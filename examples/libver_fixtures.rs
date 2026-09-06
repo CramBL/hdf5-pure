@@ -40,6 +40,10 @@ struct Demo {
     /// The `None` slot interns a `struct([])` empty marker of its own, which is
     /// an empty marker in a position no other fixture puts one.
     optional: Vec<Option<f64>>,
+    /// Complex, so the file carries a compound datatype: two named members an
+    /// old library has to walk rather than a single scalar encoding.
+    #[serde(serialize_with = "mat::complex::f64_array")]
+    signal: Vec<mat::Complex64>,
 }
 
 #[derive(Serialize)]
@@ -69,6 +73,10 @@ fn demo() -> Demo {
             },
         ],
         optional: vec![Some(1.5), None],
+        signal: vec![
+            mat::Complex64::new(1.0, -2.0),
+            mat::Complex64::new(0.5, 0.25),
+        ],
     }
 }
 
@@ -95,6 +103,27 @@ fn write_h5(path: &Path, libver: LibVer) {
         .with_i32_data(&[3, 1, 4])
         .with_committed_datatype("reading_t")
         .set_attr_committed("baseline", AttrValue::I32(9), "reading_t");
+
+    // A rank-3 dataspace, dense attributes and a group of many links: three
+    // shapes whose 1.8 encodings differ from the 1.10 ones this crate also
+    // writes. Twelve attributes is past the point where a set moves out of the
+    // object header into a fractal heap and a v2 B-tree.
+    b.create_dataset("cube")
+        .with_i32_data(&(0..24).collect::<Vec<_>>())
+        .with_shape(&[2, 3, 4]);
+
+    let dense = b.create_dataset("dense_attrs");
+    dense.with_i32_data(&[1, 2]);
+    for i in 0..12 {
+        dense.set_attr(&format!("a{i:02}"), AttrValue::I32(i));
+    }
+
+    let mut wide = b.create_group("wide");
+    for i in 0..64 {
+        wide.create_dataset(&format!("m{i:03}")).with_i32_data(&[i]);
+    }
+    let wide = wide.finish();
+    b.add_group(wide);
 
     let mut g = b.create_group("grp");
     g.set_attr("tag", AttrValue::I64(7));
