@@ -108,10 +108,15 @@ if [ ! -x "$PREFIX/bin/h5dump" ]; then
     chmod +x bin/config.sub bin/config.guess
   fi
 
+  # 1.8.23 predates GCC 14, which turned several long-standing warnings into
+  # errors by default; the tools do not build under it otherwise.
+  RELAX="-std=gnu17 -Wno-error=incompatible-pointer-types"
+  RELAX="$RELAX -Wno-error=implicit-function-declaration -Wno-error=int-conversion"
+
   echo "==> configuring (log: $WORK/configure.log)"
   ./configure --prefix="$PREFIX" \
     --disable-fortran --disable-cxx --disable-hl --disable-shared \
-    --enable-tools > "$WORK/configure.log" 2>&1 ||
+    --enable-tools CFLAGS="${CFLAGS:-} $RELAX" > "$WORK/configure.log" 2>&1 ||
     { echo "configure failed:"; tail -30 "$WORK/configure.log"; exit 1; }
 
   echo "==> building (log: $WORK/make.log)"

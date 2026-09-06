@@ -49,12 +49,13 @@ num-complex = ["dep:num-complex", "serde"]
 # against the numbers committed under `tests/baselines/`. Off by default because
 # those numbers are recorded on one platform: the scaling *rules* in
 # `tests/allocation_bounds.rs` hold everywhere and run in every configuration,
-# while an exact count is a property of one target and one toolchain. See the
-# `Allocation gates` section of CLAUDE.md.
+# while an exact count is a property of one target and one toolchain. Both test
+# files document the split at length.
 heap-baseline = []
 # Test-only: enable a crosscheck test that links against the system libmatio
 # (reference MATLAB MAT file library). Requires libmatio to be installed:
-# `brew install libmatio` (macOS) or `apt install libmatio-dev` (Debian).
+# `brew install libmatio` (macOS), `apt install libmatio-dev` (Debian) or
+# `paru -S matio` (Arch).
 # Not a run-time dependency — build.rs only emits link directives for this
 # feature, and the crosscheck lives in a gated integration test.
 matio-crosscheck = ["serde"]
@@ -161,7 +162,7 @@ approx_constant = "allow"
 # The default emits up to one object file per codegen unit per crate compilation,
 # and cargo never reaps them. With 97 integration-test binaries a full rebuild of
 # this package creates ~9,800 objects; once `deps/` reaches six figures the scan
-# cargo and rustc perform on it dominates every build. See CLAUDE.md.
+# cargo and rustc perform on it dominates every build; `just clean` clears them.
 #
 # 4 comes from the measured curve — objects per rebuild, and the time to build
 # the library alone:
