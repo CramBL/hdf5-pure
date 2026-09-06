@@ -75,16 +75,26 @@
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-WORK="$REPO/tmp/hdf5-18-check"   # under the gitignored scratch dir
+WORK="$REPO/tmp/hdf5-compat-check"   # under the gitignored scratch dir
 PREFIX="$WORK/install"
 SRC_VERSION="1_8_23"
 FIXTURES="$WORK/fixtures"
+
+# With --prefix, use an HDF5 already installed there (conda, apt, brew) instead
+# of building 1.8.23. That is how CI covers a range of versions.
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --prefix) PREFIX="${2:?--prefix needs a directory}"; SRC_VERSION=""; shift 2 ;;
+    -h|--help) echo "usage: $0 [--prefix <hdf5-install-dir>]"; exit 0 ;;
+    *) echo "unknown option: $1" >&2; exit 2 ;;
+  esac
+done
 
 mkdir -p "$WORK"
 
 # ---------------------------------------------------------------- build 1.8.23
 
-if [ ! -x "$PREFIX/bin/h5dump" ]; then
+if [ -n "$SRC_VERSION" ] && [ ! -x "$PREFIX/bin/h5dump" ]; then
   if [ ! -d "$WORK/hdf5-hdf5-$SRC_VERSION" ]; then
     echo "==> downloading HDF5 $SRC_VERSION"
     curl -fsSL --max-time 300 -o "$WORK/hdf5.tar.gz" \
@@ -94,17 +104,19 @@ if [ ! -x "$PREFIX/bin/h5dump" ]; then
 
   cd "$WORK/hdf5-hdf5-$SRC_VERSION"
 
-  # 1.8.23 predates arm64 macOS, and its bundled config.sub rejects the host
+  # 1.8.23 predates arm64 macOS, and its bundled config.sub rejects that host
   # outright ("machine `aarch64-apple' not recognized"). Refreshing the two
-  # config scripts from upstream is the standard remedy and leaves the build
-  # itself untouched.
-  if [ ! -f bin/config.sub.orig ]; then
+  # config scripts from upstream is the standard remedy, and asking them about
+  # this host first keeps every host they already know off the network.
+  host="$(bin/config.guess 2>/dev/null || true)"
+  if [ ! -f bin/config.sub.orig ] &&
+     { [ -z "$host" ] || ! bin/config.sub "$host" >/dev/null 2>&1; }; then
     echo "==> refreshing config.guess / config.sub for this host"
     cp bin/config.sub bin/config.sub.orig
     cp bin/config.guess bin/config.guess.orig
-    base='https://git.savannah.gnu.org/gitweb/?p=config.git;a=blob_plain;f='
-    curl -fsSL --max-time 120 -o bin/config.sub "${base}config.sub;hb=HEAD"
-    curl -fsSL --max-time 120 -o bin/config.guess "${base}config.guess;hb=HEAD"
+    base='https://git.savannah.gnu.org/cgit/config.git/plain/'
+    curl -fsSL --max-time 120 -o bin/config.sub "${base}config.sub"
+    curl -fsSL --max-time 120 -o bin/config.guess "${base}config.guess"
     chmod +x bin/config.sub bin/config.guess
   fi
 
@@ -130,7 +142,19 @@ fi
 
 H5DUMP="$PREFIX/bin/h5dump"
 H5REPACK="$PREFIX/bin/h5repack"
+[ -x "$H5DUMP" ] || { echo "no h5dump at $H5DUMP" >&2; exit 2; }
 echo "==> using $("$H5DUMP" --version)"
+
+# The library's own version decides what the 1.10 fixtures are expected to do:
+# 1.8 cannot open a version 3 superblock, every later release reads it.
+H5_VERSION="$("$H5DUMP" --version | awk '{print $NF}')"
+H5_MAJOR="$(printf '%s' "$H5_VERSION" | cut -d. -f1)"
+H5_MINOR="$(printf '%s' "$H5_VERSION" | cut -d. -f2)"
+if [ "$H5_MAJOR" -gt 1 ] || [ "$H5_MINOR" -ge 10 ]; then
+  V110_EXPECT=open
+else
+  V110_EXPECT=refuse
+fi
 
 # ------------------------------------------------------------------- fixtures
 
@@ -146,9 +170,9 @@ check() {  # check <description> <expected: open|refuse> <file>
   local desc="$1" expect="$2" file="$3" out rc
   out="$("$H5DUMP" -n "$file" 2>&1)" && rc=0 || rc=$?
   if [ "$expect" = open ] && [ "$rc" -eq 0 ]; then
-    echo "  ok   $desc — 1.8 lists its objects"
+    echo "  ok   $desc — lists its objects"
   elif [ "$expect" = refuse ] && [ "$rc" -ne 0 ]; then
-    echo "  ok   $desc — 1.8 refuses it (${out##*$'\n'})"
+    echo "  ok   $desc — refused (${out##*$'\n'})"
   else
     echo "  FAIL $desc — expected to $expect, exit $rc"
     echo "$out" | sed 's/^/       /'
@@ -220,7 +244,7 @@ check_named_type() {  # check_named_type <description> <name> <file>
   # As in `dump_values`: a failing h5dump must fail this check, not the run.
   out="$("$H5DUMP" -n "$file" 2>&1)" || true
   if printf '%s\n' "$out" | grep -qE "datatype[[:space:]]+$name\$"; then
-    echo "  ok   $desc — 1.8 lists $name as a named datatype"
+    echo "  ok   $desc — lists $name as a named datatype"
   else
     echo "  FAIL $desc — $name is not listed as a named datatype"
     printf '%s\n' "$out" | sed 's/^/       /'
@@ -228,17 +252,22 @@ check_named_type() {  # check_named_type <description> <name> <file>
   fi
 }
 
-# An object-reference dataset is the one shape whose data is a pointer. 1.8's
-# h5dump follows each reference and prints the target as `DATASET <addr> "<path>"`
-# before its values, so collecting those paths in order shows the references
-# *resolving* — a dataset that opens with references that dangle would still
-# dump, with no target lines.
+# An object-reference dataset is the one shape whose data is a pointer. h5dump
+# follows each reference and names the target it found before printing its
+# values, so collecting those paths in order shows the references *resolving* —
+# a dataset that opens with references that dangle would still dump, with no
+# target lines.
+#
+# Two spellings of that line: 1.8 writes `DATASET <addr> "/path"`, 1.14 and
+# later write `DATASET "<file>/path"`. Both reduce to the path by dropping an
+# optional address and an optional leading copy of the file name.
 check_ref_targets() {  # check_ref_targets <description> <expected paths> <file> <dataset>
   local desc="$1" want="$2" file="$3" ds="$4" got
   # `GROUP` as well as `DATASET`: a cell of structs interns a group per element,
   # and h5dump labels a resolved reference by the kind of object it found.
   got="$({ "$H5DUMP" -d "$ds" "$file" 2>/dev/null || true; } |
-    sed -nE 's/^[[:space:]]*(DATASET|GROUP) [0-9]+ "(.*)".*$/\2/p' |
+    sed -nE 's/^[[:space:]]*(DATASET|GROUP) ([0-9]+ )?"(.*)"[[:space:]]*$/\3/p' |
+    sed -e "s|^${file}||" |
     tr '\n' ' ' | sed -e 's/ $//')"
   if [ "$got" = "$want" ]; then
     echo "  ok   $desc — resolved [$got]"
@@ -292,18 +321,23 @@ check_signature() {  # check_signature <description> <expected count> <signature
   fi
 }
 
-echo "==> the 1.10 format must be unreadable by 1.8 (or the bound buys nothing)"
-check "mat_v110.mat"  refuse "$FIXTURES/mat_v110.mat"
-check "plain_v110.h5" refuse "$FIXTURES/plain_v110.h5"
+echo "==> the 1.10 fixtures must $V110_EXPECT under $H5_VERSION"
+check "mat_v110.mat"  "$V110_EXPECT" "$FIXTURES/mat_v110.mat"
+check "plain_v110.h5" "$V110_EXPECT" "$FIXTURES/plain_v110.h5"
+if [ "$V110_EXPECT" = open ]; then
+  check_data "plain_v110.h5 /values"    "1 2 3" -d /values    "$FIXTURES/plain_v110.h5"
+  check_data "plain_v110.h5 /grp/inner" "7 8"   -d /grp/inner "$FIXTURES/plain_v110.h5"
+  check_data "mat_v110.mat /values"     "1 2 3" -d /values    "$FIXTURES/mat_v110.mat"
+fi
 
-echo "==> the 1.8 format must be readable by 1.8"
+echo "==> the 1.8 format must be readable by $H5_VERSION"
 check "mat_v18.mat"        open "$FIXTURES/mat_v18.mat"
 check "mat_string_v18.mat" open "$FIXTURES/mat_string_v18.mat"
 check "plain_v18.h5"       open "$FIXTURES/plain_v18.h5"
 
 # Both fixtures are written by `examples/libver_fixtures.rs`; these are the
 # values it puts in them. Reading the *data* is the half `-n` cannot do.
-echo "==> 1.8 must read the right bytes, not merely open the file"
+echo "==> it must read the right bytes, not merely open the file"
 check_data "plain_v18.h5 /values"     "1 2 3" -d /values     "$FIXTURES/plain_v18.h5"
 check_data "plain_v18.h5 /grp/inner"  "7 8"   -d /grp/inner  "$FIXTURES/plain_v18.h5"
 check_data "mat_v18.mat /values"      "1 2 3" -d /values     "$FIXTURES/mat_v18.mat"
@@ -317,7 +351,7 @@ check_data "mat_v18.mat /empty"       "0 0"   -d /empty       "$FIXTURES/mat_v18
 # carries an `H5PATH` attribute alongside its `MATLAB_class`. Neither had ever
 # been put in front of an old library — the fixture had no cell in it — so a
 # regression in either was invisible here.
-echo "==> 1.8 must resolve a cell array's interned objects"
+echo "==> it must resolve a cell array's interned objects"
 MAT="$FIXTURES/mat_v18.mat"
 # `demo()` interns in field order: ragged's two vectors, records' two structs,
 # then optional's scalar and its `struct([])`.
@@ -354,7 +388,7 @@ check_data "mat_v18.mat $(r 2) MATLAB_fields" \
 # canonical empty. This is also the only 1.8 file here written by the
 # builder-backed emitter — `to_file` uses the walker, and the builder's other
 # output is the 1.10 file 1.8 refuses.
-echo "==> 1.8 must read the MCOS subsystem the string class builds"
+echo "==> it must read the MCOS subsystem the string class builds"
 STR="$FIXTURES/mat_string_v18.mat"
 # The opaque handle MATLAB resolves through the subsystem: 0xDD000000, then the
 # class and object ids.
@@ -372,7 +406,7 @@ check_absent_attr "mat_string_v18.mat canonical empty H5PATH" "$STR" "$(r 8)/H5P
 # crate writes. MATLAB decides real from complex by this shape, so an old
 # library reading the members in the wrong order — or not at all — is a
 # difference that reaches the workspace.
-echo "==> 1.8 must read a compound (complex) dataset"
+echo "==> it must read a compound (complex) dataset"
 check_data "mat_v18.mat /signal" "1 -2 0.5 0.25" -d /signal "$MAT"
 check_count "mat_v18.mat /signal members" 2 'H5T_IEEE_F64LE "' -H -d /signal "$MAT"
 
@@ -381,7 +415,7 @@ check_count "mat_v18.mat /signal members" 2 'H5T_IEEE_F64LE "' -H -d /signal "$M
 # message — 1.8 additions all, and the storage this crate's own history has the
 # most defects in. The signature counts come first: below the threshold every
 # check under them would pass while reading the header instead.
-echo "==> 1.8 must read attributes out of a fractal heap, not just a header"
+echo "==> it must read attributes out of a fractal heap, not just a header"
 check_signature "plain_v18.h5 dense attribute heap"  1 FRHP "$FIXTURES/plain_v18.h5"
 check_signature "plain_v18.h5 dense attribute index" 1 BTHD "$FIXTURES/plain_v18.h5"
 check_count "plain_v18.h5 /dense_attrs attributes" 12 'ATTRIBUTE' -A -d /dense_attrs "$FIXTURES/plain_v18.h5"
@@ -393,7 +427,7 @@ check_data "plain_v18.h5 /dense_attrs a11" "11"  -a /dense_attrs/a11 "$FIXTURES/
 # C library would switch the group to dense link storage this crate keeps
 # writing link messages, so the question an old library answers is whether the
 # header it grows is one that still walks.
-echo "==> 1.8 must read a rank-3 dataspace and a group of many links"
+echo "==> it must read a rank-3 dataspace and a group of many links"
 check_data "plain_v18.h5 /cube" \
   "0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23" \
   -d /cube "$FIXTURES/plain_v18.h5"
@@ -402,7 +436,7 @@ check_data "plain_v18.h5 /wide/m000" "0"  -d /wide/m000 "$FIXTURES/plain_v18.h5"
 check_data "plain_v18.h5 /wide/m063" "63" -d /wide/m063 "$FIXTURES/plain_v18.h5"
 
 # And the attribute values, not just the count the repack loop below compares.
-echo "==> 1.8 must read attribute values on all three kinds of object"
+echo "==> it must read attribute values on all three kinds of object"
 check_data "plain_v18.h5 /values units" '"m/s"' -a /values/units "$FIXTURES/plain_v18.h5"
 check_data "plain_v18.h5 / root_attr"   '"r"'   -a /root_attr    "$FIXTURES/plain_v18.h5"
 check_data "plain_v18.h5 /grp tag"      "7"     -a /grp/tag      "$FIXTURES/plain_v18.h5"
@@ -414,7 +448,7 @@ check_data "plain_v18.h5 /grp tag"      "7"     -a /grp/tag      "$FIXTURES/plai
 # the attribute list the reference hangs off. So name the object, then read
 # through it — the dataset whose element type it is, and the attribute whose
 # datatype it is.
-echo "==> 1.8 must resolve a committed datatype, not merely list it"
+echo "==> it must resolve a committed datatype, not merely list it"
 check_named_type "plain_v18.h5" /reading_t "$FIXTURES/plain_v18.h5"
 check_data "plain_v18.h5 /typed"          "3 1 4" -d /typed          "$FIXTURES/plain_v18.h5"
 check_data "plain_v18.h5 /typed baseline" "9"     -a /typed/baseline "$FIXTURES/plain_v18.h5"
@@ -422,7 +456,7 @@ check_data "plain_v18.h5 /typed baseline" "9"     -a /typed/baseline "$FIXTURES/
 # The attribute-count fix, against the toolchain that lost the attributes: a
 # header that declares no attributes makes h5repack copy the object without
 # them, silently. Counting `ATTRIBUTE` blocks in the dump is enough to see it.
-echo "==> a 1.8 h5repack round trip must preserve every attribute"
+echo "==> an h5repack round trip must preserve every attribute"
 for f in mat_v18.mat mat_string_v18.mat plain_v18.h5; do
   before=$("$H5DUMP" -A "$FIXTURES/$f" 2>/dev/null | grep -c 'ATTRIBUTE' || true)
   rm -f "$FIXTURES/repacked-$f"
@@ -442,7 +476,7 @@ done
 
 echo
 if [ "$failures" -eq 0 ]; then
-  echo "all checks passed against HDF5 1.8.23"
+  echo "all checks passed against HDF5 $H5_VERSION"
 else
   echo "$failures check(s) failed"
   exit 1
