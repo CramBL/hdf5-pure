@@ -13,7 +13,10 @@ if ! rustup toolchain list | grep -q '^nightly'; then
     exit 2
 fi
 
-JSON=target/doc/hdf5_pure.json
+# Not `target/doc`: a `build.target-dir` in the user's cargo config moves it.
+TARGET_DIR="$(cargo metadata --no-deps --format-version 1 \
+    | python3 -c 'import json,sys; print(json.load(sys.stdin)["target_directory"])')"
+JSON="$TARGET_DIR/doc/hdf5_pure.json"
 rm -f "$JSON"
 cargo +nightly rustdoc --all-features --lib -- \
     -Zunstable-options --output-format json >/dev/null

@@ -9,8 +9,8 @@
 #
 # nextest does not run doctests -- it has no way to, since they are compiled by
 # `rustdoc` rather than into a test binary. The pre-push gate is therefore
-# `cargo nextest run` *and* `cargo test --doc`; CI runs both as separate steps
-# so a doctest failure is not silently dropped. See CLAUDE.md.
+# `cargo nextest run` *and* `cargo test --doc` -- `just ci-essentials` runs both,
+# as does CI, in separate steps so a doctest failure is not silently dropped.
 #
 # One property this scheduling now depends on: tests in *different* binaries run
 # at the same time, which `cargo test` never did (it ran binaries one at a time,
@@ -39,4 +39,9 @@ nextest-version = "0.9.90"
 # slower than a dev machine but not seven times slower. A test that genuinely
 # needs longer should say so with an override below rather than by raising this
 # ceiling for everything.
+#
+# The usual cause is the one above: a session left on the default
+# `SyncPolicy::Always` while looping over appends. `SyncPolicy::OnClose` writes
+# byte-identical files (`tests/sync_policy.rs` asserts that) and still barriers
+# at `close`. Rule that out before reaching for a per-test override.
 slow-timeout = { period = "30s", terminate-after = 3 }

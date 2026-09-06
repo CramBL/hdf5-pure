@@ -21,8 +21,8 @@ jobs:
         config:
           - name: default
             flags: ""
-          # `matio-crosscheck` is intentionally excluded: it links against the
-          # system libmatio and is meant for maintainer-local crosscheck runs.
+          # `matio-crosscheck` needs a system library; the job below installs
+          # it and runs that test alone.
           - name: full
             flags: --features "serde zfp fast-deflate provenance ndarray"
         # The single-feature isolation configs only need to run on one platform;
@@ -102,6 +102,65 @@ jobs:
       - name: Check the recorded allocation figures
         run: cargo nextest run --locked --features heap-baseline --test allocation_baseline
 
+  # Read this crate's MAT v7.3 output back with the reference C library. It is
+  # the only job that checks the format against something other than this crate.
+  #
+  # Naming the test binary keeps the job honest: the file is behind a `cfg` on
+  # the feature, and nextest exits non-zero on "0 tests run".
+  matio-crosscheck:
+    name: MAT crosscheck (libmatio)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: matio-crosscheck
+      - name: Install libmatio
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y libmatio-dev
+      - name: Crosscheck against the reference library
+        run: >
+          cargo nextest run --locked --features "serde matio-crosscheck"
+          --test serde_matio_crosscheck
+
+  # Types reachable through the public API that cannot be named — a class
+  # `cargo-semver-checks` cannot see, since its lints match items by path.
+  # Nightly for rustdoc's JSON output.
+  api-surface:
+    name: Public API surface
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: api-surface
+      - run: ./scripts/check-api-surface.sh
+
+  # The 1.8 output format, against an HDF5 1.8.23 built from source, because
+  # every libhdf5 reachable as a dependency is modern and reads both formats.
+  # The build is cached; the script skips it when the install is already there.
+  hdf5-18-format:
+    name: HDF5 1.8 output format
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: hdf5-18-format
+      - uses: actions/cache@v6
+        with:
+          path: tmp/hdf5-18-check/install
+          key: hdf5-1_8_23-${{ runner.os }}-${{ hashFiles('scripts/check-hdf5-18.sh') }}
+      - run: ./scripts/check-hdf5-18.sh
+
   # Run every example end-to-end. The examples are self-checking (each ends in
   # `assert!`s and panics on mismatch), so a regression in the public API surfaces
   # here as a failed job. `cargo clippy --all-targets` in the `lint` job already
@@ -177,8 +236,8 @@ jobs:
       # only there: `debug_assert!` type-checks its argument in every profile, so
       # a helper gated on `cfg(debug_assertions)` and called from one passes the
       # whole suite and fails every downstream release build (issue #288). It also
-      # covers `--release`-only lints and the release examples `CLAUDE.md` points
-      # at for heap profiling.
+      # covers `--release`-only lints and the release examples behind
+      # `just heap-profile`.
       - name: Check (release)
         run: cargo check --locked --release --all-targets --features "serde ndarray"
       - name: Rustdoc (deny warnings)
@@ -205,7 +264,7 @@ jobs:
   # So a PR that breaks the public API on purpose bumps Cargo.toml to the next
   # minor as part of the PR, which is this repo's convention regardless (the
   # manifest carries the version being developed — see "Versioning" in
-  # CLAUDE.md). Red here means the break is either unintended or undeclared;
+  # RELEASES.md). Red here means the break is either unintended or undeclared;
   # it is not the expected state of a breaking PR.
   #
   # The feature set below enables every public-API-bearing feature so the whole

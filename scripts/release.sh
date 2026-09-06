@@ -5,7 +5,7 @@
 # Automates the mechanical, easy-to-botch parts of a release so they come out
 # identical every time:
 #   * bump the version in Cargo.toml and Cargo.lock, or accept one a breaking
-#     PR already bumped (see "Versioning" in CLAUDE.md)
+#     PR already bumped (see "Versioning" in RELEASES.md)
 #   * promote the CHANGELOG's [Unreleased] section into a dated `## [X.Y.Z]`
 #     section and refresh the two compare links at the bottom
 #   * verify the crate still packages (`cargo publish --dry-run`)
@@ -112,7 +112,7 @@ REPO_URL="$(awk -F'"' '/^repository = /{print $2; exit}' "$CARGO_TOML")"
 [ -n "$REPO_URL" ] || die "could not read repository URL from $CARGO_TOML"
 
 # The version this release follows comes from the latest version tag, not from
-# Cargo.toml. Under this repo's convention (see "Versioning" in CLAUDE.md) the
+# Cargo.toml. Under this repo's convention (see "Versioning" in RELEASES.md) the
 # manifest carries the version being *developed*, so once a breaking PR has
 # merged it already reads $NEW_VERSION and is no longer the previous release.
 #

@@ -695,7 +695,7 @@ fn one_append_costs_its_batch_not_the_dataset() {
     {
         // One barrier at close rather than one per append: an `fsync` apiece
         // would make this test's runtime, not its allocations, the thing to look
-        // at (see the `Allocation gates` section of CLAUDE.md).
+        // at (see `.config/nextest.toml`, which fails the run on either).
         let file = hdf5_pure::File::open_rw_with_options(
             &path,
             hdf5_pure::FileAccessProperties::new().with_sync_policy(hdf5_pure::SyncPolicy::OnClose),
