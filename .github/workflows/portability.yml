@@ -1,0 +1,178 @@
+name: Portability
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch: {}
+  schedule:
+    - cron: "0 3 1 * *"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  # The library indexes its in-memory image with `usize`, so a 64-bit offset
+  # narrowed on a 32-bit target would read the wrong bytes (issue #27).
+  clippy-32bit:
+    name: clippy / i686
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # 2026-03-27
+        with:
+          toolchain: stable
+          components: clippy
+          targets: i686-unknown-linux-gnu
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: portability
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Install tools
+        uses: taiki-e/install-action@920ab1831fbf4fb3ef75c8ead83556c918bb7290 # v2.79.8
+        with:
+          tool: just
+
+      - name: Clippy (lib, both feature sets)
+        run: just clippy-32bit
+
+  # Each narrowing cast is either routed through `crate::convert` or annotated
+  # with an `#[expect]` stating why it cannot lose information (issue #72).
+  # The toolchain is pinned so the flagged set does not drift under clippy.
+  cast-gate:
+    name: cast gate / i686
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install Rust 1.96.0
+        uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # 2026-03-27
+        with:
+          toolchain: "1.96.0"
+          components: clippy
+          targets: i686-unknown-linux-gnu
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: cast-gate
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Install tools
+        uses: taiki-e/install-action@920ab1831fbf4fb3ef75c8ead83556c918bb7290 # v2.79.8
+        with:
+          tool: just
+
+      - name: Deny 32-bit narrowing casts
+        run: just cast-gate
+
+  # QEMU, for the two properties no native runner has: a 32-bit pointer width,
+  # and a big-endian host where `from_ne_bytes` and `from_le_bytes` differ.
+  qemu:
+    name: test / ${{ matrix.name }} (qemu)
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {name: i686, recipe: test-32bit}
+          - {name: s390x, recipe: test-big-endian}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # 2026-03-27
+        with:
+          toolchain: stable
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: portability-${{ matrix.name }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Install tools
+        uses: taiki-e/install-action@920ab1831fbf4fb3ef75c8ead83556c918bb7290 # v2.79.8
+        with:
+          tool: cross,just
+
+      - name: Tests
+        run: just ${{ matrix.recipe }}
+
+  # Targets the crate must build for without running: wasm, bare metal, and a
+  # std-capable host with no default features.
+  build:
+    name: build / ${{ matrix.name }}
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {name: wasm32, target: wasm32-unknown-unknown, recipe: check-wasm}
+          - {name: thumbv7em (no_std), target: thumbv7em-none-eabi, recipe: check-bare-metal}
+          - {name: host (no_std), target: "", recipe: check-no-std}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # 2026-03-27
+        with:
+          toolchain: stable
+          targets: ${{ matrix.target }}
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: portability
+          save-if: false
+
+      - name: Install tools
+        uses: taiki-e/install-action@920ab1831fbf4fb3ef75c8ead83556c918bb7290 # v2.79.8
+        with:
+          tool: just
+
+      - name: Build
+        run: just ${{ matrix.recipe }}
+
+  portability:
+    name: portability
+    runs-on: ubuntu-latest
+    needs: [clippy-32bit, cast-gate, qemu, build]
+    permissions:
+      contents: none
+    if: always()
+    steps:
+      - name: Fail if any dependency failed
+        if: contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') || contains(needs.*.result, 'skipped')
+        run: exit 1

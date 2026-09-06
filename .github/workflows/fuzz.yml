@@ -4,6 +4,7 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch: {}
   schedule:
     # GitHub schedules are evaluated in UTC.
     - cron: '39 3 * * 5'
@@ -11,6 +12,10 @@ on:
 permissions:
   contents: read
   issues: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
 
 env:
   CARGO_TERM_COLOR: always

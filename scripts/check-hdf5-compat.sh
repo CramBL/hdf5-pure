@@ -104,17 +104,19 @@ if [ -n "$SRC_VERSION" ] && [ ! -x "$PREFIX/bin/h5dump" ]; then
 
   cd "$WORK/hdf5-hdf5-$SRC_VERSION"
 
-  # 1.8.23 predates arm64 macOS, and its bundled config.sub rejects the host
+  # 1.8.23 predates arm64 macOS, and its bundled config.sub rejects that host
   # outright ("machine `aarch64-apple' not recognized"). Refreshing the two
-  # config scripts from upstream is the standard remedy and leaves the build
-  # itself untouched.
-  if [ ! -f bin/config.sub.orig ]; then
+  # config scripts from upstream is the standard remedy, and asking them about
+  # this host first keeps every host they already know off the network.
+  host="$(bin/config.guess 2>/dev/null || true)"
+  if [ ! -f bin/config.sub.orig ] &&
+     { [ -z "$host" ] || ! bin/config.sub "$host" >/dev/null 2>&1; }; then
     echo "==> refreshing config.guess / config.sub for this host"
     cp bin/config.sub bin/config.sub.orig
     cp bin/config.guess bin/config.guess.orig
-    base='https://git.savannah.gnu.org/gitweb/?p=config.git;a=blob_plain;f='
-    curl -fsSL --max-time 120 -o bin/config.sub "${base}config.sub;hb=HEAD"
-    curl -fsSL --max-time 120 -o bin/config.guess "${base}config.guess;hb=HEAD"
+    base='https://git.savannah.gnu.org/cgit/config.git/plain/'
+    curl -fsSL --max-time 120 -o bin/config.sub "${base}config.sub"
+    curl -fsSL --max-time 120 -o bin/config.guess "${base}config.guess"
     chmod +x bin/config.sub bin/config.guess
   fi
 
