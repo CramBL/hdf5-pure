@@ -9,7 +9,7 @@ test-full:
 doctest-full:
     cargo test --locked --doc --features "serde zfp fast-deflate provenance ndarray"
 
-ci: ci-essentials check-release examples check-no-std check-wasm shear semver clippy-32bit cast-gate miri test doctest
+ci: ci-essentials check-release examples check-no-std check-wasm shear semver api-surface clippy-32bit cast-gate miri hdf5-compat test doctest
 
 test *ARGS:
     cargo nextest run --locked {{ ARGS }}
@@ -99,8 +99,8 @@ heap-profile:
 api-surface:
     ./scripts/check-api-surface.sh
 
-check-hdf5-18:
-    ./scripts/check-hdf5-18.sh
+hdf5-compat *ARGS:
+    ./scripts/check-hdf5-compat.sh {{ ARGS }}
 
 check-release-script:
     ./scripts/check-release-script.sh
