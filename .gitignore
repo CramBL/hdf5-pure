@@ -25,3 +25,6 @@ heapscope-assert-*.json
 # Documentation site build output and local preview venv (Material for MkDocs)
 /site/
 /.venv/
+
+# Python bytecode from the scripts under scripts/.
+__pycache__/

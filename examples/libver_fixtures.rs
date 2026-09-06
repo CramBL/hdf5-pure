@@ -17,6 +17,7 @@
 use hdf5_pure::mat::{self, Options};
 use hdf5_pure::{AttrValue, FileBuilder, LibVer, make_i32_type};
 use serde::Serialize;
+use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 
 #[derive(Serialize)]
@@ -133,6 +134,73 @@ fn write_h5(path: &Path, libver: LibVer) {
     b.write(path).expect("write h5 fixture");
 }
 
+/// The expectations `scripts/verify_fixtures.py` checks, written here so a
+/// fixture and the values it is checked against come from one place.
+fn checks() -> Vec<Value> {
+    let plain = "plain_v18.h5";
+    let mat_file = "mat_v18.mat";
+    let string_file = "mat_string_v18.mat";
+    // The 1.10 pair holds the same content as the 1.8 pair, so a library that
+    // opens both must read the same values out of each.
+    let plain_v110 = "plain_v110.h5";
+    let mat_v110_file = "mat_v110.mat";
+    let r = |n: u64| format!("/#refs#/ref_{n:016x}");
+
+    let mut checks = vec![
+        json!({"kind": "data", "file": plain, "path": "/values", "data": [1.0, 2.0, 3.0]}),
+        json!({"kind": "data", "file": plain, "path": "/grp/inner", "data": [7, 8]}),
+        json!({"kind": "data", "file": plain, "path": "/typed", "data": [3, 1, 4]}),
+        json!({"kind": "data", "file": plain, "path": "/cube", "data": (0..24).collect::<Vec<i32>>(), "dims": [2, 3, 4]}),
+        json!({"kind": "data", "file": plain, "path": "/dense_attrs", "data": [1, 2]}),
+        json!({"kind": "data", "file": plain, "path": "/wide/m000", "data": [0]}),
+        json!({"kind": "data", "file": plain, "path": "/wide/m063", "data": [63]}),
+        json!({"kind": "attr", "file": plain, "path": "/values", "name": "units", "data": "m/s"}),
+        json!({"kind": "attr", "file": plain, "path": "/", "name": "root_attr", "data": "r"}),
+        json!({"kind": "attr", "file": plain, "path": "/grp", "name": "tag", "data": 7}),
+        json!({"kind": "attr", "file": plain, "path": "/typed", "name": "baseline", "data": 9}),
+        json!({"kind": "attr", "file": plain, "path": "/dense_attrs", "name": "a00", "data": 0}),
+        json!({"kind": "attr", "file": plain, "path": "/dense_attrs", "name": "a11", "data": 11}),
+        json!({"kind": "attrs", "file": plain, "path": "/dense_attrs", "count": 12}),
+        json!({"kind": "links", "file": plain, "path": "/wide", "count": 64}),
+        json!({"kind": "named_type", "file": plain, "path": "/reading_t"}),
+        json!({"kind": "data", "file": mat_file, "path": "/values", "data": [1.0, 2.0, 3.0]}),
+        json!({"kind": "data", "file": mat_file, "path": "/nested/count", "data": [7]}),
+        json!({"kind": "data", "file": mat_file, "path": "/empty", "data": [0, 0]}),
+        json!({"kind": "refs", "file": mat_file, "path": "/ragged", "targets": [r(0), r(1)]}),
+        json!({"kind": "refs", "file": mat_file, "path": "/records", "targets": [r(2), r(3)]}),
+        json!({"kind": "refs", "file": mat_file, "path": "/optional", "targets": [r(4), r(5)]}),
+        json!({"kind": "data", "file": mat_file, "path": r(0), "data": [1]}),
+        json!({"kind": "data", "file": mat_file, "path": r(1), "data": [2, 3]}),
+        json!({"kind": "data", "file": mat_file, "path": format!("{}/count", r(2)), "data": [11]}),
+        json!({"kind": "data", "file": mat_file, "path": format!("{}/count", r(3)), "data": [13]}),
+        json!({"kind": "data", "file": mat_file, "path": r(4), "data": [1.5]}),
+        json!({"kind": "data", "file": mat_file, "path": r(5), "data": [0, 0]}),
+        json!({"kind": "attr", "file": mat_file, "path": r(2), "name": "MATLAB_fields", "data": ["count", "flag"]}),
+        json!({"kind": "data", "file": mat_file, "path": "/signal", "data": [1.0, -2.0, 0.5, 0.25]}),
+        json!({"kind": "members", "file": mat_file, "path": "/signal", "count": 2}),
+        json!({"kind": "data", "file": string_file, "path": "/label", "data": [3707764736u32, 2, 1, 1, 1, 1]}),
+        json!({"kind": "data", "file": string_file, "path": r(12), "data": [0, 0]}),
+        json!({"kind": "refs", "file": string_file, "path": r(15), "targets": [r(13), r(14)]}),
+        json!({"kind": "attr", "file": string_file, "path": r(8), "name": "MATLAB_class", "data": "canonical empty"}),
+        json!({"kind": "no_attr", "file": string_file, "path": r(8), "name": "H5PATH"}),
+    ];
+
+    checks.extend([
+        json!({"kind": "data", "file": plain_v110, "path": "/values", "data": [1.0, 2.0, 3.0]}),
+        json!({"kind": "data", "file": plain_v110, "path": "/grp/inner", "data": [7, 8]}),
+        json!({"kind": "data", "file": mat_v110_file, "path": "/values", "data": [1.0, 2.0, 3.0]}),
+    ]);
+
+    // Every interned object carries its own path as `H5PATH`, which is what
+    // MATLAB reads back to name it.
+    for n in 0..6 {
+        checks.push(
+            json!({"kind": "attr", "file": mat_file, "path": r(n), "name": "H5PATH", "data": r(n)}),
+        );
+    }
+    checks
+}
+
 fn superblock_version(path: &Path) -> u8 {
     let bytes = std::fs::read(path).expect("read fixture");
     let sig = bytes
@@ -177,6 +245,13 @@ fn main() {
     write_h5(&h5_v18, LibVer::V18);
     let h5_v110 = out.join("plain_v110.h5");
     write_h5(&h5_v110, LibVer::V110);
+
+    let manifest = out.join("fixtures.json");
+    std::fs::write(
+        &manifest,
+        serde_json::to_string_pretty(&checks()).expect("serialize manifest"),
+    )
+    .expect("write manifest");
 
     for path in [&mat_v18, &mat_v110, &mat_string_v18, &h5_v18, &h5_v110] {
         println!("{} superblock {}", path.display(), superblock_version(path));
