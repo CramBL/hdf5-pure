@@ -36,9 +36,10 @@ SOURCE_URL = (
 ).format(v=SOURCE_VERSION)
 CONFIG_SCRIPTS_URL = "https://git.savannah.gnu.org/cgit/config.git/plain/"
 
-# h5py dropped HDF5 below this after 3.9, so older libraries are checked with
-# the pinned entry point beside this one.
-H5PY_FLOOR = (1, 10, 4)
+# Current h5py requires HDF5 1.10.7 or newer, which conda-forge's 1.10 series
+# never reached. Anything below takes the pinned entry point beside this one,
+# where h5py 3.9 covers HDF5 back to 1.8.4.
+H5PY_FLOOR = (1, 10, 7)
 
 V18_FIXTURES = ["mat_v18.mat", "mat_string_v18.mat", "plain_v18.h5"]
 V110_FIXTURES = ["mat_v110.mat", "plain_v110.h5"]
@@ -116,6 +117,19 @@ def refresh_config_scripts(source: Path) -> None:
         script.chmod(0o755)
 
 
+def find_python(prefix: Path) -> Path | None:
+    """A conda environment's own interpreter, which h5py has to be built with.
+
+    Building under another Python loads this environment's HDF5 into a process
+    holding another OpenSSL, which fails before h5py's build finds the library.
+    """
+    for candidate in (prefix / "bin" / "python3", prefix / "bin" / "python",
+                      prefix / "python.exe"):
+        if candidate.is_file():
+            return candidate
+    return None
+
+
 def find_tool(prefix: Path, name: str) -> Path | None:
     """conda puts the tools under `Library/bin` on Windows and `bin` elsewhere."""
     for directory in (prefix / "bin", prefix / "Library" / "bin"):
@@ -164,10 +178,19 @@ class Checks:
         result = run([str(h5repack), str(FIXTURES / name), str(output)])
         self.report(result.returncode == 0, f"{name} repacked", result.stderr.strip() or "ok")
 
-    def verify(self, script: str, environment: dict, arguments: list[str]) -> None:
-        """The h5py-backed content checks, which print their own lines."""
-        command = ["uv", "run", "--refresh-package", "h5py",
-                   str(REPO / "scripts" / script), str(FIXTURES), *arguments]
+    def verify(self, script: str, environment: dict, arguments: list[str],
+               python: Path | None, reinstall: bool = False) -> None:
+        """The h5py-backed content checks, which print their own lines.
+
+        A reinstall on the build pass, because uv keys its cache on the
+        lockfile and would otherwise carry a build against another HDF5 across.
+        """
+        command = ["uv", "run"]
+        if reinstall:
+            command += ["--reinstall-package", "h5py"]
+        if python:
+            command += ["--python", str(python)]
+        command += [str(REPO / "scripts" / script), str(FIXTURES), *arguments]
         result = subprocess.run(command, env={**os.environ, **environment})
         self.failures += result.returncode != 0
 
@@ -175,6 +198,11 @@ class Checks:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--prefix", type=Path, help="an HDF5 installation to check against")
+    parser.add_argument(
+        "--prepare",
+        action="store_true",
+        help="build h5py against the library and report the pair, then stop",
+    )
     arguments = parser.parse_args()
 
     # The verifier writes straight to the terminal; keep this in step with it.
@@ -195,9 +223,29 @@ def main() -> int:
     numbers = tuple(int(part) for part in version.split("."))
     print(f"==> using HDF5 {version}")
 
-    write_fixtures()
+    home = prefix / "Library" if (prefix / "Library" / "include").is_dir() else prefix
+    environment = {"HDF5_DIR": str(home)}
+    if numbers >= H5PY_FLOOR:
+        script = "verify_fixtures.py"
+    else:
+        # Compiling against 1.8 headers trips warnings GCC 14 turned into
+        # errors, in h5py's C as it does in HDF5's own.
+        script = "verify_fixtures_hdf5_18.py"
+        environment["CFLAGS"] = (
+            f"{os.environ.get('CFLAGS', '')} -Wno-error=incompatible-pointer-types "
+            "-Wno-error=implicit-function-declaration -Wno-error=int-conversion"
+        )
+    python = find_python(prefix)
 
     checks = Checks()
+
+    if arguments.prepare:
+        print(f"==> building h5py against HDF5 {version}")
+        checks.verify(script, environment, [f"--expect-hdf5={version}", "--link-only"],
+                      python, reinstall=True)
+        return 1 if checks.failures else 0
+
+    write_fixtures()
 
     # A version 3 superblock is a 1.10 addition, so 1.8 cannot open the 1.10
     # fixtures at all. That refusal is what `LibVer::V18` exists to avoid.
@@ -217,25 +265,10 @@ def main() -> int:
     checks.signature("plain_v18.h5", b"FRHP", 1)
     checks.signature("plain_v18.h5", b"BTHD", 1)
 
-    # h5py needs the headers and library, which conda puts under Library on
-    # Windows, and a build against this library rather than a wheel carrying
-    # its own.
-    home = prefix / "Library" if (prefix / "Library" / "include").is_dir() else prefix
-    environment = {"HDF5_DIR": str(home)}
-    if numbers >= H5PY_FLOOR:
-        script = "verify_fixtures.py"
-    else:
-        # Compiling against 1.8 headers trips warnings GCC 14 turned into
-        # errors, in h5py's C as it does in HDF5's own.
-        script = "verify_fixtures_hdf5_18.py"
-        environment["CFLAGS"] = (
-            f"{os.environ.get('CFLAGS', '')} -Wno-error=incompatible-pointer-types "
-            "-Wno-error=implicit-function-declaration -Wno-error=int-conversion"
-        )
     skips = [] if reads_v110 else [f"--skip-file={name}" for name in V110_FIXTURES]
 
     print("==> it must read the values, not merely open the files")
-    checks.verify(script, environment, [f"--expect-hdf5={version}", *skips])
+    checks.verify(script, environment, [f"--expect-hdf5={version}", *skips], python)
 
     # h5repack rewrites every object through the library's own writer, so the
     # same manifest read back says the copy kept what the original held.
@@ -247,6 +280,7 @@ def main() -> int:
         environment,
         [f"--expect-hdf5={version}", "--file-prefix=repacked-",
          *[f"--skip-file={name}" for name in V110_FIXTURES]],
+        python,
     )
 
     print()

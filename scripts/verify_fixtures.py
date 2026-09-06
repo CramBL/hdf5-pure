@@ -132,7 +132,12 @@ class Checker:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("directory", type=Path)
+    parser.add_argument("directory", type=Path, nargs="?")
+    parser.add_argument(
+        "--link-only",
+        action="store_true",
+        help="report the h5py and HDF5 pair without reading anything",
+    )
     parser.add_argument("--manifest", default="fixtures.json")
     parser.add_argument("--file-prefix", default="")
     parser.add_argument(
@@ -150,8 +155,6 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    checks = json.loads((args.directory / args.manifest).read_text())
-    checks = [check for check in checks if check["file"] not in args.skip_file]
     linked = h5py.version.hdf5_version
     print(f"==> h5py {h5py.__version__} on HDF5 {linked}")
 
@@ -163,6 +166,11 @@ def main() -> int:
         )
         return 2
 
+    if args.link_only:
+        return 0
+
+    checks = json.loads((args.directory / args.manifest).read_text())
+    checks = [check for check in checks if check["file"] not in args.skip_file]
     checker = Checker(args.directory, args.file_prefix)
     for check in checks:
         checker.run(check)
