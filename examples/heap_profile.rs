@@ -42,11 +42,22 @@ const OBJECTS: usize = 1024;
 /// not.
 const APPENDS: u64 = 512;
 
-const PROFILE_PATH: &str = "target/heap-profile.html";
+/// `<target>/heap-profile.html`, found from this binary rather than assumed to
+/// be `./target`: a `build.target-dir` in the user's cargo config moves it.
+fn profile_path() -> std::path::PathBuf {
+    std::env::current_exe()
+        .ok()
+        // <target>/<profile>/examples/heap_profile
+        .and_then(|exe| exe.ancestors().nth(3).map(std::path::Path::to_path_buf))
+        .unwrap_or_else(|| std::path::PathBuf::from("target"))
+        .join("heap-profile.html")
+}
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let profile_path = profile_path();
+    let profile_path = profile_path.display().to_string();
     let profiler = heapscope::Profiler::builder()
-        .output(heapscope::Output::html(PROFILE_PATH))
+        .output(heapscope::Output::html(&profile_path))
         .build()
         .map_err(|e| {
             format!(
@@ -238,11 +249,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // come after it rather than at the end of `main`.
     drop(profiler);
 
-    let written = std::fs::metadata(PROFILE_PATH)
-        .map_err(|e| format!("{PROFILE_PATH} was not written: {e}"))?
+    let written = std::fs::metadata(&profile_path)
+        .map_err(|e| format!("{profile_path} was not written: {e}"))?
         .len();
-    assert!(written > 0, "{PROFILE_PATH} was written empty");
-    println!("\nwrote {PROFILE_PATH} ({written} bytes) — open it in a browser");
+    assert!(written > 0, "{profile_path} was written empty");
+    println!("\nwrote {profile_path} ({written} bytes) — open it in a browser");
 
     Ok(())
 }
