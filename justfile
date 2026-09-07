@@ -6,6 +6,7 @@ mod fuzz "scripts/fuzz.just"
 mod interop "scripts/interop.just"
 mod release "scripts/release.just"
 mod docs "scripts/docs.just"
+mod python "scripts/python.just"
 
 default:
     @just --list
@@ -13,7 +14,7 @@ default:
 ci-essentials: fmt-check clippy doc test-full doctest-full
 
 # Everything CI runs, against the last 1.8 release only for interop.
-ci: ci-essentials check-release examples portability::default hygiene::default api::default soundness::default (interop::test-hdf5 "1.8.23") test doctest
+ci: ci-essentials check-release examples portability::default hygiene::default python::default api::default soundness::default (interop::test-hdf5 "1.8.23") test doctest
 
 test *ARGS:
     cargo nextest run --locked --features __hdf5-bundled {{ ARGS }}

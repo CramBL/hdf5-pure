@@ -1,9 +1,12 @@
 set working-directory := ".."
 
+uv := "uv run --project scripts/python --locked"
+
 default: semver api-surface
 
 semver:
     cargo semver-checks --default-features --features serde,zfp,provenance,ndarray
 
+# Types reachable through the public API that cannot be named. Needs nightly.
 api-surface:
-    ./scripts/check-api-surface.sh
+    {{ uv }} api-surface

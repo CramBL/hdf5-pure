@@ -1,16 +1,18 @@
 set working-directory := ".."
 
+uv := "uv run --project scripts/python --locked"
+
 # The whole matrix: every release, built under tmp/hdf5 on first use.
 default: (test-hdf5 "1.8.23") (test-hdf5 "1.10.11" "serde,__hdf5-1.10") (test-hdf5 "1.12.3" "serde,__hdf5-1.12") (test-hdf5 "1.14.6" "serde,__hdf5-1.14") (test-hdf5 "2.2.0" "serde,__hdf5-2") test-matio
 
 # Build libhdf5 VERSION and its tools under tmp/hdf5/VERSION.
 hdf5-build VERSION:
-    uv run scripts/build_hdf5.py {{ VERSION }}
+    {{ uv }} hdf5-build {{ VERSION }}
 
 # For eval "$(just interop::hdf5-env 1.8.23)" && just interop::test-external-hdf5.
 # Shell exports that make a build link the libhdf5 under tmp/hdf5/VERSION.
 hdf5-env VERSION:
-    @uv run scripts/build_hdf5.py {{ VERSION }} --env
+    @{{ uv }} hdf5-build {{ VERSION }} --env
 
 # FEATURES names the release series from 1.10 up, as in `serde,__hdf5-1.10`.
 # The test suite linking libhdf5 VERSION, built under tmp/hdf5 on first use.

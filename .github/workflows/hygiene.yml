@@ -47,13 +47,41 @@ jobs:
       - name: Unused dependencies
         run: just hygiene::shear
 
-      - name: Shell scripts
-        run: just hygiene::shellcheck
+  # The Python project under scripts/python: formatting, lint and its tests.
+  python:
+    name: python / ubuntu-latest
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          enable-cache: true
+          cache-dependency-glob: scripts/python/uv.lock
+
+      - name: Install tools
+        uses: taiki-e/install-action@920ab1831fbf4fb3ef75c8ead83556c918bb7290 # v2.79.8
+        with:
+          tool: just
+
+      - name: Formatting
+        run: just python::fmt-check
+
+      - name: Lint
+        run: just python::lint
+
+      - name: Tests
+        run: just python::test
 
   ci-hygiene-guard:
     name: ci-hygiene-guard
     runs-on: ubuntu-latest
-    needs: [shear]
+    needs: [shear, python]
     permissions:
       contents: none
     if: always()

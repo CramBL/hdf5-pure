@@ -26,5 +26,8 @@ heapscope-assert-*.json
 /site/
 /.venv/
 
-# Python bytecode from the scripts under scripts/.
+# The Python project under scripts/python: its environment, caches and bytecode.
+scripts/python/.venv/
+.ruff_cache/
+.pytest_cache/
 __pycache__/

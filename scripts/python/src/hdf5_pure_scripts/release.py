@@ -1,11 +1,8 @@
-# /// script
-# requires-python = ">=3.11"
-# ///
 """Prepare and publish a release. Versions are `X.Y.Z` or `X.Y.Z-rc.N`.
 
-    uv run scripts/release.py prepare 0.45.0 --summary-file notes.md
-    uv run scripts/release.py prepare 0.45.0-rc.1
-    uv run scripts/release.py publish 0.45.0
+    just release::prepare 0.45.0 --summary-file notes.md
+    just release::prepare 0.45.0-rc.1
+    just release::publish 0.45.0
 
 `prepare` runs on a clean checkout of main. It checks the version against the
 tags and the manifest, reports the cycle's public-API delta, sets the version
@@ -18,8 +15,9 @@ stays open until the final release promotes it.
 `publish` runs on the merged release commit, from the Release workflow or from
 a machine with `cargo login` and `gh auth login` done. A commit on main has
 passed every CI guard, which the branch ruleset requires to merge. It checks
-that the public-API delta allows the version, then publishes to crates.io, pushes the tag and creates the GitHub release.
-Each of those is skipped once it exists, so re-running after a failure resumes.
+that the public-API delta allows the version, then publishes to crates.io,
+pushes the tag and creates the GitHub release. Each of those is skipped once
+it exists, so re-running after a failure resumes.
 Publishing comes first because it cannot be undone: a failure there leaves
 nothing public behind.
 """
@@ -35,6 +33,8 @@ import urllib.request
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
+
+from hdf5_pure_scripts import repo_root
 
 CRATE = "hdf5-pure"
 SEMVER_FEATURES = "serde,zfp,provenance,ndarray,num-complex"
@@ -109,7 +109,7 @@ def argument_version(text):
     try:
         return Version.parse(text)
     except ValueError as e:
-        raise argparse.ArgumentTypeError(str(e))
+        raise argparse.ArgumentTypeError(str(e)) from None
 
 
 def tagged_versions():
@@ -130,45 +130,67 @@ def manifest():
     return tomllib.loads(Path("Cargo.toml").read_text())["package"]
 
 
-def set_version(path, version):
-    # The `version` line that follows the crate's own `name` line.
-    lines = Path(path).read_text().splitlines(keepends=True)
+def set_version(manifest_text, version):
+    """Cargo.toml or Cargo.lock with the crate's own version line, the one
+    that follows its `name` line, set to `version`."""
+    lines = manifest_text.splitlines(keepends=True)
     seen_name = False
     for i, line in enumerate(lines):
         if line.startswith(f'name = "{CRATE}"'):
             seen_name = True
         elif seen_name and line.startswith("version = "):
             lines[i] = f'version = "{version}"\n'
-            break
-    else:
-        die(f"{path} has no version line for {CRATE}")
-    Path(path).write_text("".join(lines))
+            return "".join(lines)
+    raise ValueError(f"no version line for {CRATE}")
 
 
 def worktree_clean():
     return output("git", "status", "--porcelain", "--untracked-files=no") == ""
 
 
-def changelog_section(header):
-    # The body under a `## [...]` header, up to the next one.
-    text = Path("CHANGELOG.md").read_text()
-    m = re.search(rf"^## \[{re.escape(header)}\][^\n]*\n(.*?)(?=^## \[|\Z)", text, re.M | re.S)
+def changelog_section(changelog, header):
+    """The body under `## [header]`, up to the next section or the link block, or None."""
+    m = re.search(
+        rf"^## \[{re.escape(header)}\][^\n]*\n(.*?)(?=^## \[|^\[[^\]]+\]: |\Z)",
+        changelog,
+        re.M | re.S,
+    )
     return m.group(1) if m else None
 
 
-def promote_changelog(version, previous, summary, repo_url):
-    path = Path("CHANGELOG.md")
-    text = path.read_text()
-    head, marker, body = text.partition("## [Unreleased]\n")
+def promote_changelog(changelog, version, previous, summary, repo_url, today):
+    """The changelog with [Unreleased] emptied into a dated `version` section
+    that opens with `summary`, and the compare links moved along."""
+    head, marker, body = changelog.partition("## [Unreleased]\n")
     if not marker:
-        die("CHANGELOG.md has no [Unreleased] section")
-    section = f"## [{version}] - {date.today().isoformat()}\n\n{summary.strip()}\n\n"
+        raise ValueError("no [Unreleased] section")
+    section = f"## [{version}] - {today.isoformat()}\n\n{summary.strip()}\n\n"
     text = head + marker + "\n" + section + body.lstrip("\n")
-    links = f"[Unreleased]: {repo_url}/compare/v{version}...HEAD\n[{version}]: {repo_url}/compare/v{previous}...v{version}"
+    links = (
+        f"[Unreleased]: {repo_url}/compare/v{version}...HEAD\n"
+        f"[{version}]: {repo_url}/compare/v{previous}...v{version}"
+    )
     text, count = re.subn(r"^\[Unreleased\]: .*$", links, text, count=1, flags=re.M)
     if count != 1:
-        die("CHANGELOG.md has no [Unreleased]: link line to anchor the compare links to")
-    path.write_text(text)
+        raise ValueError("no [Unreleased]: link line to anchor the compare links to")
+    return text
+
+
+def required_bump(verdict):
+    """The release type a cargo semver-checks verdict asks for, or None."""
+    if "requires new major" in verdict:
+        return "major"
+    if "requires new minor" in verdict:
+        return "minor"
+    return None
+
+
+def bump_allows(release_type, required):
+    order = {"patch": 0, "minor": 1, "major": 2}
+    return required is None or order[release_type] >= order[required]
+
+
+CHANGELOG = Path("CHANGELOG.md")
 
 
 def semver_verdict(baseline, release_type):
@@ -179,26 +201,47 @@ def semver_verdict(baseline, release_type):
     breaks" (cargo-semver-checks #337).
     """
     if subprocess.run(["cargo", "semver-checks", "--version"], capture_output=True).returncode != 0:
-        die("cargo-semver-checks is not installed (`cargo binstall cargo-semver-checks`), or pass --skip-api-delta")
+        die(
+            "cargo-semver-checks is not installed (`cargo binstall cargo-semver-checks`); "
+            "pass --skip-api-delta to go without it"
+        )
     result = subprocess.run(
-        ["cargo", "semver-checks", "--baseline-version", str(baseline), "--release-type", release_type,
-         "--default-features", "--features", SEMVER_FEATURES],
-        text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        [
+            "cargo",
+            "semver-checks",
+            "--baseline-version",
+            str(baseline),
+            "--release-type",
+            release_type,
+            "--default-features",
+            "--features",
+            SEMVER_FEATURES,
+        ],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
     )
     sys.stderr.write(result.stdout)
     m = re.search(r"Summary.*", result.stdout)
     if not m:
-        die(f"cargo-semver-checks printed no verdict, so the public-API delta since v{baseline} went unchecked; "
-            "its own error above says why, and a toolchain newer than it supports is the common cause "
-            "(`cargo binstall cargo-semver-checks` refreshes it). Pass --skip-api-delta to release without the check")
+        die(
+            f"cargo-semver-checks printed no verdict, so the public-API delta since v{baseline} "
+            "went unchecked; its own error above says why, and a toolchain newer than it "
+            "supports is the common cause (`cargo binstall cargo-semver-checks` refreshes it). "
+            "Pass --skip-api-delta to release without the check"
+        )
     return m.group(0)
 
 
 def release_notes(version):
+    changelog = CHANGELOG.read_text()
     if version.is_rc:
-        return (f"Release candidate v{version}. The changelog stays under [Unreleased] until the final release.\n\n"
-                + changelog_section("Unreleased"))
-    return changelog_section(str(version))
+        return (
+            f"Release candidate v{version}. "
+            "The changelog stays under [Unreleased] until the final release.\n\n"
+            + changelog_section(changelog, "Unreleased")
+        )
+    return changelog_section(changelog, str(version))
 
 
 def prepare(args):
@@ -222,16 +265,22 @@ def prepare(args):
     if not previous < version:
         die(f"{version} does not come after the last tag (v{previous})")
     if previous.is_rc and previous.final != version.final:
-        die(f"v{previous} is a candidate of {previous.final}; finish or abandon that cycle before releasing {version}")
+        die(
+            f"v{previous} is a candidate of {previous.final}; "
+            f"finish or abandon that cycle before releasing {version}"
+        )
     # The manifest reads the last final, or anything up to the version being
     # cut when a breaking pull request already bumped it.
     if current < previous_stable or version < current:
-        die(f"Cargo.toml reads {current}, outside the last release ({previous_stable}) .. {version}")
+        die(
+            f"Cargo.toml reads {current}, outside the last release ({previous_stable}) .. {version}"
+        )
     if output("git", "tag", "--list", tag):
         die(f"tag {tag} already exists")
     if output("git", "branch", "--list", branch):
         die(f"branch {branch} already exists; a previous prepare is in flight")
-    if not (changelog_section("Unreleased") or "").strip():
+    changelog = CHANGELOG.read_text()
+    if not (changelog_section(changelog, "Unreleased") or "").strip():
         die("CHANGELOG.md [Unreleased] is empty; nothing to release")
 
     summary = args.summary
@@ -239,7 +288,7 @@ def prepare(args):
         if summary or args.summary_file:
             die("a candidate takes no summary; the changelog is promoted by the final release")
     else:
-        if changelog_section(str(version)) is not None:
+        if changelog_section(changelog, str(version)) is not None:
             die(f"CHANGELOG.md already has a [{version}] section")
         if args.summary_file:
             if not args.summary_file.is_file():
@@ -262,12 +311,15 @@ def prepare(args):
         note(semver_verdict(previous_stable, version.final.release_type(previous_stable)))
 
     note(f"Setting the version to {version} in Cargo.toml and Cargo.lock")
-    set_version("Cargo.toml", version)
-    set_version("Cargo.lock", version)
+    for path in (Path("Cargo.toml"), Path("Cargo.lock")):
+        path.write_text(set_version(path.read_text(), version))
 
     if not version.is_rc:
         note(f"Promoting CHANGELOG.md [Unreleased] into [{version}]")
-        promote_changelog(version, previous_stable, summary, manifest()["repository"])
+        promoted = promote_changelog(
+            changelog, version, previous_stable, summary, manifest()["repository"], date.today()
+        )
+        CHANGELOG.write_text(promoted)
 
     note("Packaging with cargo publish --dry-run")
     run("cargo", "publish", "--dry-run", "--allow-dirty")
@@ -283,8 +335,24 @@ def prepare(args):
 
     note(f"Pushing {branch} and opening the pull request")
     run("git", "push", "-q", "-u", "origin", branch)
-    body = release_notes(version) + f"\nAfter merging, run the Release workflow with version {version}.\n"
-    run("gh", "pr", "create", "--base", "main", "--head", branch, "--title", f"Release {tag}", "--body-file", "-", stdin=body)
+    body = (
+        release_notes(version)
+        + f"\nAfter merging, run the Release workflow with version {version}.\n"
+    )
+    run(
+        "gh",
+        "pr",
+        "create",
+        "--base",
+        "main",
+        "--head",
+        branch,
+        "--title",
+        f"Release {tag}",
+        "--body-file",
+        "-",
+        stdin=body,
+    )
     if args.skip_api_delta:
         warn(f"{tag} was prepared without its public-API delta report (--skip-api-delta)")
 
@@ -303,7 +371,7 @@ def publish(args):
     run("git", "fetch", "-q", "origin", "main", "refs/tags/*:refs/tags/*")
     if subprocess.run(["git", "merge-base", "--is-ancestor", sha, "origin/main"]).returncode != 0:
         die("HEAD is not on origin/main")
-    if not version.is_rc and changelog_section(str(version)) is None:
+    if not version.is_rc and changelog_section(CHANGELOG.read_text(), str(version)) is None:
         die(f"CHANGELOG.md has no [{version}] section; was the release prepared?")
 
     # The whole cycle's public-API delta, gated: a verdict asking for a larger
@@ -317,8 +385,7 @@ def publish(args):
     else:
         note(f"Public API delta since v{previous_stable}, for a {release_type} release")
         verdict = semver_verdict(previous_stable, release_type)
-        required = "major" if "requires new major" in verdict else "minor" if "requires new minor" in verdict else None
-        if (required == "major" and release_type != "major") or (required == "minor" and release_type == "patch"):
+        if not bump_allows(release_type, required_bump(verdict)):
             die(f"{verdict}, but {version} is a {release_type} release after {previous_stable}")
         note(verdict)
 
@@ -330,8 +397,10 @@ def publish(args):
         return
 
     # crates.io. Yanked or not, a published version answers 200.
-    request = urllib.request.Request(f"https://crates.io/api/v1/crates/{CRATE}/{version}",
-                                     headers={"User-Agent": f"{CRATE} release script"})
+    request = urllib.request.Request(
+        f"https://crates.io/api/v1/crates/{CRATE}/{version}",
+        headers={"User-Agent": f"{CRATE} release script"},
+    )
     try:
         with urllib.request.urlopen(request):
             published = True
@@ -361,9 +430,23 @@ def publish(args):
     else:
         note(f"Creating GitHub release {tag}")
         notes = release_notes(version)
-        notes += f"\n**Full changelog:** {manifest()['repository']}/compare/v{previous_stable}...{tag}\n"
+        notes += (
+            f"\n**Full changelog:** {manifest()['repository']}/compare/v{previous_stable}...{tag}\n"
+        )
         flags = ["--prerelease"] if version.is_rc else []
-        run("gh", "release", "create", tag, "--verify-tag", "--title", tag, "--notes-file", "-", *flags, stdin=notes)
+        run(
+            "gh",
+            "release",
+            "create",
+            tag,
+            "--verify-tag",
+            "--title",
+            tag,
+            "--notes-file",
+            "-",
+            *flags,
+            stdin=notes,
+        )
 
     # A tag pushed with the workflow's token triggers no workflow, so the site
     # is rebuilt on request for a final release.
@@ -377,30 +460,38 @@ def publish(args):
 
 
 def main():
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     commands = parser.add_subparsers(dest="command", required=True)
 
-    p = commands.add_parser("prepare", help="the release pull request: bump, changelog, package, branch, PR")
+    p = commands.add_parser(
+        "prepare", help="the release pull request: bump, changelog, package, branch, PR"
+    )
     p.add_argument("version", type=argument_version)
     p.add_argument("--summary", help="the paragraph a final release's changelog section opens with")
     p.add_argument("--summary-file", type=Path, help="the same, read from a file")
-    p.add_argument("--skip-api-delta", action="store_true", help="prepare without the public-API delta report")
-    p.add_argument("--local", action="store_true", help="stop after the commit: no push, no pull request")
+    p.add_argument(
+        "--skip-api-delta", action="store_true", help="prepare without the public-API delta report"
+    )
+    p.add_argument(
+        "--local", action="store_true", help="stop after the commit: no push, no pull request"
+    )
     p.set_defaults(func=prepare)
 
-    p = commands.add_parser("publish", help="publish from main: crates.io, the tag, the GitHub release")
+    p = commands.add_parser(
+        "publish", help="publish from main: crates.io, the tag, the GitHub release"
+    )
     p.add_argument("version", type=argument_version)
-    p.add_argument("--skip-api-delta", action="store_true", help="publish without the public-API delta gate")
+    p.add_argument(
+        "--skip-api-delta", action="store_true", help="publish without the public-API delta gate"
+    )
     p.add_argument("--dry-run", action="store_true", help="stop before the first public step")
     p.set_defaults(func=publish)
 
     args = parser.parse_args()
-    args.func(args)
-
-
-if __name__ == "__main__":
-    os.chdir(output("git", "rev-parse", "--show-toplevel"))
+    os.chdir(repo_root())
     try:
-        main()
-    except subprocess.CalledProcessError as e:
-        die(f"{' '.join(e.cmd)} failed")
+        args.func(args)
+    except (subprocess.CalledProcessError, ValueError) as e:
+        die(f"{' '.join(e.cmd)} failed" if isinstance(e, subprocess.CalledProcessError) else e)
