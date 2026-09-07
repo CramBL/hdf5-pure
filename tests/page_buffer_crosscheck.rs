@@ -2,6 +2,7 @@
 // gated to 64-bit little-endian targets; skip elsewhere so the pure-Rust suite still
 // runs under `cross test --target i686-...`.
 #![cfg(all(not(target_pointer_width = "32"), target_endian = "little"))]
+#![cfg(feature = "__hdf5-1.10")]
 //! The write-back page buffer against the reference C library (issue #308).
 //!
 //! Two claims are made for the crash mark a page-buffered session raises, and

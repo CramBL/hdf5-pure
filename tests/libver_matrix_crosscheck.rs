@@ -28,11 +28,6 @@ use hdf5_sys::h5p::{H5P_DEFAULT, H5Pset_libver_bounds};
 use serde::Serialize;
 use tempfile::tempdir;
 
-/// Whether the linked release knows the version 3 superblock.
-fn reads_v110() -> bool {
-    hdf5::library_version() >= (1, 10, 0)
-}
-
 /// The superblock version byte. A `.mat` file carries a 512-byte user block
 /// ahead of the signature, so it is searched for.
 fn superblock_version(path: &Path) -> u8 {
@@ -350,31 +345,42 @@ fn the_1_8_format_this_crate_writes_opens_in_every_release() {
     );
 }
 
-#[test]
-fn the_1_10_format_this_crate_writes_opens_from_1_10_on() {
-    let dir = tempdir().unwrap();
-    let plain = dir.path().join("plain_v110.h5");
+/// The plain and `.mat` fixtures in the 1.10 format, both with a version 3
+/// superblock.
+fn write_v110(dir: &Path) -> (std::path::PathBuf, std::path::PathBuf) {
+    let plain = dir.join("plain_v110.h5");
     write_plain(&plain, LibVer::V110);
-    let mat = dir.path().join("mat_v110.mat");
+    let mat = dir.join("mat_v110.mat");
     let mut options = Options::default();
     options.libver = LibVer::V110;
     mat::to_file_with_options(&demo(), &mat, &options).unwrap();
-
     for path in [&plain, &mat] {
         assert_eq!(superblock_version(path), 3, "{}", path.display());
     }
-    if reads_v110() {
-        check_plain(&hdf5::File::open(&plain).expect("the C library opens the 1.10 plain file"));
-        check_mat(&hdf5::File::open(&mat).expect("the C library opens the 1.10 mat file"));
-    } else {
-        for path in [&plain, &mat] {
-            assert!(
-                hdf5::File::open(path).is_err(),
-                "HDF5 {:?} opened {}, which carries a version 3 superblock",
-                hdf5::library_version(),
-                path.display()
-            );
-        }
+    (plain, mat)
+}
+
+#[cfg(feature = "__hdf5-1.10")]
+#[test]
+fn the_1_10_format_this_crate_writes_opens_from_1_10_on() {
+    let dir = tempdir().unwrap();
+    let (plain, mat) = write_v110(dir.path());
+    check_plain(&hdf5::File::open(&plain).expect("the C library opens the 1.10 plain file"));
+    check_mat(&hdf5::File::open(&mat).expect("the C library opens the 1.10 mat file"));
+}
+
+#[cfg(not(feature = "__hdf5-1.10"))]
+#[test]
+fn the_1_10_format_this_crate_writes_is_rejected_before_1_10() {
+    let dir = tempdir().unwrap();
+    let (plain, mat) = write_v110(dir.path());
+    for path in [&plain, &mat] {
+        assert!(
+            hdf5::File::open(path).is_err(),
+            "HDF5 {:?} opened {}, which carries a version 3 superblock",
+            hdf5::library_version(),
+            path.display()
+        );
     }
 }
 
@@ -518,9 +524,8 @@ fn c_write(path: &Path, low: H5F_libver_t, high: H5F_libver_t) {
     file.close().unwrap();
 }
 
-/// What this crate must find in the C library's file. `newest` says the file
-/// was written under the latest bounds.
-fn check_c_written(path: &Path, newest: bool) {
+/// What this crate must find in the C library's file, the compound aside.
+fn check_c_written(path: &Path) {
     let f =
         hdf5_pure::File::open(path).unwrap_or_else(|e| panic!("open {}: {e:?}", path.display()));
     assert_eq!(
@@ -570,24 +575,12 @@ fn check_c_written(path: &Path, newest: bool) {
         hdf5_pure::Object::Dataset(d) => assert_eq!(d.read_f64().unwrap(), [1.0, 2.0, 3.0]),
         other => panic!("refs[1] is {other:?}, not the values dataset"),
     }
+}
 
+/// The compound in the C library's file, read through its declared members.
+fn check_compound(path: &Path) {
+    let f = hdf5_pure::File::open(path).unwrap();
     let signal = f.dataset("signal").unwrap();
-    // TODO: under its latest bounds, HDF5 2.0 encodes this compound with
-    // datatype message version 5, which this crate does not read. Pinned here
-    // until it does.
-    if newest && hdf5::library_version() >= (2, 0, 0) {
-        let refused = signal.datatype();
-        assert!(
-            matches!(
-                refused,
-                Err(hdf5_pure::Error::Format(
-                    hdf5_pure::FormatError::InvalidDatatypeVersion { .. }
-                ))
-            ),
-            "signal: {refused:?}"
-        );
-        return;
-    }
     let hdf5_pure::Datatype::Compound { members, .. } = signal.datatype().unwrap() else {
         panic!("signal is not a compound datatype");
     };
@@ -608,15 +601,55 @@ fn this_crate_reads_the_oldest_format_the_release_writes() {
     let path = dir.path().join("oldest.h5");
     c_write(&path, H5F_LIBVER_EARLIEST, H5F_LIBVER_LATEST);
     assert_eq!(superblock_version(&path), 0);
-    check_c_written(&path, false);
+    check_c_written(&path);
+    check_compound(&path);
 }
 
+#[cfg(not(feature = "__hdf5-1.10"))]
 #[test]
 fn this_crate_reads_the_newest_format_the_release_writes() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("newest.h5");
     c_write(&path, H5F_LIBVER_LATEST, H5F_LIBVER_LATEST);
-    let expected = if reads_v110() { 3 } else { 2 };
-    assert_eq!(superblock_version(&path), expected);
-    check_c_written(&path, true);
+    assert_eq!(superblock_version(&path), 2);
+    check_c_written(&path);
+    check_compound(&path);
+}
+
+#[cfg(all(feature = "__hdf5-1.10", not(feature = "__hdf5-2")))]
+#[test]
+fn this_crate_reads_the_newest_format_the_release_writes() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("newest.h5");
+    c_write(&path, H5F_LIBVER_LATEST, H5F_LIBVER_LATEST);
+    assert_eq!(superblock_version(&path), 3);
+    check_c_written(&path);
+    check_compound(&path);
+}
+
+/// Under its latest bounds, HDF5 2.0 encodes the compound with datatype
+/// message version 5, which this crate does not read.
+// TODO: read datatype message version 5, and fold this into the test above.
+#[cfg(feature = "__hdf5-2")]
+#[test]
+fn this_crate_reads_the_newest_format_the_release_writes_except_its_datatype_version_5() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("newest.h5");
+    c_write(&path, H5F_LIBVER_LATEST, H5F_LIBVER_LATEST);
+    assert_eq!(superblock_version(&path), 3);
+    check_c_written(&path);
+    let refused = hdf5_pure::File::open(&path)
+        .unwrap()
+        .dataset("signal")
+        .unwrap()
+        .datatype();
+    assert!(
+        matches!(
+            refused,
+            Err(hdf5_pure::Error::Format(
+                hdf5_pure::FormatError::InvalidDatatypeVersion { .. }
+            ))
+        ),
+        "signal: {refused:?}"
+    );
 }

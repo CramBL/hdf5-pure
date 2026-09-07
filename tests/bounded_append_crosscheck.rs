@@ -2,6 +2,7 @@
 // which is gated to 64-bit little-endian targets; skip them elsewhere so the pure-Rust
 // suite can run under `cross test --target i686-...`.
 #![cfg(all(not(target_pointer_width = "32"), target_endian = "little"))]
+#![cfg(feature = "__hdf5-1.10")]
 //! Reference-C-library interop for the bounded read-write backend (issue #147):
 //! files grown through the bounded engine read back byte-correct in the
 //! reference C library, both when the C library wrote the original file and

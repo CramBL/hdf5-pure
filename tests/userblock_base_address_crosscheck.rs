@@ -2,6 +2,7 @@
 // which is gated to 64-bit little-endian targets; skip them elsewhere so the pure-Rust
 // suite can run under `cross test --target i686-...`.
 #![cfg(all(not(target_pointer_width = "32"), target_endian = "little"))]
+#![cfg(feature = "__hdf5-1.10")]
 //! Reading the structures the C library places in a file that has a userblock.
 //!
 //! The format specification says of the superblock's base address that "unless

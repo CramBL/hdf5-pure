@@ -2,6 +2,7 @@
 // which is gated to 64-bit little-endian targets; skip them elsewhere so the pure-Rust
 // suite can run under `cross test --target i686-...`.
 #![cfg(all(not(target_pointer_width = "32"), target_endian = "little"))]
+#![cfg(feature = "__hdf5-1.10")]
 //! A chunk index numbers its slots over the dataset's *maximum* chunk grid, and
 //! an Extensible Array rotates its unlimited dimension to the front first
 //! (issue #299). Both facts are invisible to a round trip through this crate

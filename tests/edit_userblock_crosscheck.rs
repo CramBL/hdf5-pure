@@ -2,6 +2,7 @@
 // which is gated to 64-bit little-endian targets; skip them elsewhere so the pure-Rust
 // suite can run under `cross test --target i686-...`.
 #![cfg(all(not(target_pointer_width = "32"), target_endian = "little"))]
+#![cfg(feature = "__hdf5-1.10")]
 //! Cross-validation for editing files with a userblock (the userblock slice of
 //! issue #104) against the reference C library. A single off-by-base address in
 //! an edited file makes the C library error or read garbage, so reading the

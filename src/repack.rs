@@ -1939,10 +1939,11 @@ mod tests {
 #[cfg(test)]
 mod attribute_fidelity_tests {
     use super::*;
+    #[cfg(feature = "__hdf5-1.10")]
     use crate::dataspace::{Dataspace, DataspaceType};
-    use crate::datatype::{
-        CharacterSet, CompoundMember, DatatypeByteOrder, ReferenceType, StringPadding,
-    };
+    #[cfg(feature = "__hdf5-1.10")]
+    use crate::datatype::StringPadding;
+    use crate::datatype::{CharacterSet, CompoundMember, DatatypeByteOrder, ReferenceType};
     use crate::{File, FileBuilder, RepackOptions};
     use std::collections::BTreeMap;
 
@@ -2049,6 +2050,7 @@ mod attribute_fidelity_tests {
     /// two independent parses of two real files made of them, not a struct
     /// handed back to itself.
     #[test]
+    #[cfg(feature = "__hdf5-1.10")]
     fn an_encoding_this_crate_has_no_attr_value_for_still_crosses_a_repack() {
         let dir = tempfile::tempdir().unwrap();
         let (src, dst) = (dir.path().join("src.h5"), dir.path().join("dst.h5"));
@@ -2186,7 +2188,11 @@ mod attribute_fidelity_tests {
     /// itself, which a message it encodes wrongly and parses back just as wrongly
     /// would satisfy. These encodings reach the file through an internal seam
     /// with no public spelling, so nothing else in the suite would catch that.
-    #[cfg(all(not(target_pointer_width = "32"), target_endian = "little"))]
+    #[cfg(all(
+        feature = "__hdf5-1.10",
+        not(target_pointer_width = "32"),
+        target_endian = "little"
+    ))]
     fn c_library_reads_every_attribute(file: &Path, expected: usize) {
         let c = hdf5::File::open(file).expect("the C library must open the repacked file");
         for names in [
@@ -2213,7 +2219,10 @@ mod attribute_fidelity_tests {
     /// The C library is a 64-bit little-endian-only dev-dependency, so the
     /// check compiles out elsewhere and the pure-Rust half of the test still
     /// runs there.
-    #[cfg(not(all(not(target_pointer_width = "32"), target_endian = "little")))]
+    #[cfg(all(
+        feature = "__hdf5-1.10",
+        not(all(not(target_pointer_width = "32"), target_endian = "little"))
+    ))]
     fn c_library_reads_every_attribute(_file: &Path, _expected: usize) {}
 
     /// The other half of the rule: an attribute whose bytes are a *location* must

@@ -2,6 +2,7 @@
 // which is gated to 64-bit little-endian targets; skip them elsewhere so the pure-Rust
 // suite can run under `cross test --target i686-...`.
 #![cfg(all(not(target_pointer_width = "32"), target_endian = "little"))]
+#![cfg(feature = "__hdf5-1.10")]
 //! An empty (zero-element) chunked dataset, across both writers and both readers
 //! (issue #284). This is the shape an incremental writer declares its schema at —
 //! one resizable dataset per column, grown as batches arrive — so it has to be

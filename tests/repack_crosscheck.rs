@@ -2,6 +2,7 @@
 // which is gated to 64-bit little-endian targets; skip them elsewhere so the pure-Rust
 // suite can run under `cross test --target i686-...`.
 #![cfg(all(not(target_pointer_width = "32"), target_endian = "little"))]
+#![cfg(feature = "__hdf5-1.10")]
 //! Cross-validation for whole-file repack (issue #21) against the reference
 //! HDF5 C library: a file the C library *writes* is repacked by `hdf5_pure`,
 //! and the result is read back by both readers. Also proves the fail-loud
@@ -2024,13 +2025,11 @@ fn a_never_written_dataset_keeps_its_pipeline_order_and_optional_flags() {
 /// (issue #333). The existing variable-length repack tests could not see it:
 /// they build their sources through this crate's own writer, which emits one
 /// canonically ordered, all-mandatory pipeline.
+// Before 2.0 the C library refuses a mandatory filter, fletcher32 here, on a
+// variable-length dataset.
+#[cfg(feature = "__hdf5-2")]
 #[test]
 fn a_vlen_string_dataset_keeps_its_pipeline_order_and_optional_flags() {
-    // Before 2.0 the C library refuses a mandatory filter, fletcher32 here, on a
-    // variable-length dataset.
-    if hdf5::library_version() < (2, 0, 0) {
-        return;
-    }
     let dir = tempdir().unwrap();
     let src = dir.path().join("c_vlen_order.h5");
     let dst = dir.path().join("c_vlen_order_repacked.h5");

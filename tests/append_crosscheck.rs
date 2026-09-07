@@ -2,6 +2,7 @@
 // gated to 64-bit little-endian targets; skip elsewhere so the pure-Rust suite still
 // runs under `cross test --target i686-...`.
 #![cfg(all(not(target_pointer_width = "32"), target_endian = "little"))]
+#![cfg(feature = "__hdf5-1.10")]
 //! Interop tests for `Dataset::append_staged`: append to a filtered,
 //! unlimited, Extensible-Array-indexed dataset and confirm the reference C
 //! library (`hdf5-metno`) reads the grown dataset back exactly — including

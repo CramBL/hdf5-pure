@@ -16218,6 +16218,7 @@ mod tests {
     // 64-bit little-endian-only dev-dependency; skip elsewhere so the lib tests
     // still run there.
     #[cfg(all(not(target_pointer_width = "32"), target_endian = "little"))]
+    #[cfg(feature = "__hdf5-1.10")]
     fn a_c_written_chunk_index_is_not_reclaimed_as_raw() {
         use hdf5::plist::file_create::FileSpaceStrategy as CStrategy;
         use tempfile::tempdir;
@@ -16403,6 +16404,7 @@ mod tests {
     // 64-bit little-endian-only dev-dependency; skip elsewhere so the lib tests
     // still run there.
     #[cfg(all(not(target_pointer_width = "32"), target_endian = "little"))]
+    #[cfg(feature = "__hdf5-1.10")]
     fn a_generic_large_section_is_only_reusable_as_whole_pages() {
         use hdf5::plist::file_create::FileSpaceStrategy as CStrategy;
         use tempfile::tempdir;
@@ -17618,6 +17620,7 @@ mod tests {
     // 64-bit little-endian-only dev-dependency; skip elsewhere so the lib
     // tests still run there.
     #[cfg(all(not(target_pointer_width = "32"), target_endian = "little"))]
+    #[cfg(feature = "__hdf5-1.10")]
     fn append_inplace_crash_consistency_c_library_reads_prefix() {
         use tempfile::tempdir;
 
@@ -17676,6 +17679,7 @@ mod tests {
     // 64-bit little-endian-only dev-dependency; skip elsewhere so the lib
     // tests still run there.
     #[cfg(all(not(target_pointer_width = "32"), target_endian = "little"))]
+    #[cfg(feature = "__hdf5-1.10")]
     fn append_inplace_recover_and_reappend_after_phase3_crash() {
         use crate::reader::File as PureFile;
         use tempfile::tempdir;
@@ -20874,6 +20878,7 @@ mod tests {
     /// has no API that creates one.
     #[test]
     #[cfg(all(not(target_pointer_width = "32"), target_endian = "little"))]
+    #[cfg(feature = "__hdf5-1.10")]
     fn an_undo_replays_two_hard_links_to_one_block_newest_first() {
         use tempfile::tempdir;
 

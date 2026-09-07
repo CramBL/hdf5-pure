@@ -2,6 +2,7 @@
 // 64-bit little-endian targets; skip elsewhere so `cross test` on `i686` and
 // `s390x` stays pure-Rust.
 #![cfg(all(not(target_pointer_width = "32"), target_endian = "little"))]
+#![cfg(feature = "__hdf5-1.10")]
 //! SWMR append-writer tests: hdf5-pure appends in place to an unlimited
 //! Extensible-Array dataset, and the result is read back by hdf5-pure and by the
 //! reference C library. Appends cross the inline -> direct-block -> super-block
