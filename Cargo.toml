@@ -59,6 +59,12 @@ heap-baseline = []
 # Not a run-time dependency — build.rs only emits link directives for this
 # feature, and the crosscheck lives in a gated integration test.
 matio-crosscheck = ["serde"]
+# Internal, not part of the public API. Builds and links the libhdf5 that
+# `hdf5-metno` bundles instead of searching the host. Every recipe that builds
+# the test suite passes it. The interop workflow leaves it off and sets
+# `HDF5_DIR`. Dependents never build dev-dependencies, so it changes nothing
+# for them.
+__hdf5-bundled = ["hdf5/static"]
 
 [dependencies]
 byteorder = { version = "1", default-features = false }
@@ -108,17 +114,17 @@ criterion = { version = "0.5", default-features = false }
 # "little"))]` gate.
 #
 # The binding tracks upstream `main`, pinned by commit in `Cargo.lock` since
-# every CI job runs `--locked`; `cargo update -p hdf5-metno` moves it. The
-# libhdf5 it bundles is whichever release its submodule points at, and
-# `just hdf5-bundled-version` prints that. With `HDF5_DIR` set the binding
-# links the library found there instead, which is how the interop workflow
-# runs this suite against other releases. Judge a bump by the crosschecks
+# every CI job runs `--locked`. `cargo update -p hdf5-metno` moves it. The
+# `__hdf5-bundled` feature links the release its submodule points at, which
+# `just hdf5-bundled-version` prints. Without the feature it links the
+# installation under `HDF5_DIR`, which is how the interop workflow tests other
+# releases. Judge a bump by the crosschecks
 # rather than by release notes: several of them assert constants derived from
 # libhdf5 internals that a version change could move, and
 # `tests/c_absence_predicate.rs` guards the assertion most sensitive to one by
 # re-measuring the C library's error codes against deliberately damaged files.
 [target.'cfg(all(not(target_pointer_width = "32"), target_endian = "little"))'.dev-dependencies]
-hdf5 = { package = "hdf5-metno", git = "https://github.com/metno/hdf5-rust", branch = "main", features = ["static", "zlib"] }
+hdf5 = { package = "hdf5-metno", git = "https://github.com/metno/hdf5-rust", branch = "main", features = ["zlib"] }
 
 [[example]]
 name = "matlab_fixtures"

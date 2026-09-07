@@ -67,11 +67,11 @@ jobs:
           tool: cargo-nextest
 
       - name: Tests
-        run: cargo nextest run --locked ${{ matrix.config.flags }}
+        run: cargo nextest run --locked --features __hdf5-bundled ${{ matrix.config.flags }}
 
       # rustdoc compiles doctests, so nextest cannot run them.
       - name: Doctests
-        run: cargo test --locked --doc ${{ matrix.config.flags }}
+        run: cargo test --locked --doc --features __hdf5-bundled ${{ matrix.config.flags }}
 
   lint:
     name: lint / ubuntu-latest

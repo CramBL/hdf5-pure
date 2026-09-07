@@ -114,6 +114,10 @@ The figures it checks belong to one target, one toolchain and one feature set, s
 
 `matio-crosscheck` is a test-only / maintainer feature. It enables a crosscheck integration test that links against the system `libmatio` (the reference MATLAB MAT file library, installed via `brew install libmatio` or `apt install libmatio-dev`) to validate `.mat` output. It implies `serde`, is not a run-time dependency, and end users do not need it.
 
+### `__hdf5-bundled`
+
+`__hdf5-bundled` is internal and not part of the public API. It builds and links the libhdf5 that `hdf5-metno` bundles. Without it the dev-dependency links the installation under `HDF5_DIR`. Every `just` recipe that builds the test suite passes it. The interop workflow leaves it off. Dependents never build dev-dependencies, so it changes nothing for them.
+
 ## WASM and `no_std`
 
 `hdf5-pure` builds for `wasm32-unknown-unknown` with no C dependencies. Because `std` is available on that target and the high-level API is `std`-gated, a WASM build keeps the default features (which include `std`) — turning them off would compile `File` and `FileBuilder` away. Add the target and build:

@@ -4,24 +4,28 @@ default:
 ci-essentials: fmt-check clippy doc test-full doctest-full
 
 test-full:
-    cargo nextest run --locked --features "serde zfp fast-deflate provenance ndarray"
+    cargo nextest run --locked --features __hdf5-bundled --features "serde zfp fast-deflate provenance ndarray"
 
 doctest-full:
-    cargo test --locked --doc --features "serde zfp fast-deflate provenance ndarray"
+    cargo test --locked --doc --features __hdf5-bundled --features "serde zfp fast-deflate provenance ndarray"
 
-ci: ci-essentials check-release examples check-no-std check-wasm shear semver api-surface clippy-32bit cast-gate miri hdf5-compat test doctest
+ci: ci-essentials check-release examples check-no-std check-wasm shear semver api-surface clippy-32bit cast-gate miri test doctest
 
 test *ARGS:
+    cargo nextest run --locked --features __hdf5-bundled {{ ARGS }}
+
+# The test suite linking the HDF5 installed under HDF5_DIR.
+test-external-hdf5 *ARGS:
     cargo nextest run --locked {{ ARGS }}
 
 test-matio *ARGS:
-    cargo nextest run --locked --features "serde matio-crosscheck" --test serde_matio_crosscheck {{ ARGS }}
+    cargo nextest run --locked --features __hdf5-bundled --features "serde matio-crosscheck" --test serde_matio_crosscheck {{ ARGS }}
 
 test-lib *ARGS:
-    cargo test --lib {{ ARGS }}
+    cargo test --lib --features __hdf5-bundled {{ ARGS }}
 
 doctest *ARGS:
-    cargo test --locked --doc {{ ARGS }}
+    cargo test --locked --doc --features __hdf5-bundled {{ ARGS }}
 
 fmt:
     cargo fmt --all
@@ -30,13 +34,13 @@ fmt-check:
     cargo fmt --all -- --check
 
 clippy *ARGS:
-    cargo clippy --locked --features "serde ndarray" --all-targets {{ ARGS }} -- -D warnings
+    cargo clippy --locked --features __hdf5-bundled --features "serde ndarray" --all-targets {{ ARGS }} -- -D warnings
 
 doc *ARGS:
     RUSTDOCFLAGS="-D warnings" cargo doc --locked --no-deps --features "provenance zfp ndarray serde" {{ ARGS }}
 
 check-release:
-    cargo check --locked --release --all-targets --features "serde ndarray"
+    cargo check --locked --release --all-targets --features __hdf5-bundled --features "serde ndarray"
 
 check-no-std:
     cargo check --locked --no-default-features
@@ -63,8 +67,8 @@ test-big-endian:
     cross test --locked --target s390x-unknown-linux-gnu --no-default-features --features "std checksum deflate zfp serde ndarray provenance" --lib --test write_read_roundtrip --test serde_roundtrip --test complex_bulk_array --test complex_integer --test streaming_reader --test vlen_strings --test fixed_strings
 
 miri:
-    MIRIFLAGS=-Zmiri-strict-provenance cargo miri test --locked --no-default-features --features std,serde --lib mat::transpose
-    MIRIFLAGS=-Zmiri-strict-provenance cargo miri test --locked --no-default-features --features std,serde --lib mat::complex
+    MIRIFLAGS=-Zmiri-strict-provenance cargo miri test --locked --no-default-features --features std,serde,__hdf5-bundled --lib mat::transpose
+    MIRIFLAGS=-Zmiri-strict-provenance cargo miri test --locked --no-default-features --features std,serde,__hdf5-bundled --lib mat::complex
 
 fuzz TARGET DURATION="30":
     cargo +nightly fuzz run {{ TARGET }} --target x86_64-unknown-linux-gnu -- -max_total_time={{ DURATION }} -rss_limit_mb=4096
@@ -84,28 +88,29 @@ examples:
     #!/usr/bin/env bash
     set -euo pipefail
     for ex in $(cargo metadata --no-deps --format-version 1 | jq -r '.packages[].targets[] | select(.kind[] == "example") | .name'); do
-        cargo run --locked --features "serde ndarray" --example "$ex"
+        cargo run --locked --features __hdf5-bundled --features "serde ndarray" --example "$ex"
     done
 
 heap-baseline:
-    cargo nextest run --locked --features heap-baseline --test allocation_baseline
+    cargo nextest run --locked --features __hdf5-bundled --features heap-baseline --test allocation_baseline
 
 heap-baseline-record:
-    HEAPSCOPE_UPDATE_BASELINE=1 cargo test --features heap-baseline --test allocation_baseline
+    HEAPSCOPE_UPDATE_BASELINE=1 cargo test --features __hdf5-bundled --features heap-baseline --test allocation_baseline
 
 heap-profile:
-    cargo run --release --example heap_profile
+    cargo run --release --features __hdf5-bundled --example heap_profile
 
 api-surface:
     ./scripts/check-api-surface.sh
 
-hdf5-compat *ARGS: (hdf5-build ARGS) (hdf5-check ARGS)
+# Build libhdf5 VERSION and its tools under tmp/hdf5/VERSION.
+hdf5-build VERSION:
+    uv run scripts/build_hdf5.py {{ VERSION }}
 
-hdf5-build *ARGS:
-    uv run scripts/check_hdf5_compat.py --prepare {{ ARGS }}
-
-hdf5-check *ARGS:
-    uv run scripts/check_hdf5_compat.py {{ ARGS }}
+# Shell exports that make a build link the libhdf5 under tmp/hdf5/VERSION:
+# eval "$(just hdf5-env 1.8.23)" && just test-external-hdf5
+hdf5-env VERSION:
+    @uv run scripts/build_hdf5.py {{ VERSION }} --env
 
 # The libhdf5 the crosscheck tests link when HDF5_DIR is unset.
 hdf5-bundled-version:
@@ -113,12 +118,6 @@ hdf5-bundled-version:
     set -euo pipefail
     manifest=$(cargo metadata --locked --format-version 1 | jq -r '.packages[] | select(.name == "hdf5-metno-src") | .manifest_path')
     awk '/^#define H5_VERS_(MAJOR|MINOR|RELEASE) / { v[++n] = $3 } END { print v[1] "." v[2] "." v[3] }' "$(dirname "$manifest")/ext/hdf5/src/H5public.h"
-
-verify-fixtures *ARGS:
-    uv run scripts/verify_fixtures.py {{ ARGS }}
-
-lock-python:
-    uv lock --script scripts/verify_fixtures.py
 
 check-release-script:
     ./scripts/check-release-script.sh

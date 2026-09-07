@@ -61,7 +61,7 @@ jobs:
               echo "::error::$file holds no unsafe code; point this job at the code that does."
               exit 1
             fi
-            cargo miri test --locked --no-default-features --features std,serde \
+            cargo miri test --locked --no-default-features --features std,serde,__hdf5-bundled \
               --lib "$filter" 2>&1 | tee miri.log
             if grep -q "running 0 tests" miri.log; then
               echo "::error::Miri ran no tests for $filter: the --lib filter matched nothing."
