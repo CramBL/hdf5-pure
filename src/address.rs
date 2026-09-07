@@ -15,7 +15,7 @@
 //! the compiler has nothing to say about mixing them. The result is a defect
 //! class rather than a defect: a reader that forgets the base lands inside the
 //! userblock, and every test written against a base-0 file passes anyway.
-//! `tests/userblock_base_address_crosscheck.rs` was written after that happened
+//! `crates/crosscheck/tests/userblock_base_address.rs` was written after that happened
 //! three separate times — dense attributes, object header continuations, and
 //! dense link storage — and it covers the ground its four rows name, which is
 //! not the same as covering the ground.

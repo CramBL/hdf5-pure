@@ -1,0 +1,16 @@
+# Helpers shared by the crate's integration tests and by the crosscheck
+# package. Unit tests inside the crate do not use it: a lib test is its own
+# compilation of the crate, and the types here would not be its types.
+[package]
+name = "test-util"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+hdf5-pure = { path = "../.." }
+heapscope = "0.1"
+tempfile = "3"

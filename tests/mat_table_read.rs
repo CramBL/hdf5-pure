@@ -1,5 +1,5 @@
 //! Typed `MatTable` / `MatTimetable` / `MatColumn` views over a real MATLAB
-//! fixture (BSD-3, `foreverallama/matio`; see `tests/fixtures/mat_real/NOTICE.md`).
+//! fixture (BSD-3, `foreverallama/matio`; see `tests/data/matlab/NOTICE.md`).
 //! Expected values come from the generator `tests/data/generators/test_tables_gen.m`.
 #![cfg(feature = "serde")]
 
@@ -7,7 +7,7 @@ use hdf5_pure::mat::{self, MatColumn, MatTable, MatTimetable};
 use serde::Deserialize;
 
 fn read<T: serde::de::DeserializeOwned>() -> T {
-    let bytes = std::fs::read("tests/fixtures/mat_real/test_tables_v73.mat")
+    let bytes = std::fs::read("tests/data/matlab/test_tables_v73.mat")
         .expect("read test_tables_v73.mat fixture");
     mat::from_bytes(&bytes).expect("decode fixture")
 }

@@ -3,8 +3,8 @@
 //! On disk a struct array is a `MATLAB_class="struct"` group whose every field
 //! is a dataset of per-element object references, unlike a scalar struct whose
 //! fields are direct value datasets. The fixture is synthetic, built to MATLAB's
-//! documented v7.3 layout by `tests/fixtures/mat_synth/gen_struct_array.py`
-//! (see `tests/fixtures/mat_synth/NOTICE.md`).
+//! documented v7.3 layout by `tests/data/h5py/mat/gen_struct_array.py`
+//! (see `tests/data/h5py/mat/NOTICE.md`).
 #![cfg(feature = "serde")]
 
 use hdf5_pure::mat;
@@ -37,7 +37,7 @@ struct Nested {
 }
 
 fn read<T: serde::de::DeserializeOwned>() -> T {
-    let bytes = std::fs::read("tests/fixtures/mat_synth/struct_array_v73.mat")
+    let bytes = std::fs::read("tests/data/h5py/mat/struct_array_v73.mat")
         .expect("read struct_array_v73.mat fixture");
     mat::from_bytes(&bytes).expect("decode fixture")
 }
@@ -165,7 +165,7 @@ fn struct_array_into_single_struct_errors() {
         #[allow(dead_code)]
         row: Data,
     }
-    let bytes = std::fs::read("tests/fixtures/mat_synth/struct_array_v73.mat").unwrap();
+    let bytes = std::fs::read("tests/data/h5py/mat/struct_array_v73.mat").unwrap();
     let err = mat::from_bytes::<File>(&bytes).unwrap_err();
     let msg = err.to_string();
     assert!(

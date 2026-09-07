@@ -15,8 +15,7 @@
 use hdf5_pure::{AttrValue, File, FileBuilder, RepackOptions, repack};
 use tempfile::tempdir;
 
-mod common;
-use common::heap::has_fractal_heap;
+use test_util::heap::has_fractal_heap;
 
 const USERBLOCK: u64 = 512;
 

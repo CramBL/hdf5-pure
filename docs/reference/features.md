@@ -114,11 +114,9 @@ The figures it checks belong to one target, one toolchain and one feature set, s
 
 `matio-crosscheck` is a test-only / maintainer feature. It enables a crosscheck integration test that links against the system `libmatio` (the reference MATLAB MAT file library, installed via `brew install libmatio` or `apt install libmatio-dev`) to validate `.mat` output. It implies `serde`, is not a run-time dependency, and end users do not need it.
 
-### `__hdf5-bundled` and `__hdf5-1.10` to `__hdf5-2`
+### The crosscheck package
 
-All internal and not part of the public API. `__hdf5-bundled` builds and links the libhdf5 that `hdf5-metno` bundles. Without it the dev-dependency links the installation under `HDF5_DIR`. Every `just` recipe that builds the test suite passes it. The interop workflow leaves it off.
-
-`__hdf5-1.10`, `__hdf5-1.12`, `__hdf5-1.14` and `__hdf5-2` name the release series of the linked libhdf5, from 1.10 up. Each implies the one below, and a test gates on the lowest series that has what it needs. The interop workflow passes its row's, `__hdf5-bundled` implies the bundled release's, and `tests/hdf5_release_feature.rs` checks the one passed against the library linked. Dependents never build dev-dependencies, so none of these changes anything for them.
+The tests that link the reference C library are a separate package, `hdf5-pure-crosscheck` under `crates/crosscheck/`, so that nothing else in the repository needs a C library. Its features are not this crate's. `__hdf5-bundled` builds and links the libhdf5 that `hdf5-metno` bundles, and without it the package links the installation under `HDF5_DIR`. `__hdf5-1.10`, `__hdf5-1.12`, `__hdf5-1.14` and `__hdf5-2` name the release series of the linked libhdf5, from 1.10 up. Each implies the one below, and a test gates on the lowest series that has what it needs. The interop workflow passes its row's, `__hdf5-bundled` implies the bundled release's, and `crates/crosscheck/tests/hdf5_release_feature.rs` checks the one passed against the library linked.
 
 ## WASM and `no_std`
 

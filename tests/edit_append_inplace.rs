@@ -4,7 +4,7 @@
 //! with those staged edits, without reopening the file. Crash-consistency phasing
 //! lives in the in-crate `edit::tests` module; C-library interop (including
 //! hard-link aliasing and a combined mixed-edit file) lives in
-//! `edit_crosscheck.rs`.
+//! `crates/crosscheck/tests/edit.rs`.
 
 use hdf5_pure::{
     AttrValue, Error, File, FileAccessProperties, FileBuilder, FileSpaceStrategy, FormatError,

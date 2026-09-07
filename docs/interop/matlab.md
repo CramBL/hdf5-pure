@@ -265,7 +265,7 @@ Real MATLAB writes an older format still: a version 0 superblock with v1 symbol-
 
 ## How an empty value is stored
 
-MAT v7.3 is not publicly documented, so the particulars here are measured against the genuine MATLAB files vendored under `tests/fixtures/mat_real` rather than taken from a specification. An empty value is a two-element `uint64` dataset whose *payload* is the dimension vector, marked with `MATLAB_empty`, and it carries no other attribute — in particular no `MATLAB_int_decode`, which says how to read stored integers back as `char` or `logical` and has nothing to describe when the payload is a dimension vector. Not one of the 352 empty datasets in those fixtures carries it, for any class.
+MAT v7.3 is not publicly documented, so the particulars here are measured against the genuine MATLAB files vendored under `tests/data/matlab` rather than taken from a specification. An empty value is a two-element `uint64` dataset whose *payload* is the dimension vector, marked with `MATLAB_empty`, and it carries no other attribute — in particular no `MATLAB_int_decode`, which says how to read stored integers back as `char` or `logical` and has nothing to describe when the payload is a dimension vector. Not one of the 352 empty datasets in those fixtures carries it, for any class.
 
 An empty Rust sequence is written as `0x0`, MATLAB's `[]`, whichever `OneDimensionalMode` is set: the mode orients a vector, and an empty one has no orientation to preserve. The difference is visible in MATLAB, where `[[], 1]` is `1` while `[zeros(0,1), 1]` is a dimension-mismatch error, and `0x0` is what MATLAB itself overwhelmingly writes. `MatBuilder::write_empty` still stores whatever dimensions you hand it, so `zeros(0,1)` remains expressible.
 

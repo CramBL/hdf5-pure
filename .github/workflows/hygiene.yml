@@ -50,6 +50,7 @@ jobs:
               - tests/**
               - examples/**
               - benches/**
+              - crates/**
               - justfile
               - scripts/hygiene.just
               - scripts/python.just

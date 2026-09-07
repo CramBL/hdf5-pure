@@ -1,7 +1,7 @@
 use hdf5_pure::{Error, File, FormatError, VlenStringReadOptions};
 use tempfile::tempdir;
 
-const FIXTURE: &str = "tests/fixtures/vl_strings.h5";
+const FIXTURE: &str = "tests/data/unattributed/vl_strings.h5";
 
 fn expected_names() -> Vec<String> {
     ["Alice", "Bob", "Charlie"]
@@ -89,7 +89,7 @@ fn vlen_specific_apis_reject_non_vlen_datasets() {
         hdf5_pure::Datatype::VariableLength { .. }
     ));
 
-    let numeric = File::open("tests/fixtures/simple_dataset.h5").unwrap();
+    let numeric = File::open("tests/data/unattributed/simple_dataset.h5").unwrap();
     let numeric_dataset = numeric.dataset("data").unwrap();
     assert!(matches!(
         numeric_dataset.vlen_string_payload_size(),

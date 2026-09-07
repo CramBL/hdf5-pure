@@ -24,7 +24,7 @@ pub const STORAGE_DIMS_BUF_LEN: usize = 8;
 /// does have is a value in MATLAB, and that value is the canonical empty. The
 /// difference is visible — `[[], 1]` is `1`, where `[zeros(0,1), 1]` is a
 /// dimension-mismatch error — and `0x0` is what MATLAB itself overwhelmingly
-/// writes. Counted across the MATLAB-authored fixtures in `tests/fixtures/mat_real`,
+/// writes. Counted across the MATLAB-authored fixtures in `tests/data/matlab`,
 /// `double` empties are `0x0` 47 times against `0x1` once, `char` 55 times, and
 /// `cell` 122 times; `matio` and h5py's `hdf5storage` both call `0x0` the
 /// canonical empty.

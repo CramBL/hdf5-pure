@@ -258,7 +258,7 @@ mod tests {
     #[test]
     fn verify_against_hdf5_file() {
         // Verify against a real HDF5 file checksum
-        let file_data: &[u8] = include_bytes!("../tests/fixtures/v2_groups.h5");
+        let file_data: &[u8] = include_bytes!("../tests/data/unattributed/v2_groups.h5");
         // Superblock v3: checksum at offset 44, covers bytes 0..44
         let stored =
             u32::from_le_bytes([file_data[44], file_data[45], file_data[46], file_data[47]]);

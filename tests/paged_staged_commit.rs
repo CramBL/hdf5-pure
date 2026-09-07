@@ -11,22 +11,20 @@ use hdf5_pure::{
 
 const PAGE: u64 = 4096;
 
-#[path = "common/temp_fixture.rs"]
-mod temp_fixture;
+use test_util::temp;
 
 // The page-homogeneity check is shared with the free-space tests, which exercise
 // the same invariant from the in-place append side (issue #387).
-#[path = "common/paged.rs"]
-mod paged;
 use paged::assert_pages_homogeneous;
+use test_util::paged;
 
 /// A fixture under the repository's gitignored `tmp/`, in a directory of its own
 /// so two concurrent runs of this binary cannot collide on the name (issue #334).
-fn tmp(name: &str) -> temp_fixture::TempPath {
+fn tmp(name: &str) -> temp::TempPath {
     let mut p = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     p.push("tmp");
     std::fs::create_dir_all(&p).expect("create the repository's tmp directory");
-    temp_fixture::temp_path_in(&p, name)
+    temp::temp_path_in(&p, name)
 }
 
 /// Build a paged file with one contiguous i32 dataset `d` seeded with `0..n`.

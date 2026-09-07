@@ -1,6 +1,6 @@
 //! Reading MATLAB `containers.Map` variables straight into Rust maps, over a
 //! real MATLAB fixture (BSD-3, `foreverallama/matio`; see
-//! `tests/fixtures/mat_real/NOTICE.md`). Expected values come from the generator
+//! `tests/data/matlab/NOTICE.md`). Expected values come from the generator
 //! `tests/data/generators/test_maps_gen.m` and the `test_containermap.py` oracle.
 #![cfg(feature = "serde")]
 
@@ -9,7 +9,7 @@ use serde::Deserialize;
 use std::collections::{BTreeMap, HashMap};
 
 fn read<T: serde::de::DeserializeOwned>() -> T {
-    let bytes = std::fs::read("tests/fixtures/mat_real/test_maps_v73.mat")
+    let bytes = std::fs::read("tests/data/matlab/test_maps_v73.mat")
         .expect("read test_maps_v73.mat fixture");
     mat::from_bytes(&bytes).expect("decode fixture")
 }

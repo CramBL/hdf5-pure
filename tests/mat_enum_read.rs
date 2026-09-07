@@ -1,6 +1,6 @@
 //! Reading MATLAB enumeration arrays into the typed [`MatEnum`] view, over a
 //! real MATLAB fixture (BSD-3, `foreverallama/matio`; see
-//! `tests/fixtures/mat_real/NOTICE.md`). Expected values come from the generator
+//! `tests/data/matlab/NOTICE.md`). Expected values come from the generator
 //! `tests/data/generators/test_enum_gen.m` and the `test_enum.py` oracle.
 #![cfg(feature = "serde")]
 
@@ -8,7 +8,7 @@ use hdf5_pure::mat::{self, MatEnum};
 use serde::Deserialize;
 
 fn read<T: serde::de::DeserializeOwned>() -> T {
-    let bytes = std::fs::read("tests/fixtures/mat_real/test_enum_v73.mat")
+    let bytes = std::fs::read("tests/data/matlab/test_enum_v73.mat")
         .expect("read test_enum_v73.mat fixture");
     mat::from_bytes(&bytes).expect("decode fixture")
 }

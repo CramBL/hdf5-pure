@@ -227,6 +227,8 @@ pub(crate) mod reader;
 pub(crate) mod reference_patch;
 #[cfg(feature = "std")]
 pub(crate) mod repack;
+#[cfg(test)]
+mod test_data;
 #[cfg(feature = "std")]
 pub(crate) mod types;
 #[cfg(feature = "std")]

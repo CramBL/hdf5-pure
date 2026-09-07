@@ -432,8 +432,6 @@ dependencies = [
  "byteorder",
  "criterion",
  "flate2",
- "hdf5-metno",
- "hdf5-metno-sys",
  "heapscope",
  "ndarray",
  "num-complex",
@@ -442,6 +440,21 @@ dependencies = [
  "serde_json",
  "sha2",
  "tempfile",
+ "test-util",
+]
+
+[[package]]
+name = "hdf5-pure-crosscheck"
+version = "0.0.0"
+dependencies = [
+ "hdf5-metno",
+ "hdf5-metno-sys",
+ "hdf5-pure",
+ "ndarray",
+ "proptest",
+ "serde",
+ "tempfile",
+ "test-util",
 ]
 
 [[package]]
@@ -1017,6 +1030,15 @@ dependencies = [
  "once_cell",
  "rustix",
  "windows-sys",
+]
+
+[[package]]
+name = "test-util"
+version = "0.0.0"
+dependencies = [
+ "hdf5-pure",
+ "heapscope",
+ "tempfile",
 ]
 
 [[package]]

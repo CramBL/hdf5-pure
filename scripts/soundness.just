@@ -18,7 +18,7 @@ miri:
             exit 1
         fi
         MIRIFLAGS=-Zmiri-strict-provenance cargo miri test --locked --no-default-features \
-            --features std,serde,__hdf5-bundled --lib "$filter" 2>&1 | tee "$log"
+            --features std,serde --lib "$filter" 2>&1 | tee "$log"
         if grep -q "running 0 tests" "$log"; then
             echo "Miri ran no tests for $filter: the --lib filter matched nothing." >&2
             exit 1
@@ -30,10 +30,10 @@ miri:
     done
 
 heap-baseline:
-    cargo nextest run --locked --features __hdf5-bundled --features heap-baseline --test allocation_baseline
+    cargo nextest run --locked --features heap-baseline --test allocation_baseline
 
 heap-baseline-record:
-    HEAPSCOPE_UPDATE_BASELINE=1 cargo test --features __hdf5-bundled --features heap-baseline --test allocation_baseline
+    HEAPSCOPE_UPDATE_BASELINE=1 cargo test --features heap-baseline --test allocation_baseline
 
 heap-profile:
-    cargo run --release --features __hdf5-bundled --example heap_profile
+    cargo run --release --example heap_profile

@@ -6,9 +6,8 @@
 
 use hdf5_pure::{Error, File, FileBuilder, FormatError, RepackOptions, repack};
 
-#[path = "common/temp_fixture.rs"]
-mod temp_fixture;
-use temp_fixture::temp_path;
+use temp::temp_path;
+use test_util::temp;
 
 #[test]
 fn lzf_i32_roundtrip() {
@@ -180,7 +179,7 @@ fn overwrite_lzf_dataset_in_place() {
 
 fn fixture(name: &str) -> std::path::PathBuf {
     std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures/lzf")
+        .join("tests/data/h5py/lzf")
         .join(name)
 }
 
@@ -239,7 +238,7 @@ fn pure_written_fixture_is_current() {
     assert_eq!(
         build_pure_written(),
         committed,
-        "tests/fixtures/lzf/pure_written.h5 is stale — see this test's doc comment"
+        "tests/data/h5py/lzf/pure_written.h5 is stale — see this test's doc comment"
     );
 }
 

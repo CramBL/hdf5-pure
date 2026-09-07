@@ -989,7 +989,7 @@ mod tests {
     /// Both ends are under test at once: the writer stores each variant at its
     /// own width, and the reader picks the variant back out of that width. A
     /// writer that stored `I16` in four bytes would be read as `I32` and fail
-    /// here, so the pair cannot drift together — and `attr_width_crosscheck`
+    /// here, so the pair cannot drift together — and `crates/crosscheck/tests/attr_width.rs`
     /// is what says the width means the same thing outside this crate, with the
     /// reference C library reading the bytes.
     ///

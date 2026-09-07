@@ -1,8 +1,8 @@
 //! Nested / embedded MCOS object reference decoding, validated against a real
 //! MATLAB fixture, read through the serde-native column-by-name surface.
 //!
-//! `tests/fixtures/mat_real/test_tables_v73.mat` is genuine real-MATLAB v7.3
-//! output (BSD-3, `foreverallama/matio`; see `tests/fixtures/mat_real/NOTICE.md`).
+//! `tests/data/matlab/test_tables_v73.mat` is genuine real-MATLAB v7.3
+//! output (BSD-3, `foreverallama/matio`; see `tests/data/matlab/NOTICE.md`).
 //! A `table` / `timetable` decodes so each column is addressable by its MATLAB
 //! variable name; a column that is itself an MCOS object (`string`, `datetime`,
 //! `duration`, a struct, a user class) is resolved through its embedded
@@ -15,7 +15,7 @@ use hdf5_pure::mat::{self, MatDatetime, MatDuration};
 use serde::Deserialize;
 
 fn read<T: serde::de::DeserializeOwned>() -> T {
-    let bytes = std::fs::read("tests/fixtures/mat_real/test_tables_v73.mat")
+    let bytes = std::fs::read("tests/data/matlab/test_tables_v73.mat")
         .expect("read test_tables_v73.mat fixture");
     mat::from_bytes(&bytes).expect("decode fixture")
 }

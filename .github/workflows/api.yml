@@ -81,6 +81,7 @@ jobs:
       - name: Public API delta
         uses: obi1kenobi/cargo-semver-checks-action@6b69fcf40e9b5fb17adeb57e4b6ecd020649a239 # v2.9
         with:
+          package: hdf5-pure
           feature-group: default-features
           features: serde,zfp,provenance,ndarray
 

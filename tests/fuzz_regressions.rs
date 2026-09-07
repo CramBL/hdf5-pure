@@ -1,6 +1,6 @@
 //! Regression tests for inputs found by the `cargo fuzz` targets.
 //!
-//! Each fixture under `tests/fixtures/fuzz/` is a minimized crash input; the
+//! Each fixture under `tests/data/fuzz/` is a minimized crash input; the
 //! test drives it through the same public reader entry points the fuzz target
 //! exercises and asserts the library refuses it with an error instead of
 //! aborting the process.
@@ -17,7 +17,7 @@ use hdf5_pure::{Error, File, FormatError, Group};
 #[test]
 fn oom_chunked_string_huge_elem_is_refused() {
     let bytes =
-        std::fs::read("tests/fixtures/fuzz/oom_chunked_string_huge_elem.h5").expect("read fixture");
+        std::fs::read("tests/data/fuzz/oom_chunked_string_huge_elem.h5").expect("read fixture");
 
     let file = File::from_bytes(bytes).expect("file parses; only the data read is malformed");
 
@@ -45,8 +45,8 @@ fn oom_chunked_string_huge_elem_is_refused() {
 /// element type reports it and none of them divides.
 #[test]
 fn zero_width_element_type_is_refused_not_divided_by() {
-    let bytes = std::fs::read("tests/fixtures/fuzz/zero_width_elem_chunked_string.h5")
-        .expect("read fixture");
+    let bytes =
+        std::fs::read("tests/data/fuzz/zero_width_elem_chunked_string.h5").expect("read fixture");
 
     let file = File::from_bytes(bytes).expect("file parses; only the datatype is malformed");
 

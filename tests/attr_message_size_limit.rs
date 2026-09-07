@@ -12,8 +12,7 @@
 
 use hdf5_pure::{AttrValue, Error, File, FileBuilder, FormatError, OBJECT_HEADER_MESSAGE_MAX};
 
-mod common;
-use common::heap::has_fractal_heap;
+use test_util::heap::has_fractal_heap;
 
 /// A `VarLenAsciiCharArray` past the message-size limit: each element contributes a
 /// 16-byte global-heap reference, so ~4,100 elements cross it. This is the shape

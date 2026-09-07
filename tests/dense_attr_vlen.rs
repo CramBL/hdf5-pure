@@ -14,8 +14,7 @@
 
 use hdf5_pure::{AttrValue, File, FileBuilder, FileSpaceStrategy};
 
-mod common;
-use common::heap::{has_fractal_heap, huge_object_count};
+use test_util::heap::{has_fractal_heap, huge_object_count};
 
 /// A builder whose root carries one variable-length string attribute alongside
 /// `others` small ones — enough of them to select dense storage by count, not by

@@ -49,11 +49,12 @@ jobs:
               - tests/**
               - examples/**
               - benches/**
+              - crates/test-util/**
               - justfile
               - .github/workflows/ci.yml
 
-  # The crosschecks link the libhdf5 `hdf5-metno` bundles, which the interop
-  # workflow names and also builds from source beside the older releases.
+  # The crate's own suite. The crosschecks against the reference C library
+  # are the interop workflow's.
   test:
     name: test / ${{ matrix.os }} / ${{ matrix.config.name }}
     runs-on: ${{ matrix.os }}
@@ -93,11 +94,11 @@ jobs:
           tool: cargo-nextest,cargo-hack,just
 
       - name: Tests
-        run: cargo nextest run --locked --features __hdf5-bundled ${{ matrix.config.flags }}
+        run: cargo nextest run --locked ${{ matrix.config.flags }}
 
       # rustdoc compiles doctests, so nextest cannot run them.
       - name: Doctests
-        run: cargo test --locked --doc --features __hdf5-bundled ${{ matrix.config.flags }}
+        run: cargo test --locked --doc ${{ matrix.config.flags }}
 
       # Subsets of `full`, on one host: a feature that only compiles beside
       # another surfaces here.

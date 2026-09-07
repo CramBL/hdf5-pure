@@ -1,7 +1,7 @@
 #![cfg(feature = "serde")]
 //! What an empty MATLAB value looks like on disk, measured against MATLAB.
 //!
-//! The `.mat` files under `tests/fixtures/mat_real` are genuine real-MATLAB v7.3
+//! The `.mat` files under `tests/data/matlab` are genuine real-MATLAB v7.3
 //! output (their userblock records `Platform: PCWIN64`; see `NOTICE.md` there),
 //! so they are ground truth for questions the format specification does not
 //! answer — MAT v7.3 is not publicly documented, and the community write-ups
@@ -76,7 +76,7 @@ fn empty_markers(file: &File) -> Vec<(String, Vec<String>, Vec<u64>)> {
 
 fn all_matlab_empty_markers() -> Vec<(String, Vec<String>, Vec<u64>)> {
     let mut all = Vec::new();
-    let dir = std::path::Path::new("tests/fixtures/mat_real");
+    let dir = std::path::Path::new("tests/data/matlab");
     for entry in std::fs::read_dir(dir).expect("the real-MATLAB fixture directory") {
         let path = entry.unwrap().path();
         if path.extension().and_then(|e| e.to_str()) != Some("mat") {

@@ -6,8 +6,8 @@ matlab_fixtures/
 libver_fixtures/
 .claude/
 # Fixture-regen venv (developer tool; committed fixtures are self-contained)
-tests/fixtures/zfp/.venv/
-tests/fixtures/lzf/.venv/
+tests/data/h5py/zfp/.venv/
+tests/data/h5py/lzf/.venv/
 # Local scratch dir for drafts and throwaway work
 /tmp/
 # Throwaway scratch probe tests (zz_ prefix), never committed

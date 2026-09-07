@@ -13,7 +13,7 @@ categories = ["science", "encoding", "filesystem", "wasm", "no-std"]
 build = "build.rs"
 # Keep binary test fixtures and fuzz harnesses out of the published crate. They
 # are needed only for maintainer CI and stay in the git repo for that purpose.
-exclude = ["tests/fixtures/**", "fuzz/**"]
+exclude = ["tests/data/**", "fuzz/**", "crates/**"]
 
 # Publish the full public API on docs.rs. The default feature set hides the
 # `ndarray`, `serde` (`mat`), `zfp`, and `provenance` surfaces (and
@@ -59,20 +59,6 @@ heap-baseline = []
 # Not a run-time dependency — build.rs only emits link directives for this
 # feature, and the crosscheck lives in a gated integration test.
 matio-crosscheck = ["serde"]
-# Internal, not part of the public API. Which release series of libhdf5 the
-# test suite links, from 1.10 up: none of them is 1.8. Each implies the one
-# below, so a test gates on the lowest series that has what it needs. The
-# interop workflow passes its row's, and `tests/hdf5_release_feature.rs`
-# checks the one passed against the library actually linked. Dependents never
-# build dev-dependencies, so none of these changes anything for them.
-"__hdf5-1.10" = []
-"__hdf5-1.12" = ["__hdf5-1.10"]
-"__hdf5-1.14" = ["__hdf5-1.12"]
-"__hdf5-2" = ["__hdf5-1.14"]
-# Internal. Builds and links the libhdf5 that `hdf5-metno` bundles instead of
-# searching the host, a 2.x release. Every recipe that builds the test suite
-# passes it. The interop workflow leaves it off and sets `HDF5_DIR`.
-__hdf5-bundled = ["hdf5/static", "__hdf5-2"]
 
 [dependencies]
 byteorder = { version = "1", default-features = false }
@@ -109,6 +95,7 @@ proptest = "1"
 # features are off to avoid pulling the plotting/HTML-report dependency tree; the
 # benches report to the terminal, which is enough for before/after comparison.
 criterion = { version = "0.5", default-features = false }
+test-util = { path = "crates/test-util" }
 
 # The reference HDF5 C library, used only by the byte-level crosscheck tests.
 # Its `static` feature compiles libhdf5 from source via CMake, which does not
@@ -131,19 +118,8 @@ criterion = { version = "0.5", default-features = false }
 # libhdf5 internals that a version change could move, and
 # `tests/c_absence_predicate.rs` guards the assertion most sensitive to one by
 # re-measuring the C library's error codes against deliberately damaged files.
-[target.'cfg(all(not(target_pointer_width = "32"), target_endian = "little"))'.dev-dependencies]
-hdf5 = { package = "hdf5-metno", git = "https://github.com/metno/hdf5-rust", branch = "main", features = ["zlib"] }
-# Its raw bindings, for the few calls the wrapper has no API for. Declared
-# there rather than in a test's own `extern` block, so names and structs
-# follow the linked release.
-hdf5_sys = { package = "hdf5-metno-sys", git = "https://github.com/metno/hdf5-rust", branch = "main" }
-
 [[example]]
 name = "matlab_fixtures"
-required-features = ["serde"]
-
-[[test]]
-name = "libver_matrix_crosscheck"
 required-features = ["serde"]
 
 [[example]]
@@ -157,7 +133,17 @@ harness = false
 # Style-preference clippy lints muted crate-wide. The remaining clippy
 # surface is still on (`-D warnings` in CI), so genuinely problematic
 # patterns continue to fail the build.
-[lints.clippy]
+[lints]
+workspace = true
+
+# The supporting packages: the tests that link the reference C library, so that
+# nothing else does, and the helpers the tests share. `fuzz` keeps its own
+# lockfile.
+[workspace]
+members = ["crates/*"]
+exclude = ["fuzz"]
+
+[workspace.lints.clippy]
 # Low-level binary format code naturally has many fields per call site
 # (file_data, dataspace, datatype, layout, cache, ...). Default 7 is too tight.
 too_many_arguments = "allow"
@@ -174,7 +160,7 @@ collapsible_else_if = "allow"
 manual_div_ceil = "allow"
 manual_is_multiple_of = "allow"
 unnecessary_map_or = "allow"
-# Approximate float constants in tests/fixtures are intentional.
+# Approximate float constants in tests/data are intentional.
 approx_constant = "allow"
 
 # Fewer, larger codegen units than rustc's default of 256.

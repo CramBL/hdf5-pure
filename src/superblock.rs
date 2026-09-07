@@ -479,7 +479,7 @@ mod tests {
     /// bytes out the wrong way in *both* the builder and the parser, leaves both
     /// hand-built tests passing.
     ///
-    /// `tests/owned_swmr_crosscheck.rs` already covers this against a real file,
+    /// `crates/crosscheck/tests/owned_swmr.rs` already covers this against a real file,
     /// and catches the same mutation. What it costs is the `hdf5-metno`
     /// dev-dependency, which needs 64-bit pointers, so that whole file compiles
     /// out on the i686 target — where address arithmetic is most likely to be
@@ -489,10 +489,10 @@ mod tests {
     /// `H5Pset_istore_k(64)`: all three K values differ from one another and
     /// from the library's defaults (4 leaf, 16 internal, 32 chunk), so any
     /// permutation of the three reads back wrong. See
-    /// `tests/fixtures/c_1_8/NOTICE.md`.
+    /// `tests/data/c/1.8/NOTICE.md`.
     #[test]
     fn parse_v1_against_a_c_written_superblock() {
-        let data: &[u8] = include_bytes!("../tests/fixtures/c_1_8/v1_superblock.h5");
+        let data: &[u8] = include_bytes!("../tests/data/c/1.8/v1_superblock.h5");
         let sb = Superblock::parse(data, 0).unwrap();
 
         assert_eq!(sb.version, 1);

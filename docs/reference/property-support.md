@@ -121,7 +121,7 @@ Passed to `File::dataset_with_options` / `Group::dataset_with_options` as a `Dat
 
 ## Compliance and known limits
 
-The paged and persistent-free-space paths are exercised by C-library crosschecks (`tests/file_space_crosscheck.rs`, `tests/bounded_append_crosscheck.rs`): the reference library recovers the strategy, `H5Fget_freespace` equals the crate's tracked total exactly, and the C library reopens a paged file read-write and re-paginates it. The crate also reads and bounded-mutates genuine C-created paged and persisted files. Compliance here means page **alignment** and structural validity, not byte-for-byte reproduction of the C allocator's intra-page packing.
+The paged and persistent-free-space paths are exercised by C-library crosschecks (`crates/crosscheck/tests/file_space.rs`, `crates/crosscheck/tests/bounded_append.rs`): the reference library recovers the strategy, `H5Fget_freespace` equals the crate's tracked total exactly, and the C library reopens a paged file read-write and re-paginates it. The crate also reads and bounded-mutates genuine C-created paged and persisted files. Compliance here means page **alignment** and structural validity, not byte-for-byte reproduction of the C allocator's intra-page packing.
 
 Current limits worth knowing:
 

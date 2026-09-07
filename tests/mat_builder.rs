@@ -3,15 +3,14 @@
 use hdf5_pure::mat::{Compression, MatBuilder, MatClass, MatError, Options, StringClass};
 use hdf5_pure::{AttrValue, File, LibVer};
 
-#[path = "common/temp_fixture.rs"]
-mod temp_fixture;
+use test_util::temp;
 
 /// A `.mat` fixture, in a directory that goes away with the returned value.
 ///
 /// Replaces a nanosecond-stamped name in the shared temporary directory, which
 /// no two runs collided on but no run ever cleaned up (issue #334).
-fn temp_path(name: &str) -> temp_fixture::TempPath {
-    temp_fixture::temp_path(&format!("{name}.mat"))
+fn temp_path(name: &str) -> temp::TempPath {
+    temp::temp_path(&format!("{name}.mat"))
 }
 
 fn read_class(file: &File, ds_path: &str) -> String {
@@ -214,7 +213,7 @@ fn invalid_name_errors_by_default() {
 
 /// The default empty marker is the one MATLAB itself writes: a two-element
 /// `uint64` dataset whose *payload* is the dimension vector, not a zero-element
-/// dataset of that shape. Every empty in `tests/fixtures/mat_real` takes this
+/// dataset of that shape. Every empty in `tests/data/matlab` takes this
 /// form, including the `[1 1]` and `[1 0]` ones that a zero-element encoding
 /// cannot express at all.
 #[test]

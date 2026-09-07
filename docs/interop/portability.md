@@ -144,7 +144,7 @@ discipline backs the optional [ZFP filter](../guide/compression.md)
 
 The 1.8 output format is the one claim those tests cannot make, because every
 library they link is 1.10 or newer and reads both formats happily.
-`tests/libver_matrix_crosscheck.rs` covers it against every release the
+`crates/crosscheck/tests/libver_matrix.rs` covers it against every release the
 interop workflow builds, 1.8.23 included: the 1.10 format cannot be opened at
 all before 1.10, and the 1.8 format reads completely everywhere. That
 measures the format boundary rather than any particular MathWorks build, which
@@ -160,7 +160,7 @@ against what h5py recorded for the same dataset, but *not* the compressed
 stream: LZF has many valid encodings of the same data, so matching liblzf byte
 for byte is not a requirement and not a goal. That h5py decodes the streams this
 crate produces is verified separately, by the read-back phase of
-`tests/fixtures/lzf/regen.py`, which needs a live h5py and so runs when the
+`tests/data/h5py/lzf/regen.py`, which needs a live h5py and so runs when the
 fixtures are regenerated rather than in CI.
 
 ### Host-independent output

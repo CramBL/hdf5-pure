@@ -165,7 +165,7 @@ assert_eq!(back, data);
 
 ## Portability
 
-Deflate, shuffle, and scale-offset are all built-in HDF5 filters, so files hdf5-pure writes with them stay readable by the reference HDF5 C library, h5py, and MATLAB, and files those tools produce with the same filters are readable by hdf5-pure. LZF is h5py's registered filter rather than a built-in: h5py reads it natively, while the plain C library and MATLAB need h5py's filter plugin. `src/lzf_crosscheck.rs` decodes h5py's own streams and checks the filter pipeline hdf5-pure writes against the one h5py records; the compressed stream itself is not byte-compared, since LZF has many valid encodings of the same data, so h5py's ability to read hdf5-pure's output is verified by the read-back phase of `tests/fixtures/lzf/regen.py`. See [Portability](../interop/portability.md) for the broader interoperability picture and what each direction covers.
+Deflate, shuffle, and scale-offset are all built-in HDF5 filters, so files hdf5-pure writes with them stay readable by the reference HDF5 C library, h5py, and MATLAB, and files those tools produce with the same filters are readable by hdf5-pure. LZF is h5py's registered filter rather than a built-in: h5py reads it natively, while the plain C library and MATLAB need h5py's filter plugin. `src/lzf_crosscheck.rs` decodes h5py's own streams and checks the filter pipeline hdf5-pure writes against the one h5py records; the compressed stream itself is not byte-compared, since LZF has many valid encodings of the same data, so h5py's ability to read hdf5-pure's output is verified by the read-back phase of `tests/data/h5py/lzf/regen.py`. See [Portability](../interop/portability.md) for the broader interoperability picture and what each direction covers.
 
 ## ZFP
 

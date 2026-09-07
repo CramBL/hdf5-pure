@@ -71,7 +71,7 @@ fn element_size_of_vlen_string_is_the_descriptor_width() {
 #[test]
 fn element_size_exposes_a_hostile_declared_size() {
     let bytes =
-        std::fs::read("tests/fixtures/fuzz/oom_chunked_string_huge_elem.h5").expect("read fixture");
+        std::fs::read("tests/data/fuzz/oom_chunked_string_huge_elem.h5").expect("read fixture");
     let file = File::from_bytes(bytes).unwrap();
     let root = file.root();
     let name = root.datasets().unwrap().into_iter().next().unwrap();

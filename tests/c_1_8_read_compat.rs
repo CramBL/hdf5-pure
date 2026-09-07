@@ -1,9 +1,9 @@
 //! Reading files written by an actual HDF5 1.8 library, from committed bytes.
 //!
 //! This is not the crate's first coverage of these formats, and does not claim
-//! to be. `tests/owned_swmr_crosscheck.rs` already asks libhdf5 for a version 1
+//! to be. `crates/crosscheck/tests/owned_swmr.rs` already asks libhdf5 for a version 1
 //! superblock and checks the parsed K values and status flags against it, and
-//! `tests/edit_crosscheck.rs` does the same for a version 2 one. What both cost
+//! `crates/crosscheck/tests/edit.rs` does the same for a version 2 one. What both cost
 //! is the `hdf5-metno` dev-dependency, which requires 64-bit little-endian — so every
 //! file using it opens with `#![cfg(not(target_pointer_width = "32"))]` and
 //! compiles out on the i686 target, which is where address arithmetic is most
@@ -22,12 +22,12 @@
 //!
 //! Both files hold the same objects, written by the same program, so a failure
 //! in one and not the other names the format rather than the reader. See
-//! `tests/fixtures/c_1_8/NOTICE.md`.
+//! `tests/data/c/1.8/NOTICE.md`.
 
 use hdf5_pure::{AttrValue, File};
 
-const V1: &str = "tests/fixtures/c_1_8/v1_superblock.h5";
-const V2: &str = "tests/fixtures/c_1_8/v2_superblock.h5";
+const V1: &str = "tests/data/c/1.8/v1_superblock.h5";
+const V2: &str = "tests/data/c/1.8/v2_superblock.h5";
 
 /// The values the fixtures hold, read back through the public API.
 fn assert_contents(path: &str) {

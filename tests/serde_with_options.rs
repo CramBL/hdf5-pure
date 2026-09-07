@@ -8,15 +8,14 @@ use hdf5_pure::mat::{
 use hdf5_pure::{AttrValue, File, LibVer};
 use serde::{Deserialize, Serialize};
 
-#[path = "common/temp_fixture.rs"]
-mod temp_fixture;
+use test_util::temp;
 
 /// A `.mat` fixture, in a directory that goes away with the returned value.
 ///
 /// Replaces a nanosecond-stamped name in the shared temporary directory, which
 /// no two runs collided on but no run ever cleaned up (issue #334).
-fn temp_path(name: &str) -> temp_fixture::TempPath {
-    temp_fixture::temp_path(&format!("{name}.mat"))
+fn temp_path(name: &str) -> temp::TempPath {
+    temp::temp_path(&format!("{name}.mat"))
 }
 
 fn read_class(file: &File, ds_path: &str) -> String {

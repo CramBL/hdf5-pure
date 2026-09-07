@@ -7,15 +7,14 @@
 //! every test asserts the 512-byte userblock survives the edit byte-for-byte.
 //!
 //! (The resizing-overwrite parity for the contiguous and compact layouts is
-//! exercised in `edit_userblock_crosscheck.rs`: only the reference C library can
+//! exercised in `crates/crosscheck/tests/edit_userblock.rs`: only the reference C library can
 //! create the never-written-contiguous and compact-layout fixtures those paths
 //! need.)
 
 use hdf5_pure::{AttrValue, File, FileBuilder};
 
-#[path = "common/temp_fixture.rs"]
-mod temp_fixture;
-use temp_fixture::temp_path;
+use temp::temp_path;
+use test_util::temp;
 
 const UB: usize = 512;
 

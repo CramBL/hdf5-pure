@@ -480,7 +480,7 @@ builder.create_dataset("fast")
 pipeline this crate writes against the one h5py records. Our compressed stream
 is not byte-compared — LZF has many valid encodings of the same data — so that
 h5py can read what we write is verified by the read-back phase of
-`tests/fixtures/lzf/regen.py`, which needs a live h5py.
+`tests/data/h5py/lzf/regen.py`, which needs a live h5py.
 
 ### ZFP (optional, `zfp` feature)
 
@@ -503,7 +503,7 @@ builder.create_dataset("temperature")
 ```
 
 Interop is enforced by `src/zfp_crosscheck.rs`, which compares against
-fixtures produced by `h5py` + `hdf5plugin`. See `tests/fixtures/zfp/regen.py`
+fixtures produced by `h5py` + `hdf5plugin`. See `tests/data/h5py/zfp/regen.py`
 for the generator — run it after any codec change.
 
 ## Userblock (MATLAB v7.3)

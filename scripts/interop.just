@@ -2,8 +2,12 @@ set working-directory := ".."
 
 uv := "uv run --project scripts/python --locked"
 
+# The crosschecks live in the `hdf5-pure-crosscheck` package under crates/crosscheck/,
+# the only one that links libhdf5.
+crosscheck := "-p hdf5-pure-crosscheck"
+
 # The whole matrix: every release, built under tmp/hdf5 on first use.
-default: (test-hdf5 "1.8.23") (test-hdf5 "1.10.11" "serde,__hdf5-1.10") (test-hdf5 "1.12.3" "serde,__hdf5-1.12") (test-hdf5 "1.14.6" "serde,__hdf5-1.14") (test-hdf5 "2.2.0" "serde,__hdf5-2") test-matio
+default: (test-hdf5 "1.8.23") (test-hdf5 "1.10.11" "serde,ndarray,__hdf5-1.10") (test-hdf5 "1.12.3" "serde,ndarray,__hdf5-1.12") (test-hdf5 "1.14.6" "serde,ndarray,__hdf5-1.14") (test-hdf5 "2.2.0" "serde,ndarray,__hdf5-2") test-matio
 
 # Build libhdf5 VERSION and its tools under tmp/hdf5/VERSION.
 hdf5-build VERSION:
@@ -14,22 +18,35 @@ hdf5-build VERSION:
 hdf5-env VERSION:
     @{{ uv }} hdf5-build {{ VERSION }} --env
 
-# FEATURES names the release series from 1.10 up, as in `serde,__hdf5-1.10`.
-# The test suite linking libhdf5 VERSION, built under tmp/hdf5 on first use.
-test-hdf5 VERSION FEATURES="serde" *ARGS: (hdf5-build VERSION)
+# FEATURES names the release series from 1.10 up, as in `serde,ndarray,__hdf5-1.10`.
+# The crosschecks linking libhdf5 VERSION, built under tmp/hdf5 on first use.
+test-hdf5 VERSION FEATURES="serde,ndarray" *ARGS: (hdf5-build VERSION)
     #!/usr/bin/env bash
     set -euo pipefail
     eval "$(just interop::hdf5-env {{ VERSION }})"
-    cargo nextest run --locked --features {{ FEATURES }} {{ ARGS }}
+    cargo nextest run --locked {{ crosscheck }} --features {{ FEATURES }} {{ ARGS }}
 
-# The test suite linking the HDF5 installed under HDF5_DIR.
+# Clippy over the crosschecks, linking libhdf5 VERSION.
+lint-hdf5 VERSION FEATURES="serde,ndarray":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    eval "$(just interop::hdf5-env {{ VERSION }})"
+    cargo clippy --locked {{ crosscheck }} --all-targets --features {{ FEATURES }} -- -D warnings
+
+# The crosschecks linking the libhdf5 `hdf5-metno` bundles, built from source
+# on first use. Needs no HDF5 on the host.
+test-bundled *ARGS:
+    cargo nextest run --locked {{ crosscheck }} --features __hdf5-bundled,serde,ndarray {{ ARGS }}
+
+# The crosschecks linking the HDF5 installed under HDF5_DIR. Pass the feature
+# naming its release series, as in `--features __hdf5-1.14`.
 test-external-hdf5 *ARGS:
-    cargo nextest run --locked {{ ARGS }}
+    cargo nextest run --locked {{ crosscheck }} --features serde,ndarray {{ ARGS }}
 
 test-matio *ARGS:
-    cargo nextest run --locked --features __hdf5-bundled --features "serde matio-crosscheck" --test serde_matio_crosscheck {{ ARGS }}
+    cargo nextest run --locked --features "serde matio-crosscheck" --test serde_matio_crosscheck {{ ARGS }}
 
-# The libhdf5 the crosscheck tests link when HDF5_DIR is unset.
+# The libhdf5 the crosschecks link when HDF5_DIR is unset.
 hdf5-bundled-version:
     #!/usr/bin/env bash
     set -euo pipefail
