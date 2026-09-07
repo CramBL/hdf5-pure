@@ -24,166 +24,41 @@
 //! are `H5Literate2` over `H5_INDEX_CRT_ORDER`, `H5Lget_info2`'s `corder`, and
 //! `H5Gget_info`'s `max_corder`.
 
-use std::ffi::{CString, c_char, c_int, c_uint, c_void};
+use std::ffi::{CStr, CString, c_char, c_void};
+use std::mem::MaybeUninit;
 use std::path::Path;
 use std::sync::{Mutex, MutexGuard};
 
+use hdf5::file::LibraryVersion;
+use hdf5::plist::file_create::AttrCreationOrder;
+use hdf5::plist::file_create::FileCreateBuilder;
+use hdf5::plist::group_create::GroupCreate;
 use hdf5_pure::{AttrValue, Error, File};
+use hdf5_sys::h5::H5_index_t::{self, H5_INDEX_CRT_ORDER, H5_INDEX_NAME};
+use hdf5_sys::h5::H5_iter_order_t::H5_ITER_INC;
+use hdf5_sys::h5::{herr_t, hsize_t};
+use hdf5_sys::h5a::{
+    H5A_info_t, H5Aclose, H5Aget_info_by_name, H5Aget_name, H5Aiterate2, H5Aopen_by_idx,
+};
+use hdf5_sys::h5g::{H5G_info_t, H5Gget_info};
+use hdf5_sys::h5i::hid_t;
+use hdf5_sys::h5l::{H5L_info_t, H5Literate};
+use hdf5_sys::h5p::{H5P_DEFAULT, H5Pset_attr_creation_order, H5Pset_link_creation_order};
 use tempfile::tempdir;
 
-// The creation-order entry points, resolved at link time from the statically
-// linked libhdf5. `hdf5-metno` exposes no way to set a creation-order property
-// or to iterate by creation order, and both are what these fixtures are about.
-unsafe extern "C" {
-    fn H5Pcreate(cls_id: i64) -> i64;
-    fn H5Pclose(plist_id: i64) -> c_int;
-    fn H5Pset_attr_creation_order(plist_id: i64, crt_order_flags: c_uint) -> c_int;
-    fn H5Pset_link_creation_order(plist_id: i64, crt_order_flags: c_uint) -> c_int;
-    fn H5Fcreate(name: *const c_char, flags: c_uint, fcpl: i64, fapl: i64) -> i64;
-    fn H5Fopen(name: *const c_char, flags: c_uint, fapl: i64) -> i64;
-    fn H5Fclose(id: i64) -> c_int;
-    fn H5Gcreate2(loc: i64, name: *const c_char, lcpl: i64, gcpl: i64, gapl: i64) -> i64;
-    fn H5Gopen2(loc: i64, name: *const c_char, gapl: i64) -> i64;
-    fn H5Gclose(id: i64) -> c_int;
-    fn H5Dcreate2(
-        loc: i64,
-        name: *const c_char,
-        type_id: i64,
-        space: i64,
-        lcpl: i64,
-        dcpl: i64,
-        dapl: i64,
-    ) -> i64;
-    fn H5Dopen2(loc: i64, name: *const c_char, dapl: i64) -> i64;
-    fn H5Dclose(id: i64) -> c_int;
-    fn H5Screate(class: c_int) -> i64;
-    fn H5Screate_simple(rank: c_int, dims: *const u64, maxdims: *const u64) -> i64;
-    fn H5Sclose(id: i64) -> c_int;
-    fn H5Acreate2(
-        loc: i64,
-        name: *const c_char,
-        type_id: i64,
-        space: i64,
-        acpl: i64,
-        aapl: i64,
-    ) -> i64;
-    fn H5Awrite(attr: i64, mem_type: i64, buf: *const c_void) -> c_int;
-    fn H5Aread(attr: i64, mem_type: i64, buf: *mut c_void) -> c_int;
-    fn H5Aopen(loc: i64, name: *const c_char, aapl: i64) -> i64;
-    fn H5Aopen_by_idx(
-        loc: i64,
-        obj_name: *const c_char,
-        idx_type: c_int,
-        order: c_int,
-        n: u64,
-        aapl: i64,
-        lapl: i64,
-    ) -> i64;
-    fn H5Aget_name(attr: i64, buf_size: usize, buf: *mut c_char) -> isize;
-    fn H5Aclose(id: i64) -> c_int;
-    fn H5Aiterate2(
-        loc: i64,
-        idx_type: c_int,
-        order: c_int,
-        idx: *mut u64,
-        op: extern "C" fn(i64, *const c_char, *const AttrInfo, *mut c_void) -> c_int,
-        op_data: *mut c_void,
-    ) -> c_int;
-    fn H5Aget_info_by_name(
-        loc: i64,
-        obj_name: *const c_char,
-        attr_name: *const c_char,
-        info: *mut AttrInfo,
-        lapl: i64,
-    ) -> c_int;
-    fn H5Literate2(
-        group: i64,
-        idx_type: c_int,
-        order: c_int,
-        idx: *mut u64,
-        op: extern "C" fn(i64, *const c_char, *const c_void, *mut c_void) -> c_int,
-        op_data: *mut c_void,
-    ) -> c_int;
-    fn H5Gget_info(group: i64, info: *mut GroupInfo) -> c_int;
-    fn H5Lget_info2(loc: i64, name: *const c_char, info: *mut LinkInfo, lapl: i64) -> c_int;
-}
-
-unsafe extern "C" {
-    static H5P_CLS_FILE_CREATE_ID_g: i64;
-    static H5P_CLS_GROUP_CREATE_ID_g: i64;
-    static H5P_CLS_DATASET_CREATE_ID_g: i64;
-    static H5T_NATIVE_INT_g: i64;
-}
-
-/// `H5A_info_t`: `corder_valid` (`hbool_t`, one byte, padded), `corder`, `cset`,
-/// `data_size`. Only the first two fields are read here, and the layout is
-/// checked by the assertions that read `corder` back — a wrong offset would
-/// report indexes that do not match the order the attributes were created in.
-#[repr(C)]
-#[derive(Clone, Copy, Default)]
-struct AttrInfo {
-    corder_valid: u8,
-    corder: u32,
-    cset: c_int,
-    data_size: u64,
-}
-
-/// `H5G_info_t`: storage type, link count, the highest link creation index
-/// ever assigned in the group, and whether a file is mounted here. `max_corder`
-/// is the counter a deletion must leave alone.
-#[repr(C)]
-#[derive(Clone, Copy, Default)]
-struct GroupInfo {
-    storage_type: c_int,
-    nlinks: u64,
-    max_corder: i64,
-    mounted: u8,
-}
-
-/// `H5L_info2_t`: link type, whether the link carries a creation index, that
-/// index, the name's character set, and a union of an object token and a value
-/// size. The union is modelled as two `u64`s rather than the token's sixteen
-/// bytes so it carries the `size_t` member's eight-byte alignment, which is what
-/// puts `corder` and `cset` at the offsets the C library writes them to — the
-/// assertions that read an index back are what check that.
-#[repr(C)]
-#[derive(Clone, Copy, Default)]
-struct LinkInfo {
-    link_type: c_int,
-    corder_valid: u8,
-    corder: i64,
-    cset: c_int,
-    token_or_size: [u64; 2],
-}
-
-const H5P_DEFAULT: i64 = 0;
-const H5F_ACC_TRUNC: c_uint = 0x0002;
-const H5F_ACC_RDONLY: c_uint = 0x0000;
-const H5P_CRT_ORDER_TRACKED: c_uint = 0x0001;
-const H5P_CRT_ORDER_INDEXED: c_uint = 0x0002;
-const H5S_SCALAR: c_int = 0;
-const H5_INDEX_NAME: c_int = 0;
-const H5_INDEX_CRT_ORDER: c_int = 1;
-const H5_ITER_INC: c_int = 0;
-
-fn cstr(s: &str) -> CString {
-    CString::new(s).expect("a test name holds no NUL")
-}
-
-// `hdf5-metno` serializes its own C calls through an internal lock, and the raw
-// FFI above bypasses it. Serialize every C-library call in this file through one
-// mutex so a raw call never races a concurrent libhdf5 call in another test (the
-// C library is not built thread-safe here). Poisoning is ignored: a panic in one
+// The raw calls below, each marked with the upstream issue that would remove
+// it, bypass the lock the wrapper serializes its own calls through. Every
+// C-library use in this file takes this guard, so a raw call never races a
+// wrapper call on another test thread. Poisoning is ignored: a panic in one
 // test must not cascade into the others.
 static C_LIB: Mutex<()> = Mutex::new(());
 
-/// Hold the C-library lock, and force the library's global property-list class
-/// ids to be initialized: reading them before `H5open` yields zero, and every
-/// `H5Pcreate` then fails.
 fn c_lib_guard() -> MutexGuard<'static, ()> {
-    let guard = C_LIB.lock().unwrap_or_else(|e| e.into_inner());
-    hdf5::library_version();
-    guard
+    C_LIB.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+fn cstr(s: &str) -> CString {
+    CString::new(s).expect("a test name holds no NUL")
 }
 
 /// Whether the object creation property list should also index creation order,
@@ -195,12 +70,28 @@ enum Indexed {
 }
 
 impl Indexed {
-    fn flags(self) -> c_uint {
+    fn flags(self) -> AttrCreationOrder {
         match self {
-            Self::No => H5P_CRT_ORDER_TRACKED,
-            Self::Yes => H5P_CRT_ORDER_TRACKED | H5P_CRT_ORDER_INDEXED,
+            Self::No => AttrCreationOrder::TRACKED,
+            Self::Yes => AttrCreationOrder::TRACKED | AttrCreationOrder::INDEXED,
         }
     }
+}
+
+/// A group creation property list tracking attribute creation order, and link
+/// creation order too when `links`.
+fn tracking_gcpl(indexed: Indexed, links: bool) -> GroupCreate {
+    let plist = GroupCreate::try_new().expect("a group creation property list");
+    let flags = indexed.flags().bits();
+    // TODO: https://github.com/metno/hdf5-rust/issues/229 and https://github.com/metno/hdf5-rust/issues/230
+    // Safety: a live property list id and the flags the C library defines.
+    unsafe {
+        assert_eq!(H5Pset_attr_creation_order(plist.id(), flags), 0);
+        if links {
+            assert_eq!(H5Pset_link_creation_order(plist.id(), flags), 0);
+        }
+    }
+    plist
 }
 
 /// Write a file whose group `/g` and dataset `/d` both track attribute creation
@@ -211,192 +102,186 @@ impl Indexed {
 /// tracks it too, which is what h5py's `File(..., track_order=True)` does.
 fn write_tracked(path: &Path, names: &[String], indexed: Indexed) {
     let _c = c_lib_guard();
-    unsafe {
-        let fcpl = H5Pcreate(H5P_CLS_FILE_CREATE_ID_g);
-        assert!(fcpl > 0, "file creation property list");
-        assert_eq!(H5Pset_attr_creation_order(fcpl, indexed.flags()), 0);
-        let name = cstr(path.to_str().expect("a temp path is UTF-8"));
-        let file = H5Fcreate(name.as_ptr(), H5F_ACC_TRUNC, fcpl, H5P_DEFAULT);
-        assert!(file > 0, "create {}", path.display());
-
-        let gcpl = H5Pcreate(H5P_CLS_GROUP_CREATE_ID_g);
-        assert_eq!(H5Pset_attr_creation_order(gcpl, indexed.flags()), 0);
-        let gname = cstr("g");
-        let group = H5Gcreate2(file, gname.as_ptr(), H5P_DEFAULT, gcpl, H5P_DEFAULT);
-        assert!(group > 0, "create group");
-
-        let dcpl = H5Pcreate(H5P_CLS_DATASET_CREATE_ID_g);
-        assert_eq!(H5Pset_attr_creation_order(dcpl, indexed.flags()), 0);
-        let dims = [4u64];
-        let dspace = H5Screate_simple(1, dims.as_ptr(), std::ptr::null());
-        let dname = cstr("d");
-        let dataset = H5Dcreate2(
-            file,
-            dname.as_ptr(),
-            H5T_NATIVE_INT_g,
-            dspace,
-            H5P_DEFAULT,
-            dcpl,
-            H5P_DEFAULT,
-        );
-        assert!(dataset > 0, "create dataset");
-
-        let scalar = H5Screate(H5S_SCALAR);
-        for owner in [group, dataset] {
-            for (i, name) in names.iter().enumerate() {
-                let an = cstr(name);
-                let attr = H5Acreate2(
-                    owner,
-                    an.as_ptr(),
-                    H5T_NATIVE_INT_g,
-                    scalar,
-                    H5P_DEFAULT,
-                    H5P_DEFAULT,
-                );
-                assert!(attr > 0, "create attribute {name}");
-                let value = i as i32;
-                assert_eq!(
-                    H5Awrite(attr, H5T_NATIVE_INT_g, (&raw const value).cast()),
-                    0
-                );
-                H5Aclose(attr);
-            }
+    let file = hdf5::File::with_options()
+        .with_fapl(|p| p.libver_bounds(LibraryVersion::V18, LibraryVersion::latest()))
+        .with_fcpl(|p| p.attr_creation_order(indexed.flags()))
+        .create(path)
+        .unwrap_or_else(|e| panic!("create {}: {e}", path.display()));
+    let group = file
+        .create_group_builder()
+        .set_gcpl(&tracking_gcpl(indexed, false))
+        .create("g")
+        .expect("create group");
+    let dataset = file
+        .new_dataset::<i32>()
+        .with_dcpl(|p| p.attr_creation_order(indexed.flags()))
+        .shape([4])
+        .create("d")
+        .expect("create dataset");
+    let owners: [&hdf5::Location; 2] = [&group, &dataset];
+    for owner in owners {
+        for (i, name) in names.iter().enumerate() {
+            owner
+                .new_attr::<i32>()
+                .shape(())
+                .create(name.as_str())
+                .unwrap_or_else(|e| panic!("create attribute {name}: {e}"))
+                .write_scalar(&(i as i32))
+                .unwrap_or_else(|e| panic!("write attribute {name}: {e}"));
         }
-        H5Sclose(scalar);
-        H5Sclose(dspace);
-        H5Dclose(dataset);
-        H5Gclose(group);
-        H5Pclose(dcpl);
-        H5Pclose(gcpl);
-        H5Fclose(file);
-        H5Pclose(fcpl);
     }
+    file.close().unwrap();
 }
 
 /// A file whose group `/g` tracks *link* creation order, as netCDF-4 writes,
 /// holding one dataset per name in `links`, created in that order.
 fn write_link_tracked(path: &Path, links: &[&str]) {
     let _c = c_lib_guard();
-    unsafe {
-        let fcpl = H5Pcreate(H5P_CLS_FILE_CREATE_ID_g);
-        let flags = H5P_CRT_ORDER_TRACKED | H5P_CRT_ORDER_INDEXED;
-        assert_eq!(H5Pset_link_creation_order(fcpl, flags), 0);
-        assert_eq!(H5Pset_attr_creation_order(fcpl, flags), 0);
-        let name = cstr(path.to_str().expect("a temp path is UTF-8"));
-        let file = H5Fcreate(name.as_ptr(), H5F_ACC_TRUNC, fcpl, H5P_DEFAULT);
-        assert!(file > 0, "create {}", path.display());
-
-        let gcpl = H5Pcreate(H5P_CLS_GROUP_CREATE_ID_g);
-        assert_eq!(H5Pset_link_creation_order(gcpl, flags), 0);
-        assert_eq!(H5Pset_attr_creation_order(gcpl, flags), 0);
-        let gname = cstr("g");
-        let group = H5Gcreate2(file, gname.as_ptr(), H5P_DEFAULT, gcpl, H5P_DEFAULT);
-        assert!(group > 0, "create group");
-
-        let dims = [4u64];
-        let dspace = H5Screate_simple(1, dims.as_ptr(), std::ptr::null());
-        for link in links {
-            let dname = cstr(link);
-            let dataset = H5Dcreate2(
-                group,
-                dname.as_ptr(),
-                H5T_NATIVE_INT_g,
-                dspace,
-                H5P_DEFAULT,
-                H5P_DEFAULT,
-                H5P_DEFAULT,
-            );
-            assert!(dataset > 0, "create dataset {link}");
-            H5Dclose(dataset);
-        }
-        H5Sclose(dspace);
-        H5Gclose(group);
-        H5Pclose(gcpl);
-        H5Fclose(file);
-        H5Pclose(fcpl);
+    let flags = Indexed::Yes.flags();
+    let fcpl = FileCreateBuilder::new()
+        .attr_creation_order(flags)
+        .finish()
+        .expect("a file creation property list");
+    // TODO: https://github.com/metno/hdf5-rust/issues/230
+    // Safety: a live property list id and the flags the C library defines.
+    assert_eq!(
+        unsafe { H5Pset_link_creation_order(fcpl.id(), flags.bits()) },
+        0
+    );
+    let mut builder = hdf5::File::with_options();
+    builder.with_fapl(|p| p.libver_bounds(LibraryVersion::V18, LibraryVersion::latest()));
+    builder
+        .set_fcpl(&fcpl)
+        .expect("set the file creation property list");
+    let file = builder
+        .create(path)
+        .unwrap_or_else(|e| panic!("create {}: {e}", path.display()));
+    let group = file
+        .create_group_builder()
+        .set_gcpl(&tracking_gcpl(Indexed::Yes, true))
+        .create("g")
+        .expect("create group");
+    for link in links {
+        group
+            .new_dataset::<i32>()
+            .shape([4])
+            .create(*link)
+            .unwrap_or_else(|e| panic!("create dataset {link}: {e}"));
     }
+    file.close().unwrap();
 }
 
 /// Collect attribute names into the `Vec<String>` `op_data` points at.
-extern "C" fn collect(
-    _loc: i64,
+unsafe extern "C" fn collect(
+    _loc: hid_t,
     name: *const c_char,
-    _info: *const AttrInfo,
+    _info: *const H5A_info_t,
     op_data: *mut c_void,
-) -> c_int {
+) -> herr_t {
     // Safety: every caller passes a `&mut Vec<String>` as `op_data`, and the C
     // library hands back a NUL-terminated attribute name.
     unsafe {
         let names = &mut *op_data.cast::<Vec<String>>();
-        names.push(
-            std::ffi::CStr::from_ptr(name)
-                .to_string_lossy()
-                .into_owned(),
-        );
+        names.push(CStr::from_ptr(name).to_string_lossy().into_owned());
     }
     0
 }
 
-/// Collect link names into the `Vec<String>` `op_data` points at.
-extern "C" fn collect_link(
-    _group: i64,
+/// A link as the C library lists it: its name, and its creation index when the
+/// group records one.
+struct Link {
+    name: String,
+    creation_index: Option<i64>,
+}
+
+/// Collect links into the `Vec<Link>` `op_data` points at.
+unsafe extern "C" fn collect_link(
+    _group: hid_t,
     name: *const c_char,
-    _info: *const c_void,
+    info: *const H5L_info_t,
     op_data: *mut c_void,
-) -> c_int {
-    // Safety: every caller passes a `&mut Vec<String>` as `op_data`, and the C
-    // library hands back a NUL-terminated link name.
+) -> herr_t {
+    // Safety: every caller passes a `&mut Vec<Link>` as `op_data`, and the C
+    // library hands back a NUL-terminated link name and a filled-in info.
     unsafe {
-        let names = &mut *op_data.cast::<Vec<String>>();
-        names.push(
-            std::ffi::CStr::from_ptr(name)
-                .to_string_lossy()
-                .into_owned(),
-        );
+        let links = &mut *op_data.cast::<Vec<Link>>();
+        let info = &*info;
+        links.push(Link {
+            name: CStr::from_ptr(name).to_string_lossy().into_owned(),
+            creation_index: (info.corder_valid != 0).then_some(info.corder),
+        });
     }
     0
 }
 
-/// An open handle to `/g` or `/d`, whichever `path` names, closed on drop.
+/// The links of `group` in `path`, in the order `idx_type` orders them.
+fn links_of(path: &Path, group: &str, idx_type: H5_index_t) -> Vec<Link> {
+    let _c = c_lib_guard();
+    let file = hdf5::File::open(path)
+        .unwrap_or_else(|e| panic!("the C library opens {}: {e}", path.display()));
+    let g = file
+        .group(group)
+        .unwrap_or_else(|e| panic!("the C library opens /{group}: {e}"));
+    let mut links: Vec<Link> = Vec::new();
+    let mut idx: hsize_t = 0;
+    // TODO: https://github.com/metno/hdf5-rust/issues/228
+    // Safety: `collect_link` interprets `op_data` as the `Vec<Link>` passed here.
+    let rc = unsafe {
+        H5Literate(
+            g.id(),
+            idx_type,
+            H5_ITER_INC,
+            &raw mut idx,
+            Some(collect_link),
+            (&raw mut links).cast(),
+        )
+    };
+    assert_eq!(rc, 0, "the C library iterates the links of /{group}");
+    links
+}
+
+/// An open handle to `/g` or `/d`, whichever `path` names.
 struct Owner {
-    file: i64,
-    id: i64,
-    is_group: bool,
+    _file: hdf5::File,
+    location: hdf5::Location,
 }
 
 impl Owner {
     fn open(path: &Path, object: &str) -> Self {
         let _c = c_lib_guard();
-        let name = cstr(path.to_str().expect("a temp path is UTF-8"));
-        // Safety: the ids come from the C library and are closed in `drop`.
-        unsafe {
-            let file = H5Fopen(name.as_ptr(), H5F_ACC_RDONLY, H5P_DEFAULT);
-            assert!(file > 0, "the C library opens {}", path.display());
-            let oname = cstr(object);
-            let is_group = object == "g";
-            let id = if is_group {
-                H5Gopen2(file, oname.as_ptr(), H5P_DEFAULT)
-            } else {
-                H5Dopen2(file, oname.as_ptr(), H5P_DEFAULT)
-            };
-            assert!(id > 0, "the C library opens /{object}");
-            Self { file, id, is_group }
+        let file = hdf5::File::open(path)
+            .unwrap_or_else(|e| panic!("the C library opens {}: {e}", path.display()));
+        let location = if object == "g" {
+            (*file
+                .group(object)
+                .unwrap_or_else(|e| panic!("the C library opens /{object}: {e}")))
+            .clone()
+        } else {
+            (**file
+                .dataset(object)
+                .unwrap_or_else(|e| panic!("the C library opens /{object}: {e}")))
+            .clone()
+        };
+        Self {
+            _file: file,
+            location,
         }
     }
 
     /// Attribute names in the order `idx_type` orders them.
-    fn names(&self, idx_type: c_int) -> Vec<String> {
+    fn names(&self, idx_type: H5_index_t) -> Vec<String> {
         let _c = c_lib_guard();
         let mut names: Vec<String> = Vec::new();
-        let mut idx = 0u64;
+        let mut idx: hsize_t = 0;
+        // TODO: https://github.com/metno/hdf5-rust/issues/231
         // Safety: `collect` interprets `op_data` as the `Vec<String>` passed here.
         let rc = unsafe {
             H5Aiterate2(
-                self.id,
+                self.location.id(),
                 idx_type,
                 H5_ITER_INC,
                 &raw mut idx,
-                collect,
+                Some(collect),
                 (&raw mut names).cast(),
             )
         };
@@ -417,11 +302,12 @@ impl Owner {
     fn name_by_creation_index(&self, n: u64) -> String {
         let _c = c_lib_guard();
         let here = cstr(".");
-        // Safety: the ids come from the C library and are closed below; the
-        // buffer is sized by the length the library reports for the name.
+        // TODO: https://github.com/metno/hdf5-rust/issues/231
+        // Safety: the attribute id is closed below. The buffer is sized by the
+        // length the library reports for the name.
         unsafe {
             let attr = H5Aopen_by_idx(
-                self.id,
+                self.location.id(),
                 here.as_ptr(),
                 H5_INDEX_CRT_ORDER,
                 H5_ITER_INC,
@@ -447,31 +333,11 @@ impl Owner {
     /// The value of the integer attribute `name`.
     fn value(&self, name: &str) -> i32 {
         let _c = c_lib_guard();
-        let an = cstr(name);
-        // Safety: the attribute is a scalar native int, matching the read type.
-        unsafe {
-            let attr = H5Aopen(self.id, an.as_ptr(), H5P_DEFAULT);
-            assert!(attr > 0, "the C library opens attribute {name}");
-            let mut value = 0i32;
-            assert_eq!(H5Aread(attr, H5T_NATIVE_INT_g, (&raw mut value).cast()), 0);
-            H5Aclose(attr);
-            value
-        }
-    }
-}
-
-impl Drop for Owner {
-    fn drop(&mut self) {
-        let _c = c_lib_guard();
-        // Safety: both ids were produced by the matching open calls above.
-        unsafe {
-            if self.is_group {
-                H5Gclose(self.id);
-            } else {
-                H5Dclose(self.id);
-            }
-            H5Fclose(self.file);
-        }
+        self.location
+            .attr(name)
+            .unwrap_or_else(|e| panic!("the C library opens attribute {name}: {e}"))
+            .read_scalar::<i32>()
+            .unwrap_or_else(|e| panic!("the C library reads attribute {name}: {e}"))
     }
 }
 
@@ -483,40 +349,28 @@ fn links_in_creation_order(path: &Path) -> (Vec<String>, i64) {
 /// The names of `group`'s links in link creation order, and the highest creation
 /// index the group has ever assigned — the counter a deletion must leave alone.
 fn links_in_creation_order_of(path: &Path, group: &str) -> (Vec<String>, i64) {
+    let names = links_of(path, group, H5_INDEX_CRT_ORDER)
+        .into_iter()
+        .map(|link| link.name)
+        .collect();
     let _c = c_lib_guard();
-    let name = cstr(path.to_str().expect("a temp path is UTF-8"));
-    let gname = cstr(group);
-    // Safety: both ids come from the C library and are closed below; `info` and
-    // `names` are written by the calls that are handed them.
-    unsafe {
-        let file = H5Fopen(name.as_ptr(), H5F_ACC_RDONLY, H5P_DEFAULT);
-        assert!(file > 0, "the C library opens {}", path.display());
-        let gid = H5Gopen2(file, gname.as_ptr(), H5P_DEFAULT);
-        assert!(gid > 0, "the C library opens /{group}");
-
-        let mut names: Vec<String> = Vec::new();
-        let mut idx = 0u64;
-        let rc = H5Literate2(
-            gid,
-            H5_INDEX_CRT_ORDER,
-            H5_ITER_INC,
-            &raw mut idx,
-            collect_link,
-            (&raw mut names).cast(),
-        );
-        assert_eq!(rc, 0, "the C library iterates links by creation order");
-
-        let mut info = GroupInfo::default();
+    let file = hdf5::File::open(path)
+        .unwrap_or_else(|e| panic!("the C library opens {}: {e}", path.display()));
+    let g = file
+        .group(group)
+        .unwrap_or_else(|e| panic!("the C library opens /{group}: {e}"));
+    let mut info = MaybeUninit::<H5G_info_t>::uninit();
+    // TODO: https://github.com/metno/hdf5-rust/issues/233
+    // Safety: a live group id, and `info` is written by the call before it is read.
+    let info = unsafe {
         assert_eq!(
-            H5Gget_info(gid, &raw mut info),
+            H5Gget_info(g.id(), info.as_mut_ptr()),
             0,
             "the C library reads group info"
         );
-
-        H5Gclose(gid);
-        H5Fclose(file);
-        (names, info.max_corder)
-    }
+        info.assume_init()
+    };
+    (names, info.max_corder)
 }
 
 /// [`link_creation_index_of`] for `/g`, the group every fixture here tracks.
@@ -528,57 +382,44 @@ fn link_creation_index(path: &Path, link: &str) -> i64 {
 /// must be one the group actually records: a link written without one reads back
 /// with `corder_valid` clear, and the assertion below is what catches that.
 fn link_creation_index_of(path: &Path, group: &str, link: &str) -> i64 {
-    let _c = c_lib_guard();
-    let name = cstr(path.to_str().expect("a temp path is UTF-8"));
-    let gname = cstr(group);
-    let lname = cstr(link);
-    // Safety: both ids come from the C library and are closed below; `info` is
-    // written by the call that is handed it.
-    unsafe {
-        let file = H5Fopen(name.as_ptr(), H5F_ACC_RDONLY, H5P_DEFAULT);
-        assert!(file > 0, "the C library opens {}", path.display());
-        let gid = H5Gopen2(file, gname.as_ptr(), H5P_DEFAULT);
-        assert!(gid > 0, "the C library opens /{group}");
-        let mut info = LinkInfo::default();
-        let rc = H5Lget_info2(gid, lname.as_ptr(), &raw mut info, H5P_DEFAULT);
-        assert_eq!(rc, 0, "the C library reads info for /{group}/{link}");
-        H5Gclose(gid);
-        H5Fclose(file);
-        assert!(
-            info.corder_valid != 0,
+    let found = links_of(path, group, H5_INDEX_NAME)
+        .into_iter()
+        .find(|l| l.name == link)
+        .unwrap_or_else(|| panic!("/{group}/{link} is not a link the C library lists"));
+    found.creation_index.unwrap_or_else(|| {
+        panic!(
             "/{group}/{link} carries no creation index, so it is unnumbered in the group's \
-             link order",
-        );
-        info.corder
-    }
+             link order"
+        )
+    })
 }
 
 /// The creation index the C library reports for attribute `attr` of `/object`.
 fn creation_index(path: &Path, object: &str, attr: &str) -> u32 {
     let _c = c_lib_guard();
-    let name = cstr(path.to_str().expect("a temp path is UTF-8"));
+    let file = hdf5::File::open(path)
+        .unwrap_or_else(|e| panic!("the C library opens {}: {e}", path.display()));
     let oname = cstr(object);
     let aname = cstr(attr);
-    // Safety: the file id is closed below, and `info` is written by the library.
-    unsafe {
-        let file = H5Fopen(name.as_ptr(), H5F_ACC_RDONLY, H5P_DEFAULT);
-        assert!(file > 0, "the C library opens {}", path.display());
-        let mut info = AttrInfo::default();
+    let mut info = MaybeUninit::<H5A_info_t>::uninit();
+    // TODO: https://github.com/metno/hdf5-rust/issues/231
+    // Safety: a live file id, and `info` is written by the call before it is read.
+    let info = unsafe {
         let rc = H5Aget_info_by_name(
-            file,
+            file.id(),
             oname.as_ptr(),
             aname.as_ptr(),
-            &raw mut info,
+            info.as_mut_ptr(),
             H5P_DEFAULT,
         );
         assert_eq!(rc, 0, "the C library reads info for {object}/{attr}");
-        H5Fclose(file);
-        assert!(
-            info.corder_valid != 0,
-            "{object}/{attr} carries no creation index, so the object stopped tracking the order",
-        );
-        info.corder
-    }
+        info.assume_init()
+    };
+    assert!(
+        info.corder_valid != 0,
+        "{object}/{attr} carries no creation index, so the object stopped tracking the order",
+    );
+    info.corder
 }
 
 fn names(count: usize) -> Vec<String> {

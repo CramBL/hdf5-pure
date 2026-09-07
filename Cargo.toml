@@ -125,6 +125,10 @@ criterion = { version = "0.5", default-features = false }
 # re-measuring the C library's error codes against deliberately damaged files.
 [target.'cfg(all(not(target_pointer_width = "32"), target_endian = "little"))'.dev-dependencies]
 hdf5 = { package = "hdf5-metno", git = "https://github.com/metno/hdf5-rust", branch = "main", features = ["zlib"] }
+# Its raw bindings, for the few calls the wrapper has no API for. Declared
+# there rather than in a test's own `extern` block, so names and structs
+# follow the linked release.
+hdf5_sys = { package = "hdf5-metno-sys", git = "https://github.com/metno/hdf5-rust", branch = "main" }
 
 [[example]]
 name = "matlab_fixtures"

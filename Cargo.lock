@@ -433,6 +433,7 @@ dependencies = [
  "criterion",
  "flate2",
  "hdf5-metno",
+ "hdf5-metno-sys",
  "heapscope",
  "ndarray",
  "num-complex",

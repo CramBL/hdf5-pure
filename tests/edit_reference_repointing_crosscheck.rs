@@ -12,23 +12,11 @@
 //! and reads is proof the header was resealed after its bytes changed, which no
 //! pure-Rust read would notice.
 
-use std::sync::{Mutex, MutexGuard};
-
 use hdf5_pure::File;
 use tempfile::tempdir;
 
-// One test here calls libhdf5 directly (there is no safe way to commit a
-// datatype), and the raw calls bypass the lock `hdf5-metno` serializes its own
-// through. The C library is not built thread-safe, so every test in this file
-// takes this guard and all of its C use runs one at a time. Without it the
-// binary aborts under `cargo test`, which runs tests as threads in one process —
-// and passes under `cargo nextest`, which gives each its own. Poisoning is
-// ignored: one test panicking must not cascade into the rest.
-static C_LIB: Mutex<()> = Mutex::new(());
-
-fn c_lib_guard() -> MutexGuard<'static, ()> {
-    C_LIB.lock().unwrap_or_else(|e| e.into_inner())
-}
+mod common;
+use common::create_v18;
 
 /// Dirty `g` so its object header is rebuilt at a fresh address, then spend the
 /// freed space, so a reference left behind resolves to reused bytes rather than
@@ -67,14 +55,13 @@ fn assert_resolves_to_the_moved_group(group: &hdf5::Group) {
 
 #[test]
 fn a_c_written_reference_attribute_is_repointed_and_the_header_resealed() {
-    let _c = c_lib_guard();
     use hdf5::{ObjectReference, ObjectReference1, ReferencedObject};
 
     let dir = tempdir().unwrap();
     let path = dir.path().join("attr_ref.h5");
 
     {
-        let file = hdf5::File::create(&path).unwrap();
+        let file = create_v18(&path);
         let g = file.create_group("g").unwrap();
         g.new_dataset::<i32>()
             .shape((3,))
@@ -120,7 +107,6 @@ fn a_c_written_reference_attribute_is_repointed_and_the_header_resealed() {
 
 #[test]
 fn a_c_written_reference_dataset_is_repointed() {
-    let _c = c_lib_guard();
     use hdf5::{ObjectReference, ObjectReference1, ReferencedObject};
 
     let dir = tempdir().unwrap();
@@ -175,7 +161,6 @@ fn a_c_written_reference_dataset_is_repointed() {
 /// moved, which is to say on nothing at all.
 #[test]
 fn a_chunked_reference_dataset_is_left_unrepointed() {
-    let _c = c_lib_guard();
     use hdf5::{ObjectReference, ObjectReference1};
 
     let dir = tempdir().unwrap();
@@ -249,7 +234,6 @@ fn a_chunked_reference_dataset_is_left_unrepointed() {
 /// vacated address. Only a walk over the *committed* tree fixes the right one.
 #[test]
 fn a_reference_on_a_rebuilt_header_is_repointed_in_the_header_the_commit_published() {
-    let _c = c_lib_guard();
     use hdf5::{ObjectReference, ObjectReference1, ReferencedObject};
 
     let dir = tempdir().unwrap();
@@ -297,50 +281,9 @@ fn a_reference_on_a_rebuilt_header_is_repointed_in_the_header_the_commit_publish
 /// step the dataset is invisible here — elements, addresses and all — and
 /// nothing else in the suite notices.
 ///
-/// The type has to be committed through the C entry point: `hdf5-metno` exposes
-/// no way to do it, the same reason `tests/committed_datatype_crosscheck.rs`
-/// reaches for `H5Tcommit2`.
 #[test]
 fn a_reference_dataset_through_a_committed_datatype_is_repointed() {
-    let _c = c_lib_guard();
     use hdf5::{ObjectReference, ObjectReference1, ReferencedObject};
-    use std::ffi::{CString, c_char, c_int, c_void};
-
-    unsafe extern "C" {
-        fn H5Tcommit2(
-            loc_id: i64,
-            name: *const c_char,
-            type_id: i64,
-            lcpl_id: i64,
-            tcpl_id: i64,
-            tapl_id: i64,
-        ) -> c_int;
-        fn H5Screate_simple(rank: c_int, dims: *const u64, maxdims: *const u64) -> i64;
-        fn H5Sclose(space_id: i64) -> c_int;
-        fn H5Dcreate2(
-            loc_id: i64,
-            name: *const c_char,
-            type_id: i64,
-            space_id: i64,
-            lcpl_id: i64,
-            dcpl_id: i64,
-            dapl_id: i64,
-        ) -> i64;
-        fn H5Dwrite(
-            dset_id: i64,
-            mem_type_id: i64,
-            mem_space_id: i64,
-            file_space_id: i64,
-            dxpl_id: i64,
-            buf: *const c_void,
-        ) -> c_int;
-        fn H5Dclose(dset_id: i64) -> c_int;
-        fn H5Tcopy(type_id: i64) -> i64;
-        fn H5Tclose(type_id: i64) -> c_int;
-    }
-    /// `H5P_DEFAULT` and `H5S_ALL` are both the zero id.
-    const DEFAULT: i64 = 0;
-
     let dir = tempdir().unwrap();
     let path = dir.path().join("committed_ref.h5");
 
@@ -356,48 +299,16 @@ fn a_reference_dataset_through_a_committed_datatype_is_repointed() {
         let reference = ObjectReference1::create(&file, "g").unwrap();
 
         // `H5T_STD_REF_OBJ` is one of the library's immutable predefined types,
-        // which cannot be committed; a copy of it can.
-        let predefined = hdf5::Datatype::from_type::<ObjectReference1>().unwrap();
-        let reftype = unsafe { H5Tcopy(predefined.id()) };
-        assert!(reftype >= 0, "H5Tcopy failed");
-        let name = CString::new("reftype").unwrap();
-        let rc =
-            unsafe { H5Tcommit2(file.id(), name.as_ptr(), reftype, DEFAULT, DEFAULT, DEFAULT) };
-        assert!(rc >= 0, "H5Tcommit2 failed");
-
-        let dims = [1u64];
-        let space = unsafe { H5Screate_simple(1, dims.as_ptr(), std::ptr::null()) };
-        assert!(space >= 0, "H5Screate_simple failed");
-        let dsname = CString::new("refs").unwrap();
-        let dset = unsafe {
-            H5Dcreate2(
-                file.id(),
-                dsname.as_ptr(),
-                reftype,
-                space,
-                DEFAULT,
-                DEFAULT,
-                DEFAULT,
-            )
-        };
-        assert!(dset >= 0, "H5Dcreate2 failed");
-        let values = [reference];
-        let rc = unsafe {
-            H5Dwrite(
-                dset,
-                reftype,
-                DEFAULT,
-                DEFAULT,
-                DEFAULT,
-                values.as_ptr().cast::<c_void>(),
-            )
-        };
-        assert!(rc >= 0, "H5Dwrite failed");
-        unsafe {
-            H5Dclose(dset);
-            H5Sclose(space);
-            H5Tclose(reftype);
-        }
+        // which cannot be committed. The copy `from_type` hands back can.
+        let reftype = hdf5::Datatype::from_type::<ObjectReference1>().unwrap();
+        file.commit_datatype("reftype", &reftype).unwrap();
+        file.new_dataset_builder()
+            .empty_as(&reftype)
+            .shape((1,))
+            .create("refs")
+            .unwrap()
+            .write(&[reference])
+            .unwrap();
         file.close().unwrap();
     }
 
@@ -430,7 +341,6 @@ fn a_reference_dataset_through_a_committed_datatype_is_repointed() {
 /// still left alone.
 #[test]
 fn an_earliest_format_reference_dataset_is_repointed() {
-    let _c = c_lib_guard();
     use hdf5::{ObjectReference, ObjectReference1, ReferencedObject};
 
     let dir = tempdir().unwrap();

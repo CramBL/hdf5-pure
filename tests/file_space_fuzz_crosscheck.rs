@@ -39,28 +39,7 @@ fn open_bounded(path: &std::path::Path) -> Result<File, hdf5_pure::Error> {
 }
 
 use proptest::prelude::*;
-use std::sync::{Mutex, MutexGuard};
 use tempfile::tempdir;
-
-// The reference free-space query, resolved at link time from the statically
-// linked libhdf5. Returns the total free space the C library tracks for the open
-// file, which it can only report by loading and parsing the on-disk
-// free-space-manager (`FSHD`/`FSSE`) blocks — so a match with our own tally
-// proves the C library accepts the managers hdf5-pure wrote, byte for byte.
-unsafe extern "C" {
-    fn H5Fget_freespace(file_id: i64) -> i64;
-}
-
-// `hdf5-metno` serializes its own C calls through an internal lock, but the raw
-// `H5Fget_freespace` FFI above bypasses it. Serialize every C-library call in
-// this file through one mutex so the raw call never races a concurrent libhdf5
-// call from the other property running in parallel (the C library is not built
-// thread-safe here). Poisoning is ignored: a panic in one case must not cascade.
-static C_LIB: Mutex<()> = Mutex::new(());
-
-fn c_lib_guard() -> MutexGuard<'static, ()> {
-    C_LIB.lock().unwrap_or_else(|e| e.into_inner())
-}
 
 /// The four file-space strategies, each mapped to the name the C library reports.
 fn strategy() -> impl Strategy<Value = FileSpaceStrategy> {
@@ -123,8 +102,7 @@ proptest! {
         // up to 8000 elements spans several pages even at the largest page size.
         lens in prop::collection::vec(1usize..=8000usize, 1..=3),
     ) {
-        let _c = c_lib_guard();
-        let dir = tempdir().unwrap();
+            let dir = tempdir().unwrap();
         let path = dir.path().join("fuzz_strategy.h5");
 
         let datasets: Vec<Vec<i32>> =
@@ -165,7 +143,7 @@ proptest! {
         // on-disk records; the C library's total must equal our own tally exactly
         // (a paged file tracks its page tails, a fresh non-paged file tracks none).
         if persist {
-            let free_c = unsafe { H5Fget_freespace(f.id()) };
+            let free_c = f.free_space() as i64;
             prop_assert_eq!(free_c as u64, total_ours);
         }
         drop(f);
@@ -185,8 +163,7 @@ proptest! {
         // 1..=5 append calls of 1..=1500 unfiltered (so any-length) rows each.
         appends in prop::collection::vec(1usize..=1500usize, 1..=5),
     ) {
-        let _c = c_lib_guard();
-        let dir = tempdir().unwrap();
+            let dir = tempdir().unwrap();
         let path = dir.path().join("fuzz_append.h5");
 
         // Create a paged, persisting, unlimited chunked i32 dataset with one chunk.
@@ -241,7 +218,7 @@ proptest! {
         );
         let got = f.dataset("d").unwrap().read_raw::<i32>().unwrap();
         prop_assert_eq!(&got, &want);
-        let free_c = unsafe { H5Fget_freespace(f.id()) };
+        let free_c = f.free_space() as i64;
         prop_assert_eq!(free_c as u64, total_ours);
         drop(f);
     }
