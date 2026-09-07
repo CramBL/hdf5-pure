@@ -1,10 +1,7 @@
-# /// script
-# requires-python = ">=3.11"
-# ///
 """Build a release of the HDF5 C library and its tools under `tmp/hdf5`.
 
-    uv run scripts/build_hdf5.py <version>          build, unless already built
-    uv run scripts/build_hdf5.py <version> --env    print the exports that link it
+    just interop::hdf5-build <version>    build, unless already built
+    just interop::hdf5-env <version>      print the exports that link it
 
 The result is an install prefix with `include/`, `lib/` and `bin/`, the layout
 `hdf5-metno` reads from `HDF5_DIR`. `--env` prints `export` lines for
@@ -27,8 +24,9 @@ import tarfile
 import urllib.request
 from pathlib import Path
 
-REPO = Path(__file__).resolve().parent.parent
-WORK = REPO / "tmp" / "hdf5"
+from hdf5_pure_scripts import repo_root
+
+WORK = repo_root() / "tmp" / "hdf5"
 
 # The last patch release of each series: its git tag, and the sha256 of the
 # archive GitHub serves for the tag.
@@ -92,7 +90,11 @@ def run(step: str, command: list[str], cwd: Path) -> None:
         result = subprocess.run(command, cwd=cwd, stdout=handle, stderr=subprocess.STDOUT)
     if result.returncode != 0:
         text = log.read_text(errors="replace")
-        errors = [line for line in text.splitlines() if "error" in line.lower() and "warning" not in line.lower()]
+        errors = [
+            line
+            for line in text.splitlines()
+            if "error" in line.lower() and "warning" not in line.lower()
+        ]
         sys.exit(f"{step} failed, see {log}:\n" + "\n".join(errors[:40]) + "\n...\n" + text[-1500:])
 
 
@@ -109,7 +111,11 @@ def build(version: str) -> Path:
     # on: 1.10 and 1.12 name the tools `h5dump-shared` without them. No
     # high-level library, nothing uses it.
     configure = [
-        "cmake", "-S", str(source), "-B", str(build_dir),
+        "cmake",
+        "-S",
+        str(source),
+        "-B",
+        str(build_dir),
         f"-DCMAKE_INSTALL_PREFIX={prefix}",
         f"-DCMAKE_INSTALL_RPATH={prefix}/lib",
         "-DCMAKE_BUILD_TYPE=Release",
@@ -138,7 +144,11 @@ def build(version: str) -> Path:
 
     jobs = str(os.cpu_count() or 4)
     run("configure", configure, source)
-    run("build", ["cmake", "--build", str(build_dir), "--config", "Release", "--parallel", jobs], source)
+    run(
+        "build",
+        ["cmake", "--build", str(build_dir), "--config", "Release", "--parallel", jobs],
+        source,
+    )
     run("install", ["cmake", "--install", str(build_dir), "--config", "Release"], source)
     if not tool(prefix, "h5dump"):
         sys.exit(f"the install under {prefix} has no h5dump")
@@ -158,7 +168,8 @@ def vcpkg_zlib_import_library(installed: Path) -> Path:
         candidate = installed / "lib" / name
         if candidate.is_file():
             return candidate
-    sys.exit(f"no zlib import library under {installed / 'lib'}: {sorted(p.name for p in (installed / 'lib').glob('*.lib'))}")
+    found = sorted(p.name for p in (installed / "lib").glob("*.lib"))
+    sys.exit(f"no zlib import library under {installed / 'lib'}: {found}")
 
 
 def installed_version(prefix: Path) -> str:
@@ -188,7 +199,9 @@ def exports(prefix: Path) -> list[str]:
     lines = [f'export HDF5_DIR="{str(prefix).replace(chr(92), "/")}"']
     system = platform.system()
     if system == "Linux":
-        lines.append(f'export LD_LIBRARY_PATH="{prefix}/lib${{LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}}"')
+        lines.append(
+            f'export LD_LIBRARY_PATH="{prefix}/lib${{LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}}"'
+        )
     elif system == "Darwin":
         lines.append(
             f'export RUSTFLAGS="-C force-frame-pointers=yes -C link-args=-Wl,-rpath,{prefix}/lib"'
@@ -200,7 +213,7 @@ def exports(prefix: Path) -> list[str]:
     return lines
 
 
-def main() -> int:
+def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("version", choices=sorted(RELEASES))
     parser.add_argument("--env", action="store_true", help="print shell exports for the build")
@@ -210,15 +223,12 @@ def main() -> int:
     if arguments.env:
         prefix = prefix_of(arguments.version)
         if not tool(prefix, "h5dump"):
-            sys.exit(f"no build under {prefix}: run `just interop::hdf5-build {arguments.version}` first")
+            sys.exit(
+                f"no build under {prefix}: run `just interop::hdf5-build {arguments.version}` first"
+            )
         print("\n".join(exports(prefix)))
-        return 0
+        return
 
     sys.stdout.reconfigure(line_buffering=True)
     prefix = build(arguments.version)
     print(f"==> HDF5 {installed_version(prefix)} under {prefix}")
-    return 0
-
-
-if __name__ == "__main__":
-    sys.exit(main())

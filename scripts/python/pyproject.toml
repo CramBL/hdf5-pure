@@ -1,0 +1,31 @@
+[project]
+name = "hdf5-pure-scripts"
+version = "0"
+description = "The repository's Python tooling: HDF5 builds for interop, the API surface scan, the docs site and the release"
+requires-python = ">=3.11"
+dependencies = ["mkdocs-material>=9.7.6"]
+
+[project.scripts]
+hdf5-build = "hdf5_pure_scripts.build_hdf5:main"
+api-surface = "hdf5_pure_scripts.api_surface:main"
+docs = "hdf5_pure_scripts.docs:main"
+release = "hdf5_pure_scripts.release:main"
+
+[dependency-groups]
+dev = ["ruff>=0.16.6", "pytest>=9.1.1"]
+
+[tool.uv]
+default-groups = []
+
+[build-system]
+requires = ["uv_build>=0.12.5,<0.13.0"]
+build-backend = "uv_build"
+
+[tool.ruff]
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

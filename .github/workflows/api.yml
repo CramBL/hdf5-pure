@@ -82,6 +82,9 @@ jobs:
         with:
           tool: just
 
+      - name: Install uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+
       - name: Scan the public API surface
         run: just api::api-surface
 

@@ -26,7 +26,7 @@ defaults:
 
 jobs:
   # The test suite linking each release of the C library. Each release is
-  # built from source by `scripts/build_hdf5.py` and cached.
+  # built from source by `just interop::hdf5-build` and cached.
   hdf5:
     name: hdf5 / ${{ matrix.version }} / ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
@@ -76,7 +76,7 @@ jobs:
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: tmp/hdf5/${{ matrix.version }}
-          key: hdf5-${{ matrix.version }}-${{ runner.os }}-${{ hashFiles('scripts/build_hdf5.py') }}
+          key: hdf5-${{ matrix.version }}-${{ runner.os }}-${{ hashFiles('scripts/python/src/hdf5_pure_scripts/build_hdf5.py') }}
 
       - name: Build HDF5 ${{ matrix.version }}
         run: just interop::hdf5-build ${{ matrix.version }}
