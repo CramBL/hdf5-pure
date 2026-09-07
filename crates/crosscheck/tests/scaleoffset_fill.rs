@@ -130,7 +130,7 @@ fn filter_parms(path: &std::path::Path) -> Vec<u32> {
 /// packed one entry always, or eight bytes always, agrees with the reference on
 /// only part of this.
 #[test]
-fn a_dataset_this_crate_writes_carries_the_c_librarys_filter_parameters() {
+fn a_dataset_this_crate_writes_carries_the_filter_parameters_the_c_library_records() {
     let dir = tempdir().unwrap();
 
     macro_rules! compare {

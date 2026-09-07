@@ -302,7 +302,7 @@ fn c_reads_the_whole_file_writers_empty_chunked_datasets() {
 /// dataset that *owns* elements is that many fill values — both fall out of the
 /// same expression, which is why a zero-element one needs no special case.
 #[test]
-fn pure_reads_the_c_librarys_unallocated_empty_chunked_datasets() {
+fn pure_reads_unallocated_empty_chunked_datasets_the_c_library_wrote() {
     for unlimited in [false, true] {
         for latest in [false, true] {
             let dir = tempdir().unwrap();

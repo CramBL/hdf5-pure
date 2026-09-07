@@ -164,17 +164,17 @@ fn bounded_persist_finalize_reads_back_in_c() {
     // free-space query parses the managers the finalize wrote.
     let f = hdf5::File::open(&path).unwrap();
     assert_eq!(f.dataset("d").unwrap().read_raw::<i32>().unwrap(), expected);
-    let strat = f.create_plist().unwrap().get_file_space_strategy().unwrap();
+    let strategy = f.create_plist().unwrap().get_file_space_strategy().unwrap();
     assert!(
         matches!(
-            strat,
+            strategy,
             CStrategy::FreeSpaceManager {
                 paged: false,
                 persist: true,
                 ..
             }
         ),
-        "C recovers our persisting FSM strategy, got {strat:?}"
+        "C recovers our persisting FSM strategy, got {strategy:?}"
     );
     let free = f.free_space() as i64;
     assert!(

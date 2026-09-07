@@ -68,9 +68,9 @@ fn c_library_reads_our_strategy() {
             f.dataset("d").unwrap().read_raw::<i32>().unwrap(),
             vec![10, 20, 30]
         );
-        let strat = f.create_plist().unwrap().get_file_space_strategy().unwrap();
+        let strategy = f.create_plist().unwrap().get_file_space_strategy().unwrap();
         assert_eq!(
-            strat, expected,
+            strategy, expected,
             "strategy {ours:?} read back by the C library"
         );
     }
@@ -174,9 +174,9 @@ fn c_library_reads_our_persisted_free_space() {
     // The C library opens the same file: strategy and persist flag round-trip,
     // the survivors read byte-exact, and `H5Fget_freespace` parses our managers.
     let f = hdf5::File::open(&path).unwrap();
-    let strat = f.create_plist().unwrap().get_file_space_strategy().unwrap();
+    let strategy = f.create_plist().unwrap().get_file_space_strategy().unwrap();
     assert_eq!(
-        strat,
+        strategy,
         CStrategy::FreeSpaceManager {
             paged: false,
             persist: true,
@@ -469,9 +469,9 @@ fn c_library_reads_our_paged_file() {
 
     // The C library recovers the paged strategy and reads every dataset.
     let f = hdf5::File::open(&path).unwrap();
-    let strat = f.create_plist().unwrap().get_file_space_strategy().unwrap();
+    let strategy = f.create_plist().unwrap().get_file_space_strategy().unwrap();
     assert_eq!(
-        strat,
+        strategy,
         CStrategy::FreeSpaceManager {
             paged: true,
             persist: true,

@@ -1,0 +1,15 @@
+[default.extend-words]
+# HDF5 names the scale-offset filter's parameters H5Z_SCALEOFFSET_PARM_*, and
+# the tests keep that spelling.
+PARM = "PARM"
+parms = "parms"
+Parms = "Parms"
+# N-dimensional.
+nd = "nd"
+ND = "ND"
+Nd = "Nd"
+# The prefix in mis-read, mis-encode and the like.
+mis = "mis"
+unparseable = "unparseable"
+# The flate2 crate.
+flate = "flate"

@@ -221,7 +221,7 @@ fn pure_reads_every_maxshape_the_c_library_writes() {
 /// at all. Comparing the kind against a C-written file of the same geometry is
 /// what states the rule.
 #[test]
-fn the_index_kind_matches_the_reference_librarys_choice() {
+fn the_index_kind_matches_what_the_reference_library_chooses() {
     let dir = tempdir().unwrap();
     let mut skipped = 0;
     for (label, shape, chunks, maxshape) in cases() {
@@ -668,7 +668,7 @@ fn a_shrinking_inplace_overwrite_keeps_ea_chunks_in_their_slots() {
 /// against libhdf5's 8, and the file at 38x its size, while reading back
 /// perfectly through both libraries (issue #299).
 #[test]
-fn a_sparse_extensible_array_matches_the_c_librarys_own_block_statistics() {
+fn a_sparse_extensible_array_matches_the_c_library_block_statistics() {
     /// The six `EAHD` statistics, in stored order.
     fn stats_of(path: &std::path::Path) -> Vec<u64> {
         let b = std::fs::read(path).unwrap();
