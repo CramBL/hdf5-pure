@@ -20,6 +20,8 @@ env:
   RUST_BACKTRACE: 1
 
 jobs:
+  # The crosschecks link the libhdf5 `hdf5-metno` bundles, which the interop
+  # workflow names and also builds from source beside the older releases.
   test:
     name: test / ${{ matrix.os }} / ${{ matrix.config.name }}
     runs-on: ${{ matrix.os }}

@@ -47,43 +47,21 @@ jobs:
           shared-key: miri
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
-      # Three ways this goes hollow, each of which has to fail loudly: the
-      # filter stops matching, the unsafe leaves the module while its tests
-      # stay (#113 left this green and vacuous for releases), or the tests are
-      # selected and never run.
+      - name: Install tools
+        uses: taiki-e/install-action@920ab1831fbf4fb3ef75c8ead83556c918bb7290 # v2.79.8
+        with:
+          tool: just
+
       - name: Miri
-        run: |
-          set -o pipefail
-          set -- "src/mat/transpose.rs:mat::transpose" "src/mat/complex.rs:mat::complex"
-          for entry in "$@"; do
-            file="${entry%%:*}"
-            filter="${entry##*:}"
-            if ! grep -qE '^[^/]*\bunsafe[[:space:]]*(\{|fn |impl )' "$file"; then
-              echo "::error::$file holds no unsafe code; point this job at the code that does."
-              exit 1
-            fi
-            cargo miri test --locked --no-default-features --features std,serde,__hdf5-bundled \
-              --lib "$filter" 2>&1 | tee miri.log
-            if grep -q "running 0 tests" miri.log; then
-              echo "::error::Miri ran no tests for $filter: the --lib filter matched nothing."
-              exit 1
-            fi
-            if ! grep -qE '[1-9][0-9]* passed' miri.log; then
-              echo "::error::Miri passed no tests for $filter: they were selected but ignored."
-              exit 1
-            fi
-          done
+        run: just miri
 
   # The exact allocation figures under `tests/baselines/`. One host and one
   # feature set, because an exact count is a property of both; the scaling
-  # rules run everywhere in the `test` matrix. The toolchain is pinned so a
-  # `std` release cannot redden every open pull request at once.
+  # rules run everywhere in the `test` matrix. The figures are tied to the
+  # toolchain, which `rust-toolchain.toml` pins.
   heap-baseline:
     name: heap baseline / macos aarch64
     runs-on: macos-latest
-
-    env:
-      RUSTUP_TOOLCHAIN: "1.97.0"
 
     steps:
       - name: Checkout
@@ -91,10 +69,8 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Install Rust 1.97.0
-        uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # 2026-03-27
-        with:
-          toolchain: "1.97.0"
+      - name: Install Rust
+        run: rustup toolchain install
 
       - name: Cache Cargo
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2

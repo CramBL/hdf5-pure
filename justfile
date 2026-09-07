@@ -9,7 +9,7 @@ test-full:
 doctest-full:
     cargo test --locked --doc --features __hdf5-bundled --features "serde zfp fast-deflate provenance ndarray"
 
-ci: ci-essentials check-release examples check-no-std check-wasm shear semver api-surface clippy-32bit cast-gate miri test doctest
+ci: ci-essentials check-release examples check-no-std check-wasm shear semver api-surface clippy-32bit cast-gate miri (test-hdf5 "1.8.23") test doctest
 
 test *ARGS:
     cargo nextest run --locked --features __hdf5-bundled {{ ARGS }}
@@ -66,9 +66,32 @@ test-32bit:
 test-big-endian:
     cross test --locked --target s390x-unknown-linux-gnu --no-default-features --features "std checksum deflate zfp serde ndarray provenance" --lib --test write_read_roundtrip --test serde_roundtrip --test complex_bulk_array --test complex_integer --test streaming_reader --test vlen_strings --test fixed_strings
 
+# Miri over the crate's unsafe code. The recipe fails when a file no longer
+# holds unsafe code, when a filter selects no tests, or when the selected tests
+# do not run. Each of those would otherwise pass without checking anything, as
+# happened in #113.
 miri:
-    MIRIFLAGS=-Zmiri-strict-provenance cargo miri test --locked --no-default-features --features std,serde,__hdf5-bundled --lib mat::transpose
-    MIRIFLAGS=-Zmiri-strict-provenance cargo miri test --locked --no-default-features --features std,serde,__hdf5-bundled --lib mat::complex
+    #!/usr/bin/env bash
+    set -euo pipefail
+    log="$(mktemp)"
+    for entry in "src/mat/transpose.rs:mat::transpose" "src/mat/complex.rs:mat::complex"; do
+        file="${entry%%:*}"
+        filter="${entry##*:}"
+        if ! grep -qE '^[^/]*\bunsafe[[:space:]]*(\{|fn |impl )' "$file"; then
+            echo "$file holds no unsafe code; point this recipe at the code that does." >&2
+            exit 1
+        fi
+        MIRIFLAGS=-Zmiri-strict-provenance cargo miri test --locked --no-default-features \
+            --features std,serde,__hdf5-bundled --lib "$filter" 2>&1 | tee "$log"
+        if grep -q "running 0 tests" "$log"; then
+            echo "Miri ran no tests for $filter: the --lib filter matched nothing." >&2
+            exit 1
+        fi
+        if ! grep -qE '[1-9][0-9]* passed' "$log"; then
+            echo "Miri passed no tests for $filter: they were selected but ignored." >&2
+            exit 1
+        fi
+    done
 
 fuzz TARGET DURATION="30":
     cargo +nightly fuzz run {{ TARGET }} --target x86_64-unknown-linux-gnu -- -max_total_time={{ DURATION }} -rss_limit_mb=4096
@@ -111,6 +134,14 @@ hdf5-build VERSION:
 # eval "$(just hdf5-env 1.8.23)" && just test-external-hdf5
 hdf5-env VERSION:
     @uv run scripts/build_hdf5.py {{ VERSION }} --env
+
+# The test suite linking libhdf5 VERSION, built under tmp/hdf5 on first use.
+# FEATURES names the release series from 1.10 up, as in `serde,__hdf5-1.10`.
+test-hdf5 VERSION FEATURES="serde" *ARGS: (hdf5-build VERSION)
+    #!/usr/bin/env bash
+    set -euo pipefail
+    eval "$(just hdf5-env {{ VERSION }})"
+    cargo nextest run --locked --features {{ FEATURES }} {{ ARGS }}
 
 # The libhdf5 the crosscheck tests link when HDF5_DIR is unset.
 hdf5-bundled-version:
