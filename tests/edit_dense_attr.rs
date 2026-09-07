@@ -2,6 +2,7 @@
 // which is gated to 64-bit little-endian targets; skip them elsewhere so the pure-Rust
 // suite can run under `cross test --target i686-...`.
 #![cfg(all(not(target_pointer_width = "32"), target_endian = "little"))]
+#![cfg(feature = "__hdf5-1.10")]
 //! In-place attribute edits that land in dense (fractal-heap) storage (issue #102).
 //!
 //! `File::open_rw` used to refuse any attribute edit that touched a heap: an

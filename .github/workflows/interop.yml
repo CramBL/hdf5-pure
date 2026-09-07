@@ -35,8 +35,15 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
-        # The last patch release of each series.
+        # The last patch release of each series, and the features the test
+        # suite is built with: the one naming the linked series, from 1.10 up.
         version: ["1.8.23", "1.10.11", "1.12.3", "1.14.6", "2.2.0"]
+        include:
+          - {version: "1.8.23", features: "serde"}
+          - {version: "1.10.11", features: "serde,__hdf5-1.10"}
+          - {version: "1.12.3", features: "serde,__hdf5-1.12"}
+          - {version: "1.14.6", features: "serde,__hdf5-1.14"}
+          - {version: "2.2.0", features: "serde,__hdf5-2"}
 
     steps:
       - name: Checkout
@@ -74,17 +81,10 @@ jobs:
       - name: Build HDF5 ${{ matrix.version }}
         run: just hdf5-build ${{ matrix.version }}
 
-      # The test suite linking this release. 1.8 runs the format boundary
-      # crosscheck alone: the rest of the suite is about the 1.10 formats and
-      # the wrapper APIs that arrived with them.
       - name: Run the test suite against it
         run: |
           eval "$(just hdf5-env ${{ matrix.version }})"
-          case "${{ matrix.version }}" in
-            1.8.*) tests="--test libver_matrix_crosscheck" ;;
-            *) tests="" ;;
-          esac
-          just test-external-hdf5 --features serde --no-fail-fast $tests
+          just test-external-hdf5 --features ${{ matrix.features }} --no-fail-fast
 
   # The matrix must include the release `hdf5-metno` bundles, which the
   # crosschecks in `ci.yml` link.

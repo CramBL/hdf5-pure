@@ -1,6 +1,7 @@
 // Crosschecks link the reference HDF5 C library (the `hdf5-metno` dev-dependency),
 // which is gated to 64-bit little-endian targets.
 #![cfg(all(not(target_pointer_width = "32"), target_endian = "little"))]
+#![cfg(feature = "__hdf5-1.10")]
 //! A dataset whose element bytes live in *external* files (`H5Pset_external`).
 //!
 //! Its data-layout message is contiguous with the data address **undefined** —

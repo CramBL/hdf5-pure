@@ -2,6 +2,7 @@
 // which is gated to 64-bit little-endian targets; skip them elsewhere so the pure-Rust
 // suite can run under `cross test --target i686-...`.
 #![cfg(all(not(target_pointer_width = "32"), target_endian = "little"))]
+#![cfg(feature = "__hdf5-1.10")]
 //! In-place edits of objects that track attribute creation order (issue #416).
 //!
 //! `H5Pset_attr_creation_order` — h5py's `track_order=True`, and what netCDF-4

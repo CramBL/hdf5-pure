@@ -2,6 +2,7 @@
 // which is gated to 64-bit little-endian targets; skip them elsewhere so the pure-Rust
 // suite can run under `cross test --target i686-...`.
 #![cfg(all(not(target_pointer_width = "32"), target_endian = "little"))]
+#![cfg(feature = "__hdf5-1.10")]
 //! Reference-C-library interop for the layout / filter introspection API
 //! (issue #149). The reference library *writes* datasets in every storage class
 //! and chunk-index kind; this crate must classify them identically and — the

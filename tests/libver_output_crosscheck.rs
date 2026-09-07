@@ -35,7 +35,9 @@
 //! *lower* bound of `LibVer::LATEST`, which selects the same 1.10 format the
 //! writer emits by default and must produce a file the C library reads.
 
-use hdf5_pure::{AttrValue, File, FileAccessProperties, FileBuilder, FileCreateProperties, LibVer};
+use hdf5_pure::{AttrValue, File, FileBuilder, LibVer};
+#[cfg(feature = "__hdf5-1.10")]
+use hdf5_pure::{FileAccessProperties, FileCreateProperties};
 use tempfile::tempdir;
 
 /// A file exercising everything the 1.8 format still carries: contiguous
@@ -214,6 +216,7 @@ fn an_edit_session_keeps_a_1_8_file_in_the_1_8_format() {
 /// reading `H5Pset_libver_bounds` has, where the low bound is a floor and the
 /// library is free to stay below the ceiling. The C library reading the result
 /// is what says the file is a real one and not merely one this crate accepted.
+#[cfg(feature = "__hdf5-1.10")]
 #[test]
 fn c_reads_a_file_written_at_a_lower_bound_of_latest() {
     let dir = tempdir().unwrap();

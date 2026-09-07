@@ -2,6 +2,7 @@
 // which is gated to 64-bit little-endian targets; skip them elsewhere so the pure-Rust
 // suite can run under `cross test --target i686-...`.
 #![cfg(all(not(target_pointer_width = "32"), target_endian = "little"))]
+#![cfg(feature = "__hdf5-1.10")]
 //! Attributes in the standard variable-length string datatype (issue #383).
 //!
 //! `H5T_STRING` with `STRSIZE = H5T_VARIABLE` is what h5py, the reference C

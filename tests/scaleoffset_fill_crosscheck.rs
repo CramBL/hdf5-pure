@@ -2,6 +2,7 @@
 // gated to 64-bit little-endian targets; skip elsewhere so the pure-Rust suite still
 // runs under `cross test --target i686-...`.
 #![cfg(all(not(target_pointer_width = "32"), target_endian = "little"))]
+#![cfg(feature = "__hdf5-1.10")]
 //! Scale-offset encoding with a **defined fill value** (issue #287).
 //!
 //! The reference library sets `H5Z_SCALEOFFSET_PARM_FILAVAIL` to `FILL_DEFINED`

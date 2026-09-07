@@ -1,6 +1,7 @@
 // Crosschecks link the reference HDF5 C library (the `hdf5-metno` dev-dependency),
 // gated to 64-bit little-endian targets.
 #![cfg(all(not(target_pointer_width = "32"), target_endian = "little"))]
+#![cfg(feature = "__hdf5-1.10")]
 //! The reference HDF5 C library must be able to *modify* a file hdf5-pure wrote,
 //! not just read it. Inserting a link into a group makes the C library read the
 //! group's Group Info message (`H5G_obj_insert` -> `H5O_msg_read(H5O_GINFO_ID)`);

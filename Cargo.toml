@@ -59,12 +59,20 @@ heap-baseline = []
 # Not a run-time dependency — build.rs only emits link directives for this
 # feature, and the crosscheck lives in a gated integration test.
 matio-crosscheck = ["serde"]
-# Internal, not part of the public API. Builds and links the libhdf5 that
-# `hdf5-metno` bundles instead of searching the host. Every recipe that builds
-# the test suite passes it. The interop workflow leaves it off and sets
-# `HDF5_DIR`. Dependents never build dev-dependencies, so it changes nothing
-# for them.
-__hdf5-bundled = ["hdf5/static"]
+# Internal, not part of the public API. Which release series of libhdf5 the
+# test suite links, from 1.10 up: none of them is 1.8. Each implies the one
+# below, so a test gates on the lowest series that has what it needs. The
+# interop workflow passes its row's, and `tests/hdf5_release_feature.rs`
+# checks the one passed against the library actually linked. Dependents never
+# build dev-dependencies, so none of these changes anything for them.
+"__hdf5-1.10" = []
+"__hdf5-1.12" = ["__hdf5-1.10"]
+"__hdf5-1.14" = ["__hdf5-1.12"]
+"__hdf5-2" = ["__hdf5-1.14"]
+# Internal. Builds and links the libhdf5 that `hdf5-metno` bundles instead of
+# searching the host, a 2.x release. Every recipe that builds the test suite
+# passes it. The interop workflow leaves it off and sets `HDF5_DIR`.
+__hdf5-bundled = ["hdf5/static", "__hdf5-2"]
 
 [dependencies]
 byteorder = { version = "1", default-features = false }

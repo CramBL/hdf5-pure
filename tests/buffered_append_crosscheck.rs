@@ -2,6 +2,7 @@
 // which is gated to 64-bit little-endian targets; skip them elsewhere so the pure-Rust
 // suite can run under `cross test --target i686-...`.
 #![cfg(all(not(target_pointer_width = "32"), target_endian = "little"))]
+#![cfg(feature = "__hdf5-1.10")]
 //! Reference-C-library interop for issue #262: the two on-disk shapes this
 //! change newly produces must be readable by the C library, not merely by this
 //! crate's own reader.

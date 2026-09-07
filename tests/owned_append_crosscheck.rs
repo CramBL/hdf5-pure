@@ -2,6 +2,7 @@
 // gated to 64-bit little-endian targets; skip elsewhere so the pure-Rust suite still
 // runs under `cross test --target i686-...`.
 #![cfg(all(not(target_pointer_width = "32"), target_endian = "little"))]
+#![cfg(feature = "__hdf5-1.10")]
 //! Interop for owned-handle in-place append (issue #148, phase 2): append through
 //! a `File::open_rw` `Dataset` handle and confirm the reference C library
 //! (`hdf5-metno`) reads the grown dataset back exactly — for unfiltered and

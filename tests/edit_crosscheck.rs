@@ -2,6 +2,7 @@
 // which is gated to 64-bit little-endian targets; skip them elsewhere so the pure-Rust
 // suite can run under `cross test --target i686-...`.
 #![cfg(all(not(target_pointer_width = "32"), target_endian = "little"))]
+#![cfg(feature = "__hdf5-1.10")]
 //! Cross-validation for in-place editing against the reference C library
 //! (issue #32): files the C library *writes* are edited in place by
 //! `File::open_rw`, and the result is read back by both `hdf5-pure` and the C
