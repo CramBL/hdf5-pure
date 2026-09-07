@@ -3,7 +3,9 @@
 //! The reference C library is a dependency of this package alone, so a unit
 //! test that needs what only it writes reads a committed file, written here.
 //! `just test-data::c` rewrites them, and without `HDF5_PURE_UPDATE_TEST_DATA`
-//! set each test checks the committed copy instead.
+//! set each test checks the committed copy instead, for every property the
+//! unit test that reads it relies on. A generator that changes without a
+//! rewrite fails here, not silently over there.
 #![cfg(feature = "__hdf5-1.10")]
 
 use std::path::Path;
@@ -37,6 +39,24 @@ fn persisting(paged: bool) -> FileSpaceStrategy {
     }
 }
 
+/// The file persists its free-space managers, paged with `page` as the page
+/// size, or not paged.
+fn assert_persisting(file: &hdf5::File, page: Option<u64>) {
+    let paged = page.is_some();
+    let fcpl = file.fcpl().unwrap();
+    assert!(
+        matches!(
+            fcpl.file_space_strategy(),
+            FileSpaceStrategy::FreeSpaceManager { paged: p, persist: true, .. } if p == paged
+        ),
+        "{:?}",
+        fcpl.file_space_strategy()
+    );
+    if let Some(page) = page {
+        assert_eq!(fcpl.file_space_page_size(), page);
+    }
+}
+
 /// One group of 12 links, above the C library's `max_compact` of 8 so they are
 /// stored densely, each name long enough that its link message is a huge heap
 /// object. For `src/group_v2.rs`.
@@ -61,10 +81,11 @@ fn huge_links_for_the_dense_link_walk() {
         }
         file.close().unwrap();
     });
-    assert_eq!(
-        file.group("g").unwrap().member_names().unwrap().len(),
-        COUNT
-    );
+    let names = file.group("g").unwrap().member_names().unwrap();
+    assert_eq!(names.len(), COUNT);
+    // Twelve is above the C library's `max_compact` of 8, so the links are
+    // stored densely, and each name is long enough to be a huge heap object.
+    assert!(names.iter().all(|name| name.len() > 5000), "{names:?}");
 }
 
 /// A paged, persisting file whose chunked dataset's index the C library placed
@@ -95,7 +116,10 @@ fn paged_file_whose_chunk_index_the_c_library_placed() {
             .unwrap();
         f.close().unwrap();
     });
-    assert_eq!(file.dataset("victim").unwrap().shape(), vec![8192]);
+    assert_persisting(&file, Some(4096));
+    let victim = file.dataset("victim").unwrap();
+    assert_eq!(victim.shape(), vec![8192]);
+    assert_eq!(victim.chunk(), Some(vec![512]));
     assert_eq!(
         file.dataset("keep").unwrap().read_raw::<i32>().unwrap(),
         vec![1, 2, 3, 4]
@@ -126,7 +150,10 @@ fn paged_file_with_a_sub_page_fragment_in_the_large_manager() {
         a.write_raw(&vec![7i64; 512]).unwrap();
         f.close().unwrap();
     });
-    let attr = file.dataset("d").unwrap().attr("big_attr").unwrap();
+    assert_persisting(&file, Some(512));
+    let dataset = file.dataset("d").unwrap();
+    assert_eq!(dataset.read_raw::<f64>().unwrap().len(), 64);
+    let attr = dataset.attr("big_attr").unwrap();
     assert_eq!(attr.read_raw::<i64>().unwrap().len(), 512);
 }
 
@@ -149,10 +176,15 @@ fn two_hard_links_to_one_dataset() {
         f.link_hard("aa", "bb").unwrap();
         f.close().unwrap();
     });
-    for name in ["aa", "bb"] {
-        assert_eq!(
-            file.dataset(name).unwrap().read_raw::<i32>().unwrap(),
-            vec![1, 2, 3]
-        );
-    }
+    assert_persisting(&file, None);
+    let (aa, bb) = (
+        file.loc_info_by_name("aa").unwrap(),
+        file.loc_info_by_name("bb").unwrap(),
+    );
+    assert_eq!(aa.token, bb.token, "aa and bb are one object");
+    assert_eq!(aa.num_links, 2);
+    assert_eq!(
+        file.dataset("aa").unwrap().read_raw::<i32>().unwrap(),
+        vec![1, 2, 3]
+    );
 }
