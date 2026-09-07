@@ -27,6 +27,7 @@ jobs:
 
     env:
       MIRIFLAGS: -Zmiri-strict-provenance
+      RUSTUP_TOOLCHAIN: nightly
 
     steps:
       - name: Checkout
@@ -80,6 +81,9 @@ jobs:
   heap-baseline:
     name: heap baseline / macos aarch64
     runs-on: macos-latest
+
+    env:
+      RUSTUP_TOOLCHAIN: "1.97.0"
 
     steps:
       - name: Checkout
