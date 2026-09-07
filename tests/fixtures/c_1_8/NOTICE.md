@@ -6,8 +6,8 @@ last 1.8 release, and committed as ground-truth read fixtures for
 unit test in `src/superblock.rs`.
 
 They are produced by `regen.c` in this directory, built and run by `regen.sh`
-against the 1.8.23 install that `scripts/check-hdf5-18.sh` leaves under
-`tmp/hdf5-18-check/`. Nothing in `cargo test` invokes either: the fixtures are
+against the 1.8.23 install that `scripts/check_hdf5_compat.py` leaves under
+`tmp/hdf5-compat-check/install/`. Nothing in `cargo test` invokes either: the fixtures are
 committed, so the tests reading them are ordinary tests with no external
 dependency.
 

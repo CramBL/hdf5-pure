@@ -2,11 +2,11 @@
 #
 # Regenerate the HDF5 1.8-era read fixtures in this directory.
 #
-# Needs the HDF5 1.8.23 install that `scripts/check-hdf5-18.sh` builds; run that
+# Needs the HDF5 1.8.23 install that `just hdf5-build` builds; run that
 # first if it is not there. The fixtures are committed, so this is a developer
 # tool rather than part of any test run — nothing in `cargo test` invokes it.
 #
-#   ./scripts/check-hdf5-18.sh          # once, builds 1.8.23
+#   just hdf5-build                     # once, builds 1.8.23
 #   ./tests/fixtures/c_1_8/regen.sh
 #
 # Rerun it only to change what the fixtures contain. The committed files are the
@@ -16,11 +16,11 @@ set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(cd "$HERE/../../.." && pwd)"
-H5CC="$REPO/tmp/hdf5-18-check/install/bin/h5cc"
+H5CC="$REPO/tmp/hdf5-compat-check/install/bin/h5cc"
 
 if [ ! -x "$H5CC" ]; then
   echo "no HDF5 1.8.23 install at $H5CC" >&2
-  echo "run ./scripts/check-hdf5-18.sh first — it builds one" >&2
+  echo "run `just hdf5-build` first, it builds one" >&2
   exit 1
 fi
 
@@ -28,12 +28,12 @@ fi
 # "the 1.8 format" only here; against 1.10 or newer the same source writes a
 # version 3 superblock into v2_superblock.h5 and a version 2 one into
 # v1_superblock.h5, and both filenames become lies.
-VERSION="$("$REPO/tmp/hdf5-18-check/install/bin/h5dump" --version | awk '{print $NF}')"
+VERSION="$("$REPO/tmp/hdf5-compat-check/install/bin/h5dump" --version | awk '{print $NF}')"
 case "$VERSION" in
   1.8.*) echo "==> using h5dump $VERSION" ;;
   *)
     echo "refusing to regenerate with HDF5 $VERSION: these fixtures are 1.8 output" >&2
-    echo "run ./scripts/check-hdf5-18.sh, which builds 1.8.23" >&2
+    echo "run `just hdf5-build`, which builds 1.8.23" >&2
     exit 1
     ;;
 esac

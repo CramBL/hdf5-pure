@@ -16,7 +16,7 @@
 //! without anything here changing. The feature set is not hypothetical —
 //! `--all-features` measured 416 bytes above the default set on the same machine,
 //! in the same commit. So the figures are recorded where they can be checked (see
-//! the `heap-baseline` job in `.github/workflows/ci.yml`) and the default suite
+//! the `heap-baseline` job in `.github/workflows/soundness.yml`) and the default suite
 //! runs the rules instead. Widening this to a second platform is a matter of
 //! measuring it there, not of loosening anything.
 //!

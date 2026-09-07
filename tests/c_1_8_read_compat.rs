@@ -8,7 +8,7 @@
 //! file using it opens with `#![cfg(not(target_pointer_width = "32"))]` and
 //! compiles out on the i686 target, which is where address arithmetic is most
 //! likely to be wrong. Reading committed bytes needs no dev-dependency, so this
-//! runs there; it is listed in the `cross test` target list in `ci.yml`.
+//! runs there; it is listed in the `test-32bit` recipe in the justfile.
 //!
 //! The committed corpus also had nothing at these versions: of the 80 tracked
 //! `.h5`/`.mat` fixtures before these two, 69 were superblock 0 and 11 were

@@ -107,16 +107,18 @@ criterion = { version = "0.5", default-features = false }
 # matching `#![cfg(all(not(target_pointer_width = "32"), target_endian =
 # "little"))]` gate.
 #
-# The suite validates against the current *released* libhdf5, not a development
-# snapshot. Which one that is comes from the `hdf5-metno-src` pin in
-# `Cargo.lock`, since every CI job runs `--locked`; read `H5_VERS_MAJOR/MINOR/
-# RELEASE` in that crate's `ext/hdf5/src/H5public.h` to see it. Judge a bump by
-# the crosschecks rather than by release notes: several of them assert constants
-# derived from libhdf5 internals that a version change could move, and
+# The binding tracks upstream `main`, pinned by commit in `Cargo.lock` since
+# every CI job runs `--locked`; `cargo update -p hdf5-metno` moves it. The
+# libhdf5 it bundles is whichever release its submodule points at, and
+# `just hdf5-bundled-version` prints that. With `HDF5_DIR` set the binding
+# links the library found there instead, which is how the interop workflow
+# runs this suite against other releases. Judge a bump by the crosschecks
+# rather than by release notes: several of them assert constants derived from
+# libhdf5 internals that a version change could move, and
 # `tests/c_absence_predicate.rs` guards the assertion most sensitive to one by
 # re-measuring the C library's error codes against deliberately damaged files.
 [target.'cfg(all(not(target_pointer_width = "32"), target_endian = "little"))'.dev-dependencies]
-hdf5 = { package = "hdf5-metno", version = "0.14", features = ["static", "zlib"] }
+hdf5 = { package = "hdf5-metno", git = "https://github.com/metno/hdf5-rust", branch = "main", features = ["static", "zlib"] }
 
 [[example]]
 name = "matlab_fixtures"
