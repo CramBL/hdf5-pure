@@ -5,6 +5,7 @@ mod hygiene "scripts/hygiene.just"
 mod fuzz "scripts/fuzz.just"
 mod interop "scripts/interop.just"
 mod release "scripts/release.just"
+mod docs "scripts/docs.just"
 
 default:
     @just --list

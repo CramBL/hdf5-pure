@@ -107,10 +107,8 @@ Next, walk through the [Quick Start](quickstart.md).
 ## Building this documentation
 
 The site you are reading is built with [Material for MkDocs](https://squidfunk.github.io/mkdocs-material/).
-To preview it locally:
+To preview it locally, with [uv](https://docs.astral.sh/uv/) and [just](https://just.systems) installed:
 
 ```bash
-python -m venv .venv && . .venv/bin/activate
-pip install -r requirements-docs.txt
-mkdocs serve   # http://127.0.0.1:8000
+just docs::serve   # http://127.0.0.1:8000
 ```
