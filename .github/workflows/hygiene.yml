@@ -47,8 +47,8 @@ jobs:
       - name: Unused dependencies
         run: just hygiene::shear
 
-  hygiene:
-    name: hygiene
+  ci-hygiene-guard:
+    name: ci-hygiene-guard
     runs-on: ubuntu-latest
     needs: [shear]
     permissions:

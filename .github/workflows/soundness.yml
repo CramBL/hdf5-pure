@@ -86,8 +86,8 @@ jobs:
       - name: Check the recorded figures
         run: just soundness::heap-baseline
 
-  soundness:
-    name: soundness
+  ci-soundness-guard:
+    name: ci-soundness-guard
     runs-on: ubuntu-latest
     needs: [miri, heap-baseline]
     permissions:
