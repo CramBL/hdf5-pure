@@ -134,8 +134,8 @@ hdf5_sys = { package = "hdf5-metno-sys", git = "https://github.com/metno/hdf5-ru
 name = "matlab_fixtures"
 required-features = ["serde"]
 
-[[example]]
-name = "libver_fixtures"
+[[test]]
+name = "libver_matrix_crosscheck"
 required-features = ["serde"]
 
 [[example]]

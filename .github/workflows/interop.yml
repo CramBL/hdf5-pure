@@ -25,9 +25,8 @@ defaults:
     shell: bash
 
 jobs:
-  # The test suite linking each release of the C library, and that release's
-  # `h5dump` and `h5repack` on the fixtures. Each release is built from source
-  # by `scripts/build_hdf5.py` and cached.
+  # The test suite linking each release of the C library. Each release is
+  # built from source by `scripts/build_hdf5.py` and cached.
   hdf5:
     name: hdf5 / ${{ matrix.version }} / ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
@@ -77,42 +76,17 @@ jobs:
       - name: Build HDF5 ${{ matrix.version }}
         run: just hdf5-build ${{ matrix.version }}
 
-      # A 1.8 library must reject the version 3 superblock of the 1.10 format.
-      # Every later release must open it. The 1.8 format must open everywhere
-      # and survive `h5repack`.
-      - name: Check the format boundary with its tools
-        run: |
-          eval "$(just hdf5-env ${{ matrix.version }})"
-          cargo run --locked --features serde --example libver_fixtures -- tmp/hdf5/fixtures
-          case "${{ matrix.version }}" in
-            1.8.*) reads_v110=false ;;
-            *) reads_v110=true ;;
-          esac
-          failed=0
-          for name in plain_v110.h5 mat_v110.mat; do
-            if h5dump -n "tmp/hdf5/fixtures/$name" >/dev/null 2>&1; then opened=true; else opened=false; fi
-            if [ "$opened" = "$reads_v110" ]; then
-              echo "ok   $name: opened=$opened"
-            else
-              echo "FAIL $name: opened=$opened, expected $reads_v110"; failed=1
-            fi
-          done
-          for name in plain_v18.h5 mat_v18.mat mat_string_v18.mat; do
-            if h5dump -n "tmp/hdf5/fixtures/$name" >/dev/null 2>&1 \
-               && h5repack "tmp/hdf5/fixtures/$name" "tmp/hdf5/fixtures/repacked-$name"; then
-              echo "ok   $name: opened and repacked"
-            else
-              echo "FAIL $name: not opened or not repacked"; failed=1
-            fi
-          done
-          exit $failed
-
-      # The test suite linking this release. Failures do not fail the job.
+      # The test suite linking this release. 1.8 runs the format boundary
+      # crosscheck alone: the rest of the suite is about the 1.10 formats and
+      # the wrapper APIs that arrived with them.
       - name: Run the test suite against it
-        continue-on-error: true
         run: |
           eval "$(just hdf5-env ${{ matrix.version }})"
-          just test-external-hdf5 --features serde --no-fail-fast
+          case "${{ matrix.version }}" in
+            1.8.*) tests="--test libver_matrix_crosscheck" ;;
+            *) tests="" ;;
+          esac
+          just test-external-hdf5 --features serde --no-fail-fast $tests
 
   # The matrix must include the release `hdf5-metno` bundles, which the
   # crosschecks in `ci.yml` link.

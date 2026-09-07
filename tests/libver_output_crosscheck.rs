@@ -14,9 +14,9 @@
 //!
 //! It cannot check the boundary itself. The `hdf5-metno` dev-dependency builds a
 //! current libhdf5, which reads both formats without complaint, so nothing here
-//! would fail if the bound stopped working. The interop workflow covers that
-//! half by building HDF5 1.8.23 and pointing its tools at both formats, and
-//! `just hdf5-build 1.8.23` builds the same library locally.
+//! would fail if the bound stopped working. `tests/libver_matrix_crosscheck.rs`
+//! covers that half against every release the interop workflow builds, 1.8.23
+//! included.
 //!
 //! Measured there when this landed, so the boundary is observed rather than
 //! inferred from the format specification:

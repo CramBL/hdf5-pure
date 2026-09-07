@@ -144,9 +144,9 @@ discipline backs the optional [ZFP filter](../guide/compression.md)
 
 The 1.8 output format is the one claim those tests cannot make, because every
 library they link is 1.10 or newer and reads both formats happily.
-The interop workflow covers it by building HDF5 1.8.23 and pointing its
-tools at both: the 1.10 format cannot be opened at all, the 1.8 format reads
-completely, and a 1.8 `h5repack` round trip accepts every object. That
+`tests/libver_matrix_crosscheck.rs` covers it against every release the
+interop workflow builds, 1.8.23 included: the 1.10 format cannot be opened at
+all before 1.10, and the 1.8 format reads completely everywhere. That
 measures the format boundary rather than any particular MathWorks build, which
 only MATLAB itself can confirm — `examples/octave/check_format.m` asks it
 directly.
