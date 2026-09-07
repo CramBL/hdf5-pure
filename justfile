@@ -22,6 +22,10 @@ test *ARGS:
 test-full *ARGS:
     cargo nextest run --locked --features __hdf5-bundled --features "serde zfp fast-deflate provenance ndarray" {{ ARGS }}
 
+# Each optional feature on its own beside the defaults, one run per feature.
+test-each-feature *ARGS:
+    cargo hack --each-feature --include-features serde,zfp,ndarray --exclude-no-default-features --features __hdf5-bundled,default nextest run --locked {{ ARGS }}
+
 test-lib *ARGS:
     cargo test --lib --features __hdf5-bundled {{ ARGS }}
 
@@ -30,6 +34,9 @@ doctest *ARGS:
 
 doctest-full *ARGS:
     cargo test --locked --doc --features __hdf5-bundled --features "serde zfp fast-deflate provenance ndarray" {{ ARGS }}
+
+doctest-each-feature *ARGS:
+    cargo hack --each-feature --include-features serde,zfp,ndarray --exclude-no-default-features --features __hdf5-bundled,default test --locked --doc {{ ARGS }}
 
 fmt:
     cargo fmt --all

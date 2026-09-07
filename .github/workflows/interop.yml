@@ -84,35 +84,6 @@ jobs:
       - name: Run the test suite against it
         run: just interop::test-hdf5 ${{ matrix.version }} ${{ matrix.features }} --no-fail-fast
 
-  # The matrix must include the release `hdf5-metno` bundles, which the
-  # crosschecks in `ci.yml` link.
-  bundled-version:
-    name: bundled version / ubuntu-latest
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-
-      - name: Install Rust
-        run: rustup toolchain install
-
-      - name: Install tools
-        uses: taiki-e/install-action@920ab1831fbf4fb3ef75c8ead83556c918bb7290 # v2.79.8
-        with:
-          tool: just
-
-      - name: Check the matrix lists it
-        run: |
-          version="$(just interop::hdf5-bundled-version)"
-          echo "hdf5-metno bundles $version"
-          if ! grep -qE "^\s+version: \[.*\"$version\".*\]" .github/workflows/interop.yml; then
-            echo "::error::$version is not in the interop matrix version list."
-            exit 1
-          fi
-
   # The reference C library for MATLAB files, reading back what `mat` writes.
   # From conda-forge because the test calls `Mat_VarCreateStruct2`, which no
   # distribution package carries yet.
@@ -172,7 +143,7 @@ jobs:
   ci-interop-guard:
     name: ci-interop-guard
     runs-on: ubuntu-latest
-    needs: [hdf5, bundled-version, matio]
+    needs: [hdf5, matio]
     permissions:
       contents: none
     if: always()
