@@ -155,8 +155,8 @@ jobs:
       - name: Build
         run: just ${{ matrix.recipe }}
 
-  portability:
-    name: portability
+  ci-portability-guard:
+    name: ci-portability-guard
     runs-on: ubuntu-latest
     needs: [clippy-32bit, cast-gate, qemu, build]
     permissions:
