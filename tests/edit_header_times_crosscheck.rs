@@ -16,261 +16,121 @@
 //! The fixture has to come from the C library: nothing in this crate's whole-file
 //! writer emits either block, so a fixture written here would only test the
 //! editor against itself. And the assertion has to come from the C library too —
-//! this crate exposes no timestamp reader at all, so `H5Oget_info_by_name3` is
-//! the only thing that can say the file still means what it meant.
+//! this crate exposes no timestamp reader at all, so the C library's object info
+//! is the only thing that can say the file still means what it meant.
 
-use std::ffi::{CString, c_char, c_int, c_uint};
 use std::path::Path;
 use std::sync::{Mutex, MutexGuard};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use hdf5::plist::group_create::GroupCreate;
 use hdf5_pure::{AttrValue, File};
+use hdf5_sys::h5p::{H5Pget_attr_phase_change, H5Pset_attr_phase_change};
 use tempfile::tempdir;
 
-// The entry points these fixtures need, resolved at link time from the statically
-// linked libhdf5. `hdf5-metno` exposes neither the attribute phase-change
-// property nor the object-info timestamps, and both are what this file is about.
-unsafe extern "C" {
-    fn H5Pcreate(cls_id: i64) -> i64;
-    fn H5Pclose(plist_id: i64) -> c_int;
-    fn H5Pset_attr_phase_change(plist_id: i64, max_compact: c_uint, min_dense: c_uint) -> c_int;
-    fn H5Pget_attr_phase_change(
-        plist_id: i64,
-        max_compact: *mut c_uint,
-        min_dense: *mut c_uint,
-    ) -> c_int;
-    fn H5Fcreate(name: *const c_char, flags: c_uint, fcpl: i64, fapl: i64) -> i64;
-    fn H5Fopen(name: *const c_char, flags: c_uint, fapl: i64) -> i64;
-    fn H5Fclose(id: i64) -> c_int;
-    fn H5Gcreate2(loc: i64, name: *const c_char, lcpl: i64, gcpl: i64, gapl: i64) -> i64;
-    fn H5Gopen2(loc: i64, name: *const c_char, gapl: i64) -> i64;
-    fn H5Gget_create_plist(group_id: i64) -> i64;
-    fn H5Gclose(id: i64) -> c_int;
-    fn H5Dcreate2(
-        loc: i64,
-        name: *const c_char,
-        type_id: i64,
-        space: i64,
-        lcpl: i64,
-        dcpl: i64,
-        dapl: i64,
-    ) -> i64;
-    fn H5Dopen2(loc: i64, name: *const c_char, dapl: i64) -> i64;
-    fn H5Dget_create_plist(dataset_id: i64) -> i64;
-    fn H5Dclose(id: i64) -> c_int;
-    fn H5Screate(class: c_int) -> i64;
-    fn H5Screate_simple(rank: c_int, dims: *const u64, maxdims: *const u64) -> i64;
-    fn H5Sclose(id: i64) -> c_int;
-    fn H5Acreate2(
-        loc: i64,
-        name: *const c_char,
-        type_id: i64,
-        space: i64,
-        acpl: i64,
-        aapl: i64,
-    ) -> i64;
-    fn H5Awrite(attr: i64, mem_type: i64, buf: *const std::ffi::c_void) -> c_int;
-    fn H5Aclose(id: i64) -> c_int;
-    fn H5Oget_info_by_name3(
-        loc_id: i64,
-        name: *const c_char,
-        oinfo: *mut ObjInfo,
-        fields: c_uint,
-        lapl_id: i64,
-    ) -> c_int;
-}
-
-unsafe extern "C" {
-    static H5P_CLS_GROUP_CREATE_ID_g: i64;
-    static H5P_CLS_DATASET_CREATE_ID_g: i64;
-    static H5T_NATIVE_INT_g: i64;
-}
-
-/// `H5O_info2_t`: file number, object token, type, reference count, the four
-/// timestamps, and the attribute count.
-///
-/// `c_ulong` rather than `u64` for `fileno` on purpose — it is `unsigned long` in
-/// C, which is 32 bits on Windows and 64 elsewhere, and every field after it
-/// would shift by four bytes if this said `u64`. The timestamp assertions below
-/// are what check the layout: a field read at the wrong offset lands in the token
-/// or the attribute count and cannot pass a "this is within the last few seconds"
-/// test.
-#[repr(C)]
-#[derive(Clone, Copy, Default, Debug)]
-struct ObjInfo {
-    fileno: std::ffi::c_ulong,
-    token: [u8; 16],
-    otype: c_int,
-    rc: c_uint,
-    atime: i64,
-    mtime: i64,
-    ctime: i64,
-    btime: i64,
-    num_attrs: u64,
-}
-
-const H5P_DEFAULT: i64 = 0;
-const H5F_ACC_TRUNC: c_uint = 0x0002;
-const H5F_ACC_RDONLY: c_uint = 0x0000;
-const H5S_SCALAR: c_int = 0;
-/// `H5O_INFO_BASIC | H5O_INFO_TIME`.
-const H5O_INFO_BASIC_AND_TIME: c_uint = 0x0001 | 0x0002;
+mod common;
+use common::create_v18;
 
 /// A phase-change pair the C library would never write by default (its defaults
 /// are 8 and 6), and one it therefore stores in the header prefix rather than
 /// leaving implied.
-const MAX_COMPACT: c_uint = 32;
-const MIN_DENSE: c_uint = 24;
+const MAX_COMPACT: u32 = 32;
+const MIN_DENSE: u32 = 24;
 
-fn cstr(s: &str) -> CString {
-    CString::new(s).expect("a test name holds no NUL")
-}
+const OBJECTS: [&str; 2] = ["/g", "/d"];
 
-// `hdf5-metno` serializes its own C calls through an internal lock, and the raw
-// FFI above bypasses it. Serialize every C-library call in this file through one
-// mutex so a raw call never races a concurrent libhdf5 call in another test (the
-// C library is not built thread-safe here). Poisoning is ignored: a panic in one
+// The two raw calls below, each marked with the upstream issue that would
+// remove it, bypass the lock the wrapper serializes its own calls through.
+// Every C-library use in this file takes this guard, so a raw call never races
+// a wrapper call on another test thread. Poisoning is ignored: a panic in one
 // test must not cascade into the others.
 static C_LIB: Mutex<()> = Mutex::new(());
 
-/// Hold the C-library lock, and force the library's global property-list class
-/// ids to be initialized: reading them before `H5open` yields zero, and every
-/// `H5Pcreate` then fails.
 fn c_lib_guard() -> MutexGuard<'static, ()> {
-    let guard = C_LIB.lock().unwrap_or_else(|e| e.into_inner());
-    hdf5::library_version();
-    guard
+    C_LIB.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-/// Both objects of the fixture, so every assertion covers a group and a dataset —
-/// the two headers the editor rebuilds by different routes.
-const OBJECTS: [&str; 2] = ["/g", "/d"];
+/// A group creation property list carrying the phase-change pair.
+fn gcpl_with_phase_change() -> GroupCreate {
+    let plist = GroupCreate::try_new().expect("a group creation property list");
+    // TODO: https://github.com/metno/hdf5-rust/issues/229
+    // Safety: a live property list id and two in-range thresholds.
+    let rc = unsafe { H5Pset_attr_phase_change(plist.id(), MAX_COMPACT, MIN_DENSE) };
+    assert_eq!(rc, 0, "H5Pset_attr_phase_change");
+    plist
+}
 
-/// Write a file whose group `/g` and dataset `/d` each carry one integer
+/// A file with a group `/g` and a dataset `/d`, each carrying one integer
 /// attribute and a non-default attribute phase-change pair.
 ///
 /// Nothing here asks for timestamps: the C library stores them on every version 2
 /// header it writes, which is the whole point.
 fn write_fixture(path: &Path) {
     let _c = c_lib_guard();
-    // Safety: every id below is produced by the matching C call and closed here.
-    unsafe {
-        let name = cstr(path.to_str().expect("a temp path is UTF-8"));
-        let file = H5Fcreate(name.as_ptr(), H5F_ACC_TRUNC, H5P_DEFAULT, H5P_DEFAULT);
-        assert!(file > 0, "create {}", path.display());
-
-        let gcpl = H5Pcreate(H5P_CLS_GROUP_CREATE_ID_g);
-        assert_eq!(H5Pset_attr_phase_change(gcpl, MAX_COMPACT, MIN_DENSE), 0);
-        let gname = cstr("g");
-        let group = H5Gcreate2(file, gname.as_ptr(), H5P_DEFAULT, gcpl, H5P_DEFAULT);
-        assert!(group > 0, "create group");
-
-        let dcpl = H5Pcreate(H5P_CLS_DATASET_CREATE_ID_g);
-        assert_eq!(H5Pset_attr_phase_change(dcpl, MAX_COMPACT, MIN_DENSE), 0);
-        let dims = [4u64];
-        let dspace = H5Screate_simple(1, dims.as_ptr(), std::ptr::null());
-        let dname = cstr("d");
-        let dataset = H5Dcreate2(
-            file,
-            dname.as_ptr(),
-            H5T_NATIVE_INT_g,
-            dspace,
-            H5P_DEFAULT,
-            dcpl,
-            H5P_DEFAULT,
-        );
-        assert!(dataset > 0, "create dataset");
-
-        let scalar = H5Screate(H5S_SCALAR);
-        for owner in [group, dataset] {
-            let an = cstr("kept");
-            let attr = H5Acreate2(
-                owner,
-                an.as_ptr(),
-                H5T_NATIVE_INT_g,
-                scalar,
-                H5P_DEFAULT,
-                H5P_DEFAULT,
-            );
-            assert!(attr > 0, "create attribute");
-            let value = 1i32;
-            assert_eq!(
-                H5Awrite(attr, H5T_NATIVE_INT_g, (&raw const value).cast()),
-                0
-            );
-            H5Aclose(attr);
-        }
-        H5Sclose(scalar);
-        H5Sclose(dspace);
-        H5Dclose(dataset);
-        H5Gclose(group);
-        H5Pclose(dcpl);
-        H5Pclose(gcpl);
-        H5Fclose(file);
+    let file = create_v18(path);
+    let group = file
+        .create_group_builder()
+        .set_gcpl(&gcpl_with_phase_change())
+        .create("g")
+        .expect("create group");
+    // The wrapper's dataset builder turns time tracking off. The C library's
+    // default is on, and that default is what this fixture is about.
+    let dataset = file
+        .new_dataset::<i32>()
+        .obj_track_times(true)
+        .with_dcpl(|p| p.attr_phase_change(MAX_COMPACT, MIN_DENSE))
+        .shape([4])
+        .create("d")
+        .expect("create dataset");
+    let owners: [&hdf5::Location; 2] = [&group, &dataset];
+    for owner in owners {
+        owner
+            .new_attr::<i32>()
+            .shape(())
+            .create("kept")
+            .expect("create attribute")
+            .write_scalar(&1i32)
+            .expect("write attribute");
     }
+    file.close().unwrap();
 }
 
 /// The object info the C library reports for `object` in `path`.
-fn object_info(path: &Path, object: &str) -> ObjInfo {
+fn object_info(path: &Path, object: &str) -> hdf5::LocationInfo {
     let _c = c_lib_guard();
-    let name = cstr(path.to_str().expect("a temp path is UTF-8"));
-    let oname = cstr(object);
-    // Safety: the file id is closed below, and `info` is written by the library.
-    unsafe {
-        let file = H5Fopen(name.as_ptr(), H5F_ACC_RDONLY, H5P_DEFAULT);
-        assert!(file > 0, "the C library opens {}", path.display());
-        let mut info = ObjInfo::default();
-        let rc = H5Oget_info_by_name3(
-            file,
-            oname.as_ptr(),
-            &raw mut info,
-            H5O_INFO_BASIC_AND_TIME,
-            H5P_DEFAULT,
-        );
-        assert_eq!(rc, 0, "the C library reads info for {object}");
-        H5Fclose(file);
-        info
-    }
+    hdf5::File::open(path)
+        .unwrap_or_else(|e| panic!("the C library opens {}: {e}", path.display()))
+        .loc_info_by_name(object)
+        .unwrap_or_else(|e| panic!("the C library reads info for {object}: {e}"))
 }
 
 /// The attribute phase-change thresholds the C library reports for `object`'s
 /// creation property list.
-fn phase_change(path: &Path, object: &str) -> (c_uint, c_uint) {
+fn phase_change(path: &Path, object: &str) -> (u32, u32) {
     let _c = c_lib_guard();
-    let name = cstr(path.to_str().expect("a temp path is UTF-8"));
-    let oname = cstr(object);
-    // Safety: every id below is produced by the matching C call and closed here.
-    unsafe {
-        let file = H5Fopen(name.as_ptr(), H5F_ACC_RDONLY, H5P_DEFAULT);
-        assert!(file > 0, "the C library opens {}", path.display());
-        let is_group = object == "/g";
-        let id = if is_group {
-            H5Gopen2(file, oname.as_ptr(), H5P_DEFAULT)
-        } else {
-            H5Dopen2(file, oname.as_ptr(), H5P_DEFAULT)
+    let file = hdf5::File::open(path)
+        .unwrap_or_else(|e| panic!("the C library opens {}: {e}", path.display()));
+    if object == "/g" {
+        let gcpl = file.group(object).unwrap().gcpl().unwrap();
+        let (mut max_compact, mut min_dense) = (0u32, 0u32);
+        // TODO: https://github.com/metno/hdf5-rust/issues/229
+        // Safety: a live property list id and two out-pointers.
+        let rc = unsafe {
+            H5Pget_attr_phase_change(gcpl.id(), &raw mut max_compact, &raw mut min_dense)
         };
-        assert!(id > 0, "the C library opens {object}");
-        let plist = if is_group {
-            H5Gget_create_plist(id)
-        } else {
-            H5Dget_create_plist(id)
-        };
-        assert!(plist > 0, "the C library reads {object}'s creation plist");
-        let mut max_compact = 0;
-        let mut min_dense = 0;
         assert_eq!(
-            H5Pget_attr_phase_change(plist, &raw mut max_compact, &raw mut min_dense),
-            0,
-            "the C library reads {object}'s phase-change thresholds",
+            rc, 0,
+            "the C library reads {object}'s phase-change thresholds"
         );
-        H5Pclose(plist);
-        if is_group {
-            H5Gclose(id);
-        } else {
-            H5Dclose(id);
-        }
-        H5Fclose(file);
         (max_compact, min_dense)
+    } else {
+        let pair = file
+            .dataset(object)
+            .unwrap()
+            .dcpl()
+            .unwrap()
+            .attr_phase_change();
+        (pair.max_compact, pair.min_dense)
     }
 }
 
@@ -293,7 +153,7 @@ fn an_in_place_edit_keeps_a_headers_times_and_phase_change_thresholds() {
     let p = dir.path().join("t.h5");
     write_fixture(&p);
 
-    let before: Vec<ObjInfo> = OBJECTS.iter().map(|o| object_info(&p, o)).collect();
+    let before: Vec<hdf5::LocationInfo> = OBJECTS.iter().map(|o| object_info(&p, o)).collect();
     for (object, info) in OBJECTS.iter().zip(&before) {
         assert!(
             info.btime > 0,

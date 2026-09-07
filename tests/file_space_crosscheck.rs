@@ -22,35 +22,13 @@ fn open_bounded(path: &std::path::Path) -> Result<File, hdf5_pure::Error> {
     )
 }
 
-use std::sync::{Mutex, MutexGuard};
 use tempfile::tempdir;
 
 mod common;
 use common::assert_c_absent;
 
-// The reference free-space query, resolved at link time from the statically
-// linked libhdf5. Returns the total free space the C library tracks for the open
-// file, which it can only report by loading and parsing the on-disk
-// free-space-manager (`FSHD`/`FSSE`) blocks — so a positive result proves the C
-// library accepts the managers hdf5-pure wrote.
-unsafe extern "C" {
-    fn H5Fget_freespace(file_id: i64) -> i64;
-}
-
-// `hdf5-metno` serializes its own C calls through an internal lock, but the raw
-// `H5Fget_freespace` FFI above bypasses it. Serialize every C-library call in this
-// file through one mutex so the raw call never races a concurrent libhdf5 call in
-// another test (the C library is not built thread-safe here). Poisoning is
-// ignored: a panic in one test must not cascade into the others.
-static C_LIB: Mutex<()> = Mutex::new(());
-
-fn c_lib_guard() -> MutexGuard<'static, ()> {
-    C_LIB.lock().unwrap_or_else(|e| e.into_inner())
-}
-
 #[test]
 fn c_library_reads_our_strategy() {
-    let _c = c_lib_guard();
     let dir = tempdir().unwrap();
     for (i, (ours, expected)) in [
         (
@@ -100,7 +78,6 @@ fn c_library_reads_our_strategy() {
 
 #[test]
 fn we_read_c_library_persisted_free_space() {
-    let _c = c_lib_guard();
     // The C library writes a persisted FSM file with real free space (a deleted
     // dataset). hdf5-pure must follow the File Space Info manager addresses to the
     // on-disk FSHD/FSSE blocks and recover the freed sections.
@@ -165,7 +142,6 @@ fn we_read_c_library_persisted_free_space() {
 
 #[test]
 fn c_library_reads_our_persisted_free_space() {
-    let _c = c_lib_guard();
     // The mirror of `we_read_c_library_persisted_free_space`: hdf5-pure writes a
     // persisted file with real free space (a deleted dataset), and the reference
     // C library opens it, recovers the strategy, reads the survivors, and loads
@@ -220,7 +196,7 @@ fn c_library_reads_our_persisted_free_space() {
 
     // Loading the managers requires parsing our FSHD/FSSE blocks; the C library
     // reports at least the freed dataset's storage as free space.
-    let free_c = unsafe { H5Fget_freespace(f.id()) };
+    let free_c = f.free_space() as i64;
     assert!(
         free_c >= 1600,
         "C library loads our free-space managers and reports the freed space (got {free_c})"
@@ -229,7 +205,6 @@ fn c_library_reads_our_persisted_free_space() {
 
 #[test]
 fn c_library_reads_managers_we_placed_mid_file() {
-    let _c = c_lib_guard();
     // The test above makes free space and stops, so its managers are written at
     // end-of-file — the only place they could go on a file that had no free space
     // yet. Once a file *has* free space, a commit places them in it (issue #358),
@@ -314,7 +289,7 @@ fn c_library_reads_managers_we_placed_mid_file() {
         f.dataset("c").unwrap().read_raw::<i32>().unwrap(),
         vec![3; 100]
     );
-    let free_c = unsafe { H5Fget_freespace(f.id()) };
+    let free_c = f.free_space() as i64;
     assert_eq!(
         free_c as u64, total_ours,
         "the C library's free-space total must match the managers we wrote"
@@ -358,7 +333,6 @@ fn c_library_reads_managers_we_placed_mid_file() {
 
 #[test]
 fn we_read_c_library_strategy() {
-    let _c = c_lib_guard();
     let dir = tempdir().unwrap();
 
     // Each case: a C-written strategy and what hdf5-pure should report. The C
@@ -422,7 +396,6 @@ fn we_read_c_library_strategy() {
 
 #[test]
 fn c_library_reads_our_fresh_persisting_file() {
-    let _c = c_lib_guard();
     // Regression for issue #178: a fresh `persist = true` non-paged file must record
     // a defined `eoa_fsm_fsalloc` in its File Space Info message. hdf5-pure once
     // wrote the UNDEF sentinel, which an assertion-enabled libhdf5 rejects on open
@@ -462,13 +435,12 @@ fn c_library_reads_our_fresh_persisting_file() {
         f.dataset("d").unwrap().read_raw::<i32>().unwrap(),
         vec![1, 2, 3]
     );
-    let free_c = unsafe { H5Fget_freespace(f.id()) };
+    let free_c = f.free_space() as i64;
     assert_eq!(free_c as u64, total_ours);
 }
 
 #[test]
 fn c_library_reads_our_paged_file() {
-    let _c = c_lib_guard();
     // hdf5-pure writes a genuine paged (H5F_FSPACE_STRATEGY_PAGE) persisting file
     // with small and large datasets. The reference C library must recover the
     // paged strategy, read every dataset, load the per-page-type free-space
@@ -513,7 +485,7 @@ fn c_library_reads_our_paged_file() {
 
     // Loading the managers requires parsing our FSHD/FSSE blocks; the C library's
     // free-space total equals the sum of the sections we wrote.
-    let free_c = unsafe { H5Fget_freespace(f.id()) };
+    let free_c = f.free_space() as i64;
     assert_eq!(
         free_c as u64, total_ours,
         "C library free-space total matches our paged managers"
@@ -543,7 +515,6 @@ fn c_library_reads_our_paged_file() {
 
 #[test]
 fn c_library_reads_our_paged_chunked_file() {
-    let _c = c_lib_guard();
     // Paged interop for chunked datasets: hdf5-pure writes a paged persisting
     // file with a small chunked dataset and a large compressed (shuffle+deflate)
     // chunked dataset whose data begins a page-aligned run. The C library must
@@ -586,7 +557,7 @@ fn c_library_reads_our_paged_chunked_file() {
     );
     assert_eq!(f.dataset("s").unwrap().read_raw::<f64>().unwrap(), small);
     assert_eq!(f.dataset("big").unwrap().read_raw::<f64>().unwrap(), big);
-    let free_c = unsafe { H5Fget_freespace(f.id()) };
+    let free_c = f.free_space() as i64;
     assert_eq!(
         free_c as u64, total_ours,
         "C free-space matches our managers"
@@ -614,7 +585,6 @@ fn c_library_reads_our_paged_chunked_file() {
 
 #[test]
 fn c_library_reads_our_bounded_mutated_paged_file() {
-    let _c = c_lib_guard();
     // hdf5-pure creates a genuine paged persisting file, then grows it through the
     // bounded backend, appending enough rows to force
     // extensible-array index growth so the append allocates metadata as well as
@@ -664,7 +634,7 @@ fn c_library_reads_our_bounded_mutated_paged_file() {
     assert_eq!(f.dataset("d").unwrap().read_raw::<i32>().unwrap(), want);
     // Loading the managers parses our rewritten FSHD/FSSE blocks; the C library's
     // free-space total equals the sum of the sections we wrote.
-    let free_c = unsafe { H5Fget_freespace(f.id()) };
+    let free_c = f.free_space() as i64;
     assert_eq!(
         free_c as u64, total_ours,
         "C free-space total matches our rewritten paged managers"
@@ -690,7 +660,6 @@ fn c_library_reads_our_bounded_mutated_paged_file() {
 
 #[test]
 fn c_library_reads_our_staged_mutated_paged_file() {
-    let _c = c_lib_guard();
     // The whole-file editor's counterpart of the bounded crosscheck above (issue
     // #198): hdf5-pure creates a genuine paged persisting file, then mutates it
     // through `File::open_rw` + staged edits + `commit`, which allocates both raw
@@ -758,7 +727,7 @@ fn c_library_reads_our_staged_mutated_paged_file() {
     );
     // Loading the managers parses the per-page-type FSHD/FSSE blocks the commit
     // wrote; the C library's free-space total equals the sum of our sections.
-    let free_c = unsafe { H5Fget_freespace(f.id()) };
+    let free_c = f.free_space() as i64;
     assert_eq!(
         free_c as u64, total_ours,
         "C free-space total matches our rewritten paged managers"
@@ -784,7 +753,6 @@ fn c_library_reads_our_staged_mutated_paged_file() {
 
 #[test]
 fn c_library_reads_our_paged_file_after_free_space_reuse() {
-    let _c = c_lib_guard();
     // Issue #261: a paged file now draws on its own free space, so a delete
     // followed by a write of the same shape reuses the pages the delete released
     // instead of appending past them. Reuse is confined to the page type being
@@ -856,7 +824,7 @@ fn c_library_reads_our_paged_file_after_free_space_reuse() {
         f.dataset("ceiling").unwrap().read_raw::<f64>().unwrap(),
         kept
     );
-    let free_c = unsafe { H5Fget_freespace(f.id()) };
+    let free_c = f.free_space() as i64;
     assert_eq!(
         free_c as u64, total_ours,
         "C free-space total matches the managers the reusing commit rewrote"
@@ -887,7 +855,6 @@ fn c_library_reads_our_paged_file_after_free_space_reuse() {
 
 #[test]
 fn c_library_reads_our_paged_file_after_a_cross_page_type_claim() {
-    let _c = c_lib_guard();
     // Issue #286: a page holding nothing at all belongs to no page type, so either
     // kind may open one — which is what lets metadata reuse the pages a deleted
     // dataset's chunk data released, and how free space survives a close at all
@@ -955,7 +922,7 @@ fn c_library_reads_our_paged_file_after_a_cross_page_type_claim() {
         f.dataset("ceiling").unwrap().read_raw::<f64>().unwrap(),
         kept
     );
-    let free_c = unsafe { H5Fget_freespace(f.id()) };
+    let free_c = f.free_space() as i64;
     assert_eq!(
         free_c as u64, total_ours,
         "C free-space total matches the managers the claiming commit rewrote"
@@ -983,7 +950,6 @@ fn c_library_reads_our_paged_file_after_a_cross_page_type_claim() {
 
 #[test]
 fn pure_bounded_mutates_c_created_paged_file() {
-    let _c = c_lib_guard();
     // The reverse direction: the reference C library creates a genuine paged
     // persisting file with an unlimited chunked dataset; hdf5-pure grows it through
     // the bounded backend; then both the C library and hdf5-pure read every row
@@ -1040,7 +1006,7 @@ fn pure_bounded_mutates_c_created_paged_file() {
         },
     );
     assert_eq!(f.dataset("d").unwrap().read_raw::<i32>().unwrap(), want);
-    let free_c = unsafe { H5Fget_freespace(f.id()) };
+    let free_c = f.free_space() as i64;
     assert_eq!(
         free_c as u64, total_ours,
         "C free-space matches our managers"
@@ -1049,7 +1015,6 @@ fn pure_bounded_mutates_c_created_paged_file() {
 
 #[test]
 fn c_library_reads_our_paged_file_after_group_churn() {
-    let _c = c_lib_guard();
     // The reclaim a paged file performs under delete-and-recreate churn is a claim
     // about which bytes are free, and the reference library is the reader that has
     // to agree with it (issue #388). hdf5-pure creates a paged persisting file,
@@ -1131,7 +1096,7 @@ fn c_library_reads_our_paged_file_after_group_churn() {
         f.dataset("live/log").unwrap().read_raw::<i32>().unwrap(),
         vec![7, 8, 9]
     );
-    let free_c = unsafe { H5Fget_freespace(f.id()) };
+    let free_c = f.free_space() as i64;
     assert_eq!(
         free_c as u64, total_ours,
         "C free-space total matches the managers the churn rewrote"
@@ -1177,7 +1142,6 @@ fn c_library_reads_our_paged_file_after_group_churn() {
 /// file and hdf5-pure reads the result.
 #[test]
 fn c_library_reads_our_file_after_a_release_shortened_it() {
-    let _c = c_lib_guard();
     let dir = tempdir().unwrap();
     const ROWS: usize = 65536;
     let payload: Vec<i32> = (0..ROWS as i32).collect();
@@ -1248,7 +1212,7 @@ fn c_library_reads_our_file_after_a_release_shortened_it() {
             vec![1, 2, 3, 4],
             "{label}: the C library reads the survivor out of the shortened file"
         );
-        let free_c = unsafe { H5Fget_freespace(f.id()) };
+        let free_c = f.free_space() as i64;
         assert_eq!(
             free_c as u64, total_ours,
             "{label}: the C free-space total matches the managers the release rewrote"
@@ -1290,7 +1254,6 @@ fn c_library_reads_our_file_after_a_release_shortened_it() {
 /// says the paged managers still segregate what they should.
 #[test]
 fn c_library_reads_our_file_after_an_append_reused_free_space() {
-    let _c = c_lib_guard();
     let dir = tempdir().unwrap();
 
     // Comfortably more than one reserve batch, so the append draws from the hole
@@ -1389,7 +1352,7 @@ fn c_library_reads_our_file_after_an_append_reused_free_space() {
             f.dataset("ceiling").unwrap().read_raw::<i32>().unwrap(),
             vec![9, 9, 9]
         );
-        let free_c = unsafe { H5Fget_freespace(f.id()) };
+        let free_c = f.free_space() as i64;
         assert_eq!(
             free_c as u64, total_ours,
             "{label}: C free-space total matches the managers the reservation rewrote"

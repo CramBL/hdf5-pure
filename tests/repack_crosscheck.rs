@@ -2026,6 +2026,11 @@ fn a_never_written_dataset_keeps_its_pipeline_order_and_optional_flags() {
 /// canonically ordered, all-mandatory pipeline.
 #[test]
 fn a_vlen_string_dataset_keeps_its_pipeline_order_and_optional_flags() {
+    // Before 2.0 the C library refuses a mandatory filter, fletcher32 here, on a
+    // variable-length dataset.
+    if hdf5::library_version() < (2, 0, 0) {
+        return;
+    }
     let dir = tempdir().unwrap();
     let src = dir.path().join("c_vlen_order.h5");
     let dst = dir.path().join("c_vlen_order_repacked.h5");

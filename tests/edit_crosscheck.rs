@@ -20,7 +20,7 @@ use hdf5_pure::{AttrValue, File, FileBuilder, ScaleOffset};
 use tempfile::tempdir;
 
 mod common;
-use common::assert_c_absent;
+use common::{assert_c_absent, create_v18};
 
 /// Stage an add, an add-into-a-group, a delete, and a copy — the full op set.
 fn stage_edits(session: &File) {
@@ -1850,7 +1850,7 @@ fn the_hard_link_rule_does_not_refuse_an_ordinary_group() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("c_hardlink_group_ok.h5");
     {
-        let file = hdf5::File::create(&path).unwrap();
+        let file = create_v18(&path);
         let g = file.create_group("g").unwrap();
         g.create_group("child").unwrap();
         // A *soft* link is not a hard link: it resolves by path, so it still
@@ -1935,7 +1935,7 @@ fn editing_a_group_is_refused_when_the_links_cannot_be_walked() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("c_hardlink_group_damaged.h5");
     {
-        let file = hdf5::File::create(&path).unwrap();
+        let file = create_v18(&path);
         let g = file.create_group("g").unwrap();
         g.new_dataset::<i32>()
             .shape((3,))

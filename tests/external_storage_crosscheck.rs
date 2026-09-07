@@ -11,99 +11,24 @@
 //! every element of a dataset that holds data, and a rewrite that did would emit
 //! a schema-only dataset in place of it — both reporting success.
 
-use std::ffi::{CString, c_char, c_int};
-use std::sync::{Mutex, MutexGuard};
-
 use hdf5_pure::{File, RepackOptions, repack};
 use tempfile::tempdir;
 
-const DEFAULT: i64 = 0;
-
-// libhdf5 is not built thread-safe here. `hdf5-metno` serializes its own calls
-// through a private global lock, but the raw `H5P…` / `H5D…` FFI below bypasses
-// it, so a raw call can race an `hdf5-metno` operation on another test thread and
-// abort the C library. EVERY test here takes this guard as its first line and
-// holds it for the whole body, so no two run C-library code at once (matching
-// `bounded_append_crosscheck` and `file_space_crosscheck`). Poisoning is ignored
-// so one test's panic does not cascade.
-static C_LIB: Mutex<()> = Mutex::new(());
-
-fn c_lib_guard() -> MutexGuard<'static, ()> {
-    C_LIB.lock().unwrap_or_else(|e| e.into_inner())
-}
-
-unsafe extern "C" {
-    fn H5Screate_simple(rank: c_int, dims: *const u64, maxdims: *const u64) -> i64;
-    fn H5Sclose(space_id: i64) -> c_int;
-    fn H5Pcreate(cls_id: i64) -> i64;
-    fn H5Pclose(plist_id: i64) -> c_int;
-    fn H5Pset_external(plist_id: i64, name: *const c_char, offset: i64, size: u64) -> c_int;
-    fn H5Dcreate2(
-        loc_id: i64,
-        name: *const c_char,
-        type_id: i64,
-        space_id: i64,
-        lcpl_id: i64,
-        dcpl_id: i64,
-        dapl_id: i64,
-    ) -> i64;
-    fn H5Dwrite(
-        dset: i64,
-        mem_type: i64,
-        mem_space: i64,
-        file_space: i64,
-        dxpl: i64,
-        buf: *const core::ffi::c_void,
-    ) -> c_int;
-    fn H5Dclose(dset_id: i64) -> c_int;
-    static H5P_CLS_DATASET_CREATE_ID_g: i64;
-    static H5T_NATIVE_INT_g: i64;
-}
+mod common;
+use common::create_v18;
 
 const N: usize = 16;
 
 /// Write `path` holding `/d`, an `N`-element i32 dataset stored in `payload`.
 fn write_external_fixture(path: &std::path::Path, payload: &str) {
-    let file = hdf5::File::create(path).unwrap();
-    let dcpl = unsafe { H5Pcreate(H5P_CLS_DATASET_CREATE_ID_g) };
-    assert!(dcpl >= 0, "H5Pcreate");
-    let ename = CString::new(payload).unwrap();
-    assert!(
-        unsafe { H5Pset_external(dcpl, ename.as_ptr(), 0, (N * 4) as u64) } >= 0,
-        "H5Pset_external"
-    );
-    let dims = [N as u64];
-    let space = unsafe { H5Screate_simple(1, dims.as_ptr(), std::ptr::null()) };
-    let dname = CString::new("d").unwrap();
-    let ds = unsafe {
-        H5Dcreate2(
-            file.id(),
-            dname.as_ptr(),
-            H5T_NATIVE_INT_g,
-            space,
-            DEFAULT,
-            dcpl,
-            DEFAULT,
-        )
-    };
-    assert!(ds >= 0, "H5Dcreate2 with external storage");
-    let vals: Vec<i32> = (1..=N as i32).collect();
-    assert!(
-        unsafe {
-            H5Dwrite(
-                ds,
-                H5T_NATIVE_INT_g,
-                DEFAULT,
-                DEFAULT,
-                DEFAULT,
-                vals.as_ptr().cast(),
-            )
-        } >= 0,
-        "H5Dwrite"
-    );
-    unsafe { H5Dclose(ds) };
-    unsafe { H5Sclose(space) };
-    unsafe { H5Pclose(dcpl) };
+    let file = create_v18(path);
+    file.new_dataset::<i32>()
+        .external(payload, 0, N * 4)
+        .shape([N])
+        .create("d")
+        .unwrap()
+        .write(&(1..=N as i32).collect::<Vec<_>>())
+        .unwrap();
     file.close().unwrap();
 }
 
@@ -119,7 +44,6 @@ fn write_external_fixture(path: &std::path::Path, payload: &str) {
 /// still fires first, so this test does not rest on that.
 #[test]
 fn repack_refuses_external_data_storage() {
-    let _c = c_lib_guard();
     let dir = tempdir().unwrap();
     let src = dir.path().join("external.h5");
     let dst = dir.path().join("external_repacked.h5");
@@ -180,7 +104,6 @@ fn repack_refuses_external_data_storage() {
 /// assertion before it.
 #[test]
 fn every_read_path_refuses_external_data_storage() {
-    let _c = c_lib_guard();
     let dir = tempdir().unwrap();
     let src = dir.path().join("external.h5");
     let payload = dir.path().join("read_payload.bin");
@@ -225,7 +148,6 @@ fn every_read_path_refuses_external_data_storage() {
 /// with no address is the evidence.
 #[test]
 fn external_data_storage_still_reports_its_metadata() {
-    let _c = c_lib_guard();
     let dir = tempdir().unwrap();
     let src = dir.path().join("external.h5");
     let payload = dir.path().join("meta_payload.bin");
@@ -260,7 +182,6 @@ fn external_data_storage_still_reports_its_metadata() {
 /// the way to stop a file depending on external files.
 #[test]
 fn no_write_reaches_an_external_dataset() {
-    let _c = c_lib_guard();
     let dir = tempdir().unwrap();
     let src = dir.path().join("external.h5");
     let payload = dir.path().join("write_payload.bin");
@@ -373,7 +294,6 @@ fn no_write_reaches_an_external_dataset() {
 /// source need not outlive the call) and refuses on the spot.
 #[test]
 fn copy_refuses_an_external_dataset_by_name() {
-    let _c = c_lib_guard();
     let dir = tempdir().unwrap();
     let src = dir.path().join("external.h5");
     let payload = dir.path().join("copy_payload.bin");

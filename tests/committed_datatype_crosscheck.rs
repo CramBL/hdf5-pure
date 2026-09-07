@@ -18,80 +18,22 @@
 //! finds is committed, which is the question no pure-Rust round trip can answer
 //! about itself.
 
-use std::ffi::{CString, c_char, c_int, c_void};
 use std::path::Path;
 use std::sync::{Mutex, MutexGuard};
 
 use hdf5::{ObjectReference1, ReferencedObject};
 use hdf5_pure::{AttrValue, Datatype, File, RepackOptions};
+use hdf5_sys::h5a::{H5Aclose, H5Acreate2, H5Awrite};
+use hdf5_sys::h5p::H5P_DEFAULT;
 use tempfile::tempdir;
 
-// The committed-datatype entry points, resolved at link time from the statically
-// linked libhdf5. `hdf5-metno` exposes no way to commit a datatype, and a
-// committed type is precisely what these fixtures need.
-unsafe extern "C" {
-    fn H5Tcommit2(
-        loc_id: i64,
-        name: *const c_char,
-        type_id: i64,
-        lcpl_id: i64,
-        tcpl_id: i64,
-        tapl_id: i64,
-    ) -> c_int;
-    fn H5Screate_simple(rank: c_int, dims: *const u64, maxdims: *const u64) -> i64;
-    fn H5Sclose(space_id: i64) -> c_int;
-    fn H5Acreate2(
-        loc_id: i64,
-        attr_name: *const c_char,
-        type_id: i64,
-        space_id: i64,
-        acpl_id: i64,
-        aapl_id: i64,
-    ) -> i64;
-    fn H5Awrite(attr_id: i64, mem_type_id: i64, buf: *const c_void) -> c_int;
-    fn H5Aclose(attr_id: i64) -> c_int;
-    fn H5Dcreate2(
-        loc_id: i64,
-        name: *const c_char,
-        type_id: i64,
-        space_id: i64,
-        lcpl_id: i64,
-        dcpl_id: i64,
-        dapl_id: i64,
-    ) -> i64;
-    fn H5Dwrite(
-        dset_id: i64,
-        mem_type_id: i64,
-        mem_space_id: i64,
-        file_space_id: i64,
-        dxpl_id: i64,
-        buf: *const c_void,
-    ) -> c_int;
-    fn H5Dclose(dset_id: i64) -> c_int;
-    fn H5Gcreate2(
-        loc_id: i64,
-        name: *const c_char,
-        lcpl_id: i64,
-        gcpl_id: i64,
-        gapl_id: i64,
-    ) -> i64;
-    fn H5Gclose(group_id: i64) -> c_int;
-    /// Positive when the type is committed, zero when it is transient. This is
-    /// the C library's own answer to "is this a named type", and the one thing a
-    /// pure-Rust read of a file this crate wrote cannot independently confirm.
-    fn H5Tcommitted(type_id: i64) -> c_int;
-    fn H5Aopen(obj_id: i64, attr_name: *const c_char, aapl_id: i64) -> i64;
-    fn H5Aget_type(attr_id: i64) -> i64;
-    fn H5Tclose(type_id: i64) -> c_int;
-}
+mod common;
+use common::create_v18;
 
-/// `H5P_DEFAULT` and `H5S_ALL` are both the zero id.
-const DEFAULT: i64 = 0;
-
-// `hdf5-metno` serializes its own C calls through an internal lock, and the raw
-// FFI above bypasses it. Serialize every C-library call in this file through one
-// mutex so a raw call never races a concurrent libhdf5 call in another test (the
-// C library is not built thread-safe here). Poisoning is ignored: a panic in one
+// The one raw call below, marked with the upstream issue that would remove
+// it, bypasses the lock the wrapper serializes its own calls through. Every
+// C-library use in this file takes this guard, so a raw call never races a
+// wrapper call on another test thread. Poisoning is ignored: a panic in one
 // test must not cascade into the others.
 static C_LIB: Mutex<()> = Mutex::new(());
 
@@ -117,38 +59,34 @@ fn committed_i32() -> Datatype {
     }
 }
 
-/// Commit `type_id` in `loc` under `name`, which is what makes it a named type
-/// rather than a transient one. There is no safe-API equivalent: `hdf5-metno`
-/// exposes no way to commit a datatype, which is why every fixture here reaches
-/// for the C entry point.
-fn commit_type(loc: i64, name: &str, type_id: i64) {
-    let cname = CString::new(name).unwrap();
-    let rc = unsafe { H5Tcommit2(loc, cname.as_ptr(), type_id, DEFAULT, DEFAULT, DEFAULT) };
-    assert!(rc >= 0, "H5Tcommit2 failed for {name:?}");
+/// Commit `dtype` in `loc` under `name`. Afterwards `dtype` itself is the
+/// committed type.
+fn commit_type(loc: &hdf5::Group, name: &str, dtype: &hdf5::Datatype) {
+    loc.commit_datatype(name, dtype)
+        .unwrap_or_else(|e| panic!("commit {name:?}: {e}"));
 }
 
-/// Create `name` in `loc` over `space` with element type `type_id`, write
-/// `values` into it, and close it.
-///
-/// `dcpl` is the only property a fixture here varies; pass `DEFAULT` for
-/// contiguous storage. The dataspace stays at the call site, since that is where
-/// the fixtures genuinely differ.
-fn write_i32_dataset(loc: i64, name: &str, type_id: i64, space: i64, dcpl: i64, values: &[i32]) {
-    let cname = CString::new(name).unwrap();
-    let dset = unsafe { H5Dcreate2(loc, cname.as_ptr(), type_id, space, DEFAULT, dcpl, DEFAULT) };
-    assert!(dset >= 0, "H5Dcreate2 failed for {name:?}");
-    let rc = unsafe {
-        H5Dwrite(
-            dset,
-            type_id,
-            DEFAULT,
-            DEFAULT,
-            DEFAULT,
-            values.as_ptr().cast::<c_void>(),
-        )
-    };
-    assert!(rc >= 0, "H5Dwrite failed for {name:?}");
-    unsafe { H5Dclose(dset) };
+/// Create `name` in `loc` with element type `dtype`, holding `values`. `chunk`
+/// makes it chunked and resizable. `None` is contiguous storage.
+fn write_i32_dataset(
+    loc: &hdf5::Group,
+    name: &str,
+    dtype: &hdf5::Datatype,
+    chunk: Option<usize>,
+    values: &[i32],
+) {
+    let builder = loc.new_dataset_builder().empty_as(dtype);
+    let dataset = match chunk {
+        Some(size) => builder
+            .chunk([size])
+            .shape(hdf5::SimpleExtents::resizable([values.len()]))
+            .create(name),
+        None => builder.shape([values.len()]).create(name),
+    }
+    .unwrap_or_else(|e| panic!("create {name:?}: {e}"));
+    dataset
+        .write(values)
+        .unwrap_or_else(|e| panic!("write {name:?}: {e}"));
 }
 
 /// What a fixture puts the committed `/mytype` to use for.
@@ -182,89 +120,72 @@ const EVERYTHING: Fixture = Fixture {
 /// names. `/data` and the ordinary `plain` attribute beside each committed one
 /// are always present.
 fn write_committed_fixture(path: &Path, fixture: Fixture) {
-    let file = hdf5::File::create(path).expect("create fixture");
-    // Dropped before `file`, as HDF5 requires every id in a file to be released
-    // before the file itself.
+    let file = create_v18(path);
     let dtype = hdf5::Datatype::from_type::<i32>().expect("transient i32 type");
+    commit_type(&file, "mytype", &dtype);
 
-    commit_type(file.id(), "mytype", dtype.id());
-
-    let one = [1u64];
-    let scalar_space = unsafe { H5Screate_simple(1, one.as_ptr(), std::ptr::null()) };
-    assert!(scalar_space >= 0, "H5Screate_simple failed");
-
-    // An ordinary dataset to hang attributes on, written through the safe API.
-    file.new_dataset::<f64>()
+    // An ordinary dataset to hang attributes on.
+    let data = file
+        .new_dataset::<f64>()
         .shape([1])
         .create("data")
-        .expect("create /data")
-        .write(&[1.0f64])
-        .expect("write /data");
-    let data = file.dataset("data").expect("open /data");
+        .expect("create /data");
+    data.write(&[1.0f64]).expect("write /data");
 
-    for owner in [file.id(), data.id()] {
+    let owners: [&hdf5::Location; 2] = [&file, &data];
+    for owner in owners {
         if fixture.committed_attrs {
-            write_attr(
-                owner,
-                "shared_attr",
-                Some(dtype.id()),
-                scalar_space,
-                ATTR_VALUE,
-            );
+            write_attr(owner, "shared_attr", Some(&dtype), ATTR_VALUE);
         }
         // An ordinary attribute beside it: the C library abandons an object's
         // whole attribute list when one attribute fails to decode, so a healthy
         // neighbour is what makes that collateral damage visible.
-        write_attr(owner, "plain", None, scalar_space, -ATTR_VALUE);
+        write_attr(owner, "plain", None, -ATTR_VALUE);
     }
 
     for i in 0..fixture.dense_attrs {
-        write_attr(
-            file.id(),
-            &format!("dense{i:02}"),
-            Some(dtype.id()),
-            scalar_space,
-            i as i32,
-        );
+        write_attr(&file, &format!("dense{i:02}"), Some(&dtype), i as i32);
     }
 
     if fixture.committed_dataset {
         // A dataset whose *element* type is the committed one.
-        let three = [3u64];
-        let vector_space = unsafe { H5Screate_simple(1, three.as_ptr(), std::ptr::null()) };
-        assert!(vector_space >= 0, "H5Screate_simple failed");
-        write_i32_dataset(
-            file.id(),
-            "typed",
-            dtype.id(),
-            vector_space,
-            DEFAULT,
-            &DATASET_VALUES,
-        );
-        unsafe { H5Sclose(vector_space) };
+        write_i32_dataset(&file, "typed", &dtype, None, &DATASET_VALUES);
     }
-
-    unsafe { H5Sclose(scalar_space) };
 }
 
-/// Create an i32 attribute on `owner`. `committed` names the committed type when
-/// the attribute is to reference one; `None` uses a fresh transient copy, whose
-/// encoding the C library stores inline in the message.
-fn write_attr(owner: i64, name: &str, committed: Option<i64>, space: i64, value: i32) {
-    let transient = hdf5::Datatype::from_type::<i32>().expect("transient i32 type");
-    let type_id = committed.unwrap_or_else(|| transient.id());
-    let cname = CString::new(name).unwrap();
-    let attr = unsafe { H5Acreate2(owner, cname.as_ptr(), type_id, space, DEFAULT, DEFAULT) };
-    assert!(attr >= 0, "H5Acreate2 failed for {name}");
-    let rc = unsafe {
-        H5Awrite(
-            attr,
-            transient.id(),
-            std::ptr::from_ref(&value).cast::<c_void>(),
-        )
+/// Create a one-element i32 attribute on `owner`. `committed` names the
+/// committed type when the attribute is to reference one. `None` uses a fresh
+/// transient copy, whose encoding the C library stores inline in the message.
+fn write_attr(owner: &hdf5::Location, name: &str, committed: Option<&hdf5::Datatype>, value: i32) {
+    let Some(dtype) = committed else {
+        owner
+            .new_attr::<i32>()
+            .shape([1])
+            .create(name)
+            .unwrap_or_else(|e| panic!("create attribute {name}: {e}"))
+            .write(&[value])
+            .unwrap_or_else(|e| panic!("write attribute {name}: {e}"));
+        return;
     };
-    assert!(rc >= 0, "H5Awrite failed for {name}");
-    unsafe { H5Aclose(attr) };
+    let space = hdf5::Dataspace::try_new([1]).expect("a one-element dataspace");
+    let transient = hdf5::Datatype::from_type::<i32>().expect("transient i32 type");
+    let cname = std::ffi::CString::new(name).unwrap();
+    // TODO: https://github.com/metno/hdf5-rust/issues/232
+    // Safety: every id is live, and the buffer is one element of the memory type.
+    unsafe {
+        let attr = H5Acreate2(
+            owner.id(),
+            cname.as_ptr(),
+            dtype.id(),
+            space.id(),
+            H5P_DEFAULT,
+            H5P_DEFAULT,
+        );
+        assert!(attr >= 0, "H5Acreate2 failed for {name}");
+        let rc = H5Awrite(attr, transient.id(), std::ptr::from_ref(&value).cast());
+        assert!(rc >= 0, "H5Awrite failed for {name}");
+        H5Aclose(attr);
+    }
 }
 
 /// An attribute whose datatype is a committed one reports the type it names, on
@@ -494,32 +415,10 @@ fn an_in_place_append_refuses_a_committed_element_type() {
 /// dimension, and typed by the committed `/mytype` — the extensible-array shape
 /// this crate's in-place append engine maintains.
 fn write_appendable_committed_fixture(path: &Path) {
-    let mut fb = hdf5::FileBuilder::new();
-    fb.with_fapl(|fapl| fapl.libver_latest());
-    let file = fb.create(path).expect("create fixture");
+    let file = create_v18(path);
     let dtype = hdf5::Datatype::from_type::<i32>().expect("transient i32 type");
-
-    commit_type(file.id(), "mytype", dtype.id());
-
-    let dims = [DATASET_VALUES.len() as u64];
-    let maxdims = [u64::MAX]; // H5S_UNLIMITED
-    let space = unsafe { H5Screate_simple(1, dims.as_ptr(), maxdims.as_ptr()) };
-    assert!(space >= 0, "H5Screate_simple failed");
-
-    let dcpl = hdf5::plist::dataset_create::DatasetCreateBuilder::new()
-        .chunk([4usize])
-        .finish()
-        .expect("chunked dcpl");
-    write_i32_dataset(
-        file.id(),
-        "typed",
-        dtype.id(),
-        space,
-        dcpl.id(),
-        &DATASET_VALUES,
-    );
-
-    unsafe { H5Sclose(space) };
+    commit_type(&file, "mytype", &dtype);
+    write_i32_dataset(&file, "typed", &dtype, Some(4), &DATASET_VALUES);
 }
 
 /// The streaming backend reads a committed datatype through the same reference,
@@ -555,36 +454,28 @@ fn the_streaming_backend_resolves_a_committed_datatype_too() {
 /// "committed" means the file really carries the shared-message encoding a named
 /// type is made of.
 fn dataset_type_is_committed(file: &hdf5::File, path: &str) -> bool {
-    let dataset = file
-        .dataset(path)
-        .unwrap_or_else(|e| panic!("open {path}: {e}"));
-    let dtype = dataset.dtype().expect("dataset datatype");
-    unsafe { H5Tcommitted(dtype.id()) > 0 }
+    file.dataset(path)
+        .unwrap_or_else(|e| panic!("open {path}: {e}"))
+        .dtype()
+        .expect("dataset datatype")
+        .is_committed()
 }
 
 /// The same question for an attribute, which stores its reference in the
 /// attribute message rather than in a header message record — a separate encoding
 /// with a separate flag.
 fn attr_type_is_committed(file: &hdf5::File, owner: &str, attr: &str) -> bool {
-    // `H5Aopen` wants an *object* identifier, which a file identifier is not, so
-    // the root group is opened as one rather than passed as `file.id()`. Both
-    // handles are bound rather than used inline: dropping one closes the id, and
-    // an `H5Aopen` on a closed id fails in a way that reads exactly like a missing
-    // attribute.
-    let root = file.group("/").expect("open root group");
-    let dataset = (!owner.is_empty()).then(|| file.dataset(owner).expect("open attribute owner"));
-    let owner_id = dataset.as_ref().map_or_else(|| root.id(), |d| d.id());
-    let cname = CString::new(attr).unwrap();
-    let attr_id = unsafe { H5Aopen(owner_id, cname.as_ptr(), DEFAULT) };
-    assert!(attr_id >= 0, "H5Aopen failed for {attr} on owner {owner:?}");
-    let type_id = unsafe { H5Aget_type(attr_id) };
-    assert!(type_id >= 0, "H5Aget_type failed for {attr}");
-    let committed = unsafe { H5Tcommitted(type_id) > 0 };
-    unsafe {
-        H5Tclose(type_id);
-        H5Aclose(attr_id);
-    }
-    committed
+    let owner: hdf5::Location = if owner.is_empty() {
+        (*file.group("/").expect("open root group")).clone()
+    } else {
+        (**file.dataset(owner).expect("open attribute owner")).clone()
+    };
+    owner
+        .attr(attr)
+        .unwrap_or_else(|e| panic!("open attribute {attr}: {e}"))
+        .dtype()
+        .expect("attribute datatype")
+        .is_committed()
 }
 
 /// A repack carries every use of a committed type across as a use of the *same*
@@ -912,30 +803,11 @@ fn repack_refuses_dropping_the_group_a_named_type_lives_in() {
     let dst = dir.path().join("repacked.h5");
 
     {
-        let file = hdf5::File::create(&src).expect("create fixture");
+        let file = create_v18(&src);
         let dtype = hdf5::Datatype::from_type::<i32>().expect("transient i32 type");
-        let group_name = CString::new("types").unwrap();
-        let group =
-            unsafe { H5Gcreate2(file.id(), group_name.as_ptr(), DEFAULT, DEFAULT, DEFAULT) };
-        assert!(group >= 0, "H5Gcreate2 failed");
-        commit_type(group, "mytype", dtype.id());
-
-        // The dataset is outside the group, so dropping the group leaves it
-        // naming a type the output has not got.
-        let three = [3u64];
-        let space = unsafe { H5Screate_simple(1, three.as_ptr(), std::ptr::null()) };
-        write_i32_dataset(
-            file.id(),
-            "typed",
-            dtype.id(),
-            space,
-            DEFAULT,
-            &DATASET_VALUES,
-        );
-        unsafe {
-            H5Sclose(space);
-            H5Gclose(group);
-        }
+        let group = file.create_group("types").expect("create /types");
+        commit_type(&group, "mytype", &dtype);
+        write_i32_dataset(&file, "typed", &dtype, None, &DATASET_VALUES);
     }
 
     let options = RepackOptions::new().drop_path("types");

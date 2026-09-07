@@ -17,6 +17,7 @@
 //! index is a **list** or a **version 2 B-tree** (forced by driving the message
 //! count past the list maximum), and how many objects share one message.
 
+use hdf5::file::LibraryVersion;
 use hdf5::plist::file_create::{SharedMessageIndex, SharedMessageType};
 use hdf5_pure::{AttrValue, Datatype, DatatypeByteOrder, File};
 use std::path::{Path, PathBuf};
@@ -68,6 +69,7 @@ struct Fixture {
 /// fixture.
 fn create_shared_file(path: &Path, max_list: u32, min_btree: u32) -> hdf5::File {
     hdf5::File::with_options()
+        .with_fapl(|p| p.libver_bounds(LibraryVersion::V18, LibraryVersion::latest()))
         .with_fcpl(|p| {
             p.shared_mesg_phase_change(max_list, min_btree)
                 .shared_mesg_indexes(&[SharedMessageIndex {
