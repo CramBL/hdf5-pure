@@ -251,7 +251,7 @@ pub use error::{FormatError, OBJECT_HEADER_MESSAGE_MAX};
 
 // Reached by value through `File::superblock` and `Error::MissingMessage`, so
 // exported alongside them rather than left nameless — see RELEASES.md, and
-// `scripts/check-api-surface.sh` (`just api-surface`), which enforces it.
+// `scripts/check-api-surface.sh` (`just api::api-surface`), which enforces it.
 #[cfg(feature = "std")]
 pub use address::BaseAddress;
 #[cfg(feature = "std")]

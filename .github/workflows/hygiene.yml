@@ -45,7 +45,7 @@ jobs:
           tool: cargo-shear,just
 
       - name: Unused dependencies
-        run: just shear
+        run: just hygiene::shear
 
   hygiene:
     name: hygiene

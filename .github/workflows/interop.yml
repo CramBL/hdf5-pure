@@ -79,10 +79,10 @@ jobs:
           key: hdf5-${{ matrix.version }}-${{ runner.os }}-${{ hashFiles('scripts/build_hdf5.py') }}
 
       - name: Build HDF5 ${{ matrix.version }}
-        run: just hdf5-build ${{ matrix.version }}
+        run: just interop::hdf5-build ${{ matrix.version }}
 
       - name: Run the test suite against it
-        run: just test-hdf5 ${{ matrix.version }} ${{ matrix.features }} --no-fail-fast
+        run: just interop::test-hdf5 ${{ matrix.version }} ${{ matrix.features }} --no-fail-fast
 
   # The matrix must include the release `hdf5-metno` bundles, which the
   # crosschecks in `ci.yml` link.
@@ -106,7 +106,7 @@ jobs:
 
       - name: Check the matrix lists it
         run: |
-          version="$(just hdf5-bundled-version)"
+          version="$(just interop::hdf5-bundled-version)"
           echo "hdf5-metno bundles $version"
           if ! grep -qE "^\s+version: \[.*\"$version\".*\]" .github/workflows/interop.yml; then
             echo "::error::$version is not in the interop matrix version list."
@@ -167,7 +167,7 @@ jobs:
         run: |
           export LIBRARY_PATH="$CONDA_PREFIX/lib:${LIBRARY_PATH:-}"
           export RUSTFLAGS="-C link-args=-Wl,-rpath,$CONDA_PREFIX/lib"
-          just test-matio
+          just interop::test-matio
 
   interop:
     name: interop

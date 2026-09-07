@@ -47,7 +47,7 @@ jobs:
           tool: just
 
       - name: Clippy (lib, both feature sets)
-        run: just clippy-32bit
+        run: just portability::clippy-32bit
 
   # Each narrowing cast is either routed through `crate::convert` or annotated
   # with an `#[expect]` stating why it cannot lose information (issue #72).
@@ -78,7 +78,7 @@ jobs:
           tool: just
 
       - name: Deny 32-bit narrowing casts
-        run: just cast-gate
+        run: just portability::cast-gate
 
   # QEMU, for the two properties no native runner has: a 32-bit pointer width,
   # and a big-endian host where `from_ne_bytes` and `from_le_bytes` differ.
@@ -90,8 +90,8 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - {name: i686, recipe: test-32bit}
-          - {name: s390x, recipe: test-big-endian}
+          - {name: i686, recipe: portability::test-32bit}
+          - {name: s390x, recipe: portability::test-big-endian}
 
     steps:
       - name: Checkout
@@ -126,9 +126,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - {name: wasm32, target: wasm32-unknown-unknown, recipe: check-wasm}
-          - {name: thumbv7em (no_std), target: thumbv7em-none-eabi, recipe: check-bare-metal}
-          - {name: host (no_std), target: "", recipe: check-no-std}
+          - {name: wasm32, target: wasm32-unknown-unknown, recipe: portability::check-wasm}
+          - {name: thumbv7em (no_std), target: thumbv7em-none-eabi, recipe: portability::check-bare-metal}
+          - {name: host (no_std), target: "", recipe: portability::check-no-std}
 
     steps:
       - name: Checkout
