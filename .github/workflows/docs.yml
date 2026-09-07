@@ -31,20 +31,19 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Install Python
-        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+      - name: Install uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
         with:
-          python-version: "3.x"
-          cache: pip
-          cache-dependency-path: requirements-docs.txt
+          enable-cache: true
+          cache-dependency-glob: scripts/docs.py.lock
 
-      - name: Install MkDocs
-        run: pip install -r requirements-docs.txt
+      - name: Install tools
+        uses: taiki-e/install-action@920ab1831fbf4fb3ef75c8ead83556c918bb7290 # v2.79.8
+        with:
+          tool: just
 
-      # `--strict` fails the build on broken links or pages missing from the
-      # nav, so a regression never ships silently.
       - name: Build the site
-        run: mkdocs build --strict
+        run: just docs::build
 
       - name: Upload the site
         if: github.event_name != 'pull_request'

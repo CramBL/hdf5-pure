@@ -6,9 +6,8 @@
 # feature-complete Material engine today; when Zensical reaches a stable release
 # and feature parity, this config is the documented migration starting point.
 #
-# Local preview:   python -m venv .venv && . .venv/bin/activate
-#                  pip install -r requirements-docs.txt && mkdocs serve
-# Build (strict):  mkdocs build --strict
+# Local preview:   just docs::serve
+# Build (strict):  just docs::build
 
 site_name: hdf5-pure
 site_url: https://stephenberry.github.io/hdf5-pure/
