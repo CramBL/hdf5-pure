@@ -210,7 +210,7 @@ def main() -> int:
     if arguments.env:
         prefix = prefix_of(arguments.version)
         if not tool(prefix, "h5dump"):
-            sys.exit(f"no build under {prefix}: run `just hdf5-build {arguments.version}` first")
+            sys.exit(f"no build under {prefix}: run `just interop::hdf5-build {arguments.version}` first")
         print("\n".join(exports(prefix)))
         return 0
 

@@ -53,7 +53,7 @@ jobs:
           tool: just
 
       - name: Miri
-        run: just miri
+        run: just soundness::miri
 
   # The exact allocation figures under `tests/baselines/`. One host and one
   # feature set, because an exact count is a property of both; the scaling
@@ -84,7 +84,7 @@ jobs:
           tool: cargo-nextest,just
 
       - name: Check the recorded figures
-        run: just heap-baseline
+        run: just soundness::heap-baseline
 
   soundness:
     name: soundness

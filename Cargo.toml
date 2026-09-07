@@ -124,7 +124,7 @@ criterion = { version = "0.5", default-features = false }
 # The binding tracks upstream `main`, pinned by commit in `Cargo.lock` since
 # every CI job runs `--locked`. `cargo update -p hdf5-metno` moves it. The
 # `__hdf5-bundled` feature links the release its submodule points at, which
-# `just hdf5-bundled-version` prints. Without the feature it links the
+# `just interop::hdf5-bundled-version` prints. Without the feature it links the
 # installation under `HDF5_DIR`, which is how the interop workflow tests other
 # releases. Judge a bump by the crosschecks
 # rather than by release notes: several of them assert constants derived from

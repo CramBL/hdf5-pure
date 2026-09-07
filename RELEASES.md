@@ -20,7 +20,7 @@ Write the summary paragraph that leads each released section by hand.
 4. Read the diff it leaves in your tree.
 5. `scripts/release.sh 0.25.0 --summary-file notes.md --gh-release --publish` to commit, tag, push, release and publish.
 
-Run `just check-release-script` after changing the script.
+Run `just release::check-release-script` after changing the script.
 
 ## The API delta
 
@@ -28,4 +28,4 @@ Step 3's report is the cycle's only full public-API check: CI's `SemVer` job der
 
 The verdict is the `Summary` line — 0.48.0 exits 1 for both findings and failure-to-run, 0.50.0 splits those into 100 and 101 (#337). `cargo install cargo-semver-checks --locked` fixes a tool too old for the toolchain; `--skip-api-delta` releases without the check, for the window after a rustc release.
 
-`cargo-semver-checks` matches items by importable path. `just api-surface` covers types reachable through the API without one — `Superblock::base_address` went from `u64` to `BaseAddress` in 0.40.0 with no finding — and `tests/public_api_surface.rs` covers a retyped public field.
+`cargo-semver-checks` matches items by importable path. `just api::api-surface` covers types reachable through the API without one — `Superblock::base_address` went from `u64` to `BaseAddress` in 0.40.0 with no finding — and `tests/public_api_surface.rs` covers a retyped public field.

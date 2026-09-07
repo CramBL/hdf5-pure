@@ -43,7 +43,7 @@ jobs:
           shared-key: api
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
-      # The action rather than `just semver`: it pairs a cargo-semver-checks
+      # The action rather than `just api::semver`: it pairs a cargo-semver-checks
       # build with a toolchain whose rustdoc JSON that build can parse.
       - name: Public API delta
         uses: obi1kenobi/cargo-semver-checks-action@6b69fcf40e9b5fb17adeb57e4b6ecd020649a239 # v2.9
@@ -83,7 +83,7 @@ jobs:
           tool: just
 
       - name: Scan the public API surface
-        run: just api-surface
+        run: just api::api-surface
 
   api:
     name: api
