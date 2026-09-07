@@ -32,12 +32,8 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # 2026-03-27
-        with:
-          toolchain: stable
-          components: clippy
-          targets: i686-unknown-linux-gnu
+      - name: Install Rust
+        run: rustup toolchain install && rustup target add i686-unknown-linux-gnu
 
       - name: Cache Cargo
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
@@ -59,6 +55,9 @@ jobs:
   cast-gate:
     name: cast gate / i686
     runs-on: ubuntu-latest
+
+    env:
+      RUSTUP_TOOLCHAIN: "1.96.0"
 
     steps:
       - name: Checkout
@@ -106,10 +105,8 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # 2026-03-27
-        with:
-          toolchain: stable
+      - name: Install Rust
+        run: rustup toolchain install
 
       - name: Cache Cargo
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
@@ -145,11 +142,10 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # 2026-03-27
-        with:
-          toolchain: stable
-          targets: ${{ matrix.target }}
+      - name: Install Rust
+        run: |
+          rustup toolchain install
+          if [ -n "${{ matrix.target }}" ]; then rustup target add ${{ matrix.target }}; fi
 
       - name: Cache Cargo
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
