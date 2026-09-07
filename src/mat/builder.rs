@@ -56,7 +56,7 @@ const SUBSYSTEM_GROUP: &str = "#subsystem#";
 /// The `H5PATH` attribute MATLAB stamps on an object interned under `#refs#`:
 /// the object's own absolute path.
 ///
-/// Measured across the MATLAB-authored fixtures in `tests/fixtures/mat_real`:
+/// Measured across the MATLAB-authored fixtures in `tests/data/matlab`:
 /// every object directly under `#refs#` carries it — 519 of them — with two
 /// exceptions that hold in all eight files, the `canonical empty` placeholder
 /// and `#subsystem#/MCOS`. Set before the `MATLAB_*` attributes, which is the
@@ -735,7 +735,7 @@ impl MatBuilder {
     /// read stored integers back as `char` or `logical` values and so has nothing
     /// to describe here: the payload is a `uint64` dimension vector, not data of
     /// the marked class. Of the 352 empty datasets in the MATLAB-authored
-    /// fixtures under `tests/fixtures/mat_real`, not one carries it, for any
+    /// fixtures under `tests/data/matlab`, not one carries it, for any
     /// class.
     pub fn write_empty(
         &mut self,

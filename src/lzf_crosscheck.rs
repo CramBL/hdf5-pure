@@ -1,9 +1,9 @@
 //! Crosscheck the pure-Rust LZF codec against fixtures produced by h5py's
 //! built-in LZF filter.
 //!
-//! Fixtures and generator script live in `tests/fixtures/lzf/`. Regenerate:
+//! Fixtures and generator script live in `tests/data/h5py/lzf/`. Regenerate:
 //!
-//!     tests/fixtures/lzf/.venv/bin/python tests/fixtures/lzf/regen.py
+//!     tests/data/h5py/lzf/.venv/bin/python tests/data/h5py/lzf/regen.py
 //!
 //! Two directions are checked, and they are not equally strong.
 //!
@@ -69,7 +69,7 @@ impl Fixture {
 }
 
 fn fixture_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/lzf")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/data/h5py/lzf")
 }
 
 fn load_manifest() -> Manifest {

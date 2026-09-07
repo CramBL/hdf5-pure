@@ -6,13 +6,11 @@ use hdf5_pure::{
     FormatError, Object, ReferenceType, ScaleOffset, StringPadding,
 };
 
-#[path = "common/temp_fixture.rs"]
-mod temp_fixture;
-use temp_fixture::temp_path;
+use temp::temp_path;
+use test_util::temp;
 
-#[path = "common/heap.rs"]
-mod heap;
 use heap::has_fractal_heap;
+use test_util::heap;
 
 /// Write a starter file with one dataset, returning its path.
 fn write_starter(path: &std::path::Path) {

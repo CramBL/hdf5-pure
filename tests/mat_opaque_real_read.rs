@@ -6,7 +6,7 @@
 //! own writer, which is circular: a bug shared by the writer and reader passes
 //! unnoticed. These fixtures are different. They were produced by real MATLAB on
 //! Windows (the userblock records `Platform: PCWIN64`) and are vendored from the
-//! BSD-3 `foreverallama/matio` project under `tests/fixtures/mat_real/` (see the
+//! BSD-3 `foreverallama/matio` project under `tests/data/matlab/` (see the
 //! `NOTICE.md` there for provenance). The expected values below are transcribed
 //! from that project's MATLAB generator scripts (`tests/data/generators/*.m`)
 //! and its independent pytest oracle (`tests/test_{datetime,duration,…}.py`),
@@ -23,7 +23,7 @@ use hdf5_pure::mat::{self, MatCategorical, MatDatetime, MatDuration};
 use serde::Deserialize;
 
 fn read<T: serde::de::DeserializeOwned>(name: &str) -> T {
-    let path = format!("tests/fixtures/mat_real/{name}");
+    let path = format!("tests/data/matlab/{name}");
     let bytes = std::fs::read(&path).unwrap_or_else(|e| panic!("read {path}: {e}"));
     mat::from_bytes(&bytes).unwrap_or_else(|e| panic!("decode {path}: {e:?}"))
 }
@@ -289,11 +289,10 @@ fn malformed_mcos_is_handled_without_panicking() {
     // reader never panics on them. The fixture with an out-of-range object id
     // surfaces a typed error; the other's damage is tolerated and its variable
     // still decodes (as matio also reads it). Both complete without panicking.
-    let meta =
-        std::fs::read("tests/fixtures/mat_real/test_corrupted_mcos_object_metadata.mat").unwrap();
+    let meta = std::fs::read("tests/data/matlab/test_corrupted_mcos_object_metadata.mat").unwrap();
     assert!(mat::from_bytes::<HashMap<String, serde_json::Value>>(&meta).is_err());
 
-    let subsys = std::fs::read("tests/fixtures/mat_real/test_corrupted_subsystem.mat").unwrap();
+    let subsys = std::fs::read("tests/data/matlab/test_corrupted_subsystem.mat").unwrap();
     // Tolerated by our parser; must return (Ok or Err) rather than panic.
     let _ = mat::from_bytes::<HashMap<String, serde_json::Value>>(&subsys);
 }

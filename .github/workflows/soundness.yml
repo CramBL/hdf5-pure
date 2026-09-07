@@ -48,7 +48,7 @@ jobs:
               - .cargo/**
               - tests/allocation_baseline.rs
               - tests/baselines/**
-              - tests/common/**
+              - crates/test-util/**
               - justfile
               - scripts/soundness.just
               - .github/workflows/soundness.yml

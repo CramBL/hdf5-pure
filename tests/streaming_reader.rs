@@ -333,7 +333,7 @@ fn streaming_matches_buffered_groups_and_attributes_across_fixtures() {
     ];
 
     for (fixture, expected_attrs) in cases {
-        let path = format!("tests/fixtures/{fixture}");
+        let path = format!("tests/data/unattributed/{fixture}");
         let buffered = File::open(&path).unwrap();
         let streaming = File::open_streaming(&path).unwrap();
         let counted = assert_group_parity(&buffered, &streaming, "");

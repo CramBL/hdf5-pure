@@ -47,6 +47,7 @@ jobs:
               - rust-toolchain.toml
               - .cargo/**
               - tests/**
+              - crates/test-util/**
               - justfile
               - scripts/portability.just
               - .github/workflows/portability.yml

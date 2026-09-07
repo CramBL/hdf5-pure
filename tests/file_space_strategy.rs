@@ -5,9 +5,8 @@
 
 use hdf5_pure::{File, FileBuilder, FileSpaceStrategy};
 
-#[path = "common/temp_fixture.rs"]
-mod temp_fixture;
-use temp_fixture::temp_path;
+use temp::temp_path;
+use test_util::temp;
 
 #[test]
 fn each_strategy_roundtrips() {

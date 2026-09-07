@@ -1,22 +1,21 @@
 //! Genuine paged file-space allocation (issue #173 Phase 2, B1): hdf5-pure
 //! creates page-aligned files whose free space is tracked by per-page-type
 //! free-space managers, and reads them back. C-library interop lives in
-//! `tests/file_space_crosscheck.rs`.
+//! `crates/crosscheck/tests/file_space.rs`.
 
 use hdf5_pure::{AttrValue, File, FileBuilder, FileSpaceStrategy};
 
 const PAGE: u64 = 16384;
 
-#[path = "common/temp_fixture.rs"]
-mod temp_fixture;
+use test_util::temp;
 
 /// A fixture under the repository's gitignored `tmp/`, in a directory of its own
 /// so two concurrent runs of this binary cannot collide on the name (issue #334).
-fn tmp(name: &str) -> temp_fixture::TempPath {
+fn tmp(name: &str) -> temp::TempPath {
     let mut p = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     p.push("tmp");
     std::fs::create_dir_all(&p).expect("create the repository's tmp directory");
-    temp_fixture::temp_path_in(&p, name)
+    temp::temp_path_in(&p, name)
 }
 
 /// A persisting paged file with small and large datasets round-trips through

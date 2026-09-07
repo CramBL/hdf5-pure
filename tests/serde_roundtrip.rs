@@ -201,7 +201,7 @@ struct WithOption {
 ///
 /// The payload is where the dims live under the default
 /// `EmptyMarkerEncoding::DataAsDims`, which is what MATLAB itself writes: every
-/// empty in `tests/fixtures/mat_real` is a two-element `uint64` dataset holding
+/// empty in `tests/data/matlab` is a two-element `uint64` dataset holding
 /// its own dims, including the `[1 1]` and `[1 0]` ones a zero-element dataset
 /// could not express at all.
 fn assert_empty_struct_array(file: &File, name: &str) {

@@ -15,9 +15,8 @@
 
 use hdf5_pure::{File, FileBuilder};
 
-#[path = "common/temp_fixture.rs"]
-mod temp_fixture;
-use temp_fixture::temp_path;
+use temp::temp_path;
+use test_util::temp;
 
 const UB: usize = 512;
 
@@ -181,7 +180,7 @@ fn real_mat_add_chunked_dataset_preserves_userblock() {
     // Adding a chunked/deflate dataset to a real MATLAB v7.3 file: its chunk
     // index and chunk data addresses are written relative to the 512-byte MATLAB
     // userblock, and the added value plus an untouched original both read back.
-    let src = std::path::Path::new("tests/fixtures/mat_real/test_string_v73.mat");
+    let src = std::path::Path::new("tests/data/matlab/test_string_v73.mat");
     let path = temp_path("hdf5_pure_ub_real_mat_chunk.mat");
     std::fs::copy(src, &path).unwrap();
     let original_userblock = std::fs::read(&path).unwrap()[..UB].to_vec();

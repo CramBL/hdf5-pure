@@ -21,9 +21,8 @@
 
 use hdf5_pure::{BaseAddress, Error, File, FileBuilder, LibVer, MessageType, Superblock};
 
-#[path = "common/temp_fixture.rs"]
-mod temp_fixture;
-use temp_fixture::temp_path;
+use temp::temp_path;
+use test_util::temp;
 
 /// A consumer's own helper over the superblock: both types in one signature,
 /// which is the thing that could not be written before.

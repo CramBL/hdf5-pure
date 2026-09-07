@@ -1,0 +1,48 @@
+# The tests that check hdf5-pure against the reference C library, and the
+# helpers that call it. The only package that links libhdf5: the crate's own
+# suite, its examples and every other job build without a C toolchain or a C
+# library.
+[package]
+name = "hdf5-pure-crosscheck"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[lints]
+workspace = true
+
+[features]
+serde = ["hdf5-pure/serde"]
+ndarray = ["hdf5-pure/ndarray"]
+# Which release series of libhdf5 the tests link, from 1.10 up: none of them
+# is 1.8. Each implies the one below, so a test gates on the lowest series that
+# has what it needs. The interop workflow passes its row's, and
+# `tests/hdf5_release_feature.rs` checks the one passed against the library
+# actually linked.
+"__hdf5-1.10" = []
+"__hdf5-1.12" = ["__hdf5-1.10"]
+"__hdf5-1.14" = ["__hdf5-1.12"]
+"__hdf5-2" = ["__hdf5-1.14"]
+# Builds and links the libhdf5 that `hdf5-metno` bundles instead of searching
+# the host, a 2.x release. Without it the package links the installation under
+# `HDF5_DIR`.
+__hdf5-bundled = ["hdf5/static", "__hdf5-2"]
+
+[dependencies]
+hdf5 = { package = "hdf5-metno", git = "https://github.com/metno/hdf5-rust", branch = "main", features = ["zlib"] }
+
+[dev-dependencies]
+hdf5-pure = { path = "../.." }
+# Its raw bindings, for the few calls the wrapper has no API for. Declared
+# here rather than in a test's own `extern` block, so names and structs follow
+# the linked release.
+hdf5_sys = { package = "hdf5-metno-sys", git = "https://github.com/metno/hdf5-rust", branch = "main" }
+test-util = { path = "../test-util" }
+tempfile = "3"
+serde = { version = "1", features = ["derive"] }
+ndarray = ">=0.16, <0.18"
+proptest = "1"
+
+[[test]]
+name = "libver_matrix"
+required-features = ["serde"]

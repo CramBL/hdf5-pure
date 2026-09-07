@@ -13,8 +13,7 @@
 
 use hdf5_pure::{AttrValue, Error, File, FileBuilder, FormatError};
 
-mod common;
-use common::heap::{
+use test_util::heap::{
     has_fractal_heap, huge_object_bytes, huge_object_count, indirect_block_count,
     managed_object_count, name_index_leaf_records, root_indirect_rows,
 };

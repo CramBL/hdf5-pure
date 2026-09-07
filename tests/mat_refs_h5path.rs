@@ -84,7 +84,7 @@ fn matlab_class(file: &File, path: &str) -> Option<String> {
 fn matlab_stamps_every_refs_object_with_its_own_path() {
     let mut members = 0;
     let mut exceptions = Vec::new();
-    for entry in std::fs::read_dir("tests/fixtures/mat_real").expect("the fixture directory") {
+    for entry in std::fs::read_dir("tests/data/matlab").expect("the fixture directory") {
         let path = entry.unwrap().path();
         if path.extension().and_then(|e| e.to_str()) != Some("mat") {
             continue;

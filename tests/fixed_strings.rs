@@ -8,8 +8,8 @@
 //! a datatype message and a run of element bytes that agree on a width are only
 //! correct if `read_string` recovers the values from them.
 //!
-//! C-library interop lives in `fixed_string_crosscheck.rs` for the datasets and
-//! in `attr_width_crosscheck.rs` for the attributes.
+//! C-library interop lives in `crates/crosscheck/tests/fixed_string.rs` for the datasets and
+//! in `crates/crosscheck/tests/attr_width.rs` for the attributes.
 
 use hdf5_pure::{
     AttrValue, CharacterSet, Datatype, Error, File, FileBuilder, FormatError, StringPadding,

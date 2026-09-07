@@ -3890,7 +3890,7 @@ impl WriteEngine {
     /// to an older file does make that file need 1.10 — deliberately, since the
     /// alternative is a version 1 B-tree index this crate does not write, and
     /// refusing instead would take away in-place editing of every file the C
-    /// library wrote with its own default bounds. `tests/edit_crosscheck.rs`
+    /// library wrote with its own default bounds. `crates/crosscheck/tests/edit.rs`
     /// covers exactly that case (issue #101).
     ///
     /// That is a default, not a verdict: a caller who needs the file to stay
@@ -10689,7 +10689,7 @@ impl WriteEngine {
             // was modelled as the contiguous dataset it structurally is and had
             // its header chunks reclaimed. Deleting one therefore leaves those
             // chunks behind: measured on the fixture in
-            // `tests/external_storage_crosscheck.rs`, a commit that deletes it
+            // `crates/crosscheck/tests/external_storage.rs`, a commit that deletes it
             // reports 147 B reusable where it reported 431 B. That is a leak and
             // not a hazard — `oh_chunk_spans` never covered the local heap the
             // External Data Files message names either, so neither the old
@@ -16214,46 +16214,14 @@ mod tests {
     /// about placement itself: no byte this commit writes may land in a page that
     /// held live metadata beforehand.
     #[test]
-    // Builds the fixture with the reference HDF5 C library (`hdf5-metno`), a
-    // 64-bit little-endian-only dev-dependency; skip elsewhere so the lib tests
-    // still run there.
-    #[cfg(all(not(target_pointer_width = "32"), target_endian = "little"))]
-    #[cfg(feature = "__hdf5-1.10")]
+    // The file is a committed one the reference C library wrote, see
+    // `crates/crosscheck/tests/c_test_data.rs`.
     fn a_c_written_chunk_index_is_not_reclaimed_as_raw() {
-        use hdf5::plist::file_create::FileSpaceStrategy as CStrategy;
         use tempfile::tempdir;
 
         const PAGE: u64 = 4096;
         let dir = tempdir().unwrap();
-        let path = dir.path().join("c_paged_index.h5");
-        {
-            let f = hdf5::FileBuilder::new()
-                .with_fapl(|fapl| fapl.libver_v110())
-                .with_fcpl(|fcpl| {
-                    fcpl.file_space_strategy(CStrategy::FreeSpaceManager {
-                        paged: true,
-                        persist: true,
-                        threshold: 1,
-                    })
-                    .file_space_page_size(PAGE)
-                })
-                .create(&path)
-                .unwrap();
-            let ds = f
-                .new_dataset::<i32>()
-                .shape(hdf5::SimpleExtents::resizable(vec![8192]))
-                .chunk((512,))
-                .create("victim")
-                .unwrap();
-            ds.write_raw(&(0..8192i32).collect::<Vec<i32>>()).unwrap();
-            f.new_dataset::<i32>()
-                .shape((4,))
-                .create("keep")
-                .unwrap()
-                .write_raw(&[1i32, 2, 3, 4])
-                .unwrap();
-            f.close().unwrap();
-        }
+        let path = crate::test_data::copy("c/paged_index.h5", dir.path());
 
         let mut s = WriteEngine::open_with_locking(&path, FileLocking::Enabled).unwrap();
         let page_size = s.paged.as_ref().expect("a paged file").page_size;
@@ -16400,43 +16368,14 @@ mod tests {
     /// keeps it out of reach: it is recorded, so a rewrite gives it back to the
     /// manager it came from, but never offered to an allocation.
     #[test]
-    // Builds the fixture with the reference HDF5 C library (`hdf5-metno`), a
-    // 64-bit little-endian-only dev-dependency; skip elsewhere so the lib tests
-    // still run there.
-    #[cfg(all(not(target_pointer_width = "32"), target_endian = "little"))]
-    #[cfg(feature = "__hdf5-1.10")]
+    // The file is a committed one the reference C library wrote, see
+    // `crates/crosscheck/tests/c_test_data.rs`.
     fn a_generic_large_section_is_only_reusable_as_whole_pages() {
-        use hdf5::plist::file_create::FileSpaceStrategy as CStrategy;
         use tempfile::tempdir;
 
         const PAGE: u64 = 512;
         let dir = tempdir().unwrap();
-        let path = dir.path().join("c_generic_large.h5");
-        {
-            let f = hdf5::FileBuilder::new()
-                .with_fapl(|fapl| fapl.libver_v110())
-                .with_fcpl(|fcpl| {
-                    fcpl.file_space_strategy(CStrategy::FreeSpaceManager {
-                        paged: true,
-                        persist: true,
-                        threshold: 1,
-                    })
-                    .file_space_page_size(PAGE)
-                })
-                .create(&path)
-                .unwrap();
-            let ds = f.new_dataset::<f64>().shape((64,)).create("d").unwrap();
-            ds.write_raw(&vec![1.0f64; 64]).unwrap();
-            // One attribute far larger than a page, so the object-header chunk
-            // holding it is a "large" *metadata* allocation.
-            let a = ds
-                .new_attr::<i64>()
-                .shape((512,))
-                .create("big_attr")
-                .unwrap();
-            a.write_raw(&vec![7i64; 512]).unwrap();
-            f.close().unwrap();
-        }
+        let path = crate::test_data::copy("c/generic_large.h5", dir.path());
 
         // The premise: at least one section in the generic-large manager (slot 6)
         // is a sub-page fragment. Read the managers slot by slot, since the
@@ -17598,30 +17537,24 @@ mod tests {
         }
     }
 
-    /// The consistent-prefix guarantee must hold for the *reference C library*,
-    /// not only this crate's reader — and this crate's reader is the more lenient
-    /// of the two, so it cannot stand in for it.
+    /// After an append stopped at any phase, a reader sees the committed prefix
+    /// and nothing of the rest, for both starting layouts: a partial trailing
+    /// chunk and the EA-boundary growth above, which exercise different index
+    /// writes.
     ///
-    /// The pure reader bounds chunk reads by `min(EA count, dimension)`, which
-    /// makes it tolerate a phase-3 state where the element count has advanced
-    /// past the dimension. The C library instead walks strictly by the dataspace
-    /// dimension and re-validates block checksums, so a stale end-of-file, a
-    /// half-grown index, or a mis-checksummed block could satisfy the reader here
-    /// and still break C or h5py. That gap is the whole point of the test:
-    /// crash-safety for the append path is an interop guarantee.
-    ///
-    /// Both starting layouts are covered — a partial trailing chunk and the
-    /// EA-boundary growth above — since they exercise different index writes.
+    /// This reader is the lenient one. It bounds chunk reads by `min(EA count,
+    /// dimension)`, so it tolerates a phase-3 state where the element count has
+    /// advanced past the dimension, where the reference C library walks strictly
+    /// by the dataspace dimension and re-validates block checksums. The C
+    /// library read these states until it became a dependency of the crosscheck
+    /// package alone; the phased append that produces them is private, so that
+    /// coverage is gone, and a stale end-of-file, a half-grown index or a
+    /// mis-checksummed block that this reader forgives is not caught here.
     ///
     /// Restores coverage lost with the deprecated `SwmrWriter` and `AppendWriter`
     /// (issue #202).
     #[test]
-    // Reads back with the reference HDF5 C library (`hdf5-metno`), a
-    // 64-bit little-endian-only dev-dependency; skip elsewhere so the lib
-    // tests still run there.
-    #[cfg(all(not(target_pointer_width = "32"), target_endian = "little"))]
-    #[cfg(feature = "__hdf5-1.10")]
-    fn append_inplace_crash_consistency_c_library_reads_prefix() {
+    fn append_inplace_crash_consistency_leaves_the_committed_prefix() {
         use tempfile::tempdir;
 
         // (initial length, chunk length, appended length): a partial trailing
@@ -17646,14 +17579,12 @@ mod tests {
                     .join(format!("crash_c_{n}_{chunk}_{max_phase}.h5"));
                 append_stopped_at(&base, &p, n..n + add, max_phase);
                 let expected_len = if max_phase == 4 { n + add } else { n };
-                let f = hdf5::File::open(&p).unwrap();
+                let pf = crate::reader::File::from_bytes(std::fs::read(&p).unwrap()).unwrap();
                 assert_eq!(
-                    f.dataset("d").unwrap().read_raw::<i32>().unwrap(),
+                    pf.dataset("d").unwrap().read_i32().unwrap(),
                     (0..expected_len).collect::<Vec<_>>(),
-                    "C library saw an inconsistent view after crash at phase {max_phase} \
-                     (n={n}, chunk={chunk})"
+                    "inconsistent view after crash at phase {max_phase} (n={n}, chunk={chunk})"
                 );
-                f.close().unwrap();
             }
         }
     }
@@ -17675,11 +17606,6 @@ mod tests {
     /// surviving `recover_and_reappend_after_clean_phase4` covers only the clean
     /// case.
     #[test]
-    // Reads back with the reference HDF5 C library (`hdf5-metno`), a
-    // 64-bit little-endian-only dev-dependency; skip elsewhere so the lib
-    // tests still run there.
-    #[cfg(all(not(target_pointer_width = "32"), target_endian = "little"))]
-    #[cfg(feature = "__hdf5-1.10")]
     fn append_inplace_recover_and_reappend_after_phase3_crash() {
         use crate::reader::File as PureFile;
         use tempfile::tempdir;
@@ -17704,15 +17630,6 @@ mod tests {
             committed,
             "phase-3 crash exposed uncommitted data to the pure reader"
         );
-        {
-            let f = hdf5::File::open(&path).unwrap();
-            assert_eq!(
-                f.dataset("d").unwrap().read_raw::<i32>().unwrap(),
-                committed,
-                "phase-3 crash exposed uncommitted data to the C library"
-            );
-            f.close().unwrap();
-        }
 
         // Writer 2 recovers: roll forward from the committed dimension,
         // overwriting the uncommitted slots with the real continuation.
@@ -17729,13 +17646,6 @@ mod tests {
             expected,
             "recovery did not roll forward correctly (pure reader)"
         );
-        let f = hdf5::File::open(&path).unwrap();
-        assert_eq!(
-            f.dataset("d").unwrap().read_raw::<i32>().unwrap(),
-            expected,
-            "recovery did not roll forward correctly (C library)"
-        );
-        f.close().unwrap();
     }
 
     #[test]
@@ -20875,39 +20785,14 @@ mod tests {
     /// is the interop half of that). Which is what makes this reachable.
     ///
     /// The second link is made with the reference C library because this crate
-    /// has no API that creates one.
+    /// has no API that creates one: the file is a committed one, see
+    /// `crates/crosscheck/tests/c_test_data.rs`.
     #[test]
-    #[cfg(all(not(target_pointer_width = "32"), target_endian = "little"))]
-    #[cfg(feature = "__hdf5-1.10")]
     fn an_undo_replays_two_hard_links_to_one_block_newest_first() {
         use tempfile::tempdir;
 
         let dir = tempdir().unwrap();
-        let path = dir.path().join("hard_link_undo.h5");
-        {
-            use hdf5::plist::file_create::FileSpaceStrategy as CStrategy;
-            let f = hdf5::FileBuilder::new()
-                .with_fapl(|fapl| fapl.libver_v110())
-                .with_fcpl(|fcpl| {
-                    fcpl.file_space_strategy(CStrategy::FreeSpaceManager {
-                        paged: false,
-                        persist: true,
-                        threshold: 1,
-                    })
-                })
-                .create(&path)
-                .unwrap();
-            f.new_dataset::<i32>()
-                .shape((3,))
-                .create("aa")
-                .unwrap()
-                .write(&[1i32, 2, 3])
-                .unwrap();
-            // A second name for the very same object header, and so the very
-            // same data block.
-            f.link_hard("aa", "bb").unwrap();
-            f.close().unwrap();
-        }
+        let path = crate::test_data::copy("c/hard_link_undo.h5", dir.path());
 
         let mut s = WriteEngine::open_with_locking(&path, FileLocking::Enabled).unwrap();
         // Fail the commit in its tail, after both writes have landed.

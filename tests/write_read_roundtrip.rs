@@ -1395,7 +1395,7 @@ fn matching_shape_and_data_is_accepted() {
 // forward, so every stored address is relative to the base; the reader must
 // apply the base to contiguous data, the chunk index, and each chunk's data.
 // (These exercise the in-memory read path; the C-library cross-checks live in
-// `edit_userblock_crosscheck.rs`.)
+// `crates/crosscheck/tests/edit_userblock.rs`.)
 // ---------------------------------------------------------------------------
 
 /// Build a file with a 512-byte userblock and read a dataset back.

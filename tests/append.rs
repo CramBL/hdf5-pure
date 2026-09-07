@@ -1,7 +1,7 @@
 //! Pure-Rust tests for `Dataset::append_staged`: append new elements to an
 //! existing chunked, unlimited, Extensible-Array-indexed dataset in place —
 //! filtered and unfiltered, chunk-aligned and not — and read the result back
-//! with this crate. C-library interop lives in `append_crosscheck.rs`.
+//! with this crate. C-library interop lives in `crates/crosscheck/tests/append.rs`.
 
 use hdf5_pure::{AppendBuilder, AttrValue, Error, File, FileBuilder, FormatError, ScaleOffset};
 use tempfile::tempdir;

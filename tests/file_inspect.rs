@@ -4,9 +4,8 @@
 
 use hdf5_pure::{File, FileBuilder, LibVer, is_hdf5, is_hdf5_bytes};
 
-#[path = "common/temp_fixture.rs"]
-mod temp_fixture;
-use temp_fixture::temp_path;
+use temp::temp_path;
+use test_util::temp;
 
 fn sample_file() -> Vec<u8> {
     let mut builder = FileBuilder::new();

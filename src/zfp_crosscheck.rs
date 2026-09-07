@@ -1,9 +1,9 @@
 //! Crosscheck the pure-Rust ZFP codec against reference fixtures produced by
 //! h5py + the real H5Z-ZFP plugin.
 //!
-//! Fixtures and generator script live in `tests/fixtures/zfp/`. Regenerate:
+//! Fixtures and generator script live in `tests/data/h5py/zfp/`. Regenerate:
 //!
-//!     tests/fixtures/zfp/.venv/bin/python tests/fixtures/zfp/regen.py
+//!     tests/data/h5py/zfp/.venv/bin/python tests/data/h5py/zfp/regen.py
 //!
 //! The test iterates every fixture in the manifest. For each fixture that
 //! falls inside the currently-implemented codec slice (see `is_supported`),
@@ -58,7 +58,7 @@ struct Fixture {
 }
 
 fn fixture_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/zfp")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/data/h5py/zfp")
 }
 
 fn load_manifest() -> Manifest {

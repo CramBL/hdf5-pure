@@ -28,8 +28,7 @@ use hdf5_pure::{
 #[global_allocator]
 static ALLOC: heapscope::Alloc = heapscope::Alloc::system();
 
-#[path = "common/allocation.rs"]
-mod allocation;
+use test_util::allocation;
 
 use allocation::measure;
 

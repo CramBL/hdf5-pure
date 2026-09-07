@@ -15,7 +15,7 @@
 //! dataset whose rows, chunk bands, and window all lined up would exercise the
 //! sweep without exercising its edges.
 //!
-//! One case is missing from here and lives in `tests/empty_chunked_crosscheck.rs`
+//! One case is missing from here and lives in `crates/crosscheck/tests/empty_chunked.rs`
 //! instead: a chunk grid with holes in it, where a window is answered partly from
 //! storage and partly from the fill value. This crate's writer allocates every
 //! chunk it declares, so only the reference C library can produce that file

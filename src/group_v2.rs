@@ -868,7 +868,7 @@ mod tests {
 
     #[test]
     fn integration_v2_groups_temperature() {
-        let file_data: &[u8] = include_bytes!("../tests/fixtures/v2_groups.h5");
+        let file_data: &[u8] = include_bytes!("../tests/data/unattributed/v2_groups.h5");
         let sig_offset = signature::find_signature(file_data).unwrap();
         let sb = Superblock::parse(file_data, sig_offset).unwrap();
         assert!(sb.version >= 2); // v2/v3 superblock
@@ -884,7 +884,7 @@ mod tests {
 
     #[test]
     fn integration_v2_groups_humidity() {
-        let file_data: &[u8] = include_bytes!("../tests/fixtures/v2_groups.h5");
+        let file_data: &[u8] = include_bytes!("../tests/data/unattributed/v2_groups.h5");
         let sig_offset = signature::find_signature(file_data).unwrap();
         let sb = Superblock::parse(file_data, sig_offset).unwrap();
 
@@ -899,7 +899,7 @@ mod tests {
 
     #[test]
     fn integration_v2_many_links() {
-        let file_data: &[u8] = include_bytes!("../tests/fixtures/v2_many_links.h5");
+        let file_data: &[u8] = include_bytes!("../tests/data/unattributed/v2_many_links.h5");
         let sig_offset = signature::find_signature(file_data).unwrap();
         let sb = Superblock::parse(file_data, sig_offset).unwrap();
 
@@ -915,7 +915,7 @@ mod tests {
     #[test]
     fn integration_resolve_path_any_v1() {
         // Test that resolve_path_any also works for v1 files
-        let file_data: &[u8] = include_bytes!("../tests/fixtures/two_groups.h5");
+        let file_data: &[u8] = include_bytes!("../tests/data/unattributed/two_groups.h5");
         let sig_offset = signature::find_signature(file_data).unwrap();
         let sb = Superblock::parse(file_data, sig_offset).unwrap();
 
@@ -930,7 +930,7 @@ mod tests {
 
     #[test]
     fn integration_resolve_path_any_v2() {
-        let file_data: &[u8] = include_bytes!("../tests/fixtures/v2_groups.h5");
+        let file_data: &[u8] = include_bytes!("../tests/data/unattributed/v2_groups.h5");
         let sig_offset = signature::find_signature(file_data).unwrap();
         let sb = Superblock::parse(file_data, sig_offset).unwrap();
 
@@ -945,7 +945,7 @@ mod tests {
 
     #[test]
     fn path_not_found_v2() {
-        let file_data: &[u8] = include_bytes!("../tests/fixtures/v2_groups.h5");
+        let file_data: &[u8] = include_bytes!("../tests/data/unattributed/v2_groups.h5");
         let sig_offset = signature::find_signature(file_data).unwrap();
         let sb = Superblock::parse(file_data, sig_offset).unwrap();
 
@@ -1062,16 +1062,11 @@ mod tests {
 }
 
 /// The dense-link walks hold to the same one-parse-per-walk invariant as the
-/// dense-attribute ones. Gated to 64-bit targets with the reference C library,
-/// which is the only writer that produces a huge *link*: this crate's writer
-/// stores even a 60,000-byte link name as a managed heap object, so the huge
-/// path these tests cover is unreachable from a file it wrote.
-#[cfg(all(
-    test,
-    feature = "__hdf5-1.10",
-    not(target_pointer_width = "32"),
-    target_endian = "little"
-))]
+/// dense-attribute ones. The file comes from the reference C library, the only
+/// writer that produces a huge *link*: this crate's writer stores even a
+/// 60,000-byte link name as a managed heap object, so the huge path these tests
+/// cover is unreachable from a file it wrote.
+#[cfg(test)]
 mod huge_link_tests {
     use super::*;
     use crate::fractal_heap::{huge_index_decodes, reset_huge_index_decodes};
@@ -1080,29 +1075,9 @@ mod huge_link_tests {
 
     /// A file with one group of `count` links, each name long enough that its
     /// link message exceeds the heap's managed-object limit and is stored as a
-    /// huge object.
+    /// huge object. Written by `crates/crosscheck/tests/c_test_data.rs`.
     fn file_with_huge_links(count: usize) -> Vec<u8> {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("huge_links.h5");
-        {
-            let file = hdf5::FileBuilder::new()
-                .with_fapl(|fapl| fapl.libver_latest())
-                .create(&path)
-                .unwrap();
-            let group = file.create_group("g").unwrap();
-            for i in 0..count {
-                let name = format!("d{i}_{}", "x".repeat(5000));
-                group
-                    .new_dataset::<i32>()
-                    .shape((1,))
-                    .create(name.as_str())
-                    .unwrap()
-                    .write(&[i as i32])
-                    .unwrap();
-            }
-            file.close().unwrap();
-        }
-        std::fs::read(&path).unwrap()
+        std::fs::read(crate::test_data::path(&format!("c/huge_links_{count}.h5"))).unwrap()
     }
 
     /// Group `g`'s dense-link storage: its info message, its heap address, and

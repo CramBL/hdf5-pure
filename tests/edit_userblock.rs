@@ -12,15 +12,14 @@
 //! re-encoded chunks fit their slots, otherwise rebuilt and relocated with the
 //! old storage reclaimed), group creation, and compact group attributes. The
 //! delete, copy, and relocating contiguous/compact overwrite paths are covered in
-//! `edit_userblock_followups.rs` and `edit_userblock_crosscheck.rs`. The one
+//! `edit_userblock_followups.rs` and `crates/crosscheck/tests/edit_userblock.rs`. The one
 //! userblock-specific operation still refused — cross-file copy from a userblock
 //! *source* — is covered below; a refusal never corrupts the file.
 
 use hdf5_pure::{AttrValue, File, FileBuilder, Object};
 
-#[path = "common/temp_fixture.rs"]
-mod temp_fixture;
-use temp_fixture::temp_path;
+use temp::temp_path;
+use test_util::temp;
 
 const UB: usize = 512;
 
@@ -164,7 +163,7 @@ fn userblock_inplace_overwrite_only_takes_fast_path() {
 /// base-address restriction in `copy_from`); the destination file must be left
 /// byte-identical by the refusal. Delete, in-file copy, cross-file copy into a
 /// userblock destination, and resizing overwrites are all supported now and are
-/// exercised in `edit_userblock_followups.rs` / `edit_userblock_crosscheck.rs`.
+/// exercised in `edit_userblock_followups.rs` / `crates/crosscheck/tests/edit_userblock.rs`.
 #[test]
 fn userblock_cross_file_copy_from_userblock_source_is_refused() {
     let src_path = temp_path("hdf5_pure_ub_xcopy_src_refuse.h5");
@@ -432,7 +431,7 @@ fn userblock_add_reference_dataset_roundtrip() {
 #[test]
 fn real_mat_add_dataset_preserves_userblock_and_data() {
     // Copy the fixture so the test never mutates the checked-in file.
-    let src = std::path::Path::new("tests/fixtures/mat_real/test_string_v73.mat");
+    let src = std::path::Path::new("tests/data/matlab/test_string_v73.mat");
     let path = temp_path("hdf5_pure_ub_real_mat.mat");
     std::fs::copy(src, &path).unwrap();
 

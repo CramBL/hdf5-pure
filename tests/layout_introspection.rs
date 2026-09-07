@@ -6,7 +6,7 @@
 //! data and picks the chunk index from the shape: unlimited maxshape ->
 //! extensible array, a single chunk -> single-chunk, otherwise fixed array. The
 //! `Compact` and legacy `BTreeV1` variants are exercised against
-//! reference-C-library files in `layout_introspection_crosscheck.rs`.
+//! reference-C-library files in `crates/crosscheck/tests/layout_introspection.rs`.
 
 use hdf5_pure::{ChunkIndex, Dataset, File, FileBuilder, Layout};
 use tempfile::tempdir;

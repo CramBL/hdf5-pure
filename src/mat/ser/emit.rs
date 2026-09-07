@@ -533,7 +533,7 @@ fn apply_char_string(ds: &mut DatasetBuilder, s: &str) {
         // characters, and an empty marker's payload is a `uint64` dimension vector
         // rather than character data. MATLAB writes the attribute on every
         // non-empty `char` and on no empty one; the fixtures in
-        // `tests/fixtures/mat_real` carry 167 of the first and 55 of the second.
+        // `tests/data/matlab` carry 167 of the first and 55 of the second.
         ds.set_attr("MATLAB_empty", AttrValue::U32(1));
         return;
     }
@@ -552,7 +552,7 @@ fn apply_char_string(ds: &mut DatasetBuilder, s: &str) {
 /// No `MATLAB_int_decode`, for any class: it says how to read the stored
 /// integers back as `char` or `logical` values, and an empty marker's payload is
 /// a `uint64` dimension vector rather than data of the marked class. MATLAB
-/// agrees — of the 352 empty datasets in `tests/fixtures/mat_real`, not one
+/// agrees — of the 352 empty datasets in `tests/data/matlab`, not one
 /// carries it. `MatBuilder::write_empty` states the same rule; the two have to
 /// hold it identically or the emitters diverge for an empty logical.
 ///

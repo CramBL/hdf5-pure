@@ -11,15 +11,13 @@ use hdf5_pure::{
     MemoryStrategy, SyncPolicy,
 };
 
-#[path = "common/temp_fixture.rs"]
-mod temp_fixture;
-use temp_fixture::temp_path;
+use temp::temp_path;
+use test_util::temp;
 
 // Shared with `tests/paged_staged_commit.rs`, which holds the staged commit to
 // the same invariant this holds the in-place append's reserve to (issue #387).
-#[path = "common/paged.rs"]
-mod paged;
 use paged::assert_pages_homogeneous;
+use test_util::paged;
 
 /// The superblock's end-of-file must equal the actual file length after every
 /// commit, including ones that truncate.

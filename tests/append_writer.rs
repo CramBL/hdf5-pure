@@ -3,7 +3,7 @@
 //! chunked, unlimited, Extensible-Array-indexed dataset — filtered and
 //! unfiltered, chunk-aligned and not, across one or many calls and sessions —
 //! read back with this crate. C-library interop lives in
-//! `append_writer_crosscheck.rs`.
+//! `crates/crosscheck/tests/append_writer.rs`.
 use hdf5_pure::{Error, File, FileAccessProperties, FileBuilder, ScaleOffset, SyncPolicy};
 use tempfile::tempdir;
 

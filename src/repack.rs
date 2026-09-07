@@ -1939,9 +1939,7 @@ mod tests {
 #[cfg(test)]
 mod attribute_fidelity_tests {
     use super::*;
-    #[cfg(feature = "__hdf5-1.10")]
     use crate::dataspace::{Dataspace, DataspaceType};
-    #[cfg(feature = "__hdf5-1.10")]
     use crate::datatype::StringPadding;
     use crate::datatype::{CharacterSet, CompoundMember, DatatypeByteOrder, ReferenceType};
     use crate::{File, FileBuilder, RepackOptions};
@@ -2050,7 +2048,6 @@ mod attribute_fidelity_tests {
     /// two independent parses of two real files made of them, not a struct
     /// handed back to itself.
     #[test]
-    #[cfg(feature = "__hdf5-1.10")]
     fn an_encoding_this_crate_has_no_attr_value_for_still_crosses_a_repack() {
         let dir = tempfile::tempdir().unwrap();
         let (src, dst) = (dir.path().join("src.h5"), dir.path().join("dst.h5"));
@@ -2178,52 +2175,41 @@ mod attribute_fidelity_tests {
                 );
             }
         }
-        c_library_reads_every_attribute(&dst, exotic.len());
+        assert_fixture_holds(&src, &exotic);
     }
 
-    /// The repacked file, read by the reference C library rather than by the
-    /// reader that wrote it.
+    /// `tests/data/pure/exotic_attributes.h5` is the source file of the
+    /// test above, committed so that `crates/crosscheck/tests/repack.rs` can
+    /// repack it through the public API and read the result with the reference
+    /// C library. Without that the test proves only that this crate agrees with
+    /// itself, which a message it encodes wrongly and parses back just as
+    /// wrongly would satisfy. The seam that writes these encodings is
+    /// crate-private, so the fixture cannot be built over there.
     ///
-    /// Without this the test above proves only that this crate agrees with
-    /// itself, which a message it encodes wrongly and parses back just as wrongly
-    /// would satisfy. These encodings reach the file through an internal seam
-    /// with no public spelling, so nothing else in the suite would catch that.
-    #[cfg(all(
-        feature = "__hdf5-1.10",
-        not(target_pointer_width = "32"),
-        target_endian = "little"
-    ))]
-    fn c_library_reads_every_attribute(file: &Path, expected: usize) {
-        let c = hdf5::File::open(file).expect("the C library must open the repacked file");
-        for names in [
-            c.attr_names().expect("root attribute names"),
-            c.dataset("data")
-                .expect("dataset")
-                .attr_names()
-                .expect("dataset attribute names"),
-        ] {
-            assert_eq!(
-                names.len(),
-                expected,
-                "the C library found {names:?}, not all {expected} attributes"
-            );
-            for name in names {
-                // Opening reads the datatype and dataspace, which is where a
-                // malformed one is caught.
-                c.attr(&name)
-                    .unwrap_or_else(|e| panic!("the C library could not open {name:?}: {e}"));
+    /// Not pinned byte for byte, since the encodings are what matter: the
+    /// committed copy has to hold them, and `HDF5_PURE_UPDATE_TEST_DATA` rewrites
+    /// it.
+    fn assert_fixture_holds(src: &Path, exotic: &[AttributeMessage]) {
+        let fixture = crate::test_data::path("pure/exotic_attributes.h5");
+        if std::env::var_os(crate::test_data::UPDATE).is_some() {
+            std::fs::create_dir_all(fixture.parent().unwrap()).unwrap();
+            std::fs::copy(src, &fixture).unwrap();
+        }
+        for owner in ["", "data"] {
+            let messages = messages_at(owner, &fixture);
+            for message in exotic {
+                assert_eq!(
+                    messages.get(&message.name),
+                    Some(message),
+                    "{} does not hold {:?} on {owner:?} as this test writes it; \
+                     rerun with {}=1 to refresh it",
+                    fixture.display(),
+                    message.name,
+                    crate::test_data::UPDATE
+                );
             }
         }
     }
-
-    /// The C library is a 64-bit little-endian-only dev-dependency, so the
-    /// check compiles out elsewhere and the pure-Rust half of the test still
-    /// runs there.
-    #[cfg(all(
-        feature = "__hdf5-1.10",
-        not(all(not(target_pointer_width = "32"), target_endian = "little"))
-    ))]
-    fn c_library_reads_every_attribute(_file: &Path, _expected: usize) {}
 
     /// The other half of the rule: an attribute whose bytes are a *location* must
     /// not be copied, because the location is in the source file.

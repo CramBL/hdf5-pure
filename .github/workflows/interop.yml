@@ -52,7 +52,8 @@ jobs:
               - rust-toolchain.toml
               - .cargo/**
               - scripts/python/**
-              - tests/**
+              - crates/**
+              - tests/data/**
               - justfile
               - scripts/interop.just
               - .github/workflows/interop.yml
@@ -73,11 +74,11 @@ jobs:
         # suite is built with: the one naming the linked series, from 1.10 up.
         version: ["1.8.23", "1.10.11", "1.12.3", "1.14.6", "2.2.0"]
         include:
-          - {version: "1.8.23", features: "serde"}
-          - {version: "1.10.11", features: "serde,__hdf5-1.10"}
-          - {version: "1.12.3", features: "serde,__hdf5-1.12"}
-          - {version: "1.14.6", features: "serde,__hdf5-1.14"}
-          - {version: "2.2.0", features: "serde,__hdf5-2"}
+          - {version: "1.8.23", features: "serde,ndarray"}
+          - {version: "1.10.11", features: "serde,ndarray,__hdf5-1.10"}
+          - {version: "1.12.3", features: "serde,ndarray,__hdf5-1.12"}
+          - {version: "1.14.6", features: "serde,ndarray,__hdf5-1.14"}
+          - {version: "2.2.0", features: "serde,ndarray,__hdf5-2"}
 
     steps:
       - name: Checkout
@@ -115,8 +116,13 @@ jobs:
       - name: Build HDF5 ${{ matrix.version }}
         run: just interop::hdf5-build ${{ matrix.version }}
 
-      - name: Run the test suite against it
+      - name: Run the crosschecks against it
         run: just interop::test-hdf5 ${{ matrix.version }} ${{ matrix.features }} --no-fail-fast
+
+      # Clippy needs a libhdf5 to build against, so it runs here, once.
+      - name: Lint the crosschecks
+        if: matrix.os == 'ubuntu-latest' && matrix.version == '2.2.0'
+        run: just interop::lint-hdf5 ${{ matrix.version }} ${{ matrix.features }}
 
   # The reference C library for MATLAB files, reading back what `mat` writes.
   # From conda-forge because the test calls `Mat_VarCreateStruct2`, which no

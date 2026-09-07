@@ -7213,7 +7213,8 @@ mod tests {
     #[test]
     fn a_symbol_table_group_still_opens_by_name() {
         let file =
-            File::from_bytes(include_bytes!("../tests/fixtures/two_groups.h5").to_vec()).unwrap();
+            File::from_bytes(include_bytes!("../tests/data/unattributed/two_groups.h5").to_vec())
+                .unwrap();
 
         // Names, not a count: this file holds two one-child groups, so a lookup
         // that classified correctly and then took its sibling's address would
