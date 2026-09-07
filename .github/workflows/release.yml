@@ -42,8 +42,9 @@ jobs:
       id-token: write
       actions: write
     steps:
+      # The credentials stay: the publish step pushes the tag.
       - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 # zizmor: ignore[artipacked]
         with:
           ref: main
           fetch-depth: 0
@@ -67,4 +68,6 @@ jobs:
         env:
           CARGO_REGISTRY_TOKEN: ${{ steps.crates-io.outputs.token }}
           GH_TOKEN: ${{ github.token }}
-        run: just release::publish ${{ inputs.version }} ${{ inputs.skip_api_delta && '--skip-api-delta' || '' }}
+          VERSION: ${{ inputs.version }}
+          SKIP_API_DELTA: ${{ inputs.skip_api_delta && '--skip-api-delta' || '' }}
+        run: just release::publish "$VERSION" $SKIP_API_DELTA
