@@ -102,17 +102,24 @@ jobs:
       # bundled one. Failures are reported and do not fail the job.
       #
       # HDF5_DIR is set on this step only, so the fixture writer above links
-      # the bundled library.
+      # the bundled library. `hdf5-metno-sys` declares HDF5_DIR as a build
+      # script input only when it links a system library, so a bundled build
+      # from the cache is cleaned to make the script run again.
+      #
+      # The runtime library path is set through the loader on Linux and
+      # Windows. macOS takes an rpath through RUSTFLAGS, which replaces the
+      # flags in `.cargo/config.toml`; that file sets none for aarch64.
       - name: Run the test suite against it
         continue-on-error: true
         run: |
           dir="$CONDA_PREFIX"
-          if command -v cygpath >/dev/null; then
-            dir="$(cygpath -m "$dir")"
-          else
-            export RUSTFLAGS="-C link-args=-Wl,-rpath,$dir/lib"
-          fi
+          case "$RUNNER_OS" in
+            Windows) dir="$(cygpath -m "$dir")" ;;
+            Linux) export LD_LIBRARY_PATH="$dir/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" ;;
+            macOS) export RUSTFLAGS="-C link-args=-Wl,-rpath,$dir/lib" ;;
+          esac
           export HDF5_DIR="$dir"
+          cargo clean -p hdf5-metno-sys
           just test --features serde --no-fail-fast
 
   # The matrix must include the release `hdf5-metno` bundles, which is the
