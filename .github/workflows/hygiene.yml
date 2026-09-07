@@ -20,8 +20,8 @@ env:
   RUST_BACKTRACE: 1
 
 jobs:
-  shear:
-    name: shear / ubuntu-latest
+  checks:
+    name: checks / ubuntu-latest
     runs-on: ubuntu-latest
 
     steps:
@@ -44,44 +44,39 @@ jobs:
         with:
           tool: cargo-shear,just
 
-      - name: Unused dependencies
-        run: just hygiene::shear
-
-  # The Python project under scripts/python: formatting, lint and its tests.
-  python:
-    name: python / ubuntu-latest
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-
       - name: Install uv
         uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
         with:
           enable-cache: true
           cache-dependency-glob: scripts/python/uv.lock
 
-      - name: Install tools
-        uses: taiki-e/install-action@920ab1831fbf4fb3ef75c8ead83556c918bb7290 # v2.79.8
-        with:
-          tool: just
+      - name: Unused dependencies
+        run: just hygiene::shear
 
-      - name: Formatting
+      # The interop matrix must include the release `hdf5-metno` bundles, which
+      # the crosschecks in `ci.yml` link.
+      - name: Interop matrix lists the bundled release
+        run: |
+          version="$(just interop::hdf5-bundled-version)"
+          echo "hdf5-metno bundles $version"
+          if ! grep -qE "^\s+version: \[.*\"$version\".*\]" .github/workflows/interop.yml; then
+            echo "::error::$version is not in the interop matrix version list."
+            exit 1
+          fi
+
+      - name: Python formatting
         run: just python::fmt-check
 
-      - name: Lint
+      - name: Python lint
         run: just python::lint
 
-      - name: Tests
+      - name: Python tests
         run: just python::test
 
   ci-hygiene-guard:
     name: ci-hygiene-guard
     runs-on: ubuntu-latest
-    needs: [shear, python]
+    needs: [checks]
     permissions:
       contents: none
     if: always()
