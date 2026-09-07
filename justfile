@@ -99,8 +99,19 @@ heap-profile:
 api-surface:
     ./scripts/check-api-surface.sh
 
-hdf5-compat *ARGS:
-    ./scripts/check-hdf5-compat.sh {{ ARGS }}
+hdf5-compat *ARGS: (hdf5-build ARGS) (hdf5-check ARGS)
+
+hdf5-build *ARGS:
+    uv run scripts/check_hdf5_compat.py --prepare {{ ARGS }}
+
+hdf5-check *ARGS:
+    uv run scripts/check_hdf5_compat.py {{ ARGS }}
+
+verify-fixtures *ARGS:
+    uv run scripts/verify_fixtures.py {{ ARGS }}
+
+lock-python:
+    uv lock --script scripts/verify_fixtures.py
 
 check-release-script:
     ./scripts/check-release-script.sh

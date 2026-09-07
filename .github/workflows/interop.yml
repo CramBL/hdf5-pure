@@ -24,13 +24,21 @@ jobs:
   # a user is likely to have. conda-forge carries builds back to 1.8.16, and the
   # tools ship with them, so each entry is a real `h5dump` reading real output.
   hdf5:
-    name: hdf5 / ${{ matrix.version }}
-    runs-on: ubuntu-latest
+    name: hdf5 / ${{ matrix.version }} / ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
 
     strategy:
       fail-fast: false
       matrix:
-        version: ["1.8.16", "1.8.20", "1.10.6", "1.12.2", "1.14.6", "2.2.0"]
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        # The last release of each series conda-forge carries.
+        version: ["1.8.20", "1.10.6", "1.12.2", "1.14.6", "2.2.0"]
+        exclude:
+          # conda-forge's oldest build for Apple Silicon is 1.10.6, and its
+          # Windows 1.8 build wants a `vc ==14` package only the retired
+          # defaults channel carries. The source job below covers 1.8 on macOS.
+          - {os: macos-latest, version: "1.8.20"}
+          - {os: windows-latest, version: "1.8.20"}
 
     defaults:
       run:
@@ -53,24 +61,53 @@ jobs:
           shared-key: interop
           save-if: ${{ github.ref == 'refs/heads/main' && matrix.version == '1.14.6' }}
 
+      - name: Install tools
+        uses: taiki-e/install-action@920ab1831fbf4fb3ef75c8ead83556c918bb7290 # v2.79.8
+        with:
+          tool: just
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          enable-cache: true
+          cache-dependency-glob: "scripts/*.lock"
+          cache-suffix: hdf5-${{ matrix.version }}
+
       - name: Install conda
         uses: conda-incubator/setup-miniconda@8ee1f361103df19b6f8c8655fd3967a8ecb162d5 # v4.0.1
         with:
           auto-update-conda: false
           activate-environment: hdf5
           miniconda-version: latest
+          channels: conda-forge
+          conda-remove-defaults: "true"
 
       - name: Install HDF5 ${{ matrix.version }}
-        run: conda install -y -c conda-forge "hdf5=${{ matrix.version }}"
+        run: conda install -y -c conda-forge "hdf5=${{ matrix.version }}" "python>=3.9,<3.12"
+
+      # cygpath: bash eats the backslashes in a Windows $CONDA_PREFIX.
+      - name: Resolve the prefix
+        run: |
+          prefix="$CONDA_PREFIX"
+          if command -v cygpath >/dev/null; then prefix="$(cygpath -u "$prefix")"; fi
+          echo "HDF5_PREFIX=$prefix" >> "$GITHUB_ENV"
+
+      - name: Build h5py against it
+        run: just hdf5-build --prefix "$HDF5_PREFIX"
 
       - name: Check this crate's output against it
-        run: ./scripts/check-hdf5-compat.sh --prefix "$CONDA_PREFIX"
+        run: just hdf5-check --prefix "$HDF5_PREFIX"
 
   # 1.8.23 is the last 1.8 release and predates conda-forge's oldest build, so
   # the format boundary that `LibVer::V18` exists for is checked at its edge.
   hdf5-last-1_8:
-    name: hdf5 / 1.8.23 (source)
-    runs-on: ubuntu-latest
+    name: hdf5 / 1.8.23 (source) / ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
 
     steps:
       - name: Checkout
@@ -89,21 +126,40 @@ jobs:
           shared-key: interop
           save-if: false
 
+      - name: Install tools
+        uses: taiki-e/install-action@920ab1831fbf4fb3ef75c8ead83556c918bb7290 # v2.79.8
+        with:
+          tool: just
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          enable-cache: true
+          cache-dependency-glob: "scripts/*.lock"
+
       - name: Cache the HDF5 1.8.23 build
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: tmp/hdf5-compat-check/install
-          key: hdf5-1_8_23-${{ runner.os }}-${{ hashFiles('scripts/check-hdf5-compat.sh') }}
+          key: hdf5-1_8_23-${{ runner.os }}-${{ hashFiles('scripts/check_hdf5_compat.py') }}
+
+      - name: Build HDF5 1.8.23, and h5py against it
+        run: just hdf5-build
 
       - name: Check this crate's output against it
-        run: ./scripts/check-hdf5-compat.sh
+        run: just hdf5-check
 
   # The reference C library for MATLAB files, reading back what `mat` writes.
   # From conda-forge because the test calls `Mat_VarCreateStruct2`, which no
   # distribution package carries yet.
   matio:
-    name: matio / ubuntu-latest
-    runs-on: ubuntu-latest
+    name: matio / ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
 
     defaults:
       run:
@@ -137,6 +193,8 @@ jobs:
           auto-update-conda: false
           activate-environment: matio
           miniconda-version: latest
+          channels: conda-forge
+          conda-remove-defaults: "true"
 
       - name: Install libmatio
         run: conda install -y -c conda-forge libmatio
@@ -146,7 +204,7 @@ jobs:
       - name: Crosscheck against the reference library
         run: |
           export LIBRARY_PATH="$CONDA_PREFIX/lib:${LIBRARY_PATH:-}"
-          export LD_LIBRARY_PATH="$CONDA_PREFIX/lib:${LD_LIBRARY_PATH:-}"
+          export RUSTFLAGS="-C link-args=-Wl,-rpath,$CONDA_PREFIX/lib"
           just test-matio
 
   interop:
