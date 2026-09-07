@@ -946,7 +946,7 @@ mod tests {
     /// are what it takes to see this, which no single read produces; the cache
     /// API hands them out directly, so this needs no threads.
     #[test]
-    fn an_lru_hit_does_not_release_another_passs_chunk_to_it() {
+    fn an_lru_hit_does_not_release_a_chunk_of_another_pass_to_it() {
         let cache = ChunkCache::with_capacity(1024 * 1024, 2);
         let reader = cache.begin_pass();
         cache.put_decompressed(reader, &[0], vec![0u8; 100]);

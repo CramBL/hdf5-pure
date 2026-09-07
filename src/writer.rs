@@ -308,7 +308,7 @@ impl FileBuilder {
     /// memory stays bounded by a single chunk plus the file metadata rather than
     /// the whole dataset.
     ///
-    /// The sink is written front-to-back and never seeked, so it can be a socket
+    /// The sink is written front-to-back with no seeks, so it can be a socket
     /// or a pipe as readily as a file. That is possible because the writer
     /// computes every object's address before it emits a byte, rather than
     /// seeking back to patch addresses the way a backpatching writer would.
