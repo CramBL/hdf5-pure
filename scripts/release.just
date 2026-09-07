@@ -3,8 +3,10 @@ set working-directory := ".."
 default:
     @just --list release
 
-release *ARGS:
-    ./scripts/release.sh {{ ARGS }}
+# The release pull request for VERSION: bump, changelog, package, branch, PR.
+prepare VERSION *ARGS:
+    uv run scripts/release.py prepare {{ VERSION }} {{ ARGS }}
 
-check-release-script:
-    ./scripts/check-release-script.sh
+# Publish VERSION from main: crates.io, the tag, the GitHub release. Resumable.
+publish VERSION *ARGS:
+    uv run scripts/release.py publish {{ VERSION }} {{ ARGS }}

@@ -1,0 +1,64 @@
+name: Release
+
+# Publish a version that has been merged to main. Run from the Actions tab
+# with the version as merged, `0.45.0` or `0.45.0-rc.1`. Re-running with the
+# same version resumes after a failure: every public step is skipped once it
+# has happened.
+#
+# One-time setup: the crate's Trusted Publishing entry on crates.io naming
+# this repository and `release.yml`.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "The version to publish, as merged to main: X.Y.Z or X.Y.Z-rc.N"
+        required: true
+        type: string
+      skip_api_delta:
+        description: "Publish without the public-API delta gate"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: publish / ${{ inputs.version }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+      actions: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Install Rust
+        run: rustup toolchain install
+
+      - name: Install tools
+        uses: taiki-e/install-action@920ab1831fbf4fb3ef75c8ead83556c918bb7290 # v2.79.8
+        with:
+          tool: just,cargo-semver-checks
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+
+      - name: Authenticate with crates.io
+        id: crates-io
+        uses: rust-lang/crates-io-auth-action@c6f97d42243bad5fab37ca0427f495c86d5b1a18 # v1.0.5
+
+      - name: Publish
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.crates-io.outputs.token }}
+          GH_TOKEN: ${{ github.token }}
+        run: just release::publish ${{ inputs.version }} ${{ inputs.skip_api_delta && '--skip-api-delta' || '' }}
