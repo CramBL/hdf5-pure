@@ -27,6 +27,12 @@ concurrency:
   group: release
   cancel-in-progress: false
 
+env:
+  CARGO_TERM_COLOR: always
+  JUST_COLOR: always
+  JUST_VERBOSE: 1
+  JUST_TIMESTAMP: true
+
 jobs:
   publish:
     name: publish / ${{ inputs.version }}
