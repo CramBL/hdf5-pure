@@ -21,10 +21,43 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
+env:
+  CARGO_TERM_COLOR: always
+  JUST_COLOR: always
+  JUST_VERBOSE: 1
+  JUST_TIMESTAMP: true
+
 jobs:
+  # Whether the pull request touches what this workflow reads. Every other
+  # event runs everything.
+  changes:
+    name: changes
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: read
+    outputs:
+      run: ${{ github.event_name != 'pull_request' || steps.filter.outputs.run == 'true' }}
+    steps:
+      - name: Filter the changed paths
+        id: filter
+        if: github.event_name == 'pull_request'
+        uses: dorny/paths-filter@fbd0ab8f3e69293af611ebaee6363fc25e6d187d # v4.0.1
+        with:
+          filters: |
+            run:
+              - scripts/python/**
+              - docs/**
+              - mkdocs.yml
+              - CHANGELOG.md
+              - justfile
+              - scripts/docs.just
+              - .github/workflows/docs.yml
+
   build:
     name: build / ubuntu-latest
     runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.run == 'true'
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -70,11 +103,13 @@ jobs:
   ci-docs-guard:
     name: ci-docs-guard
     runs-on: ubuntu-latest
-    needs: [build]
+    needs: [changes, build]
     permissions:
       contents: none
     if: always()
     steps:
       - name: Fail if any dependency failed
-        if: contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') || contains(needs.*.result, 'skipped')
+        if: >-
+          contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')
+          || (needs.changes.outputs.run == 'true' && contains(needs.*.result, 'skipped'))
         run: exit 1
