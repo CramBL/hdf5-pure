@@ -7,7 +7,7 @@
 //! cargo run --example libver_fixtures --features serde -- <out-dir>
 //! ```
 //!
-//! `scripts/check-hdf5-18.sh` drives this; it is a separate program rather than
+//! `scripts/check_hdf5_compat.py` drives this; it is a separate program rather than
 //! a test because the thing it feeds is an external toolchain that cannot be a
 //! dev-dependency (see that script for why).
 //!

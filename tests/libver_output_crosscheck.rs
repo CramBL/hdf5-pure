@@ -14,7 +14,7 @@
 //!
 //! It cannot check the boundary itself. The `hdf5-metno` dev-dependency builds a
 //! current libhdf5, which reads both formats without complaint, so nothing here
-//! would fail if the bound stopped working. `scripts/check-hdf5-18.sh` covers
+//! would fail if the bound stopped working. `scripts/check_hdf5_compat.py` covers
 //! that half by building HDF5 1.8.23 and pointing its tools at both formats;
 //! run it when changing anything about superblock or message versions.
 //!

@@ -2,7 +2,7 @@
  * produced by an old library rather than by the `hdf5-metno` dev-dependency.
  *
  * Built and run by `regen.sh`, which points it at the HDF5 1.8.23 install that
- * `scripts/check-hdf5-18.sh` leaves under `tmp/hdf5-18-check/install`.
+ * `just hdf5-build` leaves under `tmp/hdf5-compat-check/install`.
  */
 #include "hdf5.h"
 #include <stdio.h>

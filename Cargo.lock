@@ -364,9 +364,8 @@ checksum = "841d1cc9bed7f9236f321df977030373f4a4163ae1a7dbfe1a51a2c1a51d9100"
 
 [[package]]
 name = "hdf5-metno"
-version = "0.14.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "effaf90242ed59abcbed70e156cb1830dd29fad918990cdf3413fd25934b999c"
+version = "0.14.1"
+source = "git+https://github.com/metno/hdf5-rust?branch=main#ee47d729d186224d35a3d31bc089bb2732da2b20"
 dependencies = [
  "bitflags",
  "cfg-if",
@@ -381,8 +380,7 @@ dependencies = [
 [[package]]
 name = "hdf5-metno-derive"
 version = "0.10.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2368b6d71ab96708b91912af3a93f7b8be9b1ecfca082f2c0868ce327a1fe926"
+source = "git+https://github.com/metno/hdf5-rust?branch=main#ee47d729d186224d35a3d31bc089bb2732da2b20"
 dependencies = [
  "proc-macro-crate",
  "proc-macro2",
@@ -392,9 +390,8 @@ dependencies = [
 
 [[package]]
 name = "hdf5-metno-src"
-version = "0.10.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3e8dfed88a20aca1e594f0e2e2f2c9115e0812ba20bbea1ef7c99e0142dc84b9"
+version = "0.10.4"
+source = "git+https://github.com/metno/hdf5-rust?branch=main#ee47d729d186224d35a3d31bc089bb2732da2b20"
 dependencies = [
  "cmake",
  "libz-sys",
@@ -402,9 +399,8 @@ dependencies = [
 
 [[package]]
 name = "hdf5-metno-sys"
-version = "0.12.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ff52250062cf9ecd180ae4eccbb5e00b1f89ee44cb48046d1339c99f5fb6c169"
+version = "0.12.3"
+source = "git+https://github.com/metno/hdf5-rust?branch=main#ee47d729d186224d35a3d31bc089bb2732da2b20"
 dependencies = [
  "hdf5-metno-src",
  "libc",
@@ -421,8 +417,7 @@ dependencies = [
 [[package]]
 name = "hdf5-metno-types"
 version = "0.11.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b29041af7e5a0b5698d6607c5c8b67b5dfcab40eb89c2fcfec54bbf0c031b425"
+source = "git+https://github.com/metno/hdf5-rust?branch=main#ee47d729d186224d35a3d31bc089bb2732da2b20"
 dependencies = [
  "ascii",
  "cfg-if",

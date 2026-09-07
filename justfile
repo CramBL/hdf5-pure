@@ -107,6 +107,13 @@ hdf5-build *ARGS:
 hdf5-check *ARGS:
     uv run scripts/check_hdf5_compat.py {{ ARGS }}
 
+# The libhdf5 the crosscheck tests link when HDF5_DIR is unset.
+hdf5-bundled-version:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    manifest=$(cargo metadata --locked --format-version 1 | jq -r '.packages[] | select(.name == "hdf5-metno-src") | .manifest_path')
+    awk '/^#define H5_VERS_(MAJOR|MINOR|RELEASE) / { v[++n] = $3 } END { print v[1] "." v[2] "." v[3] }' "$(dirname "$manifest")/ext/hdf5/src/H5public.h"
+
 verify-fixtures *ARGS:
     uv run scripts/verify_fixtures.py {{ ARGS }}
 
