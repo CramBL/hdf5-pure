@@ -51,13 +51,11 @@ jobs:
 
   # Each narrowing cast is either routed through `crate::convert` or annotated
   # with an `#[expect]` stating why it cannot lose information (issue #72).
-  # The toolchain is pinned so the flagged set does not drift under clippy.
+  # The flagged set is tied to the clippy version, which `rust-toolchain.toml`
+  # pins.
   cast-gate:
     name: cast gate / i686
     runs-on: ubuntu-latest
-
-    env:
-      RUSTUP_TOOLCHAIN: "1.96.0"
 
     steps:
       - name: Checkout
@@ -65,12 +63,8 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Install Rust 1.96.0
-        uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # 2026-03-27
-        with:
-          toolchain: "1.96.0"
-          components: clippy
-          targets: i686-unknown-linux-gnu
+      - name: Install Rust
+        run: rustup toolchain install && rustup target add i686-unknown-linux-gnu
 
       - name: Cache Cargo
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2

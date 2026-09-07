@@ -20,9 +20,6 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   FUZZ_DURATION: 600
-  FUZZ_TARGETS: |
-    parse_file
-    roundtrip_simple
 
 jobs:
   cargo-fuzz:
@@ -32,41 +29,30 @@ jobs:
     env:
       RUSTUP_TOOLCHAIN: nightly
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - name: Install Rust nightly
         uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # 2026-03-27
         with:
           toolchain: nightly
           targets: x86_64-unknown-linux-gnu
-      - uses: Swatinem/rust-cache@v2
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           key: cargo-fuzz
-      - name: Install cargo-fuzz
+      - name: Install tools
         uses: taiki-e/install-action@920ab1831fbf4fb3ef75c8ead83556c918bb7290 # v2.79.8
         with:
-          tool: cargo-fuzz
+          tool: cargo-fuzz,just
       - name: Use PR smoke duration
         if: github.event_name == 'pull_request'
         run: |
           set -euo pipefail
           echo "FUZZ_DURATION=30" >> "${GITHUB_ENV}"
-      - name: Run streaming differential fuzz target
-        run: |
-          # Pin the gnu target: cargo-fuzz ships as a musl-static binary, so it
-          # otherwise defaults to the musl target, whose static libc the address
-          # sanitizer cannot link against.
-          cargo +nightly fuzz run streaming_differential fuzz/corpus/parse_file \
-            --target x86_64-unknown-linux-gnu -- -max_total_time="${FUZZ_DURATION}" -rss_limit_mb=4096
-      - name: Run fuzz targets
-        run: |
-          set -euo pipefail
-
-          for target in ${FUZZ_TARGETS}; do
-            echo "::group::cargo +nightly fuzz run ${target}"
-            cargo +nightly fuzz run "${target}" \
-              --target x86_64-unknown-linux-gnu -- -max_total_time="${FUZZ_DURATION}" -rss_limit_mb=4096
-            echo "::endgroup::"
-          done
+      - name: Run every fuzz target
+        run: just fuzz-all "$FUZZ_DURATION"
       # To reproduce a crash, download fuzz-artifacts and run:
       # cargo +nightly fuzz run <target> fuzz/artifacts/<target>/<crash-file> --target x86_64-unknown-linux-gnu -- -rss_limit_mb=4096
       - name: Upload crash artifacts

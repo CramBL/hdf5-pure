@@ -82,9 +82,7 @@ jobs:
         run: just hdf5-build ${{ matrix.version }}
 
       - name: Run the test suite against it
-        run: |
-          eval "$(just hdf5-env ${{ matrix.version }})"
-          just test-external-hdf5 --features ${{ matrix.features }} --no-fail-fast
+        run: just test-hdf5 ${{ matrix.version }} ${{ matrix.features }} --no-fail-fast
 
   # The matrix must include the release `hdf5-metno` bundles, which the
   # crosschecks in `ci.yml` link.
