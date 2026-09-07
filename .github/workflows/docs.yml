@@ -64,10 +64,12 @@ jobs:
         with:
           persist-credentials: false
 
+      # The cache is uv's package cache, keyed on the lockfile, and it is off on
+      # the path that deploys: a build from a tag starts cold.
       - name: Install uv
-        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0 # zizmor: ignore[cache-poisoning]
         with:
-          enable-cache: true
+          enable-cache: ${{ github.event_name == 'pull_request' }}
           cache-dependency-glob: scripts/python/uv.lock
 
       - name: Install tools

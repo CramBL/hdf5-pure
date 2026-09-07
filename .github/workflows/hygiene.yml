@@ -55,8 +55,7 @@ jobs:
               - scripts/hygiene.just
               - scripts/python.just
               - scripts/interop.just
-              - .github/workflows/interop.yml
-              - .github/workflows/hygiene.yml
+              - .github/**
 
   checks:
     name: checks / ubuntu-latest
@@ -82,7 +81,7 @@ jobs:
       - name: Install tools
         uses: taiki-e/install-action@920ab1831fbf4fb3ef75c8ead83556c918bb7290 # v2.79.8
         with:
-          tool: cargo-shear,just
+          tool: cargo-shear,just,zizmor
 
       - name: Install uv
         uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
@@ -92,6 +91,9 @@ jobs:
 
       - name: Unused dependencies
         run: just hygiene::shear
+
+      - name: Workflows
+        run: just hygiene::zizmor
 
       # The interop matrix must include the release `hdf5-metno` bundles, which
       # the crosschecks in `ci.yml` link.

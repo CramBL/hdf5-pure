@@ -14,19 +14,19 @@ libfuzzer-sys = "0.4"
 tempfile = "3"
 
 [[bin]]
-name = "parse_file"
+name = "parse-file"
 path = "fuzz_targets/parse_file.rs"
 test = false
 doc = false
 
 [[bin]]
-name = "streaming_differential"
+name = "streaming-differential"
 path = "fuzz_targets/streaming_differential.rs"
 test = false
 doc = false
 
 [[bin]]
-name = "roundtrip_simple"
+name = "roundtrip-simple"
 path = "fuzz_targets/roundtrip_simple.rs"
 test = false
 doc = false

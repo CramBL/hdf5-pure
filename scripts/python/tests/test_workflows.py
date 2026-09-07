@@ -28,7 +28,9 @@ def needs(job):
 @pytest.mark.parametrize("name", filtered())
 def test_the_filter_names_the_workflow_file(name):
     step = load(name)["jobs"]["changes"]["steps"][0]
-    assert f"- .github/workflows/{name}\n" in step["with"]["filters"]
+    paths = yaml.safe_load(step["with"]["filters"])["run"]
+    covering = {f".github/workflows/{name}", ".github/workflows/**", ".github/**"}
+    assert covering & set(paths), f"{name} does not run when its own file changes"
 
 
 @pytest.mark.parametrize("name", filtered())
