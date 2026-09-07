@@ -20,7 +20,7 @@
 //! only chunk indices it writes arrived in 1.10 — so no round trip through it
 //! can stand in for the file.
 //!
-//! Both files hold the same objects, written by the same `regen.c`, so a failure
+//! Both files hold the same objects, written by the same program, so a failure
 //! in one and not the other names the format rather than the reader. See
 //! `tests/fixtures/c_1_8/NOTICE.md`.
 
@@ -29,7 +29,7 @@ use hdf5_pure::{AttrValue, File};
 const V1: &str = "tests/fixtures/c_1_8/v1_superblock.h5";
 const V2: &str = "tests/fixtures/c_1_8/v2_superblock.h5";
 
-/// The values `regen.c` wrote, read back through the public API.
+/// The values the fixtures hold, read back through the public API.
 fn assert_contents(path: &str) {
     let f = File::open(path).unwrap_or_else(|e| panic!("{path}: {e:?}"));
 
@@ -46,7 +46,7 @@ fn assert_contents(path: &str) {
     );
 
     // Chunked and deflated, indexed by a version 1 B-tree in both files —
-    // `regen.c` writes them under 1.8 bounds, and 1.8 had no other chunk index.
+    // both were written under 1.8 bounds, and 1.8 had no other chunk index.
     let expected: Vec<i32> = (0..1000).map(|i| i % 97).collect();
     assert_eq!(
         f.dataset("chunked").unwrap().read_i32().unwrap(),
@@ -55,7 +55,7 @@ fn assert_contents(path: &str) {
     );
 
     // A group, its attribute, and a dataset inside it. The two files differ here
-    // in a way the superblock version does not cause: `regen.c` builds the
+    // in a way the superblock version does not cause: the fixture builds the
     // version 2 file under `H5F_LIBVER_LATEST`, so its root is a link-message
     // group, where the version 1 file's is a v1 symbol table.
     assert_eq!(

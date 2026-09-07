@@ -7,9 +7,9 @@
 //! cargo run --example libver_fixtures --features serde -- <out-dir>
 //! ```
 //!
-//! `scripts/check_hdf5_compat.py` drives this; it is a separate program rather than
-//! a test because the thing it feeds is an external toolchain that cannot be a
-//! dev-dependency (see that script for why).
+//! The interop workflow points each release's `h5dump` and `h5repack` at the
+//! output. It is a program rather than a test because those tools are not a
+//! dev-dependency.
 //!
 //! Both files hold the same content, so any difference an old library reports
 //! between them is the format and nothing else.
@@ -134,8 +134,9 @@ fn write_h5(path: &Path, libver: LibVer) {
     b.write(path).expect("write h5 fixture");
 }
 
-/// The expectations `scripts/verify_fixtures.py` checks, written here so a
-/// fixture and the values it is checked against come from one place.
+/// The expectations for the fixtures, written here so a fixture and the values
+/// it is checked against come from one place. Nothing reads the manifest at
+/// present.
 fn checks() -> Vec<Value> {
     let plain = "plain_v18.h5";
     let mat_file = "mat_v18.mat";

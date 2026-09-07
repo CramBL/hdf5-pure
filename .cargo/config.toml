@@ -1,3 +1,11 @@
+# This crate's own target directory, overriding `~/.cargo/config.toml`.
+#
+# The test suite builds libhdf5 from source and links whichever release a job
+# names. A target directory shared with other projects mixes those builds with
+# theirs. `/target` is ignored by git and can be a symlink.
+[build]
+target-dir = "target"
+
 # Frame pointers on x86_64, for the allocation gates (issue #228).
 #
 # `tests/allocation_bounds.rs` and `tests/allocation_baseline.rs` install
