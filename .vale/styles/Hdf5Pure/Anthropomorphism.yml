@@ -1,6 +1,7 @@
-# Fork of Slop.Anthropomorphism (vale-llm-slop v0.1.0) with an exception.
-# The token list is upstream's, unchanged. Slop.Anthropomorphism is disabled in
-# .vale.ini so the two never double-report.
+# Fork of Slop.Anthropomorphism (vale-llm-slop v0.1.0) with an exception and
+# one more token: a bare third-person "knows", which upstream matches only
+# before "about" or "how to". Slop.Anthropomorphism is disabled in .vale.ini so
+# the two never double-report.
 #
 # "The caller is responsible for" is the Rust API Guidelines' wording for an
 # invariant the caller upholds. The exception is a full phrase, matched only
@@ -14,6 +15,7 @@ nonword: true
 exceptions:
   - '[Cc]allers?\s+(?:is|are)\s+responsible\s+for'
 tokens:
-  - '\b(?:knows|know)\s+(?:about|how\s+to)\b'
+  - '\bknows\b'
+  - '\bknow\s+(?:about|how\s+to)\b'
   - '\bis\s+aware\s+of\b'
   - '\b(?:wants|prefers|expects|likes)\s+(?:a|an|the|to)\b'

@@ -55,7 +55,12 @@ jobs:
       - name: Install tools
         uses: taiki-e/install-action@920ab1831fbf4fb3ef75c8ead83556c918bb7290 # v2.79.8
         with:
-          tool: just,cargo-semver-checks
+          tool: just,cargo-binstall
+
+      # From its own releases: the version in install-action's pinned manifest
+      # reads an older rustdoc format than the pinned toolchain writes.
+      - name: Install cargo-semver-checks
+        run: cargo binstall -y cargo-semver-checks
 
       - name: Install uv
         uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
