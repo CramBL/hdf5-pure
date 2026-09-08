@@ -1,0 +1,16 @@
+# Code that declines input rejects it. A remote host that declines a request
+# refuses it, which is the sense of "connection refused".
+#
+# Vale note: an exception must start with (?i), otherwise Vale compiles it
+# case-sensitive.
+extends: existence
+message: "Refuse '%s': code rejects input. A remote host refuses a request."
+level: error
+ignorecase: true
+nonword: true
+exceptions:
+  - '(?i)\b(?:host|server|endpoint)s?\s+(?:that\s+|which\s+)?refus\w*'
+  - '(?i)\brefus\w*\s+(?:by\s+|from\s+)?(?:the\s+|a\s+)?(?:host|server|endpoint)'
+  - '(?i)\bconnection\s+refused\b'
+tokens:
+  - '\brefus(?:e|es|ed|ing|al)\b'

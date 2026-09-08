@@ -1,0 +1,11 @@
+# "writes no header", "holds no chunks", "reports no error" is a dramatic
+# negation. State what the code does under the condition, and write a caller
+# contract as a requirement: "must not". "has no" and "needs no" describe a
+# state and stay allowed.
+extends: existence
+message: "Negated action '%s': state what the code does under the condition. A caller contract is a requirement: 'must not'."
+level: error
+ignorecase: true
+nonword: true
+tokens:
+  - '\b(?:removes?|deletes?|drops?|writes?|reads?|returns?|reports?|sends?|touches|changes?|draws?|adds?|creates?|opens?|closes?|fetches|requests?|leaves?|takes?|makes?|finds?|stores?|records?|emits?|produces?|raises?|lists?|shows?|prunes?|frees?|archives?|loads?|spawns?|starts?|runs?|reaches|counts?|keeps?|holds?|places?|marks?|paints?|renders?|selects?|yields?|hides?)\s+no\s+(?!longer\b|more\b|matter\b|one\b|further\b|such\b)\w+'

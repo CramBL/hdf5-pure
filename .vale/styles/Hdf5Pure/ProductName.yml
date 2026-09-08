@@ -1,0 +1,9 @@
+extends: substitution
+message: "Use '%s' instead of '%s'."
+level: error
+ignorecase: false
+swap:
+  HDF5-pure: hdf5-pure
+  HDF5-Pure: hdf5-pure
+  Hdf5-pure: hdf5-pure
+  Hdf5-Pure: hdf5-pure

@@ -1,0 +1,14 @@
+# Fork of Slop.NegativeParallelism (vale-llm-slop v0.1.0). Slop's copy is
+# disabled in .vale.ini. Upstream's second pattern, "is not X. It is Y", is
+# left out: it also matches two unrelated sentences. The three kept patterns
+# need "just", "only" or "not only ... but also".
+extends: existence
+message: "Negative parallelism ('%s') is a machine cadence. State the claim once."
+link: https://github.com/Syntaf/vale-llm-slop#slopnegativeparallelism
+level: error
+ignorecase: true
+nonword: true
+tokens:
+  - '\b(?:(?:is|are|was|were|it.s|they.re)\s+not|isn.t|aren.t|wasn.t|weren.t)\s+(?:just|only|merely|simply)\b[^.!?]{0,80}[—–,;:]\s*(?:it.s|they.re|it\s+is|they\s+are|but|rather)\b'
+  - '\bnot\s+only\b[^.!?]{0,80}\bbut\s+also\b'
+  - '\bnot\s+(?:just|merely|simply)\s+(?:about|a|an|the)\b[^.!?]{0,60}[—–,]\s*but\b'

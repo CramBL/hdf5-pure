@@ -1,0 +1,8 @@
+# Vale.Spelling with a filter for possessives: Vale's checker does not strip
+# "'s", so every possessive of a word outside its dictionary would report.
+# Vale.Spelling is disabled in .vale.ini.
+extends: spelling
+message: "Unknown word '%s'. An identifier goes in backticks, an abbreviation is spelled out. Only a real term of the domain goes into .vale/styles/config/vocabularies/Hdf5Pure/accept.txt."
+level: error
+filters:
+  - "\\w+['’]s"

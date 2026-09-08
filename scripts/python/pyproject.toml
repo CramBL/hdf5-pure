@@ -10,6 +10,7 @@ hdf5-build = "hdf5_pure_scripts.build_hdf5:main"
 api-surface = "hdf5_pure_scripts.api_surface:main"
 docs = "hdf5_pure_scripts.docs:main"
 release = "hdf5_pure_scripts.release:main"
+lint-prose = "hdf5_pure_scripts.prose:main"
 
 [dependency-groups]
 dev = ["ruff>=0.16.6", "pytest>=9.1.1", "pyyaml>=6.0.3"]

@@ -1,0 +1,19 @@
+# Fork of Slop.Anthropomorphism (vale-llm-slop v0.1.0) with an exception.
+# The token list is upstream's, unchanged. Slop.Anthropomorphism is disabled in
+# .vale.ini so the two never double-report.
+#
+# "The caller is responsible for" is the Rust API Guidelines' wording for an
+# invariant the caller upholds. The exception is a full phrase, matched only
+# as a whole.
+extends: existence
+message: "Code does not have intentions: '%s'. State the behaviour."
+link: https://github.com/Syntaf/vale-llm-slop#slopanthropomorphism
+level: error
+ignorecase: true
+nonword: true
+exceptions:
+  - '[Cc]allers?\s+(?:is|are)\s+responsible\s+for'
+tokens:
+  - '\b(?:knows|know)\s+(?:about|how\s+to)\b'
+  - '\bis\s+aware\s+of\b'
+  - '\b(?:wants|prefers|expects|likes)\s+(?:a|an|the|to)\b'

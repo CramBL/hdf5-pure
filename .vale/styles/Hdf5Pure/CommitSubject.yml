@@ -1,0 +1,9 @@
+# The subject line is a sentence: a capital first letter and no trailing period.
+extends: existence
+message: "Commit subject: '%s'. A capital first letter, no trailing period."
+level: error
+scope: raw
+nonword: true
+tokens:
+  - '\A[a-z]'
+  - '\A[^\n]*\.(?:\n|\z)'

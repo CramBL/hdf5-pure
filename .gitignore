@@ -31,3 +31,8 @@ scripts/python/.venv/
 .ruff_cache/
 .pytest_cache/
 __pycache__/
+
+# Vale: synced packages, pinned by URL in .vale.ini. The project style and
+# vocabulary are committed.
+.vale/styles/Slop/
+.vale/styles/.vale-config/
