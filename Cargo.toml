@@ -325,7 +325,7 @@ multiple_unsafe_ops_per_block = "allow"
 
 # Casts. A widening is `From`, a narrowing is `TryFrom`, and `as` is left for
 # the cast whose loss is the point, marked as such.
-# TODO: 1,465 sites.
+# TODO: 1,460 sites.
 as_conversions = "allow"
 # TODO: 412 sites on a 64-bit host, more on 32-bit, which
 # `just portability::cast-gate` denies.
