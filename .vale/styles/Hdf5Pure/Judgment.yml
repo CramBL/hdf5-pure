@@ -1,0 +1,13 @@
+# Mechanical behaviour is stated as a rule, never as a bargain or a
+# judgment: "retried once", not "worth one retry".
+extends: existence
+message: "Judgment '%s': state the rule literally."
+level: error
+ignorecase: true
+nonword: true
+tokens:
+  - '\bworth\s+(?:a|an|one|the|its)\b'
+  - '\bdeserves?\b'
+  - '\bearns?\b'
+  - '\bis\s+happy\s+(?:with|to)\b'
+  - '\btrusts?\b'

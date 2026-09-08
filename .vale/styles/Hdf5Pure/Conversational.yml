@@ -1,0 +1,21 @@
+# Code and library operations use a technical verb: request, read, return,
+# report, reject. Ask, tell and answer are for a person, which the exceptions
+# cover.
+#
+# Vale notes: an exception must start with (?i), otherwise Vale compiles it
+# case-sensitive. \w does not cross an apostrophe, so [\w'] where a possessive
+# can sit inside a phrase.
+extends: existence
+message: "Conversational '%s': use request, read, return, report or reject."
+level: error
+ignorecase: true
+nonword: true
+exceptions:
+  - '(?i)\b(?:tell\w*|told)\s+(?:[\w'']+\s+){0,5}apart\b'
+  - '(?i)\buser(?:''s)?\s+(?:\w+\s+){0,2}(?:ask\w*|answer\w*|told|tell\w*)'
+  - '(?i)\b(?:ask\w*|tell\w*|told|answer\w*)\s+(?:the\s+|a\s+|each\s+)?user\b'
+tokens:
+  - '\b(?:asks?|asked|asking)\b'
+  - '\b(?:tells?|told|telling)\b'
+  - '\b(?:answers?|answered|answering)\b'
+  - '\btalks?\s+to\b'

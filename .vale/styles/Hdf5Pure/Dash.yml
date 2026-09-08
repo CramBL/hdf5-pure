@@ -1,0 +1,11 @@
+# Prose uses a spaced hyphen for a break. An en dash only between the ends of
+# a numeric range ("1.8–2.2", "0–7"). Box-drawing characters are decoration,
+# never a section header.
+extends: existence
+message: "Dash '%s': use a spaced hyphen in prose, an en dash only in a numeric range."
+level: error
+nonword: true
+tokens:
+  - '[─═]'
+  - '—'
+  - '–(?![A-Za-z]?\d)|(?<!\d[a-z]?)–'

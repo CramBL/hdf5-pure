@@ -1,0 +1,12 @@
+# A commit message ends without a trailer: no Co-Authored-By, Signed-off-by,
+# Claude-Session or session URL, and no other Key-Name: line. The session token
+# omits the scheme so that lychee does not read it as a link.
+extends: existence
+message: "Commit trailer: '%s'. Commit messages have no trailers."
+level: error
+scope: raw
+nonword: true
+tokens:
+  - '(?m)^[A-Z][A-Za-z]*(?:-[A-Za-z]+)+:\s'
+  - '(?mi)^(?:Signed-off-by|Co-authored-by|Reviewed-by|Acked-by|Tested-by|Fixes|Closes|Resolves|Refs?|Link|Change-Id)\s*:'
+  - '\bclaude\.ai/code/session_\w+'

@@ -1,0 +1,10 @@
+# "a chunk the index does not have", "a message the reader does not know" are
+# reduced relative clauses. Name the condition plainly: outside, missing from,
+# unknown to, without.
+extends: existence
+message: "Reduced negative clause '%s': name the condition plainly: outside, missing from, unknown to, without."
+level: error
+ignorecase: true
+nonword: true
+tokens:
+  - '\b(?:a|an|the|every|any|each|one)\s+\w+\s+(?:the|a|an|this|that|its|their|every)\s+\w+\s+(?:does|do|did)\s+not\s+(?:have|hold|carry|know|contain|own)\b'

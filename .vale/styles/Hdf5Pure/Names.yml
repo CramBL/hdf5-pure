@@ -1,0 +1,13 @@
+# A code concept - an address, a message, an error, a version - does not name
+# a thing. It identifies, refers to, states, contains, lists or includes one.
+# A naming convention, scheme or rule keeps the word.
+extends: existence
+message: "Names '%s': a code concept does not name a thing. Use identifies, refers to, states, contains, lists or includes."
+level: error
+ignorecase: true
+nonword: true
+exceptions:
+  - '(?i)\bnaming\s+(?:convention|scheme|rule)s?\b'
+tokens:
+  - '\bnam(?:es|ing)\s+(?:a|an|the|its|one|which|what|no|every|each|that|this|those|these)\b'
+  - '\b(?:it|they|which|that|who)\s+names?\b'

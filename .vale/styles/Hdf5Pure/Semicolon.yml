@@ -1,0 +1,8 @@
+# Two clauses joined by a semicolon become two sentences, or a colon when the
+# second clause is the consequence of the first.
+extends: existence
+message: "Semicolon: split into two sentences, or use a colon for a consequence."
+level: error
+nonword: true
+tokens:
+  - ';'

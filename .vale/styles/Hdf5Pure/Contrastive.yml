@@ -1,0 +1,11 @@
+# A sentence states the current behaviour on its own, never against a
+# historical or hypothetical alternative.
+extends: existence
+message: "Contrastive '%s': state the current behaviour without the alternative."
+level: error
+ignorecase: true
+nonword: true
+tokens:
+  - '\brather\s+than\b'
+  - '\binstead\s+of\b'
+  - '\bas\s+opposed\s+to\b'

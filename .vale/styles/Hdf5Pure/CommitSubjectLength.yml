@@ -1,0 +1,8 @@
+# The subject line fits git's 72-column convention.
+extends: existence
+message: "Commit subject longer than 72 characters."
+level: error
+scope: raw
+nonword: true
+tokens:
+  - '\A[^\n]{73,}'
