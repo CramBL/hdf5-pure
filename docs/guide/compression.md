@@ -3,7 +3,7 @@
 This page covers the storage filters hdf5-pure can apply to a dataset: deflate, shuffle, scale-offset, LZF, and (behind a feature flag) ZFP. Filters shrink on-disk size while keeping the file readable by any standard HDF5 tool, because every filter here is either a built-in HDF5 filter or a registered third-party one.
 
 !!! tip "Runnable example"
-    A complete, runnable program lives at [`examples/compression.rs`](https://github.com/stephenberry/hdf5-pure/blob/main/examples/compression.rs). Run it with:
+    A complete, runnable program lives at [`examples/compression.rs`](https://github.com/CramBL/hdf5-pure/blob/main/examples/compression.rs). Run it with:
 
     ```bash
     cargo run --example compression

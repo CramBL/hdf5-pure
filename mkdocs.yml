@@ -10,15 +10,15 @@
 # Build (strict):  just docs::build
 
 site_name: hdf5-pure
-site_url: https://stephenberry.github.io/hdf5-pure/
+site_url: https://crambl.github.io/hdf5-pure/
 site_description: >-
   Pure-Rust HDF5 reader, writer, and in-place editor. No C dependencies, no
   build scripts, WASM-compatible.
 site_author: Stephen Berry
 copyright: Copyright &copy; 2026 Stephen Berry — MIT licensed
 
-repo_url: https://github.com/stephenberry/hdf5-pure
-repo_name: stephenberry/hdf5-pure
+repo_url: https://github.com/CramBL/hdf5-pure
+repo_name: CramBL/hdf5-pure
 edit_uri: edit/main/docs/
 
 theme:
@@ -73,7 +73,7 @@ theme:
 extra:
   social:
     - icon: fontawesome/brands/github
-      link: https://github.com/stephenberry/hdf5-pure
+      link: https://github.com/CramBL/hdf5-pure
       name: hdf5-pure on GitHub
     - icon: fontawesome/brands/rust
       link: https://crates.io/crates/hdf5-pure

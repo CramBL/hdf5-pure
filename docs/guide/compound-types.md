@@ -3,7 +3,7 @@
 A compound dataset stores a record of named fields per element, like a C struct or an HDF5 `H5Tcreate(H5T_COMPOUND)` type. This page covers writing and reading compound (struct-like) datasets, the complex-number convention built on top of them, and the related enumeration, fixed-size array, and object-reference dataset kinds.
 
 !!! tip "Runnable example"
-    The patterns on this page come from [`examples/compound_types.rs`](https://github.com/stephenberry/hdf5-pure/blob/main/examples/compound_types.rs). Run it with:
+    The patterns on this page come from [`examples/compound_types.rs`](https://github.com/CramBL/hdf5-pure/blob/main/examples/compound_types.rs). Run it with:
 
     ```bash
     cargo run --example compound_types

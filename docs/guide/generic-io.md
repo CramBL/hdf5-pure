@@ -3,7 +3,7 @@
 This page covers writing and reading datasets generically over the scalar element type, so you can write one function that serves every supported type instead of reaching for the per-type `with_*_data` / `read_*` family. The entry points are `DatasetBuilder::with_data` and `Dataset::read`, both bounded by the sealed `H5Element` trait.
 
 !!! tip "Runnable example"
-    The patterns on this page come from [`examples/generic_io.rs`](https://github.com/stephenberry/hdf5-pure/blob/main/examples/generic_io.rs). Run it with:
+    The patterns on this page come from [`examples/generic_io.rs`](https://github.com/CramBL/hdf5-pure/blob/main/examples/generic_io.rs). Run it with:
 
     ```bash
     cargo run --example generic_io

@@ -3,7 +3,7 @@
 The `ndarray` feature adds ergonomic, rank-generic dataset I/O on top of the [`ndarray`](https://docs.rs/ndarray) crate, so multi-dimensional data round-trips without manually flattening it or tracking shapes. Shape and datatype are taken directly from the array you pass in.
 
 !!! tip
-    A runnable example lives at [`examples/ndarray_io.rs`](https://github.com/stephenberry/hdf5-pure/blob/main/examples/ndarray_io.rs). Run it with:
+    A runnable example lives at [`examples/ndarray_io.rs`](https://github.com/CramBL/hdf5-pure/blob/main/examples/ndarray_io.rs). Run it with:
 
     ```bash
     cargo run --example ndarray_io --features ndarray

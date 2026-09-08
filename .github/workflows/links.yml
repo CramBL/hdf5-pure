@@ -1,0 +1,36 @@
+name: Links
+
+on:
+  workflow_dispatch: {}
+  schedule:
+    - cron: "0 4 1 * *"
+
+permissions:
+  contents: read
+
+env:
+  JUST_COLOR: always
+  JUST_VERBOSE: 1
+  JUST_TIMESTAMP: true
+
+jobs:
+  lychee:
+    name: lychee / ubuntu-latest
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install tools
+        uses: taiki-e/install-action@920ab1831fbf4fb3ef75c8ead83556c918bb7290 # v2.79.8
+        with:
+          tool: just,lychee
+
+      # The token lifts GitHub's rate limit for the several hundred issue links.
+      - name: Check every link
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: just hygiene::lychee

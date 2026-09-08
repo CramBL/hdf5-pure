@@ -241,7 +241,7 @@ impl Source for SourceView<'_> {
 ///
 /// See the [property-support reference] for the full property-by-property map.
 ///
-/// [property-support reference]: https://github.com/stephenberry/hdf5-pure/blob/main/docs/reference/property-support.md
+/// [property-support reference]: https://github.com/CramBL/hdf5-pure/blob/main/docs/reference/property-support.md
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[doc(alias = "fapl")]
 pub struct FileAccessProperties {
@@ -653,7 +653,7 @@ impl FileAccessProperties {
 ///
 /// Pass it to [`File::dataset_with_options`] or [`Group::dataset_with_options`].
 ///
-/// [property-support reference]: https://github.com/stephenberry/hdf5-pure/blob/main/docs/reference/property-support.md
+/// [property-support reference]: https://github.com/CramBL/hdf5-pure/blob/main/docs/reference/property-support.md
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[doc(alias = "dapl")]
 pub struct DatasetAccessProperties {

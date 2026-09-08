@@ -3,7 +3,7 @@
 `repack` rewrites a whole HDF5 file into a fresh, compact copy, optionally dropping objects on the way. It is the guaranteed-shrink answer to a fundamental limitation of in-place editing: deleting an object cannot always return its bytes to the operating system.
 
 !!! tip "Runnable example"
-    This page is backed by [`examples/repack.rs`](https://github.com/stephenberry/hdf5-pure/blob/main/examples/repack.rs). Run it with:
+    This page is backed by [`examples/repack.rs`](https://github.com/CramBL/hdf5-pure/blob/main/examples/repack.rs). Run it with:
 
     ```bash
     cargo run --example repack

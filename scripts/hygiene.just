@@ -12,3 +12,7 @@ zizmor:
 # Spelling, over every tracked file. typos.toml lists the words the format uses.
 typos:
     typos
+
+# Every link in the documentation, online. The Links workflow runs it monthly.
+lychee:
+    lychee README.md RELEASES.md CHANGELOG.md docs
