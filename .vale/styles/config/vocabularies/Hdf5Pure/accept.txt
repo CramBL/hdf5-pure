@@ -247,3 +247,6 @@ writeback
 xorshift
 zfp
 zlib
+editorconfig
+rebase
+rustfmt

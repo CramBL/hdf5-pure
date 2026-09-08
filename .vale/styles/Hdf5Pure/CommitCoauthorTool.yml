@@ -1,0 +1,9 @@
+# Co-authored-by credits a person who shares authorship, and with it
+# responsibility. A tool is not one: an AI assistant goes in Assisted-by.
+extends: existence
+message: "Co-authored-by credits a person. A tool goes in 'Assisted-by:': '%s'."
+level: error
+scope: raw
+nonword: true
+tokens:
+  - '(?mi)^Co-authored-by:[^\n]*\b(?:claude|anthropic|gpt|chatgpt|openai|codex|copilot|gemini|jules|deepseek|grok|qwen|kimi|mistral|llama|gemma|cursor|windsurf|devin|aider|cline|opencode|roo|amp|augment|llm|ai\s+agent|assistant)\b'
