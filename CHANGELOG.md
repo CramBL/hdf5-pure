@@ -15,6 +15,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - Licensed under MIT or Apache-2.0, at your option, where it was MIT alone ([#511](https://github.com/CramBL/hdf5-pure/pull/511)).
 - The repository moved to `CramBL/hdf5-pure`, and the documentation site to <https://crambl.github.io/hdf5-pure/>.
+- Releases are published to crates.io through Trusted Publishing from the repository's Release workflow, with no long-lived token.
 
 ## [0.44.0] - 2026-09-04
 
