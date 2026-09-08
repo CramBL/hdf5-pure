@@ -1,14 +1,18 @@
 # The trailers a commit message may end with: attribution between people
 # (Signed-off-by, Co-authored-by, Reviewed-by, Tested-by, Acked-by), a tool
 # that assisted (Assisted-by), and an issue reference (Closes, Fixes,
-# Resolves, Refs). Every other Key-Name line is rejected, and so is a link to
-# an agent session. The session token omits the scheme so that lychee does
-# not read it as a link.
+# Resolves, Refs) followed by an issue number or an issue URL. Every other
+# hyphenated Key-Name line is rejected, and so are the single-word reference
+# keys other tools use (Link, Bug, Issue, Fix) and a link to an agent
+# session. The session token omits the scheme so that lychee does not read it
+# as a link.
 extends: existence
-message: "Commit trailer: '%s'. Accepted: Signed-off-by, Co-authored-by, Reviewed-by, Tested-by, Acked-by, Assisted-by, and Closes, Fixes, Resolves or Refs with an issue number."
+message: "Commit trailer: '%s'. Accepted: Signed-off-by, Co-authored-by, Reviewed-by, Tested-by, Acked-by, Assisted-by, and Closes, Fixes, Resolves or Refs followed by #N or an issue URL."
 level: error
 scope: raw
 nonword: true
 tokens:
-  - '(?m)^(?!(?:Co-authored-by|Signed-off-by|Reviewed-by|Tested-by|Acked-by|Assisted-by):\s)[A-Z][A-Za-z]*(?:-[A-Za-z]+)+:\s'
+  - '(?m)^(?!(?i:Co-authored-by|Signed-off-by|Reviewed-by|Tested-by|Acked-by|Assisted-by):\s)[A-Z][A-Za-z]*(?:-[A-Za-z]+)+:\s'
+  - '(?<=\n)(?:Closes|Fixes|Resolves|Refs)(?!:?[ \t]+(?:#\d+(?:,[ \t]*#\d+)*|https://github\.com/[\w.-]+/[\w.-]+/(?:issues|pull)/\d+)[ \t]*(?:\n|\z))'
+  - '(?mi)^(?:Link|Bug|Issue|Ticket|See|Ref|Reference|Related|Relates|Close|Closed|Fix|Fixed|Resolve|Resolved):\s'
   - '\bclaude\.ai/code/session_\w+'

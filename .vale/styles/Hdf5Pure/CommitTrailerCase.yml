@@ -1,0 +1,10 @@
+# A known trailer in a casing other than the one the log uses, such as the
+# Co-Authored-By some tools write. git reads the two as one key, and the log
+# keeps one spelling.
+extends: existence
+message: "Trailer '%s': write it as Co-authored-by, Signed-off-by, Reviewed-by, Tested-by, Acked-by or Assisted-by."
+level: error
+scope: raw
+nonword: true
+tokens:
+  - '(?m)^(?!(?:Co-authored-by|Signed-off-by|Reviewed-by|Tested-by|Acked-by|Assisted-by):)(?i:Co-authored-by|Signed-off-by|Reviewed-by|Tested-by|Acked-by|Assisted-by):'
