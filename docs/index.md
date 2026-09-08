@@ -38,7 +38,7 @@ reference HDF5 C library, h5py, and MATLAB.</p>
 <a href="https://crates.io/crates/hdf5-pure"><img alt="crates.io" src="https://img.shields.io/crates/v/hdf5-pure.svg?logo=rust&color=0e7490"></a>
 <a href="https://docs.rs/hdf5-pure"><img alt="docs.rs" src="https://img.shields.io/docsrs/hdf5-pure?logo=docsdotrs&color=0e7490"></a>
 <a href="https://github.com/CramBL/hdf5-pure/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/CramBL/hdf5-pure/actions/workflows/ci.yml/badge.svg"></a>
-<a href="https://github.com/CramBL/hdf5-pure/blob/main/LICENSE"><img alt="License: MIT" src="https://img.shields.io/crates/l/hdf5-pure.svg?color=0e7490"></a>
+<a href="https://github.com/CramBL/hdf5-pure/blob/main/README.md#license"><img alt="License: MIT or Apache-2.0" src="https://img.shields.io/crates/l/hdf5-pure.svg?color=0e7490"></a>
 </p>
 
 `hdf5-pure` is a zero-C-dependency crate for creating, reading, and editing

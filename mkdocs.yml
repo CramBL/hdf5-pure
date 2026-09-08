@@ -15,7 +15,7 @@ site_description: >-
   Pure-Rust HDF5 reader, writer, and in-place editor. No C dependencies, no
   build scripts, WASM-compatible.
 site_author: Stephen Berry
-copyright: Copyright &copy; 2026 Stephen Berry — MIT licensed
+copyright: Copyright &copy; 2026 The hdf5-pure Authors. MIT or Apache-2.0 licensed.
 
 repo_url: https://github.com/CramBL/hdf5-pure
 repo_name: CramBL/hdf5-pure

@@ -655,10 +655,20 @@ The high-level `File` / `FileBuilder` API is `std`-gated, so a `no_std` build ex
 
 Where `hdf5-pure` cannot yet handle something, it returns a clear typed error rather than producing a wrong result. The [Limitations & Unsupported Features](https://crambl.github.io/hdf5-pure/reference/limitations/) reference catalogs every such refusal, split into **deliberately unsupported** (by-design constraints and foreign-format guards) and **planned support** (deferred features, each tracked by an issue).
 
-## Acknowledgements
-
-The HDF5 format parsing and low-level I/O modules are derived from rustyhdf5 by the RustyStack project (MIT licensed).
-
 ## License
 
-MIT
+Licensed under either of
+
+- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE) or <https://www.apache.org/licenses/LICENSE-2.0>)
+- MIT license ([LICENSE-MIT](LICENSE-MIT) or <https://opensource.org/licenses/MIT>)
+
+at your option.
+
+Unless you explicitly state otherwise, any contribution intentionally submitted for inclusion in the work by you, as defined in the Apache-2.0 license, shall be dual licensed as above, without any additional terms or conditions.
+
+### Third-party code
+
+- The scale-offset filter in `src/scaleoffset.rs` is a port of `H5Zscaleoffset.c` from the HDF5 library, which The HDF Group licenses under the BSD 3-Clause license in [LICENSE-HDF5](LICENSE-HDF5). The crosscheck tests build that library to compare against, and nothing of it ships in the crate.
+- The ZFP codec in `src/zfp.rs` is a port of the reference implementation by Lawrence Livermore National Security, LLC, under the BSD 3-Clause license in [LICENSE-ZFP](LICENSE-ZFP).
+- The metadata checksum in `src/checksum.rs` is Bob Jenkins' public-domain lookup3 hash.
+- The HDF5 format parsing and low-level I/O modules are derived from rustyhdf5 by the RustyStack project, MIT licensed.
