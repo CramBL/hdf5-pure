@@ -6,3 +6,6 @@ allow-indexing-slicing-in-tests = true
 allow-panic-in-tests = true
 allow-unwrap-in-tests = true
 
+# TODO: raise to 10 with `too_many_arguments`. The format code has many fields
+# per call site.
+# too-many-arguments-threshold = 10
