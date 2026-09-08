@@ -71,7 +71,7 @@ Read datatype message version 5, as HDF5 2.0 writes under latest bounds
 Preserve a version 2 object header's optional fields across in-place rewrites
 ```
 
-The body, when there is one, explains why. Issue references and trailers go at the end, after a blank line: `Closes #NN`, `Signed-off-by:`, `Co-authored-by:` for a person, `Assisted-by:` for a tool. `just prose::commits` checks every commit since `origin/main`, as CI does.
+The body, when there is one, follows a blank line and explains why. Issue references and trailers go at the end, after a blank line: `Closes #NN`, `Signed-off-by:`, `Co-authored-by:` for a person, `Assisted-by:` for a tool. `just prose::commits` checks every commit since `origin/main`, as CI does.
 
 ## Testing
 
