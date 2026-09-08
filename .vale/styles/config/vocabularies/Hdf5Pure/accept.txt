@@ -173,6 +173,7 @@ retarget
 retargeted
 retargeting
 rewrapped
+ruleset
 rustc
 rustdoc
 sandboxed

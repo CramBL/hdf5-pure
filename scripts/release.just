@@ -13,6 +13,6 @@ prepare VERSION *ARGS:
 pr VERSION:
     {{ uv }} release pr {{ VERSION }}
 
-# Publish VERSION from main: crates.io, the tag, the GitHub release. Resumable.
-publish VERSION *ARGS:
-    {{ uv }} release publish {{ VERSION }} {{ ARGS }}
+# Publish the manifest's version from main: crates.io, the tag, the GitHub release. Resumable.
+publish *ARGS:
+    {{ uv }} release publish {{ ARGS }}

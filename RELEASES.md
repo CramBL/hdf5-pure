@@ -16,12 +16,11 @@ A released section may open with a summary paragraph, written by hand.
 
 1. `just ci`
 2. `just release::prepare 0.45.0`, or `just release::prepare 0.45.0-rc.1` for a candidate. `--summary-file notes.md` opens the section with a summary paragraph.
-3. `just release::pr 0.45.0`, and merge the pull request it opens.
-4. Run the Release workflow from the Actions tab with the version.
+3. `just release::pr 0.45.0`, and merge the pull request it opens. The Release workflow runs on the merge.
 
-Re-running the workflow with the same version resumes after a failure.
+Re-running the workflow's job resumes after a failure.
 
-`just release::publish 0.45.0` runs the same steps from a machine with `cargo login` and `gh auth login` done, if Actions is unavailable.
+`just release::publish` runs the same steps from a checkout of the merged commit on a machine with `cargo login` and `gh auth login` done, if Actions is unavailable.
 
 ## Release candidates
 

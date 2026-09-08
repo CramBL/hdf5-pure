@@ -3,7 +3,7 @@
     just release::prepare 0.45.0 --summary-file notes.md
     just release::prepare 0.45.0-rc.1
     just release::pr 0.45.0
-    just release::publish 0.45.0
+    just release::publish
 
 `prepare` runs on a clean checkout of main. It checks the version against the
 tags and the manifest, reports the cycle's public-API delta, sets the version
@@ -16,10 +16,11 @@ final release promotes it.
 `pr` commits those changes on `release/vX.Y.Z`, prompts for confirmation, then
 pushes the branch and opens the pull request.
 
-`publish` runs on the merged release commit, from the Release workflow or from
-a machine with `cargo login` and `gh auth login` done. A commit on main has
-passed every CI guard, which the branch ruleset requires to merge. It checks
-that the public-API delta allows the version, then publishes to crates.io,
+`publish` runs on the merged release commit, from the Release workflow on the
+merge or from a machine with `cargo login` and `gh auth login` done. The
+version is the manifest's. A commit on main has passed every CI guard, which
+the branch ruleset requires to merge. It checks that the public-API delta
+allows the version, then publishes to crates.io,
 pushes the tag and creates the GitHub release. Each of those is skipped once
 it exists, so re-running after a failure resumes. Publishing comes first
 because it cannot be undone.
@@ -270,6 +271,7 @@ def prepare(args):
         fail("not on main; prepare a release from main")
     if not worktree_clean():
         fail("working tree is dirty; commit or stash first")
+    run("git", "fetch", "-q", "--tags")
     tags = tagged_versions()
     previous = latest(tags)
     previous_stable = latest([v for v in tags if not v.is_rc])
@@ -391,12 +393,12 @@ def pr(args):
 
 
 def publish(args):
-    version = args.version
+    current = manifest()["version"]
+    version = args.version or Version.parse(current)
     tag = f"v{version}"
     sha = output("git", "rev-parse", "HEAD")
 
     # The commit under HEAD is the release commit, on main, and what CI passed.
-    current = manifest()["version"]
     if current != str(version):
         fail(f"Cargo.toml reads {current}, not {version}; publish from the merged release commit")
     if not worktree_clean():
@@ -518,7 +520,7 @@ def main():
     p = commands.add_parser(
         "publish", help="publish from main: crates.io, the tag, the GitHub release"
     )
-    p.add_argument("version", type=argument_version)
+    p.add_argument("version", nargs="?", type=argument_version, help="defaults to the manifest's")
     p.add_argument(
         "--skip-api-delta", action="store_true", help="publish without the public-API delta gate"
     )

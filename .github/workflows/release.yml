@@ -1,24 +1,16 @@
 name: Release
 
-# Publish a version that has been merged to main. Run from the Actions tab
-# with the version as merged, `0.45.0` or `0.45.0-rc.1`. Re-running with the
-# same version resumes after a failure: every public step is skipped once it
-# has happened.
+# Publish the release commit merged to main: the pull request `just
+# release::pr` opens, whose subject starts with "Release v". A release is
+# therefore a reviewed merge, and nothing else starts one. Re-running the job
+# resumes after a failure: every public step is skipped once it has happened.
 #
 # One-time setup: the crate's Trusted Publishing entry on crates.io naming
 # this repository and `release.yml`.
 
 on:
-  workflow_dispatch:
-    inputs:
-      version:
-        description: "The version to publish, as merged to main: X.Y.Z or X.Y.Z-rc.N"
-        required: true
-        type: string
-      skip_api_delta:
-        description: "Publish without the public-API delta gate"
-        type: boolean
-        default: false
+  push:
+    branches: [main]
 
 permissions:
   contents: read
@@ -35,8 +27,9 @@ env:
 
 jobs:
   publish:
-    name: publish / ${{ inputs.version }}
+    name: publish
     runs-on: ubuntu-latest
+    if: startsWith(github.event.head_commit.message, 'Release v')
     permissions:
       contents: write
       id-token: write
@@ -76,6 +69,4 @@ jobs:
           # The tagger of the annotated release tag.
           GIT_COMMITTER_NAME: github-actions[bot]
           GIT_COMMITTER_EMAIL: 41898282+github-actions[bot]@users.noreply.github.com
-          VERSION: ${{ inputs.version }}
-          SKIP_API_DELTA: ${{ inputs.skip_api_delta && '--skip-api-delta' || '' }}
-        run: just release::publish "$VERSION" $SKIP_API_DELTA
+        run: just release::publish
