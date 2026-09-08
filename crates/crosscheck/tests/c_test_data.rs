@@ -10,6 +10,7 @@
 
 use std::path::Path;
 
+use hdf5::file::LibraryVersion;
 use hdf5::plist::file_create::FileSpaceStrategy;
 
 const UPDATE: &str = "HDF5_PURE_UPDATE_TEST_DATA";
@@ -155,6 +156,36 @@ fn paged_file_with_a_sub_page_fragment_in_the_large_manager() {
     assert_eq!(dataset.read_raw::<f64>().unwrap().len(), 64);
     let attr = dataset.attr("big_attr").unwrap();
     assert_eq!(attr.read_raw::<i64>().unwrap().len(), 512);
+}
+
+/// A committed datatype in a version 1 object header, linked once and the
+/// element type of two datasets, so its reference count is 3 and lives in the
+/// header prefix. For `tests/named_datatypes.rs`.
+#[test]
+fn committed_datatype_in_a_version_1_header() {
+    let file = c_written("committed_datatype_v1.h5", |path| {
+        let f = hdf5::FileBuilder::new()
+            .with_fapl(|fapl| fapl.libver_bounds(LibraryVersion::Earliest, LibraryVersion::V18))
+            .create(path)
+            .unwrap();
+        let dtype = hdf5::Datatype::from_type::<i32>().unwrap();
+        f.commit_datatype("mytype", &dtype).unwrap();
+        for name in ["first", "second"] {
+            f.new_dataset_builder()
+                .empty_as(&dtype)
+                .shape([2])
+                .create(name)
+                .unwrap()
+                .write(&[1i32, 2])
+                .unwrap();
+        }
+        f.close().unwrap();
+    });
+    assert_eq!(file.loc_info_by_name("mytype").unwrap().num_links, 3);
+    assert_eq!(
+        file.dataset("second").unwrap().read_raw::<i32>().unwrap(),
+        vec![1, 2]
+    );
 }
 
 /// Two hard links to one dataset, which this crate has no API to create, in a

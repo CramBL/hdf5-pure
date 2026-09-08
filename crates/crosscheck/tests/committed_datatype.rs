@@ -22,6 +22,7 @@
 use std::path::Path;
 use std::sync::{Mutex, MutexGuard};
 
+use hdf5::file::LibraryVersion;
 use hdf5::{ObjectReference1, ReferencedObject};
 use hdf5_pure::{AttrValue, Datatype, File, RepackOptions};
 use hdf5_sys::h5a::{H5Aclose, H5Acreate2, H5Awrite};
@@ -120,9 +121,13 @@ const EVERYTHING: Fixture = Fixture {
 /// names. `/data` and the ordinary `plain` attribute beside each committed one
 /// are always present.
 fn write_committed_fixture(path: &Path, fixture: Fixture) {
-    let file = create_v18(path);
+    fill_committed_fixture(&create_v18(path), fixture);
+}
+
+/// The objects of [`write_committed_fixture`], in a file already created.
+fn fill_committed_fixture(file: &hdf5::File, fixture: Fixture) {
     let dtype = hdf5::Datatype::from_type::<i32>().expect("transient i32 type");
-    commit_type(&file, "mytype", &dtype);
+    commit_type(file, "mytype", &dtype);
 
     // An ordinary dataset to hang attributes on.
     let data = file
@@ -132,7 +137,7 @@ fn write_committed_fixture(path: &Path, fixture: Fixture) {
         .expect("create /data");
     data.write(&[1.0f64]).expect("write /data");
 
-    let owners: [&hdf5::Location; 2] = [&file, &data];
+    let owners: [&hdf5::Location; 2] = [file, &data];
     for owner in owners {
         if fixture.committed_attrs {
             write_attr(owner, "shared_attr", Some(&dtype), ATTR_VALUE);
@@ -144,12 +149,12 @@ fn write_committed_fixture(path: &Path, fixture: Fixture) {
     }
 
     for i in 0..fixture.dense_attrs {
-        write_attr(&file, &format!("dense{i:02}"), Some(&dtype), i as i32);
+        write_attr(file, &format!("dense{i:02}"), Some(&dtype), i as i32);
     }
 
     if fixture.committed_dataset {
         // A dataset whose *element* type is the committed one.
-        write_i32_dataset(&file, "typed", &dtype, None, &DATASET_VALUES);
+        write_i32_dataset(file, "typed", &dtype, None, &DATASET_VALUES);
     }
 }
 
@@ -685,6 +690,37 @@ fn a_committed_datatype_this_crate_writes_reads_back_as_committed() {
     assert_eq!(
         File::open(&path).unwrap().root().named_datatypes().unwrap(),
         vec!["mytype".to_string()]
+    );
+}
+
+/// The same file with version 1 object headers, which keep the reference count
+/// in the header prefix and carry no Object Reference Count message. The
+/// count is the one the C library reads back from its own file.
+#[test]
+fn a_version_1_header_reports_the_reference_count_the_c_library_wrote() {
+    let _c = c_lib_guard();
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("committed_v1.h5");
+    let file = hdf5::FileBuilder::new()
+        .with_fapl(|fapl| fapl.libver_bounds(LibraryVersion::Earliest, LibraryVersion::V18))
+        .create(&path)
+        .expect("create a file with version 1 object headers");
+    fill_committed_fixture(&file, EVERYTHING);
+    file.close().unwrap();
+
+    let c_count = hdf5::File::open(&path)
+        .unwrap()
+        .loc_info_by_name("mytype")
+        .unwrap()
+        .num_links;
+    assert_eq!(c_count, 4, "one link, one dataset and two attributes");
+    assert_eq!(
+        File::open(&path)
+            .unwrap()
+            .root()
+            .named_datatype_references("mytype")
+            .unwrap(),
+        u32::try_from(c_count).unwrap()
     );
 }
 
