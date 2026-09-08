@@ -6,4 +6,4 @@ level: error
 scope: raw
 nonword: true
 tokens:
-  - '(?mi)^Co-authored-by:[^\n]*\b(?:claude|anthropic|gpt|chatgpt|openai|codex|copilot|gemini|jules|deepseek|grok|qwen|kimi|mistral|llama|gemma|cursor|windsurf|devin|aider|cline|opencode|roo|amp|augment|llm|ai\s+agent|assistant)\b'
+  - '(?mi)^Co-authored-by:[^\n]*\b(?:claude|anthropic|sonnet|opus|haiku|gpt|chatgpt|openai|codex|copilot|cody|tabnine|bard|gemini|jules|deepseek|grok|qwen|kimi|mistral|llama|gemma|cursor|windsurf|devin|aider|cline|opencode|roo|amp|augment|llm|ai\s+agent|assistant)\b'
