@@ -1,7 +1,8 @@
 name: Docs
 
 # Build the Material for MkDocs site on every pull request, and publish it to
-# GitHub Pages from a release tag, so the site describes the latest release.
+# GitHub Pages when the Release workflow dispatches this one for a release, so
+# the site describes the latest release.
 #
 # One-time setup: in the repository settings, set
 #   Settings -> Pages -> Build and deployment -> Source = "GitHub Actions".
@@ -9,8 +10,6 @@ name: Docs
 # and served directly from the deployment below.
 
 on:
-  push:
-    tags: ["v[0-9]+.[0-9]+.[0-9]+"]
   pull_request:
   workflow_dispatch:
 
@@ -64,10 +63,8 @@ jobs:
         with:
           persist-credentials: false
 
-      # The cache is uv's package cache, keyed on the lockfile, and it is off on
-      # the path that deploys: a build from a tag starts cold.
       - name: Install uv
-        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0 # zizmor: ignore[cache-poisoning]
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
         with:
           enable-cache: ${{ github.event_name == 'pull_request' }}
           cache-dependency-glob: scripts/python/uv.lock
