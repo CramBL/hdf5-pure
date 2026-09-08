@@ -110,5 +110,14 @@ that is correct down to the bytes, or it produces no file and tells you why.
 
 ## Provenance
 
-The HDF5 format parsing and low-level I/O modules are derived from rustyhdf5 by
-the RustyStack project (MIT licensed).
+The crate is licensed under MIT or Apache-2.0, at your option. The scale-offset
+filter is a port of the HDF5 library's `H5Zscaleoffset.c` and the ZFP codec a
+port of LLNL's reference implementation, both BSD 3-Clause, and the HDF5 format
+parsing and low-level I/O modules are derived from rustyhdf5 by the RustyStack
+project, MIT licensed. The README's License section links every license text.
+
+### History
+
+hdf5-pure was started by Stephen Berry, as a derived project of rustyhdf5 which was a ~25k LoC slop implementation of HDF5 with wild claims about performance over libhdf5. rustyhdf5 of course didn't support 98% of HDF5 features and was extremely buggy.
+
+Under Stephen, hdf5-pure rapidly developed into an ambitious and respectable project, which read and wrote most HDF5 files without issues. Stephen eventually transferred the project ownership to Marc König who'd been aiding development with numerous bug reports and general recommendations to improvements. Marc König is a long time HDF5 user and contributor to hdf5-rust (hdf5-metno) and hdf5-pure development continued under him.
