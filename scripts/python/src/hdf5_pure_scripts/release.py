@@ -5,9 +5,11 @@
     just release::pr 0.45.0
     just release::publish
 
-`prepare` runs on a clean checkout of main. It checks the version against the
-tags and the manifest, reports the cycle's public-API delta, sets the version
-in Cargo.toml and Cargo.lock, for a final release promotes the changelog's
+`prepare` runs on a clean checkout of main, where Cargo.toml reads the last
+tag: no pull request touches the version. It checks the version against the
+tags and the manifest, rejects a patch version when the cycle's changelog
+marks a breaking change, reports the cycle's public-API delta, sets the
+version in Cargo.toml and Cargo.lock, for a final release promotes the changelog's
 [Unreleased] section into a dated one, opened by a summary paragraph when one
 is given, and packages with `cargo publish --dry-run`. It commits nothing. A
 candidate does not change the changelog: [Unreleased] stays open until the
@@ -174,6 +176,20 @@ def changelog_section(changelog, header):
     return m.group(1) if m else None
 
 
+BREAKING = "**Breaking:**"
+
+
+def cycle_release_type(changelog):
+    """The release type the [Unreleased] section calls for: minor with a breaking entry.
+
+    Under 0.x, a breaking change takes the next minor and everything else may
+    go in a patch. The marker is the one the changelog convention requires on
+    a breaking entry, so a pull request declares its bump by writing its entry.
+    """
+    section = changelog_section(changelog, "Unreleased") or ""
+    return "minor" if BREAKING in section else "patch"
+
+
 def promote_changelog(changelog, version, previous, summary, repo_url, today):
     """The changelog with [Unreleased] emptied into a dated `version` section,
     opened by `summary` when there is one, and the compare links updated."""
@@ -288,12 +304,9 @@ def prepare(args):
             f"v{previous} is a candidate of {previous.final}; "
             f"finish or abandon that cycle before releasing {version}"
         )
-    # The manifest reads the last final, or anything up to the version being
-    # cut when a breaking pull request already bumped it.
-    if current < previous_stable or version < current:
-        fail(
-            f"Cargo.toml reads {current}, outside the last release ({previous_stable}) .. {version}"
-        )
+    # Between releases the manifest reads the last tag, a candidate included.
+    if current != previous:
+        fail(f"Cargo.toml reads {current}; between releases it reads the last tag (v{previous})")
     if output("git", "tag", "--list", tag):
         fail(f"tag {tag} already exists")
     if output("git", "branch", "--list", branch):
@@ -301,6 +314,12 @@ def prepare(args):
     changelog = CHANGELOG.read_text()
     if not (changelog_section(changelog, "Unreleased") or "").strip():
         fail("CHANGELOG.md [Unreleased] is empty; nothing to release")
+    release_type = version.final.release_type(previous_stable)
+    if not bump_allows(release_type, cycle_release_type(changelog)):
+        fail(
+            f"CHANGELOG.md [Unreleased] marks a change {BREAKING}, which takes the next minor; "
+            f"{version} is a {release_type} release"
+        )
 
     summary = args.summary
     if version.is_rc:
@@ -316,15 +335,14 @@ def prepare(args):
 
     note(f"Preparing {tag} after v{previous}")
 
-    # CI's semver job derives what to check from the manifest, so once a
-    # breaking pull request has bumped it the job checks nothing for the rest
-    # of the cycle. This report covers the whole cycle. `publish` runs the same
-    # check as a gate.
+    # CI's semver job checks each pull request against the release type the
+    # changelog calls for. This report covers the whole cycle against the
+    # version being cut, and `publish` runs the same check as a gate.
     if args.skip_api_delta:
         warn("Skipping the public-API delta report (--skip-api-delta)")
     else:
         note(f"Public API delta since v{previous_stable}")
-        note(semver_verdict(previous_stable, version.final.release_type(previous_stable)))
+        note(semver_verdict(previous_stable, release_type))
 
     note(f"Setting the version to {version} in Cargo.toml and Cargo.lock")
     for path in (Path("Cargo.toml"), Path("Cargo.lock")):
@@ -510,6 +528,12 @@ def main():
         "--skip-api-delta", action="store_true", help="prepare without the public-API delta report"
     )
     p.set_defaults(func=prepare)
+
+    p = commands.add_parser(
+        "release-type",
+        help="print the release type the changelog's [Unreleased] section calls for",
+    )
+    p.set_defaults(func=lambda args: print(cycle_release_type(CHANGELOG.read_text())))
 
     p = commands.add_parser(
         "pr", help="commit the prepared release on its branch, then push it and open the PR"

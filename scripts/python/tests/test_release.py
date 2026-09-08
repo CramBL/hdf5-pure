@@ -6,6 +6,7 @@ from hdf5_pure_scripts.release import (
     Version,
     bump_allows,
     changelog_section,
+    cycle_release_type,
     promote_changelog,
     required_bump,
     set_version,
@@ -143,3 +144,13 @@ def test_semver_verdict_gates_the_release_type():
     assert bump_allows("major", "minor")
     assert not bump_allows("minor", "major")
     assert not bump_allows("patch", "minor")
+
+
+def test_the_cycle_is_a_minor_only_with_a_breaking_entry_under_unreleased():
+    plain = (
+        "## [Unreleased]\n\n- Read a thing.\n\n## [0.44.0] - 2026-09-04\n\n- **Breaking:** old.\n"
+    )
+    assert cycle_release_type(plain) == "patch"
+    marked = plain.replace("- Read a thing.", "- **Breaking:** `read` returns a handle.")
+    assert cycle_release_type(marked) == "minor"
+    assert cycle_release_type("## [0.44.0]\n\n- **Breaking:** old.\n") == "patch"
