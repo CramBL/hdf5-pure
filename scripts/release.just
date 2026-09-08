@@ -5,9 +5,13 @@ uv := "uv run --project scripts/python --locked"
 default:
     @just --list release
 
-# The release pull request for VERSION: bump, changelog, package, branch, PR.
+# Set VERSION in the manifests and the changelog, and package. Commits nothing.
 prepare VERSION *ARGS:
     {{ uv }} release prepare {{ VERSION }} {{ ARGS }}
+
+# Commit the prepared release on its branch, prompt, then push it and open the pull request.
+pr VERSION:
+    {{ uv }} release pr {{ VERSION }}
 
 # Publish VERSION from main: crates.io, the tag, the GitHub release. Resumable.
 publish VERSION *ARGS:
