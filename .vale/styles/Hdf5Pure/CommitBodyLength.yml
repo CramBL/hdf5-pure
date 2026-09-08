@@ -1,0 +1,9 @@
+# A body line fits 100 columns. A line without whitespace, such as a URL,
+# is exempt.
+extends: existence
+message: "Commit body line longer than 100 characters."
+level: error
+scope: raw
+nonword: true
+tokens:
+  - '(?m)^(?!\S+$)[^\n]{101,}$'

@@ -1,0 +1,9 @@
+# Co-authored-by carries "Name <address>", the form git and GitHub attribute
+# by. A GitHub noreply address satisfies it.
+extends: existence
+message: "Co-authored-by without an address: '%s'. Write 'Name <address>'. A GitHub noreply address is fine."
+level: error
+scope: raw
+nonword: true
+tokens:
+  - '(?m)^Co-authored-by:(?![^\n]*<[^\s@<>]+@[^\s@<>]+>)[^\n]*'

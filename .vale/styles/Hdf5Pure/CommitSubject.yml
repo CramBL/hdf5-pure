@@ -1,9 +1,12 @@
-# The subject line is a sentence: a capital first letter and no trailing period.
+# The subject line is a sentence: a capital first letter and no trailing
+# period. An optional lowercase tag for the part of the crate the commit
+# touches may precede it, as in "edit: Keep the header's timestamps".
 extends: existence
-message: "Commit subject: '%s'. A capital first letter, no trailing period."
+message: "Commit subject: '%s'. A capital first letter after an optional lowercase 'tag: ', no trailing period."
 level: error
 scope: raw
 nonword: true
 tokens:
-  - '\A[a-z]'
+  - '\A(?![a-z][a-z0-9_./-]*: [A-Z])[a-z]'
+  - '\A[a-z][a-z0-9_./-]*: [a-z]'
   - '\A[^\n]*\.(?:\n|\z)'
