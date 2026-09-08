@@ -2,7 +2,7 @@
 
 ## Versioning
 
-`0.x.0` may break, `0.x.y` may not. `Cargo.toml` holds the version being developed: a PR that breaks the public API bumps it to the next minor, with `Cargo.lock` and its changelog entry. One bump covers the cycle.
+`0.x.0` may break, `0.x.y` may not. `Cargo.toml` on `main` reads the last release, and no pull request touches it. A pull request that breaks the public API marks its changelog entry `**Breaking:**`, and the release decides the bump from that: a cycle with a marked entry releases as the next minor, and any other as a patch. `prepare` rejects a patch version over a marked cycle, and CI checks each pull request's API delta against the release type the marker implies, so a break without the marker fails there.
 
 ## Changelog
 
@@ -28,6 +28,6 @@ Re-running the workflow's job resumes after a failure.
 
 ## The API delta
 
-`prepare` prints the public-API delta since the last release. Read it against the `[Unreleased]` section. The Release workflow stops a release whose delta needs a larger bump than the release makes.
+`prepare` prints the public-API delta since the last release. Read it against the `[Unreleased]` section. The Release workflow stops a release whose delta needs a larger bump than the release makes, which catches a break that no entry marked. `just api::release-type` prints the release type the section calls for, which is what CI checks a pull request against.
 
 `--skip-api-delta` on `prepare`, and the workflow's checkbox, release without the check.

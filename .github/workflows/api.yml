@@ -51,9 +51,10 @@ jobs:
               - scripts/api.just
               - .github/workflows/api.yml
 
-  # The public-API delta against the latest release. Green means the manifest
-  # already declares a bump large enough to carry the change, which under this
-  # repo's convention the breaking PR made itself. RELEASES.md covers what this
+  # The public-API delta against the latest release, checked against the
+  # release type the changelog's [Unreleased] section calls for: a pull request
+  # that breaks the API marks its entry **Breaking:**, and the version stays
+  # the last release's until a release is cut. RELEASES.md covers what this
   # cannot see.
   semver:
     name: semver / ubuntu-latest
@@ -76,6 +77,21 @@ jobs:
           shared-key: api
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
+      - name: Install uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          enable-cache: true
+          cache-dependency-glob: scripts/python/uv.lock
+
+      - name: Install tools
+        uses: taiki-e/install-action@920ab1831fbf4fb3ef75c8ead83556c918bb7290 # v2.79.8
+        with:
+          tool: just
+
+      - name: The release type the changelog calls for
+        id: release-type
+        run: echo "type=$(just api::release-type)" >> "$GITHUB_OUTPUT"
+
       # The action rather than `just api::semver`: it pairs a cargo-semver-checks
       # build with a toolchain whose rustdoc JSON that build can parse.
       - name: Public API delta
@@ -84,6 +100,7 @@ jobs:
           package: hdf5-pure
           feature-group: default-features
           features: serde,zfp,provenance,ndarray
+          release-type: ${{ steps.release-type.outputs.type }}
 
   msrv:
     name: msrv / ubuntu-latest

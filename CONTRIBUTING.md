@@ -114,7 +114,7 @@ When reviewing, we look for:
 
 - The pull request title and description should be helpful.
 - Each commit does one thing, and its message says what.
-- Breaking changes are documented in the pull request description and in the changelog.
+- A breaking change is marked `**Breaking:**` in its changelog entry, which decides the next release's version, and is documented in the pull request description.
 - The code should be readable.
 - The code should have helpful doc comments.
 - The code should follow [CODE_STYLE.md](CODE_STYLE.md).
