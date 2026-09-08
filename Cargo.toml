@@ -11,9 +11,10 @@ repository = "https://github.com/CramBL/hdf5-pure"
 keywords = ["hdf5", "serialization", "scientific", "no-std", "wasm"]
 categories = ["science", "encoding", "filesystem", "wasm", "no-std"]
 build = "build.rs"
-# Keep binary test fixtures and fuzz harnesses out of the published crate. They
-# are needed only for maintainer CI and stay in the git repo for that purpose.
-exclude = ["tests/data/**", "fuzz/**", "crates/**"]
+# What the published crate holds: the library, its build script, the examples
+# and the documents a user reads. Tests, test data, tooling and the docs site
+# stay in the repository.
+include = ["/src/**", "/build.rs", "/examples/**", "/README.md", "/CHANGELOG.md", "/LICENSE-*"]
 
 # Publish the full public API on docs.rs. The default feature set hides the
 # `ndarray`, `serde` (`mat`), `zfp`, and `provenance` surfaces (and
