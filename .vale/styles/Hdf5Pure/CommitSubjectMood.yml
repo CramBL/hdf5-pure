@@ -1,0 +1,10 @@
+# The subject is in the imperative: Add, Fix, Read. Mood is not a regular
+# language, so the rule lists the past-tense, third-person and gerund forms
+# of the verbs a subject starts with, after the optional tag.
+extends: existence
+message: "Commit subject '%s': the imperative, as in Add, Fix, Read."
+level: error
+scope: raw
+nonword: true
+tokens:
+  - '\A(?:[a-z][a-z0-9_./-]*: )?(?:Added|Adds|Adding|Fixed|Fixes|Fixing|Updated|Updates|Updating|Removed|Removes|Removing|Changed|Changes|Changing|Refactored|Refactors|Refactoring|Implemented|Implements|Implementing|Improved|Improves|Improving|Moved|Moves|Moving|Renamed|Renames|Renaming|Reverted|Reverts|Reverting|Bumped|Bumps|Bumping|Merged|Merges|Merging|Introduced|Introduces|Introducing|Made|Makes|Making|Replaced|Replaces|Replacing|Deleted|Deletes|Deleting|Created|Creates|Creating|Dropped|Drops|Dropping|Used|Uses|Using|Allowed|Allows|Allowing|Enabled|Enables|Enabling|Disabled|Disables|Disabling|Tested|Tests|Testing|Documented|Documents|Documenting|Cleaned|Cleans|Cleaning|Supported|Supports|Supporting|Handled|Handles|Handling|Reworked|Reworks|Reworking|Simplified|Simplifies|Simplifying|Extended|Extends|Extending)\b'
