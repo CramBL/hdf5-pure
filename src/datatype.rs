@@ -573,7 +573,11 @@ impl Datatype {
                 let num_members = (bf0 as u16) | ((bf1 as u16) << 8);
                 let mut members = Vec::with_capacity(num_members as usize);
 
-                if version == 3 || version == 4 {
+                // Versions 3 to 5 share one layout: version 4 added the revised
+                // reference types and version 5 the complex class, and neither
+                // changed a compound. HDF5 2.0 writes version 5 for every
+                // datatype under its latest library bounds.
+                if (3..=5).contains(&version) {
                     let ob = offset_bytes_for_size(size);
                     for _ in 0..num_members {
                         let (name, name_len) = read_null_terminated_string(data, pos)?;
@@ -725,7 +729,7 @@ impl Datatype {
                         },
                         pos,
                     ))
-                } else if version == 3 {
+                } else if (3..=5).contains(&version) {
                     ensure_len(data, pos, 1)?;
                     let ndims = data[pos] as usize;
                     pos += 1;
