@@ -104,6 +104,13 @@ We use `Result` types pervasively throughout the code to signal error cases. Out
 
 A file is untrusted input. The fuzz targets and the property tests feed the reader damaged files, and a panic on any of them is a bug (`effect:crash`). This includes slice indexing and arithmetic on a value that came from the file: use `.get()` and the checked conversions in `src/convert.rs`, which turn an out-of-range value into a `FormatError`. Every offset and length read from a file goes through one, so that a value which does not fit a 32-bit `usize` is an error and never a truncation.
 
+- Every error is returned to the caller and handled once. Code that converts an error returns the conversion.
+- A failure mode is a variant of `Error` or `FormatError`, with the values a caller needs to act on it as fields. A new failure mode is a new variant, not a string.
+- An invariant the type system can express is a type: a value that cannot be zero is a `NonZeroU64`.
+- An invariant it cannot express is a `debug_assert!`, or an `assert!` where a violation would write a wrong file. The code panics only on a bug in the code.
+- A `Result` that is deliberately dropped is dropped with `.ok()`, which stops compiling if the return type changes. `let _ = f();` and `unwrap_or(())` are not used for that.
+- A string in an error message is formatted with `{:?}`, so that a path or a name is quoted and an embedded newline or tab is escaped.
+
 ### Faithful or nothing
 
 An operation either produces a result that is correct down to the bytes, or it returns an error that says why. The editor returns `Error::EditUnsupported` for an object it cannot reproduce, `repack` returns `Error::RepackUnsupported` and leaves the destination path absent, and a reader returns a `FormatError` for a structure it does not handle. Silently writing a file that differs, or reading a value that differs, is the one thing the crate must never do. A new feature that cannot cover a case reports it as an error of that kind.
@@ -138,6 +145,14 @@ Ok(match foo {
 })
 ```
 
+### Determinism
+
+The order a `HashMap` or `HashSet` iterates in differs from run to run. Where the order reaches a file, a checksum or a value a test compares, the collection is a `BTreeMap` or `BTreeSet`.
+
+### Destructuring
+
+A function that reads most of a struct's fields destructures it once: `let Self { a, b, c } = self;`. A field added later is then a compile error at every such site.
+
 ## Naming
 
 ### Use concise names
@@ -147,6 +162,10 @@ We prefer concise names, especially for local variables, but prefer to expand ac
 Where the specification or libhdf5 already has a term for a thing, start from that term, so that a reader with the specification open finds the code and a libhdf5 user finds the API. Then judge it: a C name is often terse because of C's conventions, and that terseness sometimes costs readability. `btree`, `superblock`, `dataspace` and `datatype` come from the specification and read well. `sohm` does not, and the code says `shared_message`. `fheap` is `fractal_heap`. When in doubt, expand.
 
 Avoid adding a suffix for a variable that describes its type, provided that its type is hard to confuse with other types. The precision and conciseness trade-off for variable names also depends on the scope of the binding.
+
+When in doubt, be explicit: `msg_id` over `id`. Be terse where it does not hurt readability: `msg_id` over `message_identifier`. Where a value is a string, be over-explicit about which: `path`, `link_name`, `attr_name`, and never a bare `name` where two kinds of name are in scope.
+
+Avoid negations in names. `!non_blocking` and `disconnected == false` slow every reader down, so prefer `connected` over `disconnected` and `initialized` over `uninitialized`.
 
 ### Avoid `get_` prefixes
 
@@ -213,11 +232,39 @@ Comments and doc comments are prose, and the prose linter reads every added line
 
 [1574-A]: https://rust-lang.github.io/rfcs/1574-more-api-documentation-conventions.html#appendix-a-full-conventions-text
 
+## Tests
+
+### Assert the exact error
+
+A test of a failure asserts which failure. `is_err()` also passes on the failure the test rules out. Take the error out with `unwrap_err()` or a `let ... else`, and match the variant and its fields:
+
+```rust
+let err = builder.finish().unwrap_err();
+let Error::Format(FormatError::InvalidChunkGeometry(reason)) = &err else {
+    panic!("expected InvalidChunkGeometry, got {err:?}");
+};
+assert_eq!(reason, "chunk logical byte size exceeds the 4 GiB format limit");
+```
+
+`assert!(matches!(err, Error::StaleHandle), "{err:?}")` is the short form for a variant with no field to check. The message prints the error a wrong variant fails with.
+
+An error from the C library follows the same rule: the test asserts the major and minor codes the condition produces, `err.contains_major(MajorErrorCode::Symbol)` and `err.contains_minor(MinorErrorCode::NotFound)`, or the frames in order where the order matters. Where one code covers two conditions, the test asserts what separates them, as `assert_c_absent` in `crates/crosscheck/src/lib.rs` does.
+
+`hdf5::Error::Internal` is a failure in the binding. A test does not accept it in place of an error from the library.
+
+`assert!(r.is_ok())` is the same defect. A test unwraps the value and asserts on it, and asserts the whole value where that is feasible: `assert_eq!(names, vec!["a", "b"])` over `assert!(names.contains(&"a"))`.
+
+### Test helpers
+
+A helper that several test binaries share lives in `crates/test-util`. A helper that one binary uses lives in that binary. A helper that needs the C library lives in `crates/crosscheck/src/lib.rs`, so that nothing else links it.
+
 ## Misc
 
 ### Numeric literals
 
 Prefer a numeric base that fits with the domain of the value being used. E.g. use hexadecimal for the format's signatures, message type identifiers and flag bits, and decimal for sizes and counts. Use digit grouping to make larger numeric constants easy to read, e.g. use `100_000_000` and not `100000000`.
+
+A value the specification defines is a named constant, never a literal at the use site: a signature, a message type, a flag bit, a version number, a size threshold. The constant's doc comment cites the section that defines it.
 
 ### Avoid type aliases
 
