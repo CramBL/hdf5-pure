@@ -1,0 +1,9 @@
+# A blank line separates the subject from the body, so that git reads the
+# first line alone as the subject.
+extends: existence
+message: "A blank line separates the subject from the body."
+level: error
+scope: raw
+nonword: true
+tokens:
+  - '\A[^\n]+\n[^\n]+'
