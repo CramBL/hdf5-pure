@@ -655,6 +655,10 @@ The high-level `File` / `FileBuilder` API is `std`-gated, so a `no_std` build ex
 
 Where `hdf5-pure` cannot yet handle something, it returns a clear typed error rather than producing a wrong result. The [Limitations & Unsupported Features](https://crambl.github.io/hdf5-pure/reference/limitations/) reference catalogs every such refusal, split into **deliberately unsupported** (by-design constraints and foreign-format guards) and **planned support** (deferred features, each tracked by an issue).
 
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md). The [AI policy](AI_POLICY.md) and the [code style](CODE_STYLE.md) apply to every contribution.
+
 ## License
 
 Licensed under either of
