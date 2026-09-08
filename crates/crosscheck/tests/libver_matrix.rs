@@ -616,7 +616,7 @@ fn this_crate_reads_the_newest_format_the_release_writes() {
     check_compound(&path);
 }
 
-#[cfg(all(feature = "__hdf5-1.10", not(feature = "__hdf5-2")))]
+#[cfg(feature = "__hdf5-1.10")]
 #[test]
 fn this_crate_reads_the_newest_format_the_release_writes() {
     let dir = tempdir().unwrap();
@@ -625,31 +625,4 @@ fn this_crate_reads_the_newest_format_the_release_writes() {
     assert_eq!(superblock_version(&path), 3);
     check_c_written(&path);
     check_compound(&path);
-}
-
-/// Under its latest bounds, HDF5 2.0 encodes the compound with datatype
-/// message version 5, which this crate does not read.
-// TODO: read datatype message version 5, and fold this into the test above.
-#[cfg(feature = "__hdf5-2")]
-#[test]
-fn this_crate_reads_the_newest_format_the_release_writes_except_its_datatype_version_5() {
-    let dir = tempdir().unwrap();
-    let path = dir.path().join("newest.h5");
-    c_write(&path, H5F_LIBVER_LATEST, H5F_LIBVER_LATEST);
-    assert_eq!(superblock_version(&path), 3);
-    check_c_written(&path);
-    let refused = hdf5_pure::File::open(&path)
-        .unwrap()
-        .dataset("signal")
-        .unwrap()
-        .datatype();
-    assert!(
-        matches!(
-            refused,
-            Err(hdf5_pure::Error::Format(
-                hdf5_pure::FormatError::InvalidDatatypeVersion { .. }
-            ))
-        ),
-        "signal: {refused:?}"
-    );
 }

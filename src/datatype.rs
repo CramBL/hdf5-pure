@@ -1923,6 +1923,42 @@ mod tests {
         }
     }
 
+    /// HDF5 2.0 writes every datatype message with version 5 under its latest
+    /// library bounds. For a compound the layout is version 3's: unpadded
+    /// member names and offsets in the fewest bytes the size needs.
+    #[test]
+    fn a_version_5_compound_parses_like_version_3() {
+        let members = |version: u8| {
+            let mut buf = build_dt_header(6, version, [2, 0, 0], 16);
+            buf.extend_from_slice(b"re\0");
+            buf.push(0);
+            buf.extend_from_slice(&build_float(8, 52, 11, 0, 52, 1023));
+            buf.extend_from_slice(b"im\0");
+            buf.push(8);
+            buf.extend_from_slice(&build_float(8, 52, 11, 0, 52, 1023));
+            buf
+        };
+        let (expected, expected_len) = Datatype::parse(&members(3)).unwrap();
+        let (parsed, len) = Datatype::parse(&members(5)).unwrap();
+        assert_eq!((parsed, len), (expected, expected_len));
+    }
+
+    /// The same for an array: version 5 keeps version 3's layout.
+    #[test]
+    fn a_version_5_array_parses_like_version_3() {
+        let array = |version: u8| {
+            let mut buf = build_dt_header(10, version, [0, 0, 0], 48);
+            buf.push(2);
+            buf.extend_from_slice(&3u32.to_le_bytes());
+            buf.extend_from_slice(&4u32.to_le_bytes());
+            buf.extend_from_slice(&build_fixed_point(4, false, true, 0, 32));
+            buf
+        };
+        let (expected, expected_len) = Datatype::parse(&array(3)).unwrap();
+        let (parsed, len) = Datatype::parse(&array(5)).unwrap();
+        assert_eq!((parsed, len), (expected, expected_len));
+    }
+
     #[test]
     fn test_array_2d() {
         // Array [3][4] of i32 LE, version 3
