@@ -155,6 +155,30 @@ unused_import_braces = "warn"
 unused_lifetimes = "warn"
 variant_size_differences = "warn"
 
+# Allowed today and to be turned on, each with what it flags now.
+# TODO: 204 public items.
+missing_docs = "allow"
+# TODO: 13 types.
+missing_debug_implementations = "allow"
+# TODO: 3 types.
+missing_copy_implementations = "allow"
+# TODO: 20 paths.
+elided_lifetimes_in_paths = "allow"
+# TODO: 3 lifetimes.
+single_use_lifetimes = "allow"
+# TODO: 310 items, each becomes `pub(crate)`. The crate root is the API.
+unreachable_pub = "allow"
+# TODO: 70 casts.
+trivial_numeric_casts = "allow"
+# TODO: 59 paths.
+unused_qualifications = "allow"
+# TODO: 10 bindings.
+let_underscore_drop = "allow"
+# TODO: 3 traits.
+unnameable_types = "allow"
+# TODO: 10 sites, each carries an `expect` with the reason.
+unsafe_code = "allow"
+
 [workspace.lints.clippy]
 # Panics. A file is untrusted input, so a panic on one is a bug. clippy.toml
 # allows unwrap, expect, indexing and panic in tests.
@@ -240,18 +264,146 @@ rest_pat_in_fully_bound_structs = "warn"
 semicolon_inside_block = "warn"
 
 # Style-preference lints muted crate-wide, with the reason.
-# We prefer the explicit form.
-collapsible_if = "allow"
 # Incremental byte stream construction reads more naturally as
 # `let mut buf = Vec::new(); buf.push(...);` with a comment per byte.
 vec_init_then_push = "allow"
 # Approximate float constants in test data are intentional.
 approx_constant = "allow"
-# Low-level binary format code has many fields per call site (`file_data`,
-# `dataspace`, `datatype`, `layout`, `cache`, ...). Default 7 is too tight.
-too_many_arguments = "allow"
+
+# Allowed today and to be turned on, each with what it flags now.
+# TODO: 31 sites. Let chains make the collapsed form read well.
+collapsible_if = "allow"
+# TODO: 10 sites.
 manual_is_multiple_of = "allow"
+# TODO: 3 sites.
 same_item_push = "allow"
+# TODO: 15 functions at the default threshold of 7. clippy.toml raises it to
+# 10 for the format code, which has many fields per call site.
+too_many_arguments = "allow"
+
+# Panics and error handling.
+# TODO: 47 sites. Each returns an error or carries an expect with the invariant.
+unwrap_used = "allow"
+# TODO: 65 sites.
+expect_used = "allow"
+# TODO: 18 sites.
+unwrap_in_result = "allow"
+# TODO: 1 site.
+panic = "allow"
+# TODO: 30 sites.
+unreachable = "allow"
+# TODO: 1 site.
+get_unwrap = "allow"
+# TODO: 3 sites. A slice of a string panics off a character boundary.
+string_slice = "allow"
+# TODO: 81 sites. Each keeps or converts the error it drops.
+map_err_ignore = "allow"
+# TODO: 8 sites. The `.ok()` rule.
+let_underscore_must_use = "allow"
+# TODO: 1 site. The determinism rule.
+iter_over_hash_type = "allow"
+# TODO: 1 site.
+checked_conversions = "allow"
+# TODO: 2 sites.
+non_zero_suggestions = "allow"
+
+# Lint attributes.
+# TODO: 159 attributes, each becomes an `expect` with a reason, or goes.
+allow_attributes = "allow"
+# TODO: 160 attributes.
+allow_attributes_without_reason = "allow"
+
+# `no_std`.
+# TODO: 136 imports.
+std_instead_of_core = "allow"
+# TODO: 53 imports.
+std_instead_of_alloc = "allow"
+
+# unsafe.
+# TODO: 1 block.
+multiple_unsafe_ops_per_block = "allow"
+
+# Casts. A widening is `From`, a narrowing is `TryFrom`, and `as` is left for
+# the cast whose loss is the point, marked as such.
+# TODO: 1,465 sites.
+as_conversions = "allow"
+# TODO: 412 sites on a 64-bit host, more on 32-bit, which
+# `just portability::cast-gate` denies.
+cast_possible_truncation = "allow"
+# TODO: 74 sites.
+cast_possible_wrap = "allow"
+# TODO: 58 sites.
+cast_sign_loss = "allow"
+# TODO: 152 sites, each a `From` conversion.
+cast_lossless = "allow"
+# TODO: 38 sites.
+cast_precision_loss = "allow"
+# TODO: 2,396 sites, most of them loop counters. Turned on per file in the
+# byte-level parsers, where every operand comes off the disk, with
+# `#![warn(clippy::arithmetic_side_effects)]`.
+arithmetic_side_effects = "allow"
+
+# API shape.
+# TODO: 7 enums. Each addition is a breaking change, with the next minor bump.
+exhaustive_enums = "allow"
+# TODO: 1 struct.
+exhaustive_structs = "allow"
+# TODO: 12 functions.
+unnecessary_wraps = "allow"
+# TODO: 16 functions.
+needless_pass_by_value = "allow"
+# TODO: 3 functions.
+ref_option = "allow"
+# TODO: 12 types.
+derive_partial_eq_without_eq = "allow"
+# TODO: 3 `Debug` implementations.
+missing_fields_in_debug = "allow"
+# TODO: 179 functions. A dropped handle or shape is a bug.
+must_use_candidate = "allow"
+# TODO: 48 builder methods.
+return_self_not_must_use = "allow"
+# TODO: 689 sites, each `Self`.
+use_self = "allow"
+
+# Documentation.
+# TODO: 59 doc comments with an identifier outside backticks.
+doc_markdown = "allow"
+# TODO: 236 functions without an Errors section.
+missing_errors_doc = "allow"
+# TODO: 10 functions without a Panics section.
+missing_panics_doc = "allow"
+
+# Tests.
+# TODO: 239 assertions on `is_err` or `is_ok`. The exact-error rule.
+assertions_on_result_states = "allow"
+# TODO: 53 assertions without a message.
+missing_assert_message = "allow"
+
+# Expressions.
+# TODO: 57 imports, each `use Trait as _`.
+unused_trait_names = "allow"
+# TODO: 44 functions over 100 lines.
+too_many_lines = "allow"
+# TODO: 4 sites.
+manual_let_else = "allow"
+# TODO: 2 sites.
+uninlined_format_args = "allow"
+# TODO: 21 closures.
+redundant_closure_for_method_calls = "allow"
+# TODO: 7 loops.
+explicit_iter_loop = "allow"
+# TODO: 22 matches.
+match_same_arms = "allow"
+# TODO: 231 wildcard arms. A variant added to a format enum is then a compile
+# error at every match. A match over a `non_exhaustive` enum of another crate
+# keeps its wildcard.
+wildcard_enum_match_arm = "allow"
+# TODO: 24 bindings.
+shadow_unrelated = "allow"
+# TODO: 88 sites.
+str_to_string = "allow"
+# TODO: 34 items.
+items_after_statements = "allow"
 
 # Fewer, larger codegen units than rustc's default of 256.
 #
