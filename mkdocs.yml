@@ -158,3 +158,4 @@ nav:
       - API Reference (docs.rs): https://docs.rs/hdf5-pure
   - About:
       - Architecture: about/architecture.md
+      - Contributing: about/contributing.md
