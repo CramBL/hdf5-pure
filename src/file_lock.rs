@@ -428,6 +428,9 @@ pub(crate) fn clear_swmr_flag_at(path: &Path) -> Result<(), Error> {
 mod tests {
     use super::*;
 
+    use crate::width::LengthWidth;
+    use crate::width::OffsetWidth;
+
     #[test]
     fn parse_env_recognizes_disable_values() {
         for v in ["FALSE", "false", "0", "No", "off", " false "] {
@@ -461,8 +464,10 @@ mod tests {
     fn flagged(version: u8, flags: u32) -> Superblock {
         Superblock {
             version,
-            offset_size: 8,
-            length_size: 8,
+            offset_size: OffsetWidth::Eight.get(),
+            offset_width: OffsetWidth::Eight,
+            length_size: LengthWidth::Eight.get(),
+            length_width: LengthWidth::Eight,
             base_address: crate::address::BaseAddress::ZERO,
             eof_address: 0,
             root_group_address: 0,
