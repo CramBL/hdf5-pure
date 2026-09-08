@@ -23,13 +23,19 @@
 //!   is file-derived, so on a 32-bit target that sum can wrap and admit a read
 //!   past the end of the buffer (issue #140).
 //!
+//! Each address and length read comes in two forms. A `_width` function takes a
+//! width already parsed into an [`OffsetWidth`] or a [`LengthWidth`]. The plain
+//! form takes the `u8` the superblock stores and parses it first.
+//!
 //! Reads are from an in-memory slice. A parser working through [`crate::source`]
 //! reads its bytes into a buffer first and then uses these on that buffer.
 
 use crate::convert::is_undefined_addr;
 use crate::error::FormatError;
+use crate::width::LengthWidth;
+use crate::width::OffsetWidth;
 
-/// Check that `needed` bytes are readable at `offset`.
+/// Checks that `needed` bytes are readable at `offset`.
 ///
 /// Returns [`FormatError::UnexpectedEof`] otherwise. `offset + needed` is
 /// computed with [`usize::checked_add`], so a file-derived `offset` near
@@ -46,10 +52,9 @@ pub(crate) fn ensure_len(data: &[u8], offset: usize, needed: usize) -> Result<()
     }
 }
 
-/// Read a little-endian unsigned integer of `width` bytes at `pos`.
+/// Reads a little-endian unsigned integer of `width` bytes at `pos`.
 ///
-/// The width is assumed already validated; the caller-facing wrappers below own
-/// the "which widths are legal here" decision and the error that reports it.
+/// Each caller restricts `width` to 1, 2, 4 or 8 before the call.
 ///
 /// Written as a match over fixed-size arrays rather than a loop over `width`
 /// bytes. A loop whose trip count is the runtime `width` keeps its per-byte
@@ -78,10 +83,10 @@ fn read_le(data: &[u8], pos: usize, width: u8) -> u64 {
             data[pos + 6],
             data[pos + 7],
         ]),
-        // Unreachable: all three callers `matches!` the width against their own
-        // legal set before calling. Not `unreachable!()`, which would make a
-        // future fourth caller's omission a panic in a parser rather than an
-        // error; the `debug_assert` catches it in the tests instead.
+        // Unreachable: `read_offset_width` and `read_length_width` take a width
+        // parsed into its type, and `read_uint_width` matches its own legal
+        // set. Not `unreachable!()`, which would turn a later caller's omitted
+        // check into a panic inside a parser.
         _ => {
             debug_assert!(false, "width validated by the caller");
             0
@@ -89,35 +94,67 @@ fn read_le(data: &[u8], pos: usize, width: u8) -> u64 {
     }
 }
 
-/// Read a file address of `offset_size` bytes at `pos`.
+/// Reads a file address of `offset_size` bytes at `pos`.
 ///
-/// `offset_size` is the superblock's "size of offsets" and must be 2, 4, or 8;
-/// anything else is [`FormatError::InvalidOffsetSize`]. For the 1/2/4/8 widths
-/// that object header and link messages encode in a flag field, use
-/// [`read_uint_width`] instead.
+/// `offset_size` is the superblock's "Size of Offsets" field. For the 1, 2, 4
+/// or 8 byte width that an object header or a link message encodes in a flag
+/// field, use [`read_uint_width`].
+///
+/// # Errors
+///
+/// [`FormatError::InvalidOffsetSize`] for an `offset_size` outside 2, 4 and 8,
+/// and [`FormatError::UnexpectedEof`] when fewer than `offset_size` bytes
+/// remain at `pos`.
 #[inline]
 pub(crate) fn read_offset(data: &[u8], pos: usize, offset_size: u8) -> Result<u64, FormatError> {
-    if !matches!(offset_size, 2 | 4 | 8) {
-        return Err(FormatError::InvalidOffsetSize(offset_size));
-    }
-    ensure_len(data, pos, offset_size as usize)?;
-    Ok(read_le(data, pos, offset_size))
+    read_offset_width(data, pos, OffsetWidth::try_from(offset_size)?)
 }
 
-/// Read a length of `length_size` bytes at `pos`.
+/// Reads a file address of `width` bytes at `pos`.
 ///
-/// Identical to [`read_offset`] but reports [`FormatError::InvalidLengthSize`],
-/// naming the "size of lengths" superblock field the width came from.
+/// # Errors
+///
+/// [`FormatError::UnexpectedEof`] when fewer than `width` bytes remain at `pos`.
+#[inline]
+pub(crate) fn read_offset_width(
+    data: &[u8],
+    pos: usize,
+    width: OffsetWidth,
+) -> Result<u64, FormatError> {
+    ensure_len(data, pos, usize::from(width.get()))?;
+    Ok(read_le(data, pos, width.get()))
+}
+
+/// Reads a length of `length_size` bytes at `pos`.
+///
+/// `length_size` is the superblock's "Size of Lengths" field.
+///
+/// # Errors
+///
+/// [`FormatError::InvalidLengthSize`] for a `length_size` outside 2, 4 and 8,
+/// and [`FormatError::UnexpectedEof`] when fewer than `length_size` bytes
+/// remain at `pos`.
 #[inline]
 pub(crate) fn read_length(data: &[u8], pos: usize, length_size: u8) -> Result<u64, FormatError> {
-    if !matches!(length_size, 2 | 4 | 8) {
-        return Err(FormatError::InvalidLengthSize(length_size));
-    }
-    ensure_len(data, pos, length_size as usize)?;
-    Ok(read_le(data, pos, length_size))
+    read_length_width(data, pos, LengthWidth::try_from(length_size)?)
 }
 
-/// Read a variable-width unsigned integer of `width` bytes at `pos`, where
+/// Reads a length of `width` bytes at `pos`.
+///
+/// # Errors
+///
+/// [`FormatError::UnexpectedEof`] when fewer than `width` bytes remain at `pos`.
+#[inline]
+pub(crate) fn read_length_width(
+    data: &[u8],
+    pos: usize,
+    width: LengthWidth,
+) -> Result<u64, FormatError> {
+    ensure_len(data, pos, usize::from(width.get()))?;
+    Ok(read_le(data, pos, width.get()))
+}
+
+/// Reads a variable-width unsigned integer of `width` bytes at `pos`, where
 /// `width` is 1, 2, 4, or 8.
 ///
 /// This is the width an object header or link message encodes in a two-bit flag
@@ -140,23 +177,46 @@ pub(crate) fn read_uint_width(data: &[u8], pos: usize, width: u8) -> Result<u64,
     Ok(read_le(data, pos, width))
 }
 
-/// Read a file address of `offset_size` bytes at `pos`, as `None` when the file
-/// stored the all-`0xFF` "undefined address" sentinel there.
+/// Reads a file address of `offset_size` bytes at `pos`, as `None` when the file
+/// stored the all-`0xFF` undefined address there.
 ///
-/// The two outcomes a caller must not confuse are separated by the return type:
-/// `Ok(None)` is "the file says there is no address here", and an unreadable or
-/// mis-sized address is an `Err` naming the position it failed at. Every field
-/// this reads — a contiguous dataset's data address, a chunk index root, a
-/// B-tree v1 sibling, an array element — is optional in exactly that sense, and
-/// the sentinel is the format's way of writing the `None`.
+/// The return type separates the two outcomes a caller must not confuse:
+/// `Ok(None)` is the undefined address the file stored, and an address that
+/// cannot be read is an `Err`. Each field this reads is optional in that sense,
+/// such as a contiguous dataset's data address or a chunk index root.
+///
+/// # Errors
+///
+/// [`FormatError::InvalidOffsetSize`] for an `offset_size` outside 2, 4 and 8,
+/// and [`FormatError::UnexpectedEof`] when fewer than `offset_size` bytes
+/// remain at `pos`.
 #[inline]
 pub(crate) fn read_optional_offset(
     data: &[u8],
     pos: usize,
     offset_size: u8,
 ) -> Result<Option<u64>, FormatError> {
-    let addr = read_offset(data, pos, offset_size)?;
-    if is_undefined_addr(addr, offset_size) {
+    read_optional_offset_width(data, pos, OffsetWidth::try_from(offset_size)?)
+}
+
+/// Reads a file address of `width` bytes at `pos`, as `None` when the file
+/// stored the all-`0xFF` undefined address there.
+///
+/// The undefined address is as wide as the address field: `0xFFFF` is undefined
+/// in a file with 2-byte addresses and an ordinary address in a file with 8-byte
+/// ones.
+///
+/// # Errors
+///
+/// [`FormatError::UnexpectedEof`] when fewer than `width` bytes remain at `pos`.
+#[inline]
+pub(crate) fn read_optional_offset_width(
+    data: &[u8],
+    pos: usize,
+    width: OffsetWidth,
+) -> Result<Option<u64>, FormatError> {
+    let addr = read_offset_width(data, pos, width)?;
+    if is_undefined_addr(addr, width.get()) {
         Ok(None)
     } else {
         Ok(Some(addr))
@@ -323,6 +383,54 @@ mod tests {
         data[1] = 0xFF;
         assert_eq!(read_optional_offset(&data, 0, 2).unwrap(), None);
         assert_eq!(read_optional_offset(&data, 0, 8).unwrap(), Some(0xFFFF));
+        assert_eq!(
+            read_optional_offset_width(&data, 0, OffsetWidth::Two).unwrap(),
+            None
+        );
+        assert_eq!(
+            read_optional_offset_width(&data, 0, OffsetWidth::Eight).unwrap(),
+            Some(0xFFFF)
+        );
+    }
+
+    #[test]
+    fn a_typed_width_and_the_u8_it_parsed_from_read_the_same_value() {
+        let data = [0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88];
+        for size in [2u8, 4, 8] {
+            let offsets = OffsetWidth::try_from(size).unwrap();
+            let lengths = LengthWidth::try_from(size).unwrap();
+            assert_eq!(
+                read_offset_width(&data, 0, offsets).unwrap(),
+                read_offset(&data, 0, size).unwrap()
+            );
+            assert_eq!(
+                read_length_width(&data, 0, lengths).unwrap(),
+                read_length(&data, 0, size).unwrap()
+            );
+            assert_eq!(
+                read_optional_offset_width(&data, 0, offsets).unwrap(),
+                read_optional_offset(&data, 0, size).unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn a_read_at_a_parsed_width_reports_unexpected_eof_on_a_short_buffer() {
+        let data = [0xFFu8; 8];
+        assert_eq!(
+            read_offset_width(&data, 4, OffsetWidth::Eight).unwrap_err(),
+            FormatError::UnexpectedEof {
+                expected: 12,
+                available: 8,
+            }
+        );
+        assert_eq!(
+            read_length_width(&data, 6, LengthWidth::Four).unwrap_err(),
+            FormatError::UnexpectedEof {
+                expected: 10,
+                available: 8,
+            }
+        );
     }
 
     #[test]
