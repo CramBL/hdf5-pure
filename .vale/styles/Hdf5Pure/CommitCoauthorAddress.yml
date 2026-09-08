@@ -6,4 +6,4 @@ level: error
 scope: raw
 nonword: true
 tokens:
-  - '(?m)^Co-authored-by:(?![^\n]*<[^\s@<>]+@[^\s@<>]+>)[^\n]*'
+  - '(?mi)^Co-authored-by:(?![^\n]*<[^\s@<>]+@[^\s@<>]+>)[^\n]*'
