@@ -79,6 +79,7 @@ The body, when there is one, explains why. Issue references and trailers go at t
 
 - An addition to the public API has (at least) a test through that API, under `tests/`.
 - A change to the reader or the writer has a test against a file the C library or h5py wrote, or a crosscheck, whichever shows the change.
+- A test of a failure asserts the exact error: the `Error` or `FormatError` variant, or the major and minor codes the C library reports. [CODE_STYLE.md](CODE_STYLE.md#assert-the-exact-error) has the forms.
 
 ### Test data
 
