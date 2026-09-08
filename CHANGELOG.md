@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Fixed
+
+- Files HDF5 2.0 writes under its latest library bounds are read. Their compound and array datatypes were rejected with `FormatError::InvalidDatatypeVersion`.
+
 ### Changed
 
 - Licensed under MIT or Apache-2.0, at your option, where it was MIT alone ([#511](https://github.com/CramBL/hdf5-pure/pull/511)).
