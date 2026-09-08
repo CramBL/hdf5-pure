@@ -53,6 +53,10 @@ fn profile_path() -> std::path::PathBuf {
         .join("heap-profile.html")
 }
 
+#[expect(
+    clippy::panic_in_result_fn,
+    reason = "the example checks its own output"
+)]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let profile_path = profile_path();
     let profile_path = profile_path.display().to_string();
@@ -120,8 +124,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     assert_eq!(window.len(), 4096, "row window returned wrong length");
     assert_eq!(
-        window[0],
-        (ELEMENTS / 2) as f64,
+        window[0].to_bits(),
+        ((ELEMENTS / 2) as f64).to_bits(),
         "row window started at the wrong row"
     );
     drop(window);

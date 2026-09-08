@@ -118,7 +118,7 @@ fn vec_of_strings_roundtrips_as_cell_of_string_objects() {
     // A `Vec<String>` lowers to a cell whose elements are individual `string`
     // objects; reading resolves each object id against the shared MCOS store.
     let root = Root {
-        words: vec!["alpha".into(), "beta".into(), "".into(), "δέλτα".into()],
+        words: vec!["alpha".into(), "beta".into(), String::new(), "δέλτα".into()],
     };
     assert_eq!(modern_string_roundtrip(&root), root);
 }

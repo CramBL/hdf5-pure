@@ -70,6 +70,7 @@ fn start_profiling() {
         // nowhere to put it: dropping it ends the run, and a `static` would need
         // it to be `Sync`. Nothing is lost by forgetting it — the builder above
         // asks for no output, so its drop had nothing left to do.
+        #[expect(clippy::mem_forget, reason = "the profiler outlives the test binary")]
         std::mem::forget(profiler);
     });
 }

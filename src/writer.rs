@@ -484,6 +484,10 @@ mod streaming_tests {
     }
 
     impl ChunkProvider for MemProvider {
+        #[expect(
+            clippy::panic_in_result_fn,
+            reason = "a test provider asserts the emitter's contract"
+        )]
         fn chunk_bytes(&self, index: usize, out: &mut Vec<u8>) -> Result<(), FormatError> {
             self.calls.lock().unwrap().push(index);
             assert!(

@@ -378,7 +378,7 @@ fn chunked_write_costs_a_constant_per_chunk() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("write.h5");
 
-    let (_, measured) = measure("chunked_write", || {
+    let ((), measured) = measure("chunked_write", || {
         let mut builder = FileBuilder::new();
         builder
             .create_dataset("t")
@@ -443,7 +443,7 @@ fn filtered_write_does_not_build_a_compressor_per_chunk() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("deflate.h5");
 
-    let (_, measured) = measure("filtered_write", || {
+    let ((), measured) = measure("filtered_write", || {
         let mut builder = FileBuilder::new();
         builder
             .create_dataset("t")
@@ -623,7 +623,7 @@ fn vlen_string_write_does_not_own_each_string_before_staging_it() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("vlen.h5");
 
-    let (_, measured) = measure("vlen_string_write", || {
+    let ((), measured) = measure("vlen_string_write", || {
         let mut builder = FileBuilder::new();
         builder.create_dataset("labels").with_vlen_strings(&refs);
         builder.write(&path).unwrap();
@@ -705,7 +705,7 @@ fn one_append_costs_its_batch_not_the_dataset() {
             ds.append(&batch).unwrap();
         }
 
-        let (_, measured) = measure("append_in_place", || ds.append(&batch).unwrap());
+        let ((), measured) = measure("append_in_place", || ds.append(&batch).unwrap());
 
         // The batch's own bytes are staged inside this measurement, so their size
         // is a floor a measurement of nothing cannot reach.
@@ -924,7 +924,7 @@ fn a_write_larger_than_the_gather_budget_is_not_copied_into_it() {
     let measured = {
         let file = File::open_rw(&path).unwrap();
         let root = file.root();
-        let (_, m) = measure("big_staged_commit", || {
+        let ((), m) = measure("big_staged_commit", || {
             root.create_dataset("big", |b| {
                 b.with_f64_data(&data).with_shape(&[ELEMS as u64]);
             })
@@ -1097,7 +1097,7 @@ fn repeated_staged_append_commits_retain_nothing_per_commit() {
             commit_one_batch_per_dataset(&file, DATASETS, &batch);
         }
 
-        let (_, measured) = measure("staged_append_commits", || {
+        let ((), measured) = measure("staged_append_commits", || {
             for _ in 0..MEASURED_COMMITS {
                 commit_one_batch_per_dataset(&file, DATASETS, &batch);
             }

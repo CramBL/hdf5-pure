@@ -339,8 +339,9 @@ mod tests {
             MatValue::ComplexVec1D(ComplexVec::I16(vec![(1, -2), (3, -4)])),
         );
 
+        let none: &[ComplexI16] = &[];
         assert_eq!(
-            i16_array(&[] as &[ComplexI16], ValueSerializer::new(&opts)).unwrap(),
+            i16_array(none, ValueSerializer::new(&opts)).unwrap(),
             MatValue::ComplexVec1D(ComplexVec::I16(Vec::new())),
         );
 

@@ -1166,8 +1166,7 @@ mod tests {
             bytes.extend_from_slice(&dataset);
 
             let mut plan = Plan::default();
-            let map: BTreeMap<u64, u64> =
-                [(300 + base.get(), 900 + base.get())].into_iter().collect();
+            let map = BTreeMap::from([(300 + base.get(), 900 + base.get())]);
             let scanned =
                 scan_object(&BytesSource::new(bytes), HEADER_AT, base, &map, &mut plan).unwrap();
             assert!(
@@ -1217,7 +1216,7 @@ mod tests {
 
         // The control: `d` has moved, the root has not, so the walk descends
         // through the root and repoints the one element in `refs`.
-        let moved: BTreeMap<u64, u64> = [(stored, stored + 4096)].into_iter().collect();
+        let moved = BTreeMap::from([(stored, stored + 4096)]);
         let reached = super::plan(&source, &superblock, &moved, 1 << 20).unwrap();
         assert_eq!(reached.len(), 1, "the walk must reach `refs` at all");
 

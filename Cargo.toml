@@ -144,25 +144,114 @@ workspace = true
 members = ["crates/*"]
 exclude = ["fuzz"]
 
+[workspace.lints.rust]
+macro_use_extern_crate = "warn"
+meta_variable_misuse = "warn"
+non_ascii_idents = "warn"
+redundant_lifetimes = "warn"
+trivial_casts = "warn"
+unexpected_cfgs = "warn"
+unused_import_braces = "warn"
+unused_lifetimes = "warn"
+variant_size_differences = "warn"
+
 [workspace.lints.clippy]
-# Low-level binary format code naturally has many fields per call site
-# (file_data, dataspace, datatype, layout, cache, ...). Default 7 is too tight.
-too_many_arguments = "allow"
-# Incremental bytestream construction reads more naturally as
-# `let mut buf = Vec::new(); buf.push(...);` than the equivalent `vec![...]`.
-vec_init_then_push = "allow"
-same_item_push = "allow"
-# Index-based loops are sometimes the clearest way to express the access pattern.
-needless_range_loop = "allow"
-# We prefer the explicit forms.
+# Panics. A file is untrusted input, so a panic on one is a bug. clippy.toml
+# allows unwrap, expect, indexing and panic in tests.
+dbg_macro = "warn"
+exit = "warn"
+mem_forget = "warn"
+panic_in_result_fn = "warn"
+todo = "warn"
+unimplemented = "warn"
+
+# `no_std`: everything below the filesystem API imports from `core` and `alloc`.
+alloc_instead_of_core = "warn"
+
+# unsafe.
+undocumented_unsafe_blocks = "warn"
+unnecessary_safety_comment = "warn"
+unnecessary_safety_doc = "warn"
+
+# A directory module is its mod.rs.
+self_named_module_files = "warn"
+
+# Numeric casts and float comparisons. The truncating casts are denied on a 32-bit target by
+# `just portability::cast-gate`, where they can fire.
+as_ptr_cast_mut = "warn"
+char_lit_as_u8 = "warn"
+float_cmp_const = "warn"
+fn_to_numeric_cast_any = "warn"
+imprecise_flops = "warn"
+invalid_upcast_comparisons = "warn"
+large_digit_groups = "warn"
+manual_is_power_of_two = "warn"
+precedence_bits = "warn"
+suspicious_xor_used_as_pow = "warn"
+
+# API shape.
+default_trait_access = "warn"
+empty_drop = "warn"
+empty_enums = "warn"
+enum_glob_use = "warn"
+expl_impl_clone_on_copy = "warn"
+into_iter_without_iter = "warn"
+iter_not_returning_iterator = "warn"
+iter_without_into_iter = "warn"
+large_stack_arrays = "warn"
+large_stack_frames = "warn"
+large_types_passed_by_value = "warn"
+linkedlist = "warn"
+macro_use_imports = "warn"
+mismatching_type_param_order = "warn"
+pub_without_shorthand = "warn"
+rc_mutex = "warn"
+same_name_method = "warn"
+
+# Expressions.
+debug_assert_with_mut_call = "warn"
+equatable_if_let = "warn"
+explicit_deref_methods = "warn"
+fallible_impl_from = "warn"
+filter_map_next = "warn"
+flat_map_option = "warn"
+fn_params_excessive_bools = "warn"
+ignored_unit_patterns = "warn"
+index_refutable_slice = "warn"
+inefficient_to_string = "warn"
+infallible_try_from = "warn"
+infinite_loop = "warn"
+iter_on_empty_collections = "warn"
+iter_on_single_items = "warn"
+literal_string_with_formatting_args = "warn"
+manual_assert = "warn"
+manual_clamp = "warn"
+manual_ok_or = "warn"
+manual_string_new = "warn"
+map_flatten = "warn"
+match_wild_err_arm = "warn"
+mut_mut = "warn"
+mutex_integer = "warn"
+needless_continue = "warn"
+needless_for_each = "warn"
+needless_raw_string_hashes = "warn"
+negative_feature_names = "warn"
+rest_pat_in_fully_bound_structs = "warn"
+semicolon_inside_block = "warn"
+
+# Style-preference lints muted crate-wide, with the reason.
+# We prefer the explicit form.
 collapsible_if = "allow"
-collapsible_match = "allow"
-collapsible_else_if = "allow"
-manual_div_ceil = "allow"
-manual_is_multiple_of = "allow"
-unnecessary_map_or = "allow"
-# Approximate float constants in tests/data are intentional.
+# Incremental byte stream construction reads more naturally as
+# `let mut buf = Vec::new(); buf.push(...);` with a comment per byte.
+vec_init_then_push = "allow"
+# Approximate float constants in test data are intentional.
 approx_constant = "allow"
+# Low-level binary format code has many fields per call site (`file_data`,
+# `dataspace`, `datatype`, `layout`, `cache`, ...). Default 7 is too tight.
+too_many_arguments = "allow"
+manual_is_multiple_of = "allow"
+same_item_push = "allow"
 
 # Fewer, larger codegen units than rustc's default of 256.
 #

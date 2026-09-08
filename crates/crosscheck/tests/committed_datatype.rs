@@ -921,25 +921,30 @@ fn an_in_place_edit_refuses_a_committed_datatype() {
         .with_i32_data(&DATASET_VALUES);
     builder.write(&path).expect("write the base file");
 
-    for (what, configure) in [
+    #[expect(
+        clippy::type_complexity,
+        reason = "two named edits share one loop body"
+    )]
+    let cases: [(&str, &dyn Fn(&mut hdf5_pure::DatasetBuilder)); 2] = [
         (
             "a dataset element type",
-            Box::new(|db: &mut hdf5_pure::DatasetBuilder| {
+            &|db: &mut hdf5_pure::DatasetBuilder| {
                 db.with_i32_data(&DATASET_VALUES)
                     .with_committed_datatype("mytype");
-            }) as Box<dyn Fn(&mut hdf5_pure::DatasetBuilder)>,
+            },
         ),
         (
             "an attribute datatype",
-            Box::new(|db: &mut hdf5_pure::DatasetBuilder| {
+            &|db: &mut hdf5_pure::DatasetBuilder| {
                 db.with_i32_data(&DATASET_VALUES).set_attr_committed(
                     "a",
                     AttrValue::I32(ATTR_VALUE),
                     "mytype",
                 );
-            }),
+            },
         ),
-    ] {
+    ];
+    for (what, configure) in cases {
         let file = File::open_rw(&path).expect("open for editing");
         let message = file
             .root()

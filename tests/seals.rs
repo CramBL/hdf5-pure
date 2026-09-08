@@ -173,7 +173,7 @@ fn sealed_enums_still_require_a_wildcard_arm() {
         byte_order: hdf5_pure::DatatypeByteOrder::LittleEndian,
         bit_precision: 64,
     });
-    let _ = object as fn(&Object);
+    let _: fn(&Object) = object;
 }
 
 #[cfg(feature = "provenance")]

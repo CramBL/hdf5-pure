@@ -6,6 +6,8 @@
 //! SWMR writer — which follow it — a SWMR reader — and that
 //! `File::clear_swmr_flag` restores all of them.
 
+#![expect(clippy::mem_forget, reason = "the tests model a writer that crashed")]
+
 use hdf5_pure::{
     Error, File, FileAccessProperties, FileBuilder, FileLocking, FileSpaceStrategy, MemoryStrategy,
     SyncPolicy, WriteMarkPolicy,

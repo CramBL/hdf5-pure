@@ -8,8 +8,10 @@ pub struct Mutex<T> {
     data: UnsafeCell<T>,
 }
 
-// SAFETY: WASM is single-threaded; no concurrent access.
+// SAFETY: a `no_std` build runs single-threaded (WASM without threads, or bare metal), so no
+// two threads hold the value at once.
 unsafe impl<T> Send for Mutex<T> {}
+// SAFETY: as above.
 unsafe impl<T> Sync for Mutex<T> {}
 
 impl<T> Mutex<T> {

@@ -4075,13 +4075,13 @@ mod fixed_string_tests {
                 1,
             ),
             (
-                AttrValue::ascii_string_array_sized(vec!["ok".into(), "".into()], 64).unwrap(),
+                AttrValue::ascii_string_array_sized(vec!["ok".into(), String::new()], 64).unwrap(),
                 CharacterSet::Ascii,
                 DataspaceType::Simple,
                 2,
             ),
             (
-                AttrValue::string_array_sized(vec!["ok".into(), "".into()], 64).unwrap(),
+                AttrValue::string_array_sized(vec!["ok".into(), String::new()], 64).unwrap(),
                 CharacterSet::Utf8,
                 DataspaceType::Simple,
                 2,

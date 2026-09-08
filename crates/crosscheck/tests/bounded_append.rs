@@ -364,7 +364,7 @@ fn mirror_inplace_append_to_a_persisting_file_reads_back_in_c() {
     assert_eq!(read_c(&path, "d"), expected);
 
     let f = hdf5::File::open(&path).unwrap();
-    // Safety: the C-library guard above serializes every C call in this suite.
+    // The C-library guard above serializes every C call in this suite.
     let free = f.free_space() as i64;
     f.close().unwrap();
     assert!(
@@ -409,7 +409,7 @@ fn mirror_inplace_append_to_a_paged_file_stays_page_aligned() {
     assert_eq!(read_c(&path, "d"), expected);
 
     let f = hdf5::File::open(&path).unwrap();
-    // Safety: the C-library guard above serializes every C call in this suite.
+    // The C-library guard above serializes every C call in this suite.
     let free = f.free_space() as i64;
     f.close().unwrap();
     assert!(
