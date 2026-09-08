@@ -11,6 +11,8 @@ use crate::convert::TryToUsize;
 use crate::error::FormatError;
 use crate::signature::HDF5_SIGNATURE;
 use crate::source::Source;
+use crate::width::LengthWidth;
+use crate::width::OffsetWidth;
 
 /// Upper bound on the on-disk size of a superblock across all versions: the
 /// largest is v1 with 8-byte offsets at 100 bytes (28 prefix + 4 addresses +
@@ -37,8 +39,12 @@ pub struct Superblock {
     pub version: u8,
     /// Size of offsets in bytes (2, 4, or 8).
     pub offset_size: u8,
+    /// The width of an address in this file. [`Self::offset_size`] is this width as a `u8`.
+    pub(crate) offset_width: OffsetWidth,
     /// Size of lengths in bytes (2, 4, or 8).
     pub length_size: u8,
+    /// The width of a length in this file. [`Self::length_size`] is this width as a `u8`.
+    pub(crate) length_width: LengthWidth,
     /// File base address.
     pub base_address: BaseAddress,
     /// End-of-file address.
@@ -63,56 +69,50 @@ pub struct Superblock {
     pub checksum: Option<u32>,
 }
 
-fn validate_sizes(offset_size: u8, length_size: u8) -> Result<(), FormatError> {
-    if !matches!(offset_size, 2 | 4 | 8) {
-        return Err(FormatError::InvalidOffsetSize(offset_size));
-    }
-    if !matches!(length_size, 2 | 4 | 8) {
-        return Err(FormatError::InvalidLengthSize(length_size));
-    }
-    Ok(())
-}
-
 impl Superblock {
-    /// Serialize this superblock to bytes.
+    /// Serializes this superblock to bytes.
     ///
-    /// Always writes v2/v3 format. Computes and appends Jenkins lookup3 checksum.
+    /// Always writes the version 2 and 3 layout: the two width bytes, four addresses at
+    /// [`Self::offset_width`], and the Jenkins lookup3 checksum over the bytes before it.
     pub(crate) fn serialize(&self) -> Vec<u8> {
         let mut buf = Vec::with_capacity(48);
         buf.extend_from_slice(&HDF5_SIGNATURE);
         buf.push(self.version);
-        buf.push(self.offset_size);
-        buf.push(self.length_size);
+        buf.push(self.offset_width.get());
+        buf.push(self.length_width.get());
         #[expect(
             clippy::cast_possible_truncation,
             reason = "consistency flags occupy the 1-byte file-consistency-flags field of the superblock"
         )]
         buf.push(self.consistency_flags as u8);
         // base_address
-        Self::write_offset(&mut buf, self.base_address.get(), self.offset_size);
+        Self::write_offset(&mut buf, self.base_address.get(), self.offset_width);
         // superblock extension address
         let ext_addr = self.superblock_extension_address.unwrap_or(u64::MAX);
-        Self::write_offset(&mut buf, ext_addr, self.offset_size);
+        Self::write_offset(&mut buf, ext_addr, self.offset_width);
         // eof_address
-        Self::write_offset(&mut buf, self.eof_address, self.offset_size);
+        Self::write_offset(&mut buf, self.eof_address, self.offset_width);
         // root_group_address
-        Self::write_offset(&mut buf, self.root_group_address, self.offset_size);
+        Self::write_offset(&mut buf, self.root_group_address, self.offset_width);
         // checksum
         let checksum = crate::checksum::jenkins_lookup3(&buf);
         buf.extend_from_slice(&checksum.to_le_bytes());
         buf
     }
 
-    fn write_offset(buf: &mut Vec<u8>, val: u64, size: u8) {
+    /// Appends `val` to `buf` as a little-endian integer of `width` bytes.
+    ///
+    /// Truncates `val` to its low `width` bytes, which is how the all-ones undefined address is
+    /// written at each width.
+    fn write_offset(buf: &mut Vec<u8>, val: u64, width: OffsetWidth) {
         #[expect(
             clippy::cast_possible_truncation,
-            reason = "size is the offset byte width chosen to hold val, so each arm casts to a width that fits by construction"
+            reason = "each arm writes the low `width` bytes of `val`"
         )]
-        match size {
-            2 => buf.extend_from_slice(&(val as u16).to_le_bytes()),
-            4 => buf.extend_from_slice(&(val as u32).to_le_bytes()),
-            8 => buf.extend_from_slice(&val.to_le_bytes()),
-            _ => {}
+        match width {
+            OffsetWidth::Two => buf.extend_from_slice(&(val as u16).to_le_bytes()),
+            OffsetWidth::Four => buf.extend_from_slice(&(val as u32).to_le_bytes()),
+            OffsetWidth::Eight => buf.extend_from_slice(&val.to_le_bytes()),
         }
     }
 
@@ -163,15 +163,14 @@ impl Superblock {
         // = 24 bytes before variable-sized fields
         bytes::ensure_len(d, 0, 24)?;
 
-        let offset_size = d[13];
-        let length_size = d[14];
-        validate_sizes(offset_size, length_size)?;
+        let offset_width = OffsetWidth::try_from(d[13])?;
+        let length_width = LengthWidth::try_from(d[14])?;
 
         let group_leaf_node_k = LittleEndian::read_u16(&d[16..18]);
         let group_internal_node_k = LittleEndian::read_u16(&d[18..20]);
         let consistency_flags = LittleEndian::read_u32(&d[20..24]);
 
-        let os = offset_size as usize;
+        let os = usize::from(offset_width.get());
         // 4 addresses + root symbol table entry
         let var_start = 24;
         let sym_entry_size = os + os + 4 + 4 + 16; // link_name_off, obj_hdr_addr, cache_type, reserved, scratch
@@ -179,24 +178,26 @@ impl Superblock {
         bytes::ensure_len(d, 0, total)?;
 
         let mut pos = var_start;
-        let base_address = BaseAddress::new(bytes::read_offset(d, pos, offset_size)?);
+        let base_address = BaseAddress::new(bytes::read_offset_width(d, pos, offset_width)?);
         pos += os;
-        let free_space_address = bytes::read_offset(d, pos, offset_size)?;
+        let free_space_address = bytes::read_offset_width(d, pos, offset_width)?;
         pos += os;
-        let eof_address = bytes::read_offset(d, pos, offset_size)?;
+        let eof_address = bytes::read_offset_width(d, pos, offset_width)?;
         pos += os;
-        let driver_info_address = bytes::read_offset(d, pos, offset_size)?;
+        let driver_info_address = bytes::read_offset_width(d, pos, offset_width)?;
         pos += os;
 
         // Root symbol table entry
-        let _link_name_offset = bytes::read_offset(d, pos, offset_size)?;
+        let _link_name_offset = bytes::read_offset_width(d, pos, offset_width)?;
         pos += os;
-        let object_header_addr = bytes::read_offset(d, pos, offset_size)?;
+        let object_header_addr = bytes::read_offset_width(d, pos, offset_width)?;
 
         Ok(Superblock {
             version: 0,
-            offset_size,
-            length_size,
+            offset_size: offset_width.get(),
+            offset_width,
+            length_size: length_width.get(),
+            length_width,
             base_address,
             eof_address,
             root_group_address: object_header_addr,
@@ -222,9 +223,8 @@ impl Superblock {
         // + indexed_storage_k(2) + reserved(2) = 28
         bytes::ensure_len(d, 0, 28)?;
 
-        let offset_size = d[13];
-        let length_size = d[14];
-        validate_sizes(offset_size, length_size)?;
+        let offset_width = OffsetWidth::try_from(d[13])?;
+        let length_width = LengthWidth::try_from(d[14])?;
 
         let group_leaf_node_k = LittleEndian::read_u16(&d[16..18]);
         let group_internal_node_k = LittleEndian::read_u16(&d[18..20]);
@@ -232,31 +232,33 @@ impl Superblock {
         let indexed_storage_internal_node_k = LittleEndian::read_u16(&d[24..26]);
         // d[26..28] reserved
 
-        let os = offset_size as usize;
+        let os = usize::from(offset_width.get());
         let var_start = 28;
         let sym_entry_size = os + os + 4 + 4 + 16;
         let total = var_start + 4 * os + sym_entry_size;
         bytes::ensure_len(d, 0, total)?;
 
         let mut pos = var_start;
-        let base_address = BaseAddress::new(bytes::read_offset(d, pos, offset_size)?);
+        let base_address = BaseAddress::new(bytes::read_offset_width(d, pos, offset_width)?);
         pos += os;
-        let free_space_address = bytes::read_offset(d, pos, offset_size)?;
+        let free_space_address = bytes::read_offset_width(d, pos, offset_width)?;
         pos += os;
-        let eof_address = bytes::read_offset(d, pos, offset_size)?;
+        let eof_address = bytes::read_offset_width(d, pos, offset_width)?;
         pos += os;
-        let driver_info_address = bytes::read_offset(d, pos, offset_size)?;
+        let driver_info_address = bytes::read_offset_width(d, pos, offset_width)?;
         pos += os;
 
         // Root symbol table entry
-        let _link_name_offset = bytes::read_offset(d, pos, offset_size)?;
+        let _link_name_offset = bytes::read_offset_width(d, pos, offset_width)?;
         pos += os;
-        let object_header_addr = bytes::read_offset(d, pos, offset_size)?;
+        let object_header_addr = bytes::read_offset_width(d, pos, offset_width)?;
 
         Ok(Superblock {
             version: 1,
-            offset_size,
-            length_size,
+            offset_size: offset_width.get(),
+            offset_width,
+            length_size: length_width.get(),
+            length_width,
             base_address,
             eof_address,
             root_group_address: object_header_addr,
@@ -275,24 +277,23 @@ impl Superblock {
         // sig(8) + version(1) + offset_size(1) + length_size(1) + consistency_flags(1) = 12
         bytes::ensure_len(d, 0, 12)?;
 
-        let offset_size = d[9];
-        let length_size = d[10];
-        validate_sizes(offset_size, length_size)?;
+        let offset_width = OffsetWidth::try_from(d[9])?;
+        let length_width = LengthWidth::try_from(d[10])?;
         let consistency_flags = d[11] as u32;
 
-        let os = offset_size as usize;
+        let os = usize::from(offset_width.get());
         // 4 addresses + checksum(4)
         let total = 12 + 4 * os + 4;
         bytes::ensure_len(d, 0, total)?;
 
         let mut pos = 12;
-        let base_address = BaseAddress::new(bytes::read_offset(d, pos, offset_size)?);
+        let base_address = BaseAddress::new(bytes::read_offset_width(d, pos, offset_width)?);
         pos += os;
-        let superblock_extension_address = bytes::read_offset(d, pos, offset_size)?;
+        let superblock_extension_address = bytes::read_offset_width(d, pos, offset_width)?;
         pos += os;
-        let eof_address = bytes::read_offset(d, pos, offset_size)?;
+        let eof_address = bytes::read_offset_width(d, pos, offset_width)?;
         pos += os;
-        let root_group_address = bytes::read_offset(d, pos, offset_size)?;
+        let root_group_address = bytes::read_offset_width(d, pos, offset_width)?;
         pos += os;
 
         let stored_checksum = LittleEndian::read_u32(&d[pos..pos + 4]);
@@ -311,8 +312,10 @@ impl Superblock {
 
         Ok(Superblock {
             version,
-            offset_size,
-            length_size,
+            offset_size: offset_width.get(),
+            offset_width,
+            length_size: length_width.get(),
+            length_width,
             base_address,
             eof_address,
             root_group_address,
@@ -405,12 +408,17 @@ mod tests {
         buf
     }
 
-    fn build_v2_bytes(offset_size: u8, version: u8) -> Vec<u8> {
+    fn build_v2_bytes(
+        offset_width: OffsetWidth,
+        length_width: LengthWidth,
+        version: u8,
+    ) -> Vec<u8> {
+        let offset_size = offset_width.get();
         let mut buf = Vec::new();
         buf.extend_from_slice(&HDF5_SIGNATURE);
         buf.push(version);
         buf.push(offset_size);
-        buf.push(offset_size); // length_size
+        buf.push(length_width.get());
         buf.push(0); // consistency_flags
         write_offset(&mut buf, 0, offset_size); // base_address
         write_offset(&mut buf, 0xFFFFFFFFFFFFFFFF, offset_size); // superblock ext
@@ -532,7 +540,7 @@ mod tests {
 
     #[test]
     fn parse_v2_8byte_offsets() {
-        let data = build_v2_bytes(8, 2);
+        let data = build_v2_bytes(OffsetWidth::Eight, LengthWidth::Eight, 2);
         let sb = Superblock::parse(&data, 0).unwrap();
         assert_eq!(sb.version, 2);
         assert_eq!(sb.offset_size, 8);
@@ -544,7 +552,7 @@ mod tests {
 
     #[test]
     fn parse_v2_4byte_offsets() {
-        let data = build_v2_bytes(4, 2);
+        let data = build_v2_bytes(OffsetWidth::Four, LengthWidth::Four, 2);
         let sb = Superblock::parse(&data, 0).unwrap();
         assert_eq!(sb.version, 2);
         assert_eq!(sb.offset_size, 4);
@@ -552,14 +560,14 @@ mod tests {
 
     #[test]
     fn parse_v3() {
-        let data = build_v2_bytes(8, 3);
+        let data = build_v2_bytes(OffsetWidth::Eight, LengthWidth::Eight, 3);
         let sb = Superblock::parse(&data, 0).unwrap();
         assert_eq!(sb.version, 3);
     }
 
     #[test]
     fn checksum_mismatch_v2() {
-        let mut data = build_v2_bytes(8, 2);
+        let mut data = build_v2_bytes(OffsetWidth::Eight, LengthWidth::Eight, 2);
         // Corrupt the checksum
         let len = data.len();
         data[len - 1] ^= 0xFF;
@@ -639,10 +647,35 @@ mod tests {
 
     #[test]
     fn v2_2byte_offsets() {
-        let data = build_v2_bytes(2, 2);
+        let data = build_v2_bytes(OffsetWidth::Two, LengthWidth::Two, 2);
         let sb = Superblock::parse(&data, 0).unwrap();
         assert_eq!(sb.offset_size, 2);
+        assert_eq!(sb.offset_width, OffsetWidth::Two);
         assert_eq!(sb.eof_address, 2048);
+    }
+
+    #[test]
+    fn a_superblock_whose_two_widths_differ_round_trips_to_the_same_bytes() {
+        let data = build_v2_bytes(OffsetWidth::Two, LengthWidth::Four, 2);
+        let sb = Superblock::parse(&data, 0).unwrap();
+
+        assert_eq!(sb.offset_size, 2);
+        assert_eq!(sb.offset_width, OffsetWidth::Two);
+        assert_eq!(sb.length_size, 4);
+        assert_eq!(sb.length_width, LengthWidth::Four);
+        assert_eq!(sb.eof_address, 2048);
+        assert_eq!(sb.root_group_address, 48);
+
+        assert_eq!(sb.serialize(), data);
+    }
+
+    #[test]
+    fn a_superblock_with_8_byte_widths_round_trips_to_the_same_bytes() {
+        let data = build_v2_bytes(OffsetWidth::Eight, LengthWidth::Eight, 3);
+        let sb = Superblock::parse(&data, 0).unwrap();
+        assert_eq!(sb.offset_width, OffsetWidth::Eight);
+        assert_eq!(sb.length_width, LengthWidth::Eight);
+        assert_eq!(sb.serialize(), data);
     }
 
     #[cfg(feature = "std")]
@@ -653,7 +686,7 @@ mod tests {
         // a lazy Read+Seek source (reading only a small window) and from the
         // in-memory buffer.
         let mut data = vec![0u8; 4096];
-        let v2 = build_v2_bytes(8, 2);
+        let v2 = build_v2_bytes(OffsetWidth::Eight, LengthWidth::Eight, 2);
         data[512..512 + v2.len()].copy_from_slice(&v2);
 
         let buffered = Superblock::parse(&data, 512).unwrap();
@@ -673,7 +706,7 @@ mod tests {
     #[test]
     fn parse_from_streaming_source_validates_checksum() {
         use crate::source::ReadSeekSource;
-        let mut data = build_v2_bytes(8, 2);
+        let mut data = build_v2_bytes(OffsetWidth::Eight, LengthWidth::Eight, 2);
         let len = data.len();
         data[len - 1] ^= 0xFF; // corrupt the stored checksum
         let src = ReadSeekSource::new(std::io::Cursor::new(data)).unwrap();

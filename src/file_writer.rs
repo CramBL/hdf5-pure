@@ -44,6 +44,8 @@ use crate::type_builders::{
     AttrSpec, CommittedDatatype, DatasetBuilder, FinishedGroup, GroupBuilder, VlStringStaging,
     build_global_heap_collections, patch_vl_refs, patch_vl_refs_masked, write_reference_address,
 };
+use crate::width::LengthWidth;
+use crate::width::OffsetWidth;
 
 // `AttrValue` lives in `type_builders`; `types` and `mat` reference it through
 // this module's path, so keep it re-exported here.
@@ -51,8 +53,14 @@ pub use crate::type_builders::AttrValue;
 
 use crate::datatype::{CharacterSet, Datatype};
 
-pub(crate) const OFFSET_SIZE: u8 = 8;
-pub(crate) const LENGTH_SIZE: u8 = 8;
+/// The width of every address in a file this crate writes.
+const OFFSET_WIDTH: OffsetWidth = OffsetWidth::Eight;
+/// The width of every length in a file this crate writes.
+const LENGTH_WIDTH: LengthWidth = LengthWidth::Eight;
+/// [`OFFSET_WIDTH`] as the `u8` width the writers take.
+pub(crate) const OFFSET_SIZE: u8 = OFFSET_WIDTH.get();
+/// [`LENGTH_WIDTH`] as the `u8` width the writers take.
+pub(crate) const LENGTH_SIZE: u8 = LENGTH_WIDTH.get();
 const SUPERBLOCK_SIZE: usize = 48;
 
 /// Object-header message record flags (`H5O_MSG_FLAG_*`).
@@ -3255,7 +3263,9 @@ impl FileWriter {
             let sb = Superblock {
                 version: superblock_version(libver),
                 offset_size: OFFSET_SIZE,
+                offset_width: OFFSET_WIDTH,
                 length_size: LENGTH_SIZE,
+                length_width: LENGTH_WIDTH,
                 base_address: base,
                 eof_address: eof_addr2,
                 root_group_address: root_group_addr,
@@ -3537,7 +3547,9 @@ impl FileWriter {
         let sb = Superblock {
             version: superblock_version(libver),
             offset_size: OFFSET_SIZE,
+            offset_width: OFFSET_WIDTH,
             length_size: LENGTH_SIZE,
+            length_width: LENGTH_WIDTH,
             base_address: BaseAddress::new(ub as u64),
             eof_address: eof_addr2,
             root_group_address: root_group_addr,
