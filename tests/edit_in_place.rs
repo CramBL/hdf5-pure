@@ -4417,7 +4417,11 @@ fn a_dataset_region_reference_is_refused_beside_a_delete() {
 /// same commit relocates it.
 #[test]
 fn a_reference_address_to_a_dataset_a_write_relocates_is_refused() {
-    for (tag, relocate) in [
+    #[expect(
+        clippy::type_complexity,
+        reason = "two named edits share one loop body"
+    )]
+    let cases: [(&str, fn(&File)); 2] = [
         (
             // A filtered chunk whose replacement compresses worse than what it
             // replaces no longer fits its slot, so the dataset is rebuilt
@@ -4434,7 +4438,7 @@ fn a_reference_address_to_a_dataset_a_write_relocates_is_refused() {
                         b.with_i32_data(&incompressible);
                     })
                     .unwrap();
-            }) as fn(&File),
+            }),
         ),
         (
             "append",
@@ -4446,9 +4450,10 @@ fn a_reference_address_to_a_dataset_a_write_relocates_is_refused() {
                         a.append_i32(&[9]);
                     })
                     .unwrap();
-            }) as fn(&File),
+            }),
         ),
-    ] {
+    ];
+    for (tag, relocate) in cases {
         let path = temp_path(&format!("hdf5_pure_edit_ref_moved_{tag}.h5"));
         let mut b = FileBuilder::new();
         // Zeros so every chunk compresses to almost nothing, leaving slots the

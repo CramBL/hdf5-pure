@@ -145,10 +145,8 @@ fn write_link_tracked(path: &Path, links: &[&str]) {
         .expect("a file creation property list");
     // TODO: https://github.com/metno/hdf5-rust/issues/230
     // Safety: a live property list id and the flags the C library defines.
-    assert_eq!(
-        unsafe { H5Pset_link_creation_order(fcpl.id(), flags.bits()) },
-        0
-    );
+    let rc = unsafe { H5Pset_link_creation_order(fcpl.id(), flags.bits()) };
+    assert_eq!(rc, 0);
     let mut builder = hdf5::File::with_options();
     builder.with_fapl(|p| p.libver_bounds(LibraryVersion::V18, LibraryVersion::latest()));
     builder

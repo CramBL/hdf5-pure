@@ -8,7 +8,7 @@
 //! and the result is read back by both readers. Also proves the fail-loud
 //! contract on a real variable-length string dataset the C library produces.
 
-use hdf5_pure::{File, RepackOptions, repack};
+use hdf5_pure::{File, RepackOptions, VlenStringReadOptions, repack};
 use tempfile::tempdir;
 
 use hdf5_pure_crosscheck::assert_c_absent;
@@ -136,7 +136,9 @@ fn repack_roundtrips_c_vlen_string_dataset() {
     // and non-ASCII elements.
     let f = File::open(&dst).unwrap();
     let labels = f.dataset("labels").unwrap();
-    let got = labels.read_vlen_strings(Default::default()).unwrap();
+    let got = labels
+        .read_vlen_strings(VlenStringReadOptions::default())
+        .unwrap();
     assert_eq!(got, words);
 
     // The datatype must remain variable-length, not be silently converted to a
@@ -200,7 +202,7 @@ fn repack_roundtrips_c_vlen_dataset_spanning_many_collections() {
     let got = f
         .dataset("labels")
         .unwrap()
-        .read_vlen_strings(Default::default())
+        .read_vlen_strings(VlenStringReadOptions::default())
         .unwrap();
     assert_eq!(got, words);
 
@@ -248,7 +250,11 @@ fn repack_roundtrips_vlen_string_2d() {
     let f = File::open(&dst).unwrap();
     let grid = f.dataset("grid").unwrap();
     assert_eq!(grid.shape().unwrap(), vec![2, 3]);
-    assert_eq!(grid.read_vlen_strings(Default::default()).unwrap(), words);
+    assert_eq!(
+        grid.read_vlen_strings(VlenStringReadOptions::default())
+            .unwrap(),
+        words
+    );
 
     // C library agrees on shape and values.
     let c = hdf5::File::open(&dst).unwrap();
@@ -2075,7 +2081,7 @@ fn a_vlen_string_dataset_keeps_its_pipeline_order_and_optional_flags() {
     let read: Vec<String> = f
         .dataset("data")
         .unwrap()
-        .read_vlen_strings(Default::default())
+        .read_vlen_strings(VlenStringReadOptions::default())
         .unwrap();
     let expected: Vec<String> = words.iter().map(|w| w.to_string()).collect();
     assert_eq!(read, expected);

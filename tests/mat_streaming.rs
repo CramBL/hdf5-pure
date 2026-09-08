@@ -616,7 +616,7 @@ fn every_element_type_matches_its_materialized_sibling() {
     let logical: Vec<u8> = vec![1, 0, 1, 1];
     let counts: Vec<u32> = vec![7, 8, 9, 10];
 
-    let raw = |bytes: &[u8]| Box::new(Bytes(bytes.to_vec())) as Box<dyn DataProducer>;
+    let raw = |bytes: &[u8]| -> Box<dyn DataProducer> { Box::new(Bytes(bytes.to_vec())) };
     let complex_bytes: Vec<u8> = complex
         .iter()
         .flat_map(|(re, im)| [re.to_le_bytes(), im.to_le_bytes()])

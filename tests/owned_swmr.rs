@@ -182,7 +182,9 @@ fn clear_swmr_flag_recovers_a_stale_flag() {
     build_swmr(&path, 4, 4);
 
     let file = File::open_swmr_writer(&path).unwrap();
-    std::mem::forget(file); // Drop never runs, so the flag is left set
+    // Drop never runs, so the flag is left set.
+    #[expect(clippy::mem_forget, reason = "the test models a writer that crashed")]
+    std::mem::forget(file);
     assert_eq!(read_flags(&path), SWMR_WRITE_FLAGS);
 
     File::clear_swmr_flag(&path).unwrap();

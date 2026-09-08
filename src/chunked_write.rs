@@ -4375,9 +4375,9 @@ mod tests {
             // pass ones that are: an error raised only because the datatype was
             // also wrong would pass an `is_err()` check while leaving the
             // combination itself unrefused.
-            let err = options
-                .build_pipeline(&f64_ctx(&[64]), FillPattern::ZERO)
-                .expect_err("{a} + {b} was accepted");
+            let Err(err) = options.build_pipeline(&f64_ctx(&[64]), FillPattern::ZERO) else {
+                panic!("{a} + {b} was accepted");
+            };
             let FormatError::FilterError(msg) = &err else {
                 panic!("{a} + {b}: expected a filter error, got {err}");
             };

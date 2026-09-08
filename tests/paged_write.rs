@@ -3,7 +3,7 @@
 //! free-space managers, and reads them back. C-library interop lives in
 //! `crates/crosscheck/tests/file_space.rs`.
 
-use hdf5_pure::{AttrValue, File, FileBuilder, FileSpaceStrategy};
+use hdf5_pure::{AttrValue, File, FileBuilder, FileSpaceStrategy, VlenStringReadOptions};
 
 const PAGE: u64 = 16384;
 
@@ -210,7 +210,7 @@ fn paged_groups_attrs_vlen() {
     let labels = f
         .dataset("labels")
         .unwrap()
-        .read_vlen_strings(Default::default())
+        .read_vlen_strings(VlenStringReadOptions::default())
         .unwrap();
     assert_eq!(labels, vec!["alpha", "beta", "gamma", "delta"]);
 }

@@ -17139,7 +17139,7 @@ mod tests {
         let mut b = FileBuilder::new();
         b.create_dataset("labels")
             .with_vlen_strings(&["seed-one", "seed-two"]);
-        b.create_dataset("big").with_u8_data(&[0x5A; 40960]);
+        b.create_dataset("big").with_u8_data(&vec![0x5A; 40960]);
         b.with_file_space_strategy(FileSpaceStrategy::FsmAggr, true, 0);
         b.write(&path).unwrap();
 

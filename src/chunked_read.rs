@@ -2578,9 +2578,9 @@ mod tests {
             let chunk_bytes = chunk_size_elems * elem_size; // full chunk allocation
 
             // Write chunk data (full chunk size, padding with zeros)
-            for i in start..end {
-                let byte_offset = data_offset + (i - start) * elem_size;
-                file_data[byte_offset..byte_offset + 8].copy_from_slice(&values[i].to_le_bytes());
+            for (k, value) in values[start..end].iter().enumerate() {
+                let byte_offset = data_offset + k * elem_size;
+                file_data[byte_offset..byte_offset + 8].copy_from_slice(&value.to_le_bytes());
             }
 
             chunk_infos.push(ChunkInfo {
@@ -2734,8 +2734,8 @@ mod tests {
         for chunk_idx in 0..2 {
             let start = chunk_idx * chunk_elems;
             let mut chunk_bytes = Vec::new();
-            for i in start..start + chunk_elems {
-                chunk_bytes.extend_from_slice(&values[i].to_le_bytes());
+            for value in &values[start..start + chunk_elems] {
+                chunk_bytes.extend_from_slice(&value.to_le_bytes());
             }
             let dims_u64 = [chunk_elems as u64];
             let ctx = crate::filters::ChunkContext::basic(&dims_u64, elem_size as u32);

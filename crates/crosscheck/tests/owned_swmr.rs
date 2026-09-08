@@ -109,6 +109,7 @@ fn both_libraries_refuse_a_file_a_crashed_swmr_writer_left_flagged() {
 
     // A crashed writer: leak the handle so neither `close` nor `Drop` clears the
     // flag it raised.
+    #[expect(clippy::mem_forget, reason = "the test models a writer that crashed")]
     std::mem::forget(File::open_swmr_writer(&path).unwrap());
 
     let c_err = hdf5::File::open(&path).expect_err("the C library refuses a flagged file");

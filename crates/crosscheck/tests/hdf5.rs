@@ -8,7 +8,10 @@
 //! These tests verify that files produced by hdf5-pure are valid HDF5 files
 //! readable by the reference C implementation.
 
-use hdf5_pure::{AttrValue, CompoundTypeBuilder, Datatype, File, FileBuilder, make_f64_type};
+use hdf5_pure::{
+    AttrValue, CompoundTypeBuilder, Datatype, File, FileBuilder, VlenStringReadOptions,
+    make_f64_type,
+};
 use tempfile::tempdir;
 
 /// Read a MATLAB-style variable-length ASCII attribute from an `hdf5::Attribute`.
@@ -1770,7 +1773,7 @@ fn crosscheck_vlen_string_dataset() {
     assert_eq!(
         f.dataset("labels")
             .unwrap()
-            .read_vlen_strings(Default::default())
+            .read_vlen_strings(VlenStringReadOptions::default())
             .unwrap(),
         words
     );

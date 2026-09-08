@@ -17,7 +17,7 @@ use tempfile::tempdir;
 /// Open `path` with h5py and return `(len, first, last)` of dataset `d`, or
 /// `None` if python3/h5py are unavailable. `mode` is "swmr" or "plain".
 fn h5py_read(path: &std::path::Path, mode: &str) -> Option<(usize, i64, i64)> {
-    let script = r#"
+    let script = r"
 import sys, h5py
 path, mode = sys.argv[1], sys.argv[2]
 f = h5py.File(path, 'r', swmr=(mode == 'swmr'), libver='latest')
@@ -26,7 +26,7 @@ if mode == 'swmr':
     d.refresh()
 n = d.shape[0]
 print(n, int(d[0]) if n else 0, int(d[-1]) if n else 0)
-"#;
+";
     let out = std::process::Command::new("python3")
         .args(["-c", script, &path.to_string_lossy(), mode])
         // SWMR readers run without HDF5's file locking so they don't conflict
@@ -148,7 +148,9 @@ fn swmr_flag_lifecycle() {
     {
         let w = File::open_swmr_writer(&path).unwrap();
         w.dataset("d").unwrap().append(&[8]).unwrap();
-        std::mem::forget(w); // skip Drop -> flag stays set, as if crashed
+        // Skipping Drop leaves the flag set, as a crash would.
+        #[expect(clippy::mem_forget, reason = "the test models a writer that crashed")]
+        std::mem::forget(w);
     }
     assert_eq!(flag(&path), 0x05, "flag left set after simulated crash");
     File::clear_swmr_flag(&path).unwrap();

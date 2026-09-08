@@ -238,7 +238,7 @@ fn c_library_reads_managers_we_placed_mid_file() {
         // with live data above them whichever hole they land in.
         s.root()
             .create_dataset("above", |b| {
-                b.with_i32_data(&[5; 8000]);
+                b.with_i32_data(&vec![5; 8000]);
             })
             .unwrap();
         s.commit().unwrap();

@@ -321,7 +321,7 @@ fn write_strings(dir: &Path) {
     let v = Strings {
         ascii: "hello MATLAB".into(),
         unicode: "é ù €".into(),
-        empty: "".into(),
+        empty: String::new(),
     };
     mat::to_file(&v, dir.join("strings.mat")).unwrap();
     println!("wrote: strings.mat");

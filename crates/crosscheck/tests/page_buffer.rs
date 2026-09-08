@@ -57,6 +57,7 @@ fn the_c_library_refuses_a_file_a_crashed_page_buffered_session_left_marked() {
 
     // A crashed session: leak the handle so neither `close` nor `Drop` clears
     // the mark it raised.
+    #[expect(clippy::mem_forget, reason = "the test models a session that crashed")]
     {
         let file = File::open_rw_with_options(&path, page_buffered()).unwrap();
         let mut ds = file.dataset("d").unwrap();
