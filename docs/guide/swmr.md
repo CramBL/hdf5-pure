@@ -3,7 +3,7 @@
 SWMR lets a single process append to an unlimited dataset in place while other processes read it concurrently, and it interoperates with the reference HDF5 C library and h5py in both directions. This page covers how to lay out a SWMR-capable dataset, append to it durably, follow it from a reader, and recover a file left flagged by a writer that exited uncleanly.
 
 !!! tip "Runnable example"
-    A complete single-process demonstration lives in [`examples/swmr.rs`](https://github.com/stephenberry/hdf5-pure/blob/main/examples/swmr.rs). Run it with:
+    A complete single-process demonstration lives in [`examples/swmr.rs`](https://github.com/CramBL/hdf5-pure/blob/main/examples/swmr.rs). Run it with:
 
     ```bash
     cargo run --example swmr

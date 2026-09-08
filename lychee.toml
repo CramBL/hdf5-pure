@@ -1,0 +1,12 @@
+no_progress = true
+
+# A host that is slow or rate-limiting today must not fail the run: retry
+# before declaring a link dead, and treat 429 as a live host.
+max_retries = 5
+retry_wait_time = 2
+accept = ["200..=299", "429"]
+
+exclude = [
+    # Blocks every non-browser client with 403.
+    "^https://www\\.mathworks\\.com/",
+]

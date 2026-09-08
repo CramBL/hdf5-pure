@@ -184,7 +184,7 @@ pub(crate) fn compress(input: &[u8]) -> Vec<u8> {
     // 0.6 us, and loses 6-78% across the 6-16 KiB band on incompressible
     // input. Keep `usize`.
     //
-    // [#234]: https://github.com/stephenberry/hdf5-pure/issues/234
+    // [#234]: https://github.com/CramBL/hdf5-pure/issues/234
     let mut table = vec![0_usize; HASH_TABLE_SLOTS];
     let mut ip = 0;
     let mut literal_start = 0;

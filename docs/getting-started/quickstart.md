@@ -5,7 +5,7 @@ then read it back. No filesystem and no C library are involved, which is exactly
 what makes the same code run in a browser via WASM.
 
 It mirrors the runnable
-[`quickstart` example](https://github.com/stephenberry/hdf5-pure/blob/main/examples/quickstart.rs).
+[`quickstart` example](https://github.com/CramBL/hdf5-pure/blob/main/examples/quickstart.rs).
 You can run it directly from a clone:
 
 ```bash

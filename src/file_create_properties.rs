@@ -35,7 +35,7 @@ use crate::libver::LibVer;
 ///
 /// See the [property-support reference] for the full property-by-property map.
 ///
-/// [property-support reference]: https://github.com/stephenberry/hdf5-pure/blob/main/docs/reference/property-support.md
+/// [property-support reference]: https://github.com/CramBL/hdf5-pure/blob/main/docs/reference/property-support.md
 ///
 /// # Examples
 ///

@@ -16,7 +16,7 @@ reference HDF5 C library, h5py, and MATLAB.</p>
 
 [Get started](getting-started/installation.md){ .md-button .md-button--primary }
 [Quick start](getting-started/quickstart.md){ .md-button }
-[View on GitHub](https://github.com/stephenberry/hdf5-pure){ .md-button }
+[View on GitHub](https://github.com/CramBL/hdf5-pure){ .md-button }
 
 <div class="h5-pills">
   <span>read</span>
@@ -37,8 +37,8 @@ reference HDF5 C library, h5py, and MATLAB.</p>
 <p align="center">
 <a href="https://crates.io/crates/hdf5-pure"><img alt="crates.io" src="https://img.shields.io/crates/v/hdf5-pure.svg?logo=rust&color=0e7490"></a>
 <a href="https://docs.rs/hdf5-pure"><img alt="docs.rs" src="https://img.shields.io/docsrs/hdf5-pure?logo=docsdotrs&color=0e7490"></a>
-<a href="https://github.com/stephenberry/hdf5-pure/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/stephenberry/hdf5-pure/actions/workflows/ci.yml/badge.svg"></a>
-<a href="https://github.com/stephenberry/hdf5-pure/blob/main/LICENSE"><img alt="License: MIT" src="https://img.shields.io/crates/l/hdf5-pure.svg?color=0e7490"></a>
+<a href="https://github.com/CramBL/hdf5-pure/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/CramBL/hdf5-pure/actions/workflows/ci.yml/badge.svg"></a>
+<a href="https://github.com/CramBL/hdf5-pure/blob/main/LICENSE"><img alt="License: MIT" src="https://img.shields.io/crates/l/hdf5-pure.svg?color=0e7490"></a>
 </p>
 
 `hdf5-pure` is a zero-C-dependency crate for creating, reading, and editing
@@ -146,4 +146,4 @@ the reference HDF5 C library, h5py, and MATLAB read without conversion.
 Ready to dig in? Start with [Installation](getting-started/installation.md) and
 the [Quick Start](getting-started/quickstart.md), then browse the
 [Guide](guide/writing.md). Every page mirrors a runnable example under
-[`examples/`](https://github.com/stephenberry/hdf5-pure/tree/main/examples).
+[`examples/`](https://github.com/CramBL/hdf5-pure/tree/main/examples).

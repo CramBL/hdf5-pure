@@ -3,7 +3,7 @@
 This page covers building HDF5 files with `FileBuilder`: creating datasets from typed Rust slices, attaching attributes, and serializing the result either to memory or to disk. It is the foundation for everything else you write to a file.
 
 !!! tip "Runnable example"
-    A complete, self-checking version of this workflow lives in [`examples/quickstart.rs`](https://github.com/stephenberry/hdf5-pure/blob/main/examples/quickstart.rs). Run it with:
+    A complete, self-checking version of this workflow lives in [`examples/quickstart.rs`](https://github.com/CramBL/hdf5-pure/blob/main/examples/quickstart.rs). Run it with:
 
     ```bash
     cargo run --example quickstart

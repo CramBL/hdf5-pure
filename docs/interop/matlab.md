@@ -3,7 +3,7 @@
 A MATLAB v7.3 `.mat` file is an HDF5 file dressed in MATLAB conventions: a 512-byte userblock carrying the `MATLAB 7.3 MAT-file` signature, a `MATLAB_class` attribute on every dataset and group, column-major 2-D arrays, and UTF-16 strings. This page covers the high-level serde path that writes and reads `.mat` files from ordinary Rust structs, the supported type mapping, MATLAB cell arrays, and the lower-level conventions for hand-built files.
 
 !!! tip "Runnable example"
-    The [`matlab_fixtures`](https://github.com/stephenberry/hdf5-pure/blob/main/examples/matlab_fixtures.rs) example writes a directory of `.mat` v7.3 fixtures (scalars, vectors, matrices, strings, nested structs, complex data, cell arrays, and edge shapes) for verification in MATLAB and Octave. Run it with:
+    The [`matlab_fixtures`](https://github.com/CramBL/hdf5-pure/blob/main/examples/matlab_fixtures.rs) example writes a directory of `.mat` v7.3 fixtures (scalars, vectors, matrices, strings, nested structs, complex data, cell arrays, and edge shapes) for verification in MATLAB and Octave. Run it with:
 
     ```bash
     cargo run --example matlab_fixtures --features serde

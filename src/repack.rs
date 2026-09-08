@@ -108,7 +108,7 @@
 //! file's metadata, independent of dataset (or file) size, so a file whose data
 //! exceeds available RAM repacks successfully.
 //!
-//! [#82]: https://github.com/stephenberry/hdf5-pure/issues/82
+//! [#82]: https://github.com/CramBL/hdf5-pure/issues/82
 
 use std::collections::{BTreeSet, HashMap};
 use std::path::Path;

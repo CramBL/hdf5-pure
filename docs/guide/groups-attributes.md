@@ -4,7 +4,7 @@ HDF5 files are hierarchical: datasets live inside groups, groups nest inside oth
 
 !!! tip "Runnable example"
     A complete, runnable version of everything on this page lives in
-    [`examples/groups_and_attributes.rs`](https://github.com/stephenberry/hdf5-pure/blob/main/examples/groups_and_attributes.rs).
+    [`examples/groups_and_attributes.rs`](https://github.com/CramBL/hdf5-pure/blob/main/examples/groups_and_attributes.rs).
     Run it with:
 
     ```bash
@@ -86,7 +86,7 @@ The `AttrValue` variants and their HDF5 encodings are:
 !!! note
     `AttrValue::AsciiString`, `AttrValue::AsciiStringArray`, and `AttrValue::VarLenAsciiCharArray` exist for compatibility with MATLAB and matio, which expect fixed-width or variable-length ASCII rather than UTF-8 for certain conventional attributes. See the [data types reference](../reference/data-types.md) for the full type mapping.
 
-    The two variable-length families differ in datatype, not in bytes. `VarLenString` and its siblings write `H5T_STRING` with `STRSIZE = H5T_VARIABLE` — what h5py and the C library write, and what h5py reads back as a `str` and the C library as a `char *`. `VarLenAsciiCharArray` writes `H5T_VLEN { H5T_STRING { STRSIZE = 1 } }`, which MATLAB and matio expect for `MATLAB_fields` and its neighbours ([#383](https://github.com/stephenberry/hdf5-pure/issues/383)).
+    The two variable-length families differ in datatype, not in bytes. `VarLenString` and its siblings write `H5T_STRING` with `STRSIZE = H5T_VARIABLE` — what h5py and the C library write, and what h5py reads back as a `str` and the C library as a `char *`. `VarLenAsciiCharArray` writes `H5T_VLEN { H5T_STRING { STRSIZE = 1 } }`, which MATLAB and matio expect for `MATLAB_fields` and its neighbours ([#383](https://github.com/CramBL/hdf5-pure/issues/383)).
 
 ## Reading the hierarchy back
 

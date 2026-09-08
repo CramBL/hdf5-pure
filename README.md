@@ -2,7 +2,7 @@
 
 Pure-Rust HDF5 reader, writer, and in-place editor. No C dependencies, no build scripts, WASM-compatible.
 
-**📖 [Documentation site](https://stephenberry.github.io/hdf5-pure/)** · [API reference (docs.rs)](https://docs.rs/hdf5-pure) · [Examples](examples) · [Changelog](CHANGELOG.md)
+**📖 [Documentation site](https://crambl.github.io/hdf5-pure/)** · [API reference (docs.rs)](https://docs.rs/hdf5-pure) · [Examples](examples) · [Changelog](CHANGELOG.md)
 
 ## Features
 
@@ -653,7 +653,7 @@ The high-level `File` / `FileBuilder` API is `std`-gated, so a `no_std` build ex
 
 ## Limitations
 
-Where `hdf5-pure` cannot yet handle something, it returns a clear typed error rather than producing a wrong result. The [Limitations & Unsupported Features](https://stephenberry.github.io/hdf5-pure/reference/limitations/) reference catalogs every such refusal, split into **deliberately unsupported** (by-design constraints and foreign-format guards) and **planned support** (deferred features, each tracked by an issue).
+Where `hdf5-pure` cannot yet handle something, it returns a clear typed error rather than producing a wrong result. The [Limitations & Unsupported Features](https://crambl.github.io/hdf5-pure/reference/limitations/) reference catalogs every such refusal, split into **deliberately unsupported** (by-design constraints and foreign-format guards) and **planned support** (deferred features, each tracked by an issue).
 
 ## Acknowledgements
 

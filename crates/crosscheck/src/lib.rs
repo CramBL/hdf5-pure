@@ -50,7 +50,7 @@ const LOAD_FAILURES: [MinorErrorCode; 6] = [
 /// `tests/c_absence_predicate.rs` guards that this stays able to tell the two
 /// apart; read it before changing either condition.
 ///
-/// [#201]: https://github.com/stephenberry/hdf5-pure/issues/201
+/// [#201]: https://github.com/CramBL/hdf5-pure/issues/201
 #[track_caller]
 pub fn assert_c_absent(err: &hdf5::Error, what: &str) {
     if let Some(reason) = not_absent_because(err) {

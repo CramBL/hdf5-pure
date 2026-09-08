@@ -3,13 +3,13 @@
 This page covers opening HDF5 files, navigating their group hierarchy, and reading datasets and attributes back into Rust. The reading API is the same regardless of how a file is opened, so the patterns here apply equally to in-memory, on-disk, streaming, and SWMR reads.
 
 !!! tip "Runnable example"
-    The [`quickstart`](https://github.com/stephenberry/hdf5-pure/blob/main/examples/quickstart.rs) example builds a file in memory and reads it back, doubling as a self-check. Run it with:
+    The [`quickstart`](https://github.com/CramBL/hdf5-pure/blob/main/examples/quickstart.rs) example builds a file in memory and reads it back, doubling as a self-check. Run it with:
 
     ```bash
     cargo run --example quickstart
     ```
 
-    The [`groups_and_attributes`](https://github.com/stephenberry/hdf5-pure/blob/main/examples/groups_and_attributes.rs) example walks a nested hierarchy. Run it with `cargo run --example groups_and_attributes`.
+    The [`groups_and_attributes`](https://github.com/CramBL/hdf5-pure/blob/main/examples/groups_and_attributes.rs) example walks a nested hierarchy. Run it with `cargo run --example groups_and_attributes`.
 
 ## Opening a file
 

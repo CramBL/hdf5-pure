@@ -3,7 +3,7 @@
 A written HDF5 file can record how it manages free space: which allocation strategy it uses, whether freed regions are tracked across closes, and the page size used for paged allocation. This page covers `FileBuilder::with_file_space_strategy` and `with_file_space_page_size`, which mirror HDF5's `H5Pset_file_space_strategy` and `H5Pset_file_space_page_size`, and how the choice interacts with [editing](editing.md) and [repacking](repack.md).
 
 !!! tip
-    A runnable example lives at [examples/file_space.rs](https://github.com/stephenberry/hdf5-pure/blob/main/examples/file_space.rs). Run it with:
+    A runnable example lives at [examples/file_space.rs](https://github.com/CramBL/hdf5-pure/blob/main/examples/file_space.rs). Run it with:
 
     ```bash
     cargo run --example file_space
