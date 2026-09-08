@@ -6,6 +6,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Changed
+
+- Licensed under MIT or Apache-2.0, at your option, where it was MIT alone ([#511](https://github.com/CramBL/hdf5-pure/pull/511)).
+- The repository moved to `CramBL/hdf5-pure`, and the documentation site to <https://crambl.github.io/hdf5-pure/>.
+
 ## [0.44.0] - 2026-09-04
 
 Files that h5py and netCDF-4 write are editable in place now. `File::open_rw` edits an object that tracks attribute creation order and adds a dataset or group to one that tracks link creation order (h5py's `track_order=True`, and everything netCDF-4 writes), where every such object was refused, and it keeps the object header's timestamps and `H5Pset_attr_phase_change` thresholds across the rewrite instead of dropping both ([#416](https://github.com/CramBL/hdf5-pure/issues/416), [#422](https://github.com/CramBL/hdf5-pure/pull/422)). `File::open` and `File::open_streaming` read a file that shares object header messages (`H5Pset_shared_mesg_index`), resolving a datatype, dataspace, fill value, filter pipeline or attribute out of the shared-message heap, and `repack` rewrites such a file with every message stored inline ([#417](https://github.com/CramBL/hdf5-pure/issues/417)). Deleting objects gives trailing space back to the filesystem rather than leaving `File::file_size()` at a high-water mark ([#418](https://github.com/CramBL/hdf5-pure/issues/418)), and `WriteMarkPolicy::AllowSnapshot` lets a read-only open take a path-based snapshot of a file a page-buffered writer holds ([#419](https://github.com/CramBL/hdf5-pure/issues/419)). Additive minor bump.
