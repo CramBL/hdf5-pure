@@ -2,24 +2,27 @@
 
     just release::prepare 0.45.0 --summary-file notes.md
     just release::prepare 0.45.0-rc.1
+    just release::pr 0.45.0
     just release::publish 0.45.0
 
 `prepare` runs on a clean checkout of main. It checks the version against the
 tags and the manifest, reports the cycle's public-API delta, sets the version
 in Cargo.toml and Cargo.lock, for a final release promotes the changelog's
-[Unreleased] section into a dated one opened by the summary, packages with
-`cargo publish --dry-run`, commits on `release/vX.Y.Z`, pushes the branch and
-opens the pull request. A candidate leaves the changelog alone: [Unreleased]
-stays open until the final release promotes it.
+[Unreleased] section into a dated one, opened by a summary paragraph when one
+is given, and packages with `cargo publish --dry-run`. It commits nothing. A
+candidate does not change the changelog: [Unreleased] stays open until the
+final release promotes it.
+
+`pr` commits those changes on `release/vX.Y.Z`, prompts for confirmation, then
+pushes the branch and opens the pull request.
 
 `publish` runs on the merged release commit, from the Release workflow or from
 a machine with `cargo login` and `gh auth login` done. A commit on main has
 passed every CI guard, which the branch ruleset requires to merge. It checks
 that the public-API delta allows the version, then publishes to crates.io,
 pushes the tag and creates the GitHub release. Each of those is skipped once
-it exists, so re-running after a failure resumes.
-Publishing comes first because it cannot be undone: a failure there leaves
-nothing public behind.
+it exists, so re-running after a failure resumes. Publishing comes first
+because it cannot be undone.
 """
 
 import argparse
@@ -37,10 +40,11 @@ from pathlib import Path
 from hdf5_pure_scripts import repo_root
 
 CRATE = "hdf5-pure"
+RELEASE_FILES = {"Cargo.toml", "Cargo.lock", "CHANGELOG.md"}
 SEMVER_FEATURES = "serde,zfp,provenance,ndarray,num-complex"
 
 
-def die(message):
+def fail(message):
     sys.exit(f"error: {message}")
 
 
@@ -144,6 +148,17 @@ def set_version(manifest_text, version):
     raise ValueError(f"no version line for {CRATE}")
 
 
+def changed_files():
+    """The tracked files with uncommitted changes."""
+    status = subprocess.run(
+        ["git", "status", "--porcelain", "-z", "--untracked-files=no"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+    return {entry[3:] for entry in status.split("\0") if entry}
+
+
 def worktree_clean():
     return output("git", "status", "--porcelain", "--untracked-files=no") == ""
 
@@ -159,12 +174,14 @@ def changelog_section(changelog, header):
 
 
 def promote_changelog(changelog, version, previous, summary, repo_url, today):
-    """The changelog with [Unreleased] emptied into a dated `version` section
-    that opens with `summary`, and the compare links moved along."""
+    """The changelog with [Unreleased] emptied into a dated `version` section,
+    opened by `summary` when there is one, and the compare links updated."""
     head, marker, body = changelog.partition("## [Unreleased]\n")
     if not marker:
         raise ValueError("no [Unreleased] section")
-    section = f"## [{version}] - {today.isoformat()}\n\n{summary.strip()}\n\n"
+    section = f"## [{version}] - {today.isoformat()}\n\n"
+    if summary and summary.strip():
+        section += f"{summary.strip()}\n\n"
     text = head + marker + "\n" + section + body.lstrip("\n")
     links = (
         f"[Unreleased]: {repo_url}/compare/v{version}...HEAD\n"
@@ -177,7 +194,7 @@ def promote_changelog(changelog, version, previous, summary, repo_url, today):
 
 
 def required_bump(verdict):
-    """The release type a cargo semver-checks verdict asks for, or None."""
+    """The release type a cargo semver-checks verdict requires, or None."""
     if "requires new major" in verdict:
         return "major"
     if "requires new minor" in verdict:
@@ -201,9 +218,9 @@ def semver_verdict(baseline, release_type):
     breaks" (cargo-semver-checks #337).
     """
     if subprocess.run(["cargo", "semver-checks", "--version"], capture_output=True).returncode != 0:
-        die(
-            "cargo-semver-checks is not installed (`cargo binstall cargo-semver-checks`); "
-            "pass --skip-api-delta to go without it"
+        fail(
+            "cargo-semver-checks is not installed (`cargo binstall cargo-semver-checks`), "
+            "or pass --skip-api-delta"
         )
     result = subprocess.run(
         [
@@ -224,11 +241,11 @@ def semver_verdict(baseline, release_type):
     sys.stderr.write(result.stdout)
     m = re.search(r"Summary.*", result.stdout)
     if not m:
-        die(
-            f"cargo-semver-checks printed no verdict, so the public-API delta since v{baseline} "
-            "went unchecked; its own error above says why, and a toolchain newer than it "
-            "supports is the common cause (`cargo binstall cargo-semver-checks` refreshes it). "
-            "Pass --skip-api-delta to release without the check"
+        fail(
+            f"cargo-semver-checks printed no verdict for the delta since v{baseline}; see its "
+            "output above. A version older than the toolchain cannot read rustdoc's JSON, and "
+            "`cargo binstall cargo-semver-checks` installs the current one. "
+            "--skip-api-delta releases without the check"
         )
     return m.group(0)
 
@@ -250,60 +267,57 @@ def prepare(args):
     branch = f"release/{tag}"
 
     if output("git", "rev-parse", "--abbrev-ref", "HEAD") != "main":
-        die("not on main; prepare a release from main")
+        fail("not on main; prepare a release from main")
     if not worktree_clean():
-        die("working tree is dirty; commit or stash first")
+        fail("working tree is dirty; commit or stash first")
     tags = tagged_versions()
     previous = latest(tags)
     previous_stable = latest([v for v in tags if not v.is_rc])
     if previous_stable is None:
-        die("no vX.Y.Z tag found; run `git fetch --tags` (a shallow clone has none)")
+        fail("no vX.Y.Z tag found; run `git fetch --tags` (a shallow clone has none)")
     current = Version.parse(manifest()["version"])
 
-    # Releases move forward. crates.io versions can be yanked but never reused,
-    # so a typo like 0.4.5 for 0.45.0 has to stop here.
+    # A version below the last tag is rejected: crates.io never reuses a
+    # version, so a typo such as 0.4.5 for 0.45.0 would be permanent.
     if not previous < version:
-        die(f"{version} does not come after the last tag (v{previous})")
+        fail(f"{version} does not come after the last tag (v{previous})")
     if previous.is_rc and previous.final != version.final:
-        die(
+        fail(
             f"v{previous} is a candidate of {previous.final}; "
             f"finish or abandon that cycle before releasing {version}"
         )
     # The manifest reads the last final, or anything up to the version being
     # cut when a breaking pull request already bumped it.
     if current < previous_stable or version < current:
-        die(
+        fail(
             f"Cargo.toml reads {current}, outside the last release ({previous_stable}) .. {version}"
         )
     if output("git", "tag", "--list", tag):
-        die(f"tag {tag} already exists")
+        fail(f"tag {tag} already exists")
     if output("git", "branch", "--list", branch):
-        die(f"branch {branch} already exists; a previous prepare is in flight")
+        fail(f"branch {branch} already exists; delete it or finish that release first")
     changelog = CHANGELOG.read_text()
     if not (changelog_section(changelog, "Unreleased") or "").strip():
-        die("CHANGELOG.md [Unreleased] is empty; nothing to release")
+        fail("CHANGELOG.md [Unreleased] is empty; nothing to release")
 
     summary = args.summary
     if version.is_rc:
         if summary or args.summary_file:
-            die("a candidate takes no summary; the changelog is promoted by the final release")
+            fail("a candidate takes no summary; the final release promotes the changelog")
     else:
         if changelog_section(changelog, str(version)) is not None:
-            die(f"CHANGELOG.md already has a [{version}] section")
+            fail(f"CHANGELOG.md already has a [{version}] section")
         if args.summary_file:
             if not args.summary_file.is_file():
-                die(f"summary file not found: {args.summary_file}")
+                fail(f"summary file not found: {args.summary_file}")
             summary = args.summary_file.read_text()
-        if not (summary or "").strip():
-            die("a final release needs its summary paragraph: --summary or --summary-file")
 
     note(f"Preparing {tag} after v{previous}")
 
     # CI's semver job derives what to check from the manifest, so once a
     # breaking pull request has bumped it the job checks nothing for the rest
-    # of the cycle. This report covers the whole cycle and is read against the
-    # changelog: an empty report on a cycle that claims a breaking change is a
-    # finding. `publish` runs the same check as a gate.
+    # of the cycle. This report covers the whole cycle. `publish` runs the same
+    # check as a gate.
     if args.skip_api_delta:
         warn("Skipping the public-API delta report (--skip-api-delta)")
     else:
@@ -324,21 +338,43 @@ def prepare(args):
     note("Packaging with cargo publish --dry-run")
     run("cargo", "publish", "--dry-run", "--allow-dirty")
 
+    note(f"Prepared {tag} in the working tree. Next: `just release::pr {version}`")
+    run("git", "status", "--short")
+
+
+def pr(args):
+    """Commit the prepared release on its branch, prompt, then push it and open
+    the pull request."""
+    version = args.version
+    tag = f"v{version}"
+    branch = f"release/{tag}"
+
+    if output("git", "rev-parse", "--abbrev-ref", "HEAD") != "main":
+        fail("not on main; run this where `prepare` ran")
+    current = manifest()["version"]
+    if current != str(version):
+        fail(
+            f"Cargo.toml reads {current}, not {version}; "
+            f"run `just release::prepare {version}` first"
+        )
+    changed = changed_files()
+    if not changed:
+        fail(f"nothing to commit; run `just release::prepare {version}` first")
+    if unexpected := changed - RELEASE_FILES:
+        fail(f"changed files outside the release: {', '.join(sorted(unexpected))}")
+    if output("git", "branch", "--list", branch):
+        fail(f"branch {branch} already exists; delete it or finish that release first")
+
     note(f"Committing on {branch}")
     run("git", "checkout", "-q", "-b", branch)
-    run("git", "add", "Cargo.toml", "Cargo.lock", "CHANGELOG.md")
+    run("git", "add", *sorted(changed))
     run("git", "commit", "-q", "-m", f"Release {tag}")
+    run("git", "show", "--stat", "--oneline", "HEAD")
 
-    if args.local:
-        note(f"Prepared {tag} on {branch} (--local: not pushed)")
+    if input(f"Push {branch} and open the pull request? [y/N] ").strip().lower() != "y":
+        note(f"Not pushed. The commit is on {branch}")
         return
-
-    note(f"Pushing {branch} and opening the pull request")
     run("git", "push", "-q", "-u", "origin", branch)
-    body = (
-        release_notes(version)
-        + f"\nAfter merging, run the Release workflow with version {version}.\n"
-    )
     run(
         "gh",
         "pr",
@@ -349,12 +385,9 @@ def prepare(args):
         branch,
         "--title",
         f"Release {tag}",
-        "--body-file",
-        "-",
-        stdin=body,
+        "--body",
+        "",
     )
-    if args.skip_api_delta:
-        warn(f"{tag} was prepared without its public-API delta report (--skip-api-delta)")
 
 
 def publish(args):
@@ -365,20 +398,20 @@ def publish(args):
     # The commit under HEAD is the release commit, on main, and what CI passed.
     current = manifest()["version"]
     if current != str(version):
-        die(f"Cargo.toml reads {current}, not {version}; publish from the merged release commit")
+        fail(f"Cargo.toml reads {current}, not {version}; publish from the merged release commit")
     if not worktree_clean():
-        die("working tree is dirty")
+        fail("working tree is dirty")
     run("git", "fetch", "-q", "origin", "main", "refs/tags/*:refs/tags/*")
     if subprocess.run(["git", "merge-base", "--is-ancestor", sha, "origin/main"]).returncode != 0:
-        die("HEAD is not on origin/main")
+        fail("HEAD is not on origin/main")
     if not version.is_rc and changelog_section(CHANGELOG.read_text(), str(version)) is None:
-        die(f"CHANGELOG.md has no [{version}] section; was the release prepared?")
+        fail(f"CHANGELOG.md has no [{version}] section; run `just release::prepare` first")
 
-    # The whole cycle's public-API delta, gated: a verdict asking for a larger
-    # bump than this release makes stops it.
+    # The whole cycle's public-API delta. A verdict that requires a larger bump
+    # than this release makes stops the release.
     previous_stable = latest([v for v in tagged_versions() if not v.is_rc])
     if previous_stable is None:
-        die("no vX.Y.Z tag found")
+        fail("no vX.Y.Z tag found")
     release_type = version.final.release_type(previous_stable)
     if args.skip_api_delta:
         warn("Skipping the public-API delta gate (--skip-api-delta)")
@@ -386,7 +419,7 @@ def publish(args):
         note(f"Public API delta since v{previous_stable}, for a {release_type} release")
         verdict = semver_verdict(previous_stable, release_type)
         if not bump_allows(release_type, required_bump(verdict)):
-            die(f"{verdict}, but {version} is a {release_type} release after {previous_stable}")
+            fail(f"{verdict}, but {version} is a {release_type} release after {previous_stable}")
         note(verdict)
 
     note("Packaging with cargo publish --dry-run")
@@ -414,11 +447,11 @@ def publish(args):
         note(f"Publishing {CRATE} {version} to crates.io")
         run("cargo", "publish")
 
-    # The tag, at this commit. A tag elsewhere is a conflict, not a retry.
+    # The tag, at this commit. A tag at another commit is an error.
     existing = output("git", "ls-remote", "--tags", "origin", f"refs/tags/{tag}^{{}}").split()
     if existing:
         if existing[0] != sha:
-            die(f"{tag} already exists at {existing[0]}, not at {sha}")
+            fail(f"{tag} already exists at {existing[0]}, not at {sha}")
         note(f"{tag} already exists")
     else:
         note(f"Tagging {tag}")
@@ -456,7 +489,7 @@ def publish(args):
 
     note(f"Done: {tag}")
     if args.skip_api_delta:
-        warn(f"{tag} went out without its public-API delta being checked (--skip-api-delta)")
+        warn(f"{tag} was published without the public-API delta check (--skip-api-delta)")
 
 
 def main():
@@ -466,18 +499,21 @@ def main():
     commands = parser.add_subparsers(dest="command", required=True)
 
     p = commands.add_parser(
-        "prepare", help="the release pull request: bump, changelog, package, branch, PR"
+        "prepare", help="set the version and the changelog in the working tree, and package"
     )
     p.add_argument("version", type=argument_version)
-    p.add_argument("--summary", help="the paragraph a final release's changelog section opens with")
+    p.add_argument("--summary", help="a paragraph to open a final release's changelog section")
     p.add_argument("--summary-file", type=Path, help="the same, read from a file")
     p.add_argument(
         "--skip-api-delta", action="store_true", help="prepare without the public-API delta report"
     )
-    p.add_argument(
-        "--local", action="store_true", help="stop after the commit: no push, no pull request"
-    )
     p.set_defaults(func=prepare)
+
+    p = commands.add_parser(
+        "pr", help="commit the prepared release on its branch, then push it and open the PR"
+    )
+    p.add_argument("version", type=argument_version)
+    p.set_defaults(func=pr)
 
     p = commands.add_parser(
         "publish", help="publish from main: crates.io, the tag, the GitHub release"
@@ -494,4 +530,4 @@ def main():
     try:
         args.func(args)
     except (subprocess.CalledProcessError, ValueError) as e:
-        die(f"{' '.join(e.cmd)} failed" if isinstance(e, subprocess.CalledProcessError) else e)
+        fail(f"{' '.join(e.cmd)} failed" if isinstance(e, subprocess.CalledProcessError) else e)

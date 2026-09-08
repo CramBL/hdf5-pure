@@ -108,6 +108,13 @@ Old summary.
     assert changelog_section(promoted, "Unreleased") == "\n"
 
 
+def test_promotion_without_a_summary_opens_with_the_entries():
+    promoted = promote_changelog(
+        CHANGELOG, v("0.45.0"), v("0.44.0"), None, "https://example", date(2026, 9, 7)
+    )
+    assert "## [0.45.0] - 2026-09-07\n\n### Fixed\n" in promoted
+
+
 def test_promotion_needs_the_section_and_the_link_line():
     with pytest.raises(ValueError):
         promote_changelog("# Changelog\n", v("0.45.0"), v("0.44.0"), "s", "u", date(2026, 9, 7))
