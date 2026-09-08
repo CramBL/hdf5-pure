@@ -9,6 +9,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 ### Fixed
 
 - Files HDF5 2.0 writes under its latest library bounds are read. Their compound and array datatypes were rejected with `FormatError::InvalidDatatypeVersion`.
+- `Group::named_datatype_references` reports the count a version 1 object header stores, where it reported 1 for every committed datatype in such a header.
 
 ### Changed
 
