@@ -6,7 +6,7 @@ use alloc::vec::Vec;
 use byteorder::{ByteOrder, LittleEndian};
 
 use crate::address::BaseAddress;
-use crate::bytes::{ensure_len, read_offset};
+use crate::bytes;
 use crate::convert::TryToUsize;
 use crate::error::FormatError;
 use crate::signature::HDF5_SIGNATURE;
@@ -140,7 +140,7 @@ impl Superblock {
     /// The signature must be present at the given offset.
     pub(crate) fn parse(data: &[u8], signature_offset: usize) -> Result<Superblock, FormatError> {
         let d = &data[signature_offset..];
-        ensure_len(d, 0, 9)?; // signature(8) + version(1)
+        bytes::ensure_len(d, 0, 9)?; // signature(8) + version(1)
 
         // Verify signature
         if d[..8] != HDF5_SIGNATURE {
@@ -161,7 +161,7 @@ impl Superblock {
         // + shared_hdr_ver(1) + offset_size(1) + length_size(1) + reserved(1)
         // + group_leaf_k(2) + group_internal_k(2) + consistency_flags(4)
         // = 24 bytes before variable-sized fields
-        ensure_len(d, 0, 24)?;
+        bytes::ensure_len(d, 0, 24)?;
 
         let offset_size = d[13];
         let length_size = d[14];
@@ -176,22 +176,22 @@ impl Superblock {
         let var_start = 24;
         let sym_entry_size = os + os + 4 + 4 + 16; // link_name_off, obj_hdr_addr, cache_type, reserved, scratch
         let total = var_start + 4 * os + sym_entry_size;
-        ensure_len(d, 0, total)?;
+        bytes::ensure_len(d, 0, total)?;
 
         let mut pos = var_start;
-        let base_address = BaseAddress::new(read_offset(d, pos, offset_size)?);
+        let base_address = BaseAddress::new(bytes::read_offset(d, pos, offset_size)?);
         pos += os;
-        let free_space_address = read_offset(d, pos, offset_size)?;
+        let free_space_address = bytes::read_offset(d, pos, offset_size)?;
         pos += os;
-        let eof_address = read_offset(d, pos, offset_size)?;
+        let eof_address = bytes::read_offset(d, pos, offset_size)?;
         pos += os;
-        let driver_info_address = read_offset(d, pos, offset_size)?;
+        let driver_info_address = bytes::read_offset(d, pos, offset_size)?;
         pos += os;
 
         // Root symbol table entry
-        let _link_name_offset = read_offset(d, pos, offset_size)?;
+        let _link_name_offset = bytes::read_offset(d, pos, offset_size)?;
         pos += os;
-        let object_header_addr = read_offset(d, pos, offset_size)?;
+        let object_header_addr = bytes::read_offset(d, pos, offset_size)?;
 
         Ok(Superblock {
             version: 0,
@@ -220,7 +220,7 @@ impl Superblock {
         // + shared_hdr_ver(1) + offset_size(1) + length_size(1) + reserved(1)
         // + group_leaf_k(2) + group_internal_k(2) + consistency_flags(4)
         // + indexed_storage_k(2) + reserved(2) = 28
-        ensure_len(d, 0, 28)?;
+        bytes::ensure_len(d, 0, 28)?;
 
         let offset_size = d[13];
         let length_size = d[14];
@@ -236,22 +236,22 @@ impl Superblock {
         let var_start = 28;
         let sym_entry_size = os + os + 4 + 4 + 16;
         let total = var_start + 4 * os + sym_entry_size;
-        ensure_len(d, 0, total)?;
+        bytes::ensure_len(d, 0, total)?;
 
         let mut pos = var_start;
-        let base_address = BaseAddress::new(read_offset(d, pos, offset_size)?);
+        let base_address = BaseAddress::new(bytes::read_offset(d, pos, offset_size)?);
         pos += os;
-        let free_space_address = read_offset(d, pos, offset_size)?;
+        let free_space_address = bytes::read_offset(d, pos, offset_size)?;
         pos += os;
-        let eof_address = read_offset(d, pos, offset_size)?;
+        let eof_address = bytes::read_offset(d, pos, offset_size)?;
         pos += os;
-        let driver_info_address = read_offset(d, pos, offset_size)?;
+        let driver_info_address = bytes::read_offset(d, pos, offset_size)?;
         pos += os;
 
         // Root symbol table entry
-        let _link_name_offset = read_offset(d, pos, offset_size)?;
+        let _link_name_offset = bytes::read_offset(d, pos, offset_size)?;
         pos += os;
-        let object_header_addr = read_offset(d, pos, offset_size)?;
+        let object_header_addr = bytes::read_offset(d, pos, offset_size)?;
 
         Ok(Superblock {
             version: 1,
@@ -273,7 +273,7 @@ impl Superblock {
 
     fn parse_v2v3(d: &[u8], version: u8) -> Result<Superblock, FormatError> {
         // sig(8) + version(1) + offset_size(1) + length_size(1) + consistency_flags(1) = 12
-        ensure_len(d, 0, 12)?;
+        bytes::ensure_len(d, 0, 12)?;
 
         let offset_size = d[9];
         let length_size = d[10];
@@ -283,16 +283,16 @@ impl Superblock {
         let os = offset_size as usize;
         // 4 addresses + checksum(4)
         let total = 12 + 4 * os + 4;
-        ensure_len(d, 0, total)?;
+        bytes::ensure_len(d, 0, total)?;
 
         let mut pos = 12;
-        let base_address = BaseAddress::new(read_offset(d, pos, offset_size)?);
+        let base_address = BaseAddress::new(bytes::read_offset(d, pos, offset_size)?);
         pos += os;
-        let superblock_extension_address = read_offset(d, pos, offset_size)?;
+        let superblock_extension_address = bytes::read_offset(d, pos, offset_size)?;
         pos += os;
-        let eof_address = read_offset(d, pos, offset_size)?;
+        let eof_address = bytes::read_offset(d, pos, offset_size)?;
         pos += os;
-        let root_group_address = read_offset(d, pos, offset_size)?;
+        let root_group_address = bytes::read_offset(d, pos, offset_size)?;
         pos += os;
 
         let stored_checksum = LittleEndian::read_u32(&d[pos..pos + 4]);
