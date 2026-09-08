@@ -194,6 +194,7 @@ pub(crate) mod superblock;
 pub(crate) mod symbol_table;
 pub(crate) mod type_builders;
 pub(crate) mod vl_data;
+pub(crate) mod width;
 #[cfg(feature = "zfp")]
 pub(crate) mod zfp;
 
