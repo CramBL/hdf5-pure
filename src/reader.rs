@@ -3684,14 +3684,19 @@ impl Group {
     ///
     /// This is HDF5's own object reference count (`H5Oget_info`'s `rc`), and what
     /// says whether unlinking the name would destroy the type or merely stop it
-    /// being reachable by that name. A header that stores no count has exactly
-    /// one reference, which is what the format means by omitting the message.
+    /// being reachable through the link. A version 1 object header keeps the count
+    /// in its prefix, a version 2 header in an Object Reference Count message,
+    /// and a version 2 header without that message has exactly one reference,
+    /// which is what the format means by omitting it.
     ///
     /// A name reaching anything but a committed datatype is
     /// [`Error::NotANamedDatatype`], as for
     /// [`named_datatype`](Self::named_datatype).
     pub fn named_datatype_references(&self, name: &str) -> Result<u32, Error> {
         let (_, hdr) = self.named_datatype_header(name)?;
+        if let Some(count) = hdr.reference_count {
+            return Ok(count);
+        }
         let Ok(msg) = find_message(&hdr, MessageType::ObjectReferenceCount) else {
             return Ok(1);
         };
