@@ -1,6 +1,6 @@
 [package]
 name = "hdf5-pure"
-version = "0.44.1-rc.1"
+version = "0.44.1"
 edition = "2024"
 # `std::fs::File` advisory locking (used by the write/edit/read open paths for
 # concurrent-writer detection, issue #73) stabilized in Rust 1.89.
