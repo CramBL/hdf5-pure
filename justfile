@@ -16,7 +16,7 @@ default:
 ci-essentials: fmt-check clippy doc test-full doctest-full
 
 # Everything CI runs, against the last 1.8 release only for interop.
-ci: ci-essentials check-release examples portability::default hygiene::default python::default prose::default api::default soundness::default (interop::lint-hdf5 "1.8.23") (interop::test-hdf5 "1.8.23") test doctest
+ci: ci-essentials docs-rs check-release examples portability::default hygiene::default python::default prose::default api::default soundness::default (interop::lint-hdf5 "1.8.23") (interop::test-hdf5 "1.8.23") test doctest
 
 test *ARGS:
     cargo nextest run --locked {{ ARGS }}
@@ -53,6 +53,10 @@ clippy *ARGS:
 doc *ARGS:
     RUSTDOCFLAGS="-D warnings" cargo doc --locked --no-deps --features "provenance zfp ndarray serde" {{ ARGS }}
     RUSTDOCFLAGS="-D warnings" cargo doc --locked --no-deps --document-private-items --features "provenance zfp ndarray serde" {{ ARGS }}
+
+# The published documentation as docs.rs builds it: nightly, the feature badges on.
+docs-rs *ARGS:
+    RUSTDOCFLAGS="--cfg docsrs -D warnings" cargo +nightly doc --locked --no-deps --features "provenance zfp ndarray serde num-complex" {{ ARGS }}
 
 check-release *ARGS:
     cargo check --locked --release --all-targets --features "serde ndarray" {{ ARGS }}

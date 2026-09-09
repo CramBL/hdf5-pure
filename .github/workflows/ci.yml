@@ -158,10 +158,42 @@ jobs:
       - name: Run every example
         run: just examples
 
+  # The published documentation as docs.rs builds it.
+  docs-rs:
+    name: docs.rs / ubuntu-latest
+    runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.run == 'true'
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install Rust nightly
+        uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # 2026-03-27
+        with:
+          toolchain: nightly
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: docs-rs
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Install tools
+        uses: taiki-e/install-action@920ab1831fbf4fb3ef75c8ead83556c918bb7290 # v2.79.8
+        with:
+          tool: just
+
+      - name: Rustdoc
+        run: just docs-rs
+
   ci-ci-guard:
     name: ci-ci-guard
     runs-on: ubuntu-latest
-    needs: [changes, test, lint]
+    needs: [changes, test, lint, docs-rs]
     permissions:
       contents: none
     if: always()
