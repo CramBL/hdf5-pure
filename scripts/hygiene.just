@@ -13,8 +13,8 @@ zizmor:
 typos:
     typos
 
-# Every link in the documentation and the doc comments, online. The Links
-# workflow runs it monthly.
+# Every link in the tracked Markdown files and Rust sources, online. The Links
+# workflow runs it weekly.
 lychee:
     git ls-files -- {{ lychee_paths }} | lychee --files-from -
 
