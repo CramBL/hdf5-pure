@@ -128,10 +128,6 @@ markdown_extensions:
   - pymdownx.tilde
 
 nav:
-  - Home: index.md
-  - Getting Started:
-      - Installation: getting-started/installation.md
-      - Quick Start: getting-started/quickstart.md
   - Guide:
       - Writing Files: guide/writing.md
       - Reading Files: guide/reading.md
@@ -154,8 +150,6 @@ nav:
       - Cargo Features: reference/features.md
       - File Properties (fapl/fcpl/dapl): reference/property-support.md
       - Limitations: reference/limitations.md
-      - Changelog: reference/changelog.md
       - API Reference (docs.rs): https://docs.rs/hdf5-pure
   - About:
       - Architecture: about/architecture.md
-      - Contributing: about/contributing.md

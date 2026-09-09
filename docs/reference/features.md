@@ -2,7 +2,7 @@
 
 `hdf5-pure` is split into Cargo features so you only compile the parts you use. The defaults cover the common case (filesystem I/O plus the high-level reader and writer), while the optional features add MATLAB `.mat` support, alternative compression backends, N-dimensional array I/O, and data provenance. This page is the complete reference for every feature, what it pulls in, and which guide page exercises it.
 
-For how to declare these in `Cargo.toml`, see [Installation](../getting-started/installation.md).
+For how to declare these in `Cargo.toml`, see the [Installation section of the README](https://github.com/CramBL/hdf5-pure#installation).
 
 ## At a glance
 

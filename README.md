@@ -35,6 +35,30 @@ Runnable, self-checking examples live in [`examples/`](examples). Run any with `
 
 The `matlab_fixtures` example (run with `--features serde`) writes `.mat` v7.3 files for verification in MATLAB/Octave.
 
+## Installation
+
+```console
+$ cargo add hdf5-pure
+```
+
+Or add it to `Cargo.toml` by hand:
+
+```toml
+[dependencies]
+hdf5-pure = "0.44"
+```
+
+That pulls the default feature set (`std`, `checksum`, and `deflate`), which covers file I/O, the high-level reader and writer API, and deflate compression. The [Cargo features](#cargo-features) table below lists the rest. The crate is edition 2024 and builds on stable Rust 1.89 or newer.
+
+For WebAssembly, keep the default features and add the target:
+
+```console
+$ rustup target add wasm32-unknown-unknown
+$ cargo build --target wasm32-unknown-unknown
+```
+
+A WASM build uses the in-memory API: `FileBuilder::finish` serializes the file into a `Vec<u8>` and `File::from_bytes` parses one. The path-based entry points (`File::open`, `FileBuilder::write`, `File::open_rw`, `File::open_swmr_writer`) compile for that target, and in the browser they have no filesystem to reach.
+
 ## Quick start
 
 ### Writing
@@ -646,7 +670,7 @@ For bare-metal `no_std`, disable default features (keep `checksum` for metadata 
 
 ```toml
 [dependencies]
-hdf5-pure = { version = "0.17", default-features = false, features = ["checksum"] }
+hdf5-pure = { version = "0.44", default-features = false, features = ["checksum"] }
 ```
 
 The high-level `File` / `FileBuilder` API is `std`-gated, so a `no_std` build exposes only the lower-level primitives. WebAssembly builds keep the default features, since `std` is available on `wasm32-unknown-unknown`.

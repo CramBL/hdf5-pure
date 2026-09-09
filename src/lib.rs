@@ -14,18 +14,26 @@
 //!     .with_f64_data(&[1.0, 2.0, 3.0])
 //!     .with_shape(&[3])
 //!     .set_attr("unit", AttrValue::String("m/s".into()));
+//! builder.set_attr("version", AttrValue::I64(2));
 //! let bytes = builder.finish().unwrap();
 //! ```
+//!
+//! [`FileBuilder::finish`] returns the file as bytes, which a WASM build or a network call takes
+//! as it is, and [`FileBuilder::write`] serializes the same file to a path.
 //!
 //! # Reading files
 //!
 //! ```rust,no_run
 //! use hdf5_pure::File;
 //!
-//! let file = File::from_bytes(std::fs::read("output.h5").unwrap()).unwrap();
+//! let file = File::open("output.h5").unwrap();
 //! let ds = file.dataset("data").unwrap();
 //! let values = ds.read_f64().unwrap();
+//! let unit = ds.attrs().unwrap().get("unit").cloned();
+//! let version = file.root().attrs().unwrap().get("version").cloned();
 //! ```
+//!
+//! [`File::from_bytes`] reads the same file from a complete in-memory image.
 //!
 //! # Generic over the element type
 //!
