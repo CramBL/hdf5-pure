@@ -683,6 +683,12 @@ Where `hdf5-pure` cannot yet handle something, it returns a clear typed error ra
 
 See [CONTRIBUTING.md](CONTRIBUTING.md). The [AI policy](AI_POLICY.md) and the [code style](CODE_STYLE.md) apply to every contribution.
 
+## History
+
+hdf5-pure was started by Stephen Berry, as a derived project of rustyhdf5 which was a ~25k LoC slop implementation of HDF5 with wild claims about performance over libhdf5. rustyhdf5 of course didn't support 98% of HDF5 features and was extremely buggy.
+
+Under Stephen, hdf5-pure rapidly developed into an ambitious and respectable project, which read and wrote most HDF5 files without issues. Stephen eventually transferred the project ownership to Marc König who'd been aiding development with numerous bug reports and general recommendations to improvements. Marc König is a long time HDF5 user and contributor to hdf5-rust (hdf5-metno) and hdf5-pure development continued under him.
+
 ## License
 
 Licensed under either of

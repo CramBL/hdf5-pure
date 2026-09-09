@@ -11,7 +11,7 @@
 
 ## Choosing a write path
 
-`File::open_rw` is the read-write open, and it picks how to hold the file's bytes from the file itself rather than making you pick a function. A latest-format file with no userblock is edited **bounded**: no whole-file copy is ever built, so memory stays at the [configured caches](streaming.md) plus whatever an edit is building. Anything else — a pre-v2 superblock, or a userblock — falls back to a whole-file **mirror**, `O(file size)`, which is what makes such a file editable at all. Those two are the whole fallback set: neither the file's size nor its [file-space strategy](file-space.md) enters into it, so a persisting `FsmAggr` file of any size is edited bounded. Either backing mutates the file the same way: new bytes are appended and a small, fixed set of locations is patched, never a rewrite on commit; see [write paths](../about/architecture.md#write-paths) for the mechanics.
+`File::open_rw` is the read-write open, and it picks how to hold the file's bytes from the file itself. A latest-format file with no userblock is edited **bounded**: no whole-file copy is ever built, so memory stays at the [configured caches](streaming.md) plus whatever an edit is building. Anything else - a pre-v2 superblock, or a userblock - falls back to a whole-file **mirror**, `O(file size)`, which is what makes such a file editable at all. Those two are the whole fallback set: neither the file's size nor its [file-space strategy](file-space.md) enters into it, so a persisting `FsmAggr` file of any size is edited bounded. Either backing mutates the file the same way: new bytes are appended and a small, fixed set of locations is patched, never a rewrite on commit. See the [crate documentation on docs.rs](https://docs.rs/hdf5-pure/latest/hdf5_pure/) for the mechanics.
 
 Ask a file which backing it got with `File::edit_backing()`, and demand one with `FileAccessProperties::with_memory_strategy`:
 
@@ -575,4 +575,4 @@ assert_eq!(backup, vec![22.5, 23.1, 21.8]);
 assert!(file.dataset("sensors/pressure").is_err());
 ```
 
-For background on the append-and-repoint design, see the [architecture overview](../about/architecture.md).
+For background on the append-and-repoint design, see the [crate documentation on docs.rs](https://docs.rs/hdf5-pure/latest/hdf5_pure/).
