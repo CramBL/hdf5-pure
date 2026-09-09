@@ -49,8 +49,10 @@ fmt-check:
 clippy *ARGS:
     cargo clippy --locked --features "serde ndarray" --all-targets {{ ARGS }} -- -D warnings
 
+# The published documentation, then the same with the private items contributors read.
 doc *ARGS:
     RUSTDOCFLAGS="-D warnings" cargo doc --locked --no-deps --features "provenance zfp ndarray serde" {{ ARGS }}
+    RUSTDOCFLAGS="-D warnings" cargo doc --locked --no-deps --document-private-items --features "provenance zfp ndarray serde" {{ ARGS }}
 
 check-release *ARGS:
     cargo check --locked --release --all-targets --features "serde ndarray" {{ ARGS }}
