@@ -1,73 +1,8 @@
-//! Random-access byte sources for the reader: the [`Source`] trait and its
-//! backends.
+//! Random-access byte sources for the reader: the [`Source`] trait and its backends.
 //!
-//! # Why this exists
-//!
-//! Today the reader holds the **entire file** in one `Vec<u8>` ([`crate::File`])
-//! and threads a `&[u8]` of that whole buffer through every parser, indexing it
-//! by absolute offset. That is simple and fast, but it has a hard ceiling: a
-//! file larger than the process address space cannot be loaded at all. On a
-//! 32-bit host (`usize` is 32 bits, ~4 GiB of usable address space) a 20 GiB
-//! HDF5 file produced on a 64-bit machine simply cannot be `read()` into a
-//! `Vec`, no matter how carefully offsets are converted (see [`crate::convert`],
-//! which makes the *narrowing* safe but cannot conjure address space). This is
-//! the core of issue #27.
-//!
-//! HDF5 metadata (superblock, object headers, B-trees, heaps) is tiny relative
-//! to the dataset payload, and the format is designed for random access by
-//! absolute file offset. So the durable fix is to read **on demand** from a
-//! seekable source instead of materializing the whole file: keep only a small
-//! working set (the metadata being parsed, plus the data chunks currently being
-//! decompressed) resident at any time.
-//!
-//! [`Source`] is that abstraction. It is deliberately minimal and
-//! `no_std`/`alloc`-friendly (the trait and the in-memory backends need no
-//! `std`), so it works on the same constrained targets the rest of the crate
-//! supports.
-//!
-//! # Backends
-//!
-//! - [`BytesSource`] — wraps any owned-or-borrowed byte buffer (`Vec<u8>`,
-//!   `&[u8]`, `Box<[u8]>`, `Arc<[u8]>`, …). This is the in-memory model the
-//!   current [`crate::File`] uses; it is always available, including on WASM and
-//!   `no_std`.
-//! - [`ReadSeekSource`] (`std` only) — wraps any `Read + Seek` (a
-//!   [`std::fs::File`], a `Cursor`, etc.) and reads bytes lazily via
-//!   `seek` + `read`. This is the backend that lets a 32-bit host read a file
-//!   far larger than its address space, because it never holds more than the
-//!   bytes a single `read_at` requests.
-//!
-//! A windowed `mmap` backend (an optional, `std`-plus-OS feature pulling a crate
-//! like `memmap2`) is a natural future addition behind this same trait. Note
-//! that a *whole-file* mmap does **not** solve the 32-bit problem — mapping
-//! 20 GiB still needs 20 GiB of virtual address space — so only a *windowed*
-//! mmap (map/unmap sub-ranges) or plain `Read + Seek` works there. It is left
-//! out for now rather than adding a dependency speculatively.
-//!
-//! # How the reader uses this (issue #27)
-//!
-//! The staged migration this module was built for has landed far enough to
-//! carry a streaming reader: the data readers fetch each chunk through
-//! [`Source::read_at`] rather than slicing a whole-file buffer, and
-//! [`crate::File::open_streaming`] constructs a file backed by a
-//! [`ReadSeekSource`], so opening one no longer implies buffering it.
-//!
-//! The metadata parsers are the part that is only half done. Each one that a
-//! streaming read reaches has a `*_from_source` twin that reads its bounded
-//! structure into a small buffer on demand, but the whole-file `&[u8]` form
-//! remains beside it for the buffered path — `ObjectHeader::parse` next to
-//! `parse_from_source`, and the same shape in `btree_v1` and `superblock`. The
-//! two are what the duplication survey counted as 47 twins; collapsing them is
-//! separate work from this module.
-//!
-//! One piece of the original plan arrived in a different shape. It called for a
-//! `Cursor<'a>` over a `&'a dyn Source` to absorb the `read_offset` /
-//! `read_length` idioms and collapse the duplicated per-module copies of them.
-//! What those copies had in common turned out to be the *decoding*, not the
-//! fetching: a parser reads its structure into a buffer first, and then every
-//! module was reading little-endian fields out of that buffer the same way. So
-//! the collapse is [`crate::bytes`], which operates on the buffer, and a cursor
-//! over the source itself was not needed to get it.
+//! [`BytesSource`] reads from a buffer that holds the whole file, and [`ReadSeekSource`] from a
+//! reader that seeks. [`MetadataCachingSource`] wraps either with a bounded cache of the metadata
+//! reads and passes a dataset's payload through to the inner source.
 
 #[cfg(not(feature = "std"))]
 use alloc::{vec, vec::Vec};

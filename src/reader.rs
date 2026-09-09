@@ -823,12 +823,7 @@ impl Drop for FileInner {
 }
 
 impl FileInner {
-    /// Open an HDF5 file from a filesystem path.
-    ///
-    /// Reads the file into memory once. To follow a file that a concurrent
-    /// single writer is appending to (SWMR), use [`File::open_swmr`] instead.
-    /// To read a file larger than memory (e.g. on a 32-bit host) without
-    /// buffering it, use [`File::open_streaming`].
+    /// Opens the HDF5 file at `path` and reads it into memory.
     pub fn open<P: AsRef<std::path::Path>>(path: P) -> Result<Self, Error> {
         Self::open_with_options(path, FileAccessProperties::new())
     }
@@ -1699,7 +1694,7 @@ impl FileInner {
         }
     }
 
-    /// Return the access properties used when opening this file.
+    /// Returns the access properties this file was opened with.
     pub const fn access_properties(&self) -> FileAccessProperties {
         self.access_properties
     }
@@ -2368,22 +2363,20 @@ impl std::fmt::Debug for File {
 }
 
 impl File {
-    /// Open an HDF5 file from a filesystem path.
+    /// Opens the HDF5 file at `path` and reads it into memory.
     ///
-    /// Reads the file into memory once. To follow a file that a concurrent
-    /// single writer is appending to (SWMR), use [`File::open_swmr`] instead.
-    /// To read a file larger than memory (e.g. on a 32-bit host) without
-    /// buffering it, use [`File::open_streaming`].
+    /// [`File::open_streaming`] reads a file larger than memory without buffering it, and
+    /// [`File::open_swmr`] follows a file that a concurrent writer is appending to.
     ///
-    /// A file whose superblock marks it as held by a writer is refused with
-    /// [`Error::FileMarkedInUse`](crate::Error::FileMarkedInUse) — the check
-    /// `H5Fopen` makes of the same byte. That means a live writer or one that
-    /// exited without closing the file; clear a stale flag with
-    /// [`clear_swmr_flag`](Self::clear_swmr_flag), and follow a live SWMR writer
-    /// with [`open_swmr`](Self::open_swmr). [`from_bytes`](Self::from_bytes) does
-    /// not check, since its caller already holds the bytes — which is also the
-    /// way to read a flagged file on a read-only mount, where clearing the flag
-    /// would need write access.
+    /// # Errors
+    ///
+    /// Returns [`Error::FileMarkedInUse`](crate::Error::FileMarkedInUse) if the status flags mark
+    /// the file as open for writing. `H5Fopen` makes the same check. The flag marks a live writer
+    /// or one that exited without closing the file.
+    /// [`clear_swmr_flag`](Self::clear_swmr_flag) clears a stale flag,
+    /// [`open_swmr`](Self::open_swmr) follows a live SWMR writer, and
+    /// [`from_bytes`](Self::from_bytes) reads the bytes its caller already holds without the check,
+    /// which is the way to read a flagged file on a read-only mount.
     pub fn open<P: AsRef<std::path::Path>>(path: P) -> Result<Self, Error> {
         Ok(File {
             inner: Arc::new(FileInner::open(path)?),
@@ -3111,7 +3104,9 @@ impl File {
         self.inner.as_bytes()
     }
 
-    /// Return the access properties used when opening this file.
+    /// Returns the access properties this file was opened with.
+    ///
+    /// An open without options, such as [`File::open`], has [`FileAccessProperties::new`].
     pub fn access_properties(&self) -> FileAccessProperties {
         self.inner.access_properties()
     }

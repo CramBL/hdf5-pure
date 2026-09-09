@@ -12,18 +12,23 @@
 //! The 1, 2, 4 or 8 byte width that an object header or a link message encodes in a two-bit flag
 //! field is a different value, which [`crate::bytes::read_uint_width`] reads.
 //!
-//! See "Disk Format: Level 0A - Format Signature and Superblock" in the [HDF5 file format
-//! specification][spec].
+//! Both superblock fields are defined in "Format Signature and Superblock" of the [format
+//! specification, version 4.0][spec].
 //!
-//! [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t3.html
+//! [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsec_fmt4_boot_super
 
 use crate::error::FormatError;
 
-/// The number of bytes a file address occupies, from the superblock's "Size of Offsets" field.
+/// The width of a file address in bytes, the superblock's "Size of Offsets" field.
 ///
-/// Every address in the file is this wide, from the root group address in the superblock to a
-/// chunk address in a B-tree. `H5Pset_sizes` sets the width on a file creation property list, and
-/// `H5F_SIZEOF_ADDR` is the C library's name for the value it reads.
+/// Every file address has this width:
+///
+/// - the addresses in the superblock, such as the root group address
+/// - the addresses in object header messages
+/// - the child and sibling addresses in B-tree nodes
+/// - the chunk addresses in a chunk index
+///
+/// The C library calls this value `H5F_SIZEOF_ADDR` and sets it with `H5Pset_sizes`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum OffsetWidth {
     Two,
@@ -51,8 +56,7 @@ impl TryFrom<u8> for OffsetWidth {
     ///
     /// # Errors
     ///
-    /// A byte outside 2, 4 and 8 is rejected with [`FormatError::InvalidOffsetSize`], which
-    /// reports that byte.
+    /// Returns [`FormatError::InvalidOffsetSize`] if `size` is not 2, 4, or 8.
     fn try_from(size: u8) -> Result<Self, FormatError> {
         match size {
             2 => Ok(Self::Two),
@@ -63,11 +67,16 @@ impl TryFrom<u8> for OffsetWidth {
     }
 }
 
-/// The number of bytes a length occupies, from the superblock's "Size of Lengths" field.
+/// The width of a length in bytes, the superblock's "Size of Lengths" field.
 ///
-/// A length is the size of an object in bytes, such as a local heap's data segment or a fractal
-/// heap's managed space. `H5Pset_sizes` sets the width on a file creation property list, and
-/// `H5F_SIZEOF_SIZE` is the C library's name for the value it reads.
+/// Every length has this width:
+///
+/// - the dimension sizes in a dataspace message
+/// - the data segment size of a local heap
+/// - the collection size of a global heap
+/// - the space and object counts in a fractal heap header
+///
+/// The C library calls this value `H5F_SIZEOF_SIZE` and sets it with `H5Pset_sizes`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum LengthWidth {
     Two,
@@ -95,8 +104,7 @@ impl TryFrom<u8> for LengthWidth {
     ///
     /// # Errors
     ///
-    /// A byte outside 2, 4 and 8 is rejected with [`FormatError::InvalidLengthSize`], which
-    /// reports that byte.
+    /// Returns [`FormatError::InvalidLengthSize`] if `size` is not 2, 4, or 8.
     fn try_from(size: u8) -> Result<Self, FormatError> {
         match size {
             2 => Ok(Self::Two),

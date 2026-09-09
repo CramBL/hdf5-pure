@@ -36,6 +36,7 @@ The same rules apply here as for bug reports and feature requests. Plus:
 - A pull request does one thing. Split a larger change into several.
 - A pull request that changes what a user sees carries a changelog entry under `[Unreleased]` in `CHANGELOG.md`. [RELEASES.md](RELEASES.md) has the rules for the entry.
 - The code follows [CODE_STYLE.md](CODE_STYLE.md).
+- The comments and the documentation follow [DOC_STYLE.md](DOC_STYLE.md).
 - Pull requests to update specific dependencies are welcome.
 
 Before pushing, run the checks CI runs on every pull request:
@@ -99,6 +100,8 @@ The fixtures under `tests/data/` are grouped by the library that wrote them: `c`
 ### Hygiene and prose
 
 `just hygiene::default` checks for unused dependencies, lints the workflows and spell-checks every tracked file. A word the format uses that the spell checker does not know goes in `typos.toml`. `just prose::added` lints the prose of every added line with [Vale](https://vale.sh) and the rules under `.vale/styles/`.
+
+`just hygiene::lychee` requests every link the tracked Markdown files and Rust sources cite, and the Links workflow runs it monthly. `just hygiene::lychee-added` requests only the links on the lines added since a base revision.
 
 ## Documentation
 

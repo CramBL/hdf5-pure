@@ -23,7 +23,7 @@ The `#[cfg(test)] mod tests {}` module goes on the very bottom, if present. Modu
 
 Top-down ordering decides where an item sits in a module. The [HDF5 file format specification][spec] decides the order of everything that mirrors it: the fields of a struct that holds an on-disk structure are declared in the order the specification lists them, a parser reads them in that order, a writer emits them in that order, and an enum of message types, datatype classes or filter identifiers lists its variants in the specification's order. So a module that implements a specification section reads top-down from the public type to its helpers, and the public type reads like the specification's table.
 
-[spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t3.html
+[spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html
 
 ### Ordering for a given type
 
@@ -220,17 +220,9 @@ A rename keeps the old name for one minor release as a deprecated type alias (`#
 
 ## Comments
 
-Crate items should have descriptive doc comments on them. These are required for any publicly exposed items.
-
-A doc comment on an item that implements part of the [specification][spec] links the section and references the libhdf5 function or property it corresponds to (`H5Pset_attr_phase_change`, `H5Ocopy`) where there is one. A private item that encodes a detail of the format that is not obvious from the specification, such as a version-dependent field width or a quirk libhdf5 writes, has a comment (not necessarily a doc comment) that cites where the detail comes from.
+[DOC_STYLE.md](DOC_STYLE.md) has the rules for doc comments, for the comments beside the code, and for citing the specification and libhdf5.
 
 All comments (doc comment or not) should be wrapped to 100 columns.
-
-In addition to the conventions above, all doc comments should conform to [Appendix A of Rust RFC 1574][1574-A].
-
-Comments and doc comments are prose, and the prose linter reads every added line of them. Say what the code does and why, without hedging or metaphor. Rules the linter applies that RFC 1574 does not are in `.vale/styles/Hdf5Pure/`.
-
-[1574-A]: https://rust-lang.github.io/rfcs/1574-more-api-documentation-conventions.html#appendix-a-full-conventions-text
 
 ## Tests
 

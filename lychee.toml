@@ -6,6 +6,11 @@ max_retries = 5
 retry_wait_time = 2
 accept = ["200..=299", "429"]
 
+# CONTRIBUTING.md links the local preview of the documentation site, and the
+# installation guide repeats the address in a shell block, which the
+# added-lines check reads as plain text. Neither run requests it.
+exclude_all_private = true
+
 exclude = [
     # Blocks every non-browser client with 403.
     "^https://www\\.mathworks\\.com/",

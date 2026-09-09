@@ -495,9 +495,9 @@ mod fill_pattern_tests {
     /// value at all, and it is read from a different field in each version.
     #[test]
     fn the_write_time_is_read_from_every_message_version() {
-        // Version 3: bits 2-3 of the flags byte. 0x26 is Late alloc + Never +
-        // Defined, which is what the C library writes for `H5D_FILL_TIME_NEVER`
-        // with a value set; 0x2a is the same but IfSet.
+        // Version 3: bits 2-3 of the flags byte. 0x26 is Late alloc, Never, and Defined,
+        // and 0x2a the same with IfSet. The C library writes Defined for
+        // `H5D_FILL_TIME_NEVER` whenever a fill value is set (`H5Ofill.c`, HDF5 2.1.0).
         let v3 = |flags: u8| vec![3u8, flags, 4, 0, 0, 0, 7, 0, 0, 0];
         assert!(!fill_value_is_written(MessageType::FillValue, &v3(0x26)).unwrap());
         assert!(fill_value_is_written(MessageType::FillValue, &v3(0x2a)).unwrap());
