@@ -101,7 +101,7 @@ The fixtures under `tests/data/` are grouped by the library that wrote them: `c`
 
 `just hygiene::default` checks for unused dependencies, lints the workflows and spell-checks every tracked file. A word the format uses that the spell checker does not know goes in `typos.toml`. `just prose::added` lints the prose of every added line with [Vale](https://vale.sh) and the rules under `.vale/styles/`.
 
-`just hygiene::lychee` requests every link the tracked Markdown files and Rust sources cite, and the Links workflow runs it monthly. `just hygiene::lychee-added` requests only the links on the lines added since a base revision.
+`just hygiene::lychee` requests every link the tracked Markdown files and Rust sources cite, and the Links workflow runs it monthly. `just hygiene::lychee-added` requests only the links on the lines added since a base revision, and the Links job of the Hygiene workflow runs it on each pull request against its base and on a push to main against the commit before it.
 
 ## Documentation
 
