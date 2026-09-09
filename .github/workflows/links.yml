@@ -1,9 +1,12 @@
+# Every link in the tracked Markdown files and Rust sources, weekly. The Links
+# job of hygiene.yml gates the links a change adds, and this sweep reports the
+# ones that break after a merge.
 name: Links
 
 on:
   workflow_dispatch: {}
   schedule:
-    - cron: "0 4 1 * *"
+    - cron: "0 4 * * 1"
 
 permissions:
   contents: read
