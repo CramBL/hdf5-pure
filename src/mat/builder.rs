@@ -12,7 +12,9 @@
 //! Nested structs and cells use closures so the borrow checker can keep the
 //! call tree straight:
 //!
-//! ```ignore
+//! ```
+//! use hdf5_pure::mat::{MatBuilder, Options};
+//!
 //! let mut mb = MatBuilder::new(Options::default());
 //! mb.struct_("payload", |s| {
 //!     s.write_scalar_f64("answer", 42.0)?;
@@ -24,6 +26,7 @@
 //!     Ok(())
 //! })?;
 //! let bytes = mb.finish()?;
+//! # Ok::<(), hdf5_pure::mat::MatError>(())
 //! ```
 //!
 //! The builder allocates exactly one `#refs#/ref_{id:016x}` per cell element
