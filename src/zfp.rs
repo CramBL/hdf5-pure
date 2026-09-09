@@ -353,7 +353,7 @@ impl_pad_strided!(pad_strided_i64, i64, 0i64);
 /// The reference defines:
 ///
 ///   emax = max frexp-exponent across the block (0.5 ≤ |m| < 1 convention)
-///   iblock[i] = (Int)(fblock[i] * 2^(30 - emax))
+///   `iblock[i] = (Int)(fblock[i] * 2^(30 - emax))`
 ///
 /// Using the IEEE biased exponent `b` of the largest-magnitude value,
 /// frexp's exponent is `b - (EBIAS - 1) = b - 126`, so the scale becomes

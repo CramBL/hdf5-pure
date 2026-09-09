@@ -69,8 +69,7 @@ use crate::reader::Dataset;
 /// dataset that has a staged edit on it or an ancestor, so staging one while an
 /// appender is live would turn accepted data into data lost silently at drop
 /// time. The session therefore refuses that edit at the call that makes it,
-/// with [`Error::EditUnsupported`](crate::Error::EditUnsupported), for as long
-/// as the appender is alive:
+/// with [`Error::EditUnsupported`], for as long as the appender is alive:
 ///
 /// - an edit naming this dataset or an ancestor —
 ///   [`Group::create_dataset`](crate::Group::create_dataset),
@@ -96,7 +95,7 @@ use crate::reader::Dataset;
 /// chunk length — a log resumed across sessions, typically — costs nothing
 /// extra: the in-place path re-encodes that trailing chunk into a fresh
 /// allocation and repoints its one index element, and the bytes it vacates are
-/// reclaimed by [`repack`](crate::repack). The appender still chooses its write
+/// reclaimed by [`repack`](crate::repack()). The appender still chooses its write
 /// prefix so the on-disk length lands back on a chunk boundary, which keeps the
 /// re-encoding to the first write rather than one per call.
 ///

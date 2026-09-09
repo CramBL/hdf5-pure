@@ -163,7 +163,7 @@ fn order_code(order: &DatatypeByteOrder) -> Option<u32> {
 /// defined one, of zero. This crate's writer cannot express an undefined fill
 /// value at all — `DatasetBuilder`'s fill is "a value or the library default" —
 /// so [`Defined`](Self::Defined) is what it writes and the other variant exists
-/// for one caller: [`repack`](crate::repack), reproducing a source file whose
+/// for one caller: [`repack`](crate::repack()), reproducing a source file whose
 /// filter recorded `FILL_UNDEFINED`. The day the writer models an undefined
 /// fill value, this collapses back into the fill value itself.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -289,7 +289,7 @@ pub fn build_cd_values(
 
 /// Recover the [`ScaleOffset`] mode a parsed filter encodes from its
 /// `cd_values`, along with whether it records a fill value, so a tool like
-/// [`repack`](crate::repack) can re-apply both.
+/// [`repack`](crate::repack()) can re-apply both.
 ///
 /// Returns `None` if the parameter array is too short, names a scale type this
 /// crate never writes (the reference library's float *E*-scale), or records

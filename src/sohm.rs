@@ -30,6 +30,8 @@
 //! and `H5SM__message_decode` in the reference C library, which are the authority
 //! on the field order — the published format description lists an index header's
 //! version byte after its index-type byte, and the library writes it before.
+//!
+//! [`SharedLocation::SohmHeap`]: crate::shared_message::SharedLocation::SohmHeap
 
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;

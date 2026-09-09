@@ -480,7 +480,7 @@ pub enum FormatError {
     /// it builds; callers that can name the offending object (for example an
     /// attribute) report a more specific error first. The in-place editor
     /// encodes headers separately and refuses the same condition with
-    /// [`Error::EditUnsupported`](crate::Error::EditUnsupported). The fields
+    /// [`Error::EditUnsupported`]. The fields
     /// carry the message type code and the message's serialized size in bytes;
     /// the limit is [`OBJECT_HEADER_MESSAGE_MAX`].
     ObjectHeaderMessageTooLarge {
@@ -1151,8 +1151,7 @@ pub enum Error {
     /// The object at the given path is not a dataset.
     NotADataset(String),
     /// The object at the given path is not a group. A name that resolves to
-    /// nothing at all is
-    /// [`FormatError::PathNotFound`](crate::FormatError::PathNotFound) instead.
+    /// nothing at all is [`FormatError::PathNotFound`] instead.
     ///
     /// The path may be an *intermediate* component of the one that was asked
     /// for: resolving `a/b/c` opens `a` and then `a/b` to look inside them, so
@@ -1161,8 +1160,8 @@ pub enum Error {
     /// than a path, reports that name.
     NotAGroup(String),
     /// The child of the given name is not a committed (`H5Tcommit`) datatype. A
-    /// name that resolves to nothing at all is
-    /// [`FormatError::PathNotFound`](crate::FormatError::PathNotFound) instead.
+    /// name that resolves to nothing at all is [`FormatError::PathNotFound`]
+    /// instead.
     NotANamedDatatype(String),
     /// A required header message was not found.
     MissingMessage(crate::message_type::MessageType),
@@ -1277,7 +1276,7 @@ pub enum Error {
     /// emit yet. The payload is a human-readable reason.
     EditUnsupported(&'static str),
     /// An object in the source file cannot be reproduced faithfully by
-    /// [`repack`](crate::repack), so the repack was refused rather than write a
+    /// [`repack`](crate::repack()), so the repack was rejected to avoid writing a
     /// silently degraded file — for example a variable-length, time, bitfield,
     /// or opaque datatype, a virtual/external data layout, an unsupported
     /// filter, or an object reference. The payload names the object and reason.

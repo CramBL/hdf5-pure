@@ -1365,7 +1365,7 @@ pub(crate) struct WriteEngine {
     /// [`FileAccessProperties::with_sync_policy`]. Consulted by
     /// [`barrier`](Self::barrier) and [`barrier_data`](Self::barrier_data) —
     /// every durability point the write paths define — and by nothing else, so
-    /// [`sync_now`](Self::sync_now) can serve an explicit
+    /// [`force_sync`](Self::force_sync) can serve an explicit
     /// [`File::sync`](crate::File::sync) whatever it says.
     ///
     /// [`FileAccessProperties::with_sync_policy`]: crate::FileAccessProperties::with_sync_policy
@@ -1427,9 +1427,9 @@ struct FreeSnapshot {
 /// [`File::edit_backing`](crate::File::edit_backing) returns an [`EditBacking`],
 /// which cannot express [`Auto`](Self::Auto).
 ///
-/// Sealed: unlike [`FileLocking`] or [`FileSpaceStrategy`](crate::FileSpaceStrategy),
-/// whose variant sets mirror a closed C-library enum, this is a policy this crate
-/// invented, so a fourth strategy must not be a breaking change.
+/// Sealed: unlike [`FileLocking`] or [`FileSpaceStrategy`], whose variant sets
+/// mirror a closed C-library enum, this is a policy this crate invented, so a
+/// fourth strategy must not be a breaking change.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum MemoryStrategy {
@@ -1445,7 +1445,7 @@ pub enum MemoryStrategy {
     /// Two files reach that fallback, and no others: one with a pre-v2
     /// (non-latest-format) superblock, and one with a userblock (a non-zero base
     /// address). Every other file a read-write open accepts is edited bounded,
-    /// whatever its [`FileSpaceStrategy`](crate::FileSpaceStrategy), whether or
+    /// whatever its [`FileSpaceStrategy`], whether or
     /// not it persists its free space, and however large it is. A paged file with
     /// no persisted free space is refused by *both* backings rather than
     /// mirrored, so it is not a third case. The list being exhaustive is what
@@ -1514,7 +1514,7 @@ impl From<EditBacking> for MemoryStrategy {
 /// [`Always`](Self::Always), the default here, is the stronger one.
 ///
 /// The whole-file writer ([`FileBuilder`](crate::FileBuilder)) and
-/// [`repack`](crate::repack) are outside this: they never `fsync` under either
+/// [`repack`](crate::repack()) are outside this: they never `fsync` under either
 /// policy, since each writes a file and hands it over rather than holding an
 /// editing session.
 ///
@@ -1761,7 +1761,7 @@ impl From<PageType> for FreeClass {
 /// The free lists are seeded only when the file *persists* its free space. A paged
 /// non-persisting file has no on-disk record of which pages hold metadata and
 /// which hold raw data, so there is nothing to seed and no way to stay segregated;
-/// [`commit`](EditSession::commit) refuses it outright, exactly as the bounded
+/// [`commit`](WriteEngine::commit) rejects it outright, exactly as the bounded
 /// backend does.
 struct PagedEdit {
     page_size: u64,
@@ -5134,7 +5134,7 @@ impl WriteEngine {
     /// Stage a new (empty) group at `path`, created on the next
     /// [`commit`](Self::commit). The parent must already exist or be created in
     /// the same session; populate the group with datasets via
-    /// [`create_dataset`](Self::create_dataset) using a path under it.
+    /// [`stage_created_dataset`](Self::stage_created_dataset) using a path under it.
     pub fn create_group(&mut self, path: &str) -> Result<(), Error> {
         let comps = split_path(path);
         self.refuse_if_claimed(&comps)?;
@@ -8088,6 +8088,8 @@ impl WriteEngine {
     /// existing links. A version 2 header is rebuilt from its own message bytes
     /// (collapsing continuation chunks, preserving every message); a version 1
     /// symbol-table group is converted to v2 via [`reconstruct_v1_group`].
+    ///
+    /// [`reconstruct_v1_group`]: Self::reconstruct_v1_group
     fn inspect_group(&self, addr: usize) -> Result<GroupInfo, Error> {
         let sig = self.image().read_metadata_at(addr as u64, 4);
         if sig.as_deref() != Ok(&b"OHDR"[..]) {
@@ -9528,14 +9530,17 @@ impl WriteEngine {
     /// blob for it, place it, and splice the matching Attribute Info message onto
     /// `region`. A no-op for an empty set.
     ///
-    /// The blob produced by [`file_writer::DenseAttrPlan::build`] is fully
+    /// The blob produced by [`DenseAttrPlan::build`] is fully
     /// relocatable: every address it embeds is `base + fixed offset`, and its
     /// length is the same for every base, so it can go into a freed metadata
     /// region as readily as at end-of-file — the base it is built for is whichever
     /// address it gets. The reservation comes from the plan the blob is then
     /// built from, so sizing it costs no bytes. The freshly built heap is always
     /// same-file, so it never aliases the source heap even for an in-file copy.
-    /// The caller has already validated [`file_writer::dense_attrs_check`].
+    /// The caller has already validated [`dense_attrs_check`].
+    ///
+    /// [`DenseAttrPlan::build`]: crate::file_writer::DenseAttrPlan::build
+    /// [`dense_attrs_check`]: crate::file_writer::dense_attrs_check
     fn append_dense_attrs(
         &mut self,
         region: &mut OhRegion,
@@ -10389,6 +10394,8 @@ impl WriteEngine {
     /// error can no longer leave earlier-processed groups' real writes
     /// orphaned in the file (the failure surfaces here instead, before the
     /// apply loop's first `place`/`write_at`).
+    ///
+    /// [`resolve_reference_target`]: Self::resolve_reference_target
     fn preflight_reference_targets(
         keys: &[PathKey],
         flat: &BTreeMap<&PathKey, Vec<&FlatDataset>>,
@@ -10525,7 +10532,7 @@ impl WriteEngine {
     ///
     /// Walks the whole link graph from the root, following hard links through
     /// groups of any on-disk format (v0/v1 symbol-table, v2 compact, v2 dense)
-    /// via [`resolve_group_entries`], tallying each hard-link edge. Datasets and
+    /// via [`resolve_group_entries_from_source`], tallying each hard-link edge. Datasets and
     /// other leaves contribute no edges. Returns `None` — so the caller reclaims
     /// nothing for the deletions, a safe leak — if the graph cannot be walked in
     /// full: an unparseable header, a group whose links cannot be enumerated, or
@@ -10893,7 +10900,7 @@ impl WriteEngine {
     /// its chunk data), for reclaiming the old index after a relocating append
     /// ([`MovingWrite::AppendedChunks`]) that keeps the chunk data in place. Mirror
     /// of [`chunked_storage_spans`](Self::chunked_storage_spans) but delegating to
-    /// [`chunk_index_spans_buffered`], which enumerates only the EA header/index/
+    /// [`chunk_index_spans_from_source`], which enumerates only the EA header/index/
     /// data/super blocks and never a chunk-data address, so the shared kept chunk
     /// data is never freed. Base-aware and validated disjoint/in-bounds; returns
     /// `None` (leave unreclaimed) on any error or violation.
@@ -11147,7 +11154,7 @@ impl InvalidatedAddresses {
     ///
     /// The null (`0`) and undefined ([`UNDEF`]) references name no object at all,
     /// so neither is screened: the same two values
-    /// [`crate::repack`](crate::repack) carries through verbatim rather than
+    /// [`crate::repack()`] copies through verbatim without
     /// resolving, and the two [`crate::reader`] refuses to dereference.
     fn refusal(&self, stored: u64) -> Option<&'static str> {
         if stored == 0 || stored == UNDEF {
@@ -11512,8 +11519,8 @@ impl EditStore<'_> {
     /// file's tail holds metadata. A plain append on the common non-paged file.
     ///
     /// Raw is the only page type this adapter allocates: see
-    /// [`Store::alloc_raw`](crate::chunk_index_inplace::Store::alloc_raw) for why
-    /// an extensible-array index block belongs in a raw page here.
+    /// [`Store::alloc_raw`] for why an extensible-array index block belongs in a
+    /// raw page here.
     fn append_into_raw_page(&mut self, bytes: &[u8]) -> Result<u64, Error> {
         if let Some(pg) = self.paged.as_deref_mut() {
             pg.begin(self.image, PageType::Raw)?;
@@ -11602,10 +11609,10 @@ fn claims_conflict(a: Option<&[String]>, b: Option<&[String]>) -> bool {
 
 /// Re-tag a refusal from the shared append engine (`AppendUnsupported`) as the
 /// fast-path [`Error::AppendInPlaceUnsupported`], so a caller can catch it and fall
-/// back to the staged [`append_dataset`](WriteEngine::append_dataset) — which
-/// handles the filtered partial-trailing-chunk case, index-geometry limits, and
-/// platform-width limits that the engine reports this way. Genuine I/O and format
-/// errors pass through unchanged.
+/// back to the staged [`stage_dataset_append`](WriteEngine::stage_dataset_append).
+/// That path covers the filtered partial-trailing-chunk case, index-geometry
+/// limits, and platform-width limits that the engine reports this way. Genuine
+/// I/O and format errors pass through unchanged.
 pub(crate) fn as_inplace_error(e: Error) -> Error {
     match e {
         Error::AppendUnsupported(m) => Error::AppendInPlaceUnsupported(m),
@@ -11816,7 +11823,7 @@ fn index_touches_page_zero(index: &[(u64, u64)], page_size: u64) -> bool {
 }
 
 /// Tag object-header chunk spans as file metadata. Every span
-/// [`oh_chunk_spans`](EditSession::oh_chunk_spans) returns is part of an object
+/// [`oh_chunk_spans`](WriteEngine::oh_chunk_spans) returns is part of an object
 /// header, so the page type is the same for all of them.
 fn meta_spans(spans: Vec<(u64, u64)>) -> impl Iterator<Item = (u64, u64, FreeClass)> {
     spans
@@ -12150,7 +12157,7 @@ pub(crate) fn pipeline_reencodable(pipeline: &FilterPipeline) -> bool {
 /// re-encoding it against a *different* set of neighbours in the same block
 /// re-quantizes the values that were already there.
 ///
-/// This is the line [`repack`](crate::repack)'s `check_pipeline` already draws
+/// This is the line [`repack`](crate::repack())'s `check_pipeline` already draws
 /// for its two re-encoding paths, stated once more here because the append
 /// engine reaches it by a different route.
 pub(crate) fn pipeline_lossless(pipeline: &FilterPipeline) -> bool {
@@ -12183,9 +12190,9 @@ pub(crate) const LOSSY_TAIL_REFUSAL: &str = "this dataset's filter pipeline is l
 /// (datatype, dataspace, fill value, filter pipeline, attributes, attribute info)
 /// byte-for-byte. The replacement may differ in length from the original — a
 /// chunked rebuild can change the index type and thus the layout message size — so
-/// the record is rebuilt via [`region_message`] rather than patched in place. The
-/// chunked overwrite and copy paths use this to relocate a dataset's chunk storage
-/// while preserving the rest of its header exactly.
+/// the record is rebuilt via [`OhRecordLayout::record`]. The chunked overwrite
+/// and copy paths use this to relocate a dataset's chunk storage while preserving
+/// the rest of its header exactly.
 fn replace_layout_message(region: &OhRegion, new_layout_body: &[u8]) -> Result<OhRegion, Error> {
     let mut out = Vec::with_capacity(region.len());
     let mut p = 0;
@@ -12217,7 +12224,7 @@ fn replace_layout_message(region: &OhRegion, new_layout_body: &[u8]) -> Result<O
 /// byte-for-byte. Used by the append path to grow a dataset's axis-0 dimension.
 /// The replacement may differ in length from the original (a v1 on-disk
 /// dataspace is normalized to v2 in the rebuilt header), so the record is rebuilt
-/// via [`region_message`] rather than patched in place.
+/// via [`OhRecordLayout::record`].
 fn replace_dataspace_message(
     region: &OhRegion,
     new_dataspace_body: &[u8],
@@ -13082,7 +13089,7 @@ fn remove_link_from_region(region: &OhRegion, name: &str) -> Result<OhRegion, Er
 /// instead collected into the returned `pending_vl_attrs` — its placeholder
 /// heap address is only patched, and the message appended to the object's
 /// header, by the apply loop once its global heap collection's real address
-/// is known (see [`WriteEngine::place_vl_collection`]). A later op for the
+/// is known (see [`WriteEngine::place_vl_collections`]). A later op for the
 /// same name (another `Set`, fixed-size or not, or a `Remove`) replaces or
 /// cancels an earlier still-pending variable-length entry, keeping the net
 /// effect the same regardless of op order within one commit.
@@ -14075,7 +14082,7 @@ fn read_oh_chunk0<S: Source + ?Sized>(src: &S, addr: u64) -> Result<OhChunk, Err
 /// Read every chunk of the version 2 object header at `addr`, chunk 0 first,
 /// following each `Continuation` message to its `OCHK` block.
 ///
-/// This is the one traversal of a header's chunk chain: [`gather_oh_messages`]
+/// This is the one traversal of a header's chunk chain: [`WriteEngine::gather_oh_messages`]
 /// collects the messages out of the result and
 /// [`oh_chunk_spans`](WriteEngine::oh_chunk_spans) collects the extents, so the
 /// two cannot disagree about what a header occupies.
@@ -14608,8 +14615,8 @@ pub(crate) const MSG_FLAG_SHARED: u8 = 0x02;
 /// [`read_copy_subtree`](WriteEngine::read_copy_subtree) copies that encoding as
 /// the storage it does not have. The layout alone cannot tell the two apart, so
 /// naming this message is the only thing standing between a dataset that holds
-/// data and a copy carrying its schema and none of it; [`crate::repack`] refuses
-/// the same shape for the same reason.
+/// data and a copy carrying its schema and none of it. [`crate::repack()`]
+/// rejects the same shape for the same reason.
 ///
 /// Applied on both copy paths rather than only the cross-file one: an in-file
 /// copy would reproduce the header without its data just as readily. It is also
@@ -14871,7 +14878,7 @@ fn screen_resolved_references(
 /// One form cannot be read at all and so is refused by *datatype*, and only when
 /// it holds an object reference: a **chunked** dataset, whose addresses sit
 /// inside chunks this path carries compressed and never decodes — the same
-/// obstacle that makes [`crate::repack`] refuse a chunked object-reference
+/// obstacle that makes [`crate::repack()`] reject a chunked object-reference
 /// dataset outright.
 ///
 /// `src` is the session's image framed at its base address, the view a stored

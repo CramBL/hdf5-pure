@@ -41,7 +41,7 @@
 //!
 //! - **Chunked** dataset elements. Unfiltered chunks would only need the index
 //!   walked; filtered ones hold their addresses compressed, the same obstacle
-//!   that makes [`crate::repack`] refuse a chunked object-reference dataset.
+//!   that makes [`crate::repack()`] reject a chunked object-reference dataset.
 //! - **Dense (fractal-heap) attributes**, whose values are not in the header,
 //!   and an attribute held as a **shared (SOHM) record**, which is not stored in
 //!   the header either.

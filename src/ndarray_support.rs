@@ -16,7 +16,7 @@
 //! `ndarray`'s default layout, so reads and writes are a flat copy with no
 //! transpose. On write, non-standard-layout inputs (Fortran-order, transposed,
 //! or strided views) are repacked into row-major order via
-//! [`ndarray::ArrayBase::as_standard_layout`]; arrays that are already standard
+//! [`ndarray::ArrayRef::as_standard_layout`]. Arrays that are already standard
 //! layout are borrowed without copying.
 //!
 //! # Example

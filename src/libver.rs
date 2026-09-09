@@ -92,7 +92,7 @@ impl LibVer {
     /// The format to write under `bounds`: the newest this crate produces that
     /// they admit, or [`WRITER_DEFAULT`](Self::WRITER_DEFAULT) when they impose
     /// nothing. Bounds admitting no such format give
-    /// [`FormatError::LibverBoundsUnsatisfiable`].
+    /// [`FormatError::LibverBoundsUnsatisfiable`](crate::FormatError::LibverBoundsUnsatisfiable).
     ///
     /// A lower bound above [`WRITER_DEFAULT`](Self::WRITER_DEFAULT) is satisfied
     /// by it, so `(LATEST, LATEST)` resolves to the 1.10 format rather than

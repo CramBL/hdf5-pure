@@ -289,6 +289,8 @@ fn default_empty_encoding() -> crate::mat::options::EmptyMarkerEncoding {
 /// Empty-struct-array marker (MATLAB `struct([])`). What `Option::None` lowers
 /// to under the default [`NullPolicy::EmptyStructArray`], both as a struct
 /// field and inside a sequence.
+///
+/// [`NullPolicy::EmptyStructArray`]: crate::mat::NullPolicy::EmptyStructArray
 fn apply_empty_struct_array(ds: &mut DatasetBuilder) {
     crate::mat::builder::emit_empty_storage(
         ds,

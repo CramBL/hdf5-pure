@@ -908,6 +908,9 @@ fn read_super_block(
 /// a defined (non-`0xFF`) address are emitted, so a partially-grown array
 /// contributes exactly its allocated blocks. The caller validates the spans
 /// against the file bounds.
+///
+/// [`eadb_size`]: crate::chunked_write::eadb_size
+/// [`aesb_size`]: crate::chunked_write::aesb_size
 #[cfg(feature = "std")]
 pub(crate) fn extensible_array_index_spans<S: Source + ?Sized>(
     source: &S,
