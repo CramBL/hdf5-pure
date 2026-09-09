@@ -11,12 +11,14 @@ repository = "https://github.com/CramBL/hdf5-pure"
 keywords = ["hdf5", "serialization", "scientific", "no-std", "wasm"]
 categories = ["science", "encoding", "filesystem", "wasm", "no-std"]
 build = "build.rs"
-# What the published crate holds: the library, its build script, the examples, and the documents a
-# user reads. Tests, test data, tooling and the docs site stay in the repository.
+# What the published crate holds: the library, its build script, the examples, the guide pages
+# `src/_guide/` includes into the documentation, and the documents a user reads. Tests, test data,
+# tooling and the rest of the docs site stay in the repository.
 include = [
     "/src/**",
     "/build.rs",
     "/examples/**",
+    "/docs/guide/reading.md",
     "/README.md",
     "/CHANGELOG.md",
     "/LICENSE-*",
