@@ -7,7 +7,7 @@
 //! # Writing files
 //!
 //! ```rust
-//! use hdf5_pure::{FileBuilder, AttrValue};
+//! use hdf5_pure::{AttrValue, FileBuilder};
 //!
 //! let mut builder = FileBuilder::new();
 //! builder.create_dataset("data")
@@ -15,25 +15,38 @@
 //!     .with_shape(&[3])
 //!     .set_attr("unit", AttrValue::String("m/s".into()));
 //! builder.set_attr("version", AttrValue::I64(2));
-//! let bytes = builder.finish().unwrap();
+//! let bytes = builder.finish()?;
+//! # assert!(hdf5_pure::is_hdf5_bytes(&bytes));
+//! # Ok::<(), hdf5_pure::Error>(())
 //! ```
 //!
-//! [`FileBuilder::finish`] returns the file as bytes, which a WASM build or a network call takes
-//! as it is, and [`FileBuilder::write`] serializes the same file to a path.
+//! [`FileBuilder::finish`] serializes the file into a `Vec<u8>`, for a WASM build or a caller
+//! that sends the bytes on, and [`FileBuilder::write`] serializes the same file to a path.
 //!
 //! # Reading files
 //!
-//! ```rust,no_run
-//! use hdf5_pure::File;
+//! ```rust
+//! # let dir = tempfile::tempdir()?;
+//! # let path = dir.path().join("data.h5");
+//! # let mut builder = hdf5_pure::FileBuilder::new();
+//! # builder.create_dataset("data")
+//! #     .with_f64_data(&[1.0, 2.0, 3.0])
+//! #     .set_attr("unit", AttrValue::String("m/s".into()));
+//! # builder.set_attr("version", AttrValue::I64(2));
+//! # builder.write(&path)?;
+//! use hdf5_pure::{AttrValue, File};
 //!
-//! let file = File::open("output.h5").unwrap();
-//! let ds = file.dataset("data").unwrap();
-//! let values = ds.read_f64().unwrap();
-//! let unit = ds.attrs().unwrap().get("unit").cloned();
-//! let version = file.root().attrs().unwrap().get("version").cloned();
+//! let file = File::open(&path)?;
+//! let dataset = file.dataset("data")?;
+//!
+//! assert_eq!(dataset.shape()?, vec![3]);
+//! assert_eq!(dataset.read_f64()?, vec![1.0, 2.0, 3.0]);
+//! assert_eq!(dataset.attrs()?["unit"], AttrValue::String("m/s".into()));
+//! assert_eq!(file.root().attrs()?["version"], AttrValue::I64(2));
+//! # Ok::<(), hdf5_pure::Error>(())
 //! ```
 //!
-//! [`File::from_bytes`] reads the same file from a complete in-memory image.
+//! [`File::from_bytes`] reads the same file from a `Vec<u8>` the caller already holds.
 //!
 //! # Generic over the element type
 //!
@@ -51,9 +64,10 @@
 //!
 //! let mut fb = FileBuilder::new();
 //! store(&mut fb, "counts", &[1u32, 2, 3]);
-//! let file = File::from_bytes(fb.finish().unwrap()).unwrap();
-//! let counts: Vec<u32> = file.dataset("counts").unwrap().read().unwrap();
+//! let file = File::from_bytes(fb.finish()?)?;
+//! let counts: Vec<u32> = file.dataset("counts")?.read()?;
 //! assert_eq!(counts, vec![1, 2, 3]);
+//! # Ok::<(), hdf5_pure::Error>(())
 //! ```
 //!
 //! # Editing files in place
@@ -70,15 +84,27 @@
 //! of function: a latest-format file with no userblock is edited without ever
 //! building a whole-file copy of it (see [`MemoryStrategy`]).
 //!
-//! ```rust,no_run
+//! ```rust
+//! # let dir = tempfile::tempdir()?;
+//! # let path = dir.path().join("data.h5");
+//! # let mut builder = hdf5_pure::FileBuilder::new();
+//! # builder.create_dataset("data").with_f64_data(&[1.0, 2.0, 3.0]);
+//! # builder.create_dataset("old").with_i32_data(&[0]);
+//! # builder.write(&path)?;
 //! use hdf5_pure::File;
 //!
-//! let file = File::open_rw("output.h5").unwrap();
+//! let file = File::open_rw(&path)?;
 //! let root = file.root();
-//! root.create_dataset("extra", |b| { b.with_f64_data(&[4.0, 5.0]); }).unwrap();
-//! file.dataset("data").unwrap().write(&[7.0, 8.0]).unwrap(); // H5Dwrite (overwrite)
-//! root.delete("old").unwrap();                               // H5Ldelete
-//! file.commit().unwrap();                                    // apply staged edits
+//! root.create_dataset("extra", |b| { b.with_f64_data(&[4.0, 5.0]); })?;
+//! file.dataset("data")?.write(&[7.0, 8.0, 9.0])?; // H5Dwrite (overwrite)
+//! root.delete("old")?;                            // H5Ldelete
+//! file.commit()?;                                 // apply staged edits
+//! # drop(root);
+//! # drop(file);
+//! # let reopened = File::open(&path)?;
+//! # assert_eq!(reopened.root().datasets()?, vec!["data", "extra"]);
+//! # assert_eq!(reopened.dataset("data")?.read_f64()?, vec![7.0, 8.0, 9.0]);
+//! # Ok::<(), hdf5_pure::Error>(())
 //! ```
 //!
 //! A value overwrite ([`Dataset::write`]) must match the on-disk datatype and
@@ -97,11 +123,18 @@
 //! compact, and every chunked layout read the same way, as do both group forms
 //! and attributes.
 //!
-//! ```rust,no_run
+//! ```rust
+//! # let dir = tempfile::tempdir()?;
+//! # let path = dir.path().join("signals.h5");
+//! # let mut builder = hdf5_pure::FileBuilder::new();
+//! # builder.create_dataset("signal").with_f64_data(&[1.0, 2.0, 3.0]);
+//! # builder.write(&path)?;
 //! use hdf5_pure::File;
 //!
-//! let file = File::open_streaming("huge.h5").unwrap();
-//! let values = file.dataset("signal").unwrap().read_f64().unwrap();
+//! let file = File::open_streaming(&path)?;
+//! let values = file.dataset("signal")?.read_f64()?;
+//! # assert_eq!(values, vec![1.0, 2.0, 3.0]);
+//! # Ok::<(), hdf5_pure::Error>(())
 //! ```
 //!
 //! When the bytes are not a path at all — an object store addressed by range
@@ -114,7 +147,7 @@
 //! With the `ndarray` feature, datasets can be written from and read back into
 //! [`ndarray`] arrays of any rank, in row-major (C) order:
 //!
-//! ```
+//! ```rust
 //! # #[cfg(feature = "ndarray")] {
 //! use hdf5_pure::{File, FileBuilder};
 //! use ndarray::{array, Array2};
@@ -122,12 +155,13 @@
 //! let a: Array2<f64> = array![[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]];
 //! let mut fb = FileBuilder::new();
 //! fb.create_dataset("m").with_ndarray(&a);
-//! let bytes = fb.finish().unwrap();
+//! let bytes = fb.finish()?;
 //!
-//! let file = File::from_bytes(bytes).unwrap();
-//! let back: Array2<f64> = file.dataset("m").unwrap().read_array().unwrap();
+//! let file = File::from_bytes(bytes)?;
+//! let back: Array2<f64> = file.dataset("m")?.read_array()?;
 //! assert_eq!(a, back);
 //! # }
+//! # Ok::<(), hdf5_pure::Error>(())
 //! ```
 
 #![cfg_attr(docsrs, feature(doc_cfg))]
