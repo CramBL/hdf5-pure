@@ -9,11 +9,13 @@ use crate::convert::TryToUsize;
 use crate::error::FormatError;
 use crate::source::Source;
 
-/// Size of the size-of-offsets-independent prefix of a version 1 B-tree node:
-/// `signature(4) + node_type(1) + node_level(1) + entries_used(2)`. The two
-/// sibling addresses that follow are each `offset_size` bytes wide; see
-/// [`btree_v1_node_header_size`]. (HDF5 format spec, "Disk Format: Level 1A1 —
-/// Version 1 B-trees".)
+/// The size in bytes of the prefix of a version 1 B-tree node that does not depend on the
+/// offset width: the signature (4), the node type (1), the node level (1), and the entries
+/// used (2). The two sibling addresses that follow are each `offset_size` bytes wide, see
+/// [`btree_v1_node_header_size`]. The node is defined in "Version 1 B-trees" of the
+/// [format specification, version 4.0][spec].
+///
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_infra_btrees_v1
 pub(crate) const BTREE_V1_NODE_PREFIX_LEN: usize = 8;
 
 /// Total size of a version 1 B-tree node header for a file whose size-of-offsets

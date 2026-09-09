@@ -20,18 +20,13 @@ use crate::width::OffsetWidth;
 /// tiny, fixed window to pull from a streaming source.
 const MAX_SUPERBLOCK_LEN: u64 = 128;
 
-/// A file's parsed superblock, as reported by
-/// [`File::superblock`](crate::File::superblock).
+/// The superblock of a file, as [`File::superblock`](crate::File::superblock) returns it.
 ///
-/// The superblock is the first HDF5 structure in a file and fixes the format
-/// every other structure is read in: the version, the width of the offsets and
-/// lengths in every message, and the [base address](Self::base_address) the
-/// rest of the file's addresses are relative to. This is a read-only view of
-/// what was found there; a field a given superblock version does not carry is
-/// `None`, and the fields carry the values as stored rather than as validated.
-///
-/// `#[non_exhaustive]` because the format's later versions may add fields, and
-/// growing this struct should not be a breaking change.
+/// The superblock is the first HDF5 structure in a file. It fixes the format every other
+/// structure is read in: the version, the width of the offsets and lengths in every message,
+/// and the [base address](Self::base_address) the rest of the file's addresses are relative
+/// to. The fields hold the values as stored. A field that a superblock version does not have
+/// is `None`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Superblock {
