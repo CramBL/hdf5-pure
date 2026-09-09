@@ -208,5 +208,5 @@ exclusive rather than cumulative:
   Because `no_std` excludes the `mat` module entirely, this replaces the
   transpose rather than adding to it.
 
-The [architecture page](../about/architecture.md) covers the safety and
-robustness guarantees in more detail.
+The [crate documentation on docs.rs](https://docs.rs/hdf5-pure/latest/hdf5_pure/)
+covers the safety and robustness guarantees in more detail.

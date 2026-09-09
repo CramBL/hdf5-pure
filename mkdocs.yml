@@ -151,5 +151,3 @@ nav:
       - File Properties (fapl/fcpl/dapl): reference/property-support.md
       - Limitations: reference/limitations.md
       - API Reference (docs.rs): https://docs.rs/hdf5-pure
-  - About:
-      - Architecture: about/architecture.md

@@ -37,6 +37,7 @@ The same rules apply here as for bug reports and feature requests. Plus:
 - A pull request that changes what a user sees carries a changelog entry under `[Unreleased]` in `CHANGELOG.md`. [RELEASES.md](RELEASES.md) has the rules for the entry.
 - The code follows [CODE_STYLE.md](CODE_STYLE.md).
 - The comments and the documentation follow [DOC_STYLE.md](DOC_STYLE.md).
+- [ARCHITECTURE.md](ARCHITECTURE.md) lists the layers of the crate.
 - Pull requests to update specific dependencies are welcome.
 
 Before pushing, run the checks CI runs on every pull request:

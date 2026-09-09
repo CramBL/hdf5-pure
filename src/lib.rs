@@ -4,6 +4,28 @@
 //! HDF5 files. It is WASM-compatible and supports `no_std` environments with
 //! `alloc`.
 //!
+//! # Design goals
+//!
+//! - **Zero C dependencies.** The HDF5 binary format is implemented directly in
+//!   Rust. There is no `libhdf5`, no `build.rs` linking step, and no system
+//!   package to install.
+//! - **Portable.** The crate compiles to `wasm32-unknown-unknown` and to bare-metal
+//!   `no_std` targets (with `alloc`). The high-level filesystem API is `std`-gated.
+//!   The in-memory parsing and serialization machinery is not.
+//! - **Interoperable.** Files this crate writes are read by the reference HDF5 C
+//!   library, h5py, and MATLAB, and vice versa. Interop is verified by crosscheck
+//!   tests that compare byte-for-byte against fixtures produced by those tools.
+//! - **Faithful or nothing.** Every operation that cannot reproduce data exactly
+//!   fails with a named error. See [Fidelity](#fidelity-faithful-or-nothing) below.
+//!
+//! # Fidelity: faithful or nothing
+//!
+//! Editing ([`File::open_rw`]) and repacking ([`repack`](fn@repack))
+//! each reject what they cannot reproduce exactly. A `File::open_rw` session that cannot reproduce
+//! an object faithfully fails with [`Error::EditUnsupported`]. `repack` fails with
+//! [`Error::RepackUnsupported`], which identifies the object, before it writes a byte to the
+//! destination.
+//!
 //! # Writing files
 //!
 //! ```rust
@@ -78,11 +100,10 @@
 //! scratch. New data and rebuilt object headers are appended at end-of-file
 //! and the superblock is repointed last, so the cost is proportional to what
 //! changes rather than to the file size. It edits files written by this crate,
-//! the reference HDF5 C library, and h5py across all of their on-disk formats,
-//! and refuses — rather than silently degrade the file — anything it cannot
-//! reproduce faithfully. Memory follows the file rather than the caller's choice
-//! of function: a latest-format file with no userblock is edited without ever
-//! building a whole-file copy of it (see [`MemoryStrategy`]).
+//! the reference HDF5 C library, and h5py across all of their on-disk formats.
+//! Memory follows the file, not the caller's choice of function: a latest-format
+//! file with no userblock is edited without ever building a whole-file copy of it
+//! (see [`MemoryStrategy`]).
 //!
 //! ```rust
 //! # let dir = tempfile::tempdir()?;
@@ -163,6 +184,106 @@
 //! # }
 //! # Ok::<(), hdf5_pure::Error>(())
 //! ```
+//!
+//! # Write paths
+//!
+//! Three paths put bytes on disk, with different cost models:
+//!
+//! | Path | Entry point | What it writes |
+//! |---|---|---|
+//! | **Whole-file writer** | [`FileBuilder`] | Serializes a brand-new file from scratch |
+//! | **In-place editor** | [`File::open_rw`] | Appends new bytes to the existing file and patches a small, fixed set of locations |
+//! | **Repack** | [`repack`](fn@repack) | Reads a source file and writes a fresh, compact copy to a separate destination through `FileBuilder` |
+//!
+//! `File::open_rw` is an **append-and-patch** editor. It reads and patches a latest-format file
+//! with no userblock where it lies, through positioned I/O, and mirrors any other file whole in
+//! memory (`O(file size)`), which is a statement about *memory*, not about what gets written
+//! back. An immediate `Dataset::append` writes the new chunks, fills Extensible-Array index
+//! slots, and publishes the grown dataspace dimension last under `fsync` barriers, so each append
+//! is durable and crash-atomic before the call returns (`SyncPolicy::OnClose` keeps the order and
+//! drops the barriers, leaving durability to `File::sync`). Every other edit is staged and applied
+//! by one `commit()`: new data and new object headers are appended at the end of the file (or
+//! placed into space freed by earlier commits), a rewritten header for each touched group and its
+//! ancestors up to the root is appended, and the superblock is repointed at the new root **last**,
+//! as the single crash-atomic commit point. A same-length value overwrite patches the existing
+//! bytes where they lie. Space freed by deletions and relocations goes to a session free list for
+//! reuse. A freed run reaching the end of the file is truncated, and on a file that persists its
+//! free space the free list is instead serialized into on-disk free-space managers that survive
+//! reopen.
+//!
+//! **Nothing re-serializes the file on commit.** The cost of a commit is proportional to the edit,
+//! not to the file size: a staged append re-encodes at most the trailing partial chunk and carries
+//! every other kept chunk into the rebuilt index by metadata alone, and no existing object moves
+//! except the object headers on the edited path. A failed or interrupted commit leaves the file
+//! valid: structural changes become visible only at the superblock repoint, so a crash before it
+//! leaves the old object tree in place. (Same-length value overwrites patch live data blocks
+//! directly and are the one staged edit outside that gate.)
+//!
+//! The bounded backing is the same engine minus the mirror: reads are positioned I/O through
+//! bounded caches (the read-write sibling of [`File::open_streaming`]),
+//! `Dataset::append` reads and patches only the metadata windows it touches with the same
+//! crash-atomicity (and under the same `SyncPolicy`), and `close()` rewrites the on-disk free-space
+//! managers of a file that persists them - including the per-page-type managers of a paged file,
+//! whose appends stay page-homogeneous. The staged edit surface works here too: it builds what the
+//! edit needs, not a copy of the file. What separates the two backings is which files they accept -
+//! the bounded one requires a latest-format file with 8-byte offsets and no userblock, and
+//! `open_rw` mirrors any other file.
+//!
+//! The SWMR writer is a restriction of the same immediate append engine - unfiltered, chunk-aligned
+//! appends only - chosen so a concurrent reader never observes a torn view.
+//!
+//! `repack` is the one operation that rewrites a file from scratch, and it never does so in place:
+//! it reads every surviving object and writes a fresh, compact copy at a separate destination path,
+//! rejecting (`Error::RepackUnsupported`) anything it cannot reproduce faithfully.
+//!
+//! # On-disk format coverage
+//!
+//! The reader and editor handle the formats the reference C library and h5py
+//! produce in the wild:
+//!
+//! - **Superblocks** version 0, 1, 2, and 3.
+//! - **Object headers** version 1 (with continuation blocks) and version 2,
+//!   including multi-chunk headers.
+//! - **Storage layouts** - contiguous, compact, and chunked.
+//! - **Chunk indexes** - B-tree v1, single chunk, implicit, fixed array (including
+//!   the paged data-block layout), and extensible array (which also backs SWMR
+//!   append and the in-place append paths: `Dataset::append_staged` and the
+//!   owned-handle `File::open_rw` + `Dataset::append`).
+//! - **Groups** - both the old symbol-table form (v0/v1) and the modern
+//!   compact-link and dense (fractal-heap + v2 B-tree) forms.
+//! - **Datatypes** - fixed-point, floating-point, string (fixed and
+//!   variable-length), bit-field, opaque, compound, enumeration, array, and
+//!   reference classes.
+//!
+//! The crate writes one modern format by default (the HDF5 1.10 version-3 superblock with
+//! latest-format object headers), and [`FileBuilder::with_libver_bounds`] takes it back to the
+//! 1.8 format at the oldest ([`LibVer::WRITER_OLDEST`]), so its output stays compact and
+//! consistent while its reader remains broad.
+//!
+//! # Safety and robustness
+//!
+//! - **Almost entirely safe Rust.** The default feature set contains no non-trivial
+//!   `unsafe`. Adding `serde` compiles the tiled row-major/column-major transpose
+//!   used by the MATLAB writer, which is exercised under
+//!   [Miri](https://github.com/rust-lang/miri) with `-Zmiri-strict-provenance` in CI.
+//!   A `no_std` build has neither, and compiles a single-threaded `Mutex`
+//!   replacement instead, whose `Send`/`Sync` rest on the target being
+//!   single-threaded.
+//! - **32-bit safe.** Every file-derived offset and length is narrowed through
+//!   checked conversions, so a 64-bit value that does not fit a 32-bit `usize`
+//!   errors where a cast would truncate. CI runs the suite on `i686` under QEMU and
+//!   builds for `thumbv7em-none-eabi`.
+//! - **Property-tested.** The write/read roundtrip and parser robustness are
+//!   covered by property-based tests in addition to the example- and
+//!   fixture-driven suites.
+//!
+//! # Origins and licenses
+//!
+//! The crate is licensed under MIT or Apache-2.0, at your option, and parts of it come from other
+//! projects. The scale-offset filter is a port of the HDF5 library's `H5Zscaleoffset.c` and the
+//! ZFP codec a port of LLNL's reference implementation, both BSD 3-Clause, and the HDF5 format
+//! parsing and low-level I/O modules come from rustyhdf5 by the RustyStack project, MIT licensed.
+//! The README's License section links every license text.
 
 #![cfg_attr(docsrs, feature(doc_cfg))]
 #![cfg_attr(not(feature = "std"), no_std)]
