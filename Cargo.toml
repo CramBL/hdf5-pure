@@ -405,6 +405,11 @@ str_to_string = "allow"
 # TODO: 34 items.
 items_after_statements = "allow"
 
+[workspace.lints.rustdoc]
+missing_crate_level_docs = "deny"
+private_doc_tests = "deny"
+unescaped_backticks = "deny"
+
 # Fewer, larger codegen units than rustc's default of 256.
 #
 # The default emits up to one object file per codegen unit per crate compilation,

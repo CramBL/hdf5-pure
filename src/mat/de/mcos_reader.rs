@@ -344,8 +344,8 @@ impl Mcos {
     /// Read the saveobj `uint64` payload for a 1-based object id.
     ///
     /// The string writer lays out one saveobj cell per object directly after the
-    /// reserved prefix, so object id `k` maps to cell `MCOS_RESERVED_CELL_PREFIX
-    /// + (k - 1)`.
+    /// reserved prefix, so object id `k` maps to cell
+    /// `MCOS_RESERVED_CELL_PREFIX + (k - 1)`.
     fn saveobj_payload(&self, object_id: u32) -> Result<Vec<u64>, MatError> {
         if object_id == 0 {
             return Err(MatError::Custom(

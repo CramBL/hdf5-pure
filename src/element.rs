@@ -35,6 +35,11 @@
 //! round_trip("floats", &[1.0f32, 2.5, -3.0]);
 //! ```
 
+#![expect(
+    rustdoc::private_doc_tests,
+    reason = "rustdoc's test mode collects a private item, so this example is compiled and run by `cargo test --doc`"
+)]
+
 use crate::data_read;
 use crate::datatype::Datatype;
 use crate::edit::AppendBuilder;

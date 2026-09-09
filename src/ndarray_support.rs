@@ -36,6 +36,11 @@
 //! assert_eq!(a, back);
 //! ```
 
+#![expect(
+    rustdoc::private_doc_tests,
+    reason = "rustdoc's test mode collects a private item, so this example is compiled and run by `cargo test --doc`"
+)]
+
 use ndarray::{Array, ArrayBase, ArrayD, Data, Dimension, IxDyn};
 
 use crate::convert::TryToUsize;
