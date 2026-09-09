@@ -4000,6 +4000,10 @@ impl WriteEngine {
     /// );
     /// # Ok::<(), hdf5_pure::Error>(())
     /// ```
+    #[expect(
+        rustdoc::private_doc_tests,
+        reason = "rustdoc's test mode collects a private item, so this example is compiled and run by `cargo test --doc`"
+    )]
     #[must_use]
     pub fn space_accounting(&self) -> SpaceAccounting {
         // The append reserve is free space this session can still spend — it is
