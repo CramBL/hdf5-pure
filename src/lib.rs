@@ -122,6 +122,7 @@
 //! # }
 //! ```
 
+#![cfg_attr(docsrs, feature(doc_cfg))]
 #![cfg_attr(not(feature = "std"), no_std)]
 // In `no_std` builds the high-level entry points that consume the parsing and
 // serialization machinery — the `reader`, `writer`, and `edit` modules —

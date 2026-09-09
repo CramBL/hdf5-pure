@@ -22,6 +22,9 @@ include = ["/src/**", "/build.rs", "/examples/**", "/README.md", "/CHANGELOG.md"
 # test-only feature and is deliberately excluded.
 [package.metadata.docs.rs]
 features = ["provenance", "zfp", "ndarray", "serde", "num-complex"]
+# `src/lib.rs` enables rustdoc's `doc_cfg` under this cfg, so each gated
+# item shows the feature that brings it.
+rustdoc-args = ["--cfg", "docsrs"]
 
 [features]
 default = ["std", "checksum", "deflate"]

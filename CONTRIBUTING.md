@@ -107,7 +107,7 @@ The fixtures under `tests/data/` are grouped by the library that wrote them: `c`
 
 The site under `docs/` is built with [MkDocs](https://www.mkdocs.org/) and published from a release tag. `just docs::serve` previews it locally at <http://127.0.0.1:8000>, and `just docs::build` fails on a broken link or a page missing from the nav. `CHANGELOG.md` is the source of the changelog page.
 
-`just doc` builds the API documentation twice with warnings denied: as it is published, then again with the private items.
+`just doc` builds the API documentation twice with warnings denied: as it is published, then again with the private items. `just docs-rs` builds it the way docs.rs does, on nightly with the feature badges on, CI runs it on every pull request.
 
 ## Pull request review
 
