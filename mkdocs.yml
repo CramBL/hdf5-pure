@@ -129,18 +129,14 @@ markdown_extensions:
 
 nav:
   - Guide:
-      - Writing Files: guide/writing.md
-      - Reading Files: guide/reading.md
       - Generic Element I/O: guide/generic-io.md
       - Groups & Attributes: guide/groups-attributes.md
       - Compression & Filters: guide/compression.md
       - Compound & Complex Types: guide/compound-types.md
       - N-dimensional Arrays: guide/ndarray.md
       - Variable-Length Strings: guide/vlen-strings.md
-      - Editing in Place: guide/editing.md
       - Reclaiming Space (repack): guide/repack.md
       - File-Space Strategy: guide/file-space.md
-      - Streaming Large Files: guide/streaming.md
       - SWMR: guide/swmr.md
   - Interoperability:
       - MATLAB v7.3 (.mat): interop/matlab.md
