@@ -18,6 +18,7 @@ include = [
     "/src/**",
     "/build.rs",
     "/examples/**",
+    "/docs/guide/editing.md",
     "/docs/guide/reading.md",
     "/docs/guide/writing.md",
     "/README.md",
