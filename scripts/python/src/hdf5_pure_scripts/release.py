@@ -501,12 +501,6 @@ def publish(args):
             stdin=notes,
         )
 
-    # A tag pushed with the workflow's token triggers no workflow, so the site
-    # is rebuilt on request for a final release.
-    if os.environ.get("GITHUB_ACTIONS") == "true" and not version.is_rc:
-        note(f"Rebuilding the documentation site from {tag}")
-        run("gh", "workflow", "run", "docs.yml", "--ref", tag)
-
     note(f"Done: {tag}")
     if args.skip_api_delta:
         warn(f"{tag} was published without the public-API delta check (--skip-api-delta)")

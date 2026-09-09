@@ -10,7 +10,7 @@ One or two sentences per entry: the capability, the public API name, one caveat 
 
 A released section may open with a summary paragraph, written by hand.
 
-`CHANGELOG.md` is the source; `docs/reference/changelog.md` includes it.
+`CHANGELOG.md` is the source.
 
 ## Cutting one
 

@@ -214,7 +214,7 @@ We prefer to reference types and traits by an imported symbol name and not by a 
 
 ## Exports
 
-The crate root is the public API. The modules are private, and every public item is re-exported from `lib.rs`, grouped by the part of the API it belongs to, or lives in a public module that a cargo feature adds (`mat`). A public item has exactly one path, and the module tree behind it is free to change: moving an item between modules is not an API change.
+The crate root is the public API. The modules are private, and every public item is re-exported from `lib.rs`, grouped by the part of the API it belongs to, or lives in a public module that a cargo feature adds (`mat`). A public module that `cfg(doc)` adds holds documentation pages and never code (`_guide`). A public item has exactly one path, and the module tree behind it is free to change: moving an item between modules is not an API change.
 
 A rename keeps the old name for one minor release as a deprecated type alias (`#[deprecated] pub type OldName = NewName;`), which warns at the use site. A deprecated `pub use` does not warn on the crate's MSRV, so it is not the mechanism.
 
