@@ -20,6 +20,7 @@ include = [
     "/examples/**",
     "/docs/guide/editing.md",
     "/docs/guide/reading.md",
+    "/docs/guide/streaming.md",
     "/docs/guide/writing.md",
     "/README.md",
     "/CHANGELOG.md",
