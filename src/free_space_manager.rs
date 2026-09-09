@@ -386,8 +386,8 @@ pub(crate) type PersistedSections = (Vec<FreeSection>, Vec<(u64, u64)>);
 
 /// The bounded-memory counterpart of [`read_persisted_sections`]: read every
 /// persisted free section from the managers named in `manager_addrs` over a
-/// random-access [`Source`] instead of a whole-file `&[u8]`, so the bounded
-/// backend can seed its free list without a mirror. Only the small manager
+/// random-access [`Source`](crate::Source), so the bounded backend can seed its
+/// free list without a mirror. Only the small manager
 /// blocks are read; nothing scales with file size.
 pub(crate) fn read_persisted_sections_source<S: crate::source::Source>(
     src: &S,

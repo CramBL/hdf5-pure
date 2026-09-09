@@ -56,7 +56,7 @@ const INDEX_LENGTH_SIZE: u8 = 8;
 /// *dataset* — element size, chunk geometry, the fill-value bytes — is derived
 /// at [`ChunkOptions::build_pipeline`] time from the dataset actually being
 /// written, so a filter carried from one dataset onto another (what
-/// [`repack`](crate::repack) does) describes the destination rather than
+/// [`repack`](crate::repack()) does) describes the destination without
 /// restating the source's numbers. What a filter records about the *request* —
 /// a deflate level, a scale-offset mode and whether it records a fill value at
 /// all — is here, and is carried across unchanged.

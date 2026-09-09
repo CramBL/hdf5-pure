@@ -136,7 +136,7 @@ impl FileBuilder {
     ///
     /// Any other size is refused by [`finish`](Self::finish) /
     /// [`finish_to`](Self::finish_to) / [`write`](Self::write) with
-    /// [`FormatError::InvalidUserblockSize`](crate::FormatError::InvalidUserblockSize).
+    /// [`FormatError::InvalidUserblockSize`].
     /// The size *is* the superblock's base address, and a reader scans for the
     /// signature at 0, 512, 1024, and so on doubling — so an unaligned size would
     /// hide the superblock where nothing looks for it.
@@ -158,7 +158,7 @@ impl FileBuilder {
     /// [`with_userblock`](Self::with_userblock) is refused by every output path —
     /// [`finish`](Self::finish), [`finish_to`](Self::finish_to), and
     /// [`write`](Self::write) — with
-    /// [`FormatError::UserblockContentTooLarge`](crate::FormatError::UserblockContentTooLarge).
+    /// [`FormatError::UserblockContentTooLarge`].
     ///
     /// Because the userblock leads the file in address order, this is what lets a
     /// wrapper format's header — MATLAB v7.3's, for instance — be produced by the
@@ -189,8 +189,7 @@ impl FileBuilder {
     /// `H5Pset_libver_bounds`. The file is written in the newest format the
     /// bounds allow, between [`LibVer::WRITER_OLDEST`] and
     /// [`LibVer::WRITER_DEFAULT`]; bounds that leave no such format fail with
-    /// [`Error::Format`] wrapping
-    /// [`FormatError::LibverBoundsUnsatisfiable`](crate::FormatError::LibverBoundsUnsatisfiable).
+    /// [`Error::Format`] wrapping [`FormatError::LibverBoundsUnsatisfiable`].
     ///
     /// `high` selects the format. `Earliest..=V18` writes the HDF5 1.8 format —
     /// a version 2 superblock and version 3 data-layout messages — and anything
@@ -203,12 +202,12 @@ impl FileBuilder {
     /// `LATEST` is satisfied by the 1.10 format rather than refused. It does not
     /// license `high` away — an inverted range such as `V114..=V110` is refused
     /// with
-    /// [`FormatError::LibverBoundsUnsatisfiable`](crate::FormatError::LibverBoundsUnsatisfiable),
+    /// [`FormatError::LibverBoundsUnsatisfiable`],
     /// as `H5Pset_libver_bounds` refuses one.
     ///
     /// Content the 1.8 format cannot express is refused rather than silently
     /// upgraded, with
-    /// [`FormatError::LibverTooOldForContent`](crate::FormatError::LibverTooOldForContent):
+    /// [`FormatError::LibverTooOldForContent`]:
     /// a chunked, filtered, or resizable dataset needs the 1.10 chunk indices,
     /// and a file-space setting — a strategy or a page size — needs the 1.10
     /// File Space Info message.

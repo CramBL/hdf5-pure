@@ -105,6 +105,10 @@ impl<'a> RootSerializer<'a> {
     /// [`NullPolicy::Error`] is the one policy that *is* expressible here, and it
     /// routes through the same lowering as every other slot so it refuses with the
     /// same message. Skipping that was the policy failing at its only purpose.
+    ///
+    /// [`NullPolicy::Omit`]: crate::mat::NullPolicy::Omit
+    /// [`NullPolicy::EmptyStructArray`]: crate::mat::NullPolicy::EmptyStructArray
+    /// [`NullPolicy::Error`]: crate::mat::NullPolicy::Error
     fn root_null(self) -> Result<Vec<(String, MatValue)>, MatError> {
         super::value_ser::null_value(self.opts)?;
         Ok(Vec::new())

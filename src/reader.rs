@@ -340,7 +340,7 @@ impl FileAccessProperties {
     /// version 1 B-tree index that 1.8 used.
     ///
     /// Setting a `high` below [`LibVer::V110`] refuses that addition with
-    /// [`FormatError::LibverTooOldForContent`](crate::FormatError::LibverTooOldForContent)
+    /// [`FormatError::LibverTooOldForContent`]
     /// at [`File::commit`] instead — the same refusal
     /// [`FileBuilder::with_libver_bounds`](crate::FileBuilder::with_libver_bounds)
     /// gives when writing a whole file, so a `.mat` bounded to 1.8 for MATLAB
@@ -351,7 +351,7 @@ impl FileAccessProperties {
     /// [`LibVer::V114`] or [`LibVer::LATEST`] leaves the session writing the 1.10
     /// format rather than failing, provided `high` reaches it. An inverted range
     /// such as `V114..=V110` is refused with
-    /// [`FormatError::LibverBoundsUnsatisfiable`](crate::FormatError::LibverBoundsUnsatisfiable).
+    /// [`FormatError::LibverBoundsUnsatisfiable`].
     ///
     /// The read-only opens ignore this: they write nothing. [`File::open_swmr_writer`]
     /// requires a version 3 superblock, so it refuses a `high` below
@@ -424,7 +424,7 @@ impl FileAccessProperties {
     /// library raises for *any* writer. A session that dies with pages in memory
     /// leaves that byte standing, and a file carrying it is refused by this
     /// crate, by `H5Fopen` and by h5py alike, with
-    /// [`Error::FileMarkedInUse`](crate::Error::FileMarkedInUse). The silent
+    /// [`Error::FileMarkedInUse`]. The silent
     /// wrong answer becomes a refusal, and
     /// [`File::clear_swmr_flag`](crate::File::clear_swmr_flag) — the `h5clear -s`
     /// equivalent — is how to look at such a file anyway, knowing what it may
@@ -434,12 +434,11 @@ impl FileAccessProperties {
     /// # Refusals
     ///
     /// Four, each refused with
-    /// [`Error::EditUnsupported`](crate::Error::EditUnsupported) rather than
-    /// quietly ignored:
+    /// [`Error::EditUnsupported`]:
     ///
     /// - a budget below the page the session merges within: the file's own
     ///   file-space page size when it was created with
-    ///   [`FileSpaceStrategy::Page`](crate::FileSpaceStrategy::Page), and the
+    ///   [`FileSpaceStrategy::Page`], and the
     ///   format's 4 KiB default otherwise. A buffer that cannot hold one page
     ///   drains on every page it touches;
     /// - a **paged** file whose free space is not persisted, which can be neither
@@ -447,7 +446,7 @@ impl FileAccessProperties {
     ///   mark blocked every reader;
     /// - a superblock older than version 3, whose status-flags byte no library
     ///   reads back, so the mark above would announce nothing;
-    /// - [`SyncPolicy::Always`](crate::SyncPolicy::Always), the default, where
+    /// - [`SyncPolicy::Always`], the default, where
     ///   every barrier is an `fsync` that flushes the buffer on its way out — so
     ///   it would hold nothing while still costing the mark. Pair this with
     ///   [`with_sync_policy(SyncPolicy::OnClose)`](Self::with_sync_policy).
@@ -525,8 +524,7 @@ impl FileAccessProperties {
     ///
     /// Defaults to [`WriteMarkPolicy::Refuse`], which is what `H5Fopen` does with
     /// the same byte: [`File::open`], [`File::open_streaming`] and
-    /// [`File::from_source`] all report
-    /// [`Error::FileMarkedInUse`](crate::Error::FileMarkedInUse).
+    /// [`File::from_source`] all report [`Error::FileMarkedInUse`].
     /// [`WriteMarkPolicy::AllowSnapshot`] reads the file as it stands instead,
     /// through whichever of those opens is passed these properties.
     ///
@@ -539,7 +537,7 @@ impl FileAccessProperties {
     /// mid-operation and one that exited without closing carry the same byte —
     /// so this crate cannot check the assertion, and passing this value is how a
     /// caller states it. It is exactly true for a writer under
-    /// [`SyncPolicy::OnClose`](crate::SyncPolicy::OnClose) that syncs at the
+    /// [`SyncPolicy::OnClose`] that syncs at the
     /// points it wants readable, and it is what the mark exists to guard against
     /// when it is false: a page-buffered session's publish points are written
     /// before the content they name, so a snapshot taken mid-flush can show a
@@ -1231,8 +1229,8 @@ impl FileInner {
     /// not against one in flight. The callers that classify what they resolved
     /// to — [`Dataset::resolved`], [`Group::header_address`] — parse that header
     /// in the same unordered window, so a commit landing inside it can also make
-    /// a live handle report [`Error::NotADataset`](crate::Error::NotADataset) or
-    /// [`Error::NotAGroup`](crate::Error::NotAGroup) for an object whose kind
+    /// a live handle report [`Error::NotADataset`] or
+    /// [`Error::NotAGroup`] for an object whose kind
     /// never changed. That is the same staleness reporting itself instead of
     /// answering, which is the better half of the trade.
     fn locate(&self, path: Option<&str>, memo: Option<Resolution>) -> Result<Resolution, Error> {
@@ -1458,7 +1456,7 @@ impl FileInner {
         Ok((superblock, addr_offset))
     }
 
-    /// Streaming counterpart of [`parse_superblock`]: locate and parse the
+    /// Streaming counterpart of [`parse_superblock`](Self::parse_superblock): locate and parse the
     /// superblock by reading only small windows from the source.
     fn parse_superblock_source<S: Source + ?Sized>(
         source: &S,
@@ -2370,7 +2368,7 @@ impl File {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::FileMarkedInUse`](crate::Error::FileMarkedInUse) if the status flags mark
+    /// Returns [`Error::FileMarkedInUse`] if the status flags mark
     /// the file as open for writing. `H5Fopen` makes the same check. The flag marks a live writer
     /// or one that exited without closing the file.
     /// [`clear_swmr_flag`](Self::clear_swmr_flag) clears a stale flag,
@@ -2504,7 +2502,7 @@ impl File {
     ///
     /// This is the open that *follows* a file marked as held by a SWMR writer,
     /// where [`open`](Self::open) refuses one. Only a half-set mark is refused
-    /// here, with [`Error::FileMarkedInUse`](crate::Error::FileMarkedInUse):
+    /// here, with [`Error::FileMarkedInUse`]:
     /// either bit without the other. Write access alone is what a plain
     /// (non-SWMR) writer leaves, and there is no protocol for following a writer
     /// that is not publishing consistent prefixes; the SWMR bit alone is a state
@@ -2554,7 +2552,7 @@ impl File {
     /// [`commit`](Self::commit). The file must use 8-byte offsets and lengths and
     /// keep its superblock at its base address (a canonical userblock, as in a
     /// MATLAB `.mat` file, is supported); anything else is refused with
-    /// [`Error::EditUnsupported`](crate::Error::EditUnsupported).
+    /// [`Error::EditUnsupported`].
     ///
     /// The fast immediate [`Dataset::append`] additionally requires a
     /// latest-format (version-2/3) file with no userblock and an
@@ -2563,9 +2561,9 @@ impl File {
     ///
     /// Two things can turn this open away because another writer holds the file:
     /// the exclusive OS lock, reported as
-    /// [`Error::FileLocked`](crate::Error::FileLocked), and the superblock's
+    /// [`Error::FileLocked`], and the superblock's
     /// status-flags byte, reported as
-    /// [`Error::FileMarkedInUse`](crate::Error::FileMarkedInUse). The second
+    /// [`Error::FileMarkedInUse`]. The second
     /// covers what the first cannot — a SWMR writer takes no lock, and a writer
     /// that exited without closing the file leaves the flag behind; recover a
     /// stale one with [`clear_swmr_flag`](Self::clear_swmr_flag).
@@ -2639,24 +2637,22 @@ impl File {
     /// Only immediate [`Dataset::append`] is permitted, and only over the SWMR
     /// subset — an **unfiltered**, chunk-aligned append, so a concurrent reader
     /// only ever observes a consistent prefix; a filtered or non-chunk-aligned
-    /// append returns [`Error::SwmrAppendUnsupported`](crate::Error::SwmrAppendUnsupported).
+    /// append returns [`Error::SwmrAppendUnsupported`].
     /// The staged edit surface (`write`/`set_attr`/`create_*`/`delete`/`copy`/
     /// `commit`) returns
-    /// [`Error::SwmrStagedUnsupported`](crate::Error::SwmrStagedUnsupported).
+    /// [`Error::SwmrStagedUnsupported`].
     /// [`close`](Self::close) clears the SWMR-write flag; a writer that exits
     /// without a clean close leaves it set — recover with
     /// [`clear_swmr_flag`](Self::clear_swmr_flag). While the flag stands, this
     /// open is refused with
-    /// [`Error::FileMarkedInUse`](crate::Error::FileMarkedInUse), which is what
-    /// keeps a second writer off a file SWMR gives only one (no OS lock is held
-    /// to do it).
+    /// [`Error::FileMarkedInUse`], which is what keeps a second writer off a
+    /// file SWMR gives only one (no OS lock is held to do it).
     ///
     /// Requires a latest-format (version-3 superblock) file with no userblock
     /// and no persisted free-space; other files are refused with
-    /// [`Error::SwmrAppendUnsupported`](crate::Error::SwmrAppendUnsupported).
-    /// The version-3 requirement is the C library's: neither library reads the
-    /// SWMR-write flag back on an older superblock, so raising one there would
-    /// announce the writer to nobody.
+    /// [`Error::SwmrAppendUnsupported`]. The version-3 requirement is the C
+    /// library's: neither library reads the SWMR-write flag back on an older
+    /// superblock, so raising one there would announce the writer to nobody.
     #[doc(alias = "H5F_ACC_SWMR_WRITE")]
     pub fn open_swmr_writer<P: AsRef<std::path::Path>>(path: P) -> Result<Self, Error> {
         Self::open_swmr_writer_with_options(path, FileAccessProperties::new())
@@ -2674,7 +2670,7 @@ impl File {
     /// with [`Error::EditUnsupported`]; [`MemoryStrategy::Auto`] and
     /// [`MemoryStrategy::Mirrored`] are both satisfied by the mirror.
     ///
-    /// Its [`SyncPolicy`](crate::SyncPolicy) applies here as to any other
+    /// Its [`SyncPolicy`] applies here as to any other
     /// read-write session, the SWMR-write flag included; a reader on this
     /// machine is unaffected either way, since the barriers carry the write
     /// order across power loss rather than across processes.
@@ -2690,8 +2686,8 @@ impl File {
     /// Clear a stale status flag left in `path` by a writer that exited without a
     /// clean [`close`](Self::close) — the `h5clear -s` equivalent, for recovering
     /// a file that both this crate and the reference C library otherwise refuse
-    /// to open ([`Error::FileMarkedInUse`](crate::Error::FileMarkedInUse)). A
-    /// no-op if the flag is already clear.
+    /// to open ([`Error::FileMarkedInUse`]). A no-op if the flag is already
+    /// clear.
     ///
     /// It takes the exclusive OS lock first, so it cannot clear the flag out
     /// from under a *live* [`open_rw`](Self::open_rw) writer. A live SWMR writer
@@ -2764,36 +2760,35 @@ impl File {
     /// [`Dataset::append`]s need no commit.
     ///
     /// Requires a read-write file ([`File::open_rw`]); a read-only file returns
-    /// [`Error::ReadOnly`](crate::Error::ReadOnly).
+    /// [`Error::ReadOnly`].
     ///
     /// Outstanding [`Dataset`] and [`Group`] handles stay usable: a commit
     /// relocates object headers, and each handle looks its object up again by
     /// path on its first use afterwards, so a long-lived handle answers for the
     /// file the commit left rather than for the copy it moved away from. Two
     /// exceptions, both of which report rather than answer wrongly. A *read*
-    /// through a handle onto an object the commit deleted — or replaced with one
-    /// of a different kind, which is
-    /// [`Error::NotADataset`](crate::Error::NotADataset) or
-    /// [`Error::NotAGroup`](crate::Error::NotAGroup) — fails the way opening it
+    /// through a handle onto an object the commit deleted, or replaced with one
+    /// of a different kind ([`Error::NotADataset`] or [`Error::NotAGroup`]),
+    /// fails the way opening it
     /// would; its write methods still address the file by path, so they stage
     /// and the commit refuses them. And a handle reached by object reference
     /// ([`Dataset::dereference`]) has no path to look up, so it returns
-    /// [`Error::StaleHandle`](crate::Error::StaleHandle) — not only after a
-    /// commit but after anything staged, synced or torn down, since only an
-    /// immediate [`Dataset::append`] is known to leave every header where it
-    /// stands. Dereference again from a fresh read.
+    /// [`Error::StaleHandle`], and not only after a commit but after anything
+    /// staged, synced or torn down, since only an immediate [`Dataset::append`]
+    /// is known to leave every header where it stands. Dereference again from a
+    /// fresh read.
     ///
     /// A handle onto an object this commit *publishes* — one
     /// [`Group::create_group`], [`Group::create_group_with`] or
     /// [`Group::create_dataset`] handed back, or a lookup of a staged name found
     /// — starts reading its object here. Until then it answers
-    /// [`Error::NotCommitted`](crate::Error::NotCommitted) for anything needing
+    /// [`Error::NotCommitted`] for anything needing
     /// bytes, and a refused commit leaves it doing so.
     ///
     /// The commit is durable when it returns, under the default
     /// [`SyncPolicy::Always`]; under
-    /// [`SyncPolicy::OnClose`](crate::SyncPolicy::OnClose) it has reached the
-    /// operating system and waits for a [`sync`](Self::sync).
+    /// [`SyncPolicy::OnClose`] it has reached the operating system and waits for
+    /// a [`sync`](Self::sync).
     ///
     /// **A commit refused before it publishes leaves every dataset reading what
     /// it read before.** Almost everything such a commit writes lands where
@@ -2808,8 +2803,8 @@ impl File {
     /// Two failures do not carry that promise, and both call for **re-reading**
     /// the datasets the batch named rather than for a retry:
     ///
-    /// - [`Error::CommitPartiallyApplied`](crate::Error::CommitPartiallyApplied),
-    ///   where the restore itself failed, so a dataset may hold either value.
+    /// - [`Error::CommitPartiallyApplied`], where the restore itself failed, so
+    ///   a dataset may hold either value.
     /// - An error from a step *after* the commit published — repointing the
     ///   object references that named a moved object is the one that can raise
     ///   it. The batch is in the file and stays there; what failed is work the
@@ -2826,11 +2821,10 @@ impl File {
     /// schema-only dataset stays one. A dataset whose elements live in external
     /// files (`H5Pset_external`) carries that same empty storage while holding
     /// data this crate does not read, and is refused with
-    /// [`Error::EditUnsupported`](crate::Error::EditUnsupported) rather than
-    /// copied without it.
+    /// [`Error::EditUnsupported`]. Copying it would leave its elements behind.
     ///
     /// Requires a read-write file ([`File::open_rw`]); a read-only file returns
-    /// [`Error::ReadOnly`](crate::Error::ReadOnly).
+    /// [`Error::ReadOnly`].
     pub fn copy(&self, src: &str, dst: &str) -> Result<(), Error> {
         self.with_mirror_session(Change::Relocating, |session| {
             session.copy(&normalize_path(src), &normalize_path(dst))
@@ -2844,13 +2838,13 @@ impl File {
     /// `source` must be a buffered file ([`File::open`] or [`File::from_bytes`],
     /// not [`File::open_streaming`]) that uses 8-byte offsets and has no
     /// userblock; anything else is refused with
-    /// [`Error::EditUnsupported`](crate::Error::EditUnsupported). The source
+    /// [`Error::EditUnsupported`]. The source
     /// subtree is read and validated eagerly, so `source` need not outlive this
     /// call — and so a source this cannot reproduce, external storage included,
     /// is refused by this call. Refusals that concern the *destination* — `dst`
     /// already exists, or its parent group does not — still come from `commit`.
     /// Requires a read-write destination ([`File::open_rw`]); a read-only
-    /// one returns [`Error::ReadOnly`](crate::Error::ReadOnly).
+    /// one returns [`Error::ReadOnly`].
     pub fn copy_from(&self, source: &File, src: &str, dst: &str) -> Result<(), Error> {
         self.with_mirror_session(Change::Relocating, |session| {
             session.copy_from(source, src, dst)
@@ -2883,7 +2877,7 @@ impl File {
     /// edits still staged for [`commit`](Self::commit).
     ///
     /// Requires a read-write file ([`File::open_rw`]); a read-only file returns
-    /// [`Error::ReadOnly`](crate::Error::ReadOnly).
+    /// [`Error::ReadOnly`].
     pub fn space_accounting(&self) -> Result<SpaceAccounting, Error> {
         match &self.inner.backend {
             Backend::Edit(m) => {
@@ -2902,7 +2896,7 @@ impl File {
     /// This is a durability barrier, not a flush: it writes nothing itself.
     /// Staged edits are not applied ([`commit`](Self::commit) does that, and a
     /// `sync` before one makes only the *previous* state durable), and elements
-    /// held by a live [`BufferedAppender`](crate::BufferedAppender) have not
+    /// held by a live [`BufferedAppender`] have not
     /// reached the file at all — flush it first.
     ///
     /// There is no need to call it before [`close`](Self::close): `close` — and
@@ -2911,9 +2905,8 @@ impl File {
     /// those writes. This is the mid-session checkpoint, not the closing one.
     ///
     /// Requires a read-write file ([`File::open_rw`]); a read-only file returns
-    /// [`Error::ReadOnly`](crate::Error::ReadOnly), and a sealed one
-    /// [`Error::FileClosed`](crate::Error::FileClosed) — a closed file has
-    /// already been synced.
+    /// [`Error::ReadOnly`], and a sealed one [`Error::FileClosed`]. A closed
+    /// file has already been synced.
     #[doc(alias = "fsync")]
     pub fn sync(&self) -> Result<(), Error> {
         // A barrier over writes the operations that made them already accounted
@@ -2927,11 +2920,11 @@ impl File {
     /// released once the last handle derived from this file is also dropped.
     ///
     /// After `close`, a write through any surviving [`Dataset`]/[`Group`] handle
-    /// or [`File`] clone returns [`Error::FileClosed`](crate::Error::FileClosed);
+    /// or [`File`] clone returns [`Error::FileClosed`], and
     /// reads still work. `close` commits, so the one handle a commit ends ends
     /// here too: one reached by [`Dataset::dereference`] reports
-    /// [`Error::StaleHandle`](crate::Error::StaleHandle) afterwards, where a
-    /// handle opened by path re-resolves and keeps reading.
+    /// [`Error::StaleHandle`] afterwards, where a handle opened by path
+    /// re-resolves and keeps reading.
     pub fn close(self) -> Result<(), Error> {
         if matches!(self.inner.backend, Backend::Edit(_)) {
             // SWMR mode stages nothing — the staged surface is refused — so there
@@ -2969,11 +2962,10 @@ impl File {
 
     /// Run `f` with the locked write session of a read-write file. `staged`
     /// distinguishes an edit applied by [`commit`](Self::commit) from an immediate
-    /// one. Returns [`Error::ReadOnly`](crate::Error::ReadOnly) for a read-only
-    /// file, [`Error::FileClosed`](crate::Error::FileClosed) once the file is
-    /// sealed by [`close`](Self::close), and
-    /// [`Error::SwmrStagedUnsupported`](crate::Error::SwmrStagedUnsupported) for a
-    /// staged edit on a SWMR-writer file.
+    /// one. Returns [`Error::ReadOnly`] for a read-only file,
+    /// [`Error::FileClosed`] once the file is sealed by [`close`](Self::close),
+    /// and [`Error::SwmrStagedUnsupported`] for a staged edit on a SWMR-writer
+    /// file.
     fn with_mirror_session<R>(
         &self,
         change: Change,
@@ -3249,7 +3241,7 @@ impl File {
 ///
 /// Non-exhaustive: a reference can name an object kind this crate does not yet
 /// resolve — a committed (named) datatype is refused with
-/// [`FormatError::InvalidObjectReference`](crate::FormatError::InvalidObjectReference)
+/// [`FormatError::InvalidObjectReference`]
 /// today — so match with a `_` arm.
 #[non_exhaustive]
 pub enum Object {
@@ -3465,9 +3457,9 @@ impl Group {
     /// It addresses the group by name from the moment it is staged: further
     /// creations, deletions and attribute edits under it are staged through it
     /// like any other handle. Anything that has to *read* the group reports
-    /// [`Error::NotCommitted`](crate::Error::NotCommitted) until
-    /// [`File::commit`], after which the first use resolves the path and the
-    /// handle behaves as if it had been opened by name.
+    /// [`Error::NotCommitted`] until [`File::commit`], after which the first use
+    /// resolves the path and the handle behaves as if it had been opened by
+    /// name.
     ///
     /// The session's staged generation is taken here so that the handle can tell
     /// that commit from a *withdrawal* of the same staging, which leaves the
@@ -3485,16 +3477,15 @@ impl Group {
     /// out again from its path if an edit could have moved it since the memo was
     /// taken. Also what resolves an object reference that points at this group.
     ///
-    /// Returns [`Error::StaleHandle`](crate::Error::StaleHandle) for a handle
+    /// Returns [`Error::StaleHandle`] for a handle
     /// that has no path to re-resolve — one an object reference produced — once
     /// a commit has run under it, and the resolution's own error (a
     /// `PathNotFound`, say, for a group a commit deleted) when the path no
     /// longer names anything. A group this session has staged and not committed
-    /// has no header at all, and that is
-    /// [`Error::NotCommitted`](crate::Error::NotCommitted). A commit that
+    /// has no header at all, and that is [`Error::NotCommitted`]. A commit that
     /// replaces this group with a dataset of the same name (issue #305) leaves
     /// the path naming something that is not a group, and that is
-    /// [`Error::NotAGroup`](crate::Error::NotAGroup).
+    /// [`Error::NotAGroup`].
     pub(crate) fn header_address(&self) -> Result<u64, Error> {
         let memo = *self.state.read().unwrap_or_else(PoisonError::into_inner);
         if let Some(memo) = memo {
@@ -4013,10 +4004,10 @@ impl Group {
     /// fills in (`create_group("a/b")` leaves `a` unaddressable until then).
     /// Reading it
     /// — its attributes, or a member's data — reports
-    /// [`Error::NotCommitted`](crate::Error::NotCommitted) until the commit,
+    /// [`Error::NotCommitted`] until the commit,
     /// after which the same handle answers for the group in the file. Deleting
     /// it before the commit withdraws the staging, and the handle then reports
-    /// [`Error::StagingWithdrawn`](crate::Error::StagingWithdrawn) rather than
+    /// [`Error::StagingWithdrawn`] without
     /// answering for whatever else the path may name.
     ///
     /// **The handle keeps the file's exclusive OS lock alive**, as every
@@ -4028,9 +4019,9 @@ impl Group {
     /// one call instead.
     ///
     /// Requires a read-write file ([`File::open_rw`]), else
-    /// [`Error::ReadOnly`](crate::Error::ReadOnly). A name the file already
+    /// [`Error::ReadOnly`]. A name the file already
     /// links to is refused here with
-    /// [`Error::EditUnsupported`](crate::Error::EditUnsupported) unless this
+    /// [`Error::EditUnsupported`] unless this
     /// session also deletes it — a [replacement](Self::delete) — since there
     /// would otherwise be no new object for the handle to address. A name this
     /// session already staged a *dataset* at is refused for the same reason —
@@ -4076,9 +4067,9 @@ impl Group {
     /// every [`Group`] and [`Dataset`] handle does; see [`File::close`].
     ///
     /// Requires a read-write file ([`File::open_rw`]), else
-    /// [`Error::ReadOnly`](crate::Error::ReadOnly). Name collisions are refused
-    /// on [`create_group`](Self::create_group)'s terms, for the group this
-    /// creates and for everything the closure stages under it.
+    /// [`Error::ReadOnly`]. Name collisions are rejected on
+    /// [`create_group`](Self::create_group)'s terms, for the group this creates
+    /// and for everything the closure stages under it.
     ///
     /// ```no_run
     /// # use hdf5_pure::{AttrValue, File};
@@ -4120,10 +4111,9 @@ impl Group {
     /// more elements into the pending creation. Anything that reads the
     /// dataset's bytes — a `read_*`, its attributes, an immediate
     /// [`append`](Dataset::append) — reports
-    /// [`Error::NotCommitted`](crate::Error::NotCommitted) until the commit,
-    /// after which the same handle reads the dataset in the file. Deleting it
-    /// before the commit withdraws the staging, and the handle then reports
-    /// [`Error::StagingWithdrawn`](crate::Error::StagingWithdrawn) rather than
+    /// [`Error::NotCommitted`] until the commit, after which the same handle
+    /// reads the dataset in the file. Deleting it before the commit withdraws the
+    /// staging, and the handle then reports [`Error::StagingWithdrawn`] without
     /// answering for whatever else the path may name.
     ///
     /// **The handle keeps the file's exclusive OS lock alive**, as every
@@ -4136,9 +4126,9 @@ impl Group {
     /// [`File`] — it will see the file as it was before this call.
     ///
     /// Requires a read-write file ([`File::open_rw`]), else
-    /// [`Error::ReadOnly`](crate::Error::ReadOnly). A name the file already
+    /// [`Error::ReadOnly`]. A name the file already
     /// links to is refused here with
-    /// [`Error::EditUnsupported`](crate::Error::EditUnsupported) unless this
+    /// [`Error::EditUnsupported`] unless this
     /// session also deletes it — a [replacement](Self::delete) — since there
     /// would otherwise be no new dataset for the handle to address. A name this
     /// session already staged a creation at is refused for the same reason:
@@ -4198,7 +4188,7 @@ impl Group {
     /// children go with it — since there is no link in the file to unlink. Where
     /// the deletion was part of a replacement, the plain deletion of the file's
     /// own object is what remains. A handle onto the withdrawn creation reports
-    /// [`Error::StagingWithdrawn`](crate::Error::StagingWithdrawn) from then on:
+    /// [`Error::StagingWithdrawn`] from then on:
     /// it names nothing, and the object the file holds at that path is the one
     /// this session is removing.
     ///
@@ -4227,7 +4217,7 @@ impl Group {
     /// [`root`](File::root) group's attributes are edited the same way.
     ///
     /// Requires a read-write file ([`File::open_rw`]), else
-    /// [`Error::ReadOnly`](crate::Error::ReadOnly). An attribute set too large
+    /// [`Error::ReadOnly`]. An attribute set too large
     /// for the object header — more than eight attributes, or one whose message
     /// the header's 2-byte size field cannot describe — is written to a fractal
     /// heap on `commit`, as it is when the whole file is written, and a group
@@ -4243,8 +4233,8 @@ impl Group {
     }
 
     /// Run `f` with the writable session and the root-relative path of child
-    /// `name`. Returns [`Error::ReadOnly`](crate::Error::ReadOnly) if the file is
-    /// read-only or this group has no resolvable path.
+    /// `name`. Returns [`Error::ReadOnly`] if the file is read-only or this
+    /// group has no resolvable path.
     fn with_child_session<R>(
         &self,
         name: &str,
@@ -4313,9 +4303,9 @@ impl Group {
 
     /// Run `f` with the writable session and this group's *own* root-relative
     /// path (for attribute edits, which act on the group itself rather than a
-    /// child). Returns [`Error::ReadOnly`](crate::Error::ReadOnly) if the file is
-    /// read-only or this group has no resolvable path, and
-    /// [`Error::FileClosed`](crate::Error::FileClosed) once the file is sealed.
+    /// child). Returns [`Error::ReadOnly`] if the file is read-only or this
+    /// group has no resolvable path, and [`Error::FileClosed`] once the file is
+    /// sealed.
     fn with_own_session<R>(
         &self,
         f: impl FnOnce(&mut WriteEngine, &str) -> Result<R, Error>,
@@ -4585,9 +4575,9 @@ impl Dataset {
     /// It answers the questions the staged builder already settles — shape,
     /// maximum shape, datatype, whether the storage is chunked and which filters
     /// it carries — and stages further edits on the pending creation. Everything
-    /// that needs bytes reports [`Error::NotCommitted`](crate::Error::NotCommitted)
-    /// until [`File::commit`], after which the first use resolves the path and
-    /// the handle behaves as if it had been opened by name.
+    /// that needs bytes reports [`Error::NotCommitted`] until [`File::commit`],
+    /// after which the first use resolves the path and the handle behaves as if
+    /// it had been opened by name.
     fn pending(file: Arc<FileInner>, chunk_cache_config: ChunkCacheConfig, path: String) -> Self {
         Self {
             staged_birth: file.staged_generation(),
@@ -4636,16 +4626,14 @@ impl Dataset {
     /// This dataset's address and parsed header, worked out again if the file
     /// has changed since the memo was taken.
     ///
-    /// Returns [`Error::StaleHandle`](crate::Error::StaleHandle) for a handle
+    /// Returns [`Error::StaleHandle`] for a handle
     /// that has no path to re-resolve — one an object reference produced — once
     /// a commit has run under it, and the resolution's own error (a
     /// `PathNotFound`, say, for a dataset a commit deleted) when the path no
     /// longer names anything. A dataset this session has staged and not
     /// committed has no header at all, and that is
-    /// [`Error::NotCommitted`](crate::Error::NotCommitted). A path that now
-    /// names something other than a dataset is
-    /// [`Error::NotADataset`](crate::Error::NotADataset), the same answer
-    /// opening it afresh would give.
+    /// [`Error::NotCommitted`]. A path that now names something other than a
+    /// dataset is [`Error::NotADataset`], the error opening it afresh reports.
     fn resolved(&self) -> Result<Arc<DatasetState>, Error> {
         let live = self.file.content_revision();
         let memo = {
@@ -4709,15 +4697,15 @@ impl Dataset {
     ///
     /// The file must have been opened for writing with [`File::open_rw`];
     /// a read-only file returns
-    /// [`Error::ReadOnly`](crate::Error::ReadOnly). The target must be a chunked,
+    /// [`Error::ReadOnly`]. The target must be a chunked,
     /// rank-1, unlimited, Extensible-Array-indexed dataset; anything else returns
-    /// [`Error::AppendInPlaceUnsupported`](crate::Error::AppendInPlaceUnsupported).
+    /// [`Error::AppendInPlaceUnsupported`].
     /// Both the dataset's current length and the appended length are
     /// unconstrained, on a filtered dataset as much as an unfiltered one: a
     /// partial trailing chunk is rewritten into a fresh allocation — decoded,
     /// extended and re-encoded when there is a filter pipeline — and its index
     /// element is repointed once those bytes are on the disk. The bytes the old
-    /// chunk occupied are left for [`repack`](crate::repack).
+    /// chunk occupied are left for [`repack`](crate::repack()).
     ///
     /// Two things still require a chunk-aligned starting length. A **lossy**
     /// pipeline (ZFP, or float D-scale scale-offset) is refused, because
@@ -4729,12 +4717,11 @@ impl Dataset {
     /// [`append_staged`](Self::append_staged).
     ///
     /// The append is immediate and crash-atomic (no `commit` needed) — under the
-    /// default [`SyncPolicy::Always`]. Under
-    /// [`SyncPolicy::OnClose`](crate::SyncPolicy::OnClose) the same writes are made
-    /// in the same order without the `fsync` barriers between them, so the
-    /// append is still immediate and still crash-atomic against *this process*
-    /// failing, but ordering it against power loss is the caller's, through
-    /// [`File::sync`].
+    /// default [`SyncPolicy::Always`]. Under [`SyncPolicy::OnClose`] the same
+    /// writes are made in the same order without the `fsync` barriers between
+    /// them, so the append is still immediate and still crash-atomic against
+    /// *this process* failing, but ordering it against power loss is the
+    /// caller's, through [`File::sync`].
     ///
     /// A **SWMR** writer ([`File::open_swmr_writer`]) keeps the narrower rule it
     /// always had — unfiltered, and chunk-aligned at both ends — because its
@@ -4923,8 +4910,8 @@ impl Dataset {
     /// data must match the dataset's existing shape and datatype.
     ///
     /// The file must have been opened with [`File::open_rw`], else
-    /// [`Error::ReadOnly`](crate::Error::ReadOnly). Unlike [`append`](Self::append)
-    /// (immediate), this is a staged edit applied on [`File::commit`].
+    /// [`Error::ReadOnly`]. Unlike [`append`](Self::append) (immediate), this is
+    /// a staged edit applied on [`File::commit`].
     pub fn write<T: H5Element>(&mut self, data: &[T]) -> Result<(), Error> {
         // Build off the lock, as `write_staged` does: `write_into` is trait
         // code reached with no lock held, keeping both paths identical.
@@ -4960,7 +4947,7 @@ impl Dataset {
     /// strings in a session does not grow the file without bound. The
     /// collections it held when the session *opened* are not reclaimed — a
     /// collection can be shared between objects, and only this session's own
-    /// placements are known not to be — so [`repack`](crate::repack) is what
+    /// placements are known not to be, so [`repack`](crate::repack()) is what
     /// recovers those.
     ///
     /// The reference refusal is on the builder, not on the datatype it produces:
@@ -4974,7 +4961,7 @@ impl Dataset {
     /// a path already got by name.
     ///
     /// The file must have been opened with [`File::open_rw`], else
-    /// [`Error::ReadOnly`](crate::Error::ReadOnly).
+    /// [`Error::ReadOnly`].
     ///
     /// ```no_run
     /// # use hdf5_pure::File;
@@ -5017,14 +5004,13 @@ impl Dataset {
     /// edits staged beside it are unaffected.
     /// Configure the appended elements through `build` on the
     /// [`AppendBuilder`]; repeated calls within the builder concatenate in
-    /// order. The dataset must be chunked, unlimited
-    /// along axis 0, Extensible-Array indexed, rank 1, use a re-encodable filter
-    /// pipeline, and have a single hard link, otherwise
-    /// [`Error::AppendUnsupported`](crate::Error::AppendUnsupported) is returned
-    /// on [`File::commit`].
+    /// order. The dataset must be chunked, unlimited along axis 0,
+    /// Extensible-Array indexed, rank 1, use a re-encodable filter pipeline, and
+    /// have a single hard link, otherwise [`Error::AppendUnsupported`] is
+    /// returned on [`File::commit`].
     ///
     /// The file must have been opened with [`File::open_rw`], else
-    /// [`Error::ReadOnly`](crate::Error::ReadOnly).
+    /// [`Error::ReadOnly`].
     /// The closure configures a standalone builder, not the file, so it may read
     /// the same [`File`]; nothing it stages resolves until [`File::commit`].
     pub fn append_staged(&mut self, build: impl FnOnce(&mut AppendBuilder)) -> Result<(), Error> {
@@ -5060,7 +5046,7 @@ impl Dataset {
     /// heap, exactly as [`Group::set_attr`] does.
     ///
     /// The file must have been opened with [`File::open_rw`], else
-    /// [`Error::ReadOnly`](crate::Error::ReadOnly).
+    /// [`Error::ReadOnly`].
     pub fn set_attr(&mut self, name: &str, value: AttrValue) -> Result<(), Error> {
         self.refuse_if_pending()?;
         self.with_session_mut(|session, path| session.set_dataset_attr(path, name, value))
@@ -5117,9 +5103,9 @@ the same commit to replace it",
 
     /// Run `f` with the writable session and this dataset's path, then refresh
     /// the cached header so a later read on this handle reflects any immediate
-    /// change (e.g. an append's new dimension). Returns
-    /// [`Error::ReadOnly`](crate::Error::ReadOnly) if the file is read-only or the
-    /// handle has no resolvable path (reached by object reference).
+    /// change (e.g. an append's new dimension). Returns [`Error::ReadOnly`] if
+    /// the file is read-only or the handle has no resolvable path (reached by
+    /// object reference).
     fn with_session_mut<R>(
         &mut self,
         f: impl FnOnce(&mut WriteEngine, &str) -> Result<R, Error>,
@@ -5464,6 +5450,8 @@ the same commit to replace it",
     /// returns `None` and the region reads as deterministic zeros rather than as
     /// a value nothing ever put there. `fill_value` still reports the declared
     /// value, because it *is* declared; see [`fill_value_is_written`].
+    ///
+    /// [`fill_value_is_written`]: crate::fill_value::fill_value_is_written
     fn fill_bytes(&self) -> Result<Option<Vec<u8>>, Error> {
         let state = self.resolved()?;
         let msg = state

@@ -515,7 +515,7 @@ impl ObjectHeader {
     }
 
     /// How many messages the chunk `[start, end)` holds, by the same stepping
-    /// [`parse_v2_messages`] does.
+    /// [`parse_v2_messages`](Self::parse_v2_messages) does.
     ///
     /// Walking the chunk a second time buys the parse one allocation instead of
     /// a doubling sequence: a group stores one Link message per child, so a

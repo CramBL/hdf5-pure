@@ -96,7 +96,7 @@ pub struct MatBuilder {
     /// Names already used at the file root.
     root_used_names: HashSet<String>,
     /// Stack of open struct groups. The deepest is the current write target
-    /// when [`next_target`] is `None`.
+    /// when [`next_target`](Self::next_target) is `None`.
     open_structs: Vec<OpenStruct>,
     /// Single-use override for the next `write_*` / `struct_` / `cell` call.
     /// Set by [`CellWriter`] before pushing a cell element; consumed by the

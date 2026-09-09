@@ -2048,7 +2048,7 @@ pub struct ProvenanceConfig {
 /// per-chunk sizes/masks (enough to plan the destination layout without reading
 /// any bytes), a provider that yields each chunk's bytes on demand at write time,
 /// the source filter-pipeline message, and the chunk geometry. Built by repack
-/// from a source [`Dataset`].
+/// from a source [`Dataset`](crate::Dataset).
 pub(crate) struct RawChunkPayload {
     /// Logical chunk dimensions (rank entries, not the trailing element size).
     pub(crate) chunk_dims: Vec<u64>,
@@ -3045,7 +3045,7 @@ impl DatasetBuilder {
     ///
     /// The shape and the staged element data have to agree on the element
     /// count, or the write is refused with
-    /// [`FormatError::ShapeDataMismatch`](crate::FormatError::ShapeDataMismatch).
+    /// [`FormatError::ShapeDataMismatch`].
     /// A shape holding a zero dimension declares no elements and is held to that
     /// same rule: stage an empty slice, or no data at all beside a
     /// [`with_dtype`](Self::with_dtype), rather than data with nowhere to go.
@@ -3164,7 +3164,7 @@ impl DatasetBuilder {
     /// datatype when the file is written, so the mode must match the data
     /// (integer mode on `with_i*`/`with_u*` data, float mode on
     /// `with_f32`/`with_f64` data) or `finish()` / `write()` returns a
-    /// [`FormatError`](crate::FormatError). Scale-offset consumes the raw
+    /// [`FormatError`]. Scale-offset consumes the raw
     /// elements itself, so it is mutually exclusive with
     /// [`with_zfp`](Self::with_zfp) and [`with_shuffle`](Self::with_shuffle) —
     /// requesting either alongside it makes the write fail with a filter error
@@ -3196,9 +3196,8 @@ impl DatasetBuilder {
     /// The scalar type is derived from the dataset's datatype when the file
     /// is written, so any of `with_{f32,f64,i32,i64}_data` or an explicit
     /// `with_dtype` establishes it. `finish()` / `write()` returns
-    /// [`FormatError::UnsupportedZfp`](crate::FormatError::UnsupportedZfp) if
-    /// the dataset's datatype isn't one of the four supported scalar types,
-    /// or if the chunk rank is outside 1..=4.
+    /// [`FormatError::UnsupportedZfp`] if the dataset's datatype isn't one of
+    /// the four supported scalar types, or if the chunk rank is outside 1..=4.
     ///
     /// The resulting file is byte-compatible with the reference H5Z-ZFP
     /// plugin (HDF5 filter ID 32013): other tools like h5py + hdf5plugin

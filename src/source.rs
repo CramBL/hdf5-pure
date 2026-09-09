@@ -232,7 +232,7 @@ impl MetadataCacheStats {
 /// seam this crate's own bounded metadata cache hangs on, and they come as a
 /// set: overriding the first without the other two reports *no* cache where
 /// there is a full one. To have metadata reads cached, ask for it with a
-/// [`MetadataCacheConfig`](crate::MetadataCacheConfig) through
+/// [`MetadataCacheConfig`] through
 /// [`File::from_source_with_options`](crate::File::from_source_with_options),
 /// which wraps the source in an implementation of all three.
 #[expect(

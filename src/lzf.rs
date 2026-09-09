@@ -45,10 +45,10 @@ const HASH_TABLE_BITS: u32 = HASH_TABLE_SLOTS.trailing_zeros();
 /// bounds the stream as a whole.
 pub(crate) const MAX_EXPANSION: usize = MAX_MATCH_LEN / 3;
 
-/// h5py's `H5PY_FILTER_LZF_VERSION` (lzf/lzf_filter.h), cd_values[0].
+/// h5py's `H5PY_FILTER_LZF_VERSION` (lzf/lzf_filter.h), `cd_values[0]`.
 const H5PY_FILTER_LZF_VERSION: u32 = 4;
 
-/// liblzf's `LZF_VERSION` (0x0105), cd_values[1] per h5py's `lzf_set_local`.
+/// liblzf's `LZF_VERSION` (0x0105), `cd_values[1]` per h5py's `lzf_set_local`.
 const LIBLZF_API_VERSION: u32 = 0x0105;
 
 /// cd_values as h5py's `lzf_set_local` records them: `[filter version, liblzf
