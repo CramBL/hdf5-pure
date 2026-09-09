@@ -102,8 +102,8 @@ shown above, is available on `wasm32-unknown-unknown`.
     The `ndarray` and `serde` features both imply `std`, because they build on
     the path-based `File` / `Dataset` reader and writer APIs. See the
     [features reference](../reference/features.md) for the full feature matrix
-    and the [installation guide](../getting-started/installation.md) for
-    dependency setup.
+    and the [Installation section of the README](https://github.com/CramBL/hdf5-pure#installation)
+    for dependency setup.
 
 ## Reference-library interoperability
 
