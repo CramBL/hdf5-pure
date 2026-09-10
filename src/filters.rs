@@ -749,52 +749,40 @@ fn shuffle_compress(data: &[u8], element_size: usize) -> Result<Vec<u8>, FormatE
     Ok(result)
 }
 
-/// Compute HDF5 Fletcher32 checksum over data.
-/// HDF5 uses a modified Fletcher32 that operates on 16-bit words.
+/// Computes the HDF5 Fletcher32 checksum of `data`.
 ///
-/// Optimized with wider accumulators: processes blocks of 360 words before
-/// taking the modulo, reducing the number of expensive modulo operations.
-/// (360 is the maximum block size that avoids u32 overflow for sum2.)
+/// HDF5 uses a modified Fletcher32 algorithm that operates on 16-bit words.
+/// Blocks of up to 360 words are accumulated before folding each 32-bit sum into
+/// 16 bits, matching `H5_checksum_fletcher32` (`H5checksum.c`, HDF5 2.2.0).
 fn fletcher32_compute(data: &[u8]) -> u32 {
     let mut sum1: u32 = 0;
     let mut sum2: u32 = 0;
 
-    // Process in blocks of 360 16-bit words (720 bytes) to delay modulo.
-    // Max sum1 before mod: 360 * 65535 = 23_592_600 < u32::MAX
-    // Max sum2 before mod: 360 * 23_592_600 ~ 8.5B > u32::MAX, but actual
-    // sum2 accumulates incrementally, so worst case is 360*360*65535/2 which
-    // fits in u64. We use u32 with block size 360 which is safe.
-    const BLOCK_WORDS: usize = 360;
-    const BLOCK_BYTES: usize = BLOCK_WORDS * 2;
-
+    let mut words = data.len() / 2;
     let mut offset = 0;
-    let len = data.len();
 
-    while offset + BLOCK_BYTES <= len {
-        let end = offset + BLOCK_BYTES;
-        let mut i = offset;
-        while i < end {
-            let val = ((data[i] as u32) << 8) | (data[i + 1] as u32);
+    while words > 0 {
+        let tlen = core::cmp::min(words, 360);
+        words -= tlen;
+        for _ in 0..tlen {
+            let val = ((data[offset] as u32) << 8) | (data[offset + 1] as u32);
+            offset += 2;
             sum1 += val;
             sum2 += sum1;
-            i += 2;
         }
-        sum1 %= 65535;
-        sum2 %= 65535;
-        offset = end;
+        sum1 = (sum1 & 0xffff) + (sum1 >> 16);
+        sum2 = (sum2 & 0xffff) + (sum2 >> 16);
     }
 
-    // Handle remaining bytes
-    while offset < len {
-        let val = if offset + 1 < len {
-            ((data[offset] as u32) << 8) | (data[offset + 1] as u32)
-        } else {
-            (data[offset] as u32) << 8
-        };
-        sum1 = (sum1 + val) % 65535;
-        sum2 = (sum2 + sum1) % 65535;
-        offset += 2;
+    if data.len() % 2 != 0 {
+        sum1 += (data[offset] as u32) << 8;
+        sum2 += sum1;
+        sum1 = (sum1 & 0xffff) + (sum1 >> 16);
+        sum2 = (sum2 & 0xffff) + (sum2 >> 16);
     }
+
+    sum1 = (sum1 & 0xffff) + (sum1 >> 16);
+    sum2 = (sum2 & 0xffff) + (sum2 >> 16);
 
     (sum2 << 16) | sum1
 }
@@ -1018,6 +1006,21 @@ mod tests {
             result,
             Err(FormatError::Fletcher32Mismatch { .. })
         ));
+    }
+
+    #[test]
+    fn fletcher32_all_ones_reduction_folds_to_all_ones() {
+        let data = vec![0xFFu8; 4];
+        let with_checksum = fletcher32_append(&data).unwrap();
+        let checksum = u32::from_le_bytes([
+            with_checksum[4],
+            with_checksum[5],
+            with_checksum[6],
+            with_checksum[7],
+        ]);
+        assert_eq!(checksum, 0xFFFF_FFFF);
+        let verified = fletcher32_verify(&with_checksum).unwrap();
+        assert_eq!(verified, data);
     }
 
     // --- Pipeline tests ---
