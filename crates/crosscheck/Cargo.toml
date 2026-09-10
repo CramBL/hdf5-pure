@@ -42,6 +42,7 @@ tempfile = "3"
 serde = { version = "1", features = ["derive"] }
 ndarray = ">=0.16, <0.18"
 proptest = "1"
+rstest = "0.27"
 
 [[test]]
 name = "libver_matrix"
