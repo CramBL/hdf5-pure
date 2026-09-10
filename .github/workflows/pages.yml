@@ -1,0 +1,52 @@
+name: Pages
+
+# Publish the page under .github/pages/ to GitHub Pages, where it redirects
+# every address of the retired documentation site to docs.rs.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/pages/**
+      - .github/workflows/pages.yml
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+# One deployment at a time, and a started one runs to its end: a deployment that
+# has begun is publishing to the live site.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: deploy / github-pages
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Configure Pages
+        uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6.0.0
+
+      # index.html serves the root, and 404.html every other path.
+      - name: Upload the redirect
+        uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+        with:
+          path: .github/pages
+
+      - name: Deploy
+        id: deployment
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1
