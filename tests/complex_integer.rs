@@ -142,7 +142,7 @@ fn an_empty_array_keeps_its_component_class() {
     // `MATLAB_empty=1`, keeping the plain class name, and libmatio reads that
     // form back as complex `int16` too. Pinning the shape we write here so the
     // divergence is visible rather than assumed — see the empty-array note in
-    // `docs/interop/matlab.md`.
+    // the `mat` module documentation, under "How an empty value is stored".
     assert!(!ds.attrs().unwrap().contains_key("MATLAB_empty"));
 }
 

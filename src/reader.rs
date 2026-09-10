@@ -8737,9 +8737,9 @@ mod tests {
         );
     }
 
-    /// The same, for row windows: `docs/guide/streaming.md` walks a dataset in
-    /// windows on one handle, so every window but the first takes its chunk
-    /// list from the cached index.
+    /// The same, for row windows: the [streaming guide](crate::_guide::streaming) walks a
+    /// dataset in windows on one handle, so every window but the first takes its chunk list from
+    /// the cached index.
     ///
     /// Each window here covers more than one span, which is what it takes to
     /// see the defect: a window whose chunks all fit a single span is served

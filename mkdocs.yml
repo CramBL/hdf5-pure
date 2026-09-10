@@ -128,11 +128,5 @@ markdown_extensions:
   - pymdownx.tilde
 
 nav:
-  - Interoperability:
-      - MATLAB v7.3 (.mat): interop/matlab.md
   - Reference:
-      - Data Types: reference/data-types.md
-      - Cargo Features: reference/features.md
-      - File Properties (fapl/fcpl/dapl): reference/property-support.md
-      - Limitations: reference/limitations.md
       - API Reference (docs.rs): https://docs.rs/hdf5-pure
