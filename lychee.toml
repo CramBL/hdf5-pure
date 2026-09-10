@@ -6,9 +6,7 @@ max_retries = 5
 retry_wait_time = 2
 accept = ["200..=299", "429"]
 
-# CONTRIBUTING.md links the local preview of the documentation site, and the
-# installation guide repeats the address in a shell block, which the
-# added-lines check reads as plain text. Neither run requests it.
+# The link checks skip a private or local address, which belongs to a machine and not the web.
 exclude_all_private = true
 
 exclude = [
