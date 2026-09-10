@@ -693,6 +693,51 @@ fn crosscheck_shuffle_deflate() {
     }
 }
 
+#[test]
+fn crosscheck_fletcher32_all_ones_written_by_pure_read_by_c() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("fletcher32_ones.h5");
+
+    let data = vec![-1i32; 128];
+    let mut builder = FileBuilder::new();
+    builder
+        .create_dataset("data")
+        .with_i32_data(&data)
+        .with_chunks(&[64])
+        .with_fletcher32();
+    builder.write(&path).unwrap();
+
+    let file = hdf5::File::open(&path).unwrap();
+    let ds = file.dataset("data").unwrap();
+    let values = ds.read_raw::<i32>().unwrap();
+    assert_eq!(values, data);
+}
+
+#[test]
+fn crosscheck_fletcher32_all_ones_written_by_c_read_by_pure() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("c_fletcher32_ones.h5");
+
+    let data = vec![-1i32; 128];
+    {
+        let file = hdf5::File::create(&path).unwrap();
+        let ds = file
+            .new_dataset::<i32>()
+            .chunk([64])
+            .shape([128])
+            .fletcher32()
+            .create("data")
+            .unwrap();
+        ds.write_raw(data.as_slice()).unwrap();
+        file.close().unwrap();
+    }
+
+    let bytes = std::fs::read(&path).unwrap();
+    let file = File::from_bytes(bytes).unwrap();
+    let ds = file.dataset("data").unwrap();
+    assert_eq!(ds.read_i32().unwrap(), data);
+}
+
 // ---------------------------------------------------------------------------
 // Compound types (complex numbers)
 // ---------------------------------------------------------------------------
