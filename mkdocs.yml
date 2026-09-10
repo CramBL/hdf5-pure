@@ -132,7 +132,6 @@ nav:
       - Generic Element I/O: guide/generic-io.md
       - N-dimensional Arrays: guide/ndarray.md
       - Reclaiming Space (repack): guide/repack.md
-      - File-Space Strategy: guide/file-space.md
       - SWMR: guide/swmr.md
   - Interoperability:
       - MATLAB v7.3 (.mat): interop/matlab.md

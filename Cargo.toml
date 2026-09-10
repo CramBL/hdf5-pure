@@ -21,6 +21,7 @@ include = [
     "/docs/guide/compound-types.md",
     "/docs/guide/compression.md",
     "/docs/guide/editing.md",
+    "/docs/guide/file-space.md",
     "/docs/guide/groups-attributes.md",
     "/docs/guide/reading.md",
     "/docs/guide/streaming.md",
