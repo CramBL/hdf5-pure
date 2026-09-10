@@ -12,8 +12,8 @@ keywords = ["hdf5", "serialization", "scientific", "no-std", "wasm"]
 categories = ["science", "encoding", "filesystem", "wasm", "no-std"]
 build = "build.rs"
 # What the published crate holds: the library, its build script, the examples, the guide pages
-# `src/_guide/` includes into the documentation, and the documents a user reads. Tests, test data,
-# tooling and the rest of the docs site stay in the repository.
+# `src/_guide/` includes into the documentation, and the documents a user reads. Tests, test data
+# and tooling stay in the repository.
 include = [
     "/src/**",
     "/build.rs",
