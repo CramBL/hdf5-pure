@@ -138,10 +138,10 @@ use crate::libver::LibVer;
 /// - Free space is under-reported and never over-reported. A final metadata-page tail and the old
 ///   bytes of a relocated partial chunk are left untracked, so `H5Fget_freespace` can read slightly
 ///   low. The file stays valid.
-/// - **`threshold` is advisory** (see the table above).
-/// - Only **File Space Info message version 1** is emitted and read.
+/// - `threshold` is advisory, as the table above says.
+/// - File Space Info message version 1 is the only one emitted and read.
 ///
-/// The limitations catalog has the full set of deliberate refusals.
+/// [Limitations](crate#limitations) has the full set of deliberate rejections.
 ///
 /// # Examples
 ///

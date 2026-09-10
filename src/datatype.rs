@@ -87,16 +87,16 @@ pub struct EnumMember {
 /// [`DatasetBuilder`](crate::DatasetBuilder) and [`Dataset`](crate::Dataset).
 /// [`type_size`](Self::type_size) returns the on-disk size in bytes, and the `make_*_type`
 /// constructors ([`make_f64_type`](crate::make_f64_type) and its siblings) return the canonical
-/// little-endian type for each Rust scalar, which are the building blocks for the compound,
-/// enumeration and array types [`CompoundTypeBuilder`](crate::CompoundTypeBuilder) and
-/// [`EnumTypeBuilder`](crate::EnumTypeBuilder) assemble.
+/// little-endian type for each Rust scalar. Those scalars are the field types
+/// [`CompoundTypeBuilder`](crate::CompoundTypeBuilder) assembles and the base types
+/// [`EnumTypeBuilder`](crate::EnumTypeBuilder) builds over, and
+/// [`DatasetBuilder::with_array_data`](crate::DatasetBuilder::with_array_data) builds an array
+/// type over one.
 ///
-/// A [`FixedPoint`](Self::FixedPoint) or [`FloatingPoint`](Self::FloatingPoint) element **wider
-/// than 8 bytes** parses and reports its type like any other, but the typed *numeric* readers
-/// refuse to decode it rather than return part of a value
-/// ([`Dataset::read_raw`](crate::Dataset::read_raw), [`read_u8`](crate::Dataset::read_u8) and
-/// [`read_i8`](crate::Dataset::read_i8) still hand back the bytes), which the limitations catalog
-/// covers under numeric element width.
+/// A [`FixedPoint`](Self::FixedPoint) or [`FloatingPoint`](Self::FloatingPoint) element wider than
+/// 8 bytes parses and reports its type as any other does, and the typed numeric readers reject it,
+/// since decoding it would return part of a value, which [Numeric element
+/// width](crate#numeric-element-width) covers.
 ///
 /// Non-exhaustive: the format's class set is not closed (HDF5 1.14.6 added a
 /// complex-number class), so match with a `_` arm. Only the *class* set is

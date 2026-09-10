@@ -15,7 +15,7 @@ This page's API is gated behind the `ndarray` feature, which is off by default. 
 hdf5-pure = { version = "0.44", features = ["ndarray"] }
 ```
 
-The crate depends on `ndarray` with a deliberately permissive version requirement, `>=0.16, <0.18`, so your project's existing `ndarray` unifies with the one this crate uses, and cargo builds a single copy. The features reference has the full list of optional features.
+The crate depends on `ndarray` with a deliberately permissive version requirement, `>=0.16, <0.18`, so your project's existing `ndarray` unifies with the one this crate uses, and cargo builds a single copy. [Cargo features](crate#cargo-features) has the full list of optional features.
 
 ## Writing arrays
 

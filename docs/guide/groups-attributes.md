@@ -45,7 +45,7 @@ The pattern is uniform at every level: build, finish, attach. A child must be fi
 
 See [Writing files](crate::_guide::writing) for the full dataset builder API used inside groups.
 
-There is no group creation property list: every group is written with the same fixed, timestamp-free, new-style layout regardless of settings or child count. The limitations reference has the details.
+There is no group creation property list: every group is written with the same fixed, timestamp-free, new-style layout regardless of settings or child count. [Group creation property list](crate#group-creation-property-list) has the details.
 
 ## Attributes
 
@@ -85,7 +85,7 @@ The [`AttrValue`](crate::AttrValue) variants and their HDF5 encodings are:
 | [`AttrValue::VarLenAsciiString`](crate::AttrValue::VarLenAsciiString) / [`AttrValue::VarLenAsciiStringArray`](crate::AttrValue::VarLenAsciiStringArray) | Variable-length ASCII string scalar / array (uses a global heap collection) |
 | [`AttrValue::VarLenAsciiCharArray`](crate::AttrValue::VarLenAsciiCharArray) | MATLAB's array of variable-length ASCII strings: a VLEN *sequence of one-byte strings* (uses a global heap collection) |
 
-[`AttrValue::AsciiString`](crate::AttrValue::AsciiString), [`AttrValue::AsciiStringArray`](crate::AttrValue::AsciiStringArray), and [`AttrValue::VarLenAsciiCharArray`](crate::AttrValue::VarLenAsciiCharArray) exist for compatibility with MATLAB and matio, which expect fixed-width or variable-length ASCII for certain conventional attributes. The data types reference has the full type mapping.
+[`AttrValue::AsciiString`](crate::AttrValue::AsciiString), [`AttrValue::AsciiStringArray`](crate::AttrValue::AsciiStringArray), and [`AttrValue::VarLenAsciiCharArray`](crate::AttrValue::VarLenAsciiCharArray) exist for compatibility with MATLAB and matio, which expect fixed-width or variable-length ASCII for certain conventional attributes. [HDF5 encodings](crate::AttrValue#hdf5-encodings) has the full type mapping.
 
 The two variable-length families differ in datatype, not in bytes. [`VarLenString`](crate::AttrValue::VarLenString) and its siblings write `H5T_STRING` with `STRSIZE = H5T_VARIABLE`, what h5py and the C library write, and what h5py reads back as a `str` and the C library as a `char *`. [`VarLenAsciiCharArray`](crate::AttrValue::VarLenAsciiCharArray) writes `H5T_VLEN { H5T_STRING { STRSIZE = 1 } }`, which MATLAB and matio expect for `MATLAB_fields` and its neighbors ([#383](https://github.com/CramBL/hdf5-pure/issues/383)).
 

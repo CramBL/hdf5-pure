@@ -123,7 +123,7 @@ fn decode_complex64(raw: &[u8]) -> Vec<(f64, f64)> {
 
 ## Enumerations, arrays, and references
 
-Several other structured dataset kinds round out the type system. The data types reference has the full set, and the writing helpers are summarized below.
+Several other structured dataset kinds round out the type system. [Element types](crate::DatasetBuilder#element-types) has the full set, and the writing helpers are summarized below.
 
 | Method | HDF5 type |
 |---|---|

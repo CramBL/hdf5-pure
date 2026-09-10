@@ -25,7 +25,7 @@ let values = ds.read_f64()?;  // only this dataset's chunks are read
 
 The reading API is identical to [`File::open`](crate::File::open), and only the backing store differs. Everything you can do with an in-memory file (see [Reading datasets](crate::_guide::reading)) applies here too.
 
-[`File::open_streaming`](crate::File::open_streaming) needs the `std` filesystem, so a `no_std` build cannot reach it. The features reference has the feature matrix.
+[`File::open_streaming`](crate::File::open_streaming) needs the `std` filesystem, so a `no_std` build cannot reach it. [Cargo features](crate#cargo-features) has the feature matrix.
 
 ## Streaming from something that is not a path
 
@@ -291,7 +291,7 @@ Which figure to read depends on the question:
 
 [`reset_metadata_cache_stats`](crate::File::reset_metadata_cache_stats) clears the counters and evicts nothing, so occupancy carries across it.
 
-Set the budget generously. The property-support reference goes through `H5AC_cache_config_t`'s adaptive-resize policy field by field, and why none of it is modeled.
+Set the budget generously. [The metadata cache](crate::FileAccessProperties#the-metadata-cache-h5pset_mdc_config) goes through `H5AC_cache_config_t`'s adaptive-resize policy field by field, and why none of it is modeled.
 
 ## Writing without buffering
 
@@ -346,4 +346,4 @@ The rest of the region stays zero-filled, and content longer than the userblock 
 - [Reading datasets](crate::_guide::reading) has the dataset read API shared between in-memory and streaming opens.
 - [Writing files](crate::_guide::writing) walks the [`FileBuilder`](crate::FileBuilder) workflow these output paths finish.
 - Reading string datasets is the subject of the [variable-length strings](crate::_guide::vlen_strings) guide.
-- The features reference lists the `std` feature requirement.
+- [Cargo features](crate#cargo-features) lists the `std` feature requirement.
