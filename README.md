@@ -572,7 +572,7 @@ v7.3 files and back:
 > release can open. A version 3 superblock is an HDF5 1.10 addition, and MATLAB
 > used HDF5 1.8.12 before R2021b, so the newer format is unreadable there. Set
 > `mat::Options::libver` to `LibVer::V110` to opt into it, which compression
-> requires. See [MATLAB interop](docs/interop/matlab.md).
+> requires. See the [`mat` module](https://docs.rs/hdf5-pure/latest/hdf5_pure/mat/).
 
 ```rust
 use hdf5_pure::mat::{self, Complex64, Matrix};
@@ -677,7 +677,7 @@ The high-level `File` / `FileBuilder` API is `std`-gated, so a `no_std` build ex
 
 ## Limitations
 
-Where `hdf5-pure` cannot yet handle something, it returns a clear typed error rather than producing a wrong result. The [Limitations & Unsupported Features](https://crambl.github.io/hdf5-pure/reference/limitations/) reference catalogs every such refusal, split into **deliberately unsupported** (by-design constraints and foreign-format guards) and **planned support** (deferred features, each tracked by an issue).
+Where `hdf5-pure` cannot handle something, it returns a typed error. The [Limitations](https://docs.rs/hdf5-pure/latest/hdf5_pure/#limitations) section of the crate documentation catalogs every such rejection, split into **deliberately unsupported** (by-design constraints and foreign-format guards) and **planned support** (deferred features, each tracked by an issue).
 
 ## Contributing
 
