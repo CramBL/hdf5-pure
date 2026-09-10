@@ -105,18 +105,18 @@ which, as shown above, is available on `wasm32-unknown-unknown`.
 
 The `ndarray` and `serde` features both imply `std`, because they build on the
 path-based [`File`](crate::File) / [`Dataset`](crate::Dataset) reader and writer
-APIs. The features reference has the full feature matrix, and the [Installation
-section of the README](https://github.com/CramBL/hdf5-pure#installation) covers
-dependency setup.
+APIs. [Cargo features](crate#cargo-features) has the full feature matrix, and
+the [Installation section of the README](https://github.com/CramBL/hdf5-pure#installation)
+covers dependency setup.
 
 ## Reference-library interoperability
 
-`hdf5-pure` does not define its own dialect of HDF5: it writes and reads the
-standard on-disk format. Files this crate writes are readable by the reference
-HDF5 C library and by `h5py`; files those tools produce are readable here. This
-holds for the format features the crate supports — multiple superblock versions,
-object header layouts, contiguous and chunked storage, and the built-in deflate,
-shuffle, and scale-offset filters, plus h5py's LZF.
+`hdf5-pure` writes and reads the standard on-disk format, and defines no dialect
+of its own. The reference HDF5 C library and `h5py` read the files this crate
+writes, and this crate reads the files those tools produce. That holds for the
+format features the crate supports: multiple superblock versions, object header
+layouts, contiguous and chunked storage, the built-in deflate, shuffle, and
+scale-offset filters, and h5py's LZF.
 
 MATLAB takes one more paragraph, since which HDF5 library it links has changed
 across releases and decides whether it opens a file at all. It was 1.8.12 before
@@ -128,25 +128,24 @@ every one of those releases reads, and
 [`FileBuilder::with_libver_bounds`](crate::FileBuilder::with_libver_bounds)
 reaches the same format for a plain `.h5` file destined for an old reader.
 Around R2021b MathWorks also shipped two libraries at once, keeping 1.8.12 on
-the MAT v7.3 path while `h5read`/`h5disp` used 1.10.7 — the split behind the odd
-symptom of a file `h5disp` prints and `load` refuses. That is not confined to
-R2021b: R2023a reports HDF5 1.10.8 and its `load` still refuses a version 3
-superblock, so the linked library version does not tell you which formats `load`
-accepts, which the MATLAB documentation covers under the on-disk format
-MATLAB's `load` needs. Real MATLAB writes an older format still: a version 0
-superblock with v1 symbol-table groups, which this crate reads but does not
-produce.
+the MAT v7.3 path while `h5read` and `h5disp` used 1.10.7, the split behind the
+odd symptom of a file `h5disp` prints and `load` rejects. R2021b is not alone in
+it: R2023a reports HDF5 1.10.8 and its `load` still rejects a version 3
+superblock, so the linked library version does not identify the formats `load`
+accepts, which the [`mat` module](crate::mat#the-on-disk-format-matlabs-load-needs)
+covers under the on-disk format MATLAB's `load` needs. MATLAB itself writes an
+older format still: a version 0 superblock with v1 symbol-table groups, which
+this crate reads and does not produce.
 
-Interoperability is not asserted by hand. It is enforced by byte-level
-crosscheck tests that compare the bytes this crate emits against fixtures
-produced by the reference toolchain, so a regression in the on-disk layout fails
-the test suite rather than slipping out as a quietly incompatible file. The same
-discipline backs the optional [ZFP filter](crate::_guide::compression)
-(`src/zfp_crosscheck.rs` compares against `h5py` + `hdf5plugin`) and the MATLAB
-`.mat` path. For the cross-tool story in depth, see the MATLAB documentation.
+Byte-level crosscheck tests check the interoperability. They compare the bytes
+this crate emits against fixtures the reference toolchain produced, so a
+regression in the on-disk layout fails the test suite. The same discipline backs
+the optional [ZFP filter](crate::_guide::compression), where
+`src/zfp_crosscheck.rs` compares against `h5py` with `hdf5plugin`, and the
+MATLAB `.mat` path. The [`mat` module](crate::mat) has the cross-tool detail.
 
-The 1.8 output format is the one claim those tests cannot make, because every
-library they link is 1.10 or newer and reads both formats happily.
+The 1.8 output format is the one claim those tests cannot make, since every
+library they link is 1.10 or newer and reads both formats.
 `crates/crosscheck/tests/libver_matrix.rs` covers it against every release the
 interop workflow builds, 1.8.23 included: the 1.10 format cannot be opened at
 all before 1.10, and the 1.8 format reads completely everywhere. That measures

@@ -258,4 +258,4 @@ All three produce the same file. [`finish`](crate::FileBuilder::finish) is the o
 
 - [Reading files](crate::_guide::reading) loads what you wrote back, including from the in-memory bytes.
 - Chunking, deflate, shuffle, LZF, and scale-offset filters are in the [compression](crate::_guide::compression) guide.
-- The portability guide walks through how the reference HDF5 C library, h5py, and MATLAB read these files.
+- The [portability guide](crate::_guide::portability) walks through how the reference HDF5 C library, h5py, and MATLAB read these files.

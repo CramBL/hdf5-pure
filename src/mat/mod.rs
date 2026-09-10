@@ -60,7 +60,7 @@
 //!
 //! The high-level `.mat` API is gated on the `serde` feature, which is off by default. [`Matrix`],
 //! the `Complex*` types, and [`MatElement`], along with [`to_file`] / [`from_file`], are only
-//! available when it is enabled. The features reference has the full list.
+//! available when it is enabled. [Cargo features](crate#cargo-features) has the full list.
 //!
 //! ```toml
 //! [dependencies]

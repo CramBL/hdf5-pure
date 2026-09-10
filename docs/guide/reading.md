@@ -210,7 +210,7 @@ The [generic I/O](crate::_guide::generic_io) guide has the writing side. [`read_
 
 ### Raw and compound reads
 
-[`Dataset::read_raw`](crate::Dataset::read_raw) returns the complete unfiltered record bytes, and [`Dataset::read_compound::<T>()`](crate::Dataset::read_compound) decodes compound (struct-like) records. Their encodings are in the [compound types](crate::_guide::compound_types) guide and the data types reference.
+[`Dataset::read_raw`](crate::Dataset::read_raw) returns the complete unfiltered record bytes, and [`Dataset::read_compound::<T>()`](crate::Dataset::read_compound) decodes compound (struct-like) records. Their encodings are in the [compound types](crate::_guide::compound_types) guide and under [Reading](crate::Dataset#reading).
 
 ### Reading a row window
 

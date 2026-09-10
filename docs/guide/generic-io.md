@@ -18,7 +18,7 @@ $ cargo run --example generic_io
 
 [`H5Element`](crate::H5Element) is available in the default build with no feature flags. The [ndarray](crate::_guide::ndarray) feature builds on the same bound for its N-dimensional [`with_ndarray`](crate::DatasetBuilder::with_ndarray) / [`read_array`](crate::Dataset::read_array) family.
 
-Each implementation simply dispatches to the matching per-type method, so a generic read or write has exactly the same datatype, endianness, and conversion behavior as the corresponding `with_*_data` / `read_*` call. The data types reference has the full set of Rust-to-HDF5 type mappings.
+Each implementation simply dispatches to the matching per-type method, so a generic read or write has exactly the same datatype, endianness, and conversion behavior as the corresponding `with_*_data` / `read_*` call. [Element types](crate::DatasetBuilder#element-types) has the full set of Rust-to-HDF5 type mappings.
 
 ## Writing with `with_data`
 

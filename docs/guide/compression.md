@@ -215,7 +215,7 @@ assert_eq!(back, data);
 
 ## Portability
 
-Deflate, shuffle, and scale-offset are all built-in HDF5 filters, so files hdf5-pure writes with them stay readable by the reference HDF5 C library, h5py, and MATLAB, and files those tools produce with the same filters are readable by hdf5-pure. LZF is a filter h5py registers, and the C library has no built-in for it: h5py reads it natively, while the plain C library and MATLAB need h5py's filter plugin. This crate's LZF crosscheck decodes h5py's own streams and checks the filter pipeline hdf5-pure writes against the one h5py records. The compressed stream itself is not byte-compared, since LZF has many valid encodings of the same data, so the script that regenerates the h5py LZF fixtures reads hdf5-pure's output back through h5py. The portability guide has the broader interoperability picture and what each direction covers.
+Deflate, shuffle, and scale-offset are all built-in HDF5 filters, so files hdf5-pure writes with them stay readable by the reference HDF5 C library, h5py, and MATLAB, and files those tools produce with the same filters are readable by hdf5-pure. LZF is a filter h5py registers, and the C library has no built-in for it: h5py reads it natively, while the plain C library and MATLAB need h5py's filter plugin. This crate's LZF crosscheck decodes h5py's own streams and checks the filter pipeline hdf5-pure writes against the one h5py records. The compressed stream itself is not byte-compared, since LZF has many valid encodings of the same data, so the script that regenerates the h5py LZF fixtures reads hdf5-pure's output back through h5py. The [portability guide](crate::_guide::portability) has the broader interoperability picture and what each direction covers.
 
 ## ZFP
 
@@ -257,4 +257,4 @@ The scalar type is derived from the dataset's datatype when the file is written,
 
 ## `fast-deflate` backend
 
-The `fast-deflate` feature swaps the deflate backend in for the zlib-ng backend (`flate2/zlib-ng`), which is faster on supported platforms while producing standard-compatible output. The deflate API ([`with_deflate`](crate::DatasetBuilder::with_deflate)) is the same under either backend. The features reference has the full feature matrix.
+The `fast-deflate` feature swaps the deflate backend in for the zlib-ng backend (`flate2/zlib-ng`), which is faster on supported platforms while producing standard-compatible output. The deflate API ([`with_deflate`](crate::DatasetBuilder::with_deflate)) is the same under either backend. [Cargo features](crate#cargo-features) has the full feature matrix.
