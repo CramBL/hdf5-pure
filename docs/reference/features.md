@@ -136,7 +136,7 @@ For bare-metal `no_std` (for example `thumbv7em-none-eabi`), turn the default fe
 hdf5-pure = { version = "0.14", default-features = false, features = ["checksum"] }
 ```
 
-The crate then compiles as `#![no_std]` with only `alloc`, but the `std`-gated `File` / `FileBuilder` API is absent — a `no_std` build exposes the lower-level primitives rather than the whole-file reader and writer. See [Portability](../interop/portability.md) for the full per-target breakdown.
+The crate then compiles as `#![no_std]` with only `alloc`, but the `std`-gated `File` / `FileBuilder` API is absent — a `no_std` build exposes the lower-level primitives rather than the whole-file reader and writer. See [Portability](../guide/portability.md) for the full per-target breakdown.
 
 !!! warning
     `fast-deflate` uses the native zlib-ng backend and is intended for native builds, not the pure-Rust WASM target.
