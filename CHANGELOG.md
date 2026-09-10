@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Fixed
+
+- `Group::attrs` and `Dataset::attrs` read an attribute with a null dataspace in a version 1 object header as an empty array, where trailing record padding was previously returned as the value. Truncated attribute payloads are rejected with `FormatError::UnexpectedEof` ([#448](https://github.com/CramBL/hdf5-pure/issues/448)).
+
 ## [0.44.2] - 2026-09-10
 
 ### Changed

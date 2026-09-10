@@ -1031,6 +1031,7 @@ mod tests {
             size: 16,
             ref_type: ReferenceType::Object,
         };
+        attr.raw_data = vec![0u8; 16];
         let region = message_record(
             MessageType::Attribute,
             &attr.serialize_v3(crate::file_writer::LENGTH_SIZE),
