@@ -1,14 +1,13 @@
 [project]
 name = "hdf5-pure-scripts"
 version = "0"
-description = "The repository's Python tooling: HDF5 builds for interop, the API surface scan, the docs site and the release"
+description = "The repository's Python tooling: HDF5 builds for interop, the API surface scan, the prose lint and the release"
 requires-python = ">=3.11"
-dependencies = ["mkdocs-material>=9.7.6"]
+dependencies = []
 
 [project.scripts]
 hdf5-build = "hdf5_pure_scripts.build_hdf5:main"
 api-surface = "hdf5_pure_scripts.api_surface:main"
-docs = "hdf5_pure_scripts.docs:main"
 release = "hdf5_pure_scripts.release:main"
 lint-prose = "hdf5_pure_scripts.prose:main"
 
