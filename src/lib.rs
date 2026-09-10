@@ -354,10 +354,6 @@
 //! or `apt install libmatio-dev`) to validate `.mat` output. It implies `serde`, is not a run-time
 //! dependency, and end users do not need it.
 //!
-//! The tests that link the reference HDF5 C library are a separate package, `hdf5-pure-crosscheck`
-//! under `crates/crosscheck/`, so that nothing else in the repository needs a C library. Its
-//! features are not this crate's.
-//!
 //! # Platform support
 //!
 //! The crate builds for `wasm32-unknown-unknown` with no C dependencies. `std` is available on

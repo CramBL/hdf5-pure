@@ -41,6 +41,7 @@ jobs:
           filters: |
             run:
               - src/**
+              - docs/**
               - build.rs
               - Cargo.toml
               - Cargo.lock

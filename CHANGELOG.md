@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Changed
+
+- The documentation is on docs.rs: the crate-level page, the task guides in the `_guide` module, and the API reference. The guide pages ship in the crate, and the documentation site at <https://crambl.github.io/hdf5-pure/> redirects to docs.rs ([#531](https://github.com/CramBL/hdf5-pure/pull/531), [#532](https://github.com/CramBL/hdf5-pure/pull/532), [#535](https://github.com/CramBL/hdf5-pure/pull/535), [#536](https://github.com/CramBL/hdf5-pure/pull/536), [#537](https://github.com/CramBL/hdf5-pure/pull/537), [#538](https://github.com/CramBL/hdf5-pure/pull/538)).
+
 ## [0.44.1] - 2026-09-08
 
 ### Fixed
