@@ -24,6 +24,7 @@ include = [
     "/docs/guide/file-space.md",
     "/docs/guide/generic-io.md",
     "/docs/guide/groups-attributes.md",
+    "/docs/guide/ndarray.md",
     "/docs/guide/reading.md",
     "/docs/guide/repack.md",
     "/docs/guide/streaming.md",
