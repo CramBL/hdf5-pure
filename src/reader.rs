@@ -239,9 +239,101 @@ impl Source for SourceView<'_> {
 ///   override, where [`with_write_mark_policy`](Self::with_write_mark_policy)
 ///   can admit a snapshot read of one.
 ///
-/// See the [property-support reference] for the full property-by-property map.
+/// # Supported properties
 ///
-/// [property-support reference]: https://github.com/CramBL/hdf5-pure/blob/main/docs/reference/property-support.md
+/// Selected through the [`File`] open-mode constructor, with memory budgets and locking set through
+/// [`FileAccessProperties`](Self), [`DatasetAccessProperties`] and [`FileLocking`]. The [status
+/// legend](crate::FileCreateProperties#status-legend) explains the status column.
+///
+/// | HDF5 property / driver | `hdf5-pure` | Status | Behavior |
+/// |---|---|---|---|
+/// | `H5Fopen(RDONLY)`, default sec2 | [`File::open`](crate::File::open) | **Genuine (read-only)** | Whole-file buffered read, without a lock. |
+/// | positioned / on-demand reads | [`File::open_streaming`](crate::File::open_streaming) | **Genuine (read-only, bounded)** | Fetches metadata and chunks on demand, with peak memory near one chunk. |
+/// | user-supplied read driver (cf. `H5Pset_driver`) | [`File::from_source`](crate::File::from_source) / [`from_source_with_options`](crate::File::from_source_with_options), over the [`Source`] trait | **Genuine (read-only, bounded)** | The same on-demand reads over bytes that are not a path: an object store addressed by range request, or a sandboxed guest handed byte ranges by its host. A read that comes back short is rejected. |
+/// | `H5Pset_fapl_core` / `H5Pset_file_image` | [`File::from_bytes`](crate::File::from_bytes) / [`FileBuilder::finish`](crate::FileBuilder::finish) | **Genuine** | Read an in-memory file image, or build one into a `Vec<u8>`. |
+/// | `H5Fopen(RDWR)` | [`File::open_rw`](crate::File::open_rw) / [`open_rw_with_options`](crate::File::open_rw_with_options) | **Genuine (read-write)** | Reads, appends, and staged edits with [`commit`](crate::File::commit). Holds a latest-format file with no userblock in bounded memory and any other file in a whole-file mirror, picked from the file. Commits to a paged file through a page-aware tail, and rejects a paged file without persisted free space at open. |
+/// | `H5Fopen(RDWR)`, bounded memory | [`File::open_rw_with_options`](crate::File::open_rw_with_options) + [`MemoryStrategy::Bounded`] | **Genuine (read-write, bounded)** | [`File::open_rw`](crate::File::open_rw) picks the bounded backing itself. Stating `Bounded` makes it strict: a file the bounded engine cannot edit is rejected, and never mirrored. |
+/// | no C counterpart | [`with_memory_strategy`](Self::with_memory_strategy), [`MemoryStrategy`] | **Behavioral** | How much memory a read-write open may spend holding the file, overriding the dispatch above. `Bounded` rejects a file the bounded engine cannot edit, a pre-v2 superblock or a userblock. `Auto`, which is what [`File::open_rw`](crate::File::open_rw) uses unset, falls back to the mirror, and `Mirrored` always mirrors. A paged file without persisted free space is rejected under both preferences, because the mirror cannot commit it either. [`File::edit_backing`](crate::File::edit_backing) reports which backend an open resolved to, as an [`EditBacking`] (`Bounded` or `Mirrored`), a separate type because `Auto` is a preference between the two and never an outcome. The C library has no analogue: `H5Fopen` picks its own caching with no caller-visible memory contract. |
+/// | `H5F_ACC_SWMR_READ` / `H5F_ACC_SWMR_WRITE` | [`File::open_swmr`](crate::File::open_swmr) / [`open_swmr_writer`](crate::File::open_swmr_writer) (`*_with_options`) | **Genuine** | No OS lock. The writer raises the superblock SWMR-write flag (a v3 superblock is required, as in the C library) and appends alone. It always mirrors, so it accepts `MemoryStrategy::Auto` and `Mirrored` and rejects an explicit `Bounded`. |
+/// | superblock status flags (`h5clear -s`) | checked by [`File::open`](crate::File::open), [`open_streaming`](crate::File::open_streaming), [`from_source`](crate::File::from_source), [`open_rw`](crate::File::open_rw), [`open_swmr`](crate::File::open_swmr) and [`open_swmr_writer`](crate::File::open_swmr_writer), and cleared by [`File::clear_swmr_flag`](crate::File::clear_swmr_flag) | **Genuine** | A file the byte marks as held by a writer is rejected with [`Error::FileMarkedInUse`], as `H5Fopen` rejects it. [`File::open_swmr`](crate::File::open_swmr) follows such a file, and rejects a half-set mark alone. Version-3 superblocks only, which is where the C library checks. [`File::from_bytes`](crate::File::from_bytes) does not consult the byte, and neither, therefore, does [`mat::from_file`](crate::mat::from_file), so a caller holding the bytes can still read a flagged file, at the cost of a copy of it. |
+/// | no C counterpart | [`with_write_mark_policy`](Self::with_write_mark_policy), [`WriteMarkPolicy`] | **Behavioral** | Whether a read-only open proceeds past a file marked open for write by a non-SWMR writer, bit 0 alone, which is what a page-buffered session raises and what no SWMR reader can follow, so such a file is otherwise readable only by copying it through [`File::from_bytes`](crate::File::from_bytes). `AllowSnapshot` reads it as it stands, on the caller's assertion that the writer has flushed ([`File::sync`](crate::File::sync), or a clean close), which the byte cannot record and this crate therefore cannot check. It admits nothing else: a SWMR pair belongs to [`File::open_swmr`](crate::File::open_swmr), and [`File::open_rw`](crate::File::open_rw) and [`File::open_swmr_writer`](crate::File::open_swmr_writer) are rejected whatever it says. The default `Refuse` is what `H5Fopen` does, and `H5Fopen` offers no override at all: `h5clear` is its one way through, and it edits the file. |
+/// | `H5Pset_file_locking` + `HDF5_USE_FILE_LOCKING` | [`with_locking`](Self::with_locking), [`FileLocking`] | **Genuine** | Exclusive advisory lock on both read-write paths, mirror and bounded, taken non-blocking, so a lock another process holds is [`Error::FileLocked`]. The environment-variable override recognizes the same values as the C library. Readers and the SWMR writer run without a lock by design and ignore the setting. |
+/// | `H5Fget_libver_bounds` (read) | [`File::libver_bound`](crate::File::libver_bound) | **Read-only** | Reports the low library-version bound the superblock version implies. |
+/// | `H5Pset_cache` (`rdcc`) / `H5Pset_chunk_cache` (`dapl`) | [`with_chunk_cache`](Self::with_chunk_cache), [`DatasetAccessProperties::with_chunk_cache`](crate::DatasetAccessProperties::with_chunk_cache) | **Genuine (all backends)** | A cache of decompressed chunks and parsed indexes, 1 MiB in 16 slots by default. `rdcc_nslots` and `rdcc_nbytes` map directly. There is no write coalescing, since a mutation clears the cache, and no `rdcc_w0`, for the reason below. [`Dataset::chunk_cache_stats`](crate::Dataset::chunk_cache_stats) reports what it did. |
+/// | `H5Pset_mdc_config` | [`with_metadata_cache`](Self::with_metadata_cache), [`MetadataCacheConfig`] | **Behavioral (partial)** | A byte budget for a metadata-read LRU on the streaming and bounded backends, off by default. [`File::metadata_cache_stats`](crate::File::metadata_cache_stats) reports what it did (`H5Fget_mdc_hit_rate` and `H5Fget_mdc_size`) and [`File::reset_metadata_cache_stats`](crate::File::reset_metadata_cache_stats) clears the counters (`H5Freset_mdc_hit_rate_stats`). Of `H5AC_cache_config_t` this is `max_size`, and [the metadata cache](#the-metadata-cache-h5pset_mdc_config) below covers what the other 29 fields would mean here. |
+/// | no C counterpart | [`with_sync_policy`](Self::with_sync_policy), [`SyncPolicy`], [`File::sync`](crate::File::sync) | **Behavioral** | Who issues the `fsync`s. The default `Always` forces durability at every point the write paths define one. `OnClose` issues none during the session, leaving the cadence to the application through [`File::sync`](crate::File::sync), and one at `close` or drop, which write past the point any caller could order them. Either way, writes reach the operating system by the time the operation making them returns, unless [`with_page_buffer_size`](Self::with_page_buffer_size) is set, which is off by default and requires `OnClose`. What moves to the caller is therefore power-loss durability within the session, and same-machine visibility stays where it was. [Choosing the fsync cadence](crate::_guide::editing#choosing-the-fsync-cadence) has the cost in full. The C library has no property for this because it never `fsync`s at all: the default `sec2` driver installs no flush callback, so `H5Fflush` drains libhdf5's caches with `write` and stops. |
+/// | `H5Pset_page_buffer_size` | [`with_page_buffer_size`](Self::with_page_buffer_size) | **Genuine** | A write-back page buffer for a read-write session: dirty pages live across the ordering barriers inside a commit or append, up to the byte budget, then flush whole. It requires a budget of at least the page it merges within (the file's own when `Page`, and the format's 4 KiB default otherwise), a version-3 superblock, `SyncPolicy::OnClose`, and, on a `Page` file, persisted free space. A request that misses one of those is rejected, and the setting is never quietly ignored. The SWMR writer and any [`File::create_with_options`](crate::File::create_with_options) pair that could not be reopened are rejected too. A `Page` file is not required, where `H5PB_create` requires one: the C page buffer is a page cache whose per-kind reservations count pages the paged allocator segregates, while this is a write gatherer that needs a window to merge within. A budget below 1 MiB is accepted, as it is in C, and it costs something here: `H5PB_write` bypasses the C buffer for any I/O of a page or more, while nothing bypasses this one, so a smaller budget is where a long run is flushed and restarted (one 4 MiB append: 10 writes at 1 MiB, 1,094 at 4 KiB). A sub-page budget is rejected, where `H5Fopen` rounds it up silently. It reorders publish points ahead of the content they identify, so the session raises superblock status-flag bit 0 (`H5F_SUPER_WRITE_ACCESS`) for its lifetime: a writer that dies mid-flush leaves a file this crate, `H5Fopen` and h5py all reject, and never one that reads clean and returns fill values or a deleted object's bytes. The C library's page buffer reorders the same way and ships no such mark. The budget is the one field modeled, and `min_meta_perc` and `min_raw_perc` are not: the buffer does not evict, so it has no victim to choose. Off by default, which still leaves the write gathering every read-write session does. |
+/// | `H5Pset_fapl_family` / `split` / `multi` / `mpio` / `direct` / `ros3` / `log` | none | **Unsupported** | Only two implicit drivers exist: an in-memory buffer and `Read + Seek` positioned I/O. A multi-file, parallel, or remote-object file is not opened. |
+///
+/// ## The metadata cache (`H5Pset_mdc_config`)
+///
+/// `H5AC_cache_config_t` is 30 fields (version 1, checked against HDF5 2.1.0).
+/// [`MetadataCacheConfig`] models one of them, `max_size`, as `max_bytes`, plus a `max_entry_bytes`
+/// cap that has no C counterpart. That ratio invites the reading that 29 things are missing. This
+/// cache holds byte ranges of a file being read, where the C cache holds parsed entries of a file
+/// being written, and each group of fields would mean this here:
+///
+/// | Group | Fields | Applies here? |
+/// |---|---|---|
+/// | `max_size` | 1 | **Modeled**, as [`MetadataCacheConfig::max_bytes`](crate::MetadataCacheConfig::max_bytes). |
+/// | Adaptive resize: `min_size`, `epoch_length`, `incr_mode` + 4, `flash_incr_mode` + 2, `decr_mode` + 7 | 18 | Not modeled: they are one feature, and not 18 separate settings. See below. |
+/// | Dirty-data and parallel: `min_clean_fraction`, `dirty_bytes_threshold`, `metadata_write_strategy` | 3 | **Never.** This cache holds bytes read alone, so there is no dirty entry to keep clean, flush, or write. A read-write session drops the ranges its writes overlap, which [`MetadataCacheStats::invalidations`](crate::MetadataCacheStats::invalidations) counts. |
+/// | Diagnostics: `version`, `rpt_fcn_enabled`, `open_trace_file`, `close_trace_file`, `trace_file_name` | 5 | No. `version` is C ABI evolution, and the rest are a trace-file facility this crate has no counterpart to. [`File::metadata_cache_stats`](crate::File::metadata_cache_stats) reports what they were for. |
+/// | Initial sizing: `set_initial_size`, `initial_size` | 2 | No effect to have. There is no arena allocated up front: entries are allocated as reads admit them, so the initial size is zero and the maximum is the only bound. |
+/// | `evictions_enabled` | 1 | Expressible already, as a budget larger than the metadata a session reads. A separate flag would be a second way to say it, and one that silently uncaps memory. |
+///
+/// Adaptive resize is the one substantive gap, and leaving it out is deliberate. The algorithm
+/// grows the cache when an epoch's hit rate falls below `lower_hr_threshold` and shrinks it when
+/// the rate rises above `upper_hr_threshold` or entries age out, so that a caller does not have to
+/// pick a size. Picking one is cheap here: the store is indexed and not scanned
+/// ([#367](https://github.com/CramBL/hdf5-pure/issues/367)), so a hit costs about the same at
+/// 65,000 entries as at 1,000, 161 nanoseconds against 136, measured, and an over-generous budget
+/// costs memory and nothing else. The advice the algorithm would arrive at is one line, set the
+/// budget generously, and [`File::metadata_cache_stats`](crate::File::metadata_cache_stats)
+/// confirms it landed. Note also the direction the algorithm runs in: a low hit rate makes it hold
+/// more.
+///
+/// ## The chunk cache (`rdcc`)
+///
+/// [`ChunkCacheConfig`] models `rdcc_nslots` and `rdcc_nbytes` directly. The third field,
+/// `rdcc_w0`, is not modeled, and the reason is what it discriminates, and not a gap in the
+/// eviction code.
+///
+/// In `H5Dchunk.c`, `w0` is a head start measured in entries: `w[0] = (int)(rdcc->nused *
+/// rdcc->w0)`, counted down one per step of `H5D__chunk_cache_prune`. Two methods walk the LRU list
+/// from its least-recently-used end. Method 0 preempts the entries that are not partially consumed.
+/// Method 1 preempts anything unlocked, and is not introduced until the head start reaches zero. So
+/// `w0` sets how far the selective rule gets to run alone, and its discriminator is
+/// `H5D_rdcc_ent_t::rd_count` and `wr_count`, per-entry counts of bytes remaining, initialized to
+/// the chunk size and decremented by `naccessed` in `H5D__chunk_unlock`. `w0` decides exactly one
+/// thing: whether to drop a chunk the caller consumed in full ahead of one it consumed in part.
+///
+/// Nothing here turns on that decision, for two separate reasons.
+///
+/// | C field | Applies here? |
+/// |---|---|
+/// | `wr_count` | **Never.** This cache holds decompressed data read from the file. There is no dirty chunk to write back. A commit in the session drops what it may have made stale, which [`ChunkCacheStats::invalidations`](crate::ChunkCacheStats::invalidations) counts. |
+/// | `rd_count` | **Not recorded.** A slot records that it holds a chunk, and never how much of that chunk a caller took. The class `w0` sorts by therefore does not exist here to be sorted. Partial consumption is the common case: an edge chunk of a dataset whose extent is not a multiple of its chunk extent is stored full-size and read in part, which is `rd_count > 0` in C too. |
+///
+/// The second reason is that on the path where a scan would thrash, there is no prune to order at
+/// all. A whole read visits each of its chunks exactly once, so it fills the cache and then stops
+/// offering, and it hands back none of the chunks it has already placed for chunks it will never
+/// read again. That removes the problem `w0` exists to soften.
+///
+/// Which figure reports a too-small budget therefore depends on how the dataset is read, and each
+/// is structurally zero on the other's path:
+///
+/// | read | admission | budget signal |
+/// |---|---|---|
+/// | whole ([`read_f64`](crate::Dataset::read_f64) and its siblings) | fills the cache, then stops offering | `rejections`, with `evictions` at 0 |
+/// | row window ([`read_raw_rows`](crate::Dataset::read_raw_rows), `read_*_rows`) | plain LRU, since the chunk its successor needs is the one it finished on | `evictions`, with `rejections` at 0 |
+///
+/// A row window is the one path that does evict, so it is the only place a `w0` analogue could ever
+/// pick a different victim. It would not pick a better one: the entry the next window needs is the
+/// one this read finished on, which is the most recently used and the last thing an LRU rule gives
+/// up, while the partially-consumed entries `w0` would additionally protect are the leading
+/// boundary chunks that a forward sweep never revisits. That is an argument about the access
+/// patterns these readers generate, and not a proof for an arbitrary one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[doc(alias = "fapl")]
 pub struct FileAccessProperties {
@@ -642,8 +734,8 @@ impl FileAccessProperties {
 /// and not a port: a plain `Copy` value, with no handle to create or close, no
 /// runtime property registry, and no setter that can fail. `dapl` and each
 /// `H5Pset_*` it models are doc aliases, so a search for either lands here.
-/// The chunk cache is the one `dapl` property modeled; see the
-/// [property-support reference] for the rest.
+/// The chunk cache is the one `dapl` property modeled, and
+/// [Supported properties](#supported-properties) has the rest.
 ///
 /// [`ChunkCacheConfig`] maps `H5Pset_chunk_cache`'s `rdcc_nslots` and
 /// `rdcc_nbytes`; its `rdcc_w0` preemption policy is not modeled, for the reason
@@ -651,7 +743,19 @@ impl FileAccessProperties {
 ///
 /// Pass it to [`File::dataset_with_options`] or [`Group::dataset_with_options`].
 ///
-/// [property-support reference]: https://github.com/CramBL/hdf5-pure/blob/main/docs/reference/property-support.md
+/// # Supported properties
+///
+/// Passed to [`File::dataset_with_options`](crate::File::dataset_with_options) /
+/// [`Group::dataset_with_options`](crate::Group::dataset_with_options) as a
+/// [`DatasetAccessProperties`](Self), overriding the file-wide access defaults for one dataset. The
+/// status column is explained by the [status legend](crate::FileCreateProperties#status-legend).
+///
+/// | HDF5 property (C API) | `hdf5-pure` | Status | Behavior |
+/// |---|---|---|---|
+/// | `H5Pset_chunk_cache` | [`with_chunk_cache`](Self::with_chunk_cache) | **Genuine** | Overrides the file-wide chunk cache for this dataset only. Unset means inherit, matching the `H5D_CHUNK_CACHE_*_DEFAULT` sentinels. `rdcc_nslots` and `rdcc_nbytes` map directly, and `rdcc_w0` is not modeled, for the reason under [The chunk cache](crate::FileAccessProperties#the-chunk-cache-rdcc). |
+/// | `H5Pset_efile_prefix` / `H5Pset_virtual_prefix` | none | **Unsupported** | External and virtual datasets are not resolved, so there is no prefix to set. |
+/// | `H5Pset_virtual_view` / `H5Pset_virtual_printf_gap` | none | **Unsupported** | Virtual datasets are not supported. |
+/// | `H5Pset_append_flush` | none | **Unsupported** | There is no append callback and no per-boundary flush, and [`Dataset::append`](crate::Dataset::append) flushes on its own schedule. |
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[doc(alias = "dapl")]
 pub struct DatasetAccessProperties {
