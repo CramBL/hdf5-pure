@@ -458,7 +458,28 @@ pub fn message_shares_a_field(data: &[u8]) -> bool {
     }
 }
 
-/// Compute raw data size based on dataspace and datatype, then extract from message bytes.
+/// Reads an attribute's value bytes from its message, sized by the datatype
+/// and dataspace alone.
+///
+/// The Data field has no length of its own: the datatype and dataspace
+/// descriptions define its size ("The Attribute Message" of the [format
+/// specification, version 4.0][spec-attr]). A null dataspace has no elements
+/// ("The Dataspace Message" of the [format specification, version 4.0][spec-space]),
+/// so the field is empty. Any bytes past it in a version 1 object header
+/// record are the record's alignment padding: header messages are aligned on
+/// 8-byte boundaries there ("Version 1 Data Object Header Prefix" of the [format
+/// specification, version 4.0][spec-hdr]).
+///
+/// # Errors
+///
+/// Returns [`FormatError::OffsetOverflow`] if the element count times the
+/// element size overflows a `u64`, [`FormatError::ValueTooLargeForPlatform`]
+/// if that size does not fit a `usize`, and [`FormatError::UnexpectedEof`] if
+/// the message holds fewer bytes than the datatype and dataspace describe.
+///
+/// [spec-attr]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_attribute
+/// [spec-space]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_simple
+/// [spec-hdr]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_prefix_one
 fn compute_raw_data(
     data: &[u8],
     pos: usize,
@@ -466,7 +487,7 @@ fn compute_raw_data(
     datatype: &Datatype,
 ) -> Result<Vec<u8>, FormatError> {
     let num_elements = dataspace.num_elements();
-    let elem_size = datatype.type_size() as u64;
+    let elem_size = u64::from(datatype.type_size());
     let expected_size = num_elements
         .checked_mul(elem_size)
         .ok_or(FormatError::OffsetOverflow {
@@ -474,13 +495,11 @@ fn compute_raw_data(
             length: elem_size,
         })?
         .to_usize()?;
-    let available = data.len().saturating_sub(pos);
-    let take = expected_size.min(available);
-    Ok(if take > 0 {
-        data[pos..pos + take].to_vec()
-    } else if available > 0 {
-        // Fallback: take whatever is available (e.g., for VL types where type_size may not match)
-        data[pos..].to_vec()
+    ensure_len(data, pos, expected_size)?;
+    Ok(if expected_size > 0 {
+        data.get(pos..pos + expected_size)
+            .map(<[u8]>::to_vec)
+            .unwrap_or_default()
     } else {
         Vec::new()
     })
@@ -1278,7 +1297,7 @@ mod tests {
         data.extend_from_slice(name);
         data.extend_from_slice(&dt_field);
         data.extend_from_slice(&ds_bytes);
-        data.extend_from_slice(&7i32.to_le_bytes());
+        data.extend_from_slice(&7.0f64.to_le_bytes());
         data
     }
 
@@ -1474,5 +1493,66 @@ mod tests {
         let attr = AttributeMessage::parse(&data, 8).unwrap();
         let strs = attr.read_as_strings().unwrap();
         assert_eq!(strs, vec!["abcd", "EFGH"]);
+    }
+
+    #[test]
+    fn a_null_dataspace_attribute_ignores_record_padding() {
+        // Five trailing zero bytes provide the record's 8-byte alignment padding.
+        let name = b"empty\0";
+        let dt_bytes = build_f64_dt();
+        let ds_bytes = vec![2u8, 0, 0, 2];
+
+        let name_size = u16::try_from(name.len()).unwrap();
+        let dt_size = u16::try_from(dt_bytes.len()).unwrap();
+        let ds_size = u16::try_from(ds_bytes.len()).unwrap();
+
+        let mut data = Vec::new();
+        data.push(3);
+        data.push(0);
+        data.extend_from_slice(&name_size.to_le_bytes());
+        data.extend_from_slice(&dt_size.to_le_bytes());
+        data.extend_from_slice(&ds_size.to_le_bytes());
+        data.push(1);
+        data.extend_from_slice(name);
+        data.extend_from_slice(&dt_bytes);
+        data.extend_from_slice(&ds_bytes);
+        data.extend_from_slice(&[0u8; 5]);
+
+        let attr = AttributeMessage::parse(&data, 8).unwrap();
+        assert_eq!(attr.raw_data, Vec::<u8>::new());
+    }
+
+    #[test]
+    fn a_truncated_attribute_payload_is_rejected() {
+        let name = b"truncated\0";
+        let dt_bytes = build_f64_dt();
+        let ds_bytes = build_scalar_ds();
+
+        let name_size = u16::try_from(name.len()).unwrap();
+        let dt_size = u16::try_from(dt_bytes.len()).unwrap();
+        let ds_size = u16::try_from(ds_bytes.len()).unwrap();
+
+        let mut data = Vec::new();
+        data.push(3);
+        data.push(0);
+        data.extend_from_slice(&name_size.to_le_bytes());
+        data.extend_from_slice(&dt_size.to_le_bytes());
+        data.extend_from_slice(&ds_size.to_le_bytes());
+        data.push(1);
+        data.extend_from_slice(name);
+        data.extend_from_slice(&dt_bytes);
+        data.extend_from_slice(&ds_bytes);
+        data.extend_from_slice(&[0u8; 4]);
+
+        let err = AttributeMessage::parse(&data, 8).unwrap_err();
+        let FormatError::UnexpectedEof {
+            expected,
+            available,
+        } = err
+        else {
+            panic!("expected UnexpectedEof, got {err:?}");
+        };
+        assert_eq!(available, data.len());
+        assert_eq!(expected, data.len() + 4);
     }
 }
