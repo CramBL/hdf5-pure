@@ -3,6 +3,7 @@
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 
+use crate::bytes::read_length;
 use crate::bytes::read_offset;
 use crate::error::FormatError;
 use crate::source::Source;
@@ -63,6 +64,7 @@ impl SymbolTableNode {
         file_data: &[u8],
         offset: usize,
         offset_size: u8,
+        length_size: u8,
     ) -> Result<SymbolTableNode, FormatError> {
         // signature(4) + version(1) + reserved(1) + number_of_symbols(2) = 8
         if 8 > file_data.len() || offset > file_data.len() - 8 {
@@ -85,8 +87,9 @@ impl SymbolTableNode {
             u16::from_le_bytes([file_data[offset + 6], file_data[offset + 7]]) as usize;
 
         let os = offset_size as usize;
-        // Each entry: link_name_offset(os) + obj_hdr_addr(os) + cache_type(4) + reserved(4) + scratch(16)
-        let entry_size = os + os + 4 + 4 + 16;
+        let ls = length_size as usize;
+        // Each entry: link_name_offset(ls) + obj_hdr_addr(os) + cache_type(4) + reserved(4) + scratch(16)
+        let entry_size = ls + os + 4 + 4 + 16;
         let entries_start = offset + 8;
         let needed = entries_start + num_symbols * entry_size;
         if needed > file_data.len() {
@@ -99,8 +102,8 @@ impl SymbolTableNode {
         let mut entries = Vec::with_capacity(num_symbols);
         let mut pos = entries_start;
         for _ in 0..num_symbols {
-            let link_name_offset = read_offset(file_data, pos, offset_size)?;
-            pos += os;
+            let link_name_offset = read_length(file_data, pos, length_size)?;
+            pos += ls;
             let object_header_address = read_offset(file_data, pos, offset_size)?;
             pos += os;
             let cache_type = u32::from_le_bytes([
@@ -135,6 +138,7 @@ impl SymbolTableNode {
         source: &S,
         address: u64,
         offset_size: u8,
+        length_size: u8,
     ) -> Result<SymbolTableNode, FormatError> {
         let header = source.read_metadata_at(address, 8)?;
         if &header[0..4] != b"SNOD" {
@@ -147,11 +151,12 @@ impl SymbolTableNode {
         let num_symbols = u16::from_le_bytes([header[6], header[7]]) as usize;
 
         let os = offset_size as usize;
-        // link_name_offset(os) + obj_hdr_addr(os) + cache_type(4) + reserved(4) + scratch(16)
-        let entry_size = os + os + 4 + 4 + 16;
+        let ls = length_size as usize;
+        // link_name_offset(ls) + obj_hdr_addr(os) + cache_type(4) + reserved(4) + scratch(16)
+        let entry_size = ls + os + 4 + 4 + 16;
         let total = 8 + num_symbols * entry_size;
         let buf = source.read_metadata_at(address, total)?;
-        Self::parse(&buf, 0, offset_size)
+        Self::parse(&buf, 0, offset_size, length_size)
     }
 }
 
@@ -179,7 +184,7 @@ mod tests {
         assert_eq!(msg.local_heap_address, 0x900);
     }
 
-    fn build_snod(entries: &[(u64, u64, u32)], offset_size: u8) -> Vec<u8> {
+    fn build_snod(entries: &[(u64, u64, u32)], offset_size: u8, length_size: u8) -> Vec<u8> {
         let mut buf = Vec::new();
         // Pad so SNOD is at offset 0
         buf.extend_from_slice(b"SNOD");
@@ -187,15 +192,14 @@ mod tests {
         buf.push(0); // reserved
         buf.extend_from_slice(&(entries.len() as u16).to_le_bytes());
         for &(name_off, ohdr_addr, cache_type) in entries {
+            match length_size {
+                4 => buf.extend_from_slice(&(name_off as u32).to_le_bytes()),
+                8 => buf.extend_from_slice(&name_off.to_le_bytes()),
+                _ => panic!("test length_size"),
+            }
             match offset_size {
-                4 => {
-                    buf.extend_from_slice(&(name_off as u32).to_le_bytes());
-                    buf.extend_from_slice(&(ohdr_addr as u32).to_le_bytes());
-                }
-                8 => {
-                    buf.extend_from_slice(&name_off.to_le_bytes());
-                    buf.extend_from_slice(&ohdr_addr.to_le_bytes());
-                }
+                4 => buf.extend_from_slice(&(ohdr_addr as u32).to_le_bytes()),
+                8 => buf.extend_from_slice(&ohdr_addr.to_le_bytes()),
                 _ => panic!("test offset_size"),
             }
             buf.extend_from_slice(&cache_type.to_le_bytes());
@@ -207,8 +211,8 @@ mod tests {
 
     #[test]
     fn parse_snod_two_entries() {
-        let data = build_snod(&[(0, 0x100, 0), (8, 0x200, 1)], 8);
-        let snod = SymbolTableNode::parse(&data, 0, 8).unwrap();
+        let data = build_snod(&[(0, 0x100, 0), (8, 0x200, 1)], 8, 8);
+        let snod = SymbolTableNode::parse(&data, 0, 8, 8).unwrap();
         assert_eq!(snod.entries.len(), 2);
         assert_eq!(snod.entries[0].link_name_offset, 0);
         assert_eq!(snod.entries[0].object_header_address, 0x100);
@@ -219,25 +223,34 @@ mod tests {
     }
 
     #[test]
+    fn parse_snod_differing_offset_and_length_sizes() {
+        let data = build_snod(&[(0x12345678, 0x100, 0)], 4, 8);
+        let snod = SymbolTableNode::parse(&data, 0, 4, 8).unwrap();
+        assert_eq!(snod.entries.len(), 1);
+        assert_eq!(snod.entries[0].link_name_offset, 0x12345678);
+        assert_eq!(snod.entries[0].object_header_address, 0x100);
+    }
+
+    #[test]
     fn parse_snod_empty() {
-        let data = build_snod(&[], 8);
-        let snod = SymbolTableNode::parse(&data, 0, 8).unwrap();
+        let data = build_snod(&[], 8, 8);
+        let snod = SymbolTableNode::parse(&data, 0, 8, 8).unwrap();
         assert_eq!(snod.entries.len(), 0);
     }
 
     #[test]
     fn parse_snod_invalid_signature() {
-        let mut data = build_snod(&[], 8);
+        let mut data = build_snod(&[], 8, 8);
         data[0] = b'X';
-        let err = SymbolTableNode::parse(&data, 0, 8).unwrap_err();
+        let err = SymbolTableNode::parse(&data, 0, 8, 8).unwrap_err();
         assert_eq!(err, FormatError::InvalidSymbolTableNodeSignature);
     }
 
     #[test]
     fn parse_snod_invalid_version() {
-        let mut data = build_snod(&[], 8);
+        let mut data = build_snod(&[], 8, 8);
         data[4] = 2; // bad version
-        let err = SymbolTableNode::parse(&data, 0, 8).unwrap_err();
+        let err = SymbolTableNode::parse(&data, 0, 8, 8).unwrap_err();
         assert_eq!(err, FormatError::InvalidSymbolTableNodeVersion(2));
     }
 }
