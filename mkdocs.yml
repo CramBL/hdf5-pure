@@ -129,7 +129,6 @@ markdown_extensions:
 
 nav:
   - Guide:
-      - Generic Element I/O: guide/generic-io.md
       - N-dimensional Arrays: guide/ndarray.md
   - Interoperability:
       - MATLAB v7.3 (.mat): interop/matlab.md
