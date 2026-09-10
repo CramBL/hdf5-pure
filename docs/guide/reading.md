@@ -39,7 +39,7 @@ let file = File::open_with_options(&path, props)?;
 # Ok::<(), hdf5_pure::Error>(())
 ```
 
-The opt-in unlocks nothing else: a SWMR pair still belongs to [`File::open_swmr`](crate::File::open_swmr), and [`File::open_rw`](crate::File::open_rw) rejects such a file whatever it says. [`File::from_bytes`](crate::File::from_bytes) does not consult the byte at all, at the cost of a copy of the file. [`File::clear_swmr_flag`](crate::File::clear_swmr_flag) recovers a file a writer left flagged when it exited, and the SWMR guide walks the writer side that raises the flag.
+The opt-in unlocks nothing else: a SWMR pair still belongs to [`File::open_swmr`](crate::File::open_swmr), and [`File::open_rw`](crate::File::open_rw) rejects such a file whatever it says. [`File::from_bytes`](crate::File::from_bytes) does not consult the byte at all, at the cost of a copy of the file. [`File::clear_swmr_flag`](crate::File::clear_swmr_flag) recovers a file a writer left flagged when it exited, and the [SWMR](crate::_guide::swmr) guide walks the writer side that raises the flag.
 
 ```rust
 # let dir = tempfile::tempdir()?;
@@ -100,7 +100,7 @@ A dataset can also be opened by name relative to its parent group via [`Group::d
 
 ### Inspecting shape and datatype
 
-[`Dataset::shape()`](crate::Dataset::shape) returns the dimensions as a `Vec<u64>`. Two accessors describe the datatype: [`Dataset::dtype()`](crate::Dataset::dtype) returns a simplified [`DType`](crate::DType) classification, while [`Dataset::datatype()`](crate::Dataset::datatype) returns the full [`Datatype`](crate::Datatype) with exact field offsets and layout, which is what a compound type needs. The compound types guide works through one.
+[`Dataset::shape()`](crate::Dataset::shape) returns the dimensions as a `Vec<u64>`. Two accessors describe the datatype: [`Dataset::dtype()`](crate::Dataset::dtype) returns a simplified [`DType`](crate::DType) classification, while [`Dataset::datatype()`](crate::Dataset::datatype) returns the full [`Datatype`](crate::Datatype) with exact field offsets and layout, which is what a compound type needs. The [compound types](crate::_guide::compound_types) guide works through one.
 
 ```rust
 # let dir = tempfile::tempdir()?;
@@ -202,15 +202,15 @@ let counts: Vec<u32> = load(&file, "counts")?;  // [1, 2, 3]
 # Ok::<(), hdf5_pure::Error>(())
 ```
 
-The generic I/O guide has the writing side. [`read_array`](crate::Dataset::read_array) and [`read_array_dyn`](crate::Dataset::read_array_dyn) deliver an N-dimensional dataset as an `ndarray` array under the `ndarray` feature, with the shapes and the feature gate in the ndarray guide.
+The [generic I/O](crate::_guide::generic_io) guide has the writing side. [`read_array`](crate::Dataset::read_array) and [`read_array_dyn`](crate::Dataset::read_array_dyn) deliver an N-dimensional dataset as an `ndarray` array under the `ndarray` feature, with the shapes and the feature gate in the [ndarray](crate::_guide::ndarray) guide.
 
 ### String reads
 
-[`Dataset::read_string`](crate::Dataset::read_string) reads both fixed-length and variable-length HDF5 string datasets into a `Vec<String>`. To bound variable-length payload allocation before reading, or to consume strings one at a time, use [`read_vlen_strings(VlenStringReadOptions)`](crate::Dataset::read_vlen_strings) or [`visit_vlen_strings`](crate::Dataset::visit_vlen_strings). The bounding options are set out in the variable-length strings guide.
+[`Dataset::read_string`](crate::Dataset::read_string) reads both fixed-length and variable-length HDF5 string datasets into a `Vec<String>`. To bound variable-length payload allocation before reading, or to consume strings one at a time, use [`read_vlen_strings(VlenStringReadOptions)`](crate::Dataset::read_vlen_strings) or [`visit_vlen_strings`](crate::Dataset::visit_vlen_strings). The bounding options are set out in the [variable-length strings](crate::_guide::vlen_strings) guide.
 
 ### Raw and compound reads
 
-[`Dataset::read_raw`](crate::Dataset::read_raw) returns the complete unfiltered record bytes, and [`Dataset::read_compound::<T>()`](crate::Dataset::read_compound) decodes compound (struct-like) records. Their encodings are in the compound types guide and the data types reference.
+[`Dataset::read_raw`](crate::Dataset::read_raw) returns the complete unfiltered record bytes, and [`Dataset::read_compound::<T>()`](crate::Dataset::read_compound) decodes compound (struct-like) records. Their encodings are in the [compound types](crate::_guide::compound_types) guide and the data types reference.
 
 ### Reading a row window
 

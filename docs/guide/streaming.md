@@ -337,7 +337,7 @@ The rest of the region stays zero-filled, and content longer than the userblock 
 
 [`finish_to`](crate::FileBuilder::finish_to) removes the assembled file from peak memory, but not the data: [`with_f64_data(&values)`](crate::DatasetBuilder::with_f64_data) still copies the slice into the builder. Two paths avoid that too.
 
-**Repacking** an existing file streams each chunk from the source to the destination, verbatim and one at a time, without decoding or re-encoding it. [`repack`](crate::repack()) is the entry point, and the repack guide walks a repack end to end.
+**Repacking** an existing file streams each chunk from the source to the destination, verbatim and one at a time, without decoding or re-encoding it. [`repack`](crate::repack()) is the entry point, and the [repack](crate::_guide::repack) guide walks a repack end to end.
 
 **Producing** a dataset's bytes at write time is available on the MATLAB writer as [`MatBuilder::write_blocks`](crate::mat::MatBuilder::write_blocks), which takes a [`DataProducer`](crate::mat::producer::DataProducer) the writer calls once per block during emission. Layout works from the shape alone, so the producer is never called before the write begins. Paired with [`MatBuilder::finish_to`](crate::mat::MatBuilder::finish_to), a `.mat` of any size is written in about one block of memory. The full API is in the MATLAB interop guide, with why it is uncompressed-only and which array shape an acquisition should choose.
 
@@ -345,5 +345,5 @@ The rest of the region stays zero-filled, and content longer than the userblock 
 
 - [Reading datasets](crate::_guide::reading) has the dataset read API shared between in-memory and streaming opens.
 - [Writing files](crate::_guide::writing) walks the [`FileBuilder`](crate::FileBuilder) workflow these output paths finish.
-- Reading string datasets is the subject of the variable-length strings guide.
+- Reading string datasets is the subject of the [variable-length strings](crate::_guide::vlen_strings) guide.
 - The features reference lists the `std` feature requirement.
