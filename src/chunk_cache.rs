@@ -84,7 +84,7 @@ impl ChunkCacheConfig {
     /// path that does evict and why recency already keeps what it needs, is in
     /// the [property-support reference].
     ///
-    /// [property-support reference]: https://github.com/CramBL/hdf5-pure/blob/main/docs/reference/property-support.md
+    /// [property-support reference]: crate::FileAccessProperties#the-chunk-cache-rdcc
     pub const fn from_h5p_cache(rdcc_nslots: usize, rdcc_nbytes: usize) -> Self {
         Self {
             max_bytes: rdcc_nbytes,
