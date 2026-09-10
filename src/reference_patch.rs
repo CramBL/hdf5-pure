@@ -68,8 +68,8 @@
 //! its root group, so there is always a relocation in hand, and refusing on an
 //! unreachable shape would therefore refuse *every* commit on any file holding
 //! one — a ban rather than a check, imposed on files whose references were no
-//! better served before this module existed. `docs/reference/limitations.md`
-//! records the set as a whole.
+//! better served before this module existed. The crate's
+//! [limitations](crate#limitations) record the set as a whole.
 
 use std::collections::{BTreeMap, BTreeSet};
 
