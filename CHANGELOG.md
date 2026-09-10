@@ -8,6 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- Fletcher32 checksum calculation folds running sums to 16 bits matching libhdf5's `H5_checksum_fletcher32`, where chunks whose sums folded to non-zero multiples of 65,535 previously caused `FormatError::Fletcher32Mismatch` on files written by libhdf5 or caused libhdf5 to reject chunks written by `with_fletcher32` ([#428](https://github.com/CramBL/hdf5-pure/issues/428)).
 - `Group::attrs` and `Dataset::attrs` read an attribute with a null dataspace in a version 1 object header as an empty array, where trailing record padding was previously returned as the value. Truncated attribute payloads are rejected with `FormatError::UnexpectedEof` ([#448](https://github.com/CramBL/hdf5-pure/issues/448)).
 
 ## [0.44.2] - 2026-09-10
