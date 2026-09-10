@@ -161,6 +161,30 @@ pub fn make_vlen_string_type(charset: CharacterSet) -> Datatype {
 // ---- Compound / Enum type builders ----
 
 /// Builder for constructing HDF5 compound (struct) datatypes.
+///
+/// Fields are laid out contiguously in insertion order, and the builder computes their offsets.
+/// [`new`](Self::new) starts an empty builder, [`field`](Self::field) adds an arbitrary field, and
+/// the typed helpers [`f64_field`](Self::f64_field), [`f32_field`](Self::f32_field),
+/// [`i8_field`](Self::i8_field), [`i16_field`](Self::i16_field), [`i32_field`](Self::i32_field),
+/// [`i64_field`](Self::i64_field), [`u8_field`](Self::u8_field), [`u16_field`](Self::u16_field),
+/// [`u32_field`](Self::u32_field) and [`u64_field`](Self::u64_field) add a named scalar field.
+/// [`build`](Self::build) rejects a builder with no fields and one whose fields pack to zero bytes.
+///
+/// For an `H5Tinsert`-style layout with explicit offsets and a fixed total size,
+/// [`with_size`](Self::with_size) returns an [`ExplicitCompoundTypeBuilder`] instead.
+///
+/// # Examples
+///
+/// ```rust
+/// use hdf5_pure::CompoundTypeBuilder;
+///
+/// let dt = CompoundTypeBuilder::new()
+///     .i32_field("id")
+///     .f64_field("value")
+///     .build()?;
+/// # assert_eq!(dt.type_size(), 12);
+/// # Ok::<(), hdf5_pure::FormatError>(())
+/// ```
 pub struct CompoundTypeBuilder {
     fields: Vec<(String, Datatype)>,
 }
@@ -338,6 +362,23 @@ impl_complex_component! {
 /// This is the pure-Rust equivalent of creating an `H5T_COMPOUND` type and
 /// inserting fields with `H5Tinsert`. [`build`](Self::build) validates field
 /// names, bounds, and overlap before returning a datatype.
+///
+/// Each [`field(name, byte_offset, datatype)`](Self::field) (and the typed
+/// [`f64_field(name, byte_offset)`](Self::f64_field) and its siblings) places a field at a chosen
+/// offset within the fixed total size given to [`CompoundTypeBuilder::with_size`].
+///
+/// # Examples
+///
+/// ```rust
+/// use hdf5_pure::CompoundTypeBuilder;
+///
+/// let dt = CompoundTypeBuilder::with_size(16)
+///     .i32_field("id", 0)
+///     .f64_field("value", 8)
+///     .build()?;
+/// # assert_eq!(dt.type_size(), 16);
+/// # Ok::<(), hdf5_pure::FormatError>(())
+/// ```
 pub struct ExplicitCompoundTypeBuilder {
     size: u32,
     fields: Vec<CompoundMember>,
@@ -465,7 +506,28 @@ impl CompoundTypeBuilder {
     }
 }
 
-/// Builder for constructing HDF5 enumeration datatypes.
+/// Builder for constructing HDF5 enumeration datatypes over an integer base type.
+///
+/// Start with [`i32_based`](Self::i32_based) or [`u8_based`](Self::u8_based), or with
+/// [`with_base`](Self::with_base) for any other integer type. Add members with
+/// [`value(name, i32)`](Self::value), [`u8_value(name, u8)`](Self::u8_value),
+/// [`i64_value(name, i64)`](Self::i64_value) for a value wider than an `i32`, or
+/// [`raw_value(name, bytes)`](Self::raw_value) for one wider than an `i64`. Then call
+/// [`build`](Self::build).
+///
+/// # Examples
+///
+/// ```rust
+/// use hdf5_pure::EnumTypeBuilder;
+///
+/// let dt = EnumTypeBuilder::i32_based()
+///     .value("Red", 0)
+///     .value("Green", 1)
+///     .value("Blue", 2)
+///     .build()?;
+/// # assert_eq!(dt.type_size(), 4);
+/// # Ok::<(), hdf5_pure::FormatError>(())
+/// ```
 pub struct EnumTypeBuilder {
     base_type: Datatype,
     members: Vec<(String, PendingEnumValue)>,
@@ -1412,6 +1474,74 @@ pub(crate) fn simple_1d(n: u64) -> Dataspace {
 /// Non-exhaustive: variants are added as this crate supports more attribute
 /// datatypes, so match a read-back value with a `_` arm. Constructing the
 /// variants below is unaffected.
+///
+/// # HDF5 encodings
+///
+/// | Variant | HDF5 encoding |
+/// |---|---|
+/// | [`F32`](Self::F32) / [`F32Array`](Self::F32Array) | 32-bit float scalar / array |
+/// | [`F64`](Self::F64) / [`F64Array`](Self::F64Array) | 64-bit float scalar / array |
+/// | [`I8`](Self::I8) / [`I16`](Self::I16) / [`I32`](Self::I32) / [`I64`](Self::I64) | Signed integer scalar, at that width |
+/// | [`I8Array`](Self::I8Array) / [`I16Array`](Self::I16Array) / [`I32Array`](Self::I32Array) / [`I64Array`](Self::I64Array) | Signed integer array, at that width |
+/// | [`U8`](Self::U8) / [`U16`](Self::U16) / [`U32`](Self::U32) / [`U64`](Self::U64) | Unsigned integer scalar, at that width |
+/// | [`U8Array`](Self::U8Array) / [`U16Array`](Self::U16Array) / [`U32Array`](Self::U32Array) / [`U64Array`](Self::U64Array) | Unsigned integer array, at that width |
+/// | [`String`](Self::String) | UTF-8 null-padded string |
+/// | [`StringArray`](Self::StringArray) | UTF-8 null-padded string array |
+/// | [`AsciiString`](Self::AsciiString) | Fixed-width ASCII string |
+/// | [`AsciiStringArray`](Self::AsciiStringArray) | Array of fixed-width ASCII strings (null-padded to the longest element) |
+/// | [`VarLenAsciiCharArray`](Self::VarLenAsciiCharArray) | MATLAB's variable-length ASCII string array, a VLEN sequence of one-byte strings (stored in a global heap collection) |
+/// | [`VarLenString`](Self::VarLenString) / [`VarLenStringArray`](Self::VarLenStringArray) | Variable-length UTF-8 string, scalar or array: `H5T_STRING` with `STRSIZE = H5T_VARIABLE` (stored in a global heap collection) |
+/// | [`VarLenAsciiString`](Self::VarLenAsciiString) / [`VarLenAsciiStringArray`](Self::VarLenAsciiStringArray) | The same, with `CSET = ASCII` |
+/// | [`StringSized`](Self::StringSized) / [`AsciiStringSized`](Self::AsciiStringSized) (and their `*ArraySized` forms) | Fixed-width string of a declared width, built by [`string_sized`](Self::string_sized) / [`ascii_string_sized`](Self::ascii_string_sized) and their array siblings |
+///
+/// [`AsciiStringArray`](Self::AsciiStringArray) and
+/// [`VarLenAsciiCharArray`](Self::VarLenAsciiCharArray) exist for MATLAB interoperability (the
+/// `MATLAB_fields` pattern). The [`VarLenString`](Self::VarLenString) family writes the standard
+/// variable-length string datatype, which is the one h5py and the C library write and read.
+/// See the [groups and attributes guide](crate::_guide::groups_attributes).
+///
+/// # Reading attributes back
+///
+/// Reading attributes yields the same enum, a `HashMap<String, AttrValue>` from
+/// [`attrs`](crate::Dataset::attrs). What the reader normalizes is the layout inside a value's
+/// width: every numeric variant is little-endian at its full precision and, for a float, in IEEE
+/// 754 layout, so a big-endian attribute reads correctly and would be rewritten in this crate's own
+/// layout. An integer width with no Rust integer of its own, 3 bytes say, comes back as
+/// [`I64`](Self::I64) / [`U64`](Self::U64). An enumeration attribute decodes through its integer
+/// base type, the same view the numeric readers take of an enum dataset, so its codes arrive and
+/// its member names do not, which is how an h5py `np.bool_` attribute, stored as `enum[FALSE,
+/// TRUE]`, reads back as `0` or `1`. [`repack`](crate::repack()) does not go through `AttrValue`,
+/// so an attribute keeps whatever encoding it had when copied.
+///
+/// [`attr_datatypes`](crate::Dataset::attr_datatypes) reports what that normalization drops: the
+/// [`Datatype`] of every attribute, including the ones [`attrs`](crate::Dataset::attrs) omits for
+/// having no `AttrValue` at all. It reports for an attribute what
+/// [`Dataset::datatype`](crate::Dataset::datatype) reports for a dataset, and it is what identifies
+/// a `np.bool_` attribute as boolean, where `AttrValue` gives an ordinary one-byte integer. As
+/// [`Dataset::datatype`](crate::Dataset::datatype) does, it resolves a committed (shared) datatype
+/// to the type it refers to, though neither reports that type's name, and neither channel exposes
+/// an attribute's rank. See the
+/// [groups and attributes guide](crate::_guide::groups_attributes#reading-an-attributes-datatype).
+///
+/// # Examples
+///
+/// ```rust
+/// use hdf5_pure::{FileBuilder, AttrValue};
+///
+/// let mut builder = FileBuilder::new();
+/// builder.set_attr("version", AttrValue::I64(2));
+/// builder.set_attr("unit", AttrValue::AsciiString("m/s".into()));
+///
+/// // A slot of a chosen width, holding a shorter value: `H5T_C_S1` plus
+/// // `H5Tset_size(64)`. Writing it again at the same width leaves the slot the
+/// // size it was, where `AsciiString` would resize it to the new content.
+/// builder.set_attr("label", AttrValue::ascii_string_sized("ok", 64)?);
+/// # let file = hdf5_pure::File::from_bytes(builder.finish()?)?;
+/// # let attrs = file.root().attrs()?;
+/// # assert_eq!(attrs["version"], AttrValue::I64(2));
+/// # assert_eq!(attrs["label"].as_str(), Some("ok"));
+/// # Ok::<(), hdf5_pure::Error>(())
+/// ```
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub enum AttrValue {
@@ -2144,6 +2274,65 @@ pub(crate) fn write_reference_address(raw: &mut [u8], byte_offset: usize, addres
 }
 
 /// Builder for datasets.
+///
+/// # Element types
+///
+/// `DatasetBuilder` exposes a typed method per supported element type. Each sets both the dataset's
+/// data and its HDF5 datatype, and defaults the shape to the 1-D `[len]` unless
+/// [`with_shape`](Self::with_shape) has already set one. All integer and float types are written
+/// little-endian.
+///
+/// | Method | HDF5 type |
+/// |---|---|
+/// | [`with_data`](Self::with_data) (generic over [`H5Element`](crate::H5Element)) | Inferred from the element type |
+/// | [`with_f64_data`](Self::with_f64_data) | IEEE 64-bit float |
+/// | [`with_f32_data`](Self::with_f32_data) | IEEE 32-bit float |
+/// | [`with_i8_data`](Self::with_i8_data) / [`with_i16_data`](Self::with_i16_data) / [`with_i32_data`](Self::with_i32_data) / [`with_i64_data`](Self::with_i64_data) | Signed integers |
+/// | [`with_u8_data`](Self::with_u8_data) / [`with_u16_data`](Self::with_u16_data) / [`with_u32_data`](Self::with_u32_data) / [`with_u64_data`](Self::with_u64_data) | Unsigned integers |
+/// | [`with_ascii_strings`](Self::with_ascii_strings) / [`with_strings`](Self::with_strings) (and their `_sized` forms) | Fixed-width strings, null-padded, ASCII or UTF-8 |
+/// | [`with_vlen_strings`](Self::with_vlen_strings) | Variable-length UTF-8 strings (global heap) |
+/// | [`with_complex32_data`](Self::with_complex32_data) | Compound `{real: f32, imag: f32}` |
+/// | [`with_complex64_data`](Self::with_complex64_data) | Compound `{real: f64, imag: f64}` |
+/// | [`with_compound_data`](Self::with_compound_data) | Arbitrary compound types (explicit datatype + raw bytes) |
+/// | [`with_compound_values`](Self::with_compound_values) | Safely encoded numeric tuples (field by field) |
+/// | [`with_enum_i32_data`](Self::with_enum_i32_data) / [`with_enum_u8_data`](Self::with_enum_u8_data) | Enumeration types |
+/// | [`with_array_data`](Self::with_array_data) | Fixed-size array types |
+/// | [`with_path_references`](Self::with_path_references) | Object references (resolved by path) |
+/// | [`with_dtype`](Self::with_dtype) + [`with_shape`](Self::with_shape) | Empty / zero-dimension datasets |
+///
+/// The generic [`with_data(&[T])`](Self::with_data) is the counterpart of the typed family, and it
+/// dispatches to the matching `with_*_data` method on `T`. See the
+/// [generic I/O guide](crate::_guide::generic_io).
+///
+/// ```rust
+/// use hdf5_pure::FileBuilder;
+///
+/// let mut builder = FileBuilder::new();
+/// builder.create_dataset("temperature")
+///     .with_f64_data(&[22.5, 23.1, 21.8])
+///     .with_shape(&[3]);
+/// # let file = hdf5_pure::File::from_bytes(builder.finish()?)?;
+/// # assert_eq!(file.dataset("temperature")?.read_f64()?, vec![22.5, 23.1, 21.8]);
+/// # Ok::<(), hdf5_pure::Error>(())
+/// ```
+///
+/// [`with_complex32_data`](Self::with_complex32_data) and
+/// [`with_complex64_data`](Self::with_complex64_data) accept `&[(f32, f32)]` / `&[(f64, f64)]` and
+/// store each pair as a two-field compound. [`with_compound_data`](Self::with_compound_data) takes
+/// an explicit [`Datatype`], the raw element bytes, and the element count, so the caller is
+/// responsible for the bytes matching the datatype's on-disk layout.
+/// [`with_array_data`](Self::with_array_data) takes the array's base [`Datatype`], the array
+/// dimensions, the raw element bytes, and the element count, and builds the [`Datatype::Array`]
+/// itself. [`with_compound_values`](Self::with_compound_values) is the safe alternative for numeric
+/// tuples: it encodes each field explicitly through the [`CompoundType`] trait without copying Rust
+/// tuple padding. [`with_enum_i32_data`](Self::with_enum_i32_data) /
+/// [`with_enum_u8_data`](Self::with_enum_u8_data) take a datatype (built with [`EnumTypeBuilder`])
+/// plus the raw values.
+///
+/// One lower-level method sits under those,
+/// [`with_raw_data(datatype, raw_data, num_elements)`](Self::with_raw_data), which writes an
+/// explicit datatype and its raw bytes verbatim, and
+/// [`with_compound_data`](Self::with_compound_data) delegates to it.
 pub struct DatasetBuilder {
     pub(crate) name: String,
     pub(crate) datatype: Option<Datatype>,
