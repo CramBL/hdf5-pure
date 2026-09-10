@@ -18,6 +18,7 @@ include = [
     "/src/**",
     "/build.rs",
     "/examples/**",
+    "/docs/guide/compound-types.md",
     "/docs/guide/compression.md",
     "/docs/guide/editing.md",
     "/docs/guide/groups-attributes.md",
