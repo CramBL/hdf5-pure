@@ -4913,14 +4913,12 @@ impl WriteEngine {
     ///   [`StagedEdits::deletes_hand_over`]'s rule: the deletion names this path,
     ///   or an ancestor this session builds again.
     ///
-    /// Only a path the session **named** answers. A commit also creates the
-    /// intermediate groups on the way to an addition — `create_dataset("a/b")`
-    /// gets an `a` whether or not one was asked for — and those are *not*
-    /// reported, because a session cannot tell from its staged set alone whether
-    /// such a group is one it is adding or one already in the file. Reporting
-    /// them would hand a caller a not-yet-committed handle onto a group they can
-    /// read today, which is the worse of the two mistakes; stage the group by
-    /// name to address it before the commit.
+    /// Only a path this session staged is reported, and every group above a
+    /// staged object must be one the file already holds or one this session
+    /// stages at its own path. [`commit`](Self::commit) rejects the whole batch
+    /// with [`Error::EditUnsupported`] when a group above a creation is neither,
+    /// the state `a/b` is in when `stage_created_dataset("a/b/col")` is staged
+    /// alone.
     pub(crate) fn staged_object(&self, path: &str) -> Option<StagedObject> {
         if self.stages_no_creations() {
             return None;
@@ -21116,10 +21114,9 @@ mod staged_query_tests {
 
         assert_eq!(kind(&e, "a"), Some(StagedKind::Group));
         assert_eq!(kind(&e, "a/b/col"), Some(StagedKind::Dataset));
-        // `a/b` was never named: the commit creates it on the way to `col`, and
-        // a session cannot tell from its staged set whether such a group is one
-        // it is adding or one the file already holds. Naming it is the way to
-        // address it.
+        // Nothing stages `a/b`, and a commit builds only what the session
+        // staged, so a batch reaching through `a/b` needs it staged at its own
+        // path.
         assert_eq!(kind(&e, "a/b"), None);
         // The root always exists, an on-disk object is not staged, and neither
         // is a name nothing reaches.
