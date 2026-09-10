@@ -35,6 +35,12 @@ pub trait CompoundField: Sized {
 /// User-defined structs can implement this trait by encoding each field
 /// explicitly and decoding fields according to the offsets in the supplied
 /// [`Datatype`].
+///
+/// It is the bound of [`with_compound_values`] and [`read_compound`], which the [compound types
+/// guide](crate::_guide::compound_types) covers.
+///
+/// [`with_compound_values`]: crate::DatasetBuilder::with_compound_values
+/// [`read_compound`]: crate::Dataset::read_compound
 pub trait CompoundType: Sized {
     /// Canonical datatype used when creating a dataset for this type.
     fn datatype() -> Result<Datatype, FormatError>;

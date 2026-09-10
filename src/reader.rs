@@ -4506,6 +4506,63 @@ struct DatasetState {
 /// [`filter_pipeline`](Self::filter_pipeline) answer empty, the same answer an
 /// unfiltered dataset gives, and [`is_chunked`](Self::is_chunked) answers
 /// `false`. Every other reader of the header says what went wrong.
+///
+/// # Reading
+///
+/// A read returns a flat `Vec<T>` in row-major order. Each typed `read_*` method coerces the
+/// stored bytes into its own element type, so a read whose element type differs from the stored
+/// datatype can lose precision.
+///
+/// | Method | Returns |
+/// |---|---|
+/// | [`read_f64`](Self::read_f64) / [`read_f32`](Self::read_f32) | `Vec<f64>` / `Vec<f32>` |
+/// | [`read_i8`](Self::read_i8) / [`read_i16`](Self::read_i16) / [`read_i32`](Self::read_i32) / [`read_i64`](Self::read_i64) | signed-integer vectors |
+/// | [`read_u8`](Self::read_u8) / [`read_u16`](Self::read_u16) / [`read_u32`](Self::read_u32) / [`read_u64`](Self::read_u64) | unsigned-integer vectors |
+/// | [`read::<T>()`](Self::read) (generic over [`H5Element`]) | `Vec<T>` |
+/// | [`read_compound::<T>()`](Self::read_compound) (over [`CompoundType`]) | `Vec<T>` |
+/// | [`read_string`](Self::read_string) | `Vec<String>` (fixed- and variable-length string datasets) |
+/// | [`read_raw`](Self::read_raw) | `Vec<u8>` (complete unfiltered record bytes) |
+/// | [`read_array`](Self::read_array) (`ndarray` feature) | `Array<T, D>` (static rank `D`) |
+/// | [`read_array_dyn`](Self::read_array_dyn) (`ndarray` feature) | `ArrayD<T>` (runtime rank) |
+///
+/// ```rust
+/// # let dir = tempfile::tempdir()?;
+/// # let path = dir.path().join("output.h5");
+/// # let mut builder = hdf5_pure::FileBuilder::new();
+/// # builder.create_dataset("temperature").with_f64_data(&[22.5, 23.1, 21.8]);
+/// # builder.write(&path)?;
+/// use hdf5_pure::File;
+///
+/// let file = File::open(&path)?;
+/// let ds = file.dataset("temperature")?;
+/// let values = ds.read_f64()?;
+/// # assert_eq!(values, vec![22.5, 23.1, 21.8]);
+/// # Ok::<(), hdf5_pure::Error>(())
+/// ```
+///
+/// [`read::<T>()`](Self::read) requests delivery as `T`, which asserts nothing about the stored
+/// datatype, so a lossless read picks the `T` the file stores.
+/// [`read_compound::<T>()`](Self::read_compound) decodes each element using its exact on-disk
+/// datatype, reading field offsets from the file. [`read_raw`](Self::read_raw) returns the
+/// unfiltered record bytes verbatim, which pairs with [`datatype`](Self::datatype) for inspecting
+/// or re-emitting an arbitrary type. [`read_array`](Self::read_array) and
+/// [`read_array_dyn`](Self::read_array_dyn) require the `ndarray` feature, which the [ndarray
+/// guide](crate::_guide::ndarray) covers.
+///
+/// Two further reads take variable-length strings beyond [`read_string`](Self::read_string):
+/// [`read_vlen_strings(options)`](Self::read_vlen_strings) and the streaming
+/// [`visit_vlen_strings(options, f)`](Self::visit_vlen_strings), bounded by
+/// [`VlenStringReadOptions`], with [`vlen_string_payload_size()`](Self::vlen_string_payload_size)
+/// reporting the payload size up front. See the
+/// [variable-length strings guide](crate::_guide::vlen_strings).
+///
+/// # Inspecting a dataset's type
+///
+/// Two accessors describe an existing dataset's type:
+///
+/// - [`dtype`](Self::dtype) returns a simplified [`DType`] classification.
+/// - [`datatype`](Self::datatype) returns the full low-level [`Datatype`], including exact compound
+///   field offsets.
 pub struct Dataset {
     file: Arc<FileInner>,
     /// Where this dataset's object header sits and what it says, as of the file

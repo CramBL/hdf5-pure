@@ -11,8 +11,27 @@ pub use crate::file_writer::AttrValue;
 
 /// Simplified datatype enum for the high-level API.
 ///
-/// Maps from the detailed `crate::datatype::Datatype` to a
-/// user-friendly representation.
+/// `DType` maps a parsed [`Datatype`] onto a coarser enum and implements
+/// [`Display`](core::fmt::Display), which gives a short summary of a dataset's type without a
+/// match over the full one.
+///
+/// | Variant | Meaning |
+/// |---|---|
+/// | [`F32`](Self::F32) / [`F64`](Self::F64) | 4-/8-byte float |
+/// | [`I8`](Self::I8) / [`I16`](Self::I16) / [`I32`](Self::I32) / [`I64`](Self::I64) | signed integers |
+/// | [`U8`](Self::U8) / [`U16`](Self::U16) / [`U32`](Self::U32) / [`U64`](Self::U64) | unsigned integers |
+/// | [`String`](Self::String) | fixed-length string |
+/// | [`VariableLengthString`](Self::VariableLengthString) | variable-length string |
+/// | [`ObjectReference`](Self::ObjectReference) | HDF5 object reference (8-byte address) |
+/// | [`Compound`](Self::Compound) | compound with classified fields |
+/// | [`Enum`](Self::Enum) | enumeration with member names |
+/// | [`Array`](Self::Array) | fixed-size array of a base type |
+/// | [`Other`](Self::Other) | anything not classified above, carrying the type itself |
+///
+/// `DType` is the quick human-readable summary, and
+/// [`Dataset::datatype`](crate::Dataset::datatype) reports exact field offsets, bit precision, and
+/// byte order. A type nested in a compound field or an array base has no such fallback, which is
+/// why [`Other`](Self::Other) carries the [`Datatype`] itself.
 ///
 /// Non-exhaustive: variants are added as this crate supports more datatypes, so
 /// match with a `_` arm.
