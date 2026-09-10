@@ -29,14 +29,14 @@ ndarray = ["hdf5-pure/ndarray"]
 __hdf5-bundled = ["hdf5/static", "__hdf5-2"]
 
 [dependencies]
-hdf5 = { package = "hdf5-metno", git = "https://github.com/metno/hdf5-rust", branch = "main", features = ["zlib"] }
+hdf5 = { package = "hdf5-metno", git = "https://github.com/metno/hdf5-rust", rev = "9f3ecbf4faada7617c7ce92be203bb341626c140", features = ["zlib"] }
 
 [dev-dependencies]
 hdf5-pure = { path = "../.." }
 # Its raw bindings, for the few calls the wrapper has no API for. Declared
 # here rather than in a test's own `extern` block, so names and structs follow
 # the linked release.
-hdf5_sys = { package = "hdf5-metno-sys", git = "https://github.com/metno/hdf5-rust", branch = "main" }
+hdf5_sys = { package = "hdf5-metno-sys", git = "https://github.com/metno/hdf5-rust", rev = "9f3ecbf4faada7617c7ce92be203bb341626c140" }
 test-util = { path = "../test-util" }
 tempfile = "3"
 serde = { version = "1", features = ["derive"] }

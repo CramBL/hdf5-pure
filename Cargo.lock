@@ -365,7 +365,7 @@ checksum = "841d1cc9bed7f9236f321df977030373f4a4163ae1a7dbfe1a51a2c1a51d9100"
 [[package]]
 name = "hdf5-metno"
 version = "0.14.1"
-source = "git+https://github.com/metno/hdf5-rust?branch=main#ee47d729d186224d35a3d31bc089bb2732da2b20"
+source = "git+https://github.com/metno/hdf5-rust?rev=9f3ecbf4faada7617c7ce92be203bb341626c140#9f3ecbf4faada7617c7ce92be203bb341626c140"
 dependencies = [
  "bitflags",
  "cfg-if",
@@ -380,7 +380,7 @@ dependencies = [
 [[package]]
 name = "hdf5-metno-derive"
 version = "0.10.2"
-source = "git+https://github.com/metno/hdf5-rust?branch=main#ee47d729d186224d35a3d31bc089bb2732da2b20"
+source = "git+https://github.com/metno/hdf5-rust?rev=9f3ecbf4faada7617c7ce92be203bb341626c140#9f3ecbf4faada7617c7ce92be203bb341626c140"
 dependencies = [
  "proc-macro-crate",
  "proc-macro2",
@@ -391,7 +391,7 @@ dependencies = [
 [[package]]
 name = "hdf5-metno-src"
 version = "0.10.4"
-source = "git+https://github.com/metno/hdf5-rust?branch=main#ee47d729d186224d35a3d31bc089bb2732da2b20"
+source = "git+https://github.com/metno/hdf5-rust?rev=9f3ecbf4faada7617c7ce92be203bb341626c140#9f3ecbf4faada7617c7ce92be203bb341626c140"
 dependencies = [
  "cmake",
  "libz-sys",
@@ -400,7 +400,7 @@ dependencies = [
 [[package]]
 name = "hdf5-metno-sys"
 version = "0.12.3"
-source = "git+https://github.com/metno/hdf5-rust?branch=main#ee47d729d186224d35a3d31bc089bb2732da2b20"
+source = "git+https://github.com/metno/hdf5-rust?rev=9f3ecbf4faada7617c7ce92be203bb341626c140#9f3ecbf4faada7617c7ce92be203bb341626c140"
 dependencies = [
  "hdf5-metno-src",
  "libc",
@@ -417,7 +417,7 @@ dependencies = [
 [[package]]
 name = "hdf5-metno-types"
 version = "0.11.1"
-source = "git+https://github.com/metno/hdf5-rust?branch=main#ee47d729d186224d35a3d31bc089bb2732da2b20"
+source = "git+https://github.com/metno/hdf5-rust?rev=9f3ecbf4faada7617c7ce92be203bb341626c140#9f3ecbf4faada7617c7ce92be203bb341626c140"
 dependencies = [
  "ascii",
  "cfg-if",
