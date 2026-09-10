@@ -7,6 +7,7 @@ pub mod file_space;
 pub mod generic_io;
 pub mod groups_attributes;
 pub mod ndarray;
+pub mod portability;
 pub mod reading;
 pub mod repack;
 pub mod streaming;

@@ -130,7 +130,6 @@ markdown_extensions:
 nav:
   - Interoperability:
       - MATLAB v7.3 (.mat): interop/matlab.md
-      - Portability — WASM, no_std, C library: interop/portability.md
   - Reference:
       - Data Types: reference/data-types.md
       - Cargo Features: reference/features.md

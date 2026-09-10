@@ -25,6 +25,7 @@ include = [
     "/docs/guide/generic-io.md",
     "/docs/guide/groups-attributes.md",
     "/docs/guide/ndarray.md",
+    "/docs/guide/portability.md",
     "/docs/guide/reading.md",
     "/docs/guide/repack.md",
     "/docs/guide/streaming.md",
