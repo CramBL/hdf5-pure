@@ -185,6 +185,209 @@
 //! # Ok::<(), hdf5_pure::Error>(())
 //! ```
 //!
+//! # Cargo features
+//!
+//! The crate is split into Cargo features, so a build compiles the parts it uses. The defaults
+//! cover filesystem I/O with the high-level reader and writer, and the optional features add
+//! MATLAB `.mat` support, a second compression backend, N-dimensional array I/O, and data
+//! provenance. The [Installation section of the README][readme-install] shows how to declare them
+//! in `Cargo.toml`.
+//!
+//! | Feature | Default | Pulls in | Implies | Description |
+//! |---|---|---|---|---|
+//! | `std` | yes | nothing | nothing | file I/O and the high-level reader and writer API |
+//! | `checksum` | yes | nothing | nothing | the Jenkins hash that validates checksummed metadata |
+//! | `deflate` | yes | `flate2`, Rust backend | nothing | deflate (zlib) compression, pure-Rust backend |
+//! | `serde` | no | `serde` | `std` | serialization of MATLAB v7.3 `.mat` files through serde |
+//! | `fast-deflate` | no | `flate2/zlib-ng` | nothing | the zlib-ng backend for deflate |
+//! | `ndarray` | no | the `ndarray` crate | `std` | N-dimensional array I/O through the [`ndarray`](https://docs.rs/ndarray) crate |
+//! | `num-complex` | no | `num-complex` | `serde` | [`mat::ComplexElement`] for `num_complex::Complex<T>`, for the bulk complex-array helpers |
+//! | `provenance` | no | `sha2` | nothing | SHA-256 data provenance tracking |
+//! | `zfp` | no | nothing | nothing | ZFP fixed-rate compression (HDF5 filter 32013), `f32`, `f64`, `i32` and `i64` in ranks 1 to 4 |
+//! | `heap-baseline` | no | nothing | nothing | maintainer only: check the recorded allocation figures (see below) |
+//! | `matio-crosscheck` | no | nothing | `serde` | maintainer only: the crosscheck against the system `libmatio` (see below) |
+//!
+//! The default feature set is `std`, `checksum`, and `deflate`. `serde` and `ndarray` both imply
+//! `std`, since they build on the [`File`], [`Group`], and [`Dataset`] reader APIs and the
+//! [`FileBuilder`] writer, which require the standard library. Enabling either one enables `std`.
+//!
+//! ## `std`
+//!
+//! Enables the standard library, and with it the whole high-level reader and writer surface:
+//! [`File`], [`FileBuilder`], [`Group`], [`Dataset`], [`File::open_rw`],
+//! [`File::open_swmr_writer`], [`Dataset::append`], [`repack`](fn@repack), the [`mat`] module, and
+//! the in-memory, filesystem, and caller-supplied-source entry points ([`FileBuilder::finish`],
+//! [`File::from_bytes`], [`File::open`], [`File::open_streaming`], [`File::from_source`],
+//! [`FileBuilder::write`]). The whole high-level API is `std`-gated: with `std` disabled the crate
+//! is `no_std` and exposes the lower-level datatype and builder primitives alone. `std` is
+//! available on `wasm32-unknown-unknown`, so a WASM build keeps it, which [Platform
+//! support](#platform-support) covers.
+//!
+//! ## `checksum`
+//!
+//! Enables the Jenkins lookup3 hash used to validate and emit the checksums HDF5 puts on its
+//! metadata: version 2 and later object headers, the superblock, version 2 B-tree nodes, fractal
+//! heaps, and the Extensible-Array and Fixed-Array chunk indexes. It has no extra dependency. Keep
+//! it enabled for broad compatibility with the files the reference HDF5 C library and h5py
+//! produce. Keep it on a WASM target too, beside `std`.
+//!
+//! ## `deflate`
+//!
+//! Enables Deflate (zlib) compression and decompression through a pure-Rust backend (`flate2` with
+//! its `rust_backend`). This is what backs [`DatasetBuilder::with_deflate`]. See the
+//! [compression guide](crate::_guide::compression) for usage.
+//!
+//! ## `serde`
+//!
+//! Adds serde-based (de)serialization of MATLAB v7.3 `.mat` files through the [`mat`] module
+//! ([`mat::to_file`], [`mat::to_writer`], [`mat::from_file`], [`Matrix`](crate::mat::Matrix),
+//! [`Complex32`](crate::mat::Complex32), [`Complex64`](crate::mat::Complex64)). It pulls in the
+//! `serde` dependency and implies `std`.
+//!
+//! Only the serde-driven entry points are gated. The mid-level [`mat::MatBuilder`], including
+//! [`write_blocks`](crate::mat::MatBuilder::write_blocks),
+//! [`finish_to`](crate::mat::MatBuilder::finish_to) and [`write`](crate::mat::MatBuilder::write),
+//! needs `std` and not `serde`, so a writer that builds its `.mat` explicitly does not pay for the
+//! dependency.
+//!
+//! The `matlab_fixtures` example requires this feature and runs with `cargo run --example
+//! matlab_fixtures --features serde`. The `mat_streaming` example needs only the defaults: `cargo
+//! run --example mat_streaming`.
+//!
+//! ## `fast-deflate`
+//!
+//! Switches the deflate backend to zlib-ng through `flate2/zlib-ng`, which compresses faster than
+//! the pure-Rust backend. It complements `deflate` and leaves the deflate API as it is. zlib-ng is
+//! a native dependency, so this feature is for native builds, and the pure-Rust `deflate` backend
+//! is what a WASM target compiles.
+//!
+//! ## `ndarray`
+//!
+//! Adds ergonomic N-dimensional array I/O via the [`ndarray`](https://docs.rs/ndarray) crate:
+//! [`DatasetBuilder::with_ndarray`] to write and [`Dataset::read_array`] /
+//! [`Dataset::read_array_dyn`] to read. Shape and datatype come from the array, and data is stored
+//! row-major (C order). It pulls in the `ndarray` crate and implies `std`. See the
+//! [ndarray guide](crate::_guide::ndarray).
+//!
+//! The `ndarray_io` example requires this feature and runs with `cargo run --example ndarray_io
+//! --features ndarray`.
+//!
+//! ## `num-complex`
+//!
+//! Implements [`mat::ComplexElement`] for `num_complex::Complex<T>`, so a slice of the de-facto
+//! standard Rust complex type can be handed to the bulk array helpers ([`mat::complex::i16_array`]
+//! and friends) without a conversion pass. It implies `serde`. See
+//! [large complex arrays](crate::mat#large-complex-arrays).
+//!
+//! `ComplexElement` is `unsafe` and asserts a memory layout, and the orphan rule allows an
+//! implementation only from a crate that owns one of the two types, so these implementations ship
+//! here. A complex type of the caller's own needs no feature: implement the trait for it directly.
+//!
+//! ## `provenance`
+//!
+//! Adds SHA-256 data provenance tracking, pulling in `sha2`.
+//! [`DatasetBuilder::with_provenance(creator, timestamp, source)`](DatasetBuilder::with_provenance)
+//! stores the SHA-256 digest of the data beside a dataset, together with the creator, the
+//! timestamp and, where the caller passes one, the source, and [`Dataset::verify_provenance`]
+//! recomputes the digest and returns a [`VerifyResult`]. The attributes have conventional names:
+//! `_provenance_sha256`, `_provenance_creator`, `_provenance_timestamp` and `_provenance_source`.
+//! `verify_provenance` and [`VerifyResult`] require `std` as well.
+//!
+//! ```rust
+//! # #[cfg(feature = "provenance")] {
+//! use hdf5_pure::{File, FileBuilder};
+//!
+//! let mut builder = FileBuilder::new();
+//! builder.create_dataset("measurements")
+//!     .with_f64_data(&[1.0, 2.0, 3.0])
+//!     .with_provenance("acquisition-rig", "2026-06-16T00:00:00Z", None);
+//! let bytes = builder.finish().unwrap();
+//!
+//! let file = File::from_bytes(bytes).unwrap();
+//! let result = file.dataset("measurements").unwrap().verify_provenance().unwrap();
+//! # assert_eq!(result, hdf5_pure::VerifyResult::Ok);
+//! # }
+//! ```
+//!
+//! ## `zfp`
+//!
+//! Enables a pure-Rust fixed-rate port of the LLNL/zfp codec, registered as HDF5 filter ID 32013,
+//! exposed through [`DatasetBuilder::with_zfp(rate)`](DatasetBuilder::with_zfp). It supports `f32`,
+//! `f64`, `i32`, and `i64` datasets in ranks 1D through 4D in fixed-rate mode. Files written with
+//! it are byte-for-byte interoperable with the reference H5Z-ZFP plugin (`h5py` + `hdf5plugin`). It
+//! has no extra crate dependency. See the [compression guide](crate::_guide::compression).
+//!
+//! ```rust
+//! # #[cfg(feature = "zfp")] {
+//! # let (ny, nx) = (16usize, 16usize);
+//! # let data: Vec<f32> = (0..ny * nx).map(|i| i as f32).collect();
+//! let mut builder = hdf5_pure::FileBuilder::new();
+//! builder.create_dataset("temperature")
+//!     .with_f32_data(&data)
+//!     .with_shape(&[ny as u64, nx as u64])
+//!     .with_chunks(&[ny as u64, nx as u64])
+//!     .with_zfp(16.0);  // 16 bits per value
+//! # let bytes = builder.finish().unwrap();
+//! # let file = hdf5_pure::File::from_bytes(bytes).unwrap();
+//! # assert_eq!(file.dataset("temperature").unwrap().shape().unwrap(), vec![16, 16]);
+//! # }
+//! ```
+//!
+//! ## `heap-baseline`
+//!
+//! A test-only, maintainer feature. It enables `tests/allocation_baseline.rs`, which checks the
+//! crate's exact allocation counts and byte totals for one write-then-read cycle against the
+//! figures committed under `tests/baselines/`. It pulls in nothing (the heap profiler it uses,
+//! [`heapscope`](https://crates.io/crates/heapscope), is an unconditional dev-dependency), it is
+//! not a run-time dependency, and end users do not need it.
+//!
+//! The figures it checks belong to one target, one toolchain and one feature set, so the test
+//! compiles only under the crate's default features and CI runs it in a single pinned job. The
+//! bounds that hold everywhere are in `tests/allocation_bounds.rs` and need no feature: a windowed
+//! read allocates on the order of its window, and a chunked read costs a constant per chunk. On
+//! x86_64, both need the frame pointers `.cargo/config.toml` sets.
+//!
+//! ## `matio-crosscheck`
+//!
+//! A test-only, maintainer feature. It enables a crosscheck integration test that links against the
+//! system `libmatio` (the reference MATLAB MAT file library, installed with `brew install libmatio`
+//! or `apt install libmatio-dev`) to validate `.mat` output. It implies `serde`, is not a run-time
+//! dependency, and end users do not need it.
+//!
+//! The tests that link the reference HDF5 C library are a separate package, `hdf5-pure-crosscheck`
+//! under `crates/crosscheck/`, so that nothing else in the repository needs a C library. Its
+//! features are not this crate's.
+//!
+//! # Platform support
+//!
+//! The crate builds for `wasm32-unknown-unknown` with no C dependencies. `std` is available on
+//! that target and the high-level API is `std`-gated, so a WASM build keeps the default features,
+//! which include `std`. Turning them off compiles [`File`] and [`FileBuilder`] away. Add the
+//! target and build:
+//!
+//! ```console
+//! $ rustup target add wasm32-unknown-unknown
+//! $ cargo build --target wasm32-unknown-unknown
+//! ```
+//!
+//! In the browser the in-memory entry points are the ones to use, [`FileBuilder::finish`], which
+//! returns a `Vec<u8>`, and [`File::from_bytes`]. The path-based entry points compile, and a
+//! browser gives them no filesystem to reach at runtime.
+//!
+//! For bare-metal `no_std` (for example `thumbv7em-none-eabi`), turn the default features off and
+//! keep `checksum`:
+//!
+//! ```toml
+//! [dependencies]
+//! hdf5-pure = { version = "0.44", default-features = false, features = ["checksum"] }
+//! ```
+//!
+//! The crate then compiles as `#![no_std]` with `alloc` alone, and the `std`-gated [`File`] and
+//! [`FileBuilder`] API is absent: a `no_std` build exposes the lower-level primitives, and
+//! building or reading a whole file needs `std`. `fast-deflate` uses the native zlib-ng backend
+//! and is for native builds, and the pure-Rust `deflate` backend is what a WASM target compiles.
+//! See the [portability guide](crate::_guide::portability) for the full per-target breakdown.
+//!
 //! # Write paths
 //!
 //! Three paths put bytes on disk, with different cost models:
@@ -284,6 +487,8 @@
 //! ZFP codec a port of LLNL's reference implementation, both BSD 3-Clause, and the HDF5 format
 //! parsing and low-level I/O modules come from rustyhdf5 by the RustyStack project, MIT licensed.
 //! The README's License section links every license text.
+//!
+//! [readme-install]: https://github.com/CramBL/hdf5-pure#installation
 
 #![cfg_attr(docsrs, feature(doc_cfg))]
 #![cfg_attr(not(feature = "std"), no_std)]
