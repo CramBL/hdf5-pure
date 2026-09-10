@@ -128,8 +128,6 @@ markdown_extensions:
   - pymdownx.tilde
 
 nav:
-  - Guide:
-      - N-dimensional Arrays: guide/ndarray.md
   - Interoperability:
       - MATLAB v7.3 (.mat): interop/matlab.md
       - Portability — WASM, no_std, C library: interop/portability.md
