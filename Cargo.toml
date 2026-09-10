@@ -24,6 +24,7 @@ include = [
     "/docs/guide/groups-attributes.md",
     "/docs/guide/reading.md",
     "/docs/guide/streaming.md",
+    "/docs/guide/vlen-strings.md",
     "/docs/guide/writing.md",
     "/README.md",
     "/CHANGELOG.md",
