@@ -1,9 +1,8 @@
 `hdf5-pure` is pure Rust with no C dependencies and no build-time linkage to
-libhdf5, which gives it three portability properties that the reference library
-cannot offer: it compiles to WebAssembly, it compiles for `no_std` targets with
-`alloc`, and the files it produces are byte-compatible with the rest of the HDF5
-ecosystem. This page covers all three, including what is and is not available
-without `std`.
+libhdf5. It compiles to WebAssembly, it compiles for `no_std` targets with
+`alloc`, and it writes the standard on-disk format, which the reference HDF5 C
+library, `h5py` and MATLAB read. This page covers all three, including which
+capabilities `std` gates.
 
 ## WebAssembly
 
