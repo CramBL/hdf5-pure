@@ -64,7 +64,7 @@ The element type of a dataset comes from the setter you call:
 | [`with_u8_data`](crate::DatasetBuilder::with_u8_data) / [`with_u16_data`](crate::DatasetBuilder::with_u16_data) / [`with_u32_data`](crate::DatasetBuilder::with_u32_data) / [`with_u64_data`](crate::DatasetBuilder::with_u64_data) | Unsigned integers (8/16/32/64-bit) |
 | [`with_ascii_strings`](crate::DatasetBuilder::with_ascii_strings) / [`with_strings`](crate::DatasetBuilder::with_strings) | Fixed-width strings, ASCII or UTF-8 |
 
-This is the common subset. Compound, enumeration, array, complex, and object-reference datatypes have their own setters, one class at a time, in the compound and complex types guide.
+This is the common subset. Compound, enumeration, array, complex, and object-reference datatypes have their own setters, one class at a time, in the [compound and complex types](crate::_guide::compound_types) guide.
 
 Data is stored row-major (C order), which is what HDF5 uses on disk. When you provide a multi-dimensional [`with_shape`](crate::DatasetBuilder::with_shape), the flat slice is interpreted in row-major order.
 
@@ -86,7 +86,7 @@ store(&mut fb, "counts", &[1u32, 2, 3]);
 # Ok::<(), hdf5_pure::Error>(())
 ```
 
-The full [`with_data`](crate::DatasetBuilder::with_data) / [`read::<T>()`](crate::Dataset::read) round trip and the types implementing [`H5Element`](crate::H5Element) are in the generic I/O guide.
+The full [`with_data`](crate::DatasetBuilder::with_data) / [`read::<T>()`](crate::Dataset::read) round trip and the types implementing [`H5Element`](crate::H5Element) are in the [generic I/O](crate::_guide::generic_io) guide.
 
 ## Strings
 
@@ -107,7 +107,7 @@ fb.create_dataset("station")
 
 The same values written as an attribute ([`AttrValue::AsciiString`](crate::AttrValue::AsciiString), [`AttrValue::AsciiStringArray`](crate::AttrValue::AsciiStringArray)) reach the file under the same encoding, so a value does not change shape by moving between the two.
 
-For strings that should not share a width at all, [`with_vlen_strings`](crate::DatasetBuilder::with_vlen_strings) writes a variable-length dataset whose payloads live in the file's global heap. Either kind reads back through [`Dataset::read_string`](crate::Dataset::read_string), which dispatches on the datatype and trims the padding for you. The variable-length strings guide has the read side in full.
+For strings that should not share a width at all, [`with_vlen_strings`](crate::DatasetBuilder::with_vlen_strings) writes a variable-length dataset whose payloads live in the file's global heap. Either kind reads back through [`Dataset::read_string`](crate::Dataset::read_string), which dispatches on the datatype and trims the padding for you. The [variable-length strings](crate::_guide::vlen_strings) guide has the read side in full.
 
 Other paddings (`NULLTERM`, `SPACEPAD`, as `H5T_C_S1` and `H5T_FORTRAN_S1` carry) are left to [`with_raw_data`](crate::DatasetBuilder::with_raw_data) with a hand-built [`Datatype::String`](crate::Datatype::String).
 
@@ -132,7 +132,7 @@ builder.set_attr("version", AttrValue::I64(2));
 # Ok::<(), hdf5_pure::Error>(())
 ```
 
-Attribute values are [`AttrValue`](crate::AttrValue) variants ([`F64`](crate::AttrValue::F64), [`I64`](crate::AttrValue::I64), [`AsciiString`](crate::AttrValue::AsciiString), and others). The full set of variants and their HDF5 encodings is in the groups and attributes guide.
+Attribute values are [`AttrValue`](crate::AttrValue) variants ([`F64`](crate::AttrValue::F64), [`I64`](crate::AttrValue::I64), [`AsciiString`](crate::AttrValue::AsciiString), and others). The full set of variants and their HDF5 encodings is in the [groups and attributes](crate::_guide::groups_attributes) guide.
 
 ## Groups
 
@@ -152,7 +152,7 @@ builder.add_group(grp.finish());
 # Ok::<(), hdf5_pure::Error>(())
 ```
 
-[`GroupBuilder::finish()`](crate::GroupBuilder::finish) produces a [`FinishedGroup`](crate::FinishedGroup), which [`add_group`](crate::FileBuilder::add_group) inserts into the file. Nested hierarchies and group attributes are the subject of the groups and attributes guide.
+[`GroupBuilder::finish()`](crate::GroupBuilder::finish) produces a [`FinishedGroup`](crate::FinishedGroup), which [`add_group`](crate::FileBuilder::add_group) inserts into the file. Nested hierarchies and group attributes are the subject of the [groups and attributes](crate::_guide::groups_attributes) guide.
 
 ## Committed (named) datatypes
 
@@ -257,5 +257,5 @@ All three produce the same file. [`finish`](crate::FileBuilder::finish) is the o
 ## Next steps
 
 - [Reading files](crate::_guide::reading) loads what you wrote back, including from the in-memory bytes.
-- Chunking, deflate, shuffle, LZF, and scale-offset filters are in the compression guide.
+- Chunking, deflate, shuffle, LZF, and scale-offset filters are in the [compression](crate::_guide::compression) guide.
 - The portability guide walks through how the reference HDF5 C library, h5py, and MATLAB read these files.
