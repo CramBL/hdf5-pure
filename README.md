@@ -2,7 +2,7 @@
 
 Pure-Rust HDF5 reader, writer, and in-place editor. No C dependencies, no build scripts, WASM-compatible.
 
-**📖 [Documentation site](https://crambl.github.io/hdf5-pure/)** · [API reference (docs.rs)](https://docs.rs/hdf5-pure) · [Examples](examples) · [Changelog](CHANGELOG.md)
+**📖 [Documentation (docs.rs)](https://docs.rs/hdf5-pure)** · [Examples](examples) · [Changelog](CHANGELOG.md)
 
 ## Features
 
@@ -673,7 +673,7 @@ For bare-metal `no_std`, disable default features (keep `checksum` for metadata 
 hdf5-pure = { version = "0.44", default-features = false, features = ["checksum"] }
 ```
 
-The high-level `File` / `FileBuilder` API is `std`-gated, so a `no_std` build exposes only the lower-level primitives. WebAssembly builds keep the default features, since `std` is available on `wasm32-unknown-unknown`.
+The high-level `File` / `FileBuilder` API is `std`-gated, so a `no_std` build exposes only the lower-level primitives. The Cargo features section of the crate documentation covers each feature: what it enables, what it pulls in, and which other features it implies.
 
 ## Limitations
 

@@ -106,7 +106,7 @@ The fixtures under `tests/data/` are grouped by the library that wrote them: `c`
 
 ## Documentation
 
-The site under `docs/` is built with [MkDocs](https://www.mkdocs.org/). `just docs::serve` previews it locally at <http://127.0.0.1:8000>, and `just docs::build` fails on a broken link.
+The documentation is the crate's rustdoc: the crate-level page in `src/lib.rs`, and one module under `src/_guide/` per task guide, each including its Markdown page from `docs/guide/`.
 
 `just doc` builds the API documentation twice with warnings denied: as it is published, then again with the private items. `just docs-rs` builds it the way docs.rs does, on nightly with the feature badges on, CI runs it on every pull request.
 
