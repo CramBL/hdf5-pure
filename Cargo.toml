@@ -26,6 +26,7 @@ include = [
     "/docs/guide/reading.md",
     "/docs/guide/repack.md",
     "/docs/guide/streaming.md",
+    "/docs/guide/swmr.md",
     "/docs/guide/vlen-strings.md",
     "/docs/guide/writing.md",
     "/README.md",
