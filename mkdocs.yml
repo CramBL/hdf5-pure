@@ -131,7 +131,6 @@ nav:
   - Guide:
       - Generic Element I/O: guide/generic-io.md
       - Groups & Attributes: guide/groups-attributes.md
-      - Compression & Filters: guide/compression.md
       - Compound & Complex Types: guide/compound-types.md
       - N-dimensional Arrays: guide/ndarray.md
       - Variable-Length Strings: guide/vlen-strings.md
