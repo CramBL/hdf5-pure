@@ -131,7 +131,6 @@ nav:
   - Guide:
       - Generic Element I/O: guide/generic-io.md
       - N-dimensional Arrays: guide/ndarray.md
-      - Variable-Length Strings: guide/vlen-strings.md
       - Reclaiming Space (repack): guide/repack.md
       - File-Space Strategy: guide/file-space.md
       - SWMR: guide/swmr.md
