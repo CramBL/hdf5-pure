@@ -63,6 +63,7 @@ pub fn resolve_v1_group_entries(
             file_data,
             base_address.absolute(snod_addr)?.to_usize()?,
             offset_size,
+            length_size,
         )?;
         for entry in &snod.entries {
             let name = heap.read_string(file_data, entry.link_name_offset)?;
@@ -116,7 +117,8 @@ pub fn resolve_v1_group_entries_from_source<S: Source + ?Sized>(
     for snod_addr in snod_addrs {
         // SNOD addresses from the B-tree are relative to base_address.
         let snod_offset = base_address.absolute(snod_addr)?;
-        let snod = SymbolTableNode::parse_from_source(source, snod_offset, offset_size)?;
+        let snod =
+            SymbolTableNode::parse_from_source(source, snod_offset, offset_size, length_size)?;
         for entry in &snod.entries {
             let name = heap.read_string_in_segment(&segment, entry.link_name_offset)?;
             entries.push(GroupEntry {
@@ -168,7 +170,7 @@ mod tests {
         // Pad to nice offset
         let snod_offset = (snod_offset + 7) & !7;
 
-        let entry_size = os + os + 4 + 4 + 16;
+        let entry_size = ls + os + 4 + 4 + 16;
         let snod_size = 8 + children.len() * entry_size;
         let btree_offset = snod_offset + snod_size;
         let btree_offset = (btree_offset + 7) & !7;
@@ -180,7 +182,7 @@ mod tests {
             heap_data_size as u64
         };
         let btree_header_size = crate::btree_v1::btree_v1_node_header_size(offset_size);
-        let btree_keys_children = os + os + os; // key[0] + child[0] + key[1]
+        let btree_keys_children = ls + os + ls; // key[0] + child[0] + key[1]
         let total_size = btree_offset + btree_header_size + btree_keys_children + 64;
 
         let mut file = vec![0u8; total_size];
@@ -229,13 +231,13 @@ mod tests {
             pos += 2;
             for (idx, &(_, obj_addr, cache_type)) in children.iter().enumerate() {
                 // link_name_offset
-                match offset_size {
+                match length_size {
                     4 => file[pos..pos + 4]
                         .copy_from_slice(&(name_offsets[idx] as u32).to_le_bytes()),
                     8 => file[pos..pos + 8].copy_from_slice(&name_offsets[idx].to_le_bytes()),
                     _ => {}
                 }
-                pos += os;
+                pos += ls;
                 // object_header_address
                 match offset_size {
                     4 => file[pos..pos + 4].copy_from_slice(&(obj_addr as u32).to_le_bytes()),
@@ -271,12 +273,12 @@ mod tests {
                 pos += os;
             }
             // key[0]
-            match offset_size {
+            match length_size {
                 4 => file[pos..pos + 4].copy_from_slice(&0u32.to_le_bytes()),
                 8 => file[pos..pos + 8].copy_from_slice(&0u64.to_le_bytes()),
                 _ => {}
             }
-            pos += os;
+            pos += ls;
             // child[0] = snod_offset
             match offset_size {
                 4 => file[pos..pos + 4].copy_from_slice(&(snod_offset as u32).to_le_bytes()),
@@ -285,7 +287,7 @@ mod tests {
             }
             pos += os;
             // key[1]
-            match offset_size {
+            match length_size {
                 4 => file[pos..pos + 4].copy_from_slice(&(last_key as u32).to_le_bytes()),
                 8 => file[pos..pos + 8].copy_from_slice(&last_key.to_le_bytes()),
                 _ => {}

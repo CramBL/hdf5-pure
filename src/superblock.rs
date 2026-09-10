@@ -166,9 +166,10 @@ impl Superblock {
         let consistency_flags = LittleEndian::read_u32(&d[20..24]);
 
         let os = usize::from(offset_width.get());
+        let ls = usize::from(length_width.get());
         // 4 addresses + root symbol table entry
         let var_start = 24;
-        let sym_entry_size = os + os + 4 + 4 + 16; // link_name_off, obj_hdr_addr, cache_type, reserved, scratch
+        let sym_entry_size = ls + os + 4 + 4 + 16;
         let total = var_start + 4 * os + sym_entry_size;
         bytes::ensure_len(d, 0, total)?;
 
@@ -183,8 +184,8 @@ impl Superblock {
         pos += os;
 
         // Root symbol table entry
-        let _link_name_offset = bytes::read_offset_width(d, pos, offset_width)?;
-        pos += os;
+        let _link_name_offset = bytes::read_length_width(d, pos, length_width)?;
+        pos += ls;
         let object_header_addr = bytes::read_offset_width(d, pos, offset_width)?;
 
         Ok(Superblock {
@@ -228,8 +229,9 @@ impl Superblock {
         // d[26..28] reserved
 
         let os = usize::from(offset_width.get());
+        let ls = usize::from(length_width.get());
         let var_start = 28;
-        let sym_entry_size = os + os + 4 + 4 + 16;
+        let sym_entry_size = ls + os + 4 + 4 + 16;
         let total = var_start + 4 * os + sym_entry_size;
         bytes::ensure_len(d, 0, total)?;
 
@@ -244,8 +246,8 @@ impl Superblock {
         pos += os;
 
         // Root symbol table entry
-        let _link_name_offset = bytes::read_offset_width(d, pos, offset_width)?;
-        pos += os;
+        let _link_name_offset = bytes::read_length_width(d, pos, length_width)?;
+        pos += ls;
         let object_header_addr = bytes::read_offset_width(d, pos, offset_width)?;
 
         Ok(Superblock {

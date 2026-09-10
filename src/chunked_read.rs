@@ -70,13 +70,15 @@ pub struct ChunkInfo {
     pub address: u64,
 }
 
-/// Size of a single key in a version 1 B-tree of type 1 (raw data chunks):
-/// `chunk_size(4) + filter_mask(4) + ndims * offset_size`. The `ndims` trailing
-/// offsets are the per-dimension scaled chunk coordinates (rank + 1 values, the
-/// extra one being the element-offset dimension). (HDF5 format spec, "Disk
-/// Format: Level 1A1 — Version 1 B-trees", type 1 key.)
-const fn chunk_record_key_size(ndims: usize, offset_size: usize) -> usize {
-    4 + 4 + ndims * offset_size
+/// The size in bytes of a key in a version 1 B-tree of type 1 (raw data chunks):
+/// the chunk byte size (4), the filter mask (4), and `ndims` 64-bit offsets (8 bytes each).
+/// The offsets are `(D + 1)` coordinates: one per dataset dimension, followed by a trailing
+/// element offset that is always zero. The key is defined in "Version 1 B-trees" of the
+/// [format specification, version 4.0][spec].
+///
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_infra_btrees_v1
+const fn chunk_record_key_size(ndims: usize) -> usize {
+    4 + 4 + ndims * 8
 }
 
 /// Traverse B-tree v1 type 1 to collect all chunk locations.
@@ -136,7 +138,7 @@ fn collect_chunk_info_inner(
 
     let mut pos = offset + header_size; // first key, past signature/siblings
 
-    let key_size = chunk_record_key_size(ndims, os);
+    let key_size = chunk_record_key_size(ndims);
 
     if node_level == 0 {
         // Leaf node: keys and children interleaved
@@ -167,8 +169,15 @@ fn collect_chunk_info_inner(
             let mut offsets = Vec::with_capacity(ndims);
             let mut kp = pos + 8;
             for _ in 0..ndims {
-                offsets.push(read_offset(file_data, kp, offset_size)?);
-                kp += os;
+                let bytes = file_data
+                    .get(kp..kp + 8)
+                    .ok_or(FormatError::UnexpectedEof {
+                        expected: kp.saturating_add(8),
+                        available: file_data.len(),
+                    })?;
+                // Invariant: slice length is exactly 8 bytes.
+                offsets.push(u64::from_le_bytes(bytes.try_into().unwrap()));
+                kp += 8;
             }
             pos += key_size;
 
@@ -278,7 +287,7 @@ fn collect_chunk_btree_node_spans_inner<S: Source + ?Sized>(
     }
     let node_level = header[5];
     let entries_used = u16::from_le_bytes([header[6], header[7]]) as usize;
-    let key_size = chunk_record_key_size(ndims, os);
+    let key_size = chunk_record_key_size(ndims);
 
     // The reader-consumed body: `entries_used` (key, child) pairs and a trailing
     // key. This is the conservative node extent (see the doc comment).
@@ -370,7 +379,7 @@ fn collect_chunk_info_from_source_inner<S: Source + ?Sized>(
     let entries_used = u16::from_le_bytes([header[6], header[7]]) as usize;
 
     // Key/child region begins right after the header (siblings already included).
-    let key_size = chunk_record_key_size(ndims, os);
+    let key_size = chunk_record_key_size(ndims);
     let needed = entries_used * (key_size + os) + key_size;
     let body_addr =
         btree_address
@@ -392,8 +401,13 @@ fn collect_chunk_info_from_source_inner<S: Source + ?Sized>(
             let mut offsets = Vec::with_capacity(ndims);
             let mut kp = pos + 8;
             for _ in 0..ndims {
-                offsets.push(read_offset(&body, kp, offset_size)?);
-                kp += os;
+                let bytes = body.get(kp..kp + 8).ok_or(FormatError::UnexpectedEof {
+                    expected: kp.saturating_add(8),
+                    available: body.len(),
+                })?;
+                // Invariant: slice length is exactly 8 bytes.
+                offsets.push(u64::from_le_bytes(bytes.try_into().unwrap()));
+                kp += 8;
             }
             pos += key_size;
             let address = read_offset(&body, pos, offset_size)?;
@@ -2304,7 +2318,7 @@ mod tests {
                 } else {
                     0
                 };
-                write_offset(&mut buf, off, offset_size);
+                buf.extend_from_slice(&off.to_le_bytes());
             }
             // Child: address
             write_offset(&mut buf, chunk.address, offset_size);
@@ -2314,7 +2328,7 @@ mod tests {
         buf.extend_from_slice(&0u32.to_le_bytes()); // chunk_size
         buf.extend_from_slice(&0u32.to_le_bytes()); // filter_mask
         for _ in 0..ndims {
-            write_offset(&mut buf, u64::MAX, offset_size);
+            buf.extend_from_slice(&u64::MAX.to_le_bytes());
         }
 
         buf
@@ -2380,7 +2394,7 @@ mod tests {
             buf.extend_from_slice(&0u32.to_le_bytes()); // key: chunk_size
             buf.extend_from_slice(&0u32.to_le_bytes()); // key: filter_mask
             for _ in 0..ndims {
-                write_offset(&mut buf, 0, offset_size);
+                buf.extend_from_slice(&0u64.to_le_bytes());
             }
             write_offset(&mut buf, addr, offset_size); // child node address
         }
@@ -2388,7 +2402,7 @@ mod tests {
         buf.extend_from_slice(&0u32.to_le_bytes());
         buf.extend_from_slice(&0u32.to_le_bytes());
         for _ in 0..ndims {
-            write_offset(&mut buf, u64::MAX, offset_size);
+            buf.extend_from_slice(&u64::MAX.to_le_bytes());
         }
         buf
     }

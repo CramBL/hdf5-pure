@@ -4,7 +4,7 @@
 use alloc::vec::Vec;
 
 use crate::address::BaseAddress;
-use crate::bytes::{read_offset, read_optional_offset};
+use crate::bytes::{read_length, read_offset, read_optional_offset};
 use crate::convert::TryToUsize;
 use crate::error::FormatError;
 use crate::source::Source;
@@ -53,16 +53,17 @@ pub struct BTreeV1Node {
 impl BTreeV1Node {
     /// Parse a B-tree v1 node at the given offset in the file data.
     ///
-    /// For type 0 (group) nodes, keys are offset_size bytes each (heap name offsets).
+    /// For type 0 (group) nodes, keys are `length_size` bytes each (heap name offsets).
     pub fn parse(
         file_data: &[u8],
         offset: usize,
         offset_size: u8,
-        _length_size: u8,
+        length_size: u8,
     ) -> Result<BTreeV1Node, FormatError> {
         // signature(4) + node_type(1) + node_level(1) + entries_used(2),
         // then left_sibling(offset_size) + right_sibling(offset_size).
         let os = offset_size as usize;
+        let ls = length_size as usize;
         let header_size = btree_v1_node_header_size(offset_size);
         if header_size > file_data.len() || offset > file_data.len() - header_size {
             return Err(FormatError::UnexpectedEof {
@@ -85,10 +86,10 @@ impl BTreeV1Node {
         let right_sibling = read_optional_offset(file_data, pos, offset_size)?;
         pos += os;
 
-        // For type 0: keys are offset_size bytes, children are offset_size bytes
+        // For type 0: keys are `length_size` bytes, children are `offset_size` bytes
         // Layout: key[0], child[0], key[1], child[1], ..., key[N-1], child[N-1], key[N]
         let eu = entries_used as usize;
-        let key_size = os; // For type 0, key = offset_size
+        let key_size = ls; // For type 0, key = `length_size`
         let needed = eu * (key_size + os) + key_size; // eu children + (eu+1) keys
         if needed > file_data.len() || pos > file_data.len() - needed {
             return Err(FormatError::UnexpectedEof {
@@ -102,7 +103,7 @@ impl BTreeV1Node {
 
         for i in 0..eu {
             // key[i]
-            let key = read_offset(file_data, pos, offset_size)?;
+            let key = read_length(file_data, pos, length_size)?;
             keys.push(key);
             pos += key_size;
             // child[i]
@@ -112,7 +113,7 @@ impl BTreeV1Node {
             let _ = i;
         }
         // final key
-        let key = read_offset(file_data, pos, offset_size)?;
+        let key = read_length(file_data, pos, length_size)?;
         keys.push(key);
 
         Ok(BTreeV1Node {
@@ -143,9 +144,10 @@ impl BTreeV1Node {
         let entries_used = u16::from_le_bytes([prefix[6], prefix[7]]) as usize;
 
         // For type 0: header + entries_used*(key + child) + a trailing key,
-        // with key and child each `offset_size` bytes wide.
+        // with child `offset_size` bytes wide and key `length_size` bytes wide.
         let os = offset_size as usize;
-        let total = btree_v1_node_header_size(offset_size) + entries_used * (os + os) + os;
+        let ls = length_size as usize;
+        let total = btree_v1_node_header_size(offset_size) + entries_used * (ls + os) + ls;
         let buf = source.read_metadata_at(address, total)?;
         Self::parse(&buf, 0, offset_size, length_size)
     }
@@ -303,6 +305,7 @@ mod tests {
         left: Option<u64>,
         right: Option<u64>,
         offset_size: u8,
+        length_size: u8,
     ) -> Vec<u8> {
         assert_eq!(keys.len(), children.len() + 1);
         let entries_used = children.len() as u16;
@@ -319,16 +322,16 @@ mod tests {
         write_offset(&mut buf, left.unwrap_or(undef), offset_size);
         write_offset(&mut buf, right.unwrap_or(undef), offset_size);
         for i in 0..children.len() {
-            write_offset(&mut buf, keys[i], offset_size);
+            write_offset(&mut buf, keys[i], length_size);
             write_offset(&mut buf, children[i], offset_size);
         }
-        write_offset(&mut buf, *keys.last().unwrap(), offset_size);
+        write_offset(&mut buf, *keys.last().unwrap(), length_size);
         buf
     }
 
     #[test]
     fn parse_leaf_node() {
-        let data = build_btree_node(0, 0, &[0, 5, 10], &[0x100, 0x200], None, None, 8);
+        let data = build_btree_node(0, 0, &[0, 5, 10], &[0x100, 0x200], None, None, 8, 8);
         let node = BTreeV1Node::parse(&data, 0, 8, 8).unwrap();
         assert_eq!(node.node_type, 0);
         assert_eq!(node.node_level, 0);
@@ -341,22 +344,32 @@ mod tests {
 
     #[test]
     fn parse_with_siblings_none() {
-        let data = build_btree_node(0, 0, &[0, 8], &[0x300], None, None, 8);
+        let data = build_btree_node(0, 0, &[0, 8], &[0x300], None, None, 8, 8);
         let node = BTreeV1Node::parse(&data, 0, 8, 8).unwrap();
         assert_eq!(node.left_sibling, None);
         assert_eq!(node.right_sibling, None);
     }
 
     #[test]
+    fn parse_leaf_node_differing_offset_and_length_sizes() {
+        let data = build_btree_node(0, 0, &[0x10, 0x20], &[0x300], None, None, 4, 8);
+        let node = BTreeV1Node::parse(&data, 0, 4, 8).unwrap();
+        assert_eq!(node.entries_used, 1);
+        assert_eq!(node.keys, vec![0x10, 0x20]);
+        assert_eq!(node.children, vec![0x300]);
+    }
+
+    #[test]
     fn parse_internal_node_and_collect() {
         // Build a 2-level tree: one internal node pointing to two leaf nodes
         let os: u8 = 8;
+        let ls: u8 = 8;
         let leaf1_offset: usize = 0;
         let leaf2_offset: usize = 256;
         let internal_offset: usize = 512;
 
-        let leaf1 = build_btree_node(0, 0, &[0, 5], &[0xA00], None, None, os);
-        let leaf2 = build_btree_node(0, 0, &[5, 10], &[0xB00], None, None, os);
+        let leaf1 = build_btree_node(0, 0, &[0, 5], &[0xA00], None, None, os, ls);
+        let leaf2 = build_btree_node(0, 0, &[5, 10], &[0xB00], None, None, os, ls);
         let internal = build_btree_node(
             0,
             1,
@@ -365,6 +378,7 @@ mod tests {
             None,
             None,
             os,
+            ls,
         );
 
         let mut file = vec![0u8; 1024];
@@ -373,14 +387,14 @@ mod tests {
         file[internal_offset..internal_offset + internal.len()].copy_from_slice(&internal);
 
         let snods =
-            collect_symbol_table_nodes(&file, internal_offset as u64, os, os, BaseAddress::ZERO)
+            collect_symbol_table_nodes(&file, internal_offset as u64, os, ls, BaseAddress::ZERO)
                 .unwrap();
         assert_eq!(snods, vec![0xA00, 0xB00]);
     }
 
     #[test]
     fn invalid_signature() {
-        let mut data = build_btree_node(0, 0, &[0, 1], &[0x100], None, None, 8);
+        let mut data = build_btree_node(0, 0, &[0, 1], &[0x100], None, None, 8, 8);
         data[0] = b'X';
         let err = BTreeV1Node::parse(&data, 0, 8, 8).unwrap_err();
         assert_eq!(err, FormatError::InvalidBTreeSignature);
@@ -388,7 +402,7 @@ mod tests {
 
     #[test]
     fn collect_wrong_node_type() {
-        let data = build_btree_node(1, 0, &[0, 1], &[0x100], None, None, 8);
+        let data = build_btree_node(1, 0, &[0, 1], &[0x100], None, None, 8, 8);
         let mut file = vec![0u8; 512];
         file[..data.len()].copy_from_slice(&data);
         let err = collect_symbol_table_nodes(&file, 0, 8, 8, BaseAddress::ZERO).unwrap_err();
@@ -397,7 +411,7 @@ mod tests {
 
     #[test]
     fn parse_4byte_offsets() {
-        let data = build_btree_node(0, 0, &[0, 4], &[0x50], None, None, 4);
+        let data = build_btree_node(0, 0, &[0, 4], &[0x50], None, None, 4, 4);
         let node = BTreeV1Node::parse(&data, 0, 4, 4).unwrap();
         assert_eq!(node.entries_used, 1);
         assert_eq!(node.children, vec![0x50]);
@@ -409,11 +423,12 @@ mod tests {
         // Listing a malicious v1 group must error via the depth guard rather
         // than recurse until the stack overflows (an uncatchable abort).
         let os: u8 = 8;
-        let node = build_btree_node(0, 1, &[0, 0], &[0], None, None, os);
+        let ls: u8 = 8;
+        let node = build_btree_node(0, 1, &[0, 0], &[0], None, None, os, ls);
         let mut file = vec![0u8; 1024];
         file[..node.len()].copy_from_slice(&node);
 
-        let err = collect_symbol_table_nodes(&file, 0, os, os, BaseAddress::ZERO).unwrap_err();
+        let err = collect_symbol_table_nodes(&file, 0, os, ls, BaseAddress::ZERO).unwrap_err();
         assert_eq!(err, FormatError::NestingDepthExceeded);
     }
 }
