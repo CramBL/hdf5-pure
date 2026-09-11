@@ -1,5 +1,6 @@
+#![cfg(feature = "hdf5")]
 //! Helpers that call into the reference HDF5 C library, for the tests under
-//! `tests/`.
+//! `tests/`. Available only when compiled with the `hdf5` feature.
 
 use hdf5::MinorErrorCode;
 
