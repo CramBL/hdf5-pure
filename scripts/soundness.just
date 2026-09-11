@@ -6,7 +6,7 @@ default: miri heap-baseline
 # holds unsafe code, when a filter selects no tests, or when the selected tests
 # do not run. Each of those would otherwise pass without checking anything, as
 # happened in #113.
-miri:
+miri $CARGO_TERM_COLOR="always" $MIRIFLAGS="-Zmiri-strict-provenance" $RUSTUP_TOOLCHAIN="nightly":
     #!/usr/bin/env bash
     set -euo pipefail
     log="$(mktemp)"
@@ -17,7 +17,7 @@ miri:
             echo "$file holds no unsafe code; point this recipe at the code that does." >&2
             exit 1
         fi
-        MIRIFLAGS=-Zmiri-strict-provenance cargo miri test --locked --no-default-features \
+        cargo miri test --locked --no-default-features \
             --features std,serde --lib "$filter" 2>&1 | tee "$log"
         if grep -q "running 0 tests" "$log"; then
             echo "Miri ran no tests for $filter: the --lib filter matched nothing." >&2
