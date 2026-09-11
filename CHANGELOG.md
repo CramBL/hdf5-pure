@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Changed
+
+- **Breaking:** The published crate ships without a build script, mitigating supply-chain attack risks from `build.rs` execution during compilation ([#548](https://github.com/CramBL/hdf5-pure/pull/548)). The libmatio integration test and its linker directives moved to the unpublished `hdf5-pure-crosscheck` package behind the private `__matio` feature. The removed `matio-crosscheck` feature was an internal check that was never part of the public API.
+
 ### Fixed
 
 - `Dataset::read` and `Group::get` read files whose superblock pairs unequal address and length widths, where raw data chunk B-tree v1 keys, symbol table entries, and group B-tree keys were previously sized by the wrong width, resulting in corrupted reads or parse failures ([#546](https://github.com/CramBL/hdf5-pure/issues/546)).

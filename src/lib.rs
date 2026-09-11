@@ -205,7 +205,6 @@
 //! | `provenance` | no | `sha2` | nothing | SHA-256 data provenance tracking |
 //! | `zfp` | no | nothing | nothing | ZFP fixed-rate compression (HDF5 filter 32013), `f32`, `f64`, `i32` and `i64` in ranks 1 to 4 |
 //! | `heap-baseline` | no | nothing | nothing | maintainer only: check the recorded allocation figures (see below) |
-//! | `matio-crosscheck` | no | nothing | `serde` | maintainer only: the crosscheck against the system `libmatio` (see below) |
 //!
 //! The default feature set is `std`, `checksum`, and `deflate`. `serde` and `ndarray` both imply
 //! `std`, since they build on the [`File`], [`Group`], and [`Dataset`] reader APIs and the
@@ -346,13 +345,6 @@
 //! bounds that hold everywhere are in `tests/allocation_bounds.rs` and need no feature: a windowed
 //! read allocates on the order of its window, and a chunked read costs a constant per chunk. On
 //! x86_64, both need the frame pointers `.cargo/config.toml` sets.
-//!
-//! ## `matio-crosscheck`
-//!
-//! A test-only, maintainer feature. It enables a crosscheck integration test that links against the
-//! system `libmatio` (the reference MATLAB MAT file library, installed with `brew install libmatio`
-//! or `apt install libmatio-dev`) to validate `.mat` output. It implies `serde`, is not a run-time
-//! dependency, and end users do not need it.
 //!
 //! # Platform support
 //!
