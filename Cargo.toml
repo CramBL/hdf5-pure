@@ -10,13 +10,11 @@ description = "Pure-Rust HDF5 library: read, write, and edit files in place (WAS
 repository = "https://github.com/CramBL/hdf5-pure"
 keywords = ["hdf5", "serialization", "scientific", "no-std", "wasm"]
 categories = ["science", "encoding", "filesystem", "wasm", "no-std"]
-build = "build.rs"
-# What the published crate holds: the library, its build script, the examples, the guide pages
+# What the published crate holds: the library, the examples, the guide pages
 # `src/_guide/` includes into the documentation, and the documents a user reads. Tests, test data
 # and tooling stay in the repository.
 include = [
     "/src/**",
-    "/build.rs",
     "/examples/**",
     "/docs/guide/compound-types.md",
     "/docs/guide/compression.md",
@@ -39,13 +37,19 @@ include = [
 
 # Publish the full public API on docs.rs. The default feature set hides the
 # `ndarray`, `serde` (`mat`), `zfp`, and `provenance` surfaces (and
-# leaves their cross-references as dead links); `matio-crosscheck` is a
-# test-only feature and is deliberately excluded.
+# leaves their cross-references as dead links).
 [package.metadata.docs.rs]
 features = ["provenance", "zfp", "ndarray", "serde", "num-complex"]
 # `src/lib.rs` enables rustdoc's `doc_cfg` under this cfg, so each gated
 # item shows the feature that brings it.
 rustdoc-args = ["--cfg", "docsrs"]
+
+# Under Cargo pre-1.0 semver conventions (RELEASES.md), breaking changes release
+# as the next minor version. cargo-semver-checks defaults `feature_missing` to
+# major with no 0.x downgrade: downgrade it to minor for the maintainer-only
+# `matio-crosscheck` feature removal.
+[package.metadata.cargo-semver-checks.lints]
+feature_missing = { required-update = "minor" }
 
 [features]
 default = ["std", "checksum", "deflate"]
@@ -77,13 +81,6 @@ num-complex = ["dep:num-complex", "serde"]
 # while an exact count is a property of one target and one toolchain. Both test
 # files document the split at length.
 heap-baseline = []
-# Test-only: enable a crosscheck test that links against the system libmatio
-# (reference MATLAB MAT file library). Requires libmatio to be installed:
-# `brew install libmatio` (macOS), `apt install libmatio-dev` (Debian) or
-# `paru -S matio` (Arch).
-# Not a run-time dependency — build.rs only emits link directives for this
-# feature, and the crosscheck lives in a gated integration test.
-matio-crosscheck = ["serde"]
 
 [dependencies]
 byteorder = { version = "1", default-features = false }

@@ -77,7 +77,6 @@
         feature = "ndarray",
         feature = "serde",
         feature = "num-complex",
-        feature = "matio-crosscheck",
     ))
 ))]
 
