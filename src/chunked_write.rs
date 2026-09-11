@@ -4971,8 +4971,13 @@ mod tests {
             .ok()?;
         if !o.status.success() {
             let err = String::from_utf8_lossy(&o.stderr);
-            if err.contains("No module named") {
-                return None; // h5py not installed — skip
+            // Under QEMU user emulation, a missing binary yields exit status 127
+            // with empty standard error.
+            if o.status.code() == Some(127) && err.is_empty()
+                || err.contains("No module named")
+                || err.contains("not found")
+            {
+                return None;
             }
             panic!("h5py: {err}");
         }
