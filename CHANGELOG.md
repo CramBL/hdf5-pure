@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.45.0] - 2026-09-11
+
 ### Changed
 
 - **Breaking:** The published crate ships without a build script, mitigating supply-chain attack risks from `build.rs` execution during compilation ([#548](https://github.com/CramBL/hdf5-pure/pull/548)). The libmatio integration test and its linker directives moved to the unpublished `hdf5-pure-crosscheck` package behind the private `__matio` feature. The removed `matio-crosscheck` feature was an internal check that was never part of the public API.
@@ -914,7 +916,8 @@ Internal robustness and tests ([#26](https://github.com/CramBL/hdf5-pure/issues/
 - The MAT deserializer flattens 1×N and N×1 values to a 1-D sequence in `deserialize_any` (matching `deserialize_seq`).
 - Numeric/complex readers preserve 1×N / N×1 shape at the value layer; any flattening happens at the serde level.
 
-[Unreleased]: https://github.com/CramBL/hdf5-pure/compare/v0.44.2...HEAD
+[Unreleased]: https://github.com/CramBL/hdf5-pure/compare/v0.45.0...HEAD
+[0.45.0]: https://github.com/CramBL/hdf5-pure/compare/v0.44.2...v0.45.0
 [0.44.2]: https://github.com/CramBL/hdf5-pure/compare/v0.44.1...v0.44.2
 [0.44.1]: https://github.com/CramBL/hdf5-pure/compare/v0.44.0...v0.44.1
 [0.44.0]: https://github.com/CramBL/hdf5-pure/compare/v0.43.1...v0.44.0
