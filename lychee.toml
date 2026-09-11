@@ -11,5 +11,5 @@ exclude_all_private = true
 
 exclude = [
     # Blocks every non-browser client with 403.
-    "^https://www\\.mathworks\\.com/",
+    '^https://www\.mathworks\.com/',
 ]
