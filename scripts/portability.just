@@ -32,4 +32,11 @@ test-32bit FEATURES="std checksum deflate zfp serde ndarray provenance":
         --features "{{ FEATURES }}"
 
 test-big-endian:
-    cross test --locked --target s390x-unknown-linux-gnu --no-default-features --features "std checksum deflate zfp serde ndarray provenance" --lib --test write_read_roundtrip --test serde_roundtrip --test complex_bulk_array --test complex_integer --test streaming_reader --test vlen_strings --test fixed_strings
+    cross test \
+        --config 'build.rustc-wrapper=""' \
+        --config 'target."s390x-unknown-linux-gnu".linker="s390x-linux-gnu-gcc"' \
+        --config 'target."x86_64-unknown-linux-gnu".linker="cc"' \
+        --locked \
+        --target s390x-unknown-linux-gnu \
+        --no-default-features \
+        --features "std checksum deflate zfp serde ndarray provenance"

@@ -1,0 +1,9 @@
+# The `:main` images carry the prefixed cross linker (`i686-linux-gnu-gcc`,
+# `s390x-linux-gnu-gcc`) that the `portability::test-*` recipes set. The
+# `:0.2.5` release images predate it. Pinned to the current `:main` digests.
+# Bump both together when cross releases again.
+[target.i686-unknown-linux-gnu]
+image = "ghcr.io/cross-rs/i686-unknown-linux-gnu@sha256:ffd906743f91aa05afcda004d23c9b8be0410d8da51ab6ed5aef203ae883385d"
+
+[target.s390x-unknown-linux-gnu]
+image = "ghcr.io/cross-rs/s390x-unknown-linux-gnu@sha256:c19e71febe5381884583fb26ad797c51fd80daa8d731a73b3d2cccbe35b61ec7"
