@@ -28,6 +28,6 @@ Re-running the workflow's job resumes after a failure.
 
 ## The API delta
 
-`prepare` prints the public-API delta since the last release. Read it against the `[Unreleased]` section. The Release workflow stops a release whose delta needs a larger bump than the release makes, which catches a break that no entry marked. `just api::release-type` prints the release type the section calls for, which is what CI checks a pull request against.
+`prepare` prints the public-API delta since the last release. Read it against the `[Unreleased]` section. The Release workflow stops a release whose delta needs a larger bump than the release makes, which catches a break that no entry marked. `just api::release-type` prints the release type CI checks a pull request against: the one the `[Unreleased]` section calls for, or, on a release pull request, the one the dated section it promotes calls for.
 
 `--skip-api-delta` on `prepare`, and the workflow's checkbox, release without the check.

@@ -52,10 +52,10 @@ jobs:
               - .github/workflows/api.yml
 
   # The public-API delta against the latest release, checked against the
-  # release type the changelog's [Unreleased] section calls for: a pull request
-  # that breaks the API marks its entry **Breaking:**, and the version stays
-  # the last release's until a release is cut. RELEASES.md covers what this
-  # cannot see.
+  # release type the changelog calls for: a pull request that breaks the API
+  # marks its entry **Breaking:**, and a release commit, whose [Unreleased] is
+  # empty, is measured against the section it promotes. RELEASES.md covers what
+  # this cannot see.
   semver:
     name: semver / ubuntu-latest
     runs-on: ubuntu-latest
@@ -67,6 +67,8 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          # The release type comes from the changelog diff against the base ref.
+          fetch-depth: 0
 
       - name: Install Rust
         run: rustup toolchain install
@@ -88,9 +90,13 @@ jobs:
         with:
           tool: just
 
+      # A pull request is measured against its base ref. Every other event is
+      # measured against the commit before its tip.
       - name: The release type the changelog calls for
         id: release-type
-        run: echo "type=$(just api::release-type)" >> "$GITHUB_OUTPUT"
+        env:
+          BASE: ${{ github.event_name == 'pull_request' && format('origin/{0}', github.base_ref) || 'HEAD~1' }}
+        run: echo "type=$(just api::release-type "$BASE")" >> "$GITHUB_OUTPUT"
 
       # The action rather than `just api::semver`: it pairs a cargo-semver-checks
       # build with a toolchain whose rustdoc JSON that build can parse.

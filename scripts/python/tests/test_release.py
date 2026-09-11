@@ -8,6 +8,7 @@ from hdf5_pure_scripts.release import (
     changelog_section,
     cycle_release_type,
     promote_changelog,
+    pull_request_release_type,
     required_bump,
     set_version,
 )
@@ -66,7 +67,7 @@ CHANGELOG = """# Changelog
 
 ## [0.44.0] - 2026-09-04
 
-Old summary.
+- **Breaking:** `open` takes a path.
 
 [Unreleased]: https://example/compare/v0.44.0...HEAD
 [0.44.0]: https://example/compare/v0.43.1...v0.44.0
@@ -75,7 +76,7 @@ Old summary.
 
 def test_changelog_section_is_the_body_up_to_the_next_header():
     assert changelog_section(CHANGELOG, "Unreleased") == "\n### Fixed\n\n- A thing.\n\n"
-    assert changelog_section(CHANGELOG, "0.44.0") == "\nOld summary.\n\n"
+    assert changelog_section(CHANGELOG, "0.44.0") == "\n- **Breaking:** `open` takes a path.\n\n"
     assert changelog_section(CHANGELOG, "0.45.0") is None
 
 
@@ -99,7 +100,7 @@ New summary.
 
 ## [0.44.0] - 2026-09-04
 
-Old summary.
+- **Breaking:** `open` takes a path.
 
 [Unreleased]: https://example/compare/v0.45.0...HEAD
 [0.45.0]: https://example/compare/v0.44.0...v0.45.0
@@ -154,3 +155,60 @@ def test_the_cycle_is_a_minor_only_with_a_breaking_entry_under_unreleased():
     marked = plain.replace("- Read a thing.", "- **Breaking:** `read` returns a handle.")
     assert cycle_release_type(marked) == "minor"
     assert cycle_release_type("## [0.44.0]\n\n- **Breaking:** old.\n") == "patch"
+
+
+MID_CYCLE_DIFF = """diff --git a/CHANGELOG.md b/CHANGELOG.md
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -5,3 +5,5 @@
+ ### Fixed
+
++- A thing.
++
+ ## [0.44.0] - 2026-09-04
+"""
+
+RELEASE_DIFF = """diff --git a/CHANGELOG.md b/CHANGELOG.md
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -2,6 +2,8 @@
+ ## [Unreleased]
+
++## [0.45.0] - 2026-09-07
++
+ ### Fixed
+
+@@ -12,3 +14,4 @@
+-[Unreleased]: https://example/compare/v0.44.0...HEAD
++[Unreleased]: https://example/compare/v0.45.0...HEAD
++[0.45.0]: https://example/compare/v0.44.0...v0.45.0
+"""
+
+BREAKING_CHANGELOG = CHANGELOG.replace("- A thing.", "- **Breaking:** `read` returns a handle.")
+
+
+def released(changelog):
+    return promote_changelog(
+        changelog, v("0.45.0"), v("0.44.0"), None, "https://example", date(2026, 9, 7)
+    )
+
+
+def test_a_mid_cycle_pull_request_with_a_breaking_entry_is_a_minor():
+    assert pull_request_release_type(BREAKING_CHANGELOG, MID_CYCLE_DIFF) == "minor"
+
+
+def test_a_mid_cycle_pull_request_without_a_breaking_entry_is_a_patch():
+    assert pull_request_release_type(CHANGELOG, MID_CYCLE_DIFF) == "patch"
+
+
+def test_a_release_pull_request_reads_the_section_it_promotes():
+    assert pull_request_release_type(released(BREAKING_CHANGELOG), RELEASE_DIFF) == "minor"
+
+
+def test_a_release_pull_request_promoting_an_unmarked_section_is_a_patch():
+    assert pull_request_release_type(released(CHANGELOG), RELEASE_DIFF) == "patch"
+
+
+def test_a_pull_request_that_leaves_the_changelog_alone_reads_unreleased():
+    assert pull_request_release_type(BREAKING_CHANGELOG, "") == "minor"
+    assert pull_request_release_type(CHANGELOG, "") == "patch"

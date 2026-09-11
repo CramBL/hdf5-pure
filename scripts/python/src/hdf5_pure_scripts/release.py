@@ -179,6 +179,14 @@ def changelog_section(changelog, header):
 BREAKING = "**Breaking:**"
 
 
+def pull_request_release_type(changelog, changelog_diff):
+    version = promoted_version(changelog_diff)
+    promoted = changelog_section(changelog, version) if version else None
+    if promoted is not None and BREAKING in promoted:
+        return "minor"
+    return cycle_release_type(changelog)
+
+
 def cycle_release_type(changelog):
     """The release type the [Unreleased] section calls for: minor with a breaking entry.
 
@@ -188,6 +196,14 @@ def cycle_release_type(changelog):
     """
     section = changelog_section(changelog, "Unreleased") or ""
     return "minor" if BREAKING in section else "patch"
+
+
+DATED_SECTION_ADDED = re.compile(r"^\+## \[(\d+\.\d+\.\d+)\] - \d{4}-\d{2}-\d{2}$", re.M)
+
+
+def promoted_version(changelog_diff):
+    m = DATED_SECTION_ADDED.search(changelog_diff)
+    return m.group(1) if m else None
 
 
 def promote_changelog(changelog, version, previous, summary, repo_url, today):
@@ -362,6 +378,16 @@ def prepare(args):
     run("git", "status", "--short")
 
 
+def print_release_type(args):
+    resolve = subprocess.run(
+        ["git", "rev-parse", "--verify", "--quiet", f"{args.base}^{{commit}}"], capture_output=True
+    )
+    if resolve.returncode != 0:
+        fail(f"no such commit: {args.base!r} (a shallow clone has no remote branches)")
+    diff = output("git", "diff", f"{args.base}...HEAD", "--", str(CHANGELOG))
+    print(pull_request_release_type(CHANGELOG.read_text(), diff))
+
+
 def pr(args):
     """Commit the prepared release on its branch, prompt, then push it and open
     the pull request."""
@@ -525,9 +551,10 @@ def main():
 
     p = commands.add_parser(
         "release-type",
-        help="print the release type the changelog's [Unreleased] section calls for",
+        help="print the release type this pull request's changelog calls for",
     )
-    p.set_defaults(func=lambda args: print(cycle_release_type(CHANGELOG.read_text())))
+    p.add_argument("--base", required=True, help="the ref the pull request diffs against")
+    p.set_defaults(func=print_release_type)
 
     p = commands.add_parser(
         "pr", help="commit the prepared release on its branch, then push it and open the PR"

@@ -7,10 +7,10 @@ default: semver api-surface msrv
 semver:
     cargo semver-checks -p hdf5-pure --default-features --features serde,zfp,provenance,ndarray
 
-# The release type the changelog's [Unreleased] section calls for: minor with a
-# **Breaking:** entry, patch otherwise. CI checks the API delta against it.
-release-type:
-    {{ uv }} release release-type
+# The release type the changelog calls for: minor with a **Breaking:** entry
+# under [Unreleased], or in the dated section the diff against BASE promotes.
+release-type BASE="origin/main":
+    {{ uv }} release release-type --base {{ BASE }}
 
 # The library builds on the `rust-version` Cargo.toml declares, with every feature.
 msrv:
