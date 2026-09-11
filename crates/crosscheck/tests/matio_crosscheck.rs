@@ -1,13 +1,13 @@
-#![cfg(all(feature = "matio-crosscheck", target_family = "unix"))]
+#![cfg(all(feature = "__matio", target_family = "unix"))]
 //! Crosscheck the serde layer against the reference `matio` C library.
 //!
-//! `matio-rs` on crates.io builds its own bundled libmatio with `MAT73=OFF`,
-//! so it can't read our HDF5-based v7.3 files. This test instead links
-//! directly against the system libmatio (which does have HDF5/v7.3 support)
-//! through a hand-written FFI.
-//!
-//! Enable with `--features matio-crosscheck`. Requires libmatio installed
-//! (`brew install libmatio` on macOS, `apt install libmatio-dev` on Debian).
+// `matio-rs` on crates.io compiles its bundled libmatio with `MAT73=OFF`,
+// which omits reading HDF5-based version 7.3 MAT files. This test links
+// against the system libmatio through a hand-written FFI binding.
+//
+// Enabled by passing `--features __matio` to `hdf5-pure-crosscheck`. Requires
+// libmatio installed (`brew install libmatio` on macOS, `apt install
+// libmatio-dev` on Debian).
 
 // =======================================================================
 // FFI bindings to system libmatio.
