@@ -20,18 +20,19 @@ hdf5-env VERSION:
 
 # FEATURES names the release series from 1.10 up, as in `serde,ndarray,__hdf5-1.10`.
 # The crosschecks linking libhdf5 VERSION, built under tmp/hdf5 on first use.
+# Passes `hdf5` and `hdf5_sys` to activate the C HDF5 bindings.
 test-hdf5 VERSION FEATURES="serde,ndarray" *ARGS: (hdf5-build VERSION)
     #!/usr/bin/env bash
     set -euo pipefail
     eval "$(just interop::hdf5-env {{ VERSION }})"
-    cargo nextest run --locked {{ crosscheck }} --features {{ FEATURES }} {{ ARGS }}
+    cargo nextest run --locked {{ crosscheck }} --features hdf5,hdf5_sys,{{ FEATURES }} {{ ARGS }}
 
 # Clippy over the crosschecks, linking libhdf5 VERSION.
 lint-hdf5 VERSION FEATURES="serde,ndarray":
     #!/usr/bin/env bash
     set -euo pipefail
     eval "$(just interop::hdf5-env {{ VERSION }})"
-    cargo clippy --locked {{ crosscheck }} --all-targets --features {{ FEATURES }} -- -D warnings
+    cargo clippy --locked {{ crosscheck }} --all-targets --features hdf5,hdf5_sys,{{ FEATURES }} -- -D warnings
 
 # The crosschecks linking the libhdf5 `hdf5-metno` bundles, built from source
 # on first use. Needs no HDF5 on the host.
@@ -41,7 +42,7 @@ test-bundled *ARGS:
 # The crosschecks linking the HDF5 installed under HDF5_DIR. Pass the feature
 # naming its release series, as in `--features __hdf5-1.14`.
 test-external-hdf5 *ARGS:
-    cargo nextest run --locked {{ crosscheck }} --features serde,ndarray {{ ARGS }}
+    cargo nextest run --locked {{ crosscheck }} --features hdf5,hdf5_sys,serde,ndarray {{ ARGS }}
 
 test-matio *ARGS:
     cargo nextest run --locked --features "serde matio-crosscheck" --test serde_matio_crosscheck {{ ARGS }}
@@ -50,5 +51,5 @@ test-matio *ARGS:
 hdf5-bundled-version:
     #!/usr/bin/env bash
     set -euo pipefail
-    manifest=$(cargo metadata --locked --format-version 1 | jq -r '.packages[] | select(.name == "hdf5-metno-src") | .manifest_path')
+    manifest=$(cargo metadata --locked --features hdf5-pure-crosscheck/__hdf5-bundled --format-version 1 | jq -r '.packages[] | select(.name == "hdf5-metno-src") | .manifest_path')
     awk '/^#define H5_VERS_(MAJOR|MINOR|RELEASE) / { v[++n] = $3 } END { print v[1] "." v[2] "." v[3] }' "$(dirname "$manifest")/ext/hdf5/src/H5public.h"
