@@ -20,6 +20,11 @@
 //! else. That last part is also how a test here could go quiet, which is why each
 //! one asserts a floor as well as a ceiling — see [`allocation::Measured`].
 
+// heapscope unwinds with the frame-pointer convention, which it implements for
+// x86_64 and aarch64 only, and on any other target the profiler errors at
+// startup.
+#![cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+
 use hdf5_pure::{
     EditBacking, File, FileAccessProperties, FileBuilder, FileSpaceStrategy, MemoryStrategy,
     SyncPolicy,
