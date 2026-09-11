@@ -7,6 +7,7 @@ name = "hdf5-pure-crosscheck"
 version = "0.0.0"
 edition = "2024"
 publish = false
+build = "build.rs"
 
 [lints]
 workspace = true
@@ -27,6 +28,10 @@ ndarray = ["hdf5-pure/ndarray"]
 # the host, a 2.x release. Without it the package links the installation under
 # `HDF5_DIR`.
 __hdf5-bundled = ["hdf5/static", "__hdf5-2"]
+# Test-only: links against the system libmatio (reference MATLAB MAT file library).
+# `build.rs` emits link directives for this feature, and the crosscheck lives in
+# `tests/matio_crosscheck.rs`.
+__matio = ["serde"]
 
 [dependencies]
 hdf5 = { package = "hdf5-metno", git = "https://github.com/metno/hdf5-rust", rev = "9f3ecbf4faada7617c7ce92be203bb341626c140", features = ["zlib"] }
