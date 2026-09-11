@@ -45,7 +45,7 @@ test-external-hdf5 *ARGS:
     cargo nextest run --locked {{ crosscheck }} --features hdf5,hdf5_sys,serde,ndarray {{ ARGS }}
 
 test-matio *ARGS:
-    cargo nextest run --locked --features "serde matio-crosscheck" --test serde_matio_crosscheck {{ ARGS }}
+    cargo nextest run --locked {{ crosscheck }} --features serde,__matio --test matio_crosscheck {{ ARGS }}
 
 # The libhdf5 the crosschecks link when HDF5_DIR is unset.
 hdf5-bundled-version:
