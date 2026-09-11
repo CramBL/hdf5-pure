@@ -21,8 +21,15 @@ cast-gate:
     cargo clean -p hdf5-pure --target i686-unknown-linux-gnu
     cargo clippy --locked --target i686-unknown-linux-gnu --lib --features "serde zfp provenance ndarray" -- -D clippy::cast_possible_truncation -D clippy::cast_possible_wrap -D unfulfilled_lint_expectations
 
-test-32bit:
-    cross test --locked --target i686-unknown-linux-gnu --no-default-features --features "std checksum deflate zfp serde ndarray provenance" --lib --test write_read_roundtrip --test serde_roundtrip --test zfp_roundtrip --test streaming_reader --test dense_attr_limits --test dense_attr_vlen --test attr_message_size_limit --test userblock_dense_attrs --test c_1_8_read_compat --test fixed_strings
+test-32bit FEATURES="std checksum deflate zfp serde ndarray provenance":
+    cross test \
+        --config 'build.rustc-wrapper=""' \
+        --config 'target."i686-unknown-linux-gnu".linker="i686-linux-gnu-gcc"' \
+        --config 'target."x86_64-unknown-linux-gnu".linker="cc"' \
+        --locked \
+        --target i686-unknown-linux-gnu \
+        --no-default-features \
+        --features "{{ FEATURES }}"
 
 test-big-endian:
     cross test --locked --target s390x-unknown-linux-gnu --no-default-features --features "std checksum deflate zfp serde ndarray provenance" --lib --test write_read_roundtrip --test serde_roundtrip --test complex_bulk_array --test complex_integer --test streaming_reader --test vlen_strings --test fixed_strings
