@@ -12,4 +12,10 @@ exclude_all_private = true
 exclude = [
     # Blocks every non-browser client with 403.
     '^https://www\.mathworks\.com/',
+    # `release::prepare` writes the changelog's newest compare links from the tag that
+    # `release::publish` creates only after the release commit merges, so that pair is
+    # unreachable while `just hygiene::lychee-added` runs. Every compare link in the block has
+    # the form `promote_changelog` writes, asserted in `scripts/python/tests/test_release.py`,
+    # so the pattern excludes the older, reachable ones and the weekly sweep skips them as well.
+    '^https://github\.com/CramBL/hdf5-pure/compare/v[0-9]+\.[0-9]+\.[0-9]+(-rc\.[0-9]+)?\.\.\.(v[0-9]+\.[0-9]+\.[0-9]+(-rc\.[0-9]+)?|HEAD)$',
 ]
