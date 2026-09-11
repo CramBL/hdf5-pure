@@ -36,8 +36,13 @@ print(n, int(d[0]) if n else 0, int(d[-1]) if n else 0)
         .ok()?;
     if !out.status.success() {
         let err = String::from_utf8_lossy(&out.stderr);
-        if err.contains("No module named") {
-            return None; // h5py not installed — skip
+        // Under QEMU user emulation, a missing binary yields exit status 127
+        // with empty standard error.
+        if out.status.code() == Some(127) && err.is_empty()
+            || err.contains("No module named")
+            || err.contains("not found")
+        {
+            return None;
         }
         panic!("h5py read ({mode}) failed: {err}");
     }
