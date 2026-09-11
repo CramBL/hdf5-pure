@@ -51,6 +51,10 @@ rustdoc-args = ["--cfg", "docsrs"]
 [package.metadata.cargo-semver-checks.lints]
 feature_missing = { required-update = "minor" }
 
+# Ignore documentation-only guide modules that contain no Rust items.
+[package.metadata.cargo-shear]
+ignored-paths = ["src/_guide/*.rs"]
+
 [features]
 default = ["std", "checksum", "deflate"]
 std = []
