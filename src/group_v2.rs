@@ -666,6 +666,7 @@ mod tests {
     use crate::data_read;
     use crate::dataspace::Dataspace;
     use crate::datatype::Datatype;
+    use crate::message_flags::MessageFlags;
     use crate::signature;
 
     fn extract_dataset(
@@ -722,7 +723,7 @@ mod tests {
                 crate::object_header::HeaderMessage {
                     msg_type: MessageType::LinkInfo,
                     size: 18,
-                    flags: 0,
+                    flags: MessageFlags::NONE,
                     creation_order: None,
                     data: {
                         let mut d = Vec::new();
@@ -736,7 +737,7 @@ mod tests {
                 crate::object_header::HeaderMessage {
                     msg_type: MessageType::Link,
                     size: link_data.len(),
-                    flags: 0,
+                    flags: MessageFlags::NONE,
                     creation_order: None,
                     data: link_data,
                 },
@@ -765,7 +766,7 @@ mod tests {
                 .map(|(msg_type, data)| crate::object_header::HeaderMessage {
                     msg_type,
                     size: data.len(),
-                    flags: 0,
+                    flags: MessageFlags::NONE,
                     creation_order: None,
                     data,
                 })

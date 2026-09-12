@@ -41,6 +41,7 @@ use crate::extensible_array::{DataBlockGeom, EaGeometry, ExtensibleArrayHeader, 
 use crate::fill_value::FillPattern;
 use crate::filter_pipeline::FilterPipeline;
 use crate::filters::{ChunkContext, FilterScratch, compress_chunk_with, decompress_chunk};
+use crate::message_flags::MessageFlags;
 use crate::message_type::MessageType;
 use crate::source::Source;
 
@@ -397,7 +398,7 @@ impl Located {
             .into_iter()
             .flatten()
         {
-            if crate::shared_message::is_shared(msg.flags) {
+            if msg.flags.is_shared() {
                 return Err(unsupported(
                     "dataset has a committed (shared) datatype, dataspace, or filter pipeline",
                 ));
@@ -1452,10 +1453,9 @@ fn locate_data_block(geom: &EaGeometry, idx_blk_elmts: u64, e: u64) -> DataBlock
 
 struct WalkedMessage {
     msg_type: MessageType,
-    /// The record's flags byte. Bit 1 marks the body as a *reference* to a shared
-    /// message rather than the message itself, which every parse below would
-    /// otherwise decode as content.
-    flags: u8,
+    /// The record's flags. With [`MessageFlags::SHARED`] set, the body is a reference
+    /// to a shared message, which every parse below would otherwise decode as content.
+    flags: MessageFlags,
     /// Absolute file offset of the message body.
     data_off: u64,
     size: usize,
@@ -1578,7 +1578,7 @@ fn walk_messages(
     while pos + msg_header_size <= end {
         let msg_type_raw = chunk[pos] as u16;
         let msg_data_size = u16::from_le_bytes([chunk[pos + 1], chunk[pos + 2]]) as usize;
-        let msg_flags = chunk[pos + 3];
+        let msg_flags = MessageFlags::new(chunk[pos + 3]);
         pos += msg_header_size;
         if pos + msg_data_size > end {
             break; // padding

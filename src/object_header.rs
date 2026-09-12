@@ -9,6 +9,7 @@ use crate::address::BaseAddress;
 use crate::bytes::{ensure_len, read_length, read_offset, read_uint_width};
 use crate::convert::TryToUsize;
 use crate::error::FormatError;
+use crate::message_flags::MessageFlags;
 use crate::message_type::MessageType;
 use crate::source::Source;
 
@@ -68,8 +69,9 @@ pub struct HeaderMessage {
     pub msg_type: MessageType,
     /// Size of the message data in bytes.
     pub size: usize,
-    /// Message flags byte.
-    pub flags: u8,
+    /// The record's flags. `data` holds a reference to the message when
+    /// [`MessageFlags::SHARED`] is set.
+    pub flags: MessageFlags,
     /// Creation order (v2 only, when tracking is enabled).
     pub creation_order: Option<u16>,
     /// Raw message data bytes.
@@ -236,7 +238,7 @@ impl ObjectHeader {
             }
             let msg_type_raw = LittleEndian::read_u16(&data[pos..pos + 2]);
             let msg_data_size = LittleEndian::read_u16(&data[pos + 2..pos + 4]) as usize;
-            let msg_flags = data[pos + 4];
+            let msg_flags = MessageFlags::new(data[pos + 4]);
             // reserved(3) at pos+5..pos+8
             pos += 8;
 
@@ -253,9 +255,8 @@ impl ObjectHeader {
             ensure_len(data, pos, msg_data_size)?;
             let msg_type = MessageType::from_u16(msg_type_raw);
 
-            // Check if unknown + must-understand (bit 3 of msg_flags)
             if let MessageType::Unknown(id) = msg_type
-                && msg_flags & 0x08 != 0
+                && msg_flags.fails_if_unknown_for_write()
             {
                 return Err(FormatError::UnsupportedMessage(id));
             }
@@ -333,7 +334,7 @@ impl ObjectHeader {
         while pos + 8 <= end {
             let msg_type_raw = LittleEndian::read_u16(&data[pos..pos + 2]);
             let msg_data_size = LittleEndian::read_u16(&data[pos + 2..pos + 4]) as usize;
-            let msg_flags = data[pos + 4];
+            let msg_flags = MessageFlags::new(data[pos + 4]);
             pos += 8;
 
             if pos + msg_data_size > end {
@@ -343,7 +344,7 @@ impl ObjectHeader {
             let msg_type = MessageType::from_u16(msg_type_raw);
 
             if let MessageType::Unknown(id) = msg_type
-                && msg_flags & 0x08 != 0
+                && msg_flags.fails_if_unknown_for_write()
             {
                 return Err(FormatError::UnsupportedMessage(id));
             }
@@ -573,7 +574,7 @@ impl ObjectHeader {
         while pos + msg_header_size <= end {
             let msg_type_raw = data[pos] as u16;
             let msg_data_size = LittleEndian::read_u16(&data[pos + 1..pos + 3]) as usize;
-            let msg_flags = data[pos + 3];
+            let msg_flags = MessageFlags::new(data[pos + 3]);
             let creation_order = if has_creation_order {
                 Some(LittleEndian::read_u16(&data[pos + 4..pos + 6]))
             } else {
@@ -589,7 +590,7 @@ impl ObjectHeader {
             let msg_type = MessageType::from_u16(msg_type_raw);
 
             if let MessageType::Unknown(id) = msg_type
-                && msg_flags & 0x08 != 0
+                && msg_flags.fails_if_unknown_for_write()
             {
                 return Err(FormatError::UnsupportedMessage(id));
             }
@@ -952,7 +953,7 @@ impl ObjectHeader {
         while count < max_messages && pos + 8 <= end {
             let msg_type_raw = LittleEndian::read_u16(&region[pos..pos + 2]);
             let msg_data_size = LittleEndian::read_u16(&region[pos + 2..pos + 4]) as usize;
-            let msg_flags = region[pos + 4];
+            let msg_flags = MessageFlags::new(region[pos + 4]);
             // reserved(3) at pos+5..pos+8
             pos += 8;
 
@@ -963,7 +964,7 @@ impl ObjectHeader {
 
             let msg_type = MessageType::from_u16(msg_type_raw);
             if let MessageType::Unknown(id) = msg_type
-                && msg_flags & 0x08 != 0
+                && msg_flags.fails_if_unknown_for_write()
             {
                 return Err(FormatError::UnsupportedMessage(id));
             }
@@ -1020,7 +1021,7 @@ mod tests {
 
     // Helper: build a v1 object header with given messages
     fn build_v1_header(
-        messages: &[(u16, &[u8], u8)], // (type, data, flags)
+        messages: &[(u16, &[u8], MessageFlags)], // (type, data, flags)
         offset_size: u8,
         length_size: u8,
     ) -> Vec<u8> {
@@ -1030,7 +1031,7 @@ mod tests {
         for (mtype, mdata, mflags) in messages {
             msg_bytes.extend_from_slice(&mtype.to_le_bytes()); // type(2)
             msg_bytes.extend_from_slice(&(mdata.len() as u16).to_le_bytes()); // size(2)
-            msg_bytes.push(*mflags); // flags(1)
+            msg_bytes.push(mflags.get()); // flags(1)
             msg_bytes.extend_from_slice(&[0u8; 3]); // reserved(3)
             msg_bytes.extend_from_slice(mdata); // data
         }
@@ -1050,7 +1051,7 @@ mod tests {
     // Helper: build a v2 object header chunk0 with given messages
     fn build_v2_header(
         flags: u8,
-        messages: &[(u8, &[u8], u8)], // (type, data, msg_flags)
+        messages: &[(u8, &[u8], MessageFlags)], // (type, data, flags)
         timestamps: Option<(u32, u32, u32, u32)>,
     ) -> Vec<u8> {
         let has_creation_order = flags & 0x04 != 0;
@@ -1077,7 +1078,7 @@ mod tests {
         for (mtype, mdata, mflags) in messages {
             msg_bytes.push(*mtype); // type(1)
             msg_bytes.extend_from_slice(&(mdata.len() as u16).to_le_bytes()); // size(2)
-            msg_bytes.push(*mflags); // flags(1)
+            msg_bytes.push(mflags.get()); // flags(1)
             if has_creation_order {
                 msg_bytes.extend_from_slice(&0u16.to_le_bytes()); // creation_order(2)
             }
@@ -1111,7 +1112,7 @@ mod tests {
     #[test]
     fn a_chunk_of_padding_reserves_no_messages() {
         // 256 empty Nil messages: 1 KiB of chunk, none of it kept.
-        let nils: Vec<(u8, &[u8], u8)> = vec![(0u8, &[][..], 0u8); 256];
+        let nils: Vec<(u8, &[u8], MessageFlags)> = vec![(0u8, &[][..], MessageFlags::NONE); 256];
         let data = build_v2_header(0x01, &nils, None);
         let header = ObjectHeader::parse(&data, 0, 8, 8).unwrap();
 
@@ -1136,8 +1137,8 @@ mod tests {
     #[test]
     fn parse_v1_two_messages() {
         let messages = [
-            (0x0001u16, &[1u8, 2, 3, 4][..], 0u8), // Dataspace
-            (0x0008, &[5u8, 6][..], 0),            // DataLayout
+            (0x0001u16, &[1u8, 2, 3, 4][..], MessageFlags::NONE), // Dataspace
+            (0x0008, &[5u8, 6][..], MessageFlags::NONE),          // DataLayout
         ];
         let data = build_v1_header(&messages, 8, 8);
         let hdr = ObjectHeader::parse(&data, 0, 8, 8).unwrap();
@@ -1150,7 +1151,7 @@ mod tests {
 
     #[test]
     fn parse_v1_unknown_message_ok() {
-        let messages = [(0x00FFu16, &[0xAA, 0xBB][..], 0u8)];
+        let messages = [(0x00FFu16, &[0xAA, 0xBB][..], MessageFlags::NONE)];
         let data = build_v1_header(&messages, 8, 8);
         let hdr = ObjectHeader::parse(&data, 0, 8, 8).unwrap();
         assert_eq!(hdr.messages.len(), 1);
@@ -1159,8 +1160,11 @@ mod tests {
 
     #[test]
     fn parse_v1_unknown_must_understand_errors() {
-        // Bit 3 of msg_flags = must understand
-        let messages = [(0x00FFu16, &[0xAA][..], 0x08u8)];
+        let messages = [(
+            0x00FFu16,
+            &[0xAA][..],
+            MessageFlags::FAIL_IF_UNKNOWN_FOR_WRITE,
+        )];
         let data = build_v1_header(&messages, 8, 8);
         let err = ObjectHeader::parse(&data, 0, 8, 8).unwrap_err();
         assert_eq!(err, FormatError::UnsupportedMessage(0x00FF));
@@ -1179,7 +1183,11 @@ mod tests {
     /// version 1 one.
     #[test]
     fn parse_v1_named_message_survives_must_understand() {
-        let messages = [(0x0007u16, &[0xAA][..], 0x08u8)];
+        let messages = [(
+            0x0007u16,
+            &[0xAA][..],
+            MessageFlags::FAIL_IF_UNKNOWN_FOR_WRITE,
+        )];
         let data = build_v1_header(&messages, 8, 8);
         let hdr = ObjectHeader::parse(&data, 0, 8, 8).unwrap();
         assert_eq!(hdr.messages.len(), 1);
@@ -1188,7 +1196,7 @@ mod tests {
 
     #[test]
     fn parse_v2_no_timestamps_one_message() {
-        let data = build_v2_header(0x00, &[(0x01, &[10, 20], 0)], None);
+        let data = build_v2_header(0x00, &[(0x01, &[10, 20], MessageFlags::NONE)], None);
         let hdr = ObjectHeader::parse(&data, 0, 8, 8).unwrap();
         assert_eq!(hdr.version, 2);
         assert_eq!(hdr.flags, 0);
@@ -1200,7 +1208,11 @@ mod tests {
 
     #[test]
     fn parse_v2_with_timestamps() {
-        let data = build_v2_header(0x20, &[(0x01, &[1], 0)], Some((100, 200, 300, 400)));
+        let data = build_v2_header(
+            0x20,
+            &[(0x01, &[1], MessageFlags::NONE)],
+            Some((100, 200, 300, 400)),
+        );
         let hdr = ObjectHeader::parse(&data, 0, 8, 8).unwrap();
         assert_eq!(hdr.access_time, Some(100));
         assert_eq!(hdr.modification_time, Some(200));
@@ -1218,7 +1230,10 @@ mod tests {
         // Use 0x24 = bit 2 + bit 5
         let data = build_v2_header(
             0x24,
-            &[(0x03, &[9], 0), (0x05, &[8], 0)],
+            &[
+                (0x03, &[9], MessageFlags::NONE),
+                (0x05, &[8], MessageFlags::NONE),
+            ],
             Some((0, 0, 0, 0)),
         );
         let hdr = ObjectHeader::parse(&data, 0, 8, 8).unwrap();
@@ -1230,7 +1245,7 @@ mod tests {
 
     #[test]
     fn parse_v2_checksum_valid() {
-        let data = build_v2_header(0x00, &[(0x01, &[1, 2, 3], 0)], None);
+        let data = build_v2_header(0x00, &[(0x01, &[1, 2, 3], MessageFlags::NONE)], None);
         // Should succeed — checksum is valid
         let hdr = ObjectHeader::parse(&data, 0, 8, 8).unwrap();
         assert_eq!(hdr.messages.len(), 1);
@@ -1238,7 +1253,7 @@ mod tests {
 
     #[test]
     fn parse_v2_checksum_invalid() {
-        let mut data = build_v2_header(0x00, &[(0x01, &[1, 2, 3], 0)], None);
+        let mut data = build_v2_header(0x00, &[(0x01, &[1, 2, 3], MessageFlags::NONE)], None);
         // Corrupt checksum
         let len = data.len();
         data[len - 1] ^= 0xFF;
@@ -1251,8 +1266,8 @@ mod tests {
         let data = build_v2_header(
             0x00,
             &[
-                (0x00, &[0, 0, 0, 0], 0), // NIL
-                (0x01, &[42], 0),         // Dataspace
+                (0x00, &[0, 0, 0, 0], MessageFlags::NONE), // NIL
+                (0x01, &[42], MessageFlags::NONE),         // Dataspace
             ],
             None,
         );
@@ -1264,21 +1279,21 @@ mod tests {
     #[test]
     fn parse_v2_chunk_size_1byte() {
         // flags bits 0-1 = 0 → 1-byte chunk size
-        let data = build_v2_header(0x00, &[(0x01, &[1], 0)], None);
+        let data = build_v2_header(0x00, &[(0x01, &[1], MessageFlags::NONE)], None);
         let hdr = ObjectHeader::parse(&data, 0, 8, 8).unwrap();
         assert_eq!(hdr.messages.len(), 1);
     }
 
     #[test]
     fn parse_v2_chunk_size_2byte() {
-        let data = build_v2_header(0x01, &[(0x01, &[1], 0)], None);
+        let data = build_v2_header(0x01, &[(0x01, &[1], MessageFlags::NONE)], None);
         let hdr = ObjectHeader::parse(&data, 0, 8, 8).unwrap();
         assert_eq!(hdr.messages.len(), 1);
     }
 
     #[test]
     fn parse_v2_chunk_size_4byte() {
-        let data = build_v2_header(0x02, &[(0x01, &[1], 0)], None);
+        let data = build_v2_header(0x02, &[(0x01, &[1], MessageFlags::NONE)], None);
         let hdr = ObjectHeader::parse(&data, 0, 8, 8).unwrap();
         assert_eq!(hdr.messages.len(), 1);
     }
@@ -1295,7 +1310,7 @@ mod tests {
         ochk_buf.extend_from_slice(&OCHK_SIGNATURE);
         ochk_buf.push(ochk_msg_type);
         ochk_buf.extend_from_slice(&(ochk_msg_data.len() as u16).to_le_bytes());
-        ochk_buf.push(0); // msg flags
+        ochk_buf.push(MessageFlags::NONE.get());
         ochk_buf.extend_from_slice(&ochk_msg_data);
         let checksum = crate::checksum::jenkins_lookup3(&ochk_buf);
         ochk_buf.extend_from_slice(&checksum.to_le_bytes());
@@ -1311,8 +1326,8 @@ mod tests {
         let header = build_v2_header(
             0x00,
             &[
-                (0x01, &[42], 0),      // Dataspace
-                (0x10, &cont_data, 0), // Continuation
+                (0x01, &[42], MessageFlags::NONE),      // Dataspace
+                (0x10, &cont_data, MessageFlags::NONE), // Continuation
             ],
             None,
         );
@@ -1385,7 +1400,11 @@ mod tests {
     #[cfg(feature = "std")]
     #[test]
     fn streaming_v2_simple_matches_buffered() {
-        let header = build_v2_header(0x20, &[(0x01, &[1, 2, 3], 0)], Some((1, 2, 3, 4)));
+        let header = build_v2_header(
+            0x20,
+            &[(0x01, &[1, 2, 3], MessageFlags::NONE)],
+            Some((1, 2, 3, 4)),
+        );
         parse_three_ways(header, 8, 8, BaseAddress::ZERO);
     }
 
@@ -1400,7 +1419,7 @@ mod tests {
         ochk_buf.extend_from_slice(&OCHK_SIGNATURE);
         ochk_buf.push(0x03); // Datatype
         ochk_buf.extend_from_slice(&(ochk_msg_data.len() as u16).to_le_bytes());
-        ochk_buf.push(0);
+        ochk_buf.push(MessageFlags::NONE.get());
         ochk_buf.extend_from_slice(&ochk_msg_data);
         let cks = crate::checksum::jenkins_lookup3(&ochk_buf);
         ochk_buf.extend_from_slice(&cks.to_le_bytes());
@@ -1410,7 +1429,14 @@ mod tests {
         cont_data.extend_from_slice(&(ochk_offset as u64).to_le_bytes());
         cont_data.extend_from_slice(&(ochk_buf.len() as u64).to_le_bytes());
 
-        let header = build_v2_header(0x00, &[(0x01, &[42], 0), (0x10, &cont_data, 0)], None);
+        let header = build_v2_header(
+            0x00,
+            &[
+                (0x01, &[42], MessageFlags::NONE),
+                (0x10, &cont_data, MessageFlags::NONE),
+            ],
+            None,
+        );
         let mut file_data = vec![0u8; ochk_offset + ochk_buf.len()];
         file_data[..header.len()].copy_from_slice(&header);
         file_data[ochk_offset..ochk_offset + ochk_buf.len()].copy_from_slice(&ochk_buf);
@@ -1429,7 +1455,7 @@ mod tests {
         let mut cont_chunk = Vec::new();
         cont_chunk.extend_from_slice(&0x03u16.to_le_bytes()); // Datatype
         cont_chunk.extend_from_slice(&(cont_msg_data.len() as u16).to_le_bytes());
-        cont_chunk.push(0);
+        cont_chunk.push(MessageFlags::NONE.get());
         cont_chunk.extend_from_slice(&[0u8; 3]); // reserved
         cont_chunk.extend_from_slice(&cont_msg_data);
 
@@ -1438,7 +1464,14 @@ mod tests {
         cont_ptr.extend_from_slice(&(cont_offset as u64).to_le_bytes());
         cont_ptr.extend_from_slice(&(cont_chunk.len() as u64).to_le_bytes());
 
-        let header = build_v1_header(&[(0x01, &[42][..], 0), (0x10, &cont_ptr[..], 0)], 8, 8);
+        let header = build_v1_header(
+            &[
+                (0x01, &[42][..], MessageFlags::NONE),
+                (0x10, &cont_ptr[..], MessageFlags::NONE),
+            ],
+            8,
+            8,
+        );
         let mut file_data = vec![0u8; cont_offset + cont_chunk.len()];
         file_data[..header.len()].copy_from_slice(&header);
         file_data[cont_offset..cont_offset + cont_chunk.len()].copy_from_slice(&cont_chunk);
@@ -1459,7 +1492,7 @@ mod tests {
         let mut cont_chunk = Vec::new();
         cont_chunk.extend_from_slice(&0x03u16.to_le_bytes()); // Datatype
         cont_chunk.extend_from_slice(&(cont_msg_data.len() as u16).to_le_bytes());
-        cont_chunk.push(0);
+        cont_chunk.push(MessageFlags::NONE.get());
         cont_chunk.extend_from_slice(&[0u8; 3]); // reserved
         cont_chunk.extend_from_slice(&cont_msg_data);
 
@@ -1480,7 +1513,7 @@ mod tests {
         header.extend_from_slice(&[0u8; 4]); // pad prefix to 16 bytes
         header.extend_from_slice(&0x0010u16.to_le_bytes()); // Continuation
         header.extend_from_slice(&(cont_ptr.len() as u16).to_le_bytes()); // size = 16
-        header.push(0); // flags
+        header.push(MessageFlags::NONE.get());
         header.extend_from_slice(&[0u8; 3]); // reserved
         header.extend_from_slice(&cont_ptr); // pointer (overruns chunk 0)
 
