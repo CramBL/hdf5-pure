@@ -17,7 +17,7 @@ use crate::fractal_heap::FractalHeapHeader;
 use crate::message_type::MessageType;
 use crate::object_header::ObjectHeader;
 use crate::shared_message::{
-    self, BufferedResolver, DatatypeLocation, SharedResolver, SourceResolver, Unresolvable,
+    BufferedResolver, DatatypeLocation, SharedResolver, SourceResolver, Unresolvable,
 };
 use crate::sohm::SohmTable;
 use crate::source::Source;
@@ -552,7 +552,7 @@ pub fn extract_attributes_full(
     // Collect compact attributes (inline in OH)
     for msg in &header.messages {
         if msg.msg_type == MessageType::Attribute {
-            let attr = if shared_message::is_shared(msg.flags) {
+            let attr = if msg.flags.is_shared() {
                 // The whole attribute message is shared: resolve the reference to
                 // get the message, which may itself name a committed datatype.
                 let resolved = resolver.resolve(&msg.data, MessageType::Attribute)?;
@@ -630,7 +630,7 @@ pub fn extract_stored_attributes_from_source<S: Source + ?Sized>(
     // Collect compact attributes (inline in OH)
     for msg in &header.messages {
         if msg.msg_type == MessageType::Attribute {
-            let attr = if shared_message::is_shared(msg.flags) {
+            let attr = if msg.flags.is_shared() {
                 let resolved = resolver.resolve(&msg.data, MessageType::Attribute)?;
                 AttributeMessage::parse_resolving(&resolved, length_size, &resolver)?
             } else {
@@ -790,6 +790,8 @@ fn record_creation_index(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::message_flags::MessageFlags;
+    use crate::shared_message;
     use crate::source::BytesSource;
     use core::cell::RefCell;
 
@@ -1256,7 +1258,7 @@ mod tests {
             msgs.push(crate::object_header::HeaderMessage {
                 msg_type: MessageType::Attribute,
                 size: attr_data.len(),
-                flags: 0,
+                flags: MessageFlags::NONE,
                 creation_order: None,
                 data: attr_data,
             });

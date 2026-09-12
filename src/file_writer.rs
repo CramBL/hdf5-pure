@@ -36,6 +36,7 @@ use crate::free_space_manager::{
 };
 use crate::libver::LibVer;
 use crate::link_message::{LinkMessage, LinkTarget};
+use crate::message_flags::MessageFlags;
 use crate::message_type::MessageType;
 use crate::object_header_writer::ObjectHeaderWriter;
 use crate::shared_message::DatatypeLocation;
@@ -62,16 +63,6 @@ pub(crate) const OFFSET_SIZE: u8 = OFFSET_WIDTH.get();
 /// [`LENGTH_WIDTH`] as the `u8` width the writers take.
 pub(crate) const LENGTH_SIZE: u8 = LENGTH_WIDTH.get();
 const SUPERBLOCK_SIZE: usize = 48;
-
-/// Object-header message record flags (`H5O_MSG_FLAG_*`).
-///
-/// The message's content cannot change once written (`H5O_MSG_FLAG_CONSTANT`).
-const MSG_CONSTANT: u8 = 0x01;
-/// The message body is a reference to the message rather than the message
-/// itself (`H5O_MSG_FLAG_SHARED`).
-const MSG_SHARED: u8 = 0x02;
-/// The message must not be moved into shared storage (`H5O_MSG_FLAG_DONTSHARE`).
-const MSG_DONTSHARE: u8 = 0x04;
 
 /// Threshold for switching from compact (inline) to dense attribute storage.
 pub(crate) const DENSE_ATTR_THRESHOLD: usize = 8;
@@ -100,7 +91,7 @@ pub(crate) fn build_chunked_dataset_oh(
     w.add_message_with_flags(
         MessageType::FillValue,
         crate::fill_value::fill_value_message_v3(fill),
-        0x01,
+        MessageFlags::CONSTANT,
     );
     w.add_message(MessageType::DataLayout, layout_message.to_vec());
     if let Some(pm) = pipeline_message {
@@ -150,7 +141,7 @@ pub(crate) fn build_dataset_oh(
     w.add_message_with_flags(
         MessageType::FillValue,
         crate::fill_value::fill_value_message_v3(fill),
-        0x01,
+        MessageFlags::CONSTANT,
     );
     let mut dl = Vec::new();
     dl.push(contiguous_layout_version(libver));
@@ -169,9 +160,17 @@ pub(crate) fn build_dataset_oh(
 fn add_datatype(w: &mut ObjectHeaderWriter, dt: &Datatype, location: &DatatypeLocation) {
     match location.reference_bytes(OFFSET_SIZE) {
         Some(reference) => {
-            w.add_message_with_flags(MessageType::Datatype, reference, MSG_CONSTANT | MSG_SHARED);
+            w.add_message_with_flags(
+                MessageType::Datatype,
+                reference,
+                MessageFlags::CONSTANT | MessageFlags::SHARED,
+            );
         }
-        None => w.add_message_with_flags(MessageType::Datatype, dt.serialize(), MSG_CONSTANT),
+        None => w.add_message_with_flags(
+            MessageType::Datatype,
+            dt.serialize(),
+            MessageFlags::CONSTANT,
+        ),
     }
 }
 
@@ -207,13 +206,17 @@ pub(crate) fn build_committed_datatype_oh(
     w.add_message_with_flags(
         MessageType::Datatype,
         dt.serialize(),
-        MSG_CONSTANT | MSG_DONTSHARE,
+        MessageFlags::CONSTANT | MessageFlags::FORBID_SHARING,
     );
     if references > 1 {
         let mut refcount = Vec::with_capacity(5);
         refcount.push(0); // version
         refcount.extend_from_slice(&references.to_le_bytes());
-        w.add_message_with_flags(MessageType::ObjectReferenceCount, refcount, MSG_DONTSHARE);
+        w.add_message_with_flags(
+            MessageType::ObjectReferenceCount,
+            refcount,
+            MessageFlags::FORBID_SHARING,
+        );
     }
     w.serialize()
 }
@@ -929,7 +932,7 @@ impl DenseAttrPlan {
         let mut name_records = Vec::with_capacity(serialized.len() * record_size as usize);
         for &(hash, i) in order {
             name_records.extend_from_slice(&heap_ids[i as usize]);
-            name_records.push(0); // msg_flags
+            name_records.push(MessageFlags::NONE.get());
             name_records.extend_from_slice(&creation.index_of(i).to_le_bytes()); // creation_order
             name_records.extend_from_slice(&hash.to_le_bytes()); // hash
         }
@@ -953,7 +956,7 @@ impl DenseAttrPlan {
                 Vec::with_capacity(corder_order.len() * DENSE_ATTR_CORDER_BTREE_RECORD as usize);
             for &i in corder_order {
                 corder_records.extend_from_slice(&heap_ids[i as usize]);
-                corder_records.push(0); // msg_flags
+                corder_records.push(MessageFlags::NONE.get());
                 corder_records.extend_from_slice(&creation.index_of(i).to_le_bytes());
             }
             let corder_tree =
@@ -1345,10 +1348,14 @@ impl FileWriter {
         self.file_space_info()
             .map(|info| {
                 let mut oh = ObjectHeaderWriter::new();
-                // Message flags 0x14 match what the reference C library writes for
-                // this message (do-not-share + mark-if-unknown); no must-understand
-                // bit, so older readers still open the file.
-                oh.add_message_with_flags(MessageType::FileSpaceInfo, info.serialize(), 0x14);
+                // The flags the reference C library writes for this message (`H5Fsuper.c`,
+                // HDF5 2.2.0). Neither must-understand bit is among them, so an older reader
+                // still opens the file.
+                oh.add_message_with_flags(
+                    MessageType::FileSpaceInfo,
+                    info.serialize(),
+                    MessageFlags::FORBID_SHARING | MessageFlags::MARK_IF_UNKNOWN,
+                );
                 oh.serialize()
             })
             .transpose()
@@ -3225,7 +3232,11 @@ impl FileWriter {
                     eoa_pre_fsm,
                 );
                 let mut oh = ObjectHeaderWriter::new();
-                oh.add_message_with_flags(MessageType::FileSpaceInfo, info.serialize(), 0x14);
+                oh.add_message_with_flags(
+                    MessageType::FileSpaceInfo,
+                    info.serialize(),
+                    MessageFlags::FORBID_SHARING | MessageFlags::MARK_IF_UNKNOWN,
+                );
                 oh.serialize()?
             } else {
                 ext_oh
@@ -3686,7 +3697,11 @@ impl FileWriter {
                 let mut info = FileSpaceInfo::persistent_empty(strategy, threshold, np_page_size);
                 info.eoa_pre_fsm = eof_addr2 - ub as u64;
                 let mut oh = ObjectHeaderWriter::new();
-                oh.add_message_with_flags(MessageType::FileSpaceInfo, info.serialize(), 0x14);
+                oh.add_message_with_flags(
+                    MessageType::FileSpaceInfo,
+                    info.serialize(),
+                    MessageFlags::FORBID_SHARING | MessageFlags::MARK_IF_UNKNOWN,
+                );
                 Some(oh.serialize()?)
             }
             (other, _) => other.clone(),
@@ -3739,7 +3754,7 @@ mod tests {
         );
         assert_eq!(
             hdr.messages[0].flags,
-            MSG_CONSTANT | MSG_DONTSHARE,
+            MessageFlags::CONSTANT | MessageFlags::FORBID_SHARING,
             "the type of a committed object never changes and must not be shared onward"
         );
     }
@@ -3836,7 +3851,7 @@ mod tests {
             .expect("a dataset always has a datatype message");
 
         assert!(
-            crate::shared_message::is_shared(msg.flags),
+            msg.flags.is_shared(),
             "the record must say its body is a reference, or the reference decodes as a type"
         );
         assert_eq!(

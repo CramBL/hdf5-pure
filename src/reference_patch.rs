@@ -84,6 +84,7 @@ use crate::datatype::{
 use crate::edit::read_oh_chunks;
 use crate::error::Error;
 use crate::group_v2::resolve_group_entries_from_source;
+use crate::message_flags::MessageFlags;
 use crate::message_type::MessageType;
 use crate::object_header::ObjectHeader;
 use crate::source::Source;
@@ -385,7 +386,7 @@ fn scan_parsed_header<S: Source + ?Sized>(
             // wrong bytes.
             MessageType::Datatype => {
                 let resolved;
-                let encoded = if message.flags & crate::edit::MSG_FLAG_SHARED != 0 {
+                let encoded = if message.flags.is_shared() {
                     let framed = crate::source::BaseOffsetSource { inner: src, base };
                     let resolver = crate::shared_message::SourceResolver::new(
                         &framed,
@@ -551,7 +552,7 @@ fn scan_object<S: Source + ?Sized>(
             // Absolute file offset of this message's body.
             let body_at = chunk.span.0 + body as u64;
             // The flags byte is the 4th of the record header (type, size, flags).
-            let shared = region[p + 3] & crate::edit::MSG_FLAG_SHARED != 0;
+            let shared = MessageFlags::new(region[p + 3]).is_shared();
             match msg_type {
                 MessageType::SymbolTable | MessageType::Link | MessageType::LinkInfo => {
                     out.descend = true;
@@ -1081,7 +1082,7 @@ mod tests {
         // walk over a file that needs it.
         let attr = reference_attr("target", 300).serialize_v3(crate::file_writer::LENGTH_SIZE);
         let mut record = message_record(MessageType::Attribute, &attr);
-        record[3] = crate::edit::MSG_FLAG_SHARED;
+        record[3] = MessageFlags::SHARED.get();
         let (src, _) = image_with_header(&record);
         let (plan, scanned) = scan(&src, &[(300, 900)]);
         assert!(
@@ -1154,7 +1155,7 @@ mod tests {
                     crate::file_writer::OFFSET_SIZE,
                 ),
             );
-            shared[3] = crate::edit::MSG_FLAG_SHARED;
+            shared[3] = MessageFlags::SHARED.get();
             let mut layout = vec![3u8, 0];
             layout.extend_from_slice(&8u16.to_le_bytes());
             layout.extend_from_slice(&(300u64).to_le_bytes());

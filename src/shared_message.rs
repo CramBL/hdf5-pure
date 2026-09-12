@@ -70,11 +70,6 @@ pub struct SharedMessageRef {
     pub location: SharedLocation,
 }
 
-/// Check whether a header message record has its shared flag set.
-pub fn is_shared(msg_flags: u8) -> bool {
-    msg_flags & 0x02 != 0
-}
-
 /// Parse a shared message reference from a message body.
 ///
 /// `length_size` is needed for version 1 only, whose reference is a symbol-table
@@ -416,7 +411,7 @@ fn select_shared_message(
     target_header
         .messages
         .iter()
-        .find(|msg| msg.msg_type == target_msg_type && !is_shared(msg.flags))
+        .find(|msg| msg.msg_type == target_msg_type && !msg.flags.is_shared())
         .map(|msg| msg.data.clone())
         .ok_or(FormatError::SharedMessageMissing {
             object_header_address,
@@ -427,6 +422,7 @@ fn select_shared_message(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::message_flags::MessageFlags;
     use crate::object_header::HeaderMessage;
 
     fn header_with(messages: Vec<HeaderMessage>) -> ObjectHeader {
@@ -442,7 +438,7 @@ mod tests {
         }
     }
 
-    fn message(msg_type: MessageType, flags: u8, data: Vec<u8>) -> HeaderMessage {
+    fn message(msg_type: MessageType, flags: MessageFlags, data: Vec<u8>) -> HeaderMessage {
         HeaderMessage {
             msg_type,
             size: data.len(),
@@ -450,15 +446,6 @@ mod tests {
             creation_order: None,
             data,
         }
-    }
-
-    #[test]
-    fn is_shared_flag() {
-        assert!(!is_shared(0x00));
-        assert!(!is_shared(0x01));
-        assert!(is_shared(0x02));
-        assert!(is_shared(0x03));
-        assert!(is_shared(0x06));
     }
 
     /// Version 2 is version + type + address, with no reserved bytes. This is the
@@ -608,7 +595,11 @@ mod tests {
     /// The target header must hold the message the reference stands in for.
     #[test]
     fn a_reference_to_a_header_without_that_message_is_an_error() {
-        let header = header_with(vec![message(MessageType::Dataspace, 0, vec![1, 2, 3])]);
+        let header = header_with(vec![message(
+            MessageType::Dataspace,
+            MessageFlags::NONE,
+            vec![1, 2, 3],
+        )]);
         let err = select_shared_message(&header, MessageType::Datatype, 0x320).unwrap_err();
         assert_eq!(
             err,
@@ -624,7 +615,11 @@ mod tests {
     /// down.
     #[test]
     fn a_shared_message_in_the_target_is_not_mistaken_for_content() {
-        let header = header_with(vec![message(MessageType::Datatype, 0x02, vec![2, 2, 0, 0])]);
+        let header = header_with(vec![message(
+            MessageType::Datatype,
+            MessageFlags::SHARED,
+            vec![2, 2, 0, 0],
+        )]);
         let err = select_shared_message(&header, MessageType::Datatype, 0x320).unwrap_err();
         assert!(matches!(err, FormatError::SharedMessageMissing { .. }));
     }

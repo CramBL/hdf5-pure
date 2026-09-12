@@ -5,11 +5,12 @@ use alloc::vec::Vec;
 
 use crate::checksum::jenkins_lookup3;
 use crate::error::{FormatError, OBJECT_HEADER_MESSAGE_MAX};
+use crate::message_flags::MessageFlags;
 use crate::message_type::MessageType;
 
 /// Writer for v2 object headers with proper checksums.
 pub struct ObjectHeaderWriter {
-    messages: Vec<(MessageType, Vec<u8>, u8)>, // (type, data, msg_flags)
+    messages: Vec<(MessageType, Vec<u8>, MessageFlags)>, // (type, data, flags)
 }
 
 impl ObjectHeaderWriter {
@@ -20,13 +21,18 @@ impl ObjectHeaderWriter {
         }
     }
 
-    /// Add a message to the header with default flags (0).
+    /// Adds a message whose record sets no flag.
     pub fn add_message(&mut self, msg_type: MessageType, data: Vec<u8>) {
-        self.messages.push((msg_type, data, 0));
+        self.messages.push((msg_type, data, MessageFlags::NONE));
     }
 
-    /// Add a message with specific flags.
-    pub fn add_message_with_flags(&mut self, msg_type: MessageType, data: Vec<u8>, flags: u8) {
+    /// Adds a message whose record stores `flags`.
+    pub fn add_message_with_flags(
+        &mut self,
+        msg_type: MessageType,
+        data: Vec<u8>,
+        flags: MessageFlags,
+    ) {
         self.messages.push((msg_type, data, flags));
     }
 
@@ -99,7 +105,7 @@ impl ObjectHeaderWriter {
                 reason = "message data length is bounded by OBJECT_HEADER_MESSAGE_MAX above, so it fits the 2-byte message-size field of the v2 object header"
             )]
             buf.extend_from_slice(&(data.len() as u16).to_le_bytes()); // size (2 bytes)
-            buf.push(*msg_flags); // flags
+            buf.push(msg_flags.get()); // flags
             buf.extend_from_slice(data);
         }
 
@@ -143,6 +149,31 @@ mod tests {
         assert_eq!(hdr.messages[0].data, vec![1, 2, 3, 4]);
         assert_eq!(hdr.messages[1].msg_type, MessageType::Datatype);
         assert_eq!(hdr.messages[1].data, vec![5, 6]);
+    }
+
+    #[test]
+    fn a_serialized_record_stores_the_flags_the_message_was_added_with() {
+        let mut writer = ObjectHeaderWriter::new();
+        writer.add_message_with_flags(
+            MessageType::Datatype,
+            vec![5, 6],
+            MessageFlags::CONSTANT | MessageFlags::FORBID_SHARING,
+        );
+        let bytes = writer.serialize().unwrap();
+        let hdr = ObjectHeader::parse(&bytes, 0, 8, 8).unwrap();
+        assert_eq!(
+            hdr.messages[0].flags,
+            MessageFlags::CONSTANT | MessageFlags::FORBID_SHARING
+        );
+    }
+
+    #[test]
+    fn a_message_added_without_flags_sets_no_flag_in_its_record() {
+        let mut writer = ObjectHeaderWriter::new();
+        writer.add_message(MessageType::Datatype, vec![5, 6]);
+        let bytes = writer.serialize().unwrap();
+        let hdr = ObjectHeader::parse(&bytes, 0, 8, 8).unwrap();
+        assert_eq!(hdr.messages[0].flags, MessageFlags::NONE);
     }
 
     #[test]

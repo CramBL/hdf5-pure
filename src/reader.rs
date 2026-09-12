@@ -2066,7 +2066,7 @@ impl FileInner {
         &self,
         msg: &'m crate::object_header::HeaderMessage,
     ) -> Result<Cow<'m, [u8]>, Error> {
-        if !shared_message::is_shared(msg.flags) {
+        if !msg.flags.is_shared() {
             return Ok(Cow::Borrowed(&msg.data));
         }
         let (os, ls, base) = (self.offset_size(), self.length_size(), self.addr_offset);
@@ -2122,7 +2122,7 @@ impl FileInner {
         &self,
         msg: &crate::object_header::HeaderMessage,
     ) -> Result<Option<u64>, Error> {
-        if !shared_message::is_shared(msg.flags) {
+        if !msg.flags.is_shared() {
             return Ok(None);
         }
         let reference =
@@ -6711,6 +6711,7 @@ fn child_path_of(parent: Option<&str>, name: &str) -> Option<String> {
 mod tests {
     use super::*;
     use crate::FileBuilder;
+    use crate::message_flags::MessageFlags;
     use std::sync::atomic::AtomicUsize;
 
     // -----------------------------------------------------------------------
@@ -7404,7 +7405,7 @@ mod tests {
                 .map(|&msg_type| crate::object_header::HeaderMessage {
                     msg_type,
                     size: 0,
-                    flags: 0,
+                    flags: MessageFlags::NONE,
                     creation_order: None,
                     data: Vec::new(),
                 })

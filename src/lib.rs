@@ -900,6 +900,7 @@ pub(crate) mod link_info;
 pub(crate) mod link_message;
 pub(crate) mod local_heap;
 pub(crate) mod lzf;
+pub(crate) mod message_flags;
 pub(crate) mod message_type;
 pub(crate) mod object_header;
 pub(crate) mod object_header_writer;

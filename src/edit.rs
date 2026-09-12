@@ -299,6 +299,7 @@ use crate::image::{FileImage, HandleImage, MirrorImage, WriteBuffering};
 use crate::libver::LibVer;
 use crate::link_info::LinkInfoMessage;
 use crate::link_message::{LinkMessage, LinkTarget};
+use crate::message_flags::MessageFlags;
 use crate::message_type::MessageType;
 use crate::object_header::ObjectHeader;
 use crate::reader::FileAccessProperties;
@@ -8051,7 +8052,7 @@ impl WriteEngine {
                         "a v0/v1 group attribute is too large to convert in place",
                     ));
                 }
-                if m.flags & !MSG_FLAG_SHARED != 0 {
+                if !m.flags.difference(MessageFlags::SHARED).is_empty() {
                     // Every other flag bit says something about the message this
                     // rewrite would have to reproduce and does not — that it is
                     // constant, that it must not be shared, what a reader should
@@ -8062,7 +8063,7 @@ impl WriteEngine {
                          conversion cannot reproduce",
                     ));
                 }
-                if m.flags & MSG_FLAG_SHARED != 0 {
+                if m.flags.is_shared() {
                     // The body is a reference, not an attribute; the reference is
                     // what gets rewrapped, in the encoding a version 2 header
                     // uses. Reachable only from a file whose version 1 objects
@@ -14482,7 +14483,7 @@ impl OhRecordLayout {
             reason = "callers pass bodies that fit the 2-byte message-size field (see doc comment)"
         )]
         m.extend_from_slice(&(body.len() as u16).to_le_bytes());
-        m.push(0); // message flags
+        m.push(MessageFlags::NONE.get()); // message flags
         if self.tracks_creation_order() {
             m.extend_from_slice(&creation_index.to_le_bytes());
         }
@@ -14597,16 +14598,10 @@ impl OhRegion {
     /// would leave a reference to be read as content.
     fn push_shared(&mut self, msg_type: MessageType, reference: &[u8]) {
         let mut record = self.props.layout.record(msg_type, reference);
-        record[3] = MSG_FLAG_SHARED;
+        record[3] = MessageFlags::SHARED.get();
         self.push_bytes(&record);
     }
 }
-
-/// Version-2 object-header message flag bit marking a message as *shared* (stored
-/// once in the shared-message table and referenced by an object-header address or
-/// fractal-heap id) rather than inline. Whatever the message type, that reference
-/// points into the source file and is meaningless after a cross-file copy.
-pub(crate) const MSG_FLAG_SHARED: u8 = 0x02;
 
 /// Refuse to copy a dataset whose element bytes live in files outside this one
 /// (`H5Pset_external`, the External Data Files header message, type 7), which
@@ -14649,9 +14644,9 @@ fn reject_external_storage(region: &OhRegion) -> Result<(), Error> {
 ///   references (collection address + index) into the source file's heap;
 /// - a **reference** datatype (object or dataset-region), whose element bytes are
 ///   absolute object addresses in the source file;
-/// - any **shared message** (the `MSG_FLAG_SHARED` bit set) — a committed datatype,
-///   but also a shared dataspace, fill value, or filter-pipeline message — whose
-///   body is a reference into the source file's shared-message storage.
+/// - any **shared message** ([`MessageFlags::SHARED`] set): a committed datatype, but also a shared
+///   dataspace, fill value, or filter-pipeline message, whose body is a reference into the source
+///   file's shared-message storage.
 ///
 /// The scan covers a copied object's whole message region (a dataset's or a
 /// group's): it refuses any shared message outright, and inspects Datatype
@@ -14672,7 +14667,7 @@ fn reject_foreign_addresses(region: &OhRegion) -> Result<(), Error> {
         // the message type. The flags byte is the 4th of the record header (type,
         // size, flags); `next_message` returning `Some` guarantees
         // `p + 4 <= region.len()`.
-        if region[p + 3] & MSG_FLAG_SHARED != 0 {
+        if MessageFlags::new(region[p + 3]).is_shared() {
             return Err(Error::EditUnsupported(
                 "a shared (committed/SOHM) object-header message cannot be copied to another file yet",
             ));
@@ -14931,7 +14926,7 @@ fn screen_copied_references(
     while let Some((msg_type, body, body_end)) = region.next_message(p)? {
         // The flags byte is the 4th of the record header (type, size, flags);
         // `next_message` returning `Some` guarantees it is in bounds.
-        let shared = region[p + 3] & MSG_FLAG_SHARED != 0;
+        let shared = MessageFlags::new(region[p + 3]).is_shared();
         match msg_type {
             MessageType::Datatype => {
                 // A committed datatype's message body is a pointer into the
@@ -15324,13 +15319,13 @@ mod tests {
         assert!(!region_has_shared_attr(&plain_region(private.clone())).unwrap());
 
         let mut shared = private.clone();
-        shared[3] = 0x02; // H5O_MSG_FLAG_SHARED
+        shared[3] = MessageFlags::SHARED.get();
         assert!(region_has_shared_attr(&plain_region(shared)).unwrap());
 
         // The flag is only read on an Attribute message: the same byte set on a
         // neighbouring message says nothing about attribute storage.
         let mut other = message_record(MessageType::Dataspace, &body);
-        other[3] = 0x02;
+        other[3] = MessageFlags::SHARED.get();
         assert!(!region_has_shared_attr(&plain_region(other)).unwrap());
     }
 
@@ -18030,7 +18025,7 @@ mod tests {
     fn a_rewrapped_shared_message_keeps_its_flag() {
         let mut region = OhRegion::empty(OhHeaderProps::PLAIN);
         region.push_shared(MessageType::Attribute, &[3, 1, 0, 0, 0, 0, 0, 0, 0, 0]);
-        assert_eq!(region[3], MSG_FLAG_SHARED);
+        assert_eq!(region[3], MessageFlags::SHARED.get());
         assert!(region_has_shared_attr(&region).unwrap());
     }
 
@@ -18041,7 +18036,7 @@ mod tests {
         // copy must refuse it, not only shared datatypes/attributes. (A plain,
         // non-shared dataspace embeds no foreign address and is accepted.)
         let mut shared = message_record(MessageType::Dataspace, &[0u8; 8]);
-        shared[3] = MSG_FLAG_SHARED; // set the message's shared flag
+        shared[3] = MessageFlags::SHARED.get(); // set the message's shared flag
         let err = reject_foreign_addresses(&plain_region(shared)).unwrap_err();
         assert!(err.to_string().contains("shared"), "got: {err}");
 
@@ -18050,11 +18045,6 @@ mod tests {
     }
 
     // ---- version 2 object-header record layout (issue #416) ----
-
-    /// Version-2 object-header message flag bit marking a message as one that
-    /// must not be shared. The reference C library sets it on the Attribute
-    /// Info message it writes, so a rewrite of that message has to keep it.
-    const MSG_FLAG_DONT_SHARE: u8 = 0x04;
 
     /// The layout of a header that tracks *and* indexes attribute creation
     /// order: object-header flag bits 2 and 3, and 6-byte message records.
@@ -18085,7 +18075,9 @@ mod tests {
             btree_creation_order_address: None,
         };
         let mut record = layout.record(MessageType::AttributeInfo, &info.serialize(OFFSET_SIZE));
-        record[3] = MSG_FLAG_DONT_SHARE;
+        // The reference C library sets this flag on the Attribute Info message it writes
+        // (`H5Oattribute.c`, HDF5 2.2.0), so a rewrite of that message has to keep it.
+        record[3] = MessageFlags::FORBID_SHARING.get();
         region.push_bytes(&record);
         for (name, index) in attrs {
             let record = layout.record_with_creation_index(
@@ -18392,7 +18384,7 @@ mod tests {
         );
         assert_eq!(
             out[record + 3],
-            MSG_FLAG_DONT_SHARE,
+            MessageFlags::FORBID_SHARING.get(),
             "the rewritten record lost the message flags it carried"
         );
     }
