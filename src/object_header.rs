@@ -1018,6 +1018,7 @@ impl ObjectHeader {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::source::BytesSource;
 
     // Helper: build a v1 object header with given messages
     fn build_v1_header(
@@ -1026,15 +1027,7 @@ mod tests {
         length_size: u8,
     ) -> Vec<u8> {
         let _ = (offset_size, length_size);
-        // Calculate total header message data size
-        let mut msg_bytes = Vec::new();
-        for (mtype, mdata, mflags) in messages {
-            msg_bytes.extend_from_slice(&mtype.to_le_bytes()); // type(2)
-            msg_bytes.extend_from_slice(&(mdata.len() as u16).to_le_bytes()); // size(2)
-            msg_bytes.push(mflags.get()); // flags(1)
-            msg_bytes.extend_from_slice(&[0u8; 3]); // reserved(3)
-            msg_bytes.extend_from_slice(mdata); // data
-        }
+        let msg_bytes = v1_message_records(messages);
 
         let mut buf = Vec::new();
         buf.push(1); // version
@@ -1046,6 +1039,20 @@ mod tests {
         buf.extend_from_slice(&[0u8; 4]);
         buf.extend_from_slice(&msg_bytes);
         buf
+    }
+
+    /// Builds the message records of one version 1 object header chunk: for each message a type,
+    /// a size, a flags byte, three reserved bytes, and the body.
+    fn v1_message_records(messages: &[(u16, &[u8], MessageFlags)]) -> Vec<u8> {
+        let mut records = Vec::new();
+        for (msg_type, msg_data, msg_flags) in messages {
+            records.extend_from_slice(&msg_type.to_le_bytes());
+            records.extend_from_slice(&(msg_data.len() as u16).to_le_bytes());
+            records.push(msg_flags.get());
+            records.extend_from_slice(&[0u8; 3]);
+            records.extend_from_slice(msg_data);
+        }
+        records
     }
 
     // Helper: build a v2 object header chunk0 with given messages
@@ -1192,6 +1199,62 @@ mod tests {
         let hdr = ObjectHeader::parse(&data, 0, 8, 8).unwrap();
         assert_eq!(hdr.messages.len(), 1);
         assert_eq!(hdr.messages[0].msg_type, MessageType::ExternalDataFiles);
+    }
+
+    #[test]
+    fn a_version_1_header_rejects_an_unknown_message_that_must_always_be_understood() {
+        let messages = [(0x00FFu16, &[0xAA][..], MessageFlags::FAIL_IF_UNKNOWN_ALWAYS)];
+        let data = build_v1_header(&messages, 8, 8);
+        let err = ObjectHeader::parse(&data, 0, 8, 8).unwrap_err();
+        assert_eq!(err, FormatError::UnsupportedMessage(0x00FF));
+    }
+
+    #[test]
+    fn a_version_1_continuation_rejects_an_unknown_message_that_must_always_be_understood() {
+        let cont_chunk =
+            v1_message_records(&[(0x00FFu16, &[0xAA][..], MessageFlags::FAIL_IF_UNKNOWN_ALWAYS)]);
+
+        let cont_offset = 256usize;
+        let mut cont_ptr = Vec::new();
+        cont_ptr.extend_from_slice(&(cont_offset as u64).to_le_bytes());
+        cont_ptr.extend_from_slice(&(cont_chunk.len() as u64).to_le_bytes());
+
+        let header = build_v1_header(
+            &[(
+                MessageType::ObjectHeaderContinuation.to_u16(),
+                &cont_ptr[..],
+                MessageFlags::NONE,
+            )],
+            8,
+            8,
+        );
+        let mut file_data = vec![0u8; cont_offset + cont_chunk.len()];
+        file_data[..header.len()].copy_from_slice(&header);
+        file_data[cont_offset..cont_offset + cont_chunk.len()].copy_from_slice(&cont_chunk);
+
+        let err = ObjectHeader::parse(&file_data, 0, 8, 8).unwrap_err();
+        assert_eq!(err, FormatError::UnsupportedMessage(0x00FF));
+    }
+
+    #[test]
+    fn a_version_2_header_rejects_an_unknown_message_that_must_always_be_understood() {
+        let data = build_v2_header(
+            0x00,
+            &[(0xFF, &[0xAA][..], MessageFlags::FAIL_IF_UNKNOWN_ALWAYS)],
+            None,
+        );
+        let err = ObjectHeader::parse(&data, 0, 8, 8).unwrap_err();
+        assert_eq!(err, FormatError::UnsupportedMessage(0x00FF));
+    }
+
+    #[test]
+    fn a_streamed_version_1_header_rejects_an_unknown_message_that_must_always_be_understood() {
+        let messages = [(0x00FFu16, &[0xAA][..], MessageFlags::FAIL_IF_UNKNOWN_ALWAYS)];
+        let data = build_v1_header(&messages, 8, 8);
+        let err =
+            ObjectHeader::parse_from_source(&BytesSource::new(&data), 0, 8, 8, BaseAddress::ZERO)
+                .unwrap_err();
+        assert_eq!(err, FormatError::UnsupportedMessage(0x00FF));
     }
 
     #[test]
