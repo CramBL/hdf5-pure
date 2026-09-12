@@ -66,6 +66,15 @@ impl MessageFlags {
         self.contains(Self::FAIL_IF_UNKNOWN_ALWAYS)
     }
 
+    /// Returns `true` if [`MessageFlags::FAIL_IF_UNKNOWN_FOR_WRITE`] or
+    /// [`MessageFlags::FAIL_IF_UNKNOWN_ALWAYS`] is set.
+    ///
+    /// The two flags differ in the access the specification conditions them on: write access for
+    /// the first, any access for the second.
+    pub(crate) const fn must_be_understood(self) -> bool {
+        self.fails_if_unknown_for_write() || self.fails_if_unknown_always()
+    }
+
     /// Returns `true` if no flag is set.
     pub(crate) const fn is_empty(self) -> bool {
         self.0 == 0
