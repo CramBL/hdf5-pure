@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Fixed
+
+- `File::dataset` and `File::group` reject an object header holding a message of an unknown type that is flagged as one every decoder must understand (`H5O_MSG_FLAG_FAIL_IF_UNKNOWN_ALWAYS`), with `FormatError::UnsupportedMessage`, where such an object was previously read as though the message were absent ([#552](https://github.com/CramBL/hdf5-pure/issues/552)).
+
 ## [0.45.0] - 2026-09-11
 
 ### Changed
