@@ -11,8 +11,8 @@
 //! library, since a heap this crate alone can read is not the point.
 
 use hdf5_pure::{
-    AttrValue, Error, File, FileAccessProperties, FileBuilder, FormatError, MemoryStrategy,
-    SyncPolicy,
+    AttrValue, Error, File, FileAccessProperties, FileBuilder, FormatError, MaxExtent,
+    MemoryStrategy, SyncPolicy,
 };
 use tempfile::tempdir;
 
@@ -420,7 +420,7 @@ fn a_dataset_added_in_place_may_carry_a_dense_attribute_set() {
             .create_dataset("chunked", |b| {
                 b.with_i32_data(&(0..64).collect::<Vec<_>>())
                     .with_shape(&[64])
-                    .with_maxshape(&[u64::MAX])
+                    .with_maxshape(&[MaxExtent::Unlimited])
                     .with_chunks(&[16]);
                 for (i, name) in dense_names().into_iter().enumerate() {
                     b.set_attr(&name, AttrValue::I64(i as i64));
@@ -536,7 +536,7 @@ fn a_dense_edit_keeps_a_chunked_dataset_readable() {
         let ds = b.create_dataset("d");
         ds.with_i32_data(&(0..64).collect::<Vec<_>>())
             .with_shape(&[64])
-            .with_maxshape(&[u64::MAX])
+            .with_maxshape(&[MaxExtent::Unlimited])
             .with_chunks(&[16]);
         for (i, name) in dense_names().into_iter().enumerate() {
             ds.set_attr(&name, AttrValue::I64(i as i64));

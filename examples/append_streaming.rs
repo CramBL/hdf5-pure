@@ -17,7 +17,7 @@
 //! cargo run --example append_streaming
 //! ```
 
-use hdf5_pure::{File, FileBuilder};
+use hdf5_pure::{File, FileBuilder, MaxExtent};
 
 fn main() {
     let dir = tempfile::tempdir().expect("temp dir");
@@ -33,7 +33,7 @@ fn main() {
         .create_dataset("samples")
         .with_i32_data(&initial)
         .with_shape(&[initial.len() as u64])
-        .with_maxshape(&[u64::MAX])
+        .with_maxshape(&[MaxExtent::Unlimited])
         .with_chunks(&[4]);
     builder.write(&path).expect("write initial file");
 

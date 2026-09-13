@@ -16,7 +16,7 @@
 //! userblock-specific operation still refused — cross-file copy from a userblock
 //! *source* — is covered below; a refusal never corrupts the file.
 
-use hdf5_pure::{AttrValue, File, FileBuilder, Object};
+use hdf5_pure::{AttrValue, File, FileBuilder, MaxExtent, Object};
 
 use temp::temp_path;
 use test_util::temp;
@@ -243,7 +243,7 @@ fn userblock_add_empty_chunked_dataset_and_grow_it() {
         root.create_dataset("col", |b| {
             b.with_i64_data(&[])
                 .with_shape(&[0])
-                .with_maxshape(&[u64::MAX])
+                .with_maxshape(&[MaxExtent::Unlimited])
                 .with_chunks(&[4]);
         })
         .unwrap();

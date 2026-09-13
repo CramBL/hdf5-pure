@@ -14,7 +14,7 @@
 //! repointed, and the result is read back correctly by the C library.
 
 use hdf5::file::LibraryVersion;
-use hdf5_pure::{AttrValue, File, FileBuilder, ScaleOffset};
+use hdf5_pure::{AttrValue, File, FileBuilder, MaxExtent, ScaleOffset};
 use tempfile::tempdir;
 
 use hdf5_pure_crosscheck::{assert_c_absent, create_v18};
@@ -597,7 +597,7 @@ fn chunked_and_filtered_datasets_added_in_place_are_c_readable() {
             .create_dataset("stream", |b| {
                 b.with_i32_data(&ext_data)
                     .with_shape(&[128])
-                    .with_maxshape(&[u64::MAX])
+                    .with_maxshape(&[MaxExtent::Unlimited])
                     .with_chunks(&[32]);
             })
             .unwrap();

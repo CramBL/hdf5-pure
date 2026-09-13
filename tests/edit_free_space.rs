@@ -7,7 +7,7 @@
 //! survivors stay byte-exact and the file stays valid.
 
 use hdf5_pure::{
-    AttrValue, EditBacking, File, FileAccessProperties, FileBuilder, FileSpaceStrategy,
+    AttrValue, EditBacking, File, FileAccessProperties, FileBuilder, FileSpaceStrategy, MaxExtent,
     MemoryStrategy, SyncPolicy,
 };
 
@@ -426,7 +426,7 @@ fn deleting_extensible_dataset_reclaims_storage() {
             .create_dataset("ext", |b| {
                 b.with_f64_data(&vec![2.5; 4096])
                     .with_chunks(&[64])
-                    .with_maxshape(&[u64::MAX]);
+                    .with_maxshape(&[MaxExtent::Unlimited]);
             })
             .unwrap();
         s.commit().unwrap();
@@ -1283,7 +1283,7 @@ fn paged_churn_reaches_a_steady_size() {
                 g.create_dataset(name, |b| {
                     b.with_i32_data(&rows)
                         .with_shape(&[rows.len() as u64])
-                        .with_maxshape(&[u64::MAX])
+                        .with_maxshape(&[MaxExtent::Unlimited])
                         .with_chunks(&[128]);
                 })
                 .unwrap();
@@ -1793,7 +1793,7 @@ fn create_populated_group(f: &File, name: &str, rows: usize, cols: usize) {
                     b.with_i32_data(&payload)
                         .with_shape(&[rows as u64])
                         .with_chunks(&[512])
-                        .with_maxshape(&[u64::MAX]);
+                        .with_maxshape(&[MaxExtent::Unlimited]);
                 });
             }
         })
@@ -2063,7 +2063,7 @@ fn create_log(session: &File, name: &str) {
             b.with_i32_data(&[])
                 .with_shape(&[0])
                 .with_chunks(&[1024])
-                .with_maxshape(&[u64::MAX]);
+                .with_maxshape(&[MaxExtent::Unlimited]);
         })
         .unwrap();
     session.commit().unwrap();
@@ -2252,7 +2252,7 @@ fn create_reuse_log(session: &File, name: &str) {
             b.with_i32_data(&[])
                 .with_shape(&[0])
                 .with_chunks(&[REUSE_CHUNK])
-                .with_maxshape(&[u64::MAX]);
+                .with_maxshape(&[MaxExtent::Unlimited]);
         })
         .unwrap();
     session.commit().unwrap();
@@ -2527,7 +2527,7 @@ fn scratch_delete_releases(
             g.create_dataset("log", |b| {
                 b.with_i32_data(&[]).with_shape(&[0]).with_chunks(&[64]);
                 if resizable {
-                    b.with_maxshape(&[u64::MAX]);
+                    b.with_maxshape(&[MaxExtent::Unlimited]);
                 }
             });
         })
@@ -2595,7 +2595,7 @@ fn paged_delete_of_an_empty_extensible_dataset_reclaims_its_index() {
                 b.with_i32_data(&[])
                     .with_shape(&[0])
                     .with_chunks(&[64])
-                    .with_maxshape(&[u64::MAX]);
+                    .with_maxshape(&[MaxExtent::Unlimited]);
             });
         })
         .unwrap();
@@ -2649,7 +2649,7 @@ fn paged_group_churn_with_empty_datasets_reaches_a_steady_size() {
                         b.with_i32_data(&[])
                             .with_shape(&[0])
                             .with_chunks(&[64])
-                            .with_maxshape(&[u64::MAX]);
+                            .with_maxshape(&[MaxExtent::Unlimited]);
                     });
                 }
             })
@@ -2699,7 +2699,7 @@ fn populated_group_churn(
                         b.with_i32_data(&[])
                             .with_shape(&[0])
                             .with_chunks(&[64])
-                            .with_maxshape(&[u64::MAX]);
+                            .with_maxshape(&[MaxExtent::Unlimited]);
                     });
                 }
             })
@@ -2835,7 +2835,7 @@ fn paged_staged_append_churn_does_not_leak_the_old_index() {
     b.create_dataset("d")
         .with_i32_data(&[0i32; ROWS])
         .with_shape(&[ROWS as u64])
-        .with_maxshape(&[u64::MAX])
+        .with_maxshape(&[MaxExtent::Unlimited])
         .with_chunks(&[ROWS as u64]);
     b.write(&path).unwrap();
 
@@ -2918,7 +2918,7 @@ fn a_multi_chunk_staged_append_fills_chunk_sized_holes() {
         b.create_dataset("d")
             .with_i32_data(&(0..CHUNK as i32).collect::<Vec<i32>>())
             .with_shape(&[CHUNK as u64])
-            .with_maxshape(&[u64::MAX])
+            .with_maxshape(&[MaxExtent::Unlimited])
             .with_chunks(&[CHUNK as u64]);
         // Scratch and spacer alternate, so deleting the scratch datasets leaves
         // four separated holes rather than one run.

@@ -7,7 +7,9 @@
 //! Fixed-Array / Extensible-Array chunked data reads — all from a `Read + Seek`
 //! source that never buffers the whole file.
 
-use hdf5_pure::{ChunkCacheConfig, File, FileAccessProperties, FileBuilder, MetadataCacheConfig};
+use hdf5_pure::{
+    ChunkCacheConfig, File, FileAccessProperties, FileBuilder, MaxExtent, MetadataCacheConfig,
+};
 
 #[test]
 fn open_streaming_matches_buffered() {
@@ -33,7 +35,7 @@ fn open_streaming_matches_buffered() {
         b.create_dataset("unlimited_chunked")
             .with_i32_data(&unlimited_chunked)
             .with_shape(&[500])
-            .with_maxshape(&[u64::MAX])
+            .with_maxshape(&[MaxExtent::Unlimited])
             .with_chunks(&[64]);
         // Nested group + dataset exercises v2 group path resolution.
         let mut g = b.create_group("grp");

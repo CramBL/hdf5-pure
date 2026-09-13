@@ -3,7 +3,7 @@
 //! (issue #198).
 
 use hdf5_pure::{
-    AttrValue, Error, File, FileAccessProperties, FileBuilder, MemoryStrategy, Object,
+    AttrValue, Error, File, FileAccessProperties, FileBuilder, MaxExtent, MemoryStrategy, Object,
 };
 
 /// Open with the bounded engine demanded rather than merely preferred: these
@@ -25,7 +25,7 @@ fn build(path: &std::path::Path) {
     b.create_dataset("d")
         .with_i32_data(&(0..8).collect::<Vec<i32>>())
         .with_shape(&[8])
-        .with_maxshape(&[u64::MAX])
+        .with_maxshape(&[MaxExtent::Unlimited])
         .with_chunks(&[4]);
     b.create_dataset("refs").with_path_references(&["d"]);
     b.write(path).unwrap();

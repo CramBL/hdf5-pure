@@ -8,6 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- **Breaking:** A dataspace's maximum dimensions are `MaxExtent` values, `MaxExtent::Fixed(n)` or `MaxExtent::Unlimited`, in place of the value `u64::MAX`: `DatasetBuilder::with_maxshape` takes `&[MaxExtent]` and `Dataset::maxshape` returns `Option<Vec<MaxExtent>>`. The bytes a file holds are unchanged, and a caller that compared a maximum against `u64::MAX` matches `MaxExtent::Unlimited` instead.
 - `Dataset::read`, `Dataset::layout` and `Dataset::chunk_index` report `FormatError::InvalidChunkIndexType` for a chunked data layout whose chunk indexing type byte is outside the five the format defines, where such a file was previously read past the unknown index and failed further in with a `FormatError::ChunkedReadError` message ([#560](https://github.com/CramBL/hdf5-pure/pull/560)).
 - **Breaking:** (technically) rename the internal "heap-scope" feature to "__heap-scope"
 - Update `sha2` from `0.10` to `0.11`

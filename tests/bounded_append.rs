@@ -3,8 +3,8 @@
 //! mirror-only.
 
 use hdf5_pure::{
-    AttrValue, Error, File, FileAccessProperties, FileBuilder, FileSpaceStrategy, MemoryStrategy,
-    MetadataCacheConfig, SyncPolicy,
+    AttrValue, Error, File, FileAccessProperties, FileBuilder, FileSpaceStrategy, MaxExtent,
+    MemoryStrategy, MetadataCacheConfig, SyncPolicy,
 };
 use tempfile::tempdir;
 
@@ -37,7 +37,7 @@ fn build(path: &std::path::Path, n: i32, chunk: u64, deflate: bool) {
         .create_dataset("d")
         .with_i32_data(&data)
         .with_shape(&[n as u64])
-        .with_maxshape(&[u64::MAX])
+        .with_maxshape(&[MaxExtent::Unlimited])
         .with_chunks(&[chunk]);
     if deflate {
         ds.with_deflate(6);
@@ -261,7 +261,7 @@ fn userblock_file_is_refused_at_open() {
     b.create_dataset("d")
         .with_i32_data(&[1, 2, 3])
         .with_shape(&[3])
-        .with_maxshape(&[u64::MAX])
+        .with_maxshape(&[MaxExtent::Unlimited])
         .with_chunks(&[2]);
     b.write(&p).unwrap();
     let err = open_bounded(&p).unwrap_err();
@@ -280,7 +280,7 @@ fn persisted_free_space_file_appends_and_finalizes() {
     b.create_dataset("d")
         .with_i32_data(&(0..10).collect::<Vec<i32>>())
         .with_shape(&[10])
-        .with_maxshape(&[u64::MAX])
+        .with_maxshape(&[MaxExtent::Unlimited])
         .with_chunks(&[4]);
     b.write(&p).unwrap();
 
@@ -322,7 +322,7 @@ fn persisted_free_space_many_appends_one_finalize() {
     b.create_dataset("d")
         .with_i32_data(&[0])
         .with_shape(&[1])
-        .with_maxshape(&[u64::MAX])
+        .with_maxshape(&[MaxExtent::Unlimited])
         .with_chunks(&[16]);
     b.write(&p).unwrap();
 
@@ -351,7 +351,7 @@ fn persisted_free_space_drop_finalizes() {
     b.create_dataset("d")
         .with_i32_data(&(0..8).collect::<Vec<i32>>())
         .with_shape(&[8])
-        .with_maxshape(&[u64::MAX])
+        .with_maxshape(&[MaxExtent::Unlimited])
         .with_chunks(&[4]);
     b.write(&p).unwrap();
 
@@ -383,7 +383,7 @@ fn persisted_free_space_noop_close_does_not_grow() {
     b.create_dataset("d")
         .with_i32_data(&(0..8).collect::<Vec<i32>>())
         .with_shape(&[8])
-        .with_maxshape(&[u64::MAX])
+        .with_maxshape(&[MaxExtent::Unlimited])
         .with_chunks(&[4]);
     b.write(&p).unwrap();
     let before = std::fs::metadata(&p).unwrap().len();
@@ -416,7 +416,7 @@ fn paged_non_persist_is_refused_at_open() {
     b.create_dataset("d")
         .with_i32_data(&[1, 2, 3])
         .with_shape(&[3])
-        .with_maxshape(&[u64::MAX])
+        .with_maxshape(&[MaxExtent::Unlimited])
         .with_chunks(&[2]);
     b.write(&p).unwrap();
     let err = open_bounded(&p).unwrap_err();
@@ -518,7 +518,7 @@ fn reads_match_streaming_capabilities() {
     b.create_dataset("d")
         .with_i32_data(&[1, 2, 3])
         .with_shape(&[3])
-        .with_maxshape(&[u64::MAX])
+        .with_maxshape(&[MaxExtent::Unlimited])
         .with_chunks(&[2]);
     let mut grp = b.create_group("grp");
     grp.create_dataset("nested")

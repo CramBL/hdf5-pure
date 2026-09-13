@@ -3,7 +3,9 @@
 //! filtered and unfiltered, chunk-aligned and not — and read the result back
 //! with this crate. C-library interop lives in `crates/crosscheck/tests/append.rs`.
 
-use hdf5_pure::{AppendBuilder, AttrValue, Error, File, FileBuilder, FormatError, ScaleOffset};
+use hdf5_pure::{
+    AppendBuilder, AttrValue, Error, File, FileBuilder, FormatError, MaxExtent, ScaleOffset,
+};
 use tempfile::tempdir;
 
 /// Create a rank-1, unlimited i32 dataset with the given chunk length and
@@ -22,7 +24,7 @@ fn create_i32(
         .create_dataset("d")
         .with_i32_data(&data)
         .with_shape(&[n as u64])
-        .with_maxshape(&[u64::MAX])
+        .with_maxshape(&[MaxExtent::Unlimited])
         .with_chunks(&[chunk]);
     if shuffle {
         ds.with_shuffle();
@@ -113,7 +115,7 @@ fn append_scale_offset_f64() {
     b.create_dataset("d")
         .with_f64_data(&init)
         .with_shape(&[6])
-        .with_maxshape(&[u64::MAX])
+        .with_maxshape(&[MaxExtent::Unlimited])
         .with_chunks(&[3])
         .with_scale_offset(ScaleOffset::FloatDScale(2));
     b.write(&path).unwrap();
@@ -168,7 +170,7 @@ fn a_staged_append_onto_a_lossy_partial_tail_is_refused() {
         b.create_dataset("d")
             .with_f64_data(data)
             .with_shape(&[data.len() as u64])
-            .with_maxshape(&[u64::MAX])
+            .with_maxshape(&[MaxExtent::Unlimited])
             .with_chunks(&[4])
             .with_scale_offset(ScaleOffset::FloatDScale(1));
         b.write(path).unwrap();
@@ -307,7 +309,7 @@ fn append_to_userblock_file() {
     b.create_dataset("d")
         .with_i32_data(&(0..8).collect::<Vec<_>>())
         .with_shape(&[8])
-        .with_maxshape(&[u64::MAX])
+        .with_maxshape(&[MaxExtent::Unlimited])
         .with_chunks(&[4])
         .with_shuffle()
         .with_deflate(6);
@@ -355,7 +357,7 @@ fn many_appends_do_not_rewrite_existing_data() {
         b.create_dataset("d")
             .with_i32_data(&base)
             .with_shape(&[base_n as u64])
-            .with_maxshape(&[u64::MAX])
+            .with_maxshape(&[MaxExtent::Unlimited])
             .with_chunks(&[200])
             .with_deflate(6);
         b.write(&path).unwrap();
@@ -397,7 +399,7 @@ fn introspection_reports_eligibility() {
     let f = File::open(&path).unwrap();
     let ds = f.dataset("d").unwrap();
     assert!(ds.is_chunked());
-    assert_eq!(ds.maxshape().unwrap(), Some(vec![u64::MAX]));
+    assert_eq!(ds.maxshape().unwrap(), Some(vec![MaxExtent::Unlimited]));
     assert_eq!(ds.chunk_shape().unwrap(), Some(vec![4]));
     // shuffle (2) then deflate (1), in pipeline order.
     assert_eq!(ds.filters(), vec![2, 1]);
@@ -470,7 +472,7 @@ fn refuse_fixed_chunked_not_unlimited() {
     b.create_dataset("d")
         .with_i32_data(&(0..6).collect::<Vec<_>>())
         .with_shape(&[6])
-        .with_maxshape(&[100])
+        .with_maxshape(&[MaxExtent::Fixed(100)])
         .with_chunks(&[3]);
     b.write(&path).unwrap();
     assert_append_unsupported(commit_append(&path, "d", |a| {
@@ -488,7 +490,7 @@ fn refuse_rank2() {
     b.create_dataset("d")
         .with_i32_data(&(0..12).collect::<Vec<_>>())
         .with_shape(&[3, 4])
-        .with_maxshape(&[u64::MAX, 4])
+        .with_maxshape(&[MaxExtent::Unlimited, MaxExtent::Fixed(4)])
         .with_chunks(&[1, 4]);
     b.write(&path).unwrap();
     assert_append_unsupported(commit_append(&path, "d", |a| {

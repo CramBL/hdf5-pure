@@ -6,7 +6,7 @@
 //! value" default, the datatype/size validation, and that a fill value set on an
 //! `File::open_rw`-created dataset is honored.
 
-use hdf5_pure::{Dataset, Error, File, FileBuilder, FormatError, H5Element};
+use hdf5_pure::{Dataset, Error, File, FileBuilder, FormatError, H5Element, MaxExtent};
 use tempfile::tempdir;
 
 /// Build a file with `build`, serialize it, and return it parsed back, ready for
@@ -37,7 +37,7 @@ fn chunked_extensible_fill_round_trips() {
         fb.create_dataset("d")
             .with_f64_data(&[1.0, 2.0, 3.0, 4.0])
             .with_shape(&[4])
-            .with_maxshape(&[u64::MAX])
+            .with_maxshape(&[MaxExtent::Unlimited])
             .with_chunks(&[2])
             .with_fill_value(3.5_f64);
     });

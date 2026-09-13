@@ -15,6 +15,7 @@ use core::num::NonZeroUsize;
 
 use crate::chunk_grid::{ChunkGrid, GridOrder};
 use crate::convert::{TryToUsize, nonzero_usize_from};
+use crate::dataspace::MaxExtent;
 use crate::error::FormatError;
 use crate::extensible_array::{DataBlockGeom, EaGeometry, ExtensibleArrayHeader, SuperBlockGeom};
 use crate::fill_value::FillPattern;
@@ -489,7 +490,7 @@ impl ChunkOptions {
     pub fn validate_geometry(
         &self,
         shape: &[u64],
-        maxshape: Option<&[u64]>,
+        maxshape: Option<&[MaxExtent]>,
     ) -> Result<(), &'static str> {
         if shape.is_empty() {
             return Err("a scalar dataset cannot be chunked, filtered, or extensible");
@@ -515,12 +516,12 @@ impl ChunkOptions {
             );
         }
         // A maximum shape must match the rank and bound the current shape in
-        // every dimension (an unlimited dimension, `u64::MAX`, bounds anything).
+        // every dimension (an unlimited dimension bounds anything).
         if let Some(ms) = maxshape {
             if ms.len() != shape.len() {
                 return Err("maxshape must have the same rank as the dataset shape");
             }
-            if ms.iter().zip(shape).any(|(&m, &d)| m != u64::MAX && m < d) {
+            if ms.iter().zip(shape).any(|(&m, &d)| !m.admits(d)) {
                 return Err("maxshape must be at least the current shape in every dimension");
             }
             // The reference library indexes a dataspace with two unlimited
@@ -530,7 +531,7 @@ impl ChunkOptions {
             // anyway produced a dataset the reference library refuses to open
             // ("already found unlimited dimension"), so this is a refusal rather
             // than a file only this crate can read (issue #299).
-            if ms.iter().filter(|&&m| m == u64::MAX).count() > 1 {
+            if ms.iter().filter(|m| m.is_unlimited()).count() > 1 {
                 return Err(
                     "at most one dimension of a maxshape may be unlimited; the chunk index \
                      for more than one is a version-2 B-tree, which this crate cannot write",
@@ -2424,7 +2425,7 @@ pub(crate) fn compress_chunks(
     shape: &[u64],
     ctx: ChunkContext<'_>,
     options: &ChunkOptions,
-    maxshape: Option<&[u64]>,
+    maxshape: Option<&[MaxExtent]>,
     fill: FillPattern<'_>,
     allocation: StorageAllocation,
 ) -> Result<CompressedChunkSet, FormatError> {
@@ -2514,7 +2515,7 @@ pub(crate) fn compress_chunks(
 pub(crate) fn plan_index_slots(
     shape: &[u64],
     chunk_dims: &[u64],
-    maxshape: Option<&[u64]>,
+    maxshape: Option<&[MaxExtent]>,
     chunk_bytes: u64,
     has_filters: bool,
     allocation: StorageAllocation,
@@ -2688,9 +2689,9 @@ fn ea_addressable_slots() -> u64 {
 fn index_grid(
     shape: &[u64],
     chunk_dims: &[u64],
-    maxshape: Option<&[u64]>,
+    maxshape: Option<&[MaxExtent]>,
 ) -> Result<ChunkGrid, FormatError> {
-    let order = if maxshape.is_some_and(|ms| ms.contains(&u64::MAX)) {
+    let order = if maxshape.is_some_and(|ms| ms.contains(&MaxExtent::Unlimited)) {
         GridOrder::UnlimitedFirst
     } else {
         GridOrder::RowMajor
@@ -2955,7 +2956,7 @@ pub fn build_chunked_data_at_ext(
     ctx: ChunkContext<'_>,
     options: &ChunkOptions,
     data_address: u64,
-    maxshape: Option<&[u64]>,
+    maxshape: Option<&[MaxExtent]>,
     fill: FillPattern<'_>,
 ) -> Result<ChunkedDataResult, FormatError> {
     let set = compress_chunks(
@@ -3102,7 +3103,7 @@ pub(crate) fn plan_chunked_data_verbatim(
     element_size: NonZeroUsize,
     pipeline_message: Option<&[u8]>,
     data_address: u64,
-    maxshape: Option<&[u64]>,
+    maxshape: Option<&[MaxExtent]>,
 ) -> Result<VerbatimLayout, FormatError> {
     if meta.is_empty() {
         return Err(FormatError::ChunkedReadError(
@@ -3487,7 +3488,7 @@ mod tests {
         let (kind, slots, _) = plan_index_slots(
             &shape,
             &chunk,
-            Some(&[u64::MAX]),
+            Some(&[MaxExtent::Unlimited]),
             400,
             false,
             StorageAllocation::Unallocated,
@@ -3607,7 +3608,7 @@ mod tests {
             plan_index_slots(
                 &[1],
                 &[1],
-                Some(&[widest]),
+                Some(&[MaxExtent::Fixed(widest)]),
                 chunk_bytes,
                 has_filters,
                 StorageAllocation::Allocated,
@@ -3616,7 +3617,7 @@ mod tests {
             let err = plan_index_slots(
                 &[1],
                 &[1],
-                Some(&[widest + 1]),
+                Some(&[MaxExtent::Fixed(widest + 1)]),
                 chunk_bytes,
                 has_filters,
                 StorageAllocation::Allocated,
@@ -3633,7 +3634,7 @@ mod tests {
         plan_index_slots(
             &[8, 8],
             &[4, 4],
-            Some(&[u64::MAX, 8]),
+            Some(&[MaxExtent::Unlimited, MaxExtent::Fixed(8)]),
             64,
             false,
             StorageAllocation::Allocated,
@@ -3663,7 +3664,7 @@ mod tests {
             plan_index_slots(
                 &[2, 1],
                 &[1, 1],
-                Some(&[u64::MAX, stride]),
+                Some(&[MaxExtent::Unlimited, MaxExtent::Fixed(stride)]),
                 4,
                 false,
                 StorageAllocation::Allocated,
@@ -3687,7 +3688,7 @@ mod tests {
         };
         for shape in [vec![0u64], vec![4, 0], vec![0, 4]] {
             let err = auto
-                .validate_geometry(&shape, Some(&vec![u64::MAX; shape.len()]))
+                .validate_geometry(&shape, Some(&vec![MaxExtent::Unlimited; shape.len()]))
                 .unwrap_err();
             assert!(
                 err.contains("explicit chunk dimensions"),
@@ -3704,7 +3705,11 @@ mod tests {
             chunk_dims: Some(vec![512]),
             ..Default::default()
         };
-        assert!(explicit.validate_geometry(&[0], Some(&[u64::MAX])).is_ok());
+        assert!(
+            explicit
+                .validate_geometry(&[0], Some(&[MaxExtent::Unlimited]))
+                .is_ok()
+        );
         assert!(explicit.validate_geometry(&[0], None).is_ok());
     }
 
@@ -3759,7 +3764,7 @@ mod tests {
     fn measuring_a_chunked_region_agrees_with_assembling_it() {
         /// Dataset shape, chunk shape, and maxshape: the three inputs that
         /// decide which index kind a set gets.
-        type Case = (&'static [u64], &'static [u64], Option<&'static [u64]>);
+        type Case = (&'static [u64], &'static [u64], Option<&'static [MaxExtent]>);
 
         // Chunk counts chosen for the kind each selects: one chunk is
         // `SingleChunk`, a fixed shape with many is `FixedArray`, and an
@@ -3768,7 +3773,7 @@ mod tests {
             (&[512], &[512], None),
             (&[4096], &[512], None),
             (&[4096], &[64], None),
-            (&[4096], &[512], Some(&[u64::MAX])),
+            (&[4096], &[512], Some(&[MaxExtent::Unlimited])),
         ];
 
         for (shape, chunk_dims, maxshape) in cases {
@@ -4060,7 +4065,7 @@ mod tests {
             (
                 "extensible array",
                 &[21u64][..],
-                Some(&[u64::MAX][..]),
+                Some(&[MaxExtent::Unlimited][..]),
                 &[37u64, 111, 5][..],
                 Some(&b"EAHD"[..]),
             ),
@@ -4558,7 +4563,7 @@ mod tests {
         values: &[f64],
         shape: &[u64],
         chunk_dims: &[u64],
-        maxshape: &[u64],
+        maxshape: &[MaxExtent],
     ) -> Vec<f64> {
         let raw = f64_to_bytes(values);
         let data_address = 0x1000u64;
@@ -4617,21 +4622,21 @@ mod tests {
     #[test]
     fn ea_roundtrip_1d_inline_only() {
         let values: Vec<f64> = (0..10).map(|i| i as f64).collect();
-        let result = roundtrip_ea(&values, &[10], &[10], &[u64::MAX]);
+        let result = roundtrip_ea(&values, &[10], &[10], &[MaxExtent::Unlimited]);
         assert_eq!(result, values);
     }
 
     #[test]
     fn ea_roundtrip_1d_multi_chunks() {
         let values: Vec<f64> = (0..20).map(|i| i as f64).collect();
-        let result = roundtrip_ea(&values, &[20], &[5], &[u64::MAX]);
+        let result = roundtrip_ea(&values, &[20], &[5], &[MaxExtent::Unlimited]);
         assert_eq!(result, values);
     }
 
     #[test]
     fn ea_roundtrip_1d_many_chunks() {
         let values: Vec<f64> = (0..100).map(|i| i as f64).collect();
-        let result = roundtrip_ea(&values, &[100], &[10], &[u64::MAX]);
+        let result = roundtrip_ea(&values, &[100], &[10], &[MaxExtent::Unlimited]);
         assert_eq!(result, values);
     }
 
@@ -4642,7 +4647,7 @@ mod tests {
     fn ea_roundtrip_super_block_sizes() {
         for &n in &[245u64, 300, 2000, 50000] {
             let values: Vec<f64> = (0..n).map(|i| i as f64).collect();
-            let result = roundtrip_ea(&values, &[n], &[1], &[u64::MAX]);
+            let result = roundtrip_ea(&values, &[n], &[1], &[MaxExtent::Unlimited]);
             assert_eq!(result.len(), n as usize, "length mismatch at n={n}");
             assert_eq!(result, values, "data mismatch at n={n}");
         }
@@ -4655,7 +4660,7 @@ mod tests {
     fn ea_roundtrip_paged_data_blocks() {
         let n: u64 = 132_000;
         let values: Vec<f64> = (0..n).map(|i| i as f64).collect();
-        let result = roundtrip_ea(&values, &[n], &[1], &[u64::MAX]);
+        let result = roundtrip_ea(&values, &[n], &[1], &[MaxExtent::Unlimited]);
         assert_eq!(result.len(), n as usize);
         assert_eq!(result, values);
     }
@@ -4733,13 +4738,13 @@ mod tests {
                         options.set_filter(FilterKind::Deflate(6));
                     }
                     let dims = [chunk];
-                    let maxshape = unlimited.then_some([u64::MAX]);
+                    let maxshape = unlimited.then_some([MaxExtent::Unlimited]);
                     let set = compress_chunks(
                         &raw,
                         &[elements],
                         ChunkContext::basic(&dims, 8),
                         &options,
-                        maxshape.as_ref().map(<[u64; 1]>::as_slice),
+                        maxshape.as_ref().map(<[MaxExtent; 1]>::as_slice),
                         FillPattern::ZERO,
                         StorageAllocation::Allocated,
                     )

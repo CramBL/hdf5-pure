@@ -14,19 +14,16 @@
 //! multiplier, so three of the four obvious fixtures pass over the bug.
 
 use hdf5::file::LibraryVersion;
-use hdf5_pure::{ChunkIndex, File, FileBuilder};
+use hdf5_pure::{ChunkIndex, File, FileBuilder, MaxExtent};
 use tempfile::tempdir;
-
-/// `H5S_UNLIMITED`.
-const U: u64 = u64::MAX;
 
 /// One swept combination: a label for the assertion messages, then the shape,
 /// the chunk dimensions and the maximum shape.
-type Case = (String, Vec<u64>, Vec<u64>, Vec<u64>);
+type Case = (String, Vec<u64>, Vec<u64>, Vec<MaxExtent>);
 
 /// One family of cases: a label, a shape, chunk dimensions, and the maximum
 /// shapes to try against them.
-type Family<'a> = (&'a str, &'a [u64], &'a [u64], &'a [&'a [u64]]);
+type Family<'a> = (&'a str, &'a [u64], &'a [u64], &'a [&'a [MaxExtent]]);
 
 /// Every shape/chunk/maximum-shape combination the sweep covers, with a label
 /// for the assertion messages.
@@ -40,44 +37,107 @@ type Family<'a> = (&'a str, &'a [u64], &'a [u64], &'a [&'a [u64]]);
 fn cases() -> Vec<Case> {
     let mut out = Vec::new();
     let families: &[Family<'_>] = &[
-        ("r1", &[7], &[3], &[&[7][..], &[16][..], &[U][..]]),
-        ("r1 one chunk", &[3], &[4], &[&[3][..], &[8][..], &[U][..]]),
+        (
+            "r1",
+            &[7],
+            &[3],
+            &[
+                &[MaxExtent::Fixed(7)][..],
+                &[MaxExtent::Fixed(16)][..],
+                &[MaxExtent::Unlimited][..],
+            ],
+        ),
+        (
+            "r1 one chunk",
+            &[3],
+            &[4],
+            &[
+                &[MaxExtent::Fixed(3)][..],
+                &[MaxExtent::Fixed(8)][..],
+                &[MaxExtent::Unlimited][..],
+            ],
+        ),
         (
             "r2",
             &[3, 3],
             &[2, 2],
             &[
-                &[3, 3][..],
-                &[8, 3][..],
-                &[3, 8][..],
-                &[8, 8][..],
-                &[U, 3][..],
-                &[3, U][..],
-                &[U, 8][..],
-                &[8, U][..],
+                &[MaxExtent::Fixed(3), MaxExtent::Fixed(3)][..],
+                &[MaxExtent::Fixed(8), MaxExtent::Fixed(3)][..],
+                &[MaxExtent::Fixed(3), MaxExtent::Fixed(8)][..],
+                &[MaxExtent::Fixed(8), MaxExtent::Fixed(8)][..],
+                &[MaxExtent::Unlimited, MaxExtent::Fixed(3)][..],
+                &[MaxExtent::Fixed(3), MaxExtent::Unlimited][..],
+                &[MaxExtent::Unlimited, MaxExtent::Fixed(8)][..],
+                &[MaxExtent::Fixed(8), MaxExtent::Unlimited][..],
             ],
         ),
         (
             "r2 one chunk",
             &[3, 3],
             &[4, 4],
-            &[&[3, 3][..], &[8, 8][..], &[U, 3][..], &[3, U][..]],
+            &[
+                &[MaxExtent::Fixed(3), MaxExtent::Fixed(3)][..],
+                &[MaxExtent::Fixed(8), MaxExtent::Fixed(8)][..],
+                &[MaxExtent::Unlimited, MaxExtent::Fixed(3)][..],
+                &[MaxExtent::Fixed(3), MaxExtent::Unlimited][..],
+            ],
         ),
         (
             "r3",
             &[2, 3, 4],
             &[1, 2, 2],
             &[
-                &[2, 3, 4][..],
-                &[4, 3, 4][..],
-                &[2, 6, 4][..],
-                &[2, 3, 8][..],
-                &[4, 6, 8][..],
-                &[U, 3, 4][..],
-                &[2, U, 4][..],
-                &[2, 3, U][..],
-                &[U, 6, 8][..],
-                &[4, 6, U][..],
+                &[
+                    MaxExtent::Fixed(2),
+                    MaxExtent::Fixed(3),
+                    MaxExtent::Fixed(4),
+                ][..],
+                &[
+                    MaxExtent::Fixed(4),
+                    MaxExtent::Fixed(3),
+                    MaxExtent::Fixed(4),
+                ][..],
+                &[
+                    MaxExtent::Fixed(2),
+                    MaxExtent::Fixed(6),
+                    MaxExtent::Fixed(4),
+                ][..],
+                &[
+                    MaxExtent::Fixed(2),
+                    MaxExtent::Fixed(3),
+                    MaxExtent::Fixed(8),
+                ][..],
+                &[
+                    MaxExtent::Fixed(4),
+                    MaxExtent::Fixed(6),
+                    MaxExtent::Fixed(8),
+                ][..],
+                &[
+                    MaxExtent::Unlimited,
+                    MaxExtent::Fixed(3),
+                    MaxExtent::Fixed(4),
+                ][..],
+                &[
+                    MaxExtent::Fixed(2),
+                    MaxExtent::Unlimited,
+                    MaxExtent::Fixed(4),
+                ][..],
+                &[
+                    MaxExtent::Fixed(2),
+                    MaxExtent::Fixed(3),
+                    MaxExtent::Unlimited,
+                ][..],
+                &[
+                    MaxExtent::Unlimited,
+                    MaxExtent::Fixed(6),
+                    MaxExtent::Fixed(8),
+                ][..],
+                &[
+                    MaxExtent::Fixed(4),
+                    MaxExtent::Fixed(6),
+                    MaxExtent::Unlimited,
+                ][..],
             ],
         ),
     ];
@@ -100,7 +160,7 @@ fn values(shape: &[u64]) -> Vec<u32> {
     (1..=shape.iter().product::<u64>() as u32).collect()
 }
 
-fn pure_write(path: &std::path::Path, shape: &[u64], chunks: &[u64], maxshape: &[u64]) {
+fn pure_write(path: &std::path::Path, shape: &[u64], chunks: &[u64], maxshape: &[MaxExtent]) {
     let mut b = FileBuilder::new();
     b.create_dataset("d")
         .with_u32_data(&values(shape))
@@ -116,7 +176,7 @@ fn pure_write(path: &std::path::Path, shape: &[u64], chunks: &[u64], maxshape: &
 /// Without the bound it writes a version-1 B-tree, whose keys carry each chunk's
 /// coordinates explicitly — so it exercises none of the positional numbering
 /// this file is about, and a read crosscheck against it passes no matter what.
-fn c_write(path: &std::path::Path, shape: &[u64], chunks: &[u64], maxshape: &[u64]) {
+fn c_write(path: &std::path::Path, shape: &[u64], chunks: &[u64], maxshape: &[MaxExtent]) {
     let file = hdf5::FileBuilder::new()
         .with_fapl(|fp| fp.libver_bounds(LibraryVersion::V110, LibraryVersion::latest()))
         .create(path)
@@ -128,7 +188,7 @@ fn c_write(path: &std::path::Path, shape: &[u64], chunks: &[u64], maxshape: &[u6
             shape
                 .iter()
                 .zip(maxshape)
-                .map(|(&s, &m)| hdf5::Extent::new(s as usize, (m != U).then_some(m as usize)))
+                .map(|(&s, &m)| hdf5::Extent::new(s as usize, m.size().map(|m| m as usize)))
                 .collect::<Vec<_>>(),
         )
         .create("d")
@@ -258,8 +318,18 @@ fn one_stored_chunk_with_room_for_more_is_not_the_single_chunk_layout() {
     let dir = tempdir().unwrap();
     let fixed = dir.path().join("fixed.h5");
     let growable = dir.path().join("growable.h5");
-    pure_write(&fixed, &[3, 3], &[4, 4], &[3, 3]);
-    pure_write(&growable, &[3, 3], &[4, 4], &[8, 8]);
+    pure_write(
+        &fixed,
+        &[3, 3],
+        &[4, 4],
+        &[MaxExtent::Fixed(3), MaxExtent::Fixed(3)],
+    );
+    pure_write(
+        &growable,
+        &[3, 3],
+        &[4, 4],
+        &[MaxExtent::Fixed(8), MaxExtent::Fixed(8)],
+    );
 
     let kind = |p: &std::path::Path| {
         File::open(p)
@@ -288,7 +358,7 @@ fn two_unlimited_dimensions_are_refused() {
     b.create_dataset("d")
         .with_u32_data(&values(&[3, 3]))
         .with_shape(&[3, 3])
-        .with_maxshape(&[U, U])
+        .with_maxshape(&[MaxExtent::Unlimited, MaxExtent::Unlimited])
         .with_chunks(&[2, 2]);
     let err = b.write(&path).unwrap_err();
     assert!(format!("{err}").contains("at most one dimension"), "{err}");
@@ -316,7 +386,7 @@ fn two_unlimited_dimensions_are_refused_in_a_session_too() {
             .create_dataset("d", |b| {
                 b.with_u32_data(&values(&[3, 3]))
                     .with_shape(&[3, 3])
-                    .with_maxshape(&[U, U])
+                    .with_maxshape(&[MaxExtent::Unlimited, MaxExtent::Unlimited])
                     .with_chunks(&[2, 2]);
             })
             .unwrap_err();
@@ -355,7 +425,7 @@ fn a_maximum_shape_needing_a_mostly_empty_index_is_refused() {
     b.create_dataset("d")
         .with_u32_data(&values(&[3, 3]))
         .with_shape(&[3, 3])
-        .with_maxshape(&[2_000_000, 2_000_000])
+        .with_maxshape(&[MaxExtent::Fixed(2_000_000), MaxExtent::Fixed(2_000_000)])
         .with_chunks(&[2, 2]);
     let err = b.write(&path).unwrap_err();
     let text = format!("{err}");
@@ -369,7 +439,7 @@ fn a_maximum_shape_needing_a_mostly_empty_index_is_refused() {
     b.create_dataset("d")
         .with_u32_data(&values(&[3, 3]))
         .with_shape(&[3, 3])
-        .with_maxshape(&[U, 3])
+        .with_maxshape(&[MaxExtent::Unlimited, MaxExtent::Fixed(3)])
         .with_chunks(&[2, 2]);
     b.write(&path).unwrap();
     assert_eq!(c_read(&path), values(&[3, 3]));
@@ -382,7 +452,7 @@ fn a_maximum_shape_needing_a_mostly_empty_index_is_refused() {
     b.create_dataset("d")
         .with_u32_data(&values(&[8, 8]))
         .with_shape(&[8, 8])
-        .with_maxshape(&[U, 131_072])
+        .with_maxshape(&[MaxExtent::Unlimited, MaxExtent::Fixed(131_072)])
         .with_chunks(&[1, 1]);
     b.write(&path).unwrap();
     assert_eq!(c_read(&path), values(&[8, 8]));
@@ -393,7 +463,7 @@ fn a_maximum_shape_needing_a_mostly_empty_index_is_refused() {
 ///
 /// This is the user-visible face of the block allocation: reading such a file
 /// always worked, so a crate that inflated it on rewrite could read files it
-/// could not faithfully copy. At `maxshape [U, 65536]` the rewrite was 11x the
+/// could not faithfully copy. At an unlimited maximum beside 65536 the rewrite was 11x the
 /// source, and one step wider it was refused outright.
 #[test]
 fn repack_of_a_c_written_sparse_dataset_stays_the_same_order_of_size() {
@@ -402,7 +472,12 @@ fn repack_of_a_c_written_sparse_dataset_stays_the_same_order_of_size() {
         let src = dir.path().join("c.h5");
         let dst = dir.path().join("repacked.h5");
         let shape = [8u64, 8];
-        c_write(&src, &shape, &[1, 1], &[U, wide]);
+        c_write(
+            &src,
+            &shape,
+            &[1, 1],
+            &[MaxExtent::Unlimited, MaxExtent::Fixed(wide)],
+        );
         hdf5_pure::repack(&src, &dst, &hdf5_pure::RepackOptions::new()).unwrap();
 
         let (src_len, dst_len) = (
@@ -411,7 +486,7 @@ fn repack_of_a_c_written_sparse_dataset_stays_the_same_order_of_size() {
         );
         assert!(
             dst_len <= src_len * 2,
-            "maxshape [U, {wide}]: repack wrote {dst_len} bytes for a {src_len}-byte source"
+            "an unlimited maximum beside {wide}: repack wrote {dst_len} bytes for a {src_len}-byte source"
         );
         assert_eq!(pure_read(&dst), values(&shape));
         assert_eq!(c_read(&dst), values(&shape));
@@ -471,7 +546,7 @@ fn repack_preserves_a_resizable_multidimensional_dataset() {
     b.create_dataset("d")
         .with_u32_data(&data)
         .with_shape(&[8, 8])
-        .with_maxshape(&[8, 16])
+        .with_maxshape(&[MaxExtent::Fixed(8), MaxExtent::Fixed(16)])
         .with_chunks(&[4, 4])
         .with_deflate(6);
     b.write(&src).unwrap();
@@ -502,7 +577,7 @@ fn a_shrinking_inplace_overwrite_keeps_each_chunk_in_its_slot() {
     b.create_dataset("d")
         .with_u32_data(&noisy)
         .with_shape(&[8, 8])
-        .with_maxshape(&[8, 16])
+        .with_maxshape(&[MaxExtent::Fixed(8), MaxExtent::Fixed(16)])
         .with_chunks(&[4, 4])
         .with_deflate(6);
     b.write(&path).unwrap();
@@ -556,7 +631,7 @@ fn a_paged_data_block_with_an_empty_first_page_keeps_its_chunks() {
         .with_u32_data(&data)
         .with_shape(&shape)
         .with_chunks(&[1, 1])
-        .with_maxshape(&[U, 3500]);
+        .with_maxshape(&[MaxExtent::Unlimited, MaxExtent::Fixed(3500)]);
     b.write(&path).unwrap();
 
     assert_eq!(pure_read(&path), data, "pure read");
@@ -576,7 +651,12 @@ fn pure_reads_a_c_written_block_whose_pages_are_not_leading() {
     let path = dir.path().join("c_paged.h5");
     let shape = [40u64, 40];
     let data = values(&shape);
-    c_write(&path, &shape, &[1, 1], &[U, 12_000]);
+    c_write(
+        &path,
+        &shape,
+        &[1, 1],
+        &[MaxExtent::Unlimited, MaxExtent::Fixed(12_000)],
+    );
 
     assert_eq!(
         hdf5_pure::File::open(&path)
@@ -615,7 +695,7 @@ fn a_shrinking_inplace_overwrite_keeps_ea_chunks_in_their_slots() {
     b.create_dataset("d")
         .with_u32_data(&noisy)
         .with_shape(&[8, 8])
-        .with_maxshape(&[U, 16])
+        .with_maxshape(&[MaxExtent::Unlimited, MaxExtent::Fixed(16)])
         .with_chunks(&[4, 4])
         .with_deflate(6);
     b.write(&path).unwrap();
@@ -688,7 +768,7 @@ fn a_sparse_extensible_array_matches_the_c_library_block_statistics() {
         ([8, 8], 100_000),
         ([8, 8], 1_000_000),
     ] {
-        let maxshape = [U, wide];
+        let maxshape = [MaxExtent::Unlimited, MaxExtent::Fixed(wide)];
         let pure_path = dir.path().join("pure.h5");
         let c_path = dir.path().join("c.h5");
         pure_write(&pure_path, &shape, &[1, 1], &maxshape);

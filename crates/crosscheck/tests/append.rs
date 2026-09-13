@@ -8,7 +8,7 @@
 
 use hdf5::Extent;
 use hdf5::file::LibraryVersion;
-use hdf5_pure::{File, FileBuilder};
+use hdf5_pure::{File, FileBuilder, MaxExtent};
 use tempfile::tempdir;
 
 /// A deterministic incompressible i32 stream (LCG), so deflate stores chunks
@@ -62,7 +62,7 @@ fn pure_create_filtered(path: &std::path::Path, data: &[i32], chunk: u64) {
     b.create_dataset("d")
         .with_i32_data(data)
         .with_shape(&[data.len() as u64])
-        .with_maxshape(&[u64::MAX])
+        .with_maxshape(&[MaxExtent::Unlimited])
         .with_chunks(&[chunk])
         .with_shuffle()
         .with_deflate(6);
@@ -151,7 +151,7 @@ fn pure_unfiltered_append_c_reads() {
     b.create_dataset("d")
         .with_i32_data(&(0..10).collect::<Vec<_>>())
         .with_shape(&[10])
-        .with_maxshape(&[u64::MAX])
+        .with_maxshape(&[MaxExtent::Unlimited])
         .with_chunks(&[4]);
     b.write(&path).unwrap();
     pure_append(&path, &(10..23).collect::<Vec<_>>());
@@ -169,7 +169,7 @@ fn userblock_append_c_reads() {
     b.create_dataset("d")
         .with_i32_data(&(0..10).collect::<Vec<_>>())
         .with_shape(&[10])
-        .with_maxshape(&[u64::MAX])
+        .with_maxshape(&[MaxExtent::Unlimited])
         .with_chunks(&[4])
         .with_shuffle()
         .with_deflate(6);

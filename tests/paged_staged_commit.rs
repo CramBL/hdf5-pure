@@ -6,7 +6,7 @@
 //! on disk records which pages hold metadata and which hold raw data.
 
 use hdf5_pure::{
-    Error, File, FileAccessProperties, FileBuilder, FileSpaceStrategy, MemoryStrategy,
+    Error, File, FileAccessProperties, FileBuilder, FileSpaceStrategy, MaxExtent, MemoryStrategy,
 };
 
 const PAGE: u64 = 4096;
@@ -110,7 +110,7 @@ fn paged_staged_commit_keeps_pages_homogeneous() {
         b.create_dataset("d")
             .with_i32_data(&(0..64).collect::<Vec<i32>>())
             .with_shape(&[64])
-            .with_maxshape(&[u64::MAX])
+            .with_maxshape(&[MaxExtent::Unlimited])
             .with_chunks(&[64]);
         b.with_file_space_strategy(FileSpaceStrategy::Page, true, 0)
             .with_file_space_page_size(PAGE);

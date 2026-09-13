@@ -8,7 +8,7 @@
 
 use hdf5_pure::{
     AttrValue, Error, File, FileAccessProperties, FileBuilder, FileSpaceStrategy, FormatError,
-    ScaleOffset, SyncPolicy,
+    MaxExtent, ScaleOffset, SyncPolicy,
 };
 use tempfile::tempdir;
 
@@ -21,7 +21,7 @@ fn build(path: &std::path::Path, name: &str, n: i32, chunk: u64, deflate: bool) 
         .create_dataset(name)
         .with_i32_data(&data)
         .with_shape(&[n as u64])
-        .with_maxshape(&[u64::MAX])
+        .with_maxshape(&[MaxExtent::Unlimited])
         .with_chunks(&[chunk]);
     if deflate {
         ds.with_deflate(6);
@@ -132,7 +132,7 @@ fn build_u64_filtered(path: &std::path::Path, n: u64, chunk: u64, filters: Filte
         .create_dataset("d")
         .with_u64_data(&data)
         .with_shape(&[n])
-        .with_maxshape(&[u64::MAX])
+        .with_maxshape(&[MaxExtent::Unlimited])
         .with_chunks(&[chunk]);
     match filters {
         Filters::Deflate => {
@@ -244,7 +244,7 @@ fn interleave_append_stage_commit_append() {
         b.create_dataset("d")
             .with_i32_data(&(0..6).collect::<Vec<_>>())
             .with_shape(&[6])
-            .with_maxshape(&[u64::MAX])
+            .with_maxshape(&[MaxExtent::Unlimited])
             .with_chunks(&[4]);
         b.create_dataset("doomed").with_i32_data(&[1, 2, 3]);
         b.write(&p).unwrap();
@@ -266,7 +266,7 @@ fn interleave_append_stage_commit_append() {
             .create_dataset("created", |b| {
                 b.with_i32_data(&(0..4).collect::<Vec<_>>())
                     .with_shape(&[4])
-                    .with_maxshape(&[u64::MAX])
+                    .with_maxshape(&[MaxExtent::Unlimited])
                     .with_chunks(&[4]);
             })
             .unwrap();
@@ -336,7 +336,7 @@ fn guard_refuses_ancestor_delete() {
         b.create_dataset("grp/d")
             .with_i32_data(&(0..4).collect::<Vec<_>>())
             .with_shape(&[4])
-            .with_maxshape(&[u64::MAX])
+            .with_maxshape(&[MaxExtent::Unlimited])
             .with_chunks(&[4]);
         b.write(&p).unwrap();
     }
@@ -388,7 +388,7 @@ fn userblock_refuses_inplace_but_staged_append_dataset_works() {
         b.create_dataset("d")
             .with_i32_data(&(0..8).collect::<Vec<_>>())
             .with_shape(&[8])
-            .with_maxshape(&[u64::MAX])
+            .with_maxshape(&[MaxExtent::Unlimited])
             .with_chunks(&[4]);
         b.write(&p).unwrap();
     }
@@ -444,7 +444,7 @@ fn persisting_file_takes_both_inplace_and_staged_appends() {
         b.create_dataset("d")
             .with_i32_data(&(0..8).collect::<Vec<_>>())
             .with_shape(&[8])
-            .with_maxshape(&[u64::MAX])
+            .with_maxshape(&[MaxExtent::Unlimited])
             .with_chunks(&[4]);
         b.write(&p).unwrap();
     }

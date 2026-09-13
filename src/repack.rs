@@ -119,6 +119,7 @@ use crate::chunked_read::ChunkInfo;
 use crate::chunked_write::{ChunkMeta, ChunkProvider, FilterKind, FilterSpec};
 use crate::convert::TryToUsize;
 use crate::data_layout::DataLayout;
+use crate::dataspace::MaxExtent;
 use crate::datatype::{Datatype, ReferenceType, embedded_reference_slots};
 use crate::error::{Error, FormatError};
 use crate::filter_pipeline::{
@@ -594,7 +595,7 @@ fn emit_dataset(
         carry_shape_and_pipeline(
             db,
             &dims,
-            dataspace.max_dimensions.as_deref(),
+            dataspace.extensible_max_dimensions(),
             &layout,
             &filters,
         );
@@ -693,11 +694,7 @@ fn emit_dataset(
         if let Some(DenseChunkPlan { meta, grid_order }) =
             try_plan_dense_chunks(source_chunks, &dims, &chunk_dims)
         {
-            let maxshape = dataspace
-                .max_dimensions
-                .as_ref()
-                .filter(|ms| *ms != &dims)
-                .map(|ms| ms.as_slice());
+            let maxshape = dataspace.extensible_max_dimensions();
             let elem_size = datatype.element_size_usize()?;
             // Stream the chunks from the source at write time rather than reading
             // them all now: the provider holds an `Arc<File>` and fetches one
@@ -747,7 +744,7 @@ fn emit_dataset(
     carry_shape_and_pipeline(
         db,
         &dims,
-        dataspace.max_dimensions.as_deref(),
+        dataspace.extensible_max_dimensions(),
         &layout,
         &filters,
     );
@@ -792,14 +789,12 @@ fn copy_dataset_attrs(
 fn carry_shape_and_pipeline(
     db: &mut DatasetBuilder,
     dims: &[u64],
-    max_dimensions: Option<&[u64]>,
+    max_dimensions: Option<&[MaxExtent]>,
     layout: &DataLayout,
     filters: &[FilterSpec],
 ) {
     // A max-shape that differs from the current shape means a resizable dataset.
-    if let Some(maxshape) = max_dimensions
-        && maxshape != dims
-    {
+    if let Some(maxshape) = max_dimensions {
         db.with_maxshape(maxshape);
     }
 
@@ -879,7 +874,7 @@ fn emit_vlen_string_dataset(
     carry_shape_and_pipeline(
         db,
         dims,
-        ds.dataspace()?.max_dimensions.as_deref(),
+        ds.dataspace()?.extensible_max_dimensions(),
         layout,
         &filters,
     );
@@ -922,7 +917,7 @@ fn emit_vlen_sequence_dataset(
     carry_shape_and_pipeline(
         db,
         dims,
-        ds.dataspace()?.max_dimensions.as_deref(),
+        ds.dataspace()?.extensible_max_dimensions(),
         layout,
         &filters,
     );
@@ -971,7 +966,7 @@ fn emit_embedded_address_dataset(
     // checked before anything is read, and before the variable-length work, so a
     // compound carrying both kinds is refused rather than half-rewritten.
     if !reference_slots.is_empty() {
-        check_embedded_reference_layout(ds, path, dims, layout, file)?;
+        check_embedded_reference_layout(ds, path, layout, file)?;
     }
 
     let n_elements: u64 = dims.iter().product();
@@ -1022,7 +1017,7 @@ fn emit_embedded_address_dataset(
     carry_shape_and_pipeline(
         db,
         dims,
-        ds.dataspace()?.max_dimensions.as_deref(),
+        ds.dataspace()?.extensible_max_dimensions(),
         layout,
         &filters,
     );
@@ -1512,9 +1507,7 @@ fn emit_object_reference_dataset(
              (their addresses live inside compressed chunks and would need rewriting in place)"
         )));
     }
-    if let Some(maxshape) = &ds.dataspace()?.max_dimensions
-        && maxshape != dims
-    {
+    if ds.dataspace()?.extensible_max_dimensions().is_some() {
         return Err(Error::RepackUnsupported(format!(
             "dataset {path}: resizable object-reference datasets cannot be repacked"
         )));
@@ -1569,7 +1562,6 @@ fn emit_object_reference_dataset(
 fn check_embedded_reference_layout(
     ds: &Dataset,
     path: &str,
-    dims: &[u64],
     layout: &DataLayout,
     file: &Arc<File>,
 ) -> Result<(), Error> {
@@ -1580,9 +1572,7 @@ fn check_embedded_reference_layout(
              in place)"
         )));
     }
-    if let Some(maxshape) = &ds.dataspace()?.max_dimensions
-        && maxshape != dims
-    {
+    if ds.dataspace()?.extensible_max_dimensions().is_some() {
         return Err(Error::RepackUnsupported(format!(
             "dataset {path}: resizable datasets with an object-reference member cannot be repacked"
         )));

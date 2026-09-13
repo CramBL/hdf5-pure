@@ -7,7 +7,7 @@
 
 use hdf5::Extent;
 use hdf5::file::LibraryVersion;
-use hdf5_pure::{Error, File, FileBuilder};
+use hdf5_pure::{Error, File, FileBuilder, MaxExtent};
 use tempfile::tempdir;
 
 fn pure_create(path: &std::path::Path, n: usize) {
@@ -16,7 +16,7 @@ fn pure_create(path: &std::path::Path, n: usize) {
     b.create_dataset("d")
         .with_i32_data(&data)
         .with_shape(&[n as u64])
-        .with_maxshape(&[u64::MAX])
+        .with_maxshape(&[MaxExtent::Unlimited])
         .with_chunks(&[1]);
     b.write(path).unwrap();
 }
@@ -153,7 +153,7 @@ fn append_crosses_paging_boundary() {
         b.create_dataset("d")
             .with_i32_data(&data)
             .with_shape(&[start as u64])
-            .with_maxshape(&[u64::MAX])
+            .with_maxshape(&[MaxExtent::Unlimited])
             .with_chunks(&[1]);
         b.write(&path).unwrap();
     }
@@ -226,7 +226,7 @@ fn append_f64_pure_file() {
         b.create_dataset("d")
             .with_f64_data(&data)
             .with_shape(&[5])
-            .with_maxshape(&[u64::MAX])
+            .with_maxshape(&[MaxExtent::Unlimited])
             .with_chunks(&[1]);
         b.write(&path).unwrap();
     }
@@ -256,7 +256,7 @@ fn append_chunk_size_greater_than_one() {
     b.create_dataset("d")
         .with_i32_data(&(0..16).collect::<Vec<_>>())
         .with_shape(&[16])
-        .with_maxshape(&[u64::MAX])
+        .with_maxshape(&[MaxExtent::Unlimited])
         .with_chunks(&[4]);
     b.write(&path).unwrap();
 
@@ -306,12 +306,12 @@ fn append_to_one_of_multiple_datasets_leaves_others_intact() {
     b.create_dataset("a")
         .with_i32_data(&(0..10).collect::<Vec<_>>())
         .with_shape(&[10])
-        .with_maxshape(&[u64::MAX])
+        .with_maxshape(&[MaxExtent::Unlimited])
         .with_chunks(&[1]);
     b.create_dataset("b")
         .with_i32_data(&(100..110).collect::<Vec<_>>())
         .with_shape(&[10])
-        .with_maxshape(&[u64::MAX])
+        .with_maxshape(&[MaxExtent::Unlimited])
         .with_chunks(&[1]);
     b.write(&path).unwrap();
 
@@ -423,7 +423,7 @@ fn rejects_filtered_pure_dataset() {
         b.create_dataset("d")
             .with_i32_data(&(0..100).collect::<Vec<_>>())
             .with_shape(&[100])
-            .with_maxshape(&[u64::MAX])
+            .with_maxshape(&[MaxExtent::Unlimited])
             .with_chunks(&[10])
             .with_deflate(4);
         b.write(&path).unwrap();
@@ -475,7 +475,7 @@ fn rejects_filtered_pure_dataset_with_a_partial_trailing_chunk() {
         b.create_dataset("d")
             .with_i32_data(&(0..105).collect::<Vec<_>>())
             .with_shape(&[105]) // 105 % 10 != 0: a partial trailing chunk
-            .with_maxshape(&[u64::MAX])
+            .with_maxshape(&[MaxExtent::Unlimited])
             .with_chunks(&[10])
             .with_deflate(4);
         b.write(&path).unwrap();

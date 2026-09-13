@@ -13,7 +13,7 @@
 //! cargo run --example swmr
 //! ```
 
-use hdf5_pure::{File, FileBuilder};
+use hdf5_pure::{File, FileBuilder, MaxExtent};
 
 fn main() {
     let dir = tempfile::tempdir().expect("temp dir");
@@ -26,7 +26,7 @@ fn main() {
         .create_dataset("log")
         .with_i32_data(&[0, 1, 2]) // initial rows
         .with_shape(&[3])
-        .with_maxshape(&[u64::MAX]) // one unlimited dimension
+        .with_maxshape(&[MaxExtent::Unlimited]) // one unlimited dimension
         .with_chunks(&[1]);
     builder.write(&path).expect("write initial file");
 

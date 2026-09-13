@@ -5,7 +5,7 @@
 //! and the result is read back by both readers. Also proves the fail-loud
 //! contract on a real variable-length string dataset the C library produces.
 
-use hdf5_pure::{File, RepackOptions, VlenStringReadOptions, repack};
+use hdf5_pure::{File, MaxExtent, RepackOptions, VlenStringReadOptions, repack};
 use tempfile::tempdir;
 
 use hdf5_pure_crosscheck::assert_c_absent;
@@ -511,7 +511,7 @@ fn repack_roundtrips_filtered_and_resizable_vlen_string_datasets() {
         b.create_dataset("growable")
             .with_vlen_strings(&refs)
             .with_shape(&[words.len() as u64])
-            .with_maxshape(&[u64::MAX])
+            .with_maxshape(&[MaxExtent::Unlimited])
             .with_chunks(&[8]);
         b.write(&src).unwrap();
     }
@@ -1727,7 +1727,7 @@ fn repack_preserves_c_written_unallocated_storage_in_every_layout() {
         if layout == "extensible" {
             assert_eq!(
                 ds.maxshape().unwrap(),
-                Some(vec![u64::MAX]),
+                Some(vec![MaxExtent::Unlimited]),
                 "[{layout}] resizability carried"
             );
             // The one case where the destination is not smaller than the source:

@@ -17,7 +17,7 @@
 
 use hdf5::Extent;
 use hdf5::file::LibraryVersion;
-use hdf5_pure::{File, FileBuilder};
+use hdf5_pure::{File, FileBuilder, MaxExtent};
 use std::sync::{Mutex, MutexGuard};
 use tempfile::tempdir;
 
@@ -40,7 +40,7 @@ fn pure_create(path: &std::path::Path, n: i32, chunk: u64) {
     b.create_dataset("d")
         .with_i32_data(&data)
         .with_shape(&[n as u64])
-        .with_maxshape(&[u64::MAX])
+        .with_maxshape(&[MaxExtent::Unlimited])
         .with_chunks(&[chunk])
         .with_shuffle()
         .with_deflate(4);

@@ -1452,6 +1452,7 @@ fn read_super_block_from_source<S: Source + ?Sized>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::dataspace::MaxExtent;
 
     /// The paged/not-paged boundary, which decides whether an `EASB` carries a
     /// page-init bitmap at all — so a reader and a writer that disagree by one
@@ -1583,7 +1584,7 @@ mod tests {
         let grid = ChunkGrid::new(
             &[2, 2],
             &[3, 4],
-            Some(&[u64::MAX, 0]),
+            Some(&[MaxExtent::Unlimited, MaxExtent::Fixed(0)]),
             crate::chunk_grid::GridOrder::UnlimitedFirst,
         )
         .unwrap();
@@ -1621,7 +1622,7 @@ mod tests {
         let grid = ChunkGrid::new(
             &[2, 2],
             &[3, 3],
-            Some(&[8, u64::MAX]),
+            Some(&[MaxExtent::Fixed(8), MaxExtent::Unlimited]),
             crate::chunk_grid::GridOrder::UnlimitedFirst,
         )
         .unwrap();

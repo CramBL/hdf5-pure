@@ -270,7 +270,7 @@ use crate::chunked_write::{
 };
 use crate::convert::TryToUsize;
 use crate::data_layout::{ChunkIndexLayout, DataLayout};
-use crate::dataspace::{Dataspace, DataspaceType};
+use crate::dataspace::{Dataspace, DataspaceType, MaxExtent};
 use crate::datatype::{
     Datatype, DatatypeByteOrder, datatype_holds_file_address, datatype_holds_object_address,
     embedded_reference_slots, stored_object_references,
@@ -763,7 +763,7 @@ pub(crate) struct StagedMeta {
     pub(crate) datatype: Datatype,
     pub(crate) dimensions: Vec<u64>,
     /// `None` for a fixed-shape dataset, matching `Dataset::maxshape`.
-    pub(crate) maxshape: Option<Vec<u64>>,
+    pub(crate) maxshape: Option<Vec<MaxExtent>>,
     pub(crate) chunked: bool,
     /// Each staged filter's registered id and its `H5Z_FLAG_OPTIONAL` flag, in
     /// pipeline order.
@@ -3650,12 +3650,11 @@ impl WriteEngine {
             .max_dimensions
             .as_ref()
             .and_then(|m| m.first().copied())
+            && !max.admits(grown)
         {
-            if max != u64::MAX && grown > max {
-                return Err(Error::AppendUnsupported(
-                    "appending would grow the staged dataset past its maximum shape",
-                ));
-            }
+            return Err(Error::AppendUnsupported(
+                "appending would grow the staged dataset past its maximum shape",
+            ));
         }
         fd.raw.extend_from_slice(bytes);
         fd.ds.dimensions[0] = grown;
@@ -5052,10 +5051,7 @@ impl WriteEngine {
             dimensions: fd.ds.dimensions.clone(),
             // Reported the way `Dataset::maxshape` reports an on-disk one: a
             // maximum equal to the current shape is a fixed-shape dataset.
-            maxshape: match &fd.ds.max_dimensions {
-                Some(md) if *md != fd.ds.dimensions => Some(md.clone()),
-                _ => None,
-            },
+            maxshape: fd.ds.extensible_max_dimensions().map(<[MaxExtent]>::to_vec),
             // The rule the commit applies: chunk options or an extensible shape
             // select chunked storage, anything else contiguous.
             chunked: fd.chunk_options.is_chunked() || fd.maxshape.is_some(),
@@ -8615,13 +8611,13 @@ impl WriteEngine {
                 "append requires a rank-1 dataset in this release",
             ));
         }
-        match &disk_ds.max_dimensions {
-            Some(md) if md.first() == Some(&u64::MAX) => {}
-            _ => {
-                return Err(Error::AppendUnsupported(
-                    "append requires a dataset that is unlimited along its first dimension",
-                ));
-            }
+        if !matches!(
+            disk_ds.max_dimensions.as_deref(),
+            Some([MaxExtent::Unlimited, ..])
+        ) {
+            return Err(Error::AppendUnsupported(
+                "append requires a dataset that is unlimited along its first dimension",
+            ));
         }
 
         let ChunkedGeometry {
@@ -9414,7 +9410,7 @@ impl WriteEngine {
         shape: &[u64],
         chunk_dims: &[u64],
         element_size: NonZeroUsize,
-        maxshape: Option<&[u64]>,
+        maxshape: Option<&[MaxExtent]>,
         pipeline_message: Option<&[u8]>,
         meta: &[ChunkMeta],
         chunk_bytes: &[Vec<u8>],
@@ -11018,7 +11014,7 @@ enum CopyTree {
         shape: Vec<u64>,
         chunk_dims: Vec<u64>,
         element_size: NonZeroUsize,
-        maxshape: Option<Vec<u64>>,
+        maxshape: Option<Vec<MaxExtent>>,
         pipeline_message: Option<Vec<u8>>,
         meta: Vec<ChunkMeta>,
         chunk_bytes: Vec<Vec<u8>>,
@@ -11239,7 +11235,7 @@ enum MovingWrite {
         shape: Vec<u64>,
         chunk_dims: Vec<u64>,
         element_size: NonZeroUsize,
-        maxshape: Option<Vec<u64>>,
+        maxshape: Option<Vec<MaxExtent>>,
         pipeline_message: Option<Vec<u8>>,
         payload: ChunkPayload,
         old_addr: u64,
@@ -11333,11 +11329,11 @@ struct FlatDataset {
     /// unfiltered storage; otherwise its chunk data and index are built by
     /// [`WriteEngine::build_chunked_dataset`].
     chunk_options: ChunkOptions,
-    /// Maximum dimensions for an extensible dataset (an unlimited dimension is
-    /// `u64::MAX`), mirrored into `ds.max_dimensions`. `None` for a fixed-shape
-    /// dataset. A maxshape with an unlimited dimension selects the
-    /// extensible-array chunk index; a finite maxshape stays fixed-array/single.
-    maxshape: Option<Vec<u64>>,
+    /// Maximum dimensions for an extensible dataset, mirrored into
+    /// `ds.max_dimensions`. `None` for a fixed-shape dataset. A maxshape with an
+    /// unlimited dimension selects the extensible-array chunk index, and a
+    /// finite maxshape the fixed-array or single-chunk one.
+    maxshape: Option<Vec<MaxExtent>>,
     /// Variable-length attributes still carrying a placeholder heap address:
     /// (index into `attrs`, that attribute's global heap collections).
     /// Resolved in the apply loop right before this dataset's header is built.
@@ -11951,8 +11947,8 @@ fn flatten_dataset(db: DatasetBuilder) -> Result<FlatDataset, Error> {
         )]
         rank: shape.len() as u8,
         dimensions: shape,
-        // A chunked, extensible dataset records its maximum dimensions (an
-        // unlimited dimension is `u64::MAX`); a fixed-shape dataset has none.
+        // A chunked, extensible dataset records its maximum dimensions. A
+        // fixed-shape dataset has none.
         max_dimensions: db.maxshape.clone(),
     };
     let mut attrs: Vec<crate::attribute::AttributeMessage> = Vec::with_capacity(db.attrs.len());
@@ -12268,10 +12264,11 @@ struct ChunkedGeometry {
     /// This is what the chunk index's element width is derived from, so it has
     /// to be the geometry's product and not any written chunk's size.
     raw_size: u64,
-    /// The on-disk maximum dimensions when they differ from the current shape; an
-    /// unlimited dimension selects the extensible-array index, a finite one the
-    /// fixed-array index. `None` keeps the fixed-array / single-chunk index.
-    maxshape: Option<Vec<u64>>,
+    /// The on-disk maximum dimensions, when they differ from the current shape.
+    /// An unlimited dimension selects the extensible-array index and a finite
+    /// one the fixed-array index. `None` keeps the fixed-array or single-chunk
+    /// index.
+    maxshape: Option<Vec<MaxExtent>>,
 }
 
 /// Derive the [`ChunkedGeometry`] for a chunked dataset from its datatype,
@@ -12303,11 +12300,7 @@ fn chunked_geometry(
         .copied()
         .product::<u64>()
         .saturating_mul(element_size.get() as u64);
-    let maxshape = ds
-        .max_dimensions
-        .as_ref()
-        .filter(|ms| *ms != &ds.dimensions)
-        .cloned();
+    let maxshape = ds.extensible_max_dimensions().map(<[MaxExtent]>::to_vec);
     Ok(ChunkedGeometry {
         spatial,
         element_size,
@@ -15677,7 +15670,7 @@ mod tests {
                 .create_dataset("d")
                 .with_i32_data(&data)
                 .with_shape(&[n as u64])
-                .with_maxshape(&[u64::MAX])
+                .with_maxshape(&[MaxExtent::Unlimited])
                 .with_chunks(&[chunk]);
             if deflate {
                 d.with_deflate(6);
@@ -15745,7 +15738,7 @@ mod tests {
             b.create_dataset("d")
                 .with_f64_data(&committed)
                 .with_shape(&[6])
-                .with_maxshape(&[u64::MAX])
+                .with_maxshape(&[MaxExtent::Unlimited])
                 .with_chunks(&[4])
                 .with_zfp(8.0);
             b.write(path).unwrap();
@@ -15790,7 +15783,7 @@ mod tests {
             b.create_dataset("d")
                 .with_f64_data(&committed[..4])
                 .with_shape(&[4])
-                .with_maxshape(&[u64::MAX])
+                .with_maxshape(&[MaxExtent::Unlimited])
                 .with_chunks(&[4])
                 .with_zfp(8.0);
             b.write(&p).unwrap();
@@ -15871,7 +15864,7 @@ mod tests {
             b.create_dataset("d")
                 .with_f64_data(&[0.5, 1.5, 2.5, 3.5, 4.5, 5.5])
                 .with_shape(&[6])
-                .with_maxshape(&[u64::MAX])
+                .with_maxshape(&[MaxExtent::Unlimited])
                 .with_chunks(&[4])
                 .with_scale_offset(ScaleOffset::FloatDScale(1));
             b.write(&p).unwrap();
@@ -15895,7 +15888,7 @@ mod tests {
             b.create_dataset("d")
                 .with_i32_data(&(0..6).collect::<Vec<_>>())
                 .with_shape(&[6])
-                .with_maxshape(&[u64::MAX])
+                .with_maxshape(&[MaxExtent::Unlimited])
                 .with_chunks(&[4])
                 .with_scale_offset(ScaleOffset::Integer(0));
             b.write(&p).unwrap();
@@ -15936,7 +15929,7 @@ mod tests {
             b.create_dataset("d")
                 .with_i32_data(&data)
                 .with_shape(&[n as u64])
-                .with_maxshape(&[u64::MAX])
+                .with_maxshape(&[MaxExtent::Unlimited])
                 .with_chunks(&[chunk])
                 .with_shuffle()
                 .with_deflate(4);
@@ -15984,7 +15977,7 @@ mod tests {
         b.create_dataset("d")
             .with_i32_data(&data)
             .with_shape(&[n as u64])
-            .with_maxshape(&[u64::MAX])
+            .with_maxshape(&[MaxExtent::Unlimited])
             .with_chunks(&[1]);
         b.write(path).unwrap();
     }
@@ -17486,7 +17479,7 @@ mod tests {
                 b.create_dataset("d")
                     .with_i32_data(&(0..n).collect::<Vec<i32>>())
                     .with_shape(&[n as u64])
-                    .with_maxshape(&[u64::MAX])
+                    .with_maxshape(&[MaxExtent::Unlimited])
                     .with_chunks(&[chunk]);
                 b.write(&base).unwrap();
             }
@@ -18677,7 +18670,7 @@ mod tests {
         b.create_dataset("d")
             .with_i32_data(&data)
             .with_shape(&[n as u64])
-            .with_maxshape(&[u64::MAX])
+            .with_maxshape(&[MaxExtent::Unlimited])
             .with_chunks(&[chunk]);
         b.write(path).unwrap();
     }
@@ -18821,7 +18814,7 @@ mod tests {
         b.create_dataset("d")
             .with_i32_data(&(0..6).collect::<Vec<i32>>())
             .with_shape(&[6])
-            .with_maxshape(&[u64::MAX])
+            .with_maxshape(&[MaxExtent::Unlimited])
             .with_chunks(&[4]);
         b.write(&p).unwrap();
         {
@@ -18859,7 +18852,7 @@ mod tests {
         b.create_dataset("d")
             .with_i32_data(&(0..64).collect::<Vec<i32>>())
             .with_shape(&[64])
-            .with_maxshape(&[u64::MAX])
+            .with_maxshape(&[MaxExtent::Unlimited])
             .with_chunks(&[64]);
         b.write(&p).unwrap();
 
@@ -18969,7 +18962,7 @@ mod tests {
         b.create_dataset("d")
             .with_i32_data(&(0..64).collect::<Vec<i32>>())
             .with_shape(&[64])
-            .with_maxshape(&[u64::MAX])
+            .with_maxshape(&[MaxExtent::Unlimited])
             .with_chunks(&[64]);
         b.write(&p).unwrap();
 
@@ -19044,7 +19037,7 @@ mod tests {
         b.create_dataset("d")
             .with_i32_data(&(0..64).collect::<Vec<i32>>())
             .with_shape(&[64])
-            .with_maxshape(&[u64::MAX])
+            .with_maxshape(&[MaxExtent::Unlimited])
             .with_chunks(&[64]);
         b.write(&p).unwrap();
 
@@ -19114,7 +19107,7 @@ mod tests {
             b.create_dataset(&std::format!("t{t}"))
                 .with_i32_data(&(0..256).collect::<Vec<_>>())
                 .with_shape(&[256])
-                .with_maxshape(&[u64::MAX])
+                .with_maxshape(&[MaxExtent::Unlimited])
                 .with_chunks(&[64]);
         }
         b.write(path).unwrap();
@@ -19414,7 +19407,7 @@ mod tests {
                 b.create_dataset(&std::format!("t{t}"))
                     .with_i32_data(&(0..256).collect::<Vec<_>>())
                     .with_shape(&[256])
-                    .with_maxshape(&[u64::MAX])
+                    .with_maxshape(&[MaxExtent::Unlimited])
                     .with_chunks(&[64]);
             }
             b.write(path).unwrap();
@@ -19667,7 +19660,7 @@ mod tests {
                 .create_dataset("d", |b| {
                     b.with_i32_data(&(0..64).collect::<Vec<i32>>())
                         .with_shape(&[64])
-                        .with_maxshape(&[u64::MAX])
+                        .with_maxshape(&[MaxExtent::Unlimited])
                         .with_chunks(&[64]);
                 })
                 .unwrap();
@@ -20002,7 +19995,7 @@ mod tests {
         b.create_dataset("t0")
             .with_i32_data(&(0..256).collect::<Vec<_>>())
             .with_shape(&[256])
-            .with_maxshape(&[u64::MAX])
+            .with_maxshape(&[MaxExtent::Unlimited])
             .with_chunks(&[64]);
         b.write(&path).unwrap();
 
@@ -20054,7 +20047,7 @@ mod tests {
         b.create_dataset("t0")
             .with_i32_data(&[0i32])
             .with_shape(&[1])
-            .with_maxshape(&[u64::MAX])
+            .with_maxshape(&[MaxExtent::Unlimited])
             .with_chunks(&[CHUNK]);
         b.create_dataset("victim")
             .with_i32_data(&vec![7i32; VICTIM]);
@@ -20123,7 +20116,7 @@ mod tests {
         b.create_dataset("t0")
             .with_i32_data(&(0..256).collect::<Vec<_>>())
             .with_shape(&[256])
-            .with_maxshape(&[u64::MAX])
+            .with_maxshape(&[MaxExtent::Unlimited])
             .with_chunks(&[64]);
         b.create_dataset("victim")
             .with_i32_data(&vec![7i32; VICTIM]);
@@ -20202,7 +20195,7 @@ mod tests {
         b.create_dataset("t0")
             .with_i32_data(&[0i32])
             .with_shape(&[1])
-            .with_maxshape(&[u64::MAX])
+            .with_maxshape(&[MaxExtent::Unlimited])
             .with_chunks(&[64]);
         for v in 0..victims {
             b.create_dataset(&std::format!("victim{v}"))
@@ -20421,7 +20414,7 @@ mod tests {
             b.create_dataset("d")
                 .with_i32_data(&(0..8).collect::<Vec<_>>())
                 .with_shape(&[8])
-                .with_maxshape(&[u64::MAX])
+                .with_maxshape(&[MaxExtent::Unlimited])
                 .with_chunks(&[4]);
             b.write(&path).unwrap();
 
@@ -20529,7 +20522,7 @@ mod tests {
             b.create_dataset("d")
                 .with_i32_data(&(0..8).collect::<Vec<_>>())
                 .with_shape(&[8])
-                .with_maxshape(&[u64::MAX])
+                .with_maxshape(&[MaxExtent::Unlimited])
                 .with_chunks(&[4]);
             b.create_dataset("victim")
                 .with_f64_data(&[1.5f64; 64])
@@ -21014,7 +21007,7 @@ mod staged_query_tests {
         e.create_group("a").unwrap();
         let mut col = DatasetBuilder::new("");
         col.with_i32_data(&[1, 2])
-            .with_maxshape(&[u64::MAX])
+            .with_maxshape(&[MaxExtent::Unlimited])
             .with_chunks(&[2]);
         e.stage_created_dataset("a/b/col", col).unwrap();
 
@@ -21057,7 +21050,7 @@ mod staged_query_tests {
         let mut e = open_session(&dir.path().join("q.h5"));
         let mut col = DatasetBuilder::new("");
         col.with_i32_data(&[1, 2, 3, 4])
-            .with_maxshape(&[u64::MAX])
+            .with_maxshape(&[MaxExtent::Unlimited])
             .with_chunks(&[2])
             .with_deflate(4);
         e.stage_created_dataset("col", col).unwrap();
@@ -21065,7 +21058,7 @@ mod staged_query_tests {
 
         let meta = e.staged_dataset_meta("col").unwrap();
         assert_eq!(meta.dimensions, vec![4]);
-        assert_eq!(meta.maxshape, Some(vec![u64::MAX]));
+        assert_eq!(meta.maxshape, Some(vec![MaxExtent::Unlimited]));
         assert_eq!(meta.datatype.type_size(), 4);
         assert!(meta.chunked);
         assert_eq!(meta.filters, vec![(1u16, false)]);
@@ -21390,7 +21383,7 @@ mod staged_query_tests {
         let mut capped = DatasetBuilder::new("");
         capped
             .with_i32_data(&[1, 2])
-            .with_maxshape(&[3])
+            .with_maxshape(&[MaxExtent::Fixed(3)])
             .with_chunks(&[2]);
         e.stage_created_dataset("capped", capped).unwrap();
         let mut over = AppendBuilder::new();

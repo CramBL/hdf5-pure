@@ -2,8 +2,8 @@
 //! survivors, and fail-loud refusal of features that cannot be reproduced.
 
 use hdf5_pure::{
-    AttrValue, Datatype, DatatypeByteOrder, FileBuilder, FileSpaceStrategy, LibVer, RepackOptions,
-    ScaleOffset, repack,
+    AttrValue, Datatype, DatatypeByteOrder, FileBuilder, FileSpaceStrategy, LibVer, MaxExtent,
+    RepackOptions, ScaleOffset, repack,
 };
 
 use temp::temp_path;
@@ -242,7 +242,7 @@ fn preserves_multidim_and_maxshape() {
     b.create_dataset("grid")
         .with_f64_data(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0])
         .with_shape(&[2, 3])
-        .with_maxshape(&[u64::MAX, 3])
+        .with_maxshape(&[MaxExtent::Unlimited, MaxExtent::Fixed(3)])
         .with_chunks(&[1, 3]);
     b.write(&src).unwrap();
 
@@ -501,7 +501,7 @@ fn repacks_resizable_extensible_array() {
     b.create_dataset("series")
         .with_i64_data(&data)
         .with_shape(&[1000])
-        .with_maxshape(&[u64::MAX])
+        .with_maxshape(&[MaxExtent::Unlimited])
         .with_chunks(&[128])
         .with_deflate(3);
     b.write(&src).unwrap();

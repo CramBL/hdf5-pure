@@ -20,7 +20,7 @@
 //! are the same, but its call stacks are full of the inlining that did not
 //! happen, so the profile reads as a list of iterator adapters.
 
-use hdf5_pure::{File, FileBuilder};
+use hdf5_pure::{File, FileBuilder, MaxExtent};
 
 #[global_allocator]
 static ALLOC: heapscope::Alloc = heapscope::Alloc::system();
@@ -221,7 +221,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .create_dataset("t")
             .with_f64_data(&[0.0f64; CHUNK_ELEMS as usize])
             .with_shape(&[CHUNK_ELEMS])
-            .with_maxshape(&[u64::MAX])
+            .with_maxshape(&[MaxExtent::Unlimited])
             .with_chunks(&[CHUNK_ELEMS]);
         builder.write(&growing)?;
     }

@@ -8,7 +8,7 @@
 //! its reusable free from disk on open, and the total always equals the summed
 //! region lengths.
 
-use hdf5_pure::{File, FileBuilder, FileSpaceStrategy};
+use hdf5_pure::{File, FileBuilder, FileSpaceStrategy, MaxExtent};
 use tempfile::tempdir;
 
 /// The scalar total must always equal the summed lengths of the reported regions,
@@ -83,7 +83,7 @@ fn logical_size_grows_with_immediate_append() {
     b.create_dataset("d")
         .with_i32_data(&(0..8).collect::<Vec<_>>())
         .with_shape(&[8])
-        .with_maxshape(&[u64::MAX])
+        .with_maxshape(&[MaxExtent::Unlimited])
         .with_chunks(&[4]);
     b.write(&p).unwrap();
 
@@ -269,7 +269,7 @@ fn a_relocating_overwrite_reclaims_the_old_header_with_its_storage() {
     b.create_dataset("d")
         .with_i32_data(&vec![0i32; 64])
         .with_shape(&[64])
-        .with_maxshape(&[u64::MAX])
+        .with_maxshape(&[MaxExtent::Unlimited])
         .with_chunks(&[16])
         .with_deflate(6);
     b.write(&path).unwrap();

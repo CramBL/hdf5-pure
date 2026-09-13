@@ -125,7 +125,7 @@ Four accessors describe a dataset's storage layout without reading any data. The
 | Method | Returns |
 |---|---|
 | [`Dataset::is_chunked()`](crate::Dataset::is_chunked) | `bool`, `true` for chunked storage. A filtered dataset is always chunked |
-| [`Dataset::maxshape()`](crate::Dataset::maxshape) | `Option<Vec<u64>>`, the maximum dimensions, with an unlimited axis reported as `u64::MAX`. `None` for a fixed-shape dataset |
+| [`Dataset::maxshape()`](crate::Dataset::maxshape) | `Option<Vec<MaxExtent>>`, the maximum dimensions, with a dimension that grows without bound reported as [`MaxExtent::Unlimited`](crate::MaxExtent::Unlimited). `None` for a fixed-shape dataset |
 | [`Dataset::chunk_shape()`](crate::Dataset::chunk_shape) | `Option<Vec<u64>>`, the chunk dimensions, one per rank. `None` for a dataset that is not chunked |
 | [`Dataset::filters()`](crate::Dataset::filters) | `Vec<u16>`, the HDF5 filter IDs in pipeline order (1 = deflate, 2 = shuffle, 3 = fletcher32, 6 = scale-offset, 32000 = LZF). Empty for an unfiltered dataset |
 
@@ -135,10 +135,10 @@ Four accessors describe a dataset's storage layout without reading any data. The
 # let mut builder = hdf5_pure::FileBuilder::new();
 # builder.create_dataset("samples")
 #     .with_i32_data(&[1, 2, 3])
-#     .with_maxshape(&[u64::MAX])
+#     .with_maxshape(&[MaxExtent::Unlimited])
 #     .with_chunks(&[512]);
 # builder.write(&path)?;
-use hdf5_pure::File;
+use hdf5_pure::{File, MaxExtent};
 
 let file = File::open(&path)?;
 let ds = file.dataset("samples")?;
@@ -146,7 +146,7 @@ let ds = file.dataset("samples")?;
 // Broadly appendable: chunked and unlimited along axis 0. The full rules
 // (rank 1, Extensible-Array index, single hard link) are in the editing guide.
 let appendable = ds.is_chunked()
-    && matches!(ds.maxshape()?.as_deref(), Some([u64::MAX, ..]));
+    && matches!(ds.maxshape()?.as_deref(), Some([MaxExtent::Unlimited, ..]));
 # assert!(appendable);
 # Ok::<(), hdf5_pure::Error>(())
 ```

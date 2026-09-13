@@ -321,13 +321,13 @@ A single process can append to an unlimited dataset in place while other process
 The dataset must have one unlimited dimension and be chunked (it is indexed by an Extensible Array, which the latest format selects automatically). Create it the usual way:
 
 ```rust
-use hdf5_pure::FileBuilder;
+use hdf5_pure::{FileBuilder, MaxExtent};
 
 let mut builder = FileBuilder::new();
 builder.create_dataset("log")
     .with_i32_data(&[0, 1, 2])   // initial rows
     .with_shape(&[3])
-    .with_maxshape(&[u64::MAX])  // one unlimited dimension
+    .with_maxshape(&[MaxExtent::Unlimited])  // one unlimited dimension
     .with_chunks(&[1]);
 builder.write("stream.h5").unwrap();
 ```

@@ -13,7 +13,7 @@
 
 use hdf5::Extent;
 use hdf5::file::LibraryVersion;
-use hdf5_pure::{AttrValue, Error, File};
+use hdf5_pure::{AttrValue, Error, File, MaxExtent};
 use tempfile::tempdir;
 
 use hdf5_pure_crosscheck::assert_c_absent;
@@ -413,7 +413,7 @@ fn a_filtered_partial_tail_with_two_hard_links_appends_in_place() {
         b.create_dataset("d")
             .with_i32_data(&(0..10).collect::<Vec<i32>>())
             .with_shape(&[10])
-            .with_maxshape(&[u64::MAX])
+            .with_maxshape(&[MaxExtent::Unlimited])
             .with_chunks(&[8])
             .with_deflate(1);
         b.write(&path).unwrap();

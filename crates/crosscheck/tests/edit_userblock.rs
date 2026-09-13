@@ -8,7 +8,7 @@
 
 use hdf5::dataset::Layout;
 use hdf5::file::LibraryVersion;
-use hdf5_pure::{File, FileBuilder};
+use hdf5_pure::{File, FileBuilder, MaxExtent};
 use tempfile::tempdir;
 
 use hdf5_pure_crosscheck::assert_c_absent;
@@ -522,7 +522,7 @@ fn userblock_extensible_array_add_read_by_c_library() {
                 b.with_f64_data(&added)
                     .with_shape(&[500])
                     .with_chunks(&[40])
-                    .with_maxshape(&[u64::MAX])
+                    .with_maxshape(&[MaxExtent::Unlimited])
                     .with_deflate(6);
             })
             .unwrap();

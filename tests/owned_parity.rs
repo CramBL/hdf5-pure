@@ -6,7 +6,9 @@
 //! per-open file-locking policy — now work through owned `File` / `Dataset` /
 //! `Group` handles. Plus the post-`close` seal (`Error::FileClosed`).
 
-use hdf5_pure::{AttrValue, Error, File, FileAccessProperties, FileBuilder, FileLocking};
+use hdf5_pure::{
+    AttrValue, Error, File, FileAccessProperties, FileBuilder, FileLocking, MaxExtent,
+};
 use tempfile::tempdir;
 
 fn build_simple(path: &std::path::Path, data: &[i32]) {
@@ -23,7 +25,7 @@ fn build_filtered_unlimited(path: &std::path::Path, n: i32, chunk: u64) {
     b.create_dataset("d")
         .with_i32_data(&data)
         .with_shape(&[n as u64])
-        .with_maxshape(&[u64::MAX])
+        .with_maxshape(&[MaxExtent::Unlimited])
         .with_chunks(&[chunk])
         .with_deflate(6);
     b.write(path).unwrap();
