@@ -217,30 +217,17 @@ fn decode_named<T: CompoundField>(
         .iter()
         .find(|member| member.name == name)
         .ok_or_else(|| FormatError::CompoundFieldMissing(name.to_string()))?;
-    let start =
-        usize::try_from(member.byte_offset).map_err(|_| FormatError::CompoundFieldOutOfBounds {
-            name: name.to_string(),
-            offset: member.byte_offset,
-            field_size: member.datatype.type_size(),
-            compound_size: reported_compound_size(bytes),
-        })?;
+    let out_of_bounds = || FormatError::CompoundFieldOutOfBounds {
+        name: name.to_string(),
+        offset: member.byte_offset,
+        field_size: member.datatype.type_size(),
+        compound_size: reported_compound_size(bytes),
+    };
+    let start = usize::try_from(member.byte_offset).map_err(|_| out_of_bounds())?;
     let end = start
         .checked_add(member.datatype.type_size().to_usize()?)
-        .ok_or_else(|| FormatError::CompoundFieldOutOfBounds {
-            name: name.to_string(),
-            offset: member.byte_offset,
-            field_size: member.datatype.type_size(),
-            compound_size: reported_compound_size(bytes),
-        })?;
-    let field_bytes =
-        bytes
-            .get(start..end)
-            .ok_or_else(|| FormatError::CompoundFieldOutOfBounds {
-                name: name.to_string(),
-                offset: member.byte_offset,
-                field_size: member.datatype.type_size(),
-                compound_size: reported_compound_size(bytes),
-            })?;
+        .ok_or_else(out_of_bounds)?;
+    let field_bytes = bytes.get(start..end).ok_or_else(out_of_bounds)?;
     T::decode_field(&member.datatype, field_bytes).map_err(|error| match error {
         FormatError::CompoundFieldTypeMismatch(inner) => {
             let path = if inner.is_empty() {
