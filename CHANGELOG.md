@@ -8,6 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- `Dataset::read`, `Dataset::layout` and `Dataset::chunk_index` report `FormatError::InvalidChunkIndexType` for a chunked data layout whose chunk indexing type byte is outside the five the format defines, where such a file was previously read past the unknown index and failed further in with a `FormatError::ChunkedReadError` message ([#560](https://github.com/CramBL/hdf5-pure/pull/560)).
 - **Breaking:** (technically) rename the internal "heap-scope" feature to "__heap-scope"
 - Update `sha2` from `0.10` to `0.11`
 

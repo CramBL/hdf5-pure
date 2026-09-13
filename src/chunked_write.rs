@@ -3321,7 +3321,7 @@ mod tests {
 
     use crate::chunked_read::read_chunked_data_cached;
     use crate::convert::nz;
-    use crate::data_layout::DataLayout;
+    use crate::data_layout::{ChunkIndexLayout, DataLayout, FilteredSingleChunk};
     use crate::dataspace::{Dataspace, DataspaceType};
     use crate::datatype::{Datatype, DatatypeByteOrder};
     use crate::fill_value::FillPattern;
@@ -4449,65 +4449,48 @@ mod tests {
     #[test]
     fn serialize_v4_single_chunk_no_filters_roundtrip() {
         let msg = serialize_v4_single_chunk(&[20], 0x1000, None, None, 8, 8);
-        let layout = DataLayout::parse(&msg, 8, 8).unwrap();
-        match layout {
+        assert_eq!(
+            DataLayout::parse(&msg, 8, 8).unwrap(),
             DataLayout::Chunked {
-                chunk_dimensions,
-                btree_address,
-                version,
-                chunk_index_type,
-                single_chunk_filtered_size,
-                single_chunk_filter_mask,
-            } => {
-                assert_eq!(version, 4);
-                assert_eq!(chunk_index_type, Some(1));
-                assert_eq!(chunk_dimensions, vec![20, 8]);
-                assert_eq!(btree_address, Some(0x1000));
-                assert_eq!(single_chunk_filtered_size, None);
-                assert_eq!(single_chunk_filter_mask, None);
+                chunk_dimensions: vec![20, 8],
+                index: ChunkIndexLayout::SingleChunk {
+                    filtered: None,
+                    address: Some(0x1000),
+                },
             }
-            _ => panic!("expected chunked layout"),
-        }
+        );
     }
 
     #[test]
     fn serialize_v4_single_chunk_with_filters_roundtrip() {
         let msg = serialize_v4_single_chunk(&[100], 0x2000, Some(500), Some(0), 8, 8);
-        let layout = DataLayout::parse(&msg, 8, 8).unwrap();
-        match layout {
+        assert_eq!(
+            DataLayout::parse(&msg, 8, 8).unwrap(),
             DataLayout::Chunked {
-                btree_address,
-                single_chunk_filtered_size,
-                single_chunk_filter_mask,
-                ..
-            } => {
-                assert_eq!(btree_address, Some(0x2000));
-                assert_eq!(single_chunk_filtered_size, Some(500));
-                assert_eq!(single_chunk_filter_mask, Some(0));
+                chunk_dimensions: vec![100, 8],
+                index: ChunkIndexLayout::SingleChunk {
+                    filtered: Some(FilteredSingleChunk {
+                        filtered_size: 500,
+                        filter_mask: 0,
+                    }),
+                    address: Some(0x2000),
+                },
             }
-            _ => panic!("expected chunked layout"),
-        }
+        );
     }
 
     #[test]
     fn serialize_v4_fixed_array_roundtrip() {
         let msg = serialize_v4_fixed_array(&[20], 0x3000, 8, 8, 4);
-        let layout = DataLayout::parse(&msg, 8, 8).unwrap();
-        match layout {
+        assert_eq!(
+            DataLayout::parse(&msg, 8, 8).unwrap(),
             DataLayout::Chunked {
-                version,
-                chunk_index_type,
-                btree_address,
-                chunk_dimensions,
-                ..
-            } => {
-                assert_eq!(version, 4);
-                assert_eq!(chunk_index_type, Some(3));
-                assert_eq!(btree_address, Some(0x3000));
-                assert_eq!(chunk_dimensions, vec![20, 8]);
+                chunk_dimensions: vec![20, 8],
+                index: ChunkIndexLayout::FixedArray {
+                    address: Some(0x3000),
+                },
             }
-            _ => panic!("expected chunked layout"),
-        }
+        );
     }
 
     #[test]
@@ -4537,22 +4520,15 @@ mod tests {
     #[test]
     fn serialize_v4_extensible_array_roundtrip() {
         let msg = serialize_v4_extensible_array(&[10], 0x4000, 8, 8);
-        let layout = DataLayout::parse(&msg, 8, 8).unwrap();
-        match layout {
+        assert_eq!(
+            DataLayout::parse(&msg, 8, 8).unwrap(),
             DataLayout::Chunked {
-                version,
-                chunk_index_type,
-                btree_address,
-                chunk_dimensions,
-                ..
-            } => {
-                assert_eq!(version, 4);
-                assert_eq!(chunk_index_type, Some(4));
-                assert_eq!(btree_address, Some(0x4000));
-                assert_eq!(chunk_dimensions, vec![10, 8]);
+                chunk_dimensions: vec![10, 8],
+                index: ChunkIndexLayout::ExtensibleArray {
+                    address: Some(0x4000),
+                },
             }
-            _ => panic!("expected chunked layout"),
-        }
+        );
     }
 
     #[test]
@@ -4607,15 +4583,16 @@ mod tests {
         file_data[data_address as usize..].copy_from_slice(&result.data_bytes);
 
         let layout = DataLayout::parse(&result.layout_message, 8, 8).unwrap();
-        // Verify it uses EA index
-        match &layout {
-            DataLayout::Chunked {
-                chunk_index_type, ..
-            } => {
-                assert_eq!(*chunk_index_type, Some(4), "expected EA index type");
-            }
-            _ => panic!("expected chunked layout"),
-        }
+        assert!(
+            matches!(
+                &layout,
+                DataLayout::Chunked {
+                    index: ChunkIndexLayout::ExtensibleArray { .. },
+                    ..
+                }
+            ),
+            "{layout:?}"
+        );
 
         let dataspace = Dataspace {
             space_type: DataspaceType::Simple,

@@ -134,6 +134,15 @@ pub enum FormatError {
     InvalidLayoutVersion(u8),
     /// Invalid data layout class.
     InvalidLayoutClass(u8),
+    /// A chunked layout's chunk indexing type is outside the five the Chunk
+    /// Indexing Type table of "The Data Layout Message" defines, in the [format
+    /// specification, version 4.0][spec]: Single Chunk (1), Implicit (2), Fixed
+    /// Array (3), Extensible Array (4), and version 2 B-tree (5).
+    /// `H5O__layout_decode` rejects the same bytes (`H5Olayout.c`, HDF5
+    /// 1.14.6).
+    ///
+    /// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_layout
+    InvalidChunkIndexType(u8),
     /// The dataset's Fill Value message could not be parsed, and a read needed
     /// it: part of the dataset's storage was never allocated, so what those
     /// elements read as is undetermined. A dataset whose storage is fully
@@ -740,6 +749,9 @@ impl fmt::Display for FormatError {
             }
             FormatError::InvalidLayoutClass(c) => {
                 write!(f, "invalid data layout class: {c}")
+            }
+            FormatError::InvalidChunkIndexType(t) => {
+                write!(f, "invalid chunk index type: {t}")
             }
             FormatError::UnreadableFillValue => write!(
                 f,

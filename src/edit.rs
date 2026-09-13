@@ -269,7 +269,7 @@ use crate::chunked_write::{
     serialize_v4_extensible_array, split_into_chunks,
 };
 use crate::convert::TryToUsize;
-use crate::data_layout::DataLayout;
+use crate::data_layout::{ChunkIndexLayout, DataLayout};
 use crate::dataspace::{Dataspace, DataspaceType};
 use crate::datatype::{
     Datatype, DatatypeByteOrder, datatype_holds_file_address, datatype_holds_object_address,
@@ -8387,18 +8387,13 @@ impl WriteEngine {
                     DataLayout::parse(&region[lb..le], OFFSET_SIZE, LENGTH_SIZE).map_err(|_| {
                         Error::EditUnsupported("dataset header data layout could not be parsed")
                     })?;
-                let DataLayout::Chunked {
-                    version: lversion,
-                    chunk_index_type,
-                    ..
-                } = dl
-                else {
+                let DataLayout::Chunked { index, .. } = dl else {
                     return Err(Error::EditUnsupported("dataset is not chunked"));
                 };
-                if !chunk_index_enumerable(lversion, chunk_index_type) {
+                if !index.enumerable() {
                     return Err(Error::EditUnsupported(
-                        "a chunked dataset with a version-2 B-tree or unknown chunk index \
-                         cannot be overwritten in place yet",
+                        "a chunked dataset with a version-2 B-tree chunk index cannot be \
+                         overwritten in place yet",
                     ));
                 }
 
@@ -8600,24 +8595,19 @@ impl WriteEngine {
             Error::AppendUnsupported("dataset header data layout could not be parsed")
         })?;
 
-        // Require chunked, data-layout version 4, Extensible-Array index (type 4).
-        let DataLayout::Chunked {
-            version: lversion,
-            chunk_index_type,
-            btree_address,
-            ..
-        } = &dl
-        else {
+        // Require a chunked dataset indexed by an Extensible Array, which only a
+        // version 4 layout message stores.
+        let DataLayout::Chunked { index, .. } = &dl else {
             return Err(Error::AppendUnsupported(
                 "append requires a chunked dataset",
             ));
         };
-        if *lversion != 4 || *chunk_index_type != Some(4) {
+        let ChunkIndexLayout::ExtensibleArray { address } = index else {
             return Err(Error::AppendUnsupported(
                 "append requires an Extensible-Array-indexed chunked dataset (a single \
                  unlimited dimension under the latest format)",
             ));
-        }
+        };
 
         // Require rank 1, unlimited along axis 0.
         if disk_ds.space_type != DataspaceType::Simple || disk_ds.dimensions.len() != 1 {
@@ -8717,7 +8707,7 @@ impl WriteEngine {
         // chosen by `has_filters`; it must agree with the source index's client id,
         // or the kept chunks — carried by metadata into the new index — would be
         // re-encoded in the wrong element width.
-        if let Some(idx_addr) = *btree_address {
+        if let Some(idx_addr) = *address {
             let hdr =
                 ExtensibleArrayHeader::parse_from_source(&view, idx_addr, OFFSET_SIZE, LENGTH_SIZE)
                     .map_err(|_| {
@@ -9200,18 +9190,13 @@ impl WriteEngine {
                     layout,
                     pipeline_message,
                 } = parse_chunked_header(&region)?;
-                let DataLayout::Chunked {
-                    version: lversion,
-                    chunk_index_type,
-                    ..
-                } = layout
-                else {
+                let DataLayout::Chunked { index, .. } = layout else {
                     return Err(Error::EditUnsupported("dataset is not chunked"));
                 };
-                if !chunk_index_enumerable(lversion, chunk_index_type) {
+                if !index.enumerable() {
                     return Err(Error::EditUnsupported(
-                        "a chunked dataset with a version-2 B-tree or unknown chunk index \
-                         cannot be copied in place yet",
+                        "a chunked dataset with a version-2 B-tree chunk index cannot be \
+                         copied in place yet",
                     ));
                 }
                 let ChunkedGeometry {
@@ -12062,23 +12047,6 @@ fn flatten_dataset(db: DatasetBuilder) -> Result<FlatDataset, Error> {
 /// 6). See [`ensure_group_info`] for why every group needs this message.
 const GROUP_INFO_BODY: [u8; 2] = [0, 0];
 
-/// Frame one chunk-0 object-header message record: a 1-byte type, a 2-byte
-/// little-endian body length, a 1-byte flags field (always 0 here), then the
-/// body. This is the v2 message-record layout used throughout a group's chunk-0
-/// message region. Callers pass bodies that fit the u16 length field: link
-/// bodies are validated in [`flatten_dataset`], and the Link Info / Group Info
-/// bodies are fixed and short.
-/// Whether a chunked dataset with this data-layout version and chunk index type
-/// can be enumerated chunk-by-chunk (and therefore overwritten or copied in
-/// place). Mirrors the dispatch in
-/// [`chunked_read::collect_chunks_for_layout_from_source`](crate::chunked_read):
-/// version-3 B-tree v1 and the version-4 single / implicit / fixed-array /
-/// extensible-array indexes have walkers; a version-2 B-tree (index type 5) or
-/// any unknown index type does not.
-fn chunk_index_enumerable(version: u8, chunk_index_type: Option<u8>) -> bool {
-    matches!((version, chunk_index_type), (3, _) | (4, Some(1..=4)))
-}
-
 /// Whether every filter in `pipeline` is one this crate can *apply* (re-encode a
 /// chunk through) — not merely decode. A pipeline with any other filter cannot be
 /// re-encoded for an in-place overwrite, so the caller refuses with a typed error
@@ -12520,15 +12488,10 @@ fn try_rebuild_index_in_place<S: Source + ?Sized>(
     grid_order: &[crate::chunked_read::ChunkInfo],
     new_bytes: &[Vec<u8>],
 ) -> Option<(u64, Vec<u8>)> {
-    let DataLayout::Chunked {
-        btree_address: Some(index_addr),
-        chunk_index_type,
-        version,
-        ..
-    } = layout
-    else {
+    let DataLayout::Chunked { index, .. } = layout else {
         return None;
     };
+    let index_addr = index.address()?;
     let written: Vec<crate::chunked_write::WrittenChunk> = grid_order
         .iter()
         .zip(new_bytes)
@@ -12554,33 +12517,39 @@ fn try_rebuild_index_in_place<S: Source + ?Sized>(
     .ok()?;
     let slots =
         crate::chunked_write::IndexSlots::new(&written, &slot_of_chunk, index_slots).ok()?;
-    let new_index = match (version, chunk_index_type) {
+    let new_index = match index {
         // `raw_size` is the whole-chunk byte size, which is what the element
         // width derives from — the same value the original index was built with,
         // so the rebuilt structure matches its length. (An index written by a
         // version that derived the width from the written chunks instead can
         // disagree; the length check below then rejects it and the caller
         // relocates, which is the safe direction.)
-        (4, Some(3)) => crate::chunked_write::build_fixed_array_at(
+        ChunkIndexLayout::FixedArray { .. } => crate::chunked_write::build_fixed_array_at(
             &slots,
             raw_size,
             OFFSET_SIZE,
             LENGTH_SIZE,
             true,
-            *index_addr,
+            index_addr,
         ),
-        (4, Some(4)) => crate::chunked_write::build_extensible_array_at(
-            &slots,
-            raw_size,
-            OFFSET_SIZE,
-            LENGTH_SIZE,
-            true,
-            *index_addr,
-        )
-        .ok()?,
-        // Single-chunk records its size in the layout message (a header rewrite),
-        // and a B-tree-v1 index has no writer; both relocate instead.
-        _ => return None,
+        ChunkIndexLayout::ExtensibleArray { .. } => {
+            crate::chunked_write::build_extensible_array_at(
+                &slots,
+                raw_size,
+                OFFSET_SIZE,
+                LENGTH_SIZE,
+                true,
+                index_addr,
+            )
+            .ok()?
+        }
+        // A single chunk's stored size sits in the layout message, so rebuilding
+        // it would rewrite the header, an implicit index has no structure to
+        // rebuild, and neither B-tree has a writer. All four relocate instead.
+        ChunkIndexLayout::SingleChunk { .. }
+        | ChunkIndexLayout::Implicit { .. }
+        | ChunkIndexLayout::BTreeV1 { .. }
+        | ChunkIndexLayout::BTreeV2 { .. } => return None,
     };
 
     // The on-disk index must be a single contiguous region starting at the index
@@ -12594,23 +12563,23 @@ fn try_rebuild_index_in_place<S: Source + ?Sized>(
         return None;
     }
     spans.sort_unstable_by_key(|&(a, _)| a);
-    if spans[0].0 != *index_addr {
+    if spans[0].0 != index_addr {
         return None;
     }
-    let mut end = *index_addr;
+    let mut end = index_addr;
     for &(a, l) in &spans {
         if a != end {
             return None; // a gap means the index is not contiguous
         }
         end = a.checked_add(l)?;
     }
-    if new_index.len() as u64 != end - *index_addr {
+    if new_index.len() as u64 != end - index_addr {
         return None;
     }
     index_addr
         .checked_add(new_index.len() as u64)
         .filter(|&e| e <= src.len())?;
-    Some((*index_addr, new_index))
+    Some((index_addr, new_index))
 }
 
 /// A [`ChunkProvider`] over chunk bytes already held in memory, in dense
