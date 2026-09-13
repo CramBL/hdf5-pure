@@ -28,14 +28,23 @@ fn main() {
 /// relies on the default linker search path (sufficient for Linux
 /// packages that install `libmatio.so` under `/usr/lib/...`).
 fn configure_libmatio() {
-    let candidates = [
-        "/opt/homebrew/opt/libmatio/lib", // macOS Apple Silicon Homebrew
-        "/usr/local/opt/libmatio/lib",    // macOS Intel Homebrew
-        "/opt/local/lib",                 // MacPorts
+    let mut candidates = vec![
+        "/opt/homebrew/opt/libmatio/lib".into(), // macOS Apple Silicon Homebrew
+        "/usr/local/opt/libmatio/lib".into(),    // macOS Intel Homebrew
+        "/opt/local/lib".into(),                 // MacPorts
+        "/home/linuxbrew/.linuxbrew/opt/libmatio/lib".into(), // Linux brew default
     ];
+
+    // Catch user-local Linux brew installations
+    if let Ok(home) = std::env::var("HOME") {
+        candidates.push(format!("{home}/.linuxbrew/opt/libmatio/lib"));
+    }
+
     for dir in candidates {
-        if std::path::Path::new(dir).exists() {
+        if std::path::Path::new(&dir).exists() {
             println!("cargo:rustc-link-arg-tests=-L{dir}");
+            // Embed the path in the binary so it can find the library at runtime
+            println!("cargo:rustc-link-arg-tests=-Wl,-rpath,{dir}");
         }
     }
     println!("cargo:rustc-link-arg-tests=-lmatio");
