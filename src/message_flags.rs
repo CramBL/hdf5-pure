@@ -43,9 +43,9 @@ impl MessageFlags {
         self.contains(Self::FORBID_SHARING)
     }
 
-    /// Returns `true` if [`MessageFlags::FAIL_IF_UNKNOWN_FOR_WRITE`] is set.
-    pub(crate) const fn fails_if_unknown_for_write(self) -> bool {
-        self.contains(Self::FAIL_IF_UNKNOWN_FOR_WRITE)
+    /// Returns `true` if [`MessageFlags::FAIL_IF_UNKNOWN_AND_OPEN_FOR_WRITE`] is set.
+    pub(crate) const fn fails_if_unknown_and_open_for_write(self) -> bool {
+        self.contains(Self::FAIL_IF_UNKNOWN_AND_OPEN_FOR_WRITE)
     }
 
     /// Returns `true` if [`MessageFlags::MARK_IF_UNKNOWN`] is set.
@@ -68,12 +68,12 @@ impl MessageFlags {
         self.contains(Self::FAIL_IF_UNKNOWN_ALWAYS)
     }
 
-    /// Returns `true` if a decoder under `access_mode` that cannot name the message's type must reject
-    /// the object: [`MessageFlags::FAIL_IF_UNKNOWN_ALWAYS`] under either access, and
-    /// [`MessageFlags::FAIL_IF_UNKNOWN_FOR_WRITE`] under [`AccessMode::ReadWrite`] alone.
+    /// Returns `true` if a decoder under `access_mode` that cannot name the message's type must
+    /// reject the object: [`MessageFlags::FAIL_IF_UNKNOWN_ALWAYS`] under either mode, and
+    /// [`MessageFlags::FAIL_IF_UNKNOWN_AND_OPEN_FOR_WRITE`] under [`AccessMode::ReadWrite`] alone.
     pub(crate) const fn must_be_understood(self, access_mode: AccessMode) -> bool {
         self.fails_if_unknown_always()
-            || (self.fails_if_unknown_for_write() && access_mode.is_read_write())
+            || (self.fails_if_unknown_and_open_for_write() && access_mode.is_read_write())
     }
 
     /// Returns `true` if no flag is set.
@@ -102,7 +102,7 @@ impl MessageFlags {
     pub(crate) const FORBID_SHARING: Self = Self(0x04);
     /// A reader that does not know the message type should reject the object while the file is
     /// open for writing.
-    pub(crate) const FAIL_IF_UNKNOWN_FOR_WRITE: Self = Self(0x08);
+    pub(crate) const FAIL_IF_UNKNOWN_AND_OPEN_FOR_WRITE: Self = Self(0x08);
     /// A reader that does not know the message type should set
     /// [`MessageFlags::WAS_UNKNOWN`] when it modifies the object.
     pub(crate) const MARK_IF_UNKNOWN: Self = Self(0x10);
@@ -132,8 +132,8 @@ impl fmt::Debug for MessageFlags {
             (self.is_shared(), "SHARED"),
             (self.forbids_sharing(), "FORBID_SHARING"),
             (
-                self.fails_if_unknown_for_write(),
-                "FAIL_IF_UNKNOWN_FOR_WRITE",
+                self.fails_if_unknown_and_open_for_write(),
+                "FAIL_IF_UNKNOWN_AND_OPEN_FOR_WRITE",
             ),
             (self.marks_if_unknown(), "MARK_IF_UNKNOWN"),
             (self.was_unknown(), "WAS_UNKNOWN"),
@@ -161,7 +161,7 @@ mod tests {
         assert_eq!(MessageFlags::CONSTANT.get(), 0x01);
         assert_eq!(MessageFlags::SHARED.get(), 0x02);
         assert_eq!(MessageFlags::FORBID_SHARING.get(), 0x04);
-        assert_eq!(MessageFlags::FAIL_IF_UNKNOWN_FOR_WRITE.get(), 0x08);
+        assert_eq!(MessageFlags::FAIL_IF_UNKNOWN_AND_OPEN_FOR_WRITE.get(), 0x08);
         assert_eq!(MessageFlags::MARK_IF_UNKNOWN.get(), 0x10);
         assert_eq!(MessageFlags::WAS_UNKNOWN.get(), 0x20);
         assert_eq!(MessageFlags::SHAREABLE.get(), 0x40);
@@ -229,8 +229,8 @@ mod tests {
     }
 
     #[test]
-    fn only_write_access_must_understand_a_message_flagged_fail_if_unknown_for_write() {
-        let flags = MessageFlags::FAIL_IF_UNKNOWN_FOR_WRITE;
+    fn only_write_access_must_understand_a_message_flagged_fail_if_unknown_and_open_for_write() {
+        let flags = MessageFlags::FAIL_IF_UNKNOWN_AND_OPEN_FOR_WRITE;
         assert!(!flags.must_be_understood(AccessMode::ReadOnly));
         assert!(flags.must_be_understood(AccessMode::ReadWrite));
     }
@@ -255,8 +255,8 @@ mod tests {
             (MessageFlags::SHARED, flags.is_shared()),
             (MessageFlags::FORBID_SHARING, flags.forbids_sharing()),
             (
-                MessageFlags::FAIL_IF_UNKNOWN_FOR_WRITE,
-                flags.fails_if_unknown_for_write(),
+                MessageFlags::FAIL_IF_UNKNOWN_AND_OPEN_FOR_WRITE,
+                flags.fails_if_unknown_and_open_for_write(),
             ),
             (MessageFlags::MARK_IF_UNKNOWN, flags.marks_if_unknown()),
             (MessageFlags::WAS_UNKNOWN, flags.was_unknown()),
@@ -275,7 +275,7 @@ mod tests {
         MessageFlags::CONSTANT,
         MessageFlags::SHARED,
         MessageFlags::FORBID_SHARING,
-        MessageFlags::FAIL_IF_UNKNOWN_FOR_WRITE,
+        MessageFlags::FAIL_IF_UNKNOWN_AND_OPEN_FOR_WRITE,
         MessageFlags::MARK_IF_UNKNOWN,
         MessageFlags::WAS_UNKNOWN,
         MessageFlags::SHAREABLE,
