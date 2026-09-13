@@ -38,7 +38,7 @@ use alloc::vec::Vec;
 
 use crate::btree_v2::{BTreeV2Header, collect_btree_v2_records_from_source};
 use crate::bytes::{ensure_len, read_offset};
-use crate::convert::{TryToUsize, is_undefined_addr};
+use crate::convert::{Narrow, is_undefined_addr};
 use crate::error::FormatError;
 use crate::fractal_heap::FractalHeapHeader;
 use crate::message_type::MessageType;

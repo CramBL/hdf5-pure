@@ -7,7 +7,7 @@ use byteorder::{ByteOrder, LittleEndian};
 
 use crate::address::BaseAddress;
 use crate::bytes::{ensure_len, read_length, read_offset, read_uint_width};
-use crate::convert::TryToUsize;
+use crate::convert::Narrow;
 use crate::error::FormatError;
 use crate::message_flags::MessageFlags;
 use crate::message_type::MessageType;

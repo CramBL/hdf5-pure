@@ -4,7 +4,7 @@
 use alloc::string::String;
 
 use crate::bytes::{read_length, read_offset};
-use crate::convert::TryToUsize;
+use crate::convert::Narrow;
 use crate::error::FormatError;
 use crate::source::Source;
 

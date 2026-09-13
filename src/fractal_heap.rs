@@ -10,7 +10,7 @@ use crate::btree_v2::{
     BTreeV2Header, BTreeV2Record, collect_btree_v2_records, collect_btree_v2_records_from_source,
 };
 use crate::bytes::{ensure_len, read_length, read_offset};
-use crate::convert::{TryToUsize, is_undefined_addr};
+use crate::convert::{Narrow, is_undefined_addr};
 use crate::error::FormatError;
 use crate::source::Source;
 

@@ -31,7 +31,7 @@ use core::num::NonZeroUsize;
 
 use crate::checksum::jenkins_lookup3;
 use crate::chunked_write::{ea_compute_stats, split_into_chunks, write_ea_addr};
-use crate::convert::TryToUsize;
+use crate::convert::Narrow;
 use crate::data_layout::{ChunkIndexLayout, DataLayout};
 use crate::dataspace::{Dataspace, MaxExtent};
 use crate::datatype::Datatype;

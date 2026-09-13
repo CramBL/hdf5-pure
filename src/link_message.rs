@@ -4,7 +4,7 @@
 use alloc::{string::String, vec::Vec};
 
 use crate::bytes::{ensure_len, read_offset, read_uint_width};
-use crate::convert::TryToUsize;
+use crate::convert::Narrow;
 use crate::datatype::CharacterSet;
 use crate::error::FormatError;
 

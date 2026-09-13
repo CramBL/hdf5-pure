@@ -12,7 +12,7 @@ use core::num::{NonZeroU32, NonZeroUsize};
 use crate::attribute::AttributeMessage;
 use crate::chunked_write::{ChunkMeta, ChunkOptions, ChunkProvider, FilterKind, StorageAllocation};
 use crate::compound::CompoundType;
-use crate::convert::TryToUsize;
+use crate::convert::Narrow;
 use crate::dataspace::{Dataspace, DataspaceType, MaxExtent};
 use crate::datatype::{
     CharacterSet, CompoundMember, Datatype, DatatypeByteOrder, EnumMember, StringPadding,

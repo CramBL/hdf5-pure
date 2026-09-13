@@ -1,6 +1,6 @@
 //! HDF5 file signature (magic bytes) detection.
 
-use crate::convert::TryToUsize;
+use crate::convert::Narrow;
 use crate::error::FormatError;
 use crate::source::{BytesSource, Source};
 

@@ -11,7 +11,7 @@ use alloc::{vec, vec::Vec};
 use std::collections::BTreeMap;
 
 use crate::address::BaseAddress;
-use crate::convert::TryToUsize;
+use crate::convert::Narrow;
 use crate::error::FormatError;
 
 /// Default maximum size of one entry admitted to a streaming metadata cache.

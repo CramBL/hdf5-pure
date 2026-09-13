@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 
-use crate::convert::TryToUsize;
+use crate::convert::Narrow;
 use crate::display::EscapedName;
 use crate::error::FormatError;
 use crate::file_writer::AttrValue;

@@ -17,7 +17,7 @@
 
 use core::num::NonZeroUsize;
 
-use crate::convert::TryToUsize;
+use crate::convert::Narrow;
 use crate::edit::AppendBuilder;
 use crate::element::H5Element;
 use crate::error::Error;

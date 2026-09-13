@@ -5,7 +5,7 @@ use alloc::{string::String, vec::Vec};
 
 use crate::address::BaseAddress;
 use crate::btree_v1::{collect_symbol_table_nodes, collect_symbol_table_nodes_from_source};
-use crate::convert::TryToUsize;
+use crate::convert::Narrow;
 use crate::error::FormatError;
 use crate::local_heap::LocalHeap;
 use crate::source::Source;

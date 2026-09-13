@@ -3,7 +3,7 @@
 #[cfg(not(feature = "std"))]
 use alloc::{format, string::ToString, vec::Vec};
 
-use crate::convert::{TryToUsize, u32_from};
+use crate::convert::Narrow;
 use crate::datatype::{CompoundMember, Datatype, DatatypeByteOrder};
 use crate::error::FormatError;
 use crate::type_builders::{
@@ -270,7 +270,7 @@ macro_rules! impl_compound_tuple {
                     offset += u64::from(datatype.type_size());
                 )+
                 Ok(Datatype::Compound {
-                    size: u32_from(offset)?,
+                    size: offset.narrow::<u32>()?,
                     members,
                 })
             }

@@ -268,7 +268,7 @@ use crate::chunked_write::{
     extensible_array_len, full_chunk_bytes, plan_chunked_data_verbatim,
     serialize_v4_extensible_array, split_into_chunks,
 };
-use crate::convert::TryToUsize;
+use crate::convert::Narrow;
 use crate::data_layout::{ChunkIndexLayout, DataLayout};
 use crate::dataspace::{Dataspace, DataspaceType, Extent, MaxExtent};
 use crate::datatype::{
@@ -10406,7 +10406,7 @@ impl WriteEngine {
         let ctx = ChunkContext::from_datatype(&chunk_dims, &fd.dt)?;
         // The overhang of a partial edge chunk holds the staged fill value
         // (issue #296).
-        let elem = crate::convert::nonzero_usize_from(ctx.element_size)?;
+        let elem = ctx.element_size.narrow::<NonZeroUsize>()?;
         let fill = crate::fill_value::FillPattern::new(fd.fill.as_deref(), elem);
         let set = compress_chunks(
             &fd.raw,
@@ -11910,7 +11910,7 @@ fn flatten_dataset(db: DatasetBuilder) -> Result<FlatDataset, Error> {
                 &ctx,
                 crate::fill_value::FillPattern::new(
                     db.fill.as_deref(),
-                    crate::convert::nonzero_usize_from(ctx.element_size)?,
+                    ctx.element_size.narrow::<NonZeroUsize>()?,
                 ),
             )
             .map_err(|_| {

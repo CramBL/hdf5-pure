@@ -61,7 +61,7 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::io::{Read, Seek, SeekFrom, Write};
 
-use crate::convert::TryToUsize;
+use crate::convert::Narrow;
 use crate::error::{Error, FormatError};
 use crate::source::{
     BytesSource, MetadataCacheConfig, MetadataCacheStats, MetadataReadCache, Source,

@@ -12,6 +12,7 @@ use core::num::{NonZeroU32, NonZeroUsize};
 use byteorder::{ByteOrder, LittleEndian};
 
 use crate::bytes::ensure_len;
+use crate::convert::Narrow;
 use crate::display::{DISPLAY_MAX_MEMBERS, Dims, EscapedName, QuotedBytes, write_elided};
 use crate::error::FormatError;
 
@@ -1129,9 +1130,9 @@ impl Datatype {
     /// The element size in bytes as a non-zero `usize`, for the byte arithmetic
     /// that indexes an in-memory buffer.
     ///
-    /// The narrowing is the one [`convert`](crate::convert) describes: a `u32`
-    /// fits `usize` on every target this crate supports, and the conversion is
-    /// routed through a checked one anyway.
+    /// The conversion goes through [`Narrow::narrow`]: a `u32` fits `usize` on every target this
+    /// crate supports, and the checked conversion keeps that assumption from becoming a
+    /// truncation on a narrower one.
     ///
     /// # Errors
     ///
@@ -1139,7 +1140,7 @@ impl Datatype {
     /// element, or [`FormatError::ValueTooLargeForPlatform`] if the size does
     /// not fit this target's `usize`.
     pub(crate) fn element_size_usize(&self) -> Result<NonZeroUsize, FormatError> {
-        crate::convert::nonzero_usize_from(self.element_size()?)
+        self.element_size()?.narrow::<NonZeroUsize>()
     }
 }
 /// Whether a datatype of this encoded class *could* hold an object address,
