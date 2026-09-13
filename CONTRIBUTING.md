@@ -89,18 +89,18 @@ The fixtures under `tests/data/` are grouped by the library that wrote them: `c`
 
 ### Crosschecks against the C library
 
-`crates/crosscheck/` holds the tests that link the reference HDF5 C library and compare its reading of a file with ours. It is the only package that links C code. `just interop::test-bundled` builds the library the `hdf5-metno` binding bundles, so it doesn't need HDF5 on the host. `just interop::test-hdf5 1.14.6` links a specific release, built under `tmp/hdf5/` on first use, and `just interop::default` runs every release in the matrix.
+`crates/crosscheck/` holds the tests that link the reference HDF5 C library and compare its reading of a file with ours. It is the only package that links C code. `just interop::test-bundled` builds the library the `hdf5-metno` binding bundles, so it doesn't need HDF5 on the host. `just interop::test-hdf5 1.14` links a specific release, built under `tmp/hdf5/` on first use, and `just interop::default` runs every release in the matrix.
 
 ### Portability, soundness and the API
 
-- `just portability::default` checks the `no_std`, WASM and bare-metal builds, and runs Clippy on a 32-bit target with the truncating casts denied.
+- `just portability` checks the `no_std`, WASM and bare-metal builds, and runs Clippy on a 32-bit target with the truncating casts denied.
 - `just soundness::miri` runs [Miri](https://github.com/rust-lang/miri) over the crate's `unsafe` code.
 - `just api::semver` runs [cargo-semver-checks](https://github.com/obi1kenobi/cargo-semver-checks) against the last release, and `just api::msrv` checks that the library builds on the `rust-version` in `Cargo.toml`.
-- `just fuzz::default` runs each fuzz target for thirty seconds on a nightly toolchain. The crate would benefit from more runtime, targets and corpora. A crafted file that makes it panic, allocate without bound or read a wrong value is a bug: file it.
+- `just fuzz` runs each fuzz target for thirty seconds on a nightly toolchain. The crate would benefit from more runtime, targets and corpora. A crafted file that makes it panic, allocate without bound or read a wrong value is a bug: file it.
 
 ### Hygiene and prose
 
-`just hygiene::default` checks for unused dependencies, lints the workflows and spell-checks every tracked file. A word the format uses that the spell checker does not know goes in `typos.toml`. `just prose::added` lints the prose of every added line with [Vale](https://vale.sh) and the rules under `.vale/styles/`.
+`just hygiene` checks for unused dependencies, lints the workflows and spell-checks every tracked file. A word the format uses that the spell checker does not know goes in `typos.toml`. `just prose::added` lints the prose of every added line with [Vale](https://vale.sh) and the rules under `.vale/styles/`.
 
 `just hygiene::lychee` checks every link in the Markdown files and the Rust sources, CI runs it weekly. `just hygiene::lychee-added` checks the links a change adds, CI runs it on every pull request.
 

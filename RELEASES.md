@@ -6,7 +6,7 @@
 
 ## Changelog
 
-One or two sentences per entry: the capability, the public API name, one caveat clause, then `([#NN](url))`. Prefix breaking changes with `**Breaking:**`. `d5a966b` is the model.
+One or two sentences per entry: the capability, the public API name, one caveat clause, then `([#NN](url))`. Prefix breaking changes with `**Breaking:**`.
 
 A released section may open with a summary paragraph, written by hand.
 
