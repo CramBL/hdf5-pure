@@ -37,10 +37,7 @@ pub enum DataLayout {
         single_chunk_filter_mask: Option<u32>,
     },
     /// Virtual dataset layout (v4 only).
-    Virtual {
-        /// Layout version.
-        version: u8,
-    },
+    Virtual,
 }
 
 /// Byte offset of a compact layout's inline data within the layout message
@@ -224,10 +221,7 @@ impl DataLayout {
                     single_chunk_filter_mask,
                 })
             }
-            3 => {
-                // Virtual
-                Ok(DataLayout::Virtual { version: 4 })
-            }
+            3 => Ok(DataLayout::Virtual),
             _ => Err(FormatError::InvalidLayoutClass(layout_class)),
         }
     }
@@ -447,6 +441,6 @@ mod tests {
     fn v4_virtual() {
         let buf = vec![4u8, 3];
         let layout = DataLayout::parse(&buf, 8, 8).unwrap();
-        assert_eq!(layout, DataLayout::Virtual { version: 4 });
+        assert_eq!(layout, DataLayout::Virtual);
     }
 }

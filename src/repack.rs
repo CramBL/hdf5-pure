@@ -1647,7 +1647,7 @@ fn storage_is_unallocated(layout: &DataLayout, chunks: &[ChunkInfo]) -> bool {
     match layout {
         DataLayout::Contiguous { address, .. } => address.is_none(),
         DataLayout::Chunked { .. } => chunks.is_empty(),
-        DataLayout::Compact { .. } | DataLayout::Virtual { .. } => false,
+        DataLayout::Compact { .. } | DataLayout::Virtual => false,
     }
 }
 
@@ -1659,7 +1659,7 @@ fn check_layout(layout: &DataLayout, path: &str) -> Result<(), Error> {
         DataLayout::Compact { .. } | DataLayout::Contiguous { .. } | DataLayout::Chunked { .. } => {
             Ok(())
         }
-        DataLayout::Virtual { .. } => Err(Error::RepackUnsupported(format!(
+        DataLayout::Virtual => Err(Error::RepackUnsupported(format!(
             "dataset {path}: virtual data layout cannot be repacked"
         ))),
     }

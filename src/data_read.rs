@@ -88,7 +88,7 @@ pub fn read_raw_data_full(
             length_size,
             &ChunkCache::new(),
         ),
-        DataLayout::Virtual { .. } => Err(FormatError::UnsupportedVirtualLayout),
+        DataLayout::Virtual => Err(FormatError::UnsupportedVirtualLayout),
     }
 }
 
@@ -160,7 +160,7 @@ pub fn read_raw_data_full_from_source<S: Source + ?Sized>(
         DataLayout::Chunked { .. } => {
             read_chunked_data_from_source(source, spec, offset_size, length_size)
         }
-        DataLayout::Virtual { .. } => Err(FormatError::UnsupportedVirtualLayout),
+        DataLayout::Virtual => Err(FormatError::UnsupportedVirtualLayout),
     }
 }
 
