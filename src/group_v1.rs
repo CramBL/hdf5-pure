@@ -135,6 +135,7 @@ pub fn resolve_v1_group_entries_from_source<S: Source + ?Sized>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::access_mode::AccessMode;
     use crate::message_type::MessageType;
     use crate::object_header::ObjectHeader;
     /// Build a minimal synthetic file with a group containing named children.
@@ -354,6 +355,7 @@ mod tests {
     ) -> SymbolTableMessage {
         let root_header = ObjectHeader::parse(
             file_data,
+            AccessMode::ReadOnly,
             sb.root_group_address as usize,
             sb.offset_size,
             sb.length_size,
@@ -391,6 +393,7 @@ mod tests {
 
         let hdr = ObjectHeader::parse(
             file_data,
+            AccessMode::ReadOnly,
             data_entry.object_header_address as usize,
             sb.offset_size,
             sb.length_size,

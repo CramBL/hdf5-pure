@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Added
+
+- `RepackOptions::reject_unknown_messages_only_a_writer_must_understand` makes `repack` reject a source holding an object header message of an unknown type that only a writer must understand, where the default reads past it as `h5repack` does ([#554](https://github.com/CramBL/hdf5-pure/issues/554)).
+
 ### Changed
 
 - **Breaking:** A dataspace's maximum dimensions are `MaxExtent` values, `MaxExtent::Fixed(n)` or `MaxExtent::Unlimited`, in place of the value `u64::MAX`: `DatasetBuilder::with_maxshape` takes `&[MaxExtent]` and `Dataset::maxshape` returns `Option<Vec<MaxExtent>>`. The bytes a file holds are unchanged, and a caller that compared a maximum against `u64::MAX` matches `MaxExtent::Unlimited` instead.
@@ -18,6 +22,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - `File::open_rw` edits a file whose addresses exceed `usize::MAX` on a 32-bit host under its bounded backing, where an edit or an append that resolved such an address was previously rejected with `Error::EditUnsupported` or `Error::AppendUnsupported`. A file with a pre-v2 superblock or a userblock takes the whole-file mirror, which the pointer width bounds ([#561](https://github.com/CramBL/hdf5-pure/pull/561)).
 - `File::dataset` and `File::group` reject an object header holding a message of an unknown type that is flagged as one every decoder must understand (`H5O_MSG_FLAG_FAIL_IF_UNKNOWN_ALWAYS`), with `FormatError::UnsupportedMessage`, where such an object was previously read as though the message were absent ([#552](https://github.com/CramBL/hdf5-pure/issues/552)).
+- A read-only open reads an object whose header holds a message of an unknown type flagged as one only a writer must understand (`H5O_MSG_FLAG_FAIL_IF_UNKNOWN_AND_OPEN_FOR_WRITE`), as the C library reads it, where `File::open`, `repack` and the `.mat` reader previously rejected such an object with `FormatError::UnsupportedMessage` ([#554](https://github.com/CramBL/hdf5-pure/issues/554)).
 
 ## [0.45.0] - 2026-09-11
 

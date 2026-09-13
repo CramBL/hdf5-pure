@@ -7,6 +7,7 @@ use std::num::{NonZeroU64, NonZeroUsize};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError, RwLock};
 
+use crate::access_mode::AccessMode;
 use crate::address::BaseAddress;
 use crate::edit::{
     AppendBuilder, AppendGeometry, AppendTarget, EditBacking, MemoryStrategy, SpaceAccounting,
@@ -825,6 +826,12 @@ pub fn is_hdf5_bytes(data: &[u8]) -> bool {
 /// An open HDF5 file for reading.
 struct FileInner {
     backend: Backend,
+    /// The mode every object header parse of this file is made under:
+    /// [`AccessMode::ReadWrite`] for an editing session and for a repack that parses
+    /// its source as a writer does, [`AccessMode::ReadOnly`] for every other open.
+    /// Fixed at the open, so the backend a later [`File::refresh`] swaps in cannot
+    /// change it.
+    access_mode: AccessMode,
     superblock: Superblock,
     /// Byte offset to add to all relative addresses (= original base_address).
     addr_offset: BaseAddress,
@@ -988,7 +995,30 @@ impl FileInner {
     ) -> Result<Self, Error> {
         let handle = std::fs::File::open(path.as_ref()).map_err(Error::Io)?;
         let source = ReadSeekSource::new(handle).map_err(Error::Format)?;
-        Self::streaming(source, properties, OpenTarget::Path(path.as_ref()))
+        Self::streaming(
+            source,
+            AccessMode::ReadOnly,
+            properties,
+            OpenTarget::Path(path.as_ref()),
+        )
+    }
+
+    /// Opens the file at `path` for streaming reads whose object header parses are
+    /// made under `access_mode`. A parse under [`AccessMode::ReadWrite`] rejects a
+    /// message of a type this crate cannot name that a decoder with write access
+    /// must understand.
+    pub(crate) fn open_streaming_with_access_mode(
+        path: &std::path::Path,
+        access_mode: AccessMode,
+    ) -> Result<Self, Error> {
+        let handle = std::fs::File::open(path).map_err(Error::Io)?;
+        let source = ReadSeekSource::new(handle).map_err(Error::Format)?;
+        Self::streaming(
+            source,
+            access_mode,
+            FileAccessProperties::new(),
+            OpenTarget::Path(path),
+        )
     }
 
     /// Open an HDF5 file from any [`Source`], reading metadata and chunks on
@@ -1004,18 +1034,24 @@ impl FileInner {
     ) -> Result<Self, Error> {
         // The only source that reaches the parsers from outside the crate, and
         // so the only one whose reads are length-checked: see `ValidatedSource`.
-        Self::streaming(ValidatedSource::new(source), properties, OpenTarget::Source)
+        Self::streaming(
+            ValidatedSource::new(source),
+            AccessMode::ReadOnly,
+            properties,
+            OpenTarget::Source,
+        )
     }
 
-    /// The body both streaming opens share.
+    /// The body every streaming open shares.
     ///
     /// Wraps the source in whatever metadata cache the properties ask for,
-    /// parses the superblock through it, and refuses a file a writer holds.
-    /// The two differ in where the source came from and in `target`, which does
-    /// nothing but name the file in that refusal; one body is what keeps the
-    /// rest of it from drifting apart.
+    /// parses the superblock through it, and rejects a file a writer holds.
+    /// The three differ in where the source came from, in `access_mode`, and in
+    /// `target`, which does nothing but name the file in that rejection. One
+    /// body is what keeps the rest of it from drifting apart.
     fn streaming<S: Source + Send + Sync + 'static>(
         source: S,
+        access_mode: AccessMode,
         properties: FileAccessProperties,
         target: OpenTarget<'_>,
     ) -> Result<Self, Error> {
@@ -1035,6 +1071,7 @@ impl FileInner {
         )?;
         Ok(Self::from_parts(
             Backend::Streaming(source),
+            access_mode,
             superblock,
             addr_offset,
             None,
@@ -1075,6 +1112,7 @@ impl FileInner {
         )?;
         Ok(Self::from_parts(
             Backend::InMemory(data),
+            AccessMode::ReadOnly,
             superblock,
             addr_offset,
             Some(handle),
@@ -1095,6 +1133,7 @@ impl FileInner {
         let (superblock, addr_offset) = Self::parse_superblock(&data)?;
         Ok(Self::from_parts(
             Backend::InMemory(data),
+            AccessMode::ReadOnly,
             superblock,
             addr_offset,
             None,
@@ -1152,6 +1191,7 @@ impl FileInner {
         let addr_offset = superblock.base_address;
         Ok(Self::from_parts(
             Backend::Edit(Box::new(Mutex::new(session))),
+            AccessMode::ReadWrite,
             superblock,
             addr_offset,
             None,
@@ -1577,6 +1617,7 @@ impl FileInner {
     /// open).
     fn from_parts(
         backend: Backend,
+        access_mode: AccessMode,
         superblock: Superblock,
         addr_offset: BaseAddress,
         handle: Option<std::fs::File>,
@@ -1584,6 +1625,7 @@ impl FileInner {
     ) -> Self {
         let mut file = FileInner {
             backend,
+            access_mode,
             superblock,
             addr_offset,
             handle,
@@ -1754,10 +1796,11 @@ impl FileInner {
 
     /// Resolve a path to an object-header address, dispatching on the backend.
     fn resolve_path(&self, path: &str) -> Result<u64, Error> {
+        let access = self.access_mode();
         Ok(match &self.backend {
-            Backend::InMemory(v) => group_v2::resolve_path_any(v, &self.superblock, path)?,
+            Backend::InMemory(v) => group_v2::resolve_path_any(v, access, &self.superblock, path)?,
             Backend::Streaming(s) => {
-                group_v2::resolve_path_any_from_source(s.as_ref(), &self.superblock, path)?
+                group_v2::resolve_path_any_from_source(s.as_ref(), access, &self.superblock, path)?
             }
             // A staged commit can relocate the object tree's root, so this
             // file's cached superblock may name a stale one; resolve against the
@@ -1766,8 +1809,10 @@ impl FileInner {
                 let core = m.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                 let sb = core.superblock().clone();
                 match core.image_slice() {
-                    Some(data) => group_v2::resolve_path_any(data, &sb, path)?,
-                    None => group_v2::resolve_path_any_from_source(core.image(), &sb, path)?,
+                    Some(data) => group_v2::resolve_path_any(data, access, &sb, path)?,
+                    None => {
+                        group_v2::resolve_path_any_from_source(core.image(), access, &sb, path)?
+                    }
                 }
             }
         })
@@ -1844,6 +1889,11 @@ impl FileInner {
     /// userblock.
     pub(crate) fn base_address(&self) -> BaseAddress {
         self.addr_offset
+    }
+
+    /// Returns the mode this file reads under.
+    pub(crate) fn access_mode(&self) -> AccessMode {
+        self.access_mode
     }
 
     /// The file-space management strategy this file records in its superblock
@@ -1925,17 +1975,37 @@ impl FileInner {
     fn parse_header(&self, address: u64) -> Result<ObjectHeader, FormatError> {
         let os = self.superblock.offset_size;
         let ls = self.superblock.length_size;
+        let access = self.access_mode();
         match &self.backend {
-            Backend::InMemory(v) => {
-                ObjectHeader::parse_with_base(v, address.to_usize()?, os, ls, self.addr_offset)
-            }
-            Backend::Streaming(s) => {
-                ObjectHeader::parse_from_source(s.as_ref(), address, os, ls, self.addr_offset)
-            }
+            Backend::InMemory(v) => ObjectHeader::parse_with_base(
+                v,
+                access,
+                address.to_usize()?,
+                os,
+                ls,
+                self.addr_offset,
+            ),
+            Backend::Streaming(s) => ObjectHeader::parse_from_source(
+                s.as_ref(),
+                access,
+                address,
+                os,
+                ls,
+                self.addr_offset,
+            ),
             Backend::Edit(m) => Self::with_engine(
                 m,
-                |d| ObjectHeader::parse_with_base(d, address.to_usize()?, os, ls, self.addr_offset),
-                |s| ObjectHeader::parse_from_source(s, address, os, ls, self.addr_offset),
+                |d| {
+                    ObjectHeader::parse_with_base(
+                        d,
+                        access,
+                        address.to_usize()?,
+                        os,
+                        ls,
+                        self.addr_offset,
+                    )
+                },
+                |s| ObjectHeader::parse_from_source(s, access, address, os, ls, self.addr_offset),
             ),
         }
     }
@@ -2022,16 +2092,25 @@ impl FileInner {
     /// of the group (issue #228).
     fn group_child(&self, group_address: u64, name: &str) -> Result<ChildLookup, Error> {
         let (os, ls, base) = (self.offset_size(), self.length_size(), self.addr_offset);
+        let access = self.access_mode();
         let addr = group_address;
         match &self.backend {
-            Backend::InMemory(v) => group_v2::find_child_address(v, addr, os, ls, base, name),
-            Backend::Streaming(s) => {
-                group_v2::find_child_address_from_source(s.as_ref(), addr, os, ls, base, name)
+            Backend::InMemory(v) => {
+                group_v2::find_child_address(v, access, addr, os, ls, base, name)
             }
+            Backend::Streaming(s) => group_v2::find_child_address_from_source(
+                s.as_ref(),
+                access,
+                addr,
+                os,
+                ls,
+                base,
+                name,
+            ),
             Backend::Edit(m) => Self::with_engine(
                 m,
-                |d| group_v2::find_child_address(d, addr, os, ls, base, name),
-                |s| group_v2::find_child_address_from_source(s, addr, os, ls, base, name),
+                |d| group_v2::find_child_address(d, access, addr, os, ls, base, name),
+                |s| group_v2::find_child_address_from_source(s, access, addr, os, ls, base, name),
             ),
         }
         .map_err(Error::Format)
@@ -2070,20 +2149,23 @@ impl FileInner {
             return Ok(Cow::Borrowed(&msg.data));
         }
         let (os, ls, base) = (self.offset_size(), self.length_size(), self.addr_offset);
+        let access = self.access_mode();
         let sohm = self.sohm_table.as_deref();
         // A shared reference stores its address relative to the base address, so
         // frame the file at `base` exactly as [`Self::attr_messages_of`] does.
         let resolved = match &self.backend {
-            Backend::InMemory(v) => BufferedResolver::new(frame(v, base)?, os, ls, sohm)
+            Backend::InMemory(v) => BufferedResolver::new(frame(v, base)?, access, os, ls, sohm)
                 .resolve(&msg.data, msg.msg_type),
             Backend::Streaming(s) if base.is_zero() => {
-                SourceResolver::new(s.as_ref(), os, ls, sohm).resolve(&msg.data, msg.msg_type)
+                SourceResolver::new(s.as_ref(), access, os, ls, sohm)
+                    .resolve(&msg.data, msg.msg_type)
             }
             Backend::Streaming(s) => SourceResolver::new(
                 &BaseOffsetSource {
                     inner: s.as_ref(),
                     base,
                 },
+                access,
                 os,
                 ls,
                 sohm,
@@ -2092,15 +2174,22 @@ impl FileInner {
             Backend::Edit(m) => Self::with_engine(
                 m,
                 |d| {
-                    BufferedResolver::new(frame(d, base)?, os, ls, sohm)
+                    BufferedResolver::new(frame(d, base)?, access, os, ls, sohm)
                         .resolve(&msg.data, msg.msg_type)
                 },
                 |s| {
                     if base.is_zero() {
-                        SourceResolver::new(s, os, ls, sohm).resolve(&msg.data, msg.msg_type)
-                    } else {
-                        SourceResolver::new(&BaseOffsetSource { inner: s, base }, os, ls, sohm)
+                        SourceResolver::new(s, access, os, ls, sohm)
                             .resolve(&msg.data, msg.msg_type)
+                    } else {
+                        SourceResolver::new(
+                            &BaseOffsetSource { inner: s, base },
+                            access,
+                            os,
+                            ls,
+                            sohm,
+                        )
+                        .resolve(&msg.data, msg.msg_type)
                     }
                 },
             ),
@@ -2148,13 +2237,20 @@ impl FileInner {
         // file (`base == 0`) this is the identity; without it, a userblock file's
         // dense attributes are looked for one userblock too early.
         let base = self.addr_offset;
+        let access = self.access_mode();
         let sohm = self.sohm_table.as_deref();
         match &self.backend {
-            Backend::InMemory(v) => {
-                Ok(extract_attributes_full(frame(v, base)?, hdr, os, ls, sohm)?)
-            }
+            Backend::InMemory(v) => Ok(extract_attributes_full(
+                frame(v, base)?,
+                access,
+                hdr,
+                os,
+                ls,
+                sohm,
+            )?),
             Backend::Streaming(s) if base.is_zero() => Ok(extract_attributes_full_from_source(
                 s.as_ref(),
+                access,
                 hdr,
                 os,
                 ls,
@@ -2166,19 +2262,30 @@ impl FileInner {
                     base,
                 };
                 Ok(extract_attributes_full_from_source(
-                    &framed, hdr, os, ls, sohm,
+                    &framed, access, hdr, os, ls, sohm,
                 )?)
             }
             Backend::Edit(m) => Self::with_engine(
                 m,
-                |d| Ok(extract_attributes_full(frame(d, base)?, hdr, os, ls, sohm)?),
+                |d| {
+                    Ok(extract_attributes_full(
+                        frame(d, base)?,
+                        access,
+                        hdr,
+                        os,
+                        ls,
+                        sohm,
+                    )?)
+                },
                 |s| {
                     if base.is_zero() {
-                        Ok(extract_attributes_full_from_source(s, hdr, os, ls, sohm)?)
+                        Ok(extract_attributes_full_from_source(
+                            s, access, hdr, os, ls, sohm,
+                        )?)
                     } else {
                         let framed = BaseOffsetSource { inner: s, base };
                         Ok(extract_attributes_full_from_source(
-                            &framed, hdr, os, ls, sohm,
+                            &framed, access, hdr, os, ls, sohm,
                         )?)
                     }
                 },
@@ -2521,6 +2628,21 @@ impl File {
     ) -> Result<Self, Error> {
         Ok(File {
             inner: Arc::new(FileInner::open_streaming_with_options(path, properties)?),
+        })
+    }
+
+    /// Opens the file at `path` for the streaming reads of a repack, whose object
+    /// header parses are made under the `access_mode` the caller's
+    /// [`RepackOptions`](crate::RepackOptions) gives.
+    pub(crate) fn open_streaming_with_access_mode(
+        path: &std::path::Path,
+        access_mode: AccessMode,
+    ) -> Result<Self, Error> {
+        Ok(File {
+            inner: Arc::new(FileInner::open_streaming_with_access_mode(
+                path,
+                access_mode,
+            )?),
         })
     }
 
@@ -3315,6 +3437,12 @@ impl File {
     /// for a streaming file. Used by cross-file object copy.
     pub(crate) fn in_memory_image(&self) -> Option<&[u8]> {
         self.inner.in_memory_image()
+    }
+
+    /// The access mode this file was opened under, which a cross-file copy passes
+    /// to every parse it makes of this file's objects.
+    pub(crate) fn access_mode(&self) -> AccessMode {
+        self.inner.access_mode()
     }
 
     /// The base address (superblock base address) added to every stored relative
@@ -7670,7 +7798,8 @@ mod tests {
         // absolute address a walk returns is also the stored one the superblock
         // field wants.
         assert_eq!(sb.base_address, BaseAddress::ZERO);
-        sb.root_group_address = group_v2::resolve_path_any(&bytes, &sb, "plain").unwrap();
+        sb.root_group_address =
+            group_v2::resolve_path_any(&bytes, AccessMode::ReadOnly, &sb, "plain").unwrap();
         let rewritten = sb.serialize();
         bytes[sig..sig + rewritten.len()].copy_from_slice(&rewritten);
 

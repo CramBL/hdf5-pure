@@ -255,6 +255,7 @@ use std::path::Path;
 
 use core::num::NonZeroUsize;
 
+use crate::access_mode::AccessMode;
 use crate::address::BaseAddress;
 use crate::attribute_info::AttributeInfoMessage;
 use crate::checksum::jenkins_lookup3;
@@ -275,7 +276,7 @@ use crate::datatype::{
     Datatype, DatatypeByteOrder, datatype_holds_file_address, datatype_holds_object_address,
     embedded_reference_slots, stored_object_references,
 };
-use crate::error::{Error, FormatError, OBJECT_HEADER_MESSAGE_MAX};
+use crate::error::{Error, FormatError, OBJECT_HEADER_MESSAGE_MAX, ResolveError};
 use crate::extensible_array::ExtensibleArrayHeader;
 use crate::file_create_properties::FileCreateProperties;
 use crate::file_lock::{self, FileLocking};
@@ -3259,7 +3260,15 @@ impl WriteEngine {
         let os = self.superblock.offset_size;
         let ls = self.superblock.length_size;
         let base = self.superblock.base_address;
-        let oh = ObjectHeader::parse_from_source(&self.image(), ext_addr, os, ls, base).ok()?;
+        let oh = ObjectHeader::parse_from_source(
+            &self.image(),
+            AccessMode::ReadWrite,
+            ext_addr,
+            os,
+            ls,
+            base,
+        )
+        .ok()?;
         let msg = oh
             .messages
             .iter()
@@ -3461,9 +3470,12 @@ impl WriteEngine {
     /// filter pipeline whose length is not a whole multiple of its chunk length?
     /// `false` whenever that cannot be established, for whatever reason.
     fn appends_onto_a_lossy_partial_tail(&self, path: &str) -> bool {
-        let Ok(addr) =
-            crate::group_v2::resolve_path_any_from_source(&self.image(), &self.superblock, path)
-        else {
+        let Ok(addr) = crate::group_v2::resolve_path_any_from_source(
+            &self.image(),
+            AccessMode::ReadWrite,
+            &self.superblock,
+            path,
+        ) else {
             return false;
         };
         let Ok(region) =
@@ -3827,7 +3839,14 @@ impl WriteEngine {
         let Ok(abs) = base.absolute(rel) else {
             return Ok(None);
         };
-        let Ok(header) = ObjectHeader::parse_from_source(&self.image(), abs, os, ls, base) else {
+        let Ok(header) = ObjectHeader::parse_from_source(
+            &self.image(),
+            AccessMode::ReadWrite,
+            abs,
+            os,
+            ls,
+            base,
+        ) else {
             return Ok(None);
         };
         let Some(msg) = header
@@ -4594,6 +4613,7 @@ impl WriteEngine {
                 None => {
                     let addr = crate::group_v2::resolve_path_any_from_source(
                         &self.image(),
+                        AccessMode::ReadWrite,
                         &self.superblock,
                         dataset,
                     )
@@ -5006,11 +5026,16 @@ impl WriteEngine {
     fn path_in_file(&self, path: &[String]) -> bool {
         let joined = path.join("/");
         match self.image.as_slice() {
-            Some(data) => {
-                crate::group_v2::resolve_path_any(data, &self.superblock, &joined).is_ok()
-            }
+            Some(data) => crate::group_v2::resolve_path_any(
+                data,
+                AccessMode::ReadWrite,
+                &self.superblock,
+                &joined,
+            )
+            .is_ok(),
             None => crate::group_v2::resolve_path_any_from_source(
                 &self.image(),
+                AccessMode::ReadWrite,
                 &self.superblock,
                 &joined,
             )
@@ -5384,6 +5409,17 @@ impl WriteEngine {
     /// [`File::from_bytes`](crate::File::from_bytes), not
     /// [`open_streaming`](crate::File::open_streaming)) using 8-byte offsets and no
     /// userblock, and `src` must exist in it and not be the root group.
+    ///
+    /// # Note
+    ///
+    /// The source is read under the mode its own file is open under, read-only for
+    /// every source this copy accepts, so an object header message of a type this
+    /// crate cannot name that a decoder with write access must understand is read
+    /// past. The copy reproduces an object's header records verbatim, so such a
+    /// message on `src`'s own header reaches the destination. `H5Ocopy` copies a
+    /// message of an unknown type into the destination header the same way, since a
+    /// message without a `copy_file` callback is copied raw (`H5Ocopy.c`,
+    /// HDF5 2.2.0).
     pub fn copy_from(
         &mut self,
         source: &crate::reader::File,
@@ -5415,13 +5451,24 @@ impl WriteEngine {
             return Err(Error::EditUnsupported("copy destination path is empty"));
         }
 
-        let src_addr = crate::group_v2::resolve_path_any(src_data, src_sb, &src.join("/"))
-            .map_err(|_| Error::EditUnsupported("copy source does not exist in the source file"))?;
+        let src_addr = crate::group_v2::resolve_path_any(
+            src_data,
+            source.access_mode(),
+            src_sb,
+            &src.join("/"),
+        )
+        .map_err(|e| match e {
+            ResolveError::Format(FormatError::PathNotFound(_)) => {
+                Error::EditUnsupported("copy source does not exist in the source file")
+            }
+            other => Error::from(other),
+        })?;
         // Read (and foreign-address-screen) the whole subtree now, while `source`
         // is borrowed; the owned tree carries every byte the commit will write. The
         // source is gated to base 0 above, so its stored addresses are absolute.
         let tree = Self::read_copy_subtree(
             &BytesSource::new(src_data),
+            source.access_mode(),
             src_addr,
             0,
             true,
@@ -5724,6 +5771,7 @@ impl WriteEngine {
             let path_str = full.join("/");
             let addr = crate::group_v2::resolve_path_any_from_source(
                 &self.image(),
+                AccessMode::ReadWrite,
                 &self.superblock,
                 &path_str,
             )
@@ -5796,6 +5844,7 @@ impl WriteEngine {
             let path_str = full.join("/");
             let addr = crate::group_v2::resolve_path_any_from_source(
                 &self.image(),
+                AccessMode::ReadWrite,
                 &self.superblock,
                 &path_str,
             )
@@ -5858,6 +5907,7 @@ impl WriteEngine {
                 let path_str = full.join("/");
                 let addr = crate::group_v2::resolve_path_any_from_source(
                     &self.image(),
+                    AccessMode::ReadWrite,
                     &self.superblock,
                     &path_str,
                 )
@@ -6038,15 +6088,28 @@ impl WriteEngine {
             let src_str = src.join("/");
             let src_addr = crate::group_v2::resolve_path_any_from_source(
                 &self.image(),
+                AccessMode::ReadWrite,
                 &self.superblock,
                 &src_str,
             )
-            .map_err(|_| Error::EditUnsupported("copy source does not exist"))?;
+            .map_err(|e| match e {
+                ResolveError::Format(FormatError::PathNotFound(_)) => {
+                    Error::EditUnsupported("copy source does not exist")
+                }
+                other => Error::from(other),
+            })?;
             // Read the source subtree from this file's own mirror (`cross_file`
             // false: same address space, so verbatim addresses stay valid). On a
             // userblock file the stored addresses are base-relative, so pass this
             // session's base for the read to absolutize them.
-            let tree = Self::read_copy_subtree(&self.image(), src_addr, 0, false, base)?;
+            let tree = Self::read_copy_subtree(
+                &self.image(),
+                AccessMode::ReadWrite,
+                src_addr,
+                0,
+                false,
+                base,
+            )?;
             copy_sources.push(src.clone());
             add_targets.push(dst.clone());
             let leaf = dst.last().unwrap().clone();
@@ -6084,6 +6147,7 @@ impl WriteEngine {
             let path_str = d.join("/");
             let del_addr = crate::group_v2::resolve_path_any_from_source(
                 &self.image(),
+                AccessMode::ReadWrite,
                 &self.superblock,
                 &path_str,
             )
@@ -6213,6 +6277,7 @@ impl WriteEngine {
                 let path_str = key.join("/");
                 let addr = crate::group_v2::resolve_path_any_from_source(
                     &self.image(),
+                    AccessMode::ReadWrite,
                     &self.superblock,
                     &path_str,
                 )
@@ -7983,7 +8048,14 @@ impl WriteEngine {
         let os = self.superblock.offset_size;
         let ls = self.superblock.length_size;
         let base = self.superblock.base_address;
-        let oh = ObjectHeader::parse_from_source(&self.image(), addr, os, ls, base)?;
+        let oh = ObjectHeader::parse_from_source(
+            &self.image(),
+            AccessMode::ReadWrite,
+            addr,
+            os,
+            ls,
+            base,
+        )?;
         if oh
             .messages
             .iter()
@@ -8867,6 +8939,7 @@ impl WriteEngine {
     /// [`ObjModel::DatasetChunked`].)
     fn read_object<S: Source + ?Sized>(
         src: &S,
+        access_mode: AccessMode,
         addr: u64,
         base: BaseAddress,
     ) -> Result<ObjModel, Error> {
@@ -8918,7 +8991,7 @@ impl WriteEngine {
         // userblock before the heap walk, and one home for that framing is what
         // keeps the two from coming to disagree about it.
         let dense_attrs = if dense {
-            let stored = read_object_attrs(src, addr, base)?;
+            let stored = read_object_attrs(src, access_mode, addr, base)?;
             let set = dense_attr_set(&region, stored)?;
             // The typed error names the offending attribute, which the previous
             // blanket `EditUnsupported` message could not.
@@ -9084,6 +9157,7 @@ impl WriteEngine {
     /// them valid by sharing the source file's heaps and objects.
     fn read_copy_subtree<S: Source + ?Sized>(
         src: &S,
+        access_mode: AccessMode,
         addr: u64,
         depth: u32,
         cross_file: bool,
@@ -9100,7 +9174,7 @@ impl WriteEngine {
         // the stored (base-relative) addresses `read_object` returns for contiguous
         // data, chunk storage, and child links are converted to absolute offsets by
         // adding `base` before `src` is read or a child is descended into.
-        match Self::read_object(src, addr, base)? {
+        match Self::read_object(src, access_mode, addr, base)? {
             ObjModel::DatasetVerbatim {
                 region,
                 dense_attrs,
@@ -9275,7 +9349,14 @@ impl WriteEngine {
                     kids.push((
                         name,
                         creation_order,
-                        Self::read_copy_subtree(src, child, depth + 1, cross_file, base)?,
+                        Self::read_copy_subtree(
+                            src,
+                            access_mode,
+                            child,
+                            depth + 1,
+                            cross_file,
+                            base,
+                        )?,
                     ));
                 }
                 Ok(CopyTree::Group {
@@ -10298,7 +10379,12 @@ impl WriteEngine {
                  reclaim",
             ));
         }
-        match crate::group_v2::resolve_path_any_from_source(src, superblock, path) {
+        match crate::group_v2::resolve_path_any_from_source(
+            src,
+            AccessMode::ReadWrite,
+            superblock,
+            path,
+        ) {
             Ok(addr) => base.relative(addr).map_err(Error::from),
             Err(_) => Ok(UNDEF),
         }
@@ -10488,7 +10574,15 @@ impl WriteEngine {
                 return None; // graph larger than we will walk; leak conservatively
             }
             budget -= 1;
-            let header = ObjectHeader::parse_from_source(&self.image(), addr, os, ls, base).ok()?;
+            let header = ObjectHeader::parse_from_source(
+                &self.image(),
+                AccessMode::ReadWrite,
+                addr,
+                os,
+                ls,
+                base,
+            )
+            .ok()?;
             // Datasets and other leaves are not groups and own no links.
             let is_group = header.messages.iter().any(|m| {
                 matches!(
@@ -10567,7 +10661,12 @@ impl WriteEngine {
             Ok(s) => s,
             Err(_) => return,
         };
-        match Self::read_object(&self.image(), addr, self.superblock.base_address) {
+        match Self::read_object(
+            &self.image(),
+            AccessMode::ReadWrite,
+            addr,
+            self.superblock.base_address,
+        ) {
             Ok(ObjModel::DatasetVerbatim { .. }) => out.extend(meta_spans(spans)),
             Ok(ObjModel::DatasetContiguous {
                 data_addr,
@@ -13212,7 +13311,7 @@ fn plan_attr_ops<S: Source + ?Sized>(
     // live in a heap the header only names — so read that set back before
     // applying the edits to it. A group this commit creates has none.
     let existing = match addr {
-        Some(addr) => read_object_attrs(src, addr, base)?,
+        Some(addr) => read_object_attrs(src, AccessMode::ReadWrite, addr, base)?,
         None => Vec::new(),
     };
     // Each attribute travels with the global heap collections it still needs
@@ -13422,11 +13521,13 @@ fn strip_attr_messages(region: &OhRegion) -> Result<OhRegion, Error> {
 /// editor checks it after applying its edits, on the set it will actually write.
 fn read_object_attrs<S: Source + ?Sized>(
     src: &S,
+    access_mode: AccessMode,
     addr: u64,
     base: BaseAddress,
 ) -> Result<Vec<crate::attribute::StoredAttribute>, Error> {
-    let header = ObjectHeader::parse_from_source(src, addr, OFFSET_SIZE, LENGTH_SIZE, base)
-        .map_err(|_| Error::EditUnsupported("an object header could not be parsed"))?;
+    let header =
+        ObjectHeader::parse_from_source(src, access_mode, addr, OFFSET_SIZE, LENGTH_SIZE, base)
+            .map_err(|_| Error::EditUnsupported("an object header could not be parsed"))?;
     if base.get() > src.len() {
         return Err(Error::EditUnsupported(
             "this file's userblock is larger than the file itself",
@@ -13439,6 +13540,7 @@ fn read_object_attrs<S: Source + ?Sized>(
     let framed = BaseOffsetSource { inner: src, base };
     crate::attribute::extract_stored_attributes_from_source(
         &framed,
+        access_mode,
         &header,
         OFFSET_SIZE,
         LENGTH_SIZE,
@@ -14794,7 +14896,13 @@ fn screen_copied_references(
     // No shared-message table: a heap-stored message is refused rather than
     // followed here, and this screen treats an unreadable datatype as one it
     // cannot clear, which is the conservative answer.
-    let resolver = crate::shared_message::SourceResolver::new(src, OFFSET_SIZE, LENGTH_SIZE, None);
+    let resolver = crate::shared_message::SourceResolver::new(
+        src,
+        AccessMode::ReadWrite,
+        OFFSET_SIZE,
+        LENGTH_SIZE,
+        None,
+    );
     let (region, dense_attrs) = match tree {
         CopyTree::DatasetVerbatim {
             region,
@@ -16134,9 +16242,13 @@ mod tests {
         assert_eq!(page_size, PAGE);
         // Where the C library put the index: every page it touches is a metadata
         // page, since the C library allocates an index as metadata.
-        let victim_addr =
-            crate::group_v2::resolve_path_any(s.image.as_slice().unwrap(), &s.superblock, "victim")
-                .unwrap();
+        let victim_addr = crate::group_v2::resolve_path_any(
+            s.image.as_slice().unwrap(),
+            AccessMode::ReadWrite,
+            &s.superblock,
+            "victim",
+        )
+        .unwrap();
         let index_spans = s
             .chunked_index_spans(victim_addr)
             .expect("the C library's extensible-array index is enumerable");
@@ -18681,8 +18793,13 @@ mod tests {
     }
 
     fn dataset_addr(engine: &WriteEngine) -> u64 {
-        crate::group_v2::resolve_path_any_from_source(&engine.image(), engine.superblock(), "d")
-            .unwrap()
+        crate::group_v2::resolve_path_any_from_source(
+            &engine.image(),
+            AccessMode::ReadWrite,
+            engine.superblock(),
+            "d",
+        )
+        .unwrap()
     }
 
     /// Crash consistency on a bounded session: stop the append after only the
@@ -19065,6 +19182,7 @@ mod tests {
         // pre-append end-of-file, which is what would have opened a metadata page.
         let addr = crate::group_v2::resolve_path_any_from_source(
             &engine.image(),
+            AccessMode::ReadWrite,
             engine.superblock(),
             "d",
         )
@@ -21323,8 +21441,13 @@ mod staged_query_tests {
         assert!(e.staged.appends.is_empty());
 
         e.commit().unwrap();
-        let addr = crate::group_v2::resolve_path_any_from_source(&e.image(), e.superblock(), "col")
-            .unwrap();
+        let addr = crate::group_v2::resolve_path_any_from_source(
+            &e.image(),
+            AccessMode::ReadWrite,
+            e.superblock(),
+            "col",
+        )
+        .unwrap();
         assert!(addr > 0);
     }
 
@@ -21459,8 +21582,13 @@ mod staged_query_tests {
         assert_eq!(e.staged.deletes.len(), 1);
         e.commit().unwrap();
         assert!(
-            crate::group_v2::resolve_path_any_from_source(&e.image(), e.superblock(), "existing",)
-                .is_err()
+            crate::group_v2::resolve_path_any_from_source(
+                &e.image(),
+                AccessMode::ReadWrite,
+                e.superblock(),
+                "existing",
+            )
+            .is_err()
         );
     }
 

@@ -126,13 +126,14 @@ impl Default for ObjectHeaderWriter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::access_mode::AccessMode;
     use crate::object_header::ObjectHeader;
 
     #[test]
     fn empty_header_roundtrip() {
         let writer = ObjectHeaderWriter::new();
         let bytes = writer.serialize().unwrap();
-        let hdr = ObjectHeader::parse(&bytes, 0, 8, 8).unwrap();
+        let hdr = ObjectHeader::parse(&bytes, AccessMode::ReadOnly, 0, 8, 8).unwrap();
         assert_eq!(hdr.version, 2);
         assert_eq!(hdr.messages.len(), 0);
     }
@@ -143,7 +144,7 @@ mod tests {
         writer.add_message(MessageType::Dataspace, vec![1, 2, 3, 4]);
         writer.add_message(MessageType::Datatype, vec![5, 6]);
         let bytes = writer.serialize().unwrap();
-        let hdr = ObjectHeader::parse(&bytes, 0, 8, 8).unwrap();
+        let hdr = ObjectHeader::parse(&bytes, AccessMode::ReadOnly, 0, 8, 8).unwrap();
         assert_eq!(hdr.messages.len(), 2);
         assert_eq!(hdr.messages[0].msg_type, MessageType::Dataspace);
         assert_eq!(hdr.messages[0].data, vec![1, 2, 3, 4]);
@@ -160,7 +161,7 @@ mod tests {
             MessageFlags::CONSTANT | MessageFlags::FORBID_SHARING,
         );
         let bytes = writer.serialize().unwrap();
-        let hdr = ObjectHeader::parse(&bytes, 0, 8, 8).unwrap();
+        let hdr = ObjectHeader::parse(&bytes, AccessMode::ReadOnly, 0, 8, 8).unwrap();
         assert_eq!(
             hdr.messages[0].flags,
             MessageFlags::CONSTANT | MessageFlags::FORBID_SHARING
@@ -172,7 +173,7 @@ mod tests {
         let mut writer = ObjectHeaderWriter::new();
         writer.add_message(MessageType::Datatype, vec![5, 6]);
         let bytes = writer.serialize().unwrap();
-        let hdr = ObjectHeader::parse(&bytes, 0, 8, 8).unwrap();
+        let hdr = ObjectHeader::parse(&bytes, AccessMode::ReadOnly, 0, 8, 8).unwrap();
         assert_eq!(hdr.messages[0].flags, MessageFlags::NONE);
     }
 
@@ -182,7 +183,7 @@ mod tests {
         // Add a message with >255 bytes of payload
         writer.add_message(MessageType::Datatype, vec![0xAA; 300]);
         let bytes = writer.serialize().unwrap();
-        let hdr = ObjectHeader::parse(&bytes, 0, 8, 8).unwrap();
+        let hdr = ObjectHeader::parse(&bytes, AccessMode::ReadOnly, 0, 8, 8).unwrap();
         assert_eq!(hdr.messages.len(), 1);
         assert_eq!(hdr.messages[0].data.len(), 300);
     }
@@ -195,7 +196,7 @@ mod tests {
             vec![0xAA; OBJECT_HEADER_MESSAGE_MAX],
         );
         let bytes = writer.serialize().unwrap();
-        let hdr = ObjectHeader::parse(&bytes, 0, 8, 8).unwrap();
+        let hdr = ObjectHeader::parse(&bytes, AccessMode::ReadOnly, 0, 8, 8).unwrap();
         assert_eq!(hdr.messages.len(), 1);
         assert_eq!(hdr.messages[0].data.len(), OBJECT_HEADER_MESSAGE_MAX);
     }

@@ -461,7 +461,8 @@
 //! | Rejected | Error | Reason |
 //! |---|---|---|
 //! | a superblock version above 3 | [`FormatError::UnsupportedVersion`] | versions 0 to 3 are read, and the released format defines no higher one |
-//! | an unrecognized object-header message flagged must-understand | [`FormatError::UnsupportedMessage`] | the format requires a reader that does not recognize a must-understand message to reject the file |
+//! | an object-header message of an unrecognized type, flagged for a decoder under either access (`H5O_MSG_FLAG_FAIL_IF_UNKNOWN_ALWAYS`) | [`FormatError::UnsupportedMessage`] | the specification requires a decoder that cannot name a message's type to reject the object, whether the file is open for reading or for writing |
+//! | the same message flagged for a decoder with write access alone (`H5O_MSG_FLAG_FAIL_IF_UNKNOWN_AND_OPEN_FOR_WRITE`), in a file open for writing ([`File::open_rw`] or [`File::open_swmr_writer`]) | [`FormatError::UnsupportedMessage`] | the specification conditions that flag on write access, and a read-only open reads past the message |
 //! | a File Space Info message version other than 1 | [`FormatError::UnsupportedFileSpaceInfoVersion`] | version 1 is the only one defined for the layouts this crate writes and reads |
 //!
 //! These guard against files outside the format-version range the crate models, and they are not
@@ -844,6 +845,7 @@ pub mod _guide;
 // re-exported at the bottom of this file).
 // ---------------------------------------------------------------------------
 
+pub(crate) mod access_mode;
 pub(crate) mod address;
 pub(crate) mod attribute;
 pub(crate) mod attribute_info;

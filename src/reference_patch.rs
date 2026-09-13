@@ -73,6 +73,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use crate::access_mode::AccessMode;
 use crate::address::BaseAddress;
 use crate::attribute::AttributeMessage;
 use crate::checksum::jenkins_lookup3;
@@ -322,7 +323,9 @@ pub(crate) fn plan<S: Source + ?Sized>(
         }
         // A group whose header or links cannot be read hides its subtree from
         // the walk; that leaves references below it unpatched, never mispatched.
-        let Ok(header) = ObjectHeader::parse_from_source(src, addr, os, ls, base) else {
+        let Ok(header) =
+            ObjectHeader::parse_from_source(src, AccessMode::ReadWrite, addr, os, ls, base)
+        else {
             complete = false;
             continue;
         };
@@ -390,6 +393,7 @@ fn scan_parsed_header<S: Source + ?Sized>(
                     let framed = crate::source::BaseOffsetSource { inner: src, base };
                     let resolver = crate::shared_message::SourceResolver::new(
                         &framed,
+                        AccessMode::ReadWrite,
                         crate::file_writer::OFFSET_SIZE,
                         crate::file_writer::LENGTH_SIZE,
                         // No shared-message table: a heap-stored datatype is not
@@ -521,6 +525,7 @@ fn scan_object<S: Source + ?Sized>(
     let framed = crate::source::BaseOffsetSource { inner: src, base };
     let resolver = crate::shared_message::SourceResolver::new(
         &framed,
+        AccessMode::ReadWrite,
         crate::file_writer::OFFSET_SIZE,
         crate::file_writer::LENGTH_SIZE,
         // No shared-message table; see the note on the other resolver in this
