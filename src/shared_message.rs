@@ -25,7 +25,7 @@ use alloc::{string::String, vec::Vec};
 
 use crate::address::BaseAddress;
 use crate::bytes::{ensure_len, read_offset};
-use crate::convert::TryToUsize;
+use crate::convert::Narrow;
 use crate::error::FormatError;
 use crate::message_type::MessageType;
 use crate::object_header::ObjectHeader;

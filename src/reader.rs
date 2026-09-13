@@ -19,7 +19,7 @@ use crate::appender::BufferedAppender;
 use crate::attribute::{extract_attributes_full, extract_attributes_full_from_source};
 use crate::chunk_cache::{CachePass, ChunkCache, ChunkCacheConfig, ChunkCacheStats};
 use crate::compound::CompoundType;
-use crate::convert::TryToUsize;
+use crate::convert::Narrow;
 use crate::data_layout::DataLayout;
 use crate::data_read;
 use crate::dataspace::{Dataspace, MaxExtent};

@@ -43,7 +43,7 @@
 
 use ndarray::{Array, ArrayBase, ArrayD, Data, Dimension, IxDyn};
 
-use crate::convert::TryToUsize;
+use crate::convert::Narrow;
 use crate::element::H5Element;
 use crate::error::Error;
 use crate::reader::Dataset;

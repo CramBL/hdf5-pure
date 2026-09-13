@@ -52,7 +52,7 @@ extern crate alloc;
 use alloc::{vec, vec::Vec};
 
 use crate::address::BaseAddress;
-use crate::convert::TryToUsize;
+use crate::convert::Narrow;
 use crate::error::FormatError;
 use crate::file_space_info::NUM_FILE_FSM_MANAGERS;
 

@@ -55,7 +55,7 @@
 
 use std::collections::HashMap;
 
-use crate::convert::TryToUsize;
+use crate::convert::Narrow;
 use crate::file_writer::AttrValue;
 use crate::mat::error::MatError;
 use crate::mat::string_object::{

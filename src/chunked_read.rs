@@ -15,7 +15,7 @@ use crate::bytes::read_offset;
 use crate::chunk_cache::{CachePass, ChunkCache};
 use crate::chunk_grid::{ChunkGrid, GridOrder};
 use crate::chunk_span::ChunkSpanReader;
-use crate::convert::{TryToUsize, nonzero_usize_from, slice_range, u32_from};
+use crate::convert::{Narrow, slice_range};
 use crate::data_layout::{ChunkIndexLayout, DataLayout};
 use crate::dataspace::Dataspace;
 use crate::error::FormatError;
@@ -1215,8 +1215,11 @@ pub(crate) fn collect_chunks_for_layout_from_source<S: Source + ?Sized>(
                 .product::<usize>()
                 * elem_size.get();
             let (chunk_size, filter_mask) = match filtered {
-                Some(filtered) => (u32_from(filtered.filtered_size)?, filtered.filter_mask),
-                None => (u32_from(chunk_byte_size as u64)?, 0),
+                Some(filtered) => (
+                    filtered.filtered_size.narrow::<u32>()?,
+                    filtered.filter_mask,
+                ),
+                None => (chunk_byte_size.narrow::<u32>()?, 0),
             };
             Ok(vec![ChunkInfo {
                 chunk_size,
@@ -1229,7 +1232,7 @@ pub(crate) fn collect_chunks_for_layout_from_source<S: Source + ?Sized>(
             addr,
             &dataspace.dimensions,
             &spatial_dims(),
-            u32_from(elem_size.get() as u64)?,
+            elem_size.get().narrow::<u32>()?,
         )),
         ChunkIndexLayout::FixedArray { .. } => {
             let spatial_chunk_dims = spatial_dims();
@@ -1240,7 +1243,7 @@ pub(crate) fn collect_chunks_for_layout_from_source<S: Source + ?Sized>(
                 &header,
                 &index_grid(dataspace, &spatial_chunk_dims, GridOrder::RowMajor)?,
                 &spatial_chunk_dims,
-                u32_from(elem_size.get() as u64)?,
+                elem_size.get().narrow::<u32>()?,
                 offset_size,
                 length_size,
             )
@@ -1254,7 +1257,7 @@ pub(crate) fn collect_chunks_for_layout_from_source<S: Source + ?Sized>(
                 &header,
                 &index_grid(dataspace, &spatial_chunk_dims, GridOrder::UnlimitedFirst)?,
                 &spatial_chunk_dims,
-                u32_from(elem_size.get() as u64)?,
+                elem_size.get().narrow::<u32>()?,
                 offset_size,
                 length_size,
             )
@@ -1651,7 +1654,7 @@ pub fn read_chunked_data_cached(
 
     // Taken once as a proven-non-zero width; see the buffered reader above.
     let elem_width = datatype.element_size()?;
-    let elem_size = nonzero_usize_from(elem_width)?;
+    let elem_size = elem_width.narrow::<NonZeroUsize>()?;
     let (rank, chunk_dims, ds_dims) = chunked_dims(chunk_dimensions, dataspace)?;
     ensure_chunk_bytes_representable(&chunk_dims, elem_size)?;
     let ndims = rank + 1; // rank + the trailing element-size dimension
@@ -1667,8 +1670,11 @@ pub fn read_chunked_data_cached(
             ChunkIndexLayout::SingleChunk { filtered, .. } => {
                 let chunk_byte_size: usize = chunk_dims.iter().product::<usize>() * elem_size.get();
                 let (chunk_size, filter_mask) = match filtered {
-                    Some(filtered) => (u32_from(filtered.filtered_size)?, filtered.filter_mask),
-                    None => (u32_from(chunk_byte_size as u64)?, 0),
+                    Some(filtered) => (
+                        filtered.filtered_size.narrow::<u32>()?,
+                        filtered.filter_mask,
+                    ),
+                    None => (chunk_byte_size.narrow::<u32>()?, 0),
                 };
                 vec![ChunkInfo {
                     chunk_size,

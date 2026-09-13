@@ -13,7 +13,7 @@ use core::num::NonZeroU32;
 use alloc::format;
 
 #[cfg(feature = "zfp")]
-use crate::convert::TryToUsize;
+use crate::convert::Narrow;
 use crate::error::FormatError;
 #[cfg(feature = "zfp")]
 use crate::filter_pipeline::FILTER_ZFP;

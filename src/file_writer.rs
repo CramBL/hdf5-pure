@@ -3,6 +3,8 @@
 //! Produces valid HDF5 files with v3 superblock, v2 object headers,
 //! link messages, contiguous datasets, inline and dense attributes.
 
+use core::num::NonZeroUsize;
+
 #[cfg(not(feature = "std"))]
 use alloc::{string::String, string::ToString, vec, vec::Vec};
 
@@ -23,7 +25,7 @@ use crate::chunked_write::{
     VerbatimLayout, VerbatimPlan, assemble_chunked_at, compress_chunks, emit_chunked_data_verbatim,
     measure_chunked_at, plan_chunked_data_verbatim,
 };
-use crate::convert::TryToUsize;
+use crate::convert::Narrow;
 use crate::dataspace::{Dataspace, DataspaceType, Extent, MaxExtent};
 use crate::error::{FormatError, OBJECT_HEADER_MESSAGE_MAX};
 use crate::file_create_properties::FileCreateProperties;
@@ -2468,7 +2470,7 @@ impl FileWriter {
                     // An allocated chunk holds the dataset's fill value
                     // wherever nothing was written, so the edge overhang of a
                     // partial chunk is filled rather than zeroed (issue #296).
-                    let elem = crate::convert::nonzero_usize_from(ctx.element_size)?;
+                    let elem = ctx.element_size.narrow::<NonZeroUsize>()?;
                     let fill = crate::fill_value::FillPattern::new(d.fill.as_deref(), elem);
                     Ok(Some(compress_chunks(
                         &d.raw,

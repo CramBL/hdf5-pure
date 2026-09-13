@@ -10,7 +10,7 @@ use crate::address::BaseAddress;
 use crate::btree_v2::{
     BTreeV2Header, collect_btree_v2_records, collect_btree_v2_records_from_source,
 };
-use crate::convert::TryToUsize;
+use crate::convert::Narrow;
 use crate::error::{FormatError, ResolveError};
 use crate::fractal_heap::FractalHeapHeader;
 use crate::group_v1::{self, GroupEntry};

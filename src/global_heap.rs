@@ -4,7 +4,7 @@
 use alloc::vec::Vec;
 
 use crate::bytes::read_length;
-use crate::convert::TryToUsize;
+use crate::convert::Narrow;
 use crate::error::FormatError;
 use crate::source::Source;
 

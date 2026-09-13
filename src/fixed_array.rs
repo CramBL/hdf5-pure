@@ -9,7 +9,7 @@ use alloc::{format, vec, vec::Vec};
 use crate::bytes::{read_length, read_offset, read_optional_offset};
 use crate::chunk_grid::ChunkGrid;
 use crate::chunked_read::ChunkInfo;
-use crate::convert::{TryToUsize, is_undefined_addr, u32_from};
+use crate::convert::{Narrow, is_undefined_addr};
 use crate::error::FormatError;
 use crate::source::Source;
 
@@ -201,7 +201,7 @@ fn parse_fa_element(
     };
     if client_id == 0 {
         Ok(Some(ChunkInfo {
-            chunk_size: u32_from(chunk_byte_size)?,
+            chunk_size: chunk_byte_size.narrow::<u32>()?,
             filter_mask: 0,
             offsets,
             address,
@@ -217,7 +217,7 @@ fn parse_fa_element(
             block[fm_off + 3],
         ]);
         Ok(Some(ChunkInfo {
-            chunk_size: u32_from(chunk_size)?,
+            chunk_size: chunk_size.narrow::<u32>()?,
             filter_mask,
             offsets,
             address,

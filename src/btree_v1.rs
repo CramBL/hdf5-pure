@@ -5,7 +5,7 @@ use alloc::vec::Vec;
 
 use crate::address::BaseAddress;
 use crate::bytes::{read_length, read_offset, read_optional_offset};
-use crate::convert::TryToUsize;
+use crate::convert::Narrow;
 use crate::error::FormatError;
 use crate::source::Source;
 

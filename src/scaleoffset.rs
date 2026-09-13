@@ -30,7 +30,7 @@ extern crate alloc;
 #[cfg(not(feature = "std"))]
 use alloc::{format, string::ToString, vec, vec::Vec};
 
-use crate::convert::TryToUsize;
+use crate::convert::Narrow;
 use crate::datatype::{Datatype, DatatypeByteOrder};
 use crate::error::FormatError;
 use crate::fill_value::FillPattern;

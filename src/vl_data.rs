@@ -9,7 +9,7 @@ use alloc::{format, string::String, vec::Vec};
 
 use crate::address::BaseAddress;
 use crate::bytes::read_offset;
-use crate::convert::{TryToUsize, is_undefined_addr};
+use crate::convert::{Narrow, is_undefined_addr};
 use crate::datatype::{CharacterSet, Datatype};
 use crate::error::FormatError;
 use crate::global_heap::GlobalHeapIndex;

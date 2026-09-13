@@ -117,7 +117,7 @@ use std::sync::Arc;
 use crate::attribute::AttributeMessage;
 use crate::chunked_read::ChunkInfo;
 use crate::chunked_write::{ChunkMeta, ChunkProvider, FilterKind, FilterSpec};
-use crate::convert::TryToUsize;
+use crate::convert::Narrow;
 use crate::data_layout::DataLayout;
 use crate::dataspace::MaxExtent;
 use crate::datatype::{Datatype, ReferenceType, embedded_reference_slots};

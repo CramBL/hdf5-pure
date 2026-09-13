@@ -14,7 +14,7 @@ const HADDR_UNDEF: u64 = u64::MAX;
 use core::num::NonZeroUsize;
 
 use crate::chunk_grid::{ChunkGrid, GridOrder};
-use crate::convert::{TryToUsize, nonzero_usize_from};
+use crate::convert::Narrow;
 use crate::dataspace::{Extent, MaxExtent};
 use crate::error::FormatError;
 use crate::extensible_array::{DataBlockGeom, EaGeometry, ExtensibleArrayHeader, SuperBlockGeom};
@@ -2420,7 +2420,7 @@ pub(crate) fn compress_chunks(
     allocation: StorageAllocation,
 ) -> Result<CompressedChunkSet, FormatError> {
     let chunk_dims = ctx.chunk_dims;
-    let element_size = nonzero_usize_from(ctx.element_size)?;
+    let element_size = ctx.element_size.narrow::<NonZeroUsize>()?;
     // The same pattern the unwritten slots are padded with: a filter that
     // records the fill value has to record the one this write pads with.
     let pipeline = options.build_pipeline(&ctx, fill)?;

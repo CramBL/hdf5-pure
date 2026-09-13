@@ -51,7 +51,7 @@ extern crate alloc;
 #[cfg(not(feature = "std"))]
 use alloc::{format, vec, vec::Vec};
 
-use crate::convert::TryToUsize;
+use crate::convert::Narrow;
 use crate::error::FormatError;
 
 /// Scalar type the codec operates on. Encoded as a small integer inside the

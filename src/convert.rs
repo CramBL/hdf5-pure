@@ -1,42 +1,31 @@
-//! Checked conversions from file-derived 64-bit values to platform integers.
+//! Checked narrowing of file-derived integers to in-memory widths.
 //!
-//! HDF5 stores offsets, lengths, sizes, and element counts as 64-bit values
-//! (the on-disk "size of offsets" / "size of lengths" are commonly 8 bytes).
-//! The reader, however, indexes an in-memory byte buffer with `usize`. On a
-//! 64-bit host these conversions are infallible, but on a 32-bit (or WASM32)
-//! host `usize` is 32 bits, so a `u64 as usize` cast *silently truncates* any
-//! value above 4 GiB, reading from the wrong location or sizing an allocation
-//! incorrectly.
+//! HDF5 stores an offset, a length, a size or an element count as a 64-bit value, and the reader
+//! indexes an in-memory buffer with `usize`. On a 64-bit host the conversion between the two is
+//! infallible. On a 32-bit host `usize` is 32 bits, where `value as usize` truncates anything
+//! above 4 GiB, so the read lands on the wrong bytes or the allocation comes out short.
 //!
-//! The helpers here replace those casts with fallible conversions that return
-//! [`FormatError`] instead of truncating. They all return [`FormatError`], so
-//! they compose with `?` in both the format layer (which returns
-//! `Result<_, FormatError>`) and the high-level layer (whose `Error` has a
-//! `From<FormatError>` impl).
+//! [`Narrow`] replaces such a cast with a conversion that reports [`FormatError`], which composes
+//! with `?` in the format layer and, through `From<FormatError>`, in the high-level layer.
+//! [`Narrow::to_usize`] and [`Narrow::narrow`] report [`FormatError::ValueTooLargeForPlatform`]
+//! for a value that overruns one of the targets [`NarrowTarget`] lists. A caller with an error of
+//! its own passes it to [`Narrow::narrow_or_else`], which reports that error in place of the
+//! platform one.
 //!
-//! ## When to use these
+//! Use them for any value that is file-derived and not structurally bounded: the result of
+//! `read_offset` or `read_length`, a data layout address or size, a chunk offset or size, a heap
+//! or collection size, an element count, and any arithmetic on those that becomes a slice index or
+//! an allocation size. [`slice_range`] takes both bounds of an `(offset, length)` pair at once.
 //!
-//! Use [`TryToUsize::to_usize`] / [`slice_range`] / [`u32_from`] for any value
-//! that is **file-derived and not structurally bounded**: the result of
-//! `read_offset`/`read_length`, a `DataLayout` address or size, a chunk offset
-//! or size, a heap or collection size, `num_elements`, an element count, or any
-//! arithmetic on those that becomes a slice index or allocation size.
-//!
-//! A narrowing `as` cast is acceptable only when the source is **provably
-//! bounded on every supported target** (e.g. a `u8` "size of offsets" field that
-//! is 2/4/8, a version/flags byte, a `u16` message size capped at 64 KiB, a
-//! match arm keyed on the on-disk field width it casts to, or a small loop
-//! counter). A `u8`/`u16` widening to `usize` never narrows and needs no guard.
-//!
-//! When you keep such a cast, annotate it at the site with
-//! `#[expect(clippy::cast_possible_truncation /* or cast_possible_wrap */,
-//! reason = "…")]`, where the `reason` states the bound that makes it safe. The
-//! 32-bit CI gate (the `cast-deny-32bit` job) denies both lints, so every
-//! narrowing cast must be either converted through the helpers above or
-//! explicitly accounted for this way; a leftover `#[expect]` whose cast was
-//! later removed fails the gate too, keeping the annotations honest.
+//! Write a narrowing `as` cast only where the source is bounded on every supported target: a
+//! "size of offsets" byte that is 2, 4, or 8, a version or flags byte, a `u16` message size, a
+//! match arm keyed on the on-disk field width it casts to, or a small loop counter. A widening,
+//! such as a `u8` to `usize`, needs no guard. Annotate a cast you keep with
+//! `#[expect(clippy::cast_possible_truncation /* or cast_possible_wrap */, reason = "…")]`, whose
+//! reason states the bound. The 32-bit cast gate (`just portability::cast-gate`) denies both lints
+//! and `unfulfilled_lint_expectations`, so a stale `#[expect]` fails it as an unguarded cast does.
 
-use core::num::{NonZeroU32, NonZeroUsize};
+use core::num::{NonZeroU32, NonZeroUsize, TryFromIntError};
 
 #[cfg(not(feature = "std"))]
 use core::ops::Range;
@@ -45,69 +34,122 @@ use std::ops::Range;
 
 use crate::error::FormatError;
 
-/// Fallible narrowing of a file-derived integer to the platform `usize`.
+/// Checked narrowing of a file-derived integer to another integer type.
 ///
-/// On targets where the source type already fits `usize` (e.g. `u64` on a
-/// 64-bit host) this collapses to an infallible widening that the optimizer
-/// removes; the error arm is cold. On a narrower target it returns
-/// [`FormatError::ValueTooLargeForPlatform`] rather than truncating.
-pub trait TryToUsize {
-    /// Narrow `self` to `usize`, or return
-    /// [`FormatError::ValueTooLargeForPlatform`] if it does not fit.
-    fn to_usize(self) -> Result<usize, FormatError>;
+/// Where the source type fits the target on this host, the conversion collapses to a widening and
+/// the error arm is cold. Where a value exceeds the target, it reaches the caller in an error.
+pub(crate) trait Narrow: Copy {
+    /// Narrows `self` to the width that indexes an in-memory buffer.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::ValueTooLargeForPlatform`] if `self` is above `usize::MAX` on this
+    /// host. A 64-bit host never reaches it.
+    #[inline]
+    fn to_usize(self) -> Result<usize, FormatError>
+    where
+        usize: TryFrom<Self, Error = TryFromIntError>,
+    {
+        self.narrow()
+    }
+
+    /// Narrows `self` to `T`, one of the targets [`NarrowTarget`] lists.
+    ///
+    /// The target is inferred where the binding or the argument fixes it, and written out as
+    /// `narrow::<u32>()` where it does not.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::ValueTooLargeForPlatform`] if `self` does not fit `T`, carrying
+    /// `self` as a `u64` and naming `T` through [`NarrowTarget::NAME`].
+    #[inline]
+    fn narrow<T>(self) -> Result<T, FormatError>
+    where
+        T: NarrowTarget + TryFrom<Self, Error = TryFromIntError>,
+    {
+        self.narrow_or_else(|| FormatError::ValueTooLargeForPlatform {
+            value: self.to_u64(),
+            target: T::NAME,
+        })
+    }
+
+    /// Narrows `self` to `T`, reporting the error `error` builds.
+    ///
+    /// The counterpart to [`narrow`](Narrow::narrow) where the caller has an error of its own:
+    /// for a target [`NarrowTarget`] does not list, such as the `u16` size of an object header
+    /// message, and for one it does list whose limit the caller's error reports better, such as
+    /// the byte offset of a compound field. The bound admits only [`TryFromIntError`], so the
+    /// caller's error loses nothing by replacing it.
+    ///
+    /// # Errors
+    ///
+    /// Returns `error()` if `self` does not fit `T`.
+    #[expect(
+        clippy::map_err_ignore,
+        reason = "the bound admits only `TryFromIntError`, which carries nothing beyond \
+                  the conversion having failed, and that is what the error `error` builds reports"
+    )]
+    #[inline]
+    fn narrow_or_else<T, E>(self, error: impl FnOnce() -> E) -> Result<T, E>
+    where
+        T: TryFrom<Self, Error = TryFromIntError>,
+    {
+        T::try_from(self).map_err(|_| error())
+    }
+
+    /// Converts `self` to `u64`, the width the platform error reports a value at.
+    fn to_u64(self) -> u64;
 }
 
-impl TryToUsize for u64 {
+impl Narrow for u64 {
     #[inline]
-    fn to_usize(self) -> Result<usize, FormatError> {
-        usize::try_from(self).map_err(|_| FormatError::ValueTooLargeForPlatform {
-            value: self,
-            target: "usize",
-        })
+    fn to_u64(self) -> u64 {
+        self
     }
 }
 
-impl TryToUsize for u32 {
+impl Narrow for u32 {
     #[inline]
-    fn to_usize(self) -> Result<usize, FormatError> {
-        // `u32` fits `usize` on every target this crate supports (>= 32-bit),
-        // but routing through `try_from` keeps the API uniform and stays correct
-        // on a hypothetical 16-bit target.
-        usize::try_from(self).map_err(|_| FormatError::ValueTooLargeForPlatform {
-            value: u64::from(self),
-            target: "usize",
-        })
+    fn to_u64(self) -> u64 {
+        u64::from(self)
     }
 }
 
-/// Fallibly narrow a file-derived `u64` to `u32`.
-///
-/// Used where the in-memory representation of a (de)compressed chunk size or
-/// similar quantity is a `u32` regardless of platform pointer width. Returns
-/// [`FormatError::ValueTooLargeForPlatform`] (with `target: "u32"`) instead of
-/// truncating.
-#[inline]
-pub fn u32_from(value: u64) -> Result<u32, FormatError> {
-    u32::try_from(value).map_err(|_| FormatError::ValueTooLargeForPlatform {
-        value,
-        target: "u32",
-    })
+impl Narrow for usize {
+    #[inline]
+    fn to_u64(self) -> u64 {
+        self as u64
+    }
 }
 
-/// Narrow a non-zero `u32` to a non-zero `usize`, carrying the proof across.
+impl Narrow for NonZeroU32 {
+    #[inline]
+    fn to_u64(self) -> u64 {
+        u64::from(self.get())
+    }
+}
+
+/// A target of [`Narrow::narrow`], which reports it by name.
 ///
-/// The counterpart to [`TryToUsize::to_usize`] for a value whose non-zero-ness
-/// has already been established — an element size, in practice — so the code it
-/// is handed to keeps the guarantee instead of re-deriving it. The `u32` fits
-/// `usize` on every target this crate supports, and routing through the checked
-/// conversion keeps that assumption from becoming a silent truncation on a
-/// narrower one.
-#[inline]
-pub(crate) fn nonzero_usize_from(value: NonZeroU32) -> Result<NonZeroUsize, FormatError> {
-    NonZeroUsize::try_from(value).map_err(|_| FormatError::ValueTooLargeForPlatform {
-        value: u64::from(value.get()),
-        target: "usize",
-    })
+/// Implemented for `usize`, [`NonZeroUsize`] and `u32`, the targets whose overflow needs no
+/// diagnostic beyond the value and the target's name. Any other target, such as the `u16` size of
+/// an object header message, goes through [`Narrow::narrow_or_else`] with the caller's error.
+pub(crate) trait NarrowTarget {
+    /// The name of the target in [`FormatError::ValueTooLargeForPlatform`], `"usize"` for both
+    /// `usize` and [`NonZeroUsize`].
+    const NAME: &'static str;
+}
+
+impl NarrowTarget for usize {
+    const NAME: &'static str = "usize";
+}
+
+impl NarrowTarget for u32 {
+    const NAME: &'static str = "u32";
+}
+
+impl NarrowTarget for NonZeroUsize {
+    const NAME: &'static str = "usize";
 }
 
 /// Test-only shorthand for a non-zero size literal, so a fixture can pass an
@@ -163,7 +205,33 @@ mod tests {
         assert_eq!(0u64.to_usize().unwrap(), 0);
         assert_eq!(1234u64.to_usize().unwrap(), 1234);
         assert_eq!(42u32.to_usize().unwrap(), 42);
-        assert_eq!(u32_from(1000).unwrap(), 1000);
+        assert_eq!(1000u64.narrow::<u32>().unwrap(), 1000);
+    }
+
+    #[test]
+    fn a_value_past_the_target_width_is_reported_with_the_value() {
+        let err = 0x1_0000_0000u64.narrow::<u32>().unwrap_err();
+        let FormatError::ValueTooLargeForPlatform { value, target } = err else {
+            panic!("expected ValueTooLargeForPlatform, got {err:?}");
+        };
+        assert_eq!(value, 0x1_0000_0000);
+        assert_eq!(target, "u32");
+    }
+
+    #[test]
+    fn the_callers_error_replaces_the_platform_one() {
+        assert_eq!(
+            65_535u32
+                .narrow_or_else::<u16, _>(|| "index does not fit u16")
+                .unwrap(),
+            65_535
+        );
+        assert_eq!(
+            65_536u32
+                .narrow_or_else::<u16, _>(|| "index does not fit u16")
+                .unwrap_err(),
+            "index does not fit u16"
+        );
     }
 
     /// The whole point of the conversion is that the proof survives it: what
@@ -171,10 +239,13 @@ mod tests {
     #[test]
     fn a_nonzero_width_survives_the_narrowing() {
         let width = NonZeroU32::new(8).unwrap();
-        assert_eq!(nonzero_usize_from(width).unwrap().get(), 8);
+        assert_eq!(width.narrow::<NonZeroUsize>().unwrap().get(), 8);
 
         let widest = NonZeroU32::new(u32::MAX).unwrap();
-        assert_eq!(nonzero_usize_from(widest).unwrap().get(), u32::MAX as usize);
+        assert_eq!(
+            widest.narrow::<NonZeroUsize>().unwrap().get(),
+            u32::MAX as usize
+        );
     }
 
     #[test]

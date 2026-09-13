@@ -7,7 +7,7 @@ use byteorder::{ByteOrder, LittleEndian};
 
 use crate::address::BaseAddress;
 use crate::bytes;
-use crate::convert::TryToUsize;
+use crate::convert::Narrow;
 use crate::error::FormatError;
 use crate::signature::HDF5_SIGNATURE;
 use crate::source::Source;
