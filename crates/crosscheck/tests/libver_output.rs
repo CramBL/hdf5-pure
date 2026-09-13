@@ -1,6 +1,3 @@
-// Crosschecks link the reference HDF5 C library (the `hdf5-metno` dev-dependency),
-// which is gated to 64-bit little-endian targets; skip them elsewhere so the pure-Rust
-// suite can run under `cross test --target i686-...`.
 #![cfg(all(not(target_pointer_width = "32"), target_endian = "little"))]
 //! Reference-C-library interop for the HDF5 1.8 output format
 //! (`FileBuilder::with_libver_bounds` with an upper bound of `LibVer::V18`).

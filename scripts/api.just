@@ -1,3 +1,4 @@
+import "constants.just"
 set working-directory := ".."
 
 uv := "uv run --project scripts/python --locked"
@@ -5,7 +6,7 @@ uv := "uv run --project scripts/python --locked"
 default: semver api-surface msrv
 
 semver:
-    cargo semver-checks -p hdf5-pure --default-features --features serde,zfp,provenance,ndarray
+    cargo semver-checks -p hdf5-pure --default-features --features "{{ USER_FACING_FEATURES }}"
 
 # The release type the changelog calls for: minor with a **Breaking:** entry
 # under [Unreleased], or in the dated section the diff against BASE promotes.

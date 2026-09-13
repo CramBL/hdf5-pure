@@ -1,9 +1,3 @@
-//! Tests for the `ndarray` integration: round-trips through `hdf5-pure` itself
-//! and byte-level cross-validation against the reference HDF5 library
-//! (`hdf5-metno`). Only built with the `ndarray` feature.
-// Byte-level crosscheck links the reference HDF5 C library (`hdf5-metno`), gated
-// to 64-bit little-endian targets; skip elsewhere so `cross test` on `i686` and
-// `s390x` stays pure-Rust.
 #![cfg(all(
     feature = "ndarray",
     not(target_pointer_width = "32"),

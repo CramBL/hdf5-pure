@@ -1,3 +1,5 @@
+import "constants.just"
+
 set working-directory := ".."
 
 # The cross-target tests need `cross` and Docker, so they are not run here.
@@ -15,13 +17,13 @@ check-bare-metal:
 
 clippy-32bit:
     cargo clippy --locked --target i686-unknown-linux-gnu --lib -- -D warnings
-    cargo clippy --locked --target i686-unknown-linux-gnu --lib --features "serde zfp provenance ndarray" -- -D warnings
+    cargo clippy --locked --target i686-unknown-linux-gnu --lib --features "{{ USER_FACING_FEATURES_PORTABILITY }}" -- -D warnings
 
 cast-gate:
     cargo clean -p hdf5-pure --target i686-unknown-linux-gnu
-    cargo clippy --locked --target i686-unknown-linux-gnu --lib --features "serde zfp provenance ndarray" -- -D clippy::cast_possible_truncation -D clippy::cast_possible_wrap -D unfulfilled_lint_expectations
+    cargo clippy --locked --target i686-unknown-linux-gnu --lib --features "{{ USER_FACING_FEATURES_PORTABILITY }}" -- -D clippy::cast_possible_truncation -D clippy::cast_possible_wrap -D unfulfilled_lint_expectations
 
-test-32bit FEATURES="std checksum deflate zfp serde ndarray provenance":
+test-32bit FEATURES=USER_FACING_FEATURES:
     cross test \
         --config 'build.rustc-wrapper=""' \
         --config 'target."i686-unknown-linux-gnu".linker="i686-linux-gnu-gcc"' \
@@ -39,4 +41,4 @@ test-big-endian:
         --locked \
         --target s390x-unknown-linux-gnu \
         --no-default-features \
-        --features "std checksum deflate zfp serde ndarray provenance"
+        --features "{{ USER_FACING_FEATURES }}"
