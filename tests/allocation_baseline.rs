@@ -47,7 +47,7 @@
 //! Re-record with:
 //!
 //! ```sh
-//! HEAPSCOPE_UPDATE_BASELINE=1 cargo test --features heap-baseline --test allocation_baseline
+//! HEAPSCOPE_UPDATE_BASELINE=1 cargo test --features __heap-baseline --test allocation_baseline
 //! ```
 //!
 //! and commit the diff with the change that caused it.
@@ -62,9 +62,9 @@
 //! writes changes the numbers legitimately. The upside is that the write path is
 //! pinned here too, and it allocates more than the read does.
 #![cfg(all(
-    feature = "heap-baseline",
+    feature = "__heap-baseline",
     // The default set, required to be present: `--no-default-features` with
-    // `heap-baseline` alone would otherwise check a different build's figures
+    // `__heap-baseline` alone would otherwise check a different build's figures
     // against this file.
     feature = "std",
     feature = "checksum",

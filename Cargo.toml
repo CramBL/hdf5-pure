@@ -76,13 +76,14 @@ serde = ["dep:serde", "std"]
 # rule puts these impls on whichever crate owns one of the two types — us, not
 # the caller.
 num-complex = ["dep:num-complex", "serde"]
-# Test-only: check the exact allocation figures of `tests/allocation_baseline.rs`
+# TODO: Refactor into an `insta` snapshot based test
+#
+# check the exact allocation figures of `tests/allocation_baseline.rs`
 # against the numbers committed under `tests/baselines/`. Off by default because
 # those numbers are recorded on one platform: the scaling *rules* in
 # `tests/allocation_bounds.rs` hold everywhere and run in every configuration,
-# while an exact count is a property of one target and one toolchain. Both test
-# files document the split at length.
-heap-baseline = []
+# while an exact count is a property of one target and one toolchain.
+__heap-baseline = []
 
 [dependencies]
 byteorder = { version = "1", default-features = false }
