@@ -270,7 +270,7 @@ The same applies to structs, with the detail that no manual marking is needed fo
 
 ### `no_std`
 
-The format structures and the in-memory machinery use `core` and `alloc`, and only the filesystem API is behind the `std` feature. New code below the high-level API imports from `core` and `alloc`, and `just portability::default` checks the `no_std`, WASM and bare-metal builds.
+The format structures and the in-memory machinery use `core` and `alloc`, and only the filesystem API is behind the `std` feature. New code below the high-level API imports from `core` and `alloc`, and `just portability` checks the `no_std`, WASM and bare-metal builds.
 
 ### `unsafe`
 

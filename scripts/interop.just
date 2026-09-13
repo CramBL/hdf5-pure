@@ -21,9 +21,7 @@ hdf5-env VERSION:
 # Test all supported HDF5 versions with `FEATURES`
 test-hdf5-all FEATURES="serde,ndarray": (test-hdf5 "1.8" FEATURES) (test-hdf5 "1.10" FEATURES + ",__hdf5-1.10") (test-hdf5 "1.12" FEATURES + ",__hdf5-1.12") (test-hdf5 "1.14" FEATURES + ",__hdf5-1.14") (test-hdf5 "2" FEATURES + ",__hdf5-2")
 
-# FEATURES names the release series from 1.10 up, as in `serde,ndarray,__hdf5-1.10`.
-# The crosschecks linking libhdf5 VERSION, built under tmp/hdf5 on first use.
-# Passes `hdf5` and `hdf5_sys` to activate the C HDF5 bindings.
+# Run cross tests on libhdf5 `VERSION` with `FEATURES` and `ARGS`. Built under tmp/hdf5 on first use.
 test-hdf5 VERSION FEATURES="serde,ndarray" *ARGS: (hdf5-build VERSION)
     eval "$(just interop::hdf5-env {{ VERSION }})" && \
     cargo nextest run --locked {{ crosscheck }} --features hdf5,hdf5_sys,{{ FEATURES }} {{ ARGS }}
