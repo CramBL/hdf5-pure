@@ -9162,12 +9162,12 @@ impl WriteEngine {
                     let start = base.absolute(data_addr).map_err(|_| {
                         Error::EditUnsupported("data address exceeds this platform")
                     })?;
-                    let len = usize::try_from(data_size)
-                        .map_err(|_| Error::EditUnsupported("data size exceeds this platform"))?;
                     start
-                        .checked_add(len as u64)
+                        .checked_add(data_size)
                         .filter(|&e| e <= src.len())
                         .ok_or(Error::EditUnsupported("dataset data is out of bounds"))?;
+                    let len = usize::try_from(data_size)
+                        .map_err(|_| Error::EditUnsupported("data size exceeds this platform"))?;
                     Some(
                         src.read_exact_at(start, len)
                             .map_err(|_| Error::EditUnsupported("dataset data is out of bounds"))?,
