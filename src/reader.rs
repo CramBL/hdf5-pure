@@ -2368,7 +2368,7 @@ fn read_rows_framed<S: Source + ?Sized>(
     // A zero-row window reads nothing, uniformly across the *supported* layouts.
     // A `Virtual` layout is unsupported and must still error like `read_raw`
     // does, so it is excluded here and falls through to the match.
-    if num_rows == 0 && !matches!(dl, DataLayout::Virtual { .. }) {
+    if num_rows == 0 && !matches!(dl, DataLayout::Virtual) {
         return Ok(Vec::new());
     }
     match dl {
@@ -2429,7 +2429,7 @@ fn read_rows_framed<S: Source + ?Sized>(
                 }
             }
         }
-        DataLayout::Virtual { .. } => Err(FormatError::UnsupportedVirtualLayout),
+        DataLayout::Virtual => Err(FormatError::UnsupportedVirtualLayout),
     }
 }
 
@@ -5439,7 +5439,7 @@ the same commit to replace it",
                 chunk_shape: self.chunk_shape()?.unwrap_or_default(),
                 index: ChunkIndex::from_layout(version, chunk_index_type)?,
             },
-            DataLayout::Virtual { .. } => Layout::Virtual,
+            DataLayout::Virtual => Layout::Virtual,
         })
     }
 
@@ -8122,7 +8122,7 @@ mod tests {
         // A Virtual layout is unsupported and must still error for a zero-row
         // window, matching `read_raw`, rather than being swallowed by the early
         // return.
-        let virtual_dl = DataLayout::Virtual { version: 4 };
+        let virtual_dl = DataLayout::Virtual;
         let err = read_rows_framed(
             &BytesSource::new(b""),
             RawReadSpec::plain(&virtual_dl, &ds, &dt),
