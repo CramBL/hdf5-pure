@@ -30,10 +30,10 @@ miri $CARGO_TERM_COLOR="always" $MIRIFLAGS="-Zmiri-strict-provenance" $RUSTUP_TO
     done
 
 heap-baseline:
-    cargo nextest run --locked --features heap-baseline --test allocation_baseline
+    cargo nextest run --locked --features __heap-baseline --test allocation_baseline
 
 heap-baseline-record:
-    HEAPSCOPE_UPDATE_BASELINE=1 cargo test --features heap-baseline --test allocation_baseline
+    HEAPSCOPE_UPDATE_BASELINE=1 cargo test --features __heap-baseline --test allocation_baseline
 
 heap-profile:
     cargo run --release --example heap_profile

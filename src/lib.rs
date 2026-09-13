@@ -204,7 +204,6 @@
 //! | `num-complex` | no | `num-complex` | `serde` | [`mat::ComplexElement`] for `num_complex::Complex<T>`, for the bulk complex-array helpers |
 //! | `provenance` | no | `sha2` | nothing | SHA-256 data provenance tracking |
 //! | `zfp` | no | nothing | nothing | ZFP fixed-rate compression (HDF5 filter 32013), `f32`, `f64`, `i32` and `i64` in ranks 1 to 4 |
-//! | `heap-baseline` | no | nothing | nothing | maintainer only: check the recorded allocation figures (see below) |
 //!
 //! The default feature set is `std`, `checksum`, and `deflate`. `serde` and `ndarray` both imply
 //! `std`, since they build on the [`File`], [`Group`], and [`Dataset`] reader APIs and the
@@ -331,20 +330,6 @@
 //! # assert_eq!(file.dataset("temperature").unwrap().shape().unwrap(), vec![16, 16]);
 //! # }
 //! ```
-//!
-//! ## `heap-baseline`
-//!
-//! A test-only, maintainer feature. It enables `tests/allocation_baseline.rs`, which checks the
-//! crate's exact allocation counts and byte totals for one write-then-read cycle against the
-//! figures committed under `tests/baselines/`. It pulls in nothing (the heap profiler it uses,
-//! [`heapscope`](https://crates.io/crates/heapscope), is an unconditional dev-dependency), it is
-//! not a run-time dependency, and end users do not need it.
-//!
-//! The figures it checks belong to one target, one toolchain and one feature set, so the test
-//! compiles only under the crate's default features and CI runs it in a single pinned job. The
-//! bounds that hold everywhere are in `tests/allocation_bounds.rs` and need no feature: a windowed
-//! read allocates on the order of its window, and a chunked read costs a constant per chunk. On
-//! x86_64, both need the frame pointers `.cargo/config.toml` sets.
 //!
 //! # Platform support
 //!

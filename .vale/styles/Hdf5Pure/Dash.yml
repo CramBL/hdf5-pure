@@ -6,6 +6,7 @@ message: "Dash '%s': use a spaced hyphen in prose, an en dash only in a numeric 
 level: error
 nonword: true
 tokens:
-  - '[─═]'
+  - '[—═]'
   - '—'
-  - '–(?![A-Za-z]?\d)|(?<!\d[a-z]?)–'
+  # Flags an en dash ONLY if it touches a space/punctuation
+  - '(?<!\w)–|–(?!\w)'

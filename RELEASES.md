@@ -2,7 +2,7 @@
 
 ## Versioning
 
-`0.x.0` may break, `0.x.y` may not. `Cargo.toml` on `main` reads the last release, and no pull request touches it. A pull request that breaks the public API marks its changelog entry `**Breaking:**`, and the release decides the bump from that: a cycle with a marked entry releases as the next minor, and any other as a patch. `prepare` rejects a patch version over a marked cycle, and CI checks each pull request's API delta against the release type the marker implies, so a break without the marker fails there.
+`0.x.0` may break, `0.x.y` may not. `Cargo.toml` on `main` reads the last release, no pull request modifies it. A pull request that breaks the public API marks its changelog entry `**Breaking:**`, and the release decides the bump from that: a cycle with a marked entry releases as the next minor, and any other as a patch. `prepare` rejects a patch version over a marked cycle, and CI checks each pull request's API delta against the release type the marker implies, so a break without the marker fails there.
 
 ## Changelog
 
