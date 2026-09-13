@@ -1226,7 +1226,7 @@ mod tests {
         let messages = [(
             0x0007u16,
             &[0xAA][..],
-            MessageFlags::FAIL_IF_UNKNOWN_FOR_WRITE,
+            MessageFlags::FAIL_IF_UNKNOWN_AND_OPEN_FOR_WRITE,
         )];
         let data = build_v1_header(&messages, 8, 8);
         let hdr = ObjectHeader::parse(&data, AccessMode::ReadWrite, 0, 8, 8).unwrap();
@@ -1301,7 +1301,7 @@ mod tests {
         let messages = [(
             0x00FFu16,
             &[0xAA][..],
-            MessageFlags::FAIL_IF_UNKNOWN_FOR_WRITE,
+            MessageFlags::FAIL_IF_UNKNOWN_AND_OPEN_FOR_WRITE,
         )];
         let data = build_v1_header(&messages, 8, 8);
 
@@ -1320,7 +1320,7 @@ mod tests {
         let cont_chunk = v1_message_records(&[(
             0x00FFu16,
             &[0xAA][..],
-            MessageFlags::FAIL_IF_UNKNOWN_FOR_WRITE,
+            MessageFlags::FAIL_IF_UNKNOWN_AND_OPEN_FOR_WRITE,
         )]);
 
         let cont_offset = 256usize;
@@ -1361,7 +1361,11 @@ mod tests {
     fn a_version_2_header_rejects_an_unknown_message_a_writer_must_understand_only_for_write() {
         let data = build_v2_header(
             0x00,
-            &[(0xFF, &[0xAA][..], MessageFlags::FAIL_IF_UNKNOWN_FOR_WRITE)],
+            &[(
+                0xFF,
+                &[0xAA][..],
+                MessageFlags::FAIL_IF_UNKNOWN_AND_OPEN_FOR_WRITE,
+            )],
             None,
         );
 
@@ -1380,7 +1384,7 @@ mod tests {
         let messages = [(
             0x00FFu16,
             &[0xAA][..],
-            MessageFlags::FAIL_IF_UNKNOWN_FOR_WRITE,
+            MessageFlags::FAIL_IF_UNKNOWN_AND_OPEN_FOR_WRITE,
         )];
         let data = build_v1_header(&messages, 8, 8);
         let source = BytesSource::new(&data);
