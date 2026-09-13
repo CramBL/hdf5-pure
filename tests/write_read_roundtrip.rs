@@ -385,6 +385,16 @@ fn chunked_builder_rejects_invalid_geometry() {
             },
             "explicit chunk dimensions",
         ),
+        (
+            "a fixed maximum at the unlimited marker",
+            |b| {
+                b.with_i32_data(&[1, 2, 3, 4])
+                    .with_shape(&[4])
+                    .with_maxshape(&[MaxExtent::Fixed(u64::MAX)])
+                    .with_chunks(&[2]);
+            },
+            "the format's unlimited marker",
+        ),
     ];
 
     for (label, configure, expected) in bad {

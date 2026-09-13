@@ -3,7 +3,7 @@ heapscope-baseline 1
 mode heap
 currBytes 0
 currBlocks 0
-maxBytes 33672401
+maxBytes 33672373
 maxBlocks 2086
-totalBytes 43479368
-totalBlocks 8968
+totalBytes 43479156
+totalBlocks 8965
