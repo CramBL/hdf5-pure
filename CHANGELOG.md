@@ -14,7 +14,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
-- `File::open_rw` edits a file whose addresses exceed `usize::MAX` on a 32-bit host under its bounded backing, where an edit or an append that resolved such an address was previously rejected with `Error::EditUnsupported` or `Error::AppendUnsupported`. A file with a pre-v2 superblock or a userblock takes the whole-file mirror, which the pointer width bounds.
+- `File::open_rw` edits a file whose addresses exceed `usize::MAX` on a 32-bit host under its bounded backing, where an edit or an append that resolved such an address was previously rejected with `Error::EditUnsupported` or `Error::AppendUnsupported`. A file with a pre-v2 superblock or a userblock takes the whole-file mirror, which the pointer width bounds ([#561](https://github.com/CramBL/hdf5-pure/pull/561)).
 - `File::dataset` and `File::group` reject an object header holding a message of an unknown type that is flagged as one every decoder must understand (`H5O_MSG_FLAG_FAIL_IF_UNKNOWN_ALWAYS`), with `FormatError::UnsupportedMessage`, where such an object was previously read as though the message were absent ([#552](https://github.com/CramBL/hdf5-pure/issues/552)).
 
 ## [0.45.0] - 2026-09-11
