@@ -8,7 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
-- **breaking** (technically) rename the internal "heap-scope" feature to "__heap-scope"
+- **Breaking:** (technically) rename the internal "heap-scope" feature to "__heap-scope"
 
 ### Fixed
 

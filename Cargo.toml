@@ -342,11 +342,9 @@ ndarray = ["dep:ndarray", "std"]
 # Serde-based (de)serialization of MATLAB v7.3 .mat files.
 # Requires `std` (uses File/Group/Dataset reader APIs).
 serde = ["dep:serde", "std"]
-# `mat::ComplexElement` impls for `num_complex::Complex<T>`, so the bulk array
+# `mat::ComplexElement` `impl`s for `num_complex::Complex<T>`, so the bulk array
 # helpers in `mat::complex` take the de-facto standard Rust complex type
-# directly. The trait is `unsafe` and asserts a memory layout, so the orphan
-# rule puts these impls on whichever crate owns one of the two types — us, not
-# the caller.
+# directly.
 num-complex = ["dep:num-complex", "serde"]
 # TODO: Refactor into an `insta` snapshot based test
 #
@@ -361,8 +359,6 @@ __heap-baseline = []
 byteorder = { version = "1", default-features = false }
 flate2 = { version = "1", optional = true, default-features = false, features = ["rust_backend"] }
 ndarray = { version = ">=0.16, <0.18", optional = true }
-# Carries only `ComplexElement` impls. No API of ours names a `Complex<T>`, so
-# nothing here appears in a public signature.
 num-complex = { version = "0.4", optional = true, default-features = false }
 serde = { version = "1", optional = true, default-features = false, features = ["derive", "alloc"] }
 sha2 = { version = "0.10", optional = true, default-features = false }
