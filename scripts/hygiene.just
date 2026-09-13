@@ -1,6 +1,6 @@
 set working-directory := ".."
 
-default: shear zizmor typos
+default: shear zizmor typos lychee-added
 
 shear:
     cargo shear

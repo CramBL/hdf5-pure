@@ -7,16 +7,18 @@ uv := "uv run --project scripts/python --locked"
 crosscheck := "-p hdf5-pure-crosscheck"
 
 # The whole matrix: every release, built under tmp/hdf5 on first use.
-default: (test-hdf5 "1.8.23") (test-hdf5 "1.10.11" "serde,ndarray,__hdf5-1.10") (test-hdf5 "1.12.3" "serde,ndarray,__hdf5-1.12") (test-hdf5 "1.14.6" "serde,ndarray,__hdf5-1.14") (test-hdf5 "2.2.0" "serde,ndarray,__hdf5-2") test-matio
+default: test-hdf5-all test-matio
 
 # Build libhdf5 VERSION and its tools under tmp/hdf5/VERSION.
 hdf5-build VERSION:
-    {{ uv }} hdf5-build {{ VERSION }}
+    {{ uv }} hdf5-build {{ if HDF5_VERSION_MAP =~ (".* " + VERSION + ":.*") { replace_regex(HDF5_VERSION_MAP, ".* " + VERSION + ":([^ ]+).*", "$1") } else { VERSION } }}
 
 # For eval "$(just interop::hdf5-env 1.8.23)" && just interop::test-external-hdf5.
 # Shell exports that make a build link the libhdf5 under tmp/hdf5/VERSION.
 hdf5-env VERSION:
-    @{{ uv }} hdf5-build {{ VERSION }} --env
+    @{{ uv }} hdf5-build {{ if HDF5_VERSION_MAP =~ (".* " + VERSION + ":.*") { replace_regex(HDF5_VERSION_MAP, ".* " + VERSION + ":([^ ]+).*", "$1") } else { VERSION } }} --env
+
+test-hdf5-all: (test-hdf5 "1.8") (test-hdf5 "1.10" "serde,ndarray,__hdf5-1.10") (test-hdf5 "1.12" "serde,ndarray,__hdf5-1.12") (test-hdf5 "1.14" "serde,ndarray,__hdf5-1.14") (test-hdf5 "2" "serde,ndarray,__hdf5-2")
 
 # FEATURES names the release series from 1.10 up, as in `serde,ndarray,__hdf5-1.10`.
 # The crosschecks linking libhdf5 VERSION, built under tmp/hdf5 on first use.
@@ -53,3 +55,10 @@ hdf5-bundled-version:
     set -euo pipefail
     manifest=$(cargo metadata --locked --features hdf5-pure-crosscheck/__hdf5-bundled --format-version 1 | jq -r '.packages[] | select(.name == "hdf5-metno-src") | .manifest_path')
     awk '/^#define H5_VERS_(MAJOR|MINOR|RELEASE) / { v[++n] = $3 } END { print v[1] "." v[2] "." v[3] }' "$(dirname "$manifest")/ext/hdf5/src/H5public.h"
+
+HDF5_1_8 := "1.8.23"
+HDF5_1_10 := "1.10.11"
+HDF5_1_12 := "1.12.3"
+HDF5_1_14 := "1.14.6"
+HDF5_2 := "2.2.0"
+HDF5_VERSION_MAP := " 1.8:" + HDF5_1_8 + " 1.10:" + HDF5_1_10 + " 1.12:" + HDF5_1_12 + " 1.14:" + HDF5_1_14 + " 2:" + HDF5_2 + " "

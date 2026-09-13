@@ -2,8 +2,6 @@
 name = "hdf5-pure"
 version = "0.45.0"
 edition = "2024"
-# `std::fs::File` advisory locking (used by the write/edit/read open paths for
-# concurrent-writer detection, issue #73) stabilized in Rust 1.89.
 rust-version = "1.89"
 license = "MIT OR Apache-2.0"
 description = "Pure-Rust HDF5 library: read, write, and edit files in place (WASM-compatible, no C dependencies)"
@@ -133,17 +131,6 @@ test-util = { path = "crates/test-util" }
 # byte-order handling, not the C library's. The crosscheck test files carry the
 # matching `#![cfg(all(not(target_pointer_width = "32"), target_endian =
 # "little"))]` gate.
-#
-# The binding tracks upstream `main`, pinned by commit in `Cargo.lock` since
-# every CI job runs `--locked`. `cargo update -p hdf5-metno` moves it. The
-# `__hdf5-bundled` feature links the release its submodule points at, which
-# `just interop::hdf5-bundled-version` prints. Without the feature it links the
-# installation under `HDF5_DIR`, which is how the interop workflow tests other
-# releases. Judge a bump by the crosschecks
-# rather than by release notes: several of them assert constants derived from
-# libhdf5 internals that a version change could move, and
-# `tests/c_absence_predicate.rs` guards the assertion most sensitive to one by
-# re-measuring the C library's error codes against deliberately damaged files.
 [[example]]
 name = "matlab_fixtures"
 required-features = ["serde"]
@@ -434,60 +421,9 @@ missing_crate_level_docs = "deny"
 private_doc_tests = "deny"
 unescaped_backticks = "deny"
 
-# Fewer, larger codegen units than rustc's default of 256.
-#
-# The default emits up to one object file per codegen unit per crate compilation,
-# and cargo never reaps them. With 97 integration-test binaries a full rebuild of
-# this package creates ~9,800 objects; once `deps/` reaches six figures the scan
-# cargo and rustc perform on it dominates every build; `just clean` clears them.
-#
-# 4 comes from the measured curve — objects per rebuild, and the time to build
-# the library alone:
-#
-#   codegen-units    256      64      16       4       1
-#   objects        9,789   7,495   1,584     606     161
-#   library           8s      8s      9s     10s     13s
-#
-# The library is the serialization point (every test binary waits on it), so its
-# build time is the cost that matters. 4 buys 16x fewer objects for about a
-# second; 1 costs 63% for a reduction nothing needs. Whole-test-build time did
-# not vary measurably: cargo already parallelizes across 98 separate crates, so
-# intra-crate codegen parallelism is largely redundant here.
-#
-# `release` and `bench` keep their default of 16 — a throughput trade-off for
-# generated code rather than a build-artifact one.
-# Line tables instead of full DWARF (issue #269).
-#
-# Nothing in this repository's workflow inspects locals in a debugger; what it
-# reads is panic backtraces, and `line-tables-only` keeps those complete —
-# function names, files, and line numbers. What it drops is the type and
-# variable description of every symbol, which for ~110 test binaries that each
-# link this crate is a large share of the debug info emitted per build.
-#
-# Measured at `--all-features` from `cargo clean -p hdf5-pure` with the
-# dependency graph already built, on a 10-core macOS host:
-#
-#                              full debug   line-tables-only
-#   build this crate + tests    25.0/28.9s        16.6/16.8s
-#   object files (1,357)            590 MiB           476 MiB
-#   test binaries (130)            1.35 GiB          1.31 GiB
-#   target/debug                   4.19 GiB          3.96 GiB
-#
-# The win is the ~40% off the build, not the disk. Emitting less debug info is
-# less work by construction; the modest size figures are a macOS artifact and
-# do not carry to Linux — Mach-O leaves DWARF in the object files and links a
-# debug *map* into the executable, so a test binary here barely shrinks even as
-# the objects behind it lose 19%. The statically linked libhdf5 inside every
-# crosscheck binary is a further fixed weight this setting cannot touch.
-#
-# `[profile.test]` inherits `debug` from `[profile.dev]` — verified, not
-# assumed: `cargo test -v` passes `-C debuginfo=line-tables-only` to all 130
-# test targets. `codegen-units` is repeated below only because it already was.
-# `release` and `bench` are untouched, so a backtrace from a release build is
-# unaffected either way.
 [profile.dev]
-codegen-units = 4
+codegen-units = 32
 debug = "line-tables-only"
 
 [profile.test]
-codegen-units = 4
+codegen-units = 32

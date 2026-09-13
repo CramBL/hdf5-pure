@@ -1,6 +1,3 @@
-// Crosschecks against the reference HDF5 C library (`hdf5-metno`), gated to
-// 64-bit little-endian targets; skip elsewhere so `cross test` on `i686` and
-// `s390x` stays pure-Rust.
 #![cfg(all(
     feature = "serde",
     not(target_pointer_width = "32"),

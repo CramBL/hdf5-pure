@@ -1,5 +1,3 @@
-// Crosschecks link the reference HDF5 C library (the `hdf5-metno` dev-dependency),
-// which is gated to 64-bit little-endian targets.
 #![cfg(all(not(target_pointer_width = "32"), target_endian = "little"))]
 //! The format boundary against the linked release of the C library, in both
 //! directions.

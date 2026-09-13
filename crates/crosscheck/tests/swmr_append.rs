@@ -1,6 +1,3 @@
-// Reads back with the reference HDF5 C library (`hdf5-metno`), gated to
-// 64-bit little-endian targets; skip elsewhere so `cross test` on `i686` and
-// `s390x` stays pure-Rust.
 #![cfg(all(not(target_pointer_width = "32"), target_endian = "little"))]
 #![cfg(feature = "__hdf5-1.10")]
 //! SWMR append-writer tests: hdf5-pure appends in place to an unlimited
