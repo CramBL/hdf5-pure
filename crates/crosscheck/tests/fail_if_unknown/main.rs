@@ -6,3 +6,4 @@
 
 mod always;
 mod fixture;
+mod for_write;

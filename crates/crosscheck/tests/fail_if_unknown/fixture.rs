@@ -98,6 +98,10 @@ pub const ATTRIBUTE_VALUE: i32 = 7;
 // "Data Object Header Messages", version 4.0.
 pub const UNKNOWN_MESSAGE_TYPE: u16 = 0x00FF;
 
+// Bit 3 of the "Header Message #n Flags" field, "Version 1 Data Object Header Prefix",
+// version 4.0.
+pub const FAIL_IF_UNKNOWN_AND_OPEN_FOR_WRITE: u8 = 0x08;
+
 // Bit 7 of the "Header Message #n Flags" field, "Version 1 Data Object Header Prefix",
 // version 4.0.
 pub const FAIL_IF_UNKNOWN_ALWAYS: u8 = 0x80;
