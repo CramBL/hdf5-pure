@@ -9,6 +9,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 ### Changed
 
 - **Breaking:** (technically) rename the internal "heap-scope" feature to "__heap-scope"
+- Update `sha2` from `0.10` to `0.11`
 
 ### Fixed
 
