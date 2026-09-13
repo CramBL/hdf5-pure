@@ -15,7 +15,7 @@ use core::num::NonZeroUsize;
 
 use crate::chunk_grid::{ChunkGrid, GridOrder};
 use crate::convert::{TryToUsize, nonzero_usize_from};
-use crate::dataspace::MaxExtent;
+use crate::dataspace::{Extent, MaxExtent};
 use crate::error::FormatError;
 use crate::extensible_array::{DataBlockGeom, EaGeometry, ExtensibleArrayHeader, SuperBlockGeom};
 use crate::fill_value::FillPattern;
@@ -468,30 +468,30 @@ impl ChunkOptions {
         }
     }
 
-    /// Validate the chunk geometry of a dataset that will use chunked storage,
-    /// against its `shape` and optional `maxshape`. Returns a static reason on
-    /// the first problem; callers map it to their own error type. Only
-    /// meaningful when the dataset is actually chunked
-    /// ([`is_chunked`](Self::is_chunked) or a `maxshape` is set).
+    /// Checks the chunk geometry of a dataset of `extent`.
     ///
-    /// These checks turn what would otherwise be a panic deep in the chunk
-    /// splitter ([`split_into_chunks`], which indexes `chunk_dims` by the shape's
-    /// rank and divides by each chunk dimension) — or a silently corrupt,
-    /// unreadable dataset — into an up-front, descriptive refusal. A
-    /// zero-element shape (e.g. `[0]` for an empty extensible dataset) is allowed
-    /// with explicit chunk dimensions: it is not scalar and produces zero chunks,
-    /// which is well-formed.
-    ///
-    /// The chunk dimensions checked are the *resolved* ones — what
-    /// [`resolve_chunk_dims`](Self::resolve_chunk_dims) will hand the splitter —
+    /// The check is meaningful only for a dataset stored chunked, by
+    /// [`is_chunked`](Self::is_chunked) or by a maximum shape.
+    /// The chunk dimensions checked are the *resolved* ones, what
+    /// [`resolve_chunk_dims`](Self::resolve_chunk_dims) hands the splitter, and
     /// not only the ones the caller named. Auto-chunking derives them from the
-    /// shape, so a shape that is invalid to chunk by itself has to be caught
-    /// here rather than left to divide by zero one layer down.
-    pub fn validate_geometry(
-        &self,
-        shape: &[u64],
-        maxshape: Option<&[MaxExtent]>,
-    ) -> Result<(), &'static str> {
+    /// shape, so a shape that is invalid to chunk by itself is caught here,
+    /// before the division one layer down. A zero-element shape, `[0]`
+    /// for an empty extensible dataset, passes with explicit chunk dimensions: it
+    /// is not scalar and produces zero chunks, which is well-formed.
+    ///
+    /// # Errors
+    ///
+    /// Returns a reason for the first problem found, for the caller to map to its
+    /// own error type: a scalar shape, chunk dimensions of another rank than the
+    /// shape, a zero chunk dimension, a zero-element shape with no explicit chunk
+    /// dimensions, or more than one unlimited dimension. Without these checks
+    /// [`split_into_chunks`] panics on such a geometry, since it indexes
+    /// `chunk_dims` by the shape's rank and divides by each chunk dimension, and
+    /// a writer given more than one unlimited dimension writes a dataset the C
+    /// library fails to open.
+    pub(crate) fn validate_geometry(&self, extent: Extent<'_>) -> Result<(), &'static str> {
+        let shape = extent.dims();
         if shape.is_empty() {
             return Err("a scalar dataset cannot be chunked, filtered, or extensible");
         }
@@ -515,28 +515,18 @@ impl ChunkOptions {
                  (its shape has none to derive)",
             );
         }
-        // A maximum shape must match the rank and bound the current shape in
-        // every dimension (an unlimited dimension bounds anything).
-        if let Some(ms) = maxshape {
-            if ms.len() != shape.len() {
-                return Err("maxshape must have the same rank as the dataset shape");
-            }
-            if ms.iter().zip(shape).any(|(&m, &d)| !m.admits(d)) {
-                return Err("maxshape must be at least the current shape in every dimension");
-            }
-            // The reference library indexes a dataspace with two unlimited
-            // dimensions using a version-2 B-tree, which this crate does not
-            // write; an Extensible Array cannot number such a dataspace at all,
-            // since it has only one dimension it can grow along. Writing one
-            // anyway produced a dataset the reference library refuses to open
-            // ("already found unlimited dimension"), so this is a refusal rather
-            // than a file only this crate can read (issue #299).
-            if ms.iter().filter(|m| m.is_unlimited()).count() > 1 {
-                return Err(
-                    "at most one dimension of a maxshape may be unlimited; the chunk index \
-                     for more than one is a version-2 B-tree, which this crate cannot write",
-                );
-            }
+        // The C library indexes a dataspace with two unlimited
+        // dimensions using a version-2 B-tree, which this crate does not
+        // write. An Extensible Array cannot number such a dataspace at all,
+        // since it has only one dimension it can grow along. Writing one
+        // anyway writes a dataset the C library fails to open ("already found
+        // unlimited dimension"), so this check returns an error first
+        // (issue #299).
+        if extent.unlimited_dimensions() > 1 {
+            return Err(
+                "at most one dimension of a maxshape may be unlimited; the chunk index \
+                 for more than one is a version-2 B-tree, which this crate cannot write",
+            );
         }
         Ok(())
     }
@@ -3687,9 +3677,9 @@ mod tests {
             ..Default::default()
         };
         for shape in [vec![0u64], vec![4, 0], vec![0, 4]] {
-            let err = auto
-                .validate_geometry(&shape, Some(&vec![MaxExtent::Unlimited; shape.len()]))
-                .unwrap_err();
+            let unlimited = vec![MaxExtent::Unlimited; shape.len()];
+            let extent = Extent::new(&shape, Some(&unlimited)).unwrap();
+            let err = auto.validate_geometry(extent).unwrap_err();
             assert!(
                 err.contains("explicit chunk dimensions"),
                 "shape {shape:?}: {err}"
@@ -3705,12 +3695,10 @@ mod tests {
             chunk_dims: Some(vec![512]),
             ..Default::default()
         };
-        assert!(
-            explicit
-                .validate_geometry(&[0], Some(&[MaxExtent::Unlimited]))
-                .is_ok()
-        );
-        assert!(explicit.validate_geometry(&[0], None).is_ok());
+        let unlimited = Extent::new(&[0], Some(&[MaxExtent::Unlimited])).unwrap();
+        assert_eq!(explicit.validate_geometry(unlimited), Ok(()));
+        let bounded = Extent::new(&[0], None).unwrap();
+        assert_eq!(explicit.validate_geometry(bounded), Ok(()));
     }
 
     /// Options carrying `filters`, placed the way the `DatasetBuilder`

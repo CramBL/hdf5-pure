@@ -255,11 +255,71 @@ impl MaxExtent {
     }
 }
 
-// The "unlimited size" a maximum dimension size carries, `H5S_UNLIMITED`. The
-// C library defines `H5S_UNLIMITED` as `HSIZE_UNDEF`, which is `UINT64_MAX`
-// (`H5Spublic.h` and `H5public.h`, HDF5 2.2.0). A message written with a
-// narrower "Size of Lengths" cannot carry it: `H5O__sdspace_decode` zero-extends
-// the field it reads (`H5F_DECODE_LENGTH` in `H5Osdspace.c`, HDF5 2.2.0), so
+/// A dataset's shape beside the maximum shape that bounds it.
+///
+/// [`Extent::new`] checks the two against each other, so a writer that takes an `Extent` has a
+/// maximum shape of the shape's own rank, with every dimension inside its maximum.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Extent<'a> {
+    /// The current size of each dimension.
+    dims: &'a [u64],
+    /// The maximum size of each dimension, `None` for a dataset of a fixed shape.
+    max_dims: Option<&'a [MaxExtent]>,
+}
+
+impl<'a> Extent<'a> {
+    /// Pairs a shape with the maximum shape that bounds it.
+    ///
+    /// # Errors
+    ///
+    /// Returns a reason for the caller to report if `max_dims` and `dims` differ in rank, if a
+    /// maximum is smaller than the dimension it bounds, or if a maximum is
+    /// [`MaxExtent::Fixed`] at the unlimited size, which [`Dataspace::serialize`] writes as
+    /// [`MaxExtent::Unlimited`].
+    pub(crate) fn new(
+        dims: &'a [u64],
+        max_dims: Option<&'a [MaxExtent]>,
+    ) -> Result<Self, &'static str> {
+        if let Some(max_dims) = max_dims {
+            if max_dims.len() != dims.len() {
+                return Err("maxshape must have the same rank as the dataset shape");
+            }
+            if max_dims
+                .iter()
+                .zip(dims)
+                .any(|(max, &dim)| !max.admits(dim))
+            {
+                return Err("maxshape must be at least the current shape in every dimension");
+            }
+            if max_dims.contains(&MaxExtent::Fixed(UNLIMITED_LENGTH)) {
+                return Err(
+                    "a fixed maximum of u64::MAX is the format's unlimited marker; \
+                     name MaxExtent::Unlimited for a dimension that grows without bound",
+                );
+            }
+        }
+        Ok(Self { dims, max_dims })
+    }
+
+    pub(crate) const fn dims(self) -> &'a [u64] {
+        self.dims
+    }
+
+    /// Returns how many dimensions grow without bound.
+    ///
+    /// A dataset of a fixed shape has none.
+    pub(crate) fn unlimited_dimensions(self) -> usize {
+        self.max_dims.map_or(0, |max_dims| {
+            max_dims.iter().filter(|max| max.is_unlimited()).count()
+        })
+    }
+}
+
+// The maximum dimension size a dataspace message stores for a dimension that grows
+// without bound, the format's "unlimited size". The C library defines `H5S_UNLIMITED` as
+// `HSIZE_UNDEF`, which is `UINT64_MAX` (`H5Spublic.h` and `H5public.h`, HDF5 2.2.0). A
+// message written with a narrower "Size of Lengths" cannot hold it: `H5O__sdspace_decode`
+// zero-extends the field it reads (`H5F_DECODE_LENGTH` in `H5Osdspace.c`, HDF5 2.2.0), so
 // only an eight-byte field decodes to this value.
 const UNLIMITED_LENGTH: u64 = u64::MAX;
 
@@ -496,7 +556,36 @@ mod tests {
     }
 
     #[test]
-    fn max_extent_answers_its_bound() {
+    fn an_extent_joins_a_shape_with_a_maximum_that_bounds_it() {
+        let extent = Extent::new(&[4, 6], Some(&[MaxExtent::Unlimited, MaxExtent::Fixed(6)]))
+            .expect("an unlimited dimension bounds anything, and 6 bounds 6");
+        assert_eq!(extent.dims(), &[4, 6]);
+        assert_eq!(extent.unlimited_dimensions(), 1);
+
+        let bounded = Extent::new(&[4, 6], None).unwrap();
+        assert_eq!(bounded.unlimited_dimensions(), 0);
+    }
+
+    #[test]
+    fn an_extent_rejects_a_maximum_shape_that_disagrees_with_its_shape() {
+        assert_eq!(
+            Extent::new(&[4], Some(&[MaxExtent::Fixed(4), MaxExtent::Fixed(4)])).unwrap_err(),
+            "maxshape must have the same rank as the dataset shape"
+        );
+        assert_eq!(
+            Extent::new(&[4], Some(&[MaxExtent::Fixed(3)])).unwrap_err(),
+            "maxshape must be at least the current shape in every dimension"
+        );
+    }
+
+    #[test]
+    fn an_extent_rejects_a_fixed_maximum_at_the_unlimited_size() {
+        let err = Extent::new(&[4], Some(&[MaxExtent::Fixed(u64::MAX)])).unwrap_err();
+        assert!(err.contains("the format's unlimited marker"), "{err}");
+    }
+
+    #[test]
+    fn max_extent_reports_its_size_and_bounds_a_dimension() {
         assert_eq!(MaxExtent::Fixed(7).size(), Some(7));
         assert_eq!(MaxExtent::Unlimited.size(), None);
         assert!(!MaxExtent::Fixed(7).is_unlimited());

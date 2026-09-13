@@ -24,7 +24,7 @@ use crate::chunked_write::{
     measure_chunked_at, plan_chunked_data_verbatim,
 };
 use crate::convert::TryToUsize;
-use crate::dataspace::{Dataspace, DataspaceType, MaxExtent};
+use crate::dataspace::{Dataspace, DataspaceType, Extent, MaxExtent};
 use crate::error::{FormatError, OBJECT_HEADER_MESSAGE_MAX};
 use crate::file_create_properties::FileCreateProperties;
 use crate::file_space_info::{
@@ -1957,8 +1957,8 @@ impl FileWriter {
             // chunking a scalar) is refused here instead of panicking in the
             // chunk splitter or producing an unreadable dataset.
             if db.chunk_options.is_chunked() || db.maxshape.is_some() {
-                db.chunk_options
-                    .validate_geometry(&shape, db.maxshape.as_deref())
+                Extent::new(&shape, db.maxshape.as_deref())
+                    .and_then(|geometry| db.chunk_options.validate_geometry(geometry))
                     .map_err(FormatError::InvalidChunkGeometry)?;
             }
             // Variable-length string element references live in the global heap.

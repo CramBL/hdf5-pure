@@ -270,7 +270,7 @@ use crate::chunked_write::{
 };
 use crate::convert::TryToUsize;
 use crate::data_layout::{ChunkIndexLayout, DataLayout};
-use crate::dataspace::{Dataspace, DataspaceType, MaxExtent};
+use crate::dataspace::{Dataspace, DataspaceType, Extent, MaxExtent};
 use crate::datatype::{
     Datatype, DatatypeByteOrder, datatype_holds_file_address, datatype_holds_object_address,
     embedded_reference_slots, stored_object_references,
@@ -11880,8 +11880,8 @@ fn flatten_dataset(db: DatasetBuilder) -> Result<FlatDataset, Error> {
         // wrong rank, a zero chunk dimension, an inconsistent maximum shape, or
         // chunking a scalar — never reaches and panics the chunk splitter, nor
         // yields a dataset the reader cannot decode.
-        db.chunk_options
-            .validate_geometry(&shape, db.maxshape.as_deref())
+        Extent::new(&shape, db.maxshape.as_deref())
+            .and_then(|extent| db.chunk_options.validate_geometry(extent))
             .map_err(Error::EditUnsupported)?;
         // A filter this build cannot apply is refused up front rather than
         // failing mid-apply when a chunk is compressed.
