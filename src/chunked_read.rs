@@ -566,45 +566,6 @@ fn ensure_chunk_bytes_representable(
     }
 }
 
-/// Resolve a chunked layout's index address, or produce the buffer an
-/// unallocated dataset reads as.
-///
-/// A chunked dataset's index is allocated lazily — the reference C library
-/// leaves the layout message's address undefined until the first chunk is
-/// written — so a dataset that has been created but never written names no
-/// index at all. That is not an error and not an empty answer: it reads as one
-/// `fill` element per element of its dataspace, which for a zero-element
-/// dataset is the empty buffer and for any other is a whole materialized
-/// dataset. Both fall out of the same expression.
-///
-/// `Ok(Err(buffer))` is the "nothing allocated, here is what it reads as" case
-/// and `Ok(Ok(addr))` the ordinary one; the outer `Result` carries a genuine
-/// failure (an element count that cannot be addressed on this target).
-fn chunk_index_address(
-    addr: Option<u64>,
-    spec: RawReadSpec<'_>,
-) -> Result<Result<u64, Vec<u8>>, FormatError> {
-    if let Some(a) = addr {
-        return Ok(Ok(a));
-    }
-    let RawReadSpec {
-        dataspace,
-        datatype,
-        fill,
-        ..
-    } = spec;
-    let elem_size = datatype.element_size_usize()?;
-    let total = dataspace
-        .num_elements()
-        .to_usize()?
-        .checked_mul(elem_size.get())
-        .ok_or(FormatError::OffsetOverflow {
-            offset: dataspace.num_elements(),
-            length: elem_size.get() as u64,
-        })?;
-    Ok(Err(fill.buffer(total)?))
-}
-
 /// Read a chunked dataset from a [`Source`], reading the chunk index and
 /// each chunk's bytes on demand via `read_at`.
 ///
@@ -636,8 +597,8 @@ pub fn read_chunked_data_from_source<S: Source + ?Sized>(
         ));
     };
 
-    if let Err(unallocated) = chunk_index_address(index.address(), spec)? {
-        return Ok(unallocated);
+    if index.address().is_none() {
+        return spec.unallocated_buffer();
     }
 
     let elem_size = datatype.element_size_usize()?;
@@ -838,9 +799,9 @@ pub(crate) fn read_chunked_rows_from_source<S: Source + ?Sized>(
     // Unallocated chunk index: no storage exists, so every element of the window
     // is fill. `output` already holds exactly that (it was built from the
     // pattern), so the window is finished before any chunk is looked at — the
-    // same answer the whole-dataset readers give through `chunk_index_address`,
-    // which is what keeps `read_raw_rows` and `read_raw` agreeing over a dataset
-    // that was created and never written.
+    // same bytes the whole-dataset readers return through
+    // `RawReadSpec::unallocated_buffer`, which is what keeps `read_raw_rows` and
+    // `read_raw` agreeing over a dataset that was created and never written.
     if index.address().is_none() {
         return Ok(Some(output));
     }
@@ -1053,8 +1014,8 @@ pub fn read_chunked_data_cached_from_source<S: Source + ?Sized>(
         ));
     };
 
-    if let Err(unallocated) = chunk_index_address(index.address(), spec)? {
-        return Ok(unallocated);
+    if index.address().is_none() {
+        return spec.unallocated_buffer();
     }
 
     let elem_size = datatype.element_size_usize()?;
@@ -1684,9 +1645,8 @@ pub fn read_chunked_data_cached(
         ));
     };
 
-    let addr = match chunk_index_address(index.address(), spec)? {
-        Ok(addr) => addr,
-        Err(unallocated) => return Ok(unallocated),
+    let Some(addr) = index.address() else {
+        return spec.unallocated_buffer();
     };
 
     // Taken once as a proven-non-zero width; see the buffered reader above.
@@ -2017,12 +1977,11 @@ mod tests {
     /// A chunk grid with a *hole* — some chunks allocated, others never — reads
     /// the hole as the fill value.
     ///
-    /// This is the case the change exists for, and the one that used to return
-    /// `Ok` with zeros regardless of the fill value. It goes through
-    /// `read_chunked_data_from_source` deliberately: that reader is the only one
-    /// reaching [`assemble_chunks`], and the unallocated-*index* test below
-    /// returns from `chunk_index_address` before ever getting there — so without
-    /// a sparse grid, `assemble_chunks`'s prefill has no coverage at all.
+    /// It goes through `read_chunked_data_from_source` deliberately: that reader
+    /// is the only one reaching [`assemble_chunks`], and the unallocated-*index*
+    /// test below returns from [`RawReadSpec::unallocated_buffer`] before ever
+    /// getting there, so without a sparse grid, the fill `assemble_chunks`
+    /// writes before it places a chunk has no coverage at all.
     ///
     /// The index holds the first and last of four chunk slots, so the hole is
     /// interior rather than a tail.
@@ -2096,7 +2055,7 @@ mod tests {
     }
 
     /// All three whole-dataset readers materialize an unallocated layout the
-    /// same way, which is what [`chunk_index_address`] promises them.
+    /// same way, which is what [`RawReadSpec::unallocated_buffer`] promises them.
     ///
     /// Exercised directly rather than through `Dataset::read_raw`, because the
     /// buffered entry point short-circuits `num_elements == 0` in
@@ -3083,15 +3042,15 @@ mod tests {
         );
     }
 
-    /// An unallocated chunk index (no address, e.g. a late-allocated
-    /// never-written dataset) reads as fill for a non-empty window, matching the
+    /// An index with no address, as a late-allocated dataset that was never
+    /// written has, reads as fill for a non-empty window, matching the
     /// whole-dataset reader element for element, and as the empty buffer for a
     /// zero-row one.
     ///
-    /// The window and the whole read reach the fill by different routes — the
-    /// window returns the buffer it built up front, the whole read builds one in
-    /// `chunk_index_address` — so this compares them rather than asserting a
-    /// literal on either.
+    /// The two reach the fill by different routes: the window returns the buffer
+    /// it built up front, and the whole read builds one in
+    /// [`RawReadSpec::unallocated_buffer`]. The test compares the two reads
+    /// against each other, with no literal on either side.
     #[test]
     fn windowed_rows_unallocated_index_matches_whole_read() {
         let layout = DataLayout::Chunked {

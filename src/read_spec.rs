@@ -16,6 +16,9 @@
 //! layer at once, and the sites that must decide what it is are the few that
 //! build the spec.
 
+#[cfg(not(feature = "std"))]
+use alloc::vec::Vec;
+
 use crate::convert::TryToUsize;
 use crate::data_layout::DataLayout;
 use crate::dataspace::Dataspace;
@@ -91,6 +94,38 @@ impl<'a> RawReadSpec<'a> {
             return Err(FormatError::DataSizeMismatch { expected, actual });
         }
         Ok(expected)
+    }
+
+    /// Returns the buffer a dataset whose storage was never allocated reads as.
+    ///
+    /// A chunked dataset's index is allocated lazily, since the reference C
+    /// library leaves the layout message's address undefined until the first
+    /// chunk is written, so a dataset that has been created but never written
+    /// refers to no index at all. That is neither an error nor an empty read: it
+    /// reads as one `fill` element per element of its dataspace, which for a
+    /// zero-element dataset is the empty buffer and for any other is a whole
+    /// materialized dataset.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::UnreadableFillValue`] if the dataset's Fill Value
+    /// message could not be parsed, leaving those elements no value to read as,
+    /// [`FormatError::ZeroSizedDatatype`] if the datatype occupies zero bytes
+    /// per element, and [`FormatError::ValueTooLargeForPlatform`] or
+    /// [`FormatError::OffsetOverflow`] if the materialized dataset would be
+    /// larger than this target can address.
+    pub(crate) fn unallocated_buffer(&self) -> Result<Vec<u8>, FormatError> {
+        let elem_size = self.datatype.element_size_usize()?;
+        let total = self
+            .dataspace
+            .num_elements()
+            .to_usize()?
+            .checked_mul(elem_size.get())
+            .ok_or(FormatError::OffsetOverflow {
+                offset: self.dataspace.num_elements(),
+                length: elem_size.get() as u64,
+            })?;
+        self.fill.buffer(total)
     }
 
     /// A spec for an unfiltered dataset whose unallocated storage reads as
