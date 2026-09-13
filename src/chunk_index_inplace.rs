@@ -1621,6 +1621,7 @@ fn read_uint(data: &[u8], pos: usize, size: usize) -> Result<u64, Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::access_mode::AccessMode;
     use crate::group_v2;
     use crate::signature;
     use crate::source::BytesSource;
@@ -1782,7 +1783,9 @@ mod tests {
     /// Drive the full located-append path (`locate_at` + `plan_ea_append` +
     /// `apply_ea_append`) through the probe store and return the located state.
     fn locate(store: &WindowProbeStore) -> (Located, crate::datatype::Datatype) {
-        let oh_addr = group_v2::resolve_path_any(&store.data, &store.superblock, "d").unwrap();
+        let oh_addr =
+            group_v2::resolve_path_any(&store.data, AccessMode::ReadOnly, &store.superblock, "d")
+                .unwrap();
         let result = Located::locate_at(store, oh_addr, Error::AppendUnsupported).unwrap();
         let (dt_off, dt_size) = result.spans.datatype;
         let dt_bytes = store.read_metadata_at(dt_off, dt_size).unwrap();

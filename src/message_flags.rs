@@ -3,6 +3,8 @@
 use core::fmt;
 use core::ops::BitOr;
 
+use crate::access_mode::AccessMode;
+
 /// The flags of an object header message record, its "Header Message #n Flags" field.
 ///
 /// The format defines all eight bits of the field, so every byte a record stores is a combination
@@ -66,13 +68,12 @@ impl MessageFlags {
         self.contains(Self::FAIL_IF_UNKNOWN_ALWAYS)
     }
 
-    /// Returns `true` if [`MessageFlags::FAIL_IF_UNKNOWN_FOR_WRITE`] or
-    /// [`MessageFlags::FAIL_IF_UNKNOWN_ALWAYS`] is set.
-    ///
-    /// The two flags differ in the access the specification conditions them on: write access for
-    /// the first, any access for the second.
-    pub(crate) const fn must_be_understood(self) -> bool {
-        self.fails_if_unknown_for_write() || self.fails_if_unknown_always()
+    /// Returns `true` if a decoder under `access_mode` that cannot name the message's type must reject
+    /// the object: [`MessageFlags::FAIL_IF_UNKNOWN_ALWAYS`] under either access, and
+    /// [`MessageFlags::FAIL_IF_UNKNOWN_FOR_WRITE`] under [`AccessMode::ReadWrite`] alone.
+    pub(crate) const fn must_be_understood(self, access_mode: AccessMode) -> bool {
+        self.fails_if_unknown_always()
+            || (self.fails_if_unknown_for_write() && access_mode.is_read_write())
     }
 
     /// Returns `true` if no flag is set.
@@ -225,6 +226,27 @@ mod tests {
     #[test]
     fn debug_names_no_flag_for_an_empty_flags_byte() {
         assert_eq!(format!("{:?}", MessageFlags::NONE), "MessageFlags()");
+    }
+
+    #[test]
+    fn only_write_access_must_understand_a_message_flagged_fail_if_unknown_for_write() {
+        let flags = MessageFlags::FAIL_IF_UNKNOWN_FOR_WRITE;
+        assert!(!flags.must_be_understood(AccessMode::ReadOnly));
+        assert!(flags.must_be_understood(AccessMode::ReadWrite));
+    }
+
+    #[test]
+    fn either_access_must_understand_a_message_flagged_fail_if_unknown_always() {
+        let flags = MessageFlags::FAIL_IF_UNKNOWN_ALWAYS;
+        assert!(flags.must_be_understood(AccessMode::ReadOnly));
+        assert!(flags.must_be_understood(AccessMode::ReadWrite));
+    }
+
+    #[test]
+    fn either_access_reads_past_a_message_flagged_with_no_fail_if_unknown_bit() {
+        let flags = MessageFlags::CONSTANT | MessageFlags::SHAREABLE;
+        assert!(!flags.must_be_understood(AccessMode::ReadOnly));
+        assert!(!flags.must_be_understood(AccessMode::ReadWrite));
     }
 
     fn flags_set_in(flags: MessageFlags) -> Vec<MessageFlags> {

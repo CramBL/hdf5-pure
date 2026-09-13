@@ -114,6 +114,7 @@ use std::collections::{BTreeSet, HashMap};
 use std::path::Path;
 use std::sync::Arc;
 
+use crate::access_mode::AccessMode;
 use crate::attribute::AttributeMessage;
 use crate::chunked_read::ChunkInfo;
 use crate::chunked_write::{ChunkMeta, ChunkProvider, FilterKind, FilterSpec};
@@ -154,6 +155,10 @@ pub struct RepackOptions {
     /// [`with_libver_bounds`](Self::with_libver_bounds). `None` carries the
     /// source's own format forward.
     libver_bounds: Option<(LibVer, LibVer)>,
+    /// Whether the source's object headers are parsed as a writer parses them, from
+    /// [`reject_unknown_messages_only_a_writer_must_understand`](Self::reject_unknown_messages_only_a_writer_must_understand).
+    /// See [`source_access_mode`](Self::source_access_mode) for the mode it selects.
+    reject_unknown_messages_only_a_writer_must_understand: bool,
 }
 
 impl RepackOptions {
@@ -212,6 +217,65 @@ impl RepackOptions {
     pub fn libver_bounds(&self) -> Option<(LibVer, LibVer)> {
         self.libver_bounds
     }
+
+    /// Rejects a source holding an object header message of a type this crate cannot
+    /// name that only a decoder with write access must understand.
+    ///
+    /// The flag is `H5O_MSG_FLAG_FAIL_IF_UNKNOWN_AND_OPEN_FOR_WRITE`, bit 3 of the
+    /// message record's flags. The source is opened read-only either way, and this
+    /// option parses its object headers as a writer does, so
+    /// [`repack`](fn@crate::repack) reports [`FormatError::UnsupportedMessage`] with
+    /// the message's type before any byte reaches the destination. A message flagged
+    /// `H5O_MSG_FLAG_FAIL_IF_UNKNOWN_ALWAYS` is rejected with this option and
+    /// without it.
+    ///
+    /// The default is what `h5repack` does. `h5repack` also reads its input
+    /// read-only, and this crate rebuilds every object without a message it cannot
+    /// name. This option is this crate's own, and `h5repack` has no counterpart for
+    /// it. Set it where a repack must fail on a message the source marked for a
+    /// decoder with write access.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// # let dir = tempfile::tempdir()?;
+    /// # let src = dir.path().join("data.h5");
+    /// # let dst = dir.path().join("compact.h5");
+    /// # let mut builder = hdf5_pure::FileBuilder::new();
+    /// # builder.create_dataset("values").with_i32_data(&[1, 2, 3]);
+    /// # builder.write(&src)?;
+    /// use hdf5_pure::{File, RepackOptions, repack};
+    ///
+    /// // Rejects a source holding a message flagged for a decoder with write access.
+    /// let options = RepackOptions::new().reject_unknown_messages_only_a_writer_must_understand();
+    /// repack(&src, &dst, &options)?;
+    ///
+    /// assert_eq!(File::open(&dst)?.dataset("values")?.read_i32()?, vec![1, 2, 3]);
+    /// # Ok::<(), hdf5_pure::Error>(())
+    /// ```
+    pub fn reject_unknown_messages_only_a_writer_must_understand(mut self) -> Self {
+        self.reject_unknown_messages_only_a_writer_must_understand = true;
+        self
+    }
+
+    /// Returns `true` if this repack reads its source as a writer would, which
+    /// [`reject_unknown_messages_only_a_writer_must_understand`](Self::reject_unknown_messages_only_a_writer_must_understand)
+    /// sets.
+    pub fn rejects_unknown_messages_only_a_writer_must_understand(&self) -> bool {
+        self.reject_unknown_messages_only_a_writer_must_understand
+    }
+
+    /// The mode the source's object headers are parsed under: [`AccessMode::ReadWrite`]
+    /// with [`reject_unknown_messages_only_a_writer_must_understand`](Self::reject_unknown_messages_only_a_writer_must_understand)
+    /// set, which is the mode a parse rejects a message of an unknown type flagged for
+    /// a decoder with write access under.
+    pub(crate) fn source_access_mode(&self) -> AccessMode {
+        if self.reject_unknown_messages_only_a_writer_must_understand {
+            AccessMode::ReadWrite
+        } else {
+            AccessMode::ReadOnly
+        }
+    }
 }
 
 /// Repack `src` into a new file at `dst`, applying `options`.
@@ -231,12 +295,23 @@ impl RepackOptions {
 /// See [`Error::RepackUnsupported`] for the objects that cannot be reproduced
 /// faithfully.
 ///
-/// `src` is opened with [`File::open_streaming`], so a file whose superblock
-/// marks it as held by a writer is refused with
-/// [`Error::FileMarkedInUse`] — repacking a file a writer is still growing would
-/// capture a torn view. Clear a flag a crashed writer left with
-/// [`File::clear_swmr_flag`](crate::File::clear_swmr_flag) first, as `h5repack`
-/// needs `h5clear`.
+/// `src` is opened for streaming reads, so a file whose superblock marks it as
+/// held by a writer is rejected with [`Error::FileMarkedInUse`], since repacking
+/// a file a writer is still growing would capture a torn view. Clear a flag a
+/// crashed writer left with [`File::clear_swmr_flag`](crate::File::clear_swmr_flag)
+/// first, as `h5repack` needs `h5clear`.
+///
+/// The source's object headers are parsed read-only by default, so a message of a
+/// type this crate cannot name that only a decoder with write access must
+/// understand is read past, and `repack` writes the object into `dst` without it,
+/// wherever the message sits. `h5repack` opens its input read-only as well and
+/// rebuilds a group or a named datatype, so both tools drop such a message from
+/// those headers. A dataset that `h5repack` copies with `H5Ocopy` keeps the message
+/// in the output (`h5repack_copy.c` and `H5Ocopy.c`, HDF5 2.2.0).
+///
+/// [`RepackOptions::reject_unknown_messages_only_a_writer_must_understand`] parses
+/// them as a writer does, so such a message is reported as
+/// [`FormatError::UnsupportedMessage`] before any byte reaches `dst`.
 pub fn repack<P: AsRef<Path>, Q: AsRef<Path>>(
     src: P,
     dst: Q,
@@ -246,7 +321,10 @@ pub fn repack<P: AsRef<Path>, Q: AsRef<Path>>(
     // chunk are resident at a time, never the whole file. Shared so each streamed
     // dataset's chunk provider can pull from the same handle during the write
     // without an extra open.
-    let file = Arc::new(File::open_streaming(src)?);
+    let file = Arc::new(File::open_streaming_with_access_mode(
+        src.as_ref(),
+        options.source_access_mode(),
+    )?);
 
     // Normalize the drop set to canonical slash-free paths and remember which
     // ones actually match, so an unmatched drop can be reported as an error.

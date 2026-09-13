@@ -6,6 +6,7 @@
 #[cfg(not(feature = "std"))]
 use alloc::{string::String, vec::Vec};
 
+use crate::access_mode::AccessMode;
 use crate::address::BaseAddress;
 use crate::btree_v2::{
     BTreeV2Header, collect_btree_v2_records, collect_btree_v2_records_from_source,
@@ -141,6 +142,7 @@ impl ChildLookup {
 /// The address answered is absolute; see [`ChildLookup::of`].
 pub(crate) fn find_child_address(
     file_data: &[u8],
+    access_mode: AccessMode,
     group_address: u64,
     offset_size: u8,
     length_size: u8,
@@ -152,6 +154,7 @@ pub(crate) fn find_child_address(
         let mut wanted = wanted_link_only(name, &mut saw_link);
         ObjectHeader::parse_filtered(
             file_data,
+            access_mode,
             group_address.to_usize()?,
             offset_size,
             length_size,
@@ -180,6 +183,7 @@ pub(crate) fn find_child_address(
 /// Streaming counterpart of [`find_child_address`].
 pub(crate) fn find_child_address_from_source<S: Source + ?Sized>(
     source: &S,
+    access_mode: AccessMode,
     group_address: u64,
     offset_size: u8,
     length_size: u8,
@@ -191,6 +195,7 @@ pub(crate) fn find_child_address_from_source<S: Source + ?Sized>(
         let mut wanted = wanted_link_only(name, &mut saw_link);
         ObjectHeader::parse_from_source_filtered(
             source,
+            access_mode,
             group_address,
             offset_size,
             length_size,
@@ -434,6 +439,7 @@ fn walked_prefix(components: &[&str], i: usize) -> String {
 /// Detects group version from object header messages and dispatches accordingly.
 pub fn resolve_path_any(
     file_data: &[u8],
+    access_mode: AccessMode,
     superblock: &Superblock,
     path: &str,
 ) -> Result<u64, ResolveError> {
@@ -449,7 +455,15 @@ pub fn resolve_path_any(
     let mut current_addr = superblock.root_group_address;
 
     for (i, component) in components.iter().enumerate() {
-        match find_child_address(file_data, current_addr, os, ls, base, component)? {
+        match find_child_address(
+            file_data,
+            access_mode,
+            current_addr,
+            os,
+            ls,
+            base,
+            component,
+        )? {
             ChildLookup::Found(abs_addr) => {
                 if i == components.len() - 1 {
                     return Ok(abs_addr);
@@ -524,6 +538,7 @@ pub fn resolve_group_entries(
 /// groups via [`group_v1::resolve_v1_group_entries_from_source`].
 pub fn resolve_path_any_from_source<S: Source + ?Sized>(
     source: &S,
+    access_mode: AccessMode,
     superblock: &Superblock,
     path: &str,
 ) -> Result<u64, ResolveError> {
@@ -539,7 +554,15 @@ pub fn resolve_path_any_from_source<S: Source + ?Sized>(
     let mut current_addr = superblock.root_group_address;
 
     for (i, component) in components.iter().enumerate() {
-        match find_child_address_from_source(source, current_addr, os, ls, base, component)? {
+        match find_child_address_from_source(
+            source,
+            access_mode,
+            current_addr,
+            os,
+            ls,
+            base,
+            component,
+        )? {
             ChildLookup::Found(abs_addr) => {
                 if i == components.len() - 1 {
                     return Ok(abs_addr);
@@ -874,9 +897,16 @@ mod tests {
         let sb = Superblock::parse(file_data, sig_offset).unwrap();
         assert!(sb.version >= 2); // v2/v3 superblock
 
-        let addr = resolve_path_any(file_data, &sb, "sensors/temperature").unwrap();
-        let hdr =
-            ObjectHeader::parse(file_data, addr as usize, sb.offset_size, sb.length_size).unwrap();
+        let addr =
+            resolve_path_any(file_data, AccessMode::ReadOnly, &sb, "sensors/temperature").unwrap();
+        let hdr = ObjectHeader::parse(
+            file_data,
+            AccessMode::ReadOnly,
+            addr as usize,
+            sb.offset_size,
+            sb.length_size,
+        )
+        .unwrap();
         let (dt, ds, dl) = extract_dataset(file_data, &hdr, sb.offset_size, sb.length_size);
         let raw = data_read::read_raw_data(file_data, &dl, &ds, &dt).unwrap();
         let values = data_read::read_as_f64(&raw, &dt).unwrap();
@@ -889,9 +919,16 @@ mod tests {
         let sig_offset = signature::find_signature(file_data).unwrap();
         let sb = Superblock::parse(file_data, sig_offset).unwrap();
 
-        let addr = resolve_path_any(file_data, &sb, "sensors/humidity").unwrap();
-        let hdr =
-            ObjectHeader::parse(file_data, addr as usize, sb.offset_size, sb.length_size).unwrap();
+        let addr =
+            resolve_path_any(file_data, AccessMode::ReadOnly, &sb, "sensors/humidity").unwrap();
+        let hdr = ObjectHeader::parse(
+            file_data,
+            AccessMode::ReadOnly,
+            addr as usize,
+            sb.offset_size,
+            sb.length_size,
+        )
+        .unwrap();
         let (dt, ds, dl) = extract_dataset(file_data, &hdr, sb.offset_size, sb.length_size);
         let raw = data_read::read_raw_data(file_data, &dl, &ds, &dt).unwrap();
         let values = data_read::read_as_i32(&raw, &dt).unwrap();
@@ -904,9 +941,15 @@ mod tests {
         let sig_offset = signature::find_signature(file_data).unwrap();
         let sb = Superblock::parse(file_data, sig_offset).unwrap();
 
-        let addr = resolve_path_any(file_data, &sb, "dataset_015").unwrap();
-        let hdr =
-            ObjectHeader::parse(file_data, addr as usize, sb.offset_size, sb.length_size).unwrap();
+        let addr = resolve_path_any(file_data, AccessMode::ReadOnly, &sb, "dataset_015").unwrap();
+        let hdr = ObjectHeader::parse(
+            file_data,
+            AccessMode::ReadOnly,
+            addr as usize,
+            sb.offset_size,
+            sb.length_size,
+        )
+        .unwrap();
         let (dt, ds, dl) = extract_dataset(file_data, &hdr, sb.offset_size, sb.length_size);
         let raw = data_read::read_raw_data(file_data, &dl, &ds, &dt).unwrap();
         let values = data_read::read_as_f64(&raw, &dt).unwrap();
@@ -920,9 +963,15 @@ mod tests {
         let sig_offset = signature::find_signature(file_data).unwrap();
         let sb = Superblock::parse(file_data, sig_offset).unwrap();
 
-        let addr = resolve_path_any(file_data, &sb, "group1/values").unwrap();
-        let hdr =
-            ObjectHeader::parse(file_data, addr as usize, sb.offset_size, sb.length_size).unwrap();
+        let addr = resolve_path_any(file_data, AccessMode::ReadOnly, &sb, "group1/values").unwrap();
+        let hdr = ObjectHeader::parse(
+            file_data,
+            AccessMode::ReadOnly,
+            addr as usize,
+            sb.offset_size,
+            sb.length_size,
+        )
+        .unwrap();
         let (dt, ds, dl) = extract_dataset(file_data, &hdr, sb.offset_size, sb.length_size);
         let raw = data_read::read_raw_data(file_data, &dl, &ds, &dt).unwrap();
         let values = data_read::read_as_i32(&raw, &dt).unwrap();
@@ -935,9 +984,16 @@ mod tests {
         let sig_offset = signature::find_signature(file_data).unwrap();
         let sb = Superblock::parse(file_data, sig_offset).unwrap();
 
-        let addr = resolve_path_any(file_data, &sb, "sensors/temperature").unwrap();
-        let hdr =
-            ObjectHeader::parse(file_data, addr as usize, sb.offset_size, sb.length_size).unwrap();
+        let addr =
+            resolve_path_any(file_data, AccessMode::ReadOnly, &sb, "sensors/temperature").unwrap();
+        let hdr = ObjectHeader::parse(
+            file_data,
+            AccessMode::ReadOnly,
+            addr as usize,
+            sb.offset_size,
+            sb.length_size,
+        )
+        .unwrap();
         let (dt, ds, dl) = extract_dataset(file_data, &hdr, sb.offset_size, sb.length_size);
         let raw = data_read::read_raw_data(file_data, &dl, &ds, &dt).unwrap();
         let values = data_read::read_as_f64(&raw, &dt).unwrap();
@@ -950,7 +1006,8 @@ mod tests {
         let sig_offset = signature::find_signature(file_data).unwrap();
         let sb = Superblock::parse(file_data, sig_offset).unwrap();
 
-        let err = resolve_path_any(file_data, &sb, "nonexistent").unwrap_err();
+        let err =
+            resolve_path_any(file_data, AccessMode::ReadOnly, &sb, "nonexistent").unwrap_err();
         assert!(matches!(
             err,
             ResolveError::Format(FormatError::PathNotFound(_))
@@ -1087,9 +1144,10 @@ mod huge_link_tests {
         let sig = signature::find_signature(bytes).unwrap();
         let superblock = Superblock::parse(bytes, sig).unwrap();
         let (offset_size, length_size) = (superblock.offset_size, superblock.length_size);
-        let group_addr = resolve_path_any(bytes, &superblock, "g").unwrap();
+        let group_addr = resolve_path_any(bytes, AccessMode::ReadOnly, &superblock, "g").unwrap();
         let header = ObjectHeader::parse(
             bytes,
+            AccessMode::ReadOnly,
             group_addr.to_usize().unwrap(),
             offset_size,
             length_size,

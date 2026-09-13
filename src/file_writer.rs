@@ -3729,6 +3729,7 @@ impl FileWriter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::access_mode::AccessMode;
     use crate::group_v2::resolve_path_any;
     use crate::link_info::LinkInfoMessage;
     use crate::object_header::ObjectHeader;
@@ -3742,7 +3743,8 @@ mod tests {
     #[test]
     fn a_committed_datatype_header_holds_only_its_type() {
         let bytes = build_committed_datatype_oh(&make_i32_type(), 1).unwrap();
-        let hdr = ObjectHeader::parse(&bytes, 0, OFFSET_SIZE, LENGTH_SIZE).unwrap();
+        let hdr =
+            ObjectHeader::parse(&bytes, AccessMode::ReadOnly, 0, OFFSET_SIZE, LENGTH_SIZE).unwrap();
 
         let types: Vec<MessageType> = hdr.messages.iter().map(|m| m.msg_type).collect();
         assert_eq!(
@@ -3767,7 +3769,8 @@ mod tests {
     #[test]
     fn a_committed_datatype_header_records_a_count_above_one() {
         let bytes = build_committed_datatype_oh(&make_i32_type(), 4).unwrap();
-        let hdr = ObjectHeader::parse(&bytes, 0, OFFSET_SIZE, LENGTH_SIZE).unwrap();
+        let hdr =
+            ObjectHeader::parse(&bytes, AccessMode::ReadOnly, 0, OFFSET_SIZE, LENGTH_SIZE).unwrap();
 
         let refcount = hdr
             .messages
@@ -3815,9 +3818,15 @@ mod tests {
     fn committed_reference_count(bytes: &[u8], path: &str) -> Option<u32> {
         let sig = signature::find_signature(bytes).unwrap();
         let sb = Superblock::parse(bytes, sig).unwrap();
-        let addr = resolve_path_any(bytes, &sb, path).unwrap();
-        let hdr =
-            ObjectHeader::parse(bytes, addr as usize, sb.offset_size, sb.length_size).unwrap();
+        let addr = resolve_path_any(bytes, AccessMode::ReadOnly, &sb, path).unwrap();
+        let hdr = ObjectHeader::parse(
+            bytes,
+            AccessMode::ReadOnly,
+            addr as usize,
+            sb.offset_size,
+            sb.length_size,
+        )
+        .unwrap();
         let msg = hdr
             .messages
             .iter()
@@ -3842,10 +3851,16 @@ mod tests {
 
         let sig = signature::find_signature(&bytes).unwrap();
         let sb = Superblock::parse(&bytes, sig).unwrap();
-        let type_addr = resolve_path_any(&bytes, &sb, "mytype").unwrap();
-        let ds_addr = resolve_path_any(&bytes, &sb, "typed").unwrap();
-        let hdr =
-            ObjectHeader::parse(&bytes, ds_addr as usize, sb.offset_size, sb.length_size).unwrap();
+        let type_addr = resolve_path_any(&bytes, AccessMode::ReadOnly, &sb, "mytype").unwrap();
+        let ds_addr = resolve_path_any(&bytes, AccessMode::ReadOnly, &sb, "typed").unwrap();
+        let hdr = ObjectHeader::parse(
+            &bytes,
+            AccessMode::ReadOnly,
+            ds_addr as usize,
+            sb.offset_size,
+            sb.length_size,
+        )
+        .unwrap();
         let msg = hdr
             .messages
             .iter()
@@ -3868,6 +3883,7 @@ mod tests {
         let sb = Superblock::parse(bytes, sig).unwrap();
         let oh = ObjectHeader::parse(
             bytes,
+            AccessMode::ReadOnly,
             sb.root_group_address as usize,
             sb.offset_size,
             sb.length_size,
@@ -3879,9 +3895,15 @@ mod tests {
     fn read_dataset_f64(bytes: &[u8], path: &str) -> Vec<f64> {
         let sig = signature::find_signature(bytes).unwrap();
         let sb = Superblock::parse(bytes, sig).unwrap();
-        let addr = resolve_path_any(bytes, &sb, path).unwrap();
-        let hdr =
-            ObjectHeader::parse(bytes, addr as usize, sb.offset_size, sb.length_size).unwrap();
+        let addr = resolve_path_any(bytes, AccessMode::ReadOnly, &sb, path).unwrap();
+        let hdr = ObjectHeader::parse(
+            bytes,
+            AccessMode::ReadOnly,
+            addr as usize,
+            sb.offset_size,
+            sb.length_size,
+        )
+        .unwrap();
         let dt_data = &hdr
             .messages
             .iter()
@@ -3935,9 +3957,15 @@ mod tests {
         assert_eq!(read_dataset_f64(&bytes, "data"), vec![1.0, 2.0]);
         let sig = signature::find_signature(&bytes).unwrap();
         let sb = Superblock::parse(&bytes, sig).unwrap();
-        let addr = resolve_path_any(&bytes, &sb, "data").unwrap();
-        let hdr =
-            ObjectHeader::parse(&bytes, addr as usize, sb.offset_size, sb.length_size).unwrap();
+        let addr = resolve_path_any(&bytes, AccessMode::ReadOnly, &sb, "data").unwrap();
+        let hdr = ObjectHeader::parse(
+            &bytes,
+            AccessMode::ReadOnly,
+            addr as usize,
+            sb.offset_size,
+            sb.length_size,
+        )
+        .unwrap();
         let attrs = crate::attribute::extract_attributes(&hdr, sb.length_size).unwrap();
         assert_eq!(attrs.len(), 1);
         assert_eq!(attrs[0].name, "scale");
@@ -3979,9 +4007,15 @@ mod tests {
         let bytes = fw.finish().unwrap();
         let sig = signature::find_signature(&bytes).unwrap();
         let sb = Superblock::parse(&bytes, sig).unwrap();
-        let addr = resolve_path_any(&bytes, &sb, "grp").unwrap();
-        let hdr =
-            ObjectHeader::parse(&bytes, addr as usize, sb.offset_size, sb.length_size).unwrap();
+        let addr = resolve_path_any(&bytes, AccessMode::ReadOnly, &sb, "grp").unwrap();
+        let hdr = ObjectHeader::parse(
+            &bytes,
+            AccessMode::ReadOnly,
+            addr as usize,
+            sb.offset_size,
+            sb.length_size,
+        )
+        .unwrap();
         assert_eq!(hdr.flags & 0x20, 0, "times-stored flag must be clear");
         assert!(hdr.modification_time.is_none());
     }
@@ -4002,9 +4036,15 @@ mod tests {
         let bytes = fw.finish().unwrap();
         let sig = signature::find_signature(&bytes).unwrap();
         let sb = Superblock::parse(&bytes, sig).unwrap();
-        let addr = resolve_path_any(&bytes, &sb, "grp").unwrap();
-        let hdr =
-            ObjectHeader::parse(&bytes, addr as usize, sb.offset_size, sb.length_size).unwrap();
+        let addr = resolve_path_any(&bytes, AccessMode::ReadOnly, &sb, "grp").unwrap();
+        let hdr = ObjectHeader::parse(
+            &bytes,
+            AccessMode::ReadOnly,
+            addr as usize,
+            sb.offset_size,
+            sb.length_size,
+        )
+        .unwrap();
 
         let link_info_msg = hdr
             .messages
@@ -4053,11 +4093,18 @@ mod tests {
         let bytes = fw.finish().unwrap();
         let sig = signature::find_signature(&bytes).unwrap();
         let sb = Superblock::parse(&bytes, sig).unwrap();
-        let addr = resolve_path_any(&bytes, &sb, "data").unwrap();
-        let hdr =
-            ObjectHeader::parse(&bytes, addr as usize, sb.offset_size, sb.length_size).unwrap();
+        let addr = resolve_path_any(&bytes, AccessMode::ReadOnly, &sb, "data").unwrap();
+        let hdr = ObjectHeader::parse(
+            &bytes,
+            AccessMode::ReadOnly,
+            addr as usize,
+            sb.offset_size,
+            sb.length_size,
+        )
+        .unwrap();
         let attrs = crate::attribute::extract_attributes_full(
             &bytes,
+            AccessMode::ReadOnly,
             &hdr,
             sb.offset_size,
             sb.length_size,
@@ -4088,6 +4135,7 @@ mod tests {
         let sb = Superblock::parse(&bytes, sig).unwrap();
         let oh = ObjectHeader::parse(
             &bytes,
+            AccessMode::ReadOnly,
             sb.root_group_address as usize,
             sb.offset_size,
             sb.length_size,
@@ -4095,6 +4143,7 @@ mod tests {
         .unwrap();
         let attrs = crate::attribute::extract_attributes_full(
             &bytes,
+            AccessMode::ReadOnly,
             &oh,
             sb.offset_size,
             sb.length_size,
@@ -4115,9 +4164,15 @@ mod tests {
         let bytes = fw.finish().unwrap();
         let sig = signature::find_signature(&bytes).unwrap();
         let sb = Superblock::parse(&bytes, sig).unwrap();
-        let addr = resolve_path_any(&bytes, &sb, "data").unwrap();
-        let hdr =
-            ObjectHeader::parse(&bytes, addr as usize, sb.offset_size, sb.length_size).unwrap();
+        let addr = resolve_path_any(&bytes, AccessMode::ReadOnly, &sb, "data").unwrap();
+        let hdr = ObjectHeader::parse(
+            &bytes,
+            AccessMode::ReadOnly,
+            addr as usize,
+            sb.offset_size,
+            sb.length_size,
+        )
+        .unwrap();
         // The Attribute Info message is present but names no fractal heap: that
         // is what tells the reference library the attributes are the header's own
         // inline messages, and how many there are.
@@ -4647,11 +4702,18 @@ mod tests {
 
         let sig = signature::find_signature(&bytes).unwrap();
         let sb = Superblock::parse(&bytes, sig).unwrap();
-        let addr = resolve_path_any(&bytes, &sb, "data").unwrap();
-        let hdr =
-            ObjectHeader::parse(&bytes, addr as usize, sb.offset_size, sb.length_size).unwrap();
+        let addr = resolve_path_any(&bytes, AccessMode::ReadOnly, &sb, "data").unwrap();
+        let hdr = ObjectHeader::parse(
+            &bytes,
+            AccessMode::ReadOnly,
+            addr as usize,
+            sb.offset_size,
+            sb.length_size,
+        )
+        .unwrap();
         let attrs = crate::attribute::extract_attributes_full(
             &bytes,
+            AccessMode::ReadOnly,
             &hdr,
             sb.offset_size,
             sb.length_size,
@@ -5100,8 +5162,15 @@ mod tests {
     fn layout_message_version(bytes: &[u8], path: &str) -> u8 {
         let sig = signature::find_signature(bytes).unwrap();
         let sb = Superblock::parse(bytes, sig).unwrap();
-        let addr = resolve_path_any(bytes, &sb, path).unwrap();
-        let oh = ObjectHeader::parse(bytes, addr as usize, sb.offset_size, sb.length_size).unwrap();
+        let addr = resolve_path_any(bytes, AccessMode::ReadOnly, &sb, path).unwrap();
+        let oh = ObjectHeader::parse(
+            bytes,
+            AccessMode::ReadOnly,
+            addr as usize,
+            sb.offset_size,
+            sb.length_size,
+        )
+        .unwrap();
         oh.messages
             .iter()
             .find(|m| m.msg_type == MessageType::DataLayout)

@@ -409,6 +409,55 @@ fn preserves_file_space_strategy() {
 }
 
 #[test]
+fn asking_a_repack_to_reject_unknown_messages_only_a_writer_must_understand_records_it_beside_its_other_options()
+ {
+    assert!(
+        !RepackOptions::new().rejects_unknown_messages_only_a_writer_must_understand(),
+        "a repack reads its source read-only by default"
+    );
+    assert!(
+        RepackOptions::new()
+            .reject_unknown_messages_only_a_writer_must_understand()
+            .rejects_unknown_messages_only_a_writer_must_understand()
+    );
+    let options = RepackOptions::new()
+        .drop_path("drop_me")
+        .reject_unknown_messages_only_a_writer_must_understand()
+        .with_libver_bounds(LibVer::Earliest, LibVer::V18);
+    assert_eq!(options.drop_paths(), ["drop_me"]);
+    assert_eq!(
+        options.libver_bounds(),
+        Some((LibVer::Earliest, LibVer::V18))
+    );
+    assert!(options.rejects_unknown_messages_only_a_writer_must_understand());
+}
+
+#[test]
+fn a_repack_asked_to_reject_unknown_messages_only_a_writer_must_understand_repacks_a_source_that_holds_none()
+ {
+    let src = temp_path("hdf5_pure_repack_writer_message_src.h5");
+    let dst = temp_path("hdf5_pure_repack_writer_message_dst.h5");
+    let mut b = FileBuilder::new();
+    b.create_dataset("values").with_i32_data(&[1, 2, 3]);
+    b.set_attr("note", AttrValue::I64(7));
+    b.write(&src).unwrap();
+
+    repack(
+        &src,
+        &dst,
+        &RepackOptions::new().reject_unknown_messages_only_a_writer_must_understand(),
+    )
+    .unwrap();
+
+    let f = hdf5_pure::File::open(&dst).unwrap();
+    assert_eq!(
+        f.dataset("values").unwrap().read_i32().unwrap(),
+        vec![1, 2, 3]
+    );
+    assert_eq!(f.root().attrs().unwrap()["note"], AttrValue::I64(7));
+}
+
+#[test]
 fn rejects_nonexistent_drop_path() {
     let src = temp_path("hdf5_pure_repack_baddrop_src.h5");
     let dst = temp_path("hdf5_pure_repack_baddrop_dst.h5");

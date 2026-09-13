@@ -23,6 +23,7 @@
 #[cfg(not(feature = "std"))]
 use alloc::{string::String, vec::Vec};
 
+use crate::access_mode::AccessMode;
 use crate::address::BaseAddress;
 use crate::bytes::{ensure_len, read_offset};
 use crate::convert::Narrow;
@@ -243,6 +244,7 @@ pub trait SharedResolver {
 /// base address (shared-message addresses are stored relative to it).
 pub struct BufferedResolver<'a> {
     file_data: &'a [u8],
+    access_mode: AccessMode,
     offset_size: u8,
     length_size: u8,
     sohm: Option<&'a SohmTable>,
@@ -256,12 +258,14 @@ impl<'a> BufferedResolver<'a> {
     /// file into an unreadable one silently.
     pub fn new(
         file_data: &'a [u8],
+        access_mode: AccessMode,
         offset_size: u8,
         length_size: u8,
         sohm: Option<&'a SohmTable>,
     ) -> Self {
         Self {
             file_data,
+            access_mode,
             offset_size,
             length_size,
             sohm,
@@ -288,6 +292,7 @@ impl SharedResolver for BufferedResolver<'_> {
         };
         let header = ObjectHeader::parse(
             self.file_data,
+            self.access_mode,
             addr.to_usize()?,
             self.offset_size,
             self.length_size,
@@ -304,6 +309,7 @@ impl SharedResolver for BufferedResolver<'_> {
 /// demand instead of indexing a whole-file slice.
 pub struct SourceResolver<'a, S: Source + ?Sized> {
     source: &'a S,
+    access_mode: AccessMode,
     offset_size: u8,
     length_size: u8,
     sohm: Option<&'a SohmTable>,
@@ -314,12 +320,14 @@ impl<'a, S: Source + ?Sized> SourceResolver<'a, S> {
     /// parameter here rather than something the resolver finds for itself.
     pub fn new(
         source: &'a S,
+        access_mode: AccessMode,
         offset_size: u8,
         length_size: u8,
         sohm: Option<&'a SohmTable>,
     ) -> Self {
         Self {
             source,
+            access_mode,
             offset_size,
             length_size,
             sohm,
@@ -348,6 +356,7 @@ impl<S: Source + ?Sized> SharedResolver for SourceResolver<'_, S> {
         // at the base address, so both treat the reference as absolute within it.
         let header = ObjectHeader::parse_from_source(
             self.source,
+            self.access_mode,
             addr,
             self.offset_size,
             self.length_size,
@@ -574,7 +583,7 @@ mod tests {
     fn a_sohm_reference_without_a_table_is_refused_rather_than_followed() {
         let mut reference = vec![3, REF_TYPE_SOHM];
         reference.extend_from_slice(&[0xFF; 8]);
-        let resolver = BufferedResolver::new(&[], 8, 8, None);
+        let resolver = BufferedResolver::new(&[], AccessMode::ReadOnly, 8, 8, None);
 
         let err = resolver
             .resolve(&reference, MessageType::Datatype)
