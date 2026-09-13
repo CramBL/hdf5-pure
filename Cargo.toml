@@ -53,103 +53,6 @@ feature_missing = { required-update = "minor" }
 [package.metadata.cargo-shear]
 ignored-paths = ["src/_guide/*.rs"]
 
-[features]
-default = ["std", "checksum", "deflate"]
-std = []
-checksum = []
-deflate = ["flate2"]
-fast-deflate = ["flate2/zlib-ng"]
-provenance = ["sha2"]
-# Pure-Rust ZFP fixed-rate compression filter (HDF5 filter ID 32013).
-# Supports f32/f64/i32/i64 datasets in 1D–4D.
-zfp = []
-# Ergonomic N-dimensional array I/O via the `ndarray` crate
-# (`DatasetBuilder::with_ndarray`, `Dataset::read_array`/`read_array_dyn`).
-# Requires `std` (it builds on the File/Dataset reader and writer APIs).
-ndarray = ["dep:ndarray", "std"]
-# Serde-based (de)serialization of MATLAB v7.3 .mat files.
-# Requires `std` (uses File/Group/Dataset reader APIs).
-serde = ["dep:serde", "std"]
-# `mat::ComplexElement` impls for `num_complex::Complex<T>`, so the bulk array
-# helpers in `mat::complex` take the de-facto standard Rust complex type
-# directly. The trait is `unsafe` and asserts a memory layout, so the orphan
-# rule puts these impls on whichever crate owns one of the two types — us, not
-# the caller.
-num-complex = ["dep:num-complex", "serde"]
-# TODO: Refactor into an `insta` snapshot based test
-#
-# check the exact allocation figures of `tests/allocation_baseline.rs`
-# against the numbers committed under `tests/baselines/`. Off by default because
-# those numbers are recorded on one platform: the scaling *rules* in
-# `tests/allocation_bounds.rs` hold everywhere and run in every configuration,
-# while an exact count is a property of one target and one toolchain.
-__heap-baseline = []
-
-[dependencies]
-byteorder = { version = "1", default-features = false }
-flate2 = { version = "1", optional = true, default-features = false, features = ["rust_backend"] }
-sha2 = { version = "0.10", optional = true, default-features = false }
-serde = { version = "1", optional = true, default-features = false, features = ["derive", "alloc"] }
-# A permissive range (like `hdf5-metno`'s own `ndarray` requirement) so the
-# user's existing `ndarray` unifies with ours instead of compiling a second
-# copy. Only APIs stable across 0.16/0.17 are used.
-ndarray = { version = ">=0.16, <0.18", optional = true }
-# Carries only `ComplexElement` impls. No API of ours names a `Complex<T>`, so
-# nothing here appears in a public signature.
-num-complex = { version = "0.4", optional = true, default-features = false }
-
-[dev-dependencies]
-# Heap profiler and test-time allocation budgets (issue #228). It is the
-# `#[global_allocator]` of `tests/allocation_bounds.rs`,
-# `tests/allocation_baseline.rs` and `examples/heap_profile.rs`, and nothing
-# else links it.
-#
-# Not optional, because cargo forbids optional dev-dependencies, so it compiles
-# on every `cargo test`. That costs about two seconds once — it has no
-# dependencies of its own — and raises the floor for *building the test suite*
-# to its own MSRV of 1.96. The `rust-version` this crate promises its users is
-# unaffected: a dependent never builds our dev-dependencies.
-heapscope = "0.1"
-tempfile = "3"
-serde_json = "1"
-serde = { version = "1", features = ["derive"] }
-# Property-based testing for the write/read roundtrip and parser-robustness
-# invariants (issue #26).
-proptest = "1"
-# Benchmark harness for the read/write hot paths (benches/hot_paths.rs). Default
-# features are off to avoid pulling the plotting/HTML-report dependency tree; the
-# benches report to the terminal, which is enough for before/after comparison.
-criterion = { version = "0.5", default-features = false }
-test-util = { path = "crates/test-util" }
-
-# The reference HDF5 C library, used only by the byte-level crosscheck tests.
-# Its `static` feature compiles libhdf5 from source via CMake, which does not
-# cross-compile cleanly and is unnecessary on the targets excluded here anyway.
-# Gate it to 64-bit little-endian so `cross test` can run the pure-Rust suite on
-# a 32-bit pointer width (`i686`) and on a big-endian host (`s390x`) without
-# building any C code: a 32-bit host cannot allocate the multi-GiB fixtures
-# these tests build, and the point of the big-endian run is this crate's own
-# byte-order handling, not the C library's. The crosscheck test files carry the
-# matching `#![cfg(all(not(target_pointer_width = "32"), target_endian =
-# "little"))]` gate.
-[[example]]
-name = "matlab_fixtures"
-required-features = ["serde"]
-
-[[example]]
-name = "ndarray_io"
-required-features = ["ndarray"]
-
-[[bench]]
-name = "hot_paths"
-harness = false
-
-# Style-preference clippy lints muted crate-wide. The remaining clippy
-# surface is still on (`-D warnings` in CI), so genuinely problematic
-# patterns continue to fail the build.
-[lints]
-workspace = true
-
 # The supporting packages: the tests that link the reference C library, so that
 # nothing else does, and the helpers the tests share. `fuzz` keeps its own
 # lockfile.
@@ -421,6 +324,75 @@ items_after_statements = "allow"
 missing_crate_level_docs = "deny"
 private_doc_tests = "deny"
 unescaped_backticks = "deny"
+
+[features]
+default = ["std", "checksum", "deflate"]
+std = []
+checksum = []
+deflate = ["flate2"]
+fast-deflate = ["flate2/zlib-ng"]
+provenance = ["sha2"]
+# Pure-Rust ZFP fixed-rate compression filter (HDF5 filter ID 32013).
+# Supports f32/f64/i32/i64 datasets in 1D–4D.
+zfp = []
+# Ergonomic N-dimensional array I/O via the `ndarray` crate
+# (`DatasetBuilder::with_ndarray`, `Dataset::read_array`/`read_array_dyn`).
+# Requires `std` (it builds on the File/Dataset reader and writer APIs).
+ndarray = ["dep:ndarray", "std"]
+# Serde-based (de)serialization of MATLAB v7.3 .mat files.
+# Requires `std` (uses File/Group/Dataset reader APIs).
+serde = ["dep:serde", "std"]
+# `mat::ComplexElement` impls for `num_complex::Complex<T>`, so the bulk array
+# helpers in `mat::complex` take the de-facto standard Rust complex type
+# directly. The trait is `unsafe` and asserts a memory layout, so the orphan
+# rule puts these impls on whichever crate owns one of the two types — us, not
+# the caller.
+num-complex = ["dep:num-complex", "serde"]
+# TODO: Refactor into an `insta` snapshot based test
+#
+# check the exact allocation figures of `tests/allocation_baseline.rs`
+# against the numbers committed under `tests/baselines/`. Off by default because
+# those numbers are recorded on one platform: the scaling *rules* in
+# `tests/allocation_bounds.rs` hold everywhere and run in every configuration,
+# while an exact count is a property of one target and one toolchain.
+__heap-baseline = []
+
+[dependencies]
+byteorder = { version = "1", default-features = false }
+flate2 = { version = "1", optional = true, default-features = false, features = ["rust_backend"] }
+ndarray = { version = ">=0.16, <0.18", optional = true }
+# Carries only `ComplexElement` impls. No API of ours names a `Complex<T>`, so
+# nothing here appears in a public signature.
+num-complex = { version = "0.4", optional = true, default-features = false }
+serde = { version = "1", optional = true, default-features = false, features = ["derive", "alloc"] }
+sha2 = { version = "0.10", optional = true, default-features = false }
+
+[dev-dependencies]
+criterion = { version = "0.5", default-features = false }
+heapscope = "0.1"
+proptest = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tempfile = "3"
+test-util = { path = "crates/test-util" }
+
+[[example]]
+name = "matlab_fixtures"
+required-features = ["serde"]
+
+[[example]]
+name = "ndarray_io"
+required-features = ["ndarray"]
+
+[[bench]]
+name = "hot_paths"
+harness = false
+
+# Style-preference clippy lints muted crate-wide. The remaining clippy
+# surface is still on (`-D warnings` in CI), so genuinely problematic
+# patterns continue to fail the build.
+[lints]
+workspace = true
 
 [profile.dev]
 codegen-units = 32

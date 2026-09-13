@@ -9,8 +9,9 @@ edition = "2024"
 publish = false
 build = "build.rs"
 
-[lints]
-workspace = true
+# Keep hdf5_sys optional in cargo-shear so tests build without a C toolchain.
+[package.metadata.cargo-shear]
+ignored = ["hdf5_sys"]
 
 [features]
 serde = ["hdf5-pure/serde"]
@@ -38,18 +39,17 @@ hdf5 = { package = "hdf5-metno", git = "https://github.com/metno/hdf5-rust", rev
 # Its raw bindings, for the few calls the wrapper has no API for.
 hdf5_sys = { package = "hdf5-metno-sys", git = "https://github.com/metno/hdf5-rust", rev = "9f3ecbf4faada7617c7ce92be203bb341626c140", optional = true }
 
-# Keep hdf5_sys optional in cargo-shear so tests build without a C toolchain.
-[package.metadata.cargo-shear]
-ignored = ["hdf5_sys"]
-
 [dev-dependencies]
 hdf5-pure = { path = "../.." }
-test-util = { path = "../test-util" }
-tempfile = "3"
-serde = { version = "1", features = ["derive"] }
 ndarray = ">=0.16, <0.18"
 proptest = "1"
 rstest = "0.27"
+serde = { version = "1", features = ["derive"] }
+tempfile = "3"
+test-util = { path = "../test-util" }
+
+[lints]
+workspace = true
 
 [[test]]
 name = "libver_matrix"

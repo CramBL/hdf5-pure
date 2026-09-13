@@ -7,10 +7,10 @@ version = "0.0.0"
 edition = "2024"
 publish = false
 
-[lints]
-workspace = true
-
 [dependencies]
 hdf5-pure = { path = "../.." }
 heapscope = "0.1"
 tempfile = "3"
+
+[lints]
+workspace = true
