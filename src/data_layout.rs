@@ -77,23 +77,8 @@ impl DataLayout {
     ) -> Result<DataLayout, FormatError> {
         let pos = 2;
         match layout_class {
-            0 => {
-                // Compact
-                ensure_len(data, pos, 2)?;
-                let data_size = u16::from_le_bytes([data[pos], data[pos + 1]]) as usize;
-                ensure_len(data, COMPACT_DATA_OFFSET, data_size)?;
-                let raw = data[COMPACT_DATA_OFFSET..COMPACT_DATA_OFFSET + data_size].to_vec();
-                Ok(DataLayout::Compact { data: raw })
-            }
-            1 => {
-                // Contiguous
-                let os = offset_size as usize;
-                let ls = length_size as usize;
-                ensure_len(data, pos, os + ls)?;
-                let address = read_optional_offset(data, pos, offset_size)?;
-                let size = read_length(data, pos + os, length_size)?;
-                Ok(DataLayout::Contiguous { address, size })
-            }
+            0 => Self::parse_compact(data),
+            1 => Self::parse_contiguous(data, offset_size, length_size),
             2 => {
                 // Chunked
                 ensure_len(data, pos, 1)?;
@@ -133,23 +118,8 @@ impl DataLayout {
     ) -> Result<DataLayout, FormatError> {
         let pos = 2;
         match layout_class {
-            0 => {
-                // Compact — same as v3
-                ensure_len(data, pos, 2)?;
-                let data_size = u16::from_le_bytes([data[pos], data[pos + 1]]) as usize;
-                ensure_len(data, COMPACT_DATA_OFFSET, data_size)?;
-                let raw = data[COMPACT_DATA_OFFSET..COMPACT_DATA_OFFSET + data_size].to_vec();
-                Ok(DataLayout::Compact { data: raw })
-            }
-            1 => {
-                // Contiguous — same as v3
-                let os = offset_size as usize;
-                let ls = length_size as usize;
-                ensure_len(data, pos, os + ls)?;
-                let address = read_optional_offset(data, pos, offset_size)?;
-                let size = read_length(data, pos + os, length_size)?;
-                Ok(DataLayout::Contiguous { address, size })
-            }
+            0 => Self::parse_compact(data),
+            1 => Self::parse_contiguous(data, offset_size, length_size),
             2 => {
                 // Chunked v4
                 ensure_len(data, pos, 3)?;
@@ -260,6 +230,30 @@ impl DataLayout {
             }
             _ => Err(FormatError::InvalidLayoutClass(layout_class)),
         }
+    }
+
+    fn parse_compact(data: &[u8]) -> Result<DataLayout, FormatError> {
+        let pos = 2;
+        ensure_len(data, pos, 2)?;
+        let data_size = u16::from_le_bytes([data[pos], data[pos + 1]]) as usize;
+        ensure_len(data, COMPACT_DATA_OFFSET, data_size)?;
+        Ok(DataLayout::Compact {
+            data: data[COMPACT_DATA_OFFSET..COMPACT_DATA_OFFSET + data_size].to_vec(),
+        })
+    }
+
+    fn parse_contiguous(
+        data: &[u8],
+        offset_size: u8,
+        length_size: u8,
+    ) -> Result<DataLayout, FormatError> {
+        let pos = 2;
+        let os = offset_size as usize;
+        ensure_len(data, pos, os + length_size as usize)?;
+        Ok(DataLayout::Contiguous {
+            address: read_optional_offset(data, pos, offset_size)?,
+            size: read_length(data, pos + os, length_size)?,
+        })
     }
 }
 
