@@ -13,7 +13,7 @@
 
 use hdf5::plist::file_create::FileSpaceStrategy as CStrategy;
 use hdf5_pure::{
-    File, FileAccessProperties, FileBuilder, FileLocking, FileSpaceStrategy, SyncPolicy,
+    File, FileAccessProperties, FileBuilder, FileLocking, FileSpaceStrategy, MaxExtent, SyncPolicy,
 };
 use tempfile::tempdir;
 
@@ -28,7 +28,7 @@ fn build(path: &std::path::Path, paged: bool) {
     b.create_dataset("d")
         .with_i32_data(&(0..64).collect::<Vec<i32>>())
         .with_shape(&[64])
-        .with_maxshape(&[u64::MAX])
+        .with_maxshape(&[MaxExtent::Unlimited])
         .with_chunks(&[64]);
     b.write(path).unwrap();
 }

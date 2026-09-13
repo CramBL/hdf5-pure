@@ -4,7 +4,7 @@
 //! `File::close`, the SWMR-write flag is cleared and the reference C library
 //! reads the streamed appends back exactly.
 
-use hdf5_pure::{File, FileBuilder};
+use hdf5_pure::{File, FileBuilder, MaxExtent};
 use tempfile::tempdir;
 
 fn build_swmr(path: &std::path::Path, n: i32, chunk: u64) {
@@ -13,7 +13,7 @@ fn build_swmr(path: &std::path::Path, n: i32, chunk: u64) {
     b.create_dataset("d")
         .with_i32_data(&data)
         .with_shape(&[n as u64])
-        .with_maxshape(&[u64::MAX])
+        .with_maxshape(&[MaxExtent::Unlimited])
         .with_chunks(&[chunk]);
     b.write(path).unwrap();
 }

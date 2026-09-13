@@ -146,6 +146,7 @@ root.create_dataset("run2/signal", |b| {
 A new dataset may be created **empty**, with zero elements, chunked, with or without an unlimited maximum, which is how a schema-first writer declares its columns before any data has arrived and then grows each one with [`append_staged`](#appending-to-an-unlimited-dataset) as batches come in:
 
 ```rust
+# use hdf5_pure::MaxExtent;
 # let dir = tempfile::tempdir()?;
 # let path = dir.path().join("schema.h5");
 # hdf5_pure::FileBuilder::new().write(&path)?;
@@ -154,7 +155,7 @@ A new dataset may be created **empty**, with zero elements, chunked, with or wit
 root.create_dataset("col", |b| {
     b.with_f64_data(&[])
         .with_shape(&[0])
-        .with_maxshape(&[u64::MAX])
+        .with_maxshape(&[MaxExtent::Unlimited])
         .with_chunks(&[512]);
 })?;
 # file.commit()?;
@@ -247,14 +248,14 @@ The new object's storage is appended, and the original's bytes stay where they a
 # let dir = tempfile::tempdir()?;
 # let path = dir.path().join("runs.h5");
 # hdf5_pure::FileBuilder::new().write(&path)?;
-use hdf5_pure::File;
+use hdf5_pure::{File, MaxExtent};
 
 let file = File::open_rw(&path)?;
 let epoch = file.root().create_group_with("epoch", |g| {
     g.create_dataset("sys_time", |b| {
         b.with_u64_data(&[])
             .with_shape(&[0])
-            .with_maxshape(&[u64::MAX])
+            .with_maxshape(&[MaxExtent::Unlimited])
             .with_chunks(&[512]);
     });
 })?;
@@ -306,9 +307,10 @@ A deletion carries a group's whole subtree away, but only a commit that builds t
 # let mut builder = hdf5_pure::FileBuilder::new();
 # builder.create_dataset("samples")
 #     .with_i32_data(&[5, 6, 7])
-#     .with_maxshape(&[u64::MAX])
+#     .with_maxshape(&[MaxExtent::Unlimited])
 #     .with_chunks(&[4]);
 # builder.write(&path)?;
+# use hdf5_pure::MaxExtent;
 use hdf5_pure::File;
 
 let file = File::open_rw(&path)?;
@@ -344,9 +346,10 @@ This section mirrors [`examples/append_dataset.rs`](https://github.com/CramBL/hd
 # let mut builder = hdf5_pure::FileBuilder::new();
 # builder.create_dataset("samples")
 #     .with_i32_data(&[5, 6, 7])
-#     .with_maxshape(&[u64::MAX])
+#     .with_maxshape(&[MaxExtent::Unlimited])
 #     .with_chunks(&[4]);
 # builder.write(&path)?;
+# use hdf5_pure::MaxExtent;
 use hdf5_pure::File;
 
 let file = File::open_rw(&path)?;
@@ -386,9 +389,10 @@ This section mirrors [`examples/append_streaming.rs`](https://github.com/CramBL/
 # builder.create_dataset("samples")
 #     .with_f64_data(&[])
 #     .with_shape(&[0])
-#     .with_maxshape(&[u64::MAX])
+#     .with_maxshape(&[MaxExtent::Unlimited])
 #     .with_chunks(&[1024]);
 # builder.write(&path)?;
+# use hdf5_pure::MaxExtent;
 use hdf5_pure::File;
 
 let file = File::open_rw(&path)?;
@@ -428,9 +432,10 @@ Appending to a large file needs no special entry point: [`File::open_rw`](crate:
 # let mut builder = hdf5_pure::FileBuilder::new();
 # builder.create_dataset("samples")
 #     .with_i32_data(&[5, 6, 7])
-#     .with_maxshape(&[u64::MAX])
+#     .with_maxshape(&[MaxExtent::Unlimited])
 #     .with_chunks(&[4]);
 # builder.write(&path)?;
+# use hdf5_pure::MaxExtent;
 use hdf5_pure::{EditBacking, File, FileAccessProperties, MemoryStrategy};
 
 // Bounded because the file allows it; add the hint to make it a requirement
@@ -481,9 +486,10 @@ Those barriers are `fsync`s, and by default there is one at every durability poi
 # builder.create_dataset("samples")
 #     .with_f64_data(&[])
 #     .with_shape(&[0])
-#     .with_maxshape(&[u64::MAX])
+#     .with_maxshape(&[MaxExtent::Unlimited])
 #     .with_chunks(&[256]);
 # builder.write(&path)?;
+# use hdf5_pure::MaxExtent;
 use hdf5_pure::{File, FileAccessProperties, SyncPolicy};
 
 let file = File::open_rw_with_options(

@@ -17,7 +17,7 @@
 
 use hdf5_pure::{
     EditBacking, File, FileAccessProperties, FileBuilder, FileCreateProperties, FileSpaceStrategy,
-    LibVer, MemoryStrategy, SyncPolicy,
+    LibVer, MaxExtent, MemoryStrategy, SyncPolicy,
 };
 
 fn with_strategy(strategy: MemoryStrategy) -> FileAccessProperties {
@@ -30,7 +30,7 @@ fn plain_file(path: &std::path::Path) {
     b.create_dataset("d")
         .with_i32_data(&[1, 2, 3])
         .with_shape(&[3])
-        .with_maxshape(&[u64::MAX])
+        .with_maxshape(&[MaxExtent::Unlimited])
         .with_chunks(&[3]);
     b.write(path).unwrap();
 }
@@ -42,7 +42,7 @@ fn userblock_file(path: &std::path::Path) {
     b.create_dataset("d")
         .with_i32_data(&[1, 2, 3])
         .with_shape(&[3])
-        .with_maxshape(&[u64::MAX])
+        .with_maxshape(&[MaxExtent::Unlimited])
         .with_chunks(&[3]);
     b.write(path).unwrap();
 }
@@ -55,7 +55,7 @@ fn paged_nonpersist_file(path: &std::path::Path) {
     b.create_dataset("d")
         .with_i32_data(&[1, 2, 3])
         .with_shape(&[3])
-        .with_maxshape(&[u64::MAX])
+        .with_maxshape(&[MaxExtent::Unlimited])
         .with_chunks(&[3]);
     b.write(path).unwrap();
 }
@@ -420,7 +420,7 @@ fn fsm_persisting_file(path: &std::path::Path) {
     b.create_dataset("samples")
         .with_u64_data(&[0, 1, 2, 3])
         .with_shape(&[4])
-        .with_maxshape(&[u64::MAX])
+        .with_maxshape(&[MaxExtent::Unlimited])
         .with_chunks(&[4]);
     b.write(path).unwrap();
 }
@@ -499,7 +499,7 @@ fn create_with_options_of_a_persisting_fsm_file_opens_bounded() {
         .create_dataset("samples", |b| {
             b.with_u64_data(&[0u64; 256])
                 .with_shape(&[256])
-                .with_maxshape(&[u64::MAX])
+                .with_maxshape(&[MaxExtent::Unlimited])
                 .with_chunks(&[256]);
         })
         .unwrap();

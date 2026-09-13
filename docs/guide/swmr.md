@@ -18,19 +18,19 @@ A SWMR writer honors [`SyncPolicy`](crate::SyncPolicy) like any other read-write
 
 ## Laying out the dataset
 
-A SWMR-capable dataset must have one unlimited dimension and be chunked. The latest format indexes such a dataset with an Extensible Array, which is selected automatically. Create it with the usual [writing](crate::_guide::writing) builder: set the initial extent with [`with_shape`](crate::DatasetBuilder::with_shape), mark the dimension unlimited with [`with_maxshape(&[u64::MAX])`](crate::DatasetBuilder::with_maxshape), and pick a chunk shape with [`with_chunks`](crate::DatasetBuilder::with_chunks).
+A SWMR-capable dataset must have one unlimited dimension and be chunked. The latest format indexes such a dataset with an Extensible Array, which is selected automatically. Create it with the usual [writing](crate::_guide::writing) builder: set the initial extent with [`with_shape`](crate::DatasetBuilder::with_shape), mark the dimension unlimited with [`with_maxshape`](crate::DatasetBuilder::with_maxshape) and [`MaxExtent::Unlimited`](crate::MaxExtent::Unlimited), and pick a chunk shape with [`with_chunks`](crate::DatasetBuilder::with_chunks).
 
 ```rust
 # let dir = tempfile::tempdir()?;
 # let path = dir.path().join("stream.h5");
-use hdf5_pure::FileBuilder;
+use hdf5_pure::{FileBuilder, MaxExtent};
 
 let mut builder = FileBuilder::new();
 builder
     .create_dataset("log")
     .with_i32_data(&[0, 1, 2])   // initial rows
     .with_shape(&[3])
-    .with_maxshape(&[u64::MAX])  // one unlimited dimension
+    .with_maxshape(&[MaxExtent::Unlimited])  // one unlimited dimension
     .with_chunks(&[1]);
 builder.write(&path)?;
 # assert_eq!(hdf5_pure::File::open(&path)?.dataset("log")?.shape()?, vec![3]);
@@ -49,9 +49,10 @@ Open the existing file with [`File::open_swmr_writer`](crate::File::open_swmr_wr
 #     .create_dataset("log")
 #     .with_i32_data(&[0, 1, 2])
 #     .with_shape(&[3])
-#     .with_maxshape(&[u64::MAX])
+#     .with_maxshape(&[MaxExtent::Unlimited])
 #     .with_chunks(&[1]);
 # builder.write(&path)?;
+# use hdf5_pure::MaxExtent;
 use hdf5_pure::File;
 
 let writer = File::open_swmr_writer(&path)?;
@@ -89,9 +90,10 @@ Open the file for reading with [`File::open_swmr`](crate::File::open_swmr), whic
 #     .create_dataset("log")
 #     .with_i32_data(&[0, 1, 2])
 #     .with_shape(&[3])
-#     .with_maxshape(&[u64::MAX])
+#     .with_maxshape(&[MaxExtent::Unlimited])
 #     .with_chunks(&[1]);
 # builder.write(&path)?;
+# use hdf5_pure::MaxExtent;
 use hdf5_pure::File;
 
 let mut file = File::open_swmr(&path)?;
@@ -134,9 +136,10 @@ The flag cannot distinguish a live writer from a crashed one, so recover a file 
 #     .create_dataset("log")
 #     .with_i32_data(&[0, 1, 2])
 #     .with_shape(&[3])
-#     .with_maxshape(&[u64::MAX])
+#     .with_maxshape(&[MaxExtent::Unlimited])
 #     .with_chunks(&[1]);
 # builder.write(&path)?;
+# use hdf5_pure::MaxExtent;
 use hdf5_pure::File;
 
 File::clear_swmr_flag(&path)?;

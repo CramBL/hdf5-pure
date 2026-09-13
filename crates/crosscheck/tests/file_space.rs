@@ -8,7 +8,8 @@
 
 use hdf5::plist::file_create::FileSpaceStrategy as CStrategy;
 use hdf5_pure::{
-    AttrValue, File, FileAccessProperties, FileBuilder, FileSpaceStrategy, Layout, MemoryStrategy,
+    AttrValue, File, FileAccessProperties, FileBuilder, FileSpaceStrategy, Layout, MaxExtent,
+    MemoryStrategy,
 };
 
 /// Open with the bounded engine demanded rather than merely preferred: these
@@ -598,7 +599,7 @@ fn c_library_reads_our_bounded_mutated_paged_file() {
         b.create_dataset("d")
             .with_i32_data(&(0..64).collect::<Vec<i32>>())
             .with_shape(&[64])
-            .with_maxshape(&[u64::MAX])
+            .with_maxshape(&[MaxExtent::Unlimited])
             .with_chunks(&[64]);
         b.with_file_space_strategy(FileSpaceStrategy::Page, true, 0)
             .with_file_space_page_size(4096);
@@ -673,7 +674,7 @@ fn c_library_reads_our_staged_mutated_paged_file() {
         b.create_dataset("d")
             .with_i32_data(&(0..64).collect::<Vec<i32>>())
             .with_shape(&[64])
-            .with_maxshape(&[u64::MAX])
+            .with_maxshape(&[MaxExtent::Unlimited])
             .with_chunks(&[64]);
         b.with_file_space_strategy(FileSpaceStrategy::Page, true, 0)
             .with_file_space_page_size(4096);
@@ -1046,7 +1047,7 @@ fn c_library_reads_our_paged_file_after_group_churn() {
                             b.with_i32_data(&[])
                                 .with_shape(&[0])
                                 .with_chunks(&[64])
-                                .with_maxshape(&[u64::MAX]);
+                                .with_maxshape(&[MaxExtent::Unlimited]);
                         });
                     }
                 })
@@ -1063,7 +1064,7 @@ fn c_library_reads_our_paged_file_after_group_churn() {
                     b.with_i32_data(&[7i32, 8, 9])
                         .with_shape(&[3])
                         .with_chunks(&[2])
-                        .with_maxshape(&[u64::MAX]);
+                        .with_maxshape(&[MaxExtent::Unlimited]);
                 });
             })
             .unwrap();
@@ -1170,7 +1171,7 @@ fn c_library_reads_our_file_after_a_release_shortened_it() {
                             b.with_i32_data(&payload)
                                 .with_shape(&[ROWS as u64])
                                 .with_chunks(&[512])
-                                .with_maxshape(&[u64::MAX]);
+                                .with_maxshape(&[MaxExtent::Unlimited]);
                         });
                     }
                 })
@@ -1277,7 +1278,7 @@ fn c_library_reads_our_file_after_an_append_reused_free_space() {
                     b.with_i32_data(&[])
                         .with_shape(&[0])
                         .with_chunks(&[16384])
-                        .with_maxshape(&[u64::MAX]);
+                        .with_maxshape(&[MaxExtent::Unlimited]);
                 })
                 .unwrap();
             file.commit().unwrap();

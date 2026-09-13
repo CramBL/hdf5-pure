@@ -15,7 +15,7 @@
 
 use hdf5::Extent;
 use hdf5::file::LibraryVersion;
-use hdf5_pure::{File, FileBuilder};
+use hdf5_pure::{File, FileBuilder, MaxExtent};
 use tempfile::tempdir;
 
 const SIZES: &[usize] = &[20, 300, 2000, 50000, 140000];
@@ -45,7 +45,7 @@ fn write_with_pure(path: &std::path::Path, n: usize) {
     b.create_dataset("d")
         .with_i32_data(&data)
         .with_shape(&[n as u64])
-        .with_maxshape(&[u64::MAX])
+        .with_maxshape(&[MaxExtent::Unlimited])
         .with_chunks(&[1]);
     b.write(path).unwrap();
 }

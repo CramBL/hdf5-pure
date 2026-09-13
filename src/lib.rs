@@ -1031,6 +1031,8 @@ pub use datatype::{
     StringPadding,
 };
 
+pub use dataspace::MaxExtent;
+
 pub use type_builders::{
     CompoundTypeBuilder, DatasetBuilder, EnumTypeBuilder, ExplicitCompoundTypeBuilder,
     FinishedGroup, GroupBuilder, make_f32_type, make_f64_type, make_i8_type, make_i16_type,

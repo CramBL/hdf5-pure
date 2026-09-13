@@ -32,6 +32,7 @@ extern crate alloc;
 #[cfg(not(feature = "std"))]
 use alloc::{format, vec, vec::Vec};
 
+use crate::dataspace::MaxExtent;
 use crate::error::FormatError;
 
 /// How a chunk index numbers its element slots.
@@ -92,16 +93,16 @@ pub(crate) struct ChunkGrid {
 }
 
 impl ChunkGrid {
-    /// Build the grid for a dataset of `dims` (its current shape) with
+    /// Builds the grid for a dataset of `dims` (its current shape) with
     /// `max_dims` (its maximum shape, absent when the dataspace records none)
     /// and `chunk_dims`, numbered in `order`.
     ///
-    /// `u64::MAX` in `max_dims` is the unlimited marker, matching
-    /// `H5S_UNLIMITED` and the dataspace message this crate reads and writes.
+    /// The chunk count is `None` for a dimension whose maximum is
+    /// [`MaxExtent::Unlimited`], since the chunks along it are unbounded.
     pub(crate) fn new(
         chunk_dims: &[u64],
         dims: &[u64],
-        max_dims: Option<&[u64]>,
+        max_dims: Option<&[MaxExtent]>,
         order: GridOrder,
     ) -> Result<Self, FormatError> {
         let rank = chunk_dims.len();
@@ -130,12 +131,8 @@ impl ChunkGrid {
                     "chunk dimensions must all be non-zero".into(),
                 ));
             }
-            let extent = max_dims.map_or(dims[d], |m| m[d]);
-            counts.push(if extent == u64::MAX {
-                None
-            } else {
-                Some(extent.div_ceil(chunk))
-            });
+            let extent = max_dims.map_or(MaxExtent::Fixed(dims[d]), |m| m[d]);
+            counts.push(extent.size().map(|size| size.div_ceil(chunk)));
         }
 
         // The reference library swizzles on the *first* unlimited dimension. A
@@ -322,7 +319,13 @@ mod tests {
     /// one that made `maxshape > shape` unreadable.
     #[test]
     fn a_wider_maximum_shape_spreads_the_slots() {
-        let g = ChunkGrid::new(&[2, 2], &[3, 3], Some(&[3, 8]), GridOrder::RowMajor).unwrap();
+        let g = ChunkGrid::new(
+            &[2, 2],
+            &[3, 3],
+            Some(&[MaxExtent::Fixed(3), MaxExtent::Fixed(8)]),
+            GridOrder::RowMajor,
+        )
+        .unwrap();
         assert_eq!(g.slots(), Some(8));
         assert_eq!(g.slot_of(&[0, 0]).unwrap(), 0);
         assert_eq!(g.slot_of(&[0, 1]).unwrap(), 1);
@@ -337,7 +340,13 @@ mod tests {
     #[test]
     fn a_wider_leading_dimension_leaves_the_numbering_alone() {
         let dense = ChunkGrid::new(&[2, 2], &[3, 3], None, GridOrder::RowMajor).unwrap();
-        let grown = ChunkGrid::new(&[2, 2], &[3, 3], Some(&[8, 3]), GridOrder::RowMajor).unwrap();
+        let grown = ChunkGrid::new(
+            &[2, 2],
+            &[3, 3],
+            Some(&[MaxExtent::Fixed(8), MaxExtent::Fixed(3)]),
+            GridOrder::RowMajor,
+        )
+        .unwrap();
         for coords in [[0, 0], [0, 1], [1, 0], [1, 1]] {
             assert_eq!(
                 dense.slot_of(&coords).unwrap(),
@@ -356,7 +365,7 @@ mod tests {
         let g = ChunkGrid::new(
             &[2, 2],
             &[3, 3],
-            Some(&[3, u64::MAX]),
+            Some(&[MaxExtent::Fixed(3), MaxExtent::Unlimited]),
             GridOrder::UnlimitedFirst,
         )
         .unwrap();
@@ -378,7 +387,11 @@ mod tests {
         let g = ChunkGrid::new(
             &[1, 2, 2],
             &[2, 3, 4],
-            Some(&[2, 3, u64::MAX]),
+            Some(&[
+                MaxExtent::Fixed(2),
+                MaxExtent::Fixed(3),
+                MaxExtent::Unlimited,
+            ]),
             GridOrder::UnlimitedFirst,
         )
         .unwrap();
@@ -403,7 +416,7 @@ mod tests {
         let g = ChunkGrid::new(
             &[2, 2],
             &[3, 3],
-            Some(&[u64::MAX, 3]),
+            Some(&[MaxExtent::Unlimited, MaxExtent::Fixed(3)]),
             GridOrder::UnlimitedFirst,
         )
         .unwrap();
@@ -420,11 +433,31 @@ mod tests {
     fn every_slot_round_trips_through_both_directions() {
         for order in [GridOrder::RowMajor, GridOrder::UnlimitedFirst] {
             for max in [
-                Some(vec![4u64, 6, 8]),
-                Some(vec![2, 3, 4]),
-                Some(vec![u64::MAX, 6, 8]),
-                Some(vec![2, u64::MAX, 8]),
-                Some(vec![2, 6, u64::MAX]),
+                Some(vec![
+                    MaxExtent::Fixed(4),
+                    MaxExtent::Fixed(6),
+                    MaxExtent::Fixed(8),
+                ]),
+                Some(vec![
+                    MaxExtent::Fixed(2),
+                    MaxExtent::Fixed(3),
+                    MaxExtent::Fixed(4),
+                ]),
+                Some(vec![
+                    MaxExtent::Unlimited,
+                    MaxExtent::Fixed(6),
+                    MaxExtent::Fixed(8),
+                ]),
+                Some(vec![
+                    MaxExtent::Fixed(2),
+                    MaxExtent::Unlimited,
+                    MaxExtent::Fixed(8),
+                ]),
+                Some(vec![
+                    MaxExtent::Fixed(2),
+                    MaxExtent::Fixed(6),
+                    MaxExtent::Unlimited,
+                ]),
                 None,
             ] {
                 let Ok(g) = ChunkGrid::new(&[1, 2, 2], &[2, 3, 4], max.as_deref(), order) else {
@@ -454,7 +487,7 @@ mod tests {
         let err = ChunkGrid::new(
             &[2, 2],
             &[3, 3],
-            Some(&[u64::MAX, u64::MAX]),
+            Some(&[MaxExtent::Unlimited, MaxExtent::Unlimited]),
             GridOrder::UnlimitedFirst,
         )
         .unwrap_err();
@@ -481,7 +514,13 @@ mod tests {
 
         // The *leading* dimension is the one no multiplier crosses, so a zero
         // count there divides nothing and stays numberable.
-        let g = ChunkGrid::new(&[2, 2], &[3, 4], Some(&[0, 4]), GridOrder::RowMajor).unwrap();
+        let g = ChunkGrid::new(
+            &[2, 2],
+            &[3, 4],
+            Some(&[MaxExtent::Fixed(0), MaxExtent::Fixed(4)]),
+            GridOrder::RowMajor,
+        )
+        .unwrap();
         assert_eq!(g.offsets_in_extent(0).unwrap(), Some(vec![0, 0]));
     }
 
@@ -493,7 +532,11 @@ mod tests {
         let err = ChunkGrid::new(
             &[1, 1, 1],
             &[2, 2, 2],
-            Some(&[u64::MAX - 1, u64::MAX - 1, u64::MAX - 1]),
+            Some(&[
+                MaxExtent::Fixed(u64::MAX - 1),
+                MaxExtent::Fixed(u64::MAX - 1),
+                MaxExtent::Fixed(u64::MAX - 1),
+            ]),
             GridOrder::RowMajor,
         )
         .unwrap_err();
@@ -509,7 +552,10 @@ mod tests {
         let err = ChunkGrid::new(
             &[1, 1],
             &[2, 2],
-            Some(&[u64::MAX - 1, u64::MAX - 1]),
+            Some(&[
+                MaxExtent::Fixed(u64::MAX - 1),
+                MaxExtent::Fixed(u64::MAX - 1),
+            ]),
             GridOrder::RowMajor,
         )
         .unwrap_err();

@@ -4,7 +4,9 @@
 //! unfiltered, chunk-aligned and not, across one or many calls and sessions —
 //! read back with this crate. C-library interop lives in
 //! `crates/crosscheck/tests/append_writer.rs`.
-use hdf5_pure::{Error, File, FileAccessProperties, FileBuilder, ScaleOffset, SyncPolicy};
+use hdf5_pure::{
+    Error, File, FileAccessProperties, FileBuilder, MaxExtent, ScaleOffset, SyncPolicy,
+};
 use tempfile::tempdir;
 
 /// Create a rank-1, unlimited i32 dataset with the given chunk length and
@@ -23,7 +25,7 @@ fn create_i32(
         .create_dataset("d")
         .with_i32_data(&data)
         .with_shape(&[n as u64])
-        .with_maxshape(&[u64::MAX])
+        .with_maxshape(&[MaxExtent::Unlimited])
         .with_chunks(&[chunk]);
     if shuffle {
         ds.with_shuffle();
@@ -133,7 +135,7 @@ fn scale_offset_f64_chunk_aligned() {
     b.create_dataset("d")
         .with_f64_data(&init)
         .with_shape(&[8])
-        .with_maxshape(&[u64::MAX])
+        .with_maxshape(&[MaxExtent::Unlimited])
         .with_chunks(&[4])
         .with_scale_offset(ScaleOffset::FloatDScale(2));
     b.write(&path).unwrap();
@@ -269,13 +271,13 @@ fn multiple_datasets_one_writer() {
     b.create_dataset("a")
         .with_i32_data(&[0, 1, 2, 3])
         .with_shape(&[4])
-        .with_maxshape(&[u64::MAX])
+        .with_maxshape(&[MaxExtent::Unlimited])
         .with_chunks(&[2])
         .with_deflate(6);
     b.create_dataset("b")
         .with_i32_data(&[100, 101])
         .with_shape(&[2])
-        .with_maxshape(&[u64::MAX])
+        .with_maxshape(&[MaxExtent::Unlimited])
         .with_chunks(&[4]);
     b.write(&path).unwrap();
 
@@ -353,7 +355,7 @@ fn refuse_fixed_not_unlimited() {
     b.create_dataset("d")
         .with_i32_data(&[1, 2, 3])
         .with_shape(&[3])
-        .with_maxshape(&[100])
+        .with_maxshape(&[MaxExtent::Fixed(100)])
         .with_chunks(&[2]);
     b.write(&path).unwrap();
     with_writer(&path, |w| {
@@ -410,7 +412,7 @@ fn append_to_pure_empty_dataset() {
     b.create_dataset("d")
         .with_i32_data(&[])
         .with_shape(&[0])
-        .with_maxshape(&[u64::MAX])
+        .with_maxshape(&[MaxExtent::Unlimited])
         .with_chunks(&[4])
         .with_shuffle()
         .with_deflate(6);

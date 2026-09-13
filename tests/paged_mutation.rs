@@ -4,7 +4,7 @@
 //! close. libhdf5 interop lives in `crates/crosscheck/tests/file_space.rs`.
 
 use hdf5_pure::{
-    Error, File, FileAccessProperties, FileBuilder, FileSpaceStrategy, MemoryStrategy,
+    Error, File, FileAccessProperties, FileBuilder, FileSpaceStrategy, MaxExtent, MemoryStrategy,
 };
 
 /// Open with the bounded engine demanded rather than merely preferred: these
@@ -38,7 +38,7 @@ fn build_paged(path: &std::path::Path, n: i32, chunk: u64) {
     b.create_dataset("d")
         .with_i32_data(&data)
         .with_shape(&[n as u64])
-        .with_maxshape(&[u64::MAX])
+        .with_maxshape(&[MaxExtent::Unlimited])
         .with_chunks(&[chunk]);
     b.with_file_space_strategy(FileSpaceStrategy::Page, true, 0)
         .with_file_space_page_size(PAGE);
@@ -219,7 +219,7 @@ fn paged_non_persist_mirror_is_refused() {
     b.create_dataset("d")
         .with_i32_data(&(0..100).collect::<Vec<i32>>())
         .with_shape(&[100])
-        .with_maxshape(&[u64::MAX])
+        .with_maxshape(&[MaxExtent::Unlimited])
         .with_chunks(&[32]);
     b.with_file_space_strategy(FileSpaceStrategy::Page, false, 0)
         .with_file_space_page_size(PAGE);

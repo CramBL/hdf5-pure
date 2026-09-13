@@ -9,8 +9,8 @@
 #![expect(clippy::mem_forget, reason = "the tests model a writer that crashed")]
 
 use hdf5_pure::{
-    Error, File, FileAccessProperties, FileBuilder, FileLocking, FileSpaceStrategy, MemoryStrategy,
-    SyncPolicy, WriteMarkPolicy,
+    Error, File, FileAccessProperties, FileBuilder, FileLocking, FileSpaceStrategy, MaxExtent,
+    MemoryStrategy, SyncPolicy, WriteMarkPolicy,
 };
 use tempfile::tempdir;
 
@@ -21,7 +21,7 @@ fn build_swmr(path: &std::path::Path) {
     b.create_dataset("d")
         .with_i32_data(&[0i32, 1, 2, 3])
         .with_shape(&[4])
-        .with_maxshape(&[u64::MAX])
+        .with_maxshape(&[MaxExtent::Unlimited])
         .with_chunks(&[4]);
     b.write(path).unwrap();
 }
@@ -203,7 +203,7 @@ fn build_paged(path: &std::path::Path) {
     b.create_dataset("d")
         .with_i32_data(&[0i32; 64])
         .with_shape(&[64])
-        .with_maxshape(&[u64::MAX])
+        .with_maxshape(&[MaxExtent::Unlimited])
         .with_chunks(&[64]);
     b.write(path).unwrap();
 }

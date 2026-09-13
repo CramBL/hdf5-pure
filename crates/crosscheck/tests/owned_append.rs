@@ -7,7 +7,7 @@
 
 use hdf5::Extent;
 use hdf5::file::LibraryVersion;
-use hdf5_pure::{File, FileBuilder};
+use hdf5_pure::{File, FileBuilder, MaxExtent};
 use tempfile::tempdir;
 
 fn read_c(path: &std::path::Path) -> Vec<i32> {
@@ -21,7 +21,7 @@ fn pure_create(path: &std::path::Path, data: &[i32], chunk: u64, filtered: bool)
         .create_dataset("d")
         .with_i32_data(data)
         .with_shape(&[data.len() as u64])
-        .with_maxshape(&[u64::MAX])
+        .with_maxshape(&[MaxExtent::Unlimited])
         .with_chunks(&[chunk]);
     if filtered {
         ds.with_shuffle().with_deflate(6);

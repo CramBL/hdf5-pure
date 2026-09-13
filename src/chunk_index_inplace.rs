@@ -33,7 +33,7 @@ use crate::checksum::jenkins_lookup3;
 use crate::chunked_write::{ea_compute_stats, split_into_chunks, write_ea_addr};
 use crate::convert::TryToUsize;
 use crate::data_layout::{ChunkIndexLayout, DataLayout};
-use crate::dataspace::Dataspace;
+use crate::dataspace::{Dataspace, MaxExtent};
 use crate::datatype::Datatype;
 use crate::edit::{LOSSY_TAIL_REFUSAL, pipeline_lossless};
 use crate::error::{Error, FormatError};
@@ -411,11 +411,11 @@ impl Located {
         if dataspace.rank != 1 {
             return Err(unsupported("only rank-1 datasets are supported"));
         }
-        match &dataspace.max_dimensions {
-            Some(maxs) if maxs.first() == Some(&u64::MAX) => {}
-            _ => {
-                return Err(unsupported("dataset has no unlimited (maxshape) dimension"));
-            }
+        if !matches!(
+            dataspace.max_dimensions.as_deref(),
+            Some([MaxExtent::Unlimited, ..])
+        ) {
+            return Err(unsupported("dataset has no unlimited (maxshape) dimension"));
         }
         let current_dim = dataspace.dimensions[0];
         // v2 dataspace header is 4 bytes (version, rank, flags, type); dim 0 follows.
@@ -1774,7 +1774,7 @@ mod tests {
         b.create_dataset("d")
             .with_i32_data(&data)
             .with_shape(&[n as u64])
-            .with_maxshape(&[u64::MAX])
+            .with_maxshape(&[MaxExtent::Unlimited])
             .with_chunks(&[chunk]);
         b.finish().unwrap()
     }
@@ -2190,7 +2190,7 @@ mod tests {
         b.create_dataset("d")
             .with_i32_data(&(0..4096).collect::<Vec<_>>())
             .with_shape(&[4096])
-            .with_maxshape(&[u64::MAX])
+            .with_maxshape(&[MaxExtent::Unlimited])
             .with_chunks(&[4])
             .with_deflate(1);
         b.write(&path).unwrap();

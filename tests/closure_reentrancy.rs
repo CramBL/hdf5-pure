@@ -11,7 +11,7 @@
 //! Every test here runs the closure on a worker thread and fails on a timeout,
 //! so a regression reports a failure instead of hanging the suite forever.
 
-use hdf5_pure::{AttrValue, File, FileBuilder};
+use hdf5_pure::{AttrValue, File, FileBuilder, MaxExtent};
 use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
@@ -142,7 +142,7 @@ fn dataset_closures_may_read_the_same_file() {
         b.create_dataset("growable")
             .with_i32_data(&[10, 20])
             .with_chunks(&[2])
-            .with_maxshape(&[u64::MAX]);
+            .with_maxshape(&[MaxExtent::Unlimited]);
         b.write(&path).unwrap();
     }
     let p = path.clone();

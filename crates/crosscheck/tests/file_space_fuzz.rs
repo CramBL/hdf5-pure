@@ -25,7 +25,9 @@
 //! with the fix.
 
 use hdf5::plist::file_create::FileSpaceStrategy as CStrategy;
-use hdf5_pure::{File, FileAccessProperties, FileBuilder, FileSpaceStrategy, MemoryStrategy};
+use hdf5_pure::{
+    File, FileAccessProperties, FileBuilder, FileSpaceStrategy, MaxExtent, MemoryStrategy,
+};
 
 /// Open with the bounded engine demanded rather than merely preferred: these
 /// tests are about that engine, so a file it stops accepting must fail here
@@ -171,7 +173,7 @@ proptest! {
             b.create_dataset("d")
                 .with_i32_data(&(0..chunk_size as i32).collect::<Vec<i32>>())
                 .with_shape(&[chunk_size as u64])
-                .with_maxshape(&[u64::MAX])
+                .with_maxshape(&[MaxExtent::Unlimited])
                 .with_chunks(&[chunk_size as u64]);
             b.with_file_space_strategy(FileSpaceStrategy::Page, true, 0)
                 .with_file_space_page_size(page_size);

@@ -19,7 +19,7 @@
 //! own C calls through an internal lock, so these tests need no extra guard.
 
 use hdf5::types::{FixedAscii, FixedUnicode, TypeDescriptor};
-use hdf5_pure::FileBuilder;
+use hdf5_pure::{FileBuilder, MaxExtent};
 use tempfile::tempdir;
 
 /// The width the C library reports comes from the datatype message, so a writer
@@ -210,7 +210,7 @@ fn the_c_library_extends_a_declared_width_dataset() {
     b.create_dataset("station")
         .with_ascii_strings_sized(&["north", "s"], 16)
         .unwrap()
-        .with_maxshape(&[u64::MAX])
+        .with_maxshape(&[MaxExtent::Unlimited])
         .with_chunks(&[4]);
     b.write(&path).unwrap();
 

@@ -466,6 +466,7 @@ mod streaming_tests {
     use super::*;
     use crate::chunked_write::{ChunkMeta, ChunkProvider};
     use crate::convert::nz;
+    use crate::dataspace::MaxExtent;
     use std::sync::{Arc, Mutex};
 
     type Calls = Arc<Mutex<Vec<usize>>>;
@@ -528,7 +529,7 @@ mod streaming_tests {
         chunk_bytes: Vec<Vec<u8>>,
         dims: &[u64],
         chunk_dims: &[u64],
-        maxshape: Option<&[u64]>,
+        maxshape: Option<&[MaxExtent]>,
         calls: Calls,
         short_slot: Option<usize>,
     ) {
@@ -555,7 +556,7 @@ mod streaming_tests {
         chunk_bytes: Vec<Vec<u8>>,
         dims: &[u64],
         chunk_dims: &[u64],
-        maxshape: Option<&[u64]>,
+        maxshape: Option<&[MaxExtent]>,
         calls: Calls,
         short_slot: Option<usize>,
     ) -> FileBuilder {
@@ -660,7 +661,7 @@ mod streaming_tests {
         chunks: Vec<Vec<u8>>,
         dims: &[u64],
         chunk_dims: &[u64],
-        maxshape: Option<&[u64]>,
+        maxshape: Option<&[MaxExtent]>,
         expected: &[f64],
     ) {
         let buffered = build_lazy(
@@ -721,7 +722,7 @@ mod streaming_tests {
             vec![f64_chunk(&[1.0, 2.0]), f64_chunk(&[3.0, 4.0])],
             &[4],
             &[2],
-            Some(&[u64::MAX]),
+            Some(&[MaxExtent::Unlimited]),
             &[1.0, 2.0, 3.0, 4.0],
         );
     }

@@ -11,7 +11,7 @@
 //!
 //! `uv run` puts a pinned python3 + h5py on PATH for the duration of the test.
 
-use hdf5_pure::{File, FileBuilder};
+use hdf5_pure::{File, FileBuilder, MaxExtent};
 use tempfile::tempdir;
 
 /// Open `path` with h5py and return `(len, first, last)` of dataset `d`, or
@@ -66,7 +66,7 @@ fn h5py_swmr_reads_pure_appends_concurrently() {
         b.create_dataset("d")
             .with_i32_data(&data)
             .with_shape(&[5])
-            .with_maxshape(&[u64::MAX])
+            .with_maxshape(&[MaxExtent::Unlimited])
             .with_chunks(&[1]);
         b.write(&path).unwrap();
     }
@@ -124,7 +124,7 @@ fn swmr_flag_lifecycle() {
         b.create_dataset("d")
             .with_i32_data(&data)
             .with_shape(&[5])
-            .with_maxshape(&[u64::MAX])
+            .with_maxshape(&[MaxExtent::Unlimited])
             .with_chunks(&[1]);
         b.write(&path).unwrap();
     }

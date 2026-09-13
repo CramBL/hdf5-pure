@@ -11,7 +11,7 @@
 //!   message) — and the pure reader must recover it.
 
 use hdf5::file::LibraryVersion;
-use hdf5_pure::{File, FileBuilder, ScaleOffset};
+use hdf5_pure::{File, FileBuilder, MaxExtent, ScaleOffset};
 use tempfile::tempdir;
 
 /// Read a dataset's typed fill value back through the reference C library.
@@ -46,7 +46,7 @@ fn c_reads_pure_written_chunked_fill() {
     fb.create_dataset("d")
         .with_f64_data(&[1.0, 2.0, 3.0, 4.0])
         .with_shape(&[4])
-        .with_maxshape(&[u64::MAX])
+        .with_maxshape(&[MaxExtent::Unlimited])
         .with_chunks(&[2])
         .with_fill_value(3.5_f64);
     fb.write(&path).unwrap();
@@ -255,7 +255,7 @@ fn pure_create_chunked(path: &std::path::Path, data: &[u32], chunk: u64, fill: O
         .create_dataset("col")
         .with_u32_data(data)
         .with_shape(&[data.len() as u64])
-        .with_maxshape(&[u64::MAX])
+        .with_maxshape(&[MaxExtent::Unlimited])
         .with_chunks(&[chunk]);
     if let Some(f) = fill {
         ds.with_fill_value(f);
@@ -351,7 +351,7 @@ fn a_filtered_partial_chunk_is_padded_before_compression() {
     b.create_dataset("col")
         .with_u32_data(&data)
         .with_shape(&[5])
-        .with_maxshape(&[u64::MAX])
+        .with_maxshape(&[MaxExtent::Unlimited])
         .with_chunks(&[4])
         .with_fill_value(fill)
         .with_deflate(6);
@@ -377,7 +377,7 @@ fn a_scale_offset_partial_chunk_is_padded_before_encoding() {
     b.create_dataset("col")
         .with_u32_data(&data)
         .with_shape(&[5])
-        .with_maxshape(&[u64::MAX])
+        .with_maxshape(&[MaxExtent::Unlimited])
         .with_chunks(&[4])
         .with_fill_value(fill)
         .with_scale_offset(ScaleOffset::Integer(0));
@@ -504,7 +504,7 @@ fn a_dataset_created_in_a_session_pads_with_its_fill_value() {
             .create_dataset("col", |b| {
                 b.with_u32_data(&[1u32, 2, 3, 4, 5])
                     .with_shape(&[5])
-                    .with_maxshape(&[u64::MAX])
+                    .with_maxshape(&[MaxExtent::Unlimited])
                     .with_chunks(&[4])
                     .with_fill_value(fill);
             })
@@ -607,7 +607,7 @@ fn a_partial_chunk_of_single_byte_elements_is_filled() {
     b.create_dataset("col")
         .with_u8_data(&[1u8, 2, 3, 4, 5])
         .with_shape(&[5])
-        .with_maxshape(&[u64::MAX])
+        .with_maxshape(&[MaxExtent::Unlimited])
         .with_chunks(&[4])
         .with_fill_value(9u8);
     b.write(&path).unwrap();

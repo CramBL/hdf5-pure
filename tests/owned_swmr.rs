@@ -5,7 +5,7 @@
 //! and cleared on `close`, only immediate `Dataset::append` permitted (over the
 //! unfiltered, chunk-aligned SWMR subset), and the staged edit surface refused.
 
-use hdf5_pure::{AttrValue, Error, File, FileBuilder};
+use hdf5_pure::{AttrValue, Error, File, FileBuilder, MaxExtent};
 use tempfile::tempdir;
 
 /// Build an unfiltered rank-1, unlimited, Extensible-Array-indexed i32 dataset
@@ -16,7 +16,7 @@ fn build_swmr(path: &std::path::Path, n: i32, chunk: u64) {
     b.create_dataset("d")
         .with_i32_data(&data)
         .with_shape(&[n as u64])
-        .with_maxshape(&[u64::MAX])
+        .with_maxshape(&[MaxExtent::Unlimited])
         .with_chunks(&[chunk]);
     b.write(path).unwrap();
 }
@@ -27,7 +27,7 @@ fn build_swmr_filtered(path: &std::path::Path, n: i32, chunk: u64) {
     b.create_dataset("d")
         .with_i32_data(&data)
         .with_shape(&[n as u64])
-        .with_maxshape(&[u64::MAX])
+        .with_maxshape(&[MaxExtent::Unlimited])
         .with_chunks(&[chunk])
         .with_deflate(6);
     b.write(path).unwrap();

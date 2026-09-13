@@ -4,7 +4,7 @@
 //! issue #393 every write it makes is the immediate in-place one, filtered or
 //! not, so the type buys write *frequency* and nothing else.
 
-use hdf5_pure::{AttrValue, Error, File, FileBuilder, ScaleOffset};
+use hdf5_pure::{AttrValue, Error, File, FileBuilder, MaxExtent, ScaleOffset};
 use tempfile::tempdir;
 
 /// A rank-1 unlimited chunked i32 dataset `d` seeded with `0..n`.
@@ -15,7 +15,7 @@ fn build(path: &std::path::Path, n: i32, chunk: u64, filtered: bool) {
         .create_dataset("d")
         .with_i32_data(&data)
         .with_shape(&[n as u64])
-        .with_maxshape(&[u64::MAX])
+        .with_maxshape(&[MaxExtent::Unlimited])
         .with_chunks(&[chunk]);
     if filtered {
         d.with_shuffle().with_deflate(4);
@@ -769,7 +769,7 @@ fn build_lossy(path: &std::path::Path, n: usize) {
     b.create_dataset("d")
         .with_f64_data(&data)
         .with_shape(&[n as u64])
-        .with_maxshape(&[u64::MAX])
+        .with_maxshape(&[MaxExtent::Unlimited])
         .with_chunks(&[4])
         .with_scale_offset(ScaleOffset::FloatDScale(1));
     b.write(path).unwrap();

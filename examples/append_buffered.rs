@@ -16,7 +16,7 @@
 //! cargo run --example append_buffered
 //! ```
 
-use hdf5_pure::{File, FileBuilder};
+use hdf5_pure::{File, FileBuilder, MaxExtent};
 
 const CHUNK: u64 = 64;
 const BATCH: i32 = 10;
@@ -32,7 +32,7 @@ fn main() {
         .create_dataset("samples")
         .with_i32_data(&[])
         .with_shape(&[0])
-        .with_maxshape(&[u64::MAX])
+        .with_maxshape(&[MaxExtent::Unlimited])
         .with_chunks(&[CHUNK])
         .with_shuffle()
         .with_deflate(6);

@@ -80,7 +80,7 @@
     ))
 ))]
 
-use hdf5_pure::{File, FileBuilder};
+use hdf5_pure::{File, FileBuilder, MaxExtent};
 
 #[global_allocator]
 static ALLOC: heapscope::Alloc = heapscope::Alloc::system();
@@ -124,7 +124,7 @@ fn writing_and_reading_a_chunked_dataset_matches_its_recorded_figures() {
         .with_shape(&[N0 as u64])
         .with_chunks(&[CHUNK_ELEMS]);
     // The appends below need an unlimited dimension, and it must be a *second*
-    // dataset: `with_maxshape(&[u64::MAX])` is what selects an Extensible Array
+    // dataset: `with_maxshape(&[MaxExtent::Unlimited])` is what selects an Extensible Array
     // chunk index over a Fixed Array one (`chunked_write::use_extensible`), so
     // adding it to "t" would have moved the 2,048-chunk write off the index this
     // file exists to pin and left the Fixed Array builder with no exact figures
@@ -133,7 +133,7 @@ fn writing_and_reading_a_chunked_dataset_matches_its_recorded_figures() {
         .create_dataset("growing")
         .with_f64_data(&data[..CHUNK_ELEMS as usize])
         .with_shape(&[CHUNK_ELEMS])
-        .with_maxshape(&[u64::MAX])
+        .with_maxshape(&[MaxExtent::Unlimited])
         .with_chunks(&[CHUNK_ELEMS]);
     builder.write(&path).unwrap();
     drop(data);

@@ -1,6 +1,6 @@
 use hdf5_pure::{
     AttrValue, CompoundTypeBuilder, DType, Datatype, Error, File, FileBuilder, FormatError,
-    make_f64_type, make_i32_type,
+    MaxExtent, make_f64_type, make_i32_type,
 };
 
 #[test]
@@ -342,7 +342,7 @@ fn chunked_builder_rejects_invalid_geometry() {
             |b| {
                 b.with_i32_data(&[1, 2, 3, 4])
                     .with_shape(&[4])
-                    .with_maxshape(&[u64::MAX, u64::MAX])
+                    .with_maxshape(&[MaxExtent::Unlimited, MaxExtent::Unlimited])
                     .with_chunks(&[2]);
             },
             "maxshape must have the same rank",
@@ -352,7 +352,7 @@ fn chunked_builder_rejects_invalid_geometry() {
             |b| {
                 b.with_i32_data(&[1, 2, 3, 4])
                     .with_shape(&[4])
-                    .with_maxshape(&[2]);
+                    .with_maxshape(&[MaxExtent::Fixed(2)]);
             },
             "maxshape must be at least the current shape",
         ),
@@ -372,7 +372,7 @@ fn chunked_builder_rejects_invalid_geometry() {
             |b| {
                 b.with_i32_data(&[])
                     .with_shape(&[0])
-                    .with_maxshape(&[u64::MAX]);
+                    .with_maxshape(&[MaxExtent::Unlimited]);
             },
             "explicit chunk dimensions",
         ),
@@ -381,7 +381,7 @@ fn chunked_builder_rejects_invalid_geometry() {
             |b| {
                 b.with_i32_data(&[])
                     .with_shape(&[4, 0])
-                    .with_maxshape(&[u64::MAX, u64::MAX]);
+                    .with_maxshape(&[MaxExtent::Unlimited, MaxExtent::Unlimited]);
             },
             "explicit chunk dimensions",
         ),
@@ -414,7 +414,7 @@ fn chunked_builder_accepts_empty_extensible_dataset() {
         .create_dataset("stream")
         .with_i32_data(&[])
         .with_shape(&[0])
-        .with_maxshape(&[u64::MAX])
+        .with_maxshape(&[MaxExtent::Unlimited])
         .with_chunks(&[16]);
     let bytes = builder
         .finish()

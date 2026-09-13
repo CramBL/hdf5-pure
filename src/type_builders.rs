@@ -13,7 +13,7 @@ use crate::attribute::AttributeMessage;
 use crate::chunked_write::{ChunkMeta, ChunkOptions, ChunkProvider, FilterKind, StorageAllocation};
 use crate::compound::CompoundType;
 use crate::convert::TryToUsize;
-use crate::dataspace::{Dataspace, DataspaceType};
+use crate::dataspace::{Dataspace, DataspaceType, MaxExtent};
 use crate::datatype::{
     CharacterSet, CompoundMember, Datatype, DatatypeByteOrder, EnumMember, StringPadding,
 };
@@ -2337,7 +2337,7 @@ pub struct DatasetBuilder {
     pub(crate) name: String,
     pub(crate) datatype: Option<Datatype>,
     pub(crate) shape: Option<Vec<u64>>,
-    pub(crate) maxshape: Option<Vec<u64>>,
+    pub(crate) maxshape: Option<Vec<MaxExtent>>,
     pub(crate) data: Option<Vec<u8>>,
     pub(crate) attrs: Vec<(String, AttrSpec)>,
     pub(crate) chunk_options: ChunkOptions,
@@ -2785,7 +2785,7 @@ impl DatasetBuilder {
         &mut self,
         datatype: Datatype,
         dims: &[u64],
-        maxshape: Option<&[u64]>,
+        maxshape: Option<&[MaxExtent]>,
         chunk_dims: &[u64],
         element_size: NonZeroUsize,
         pipeline_message: Option<Vec<u8>>,
@@ -3250,9 +3250,20 @@ impl DatasetBuilder {
         self
     }
 
-    /// Set maximum dimensions for a resizable dataset.
-    /// Use `u64::MAX` for unlimited dimensions.
-    pub fn with_maxshape(&mut self, maxshape: &[u64]) -> &mut Self {
+    /// Sets the maximum dimensions of a resizable dataset.
+    ///
+    /// A dimension the dataset grows along without bound is
+    /// [`MaxExtent::Unlimited`]. The maximum shape has to have the rank of the
+    /// shape and bound it in every dimension, or the write is rejected. At most
+    /// one dimension may be unlimited: the chunk index for more than one is a
+    /// version-2 B-tree, which this crate cannot write. [`MaxExtent::Fixed`] at
+    /// the unlimited size, `u64::MAX`, is rejected as well, since it is written
+    /// as [`MaxExtent::Unlimited`].
+    ///
+    /// A dataset with a maximum shape is stored chunked, and a zero-element
+    /// shape has no size to derive chunk dimensions from, so name them with
+    /// [`with_chunks`](Self::with_chunks).
+    pub fn with_maxshape(&mut self, maxshape: &[MaxExtent]) -> &mut Self {
         self.maxshape = Some(maxshape.to_vec());
         self
     }

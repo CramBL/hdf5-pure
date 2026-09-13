@@ -17,7 +17,7 @@
 //! offsets it computes itself, in a file it did not write.
 
 use hdf5::types::VarLenUnicode;
-use hdf5_pure::{File, FileBuilder, FileSpaceStrategy};
+use hdf5_pure::{File, FileBuilder, FileSpaceStrategy, MaxExtent};
 use std::sync::{Mutex, MutexGuard, OnceLock};
 use tempfile::tempdir;
 
@@ -130,7 +130,7 @@ fn c_library_reads_resizable_vlen_strings() {
     b.create_dataset("labels")
         .with_vlen_strings(&data.iter().map(String::as_str).collect::<Vec<_>>())
         .with_shape(&[data.len() as u64])
-        .with_maxshape(&[u64::MAX])
+        .with_maxshape(&[MaxExtent::Unlimited])
         .with_chunks(&[4]);
     b.write(&path).unwrap();
 

@@ -8,7 +8,9 @@
 use hdf5::Extent;
 use hdf5::file::LibraryVersion;
 use hdf5::plist::file_create::FileSpaceStrategy as CStrategy;
-use hdf5_pure::{File, FileAccessProperties, FileBuilder, FileSpaceStrategy, MemoryStrategy};
+use hdf5_pure::{
+    File, FileAccessProperties, FileBuilder, FileSpaceStrategy, MaxExtent, MemoryStrategy,
+};
 
 /// Open with the bounded engine demanded rather than merely preferred: these
 /// tests are about that engine, so a file it stops accepting must fail here
@@ -63,7 +65,7 @@ fn pure_create(path: &std::path::Path, n: i32, chunk: u64, deflate: bool) {
         .create_dataset("d")
         .with_i32_data(&data)
         .with_shape(&[n as u64])
-        .with_maxshape(&[u64::MAX])
+        .with_maxshape(&[MaxExtent::Unlimited])
         .with_chunks(&[chunk]);
     if deflate {
         ds.with_deflate(6);
@@ -143,7 +145,7 @@ fn bounded_persist_finalize_reads_back_in_c() {
     b.create_dataset("d")
         .with_i32_data(&(0..10).collect::<Vec<i32>>())
         .with_shape(&[10])
-        .with_maxshape(&[u64::MAX])
+        .with_maxshape(&[MaxExtent::Unlimited])
         .with_chunks(&[4]);
     b.write(&path).unwrap();
 
@@ -345,7 +347,7 @@ fn mirror_inplace_append_to_a_persisting_file_reads_back_in_c() {
     b.create_dataset("d")
         .with_i32_data(&(0..8).collect::<Vec<i32>>())
         .with_shape(&[8])
-        .with_maxshape(&[u64::MAX])
+        .with_maxshape(&[MaxExtent::Unlimited])
         .with_chunks(&[4]);
     b.write(&path).unwrap();
 
@@ -385,7 +387,7 @@ fn mirror_inplace_append_to_a_paged_file_stays_page_aligned() {
     b.create_dataset("d")
         .with_i32_data(&(0..64).collect::<Vec<i32>>())
         .with_shape(&[64])
-        .with_maxshape(&[u64::MAX])
+        .with_maxshape(&[MaxExtent::Unlimited])
         .with_chunks(&[64]);
     b.write(&path).unwrap();
 

@@ -22,7 +22,7 @@ use crate::compound::CompoundType;
 use crate::convert::TryToUsize;
 use crate::data_layout::DataLayout;
 use crate::data_read;
-use crate::dataspace::Dataspace;
+use crate::dataspace::{Dataspace, MaxExtent};
 use crate::datatype::{Datatype, ReferenceType};
 use crate::error::{Error, FormatError};
 use crate::file_create_properties::FileCreateProperties;
@@ -4241,13 +4241,13 @@ impl Group {
     /// withdraws a staged creation, which frees the name for another.
     ///
     /// ```no_run
-    /// # use hdf5_pure::File;
+    /// # use hdf5_pure::{File, MaxExtent};
     /// # fn main() -> Result<(), hdf5_pure::Error> {
     /// let file = File::open_rw("runs.h5")?;
     /// let mut col = file.root().create_dataset("col", |b| {
     ///     b.with_f64_data(&[])
     ///         .with_shape(&[0])
-    ///         .with_maxshape(&[u64::MAX])
+    ///         .with_maxshape(&[MaxExtent::Unlimited])
     ///         .with_chunks(&[512]);
     /// })?;
     /// col.append_staged(|a| {
@@ -5333,25 +5333,34 @@ the same commit to replace it",
         Ok(ds.dimensions.clone())
     }
 
-    /// The dataset's maximum dimensions, when it is extensible. An unlimited
-    /// dimension is reported as `u64::MAX`. Returns `Ok(None)` for a fixed-shape
-    /// dataset (no maximum-dimensions record, or one equal to the current shape).
+    /// Returns the dataset's maximum dimensions, when it is extensible.
+    ///
+    /// A dimension that grows without bound is [`MaxExtent::Unlimited`].
+    /// Returns `Ok(None)` for a fixed-shape dataset: one with no
+    /// maximum-dimensions record, and one whose record is the current shape.
+    /// A dataset this session has staged and not yet committed reports what was
+    /// staged.
     ///
     /// Together with [`is_chunked`](Self::is_chunked) and
     /// [`chunk_shape`](Self::chunk_shape), this lets a caller check up front
     /// whether a dataset is eligible for
-    /// [`Dataset::append_staged`](crate::Dataset::append_staged)
-    /// (which requires a chunked dataset whose first maximum dimension is
-    /// `u64::MAX`) instead of relying on the append's refusal error.
-    pub fn maxshape(&self) -> Result<Option<Vec<u64>>, Error> {
+    /// [`Dataset::append_staged`](crate::Dataset::append_staged), which needs a
+    /// chunked dataset whose first maximum dimension is
+    /// [`MaxExtent::Unlimited`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Format`] if the dataspace message cannot be parsed, and
+    /// [`Error::StaleHandle`] for a handle an object reference produced once a
+    /// commit has run under it.
+    pub fn maxshape(&self) -> Result<Option<Vec<MaxExtent>>, Error> {
         if let Some(meta) = self.staged_meta()? {
             return Ok(meta.maxshape);
         }
-        let ds = self.dataspace()?;
-        match &ds.max_dimensions {
-            Some(md) if *md != ds.dimensions => Ok(Some(md.clone())),
-            _ => Ok(None),
-        }
+        Ok(self
+            .dataspace()?
+            .extensible_max_dimensions()
+            .map(<[MaxExtent]>::to_vec))
     }
 
     /// Whether the dataset uses chunked storage (as opposed to contiguous or
@@ -6743,7 +6752,7 @@ mod tests {
             b.create_dataset(ds)
                 .with_i32_data(&[0, 1])
                 .with_shape(&[2])
-                .with_maxshape(&[u64::MAX])
+                .with_maxshape(&[MaxExtent::Unlimited])
                 .with_chunks(&[4]);
         }
         b.create_dataset("plain").with_i32_data(&[7, 8, 9]);
@@ -6900,7 +6909,7 @@ mod tests {
         b.create_dataset("log")
             .with_i32_data(&[0, 1])
             .with_shape(&[2])
-            .with_maxshape(&[u64::MAX])
+            .with_maxshape(&[MaxExtent::Unlimited])
             .with_chunks(&[4]);
         b.create_dataset("refs").with_path_references(&["log"]);
         b.write(&path).unwrap();
@@ -7176,7 +7185,7 @@ mod tests {
                 b.create_dataset(ds)
                     .with_i32_data(&[0, 1])
                     .with_shape(&[2])
-                    .with_maxshape(&[u64::MAX])
+                    .with_maxshape(&[MaxExtent::Unlimited])
                     .with_chunks(&[4]);
             }
             b.create_dataset("refs").with_path_references(&["log"]);
@@ -9128,7 +9137,7 @@ mod tests {
             b.create_dataset("d")
                 .with_i32_data(&[1, 2, 3, 4])
                 .with_shape(&[4])
-                .with_maxshape(&[u64::MAX])
+                .with_maxshape(&[MaxExtent::Unlimited])
                 .with_chunks(&[2]);
             b.write(&path).unwrap();
             path
@@ -9511,7 +9520,7 @@ mod tests {
             b.create_dataset("d")
                 .with_i32_data(&(0..8).collect::<Vec<_>>())
                 .with_shape(&[8])
-                .with_maxshape(&[u64::MAX])
+                .with_maxshape(&[MaxExtent::Unlimited])
                 .with_chunks(&[4]);
             // Persisting, so the ordinary branch has manager re-homing to do:
             // an immediate append below leaves the on-disk managers mid-file,

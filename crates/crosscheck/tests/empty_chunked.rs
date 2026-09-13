@@ -15,7 +15,7 @@
 
 use hdf5::Extent;
 use hdf5::file::LibraryVersion;
-use hdf5_pure::{File, FileBuilder};
+use hdf5_pure::{File, FileBuilder, MaxExtent};
 use tempfile::tempdir;
 
 /// Write a starter file and add one empty chunked dataset to it through the
@@ -31,7 +31,7 @@ fn edit_in_an_empty_chunked_dataset(path: &std::path::Path, unlimited: bool) {
         .create_dataset("col", |b| {
             b.with_i64_data(&[]).with_shape(&[0]).with_chunks(&[512]);
             if unlimited {
-                b.with_maxshape(&[u64::MAX]);
+                b.with_maxshape(&[MaxExtent::Unlimited]);
             }
         })
         .unwrap();
@@ -129,8 +129,8 @@ fn c_opens_the_chunk_index_of_every_empty_chunked_dataset_we_write() {
                 // Only the leading dimension: an Extensible Array indexes
                 // exactly one unlimited dimension, and the C library refuses to
                 // open a dataset that declares two.
-                let mut ms = shape.to_vec();
-                ms[0] = u64::MAX;
+                let mut ms: Vec<MaxExtent> = shape.iter().copied().map(MaxExtent::Fixed).collect();
+                ms[0] = MaxExtent::Unlimited;
                 ds.with_maxshape(&ms);
             }
         }
@@ -191,7 +191,7 @@ fn an_empty_filtered_dataset_declares_the_width_its_first_chunk_needs() {
         b.create_dataset("col")
             .with_i32_data(values)
             .with_shape(&[values.len() as u64])
-            .with_maxshape(&[u64::MAX])
+            .with_maxshape(&[MaxExtent::Unlimited])
             .with_chunks(&[chunk_elems as u64])
             .with_deflate(6);
         b.write(path).unwrap();
@@ -242,7 +242,7 @@ fn an_empty_filtered_dataset_accepts_an_append_that_fills_its_chunk() {
     b.create_dataset("col")
         .with_i32_data(&[])
         .with_shape(&[0])
-        .with_maxshape(&[u64::MAX])
+        .with_maxshape(&[MaxExtent::Unlimited])
         .with_chunks(&[chunk_elems as u64])
         .with_deflate(6);
     b.write(&path).unwrap();
@@ -278,7 +278,7 @@ fn c_reads_the_whole_file_writers_empty_chunked_datasets() {
                 .with_shape(&[0])
                 .with_chunks(&[512]);
             if unlimited {
-                ds.with_maxshape(&[u64::MAX]);
+                ds.with_maxshape(&[MaxExtent::Unlimited]);
             }
         }
         b.write(&path).unwrap();

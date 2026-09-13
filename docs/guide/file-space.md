@@ -90,13 +90,13 @@ if let Some(info) = file.file_space_info() {
 ```rust
 # let dir = tempfile::tempdir()?;
 # let path = dir.path().join("paged.h5");
-use hdf5_pure::{FileBuilder, FileSpaceStrategy};
+use hdf5_pure::{FileBuilder, FileSpaceStrategy, MaxExtent};
 
 let mut b = FileBuilder::new();
 b.create_dataset("samples")
     .with_i32_data(&(0..1000).collect::<Vec<i32>>())
     .with_shape(&[1000])
-    .with_maxshape(&[u64::MAX])
+    .with_maxshape(&[MaxExtent::Unlimited])
     .with_chunks(&[256]);
 b.with_file_space_strategy(FileSpaceStrategy::Page, true, 0) // persist so it can be grown later
     .with_file_space_page_size(4096);

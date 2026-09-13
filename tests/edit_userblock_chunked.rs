@@ -13,7 +13,7 @@
 //!     the old chunk storage reclaimed), including reuse of that reclaimed space
 //!     by a later commit in the same session.
 
-use hdf5_pure::{File, FileBuilder};
+use hdf5_pure::{File, FileBuilder, MaxExtent};
 
 use temp::temp_path;
 use test_util::temp;
@@ -248,7 +248,7 @@ fn userblock_extensible_array_add_and_overwrite_roundtrip() {
                 b.with_f64_data(&added)
                     .with_shape(&[500])
                     .with_chunks(&[40])
-                    .with_maxshape(&[u64::MAX])
+                    .with_maxshape(&[MaxExtent::Unlimited])
                     .with_deflate(6);
             })
             .unwrap();

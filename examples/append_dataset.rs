@@ -16,14 +16,14 @@
 //! cargo run --example append_dataset
 //! ```
 
-use hdf5_pure::{File, FileBuilder};
+use hdf5_pure::{File, FileBuilder, MaxExtent};
 
 fn main() {
     let dir = tempfile::tempdir().expect("temp dir");
     let path = dir.path().join("log.h5");
 
     // ---- Create a filtered, unlimited, chunked dataset ------------------
-    // One unlimited dimension (`with_maxshape(&[u64::MAX])`) plus `with_chunks`
+    // One unlimited dimension (`with_maxshape(&[MaxExtent::Unlimited])`) plus `with_chunks`
     // makes this an Extensible-Array-indexed dataset, which is the append
     // target. The filter pipeline is preserved across every append.
     let initial: Vec<i32> = (0..8).collect();
@@ -32,7 +32,7 @@ fn main() {
         .create_dataset("samples")
         .with_i32_data(&initial)
         .with_shape(&[initial.len() as u64])
-        .with_maxshape(&[u64::MAX])
+        .with_maxshape(&[MaxExtent::Unlimited])
         .with_chunks(&[4])
         .with_shuffle()
         .with_deflate(6);
@@ -45,7 +45,7 @@ fn main() {
         let file = File::open(&path).expect("reopen for introspection");
         let ds = file.dataset("samples").expect("open dataset");
         assert!(ds.is_chunked());
-        assert_eq!(ds.maxshape().unwrap(), Some(vec![u64::MAX])); // axis 0 unlimited
+        assert_eq!(ds.maxshape().unwrap(), Some(vec![MaxExtent::Unlimited])); // axis 0 unlimited
         assert_eq!(ds.chunk_shape().unwrap(), Some(vec![4]));
         assert_eq!(ds.filters(), vec![2, 1]); // shuffle (2) then deflate (1)
         println!(

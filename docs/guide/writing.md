@@ -206,7 +206,7 @@ builder
 An empty dataset may also be **chunked and resizable**, which is how you declare a dataset up front and grow it later with [`Dataset::append_staged`](crate::Dataset::append_staged), as [Editing files](crate::_guide::editing#appending-to-an-unlimited-dataset) shows:
 
 ```rust
-use hdf5_pure::{FileBuilder, make_f64_type};
+use hdf5_pure::{FileBuilder, MaxExtent, make_f64_type};
 
 let mut builder = FileBuilder::new();
 
@@ -214,7 +214,7 @@ builder
     .create_dataset("stream")
     .with_dtype(make_f64_type())
     .with_shape(&[0])
-    .with_maxshape(&[u64::MAX])
+    .with_maxshape(&[MaxExtent::Unlimited])
     .with_chunks(&[512]);
 # let file = hdf5_pure::File::from_bytes(builder.finish()?)?;
 # assert_eq!(file.dataset("stream")?.chunk_shape()?, Some(vec![512]));

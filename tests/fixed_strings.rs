@@ -12,8 +12,8 @@
 //! in `crates/crosscheck/tests/attr_width.rs` for the attributes.
 
 use hdf5_pure::{
-    AttrValue, CharacterSet, Datatype, Error, File, FileBuilder, FormatError, StringPadding,
-    VlenStringReadOptions,
+    AttrValue, CharacterSet, Datatype, Error, File, FileBuilder, FormatError, MaxExtent,
+    StringPadding, VlenStringReadOptions,
 };
 use tempfile::tempdir;
 
@@ -98,7 +98,7 @@ fn a_declared_width_leaves_room_for_a_later_longer_value() {
     b.create_dataset("station")
         .with_ascii_strings_sized(&["north", "s"], 16)
         .unwrap()
-        .with_maxshape(&[u64::MAX])
+        .with_maxshape(&[MaxExtent::Unlimited])
         .with_chunks(&[4]);
     b.write(&path).unwrap();
 

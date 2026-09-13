@@ -3,7 +3,7 @@
 
 use hdf5_pure::{
     AttrValue, CharacterSet, CompoundTypeBuilder, DType, Datatype, Error, File, FileBuilder,
-    FormatError, Object, ReferenceType, ScaleOffset, StringPadding,
+    FormatError, MaxExtent, Object, ReferenceType, ScaleOffset, StringPadding,
 };
 
 use temp::temp_path;
@@ -1378,7 +1378,7 @@ fn copy_extensible_chunked_dataset() {
                 b.with_f64_data(&data)
                     .with_shape(&[80])
                     .with_chunks(&[16])
-                    .with_maxshape(&[u64::MAX]);
+                    .with_maxshape(&[MaxExtent::Unlimited]);
             })
             .unwrap();
         session.commit().unwrap();
@@ -1953,7 +1953,7 @@ fn add_extensible_dataset() {
             .create_dataset("stream", |b| {
                 b.with_i32_data(&data)
                     .with_shape(&[64])
-                    .with_maxshape(&[u64::MAX])
+                    .with_maxshape(&[MaxExtent::Unlimited])
                     .with_chunks(&[16]);
             })
             .unwrap();
@@ -2085,7 +2085,7 @@ fn malformed_chunked_requests_are_rejected_without_writing() {
             |b| {
                 b.with_f64_data(&[])
                     .with_shape(&[0])
-                    .with_maxshape(&[u64::MAX]);
+                    .with_maxshape(&[MaxExtent::Unlimited]);
             },
             "explicit chunk dimensions",
         ),
@@ -2112,7 +2112,7 @@ fn malformed_chunked_requests_are_rejected_without_writing() {
             |b| {
                 b.with_i32_data(&[1, 2, 3, 4])
                     .with_shape(&[4])
-                    .with_maxshape(&[u64::MAX, u64::MAX])
+                    .with_maxshape(&[MaxExtent::Unlimited, MaxExtent::Unlimited])
                     .with_chunks(&[2]);
             },
             "maxshape must have the same rank",
@@ -2129,7 +2129,7 @@ fn malformed_chunked_requests_are_rejected_without_writing() {
             |b| {
                 b.with_i32_data(&[1, 2, 3, 4])
                     .with_shape(&[4])
-                    .with_maxshape(&[2]);
+                    .with_maxshape(&[MaxExtent::Fixed(2)]);
             },
             "maxshape must be at least the current shape",
         ),
@@ -2431,7 +2431,7 @@ fn write_dataset_overwrites_extensible_chunked_in_place() {
                 b.with_f64_data(&orig)
                     .with_shape(&[60])
                     .with_chunks(&[16])
-                    .with_maxshape(&[u64::MAX]);
+                    .with_maxshape(&[MaxExtent::Unlimited]);
             })
             .unwrap();
         session.commit().unwrap();
@@ -2689,7 +2689,7 @@ fn write_dataset_overwrites_filtered_extensible_fits_with_slack() {
                 b.with_i32_data(&orig)
                     .with_shape(&[2048])
                     .with_chunks(&[512])
-                    .with_maxshape(&[u64::MAX]) // unlimited => Extensible Array index
+                    .with_maxshape(&[MaxExtent::Unlimited]) // unlimited => Extensible Array index
                     .with_deflate(6);
             })
             .unwrap();
@@ -2981,7 +2981,7 @@ fn appending_to_a_staged_provenance_dataset_keeps_its_hash_true() {
             .create_dataset("col", |b| {
                 b.with_f64_data(&[1.0, 2.0])
                     .with_shape(&[2])
-                    .with_maxshape(&[u64::MAX])
+                    .with_maxshape(&[MaxExtent::Unlimited])
                     .with_chunks(&[4])
                     .with_provenance("test-suite", "2026-02-19T12:00:00Z", Some("bench"));
             })
@@ -4461,7 +4461,7 @@ fn a_reference_address_to_a_dataset_a_write_relocates_is_refused() {
         b.create_dataset("d")
             .with_i32_data(&vec![0i32; 64])
             .with_shape(&[64])
-            .with_maxshape(&[u64::MAX])
+            .with_maxshape(&[MaxExtent::Unlimited])
             .with_chunks(&[16])
             .with_deflate(6);
         b.create_dataset("refs").with_path_references(&["d"]);
@@ -4830,7 +4830,7 @@ fn add_extensible_vlen_string_dataset_is_rejected_without_writing() {
             .root()
             .create_dataset("labels", |b| {
                 b.with_vlen_strings(&["a", "b", "c"])
-                    .with_maxshape(&[u64::MAX]);
+                    .with_maxshape(&[MaxExtent::Unlimited]);
             })
             .unwrap_err();
         assert!(
@@ -5103,7 +5103,7 @@ fn add_empty_extensible_chunked_dataset_and_grow_it() {
             .create_dataset("col", |b| {
                 b.with_i64_data(&[])
                     .with_shape(&[0])
-                    .with_maxshape(&[u64::MAX])
+                    .with_maxshape(&[MaxExtent::Unlimited])
                     .with_chunks(&[2]);
             })
             .unwrap();
@@ -5179,7 +5179,7 @@ fn add_empty_chunked_datasets_of_every_flavor() {
         root.create_dataset("two_d", |b| {
             b.with_f64_data(&[])
                 .with_shape(&[0, 3])
-                .with_maxshape(&[u64::MAX, 3])
+                .with_maxshape(&[MaxExtent::Unlimited, MaxExtent::Fixed(3)])
                 .with_chunks(&[4, 3]);
         })
         .unwrap();
@@ -5189,14 +5189,14 @@ fn add_empty_chunked_datasets_of_every_flavor() {
         root.create_dataset("declared", |b| {
             b.with_dtype(hdf5_pure::make_u64_type())
                 .with_shape(&[0])
-                .with_maxshape(&[u64::MAX])
+                .with_maxshape(&[MaxExtent::Unlimited])
                 .with_chunks(&[512]);
         })
         .unwrap();
         root.create_dataset("filtered", |b| {
             b.with_i32_data(&[])
                 .with_shape(&[0])
-                .with_maxshape(&[u64::MAX])
+                .with_maxshape(&[MaxExtent::Unlimited])
                 .with_chunks(&[16])
                 .with_deflate(6)
                 .with_shuffle();
@@ -5926,7 +5926,7 @@ fn a_refused_commit_restores_every_kind_of_staged_edit() {
             g.create_dataset("inner")
                 .with_i32_data(&[1, 2, 3, 4])
                 .with_chunks(&[2])
-                .with_maxshape(&[u64::MAX]);
+                .with_maxshape(&[MaxExtent::Unlimited]);
             b.add_group(g.finish());
             b.write(&path).unwrap();
         }
@@ -6804,7 +6804,7 @@ fn a_staged_subtree_is_addressable_before_the_commit() {
             g.create_dataset("sys_time", |b| {
                 b.with_u64_data(&[])
                     .with_shape(&[0])
-                    .with_maxshape(&[u64::MAX])
+                    .with_maxshape(&[MaxExtent::Unlimited])
                     .with_chunks(&[4]);
             });
         })
@@ -6819,7 +6819,7 @@ fn a_staged_subtree_is_addressable_before_the_commit() {
 
     // What the builder settled is answered from the staged record.
     assert_eq!(col.shape().unwrap(), vec![0]);
-    assert_eq!(col.maxshape().unwrap(), Some(vec![u64::MAX]));
+    assert_eq!(col.maxshape().unwrap(), Some(vec![MaxExtent::Unlimited]));
     assert_eq!(col.dtype().unwrap(), DType::U64);
     assert!(col.is_chunked());
     assert!(col.filters().is_empty());
@@ -6888,7 +6888,7 @@ fn reading_a_staged_object_reports_that_it_is_not_committed() {
     let mut col = grp
         .create_dataset("col", |b| {
             b.with_i32_data(&[7, 8])
-                .with_maxshape(&[u64::MAX])
+                .with_maxshape(&[MaxExtent::Unlimited])
                 .with_chunks(&[2]);
         })
         .unwrap();
@@ -7126,7 +7126,7 @@ fn appending_through_a_handle_onto_a_replaced_dataset_is_refused() {
     let mut b = FileBuilder::new();
     b.create_dataset("x")
         .with_i32_data(&[1, 2, 3])
-        .with_maxshape(&[u64::MAX])
+        .with_maxshape(&[MaxExtent::Unlimited])
         .with_chunks(&[4]);
     b.write(&path).unwrap();
 
@@ -7138,7 +7138,7 @@ fn appending_through_a_handle_onto_a_replaced_dataset_is_refused() {
         .root()
         .create_dataset("x", |b| {
             b.with_i32_data(&[100])
-                .with_maxshape(&[u64::MAX])
+                .with_maxshape(&[MaxExtent::Unlimited])
                 .with_chunks(&[4]);
         })
         .unwrap();

@@ -7,7 +7,7 @@
 //! editor still holds its lock, because that read is permitted on Unix but
 //! blocked by the OS on Windows.
 
-use hdf5_pure::{Error, File, FileAccessProperties, FileBuilder, FileLocking};
+use hdf5_pure::{Error, File, FileAccessProperties, FileBuilder, FileLocking, MaxExtent};
 use tempfile::tempdir;
 
 /// A plain, in-place-editable starter file.
@@ -23,7 +23,7 @@ fn write_appendable(path: &std::path::Path) {
     b.create_dataset("d")
         .with_i32_data(&[0, 1, 2, 3])
         .with_shape(&[4])
-        .with_maxshape(&[u64::MAX])
+        .with_maxshape(&[MaxExtent::Unlimited])
         .with_chunks(&[1]);
     b.write(path).unwrap();
 }

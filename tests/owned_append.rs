@@ -5,7 +5,7 @@
 //! the same handle observe the new length and data. A read-only file refuses the
 //! append.
 
-use hdf5_pure::{Error, File, FileBuilder};
+use hdf5_pure::{Error, File, FileBuilder, MaxExtent};
 use tempfile::tempdir;
 
 /// Create a rank-1, unlimited i32 dataset with chunk length `chunk`, seeded 0..n.
@@ -15,7 +15,7 @@ fn create_i32(path: &std::path::Path, n: i32, chunk: u64) {
     b.create_dataset("d")
         .with_i32_data(&data)
         .with_shape(&[n as u64])
-        .with_maxshape(&[u64::MAX])
+        .with_maxshape(&[MaxExtent::Unlimited])
         .with_chunks(&[chunk]);
     b.write(path).unwrap();
 }

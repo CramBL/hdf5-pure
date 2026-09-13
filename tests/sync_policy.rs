@@ -11,7 +11,8 @@
 //! else*: the same file, the same content, the same refusals.
 
 use hdf5_pure::{
-    AttrValue, Error, File, FileAccessProperties, FileBuilder, FileSpaceStrategy, SyncPolicy,
+    AttrValue, Error, File, FileAccessProperties, FileBuilder, FileSpaceStrategy, MaxExtent,
+    SyncPolicy,
 };
 use tempfile::tempdir;
 
@@ -22,7 +23,7 @@ fn fixture(path: &std::path::Path) {
     b.create_dataset("d")
         .with_i32_data(&(0..8).collect::<Vec<_>>())
         .with_shape(&[8])
-        .with_maxshape(&[u64::MAX])
+        .with_maxshape(&[MaxExtent::Unlimited])
         .with_chunks(&[4]);
     b.write(path).unwrap();
 }
@@ -125,7 +126,7 @@ fn a_closed_file_refuses_sync_and_does_not_need_one() {
     b.create_dataset("d")
         .with_i32_data(&(0..8).collect::<Vec<_>>())
         .with_shape(&[8])
-        .with_maxshape(&[u64::MAX])
+        .with_maxshape(&[MaxExtent::Unlimited])
         .with_chunks(&[4]);
     b.with_file_space_strategy(FileSpaceStrategy::FsmAggr, true, 1);
     b.write(&path).unwrap();

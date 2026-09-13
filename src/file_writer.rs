@@ -24,7 +24,7 @@ use crate::chunked_write::{
     measure_chunked_at, plan_chunked_data_verbatim,
 };
 use crate::convert::TryToUsize;
-use crate::dataspace::{Dataspace, DataspaceType};
+use crate::dataspace::{Dataspace, DataspaceType, MaxExtent};
 use crate::error::{FormatError, OBJECT_HEADER_MESSAGE_MAX};
 use crate::file_create_properties::FileCreateProperties;
 use crate::file_space_info::{
@@ -1532,7 +1532,7 @@ impl FileWriter {
             raw: Vec<u8>,
             attrs: Vec<AttributeMessage>,
             chunk_options: ChunkOptions,
-            maxshape: Option<Vec<u64>>,
+            maxshape: Option<Vec<MaxExtent>>,
             /// Repack's verbatim chunk payload, when this dataset's chunks are
             /// copied compressed-as-is rather than encoded from `raw`.
             raw_chunks: Option<crate::type_builders::RawChunkPayload>,
@@ -4949,7 +4949,7 @@ mod tests {
         fw.create_dataset("growable")
             .with_vlen_strings(&["one", "two", "three"])
             .with_shape(&[3])
-            .with_maxshape(&[u64::MAX])
+            .with_maxshape(&[MaxExtent::Unlimited])
             .with_chunks(&[2]);
         let bytes = fw.finish().unwrap();
         let f = crate::reader::File::from_bytes(bytes).unwrap();
@@ -5244,7 +5244,7 @@ mod tests {
         fw.create_dataset("d")
             .with_i32_data(&[1, 2, 3])
             .with_shape(&[3])
-            .with_maxshape(&[u64::MAX]);
+            .with_maxshape(&[MaxExtent::Unlimited]);
         assert!(matches!(
             fw.finish().unwrap_err(),
             FormatError::LibverTooOldForContent { .. }

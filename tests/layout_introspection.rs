@@ -8,7 +8,7 @@
 //! `Compact` and legacy `BTreeV1` variants are exercised against
 //! reference-C-library files in `crates/crosscheck/tests/layout_introspection.rs`.
 
-use hdf5_pure::{ChunkIndex, Dataset, File, FileBuilder, Layout};
+use hdf5_pure::{ChunkIndex, Dataset, File, FileBuilder, Layout, MaxExtent};
 use tempfile::tempdir;
 
 fn open(f: &File, name: &str) -> Dataset {
@@ -138,7 +138,7 @@ fn chunked_extensible_array_supports_append() {
         b.create_dataset("d")
             .with_i32_data(&(0..8).collect::<Vec<_>>())
             .with_shape(&[8])
-            .with_maxshape(&[u64::MAX]) // unlimited -> extensible array
+            .with_maxshape(&[MaxExtent::Unlimited]) // unlimited -> extensible array
             .with_chunks(&[4]);
         b.write(&p).unwrap();
     }
@@ -236,7 +236,7 @@ fn unallocated_extensible_has_no_chunks() {
         b.create_dataset("d")
             .with_i32_data(&[]) // empty
             .with_shape(&[0])
-            .with_maxshape(&[u64::MAX])
+            .with_maxshape(&[MaxExtent::Unlimited])
             .with_chunks(&[8]);
         b.write(&p).unwrap();
     }

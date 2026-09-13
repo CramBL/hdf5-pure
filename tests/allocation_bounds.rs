@@ -26,8 +26,8 @@
 #![cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 
 use hdf5_pure::{
-    EditBacking, File, FileAccessProperties, FileBuilder, FileSpaceStrategy, MemoryStrategy,
-    SyncPolicy,
+    EditBacking, File, FileAccessProperties, FileBuilder, FileSpaceStrategy, MaxExtent,
+    MemoryStrategy, SyncPolicy,
 };
 
 #[global_allocator]
@@ -691,7 +691,7 @@ fn one_append_costs_its_batch_not_the_dataset() {
         .create_dataset("t")
         .with_f64_data(&[0.0f64; CHUNK_ELEMS as usize])
         .with_shape(&[CHUNK_ELEMS])
-        .with_maxshape(&[u64::MAX])
+        .with_maxshape(&[MaxExtent::Unlimited])
         .with_chunks(&[CHUNK_ELEMS]);
     builder.write(&path).unwrap();
 
@@ -781,7 +781,7 @@ fn gathering_writes_does_not_recopy_what_it_holds() {
         .create_dataset("growing")
         .with_f64_data(&[1.0f64; CHUNK])
         .with_shape(&[CHUNK as u64])
-        .with_maxshape(&[u64::MAX])
+        .with_maxshape(&[MaxExtent::Unlimited])
         .with_chunks(&[CHUNK as u64]);
     builder.write(&path).unwrap();
 
@@ -853,7 +853,7 @@ fn a_page_buffer_does_not_recopy_what_it_holds_across_operations() {
         .create_dataset("growing")
         .with_f64_data(&[1.0f64; CHUNK])
         .with_shape(&[CHUNK as u64])
-        .with_maxshape(&[u64::MAX])
+        .with_maxshape(&[MaxExtent::Unlimited])
         .with_chunks(&[CHUNK as u64]);
     builder.write(&path).unwrap();
 
@@ -982,7 +982,7 @@ fn open_rw_of_a_persisting_fsm_file_does_not_allocate_the_file() {
         .create_dataset("samples")
         .with_u64_data(&data)
         .with_shape(&[data.len() as u64])
-        .with_maxshape(&[u64::MAX])
+        .with_maxshape(&[MaxExtent::Unlimited])
         .with_chunks(&[CHUNK_ELEMS as u64]);
     builder.write(&path).unwrap();
     drop(data);
@@ -1228,7 +1228,7 @@ fn write_growing_fixture(path: &std::path::Path, datasets: usize, chunk_elems: u
             .create_dataset(&format!("d{i}"))
             .with_f64_data(&initial)
             .with_shape(&[chunk_elems])
-            .with_maxshape(&[u64::MAX])
+            .with_maxshape(&[MaxExtent::Unlimited])
             .with_chunks(&[chunk_elems]);
     }
     builder.write(path).unwrap();

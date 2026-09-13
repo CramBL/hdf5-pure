@@ -18,7 +18,7 @@
 use std::hint::black_box;
 
 use criterion::{Criterion, criterion_group, criterion_main};
-use hdf5_pure::{File, FileBuilder};
+use hdf5_pure::{File, FileBuilder, MaxExtent};
 
 /// Build a file image from a configuring closure.
 fn build(configure: impl FnOnce(&mut FileBuilder)) -> Vec<u8> {
@@ -260,7 +260,7 @@ fn bench_page_buffer(c: &mut Criterion) {
             b.create_dataset(name)
                 .with_i32_data(&vec![0i32; CHUNK])
                 .with_shape(&[CHUNK as u64])
-                .with_maxshape(&[u64::MAX])
+                .with_maxshape(&[MaxExtent::Unlimited])
                 .with_chunks(&[CHUNK as u64]);
         }
         b.write(path).expect("fixture");

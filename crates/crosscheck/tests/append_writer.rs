@@ -11,7 +11,7 @@
 
 use hdf5::Extent;
 use hdf5::file::LibraryVersion;
-use hdf5_pure::{File, FileAccessProperties, FileBuilder, SyncPolicy};
+use hdf5_pure::{File, FileAccessProperties, FileBuilder, MaxExtent, SyncPolicy};
 use tempfile::tempdir;
 
 fn incompressible(seed: u32, n: usize) -> Vec<i32> {
@@ -62,7 +62,7 @@ fn pure_create_filtered(path: &std::path::Path, data: &[i32], chunk: u64) {
     b.create_dataset("d")
         .with_i32_data(data)
         .with_shape(&[data.len() as u64])
-        .with_maxshape(&[u64::MAX])
+        .with_maxshape(&[MaxExtent::Unlimited])
         .with_chunks(&[chunk])
         .with_shuffle()
         .with_deflate(6);
@@ -175,7 +175,7 @@ fn unfiltered_writer_append_c_reads() {
     b.create_dataset("d")
         .with_i32_data(&(0..10).collect::<Vec<_>>())
         .with_shape(&[10])
-        .with_maxshape(&[u64::MAX])
+        .with_maxshape(&[MaxExtent::Unlimited])
         .with_chunks(&[4]);
     b.write(&path).unwrap();
     writer_append(&path, &(10..23).collect::<Vec<_>>()); // unaligned

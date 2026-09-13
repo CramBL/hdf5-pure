@@ -11,7 +11,7 @@
 
 use hdf5_pure::{
     AttrValue, CompoundTypeBuilder, Datatype, DatatypeByteOrder, File, FileBuilder,
-    FileSpaceStrategy, Group, Object, ReferenceType,
+    FileSpaceStrategy, Group, MaxExtent, Object, ReferenceType,
 };
 use tempfile::tempdir;
 
@@ -517,7 +517,7 @@ fn a_reference_to_an_appended_dataset_follows_its_relocating_append() {
     b.create_dataset("target")
         .with_i32_data(&[1, 2, 3])
         .with_shape(&[3])
-        .with_maxshape(&[u64::MAX])
+        .with_maxshape(&[MaxExtent::Unlimited])
         .with_chunks(&[3]);
     b.create_dataset("refs").with_path_references(&["target"]);
     b.write(&path).unwrap();

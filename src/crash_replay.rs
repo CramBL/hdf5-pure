@@ -122,6 +122,7 @@
 use std::path::Path;
 
 use crate::chunk_index_inplace::alloc_probe;
+use crate::dataspace::MaxExtent;
 use crate::edit::{AppendBuilder, AppendTarget, MemoryStrategy, SyncPolicy, WriteEngine};
 use crate::error::{Error, FormatError};
 use crate::file_lock::FileLocking;
@@ -503,7 +504,7 @@ fn warmed_base_padded(path: &Path, paged: bool, pad: usize) {
         let d = b.create_dataset("d");
         d.with_i32_data(&[0i32])
             .with_shape(&[1])
-            .with_maxshape(&[u64::MAX])
+            .with_maxshape(&[MaxExtent::Unlimited])
             .with_chunks(&[CHUNK]);
         if pad > 0 {
             d.set_attr(
@@ -636,7 +637,7 @@ fn warmed_shuffled_base(path: &Path) {
     b.create_dataset("d")
         .with_i32_data(&(0..CHUNK as i32).collect::<Vec<_>>())
         .with_shape(&[CHUNK])
-        .with_maxshape(&[u64::MAX])
+        .with_maxshape(&[MaxExtent::Unlimited])
         .with_chunks(&[CHUNK])
         .with_shuffle();
     b.write(path).unwrap();
@@ -856,7 +857,7 @@ fn warmed_base_with_a_persisted_hole(path: &Path) {
     b.create_dataset("d")
         .with_i32_data(&[0i32])
         .with_shape(&[1])
-        .with_maxshape(&[u64::MAX])
+        .with_maxshape(&[MaxExtent::Unlimited])
         .with_chunks(&[CHUNK]);
     b.create_dataset("victim")
         .with_i32_data(&vec![7i32; RESERVE_HOLE / 4]);
@@ -1025,7 +1026,7 @@ fn commit_base(path: &Path, paged: bool) {
     b.create_dataset("d")
         .with_i32_data(&(0..COMMIT_BASE).collect::<Vec<i32>>())
         .with_shape(&[COMMIT_BASE as u64])
-        .with_maxshape(&[u64::MAX])
+        .with_maxshape(&[MaxExtent::Unlimited])
         .with_chunks(&[COMMIT_STEP as u64]);
     for r in 0..CHURN {
         let v = doomed_values(r);

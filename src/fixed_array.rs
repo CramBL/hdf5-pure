@@ -579,6 +579,7 @@ fn read_variable_length(data: &[u8], size: usize) -> Result<u64, FormatError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::dataspace::MaxExtent;
 
     /// The grid of a dataset with no maximum shape: dense row-major, which is
     /// what these tests read. The numbering rule itself is tested in
@@ -632,7 +633,7 @@ mod tests {
         let grid = ChunkGrid::new(
             &[2],
             &[4],
-            Some(&[8]),
+            Some(&[MaxExtent::Fixed(8)]),
             crate::chunk_grid::GridOrder::RowMajor,
         )
         .unwrap();
