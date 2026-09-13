@@ -1051,7 +1051,7 @@ pub(crate) struct WriteEngine {
     /// exposes the mirror's buffer where a caller can exploit it.
     image: Box<dyn FileImage>,
     /// Absolute offset of the superblock signature in the file.
-    sb_sig_off: usize,
+    sb_sig_off: u64,
     /// Parsed superblock. On-disk addresses are stored relative to `base_address`;
     /// the in-memory `root_group_address` is normalized to an absolute file offset
     /// on open and converted back to a base-relative address when serialized on
@@ -1239,7 +1239,7 @@ pub(crate) struct WriteEngine {
     /// a dataset with more than one hard link
     /// ([`count_incoming_hard_links`](Self::count_incoming_hard_links)), so it
     /// would start refusing overwrites this engine accepts today.
-    inplace_undo: Vec<(usize, Vec<u8>)>,
+    inplace_undo: Vec<(u64, Vec<u8>)>,
     /// True when this engine was opened for SWMR writing
     /// ([`open_swmr_writer`](Self::open_swmr_writer)): the append engine then
     /// enforces the SWMR subset (unfiltered, chunk-aligned) so a concurrent
@@ -2811,8 +2811,8 @@ impl WriteEngine {
         // handle; it leaves the handle's cursor wherever its last read ended,
         // which is why the mirror positions the handle before reading it whole.
         let probe = crate::image::BorrowedHandle::new(&handle, len);
-        let sb_sig_off = signature::find_signature_in(&probe)?.to_usize()?;
-        let mut superblock = Superblock::parse_from_source(&probe, sb_sig_off as u64)?;
+        let sb_sig_off = signature::find_signature_in(&probe)?;
+        let mut superblock = Superblock::parse_from_source(&probe, sb_sig_off)?;
 
         if superblock.version > 3 {
             return Err(Error::EditUnsupported("unsupported superblock version"));
@@ -2838,7 +2838,7 @@ impl WriteEngine {
         // exactly at the base address (e.g. a MATLAB v7.3 `.mat` file's 512-byte
         // userblock) — is accepted; a base address that disagrees with the
         // superblock's location is a relocated or malformed file we will not rewrite.
-        if superblock.base_address != BaseAddress::new(sb_sig_off as u64) {
+        if superblock.base_address != BaseAddress::new(sb_sig_off) {
             return Err(Error::EditUnsupported(
                 "a file whose superblock is not located at its base address is not editable in place",
             ));
@@ -3070,13 +3070,7 @@ impl WriteEngine {
         // shifted to an absolute file offset before the header is read. This is a
         // no-op on the base-0 file every path below the userblock check sees, but
         // that check itself needs the strategy of a *userblock* file.
-        let Ok(ext_addr) = self
-            .superblock
-            .base_address
-            .absolute(ext_rel)
-            .map_err(|_| ())
-            .and_then(|a| usize::try_from(a).map_err(|_| ()))
-        else {
+        let Ok(ext_addr) = self.superblock.base_address.absolute(ext_rel) else {
             return;
         };
         let Some(info) = self.extension_fsinfo(ext_addr) else {
@@ -3259,14 +3253,13 @@ impl WriteEngine {
         });
     }
 
-    /// Parse the File Space Info message out of the superblock-extension object
+    /// Parses the File Space Info message out of the superblock-extension object
     /// header at `ext_addr`, if present and readable.
-    fn extension_fsinfo(&self, ext_addr: usize) -> Option<FileSpaceInfo> {
+    fn extension_fsinfo(&self, ext_addr: u64) -> Option<FileSpaceInfo> {
         let os = self.superblock.offset_size;
         let ls = self.superblock.length_size;
         let base = self.superblock.base_address;
-        let oh =
-            ObjectHeader::parse_from_source(&self.image(), ext_addr as u64, os, ls, base).ok()?;
+        let oh = ObjectHeader::parse_from_source(&self.image(), ext_addr, os, ls, base).ok()?;
         let msg = oh
             .messages
             .iter()
@@ -5586,14 +5579,14 @@ impl WriteEngine {
         }
     }
 
-    /// Overwrite `raw` at `at`, keeping the bytes it replaces so a commit that
+    /// Overwrites `raw` at `at`, keeping the bytes it replaces so a commit that
     /// fails before its repoint can put them back.
     ///
     /// The read covers exactly the range about to be written, which the write
     /// preflight sized and bounds-checked against the on-disk dataset — a
     /// same-length overwrite by construction.
-    fn write_inplace_journaled(&mut self, at: usize, raw: &[u8]) -> Result<(), Error> {
-        let prior = self.image().read_exact_at(at as u64, raw.len())?;
+    fn write_inplace_journaled(&mut self, at: u64, raw: &[u8]) -> Result<(), Error> {
+        let prior = self.image().read_exact_at(at, raw.len())?;
         self.inplace_undo.push((at, prior));
         self.write_at(at, raw)
     }
@@ -5708,7 +5701,7 @@ impl WriteEngine {
         // in place (no header rewrite, no superblock flip), while a resize or
         // compact rewrite relocates the header and is staged against its parent
         // group so the commit below rebuilds it and patches the link. ---
-        let mut inplace_writes: Vec<(usize, OverwriteBytes)> = Vec::new();
+        let mut inplace_writes: Vec<(u64, OverwriteBytes)> = Vec::new();
         let mut moving_writes: Vec<(PathKey, String, u64, MovingWrite)> = Vec::new();
         let mut write_targets: Vec<PathKey> = Vec::new();
         // The file-wide hard-link count, computed lazily the first time a commit
@@ -5739,9 +5732,7 @@ impl WriteEngine {
                 &path_str,
             )
             .map_err(|_| Error::EditUnsupported("nothing to overwrite at the given path"))?;
-            let addr = usize::try_from(addr)
-                .map_err(|_| Error::EditUnsupported("dataset address exceeds this platform"))?;
-            match Self::prepare_write(&self.image(), addr as u64, fd, base, full)? {
+            match Self::prepare_write(&self.image(), addr, fd, base, full)? {
                 WritePlan::InPlace { data_addr, bytes } => {
                     inplace_writes.push((data_addr, bytes));
                 }
@@ -5767,7 +5758,7 @@ impl WriteEngine {
                     let counts = incoming_links
                         .get_or_insert_with(|| self.count_incoming_hard_links())
                         .as_ref();
-                    match counts.and_then(|c| c.get(&(addr as u64))) {
+                    match counts.and_then(|c| c.get(&addr)) {
                         Some(&1) => {}
                         _ => {
                             return Err(Error::EditUnsupported(
@@ -5778,7 +5769,7 @@ impl WriteEngine {
                     }
                     let leaf = full.last().unwrap().clone();
                     let parent = full[..full.len() - 1].to_vec();
-                    moving_writes.push((parent, leaf, addr as u64, mw));
+                    moving_writes.push((parent, leaf, addr, mw));
                 }
             }
             write_targets.push(full.clone());
@@ -5813,16 +5804,14 @@ impl WriteEngine {
                 &path_str,
             )
             .map_err(|_| Error::AppendUnsupported("nothing to append to at the given path"))?;
-            let addr = usize::try_from(addr)
-                .map_err(|_| Error::AppendUnsupported("dataset address exceeds this platform"))?;
-            let mw = Self::prepare_append(&self.image(), addr as u64, ab, base)?;
+            let mw = Self::prepare_append(&self.image(), addr, ab, base)?;
             // A relocating append moves the dataset's object header and patches only
             // the one parent link that names it, so it is safe only when this is the
             // dataset's sole hard link (same rule as a relocating overwrite).
             let counts = incoming_links
                 .get_or_insert_with(|| self.count_incoming_hard_links())
                 .as_ref();
-            match counts.and_then(|c| c.get(&(addr as u64))) {
+            match counts.and_then(|c| c.get(&addr)) {
                 Some(&1) => {}
                 _ => {
                     return Err(Error::AppendUnsupported(
@@ -5833,7 +5822,7 @@ impl WriteEngine {
             }
             let leaf = full.last().unwrap().clone();
             let parent = full[..full.len() - 1].to_vec();
-            moving_writes.push((parent, leaf, addr as u64, mw));
+            moving_writes.push((parent, leaf, addr, mw));
             write_targets.push(full.clone());
         }
 
@@ -5879,15 +5868,13 @@ impl WriteEngine {
                 .map_err(|_| {
                     Error::EditUnsupported("nothing to set an attribute on at the given path")
                 })?;
-                let addr = usize::try_from(addr)
-                    .map_err(|_| Error::EditUnsupported("dataset address exceeds this platform"))?;
                 // An attribute edit relocates the dataset's object header and patches
                 // only the one naming link, so it is safe only when this is the
                 // dataset's sole hard link (same rule as a relocating overwrite).
                 let counts = incoming_links
                     .get_or_insert_with(|| self.count_incoming_hard_links())
                     .as_ref();
-                match counts.and_then(|c| c.get(&(addr as u64))) {
+                match counts.and_then(|c| c.get(&addr)) {
                     Some(&1) => {}
                     _ => {
                         return Err(Error::EditUnsupported(
@@ -5896,14 +5883,14 @@ impl WriteEngine {
                         ));
                     }
                 }
-                let region = Self::gather_oh_messages(&self.image(), addr as u64, base)?;
-                let edits = plan_attr_ops(&self.image(), base, Some(addr as u64), &region, &ops)?;
+                let region = Self::gather_oh_messages(&self.image(), addr, base)?;
+                let edits = plan_attr_ops(&self.image(), base, Some(addr), &region, &ops)?;
                 let leaf = full.last().unwrap().clone();
                 let parent = full[..full.len() - 1].to_vec();
                 moving_writes.push((
                     parent,
                     leaf,
-                    addr as u64,
+                    addr,
                     MovingWrite::AttrEdit {
                         region: edits.region,
                         attrs: edits.attrs,
@@ -6059,13 +6046,11 @@ impl WriteEngine {
                 &src_str,
             )
             .map_err(|_| Error::EditUnsupported("copy source does not exist"))?;
-            let src_addr = usize::try_from(src_addr)
-                .map_err(|_| Error::EditUnsupported("source address exceeds this platform"))?;
             // Read the source subtree from this file's own mirror (`cross_file`
             // false: same address space, so verbatim addresses stay valid). On a
             // userblock file the stored addresses are base-relative, so pass this
             // session's base for the read to absolutize them.
-            let tree = Self::read_copy_subtree(&self.image(), src_addr as u64, 0, false, base)?;
+            let tree = Self::read_copy_subtree(&self.image(), src_addr, 0, false, base)?;
             copy_sources.push(src.clone());
             add_targets.push(dst.clone());
             let leaf = dst.last().unwrap().clone();
@@ -6095,7 +6080,7 @@ impl WriteEngine {
         // each removed object's header address so its owned blocks can be
         // reclaimed after the commit lands (issue #21).
         let delete_targets = &staged.deletes;
-        let mut deleted_addrs: Vec<usize> = Vec::new();
+        let mut deleted_addrs: Vec<u64> = Vec::new();
         for (i, d) in delete_targets.iter().enumerate() {
             if d.is_empty() {
                 return Err(Error::EditUnsupported("cannot delete the root group"));
@@ -6107,9 +6092,7 @@ impl WriteEngine {
                 &path_str,
             )
             .map_err(|_| Error::EditUnsupported("nothing to delete at the given path"))?;
-            if let Ok(a) = usize::try_from(del_addr) {
-                deleted_addrs.push(a);
-            }
+            deleted_addrs.push(del_addr);
             // A deletion may overlap other staged work when this commit
             // *replaces* what it removes: an addition names exactly `d`, so the
             // removal and the new object at the same path are one rotation
@@ -6225,7 +6208,7 @@ impl WriteEngine {
         // halves of one relocation, which is what an object reference stored
         // elsewhere in the file has to be repointed across (issue #324).
         let keys: Vec<PathKey> = nodes.keys().cloned().collect();
-        let mut superseded_addrs: Vec<(PathKey, usize)> = Vec::new();
+        let mut superseded_addrs: Vec<(PathKey, u64)> = Vec::new();
         for key in &keys {
             let is_new = nodes[key].is_new;
             if is_new {
@@ -6242,8 +6225,6 @@ impl WriteEngine {
                         "a target group does not exist; create it first in this session",
                     )
                 })?;
-                let addr = usize::try_from(addr)
-                    .map_err(|_| Error::EditUnsupported("group address exceeds this platform"))?;
                 // Rebuilding this group moves its header and patches only the
                 // link this commit resolved it through, so every other hard link
                 // to it would be left naming the old header — which this commit
@@ -6260,7 +6241,7 @@ impl WriteEngine {
                     let counts = incoming_links
                         .get_or_insert_with(|| self.count_incoming_hard_links())
                         .as_ref();
-                    match counts.and_then(|c| c.get(&(addr as u64)).copied()) {
+                    match counts.and_then(|c| c.get(&addr).copied()) {
                         Some(1) => {}
                         // Known, and more than one: the aliases are the problem.
                         Some(_) => {
@@ -6294,7 +6275,7 @@ impl WriteEngine {
 
         // A rebuilt group's old header is vacated just as a relocated dataset's is,
         // so the two join one list for the screen below.
-        moved_headers.extend(superseded_addrs.iter().map(|&(_, a)| a as u64));
+        moved_headers.extend(superseded_addrs.iter().map(|&(_, a)| a));
 
         // Apply and validate group attribute edits before any writes. This keeps
         // unsupported attribute edits under the same all-or-nothing preflight
@@ -6308,10 +6289,8 @@ impl WriteEngine {
         // rebuilds back out of the file, which needs the address; a group this
         // commit *creates* has neither an address nor any stored attribute, and
         // its `None` says so.
-        let existing_group_addrs: HashMap<PathKey, u64> = superseded_addrs
-            .iter()
-            .map(|(key, addr)| (key.clone(), *addr as u64))
-            .collect();
+        let existing_group_addrs: HashMap<PathKey, u64> =
+            superseded_addrs.iter().cloned().collect();
         for key in &keys {
             if let Some(ops) = attrs_by_group.get(key) {
                 let region = std::mem::take(&mut nodes.get_mut(key).unwrap().base_region);
@@ -6621,10 +6600,8 @@ impl WriteEngine {
                     // rather than freeing a region still in use); the old header
                     // chunks are freed generically below.
                     MovingWrite::Chunked { old_addr, .. } => {
-                        if let Ok(a) = usize::try_from(*old_addr) {
-                            if let Some(spans) = self.chunked_storage_spans(a) {
-                                to_free.extend(spans);
-                            }
+                        if let Some(spans) = self.chunked_storage_spans(*old_addr) {
+                            to_free.extend(spans);
                         }
                     }
                     // A relocating append keeps the existing chunk *data* in place
@@ -6637,29 +6614,27 @@ impl WriteEngine {
                         kept_chunks,
                         ..
                     } => {
-                        if let Ok(a) = usize::try_from(*old_addr) {
-                            if let Some(spans) = self.chunked_index_spans(a) {
-                                // The old index is reclaimed as raw only where it
-                                // provably sits in a raw page, and recorded as dead
-                                // otherwise; see `index_is_provably_raw`. The
-                                // dataset's old chunk data is the kept chunks
-                                // (base-relative) plus the trailing partial chunk
-                                // this append relocated — both already in hand, so
-                                // the proof needs no second walk of the index.
-                                let data: Vec<(u64, u64)> = kept_chunks
-                                    .iter()
-                                    .filter_map(|c| {
-                                        Some((base.absolute(c.address).ok()?, c.compressed_size))
-                                    })
-                                    .chain(*old_tail_extent)
-                                    .collect();
-                                let class = if self.index_is_provably_raw(&data, &spans) {
-                                    FreeClass::Page(PageType::Raw)
-                                } else {
-                                    FreeClass::Dead
-                                };
-                                to_free.extend(spans.into_iter().map(|(a, l)| (a, l, class)));
-                            }
+                        if let Some(spans) = self.chunked_index_spans(*old_addr) {
+                            // The old index is reclaimed as raw only where it
+                            // provably sits in a raw page, and recorded as dead
+                            // otherwise. See `index_is_provably_raw`. The
+                            // dataset's old chunk data is the kept chunks
+                            // (base-relative) plus the trailing partial chunk
+                            // this append relocated, both already in hand, so
+                            // the proof needs no second walk of the index.
+                            let data: Vec<(u64, u64)> = kept_chunks
+                                .iter()
+                                .filter_map(|c| {
+                                    Some((base.absolute(c.address).ok()?, c.compressed_size))
+                                })
+                                .chain(*old_tail_extent)
+                                .collect();
+                            let class = if self.index_is_provably_raw(&data, &spans) {
+                                FreeClass::Page(PageType::Raw)
+                            } else {
+                                FreeClass::Dead
+                            };
+                            to_free.extend(spans.into_iter().map(|(a, l)| (a, l, class)));
                         }
                         if let Some(ext) = old_tail_extent {
                             // The relocated old trailing chunk is raw data.
@@ -6669,10 +6644,8 @@ impl WriteEngine {
                     _ => {}
                 }
                 // The relocated dataset's old header chunks are dead too.
-                if let Ok(a) = usize::try_from(*old_oh) {
-                    if let Ok(spans) = self.oh_chunk_spans(a) {
-                        to_free.extend(meta_spans(spans));
-                    }
+                if let Ok(spans) = self.oh_chunk_spans(*old_oh) {
+                    to_free.extend(meta_spans(spans));
                 }
             }
         }
@@ -6910,7 +6883,7 @@ impl WriteEngine {
         // `superseded_addrs` is filled from `keys`, and the loop visits all of it.
         for (key, old) in &superseded_addrs {
             if let Some(&new) = path_addr.get(key) {
-                relocations.insert(*old as u64, new);
+                relocations.insert(*old, new);
             }
         }
 
@@ -7132,8 +7105,6 @@ impl WriteEngine {
             .ok_or(Error::EditUnsupported(
                 "a persisting file has no superblock extension to update",
             ))?;
-        let old_ext_addr = usize::try_from(old_ext_rel)
-            .map_err(|_| Error::EditUnsupported("extension address exceeds this platform"))?;
 
         // The persist File Space Info message is fixed-size, so the rewritten
         // extension's length is independent of the addresses it will carry: size
@@ -7141,7 +7112,7 @@ impl WriteEngine {
         let placeholder =
             FileSpaceInfo::persistent_single_manager(strategy, threshold, page_size, 0, 0);
         let ext_len =
-            build_v2_object_header(&self.rewrite_extension_region(old_ext_addr, &placeholder)?)?
+            build_v2_object_header(&self.rewrite_extension_region(old_ext_rel, &placeholder)?)?
                 .len() as u64;
 
         // Place the tail — the rewritten extension and the manager blocks — in a
@@ -7180,7 +7151,7 @@ impl WriteEngine {
         let (ext_oh, fsm_blocks) = if sections.is_empty() {
             let info = FileSpaceInfo::persistent_empty(strategy, threshold, page_size);
             let ext_oh =
-                build_v2_object_header(&self.rewrite_extension_region(old_ext_addr, &info)?)?;
+                build_v2_object_header(&self.rewrite_extension_region(old_ext_rel, &info)?)?;
             (ext_oh, None)
         } else {
             // `eoa_pre_fsm` is the end-of-allocation before the free-space-manager
@@ -7204,7 +7175,7 @@ impl WriteEngine {
                 eoa_pre_fsm,
             );
             let ext_oh =
-                build_v2_object_header(&self.rewrite_extension_region(old_ext_addr, &info)?)?;
+                build_v2_object_header(&self.rewrite_extension_region(old_ext_rel, &info)?)?;
             let (fshd, fsse) =
                 serialize_file_fsm(&sections, fshd_addr, fsse_addr, os, SECT_CLASS_SIMPLE);
             (ext_oh, Some((fshd, fsse)))
@@ -7488,8 +7459,6 @@ impl WriteEngine {
             .ok_or(Error::EditUnsupported(
                 "a persisting file has no superblock extension to update",
             ))?;
-        let old_ext_addr = usize::try_from(old_ext_rel)
-            .map_err(|_| Error::EditUnsupported("extension address exceeds this platform"))?;
 
         // The 12-slot persist message is fixed-size, so a placeholder sizes the
         // rewritten extension before its manager addresses are known — and before
@@ -7502,7 +7471,7 @@ impl WriteEngine {
             0,
         );
         let ext_len =
-            build_v2_object_header(&self.rewrite_extension_region(old_ext_addr, &placeholder)?)?
+            build_v2_object_header(&self.rewrite_extension_region(old_ext_rel, &placeholder)?)?
                 .len() as u64;
 
         // Place the tail — the rewritten extension and the manager blocks — as an
@@ -7572,14 +7541,14 @@ impl WriteEngine {
         let ext_oh = if plan.is_empty() {
             // No free space to track: an empty persist message, page-aligned.
             let info = FileSpaceInfo::persistent_empty(strategy, threshold, page_size);
-            build_v2_object_header(&self.rewrite_extension_region(old_ext_addr, &info)?)?
+            build_v2_object_header(&self.rewrite_extension_region(old_ext_rel, &info)?)?
         } else {
             // Paged convention (matching the from-scratch writer): the managers are
             // ordinary metadata below a page-aligned end-of-allocation.
             let info = FileSpaceInfo::persistent_managers(
                 strategy, threshold, page_size, plan.slots, final_eof,
             );
-            build_v2_object_header(&self.rewrite_extension_region(old_ext_addr, &info)?)?
+            build_v2_object_header(&self.rewrite_extension_region(old_ext_rel, &info)?)?
         };
         debug_assert_eq!(
             ext_oh.len() as u64,
@@ -7917,11 +7886,7 @@ impl WriteEngine {
             debug_assert_eq!(written, addr, "an appended block must land at end-of-file");
             return Ok(());
         }
-        self.write_at(
-            usize::try_from(addr)
-                .map_err(|_| Error::EditUnsupported("tail address exceeds this platform"))?,
-            bytes,
-        )
+        self.write_at(addr, bytes)
     }
 
     /// Extend the file with zeros up to `target` (>= the current length), used by
@@ -7936,17 +7901,17 @@ impl WriteEngine {
         Ok(())
     }
 
-    /// Rebuild the superblock-extension object header's message region with its
+    /// Rebuilds the superblock-extension object header's message region with its
     /// File Space Info message replaced by `info` (every other message preserved
     /// verbatim), ready to wrap with [`build_v2_object_header`]. The persisting
     /// message is fixed-size, so this never changes the region's length.
     fn rewrite_extension_region(
         &self,
-        ext_addr: usize,
+        ext_addr: u64,
         info: &FileSpaceInfo,
     ) -> Result<OhRegion, Error> {
         let region =
-            Self::gather_oh_messages(&self.image(), ext_addr as u64, self.superblock.base_address)?;
+            Self::gather_oh_messages(&self.image(), ext_addr, self.superblock.base_address)?;
         rewrite_extension_region_bytes(&region, info)
     }
 
@@ -7957,21 +7922,22 @@ impl WriteEngine {
     /// describe the old symbol-table group, no longer apply). The
     /// object-header-address write is done last so it is the linearization point.
     fn repoint_v0v1_root(&mut self, new_root: u64, new_eof: u64) -> Result<(), Error> {
-        let os = self.superblock.offset_size as usize;
+        let os = self.superblock.offset_size;
+        let addr_width = u64::from(os);
         // Field layout after the fixed prefix: base / free-space / EOF / driver
         // addresses, then the root symbol-table entry (link-name offset, object
         // header address, cache type(4), reserved(4), scratch(16)). The prefix is
         // 24 bytes for v0 and 28 for v1 (the latter adds indexed-storage-K).
         let var_start = if self.superblock.version == 0 { 24 } else { 28 };
         let base = self.sb_sig_off + var_start;
-        let eof_off = base + 2 * os;
-        let ste = base + 4 * os;
-        let oh_addr_off = ste + os;
-        let cache_off = ste + 2 * os;
-        self.write_at(eof_off, &new_eof.to_le_bytes()[..os])?;
+        let eof_off = base + 2 * addr_width;
+        let ste = base + 4 * addr_width;
+        let oh_addr_off = ste + addr_width;
+        let cache_off = ste + 2 * addr_width;
+        self.write_at(eof_off, &new_eof.to_le_bytes()[..usize::from(os)])?;
         self.write_at(cache_off, &[0u8; 4])?; // cache type = none
         self.write_at(cache_off + 8, &[0u8; 16])?; // clear scratch-pad
-        self.write_at(oh_addr_off, &new_root.to_le_bytes()[..os])?;
+        self.write_at(oh_addr_off, &new_root.to_le_bytes()[..usize::from(os)])?;
         Ok(())
     }
 
@@ -8010,18 +7976,18 @@ impl WriteEngine {
         Ok(out)
     }
 
-    /// Reconstruct a version-1 (symbol-table) group as a fresh v2 compact-link
+    /// Reconstructs a version-1 (symbol-table) group as a fresh v2 compact-link
     /// message region: a LinkInfo message, one Link message per existing child,
     /// and the group's existing attributes (re-wrapped as v2 messages). The
     /// symbol-table message and other non-link/non-attribute messages
     /// (modification time, comment, …) are dropped — editing a v0/v1 group
     /// converts it to the latest format. Refuses an attribute it cannot
     /// reproduce (shared, or larger than a v2 message can hold).
-    fn reconstruct_v1_group(&self, addr: usize) -> Result<GroupInfo, Error> {
+    fn reconstruct_v1_group(&self, addr: u64) -> Result<GroupInfo, Error> {
         let os = self.superblock.offset_size;
         let ls = self.superblock.length_size;
         let base = self.superblock.base_address;
-        let oh = ObjectHeader::parse_from_source(&self.image(), addr as u64, os, ls, base)?;
+        let oh = ObjectHeader::parse_from_source(&self.image(), addr, os, ls, base)?;
         if oh
             .messages
             .iter()
@@ -8086,20 +8052,20 @@ impl WriteEngine {
         Ok(GroupInfo { region, link_names })
     }
 
-    /// Parse and validate a group's object header, returning its message region
+    /// Parses and validates a group's object header, returning its message region
     /// — the bytes to copy when rewriting the header — and the names of its
     /// existing links. A version 2 header is rebuilt from its own message bytes
     /// (collapsing continuation chunks, preserving every message); a version 1
     /// symbol-table group is converted to v2 via [`reconstruct_v1_group`].
     ///
     /// [`reconstruct_v1_group`]: Self::reconstruct_v1_group
-    fn inspect_group(&self, addr: usize) -> Result<GroupInfo, Error> {
-        let sig = self.image().read_metadata_at(addr as u64, 4);
+    fn inspect_group(&self, addr: u64) -> Result<GroupInfo, Error> {
+        let sig = self.image().read_metadata_at(addr, 4);
         if sig.as_deref() != Ok(&b"OHDR"[..]) {
             return self.reconstruct_v1_group(addr);
         }
         let mut region =
-            Self::gather_oh_messages(&self.image(), addr as u64, self.superblock.base_address)?;
+            Self::gather_oh_messages(&self.image(), addr, self.superblock.base_address)?;
         let mut p = 0;
         let mut has_link_info = false;
         let mut link_names = Vec::new();
@@ -8378,15 +8344,8 @@ impl WriteEngine {
                     && data_addr != UNDEF
                     && data_size == fd.raw.len() as u64
                 {
-                    if let Some(start) = base
-                        .absolute(data_addr)
-                        .ok()
-                        .and_then(|a| usize::try_from(a).ok())
-                    {
-                        if start
-                            .checked_add(fd.raw.len())
-                            .is_some_and(|e| e as u64 <= src.len())
-                        {
+                    if let Ok(start) = base.absolute(data_addr) {
+                        if start.checked_add(data_size).is_some_and(|e| e <= src.len()) {
                             return Ok(WritePlan::InPlace {
                                 data_addr: start,
                                 bytes: staged_bytes(fd, path),
@@ -8521,9 +8480,6 @@ impl WriteEngine {
                 // the file (so the layout's stored addresses index correctly), and
                 // the returned write offsets are shifted back to absolute file
                 // offsets by adding `base` (a no-op on a base-0 file).
-                let base_off = usize::try_from(base.get()).map_err(|_| {
-                    Error::EditUnsupported("userblock base address exceeds this platform")
-                })?;
                 if let Some(writes) = try_inplace_chunk_writes(
                     &BaseOffsetSource { inner: src, base },
                     &dl,
@@ -8534,8 +8490,8 @@ impl WriteEngine {
                 ) {
                     let writes = writes
                         .into_iter()
-                        .map(|(off, b)| (off + base_off, b))
-                        .collect();
+                        .map(|(off, b)| Ok((base.absolute(off)?, b)))
+                        .collect::<Result<Vec<_>, FormatError>>()?;
                     return Ok(WritePlan::InPlaceChunks { writes });
                 }
 
@@ -9950,10 +9906,10 @@ impl WriteEngine {
         self.image.append(bytes)
     }
 
-    /// Overwrite bytes in place at `offset`. The caller guarantees the range
+    /// Overwrites bytes in place at `offset`. The caller guarantees the range
     /// already exists.
-    fn write_at(&mut self, offset: usize, bytes: &[u8]) -> Result<(), Error> {
-        self.image.write_at(offset as u64, bytes)
+    fn write_at(&mut self, offset: u64, bytes: &[u8]) -> Result<(), Error> {
+        self.image.write_at(offset, bytes)
     }
 
     /// Ensure the next allocation begins in a page holding page type `ty`, on a
@@ -10074,12 +10030,7 @@ impl WriteEngine {
         }
         match at {
             Placement::Reused { addr, .. } => {
-                self.write_at(
-                    usize::try_from(addr).map_err(|_| {
-                        Error::EditUnsupported("free-region address exceeds this platform")
-                    })?,
-                    bytes,
-                )?;
+                self.write_at(addr, bytes)?;
                 Ok(addr)
             }
             Placement::Appended { addr, .. } => {
@@ -10512,16 +10463,17 @@ impl WriteEngine {
         )?)
     }
 
-    /// On-disk byte spans `(addr, len)` of every chunk of the version 2 object
-    /// header at `addr`: chunk 0 (signature, prefix, messages, checksum) plus
-    /// each continuation (`OCHK`) block. Used to reclaim a header's storage when
-    /// its object is deleted. An error (propagated from [`oh_region_at`] or a
-    /// malformed continuation) means the header is not a plain v2 header this
-    /// engine can fully account for, and the caller leaves it as dead bytes
-    /// rather than guess its extent.
-    fn oh_chunk_spans(&self, addr: usize) -> Result<Vec<(u64, u64)>, Error> {
+    /// Returns the on-disk byte spans `(addr, len)` of every chunk of the
+    /// version 2 object header at `addr`: chunk 0 (signature, prefix, messages,
+    /// checksum) plus each continuation (`OCHK`) block.
+    ///
+    /// Used to reclaim a header's storage when its object is deleted. An error
+    /// (propagated from [`oh_region_at`] or a malformed continuation) means the
+    /// header is not a plain v2 header this engine can fully account for, and
+    /// the caller leaves it as dead bytes of unknown extent.
+    fn oh_chunk_spans(&self, addr: u64) -> Result<Vec<(u64, u64)>, Error> {
         Ok(
-            read_oh_chunks(&self.image(), addr as u64, self.superblock.base_address)?
+            read_oh_chunks(&self.image(), addr, self.superblock.base_address)?
                 .into_iter()
                 .map(|chunk| chunk.span)
                 .collect(),
@@ -10558,9 +10510,7 @@ impl WriteEngine {
                 return None; // graph larger than we will walk; leak conservatively
             }
             budget -= 1;
-            let off = usize::try_from(addr).ok()?;
-            let header =
-                ObjectHeader::parse_from_source(&self.image(), off as u64, os, ls, base).ok()?;
+            let header = ObjectHeader::parse_from_source(&self.image(), addr, os, ls, base).ok()?;
             // Datasets and other leaves are not groups and own no links.
             let is_group = header.messages.iter().any(|m| {
                 matches!(
@@ -10584,9 +10534,9 @@ impl WriteEngine {
         Some(counts)
     }
 
-    /// Best-effort enumeration of every on-disk block owned by the object at
-    /// `addr` (and, for a group, its whole subtree), accumulating `(addr, len)`
-    /// spans into `out` for reclamation after a delete.
+    /// Collects, as far as it can account for them, the span and free class of
+    /// every on-disk block the object at `addr` owns, and for a group its whole
+    /// subtree, into `out` for reclamation after a delete.
     ///
     /// Contiguous datasets (header + data block), chunked datasets (header +
     /// chunk index + chunk data, via [`chunked_storage_spans`](Self::chunked_storage_spans)),
@@ -10608,7 +10558,7 @@ impl WriteEngine {
     /// one of several hard links from corrupting the survivor.
     fn collect_free_spans(
         &self,
-        addr: usize,
+        addr: u64,
         depth: u32,
         incoming: &HashMap<u64, u32>,
         out: &mut Vec<(u64, u64, FreeClass)>,
@@ -10631,7 +10581,7 @@ impl WriteEngine {
         // count other than 1 (it has surviving links, or the graph walk could
         // not account for it) means the object — and a group's whole subtree —
         // stays live and must not be freed.
-        if incoming.get(&(addr as u64)) != Some(&1) {
+        if incoming.get(&addr) != Some(&1) {
             return;
         }
         // The header's own chunks. If they cannot be mapped, account for nothing.
@@ -10639,7 +10589,7 @@ impl WriteEngine {
             Ok(s) => s,
             Err(_) => return,
         };
-        match Self::read_object(&self.image(), addr as u64, self.superblock.base_address) {
+        match Self::read_object(&self.image(), addr, self.superblock.base_address) {
             Ok(ObjModel::DatasetVerbatim { .. }) => out.extend(meta_spans(spans)),
             Ok(ObjModel::DatasetContiguous {
                 data_addr,
@@ -10652,14 +10602,10 @@ impl WriteEngine {
                 // stored address is base-relative, so shift it to an absolute file
                 // offset before bounds-checking and recording it.
                 if data_addr != u64::MAX && data_size > 0 {
-                    if let (Some(abs), Ok(len)) =
-                        (base.absolute(data_addr).ok(), usize::try_from(data_size))
-                    {
-                        if let Ok(start) = usize::try_from(abs) {
-                            if start.checked_add(len).is_some_and(|e| e as u64 <= file_len) {
-                                // A contiguous data block is raw data.
-                                out.push((abs, data_size, FreeClass::Page(PageType::Raw)));
-                            }
+                    if let Ok(abs) = base.absolute(data_addr) {
+                        if abs.checked_add(data_size).is_some_and(|e| e <= file_len) {
+                            // A contiguous data block is raw data.
+                            out.push((abs, data_size, FreeClass::Page(PageType::Raw)));
                         }
                     }
                 }
@@ -10670,11 +10616,7 @@ impl WriteEngine {
                 // before descending so the recursion keeps working in absolute
                 // offsets (matching `incoming`'s keys and `oh_chunk_spans`).
                 for (_, _, child) in children {
-                    if let Some(c) = base
-                        .absolute(child)
-                        .ok()
-                        .and_then(|a| usize::try_from(a).ok())
-                    {
+                    if let Ok(c) = base.absolute(child) {
                         self.collect_free_spans(c, depth + 1, incoming, out);
                     }
                 }
@@ -10710,12 +10652,14 @@ impl WriteEngine {
         }
     }
 
-    /// Best-effort enumeration of every on-disk block a *chunked* dataset at
-    /// `addr` owns: its chunk index structure (B-tree v1 nodes, or fixed- /
-    /// extensible-array header, index, super, and data blocks) plus every
-    /// allocated chunk data block. The object-header chunks are freed by the
-    /// caller ([`collect_free_spans`](Self::collect_free_spans)); this returns
-    /// only the storage the data-layout message points at.
+    /// Returns every on-disk block a *chunked* dataset at `addr` owns: its
+    /// chunk index structure (B-tree v1 nodes, or fixed- / extensible-array
+    /// header, index, super, and data blocks) plus every allocated chunk data
+    /// block.
+    ///
+    /// The object-header chunks are freed by the caller
+    /// ([`collect_free_spans`](Self::collect_free_spans)). This returns only the
+    /// storage the data-layout message points at.
     ///
     /// Returns `None` — contribute nothing, leave the object as dead bytes —
     /// whenever the dataset cannot be enumerated *exhaustively* and safely: a
@@ -10734,11 +10678,10 @@ impl WriteEngine {
     /// the result. Variable-length data in global-heap collections is still
     /// never reclaimed (a collection can be shared between objects); see the
     /// [module docs](self).
-    fn chunked_storage_spans(&self, addr: usize) -> Option<Vec<(u64, u64, FreeClass)>> {
+    fn chunked_storage_spans(&self, addr: u64) -> Option<Vec<(u64, u64, FreeClass)>> {
         // Locate the data-layout and dataspace messages in the object header.
         let region =
-            Self::gather_oh_messages(&self.image(), addr as u64, self.superblock.base_address)
-                .ok()?;
+            Self::gather_oh_messages(&self.image(), addr, self.superblock.base_address).ok()?;
         let mut layout_msg: Option<(usize, usize)> = None;
         let mut dataspace_msg: Option<(usize, usize)> = None;
         let mut p = 0;
@@ -10899,18 +10842,22 @@ impl WriteEngine {
         }
     }
 
-    /// Every on-disk byte span of a chunked dataset's *index structure only* (not
-    /// its chunk data), for reclaiming the old index after a relocating append
-    /// ([`MovingWrite::AppendedChunks`]) that keeps the chunk data in place. Mirror
-    /// of [`chunked_storage_spans`](Self::chunked_storage_spans) but delegating to
-    /// [`chunk_index_spans_from_source`], which enumerates only the EA header/index/
-    /// data/super blocks and never a chunk-data address, so the shared kept chunk
-    /// data is never freed. Base-aware and validated disjoint/in-bounds; returns
-    /// `None` (leave unreclaimed) on any error or violation.
-    fn chunked_index_spans(&self, addr: usize) -> Option<Vec<(u64, u64)>> {
+    /// Returns every on-disk byte span of a chunked dataset's *index structure
+    /// only* (not its chunk data), for reclaiming the old index after a
+    /// relocating append ([`MovingWrite::AppendedChunks`]) that keeps the chunk
+    /// data in place.
+    ///
+    /// This is the index-only counterpart of
+    /// [`chunked_storage_spans`](Self::chunked_storage_spans), delegating to
+    /// [`chunk_index_spans_from_source`], which enumerates the index structure's
+    /// own blocks (B-tree v1 nodes, or fixed- / extensible-array header, index,
+    /// super, and data blocks) and never a chunk-data address, so the shared
+    /// kept chunk data is never freed. Base-aware and validated
+    /// disjoint/in-bounds. Returns `None` (leave unreclaimed) on any error or
+    /// violation.
+    fn chunked_index_spans(&self, addr: u64) -> Option<Vec<(u64, u64)>> {
         let region =
-            Self::gather_oh_messages(&self.image(), addr as u64, self.superblock.base_address)
-                .ok()?;
+            Self::gather_oh_messages(&self.image(), addr, self.superblock.base_address).ok()?;
         let mut layout_msg: Option<(usize, usize)> = None;
         let mut p = 0;
         loop {
@@ -11253,7 +11200,7 @@ enum WritePlan {
     /// moves end-of-file, a figure only the superblock records. `commit`'s
     /// fast path excludes exactly that case (issue #321).
     InPlace {
-        data_addr: usize,
+        data_addr: u64,
         bytes: OverwriteBytes,
     },
     /// A chunked dataset overwritten chunk-by-chunk in place: each `(addr, bytes)`
@@ -11263,7 +11210,7 @@ enum WritePlan {
     /// or a filtered one whose re-encoded chunks happen to match. Like
     /// [`InPlace`](WritePlan::InPlace) it touches no header and no chunk index, so
     /// the superblock root is not flipped.
-    InPlaceChunks { writes: Vec<(usize, Vec<u8>)> },
+    InPlaceChunks { writes: Vec<(u64, Vec<u8>)> },
     /// The dataset's header relocates: a contiguous resize, a compact rewrite, or
     /// a chunked rebuild. The parent group is rebuilt and its link patched. See
     /// [`MovingWrite`].
@@ -11500,7 +11447,7 @@ impl FlatDataset {
 struct EditStore<'a> {
     image: &'a mut dyn FileImage,
     superblock: &'a mut Superblock,
-    sb_sig_off: usize,
+    sb_sig_off: u64,
     /// The session's paged state when the file is paged, `None` otherwise. A
     /// borrow rather than a copy: padding recorded here has to reach the manager
     /// rewrite at the next commit or at close.
@@ -11588,7 +11535,7 @@ impl Store for EditStore<'_> {
         let eof = self.image.len();
         self.superblock.eof_address = eof;
         let bytes = self.superblock.serialize();
-        self.write_at(self.sb_sig_off as u64, &bytes)
+        self.write_at(self.sb_sig_off, &bytes)
     }
     fn sync(&mut self) -> Result<(), Error> {
         barrier_data(self.image, self.sync_policy)
@@ -12461,10 +12408,10 @@ fn split_and_encode_chunks(
     Ok(encoded)
 }
 
-/// Try to overwrite a chunked dataset's chunks in place. When the dataset's
+/// Tries to overwrite a chunked dataset's chunks in place. When the dataset's
 /// on-disk chunks form a dense grid aligned with `new_bytes` (dense row-major
 /// order), every slot is unmasked (`filter_mask == 0`), and every new chunk
-/// **fits** the slot it replaces (`new_len <= slot`), return the in-place
+/// **fits** the slot it replaces (`new_len <= slot`), returns the in-place
 /// `(address, bytes)` writes:
 ///
 /// - When every new chunk is **exactly** its slot's size, only the chunk data is
@@ -12487,7 +12434,7 @@ fn try_inplace_chunk_writes<S: Source + ?Sized>(
     spatial: &[u64],
     raw_size: u64,
     new_bytes: &[Vec<u8>],
-) -> Option<Vec<(usize, Vec<u8>)>> {
+) -> Option<Vec<(u64, Vec<u8>)>> {
     let infos = enumerate_chunks_from_source(src, layout, ds, OFFSET_SIZE, LENGTH_SIZE).ok()?;
     let grid = plan_dense_grid(infos, &ds.dimensions, spatial)?;
     if grid.grid_order.len() != new_bytes.len() {
@@ -12512,11 +12459,10 @@ fn try_inplace_chunk_writes<S: Source + ?Sized>(
         if new_len < slot {
             any_shrunk = true;
         }
-        let start = usize::try_from(ci.address).ok()?;
-        start
-            .checked_add(bytes.len())
-            .filter(|&e| e as u64 <= src.len())?;
-        writes.push((start, bytes.clone()));
+        ci.address
+            .checked_add(new_len)
+            .filter(|&e| e <= src.len())?;
+        writes.push((ci.address, bytes.clone()));
         spans.push((ci.address, new_len));
     }
 
@@ -12532,7 +12478,7 @@ fn try_inplace_chunk_writes<S: Source + ?Sized>(
             &grid.grid_order,
             new_bytes,
         )?;
-        spans.push((index_addr as u64, index_bytes.len() as u64));
+        spans.push((index_addr, index_bytes.len() as u64));
         writes.push((index_addr, index_bytes));
     }
 
@@ -12545,7 +12491,7 @@ fn try_inplace_chunk_writes<S: Source + ?Sized>(
     Some(writes)
 }
 
-/// Rebuild a chunked dataset's index **in place** so it records the new
+/// Rebuilds a chunked dataset's index **in place** so it records the new
 /// (smaller) per-chunk stored sizes after a fits-with-slack overwrite, returning
 /// the `(address, bytes)` write that replaces it. The chunks keep their existing
 /// addresses (only their stored bytes shrank), so the rebuilt index points at the
@@ -12573,7 +12519,7 @@ fn try_rebuild_index_in_place<S: Source + ?Sized>(
     raw_size: u64,
     grid_order: &[crate::chunked_read::ChunkInfo],
     new_bytes: &[Vec<u8>],
-) -> Option<(usize, Vec<u8>)> {
+) -> Option<(u64, Vec<u8>)> {
     let DataLayout::Chunked {
         btree_address: Some(index_addr),
         chunk_index_type,
@@ -12661,11 +12607,10 @@ fn try_rebuild_index_in_place<S: Source + ?Sized>(
     if new_index.len() as u64 != end - *index_addr {
         return None;
     }
-    let start = usize::try_from(*index_addr).ok()?;
-    start
-        .checked_add(new_index.len())
-        .filter(|&e| e as u64 <= src.len())?;
-    Some((start, new_index))
+    index_addr
+        .checked_add(new_index.len() as u64)
+        .filter(|&e| e <= src.len())?;
+    Some((*index_addr, new_index))
 }
 
 /// A [`ChunkProvider`] over chunk bytes already held in memory, in dense
@@ -16236,7 +16181,7 @@ mod tests {
             crate::group_v2::resolve_path_any(s.image.as_slice().unwrap(), &s.superblock, "victim")
                 .unwrap();
         let index_spans = s
-            .chunked_index_spans(usize::try_from(victim_addr).unwrap())
+            .chunked_index_spans(victim_addr)
             .expect("the C library's extensible-array index is enumerable");
         assert!(!index_spans.is_empty());
         // Page 0 always holds the superblock and the root group header; the index
@@ -19168,7 +19113,7 @@ mod tests {
         )
         .unwrap();
         let spans = engine
-            .chunked_storage_spans(addr.to_usize().unwrap())
+            .chunked_storage_spans(addr)
             .expect("a chunked dataset has reclaimable spans");
         let fresh = spans.iter().filter(|&&(a, _, _)| a >= before).count();
         assert!(
@@ -19847,11 +19792,11 @@ mod tests {
             let order = s.image.issued_write_order()[before..].to_vec();
             let superblock = order
                 .iter()
-                .position(|&(at, _)| at == s.sb_sig_off as u64)
+                .position(|&(at, _)| at == s.sb_sig_off)
                 .unwrap_or_else(|| panic!("{policy:?}: the commit never wrote the superblock"));
             let content = order
                 .iter()
-                .rposition(|&(at, _)| at != s.sb_sig_off as u64)
+                .rposition(|&(at, _)| at != s.sb_sig_off)
                 .unwrap_or_else(|| panic!("{policy:?}: the commit wrote nothing but a superblock"));
             assert!(
                 superblock > content,
@@ -20912,7 +20857,7 @@ mod tests {
             match f.dataset("nums").unwrap().layout().unwrap() {
                 crate::Layout::Contiguous {
                     address: Some(a), ..
-                } => a as usize,
+                } => a,
                 other => panic!("expected a contiguous dataset: {other:?}"),
             }
         };
