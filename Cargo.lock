@@ -460,6 +460,7 @@ dependencies = [
  "ndarray",
  "num-complex",
  "proptest",
+ "rstest",
  "serde",
  "serde_json",
  "sha2",

@@ -1754,6 +1754,7 @@ fn join(parent: &str, name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::data_layout::ChunkIndexLayout;
 
     /// A source's scale-offset fill availability is carried onto the rebuilt
     /// dataset, in both directions.
@@ -1795,11 +1796,9 @@ mod tests {
                     // A v3 layout appends the element size, which is what the
                     // caller trims back off.
                     chunk_dimensions: vec![16, 4],
-                    btree_address: Some(0x1000),
-                    version: 3,
-                    chunk_index_type: None,
-                    single_chunk_filtered_size: None,
-                    single_chunk_filter_mask: None,
+                    index: ChunkIndexLayout::BTreeV1 {
+                        address: Some(0x1000),
+                    },
                 },
                 // Routed through `check_pipeline`, as every production caller
                 // is: it is the step that decodes the availability out of the

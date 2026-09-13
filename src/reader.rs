@@ -5417,9 +5417,10 @@ the same commit to replace it",
     /// use [`chunks`](Self::chunks) for per-chunk locations. The curated analogue
     /// of `H5Pget_layout`.
     ///
-    /// Returns `Err` if the dataset has no data-layout message, if it cannot be
-    /// parsed, or if a chunked dataset uses an index kind this crate does not
-    /// recognize.
+    /// # Errors
+    ///
+    /// Returns [`Error::Format`] if the data-layout message, or the dataspace a
+    /// chunked dataset's chunk shape comes from, cannot be parsed.
     pub fn layout(&self) -> Result<Layout, Error> {
         Ok(match self.data_layout()? {
             DataLayout::Compact { data } => Layout::Compact {
@@ -5429,15 +5430,11 @@ the same commit to replace it",
                 address: self.absolute_address(address)?,
                 size,
             },
-            DataLayout::Chunked {
-                version,
-                chunk_index_type,
-                ..
-            } => Layout::Chunked {
+            DataLayout::Chunked { index, .. } => Layout::Chunked {
                 // Reuse `chunk_shape` so the two accessors can never disagree on
                 // how the element-size dimension is stripped.
                 chunk_shape: self.chunk_shape()?.unwrap_or_default(),
-                index: ChunkIndex::from_layout(version, chunk_index_type)?,
+                index: ChunkIndex::from(index),
             },
             DataLayout::Virtual => Layout::Virtual,
         })
@@ -5451,15 +5448,12 @@ the same commit to replace it",
     /// ([`ChunkIndex::supports_inplace_append`]). Complements
     /// [`maxshape`](Self::maxshape) and [`chunk_shape`](Self::chunk_shape).
     ///
-    /// Returns `Err` if the data-layout message is missing or cannot be parsed,
-    /// or if a chunked dataset uses an index kind this crate does not recognize.
+    /// # Errors
+    ///
+    /// Returns [`Error::Format`] if the data-layout message cannot be parsed.
     pub fn chunk_index(&self) -> Result<Option<ChunkIndex>, Error> {
         match self.data_layout()? {
-            DataLayout::Chunked {
-                version,
-                chunk_index_type,
-                ..
-            } => Ok(Some(ChunkIndex::from_layout(version, chunk_index_type)?)),
+            DataLayout::Chunked { index, .. } => Ok(Some(ChunkIndex::from(index))),
             _ => Ok(None),
         }
     }
@@ -6241,11 +6235,7 @@ the same commit to replace it",
     pub(crate) fn raw_chunks(&self) -> Result<Vec<crate::chunked_read::ChunkInfo>, Error> {
         let DataLayout::Chunked {
             chunk_dimensions,
-            btree_address,
-            version,
-            chunk_index_type,
-            single_chunk_filtered_size,
-            single_chunk_filter_mask,
+            index,
         } = self.data_layout()?
         else {
             return Err(Error::Format(crate::error::FormatError::ChunkedReadError(
@@ -6253,9 +6243,9 @@ the same commit to replace it",
             )));
         };
         // An undefined index address means no storage is allocated yet.
-        let Some(addr) = btree_address else {
+        if index.address().is_none() {
             return Ok(Vec::new());
-        };
+        }
         let dataspace = self.dataspace()?;
         let elem_size = self.datatype()?.element_size_usize()?;
         let base = self.file.addr_offset;
@@ -6268,11 +6258,7 @@ the same commit to replace it",
             if base.is_zero() {
                 return Ok(crate::chunked_read::collect_chunks_for_layout_from_source(
                     source,
-                    version,
-                    chunk_index_type,
-                    addr,
-                    single_chunk_filtered_size,
-                    single_chunk_filter_mask,
+                    index,
                     &chunk_dimensions,
                     &dataspace,
                     elem_size,
@@ -6286,11 +6272,7 @@ the same commit to replace it",
             };
             let mut chunks = crate::chunked_read::collect_chunks_for_layout_from_source(
                 &framed,
-                version,
-                chunk_index_type,
-                addr,
-                single_chunk_filtered_size,
-                single_chunk_filter_mask,
+                index,
                 &chunk_dimensions,
                 &dataspace,
                 elem_size,
@@ -6711,6 +6693,7 @@ fn child_path_of(parent: Option<&str>, name: &str) -> Option<String> {
 mod tests {
     use super::*;
     use crate::FileBuilder;
+    use crate::data_layout::ChunkIndexLayout;
     use crate::message_flags::MessageFlags;
     use std::sync::atomic::AtomicUsize;
 
@@ -8165,11 +8148,7 @@ mod tests {
         };
         let chunked = |band: u32| DataLayout::Chunked {
             chunk_dimensions: vec![band, 8],
-            btree_address: Some(0),
-            version: 3,
-            chunk_index_type: None,
-            single_chunk_filtered_size: None,
-            single_chunk_filter_mask: None,
+            index: ChunkIndexLayout::BTreeV1 { address: Some(0) },
         };
         let elem = NonZeroUsize::new(8).unwrap();
 

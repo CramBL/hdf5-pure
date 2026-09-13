@@ -16,7 +16,7 @@ use crate::chunk_cache::{CachePass, ChunkCache};
 use crate::chunk_grid::{ChunkGrid, GridOrder};
 use crate::chunk_span::ChunkSpanReader;
 use crate::convert::{TryToUsize, nonzero_usize_from, slice_range, u32_from};
-use crate::data_layout::DataLayout;
+use crate::data_layout::{ChunkIndexLayout, DataLayout};
 use crate::dataspace::Dataspace;
 use crate::error::FormatError;
 use crate::extensible_array::{
@@ -626,40 +626,19 @@ pub fn read_chunked_data_from_source<S: Source + ?Sized>(
         pipeline,
         fill,
     } = spec;
-    let (
+    let DataLayout::Chunked {
         chunk_dimensions,
-        version,
-        chunk_index_type,
-        addr_opt,
-        single_filtered_size,
-        single_filter_mask,
-    ) = match layout {
-        DataLayout::Chunked {
-            chunk_dimensions,
-            btree_address,
-            version,
-            chunk_index_type,
-            single_chunk_filtered_size,
-            single_chunk_filter_mask,
-        } => (
-            chunk_dimensions,
-            *version,
-            *chunk_index_type,
-            *btree_address,
-            *single_chunk_filtered_size,
-            *single_chunk_filter_mask,
-        ),
-        _ => {
-            return Err(FormatError::ChunkedReadError(
-                "expected chunked layout".into(),
-            ));
-        }
+        index,
+    } = layout
+    else {
+        return Err(FormatError::ChunkedReadError(
+            "expected chunked layout".into(),
+        ));
     };
 
-    let addr = match chunk_index_address(addr_opt, spec)? {
-        Ok(addr) => addr,
-        Err(unallocated) => return Ok(unallocated),
-    };
+    if let Err(unallocated) = chunk_index_address(index.address(), spec)? {
+        return Ok(unallocated);
+    }
 
     let elem_size = datatype.element_size_usize()?;
     let (rank, chunk_dims, ds_dims) = chunked_dims(chunk_dimensions, dataspace)?;
@@ -667,11 +646,7 @@ pub fn read_chunked_data_from_source<S: Source + ?Sized>(
 
     let chunks = collect_chunks_for_layout_from_source(
         source,
-        version,
-        chunk_index_type,
-        addr,
-        single_filtered_size,
-        single_filter_mask,
+        *index,
         chunk_dimensions,
         dataspace,
         elem_size,
@@ -796,11 +771,7 @@ pub(crate) fn read_chunked_rows_from_source<S: Source + ?Sized>(
     } = spec;
     let DataLayout::Chunked {
         chunk_dimensions,
-        btree_address,
-        version,
-        chunk_index_type,
-        single_chunk_filtered_size,
-        single_chunk_filter_mask,
+        index,
     } = layout
     else {
         return Err(FormatError::ChunkedReadError(
@@ -870,9 +841,9 @@ pub(crate) fn read_chunked_rows_from_source<S: Source + ?Sized>(
     // same answer the whole-dataset readers give through `chunk_index_address`,
     // which is what keeps `read_raw_rows` and `read_raw` agreeing over a dataset
     // that was created and never written.
-    let Some(addr) = *btree_address else {
+    if index.address().is_none() {
         return Ok(Some(output));
-    };
+    }
 
     let row_lo = row_start.to_usize()?;
     let row_hi = row_lo.saturating_add(out_rows); // exclusive; caller clamped to the dataset
@@ -903,11 +874,7 @@ pub(crate) fn read_chunked_rows_from_source<S: Source + ?Sized>(
     } else {
         let chunks = collect_chunks_for_layout_from_source(
             source,
-            *version,
-            *chunk_index_type,
-            addr,
-            *single_chunk_filtered_size,
-            *single_chunk_filter_mask,
+            *index,
             chunk_dimensions,
             dataspace,
             elem_size,
@@ -1076,40 +1043,19 @@ pub fn read_chunked_data_cached_from_source<S: Source + ?Sized>(
         pipeline,
         fill,
     } = spec;
-    let (
+    let DataLayout::Chunked {
         chunk_dimensions,
-        version,
-        chunk_index_type,
-        addr_opt,
-        single_filtered_size,
-        single_filter_mask,
-    ) = match layout {
-        DataLayout::Chunked {
-            chunk_dimensions,
-            btree_address,
-            version,
-            chunk_index_type,
-            single_chunk_filtered_size,
-            single_chunk_filter_mask,
-        } => (
-            chunk_dimensions,
-            *version,
-            *chunk_index_type,
-            *btree_address,
-            *single_chunk_filtered_size,
-            *single_chunk_filter_mask,
-        ),
-        _ => {
-            return Err(FormatError::ChunkedReadError(
-                "expected chunked layout".into(),
-            ));
-        }
+        index,
+    } = layout
+    else {
+        return Err(FormatError::ChunkedReadError(
+            "expected chunked layout".into(),
+        ));
     };
 
-    let addr = match chunk_index_address(addr_opt, spec)? {
-        Ok(addr) => addr,
-        Err(unallocated) => return Ok(unallocated),
-    };
+    if let Err(unallocated) = chunk_index_address(index.address(), spec)? {
+        return Ok(unallocated);
+    }
 
     let elem_size = datatype.element_size_usize()?;
     let (rank, chunk_dims, ds_dims) = chunked_dims(chunk_dimensions, dataspace)?;
@@ -1120,11 +1066,7 @@ pub fn read_chunked_data_cached_from_source<S: Source + ?Sized>(
     } else {
         let chunks = collect_chunks_for_layout_from_source(
             source,
-            version,
-            chunk_index_type,
-            addr,
-            single_filtered_size,
-            single_filter_mask,
+            *index,
             chunk_dimensions,
             dataspace,
             elem_size,
@@ -1271,13 +1213,20 @@ fn index_grid(
     )
 }
 
+/// Walks `index` and reports one [`ChunkInfo`] per chunk the file holds.
+///
+/// Returns an empty vector for an index with no address, which is a dataset
+/// whose storage was never allocated.
+///
+/// # Errors
+///
+/// Returns [`FormatError::ChunkedReadError`] for a chunked layout with no
+/// dimensions and for a version 2 B-tree index, the one index with no walker
+/// here, and propagates what the other walkers report for a malformed
+/// structure.
 pub(crate) fn collect_chunks_for_layout_from_source<S: Source + ?Sized>(
     source: &S,
-    version: u8,
-    chunk_index_type: Option<u8>,
-    addr: u64,
-    single_filtered_size: Option<u64>,
-    single_filter_mask: Option<u32>,
+    index: ChunkIndexLayout,
     chunk_dimensions: &[u32],
     dataspace: &Dataspace,
     elem_size: NonZeroUsize,
@@ -1288,37 +1237,41 @@ pub(crate) fn collect_chunks_for_layout_from_source<S: Source + ?Sized>(
     let rank = ndims
         .checked_sub(1)
         .ok_or_else(|| FormatError::ChunkedReadError("chunked layout has no dimensions".into()))?;
-    match (version, chunk_index_type) {
-        (3, _) => collect_chunk_info_from_source(source, addr, ndims, offset_size, length_size),
-        (4, Some(1)) => {
+    // An undefined index address means no storage is allocated yet, so there is
+    // no index to walk and no chunk to report.
+    let Some(addr) = index.address() else {
+        return Ok(Vec::new());
+    };
+    let spatial_dims = || chunk_dimensions[..rank].to_vec();
+    match index {
+        ChunkIndexLayout::BTreeV1 { .. } => {
+            collect_chunk_info_from_source(source, addr, ndims, offset_size, length_size)
+        }
+        ChunkIndexLayout::SingleChunk { filtered, .. } => {
             let chunk_byte_size: usize = chunk_dimensions[..rank]
                 .iter()
                 .map(|&d| d as usize)
                 .product::<usize>()
                 * elem_size.get();
-            let (csize, fmask) = if let Some(fs) = single_filtered_size {
-                (u32_from(fs)?, single_filter_mask.unwrap_or(0))
-            } else {
-                (u32_from(chunk_byte_size as u64)?, 0)
+            let (chunk_size, filter_mask) = match filtered {
+                Some(filtered) => (u32_from(filtered.filtered_size)?, filtered.filter_mask),
+                None => (u32_from(chunk_byte_size as u64)?, 0),
             };
             Ok(vec![ChunkInfo {
-                chunk_size: csize,
-                filter_mask: fmask,
+                chunk_size,
+                filter_mask,
                 offsets: vec![0u64; rank],
                 address: addr,
             }])
         }
-        (4, Some(2)) => {
-            let spatial_chunk_dims: Vec<u32> = chunk_dimensions[..rank].to_vec();
-            Ok(generate_implicit_chunks(
-                addr,
-                &dataspace.dimensions,
-                &spatial_chunk_dims,
-                u32_from(elem_size.get() as u64)?,
-            ))
-        }
-        (4, Some(3)) => {
-            let spatial_chunk_dims: Vec<u32> = chunk_dimensions[..rank].to_vec();
+        ChunkIndexLayout::Implicit { .. } => Ok(generate_implicit_chunks(
+            addr,
+            &dataspace.dimensions,
+            &spatial_dims(),
+            u32_from(elem_size.get() as u64)?,
+        )),
+        ChunkIndexLayout::FixedArray { .. } => {
+            let spatial_chunk_dims = spatial_dims();
             let header =
                 FixedArrayHeader::parse_from_source(source, addr, offset_size, length_size)?;
             read_fixed_array_chunks_from_source(
@@ -1331,8 +1284,8 @@ pub(crate) fn collect_chunks_for_layout_from_source<S: Source + ?Sized>(
                 length_size,
             )
         }
-        (4, Some(4)) => {
-            let spatial_chunk_dims: Vec<u32> = chunk_dimensions[..rank].to_vec();
+        ChunkIndexLayout::ExtensibleArray { .. } => {
+            let spatial_chunk_dims = spatial_dims();
             let header =
                 ExtensibleArrayHeader::parse_from_source(source, addr, offset_size, length_size)?;
             read_extensible_array_chunks_from_source(
@@ -1345,9 +1298,9 @@ pub(crate) fn collect_chunks_for_layout_from_source<S: Source + ?Sized>(
                 length_size,
             )
         }
-        (v, idx) => Err(FormatError::ChunkedReadError(format!(
-            "unsupported chunked layout version={v}, index_type={idx:?}"
-        ))),
+        ChunkIndexLayout::BTreeV2 { .. } => Err(FormatError::ChunkedReadError(
+            "a version 2 B-tree chunk index cannot be enumerated".into(),
+        )),
     }
 }
 
@@ -1360,9 +1313,8 @@ pub(crate) fn collect_chunks_for_layout_from_source<S: Source + ?Sized>(
 /// [`BytesSource`](crate::source::BytesSource).
 ///
 /// Returns an empty vector when the index address is undefined (a chunked
-/// dataset with no storage allocated yet). Errors — propagated from the index
-/// walkers — for a version-2 B-tree (index type 5) or any unknown index type,
-/// which have no walker.
+/// dataset with no storage allocated yet). Errors for a version-2 B-tree
+/// (index type 5), the one index the walkers do not cover.
 #[cfg(feature = "std")]
 pub(crate) fn enumerate_chunks_from_source<S: Source + ?Sized>(
     source: &S,
@@ -1373,26 +1325,13 @@ pub(crate) fn enumerate_chunks_from_source<S: Source + ?Sized>(
 ) -> Result<Vec<ChunkInfo>, FormatError> {
     let DataLayout::Chunked {
         chunk_dimensions,
-        btree_address,
-        version,
-        chunk_index_type,
-        single_chunk_filtered_size,
-        single_chunk_filter_mask,
+        index,
     } = layout
     else {
         return Err(FormatError::ChunkedReadError(
             "enumerate_chunks_from_source called on a non-chunked layout".into(),
         ));
     };
-    // An undefined index address means no storage is allocated yet.
-    let Some(index_addr) = *btree_address else {
-        return Ok(Vec::new());
-    };
-    if chunk_dimensions.is_empty() {
-        return Err(FormatError::ChunkedReadError(
-            "chunked layout has no dimensions".into(),
-        ));
-    }
     // `chunk_dimensions` is rank + 1 entries; the last is the element size.
     let rank = chunk_dimensions
         .len()
@@ -1403,11 +1342,7 @@ pub(crate) fn enumerate_chunks_from_source<S: Source + ?Sized>(
     })?;
     collect_chunks_for_layout_from_source(
         source,
-        *version,
-        *chunk_index_type,
-        index_addr,
-        *single_chunk_filtered_size,
-        *single_chunk_filter_mask,
+        *index,
         chunk_dimensions,
         dataspace,
         elem_size,
@@ -1517,11 +1452,7 @@ pub(crate) fn collect_chunked_storage_spans<S: Source + ?Sized>(
 ) -> Result<ChunkedStorageSpans, FormatError> {
     let DataLayout::Chunked {
         chunk_dimensions,
-        btree_address,
-        version,
-        chunk_index_type,
-        single_chunk_filtered_size,
-        single_chunk_filter_mask,
+        index: chunk_index,
     } = layout
     else {
         return Err(FormatError::ChunkedReadError(
@@ -1529,16 +1460,11 @@ pub(crate) fn collect_chunked_storage_spans<S: Source + ?Sized>(
         ));
     };
     // An undefined index address means no storage is allocated yet.
-    let Some(index_addr) = *btree_address else {
+    if chunk_index.address().is_none() {
         return Ok(ChunkedStorageSpans {
             data: Vec::new(),
             index: Vec::new(),
         });
-    };
-    if chunk_dimensions.is_empty() {
-        return Err(FormatError::ChunkedReadError(
-            "chunked layout has no dimensions".into(),
-        ));
     }
     // `chunk_dimensions` is rank + 1 entries; the last is the element size.
     let rank = chunk_dimensions
@@ -1554,11 +1480,7 @@ pub(crate) fn collect_chunked_storage_spans<S: Source + ?Sized>(
     // Chunk data blocks (the walkers omit unallocated chunks).
     for ci in collect_chunks_for_layout_from_source(
         source,
-        *version,
-        *chunk_index_type,
-        index_addr,
-        *single_chunk_filtered_size,
-        *single_chunk_filter_mask,
+        *chunk_index,
         chunk_dimensions,
         dataspace,
         elem_size,
@@ -1573,9 +1495,7 @@ pub(crate) fn collect_chunked_storage_spans<S: Source + ?Sized>(
     // The chunk index's own structure blocks.
     let index = collect_chunk_index_spans(
         source,
-        *version,
-        *chunk_index_type,
-        index_addr,
+        *chunk_index,
         chunk_dimensions.len(),
         offset_size,
         length_size,
@@ -1612,32 +1532,38 @@ pub(crate) struct ChunkedStorageSpans {
 #[cfg(feature = "std")]
 fn collect_chunk_index_spans<S: Source + ?Sized>(
     source: &S,
-    version: u8,
-    chunk_index_type: Option<u8>,
-    index_addr: u64,
+    index: ChunkIndexLayout,
     ndims: usize,
     offset_size: u8,
     length_size: u8,
 ) -> Result<Vec<(u64, u64)>, FormatError> {
-    match (version, chunk_index_type) {
-        (3, _) => collect_chunk_btree_node_spans(source, index_addr, ndims, offset_size),
+    // An undefined index address means the index structure was never written.
+    let Some(index_addr) = index.address() else {
+        return Ok(Vec::new());
+    };
+    match index {
+        ChunkIndexLayout::BTreeV1 { .. } => {
+            collect_chunk_btree_node_spans(source, index_addr, ndims, offset_size)
+        }
         // Single chunk and implicit indexes have no separate index structure.
-        (4, Some(1)) | (4, Some(2)) => Ok(Vec::new()),
-        (4, Some(3)) => crate::fixed_array::fixed_array_index_spans(
+        ChunkIndexLayout::SingleChunk { .. } | ChunkIndexLayout::Implicit { .. } => Ok(Vec::new()),
+        ChunkIndexLayout::FixedArray { .. } => crate::fixed_array::fixed_array_index_spans(
             source,
             index_addr,
             offset_size,
             length_size,
         ),
-        (4, Some(4)) => crate::extensible_array::extensible_array_index_spans(
-            source,
-            index_addr,
-            offset_size,
-            length_size,
-        ),
-        (v, idx) => Err(FormatError::ChunkedReadError(format!(
-            "chunk index has no reclaim walker: version={v}, index_type={idx:?}"
-        ))),
+        ChunkIndexLayout::ExtensibleArray { .. } => {
+            crate::extensible_array::extensible_array_index_spans(
+                source,
+                index_addr,
+                offset_size,
+                length_size,
+            )
+        }
+        ChunkIndexLayout::BTreeV2 { .. } => Err(FormatError::ChunkedReadError(
+            "a version 2 B-tree chunk index has no reclaim walker".into(),
+        )),
     }
 }
 
@@ -1657,24 +1583,16 @@ pub(crate) fn chunk_index_spans_from_source<S: Source + ?Sized>(
 ) -> Result<Vec<(u64, u64)>, FormatError> {
     let DataLayout::Chunked {
         chunk_dimensions,
-        btree_address,
-        version,
-        chunk_index_type,
-        ..
+        index,
     } = layout
     else {
         return Err(FormatError::ChunkedReadError(
             "chunk_index_spans_from_source called on a non-chunked layout".into(),
         ));
     };
-    let Some(index_addr) = *btree_address else {
-        return Ok(Vec::new());
-    };
     collect_chunk_index_spans(
         source,
-        *version,
-        *chunk_index_type,
-        index_addr,
+        *index,
         chunk_dimensions.len(),
         offset_size,
         length_size,
@@ -1756,37 +1674,17 @@ pub fn read_chunked_data_cached(
         pipeline,
         fill,
     } = spec;
-    let (
+    let DataLayout::Chunked {
         chunk_dimensions,
-        version,
-        chunk_index_type,
-        addr_opt,
-        single_filtered_size,
-        single_filter_mask,
-    ) = match layout {
-        DataLayout::Chunked {
-            chunk_dimensions,
-            btree_address,
-            version,
-            chunk_index_type,
-            single_chunk_filtered_size,
-            single_chunk_filter_mask,
-        } => (
-            chunk_dimensions,
-            *version,
-            *chunk_index_type,
-            *btree_address,
-            *single_chunk_filtered_size,
-            *single_chunk_filter_mask,
-        ),
-        _ => {
-            return Err(FormatError::ChunkedReadError(
-                "expected chunked layout".into(),
-            ));
-        }
+        index,
+    } = layout
+    else {
+        return Err(FormatError::ChunkedReadError(
+            "expected chunked layout".into(),
+        ));
     };
 
-    let addr = match chunk_index_address(addr_opt, spec)? {
+    let addr = match chunk_index_address(index.address(), spec)? {
         Ok(addr) => addr,
         Err(unallocated) => return Ok(unallocated),
     };
@@ -1798,41 +1696,35 @@ pub fn read_chunked_data_cached(
     ensure_chunk_bytes_representable(&chunk_dims, elem_size)?;
     let ndims = rank + 1; // rank + the trailing element-size dimension
 
-    #[expect(
-        clippy::cast_possible_truncation,
-        reason = "chunk byte sizes are encoded into 32-bit chunk-info fields; they stay \
-                  well below u32::MAX (HDF5 caps a chunk at 4 GiB)"
-    )]
     let mut chunks = if let Some(chunks) = cache.all_indexed_chunks() {
         chunks
     } else {
-        let chunks = match (version, chunk_index_type) {
-            (3, _) => collect_chunk_info(file_data, addr, ndims, offset_size, length_size)?,
-            (4, Some(1)) => {
+        let spatial_dims = || chunk_dimensions[..rank].to_vec();
+        let chunks = match *index {
+            ChunkIndexLayout::BTreeV1 { .. } => {
+                collect_chunk_info(file_data, addr, ndims, offset_size, length_size)?
+            }
+            ChunkIndexLayout::SingleChunk { filtered, .. } => {
                 let chunk_byte_size: usize = chunk_dims.iter().product::<usize>() * elem_size.get();
-                let (csize, fmask) = if let Some(fs) = single_filtered_size {
-                    (fs as u32, single_filter_mask.unwrap_or(0))
-                } else {
-                    (chunk_byte_size as u32, 0)
+                let (chunk_size, filter_mask) = match filtered {
+                    Some(filtered) => (u32_from(filtered.filtered_size)?, filtered.filter_mask),
+                    None => (u32_from(chunk_byte_size as u64)?, 0),
                 };
                 vec![ChunkInfo {
-                    chunk_size: csize,
-                    filter_mask: fmask,
+                    chunk_size,
+                    filter_mask,
                     offsets: vec![0u64; rank],
                     address: addr,
                 }]
             }
-            (4, Some(2)) => {
-                let spatial_chunk_dims: Vec<u32> = chunk_dimensions[..rank].to_vec();
-                generate_implicit_chunks(
-                    addr,
-                    &dataspace.dimensions,
-                    &spatial_chunk_dims,
-                    elem_width.get(),
-                )
-            }
-            (4, Some(3)) => {
-                let spatial_chunk_dims: Vec<u32> = chunk_dimensions[..rank].to_vec();
+            ChunkIndexLayout::Implicit { .. } => generate_implicit_chunks(
+                addr,
+                &dataspace.dimensions,
+                &spatial_dims(),
+                elem_width.get(),
+            ),
+            ChunkIndexLayout::FixedArray { .. } => {
+                let spatial_chunk_dims = spatial_dims();
                 let header =
                     FixedArrayHeader::parse(file_data, addr.to_usize()?, offset_size, length_size)?;
                 read_fixed_array_chunks(
@@ -1845,8 +1737,8 @@ pub fn read_chunked_data_cached(
                     length_size,
                 )?
             }
-            (4, Some(4)) => {
-                let spatial_chunk_dims: Vec<u32> = chunk_dimensions[..rank].to_vec();
+            ChunkIndexLayout::ExtensibleArray { .. } => {
+                let spatial_chunk_dims = spatial_dims();
                 let header = ExtensibleArrayHeader::parse(
                     file_data,
                     addr.to_usize()?,
@@ -1863,10 +1755,10 @@ pub fn read_chunked_data_cached(
                     length_size,
                 )?
             }
-            (v, idx) => {
-                return Err(FormatError::ChunkedReadError(format!(
-                    "unsupported chunked layout version={v}, index_type={idx:?}"
-                )));
+            ChunkIndexLayout::BTreeV2 { .. } => {
+                return Err(FormatError::ChunkedReadError(
+                    "a version 2 B-tree chunk index cannot be enumerated".into(),
+                ));
             }
         };
         cache.populate_index(&chunks, rank);
@@ -2163,11 +2055,9 @@ mod tests {
 
         let layout = DataLayout::Chunked {
             chunk_dimensions: vec![chunk_elems as u32, elem as u32],
-            btree_address: Some(btree_addr as u64),
-            version: 3,
-            chunk_index_type: None,
-            single_chunk_filtered_size: None,
-            single_chunk_filter_mask: None,
+            index: ChunkIndexLayout::BTreeV1 {
+                address: Some(btree_addr as u64),
+            },
         };
         let dataspace = Dataspace {
             space_type: DataspaceType::Simple,
@@ -2218,11 +2108,7 @@ mod tests {
     fn every_whole_dataset_reader_materializes_an_unallocated_dataset() {
         let layout = DataLayout::Chunked {
             chunk_dimensions: vec![4, 8],
-            btree_address: None,
-            version: 4,
-            chunk_index_type: Some(3),
-            single_chunk_filtered_size: None,
-            single_chunk_filter_mask: None,
+            index: ChunkIndexLayout::FixedArray { address: None },
         };
         let datatype = Datatype::FixedPoint {
             size: 8,
@@ -2615,11 +2501,9 @@ mod tests {
 
         let layout = DataLayout::Chunked {
             chunk_dimensions: vec![chunk_size_elems as u32, elem_size as u32],
-            btree_address: Some(btree_addr as u64),
-            version: 3,
-            chunk_index_type: None,
-            single_chunk_filtered_size: None,
-            single_chunk_filter_mask: None,
+            index: ChunkIndexLayout::BTreeV1 {
+                address: Some(btree_addr as u64),
+            },
         };
 
         let dataspace = Dataspace {
@@ -2773,11 +2657,9 @@ mod tests {
 
         let layout = DataLayout::Chunked {
             chunk_dimensions: vec![chunk_elems as u32, elem_size as u32],
-            btree_address: Some(btree_addr as u64),
-            version: 3,
-            chunk_index_type: None,
-            single_chunk_filtered_size: None,
-            single_chunk_filter_mask: None,
+            index: ChunkIndexLayout::BTreeV1 {
+                address: Some(btree_addr as u64),
+            },
         };
         let dataspace = Dataspace {
             space_type: DataspaceType::Simple,
@@ -2862,11 +2744,9 @@ mod tests {
 
         let layout = DataLayout::Chunked {
             chunk_dimensions: vec![chunk_dims[0] as u32, chunk_dims[1] as u32, elem_size as u32],
-            btree_address: Some(btree_addr as u64),
-            version: 3,
-            chunk_index_type: None,
-            single_chunk_filtered_size: None,
-            single_chunk_filter_mask: None,
+            index: ChunkIndexLayout::BTreeV1 {
+                address: Some(btree_addr as u64),
+            },
         };
         let dataspace = Dataspace {
             space_type: DataspaceType::Simple,
@@ -2985,11 +2865,10 @@ mod tests {
 
         let layout = DataLayout::Chunked {
             chunk_dimensions: vec![chunk_elems as u32, elem_size as u32],
-            btree_address: Some(data_addr as u64),
-            version: 4,
-            chunk_index_type: Some(1),
-            single_chunk_filtered_size: None,
-            single_chunk_filter_mask: None,
+            index: ChunkIndexLayout::SingleChunk {
+                filtered: None,
+                address: Some(data_addr as u64),
+            },
         };
         let dataspace = Dataspace {
             space_type: DataspaceType::Simple,
@@ -3105,11 +2984,7 @@ mod tests {
     fn windowed_rows_rank0_chunked_falls_back() {
         let layout = DataLayout::Chunked {
             chunk_dimensions: vec![8], // dimensionality 1 => rank 0
-            btree_address: Some(0),
-            version: 3,
-            chunk_index_type: None,
-            single_chunk_filtered_size: None,
-            single_chunk_filter_mask: None,
+            index: ChunkIndexLayout::BTreeV1 { address: Some(0) },
         };
         let dataspace = Dataspace {
             space_type: DataspaceType::Scalar,
@@ -3145,11 +3020,7 @@ mod tests {
         let big: u32 = 1 << 22;
         let layout = DataLayout::Chunked {
             chunk_dimensions: vec![1, 2, 2, 2, 8],
-            btree_address: Some(0),
-            version: 3,
-            chunk_index_type: None,
-            single_chunk_filtered_size: None,
-            single_chunk_filter_mask: None,
+            index: ChunkIndexLayout::BTreeV1 { address: Some(0) },
         };
         let dataspace = Dataspace {
             space_type: DataspaceType::Simple,
@@ -3186,11 +3057,7 @@ mod tests {
         let big: u32 = 1 << 22;
         let layout = DataLayout::Chunked {
             chunk_dimensions: vec![2, big, big, big, 8],
-            btree_address: Some(0),
-            version: 3,
-            chunk_index_type: None,
-            single_chunk_filtered_size: None,
-            single_chunk_filter_mask: None,
+            index: ChunkIndexLayout::BTreeV1 { address: Some(0) },
         };
         let dataspace = Dataspace {
             space_type: DataspaceType::Simple,
@@ -3216,7 +3083,7 @@ mod tests {
         );
     }
 
-    /// An unallocated chunk index (`btree_address == None`, e.g. a late-allocated
+    /// An unallocated chunk index (no address, e.g. a late-allocated
     /// never-written dataset) reads as fill for a non-empty window, matching the
     /// whole-dataset reader element for element, and as the empty buffer for a
     /// zero-row one.
@@ -3229,11 +3096,7 @@ mod tests {
     fn windowed_rows_unallocated_index_matches_whole_read() {
         let layout = DataLayout::Chunked {
             chunk_dimensions: vec![4, 8],
-            btree_address: None,
-            version: 3,
-            chunk_index_type: None,
-            single_chunk_filtered_size: None,
-            single_chunk_filter_mask: None,
+            index: ChunkIndexLayout::BTreeV1 { address: None },
         };
         let dataspace = Dataspace {
             space_type: DataspaceType::Simple,

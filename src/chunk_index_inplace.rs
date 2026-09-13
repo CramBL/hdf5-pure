@@ -32,7 +32,7 @@ use core::num::NonZeroUsize;
 use crate::checksum::jenkins_lookup3;
 use crate::chunked_write::{ea_compute_stats, split_into_chunks, write_ea_addr};
 use crate::convert::TryToUsize;
-use crate::data_layout::DataLayout;
+use crate::data_layout::{ChunkIndexLayout, DataLayout};
 use crate::dataspace::Dataspace;
 use crate::datatype::Datatype;
 use crate::edit::{LOSSY_TAIL_REFUSAL, pipeline_lossless};
@@ -426,14 +426,14 @@ impl Located {
         let layout = DataLayout::parse(&layout_bytes, os, ls)?;
         let (ea_addr, chunk_dims) = match layout {
             DataLayout::Chunked {
-                chunk_index_type: Some(4),
-                btree_address: Some(addr),
                 chunk_dimensions,
-                ..
+                index:
+                    ChunkIndexLayout::ExtensibleArray {
+                        address: Some(addr),
+                    },
             } => (addr, chunk_dimensions),
             DataLayout::Chunked {
-                chunk_index_type: Some(4),
-                btree_address: None,
+                index: ChunkIndexLayout::ExtensibleArray { address: None },
                 ..
             } => {
                 // An Extensible Array whose header/index block is not allocated

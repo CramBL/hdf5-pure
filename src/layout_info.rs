@@ -2,10 +2,10 @@
 //! filter pipeline (issue #149).
 //!
 //! These types are decoded from the HDF5 data-layout and filter-pipeline
-//! messages but deliberately omit on-disk encoding artifacts (message and layout
-//! version numbers, chunk-index root addresses, and the single-chunk
-//! filtered-size sidecar fields), so the public surface is not welded to the
-//! internal parse representation. Obtain them from the [`Dataset`] accessors
+//! messages but deliberately omit on-disk encoding artifacts (message version
+//! numbers, the addresses of chunk index structures, and a filtered single
+//! chunk's stored size and filter mask), so the public surface is not welded to
+//! the internal parse representation. Obtain them from the [`Dataset`] accessors
 //! [`layout`], [`chunk_index`], [`chunks`], and [`filter_pipeline`].
 //!
 //! [`Dataset`]: crate::Dataset
@@ -15,12 +15,14 @@
 //! [`filter_pipeline`]: crate::Dataset::filter_pipeline
 
 #[cfg(not(feature = "std"))]
-use alloc::{format, string::String, vec::Vec};
+use alloc::string::String;
+#[cfg(not(feature = "std"))]
+use alloc::vec::Vec;
 
 use core::fmt;
 
+use crate::data_layout::ChunkIndexLayout;
 use crate::display::{Dims, EscapedName};
-use crate::error::FormatError;
 use crate::filter_pipeline::{
     FILTER_DEFLATE, FILTER_FLETCHER32, FILTER_LZF, FILTER_SCALEOFFSET, FILTER_SHUFFLE,
 };
@@ -116,29 +118,18 @@ impl ChunkIndex {
     pub const fn supports_inplace_append(self) -> bool {
         matches!(self, ChunkIndex::ExtensibleArray)
     }
+}
 
-    /// Map an internal `(layout version, chunk index type)` pair to a public
-    /// index kind. Version-3 layouts always use a version-1 B-tree; version-4
-    /// layouts carry an explicit index type (1..=5).
-    pub(crate) fn from_layout(version: u8, index_type: Option<u8>) -> Result<Self, FormatError> {
-        Ok(match (version, index_type) {
-            (3, _) => ChunkIndex::BTreeV1,
-            (4, Some(1)) => ChunkIndex::SingleChunk,
-            (4, Some(2)) => ChunkIndex::Implicit,
-            (4, Some(3)) => ChunkIndex::FixedArray,
-            (4, Some(4)) => ChunkIndex::ExtensibleArray,
-            (4, Some(5)) => ChunkIndex::BTreeV2,
-            (v, Some(idx)) => {
-                return Err(FormatError::ChunkedReadError(format!(
-                    "unrecognized chunk index (layout version={v}, index type={idx})"
-                )));
-            }
-            (v, None) => {
-                return Err(FormatError::ChunkedReadError(format!(
-                    "unrecognized chunk index (layout version={v}, no index type)"
-                )));
-            }
-        })
+impl From<ChunkIndexLayout> for ChunkIndex {
+    fn from(index: ChunkIndexLayout) -> Self {
+        match index {
+            ChunkIndexLayout::BTreeV1 { .. } => ChunkIndex::BTreeV1,
+            ChunkIndexLayout::SingleChunk { .. } => ChunkIndex::SingleChunk,
+            ChunkIndexLayout::Implicit { .. } => ChunkIndex::Implicit,
+            ChunkIndexLayout::FixedArray { .. } => ChunkIndex::FixedArray,
+            ChunkIndexLayout::ExtensibleArray { .. } => ChunkIndex::ExtensibleArray,
+            ChunkIndexLayout::BTreeV2 { .. } => ChunkIndex::BTreeV2,
+        }
     }
 }
 
@@ -302,46 +293,28 @@ fn well_known_filter_name(id: u16) -> Option<&'static str> {
 
 #[cfg(test)]
 mod tests {
+    use rstest::rstest;
+
     use super::*;
 
-    #[test]
-    fn chunk_index_from_layout_maps_every_kind() {
-        assert_eq!(
-            ChunkIndex::from_layout(3, None).unwrap(),
-            ChunkIndex::BTreeV1
-        );
-        assert_eq!(
-            ChunkIndex::from_layout(3, Some(4)).unwrap(),
-            ChunkIndex::BTreeV1,
-            "v3 is always a v1 B-tree regardless of the index-type byte"
-        );
-        assert_eq!(
-            ChunkIndex::from_layout(4, Some(1)).unwrap(),
-            ChunkIndex::SingleChunk
-        );
-        assert_eq!(
-            ChunkIndex::from_layout(4, Some(2)).unwrap(),
-            ChunkIndex::Implicit
-        );
-        assert_eq!(
-            ChunkIndex::from_layout(4, Some(3)).unwrap(),
-            ChunkIndex::FixedArray
-        );
-        assert_eq!(
-            ChunkIndex::from_layout(4, Some(4)).unwrap(),
-            ChunkIndex::ExtensibleArray
-        );
-        assert_eq!(
-            ChunkIndex::from_layout(4, Some(5)).unwrap(),
-            ChunkIndex::BTreeV2
-        );
-    }
-
-    #[test]
-    fn chunk_index_from_layout_rejects_unknown() {
-        assert!(ChunkIndex::from_layout(4, Some(9)).is_err());
-        assert!(ChunkIndex::from_layout(4, None).is_err());
-        assert!(ChunkIndex::from_layout(2, Some(1)).is_err());
+    #[rstest]
+    #[case(ChunkIndexLayout::BTreeV1 { address: None }, ChunkIndex::BTreeV1)]
+    #[case(
+        ChunkIndexLayout::SingleChunk { filtered: None, address: Some(0x100) },
+        ChunkIndex::SingleChunk
+    )]
+    #[case(ChunkIndexLayout::Implicit { address: Some(0x100) }, ChunkIndex::Implicit)]
+    #[case(ChunkIndexLayout::FixedArray { address: Some(0x100) }, ChunkIndex::FixedArray)]
+    #[case(
+        ChunkIndexLayout::ExtensibleArray { address: Some(0x100) },
+        ChunkIndex::ExtensibleArray
+    )]
+    #[case(ChunkIndexLayout::BTreeV2 { address: Some(0x100) }, ChunkIndex::BTreeV2)]
+    fn every_parsed_chunk_index_maps_to_a_kind(
+        #[case] parsed: ChunkIndexLayout,
+        #[case] kind: ChunkIndex,
+    ) {
+        assert_eq!(ChunkIndex::from(parsed), kind);
     }
 
     #[test]
@@ -474,18 +447,5 @@ mod display_tests {
             client_data: vec![7, 8],
         };
         assert_eq!(named.to_string(), "custom(id=40000, 7, 8)");
-    }
-
-    /// The message reports the index-type byte itself, not the `Option` that
-    /// carries it.
-    #[test]
-    fn an_unrecognized_index_error_has_no_rust_option_in_it() {
-        let with_type = ChunkIndex::from_layout(4, Some(9)).unwrap_err().to_string();
-        assert!(with_type.contains("index type=9"), "{with_type}");
-        assert!(!with_type.contains("Some"), "{with_type}");
-
-        let without_type = ChunkIndex::from_layout(9, None).unwrap_err().to_string();
-        assert!(without_type.contains("no index type"), "{without_type}");
-        assert!(!without_type.contains("None"), "{without_type}");
     }
 }
