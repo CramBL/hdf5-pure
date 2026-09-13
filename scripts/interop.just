@@ -18,22 +18,19 @@ hdf5-build VERSION:
 hdf5-env VERSION:
     @{{ uv }} hdf5-build {{ if HDF5_VERSION_MAP =~ (".* " + VERSION + ":.*") { replace_regex(HDF5_VERSION_MAP, ".* " + VERSION + ":([^ ]+).*", "$1") } else { VERSION } }} --env
 
-test-hdf5-all: (test-hdf5 "1.8") (test-hdf5 "1.10" "serde,ndarray,__hdf5-1.10") (test-hdf5 "1.12" "serde,ndarray,__hdf5-1.12") (test-hdf5 "1.14" "serde,ndarray,__hdf5-1.14") (test-hdf5 "2" "serde,ndarray,__hdf5-2")
+# Test all supported HDF5 versions with `FEATURES`
+test-hdf5-all FEATURES="serde,ndarray": (test-hdf5 "1.8" FEATURES) (test-hdf5 "1.10" FEATURES + ",__hdf5-1.10") (test-hdf5 "1.12" FEATURES + ",__hdf5-1.12") (test-hdf5 "1.14" FEATURES + ",__hdf5-1.14") (test-hdf5 "2" FEATURES + ",__hdf5-2")
 
 # FEATURES names the release series from 1.10 up, as in `serde,ndarray,__hdf5-1.10`.
 # The crosschecks linking libhdf5 VERSION, built under tmp/hdf5 on first use.
 # Passes `hdf5` and `hdf5_sys` to activate the C HDF5 bindings.
 test-hdf5 VERSION FEATURES="serde,ndarray" *ARGS: (hdf5-build VERSION)
-    #!/usr/bin/env bash
-    set -euo pipefail
-    eval "$(just interop::hdf5-env {{ VERSION }})"
+    eval "$(just interop::hdf5-env {{ VERSION }})" && \
     cargo nextest run --locked {{ crosscheck }} --features hdf5,hdf5_sys,{{ FEATURES }} {{ ARGS }}
 
 # Clippy over the crosschecks, linking libhdf5 VERSION.
 lint-hdf5 VERSION FEATURES="serde,ndarray":
-    #!/usr/bin/env bash
-    set -euo pipefail
-    eval "$(just interop::hdf5-env {{ VERSION }})"
+    eval "$(just interop::hdf5-env {{ VERSION }})" && \
     cargo clippy --locked {{ crosscheck }} --all-targets --features hdf5,hdf5_sys,{{ FEATURES }} -- -D warnings
 
 # The crosschecks linking the libhdf5 `hdf5-metno` bundles, built from source
