@@ -1171,8 +1171,8 @@ pub(crate) fn plan_ea_append<F: Store>(
                 "trailing partial chunk is missing from the index",
             ))?;
         let stored_len = if pipeline.is_some() {
-            usize::try_from(rec.stored_size)
-                .map_err(|_| Error::AppendUnsupported("chunk size exceeds this platform"))?
+            rec.stored_size
+                .narrow_or_else(|| Error::AppendUnsupported("chunk size exceeds this platform"))?
         } else {
             chunk_elems.to_usize()? * element_size.get()
         };
@@ -1190,8 +1190,8 @@ pub(crate) fn plan_ea_append<F: Store>(
         } else {
             stored
         };
-        let live_elems = usize::try_from(current_dim % chunk_elems)
-            .map_err(|_| Error::AppendUnsupported("chunk length exceeds this platform"))?;
+        let live_elems: usize = (current_dim % chunk_elems)
+            .narrow_or_else(|| Error::AppendUnsupported("chunk length exceeds this platform"))?;
         let live_bytes = live_elems * element_size.get();
         if full.len() < live_bytes {
             return Err(Error::AppendUnsupported(
