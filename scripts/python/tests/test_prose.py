@@ -51,6 +51,8 @@ _STUB_ENGINE = prose.Engine(argv=["vale"], description="vale")
 
 _REPLACEMENT_MESSAGE = "A replacement subject\n\nA replacement body.\n"
 
+_SUPERSEDED_MESSAGE = "A superseded subject\n\nA superseded body.\n"
+
 _BODY = "An appended note.\n"
 
 _JUST_SOURCE = """\
@@ -244,6 +246,40 @@ def test_commits_in_drops_a_fixup_subject_and_keeps_a_body_that_quotes_one(
     ]
     assert commits[0].message == f"amend! Root\n\n{_REPLACEMENT_MESSAGE}"
     assert commits[-1].message == "Root\n"
+
+
+def test_commits_in_keeps_only_the_last_amend_of_a_subject(tmp_path: Path) -> None:
+    _repository_with_one_commit(tmp_path)
+    _commit_empty(tmp_path, "Grow a second atomic commit")
+    _commit_empty(tmp_path, f"amend! Root\n\n{_SUPERSEDED_MESSAGE}")
+    _commit_empty(tmp_path, f"amend! Grow a second atomic commit\n\n{_REPLACEMENT_MESSAGE}")
+    _commit_empty(tmp_path, f"amend! Root\n\n{_REPLACEMENT_MESSAGE}")
+
+    commits = prose.commits_in(tmp_path, "HEAD")
+
+    assert [commit.message for commit in commits] == [
+        f"amend! Root\n\n{_REPLACEMENT_MESSAGE}",
+        f"amend! Grow a second atomic commit\n\n{_REPLACEMENT_MESSAGE}",
+        "Grow a second atomic commit\n",
+        "Root\n",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("subject", "expected"),
+    [
+        ("amend! Root", "Root"),
+        ("amend! amend! Root", "Root"),
+        ("amend! squash! Root", "Root"),
+        ("squash! Root", None),
+        ("amend!", None),
+        ("Root", None),
+    ],
+)
+def test_amend_target_names_the_commit_the_message_lands_on(
+    subject: str, expected: str | None
+) -> None:
+    assert prose.Commit(hash="8250d2ea", message=f"{subject}\n\n{_BODY}").amend_target == expected
 
 
 @pytest.mark.parametrize(
