@@ -2376,25 +2376,7 @@ impl FileInner {
 
         // Compact data is inline in the layout message — no I/O, no framing.
         if let DataLayout::Compact { data } = dl {
-            let start = start_row.to_usize()?.checked_mul(row_bytes);
-            let len = num_rows.to_usize()?.checked_mul(row_bytes);
-            let (Some(start), Some(len)) = (start, len) else {
-                return Err(FormatError::OffsetOverflow {
-                    offset: start_row,
-                    length: row_bytes as u64,
-                });
-            };
-            let end = start.checked_add(len).ok_or(FormatError::OffsetOverflow {
-                offset: start as u64,
-                length: len as u64,
-            })?;
-            return data
-                .get(start..end)
-                .map(<[u8]>::to_vec)
-                .ok_or(FormatError::DataSizeMismatch {
-                    expected: end,
-                    actual: data.len(),
-                });
+            return compact_rows(data, start_row, num_rows, row_bytes);
         }
 
         let base = self.addr_offset;
@@ -2460,10 +2442,19 @@ impl FileInner {
     }
 }
 
-/// Read a row window through an already base-framed `Source`. Contiguous
-/// layouts are one bounded sub-read; chunked layouts use the windowed chunk
-/// reader (only the rank-0 crafted-file corner falls back to a whole read
-/// plus slice).
+/// Reads a row window through an already base-framed [`Source`].
+///
+/// A compact layout reads from the bytes the layout message holds, a contiguous
+/// one from a single bounded sub-read or, where the file allocated no storage,
+/// from the fill value, and a chunked one from the windowed chunk reader. Only
+/// the rank-0 chunked corner a crafted file reaches falls back to a whole read
+/// plus a slice.
+///
+/// # Errors
+///
+/// Returns [`FormatError::UnsupportedVirtualLayout`] for a virtual layout, and
+/// the error the layout's own reader reports for a window the dataset's storage
+/// does not hold.
 fn read_rows_framed<S: Source + ?Sized>(
     source: &S,
     spec: RawReadSpec<'_>,
@@ -2483,7 +2474,7 @@ fn read_rows_framed<S: Source + ?Sized>(
         return Ok(Vec::new());
     }
     match dl {
-        DataLayout::Compact { .. } => unreachable!("compact is handled before framing"),
+        DataLayout::Compact { data } => compact_rows(data, start_row, num_rows, row_bytes),
         DataLayout::Contiguous { address, size } => {
             // Unallocated storage: the window reads as the fill value, the same
             // answer the whole-dataset readers give for it.
@@ -2542,6 +2533,44 @@ fn read_rows_framed<S: Source + ?Sized>(
         }
         DataLayout::Virtual => Err(FormatError::UnsupportedVirtualLayout),
     }
+}
+
+/// Reads the rows `[start_row, start_row + num_rows)` of a compact dataset from
+/// the element bytes its layout message holds.
+///
+/// Compact data is inline in the object header, so the window is a slice of
+/// `data` and the file is never read.
+///
+/// # Errors
+///
+/// Returns [`FormatError::ValueTooLargeForPlatform`] if a row index exceeds
+/// `usize`, [`FormatError::OffsetOverflow`] if the window's byte range overflows
+/// it, and [`FormatError::DataSizeMismatch`] if the window ends past the bytes
+/// the message holds.
+fn compact_rows(
+    data: &[u8],
+    start_row: u64,
+    num_rows: u64,
+    row_bytes: usize,
+) -> Result<Vec<u8>, FormatError> {
+    let start = start_row.to_usize()?.checked_mul(row_bytes);
+    let len = num_rows.to_usize()?.checked_mul(row_bytes);
+    let (Some(start), Some(len)) = (start, len) else {
+        return Err(FormatError::OffsetOverflow {
+            offset: start_row,
+            length: row_bytes as u64,
+        });
+    };
+    let end = start.checked_add(len).ok_or(FormatError::OffsetOverflow {
+        offset: start as u64,
+        length: len as u64,
+    })?;
+    data.get(start..end)
+        .map(<[u8]>::to_vec)
+        .ok_or(FormatError::DataSizeMismatch {
+            expected: end,
+            actual: data.len(),
+        })
 }
 
 impl std::fmt::Debug for FileInner {
@@ -8398,6 +8427,55 @@ mod tests {
         assert!(
             matches!(err, FormatError::UnsupportedVirtualLayout),
             "expected UnsupportedVirtualLayout, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn read_rows_framed_reads_a_compact_row_window() {
+        let dl = DataLayout::Compact {
+            data: (0..16u8).collect(),
+        };
+        let ds = Dataspace {
+            space_type: crate::dataspace::DataspaceType::Simple,
+            rank: 2,
+            dimensions: vec![4, 4],
+            max_dimensions: None,
+        };
+        let dt = Datatype::FixedPoint {
+            size: 1,
+            byte_order: crate::datatype::DatatypeByteOrder::LittleEndian,
+            signed: false,
+            bit_offset: 0,
+            bit_precision: 8,
+        };
+        let cache = ChunkCache::new();
+        let rows = |start_row, num_rows| {
+            read_rows_framed(
+                &BytesSource::new(b""),
+                RawReadSpec::plain(&dl, &ds, &dt),
+                8,
+                8,
+                &cache,
+                CachePass::LRU,
+                start_row,
+                num_rows,
+                4,
+            )
+        };
+
+        let out = rows(2, 1).expect("the third row of a compact dataset");
+        assert_eq!(out, vec![8, 9, 10, 11]);
+
+        let err = rows(4, 1).expect_err("a window past the inline bytes");
+        assert!(
+            matches!(
+                err,
+                FormatError::DataSizeMismatch {
+                    expected: 20,
+                    actual: 16
+                }
+            ),
+            "expected DataSizeMismatch, got {err:?}"
         );
     }
 
