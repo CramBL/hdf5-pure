@@ -10286,13 +10286,12 @@ impl WriteEngine {
             ObjectRefTarget::Path(path) => path,
         };
         let base = superblock.base_address;
-        let key = ObjectPathBuf::parse(path);
-        if let Some(&addr) = path_addr.get(&key) {
+        if let Some(&addr) = path_addr.get(path) {
             return Ok(base.relative(addr)?.get());
         }
-        if nodes.contains_key(&key)
-            || add_targets.iter().any(|t| key.starts_with(t))
-            || write_targets.contains(&key)
+        if nodes.contains_key(path)
+            || add_targets.iter().any(|t| path.starts_with(t))
+            || write_targets.contains(path)
         {
             return Err(Error::EditUnsupported(
                 "an object-reference dataset targets a path this commit is still writing; \
@@ -10301,7 +10300,7 @@ impl WriteEngine {
         }
         // After the three above; see this function's doc for why, and for what
         // that ordering does and does not buy.
-        if delete_targets.iter().any(|d| key.starts_with(d)) {
+        if delete_targets.iter().any(|d| path.starts_with(d)) {
             return Err(Error::EditUnsupported(
                 "an object-reference dataset targets an object this commit deletes, or one \
                  under it; the reference would be left pointing at storage the delete can \
@@ -10313,7 +10312,7 @@ impl WriteEngine {
                 src,
                 AccessMode::ReadWrite,
                 superblock,
-                &key.as_path(),
+                &path.as_path(),
             ) {
                 Ok(addr) => base.relative(addr)?.get(),
                 Err(_) => UNDEF,
@@ -15602,7 +15601,7 @@ mod tests {
         let nodes: BTreeMap<ObjectPathBuf, Node> = BTreeMap::new();
         let resolve = |path_addr: &BTreeMap<ObjectPathBuf, u64>, add_targets: &[ObjectPathBuf]| {
             WriteEngine::resolve_reference_target(
-                &ObjectRefTarget::Path(spelling.to_string()),
+                &ObjectRefTarget::Path(ObjectPathBuf::parse(spelling)),
                 path_addr,
                 &nodes,
                 add_targets,

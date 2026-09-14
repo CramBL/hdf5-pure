@@ -21,7 +21,7 @@
 //! byte distinguishes the two destinations only from version 2 on.
 
 #[cfg(not(feature = "std"))]
-use alloc::{string::String, vec::Vec};
+use alloc::vec::Vec;
 
 use crate::access_mode::AccessMode;
 use crate::address::{BaseAddress, StoredAddress};
@@ -30,6 +30,7 @@ use crate::convert::Narrow;
 use crate::error::FormatError;
 use crate::message_type::MessageType;
 use crate::object_header::ObjectHeader;
+use crate::object_path::ObjectPathBuf;
 use crate::sohm::SohmTable;
 use crate::source::Source;
 
@@ -188,7 +189,7 @@ pub enum DatatypeLocation {
     /// same pass that assigns addresses. Serializing one writes the undefined
     /// address, so a reference that misses that pass names nothing rather than
     /// silently naming the superblock.
-    CommittedPath(String),
+    CommittedPath(ObjectPathBuf),
 }
 
 impl DatatypeLocation {
@@ -206,7 +207,7 @@ impl DatatypeLocation {
     }
 
     /// The path this location still has to have resolved, if any.
-    pub fn unresolved_path(&self) -> Option<&str> {
+    pub fn unresolved_path(&self) -> Option<&ObjectPathBuf> {
         match self {
             Self::CommittedPath(path) => Some(path),
             Self::Inline | Self::Committed(_) => None,

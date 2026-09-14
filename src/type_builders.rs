@@ -19,7 +19,7 @@ use crate::datatype::{
 };
 use crate::display::write_elided;
 use crate::error::FormatError;
-use crate::object_path::ObjectPath;
+use crate::object_path::ObjectPathBuf;
 use crate::scaleoffset::{FillAvailability, ScaleOffset};
 use crate::shared_message::DatatypeLocation;
 
@@ -2230,7 +2230,7 @@ pub(crate) struct ProducedPayload {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ObjectRefTarget {
     /// Resolve to the destination address of the object at this path.
-    Path(String),
+    Path(ObjectPathBuf),
     /// Write this exact 8-byte address (e.g. 0 for null, `u64::MAX` for
     /// undefined).
     Raw(u64),
@@ -2409,10 +2409,10 @@ impl DatasetBuilder {
     ///
     /// `path` names a datatype committed with
     /// [`FileBuilder::commit_datatype`](crate::FileBuilder::commit_datatype) or
-    /// [`GroupBuilder::commit_datatype`], with or without a leading `/`.
+    /// [`GroupBuilder::commit_datatype`], and identifies it whichever way it is spelled, as it
+    /// does for [`Group::dataset`](crate::Group::dataset).
     pub fn with_committed_datatype(&mut self, path: &str) -> &mut Self {
-        self.datatype_location =
-            DatatypeLocation::CommittedPath(ObjectPath::parse(path).to_string());
+        self.datatype_location = DatatypeLocation::CommittedPath(ObjectPathBuf::parse(path));
         self
     }
 
@@ -2582,13 +2582,23 @@ impl DatasetBuilder {
         self
     }
 
-    /// Write an object reference dataset by path. During file serialization,
-    /// each path is resolved to the absolute address of the named object.
-    /// Paths use `/` separators (e.g., `"#refs#/child1"`).
+    /// Writes an object reference dataset whose elements refer to the objects `paths`
+    /// identifies, each path from the root group, such as `"#refs#/child1"`.
+    ///
+    /// A whole-file write resolves each path to the address of the object it identifies, and
+    /// every spelling of one path identifies one object, as it does for
+    /// [`Group::dataset`](crate::Group::dataset). A path must identify an object of this
+    /// file: the write emits the undefined address for every other path, which
+    /// [`Dataset::dereference`](crate::Dataset::dereference) reports as
+    /// [`FormatError::InvalidObjectReference`].
+    ///
+    /// A dataset staged on a file [`File::open_rw`](crate::File::open_rw) opened resolves its
+    /// targets at [`File::commit`](crate::File::commit), which rejects a target it is still
+    /// writing, and one it deletes, with [`Error::EditUnsupported`](crate::Error::EditUnsupported).
     pub fn with_path_references(&mut self, paths: &[&str]) -> &mut Self {
         let targets = paths
             .iter()
-            .map(|s| ObjectRefTarget::Path(s.to_string()))
+            .map(|path| ObjectRefTarget::Path(ObjectPathBuf::parse(path)))
             .collect();
         self.with_object_references(targets)
     }
@@ -3595,8 +3605,7 @@ pub(crate) struct CommittedDatatype {
 /// an empty string in the C library.
 pub(crate) fn committed_attr_spec(name: &str, value: &AttrValue, path: &str) -> AttrSpec {
     let mut message = build_attr_message(name, value);
-    message.datatype_location =
-        DatatypeLocation::CommittedPath(ObjectPath::parse(path).to_string());
+    message.datatype_location = DatatypeLocation::CommittedPath(ObjectPathBuf::parse(path));
     match value.var_len_strings() {
         Some(strings) => AttrSpec::VerbatimVarLen {
             message,
