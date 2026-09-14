@@ -10,6 +10,7 @@ use super::value::{Leaf, Value};
 use crate::file_writer::AttrValue;
 use crate::mat::builder::{RefsH5Path, refs_h5path};
 use crate::mat::class::MatClass;
+use crate::mat::dims;
 use crate::mat::error::MatError;
 use crate::mat::options::Options;
 use crate::mat::transpose::transpose_scalars;
@@ -117,7 +118,10 @@ fn emit_at_root(
     refs: &mut RefsAccumulator,
 ) -> Result<(), MatError> {
     match value {
-        Value::Cell(elements) => apply_cell(builder.create_dataset(name), elements, refs),
+        Value::Cell(elements) => {
+            apply_cell(builder.create_dataset(name), elements, refs);
+            Ok(())
+        }
         Value::Leaf(leaf) => {
             apply_leaf_to_dataset(builder.create_dataset(name), leaf);
             Ok(())
@@ -140,7 +144,10 @@ fn emit_into_group(
     h5path: RefsH5Path,
 ) -> Result<(), MatError> {
     match value {
-        Value::Cell(elements) => apply_cell(dataset_for(group, name, h5path), elements, refs),
+        Value::Cell(elements) => {
+            apply_cell(dataset_for(group, name, h5path), elements, refs);
+            Ok(())
+        }
         Value::Leaf(leaf) => {
             apply_leaf_to_dataset(dataset_for(group, name, h5path), leaf);
             Ok(())
@@ -236,34 +243,26 @@ fn apply_leaf_to_dataset(ds: &mut DatasetBuilder, leaf: Leaf) {
     }
 }
 
-/// Stash each element under `#refs#` and write the parent dataset as a vector
-/// of object references. Shape is `[1, n]` HDF5 storage of a MATLAB `[n, 1]`
-/// column vector, matching `apply_vec_1d`.
+/// Stashes each element under `#refs#` and writes the parent dataset as a vector
+/// of object references, oriented the way [`dims::vector_dims`] orients every
+/// other 1-D value. An empty cell has no reference to store: its dataset is the
+/// `[0, 0]` empty marker [`MatBuilder::cell`] writes.
 ///
-/// Fixed rather than taken from `one_dimensional_mode`, for the same reason the
-/// empty case below is unreachable: this emitter has no [`Options`], so it only
-/// ever runs under the default, and the default is `ColumnVector`.
-fn apply_cell(
-    ds: &mut DatasetBuilder,
-    elements: Vec<Value>,
-    refs: &mut RefsAccumulator,
-) -> Result<(), MatError> {
+/// The orientation is the default one, since this emitter has no [`Options`] of
+/// its own.
+///
+/// [`MatBuilder::cell`]: crate::mat::MatBuilder::cell
+fn apply_cell(ds: &mut DatasetBuilder, elements: Vec<Value>, refs: &mut RefsAccumulator) {
     let paths: Vec<String> = elements.into_iter().map(|el| refs.intern(el)).collect();
+    let matlab_dims = dims::vector_dims(paths.len(), Options::default().one_dimensional_mode);
     if paths.is_empty() {
-        // Construction-enforced: an empty `Cell` comes from one place
-        // (`unify_sequence` under `EmptySequencePolicy::Cell`), and this
-        // emitter has no `Options`, so it always runs under the default
-        // `DoubleArray` and never sees one. Assert rather than encode a second
-        // answer for the shape: `emit_with_builder` derives an empty cell's
-        // dims from `cell_dims`, and a guess here that disagreed with it would
-        // be untestable while it stays unreachable.
-        unreachable!("this emitter has no Options, so an empty Cell cannot reach it");
+        emit_empty(ds, MatClass::Cell, &matlab_dims);
+        return;
     }
-    let path_refs: Vec<&str> = paths.iter().map(|s| s.as_str()).collect();
-    let n = path_refs.len() as u64;
-    ds.with_path_references(&path_refs).with_shape(&[1u64, n]);
+    let path_refs: Vec<&str> = paths.iter().map(String::as_str).collect();
+    ds.with_path_references(&path_refs)
+        .with_shape(&dims::storage_dims_u64(&matlab_dims));
     set_class(ds, MatClass::Cell);
-    Ok(())
 }
 
 /// The empty-marker encoding this emitter writes.
@@ -555,6 +554,8 @@ mod tests {
     use rstest::rstest;
 
     use super::*;
+    use crate::mat::ser::emit_with_builder;
+    use crate::type_builders::AttrSpec;
 
     /// The rule [`MatBuilder::write_empty`] states — an empty marker carries
     /// `MATLAB_class` and `MATLAB_empty` and nothing else — held for one emitter
@@ -621,5 +622,48 @@ mod tests {
                 "{rows}x{cols} empty matrix is not marked empty"
             );
         }
+    }
+
+    #[test]
+    fn an_empty_cell_writes_the_zero_by_zero_marker() {
+        let mut ds = DatasetBuilder::new("c");
+        apply_cell(&mut ds, Vec::new(), &mut RefsAccumulator::new());
+        assert_eq!(
+            ds.data.as_deref(),
+            Some(
+                [0u64, 0]
+                    .iter()
+                    .flat_map(|d| d.to_le_bytes())
+                    .collect::<Vec<u8>>()
+                    .as_slice()
+            ),
+            "an empty cell records the wrong dimension vector"
+        );
+        let attrs: Vec<(&str, AttrValue)> = ds
+            .attrs
+            .iter()
+            .map(|(name, spec)| {
+                let AttrSpec::Value(value) = spec else {
+                    panic!("an empty cell carries a pre-encoded {name:?} attribute");
+                };
+                (name.as_str(), value.clone())
+            })
+            .collect();
+        assert_eq!(
+            attrs,
+            [
+                ("MATLAB_class", AttrValue::AsciiString("cell".to_owned())),
+                ("MATLAB_empty", AttrValue::U32(1)),
+            ]
+        );
+    }
+
+    #[test]
+    fn an_empty_cell_writes_what_the_with_options_emitter_writes() {
+        let fields = || vec![("c".to_owned(), Value::Cell(Vec::new()))];
+        assert_eq!(
+            emit_file(fields()).unwrap(),
+            emit_with_builder::emit_file_with_options(fields(), &Options::default()).unwrap(),
+        );
     }
 }
