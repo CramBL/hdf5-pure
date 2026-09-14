@@ -2412,7 +2412,15 @@ impl DatasetBuilder {
     /// [`GroupBuilder::commit_datatype`], and identifies it whichever way it is spelled, as it
     /// does for [`Group::dataset`](crate::Group::dataset).
     pub fn with_committed_datatype(&mut self, path: &str) -> &mut Self {
-        self.datatype_location = DatatypeLocation::CommittedPath(ObjectPathBuf::parse(path));
+        self.with_committed_datatype_path(ObjectPathBuf::parse(path))
+    }
+
+    /// Refers to the committed datatype at `path`, which
+    /// [`with_committed_datatype`](Self::with_committed_datatype) takes as a spelling.
+    ///
+    /// A repack resolves a source's committed type to a path of the output and passes it here.
+    pub(crate) fn with_committed_datatype_path(&mut self, path: ObjectPathBuf) -> &mut Self {
+        self.datatype_location = DatatypeLocation::CommittedPath(path);
         self
     }
 

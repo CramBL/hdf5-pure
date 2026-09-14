@@ -5,7 +5,10 @@
 //! and the result is read back by both readers. Also proves the fail-loud
 //! contract on a real variable-length string dataset the C library produces.
 
-use hdf5_pure::{File, MaxExtent, RepackOptions, VlenStringReadOptions, repack};
+use hdf5_pure::{
+    Error, File, FormatError, MaxExtent, RepackOptions, VlenStringReadOptions, repack,
+};
+use rstest::rstest;
 use tempfile::tempdir;
 
 use hdf5_pure_crosscheck::assert_c_absent;
@@ -2131,4 +2134,59 @@ fn the_encodings_only_this_crate_writes_survive_a_repack_for_the_c_library() {
         data.attr(name)
             .unwrap_or_else(|e| panic!("the C library could not open data/{name:?}: {e}"));
     }
+}
+
+/// A drop path reads the way the C library reads a path it is handed: `H5G__component` walks
+/// past the separators between two names, so a repeated or a trailing one separates nothing, and
+/// `H5G__traverse_real` resolves a `.` component to the group it is already in (`H5Gname.c` and
+/// `H5Gtraverse.c`, HDF5 1.14.6). Every spelling below drops the one dataset the C library wrote
+/// at `grp/doomed`, and both readers agree on what the output holds.
+#[rstest]
+#[case("grp/doomed")]
+#[case("/grp/doomed")]
+#[case("grp//doomed")]
+#[case("./grp/doomed")]
+#[case("grp/./doomed/")]
+fn every_spelling_of_a_drop_path_drops_one_object_the_c_library_wrote(#[case] spelling: &str) {
+    let dir = tempdir().unwrap();
+    let src = dir.path().join("c_drop_spelling.h5");
+    let dst = dir.path().join("drop_spelling_repacked.h5");
+
+    {
+        let file = hdf5::File::create(&src).unwrap();
+        let grp = file.create_group("grp").unwrap();
+        grp.new_dataset::<i32>()
+            .shape((2,))
+            .create("doomed")
+            .unwrap()
+            .write(&[7i32, 8])
+            .unwrap();
+        grp.new_dataset::<i32>()
+            .shape((2,))
+            .create("kept")
+            .unwrap()
+            .write(&[1i32, 2])
+            .unwrap();
+        file.close().unwrap();
+    }
+
+    repack(&src, &dst, &RepackOptions::new().drop_path(spelling)).unwrap();
+
+    let f = File::open(&dst).unwrap();
+    assert_eq!(
+        f.dataset("grp/kept").unwrap().read_i32().unwrap(),
+        vec![1, 2]
+    );
+    let err = f.dataset("grp/doomed").unwrap_err();
+    let Error::Format(FormatError::PathNotFound(missing)) = &err else {
+        panic!("expected PathNotFound, got {err:?}");
+    };
+    assert_eq!(missing, "grp/doomed");
+
+    let c = hdf5::File::open(&dst).unwrap();
+    assert_eq!(
+        c.dataset("grp/kept").unwrap().read_raw::<i32>().unwrap(),
+        vec![1, 2]
+    );
+    assert_c_absent(&c.dataset("grp/doomed").unwrap_err(), "doomed");
 }

@@ -12,6 +12,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - `Group::create_group_with` rejects a group creation at the root group's path from inside its closure and stages nothing, where the call returned `Ok` and the next `File::commit` reported it. A creation staged through a group handle still reports such a path as spelling no link ([#573](https://github.com/CramBL/hdf5-pure/pull/573)).
 - `FileBuilder::write` reports `FormatError::InvalidLinkName` for a dataset, group or committed-datatype name that is no component of an object path, where such a name went into the file as a link no path reaches. The group builders and the in-memory write report it the same way.
 - `DatasetBuilder::with_path_references` resolves a target whichever way its path is spelled when the file is written whole, where a spelling other than the one the object was created under was written as the undefined address.
+- `RepackOptions::drop_path` takes a path whichever way it is spelled, where a `.` component identified no object and failed the repack. A drop path that identifies the root group, and a source link whose name is no component of a path, are rejected with `Error::RepackUnsupported`.
 
 ## [0.46.0] - 2026-09-14
 

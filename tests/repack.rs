@@ -5,7 +5,7 @@ use hdf5_pure::{
     AttrValue, Datatype, DatatypeByteOrder, FileBuilder, FileSpaceStrategy, LibVer, MaxExtent,
     RepackOptions, ScaleOffset, repack,
 };
-
+use rstest::rstest;
 use temp::temp_path;
 use test_util::temp;
 
@@ -785,4 +785,81 @@ fn superblock_version(path: &std::path::Path) -> u8 {
         .position(|w| w == b"\x89HDF\r\n\x1a\n")
         .expect("the file carries an HDF5 signature");
     bytes[sig + 8]
+}
+
+/// Every spelling of one path identifies one object to a drop, as it does to a read.
+#[rstest]
+#[case("doomed/a")]
+#[case("/doomed/a")]
+#[case("doomed//a")]
+#[case("./doomed/a")]
+#[case("doomed/./a/")]
+fn every_spelling_of_a_drop_path_drops_one_object(#[case] spelling: &str) {
+    let src = temp::temp_path("hdf5_pure_repack_drop_spelling_src.h5");
+    let dst = temp::temp_path("hdf5_pure_repack_drop_spelling_dst.h5");
+    let mut b = FileBuilder::new();
+    let mut g = b.create_group("doomed");
+    g.create_dataset("a").with_i32_data(&[1, 2]);
+    g.create_dataset("b").with_i32_data(&[3, 4]);
+    b.add_group(g.finish());
+    b.write(&src).unwrap();
+
+    repack(&src, &dst, &RepackOptions::new().drop_path(spelling)).unwrap();
+
+    let f = hdf5_pure::File::open(&dst).unwrap();
+    assert_eq!(
+        f.group("doomed").unwrap().datasets().unwrap(),
+        vec!["b".to_string()]
+    );
+}
+
+#[test]
+fn a_drop_path_is_recorded_in_its_root_relative_form() {
+    let options = RepackOptions::new()
+        .drop_path("/a//b/")
+        .drop_path("./c")
+        .drop_path("d");
+    assert_eq!(options.drop_paths(), ["a/b", "c", "d"]);
+}
+
+#[rstest]
+#[case("/")]
+#[case(".")]
+#[case("")]
+fn a_drop_of_the_root_group_is_rejected(#[case] spelling: &str) {
+    let src = temp::temp_path("hdf5_pure_repack_drop_root_src.h5");
+    let dst = temp::temp_path("hdf5_pure_repack_drop_root_dst.h5");
+    let mut b = FileBuilder::new();
+    b.create_dataset("keep").with_i32_data(&[1]);
+    b.write(&src).unwrap();
+
+    let err = repack(&src, &dst, &RepackOptions::new().drop_path(spelling)).unwrap_err();
+    let hdf5_pure::Error::RepackUnsupported(reason) = &err else {
+        panic!("expected RepackUnsupported, got {err:?}");
+    };
+    assert_eq!(reason, "a repack cannot drop the root group");
+    assert!(!dst.exists(), "dst must not be created when a repack fails");
+}
+
+/// The fixture's one link has an empty name, which is not a component of an object path, so
+/// the object it identifies has no path in the output.
+#[test]
+fn a_source_link_whose_name_is_not_a_path_component_is_rejected() {
+    let dst = temp::temp_path("hdf5_pure_repack_nameless_link_dst.h5");
+
+    let err = repack(
+        "tests/data/fuzz/oom_chunked_string_huge_elem.h5",
+        &dst,
+        &RepackOptions::new(),
+    )
+    .unwrap_err();
+    let hdf5_pure::Error::RepackUnsupported(reason) = &err else {
+        panic!("expected RepackUnsupported, got {err:?}");
+    };
+    assert_eq!(
+        reason,
+        "root group: the link \"\" has a name that is not a component of an object path, so \
+         the object it identifies has no path in the output"
+    );
+    assert!(!dst.exists(), "dst must not be created when a repack fails");
 }
