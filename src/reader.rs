@@ -4984,8 +4984,11 @@ impl Dataset {
     /// The file must have been opened for writing with [`File::open_rw`];
     /// a read-only file returns
     /// [`Error::ReadOnly`]. The target must be a chunked,
-    /// rank-1, unlimited, Extensible-Array-indexed dataset; anything else returns
-    /// [`Error::AppendInPlaceUnsupported`].
+    /// rank-1, unlimited, Extensible-Array-indexed dataset: anything else returns
+    /// [`Error::AppendInPlaceUnsupported`]. A missing path returns
+    /// [`Error::Format`] with [`FormatError::PathNotFound`], and a header message
+    /// that does not read or parse returns [`Error::Format`] with the failure the
+    /// read or the parse produced.
     /// Both the dataset's current length and the appended length are
     /// unconstrained, on a filtered dataset as much as an unfiltered one: a
     /// partial trailing chunk is rewritten into a fresh allocation — decoded,

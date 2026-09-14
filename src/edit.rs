@@ -276,7 +276,7 @@ use crate::datatype::{
     Datatype, DatatypeByteOrder, datatype_holds_file_address, datatype_holds_object_address,
     embedded_reference_slots, stored_object_references,
 };
-use crate::error::{Error, FormatError, OBJECT_HEADER_MESSAGE_MAX, ResolveError};
+use crate::error::{Error, FormatError, OBJECT_HEADER_MESSAGE_MAX};
 use crate::extensible_array::ExtensibleArrayHeader;
 use crate::file_create_properties::FileCreateProperties;
 use crate::file_lock::{self, FileLocking};
@@ -4616,10 +4616,7 @@ impl WriteEngine {
                         AccessMode::ReadWrite,
                         &self.superblock,
                         dataset,
-                    )
-                    .map_err(|_| {
-                        Error::AppendInPlaceUnsupported("nothing to append to at the given path")
-                    })?;
+                    )?;
                     self.resolved.insert(dataset.to_string(), addr);
                     addr
                 }
@@ -5456,13 +5453,7 @@ impl WriteEngine {
             source.access_mode(),
             src_sb,
             &src.join("/"),
-        )
-        .map_err(|e| match e {
-            ResolveError::Format(FormatError::PathNotFound(_)) => {
-                Error::EditUnsupported("copy source does not exist in the source file")
-            }
-            other => Error::from(other),
-        })?;
+        )?;
         // Read (and foreign-address-screen) the whole subtree now, while `source`
         // is borrowed; the owned tree carries every byte the commit will write. The
         // source is gated to base 0 above, so its stored addresses are absolute.
@@ -5774,8 +5765,7 @@ impl WriteEngine {
                 AccessMode::ReadWrite,
                 &self.superblock,
                 &path_str,
-            )
-            .map_err(|_| Error::EditUnsupported("nothing to overwrite at the given path"))?;
+            )?;
             match Self::prepare_write(&self.image(), addr, fd, base, full)? {
                 WritePlan::InPlace { data_addr, bytes } => {
                     inplace_writes.push((data_addr, bytes));
@@ -5847,8 +5837,7 @@ impl WriteEngine {
                 AccessMode::ReadWrite,
                 &self.superblock,
                 &path_str,
-            )
-            .map_err(|_| Error::AppendUnsupported("nothing to append to at the given path"))?;
+            )?;
             let mw = Self::prepare_append(&self.image(), addr, ab, base)?;
             // A relocating append moves the dataset's object header and patches only
             // the one parent link that names it, so it is safe only when this is the
@@ -5910,10 +5899,7 @@ impl WriteEngine {
                     AccessMode::ReadWrite,
                     &self.superblock,
                     &path_str,
-                )
-                .map_err(|_| {
-                    Error::EditUnsupported("nothing to set an attribute on at the given path")
-                })?;
+                )?;
                 // An attribute edit relocates the dataset's object header and patches
                 // only the one naming link, so it is safe only when this is the
                 // dataset's sole hard link (same rule as a relocating overwrite).
@@ -6091,13 +6077,7 @@ impl WriteEngine {
                 AccessMode::ReadWrite,
                 &self.superblock,
                 &src_str,
-            )
-            .map_err(|e| match e {
-                ResolveError::Format(FormatError::PathNotFound(_)) => {
-                    Error::EditUnsupported("copy source does not exist")
-                }
-                other => Error::from(other),
-            })?;
+            )?;
             // Read the source subtree from this file's own mirror (`cross_file`
             // false: same address space, so verbatim addresses stay valid). On a
             // userblock file the stored addresses are base-relative, so pass this
@@ -6150,8 +6130,7 @@ impl WriteEngine {
                 AccessMode::ReadWrite,
                 &self.superblock,
                 &path_str,
-            )
-            .map_err(|_| Error::EditUnsupported("nothing to delete at the given path"))?;
+            )?;
             deleted_addrs.push(del_addr);
             // A deletion may overlap other staged work when this commit
             // *replaces* what it removes: an addition names exactly `d`, so the
@@ -6280,12 +6259,7 @@ impl WriteEngine {
                     AccessMode::ReadWrite,
                     &self.superblock,
                     &path_str,
-                )
-                .map_err(|_| {
-                    Error::EditUnsupported(
-                        "a target group does not exist; create it first in this session",
-                    )
-                })?;
+                )?;
                 // Rebuilding this group moves its header and patches only the
                 // link this commit resolved it through, so every other hard link
                 // to it would be left naming the old header — which this commit
