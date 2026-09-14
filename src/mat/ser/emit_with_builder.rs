@@ -1,16 +1,16 @@
-//! Emit a `MatValue` tree into HDF5 bytes through the public [`MatBuilder`]
+//! Writes a serializer [`Value`] tree as HDF5 bytes through the [`MatBuilder`]
 //! mid-level API.
 //!
-//! Used by [`super::root::to_bytes_with_options`]. The default-options path
-//! (`to_bytes`) keeps the legacy `emit_file` for backwards compatibility.
+//! The entry points that take [`Options`] come here, and [`super::emit`] serves
+//! the ones that do not.
 
+use super::value::{Leaf, Value};
 use crate::mat::builder::{CellWriter, MatBuilder, StructWriter};
 use crate::mat::class::MatClass;
 use crate::mat::error::MatError;
 use crate::mat::options::{Options, StringClass};
-use crate::mat::value::{ComplexVec, MatValue, NumVec, ScalarNum, ScalarTag};
-
 use crate::mat::transpose::transpose_scalars;
+use crate::mat::value::{ComplexVec, NumVec, ScalarNum, ScalarTag};
 
 /// The complex dispatchers for the three write scopes, from one list.
 ///
@@ -69,7 +69,7 @@ complex_dispatchers! {
 
 /// Walk top-level fields and emit through a `MatBuilder`.
 pub(crate) fn emit_file_with_options(
-    fields: Vec<(String, MatValue)>,
+    fields: Vec<(String, Value)>,
     options: &Options,
 ) -> Result<Vec<u8>, MatError> {
     build_with_options(fields, options)?.finish()
@@ -77,7 +77,7 @@ pub(crate) fn emit_file_with_options(
 
 /// Same file as [`emit_file_with_options`], streamed to `w` instead of returned.
 pub(crate) fn emit_file_with_options_to<W: std::io::Write>(
-    fields: Vec<(String, MatValue)>,
+    fields: Vec<(String, Value)>,
     options: &Options,
     w: W,
 ) -> Result<(), MatError> {
@@ -86,12 +86,12 @@ pub(crate) fn emit_file_with_options_to<W: std::io::Write>(
 
 /// Stage every field into a `MatBuilder`, ready to be finished either way.
 fn build_with_options(
-    fields: Vec<(String, MatValue)>,
+    fields: Vec<(String, Value)>,
     options: &Options,
 ) -> Result<MatBuilder, MatError> {
     let mut mb = MatBuilder::new(options.clone());
     for (name, value) in fields {
-        if matches!(value, MatValue::Omit) {
+        if matches!(value, Value::Omit) {
             continue;
         }
         emit_at_root(&mut mb, &name, value)?;
@@ -99,13 +99,9 @@ fn build_with_options(
     Ok(mb)
 }
 
-fn emit_at_root(mb: &mut MatBuilder, name: &str, value: MatValue) -> Result<(), MatError> {
+fn emit_at_root(mb: &mut MatBuilder, name: &str, value: Value) -> Result<(), MatError> {
     match value {
-        MatValue::Omit => Ok(()),
-        MatValue::Struct(fields) => mb
-            .struct_(name, |sw| emit_struct_fields(sw, fields))
-            .map(|_| ()),
-        MatValue::Cell(elements) => {
+        Value::Cell(elements) => {
             // A cell built from a sequence is a 1-D value, so its shape is the
             // one `dims::vector_dims` gives every other 1-D value: oriented by
             // `one_dimensional_mode`, and `0x0` when empty.
@@ -113,16 +109,17 @@ fn emit_at_root(mb: &mut MatBuilder, name: &str, value: MatValue) -> Result<(), 
             mb.cell(name, &dims, |cw| emit_cell_elements(cw, elements))
                 .map(|_| ())
         }
-        other => emit_leaf_at_builder(mb, name, other),
+        Value::Leaf(leaf) => emit_leaf_at_builder(mb, name, leaf),
+        Value::Omit => Ok(()),
+        Value::Struct(fields) => mb
+            .struct_(name, |sw| emit_struct_fields(sw, fields))
+            .map(|_| ()),
     }
 }
 
-fn emit_struct_fields(
-    sw: &mut StructWriter,
-    fields: Vec<(String, MatValue)>,
-) -> Result<(), MatError> {
+fn emit_struct_fields(sw: &mut StructWriter, fields: Vec<(String, Value)>) -> Result<(), MatError> {
     for (name, value) in fields {
-        if matches!(value, MatValue::Omit) {
+        if matches!(value, Value::Omit) {
             continue;
         }
         emit_at_struct(sw, &name, value)?;
@@ -130,67 +127,60 @@ fn emit_struct_fields(
     Ok(())
 }
 
-fn emit_at_struct(sw: &mut StructWriter, name: &str, value: MatValue) -> Result<(), MatError> {
+fn emit_at_struct(sw: &mut StructWriter, name: &str, value: Value) -> Result<(), MatError> {
     match value {
-        MatValue::Omit => Ok(()),
-        MatValue::Struct(fields) => sw
-            .struct_(name, |inner| emit_struct_fields(inner, fields))
-            .map(|_| ()),
-        MatValue::Cell(elements) => {
+        Value::Cell(elements) => {
             let dims = sw.vector_dims(elements.len());
             sw.cell(name, &dims, |cw| emit_cell_elements(cw, elements))
                 .map(|_| ())
         }
-        other => emit_leaf_at_struct(sw, name, other),
+        Value::Leaf(leaf) => emit_leaf_at_struct(sw, name, leaf),
+        Value::Omit => Ok(()),
+        Value::Struct(fields) => sw
+            .struct_(name, |inner| emit_struct_fields(inner, fields))
+            .map(|_| ()),
     }
 }
 
-fn emit_cell_elements(cw: &mut CellWriter, elements: Vec<MatValue>) -> Result<(), MatError> {
+fn emit_cell_elements(cw: &mut CellWriter, elements: Vec<Value>) -> Result<(), MatError> {
     for value in elements {
         emit_cell_element(cw, value)?;
     }
     Ok(())
 }
 
-fn emit_cell_element(cw: &mut CellWriter, value: MatValue) -> Result<(), MatError> {
+fn emit_cell_element(cw: &mut CellWriter, value: Value) -> Result<(), MatError> {
     match value {
-        MatValue::Omit => {
-            cw.push_empty_struct_array()?;
-        }
-        MatValue::Struct(fields) => {
-            cw.push_struct(|sw| emit_struct_fields(sw, fields))?;
-        }
-        MatValue::Cell(elements) => {
+        Value::Cell(elements) => {
             let dims = cw.vector_dims(elements.len());
-            cw.push_cell(&dims, |inner| emit_cell_elements(inner, elements))?;
+            cw.push_cell(&dims, |inner| emit_cell_elements(inner, elements))
+                .map(|_| ())
         }
-        MatValue::Scalar(n) => emit_cell_scalar(cw, n)?,
-        MatValue::Vec1D(v) => emit_cell_vec(cw, v)?,
-        MatValue::Matrix { rows, cols, vec } => emit_cell_matrix(cw, rows, cols, vec)?,
-        MatValue::String(s) => {
-            cw.push_char(&s)?;
-        }
-        MatValue::ComplexScalar(n) => {
-            push_complex(cw, &[1, 1], ComplexVec::from_single(n))?;
-        }
-        MatValue::ComplexVec1D(pairs) => {
-            let dims = cw.vector_dims(pairs.len());
-            push_complex(cw, &dims, pairs)?;
-        }
-        MatValue::ComplexMatrix { rows, cols, pairs } => {
-            let col_major = pairs.transposed(rows, cols);
-            push_complex(cw, &[rows, cols], col_major)?;
-        }
-        MatValue::EmptyStructArray => {
-            cw.push_empty_struct_array()?;
-        }
-        MatValue::Opaque { .. } | MatValue::StructArray { .. } => {
-            unreachable!(
-                "MatValue::Opaque / StructArray are read-only; produced by the deserializer, never serialized"
-            )
-        }
+        Value::Leaf(leaf) => emit_leaf_at_cell(cw, leaf),
+        Value::Omit => cw.push_empty_struct_array().map(|_| ()),
+        Value::Struct(fields) => cw
+            .push_struct(|sw| emit_struct_fields(sw, fields))
+            .map(|_| ()),
     }
-    Ok(())
+}
+
+fn emit_leaf_at_cell(cw: &mut CellWriter, leaf: Leaf) -> Result<(), MatError> {
+    match leaf {
+        Leaf::ComplexMatrix { rows, cols, pairs } => {
+            let col_major = pairs.transposed(rows, cols);
+            push_complex(cw, &[rows, cols], col_major)
+        }
+        Leaf::ComplexScalar(n) => push_complex(cw, &[1, 1], ComplexVec::from_single(n)),
+        Leaf::ComplexVec1D(pairs) => {
+            let dims = cw.vector_dims(pairs.len());
+            push_complex(cw, &dims, pairs)
+        }
+        Leaf::EmptyStructArray => cw.push_empty_struct_array().map(|_| ()),
+        Leaf::Matrix { rows, cols, vec } => emit_cell_matrix(cw, rows, cols, vec),
+        Leaf::Scalar(n) => emit_cell_scalar(cw, n),
+        Leaf::String(s) => cw.push_char(&s).map(|_| ()),
+        Leaf::Vec1D(v) => emit_cell_vec(cw, v),
+    }
 }
 
 fn emit_cell_scalar(cw: &mut CellWriter, scalar: ScalarNum) -> Result<(), MatError> {
@@ -322,60 +312,45 @@ fn emit_cell_matrix(
     Ok(())
 }
 
-fn emit_leaf_at_builder(mb: &mut MatBuilder, name: &str, value: MatValue) -> Result<(), MatError> {
-    match value {
-        MatValue::Omit | MatValue::Struct(_) | MatValue::Cell(_) => {
-            // Handled by the caller.
-            Ok(())
-        }
-        MatValue::Scalar(n) => emit_scalar_at_builder(mb, name, n),
-        MatValue::Vec1D(v) => emit_vec_at_builder(mb, name, v),
-        MatValue::Matrix { rows, cols, vec } => emit_matrix_at_builder(mb, name, rows, cols, vec),
-        MatValue::String(s) => emit_string_at_builder(mb, name, &s),
-        MatValue::ComplexScalar(n) => {
-            write_complex_at_builder(mb, name, &[1, 1], ComplexVec::from_single(n))
-        }
-        MatValue::ComplexVec1D(pairs) => {
-            let dims = mb.vector_dims(pairs.len());
-            write_complex_at_builder(mb, name, &dims, pairs)
-        }
-        MatValue::ComplexMatrix { rows, cols, pairs } => {
+fn emit_leaf_at_builder(mb: &mut MatBuilder, name: &str, leaf: Leaf) -> Result<(), MatError> {
+    match leaf {
+        Leaf::ComplexMatrix { rows, cols, pairs } => {
             let col_major = pairs.transposed(rows, cols);
             write_complex_at_builder(mb, name, &[rows, cols], col_major)
         }
-        MatValue::EmptyStructArray => mb.write_empty_struct_array(name).map(|_| ()),
-        MatValue::Opaque { .. } | MatValue::StructArray { .. } => {
-            unreachable!(
-                "MatValue::Opaque / StructArray are read-only; produced by the deserializer, never serialized"
-            )
+        Leaf::ComplexScalar(n) => {
+            write_complex_at_builder(mb, name, &[1, 1], ComplexVec::from_single(n))
         }
+        Leaf::ComplexVec1D(pairs) => {
+            let dims = mb.vector_dims(pairs.len());
+            write_complex_at_builder(mb, name, &dims, pairs)
+        }
+        Leaf::EmptyStructArray => mb.write_empty_struct_array(name).map(|_| ()),
+        Leaf::Matrix { rows, cols, vec } => emit_matrix_at_builder(mb, name, rows, cols, vec),
+        Leaf::Scalar(n) => emit_scalar_at_builder(mb, name, n),
+        Leaf::String(s) => emit_string_at_builder(mb, name, &s),
+        Leaf::Vec1D(v) => emit_vec_at_builder(mb, name, v),
     }
 }
 
-fn emit_leaf_at_struct(sw: &mut StructWriter, name: &str, value: MatValue) -> Result<(), MatError> {
-    match value {
-        MatValue::Omit | MatValue::Struct(_) | MatValue::Cell(_) => Ok(()),
-        MatValue::Scalar(n) => emit_scalar_at_struct(sw, name, n),
-        MatValue::Vec1D(v) => emit_vec_at_struct(sw, name, v),
-        MatValue::Matrix { rows, cols, vec } => emit_matrix_at_struct(sw, name, rows, cols, vec),
-        MatValue::String(s) => emit_string_at_struct(sw, name, &s),
-        MatValue::ComplexScalar(n) => {
-            write_complex_at_struct(sw, name, &[1, 1], ComplexVec::from_single(n))
-        }
-        MatValue::ComplexVec1D(pairs) => {
-            let dims = sw.vector_dims(pairs.len());
-            write_complex_at_struct(sw, name, &dims, pairs)
-        }
-        MatValue::ComplexMatrix { rows, cols, pairs } => {
+fn emit_leaf_at_struct(sw: &mut StructWriter, name: &str, leaf: Leaf) -> Result<(), MatError> {
+    match leaf {
+        Leaf::ComplexMatrix { rows, cols, pairs } => {
             let col_major = pairs.transposed(rows, cols);
             write_complex_at_struct(sw, name, &[rows, cols], col_major)
         }
-        MatValue::EmptyStructArray => sw.write_empty_struct_array(name).map(|_| ()),
-        MatValue::Opaque { .. } | MatValue::StructArray { .. } => {
-            unreachable!(
-                "MatValue::Opaque / StructArray are read-only; produced by the deserializer, never serialized"
-            )
+        Leaf::ComplexScalar(n) => {
+            write_complex_at_struct(sw, name, &[1, 1], ComplexVec::from_single(n))
         }
+        Leaf::ComplexVec1D(pairs) => {
+            let dims = sw.vector_dims(pairs.len());
+            write_complex_at_struct(sw, name, &dims, pairs)
+        }
+        Leaf::EmptyStructArray => sw.write_empty_struct_array(name).map(|_| ()),
+        Leaf::Matrix { rows, cols, vec } => emit_matrix_at_struct(sw, name, rows, cols, vec),
+        Leaf::Scalar(n) => emit_scalar_at_struct(sw, name, n),
+        Leaf::String(s) => emit_string_at_struct(sw, name, &s),
+        Leaf::Vec1D(v) => emit_vec_at_struct(sw, name, v),
     }
 }
 

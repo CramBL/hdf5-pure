@@ -5,6 +5,7 @@ mod emit_with_builder;
 mod root;
 // `pub(crate)` so `mat::complex`'s Miri test can drive the real serializer
 // over the byte view its array helpers build. Nothing is re-exported.
+pub(crate) mod value;
 pub(crate) mod value_ser;
 
 pub use root::{

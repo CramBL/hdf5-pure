@@ -1,5 +1,5 @@
-//! Intermediate value tree built by the serializer, later emitted to an
-//! HDF5 file with MATLAB conventions.
+//! Intermediate value tree the reader builds out of a `.mat` file, and the
+//! tagged scalar and array types it shares with the serializer.
 
 use crate::mat::class::MatClass;
 use crate::mat::error::MatError;
@@ -465,13 +465,14 @@ complex_kinds! {
     U8 => u8, UInt8,
 }
 
-/// Intermediate tree node produced by the value serializer.
+/// A node of the tree the reader builds out of a file.
+///
+/// The serializer has a value tree of its own, [`Value`]. A variant here
+/// describes what a `.mat` file holds, and the reader alone produces it.
+///
+/// [`Value`]: crate::mat::ser::value::Value
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum MatValue {
-    /// Instruction to write nothing: the containing struct drops the field.
-    /// Produced by `Option::None` and friends only under `NullPolicy::Omit`;
-    /// the default lowers them to an empty struct array instead.
-    Omit,
     /// Numeric / logical scalar.
     Scalar(ScalarNum),
     /// 1-D numeric array → stored as `[1, N]`.
@@ -498,14 +499,11 @@ pub(crate) enum MatValue {
     },
     /// Ordered, named fields. Serialized as a MATLAB struct group.
     Struct(Vec<(String, MatValue)>),
-    /// Heterogeneous sequence (`MATLAB_class = "cell"`). Each element is
-    /// interned under `#refs#` and the parent dataset stores object
-    /// references in element order. The IR carries no shape: it is a 1-D
-    /// sequence, so the writer orients it the way it orients any other 1-D
-    /// value — `[n, 1]` MATLAB shape under the default `ColumnVector` mode,
-    /// `[1, n]` under `RowVector`, and `[0, 0]` when empty. The deserializer
-    /// flattens back to a 1-D sequence. If multi-dim cells ever ship, add a
-    /// `dims` field then.
+    /// A cell array (`MATLAB_class = "cell"`), whose elements live under
+    /// `#refs#` and whose dataset stores object references in element order.
+    ///
+    /// The node carries no shape: the deserializer presents a cell array of any
+    /// shape as a 1-D sequence, in storage order.
     Cell(Vec<MatValue>),
     /// Empty struct array placeholder for `None` inside a sequence. Renders
     /// as MATLAB's `struct([])` (a `[0, 0]` empty marker with
@@ -522,9 +520,8 @@ pub(crate) enum MatValue {
     /// to a sequence of structs → `Vec<T>`; a true `M×N` array yields a
     /// sequence of rows → `Vec<Vec<T>>`).
     ///
-    /// Read-only: the serializer lowers a `Vec<Struct>` to a cell array (see
-    /// [`MatValue::Cell`]), never to this native struct-array layout, so it
-    /// never produces this variant.
+    /// A `Vec<Struct>` goes out as a cell array (see [`MatValue::Cell`]), so
+    /// this layout comes from a file alone.
     StructArray {
         rows: usize,
         cols: usize,
@@ -548,8 +545,7 @@ pub(crate) enum MatValue {
     ///   so the object is still losslessly readable as a struct rather than
     ///   failing the whole file.
     ///
-    /// Read-only: the serializer never produces this variant (writing MCOS
-    /// opaque objects beyond `string` is not supported).
+    /// Of the MCOS classes, this crate writes `string` alone.
     Opaque {
         /// The MATLAB class name (`"datetime"`, `"categorical"`, `"table"`, …).
         class_name: String,
@@ -562,7 +558,6 @@ impl MatValue {
     /// Return a short human-readable description for error messages.
     pub(crate) fn kind(&self) -> &'static str {
         match self {
-            MatValue::Omit => "none",
             MatValue::Scalar(_) => "scalar",
             MatValue::Vec1D(_) => "1-D vector",
             MatValue::Matrix { .. } => "2-D matrix",

@@ -328,21 +328,22 @@ mod tests {
     #[test]
     fn the_array_helpers_read_their_slice_without_undefined_behavior() {
         use crate::mat::options::Options;
+        use crate::mat::ser::value::{Leaf, Value};
         use crate::mat::ser::value_ser::ValueSerializer;
-        use crate::mat::value::{ComplexVec, MatValue};
+        use crate::mat::value::ComplexVec;
 
         let opts = Options::default();
 
         let pairs = [ComplexI16::new(1, -2), ComplexI16::new(3, -4)];
         assert_eq!(
             i16_array(&pairs, ValueSerializer::new(&opts)).unwrap(),
-            MatValue::ComplexVec1D(ComplexVec::I16(vec![(1, -2), (3, -4)])),
+            Value::Leaf(Leaf::ComplexVec1D(ComplexVec::I16(vec![(1, -2), (3, -4)]))),
         );
 
         let none: &[ComplexI16] = &[];
         assert_eq!(
             i16_array(none, ValueSerializer::new(&opts)).unwrap(),
-            MatValue::ComplexVec1D(ComplexVec::I16(Vec::new())),
+            Value::Leaf(Leaf::ComplexVec1D(ComplexVec::I16(Vec::new()))),
         );
 
         // A wider component, so a stride error shows up as a wrong value
@@ -350,7 +351,7 @@ mod tests {
         let wide = [Complex64::new(1.5, -2.5)];
         assert_eq!(
             f64_array(&wide, ValueSerializer::new(&opts)).unwrap(),
-            MatValue::ComplexVec1D(ComplexVec::F64(vec![(1.5, -2.5)])),
+            Value::Leaf(Leaf::ComplexVec1D(ComplexVec::F64(vec![(1.5, -2.5)]))),
         );
     }
 
