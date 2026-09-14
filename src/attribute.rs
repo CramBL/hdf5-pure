@@ -1365,7 +1365,10 @@ mod tests {
             Ok(self.0.clone())
         }
 
-        fn committed_address(&self, reference: &[u8]) -> Result<Option<u64>, FormatError> {
+        fn committed_address(
+            &self,
+            reference: &[u8],
+        ) -> Result<Option<StoredAddress>, FormatError> {
             shared_message::committed_address_in(reference, 8, 8)
         }
     }
@@ -1385,7 +1388,7 @@ mod tests {
         ));
         assert_eq!(
             attr.datatype_location,
-            DatatypeLocation::Committed(0x320),
+            DatatypeLocation::Committed(StoredAddress::new(0x320)),
             "the attribute must record which committed object it named, not just that it named one"
         );
     }

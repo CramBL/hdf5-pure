@@ -1324,7 +1324,7 @@ where
         };
         let name = &message.name;
         let type_path = committed_type_path(
-            address,
+            address.get(),
             &format!("{owner} attribute {name:?}"),
             drop,
             addr_map,

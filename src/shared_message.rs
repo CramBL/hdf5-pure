@@ -24,7 +24,7 @@
 use alloc::{string::String, vec::Vec};
 
 use crate::access_mode::AccessMode;
-use crate::address::BaseAddress;
+use crate::address::{BaseAddress, StoredAddress};
 use crate::bytes::{ensure_len, read_offset};
 use crate::convert::Narrow;
 use crate::error::FormatError;
@@ -53,7 +53,7 @@ const REF_TYPE_COMMITTED: u8 = 2;
 pub enum SharedLocation {
     /// In another object header, at this address. A committed (`H5Tcommit`)
     /// datatype is stored this way, as is every version 1 reference.
-    ObjectHeader(u64),
+    ObjectHeader(StoredAddress),
     /// In the file's shared object header message heap, under this fractal-heap
     /// id. Written only when a file enables SOHM indexes (`H5Pset_shared_mesg_*`).
     SohmHeap([u8; FHEAP_ID_LEN]),
@@ -91,7 +91,7 @@ pub fn parse_shared_ref(
             // byte carries nothing and the destination is always an object
             // header.
             let pos = 2 + 6 + length_size as usize;
-            let addr = read_offset(data, pos, offset_size)?;
+            let addr = StoredAddress::new(read_offset(data, pos, offset_size)?);
             Ok(SharedMessageRef {
                 version,
                 ref_type: REF_TYPE_COMMITTED,
@@ -109,7 +109,7 @@ pub fn parse_shared_ref(
                 id.copy_from_slice(&data[2..2 + FHEAP_ID_LEN]);
                 SharedLocation::SohmHeap(id)
             } else {
-                SharedLocation::ObjectHeader(read_offset(data, 2, offset_size)?)
+                SharedLocation::ObjectHeader(StoredAddress::new(read_offset(data, 2, offset_size)?))
             };
             Ok(SharedMessageRef {
                 version,
@@ -133,11 +133,11 @@ const WRITE_REF_VERSION: u8 = 2;
 ///
 /// The inverse of the version 2 arm of [`parse_shared_ref`], and the body a
 /// message record with the shared flag carries in place of its content.
-pub fn encode_committed_ref(address: u64, offset_size: u8) -> Vec<u8> {
+pub fn encode_committed_ref(address: StoredAddress, offset_size: u8) -> Vec<u8> {
     let mut buf = Vec::with_capacity(2 + offset_size as usize);
     buf.push(WRITE_REF_VERSION);
     buf.push(REF_TYPE_COMMITTED);
-    buf.extend_from_slice(&address.to_le_bytes()[..offset_size as usize]);
+    buf.extend_from_slice(&address.get().to_le_bytes()[..offset_size as usize]);
     buf
 }
 
@@ -179,7 +179,7 @@ pub enum DatatypeLocation {
     /// A reference to the committed datatype object at this address, in the file
     /// the message belongs to. What a parse reads out of a file, and what a
     /// writer emits once the object's address is fixed.
-    Committed(u64),
+    Committed(StoredAddress),
     /// Staged for writing: a reference to the committed datatype object the file
     /// under construction places at this path.
     ///
@@ -198,7 +198,10 @@ impl DatatypeLocation {
         match self {
             Self::Inline => None,
             Self::Committed(addr) => Some(encode_committed_ref(*addr, offset_size)),
-            Self::CommittedPath(_) => Some(encode_committed_ref(u64::MAX, offset_size)),
+            Self::CommittedPath(_) => Some(encode_committed_ref(
+                StoredAddress::new(u64::MAX),
+                offset_size,
+            )),
         }
     }
 
@@ -237,7 +240,7 @@ pub trait SharedResolver {
     /// rather than several copies. A heap-stored message has no such object: it
     /// is one copy of an *anonymous* message, which every user spells out again
     /// when written back, so `None` is the answer rather than an error.
-    fn committed_address(&self, reference: &[u8]) -> Result<Option<u64>, FormatError>;
+    fn committed_address(&self, reference: &[u8]) -> Result<Option<StoredAddress>, FormatError>;
 }
 
 /// Resolves references against a whole-file slice, already framed at the file's
@@ -293,14 +296,14 @@ impl SharedResolver for BufferedResolver<'_> {
         let header = ObjectHeader::parse(
             self.file_data,
             self.access_mode,
-            addr.to_usize()?,
+            addr.get().to_usize()?,
             self.offset_size,
             self.length_size,
         )?;
-        select_shared_message(&header, target, addr)
+        select_shared_message(&header, target, addr.get())
     }
 
-    fn committed_address(&self, reference: &[u8]) -> Result<Option<u64>, FormatError> {
+    fn committed_address(&self, reference: &[u8]) -> Result<Option<StoredAddress>, FormatError> {
         committed_address_in(reference, self.offset_size, self.length_size)
     }
 }
@@ -357,15 +360,15 @@ impl<S: Source + ?Sized> SharedResolver for SourceResolver<'_, S> {
         let header = ObjectHeader::parse_from_source(
             self.source,
             self.access_mode,
-            addr,
+            addr.get(),
             self.offset_size,
             self.length_size,
             BaseAddress::ZERO,
         )?;
-        select_shared_message(&header, target, addr)
+        select_shared_message(&header, target, addr.get())
     }
 
-    fn committed_address(&self, reference: &[u8]) -> Result<Option<u64>, FormatError> {
+    fn committed_address(&self, reference: &[u8]) -> Result<Option<StoredAddress>, FormatError> {
         committed_address_in(reference, self.offset_size, self.length_size)
     }
 }
@@ -383,7 +386,7 @@ impl SharedResolver for Unresolvable {
     /// Refused for the same reason as [`Self::resolve`]: the address is stored in
     /// the file's own offset width, which a parse without that file does not
     /// know, so any answer here would be a guess at the field width.
-    fn committed_address(&self, _reference: &[u8]) -> Result<Option<u64>, FormatError> {
+    fn committed_address(&self, _reference: &[u8]) -> Result<Option<StoredAddress>, FormatError> {
         Err(FormatError::UnresolvedSharedMessage(
             MessageType::Datatype.to_u16(),
         ))
@@ -400,7 +403,7 @@ pub(crate) fn committed_address_in(
     reference: &[u8],
     offset_size: u8,
     length_size: u8,
-) -> Result<Option<u64>, FormatError> {
+) -> Result<Option<StoredAddress>, FormatError> {
     match parse_shared_ref(reference, offset_size, length_size)?.location {
         SharedLocation::ObjectHeader(addr) => Ok(Some(addr)),
         SharedLocation::SohmHeap(_) => Ok(None),
@@ -468,7 +471,10 @@ mod tests {
         let shared = parse_shared_ref(&data, 8, 8).unwrap();
         assert_eq!(shared.version, 2);
         assert_eq!(shared.ref_type, REF_TYPE_COMMITTED);
-        assert_eq!(shared.location, SharedLocation::ObjectHeader(0x320));
+        assert_eq!(
+            shared.location,
+            SharedLocation::ObjectHeader(StoredAddress::new(0x320))
+        );
     }
 
     /// The exact 10-byte field h5py 3.14 / libhdf5 1.14.6 wrote for an attribute
@@ -478,7 +484,10 @@ mod tests {
     fn parse_v2_ref_as_libhdf5_writes_it() {
         let data = [0x02, 0x02, 0x20, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00];
         let shared = parse_shared_ref(&data, 8, 8).unwrap();
-        assert_eq!(shared.location, SharedLocation::ObjectHeader(800));
+        assert_eq!(
+            shared.location,
+            SharedLocation::ObjectHeader(StoredAddress::new(800))
+        );
     }
 
     /// Version 1 stores a symbol-table entry: the object-header address follows a
@@ -492,7 +501,10 @@ mod tests {
 
         let shared = parse_shared_ref(&data, 8, 8).unwrap();
         assert_eq!(shared.version, 1);
-        assert_eq!(shared.location, SharedLocation::ObjectHeader(0x5678));
+        assert_eq!(
+            shared.location,
+            SharedLocation::ObjectHeader(StoredAddress::new(0x5678))
+        );
     }
 
     /// A version 1 reference in a file with 4-byte lengths puts the address four
@@ -505,7 +517,10 @@ mod tests {
         data.extend_from_slice(&0x5678u32.to_le_bytes()); // object header address
 
         let shared = parse_shared_ref(&data, 4, 4).unwrap();
-        assert_eq!(shared.location, SharedLocation::ObjectHeader(0x5678));
+        assert_eq!(
+            shared.location,
+            SharedLocation::ObjectHeader(StoredAddress::new(0x5678))
+        );
     }
 
     #[test]
@@ -515,7 +530,10 @@ mod tests {
 
         let shared = parse_shared_ref(&data, 8, 8).unwrap();
         assert_eq!(shared.version, 3);
-        assert_eq!(shared.location, SharedLocation::ObjectHeader(0xABCD));
+        assert_eq!(
+            shared.location,
+            SharedLocation::ObjectHeader(StoredAddress::new(0xABCD))
+        );
     }
 
     /// Type 1 is the SOHM heap, not an object header. Reading its 8-byte heap id
@@ -573,7 +591,10 @@ mod tests {
         data.extend_from_slice(&0x1000u32.to_le_bytes());
 
         let shared = parse_shared_ref(&data, 4, 4).unwrap();
-        assert_eq!(shared.location, SharedLocation::ObjectHeader(0x1000));
+        assert_eq!(
+            shared.location,
+            SharedLocation::ObjectHeader(StoredAddress::new(0x1000))
+        );
     }
 
     /// A resolver given no shared-message table refuses a heap reference by

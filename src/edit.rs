@@ -15304,7 +15304,7 @@ mod tests {
         };
         let mut bytes = message_record(
             MessageType::Datatype,
-            &crate::shared_message::encode_committed_ref(248, OFFSET_SIZE),
+            &crate::shared_message::encode_committed_ref(StoredAddress::new(248), OFFSET_SIZE),
         );
         bytes[3] = MessageFlags::SHARED.get();
         let tree = CopyTree::DatasetVerbatim {
@@ -17953,7 +17953,7 @@ mod tests {
             crate::shared_message::parse_shared_ref(&modern, OFFSET_SIZE, LENGTH_SIZE)
                 .unwrap()
                 .location,
-            crate::shared_message::SharedLocation::ObjectHeader(0x5678)
+            crate::shared_message::SharedLocation::ObjectHeader(StoredAddress::new(0x5678))
         );
     }
 
