@@ -95,8 +95,8 @@ jobs:
   # rules run everywhere in the `test` matrix. The figures are tied to the
   # toolchain, which `rust-toolchain.toml` pins.
   heap-baseline:
-    name: heap baseline / macos aarch64
-    runs-on: macos-latest
+    name: heap baseline / ubuntu x86_64
+    runs-on: ubuntu-latest
     needs: changes
     if: needs.changes.outputs.run == 'true'
 
