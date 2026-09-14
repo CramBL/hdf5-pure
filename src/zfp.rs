@@ -1753,14 +1753,11 @@ macro_rules! impl_codec {
 
             pub fn compress(
                 data: &[u8],
-                dims: &[usize],
+                dims: ZfpChunkDims,
                 rate: f64,
             ) -> Result<Vec<u8>, FormatError> {
-                if !matches!(dims.len(), 1..=4) {
-                    return Err(FormatError::FilterError("ZFP: only 1D-4D supported".into()));
-                }
                 validate_rate(rate)?;
-                let expected = dims.iter().product::<usize>() * $esz;
+                let expected = dims.element_count() * $esz;
                 if data.len() != expected {
                     return Err(FormatError::FilterError(format!(
                         "ZFP: data length {} does not match dims product × element size ({})",
@@ -1768,30 +1765,31 @@ macro_rules! impl_codec {
                         expected,
                     )));
                 }
-                match dims.len() {
-                    1 => compress_1d(data, dims[0], rate),
-                    2 => compress_2d(data, dims[0], dims[1], rate),
-                    3 => compress_3d(data, dims[0], dims[1], dims[2], rate),
-                    4 => compress_4d(data, dims[0], dims[1], dims[2], dims[3], rate),
-                    _ => unreachable!(),
+                match dims {
+                    ZfpChunkDims::One([nx]) => compress_1d(data, nx, rate),
+                    ZfpChunkDims::Two([ny, nx]) => compress_2d(data, ny, nx, rate),
+                    ZfpChunkDims::Three([nz, ny, nx]) => compress_3d(data, nz, ny, nx, rate),
+                    ZfpChunkDims::Four([nw, nz, ny, nx]) => {
+                        compress_4d(data, nw, nz, ny, nx, rate)
+                    }
                 }
             }
 
             pub fn decompress(
                 compressed: &[u8],
-                dims: &[usize],
+                dims: ZfpChunkDims,
                 rate: f64,
             ) -> Result<Vec<u8>, FormatError> {
-                if !matches!(dims.len(), 1..=4) {
-                    return Err(FormatError::FilterError("ZFP: only 1D-4D supported".into()));
-                }
                 validate_rate(rate)?;
-                match dims.len() {
-                    1 => decompress_1d(compressed, dims[0], rate),
-                    2 => decompress_2d(compressed, dims[0], dims[1], rate),
-                    3 => decompress_3d(compressed, dims[0], dims[1], dims[2], rate),
-                    4 => decompress_4d(compressed, dims[0], dims[1], dims[2], dims[3], rate),
-                    _ => unreachable!(),
+                match dims {
+                    ZfpChunkDims::One([nx]) => decompress_1d(compressed, nx, rate),
+                    ZfpChunkDims::Two([ny, nx]) => decompress_2d(compressed, ny, nx, rate),
+                    ZfpChunkDims::Three([nz, ny, nx]) => {
+                        decompress_3d(compressed, nz, ny, nx, rate)
+                    }
+                    ZfpChunkDims::Four([nw, nz, ny, nx]) => {
+                        decompress_4d(compressed, nw, nz, ny, nx, rate)
+                    }
                 }
             }
 
@@ -2335,17 +2333,24 @@ impl_codec!(
     decode_block_i64_4d
 );
 
-/// Compress a raw chunk buffer with ZFP fixed-rate.
+/// Compresses a raw chunk buffer with ZFP fixed-rate.
 ///
 /// `data` holds `dims.iter().product()` little-endian scalars of `element_type`
 /// in row-major order (outer-most dimension first). `rate` is bits-per-scalar
 /// and must be finite and in `(0, 8 * sizeof(element_type)]`.
+///
+/// # Errors
+///
+/// Returns [`FormatError::UnsupportedZfp`] if `dims` is empty or holds more than four
+/// dimensions, and [`FormatError::FilterError`] if `rate` is outside its range or `data` is not
+/// the size `dims` and `element_type` call for.
 pub fn compress(
     data: &[u8],
     dims: &[usize],
     rate: f64,
     element_type: ZfpElementType,
 ) -> Result<Vec<u8>, FormatError> {
+    let dims = ZfpChunkDims::try_from(dims)?;
     match element_type {
         ZfpElementType::F32 => codec_f32::compress(data, dims, rate),
         ZfpElementType::F64 => codec_f64::compress(data, dims, rate),
@@ -2354,14 +2359,20 @@ pub fn compress(
     }
 }
 
-/// Decompress a ZFP fixed-rate chunk into little-endian scalars of
+/// Decompresses a ZFP fixed-rate chunk into little-endian scalars of
 /// `element_type`, row-major, sized to `dims`.
+///
+/// # Errors
+///
+/// Returns [`FormatError::UnsupportedZfp`] if `dims` is empty or holds more than four
+/// dimensions, and [`FormatError::FilterError`] if `rate` is outside its range.
 pub fn decompress(
     compressed: &[u8],
     dims: &[usize],
     rate: f64,
     element_type: ZfpElementType,
 ) -> Result<Vec<u8>, FormatError> {
+    let dims = ZfpChunkDims::try_from(dims)?;
     match element_type {
         ZfpElementType::F32 => codec_f32::decompress(compressed, dims, rate),
         ZfpElementType::F64 => codec_f64::decompress(compressed, dims, rate),
@@ -2398,7 +2409,7 @@ const H5Z_FILTER_ZFP_VERSION_NO: u32 = 0x111; // H5Z-ZFP 1.1.1
 /// ZFP encodes blocks of one to four dimensions, so a chunk of any other rank has no
 /// encoding. Each variant holds its dimension sizes row-major, outermost first.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum ZfpChunkDims {
+pub(crate) enum ZfpChunkDims {
     One([usize; 1]),
     Two([usize; 2]),
     Three([usize; 3]),
@@ -2415,6 +2426,16 @@ impl ZfpChunkDims {
             Self::Four(_) => 4,
         }
     }
+
+    /// Returns the number of elements the chunk holds, the product of its dimensions.
+    fn element_count(self) -> usize {
+        match self {
+            Self::One(sizes) => sizes.iter().product(),
+            Self::Two(sizes) => sizes.iter().product(),
+            Self::Three(sizes) => sizes.iter().product(),
+            Self::Four(sizes) => sizes.iter().product(),
+        }
+    }
 }
 
 impl TryFrom<&[u64]> for ZfpChunkDims {
@@ -2427,23 +2448,44 @@ impl TryFrom<&[u64]> for ZfpChunkDims {
     /// Returns [`FormatError::UnsupportedZfp`] if `dims` is empty or holds more than four
     /// dimensions, and [`FormatError::ValueTooLargeForPlatform`] if a dimension exceeds `usize`.
     fn try_from(dims: &[u64]) -> Result<Self, FormatError> {
-        if !matches!(dims.len(), 1..=4) {
-            return Err(FormatError::UnsupportedZfp(format!(
-                "only 1D-4D chunks are supported, got rank {}",
-                dims.len()
-            )));
-        }
-        let mut sizes = [0usize; 4];
-        for (slot, &dim) in sizes.iter_mut().zip(dims) {
-            *slot = dim.to_usize()?;
-        }
-        Ok(match dims.len() {
-            1 => Self::One([sizes[0]]),
-            2 => Self::Two([sizes[0], sizes[1]]),
-            3 => Self::Three([sizes[0], sizes[1], sizes[2]]),
-            _ => Self::Four(sizes),
+        Ok(match dims {
+            [nx] => Self::One([nx.to_usize()?]),
+            [ny, nx] => Self::Two([ny.to_usize()?, nx.to_usize()?]),
+            [nz, ny, nx] => Self::Three([nz.to_usize()?, ny.to_usize()?, nx.to_usize()?]),
+            [nw, nz, ny, nx] => Self::Four([
+                nw.to_usize()?,
+                nz.to_usize()?,
+                ny.to_usize()?,
+                nx.to_usize()?,
+            ]),
+            _ => return Err(unsupported_rank(dims.len())),
         })
     }
+}
+
+impl TryFrom<&[usize]> for ZfpChunkDims {
+    type Error = FormatError;
+
+    /// Converts the chunk dimensions a caller passes to [`compress`] or [`decompress`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::UnsupportedZfp`] if `dims` is empty or holds more than four
+    /// dimensions.
+    fn try_from(dims: &[usize]) -> Result<Self, FormatError> {
+        Ok(match *dims {
+            [nx] => Self::One([nx]),
+            [ny, nx] => Self::Two([ny, nx]),
+            [nz, ny, nx] => Self::Three([nz, ny, nx]),
+            [nw, nz, ny, nx] => Self::Four([nw, nz, ny, nx]),
+            _ => return Err(unsupported_rank(dims.len())),
+        })
+    }
+}
+
+/// Returns the error that reports a chunk rank outside 1 to 4.
+fn unsupported_rank(rank: usize) -> FormatError {
+    FormatError::UnsupportedZfp(format!("only 1D-4D chunks are supported, got rank {rank}"))
 }
 
 /// Encode meta (52 bits) per `zfp_field_metadata`. `dims` is row-major
@@ -2749,6 +2791,8 @@ fn read_bits_u32(words: &[u32], bit_pos: u64, n_bits: u32) -> Option<u64> {
 
 #[cfg(test)]
 mod tests {
+    use rstest::rstest;
+
     use super::*;
 
     // -- BitWriter / BitReader round-trip --
@@ -2949,6 +2993,28 @@ mod tests {
         // `[0x10105111, 0x0570667a, 0x000000f2, 0x03f00000]`.
         let cd = zfp_cd_values_rate(16.0, ZfpElementType::F32, &[16]).unwrap();
         assert_eq!(cd, vec![0x10105111, 0x0570667a, 0x000000f2, 0x03f00000],);
+    }
+
+    #[rstest]
+    #[case(&[], "only 1D-4D chunks are supported, got rank 0")]
+    #[case(&[2, 2, 2, 2, 2], "only 1D-4D chunks are supported, got rank 5")]
+    fn a_chunk_rank_outside_one_to_four_is_rejected_by_the_codec(
+        #[case] dims: &[usize],
+        #[case] expected: &str,
+    ) {
+        let data = vec![0u8; 128];
+
+        let err = compress(&data, dims, 16.0, ZfpElementType::F32).unwrap_err();
+        let FormatError::UnsupportedZfp(reason) = &err else {
+            panic!("expected UnsupportedZfp, got {err:?}");
+        };
+        assert_eq!(reason, expected);
+
+        let err = decompress(&data, dims, 16.0, ZfpElementType::F32).unwrap_err();
+        let FormatError::UnsupportedZfp(reason) = &err else {
+            panic!("expected UnsupportedZfp, got {err:?}");
+        };
+        assert_eq!(reason, expected);
     }
 
     #[test]
