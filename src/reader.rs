@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError, RwLock};
 
 use crate::access_mode::AccessMode;
-use crate::address::BaseAddress;
+use crate::address::{BaseAddress, StoredAddress};
 use crate::edit::{
     AppendBuilder, AppendGeometry, AppendTarget, EditBacking, MemoryStrategy, SpaceAccounting,
     StagedChild, StagedKind, StagedMeta, StagedObject, SyncPolicy, WriteEngine,
@@ -1600,7 +1600,8 @@ impl FileInner {
         let mut superblock = Superblock::parse(data, sig_offset)?;
         let addr_offset = superblock.base_address;
         // Normalize root_group_address to absolute so resolve_path_any works.
-        superblock.root_group_address = addr_offset.absolute(superblock.root_group_address)?;
+        superblock.root_group_address =
+            addr_offset.absolute(StoredAddress::new(superblock.root_group_address))?;
         Ok((superblock, addr_offset))
     }
 
@@ -1612,7 +1613,8 @@ impl FileInner {
         let sig_offset = signature::find_signature_in(source)?;
         let mut superblock = Superblock::parse_from_source(source, sig_offset)?;
         let addr_offset = superblock.base_address;
-        superblock.root_group_address = addr_offset.absolute(superblock.root_group_address)?;
+        superblock.root_group_address =
+            addr_offset.absolute(StoredAddress::new(superblock.root_group_address))?;
         Ok((superblock, addr_offset))
     }
 
@@ -1654,7 +1656,7 @@ impl FileInner {
         if rel == u64::MAX {
             return None;
         }
-        let abs = self.addr_offset.absolute(rel).ok()?;
+        let abs = self.addr_offset.absolute(StoredAddress::new(rel)).ok()?;
         let header = self.parse_header(abs).ok()?;
         let msg = header
             .messages
@@ -1680,7 +1682,7 @@ impl FileInner {
         if rel == u64::MAX {
             return None;
         }
-        let abs = self.addr_offset.absolute(rel).ok()?;
+        let abs = self.addr_offset.absolute(StoredAddress::new(rel)).ok()?;
         let header = self.parse_header(abs).ok()?;
         let msg = header
             .messages
@@ -2031,7 +2033,7 @@ impl FileInner {
         if rel_addr == u64::MAX || rel_addr == 0 {
             return Err(FormatError::InvalidObjectReference(rel_addr).into());
         }
-        let abs = file.addr_offset.absolute(rel_addr)?;
+        let abs = file.addr_offset.absolute(StoredAddress::new(rel_addr))?;
         let at = revisions.at(abs);
         let hdr = file.parse_header(abs)?;
         if has_message(&hdr, MessageType::DataLayout) {
@@ -2079,7 +2081,8 @@ impl FileInner {
             // The stored address is relative to the base address; normalize to an
             // absolute file offset. A crafted entry (e.g. the HADDR_UNDEF sentinel)
             // must not wrap or panic.
-            entry.object_header_address = base.absolute(entry.object_header_address)?;
+            entry.object_header_address =
+                base.absolute(StoredAddress::new(entry.object_header_address))?;
         }
         Ok(entries)
     }
@@ -5809,7 +5812,9 @@ the same commit to replace it",
     /// base-zero file. Returns `Ok(None)` for an unallocated (undefined) address.
     fn absolute_address(&self, address: Option<u64>) -> Result<Option<u64>, Error> {
         match address {
-            Some(rel) => Ok(Some(self.file.addr_offset.absolute(rel)?)),
+            Some(rel) => Ok(Some(
+                self.file.addr_offset.absolute(StoredAddress::new(rel))?,
+            )),
             None => Ok(None),
         }
     }
@@ -6552,7 +6557,7 @@ the same commit to replace it",
                 self.file.length_size(),
             )?;
             for c in &mut chunks {
-                c.address = base.absolute(c.address)?;
+                c.address = base.absolute(StoredAddress::new(c.address))?;
             }
             Ok(chunks)
         })

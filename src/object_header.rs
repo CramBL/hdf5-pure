@@ -6,7 +6,7 @@ use alloc::vec::Vec;
 use byteorder::{ByteOrder, LittleEndian};
 
 use crate::access_mode::AccessMode;
-use crate::address::BaseAddress;
+use crate::address::{BaseAddress, StoredAddress};
 use crate::bytes::{ensure_len, read_length, read_offset, read_uint_width};
 use crate::convert::Narrow;
 use crate::error::FormatError;
@@ -305,7 +305,9 @@ impl ObjectHeader {
                 && msg_body.len() >= (offset_size as usize + length_size as usize)
             {
                 let cont_offset_raw = read_offset(msg_body, 0, offset_size)?;
-                let cont_offset = base_address.absolute(cont_offset_raw)?.to_usize()?;
+                let cont_offset = base_address
+                    .absolute(StoredAddress::new(cont_offset_raw))?
+                    .to_usize()?;
                 let cont_length =
                     read_length(msg_body, offset_size as usize, length_size)?.to_usize()?;
                 // Parse continuation block (v1: just raw messages, no signature)
@@ -393,7 +395,9 @@ impl ObjectHeader {
                 && msg_body.len() >= (offset_size as usize + length_size as usize)
             {
                 let cont_offset_raw = read_offset(msg_body, 0, offset_size)?;
-                let cont_offset = base_address.absolute(cont_offset_raw)?.to_usize()?;
+                let cont_offset = base_address
+                    .absolute(StoredAddress::new(cont_offset_raw))?
+                    .to_usize()?;
                 let cont_length =
                     read_length(msg_body, offset_size as usize, length_size)?.to_usize()?;
                 let cont_msgs = Self::parse_v1_continuation(
@@ -517,7 +521,7 @@ impl ObjectHeader {
                 return Err(FormatError::NestingDepthExceeded);
             }
             cont_remaining -= 1;
-            let cont_offset = base_address.absolute(cont_offset)?;
+            let cont_offset = base_address.absolute(StoredAddress::new(cont_offset))?;
             Self::parse_v2_continuation(
                 data,
                 access_mode,
@@ -889,7 +893,10 @@ impl ObjectHeader {
             }
             cont_remaining -= 1;
             let cont_len = cont_len.to_usize()?;
-            let region = source.read_metadata_at(base_address.absolute(cont_off)?, cont_len)?;
+            let region = source.read_metadata_at(
+                base_address.absolute(StoredAddress::new(cont_off))?,
+                cont_len,
+            )?;
             Self::parse_v2_continuation(
                 &region,
                 access_mode,
@@ -1039,7 +1046,7 @@ impl ObjectHeader {
             }
 
             if let Some((off_raw, len)) = cont {
-                let cont_off = base_address.absolute(off_raw)?;
+                let cont_off = base_address.absolute(StoredAddress::new(off_raw))?;
                 Self::parse_v1_chunk_from_source(
                     source,
                     access_mode,

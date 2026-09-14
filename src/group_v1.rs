@@ -3,7 +3,7 @@
 #[cfg(not(feature = "std"))]
 use alloc::{string::String, vec::Vec};
 
-use crate::address::BaseAddress;
+use crate::address::{BaseAddress, StoredAddress};
 use crate::btree_v1::{collect_symbol_table_nodes, collect_symbol_table_nodes_from_source};
 use crate::convert::Narrow;
 use crate::error::FormatError;
@@ -39,13 +39,14 @@ pub fn resolve_v1_group_entries(
     let mut heap = LocalHeap::parse(
         file_data,
         base_address
-            .absolute(sym_table_msg.local_heap_address)?
+            .absolute(StoredAddress::new(sym_table_msg.local_heap_address))?
             .to_usize()?,
         offset_size,
         length_size,
     )?;
     // The data segment address stored in the heap is also relative to base_address
-    heap.data_segment_address = base_address.absolute(heap.data_segment_address)?;
+    heap.data_segment_address =
+        base_address.absolute(StoredAddress::new(heap.data_segment_address))?;
 
     // Collect all SNOD addresses from B-tree (btree_address is relative to base_address)
     let snod_addrs = collect_symbol_table_nodes(
@@ -61,7 +62,9 @@ pub fn resolve_v1_group_entries(
         // SNOD addresses from B-tree children are also relative to base_address
         let snod = SymbolTableNode::parse(
             file_data,
-            base_address.absolute(snod_addr)?.to_usize()?,
+            base_address
+                .absolute(StoredAddress::new(snod_addr))?
+                .to_usize()?,
             offset_size,
             length_size,
         )?;
@@ -93,10 +96,11 @@ pub fn resolve_v1_group_entries_from_source<S: Source + ?Sized>(
     base_address: BaseAddress,
 ) -> Result<Vec<GroupEntry>, FormatError> {
     // Parse local heap (address is relative to base_address).
-    let heap_addr = base_address.absolute(sym_table_msg.local_heap_address)?;
+    let heap_addr = base_address.absolute(StoredAddress::new(sym_table_msg.local_heap_address))?;
     let mut heap = LocalHeap::parse_from_source(source, heap_addr, offset_size, length_size)?;
     // The data segment address stored in the heap is also relative to base_address.
-    heap.data_segment_address = base_address.absolute(heap.data_segment_address)?;
+    heap.data_segment_address =
+        base_address.absolute(StoredAddress::new(heap.data_segment_address))?;
 
     // Read the heap data segment once; every link name is sliced from it.
     let segment = source.read_metadata_at(
@@ -116,7 +120,7 @@ pub fn resolve_v1_group_entries_from_source<S: Source + ?Sized>(
     let mut entries = Vec::new();
     for snod_addr in snod_addrs {
         // SNOD addresses from the B-tree are relative to base_address.
-        let snod_offset = base_address.absolute(snod_addr)?;
+        let snod_offset = base_address.absolute(StoredAddress::new(snod_addr))?;
         let snod =
             SymbolTableNode::parse_from_source(source, snod_offset, offset_size, length_size)?;
         for entry in &snod.entries {

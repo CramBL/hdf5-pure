@@ -16,7 +16,7 @@ use alloc::collections::BTreeMap as HashMap;
 #[cfg(feature = "std")]
 use std::collections::HashMap;
 
-use crate::address::BaseAddress;
+use crate::address::{BaseAddress, StoredAddress};
 use crate::attribute::AttributeMessage;
 use crate::attribute_info::AttributeInfoMessage;
 use crate::btree_v2_write::{self, BTreeV2Plan};
@@ -3187,7 +3187,7 @@ impl FileWriter {
                 c = align_up(data_end, page_size);
             }
             let eoa_rel = c; // already page-aligned
-            let eof_addr2 = base.absolute(eoa_rel)?;
+            let eof_addr2 = base.absolute(StoredAddress::new(eoa_rel))?;
             let eoa_pre_fsm = eoa_rel;
 
             // (g) Now that the element bytes exist, patch dataset-element VL refs.
@@ -3407,7 +3407,7 @@ impl FileWriter {
             }
             for &i in &large_indices {
                 let data_addr = ds_layouts[i].data_addr;
-                let gap = base.absolute(data_addr)? - sink.position();
+                let gap = base.absolute(StoredAddress::new(data_addr))? - sink.position();
                 sink.put_zeros(gap.to_usize()?)?;
                 emit_ds_data(
                     sink,
@@ -3415,7 +3415,7 @@ impl FileWriter {
                     all_ds[i].raw_chunks.as_ref(),
                     all_ds[i].produced.as_ref(),
                 )?;
-                let end_rel = base.relative(sink.position())?;
+                let end_rel = base.relative(sink.position())?.get();
                 sink.put_zeros((align_up(end_rel, page_size) - end_rel).to_usize()?)?;
             }
             let final_pad = eof_addr2 - sink.position();
