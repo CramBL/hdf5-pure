@@ -8733,8 +8733,7 @@ impl WriteEngine {
 
         // Complete chunks are kept by metadata; a trailing partial chunk (when the
         // current length is not chunk-aligned) is rewritten.
-        let n_full: usize = (current_dim0 / chunk_elems)
-            .narrow_or_else(|| Error::AppendUnsupported("chunk count exceeds this platform"))?;
+        let n_full = (current_dim0 / chunk_elems).to_usize()?;
         let has_partial = current_dim0 % chunk_elems != 0;
 
         // Rewriting that chunk decodes and re-encodes committed values, which a
@@ -8785,9 +8784,7 @@ impl WriteEngine {
             } else {
                 stored
             };
-            let live_elems: usize = (current_dim0 % chunk_elems).narrow_or_else(|| {
-                Error::AppendUnsupported("chunk length exceeds this platform")
-            })?;
+            let live_elems = (current_dim0 % chunk_elems).to_usize()?;
             let live_bytes = live_elems * element_size.get();
             if full.len() < live_bytes {
                 return Err(Error::AppendUnsupported(
@@ -9153,9 +9150,7 @@ impl WriteEngine {
                         .checked_add(data_size)
                         .filter(|&e| e <= src.len())
                         .ok_or(Error::EditUnsupported("dataset data is out of bounds"))?;
-                    let len: usize = data_size.narrow_or_else(|| {
-                        Error::EditUnsupported("data size exceeds this platform")
-                    })?;
+                    let len = data_size.to_usize()?;
                     Some(
                         src.read_exact_at(start, len)
                             .map_err(|_| Error::EditUnsupported("dataset data is out of bounds"))?,
@@ -11540,12 +11535,12 @@ fn claims_conflict(a: Option<&[String]>, b: Option<&[String]>) -> bool {
     }
 }
 
-/// Re-tag a refusal from the shared append engine (`AppendUnsupported`) as the
-/// fast-path [`Error::AppendInPlaceUnsupported`], so a caller can catch it and fall
-/// back to the staged [`stage_dataset_append`](WriteEngine::stage_dataset_append).
-/// That path covers the filtered partial-trailing-chunk case, index-geometry
-/// limits, and platform-width limits that the engine reports this way. Genuine
-/// I/O and format errors pass through unchanged.
+/// Re-tags a rejection from the shared append engine (`AppendUnsupported`) as the fast-path
+/// [`Error::AppendInPlaceUnsupported`], which a caller catches to fall back to the staged
+/// [`stage_dataset_append`](WriteEngine::stage_dataset_append). That path covers the filtered
+/// partial-trailing-chunk case and index-geometry limits. A platform-width limit applies on both
+/// paths: the engine reports it as `AppendUnsupported`, and the staged path as
+/// [`FormatError::ValueTooLargeForPlatform`]. I/O and format errors pass through unchanged.
 pub(crate) fn as_inplace_error(e: Error) -> Error {
     match e {
         Error::AppendUnsupported(m) => Error::AppendInPlaceUnsupported(m),
@@ -14058,8 +14053,7 @@ fn read_oh_continuation<S: Source + ?Sized>(
         .checked_add(len)
         .filter(|&e| e <= src.len() && len >= 8)
         .ok_or(Error::EditUnsupported("continuation block out of bounds"))?;
-    let want: usize = (end - off)
-        .narrow_or_else(|| Error::EditUnsupported("continuation length exceeds this platform"))?;
+    let want = (end - off).to_usize()?;
     let mut buf = src.read_metadata_at(off, want)?;
     if buf[..4] != *b"OCHK" {
         return Err(Error::EditUnsupported(
