@@ -1385,7 +1385,7 @@ impl FileInner {
         // is walked afresh every time until a commit gives it a header.
         Ok(revisions.at(match (path, memo) {
             (_, Some(memo)) if revisions.address == memo.address_revision => memo.address,
-            (Some(path), _) => self.resolve_path(path)?,
+            (Some(path), _) => self.resolve_path(&ObjectPath::parse(path))?,
             (None, _) => return Err(Error::StaleHandle),
         }))
     }
@@ -1796,7 +1796,7 @@ impl FileInner {
     }
 
     /// Resolve a path to an object-header address, dispatching on the backend.
-    fn resolve_path(&self, path: &str) -> Result<u64, Error> {
+    fn resolve_path(&self, path: &ObjectPath<'_>) -> Result<u64, Error> {
         let access = self.access_mode();
         Ok(match &self.backend {
             Backend::InMemory(v) => group_v2::resolve_path_any(v, access, &self.superblock, path)?,
@@ -3244,7 +3244,8 @@ impl File {
         properties: DatasetAccessProperties,
     ) -> Result<Dataset, Error> {
         let chunk_cache = properties.resolved_chunk_cache(self.inner.access_properties.chunk_cache);
-        let normalized = ObjectPath::parse(path).to_string();
+        let relative = ObjectPath::parse(path);
+        let normalized = relative.to_string();
         match self.inner.staged_object(&normalized).map(|o| o.kind) {
             Some(StagedKind::Dataset) => {
                 return Ok(Dataset::pending(
@@ -3257,7 +3258,7 @@ impl File {
             None => {}
         }
         let revisions = self.inner.revisions();
-        let addr = self.inner.resolve_path(&normalized)?;
+        let addr = self.inner.resolve_path(&relative)?;
         let hdr = self.inner.parse_header(addr)?;
         if !has_message(&hdr, MessageType::DataLayout) {
             return Err(Error::NotADataset(normalized));
@@ -3282,7 +3283,8 @@ impl File {
     /// naming that component's own path rather than the one asked for: `a/b/c`
     /// stopped by a dataset at `a/b` reports `NotAGroup("a/b")` (issue #365).
     pub fn group(&self, path: &str) -> Result<Group, Error> {
-        let normalized = ObjectPath::parse(path).to_string();
+        let relative = ObjectPath::parse(path);
+        let normalized = relative.to_string();
         match self.inner.staged_object(&normalized).map(|o| o.kind) {
             Some(StagedKind::Group) => {
                 return Ok(Group::pending(self.inner.clone(), normalized));
@@ -3291,7 +3293,7 @@ impl File {
             None => {}
         }
         let revisions = self.inner.revisions();
-        let addr = self.inner.resolve_path(&normalized)?;
+        let addr = self.inner.resolve_path(&relative)?;
         if !is_group(&self.inner.parse_header(addr)?) {
             // Normalized, so that the same object refused here and refused by a
             // live handle below names itself the same way: a handle knows only
@@ -7916,8 +7918,13 @@ mod tests {
         // absolute address a walk returns is also the stored one the superblock
         // field wants.
         assert_eq!(sb.base_address, BaseAddress::ZERO);
-        sb.root_group_address =
-            group_v2::resolve_path_any(&bytes, AccessMode::ReadOnly, &sb, "plain").unwrap();
+        sb.root_group_address = group_v2::resolve_path_any(
+            &bytes,
+            AccessMode::ReadOnly,
+            &sb,
+            &ObjectPath::parse("plain"),
+        )
+        .unwrap();
         let rewritten = sb.serialize();
         bytes[sig..sig + rewritten.len()].copy_from_slice(&rewritten);
 

@@ -303,6 +303,7 @@ use crate::link_message::{LinkMessage, LinkTarget};
 use crate::message_flags::MessageFlags;
 use crate::message_type::MessageType;
 use crate::object_header::ObjectHeader;
+use crate::object_path::ObjectPath;
 use crate::reader::FileAccessProperties;
 use crate::shared_message::DatatypeLocation;
 use crate::signature;
@@ -3474,7 +3475,7 @@ impl WriteEngine {
             &self.image(),
             AccessMode::ReadWrite,
             &self.superblock,
-            path,
+            &ObjectPath::parse(path),
         ) else {
             return false;
         };
@@ -4615,7 +4616,7 @@ impl WriteEngine {
                         &self.image(),
                         AccessMode::ReadWrite,
                         &self.superblock,
-                        dataset,
+                        &ObjectPath::parse(dataset),
                     )?;
                     self.resolved.insert(dataset.to_string(), addr);
                     addr
@@ -5027,14 +5028,14 @@ impl WriteEngine {
                 data,
                 AccessMode::ReadWrite,
                 &self.superblock,
-                &joined,
+                &ObjectPath::parse(&joined),
             )
             .is_ok(),
             None => crate::group_v2::resolve_path_any_from_source(
                 &self.image(),
                 AccessMode::ReadWrite,
                 &self.superblock,
-                &joined,
+                &ObjectPath::parse(&joined),
             )
             .is_ok(),
         }
@@ -5452,7 +5453,7 @@ impl WriteEngine {
             src_data,
             source.access_mode(),
             src_sb,
-            &src.join("/"),
+            &ObjectPath::parse(&src.join("/")),
         )?;
         // Read (and foreign-address-screen) the whole subtree now, while `source`
         // is borrowed; the owned tree carries every byte the commit will write. The
@@ -5764,7 +5765,7 @@ impl WriteEngine {
                 &self.image(),
                 AccessMode::ReadWrite,
                 &self.superblock,
-                &path_str,
+                &ObjectPath::parse(&path_str),
             )?;
             match Self::prepare_write(&self.image(), addr, fd, base, full)? {
                 WritePlan::InPlace { data_addr, bytes } => {
@@ -5836,7 +5837,7 @@ impl WriteEngine {
                 &self.image(),
                 AccessMode::ReadWrite,
                 &self.superblock,
-                &path_str,
+                &ObjectPath::parse(&path_str),
             )?;
             let mw = Self::prepare_append(&self.image(), addr, ab, base)?;
             // A relocating append moves the dataset's object header and patches only
@@ -5898,7 +5899,7 @@ impl WriteEngine {
                     &self.image(),
                     AccessMode::ReadWrite,
                     &self.superblock,
-                    &path_str,
+                    &ObjectPath::parse(&path_str),
                 )?;
                 // An attribute edit relocates the dataset's object header and patches
                 // only the one naming link, so it is safe only when this is the
@@ -6076,7 +6077,7 @@ impl WriteEngine {
                 &self.image(),
                 AccessMode::ReadWrite,
                 &self.superblock,
-                &src_str,
+                &ObjectPath::parse(&src_str),
             )?;
             // Read the source subtree from this file's own mirror (`cross_file`
             // false: same address space, so verbatim addresses stay valid). On a
@@ -6129,7 +6130,7 @@ impl WriteEngine {
                 &self.image(),
                 AccessMode::ReadWrite,
                 &self.superblock,
-                &path_str,
+                &ObjectPath::parse(&path_str),
             )?;
             deleted_addrs.push(del_addr);
             // A deletion may overlap other staged work when this commit
@@ -6258,7 +6259,7 @@ impl WriteEngine {
                     &self.image(),
                     AccessMode::ReadWrite,
                     &self.superblock,
-                    &path_str,
+                    &ObjectPath::parse(&path_str),
                 )?;
                 // Rebuilding this group moves its header and patches only the
                 // link this commit resolved it through, so every other hard link
@@ -10323,7 +10324,7 @@ impl WriteEngine {
             src,
             AccessMode::ReadWrite,
             superblock,
-            path,
+            &ObjectPath::parse(path),
         ) {
             Ok(addr) => base.relative(addr).map_err(Error::from),
             Err(_) => Ok(UNDEF),
@@ -16187,7 +16188,7 @@ mod tests {
             s.image.as_slice().unwrap(),
             AccessMode::ReadWrite,
             &s.superblock,
-            "victim",
+            &ObjectPath::parse("victim"),
         )
         .unwrap();
         let index_spans = s
@@ -18738,7 +18739,7 @@ mod tests {
             &engine.image(),
             AccessMode::ReadWrite,
             engine.superblock(),
-            "d",
+            &ObjectPath::parse("d"),
         )
         .unwrap()
     }
@@ -19125,7 +19126,7 @@ mod tests {
             &engine.image(),
             AccessMode::ReadWrite,
             engine.superblock(),
-            "d",
+            &ObjectPath::parse("d"),
         )
         .unwrap();
         let spans = engine
@@ -21386,7 +21387,7 @@ mod staged_query_tests {
             &e.image(),
             AccessMode::ReadWrite,
             e.superblock(),
-            "col",
+            &ObjectPath::parse("col"),
         )
         .unwrap();
         assert!(addr > 0);
@@ -21527,7 +21528,7 @@ mod staged_query_tests {
                 &e.image(),
                 AccessMode::ReadWrite,
                 e.superblock(),
-                "existing",
+                &ObjectPath::parse("existing"),
             )
             .is_err()
         );

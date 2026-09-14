@@ -425,8 +425,8 @@ pub(crate) fn is_group(object_header: &ObjectHeader) -> bool {
 /// Returns the address of the object header `path` identifies, walked from the root group.
 ///
 /// Each component is looked up through [`find_child_address`], which reads a v1 symbol-table
-/// group, a compact v2 group and a dense one alike. [`ObjectPath::parse`] decides what the
-/// spelling of `path` identifies, and a `path` that spells no link identifies the root group.
+/// group, a compact v2 group and a dense one alike. The caller parses the spelling it holds,
+/// through [`ObjectPath::parse`], and a `path` with no components identifies the root group.
 ///
 /// # Errors
 ///
@@ -437,9 +437,8 @@ pub fn resolve_path_any(
     file_data: &[u8],
     access_mode: AccessMode,
     superblock: &Superblock,
-    path: &str,
+    path: &ObjectPath<'_>,
 ) -> Result<u64, ResolveError> {
-    let path = ObjectPath::parse(path);
     let os = superblock.offset_size;
     let ls = superblock.length_size;
     let base = superblock.base_address;
@@ -513,8 +512,7 @@ pub fn resolve_group_entries(
 /// and, for a dense group, the fractal heap and the version 2 B-tree from a [`Source`].
 ///
 /// A v1 symbol-table group resolves through
-/// [`group_v1::resolve_v1_group_entries_from_source`], and the grammar is the same as for
-/// [`resolve_path_any`].
+/// [`group_v1::resolve_v1_group_entries_from_source`].
 ///
 /// # Errors
 ///
@@ -523,9 +521,8 @@ pub fn resolve_path_any_from_source<S: Source + ?Sized>(
     source: &S,
     access_mode: AccessMode,
     superblock: &Superblock,
-    path: &str,
+    path: &ObjectPath<'_>,
 ) -> Result<u64, ResolveError> {
-    let path = ObjectPath::parse(path);
     let os = superblock.offset_size;
     let ls = superblock.length_size;
     let base = superblock.base_address;
@@ -867,8 +864,13 @@ mod tests {
         let sb = Superblock::parse(file_data, sig_offset).unwrap();
         assert!(sb.version >= 2); // v2/v3 superblock
 
-        let addr =
-            resolve_path_any(file_data, AccessMode::ReadOnly, &sb, "sensors/temperature").unwrap();
+        let addr = resolve_path_any(
+            file_data,
+            AccessMode::ReadOnly,
+            &sb,
+            &ObjectPath::parse("sensors/temperature"),
+        )
+        .unwrap();
         let hdr = ObjectHeader::parse(
             file_data,
             AccessMode::ReadOnly,
@@ -889,8 +891,13 @@ mod tests {
         let sig_offset = signature::find_signature(file_data).unwrap();
         let sb = Superblock::parse(file_data, sig_offset).unwrap();
 
-        let addr =
-            resolve_path_any(file_data, AccessMode::ReadOnly, &sb, "sensors/humidity").unwrap();
+        let addr = resolve_path_any(
+            file_data,
+            AccessMode::ReadOnly,
+            &sb,
+            &ObjectPath::parse("sensors/humidity"),
+        )
+        .unwrap();
         let hdr = ObjectHeader::parse(
             file_data,
             AccessMode::ReadOnly,
@@ -911,7 +918,13 @@ mod tests {
         let sig_offset = signature::find_signature(file_data).unwrap();
         let sb = Superblock::parse(file_data, sig_offset).unwrap();
 
-        let addr = resolve_path_any(file_data, AccessMode::ReadOnly, &sb, "dataset_015").unwrap();
+        let addr = resolve_path_any(
+            file_data,
+            AccessMode::ReadOnly,
+            &sb,
+            &ObjectPath::parse("dataset_015"),
+        )
+        .unwrap();
         let hdr = ObjectHeader::parse(
             file_data,
             AccessMode::ReadOnly,
@@ -933,7 +946,13 @@ mod tests {
         let sig_offset = signature::find_signature(file_data).unwrap();
         let sb = Superblock::parse(file_data, sig_offset).unwrap();
 
-        let addr = resolve_path_any(file_data, AccessMode::ReadOnly, &sb, "group1/values").unwrap();
+        let addr = resolve_path_any(
+            file_data,
+            AccessMode::ReadOnly,
+            &sb,
+            &ObjectPath::parse("group1/values"),
+        )
+        .unwrap();
         let hdr = ObjectHeader::parse(
             file_data,
             AccessMode::ReadOnly,
@@ -954,8 +973,13 @@ mod tests {
         let sig_offset = signature::find_signature(file_data).unwrap();
         let sb = Superblock::parse(file_data, sig_offset).unwrap();
 
-        let addr =
-            resolve_path_any(file_data, AccessMode::ReadOnly, &sb, "sensors/temperature").unwrap();
+        let addr = resolve_path_any(
+            file_data,
+            AccessMode::ReadOnly,
+            &sb,
+            &ObjectPath::parse("sensors/temperature"),
+        )
+        .unwrap();
         let hdr = ObjectHeader::parse(
             file_data,
             AccessMode::ReadOnly,
@@ -976,8 +1000,13 @@ mod tests {
         let sig_offset = signature::find_signature(file_data).unwrap();
         let sb = Superblock::parse(file_data, sig_offset).unwrap();
 
-        let err =
-            resolve_path_any(file_data, AccessMode::ReadOnly, &sb, "nonexistent").unwrap_err();
+        let err = resolve_path_any(
+            file_data,
+            AccessMode::ReadOnly,
+            &sb,
+            &ObjectPath::parse("nonexistent"),
+        )
+        .unwrap_err();
         assert!(matches!(
             err,
             ResolveError::Format(FormatError::PathNotFound(_))
@@ -1114,7 +1143,13 @@ mod huge_link_tests {
         let sig = signature::find_signature(bytes).unwrap();
         let superblock = Superblock::parse(bytes, sig).unwrap();
         let (offset_size, length_size) = (superblock.offset_size, superblock.length_size);
-        let group_addr = resolve_path_any(bytes, AccessMode::ReadOnly, &superblock, "g").unwrap();
+        let group_addr = resolve_path_any(
+            bytes,
+            AccessMode::ReadOnly,
+            &superblock,
+            &ObjectPath::parse("g"),
+        )
+        .unwrap();
         let header = ObjectHeader::parse(
             bytes,
             AccessMode::ReadOnly,
