@@ -36,9 +36,10 @@
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 
+use crate::address::StoredAddress;
 use crate::btree_v2::{BTreeV2Header, collect_btree_v2_records_from_source};
-use crate::bytes::{ensure_len, read_offset};
-use crate::convert::{Narrow, is_undefined_addr};
+use crate::bytes::{ensure_len, read_offset, read_optional_offset};
+use crate::convert::Narrow;
 use crate::error::FormatError;
 use crate::fractal_heap::FractalHeapHeader;
 use crate::message_type::MessageType;
@@ -96,7 +97,7 @@ const LOCATION_OBJECT_HEADER: u8 = 1;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SharedMessageTableMessage {
     /// Address of the master table.
-    pub table_address: u64,
+    pub table_address: StoredAddress,
     /// How many indexes the master table holds. Fixed for the life of the file:
     /// the table's own size depends on it, so it is stored here rather than in
     /// the table.
@@ -112,7 +113,7 @@ impl SharedMessageTableMessage {
         if version != SOHM_VERSION {
             return Err(FormatError::InvalidSohmTableVersion(version));
         }
-        let table_address = read_offset(data, 1, offset_size)?;
+        let table_address = StoredAddress::new(read_offset(data, 1, offset_size)?);
         let pos = 1 + offset_size as usize;
         ensure_len(data, pos, 1)?;
         let index_count = data[pos];
@@ -155,10 +156,10 @@ pub struct SohmIndexHeader {
     /// Whether [`index_address`](Self::index_address) names a list or a B-tree.
     pub kind: SohmIndexKind,
     /// Address of the list or B-tree, or `None` while the index holds nothing.
-    pub index_address: Option<u64>,
+    pub index_address: Option<StoredAddress>,
     /// Address of the fractal heap holding this index's message bodies, or
     /// `None` while the index holds nothing.
-    pub heap_address: Option<u64>,
+    pub heap_address: Option<StoredAddress>,
 }
 
 impl SohmIndexHeader {
@@ -265,9 +266,11 @@ impl SohmTable {
             let btree_min = u16::from_le_bytes([image[pos + 10], image[pos + 11]]);
             let message_count = u16::from_le_bytes([image[pos + 12], image[pos + 13]]);
             let mut at = pos + INDEX_HEADER_FIXED_LEN;
-            let index_address = optional_address(image, at, offset_size)?;
+            let index_address =
+                read_optional_offset(image, at, offset_size)?.map(StoredAddress::new);
             at += offset_size as usize;
-            let heap_address = optional_address(image, at, offset_size)?;
+            let heap_address =
+                read_optional_offset(image, at, offset_size)?.map(StoredAddress::new);
             pos = at + offset_size as usize;
 
             indexes.push(SohmIndexHeader {
@@ -291,7 +294,7 @@ impl SohmTable {
         message: &SharedMessageTableMessage,
         offset_size: u8,
     ) -> Result<Self, FormatError> {
-        let at = message.table_address.to_usize()?;
+        let at = message.table_address.get().to_usize()?;
         let len = table_len(message.index_count, offset_size);
         ensure_len(file_data, at, len)?;
         Self::parse(&file_data[at..at + len], message.index_count, offset_size)
@@ -304,7 +307,7 @@ impl SohmTable {
         offset_size: u8,
     ) -> Result<Self, FormatError> {
         let len = table_len(message.index_count, offset_size);
-        let image = source.read_metadata_at(message.table_address, len)?;
+        let image = source.read_metadata_at(message.table_address.get(), len)?;
         Self::parse(&image, message.index_count, offset_size)
     }
 
@@ -316,12 +319,6 @@ impl SohmTable {
     pub fn index_for(&self, message_type: MessageType) -> Option<&SohmIndexHeader> {
         self.indexes.iter().find(|index| index.covers(message_type))
     }
-}
-
-/// Read an address field that may carry the all-ones undefined marker.
-fn optional_address(data: &[u8], pos: usize, offset_size: u8) -> Result<Option<u64>, FormatError> {
-    let addr = read_offset(data, pos, offset_size)?;
-    Ok((!is_undefined_addr(addr, offset_size)).then_some(addr))
 }
 
 /// Where an index says a shared message is stored.
@@ -340,8 +337,7 @@ pub enum SohmLocation {
     /// Still in the object header that wrote it. The reference C library records
     /// a shareable message this way when it is written into an object header
     /// that is already open, and moves it into the heap when a second user
-    /// appears — so a record of this shape means exactly one user, and its
-    /// address is a stored address like any other.
+    /// appears, so a record of this shape means exactly one user.
     ObjectHeader {
         /// Raw type ID of the message within that header.
         message_type: u8,
@@ -349,7 +345,7 @@ pub enum SohmLocation {
         /// distinguishes it from another message of the same type there.
         creation_index: u16,
         /// Address of the object header.
-        address: u64,
+        address: StoredAddress,
     },
 }
 
@@ -386,7 +382,7 @@ impl SohmRecord {
                 ensure_len(data, at, 4)?;
                 let message_type = data[at + 1];
                 let creation_index = u16::from_le_bytes([data[at + 2], data[at + 3]]);
-                let address = read_offset(data, at + 4, offset_size)?;
+                let address = StoredAddress::new(read_offset(data, at + 4, offset_size)?);
                 SohmLocation::ObjectHeader {
                     message_type,
                     creation_index,
@@ -455,12 +451,12 @@ pub fn read_index_records_from_source<S: Source + ?Sized>(
     match index.kind {
         SohmIndexKind::List => {
             let len = list_image_len(index.message_count, offset_size);
-            let image = source.read_metadata_at(address, len)?;
+            let image = source.read_metadata_at(address.get(), len)?;
             parse_list(&image, index.message_count, offset_size)
         }
         SohmIndexKind::BTree => {
             let header =
-                BTreeV2Header::parse_from_source(source, address, offset_size, length_size)?;
+                BTreeV2Header::parse_from_source(source, address.get(), offset_size, length_size)?;
             check_btree_type(&header)?;
             let records =
                 collect_btree_v2_records_from_source(source, &header, offset_size, length_size)?;
@@ -489,7 +485,7 @@ fn check_btree_type(header: &BTreeV2Header) -> Result<(), FormatError> {
 fn index_for_read(
     table: &SohmTable,
     message_type: MessageType,
-) -> Result<(&SohmIndexHeader, u64), FormatError> {
+) -> Result<(&SohmIndexHeader, StoredAddress), FormatError> {
     let index = table
         .index_for(message_type)
         .ok_or(FormatError::SohmIndexMissing(message_type.to_u16()))?;
@@ -516,7 +512,7 @@ pub fn read_heap_message(
     let (_, heap_address) = index_for_read(table, message_type)?;
     let heap = FractalHeapHeader::parse(
         file_data,
-        heap_address.to_usize()?,
+        heap_address.get().to_usize()?,
         offset_size,
         length_size,
     )?;
@@ -535,7 +531,7 @@ pub fn read_heap_message_from_source<S: Source + ?Sized>(
 ) -> Result<Vec<u8>, FormatError> {
     let (_, heap_address) = index_for_read(table, message_type)?;
     let heap =
-        FractalHeapHeader::parse_from_source(source, heap_address, offset_size, length_size)?;
+        FractalHeapHeader::parse_from_source(source, heap_address.get(), offset_size, length_size)?;
     heap.object_reader(offset_size, length_size)
         .read_from_source(source, &heap_id[..heap.heap_id_length as usize])
 }
@@ -559,8 +555,18 @@ mod tests {
             image.extend_from_slice(&index.list_max.to_le_bytes());
             image.extend_from_slice(&index.btree_min.to_le_bytes());
             image.extend_from_slice(&index.message_count.to_le_bytes());
-            image.extend_from_slice(&index.index_address.unwrap_or(u64::MAX).to_le_bytes());
-            image.extend_from_slice(&index.heap_address.unwrap_or(u64::MAX).to_le_bytes());
+            image.extend_from_slice(
+                &index
+                    .index_address
+                    .map_or(u64::MAX, StoredAddress::get)
+                    .to_le_bytes(),
+            );
+            image.extend_from_slice(
+                &index
+                    .heap_address
+                    .map_or(u64::MAX, StoredAddress::get)
+                    .to_le_bytes(),
+            );
         }
         let checksum = crate::checksum::jenkins_lookup3(&image);
         image.extend_from_slice(&checksum.to_le_bytes());
@@ -584,8 +590,8 @@ mod tests {
             btree_min: 40,
             message_count: 2,
             kind: SohmIndexKind::List,
-            index_address: Some(0x1234),
-            heap_address: Some(0x5678),
+            index_address: Some(StoredAddress::new(0x1234)),
+            heap_address: Some(StoredAddress::new(0x5678)),
         }
     }
 
@@ -599,7 +605,7 @@ mod tests {
         data.push(3);
 
         let message = SharedMessageTableMessage::parse(&data, 8).unwrap();
-        assert_eq!(message.table_address, 0x400);
+        assert_eq!(message.table_address, StoredAddress::new(0x400));
         assert_eq!(message.index_count, 3);
     }
 
@@ -735,7 +741,7 @@ mod tests {
         datatypes.message_type_flags = 1 << 3;
         let mut attributes = sample_index();
         attributes.message_type_flags = 1 << 12;
-        attributes.heap_address = Some(0x9999);
+        attributes.heap_address = Some(StoredAddress::new(0x9999));
         let table = SohmTable {
             indexes: vec![datatypes, attributes],
         };
@@ -745,11 +751,11 @@ mod tests {
                 .index_for(MessageType::Attribute)
                 .unwrap()
                 .heap_address,
-            Some(0x9999)
+            Some(StoredAddress::new(0x9999))
         );
         assert_eq!(
             table.index_for(MessageType::Datatype).unwrap().heap_address,
-            Some(0x5678)
+            Some(StoredAddress::new(0x5678))
         );
         assert!(table.index_for(MessageType::FillValue).is_none());
     }
@@ -805,7 +811,7 @@ mod tests {
             SohmLocation::ObjectHeader {
                 message_type: 0x0C,
                 creation_index: 4,
-                address: 0x2000,
+                address: StoredAddress::new(0x2000),
             }
         );
     }
@@ -914,7 +920,7 @@ mod tests {
             8,
         )]));
         let mut index = sample_index();
-        index.index_address = Some(64);
+        index.index_address = Some(StoredAddress::new(64));
         index.message_count = 1;
 
         let source = crate::source::BytesSource::new(image);

@@ -99,7 +99,7 @@ impl BaseAddress {
 /// the base, which [`BaseAddress::absolute`] computes, and [`BaseAddress::relative`] goes back the
 /// other way. A parser that reads against a base-framed view of the file converts nothing: its
 /// addresses stay in the stored form.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub(crate) struct StoredAddress(u64);
 
 impl StoredAddress {

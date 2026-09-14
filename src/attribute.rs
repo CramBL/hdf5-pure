@@ -4,6 +4,7 @@
 use alloc::{string::String, vec::Vec};
 
 use crate::access_mode::AccessMode;
+use crate::address::StoredAddress;
 use crate::attribute_info::AttributeInfoMessage;
 use crate::btree_v2::{
     BTreeV2Header, collect_btree_v2_records, collect_btree_v2_records_from_source,
@@ -693,18 +694,29 @@ fn find_attribute_info(
     Ok(None)
 }
 
-/// Extract attributes from dense storage (fractal heap + B-tree v2).
+/// Returns one attribute per record of the name index in `attr_info`, reading each message out
+/// of the fractal heap at `fh_addr`.
+///
+/// # Errors
+///
+/// Returns [`FormatError::UnexpectedEof`] if `attr_info` contains no B-tree name index address,
+/// and the [`FormatError`] of the first structure that does not parse.
 fn extract_dense_attributes(
     file_data: &[u8],
     access_mode: AccessMode,
     attr_info: &AttributeInfoMessage,
-    fh_addr: u64,
+    fh_addr: StoredAddress,
     offset_size: u8,
     length_size: u8,
     sohm: Option<&SohmTable>,
 ) -> Result<Vec<AttributeMessage>, FormatError> {
     // Parse fractal heap
-    let fh = FractalHeapHeader::parse(file_data, fh_addr.to_usize()?, offset_size, length_size)?;
+    let fh = FractalHeapHeader::parse(
+        file_data,
+        fh_addr.get().to_usize()?,
+        offset_size,
+        length_size,
+    )?;
 
     // Parse B-tree v2 for name index (type 8)
     let btree_addr = attr_info
@@ -713,8 +725,12 @@ fn extract_dense_attributes(
             expected: 1,
             available: 0,
         })?;
-    let btree_hdr =
-        BTreeV2Header::parse(file_data, btree_addr.to_usize()?, offset_size, length_size)?;
+    let btree_hdr = BTreeV2Header::parse(
+        file_data,
+        btree_addr.get().to_usize()?,
+        offset_size,
+        length_size,
+    )?;
     let records = collect_btree_v2_records(file_data, &btree_hdr, offset_size, length_size)?;
 
     let resolver = BufferedResolver::new(file_data, access_mode, offset_size, length_size, sohm);
@@ -749,12 +765,12 @@ fn extract_dense_attributes_from_source<S: Source + ?Sized>(
     source: &S,
     access_mode: AccessMode,
     attr_info: &AttributeInfoMessage,
-    fh_addr: u64,
+    fh_addr: StoredAddress,
     offset_size: u8,
     length_size: u8,
     sohm: Option<&SohmTable>,
 ) -> Result<Vec<StoredAttribute>, FormatError> {
-    let fh = FractalHeapHeader::parse_from_source(source, fh_addr, offset_size, length_size)?;
+    let fh = FractalHeapHeader::parse_from_source(source, fh_addr.get(), offset_size, length_size)?;
 
     let btree_addr = attr_info
         .btree_name_index_address
@@ -762,7 +778,8 @@ fn extract_dense_attributes_from_source<S: Source + ?Sized>(
             expected: 1,
             available: 0,
         })?;
-    let btree_hdr = BTreeV2Header::parse_from_source(source, btree_addr, offset_size, length_size)?;
+    let btree_hdr =
+        BTreeV2Header::parse_from_source(source, btree_addr.get(), offset_size, length_size)?;
     let records =
         collect_btree_v2_records_from_source(source, &btree_hdr, offset_size, length_size)?;
 
@@ -873,7 +890,7 @@ mod tests {
 
     /// The root group's dense-attribute storage: its info message, its heap
     /// address, and the file's offset and length sizes.
-    fn dense_attribute_info(bytes: &[u8]) -> (AttributeInfoMessage, u64, u8, u8) {
+    fn dense_attribute_info(bytes: &[u8]) -> (AttributeInfoMessage, StoredAddress, u8, u8) {
         let sig = crate::signature::find_signature(bytes).unwrap();
         let superblock = crate::superblock::Superblock::parse(bytes, sig).unwrap();
         let (offset_size, length_size) = (superblock.offset_size, superblock.length_size);
@@ -909,7 +926,7 @@ mod tests {
         let (info, fh_addr, offset_size, length_size) = dense_attribute_info(&bytes);
         let heap = FractalHeapHeader::parse(
             &bytes,
-            fh_addr.to_usize().unwrap(),
+            fh_addr.get().to_usize().unwrap(),
             offset_size,
             length_size,
         )
@@ -934,7 +951,7 @@ mod tests {
             "the walk must still read every attribute"
         );
         assert_eq!(
-            source.reads_at(btree_addr),
+            source.reads_at(btree_addr.get()),
             1,
             "the huge-object B-tree header was re-read per object"
         );

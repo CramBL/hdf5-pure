@@ -778,12 +778,12 @@ impl DenseAttrPlan {
         AttributeInfoMessage {
             max_creation_index: self.creation.max(),
             indexes_creation_order: self.creation.indexed(),
-            fractal_heap_address: Some(heap_address),
-            btree_name_index_address: Some(heap_address + self.btree_off),
+            fractal_heap_address: Some(StoredAddress::new(heap_address)),
+            btree_name_index_address: Some(StoredAddress::new(heap_address + self.btree_off)),
             btree_creation_order_address: self
                 .creation
                 .indexed()
-                .then(|| heap_address + self.corder_bthd_off),
+                .then(|| StoredAddress::new(heap_address + self.corder_bthd_off)),
         }
     }
 
@@ -4265,13 +4265,13 @@ mod tests {
             heap_id_length: 8,
             io_filter_encoded_length: 0,
             max_managed_object_size: 1024,
-            btree_huge_objects_address: u64::MAX,
+            btree_huge_objects_address: StoredAddress::new(u64::MAX),
             table_width: 4,
             starting_block_size: 4096,
             max_direct_block_size: 65536,
             max_heap_size: 40,
             start_root_rows: 1,
-            root_block_address: 0,
+            root_block_address: StoredAddress::new(0),
             current_rows_in_root_indirect_block: 0,
             managed_objects_count: 0,
         };
@@ -4565,7 +4565,7 @@ mod tests {
 
         let (at, record_size, root, nrec) = btree_header(&built.blob, 9);
         assert_eq!(
-            heap_address + at as u64,
+            StoredAddress::new(heap_address + at as u64),
             corder_addr,
             "the Attribute Info message names a different address than the tree sits at"
         );
