@@ -3,6 +3,7 @@
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 
+use crate::address::StoredAddress;
 use crate::bytes::read_length;
 use crate::bytes::read_offset;
 use crate::error::FormatError;
@@ -12,9 +13,9 @@ use crate::source::Source;
 #[derive(Debug, Clone, PartialEq)]
 pub struct SymbolTableMessage {
     /// Address of B-tree v1 (type 0) for this group.
-    pub btree_address: u64,
+    pub btree_address: StoredAddress,
     /// Address of the local heap for this group.
-    pub local_heap_address: u64,
+    pub local_heap_address: StoredAddress,
 }
 
 impl SymbolTableMessage {
@@ -27,8 +28,8 @@ impl SymbolTableMessage {
                 available: data.len(),
             });
         }
-        let btree_address = read_offset(data, 0, offset_size)?;
-        let local_heap_address = read_offset(data, os, offset_size)?;
+        let btree_address = StoredAddress::new(read_offset(data, 0, offset_size)?);
+        let local_heap_address = StoredAddress::new(read_offset(data, os, offset_size)?);
         Ok(SymbolTableMessage {
             btree_address,
             local_heap_address,
@@ -42,7 +43,7 @@ pub struct SymbolTableEntry {
     /// Byte offset of the link name in the local heap.
     pub link_name_offset: u64,
     /// Address of the child object's header.
-    pub object_header_address: u64,
+    pub object_header_address: StoredAddress,
     /// Cache type: 0=none, 1=group, 2=symbolic link.
     pub cache_type: u32,
     /// 16-byte scratch pad (cached data). Parsed for on-disk-format
@@ -104,7 +105,8 @@ impl SymbolTableNode {
         for _ in 0..num_symbols {
             let link_name_offset = read_length(file_data, pos, length_size)?;
             pos += ls;
-            let object_header_address = read_offset(file_data, pos, offset_size)?;
+            let object_header_address =
+                StoredAddress::new(read_offset(file_data, pos, offset_size)?);
             pos += os;
             let cache_type = u32::from_le_bytes([
                 file_data[pos],
@@ -170,8 +172,8 @@ mod tests {
         data.extend_from_slice(&0x1000u64.to_le_bytes()); // btree
         data.extend_from_slice(&0x2000u64.to_le_bytes()); // heap
         let msg = SymbolTableMessage::parse(&data, 8).unwrap();
-        assert_eq!(msg.btree_address, 0x1000);
-        assert_eq!(msg.local_heap_address, 0x2000);
+        assert_eq!(msg.btree_address, StoredAddress::new(0x1000));
+        assert_eq!(msg.local_heap_address, StoredAddress::new(0x2000));
     }
 
     #[test]
@@ -180,8 +182,8 @@ mod tests {
         data.extend_from_slice(&0x800u32.to_le_bytes());
         data.extend_from_slice(&0x900u32.to_le_bytes());
         let msg = SymbolTableMessage::parse(&data, 4).unwrap();
-        assert_eq!(msg.btree_address, 0x800);
-        assert_eq!(msg.local_heap_address, 0x900);
+        assert_eq!(msg.btree_address, StoredAddress::new(0x800));
+        assert_eq!(msg.local_heap_address, StoredAddress::new(0x900));
     }
 
     fn build_snod(entries: &[(u64, u64, u32)], offset_size: u8, length_size: u8) -> Vec<u8> {
@@ -215,10 +217,16 @@ mod tests {
         let snod = SymbolTableNode::parse(&data, 0, 8, 8).unwrap();
         assert_eq!(snod.entries.len(), 2);
         assert_eq!(snod.entries[0].link_name_offset, 0);
-        assert_eq!(snod.entries[0].object_header_address, 0x100);
+        assert_eq!(
+            snod.entries[0].object_header_address,
+            StoredAddress::new(0x100)
+        );
         assert_eq!(snod.entries[0].cache_type, 0);
         assert_eq!(snod.entries[1].link_name_offset, 8);
-        assert_eq!(snod.entries[1].object_header_address, 0x200);
+        assert_eq!(
+            snod.entries[1].object_header_address,
+            StoredAddress::new(0x200)
+        );
         assert_eq!(snod.entries[1].cache_type, 1);
     }
 
@@ -228,7 +236,10 @@ mod tests {
         let snod = SymbolTableNode::parse(&data, 0, 4, 8).unwrap();
         assert_eq!(snod.entries.len(), 1);
         assert_eq!(snod.entries[0].link_name_offset, 0x12345678);
-        assert_eq!(snod.entries[0].object_header_address, 0x100);
+        assert_eq!(
+            snod.entries[0].object_header_address,
+            StoredAddress::new(0x100)
+        );
     }
 
     #[test]

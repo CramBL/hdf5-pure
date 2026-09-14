@@ -275,7 +275,9 @@ fn add_attributes(
     }
 }
 
-pub(crate) fn make_link(name: &str, addr: u64) -> LinkMessage {
+/// Returns a hard Link message that binds `name` to the object header at `addr`, with no creation
+/// index.
+pub(crate) fn make_link(name: &str, addr: StoredAddress) -> LinkMessage {
     LinkMessage {
         name: name.to_string(),
         link_target: LinkTarget::Hard {
@@ -2337,16 +2339,22 @@ impl FileWriter {
                     ds_indices.len() + committed_indices.len() + sub_group_indices.len(),
                 );
                 for &i in ds_indices {
-                    links.push(make_link(&self.all_ds[i].name, self.ds_addrs[i]));
+                    links.push(make_link(
+                        &self.all_ds[i].name,
+                        StoredAddress::new(self.ds_addrs[i]),
+                    ));
                 }
                 for &ci in committed_indices {
                     links.push(make_link(
                         &self.committed[ci].name,
-                        self.committed_addrs[ci],
+                        StoredAddress::new(self.committed_addrs[ci]),
                     ));
                 }
                 for &gi in sub_group_indices {
-                    links.push(make_link(&self.groups[gi].name, self.group_addrs[gi]));
+                    links.push(make_link(
+                        &self.groups[gi].name,
+                        StoredAddress::new(self.group_addrs[gi]),
+                    ));
                 }
                 links
             }

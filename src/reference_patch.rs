@@ -342,7 +342,7 @@ pub(crate) fn plan<S: Source + ?Sized>(
             continue;
         };
         for e in entries {
-            if let Ok(child) = base.absolute(StoredAddress::new(e.object_header_address)) {
+            if let Ok(child) = base.absolute(e.object_header_address) {
                 stack.push(child);
             }
         }
