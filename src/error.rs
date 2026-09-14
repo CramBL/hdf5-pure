@@ -4,8 +4,12 @@
 extern crate alloc;
 
 #[cfg(not(feature = "std"))]
+use alloc::collections::TryReserveError;
+#[cfg(not(feature = "std"))]
 use alloc::string::String;
 
+#[cfg(feature = "std")]
+use std::collections::TryReserveError;
 #[cfg(feature = "std")]
 use std::string::String;
 
@@ -417,6 +421,15 @@ pub enum FormatError {
         address: u64,
         /// The superblock base address it was below.
         base: u64,
+    },
+    /// An allocation sized from the file failed. A typed whole-dataset read
+    /// reserves its output buffer once with `try_reserve`, for as many values as
+    /// the read produces, and reports the allocator's failure here.
+    AllocationFailed {
+        /// The number of values the reservation requested.
+        values: usize,
+        /// The allocator's reason for the failure.
+        source: TryReserveError,
     },
     /// A random-access byte source failed to
     /// supply the requested bytes. The string carries a backend-specific reason
@@ -1032,6 +1045,9 @@ impl fmt::Display for FormatError {
                      {base}, so it names no stored (base-relative) position"
                 )
             }
+            FormatError::AllocationFailed { values, source } => {
+                write!(f, "cannot reserve room for {values} values: {source}")
+            }
             FormatError::Source(msg) => {
                 write!(f, "byte source error: {msg}")
             }
@@ -1136,6 +1152,7 @@ impl fmt::Display for FormatError {
 impl std::error::Error for FormatError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
+            FormatError::AllocationFailed { source, .. } => Some(source),
             FormatError::InvalidLocalHeapName { source, .. } => Some(source),
             _ => None,
         }
