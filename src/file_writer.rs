@@ -41,6 +41,7 @@ use crate::link_message::{LinkMessage, LinkTarget};
 use crate::message_flags::MessageFlags;
 use crate::message_type::MessageType;
 use crate::object_header_writer::ObjectHeaderWriter;
+use crate::object_path::LinkNameBuf;
 use crate::shared_message::DatatypeLocation;
 use crate::superblock::Superblock;
 use crate::type_builders::{
@@ -272,6 +273,22 @@ fn add_attributes(
         for attr in attrs {
             w.add_message(MessageType::Attribute, attr.serialize(LENGTH_SIZE));
         }
+    }
+}
+
+/// Returns the link name `name` spells.
+///
+/// A builder takes a name and returns a builder, so the write is where a name that is not a
+/// component of an object path is rejected.
+///
+/// # Errors
+///
+/// Returns [`FormatError::InvalidLinkName`] if `name` is the empty name, `.`, or a name
+/// holding `/`.
+fn link_name(name: String) -> Result<LinkNameBuf, FormatError> {
+    match LinkNameBuf::new(&name) {
+        Some(link_name) => Ok(link_name),
+        None => Err(FormatError::InvalidLinkName(name)),
     }
 }
 
@@ -1527,7 +1544,8 @@ impl FileWriter {
             _ => None,
         };
         struct DsFlat {
-            name: String,
+            /// Link name in the owning group.
+            name: LinkNameBuf,
             dt: Datatype,
             /// Where `dt` is written: in this dataset's header, or in a committed
             /// datatype object it names.
@@ -1838,7 +1856,8 @@ impl FileWriter {
             }
         }
         struct GrpFlat {
-            name: String,
+            /// Link name in the owning group.
+            name: LinkNameBuf,
             attrs: Vec<AttributeMessage>,
             ds_indices: Vec<usize>,
             sub_group_indices: Vec<usize>,
@@ -1848,7 +1867,7 @@ impl FileWriter {
         /// One committed datatype object, flattened out of the group tree.
         struct CtFlat {
             /// Link name in the owning group.
-            name: String,
+            name: LinkNameBuf,
             dt: Datatype,
             /// Hard links plus shared references, completed once every dataset
             /// and attribute in the file has been counted (see
@@ -1867,6 +1886,7 @@ impl FileWriter {
             all_ds: &mut Vec<DsFlat>,
             ds_vl: &mut Vec<Vec<VlPatch>>,
         ) -> Result<usize, FormatError> {
+            let name = link_name(db.name)?;
             let dt = db.datatype.ok_or(FormatError::DatasetMissingData)?;
             let shape = db.shape.ok_or(FormatError::DatasetMissingShape)?;
             // A verbatim-chunk dataset (repack) owns no flat `raw` element bytes;
@@ -1892,7 +1912,7 @@ impl FileWriter {
             debug_assert!(
                 !(unallocated && (db.data.is_some() || produced.is_some() || raw_chunks.is_some())),
                 "dataset {:?} declares unallocated storage and stages data for it",
-                db.name,
+                name.as_str(),
             );
             // Allow empty data for zero-element datasets (e.g. shape [0, 0]).
             let is_empty = shape.contains(&0);
@@ -2040,7 +2060,7 @@ impl FileWriter {
             }
             let idx = all_ds.len();
             all_ds.push(DsFlat {
-                name: db.name,
+                name,
                 dt,
                 dt_location: db.datatype_location,
                 ds: dspace,
@@ -2076,7 +2096,7 @@ impl FileWriter {
                 .map(|ct| {
                     ct.datatype.element_size()?;
                     committed.push(CtFlat {
-                        name: ct.name,
+                        name: link_name(ct.name)?,
                         dt: ct.datatype,
                         // One hard link. Every shared reference to it adds one
                         // more, counted once the whole file is flattened.
@@ -2095,6 +2115,7 @@ impl FileWriter {
             grp_vl: &mut Vec<Vec<VlPatch>>,
             ds_vl: &mut Vec<Vec<VlPatch>>,
         ) -> Result<usize, FormatError> {
+            let name = link_name(g.name)?;
             let patches = collect_vl_patches(&g.attrs);
             let mut gattrs = Vec::new();
             for (n, v) in &g.attrs {
@@ -2111,7 +2132,7 @@ impl FileWriter {
             }
             let gi = groups.len();
             groups.push(GrpFlat {
-                name: g.name,
+                name,
                 attrs: gattrs,
                 ds_indices: ds_idx,
                 sub_group_indices: sub_grp_idx,
@@ -2200,11 +2221,11 @@ impl FileWriter {
                 out: &mut HashMap<String, usize>,
             ) {
                 for &ci in &groups[gi].committed_indices {
-                    out.insert(format!("{prefix}/{}", committed[ci].name), ci);
+                    out.insert(format!("{prefix}/{}", committed[ci].name.as_str()), ci);
                 }
                 for &sgi in &groups[gi].sub_group_indices {
                     walk(
-                        &format!("{prefix}/{}", groups[sgi].name),
+                        &format!("{prefix}/{}", groups[sgi].name.as_str()),
                         sgi,
                         groups,
                         committed,
@@ -2214,10 +2235,10 @@ impl FileWriter {
             }
             let mut out: HashMap<String, usize> = root_committed_indices
                 .iter()
-                .map(|&ci| (committed[ci].name.clone(), ci))
+                .map(|&ci| (String::from(committed[ci].name.as_str()), ci))
                 .collect();
             for &gi in &root_group_indices {
-                walk(&groups[gi].name, gi, &groups, &committed, &mut out);
+                walk(groups[gi].name.as_str(), gi, &groups, &committed, &mut out);
             }
             out
         };
@@ -2273,7 +2294,7 @@ impl FileWriter {
                     &committed_by_path,
                     &attr.datatype_location,
                     &attr.datatype,
-                    || format!("attribute {:?} of group {:?}", attr.name, g.name),
+                    || format!("attribute {:?} of group {:?}", attr.name, g.name.as_str()),
                 )?;
             }
         }
@@ -2283,7 +2304,7 @@ impl FileWriter {
                 &committed_by_path,
                 &d.dt_location,
                 &d.dt,
-                || format!("dataset {:?}", d.name),
+                || format!("dataset {:?}", d.name.as_str()),
             )?;
             for attr in &d.attrs {
                 register_committed_use(
@@ -2291,7 +2312,7 @@ impl FileWriter {
                     &committed_by_path,
                     &attr.datatype_location,
                     &attr.datatype,
-                    || format!("attribute {:?} of dataset {:?}", attr.name, d.name),
+                    || format!("attribute {:?} of dataset {:?}", attr.name, d.name.as_str()),
                 )?;
             }
         }
@@ -2340,19 +2361,19 @@ impl FileWriter {
                 );
                 for &i in ds_indices {
                     links.push(make_link(
-                        &self.all_ds[i].name,
+                        self.all_ds[i].name.as_str(),
                         StoredAddress::new(self.ds_addrs[i]),
                     ));
                 }
                 for &ci in committed_indices {
                     links.push(make_link(
-                        &self.committed[ci].name,
+                        self.committed[ci].name.as_str(),
                         StoredAddress::new(self.committed_addrs[ci]),
                     ));
                 }
                 for &gi in sub_group_indices {
                     links.push(make_link(
-                        &self.groups[gi].name,
+                        self.groups[gi].name.as_str(),
                         StoredAddress::new(self.group_addrs[gi]),
                     ));
                 }
@@ -2819,7 +2840,7 @@ impl FileWriter {
             // reference to the source root group to "").
             path_map.insert(String::new(), root_group_addr);
             for &i in &root_ds_indices {
-                path_map.insert(all_ds[i].name.clone(), ds_oh_addrs2[i]);
+                path_map.insert(String::from(all_ds[i].name.as_str()), ds_oh_addrs2[i]);
             }
             // A committed datatype is an object like any other, so an object
             // reference can point at one. Its path was already computed, above.
@@ -2838,11 +2859,14 @@ impl FileWriter {
                 ) {
                     map.insert(prefix.to_string(), grp_addrs[gi]);
                     for &di in &groups[gi].ds_indices {
-                        map.insert(format!("{}/{}", prefix, all_ds[di].name), ds_addrs[di]);
+                        map.insert(
+                            format!("{}/{}", prefix, all_ds[di].name.as_str()),
+                            ds_addrs[di],
+                        );
                     }
                     for &sgi in &groups[gi].sub_group_indices {
                         register_group(
-                            &format!("{}/{}", prefix, groups[sgi].name),
+                            &format!("{}/{}", prefix, groups[sgi].name.as_str()),
                             sgi,
                             groups,
                             ds_addrs,
@@ -2853,7 +2877,7 @@ impl FileWriter {
                     }
                 }
                 register_group(
-                    &groups[gi].name,
+                    groups[gi].name.as_str(),
                     gi,
                     &groups,
                     &ds_oh_addrs2,
@@ -3233,7 +3257,7 @@ impl FileWriter {
                     .as_mut()
                     .and_then(|layout| layout.data.in_memory_mut())
                 else {
-                    return Err(vl_element_bytes_absent(&all_ds[*i].name));
+                    return Err(vl_element_bytes_absent(all_ds[*i].name.as_str()));
                 };
                 patch_vl_refs_masked(bytes, &staging.patch_offsets, gaddrs);
             }
@@ -3529,7 +3553,7 @@ impl FileWriter {
                     // bytes in memory. Report it: heap addresses patched into
                     // another buffer would corrupt the file in silence.
                     let Some(bytes) = ds_layouts[i].data.in_memory_mut() else {
-                        return Err(vl_element_bytes_absent(&d.name));
+                        return Err(vl_element_bytes_absent(d.name.as_str()));
                     };
                     let addrs = place_collections(&staging.collections, &mut gcol_cursor);
                     patch_vl_refs_masked(bytes, &staging.patch_offsets, &addrs);

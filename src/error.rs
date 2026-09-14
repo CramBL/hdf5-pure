@@ -340,6 +340,10 @@ pub enum FormatError {
     },
     /// Serialization error.
     SerializationError(String),
+    /// A name a builder was given for a dataset, a group, or a committed datatype is not a
+    /// component of an object path: the empty name, `.`, or a name holding `/`. The object
+    /// under such a link has no path, and the write reports the name it rejects.
+    InvalidLinkName(String),
     /// Dataset is missing data.
     DatasetMissingData,
     /// Dataset is missing shape.
@@ -975,6 +979,13 @@ impl fmt::Display for FormatError {
             }
             FormatError::SerializationError(msg) => {
                 write!(f, "serialization error: {msg}")
+            }
+            FormatError::InvalidLinkName(name) => {
+                write!(
+                    f,
+                    "invalid link name {name:?}: a link name is one component of an object \
+                     path, so it is not empty, is not \".\" and holds no \"/\""
+                )
             }
             FormatError::DatasetMissingData => {
                 write!(f, "dataset is missing data")

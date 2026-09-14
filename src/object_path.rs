@@ -285,6 +285,11 @@ impl<'a> LinkName<'a> {
 pub(crate) struct LinkNameBuf(String);
 
 impl LinkNameBuf {
+    /// Returns `name` as the owned name of a link, or `None` where [`LinkName::new`] rejects it.
+    pub(crate) fn new(name: &str) -> Option<Self> {
+        LinkName::new(name).map(Self::from)
+    }
+
     /// Returns the name as the group's link stores it.
     pub(crate) fn as_str(&self) -> &str {
         &self.0

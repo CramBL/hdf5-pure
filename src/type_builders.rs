@@ -3473,13 +3473,22 @@ impl GroupBuilder {
         }
     }
 
+    /// Creates a dataset in this group under `name`, and returns the builder that configures
+    /// its data, shape, and attributes.
+    ///
+    /// `name` is one link name: not empty, not `.`, and holding no `/`. The write reports
+    /// [`FormatError::InvalidLinkName`] for a name that is not a component of an object path.
     pub fn create_dataset(&mut self, name: &str) -> &mut DatasetBuilder {
         self.datasets.push(DatasetBuilder::new(name));
         self.datasets.last_mut().unwrap()
     }
 
-    /// Create a nested group builder. Call `.finish()` on it and then
-    /// `add_group()` to add it to this group.
+    /// Returns a builder for a group in this group under `name`. Call
+    /// [`finish`](Self::finish) on it, then pass the result to
+    /// [`add_group`](Self::add_group).
+    ///
+    /// `name` is one link name: not empty, not `.`, and holding no `/`. The write reports
+    /// [`FormatError::InvalidLinkName`] for a name that is not a component of an object path.
     pub fn create_group(&mut self, name: &str) -> GroupBuilder {
         GroupBuilder::new(name)
     }
@@ -3525,11 +3534,14 @@ impl GroupBuilder {
         ));
     }
 
-    /// Commit `datatype` in this group under `name`, the way `H5Tcommit` does.
+    /// Commits `datatype` in this group under `name`, the way `H5Tcommit` does.
     ///
     /// See [`FileBuilder::commit_datatype`](crate::FileBuilder::commit_datatype)
     /// for what a committed datatype is and how datasets and attributes name one.
     /// The path they use is this group's path joined with `name`.
+    ///
+    /// `name` is one link name: not empty, not `.`, and holding no `/`. The write reports
+    /// [`FormatError::InvalidLinkName`] for a name that is not a component of an object path.
     pub fn commit_datatype(&mut self, name: &str, datatype: Datatype) {
         self.committed.push(CommittedDatatype {
             name: name.to_string(),

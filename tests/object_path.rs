@@ -379,3 +379,76 @@ fn a_path_that_spells_no_link_is_no_target_for_a_write(
     assert_eq!(file.root().groups().unwrap(), vec!["a"]);
     assert_eq!(a.datasets().unwrap(), vec!["d"]);
 }
+
+/// Four of the builder entry points that take a name: a dataset, a group and a committed
+/// datatype in the root group, and a dataset in a group.
+#[derive(Clone, Copy, Debug)]
+enum BuilderEntryPoint {
+    CommittedDatatype,
+    GroupDataset,
+    RootDataset,
+    RootGroup,
+}
+
+impl BuilderEntryPoint {
+    /// Returns the bytes of a file holding this object under `name`, or what the write reports
+    /// for it.
+    fn build(self, name: &str) -> Result<Vec<u8>, Error> {
+        let mut builder = FileBuilder::new();
+        match self {
+            BuilderEntryPoint::CommittedDatatype => {
+                builder.commit_datatype(name, hdf5_pure::make_i32_type());
+            }
+            BuilderEntryPoint::GroupDataset => {
+                let mut group = builder.create_group("g");
+                group.create_dataset(name).with_i32_data(&[1]);
+                builder.add_group(group.finish());
+            }
+            BuilderEntryPoint::RootDataset => {
+                builder.create_dataset(name).with_i32_data(&[1]);
+            }
+            BuilderEntryPoint::RootGroup => {
+                let group = builder.create_group(name);
+                builder.add_group(group.finish());
+            }
+        }
+        builder.finish()
+    }
+}
+
+#[rstest]
+#[case("")]
+#[case(".")]
+#[case("/")]
+#[case("a/b")]
+#[case("/a")]
+fn a_builder_name_that_is_not_a_link_name_is_rejected_by_the_write(
+    #[case] name: &str,
+    #[values(
+        BuilderEntryPoint::CommittedDatatype,
+        BuilderEntryPoint::GroupDataset,
+        BuilderEntryPoint::RootDataset,
+        BuilderEntryPoint::RootGroup
+    )]
+    entry: BuilderEntryPoint,
+) {
+    let err = entry.build(name).unwrap_err();
+    let Error::Format(FormatError::InvalidLinkName(rejected)) = &err else {
+        panic!("expected InvalidLinkName, got {err:?}");
+    };
+    assert_eq!(rejected, name);
+}
+
+/// `..` is one component like any other, and so is a name holding a space.
+#[rstest]
+#[case("d")]
+#[case("..")]
+#[case("a b")]
+fn a_builder_name_that_is_one_link_name_is_written(#[case] name: &str) {
+    let mut builder = FileBuilder::new();
+    builder.create_dataset(name).with_i32_data(&[7]);
+    let file = File::from_bytes(builder.finish().unwrap()).unwrap();
+
+    assert_eq!(file.root().datasets().unwrap(), vec![name]);
+    assert_eq!(file.dataset(name).unwrap().read_i32().unwrap(), vec![7]);
+}

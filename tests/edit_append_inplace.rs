@@ -7,8 +7,8 @@
 //! `crates/crosscheck/tests/edit.rs`.
 
 use hdf5_pure::{
-    AttrValue, Error, File, FileAccessProperties, FileBuilder, FileSpaceStrategy, FormatError,
-    MaxExtent, ScaleOffset, SyncPolicy,
+    AttrValue, Error, File, FileAccessProperties, FileBuilder, FileSpaceStrategy, MaxExtent,
+    ScaleOffset, SyncPolicy,
 };
 use tempfile::tempdir;
 
@@ -333,29 +333,29 @@ fn guard_refuses_ancestor_delete() {
     let p = dir.path().join("d.h5");
     {
         let mut b = FileBuilder::new();
-        b.create_dataset("grp/d")
+        let mut grp = b.create_group("grp");
+        grp.create_dataset("d")
             .with_i32_data(&(0..4).collect::<Vec<_>>())
             .with_shape(&[4])
             .with_maxshape(&[MaxExtent::Unlimited])
             .with_chunks(&[4]);
+        b.add_group(grp.finish());
         b.write(&p).unwrap();
     }
 
     let s = File::open_rw(&p).unwrap();
     s.root().delete("grp").unwrap(); // deletes the ancestor group of grp/d
-    // The staged delete takes the subtree out of reach: the dataset no longer
-    // resolves, so there is no handle to append through. Either way the append
-    // cannot land — which is the guarantee this pins.
-    let err = match s.dataset("grp/d") {
-        Ok(mut ds) => ds.append(&[4]).unwrap_err(),
-        Err(e) => e,
+    // The delete is staged, so the dataset still resolves and a handle onto it
+    // still opens. The append is what the guard rejects, since the commit deletes
+    // the group the appended rows would land in.
+    let err = s.dataset("grp/d").unwrap().append(&[4]).unwrap_err();
+    let Error::AppendInPlaceUnsupported(reason) = &err else {
+        panic!("expected AppendInPlaceUnsupported, got {err:?}");
     };
-    assert!(
-        matches!(
-            err,
-            Error::AppendInPlaceUnsupported(_) | Error::Format(FormatError::PathNotFound(_))
-        ),
-        "expected the append to be unreachable, got {err:?}"
+    assert_eq!(
+        *reason,
+        "the dataset or an ancestor has a staged edit pending in this session; commit the \
+         staged edits before appending in place, or use Dataset::append_staged"
     );
 }
 
