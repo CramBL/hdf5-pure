@@ -2895,7 +2895,7 @@ impl FileWriter {
                     ),
                     None => return,
                 };
-                *location = DatatypeLocation::Committed(committed_addrs[ci]);
+                *location = DatatypeLocation::Committed(StoredAddress::new(committed_addrs[ci]));
             };
             for attr in &mut root_attrs {
                 resolve(&mut attr.datatype_location);
@@ -3909,7 +3909,7 @@ mod tests {
         );
         assert_eq!(
             msg.data,
-            crate::shared_message::encode_committed_ref(type_addr, OFFSET_SIZE),
+            crate::shared_message::encode_committed_ref(StoredAddress::new(type_addr), OFFSET_SIZE),
             "the reference must name the object the link resolves to"
         );
     }

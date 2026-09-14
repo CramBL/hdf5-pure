@@ -305,10 +305,8 @@ impl ObjectHeader {
             if msg_type == MessageType::ObjectHeaderContinuation
                 && msg_body.len() >= (offset_size as usize + length_size as usize)
             {
-                let cont_offset_raw = read_offset(msg_body, 0, offset_size)?;
-                let cont_offset = base_address
-                    .absolute(StoredAddress::new(cont_offset_raw))?
-                    .to_usize()?;
+                let cont_offset_raw = StoredAddress::new(read_offset(msg_body, 0, offset_size)?);
+                let cont_offset = base_address.absolute(cont_offset_raw)?.to_usize()?;
                 let cont_length =
                     read_length(msg_body, offset_size as usize, length_size)?.to_usize()?;
                 // Parse continuation block (v1: just raw messages, no signature)
@@ -395,10 +393,8 @@ impl ObjectHeader {
             if msg_type == MessageType::ObjectHeaderContinuation
                 && msg_body.len() >= (offset_size as usize + length_size as usize)
             {
-                let cont_offset_raw = read_offset(msg_body, 0, offset_size)?;
-                let cont_offset = base_address
-                    .absolute(StoredAddress::new(cont_offset_raw))?
-                    .to_usize()?;
+                let cont_offset_raw = StoredAddress::new(read_offset(msg_body, 0, offset_size)?);
+                let cont_offset = base_address.absolute(cont_offset_raw)?.to_usize()?;
                 let cont_length =
                     read_length(msg_body, offset_size as usize, length_size)?.to_usize()?;
                 let cont_msgs = Self::parse_v1_continuation(
@@ -504,17 +500,16 @@ impl ObjectHeader {
             filter,
         )?;
 
-        // Follow continuations (limit to prevent cycles in malformed data).
-        // Offsets are u64 file addresses relative to the superblock base; in this
-        // buffered path the absolute position indexes the in-memory image, so add
-        // the base and narrow (checked) to usize here.
+        // Follow continuations (limit to prevent cycles in malformed data). In
+        // this buffered path the absolute position indexes the in-memory image,
+        // so each address is narrowed (checked) to usize here.
         let mut cont_remaining = 256u16;
         while let Some((cont_offset, cont_length)) = continuations.pop() {
             if cont_remaining == 0 {
                 return Err(FormatError::NestingDepthExceeded);
             }
             cont_remaining -= 1;
-            let cont_offset = base_address.absolute(StoredAddress::new(cont_offset))?;
+            let cont_offset = base_address.absolute(cont_offset)?;
             Self::parse_v2_continuation(
                 data,
                 access_mode,
@@ -589,7 +584,7 @@ impl ObjectHeader {
         offset_size: u8,
         length_size: u8,
         messages: &mut Vec<HeaderMessage>,
-        continuations: &mut Vec<(u64, u64)>,
+        continuations: &mut Vec<(StoredAddress, u64)>,
         filter: &mut MessageFilter<'_>,
     ) -> Result<(), FormatError> {
         let msg_header_size = if has_creation_order { 6 } else { 4 };
@@ -625,12 +620,12 @@ impl ObjectHeader {
             let msg_data = &data[pos..pos + msg_data_size];
 
             if msg_type == MessageType::ObjectHeaderContinuation {
-                // The continuation offset/length are file offsets; keep them as
-                // u64 so the driver (buffered or streaming) can fetch that
-                // region — a streaming reader can then follow a continuation
-                // past 4 GiB on a 32-bit host.
+                // Neither the offset nor the length is narrowed here, so that
+                // the driver, buffered or streaming, can fetch a region a
+                // 32-bit `usize` does not reach: a streaming reader follows a
+                // continuation past 4 GiB on a 32-bit host.
                 if msg_data.len() >= (offset_size as usize + length_size as usize) {
-                    let cont_off = read_offset(msg_data, 0, offset_size)?;
+                    let cont_off = StoredAddress::new(read_offset(msg_data, 0, offset_size)?);
                     let cont_len = read_length(msg_data, offset_size as usize, length_size)?;
                     continuations.push((cont_off, cont_len));
                 }
@@ -660,7 +655,7 @@ impl ObjectHeader {
         offset_size: u8,
         length_size: u8,
         messages: &mut Vec<HeaderMessage>,
-        continuations: &mut Vec<(u64, u64)>,
+        continuations: &mut Vec<(StoredAddress, u64)>,
         filter: &mut MessageFilter<'_>,
     ) -> Result<(), FormatError> {
         // OCHK signature(4) + messages + checksum(4)
@@ -857,7 +852,7 @@ impl ObjectHeader {
 
         let has_creation_order = flags & 0x04 != 0;
         let mut messages = Vec::new();
-        let mut continuations: Vec<(u64, u64)> = Vec::new();
+        let mut continuations: Vec<(StoredAddress, u64)> = Vec::new();
         Self::parse_v2_messages(
             &chunk0,
             access_mode,
@@ -879,10 +874,7 @@ impl ObjectHeader {
             }
             cont_remaining -= 1;
             let cont_len = cont_len.to_usize()?;
-            let region = source.read_metadata_at(
-                base_address.absolute(StoredAddress::new(cont_off))?,
-                cont_len,
-            )?;
+            let region = source.read_metadata_at(base_address.absolute(cont_off)?, cont_len)?;
             Self::parse_v2_continuation(
                 &region,
                 access_mode,
@@ -1014,7 +1006,7 @@ impl ObjectHeader {
             let cont = if msg_type == MessageType::ObjectHeaderContinuation
                 && msg_data.len() >= (offset_size as usize + length_size as usize)
             {
-                let off_raw = read_offset(msg_data, 0, offset_size)?;
+                let off_raw = StoredAddress::new(read_offset(msg_data, 0, offset_size)?);
                 let len = read_length(msg_data, offset_size as usize, length_size)?;
                 Some((off_raw, len))
             } else {
@@ -1032,7 +1024,7 @@ impl ObjectHeader {
             }
 
             if let Some((off_raw, len)) = cont {
-                let cont_off = base_address.absolute(StoredAddress::new(off_raw))?;
+                let cont_off = base_address.absolute(off_raw)?;
                 Self::parse_v1_chunk_from_source(
                     source,
                     access_mode,

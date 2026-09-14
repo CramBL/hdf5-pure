@@ -2230,7 +2230,7 @@ impl FileInner {
         let reference =
             shared_message::parse_shared_ref(&msg.data, self.offset_size(), self.length_size())?;
         match reference.location {
-            shared_message::SharedLocation::ObjectHeader(addr) => Ok(Some(addr)),
+            shared_message::SharedLocation::ObjectHeader(addr) => Ok(Some(addr.get())),
             shared_message::SharedLocation::SohmHeap(_) => Ok(None),
         }
     }

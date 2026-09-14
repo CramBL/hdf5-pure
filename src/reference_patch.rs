@@ -1156,7 +1156,7 @@ mod tests {
             let mut shared = message_record(
                 MessageType::Datatype,
                 &crate::shared_message::encode_committed_ref(
-                    base.relative(TYPE_AT).unwrap().get(),
+                    base.relative(TYPE_AT).unwrap(),
                     crate::file_writer::OFFSET_SIZE,
                 ),
             );
