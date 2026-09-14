@@ -361,15 +361,12 @@ pub(crate) fn read_persisted_sections(
         if addr == u64::MAX {
             continue;
         }
-        let a = base.absolute(addr).map_err(|_| bad())?.to_usize()?;
+        let a = base.absolute(addr)?.to_usize()?;
         let header = FsmHeader::parse(data.get(a..).ok_or_else(bad)?, offset_size)?;
         if header.fsse_addr == u64::MAX {
             continue;
         }
-        let fa = base
-            .absolute(header.fsse_addr)
-            .map_err(|_| bad())?
-            .to_usize()?;
+        let fa = base.absolute(header.fsse_addr)?.to_usize()?;
         let end = fa
             .checked_add(header.fsse_used.to_usize()?)
             .ok_or_else(bad)?;
@@ -395,7 +392,6 @@ pub(crate) fn read_persisted_sections_source<S: crate::source::Source>(
     base: BaseAddress,
     offset_size: u8,
 ) -> Result<PersistedSections, FormatError> {
-    let bad = || FormatError::InvalidFreeSpaceManager;
     let mut sections = Vec::new();
     let mut blocks = Vec::new();
     let hdr_len = fshd_len(offset_size);
@@ -403,14 +399,14 @@ pub(crate) fn read_persisted_sections_source<S: crate::source::Source>(
         if addr == u64::MAX {
             continue;
         }
-        let a = base.absolute(addr).map_err(|_| bad())?;
+        let a = base.absolute(addr)?;
         let fshd = src.read_exact_at(a, hdr_len.to_usize()?)?;
         let header = FsmHeader::parse(&fshd, offset_size)?;
         blocks.push((a, hdr_len));
         if header.fsse_addr == u64::MAX {
             continue;
         }
-        let fa = base.absolute(header.fsse_addr).map_err(|_| bad())?;
+        let fa = base.absolute(header.fsse_addr)?;
         let used = header.fsse_used;
         let block = src.read_exact_at(fa, used.to_usize()?)?;
         sections.extend(parse_fsse(&block, &header, offset_size)?);

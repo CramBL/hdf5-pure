@@ -9217,9 +9217,7 @@ impl WriteEngine {
                 } else {
                     // The stored data address is base-relative; shift it to an absolute
                     // offset into `src` before reading the data block out.
-                    let start = base.absolute(data_addr).map_err(|_| {
-                        Error::EditUnsupported("data address exceeds this platform")
-                    })?;
+                    let start = base.absolute(data_addr)?;
                     start
                         .checked_add(data_size)
                         .filter(|&e| e <= src.len())
@@ -9343,9 +9341,7 @@ impl WriteEngine {
                 for (name, creation_order, child) in children {
                     // Child link targets are stored base-relative; re-absolutize
                     // before descending so `addr` stays an absolute offset into `src`.
-                    let child = base.absolute(child).map_err(|_| {
-                        Error::EditUnsupported("child address exceeds this platform")
-                    })?;
+                    let child = base.absolute(child)?;
                     kids.push((
                         name,
                         creation_order,
@@ -14147,9 +14143,7 @@ fn read_oh_continuation<S: Source + ?Sized>(
     let len = u64::from_le_bytes(region[body + 8..body + 16].try_into().unwrap());
     // The block address is stored relative to the base address; shift it to an
     // absolute file offset before reading.
-    let off = base
-        .absolute(off)
-        .map_err(|_| Error::EditUnsupported("continuation address overflow"))?;
+    let off = base.absolute(off)?;
     // An OCHK block is signature(4) + messages + checksum(4).
     let end = off
         .checked_add(len)
