@@ -73,7 +73,7 @@ pub(crate) struct FsmHeader {
     pub total_sections: u64,
     pub addr_space_bits: u16,
     pub max_section_size: u64,
-    pub fsse_addr: u64,
+    pub fsse_addr: StoredAddress,
     pub fsse_used: u64,
 }
 
@@ -126,7 +126,7 @@ impl FsmHeader {
         pos += 2;
         let max_section_size = read_uint_le(&data[pos..pos + 8]);
         pos += 8;
-        let fsse_addr = read_uint_le(&data[pos..pos + os]);
+        let fsse_addr = StoredAddress::new(read_uint_le(&data[pos..pos + os]));
         pos += os;
         let fsse_used = read_uint_le(&data[pos..pos + 8]);
         Ok(FsmHeader {
@@ -175,10 +175,11 @@ fn push_uint_le(buf: &mut Vec<u8>, value: u64, width: usize) {
 
 /// Serialize a single file free-space manager (the `FSHD` header and its `FSSE`
 /// section list) holding every region in `sections`. `fshd_addr`/`fsse_addr` are
-/// the absolute file offsets the two blocks will occupy: the header records the
-/// section-info address and the section info back-points at the header. Returns
-/// `(fshd_bytes, fsse_bytes)`, each ending in its Jenkins checksum, ready to write
-/// at those addresses. The encoding round-trips through [`FsmHeader::parse`] /
+/// the addresses the two blocks will occupy, relative to the file's base address:
+/// the header records the section-info address and the section info back-points at
+/// the header. Returns `(fshd_bytes, fsse_bytes)`, each ending in its Jenkins
+/// checksum, ready to write at those addresses in a view of the file framed at the
+/// base. The encoding round-trips through [`FsmHeader::parse`] /
 /// [`parse_fsse`] and is byte-identical to the reference C library's.
 ///
 /// `class_id` is the on-disk section class every section is tagged with
@@ -363,12 +364,10 @@ pub(crate) fn read_persisted_sections(
         }
         let a = base.absolute(StoredAddress::new(addr))?.to_usize()?;
         let header = FsmHeader::parse(data.get(a..).ok_or_else(bad)?, offset_size)?;
-        if header.fsse_addr == u64::MAX {
+        if header.fsse_addr.get() == u64::MAX {
             continue;
         }
-        let fa = base
-            .absolute(StoredAddress::new(header.fsse_addr))?
-            .to_usize()?;
+        let fa = base.absolute(header.fsse_addr)?.to_usize()?;
         let end = fa
             .checked_add(header.fsse_used.to_usize()?)
             .ok_or_else(bad)?;
@@ -405,10 +404,10 @@ pub(crate) fn read_persisted_sections_source<S: crate::source::Source>(
         let fshd = src.read_exact_at(a, hdr_len.to_usize()?)?;
         let header = FsmHeader::parse(&fshd, offset_size)?;
         blocks.push((a, hdr_len));
-        if header.fsse_addr == u64::MAX {
+        if header.fsse_addr.get() == u64::MAX {
             continue;
         }
-        let fa = base.absolute(StoredAddress::new(header.fsse_addr))?;
+        let fa = base.absolute(header.fsse_addr)?;
         let used = header.fsse_used;
         let block = src.read_exact_at(fa, used.to_usize()?)?;
         sections.extend(parse_fsse(&block, &header, offset_size)?);
@@ -612,7 +611,7 @@ mod tests {
         assert_eq!(header.total_space, 1600);
         assert_eq!(header.total_sections, 1);
         assert_eq!(header.addr_space_bits, 63);
-        assert_eq!(header.fsse_addr, 701);
+        assert_eq!(header.fsse_addr, StoredAddress::new(701));
         assert_eq!(header.fsse_used, 35);
 
         let fsse = bytes("46535345006b02000000000000014006000000000000200b000000000000005c797631");
@@ -635,7 +634,7 @@ mod tests {
         let header = FsmHeader::parse(&fshd, 8).unwrap();
         assert_eq!(header.total_space, 909);
         assert_eq!(header.total_sections, 2);
-        assert_eq!(header.fsse_addr, 818);
+        assert_eq!(header.fsse_addr, StoredAddress::new(818));
         assert_eq!(header.fsse_used, 53);
 
         let fsse = bytes(
@@ -765,7 +764,7 @@ mod tests {
         let header = FsmHeader::parse(&fshd, 8).unwrap();
         assert_eq!(header.total_sections, 3);
         assert_eq!(header.total_space, 512 + 512 + 70000);
-        assert_eq!(header.fsse_addr, 1100);
+        assert_eq!(header.fsse_addr, StoredAddress::new(1100));
 
         // Place both blocks in a buffer and read them back through the manager
         // indirection; the recovered sections match (order-independent).

@@ -3216,7 +3216,7 @@ impl WriteEngine {
             old_blocks.extend(spans);
         }
         for &m in &info.manager_addrs {
-            if m == UNDEF {
+            if StoredAddress::new(m).is_undefined(os) {
                 continue;
             }
             let Ok(hdr_len) = fshd_len(os).to_usize() else {
@@ -3231,12 +3231,13 @@ impl WriteEngine {
                 // section-info extent before recording it, so a malformed
                 // `fsse_used` can't later free a region running past end-of-file.
                 old_blocks.push((m, fshd_len(os)));
-                if h.fsse_addr != UNDEF
+                if !h.fsse_addr.is_undefined(os)
                     && h.fsse_addr
+                        .get()
                         .checked_add(h.fsse_used)
                         .is_some_and(|end| end <= file_len)
                 {
-                    old_blocks.push((h.fsse_addr, h.fsse_used));
+                    old_blocks.push((h.fsse_addr.get(), h.fsse_used));
                 }
             }
         }
