@@ -40,14 +40,23 @@ impl FileBuilder {
         }
     }
 
-    /// Create a dataset at the root level. Returns a mutable reference to
-    /// a `DatasetBuilder` for configuring data, shape, and attributes.
+    /// Creates a dataset in the root group under `name`, and returns the builder that
+    /// configures its data, shape, and attributes.
+    ///
+    /// `name` is one link name: not empty, not `.`, and holding no `/`.
+    /// The write reports [`FormatError::InvalidLinkName`] for a name that is not a component
+    /// of an object path.
     pub fn create_dataset(&mut self, name: &str) -> &mut FormatDatasetBuilder {
         self.writer.create_dataset(name)
     }
 
-    /// Create a group builder. Call `.finish()` on the returned builder
-    /// to complete it, then pass to `add_group()`.
+    /// Returns a builder for a group in the root group under `name`. Call
+    /// [`finish`](crate::GroupBuilder::finish) on it, then pass the result to
+    /// [`add_group`](Self::add_group).
+    ///
+    /// `name` is one link name: not empty, not `.`, and holding no `/`.
+    /// The write reports [`FormatError::InvalidLinkName`] for a name that is not a component
+    /// of an object path.
     pub fn create_group(&mut self, name: &str) -> FormatGroupBuilder {
         self.writer.create_group(name)
     }
@@ -57,9 +66,13 @@ impl FileBuilder {
         self.writer.add_group(group);
     }
 
-    /// Commit `datatype` in the root group under `name`, the way `H5Tcommit`
+    /// Commits `datatype` in the root group under `name`, the way `H5Tcommit`
     /// does: the type is written as an object of its own, and datasets and
     /// attributes reference it by path instead of encoding it again.
+    ///
+    /// `name` is one link name: not empty, not `.`, and holding no `/`.
+    /// The write reports [`FormatError::InvalidLinkName`] for a name that is not a component
+    /// of an object path.
     ///
     /// A committed datatype is what a C-library reader reports by name — `h5dump`
     /// prints `DATATYPE "/mytype"` for a dataset using one — and what netCDF-4
