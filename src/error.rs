@@ -11,6 +11,7 @@ use std::string::String;
 
 use core::fmt;
 use core::num::NonZeroUsize;
+use core::str::Utf8Error;
 
 /// Errors that can occur when parsing HDF5 binary format structures.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -166,6 +167,17 @@ pub enum FormatError {
     InvalidLocalHeapSignature,
     /// Invalid local heap version.
     InvalidLocalHeapVersion(u8),
+    /// A link name in a group's local heap is not UTF-8. A version 1 group
+    /// stores the names of its links in a local heap, defined in "Local Heaps"
+    /// of the [format specification, version 4.0][spec].
+    ///
+    /// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsec_fmt4_infra_localheap
+    InvalidLocalHeapName {
+        /// The name's offset within the heap's data segment.
+        offset: u64,
+        /// The decode failure.
+        source: Utf8Error,
+    },
     /// Invalid B-tree v1 signature.
     InvalidBTreeSignature,
     /// Invalid B-tree node type.
@@ -773,6 +785,12 @@ impl fmt::Display for FormatError {
             FormatError::InvalidLocalHeapVersion(v) => {
                 write!(f, "invalid local heap version: {v}")
             }
+            FormatError::InvalidLocalHeapName { offset, source } => {
+                write!(
+                    f,
+                    "the local heap name at data segment offset {offset} is not UTF-8: {source}"
+                )
+            }
             FormatError::InvalidBTreeSignature => {
                 write!(f, "invalid B-tree v1 signature")
             }
@@ -1115,7 +1133,14 @@ impl fmt::Display for FormatError {
 }
 
 #[cfg(feature = "std")]
-impl std::error::Error for FormatError {}
+impl std::error::Error for FormatError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            FormatError::InvalidLocalHeapName { source, .. } => Some(source),
+            _ => None,
+        }
+    }
+}
 
 /// How resolving a path can fail: at a component that is not a group, named, or
 /// at anything else the parse refuses.

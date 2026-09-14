@@ -111,8 +111,12 @@ impl LocalHeap {
             });
         }
 
-        let s = core::str::from_utf8(&file_data[str_start..end])
-            .map_err(|_| FormatError::InvalidLocalHeapSignature)?;
+        let s = core::str::from_utf8(&file_data[str_start..end]).map_err(|source| {
+            FormatError::InvalidLocalHeapName {
+                offset: string_offset,
+                source,
+            }
+        })?;
         Ok(String::from(s))
     }
 
@@ -167,8 +171,12 @@ impl LocalHeap {
             });
         }
 
-        let s = core::str::from_utf8(&segment[start..end])
-            .map_err(|_| FormatError::InvalidLocalHeapSignature)?;
+        let s = core::str::from_utf8(&segment[start..end]).map_err(|source| {
+            FormatError::InvalidLocalHeapName {
+                offset: string_offset,
+                source,
+            }
+        })?;
         Ok(String::from(s))
     }
 }
@@ -256,6 +264,27 @@ mod tests {
         file[0] = b'X';
         let err = LocalHeap::parse(&file, 0, 8, 8).unwrap_err();
         assert_eq!(err, FormatError::InvalidLocalHeapSignature);
+    }
+
+    // The third byte of "hello" is 0xFF, so the decode is valid up to 2.
+    #[test]
+    fn read_string_rejects_a_name_that_is_not_utf8() {
+        let mut file = build_heap_file(0, 100, &["hello"], 8, 8);
+        file[102] = 0xFF;
+        let heap = LocalHeap::parse(&file, 0, 8, 8).unwrap();
+
+        let err = heap.read_string(&file, 0).unwrap_err();
+        let FormatError::InvalidLocalHeapName { offset, source } = err else {
+            panic!("expected InvalidLocalHeapName, got {err:?}");
+        };
+        assert_eq!(offset, 0);
+        assert_eq!(source.valid_up_to(), 2);
+
+        let err = heap.read_string_in_segment(&file[100..], 0).unwrap_err();
+        assert!(
+            matches!(err, FormatError::InvalidLocalHeapName { offset: 0, .. }),
+            "{err:?}"
+        );
     }
 
     #[test]
