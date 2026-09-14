@@ -128,6 +128,7 @@ use crate::error::{Error, FormatError};
 use crate::file_lock::FileLocking;
 use crate::file_space_info::FileSpaceStrategy;
 use crate::image::disk_log::{self, DiskOp};
+use crate::object_path::ObjectPathBuf;
 use crate::source::MetadataCacheConfig;
 use crate::type_builders::DatasetBuilder;
 use crate::writer::FileBuilder;
@@ -874,7 +875,7 @@ fn warmed_base_with_a_persisted_hole(path: &Path) {
         append(&mut s, n, take);
         n += take;
     }
-    s.delete("victim").unwrap();
+    s.delete(&ObjectPathBuf::parse("victim")).unwrap();
     s.commit().unwrap();
     drop(s);
 }
@@ -1248,19 +1249,21 @@ fn churn(s: &mut WriteEngine, r: i32) {
     let v = added_values(r);
     let mut db = DatasetBuilder::new(&std::format!("added{r}"));
     db.with_i32_data(&v).with_shape(&[v.len() as u64]);
-    s.stage_created_dataset(&std::format!("/added{r}"), db)
+    s.stage_created_dataset(&ObjectPathBuf::parse(&std::format!("/added{r}")), db)
         .unwrap();
-    s.delete(&std::format!("doomed{r}")).unwrap();
+    s.delete(&ObjectPathBuf::parse(&std::format!("doomed{r}")))
+        .unwrap();
 
     // Delete and recreate one path in the *same* commit (issue #305), beside the
     // unrelated create and delete above. This is the edit that has no two-commit
     // intermediate state to fall into, so a prefix where `slot` is missing is a
     // real failure rather than a legitimate half-done rotation.
-    s.delete("slot").unwrap();
+    s.delete(&ObjectPathBuf::parse("slot")).unwrap();
     let v = slot_values(r + 1);
     let mut sb = DatasetBuilder::new("slot");
     sb.with_i32_data(&v).with_shape(&[v.len() as u64]);
-    s.stage_created_dataset("/slot", sb).unwrap();
+    s.stage_created_dataset(&ObjectPathBuf::parse("/slot"), sb)
+        .unwrap();
 
     s.commit().unwrap();
 
