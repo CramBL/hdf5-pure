@@ -303,7 +303,7 @@ use crate::link_message::{LinkMessage, LinkTarget};
 use crate::message_flags::MessageFlags;
 use crate::message_type::MessageType;
 use crate::object_header::ObjectHeader;
-use crate::object_path::{LinkNameBuf, ObjectPath, ObjectPathBuf};
+use crate::object_path::{LinkNameBuf, ObjectPathBuf};
 use crate::reader::FileAccessProperties;
 use crate::shared_message::DatatypeLocation;
 use crate::signature;
@@ -1259,7 +1259,7 @@ pub(crate) struct WriteEngine {
     /// An in-place append never moves an object header — that is why
     /// [`located`](Self::located) can be keyed by address and survive appends —
     /// so only a commit can stale an entry, and it clears both together.
-    resolved: HashMap<String, u64>,
+    resolved: HashMap<ObjectPathBuf, u64>,
     /// Whether this session splits a large in-place append into batches, trading
     /// whole-call crash atomicity for a peak memory that does not scale with the
     /// call. Set by [`open_rw_with_strategy`](Self::open_rw_with_strategy); see
@@ -2223,7 +2223,7 @@ impl Placement {
 /// through — the same key the geometry cache uses.
 #[derive(Clone, Copy)]
 pub(crate) enum AppendTarget<'a> {
-    Path(&'a str),
+    Path(&'a ObjectPathBuf),
     Header(u64),
 }
 
@@ -4586,7 +4586,7 @@ impl WriteEngine {
         // superset of the path check, and the remedy is the same one.
         match target {
             AppendTarget::Path(dataset) => {
-                if self.append_conflicts_with_pending(&ObjectPathBuf::parse(dataset)) {
+                if self.append_conflicts_with_pending(dataset) {
                     return Err(Error::AppendInPlaceUnsupported(
                         "the dataset or an ancestor has a staged edit pending in this session; \
                          commit the staged edits before appending in place, or use \
@@ -4615,9 +4615,9 @@ impl WriteEngine {
                         &self.image(),
                         AccessMode::ReadWrite,
                         &self.superblock,
-                        &ObjectPath::parse(dataset),
+                        &dataset.as_path(),
                     )?;
-                    self.resolved.insert(dataset.to_string(), addr);
+                    self.resolved.insert(dataset.clone(), addr);
                     addr
                 }
             },
@@ -4877,7 +4877,11 @@ impl WriteEngine {
     ) -> Result<(), Error> {
         let mut b = AppendBuilder::new();
         b.append_i32(values);
-        self.append_inplace_gathered(AppendTarget::Path(dataset), &b, max_phase)
+        self.append_inplace_gathered(
+            AppendTarget::Path(&ObjectPathBuf::parse(dataset)),
+            &b,
+            max_phase,
+        )
     }
 
     /// Whether `target` (an [`append_inplace_gathered`](Self::append_inplace_gathered) dataset path)
@@ -4929,26 +4933,25 @@ impl WriteEngine {
     /// with [`Error::EditUnsupported`] when a group above a creation is neither,
     /// the state `a/b` is in when [`stage_created_dataset`](Self::stage_created_dataset) stages
     /// `a/b/col` alone.
-    pub(crate) fn staged_object(&self, path: &ObjectPath<'_>) -> Option<StagedObject> {
+    pub(crate) fn staged_object(&self, path: &ObjectPathBuf) -> Option<StagedObject> {
         if self.stages_no_creations() {
             return None;
         }
-        let path = path.to_path_buf();
         if path.is_empty() {
             // The root always exists; nothing can stage it.
             return None;
         }
-        let kind = if self.staged.dataset_at(&path).is_some() {
+        let kind = if self.staged.dataset_at(path).is_some() {
             StagedKind::Dataset
-        } else if self.staged.has_group_at(&path) {
+        } else if self.staged.has_group_at(path) {
             StagedKind::Group
         } else {
             return None;
         };
-        let replaces_link = self.staged.deletes_hand_over(&path);
+        let replaces_link = self.staged.deletes_hand_over(path);
         // The file is asked only about a path a creation actually names, so an
         // ordinary open of an object nothing is staged at never pays for this.
-        if !replaces_link && self.path_in_file(&path) {
+        if !replaces_link && self.path_in_file(path) {
             return None;
         }
         Some(StagedObject {
@@ -5066,11 +5069,11 @@ impl WriteEngine {
     /// what the commit will write, so these answers cannot drift from the
     /// dataset that lands. Answers only for a creation that owns its path, on
     /// the terms [`staged_object`](Self::staged_object) sets out.
-    pub(crate) fn staged_dataset_meta(&self, path: &ObjectPath<'_>) -> Option<StagedMeta> {
+    pub(crate) fn staged_dataset_meta(&self, path: &ObjectPathBuf) -> Option<StagedMeta> {
         if self.staged_object(path)?.kind != StagedKind::Dataset {
             return None;
         }
-        let fd = self.staged.dataset_at(&path.to_path_buf())?;
+        let fd = self.staged.dataset_at(path)?;
         Some(StagedMeta {
             datatype: fd.dt.clone(),
             dimensions: fd.ds.dimensions.clone(),
@@ -5101,11 +5104,10 @@ impl WriteEngine {
     /// whether each name is already taken: the caller is enumerating a group and
     /// already holds its on-disk links, so `replaces_link` is all it needs to
     /// apply the same rule without a path resolution per child.
-    pub(crate) fn staged_children(&self, parent: &ObjectPath<'_>) -> Vec<StagedChild> {
+    pub(crate) fn staged_children(&self, parent: &ObjectPathBuf) -> Vec<StagedChild> {
         if self.stages_no_creations() {
             return Vec::new();
         }
-        let parent = parent.to_path_buf();
         // Whether this group is itself a replacement staged here — its on-disk
         // links go with the object being removed, so every creation under it
         // owns its name — and which links directly under it are removed by
@@ -5114,19 +5116,19 @@ impl WriteEngine {
         // again is neither: the commit refuses that batch, so the file's own
         // children still own their names (see [`StagedEdits::deletes_hand_over`]).
         let base_deleted =
-            self.staged.deletes_hand_over(&parent) && self.staged.has_group_at(&parent);
+            self.staged.deletes_hand_over(parent) && self.staged.has_group_at(parent);
         let deleted_here: HashSet<&str> = self
             .staged
             .deletes
             .iter()
-            .filter_map(|d| d.name_under(&parent))
+            .filter_map(|d| d.name_under(parent))
             .map(LinkNameBuf::as_str)
             .collect();
 
         let mut seen: HashSet<&str> = HashSet::new();
         let mut out: Vec<StagedChild> = Vec::new();
         for path in &self.staged.groups {
-            if let Some(name) = path.name_under(&parent) {
+            if let Some(name) = path.name_under(parent) {
                 let name = name.as_str();
                 if seen.insert(name) {
                     out.push(StagedChild {
@@ -5138,7 +5140,7 @@ impl WriteEngine {
             }
         }
         for (p, fd) in &self.staged.datasets {
-            if *p == parent && seen.insert(fd.name.as_str()) {
+            if p == parent && seen.insert(fd.name.as_str()) {
                 out.push(StagedChild {
                     name: fd.name.as_str().to_string(),
                     kind: StagedKind::Dataset,
@@ -15053,6 +15055,7 @@ mod tests {
     use rstest::rstest;
 
     use super::*;
+    use crate::object_path::ObjectPath;
 
     /// The rule that places a chunk index on a paged file: some chunk-data span
     /// abuts it. Both sides count, which is what a repeatedly appended dataset
@@ -18821,14 +18824,14 @@ mod tests {
         let bounded_batch = {
             let mut engine = open_bounded_session(&p);
             engine
-                .append_geometry(AppendTarget::Path("d"))
+                .append_geometry(AppendTarget::Path(&ObjectPathBuf::parse("d")))
                 .unwrap()
                 .full_batch_elems
         };
         let mirror_batch = {
             let mut engine = WriteEngine::open_with_locking(&p, FileLocking::Enabled).unwrap();
             engine
-                .append_geometry(AppendTarget::Path("d"))
+                .append_geometry(AppendTarget::Path(&ObjectPathBuf::parse("d")))
                 .unwrap()
                 .full_batch_elems
         };
@@ -19019,7 +19022,7 @@ mod tests {
         let mut ab = AppendBuilder::new();
         ab.append_i32(&(64..2000).collect::<Vec<_>>());
         engine
-            .append_inplace_gathered(AppendTarget::Path("d"), &ab, 4)
+            .append_inplace_gathered(AppendTarget::Path(&ObjectPathBuf::parse("d")), &ab, 4)
             .unwrap();
 
         assert_eq!(
@@ -19098,7 +19101,7 @@ mod tests {
             let mut ab = AppendBuilder::new();
             ab.append_i32(&range.collect::<Vec<_>>());
             engine
-                .append_inplace_gathered(AppendTarget::Path("d"), &ab, 4)
+                .append_inplace_gathered(AppendTarget::Path(&ObjectPathBuf::parse("d")), &ab, 4)
                 .unwrap();
         }
 
@@ -21029,6 +21032,7 @@ mod staged_query_tests {
     use tempfile::tempdir;
 
     use super::*;
+    use crate::object_path::ObjectPath;
     use crate::type_builders::DatasetBuilder;
 
     /// A session over a file holding one dataset, `existing`.
@@ -21052,11 +21056,11 @@ mod staged_query_tests {
     }
 
     fn kind(e: &WriteEngine, path: &str) -> Option<StagedKind> {
-        e.staged_object(&ObjectPath::parse(path)).map(|o| o.kind)
+        e.staged_object(&ObjectPathBuf::parse(path)).map(|o| o.kind)
     }
 
     fn child_names(e: &WriteEngine, parent: &str) -> Vec<(String, StagedKind)> {
-        e.staged_children(&ObjectPath::parse(parent))
+        e.staged_children(&ObjectPathBuf::parse(parent))
             .into_iter()
             .map(|c| (c.name, c.kind))
             .collect()
@@ -21121,7 +21125,7 @@ mod staged_query_tests {
         e.stage_created_dataset(&ObjectPathBuf::parse("plain"), i32_dataset(&[5]))
             .unwrap();
 
-        let meta = e.staged_dataset_meta(&ObjectPath::parse("col")).unwrap();
+        let meta = e.staged_dataset_meta(&ObjectPathBuf::parse("col")).unwrap();
         assert_eq!(meta.dimensions, vec![4]);
         assert_eq!(meta.maxshape, Some(vec![MaxExtent::Unlimited]));
         assert_eq!(meta.datatype.type_size(), 4);
@@ -21130,7 +21134,9 @@ mod staged_query_tests {
 
         // A fixed-shape, unfiltered dataset is contiguous and reports no
         // maximum, the way `Dataset::maxshape` reports an on-disk one.
-        let plain = e.staged_dataset_meta(&ObjectPath::parse("plain")).unwrap();
+        let plain = e
+            .staged_dataset_meta(&ObjectPathBuf::parse("plain"))
+            .unwrap();
         assert_eq!(plain.dimensions, vec![1]);
         assert_eq!(plain.maxshape, None);
         assert!(!plain.chunked);
@@ -21138,9 +21144,9 @@ mod staged_query_tests {
 
         // Only datasets answer.
         e.create_group(&ObjectPathBuf::parse("g")).unwrap();
-        assert!(e.staged_dataset_meta(&ObjectPath::parse("g")).is_none());
+        assert!(e.staged_dataset_meta(&ObjectPathBuf::parse("g")).is_none());
         assert!(
-            e.staged_dataset_meta(&ObjectPath::parse("existing"))
+            e.staged_dataset_meta(&ObjectPathBuf::parse("existing"))
                 .is_none()
         );
     }
@@ -21153,20 +21159,20 @@ mod staged_query_tests {
         // The object is still in the file, and still readable, so a handle must
         // not be told it is staged.
         assert_eq!(kind(&e, "existing"), None);
-        assert!(e.staged_children(&ObjectPath::parse("")).is_empty());
+        assert!(e.staged_children(&ObjectPathBuf::parse("")).is_empty());
 
         e.stage_created_dataset(&ObjectPathBuf::parse("existing"), i32_dataset(&[9]))
             .unwrap();
-        let staged = e.staged_object(&ObjectPath::parse("existing")).unwrap();
+        let staged = e.staged_object(&ObjectPathBuf::parse("existing")).unwrap();
         assert_eq!(staged.kind, StagedKind::Dataset);
         assert!(staged.replaces_link, "the same commit removes the link");
         assert_eq!(
-            e.staged_dataset_meta(&ObjectPath::parse("existing"))
+            e.staged_dataset_meta(&ObjectPathBuf::parse("existing"))
                 .unwrap()
                 .dimensions,
             vec![1]
         );
-        assert!(e.staged_children(&ObjectPath::parse(""))[0].replaces_link);
+        assert!(e.staged_children(&ObjectPathBuf::parse(""))[0].replaces_link);
     }
 
     #[test]
@@ -21193,10 +21199,10 @@ mod staged_query_tests {
         // means, and the session has nothing left to refuse at commit time.
         assert_eq!(kind(&e, "existing"), None);
         assert!(
-            e.staged_dataset_meta(&ObjectPath::parse("existing"))
+            e.staged_dataset_meta(&ObjectPathBuf::parse("existing"))
                 .is_none()
         );
-        assert!(e.staged_children(&ObjectPath::parse("")).is_empty());
+        assert!(e.staged_children(&ObjectPathBuf::parse("")).is_empty());
         e.commit().unwrap();
     }
 
@@ -21220,7 +21226,7 @@ mod staged_query_tests {
         // Refused, not replaced: the first creation is exactly as it was, and it
         // is still the only thing staged at that name.
         assert_eq!(
-            e.staged_dataset_meta(&ObjectPath::parse("fresh"))
+            e.staged_dataset_meta(&ObjectPathBuf::parse("fresh"))
                 .unwrap()
                 .dimensions,
             vec![3]
@@ -21259,7 +21265,7 @@ mod staged_query_tests {
                 .is_err()
         );
         assert_eq!(
-            e.staged_dataset_meta(&ObjectPath::parse("existing"))
+            e.staged_dataset_meta(&ObjectPathBuf::parse("existing"))
                 .unwrap()
                 .dimensions,
             vec![1]
@@ -21271,7 +21277,7 @@ mod staged_query_tests {
         e.stage_created_dataset(&ObjectPathBuf::parse("existing"), i32_dataset(&[8, 8]))
             .unwrap();
         assert_eq!(
-            e.staged_dataset_meta(&ObjectPath::parse("existing"))
+            e.staged_dataset_meta(&ObjectPathBuf::parse("existing"))
                 .unwrap()
                 .dimensions,
             vec![2]
@@ -21340,7 +21346,7 @@ mod staged_query_tests {
         e.stage_created_dataset(&ObjectPathBuf::parse("g/other"), i32_dataset(&[9]))
             .unwrap();
         assert!(
-            !e.staged_children(&ObjectPath::parse("g"))[0].replaces_link,
+            !e.staged_children(&ObjectPathBuf::parse("g"))[0].replaces_link,
             "nothing rebuilds `g`, so its names are not handed over"
         );
         assert!(e.commit().is_err(), "a deletion overlapping an addition");
@@ -21372,11 +21378,11 @@ mod staged_query_tests {
             .unwrap();
         assert_eq!(kind(&e, "g/inner"), Some(StagedKind::Dataset));
         assert!(
-            e.staged_object(&ObjectPath::parse("g/inner"))
+            e.staged_object(&ObjectPathBuf::parse("g/inner"))
                 .unwrap()
                 .replaces_link
         );
-        assert!(e.staged_children(&ObjectPath::parse("g"))[0].replaces_link);
+        assert!(e.staged_children(&ObjectPathBuf::parse("g"))[0].replaces_link);
         e.commit().unwrap();
     }
 
@@ -21401,7 +21407,7 @@ mod staged_query_tests {
         e.stage_created_dataset(&ObjectPathBuf::parse("fresh"), i32_dataset(&[1]))
             .unwrap();
         assert!(
-            !e.staged_object(&ObjectPath::parse("fresh"))
+            !e.staged_object(&ObjectPathBuf::parse("fresh"))
                 .unwrap()
                 .replaces_link,
             "the refused deletion staged nothing, so this replaces nothing"
@@ -21438,7 +21444,7 @@ mod staged_query_tests {
         e.stage_dataset_append_pending(&ObjectPathBuf::parse("col"), b)
             .unwrap();
         assert_eq!(
-            e.staged_dataset_meta(&ObjectPath::parse("col"))
+            e.staged_dataset_meta(&ObjectPathBuf::parse("col"))
                 .unwrap()
                 .dimensions,
             vec![4]
@@ -21476,7 +21482,7 @@ mod staged_query_tests {
             Err(Error::EditUnsupported(_))
         ));
         assert_eq!(
-            e.staged_dataset_meta(&ObjectPath::parse("existing"))
+            e.staged_dataset_meta(&ObjectPathBuf::parse("existing"))
                 .unwrap()
                 .dimensions,
             vec![1],
@@ -21523,13 +21529,13 @@ mod staged_query_tests {
 
         // Nothing the refusals touched changed.
         assert_eq!(
-            e.staged_dataset_meta(&ObjectPath::parse("col"))
+            e.staged_dataset_meta(&ObjectPathBuf::parse("col"))
                 .unwrap()
                 .dimensions,
             vec![2]
         );
         assert_eq!(
-            e.staged_dataset_meta(&ObjectPath::parse("capped"))
+            e.staged_dataset_meta(&ObjectPathBuf::parse("capped"))
                 .unwrap()
                 .dimensions,
             vec![2]
@@ -21632,7 +21638,7 @@ mod staged_query_tests {
         assert_eq!(kind(&e, "gone"), None);
         assert_eq!(kind(&e, "gone/col"), None);
         assert_eq!(kind(&e, "kept"), Some(StagedKind::Dataset));
-        assert!(e.staged_children(&ObjectPath::parse("gone")).is_empty());
+        assert!(e.staged_children(&ObjectPathBuf::parse("gone")).is_empty());
 
         // And it must forget them for good: an index entry left behind would be
         // found by the *next* creation at that path and keep it pointing at the
@@ -21650,7 +21656,7 @@ mod staged_query_tests {
         assert_eq!(kind(&e, "gone"), Some(StagedKind::Group));
         assert_eq!(kind(&e, "gone/col"), Some(StagedKind::Dataset));
         assert_eq!(
-            e.staged_dataset_meta(&ObjectPath::parse("gone/col"))
+            e.staged_dataset_meta(&ObjectPathBuf::parse("gone/col"))
                 .unwrap()
                 .dimensions,
             vec![1]
@@ -21677,7 +21683,7 @@ mod staged_query_tests {
             e.stage_atomically(|s| s.delete(&ObjectPathBuf::parse("col")));
         assert!(matches!(withdrawn, Err(Error::EditUnsupported(_))));
         assert_eq!(
-            e.staged_dataset_meta(&ObjectPath::parse("col"))
+            e.staged_dataset_meta(&ObjectPathBuf::parse("col"))
                 .unwrap()
                 .dimensions,
             vec![2]

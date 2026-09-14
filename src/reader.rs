@@ -38,7 +38,7 @@ use crate::layout_info::{Chunk, ChunkIndex, Filter, Layout};
 use crate::libver::LibVer;
 use crate::message_type::MessageType;
 use crate::object_header::ObjectHeader;
-use crate::object_path::{LinkName, ObjectPath, ObjectPathBuf};
+use crate::object_path::{LinkName, LinkNameBuf, ObjectPath, ObjectPathBuf};
 use crate::read_spec::RawReadSpec;
 use crate::shared_message::{self, BufferedResolver, SharedResolver, SourceResolver};
 use crate::signature;
@@ -1378,14 +1378,18 @@ impl FileInner {
     /// [`Error::NotAGroup`] for an object whose kind
     /// never changed. That is the same staleness reporting itself instead of
     /// answering, which is the better half of the trade.
-    fn locate(&self, path: Option<&str>, memo: Option<Resolution>) -> Result<Resolution, Error> {
+    fn locate(
+        &self,
+        path: Option<&ObjectPathBuf>,
+        memo: Option<Resolution>,
+    ) -> Result<Resolution, Error> {
         let revisions = self.revisions();
         // A handle with no memo has never resolved — it names an object this
         // session staged — so there is nothing to short-circuit on, and its path
         // is walked afresh every time until a commit gives it a header.
         Ok(revisions.at(match (path, memo) {
             (_, Some(memo)) if revisions.address == memo.address_revision => memo.address,
-            (Some(path), _) => self.resolve_path(&ObjectPath::parse(path))?,
+            (Some(path), _) => self.resolve_path(&path.as_path())?,
             (None, _) => return Err(Error::StaleHandle),
         }))
     }
@@ -1415,7 +1419,7 @@ impl FileInner {
     /// refuse, and neither answers from the file.
     fn locate_staged(
         &self,
-        path: Option<&str>,
+        path: Option<&ObjectPathBuf>,
         memo: Option<Resolution>,
         birth: Option<u64>,
     ) -> Result<Resolution, Error> {
@@ -1428,9 +1432,8 @@ impl FileInner {
         }
         match self.locate(path, memo) {
             Err(Error::Format(FormatError::PathNotFound(missing))) => {
-                let named = path.unwrap_or_default();
-                match self.staged_object(&ObjectPath::parse(named)) {
-                    Some(_) => Err(Error::NotCommitted(named.to_string())),
+                match path.and_then(|named| self.staged_object(named)) {
+                    Some(_) => Err(Error::NotCommitted(reported_path(path))),
                     None => Err(Error::Format(FormatError::PathNotFound(missing))),
                 }
             }
@@ -1449,7 +1452,7 @@ impl FileInner {
 
     /// What this session has staged at `path`, if anything. See
     /// [`WriteEngine::staged_object`] for the rule.
-    fn staged_object(&self, path: &ObjectPath<'_>) -> Option<StagedObject> {
+    fn staged_object(&self, path: &ObjectPathBuf) -> Option<StagedObject> {
         self.query_engine(|e| e.staged_object(path)).flatten()
     }
 
@@ -1473,10 +1476,9 @@ impl FileInner {
     /// live. That includes the `birth`-carrying arm, which such a file cannot
     /// produce: a handle holds its [`FileInner`] alive and a backend never
     /// changes under one, so the case is unreachable rather than merely unlikely.
-    fn staged_standing(&self, path: &str, birth: Option<u64>) -> Standing {
-        let path = ObjectPath::parse(path);
+    fn staged_standing(&self, path: &ObjectPathBuf, birth: Option<u64>) -> Standing {
         let Some((generation, staged)) =
-            self.query_engine(|e| (e.staged_generation(), e.staged_object(&path).is_some()))
+            self.query_engine(|e| (e.staged_generation(), e.staged_object(path).is_some()))
         else {
             return Standing::Live;
         };
@@ -1502,12 +1504,11 @@ impl FileInner {
     /// leaves nothing for this handle to answer from either.
     fn staged_dataset_view(
         &self,
-        path: &str,
+        path: &ObjectPathBuf,
         birth: Option<u64>,
     ) -> Result<Option<StagedMeta>, Error> {
-        let staged_path = ObjectPath::parse(path);
         let Some((generation, meta)) =
-            self.query_engine(|e| (e.staged_generation(), e.staged_dataset_meta(&staged_path)))
+            self.query_engine(|e| (e.staged_generation(), e.staged_dataset_meta(path)))
         else {
             return Ok(None);
         };
@@ -1526,9 +1527,8 @@ impl FileInner {
     }
 
     /// The direct children `parent` gains from this session's staged creations.
-    fn staged_children(&self, parent: &str) -> StagedChildren {
-        let parent = ObjectPath::parse(parent);
-        self.query_engine(|e| e.staged_children(&parent))
+    fn staged_children(&self, parent: &ObjectPathBuf) -> StagedChildren {
+        self.query_engine(|e| e.staged_children(parent))
             .unwrap_or_default()
     }
 
@@ -3254,7 +3254,7 @@ impl File {
             // A relocating commit on a read-write file can move the root, so
             // resolve it from the live mirror rather than the cached superblock.
             revisions.at(self.inner.mirror_root_address()),
-            Some(String::new()),
+            Some(ObjectPathBuf::root()),
         )
     }
 
@@ -3285,31 +3285,26 @@ impl File {
         properties: DatasetAccessProperties,
     ) -> Result<Dataset, Error> {
         let chunk_cache = properties.resolved_chunk_cache(self.inner.access_properties.chunk_cache);
-        let relative = ObjectPath::parse(path);
-        let normalized = relative.to_string();
-        match self.inner.staged_object(&relative).map(|o| o.kind) {
+        let path = ObjectPathBuf::parse(path);
+        match self.inner.staged_object(&path).map(|o| o.kind) {
             Some(StagedKind::Dataset) => {
-                return Ok(Dataset::pending(
-                    self.inner.clone(),
-                    chunk_cache,
-                    normalized,
-                ));
+                return Ok(Dataset::pending(self.inner.clone(), chunk_cache, path));
             }
-            Some(StagedKind::Group) => return Err(Error::NotADataset(normalized)),
+            Some(StagedKind::Group) => return Err(Error::NotADataset(path.to_string())),
             None => {}
         }
         let revisions = self.inner.revisions();
-        let addr = self.inner.resolve_path(&relative)?;
+        let addr = self.inner.resolve_path(&path.as_path())?;
         let hdr = self.inner.parse_header(addr)?;
         if !has_message(&hdr, MessageType::DataLayout) {
-            return Err(Error::NotADataset(normalized));
+            return Err(Error::NotADataset(path.to_string()));
         }
         Ok(Dataset::new(
             self.inner.clone(),
             revisions.at(addr),
             hdr,
             chunk_cache,
-            Some(normalized),
+            Some(path),
         ))
     }
 
@@ -3324,27 +3319,26 @@ impl File {
     /// naming that component's own path rather than the one asked for: `a/b/c`
     /// stopped by a dataset at `a/b` reports `NotAGroup("a/b")` (issue #365).
     pub fn group(&self, path: &str) -> Result<Group, Error> {
-        let relative = ObjectPath::parse(path);
-        let normalized = relative.to_string();
-        match self.inner.staged_object(&relative).map(|o| o.kind) {
+        let path = ObjectPathBuf::parse(path);
+        match self.inner.staged_object(&path).map(|o| o.kind) {
             Some(StagedKind::Group) => {
-                return Ok(Group::pending(self.inner.clone(), normalized));
+                return Ok(Group::pending(self.inner.clone(), path));
             }
-            Some(StagedKind::Dataset) => return Err(Error::NotAGroup(normalized)),
+            Some(StagedKind::Dataset) => return Err(Error::NotAGroup(path.to_string())),
             None => {}
         }
         let revisions = self.inner.revisions();
-        let addr = self.inner.resolve_path(&relative)?;
+        let addr = self.inner.resolve_path(&path.as_path())?;
         if !is_group(&self.inner.parse_header(addr)?) {
             // Normalized, so that the same object refused here and refused by a
             // live handle below names itself the same way: a handle knows only
             // the normalized path it memoized.
-            return Err(Error::NotAGroup(normalized));
+            return Err(Error::NotAGroup(path.to_string()));
         }
         Ok(Group::new(
             self.inner.clone(),
             revisions.at(addr),
-            Some(normalized),
+            Some(path),
         ))
     }
 
@@ -3685,12 +3679,12 @@ pub struct Group {
     /// and installs a memo the first time a commit gives it something to point
     /// at.
     state: RwLock<Option<Resolution>>,
-    /// Root-relative path of this group (e.g. `""` for the root, `"a/b"`), used
-    /// to address the group and its children for write operations on a
-    /// read-write file, and to find it again after an edit moved it. `None` for
-    /// a group reached by object reference ([`Dataset::dereference`]), which has
-    /// no resolvable path.
-    path: Option<String>,
+    /// Root-relative path of this group (the root group's own path has no
+    /// components), used to address the group and its children for write
+    /// operations on a read-write file, and to find it again after an edit moved
+    /// it. `None` for a group reached by object reference
+    /// ([`Dataset::dereference`]), which has no resolvable path.
+    path: Option<ObjectPathBuf>,
     /// The session's staged generation when this handle was made onto a staged
     /// creation, and `None` for a handle opened onto a group in the file.
     ///
@@ -3728,7 +3722,7 @@ impl std::fmt::Debug for Group {
 
 impl Group {
     /// Build a handle for a group whose header was found at `at`.
-    fn new(file: Arc<FileInner>, at: Resolution, path: Option<String>) -> Self {
+    fn new(file: Arc<FileInner>, at: Resolution, path: Option<ObjectPathBuf>) -> Self {
         Self {
             file,
             state: RwLock::new(Some(at)),
@@ -3750,7 +3744,7 @@ impl Group {
     /// The session's staged generation is taken here so that the handle can tell
     /// that commit from a *withdrawal* of the same staging, which leaves the
     /// path meaning whatever the file holds — see [`Standing`].
-    fn pending(file: Arc<FileInner>, path: String) -> Self {
+    fn pending(file: Arc<FileInner>, path: ObjectPathBuf) -> Self {
         Self {
             staged_birth: file.staged_generation(),
             file,
@@ -3781,16 +3775,15 @@ impl Group {
         }
         let at = self
             .file
-            .locate_staged(self.path.as_deref(), memo, self.staged_birth)?;
+            .locate_staged(self.path.as_ref(), memo, self.staged_birth)?;
         // Checked before it is memoized. The short-circuit above does not
         // re-check, so an address installed and then refused would be the
         // answer every later call returns without looking at it again.
         if !is_group(&self.file.parse_header(at.address)?) {
             // A path-less handle never reaches here: it failed the short-circuit
             // above, and `locate` answers `StaleHandle` for one whose address
-            // memo it cannot reuse. The default stands for the root's own empty
-            // path, which is the only empty one a handle holds.
-            return Err(Error::NotAGroup(self.path.clone().unwrap_or_default()));
+            // memo it cannot reuse.
+            return Err(Error::NotAGroup(reported_path(self.path.as_ref())));
         }
         let mut state = self.state.write().unwrap_or_else(PoisonError::into_inner);
         // Two threads can re-resolve at once. The older answer must not land on
@@ -3902,7 +3895,7 @@ impl Group {
         let chunk_cache = DatasetAccessProperties::new()
             .resolved_chunk_cache(self.file.access_properties.chunk_cache);
         Ok(members.into_iter().map(move |(name, on_disk)| {
-            let path = LinkName::new(&name).and_then(|leaf| child_path_of(parent.as_deref(), leaf));
+            let path = LinkName::new(&name).and_then(|leaf| child_path_of(parent.as_ref(), leaf));
             let dataset = match on_disk {
                 Some((address, header)) => Dataset::new(
                     Arc::clone(&file),
@@ -4103,7 +4096,7 @@ impl Group {
         let file = Arc::clone(&self.file);
         let parent = self.path.clone();
         Ok(members.into_iter().map(move |(name, address)| {
-            let path = LinkName::new(&name).and_then(|leaf| child_path_of(parent.as_deref(), leaf));
+            let path = LinkName::new(&name).and_then(|leaf| child_path_of(parent.as_ref(), leaf));
             let group = match address {
                 Some(address) => Group::new(Arc::clone(&file), revisions.at(address), path),
                 // As in `iter_datasets`: a staged member is one path component
@@ -4239,7 +4232,7 @@ impl Group {
                     return Ok(Dataset::pending(
                         self.file.clone(),
                         chunk_cache,
-                        child.to_string(),
+                        child.clone(),
                     ));
                 }
                 Some(StagedKind::Group) => return Err(Error::NotADataset(child.to_string())),
@@ -4257,7 +4250,7 @@ impl Group {
             revisions.at(address),
             hdr,
             chunk_cache,
-            child.map(|child| child.to_string()),
+            child,
         ))
     }
 
@@ -4278,7 +4271,7 @@ impl Group {
         if let Some(child) = &child {
             match self.file.staged_object(child).map(|o| o.kind) {
                 Some(StagedKind::Group) => {
-                    return Ok(Group::pending(self.file.clone(), child.to_string()));
+                    return Ok(Group::pending(self.file.clone(), child.clone()));
                 }
                 Some(StagedKind::Dataset) => return Err(Error::NotAGroup(child.to_string())),
                 None => {}
@@ -4289,11 +4282,7 @@ impl Group {
         if !is_group(&self.file.parse_header(address)?) {
             return Err(Error::NotAGroup(self.root_relative(&relative)));
         }
-        Ok(Group::new(
-            self.file.clone(),
-            revisions.at(address),
-            child.map(|child| child.to_string()),
-        ))
+        Ok(Group::new(self.file.clone(), revisions.at(address), child))
     }
 
     /// Returns the address of the object header `path` identifies, walking from this group, or
@@ -4344,11 +4333,8 @@ impl Group {
     /// Returns the root-relative path of the object `path` identifies from this group, or from
     /// the root group where `path` is absolute, and `None` if this group itself has no resolvable
     /// path (reached by object reference).
-    ///
-    /// The [`ObjectPath`] borrows this group's own path and `path`, so a caller that has to keep
-    /// it calls [`ObjectPath::to_path_buf`].
-    fn child_path<'a>(&'a self, path: &ObjectPath<'a>) -> Option<ObjectPath<'a>> {
-        Some(self.object_path()?.join_path(path))
+    fn child_path(&self, path: &ObjectPath<'_>) -> Option<ObjectPathBuf> {
+        Some(self.path.as_ref()?.join_path(path))
     }
 
     /// Returns the path an error reports the object `path` reaches by: its path from the root
@@ -4361,12 +4347,6 @@ impl Group {
     fn root_relative(&self, path: &ObjectPath<'_>) -> String {
         self.child_path(path)
             .map_or_else(|| path.to_string(), |child| child.to_string())
-    }
-
-    /// Returns this group's own path, parsed, or `None` where it has none (reached by object
-    /// reference).
-    fn object_path(&self) -> Option<ObjectPath<'_>> {
-        self.path.as_deref().map(ObjectPath::parse)
     }
 
     /// Creates an empty subgroup at `path` within this group, staged until
@@ -4473,7 +4453,7 @@ impl Group {
             path: child.clone(),
         });
         self.apply_staged(ops)?;
-        Ok(Group::pending(self.file.clone(), child.to_string()))
+        Ok(Group::pending(self.file.clone(), child))
     }
 
     /// Creates a dataset at `path` within this group, configuring it through `build`
@@ -4551,7 +4531,7 @@ impl Group {
             self.file.clone(),
             DatasetAccessProperties::new()
                 .resolved_chunk_cache(self.file.access_properties.chunk_cache),
-            child.to_string(),
+            child,
         ))
     }
 
@@ -4649,7 +4629,7 @@ impl Group {
     /// Costs nothing for a handle opened onto an object in the file: those carry
     /// no birth generation, so the session is never locked to answer.
     fn refuse_if_withdrawn(&self) -> Result<(), Error> {
-        let Some(path) = self.path.as_deref().filter(|_| self.staged_birth.is_some()) else {
+        let Some(path) = self.path.as_ref().filter(|_| self.staged_birth.is_some()) else {
             return Ok(());
         };
         match self.file.staged_standing(path, self.staged_birth) {
@@ -4685,9 +4665,7 @@ impl Group {
             // delete (`H5Lint.c`, HDF5 1.14.6).
             return Err(Error::EditUnsupported(NO_LINK_TO_WRITE));
         }
-        self.child_path(&relative)
-            .map(|child| child.to_path_buf())
-            .ok_or(Error::ReadOnly)
+        self.child_path(&relative).ok_or(Error::ReadOnly)
     }
 
     /// Record already-built edits on the writable session, holding the lock only
@@ -4720,7 +4698,7 @@ impl Group {
         f: impl FnOnce(&mut WriteEngine, &ObjectPathBuf) -> Result<R, Error>,
     ) -> Result<R, Error> {
         self.refuse_if_withdrawn()?;
-        let path = ObjectPathBuf::parse(self.path.as_deref().ok_or(Error::ReadOnly)?);
+        let path = self.path.clone().ok_or(Error::ReadOnly)?;
         self.file
             .with_engine_mut(Change::Relocating, |session| f(session, &path))
     }
@@ -4740,7 +4718,7 @@ impl Group {
     /// on disk to enumerate, and its members are exactly what is staged under
     /// it.
     fn children_and_staged(&self) -> Result<(Vec<GroupEntry>, StagedChildren), Error> {
-        let staged = match self.path.as_deref() {
+        let staged = match self.path.as_ref() {
             Some(path) => self.file.staged_children(path),
             // A group reached by object reference cannot name itself, so nothing
             // can have been staged under it by name either.
@@ -4891,7 +4869,7 @@ pub struct Dataset {
     /// operations on a read-write file, and to find it again after an edit moved
     /// it. `None` for a dataset reached by object reference
     /// ([`Dataset::dereference`]), which has no resolvable path.
-    path: Option<String>,
+    path: Option<ObjectPathBuf>,
     /// The session's staged generation when this handle was made onto a staged
     /// creation, and `None` for a handle opened onto a dataset in the file.
     ///
@@ -5023,7 +5001,7 @@ impl Dataset {
         at: Resolution,
         header: ObjectHeader,
         chunk_cache_config: ChunkCacheConfig,
-        path: Option<String>,
+        path: Option<ObjectPathBuf>,
     ) -> Self {
         Self {
             file,
@@ -5044,7 +5022,11 @@ impl Dataset {
     /// that needs bytes reports [`Error::NotCommitted`] until [`File::commit`],
     /// after which the first use resolves the path and the handle behaves as if
     /// it had been opened by name.
-    fn pending(file: Arc<FileInner>, chunk_cache_config: ChunkCacheConfig, path: String) -> Self {
+    fn pending(
+        file: Arc<FileInner>,
+        chunk_cache_config: ChunkCacheConfig,
+        path: ObjectPathBuf,
+    ) -> Self {
         Self {
             staged_birth: file.staged_generation(),
             file,
@@ -5073,7 +5055,7 @@ impl Dataset {
         {
             return Ok(None);
         }
-        let Some(path) = self.path.as_deref() else {
+        let Some(path) = self.path.as_ref() else {
             return Ok(None);
         };
         self.file.staged_dataset_view(path, self.staged_birth)
@@ -5084,7 +5066,7 @@ impl Dataset {
     fn refuse_if_pending(&self) -> Result<(), Error> {
         match self.staged_meta()? {
             // `staged_meta` answers only for a handle with a path.
-            Some(_) => Err(Error::NotCommitted(self.path.clone().unwrap_or_default())),
+            Some(_) => Err(Error::NotCommitted(reported_path(self.path.as_ref()))),
             None => Ok(()),
         }
     }
@@ -5114,7 +5096,7 @@ impl Dataset {
         };
         let at = self
             .file
-            .locate_staged(self.path.as_deref(), memo, self.staged_birth)?;
+            .locate_staged(self.path.as_ref(), memo, self.staged_birth)?;
         let header = self.file.parse_header(at.address)?;
         // Checked *before* it is memoized. A header installed and then refused is
         // the answer every later call short-circuits on, so this handle would
@@ -5124,7 +5106,7 @@ impl Dataset {
         if !has_message(&header, MessageType::DataLayout) {
             // Only a path can reach this: an address memo that survived is the
             // address of the dataset this handle already read there.
-            return Err(Error::NotADataset(self.path.clone().unwrap_or_default()));
+            return Err(Error::NotADataset(reported_path(self.path.as_ref())));
         }
         Ok(self.install(at, header))
     }
@@ -5278,10 +5260,9 @@ impl Dataset {
         let Backend::Edit(m) = &self.file.backend else {
             return Err(Error::ReadOnly);
         };
-        let path = self.path.as_deref().map(ObjectPathBuf::parse);
         m.lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .claim_for_appender(path.as_ref())
+            .claim_for_appender(self.path.as_ref())
     }
 
     /// Release the claim taken by [`claim_for_appender`](Self::claim_for_appender).
@@ -5580,7 +5561,7 @@ the same commit to replace it",
         &mut self,
         f: impl FnOnce(&mut WriteEngine, &ObjectPathBuf) -> Result<R, Error>,
     ) -> Result<R, Error> {
-        let path = ObjectPathBuf::parse(self.path.as_deref().ok_or(Error::ReadOnly)?);
+        let path = self.path.clone().ok_or(Error::ReadOnly)?;
         self.file
             .with_engine_mut(Change::Relocating, |session| f(session, &path))
     }
@@ -6993,8 +6974,14 @@ fn is_named_datatype(header: &ObjectHeader) -> bool {
 /// A member whose name is no path component, such as the empty name a malformed file can store,
 /// has no [`LinkName`] for the iterators to pass, and they return its handle with `None` for a
 /// path.
-fn child_path_of(parent: Option<&str>, name: LinkName<'_>) -> Option<String> {
-    Some(ObjectPath::parse(parent?).join(name).to_string())
+fn child_path_of(parent: Option<&ObjectPathBuf>, name: LinkName<'_>) -> Option<ObjectPathBuf> {
+    Some(parent?.join(&LinkNameBuf::from(name)))
+}
+
+/// Returns the root-relative path an error reports an object by, and the empty string for a
+/// handle reached by object reference, which has no path.
+fn reported_path(path: Option<&ObjectPathBuf>) -> String {
+    path.map_or_else(String::new, ObjectPathBuf::to_string)
 }
 
 /// The reason [`Group::child_edit_path`] gives for a path that spells no link.
