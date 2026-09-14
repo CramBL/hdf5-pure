@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.46.0] - 2026-09-14
+
 ### Added
 
 - `RepackOptions::reject_unknown_messages_only_a_writer_must_understand` makes `repack` reject a source whose object header holds a message of an unknown type that only a writer must understand, where the default reads past it ([#564](https://github.com/CramBL/hdf5-pure/pull/564)).
@@ -936,7 +938,8 @@ Internal robustness and tests ([#26](https://github.com/CramBL/hdf5-pure/issues/
 - The MAT deserializer flattens 1×N and N×1 values to a 1-D sequence in `deserialize_any` (matching `deserialize_seq`).
 - Numeric/complex readers preserve 1×N / N×1 shape at the value layer; any flattening happens at the serde level.
 
-[Unreleased]: https://github.com/CramBL/hdf5-pure/compare/v0.45.0...HEAD
+[Unreleased]: https://github.com/CramBL/hdf5-pure/compare/v0.46.0...HEAD
+[0.46.0]: https://github.com/CramBL/hdf5-pure/compare/v0.45.0...v0.46.0
 [0.45.0]: https://github.com/CramBL/hdf5-pure/compare/v0.44.2...v0.45.0
 [0.44.2]: https://github.com/CramBL/hdf5-pure/compare/v0.44.1...v0.44.2
 [0.44.1]: https://github.com/CramBL/hdf5-pure/compare/v0.44.0...v0.44.1
