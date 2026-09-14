@@ -348,8 +348,9 @@ pub(crate) fn parse_fsse(
 
 /// Read every persisted free section from the managers named in `manager_addrs`,
 /// fetching the `FSHD`/`FSSE` blocks from `data`. `base` is added to every stored
-/// address (the file's base address, normally 0). Undefined (`u64::MAX`) manager
-/// slots are skipped. Used on reopen to restore a free list.
+/// address (the file's base address, normally 0). A slot whose address is
+/// undefined at `offset_size` is skipped, and so is a manager whose section-info
+/// address is undefined. Used on reopen to restore a free list.
 pub(crate) fn read_persisted_sections(
     data: &[u8],
     manager_addrs: &[u64],
@@ -359,12 +360,13 @@ pub(crate) fn read_persisted_sections(
     let bad = || FormatError::InvalidFreeSpaceManager;
     let mut sections = Vec::new();
     for &addr in manager_addrs {
-        if addr == u64::MAX {
+        let addr = StoredAddress::new(addr);
+        if addr.is_undefined(offset_size) {
             continue;
         }
-        let a = base.absolute(StoredAddress::new(addr))?.to_usize()?;
+        let a = base.absolute(addr)?.to_usize()?;
         let header = FsmHeader::parse(data.get(a..).ok_or_else(bad)?, offset_size)?;
-        if header.fsse_addr.get() == u64::MAX {
+        if header.fsse_addr.is_undefined(offset_size) {
             continue;
         }
         let fa = base.absolute(header.fsse_addr)?.to_usize()?;
@@ -397,14 +399,15 @@ pub(crate) fn read_persisted_sections_source<S: crate::source::Source>(
     let mut blocks = Vec::new();
     let hdr_len = fshd_len(offset_size);
     for &addr in manager_addrs {
-        if addr == u64::MAX {
+        let addr = StoredAddress::new(addr);
+        if addr.is_undefined(offset_size) {
             continue;
         }
-        let a = base.absolute(StoredAddress::new(addr))?;
+        let a = base.absolute(addr)?;
         let fshd = src.read_exact_at(a, hdr_len.to_usize()?)?;
         let header = FsmHeader::parse(&fshd, offset_size)?;
         blocks.push((a, hdr_len));
-        if header.fsse_addr.get() == u64::MAX {
+        if header.fsse_addr.is_undefined(offset_size) {
             continue;
         }
         let fa = base.absolute(header.fsse_addr)?;
@@ -686,6 +689,43 @@ mod tests {
             read_persisted_sections(&buf, &[u64::MAX], BaseAddress::ZERO, 8)
                 .unwrap()
                 .is_empty()
+        );
+    }
+
+    #[test]
+    fn an_undefined_manager_slot_is_skipped_in_a_four_byte_offset_file() {
+        assert!(
+            read_persisted_sections(&[], &[0xFFFF_FFFF], BaseAddress::ZERO, 4)
+                .unwrap()
+                .is_empty(),
+            "an all-0xFF manager address is the sentinel for an unused slot"
+        );
+    }
+
+    #[test]
+    fn a_manager_with_no_section_info_is_skipped_in_a_four_byte_offset_file() {
+        const OS: u8 = 4;
+        let (fshd, _fsse) = serialize_file_fsm(&[], 0, 0xFFFF_FFFF, OS, SECT_CLASS_SIMPLE);
+
+        assert!(
+            read_persisted_sections(&fshd, &[0], BaseAddress::ZERO, OS)
+                .unwrap()
+                .is_empty(),
+            "a manager tracking nothing records no section info"
+        );
+
+        let (sections, blocks) = read_persisted_sections_source(
+            &crate::source::BytesSource::new(&fshd),
+            &[0],
+            BaseAddress::ZERO,
+            OS,
+        )
+        .unwrap();
+        assert!(sections.is_empty());
+        assert_eq!(
+            blocks,
+            vec![(0, fshd_len(OS))],
+            "only the header block was read"
         );
     }
 

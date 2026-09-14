@@ -13,6 +13,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - `FileBuilder::write` reports `FormatError::InvalidLinkName` for a dataset, group or committed-datatype name that is not a component of an object path, where such a name went into the file as a link, leaving its object with no path. The group builders and the in-memory write report it the same way ([#580](https://github.com/CramBL/hdf5-pure/pull/580)).
 - `DatasetBuilder::with_path_references` resolves a target whichever way its path is spelled when the file is written whole, where a spelling other than the one the object was created under was written as the undefined address ([#580](https://github.com/CramBL/hdf5-pure/pull/580)).
 - `RepackOptions::drop_path` takes a path whichever way it is spelled, where a `.` component identified no object and failed the repack. A drop path that identifies the root group, and a source link whose name is not a component of a path, are rejected with `Error::RepackUnsupported` ([#580](https://github.com/CramBL/hdf5-pure/pull/580)).
+- `File::persisted_free_space` reports the free regions of a file whose addresses are narrower than 8 bytes, where a free-space manager storing the undefined address for its section list was read as though a list were there and the call reported an empty result. An edit of such a file reuses those regions ([#581](https://github.com/CramBL/hdf5-pure/pull/581)).
 
 ## [0.46.0] - 2026-09-14
 
