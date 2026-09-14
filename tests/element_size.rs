@@ -73,8 +73,7 @@ fn element_size_exposes_a_hostile_declared_size() {
     let bytes =
         std::fs::read("tests/data/fuzz/oom_chunked_string_huge_elem.h5").expect("read fixture");
     let file = File::from_bytes(bytes).unwrap();
-    let root = file.root();
-    let name = root.datasets().unwrap().into_iter().next().unwrap();
-    let ds = root.dataset(&name).unwrap();
+    let (name, ds) = file.root().iter_datasets().unwrap().next().unwrap();
+    assert_eq!(name, "", "the fixture's one link has an empty name");
     assert_eq!(ds.element_size().unwrap(), 0xAAAA_AAAA);
 }

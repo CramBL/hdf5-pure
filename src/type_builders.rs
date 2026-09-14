@@ -19,6 +19,7 @@ use crate::datatype::{
 };
 use crate::display::write_elided;
 use crate::error::FormatError;
+use crate::object_path::ObjectPath;
 use crate::scaleoffset::{FillAvailability, ScaleOffset};
 use crate::shared_message::DatatypeLocation;
 
@@ -2410,7 +2411,8 @@ impl DatasetBuilder {
     /// [`FileBuilder::commit_datatype`](crate::FileBuilder::commit_datatype) or
     /// [`GroupBuilder::commit_datatype`], with or without a leading `/`.
     pub fn with_committed_datatype(&mut self, path: &str) -> &mut Self {
-        self.datatype_location = DatatypeLocation::CommittedPath(normalize_object_path(path));
+        self.datatype_location =
+            DatatypeLocation::CommittedPath(ObjectPath::parse(path).to_string());
         self
     }
 
@@ -3564,16 +3566,6 @@ pub(crate) struct CommittedDatatype {
     pub(crate) datatype: Datatype,
 }
 
-/// Canonicalize a path naming an object in the file being written.
-///
-/// The writer's own path map is keyed without a leading slash (the root group is
-/// the empty path), while an HDF5 user writes `/mytype`. Both forms name the same
-/// object, so both are accepted and reduced to the map's form here rather than at
-/// every lookup.
-pub(crate) fn normalize_object_path(path: &str) -> String {
-    path.trim_matches('/').to_string()
-}
-
 /// How an attribute named after the committed datatype at `path` is written:
 /// an already-encoded message whose datatype has moved out of it.
 ///
@@ -3591,7 +3583,8 @@ pub(crate) fn normalize_object_path(path: &str) -> String {
 /// an empty string in the C library.
 pub(crate) fn committed_attr_spec(name: &str, value: &AttrValue, path: &str) -> AttrSpec {
     let mut message = build_attr_message(name, value);
-    message.datatype_location = DatatypeLocation::CommittedPath(normalize_object_path(path));
+    message.datatype_location =
+        DatatypeLocation::CommittedPath(ObjectPath::parse(path).to_string());
     match value.var_len_strings() {
         Some(strings) => AttrSpec::VerbatimVarLen {
             message,

@@ -7272,7 +7272,13 @@ fn the_root_group_cannot_be_deleted() {
     let session = File::open_rw(&path).unwrap();
     for name in ["", "/"] {
         let err = session.root().delete(name).unwrap_err();
-        assert!(err.to_string().contains("root group"), "got: {err}");
+        let Error::EditUnsupported(reason) = &err else {
+            panic!("expected EditUnsupported for {name:?}, got {err:?}");
+        };
+        assert_eq!(
+            *reason,
+            "a write needs a link name, and this path holds none"
+        );
     }
     // Refused where it was asked for, so it cannot go on to make every staged
     // creation in the session look like a replacement of a file object.

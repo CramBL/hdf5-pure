@@ -656,8 +656,9 @@ fn a_committed_datatype_this_crate_writes_reads_back_as_committed() {
         .create_dataset("typed")
         .with_i32_data(&DATASET_VALUES)
         // Absolute, where every other test here names the type relatively. This
-        // is the only coverage of the leading slash `normalize_object_path`
-        // trims, so the two spellings must not be made uniform.
+        // is the only coverage of the absolute spelling, which the writer stores
+        // under the same key as the relative one, so the two spellings must not
+        // be made uniform.
         .with_committed_datatype("/mytype")
         .set_attr_committed("shared_attr", AttrValue::I32(ATTR_VALUE), "mytype");
     builder.write(&path).expect("write a committed datatype");

@@ -891,6 +891,7 @@ pub(crate) mod message_flags;
 pub(crate) mod message_type;
 pub(crate) mod object_header;
 pub(crate) mod object_header_writer;
+pub(crate) mod object_path;
 pub(crate) mod read_spec;
 pub(crate) mod scaleoffset;
 pub(crate) mod shared_message;

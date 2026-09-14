@@ -722,7 +722,7 @@ let err = file.dataset("sensors/pressure").unwrap_err();
 let Error::Format(FormatError::PathNotFound(missing)) = &err else {
     panic!("expected PathNotFound, got {err:?}");
 };
-assert_eq!(missing, "pressure");
+assert_eq!(missing, "sensors/pressure");
 # Ok::<(), hdf5_pure::Error>(())
 ```
 
