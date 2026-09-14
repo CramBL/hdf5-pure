@@ -3293,10 +3293,10 @@ impl WriteEngine {
         builder: DatasetBuilder,
     ) -> Result<(), Error> {
         self.refuse_if_claimed(path)?;
-        self.refuse_creation_collision(path, StagedKind::Dataset)?;
         let Some((parent, leaf)) = path.split_leaf() else {
             return Err(Error::EditUnsupported("dataset path has an empty name"));
         };
+        self.refuse_creation_collision(path, StagedKind::Dataset)?;
         self.staged
             .push_dataset(parent, flatten_dataset(builder, leaf)?);
         Ok(())
@@ -4984,9 +4984,10 @@ impl WriteEngine {
         path: &ObjectPathBuf,
         kind: StagedKind,
     ) -> Result<(), Error> {
-        // An empty path names the root, which is not a link and cannot be
-        // created. Both callers already refuse it by name — with a message that
-        // says so — so this must not answer first with a collision.
+        // An empty path identifies the root group, which no link reaches and
+        // nothing creates. Both callers reject it with a message of their own
+        // before this is reached, so this returns `Ok` and leaves the collision
+        // below to a path that identifies a link.
         if path.is_empty() {
             return Ok(());
         }
@@ -5144,7 +5145,20 @@ impl WriteEngine {
     /// [`commit`](Self::commit). The parent must already exist or be created in
     /// the same session; populate the group with datasets via
     /// [`stage_created_dataset`](Self::stage_created_dataset) using a path under it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::EditUnsupported`] if `path` is [`ObjectPathBuf::root`], which no link
+    /// reaches, if a live buffered appender covers `path`, or if the name is taken on the terms
+    /// [`refuse_creation_collision`](Self::refuse_creation_collision) sets out.
     pub fn create_group(&mut self, path: &ObjectPathBuf) -> Result<(), Error> {
+        // Nothing links to the root group, and every file has one, so there is
+        // no link here to create. Rejected here, as a deletion of the root is:
+        // a creation staged at the root would mark it a node this commit builds
+        // fresh, until the commit rejected the batch.
+        if path.is_empty() {
+            return Err(Error::EditUnsupported("cannot create the root group"));
+        }
         self.refuse_if_claimed(path)?;
         self.refuse_creation_collision(path, StagedKind::Group)?;
         self.staged.push_group(path.clone());
@@ -21025,13 +21039,11 @@ mod staged_query_tests {
     //! The queries a handle asks about objects a session has staged and not
     //! committed (issue #392).
 
-    use super::*;
-    use crate::type_builders::DatasetBuilder;
+    use rstest::rstest;
     use tempfile::tempdir;
 
-    fn object_path(spelling: &str) -> ObjectPathBuf {
-        ObjectPathBuf::parse(spelling)
-    }
+    use super::*;
+    use crate::type_builders::DatasetBuilder;
 
     /// A session over a file holding one dataset, `existing`.
     fn open_session(path: &Path) -> WriteEngine {
@@ -21382,27 +21394,49 @@ mod staged_query_tests {
         e.commit().unwrap();
     }
 
-    #[test]
-    fn the_root_cannot_be_deleted() {
+    #[rstest]
+    #[case("")]
+    #[case("/")]
+    #[case(".")]
+    fn the_root_cannot_be_deleted(#[case] spelling: &str) {
         // Nothing links to the root, so there is no link to remove — and an
         // empty path is a prefix of every other, so a deletion staged there
         // would make every creation in the session look like a replacement.
         let dir = tempdir().unwrap();
         let mut e = open_session(&dir.path().join("q.h5"));
-        for path in ["", "/"] {
-            let err = e.delete(&object_path(path)).unwrap_err();
-            assert!(
-                matches!(&err, Error::EditUnsupported(m) if m.contains("root group")),
-                "got: {err}"
-            );
-        }
-        e.stage_created_dataset(&object_path("fresh"), i32_dataset(&[1]))
+        let err = e.delete(&ObjectPathBuf::parse(spelling)).unwrap_err();
+        let Error::EditUnsupported(message) = &err else {
+            panic!("expected EditUnsupported, got {err:?}");
+        };
+        assert_eq!(
+            *message,
+            "cannot delete the root group; delete its members instead"
+        );
+        e.stage_created_dataset(&ObjectPathBuf::parse("fresh"), i32_dataset(&[1]))
             .unwrap();
         assert!(
             !e.staged_object(&ObjectPath::parse("fresh"))
                 .unwrap()
                 .replaces_link,
-            "no deletion was staged, so this replaces nothing"
+            "the refused deletion staged nothing, so this replaces nothing"
+        );
+    }
+
+    #[rstest]
+    #[case("")]
+    #[case("/")]
+    #[case(".")]
+    fn the_root_group_cannot_be_created(#[case] spelling: &str) {
+        let dir = tempdir().unwrap();
+        let mut e = open_session(&dir.path().join("q.h5"));
+        let err = e.create_group(&ObjectPathBuf::parse(spelling)).unwrap_err();
+        let Error::EditUnsupported(message) = &err else {
+            panic!("expected EditUnsupported, got {err:?}");
+        };
+        assert_eq!(*message, "cannot create the root group");
+        assert!(
+            !e.has_staged_edits(),
+            "the refusal staged nothing for a later commit to find"
         );
     }
 

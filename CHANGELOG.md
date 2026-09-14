@@ -9,6 +9,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 ### Fixed
 
 - `DatasetBuilder::with_path_references` resolves a target whose spelling holds a `.` component against the object that path identifies, where such a target kept the address it had before the commit and was left dangling by a commit that moved the object. A target the same commit writes, or deletes, is rejected for that spelling too ([#573](https://github.com/CramBL/hdf5-pure/pull/573))
+- `Group::create_group_with` rejects a group creation at the root group's path from inside its closure and stages nothing, where the call returned `Ok` and the next `File::commit` reported it. A creation staged through a group handle still reports such a path as spelling no link ([#573](https://github.com/CramBL/hdf5-pure/pull/573)).
 
 ## [0.46.0] - 2026-09-14
 

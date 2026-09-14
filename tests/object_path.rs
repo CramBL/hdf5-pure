@@ -314,6 +314,35 @@ impl StagedWrite {
 }
 
 #[rstest]
+#[case("/")]
+#[case("//")]
+#[case("/./")]
+fn a_creation_staged_in_a_closure_at_the_root_group_path_is_rejected(#[case] spelling: &str) {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("root_creation.h5");
+    let mut builder = FileBuilder::new();
+    let mut a = builder.create_group("a");
+    a.create_dataset("d").with_i32_data(&[1]);
+    builder.add_group(a.finish());
+    builder.write(&path).unwrap();
+
+    let file = File::open_rw(&path).unwrap();
+    let err = file
+        .root()
+        .create_group_with("g", |group| {
+            group.create_group(spelling);
+        })
+        .unwrap_err();
+    let Error::EditUnsupported(reason) = &err else {
+        panic!("expected EditUnsupported, got {err:?}");
+    };
+    assert_eq!(*reason, "cannot create the root group");
+
+    file.commit().unwrap();
+    assert_eq!(file.root().groups().unwrap(), vec!["a"]);
+}
+
+#[rstest]
 #[case("")]
 #[case(".")]
 #[case("./.")]
