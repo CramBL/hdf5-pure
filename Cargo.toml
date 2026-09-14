@@ -105,6 +105,9 @@ panic_in_result_fn = "warn"
 todo = "warn"
 unimplemented = "warn"
 
+# Error handling: an error is returned to the caller or converted, never dropped.
+map_err_ignore = "warn"
+
 # `no_std`: everything below the filesystem API imports from `core` and `alloc`.
 alloc_instead_of_core = "warn"
 
@@ -212,8 +215,6 @@ unreachable = "allow"
 get_unwrap = "allow"
 # TODO: a slice of a string panics off a character boundary.
 string_slice = "allow"
-# TODO: each site keeps or converts the error it drops.
-map_err_ignore = "allow"
 # TODO: the `.ok()` rule.
 let_underscore_must_use = "allow"
 # TODO: the determinism rule.
