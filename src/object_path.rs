@@ -7,7 +7,12 @@
 //! (`H5G__traverse_real` in `H5Gtraverse.c`, HDF5 1.14.6).
 //!
 //! [`LinkName`] is one component of a path, the name of a link in one group.
+//!
+//! [`ObjectPathBuf`] owns the components of a path from the root group, and [`LinkNameBuf`] owns
+//! one component.
 
+#[cfg(not(feature = "std"))]
+use alloc::string::String;
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 use core::fmt;
@@ -88,6 +93,19 @@ impl<'a> ObjectPath<'a> {
         }
     }
 
+    /// Converts this path into an owned [`ObjectPathBuf`], which keeps its components and not
+    /// where the walk starts.
+    pub(crate) fn to_path_buf(&self) -> ObjectPathBuf {
+        ObjectPathBuf {
+            components: self
+                .components
+                .iter()
+                .copied()
+                .map(LinkNameBuf::from)
+                .collect(),
+        }
+    }
+
     /// Returns the components, an empty slice for the path of the object a walk starts from.
     pub(crate) fn components(&self) -> &[LinkName<'a>] {
         &self.components
@@ -103,13 +121,115 @@ impl<'a> ObjectPath<'a> {
 /// stores: `a/b` for every spelling of that path, and the empty string for the root group.
 impl fmt::Display for ObjectPath<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        for (position, name) in self.components.iter().enumerate() {
-            if position > 0 {
-                f.write_str(SEPARATOR)?;
-            }
-            f.write_str(name.as_str())?;
+        write_components(f, self.components.iter().copied().map(LinkName::as_str))
+    }
+}
+
+/// An owned path from the root group: its components, and nothing of how they were spelled.
+///
+/// The edit engine keys its staged edits on this, so two spellings of one path are one key.
+/// [`as_path`](Self::as_path) borrows it back as an absolute [`ObjectPath`], the form a walk
+/// takes.
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub(crate) struct ObjectPathBuf {
+    /// The components, in order, from the root group.
+    components: Vec<LinkNameBuf>,
+}
+
+impl ObjectPathBuf {
+    pub(crate) fn root() -> Self {
+        Self {
+            components: Vec::new(),
         }
-        Ok(())
+    }
+
+    pub(crate) fn join(&self, name: &LinkNameBuf) -> Self {
+        let mut components = self.components.clone();
+        components.push(name.clone());
+        Self { components }
+    }
+
+    pub(crate) fn prefix(&self, count: usize) -> Self {
+        Self {
+            components: self.components.iter().take(count).cloned().collect(),
+        }
+    }
+
+    pub(crate) fn split_leaf(&self) -> Option<(Self, LinkNameBuf)> {
+        let (leaf, parent) = self.components.split_last()?;
+        Some((
+            Self {
+                components: parent.to_vec(),
+            },
+            leaf.clone(),
+        ))
+    }
+
+    /// Borrows the components as an absolute [`ObjectPath`], the form a resolver walks.
+    pub(crate) fn as_path(&self) -> ObjectPath<'_> {
+        ObjectPath {
+            components: self
+                .components
+                .iter()
+                .map(LinkNameBuf::as_link_name)
+                .collect(),
+            absolute: true,
+        }
+    }
+
+    /// Returns the components, an empty slice for the root group.
+    pub(crate) fn components(&self) -> &[LinkNameBuf] {
+        &self.components
+    }
+
+    /// Returns the number of components, which is the depth of the object below the root group.
+    pub(crate) fn len(&self) -> usize {
+        self.components.len()
+    }
+
+    /// Returns `true` if this is the path of the root group.
+    pub(crate) fn is_empty(&self) -> bool {
+        self.components.is_empty()
+    }
+
+    /// Returns the link name this path has in `parent`, or `None` unless `parent` holds the
+    /// object directly.
+    pub(crate) fn name_under(&self, parent: &Self) -> Option<&LinkNameBuf> {
+        let (leaf, above) = self.components.split_last()?;
+        (above == parent.components()).then_some(leaf)
+    }
+
+    /// Returns `true` if `prefix` identifies this object or an ancestor of it.
+    pub(crate) fn starts_with(&self, prefix: &Self) -> bool {
+        self.components.starts_with(prefix.components())
+    }
+
+    /// Returns `true` if one of the two paths identifies the object the other does or an
+    /// ancestor of it.
+    pub(crate) fn overlaps(&self, other: &Self) -> bool {
+        self.starts_with(other) || other.starts_with(self)
+    }
+
+    /// Returns `true` if the child `name` of `parent` lies at or under this path.
+    ///
+    /// Takes `parent` and `name` in place of the child's own path, which a caller would have to
+    /// build to pass it.
+    pub(crate) fn covers_child(&self, parent: &Self, name: &LinkNameBuf) -> bool {
+        match self.len() {
+            n if n <= parent.len() => parent.starts_with(self),
+            n if n == parent.len() + 1 => {
+                self.starts_with(parent) && self.components().get(parent.len()) == Some(name)
+            }
+            _ => false,
+        }
+    }
+}
+
+/// Writes the components separated by `/`, the root-relative form a [`crate::Group`] handle
+/// stores, and the empty string for the root group.
+impl fmt::Display for ObjectPathBuf {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write_components(f, self.components.iter().map(LinkNameBuf::as_str))
     }
 }
 
@@ -135,6 +255,46 @@ impl<'a> LinkName<'a> {
     }
 }
 
+/// The name of one link in one group, owned: one component of an [`ObjectPathBuf`].
+///
+/// Built only from a [`LinkName`], so [`LinkName::new`] is the one gate on what a component may
+/// be.
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub(crate) struct LinkNameBuf(String);
+
+impl LinkNameBuf {
+    /// Returns the name as the group's link stores it.
+    pub(crate) fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// Borrows the name as a [`LinkName`], the form a group lookup takes.
+    pub(crate) fn as_link_name(&self) -> LinkName<'_> {
+        LinkName(&self.0)
+    }
+}
+
+/// Copies a parsed name into an owned one.
+impl From<LinkName<'_>> for LinkNameBuf {
+    fn from(name: LinkName<'_>) -> Self {
+        Self(String::from(name.as_str()))
+    }
+}
+
+/// Writes `names` separated by `/`, the form both path types display in.
+fn write_components<'a>(
+    f: &mut fmt::Formatter<'_>,
+    names: impl Iterator<Item = &'a str>,
+) -> fmt::Result {
+    for (position, name) in names.enumerate() {
+        if position > 0 {
+            f.write_str(SEPARATOR)?;
+        }
+        f.write_str(name)?;
+    }
+    Ok(())
+}
+
 /// Separates the components of an object path.
 const SEPARATOR: &str = "/";
 
@@ -146,7 +306,15 @@ const CURRENT_GROUP: &str = ".";
 mod tests {
     use rstest::rstest;
 
-    use super::{LinkName, ObjectPath};
+    use super::{LinkName, LinkNameBuf, ObjectPath, ObjectPathBuf};
+
+    fn path(spelling: &str) -> ObjectPathBuf {
+        ObjectPath::parse(spelling).to_path_buf()
+    }
+
+    fn name(link_name: &str) -> LinkNameBuf {
+        LinkNameBuf::from(LinkName::new(link_name).expect("a name that is one component"))
+    }
 
     #[rstest]
     #[case("a/b")]
@@ -264,5 +432,113 @@ mod tests {
         #[case] prefix: &str,
     ) {
         assert_eq!(ObjectPath::parse("a/b/c").prefix(count).to_string(), prefix);
+    }
+
+    #[rstest]
+    #[case("a/b")]
+    #[case("/a/b")]
+    #[case("a//b/")]
+    #[case("./a/./b")]
+    fn every_spelling_of_a_path_owns_the_same_components(#[case] spelling: &str) {
+        assert_eq!(path(spelling), path("a/b"));
+        assert_eq!(path(spelling).to_string(), "a/b");
+    }
+
+    #[rstest]
+    #[case("")]
+    #[case("/")]
+    #[case(".")]
+    fn a_path_that_spells_no_link_owns_the_root_group_path(#[case] spelling: &str) {
+        assert_eq!(path(spelling), ObjectPathBuf::root());
+        assert!(path(spelling).is_empty());
+        assert_eq!(ObjectPathBuf::root().to_string(), "");
+    }
+
+    #[rstest]
+    #[case("", "a")]
+    #[case("g", "g/a")]
+    #[case("/g/h/", "g/h/a")]
+    fn joining_appends_one_component_to_an_owned_path(#[case] base: &str, #[case] joined: &str) {
+        assert_eq!(path(base).join(&name("a")), path(joined));
+    }
+
+    #[rstest]
+    #[case(0, "")]
+    #[case(2, "a/b")]
+    #[case(9, "a/b/c")]
+    fn an_owned_prefix_names_the_object_reached_after_that_many_components(
+        #[case] count: usize,
+        #[case] prefix: &str,
+    ) {
+        assert_eq!(path("a/b/c").prefix(count), path(prefix));
+    }
+
+    #[test]
+    fn splitting_off_the_leaf_gives_the_group_holding_the_link_and_its_name() {
+        let (parent, leaf) = path("a/b/c").split_leaf().expect("a path naming a link");
+        assert_eq!(parent, path("a/b"));
+        assert_eq!(leaf, name("c"));
+        assert_eq!(ObjectPathBuf::root().split_leaf(), None);
+    }
+
+    #[rstest]
+    #[case("g/a", Some("a"))]
+    #[case("g", None)]
+    #[case("g/a/b", None)]
+    #[case("h/a", None)]
+    fn a_name_under_a_group_is_the_leaf_of_a_direct_child(
+        #[case] child: &str,
+        #[case] link_name: Option<&str>,
+    ) {
+        assert_eq!(
+            path(child).name_under(&path("g")).map(LinkNameBuf::as_str),
+            link_name
+        );
+    }
+
+    #[rstest]
+    #[case("a/b", "a", true)]
+    #[case("a/b", "a/b", true)]
+    #[case("a/b", "", true)]
+    #[case("a/b", "a/b/c", false)]
+    #[case("a/b", "b", false)]
+    fn a_path_starts_with_itself_and_with_each_of_its_ancestors(
+        #[case] path_of: &str,
+        #[case] prefix: &str,
+        #[case] starts_with: bool,
+    ) {
+        assert_eq!(path(path_of).starts_with(&path(prefix)), starts_with);
+    }
+
+    #[rstest]
+    #[case("a/b", "a", true)]
+    #[case("a", "a/b", true)]
+    #[case("a/b", "a/b", true)]
+    #[case("a/b", "a/c", false)]
+    fn two_paths_overlap_when_one_names_the_other_or_an_ancestor_of_it(
+        #[case] one: &str,
+        #[case] other: &str,
+        #[case] overlaps: bool,
+    ) {
+        assert_eq!(path(one).overlaps(&path(other)), overlaps);
+    }
+
+    #[rstest]
+    #[case("", true)]
+    #[case("g", true)]
+    #[case("g/col", true)]
+    #[case("g/col/deeper", false)]
+    #[case("g/other", false)]
+    #[case("h", false)]
+    fn a_path_covers_a_child_it_identifies_or_holds(#[case] prefix: &str, #[case] covers: bool) {
+        assert_eq!(path(prefix).covers_child(&path("g"), &name("col")), covers);
+    }
+
+    #[test]
+    fn an_owned_path_borrows_back_as_an_absolute_path() {
+        let absolute = path("a/b");
+        assert!(absolute.as_path().is_absolute());
+        assert_eq!(absolute.as_path().to_string(), "a/b");
+        assert_eq!(absolute.as_path().to_path_buf(), absolute);
     }
 }

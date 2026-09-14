@@ -303,7 +303,7 @@ use crate::link_message::{LinkMessage, LinkTarget};
 use crate::message_flags::MessageFlags;
 use crate::message_type::MessageType;
 use crate::object_header::ObjectHeader;
-use crate::object_path::ObjectPath;
+use crate::object_path::{LinkNameBuf, ObjectPath, ObjectPathBuf};
 use crate::reader::FileAccessProperties;
 use crate::shared_message::DatatypeLocation;
 use crate::signature;
@@ -448,10 +448,6 @@ const MAX_OH_CHUNKS: usize = 256;
 /// image.
 const OH_PREFIX_MAX: usize = 34;
 
-/// A path identified by its components (no leading/trailing empties); the root
-/// group is the empty vector.
-type PathKey = Vec<String>;
-
 /// A live [`BufferedAppender`](crate::BufferedAppender)'s hold on a dataset.
 ///
 /// The appender accepts elements into memory and is the only thing that can
@@ -465,7 +461,7 @@ struct AppenderClaim {
     /// reference. Such a handle is named by object-header address, which *any*
     /// staged edit may move, so a path-less claim conflicts with everything —
     /// exactly the rule `append_prepare` already applies to that target.
-    path: Option<PathKey>,
+    path: Option<ObjectPathBuf>,
 }
 
 /// A variable-length group/root attribute staged by [`apply_compact_attr_ops`]
@@ -653,7 +649,7 @@ struct StagedEdits {
     /// guards it raises — a missing shape, data that does not match it, a
     /// feature this engine cannot reproduce — are answered at the call that
     /// stages the dataset, where the caller still has the context to fix them.
-    datasets: Vec<(PathKey, FlatDataset)>,
+    datasets: Vec<(ObjectPathBuf, FlatDataset)>,
     /// Value overwrites staged by `write_dataset`, as (full dataset path,
     /// dataset). Each replaces an existing dataset's values in place; the new
     /// datatype and shape must match the on-disk ones byte-exactly (this is a
@@ -661,34 +657,34 @@ struct StagedEdits {
     /// Flattened at staging, for the reason given on [`datasets`](Self::datasets);
     /// the match against the on-disk dataset is a commit-time check and stays
     /// one, since it reads the file.
-    writes: Vec<(PathKey, FlatDataset)>,
+    writes: Vec<(ObjectPathBuf, FlatDataset)>,
     /// Appends staged by `append_dataset`, as (full dataset path, builder). Each
     /// grows an existing chunked, unlimited, Extensible-Array-indexed dataset
     /// along axis 0 by keeping its existing chunk data in place and rebuilding the
     /// index over the kept plus newly-appended (and any rewritten trailing) chunks.
     /// Applied on the next `commit`.
-    appends: Vec<(PathKey, AppendBuilder)>,
+    appends: Vec<(ObjectPathBuf, AppendBuilder)>,
     /// New groups staged by `create_group`, as full paths.
-    groups: Vec<PathKey>,
+    groups: Vec<ObjectPathBuf>,
     /// Group attribute edits staged as (group path, operation). The path may be
     /// a group created in this same session.
-    group_attrs: Vec<(PathKey, AttrOp)>,
+    group_attrs: Vec<(ObjectPathBuf, AttrOp)>,
     /// Dataset attribute edits staged as (full dataset path, operation), applied
     /// on the next `commit`. Each relocates the dataset's object header (like a
     /// relocating overwrite): the header is rebuilt with the compact-attribute
     /// change, its single naming link is patched, and the old header freed — the
     /// dataset's data and chunk index stay in place. The target must be an existing,
     /// single-hard-link dataset using compact (not dense fractal-heap) attributes.
-    dataset_attrs: Vec<(PathKey, AttrOp)>,
+    dataset_attrs: Vec<(ObjectPathBuf, AttrOp)>,
     /// Links staged for removal by `delete`, as full paths.
-    deletes: Vec<PathKey>,
+    deletes: Vec<ObjectPathBuf>,
     /// Object copies staged by `copy`, as (source path, destination full path).
-    copies: Vec<(PathKey, PathKey)>,
+    copies: Vec<(ObjectPathBuf, ObjectPathBuf)>,
     /// Cross-file object copies staged by `copy_from`, as (destination full path,
     /// the source subtree already read out of the other file). The subtree is read
     /// — and foreign-address-screened — eagerly in `copy_from` (the source file is
     /// borrowed only for that call), then linked in at the next `commit`.
-    cross_copies: Vec<(PathKey, CopyTree)>,
+    cross_copies: Vec<(ObjectPathBuf, CopyTree)>,
     /// Where the creation at each full path sits in [`datasets`](Self::datasets)
     /// / [`groups`](Self::groups), so a by-name question about the staged set
     /// costs a hash rather than a scan of everything staged.
@@ -701,27 +697,8 @@ struct StagedEdits {
     /// [`withdraw_at`](Self::withdraw_at) makes after removing from the middle.
     /// A path staged twice keeps its *first* position, which is the entry a scan
     /// would have found; the commit refuses such a pair anyway.
-    dataset_at: HashMap<PathKey, usize>,
-    group_at: HashMap<PathKey, usize>,
-}
-
-/// The full path of a dataset staged under `parent` as `name`.
-fn child_key(parent: &[String], name: &str) -> PathKey {
-    let mut full = parent.to_vec();
-    full.push(name.to_string());
-    full
-}
-
-/// Whether the dataset staged under `parent` as `name` lies at or under
-/// `prefix`, without building its full path.
-fn dataset_under(parent: &[String], name: &str, prefix: &[String]) -> bool {
-    match prefix.len() {
-        n if n <= parent.len() => parent.starts_with(prefix),
-        n if n == parent.len() + 1 => {
-            parent[..] == prefix[..parent.len()] && prefix[parent.len()] == name
-        }
-        _ => false,
-    }
+    dataset_at: HashMap<ObjectPathBuf, usize>,
+    group_at: HashMap<ObjectPathBuf, usize>,
 }
 
 /// What a session has staged at a path, for a handle addressing an object the
@@ -844,7 +821,7 @@ impl StagedEdits {
         for i in mark.datasets..self.datasets.len() {
             let key = {
                 let (parent, fd) = &self.datasets[i];
-                child_key(parent, &fd.name)
+                parent.join(&fd.name)
             };
             // Only where it still points at the entry being dropped: a second
             // creation at one path never displaced the first.
@@ -881,15 +858,15 @@ impl StagedEdits {
     }
 
     /// Stage a dataset creation, indexing it by its full path.
-    fn push_dataset(&mut self, parent: PathKey, fd: FlatDataset) {
+    fn push_dataset(&mut self, parent: ObjectPathBuf, fd: FlatDataset) {
         self.dataset_at
-            .entry(child_key(&parent, &fd.name))
+            .entry(parent.join(&fd.name))
             .or_insert(self.datasets.len());
         self.datasets.push((parent, fd));
     }
 
     /// Stage a group creation, indexing it by its path.
-    fn push_group(&mut self, path: PathKey) {
+    fn push_group(&mut self, path: ObjectPathBuf) {
         self.group_at
             .entry(path.clone())
             .or_insert(self.groups.len());
@@ -901,20 +878,20 @@ impl StagedEdits {
     /// The position the index gives is checked against the entry it names
     /// rather than trusted: an index that fell behind the vector then reads as a
     /// miss — the answer a scan would give — instead of as another dataset.
-    fn dataset_position(&self, path: &[String]) -> Option<usize> {
+    fn dataset_position(&self, path: &ObjectPathBuf) -> Option<usize> {
         let i = *self.dataset_at.get(path)?;
         let (parent, fd) = self.datasets.get(i)?;
-        dataset_under(parent, &fd.name, path).then_some(i)
+        path.covers_child(parent, &fd.name).then_some(i)
     }
 
-    /// The staged dataset at `path` (given as components), if there is one.
-    fn dataset_at(&self, path: &[String]) -> Option<&FlatDataset> {
+    /// The staged dataset at `path`, if there is one.
+    fn dataset_at(&self, path: &ObjectPathBuf) -> Option<&FlatDataset> {
         let i = self.dataset_position(path)?;
         self.datasets.get(i).map(|(_, fd)| fd)
     }
 
     /// The staged dataset at `path`, mutably.
-    fn dataset_at_mut(&mut self, path: &[String]) -> Option<&mut FlatDataset> {
+    fn dataset_at_mut(&mut self, path: &ObjectPathBuf) -> Option<&mut FlatDataset> {
         let i = self.dataset_position(path)?;
         self.datasets.get_mut(i).map(|(_, fd)| fd)
     }
@@ -922,17 +899,17 @@ impl StagedEdits {
     /// Whether a group creation is staged at `path`. Checked against the entry
     /// the index names, for the reason [`dataset_position`](Self::dataset_position)
     /// gives.
-    fn has_group_at(&self, path: &[String]) -> bool {
+    fn has_group_at(&self, path: &ObjectPathBuf) -> bool {
         match self.group_at.get(path) {
-            Some(&i) => self.groups.get(i).is_some_and(|p| p[..] == *path),
+            Some(&i) => self.groups.get(i).is_some_and(|p| p == path),
             None => false,
         }
     }
 
     /// Whether a staged deletion removes the link at `path`, or the link to an
     /// ancestor that carries it away.
-    fn deletes_cover(&self, path: &[String]) -> bool {
-        self.deletes.iter().any(|d| path.starts_with(&d[..]))
+    fn deletes_cover(&self, path: &ObjectPathBuf) -> bool {
+        self.deletes.iter().any(|d| path.starts_with(d))
     }
 
     /// Whether a staged deletion hands `path` over to a creation staged there —
@@ -951,9 +928,9 @@ impl StagedEdits {
     ///
     /// The exact deletion is the empty case of the same rule: with `d == path`
     /// there is no ancestor between them to have been recreated.
-    fn deletes_hand_over(&self, path: &[String]) -> bool {
+    fn deletes_hand_over(&self, path: &ObjectPathBuf) -> bool {
         self.deletes.iter().any(|d| {
-            path.starts_with(&d[..]) && (d.len()..path.len()).all(|n| self.has_group_at(&path[..n]))
+            path.starts_with(d) && (d.len()..path.len()).all(|n| self.has_group_at(&path.prefix(n)))
         })
     }
 
@@ -971,7 +948,7 @@ impl StagedEdits {
     /// Destructured for the reason [`mark`](Self::mark) is: a staged kind added
     /// later has to be classified here rather than silently survive a
     /// withdrawal.
-    fn withdraw_at(&mut self, path: &[String]) -> bool {
+    fn withdraw_at(&mut self, path: &ObjectPathBuf) -> bool {
         let before = {
             let Self {
                 datasets,
@@ -987,7 +964,7 @@ impl StagedEdits {
                 group_at: _,
             } = self;
             let before = datasets.len() + groups.len();
-            datasets.retain(|(parent, fd)| !dataset_under(parent, &fd.name, path));
+            datasets.retain(|(parent, fd)| !path.covers_child(parent, &fd.name));
             writes.retain(|(p, _)| !p.starts_with(path));
             appends.retain(|(p, _)| !p.starts_with(path));
             groups.retain(|p| !p.starts_with(path));
@@ -1011,9 +988,7 @@ impl StagedEdits {
         self.dataset_at.clear();
         self.group_at.clear();
         for (i, (parent, fd)) in self.datasets.iter().enumerate() {
-            self.dataset_at
-                .entry(child_key(parent, &fd.name))
-                .or_insert(i);
+            self.dataset_at.entry(parent.join(&fd.name)).or_insert(i);
         }
         for (i, path) in self.groups.iter().enumerate() {
             self.group_at.entry(path.clone()).or_insert(i);
@@ -1199,7 +1174,7 @@ pub(crate) struct WriteEngine {
     /// The collections a dataset held when the session *opened* are never in
     /// here and are never reclaimed: their provenance is whatever wrote the
     /// file. `repack` is what recovers those.
-    vl_overwrite_heaps: HashMap<PathKey, Vec<(u64, u64)>>,
+    vl_overwrite_heaps: HashMap<ObjectPathBuf, Vec<(u64, u64)>>,
     /// Heap collections superseded by a value overwrite this commit is applying,
     /// freed once the commit's superblock repoint has landed — never before, so
     /// a mid-commit crash leaves the prior root reaching bytes that are still
@@ -1408,7 +1383,7 @@ struct FreeSnapshot {
     /// record naming it. The next overwrite of that path would then free a
     /// region already handed out — the one piece of engine state naming file
     /// addresses that this rollback used to miss (issue #321).
-    vl_overwrite_heaps: HashMap<PathKey, Vec<(u64, u64)>>,
+    vl_overwrite_heaps: HashMap<ObjectPathBuf, Vec<(u64, u64)>>,
 }
 
 /// How much memory a read-write open may use to hold the file being edited.
@@ -3304,13 +3279,16 @@ impl WriteEngine {
     pub(crate) fn stage_created_dataset(
         &mut self,
         path: &str,
-        mut builder: DatasetBuilder,
+        builder: DatasetBuilder,
     ) -> Result<(), Error> {
-        let mut comps = split_path(path);
-        self.refuse_if_claimed(&comps)?;
-        self.refuse_creation_collision(&comps, StagedKind::Dataset)?;
-        builder.name = comps.pop().unwrap_or_default();
-        self.staged.push_dataset(comps, flatten_dataset(builder)?);
+        let full = ObjectPath::parse(path).to_path_buf();
+        self.refuse_if_claimed(&full)?;
+        self.refuse_creation_collision(&full, StagedKind::Dataset)?;
+        let Some((parent, leaf)) = full.split_leaf() else {
+            return Err(Error::EditUnsupported("dataset path has an empty name"));
+        };
+        self.staged
+            .push_dataset(parent, flatten_dataset(builder, leaf)?);
         Ok(())
     }
 
@@ -3354,20 +3332,17 @@ impl WriteEngine {
     pub(crate) fn stage_dataset_write(
         &mut self,
         path: &str,
-        mut builder: DatasetBuilder,
+        builder: DatasetBuilder,
     ) -> Result<(), Error> {
-        self.refuse_if_claimed(&split_path(path))?;
-        let comps = split_path(path);
-        // Before the flatten below, which would otherwise report the root as a
-        // dataset with an empty name: the leaf of an empty path is what names
-        // the builder.
-        let Some(leaf) = comps.last() else {
+        let full = ObjectPath::parse(path).to_path_buf();
+        self.refuse_if_claimed(&full)?;
+        // The root group has no link to overwrite: the superblock identifies it.
+        let Some((_, leaf)) = full.split_leaf() else {
             return Err(Error::EditUnsupported("cannot overwrite the root group"));
         };
-        builder.name = leaf.clone();
-        let fd = flatten_dataset(builder)?;
+        let fd = flatten_dataset(builder, leaf)?;
         Self::refuse_unsupported_overwrite(&fd)?;
-        self.staged.writes.push((comps, fd));
+        self.staged.writes.push((full, fd));
         Ok(())
     }
 
@@ -3411,9 +3386,9 @@ impl WriteEngine {
         path: &str,
         builder: AppendBuilder,
     ) -> Result<(), Error> {
-        let comps = split_path(path);
-        self.refuse_if_claimed(&comps)?;
-        if self.staged.dataset_at(&comps).is_some() {
+        let full = ObjectPath::parse(path).to_path_buf();
+        self.refuse_if_claimed(&full)?;
+        if self.staged.dataset_at(&full).is_some() {
             // This call came through a handle onto the object *in the file*: a
             // handle onto the staged creation goes to
             // [`stage_dataset_append_pending`] instead. So the elements could
@@ -3427,7 +3402,7 @@ impl WriteEngine {
             ));
         }
         self.refuse_lossy_partial_tail(path, &builder)?;
-        self.staged.appends.push((comps, builder));
+        self.staged.appends.push((full, builder));
         Ok(())
     }
 
@@ -3550,19 +3525,19 @@ impl WriteEngine {
         path: &str,
         builder: AppendBuilder,
     ) -> Result<(), Error> {
-        let comps = split_path(path);
-        self.refuse_if_claimed(&comps)?;
-        if self.staged.dataset_at(&comps).is_none() {
+        let full = ObjectPath::parse(path).to_path_buf();
+        self.refuse_if_claimed(&full)?;
+        if self.staged.dataset_at(&full).is_none() {
             // Nothing staged here after all, so these elements grow the object the
             // file holds — including its trailing chunk, which the same eager
             // refusal applies to. The fold below reaches no on-disk chunk at all
             // and is untouched by it.
             self.refuse_lossy_partial_tail(path, &builder)?;
-            self.staged.appends.push((comps, builder));
+            self.staged.appends.push((full, builder));
             return Ok(());
         }
         self.refuse_mid_batch()?;
-        self.extend_staged_dataset(&comps, &builder)
+        self.extend_staged_dataset(&full, &builder)
     }
 
     /// Refuse an edit that changes or withdraws something already staged while a
@@ -3604,7 +3579,7 @@ impl WriteEngine {
     /// commit writes is the digest of what it writes.
     fn extend_staged_dataset(
         &mut self,
-        comps: &[String],
+        path: &ObjectPathBuf,
         builder: &AppendBuilder,
     ) -> Result<(), Error> {
         if builder.dt_conflict() {
@@ -3614,7 +3589,7 @@ impl WriteEngine {
         }
         let fd = self
             .staged
-            .dataset_at_mut(comps)
+            .dataset_at_mut(path)
             .expect("caller checked a dataset is staged at this path");
         if fd.vl_string_staging.is_some() || fd.reference_targets.is_some() {
             return Err(Error::AppendUnsupported(
@@ -3689,18 +3664,18 @@ impl WriteEngine {
     /// staged edit already pending on that path is one the appender's own flush
     /// would later refuse.
     pub(crate) fn claim_for_appender(&mut self, path: Option<&str>) -> Result<u64, Error> {
-        let path = path.map(split_path);
+        let path = path.map(|p| ObjectPath::parse(p).to_path_buf());
         if self
             .appender_claims
             .iter()
-            .any(|c| claims_conflict(c.path.as_deref(), path.as_deref()))
+            .any(|c| claims_conflict(c.path.as_ref(), path.as_ref()))
         {
             return Err(Error::EditUnsupported(
                 "this dataset already has a live buffered appender; two of them would interleave \
                  their buffers a chunk at a time",
             ));
         }
-        let blocked = match path.as_deref() {
+        let blocked = match path.as_ref() {
             Some(p) => self.append_conflicts_with_pending(p),
             None => self.has_staged_edits() || self.committed,
         };
@@ -3729,9 +3704,9 @@ impl WriteEngine {
     /// an ancestor. Left unchecked, staging such an edit turns accepted data into
     /// data lost silently in `Drop`. Refusing here moves the failure to the call
     /// that creates the conflict, where there is someone to report it to.
-    fn refuse_if_claimed(&self, path: &[String]) -> Result<(), Error> {
+    fn refuse_if_claimed(&self, path: &ObjectPathBuf) -> Result<(), Error> {
         let conflicts = self.appender_claims.iter().any(|c| match &c.path {
-            Some(p) => paths_overlap(p, path),
+            Some(p) => p.overlaps(path),
             None => true,
         });
         if conflicts {
@@ -4587,7 +4562,7 @@ impl WriteEngine {
         // superset of the path check, and the remedy is the same one.
         match target {
             AppendTarget::Path(dataset) => {
-                if self.append_conflicts_with_pending(&split_path(dataset)) {
+                if self.append_conflicts_with_pending(&ObjectPath::parse(dataset).to_path_buf()) {
                     return Err(Error::AppendInPlaceUnsupported(
                         "the dataset or an ancestor has a staged edit pending in this session; \
                          commit the staged edits before appending in place, or use \
@@ -4887,19 +4862,19 @@ impl WriteEngine {
     /// and group-attribute edits are excluded: they rewrite a group header without
     /// moving a descendant dataset's header or freeing its storage, so they cannot
     /// stale the append geometry cache.
-    fn append_conflicts_with_pending(&self, target: &[String]) -> bool {
-        let hits = |p: &[String]| paths_overlap(target, p);
+    fn append_conflicts_with_pending(&self, target: &ObjectPathBuf) -> bool {
+        let hits = |p: &ObjectPathBuf| target.overlaps(p);
         self.staged.writes.iter().any(|(p, _)| hits(p))
             || self.staged.appends.iter().any(|(p, _)| hits(p))
-            || self.staged.deletes.iter().any(|p| hits(p))
+            || self.staged.deletes.iter().any(&hits)
             || self.staged.copies.iter().any(|(_, dst)| hits(dst))
             || self.staged.cross_copies.iter().any(|(dst, _)| hits(dst))
             || self.staged.dataset_attrs.iter().any(|(p, _)| hits(p))
-            || self.staged.datasets.iter().any(|(parent, fd)| {
-                let mut full = parent.clone();
-                full.push(fd.name.clone());
-                paths_overlap(target, &full)
-            })
+            || self
+                .staged
+                .datasets
+                .iter()
+                .any(|(parent, fd)| target.overlaps(&parent.join(&fd.name)))
     }
 
     /// What this session has staged at `path`, for a handle that wants to
@@ -4934,22 +4909,22 @@ impl WriteEngine {
         if self.stages_no_creations() {
             return None;
         }
-        let comps = split_path(path);
-        if comps.is_empty() {
+        let full = ObjectPath::parse(path).to_path_buf();
+        if full.is_empty() {
             // The root always exists; nothing can stage it.
             return None;
         }
-        let kind = if self.staged.dataset_at(&comps).is_some() {
+        let kind = if self.staged.dataset_at(&full).is_some() {
             StagedKind::Dataset
-        } else if self.staged.has_group_at(&comps) {
+        } else if self.staged.has_group_at(&full) {
             StagedKind::Group
         } else {
             return None;
         };
-        let replaces_link = self.staged.deletes_hand_over(&comps);
+        let replaces_link = self.staged.deletes_hand_over(&full);
         // The file is asked only about a path a creation actually names, so an
         // ordinary open of an object nothing is staged at never pays for this.
-        if !replaces_link && self.path_in_file(&comps) {
+        if !replaces_link && self.path_in_file(&full) {
             return None;
         }
         Some(StagedObject {
@@ -4988,25 +4963,29 @@ impl WriteEngine {
     ///
     /// A [`copy`](Self::copy) destination is still the commit's collision to
     /// refuse: it hands back no handle, so nothing can be misaddressed by it.
-    fn refuse_creation_collision(&self, comps: &[String], kind: StagedKind) -> Result<(), Error> {
+    fn refuse_creation_collision(
+        &self,
+        path: &ObjectPathBuf,
+        kind: StagedKind,
+    ) -> Result<(), Error> {
         // An empty path names the root, which is not a link and cannot be
         // created. Both callers already refuse it by name — with a message that
         // says so — so this must not answer first with a collision.
-        if comps.is_empty() {
+        if path.is_empty() {
             return Ok(());
         }
         // Asked before the file, so that staging twice over a link this session
         // deletes — a replacement, which the file arm below lets through — is
         // caught by the same rule as staging twice over nothing.
-        if self.staged.dataset_at(comps).is_some()
-            || (kind == StagedKind::Dataset && self.staged.has_group_at(comps))
+        if self.staged.dataset_at(path).is_some()
+            || (kind == StagedKind::Dataset && self.staged.has_group_at(path))
         {
             return Err(Error::EditUnsupported(
                 "this session already stages an object with this name in the target group; \
                  delete it to withdraw that staging before staging another in its place",
             ));
         }
-        if self.staged.deletes_hand_over(comps) || !self.path_in_file(comps) {
+        if self.staged.deletes_hand_over(path) || !self.path_in_file(path) {
             return Ok(());
         }
         Err(Error::EditUnsupported(
@@ -5021,21 +5000,20 @@ impl WriteEngine {
     /// reader's own path resolution does: this is asked once per by-name lookup
     /// of a path a creation is staged at, so the copy a `Source` read would make
     /// per link block is worth avoiding.
-    fn path_in_file(&self, path: &[String]) -> bool {
-        let joined = path.join("/");
+    fn path_in_file(&self, path: &ObjectPathBuf) -> bool {
         match self.image.as_slice() {
             Some(data) => crate::group_v2::resolve_path_any(
                 data,
                 AccessMode::ReadWrite,
                 &self.superblock,
-                &ObjectPath::parse(&joined),
+                &path.as_path(),
             )
             .is_ok(),
             None => crate::group_v2::resolve_path_any_from_source(
                 &self.image(),
                 AccessMode::ReadWrite,
                 &self.superblock,
-                &ObjectPath::parse(&joined),
+                &path.as_path(),
             )
             .is_ok(),
         }
@@ -5068,7 +5046,9 @@ impl WriteEngine {
         if self.staged_object(path)?.kind != StagedKind::Dataset {
             return None;
         }
-        let fd = self.staged.dataset_at(&split_path(path))?;
+        let fd = self
+            .staged
+            .dataset_at(&ObjectPath::parse(path).to_path_buf())?;
         Some(StagedMeta {
             datatype: fd.dt.clone(),
             dimensions: fd.ds.dimensions.clone(),
@@ -5103,7 +5083,7 @@ impl WriteEngine {
         if self.stages_no_creations() {
             return Vec::new();
         }
-        let base = split_path(parent);
+        let base = ObjectPath::parse(parent).to_path_buf();
         // Whether this group is itself a replacement staged here — its on-disk
         // links go with the object being removed, so every creation under it
         // owns its name — and which links directly under it are removed by
@@ -5116,15 +5096,15 @@ impl WriteEngine {
             .staged
             .deletes
             .iter()
-            .filter(|d| d.len() == base.len() + 1 && d[..base.len()] == base[..])
-            .map(|d| d[base.len()].as_str())
+            .filter_map(|d| d.name_under(&base))
+            .map(LinkNameBuf::as_str)
             .collect();
 
         let mut seen: HashSet<&str> = HashSet::new();
         let mut out: Vec<StagedChild> = Vec::new();
         for path in &self.staged.groups {
-            if path.len() == base.len() + 1 && path[..base.len()] == base[..] {
-                let name = path[base.len()].as_str();
+            if let Some(name) = path.name_under(&base) {
+                let name = name.as_str();
                 if seen.insert(name) {
                     out.push(StagedChild {
                         name: name.to_string(),
@@ -5135,9 +5115,9 @@ impl WriteEngine {
             }
         }
         for (p, fd) in &self.staged.datasets {
-            if p[..] == base[..] && seen.insert(fd.name.as_str()) {
+            if *p == base && seen.insert(fd.name.as_str()) {
                 out.push(StagedChild {
-                    name: fd.name.clone(),
+                    name: fd.name.as_str().to_string(),
                     kind: StagedKind::Dataset,
                     replaces_link: base_deleted || deleted_here.contains(fd.name.as_str()),
                 });
@@ -5151,10 +5131,10 @@ impl WriteEngine {
     /// the same session; populate the group with datasets via
     /// [`stage_created_dataset`](Self::stage_created_dataset) using a path under it.
     pub fn create_group(&mut self, path: &str) -> Result<(), Error> {
-        let comps = split_path(path);
-        self.refuse_if_claimed(&comps)?;
-        self.refuse_creation_collision(&comps, StagedKind::Group)?;
-        self.staged.push_group(comps);
+        let full = ObjectPath::parse(path).to_path_buf();
+        self.refuse_if_claimed(&full)?;
+        self.refuse_creation_collision(&full, StagedKind::Group)?;
+        self.staged.push_group(full);
         Ok(())
     }
 
@@ -5173,10 +5153,10 @@ impl WriteEngine {
         name: &str,
         value: AttrValue,
     ) -> Result<(), Error> {
-        let comps = split_path(path);
-        self.refuse_if_claimed(&comps)?;
+        let full = ObjectPath::parse(path).to_path_buf();
+        self.refuse_if_claimed(&full)?;
         self.staged.group_attrs.push((
-            comps,
+            full,
             AttrOp::Set {
                 name: name.to_string(),
                 value,
@@ -5192,10 +5172,10 @@ impl WriteEngine {
     /// named attribute must exist in the committed group state after any earlier
     /// staged attribute operations for the same group have been applied.
     pub fn remove_group_attr(&mut self, path: &str, name: &str) -> Result<(), Error> {
-        let comps = split_path(path);
-        self.refuse_if_claimed(&comps)?;
+        let full = ObjectPath::parse(path).to_path_buf();
+        self.refuse_if_claimed(&full)?;
         self.staged.group_attrs.push((
-            comps,
+            full,
             AttrOp::Remove {
                 name: name.to_string(),
             },
@@ -5221,10 +5201,10 @@ impl WriteEngine {
         name: &str,
         value: AttrValue,
     ) -> Result<(), Error> {
-        let comps = split_path(path);
-        self.refuse_if_claimed(&comps)?;
+        let full = ObjectPath::parse(path).to_path_buf();
+        self.refuse_if_claimed(&full)?;
         self.staged.dataset_attrs.push((
-            comps,
+            full,
             AttrOp::Set {
                 name: name.to_string(),
                 value,
@@ -5241,10 +5221,10 @@ impl WriteEngine {
     /// same dataset have been applied. Like [`set_dataset_attr`](Self::set_dataset_attr)
     /// it relocates the dataset header and requires a single hard link.
     pub fn remove_dataset_attr(&mut self, path: &str, name: &str) -> Result<(), Error> {
-        let comps = split_path(path);
-        self.refuse_if_claimed(&comps)?;
+        let full = ObjectPath::parse(path).to_path_buf();
+        self.refuse_if_claimed(&full)?;
         self.staged.dataset_attrs.push((
-            comps,
+            full,
             AttrOp::Remove {
                 name: name.to_string(),
             },
@@ -5310,30 +5290,30 @@ impl WriteEngine {
     /// The root itself (`""` or `"/"`) is refused with [`Error::EditUnsupported`]:
     /// nothing links to it, so there is no link to remove.
     pub fn delete(&mut self, path: &str) -> Result<(), Error> {
-        let comps = split_path(path);
+        let full = ObjectPath::parse(path).to_path_buf();
         // The root is not linked from anywhere, so there is no link to remove —
         // and an empty path is a prefix of every other, so a deletion staged
         // here would make every staged creation in the session look like a
         // replacement of a file object until the commit refused the batch.
         // Refused by name, as creating the root is.
-        if comps.is_empty() {
+        if full.is_empty() {
             return Err(Error::EditUnsupported(
                 "cannot delete the root group; delete its members instead",
             ));
         }
-        self.refuse_if_claimed(&comps)?;
-        if self.staged.dataset_at(&comps).is_some() || self.staged.has_group_at(&comps) {
+        self.refuse_if_claimed(&full)?;
+        if self.staged.dataset_at(&full).is_some() || self.staged.has_group_at(&full) {
             self.refuse_mid_batch()?;
-            self.staged.withdraw_at(&comps);
+            self.staged.withdraw_at(&full);
             // Withdrawing is the whole deletion unless the file holds a link
             // here too — and if it does, a deletion of it may already be staged,
             // which is what made this a replacement in the first place. A second
             // one would be an overlapping deletion the commit refuses.
-            if self.staged.deletes_cover(&comps) || !self.path_in_file(&comps) {
+            if self.staged.deletes_cover(&full) || !self.path_in_file(&full) {
                 return Ok(());
             }
         }
-        self.staged.deletes.push(comps);
+        self.staged.deletes.push(full);
         Ok(())
     }
 
@@ -5362,7 +5342,10 @@ impl WriteEngine {
     /// does not read, and is refused by name so the two do not share an answer
     /// (issue #336).
     pub fn copy(&mut self, src: &str, dst: &str) -> Result<(), Error> {
-        let (s, d) = (split_path(src), split_path(dst));
+        let (s, d) = (
+            ObjectPath::parse(src).to_path_buf(),
+            ObjectPath::parse(dst).to_path_buf(),
+        );
         // Both ends matter: the source is read and the destination is written,
         // and a commit relocates headers along either path.
         self.refuse_if_claimed(&s)?;
@@ -5440,11 +5423,11 @@ impl WriteEngine {
             ));
         }
 
-        let src = split_path(src);
+        let src = ObjectPath::parse(src).to_path_buf();
         if src.is_empty() {
             return Err(Error::EditUnsupported("cannot copy the root group"));
         }
-        let dst = split_path(dst);
+        let dst = ObjectPath::parse(dst).to_path_buf();
         if dst.is_empty() {
             return Err(Error::EditUnsupported("copy destination path is empty"));
         }
@@ -5453,7 +5436,7 @@ impl WriteEngine {
             src_data,
             source.access_mode(),
             src_sb,
-            &ObjectPath::parse(&src.join("/")),
+            &src.as_path(),
         )?;
         // Read (and foreign-address-screen) the whole subtree now, while `source`
         // is borrowed; the owned tree carries every byte the commit will write. The
@@ -5737,8 +5720,8 @@ impl WriteEngine {
         // compact rewrite relocates the header and is staged against its parent
         // group so the commit below rebuilds it and patches the link. ---
         let mut inplace_writes: Vec<(u64, OverwriteBytes)> = Vec::new();
-        let mut moving_writes: Vec<(PathKey, String, u64, MovingWrite)> = Vec::new();
-        let mut write_targets: Vec<PathKey> = Vec::new();
+        let mut moving_writes: Vec<(ObjectPathBuf, LinkNameBuf, u64, MovingWrite)> = Vec::new();
+        let mut write_targets: Vec<ObjectPathBuf> = Vec::new();
         // The file-wide hard-link count, computed lazily the first time a commit
         // relocates a header: such a write moves the object's header and patches
         // only the one parent link that names it, so an object reachable through
@@ -5760,12 +5743,11 @@ impl WriteEngine {
                     "the same dataset is overwritten twice in one commit; use separate commits",
                 ));
             }
-            let path_str = full.join("/");
             let addr = crate::group_v2::resolve_path_any_from_source(
                 &self.image(),
                 AccessMode::ReadWrite,
                 &self.superblock,
-                &ObjectPath::parse(&path_str),
+                &full.as_path(),
             )?;
             match Self::prepare_write(&self.image(), addr, fd, base, full)? {
                 WritePlan::InPlace { data_addr, bytes } => {
@@ -5802,8 +5784,9 @@ impl WriteEngine {
                             ));
                         }
                     }
-                    let leaf = full.last().unwrap().clone();
-                    let parent = full[..full.len() - 1].to_vec();
+                    let Some((parent, leaf)) = full.split_leaf() else {
+                        return Err(Error::EditUnsupported("cannot overwrite the root group"));
+                    };
                     moving_writes.push((parent, leaf, addr, mw));
                 }
             }
@@ -5818,9 +5801,9 @@ impl WriteEngine {
         // against its parent group so the commit patches the link). A zero-length
         // append is a no-op and is dropped here. ---
         for (full, ab) in &staged.appends {
-            if full.is_empty() {
+            let Some((parent, leaf)) = full.split_leaf() else {
                 return Err(Error::AppendUnsupported("cannot append to the root group"));
-            }
+            };
             if ab.raw.is_empty() {
                 continue; // nothing to append
             }
@@ -5832,12 +5815,11 @@ impl WriteEngine {
                     "the same dataset is edited more than once in one commit; use separate commits",
                 ));
             }
-            let path_str = full.join("/");
             let addr = crate::group_v2::resolve_path_any_from_source(
                 &self.image(),
                 AccessMode::ReadWrite,
                 &self.superblock,
-                &ObjectPath::parse(&path_str),
+                &full.as_path(),
             )?;
             let mw = Self::prepare_append(&self.image(), addr, ab, base)?;
             // A relocating append moves the dataset's object header and patches only
@@ -5855,8 +5837,6 @@ impl WriteEngine {
                     ));
                 }
             }
-            let leaf = full.last().unwrap().clone();
-            let parent = full[..full.len() - 1].to_vec();
             moving_writes.push((parent, leaf, addr, mw));
             write_targets.push(full.clone());
         }
@@ -5871,8 +5851,8 @@ impl WriteEngine {
         if !staged.dataset_attrs.is_empty() {
             // Collect the ops per dataset in first-seen path order, so multiple edits
             // to one dataset produce a single relocating header rewrite.
-            let mut order: Vec<PathKey> = Vec::new();
-            let mut ops_by_path: HashMap<&PathKey, Vec<&AttrOp>> = HashMap::new();
+            let mut order: Vec<ObjectPathBuf> = Vec::new();
+            let mut ops_by_path: HashMap<&ObjectPathBuf, Vec<&AttrOp>> = HashMap::new();
             for (path, op) in &staged.dataset_attrs {
                 if !ops_by_path.contains_key(path) {
                     order.push(path.clone());
@@ -5881,11 +5861,11 @@ impl WriteEngine {
             }
             for full in order {
                 let ops = ops_by_path.remove(&full).unwrap();
-                if full.is_empty() {
+                let Some((parent, leaf)) = full.split_leaf() else {
                     return Err(Error::EditUnsupported(
                         "cannot set a dataset attribute on the root group; use set_group_attr",
                     ));
-                }
+                };
                 // A dataset already overwritten or appended in this commit would be
                 // planned against a stale header; require separate commits.
                 if write_targets.contains(&full) {
@@ -5894,12 +5874,11 @@ impl WriteEngine {
                          edit plus another edit); use separate commits",
                     ));
                 }
-                let path_str = full.join("/");
                 let addr = crate::group_v2::resolve_path_any_from_source(
                     &self.image(),
                     AccessMode::ReadWrite,
                     &self.superblock,
-                    &ObjectPath::parse(&path_str),
+                    &full.as_path(),
                 )?;
                 // An attribute edit relocates the dataset's object header and patches
                 // only the one naming link, so it is safe only when this is the
@@ -5918,8 +5897,7 @@ impl WriteEngine {
                 }
                 let region = Self::gather_oh_messages(&self.image(), addr, base)?;
                 let edits = plan_attr_ops(&self.image(), base, Some(addr), &region, &ops)?;
-                let leaf = full.last().unwrap().clone();
-                let parent = full[..full.len() - 1].to_vec();
+
                 moving_writes.push((
                     parent,
                     leaf,
@@ -6004,16 +5982,16 @@ impl WriteEngine {
         // path to an addition or deletion), validating every target before any
         // write. `add_targets` records the full paths created this commit, used
         // to reject a deletion that overlaps an addition. ---
-        let mut nodes: BTreeMap<PathKey, Node> = BTreeMap::new();
-        nodes.entry(PathKey::new()).or_default(); // root is always dirty
-        let mut add_targets: Vec<PathKey> = Vec::new();
+        let mut nodes: BTreeMap<ObjectPathBuf, Node> = BTreeMap::new();
+        nodes.entry(ObjectPathBuf::root()).or_default(); // root is always dirty
+        let mut add_targets: Vec<ObjectPathBuf> = Vec::new();
         // Where each in-file `copy` reads from. A copy takes its bytes from the
         // *pre-commit* file, so a source this same commit replaces would copy the
         // object being removed while the replacement lands at the same path — see
         // the delete-staging loop, which refuses that. Cross-file copies are not
         // tracked: their source is in another file, so no path here can name it.
-        let mut copy_sources: Vec<PathKey> = Vec::new();
-        let mut attr_targets: Vec<PathKey> = Vec::new();
+        let mut copy_sources: Vec<ObjectPathBuf> = Vec::new();
+        let mut attr_targets: Vec<ObjectPathBuf> = Vec::new();
 
         // Mark explicitly-created new groups, ensuring their ancestor chain.
         for path in &staged.groups {
@@ -6030,9 +6008,7 @@ impl WriteEngine {
         // preflight reads but must not empty (issue #316); `datasets_by_group`
         // below is the grouped view both the preflight and the apply loop use.
         for (parent, fd) in &staged.datasets {
-            let mut full = parent.clone();
-            full.push(fd.name.clone());
-            add_targets.push(full);
+            add_targets.push(parent.join(&fd.name));
             ensure_ancestors(&mut nodes, parent);
         }
 
@@ -6064,20 +6040,19 @@ impl WriteEngine {
             if src.is_empty() {
                 return Err(Error::EditUnsupported("cannot copy the root group"));
             }
-            if dst.is_empty() {
+            let Some((parent, leaf)) = dst.split_leaf() else {
                 return Err(Error::EditUnsupported("copy destination path is empty"));
-            }
-            if is_prefix(src, dst) {
+            };
+            if dst.starts_with(src) {
                 return Err(Error::EditUnsupported(
                     "cannot copy an object into itself or its own subtree",
                 ));
             }
-            let src_str = src.join("/");
             let src_addr = crate::group_v2::resolve_path_any_from_source(
                 &self.image(),
                 AccessMode::ReadWrite,
                 &self.superblock,
-                &ObjectPath::parse(&src_str),
+                &src.as_path(),
             )?;
             // Read the source subtree from this file's own mirror (`cross_file`
             // false: same address space, so verbatim addresses stay valid). On a
@@ -6093,8 +6068,6 @@ impl WriteEngine {
             )?;
             copy_sources.push(src.clone());
             add_targets.push(dst.clone());
-            let leaf = dst.last().unwrap().clone();
-            let parent = dst[..dst.len() - 1].to_vec();
             ensure_ancestors(&mut nodes, &parent);
             nodes.entry(parent).or_default().copies.push((leaf, tree));
         }
@@ -6104,12 +6077,10 @@ impl WriteEngine {
         // called, so here they are simply linked into the destination parent like
         // any other addition.
         for (dst, _) in &staged.cross_copies {
-            if dst.is_empty() {
+            let Some((parent, leaf)) = dst.split_leaf() else {
                 return Err(Error::EditUnsupported("copy destination path is empty"));
-            }
+            };
             add_targets.push(dst.clone());
-            let leaf = dst.last().unwrap().clone();
-            let parent = dst[..dst.len() - 1].to_vec();
             ensure_ancestors(&mut nodes, &parent);
             nodes.entry(parent).or_default().cross_copies.push(leaf);
         }
@@ -6122,15 +6093,14 @@ impl WriteEngine {
         let delete_targets = &staged.deletes;
         let mut deleted_addrs: Vec<u64> = Vec::new();
         for (i, d) in delete_targets.iter().enumerate() {
-            if d.is_empty() {
+            let Some((parent, leaf)) = d.split_leaf() else {
                 return Err(Error::EditUnsupported("cannot delete the root group"));
-            }
-            let path_str = d.join("/");
+            };
             let del_addr = crate::group_v2::resolve_path_any_from_source(
                 &self.image(),
                 AccessMode::ReadWrite,
                 &self.superblock,
-                &ObjectPath::parse(&path_str),
+                &d.as_path(),
             )?;
             deleted_addrs.push(del_addr);
             // A deletion may overlap other staged work when this commit
@@ -6161,7 +6131,7 @@ impl WriteEngine {
             if recreated
                 && !nodes
                     .iter()
-                    .all(|(key, node)| !is_prefix(d, key) || node.is_new)
+                    .all(|(key, node)| !key.starts_with(d) || node.is_new)
             {
                 return Err(Error::EditUnsupported(
                     "a staged edit names a group at or under a replaced path that this \
@@ -6178,7 +6148,7 @@ impl WriteEngine {
             // a move) and stays allowed.
             if recreated {
                 for t in &copy_sources {
-                    if is_prefix(d, t) {
+                    if t.starts_with(d) {
                         return Err(Error::EditUnsupported(
                             "a copy in this commit reads from a path the same commit \
                              replaces; use separate commits",
@@ -6192,10 +6162,10 @@ impl WriteEngine {
             // any new one (`remove_link_from_region` runs first), so a
             // replacement needs no further sequencing here.
             for t in &add_targets {
-                if recreated && is_prefix(d, t) {
+                if recreated && t.starts_with(d) {
                     continue;
                 }
-                if is_prefix(d, t) || is_prefix(t, d) {
+                if t.starts_with(d) || d.starts_with(t) {
                     return Err(Error::EditUnsupported(
                         "a deletion overlaps an addition in the same commit; \
                          replace the path instead, or use separate commits",
@@ -6203,17 +6173,17 @@ impl WriteEngine {
                 }
             }
             for t in &attr_targets {
-                if recreated && is_prefix(d, t) {
+                if recreated && t.starts_with(d) {
                     continue;
                 }
-                if is_prefix(d, t) {
+                if t.starts_with(d) {
                     return Err(Error::EditUnsupported(
                         "a deletion overlaps a group-attribute edit in the same commit; use separate commits",
                     ));
                 }
             }
             for t in &write_targets {
-                if is_prefix(d, t) {
+                if t.starts_with(d) {
                     // `write_targets` holds three kinds — a value overwrite, a
                     // dataset-attribute edit, and a staged append — so the
                     // message names what they have in common rather than only
@@ -6225,19 +6195,14 @@ impl WriteEngine {
                 }
             }
             for (j, d2) in delete_targets.iter().enumerate() {
-                if i != j && is_prefix(d, d2) {
+                if i != j && d2.starts_with(d) {
                     return Err(Error::EditUnsupported(
                         "overlapping deletions in one commit; delete the common parent only",
                     ));
                 }
             }
-            let parent = d[..d.len() - 1].to_vec();
             ensure_ancestors(&mut nodes, &parent);
-            nodes
-                .entry(parent)
-                .or_default()
-                .deletes
-                .push(d.last().unwrap().clone());
+            nodes.entry(parent).or_default().deletes.push(leaf);
         }
 
         // Resolve / validate each node's base object-header region up front.
@@ -6247,19 +6212,18 @@ impl WriteEngine {
         // paired with the path whose rebuilt header replaces each — the two
         // halves of one relocation, which is what an object reference stored
         // elsewhere in the file has to be repointed across (issue #324).
-        let keys: Vec<PathKey> = nodes.keys().cloned().collect();
-        let mut superseded_addrs: Vec<(PathKey, u64)> = Vec::new();
+        let keys: Vec<ObjectPathBuf> = nodes.keys().cloned().collect();
+        let mut superseded_addrs: Vec<(ObjectPathBuf, u64)> = Vec::new();
         for key in &keys {
             let is_new = nodes[key].is_new;
             if is_new {
                 nodes.get_mut(key).unwrap().base_region = fresh_group_region();
             } else {
-                let path_str = key.join("/");
                 let addr = crate::group_v2::resolve_path_any_from_source(
                     &self.image(),
                     AccessMode::ReadWrite,
                     &self.superblock,
-                    &ObjectPath::parse(&path_str),
+                    &key.as_path(),
                 )?;
                 // Rebuilding this group moves its header and patches only the
                 // link this commit resolved it through, so every other hard link
@@ -6325,7 +6289,7 @@ impl WriteEngine {
         // rebuilds back out of the file, which needs the address; a group this
         // commit *creates* has neither an address nor any stored attribute, and
         // its `None` says so.
-        let existing_group_addrs: HashMap<PathKey, u64> =
+        let existing_group_addrs: HashMap<ObjectPathBuf, u64> =
             superseded_addrs.iter().cloned().collect();
         for key in &keys {
             if let Some(ops) = attrs_by_group.get(key) {
@@ -6343,12 +6307,17 @@ impl WriteEngine {
             }
         }
 
-        // Map each node to its direct child group nodes (for link wiring).
-        let mut children: BTreeMap<PathKey, Vec<PathKey>> = BTreeMap::new();
+        // Map each node to its direct child group nodes, each with the link name
+        // it has in that parent (for link wiring). The root group has no name in
+        // a parent, so `split_leaf` gives `None` for it and the loop skips it.
+        let mut children: BTreeMap<ObjectPathBuf, Vec<(ObjectPathBuf, LinkNameBuf)>> =
+            BTreeMap::new();
         for key in &keys {
-            if !key.is_empty() {
-                let parent = key[..key.len() - 1].to_vec();
-                children.entry(parent).or_default().push(key.clone());
+            if let Some((parent, leaf)) = key.split_leaf() {
+                children
+                    .entry(parent)
+                    .or_default()
+                    .push((key.clone(), leaf));
             }
         }
 
@@ -6371,13 +6340,13 @@ impl WriteEngine {
                 + node.cross_copies.len()
                 + datasets_by_group.get(key).map_or(0, Vec::len)
                 + children.get(key).map_or(0, |kids| {
-                    kids.iter().filter(|child| nodes[*child].is_new).count()
+                    kids.iter().filter(|(child, _)| nodes[child].is_new).count()
                 });
             if added > 0 {
                 let kept = node
                     .existing_links
                     .iter()
-                    .filter(|name| !node.deletes.contains(name))
+                    .filter(|name| !node.deletes.iter().any(|d| d.as_str() == *name))
                     .count();
                 reject_dense_link_creation_order(&node.base_region, kept + added)?;
             }
@@ -6392,22 +6361,22 @@ impl WriteEngine {
             let node = &nodes[key];
             let mut adding: Vec<&str> = Vec::new();
             for fd in datasets_by_group.get(key).into_iter().flatten() {
-                adding.push(&fd.name);
+                adding.push(fd.name.as_str());
             }
-            for child in children.get(key).into_iter().flatten() {
+            for (child, leaf) in children.get(key).into_iter().flatten() {
                 if nodes[child].is_new {
-                    adding.push(child.last().unwrap());
+                    adding.push(leaf.as_str());
                 }
             }
             for (leaf, _) in &node.copies {
-                adding.push(leaf);
+                adding.push(leaf.as_str());
             }
             for leaf in &node.cross_copies {
-                adding.push(leaf);
+                adding.push(leaf.as_str());
             }
             for (i, name) in adding.iter().enumerate() {
                 let survives = node.existing_links.iter().any(|n| n == name)
-                    && !node.deletes.iter().any(|n| n == name);
+                    && !node.deletes.iter().any(|n| n.as_str() == *name);
                 if survives || adding[..i].contains(name) {
                     return Err(Error::EditUnsupported(
                         "a link with this name already exists in the target group",
@@ -6581,8 +6550,8 @@ impl WriteEngine {
         // group's in-file copies. The parent node exists: the preflight made one
         // for every destination.
         for (dst, tree) in taken.cross_copies.drain(..) {
-            let leaf = dst.last().unwrap().clone();
-            let parent = dst[..dst.len() - 1].to_vec();
+            // A destination that identifies no link is rejected above.
+            let (parent, leaf) = dst.split_leaf().expect("a copy destination names a link");
             nodes.get_mut(&parent).unwrap().copies.push((leaf, tree));
         }
 
@@ -6701,7 +6670,7 @@ impl WriteEngine {
         // object-reference target (see the dataset-placement loop below for the
         // group/dataset key convention: a group's own path, or a dataset's
         // full parent+name path). ---
-        let mut path_addr: BTreeMap<PathKey, u64> = BTreeMap::new();
+        let mut path_addr: BTreeMap<ObjectPathBuf, u64> = BTreeMap::new();
         // Where each object-header address this commit vacates has been rewritten
         // to, for repointing the object references the rest of the file already
         // stores (issue #324). Filled from the two places a header moves: a
@@ -6739,7 +6708,7 @@ impl WriteEngine {
             // relocating write and an existing child group *patch* a link rather
             // than appending one, so neither can be a replacement's.)
             for name in &deletes {
-                region = remove_link_from_region(&region, name)?;
+                region = remove_link_from_region(&region, name.as_str())?;
             }
 
             // Every link appended below takes the next creation index from this
@@ -6755,7 +6724,7 @@ impl WriteEngine {
             // link stores it relative to the userblock base.
             for (leaf, tree) in copies {
                 let root = self.write_copy_subtree(&tree)?;
-                region.push_link(&leaf, base.relative(root)?, link_order.take()?);
+                region.push_link(leaf.as_str(), base.relative(root)?, link_order.take()?);
             }
 
             // Datasets directly under this group. Appended addresses are absolute
@@ -6851,10 +6820,12 @@ impl WriteEngine {
                     )?
                 };
                 let oh_addr = self.alloc_or_append_typed(&oh, PageType::Meta)?;
-                region.push_link(&fd.name, base.relative(oh_addr)?, link_order.take()?);
-                let mut full = key.clone();
-                full.push(fd.name.clone());
-                path_addr.insert(full, oh_addr);
+                region.push_link(
+                    fd.name.as_str(),
+                    base.relative(oh_addr)?,
+                    link_order.take()?,
+                );
+                path_addr.insert(key.join(&fd.name), oh_addr);
             }
 
             // Relocating value overwrites under this group: write the new data and
@@ -6864,15 +6835,15 @@ impl WriteEngine {
             // compact resizes are refused in the write preflight).
             for (leaf, old_oh, mw) in &writes {
                 let new_oh = self.write_moving(mw)?;
-                patch_link_target(&mut region, leaf, base.relative(new_oh)?)?;
+                patch_link_target(&mut region, leaf.as_str(), base.relative(new_oh)?)?;
                 relocations.insert(*old_oh, new_oh);
             }
 
             // Wire links to dirty child groups (new → add a link; existing →
             // patch the existing link to the child's new address). Link targets are
             // stored relative to the base address.
-            for child in children.get(key).into_iter().flatten() {
-                let child_name = child.last().unwrap();
+            for (child, leaf) in children.get(key).into_iter().flatten() {
+                let child_name = leaf.as_str();
                 let child_addr = base.relative(path_addr[child])?;
                 if nodes[child].is_new {
                     region.push_link(child_name, child_addr, link_order.take()?);
@@ -6934,7 +6905,7 @@ impl WriteEngine {
         // pointing at bytes that never reached disk. `flush` on a plain `File`
         // does not force a write-back, so sync the appended bytes to disk first
         // (the barrier), then flip the pointer, then sync the flip.
-        let new_root = path_addr[&PathKey::new()];
+        let new_root = path_addr[&ObjectPathBuf::root()];
 
         // The heap collections this commit's value overwrites superseded. They
         // join `to_free` rather than being handed to the free list here, which
@@ -8246,7 +8217,7 @@ impl WriteEngine {
         addr: u64,
         fd: &FlatDataset,
         base: BaseAddress,
-        path: &PathKey,
+        path: &ObjectPathBuf,
     ) -> Result<WritePlan, Error> {
         // Enforced by construction: `staged.writes` has one producer, and it
         // refuses there. Asserted rather than re-refused because a second caller
@@ -10206,7 +10177,7 @@ impl WriteEngine {
         // to whatever later takes its path.
         for path in &staged.deletes {
             self.vl_overwrite_heaps
-                .retain(|recorded, _| !paths_overlap(recorded, path));
+                .retain(|recorded, _| !recorded.overlaps(path));
         }
     }
 
@@ -10269,11 +10240,11 @@ impl WriteEngine {
     /// commit puts back is resolved by step 1 before either test is reached.
     fn resolve_reference_target(
         target: &ObjectRefTarget,
-        path_addr: &BTreeMap<PathKey, u64>,
-        nodes: &BTreeMap<PathKey, Node>,
-        add_targets: &[PathKey],
-        write_targets: &[PathKey],
-        delete_targets: &[PathKey],
+        path_addr: &BTreeMap<ObjectPathBuf, u64>,
+        nodes: &BTreeMap<ObjectPathBuf, Node>,
+        add_targets: &[ObjectPathBuf],
+        write_targets: &[ObjectPathBuf],
+        delete_targets: &[ObjectPathBuf],
         invalidated: &InvalidatedAddresses,
         src: &(impl Source + ?Sized),
         superblock: &Superblock,
@@ -10298,12 +10269,12 @@ impl WriteEngine {
             ObjectRefTarget::Path(path) => path,
         };
         let base = superblock.base_address;
-        let key = split_path(path);
+        let key = ObjectPath::parse(path).to_path_buf();
         if let Some(&addr) = path_addr.get(&key) {
             return base.relative(addr).map_err(Error::from);
         }
         if nodes.contains_key(&key)
-            || add_targets.iter().any(|t| is_prefix(t, &key))
+            || add_targets.iter().any(|t| key.starts_with(t))
             || write_targets.contains(&key)
         {
             return Err(Error::EditUnsupported(
@@ -10313,7 +10284,7 @@ impl WriteEngine {
         }
         // After the three above; see this function's doc for why, and for what
         // that ordering does and does not buy.
-        if delete_targets.iter().any(|d| is_prefix(d, &key)) {
+        if delete_targets.iter().any(|d| key.starts_with(d)) {
             return Err(Error::EditUnsupported(
                 "an object-reference dataset targets an object this commit deletes, or one \
                  under it; the reference would be left pointing at storage the delete can \
@@ -10335,7 +10306,7 @@ impl WriteEngine {
     /// object-reference target across every staged dataset will resolve
     /// successfully — either against a pre-existing untouched object or
     /// against something this same commit places. [`resolve_reference_target`]
-    /// classifies a target purely from *whether* a `PathKey` has been placed
+    /// classifies a target purely from *whether* a `ObjectPathBuf` has been placed
     /// yet (`path_addr.get`), never from the address *value*, so replaying the
     /// apply loop's placement order here with a placeholder address standing in
     /// for "already placed" reproduces the exact same verdict the apply loop's
@@ -10356,12 +10327,12 @@ impl WriteEngine {
     ///
     /// [`resolve_reference_target`]: Self::resolve_reference_target
     fn preflight_reference_targets(
-        keys: &[PathKey],
-        flat: &BTreeMap<&PathKey, Vec<&FlatDataset>>,
-        nodes: &BTreeMap<PathKey, Node>,
-        add_targets: &[PathKey],
-        write_targets: &[PathKey],
-        delete_targets: &[PathKey],
+        keys: &[ObjectPathBuf],
+        flat: &BTreeMap<&ObjectPathBuf, Vec<&FlatDataset>>,
+        nodes: &BTreeMap<ObjectPathBuf, Node>,
+        add_targets: &[ObjectPathBuf],
+        write_targets: &[ObjectPathBuf],
+        delete_targets: &[ObjectPathBuf],
         invalidated: &InvalidatedAddresses,
         src: &(impl Source + ?Sized),
         superblock: &Superblock,
@@ -10370,7 +10341,7 @@ impl WriteEngine {
         // Stable on purpose, for the same reason as the apply loop's copy: this
         // simulation is only faithful if it walks the groups in that same order.
         by_depth.sort_by_key(|k| std::cmp::Reverse(k.len()));
-        let mut sim_addr: BTreeMap<PathKey, u64> = BTreeMap::new();
+        let mut sim_addr: BTreeMap<ObjectPathBuf, u64> = BTreeMap::new();
         for key in &by_depth {
             if let Some(datasets) = flat.get(key) {
                 // Mirrors the apply loop's `group_datasets.sort_by_key(|fd|
@@ -10396,9 +10367,7 @@ impl WriteEngine {
                             )?;
                         }
                     }
-                    let mut full = key.clone();
-                    full.push(fd.name.clone());
-                    sim_addr.insert(full, superblock.base_address.get());
+                    sim_addr.insert(key.join(&fd.name), superblock.base_address.get());
                 }
             }
             sim_addr.insert(key.clone(), superblock.base_address.get());
@@ -10922,17 +10891,17 @@ impl WriteEngine {
 struct Node {
     is_new: bool,
     /// Names of links to remove from this group (from `delete`).
-    deletes: Vec<String>,
+    deletes: Vec<LinkNameBuf>,
     /// Copies to add to this group: (new link name, the source subtree read out
     /// for writing). Built at staging time from either this file (an in-file
     /// [`copy`](crate::File::copy)) or another open file (a cross-file
     /// [`copy_from`](crate::File::copy_from)).
-    copies: Vec<(String, CopyTree)>,
+    copies: Vec<(LinkNameBuf, CopyTree)>,
     /// New link names this commit adds to this group by cross-file copy. The
     /// subtrees themselves stay in the staged set — which the preflight may
     /// still refuse, and must not empty (issue #316) — and join `copies` at the
     /// point of no return.
-    cross_copies: Vec<String>,
+    cross_copies: Vec<LinkNameBuf>,
     /// Value overwrites whose dataset header relocates (a resize or compact
     /// rewrite by `write_dataset`, a staged append, an attribute edit), as (child
     /// link name, the pre-commit object-header address, the relocation plan). On
@@ -10941,7 +10910,7 @@ struct Node {
     /// existing child group's link. The old address is carried rather than
     /// re-resolved: the screen above and the reclaim below both need it, and one
     /// derivation cannot disagree with itself.
-    writes: Vec<(String, u64, MovingWrite)>,
+    writes: Vec<(LinkNameBuf, u64, MovingWrite)>,
     base_region: OhRegion,
     existing_links: Vec<String>,
     /// What this group's attribute edits left for the apply loop, staged by
@@ -11184,7 +11153,7 @@ struct VlenOverwrite {
     /// under in [`vl_overwrite_heaps`](WriteEngine::vl_overwrite_heaps) — and
     /// the key the ones a previous overwrite left are read back from, to be
     /// freed once this commit lands.
-    path: PathKey,
+    path: ObjectPathBuf,
 }
 
 impl OverwriteBytes {
@@ -11356,7 +11325,7 @@ enum ChunkPayload {
 
 /// A staged dataset reduced to the pieces the writer needs.
 struct FlatDataset {
-    name: String,
+    name: LinkNameBuf,
     dt: crate::datatype::Datatype,
     ds: Dataspace,
     raw: Vec<u8>,
@@ -11560,15 +11529,10 @@ impl Store for EditStore<'_> {
     }
 }
 
-/// Whether two object paths are equal or one is an ancestor of the other.
-fn paths_overlap(a: &[String], b: &[String]) -> bool {
-    a.starts_with(b) || b.starts_with(a)
-}
-
 /// Whether two appender claims cover the same dataset. A path-less claim (a
 /// handle reached by object reference) names its dataset by an address nothing
 /// else can compare against, so it conflicts with every other claim.
-fn claims_conflict(a: Option<&[String]>, b: Option<&[String]>) -> bool {
+fn claims_conflict(a: Option<&ObjectPathBuf>, b: Option<&ObjectPathBuf>) -> bool {
     match (a, b) {
         (Some(x), Some(y)) => x == y,
         _ => true,
@@ -11677,14 +11641,6 @@ pub(crate) fn locate_dataset_state<F: Store>(
     })
 }
 
-/// Split a path into non-empty components.
-fn split_path(path: &str) -> PathKey {
-    path.split('/')
-        .filter(|s| !s.is_empty())
-        .map(String::from)
-        .collect()
-}
-
 /// Group `(parent group, item)` pairs by their parent, preserving the input
 /// order within each group.
 ///
@@ -11703,9 +11659,9 @@ fn group_by_parent<K: Ord, T>(items: impl IntoIterator<Item = (K, T)>) -> BTreeM
 
 /// Ensure a node exists for every ancestor prefix of `path` (so each is rebuilt
 /// and can re-wire its child link). Does not set `is_new`.
-fn ensure_ancestors(nodes: &mut BTreeMap<PathKey, Node>, path: &[String]) {
+fn ensure_ancestors(nodes: &mut BTreeMap<ObjectPathBuf, Node>, path: &ObjectPathBuf) {
     for len in 0..=path.len() {
-        nodes.entry(path[..len].to_vec()).or_default();
+        nodes.entry(path.prefix(len)).or_default();
     }
 }
 
@@ -11794,7 +11750,8 @@ fn meta_spans(spans: Vec<(u64, u64)>) -> impl Iterator<Item = (u64, u64, FreeCla
         .map(|(a, l)| (a, l, FreeClass::Page(PageType::Meta)))
 }
 
-/// Validate a staged dataset and reduce it to a [`FlatDataset`]. Contiguous,
+/// Validate a staged dataset and reduce it to a [`FlatDataset`]. `name` is the link name the
+/// dataset has in its parent group, taken off the staged path by the caller. Contiguous,
 /// unfiltered datasets are emitted as such; chunked, filtered, or extensible
 /// datasets carry their [`ChunkOptions`] and maxshape through to the commit,
 /// where [`WriteEngine::build_chunked_dataset`] lays out their chunk data and
@@ -11818,10 +11775,7 @@ fn meta_spans(spans: Vec<(u64, u64)>) -> impl Iterator<Item = (u64, u64, FreeCla
 /// feature this engine cannot reproduce faithfully: a
 /// chunked/extensible variable-length-string or object-reference dataset, or a
 /// filter pipeline the build cannot construct.
-fn flatten_dataset(db: DatasetBuilder) -> Result<FlatDataset, Error> {
-    if db.name.is_empty() {
-        return Err(Error::EditUnsupported("dataset path has an empty name"));
-    }
+fn flatten_dataset(db: DatasetBuilder, name: LinkNameBuf) -> Result<FlatDataset, Error> {
     let dt = db
         .datatype
         .ok_or(Error::EditUnsupported("dataset has no datatype/data"))?;
@@ -11951,7 +11905,7 @@ fn flatten_dataset(db: DatasetBuilder) -> Result<FlatDataset, Error> {
     // name would otherwise overflow it into silent corruption. Measured with a
     // creation index present — the widest form, written into a group that tracks
     // link creation order — since the parent group is not known here.
-    let mut sized = make_link(&db.name, 0);
+    let mut sized = make_link(name.as_str(), 0);
     sized.creation_order = Some(0);
     if sized.serialize(OFFSET_SIZE).len() > OBJECT_HEADER_MESSAGE_MAX {
         return Err(Error::EditUnsupported(
@@ -12044,7 +11998,7 @@ fn flatten_dataset(db: DatasetBuilder) -> Result<FlatDataset, Error> {
     }
 
     Ok(FlatDataset {
-        name: db.name,
+        name,
         dt,
         ds,
         raw,
@@ -12336,7 +12290,7 @@ fn chunked_geometry(
 ///
 /// Cloned rather than moved because the staged set must survive a refused
 /// commit whole (issue #316), and this runs in the preflight that may refuse.
-fn staged_bytes(fd: &FlatDataset, path: &PathKey) -> OverwriteBytes {
+fn staged_bytes(fd: &FlatDataset, path: &ObjectPathBuf) -> OverwriteBytes {
     OverwriteBytes {
         raw: fd.raw.clone(),
         vlen: fd.vl_string_staging.clone().map(|staging| VlenOverwrite {
@@ -13823,11 +13777,6 @@ fn encode_attr_body(name: &str, value: &AttrValue) -> Result<Vec<u8>, Error> {
         ));
     }
     Ok(body)
-}
-
-/// Whether `a` is a path prefix of (or equal to) `b`.
-fn is_prefix(a: &[String], b: &[String]) -> bool {
-    a.len() <= b.len() && b[..a.len()] == *a
 }
 
 /// Parse the version-2 object-header message record at `p` within a chunk-0
@@ -15594,8 +15543,8 @@ mod tests {
         b.write(&path).unwrap();
         let engine = WriteEngine::open_with_locking(&path, FileLocking::Enabled).unwrap();
 
-        let nodes: BTreeMap<PathKey, Node> = BTreeMap::new();
-        let path_addr: BTreeMap<PathKey, u64> = BTreeMap::new();
+        let nodes: BTreeMap<ObjectPathBuf, Node> = BTreeMap::new();
+        let path_addr: BTreeMap<ObjectPathBuf, u64> = BTreeMap::new();
         let resolve = |address: u64, removed: Vec<(u64, u64)>, moved: Vec<u64>| {
             WriteEngine::resolve_reference_target(
                 &ObjectRefTarget::Raw(address),
