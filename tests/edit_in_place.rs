@@ -301,7 +301,10 @@ fn dataset_into_missing_group_is_rejected() {
             })
             .unwrap();
         let err = session.commit().unwrap_err();
-        assert!(err.to_string().contains("does not exist"), "got: {err}");
+        let Error::Format(FormatError::PathNotFound(missing)) = &err else {
+            panic!("expected PathNotFound, got {err:?}");
+        };
+        assert_eq!(missing, "nope");
     }
     assert_eq!(std::fs::read(&path).unwrap(), before);
 }
@@ -628,7 +631,10 @@ fn delete_missing_or_overlapping_is_rejected() {
         let session = File::open_rw(&path).unwrap();
         session.root().delete("ghost").unwrap();
         let err = session.commit().unwrap_err();
-        assert!(err.to_string().contains("nothing to delete"), "got: {err}");
+        let Error::Format(FormatError::PathNotFound(missing)) = &err else {
+            panic!("expected PathNotFound, got {err:?}");
+        };
+        assert_eq!(missing, "ghost");
     }
     assert_eq!(std::fs::read(&path).unwrap(), before);
 
@@ -774,10 +780,10 @@ fn copy_rejects_missing_source_and_cycle() {
         let session = File::open_rw(&path).unwrap();
         session.copy("ghost", "x").unwrap();
         let err = session.commit().unwrap_err();
-        assert!(
-            err.to_string().contains("source does not exist"),
-            "got: {err}"
-        );
+        let Error::Format(FormatError::PathNotFound(missing)) = &err else {
+            panic!("expected PathNotFound, got {err:?}");
+        };
+        assert_eq!(missing, "ghost");
     }
     assert_eq!(std::fs::read(&path).unwrap(), before);
 
@@ -1708,7 +1714,10 @@ fn copy_from_file_rejects_missing_source() {
     let source = File::open(&src_path).unwrap();
     let session = File::open_rw(&dst_path).unwrap();
     let err = session.copy_from(&source, "ghost", "x").unwrap_err();
-    assert!(err.to_string().contains("does not exist"), "got: {err}");
+    let Error::Format(FormatError::PathNotFound(missing)) = &err else {
+        panic!("expected PathNotFound, got {err:?}");
+    };
+    assert_eq!(missing, "ghost");
 }
 
 #[test]
