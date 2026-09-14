@@ -240,10 +240,26 @@ def bump_allows(release_type, required):
     return required is None or order[release_type] >= order[required]
 
 
+PRE_1_0_BUMP = {"patch": "minor", "minor": "major", "major": "major"}
+
+
+def semver_checks_release_type(release_type, baseline):
+    """`release_type` in the word `cargo semver-checks --release-type` takes.
+
+    The tool reads that word literally, and under Cargo's pre-1.0 convention a
+    0.x release sits one notch above where the word puts it: the tool classifies
+    0.x.y to 0.x.z as a minor change and 0.x.y to 0.(x+1).0 as a major one. From
+    1.0 on the two agree.
+    """
+    if baseline.major > 0:
+        return release_type
+    return PRE_1_0_BUMP[release_type]
+
+
 CHANGELOG = Path("CHANGELOG.md")
 
 
-def semver_verdict(baseline, release_type):
+def semver_verdict(baseline, release_type_word):
     """The `Summary` line cargo semver-checks prints, with the report on stderr.
 
     Dies when there is no verdict, because a tool that cannot run says so in
@@ -262,7 +278,7 @@ def semver_verdict(baseline, release_type):
             "--baseline-version",
             str(baseline),
             "--release-type",
-            release_type,
+            release_type_word,
             "--default-features",
             "--features",
             SEMVER_FEATURES,
@@ -358,7 +374,8 @@ def prepare(args):
         warn("Skipping the public-API delta report (--skip-api-delta)")
     else:
         note(f"Public API delta since v{previous_stable}")
-        note(semver_verdict(previous_stable, release_type))
+        release_type_word = semver_checks_release_type(release_type, previous_stable)
+        note(semver_verdict(previous_stable, release_type_word))
 
     note(f"Setting the version to {version} in Cargo.toml and Cargo.lock")
     for path in (Path("Cargo.toml"), Path("Cargo.lock")):
@@ -385,7 +402,11 @@ def print_release_type(args):
     if resolve.returncode != 0:
         fail(f"no such commit: {args.base!r} (a shallow clone has no remote branches)")
     diff = output("git", "diff", f"{args.base}...HEAD", "--", str(CHANGELOG))
-    print(pull_request_release_type(CHANGELOG.read_text(), diff))
+    release_type = pull_request_release_type(CHANGELOG.read_text(), diff)
+    if args.for_semver_checks:
+        baseline = Version.parse(manifest()["version"])
+        release_type = semver_checks_release_type(release_type, baseline)
+    print(release_type)
 
 
 def pr(args):
@@ -463,8 +484,9 @@ def publish(args):
         warn("Skipping the public-API delta gate (--skip-api-delta)")
     else:
         note(f"Public API delta since v{previous_stable}, for a {release_type} release")
-        verdict = semver_verdict(previous_stable, release_type)
-        if not bump_allows(release_type, required_bump(verdict)):
+        release_type_word = semver_checks_release_type(release_type, previous_stable)
+        verdict = semver_verdict(previous_stable, release_type_word)
+        if not bump_allows(release_type_word, required_bump(verdict)):
             fail(f"{verdict}, but {version} is a {release_type} release after {previous_stable}")
         note(verdict)
 
@@ -554,6 +576,11 @@ def main():
         help="print the release type this pull request's changelog calls for",
     )
     p.add_argument("--base", required=True, help="the ref the pull request diffs against")
+    p.add_argument(
+        "--for-semver-checks",
+        action="store_true",
+        help="print it in the word `cargo semver-checks --release-type` takes",
+    )
     p.set_defaults(func=print_release_type)
 
     p = commands.add_parser(

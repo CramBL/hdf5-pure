@@ -90,13 +90,14 @@ jobs:
         with:
           tool: just
 
-      # A pull request is measured against its base ref. Every other event is
-      # measured against the commit before its tip.
-      - name: The release type the changelog calls for
+      # The release type the changelog calls for, in the word cargo-semver-checks
+      # takes. A pull request is measured against its base ref. Every other event
+      # is measured against the commit before its tip.
+      - name: The release type to check the delta against
         id: release-type
         env:
           BASE: ${{ github.event_name == 'pull_request' && format('origin/{0}', github.base_ref) || 'HEAD~1' }}
-        run: echo "type=$(just api::release-type "$BASE")" >> "$GITHUB_OUTPUT"
+        run: echo "type=$(just api::semver-release-type "$BASE")" >> "$GITHUB_OUTPUT"
 
       # The action rather than `just api::semver`: it pairs a cargo-semver-checks
       # build with a toolchain whose rustdoc JSON that build can parse.
