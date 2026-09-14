@@ -2027,10 +2027,7 @@ impl FileInner {
         if rel_addr == u64::MAX || rel_addr == 0 {
             return Err(FormatError::InvalidObjectReference(rel_addr).into());
         }
-        let abs = file
-            .addr_offset
-            .absolute(rel_addr)
-            .map_err(|_| FormatError::InvalidObjectReference(rel_addr))?;
+        let abs = file.addr_offset.absolute(rel_addr)?;
         let at = revisions.at(abs);
         let hdr = file.parse_header(abs)?;
         if has_message(&hdr, MessageType::DataLayout) {
