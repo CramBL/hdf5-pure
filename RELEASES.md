@@ -6,7 +6,7 @@
 
 ## Changelog
 
-One or two sentences per entry: the capability, the public API name, one caveat clause, then the pull request link, `([#NN](url))`, or several comma-separated where a change landed in several pull requests. An issue the change closes is named in the pull request's description, never in the entry. Prefix breaking changes with `**Breaking:**`.
+One or two sentences per entry: the capability, the public API name, one caveat clause, then the pull request link, `([#NN](url))`. Prefix breaking changes with `**Breaking:**` and list them first in their section.
 
 A released section may open with a summary paragraph, written by hand.
 
