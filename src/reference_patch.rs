@@ -174,9 +174,7 @@ impl Plan {
             // `read_oh_chunks` produced this span from a header it had already
             // bounds-checked, and the length always covers the trailing
             // four-byte checksum.
-            let len: usize = len.narrow_or_else(|| {
-                Error::EditUnsupported("object header chunk exceeds this platform")
-            })?;
+            let len = len.to_usize()?;
             let body_len = len
                 .checked_sub(4)
                 .ok_or(Error::EditUnsupported("object header chunk is too short"))?;
