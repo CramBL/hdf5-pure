@@ -63,7 +63,7 @@ impl RefsAccumulator {
 
 /// Turn a list of top-level `(name, value)` pairs into a MAT 7.3 file.
 pub(crate) fn emit_file(fields: Vec<(String, Value)>) -> Result<Vec<u8>, MatError> {
-    build_file(fields)?.finish().map_err(MatError::Hdf5)
+    build_file(fields).finish().map_err(MatError::Hdf5)
 }
 
 /// Same file as [`emit_file`], streamed to `w` instead of returned. Assembly is
@@ -72,13 +72,13 @@ pub(crate) fn emit_file_to<W: std::io::Write>(
     fields: Vec<(String, Value)>,
     w: W,
 ) -> Result<(), MatError> {
-    build_file(fields)?.finish_to(w).map_err(MatError::Hdf5)
+    build_file(fields).finish_to(w).map_err(MatError::Hdf5)
 }
 
 /// Stage every field into a [`FileBuilder`] carrying the MAT userblock, ready to
 /// be finished either way. Shared so the buffered and streaming entry points
 /// cannot come to describe different files.
-fn build_file(fields: Vec<(String, Value)>) -> Result<FileBuilder, MatError> {
+fn build_file(fields: Vec<(String, Value)>) -> FileBuilder {
     let mut builder = FileBuilder::new();
     builder.with_userblock(USERBLOCK_SIZE);
     // This emitter serves the no-options entry points, which are defined to
@@ -93,7 +93,7 @@ fn build_file(fields: Vec<(String, Value)>) -> Result<FileBuilder, MatError> {
         if matches!(value, Value::Omit) {
             continue;
         }
-        emit_at_root(&mut builder, &name, value, &mut refs)?;
+        emit_at_root(&mut builder, &name, value, &mut refs);
     }
 
     if refs.has_any() {
@@ -101,36 +101,24 @@ fn build_file(fields: Vec<(String, Value)>) -> Result<FileBuilder, MatError> {
         // Drain in FIFO order; emitting one entry may itself queue more
         // (nested cells), which the loop will pick up on later iterations.
         while let Some((name, value)) = refs.pop_front() {
-            emit_into_group(&mut refs_group, &name, value, &mut refs, RefsH5Path::Own)?;
+            emit_into_group(&mut refs_group, &name, value, &mut refs, RefsH5Path::Own);
         }
         builder.add_group(refs_group.finish());
     }
 
     builder.with_userblock_content(&userblock::header_block(userblock::DEFAULT_DESCRIPTION));
-    Ok(builder)
+    builder
 }
 
 /// Emit a single named value at the file root.
-fn emit_at_root(
-    builder: &mut FileBuilder,
-    name: &str,
-    value: Value,
-    refs: &mut RefsAccumulator,
-) -> Result<(), MatError> {
+fn emit_at_root(builder: &mut FileBuilder, name: &str, value: Value, refs: &mut RefsAccumulator) {
     match value {
-        Value::Cell(elements) => {
-            apply_cell(builder.create_dataset(name), elements, refs);
-            Ok(())
-        }
-        Value::Leaf(leaf) => {
-            apply_leaf_to_dataset(builder.create_dataset(name), leaf);
-            Ok(())
-        }
-        Value::Omit => Ok(()),
+        Value::Cell(elements) => apply_cell(builder.create_dataset(name), elements, refs),
+        Value::Leaf(leaf) => apply_leaf_to_dataset(builder.create_dataset(name), leaf),
+        Value::Omit => {}
         Value::Struct(fields) => {
-            let group = build_struct_group(name, fields, refs, RefsH5Path::Omit)?;
+            let group = build_struct_group(name, fields, refs, RefsH5Path::Omit);
             builder.add_group(group);
-            Ok(())
         }
     }
 }
@@ -142,21 +130,14 @@ fn emit_into_group(
     value: Value,
     refs: &mut RefsAccumulator,
     h5path: RefsH5Path,
-) -> Result<(), MatError> {
+) {
     match value {
-        Value::Cell(elements) => {
-            apply_cell(dataset_for(group, name, h5path), elements, refs);
-            Ok(())
-        }
-        Value::Leaf(leaf) => {
-            apply_leaf_to_dataset(dataset_for(group, name, h5path), leaf);
-            Ok(())
-        }
-        Value::Omit => Ok(()),
+        Value::Cell(elements) => apply_cell(dataset_for(group, name, h5path), elements, refs),
+        Value::Leaf(leaf) => apply_leaf_to_dataset(dataset_for(group, name, h5path), leaf),
+        Value::Omit => {}
         Value::Struct(fields) => {
-            let sub = build_struct_group(name, fields, refs, h5path)?;
+            let sub = build_struct_group(name, fields, refs, h5path);
             group.add_group(sub);
-            Ok(())
         }
     }
 }
@@ -181,7 +162,7 @@ fn build_struct_group(
     fields: Vec<(String, Value)>,
     refs: &mut RefsAccumulator,
     h5path: RefsH5Path,
-) -> Result<FinishedGroup, MatError> {
+) -> FinishedGroup {
     let mut group = new_group_builder(name);
     if h5path == RefsH5Path::Own {
         // Before the struct's own attributes: MATLAB's order on a `#refs#`
@@ -196,7 +177,7 @@ fn build_struct_group(
         }
         // A field of a struct is not itself a `#refs#` member, whatever the
         // struct is.
-        emit_into_group(&mut group, &fname, value, refs, RefsH5Path::Omit)?;
+        emit_into_group(&mut group, &fname, value, refs, RefsH5Path::Omit);
         // `emit_into_group` only borrows the name, so move it in afterward
         // rather than cloning.
         live_names.push(fname);
@@ -206,7 +187,7 @@ fn build_struct_group(
         AttrValue::AsciiString(MatClass::Struct.as_str().into()),
     );
     group.set_attr("MATLAB_fields", AttrValue::VarLenAsciiCharArray(live_names));
-    Ok(group.finish())
+    group.finish()
 }
 
 fn new_group_builder(name: &str) -> GroupBuilder {
