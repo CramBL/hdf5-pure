@@ -9,7 +9,7 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use crate::access_mode::AccessMode;
-use crate::address::BaseAddress;
+use crate::address::{BaseAddress, StoredAddress};
 use crate::btree_v2::{
     BTreeV2Header, collect_btree_v2_records, collect_btree_v2_records_from_source,
 };
@@ -116,7 +116,7 @@ impl ChildLookup {
     /// a crafted link naming `HADDR_UNDEF` in a file with a userblock arranges.
     fn of(base: BaseAddress, address: Option<u64>) -> Result<Self, FormatError> {
         Ok(match address {
-            Some(address) => ChildLookup::Found(base.absolute(address)?),
+            Some(address) => ChildLookup::Found(base.absolute(StoredAddress::new(address))?),
             None => ChildLookup::Absent,
         })
     }

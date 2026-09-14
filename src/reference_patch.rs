@@ -74,7 +74,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::access_mode::AccessMode;
-use crate::address::BaseAddress;
+use crate::address::{BaseAddress, StoredAddress};
 use crate::attribute::AttributeMessage;
 use crate::checksum::jenkins_lookup3;
 use crate::convert::Narrow;
@@ -342,7 +342,7 @@ pub(crate) fn plan<S: Source + ?Sized>(
             continue;
         };
         for e in entries {
-            if let Ok(child) = base.absolute(e.object_header_address) {
+            if let Ok(child) = base.absolute(StoredAddress::new(e.object_header_address)) {
                 stack.push(child);
             }
         }
@@ -445,7 +445,7 @@ fn scan_parsed_header<S: Source + ?Sized>(
     else {
         return holds;
     };
-    let (Ok(at), Ok(want)) = (base.absolute(a), usize::try_from(size)) else {
+    let (Ok(at), Ok(want)) = (base.absolute(StoredAddress::new(a)), usize::try_from(size)) else {
         return holds;
     };
     let Ok(raw) = src.read_exact_at(at, want) else {
@@ -675,7 +675,7 @@ fn scan_object<S: Source + ?Sized>(
         } => {
             // A contiguous data block sits outside the header and carries no
             // checksum, so its elements are patched with nothing else to fix.
-            let Ok(at) = base.absolute(a) else {
+            let Ok(at) = base.absolute(StoredAddress::new(a)) else {
                 return Ok(out);
             };
             let Ok(want) = usize::try_from(size) else {
@@ -808,7 +808,7 @@ fn collect_slots(
         if stored == 0 || stored == u64::MAX {
             continue;
         }
-        let Ok(abs) = base.absolute(stored) else {
+        let Ok(abs) = base.absolute(StoredAddress::new(stored)) else {
             continue;
         };
         let Some(&new) = relocations.get(&abs) else {
@@ -817,7 +817,7 @@ fn collect_slots(
         let Ok(value) = base.relative(new) else {
             continue;
         };
-        out.push((raw_at + offset as u64, value));
+        out.push((raw_at + offset as u64, value.get()));
     }
 }
 
@@ -1156,7 +1156,7 @@ mod tests {
             let mut shared = message_record(
                 MessageType::Datatype,
                 &crate::shared_message::encode_committed_ref(
-                    base.relative(TYPE_AT).unwrap(),
+                    base.relative(TYPE_AT).unwrap().get(),
                     crate::file_writer::OFFSET_SIZE,
                 ),
             );

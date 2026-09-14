@@ -7,7 +7,7 @@
 #[cfg(not(feature = "std"))]
 use alloc::{format, string::String, vec::Vec};
 
-use crate::address::BaseAddress;
+use crate::address::{BaseAddress, StoredAddress};
 use crate::bytes::read_offset;
 use crate::convert::{Narrow, is_undefined_addr};
 use crate::datatype::{CharacterSet, Datatype};
@@ -398,7 +398,8 @@ where
         {
             continue;
         }
-        let Ok(address) = base_address.absolute(element.collection_address) else {
+        let Ok(address) = base_address.absolute(StoredAddress::new(element.collection_address))
+        else {
             continue;
         };
         let Ok(index) = u16::try_from(element.object_index) else {
@@ -428,7 +429,8 @@ where
             ));
         }
 
-        let collection_address = base_address.absolute(element.collection_address)?;
+        let collection_address =
+            base_address.absolute(StoredAddress::new(element.collection_address))?;
         let collection_pos = match collections
             .iter()
             .position(|(address, _)| *address == collection_address)
@@ -560,7 +562,8 @@ pub(crate) fn read_vl_byte_objects_from_source<S: Source + ?Sized>(
             ));
         }
 
-        let collection_address = base_address.absolute(element.collection_address)?;
+        let collection_address =
+            base_address.absolute(StoredAddress::new(element.collection_address))?;
         let collection_pos = match collections
             .iter()
             .position(|(address, _)| *address == collection_address)

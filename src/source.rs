@@ -10,7 +10,7 @@ use alloc::{vec, vec::Vec};
 #[cfg(feature = "std")]
 use std::collections::BTreeMap;
 
-use crate::address::BaseAddress;
+use crate::address::{BaseAddress, StoredAddress};
 use crate::convert::Narrow;
 use crate::error::FormatError;
 
@@ -499,12 +499,13 @@ impl<S: Source + ?Sized> Source for BaseOffsetSource<'_, S> {
     }
 
     fn read_at(&self, offset: u64, buf: &mut [u8]) -> Result<(), FormatError> {
-        self.inner.read_at(self.base.absolute(offset)?, buf)
+        self.inner
+            .read_at(self.base.absolute(StoredAddress::new(offset))?, buf)
     }
 
     fn read_metadata_at(&self, offset: u64, len: usize) -> Result<Vec<u8>, FormatError> {
         self.inner
-            .read_metadata_at(self.base.absolute(offset)?, len)
+            .read_metadata_at(self.base.absolute(StoredAddress::new(offset))?, len)
     }
 
     // The metadata reads above are the inner source's, so its cache is the one

@@ -256,7 +256,7 @@ use std::path::Path;
 use core::num::NonZeroUsize;
 
 use crate::access_mode::AccessMode;
-use crate::address::BaseAddress;
+use crate::address::{BaseAddress, StoredAddress};
 use crate::attribute_info::AttributeInfoMessage;
 use crate::checksum::jenkins_lookup3;
 use crate::chunk_index_inplace::{Located, Store, apply_ea_append, plan_ea_append};
@@ -2668,7 +2668,10 @@ impl WriteEngine {
         // `open_imaged` built the in-memory address by adding the base to the
         // stored one, so this cannot be below the base — but it is a subtraction
         // over two file-derived numbers, and `relative` reports rather than wraps.
-        on_disk.root_group_address = on_disk.base_address.relative(on_disk.root_group_address)?;
+        on_disk.root_group_address = on_disk
+            .base_address
+            .relative(on_disk.root_group_address)?
+            .get();
         let bytes = on_disk.serialize();
         self.write_at(self.sb_sig_off, &bytes)?;
         self.barrier_data()?;
@@ -2838,7 +2841,7 @@ impl WriteEngine {
         // commit.
         superblock.root_group_address = superblock
             .base_address
-            .absolute(superblock.root_group_address)?;
+            .absolute(StoredAddress::new(superblock.root_group_address))?;
 
         // Everything that can refuse this file has run; only now is it worth
         // holding the bytes.
@@ -3058,7 +3061,11 @@ impl WriteEngine {
         // shifted to an absolute file offset before the header is read. This is a
         // no-op on the base-0 file every path below the userblock check sees, but
         // that check itself needs the strategy of a *userblock* file.
-        let Ok(ext_addr) = self.superblock.base_address.absolute(ext_rel) else {
+        let Ok(ext_addr) = self
+            .superblock
+            .base_address
+            .absolute(StoredAddress::new(ext_rel))
+        else {
             return;
         };
         let Some(info) = self.extension_fsinfo(ext_addr) else {
@@ -3828,7 +3835,7 @@ impl WriteEngine {
         // once the extension is readable and *says* the file shares messages,
         // failing to read the table is an error, because the screen below is
         // then the difference between a refusal and a corrupted index.
-        let Ok(abs) = base.absolute(rel) else {
+        let Ok(abs) = base.absolute(StoredAddress::new(rel)) else {
             return Ok(None);
         };
         let Ok(header) = ObjectHeader::parse_from_source(
@@ -6646,7 +6653,10 @@ impl WriteEngine {
                             let data: Vec<(u64, u64)> = kept_chunks
                                 .iter()
                                 .filter_map(|c| {
-                                    Some((base.absolute(c.address).ok()?, c.compressed_size))
+                                    Some((
+                                        base.absolute(StoredAddress::new(c.address)).ok()?,
+                                        c.compressed_size,
+                                    ))
                                 })
                                 .chain(*old_tail_extent)
                                 .collect();
@@ -6740,7 +6750,11 @@ impl WriteEngine {
             // link stores it relative to the userblock base.
             for (leaf, tree) in copies {
                 let root = self.write_copy_subtree(&tree)?;
-                region.push_link(leaf.as_str(), base.relative(root)?, link_order.take()?);
+                region.push_link(
+                    leaf.as_str(),
+                    base.relative(root)?.get(),
+                    link_order.take()?,
+                );
             }
 
             // Datasets directly under this group. Appended addresses are absolute
@@ -6814,6 +6828,7 @@ impl WriteEngine {
                         u64::MAX
                     } else {
                         base.relative(self.alloc_or_append_typed(&fd.raw, PageType::Raw)?)?
+                            .get()
                     };
                     // Attributes this dataset keeps in a fractal heap are placed
                     // now — after the variable-length patching above, so the heap
@@ -6838,7 +6853,7 @@ impl WriteEngine {
                 let oh_addr = self.alloc_or_append_typed(&oh, PageType::Meta)?;
                 region.push_link(
                     fd.name.as_str(),
-                    base.relative(oh_addr)?,
+                    base.relative(oh_addr)?.get(),
                     link_order.take()?,
                 );
                 path_addr.insert(key.join(&fd.name), oh_addr);
@@ -6851,7 +6866,7 @@ impl WriteEngine {
             // compact resizes are refused in the write preflight).
             for (leaf, old_oh, mw) in &writes {
                 let new_oh = self.write_moving(mw)?;
-                patch_link_target(&mut region, leaf.as_str(), base.relative(new_oh)?)?;
+                patch_link_target(&mut region, leaf.as_str(), base.relative(new_oh)?.get())?;
                 relocations.insert(*old_oh, new_oh);
             }
 
@@ -6860,7 +6875,7 @@ impl WriteEngine {
             // stored relative to the base address.
             for (child, leaf) in children.get(key).into_iter().flatten() {
                 let child_name = leaf.as_str();
-                let child_addr = base.relative(path_addr[child])?;
+                let child_addr = base.relative(path_addr[child])?.get();
                 if nodes[child].is_new {
                     region.push_link(child_name, child_addr, link_order.take()?);
                 } else {
@@ -6980,7 +6995,7 @@ impl WriteEngine {
             // write succeeds, so a failed write does not desync the in-memory
             // state. The v2/v3 superblock carries its own checksum.
             let mut new_sb = self.superblock.clone();
-            new_sb.root_group_address = base.relative(new_root)?;
+            new_sb.root_group_address = base.relative(new_root)?.get();
             new_sb.eof_address = new_eof;
             // Publish the flags this session *raised*, so a flag the source file
             // arrived carrying (left set by a crashed SWMR writer, say) is
@@ -7003,7 +7018,7 @@ impl WriteEngine {
             self.superblock = new_sb;
         } else {
             self.publish_attempted = true;
-            self.repoint_v0v1_root(base.relative(new_root)?, new_eof)?;
+            self.repoint_v0v1_root(base.relative(new_root)?.get(), new_eof)?;
             self.barrier()?;
             self.superblock.root_group_address = new_root;
             self.superblock.eof_address = new_eof;
@@ -8372,7 +8387,7 @@ impl WriteEngine {
                     && data_addr != UNDEF
                     && data_size == fd.raw.len() as u64
                 {
-                    if let Ok(start) = base.absolute(data_addr) {
+                    if let Ok(start) = base.absolute(StoredAddress::new(data_addr)) {
                         if start.checked_add(data_size).is_some_and(|e| e <= src.len()) {
                             return Ok(WritePlan::InPlace {
                                 data_addr: start,
@@ -8387,7 +8402,7 @@ impl WriteEngine {
                 // freed extent is recorded as an absolute file offset (`+ base`) to
                 // match the session free list.
                 let old_extent = if data_addr != UNDEF && data_size > 0 {
-                    Some((base.absolute(data_addr)?, data_size))
+                    Some((base.absolute(StoredAddress::new(data_addr))?, data_size))
                 } else {
                     None
                 };
@@ -8508,7 +8523,7 @@ impl WriteEngine {
                 ) {
                     let writes = writes
                         .into_iter()
-                        .map(|(off, b)| Ok((base.absolute(off)?, b)))
+                        .map(|(off, b)| Ok((base.absolute(StoredAddress::new(off))?, b)))
                         .collect::<Result<Vec<_>, FormatError>>()?;
                     return Ok(WritePlan::InPlaceChunks { writes });
                 }
@@ -8810,7 +8825,7 @@ impl WriteEngine {
             tail_raw.extend_from_slice(&full[..live_bytes]);
             // The old partial chunk's data block is dead once the new index lands.
             old_tail_extent = Some((
-                base.absolute(partial.address)?,
+                base.absolute(StoredAddress::new(partial.address))?,
                 u64::from(partial.chunk_size),
             ));
         }
@@ -9156,7 +9171,7 @@ impl WriteEngine {
                 } else {
                     // The stored data address is base-relative; shift it to an absolute
                     // offset into `src` before reading the data block out.
-                    let start = base.absolute(data_addr)?;
+                    let start = base.absolute(StoredAddress::new(data_addr))?;
                     start
                         .checked_add(data_size)
                         .filter(|&e| e <= src.len())
@@ -9273,7 +9288,7 @@ impl WriteEngine {
                 for (name, creation_order, child) in children {
                     // Child link targets are stored base-relative; re-absolutize
                     // before descending so `addr` stays an absolute offset into `src`.
-                    let child = base.absolute(child)?;
+                    let child = base.absolute(StoredAddress::new(child))?;
                     kids.push((
                         name,
                         creation_order,
@@ -9332,7 +9347,7 @@ impl WriteEngine {
                     let new_data_addr = self.alloc_or_append_typed(data, PageType::Raw)?;
                     // The placement is an absolute offset; the data-layout
                     // address field stores it relative to the userblock base.
-                    let relative = base.relative(new_data_addr)?;
+                    let relative = base.relative(new_data_addr)?.get();
                     region.bytes_mut()[*addr_off..*addr_off + 8]
                         .copy_from_slice(&relative.to_le_bytes());
                 }
@@ -9377,7 +9392,7 @@ impl WriteEngine {
                     // for it, so a copy of a group that tracks link creation
                     // order carries the same order as its source — the Link Info
                     // message naming that order is copied verbatim beside it.
-                    region.push_link(name, base.relative(new_child)?, *creation_order);
+                    region.push_link(name, base.relative(new_child)?.get(), *creation_order);
                 }
                 // The dense heap is built for whatever address it is placed at
                 // (see `append_dense_attrs`), so it needs no ordering against the
@@ -9601,7 +9616,7 @@ impl WriteEngine {
                 // The placement is an absolute file offset; the contiguous
                 // data-layout field stores it relative to the userblock base (`-
                 // base`, a no-op on a base-0 file).
-                let relative = base.relative(new_data_addr)?;
+                let relative = base.relative(new_data_addr)?.get();
                 region.bytes_mut()[*addr_off..*addr_off + 8]
                     .copy_from_slice(&relative.to_le_bytes());
                 // The data size field follows the 8-byte address in the contiguous
@@ -9819,7 +9834,7 @@ impl WriteEngine {
                 // would leave it neither free nor written for the rest of the
                 // session. Collected into a `Result` and handed back on the way out.
                 let placed = (|| -> Result<u64, Error> {
-                    let blob_stored = base.relative(addr)?;
+                    let blob_stored = base.relative(addr)?.get();
                     let combined = placed_chunks(blob_stored);
                     let mut buf =
                         Vec::with_capacity(usize::try_from(chunk_total + ea_len).unwrap_or(0));
@@ -9854,7 +9869,7 @@ impl WriteEngine {
                 for cb in new_chunk_bytes {
                     let abs = self.alloc_or_append_typed(cb, PageType::Raw)?;
                     combined.push(WrittenChunk {
-                        address: base.relative(abs)?,
+                        address: base.relative(abs)?.get(),
                         compressed_size: cb.len() as u64,
                         filter_mask: 0,
                     });
@@ -9865,7 +9880,7 @@ impl WriteEngine {
                         (),
                     ))
                 })?;
-                base.relative(ea_addr)?
+                base.relative(ea_addr)?.get()
             }
         };
 
@@ -10057,7 +10072,7 @@ impl WriteEngine {
         build: impl FnOnce(u64) -> Result<(Vec<u8>, T), Error>,
     ) -> Result<(u64, T), Error> {
         let at = self.reserve(len, ty)?;
-        let (bytes, extra) = build(self.superblock.base_address.relative(at.address())?)?;
+        let (bytes, extra) = build(self.superblock.base_address.relative(at.address())?.get())?;
         let addr = self.place(at, &bytes)?;
         Ok((addr, extra))
     }
@@ -10077,10 +10092,7 @@ impl WriteEngine {
             .iter()
             .map(|collection| {
                 let addr = self.alloc_or_append_typed(collection, PageType::Meta)?;
-                self.superblock
-                    .base_address
-                    .relative(addr)
-                    .map_err(Error::from)
+                Ok(self.superblock.base_address.relative(addr)?.get())
             })
             .collect()
     }
@@ -10137,7 +10149,7 @@ impl WriteEngine {
         let placed = addrs
             .iter()
             .zip(&staging.collections)
-            .map(|(&a, c)| Ok((base.absolute(a)?, c.len() as u64)))
+            .map(|(&a, c)| Ok((base.absolute(StoredAddress::new(a))?, c.len() as u64)))
             .collect::<Result<Vec<_>, FormatError>>()?;
         self.vl_overwrite_heaps.insert(vlen.path.clone(), placed);
         self.superseded_heaps.extend(superseded);
@@ -10287,7 +10299,7 @@ impl WriteEngine {
         let base = superblock.base_address;
         let key = ObjectPathBuf::parse(path);
         if let Some(&addr) = path_addr.get(&key) {
-            return base.relative(addr).map_err(Error::from);
+            return Ok(base.relative(addr)?.get());
         }
         if nodes.contains_key(&key)
             || add_targets.iter().any(|t| key.starts_with(t))
@@ -10307,15 +10319,17 @@ impl WriteEngine {
                  reclaim",
             ));
         }
-        match crate::group_v2::resolve_path_any_from_source(
-            src,
-            AccessMode::ReadWrite,
-            superblock,
-            &key.as_path(),
-        ) {
-            Ok(addr) => base.relative(addr).map_err(Error::from),
-            Err(_) => Ok(UNDEF),
-        }
+        Ok(
+            match crate::group_v2::resolve_path_any_from_source(
+                src,
+                AccessMode::ReadWrite,
+                superblock,
+                &key.as_path(),
+            ) {
+                Ok(addr) => base.relative(addr)?.get(),
+                Err(_) => UNDEF,
+            },
+        )
     }
 
     /// Prove, before any byte of this commit is written, that every
@@ -10524,7 +10538,9 @@ impl WriteEngine {
             let entries =
                 resolve_group_entries_from_source(&self.image(), &header, os, ls, base).ok()?;
             for e in entries {
-                let child = base.absolute(e.object_header_address).ok()?;
+                let child = base
+                    .absolute(StoredAddress::new(e.object_header_address))
+                    .ok()?;
                 *counts.entry(child).or_insert(0) += 1;
                 stack.push(child);
             }
@@ -10605,7 +10621,7 @@ impl WriteEngine {
                 // stored address is base-relative, so shift it to an absolute file
                 // offset before bounds-checking and recording it.
                 if data_addr != u64::MAX && data_size > 0 {
-                    if let Ok(abs) = base.absolute(data_addr) {
+                    if let Ok(abs) = base.absolute(StoredAddress::new(data_addr)) {
                         if abs.checked_add(data_size).is_some_and(|e| e <= file_len) {
                             // A contiguous data block is raw data.
                             out.push((abs, data_size, FreeClass::Page(PageType::Raw)));
@@ -10619,7 +10635,7 @@ impl WriteEngine {
                 // before descending so the recursion keeps working in absolute
                 // offsets (matching `incoming`'s keys and `oh_chunk_spans`).
                 for (_, _, child) in children {
-                    if let Ok(c) = base.absolute(child) {
+                    if let Ok(c) = base.absolute(StoredAddress::new(child)) {
                         self.collect_free_spans(c, depth + 1, incoming, out);
                     }
                 }
@@ -10741,11 +10757,11 @@ impl WriteEngine {
         // as dead rather than free otherwise.
         let mut data: Vec<(u64, u64)> = Vec::with_capacity(split.data.len());
         for (addr, len) in split.data {
-            data.push((base.absolute(addr).ok()?, len));
+            data.push((base.absolute(StoredAddress::new(addr)).ok()?, len));
         }
         let mut index: Vec<(u64, u64)> = Vec::with_capacity(split.index.len());
         for (addr, len) in split.index {
-            index.push((base.absolute(addr).ok()?, len));
+            index.push((base.absolute(StoredAddress::new(addr)).ok()?, len));
         }
         // Validate both halves together — they must be disjoint from each other as
         // well as internally — before either is trusted, including by the proof.
@@ -10892,7 +10908,7 @@ impl WriteEngine {
         )
         .ok()?;
         for (a, _) in &mut spans {
-            *a = base.absolute(*a).ok()?;
+            *a = base.absolute(StoredAddress::new(*a)).ok()?;
         }
         if !spans_disjoint_in_bounds(&mut spans, self.image.len()) {
             return None;
@@ -11115,7 +11131,7 @@ impl InvalidatedAddresses {
         }
         // An address that cannot even be shifted into the file is not one of
         // ours; leave it to whatever reads it.
-        let abs = self.base.absolute(stored).ok()?;
+        let abs = self.base.absolute(StoredAddress::new(stored)).ok()?;
         if self
             .removed
             .iter()
@@ -14022,7 +14038,7 @@ fn read_oh_continuation<S: Source + ?Sized>(
     let len = u64::from_le_bytes(region[body + 8..body + 16].try_into().unwrap());
     // The block address is stored relative to the base address; shift it to an
     // absolute file offset before reading.
-    let off = base.absolute(off)?;
+    let off = base.absolute(StoredAddress::new(off))?;
     // An OCHK block is signature(4) + messages + checksum(4).
     let end = off
         .checked_add(len)

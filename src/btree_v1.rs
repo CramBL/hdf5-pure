@@ -3,7 +3,7 @@
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 
-use crate::address::BaseAddress;
+use crate::address::{BaseAddress, StoredAddress};
 use crate::bytes::{read_length, read_offset, read_optional_offset};
 use crate::convert::Narrow;
 use crate::error::FormatError;
@@ -195,7 +195,9 @@ fn collect_symbol_table_nodes_inner(
     if depth > MAX_SYMBOL_TABLE_BTREE_DEPTH {
         return Err(FormatError::NestingDepthExceeded);
     }
-    let node_offset = base_address.absolute(btree_address)?.to_usize()?;
+    let node_offset = base_address
+        .absolute(StoredAddress::new(btree_address))?
+        .to_usize()?;
     let node = BTreeV1Node::parse(file_data, node_offset, offset_size, length_size)?;
 
     if node.node_type != 0 {
@@ -259,7 +261,7 @@ fn collect_symbol_table_nodes_from_source_inner<S: Source + ?Sized>(
     if depth > MAX_SYMBOL_TABLE_BTREE_DEPTH {
         return Err(FormatError::NestingDepthExceeded);
     }
-    let node_offset = base_address.absolute(btree_address)?;
+    let node_offset = base_address.absolute(StoredAddress::new(btree_address))?;
     let node = BTreeV1Node::parse_from_source(source, node_offset, offset_size, length_size)?;
 
     if node.node_type != 0 {

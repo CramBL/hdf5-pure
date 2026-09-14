@@ -51,7 +51,7 @@ extern crate alloc;
 #[cfg(not(feature = "std"))]
 use alloc::{vec, vec::Vec};
 
-use crate::address::BaseAddress;
+use crate::address::{BaseAddress, StoredAddress};
 use crate::convert::Narrow;
 use crate::error::FormatError;
 use crate::file_space_info::NUM_FILE_FSM_MANAGERS;
@@ -361,12 +361,14 @@ pub(crate) fn read_persisted_sections(
         if addr == u64::MAX {
             continue;
         }
-        let a = base.absolute(addr)?.to_usize()?;
+        let a = base.absolute(StoredAddress::new(addr))?.to_usize()?;
         let header = FsmHeader::parse(data.get(a..).ok_or_else(bad)?, offset_size)?;
         if header.fsse_addr == u64::MAX {
             continue;
         }
-        let fa = base.absolute(header.fsse_addr)?.to_usize()?;
+        let fa = base
+            .absolute(StoredAddress::new(header.fsse_addr))?
+            .to_usize()?;
         let end = fa
             .checked_add(header.fsse_used.to_usize()?)
             .ok_or_else(bad)?;
@@ -399,14 +401,14 @@ pub(crate) fn read_persisted_sections_source<S: crate::source::Source>(
         if addr == u64::MAX {
             continue;
         }
-        let a = base.absolute(addr)?;
+        let a = base.absolute(StoredAddress::new(addr))?;
         let fshd = src.read_exact_at(a, hdr_len.to_usize()?)?;
         let header = FsmHeader::parse(&fshd, offset_size)?;
         blocks.push((a, hdr_len));
         if header.fsse_addr == u64::MAX {
             continue;
         }
-        let fa = base.absolute(header.fsse_addr)?;
+        let fa = base.absolute(StoredAddress::new(header.fsse_addr))?;
         let used = header.fsse_used;
         let block = src.read_exact_at(fa, used.to_usize()?)?;
         sections.extend(parse_fsse(&block, &header, offset_size)?);
