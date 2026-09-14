@@ -315,6 +315,7 @@ use crate::type_builders::{
     make_i16_type, make_i32_type, make_i64_type, make_u8_type, make_u16_type, make_u32_type,
     make_u64_type, patch_vl_refs, patch_vl_refs_masked, write_reference_address,
 };
+use crate::width::UintWidth;
 
 /// An undefined on-disk address (all bits set), HDF5's "no address" sentinel.
 const UNDEF: u64 = u64::MAX;
@@ -13900,12 +13901,7 @@ fn oh_region_at(
         times,
         attr_phase_change,
     };
-    let size_width = match flags & 0x03 {
-        0 => 1usize,
-        1 => 2,
-        2 => 4,
-        _ => 8,
-    };
+    let size_width = usize::from(UintWidth::from_flags(flags).get());
     if prefix.len() < pos + size_width {
         return Err(Error::EditUnsupported("truncated object header"));
     }
@@ -14981,18 +14977,12 @@ pub(crate) fn build_v2_object_header(region: &OhRegion) -> Result<Vec<u8>, Error
 /// here applies to it.
 fn build_v2_object_header_verbatim(region: &OhRegion) -> Vec<u8> {
     let total = region.len();
-    let (size_flags, width) = if total <= 255 {
-        (0u8, 1usize)
-    } else if total <= 65535 {
-        (1u8, 2)
-    } else {
-        (2u8, 4)
-    };
+    let width = UintWidth::smallest_for_len(total);
     let props = region.props();
     // The creation-order bits and the two optional-block bits are the header's
     // own claim about what follows, so they come from the properties the region
     // was parsed with.
-    let flags = size_flags | props.header_flags();
+    let flags = width.flag_bits() | props.header_flags();
     let mut buf = Vec::with_capacity(8 + props.optional_len() + total + 4);
     buf.extend_from_slice(b"OHDR");
     buf.push(2); // version
@@ -15007,15 +14997,7 @@ fn build_v2_object_header_verbatim(region: &OhRegion) -> Vec<u8> {
     if let Some(phase) = props.attr_phase_change {
         buf.extend_from_slice(&phase.to_bytes());
     }
-    #[expect(
-        clippy::cast_possible_truncation,
-        reason = "width was selected just above to be the smallest field that holds total"
-    )]
-    match width {
-        1 => buf.push(total as u8),
-        2 => buf.extend_from_slice(&(total as u16).to_le_bytes()),
-        _ => buf.extend_from_slice(&(total as u32).to_le_bytes()),
-    }
+    buf.extend_from_slice(&(total as u64).to_le_bytes()[..usize::from(width.get())]);
     buf.extend_from_slice(region);
     let checksum = jenkins_lookup3(&buf);
     buf.extend_from_slice(&checksum.to_le_bytes());

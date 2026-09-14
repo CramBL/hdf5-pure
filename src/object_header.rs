@@ -13,6 +13,7 @@ use crate::error::FormatError;
 use crate::message_flags::MessageFlags;
 use crate::message_type::MessageType;
 use crate::source::Source;
+use crate::width::UintWidth;
 
 /// OHDR signature for v2 object headers.
 const OHDR_SIGNATURE: [u8; 4] = *b"OHDR";
@@ -458,17 +459,9 @@ impl ObjectHeader {
             pos += 4;
         }
 
-        // chunk0 size: width depends on flags bits 0-1
-        let chunk_size_width = match flags & 0x03 {
-            0 => 1u8,
-            1 => 2,
-            2 => 4,
-            3 => 8,
-            _ => unreachable!(),
-        };
-        ensure_len(data, pos, chunk_size_width as usize)?;
+        let chunk_size_width = UintWidth::from_flags(flags);
         let chunk0_size = read_uint_width(data, pos, chunk_size_width)?.to_usize()?;
-        pos += chunk_size_width as usize;
+        pos += usize::from(chunk_size_width.get());
 
         let chunk0_msg_start = pos;
         let chunk0_msg_end = pos
@@ -827,16 +820,9 @@ impl ObjectHeader {
             pos += 4;
         }
 
-        let chunk_size_width = match flags & 0x03 {
-            0 => 1u8,
-            1 => 2,
-            2 => 4,
-            3 => 8,
-            _ => unreachable!(),
-        };
-        ensure_len(&head, pos, chunk_size_width as usize)?;
+        let chunk_size_width = UintWidth::from_flags(flags);
         let chunk0_size = read_uint_width(&head, pos, chunk_size_width)?.to_usize()?;
-        pos += chunk_size_width as usize;
+        pos += usize::from(chunk_size_width.get());
         let prefix_len = pos;
 
         // The chunk0 body (prefix + messages + 4-byte checksum) is contiguous
@@ -1145,13 +1131,11 @@ mod tests {
         }
 
         let chunk_size = msg_bytes.len();
-        // Write chunk size based on flags bits 0-1
-        match flags & 0x03 {
-            0 => buf.push(chunk_size as u8),
-            1 => buf.extend_from_slice(&(chunk_size as u16).to_le_bytes()),
-            2 => buf.extend_from_slice(&(chunk_size as u32).to_le_bytes()),
-            3 => buf.extend_from_slice(&(chunk_size as u64).to_le_bytes()),
-            _ => unreachable!(),
+        match UintWidth::from_flags(flags) {
+            UintWidth::One => buf.push(chunk_size as u8),
+            UintWidth::Two => buf.extend_from_slice(&(chunk_size as u16).to_le_bytes()),
+            UintWidth::Four => buf.extend_from_slice(&(chunk_size as u32).to_le_bytes()),
+            UintWidth::Eight => buf.extend_from_slice(&(chunk_size as u64).to_le_bytes()),
         }
 
         buf.extend_from_slice(&msg_bytes);
