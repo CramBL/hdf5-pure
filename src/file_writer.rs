@@ -3730,9 +3730,10 @@ impl FileWriter {
 mod tests {
     use super::*;
     use crate::access_mode::AccessMode;
-    use crate::group_v2::resolve_path_any;
+    use crate::group_v2;
     use crate::link_info::LinkInfoMessage;
     use crate::object_header::ObjectHeader;
+    use crate::object_path::ObjectPath;
     use crate::signature;
     use crate::type_builders::{build_attr_message, make_i32_type};
 
@@ -3818,7 +3819,9 @@ mod tests {
     fn committed_reference_count(bytes: &[u8], path: &str) -> Option<u32> {
         let sig = signature::find_signature(bytes).unwrap();
         let sb = Superblock::parse(bytes, sig).unwrap();
-        let addr = resolve_path_any(bytes, AccessMode::ReadOnly, &sb, path).unwrap();
+        let addr =
+            group_v2::resolve_path_any(bytes, AccessMode::ReadOnly, &sb, &ObjectPath::parse(path))
+                .unwrap();
         let hdr = ObjectHeader::parse(
             bytes,
             AccessMode::ReadOnly,
@@ -3851,8 +3854,20 @@ mod tests {
 
         let sig = signature::find_signature(&bytes).unwrap();
         let sb = Superblock::parse(&bytes, sig).unwrap();
-        let type_addr = resolve_path_any(&bytes, AccessMode::ReadOnly, &sb, "mytype").unwrap();
-        let ds_addr = resolve_path_any(&bytes, AccessMode::ReadOnly, &sb, "typed").unwrap();
+        let type_addr = group_v2::resolve_path_any(
+            &bytes,
+            AccessMode::ReadOnly,
+            &sb,
+            &ObjectPath::parse("mytype"),
+        )
+        .unwrap();
+        let ds_addr = group_v2::resolve_path_any(
+            &bytes,
+            AccessMode::ReadOnly,
+            &sb,
+            &ObjectPath::parse("typed"),
+        )
+        .unwrap();
         let hdr = ObjectHeader::parse(
             &bytes,
             AccessMode::ReadOnly,
@@ -3895,7 +3910,9 @@ mod tests {
     fn read_dataset_f64(bytes: &[u8], path: &str) -> Vec<f64> {
         let sig = signature::find_signature(bytes).unwrap();
         let sb = Superblock::parse(bytes, sig).unwrap();
-        let addr = resolve_path_any(bytes, AccessMode::ReadOnly, &sb, path).unwrap();
+        let addr =
+            group_v2::resolve_path_any(bytes, AccessMode::ReadOnly, &sb, &ObjectPath::parse(path))
+                .unwrap();
         let hdr = ObjectHeader::parse(
             bytes,
             AccessMode::ReadOnly,
@@ -3957,7 +3974,13 @@ mod tests {
         assert_eq!(read_dataset_f64(&bytes, "data"), vec![1.0, 2.0]);
         let sig = signature::find_signature(&bytes).unwrap();
         let sb = Superblock::parse(&bytes, sig).unwrap();
-        let addr = resolve_path_any(&bytes, AccessMode::ReadOnly, &sb, "data").unwrap();
+        let addr = group_v2::resolve_path_any(
+            &bytes,
+            AccessMode::ReadOnly,
+            &sb,
+            &ObjectPath::parse("data"),
+        )
+        .unwrap();
         let hdr = ObjectHeader::parse(
             &bytes,
             AccessMode::ReadOnly,
@@ -4007,7 +4030,13 @@ mod tests {
         let bytes = fw.finish().unwrap();
         let sig = signature::find_signature(&bytes).unwrap();
         let sb = Superblock::parse(&bytes, sig).unwrap();
-        let addr = resolve_path_any(&bytes, AccessMode::ReadOnly, &sb, "grp").unwrap();
+        let addr = group_v2::resolve_path_any(
+            &bytes,
+            AccessMode::ReadOnly,
+            &sb,
+            &ObjectPath::parse("grp"),
+        )
+        .unwrap();
         let hdr = ObjectHeader::parse(
             &bytes,
             AccessMode::ReadOnly,
@@ -4036,7 +4065,13 @@ mod tests {
         let bytes = fw.finish().unwrap();
         let sig = signature::find_signature(&bytes).unwrap();
         let sb = Superblock::parse(&bytes, sig).unwrap();
-        let addr = resolve_path_any(&bytes, AccessMode::ReadOnly, &sb, "grp").unwrap();
+        let addr = group_v2::resolve_path_any(
+            &bytes,
+            AccessMode::ReadOnly,
+            &sb,
+            &ObjectPath::parse("grp"),
+        )
+        .unwrap();
         let hdr = ObjectHeader::parse(
             &bytes,
             AccessMode::ReadOnly,
@@ -4093,7 +4128,13 @@ mod tests {
         let bytes = fw.finish().unwrap();
         let sig = signature::find_signature(&bytes).unwrap();
         let sb = Superblock::parse(&bytes, sig).unwrap();
-        let addr = resolve_path_any(&bytes, AccessMode::ReadOnly, &sb, "data").unwrap();
+        let addr = group_v2::resolve_path_any(
+            &bytes,
+            AccessMode::ReadOnly,
+            &sb,
+            &ObjectPath::parse("data"),
+        )
+        .unwrap();
         let hdr = ObjectHeader::parse(
             &bytes,
             AccessMode::ReadOnly,
@@ -4164,7 +4205,13 @@ mod tests {
         let bytes = fw.finish().unwrap();
         let sig = signature::find_signature(&bytes).unwrap();
         let sb = Superblock::parse(&bytes, sig).unwrap();
-        let addr = resolve_path_any(&bytes, AccessMode::ReadOnly, &sb, "data").unwrap();
+        let addr = group_v2::resolve_path_any(
+            &bytes,
+            AccessMode::ReadOnly,
+            &sb,
+            &ObjectPath::parse("data"),
+        )
+        .unwrap();
         let hdr = ObjectHeader::parse(
             &bytes,
             AccessMode::ReadOnly,
@@ -4702,7 +4749,13 @@ mod tests {
 
         let sig = signature::find_signature(&bytes).unwrap();
         let sb = Superblock::parse(&bytes, sig).unwrap();
-        let addr = resolve_path_any(&bytes, AccessMode::ReadOnly, &sb, "data").unwrap();
+        let addr = group_v2::resolve_path_any(
+            &bytes,
+            AccessMode::ReadOnly,
+            &sb,
+            &ObjectPath::parse("data"),
+        )
+        .unwrap();
         let hdr = ObjectHeader::parse(
             &bytes,
             AccessMode::ReadOnly,
@@ -5162,7 +5215,9 @@ mod tests {
     fn layout_message_version(bytes: &[u8], path: &str) -> u8 {
         let sig = signature::find_signature(bytes).unwrap();
         let sb = Superblock::parse(bytes, sig).unwrap();
-        let addr = resolve_path_any(bytes, AccessMode::ReadOnly, &sb, path).unwrap();
+        let addr =
+            group_v2::resolve_path_any(bytes, AccessMode::ReadOnly, &sb, &ObjectPath::parse(path))
+                .unwrap();
         let oh = ObjectHeader::parse(
             bytes,
             AccessMode::ReadOnly,
