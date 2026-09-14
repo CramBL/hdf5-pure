@@ -2393,9 +2393,62 @@ const ZFP_VERSION_NO: u32 = 0x1010; // ZFP 1.0.1.0
 const ZFP_CODEC: u32 = 5;
 const H5Z_FILTER_ZFP_VERSION_NO: u32 = 0x111; // H5Z-ZFP 1.1.1
 
+/// The dimensions of a ZFP chunk, one variant per rank the codec supports.
+///
+/// ZFP encodes blocks of one to four dimensions, so a chunk of any other rank has no
+/// encoding. Each variant holds its dimension sizes row-major, outermost first.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ZfpChunkDims {
+    One([usize; 1]),
+    Two([usize; 2]),
+    Three([usize; 3]),
+    Four([usize; 4]),
+}
+
+impl ZfpChunkDims {
+    /// Returns the number of dimensions, 1 to 4.
+    fn rank(self) -> u32 {
+        match self {
+            Self::One(_) => 1,
+            Self::Two(_) => 2,
+            Self::Three(_) => 3,
+            Self::Four(_) => 4,
+        }
+    }
+}
+
+impl TryFrom<&[u64]> for ZfpChunkDims {
+    type Error = FormatError;
+
+    /// Converts the chunk dimensions a caller passes to [`zfp_cd_values_rate`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::UnsupportedZfp`] if `dims` is empty or holds more than four
+    /// dimensions, and [`FormatError::ValueTooLargeForPlatform`] if a dimension exceeds `usize`.
+    fn try_from(dims: &[u64]) -> Result<Self, FormatError> {
+        if !matches!(dims.len(), 1..=4) {
+            return Err(FormatError::UnsupportedZfp(format!(
+                "only 1D-4D chunks are supported, got rank {}",
+                dims.len()
+            )));
+        }
+        let mut sizes = [0usize; 4];
+        for (slot, &dim) in sizes.iter_mut().zip(dims) {
+            *slot = dim.to_usize()?;
+        }
+        Ok(match dims.len() {
+            1 => Self::One([sizes[0]]),
+            2 => Self::Two([sizes[0], sizes[1]]),
+            3 => Self::Three([sizes[0], sizes[1], sizes[2]]),
+            _ => Self::Four(sizes),
+        })
+    }
+}
+
 /// Encode meta (52 bits) per `zfp_field_metadata`. `dims` is row-major
 /// (outer→inner). Returns a u64 whose low 52 bits are the meta value.
-fn zfp_meta_for(elem: ZfpElementType, dims: &[usize]) -> u64 {
+fn zfp_meta_for(elem: ZfpElementType, dims: ZfpChunkDims) -> u64 {
     // zfp_type: int32=1, int64=2, float=3, double=4
     let zt: u64 = match elem {
         ZfpElementType::I32 => 1,
@@ -2403,49 +2456,37 @@ fn zfp_meta_for(elem: ZfpElementType, dims: &[usize]) -> u64 {
         ZfpElementType::F32 => 3,
         ZfpElementType::F64 => 4,
     };
-    let rank = dims.len();
     let mut meta: u64 = 0;
     // Build via shift-and-add in the same order the reference does:
     // first the sizes in reverse row-major (nx last -> nw/nz/ny/nx), then
     // rank-1, then type-1. Because we shift left before adding, the final
     // low bits are type-1, then rank-1, then nx-1, etc. — matching what
     // the reference stream reads LSB-first.
-    match rank {
-        1 => {
-            let nx = dims[0] as u64 - 1;
-            meta = (meta << 48) + nx;
+    match dims {
+        ZfpChunkDims::One([nx]) => {
+            meta = (meta << 48) + (nx as u64 - 1);
         }
-        2 => {
+        ZfpChunkDims::Two([ny, nx]) => {
             // C does: <<24 ny-1, <<24 nx-1. That yields nx-1 at lower bits,
             // ny-1 at upper. Row-major `dims = [ny, nx]` so dims[0]=ny.
-            let ny = dims[0] as u64 - 1;
-            let nx = dims[1] as u64 - 1;
-            meta = (meta << 24) + ny;
-            meta = (meta << 24) + nx;
+            meta = (meta << 24) + (ny as u64 - 1);
+            meta = (meta << 24) + (nx as u64 - 1);
         }
-        3 => {
+        ZfpChunkDims::Three([nz, ny, nx]) => {
             // C: <<16 nz, <<16 ny, <<16 nx
-            let nz = dims[0] as u64 - 1;
-            let ny = dims[1] as u64 - 1;
-            let nx = dims[2] as u64 - 1;
-            meta = (meta << 16) + nz;
-            meta = (meta << 16) + ny;
-            meta = (meta << 16) + nx;
+            meta = (meta << 16) + (nz as u64 - 1);
+            meta = (meta << 16) + (ny as u64 - 1);
+            meta = (meta << 16) + (nx as u64 - 1);
         }
-        4 => {
+        ZfpChunkDims::Four([nw, nz, ny, nx]) => {
             // C: <<12 nw, <<12 nz, <<12 ny, <<12 nx
-            let nw = dims[0] as u64 - 1;
-            let nz = dims[1] as u64 - 1;
-            let ny = dims[2] as u64 - 1;
-            let nx = dims[3] as u64 - 1;
-            meta = (meta << 12) + nw;
-            meta = (meta << 12) + nz;
-            meta = (meta << 12) + ny;
-            meta = (meta << 12) + nx;
+            meta = (meta << 12) + (nw as u64 - 1);
+            meta = (meta << 12) + (nz as u64 - 1);
+            meta = (meta << 12) + (ny as u64 - 1);
+            meta = (meta << 12) + (nx as u64 - 1);
         }
-        _ => unreachable!("rank must be 1..=4 — validated by zfp_cd_values_rate"),
     }
-    meta = (meta << 2) + rank as u64 - 1;
+    meta = (meta << 2) + (u64::from(dims.rank()) - 1);
     meta = (meta << 2) + zt - 1;
     meta
 }
@@ -2460,22 +2501,8 @@ pub fn zfp_cd_values_rate(
     element_type: ZfpElementType,
     chunk_dims: &[u64],
 ) -> Result<Vec<u32>, FormatError> {
-    if !matches!(chunk_dims.len(), 1..=4) {
-        return Err(FormatError::UnsupportedZfp(format!(
-            "only 1D-4D chunks are supported, got rank {}",
-            chunk_dims.len()
-        )));
-    }
-    let dims_usize: Vec<usize> = chunk_dims
-        .iter()
-        .map(|&d| d.to_usize())
-        .collect::<Result<_, _>>()?;
-    let rank = dims_usize.len();
-    #[expect(
-        clippy::cast_possible_truncation,
-        reason = "rank is a validated 1..=4 chunk rank; 4^rank <= 256, fits usize"
-    )]
-    let block_values: usize = 4usize.pow(rank as u32);
+    let dims = ZfpChunkDims::try_from(chunk_dims)?;
+    let block_values: usize = 4usize.pow(dims.rank());
     #[expect(
         clippy::cast_possible_truncation,
         reason = "rate (bits-per-value) * block_values (<= 256) is a small bit budget that fits u64"
@@ -2491,7 +2518,7 @@ pub fn zfp_cd_values_rate(
         reason = "ZFP_CODEC is the constant 5; the codec id is a single magic byte and fits u8"
     )]
     w.write(8, u64::from(ZFP_CODEC as u8));
-    w.write(52, zfp_meta_for(element_type, &dims_usize));
+    w.write(52, zfp_meta_for(element_type, dims));
     // Rate-mode short form: mode = maxbits - 1 for maxbits ≤ 2048.
     // Our rate × 4^rank is well inside that range for supported inputs.
     // Mode (12 bits short / 64 bits long). `zfp_stream_mode` short form for
