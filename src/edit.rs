@@ -8342,15 +8342,13 @@ impl WriteEngine {
         // library (e.g. the C library records a maximum-dimensions array equal to
         // the current dimensions, which this crate omits) while still refusing any
         // real retype or reshape.
-        let (disk_dt, _) = crate::datatype::Datatype::parse(&region[dt_b..dt_e])
-            .map_err(|_| Error::EditUnsupported("dataset header datatype could not be parsed"))?;
+        let (disk_dt, _) = Datatype::parse(&region[dt_b..dt_e])?;
         if disk_dt != fd.dt {
             return Err(Error::EditUnsupported(
                 "write_dataset datatype does not match the on-disk dataset (overwrite, not retype)",
             ));
         }
-        let disk_ds = Dataspace::parse(&region[ds_b..ds_e], LENGTH_SIZE)
-            .map_err(|_| Error::EditUnsupported("dataset header dataspace could not be parsed"))?;
+        let disk_ds = Dataspace::parse(&region[ds_b..ds_e], LENGTH_SIZE)?;
         if disk_ds.space_type != fd.ds.space_type
             || disk_ds.rank != fd.ds.rank
             || disk_ds.dimensions != fd.ds.dimensions
@@ -8451,10 +8449,7 @@ impl WriteEngine {
                 // the file and shifts the resulting write offsets back by `base`,
                 // and the relocating path rebuilds the chunk blob with stored
                 // addresses (see `write_chunked_relocatable`).
-                let dl =
-                    DataLayout::parse(&region[lb..le], OFFSET_SIZE, LENGTH_SIZE).map_err(|_| {
-                        Error::EditUnsupported("dataset header data layout could not be parsed")
-                    })?;
+                let dl = DataLayout::parse(&region[lb..le], OFFSET_SIZE, LENGTH_SIZE)?;
                 let DataLayout::Chunked { index, .. } = dl else {
                     return Err(Error::EditUnsupported("dataset is not chunked"));
                 };
@@ -8492,9 +8487,7 @@ impl WriteEngine {
                 // splitting in the apply phase and so has no other chance to make
                 // it.
                 if let Some(pm) = &pipeline_message {
-                    let pipeline = FilterPipeline::parse(pm).map_err(|_| {
-                        Error::EditUnsupported("dataset filter pipeline could not be parsed")
-                    })?;
+                    let pipeline = FilterPipeline::parse(pm)?;
                     if !pipeline_reencodable(&pipeline) {
                         return Err(Error::EditUnsupported(
                             "a chunked dataset using a filter this engine cannot re-encode \
@@ -8654,14 +8647,9 @@ impl WriteEngine {
             "dataset header has no data layout",
         ))?;
 
-        let (disk_dt, _) = Datatype::parse(&region[dt_b..dt_e])
-            .map_err(|_| Error::AppendUnsupported("dataset header datatype could not be parsed"))?;
-        let disk_ds = Dataspace::parse(&region[ds_b..ds_e], LENGTH_SIZE).map_err(|_| {
-            Error::AppendUnsupported("dataset header dataspace could not be parsed")
-        })?;
-        let dl = DataLayout::parse(&region[lb..le], OFFSET_SIZE, LENGTH_SIZE).map_err(|_| {
-            Error::AppendUnsupported("dataset header data layout could not be parsed")
-        })?;
+        let (disk_dt, _) = Datatype::parse(&region[dt_b..dt_e])?;
+        let disk_ds = Dataspace::parse(&region[ds_b..ds_e], LENGTH_SIZE)?;
+        let dl = DataLayout::parse(&region[lb..le], OFFSET_SIZE, LENGTH_SIZE)?;
 
         // Require a chunked dataset indexed by an Extensible Array, which only a
         // version 4 layout message stores.
@@ -8751,9 +8739,7 @@ impl WriteEngine {
         let has_filters = pipeline_message.is_some();
         let pipeline = match &pipeline_message {
             Some(pm) => {
-                let parsed = FilterPipeline::parse(pm).map_err(|_| {
-                    Error::AppendUnsupported("dataset filter pipeline could not be parsed")
-                })?;
+                let parsed = FilterPipeline::parse(pm)?;
                 if !pipeline_reencodable(&parsed) {
                     return Err(Error::AppendUnsupported(
                         "dataset uses a filter this engine cannot re-encode",
@@ -8776,13 +8762,12 @@ impl WriteEngine {
         // or the kept chunks — carried by metadata into the new index — would be
         // re-encoded in the wrong element width.
         if let Some(idx_addr) = *address {
-            let hdr =
-                ExtensibleArrayHeader::parse_from_source(&view, idx_addr, OFFSET_SIZE, LENGTH_SIZE)
-                    .map_err(|_| {
-                        Error::AppendUnsupported(
-                            "dataset extensible-array header could not be parsed",
-                        )
-                    })?;
+            let hdr = ExtensibleArrayHeader::parse_from_source(
+                &view,
+                idx_addr,
+                OFFSET_SIZE,
+                LENGTH_SIZE,
+            )?;
             if (hdr.client_id == 1) != has_filters {
                 return Err(Error::AppendUnsupported(
                     "dataset filter metadata is inconsistent (chunk-index client id \
@@ -8794,8 +8779,7 @@ impl WriteEngine {
         // Enumerate the existing chunks (base-relative addresses) and require a
         // dense grid: `plan_dense_grid` returns the chunks in index order and
         // `None` on any hole, duplicate, or count mismatch against the dimension.
-        let infos = enumerate_chunks_from_source(&view, &dl, &disk_ds, OFFSET_SIZE, LENGTH_SIZE)
-            .map_err(|_| Error::AppendUnsupported("dataset chunk index could not be enumerated"))?;
+        let infos = enumerate_chunks_from_source(&view, &dl, &disk_ds, OFFSET_SIZE, LENGTH_SIZE)?;
         let grid = plan_dense_grid(infos, &disk_ds.dimensions, &spatial).ok_or(
             Error::AppendUnsupported(
                 "dataset has a sparse or inconsistent chunk grid; cannot append",
@@ -8847,9 +8831,7 @@ impl WriteEngine {
                 .ok_or(Error::AppendUnsupported(
                     "trailing chunk extends past end-of-file",
                 ))?;
-            let stored = view
-                .read_exact_at(partial.address, len)
-                .map_err(|_| Error::AppendUnsupported("trailing chunk could not be read"))?;
+            let stored = view.read_exact_at(partial.address, len)?;
             let full = if let Some(pl) = &pipeline {
                 let ctx = ChunkContext::from_datatype(&spatial, &disk_dt)?;
                 decompress_chunk(&stored, pl, ctx, partial.filter_mask).map_err(Error::Format)?
@@ -8971,12 +8953,7 @@ impl WriteEngine {
                 let ai = crate::attribute_info::AttributeInfoMessage::parse(
                     &region[body..body_end],
                     OFFSET_SIZE,
-                )
-                .map_err(|_| {
-                    Error::EditUnsupported(
-                        "a source attribute-info message could not be parsed for copying",
-                    )
-                })?;
+                )?;
                 if ai.fractal_heap_address.is_some() {
                     dense = true;
                 }
@@ -9223,10 +9200,7 @@ impl WriteEngine {
                         .filter(|&e| e <= src.len())
                         .ok_or(Error::EditUnsupported("dataset data is out of bounds"))?;
                     let len = data_size.to_usize()?;
-                    Some(
-                        src.read_exact_at(start, len)
-                            .map_err(|_| Error::EditUnsupported("dataset data is out of bounds"))?,
-                    )
+                    Some(src.read_exact_at(start, len)?)
                 };
                 Ok(CopyTree::DatasetContiguous {
                     region,
@@ -9305,11 +9279,7 @@ impl WriteEngine {
                         .checked_add(len as u64)
                         .filter(|&e| e <= dview.len())
                         .ok_or(Error::EditUnsupported("chunk data is out of bounds"))?;
-                    chunk_bytes.push(
-                        dview
-                            .read_exact_at(ci.address, len)
-                            .map_err(|_| Error::EditUnsupported("chunk data is out of bounds"))?,
-                    );
+                    chunk_bytes.push(dview.read_exact_at(ci.address, len)?);
                     meta.push(ChunkMeta {
                         compressed_size: ci.chunk_size as u64,
                         filter_mask: ci.filter_mask,
@@ -11679,9 +11649,11 @@ pub(crate) fn validate_gathered_append(st: &LocatedState, b: &AppendBuilder) -> 
 
 /// Locate the dataset at `oh_addr` in `file` and build its [`LocatedState`],
 /// validating in-place append eligibility (rank-1 / unlimited / Extensible-Array
-/// indexed, a nonzero chunk length, and a re-encodable filter pipeline). Mirrors
-/// the append writer's `ensure_located`, reporting through
-/// [`Error::AppendInPlaceUnsupported`].
+/// indexed, a nonzero chunk length, and a re-encodable filter pipeline). A
+/// dataset this path cannot append to takes an
+/// [`Error::AppendInPlaceUnsupported`]. A datatype or filter pipeline message
+/// that does not read or parse returns the [`Error::Format`] the read or the
+/// parse produced.
 pub(crate) fn locate_dataset_state<F: Store>(
     file: &F,
     oh_addr: u64,
@@ -11693,19 +11665,12 @@ pub(crate) fn locate_dataset_state<F: Store>(
         ));
     }
     let (dt_off, dt_size) = result.spans.datatype;
-    let dt_bytes = file
-        .read_metadata_at(dt_off, dt_size)
-        .map_err(|_| Error::AppendInPlaceUnsupported("dataset datatype could not be parsed"))?;
-    let (datatype, _) = Datatype::parse(&dt_bytes)
-        .map_err(|_| Error::AppendInPlaceUnsupported("dataset datatype could not be parsed"))?;
+    let dt_bytes = file.read_metadata_at(dt_off, dt_size)?;
+    let (datatype, _) = Datatype::parse(&dt_bytes)?;
     let pipeline = match result.spans.filter {
         Some((fb, fsize)) => {
-            let fp_bytes = file.read_metadata_at(fb, fsize).map_err(|_| {
-                Error::AppendInPlaceUnsupported("dataset filter pipeline could not be parsed")
-            })?;
-            let parsed = FilterPipeline::parse(&fp_bytes).map_err(|_| {
-                Error::AppendInPlaceUnsupported("dataset filter pipeline could not be parsed")
-            })?;
+            let fp_bytes = file.read_metadata_at(fb, fsize)?;
+            let parsed = FilterPipeline::parse(&fp_bytes)?;
             if !pipeline_reencodable(&parsed) {
                 return Err(Error::AppendInPlaceUnsupported(
                     "dataset uses a filter this engine cannot re-encode",
@@ -11997,21 +11962,13 @@ fn flatten_dataset(db: DatasetBuilder) -> Result<FlatDataset, Error> {
         // build — and would pass a fill value the encoder later refuses.
         let chunk_dims = db.chunk_options.resolve_chunk_dims(&shape);
         let ctx = ChunkContext::from_datatype(&chunk_dims, &dt)?;
-        db.chunk_options
-            .build_pipeline(
-                &ctx,
-                crate::fill_value::FillPattern::new(
-                    db.fill.as_deref(),
-                    ctx.element_size.narrow::<NonZeroUsize>()?,
-                ),
-            )
-            .map_err(|_| {
-                Error::EditUnsupported(
-                    "this dataset's filter pipeline cannot be added in place \
-                     (an unsupported filter, an incompatible datatype, or a \
-                     fill value the filter cannot record)",
-                )
-            })?;
+        db.chunk_options.build_pipeline(
+            &ctx,
+            crate::fill_value::FillPattern::new(
+                db.fill.as_deref(),
+                ctx.element_size.narrow::<NonZeroUsize>()?,
+            ),
+        )?;
     }
 
     // The link message body (whose length is independent of the address) must
@@ -12325,12 +12282,9 @@ fn parse_chunked_header(region: &OhRegion) -> Result<ChunkedHeaderParts, Error> 
     let (ds_b, ds_e) =
         dataspace.ok_or(Error::EditUnsupported("dataset header has no dataspace"))?;
     let (lb, le) = layout.ok_or(Error::EditUnsupported("dataset header has no data layout"))?;
-    let (dt, _) = crate::datatype::Datatype::parse(&region[dt_b..dt_e])
-        .map_err(|_| Error::EditUnsupported("dataset header datatype could not be parsed"))?;
-    let ds = Dataspace::parse(&region[ds_b..ds_e], LENGTH_SIZE)
-        .map_err(|_| Error::EditUnsupported("dataset header dataspace could not be parsed"))?;
-    let dl = DataLayout::parse(&region[lb..le], OFFSET_SIZE, LENGTH_SIZE)
-        .map_err(|_| Error::EditUnsupported("dataset header data layout could not be parsed"))?;
+    let (dt, _) = Datatype::parse(&region[dt_b..dt_e])?;
+    let ds = Dataspace::parse(&region[ds_b..ds_e], LENGTH_SIZE)?;
+    let dl = DataLayout::parse(&region[lb..le], OFFSET_SIZE, LENGTH_SIZE)?;
     if !matches!(dl, DataLayout::Chunked { .. }) {
         return Err(Error::EditUnsupported("dataset is not chunked"));
     }
@@ -12449,8 +12403,7 @@ fn split_and_encode_chunks(
     let Some(pm) = pipeline_message else {
         return Ok(split);
     };
-    let pipeline = FilterPipeline::parse(pm)
-        .map_err(|_| Error::EditUnsupported("dataset filter pipeline could not be parsed"))?;
+    let pipeline = FilterPipeline::parse(pm)?;
     let ctx = ChunkContext::from_datatype(chunk_dims, dt)?;
     let mut encoded = Vec::with_capacity(split.len());
     // One encoder across the rewrite; see `FilterScratch`.
@@ -13522,8 +13475,7 @@ fn read_object_attrs<S: Source + ?Sized>(
     base: BaseAddress,
 ) -> Result<Vec<crate::attribute::StoredAttribute>, Error> {
     let header =
-        ObjectHeader::parse_from_source(src, access_mode, addr, OFFSET_SIZE, LENGTH_SIZE, base)
-            .map_err(|_| Error::EditUnsupported("an object header could not be parsed"))?;
+        ObjectHeader::parse_from_source(src, access_mode, addr, OFFSET_SIZE, LENGTH_SIZE, base)?;
     if base.get() > src.len() {
         return Err(Error::EditUnsupported(
             "this file's userblock is larger than the file itself",
@@ -13548,9 +13500,7 @@ fn read_object_attrs<S: Source + ?Sized>(
         // attribute that no longer exists.
         None,
     )
-    .map_err(|_| {
-        Error::EditUnsupported("an object's dense (fractal-heap) attributes could not be read")
-    })
+    .map_err(Error::Format)
 }
 
 /// Assemble a [`DenseAttrSet`] from an object's stored attributes and what its
@@ -13879,8 +13829,7 @@ fn parse_compact_attr_name(
     // committed message this walk has no file context to follow. Reading the name
     // alone lets an edit pass over such an attribute instead of refusing the
     // whole object because one of its neighbours is committed.
-    crate::attribute::message_name(&region[body..body_end])
-        .map_err(|_| Error::EditUnsupported("a target object has an unreadable attribute message"))
+    crate::attribute::message_name(&region[body..body_end]).map_err(Error::Format)
 }
 
 fn encode_attr_body(name: &str, value: &AttrValue) -> Result<Vec<u8>, Error> {
@@ -14672,10 +14621,7 @@ fn reject_foreign_addresses(region: &OhRegion) -> Result<(), Error> {
         }
         match msg_type {
             MessageType::Datatype => {
-                let (dt, _) =
-                    crate::datatype::Datatype::parse(&region[body..body_end]).map_err(|_| {
-                        Error::EditUnsupported("a source datatype could not be parsed for copying")
-                    })?;
+                let (dt, _) = Datatype::parse(&region[body..body_end])?;
                 if datatype_holds_file_address(&dt) {
                     return Err(Error::EditUnsupported(
                         "variable-length or reference datasets cannot be copied to another file yet",
@@ -14694,13 +14640,10 @@ fn reject_foreign_addresses(region: &OhRegion) -> Result<(), Error> {
                         "an attribute with a committed (shared) datatype cannot be copied to another file yet",
                     ));
                 }
-                let attr =
-                    crate::attribute::AttributeMessage::parse(&region[body..body_end], LENGTH_SIZE)
-                        .map_err(|_| {
-                            Error::EditUnsupported(
-                                "a source attribute could not be parsed for copying",
-                            )
-                        })?;
+                let attr = crate::attribute::AttributeMessage::parse(
+                    &region[body..body_end],
+                    LENGTH_SIZE,
+                )?;
                 if datatype_holds_file_address(&attr.datatype) {
                     return Err(Error::EditUnsupported(
                         "variable-length or reference attributes cannot be copied to another file yet",
@@ -14951,9 +14894,7 @@ fn screen_copied_references(
                 } else {
                     &region[body..body_end]
                 };
-                let (dt, _) = Datatype::parse(encoded).map_err(|_| {
-                    Error::EditUnsupported("a source datatype could not be parsed for copying")
-                })?;
+                let (dt, _) = Datatype::parse(encoded)?;
                 element_dt = Some(dt);
             }
             MessageType::DataLayout => {
@@ -15064,12 +15005,12 @@ fn screen_copied_references(
 /// reaching here should have been built by this crate or already walked
 /// message-by-message on the way in, but "should" is a claim about a file this
 /// session did not write: a header whose message size field overruns the region
-/// is a malformed *file*, which is the caller's input and so takes an
-/// [`Error::EditUnsupported`], the way every other malformed-header path in this
-/// module does. The `debug_assert!(false)` this replaced made the two build
-/// profiles disagree about whether such a file was writable at all — a panic in
-/// a test build, and in a release build a header silently missing its Attribute
-/// Info message, which is the zero-count defect this function exists to prevent.
+/// is a malformed *file*, which is the caller's input and so takes the
+/// [`Error::EditUnsupported`] the region walk reports. A debug assertion here
+/// would make the two build profiles disagree about whether such a file is
+/// writable at all: a panic in a test build, and in a release build a header
+/// silently missing its Attribute Info message, which is the zero-count defect
+/// this function exists to prevent.
 pub(crate) fn build_v2_object_header(region: &OhRegion) -> Result<Vec<u8>, Error> {
     let mut owned = region.clone();
     ensure_attribute_info(&mut owned)?;
