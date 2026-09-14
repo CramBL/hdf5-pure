@@ -129,6 +129,51 @@ fn chunked_fixed_array() {
     assert_ne!(chunks[0].address, chunks[1].address);
 }
 
+/// The oracle is the file's own bytes: an address left in the stored frame
+/// points 512 bytes short of the chunk, at plausible data.
+#[test]
+fn chunk_addresses_of_a_userblock_file_are_absolute() {
+    const USERBLOCK: u64 = 512;
+    const CHUNK_ELEMS: usize = 4;
+    let dir = tempdir().unwrap();
+    let p = dir.path().join("userblock.h5");
+    let values: Vec<i32> = (0..8).collect();
+    {
+        let mut b = FileBuilder::new();
+        b.with_userblock(USERBLOCK);
+        b.create_dataset("d")
+            .with_i32_data(&values)
+            .with_shape(&[values.len() as u64])
+            .with_chunks(&[CHUNK_ELEMS as u64]);
+        b.write(&p).unwrap();
+    }
+    let bytes = std::fs::read(&p).unwrap();
+
+    let f = File::open(&p).unwrap();
+    let chunks = open(&f, "d").chunks().unwrap();
+
+    assert_eq!(chunks.len(), 2);
+    for c in &chunks {
+        assert!(
+            c.address >= USERBLOCK,
+            "a chunk cannot lie inside the userblock: {c:?}"
+        );
+        let start = usize::try_from(c.address).unwrap();
+        let stored: Vec<i32> = bytes[start..start + usize::try_from(c.storage_size).unwrap()]
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|b| i32::from_le_bytes(*b))
+            .collect();
+        let first = usize::try_from(c.offset[0]).unwrap();
+        assert_eq!(
+            stored,
+            values[first..first + CHUNK_ELEMS],
+            "the bytes at the reported address are the chunk's own: {c:?}"
+        );
+    }
+}
+
 #[test]
 fn chunked_extensible_array_supports_append() {
     let dir = tempdir().unwrap();

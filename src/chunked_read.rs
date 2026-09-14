@@ -10,6 +10,7 @@ use std::borrow::Cow;
 
 use core::num::NonZeroUsize;
 
+use crate::address::StoredAddress;
 use crate::btree_v1::btree_v1_node_header_size;
 use crate::bytes::read_offset;
 use crate::chunk_cache::{CachePass, ChunkCache};
@@ -46,7 +47,7 @@ fn decompress_all_chunks_from_source<S: Source + ?Sized>(
     let mut scratch = FilterScratch::new();
     for chunk_info in chunks {
         let raw_chunk =
-            source.read_exact_at(chunk_info.address, chunk_info.chunk_size.to_usize()?)?;
+            source.read_exact_at(chunk_info.address.get(), chunk_info.chunk_size.to_usize()?)?;
         let decompressed = if let Some(pl) = pipeline {
             decompress_chunk_with(&mut scratch, &raw_chunk, pl, ctx, chunk_info.filter_mask)?
         } else {
@@ -66,8 +67,11 @@ pub struct ChunkInfo {
     pub filter_mask: u32,
     /// N-dimensional offset of this chunk in dataset space.
     pub offsets: Vec<u64>,
-    /// File address of the chunk data.
-    pub address: u64,
+    /// Address of the chunk data, as the chunk index stores it.
+    ///
+    /// A caller that reads the bytes from a source that is not framed at the base address adds
+    /// the base first.
+    pub address: StoredAddress,
 }
 
 /// The size in bytes of a key in a version 1 B-tree of type 1 (raw data chunks):
@@ -87,7 +91,7 @@ const fn chunk_record_key_size(ndims: usize) -> usize {
 /// `chunk_dimensions.len()` from the DataLayout::Chunked message (rank+1).
 pub fn collect_chunk_info(
     file_data: &[u8],
-    btree_address: u64,
+    btree_address: StoredAddress,
     ndims: usize,
     offset_size: u8,
     length_size: u8,
@@ -101,7 +105,7 @@ pub fn collect_chunk_info(
 /// stack overflows (which would abort the process uncatchably).
 fn collect_chunk_info_inner(
     file_data: &[u8],
-    btree_address: u64,
+    btree_address: StoredAddress,
     ndims: usize,
     offset_size: u8,
     _length_size: u8,
@@ -112,7 +116,7 @@ fn collect_chunk_info_inner(
             "chunk B-tree nested too deeply".into(),
         ));
     }
-    let offset = btree_address.to_usize()?;
+    let offset = btree_address.get().to_usize()?;
     let os = offset_size as usize;
 
     // Parse B-tree v1 header
@@ -182,7 +186,7 @@ fn collect_chunk_info_inner(
             pos += key_size;
 
             // Parse child address
-            let address = read_offset(file_data, pos, offset_size)?;
+            let address = StoredAddress::new(read_offset(file_data, pos, offset_size)?);
             pos += os;
 
             chunks.push(ChunkInfo {
@@ -207,7 +211,7 @@ fn collect_chunk_info_inner(
         let mut child_addrs = Vec::with_capacity(entries_used);
         for _ in 0..entries_used {
             pos += key_size; // skip key
-            let child_addr = read_offset(file_data, pos, offset_size)?;
+            let child_addr = StoredAddress::new(read_offset(file_data, pos, offset_size)?);
             child_addrs.push(child_addr);
             pos += os;
         }
@@ -251,7 +255,7 @@ const MAX_CHUNK_BTREE_DEPTH: u32 = 64;
 /// caller can leave the whole index unreclaimed.
 pub(crate) fn collect_chunk_btree_node_spans<S: Source + ?Sized>(
     source: &S,
-    btree_address: u64,
+    btree_address: StoredAddress,
     ndims: usize,
     offset_size: u8,
 ) -> Result<Vec<(u64, u64)>, FormatError> {
@@ -262,7 +266,7 @@ pub(crate) fn collect_chunk_btree_node_spans<S: Source + ?Sized>(
 
 fn collect_chunk_btree_node_spans_inner<S: Source + ?Sized>(
     source: &S,
-    btree_address: u64,
+    btree_address: StoredAddress,
     ndims: usize,
     offset_size: u8,
     depth: u32,
@@ -277,7 +281,7 @@ fn collect_chunk_btree_node_spans_inner<S: Source + ?Sized>(
     let header_size = btree_v1_node_header_size(offset_size);
 
     // Node header: signature(4) + type(1) + level(1) + entries_used(2) + 2 siblings.
-    let header = source.read_metadata_at(btree_address, header_size)?;
+    let header = source.read_metadata_at(btree_address.get(), header_size)?;
     if &header[0..4] != b"TREE" {
         return Err(FormatError::InvalidBTreeSignature);
     }
@@ -301,15 +305,16 @@ fn collect_chunk_btree_node_spans_inner<S: Source + ?Sized>(
     let node_len = header_size + body_len;
     let body_addr =
         btree_address
+            .get()
             .checked_add(header_size as u64)
             .ok_or(FormatError::OffsetOverflow {
-                offset: btree_address,
+                offset: btree_address.get(),
                 length: header_size as u64,
             })?;
     // Reading the body is also the bounds check: a node claiming to run past
     // end-of-file fails here rather than being recorded as reclaimable.
     let body = source.read_metadata_at(body_addr, body_len)?;
-    out.push((btree_address, node_len as u64));
+    out.push((btree_address.get(), node_len as u64));
 
     // Internal nodes (level > 0) hold child node addresses, not chunk records;
     // recurse so their nodes are reclaimed too.
@@ -317,7 +322,7 @@ fn collect_chunk_btree_node_spans_inner<S: Source + ?Sized>(
         let mut pos = 0usize;
         for _ in 0..entries_used {
             pos += key_size; // skip the key
-            let child_addr = read_offset(&body, pos, offset_size)?;
+            let child_addr = StoredAddress::new(read_offset(&body, pos, offset_size)?);
             pos += os;
             collect_chunk_btree_node_spans_inner(
                 source,
@@ -340,7 +345,7 @@ fn collect_chunk_btree_node_spans_inner<S: Source + ?Sized>(
 /// whole-file buffer.
 pub fn collect_chunk_info_from_source<S: Source + ?Sized>(
     source: &S,
-    btree_address: u64,
+    btree_address: StoredAddress,
     ndims: usize,
     offset_size: u8,
     length_size: u8,
@@ -352,7 +357,7 @@ pub fn collect_chunk_info_from_source<S: Source + ?Sized>(
 /// [`collect_chunk_info_inner`] for why the bound is required.
 fn collect_chunk_info_from_source_inner<S: Source + ?Sized>(
     source: &S,
-    btree_address: u64,
+    btree_address: StoredAddress,
     ndims: usize,
     offset_size: u8,
     _length_size: u8,
@@ -367,7 +372,7 @@ fn collect_chunk_info_from_source_inner<S: Source + ?Sized>(
     let header_size = btree_v1_node_header_size(offset_size);
 
     // Node header: signature(4) + type(1) + level(1) + entries_used(2) + 2 siblings.
-    let header = source.read_metadata_at(btree_address, header_size)?;
+    let header = source.read_metadata_at(btree_address.get(), header_size)?;
     if &header[0..4] != b"TREE" {
         return Err(FormatError::InvalidBTreeSignature);
     }
@@ -383,9 +388,10 @@ fn collect_chunk_info_from_source_inner<S: Source + ?Sized>(
     let needed = entries_used * (key_size + os) + key_size;
     let body_addr =
         btree_address
+            .get()
             .checked_add(header_size as u64)
             .ok_or(FormatError::OffsetOverflow {
-                offset: btree_address,
+                offset: btree_address.get(),
                 length: header_size as u64,
             })?;
     let body = source.read_metadata_at(body_addr, needed)?;
@@ -410,7 +416,7 @@ fn collect_chunk_info_from_source_inner<S: Source + ?Sized>(
                 kp += 8;
             }
             pos += key_size;
-            let address = read_offset(&body, pos, offset_size)?;
+            let address = StoredAddress::new(read_offset(&body, pos, offset_size)?);
             pos += os;
             chunks.push(ChunkInfo {
                 chunk_size,
@@ -424,7 +430,7 @@ fn collect_chunk_info_from_source_inner<S: Source + ?Sized>(
         let mut child_addrs = Vec::with_capacity(entries_used);
         for _ in 0..entries_used {
             pos += key_size; // skip key
-            child_addrs.push(read_offset(&body, pos, offset_size)?);
+            child_addrs.push(StoredAddress::new(read_offset(&body, pos, offset_size)?));
             pos += os;
         }
         let mut all_chunks = Vec::new();
@@ -447,7 +453,7 @@ fn collect_chunk_info_from_source_inner<S: Source + ?Sized>(
 /// Chunks are stored contiguously starting at `data_address`. No stored index;
 /// addresses are computed from the chunk position.
 pub fn generate_implicit_chunks(
-    data_address: u64,
+    data_address: StoredAddress,
     dataset_dims: &[u64],
     chunk_dimensions: &[u32],
     element_size: u32,
@@ -489,7 +495,7 @@ pub fn generate_implicit_chunks(
             chunk_size: chunk_byte_size as u32,
             filter_mask: 0,
             offsets,
-            address: data_address + linear_idx * chunk_byte_size,
+            address: StoredAddress::new(data_address.get() + linear_idx * chunk_byte_size),
         });
     }
 
@@ -931,7 +937,7 @@ pub(crate) fn read_chunked_rows_from_source<S: Source + ?Sized>(
         let len = chunk.chunk_size as usize;
         let stored = match spans.as_mut() {
             Some(sp) => Cow::Borrowed(sp.chunk_bytes(source, chunk.address, len)?),
-            None => Cow::Owned(source.read_exact_at(chunk.address, len)?),
+            None => Cow::Owned(source.read_exact_at(chunk.address.get(), len)?),
         };
         match pipeline {
             Some(pl) => {
@@ -1105,7 +1111,7 @@ pub fn read_chunked_data_cached_from_source<S: Source + ?Sized>(
         let len = chunk_info.chunk_size.to_usize()?;
         let stored = match spans.as_mut() {
             Some(sp) => Cow::Borrowed(sp.chunk_bytes(source, chunk_info.address, len)?),
-            None => Cow::Owned(source.read_exact_at(chunk_info.address, len)?),
+            None => Cow::Owned(source.read_exact_at(chunk_info.address.get(), len)?),
         };
         let dec = match pipeline {
             Some(pl) => Cow::Owned(decompress_chunk_with(
@@ -1452,7 +1458,7 @@ pub(crate) fn collect_chunked_storage_spans<S: Source + ?Sized>(
         length_size,
     )? {
         if ci.chunk_size != 0 {
-            data.push((ci.address, ci.chunk_size as u64));
+            data.push((ci.address.get(), ci.chunk_size as u64));
         }
     }
 
@@ -1691,8 +1697,12 @@ pub fn read_chunked_data_cached(
             ),
             ChunkIndexLayout::FixedArray { .. } => {
                 let spatial_chunk_dims = spatial_dims();
-                let header =
-                    FixedArrayHeader::parse(file_data, addr.to_usize()?, offset_size, length_size)?;
+                let header = FixedArrayHeader::parse(
+                    file_data,
+                    addr.get().to_usize()?,
+                    offset_size,
+                    length_size,
+                )?;
                 read_fixed_array_chunks(
                     file_data,
                     &header,
@@ -1707,7 +1717,7 @@ pub fn read_chunked_data_cached(
                 let spatial_chunk_dims = spatial_dims();
                 let header = ExtensibleArrayHeader::parse(
                     file_data,
-                    addr.to_usize()?,
+                    addr.get().to_usize()?,
                     offset_size,
                     length_size,
                 )?;
@@ -1789,7 +1799,7 @@ pub fn read_chunked_data_cached(
         }
 
         // Cache miss: read the chunk's bytes from the file.
-        let r = slice_range(chunk_info.address, u64::from(chunk_info.chunk_size))?;
+        let r = slice_range(chunk_info.address.get(), u64::from(chunk_info.chunk_size))?;
         if r.end > file_data.len() {
             return Err(FormatError::UnexpectedEof {
                 expected: r.end,
@@ -2009,7 +2019,7 @@ mod tests {
                 chunk_size: (chunk_elems * elem) as u32,
                 filter_mask: 0,
                 offsets: vec![start_elem, 0],
-                address: data_offset as u64,
+                address: StoredAddress::new(data_offset as u64),
             });
             data_offset += chunk_elems * elem;
         }
@@ -2021,7 +2031,7 @@ mod tests {
         let layout = DataLayout::Chunked {
             chunk_dimensions: vec![chunk_elems as u32, elem as u32],
             index: ChunkIndexLayout::BTreeV1 {
-                address: Some(btree_addr as u64),
+                address: Some(StoredAddress::new(btree_addr as u64)),
             },
         };
         let dataspace = Dataspace {
@@ -2172,7 +2182,7 @@ mod tests {
                 buf.extend_from_slice(&off.to_le_bytes());
             }
             // Child: address
-            write_offset(&mut buf, chunk.address, offset_size);
+            write_offset(&mut buf, chunk.address.get(), offset_size);
         }
 
         // Final key (dummy)
@@ -2197,13 +2207,13 @@ mod tests {
                 chunk_size: 80,
                 filter_mask: 0,
                 offsets: vec![0, 0],
-                address: 0x1000,
+                address: StoredAddress::new(0x1000),
             },
             ChunkInfo {
                 chunk_size: 80,
                 filter_mask: 0,
                 offsets: vec![10, 0],
-                address: 0x2000,
+                address: StoredAddress::new(0x2000),
             },
         ];
 
@@ -2211,12 +2221,12 @@ mod tests {
         let mut file_data = vec![0u8; 0x3000];
         file_data[..btree.len()].copy_from_slice(&btree);
 
-        let result = collect_chunk_info(&file_data, 0, ndims, os, os).unwrap();
+        let result = collect_chunk_info(&file_data, StoredAddress::new(0), ndims, os, os).unwrap();
         assert_eq!(result.len(), 2);
-        assert_eq!(result[0].address, 0x1000);
+        assert_eq!(result[0].address, StoredAddress::new(0x1000));
         assert_eq!(result[0].offsets, vec![0, 0]);
         assert_eq!(result[0].chunk_size, 80);
-        assert_eq!(result[1].address, 0x2000);
+        assert_eq!(result[1].address, StoredAddress::new(0x2000));
         assert_eq!(result[1].offsets, vec![10, 0]);
     }
 
@@ -2268,13 +2278,13 @@ mod tests {
                 chunk_size: 80,
                 filter_mask: 0,
                 offsets: vec![0, 0],
-                address: 0x1000,
+                address: StoredAddress::new(0x1000),
             },
             ChunkInfo {
                 chunk_size: 80,
                 filter_mask: 0,
                 offsets: vec![10, 0],
-                address: 0x2000,
+                address: StoredAddress::new(0x2000),
             },
         ];
         let leaf = build_chunk_btree_leaf(&chunks, ndims, os);
@@ -2282,9 +2292,13 @@ mod tests {
         let mut file_data = vec![0u8; 0x3000];
         file_data[at..at + leaf.len()].copy_from_slice(&leaf);
 
-        let spans =
-            collect_chunk_btree_node_spans(&BytesSource::new(&file_data), at as u64, ndims, os)
-                .unwrap();
+        let spans = collect_chunk_btree_node_spans(
+            &BytesSource::new(&file_data),
+            StoredAddress::new(at as u64),
+            ndims,
+            os,
+        )
+        .unwrap();
         assert_eq!(spans, vec![(at as u64, leaf.len() as u64)]);
     }
 
@@ -2298,7 +2312,7 @@ mod tests {
             chunk_size: 40,
             filter_mask: 0,
             offsets: vec![0, 0],
-            address: 0x100,
+            address: StoredAddress::new(0x100),
         }];
         let leaf0 = build_chunk_btree_leaf(&leaf_chunks, ndims, os);
         let leaf1 = build_chunk_btree_leaf(&leaf_chunks, ndims, os);
@@ -2310,9 +2324,13 @@ mod tests {
         file[l1..l1 + leaf1.len()].copy_from_slice(&leaf1);
         file[root..root + internal.len()].copy_from_slice(&internal);
 
-        let mut spans =
-            collect_chunk_btree_node_spans(&BytesSource::new(&file), root as u64, ndims, os)
-                .unwrap();
+        let mut spans = collect_chunk_btree_node_spans(
+            &BytesSource::new(&file),
+            StoredAddress::new(root as u64),
+            ndims,
+            os,
+        )
+        .unwrap();
         spans.sort_unstable();
         assert_eq!(
             spans,
@@ -2334,19 +2352,19 @@ mod tests {
                 chunk_size: 40,
                 filter_mask: 0,
                 offsets: vec![0, 0],
-                address: 0x100,
+                address: StoredAddress::new(0x100),
             },
             ChunkInfo {
                 chunk_size: 40,
                 filter_mask: 0,
                 offsets: vec![5, 0],
-                address: 0x200,
+                address: StoredAddress::new(0x200),
             },
             ChunkInfo {
                 chunk_size: 40,
                 filter_mask: 0,
                 offsets: vec![10, 0],
-                address: 0x300,
+                address: StoredAddress::new(0x300),
             },
         ];
 
@@ -2354,11 +2372,11 @@ mod tests {
         let mut file_data = vec![0u8; 0x1000];
         file_data[..btree.len()].copy_from_slice(&btree);
 
-        let result = collect_chunk_info(&file_data, 0, ndims, os, os).unwrap();
+        let result = collect_chunk_info(&file_data, StoredAddress::new(0), ndims, os, os).unwrap();
         assert_eq!(result.len(), 3);
-        assert_eq!(result[0].address, 0x100);
-        assert_eq!(result[1].address, 0x200);
-        assert_eq!(result[2].address, 0x300);
+        assert_eq!(result[0].address, StoredAddress::new(0x100));
+        assert_eq!(result[1].address, StoredAddress::new(0x200));
+        assert_eq!(result[2].address, StoredAddress::new(0x300));
     }
 
     #[test]
@@ -2369,7 +2387,7 @@ mod tests {
         let mut file_data = vec![0u8; 0x1000];
         file_data[..btree.len()].copy_from_slice(&btree);
 
-        let result = collect_chunk_info(&file_data, 0, ndims, os, os).unwrap();
+        let result = collect_chunk_info(&file_data, StoredAddress::new(0), ndims, os, os).unwrap();
         assert_eq!(result.len(), 0);
     }
 
@@ -2384,7 +2402,7 @@ mod tests {
         let mut file_data = vec![0u8; 0x1000];
         file_data[..node.len()].copy_from_slice(&node);
 
-        let err = collect_chunk_info(&file_data, 0, ndims, os, os).unwrap_err();
+        let err = collect_chunk_info(&file_data, StoredAddress::new(0), ndims, os, os).unwrap_err();
         assert!(matches!(err, FormatError::ChunkedReadError(_)));
     }
 
@@ -2452,7 +2470,7 @@ mod tests {
                 chunk_size: chunk_bytes as u32,
                 filter_mask: 0,
                 offsets: vec![start as u64, 0],
-                address: data_offset as u64,
+                address: StoredAddress::new(data_offset as u64),
             });
 
             data_offset += chunk_bytes;
@@ -2467,7 +2485,7 @@ mod tests {
         let layout = DataLayout::Chunked {
             chunk_dimensions: vec![chunk_size_elems as u32, elem_size as u32],
             index: ChunkIndexLayout::BTreeV1 {
-                address: Some(btree_addr as u64),
+                address: Some(StoredAddress::new(btree_addr as u64)),
             },
         };
 
@@ -2610,7 +2628,7 @@ mod tests {
                 chunk_size: compressed.len() as u32,
                 filter_mask: 0,
                 offsets: vec![start as u64, 0],
-                address: data_offset as u64,
+                address: StoredAddress::new(data_offset as u64),
             });
 
             data_offset += compressed.len() + 16; // some padding
@@ -2623,7 +2641,7 @@ mod tests {
         let layout = DataLayout::Chunked {
             chunk_dimensions: vec![chunk_elems as u32, elem_size as u32],
             index: ChunkIndexLayout::BTreeV1 {
-                address: Some(btree_addr as u64),
+                address: Some(StoredAddress::new(btree_addr as u64)),
             },
         };
         let dataspace = Dataspace {
@@ -2696,7 +2714,7 @@ mod tests {
                     chunk_size: chunk_size as u32,
                     filter_mask: 0,
                     offsets: vec![row_start as u64, col_start as u64, 0],
-                    address: data_offset as u64,
+                    address: StoredAddress::new(data_offset as u64),
                 });
 
                 data_offset += chunk_size + 8;
@@ -2710,7 +2728,7 @@ mod tests {
         let layout = DataLayout::Chunked {
             chunk_dimensions: vec![chunk_dims[0] as u32, chunk_dims[1] as u32, elem_size as u32],
             index: ChunkIndexLayout::BTreeV1 {
-                address: Some(btree_addr as u64),
+                address: Some(StoredAddress::new(btree_addr as u64)),
             },
         };
         let dataspace = Dataspace {
@@ -2755,7 +2773,7 @@ mod tests {
         let mut file_data = vec![0u8; 512];
         file_data[..buf.len()].copy_from_slice(&buf);
 
-        let err = collect_chunk_info(&file_data, 0, 2, 8, 8).unwrap_err();
+        let err = collect_chunk_info(&file_data, StoredAddress::new(0), 2, 8, 8).unwrap_err();
         assert_eq!(err, FormatError::InvalidBTreeNodeType(0));
     }
 
@@ -2764,7 +2782,7 @@ mod tests {
     #[test]
     fn implicit_chunks_1d_five_chunks() {
         let chunks = generate_implicit_chunks(
-            0x1000,
+            StoredAddress::new(0x1000),
             &[100],
             &[20],
             8, // f64
@@ -2772,7 +2790,10 @@ mod tests {
         assert_eq!(chunks.len(), 5);
         let chunk_byte_size = 20 * 8;
         for (i, c) in chunks.iter().enumerate() {
-            assert_eq!(c.address, 0x1000 + i as u64 * chunk_byte_size as u64);
+            assert_eq!(
+                c.address,
+                StoredAddress::new(0x1000 + i as u64 * chunk_byte_size as u64)
+            );
             assert_eq!(c.offsets, vec![i as u64 * 20]);
             assert_eq!(c.filter_mask, 0);
             assert_eq!(c.chunk_size, chunk_byte_size as u32);
@@ -2783,7 +2804,7 @@ mod tests {
     fn implicit_chunks_2d() {
         // 10x6 dataset, 4x3 chunks => ceil(10/4)=3, ceil(6/3)=2 => 6 chunks
         let chunks = generate_implicit_chunks(
-            0x2000,
+            StoredAddress::new(0x2000),
             &[10, 6],
             &[4, 3],
             4, // f32
@@ -2798,14 +2819,17 @@ mod tests {
         assert_eq!(chunks[4].offsets, vec![8, 0]);
         assert_eq!(chunks[5].offsets, vec![8, 3]);
         for (i, c) in chunks.iter().enumerate() {
-            assert_eq!(c.address, 0x2000 + i as u64 * chunk_byte_size as u64);
+            assert_eq!(
+                c.address,
+                StoredAddress::new(0x2000 + i as u64 * chunk_byte_size as u64)
+            );
         }
     }
 
     #[test]
     fn implicit_chunks_partial_last() {
         // 25 elements, chunk size 10 => 3 chunks (last partial)
-        let chunks = generate_implicit_chunks(0x0, &[25], &[10], 8);
+        let chunks = generate_implicit_chunks(StoredAddress::new(0x0), &[25], &[10], 8);
         assert_eq!(chunks.len(), 3);
         assert_eq!(chunks[0].offsets, vec![0]);
         assert_eq!(chunks[1].offsets, vec![10]);
@@ -2832,7 +2856,7 @@ mod tests {
             chunk_dimensions: vec![chunk_elems as u32, elem_size as u32],
             index: ChunkIndexLayout::SingleChunk {
                 filtered: None,
-                address: Some(data_addr as u64),
+                address: Some(StoredAddress::new(data_addr as u64)),
             },
         };
         let dataspace = Dataspace {
@@ -2949,7 +2973,9 @@ mod tests {
     fn windowed_rows_rank0_chunked_falls_back() {
         let layout = DataLayout::Chunked {
             chunk_dimensions: vec![8], // dimensionality 1 => rank 0
-            index: ChunkIndexLayout::BTreeV1 { address: Some(0) },
+            index: ChunkIndexLayout::BTreeV1 {
+                address: Some(StoredAddress::new(0)),
+            },
         };
         let dataspace = Dataspace {
             space_type: DataspaceType::Scalar,
@@ -2985,7 +3011,9 @@ mod tests {
         let big: u32 = 1 << 22;
         let layout = DataLayout::Chunked {
             chunk_dimensions: vec![1, 2, 2, 2, 8],
-            index: ChunkIndexLayout::BTreeV1 { address: Some(0) },
+            index: ChunkIndexLayout::BTreeV1 {
+                address: Some(StoredAddress::new(0)),
+            },
         };
         let dataspace = Dataspace {
             space_type: DataspaceType::Simple,
@@ -3022,7 +3050,9 @@ mod tests {
         let big: u32 = 1 << 22;
         let layout = DataLayout::Chunked {
             chunk_dimensions: vec![2, big, big, big, 8],
-            index: ChunkIndexLayout::BTreeV1 { address: Some(0) },
+            index: ChunkIndexLayout::BTreeV1 {
+                address: Some(StoredAddress::new(0)),
+            },
         };
         let dataspace = Dataspace {
             space_type: DataspaceType::Simple,

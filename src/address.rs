@@ -19,6 +19,7 @@
 //!
 //! [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsec_fmt4_boot_super
 
+use crate::convert;
 use crate::error::FormatError;
 
 /// The byte offset at which a file's HDF5 image begins, the superblock's "Base Address" field.
@@ -112,10 +113,29 @@ impl StoredAddress {
     pub(crate) const fn get(self) -> u64 {
         self.0
     }
+
+    /// Returns `true` if this is the undefined address of a file whose addresses are
+    /// `offset_size` bytes wide.
+    ///
+    /// The undefined address has every bit of the address field set, so the width fixes which
+    /// value it is: `0xFFFF_FFFF` is undefined in a file with 4-byte addresses and an ordinary
+    /// address in a file with 8-byte ones. Metadata stores it in an address field whose structure
+    /// has no storage allocated, such as the section-info address of a free-space manager that
+    /// tracks nothing. Returns `false` for an `offset_size` other than 2, 4, or 8.
+    ///
+    /// The undefined address is defined in "Appendix A: Definitions" of the [format
+    /// specification, version 4.0][spec].
+    ///
+    /// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#sec_fmt4_appendixa
+    pub(crate) fn is_undefined(self, offset_size: u8) -> bool {
+        convert::is_undefined_addr(self.0, offset_size)
+    }
 }
 
 #[cfg(test)]
 mod tests {
+    use rstest::rstest;
+
     use super::*;
 
     #[test]
@@ -157,6 +177,23 @@ mod tests {
                 offset: u64::MAX,
                 length: 512,
             })
+        );
+    }
+
+    #[rstest]
+    #[case(2, 0xFFFF)]
+    #[case(4, 0xFFFF_FFFF)]
+    #[case(8, u64::MAX)]
+    fn the_undefined_address_sentinel_is_as_wide_as_the_offset_field(
+        #[case] offset_size: u8,
+        #[case] sentinel: u64,
+    ) {
+        assert!(StoredAddress::new(sentinel).is_undefined(offset_size));
+        assert!(!StoredAddress::new(sentinel - 1).is_undefined(offset_size));
+        assert_eq!(
+            StoredAddress::new(u64::MAX).is_undefined(offset_size),
+            offset_size == 8,
+            "a wider file's sentinel is an ordinary address in a narrower one"
         );
     }
 

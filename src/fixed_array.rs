@@ -6,10 +6,11 @@ extern crate alloc;
 #[cfg(not(feature = "std"))]
 use alloc::{format, vec, vec::Vec};
 
+use crate::address::StoredAddress;
 use crate::bytes::{read_length, read_offset, read_optional_offset};
 use crate::chunk_grid::ChunkGrid;
 use crate::chunked_read::ChunkInfo;
-use crate::convert::{Narrow, is_undefined_addr};
+use crate::convert::Narrow;
 use crate::error::FormatError;
 use crate::source::Source;
 
@@ -25,7 +26,7 @@ pub struct FixedArrayHeader {
     /// Total number of elements (chunks) in the array.
     pub num_elements: u64,
     /// Address of the data block.
-    pub data_block_address: u64,
+    pub data_block_address: StoredAddress,
 }
 
 impl FixedArrayHeader {
@@ -67,7 +68,7 @@ impl FixedArrayHeader {
         let mut pos = 8;
         let num_elements = read_length(d, pos, length_size)?;
         pos += length_size as usize;
-        let data_block_address = read_offset(d, pos, offset_size)?;
+        let data_block_address = StoredAddress::new(read_offset(d, pos, offset_size)?);
 
         crate::checksum::verify_trailing(&d[..min_size])?;
 
@@ -83,12 +84,12 @@ impl FixedArrayHeader {
     /// Parse a Fixed Array header from a [`Source`] (bounded window).
     pub fn parse_from_source<S: Source + ?Sized>(
         source: &S,
-        address: u64,
+        address: StoredAddress,
         offset_size: u8,
         length_size: u8,
     ) -> Result<Self, FormatError> {
         let min_size = 4 + 1 + 1 + 1 + 1 + length_size as usize + offset_size as usize + 4;
-        let buf = source.read_metadata_at(address, min_size)?;
+        let buf = source.read_metadata_at(address.get(), min_size)?;
         Self::parse(&buf, 0, offset_size, length_size)
     }
 }
@@ -104,7 +105,7 @@ impl FixedArrayHeader {
 /// size computed here); the caller validates them against the file bounds.
 pub(crate) fn fixed_array_index_spans<S: Source + ?Sized>(
     source: &S,
-    fa_base: u64,
+    fa_base: StoredAddress,
     offset_size: u8,
     length_size: u8,
 ) -> Result<Vec<(u64, u64)>, FormatError> {
@@ -113,11 +114,11 @@ pub(crate) fn fixed_array_index_spans<S: Source + ?Sized>(
 
     // FAHD: sig(4)+ver(1)+client(1)+elem_size(1)+max_bits(1)+num_elements(ls)+dblk_addr(os)+checksum(4).
     let fahd_size = (4 + 1 + 1 + 1 + 1 + length_size as usize + os + 4) as u64;
-    let mut spans = vec![(fa_base, fahd_size)];
+    let mut spans = vec![(fa_base.get(), fahd_size)];
 
     // An empty array has no data block (the address is the undefined sentinel);
     // there is nothing more to reclaim.
-    if is_undefined_addr(header.data_block_address, offset_size) {
+    if header.data_block_address.is_undefined(offset_size) {
         return Ok(spans);
     }
 
@@ -166,7 +167,7 @@ pub(crate) fn fixed_array_index_spans<S: Source + ?Sized>(
         (db_prefix + bitmap_size + 4 + elements_bytes + npages * 4) as u64
     };
 
-    spans.push((header.data_block_address, fadb_size));
+    spans.push((header.data_block_address.get(), fadb_size));
     Ok(spans)
 }
 
@@ -193,7 +194,8 @@ fn parse_fa_element(
             available: block.len(),
         });
     }
-    let Some(address) = read_optional_offset(block, elem_pos, offset_size)? else {
+    let Some(address) = read_optional_offset(block, elem_pos, offset_size)?.map(StoredAddress::new)
+    else {
         return Ok(None);
     };
     let Some(offsets) = grid.offsets_in_extent(index as u64)? else {
@@ -246,7 +248,7 @@ pub fn read_fixed_array_chunks(
     offset_size: u8,
     _length_size: u8,
 ) -> Result<Vec<ChunkInfo>, FormatError> {
-    let db_offset = header.data_block_address.to_usize()?;
+    let db_offset = header.data_block_address.get().to_usize()?;
     let os = offset_size as usize;
 
     // Parse data block prefix: FADB(4) + version(1) + client_id(1) + header_address(offset_size)
@@ -424,7 +426,7 @@ pub fn read_fixed_array_chunks_from_source<S: Source + ?Sized>(
     offset_size: u8,
     _length_size: u8,
 ) -> Result<Vec<ChunkInfo>, FormatError> {
-    let db_address = header.data_block_address;
+    let db_address = header.data_block_address.get();
     let os = offset_size as usize;
     let db_header_size = 4 + 1 + 1 + os;
 
@@ -642,7 +644,7 @@ mod tests {
         let read = read_fixed_array_chunks(&fa, &header, &grid, &[2], 4, 8, 8).unwrap();
         assert_eq!(
             read.iter().map(|c| c.address).collect::<Vec<_>>(),
-            vec![0x1000, 0x2000],
+            vec![StoredAddress::new(0x1000), StoredAddress::new(0x2000)],
             "the slot-3 chunk lies past the dataset's four elements"
         );
         assert_eq!(read[1].offsets, vec![2]);
@@ -668,7 +670,7 @@ mod tests {
         assert_eq!(header.element_size, 16);
         assert_eq!(header.max_nelmts_bits, 10);
         assert_eq!(header.num_elements, 5);
-        assert_eq!(header.data_block_address, 0x1000);
+        assert_eq!(header.data_block_address, StoredAddress::new(0x1000));
     }
 
     #[test]
@@ -756,7 +758,10 @@ mod tests {
 
         assert_eq!(chunks.len(), 5);
         for (i, c) in chunks.iter().enumerate() {
-            assert_eq!(c.address, base_addr + i as u64 * chunk_byte_size as u64);
+            assert_eq!(
+                c.address,
+                StoredAddress::new(base_addr + i as u64 * chunk_byte_size as u64)
+            );
             assert_eq!(c.offsets, vec![i as u64 * 20]);
             assert_eq!(c.filter_mask, 0);
             assert_eq!(c.chunk_size, chunk_byte_size as u32);
@@ -795,7 +800,7 @@ mod tests {
         let mem = BytesSource::new(file_data);
         let hm = FixedArrayHeader::parse_from_source(
             &mem,
-            header_offset as u64,
+            StoredAddress::new(header_offset as u64),
             offset_size,
             length_size,
         )
@@ -814,7 +819,7 @@ mod tests {
         let seek = ReadSeekSource::new(std::io::Cursor::new(file_data.to_vec())).unwrap();
         let hs = FixedArrayHeader::parse_from_source(
             &seek,
-            header_offset as u64,
+            StoredAddress::new(header_offset as u64),
             offset_size,
             length_size,
         )
@@ -908,13 +913,13 @@ mod tests {
         .unwrap();
 
         assert_eq!(chunks.len(), 3);
-        assert_eq!(chunks[0].address, 0x1000);
+        assert_eq!(chunks[0].address, StoredAddress::new(0x1000));
         assert_eq!(chunks[0].chunk_size, 120);
         assert_eq!(chunks[0].filter_mask, 0);
         assert_eq!(chunks[0].offsets, vec![0]);
-        assert_eq!(chunks[1].address, 0x2000);
+        assert_eq!(chunks[1].address, StoredAddress::new(0x2000));
         assert_eq!(chunks[1].chunk_size, 115);
-        assert_eq!(chunks[2].address, 0x3000);
+        assert_eq!(chunks[2].address, StoredAddress::new(0x3000));
         assert_eq!(chunks[2].chunk_size, 100);
 
         #[cfg(feature = "std")]
@@ -1010,11 +1015,11 @@ mod tests {
         // bitmap 0xC0 => both pages initialized (page 0 and page 1).
         let chunks = read_paged(0b1100_0000);
         assert_eq!(chunks.len(), 3);
-        assert_eq!(chunks[0].address, 0x1000);
+        assert_eq!(chunks[0].address, StoredAddress::new(0x1000));
         assert_eq!(chunks[0].offsets, vec![0]);
-        assert_eq!(chunks[1].address, 0x2000);
+        assert_eq!(chunks[1].address, StoredAddress::new(0x2000));
         assert_eq!(chunks[1].offsets, vec![1]);
-        assert_eq!(chunks[2].address, 0x3000);
+        assert_eq!(chunks[2].address, StoredAddress::new(0x3000));
         assert_eq!(chunks[2].offsets, vec![2]);
     }
 
@@ -1023,8 +1028,8 @@ mod tests {
         // bitmap 0x80 => only page 0 initialized; page 1's chunk is unallocated.
         let chunks = read_paged(0b1000_0000);
         assert_eq!(chunks.len(), 2);
-        assert_eq!(chunks[0].address, 0x1000);
-        assert_eq!(chunks[1].address, 0x2000);
+        assert_eq!(chunks[0].address, StoredAddress::new(0x1000));
+        assert_eq!(chunks[1].address, StoredAddress::new(0x2000));
     }
 
     /// Every checksummed structure of a Fixed Array is verified on read, by both
@@ -1077,18 +1082,19 @@ mod tests {
                             read_fixed_array_chunks(file, &h, &grid, &chunk_dims, 8, os, ls)
                         });
                     let mem = BytesSource::new(file);
-                    let streamed = FixedArrayHeader::parse_from_source(&mem, base, os, ls)
-                        .and_then(|h| {
-                            read_fixed_array_chunks_from_source(
-                                &mem,
-                                &h,
-                                &grid,
-                                &chunk_dims,
-                                8,
-                                os,
-                                ls,
-                            )
-                        });
+                    let streamed =
+                        FixedArrayHeader::parse_from_source(&mem, StoredAddress::new(base), os, ls)
+                            .and_then(|h| {
+                                read_fixed_array_chunks_from_source(
+                                    &mem,
+                                    &h,
+                                    &grid,
+                                    &chunk_dims,
+                                    8,
+                                    os,
+                                    ls,
+                                )
+                            });
                     (buffered, streamed.is_err())
                 };
                 let sound = read_both(&file).0.expect("the sound file must read");
@@ -1098,8 +1104,13 @@ mod tests {
                     "the fixture must read before it is corrupted (filters={has_filters}, n={n})"
                 );
 
-                let spans =
-                    fixed_array_index_spans(&BytesSource::new(&file), base, os, ls).unwrap();
+                let spans = fixed_array_index_spans(
+                    &BytesSource::new(&file),
+                    StoredAddress::new(base),
+                    os,
+                    ls,
+                )
+                .unwrap();
                 assert_eq!(spans.len(), 2, "FA index = FAHD + FADB");
 
                 let header = FixedArrayHeader::parse(&file, base as usize, os, ls).unwrap();
@@ -1151,7 +1162,12 @@ mod tests {
                          buffered one does, at {at:#x}"
                     );
                     if walked {
-                        let walk = fixed_array_index_spans(&BytesSource::new(&file), base, os, ls);
+                        let walk = fixed_array_index_spans(
+                            &BytesSource::new(&file),
+                            StoredAddress::new(base),
+                            os,
+                            ls,
+                        );
                         assert!(
                             matches!(walk, Err(FormatError::ChecksumMismatch { .. })),
                             "filters={has_filters}, n={n}: the reclaim walk must refuse a corrupt \
@@ -1198,9 +1214,13 @@ mod tests {
                 let mut file = vec![0u8; base as usize + fa.len()];
                 file[base as usize..].copy_from_slice(&fa);
 
-                let spans =
-                    fixed_array_index_spans(&crate::source::BytesSource::new(&file), base, os, ls)
-                        .unwrap();
+                let spans = fixed_array_index_spans(
+                    &crate::source::BytesSource::new(&file),
+                    StoredAddress::new(base),
+                    os,
+                    ls,
+                )
+                .unwrap();
                 assert_eq!(
                     spans.len(),
                     2,

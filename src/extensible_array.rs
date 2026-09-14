@@ -9,10 +9,11 @@ extern crate alloc;
 #[cfg(not(feature = "std"))]
 use alloc::{format, vec::Vec};
 
+use crate::address::StoredAddress;
 use crate::bytes::{read_length, read_offset, read_optional_offset};
 use crate::chunk_grid::ChunkGrid;
 use crate::chunked_read::ChunkInfo;
-use crate::convert::{Narrow, is_undefined_addr};
+use crate::convert::Narrow;
 use crate::error::FormatError;
 use crate::source::Source;
 
@@ -36,7 +37,7 @@ pub struct ExtensibleArrayHeader {
     /// Total number of elements stored.
     pub num_elements: u64,
     /// Address of the index block.
-    pub index_block_address: u64,
+    pub index_block_address: StoredAddress,
 }
 
 fn read_variable_length(data: &[u8], size: usize) -> Result<u64, FormatError> {
@@ -108,7 +109,7 @@ impl ExtensibleArrayHeader {
         let num_elements = read_length(d, pos, length_size)?; // [4] max_idx_set
         pos += ls;
         pos += ls; // skip [5] nelmts
-        let index_block_address = read_offset(d, pos, offset_size)?;
+        let index_block_address = StoredAddress::new(read_offset(d, pos, offset_size)?);
 
         crate::checksum::verify_trailing(&d[..min_size])?;
 
@@ -133,12 +134,12 @@ impl ExtensibleArrayHeader {
     /// Parse an Extensible Array header from a [`Source`] (bounded window).
     pub fn parse_from_source<S: Source + ?Sized>(
         source: &S,
-        address: u64,
+        address: StoredAddress,
         offset_size: u8,
         length_size: u8,
     ) -> Result<Self, FormatError> {
         let size = Self::serialized_size(offset_size, length_size);
-        let buf = source.read_metadata_at(address, size)?;
+        let buf = source.read_metadata_at(address.get(), size)?;
         Self::parse(&buf, 0, offset_size, length_size)
     }
 }
@@ -343,7 +344,8 @@ fn read_element(
                 available: data.len(),
             });
         }
-        let Some(address) = read_optional_offset(data, pos, offset_size)? else {
+        let Some(address) = read_optional_offset(data, pos, offset_size)?.map(StoredAddress::new)
+        else {
             return Ok((None, os));
         };
         let Some(offsets) = grid.offsets_in_extent(linear_index as u64)? else {
@@ -374,7 +376,8 @@ fn read_element(
                 available: data.len(),
             });
         }
-        let Some(address) = read_optional_offset(data, pos, offset_size)? else {
+        let Some(address) = read_optional_offset(data, pos, offset_size)?.map(StoredAddress::new)
+        else {
             return Ok((None, elem_total));
         };
         let Some(offsets) = grid.offsets_in_extent(linear_index as u64)? else {
@@ -638,7 +641,7 @@ pub fn read_extensible_array_chunks(
     // Parse index block (AEIB). Its length is fixed by the geometry -- every
     // inline slot and every block pointer is always written -- so the whole
     // block, checksum included, can be bounded before anything in it is read.
-    let ib_offset = header.index_block_address.to_usize()?;
+    let ib_offset = header.index_block_address.get().to_usize()?;
     let ib_header_size = 4 + 1 + 1 + offset_size as usize; // sig + ver + client + hdr_addr
     let ib_len = crate::chunked_write::aeib_size(
         offset_size,
@@ -706,9 +709,13 @@ pub fn read_extensible_array_chunks(
 
     // 2. Direct data blocks: their addresses are listed in the index block,
     //    one per entry in `geom.direct_dblk_nelmts`.
-    let mut direct_addrs: Vec<u64> = Vec::with_capacity(geom.direct_dblk_nelmts.len());
+    let mut direct_addrs: Vec<StoredAddress> = Vec::with_capacity(geom.direct_dblk_nelmts.len());
     for _ in 0..geom.direct_dblk_nelmts.len() {
-        direct_addrs.push(read_offset(file_data, pos, offset_size)?);
+        direct_addrs.push(StoredAddress::new(read_offset(
+            file_data,
+            pos,
+            offset_size,
+        )?));
         pos += os;
     }
     for (i, &addr) in direct_addrs.iter().enumerate() {
@@ -716,10 +723,10 @@ pub fn read_extensible_array_chunks(
             break;
         }
         let nelmts = geom.direct_dblk_nelmts[i].to_usize()?;
-        if !is_undefined_addr(addr, offset_size) {
+        if !addr.is_undefined(offset_size) {
             let block_chunks = read_data_block_elements(
                 file_data,
-                addr.to_usize()?,
+                addr.get().to_usize()?,
                 nelmts,
                 header,
                 offset_size,
@@ -737,9 +744,13 @@ pub fn read_extensible_array_chunks(
     // 3. Super blocks: the remaining `geom.nsblk_addrs` index-block entries are
     //    addresses of on-disk super blocks (`EASB`). Super-block pointer `j`
     //    refers to super block `first_indirect_sblk + j`.
-    let mut sblk_addrs: Vec<u64> = Vec::with_capacity(geom.nsblk_addrs);
+    let mut sblk_addrs: Vec<StoredAddress> = Vec::with_capacity(geom.nsblk_addrs);
     for _ in 0..geom.nsblk_addrs {
-        sblk_addrs.push(read_offset(file_data, pos, offset_size)?);
+        sblk_addrs.push(StoredAddress::new(read_offset(
+            file_data,
+            pos,
+            offset_size,
+        )?));
         pos += os;
     }
     for (j, &sb_addr) in sblk_addrs.iter().enumerate() {
@@ -749,10 +760,10 @@ pub fn read_extensible_array_chunks(
         let sblk_idx = geom.first_indirect_sblk + j;
         let (ndblks, dblk_nelmts) = geom.sblks[sblk_idx];
         let total_in_sb = (ndblks * dblk_nelmts).to_usize()?;
-        if !is_undefined_addr(sb_addr, offset_size) {
+        if !sb_addr.is_undefined(offset_size) {
             let sb_chunks = read_super_block(
                 file_data,
-                sb_addr.to_usize()?,
+                sb_addr.get().to_usize()?,
                 ndblks.to_usize()?,
                 dblk_nelmts.to_usize()?,
                 header,
@@ -845,10 +856,13 @@ fn read_super_block(
     };
 
     // Read data block addresses.
-    let mut dblk_addrs: Vec<u64> = Vec::with_capacity(ndblks);
+    let mut dblk_addrs: Vec<StoredAddress> = Vec::with_capacity(ndblks);
     for _ in 0..ndblks {
-        let addr = read_offset(file_data, pos, offset_size)?;
-        dblk_addrs.push(addr);
+        dblk_addrs.push(StoredAddress::new(read_offset(
+            file_data,
+            pos,
+            offset_size,
+        )?));
         pos += os;
     }
 
@@ -856,11 +870,11 @@ fn read_super_block(
     let mut global_idx = start_index;
 
     for (db_local, &addr) in dblk_addrs.iter().enumerate() {
-        if !is_undefined_addr(addr, offset_size) {
+        if !addr.is_undefined(offset_size) {
             let block_chunks = if is_paged {
                 read_paged_data_block(
                     file_data,
-                    addr.to_usize()?,
+                    addr.get().to_usize()?,
                     page_nelmts,
                     npages,
                     db_local,
@@ -875,7 +889,7 @@ fn read_super_block(
             } else {
                 read_data_block_elements(
                     file_data,
-                    addr.to_usize()?,
+                    addr.get().to_usize()?,
                     nelmts_per_dblk,
                     header,
                     offset_size,
@@ -914,7 +928,7 @@ fn read_super_block(
 #[cfg(feature = "std")]
 pub(crate) fn extensible_array_index_spans<S: Source + ?Sized>(
     source: &S,
-    ea_base: u64,
+    ea_base: StoredAddress,
     offset_size: u8,
     length_size: u8,
 ) -> Result<Vec<(u64, u64)>, FormatError> {
@@ -934,9 +948,9 @@ pub(crate) fn extensible_array_index_spans<S: Source + ?Sized>(
 
     // EAHD header block.
     let aehd_size = ExtensibleArrayHeader::serialized_size(offset_size, length_size) as u64;
-    let mut spans = vec![(ea_base, aehd_size)];
+    let mut spans = vec![(ea_base.get(), aehd_size)];
 
-    if is_undefined_addr(header.index_block_address, offset_size) {
+    if header.index_block_address.is_undefined(offset_size) {
         return Ok(spans);
     }
 
@@ -954,7 +968,7 @@ pub(crate) fn extensible_array_index_spans<S: Source + ?Sized>(
     // Read the index block as one bounded window; the read is also the bounds
     // check, so a block claiming to run past end-of-file errors here rather than
     // being recorded as reclaimable.
-    let ib = source.read_metadata_at(ib_addr, aeib_size)?;
+    let ib = source.read_metadata_at(ib_addr.get(), aeib_size)?;
     if &ib[..4] != b"EAIB" {
         return Err(FormatError::ChunkedReadError(
             "invalid Extensible Array index block signature".into(),
@@ -965,19 +979,19 @@ pub(crate) fn extensible_array_index_spans<S: Source + ?Sized>(
     // a span derived from bytes we cannot trust would hand live storage back to
     // the allocator.
     crate::checksum::verify_trailing(&ib)?;
-    spans.push((ib_addr, aeib_size as u64));
+    spans.push((ib_addr.get(), aeib_size as u64));
 
     // Read the index block's direct data-block addresses, then its super-block
     // addresses, immediately following the inline element slots.
     let mut pos = ib_header + inline * elem_size;
     for &dblk_nelmts in &geom.direct_dblk_nelmts {
-        let addr = read_offset(&ib, pos, offset_size)?;
+        let addr = StoredAddress::new(read_offset(&ib, pos, offset_size)?);
         pos += os;
-        if is_undefined_addr(addr, offset_size) {
+        if addr.is_undefined(offset_size) {
             continue;
         }
         spans.push((
-            addr,
+            addr.get(),
             eadb_size(
                 DataBlockGeom {
                     dblk_nelmts,
@@ -990,13 +1004,13 @@ pub(crate) fn extensible_array_index_spans<S: Source + ?Sized>(
         ));
     }
     for j in 0..nsblk_addrs {
-        let addr = read_offset(&ib, pos, offset_size)?;
+        let addr = StoredAddress::new(read_offset(&ib, pos, offset_size)?);
         pos += os;
-        if is_undefined_addr(addr, offset_size) {
+        if addr.is_undefined(offset_size) {
             continue;
         }
         let sb = geom.super_block_at(j, page_nelmts);
-        spans.push((addr, aesb_size(sb, offset_size, blk_off_size)));
+        spans.push((addr.get(), aesb_size(sb, offset_size, blk_off_size)));
         easb_data_block_spans(
             source,
             addr,
@@ -1018,7 +1032,7 @@ pub(crate) fn extensible_array_index_spans<S: Source + ?Sized>(
 #[cfg(feature = "std")]
 fn easb_data_block_spans<S: Source + ?Sized>(
     source: &S,
-    sb_addr: u64,
+    sb_addr: StoredAddress,
     sb: SuperBlockGeom,
     offset_size: u8,
     blk_off_size: usize,
@@ -1033,7 +1047,7 @@ fn easb_data_block_spans<S: Source + ?Sized>(
     // addresses read out of it become free space, so one that fails is refused
     // rather than reclaimed from.
     let sb_len = aesb_size(sb, offset_size, blk_off_size).to_usize()?;
-    let block = source.read_metadata_at(sb_addr, sb_len)?;
+    let block = source.read_metadata_at(sb_addr.get(), sb_len)?;
     if &block[..4] != b"EASB" {
         return Err(FormatError::ChunkedReadError(
             "invalid Extensible Array super block signature".into(),
@@ -1045,13 +1059,13 @@ fn easb_data_block_spans<S: Source + ?Sized>(
     // the data-block addresses; `bitmap_size` is zero when it does not.
     let mut pos = sb_header + sb.bitmap_size().to_usize()?;
     for _ in 0..sb.ndblks {
-        let addr = read_offset(&block, pos, offset_size)?;
+        let addr = StoredAddress::new(read_offset(&block, pos, offset_size)?);
         pos += os;
-        if is_undefined_addr(addr, offset_size) {
+        if addr.is_undefined(offset_size) {
             continue;
         }
         spans.push((
-            addr,
+            addr.get(),
             eadb_size(sb.blocks, elem_size, offset_size, blk_off_size),
         ));
     }
@@ -1109,7 +1123,7 @@ pub fn read_extensible_array_chunks_from_source<S: Source + ?Sized>(
             length: os as u64,
         })?;
     let ib_len = ib_header_size + inline_bytes + addr_bytes + 4;
-    let ib = source.read_metadata_at(header.index_block_address, ib_len)?;
+    let ib = source.read_metadata_at(header.index_block_address.get(), ib_len)?;
     if &ib[0..4] != b"EAIB" {
         return Err(FormatError::ChunkedReadError(
             "invalid Extensible Array index block signature".into(),
@@ -1147,9 +1161,9 @@ pub fn read_extensible_array_chunks_from_source<S: Source + ?Sized>(
     }
 
     // After all inline slots, `pos` sits at the direct data-block addresses.
-    let mut direct_addrs: Vec<u64> = Vec::with_capacity(ndirect);
+    let mut direct_addrs: Vec<StoredAddress> = Vec::with_capacity(ndirect);
     for _ in 0..ndirect {
-        direct_addrs.push(read_offset(&ib, pos, offset_size)?);
+        direct_addrs.push(StoredAddress::new(read_offset(&ib, pos, offset_size)?));
         pos += os;
     }
     for (i, &addr) in direct_addrs.iter().enumerate() {
@@ -1157,7 +1171,7 @@ pub fn read_extensible_array_chunks_from_source<S: Source + ?Sized>(
             break;
         }
         let nelmts = geom.direct_dblk_nelmts[i].to_usize()?;
-        if !is_undefined_addr(addr, offset_size) {
+        if !addr.is_undefined(offset_size) {
             chunks.extend(read_data_block_elements_from_source(
                 source,
                 addr,
@@ -1174,9 +1188,9 @@ pub fn read_extensible_array_chunks_from_source<S: Source + ?Sized>(
     }
 
     // 3. Super-block addresses.
-    let mut sblk_addrs: Vec<u64> = Vec::with_capacity(nsblk);
+    let mut sblk_addrs: Vec<StoredAddress> = Vec::with_capacity(nsblk);
     for _ in 0..nsblk {
-        sblk_addrs.push(read_offset(&ib, pos, offset_size)?);
+        sblk_addrs.push(StoredAddress::new(read_offset(&ib, pos, offset_size)?));
         pos += os;
     }
     for (j, &sb_addr) in sblk_addrs.iter().enumerate() {
@@ -1186,7 +1200,7 @@ pub fn read_extensible_array_chunks_from_source<S: Source + ?Sized>(
         let sblk_idx = geom.first_indirect_sblk + j;
         let (ndblks, dblk_nelmts) = geom.sblks[sblk_idx];
         let total_in_sb = (ndblks * dblk_nelmts).to_usize()?;
-        if !is_undefined_addr(sb_addr, offset_size) {
+        if !sb_addr.is_undefined(offset_size) {
             chunks.extend(read_super_block_from_source(
                 source,
                 sb_addr,
@@ -1210,7 +1224,7 @@ pub fn read_extensible_array_chunks_from_source<S: Source + ?Sized>(
 #[allow(clippy::too_many_arguments)]
 fn read_data_block_elements_from_source<S: Source + ?Sized>(
     source: &S,
-    db_address: u64,
+    db_address: StoredAddress,
     nelmts: usize,
     header: &ExtensibleArrayHeader,
     offset_size: u8,
@@ -1229,7 +1243,7 @@ fn read_data_block_elements_from_source<S: Source + ?Sized>(
     // window this used to take, but a data block is bounded by the array's page
     // size, so it is one short read either way.
     let region_len = eadb_extent(nelmts, header, offset_size, blk_off_size)?;
-    let block = source.read_metadata_at(db_address, region_len)?;
+    let block = source.read_metadata_at(db_address.get(), region_len)?;
     if &block[0..4] != b"EADB" {
         return Err(FormatError::ChunkedReadError(
             "invalid Extensible Array data block signature".into(),
@@ -1262,7 +1276,7 @@ fn read_data_block_elements_from_source<S: Source + ?Sized>(
 #[allow(clippy::too_many_arguments)]
 fn read_paged_data_block_from_source<S: Source + ?Sized>(
     source: &S,
-    db_address: u64,
+    db_address: StoredAddress,
     page_nelmts: usize,
     npages: usize,
     db_local_idx: usize,
@@ -1305,7 +1319,7 @@ fn read_paged_data_block_from_source<S: Source + ?Sized>(
     // any file whose pages the bitmap vouches for -- a short read here means a
     // truncated block, which is what the error says.
     let region_len = db_header_size + pages_bytes;
-    let block = source.read_metadata_at(db_address, region_len)?;
+    let block = source.read_metadata_at(db_address.get(), region_len)?;
     if block.len() < 4 || &block[0..4] != b"EADB" {
         return Err(FormatError::ChunkedReadError(
             "invalid Extensible Array data block signature".into(),
@@ -1354,7 +1368,7 @@ fn read_paged_data_block_from_source<S: Source + ?Sized>(
 #[allow(clippy::too_many_arguments)]
 fn read_super_block_from_source<S: Source + ?Sized>(
     source: &S,
-    sb_address: u64,
+    sb_address: StoredAddress,
     ndblks: usize,
     nelmts_per_dblk: usize,
     header: &ExtensibleArrayHeader,
@@ -1386,7 +1400,7 @@ fn read_super_block_from_source<S: Source + ?Sized>(
         length: os as u64,
     })?;
     let region_len = sb_header_size + bitmap_size + addr_bytes + 4;
-    let block = source.read_metadata_at(sb_address, region_len)?;
+    let block = source.read_metadata_at(sb_address.get(), region_len)?;
     if &block[0..4] != b"EASB" {
         return Err(FormatError::ChunkedReadError(
             "invalid Extensible Array super block signature".into(),
@@ -1403,16 +1417,16 @@ fn read_super_block_from_source<S: Source + ?Sized>(
         Vec::new()
     };
 
-    let mut dblk_addrs: Vec<u64> = Vec::with_capacity(ndblks);
+    let mut dblk_addrs: Vec<StoredAddress> = Vec::with_capacity(ndblks);
     for _ in 0..ndblks {
-        dblk_addrs.push(read_offset(&block, pos, offset_size)?);
+        dblk_addrs.push(StoredAddress::new(read_offset(&block, pos, offset_size)?));
         pos += os;
     }
 
     let mut chunks = Vec::new();
     let mut global_idx = start_index;
     for (db_local, &addr) in dblk_addrs.iter().enumerate() {
-        if !is_undefined_addr(addr, offset_size) {
+        if !addr.is_undefined(offset_size) {
             let block_chunks = if is_paged {
                 read_paged_data_block_from_source(
                     source,
@@ -1541,7 +1555,7 @@ mod tests {
         assert_eq!(hdr.idx_blk_elmts, 2);
         assert_eq!(hdr.min_dblk_nelmts, 4);
         assert_eq!(hdr.num_elements, 5);
-        assert_eq!(hdr.index_block_address, 0x1000);
+        assert_eq!(hdr.index_block_address, StoredAddress::new(0x1000));
     }
 
     #[test]
@@ -1636,7 +1650,7 @@ mod tests {
         let read = read_extensible_array_chunks(&ea, &header, &grid, &[2, 2], 4, 8, 8).unwrap();
         assert_eq!(
             read.iter().map(|c| c.address).collect::<Vec<_>>(),
-            vec![0x1000, 0x2000],
+            vec![StoredAddress::new(0x1000), StoredAddress::new(0x2000)],
             "the slot-2 chunk lies past the dataset's three rows"
         );
     }
@@ -1716,10 +1730,13 @@ mod tests {
         .unwrap();
 
         assert_eq!(chunks.len(), 2);
-        assert_eq!(chunks[0].address, base_addr);
+        assert_eq!(chunks[0].address, StoredAddress::new(base_addr));
         assert_eq!(chunks[0].offsets, vec![0]);
         assert_eq!(chunks[0].chunk_size, chunk_byte_size as u32);
-        assert_eq!(chunks[1].address, base_addr + chunk_byte_size);
+        assert_eq!(
+            chunks[1].address,
+            StoredAddress::new(base_addr + chunk_byte_size)
+        );
         assert_eq!(chunks[1].offsets, vec![20]);
 
         #[cfg(feature = "std")]
@@ -1752,8 +1769,13 @@ mod tests {
         .unwrap();
 
         let mem = BytesSource::new(file_data);
-        let hm =
-            ExtensibleArrayHeader::parse_from_source(&mem, aehd_offset as u64, os, ls).unwrap();
+        let hm = ExtensibleArrayHeader::parse_from_source(
+            &mem,
+            StoredAddress::new(aehd_offset as u64),
+            os,
+            ls,
+        )
+        .unwrap();
         let from_mem = read_extensible_array_chunks_from_source(
             &mem,
             &hm,
@@ -1766,8 +1788,13 @@ mod tests {
         .unwrap();
 
         let seek = ReadSeekSource::new(std::io::Cursor::new(file_data.to_vec())).unwrap();
-        let hs =
-            ExtensibleArrayHeader::parse_from_source(&seek, aehd_offset as u64, os, ls).unwrap();
+        let hs = ExtensibleArrayHeader::parse_from_source(
+            &seek,
+            StoredAddress::new(aehd_offset as u64),
+            os,
+            ls,
+        )
+        .unwrap();
         let from_seek = read_extensible_array_chunks_from_source(
             &seek,
             &hs,
@@ -1896,7 +1923,10 @@ mod tests {
 
         assert_eq!(chunks.len(), 4);
         for (i, c) in chunks.iter().enumerate() {
-            assert_eq!(c.address, base_addr + i as u64 * chunk_byte_size);
+            assert_eq!(
+                c.address,
+                StoredAddress::new(base_addr + i as u64 * chunk_byte_size)
+            );
             assert_eq!(c.offsets, vec![i as u64 * 10]);
         }
 
@@ -1954,7 +1984,8 @@ mod tests {
             assert_eq!(buffered.len() as u64, n, "buffered chunk count at n={n}");
 
             let mem = BytesSource::new(&file);
-            let hm = ExtensibleArrayHeader::parse_from_source(&mem, base, 8, 8).unwrap();
+            let hm = ExtensibleArrayHeader::parse_from_source(&mem, StoredAddress::new(base), 8, 8)
+                .unwrap();
             let from_mem = read_extensible_array_chunks_from_source(
                 &mem,
                 &hm,
@@ -1967,7 +1998,9 @@ mod tests {
             .unwrap();
 
             let seek = ReadSeekSource::new(std::io::Cursor::new(file)).unwrap();
-            let hs = ExtensibleArrayHeader::parse_from_source(&seek, base, 8, 8).unwrap();
+            let hs =
+                ExtensibleArrayHeader::parse_from_source(&seek, StoredAddress::new(base), 8, 8)
+                    .unwrap();
             let from_seek = read_extensible_array_chunks_from_source(
                 &seek,
                 &hs,
@@ -2008,7 +2041,7 @@ mod tests {
                         super_blk_min_nelmts: 2,
                         max_dblk_nelmts_bits: 10,
                         num_elements: 0,
-                        index_block_address: 0,
+                        index_block_address: StoredAddress::new(0),
                     };
                     let blk_off = (max_nelmts_bits as usize).div_ceil(8);
                     let stride = ea_elem_stride(&header, offset_size);
@@ -2085,7 +2118,7 @@ mod tests {
         )
         .unwrap();
         let ci = info.unwrap();
-        assert_eq!(ci.address, 0x2000);
+        assert_eq!(ci.address, StoredAddress::new(0x2000));
         assert_eq!(ci.chunk_size, 120);
         assert_eq!(ci.filter_mask, 0);
         assert_eq!(ci.offsets, vec![20]);
@@ -2192,7 +2225,7 @@ mod tests {
         // end and repoint the header at it. The index block is copied byte for
         // byte and its checksum covers only its own bytes, so the copy stays
         // valid; the header is edited, so it is restamped below.
-        let old_ib = built.index_block_address.to_usize().unwrap();
+        let old_ib = built.index_block_address.get().to_usize().unwrap();
         let ib_len = 4 + 1 + 1 + 8                            // sig + ver + client + header addr
             + built.idx_blk_elmts as usize * 8                // inline elements
             + geom.direct_dblk_nelmts.len() * 8               // direct-block addresses
@@ -2208,7 +2241,7 @@ mod tests {
         stamp(&mut file, base as usize, eahd_len(8, 8));
 
         let header = ExtensibleArrayHeader::parse(&file, base as usize, 8, 8).unwrap();
-        assert_eq!(header.index_block_address as usize, new_ib);
+        assert_eq!(header.index_block_address.get() as usize, new_ib);
         // The relocated file must still read identically before it is cut.
         let intact = read_extensible_array_chunks(
             &file,
@@ -2263,7 +2296,8 @@ mod tests {
         }
 
         let mem = BytesSource::new(&file);
-        let hm = ExtensibleArrayHeader::parse_from_source(&mem, base, 8, 8).unwrap();
+        let hm =
+            ExtensibleArrayHeader::parse_from_source(&mem, StoredAddress::new(base), 8, 8).unwrap();
         let streamed = read_extensible_array_chunks_from_source(
             &mem,
             &hm,
@@ -2331,17 +2365,18 @@ mod tests {
                     });
                 let mem = BytesSource::new(file);
                 let streamed =
-                    ExtensibleArrayHeader::parse_from_source(&mem, base, 8, 8).and_then(|h| {
-                        read_extensible_array_chunks_from_source(
-                            &mem,
-                            &h,
-                            &grid,
-                            &chunk_dims,
-                            8,
-                            8,
-                            8,
-                        )
-                    });
+                    ExtensibleArrayHeader::parse_from_source(&mem, StoredAddress::new(base), 8, 8)
+                        .and_then(|h| {
+                            read_extensible_array_chunks_from_source(
+                                &mem,
+                                &h,
+                                &grid,
+                                &chunk_dims,
+                                8,
+                                8,
+                                8,
+                            )
+                        });
                 (buffered, streamed.is_err())
             };
             assert_eq!(
@@ -2350,7 +2385,13 @@ mod tests {
                 "the fixture must read before it is corrupted, at n={n}"
             );
 
-            let spans = extensible_array_index_spans(&BytesSource::new(&file), base, 8, 8).unwrap();
+            let spans = extensible_array_index_spans(
+                &BytesSource::new(&file),
+                StoredAddress::new(base),
+                8,
+                8,
+            )
+            .unwrap();
             assert!(spans.len() > 1, "the sweep must reach past the header");
 
             let header = ExtensibleArrayHeader::parse(&file, base as usize, 8, 8).unwrap();
@@ -2412,7 +2453,12 @@ mod tests {
                     "n={n}: the streaming backend must refuse what the buffered one does, at {at:#x}"
                 );
                 if walked {
-                    let walk = extensible_array_index_spans(&BytesSource::new(&file), base, 8, 8);
+                    let walk = extensible_array_index_spans(
+                        &BytesSource::new(&file),
+                        StoredAddress::new(base),
+                        8,
+                        8,
+                    );
                     assert!(
                         matches!(walk, Err(FormatError::ChecksumMismatch { .. })),
                         "n={n}: the reclaim walk must refuse a corrupt structure at {at:#x} \
@@ -2460,9 +2506,13 @@ mod tests {
             let mut file = vec![0u8; base as usize + ea.len()];
             file[base as usize..].copy_from_slice(&ea);
 
-            let spans =
-                extensible_array_index_spans(&crate::source::BytesSource::new(&file), base, os, ls)
-                    .unwrap();
+            let spans = extensible_array_index_spans(
+                &crate::source::BytesSource::new(&file),
+                StoredAddress::new(base),
+                os,
+                ls,
+            )
+            .unwrap();
 
             // Expected total = EAHD + EAIB + super_blk_size + data_blk_size, the
             // last two read straight from the statistics the builder wrote.

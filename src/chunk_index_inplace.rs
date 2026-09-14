@@ -493,7 +493,7 @@ impl Located {
         let geom = EaGeometry::from_header(&ea_header);
         let page_nelmts = 1u64 << ea_header.max_dblk_nelmts_bits;
         let blk_off_size = (ea_header.max_nelmts_bits as usize).div_ceil(8);
-        let index_block_addr = ea_header.index_block_address;
+        let index_block_addr = ea_header.index_block_address.get();
         // The dataspace dimension is the single commit point; the EA element
         // count is published one step earlier. If a prior writer crashed between
         // the two, the on-disk EA count is ahead of the committed dimension. Seed
@@ -516,7 +516,7 @@ impl Located {
                 elem_bytes,
                 chunk_bytes,
                 client_id: ea_header.client_id,
-                ea_addr,
+                ea_addr: ea_addr.get(),
                 geom,
                 idx_blk_elmts: ea_header.idx_blk_elmts as u64,
                 ea_elem_size: ea_header.element_size as usize,

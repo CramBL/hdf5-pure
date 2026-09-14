@@ -8776,7 +8776,7 @@ impl WriteEngine {
         let mut kept_chunks: Vec<WrittenChunk> = Vec::with_capacity(n_full);
         for ci in grid_order.iter().take(n_full) {
             kept_chunks.push(WrittenChunk {
-                address: ci.address,
+                address: ci.address.get(),
                 compressed_size: u64::from(ci.chunk_size),
                 // Preserve the source mask verbatim: a C/h5py file records a nonzero
                 // mask for a chunk whose filter was skipped (e.g. deflate on
@@ -8795,12 +8795,13 @@ impl WriteEngine {
             let len = partial.chunk_size as usize;
             partial
                 .address
+                .get()
                 .checked_add(len as u64)
                 .filter(|&e| e <= view.len())
                 .ok_or(Error::AppendUnsupported(
                     "trailing chunk extends past end-of-file",
                 ))?;
-            let stored = view.read_exact_at(partial.address, len)?;
+            let stored = view.read_exact_at(partial.address.get(), len)?;
             let full = if let Some(pl) = &pipeline {
                 let ctx = ChunkContext::from_datatype(&spatial, &disk_dt)?;
                 decompress_chunk(&stored, pl, ctx, partial.filter_mask).map_err(Error::Format)?
@@ -8817,7 +8818,7 @@ impl WriteEngine {
             tail_raw.extend_from_slice(&full[..live_bytes]);
             // The old partial chunk's data block is dead once the new index lands.
             old_tail_extent = Some((
-                base.absolute(StoredAddress::new(partial.address))?,
+                base.absolute(partial.address)?,
                 u64::from(partial.chunk_size),
             ));
         }
@@ -9245,10 +9246,11 @@ impl WriteEngine {
                 for ci in &grid.grid_order {
                     let len = ci.chunk_size as usize;
                     ci.address
+                        .get()
                         .checked_add(len as u64)
                         .filter(|&e| e <= dview.len())
                         .ok_or(Error::EditUnsupported("chunk data is out of bounds"))?;
-                    chunk_bytes.push(dview.read_exact_at(ci.address, len)?);
+                    chunk_bytes.push(dview.read_exact_at(ci.address.get(), len)?);
                     meta.push(ChunkMeta {
                         compressed_size: ci.chunk_size as u64,
                         filter_mask: ci.filter_mask,
@@ -12404,10 +12406,11 @@ fn try_inplace_chunk_writes<S: Source + ?Sized>(
             any_shrunk = true;
         }
         ci.address
+            .get()
             .checked_add(new_len)
             .filter(|&e| e <= src.len())?;
-        writes.push((ci.address, bytes.clone()));
-        spans.push((ci.address, new_len));
+        writes.push((ci.address.get(), bytes.clone()));
+        spans.push((ci.address.get(), new_len));
     }
 
     // A shrinking overwrite changes the index-recorded chunk sizes, so the index
@@ -12467,12 +12470,12 @@ fn try_rebuild_index_in_place<S: Source + ?Sized>(
     let DataLayout::Chunked { index, .. } = layout else {
         return None;
     };
-    let index_addr = index.address()?;
+    let index_addr = index.address()?.get();
     let written: Vec<crate::chunked_write::WrittenChunk> = grid_order
         .iter()
         .zip(new_bytes)
         .map(|(ci, b)| crate::chunked_write::WrittenChunk {
-            address: ci.address,
+            address: ci.address.get(),
             compressed_size: b.len() as u64,
             filter_mask: 0,
         })
