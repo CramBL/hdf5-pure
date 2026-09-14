@@ -109,10 +109,11 @@ fn a_bulk_written_array_reads_back_element_wise() {
     assert_eq!(back, capture);
 }
 
-/// The helper produces a `MatValue`, so every option still reaches the writer
-/// that emits it. The equivalence tests above run under the defaults only,
-/// which would not notice a bulk path that had grown a writer of its own and
-/// quietly stopped compressing or reorienting.
+/// The helper lowers to the same value tree the element-wise path builds, so
+/// every option still reaches the writer that emits it. The equivalence tests
+/// above run under the defaults only, which would not notice a bulk path that
+/// had grown a writer of its own and quietly stopped compressing or
+/// reorienting.
 #[test]
 fn options_reach_a_bulk_array_the_same_way() {
     #[derive(Serialize)]

@@ -162,24 +162,19 @@ impl<'de> Deserializer<'de> for MatValueDeserializer {
 
     fn deserialize_option<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, MatError> {
         match self.value {
-            // `Omit` is the in-memory placeholder used by the serializer for a
-            // missing value. `EmptyStructArray` is the on-disk encoding of the
-            // same idea (`struct([])`) that the writer emits inside a cell
-            // array; treating both as `None` keeps `Vec<Option<T>>` round-trips
-            // sound once cell-array reading is implemented.
-            MatValue::Omit | MatValue::EmptyStructArray => visitor.visit_none(),
+            // `EmptyStructArray` is the on-disk encoding of a missing value
+            // (`struct([])`), which the writer emits. Reading it back as `None`
+            // keeps `Vec<Option<T>>` round-trips sound.
+            MatValue::EmptyStructArray => visitor.visit_none(),
             other => visitor.visit_some(MatValueDeserializer::new(other)),
         }
     }
 
     fn deserialize_unit<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, MatError> {
         match self.value {
-            // `Omit` is the in-memory placeholder for a missing value;
-            // `EmptyStructArray` is its on-disk encoding (`struct([])`) inside a
-            // cell array. Accept both, mirroring `deserialize_option` above, so a
-            // unit that lowered to `struct([])` in a sequence round-trips back to
-            // `()` instead of failing on read.
-            MatValue::Omit | MatValue::EmptyStructArray => visitor.visit_unit(),
+            // Mirroring `deserialize_option` above, a unit that lowered to
+            // `struct([])` in a sequence round-trips back to `()`.
+            MatValue::EmptyStructArray => visitor.visit_unit(),
             other => mismatch("unit", other),
         }
     }
@@ -425,7 +420,6 @@ impl<'de> Deserializer<'de> for MatValueDeserializer {
 
 fn dispatch_any<'de, V: Visitor<'de>>(value: MatValue, visitor: V) -> Result<V::Value, MatError> {
     match value {
-        MatValue::Omit => visitor.visit_none(),
         MatValue::Scalar(s) => match s {
             ScalarNum::Bool(b) => visitor.visit_bool(b),
             ScalarNum::F64(x) => visitor.visit_f64(x),

@@ -643,11 +643,10 @@ fn unit_struct_field_lowers_like_none() {
     assert_empty_struct_array(&file, "marker");
 }
 
-// A flat numeric or complex sequence is collected packed, one element wide,
-// rather than one 56-byte `MatValue` per element. These pin the point where it
-// stops being packed: an element that breaks the pattern must spill the run
-// collected so far back into individual values without losing or reordering
-// any of it.
+// A flat numeric or complex sequence is collected packed, one element wide.
+// These pin the point where it stops being packed: an element that breaks the
+// pattern must spill the run collected so far back into individual values
+// without losing or reordering any of it.
 
 #[test]
 fn sequence_that_changes_scalar_type_midway_keeps_every_element() {

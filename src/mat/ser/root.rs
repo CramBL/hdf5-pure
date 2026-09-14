@@ -6,13 +6,12 @@
 
 use serde::ser::{Impossible, Serialize, SerializeMap, SerializeStruct, Serializer};
 
-use crate::mat::error::MatError;
-use crate::mat::options::Options;
-
 use super::emit::{emit_file, emit_file_to};
 use super::emit_with_builder::{emit_file_with_options, emit_file_with_options_to};
+use super::value::{Leaf, Value};
 use super::value_ser::{ValueSerializer, to_value};
-use crate::mat::value::MatValue;
+use crate::mat::error::MatError;
+use crate::mat::options::Options;
 
 /// Serialize `value` to MAT v7.3 file bytes (with 512-byte userblock).
 pub fn to_bytes<T: Serialize + ?Sized>(value: &T) -> Result<Vec<u8>, MatError> {
@@ -83,7 +82,8 @@ fn create<P: AsRef<std::path::Path>>(path: P) -> Result<std::fs::File, MatError>
     std::fs::File::create(path).map_err(MatError::Io)
 }
 
-/// The root serializer. Produces `Vec<(field_name, MatValue)>`.
+/// The root serializer, which collects the top-level fields in the order they
+/// arrive.
 pub(crate) struct RootSerializer<'a> {
     opts: &'a Options,
 }
@@ -109,23 +109,23 @@ impl<'a> RootSerializer<'a> {
     /// [`NullPolicy::Omit`]: crate::mat::NullPolicy::Omit
     /// [`NullPolicy::EmptyStructArray`]: crate::mat::NullPolicy::EmptyStructArray
     /// [`NullPolicy::Error`]: crate::mat::NullPolicy::Error
-    fn root_null(self) -> Result<Vec<(String, MatValue)>, MatError> {
+    fn root_null(self) -> Result<Vec<(String, Value)>, MatError> {
         super::value_ser::null_value(self.opts)?;
         Ok(Vec::new())
     }
 }
 
 impl<'a> Serializer for RootSerializer<'a> {
-    type Ok = Vec<(String, MatValue)>;
+    type Ok = Vec<(String, Value)>;
     type Error = MatError;
 
-    type SerializeSeq = Impossible<Vec<(String, MatValue)>, MatError>;
-    type SerializeTuple = Impossible<Vec<(String, MatValue)>, MatError>;
-    type SerializeTupleStruct = Impossible<Vec<(String, MatValue)>, MatError>;
-    type SerializeTupleVariant = Impossible<Vec<(String, MatValue)>, MatError>;
+    type SerializeSeq = Impossible<Vec<(String, Value)>, MatError>;
+    type SerializeTuple = Impossible<Vec<(String, Value)>, MatError>;
+    type SerializeTupleStruct = Impossible<Vec<(String, Value)>, MatError>;
+    type SerializeTupleVariant = Impossible<Vec<(String, Value)>, MatError>;
     type SerializeMap = RootMapSer<'a>;
     type SerializeStruct = RootStructSer<'a>;
-    type SerializeStructVariant = Impossible<Vec<(String, MatValue)>, MatError>;
+    type SerializeStructVariant = Impossible<Vec<(String, Value)>, MatError>;
 
     fn serialize_bool(self, _: bool) -> Result<Self::Ok, MatError> {
         Err(MatError::RootMustBeStruct)
@@ -270,7 +270,7 @@ impl<'a> Serializer for RootSerializer<'a> {
 // ---------------------------------------------------------------------------
 
 pub(crate) struct RootStructSer<'a> {
-    fields: Vec<(String, MatValue)>,
+    fields: Vec<(String, Value)>,
     opts: &'a Options,
 }
 
@@ -284,7 +284,7 @@ impl<'a> RootStructSer<'a> {
 }
 
 impl SerializeStruct for RootStructSer<'_> {
-    type Ok = Vec<(String, MatValue)>;
+    type Ok = Vec<(String, Value)>;
     type Error = MatError;
 
     fn serialize_field<T: Serialize + ?Sized>(
@@ -293,13 +293,13 @@ impl SerializeStruct for RootStructSer<'_> {
         value: &T,
     ) -> Result<(), MatError> {
         let v = to_value(value, self.opts)?;
-        if !matches!(v, MatValue::Omit) {
+        if !matches!(v, Value::Omit) {
             self.fields.push((key.to_owned(), v));
         }
         Ok(())
     }
 
-    fn end(self) -> Result<Vec<(String, MatValue)>, MatError> {
+    fn end(self) -> Result<Vec<(String, Value)>, MatError> {
         Ok(self.fields)
     }
 }
@@ -309,7 +309,7 @@ impl SerializeStruct for RootStructSer<'_> {
 // ---------------------------------------------------------------------------
 
 pub(crate) struct RootMapSer<'a> {
-    fields: Vec<(String, MatValue)>,
+    fields: Vec<(String, Value)>,
     pending_key: Option<String>,
     opts: &'a Options,
 }
@@ -325,13 +325,13 @@ impl<'a> RootMapSer<'a> {
 }
 
 impl SerializeMap for RootMapSer<'_> {
-    type Ok = Vec<(String, MatValue)>;
+    type Ok = Vec<(String, Value)>;
     type Error = MatError;
 
     fn serialize_key<T: Serialize + ?Sized>(&mut self, key: &T) -> Result<(), MatError> {
         let key_val = key.serialize(ValueSerializer::new(self.opts))?;
         match key_val {
-            MatValue::String(s) => {
+            Value::Leaf(Leaf::String(s)) => {
                 self.pending_key = Some(s);
                 Ok(())
             }
@@ -348,13 +348,13 @@ impl SerializeMap for RootMapSer<'_> {
             .take()
             .ok_or_else(|| MatError::Custom("serialize_value before serialize_key".into()))?;
         let v = to_value(value, self.opts)?;
-        if !matches!(v, MatValue::Omit) {
+        if !matches!(v, Value::Omit) {
             self.fields.push((k, v));
         }
         Ok(())
     }
 
-    fn end(self) -> Result<Vec<(String, MatValue)>, MatError> {
+    fn end(self) -> Result<Vec<(String, Value)>, MatError> {
         Ok(self.fields)
     }
 }

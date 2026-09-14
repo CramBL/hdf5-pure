@@ -1,20 +1,23 @@
-//! Emit a `MatValue` tree into an HDF5 file with MATLAB v7.3 conventions.
+//! Writes a serializer [`Value`] tree as an HDF5 file under MATLAB v7.3
+//! conventions.
+//!
+//! The entry points that take no [`Options`] come here, and
+//! [`super::emit_with_builder`] serves the ones that do.
 
 use std::collections::VecDeque;
 
+use super::value::{Leaf, Value};
 use crate::file_writer::AttrValue;
 use crate::mat::builder::{RefsH5Path, refs_h5path};
 use crate::mat::class::MatClass;
 use crate::mat::error::MatError;
 use crate::mat::options::Options;
+use crate::mat::transpose::transpose_scalars;
 use crate::mat::userblock::{self, USERBLOCK_SIZE};
 use crate::mat::utf16;
+use crate::mat::value::{ComplexVec, NumVec, ScalarNum, ScalarTag};
 use crate::type_builders::{DatasetBuilder, FinishedGroup, GroupBuilder};
 use crate::writer::FileBuilder;
-
-use crate::mat::value::{ComplexVec, MatValue, NumVec, ScalarNum, ScalarTag};
-
-use crate::mat::transpose::transpose_scalars;
 
 /// Hidden MATLAB conventional group that holds the targets of object
 /// references. Cell-array elements live here, addressed by absolute path.
@@ -27,7 +30,7 @@ const REFS_GROUP: &str = "#refs#";
 /// new entries onto the queue while it is being drained.
 struct RefsAccumulator {
     next_id: u64,
-    pending: VecDeque<(String, MatValue)>,
+    pending: VecDeque<(String, Value)>,
 }
 
 impl RefsAccumulator {
@@ -40,7 +43,7 @@ impl RefsAccumulator {
 
     /// Reserve a fresh name and queue `value` for later emission. Returns the
     /// absolute path the parent dataset's reference should resolve to.
-    fn intern(&mut self, value: MatValue) -> String {
+    fn intern(&mut self, value: Value) -> String {
         let name = format!("ref_{:016x}", self.next_id);
         self.next_id += 1;
         let path = format!("{REFS_GROUP}/{name}");
@@ -48,7 +51,7 @@ impl RefsAccumulator {
         path
     }
 
-    fn pop_front(&mut self) -> Option<(String, MatValue)> {
+    fn pop_front(&mut self) -> Option<(String, Value)> {
         self.pending.pop_front()
     }
 
@@ -58,14 +61,14 @@ impl RefsAccumulator {
 }
 
 /// Turn a list of top-level `(name, value)` pairs into a MAT 7.3 file.
-pub(crate) fn emit_file(fields: Vec<(String, MatValue)>) -> Result<Vec<u8>, MatError> {
+pub(crate) fn emit_file(fields: Vec<(String, Value)>) -> Result<Vec<u8>, MatError> {
     build_file(fields)?.finish().map_err(MatError::Hdf5)
 }
 
 /// Same file as [`emit_file`], streamed to `w` instead of returned. Assembly is
 /// front-to-back, so the whole file is never resident.
 pub(crate) fn emit_file_to<W: std::io::Write>(
-    fields: Vec<(String, MatValue)>,
+    fields: Vec<(String, Value)>,
     w: W,
 ) -> Result<(), MatError> {
     build_file(fields)?.finish_to(w).map_err(MatError::Hdf5)
@@ -74,7 +77,7 @@ pub(crate) fn emit_file_to<W: std::io::Write>(
 /// Stage every field into a [`FileBuilder`] carrying the MAT userblock, ready to
 /// be finished either way. Shared so the buffered and streaming entry points
 /// cannot come to describe different files.
-fn build_file(fields: Vec<(String, MatValue)>) -> Result<FileBuilder, MatError> {
+fn build_file(fields: Vec<(String, Value)>) -> Result<FileBuilder, MatError> {
     let mut builder = FileBuilder::new();
     builder.with_userblock(USERBLOCK_SIZE);
     // This emitter serves the no-options entry points, which are defined to
@@ -86,7 +89,7 @@ fn build_file(fields: Vec<(String, MatValue)>) -> Result<FileBuilder, MatError> 
     let mut refs = RefsAccumulator::new();
 
     for (name, value) in fields {
-        if matches!(value, MatValue::Omit) {
+        if matches!(value, Value::Omit) {
             continue;
         }
         emit_at_root(&mut builder, &name, value, &mut refs)?;
@@ -110,19 +113,20 @@ fn build_file(fields: Vec<(String, MatValue)>) -> Result<FileBuilder, MatError> 
 fn emit_at_root(
     builder: &mut FileBuilder,
     name: &str,
-    value: MatValue,
+    value: Value,
     refs: &mut RefsAccumulator,
 ) -> Result<(), MatError> {
     match value {
-        MatValue::Omit => Ok(()),
-        MatValue::Struct(fields) => {
+        Value::Cell(elements) => apply_cell(builder.create_dataset(name), elements, refs),
+        Value::Leaf(leaf) => {
+            apply_leaf_to_dataset(builder.create_dataset(name), leaf);
+            Ok(())
+        }
+        Value::Omit => Ok(()),
+        Value::Struct(fields) => {
             let group = build_struct_group(name, fields, refs, RefsH5Path::Omit)?;
             builder.add_group(group);
             Ok(())
-        }
-        other => {
-            let ds = builder.create_dataset(name);
-            apply_value_to_dataset(ds, other, refs)
         }
     }
 }
@@ -131,31 +135,43 @@ fn emit_at_root(
 fn emit_into_group(
     group: &mut GroupBuilder,
     name: &str,
-    value: MatValue,
+    value: Value,
     refs: &mut RefsAccumulator,
     h5path: RefsH5Path,
 ) -> Result<(), MatError> {
     match value {
-        MatValue::Omit => Ok(()),
-        MatValue::Struct(fields) => {
+        Value::Cell(elements) => apply_cell(dataset_for(group, name, h5path), elements, refs),
+        Value::Leaf(leaf) => {
+            apply_leaf_to_dataset(dataset_for(group, name, h5path), leaf);
+            Ok(())
+        }
+        Value::Omit => Ok(()),
+        Value::Struct(fields) => {
             let sub = build_struct_group(name, fields, refs, h5path)?;
             group.add_group(sub);
             Ok(())
         }
-        other => {
-            let ds = group.create_dataset(name);
-            if h5path == RefsH5Path::Own {
-                ds.set_attr("H5PATH", refs_h5path(name));
-            }
-            apply_value_to_dataset(ds, other, refs)
-        }
     }
+}
+
+/// Returns the dataset to write `name` into, and sets the `H5PATH` attribute
+/// that addresses a `#refs#` member.
+fn dataset_for<'a>(
+    group: &'a mut GroupBuilder,
+    name: &str,
+    h5path: RefsH5Path,
+) -> &'a mut DatasetBuilder {
+    let ds = group.create_dataset(name);
+    if h5path == RefsH5Path::Own {
+        ds.set_attr("H5PATH", refs_h5path(name));
+    }
+    ds
 }
 
 /// Build a `FinishedGroup` representing a MATLAB struct.
 fn build_struct_group(
     name: &str,
-    fields: Vec<(String, MatValue)>,
+    fields: Vec<(String, Value)>,
     refs: &mut RefsAccumulator,
     h5path: RefsH5Path,
 ) -> Result<FinishedGroup, MatError> {
@@ -168,7 +184,7 @@ fn build_struct_group(
     // Filter out Omit fields and record the surviving order.
     let mut live_names: Vec<String> = Vec::with_capacity(fields.len());
     for (fname, value) in fields {
-        if matches!(value, MatValue::Omit) {
+        if matches!(value, Value::Omit) {
             continue;
         }
         // A field of a struct is not itself a `#refs#` member, whatever the
@@ -192,29 +208,15 @@ fn new_group_builder(name: &str) -> GroupBuilder {
     GroupBuilder::new(name)
 }
 
-/// Apply a non-struct `MatValue` to the given `DatasetBuilder`, writing data,
-/// shape, and the `MATLAB_class` attribute.
-fn apply_value_to_dataset(
-    ds: &mut DatasetBuilder,
-    value: MatValue,
-    refs: &mut RefsAccumulator,
-) -> Result<(), MatError> {
-    match value {
-        MatValue::Omit | MatValue::Struct(_) => {
-            unreachable!("emitted as group, not dataset")
+/// Writes `leaf` into `ds` as data, shape, and the `MATLAB_class` attribute.
+fn apply_leaf_to_dataset(ds: &mut DatasetBuilder, leaf: Leaf) {
+    match leaf {
+        Leaf::ComplexMatrix { rows, cols, pairs } => {
+            let col_major = pairs.transposed(rows, cols);
+            apply_complex(ds, col_major, &[cols as u64, rows as u64]);
         }
-        MatValue::Scalar(n) => apply_scalar(ds, n),
-        MatValue::Vec1D(v) => apply_vec_1d(ds, v),
-        MatValue::Matrix { rows, cols, vec } => apply_matrix(ds, rows, cols, vec),
-        MatValue::String(s) => {
-            apply_char_string(ds, &s);
-            Ok(())
-        }
-        MatValue::ComplexScalar(n) => {
-            apply_complex(ds, ComplexVec::from_single(n), &[1, 1]);
-            Ok(())
-        }
-        MatValue::ComplexVec1D(pairs) => {
+        Leaf::ComplexScalar(n) => apply_complex(ds, ComplexVec::from_single(n), &[1, 1]),
+        Leaf::ComplexVec1D(pairs) => {
             // `[0, 0]` when empty, the answer `dims::vector_dims` gives the
             // options emitter — read the note there on why the two must not
             // drift. An empty complex vector only became reachable with the
@@ -225,23 +227,12 @@ fn apply_value_to_dataset(
                 n => [1, n],
             };
             apply_complex(ds, pairs, &shape);
-            Ok(())
         }
-        MatValue::ComplexMatrix { rows, cols, pairs } => {
-            let col_major = pairs.transposed(rows, cols);
-            apply_complex(ds, col_major, &[cols as u64, rows as u64]);
-            Ok(())
-        }
-        MatValue::Cell(elements) => apply_cell(ds, elements, refs),
-        MatValue::EmptyStructArray => {
-            apply_empty_struct_array(ds);
-            Ok(())
-        }
-        MatValue::Opaque { .. } | MatValue::StructArray { .. } => {
-            unreachable!(
-                "MatValue::Opaque / StructArray are read-only; produced by the deserializer, never serialized"
-            )
-        }
+        Leaf::EmptyStructArray => apply_empty_struct_array(ds),
+        Leaf::Matrix { rows, cols, vec } => apply_matrix(ds, rows, cols, vec),
+        Leaf::Scalar(n) => apply_scalar(ds, n),
+        Leaf::String(s) => apply_char_string(ds, &s),
+        Leaf::Vec1D(v) => apply_vec_1d(ds, v),
     }
 }
 
@@ -254,7 +245,7 @@ fn apply_value_to_dataset(
 /// ever runs under the default, and the default is `ColumnVector`.
 fn apply_cell(
     ds: &mut DatasetBuilder,
-    elements: Vec<MatValue>,
+    elements: Vec<Value>,
     refs: &mut RefsAccumulator,
 ) -> Result<(), MatError> {
     let paths: Vec<String> = elements.into_iter().map(|el| refs.intern(el)).collect();
@@ -323,7 +314,7 @@ fn apply_complex(ds: &mut DatasetBuilder, pairs: ComplexVec, shape: &[u64]) {
     set_class(ds, class);
 }
 
-fn apply_scalar(ds: &mut DatasetBuilder, n: ScalarNum) -> Result<(), MatError> {
+fn apply_scalar(ds: &mut DatasetBuilder, n: ScalarNum) {
     match n {
         ScalarNum::Bool(b) => {
             ds.with_u8_data(&[u8::from(b)]).with_shape(&[1, 1]);
@@ -371,14 +362,13 @@ fn apply_scalar(ds: &mut DatasetBuilder, n: ScalarNum) -> Result<(), MatError> {
             set_class(ds, MatClass::UInt8);
         }
     }
-    Ok(())
 }
 
-fn apply_vec_1d(ds: &mut DatasetBuilder, v: NumVec) -> Result<(), MatError> {
+fn apply_vec_1d(ds: &mut DatasetBuilder, v: NumVec) {
     let n = v.len() as u64;
     if n == 0 {
         emit_empty(ds, v.tag(), &[0, 0]);
-        return Ok(());
+        return;
     }
     let shape = [1u64, n];
     match v {
@@ -429,15 +419,9 @@ fn apply_vec_1d(ds: &mut DatasetBuilder, v: NumVec) -> Result<(), MatError> {
             set_class(ds, MatClass::UInt8);
         }
     }
-    Ok(())
 }
 
-fn apply_matrix(
-    ds: &mut DatasetBuilder,
-    rows: usize,
-    cols: usize,
-    vec: NumVec,
-) -> Result<(), MatError> {
+fn apply_matrix(ds: &mut DatasetBuilder, rows: usize, cols: usize, vec: NumVec) {
     debug_assert_eq!(vec.len(), rows * cols);
     // An empty matrix is a marker, not a zero-element array of its class, and it
     // keeps the MATLAB shape it was given — `Matrix::from_row_major(0, 3, [])`
@@ -446,7 +430,7 @@ fn apply_matrix(
     // agree byte for byte under default options.
     if rows * cols == 0 {
         emit_empty(ds, vec.tag(), &[rows, cols]);
-        return Ok(());
+        return;
     }
     // HDF5 shape for a MATLAB [rows × cols] matrix is [cols, rows].
     let shape = [cols as u64, rows as u64];
@@ -517,7 +501,6 @@ fn apply_matrix(
             set_class(ds, MatClass::UInt8);
         }
     }
-    Ok(())
 }
 
 fn apply_char_string(ds: &mut DatasetBuilder, s: &str) {
@@ -651,7 +634,7 @@ mod tests {
     fn an_empty_matrix_keeps_its_matlab_dims() {
         for (rows, cols) in [(0, 0), (0, 3), (3, 0)] {
             let mut ds = DatasetBuilder::new("m");
-            apply_matrix(&mut ds, rows, cols, NumVec::F64(Vec::new())).unwrap();
+            apply_matrix(&mut ds, rows, cols, NumVec::F64(Vec::new()));
             assert_eq!(
                 ds.data.as_deref(),
                 Some(
