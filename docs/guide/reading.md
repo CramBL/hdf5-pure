@@ -96,7 +96,7 @@ let accel = file.dataset("sensors/imu/accel")?;
 # Ok::<(), hdf5_pure::Error>(())
 ```
 
-A dataset can also be opened by name relative to its parent group via [`Group::dataset(name)`](crate::Group::dataset) (see [Navigating groups](#navigating-groups-and-attributes) below). To override the chunk cache for a single dataset, use [`File::dataset_with_options(path, DatasetAccessProperties)`](crate::File::dataset_with_options).
+A dataset can also be opened by a path relative to its parent group via [`Group::dataset(path)`](crate::Group::dataset) (see [Navigating groups](#navigating-groups-and-attributes) below). To override the chunk cache for a single dataset, use [`File::dataset_with_options(path, DatasetAccessProperties)`](crate::File::dataset_with_options).
 
 ### Inspecting shape and datatype
 

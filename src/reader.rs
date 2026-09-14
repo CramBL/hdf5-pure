@@ -38,6 +38,7 @@ use crate::layout_info::{Chunk, ChunkIndex, Filter, Layout};
 use crate::libver::LibVer;
 use crate::message_type::MessageType;
 use crate::object_header::ObjectHeader;
+use crate::object_path::{LinkName, ObjectPath};
 use crate::read_spec::RawReadSpec;
 use crate::shared_message::{self, BufferedResolver, SharedResolver, SourceResolver};
 use crate::signature;
@@ -2087,7 +2088,7 @@ impl FileInner {
     /// the one to reach for when a single child is wanted: it stops at the match
     /// rather than building an entry, and an owned name, for every other child
     /// of the group (issue #228).
-    fn group_child(&self, group_address: u64, name: &str) -> Result<ChildLookup, Error> {
+    fn group_child(&self, group_address: u64, name: LinkName<'_>) -> Result<ChildLookup, Error> {
         let (os, ls, base) = (self.offset_size(), self.length_size(), self.addr_offset);
         let access = self.access_mode();
         let addr = group_address;
@@ -3050,7 +3051,10 @@ impl File {
     /// [`Error::ReadOnly`].
     pub fn copy(&self, src: &str, dst: &str) -> Result<(), Error> {
         self.with_mirror_session(Change::Relocating, |session| {
-            session.copy(&normalize_path(src), &normalize_path(dst))
+            session.copy(
+                &ObjectPath::parse(src).to_string(),
+                &ObjectPath::parse(dst).to_string(),
+            )
         })
     }
 
@@ -3070,7 +3074,11 @@ impl File {
     /// one returns [`Error::ReadOnly`].
     pub fn copy_from(&self, source: &File, src: &str, dst: &str) -> Result<(), Error> {
         self.with_mirror_session(Change::Relocating, |session| {
-            session.copy_from(source, src, dst)
+            session.copy_from(
+                source,
+                &ObjectPath::parse(src).to_string(),
+                &ObjectPath::parse(dst).to_string(),
+            )
         })
     }
 
@@ -3236,7 +3244,7 @@ impl File {
         properties: DatasetAccessProperties,
     ) -> Result<Dataset, Error> {
         let chunk_cache = properties.resolved_chunk_cache(self.inner.access_properties.chunk_cache);
-        let normalized = normalize_path(path);
+        let normalized = ObjectPath::parse(path).to_string();
         match self.inner.staged_object(&normalized).map(|o| o.kind) {
             Some(StagedKind::Dataset) => {
                 return Ok(Dataset::pending(
@@ -3249,10 +3257,10 @@ impl File {
             None => {}
         }
         let revisions = self.inner.revisions();
-        let addr = self.inner.resolve_path(path)?;
+        let addr = self.inner.resolve_path(&normalized)?;
         let hdr = self.inner.parse_header(addr)?;
         if !has_message(&hdr, MessageType::DataLayout) {
-            return Err(Error::NotADataset(path.to_string()));
+            return Err(Error::NotADataset(normalized));
         }
         Ok(Dataset::new(
             self.inner.clone(),
@@ -3274,7 +3282,7 @@ impl File {
     /// naming that component's own path rather than the one asked for: `a/b/c`
     /// stopped by a dataset at `a/b` reports `NotAGroup("a/b")` (issue #365).
     pub fn group(&self, path: &str) -> Result<Group, Error> {
-        let normalized = normalize_path(path);
+        let normalized = ObjectPath::parse(path).to_string();
         match self.inner.staged_object(&normalized).map(|o| o.kind) {
             Some(StagedKind::Group) => {
                 return Ok(Group::pending(self.inner.clone(), normalized));
@@ -3283,7 +3291,7 @@ impl File {
             None => {}
         }
         let revisions = self.inner.revisions();
-        let addr = self.inner.resolve_path(path)?;
+        let addr = self.inner.resolve_path(&normalized)?;
         if !is_group(&self.inner.parse_header(addr)?) {
             // Normalized, so that the same object refused here and refused by a
             // live handle below names itself the same way: a handle knows only
@@ -3528,21 +3536,27 @@ impl StagedGroup<'_> {
 
     /// Stage an empty subgroup of this group.
     ///
+    /// `path` may have several components, which stages a group under this one, or begin with
+    /// `/`, which stages it from the root group, both on the terms
+    /// [`Group::create_group`] sets out.
+    ///
     /// To configure it in the same commit, use
     /// [`create_group_with`](Self::create_group_with). To get a [`Group`] handle
     /// onto it, look it up by name once this closure has returned, or stage it
     /// through [`Group::create_group`] instead, which hands one back.
-    pub fn create_group(&mut self, name: &str) -> &mut Self {
-        self.create_group_with(name, |_| {})
+    pub fn create_group(&mut self, path: &str) -> &mut Self {
+        self.create_group_with(path, |_| {})
     }
 
     /// Stage a subgroup of this group, configured through `build`.
     pub fn create_group_with(
         &mut self,
-        name: &str,
+        path: &str,
         build: impl FnOnce(&mut StagedGroup<'_>),
     ) -> &mut Self {
-        let child = format!("{}/{}", self.path, name);
+        let child = ObjectPath::parse(&self.path)
+            .join_path(&ObjectPath::parse(path))
+            .to_string();
         self.ops.push(StagedOp::CreateGroup(child.clone()));
         let mut staged = StagedGroup {
             ops: &mut *self.ops,
@@ -3553,15 +3567,19 @@ impl StagedGroup<'_> {
     }
 
     /// Stage a dataset in this group, configured through `build`.
+    ///
+    /// `path` may have several components, as it may for [`create_group`](Self::create_group).
     pub fn create_dataset(
         &mut self,
-        name: &str,
+        path: &str,
         build: impl FnOnce(&mut DatasetBuilder),
     ) -> &mut Self {
-        let mut builder = DatasetBuilder::new(name);
+        let mut builder = DatasetBuilder::new(path);
         build(&mut builder);
         self.ops.push(StagedOp::CreateDataset {
-            path: format!("{}/{}", self.path, name),
+            path: ObjectPath::parse(&self.path)
+                .join_path(&ObjectPath::parse(path))
+                .to_string(),
             builder: Box::new(builder),
         });
         self
@@ -3844,7 +3862,7 @@ impl Group {
         let chunk_cache = DatasetAccessProperties::new()
             .resolved_chunk_cache(self.file.access_properties.chunk_cache);
         Ok(members.into_iter().map(move |(name, on_disk)| {
-            let path = child_path_of(parent.as_deref(), &name);
+            let path = LinkName::new(&name).and_then(|leaf| child_path_of(parent.as_deref(), leaf));
             let dataset = match on_disk {
                 Some((address, header)) => Dataset::new(
                     Arc::clone(&file),
@@ -3854,11 +3872,12 @@ impl Group {
                     path,
                 ),
                 // Only a group with a path of its own reports staged children,
-                // so a staged member always has one to be named by.
+                // and a staged name is one path component, so a staged member
+                // always has a path of its own.
                 None => Dataset::pending(
                     Arc::clone(&file),
                     chunk_cache,
-                    path.expect("a staged member's parent has a path"),
+                    path.expect("a staged member is a link name under a parent with a path"),
                 ),
             };
             (name, dataset)
@@ -3884,17 +3903,22 @@ impl Group {
         Ok(names)
     }
 
-    /// The datatype a committed (`H5Tcommit`) child object holds.
+    /// Returns the datatype the committed (`H5Tcommit`) object `path` names holds.
     ///
-    /// `name` must be one [`named_datatypes`](Self::named_datatypes) returned: a
-    /// name that reaches nothing fails with [`FormatError::PathNotFound`], and
-    /// one that reaches an object of another kind fails with
-    /// [`Error::NotANamedDatatype`], the way `H5Topen` does.
-    pub fn named_datatype(&self, name: &str) -> Result<Datatype, Error> {
-        Ok(self.named_datatype_at(name)?.0)
+    /// `path` resolves as it does for [`dataset`](Self::dataset), and its last component is a name
+    /// [`named_datatypes`](Self::named_datatypes) reports for the group that holds it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::PathNotFound`] if a component of `path` reaches nothing,
+    /// [`Error::NotAGroup`] if an object along the way is not a group, and
+    /// [`Error::NotANamedDatatype`] if `path` identifies an object of another kind, as `H5Topen`
+    /// rejects one.
+    pub fn named_datatype(&self, path: &str) -> Result<Datatype, Error> {
+        Ok(self.named_datatype_at(path)?.0)
     }
 
-    /// How many things reference the committed (`H5Tcommit`) datatype `name`:
+    /// Returns how many things reference the committed (`H5Tcommit`) datatype `path` names:
     /// its hard links, plus every dataset and attribute that names it.
     ///
     /// This is HDF5's own object reference count (`H5Oget_info`'s `rc`), and what
@@ -3904,11 +3928,15 @@ impl Group {
     /// and a version 2 header without that message has exactly one reference,
     /// which is what the format means by omitting it.
     ///
-    /// A name reaching anything but a committed datatype is
-    /// [`Error::NotANamedDatatype`], as for
-    /// [`named_datatype`](Self::named_datatype).
-    pub fn named_datatype_references(&self, name: &str) -> Result<u32, Error> {
-        let (_, hdr) = self.named_datatype_header(name)?;
+    /// # Errors
+    ///
+    /// Returns [`FormatError::PathNotFound`], [`Error::NotAGroup`] and
+    /// [`Error::NotANamedDatatype`] on the terms [`named_datatype`](Self::named_datatype) sets out,
+    /// and
+    /// [`FormatError::UnexpectedEof`] for an Object Reference Count message too short to hold its
+    /// count.
+    pub fn named_datatype_references(&self, path: &str) -> Result<u32, Error> {
+        let (_, hdr) = self.named_datatype_header(path)?;
         if let Some(count) = hdr.reference_count {
             return Ok(count);
         }
@@ -3926,33 +3954,32 @@ impl Group {
         Ok(u32::from_le_bytes([body[1], body[2], body[3], body[4]]))
     }
 
-    /// The object header of a child that is a committed datatype, and its
+    /// Returns the object header of the committed datatype `path` identifies, and its
     /// address.
     ///
     /// The one place the by-name datatype lookups classify what they reached, so
-    /// that a child this refuses cannot be one
+    /// that an object this rejects cannot be one
     /// [`named_datatypes`](Self::named_datatypes) would list. Reached the way
     /// [`group`](Self::group) and [`dataset`](Self::dataset) reach theirs, which
-    /// looks the one name up rather than enumerating the group to find it.
-    fn named_datatype_header(&self, name: &str) -> Result<(u64, ObjectHeader), Error> {
-        let address = self
-            .child_address(name)?
-            .ok_or_else(|| Error::Format(FormatError::PathNotFound(name.to_string())))?;
+    /// looks each component up by name.
+    fn named_datatype_header(&self, path: &str) -> Result<(u64, ObjectHeader), Error> {
+        let relative = ObjectPath::parse(path);
+        let address = self.resolve_path(&relative)?;
         let hdr = self.file.parse_header(address)?;
         if !is_named_datatype(&hdr) {
-            return Err(Error::NotANamedDatatype(name.to_string()));
+            return Err(Error::NotANamedDatatype(self.root_relative(&relative)));
         }
         Ok((address, hdr))
     }
 
-    /// The datatype a committed child object holds, and the address of the object
-    /// header holding it.
+    /// Returns the datatype the committed object `path` identifies holds, and the address of the
+    /// object header holding it.
     ///
     /// The address is the identity every user of the type shares: two datasets
     /// naming the same address name one type, and reproducing that requires
     /// matching them up by address rather than by what the type decodes to.
-    pub(crate) fn named_datatype_at(&self, name: &str) -> Result<(Datatype, u64), Error> {
-        let (address, hdr) = self.named_datatype_header(name)?;
+    pub(crate) fn named_datatype_at(&self, path: &str) -> Result<(Datatype, u64), Error> {
+        let (address, hdr) = self.named_datatype_header(path)?;
         let msg = find_message(&hdr, MessageType::Datatype)?;
         let (dt, _) = Datatype::parse(&self.file.message_body(msg)?)?;
         Ok((dt, address))
@@ -4035,14 +4062,14 @@ impl Group {
         let file = Arc::clone(&self.file);
         let parent = self.path.clone();
         Ok(members.into_iter().map(move |(name, address)| {
-            let path = child_path_of(parent.as_deref(), &name);
+            let path = LinkName::new(&name).and_then(|leaf| child_path_of(parent.as_deref(), leaf));
             let group = match address {
                 Some(address) => Group::new(Arc::clone(&file), revisions.at(address), path),
-                // As in `iter_datasets`: staged members exist only under a
-                // group that has a path.
+                // As in `iter_datasets`: a staged member is one path component
+                // under a group that has a path of its own.
                 None => Group::pending(
                     Arc::clone(&file),
-                    path.expect("a staged member's parent has a path"),
+                    path.expect("a staged member is a link name under a parent with a path"),
                 ),
             };
             (name, group)
@@ -4123,115 +4150,183 @@ impl Group {
         self.file.attr_messages_of(&hdr)
     }
 
-    /// Get a dataset within this group by name.
+    /// Returns the dataset `path` names, relative to this group.
+    ///
+    /// `path` is one link name or several separated by `/`, and a `path` that begins with `/`
+    /// resolves from the root group of the file instead. The C library starts an absolute name at
+    /// the root the same way (`H5G__traverse_real` in `H5Gtraverse.c`, HDF5 1.14.6). A repeated or
+    /// a trailing separator separates nothing, and a `.` component identifies the group reached so
+    /// far, so `a/b`, `a//b/` and `./a/b` identify one dataset.
     ///
     /// The dataset uses the file-wide chunk-cache default. To override the cache
     /// for this one dataset, use
     /// [`dataset_with_options`](Self::dataset_with_options).
-    pub fn dataset(&self, name: &str) -> Result<Dataset, Error> {
-        self.dataset_with_options(name, DatasetAccessProperties::new())
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::PathNotFound`] if a component of `path` reaches nothing,
+    /// [`Error::NotADataset`] if `path` identifies an object that is not a dataset, and
+    /// [`Error::NotAGroup`] if an object along the way is not a group. Each reports the object by
+    /// its path from the root group, so one object has one name whichever handle a caller holds,
+    /// except through a handle an object reference produced, which has no path of its own
+    /// (issue #365).
+    pub fn dataset(&self, path: &str) -> Result<Dataset, Error> {
+        self.dataset_with_options(path, DatasetAccessProperties::new())
     }
 
-    /// Get a dataset within this group by name, applying per-dataset
-    /// [`DatasetAccessProperties`] that override file-wide access defaults (HDF5's
-    /// `dapl`; see `H5Pset_chunk_cache`).
+    /// Returns the dataset `path` names, applying per-dataset
+    /// [`DatasetAccessProperties`] that override the file-wide access defaults (HDF5's
+    /// `dapl`, `H5Pset_chunk_cache`).
+    ///
+    /// `path` resolves as it does for [`dataset`](Self::dataset).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::PathNotFound`], [`Error::NotADataset`] and [`Error::NotAGroup`] on
+    /// the terms [`dataset`](Self::dataset) sets out.
     pub fn dataset_with_options(
         &self,
-        name: &str,
+        path: &str,
         properties: DatasetAccessProperties,
     ) -> Result<Dataset, Error> {
         let chunk_cache = properties.resolved_chunk_cache(self.file.access_properties.chunk_cache);
-        if let Some(child) = self.child_path(name) {
+        let relative = ObjectPath::parse(path);
+        if let Some(child) = self.child_path(&relative) {
             match self.file.staged_object(&child).map(|o| o.kind) {
                 Some(StagedKind::Dataset) => {
                     return Ok(Dataset::pending(self.file.clone(), chunk_cache, child));
                 }
-                Some(StagedKind::Group) => return Err(Error::NotADataset(name.to_string())),
+                Some(StagedKind::Group) => return Err(Error::NotADataset(child)),
                 None => {}
             }
         }
         let revisions = self.file.revisions();
-        let address = self
-            .child_address(name)?
-            .ok_or_else(|| Error::Format(FormatError::PathNotFound(name.to_string())))?;
+        let address = self.resolve_path(&relative)?;
         let hdr = self.file.parse_header(address)?;
         if !has_message(&hdr, MessageType::DataLayout) {
-            return Err(Error::NotADataset(name.to_string()));
+            return Err(Error::NotADataset(self.root_relative(&relative)));
         }
         Ok(Dataset::new(
             self.file.clone(),
             revisions.at(address),
             hdr,
             chunk_cache,
-            self.child_path(name),
+            self.child_path(&relative),
         ))
     }
 
-    /// Get a subgroup within this group by name.
+    /// Returns the subgroup `path` names, relative to this group.
     ///
-    /// Returns [`Error::NotAGroup`] if the child is not a group, the way
-    /// [`dataset`](Self::dataset) returns [`Error::NotADataset`] for the mirror
-    /// case, and [`FormatError::PathNotFound`] if there is no such child.
-    pub fn group(&self, name: &str) -> Result<Group, Error> {
-        if let Some(child) = self.child_path(name) {
+    /// `path` resolves as it does for [`dataset`](Self::dataset). A relative `path` that spells no
+    /// link, `""` or `"."`, identifies this group, and an absolute one, `"/"`, identifies the root
+    /// group.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::NotAGroup`] if `path` identifies an object that is not a group, the way
+    /// [`dataset`](Self::dataset) returns [`Error::NotADataset`] for the mirror case, and
+    /// [`FormatError::PathNotFound`] if a component of `path` reaches nothing.
+    pub fn group(&self, path: &str) -> Result<Group, Error> {
+        let relative = ObjectPath::parse(path);
+        if let Some(child) = self.child_path(&relative) {
             match self.file.staged_object(&child).map(|o| o.kind) {
                 Some(StagedKind::Group) => {
                     return Ok(Group::pending(self.file.clone(), child));
                 }
-                Some(StagedKind::Dataset) => return Err(Error::NotAGroup(name.to_string())),
+                Some(StagedKind::Dataset) => return Err(Error::NotAGroup(child)),
                 None => {}
             }
         }
         let revisions = self.file.revisions();
-        let address = self
-            .child_address(name)?
-            .ok_or_else(|| Error::Format(FormatError::PathNotFound(name.to_string())))?;
+        let address = self.resolve_path(&relative)?;
         if !is_group(&self.file.parse_header(address)?) {
-            return Err(Error::NotAGroup(name.to_string()));
+            return Err(Error::NotAGroup(self.root_relative(&relative)));
         }
         Ok(Group::new(
             self.file.clone(),
             revisions.at(address),
-            self.child_path(name),
+            self.child_path(&relative),
         ))
     }
 
-    /// The object-header address of this group's child named `name`.
+    /// Returns the address of the object header `path` identifies, walking from this group, or
+    /// from the root group where `path` is absolute.
     ///
-    /// The by-name form of [`children`](Self::children): it reads the group's
-    /// links without building one entry per child, which is what makes opening
-    /// each member of a large group in turn cost the group once rather than once
-    /// per member (issue #228).
-    fn child_address(&self, name: &str) -> Result<Option<u64>, Error> {
-        match self.file.group_child(self.header_address()?, name)? {
-            ChildLookup::Found(address) => Ok(Some(address)),
-            ChildLookup::Absent => Ok(None),
-            // Reached by the one handle whose object is never classified: the
-            // root. Every other `Group` comes from a lookup that classified it
-            // (`File::group`, `Group::group`, `iter_groups`, `object_at_relative`)
-            // or re-resolves through `header_address`, which classifies again;
-            // `File::root` takes the superblock's word for it, and nothing checks
-            // that the root address names a group. The empty path is the root's
-            // own name here, so the refusal names it correctly.
-            ChildLookup::NotAGroup => Err(Error::NotAGroup(self.path.clone().unwrap_or_default())),
+    /// [`FileInner::group_child`] looks each component up by name, which reads the one Link
+    /// message a compact group holds for it and enumerates a version 1 or a dense group
+    /// (issue #228). A `path` that spells no link identifies the object the walk starts from.
+    ///
+    /// The root is the one handle whose object nothing classifies: every other `Group` comes from
+    /// a lookup that classified it (`File::group`, `Group::group`, `iter_groups`,
+    /// `object_at_relative`) or re-resolves through `header_address`, which classifies again.
+    /// `File::root` takes the superblock's word for it, so a root whose header describes some
+    /// other object is rejected here, under the empty path a root handle stores.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::PathNotFound`] if a component reaches nothing and
+    /// [`Error::NotAGroup`] if an object along the way is not a group. Both report the object
+    /// through [`root_relative`](Self::root_relative).
+    fn resolve_path(&self, path: &ObjectPath<'_>) -> Result<u64, Error> {
+        // Resolved before the walk whichever way the walk starts, so a handle
+        // that cannot resolve itself reports that.
+        let own = self.header_address()?;
+        // An absolute path starts at the root group, as `H5G__traverse_real`
+        // starts one there (`H5Gtraverse.c`, HDF5 1.14.6).
+        let mut address = if path.is_absolute() {
+            self.file.mirror_root_address()
+        } else {
+            own
+        };
+        for (walked, &name) in path.components().iter().enumerate() {
+            address = match self.file.group_child(address, name)? {
+                ChildLookup::Found(found) => found,
+                ChildLookup::Absent => {
+                    return Err(Error::Format(FormatError::PathNotFound(
+                        self.root_relative(&path.prefix(walked + 1)),
+                    )));
+                }
+                ChildLookup::NotAGroup => {
+                    return Err(Error::NotAGroup(self.root_relative(&path.prefix(walked))));
+                }
+            };
         }
+        Ok(address)
     }
 
-    /// The root-relative path of a child named `name`, or `None` if this group
-    /// itself has no resolvable path (reached by object reference).
-    fn child_path(&self, name: &str) -> Option<String> {
-        child_path_of(self.path.as_deref(), name)
+    /// Returns the root-relative path of the object `path` identifies from this group, or from
+    /// the root group where `path` is absolute, and `None` if this group itself has no resolvable
+    /// path (reached by object reference).
+    fn child_path(&self, path: &ObjectPath<'_>) -> Option<String> {
+        Some(self.object_path()?.join_path(path).to_string())
     }
 
-    /// Create an empty subgroup `name` within this group, staged until
-    /// [`File::commit`], and return a handle to it.
+    /// Returns the path an error reports the object `path` reaches by: its path from the root
+    /// group.
+    ///
+    /// One object is reported one way whether the caller holds a [`File`] or a [`Group`] handle,
+    /// and from the root, so that the caller can go and open what the error reported. For a group
+    /// reached by object reference, whose own path is `None`, the result is `path` alone, in the
+    /// form [`ObjectPath`] displays.
+    fn root_relative(&self, path: &ObjectPath<'_>) -> String {
+        self.child_path(path).unwrap_or_else(|| path.to_string())
+    }
+
+    /// Returns this group's own path, parsed, or `None` where it has none (reached by object
+    /// reference).
+    fn object_path(&self) -> Option<ObjectPath<'_>> {
+        self.path.as_deref().map(ObjectPath::parse)
+    }
+
+    /// Creates an empty subgroup at `path` within this group, staged until
+    /// [`File::commit`], and returns a handle to it.
     ///
     /// The handle addresses the new group straight away: further groups,
     /// datasets, deletions and attributes can be staged through it, and
-    /// [`group`](Self::group) finds it by name from the same session — as does
-    /// any group named in this call, but not an intermediate one the commit
-    /// fills in (`create_group("a/b")` leaves `a` unaddressable until then).
-    /// Reading it
+    /// [`group`](Self::group) finds it by name from the same session. `path` may have several
+    /// components, and every group above the new one has to be in the file already or
+    /// staged in this session: `create_group("a/b")` with no `a` anywhere stages it, and the
+    /// commit rejects the whole batch (issue #533). Reading it
     /// — its attributes, or a member's data — reports
     /// [`Error::NotCommitted`] until the commit,
     /// after which the same handle answers for the group in the file. Deleting
@@ -4248,7 +4343,10 @@ impl Group {
     /// one call instead.
     ///
     /// Requires a read-write file ([`File::open_rw`]), else
-    /// [`Error::ReadOnly`]. A name the file already
+    /// [`Error::ReadOnly`]. A `path` that begins with `/` stages
+    /// the group from the root, as [`dataset`](Self::dataset) resolves an absolute path, and one
+    /// that spells no link, `""`, `"."` or `"/"`, is rejected with
+    /// [`Error::EditUnsupported`], since a write addresses a link. A name the file already
     /// links to is refused here with
     /// [`Error::EditUnsupported`] unless this
     /// session also deletes it — a [replacement](Self::delete) — since there
@@ -4273,13 +4371,13 @@ impl Group {
     /// # Ok(())
     /// # }
     /// ```
-    pub fn create_group(&self, name: &str) -> Result<Group, Error> {
-        self.create_group_with(name, |_| {})
+    pub fn create_group(&self, path: &str) -> Result<Group, Error> {
+        self.create_group_with(path, |_| {})
     }
 
-    /// Create a subgroup `name` within this group, configuring it through
+    /// Creates a subgroup at `path` within this group, configuring it through
     /// `build` (attributes, nested groups and datasets), staged until
-    /// [`File::commit`], and return a handle to it.
+    /// [`File::commit`], and returns a handle to it.
     ///
     /// The closure describes a whole subtree in one call, which is what makes it
     /// worth having over [`create_group`](Self::create_group) plus calls on the
@@ -4314,10 +4412,10 @@ impl Group {
     /// ```
     pub fn create_group_with(
         &self,
-        name: &str,
+        path: &str,
         build: impl FnOnce(&mut StagedGroup<'_>),
     ) -> Result<Group, Error> {
-        let child = self.child_edit_path(name)?;
+        let child = self.child_edit_path(path)?;
         let mut ops = vec![StagedOp::CreateGroup(child.clone())];
         build(&mut StagedGroup {
             ops: &mut ops,
@@ -4327,9 +4425,9 @@ impl Group {
         Ok(Group::pending(self.file.clone(), child))
     }
 
-    /// Create a dataset `name` within this group, configuring it through `build`
+    /// Creates a dataset at `path` within this group, configuring it through `build`
     /// (shape, data, chunks, filters, …), staged until [`File::commit`], and
-    /// return a handle to it.
+    /// returns a handle to it.
     ///
     /// The handle addresses the new dataset straight away, which is what lets a
     /// writer cache one per column while it is still building the schema. It
@@ -4355,7 +4453,10 @@ impl Group {
     /// [`File`] — it will see the file as it was before this call.
     ///
     /// Requires a read-write file ([`File::open_rw`]), else
-    /// [`Error::ReadOnly`]. A name the file already
+    /// [`Error::ReadOnly`]. `path` may have several components or begin with `/`, and one
+    /// that spells no link is rejected, all on the terms
+    /// [`create_group`](Self::create_group) sets out.
+    /// A name the file already
     /// links to is refused here with
     /// [`Error::EditUnsupported`] unless this
     /// session also deletes it — a [replacement](Self::delete) — since there
@@ -4385,11 +4486,11 @@ impl Group {
     /// ```
     pub fn create_dataset(
         &self,
-        name: &str,
+        path: &str,
         build: impl FnOnce(&mut DatasetBuilder),
     ) -> Result<Dataset, Error> {
-        let child = self.child_edit_path(name)?;
-        let mut builder = DatasetBuilder::new(name);
+        let child = self.child_edit_path(path)?;
+        let mut builder = DatasetBuilder::new(path);
         build(&mut builder);
         self.apply_staged(vec![StagedOp::CreateDataset {
             path: child.clone(),
@@ -4403,7 +4504,7 @@ impl Group {
         ))
     }
 
-    /// Delete the object named `name` from this group, staged until
+    /// Deletes the object at `path` from this group, staged until
     /// [`File::commit`]. See [`create_group`](Self::create_group) for the
     /// file-mode rules.
     ///
@@ -4427,6 +4528,12 @@ impl Group {
     /// refuses, and until it does the file's own children still own their names.
     /// The root itself cannot be deleted.
     ///
+    /// A `path` that spells no link, `""`, `"."` or `"/"`, is rejected with
+    /// [`Error::EditUnsupported`], since a deletion takes a link. The C library rejects `"."` from
+    /// `H5L__delete_cb` (`H5Lint.c`) and an empty name in its argument check
+    /// (`H5VL_setup_name_args` in `H5VLint.c`, HDF5 1.14.6). A `path` that begins with `/` deletes
+    /// from the root group, as [`create_group`](Self::create_group) stages from there.
+    ///
     /// ```no_run
     /// # use hdf5_pure::File;
     /// # fn main() -> Result<(), hdf5_pure::Error> {
@@ -4437,8 +4544,8 @@ impl Group {
     /// # Ok(())
     /// # }
     /// ```
-    pub fn delete(&self, name: &str) -> Result<(), Error> {
-        self.with_child_session(name, |session, child| session.delete(child))
+    pub fn delete(&self, path: &str) -> Result<(), Error> {
+        self.with_child_session(path, |session, child| session.delete(child))
     }
 
     /// Add or update an attribute on this group, staged until [`File::commit`].
@@ -4461,16 +4568,19 @@ impl Group {
         self.with_own_session(|session, path| session.remove_group_attr(path, name))
     }
 
-    /// Run `f` with the writable session and the root-relative path of child
-    /// `name`. Returns [`Error::ReadOnly`] if the file is read-only or this
-    /// group has no resolvable path.
+    /// Runs `f` with the writable session and the root-relative path of the child `path`
+    /// identifies.
+    ///
+    /// # Errors
+    ///
+    /// Returns what [`child_edit_path`](Self::child_edit_path) returns for `path`, and whatever
+    /// `f` returns.
     fn with_child_session<R>(
         &self,
-        name: &str,
+        path: &str,
         f: impl FnOnce(&mut WriteEngine, &str) -> Result<R, Error>,
     ) -> Result<R, Error> {
-        self.refuse_if_withdrawn()?;
-        let child = self.child_path(name).ok_or(Error::ReadOnly)?;
+        let child = self.child_edit_path(path)?;
         self.file
             .with_engine_mut(Change::Relocating, |session| f(session, &child))
     }
@@ -4497,17 +4607,34 @@ impl Group {
         }
     }
 
-    /// Validate that this group can stage an edit to child `name` and return the
-    /// child's root-relative path, *without* taking the session lock.
+    /// Returns the root-relative path of the child `path` identifies, checked as the target of a
+    /// staged edit, *without* taking the session lock.
     ///
     /// Paired with [`apply_staged`](Self::apply_staged): the checks run first so
     /// a read-only or sealed file is reported before any user closure runs, the
     /// closure then runs unlocked, and the lock is taken only to record what it
     /// built (issue #200).
-    fn child_edit_path(&self, name: &str) -> Result<String, Error> {
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::EditUnsupported`] if `path` spells no link, since a write addresses a
+    /// link. Returns [`Error::ReadOnly`] if the
+    /// file is read-only or
+    /// this group has no path of its own, and the failures
+    /// [`check_staged_writable`](FileInner::check_staged_writable) and
+    /// [`refuse_if_withdrawn`](Self::refuse_if_withdrawn) report.
+    fn child_edit_path(&self, path: &str) -> Result<String, Error> {
         self.file.check_staged_writable()?;
         self.refuse_if_withdrawn()?;
-        self.child_path(name).ok_or(Error::ReadOnly)
+        let relative = ObjectPath::parse(path);
+        if relative.components().is_empty() {
+            // A write addresses a link, and a path that parses to no
+            // components spells none. The C library rejects the same call from
+            // `H5L__delete_cb`, which reports a `"."` as a link it cannot
+            // delete (`H5Lint.c`, HDF5 1.14.6).
+            return Err(Error::EditUnsupported(NO_LINK_TO_WRITE));
+        }
+        self.child_path(&relative).ok_or(Error::ReadOnly)
     }
 
     /// Record already-built edits on the writable session, holding the lock only
@@ -6773,13 +6900,6 @@ fn find_message(
         .ok_or(Error::MissingMessage(msg_type))
 }
 
-/// Normalize a user-supplied object path to the root-relative form the write
-/// session addresses by: strip any leading/trailing `/` so `"/a/b"` and `"a/b"`
-/// name the same object.
-fn normalize_path(path: &str) -> String {
-    path.trim_matches('/').to_string()
-}
-
 fn has_message(header: &ObjectHeader, msg_type: MessageType) -> bool {
     header.messages.iter().any(|m| m.msg_type == msg_type)
 }
@@ -6813,15 +6933,16 @@ fn is_named_datatype(header: &ObjectHeader) -> bool {
 /// Free-standing rather than a method on [`Group`] so the member iterators can
 /// build child paths from a closure that outlives the borrow of the group they
 /// came from.
-fn child_path_of(parent: Option<&str>, name: &str) -> Option<String> {
-    parent.map(|p| {
-        if p.is_empty() {
-            name.to_string()
-        } else {
-            format!("{p}/{name}")
-        }
-    })
+///
+/// A member whose name is no path component, such as the empty name a malformed file can store,
+/// has no [`LinkName`] for the iterators to pass, and they return its handle with `None` for a
+/// path.
+fn child_path_of(parent: Option<&str>, name: LinkName<'_>) -> Option<String> {
+    Some(ObjectPath::parse(parent?).join(name).to_string())
 }
+
+/// The reason [`Group::child_edit_path`] gives for a path that spells no link.
+const NO_LINK_TO_WRITE: &str = "a write needs a link name, and this path holds none";
 
 #[cfg(test)]
 mod tests {
@@ -7437,7 +7558,7 @@ mod tests {
             ("File::group nested", "g/inner", file.group("g/inner")),
             (
                 "Group::group from a subgroup",
-                "inner",
+                "g/inner",
                 nested.group("inner"),
             ),
         ] {

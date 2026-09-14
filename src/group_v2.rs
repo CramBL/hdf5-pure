@@ -4,7 +4,9 @@
 //! dense storage (fractal heap + B-tree v2).
 
 #[cfg(not(feature = "std"))]
-use alloc::{string::String, vec::Vec};
+use alloc::string::{String, ToString};
+#[cfg(not(feature = "std"))]
+use alloc::vec::Vec;
 
 use crate::access_mode::AccessMode;
 use crate::address::BaseAddress;
@@ -19,6 +21,7 @@ use crate::link_info::LinkInfoMessage;
 use crate::link_message::{LinkMessage, LinkTarget, link_is_named};
 use crate::message_type::MessageType;
 use crate::object_header::{MessageFilter, ObjectHeader};
+use crate::object_path::{LinkName, ObjectPath};
 use crate::source::{BaseOffsetSource, Source, frame};
 use crate::superblock::Superblock;
 use crate::symbol_table::SymbolTableMessage;
@@ -147,7 +150,7 @@ pub(crate) fn find_child_address(
     offset_size: u8,
     length_size: u8,
     base_address: BaseAddress,
-    name: &str,
+    name: LinkName<'_>,
 ) -> Result<ChildLookup, FormatError> {
     let mut saw_link = false;
     let header = {
@@ -175,7 +178,7 @@ pub(crate) fn find_child_address(
         base_address,
         resolve_group_entries(file_data, &header, offset_size, length_size, base_address)?
             .into_iter()
-            .find(|e| e.name == name)
+            .find(|e| e.name == name.as_str())
             .map(|e| e.object_header_address),
     )
 }
@@ -188,7 +191,7 @@ pub(crate) fn find_child_address_from_source<S: Source + ?Sized>(
     offset_size: u8,
     length_size: u8,
     base_address: BaseAddress,
-    name: &str,
+    name: LinkName<'_>,
 ) -> Result<ChildLookup, FormatError> {
     let mut saw_link = false;
     let header = {
@@ -216,7 +219,7 @@ pub(crate) fn find_child_address_from_source<S: Source + ?Sized>(
         base_address,
         resolve_group_entries_from_source(source, &header, offset_size, length_size, base_address)?
             .into_iter()
-            .find(|e| e.name == name)
+            .find(|e| e.name == name.as_str())
             .map(|e| e.object_header_address),
     )
 }
@@ -230,7 +233,7 @@ pub(crate) fn find_child_address_from_source<S: Source + ?Sized>(
 /// counted, and [`filtered_is_group`] classifies the header the way an
 /// unfiltered parse would have.
 fn wanted_link_only<'a>(
-    name: &'a str,
+    name: LinkName<'a>,
     saw_link: &'a mut bool,
 ) -> impl FnMut(MessageType, &[u8]) -> bool + 'a {
     move |ty, body| {
@@ -238,7 +241,7 @@ fn wanted_link_only<'a>(
             return true;
         }
         *saw_link = true;
-        link_is_named(body, name)
+        link_is_named(body, name.as_str())
     }
 }
 
@@ -304,14 +307,14 @@ fn filtered_is_group(header: &ObjectHeader, saw_link: bool) -> bool {
 fn scan_compact_links(
     object_header: &ObjectHeader,
     offset_size: u8,
-    name: &str,
+    name: LinkName<'_>,
 ) -> Result<Option<u64>, FormatError> {
     let mut found = None;
     for msg in &object_header.messages {
         if msg.msg_type != MessageType::Link {
             continue;
         }
-        let addr = LinkMessage::hard_link_address_if_named(&msg.data, offset_size, name)?;
+        let addr = LinkMessage::hard_link_address_if_named(&msg.data, offset_size, name.as_str())?;
         found = found.or(addr);
     }
     Ok(found)
@@ -419,62 +422,38 @@ pub(crate) fn is_group(object_header: &ObjectHeader) -> bool {
     is_v1_group(object_header) || is_v2_group(object_header)
 }
 
-/// The root-relative path of the object a path walk had descended into when it
-/// tried to look `components[i]` up inside it: every component before `i`.
+/// Returns the address of the object header `path` identifies, walked from the root group.
 ///
-/// The whole prefix rather than the one component, because that is the path the
-/// refusal is *about* — `a/b/c` stopped by a dataset at `a/b` names `a/b`, which
-/// a caller can go and open, where a bare `b` would not say where to find it.
-/// Empty at `i == 0`, the root group, which is how this crate names the root
-/// throughout (a root [`crate::Group`] handle carries the empty path too).
+/// Each component is looked up through [`find_child_address`], which reads a v1 symbol-table
+/// group, a compact v2 group and a dense one alike. [`ObjectPath::parse`] decides what the
+/// spelling of `path` identifies, and a `path` that spells no link identifies the root group.
 ///
-/// Both walks resolve the same path the same way, so they name the object the
-/// same way as well.
-fn walked_prefix(components: &[&str], i: usize) -> String {
-    components[..i].join("/")
-}
-
-/// Unified path resolution that works for both v1 and v2 groups.
+/// # Errors
 ///
-/// Detects group version from object header messages and dispatches accordingly.
+/// Returns [`FormatError::PathNotFound`] if a component reaches nothing and
+/// [`ResolveError::NotAGroup`] if an object along the way is not a group. Both report that object
+/// by the prefix of `path` walked to reach it.
 pub fn resolve_path_any(
     file_data: &[u8],
     access_mode: AccessMode,
     superblock: &Superblock,
     path: &str,
 ) -> Result<u64, ResolveError> {
-    let components: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
-    if components.is_empty() {
-        return Ok(superblock.root_group_address);
-    }
-
+    let path = ObjectPath::parse(path);
     let os = superblock.offset_size;
     let ls = superblock.length_size;
     let base = superblock.base_address;
 
     let mut current_addr = superblock.root_group_address;
 
-    for (i, component) in components.iter().enumerate() {
-        match find_child_address(
-            file_data,
-            access_mode,
-            current_addr,
-            os,
-            ls,
-            base,
-            component,
-        )? {
-            ChildLookup::Found(abs_addr) => {
-                if i == components.len() - 1 {
-                    return Ok(abs_addr);
-                }
-                current_addr = abs_addr;
-            }
+    for (walked, &name) in path.components().iter().enumerate() {
+        match find_child_address(file_data, access_mode, current_addr, os, ls, base, name)? {
+            ChildLookup::Found(abs_addr) => current_addr = abs_addr,
             ChildLookup::Absent => {
-                return Err(FormatError::PathNotFound(String::from(*component)).into());
+                return Err(FormatError::PathNotFound(path.prefix(walked + 1).to_string()).into());
             }
             ChildLookup::NotAGroup => {
-                return Err(ResolveError::NotAGroup(walked_prefix(&components, i)));
+                return Err(ResolveError::NotAGroup(path.prefix(walked).to_string()));
             }
         }
     }
@@ -530,50 +509,38 @@ pub fn resolve_group_entries(
 // structure from a `Source` on demand.
 // ---------------------------------------------------------------------------
 
-/// Streaming counterpart of [`resolve_path_any`].
+/// Resolves `path` as [`resolve_path_any`] does, reading the object headers
+/// and, for a dense group, the fractal heap and the version 2 B-tree from a [`Source`].
 ///
-/// Resolves a path to an object-header address by reading the object headers
-/// and (for dense groups) the fractal heap + B-tree v2 from a [`Source`].
-/// Both group forms resolve: v2 (compact or dense) groups, and v1 symbol-table
-/// groups via [`group_v1::resolve_v1_group_entries_from_source`].
+/// A v1 symbol-table group resolves through
+/// [`group_v1::resolve_v1_group_entries_from_source`], and the grammar is the same as for
+/// [`resolve_path_any`].
+///
+/// # Errors
+///
+/// Returns what [`resolve_path_any`] returns, on the same terms.
 pub fn resolve_path_any_from_source<S: Source + ?Sized>(
     source: &S,
     access_mode: AccessMode,
     superblock: &Superblock,
     path: &str,
 ) -> Result<u64, ResolveError> {
-    let components: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
-    if components.is_empty() {
-        return Ok(superblock.root_group_address);
-    }
-
+    let path = ObjectPath::parse(path);
     let os = superblock.offset_size;
     let ls = superblock.length_size;
     let base = superblock.base_address;
 
     let mut current_addr = superblock.root_group_address;
 
-    for (i, component) in components.iter().enumerate() {
-        match find_child_address_from_source(
-            source,
-            access_mode,
-            current_addr,
-            os,
-            ls,
-            base,
-            component,
-        )? {
-            ChildLookup::Found(abs_addr) => {
-                if i == components.len() - 1 {
-                    return Ok(abs_addr);
-                }
-                current_addr = abs_addr;
-            }
+    for (walked, &name) in path.components().iter().enumerate() {
+        match find_child_address_from_source(source, access_mode, current_addr, os, ls, base, name)?
+        {
+            ChildLookup::Found(abs_addr) => current_addr = abs_addr,
             ChildLookup::Absent => {
-                return Err(FormatError::PathNotFound(String::from(*component)).into());
+                return Err(FormatError::PathNotFound(path.prefix(walked + 1).to_string()).into());
             }
             ChildLookup::NotAGroup => {
-                return Err(ResolveError::NotAGroup(walked_prefix(&components, i)));
+                return Err(ResolveError::NotAGroup(path.prefix(walked).to_string()));
             }
         }
     }
@@ -879,15 +846,18 @@ mod tests {
         ]);
 
         assert_eq!(
-            scan_compact_links(&header, 8, "data").unwrap(),
+            scan_compact_links(&header, 8, LinkName::new("data").unwrap()).unwrap(),
             Some(0x4000)
         );
         assert_eq!(
-            scan_compact_links(&header, 8, "soft").unwrap(),
+            scan_compact_links(&header, 8, LinkName::new("soft").unwrap()).unwrap(),
             None,
             "a soft link names a path, not an object header"
         );
-        assert_eq!(scan_compact_links(&header, 8, "absent").unwrap(), None);
+        assert_eq!(
+            scan_compact_links(&header, 8, LinkName::new("absent").unwrap()).unwrap(),
+            None
+        );
     }
 
     #[test]

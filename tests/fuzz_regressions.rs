@@ -74,24 +74,18 @@ fn zero_width_element_type_is_refused_not_divided_by() {
     }
 }
 
-/// Return the first dataset reachable from `group`, mirroring the fuzz target's
-/// shallow group/dataset walk.
+/// Returns the first dataset reachable from `group`, driving the by-name entry
+/// points of the fuzz target's shallow group/dataset walk on the way.
 fn find_first_dataset(file: &File, group: &Group) -> Option<hdf5_pure::Dataset> {
-    if let Ok(names) = group.datasets() {
-        for name in names {
-            if let Ok(dataset) = group.dataset(&name) {
-                let _ = file.dataset(&name);
-                return Some(dataset);
-            }
-        }
+    if let Some((name, dataset)) = group.iter_datasets().ok().and_then(|mut m| m.next()) {
+        group.dataset(&name).ok();
+        file.dataset(&name).ok();
+        return Some(dataset);
     }
-    if let Ok(names) = group.groups() {
-        for name in names {
-            if let Ok(child) = group.group(&name) {
-                if let Some(found) = find_first_dataset(file, &child) {
-                    return Some(found);
-                }
-            }
+    for (name, child) in group.iter_groups().into_iter().flatten() {
+        group.group(&name).ok();
+        if let Some(found) = find_first_dataset(file, &child) {
+            return Some(found);
         }
     }
     None

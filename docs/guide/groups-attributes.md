@@ -128,7 +128,7 @@ println!("attributes:   {:?}", sensors.attrs()?);
 # Ok::<(), hdf5_pure::Error>(())
 ```
 
-[`File::group(path)`](crate::File::group) resolves a group by path, and [`Group::group(name)`](crate::Group::group) resolves a child relative to that group. Both fail with [`Error::NotAGroup`](crate::Error::NotAGroup) when the name reaches a dataset or a committed datatype, the way [`Error::NotADataset`](crate::Error::NotADataset) reports the mirror case for [`dataset()`](crate::Group::dataset). A name that reaches nothing at all is a [`FormatError::PathNotFound`](crate::FormatError::PathNotFound). The same error reports a component *along* a path, since resolving `a/b/c` opens `a` and then `a/b` to look inside them, and it states that component's own path: a dataset at `a/b` gives `Error::NotAGroup("a/b")` from `File::group("a/b/c")` and from `File::dataset("a/b/c")` alike. The names returned by [`groups()`](crate::Group::groups) and [`datasets()`](crate::Group::datasets) come in no guaranteed order, so sort them yourself if you need a stable listing.
+[`File::group(path)`](crate::File::group) resolves a group by path from the root, and [`Group::group(path)`](crate::Group::group) resolves a path relative to that group, or from the root where the path begins with `/`. Both fail with [`Error::NotAGroup`](crate::Error::NotAGroup) when the name reaches a dataset or a committed datatype, the way [`Error::NotADataset`](crate::Error::NotADataset) reports the mirror case for [`dataset()`](crate::Group::dataset). A name that reaches nothing at all is a [`FormatError::PathNotFound`](crate::FormatError::PathNotFound). The same error reports a component *along* a path, since resolving `a/b/c` opens `a` and then `a/b` to look inside them, and it states that component's own path: a dataset at `a/b` gives `Error::NotAGroup("a/b")` from `File::group("a/b/c")` and from `File::dataset("a/b/c")` alike. The names returned by [`groups()`](crate::Group::groups) and [`datasets()`](crate::Group::datasets) come in no guaranteed order, so sort them yourself if you need a stable listing.
 
 ### Reading an attribute value
 
@@ -208,7 +208,7 @@ let value = root.attrs()?.get("success").and_then(AttrValue::as_i64);
 
 ### Addressing datasets
 
-Datasets are addressable two ways: by full path from the file, or by name from their parent group. Both resolve to the same dataset.
+Datasets are addressable two ways: by path from the file, or by a path relative to their parent group. Both resolve to the same dataset.
 
 ```rust
 # use hdf5_pure::{File, FileBuilder};
