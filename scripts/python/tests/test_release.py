@@ -10,6 +10,7 @@ from hdf5_pure_scripts.release import (
     promote_changelog,
     pull_request_release_type,
     required_bump,
+    semver_checks_release_type,
     set_version,
 )
 
@@ -145,6 +146,21 @@ def test_semver_verdict_gates_the_release_type():
     assert bump_allows("major", "minor")
     assert not bump_allows("minor", "major")
     assert not bump_allows("patch", "minor")
+
+
+@pytest.mark.parametrize(
+    ("release_type", "expected"),
+    [("patch", "minor"), ("minor", "major"), ("major", "major")],
+)
+def test_a_pre_1_0_baseline_translates_the_release_type_to_the_word_semver_checks_takes(
+    release_type, expected
+):
+    assert semver_checks_release_type(release_type, v("0.46.0")) == expected
+
+
+@pytest.mark.parametrize("release_type", ["patch", "minor", "major"])
+def test_from_1_0_on_the_release_type_is_the_word_semver_checks_takes(release_type):
+    assert semver_checks_release_type(release_type, v("1.2.3")) == release_type
 
 
 def test_the_cycle_is_a_minor_only_with_a_breaking_entry_under_unreleased():

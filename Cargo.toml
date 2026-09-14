@@ -42,13 +42,6 @@ features = ["provenance", "zfp", "ndarray", "serde", "num-complex"]
 # item shows the feature that brings it.
 rustdoc-args = ["--cfg", "docsrs"]
 
-# Under Cargo pre-1.0 semver conventions (RELEASES.md), breaking changes release
-# as the next minor version. cargo-semver-checks defaults `feature_missing` to
-# major with no 0.x downgrade: downgrade it to minor for the maintainer-only
-# `matio-crosscheck` feature removal.
-[package.metadata.cargo-semver-checks.lints]
-feature_missing = { required-update = "minor" }
-
 # Ignore documentation-only guide modules that contain no Rust items.
 [package.metadata.cargo-shear]
 ignored-paths = ["src/_guide/*.rs"]
