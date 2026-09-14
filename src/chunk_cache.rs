@@ -785,13 +785,14 @@ impl Default for ChunkCache {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::address::StoredAddress;
 
     fn make_chunk(offsets: Vec<u64>, address: u64, size: u32) -> ChunkInfo {
         ChunkInfo {
             chunk_size: size,
             filter_mask: 0,
             offsets,
-            address,
+            address: StoredAddress::new(address),
         }
     }
 
@@ -805,14 +806,17 @@ mod tests {
         cache.populate_index(&chunks, 2); // rank=2, truncate to [0,0] and [10,0]
         assert!(cache.stats().index_loaded());
 
-        let mut addrs: Vec<u64> = cache
+        let mut addrs: Vec<StoredAddress> = cache
             .all_indexed_chunks()
             .unwrap()
             .iter()
             .map(|c| c.address)
             .collect();
         addrs.sort_unstable();
-        assert_eq!(addrs, vec![0x1000, 0x2000]);
+        assert_eq!(
+            addrs,
+            vec![StoredAddress::new(0x1000), StoredAddress::new(0x2000)]
+        );
     }
 
     /// Test helper: clone a cached chunk's bytes if present (the production

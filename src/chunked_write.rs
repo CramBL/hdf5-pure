@@ -13,6 +13,7 @@ use crate::checksum::jenkins_lookup3;
 const HADDR_UNDEF: u64 = u64::MAX;
 use core::num::NonZeroUsize;
 
+use crate::address::StoredAddress;
 use crate::chunk_grid::{ChunkGrid, GridOrder};
 use crate::convert::Narrow;
 use crate::dataspace::{Extent, MaxExtent};
@@ -1948,7 +1949,7 @@ fn ea_layout(
         super_blk_min_nelmts,
         max_dblk_nelmts_bits,
         num_elements: 0,
-        index_block_address: 0,
+        index_block_address: StoredAddress::new(0),
     };
     let geom = EaGeometry::from_header(&geom_header);
     let page_nelmts = 1usize << max_dblk_nelmts_bits;
@@ -2654,7 +2655,7 @@ fn ea_addressable_slots() -> u64 {
         super_blk_min_nelmts: EA_SUPER_BLK_MIN_NELMTS,
         max_dblk_nelmts_bits: EA_MAX_DBLK_NELMTS_BITS,
         num_elements: 0,
-        index_block_address: 0,
+        index_block_address: StoredAddress::new(0),
     };
     let geom = EaGeometry::from_header(&geom_header);
     let direct: u64 = geom.direct_dblk_nelmts.iter().sum();
@@ -4445,7 +4446,7 @@ mod tests {
                 chunk_dimensions: vec![20, 8],
                 index: ChunkIndexLayout::SingleChunk {
                     filtered: None,
-                    address: Some(0x1000),
+                    address: Some(StoredAddress::new(0x1000)),
                 },
             }
         );
@@ -4463,7 +4464,7 @@ mod tests {
                         filtered_size: 500,
                         filter_mask: 0,
                     }),
-                    address: Some(0x2000),
+                    address: Some(StoredAddress::new(0x2000)),
                 },
             }
         );
@@ -4477,7 +4478,7 @@ mod tests {
             DataLayout::Chunked {
                 chunk_dimensions: vec![20, 8],
                 index: ChunkIndexLayout::FixedArray {
-                    address: Some(0x3000),
+                    address: Some(StoredAddress::new(0x3000)),
                 },
             }
         );
@@ -4515,7 +4516,7 @@ mod tests {
             DataLayout::Chunked {
                 chunk_dimensions: vec![10, 8],
                 index: ChunkIndexLayout::ExtensibleArray {
-                    address: Some(0x4000),
+                    address: Some(StoredAddress::new(0x4000)),
                 },
             }
         );
@@ -4666,7 +4667,7 @@ mod tests {
             super_blk_min_nelmts: 4,
             max_dblk_nelmts_bits: 10,
             num_elements: 0,
-            index_block_address: 0,
+            index_block_address: StoredAddress::new(0),
         };
         let geom = EaGeometry::from_header(&geom_header);
         for &n in &[1u64, 4, 20, 100, 244, 300, 2000, 50000, 131056, 140000] {

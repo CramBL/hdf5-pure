@@ -2513,10 +2513,13 @@ fn read_rows_framed<S: Source + ?Sized>(
                     actual: (*size).to_usize()?,
                 });
             }
-            let off = addr.checked_add(start).ok_or(FormatError::OffsetOverflow {
-                offset: addr,
-                length: start,
-            })?;
+            let off = addr
+                .get()
+                .checked_add(start)
+                .ok_or(FormatError::OffsetOverflow {
+                    offset: addr.get(),
+                    length: start,
+                })?;
             source.read_exact_at(off, len)
         }
         DataLayout::Chunked { .. } => {
@@ -5774,16 +5777,18 @@ the same commit to replace it",
     /// which has no enumerator yet.
     pub fn chunks(&self) -> Result<Vec<Chunk>, Error> {
         let rank = self.dataspace()?.dimensions.len();
-        Ok(self
-            .raw_chunks()?
+        let base = self.file.addr_offset;
+        self.raw_chunks()?
             .into_iter()
-            .map(|c| Chunk {
-                offset: c.offsets.into_iter().take(rank).collect(),
-                address: c.address,
-                storage_size: u64::from(c.chunk_size),
-                filter_mask: c.filter_mask,
+            .map(|c| {
+                Ok(Chunk {
+                    offset: c.offsets.into_iter().take(rank).collect(),
+                    address: base.absolute(c.address)?,
+                    storage_size: u64::from(c.chunk_size),
+                    filter_mask: c.filter_mask,
+                })
             })
-            .collect())
+            .collect()
     }
 
     /// This dataset's filter pipeline as an ordered list of [`Filter`]s — each
@@ -5828,14 +5833,15 @@ the same commit to replace it",
             .unwrap_or_default()
     }
 
-    /// Shift a base-relative on-disk address to an absolute file offset using the
-    /// superblock base address (`addr_offset`). A no-op for the common
-    /// base-zero file. Returns `Ok(None)` for an unallocated (undefined) address.
-    fn absolute_address(&self, address: Option<u64>) -> Result<Option<u64>, Error> {
+    /// Returns the absolute file position of `address`, and `None` where a layout message stores
+    /// the undefined address.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::OffsetOverflow`] if the sum exceeds `u64`.
+    fn absolute_address(&self, address: Option<StoredAddress>) -> Result<Option<u64>, Error> {
         match address {
-            Some(rel) => Ok(Some(
-                self.file.addr_offset.absolute(StoredAddress::new(rel))?,
-            )),
+            Some(stored) => Ok(Some(self.file.addr_offset.absolute(stored)?)),
             None => Ok(None),
         }
     }
@@ -6520,11 +6526,12 @@ the same commit to replace it",
         self.data_layout()
     }
 
-    /// The raw, still-compressed on-disk bytes of every allocated chunk of this
-    /// chunked dataset, with each chunk's `(address, on-disk size, filter mask,
-    /// logical offset)` — the same `ChunkInfo`s the chunked reader walks before
-    /// decompressing. Used by repack to copy compressed chunks verbatim without
-    /// ever decoding them.
+    /// Returns one [`ChunkInfo`](crate::chunked_read::ChunkInfo) per allocated chunk of this
+    /// chunked dataset, the records the chunked reader walks before decompressing.
+    ///
+    /// Every address is in the frame the chunk index stores it in, so a caller reading the
+    /// still-compressed chunk bytes from the file's own source adds the base address first,
+    /// as `repack` does when it copies a chunk without decoding it.
     ///
     /// Returns `Err` if the layout is not chunked. Returns `Ok(vec![])` for an
     /// empty / never-allocated chunked dataset (no index address). Covers every
@@ -6547,11 +6554,9 @@ the same commit to replace it",
         let dataspace = self.dataspace()?;
         let elem_size = self.datatype()?.element_size_usize()?;
         let base = self.file.addr_offset;
-        // The chunk index — its root at `addr` and every internal node — stores
-        // addresses relative to the base address. Walk it through a base-relative
-        // view so those resolve, then shift each returned chunk address back to an
-        // absolute file offset, since callers (repack) read the chunk bytes from
-        // the full file source.
+        // The chunk index stores base-relative addresses, in its root and in every internal
+        // node, so the walk runs over a view of the file framed at the base. Every address it
+        // reports stays in that frame.
         self.file.with_source(|source| {
             if base.is_zero() {
                 return Ok(crate::chunked_read::collect_chunks_for_layout_from_source(
@@ -6568,7 +6573,7 @@ the same commit to replace it",
                 inner: source,
                 base,
             };
-            let mut chunks = crate::chunked_read::collect_chunks_for_layout_from_source(
+            Ok(crate::chunked_read::collect_chunks_for_layout_from_source(
                 &framed,
                 index,
                 &chunk_dimensions,
@@ -6576,11 +6581,7 @@ the same commit to replace it",
                 elem_size,
                 self.file.offset_size(),
                 self.file.length_size(),
-            )?;
-            for c in &mut chunks {
-                c.address = base.absolute(StoredAddress::new(c.address))?;
-            }
-            Ok(chunks)
+            )?)
         })
     }
 
@@ -8496,12 +8497,14 @@ mod tests {
             max_dimensions: None,
         };
         let contiguous = DataLayout::Contiguous {
-            address: Some(0),
+            address: Some(StoredAddress::new(0)),
             size: 0,
         };
         let chunked = |band: u32| DataLayout::Chunked {
             chunk_dimensions: vec![band, 8],
-            index: ChunkIndexLayout::BTreeV1 { address: Some(0) },
+            index: ChunkIndexLayout::BTreeV1 {
+                address: Some(StoredAddress::new(0)),
+            },
         };
         let elem = NonZeroUsize::new(8).unwrap();
 

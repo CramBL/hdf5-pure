@@ -12,6 +12,7 @@
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 
+use crate::address::StoredAddress;
 use crate::bytes::{ensure_len, read_length, read_optional_offset};
 use crate::error::FormatError;
 
@@ -26,7 +27,7 @@ pub enum DataLayout {
     /// Contiguous: data stored at a single address in the file.
     Contiguous {
         /// File address of the data, or `None` if undefined (all 0xFF).
-        address: Option<u64>,
+        address: Option<StoredAddress>,
         /// Size of the data in bytes.
         size: u64,
     },
@@ -85,7 +86,7 @@ impl DataLayout {
                 // btree address first
                 let os = offset_size as usize;
                 ensure_len(data, p, os)?;
-                let address = read_optional_offset(data, p, offset_size)?;
+                let address = read_optional_offset(data, p, offset_size)?.map(StoredAddress::new);
                 p += os;
                 // chunk dim sizes: dimensionality × 4 bytes each
                 ensure_len(data, p, dimensionality * 4)?;
@@ -173,7 +174,7 @@ impl DataLayout {
         let os = offset_size as usize;
         ensure_len(data, pos, os + length_size as usize)?;
         Ok(DataLayout::Contiguous {
-            address: read_optional_offset(data, pos, offset_size)?,
+            address: read_optional_offset(data, pos, offset_size)?.map(StoredAddress::new),
             size: read_length(data, pos + os, length_size)?,
         })
     }
@@ -199,7 +200,7 @@ pub(crate) enum ChunkIndexLayout {
     /// latest format bounds.
     BTreeV1 {
         /// Address of the B-tree's root node.
-        address: Option<u64>,
+        address: Option<StoredAddress>,
     },
     /// One chunk holds the whole dataset, and the message stores the address of
     /// that chunk itself.
@@ -208,37 +209,37 @@ pub(crate) enum ChunkIndexLayout {
         /// flags mark the chunk as filtered.
         filtered: Option<FilteredSingleChunk>,
         /// Address of the single chunk.
-        address: Option<u64>,
+        address: Option<StoredAddress>,
     },
     /// The chunks lie in one array in the order of their coordinates, and a
     /// reader computes a chunk's address from its position.
     Implicit {
         /// Base address of the array of chunks.
-        address: Option<u64>,
+        address: Option<StoredAddress>,
     },
     /// A fixed array indexes the chunks of a dataspace of fixed maximum
     /// dimensions.
     FixedArray {
         /// Address of the fixed array header.
-        address: Option<u64>,
+        address: Option<StoredAddress>,
     },
     /// An extensible array indexes the chunks of a dataspace with one unlimited
     /// dimension.
     ExtensibleArray {
         /// Address of the extensible array header.
-        address: Option<u64>,
+        address: Option<StoredAddress>,
     },
     /// A version 2 B-tree indexes the chunks of a dataspace with more than one
     /// unlimited dimension.
     BTreeV2 {
         /// Address of the B-tree's header.
-        address: Option<u64>,
+        address: Option<StoredAddress>,
     },
 }
 
 impl ChunkIndexLayout {
     /// Returns the address stored with the index, whichever index it is.
-    pub(crate) fn address(self) -> Option<u64> {
+    pub(crate) fn address(self) -> Option<StoredAddress> {
         match self {
             ChunkIndexLayout::BTreeV1 { address }
             | ChunkIndexLayout::SingleChunk { address, .. }
@@ -295,7 +296,11 @@ fn parse_chunk_index(
     // information is kept: a Fixed Array and an Extensible Array repeat their
     // creation parameters in their own header, which is where the walkers read
     // them, and no walker reads a version 2 B-tree.
-    let address = |info_len: usize| read_optional_offset(data, info + info_len, offset_size);
+    let address = |info_len: usize| {
+        Ok::<_, FormatError>(
+            read_optional_offset(data, info + info_len, offset_size)?.map(StoredAddress::new),
+        )
+    };
     Ok(match index_type {
         CHUNK_INDEX_SINGLE_CHUNK => {
             let filtered = read_filtered_single_chunk(data, info, flags, length_size)?;
@@ -455,7 +460,7 @@ mod tests {
         assert_eq!(
             layout,
             DataLayout::Contiguous {
-                address: Some(0x1000),
+                address: Some(StoredAddress::new(0x1000)),
                 size: 256,
             }
         );
@@ -491,7 +496,7 @@ mod tests {
             DataLayout::Chunked {
                 chunk_dimensions: vec![100, 200, 8],
                 index: ChunkIndexLayout::BTreeV1 {
-                    address: Some(0x2000)
+                    address: Some(StoredAddress::new(0x2000))
                 },
             }
         );
@@ -520,7 +525,7 @@ mod tests {
         assert_eq!(
             layout,
             DataLayout::Contiguous {
-                address: Some(0x5000),
+                address: Some(StoredAddress::new(0x5000)),
                 size: 512,
             }
         );
@@ -547,7 +552,7 @@ mod tests {
                 chunk_dimensions: vec![64],
                 index: ChunkIndexLayout::SingleChunk {
                     filtered: None,
-                    address: Some(0x3000),
+                    address: Some(StoredAddress::new(0x3000)),
                 },
             }
         );
@@ -567,7 +572,7 @@ mod tests {
                         filtered_size: 1024,
                         filter_mask: 3,
                     }),
-                    address: Some(0x3000),
+                    address: Some(StoredAddress::new(0x3000)),
                 },
             }
         );
@@ -581,7 +586,7 @@ mod tests {
             DataLayout::Chunked {
                 chunk_dimensions: vec![64],
                 index: ChunkIndexLayout::Implicit {
-                    address: Some(0x3000)
+                    address: Some(StoredAddress::new(0x3000))
                 },
             }
         );
@@ -595,7 +600,7 @@ mod tests {
             DataLayout::Chunked {
                 chunk_dimensions: vec![64],
                 index: ChunkIndexLayout::FixedArray {
-                    address: Some(0x3000)
+                    address: Some(StoredAddress::new(0x3000))
                 },
             }
         );
@@ -609,7 +614,7 @@ mod tests {
             DataLayout::Chunked {
                 chunk_dimensions: vec![64],
                 index: ChunkIndexLayout::ExtensibleArray {
-                    address: Some(0x3000)
+                    address: Some(StoredAddress::new(0x3000))
                 },
             }
         );
@@ -625,7 +630,7 @@ mod tests {
             DataLayout::Chunked {
                 chunk_dimensions: vec![64],
                 index: ChunkIndexLayout::BTreeV2 {
-                    address: Some(0x3000)
+                    address: Some(StoredAddress::new(0x3000))
                 },
             }
         );
@@ -695,7 +700,7 @@ mod tests {
         assert_eq!(
             layout,
             DataLayout::Contiguous {
-                address: Some(0x800),
+                address: Some(StoredAddress::new(0x800)),
                 size: 24,
             }
         );

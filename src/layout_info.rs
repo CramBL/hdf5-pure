@@ -296,20 +296,21 @@ mod tests {
     use rstest::rstest;
 
     use super::*;
+    use crate::address::StoredAddress;
 
     #[rstest]
     #[case(ChunkIndexLayout::BTreeV1 { address: None }, ChunkIndex::BTreeV1)]
     #[case(
-        ChunkIndexLayout::SingleChunk { filtered: None, address: Some(0x100) },
+        ChunkIndexLayout::SingleChunk { filtered: None, address: Some(StoredAddress::new(0x100)) },
         ChunkIndex::SingleChunk
     )]
-    #[case(ChunkIndexLayout::Implicit { address: Some(0x100) }, ChunkIndex::Implicit)]
-    #[case(ChunkIndexLayout::FixedArray { address: Some(0x100) }, ChunkIndex::FixedArray)]
+    #[case(ChunkIndexLayout::Implicit { address: Some(StoredAddress::new(0x100)) }, ChunkIndex::Implicit)]
+    #[case(ChunkIndexLayout::FixedArray { address: Some(StoredAddress::new(0x100)) }, ChunkIndex::FixedArray)]
     #[case(
-        ChunkIndexLayout::ExtensibleArray { address: Some(0x100) },
+        ChunkIndexLayout::ExtensibleArray { address: Some(StoredAddress::new(0x100)) },
         ChunkIndex::ExtensibleArray
     )]
-    #[case(ChunkIndexLayout::BTreeV2 { address: Some(0x100) }, ChunkIndex::BTreeV2)]
+    #[case(ChunkIndexLayout::BTreeV2 { address: Some(StoredAddress::new(0x100)) }, ChunkIndex::BTreeV2)]
     fn every_parsed_chunk_index_maps_to_a_kind(
         #[case] parsed: ChunkIndexLayout,
         #[case] kind: ChunkIndex,

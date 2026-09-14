@@ -69,7 +69,7 @@ pub fn read_raw_data_full(
             let Some(addr) = *address else {
                 return fill.buffer(expected_size);
             };
-            let r = slice_range(addr, *size)?;
+            let r = slice_range(addr.get(), *size)?;
             if r.end > file_data.len() {
                 return Err(FormatError::UnexpectedEof {
                     expected: r.end,
@@ -155,7 +155,7 @@ pub fn read_raw_data_full_from_source<S: Source + ?Sized>(
             };
             // The single point of I/O; `read_exact_at` bounds-checks against the
             // source length (in u64) and errors instead of truncating.
-            source.read_exact_at(addr, expected_size)
+            source.read_exact_at(addr.get(), expected_size)
         }
         DataLayout::Chunked { .. } => {
             read_chunked_data_from_source(source, spec, offset_size, length_size)
@@ -1109,6 +1109,7 @@ mod tests {
     use rstest::rstest;
 
     use super::*;
+    use crate::address::StoredAddress;
     use crate::convert::nz;
     use crate::dataspace::{Dataspace, DataspaceType};
     use crate::datatype::{CharacterSet, StringPadding};
@@ -1208,7 +1209,7 @@ mod tests {
             file_data[offset + i * 4..offset + i * 4 + 4].copy_from_slice(&bytes);
         }
         let layout = DataLayout::Contiguous {
-            address: Some(offset as u64),
+            address: Some(StoredAddress::new(offset as u64)),
             size: 16,
         };
         let raw = read_raw_data(&file_data, &layout, &ds, &dt).unwrap();
@@ -1417,7 +1418,7 @@ mod tests {
             file_data[offset + i * 8..offset + i * 8 + 8].copy_from_slice(&v.to_le_bytes());
         }
         let layout = DataLayout::Contiguous {
-            address: Some(offset as u64),
+            address: Some(StoredAddress::new(offset as u64)),
             size: 24,
         };
 

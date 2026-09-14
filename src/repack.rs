@@ -1186,24 +1186,25 @@ struct DatasetChunkProvider {
 impl ChunkProvider for DatasetChunkProvider {
     fn chunk_bytes(&self, index: usize, out: &mut Vec<u8>) -> Result<(), FormatError> {
         // Read exactly the chunk's compressed bytes at its recorded address, with
-        // no decode and no `addr_offset` adjustment — the same slice the chunked
-        // reader consumes. `read_at` fills the whole buffer or errors, and the
-        // emitter additionally checks the length against the planned size, so the
-        // layout cannot silently desync from the data. Reading straight into the
-        // emitter's reused buffer keeps repack at one chunk-sized allocation for
-        // the whole dataset.
+        // no decode, the same slice the chunked reader consumes. The address is the
+        // one the chunk index stores, and this source spans the file from byte
+        // zero, so this adds the base address first. `read_at` fills the whole
+        // buffer or errors, and the emitter additionally checks the length against
+        // the planned size, so the layout cannot silently desync from the data.
+        // Reading straight into the emitter's reused buffer keeps repack at one
+        // chunk-sized allocation for the whole dataset.
         let info = &self.grid_order[index];
         let source = self.file.source();
         let len = info.chunk_size as usize;
+        let at = self.file.base_address().absolute(info.address)?;
         // Bounds-check before growing the buffer, the way `Source::read_exact_at`
         // does and for its reason: `chunk_size` comes from the source's chunk
         // index, so a malformed file could name a 4 GiB chunk and have this zero
         // that much memory only for the read to fail EOF anyway.
-        let end = info
-            .address
+        let end = at
             .checked_add(len as u64)
             .ok_or(FormatError::OffsetOverflow {
-                offset: info.address,
+                offset: at,
                 length: len as u64,
             })?;
         if end > source.len() {
@@ -1214,7 +1215,7 @@ impl ChunkProvider for DatasetChunkProvider {
         }
         let start = out.len();
         out.resize(start + len, 0);
-        source.read_at(info.address, &mut out[start..])
+        source.read_at(at, &mut out[start..])
     }
 }
 
@@ -1850,6 +1851,7 @@ mod tests {
     use rstest::rstest;
 
     use super::*;
+    use crate::address::StoredAddress;
     use crate::data_layout::ChunkIndexLayout;
 
     /// A source's scale-offset fill availability is carried onto the rebuilt
@@ -1893,7 +1895,7 @@ mod tests {
                     // caller trims back off.
                     chunk_dimensions: vec![16, 4],
                     index: ChunkIndexLayout::BTreeV1 {
-                        address: Some(0x1000),
+                        address: Some(StoredAddress::new(0x1000)),
                     },
                 },
                 // Routed through `check_pipeline`, as every production caller

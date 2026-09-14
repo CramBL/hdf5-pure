@@ -445,7 +445,7 @@ fn scan_parsed_header<S: Source + ?Sized>(
     else {
         return holds;
     };
-    let (Ok(at), Ok(want)) = (base.absolute(StoredAddress::new(a)), usize::try_from(size)) else {
+    let (Ok(at), Ok(want)) = (base.absolute(a), usize::try_from(size)) else {
         return holds;
     };
     let Ok(raw) = src.read_exact_at(at, want) else {
@@ -675,7 +675,7 @@ fn scan_object<S: Source + ?Sized>(
         } => {
             // A contiguous data block sits outside the header and carries no
             // checksum, so its elements are patched with nothing else to fix.
-            let Ok(at) = base.absolute(StoredAddress::new(a)) else {
+            let Ok(at) = base.absolute(a) else {
                 return Ok(out);
             };
             let Ok(want) = usize::try_from(size) else {

@@ -48,6 +48,7 @@
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 
+use crate::address::StoredAddress;
 use crate::convert::Narrow;
 use crate::error::FormatError;
 use crate::source::Source;
@@ -106,14 +107,14 @@ impl ChunkSpanReader {
     /// chunk, and serving it through the buffer would only add a copy. A file
     /// whose writer had its chunk cache disabled scatters its chunks that way
     /// and pays nothing for this.
-    pub(crate) fn new(chunks: impl IntoIterator<Item = (u64, u32)>) -> Option<Self> {
+    pub(crate) fn new(chunks: impl IntoIterator<Item = (StoredAddress, u32)>) -> Option<Self> {
         let mut ranges: Vec<Span> = chunks
             .into_iter()
             .map(|(address, size)| Span {
-                start: address,
+                start: address.get(),
                 // A crafted address near `u64::MAX` saturates rather than
                 // wrapping; the read itself is bounds-checked by the source.
-                end: address.saturating_add(u64::from(size)),
+                end: address.get().saturating_add(u64::from(size)),
             })
             .collect();
         if ranges.len() < 2 {
@@ -154,12 +155,16 @@ impl ChunkSpanReader {
 
     /// The `len` bytes of the chunk at `address`, reading its span first if
     /// that is not the span already held.
+    ///
+    /// `source` is framed at the file's base address, the frame the chunk index
+    /// stores its addresses in.
     pub(crate) fn chunk_bytes<S: Source + ?Sized>(
         &mut self,
         source: &S,
-        address: u64,
+        address: StoredAddress,
         len: usize,
     ) -> Result<&[u8], FormatError> {
+        let address = address.get();
         let end = address.saturating_add(len as u64);
 
         if !matches!(self.held, Some(span) if span.covers(address, end)) {
@@ -243,9 +248,9 @@ mod tests {
     }
 
     /// `count` chunks of `size` bytes laid end to end from `start`.
-    fn run(start: u64, size: u32, count: usize) -> Vec<(u64, u32)> {
+    fn run(start: u64, size: u32, count: usize) -> Vec<(StoredAddress, u32)> {
         (0..count)
-            .map(|i| (start + i as u64 * u64::from(size), size))
+            .map(|i| (StoredAddress::new(start + i as u64 * u64::from(size)), size))
             .collect()
     }
 
@@ -257,8 +262,10 @@ mod tests {
 
         for &(address, _) in &chunks {
             let bytes = reader.chunk_bytes(&source, address, 8).unwrap();
-            let expected: Vec<u8> = (address..address + 8).map(|b| b as u8).collect();
-            assert_eq!(bytes, &expected[..], "chunk at {address}");
+            let expected: Vec<u8> = (address.get()..address.get() + 8)
+                .map(|b| b as u8)
+                .collect();
+            assert_eq!(bytes, &expected[..], "chunk at {address:?}");
         }
 
         // One read for the whole run, and not a byte beyond it.
@@ -282,7 +289,7 @@ mod tests {
         for &(address, size) in &chunks {
             let bytes = reader.chunk_bytes(&source, address, size as usize).unwrap();
             assert_eq!(bytes.len(), 8192);
-            assert_eq!(bytes[0], address as u8);
+            assert_eq!(bytes[0], address.get() as u8);
         }
 
         assert_eq!(source.reads.get(), 2, "320 KiB of chunks is two spans");
@@ -293,7 +300,8 @@ mod tests {
 
     #[test]
     fn chunks_that_are_not_adjacent_are_left_to_the_direct_path() {
-        let scattered: Vec<(u64, u32)> = (0..16).map(|i| (i * 4096, 8)).collect();
+        let scattered: Vec<(StoredAddress, u32)> =
+            (0..16).map(|i| (StoredAddress::new(i * 4096), 8)).collect();
         assert!(ChunkSpanReader::new(scattered).is_none());
     }
 
@@ -303,7 +311,8 @@ mod tests {
     /// boundary; an off-by-one in the adjacency test survives it.
     #[test]
     fn a_one_byte_gap_is_not_bridged() {
-        let gapped: Vec<(u64, u32)> = (0..16).map(|i| (i * 33, 32)).collect();
+        let gapped: Vec<(StoredAddress, u32)> =
+            (0..16).map(|i| (StoredAddress::new(i * 33), 32)).collect();
         assert!(
             ChunkSpanReader::new(gapped).is_none(),
             "chunks one byte apart are not adjacent"
@@ -352,16 +361,23 @@ mod tests {
         let source = CountingSource::new(200_000);
         let mut reader = ChunkSpanReader::new(chunks).expect("adjacent chunks coalesce");
 
-        reader.chunk_bytes(&source, 0, 32).unwrap();
+        reader
+            .chunk_bytes(&source, StoredAddress::new(0), 32)
+            .unwrap();
         assert_eq!(source.reads.get(), 1);
 
         // A chunk this reader was not planned over still reads correctly...
-        let stray = reader.chunk_bytes(&source, 100_000, 4).unwrap().to_vec();
+        let stray = reader
+            .chunk_bytes(&source, StoredAddress::new(100_000), 4)
+            .unwrap()
+            .to_vec();
         assert_eq!(stray, vec![160u8, 161, 162, 163]);
         assert_eq!(source.reads.get(), 2);
 
         // ...and does not cost the held span, which still serves its chunks.
-        reader.chunk_bytes(&source, 224, 32).unwrap();
+        reader
+            .chunk_bytes(&source, StoredAddress::new(224), 32)
+            .unwrap();
         assert_eq!(source.reads.get(), 2);
     }
 
@@ -372,14 +388,17 @@ mod tests {
         // without coalescing — and does not drag its neighbours over budget.
         let big = MAX_SPAN_BYTES + 40 * 1024;
         let big_usize = big.to_usize().unwrap();
-        let mut chunks = vec![(0u64, u32::try_from(big).unwrap())];
+        let mut chunks = vec![(StoredAddress::new(0), u32::try_from(big).unwrap())];
         chunks.extend(run(big, 64, 8));
 
         let source = CountingSource::new(big_usize + 8 * 64);
         let mut reader = ChunkSpanReader::new(chunks.clone()).expect("the small chunks coalesce");
 
         assert_eq!(
-            reader.chunk_bytes(&source, 0, big_usize).unwrap().len(),
+            reader
+                .chunk_bytes(&source, StoredAddress::new(0), big_usize)
+                .unwrap()
+                .len(),
             big_usize
         );
         assert_eq!(source.largest.get(), big_usize, "the big chunk read alone");
@@ -403,7 +422,7 @@ mod tests {
 
         for &(address, _) in chunks.iter().rev() {
             let bytes = reader.chunk_bytes(&source, address, 16).unwrap();
-            assert_eq!(bytes[0], address as u8);
+            assert_eq!(bytes[0], address.get() as u8);
         }
         assert_eq!(source.reads.get(), 1, "one span serves both directions");
     }
@@ -418,9 +437,13 @@ mod tests {
         let source = CountingSource::new(200_000);
         let mut reader = ChunkSpanReader::new(chunks).expect("two runs coalesce");
 
-        reader.chunk_bytes(&source, 0, 64).unwrap();
+        reader
+            .chunk_bytes(&source, StoredAddress::new(0), 64)
+            .unwrap();
         let before = source.bytes_read.get();
-        let short = reader.chunk_bytes(&source, 100_000, 8).unwrap();
+        let short = reader
+            .chunk_bytes(&source, StoredAddress::new(100_000), 8)
+            .unwrap();
         assert_eq!(short, &[160u8, 161, 162, 163, 164, 165, 166, 167]);
         assert_eq!(source.bytes_read.get() - before, 16, "the short span's own");
     }
