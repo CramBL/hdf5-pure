@@ -464,6 +464,17 @@ struct AppenderClaim {
     path: Option<ObjectPathBuf>,
 }
 
+impl AppenderClaim {
+    /// Returns `true` if this claim covers the dataset `path` identifies, or if either side has
+    /// no path.
+    fn conflicts_with(&self, path: Option<&ObjectPathBuf>) -> bool {
+        match (&self.path, path) {
+            (Some(claimed), Some(candidate)) => claimed == candidate,
+            _ => true,
+        }
+    }
+}
+
 /// A variable-length group/root attribute staged by [`apply_compact_attr_ops`]
 /// and resolved in the apply loop.
 #[derive(Clone)]
@@ -3278,13 +3289,12 @@ impl WriteEngine {
     /// is written to a fractal heap, as the whole-file writer does.
     pub(crate) fn stage_created_dataset(
         &mut self,
-        path: &str,
+        path: &ObjectPathBuf,
         builder: DatasetBuilder,
     ) -> Result<(), Error> {
-        let full = ObjectPath::parse(path).to_path_buf();
-        self.refuse_if_claimed(&full)?;
-        self.refuse_creation_collision(&full, StagedKind::Dataset)?;
-        let Some((parent, leaf)) = full.split_leaf() else {
+        self.refuse_if_claimed(path)?;
+        self.refuse_creation_collision(path, StagedKind::Dataset)?;
+        let Some((parent, leaf)) = path.split_leaf() else {
             return Err(Error::EditUnsupported("dataset path has an empty name"));
         };
         self.staged
@@ -3331,18 +3341,17 @@ impl WriteEngine {
     /// dataset has a single hard link.
     pub(crate) fn stage_dataset_write(
         &mut self,
-        path: &str,
+        path: &ObjectPathBuf,
         builder: DatasetBuilder,
     ) -> Result<(), Error> {
-        let full = ObjectPath::parse(path).to_path_buf();
-        self.refuse_if_claimed(&full)?;
-        // The root group has no link to overwrite: the superblock identifies it.
-        let Some((_, leaf)) = full.split_leaf() else {
+        self.refuse_if_claimed(path)?;
+        // The root group has no link to overwrite: the superblock holds its address.
+        let Some((_, leaf)) = path.split_leaf() else {
             return Err(Error::EditUnsupported("cannot overwrite the root group"));
         };
         let fd = flatten_dataset(builder, leaf)?;
         Self::refuse_unsupported_overwrite(&fd)?;
-        self.staged.writes.push((full, fd));
+        self.staged.writes.push((path.clone(), fd));
         Ok(())
     }
 
@@ -3383,12 +3392,11 @@ impl WriteEngine {
     /// to check eligibility up front.
     pub(crate) fn stage_dataset_append(
         &mut self,
-        path: &str,
+        path: &ObjectPathBuf,
         builder: AppendBuilder,
     ) -> Result<(), Error> {
-        let full = ObjectPath::parse(path).to_path_buf();
-        self.refuse_if_claimed(&full)?;
-        if self.staged.dataset_at(&full).is_some() {
+        self.refuse_if_claimed(path)?;
+        if self.staged.dataset_at(path).is_some() {
             // This call came through a handle onto the object *in the file*: a
             // handle onto the staged creation goes to
             // [`stage_dataset_append_pending`] instead. So the elements could
@@ -3402,7 +3410,7 @@ impl WriteEngine {
             ));
         }
         self.refuse_lossy_partial_tail(path, &builder)?;
-        self.staged.appends.push((full, builder));
+        self.staged.appends.push((path.clone(), builder));
         Ok(())
     }
 
@@ -3428,7 +3436,11 @@ impl WriteEngine {
     /// before the commit reads it. The commit-time check stays as the backstop,
     /// and is the only one that runs for an append staged through some other
     /// entry point.
-    fn refuse_lossy_partial_tail(&self, path: &str, builder: &AppendBuilder) -> Result<(), Error> {
+    fn refuse_lossy_partial_tail(
+        &self,
+        path: &ObjectPathBuf,
+        builder: &AppendBuilder,
+    ) -> Result<(), Error> {
         // A zero-length append is dropped by the preflight before it ever reaches
         // `prepare_append`, so it stays a no-op here rather than becoming the one
         // append this refusal would newly reject.
@@ -3445,12 +3457,12 @@ impl WriteEngine {
     /// does the file hold, at `path`, a rank-1 chunked dataset under a lossy
     /// filter pipeline whose length is not a whole multiple of its chunk length?
     /// `false` whenever that cannot be established, for whatever reason.
-    fn appends_onto_a_lossy_partial_tail(&self, path: &str) -> bool {
+    fn appends_onto_a_lossy_partial_tail(&self, path: &ObjectPathBuf) -> bool {
         let Ok(addr) = crate::group_v2::resolve_path_any_from_source(
             &self.image(),
             AccessMode::ReadWrite,
             &self.superblock,
-            &ObjectPath::parse(path),
+            &path.as_path(),
         ) else {
             return false;
         };
@@ -3522,22 +3534,21 @@ impl WriteEngine {
     /// the append becomes an ordinary staged one rather than an error.
     pub(crate) fn stage_dataset_append_pending(
         &mut self,
-        path: &str,
+        path: &ObjectPathBuf,
         builder: AppendBuilder,
     ) -> Result<(), Error> {
-        let full = ObjectPath::parse(path).to_path_buf();
-        self.refuse_if_claimed(&full)?;
-        if self.staged.dataset_at(&full).is_none() {
+        self.refuse_if_claimed(path)?;
+        if self.staged.dataset_at(path).is_none() {
             // Nothing staged here after all, so these elements grow the object the
             // file holds — including its trailing chunk, which the same eager
             // refusal applies to. The fold below reaches no on-disk chunk at all
             // and is untouched by it.
             self.refuse_lossy_partial_tail(path, &builder)?;
-            self.staged.appends.push((full, builder));
+            self.staged.appends.push((path.clone(), builder));
             return Ok(());
         }
         self.refuse_mid_batch()?;
-        self.extend_staged_dataset(&full, &builder)
+        self.extend_staged_dataset(path, &builder)
     }
 
     /// Refuse an edit that changes or withdraws something already staged while a
@@ -3663,19 +3674,21 @@ impl WriteEngine {
     /// same dataset would interleave the two buffers a chunk at a time, and a
     /// staged edit already pending on that path is one the appender's own flush
     /// would later refuse.
-    pub(crate) fn claim_for_appender(&mut self, path: Option<&str>) -> Result<u64, Error> {
-        let path = path.map(|p| ObjectPath::parse(p).to_path_buf());
+    pub(crate) fn claim_for_appender(
+        &mut self,
+        path: Option<&ObjectPathBuf>,
+    ) -> Result<u64, Error> {
         if self
             .appender_claims
             .iter()
-            .any(|c| claims_conflict(c.path.as_ref(), path.as_ref()))
+            .any(|claim| claim.conflicts_with(path))
         {
             return Err(Error::EditUnsupported(
                 "this dataset already has a live buffered appender; two of them would interleave \
                  their buffers a chunk at a time",
             ));
         }
-        let blocked = match path.as_ref() {
+        let blocked = match path {
             Some(p) => self.append_conflicts_with_pending(p),
             None => self.has_staged_edits() || self.committed,
         };
@@ -3687,7 +3700,10 @@ impl WriteEngine {
         }
         let token = self.next_appender_token;
         self.next_appender_token += 1;
-        self.appender_claims.push(AppenderClaim { token, path });
+        self.appender_claims.push(AppenderClaim {
+            token,
+            path: path.cloned(),
+        });
         Ok(token)
     }
 
@@ -4562,7 +4578,7 @@ impl WriteEngine {
         // superset of the path check, and the remedy is the same one.
         match target {
             AppendTarget::Path(dataset) => {
-                if self.append_conflicts_with_pending(&ObjectPath::parse(dataset).to_path_buf()) {
+                if self.append_conflicts_with_pending(&ObjectPathBuf::parse(dataset)) {
                     return Err(Error::AppendInPlaceUnsupported(
                         "the dataset or an ancestor has a staged edit pending in this session; \
                          commit the staged edits before appending in place, or use \
@@ -4903,28 +4919,28 @@ impl WriteEngine {
     /// staged object must be one the file already holds or one this session
     /// stages at its own path. [`commit`](Self::commit) rejects the whole batch
     /// with [`Error::EditUnsupported`] when a group above a creation is neither,
-    /// the state `a/b` is in when `stage_created_dataset("a/b/col")` is staged
-    /// alone.
-    pub(crate) fn staged_object(&self, path: &str) -> Option<StagedObject> {
+    /// the state `a/b` is in when [`stage_created_dataset`](Self::stage_created_dataset) stages
+    /// `a/b/col` alone.
+    pub(crate) fn staged_object(&self, path: &ObjectPath<'_>) -> Option<StagedObject> {
         if self.stages_no_creations() {
             return None;
         }
-        let full = ObjectPath::parse(path).to_path_buf();
-        if full.is_empty() {
+        let path = path.to_path_buf();
+        if path.is_empty() {
             // The root always exists; nothing can stage it.
             return None;
         }
-        let kind = if self.staged.dataset_at(&full).is_some() {
+        let kind = if self.staged.dataset_at(&path).is_some() {
             StagedKind::Dataset
-        } else if self.staged.has_group_at(&full) {
+        } else if self.staged.has_group_at(&path) {
             StagedKind::Group
         } else {
             return None;
         };
-        let replaces_link = self.staged.deletes_hand_over(&full);
+        let replaces_link = self.staged.deletes_hand_over(&path);
         // The file is asked only about a path a creation actually names, so an
         // ordinary open of an object nothing is staged at never pays for this.
-        if !replaces_link && self.path_in_file(&full) {
+        if !replaces_link && self.path_in_file(&path) {
             return None;
         }
         Some(StagedObject {
@@ -5020,9 +5036,8 @@ impl WriteEngine {
     }
 
     /// Whether this session has staged no creations at all, which is the common
-    /// case on the by-name lookup path. Checked before splitting a path into
-    /// components, so an ordinary open of an existing object does not allocate
-    /// one per call to ask a question whose answer is already known.
+    /// case on the by-name lookup path. Checked before the path is owned, so a
+    /// lookup of an object already in the file returns on this flag alone.
     fn stages_no_creations(&self) -> bool {
         self.staged.groups.is_empty() && self.staged.datasets.is_empty()
     }
@@ -5042,13 +5057,11 @@ impl WriteEngine {
     /// what the commit will write, so these answers cannot drift from the
     /// dataset that lands. Answers only for a creation that owns its path, on
     /// the terms [`staged_object`](Self::staged_object) sets out.
-    pub(crate) fn staged_dataset_meta(&self, path: &str) -> Option<StagedMeta> {
+    pub(crate) fn staged_dataset_meta(&self, path: &ObjectPath<'_>) -> Option<StagedMeta> {
         if self.staged_object(path)?.kind != StagedKind::Dataset {
             return None;
         }
-        let fd = self
-            .staged
-            .dataset_at(&ObjectPath::parse(path).to_path_buf())?;
+        let fd = self.staged.dataset_at(&path.to_path_buf())?;
         Some(StagedMeta {
             datatype: fd.dt.clone(),
             dimensions: fd.ds.dimensions.clone(),
@@ -5079,11 +5092,11 @@ impl WriteEngine {
     /// whether each name is already taken: the caller is enumerating a group and
     /// already holds its on-disk links, so `replaces_link` is all it needs to
     /// apply the same rule without a path resolution per child.
-    pub(crate) fn staged_children(&self, parent: &str) -> Vec<StagedChild> {
+    pub(crate) fn staged_children(&self, parent: &ObjectPath<'_>) -> Vec<StagedChild> {
         if self.stages_no_creations() {
             return Vec::new();
         }
-        let base = ObjectPath::parse(parent).to_path_buf();
+        let parent = parent.to_path_buf();
         // Whether this group is itself a replacement staged here — its on-disk
         // links go with the object being removed, so every creation under it
         // owns its name — and which links directly under it are removed by
@@ -5091,19 +5104,20 @@ impl WriteEngine {
         // collision. A deletion of the group that this session does *not* build
         // again is neither: the commit refuses that batch, so the file's own
         // children still own their names (see [`StagedEdits::deletes_hand_over`]).
-        let base_deleted = self.staged.deletes_hand_over(&base) && self.staged.has_group_at(&base);
+        let base_deleted =
+            self.staged.deletes_hand_over(&parent) && self.staged.has_group_at(&parent);
         let deleted_here: HashSet<&str> = self
             .staged
             .deletes
             .iter()
-            .filter_map(|d| d.name_under(&base))
+            .filter_map(|d| d.name_under(&parent))
             .map(LinkNameBuf::as_str)
             .collect();
 
         let mut seen: HashSet<&str> = HashSet::new();
         let mut out: Vec<StagedChild> = Vec::new();
         for path in &self.staged.groups {
-            if let Some(name) = path.name_under(&base) {
+            if let Some(name) = path.name_under(&parent) {
                 let name = name.as_str();
                 if seen.insert(name) {
                     out.push(StagedChild {
@@ -5115,7 +5129,7 @@ impl WriteEngine {
             }
         }
         for (p, fd) in &self.staged.datasets {
-            if *p == base && seen.insert(fd.name.as_str()) {
+            if *p == parent && seen.insert(fd.name.as_str()) {
                 out.push(StagedChild {
                     name: fd.name.as_str().to_string(),
                     kind: StagedKind::Dataset,
@@ -5130,18 +5144,17 @@ impl WriteEngine {
     /// [`commit`](Self::commit). The parent must already exist or be created in
     /// the same session; populate the group with datasets via
     /// [`stage_created_dataset`](Self::stage_created_dataset) using a path under it.
-    pub fn create_group(&mut self, path: &str) -> Result<(), Error> {
-        let full = ObjectPath::parse(path).to_path_buf();
-        self.refuse_if_claimed(&full)?;
-        self.refuse_creation_collision(&full, StagedKind::Group)?;
-        self.staged.push_group(full);
+    pub fn create_group(&mut self, path: &ObjectPathBuf) -> Result<(), Error> {
+        self.refuse_if_claimed(path)?;
+        self.refuse_creation_collision(path, StagedKind::Group)?;
+        self.staged.push_group(path.clone());
         Ok(())
     }
 
     /// Stage an attribute add or replacement on a group, applied on the next
     /// [`commit`](Self::commit).
     ///
-    /// `path` names the group to edit; `""` or `"/"` names the root group. The
+    /// `path` identifies the group to edit, and [`ObjectPathBuf::root`] the root group. The
     /// group may already exist or may be created earlier in the same session
     /// with [`create_group`](Self::create_group). Attributes — fixed-size or
     /// variable-length — are stored compactly in the rebuilt group header while
@@ -5149,14 +5162,13 @@ impl WriteEngine {
     /// [`plan_attr_ops`] sets out.
     pub fn set_group_attr(
         &mut self,
-        path: &str,
+        path: &ObjectPathBuf,
         name: &str,
         value: AttrValue,
     ) -> Result<(), Error> {
-        let full = ObjectPath::parse(path).to_path_buf();
-        self.refuse_if_claimed(&full)?;
+        self.refuse_if_claimed(path)?;
         self.staged.group_attrs.push((
-            full,
+            path.clone(),
             AttrOp::Set {
                 name: name.to_string(),
                 value,
@@ -5168,14 +5180,13 @@ impl WriteEngine {
     /// Stage removal of a compact attribute from a group, applied on the next
     /// [`commit`](Self::commit).
     ///
-    /// `path` names the group to edit; `""` or `"/"` names the root group. The
+    /// `path` identifies the group to edit, and [`ObjectPathBuf::root`] the root group. The
     /// named attribute must exist in the committed group state after any earlier
     /// staged attribute operations for the same group have been applied.
-    pub fn remove_group_attr(&mut self, path: &str, name: &str) -> Result<(), Error> {
-        let full = ObjectPath::parse(path).to_path_buf();
-        self.refuse_if_claimed(&full)?;
+    pub fn remove_group_attr(&mut self, path: &ObjectPathBuf, name: &str) -> Result<(), Error> {
+        self.refuse_if_claimed(path)?;
         self.staged.group_attrs.push((
-            full,
+            path.clone(),
             AttrOp::Remove {
                 name: name.to_string(),
             },
@@ -5197,14 +5208,13 @@ impl WriteEngine {
     /// instead.
     pub fn set_dataset_attr(
         &mut self,
-        path: &str,
+        path: &ObjectPathBuf,
         name: &str,
         value: AttrValue,
     ) -> Result<(), Error> {
-        let full = ObjectPath::parse(path).to_path_buf();
-        self.refuse_if_claimed(&full)?;
+        self.refuse_if_claimed(path)?;
         self.staged.dataset_attrs.push((
-            full,
+            path.clone(),
             AttrOp::Set {
                 name: name.to_string(),
                 value,
@@ -5220,11 +5230,10 @@ impl WriteEngine {
     /// committed dataset state after any earlier staged attribute operations for the
     /// same dataset have been applied. Like [`set_dataset_attr`](Self::set_dataset_attr)
     /// it relocates the dataset header and requires a single hard link.
-    pub fn remove_dataset_attr(&mut self, path: &str, name: &str) -> Result<(), Error> {
-        let full = ObjectPath::parse(path).to_path_buf();
-        self.refuse_if_claimed(&full)?;
+    pub fn remove_dataset_attr(&mut self, path: &ObjectPathBuf, name: &str) -> Result<(), Error> {
+        self.refuse_if_claimed(path)?;
         self.staged.dataset_attrs.push((
-            full,
+            path.clone(),
             AttrOp::Remove {
                 name: name.to_string(),
             },
@@ -5287,33 +5296,32 @@ impl WriteEngine {
     /// holds a link at the path (the creation was replacing it), the withdrawal
     /// leaves the plain deletion of the file's own object behind.
     ///
-    /// The root itself (`""` or `"/"`) is refused with [`Error::EditUnsupported`]:
-    /// nothing links to it, so there is no link to remove.
-    pub fn delete(&mut self, path: &str) -> Result<(), Error> {
-        let full = ObjectPath::parse(path).to_path_buf();
+    /// The root group, [`ObjectPathBuf::root`], is rejected with [`Error::EditUnsupported`]:
+    /// no link reaches it, so there is no link to remove.
+    pub fn delete(&mut self, path: &ObjectPathBuf) -> Result<(), Error> {
         // The root is not linked from anywhere, so there is no link to remove —
         // and an empty path is a prefix of every other, so a deletion staged
         // here would make every staged creation in the session look like a
         // replacement of a file object until the commit refused the batch.
         // Refused by name, as creating the root is.
-        if full.is_empty() {
+        if path.is_empty() {
             return Err(Error::EditUnsupported(
                 "cannot delete the root group; delete its members instead",
             ));
         }
-        self.refuse_if_claimed(&full)?;
-        if self.staged.dataset_at(&full).is_some() || self.staged.has_group_at(&full) {
+        self.refuse_if_claimed(path)?;
+        if self.staged.dataset_at(path).is_some() || self.staged.has_group_at(path) {
             self.refuse_mid_batch()?;
-            self.staged.withdraw_at(&full);
+            self.staged.withdraw_at(path);
             // Withdrawing is the whole deletion unless the file holds a link
             // here too — and if it does, a deletion of it may already be staged,
             // which is what made this a replacement in the first place. A second
             // one would be an overlapping deletion the commit refuses.
-            if self.staged.deletes_cover(&full) || !self.path_in_file(&full) {
+            if self.staged.deletes_cover(path) || !self.path_in_file(path) {
                 return Ok(());
             }
         }
-        self.staged.deletes.push(full);
+        self.staged.deletes.push(path.clone());
         Ok(())
     }
 
@@ -5341,16 +5349,12 @@ impl WriteEngine {
     /// (`H5Pset_external`) carries that same empty storage over data this crate
     /// does not read, and is refused by name so the two do not share an answer
     /// (issue #336).
-    pub fn copy(&mut self, src: &str, dst: &str) -> Result<(), Error> {
-        let (s, d) = (
-            ObjectPath::parse(src).to_path_buf(),
-            ObjectPath::parse(dst).to_path_buf(),
-        );
+    pub fn copy(&mut self, src: &ObjectPathBuf, dst: &ObjectPathBuf) -> Result<(), Error> {
         // Both ends matter: the source is read and the destination is written,
         // and a commit relocates headers along either path.
-        self.refuse_if_claimed(&s)?;
-        self.refuse_if_claimed(&d)?;
-        self.staged.copies.push((s, d));
+        self.refuse_if_claimed(src)?;
+        self.refuse_if_claimed(dst)?;
+        self.staged.copies.push((src.clone(), dst.clone()));
         Ok(())
     }
 
@@ -5404,8 +5408,8 @@ impl WriteEngine {
     pub fn copy_from(
         &mut self,
         source: &crate::reader::File,
-        src: &str,
-        dst: &str,
+        src: &ObjectPathBuf,
+        dst: &ObjectPathBuf,
     ) -> Result<(), Error> {
         // The source bytes must be addressable: a streaming file is refused.
         let src_data = source.in_memory_image().ok_or(Error::EditUnsupported(
@@ -5423,11 +5427,9 @@ impl WriteEngine {
             ));
         }
 
-        let src = ObjectPath::parse(src).to_path_buf();
         if src.is_empty() {
             return Err(Error::EditUnsupported("cannot copy the root group"));
         }
-        let dst = ObjectPath::parse(dst).to_path_buf();
         if dst.is_empty() {
             return Err(Error::EditUnsupported("copy destination path is empty"));
         }
@@ -5449,8 +5451,8 @@ impl WriteEngine {
             true,
             BaseAddress::ZERO,
         )?;
-        self.refuse_if_claimed(&dst)?;
-        self.staged.cross_copies.push((dst, tree));
+        self.refuse_if_claimed(dst)?;
+        self.staged.cross_copies.push((dst.clone(), tree));
         Ok(())
     }
 
@@ -10269,7 +10271,7 @@ impl WriteEngine {
             ObjectRefTarget::Path(path) => path,
         };
         let base = superblock.base_address;
-        let key = ObjectPath::parse(path).to_path_buf();
+        let key = ObjectPathBuf::parse(path);
         if let Some(&addr) = path_addr.get(&key) {
             return base.relative(addr).map_err(Error::from);
         }
@@ -10295,7 +10297,7 @@ impl WriteEngine {
             src,
             AccessMode::ReadWrite,
             superblock,
-            &ObjectPath::parse(path),
+            &key.as_path(),
         ) {
             Ok(addr) => base.relative(addr).map_err(Error::from),
             Err(_) => Ok(UNDEF),
@@ -10306,7 +10308,7 @@ impl WriteEngine {
     /// object-reference target across every staged dataset will resolve
     /// successfully — either against a pre-existing untouched object or
     /// against something this same commit places. [`resolve_reference_target`]
-    /// classifies a target purely from *whether* a `ObjectPathBuf` has been placed
+    /// classifies a target purely from *whether* an [`ObjectPathBuf`] has been placed
     /// yet (`path_addr.get`), never from the address *value*, so replaying the
     /// apply loop's placement order here with a placeholder address standing in
     /// for "already placed" reproduces the exact same verdict the apply loop's
@@ -11526,16 +11528,6 @@ impl Store for EditStore<'_> {
     }
     fn sync(&mut self) -> Result<(), Error> {
         barrier_data(self.image, self.sync_policy)
-    }
-}
-
-/// Whether two appender claims cover the same dataset. A path-less claim (a
-/// handle reached by object reference) names its dataset by an address nothing
-/// else can compare against, so it conflicts with every other claim.
-fn claims_conflict(a: Option<&ObjectPathBuf>, b: Option<&ObjectPathBuf>) -> bool {
-    match (a, b) {
-        (Some(x), Some(y)) => x == y,
-        _ => true,
     }
 }
 
@@ -15058,6 +15050,8 @@ impl crate::reference_patch::PatchTarget for WriteEngine {
 
 #[cfg(test)]
 mod tests {
+    use rstest::rstest;
+
     use super::*;
 
     /// The rule that places a chunk index on a paged file: some chunk-data span
@@ -15587,6 +15581,54 @@ mod tests {
         assert_eq!(
             resolve(UNDEF, vec![(0, u64::MAX)], vec![UNDEF]).unwrap(),
             UNDEF
+        );
+    }
+
+    #[rstest]
+    #[case("a/b")]
+    #[case("/a/b")]
+    #[case("a/./b")]
+    #[case("a//b/")]
+    fn a_reference_target_is_keyed_by_the_object_its_spelling_names(#[case] spelling: &str) {
+        use tempfile::tempdir;
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("path_target.h5");
+        let mut b = crate::writer::FileBuilder::new();
+        b.create_dataset("d").with_i32_data(&[1, 2, 3]);
+        b.write(&path).unwrap();
+        let engine = WriteEngine::open_with_locking(&path, FileLocking::Enabled).unwrap();
+
+        let nodes: BTreeMap<ObjectPathBuf, Node> = BTreeMap::new();
+        let resolve = |path_addr: &BTreeMap<ObjectPathBuf, u64>, add_targets: &[ObjectPathBuf]| {
+            WriteEngine::resolve_reference_target(
+                &ObjectRefTarget::Path(spelling.to_string()),
+                path_addr,
+                &nodes,
+                add_targets,
+                &[],
+                &[],
+                &InvalidatedAddresses {
+                    removed: Vec::new(),
+                    moved: Vec::new(),
+                    base: BaseAddress::ZERO,
+                },
+                &engine.image(),
+                engine.superblock(),
+            )
+        };
+
+        let placed: BTreeMap<ObjectPathBuf, u64> =
+            std::iter::once((ObjectPathBuf::parse("a/b"), 4096)).collect();
+        assert_eq!(resolve(&placed, &[]).unwrap(), 4096);
+
+        let err = resolve(&BTreeMap::new(), &[ObjectPathBuf::parse("a/b")]).unwrap_err();
+        let Error::EditUnsupported(reason) = &err else {
+            panic!("expected EditUnsupported, got {err:?}");
+        };
+        assert_eq!(
+            *reason,
+            "an object-reference dataset targets a path this commit is still writing; \
+             use separate commits"
         );
     }
 
@@ -16157,11 +16199,12 @@ mod tests {
 
         // Delete the dataset, then write a small dataset that would fit in the
         // index's freed bytes.
-        s.delete("/victim").unwrap();
+        s.delete(&ObjectPathBuf::parse("/victim")).unwrap();
         s.commit().unwrap();
         let mut db = crate::type_builders::DatasetBuilder::new("added");
         db.with_f64_data(&[2.5f64; 8]).with_shape(&[8]);
-        s.stage_created_dataset("/added", db).unwrap();
+        s.stage_created_dataset(&ObjectPathBuf::parse("/added"), db)
+            .unwrap();
         s.commit().unwrap();
 
         // Release the session's exclusive OS lock before reading the file back;
@@ -16767,7 +16810,7 @@ mod tests {
         // A commit with nothing staged returns without writing, so give it one
         // small metadata object to place. It appends for want of anywhere else,
         // and the tail follows it into the same page.
-        s.create_group("g").unwrap();
+        s.create_group(&ObjectPathBuf::parse("g")).unwrap();
         s.commit().unwrap();
 
         let after = std::fs::metadata(&path).unwrap().len();
@@ -16825,7 +16868,7 @@ mod tests {
 
         {
             let mut s = WriteEngine::open_with_locking(&path, FileLocking::Enabled).unwrap();
-            s.delete("/drop").unwrap();
+            s.delete(&ObjectPathBuf::parse("/drop")).unwrap();
             s.commit().unwrap();
         }
 
@@ -16901,7 +16944,7 @@ mod tests {
         // regions `drop` vacates and *before* the superblock repoint.
         let good_ext = s.superblock.superblock_extension_address;
         s.superblock.superblock_extension_address = Some(0);
-        s.delete("/drop").unwrap();
+        s.delete(&ObjectPathBuf::parse("/drop")).unwrap();
         assert!(
             s.commit().is_err(),
             "a commit with an unreadable extension must fail"
@@ -16917,7 +16960,7 @@ mod tests {
         // the failed commit had folded its regions in, this second commit would
         // double-free them (a debug assertion) and publish `keep`'s live extent.
         s.superblock.superblock_extension_address = good_ext;
-        s.delete("/drop").unwrap();
+        s.delete(&ObjectPathBuf::parse("/drop")).unwrap();
         s.commit()
             .expect("the session is usable after a failed commit");
 
@@ -16968,7 +17011,7 @@ mod tests {
         let mut s = WriteEngine::open_with_locking(&path, FileLocking::Enabled).unwrap();
 
         // One good round, so there is a record to roll back.
-        s.stage_dataset_write("/labels", {
+        s.stage_dataset_write(&ObjectPathBuf::parse("/labels"), {
             let mut db = crate::type_builders::DatasetBuilder::new("");
             db.with_vlen_strings(&["round-one-aaaa", "round-one-bbbb"]);
             db
@@ -16981,7 +17024,7 @@ mod tests {
         // Break the extension so the next commit fails after the apply phase.
         let good_ext = s.superblock.superblock_extension_address;
         s.superblock.superblock_extension_address = Some(0);
-        s.stage_dataset_write("/labels", {
+        s.stage_dataset_write(&ObjectPathBuf::parse("/labels"), {
             let mut db = crate::type_builders::DatasetBuilder::new("");
             db.with_vlen_strings(&["round-two-aaaa", "round-two-bbbb"]);
             db
@@ -17000,7 +17043,7 @@ mod tests {
         // The session stays usable, and the collections the rolled-back record
         // names are still the live ones.
         s.superblock.superblock_extension_address = good_ext;
-        s.stage_dataset_write("/labels", {
+        s.stage_dataset_write(&ObjectPathBuf::parse("/labels"), {
             let mut db = crate::type_builders::DatasetBuilder::new("");
             db.with_vlen_strings(&["round-three-a", "round-three-b"]);
             db
@@ -17054,11 +17097,11 @@ mod tests {
 
         let mut s = WriteEngine::open_with_locking(&path, FileLocking::Enabled).unwrap();
         // The hole the collections below are placed into by reuse.
-        s.delete("/big").unwrap();
+        s.delete(&ObjectPathBuf::parse("/big")).unwrap();
         s.commit().unwrap();
 
         let round_one = ["round-one-aaaa", "round-one-bbbb"];
-        s.stage_dataset_write("/labels", {
+        s.stage_dataset_write(&ObjectPathBuf::parse("/labels"), {
             let mut db = crate::type_builders::DatasetBuilder::new("");
             db.with_vlen_strings(&round_one);
             db
@@ -17069,7 +17112,7 @@ mod tests {
         // Fail a second overwrite after its apply phase has placed a collection.
         let good_ext = s.superblock.superblock_extension_address;
         s.superblock.superblock_extension_address = Some(0);
-        s.stage_dataset_write("/labels", {
+        s.stage_dataset_write(&ObjectPathBuf::parse("/labels"), {
             let mut db = crate::type_builders::DatasetBuilder::new("");
             db.with_vlen_strings(&["round-two-aaaa", "round-two-bbbb"]);
             db
@@ -17084,7 +17127,7 @@ mod tests {
         // Unrelated commits that each want a metadata span of the same size.
         // Whatever the failed attempt gave back, these are what would draw on it.
         for i in 0..4 {
-            s.stage_created_dataset(&format!("/filler{i}"), {
+            s.stage_created_dataset(&ObjectPathBuf::parse(&format!("/filler{i}")), {
                 let mut db = crate::type_builders::DatasetBuilder::new("");
                 db.with_vlen_strings(&["XXXXXXXXXXXXXXXXXXXX", "YYYYYYYYYYYYYYYYYYYY"]);
                 db
@@ -17145,7 +17188,7 @@ mod tests {
         b.write(&path).unwrap();
 
         let mut s = WriteEngine::open_with_locking(&path, FileLocking::Enabled).unwrap();
-        s.delete("/victim").unwrap();
+        s.delete(&ObjectPathBuf::parse("/victim")).unwrap();
         s.commit().unwrap();
         let free_before = s.space_accounting().reusable_free_space;
         let len_before = std::fs::metadata(&path).unwrap().len();
@@ -17161,7 +17204,8 @@ mod tests {
         db.with_f64_data(&vec![7.5f64; 4096])
             .with_shape(&[4096])
             .with_chunks(&[512]);
-        s.stage_created_dataset("/fresh", db).unwrap();
+        s.stage_created_dataset(&ObjectPathBuf::parse("/fresh"), db)
+            .unwrap();
         assert!(
             s.commit().is_err(),
             "a commit with an unreadable extension must fail"
@@ -17229,13 +17273,13 @@ mod tests {
 
         let good_ext = s.superblock.superblock_extension_address;
         s.superblock.superblock_extension_address = Some(0);
-        s.stage_dataset_write("/nums", {
+        s.stage_dataset_write(&ObjectPathBuf::parse("/nums"), {
             let mut db = crate::type_builders::DatasetBuilder::new("");
             db.with_i32_data(&[9, 9, 9]);
             db
         })
         .unwrap();
-        s.stage_created_dataset("/extra", {
+        s.stage_created_dataset(&ObjectPathBuf::parse("/extra"), {
             let mut db = crate::type_builders::DatasetBuilder::new("");
             db.with_i32_data(&[42]);
             db
@@ -17250,7 +17294,7 @@ mod tests {
         // The session stays usable, and its next commit is not carrying any of
         // the refused batch.
         s.superblock.superblock_extension_address = good_ext;
-        s.stage_created_dataset("/later", {
+        s.stage_created_dataset(&ObjectPathBuf::parse("/later"), {
             let mut db = crate::type_builders::DatasetBuilder::new("");
             db.with_i32_data(&[7]);
             db
@@ -17324,7 +17368,7 @@ mod tests {
 
         let mut s = WriteEngine::open_torn_writes(&path, victim_block).unwrap();
         for (name, data) in [("/kept", [9, 9, 9]), ("/victim", [8, 8, 8])] {
-            s.stage_dataset_write(name, {
+            s.stage_dataset_write(&ObjectPathBuf::parse(name), {
                 let mut db = crate::type_builders::DatasetBuilder::new("");
                 db.with_i32_data(&data);
                 db
@@ -17389,7 +17433,7 @@ mod tests {
         };
 
         let mut s = WriteEngine::open_torn_writes(&path, refs_block).unwrap();
-        s.stage_dataset_write("/nums", {
+        s.stage_dataset_write(&ObjectPathBuf::parse("/nums"), {
             let mut db = crate::type_builders::DatasetBuilder::new("");
             db.with_i32_data(&[9, 9, 9]);
             db
@@ -17397,7 +17441,7 @@ mod tests {
         .unwrap();
         // A second edit, so the batch takes the full commit path and reaches a
         // repoint at all.
-        s.stage_created_dataset("/extra", {
+        s.stage_created_dataset(&ObjectPathBuf::parse("/extra"), {
             let mut db = crate::type_builders::DatasetBuilder::new("");
             db.with_i32_data(&[42]);
             db
@@ -18549,7 +18593,8 @@ mod tests {
                 .expect("the gate skips a v2 superblock, so this opens");
             let mut b = DatasetBuilder::new("e");
             b.with_i32_data(&[4, 5]);
-            s.stage_created_dataset("e", b).unwrap();
+            s.stage_created_dataset(&ObjectPathBuf::parse("e"), b)
+                .unwrap();
             s.commit().unwrap();
         }
 
@@ -18594,7 +18639,8 @@ mod tests {
             let mut s = WriteEngine::open_with_locking(&path, FileLocking::Enabled).unwrap();
             let mut b = DatasetBuilder::new("labels");
             b.with_vlen_string_elements(datatype, &elements).unwrap();
-            s.stage_created_dataset("labels", b).unwrap();
+            s.stage_created_dataset(&ObjectPathBuf::parse("labels"), b)
+                .unwrap();
             s.commit().unwrap();
         }
 
@@ -18927,7 +18973,7 @@ mod tests {
         {
             let mut engine =
                 WriteEngine::open_bounded_counting(&p, Arc::clone(&read_bytes)).unwrap();
-            engine.create_group("g").unwrap();
+            engine.create_group(&ObjectPathBuf::parse("g")).unwrap();
             engine.commit().unwrap();
         }
         let read = read_bytes.load(Ordering::Relaxed);
@@ -18987,7 +19033,7 @@ mod tests {
             "the append must leave a partially-filled page for the commit to pad"
         );
 
-        engine.create_group("g").unwrap();
+        engine.create_group(&ObjectPathBuf::parse("g")).unwrap();
         engine.commit().unwrap();
 
         // The commit padded the raw tail before laying down metadata, and folded
@@ -19136,7 +19182,7 @@ mod tests {
             let mut db = crate::type_builders::DatasetBuilder::new(&std::format!("n{t}"));
             db.with_f64_data(&[2.5f64; 32]).with_shape(&[32]);
             session
-                .stage_created_dataset(&std::format!("/n{t}"), db)
+                .stage_created_dataset(&ObjectPathBuf::parse(&std::format!("/n{t}")), db)
                 .unwrap();
         }
         let after_appends = session.image.issued_writes();
@@ -19537,7 +19583,8 @@ mod tests {
         for t in 0..3 {
             let mut db = crate::type_builders::DatasetBuilder::new(&std::format!("n{t}"));
             db.with_f64_data(&[2.5f64; 32]).with_shape(&[32]);
-            s.stage_created_dataset(&std::format!("/n{t}"), db).unwrap();
+            s.stage_created_dataset(&ObjectPathBuf::parse(&std::format!("/n{t}")), db)
+                .unwrap();
         }
         s.commit().unwrap();
         s.force_sync().unwrap();
@@ -19751,7 +19798,8 @@ mod tests {
 
             let mut db = crate::type_builders::DatasetBuilder::new("added");
             db.with_f64_data(&[2.5f64; 64]).with_shape(&[64]);
-            s.stage_created_dataset("/added", db).unwrap();
+            s.stage_created_dataset(&ObjectPathBuf::parse("/added"), db)
+                .unwrap();
             let before = s.image.issued_write_order().len();
             s.commit().unwrap();
 
@@ -19890,7 +19938,8 @@ mod tests {
 
         let mut db = crate::type_builders::DatasetBuilder::new("added");
         db.with_f64_data(&[1.5f64; 8]).with_shape(&[8]);
-        s.stage_created_dataset("/added", db).unwrap();
+        s.stage_created_dataset(&ObjectPathBuf::parse("/added"), db)
+            .unwrap();
         s.commit().unwrap();
         let after_commit = s.image.issued_writes();
         assert!(
@@ -19937,7 +19986,9 @@ mod tests {
         let mut s = WriteEngine::open_with_locking(&path, FileLocking::Enabled).unwrap();
         let mut db = crate::type_builders::DatasetBuilder::new("whatever");
         db.with_i32_data(&[1]);
-        let err = s.stage_dataset_write("/", db).unwrap_err();
+        let err = s
+            .stage_dataset_write(&ObjectPathBuf::parse("/"), db)
+            .unwrap_err();
         assert!(
             matches!(&err, Error::EditUnsupported(m) if m.contains("root group")),
             "unexpected error: {err:?}"
@@ -19972,7 +20023,9 @@ mod tests {
         let mut db = crate::type_builders::DatasetBuilder::new("sparse");
         db.with_unallocated_storage(make_i32_type(), &[1000]);
         db.with_chunks(&[100]);
-        let err = s.stage_created_dataset("/sparse", db).unwrap_err();
+        let err = s
+            .stage_created_dataset(&ObjectPathBuf::parse("/sparse"), db)
+            .unwrap_err();
         assert!(
             matches!(&err, Error::EditUnsupported(m) if m.contains("unallocated storage")),
             "unexpected error: {err:?}"
@@ -20060,7 +20113,7 @@ mod tests {
 
         let mut s = WriteEngine::open_with_locking(&path, FileLocking::Enabled).unwrap();
         s.set_sync_policy(SyncPolicy::OnClose);
-        s.delete("victim").unwrap();
+        s.delete(&ObjectPathBuf::parse("victim")).unwrap();
         s.commit().unwrap();
 
         let batch: Vec<i32> = (0..CHUNK as i32).collect();
@@ -20141,7 +20194,7 @@ mod tests {
         {
             let mut s = WriteEngine::open_with_locking(&path, FileLocking::Enabled).unwrap();
             s.set_sync_policy(SyncPolicy::OnClose);
-            s.delete("victim").unwrap();
+            s.delete(&ObjectPathBuf::parse("victim")).unwrap();
             s.commit().unwrap();
         }
         let before = persisted(&path);
@@ -20213,7 +20266,8 @@ mod tests {
         let mut s = WriteEngine::open_with_locking(path, FileLocking::Enabled).unwrap();
         s.set_sync_policy(SyncPolicy::OnClose);
         for v in 0..victims {
-            s.delete(&std::format!("victim{v}")).unwrap();
+            s.delete(&ObjectPathBuf::parse(&std::format!("victim{v}")))
+                .unwrap();
         }
         s.commit().unwrap();
         s
@@ -20429,7 +20483,8 @@ mod tests {
             let after_append = syncs.load(Ordering::Relaxed);
             let mut db = crate::type_builders::DatasetBuilder::new("added");
             db.with_f64_data(&[2.5f64; 8]).with_shape(&[8]);
-            s.stage_created_dataset("/added", db).unwrap();
+            s.stage_created_dataset(&ObjectPathBuf::parse("/added"), db)
+                .unwrap();
             s.commit().unwrap();
             let after_commit = syncs.load(Ordering::Relaxed);
 
@@ -20437,13 +20492,14 @@ mod tests {
             // the bytes where they lie and syncs without repointing anything.
             let mut ow = crate::type_builders::DatasetBuilder::new("added");
             ow.with_f64_data(&[4.5f64; 8]).with_shape(&[8]);
-            s.stage_dataset_write("/added", ow).unwrap();
+            s.stage_dataset_write(&ObjectPathBuf::parse("/added"), ow)
+                .unwrap();
             s.commit().unwrap();
             let after_overwrite = syncs.load(Ordering::Relaxed);
 
             // A delete whose freed run reaches end-of-file, so the commit
             // truncates and takes the barrier that only a shrinking commit does.
-            s.delete("/added").unwrap();
+            s.delete(&ObjectPathBuf::parse("/added")).unwrap();
             s.commit().unwrap();
             let after_truncate = syncs.load(Ordering::Relaxed);
 
@@ -20553,7 +20609,7 @@ mod tests {
             );
             // A delete on a persisting file takes `commit_persisting`: the free
             // space is recorded on disk rather than truncated away.
-            s.delete("/victim").unwrap();
+            s.delete(&ObjectPathBuf::parse("/victim")).unwrap();
             s.commit().unwrap();
             let after_commit = syncs.load(Ordering::Relaxed);
 
@@ -20653,13 +20709,13 @@ mod tests {
 
         // The superblock sits at offset 0 on a file with no userblock.
         let mut s = WriteEngine::open_torn_writes(&path, 0..48).unwrap();
-        s.stage_dataset_write("/nums", {
+        s.stage_dataset_write(&ObjectPathBuf::parse("/nums"), {
             let mut db = crate::type_builders::DatasetBuilder::new("");
             db.with_i32_data(&[9, 9, 9]);
             db
         })
         .unwrap();
-        s.stage_created_dataset("/extra", {
+        s.stage_created_dataset(&ObjectPathBuf::parse("/extra"), {
             let mut db = crate::type_builders::DatasetBuilder::new("");
             db.with_i32_data(&[42]);
             db
@@ -20710,7 +20766,7 @@ mod tests {
         // Fail the commit in its tail, after both writes have landed.
         s.superblock.superblock_extension_address = Some(0);
         for (name, data) in [("/aa", [9, 9, 9]), ("/bb", [8, 8, 8])] {
-            s.stage_dataset_write(name, {
+            s.stage_dataset_write(&ObjectPathBuf::parse(name), {
                 let mut db = crate::type_builders::DatasetBuilder::new("");
                 db.with_i32_data(&data);
                 db
@@ -20719,7 +20775,7 @@ mod tests {
         }
         // A second kind of edit, so the batch takes the full commit path and has
         // a tail to fail in.
-        s.stage_created_dataset("/extra", {
+        s.stage_created_dataset(&ObjectPathBuf::parse("/extra"), {
             let mut db = crate::type_builders::DatasetBuilder::new("");
             db.with_i32_data(&[42]);
             db
@@ -20767,7 +20823,7 @@ mod tests {
 
         let mut s = WriteEngine::open_with_locking(&path, FileLocking::Enabled).unwrap();
         s.superblock.superblock_extension_address = Some(0);
-        s.stage_dataset_write("/grid", {
+        s.stage_dataset_write(&ObjectPathBuf::parse("/grid"), {
             // Values only: an overwrite that restated the chunking or the
             // filter would be refused as asking for more than an overwrite
             // (issue #318). The layout comes from the dataset already there.
@@ -20776,7 +20832,7 @@ mod tests {
             db
         })
         .unwrap();
-        s.stage_created_dataset("/extra", {
+        s.stage_created_dataset(&ObjectPathBuf::parse("/extra"), {
             let mut db = crate::type_builders::DatasetBuilder::new("");
             db.with_i32_data(&[42]);
             db
@@ -20835,7 +20891,7 @@ mod tests {
 
         // An unrelated commit, failed in its tail so that it rolls back at all.
         s.superblock.superblock_extension_address = Some(0);
-        s.stage_created_dataset("/extra", {
+        s.stage_created_dataset(&ObjectPathBuf::parse("/extra"), {
             let mut db = crate::type_builders::DatasetBuilder::new("");
             db.with_i32_data(&[42]);
             db
@@ -20885,14 +20941,14 @@ mod tests {
             // Fail the commit in its tail, after the apply phase has written.
             s.superblock.superblock_extension_address = Some(0);
             if with_overwrite {
-                s.stage_dataset_write("/nums", {
+                s.stage_dataset_write(&ObjectPathBuf::parse("/nums"), {
                     let mut db = crate::type_builders::DatasetBuilder::new("");
                     db.with_i32_data(&[9, 9, 9]);
                     db
                 })
                 .unwrap();
             }
-            s.stage_created_dataset("/extra", {
+            s.stage_created_dataset(&ObjectPathBuf::parse("/extra"), {
                 let mut db = crate::type_builders::DatasetBuilder::new("");
                 db.with_i32_data(&[42]);
                 db
@@ -20943,7 +20999,7 @@ mod tests {
         let read_bytes = Arc::new(AtomicU64::new(0));
         let mut engine = WriteEngine::open_bounded_counting(&p, Arc::clone(&read_bytes)).unwrap();
         engine
-            .stage_dataset_write("/nums", {
+            .stage_dataset_write(&ObjectPathBuf::parse("/nums"), {
                 let mut db = crate::type_builders::DatasetBuilder::new("");
                 db.with_i32_data(&data);
                 db
@@ -20973,6 +21029,10 @@ mod staged_query_tests {
     use crate::type_builders::DatasetBuilder;
     use tempfile::tempdir;
 
+    fn object_path(spelling: &str) -> ObjectPathBuf {
+        ObjectPathBuf::parse(spelling)
+    }
+
     /// A session over a file holding one dataset, `existing`.
     fn open_session(path: &Path) -> WriteEngine {
         let mut b = crate::writer::FileBuilder::new();
@@ -20994,11 +21054,11 @@ mod staged_query_tests {
     }
 
     fn kind(e: &WriteEngine, path: &str) -> Option<StagedKind> {
-        e.staged_object(path).map(|o| o.kind)
+        e.staged_object(&ObjectPath::parse(path)).map(|o| o.kind)
     }
 
     fn child_names(e: &WriteEngine, parent: &str) -> Vec<(String, StagedKind)> {
-        e.staged_children(parent)
+        e.staged_children(&ObjectPath::parse(parent))
             .into_iter()
             .map(|c| (c.name, c.kind))
             .collect()
@@ -21008,12 +21068,13 @@ mod staged_query_tests {
     fn a_staged_creation_is_named_at_every_level_of_its_path() {
         let dir = tempdir().unwrap();
         let mut e = open_session(&dir.path().join("q.h5"));
-        e.create_group("a").unwrap();
+        e.create_group(&ObjectPathBuf::parse("a")).unwrap();
         let mut col = DatasetBuilder::new("");
         col.with_i32_data(&[1, 2])
             .with_maxshape(&[MaxExtent::Unlimited])
             .with_chunks(&[2]);
-        e.stage_created_dataset("a/b/col", col).unwrap();
+        e.stage_created_dataset(&ObjectPathBuf::parse("a/b/col"), col)
+            .unwrap();
 
         assert_eq!(kind(&e, "a"), Some(StagedKind::Group));
         assert_eq!(kind(&e, "a/b/col"), Some(StagedKind::Dataset));
@@ -21040,7 +21101,7 @@ mod staged_query_tests {
         assert!(child_names(&e, "existing").is_empty());
 
         // Named outright, it answers at every level.
-        e.create_group("a/b").unwrap();
+        e.create_group(&ObjectPathBuf::parse("a/b")).unwrap();
         assert_eq!(kind(&e, "a/b"), Some(StagedKind::Group));
         assert_eq!(
             child_names(&e, "a"),
@@ -21057,10 +21118,12 @@ mod staged_query_tests {
             .with_maxshape(&[MaxExtent::Unlimited])
             .with_chunks(&[2])
             .with_deflate(4);
-        e.stage_created_dataset("col", col).unwrap();
-        e.stage_created_dataset("plain", i32_dataset(&[5])).unwrap();
+        e.stage_created_dataset(&ObjectPathBuf::parse("col"), col)
+            .unwrap();
+        e.stage_created_dataset(&ObjectPathBuf::parse("plain"), i32_dataset(&[5]))
+            .unwrap();
 
-        let meta = e.staged_dataset_meta("col").unwrap();
+        let meta = e.staged_dataset_meta(&ObjectPath::parse("col")).unwrap();
         assert_eq!(meta.dimensions, vec![4]);
         assert_eq!(meta.maxshape, Some(vec![MaxExtent::Unlimited]));
         assert_eq!(meta.datatype.type_size(), 4);
@@ -21069,38 +21132,43 @@ mod staged_query_tests {
 
         // A fixed-shape, unfiltered dataset is contiguous and reports no
         // maximum, the way `Dataset::maxshape` reports an on-disk one.
-        let plain = e.staged_dataset_meta("plain").unwrap();
+        let plain = e.staged_dataset_meta(&ObjectPath::parse("plain")).unwrap();
         assert_eq!(plain.dimensions, vec![1]);
         assert_eq!(plain.maxshape, None);
         assert!(!plain.chunked);
         assert!(plain.filters.is_empty());
 
         // Only datasets answer.
-        e.create_group("g").unwrap();
-        assert!(e.staged_dataset_meta("g").is_none());
-        assert!(e.staged_dataset_meta("existing").is_none());
+        e.create_group(&ObjectPathBuf::parse("g")).unwrap();
+        assert!(e.staged_dataset_meta(&ObjectPath::parse("g")).is_none());
+        assert!(
+            e.staged_dataset_meta(&ObjectPath::parse("existing"))
+                .is_none()
+        );
     }
 
     #[test]
     fn a_deletion_hides_nothing_until_a_creation_replaces_it() {
         let dir = tempdir().unwrap();
         let mut e = open_session(&dir.path().join("q.h5"));
-        e.delete("existing").unwrap();
+        e.delete(&ObjectPathBuf::parse("existing")).unwrap();
         // The object is still in the file, and still readable, so a handle must
         // not be told it is staged.
         assert_eq!(kind(&e, "existing"), None);
-        assert!(e.staged_children("").is_empty());
+        assert!(e.staged_children(&ObjectPath::parse("")).is_empty());
 
-        e.stage_created_dataset("existing", i32_dataset(&[9]))
+        e.stage_created_dataset(&ObjectPathBuf::parse("existing"), i32_dataset(&[9]))
             .unwrap();
-        let staged = e.staged_object("existing").unwrap();
+        let staged = e.staged_object(&ObjectPath::parse("existing")).unwrap();
         assert_eq!(staged.kind, StagedKind::Dataset);
         assert!(staged.replaces_link, "the same commit removes the link");
         assert_eq!(
-            e.staged_dataset_meta("existing").unwrap().dimensions,
+            e.staged_dataset_meta(&ObjectPath::parse("existing"))
+                .unwrap()
+                .dimensions,
             vec![1]
         );
-        assert!(e.staged_children("")[0].replaces_link);
+        assert!(e.staged_children(&ObjectPath::parse(""))[0].replaces_link);
     }
 
     #[test]
@@ -21113,7 +21181,7 @@ mod staged_query_tests {
         // handle would have addressed the file's `existing` while claiming to
         // address the new one.
         let err = e
-            .stage_created_dataset("existing", i32_dataset(&[9]))
+            .stage_created_dataset(&ObjectPathBuf::parse("existing"), i32_dataset(&[9]))
             .unwrap_err();
         assert!(
             matches!(&err, Error::EditUnsupported(m) if m.contains("already exists")),
@@ -21121,13 +21189,16 @@ mod staged_query_tests {
         );
         // The same rule for a group, which is also the kind change a listing
         // would otherwise misreport as turning a dataset into a group.
-        assert!(e.create_group("existing").is_err());
+        assert!(e.create_group(&ObjectPathBuf::parse("existing")).is_err());
 
         // Nothing was staged, so the file's own object is still what the name
         // means, and the session has nothing left to refuse at commit time.
         assert_eq!(kind(&e, "existing"), None);
-        assert!(e.staged_dataset_meta("existing").is_none());
-        assert!(e.staged_children("").is_empty());
+        assert!(
+            e.staged_dataset_meta(&ObjectPath::parse("existing"))
+                .is_none()
+        );
+        assert!(e.staged_children(&ObjectPath::parse("")).is_empty());
         e.commit().unwrap();
     }
 
@@ -21135,14 +21206,14 @@ mod staged_query_tests {
     fn a_second_creation_at_a_staged_path_is_refused_where_it_is_staged() {
         let dir = tempdir().unwrap();
         let mut e = open_session(&dir.path().join("q.h5"));
-        e.stage_created_dataset("fresh", i32_dataset(&[1, 2, 3]))
+        e.stage_created_dataset(&ObjectPathBuf::parse("fresh"), i32_dataset(&[1, 2, 3]))
             .unwrap();
 
         // The staged set is indexed by path and keeps the first record there, so
         // a second creation would be staged behind the first and the handle this
         // call hands back would answer for the first one's shape and datatype.
         let err = e
-            .stage_created_dataset("fresh", i32_dataset(&[9]))
+            .stage_created_dataset(&ObjectPathBuf::parse("fresh"), i32_dataset(&[9]))
             .unwrap_err();
         assert!(
             matches!(&err, Error::EditUnsupported(m) if m.contains("already stages")),
@@ -21150,7 +21221,12 @@ mod staged_query_tests {
         );
         // Refused, not replaced: the first creation is exactly as it was, and it
         // is still the only thing staged at that name.
-        assert_eq!(e.staged_dataset_meta("fresh").unwrap().dimensions, vec![3]);
+        assert_eq!(
+            e.staged_dataset_meta(&ObjectPath::parse("fresh"))
+                .unwrap()
+                .dimensions,
+            vec![3]
+        );
         assert_eq!(
             child_names(&e, ""),
             vec![("fresh".to_string(), StagedKind::Dataset)]
@@ -21159,9 +21235,12 @@ mod staged_query_tests {
         // The two kinds collide with each other for the same reason: one path
         // cannot name both, and whichever the index found first is what every
         // handle onto it would report.
-        assert!(e.create_group("fresh").is_err());
-        e.create_group("g").unwrap();
-        assert!(e.stage_created_dataset("g", i32_dataset(&[9])).is_err());
+        assert!(e.create_group(&ObjectPathBuf::parse("fresh")).is_err());
+        e.create_group(&ObjectPathBuf::parse("g")).unwrap();
+        assert!(
+            e.stage_created_dataset(&ObjectPathBuf::parse("g"), i32_dataset(&[9]))
+                .is_err()
+        );
         assert_eq!(kind(&e, "g"), Some(StagedKind::Group));
 
         e.commit().unwrap();
@@ -21174,25 +21253,29 @@ mod staged_query_tests {
         // A creation over a link this session deletes is a replacement, which
         // the file arm admits — but only one of them, since the second would
         // still be staged behind the first.
-        e.delete("existing").unwrap();
-        e.stage_created_dataset("existing", i32_dataset(&[9]))
+        e.delete(&ObjectPathBuf::parse("existing")).unwrap();
+        e.stage_created_dataset(&ObjectPathBuf::parse("existing"), i32_dataset(&[9]))
             .unwrap();
         assert!(
-            e.stage_created_dataset("existing", i32_dataset(&[8, 8]))
+            e.stage_created_dataset(&ObjectPathBuf::parse("existing"), i32_dataset(&[8, 8]))
                 .is_err()
         );
         assert_eq!(
-            e.staged_dataset_meta("existing").unwrap().dimensions,
+            e.staged_dataset_meta(&ObjectPath::parse("existing"))
+                .unwrap()
+                .dimensions,
             vec![1]
         );
 
         // Deleting a staged creation withdraws it, which is what puts the name
         // back within reach of another creation.
-        e.delete("existing").unwrap();
-        e.stage_created_dataset("existing", i32_dataset(&[8, 8]))
+        e.delete(&ObjectPathBuf::parse("existing")).unwrap();
+        e.stage_created_dataset(&ObjectPathBuf::parse("existing"), i32_dataset(&[8, 8]))
             .unwrap();
         assert_eq!(
-            e.staged_dataset_meta("existing").unwrap().dimensions,
+            e.staged_dataset_meta(&ObjectPath::parse("existing"))
+                .unwrap()
+                .dimensions,
             vec![2]
         );
         e.commit().unwrap();
@@ -21206,14 +21289,14 @@ mod staged_query_tests {
         // single group from them, so a handle onto either addresses it and
         // nothing is misreported. Re-staging is how attributes and children are
         // added to a group already staged.
-        e.create_group("g").unwrap();
-        e.create_group("g").unwrap();
+        e.create_group(&ObjectPathBuf::parse("g")).unwrap();
+        e.create_group(&ObjectPathBuf::parse("g")).unwrap();
         assert_eq!(kind(&e, "g"), Some(StagedKind::Group));
         assert_eq!(
             child_names(&e, ""),
             vec![("g".to_string(), StagedKind::Group)]
         );
-        e.stage_created_dataset("g/inner", i32_dataset(&[7]))
+        e.stage_created_dataset(&ObjectPathBuf::parse("g/inner"), i32_dataset(&[7]))
             .unwrap();
         e.commit().unwrap();
     }
@@ -21241,12 +21324,12 @@ mod staged_query_tests {
             MemoryStrategy::Mirrored,
         )
         .unwrap();
-        e.delete("g").unwrap();
+        e.delete(&ObjectPathBuf::parse("g")).unwrap();
         // The name `g/inner` is still taken: a deletion of `g` alone hands it
         // over to nobody, so this is the collision it looks like rather than a
         // replacement.
         let err = e
-            .stage_created_dataset("g/inner", i32_dataset(&[9]))
+            .stage_created_dataset(&ObjectPathBuf::parse("g/inner"), i32_dataset(&[9]))
             .unwrap_err();
         assert!(
             matches!(&err, Error::EditUnsupported(m) if m.contains("already exists")),
@@ -21256,10 +21339,10 @@ mod staged_query_tests {
 
         // A name the file does not hold stages, and is not a replacement of
         // anything; the commit refuses the batch for the overlap itself.
-        e.stage_created_dataset("g/other", i32_dataset(&[9]))
+        e.stage_created_dataset(&ObjectPathBuf::parse("g/other"), i32_dataset(&[9]))
             .unwrap();
         assert!(
-            !e.staged_children("g")[0].replaces_link,
+            !e.staged_children(&ObjectPath::parse("g"))[0].replaces_link,
             "nothing rebuilds `g`, so its names are not handed over"
         );
         assert!(e.commit().is_err(), "a deletion overlapping an addition");
@@ -21285,13 +21368,17 @@ mod staged_query_tests {
             MemoryStrategy::Mirrored,
         )
         .unwrap();
-        e.delete("g").unwrap();
-        e.create_group("g").unwrap();
-        e.stage_created_dataset("g/inner", i32_dataset(&[9]))
+        e.delete(&ObjectPathBuf::parse("g")).unwrap();
+        e.create_group(&ObjectPathBuf::parse("g")).unwrap();
+        e.stage_created_dataset(&ObjectPathBuf::parse("g/inner"), i32_dataset(&[9]))
             .unwrap();
         assert_eq!(kind(&e, "g/inner"), Some(StagedKind::Dataset));
-        assert!(e.staged_object("g/inner").unwrap().replaces_link);
-        assert!(e.staged_children("g")[0].replaces_link);
+        assert!(
+            e.staged_object(&ObjectPath::parse("g/inner"))
+                .unwrap()
+                .replaces_link
+        );
+        assert!(e.staged_children(&ObjectPath::parse("g"))[0].replaces_link);
         e.commit().unwrap();
     }
 
@@ -21303,15 +21390,18 @@ mod staged_query_tests {
         let dir = tempdir().unwrap();
         let mut e = open_session(&dir.path().join("q.h5"));
         for path in ["", "/"] {
-            let err = e.delete(path).unwrap_err();
+            let err = e.delete(&object_path(path)).unwrap_err();
             assert!(
                 matches!(&err, Error::EditUnsupported(m) if m.contains("root group")),
                 "got: {err}"
             );
         }
-        e.stage_created_dataset("fresh", i32_dataset(&[1])).unwrap();
+        e.stage_created_dataset(&object_path("fresh"), i32_dataset(&[1]))
+            .unwrap();
         assert!(
-            !e.staged_object("fresh").unwrap().replaces_link,
+            !e.staged_object(&ObjectPath::parse("fresh"))
+                .unwrap()
+                .replaces_link,
             "no deletion was staged, so this replaces nothing"
         );
     }
@@ -21320,13 +21410,19 @@ mod staged_query_tests {
     fn an_append_onto_a_staged_dataset_grows_the_pending_creation() {
         let dir = tempdir().unwrap();
         let mut e = open_session(&dir.path().join("q.h5"));
-        e.stage_created_dataset("col", i32_dataset(&[1, 2]))
+        e.stage_created_dataset(&ObjectPathBuf::parse("col"), i32_dataset(&[1, 2]))
             .unwrap();
 
         let mut b = AppendBuilder::new();
         b.append_i32(&[3, 4]);
-        e.stage_dataset_append_pending("col", b).unwrap();
-        assert_eq!(e.staged_dataset_meta("col").unwrap().dimensions, vec![4]);
+        e.stage_dataset_append_pending(&ObjectPathBuf::parse("col"), b)
+            .unwrap();
+        assert_eq!(
+            e.staged_dataset_meta(&ObjectPath::parse("col"))
+                .unwrap()
+                .dimensions,
+            vec![4]
+        );
         // Folded into the creation rather than queued beside it, so the commit
         // has one dataset to write and no append to apply to it.
         assert!(e.staged.appends.is_empty());
@@ -21346,8 +21442,8 @@ mod staged_query_tests {
     fn an_append_through_a_handle_onto_the_replaced_object_is_refused() {
         let dir = tempdir().unwrap();
         let mut e = open_session(&dir.path().join("q.h5"));
-        e.delete("existing").unwrap();
-        e.stage_created_dataset("existing", i32_dataset(&[100]))
+        e.delete(&ObjectPathBuf::parse("existing")).unwrap();
+        e.stage_created_dataset(&ObjectPathBuf::parse("existing"), i32_dataset(&[100]))
             .unwrap();
 
         // `stage_dataset_append` is the entry point a handle onto the object in
@@ -21356,11 +21452,13 @@ mod staged_query_tests {
         let mut b = AppendBuilder::new();
         b.append_i32(&[200]);
         assert!(matches!(
-            e.stage_dataset_append("existing", b),
+            e.stage_dataset_append(&ObjectPathBuf::parse("existing"), b),
             Err(Error::EditUnsupported(_))
         ));
         assert_eq!(
-            e.staged_dataset_meta("existing").unwrap().dimensions,
+            e.staged_dataset_meta(&ObjectPath::parse("existing"))
+                .unwrap()
+                .dimensions,
             vec![1],
             "the refusal must leave the replacement alone"
         );
@@ -21371,20 +21469,20 @@ mod staged_query_tests {
     fn an_append_the_staged_dataset_cannot_carry_is_refused_without_changing_it() {
         let dir = tempdir().unwrap();
         let mut e = open_session(&dir.path().join("q.h5"));
-        e.stage_created_dataset("col", i32_dataset(&[1, 2]))
+        e.stage_created_dataset(&ObjectPathBuf::parse("col"), i32_dataset(&[1, 2]))
             .unwrap();
 
         let mut wrong_type = AppendBuilder::new();
         wrong_type.append_f64(&[1.0]);
         assert!(matches!(
-            e.stage_dataset_append_pending("col", wrong_type),
+            e.stage_dataset_append_pending(&ObjectPathBuf::parse("col"), wrong_type),
             Err(Error::AppendUnsupported(_))
         ));
 
         let mut partial = AppendBuilder::new();
         partial.append_raw(&[0u8, 1, 2]);
         assert!(matches!(
-            e.stage_dataset_append_pending("col", partial),
+            e.stage_dataset_append_pending(&ObjectPathBuf::parse("col"), partial),
             Err(Error::AppendUnsupported(_))
         ));
 
@@ -21394,17 +21492,28 @@ mod staged_query_tests {
             .with_i32_data(&[1, 2])
             .with_maxshape(&[MaxExtent::Fixed(3)])
             .with_chunks(&[2]);
-        e.stage_created_dataset("capped", capped).unwrap();
+        e.stage_created_dataset(&ObjectPathBuf::parse("capped"), capped)
+            .unwrap();
         let mut over = AppendBuilder::new();
         over.append_i32(&[3, 4]);
         assert!(matches!(
-            e.stage_dataset_append_pending("capped", over),
+            e.stage_dataset_append_pending(&ObjectPathBuf::parse("capped"), over),
             Err(Error::AppendUnsupported(_))
         ));
 
         // Nothing the refusals touched changed.
-        assert_eq!(e.staged_dataset_meta("col").unwrap().dimensions, vec![2]);
-        assert_eq!(e.staged_dataset_meta("capped").unwrap().dimensions, vec![2]);
+        assert_eq!(
+            e.staged_dataset_meta(&ObjectPath::parse("col"))
+                .unwrap()
+                .dimensions,
+            vec![2]
+        );
+        assert_eq!(
+            e.staged_dataset_meta(&ObjectPath::parse("capped"))
+                .unwrap()
+                .dimensions,
+            vec![2]
+        );
     }
 
     #[test]
@@ -21413,14 +21522,16 @@ mod staged_query_tests {
         let mut e = open_session(&dir.path().join("q.h5"));
         let mut b = AppendBuilder::new();
         b.append_i32(&[4]);
-        e.stage_dataset_append("existing", b).unwrap();
+        e.stage_dataset_append(&ObjectPathBuf::parse("existing"), b)
+            .unwrap();
         assert_eq!(e.staged.appends.len(), 1);
 
         // And so does one made through a handle whose creation was committed
         // between the caller's check and this lock.
         let mut b = AppendBuilder::new();
         b.append_i32(&[5]);
-        e.stage_dataset_append_pending("existing", b).unwrap();
+        e.stage_dataset_append_pending(&ObjectPathBuf::parse("existing"), b)
+            .unwrap();
         assert_eq!(e.staged.appends.len(), 2);
     }
 
@@ -21428,9 +21539,9 @@ mod staged_query_tests {
     fn deleting_a_staged_creation_withdraws_it() {
         let dir = tempdir().unwrap();
         let mut e = open_session(&dir.path().join("q.h5"));
-        e.stage_created_dataset("col", i32_dataset(&[1, 2]))
+        e.stage_created_dataset(&ObjectPathBuf::parse("col"), i32_dataset(&[1, 2]))
             .unwrap();
-        e.delete("col").unwrap();
+        e.delete(&ObjectPathBuf::parse("col")).unwrap();
         // Withdrawn, not queued for a deletion the commit could not perform.
         assert_eq!(kind(&e, "col"), None);
         assert!(e.staged.deletes.is_empty());
@@ -21442,13 +21553,14 @@ mod staged_query_tests {
     fn deleting_a_staged_group_withdraws_its_staged_subtree() {
         let dir = tempdir().unwrap();
         let mut e = open_session(&dir.path().join("q.h5"));
-        e.create_group("g").unwrap();
-        e.create_group("g/inner").unwrap();
-        e.stage_created_dataset("g/inner/col", i32_dataset(&[1]))
+        e.create_group(&ObjectPathBuf::parse("g")).unwrap();
+        e.create_group(&ObjectPathBuf::parse("g/inner")).unwrap();
+        e.stage_created_dataset(&ObjectPathBuf::parse("g/inner/col"), i32_dataset(&[1]))
             .unwrap();
-        e.set_group_attr("g", "kind", AttrValue::I64(1)).unwrap();
+        e.set_group_attr(&ObjectPathBuf::parse("g"), "kind", AttrValue::I64(1))
+            .unwrap();
 
-        e.delete("g").unwrap();
+        e.delete(&ObjectPathBuf::parse("g")).unwrap();
         assert_eq!(kind(&e, "g"), None);
         assert_eq!(kind(&e, "g/inner"), None);
         assert_eq!(kind(&e, "g/inner/col"), None);
@@ -21463,12 +21575,12 @@ mod staged_query_tests {
     fn deleting_a_staged_replacement_leaves_the_plain_deletion() {
         let dir = tempdir().unwrap();
         let mut e = open_session(&dir.path().join("q.h5"));
-        e.delete("existing").unwrap();
-        e.stage_created_dataset("existing", i32_dataset(&[9]))
+        e.delete(&ObjectPathBuf::parse("existing")).unwrap();
+        e.stage_created_dataset(&ObjectPathBuf::parse("existing"), i32_dataset(&[9]))
             .unwrap();
         // Changing one's mind about the replacement leaves the deletion of the
         // object in the file, which is what was asked for first.
-        e.delete("existing").unwrap();
+        e.delete(&ObjectPathBuf::parse("existing")).unwrap();
         assert_eq!(kind(&e, "existing"), None);
         assert_eq!(e.staged.deletes.len(), 1);
         e.commit().unwrap();
@@ -21487,10 +21599,11 @@ mod staged_query_tests {
     fn a_batch_that_fails_leaves_the_staged_index_matching_the_staged_set() {
         let dir = tempdir().unwrap();
         let mut e = open_session(&dir.path().join("q.h5"));
-        e.stage_created_dataset("kept", i32_dataset(&[1])).unwrap();
+        e.stage_created_dataset(&ObjectPathBuf::parse("kept"), i32_dataset(&[1]))
+            .unwrap();
         let refused: Result<(), Error> = e.stage_atomically(|s| {
-            s.create_group("gone")?;
-            s.stage_created_dataset("gone/col", i32_dataset(&[2]))?;
+            s.create_group(&ObjectPathBuf::parse("gone"))?;
+            s.stage_created_dataset(&ObjectPathBuf::parse("gone/col"), i32_dataset(&[2]))?;
             Err(Error::EditUnsupported("refused on purpose"))
         });
         assert!(refused.is_err());
@@ -21499,7 +21612,7 @@ mod staged_query_tests {
         assert_eq!(kind(&e, "gone"), None);
         assert_eq!(kind(&e, "gone/col"), None);
         assert_eq!(kind(&e, "kept"), Some(StagedKind::Dataset));
-        assert!(e.staged_children("gone").is_empty());
+        assert!(e.staged_children(&ObjectPath::parse("gone")).is_empty());
 
         // And it must forget them for good: an index entry left behind would be
         // found by the *next* creation at that path and keep it pointing at the
@@ -21508,16 +21621,18 @@ mod staged_query_tests {
         // Staged behind an unrelated creation, so the retry lands at a
         // *different* position than the one the rewind dropped: an index entry
         // left behind would still name the old one.
-        e.create_group("other").unwrap();
-        e.stage_created_dataset("other/col", i32_dataset(&[3]))
+        e.create_group(&ObjectPathBuf::parse("other")).unwrap();
+        e.stage_created_dataset(&ObjectPathBuf::parse("other/col"), i32_dataset(&[3]))
             .unwrap();
-        e.create_group("gone").unwrap();
-        e.stage_created_dataset("gone/col", i32_dataset(&[2]))
+        e.create_group(&ObjectPathBuf::parse("gone")).unwrap();
+        e.stage_created_dataset(&ObjectPathBuf::parse("gone/col"), i32_dataset(&[2]))
             .unwrap();
         assert_eq!(kind(&e, "gone"), Some(StagedKind::Group));
         assert_eq!(kind(&e, "gone/col"), Some(StagedKind::Dataset));
         assert_eq!(
-            e.staged_dataset_meta("gone/col").unwrap().dimensions,
+            e.staged_dataset_meta(&ObjectPath::parse("gone/col"))
+                .unwrap()
+                .dimensions,
             vec![1]
         );
         e.commit().unwrap();
@@ -21527,7 +21642,7 @@ mod staged_query_tests {
     fn an_edit_that_changes_staged_work_is_refused_inside_a_batch() {
         let dir = tempdir().unwrap();
         let mut e = open_session(&dir.path().join("q.h5"));
-        e.stage_created_dataset("col", i32_dataset(&[1, 2]))
+        e.stage_created_dataset(&ObjectPathBuf::parse("col"), i32_dataset(&[1, 2]))
             .unwrap();
         // `rewind` undoes a batch by truncating, which is exact only while
         // staging appends. Both operations that do otherwise say so here rather
@@ -21535,12 +21650,18 @@ mod staged_query_tests {
         let folded: Result<(), Error> = e.stage_atomically(|s| {
             let mut b = AppendBuilder::new();
             b.append_i32(&[3]);
-            s.stage_dataset_append_pending("col", b)
+            s.stage_dataset_append_pending(&ObjectPathBuf::parse("col"), b)
         });
         assert!(matches!(folded, Err(Error::EditUnsupported(_))));
-        let withdrawn: Result<(), Error> = e.stage_atomically(|s| s.delete("col"));
+        let withdrawn: Result<(), Error> =
+            e.stage_atomically(|s| s.delete(&ObjectPathBuf::parse("col")));
         assert!(matches!(withdrawn, Err(Error::EditUnsupported(_))));
-        assert_eq!(e.staged_dataset_meta("col").unwrap().dimensions, vec![2]);
+        assert_eq!(
+            e.staged_dataset_meta(&ObjectPath::parse("col"))
+                .unwrap()
+                .dimensions,
+            vec![2]
+        );
     }
 }
 

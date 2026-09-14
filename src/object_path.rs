@@ -137,24 +137,46 @@ pub(crate) struct ObjectPathBuf {
 }
 
 impl ObjectPathBuf {
+    /// Parses one spelling of an object path into its owned components.
+    ///
+    /// The spelling parses as it does for [`ObjectPath::parse`], and an absolute and a relative
+    /// spelling of the same components give the same path. A caller with a relative path resolves
+    /// it from the group it is relative to first, through [`join_path`](Self::join_path).
+    pub(crate) fn parse(path: &str) -> Self {
+        ObjectPath::parse(path).to_path_buf()
+    }
+
+    /// Returns the path of the root group, which has no components.
     pub(crate) fn root() -> Self {
         Self {
             components: Vec::new(),
         }
     }
 
+    /// Returns the path of the child `name` of the object this path identifies.
     pub(crate) fn join(&self, name: &LinkNameBuf) -> Self {
         let mut components = self.components.clone();
         components.push(name.clone());
         Self { components }
     }
 
+    /// Resolves `rest` from the object this path identifies, as [`ObjectPath::join_path`] does.
+    ///
+    /// An absolute `rest` walks from the root group, so its components alone are the result.
+    pub(crate) fn join_path(&self, rest: &ObjectPath<'_>) -> Self {
+        self.as_path().join_path(rest).to_path_buf()
+    }
+
+    /// Returns the path a walk has reached after `count` components, or this whole path where it
+    /// has fewer than that.
     pub(crate) fn prefix(&self, count: usize) -> Self {
         Self {
             components: self.components.iter().take(count).cloned().collect(),
         }
     }
 
+    /// Returns the path of the group holding the last link and that link's name, or `None` for
+    /// the root group, which no link reaches.
     pub(crate) fn split_leaf(&self) -> Option<(Self, LinkNameBuf)> {
         let (leaf, parent) = self.components.split_last()?;
         Some((
@@ -309,7 +331,7 @@ mod tests {
     use super::{LinkName, LinkNameBuf, ObjectPath, ObjectPathBuf};
 
     fn path(spelling: &str) -> ObjectPathBuf {
-        ObjectPath::parse(spelling).to_path_buf()
+        ObjectPathBuf::parse(spelling)
     }
 
     fn name(link_name: &str) -> LinkNameBuf {
@@ -460,6 +482,18 @@ mod tests {
     #[case("/g/h/", "g/h/a")]
     fn joining_appends_one_component_to_an_owned_path(#[case] base: &str, #[case] joined: &str) {
         assert_eq!(path(base).join(&name("a")), path(joined));
+    }
+
+    #[rstest]
+    #[case("/g/", "a//b", "g/a/b")]
+    #[case("/g/", "", "g")]
+    #[case("g/i", "/h/", "h")]
+    fn joining_a_path_resolves_it_from_the_object_this_one_names(
+        #[case] base: &str,
+        #[case] rest: &str,
+        #[case] joined: &str,
+    ) {
+        assert_eq!(path(base).join_path(&ObjectPath::parse(rest)), path(joined));
     }
 
     #[rstest]

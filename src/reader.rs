@@ -38,7 +38,7 @@ use crate::layout_info::{Chunk, ChunkIndex, Filter, Layout};
 use crate::libver::LibVer;
 use crate::message_type::MessageType;
 use crate::object_header::ObjectHeader;
-use crate::object_path::{LinkName, ObjectPath};
+use crate::object_path::{LinkName, ObjectPath, ObjectPathBuf};
 use crate::read_spec::RawReadSpec;
 use crate::shared_message::{self, BufferedResolver, SharedResolver, SourceResolver};
 use crate::signature;
@@ -1429,7 +1429,7 @@ impl FileInner {
         match self.locate(path, memo) {
             Err(Error::Format(FormatError::PathNotFound(missing))) => {
                 let named = path.unwrap_or_default();
-                match self.staged_object(named) {
+                match self.staged_object(&ObjectPath::parse(named)) {
                     Some(_) => Err(Error::NotCommitted(named.to_string())),
                     None => Err(Error::Format(FormatError::PathNotFound(missing))),
                 }
@@ -1449,7 +1449,7 @@ impl FileInner {
 
     /// What this session has staged at `path`, if anything. See
     /// [`WriteEngine::staged_object`] for the rule.
-    fn staged_object(&self, path: &str) -> Option<StagedObject> {
+    fn staged_object(&self, path: &ObjectPath<'_>) -> Option<StagedObject> {
         self.query_engine(|e| e.staged_object(path)).flatten()
     }
 
@@ -1474,8 +1474,9 @@ impl FileInner {
     /// produce: a handle holds its [`FileInner`] alive and a backend never
     /// changes under one, so the case is unreachable rather than merely unlikely.
     fn staged_standing(&self, path: &str, birth: Option<u64>) -> Standing {
+        let path = ObjectPath::parse(path);
         let Some((generation, staged)) =
-            self.query_engine(|e| (e.staged_generation(), e.staged_object(path).is_some()))
+            self.query_engine(|e| (e.staged_generation(), e.staged_object(&path).is_some()))
         else {
             return Standing::Live;
         };
@@ -1504,8 +1505,9 @@ impl FileInner {
         path: &str,
         birth: Option<u64>,
     ) -> Result<Option<StagedMeta>, Error> {
+        let staged_path = ObjectPath::parse(path);
         let Some((generation, meta)) =
-            self.query_engine(|e| (e.staged_generation(), e.staged_dataset_meta(path)))
+            self.query_engine(|e| (e.staged_generation(), e.staged_dataset_meta(&staged_path)))
         else {
             return Ok(None);
         };
@@ -1525,7 +1527,8 @@ impl FileInner {
 
     /// The direct children `parent` gains from this session's staged creations.
     fn staged_children(&self, parent: &str) -> StagedChildren {
-        self.query_engine(|e| e.staged_children(parent))
+        let parent = ObjectPath::parse(parent);
+        self.query_engine(|e| e.staged_children(&parent))
             .unwrap_or_default()
     }
 
@@ -3051,10 +3054,7 @@ impl File {
     /// [`Error::ReadOnly`].
     pub fn copy(&self, src: &str, dst: &str) -> Result<(), Error> {
         self.with_mirror_session(Change::Relocating, |session| {
-            session.copy(
-                &ObjectPath::parse(src).to_string(),
-                &ObjectPath::parse(dst).to_string(),
-            )
+            session.copy(&ObjectPathBuf::parse(src), &ObjectPathBuf::parse(dst))
         })
     }
 
@@ -3076,8 +3076,8 @@ impl File {
         self.with_mirror_session(Change::Relocating, |session| {
             session.copy_from(
                 source,
-                &ObjectPath::parse(src).to_string(),
-                &ObjectPath::parse(dst).to_string(),
+                &ObjectPathBuf::parse(src),
+                &ObjectPathBuf::parse(dst),
             )
         })
     }
@@ -3246,7 +3246,7 @@ impl File {
         let chunk_cache = properties.resolved_chunk_cache(self.inner.access_properties.chunk_cache);
         let relative = ObjectPath::parse(path);
         let normalized = relative.to_string();
-        match self.inner.staged_object(&normalized).map(|o| o.kind) {
+        match self.inner.staged_object(&relative).map(|o| o.kind) {
             Some(StagedKind::Dataset) => {
                 return Ok(Dataset::pending(
                     self.inner.clone(),
@@ -3285,7 +3285,7 @@ impl File {
     pub fn group(&self, path: &str) -> Result<Group, Error> {
         let relative = ObjectPath::parse(path);
         let normalized = relative.to_string();
-        match self.inner.staged_object(&normalized).map(|o| o.kind) {
+        match self.inner.staged_object(&relative).map(|o| o.kind) {
             Some(StagedKind::Group) => {
                 return Ok(Group::pending(self.inner.clone(), normalized));
             }
@@ -3521,7 +3521,7 @@ impl std::fmt::Debug for Object {
 /// addressable only once the closure has returned.
 pub struct StagedGroup<'a> {
     ops: &'a mut Vec<StagedOp>,
-    path: String,
+    path: ObjectPathBuf,
 }
 
 impl StagedGroup<'_> {
@@ -3556,9 +3556,7 @@ impl StagedGroup<'_> {
         path: &str,
         build: impl FnOnce(&mut StagedGroup<'_>),
     ) -> &mut Self {
-        let child = ObjectPath::parse(&self.path)
-            .join_path(&ObjectPath::parse(path))
-            .to_string();
+        let child = self.path.join_path(&ObjectPath::parse(path));
         self.ops.push(StagedOp::CreateGroup(child.clone()));
         let mut staged = StagedGroup {
             ops: &mut *self.ops,
@@ -3579,9 +3577,7 @@ impl StagedGroup<'_> {
         let mut builder = DatasetBuilder::new(path);
         build(&mut builder);
         self.ops.push(StagedOp::CreateDataset {
-            path: ObjectPath::parse(&self.path)
-                .join_path(&ObjectPath::parse(path))
-                .to_string(),
+            path: self.path.join_path(&ObjectPath::parse(path)),
             builder: Box::new(builder),
         });
         self
@@ -3595,14 +3591,14 @@ impl StagedGroup<'_> {
 /// touches only this buffer, so calling back into the same [`File`] from inside
 /// it is at worst wrongly ordered rather than a deadlock (issue #200).
 enum StagedOp {
-    CreateGroup(String),
+    CreateGroup(ObjectPathBuf),
     SetGroupAttr {
-        path: String,
+        path: ObjectPathBuf,
         name: String,
         value: AttrValue,
     },
     CreateDataset {
-        path: String,
+        path: ObjectPathBuf,
         /// Boxed because a `DatasetBuilder` dwarfs the other variants, and a
         /// closure staging many groups would otherwise pay its size per entry.
         builder: Box<DatasetBuilder>,
@@ -4193,12 +4189,17 @@ impl Group {
     ) -> Result<Dataset, Error> {
         let chunk_cache = properties.resolved_chunk_cache(self.file.access_properties.chunk_cache);
         let relative = ObjectPath::parse(path);
-        if let Some(child) = self.child_path(&relative) {
-            match self.file.staged_object(&child).map(|o| o.kind) {
+        let child = self.child_path(&relative);
+        if let Some(child) = &child {
+            match self.file.staged_object(child).map(|o| o.kind) {
                 Some(StagedKind::Dataset) => {
-                    return Ok(Dataset::pending(self.file.clone(), chunk_cache, child));
+                    return Ok(Dataset::pending(
+                        self.file.clone(),
+                        chunk_cache,
+                        child.to_string(),
+                    ));
                 }
-                Some(StagedKind::Group) => return Err(Error::NotADataset(child)),
+                Some(StagedKind::Group) => return Err(Error::NotADataset(child.to_string())),
                 None => {}
             }
         }
@@ -4213,7 +4214,7 @@ impl Group {
             revisions.at(address),
             hdr,
             chunk_cache,
-            self.child_path(&relative),
+            child.map(|child| child.to_string()),
         ))
     }
 
@@ -4230,12 +4231,13 @@ impl Group {
     /// [`FormatError::PathNotFound`] if a component of `path` reaches nothing.
     pub fn group(&self, path: &str) -> Result<Group, Error> {
         let relative = ObjectPath::parse(path);
-        if let Some(child) = self.child_path(&relative) {
-            match self.file.staged_object(&child).map(|o| o.kind) {
+        let child = self.child_path(&relative);
+        if let Some(child) = &child {
+            match self.file.staged_object(child).map(|o| o.kind) {
                 Some(StagedKind::Group) => {
-                    return Ok(Group::pending(self.file.clone(), child));
+                    return Ok(Group::pending(self.file.clone(), child.to_string()));
                 }
-                Some(StagedKind::Dataset) => return Err(Error::NotAGroup(child)),
+                Some(StagedKind::Dataset) => return Err(Error::NotAGroup(child.to_string())),
                 None => {}
             }
         }
@@ -4247,7 +4249,7 @@ impl Group {
         Ok(Group::new(
             self.file.clone(),
             revisions.at(address),
-            self.child_path(&relative),
+            child.map(|child| child.to_string()),
         ))
     }
 
@@ -4299,8 +4301,11 @@ impl Group {
     /// Returns the root-relative path of the object `path` identifies from this group, or from
     /// the root group where `path` is absolute, and `None` if this group itself has no resolvable
     /// path (reached by object reference).
-    fn child_path(&self, path: &ObjectPath<'_>) -> Option<String> {
-        Some(self.object_path()?.join_path(path).to_string())
+    ///
+    /// The [`ObjectPath`] borrows this group's own path and `path`, so a caller that has to keep
+    /// it calls [`ObjectPath::to_path_buf`].
+    fn child_path<'a>(&'a self, path: &ObjectPath<'a>) -> Option<ObjectPath<'a>> {
+        Some(self.object_path()?.join_path(path))
     }
 
     /// Returns the path an error reports the object `path` reaches by: its path from the root
@@ -4311,7 +4316,8 @@ impl Group {
     /// reached by object reference, whose own path is `None`, the result is `path` alone, in the
     /// form [`ObjectPath`] displays.
     fn root_relative(&self, path: &ObjectPath<'_>) -> String {
-        self.child_path(path).unwrap_or_else(|| path.to_string())
+        self.child_path(path)
+            .map_or_else(|| path.to_string(), |child| child.to_string())
     }
 
     /// Returns this group's own path, parsed, or `None` where it has none (reached by object
@@ -4424,7 +4430,7 @@ impl Group {
             path: child.clone(),
         });
         self.apply_staged(ops)?;
-        Ok(Group::pending(self.file.clone(), child))
+        Ok(Group::pending(self.file.clone(), child.to_string()))
     }
 
     /// Creates a dataset at `path` within this group, configuring it through `build`
@@ -4502,7 +4508,7 @@ impl Group {
             self.file.clone(),
             DatasetAccessProperties::new()
                 .resolved_chunk_cache(self.file.access_properties.chunk_cache),
-            child,
+            child.to_string(),
         ))
     }
 
@@ -4580,7 +4586,7 @@ impl Group {
     fn with_child_session<R>(
         &self,
         path: &str,
-        f: impl FnOnce(&mut WriteEngine, &str) -> Result<R, Error>,
+        f: impl FnOnce(&mut WriteEngine, &ObjectPathBuf) -> Result<R, Error>,
     ) -> Result<R, Error> {
         let child = self.child_edit_path(path)?;
         self.file
@@ -4625,7 +4631,7 @@ impl Group {
     /// this group has no path of its own, and the failures
     /// [`check_staged_writable`](FileInner::check_staged_writable) and
     /// [`refuse_if_withdrawn`](Self::refuse_if_withdrawn) report.
-    fn child_edit_path(&self, path: &str) -> Result<String, Error> {
+    fn child_edit_path(&self, path: &str) -> Result<ObjectPathBuf, Error> {
         self.file.check_staged_writable()?;
         self.refuse_if_withdrawn()?;
         let relative = ObjectPath::parse(path);
@@ -4636,7 +4642,9 @@ impl Group {
             // delete (`H5Lint.c`, HDF5 1.14.6).
             return Err(Error::EditUnsupported(NO_LINK_TO_WRITE));
         }
-        self.child_path(&relative).ok_or(Error::ReadOnly)
+        self.child_path(&relative)
+            .map(|child| child.to_path_buf())
+            .ok_or(Error::ReadOnly)
     }
 
     /// Record already-built edits on the writable session, holding the lock only
@@ -4666,10 +4674,10 @@ impl Group {
     /// sealed.
     fn with_own_session<R>(
         &self,
-        f: impl FnOnce(&mut WriteEngine, &str) -> Result<R, Error>,
+        f: impl FnOnce(&mut WriteEngine, &ObjectPathBuf) -> Result<R, Error>,
     ) -> Result<R, Error> {
         self.refuse_if_withdrawn()?;
-        let path = self.path.clone().ok_or(Error::ReadOnly)?;
+        let path = ObjectPathBuf::parse(self.path.as_deref().ok_or(Error::ReadOnly)?);
         self.file
             .with_engine_mut(Change::Relocating, |session| f(session, &path))
     }
@@ -5227,9 +5235,10 @@ impl Dataset {
         let Backend::Edit(m) = &self.file.backend else {
             return Err(Error::ReadOnly);
         };
+        let path = self.path.as_deref().map(ObjectPathBuf::parse);
         m.lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .claim_for_appender(self.path.as_deref())
+            .claim_for_appender(path.as_ref())
     }
 
     /// Release the claim taken by [`claim_for_appender`](Self::claim_for_appender).
@@ -5526,9 +5535,9 @@ the same commit to replace it",
     /// object reference).
     fn with_session_mut<R>(
         &mut self,
-        f: impl FnOnce(&mut WriteEngine, &str) -> Result<R, Error>,
+        f: impl FnOnce(&mut WriteEngine, &ObjectPathBuf) -> Result<R, Error>,
     ) -> Result<R, Error> {
-        let path = self.path.clone().ok_or(Error::ReadOnly)?;
+        let path = ObjectPathBuf::parse(self.path.as_deref().ok_or(Error::ReadOnly)?);
         self.file
             .with_engine_mut(Change::Relocating, |session| f(session, &path))
     }
