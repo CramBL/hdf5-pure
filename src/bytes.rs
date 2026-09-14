@@ -34,6 +34,7 @@ use crate::convert::is_undefined_addr;
 use crate::error::FormatError;
 use crate::width::LengthWidth;
 use crate::width::OffsetWidth;
+use crate::width::UintWidth;
 
 /// Checks that `needed` bytes are readable at `offset`.
 ///
@@ -83,10 +84,10 @@ fn read_le(data: &[u8], pos: usize, width: u8) -> u64 {
             data[pos + 6],
             data[pos + 7],
         ]),
-        // Unreachable: `read_offset_width` and `read_length_width` take a width
-        // parsed into its type, and `read_uint_width` matches its own legal
-        // set. Not `unreachable!()`, which would turn a later caller's omitted
-        // check into a panic inside a parser.
+        // Unreachable: every caller takes its width parsed into an
+        // `OffsetWidth`, a `LengthWidth` or a `UintWidth`. Not
+        // `unreachable!()`, which would turn a later caller's omitted check into
+        // a panic inside a parser.
         _ => {
             debug_assert!(false, "width validated by the caller");
             0
@@ -154,27 +155,24 @@ pub(crate) fn read_length_width(
     Ok(read_le(data, pos, width.get()))
 }
 
-/// Reads a variable-width unsigned integer of `width` bytes at `pos`, where
-/// `width` is 1, 2, 4, or 8.
+/// Reads an unsigned integer of `width` bytes at `pos`.
 ///
-/// This is the width an object header or link message encodes in a two-bit flag
-/// field, for a value that is a size or an index rather than a file address —
-/// so 1 is legal here and malformed in [`read_offset`].
+/// `width` is a [`UintWidth`], the width an object header or a link message
+/// encodes in two bits of a flag byte. It sizes a value such as a chunk size or
+/// a name length, so 1 is legal here and malformed in [`read_offset`].
 ///
-/// Its error is [`FormatError::InvalidOffsetSize`], whose message names a
-/// superblock field this width did not come from and a legal set that excludes
-/// the 1 this function accepts. That contradicts the naming principle in the
-/// module doc above, and it stands because the arm is unreachable: both callers
-/// derive the width as `1 << (flags & 3)`, which is 1, 2, 4, or 8 by
-/// construction. Adding a public error variant for a case no input can reach
-/// would cost more than it states.
+/// # Errors
+///
+/// Returns [`FormatError::UnexpectedEof`] if fewer than `width` bytes remain at
+/// `pos`.
 #[inline]
-pub(crate) fn read_uint_width(data: &[u8], pos: usize, width: u8) -> Result<u64, FormatError> {
-    if !matches!(width, 1 | 2 | 4 | 8) {
-        return Err(FormatError::InvalidOffsetSize(width));
-    }
-    ensure_len(data, pos, width as usize)?;
-    Ok(read_le(data, pos, width))
+pub(crate) fn read_uint_width(
+    data: &[u8],
+    pos: usize,
+    width: UintWidth,
+) -> Result<u64, FormatError> {
+    ensure_len(data, pos, usize::from(width.get()))?;
+    Ok(read_le(data, pos, width.get()))
 }
 
 /// Reads a file address of `offset_size` bytes at `pos`, as `None` when the file
@@ -294,16 +292,16 @@ mod tests {
         // sites happen to use most: `read_uint_width` is otherwise only
         // exercised at 1, and `read_length` at 4.
         let data = [0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88];
-        for (width, expected) in [
-            (2u8, 0x2211u64),
-            (4, 0x4433_2211),
-            (8, 0x8877_6655_4433_2211),
+        for (width, uint_width, expected) in [
+            (2u8, UintWidth::Two, 0x2211u64),
+            (4, UintWidth::Four, 0x4433_2211),
+            (8, UintWidth::Eight, 0x8877_6655_4433_2211),
         ] {
             assert_eq!(read_offset(&data, 0, width).unwrap(), expected);
             assert_eq!(read_length(&data, 0, width).unwrap(), expected);
-            assert_eq!(read_uint_width(&data, 0, width).unwrap(), expected);
+            assert_eq!(read_uint_width(&data, 0, uint_width).unwrap(), expected);
         }
-        assert_eq!(read_uint_width(&data, 0, 1).unwrap(), 0x11);
+        assert_eq!(read_uint_width(&data, 0, UintWidth::One).unwrap(), 0x11);
     }
 
     #[test]
@@ -313,7 +311,7 @@ mod tests {
         assert_eq!(read_offset(&data, 0, 4).unwrap(), 0x4433_2211);
         assert_eq!(read_offset(&data, 0, 8).unwrap(), 0x8877_6655_4433_2211);
         assert_eq!(read_length(&data, 0, 4).unwrap(), 0x4433_2211);
-        assert_eq!(read_uint_width(&data, 0, 1).unwrap(), 0x11);
+        assert_eq!(read_uint_width(&data, 0, UintWidth::One).unwrap(), 0x11);
         // Reading at a non-zero position uses that position's bytes, not the
         // buffer's first ones — a `read_le` that ignored `pos` would still pass
         // every assertion above.
@@ -329,7 +327,7 @@ mod tests {
             read_offset(&data, 0, 1).unwrap_err(),
             FormatError::InvalidOffsetSize(1)
         );
-        assert_eq!(read_uint_width(&data, 0, 1).unwrap(), 0xAB);
+        assert_eq!(read_uint_width(&data, 0, UintWidth::One).unwrap(), 0xAB);
     }
 
     #[test]
@@ -342,10 +340,6 @@ mod tests {
         assert_eq!(
             read_length(&data, 0, 3).unwrap_err(),
             FormatError::InvalidLengthSize(3)
-        );
-        assert_eq!(
-            read_uint_width(&data, 0, 3).unwrap_err(),
-            FormatError::InvalidOffsetSize(3)
         );
     }
 

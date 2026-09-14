@@ -7,6 +7,7 @@ use crate::bytes::{ensure_len, read_offset, read_uint_width};
 use crate::convert::Narrow;
 use crate::datatype::CharacterSet;
 use crate::error::FormatError;
+use crate::width::UintWidth;
 
 /// The type of a link in an HDF5 v2 group.
 #[derive(Debug, Clone, PartialEq)]
@@ -64,14 +65,7 @@ fn parse_prefix(data: &[u8]) -> Result<LinkPrefix<'_>, FormatError> {
     }
 
     let flags = data[1];
-    // Bits 0-1: size of the name length field (1/2/4/8 bytes)
-    let name_size_field_width = match flags & 0x03 {
-        0 => 1u8,
-        1 => 2,
-        2 => 4,
-        3 => 8,
-        _ => unreachable!(),
-    };
+    let name_size_field_width = UintWidth::from_flags(flags);
     // Bit 2: creation order field present
     let has_creation_order = flags & 0x04 != 0;
     // Bit 3: link type field present
@@ -126,7 +120,7 @@ fn parse_prefix(data: &[u8]) -> Result<LinkPrefix<'_>, FormatError> {
 
     // Link name length
     let name_len = read_uint_width(data, pos, name_size_field_width)?.to_usize()?;
-    pos += name_size_field_width as usize;
+    pos += usize::from(name_size_field_width.get());
 
     // Link name
     ensure_len(data, pos, name_len)?;
