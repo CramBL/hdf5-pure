@@ -2061,11 +2061,18 @@ impl FileInner {
         self.superblock.length_size
     }
 
-    /// Resolve the children of a group object header, dispatching on the backend
-    /// and converting link addresses to absolute.
+    /// Returns the entries of the group `hdr` describes, dispatching on the backend.
+    ///
+    /// Each entry holds the address the file stores for its child, which
+    /// [`entry_address`](Self::entry_address) turns into a position to read at.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Format`] if the group's own structures do not parse, or if `hdr` describes
+    /// no group at all.
     fn group_children(&self, hdr: &ObjectHeader) -> Result<Vec<GroupEntry>, Error> {
         let (os, ls, base) = (self.offset_size(), self.length_size(), self.addr_offset);
-        let mut entries = match &self.backend {
+        match &self.backend {
             Backend::InMemory(v) => group_v2::resolve_group_entries(v, hdr, os, ls, base),
             Backend::Streaming(s) => {
                 group_v2::resolve_group_entries_from_source(s.as_ref(), hdr, os, ls, base)
@@ -2076,15 +2083,17 @@ impl FileInner {
                 |s| group_v2::resolve_group_entries_from_source(s, hdr, os, ls, base),
             ),
         }
-        .map_err(Error::Format)?;
-        for entry in &mut entries {
-            // The stored address is relative to the base address; normalize to an
-            // absolute file offset. A crafted entry (e.g. the HADDR_UNDEF sentinel)
-            // must not wrap or panic.
-            entry.object_header_address =
-                base.absolute(StoredAddress::new(entry.object_header_address))?;
-        }
-        Ok(entries)
+        .map_err(Error::Format)
+    }
+
+    /// Returns the absolute file address of the object header `entry` names.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::OffsetOverflow`] if the base address cannot be added to it, which a
+    /// crafted entry naming `HADDR_UNDEF` in a file with a userblock arranges.
+    fn entry_address(&self, entry: &GroupEntry) -> Result<u64, FormatError> {
+        self.addr_offset.absolute(entry.object_header_address)
     }
 
     /// The child named `name`, at the absolute file address
@@ -3812,7 +3821,7 @@ impl Group {
             if superseded(&staged, &entry.name) {
                 continue;
             }
-            let hdr = self.file.parse_header(entry.object_header_address)?;
+            let hdr = self.file.parse_header(self.file.entry_address(entry)?)?;
             if has_message(&hdr, MessageType::DataLayout) {
                 names.push(entry.name.clone());
             }
@@ -3881,9 +3890,10 @@ impl Group {
             if superseded(&staged, &entry.name) {
                 continue;
             }
-            let hdr = self.file.parse_header(entry.object_header_address)?;
+            let address = self.file.entry_address(&entry)?;
+            let hdr = self.file.parse_header(address)?;
             if has_message(&hdr, MessageType::DataLayout) {
-                members.push((entry.name, Some((entry.object_header_address, hdr))));
+                members.push((entry.name, Some((address, hdr))));
             }
         }
         members.extend(staged_members.into_iter().map(|name| (name, None)));
@@ -3925,7 +3935,7 @@ impl Group {
         let entries = self.children()?;
         let mut names = Vec::new();
         for entry in &entries {
-            let hdr = self.file.parse_header(entry.object_header_address)?;
+            let hdr = self.file.parse_header(self.file.entry_address(entry)?)?;
             if is_named_datatype(&hdr) {
                 names.push(entry.name.clone());
             }
@@ -4031,7 +4041,7 @@ impl Group {
             if superseded(&staged, &entry.name) {
                 continue;
             }
-            let hdr = self.file.parse_header(entry.object_header_address)?;
+            let hdr = self.file.parse_header(self.file.entry_address(entry)?)?;
             if is_group(&hdr) {
                 names.push(entry.name.clone());
             }
@@ -4084,8 +4094,9 @@ impl Group {
             // A `Group` handle carries no parsed header, so the header that
             // classified this child is dropped here rather than held for the
             // length of the walk.
-            if is_group(&self.file.parse_header(entry.object_header_address)?) {
-                members.push((entry.name, Some(entry.object_header_address)));
+            let address = self.file.entry_address(&entry)?;
+            if is_group(&self.file.parse_header(address)?) {
+                members.push((entry.name, Some(address)));
             }
         }
         members.extend(staged_members.into_iter().map(|name| (name, None)));
@@ -8180,7 +8191,7 @@ mod tests {
     /// `u64` once the base address is added must be rejected, not wrapped or
     /// panicked on. Reaching this needs a nonzero base address, so the file
     /// carries a userblock; the child link's stored address is then rewritten to
-    /// `HADDR_UNDEF` (all ones) so `group_children`'s normalization overflows.
+    /// `HADDR_UNDEF` (all ones) so adding the base to it overflows.
     #[test]
     fn group_child_address_base_overflow_is_rejected() {
         const UB: u64 = 512;

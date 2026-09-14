@@ -1,5 +1,6 @@
 //! HDF5 Link Info message parsing (message type 0x0002).
 
+use crate::address::StoredAddress;
 use crate::bytes::{ensure_len, read_optional_offset};
 use crate::error::FormatError;
 
@@ -9,11 +10,11 @@ pub struct LinkInfoMessage {
     /// Maximum creation order value (if tracking is enabled).
     pub max_creation_order: Option<u64>,
     /// Address of fractal heap for dense link storage. None means compact storage only.
-    pub fractal_heap_address: Option<u64>,
+    pub fractal_heap_address: Option<StoredAddress>,
     /// Address of B-tree v2 for name-ordered link index.
-    pub btree_name_index_address: Option<u64>,
+    pub btree_name_index_address: Option<StoredAddress>,
     /// Address of B-tree v2 for creation-order link index.
-    pub btree_creation_order_address: Option<u64>,
+    pub btree_creation_order_address: Option<StoredAddress>,
 }
 
 impl LinkInfoMessage {
@@ -50,14 +51,16 @@ impl LinkInfoMessage {
             None
         };
 
-        let fractal_heap_address = read_optional_offset(data, pos, offset_size)?;
+        let fractal_heap_address =
+            read_optional_offset(data, pos, offset_size)?.map(StoredAddress::new);
         pos += offset_size as usize;
 
-        let btree_name_index_address = read_optional_offset(data, pos, offset_size)?;
+        let btree_name_index_address =
+            read_optional_offset(data, pos, offset_size)?.map(StoredAddress::new);
         pos += offset_size as usize;
 
         let btree_creation_order_address = if has_creation_order_index {
-            read_optional_offset(data, pos, offset_size)?
+            read_optional_offset(data, pos, offset_size)?.map(StoredAddress::new)
         } else {
             None
         };
@@ -106,9 +109,15 @@ mod tests {
 
         let msg = LinkInfoMessage::parse(&data, 8).unwrap();
         assert_eq!(msg.max_creation_order, Some(42));
-        assert_eq!(msg.fractal_heap_address, Some(0x1000));
-        assert_eq!(msg.btree_name_index_address, Some(0x2000));
-        assert_eq!(msg.btree_creation_order_address, Some(0x3000));
+        assert_eq!(msg.fractal_heap_address, Some(StoredAddress::new(0x1000)));
+        assert_eq!(
+            msg.btree_name_index_address,
+            Some(StoredAddress::new(0x2000))
+        );
+        assert_eq!(
+            msg.btree_creation_order_address,
+            Some(StoredAddress::new(0x3000))
+        );
     }
 
     #[test]
@@ -121,8 +130,11 @@ mod tests {
 
         let msg = LinkInfoMessage::parse(&data, 8).unwrap();
         assert_eq!(msg.max_creation_order, None);
-        assert_eq!(msg.fractal_heap_address, Some(0x500));
-        assert_eq!(msg.btree_name_index_address, Some(0x600));
+        assert_eq!(msg.fractal_heap_address, Some(StoredAddress::new(0x500)));
+        assert_eq!(
+            msg.btree_name_index_address,
+            Some(StoredAddress::new(0x600))
+        );
         assert_eq!(msg.btree_creation_order_address, None);
     }
 
@@ -142,7 +154,10 @@ mod tests {
         data.extend_from_slice(&0x200u32.to_le_bytes()); // btree name
 
         let msg = LinkInfoMessage::parse(&data, 4).unwrap();
-        assert_eq!(msg.fractal_heap_address, Some(0x100));
-        assert_eq!(msg.btree_name_index_address, Some(0x200));
+        assert_eq!(msg.fractal_heap_address, Some(StoredAddress::new(0x100)));
+        assert_eq!(
+            msg.btree_name_index_address,
+            Some(StoredAddress::new(0x200))
+        );
     }
 }

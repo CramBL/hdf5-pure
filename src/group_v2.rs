@@ -26,15 +26,18 @@ use crate::source::{BaseOffsetSource, Source, frame};
 use crate::superblock::Superblock;
 use crate::symbol_table::SymbolTableMessage;
 
-/// Resolve v2 group entries from an object header.
+/// Returns one entry per hard link of the version 2 group `object_header` describes.
 ///
-/// Handles both compact (Link messages) and dense (fractal heap + B-tree v2) storage.
+/// A compact group holds its links as Link messages in the header itself, and a dense one holds
+/// them in a fractal heap indexed by a version 2 B-tree. A soft or external link is passed over:
+/// it identifies no object header in this file. The dense walk reads through a view of `file_data`
+/// framed at `base_address`, so the heap and index addresses of the Link Info message index that
+/// view directly.
 ///
-/// `base_address` is the superblock base address. The fractal heap and B-tree
-/// addresses in a Link Info message are file addresses, so on a file with a
-/// userblock they are short of their real positions by the base; dense storage is
-/// read through a base-framed view of `file_data` so they index it directly. The
-/// entry addresses this returns stay relative, as the compact path's do.
+/// # Errors
+///
+/// Returns [`FormatError::PathNotFound`] if a dense group's Link Info message contains no B-tree
+/// name index address, and the [`FormatError`] of the first structure that does not parse.
 pub fn resolve_v2_group_entries(
     file_data: &[u8],
     object_header: &ObjectHeader,
@@ -109,14 +112,16 @@ pub(crate) enum ChildLookup {
 }
 
 impl ChildLookup {
-    /// The answer reached by searching an object that *is* a group, given the
-    /// stored (base-relative) address the search found.
+    /// Returns [`ChildLookup::Found`] at the absolute file address of `address`, or
+    /// [`ChildLookup::Absent`] where the search of a group found no such child.
     ///
-    /// [`FormatError::OffsetOverflow`] if the base cannot be added to it, which
-    /// a crafted link naming `HADDR_UNDEF` in a file with a userblock arranges.
-    fn of(base: BaseAddress, address: Option<u64>) -> Result<Self, FormatError> {
+    /// # Errors
+    ///
+    /// Returns [`FormatError::OffsetOverflow`] if the base cannot be added to it, which a crafted
+    /// link naming `HADDR_UNDEF` in a file with a userblock arranges.
+    fn of(base: BaseAddress, address: Option<StoredAddress>) -> Result<Self, FormatError> {
         Ok(match address {
-            Some(address) => ChildLookup::Found(base.absolute(StoredAddress::new(address))?),
+            Some(address) => ChildLookup::Found(base.absolute(address)?),
             None => ChildLookup::Absent,
         })
     }
@@ -308,7 +313,7 @@ fn scan_compact_links(
     object_header: &ObjectHeader,
     offset_size: u8,
     name: LinkName<'_>,
-) -> Result<Option<u64>, FormatError> {
+) -> Result<Option<StoredAddress>, FormatError> {
     let mut found = None;
     for msg in &object_header.messages {
         if msg.msg_type != MessageType::Link {
@@ -320,23 +325,40 @@ fn scan_compact_links(
     Ok(found)
 }
 
-/// Resolve entries from dense storage (fractal heap + B-tree v2).
+/// Returns one entry per hard link of a group's dense storage: the fractal heap at `fh_addr`, read
+/// through the name index in `link_info`.
+///
+/// `file_data` is framed at the file's base address, so both addresses index it directly.
+///
+/// # Errors
+///
+/// Returns [`FormatError::PathNotFound`] if `link_info` contains no B-tree name index address,
+/// and the [`FormatError`] of the first structure that does not parse.
 fn resolve_dense_entries(
     file_data: &[u8],
     link_info: &LinkInfoMessage,
-    fh_addr: u64,
+    fh_addr: StoredAddress,
     offset_size: u8,
     length_size: u8,
 ) -> Result<Vec<GroupEntry>, FormatError> {
     // Parse fractal heap
-    let fh = FractalHeapHeader::parse(file_data, fh_addr.to_usize()?, offset_size, length_size)?;
+    let fh = FractalHeapHeader::parse(
+        file_data,
+        fh_addr.get().to_usize()?,
+        offset_size,
+        length_size,
+    )?;
 
     // Parse B-tree v2 for name index
     let btree_addr = link_info
         .btree_name_index_address
         .ok_or_else(|| FormatError::PathNotFound(String::from("no B-tree v2 name index")))?;
-    let btree_hdr =
-        BTreeV2Header::parse(file_data, btree_addr.to_usize()?, offset_size, length_size)?;
+    let btree_hdr = BTreeV2Header::parse(
+        file_data,
+        btree_addr.get().to_usize()?,
+        offset_size,
+        length_size,
+    )?;
     let records = collect_btree_v2_records(file_data, &btree_hdr, offset_size, length_size)?;
 
     let mut heap = fh.object_reader(offset_size, length_size);
@@ -460,10 +482,16 @@ pub fn resolve_path_any(
     Ok(current_addr)
 }
 
-/// Resolve group entries from an object header, auto-detecting v1 vs v2.
+/// Returns the entries of the group `object_header` describes, in either group version.
 ///
-/// `base_address` is the superblock base address, used to convert relative
-/// addresses to absolute file offsets in v1 groups.
+/// A header carrying a Symbol Table message describes a version 1 group, and one carrying a Link
+/// Info or Link message a version 2 group. A version 2 group's soft and external links are passed
+/// over: they identify no object header in this file.
+///
+/// # Errors
+///
+/// Returns [`FormatError::PathNotFound`] if the header describes no group, and the
+/// [`FormatError`] of the first structure of the group that does not parse.
 pub fn resolve_group_entries(
     file_data: &[u8],
     object_header: &ObjectHeader,
@@ -545,10 +573,13 @@ pub fn resolve_path_any_from_source<S: Source + ?Sized>(
     Ok(current_addr)
 }
 
-/// Streaming counterpart of [`resolve_group_entries`], auto-detecting v1 vs v2.
+/// Streaming counterpart of [`resolve_group_entries`], reading each structure of the group from
+/// `source` on demand.
 ///
-/// `base_address` is the superblock base address, used to convert the relative
-/// addresses stored in v1 (symbol-table) groups to absolute file offsets.
+/// # Errors
+///
+/// Returns the errors of [`resolve_group_entries`], and the error `source` reports for a structure
+/// it cannot read.
 pub fn resolve_group_entries_from_source<S: Source + ?Sized>(
     source: &S,
     object_header: &ObjectHeader,
@@ -585,6 +616,12 @@ pub fn resolve_group_entries_from_source<S: Source + ?Sized>(
     }
 }
 
+/// Streaming counterpart of [`resolve_v2_group_entries`].
+///
+/// # Errors
+///
+/// Returns the errors of [`resolve_v2_group_entries`], and the error `source` reports for a
+/// structure it cannot read.
 fn resolve_v2_group_entries_from_source<S: Source + ?Sized>(
     source: &S,
     object_header: &ObjectHeader,
@@ -605,19 +642,27 @@ fn resolve_v2_group_entries_from_source<S: Source + ?Sized>(
     }
 }
 
+/// Streaming counterpart of [`resolve_dense_entries`], reading `source` framed at the file's base
+/// address.
+///
+/// # Errors
+///
+/// Returns the errors of [`resolve_dense_entries`], and the error `source` reports for a structure
+/// it cannot read.
 fn resolve_dense_entries_from_source<S: Source + ?Sized>(
     source: &S,
     link_info: &LinkInfoMessage,
-    fh_addr: u64,
+    fh_addr: StoredAddress,
     offset_size: u8,
     length_size: u8,
 ) -> Result<Vec<GroupEntry>, FormatError> {
-    let fh = FractalHeapHeader::parse_from_source(source, fh_addr, offset_size, length_size)?;
+    let fh = FractalHeapHeader::parse_from_source(source, fh_addr.get(), offset_size, length_size)?;
 
     let btree_addr = link_info
         .btree_name_index_address
         .ok_or_else(|| FormatError::PathNotFound(String::from("no B-tree v2 name index")))?;
-    let btree_hdr = BTreeV2Header::parse_from_source(source, btree_addr, offset_size, length_size)?;
+    let btree_hdr =
+        BTreeV2Header::parse_from_source(source, btree_addr.get(), offset_size, length_size)?;
     let records =
         collect_btree_v2_records_from_source(source, &btree_hdr, offset_size, length_size)?;
 
@@ -740,7 +785,7 @@ mod tests {
         let entries = resolve_v2_group_entries(&[], &oh, 8, 8, BaseAddress::ZERO).unwrap();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].name, "test");
-        assert_eq!(entries[0].object_header_address, 0x1000);
+        assert_eq!(entries[0].object_header_address, StoredAddress::new(0x1000));
     }
 
     /// Build an object header carrying the given messages, as a lookup's filtered
@@ -844,7 +889,7 @@ mod tests {
 
         assert_eq!(
             scan_compact_links(&header, 8, LinkName::new("data").unwrap()).unwrap(),
-            Some(0x4000)
+            Some(StoredAddress::new(0x4000))
         );
         assert_eq!(
             scan_compact_links(&header, 8, LinkName::new("soft").unwrap()).unwrap(),
@@ -1139,7 +1184,7 @@ mod huge_link_tests {
 
     /// Group `g`'s dense-link storage: its info message, its heap address, and
     /// the file's offset and length sizes.
-    fn dense_link_info(bytes: &[u8]) -> (LinkInfoMessage, u64, u8, u8) {
+    fn dense_link_info(bytes: &[u8]) -> (LinkInfoMessage, StoredAddress, u8, u8) {
         let sig = signature::find_signature(bytes).unwrap();
         let superblock = Superblock::parse(bytes, sig).unwrap();
         let (offset_size, length_size) = (superblock.offset_size, superblock.length_size);

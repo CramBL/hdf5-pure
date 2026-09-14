@@ -17,17 +17,22 @@ pub struct GroupEntry {
     /// Name of the child object.
     pub name: String,
     /// Address of the child's object header.
-    pub object_header_address: u64,
+    pub object_header_address: StoredAddress,
     /// Cache type from the symbol table (SNOD) entry. Parsed for on-disk
     /// completeness; the reader does not currently act on it.
     #[allow(dead_code)]
     pub cache_type: u32,
 }
 
-/// Given a SymbolTableMessage, resolve all group children.
+/// Returns one entry per child of the version 1 group `sym_table_msg` describes.
 ///
-/// `base_address` is the superblock base address (typically the userblock size).
-/// All addresses stored in v1 structures are relative to this value.
+/// The message names two structures: the local heap that holds the link names, and the B-tree
+/// whose leaves lead to the symbol table nodes that hold the entries.
+///
+/// # Errors
+///
+/// Returns the [`FormatError`] of the first structure that does not parse: the local heap, the
+/// B-tree, or one of the symbol table nodes.
 pub fn resolve_v1_group_entries(
     file_data: &[u8],
     sym_table_msg: &SymbolTableMessage,
@@ -35,20 +40,15 @@ pub fn resolve_v1_group_entries(
     length_size: u8,
     base_address: BaseAddress,
 ) -> Result<Vec<GroupEntry>, FormatError> {
-    // Parse local heap (address is relative to base_address)
-    let mut heap = LocalHeap::parse(
+    let heap = LocalHeap::parse(
         file_data,
         base_address
-            .absolute(StoredAddress::new(sym_table_msg.local_heap_address))?
+            .absolute(sym_table_msg.local_heap_address)?
             .to_usize()?,
         offset_size,
         length_size,
     )?;
-    // The data segment address stored in the heap is also relative to base_address
-    heap.data_segment_address =
-        base_address.absolute(StoredAddress::new(heap.data_segment_address))?;
 
-    // Collect all SNOD addresses from B-tree (btree_address is relative to base_address)
     let snod_addrs = collect_symbol_table_nodes(
         file_data,
         sym_table_msg.btree_address,
@@ -59,17 +59,14 @@ pub fn resolve_v1_group_entries(
 
     let mut entries = Vec::new();
     for snod_addr in snod_addrs {
-        // SNOD addresses from B-tree children are also relative to base_address
         let snod = SymbolTableNode::parse(
             file_data,
-            base_address
-                .absolute(StoredAddress::new(snod_addr))?
-                .to_usize()?,
+            base_address.absolute(snod_addr)?.to_usize()?,
             offset_size,
             length_size,
         )?;
         for entry in &snod.entries {
-            let name = heap.read_string(file_data, entry.link_name_offset)?;
+            let name = heap.read_string(file_data, base_address, entry.link_name_offset)?;
             entries.push(GroupEntry {
                 name,
                 object_header_address: entry.object_header_address,
@@ -84,10 +81,13 @@ pub fn resolve_v1_group_entries(
 /// Streaming counterpart of [`resolve_v1_group_entries`].
 ///
 /// Reads the local heap header, B-tree v1, and each symbol-table node from a
-/// [`Source`] on demand. The heap's data segment (holding the link names) is
-/// read once and every name is sliced from that single buffer. As with the
-/// buffered version, the returned `object_header_address` values are relative to
-/// `base_address` (the caller adds it to obtain absolute file offsets).
+/// [`Source`] on demand. The heap's data segment, which holds the link names, is read once and
+/// every name is sliced from that single buffer.
+///
+/// # Errors
+///
+/// Returns the errors of [`resolve_v1_group_entries`], and the error `source` reports for a
+/// structure it cannot read.
 pub fn resolve_v1_group_entries_from_source<S: Source + ?Sized>(
     source: &S,
     sym_table_msg: &SymbolTableMessage,
@@ -95,20 +95,15 @@ pub fn resolve_v1_group_entries_from_source<S: Source + ?Sized>(
     length_size: u8,
     base_address: BaseAddress,
 ) -> Result<Vec<GroupEntry>, FormatError> {
-    // Parse local heap (address is relative to base_address).
-    let heap_addr = base_address.absolute(StoredAddress::new(sym_table_msg.local_heap_address))?;
-    let mut heap = LocalHeap::parse_from_source(source, heap_addr, offset_size, length_size)?;
-    // The data segment address stored in the heap is also relative to base_address.
-    heap.data_segment_address =
-        base_address.absolute(StoredAddress::new(heap.data_segment_address))?;
+    let heap_addr = base_address.absolute(sym_table_msg.local_heap_address)?;
+    let heap = LocalHeap::parse_from_source(source, heap_addr, offset_size, length_size)?;
 
     // Read the heap data segment once; every link name is sliced from it.
     let segment = source.read_metadata_at(
-        heap.data_segment_address,
+        base_address.absolute(heap.data_segment_address)?,
         heap.data_segment_size.to_usize()?,
     )?;
 
-    // Collect all SNOD addresses from the B-tree (relative to base_address).
     let snod_addrs = collect_symbol_table_nodes_from_source(
         source,
         sym_table_msg.btree_address,
@@ -119,8 +114,7 @@ pub fn resolve_v1_group_entries_from_source<S: Source + ?Sized>(
 
     let mut entries = Vec::new();
     for snod_addr in snod_addrs {
-        // SNOD addresses from the B-tree are relative to base_address.
-        let snod_offset = base_address.absolute(StoredAddress::new(snod_addr))?;
+        let snod_offset = base_address.absolute(snod_addr)?;
         let snod =
             SymbolTableNode::parse_from_source(source, snod_offset, offset_size, length_size)?;
         for entry in &snod.entries {
@@ -300,8 +294,8 @@ mod tests {
         }
 
         let msg = SymbolTableMessage {
-            btree_address: btree_offset as u64,
-            local_heap_address: heap_offset as u64,
+            btree_address: StoredAddress::new(btree_offset as u64),
+            local_heap_address: StoredAddress::new(heap_offset as u64),
         };
 
         (file, msg)
@@ -313,9 +307,9 @@ mod tests {
         let entries = resolve_v1_group_entries(&file, &msg, 8, 8, BaseAddress::ZERO).unwrap();
         assert_eq!(entries.len(), 2);
         assert_eq!(entries[0].name, "alpha");
-        assert_eq!(entries[0].object_header_address, 0x1000);
+        assert_eq!(entries[0].object_header_address, StoredAddress::new(0x1000));
         assert_eq!(entries[1].name, "beta");
-        assert_eq!(entries[1].object_header_address, 0x2000);
+        assert_eq!(entries[1].object_header_address, StoredAddress::new(0x2000));
     }
 
     // Helper to extract dataset components from an object header
@@ -398,7 +392,7 @@ mod tests {
         let hdr = ObjectHeader::parse(
             file_data,
             AccessMode::ReadOnly,
-            data_entry.object_header_address as usize,
+            data_entry.object_header_address.get() as usize,
             sb.offset_size,
             sb.length_size,
         )

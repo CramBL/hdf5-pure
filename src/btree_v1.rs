@@ -40,14 +40,14 @@ pub struct BTreeV1Node {
     pub node_level: u8,
     /// Number of entries used.
     pub entries_used: u16,
-    /// Left sibling address, or None if undefined.
-    pub left_sibling: Option<u64>,
-    /// Right sibling address, or None if undefined.
-    pub right_sibling: Option<u64>,
+    /// Address of the left sibling, or `None` where the node stores the undefined address.
+    pub left_sibling: Option<StoredAddress>,
+    /// Address of the right sibling, or `None` where the node stores the undefined address.
+    pub right_sibling: Option<StoredAddress>,
     /// Keys (entries_used + 1 values).
     pub keys: Vec<u64>,
-    /// Child addresses (entries_used values).
-    pub children: Vec<u64>,
+    /// Address of each child, one per used entry.
+    pub children: Vec<StoredAddress>,
 }
 
 impl BTreeV1Node {
@@ -81,9 +81,11 @@ impl BTreeV1Node {
         let entries_used = u16::from_le_bytes([file_data[offset + 6], file_data[offset + 7]]);
 
         let mut pos = offset + BTREE_V1_NODE_PREFIX_LEN;
-        let left_sibling = read_optional_offset(file_data, pos, offset_size)?;
+        let left_sibling =
+            read_optional_offset(file_data, pos, offset_size)?.map(StoredAddress::new);
         pos += os;
-        let right_sibling = read_optional_offset(file_data, pos, offset_size)?;
+        let right_sibling =
+            read_optional_offset(file_data, pos, offset_size)?.map(StoredAddress::new);
         pos += os;
 
         // For type 0: keys are `length_size` bytes, children are `offset_size` bytes
@@ -107,8 +109,11 @@ impl BTreeV1Node {
             keys.push(key);
             pos += key_size;
             // child[i]
-            let child = read_offset(file_data, pos, offset_size)?;
-            children.push(child);
+            children.push(StoredAddress::new(read_offset(
+                file_data,
+                pos,
+                offset_size,
+            )?));
             pos += os;
             let _ = i;
         }
@@ -159,18 +164,24 @@ impl BTreeV1Node {
 /// beyond any valid tree. Mirrors `MAX_CHUNK_BTREE_DEPTH` in `chunked_read`.
 const MAX_SYMBOL_TABLE_BTREE_DEPTH: u32 = 64;
 
-/// Collect all leaf-level child addresses (SNOD addresses) by traversing the B-tree.
+/// Returns the address of every symbol table node the B-tree at `btree_address` leads to.
 ///
-/// `base_address` is the superblock base address. All addresses stored in the
-/// B-tree are relative to this value. The returned SNOD addresses are also
-/// relative (the caller must add `base_address` to obtain absolute file offsets).
+/// The leaves of a group's B-tree name the symbol table nodes that hold its entries, and the walk
+/// descends to them through the internal nodes.
+///
+/// # Errors
+///
+/// Returns [`FormatError::InvalidBTreeNodeType`] if a node on the walk is not a group node,
+/// [`FormatError::NestingDepthExceeded`] if the walk descends past
+/// [`MAX_SYMBOL_TABLE_BTREE_DEPTH`] levels, and the [`FormatError`] of the first node that does
+/// not parse.
 pub fn collect_symbol_table_nodes(
     file_data: &[u8],
-    btree_address: u64,
+    btree_address: StoredAddress,
     offset_size: u8,
     length_size: u8,
     base_address: BaseAddress,
-) -> Result<Vec<u64>, FormatError> {
+) -> Result<Vec<StoredAddress>, FormatError> {
     collect_symbol_table_nodes_inner(
         file_data,
         btree_address,
@@ -186,18 +197,16 @@ pub fn collect_symbol_table_nodes(
 /// stack overflows (an uncatchable process abort) when listing a v1 group.
 fn collect_symbol_table_nodes_inner(
     file_data: &[u8],
-    btree_address: u64,
+    btree_address: StoredAddress,
     offset_size: u8,
     length_size: u8,
     base_address: BaseAddress,
     depth: u32,
-) -> Result<Vec<u64>, FormatError> {
+) -> Result<Vec<StoredAddress>, FormatError> {
     if depth > MAX_SYMBOL_TABLE_BTREE_DEPTH {
         return Err(FormatError::NestingDepthExceeded);
     }
-    let node_offset = base_address
-        .absolute(StoredAddress::new(btree_address))?
-        .to_usize()?;
+    let node_offset = base_address.absolute(btree_address)?.to_usize()?;
     let node = BTreeV1Node::parse(file_data, node_offset, offset_size, length_size)?;
 
     if node.node_type != 0 {
@@ -205,10 +214,10 @@ fn collect_symbol_table_nodes_inner(
     }
 
     if node.node_level == 0 {
-        // Leaf: children are SNOD addresses (relative to base_address)
+        // A leaf's children are the symbol table nodes themselves.
         Ok(node.children)
     } else {
-        // Internal: recurse into children (child addresses are relative to base_address)
+        // An internal node's children are B-tree nodes one level down.
         let mut result = Vec::new();
         for &child_addr in &node.children {
             let child_snods = collect_symbol_table_nodes_inner(
@@ -228,16 +237,17 @@ fn collect_symbol_table_nodes_inner(
 /// Streaming counterpart of [`collect_symbol_table_nodes`]: walks the v1 B-tree
 /// through a [`Source`], reading one node at a time.
 ///
-/// `base_address` is the superblock base address; all B-tree node and SNOD
-/// addresses are stored relative to it. The returned SNOD addresses are also
-/// relative (the caller adds `base_address` to obtain absolute file offsets).
+/// # Errors
+///
+/// Returns the errors of [`collect_symbol_table_nodes`], and the error `source` reports for a node
+/// it cannot read.
 pub fn collect_symbol_table_nodes_from_source<S: Source + ?Sized>(
     source: &S,
-    btree_address: u64,
+    btree_address: StoredAddress,
     offset_size: u8,
     length_size: u8,
     base_address: BaseAddress,
-) -> Result<Vec<u64>, FormatError> {
+) -> Result<Vec<StoredAddress>, FormatError> {
     collect_symbol_table_nodes_from_source_inner(
         source,
         btree_address,
@@ -252,16 +262,16 @@ pub fn collect_symbol_table_nodes_from_source<S: Source + ?Sized>(
 /// [`collect_symbol_table_nodes_inner`] for why the bound is required.
 fn collect_symbol_table_nodes_from_source_inner<S: Source + ?Sized>(
     source: &S,
-    btree_address: u64,
+    btree_address: StoredAddress,
     offset_size: u8,
     length_size: u8,
     base_address: BaseAddress,
     depth: u32,
-) -> Result<Vec<u64>, FormatError> {
+) -> Result<Vec<StoredAddress>, FormatError> {
     if depth > MAX_SYMBOL_TABLE_BTREE_DEPTH {
         return Err(FormatError::NestingDepthExceeded);
     }
-    let node_offset = base_address.absolute(StoredAddress::new(btree_address))?;
+    let node_offset = base_address.absolute(btree_address)?;
     let node = BTreeV1Node::parse_from_source(source, node_offset, offset_size, length_size)?;
 
     if node.node_type != 0 {
@@ -339,7 +349,10 @@ mod tests {
         assert_eq!(node.node_level, 0);
         assert_eq!(node.entries_used, 2);
         assert_eq!(node.keys, vec![0, 5, 10]);
-        assert_eq!(node.children, vec![0x100, 0x200]);
+        assert_eq!(
+            node.children,
+            vec![StoredAddress::new(0x100), StoredAddress::new(0x200)]
+        );
         assert_eq!(node.left_sibling, None);
         assert_eq!(node.right_sibling, None);
     }
@@ -358,7 +371,7 @@ mod tests {
         let node = BTreeV1Node::parse(&data, 0, 4, 8).unwrap();
         assert_eq!(node.entries_used, 1);
         assert_eq!(node.keys, vec![0x10, 0x20]);
-        assert_eq!(node.children, vec![0x300]);
+        assert_eq!(node.children, vec![StoredAddress::new(0x300)]);
     }
 
     #[test]
@@ -388,10 +401,18 @@ mod tests {
         file[leaf2_offset..leaf2_offset + leaf2.len()].copy_from_slice(&leaf2);
         file[internal_offset..internal_offset + internal.len()].copy_from_slice(&internal);
 
-        let snods =
-            collect_symbol_table_nodes(&file, internal_offset as u64, os, ls, BaseAddress::ZERO)
-                .unwrap();
-        assert_eq!(snods, vec![0xA00, 0xB00]);
+        let snods = collect_symbol_table_nodes(
+            &file,
+            StoredAddress::new(internal_offset as u64),
+            os,
+            ls,
+            BaseAddress::ZERO,
+        )
+        .unwrap();
+        assert_eq!(
+            snods,
+            vec![StoredAddress::new(0xA00), StoredAddress::new(0xB00)]
+        );
     }
 
     #[test]
@@ -407,7 +428,8 @@ mod tests {
         let data = build_btree_node(1, 0, &[0, 1], &[0x100], None, None, 8, 8);
         let mut file = vec![0u8; 512];
         file[..data.len()].copy_from_slice(&data);
-        let err = collect_symbol_table_nodes(&file, 0, 8, 8, BaseAddress::ZERO).unwrap_err();
+        let err = collect_symbol_table_nodes(&file, StoredAddress::new(0), 8, 8, BaseAddress::ZERO)
+            .unwrap_err();
         assert_eq!(err, FormatError::InvalidBTreeNodeType(1));
     }
 
@@ -416,7 +438,7 @@ mod tests {
         let data = build_btree_node(0, 0, &[0, 4], &[0x50], None, None, 4, 4);
         let node = BTreeV1Node::parse(&data, 0, 4, 4).unwrap();
         assert_eq!(node.entries_used, 1);
-        assert_eq!(node.children, vec![0x50]);
+        assert_eq!(node.children, vec![StoredAddress::new(0x50)]);
     }
 
     #[test]
@@ -430,7 +452,9 @@ mod tests {
         let mut file = vec![0u8; 1024];
         file[..node.len()].copy_from_slice(&node);
 
-        let err = collect_symbol_table_nodes(&file, 0, os, ls, BaseAddress::ZERO).unwrap_err();
+        let err =
+            collect_symbol_table_nodes(&file, StoredAddress::new(0), os, ls, BaseAddress::ZERO)
+                .unwrap_err();
         assert_eq!(err, FormatError::NestingDepthExceeded);
     }
 }

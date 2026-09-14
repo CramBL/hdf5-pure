@@ -3,6 +3,7 @@
 #[cfg(not(feature = "std"))]
 use alloc::string::String;
 
+use crate::address::{BaseAddress, StoredAddress};
 use crate::bytes::{read_length, read_offset};
 use crate::convert::Narrow;
 use crate::error::FormatError;
@@ -18,7 +19,7 @@ pub struct LocalHeap {
     #[allow(dead_code)]
     pub free_list_head_offset: u64,
     /// File address of the data segment.
-    pub data_segment_address: u64,
+    pub data_segment_address: StoredAddress,
 }
 
 impl LocalHeap {
@@ -62,7 +63,7 @@ impl LocalHeap {
         pos += ls;
         let free_list_head_offset = read_length(file_data, pos, length_size)?;
         pos += ls;
-        let data_segment_address = read_offset(file_data, pos, offset_size)?;
+        let data_segment_address = StoredAddress::new(read_offset(file_data, pos, offset_size)?);
 
         Ok(LocalHeap {
             data_segment_size,
@@ -71,20 +72,37 @@ impl LocalHeap {
         })
     }
 
-    /// Read a null-terminated string from the heap's data segment at the given byte offset.
-    pub fn read_string(&self, file_data: &[u8], string_offset: u64) -> Result<String, FormatError> {
-        let seg_addr = self.data_segment_address.to_usize()?;
+    /// Returns the null-terminated string at `string_offset` in the heap's data segment.
+    ///
+    /// The heap stores the address of its data segment, so the segment sits in `file_data` at that
+    /// address plus `base_address`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::OffsetOverflow`] if adding `base_address` or `string_offset` to the
+    /// segment address overflows, [`FormatError::ValueTooLargeForPlatform`] if the segment address
+    /// or `string_offset` does not fit this platform's `usize`, [`FormatError::UnexpectedEof`] if
+    /// the string begins outside the segment or reaches its end with no terminator, and
+    /// [`FormatError::InvalidLocalHeapName`] if the bytes before the terminator are not UTF-8.
+    pub fn read_string(
+        &self,
+        file_data: &[u8],
+        base_address: BaseAddress,
+        string_offset: u64,
+    ) -> Result<String, FormatError> {
+        let segment = base_address.absolute(self.data_segment_address)?;
+        let seg_addr = segment.to_usize()?;
         let str_start =
             seg_addr
                 .checked_add(string_offset.to_usize()?)
                 .ok_or(FormatError::OffsetOverflow {
-                    offset: self.data_segment_address,
+                    offset: segment,
                     length: string_offset,
                 })?;
         let seg_end = seg_addr
             .checked_add(self.data_segment_size.to_usize()?)
             .ok_or(FormatError::OffsetOverflow {
-                offset: self.data_segment_address,
+                offset: segment,
                 length: self.data_segment_size,
             })?;
 
@@ -238,7 +256,7 @@ mod tests {
     fn parse_heap_header() {
         let file = build_heap_file(0, 100, &["hello", "world"], 8, 8);
         let heap = LocalHeap::parse(&file, 0, 8, 8).unwrap();
-        assert_eq!(heap.data_segment_address, 100);
+        assert_eq!(heap.data_segment_address, StoredAddress::new(100));
         assert_eq!(heap.data_segment_size, 12); // "hello\0world\0"
     }
 
@@ -246,7 +264,7 @@ mod tests {
     fn read_string_at_offset_0() {
         let file = build_heap_file(0, 100, &["hello", "world"], 8, 8);
         let heap = LocalHeap::parse(&file, 0, 8, 8).unwrap();
-        let s = heap.read_string(&file, 0).unwrap();
+        let s = heap.read_string(&file, BaseAddress::ZERO, 0).unwrap();
         assert_eq!(s, "hello");
     }
 
@@ -254,8 +272,23 @@ mod tests {
     fn read_string_at_offset_6() {
         let file = build_heap_file(0, 100, &["hello", "world"], 8, 8);
         let heap = LocalHeap::parse(&file, 0, 8, 8).unwrap();
-        let s = heap.read_string(&file, 6).unwrap();
+        let s = heap.read_string(&file, BaseAddress::ZERO, 6).unwrap();
         assert_eq!(s, "world");
+    }
+
+    #[test]
+    fn read_string_adds_the_base_address_to_the_stored_segment_address() {
+        const BASE: usize = 512;
+        let mut file = vec![0u8; BASE];
+        file.extend_from_slice(&build_heap_file(0, 100, &["hello", "world"], 8, 8));
+
+        let heap = LocalHeap::parse(&file, BASE, 8, 8).unwrap();
+        assert_eq!(heap.data_segment_address, StoredAddress::new(100));
+        assert_eq!(
+            heap.read_string(&file, BaseAddress::new(BASE as u64), 6)
+                .unwrap(),
+            "world"
+        );
     }
 
     #[test]
@@ -273,7 +306,7 @@ mod tests {
         file[102] = 0xFF;
         let heap = LocalHeap::parse(&file, 0, 8, 8).unwrap();
 
-        let err = heap.read_string(&file, 0).unwrap_err();
+        let err = heap.read_string(&file, BaseAddress::ZERO, 0).unwrap_err();
         let FormatError::InvalidLocalHeapName { offset, source } = err else {
             panic!("expected InvalidLocalHeapName, got {err:?}");
         };
@@ -291,7 +324,7 @@ mod tests {
     fn read_string_past_segment() {
         let file = build_heap_file(0, 100, &["hi"], 8, 8);
         let heap = LocalHeap::parse(&file, 0, 8, 8).unwrap();
-        let err = heap.read_string(&file, 100).unwrap_err();
+        let err = heap.read_string(&file, BaseAddress::ZERO, 100).unwrap_err();
         assert!(matches!(err, FormatError::UnexpectedEof { .. }));
     }
 
@@ -299,8 +332,8 @@ mod tests {
     fn parse_heap_4byte_offsets() {
         let file = build_heap_file(0, 80, &["test"], 4, 4);
         let heap = LocalHeap::parse(&file, 0, 4, 4).unwrap();
-        assert_eq!(heap.data_segment_address, 80);
-        let s = heap.read_string(&file, 0).unwrap();
+        assert_eq!(heap.data_segment_address, StoredAddress::new(80));
+        let s = heap.read_string(&file, BaseAddress::ZERO, 0).unwrap();
         assert_eq!(s, "test");
     }
 
@@ -327,7 +360,10 @@ mod tests {
         // diagnostic `start + 1` in either read path (issue #140).
         let file = build_heap_file(0, 80, &["test"], 8, 8);
         let heap = LocalHeap::parse(&file, 0, 8, 8).unwrap();
-        assert!(heap.read_string(&file, u64::MAX).is_err());
+        assert!(
+            heap.read_string(&file, BaseAddress::ZERO, u64::MAX)
+                .is_err()
+        );
         assert!(heap.read_string_in_segment(&file, u64::MAX).is_err());
     }
 }

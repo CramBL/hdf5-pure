@@ -6747,20 +6747,14 @@ impl WriteEngine {
             let mut link_order = LinkCreationOrder::for_region(&region)?;
 
             // Write each staged source subtree and link its root into this group.
-            // `write_copy_subtree` returns an absolute header address; the parent
-            // link stores it relative to the userblock base.
             for (leaf, tree) in copies {
                 let root = self.write_copy_subtree(&tree)?;
-                region.push_link(
-                    leaf.as_str(),
-                    base.relative(root)?.get(),
-                    link_order.take()?,
-                );
+                region.push_link(leaf.as_str(), base.relative(root)?, link_order.take()?);
             }
 
             // Datasets directly under this group. Appended addresses are absolute
-            // file offsets; the contiguous data-layout address and the parent link
-            // target are stored relative to the base address (`- base`). Placed
+            // file offsets, and the contiguous data-layout address is stored
+            // relative to the base address. Placed
             // non-reference datasets first (recording each into `path_addr`), then
             // reference datasets — a reference to a *non-reference* sibling added
             // in the same group's batch resolves regardless of `staged.datasets`
@@ -6854,29 +6848,27 @@ impl WriteEngine {
                 let oh_addr = self.alloc_or_append_typed(&oh, PageType::Meta)?;
                 region.push_link(
                     fd.name.as_str(),
-                    base.relative(oh_addr)?.get(),
+                    base.relative(oh_addr)?,
                     link_order.take()?,
                 );
                 path_addr.insert(key.join(&fd.name), oh_addr);
             }
 
             // Relocating value overwrites under this group: write the new data and
-            // rewritten header, then patch this group's existing link to it. The
-            // link target is stored relative to the base address (`- base`); on a
+            // rewritten header, then patch this group's existing link to it. On a
             // userblock file only the chunked variant reaches here (contiguous and
             // compact resizes are refused in the write preflight).
             for (leaf, old_oh, mw) in &writes {
                 let new_oh = self.write_moving(mw)?;
-                patch_link_target(&mut region, leaf.as_str(), base.relative(new_oh)?.get())?;
+                patch_link_target(&mut region, leaf.as_str(), base.relative(new_oh)?)?;
                 relocations.insert(*old_oh, new_oh);
             }
 
             // Wire links to dirty child groups (new → add a link; existing →
-            // patch the existing link to the child's new address). Link targets are
-            // stored relative to the base address.
+            // patch the existing link to the child's new address).
             for (child, leaf) in children.get(key).into_iter().flatten() {
                 let child_name = leaf.as_str();
-                let child_addr = base.relative(path_addr[child])?.get();
+                let child_addr = base.relative(path_addr[child])?;
                 if nodes[child].is_new {
                     region.push_link(child_name, child_addr, link_order.take()?);
                 } else {
@@ -8048,12 +8040,9 @@ impl WriteEngine {
         let mut region = fresh_group_region();
         let mut link_names = Vec::with_capacity(entries.len());
         for e in &entries {
-            // Group-entry addresses are already stored relative to the base address,
-            // matching how `encode_link_message` stores link targets — so they are
-            // re-emitted verbatim, no base conversion needed. A version 1 group
-            // records no link creation order — the mechanism arrived with the
-            // Link Info message — so these links carry no creation index, and
-            // `fresh_group_region` declares none.
+            // A version 1 group has no link creation order, which the Link Info
+            // message introduced, so these links get no creation index and the
+            // Link Info message `fresh_group_region` writes tracks none.
             region.push_link(&e.name, e.object_header_address, None);
             link_names.push(e.name.clone());
         }
@@ -8961,7 +8950,7 @@ impl WriteEngine {
         // (name, creation index, target address) per hard link. The creation
         // index is `None` unless the source group tracks link creation order,
         // and is carried so a copy of one that does reproduces its order.
-        let mut children: Vec<(String, Option<u64>, u64)> = Vec::new();
+        let mut children: Vec<(String, Option<u64>, StoredAddress)> = Vec::new();
         // The rebuilt chunk-0 region: every message kept verbatim except hard
         // Link messages (carried as `children`) and, when dense, the Attribute
         // Info message and inline Attribute messages (carried as `dense_attrs`).
@@ -9287,9 +9276,8 @@ impl WriteEngine {
                 }
                 let mut kids = Vec::with_capacity(children.len());
                 for (name, creation_order, child) in children {
-                    // Child link targets are stored base-relative; re-absolutize
-                    // before descending so `addr` stays an absolute offset into `src`.
-                    let child = base.absolute(StoredAddress::new(child))?;
+                    // `read_copy_subtree` reads `src` at absolute offsets.
+                    let child = base.absolute(child)?;
                     kids.push((
                         name,
                         creation_order,
@@ -9393,7 +9381,7 @@ impl WriteEngine {
                     // for it, so a copy of a group that tracks link creation
                     // order carries the same order as its source — the Link Info
                     // message naming that order is copied verbatim beside it.
-                    region.push_link(name, base.relative(new_child)?.get(), *creation_order);
+                    region.push_link(name, base.relative(new_child)?, *creation_order);
                 }
                 // The dense heap is built for whatever address it is placed at
                 // (see `append_dense_attrs`), so it needs no ordering against the
@@ -10539,9 +10527,7 @@ impl WriteEngine {
             let entries =
                 resolve_group_entries_from_source(&self.image(), &header, os, ls, base).ok()?;
             for e in entries {
-                let child = base
-                    .absolute(StoredAddress::new(e.object_header_address))
-                    .ok()?;
+                let child = base.absolute(e.object_header_address).ok()?;
                 *counts.entry(child).or_insert(0) += 1;
                 stack.push(child);
             }
@@ -10632,11 +10618,10 @@ impl WriteEngine {
             }
             Ok(ObjModel::Group { children, .. }) => {
                 out.extend(meta_spans(spans));
-                // Child link targets are stored base-relative; re-absolutize each
-                // before descending so the recursion keeps working in absolute
-                // offsets (matching `incoming`'s keys and `oh_chunk_spans`).
+                // The recursion works in absolute offsets, matching `incoming`'s
+                // keys and `oh_chunk_spans`.
                 for (_, _, child) in children {
-                    if let Ok(c) = base.absolute(StoredAddress::new(child)) {
+                    if let Ok(c) = base.absolute(child) {
                         self.collect_free_spans(c, depth + 1, incoming, out);
                     }
                 }
@@ -10999,7 +10984,7 @@ enum ObjModel {
     /// [`DatasetVerbatim`](ObjModel::DatasetVerbatim) for `dense_attrs`.
     Group {
         non_link_region: OhRegion,
-        children: Vec<(String, Option<u64>, u64)>,
+        children: Vec<(String, Option<u64>, StoredAddress)>,
         dense_attrs: DenseAttrSet,
     },
 }
@@ -11928,7 +11913,7 @@ fn flatten_dataset(db: DatasetBuilder, name: LinkNameBuf) -> Result<FlatDataset,
     // name would otherwise overflow it into silent corruption. Measured with a
     // creation index present — the widest form, written into a group that tracks
     // link creation order — since the parent group is not known here.
-    let mut sized = make_link(name.as_str(), 0);
+    let mut sized = make_link(name.as_str(), StoredAddress::new(0));
     sized.creation_order = Some(0);
     if sized.serialize(OFFSET_SIZE).len() > OBJECT_HEADER_MESSAGE_MAX {
         return Err(Error::EditUnsupported(
@@ -12674,7 +12659,7 @@ fn ensure_attribute_info(region: &mut OhRegion) -> Result<(), Error> {
 fn encode_link_message(
     layout: OhRecordLayout,
     name: &str,
-    addr: u64,
+    addr: StoredAddress,
     creation_order: Option<u64>,
 ) -> Vec<u8> {
     let mut link = make_link(name, addr);
@@ -12687,7 +12672,11 @@ fn encode_link_message(
 /// the link named `name` to `new_addr` (used to repoint a parent at a relocated
 /// child group). The target address is the trailing `OFFSET_SIZE` bytes of the
 /// link body for a hard link.
-fn patch_link_target(region: &mut OhRegion, name: &str, new_addr: u64) -> Result<(), Error> {
+fn patch_link_target(
+    region: &mut OhRegion,
+    name: &str,
+    new_addr: StoredAddress,
+) -> Result<(), Error> {
     let mut p = 0;
     while let Some((msg_type, body, body_end)) = region.next_message(p)? {
         if msg_type == MessageType::Link {
@@ -12697,7 +12686,7 @@ fn patch_link_target(region: &mut OhRegion, name: &str, new_addr: u64) -> Result
                         LinkTarget::Hard { .. } => {
                             let ofs = body_end - OFFSET_SIZE as usize;
                             region.bytes_mut()[ofs..body_end]
-                                .copy_from_slice(&new_addr.to_le_bytes());
+                                .copy_from_slice(&new_addr.get().to_le_bytes());
                             Ok(())
                         }
                         _ => Err(Error::EditUnsupported(
@@ -14467,7 +14456,7 @@ impl OhRegion {
     /// `creation_order` where the group tracks link creation order and `None`
     /// where it does not (see [`LinkCreationOrder`], which is what decides
     /// which).
-    fn push_link(&mut self, name: &str, addr: u64, creation_order: Option<u64>) {
+    fn push_link(&mut self, name: &str, addr: StoredAddress, creation_order: Option<u64>) {
         let record = encode_link_message(self.props.layout, name, addr, creation_order);
         self.push_bytes(&record);
     }
@@ -17725,7 +17714,7 @@ mod tests {
         region.push(MessageType::LinkInfo, &li);
         region.push(MessageType::GroupInfo, &GROUP_INFO_BODY);
         for (i, name) in links.iter().enumerate() {
-            region.push_link(name, 0x100 + i as u64, Some(i as u64));
+            region.push_link(name, StoredAddress::new(0x100 + i as u64), Some(i as u64));
         }
         region
     }
@@ -17758,8 +17747,8 @@ mod tests {
         // up recording 5 — the next index, not the highest in use.
         let mut region = link_tracked_region(3, false, &["a", "b", "c"]);
         let mut order = LinkCreationOrder::for_region(&region).unwrap();
-        region.push_link("d", 0x200, order.take().unwrap());
-        region.push_link("e", 0x300, order.take().unwrap());
+        region.push_link("d", StoredAddress::new(0x200), order.take().unwrap());
+        region.push_link("e", StoredAddress::new(0x300), order.take().unwrap());
         order.record(&mut region).unwrap();
 
         assert_eq!(
@@ -17784,7 +17773,7 @@ mod tests {
         let mut region = remove_link_from_region(&region, "a").unwrap();
         region = remove_link_from_region(&region, "c").unwrap();
         let mut order = LinkCreationOrder::for_region(&region).unwrap();
-        region.push_link("d", 0x200, order.take().unwrap());
+        region.push_link("d", StoredAddress::new(0x200), order.take().unwrap());
         order.record(&mut region).unwrap();
 
         assert_eq!(
@@ -17802,7 +17791,7 @@ mod tests {
         // it and leaves the three addresses undefined.
         let mut region = link_tracked_region(1, true, &["a"]);
         let mut order = LinkCreationOrder::for_region(&region).unwrap();
-        region.push_link("b", 0x200, order.take().unwrap());
+        region.push_link("b", StoredAddress::new(0x200), order.take().unwrap());
         order.record(&mut region).unwrap();
 
         let (_, _, info) = find_link_info(&region).unwrap().unwrap();
@@ -17821,7 +17810,7 @@ mod tests {
         let before = region.clone();
         let mut order = LinkCreationOrder::for_region(&region).unwrap();
         assert_eq!(order.take().unwrap(), None);
-        region.push_link("d", 0x200, None);
+        region.push_link("d", StoredAddress::new(0x200), None);
         order.record(&mut region).unwrap();
 
         assert_eq!(region_links(&region), vec![("d".to_string(), None)]);
@@ -17876,7 +17865,7 @@ mod tests {
         // A group that does not track the order is not screened at all: this
         // crate writes more than eight compact links routinely.
         let mut untracked = fresh_group_region();
-        untracked.push_link("a", 0x100, None);
+        untracked.push_link("a", StoredAddress::new(0x100), None);
         reject_dense_link_creation_order(&untracked, 99)
             .expect("an untracked group has no creation order to lose");
     }

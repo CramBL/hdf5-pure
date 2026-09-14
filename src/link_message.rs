@@ -3,6 +3,7 @@
 #[cfg(not(feature = "std"))]
 use alloc::{string::String, vec::Vec};
 
+use crate::address::StoredAddress;
 use crate::bytes::{ensure_len, read_offset, read_uint_width};
 use crate::convert::Narrow;
 use crate::datatype::CharacterSet;
@@ -13,7 +14,9 @@ use crate::width::UintWidth;
 #[derive(Debug, Clone, PartialEq)]
 pub enum LinkTarget {
     /// Hard link pointing to an object header address.
-    Hard { object_header_address: u64 },
+    Hard {
+        object_header_address: StoredAddress,
+    },
     /// Soft (symbolic) link with a target path string.
     Soft { target_path: String },
     /// External link pointing to a file and object path within it.
@@ -179,13 +182,17 @@ impl LinkMessage {
         data: &[u8],
         offset_size: u8,
         name: &str,
-    ) -> Result<Option<u64>, FormatError> {
+    ) -> Result<Option<StoredAddress>, FormatError> {
         let prefix = parse_prefix(data)?;
         if !name_matches(prefix.name, name) {
             return Ok(None);
         }
         match prefix.link_type_code {
-            0 => Ok(Some(read_offset(data, prefix.target_pos, offset_size)?)),
+            0 => Ok(Some(StoredAddress::new(read_offset(
+                data,
+                prefix.target_pos,
+                offset_size,
+            )?))),
             // A soft or external link names a path, not an object header here, so
             // it is passed over exactly as `crate::group_v2` passes over it when
             // resolving entries.
@@ -286,9 +293,9 @@ impl LinkMessage {
                               narrows to the width chosen to hold object header addresses"
                 )]
                 match offset_size {
-                    2 => buf.extend_from_slice(&(*object_header_address as u16).to_le_bytes()),
-                    4 => buf.extend_from_slice(&(*object_header_address as u32).to_le_bytes()),
-                    8 => buf.extend_from_slice(&object_header_address.to_le_bytes()),
+                    2 => buf.extend_from_slice(&(object_header_address.get() as u16).to_le_bytes()),
+                    4 => buf.extend_from_slice(&(object_header_address.get() as u32).to_le_bytes()),
+                    8 => buf.extend_from_slice(&object_header_address.get().to_le_bytes()),
                     _ => {}
                 }
             }
@@ -342,9 +349,8 @@ impl LinkMessage {
         let link_target = match link_type_code {
             0 => {
                 // Hard link
-                let addr = read_offset(data, pos, offset_size)?;
                 LinkTarget::Hard {
-                    object_header_address: addr,
+                    object_header_address: StoredAddress::new(read_offset(data, pos, offset_size)?),
                 }
             }
             1 => {
@@ -471,7 +477,7 @@ mod tests {
         assert_eq!(
             msg.link_target,
             LinkTarget::Hard {
-                object_header_address: 0x1000
+                object_header_address: StoredAddress::new(0x1000)
             }
         );
         assert_eq!(msg.creation_order, None);
@@ -486,7 +492,7 @@ mod tests {
         assert_eq!(
             msg.link_target,
             LinkTarget::Hard {
-                object_header_address: 0x2000
+                object_header_address: StoredAddress::new(0x2000)
             }
         );
         assert_eq!(msg.creation_order, Some(42));
@@ -534,7 +540,7 @@ mod tests {
         let data = build_hard_link("mydata", 0x1000, 8, None, None, 1);
         assert_eq!(
             LinkMessage::hard_link_address_if_named(&data, 8, "mydata").unwrap(),
-            Some(0x1000)
+            Some(StoredAddress::new(0x1000))
         );
         assert_eq!(
             LinkMessage::hard_link_address_if_named(&data, 8, "other").unwrap(),
@@ -578,7 +584,7 @@ mod tests {
         let decoded = LinkMessage::parse(&data, 8).unwrap().name;
         assert_eq!(
             LinkMessage::hard_link_address_if_named(&data, 8, &decoded).unwrap(),
-            Some(0x2000),
+            Some(StoredAddress::new(0x2000)),
             "a link found by listing must be findable by the name the listing gave"
         );
         assert!(link_is_named(&data, &decoded));
