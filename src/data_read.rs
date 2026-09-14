@@ -262,26 +262,47 @@ fn numeric_elem_size(dt: &Datatype) -> Result<NonZeroUsize, FormatError> {
     Ok(size)
 }
 
-/// True when a numeric element is stored in the "standard" full-width layout —
-/// no sub-byte bit offset, a precision equal to the full byte width, and a plain
-/// little- or big-endian order at a power-of-two width up to 8 bytes. Such
-/// elements decode with a single `from_le_bytes`/`from_be_bytes` per element
-/// (a `chunks_exact` bulk loop the compiler can vectorize and bounds-check once)
-/// instead of the general per-element [`reorder_bytes`]/[`read_raw_word`]
-/// bit-extraction path. Sub-byte-precision integers, Vax order, and non-standard
-/// widths fall through to that slow path, so their decoding is unchanged.
-fn is_standard_layout(
-    elem_size: usize,
-    order: &DatatypeByteOrder,
-    bit_offset: u16,
-    bit_precision: u16,
-) -> bool {
-    matches!(
-        order,
-        DatatypeByteOrder::LittleEndian | DatatypeByteOrder::BigEndian
-    ) && bit_offset == 0
-        && bit_precision as usize == elem_size * 8
-        && matches!(elem_size, 1 | 2 | 4 | 8)
+/// The width of a numeric element in the standard layout: 1, 2, 4, or 8 bytes.
+///
+/// An element of this width holds the bytes of one storage scalar, so a `chunks_exact` loop
+/// decodes a whole buffer with one `from_le_bytes` or `from_be_bytes` per element. A match over
+/// the four variants covers every element that loop takes.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum StandardWidth {
+    OneByte,
+    TwoBytes,
+    FourBytes,
+    EightBytes,
+}
+
+impl StandardWidth {
+    /// Creates a width if the element is in the standard layout.
+    ///
+    /// An element is in that layout at a size of 1, 2, 4, or 8 bytes, at bit offset zero, at a
+    /// precision equal to the full width in bits, and in plain little- or big-endian order.
+    /// Returns `None` for the rest, which [`reorder_bytes`] and [`read_raw_word`] decode one
+    /// element at a time.
+    fn new(
+        elem_size: NonZeroUsize,
+        order: &DatatypeByteOrder,
+        bit_offset: u16,
+        bit_precision: u16,
+    ) -> Option<Self> {
+        let (width, full_precision) = match elem_size.get() {
+            1 => (Self::OneByte, 8),
+            2 => (Self::TwoBytes, 16),
+            4 => (Self::FourBytes, 32),
+            8 => (Self::EightBytes, 64),
+            _ => return None,
+        };
+        (bit_offset == 0
+            && bit_precision == full_precision
+            && matches!(
+                order,
+                DatatypeByteOrder::LittleEndian | DatatypeByteOrder::BigEndian
+            ))
+        .then_some(width)
+    }
 }
 
 /// Bulk-decode `$raw` — already validated as a whole multiple of the storage
@@ -310,7 +331,7 @@ macro_rules! bulk_decode {
                     dst.push(<$store>::from_be_bytes(a) as $out);
                 }
             }
-            // LittleEndian here (Vax is excluded by `is_standard_layout`).
+            // LittleEndian here: `StandardWidth::new` returns `None` for Vax order.
             _ => {
                 for c in $raw.chunks_exact(W) {
                     let a: [u8; W] = c.try_into().unwrap();
@@ -363,7 +384,7 @@ pub fn read_as_f64_into(
     out.reserve(count);
 
     // Fast path: standard full-width layout, bulk-decoded with `from_*_bytes`.
-    if is_standard_layout(elem_size.get(), &order, bit_offset, bit_precision) {
+    if let Some(width) = StandardWidth::new(elem_size, &order, bit_offset, bit_precision) {
         match datatype {
             Datatype::FloatingPoint { size: 4, .. } => {
                 bulk_decode!(out, raw, order, f32, f64);
@@ -374,22 +395,20 @@ pub fn read_as_f64_into(
                 return Ok(());
             }
             Datatype::FixedPoint { signed: true, .. } => {
-                match elem_size.get() {
-                    1 => bulk_decode!(out, raw, order, i8, f64),
-                    2 => bulk_decode!(out, raw, order, i16, f64),
-                    4 => bulk_decode!(out, raw, order, i32, f64),
-                    8 => bulk_decode!(out, raw, order, i64, f64),
-                    _ => unreachable!(),
+                match width {
+                    StandardWidth::OneByte => bulk_decode!(out, raw, order, i8, f64),
+                    StandardWidth::TwoBytes => bulk_decode!(out, raw, order, i16, f64),
+                    StandardWidth::FourBytes => bulk_decode!(out, raw, order, i32, f64),
+                    StandardWidth::EightBytes => bulk_decode!(out, raw, order, i64, f64),
                 }
                 return Ok(());
             }
             Datatype::FixedPoint { signed: false, .. } => {
-                match elem_size.get() {
-                    1 => bulk_decode!(out, raw, order, u8, f64),
-                    2 => bulk_decode!(out, raw, order, u16, f64),
-                    4 => bulk_decode!(out, raw, order, u32, f64),
-                    8 => bulk_decode!(out, raw, order, u64, f64),
-                    _ => unreachable!(),
+                match width {
+                    StandardWidth::OneByte => bulk_decode!(out, raw, order, u8, f64),
+                    StandardWidth::TwoBytes => bulk_decode!(out, raw, order, u16, f64),
+                    StandardWidth::FourBytes => bulk_decode!(out, raw, order, u32, f64),
+                    StandardWidth::EightBytes => bulk_decode!(out, raw, order, u64, f64),
                 }
                 return Ok(());
             }
@@ -486,13 +505,12 @@ pub fn read_as_i64_into(
     // Fast path: standard full-width layout, bulk-decoded then sign-extended.
     // Signed storage types reproduce `read_signed_int`'s sign-extension for the
     // full-width case (and a float read as i64 bit-reinterprets identically).
-    if is_standard_layout(elem_size.get(), &order, bit_offset, bit_precision) {
-        match elem_size.get() {
-            1 => bulk_decode!(out, raw, order, i8, i64),
-            2 => bulk_decode!(out, raw, order, i16, i64),
-            4 => bulk_decode!(out, raw, order, i32, i64),
-            8 => bulk_decode!(out, raw, order, i64, i64),
-            _ => unreachable!(),
+    if let Some(width) = StandardWidth::new(elem_size, &order, bit_offset, bit_precision) {
+        match width {
+            StandardWidth::OneByte => bulk_decode!(out, raw, order, i8, i64),
+            StandardWidth::TwoBytes => bulk_decode!(out, raw, order, i16, i64),
+            StandardWidth::FourBytes => bulk_decode!(out, raw, order, i32, i64),
+            StandardWidth::EightBytes => bulk_decode!(out, raw, order, i64, i64),
         }
         return Ok(());
     }
@@ -543,13 +561,12 @@ pub fn read_as_u64_into(
 
     // Fast path: standard full-width layout, bulk-decoded with zero-extension
     // (unsigned storage types reproduce `read_unsigned_int`'s magnitude).
-    if is_standard_layout(elem_size.get(), &order, bit_offset, bit_precision) {
-        match elem_size.get() {
-            1 => bulk_decode!(out, raw, order, u8, u64),
-            2 => bulk_decode!(out, raw, order, u16, u64),
-            4 => bulk_decode!(out, raw, order, u32, u64),
-            8 => bulk_decode!(out, raw, order, u64, u64),
-            _ => unreachable!(),
+    if let Some(width) = StandardWidth::new(elem_size, &order, bit_offset, bit_precision) {
+        match width {
+            StandardWidth::OneByte => bulk_decode!(out, raw, order, u8, u64),
+            StandardWidth::TwoBytes => bulk_decode!(out, raw, order, u16, u64),
+            StandardWidth::FourBytes => bulk_decode!(out, raw, order, u32, u64),
+            StandardWidth::EightBytes => bulk_decode!(out, raw, order, u64, u64),
         }
         return Ok(());
     }
@@ -599,7 +616,7 @@ pub fn read_as_f32_into(
     out.reserve(count);
 
     // Fast path: standard full-width layout, bulk-decoded with `from_*_bytes`.
-    if is_standard_layout(elem_size.get(), &order, bit_offset, bit_precision) {
+    if let Some(width) = StandardWidth::new(elem_size, &order, bit_offset, bit_precision) {
         match datatype {
             Datatype::FloatingPoint { size: 4, .. } => {
                 bulk_decode!(out, raw, order, f32, f32);
@@ -610,22 +627,20 @@ pub fn read_as_f32_into(
                 return Ok(());
             }
             Datatype::FixedPoint { signed: true, .. } => {
-                match elem_size.get() {
-                    1 => bulk_decode!(out, raw, order, i8, f32),
-                    2 => bulk_decode!(out, raw, order, i16, f32),
-                    4 => bulk_decode!(out, raw, order, i32, f32),
-                    8 => bulk_decode!(out, raw, order, i64, f32),
-                    _ => unreachable!(),
+                match width {
+                    StandardWidth::OneByte => bulk_decode!(out, raw, order, i8, f32),
+                    StandardWidth::TwoBytes => bulk_decode!(out, raw, order, i16, f32),
+                    StandardWidth::FourBytes => bulk_decode!(out, raw, order, i32, f32),
+                    StandardWidth::EightBytes => bulk_decode!(out, raw, order, i64, f32),
                 }
                 return Ok(());
             }
             Datatype::FixedPoint { signed: false, .. } => {
-                match elem_size.get() {
-                    1 => bulk_decode!(out, raw, order, u8, f32),
-                    2 => bulk_decode!(out, raw, order, u16, f32),
-                    4 => bulk_decode!(out, raw, order, u32, f32),
-                    8 => bulk_decode!(out, raw, order, u64, f32),
-                    _ => unreachable!(),
+                match width {
+                    StandardWidth::OneByte => bulk_decode!(out, raw, order, u8, f32),
+                    StandardWidth::TwoBytes => bulk_decode!(out, raw, order, u16, f32),
+                    StandardWidth::FourBytes => bulk_decode!(out, raw, order, u32, f32),
+                    StandardWidth::EightBytes => bulk_decode!(out, raw, order, u64, f32),
                 }
                 return Ok(());
             }
@@ -722,13 +737,12 @@ pub fn read_as_i32_into(
 
     // Fast path: standard full-width layout, bulk-decoded then narrowed to i32
     // (matches `read_signed_int(..) as i32` for the full-width case).
-    if is_standard_layout(elem_size.get(), &order, bit_offset, bit_precision) {
-        match elem_size.get() {
-            1 => bulk_decode!(out, raw, order, i8, i32),
-            2 => bulk_decode!(out, raw, order, i16, i32),
-            4 => bulk_decode!(out, raw, order, i32, i32),
-            8 => bulk_decode!(out, raw, order, i64, i32),
-            _ => unreachable!(),
+    if let Some(width) = StandardWidth::new(elem_size, &order, bit_offset, bit_precision) {
+        match width {
+            StandardWidth::OneByte => bulk_decode!(out, raw, order, i8, i32),
+            StandardWidth::TwoBytes => bulk_decode!(out, raw, order, i16, i32),
+            StandardWidth::FourBytes => bulk_decode!(out, raw, order, i32, i32),
+            StandardWidth::EightBytes => bulk_decode!(out, raw, order, i64, i32),
         }
         return Ok(());
     }
@@ -782,13 +796,12 @@ pub fn read_as_i16_into(
     let (bit_offset, bit_precision) = int_bits(datatype);
     out.reserve(count);
 
-    if is_standard_layout(elem_size.get(), &order, bit_offset, bit_precision) {
-        match elem_size.get() {
-            1 => bulk_decode!(out, raw, order, i8, i16),
-            2 => bulk_decode!(out, raw, order, i16, i16),
-            4 => bulk_decode!(out, raw, order, i32, i16),
-            8 => bulk_decode!(out, raw, order, i64, i16),
-            _ => unreachable!(),
+    if let Some(width) = StandardWidth::new(elem_size, &order, bit_offset, bit_precision) {
+        match width {
+            StandardWidth::OneByte => bulk_decode!(out, raw, order, i8, i16),
+            StandardWidth::TwoBytes => bulk_decode!(out, raw, order, i16, i16),
+            StandardWidth::FourBytes => bulk_decode!(out, raw, order, i32, i16),
+            StandardWidth::EightBytes => bulk_decode!(out, raw, order, i64, i16),
         }
         return Ok(());
     }
@@ -840,13 +853,12 @@ pub fn read_as_u32_into(
     let (bit_offset, bit_precision) = int_bits(datatype);
     out.reserve(count);
 
-    if is_standard_layout(elem_size.get(), &order, bit_offset, bit_precision) {
-        match elem_size.get() {
-            1 => bulk_decode!(out, raw, order, u8, u32),
-            2 => bulk_decode!(out, raw, order, u16, u32),
-            4 => bulk_decode!(out, raw, order, u32, u32),
-            8 => bulk_decode!(out, raw, order, u64, u32),
-            _ => unreachable!(),
+    if let Some(width) = StandardWidth::new(elem_size, &order, bit_offset, bit_precision) {
+        match width {
+            StandardWidth::OneByte => bulk_decode!(out, raw, order, u8, u32),
+            StandardWidth::TwoBytes => bulk_decode!(out, raw, order, u16, u32),
+            StandardWidth::FourBytes => bulk_decode!(out, raw, order, u32, u32),
+            StandardWidth::EightBytes => bulk_decode!(out, raw, order, u64, u32),
         }
         return Ok(());
     }
@@ -896,13 +908,12 @@ pub fn read_as_u16_into(
     let (bit_offset, bit_precision) = int_bits(datatype);
     out.reserve(count);
 
-    if is_standard_layout(elem_size.get(), &order, bit_offset, bit_precision) {
-        match elem_size.get() {
-            1 => bulk_decode!(out, raw, order, u8, u16),
-            2 => bulk_decode!(out, raw, order, u16, u16),
-            4 => bulk_decode!(out, raw, order, u32, u16),
-            8 => bulk_decode!(out, raw, order, u64, u16),
-            _ => unreachable!(),
+    if let Some(width) = StandardWidth::new(elem_size, &order, bit_offset, bit_precision) {
+        match width {
+            StandardWidth::OneByte => bulk_decode!(out, raw, order, u8, u16),
+            StandardWidth::TwoBytes => bulk_decode!(out, raw, order, u16, u16),
+            StandardWidth::FourBytes => bulk_decode!(out, raw, order, u32, u16),
+            StandardWidth::EightBytes => bulk_decode!(out, raw, order, u64, u16),
         }
         return Ok(());
     }
@@ -1092,13 +1103,16 @@ fn read_signed_int(
 
 #[cfg(test)]
 mod tests {
+    #[cfg(not(feature = "std"))]
+    use alloc::vec;
+
+    use rstest::rstest;
+
     use super::*;
     use crate::convert::nz;
     use crate::dataspace::{Dataspace, DataspaceType};
     use crate::datatype::{CharacterSet, StringPadding};
     use crate::fill_value::FillPattern;
-    #[cfg(not(feature = "std"))]
-    use alloc::vec;
 
     fn make_f64_le_type() -> Datatype {
         Datatype::FloatingPoint {
@@ -1628,6 +1642,53 @@ mod tests {
                 "u32 narrow be={be}"
             );
         }
+    }
+
+    #[rstest]
+    #[case(
+        nz(1),
+        DatatypeByteOrder::LittleEndian,
+        0,
+        8,
+        Some(StandardWidth::OneByte)
+    )]
+    #[case(
+        nz(2),
+        DatatypeByteOrder::BigEndian,
+        0,
+        16,
+        Some(StandardWidth::TwoBytes)
+    )]
+    #[case(
+        nz(4),
+        DatatypeByteOrder::LittleEndian,
+        0,
+        32,
+        Some(StandardWidth::FourBytes)
+    )]
+    #[case(
+        nz(8),
+        DatatypeByteOrder::BigEndian,
+        0,
+        64,
+        Some(StandardWidth::EightBytes)
+    )]
+    #[case(nz(3), DatatypeByteOrder::LittleEndian, 0, 24, None)]
+    #[case(nz(16), DatatypeByteOrder::LittleEndian, 0, 128, None)]
+    #[case(nz(4), DatatypeByteOrder::Vax, 0, 32, None)]
+    #[case(nz(2), DatatypeByteOrder::LittleEndian, 4, 16, None)]
+    #[case(nz(2), DatatypeByteOrder::LittleEndian, 0, 12, None)]
+    fn a_width_is_standard_at_full_precision_in_plain_byte_order(
+        #[case] elem_size: NonZeroUsize,
+        #[case] order: DatatypeByteOrder,
+        #[case] bit_offset: u16,
+        #[case] bit_precision: u16,
+        #[case] expected: Option<StandardWidth>,
+    ) {
+        assert_eq!(
+            StandardWidth::new(elem_size, &order, bit_offset, bit_precision),
+            expected
+        );
     }
 
     #[test]
