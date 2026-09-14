@@ -76,6 +76,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::address::BaseAddress;
 use crate::attribute::AttributeMessage;
 use crate::checksum::jenkins_lookup3;
+use crate::convert::Narrow;
 use crate::data_layout::{COMPACT_DATA_OFFSET, DataLayout};
 use crate::datatype::{
     Datatype, class_may_hold_object_address, datatype_holds_object_address,
@@ -173,8 +174,9 @@ impl Plan {
             // `read_oh_chunks` produced this span from a header it had already
             // bounds-checked, and the length always covers the trailing
             // four-byte checksum.
-            let len = usize::try_from(len)
-                .map_err(|_| Error::EditUnsupported("object header chunk exceeds this platform"))?;
+            let len: usize = len.narrow_or_else(|| {
+                Error::EditUnsupported("object header chunk exceeds this platform")
+            })?;
             let body_len = len
                 .checked_sub(4)
                 .ok_or(Error::EditUnsupported("object header chunk is too short"))?;

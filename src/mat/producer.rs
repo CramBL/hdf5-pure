@@ -37,6 +37,7 @@
 //! channel 1's, so no producer can emit it as an acquisition proceeds.
 
 use crate::chunked_write::ChunkProvider;
+use crate::convert::Narrow;
 use crate::datatype::Datatype;
 use crate::error::FormatError;
 use crate::mat::class::MatClass;
@@ -248,7 +249,7 @@ pub(crate) fn plan_blocking(total: u64, element_size: usize) -> Result<Blocking,
     debug_assert!(total_bytes >= block_bytes);
 
     Ok(Blocking {
-        block_count: usize::try_from(block_count).map_err(|_| too_large(block_count))?,
+        block_count: block_count.narrow_or_else(|| too_large(block_count))?,
         block_elements: per_block,
         last_block_elements: last,
         element_size,

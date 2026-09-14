@@ -8733,8 +8733,8 @@ impl WriteEngine {
 
         // Complete chunks are kept by metadata; a trailing partial chunk (when the
         // current length is not chunk-aligned) is rewritten.
-        let n_full = usize::try_from(current_dim0 / chunk_elems)
-            .map_err(|_| Error::AppendUnsupported("chunk count exceeds this platform"))?;
+        let n_full: usize = (current_dim0 / chunk_elems)
+            .narrow_or_else(|| Error::AppendUnsupported("chunk count exceeds this platform"))?;
         let has_partial = current_dim0 % chunk_elems != 0;
 
         // Rewriting that chunk decodes and re-encodes committed values, which a
@@ -8785,8 +8785,9 @@ impl WriteEngine {
             } else {
                 stored
             };
-            let live_elems = usize::try_from(current_dim0 % chunk_elems)
-                .map_err(|_| Error::AppendUnsupported("chunk length exceeds this platform"))?;
+            let live_elems: usize = (current_dim0 % chunk_elems).narrow_or_else(|| {
+                Error::AppendUnsupported("chunk length exceeds this platform")
+            })?;
             let live_bytes = live_elems * element_size.get();
             if full.len() < live_bytes {
                 return Err(Error::AppendUnsupported(
@@ -9152,8 +9153,9 @@ impl WriteEngine {
                         .checked_add(data_size)
                         .filter(|&e| e <= src.len())
                         .ok_or(Error::EditUnsupported("dataset data is out of bounds"))?;
-                    let len = usize::try_from(data_size)
-                        .map_err(|_| Error::EditUnsupported("data size exceeds this platform"))?;
+                    let len: usize = data_size.narrow_or_else(|| {
+                        Error::EditUnsupported("data size exceeds this platform")
+                    })?;
                     Some(
                         src.read_exact_at(start, len)
                             .map_err(|_| Error::EditUnsupported("dataset data is out of bounds"))?,
@@ -13583,7 +13585,7 @@ fn next_attr_creation_index(region: &OhRegion) -> Result<u16, Error> {
         .unwrap_or(0);
     let derived = highest_attr_creation_index(region)?.map_or(0, |i| u32::from(i) + 1);
     let next = u32::from(recorded).max(derived);
-    u16::try_from(next).map_err(|_| {
+    next.narrow_or_else(|| {
         Error::EditUnsupported(
             "an object has assigned every attribute creation index its header can record",
         )
@@ -13684,7 +13686,7 @@ fn put_attr_message(
                     info.max_creation_index = new_max;
                     info.indexes_creation_order |= layout.indexes_creation_order();
                     let encoded = info.serialize(OFFSET_SIZE);
-                    let len = u16::try_from(encoded.len()).map_err(|_| {
+                    let len: u16 = encoded.len().narrow_or_else(|| {
                         Error::EditUnsupported("an Attribute Info message is too large to record")
                     })?;
                     // Only the body and its length change: the record keeps its
@@ -13828,10 +13830,10 @@ pub(crate) fn rewrite_extension_region_bytes(
 ) -> Result<OhRegion, Error> {
     let new_body = info.serialize();
     // The message body is the fixed-size File Space Info record (≤ 125 bytes),
-    // so it always fits the u16 size field; `try_from` keeps this off the
-    // 32-bit narrowing-cast ledger.
-    let new_len = u16::try_from(new_body.len())
-        .map_err(|_| Error::EditUnsupported("File Space Info message too large"))?;
+    // so it always fits the u16 size field.
+    let new_len: u16 = new_body
+        .len()
+        .narrow_or_else(|| Error::EditUnsupported("File Space Info message too large"))?;
     let mut out = Vec::with_capacity(region.len());
     let mut p = 0;
     let mut replaced = false;
@@ -14056,9 +14058,8 @@ fn read_oh_continuation<S: Source + ?Sized>(
         .checked_add(len)
         .filter(|&e| e <= src.len() && len >= 8)
         .ok_or(Error::EditUnsupported("continuation block out of bounds"))?;
-    let want = (end - off)
-        .to_usize()
-        .map_err(|_| Error::EditUnsupported("continuation length exceeds this platform"))?;
+    let want: usize = (end - off)
+        .narrow_or_else(|| Error::EditUnsupported("continuation length exceeds this platform"))?;
     let mut buf = src.read_metadata_at(off, want)?;
     if buf[..4] != *b"OCHK" {
         return Err(Error::EditUnsupported(

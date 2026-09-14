@@ -390,12 +390,9 @@ impl ChunkOptions {
                                 .into(),
                         )
                     })?;
-                    let nelmts =
-                        u32::try_from(chunk_dims.iter().product::<u64>()).map_err(|_| {
-                            FormatError::FilterError(
-                                "scale-offset: chunk has too many elements".into(),
-                            )
-                        })?;
+                    let nelmts: u32 = chunk_dims.iter().product::<u64>().narrow_or_else(|| {
+                        FormatError::FilterError("scale-offset: chunk has too many elements".into())
+                    })?;
                     FilterDescription {
                         filter_id: FILTER_SCALEOFFSET,
                         name: None,

@@ -223,7 +223,7 @@ fn decode_named<T: CompoundField>(
         field_size: member.datatype.type_size(),
         compound_size: reported_compound_size(bytes),
     };
-    let start = usize::try_from(member.byte_offset).map_err(|_| out_of_bounds())?;
+    let start: usize = member.byte_offset.narrow_or_else(out_of_bounds)?;
     let end = start
         .checked_add(member.datatype.type_size().to_usize()?)
         .ok_or_else(out_of_bounds)?;

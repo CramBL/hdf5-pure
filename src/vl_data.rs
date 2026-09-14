@@ -450,7 +450,7 @@ where
             }
         };
 
-        let index = u16::try_from(element.object_index).map_err(|_| {
+        let index: u16 = element.object_index.narrow_or_else(|| {
             FormatError::VlDataError(format!(
                 "global heap object index {} does not fit u16",
                 element.object_index
@@ -573,7 +573,7 @@ pub(crate) fn read_vl_byte_objects_from_source<S: Source + ?Sized>(
             }
         };
 
-        let index = u16::try_from(element.object_index).map_err(|_| {
+        let index: u16 = element.object_index.narrow_or_else(|| {
             FormatError::VlDataError(format!(
                 "global heap object index {} does not fit u16",
                 element.object_index
