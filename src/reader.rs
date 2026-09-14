@@ -5865,10 +5865,7 @@ the same commit to replace it",
                 // for the same reason — a file-derived capacity that cannot be
                 // had is an answer this reader owes its caller, not a panic.
                 out.try_reserve(values)
-                    .map_err(|_| FormatError::ValueTooLargeForPlatform {
-                        value: values as u64,
-                        target: "one allocation",
-                    })?;
+                    .map_err(|source| FormatError::AllocationFailed { values, source })?;
             }
             decode(&raw, &dt, &mut out)?;
             start += count;
