@@ -4,7 +4,7 @@
 //! `crates/crosscheck/tests/object_path.rs` runs the same spellings through the C library, which
 //! is the oracle for the grammar.
 
-use hdf5_pure::{Dataset, Error, File, FileBuilder, FormatError, Group};
+use hdf5_pure::{Dataset, Error, File, FileBuilder, FormatError, Group, Object};
 use rstest::rstest;
 use tempfile::tempdir;
 
@@ -451,4 +451,26 @@ fn a_builder_name_that_is_one_link_name_is_written(#[case] name: &str) {
 
     assert_eq!(file.root().datasets().unwrap(), vec![name]);
     assert_eq!(file.dataset(name).unwrap().read_i32().unwrap(), vec![7]);
+}
+
+#[rstest]
+#[case("a/b")]
+#[case("/a/b")]
+#[case("a//b/")]
+#[case("./a/./b")]
+fn every_spelling_of_a_reference_target_names_one_object(#[case] spelling: &str) {
+    let mut builder = FileBuilder::new();
+    let mut a = builder.create_group("a");
+    a.create_dataset("b").with_i32_data(&[1]);
+    builder.add_group(a.finish());
+    builder
+        .create_dataset("refs")
+        .with_path_references(&[spelling]);
+    let file = File::from_bytes(builder.finish().unwrap()).unwrap();
+
+    let objects = file.dataset("refs").unwrap().dereference().unwrap();
+    let [Object::Dataset(target)] = &objects[..] else {
+        panic!("expected one referenced dataset, got {objects:?}");
+    };
+    assert_eq!(target.read_i32().unwrap(), vec![1]);
 }

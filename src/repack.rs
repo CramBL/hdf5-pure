@@ -128,6 +128,7 @@ use crate::filter_pipeline::{
     FilterPipeline,
 };
 use crate::libver::LibVer;
+use crate::object_path::ObjectPathBuf;
 use crate::reader::{Dataset, File, Group};
 use crate::scaleoffset::{self, ScaleOffset};
 use crate::shared_message::DatatypeLocation;
@@ -1329,7 +1330,8 @@ where
             drop,
             addr_map,
         )?;
-        message.datatype_location = DatatypeLocation::CommittedPath(type_path);
+        message.datatype_location =
+            DatatypeLocation::CommittedPath(ObjectPathBuf::parse(&type_path));
     }
     let any_needs_decoding = messages
         .iter()
@@ -1683,7 +1685,7 @@ fn resolve_reference_address(
                 "dataset {path}: object reference to dropped object {target_path:?} cannot be repacked"
             )))
         }
-        Some(target_path) => Ok(ObjectRefTarget::Path(target_path.clone())),
+        Some(target_path) => Ok(ObjectRefTarget::Path(ObjectPathBuf::parse(target_path))),
         None => Err(Error::RepackUnsupported(format!(
             "dataset {path}: object reference to address {address:#x} resolves to no hard-linked \
              object in the source (dangling, or a region target not supported yet)"

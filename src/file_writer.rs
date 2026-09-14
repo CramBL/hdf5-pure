@@ -41,7 +41,7 @@ use crate::link_message::{LinkMessage, LinkTarget};
 use crate::message_flags::MessageFlags;
 use crate::message_type::MessageType;
 use crate::object_header_writer::ObjectHeaderWriter;
-use crate::object_path::LinkNameBuf;
+use crate::object_path::{LinkNameBuf, ObjectPathBuf};
 use crate::shared_message::DatatypeLocation;
 use crate::superblock::Superblock;
 use crate::type_builders::{
@@ -2212,33 +2212,34 @@ impl FileWriter {
         // its reference count and so changes length with it, and because a
         // dataset that names a type the file does not commit must be refused
         // before the layout is half built.
-        let committed_by_path: HashMap<String, usize> = {
+        let committed_by_path: HashMap<ObjectPathBuf, usize> = {
             fn walk(
-                prefix: &str,
+                prefix: &ObjectPathBuf,
                 gi: usize,
                 groups: &[GrpFlat],
                 committed: &[CtFlat],
-                out: &mut HashMap<String, usize>,
+                out: &mut HashMap<ObjectPathBuf, usize>,
             ) {
                 for &ci in &groups[gi].committed_indices {
-                    out.insert(format!("{prefix}/{}", committed[ci].name.as_str()), ci);
+                    out.insert(prefix.join(&committed[ci].name), ci);
                 }
                 for &sgi in &groups[gi].sub_group_indices {
-                    walk(
-                        &format!("{prefix}/{}", groups[sgi].name.as_str()),
-                        sgi,
-                        groups,
-                        committed,
-                        out,
-                    );
+                    walk(&prefix.join(&groups[sgi].name), sgi, groups, committed, out);
                 }
             }
-            let mut out: HashMap<String, usize> = root_committed_indices
+            let root = ObjectPathBuf::root();
+            let mut out: HashMap<ObjectPathBuf, usize> = root_committed_indices
                 .iter()
-                .map(|&ci| (String::from(committed[ci].name.as_str()), ci))
+                .map(|&ci| (root.join(&committed[ci].name), ci))
                 .collect();
             for &gi in &root_group_indices {
-                walk(groups[gi].name.as_str(), gi, &groups, &committed, &mut out);
+                walk(
+                    &root.join(&groups[gi].name),
+                    gi,
+                    &groups,
+                    &committed,
+                    &mut out,
+                );
             }
             out
         };
@@ -2257,7 +2258,7 @@ impl FileWriter {
         /// here, and almost none of them name a committed type at all.
         fn register_committed_use(
             committed: &mut [CtFlat],
-            by_path: &HashMap<String, usize>,
+            by_path: &HashMap<ObjectPathBuf, usize>,
             location: &DatatypeLocation,
             dt: &Datatype,
             user: impl FnOnce() -> String,
@@ -2835,12 +2836,14 @@ impl FileWriter {
             // Root-level datasets: path = dataset_name
             // Group-level datasets: path = group_name/dataset_name (recursive)
             // Groups: path = group_name (recursive)
-            let mut path_map = HashMap::<String, u64>::new();
-            // The root group is referenceable under the empty path (repack maps a
-            // reference to the source root group to "").
-            path_map.insert(String::new(), root_group_addr);
+            let mut path_map = HashMap::<ObjectPathBuf, u64>::new();
+            let root = ObjectPathBuf::root();
+            // An object reference can point at the root group, which the map holds
+            // under its own path, the one with no components (repack resolves a
+            // reference to the source root group to that path).
+            path_map.insert(root.clone(), root_group_addr);
             for &i in &root_ds_indices {
-                path_map.insert(String::from(all_ds[i].name.as_str()), ds_oh_addrs2[i]);
+                path_map.insert(root.join(&all_ds[i].name), ds_oh_addrs2[i]);
             }
             // A committed datatype is an object like any other, so an object
             // reference can point at one. Its path was already computed, above.
@@ -2849,24 +2852,21 @@ impl FileWriter {
             }
             for &gi in &root_group_indices {
                 fn register_group(
-                    prefix: &str,
+                    prefix: &ObjectPathBuf,
                     gi: usize,
                     groups: &[GrpFlat],
                     ds_addrs: &[u64],
                     grp_addrs: &[u64],
                     all_ds: &[DsFlat],
-                    map: &mut HashMap<String, u64>,
+                    map: &mut HashMap<ObjectPathBuf, u64>,
                 ) {
-                    map.insert(prefix.to_string(), grp_addrs[gi]);
+                    map.insert(prefix.clone(), grp_addrs[gi]);
                     for &di in &groups[gi].ds_indices {
-                        map.insert(
-                            format!("{}/{}", prefix, all_ds[di].name.as_str()),
-                            ds_addrs[di],
-                        );
+                        map.insert(prefix.join(&all_ds[di].name), ds_addrs[di]);
                     }
                     for &sgi in &groups[gi].sub_group_indices {
                         register_group(
-                            &format!("{}/{}", prefix, groups[sgi].name.as_str()),
+                            &prefix.join(&groups[sgi].name),
                             sgi,
                             groups,
                             ds_addrs,
@@ -2877,7 +2877,7 @@ impl FileWriter {
                     }
                 }
                 register_group(
-                    groups[gi].name.as_str(),
+                    &root.join(&groups[gi].name),
                     gi,
                     &groups,
                     &ds_oh_addrs2,
