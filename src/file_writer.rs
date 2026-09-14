@@ -1610,6 +1610,15 @@ impl FileWriter {
             },
         }
         impl DsData {
+            /// Returns the element bytes of a region held in memory, or `None`
+            /// for one whose bytes are streamed or produced at write time.
+            fn in_memory_mut(&mut self) -> Option<&mut Vec<u8>> {
+                match self {
+                    DsData::InMemory(bytes) => Some(bytes),
+                    DsData::Streamed(_) | DsData::Produced { .. } => None,
+                }
+            }
+
             fn len(&self) -> u64 {
                 match self {
                     DsData::InMemory(v) => v.len() as u64,
@@ -1617,6 +1626,22 @@ impl FileWriter {
                     DsData::Produced { total_bytes, .. } => *total_bytes,
                 }
             }
+        }
+
+        /// Returns the error for a variable-length dataset whose element bytes
+        /// are not held in memory when its global heap references are patched.
+        fn vl_element_bytes_absent(link_name: &str) -> FormatError {
+            // VL staging goes only to a dataset whose bytes are in memory: a
+            // chunked one is patched before its chunks are encoded, and
+            // `with_produced_data` debug-asserts against the combination.
+            debug_assert!(
+                false,
+                "a staged VL-string dataset holds its element bytes in memory"
+            );
+            FormatError::SerializationError(format!(
+                "the element bytes of variable-length dataset {link_name:?} are not held in \
+                 memory, so its global heap references cannot be patched"
+            ))
         }
 
         /// Emit one dataset's data region: in-memory bytes directly, or a
@@ -3196,16 +3221,11 @@ impl FileWriter {
                     .vl_string_staging
                     .as_ref()
                     .expect("elem_gcol only holds datasets with VL staging");
-                let Some(DsLayout {
-                    data: DsData::InMemory(bytes),
-                    ..
-                }) = layouts[*i].as_mut()
+                let Some(bytes) = layouts[*i]
+                    .as_mut()
+                    .and_then(|layout| layout.data.in_memory_mut())
                 else {
-                    unreachable!(
-                        "a staged VL-string dataset holds its element bytes in memory: the \
-                         chunked path patches before encoding, and a produced region refuses \
-                         to carry VL staging at all"
-                    )
+                    return Err(vl_element_bytes_absent(&all_ds[*i].name));
                 };
                 patch_vl_refs_masked(bytes, &staging.patch_offsets, gaddrs);
             }
@@ -3498,17 +3518,10 @@ impl FileWriter {
                 }
                 if let Some(staging) = &d.vl_string_staging {
                     // A dataset that carries VL staging always has its element
-                    // bytes in memory. Neither of the two data regions that do
-                    // not — a streamed (lazy) chunked one, or a produced
-                    // contiguous one — can carry VL staging: the chunked path
-                    // patches before encoding, and `with_produced_data` refuses
-                    // the combination. Assert that rather than risk silently
-                    // patching heap addresses into the wrong buffer.
-                    let DsData::InMemory(ref mut bytes) = ds_layouts[i].data else {
-                        unreachable!(
-                            "a chunked VL-string dataset is patched before encoding, so a \
-                             dataset patched here always has its data in memory"
-                        );
+                    // bytes in memory. Report it: heap addresses patched into
+                    // another buffer would corrupt the file in silence.
+                    let Some(bytes) = ds_layouts[i].data.in_memory_mut() else {
+                        return Err(vl_element_bytes_absent(&d.name));
                     };
                     let addrs = place_collections(&staging.collections, &mut gcol_cursor);
                     patch_vl_refs_masked(bytes, &staging.patch_offsets, &addrs);
