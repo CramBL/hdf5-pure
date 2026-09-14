@@ -4,6 +4,9 @@
 //! The serializer makes one pass to collect everything into the intermediate
 //! tree, then the emitter walks the tree to build the HDF5 file.
 
+use core::iter;
+use core::mem;
+
 use serde::ser::{
     Impossible, Serialize, SerializeMap, SerializeSeq, SerializeStruct, SerializeTuple,
     SerializeTupleStruct, Serializer,
@@ -14,7 +17,9 @@ use crate::mat::error::MatError;
 use crate::mat::matrix::{MATRIX_SENTINEL, complex_tag_for_matrix_sentinel};
 use crate::mat::options::{EmptySequencePolicy, NullPolicy, Options, UnitVariantEncoding};
 
-use crate::mat::value::{ComplexNum, ComplexTag, ComplexVec, MatValue, NumVec, ScalarNum};
+use crate::mat::value::{
+    ComplexNum, ComplexTag, ComplexVec, MatValue, NumVec, ScalarNum, ScalarTag,
+};
 
 // ---------------------------------------------------------------------------
 // Public entry: serialize a value into a MatValue
@@ -390,90 +395,6 @@ pub(crate) struct SeqSer<'a> {
     opts: &'a Options,
 }
 
-/// How a sequence's elements are held while it is being collected.
-///
-/// A flat numeric or complex array is the common large case, and holding it
-/// as one `MatValue` per element costs 56 bytes for what packs into 4. So the
-/// accumulator stays packed for as long as the elements agree, and only falls
-/// back to one-value-per-element when one of them breaks the pattern. That
-/// fallback is where the sequence was always going to end up anyway (a cell
-/// array, or a matrix built from equal-length rows), so nothing is lost by
-/// paying for it there instead of everywhere.
-enum SeqAccum {
-    /// Nothing pushed yet; the first element picks the representation.
-    Empty { cap: usize },
-    /// Every element so far is a numeric scalar of one tag.
-    Numeric(NumVec),
-    /// Every element so far is a complex scalar of one tag.
-    Complex(ComplexVec),
-    /// Anything else, held individually for `unify_sequence` to interpret.
-    Mixed(Vec<MatValue>),
-}
-
-impl SeqAccum {
-    fn push(&mut self, value: MatValue) -> Result<(), MatError> {
-        match self {
-            SeqAccum::Empty { cap } => {
-                let cap = *cap;
-                *self = match value {
-                    MatValue::Scalar(s) => {
-                        let mut v = NumVec::with_capacity_for_tag(s.tag(), cap);
-                        v.push(s)?;
-                        SeqAccum::Numeric(v)
-                    }
-                    MatValue::ComplexScalar(c) => {
-                        let mut v = ComplexVec::with_capacity_for_tag(c.tag(), cap);
-                        v.push(c)?;
-                        SeqAccum::Complex(v)
-                    }
-                    other => {
-                        let mut v = Vec::with_capacity(cap);
-                        v.push(other);
-                        SeqAccum::Mixed(v)
-                    }
-                };
-                Ok(())
-            }
-            SeqAccum::Numeric(v) => match value {
-                MatValue::Scalar(s) if s.tag() == v.tag() => v.push(s),
-                other => self.spill_and_push(other),
-            },
-            SeqAccum::Complex(v) => match value {
-                MatValue::ComplexScalar(c) if c.tag() == v.tag() => v.push(c),
-                other => self.spill_and_push(other),
-            },
-            SeqAccum::Mixed(v) => {
-                v.push(value);
-                Ok(())
-            }
-        }
-    }
-
-    /// Expand a packed accumulator back to one `MatValue` per element, then
-    /// push the element that broke the pattern.
-    fn spill_and_push(&mut self, value: MatValue) -> Result<(), MatError> {
-        let packed = std::mem::replace(self, SeqAccum::Empty { cap: 0 });
-        let (len, elements): (usize, Box<dyn Iterator<Item = MatValue>>) = match packed {
-            SeqAccum::Numeric(nums) => (
-                nums.len(),
-                Box::new(nums.into_scalars().map(MatValue::Scalar)),
-            ),
-            SeqAccum::Complex(pairs) => (
-                pairs.len(),
-                Box::new(pairs.into_pairs().map(MatValue::ComplexScalar)),
-            ),
-            SeqAccum::Empty { .. } | SeqAccum::Mixed(_) => {
-                unreachable!("only a packed accumulator spills")
-            }
-        };
-        let mut v = Vec::with_capacity(len + 1);
-        v.extend(elements);
-        v.push(value);
-        *self = SeqAccum::Mixed(v);
-        Ok(())
-    }
-}
-
 impl<'a> SeqSer<'a> {
     fn new(len: Option<usize>, opts: &'a Options) -> Self {
         Self {
@@ -486,16 +407,13 @@ impl<'a> SeqSer<'a> {
 
     fn push<T: Serialize + ?Sized>(&mut self, v: &T) -> Result<(), MatError> {
         let value = v.serialize(ValueSerializer::new(self.opts))?;
-        self.accum.push(value)
+        let accum = mem::replace(&mut self.accum, SeqAccum::Empty { cap: 0 });
+        self.accum = accum.pushed(value)?;
+        Ok(())
     }
 
     fn finish(self) -> Result<MatValue, MatError> {
-        match self.accum {
-            SeqAccum::Empty { .. } => unify_sequence(Vec::new(), self.opts),
-            SeqAccum::Numeric(v) => Ok(MatValue::Vec1D(v)),
-            SeqAccum::Complex(v) => Ok(MatValue::ComplexVec1D(v)),
-            SeqAccum::Mixed(v) => unify_sequence(v, self.opts),
-        }
+        self.accum.finish(self.opts)
     }
 }
 
@@ -532,129 +450,193 @@ impl SerializeTupleStruct for SeqSer<'_> {
     }
 }
 
-/// Decide what a finished sequence of elements means. A sequence whose
-/// elements all share the same numeric shape (scalars of one tag, vectors of
-/// one tag and length, complex of one width) collapses to a numeric vec/matrix
-/// or complex vec/matrix. Anything else (mixed tags, ragged inner vectors,
-/// sequences of structs, sequences containing `None`) lowers to a MATLAB cell
-/// array; the emitter interns each element under `#refs#`.
-fn unify_sequence(elements: Vec<MatValue>, opts: &Options) -> Result<MatValue, MatError> {
-    if elements.is_empty() {
-        // No element revealed its type, so the MATLAB class is the caller's
-        // to pick; see `EmptySequencePolicy`.
-        return Ok(match opts.empty_sequence_policy {
-            EmptySequencePolicy::DoubleArray => MatValue::Vec1D(NumVec::F64(Vec::new())),
-            EmptySequencePolicy::Cell => MatValue::Cell(Vec::new()),
-        });
-    }
-
-    let elements = match try_unify_homogeneous(elements) {
-        Ok(unified) => return Ok(unified),
-        Err(elements) => elements,
-    };
-
-    // Heterogeneous: lower to a cell array, mapping `Omit` to `struct([])`.
-    let cell_elements: Vec<MatValue> = elements
-        .into_iter()
-        .map(|e| match e {
-            MatValue::Omit => MatValue::EmptyStructArray,
-            other => other,
-        })
-        .collect();
-    Ok(MatValue::Cell(cell_elements))
+/// How a sequence's elements are held while it is being collected, and with
+/// that what the sequence has turned out to be: same-class scalars are a
+/// numeric or complex vector, same-class same-length vectors are the rows of a
+/// matrix, and anything else is a cell array.
+///
+/// A flat numeric or complex array is the common large case, and holding it as
+/// one `MatValue` per element costs 56 bytes for what packs into 4. So the
+/// accumulator stays packed for as long as the elements agree, and only falls
+/// back to one value per element when one of them breaks the pattern. That
+/// fallback is where the sequence was always going to end up anyway, so the
+/// cost lands on the sequences that were never packed to begin with.
+enum SeqAccum {
+    /// Every element so far is a complex vector of one class and length.
+    ComplexRows {
+        tag: ComplexTag,
+        cols: usize,
+        rows: Vec<ComplexVec>,
+    },
+    /// Every element so far is a complex scalar of one class.
+    ComplexScalars(ComplexVec),
+    /// Nothing pushed yet. The first element picks the state.
+    Empty { cap: usize },
+    /// Anything else, one value per element.
+    Mixed(Vec<MatValue>),
+    /// Every element so far is a numeric vector of one class and length.
+    Rows {
+        tag: ScalarTag,
+        cols: usize,
+        rows: Vec<NumVec>,
+    },
+    /// Every element so far is a numeric scalar of one class.
+    Scalars(NumVec),
 }
 
-/// Try the homogeneous fast paths. Returns the original `Vec` back via
-/// `Err(_)` when no path matches, so the cell-array fallback can take
-/// ownership without re-cloning each element. (Cloning a `Vec1D` or
-/// `ComplexVec*` of the inner shape would double peak allocation on the
-/// matrix path for large `Vec<Vec<T>>` inputs.)
-fn try_unify_homogeneous(elements: Vec<MatValue>) -> Result<MatValue, Vec<MatValue>> {
-    debug_assert!(!elements.is_empty());
-
-    // ----- all elements are numeric scalars of the same tag → Vec1D -----
-    if let Some(MatValue::Scalar(first)) = elements.first() {
-        let first_tag = first.tag();
-        if elements
-            .iter()
-            .all(|e| matches!(e, MatValue::Scalar(s) if s.tag() == first_tag))
-        {
-            let mut vec = NumVec::with_capacity_for_tag(first_tag, elements.len());
-            for e in elements {
-                let MatValue::Scalar(s) = e else {
-                    unreachable!()
-                };
-                vec.push(s).expect("tag check held");
+impl SeqAccum {
+    /// The state one element on its own establishes.
+    fn started(cap: usize, value: MatValue) -> Result<Self, MatError> {
+        Ok(match value {
+            MatValue::ComplexScalar(c) => {
+                let mut packed = ComplexVec::with_capacity_for_tag(c.tag(), cap);
+                packed.push(c)?;
+                SeqAccum::ComplexScalars(packed)
             }
-            return Ok(MatValue::Vec1D(vec));
-        }
+            MatValue::ComplexVec1D(v) => {
+                let (tag, cols) = (v.tag(), v.len());
+                let mut rows = Vec::with_capacity(cap);
+                rows.push(v);
+                SeqAccum::ComplexRows { tag, cols, rows }
+            }
+            MatValue::Scalar(s) => {
+                let mut packed = NumVec::with_capacity_for_tag(s.tag(), cap);
+                packed.push(s)?;
+                SeqAccum::Scalars(packed)
+            }
+            MatValue::Vec1D(v) => {
+                let (tag, cols) = (v.tag(), v.len());
+                let mut rows = Vec::with_capacity(cap);
+                rows.push(v);
+                SeqAccum::Rows { tag, cols, rows }
+            }
+            other => {
+                let mut values = Vec::with_capacity(cap);
+                values.push(other);
+                SeqAccum::Mixed(values)
+            }
+        })
     }
 
-    // ----- all elements are Vec1D of same tag & length → Matrix -----
-    if let Some(MatValue::Vec1D(first)) = elements.first() {
-        let first_tag = first.tag();
-        let first_len = first.len();
-        if elements.iter().all(
-            |e| matches!(e, MatValue::Vec1D(v) if v.tag() == first_tag && v.len() == first_len),
-        ) {
-            let rows = elements.len();
-            let mut flat = NumVec::with_capacity_for_tag(first_tag, rows * first_len);
-            for e in elements {
-                let MatValue::Vec1D(v) = e else {
-                    unreachable!()
-                };
-                flat.extend(v).expect("tag check held");
+    /// Take `value` into the state the elements before it established, or spill
+    /// to [`SeqAccum::Mixed`] when it breaks the pattern.
+    fn pushed(self, value: MatValue) -> Result<Self, MatError> {
+        Ok(match self {
+            SeqAccum::ComplexRows {
+                tag,
+                cols,
+                mut rows,
+            } => match value {
+                MatValue::ComplexVec1D(v) if v.tag() == tag && v.len() == cols => {
+                    rows.push(v);
+                    SeqAccum::ComplexRows { tag, cols, rows }
+                }
+                broke => SeqAccum::Mixed(
+                    rows.into_iter()
+                        .map(MatValue::ComplexVec1D)
+                        .chain(iter::once(broke))
+                        .collect(),
+                ),
+            },
+            SeqAccum::ComplexScalars(mut packed) => match value {
+                MatValue::ComplexScalar(c) if c.tag() == packed.tag() => {
+                    packed.push(c)?;
+                    SeqAccum::ComplexScalars(packed)
+                }
+                broke => SeqAccum::Mixed(
+                    packed
+                        .into_pairs()
+                        .map(MatValue::ComplexScalar)
+                        .chain(iter::once(broke))
+                        .collect(),
+                ),
+            },
+            SeqAccum::Empty { cap } => SeqAccum::started(cap, value)?,
+            SeqAccum::Mixed(mut values) => {
+                values.push(value);
+                SeqAccum::Mixed(values)
             }
-            return Ok(MatValue::Matrix {
-                rows,
-                cols: first_len,
-                vec: flat,
-            });
-        }
+            SeqAccum::Rows {
+                tag,
+                cols,
+                mut rows,
+            } => match value {
+                MatValue::Vec1D(v) if v.tag() == tag && v.len() == cols => {
+                    rows.push(v);
+                    SeqAccum::Rows { tag, cols, rows }
+                }
+                broke => SeqAccum::Mixed(
+                    rows.into_iter()
+                        .map(MatValue::Vec1D)
+                        .chain(iter::once(broke))
+                        .collect(),
+                ),
+            },
+            SeqAccum::Scalars(mut packed) => match value {
+                MatValue::Scalar(s) if s.tag() == packed.tag() => {
+                    packed.push(s)?;
+                    SeqAccum::Scalars(packed)
+                }
+                broke => SeqAccum::Mixed(
+                    packed
+                        .into_scalars()
+                        .map(MatValue::Scalar)
+                        .chain(iter::once(broke))
+                        .collect(),
+                ),
+            },
+        })
     }
 
-    // ----- all complex scalars of one class → ComplexVec1D -----
-    if let Some(MatValue::ComplexScalar(first)) = elements.first() {
-        let first_tag = first.tag();
-        if elements
-            .iter()
-            .all(|e| matches!(e, MatValue::ComplexScalar(n) if n.tag() == first_tag))
-        {
-            let mut pairs = ComplexVec::with_capacity_for_tag(first_tag, elements.len());
-            for e in elements {
-                let MatValue::ComplexScalar(n) = e else {
-                    unreachable!()
-                };
-                pairs.push(n).expect("tag check held");
+    /// The value the collected elements amount to.
+    fn finish(self, opts: &Options) -> Result<MatValue, MatError> {
+        Ok(match self {
+            SeqAccum::ComplexRows { tag, cols, rows } => {
+                let mut pairs = ComplexVec::with_capacity_for_tag(tag, rows.len() * cols);
+                let count = rows.len();
+                for row in rows {
+                    pairs.extend(row)?;
+                }
+                MatValue::ComplexMatrix {
+                    rows: count,
+                    cols,
+                    pairs,
+                }
             }
-            return Ok(MatValue::ComplexVec1D(pairs));
-        }
-    }
-
-    // ----- all elements are ComplexVec1D of one class & length → ComplexMatrix -----
-    if let Some(MatValue::ComplexVec1D(first)) = elements.first() {
-        let first_tag = first.tag();
-        let first_len = first.len();
-        if elements.iter().all(
-            |e| matches!(e, MatValue::ComplexVec1D(v) if v.tag() == first_tag && v.len() == first_len),
-        ) {
-            let rows = elements.len();
-            let mut pairs = ComplexVec::with_capacity_for_tag(first_tag, rows * first_len);
-            for e in elements {
-                let MatValue::ComplexVec1D(v) = e else {
-                    unreachable!()
-                };
-                pairs.extend(v).expect("tag check held");
+            SeqAccum::ComplexScalars(packed) => MatValue::ComplexVec1D(packed),
+            // No element revealed its type, so the MATLAB class is the
+            // caller's to pick. See `EmptySequencePolicy`.
+            SeqAccum::Empty { .. } => match opts.empty_sequence_policy {
+                EmptySequencePolicy::DoubleArray => MatValue::Vec1D(NumVec::F64(Vec::new())),
+                EmptySequencePolicy::Cell => MatValue::Cell(Vec::new()),
+            },
+            SeqAccum::Mixed(values) => {
+                MatValue::Cell(values.into_iter().map(cell_element).collect())
             }
-            return Ok(MatValue::ComplexMatrix {
-                rows,
-                cols: first_len,
-                pairs,
-            });
-        }
+            SeqAccum::Rows { tag, cols, rows } => {
+                let mut vec = NumVec::with_capacity_for_tag(tag, rows.len() * cols);
+                let count = rows.len();
+                for row in rows {
+                    vec.extend(row)?;
+                }
+                MatValue::Matrix {
+                    rows: count,
+                    cols,
+                    vec,
+                }
+            }
+            SeqAccum::Scalars(packed) => MatValue::Vec1D(packed),
+        })
     }
+}
 
-    Err(elements)
+/// A cell array element. `Omit` has no element form: a `None` inside a
+/// sequence holds its slot, as MATLAB's `struct([])`.
+fn cell_element(value: MatValue) -> MatValue {
+    match value {
+        MatValue::Omit => MatValue::EmptyStructArray,
+        other => other,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -942,5 +924,99 @@ fn expect_component(v: MatValue) -> Result<ScalarNum, MatError> {
             "a complex field must be a numeric scalar, got {}",
             other.kind()
         ))),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::mat::complex::Complex64;
+
+    use super::*;
+
+    #[test]
+    fn scalars_of_one_class_become_a_vector() {
+        assert_eq!(
+            to_value(&vec![1u8, 2, 3], &Options::default()).unwrap(),
+            MatValue::Vec1D(NumVec::U8(vec![1, 2, 3])),
+        );
+    }
+
+    #[test]
+    fn scalars_of_two_classes_become_a_cell_array() {
+        assert_eq!(
+            to_value(&(1u8, 2u16), &Options::default()).unwrap(),
+            MatValue::Cell(vec![
+                MatValue::Scalar(ScalarNum::U8(1)),
+                MatValue::Scalar(ScalarNum::U16(2)),
+            ]),
+        );
+    }
+
+    #[test]
+    fn rows_of_one_class_and_length_become_a_matrix() {
+        assert_eq!(
+            to_value(&vec![vec![1u8, 2], vec![3, 4]], &Options::default()).unwrap(),
+            MatValue::Matrix {
+                rows: 2,
+                cols: 2,
+                vec: NumVec::U8(vec![1, 2, 3, 4]),
+            },
+        );
+    }
+
+    #[test]
+    fn ragged_rows_become_a_cell_array() {
+        assert_eq!(
+            to_value(&vec![vec![1u8, 2], vec![3]], &Options::default()).unwrap(),
+            MatValue::Cell(vec![
+                MatValue::Vec1D(NumVec::U8(vec![1, 2])),
+                MatValue::Vec1D(NumVec::U8(vec![3])),
+            ]),
+        );
+    }
+
+    #[test]
+    fn a_scalar_after_a_row_spills_the_rows_into_the_cell_array() {
+        assert_eq!(
+            to_value(&(vec![1u8, 2], 3u8), &Options::default()).unwrap(),
+            MatValue::Cell(vec![
+                MatValue::Vec1D(NumVec::U8(vec![1, 2])),
+                MatValue::Scalar(ScalarNum::U8(3)),
+            ]),
+        );
+    }
+
+    #[test]
+    fn complex_rows_of_one_class_and_length_become_a_complex_matrix() {
+        assert_eq!(
+            to_value(
+                &vec![
+                    vec![Complex64::new(1.0, 2.0)],
+                    vec![Complex64::new(3.0, 4.0)],
+                ],
+                &Options::default(),
+            )
+            .unwrap(),
+            MatValue::ComplexMatrix {
+                rows: 2,
+                cols: 1,
+                pairs: ComplexVec::F64(vec![(1.0, 2.0), (3.0, 4.0)]),
+            },
+        );
+    }
+
+    #[test]
+    fn an_omitted_element_holds_its_slot_in_the_cell_array() {
+        let opts = Options {
+            null_policy: NullPolicy::Omit,
+            ..Options::default()
+        };
+        assert_eq!(
+            to_value(&(Some(1.0f64), None::<f64>), &opts).unwrap(),
+            MatValue::Cell(vec![
+                MatValue::Scalar(ScalarNum::F64(1.0)),
+                MatValue::EmptyStructArray,
+            ]),
+        );
     }
 }
