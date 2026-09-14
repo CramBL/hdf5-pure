@@ -50,18 +50,6 @@ impl<'a> ObjectPath<'a> {
         }
     }
 
-    /// Returns the path of the child `name` of the object this path identifies.
-    ///
-    /// The child of an absolute path is absolute, so it starts the walk where this path starts it.
-    pub(crate) fn join(&self, name: LinkName<'a>) -> Self {
-        let mut components = self.components.clone();
-        components.push(name);
-        Self {
-            components,
-            absolute: self.absolute,
-        }
-    }
-
     /// Resolves `rest` from the object this path identifies.
     ///
     /// An absolute `rest` walks from the root group wherever this path ends, so it is the result
@@ -404,15 +392,6 @@ mod tests {
         #[case] link_name: Option<&str>,
     ) {
         assert_eq!(LinkName::new(name).map(LinkName::as_str), link_name);
-    }
-
-    #[rstest]
-    #[case("", "a")]
-    #[case("g", "g/a")]
-    #[case("/g/h/", "g/h/a")]
-    fn joining_appends_one_component_to_a_path(#[case] base: &str, #[case] joined: &str) {
-        let name = LinkName::new("a").unwrap();
-        assert_eq!(ObjectPath::parse(base).join(name).to_string(), joined);
     }
 
     #[rstest]

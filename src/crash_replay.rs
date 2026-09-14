@@ -531,7 +531,7 @@ fn warmed_base_padded(path: &Path, paged: bool, pad: usize) {
 fn append(s: &mut WriteEngine, from: i32, count: i32) {
     let mut b = AppendBuilder::new();
     b.append_i32(&(from..from + count).collect::<Vec<_>>());
-    s.append_inplace_gathered(AppendTarget::Path("d"), &b, 4)
+    s.append_inplace_gathered(AppendTarget::Path(&ObjectPathBuf::parse("d")), &b, 4)
         .unwrap();
 }
 
@@ -795,7 +795,7 @@ fn a_crashed_append_can_be_reopened_and_appended_to() {
             s.set_sync_policy(SyncPolicy::OnClose);
             let mut b = AppendBuilder::new();
             b.append_i32(&(before..before + RECOVER_APPEND).collect::<Vec<_>>());
-            s.append_inplace_gathered(AppendTarget::Path("d"), &b, 4)?;
+            s.append_inplace_gathered(AppendTarget::Path(&ObjectPathBuf::parse("d")), &b, 4)?;
             drop(s);
             Ok::<(), Error>(())
         }));
@@ -1243,7 +1243,7 @@ fn churn(s: &mut WriteEngine, r: i32) {
     let from = COMMIT_BASE + r * COMMIT_STEP;
     let mut b = AppendBuilder::new();
     b.append_i32(&(from..from + COMMIT_STEP).collect::<Vec<_>>());
-    s.append_inplace_gathered(AppendTarget::Path("d"), &b, 4)
+    s.append_inplace_gathered(AppendTarget::Path(&ObjectPathBuf::parse("d")), &b, 4)
         .unwrap();
 
     let v = added_values(r);
