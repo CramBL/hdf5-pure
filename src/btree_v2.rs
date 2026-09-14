@@ -6,6 +6,7 @@ use alloc::{vec, vec::Vec};
 #[cfg(feature = "checksum")]
 use byteorder::{ByteOrder, LittleEndian};
 
+use crate::address::StoredAddress;
 use crate::bytes::{ensure_len, read_length, read_offset};
 use crate::convert::Narrow;
 use crate::error::FormatError;
@@ -23,7 +24,7 @@ pub struct BTreeV2Header {
     /// Depth of the tree (0 = root is a leaf).
     pub depth: u16,
     /// Address of root node.
-    pub root_node_address: u64,
+    pub root_node_address: StoredAddress,
     /// Number of records in the root node.
     pub num_records_in_root: u16,
     /// Total number of records in all nodes.
@@ -89,7 +90,7 @@ impl BTreeV2Header {
         let _merge_percent = file_data[offset + 15];
 
         let mut pos = offset + 16;
-        let root_node_address = read_offset(file_data, pos, offset_size)?;
+        let root_node_address = StoredAddress::new(read_offset(file_data, pos, offset_size)?);
         pos += offset_size as usize;
 
         ensure_len(file_data, pos, 2)?;
@@ -307,7 +308,7 @@ pub fn collect_btree_v2_records(
         // Root is a leaf
         parse_leaf_records(
             file_data,
-            header.root_node_address.to_usize()?,
+            header.root_node_address.get().to_usize()?,
             header.num_records_in_root,
             header.record_size,
         )
@@ -322,7 +323,7 @@ pub fn collect_btree_v2_records(
         let mut records = Vec::new();
         collect_internal_records(
             file_data,
-            header.root_node_address.to_usize()?,
+            header.root_node_address.get().to_usize()?,
             header.num_records_in_root,
             header.depth,
             header.record_size,
@@ -393,7 +394,7 @@ fn parse_internal_child_pointers(
     record_size: u16,
     offset_size: u8,
     node_info: &NodeInfo,
-) -> Result<Vec<(u64, u16)>, FormatError> {
+) -> Result<Vec<(StoredAddress, u16)>, FormatError> {
     // signature(4) + version(1) + type(1) = 6
     ensure_len(node, 0, 6)?;
     if &node[0..4] != b"BTIN" {
@@ -419,7 +420,7 @@ fn parse_internal_child_pointers(
 
     let mut children = Vec::with_capacity(num_children);
     for _ in 0..num_children {
-        let addr = read_offset(node, pos, offset_size)?;
+        let addr = StoredAddress::new(read_offset(node, pos, offset_size)?);
         pos += offset_size as usize;
         // `read_var_uint` returns a value spanning `nrec_width` bytes, and
         // `max_nrec_size` is sized to the node's record capacity, which the v2
@@ -471,14 +472,14 @@ fn collect_internal_records(
         if child_depth == 0 {
             out.extend(parse_leaf_records(
                 file_data,
-                child_addr.to_usize()?,
+                child_addr.get().to_usize()?,
                 child_nrec,
                 record_size,
             )?);
         } else {
             collect_internal_records(
                 file_data,
-                child_addr.to_usize()?,
+                child_addr.get().to_usize()?,
                 child_nrec,
                 child_depth,
                 record_size,
@@ -522,7 +523,7 @@ pub fn collect_btree_v2_records_from_source<S: Source + ?Sized>(
     let mut records = Vec::new();
     collect_node_from_source(
         source,
-        header.root_node_address,
+        header.root_node_address.get(),
         header.num_records_in_root,
         header.depth,
         header.record_size,
@@ -576,7 +577,7 @@ fn collect_node_from_source<S: Source + ?Sized>(
     for (i, &(child_addr, child_nrec)) in children.iter().enumerate() {
         collect_node_from_source(
             source,
-            child_addr,
+            child_addr.get(),
             child_nrec,
             child_depth,
             record_size,
@@ -770,7 +771,7 @@ mod tests {
         assert_eq!(hdr.node_size, 512);
         assert_eq!(hdr.record_size, 11);
         assert_eq!(hdr.depth, 0);
-        assert_eq!(hdr.root_node_address, 0x1000);
+        assert_eq!(hdr.root_node_address, StoredAddress::new(0x1000));
         assert_eq!(hdr.num_records_in_root, 3);
         assert_eq!(hdr.total_records, 3);
     }

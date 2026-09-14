@@ -10278,7 +10278,7 @@ impl WriteEngine {
             // otherwise write it past the screen its `Path` twin gets — which
             // is the shape of this bug in the first place (issue #317).
             ObjectRefTarget::Raw(addr) => {
-                if let Some(refusal) = invalidated.refusal(*addr) {
+                if let Some(refusal) = invalidated.refusal(StoredAddress::new(*addr)) {
                     return Err(Error::EditUnsupported(refusal));
                 }
                 return Ok(*addr);
@@ -11111,13 +11111,13 @@ impl InvalidatedAddresses {
     /// so neither is screened: the same two values
     /// [`crate::repack()`] copies through verbatim without
     /// resolving, and the two [`crate::reader`] refuses to dereference.
-    fn refusal(&self, stored: u64) -> Option<&'static str> {
-        if stored == 0 || stored == UNDEF {
+    fn refusal(&self, stored: StoredAddress) -> Option<&'static str> {
+        if stored.get() == 0 || stored.get() == UNDEF {
             return None;
         }
         // An address that cannot even be shifted into the file is not one of
         // ours; leave it to whatever reads it.
-        let abs = self.base.absolute(StoredAddress::new(stored)).ok()?;
+        let abs = self.base.absolute(stored).ok()?;
         if self
             .removed
             .iter()
@@ -14720,7 +14720,7 @@ fn screen_resolved_references(
     // Non-empty slots mean the datatype has room for at least one 8-byte
     // address, so the element size is at least 8.
     for (_, stored) in stored_object_references(raw, dt.type_size() as usize, &slots) {
-        if let Some(refusal) = invalidated.refusal(stored) {
+        if let Some(refusal) = invalidated.refusal(StoredAddress::new(stored)) {
             return Err(Error::EditUnsupported(refusal));
         }
     }
@@ -17893,7 +17893,7 @@ mod tests {
             location: crate::sohm::SohmLocation::ObjectHeader {
                 message_type: MessageType::Attribute.to_u16() as u8,
                 creation_index: 0,
-                address: 0x400,
+                address: StoredAddress::new(0x400),
             },
         };
         let moved = InvalidatedAddresses {

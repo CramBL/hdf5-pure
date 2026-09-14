@@ -6,6 +6,7 @@
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 
+use crate::address::StoredAddress;
 use crate::bytes::{ensure_len, read_optional_offset};
 use crate::error::FormatError;
 
@@ -23,11 +24,11 @@ pub struct AttributeInfoMessage {
     /// which is what the reference C library writes before a set goes dense.
     pub indexes_creation_order: bool,
     /// Address of the fractal heap storing attribute messages.
-    pub fractal_heap_address: Option<u64>,
+    pub fractal_heap_address: Option<StoredAddress>,
     /// Address of B-tree v2 (type 8) for name-ordered attribute index.
-    pub btree_name_index_address: Option<u64>,
+    pub btree_name_index_address: Option<StoredAddress>,
     /// Address of B-tree v2 (type 9) for creation-order attribute index.
-    pub btree_creation_order_address: Option<u64>,
+    pub btree_creation_order_address: Option<StoredAddress>,
 }
 
 impl AttributeInfoMessage {
@@ -59,14 +60,16 @@ impl AttributeInfoMessage {
             None
         };
 
-        let fractal_heap_address = read_optional_offset(data, pos, offset_size)?;
+        let fractal_heap_address =
+            read_optional_offset(data, pos, offset_size)?.map(StoredAddress::new);
         pos += offset_size as usize;
 
-        let btree_name_index_address = read_optional_offset(data, pos, offset_size)?;
+        let btree_name_index_address =
+            read_optional_offset(data, pos, offset_size)?.map(StoredAddress::new);
         pos += offset_size as usize;
 
         let btree_creation_order_address = if has_creation_order_index {
-            read_optional_offset(data, pos, offset_size)?
+            read_optional_offset(data, pos, offset_size)?.map(StoredAddress::new)
         } else {
             None
         };
@@ -108,8 +111,8 @@ impl AttributeInfoMessage {
 
 /// Write an address, or the all-ones "undefined" value for `None`, in
 /// `offset_size` little-endian bytes.
-fn write_offset(data: &mut Vec<u8>, address: Option<u64>, offset_size: u8) {
-    let value = address.unwrap_or(u64::MAX);
+fn write_offset(data: &mut Vec<u8>, address: Option<StoredAddress>, offset_size: u8) {
+    let value = address.map_or(u64::MAX, StoredAddress::get);
     for i in 0..offset_size as usize {
         #[expect(
             clippy::cast_possible_truncation,
@@ -148,8 +151,11 @@ mod tests {
         data.extend_from_slice(&0x2000u64.to_le_bytes()); // btree name
 
         let msg = AttributeInfoMessage::parse(&data, 8).unwrap();
-        assert_eq!(msg.fractal_heap_address, Some(0x1000));
-        assert_eq!(msg.btree_name_index_address, Some(0x2000));
+        assert_eq!(msg.fractal_heap_address, Some(StoredAddress::new(0x1000)));
+        assert_eq!(
+            msg.btree_name_index_address,
+            Some(StoredAddress::new(0x2000))
+        );
         assert_eq!(msg.max_creation_index, None);
         assert_eq!(msg.btree_creation_order_address, None);
     }
@@ -167,9 +173,15 @@ mod tests {
         let msg = AttributeInfoMessage::parse(&data, 8).unwrap();
         assert_eq!(msg.max_creation_index, Some(42));
         assert!(msg.indexes_creation_order);
-        assert_eq!(msg.fractal_heap_address, Some(0x1000));
-        assert_eq!(msg.btree_name_index_address, Some(0x2000));
-        assert_eq!(msg.btree_creation_order_address, Some(0x3000));
+        assert_eq!(msg.fractal_heap_address, Some(StoredAddress::new(0x1000)));
+        assert_eq!(
+            msg.btree_name_index_address,
+            Some(StoredAddress::new(0x2000))
+        );
+        assert_eq!(
+            msg.btree_creation_order_address,
+            Some(StoredAddress::new(0x3000))
+        );
     }
 
     /// Every shape of the message survives a round trip through
@@ -179,13 +191,14 @@ mod tests {
     fn serialize_round_trips_every_flag_combination() {
         for max in [None, Some(7u16)] {
             for indexed in [false, true] {
-                for heap in [None, Some(0x1000u64)] {
+                for heap in [None, Some(StoredAddress::new(0x1000))] {
                     let msg = AttributeInfoMessage {
                         max_creation_index: max,
                         indexes_creation_order: indexed,
                         fractal_heap_address: heap,
-                        btree_name_index_address: heap.map(|_| 0x2000),
-                        btree_creation_order_address: (indexed && heap.is_some()).then_some(0x3000),
+                        btree_name_index_address: heap.map(|_| StoredAddress::new(0x2000)),
+                        btree_creation_order_address: (indexed && heap.is_some())
+                            .then_some(StoredAddress::new(0x3000)),
                     };
                     let bytes = msg.serialize(8);
                     assert_eq!(
@@ -207,8 +220,11 @@ mod tests {
         data.extend_from_slice(&0x200u32.to_le_bytes()); // btree name
 
         let msg = AttributeInfoMessage::parse(&data, 4).unwrap();
-        assert_eq!(msg.fractal_heap_address, Some(0x100));
-        assert_eq!(msg.btree_name_index_address, Some(0x200));
+        assert_eq!(msg.fractal_heap_address, Some(StoredAddress::new(0x100)));
+        assert_eq!(
+            msg.btree_name_index_address,
+            Some(StoredAddress::new(0x200))
+        );
     }
 
     #[test]

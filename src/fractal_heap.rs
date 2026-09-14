@@ -6,6 +6,7 @@ use alloc::vec::Vec;
 #[cfg(feature = "checksum")]
 use byteorder::{ByteOrder, LittleEndian};
 
+use crate::address::StoredAddress;
 use crate::btree_v2::{
     BTreeV2Header, BTreeV2Record, collect_btree_v2_records, collect_btree_v2_records_from_source,
 };
@@ -33,12 +34,12 @@ enum HeapIdType {
 /// readers share the indirect-block navigation logic.
 enum HeapChild {
     Direct {
-        addr: u64,
+        addr: StoredAddress,
         block_size: u64,
         heap_offset: u64,
     },
     Indirect {
-        addr: u64,
+        addr: StoredAddress,
         nrows: u16,
         heap_offset: u64,
     },
@@ -60,7 +61,7 @@ pub struct FractalHeapHeader {
     pub max_managed_object_size: u32,
     /// Address of the v2 B-tree that indexes "huge" objects (objects too large
     /// to be managed). Undefined (all-ones) when the heap has no huge objects.
-    pub btree_huge_objects_address: u64,
+    pub btree_huge_objects_address: StoredAddress,
     /// Width of the doubling table.
     pub table_width: u16,
     /// Starting block size in the doubling table.
@@ -76,7 +77,7 @@ pub struct FractalHeapHeader {
     /// field is decoded for format completeness but not consulted by the reader.
     pub start_root_rows: u16,
     /// Address of the root block.
-    pub root_block_address: u64,
+    pub root_block_address: StoredAddress,
     /// Number of rows in root indirect block (0 = root is direct block).
     pub current_rows_in_root_indirect_block: u16,
     /// Total number of managed objects.
@@ -168,7 +169,7 @@ struct HugeObjectIndex {
     /// `(id, address, length)`, ordered by id so a lookup is a binary search.
     /// The B-tree already stores them in that order; sorting again costs one
     /// pass and means correctness here does not rest on that.
-    entries: Vec<(u64, u64, u64)>,
+    entries: Vec<(u64, StoredAddress, u64)>,
 }
 
 #[cfg(test)]
@@ -211,7 +212,7 @@ impl HugeObjectIndex {
         let mut entries = Vec::with_capacity(records.len());
         for record in records {
             let data = &record.data;
-            let addr = read_offset(data, 0, offset_size)?;
+            let addr = StoredAddress::new(read_offset(data, 0, offset_size)?);
             let len = read_length(data, os, length_size)?;
             let id = read_length(data, os + ls, length_size)?;
             entries.push((id, addr, len));
@@ -221,7 +222,7 @@ impl HugeObjectIndex {
     }
 
     /// The `(address, length)` of the object with `huge_id`.
-    fn locate(&self, huge_id: u64) -> Result<(u64, u64), FormatError> {
+    fn locate(&self, huge_id: u64) -> Result<(StoredAddress, u64), FormatError> {
         match self
             .entries
             .binary_search_by_key(&huge_id, |&(id, _, _)| id)
@@ -238,7 +239,7 @@ impl HugeObjectIndex {
 /// What a huge object's heap ID resolves to: its location outright, or the id
 /// the heap's huge-object index knows it by.
 enum HugeReference {
-    Inline { addr: u64, len: u64 },
+    Inline { addr: StoredAddress, len: u64 },
     Indexed(u64),
 }
 
@@ -317,7 +318,7 @@ impl HeapObjectReader<'_> {
             .huge_ids_direct(self.offset_size, self.length_size)
         {
             // The address and length are stored inline in the heap ID.
-            let addr = read_offset(payload, 0, self.offset_size)?;
+            let addr = StoredAddress::new(read_offset(payload, 0, self.offset_size)?);
             let len = read_length(payload, self.offset_size as usize, self.length_size)?;
             return Ok(HugeReference::Inline { addr, len });
         }
@@ -325,7 +326,10 @@ impl HeapObjectReader<'_> {
         // Indirect: the heap ID holds a B-tree key (the huge object ID); the
         // huge-objects v2 B-tree maps it to (address, length).
         let huge_id = read_var_le(payload);
-        if is_undefined_addr(self.header.btree_huge_objects_address, self.offset_size) {
+        if is_undefined_addr(
+            self.header.btree_huge_objects_address.get(),
+            self.offset_size,
+        ) {
             return Err(FormatError::HugeObjectNotFound(huge_id));
         }
         Ok(HugeReference::Indexed(huge_id))
@@ -344,7 +348,7 @@ impl HeapObjectReader<'_> {
         huge_id: u64,
         backend: Backend,
         records: F,
-    ) -> Result<(u64, u64), FormatError>
+    ) -> Result<(StoredAddress, u64), FormatError>
     where
         F: FnOnce() -> Result<Vec<BTreeV2Record>, FormatError>,
     {
@@ -373,7 +377,7 @@ impl HeapObjectReader<'_> {
             HugeReference::Inline { addr, len } => (addr, len),
             HugeReference::Indexed(huge_id) => {
                 let (offset_size, length_size) = (self.offset_size, self.length_size);
-                let btree_addr = self.header.btree_huge_objects_address.to_usize()?;
+                let btree_addr = self.header.btree_huge_objects_address.get().to_usize()?;
                 self.locate_huge(huge_id, Backend::Buffered, || {
                     let header =
                         BTreeV2Header::parse(file_data, btree_addr, offset_size, length_size)?;
@@ -382,7 +386,7 @@ impl HeapObjectReader<'_> {
                 })?
             }
         };
-        slice_object(file_data, addr, len.to_usize()?)
+        slice_object(file_data, addr.get(), len.to_usize()?)
     }
 
     /// Resolve and read a "huge" object via a [`Source`].
@@ -395,7 +399,7 @@ impl HeapObjectReader<'_> {
             HugeReference::Inline { addr, len } => (addr, len),
             HugeReference::Indexed(huge_id) => {
                 let (offset_size, length_size) = (self.offset_size, self.length_size);
-                let btree_addr = self.header.btree_huge_objects_address;
+                let btree_addr = self.header.btree_huge_objects_address.get();
                 self.locate_huge(huge_id, Backend::Streaming, || {
                     let header = BTreeV2Header::parse_from_source(
                         source,
@@ -408,7 +412,7 @@ impl HeapObjectReader<'_> {
                 })?
             }
         };
-        read_object_at_source(source, addr, len.to_usize()?)
+        read_object_at_source(source, addr.get(), len.to_usize()?)
     }
 }
 
@@ -494,7 +498,8 @@ impl FractalHeapHeader {
         // btree_huge_objects_address (offset_size) — root of the v2 B-tree that
         // indexes "huge" objects (used when a stored object exceeds
         // max_managed_object_size, e.g. links/attributes with very long names).
-        let btree_huge_objects_address = read_offset(file_data, pos, offset_size)?;
+        let btree_huge_objects_address =
+            StoredAddress::new(read_offset(file_data, pos, offset_size)?);
         pos += os;
 
         // Skip the remaining fixed fields: free_space_managed_blocks(ls),
@@ -542,7 +547,7 @@ impl FractalHeapHeader {
         pos += 2;
 
         // root_block_address (offset_size)
-        let root_block_address = read_offset(file_data, pos, offset_size)?;
+        let root_block_address = StoredAddress::new(read_offset(file_data, pos, offset_size)?);
         pos += os;
 
         // current_rows_in_root_indirect_block (2)
@@ -663,7 +668,7 @@ impl FractalHeapHeader {
         }
         let (heap_offset, obj_len) = self.decode_managed_id(id_bytes)?;
 
-        if is_undefined_addr(self.root_block_address, offset_size) {
+        if is_undefined_addr(self.root_block_address.get(), offset_size) {
             return Err(FormatError::UnexpectedEof {
                 expected: 1,
                 available: 0,
@@ -674,7 +679,7 @@ impl FractalHeapHeader {
             // Root is a direct block
             self.read_from_direct_block(
                 file_data,
-                self.root_block_address.to_usize()?,
+                self.root_block_address.get().to_usize()?,
                 self.starting_block_size,
                 0, // block offset in heap = 0 for root
                 heap_offset,
@@ -685,7 +690,7 @@ impl FractalHeapHeader {
             // Root is an indirect block — limit recursion to 64 levels
             self.read_from_indirect_block(
                 file_data,
-                self.root_block_address.to_usize()?,
+                self.root_block_address.get().to_usize()?,
                 self.current_rows_in_root_indirect_block,
                 0, // block offset
                 heap_offset,
@@ -820,7 +825,7 @@ impl FractalHeapHeader {
                     let block_end = current_heap_offset.saturating_add(block_size);
                     if target_offset >= current_heap_offset && target_offset < block_end {
                         return Ok(Some(HeapChild::Direct {
-                            addr: child_addr,
+                            addr: StoredAddress::new(child_addr),
                             block_size,
                             heap_offset: current_heap_offset,
                         }));
@@ -848,7 +853,7 @@ impl FractalHeapHeader {
                                       max_heap_size bits), so it fits u16"
                         )]
                         return Ok(Some(HeapChild::Indirect {
-                            addr: child_addr,
+                            addr: StoredAddress::new(child_addr),
                             nrows: child_nrows as u16,
                             heap_offset: current_heap_offset,
                         }));
@@ -918,7 +923,7 @@ impl FractalHeapHeader {
                 heap_offset,
             }) => self.read_from_direct_block(
                 file_data,
-                addr.to_usize()?,
+                addr.get().to_usize()?,
                 block_size,
                 heap_offset,
                 target_offset,
@@ -931,7 +936,7 @@ impl FractalHeapHeader {
                 heap_offset,
             }) => self.read_from_indirect_block(
                 file_data,
-                addr.to_usize()?,
+                addr.get().to_usize()?,
                 child_nrows,
                 heap_offset,
                 target_offset,
@@ -979,7 +984,7 @@ impl FractalHeapHeader {
             return Err(FormatError::UnsupportedFilteredHeapObject);
         }
         let (heap_offset, obj_len) = self.decode_managed_id(id_bytes)?;
-        if is_undefined_addr(self.root_block_address, offset_size) {
+        if is_undefined_addr(self.root_block_address.get(), offset_size) {
             return Err(FormatError::UnexpectedEof {
                 expected: 1,
                 available: 0,
@@ -988,7 +993,7 @@ impl FractalHeapHeader {
         if self.current_rows_in_root_indirect_block == 0 {
             self.read_from_direct_block_from_source(
                 source,
-                self.root_block_address,
+                self.root_block_address.get(),
                 0, // root direct block starts at heap offset 0
                 heap_offset,
                 obj_len.to_usize()?,
@@ -996,7 +1001,7 @@ impl FractalHeapHeader {
         } else {
             self.read_from_indirect_block_from_source(
                 source,
-                self.root_block_address,
+                self.root_block_address.get(),
                 self.current_rows_in_root_indirect_block,
                 0,
                 heap_offset,
@@ -1057,7 +1062,7 @@ impl FractalHeapHeader {
                 addr, heap_offset, ..
             }) => self.read_from_direct_block_from_source(
                 source,
-                addr,
+                addr.get(),
                 heap_offset,
                 target_offset,
                 length,
@@ -1068,7 +1073,7 @@ impl FractalHeapHeader {
                 heap_offset,
             }) => self.read_from_indirect_block_from_source(
                 source,
-                addr,
+                addr.get(),
                 child_nrows,
                 heap_offset,
                 target_offset,
@@ -1438,7 +1443,7 @@ mod tests {
         // Root is a direct block.
         let mut h = dtable_header(512, 65536, 4);
         h.io_filter_encoded_length = 8;
-        h.root_block_address = 0x100;
+        h.root_block_address = StoredAddress::new(0x100);
         h.current_rows_in_root_indirect_block = 0;
         let file = vec![0u8; 0x400];
         assert_eq!(
@@ -1489,8 +1494,8 @@ mod tests {
             huge_record(0x3000, 7000, 5),
         ];
         let index = HugeObjectIndex::decode(&records, 8, 8).unwrap();
-        assert_eq!(index.locate(2).unwrap(), (0x2000, 6000));
-        assert_eq!(index.locate(5).unwrap(), (0x3000, 7000));
+        assert_eq!(index.locate(2).unwrap(), (StoredAddress::new(0x2000), 6000));
+        assert_eq!(index.locate(5).unwrap(), (StoredAddress::new(0x3000), 7000));
         assert_eq!(
             index.locate(9),
             Err(FormatError::HugeObjectNotFound(9)),
@@ -1509,9 +1514,9 @@ mod tests {
         ];
         let index = HugeObjectIndex::decode(&records, 8, 8).unwrap();
         for (id, want) in [
-            (1, (0x1000, 5000)),
-            (2, (0x2000, 6000)),
-            (5, (0x3000, 7000)),
+            (1, (StoredAddress::new(0x1000), 5000)),
+            (2, (StoredAddress::new(0x2000), 6000)),
+            (5, (StoredAddress::new(0x3000), 7000)),
         ] {
             assert_eq!(index.locate(id).unwrap(), want);
         }
@@ -1530,7 +1535,7 @@ mod tests {
             node_size: 512,
             record_size,
             depth: 0,
-            root_node_address: 0x100,
+            root_node_address: StoredAddress::new(0x100),
             num_records_in_root: 1,
             total_records: 1,
         };
@@ -1692,13 +1697,13 @@ mod tests {
             heap_id_length: 7,
             io_filter_encoded_length: 0,
             max_managed_object_size: 0,
-            btree_huge_objects_address: u64::MAX,
+            btree_huge_objects_address: StoredAddress::new(u64::MAX),
             table_width,
             starting_block_size: start_block_size,
             max_direct_block_size,
             max_heap_size: 64,
             start_root_rows: 1,
-            root_block_address: 0,
+            root_block_address: StoredAddress::new(0),
             current_rows_in_root_indirect_block: 0,
             managed_objects_count: 0,
         }

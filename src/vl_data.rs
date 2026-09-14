@@ -66,7 +66,7 @@ pub struct VlElement {
     /// Length of the VL data.
     pub length: u32,
     /// Address of the global heap collection containing the data.
-    pub collection_address: u64,
+    pub collection_address: StoredAddress,
     /// Index of the object within the collection.
     pub object_index: u32,
 }
@@ -104,7 +104,7 @@ pub fn parse_vl_references(
         ]);
         pos += 4;
 
-        let collection_address = read_offset(raw_data, pos, offset_size)?;
+        let collection_address = StoredAddress::new(read_offset(raw_data, pos, offset_size)?);
         pos += offset_size as usize;
 
         let object_index = u32::from_le_bytes([
@@ -393,13 +393,12 @@ where
     // there, in element order.
     let mut wanted: Vec<(u64, Vec<u16>)> = Vec::new();
     for element in &refs {
-        if is_undefined_addr(element.collection_address, offset_size)
-            || (element.length == 0 && element.collection_address == 0)
+        if is_undefined_addr(element.collection_address.get(), offset_size)
+            || (element.length == 0 && element.collection_address.get() == 0)
         {
             continue;
         }
-        let Ok(address) = base_address.absolute(StoredAddress::new(element.collection_address))
-        else {
+        let Ok(address) = base_address.absolute(element.collection_address) else {
             continue;
         };
         let Ok(index) = u16::try_from(element.object_index) else {
@@ -417,20 +416,19 @@ where
     let mut collections: Vec<(u64, GlobalHeapIndex)> = Vec::new();
     for element in &refs {
         if element.length == 0
-            && (is_undefined_addr(element.collection_address, offset_size)
-                || element.collection_address == 0)
+            && (is_undefined_addr(element.collection_address.get(), offset_size)
+                || element.collection_address.get() == 0)
         {
             visitor("");
             continue;
         }
-        if is_undefined_addr(element.collection_address, offset_size) {
+        if is_undefined_addr(element.collection_address.get(), offset_size) {
             return Err(FormatError::VlDataError(
                 "non-empty VL element has an undefined heap address".into(),
             ));
         }
 
-        let collection_address =
-            base_address.absolute(StoredAddress::new(element.collection_address))?;
+        let collection_address = base_address.absolute(element.collection_address)?;
         let collection_pos = match collections
             .iter()
             .position(|(address, _)| *address == collection_address)
@@ -550,20 +548,19 @@ pub(crate) fn read_vl_byte_objects_from_source<S: Source + ?Sized>(
     let mut collections: Vec<(u64, GlobalHeapIndex)> = Vec::new();
     for element in &refs {
         if element.length == 0
-            && (is_undefined_addr(element.collection_address, offset_size)
-                || element.collection_address == 0)
+            && (is_undefined_addr(element.collection_address.get(), offset_size)
+                || element.collection_address.get() == 0)
         {
             objects.push(VlByteObject::Null);
             continue;
         }
-        if is_undefined_addr(element.collection_address, offset_size) {
+        if is_undefined_addr(element.collection_address.get(), offset_size) {
             return Err(FormatError::VlDataError(
                 "non-empty VL element has an undefined heap address".into(),
             ));
         }
 
-        let collection_address =
-            base_address.absolute(StoredAddress::new(element.collection_address))?;
+        let collection_address = base_address.absolute(element.collection_address)?;
         let collection_pos = match collections
             .iter()
             .position(|(address, _)| *address == collection_address)
@@ -710,7 +707,7 @@ mod tests {
         let refs = parse_vl_references(&raw, 2, 8).unwrap();
         assert_eq!(refs.len(), 2);
         assert_eq!(refs[0].length, 5);
-        assert_eq!(refs[0].collection_address, 0x1000);
+        assert_eq!(refs[0].collection_address, StoredAddress::new(0x1000));
         assert_eq!(refs[0].object_index, 1);
         assert_eq!(refs[1].length, 5);
         assert_eq!(refs[1].object_index, 2);
