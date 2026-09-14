@@ -1844,12 +1844,11 @@ fn repack_keeps_the_chunks_a_partly_written_dataset_holds() {
 ///
 /// The unallocated path emits no chunk, so there is nothing for a lossy filter to
 /// perturb and a case could be made for letting it through. It is not made here:
-/// the filters are reproduced by the same `carry_shape_and_pipeline` the
-/// re-encode path uses, which reaches an `unreachable!` for any filter
-/// `check_pipeline` was supposed to have refused. Widening what repack accepts is
-/// a separate decision from preserving storage, so the refusal set is unchanged —
-/// and a path that skipped the check would panic rather than refuse, which is
-/// what this pins.
+/// `check_pipeline` runs before the storage is reproduced, and the filters it
+/// decodes are the ones `carry_shape_and_pipeline` re-applies. Widening what
+/// repack accepts is a separate decision from preserving storage, so the set it
+/// rejects is unchanged, and a path that skipped the check would carry the
+/// dataset over without its filter.
 #[test]
 fn repack_still_refuses_a_never_written_dataset_with_a_lossy_filter() {
     use hdf5::filters::ScaleOffset as CScaleOffset;
