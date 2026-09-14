@@ -14857,12 +14857,9 @@ fn screen_copied_references(
                 let encoded = if shared {
                     committed = resolver
                         .resolve(&region[body..body_end], MessageType::Datatype)
-                        .map_err(|_| {
-                            Error::EditUnsupported(
-                                "a copy in this commit names a committed (shared) datatype that \
-                                 could not be read, so its elements cannot be screened against \
-                                 the same commit's deletions; use separate commits",
-                            )
+                        .map_err(|source| Error::CopyScreenUnreadable {
+                            message: MessageType::Datatype,
+                            source,
                         })?;
                     &committed[..]
                 } else {
@@ -14900,8 +14897,9 @@ fn screen_copied_references(
                     LENGTH_SIZE,
                     &resolver,
                 )
-                .map_err(|_| {
-                    Error::EditUnsupported("a source attribute could not be parsed for copying")
+                .map_err(|source| Error::CopyScreenUnreadable {
+                    message: MessageType::Attribute,
+                    source,
                 })?;
                 screen_resolved_references(&attr.datatype, &attr.raw_data, invalidated)?;
             }
@@ -15346,6 +15344,40 @@ mod tests {
         assert!(
             err.to_string().contains("could not be read to screen"),
             "got: {err}"
+        );
+    }
+
+    /// The committed reference points at address 248, and the source is empty,
+    /// so the four-byte signature read there runs to 252 over 0 bytes.
+    #[test]
+    fn a_copy_whose_committed_datatype_cannot_be_read_reports_the_read_failure() {
+        let empty = BytesSource::new(Vec::new());
+        let invalidated = InvalidatedAddresses {
+            removed: vec![(248, 71)],
+            moved: Vec::new(),
+            base: BaseAddress::ZERO,
+        };
+        let mut bytes = message_record(
+            MessageType::Datatype,
+            &crate::shared_message::encode_committed_ref(248, OFFSET_SIZE),
+        );
+        bytes[3] = MessageFlags::SHARED.get();
+        let tree = CopyTree::DatasetVerbatim {
+            region: plain_region(bytes),
+            dense_attrs: DenseAttrSet::default(),
+        };
+
+        let err = screen_copied_references(&tree, &invalidated, &empty).unwrap_err();
+        let Error::CopyScreenUnreadable { message, source } = &err else {
+            panic!("expected CopyScreenUnreadable, got {err:?}");
+        };
+        assert_eq!(*message, MessageType::Datatype);
+        assert_eq!(
+            *source,
+            FormatError::UnexpectedEof {
+                expected: 252,
+                available: 0
+            }
         );
     }
 

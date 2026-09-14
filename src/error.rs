@@ -17,6 +17,9 @@ use core::fmt;
 use core::num::NonZeroUsize;
 use core::str::Utf8Error;
 
+#[cfg(feature = "std")]
+use crate::message_type::MessageType;
+
 /// Errors that can occur when parsing HDF5 binary format structures.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
@@ -1218,7 +1221,7 @@ pub enum Error {
     /// instead.
     NotANamedDatatype(String),
     /// A required header message was not found.
-    MissingMessage(crate::message_type::MessageType),
+    MissingMessage(MessageType),
     /// An array shape error from the `ndarray` integration: either the flat
     /// data could not be reshaped to the dataset's dimensions, or a requested
     /// static rank (e.g. `read_array::<_, Ix2>`) did not match the dataset's
@@ -1329,6 +1332,16 @@ pub enum Error {
     /// dataset shape/datatype/filter combination the in-place writer cannot
     /// emit yet. The payload is a human-readable reason.
     EditUnsupported(&'static str),
+    /// The copy screen could not read a message of an object this commit copies:
+    /// a committed (shared) datatype that did not resolve, or an attribute that
+    /// did not parse or resolve. Without it, the copy's elements cannot be
+    /// checked against the space the same commit reclaims.
+    CopyScreenUnreadable {
+        /// The type of the message the screen stopped at.
+        message: MessageType,
+        /// The failure the resolve or the parse returned.
+        source: FormatError,
+    },
     /// An object in the source file cannot be reproduced faithfully by
     /// [`repack`](crate::repack()), so the repack was rejected to avoid writing a
     /// silently degraded file — for example a variable-length, time, bitfield,
@@ -1454,6 +1467,12 @@ impl fmt::Display for Error {
             Error::EditUnsupported(reason) => {
                 write!(f, "unsupported in-place edit target: {reason}")
             }
+            Error::CopyScreenUnreadable { message, source } => write!(
+                f,
+                "a copy in this commit carries a {message} message that could not be read \
+                 ({source}), so its elements cannot be screened against the same commit's \
+                 deletions; stage the copy and the deletions in separate commits"
+            ),
             Error::RepackUnsupported(reason) => {
                 write!(f, "cannot repack faithfully: {reason}")
             }
@@ -1474,6 +1493,7 @@ impl std::error::Error for Error {
         match self {
             Error::Io(e) => Some(e),
             Error::Format(e) => Some(e),
+            Error::CopyScreenUnreadable { source, .. } => Some(source),
             Error::CommitPartiallyApplied { restore, .. } => Some(&**restore),
             _ => None,
         }
