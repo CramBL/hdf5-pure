@@ -6,11 +6,10 @@
 
 use super::value::{Leaf, Value};
 use crate::mat::builder::{CellWriter, MatBuilder, StructWriter};
-use crate::mat::class::MatClass;
 use crate::mat::error::MatError;
 use crate::mat::options::{Options, StringClass};
 use crate::mat::transpose::transpose_scalars;
-use crate::mat::value::{ComplexVec, NumVec, ScalarNum, ScalarTag};
+use crate::mat::value::{ComplexVec, NumVec, ScalarNum};
 
 /// The complex dispatchers for the three write scopes, from one list.
 ///
@@ -399,9 +398,7 @@ fn emit_scalar_at_struct(
 fn emit_vec_at_builder(mb: &mut MatBuilder, name: &str, v: NumVec) -> Result<(), MatError> {
     let dims = mb.vector_dims(v.len());
     if v.is_empty() {
-        return mb
-            .write_empty(name, scalar_class(v.tag()), &dims)
-            .map(|_| ());
+        return mb.write_empty(name, v.tag().class(), &dims).map(|_| ());
     }
     match v {
         NumVec::Bool(vec) => {
@@ -425,9 +422,7 @@ fn emit_vec_at_builder(mb: &mut MatBuilder, name: &str, v: NumVec) -> Result<(),
 fn emit_vec_at_struct(sw: &mut StructWriter, name: &str, v: NumVec) -> Result<(), MatError> {
     let dims = sw.vector_dims(v.len());
     if v.is_empty() {
-        return sw
-            .write_empty(name, scalar_class(v.tag()), &dims)
-            .map(|_| ());
+        return sw.write_empty(name, v.tag().class(), &dims).map(|_| ());
     }
     match v {
         NumVec::Bool(vec) => {
@@ -519,21 +514,5 @@ fn emit_string_at_struct(sw: &mut StructWriter, name: &str, s: &str) -> Result<(
         StringClass::String => sw
             .write_string_object(name, &[s.to_owned()], &[1, 1])
             .map(|_| ()),
-    }
-}
-
-fn scalar_class(tag: ScalarTag) -> MatClass {
-    match tag {
-        ScalarTag::Bool => MatClass::Logical,
-        ScalarTag::F64 => MatClass::Double,
-        ScalarTag::F32 => MatClass::Single,
-        ScalarTag::I64 => MatClass::Int64,
-        ScalarTag::I32 => MatClass::Int32,
-        ScalarTag::I16 => MatClass::Int16,
-        ScalarTag::I8 => MatClass::Int8,
-        ScalarTag::U64 => MatClass::UInt64,
-        ScalarTag::U32 => MatClass::UInt32,
-        ScalarTag::U16 => MatClass::UInt16,
-        ScalarTag::U8 => MatClass::UInt8,
     }
 }

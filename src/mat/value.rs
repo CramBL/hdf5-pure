@@ -54,6 +54,26 @@ pub(crate) enum ScalarTag {
     U8,
 }
 
+impl ScalarTag {
+    /// Returns the MATLAB class a dataset of this tag reports in its
+    /// `MATLAB_class` attribute.
+    pub(crate) fn class(self) -> MatClass {
+        match self {
+            ScalarTag::Bool => MatClass::Logical,
+            ScalarTag::F64 => MatClass::Double,
+            ScalarTag::F32 => MatClass::Single,
+            ScalarTag::I64 => MatClass::Int64,
+            ScalarTag::I32 => MatClass::Int32,
+            ScalarTag::I16 => MatClass::Int16,
+            ScalarTag::I8 => MatClass::Int8,
+            ScalarTag::U64 => MatClass::UInt64,
+            ScalarTag::U32 => MatClass::UInt32,
+            ScalarTag::U16 => MatClass::UInt16,
+            ScalarTag::U8 => MatClass::UInt8,
+        }
+    }
+}
+
 /// A typed 1-D array of a single primitive class.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum NumVec {
