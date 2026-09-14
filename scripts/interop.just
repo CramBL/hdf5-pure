@@ -18,18 +18,25 @@ hdf5-build VERSION:
 hdf5-env VERSION:
     @{{ uv }} hdf5-build {{ if HDF5_VERSION_MAP =~ (".* " + VERSION + ":.*") { replace_regex(HDF5_VERSION_MAP, ".* " + VERSION + ":([^ ]+).*", "$1") } else { VERSION } }} --env
 
+# The crosscheck feature for the release series of libhdf5 VERSION, with the
+# comma that appends it to a feature list. The 1.8 series has no such feature.
+hdf5-release-feature VERSION:
+    @echo '{{ if VERSION =~ "^1[.]8([.]|$)" { "" } else if VERSION =~ "^1[.]10([.]|$)" { ",__hdf5-1.10" } else if VERSION =~ "^1[.]12([.]|$)" { ",__hdf5-1.12" } else if VERSION =~ "^1[.]14([.]|$)" { ",__hdf5-1.14" } else if VERSION =~ "^2([.]|$)" { ",__hdf5-2" } else { error("no crosscheck feature for HDF5 " + VERSION + ": add its release series to hdf5-release-feature") } }}'
+
 # Test all supported HDF5 versions with `FEATURES`
-test-hdf5-all FEATURES="serde,ndarray": (test-hdf5 "1.8" FEATURES) (test-hdf5 "1.10" FEATURES + ",__hdf5-1.10") (test-hdf5 "1.12" FEATURES + ",__hdf5-1.12") (test-hdf5 "1.14" FEATURES + ",__hdf5-1.14") (test-hdf5 "2" FEATURES + ",__hdf5-2")
+test-hdf5-all FEATURES="serde,ndarray": (test-hdf5 "1.8" FEATURES) (test-hdf5 "1.10" FEATURES) (test-hdf5 "1.12" FEATURES) (test-hdf5 "1.14" FEATURES) (test-hdf5 "2" FEATURES)
 
 # Run cross tests on libhdf5 `VERSION` with `FEATURES` and `ARGS`. Built under tmp/hdf5 on first use.
 test-hdf5 VERSION FEATURES="serde,ndarray" *ARGS: (hdf5-build VERSION)
+    release_feature="$(just interop::hdf5-release-feature {{ VERSION }})" && \
     eval "$(just interop::hdf5-env {{ VERSION }})" && \
-    cargo nextest run --locked {{ crosscheck }} --features hdf5,hdf5_sys,{{ FEATURES }} {{ ARGS }}
+    cargo nextest run --locked {{ crosscheck }} --features "hdf5,hdf5_sys,{{ FEATURES }}$release_feature" {{ ARGS }}
 
 # Clippy over the crosschecks, linking libhdf5 VERSION.
 lint-hdf5 VERSION FEATURES="serde,ndarray":
+    release_feature="$(just interop::hdf5-release-feature {{ VERSION }})" && \
     eval "$(just interop::hdf5-env {{ VERSION }})" && \
-    cargo clippy --locked {{ crosscheck }} --all-targets --features hdf5,hdf5_sys,{{ FEATURES }} -- -D warnings
+    cargo clippy --locked {{ crosscheck }} --all-targets --features "hdf5,hdf5_sys,{{ FEATURES }}$release_feature" -- -D warnings
 
 # The crosschecks linking the libhdf5 `hdf5-metno` bundles, built from source
 # on first use. Needs no HDF5 on the host.
