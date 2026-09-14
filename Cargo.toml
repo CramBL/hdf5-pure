@@ -104,6 +104,7 @@ mem_forget = "warn"
 panic_in_result_fn = "warn"
 todo = "warn"
 unimplemented = "warn"
+unreachable = "warn"
 
 # Error handling: an error is returned to the caller or converted, never dropped.
 map_err_ignore = "warn"
@@ -209,8 +210,6 @@ expect_used = "allow"
 unwrap_in_result = "allow"
 # TODO
 panic = "allow"
-# TODO
-unreachable = "allow"
 # TODO
 get_unwrap = "allow"
 # TODO: a slice of a string panics off a character boundary.
