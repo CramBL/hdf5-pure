@@ -222,6 +222,10 @@ def _lint_comments(engine: Engine, root: Path, path: str) -> list[Alert]:
 # Per commit: short hash, tab, the whole message, NUL.
 _COMMIT_RECORD_FORMAT = "%h%x09%B%x00"
 
+# Every prefix `git rebase --autosquash` strips, repeated, to find the commit a
+# subject names: `amend! amend! Root` names `Root`.
+_AUTOSQUASH_PREFIXES = re.compile(r"^(?:amend! |fixup! |squash! )+")
+
 
 @dataclass(frozen=True)
 class Commit:
@@ -233,6 +237,14 @@ class Commit:
     @property
     def subject(self) -> str:
         return self.message.partition("\n")[0]
+
+    @property
+    def amend_target(self) -> str | None:
+        """The subject this commit's `amend!` names, with the prefixes of a chain
+        stripped, or `None` under any other subject."""
+        if not self.subject.startswith("amend! "):
+            return None
+        return _AUTOSQUASH_PREFIXES.sub("", self.subject)
 
     def message_to_lint(self) -> str:
         """The part of this commit's message that lands on the branch.
@@ -252,9 +264,12 @@ class Commit:
 
 
 def commits_in(root: Path, revision_range: str) -> list[Commit]:
-    """The commits of `revision_range`, without the merges and the `fixup!` commits:
-    `git rebase --autosquash` discards a `fixup!` message whole and no line of it
-    lands on the branch."""
+    """The commits of `revision_range` the gate lints.
+
+    Leaves out the merges, the `fixup!` commits, and every `amend!` that a later
+    `amend!` on the same subject overwrites. `git rebase --autosquash` discards a
+    `fixup!` message whole.
+    """
     output = _git(
         root,
         ["log", "--no-merges", f"--format={_COMMIT_RECORD_FORMAT}", revision_range],
@@ -266,7 +281,23 @@ def commits_in(root: Path, revision_range: str) -> list[Commit]:
         short_hash, tab, message = record.lstrip("\n").partition("\t")
         if tab and not message.startswith("fixup! "):
             found.append(Commit(short_hash, message))
-    return found
+    return _drop_superseded_amends(found)
+
+
+def _drop_superseded_amends(commits: Iterable[Commit]) -> list[Commit]:
+    landed: set[str] = set()
+    kept = []
+    # `git log` lists the newest commit first, and `git rebase --autosquash` applies an
+    # `amend!` chain oldest first, so the message that lands is the one of the newest
+    # `amend!` on a subject.
+    for commit in commits:
+        target = commit.amend_target
+        if target is None:
+            kept.append(commit)
+        elif target not in landed:
+            landed.add(target)
+            kept.append(commit)
+    return kept
 
 
 def _lint_commit(engine: Engine, root: Path, commit: Commit) -> list[Alert]:
