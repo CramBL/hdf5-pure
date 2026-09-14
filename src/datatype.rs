@@ -367,6 +367,33 @@ fn parse_string_padding(val: u8) -> Result<StringPadding, FormatError> {
     }
 }
 
+/// Returns the byte order a floating-point datatype's class bit field encodes.
+///
+/// Bit 6 and bit 0 select it together: neither set is little-endian, bit 0 alone big-endian, and
+/// both VAX. Bit 6 alone is the reserved pattern, which parses as VAX, the encoding this crate
+/// writes for a VAX type.
+///
+/// The bit field is defined in "The Datatype Message" of the [format specification, version
+/// 4.0][spec].
+///
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_dtmessage
+fn parse_float_byte_order(bit_field: u8) -> DatatypeByteOrder {
+    match (
+        bit_field & FLOAT_BYTE_ORDER_HIGH_BIT != 0,
+        bit_field & FLOAT_BYTE_ORDER_LOW_BIT != 0,
+    ) {
+        (false, false) => DatatypeByteOrder::LittleEndian,
+        (false, true) => DatatypeByteOrder::BigEndian,
+        (true, _) => DatatypeByteOrder::Vax,
+    }
+}
+
+/// Bit 0 of a floating-point class bit field, the low bit of its byte order.
+const FLOAT_BYTE_ORDER_LOW_BIT: u8 = 0x01;
+
+/// Bit 6 of a floating-point class bit field, the high bit of its byte order.
+const FLOAT_BYTE_ORDER_HIGH_BIT: u8 = 0x40;
+
 fn parse_charset(val: u8) -> Result<CharacterSet, FormatError> {
     match val {
         0 => Ok(CharacterSet::Ascii),
@@ -487,15 +514,7 @@ impl Datatype {
             1 => {
                 // Floating-Point
                 ensure_len(data, pos, 12)?;
-                let bo_low = bf0 & 0x01;
-                let bo_high = (bf0 >> 6) & 0x01;
-                let byte_order = match (bo_high, bo_low) {
-                    (0, 0) => DatatypeByteOrder::LittleEndian,
-                    (0, 1) => DatatypeByteOrder::BigEndian,
-                    (1, 0) => DatatypeByteOrder::Vax,
-                    (1, 1) => DatatypeByteOrder::Vax,
-                    _ => unreachable!(),
-                };
+                let byte_order = parse_float_byte_order(bf0);
                 let bit_offset = LittleEndian::read_u16(&data[pos..pos + 2]);
                 let bit_precision = LittleEndian::read_u16(&data[pos + 2..pos + 4]);
                 let exponent_location = data[pos + 4];
@@ -1403,6 +1422,9 @@ fn build_dt_header(class: u8, version: u8, bf: [u8; 3], size: u32) -> Vec<u8> {
 
 #[cfg(test)]
 mod tests {
+    use rstest::rstest;
+
+    use super::*;
 
     /// Every datatype that reaches an object address must have an encoded class
     /// [`class_may_hold_object_address`] admits.
@@ -1537,8 +1559,6 @@ mod tests {
             "a compound of integers is admitted by the class gate and holds no address"
         );
     }
-
-    use super::*;
 
     // Helper to build a fixed-point datatype message
     fn build_fixed_point(
@@ -1692,6 +1712,25 @@ mod tests {
                 exponent_bias: 1023,
             }
         );
+    }
+
+    #[rstest]
+    #[case(0x00, DatatypeByteOrder::LittleEndian)]
+    #[case(0x01, DatatypeByteOrder::BigEndian)]
+    #[case(0x40, DatatypeByteOrder::Vax)]
+    #[case(0x41, DatatypeByteOrder::Vax)]
+    fn each_pair_of_byte_order_bits_parses_to_its_order(
+        #[case] bit_field: u8,
+        #[case] expected: DatatypeByteOrder,
+    ) {
+        let mut data = build_dt_header(1, 1, [bit_field, 0x1F, 0x02], 4);
+        data.extend_from_slice(&[0u8; 12]);
+
+        let (dt, _) = Datatype::parse(&data).unwrap();
+        let Datatype::FloatingPoint { byte_order, .. } = dt else {
+            panic!("expected a floating-point datatype, got {dt:?}");
+        };
+        assert_eq!(byte_order, expected);
     }
 
     #[test]
