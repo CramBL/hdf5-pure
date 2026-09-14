@@ -126,82 +126,32 @@ fn hashlittle(data: &[u8], initval: u32) -> u32 {
     let mut c: u32 = a;
 
     let mut offset = 0;
-    let mut remaining = length;
 
     // Process 12-byte blocks
-    while remaining > 12 {
+    while data.len() - offset > 12 {
         a = a.wrapping_add(read_u32_le(data, offset));
         b = b.wrapping_add(read_u32_le(data, offset + 4));
         c = c.wrapping_add(read_u32_le(data, offset + 8));
         mix(&mut a, &mut b, &mut c);
         offset += 12;
-        remaining -= 12;
     }
 
-    // Handle the last few bytes (switch fall-through pattern)
+    // The tail is 1 to 12 bytes, added little-endian into a, b and c in turn --
+    // the sum the reference's fall-through switch forms. An empty input has no
+    // tail, and the reference returns `c` without the final mix.
     let tail = &data[offset..];
-    // Using the little-endian byte reading approach from hashlittle
-    match remaining {
-        12 => {
-            a = a.wrapping_add(read_u32_le(tail, 0));
-            b = b.wrapping_add(read_u32_le(tail, 4));
-            c = c.wrapping_add(read_u32_le(tail, 8));
-        }
-        11 => {
-            c = c.wrapping_add((tail[10] as u32) << 16);
-            c = c.wrapping_add((tail[9] as u32) << 8);
-            c = c.wrapping_add(tail[8] as u32);
-            b = b.wrapping_add(read_u32_le(tail, 4));
-            a = a.wrapping_add(read_u32_le(tail, 0));
-        }
-        10 => {
-            c = c.wrapping_add((tail[9] as u32) << 8);
-            c = c.wrapping_add(tail[8] as u32);
-            b = b.wrapping_add(read_u32_le(tail, 4));
-            a = a.wrapping_add(read_u32_le(tail, 0));
-        }
-        9 => {
-            c = c.wrapping_add(tail[8] as u32);
-            b = b.wrapping_add(read_u32_le(tail, 4));
-            a = a.wrapping_add(read_u32_le(tail, 0));
-        }
-        8 => {
-            b = b.wrapping_add(read_u32_le(tail, 4));
-            a = a.wrapping_add(read_u32_le(tail, 0));
-        }
-        7 => {
-            b = b.wrapping_add((tail[6] as u32) << 16);
-            b = b.wrapping_add((tail[5] as u32) << 8);
-            b = b.wrapping_add(tail[4] as u32);
-            a = a.wrapping_add(read_u32_le(tail, 0));
-        }
-        6 => {
-            b = b.wrapping_add((tail[5] as u32) << 8);
-            b = b.wrapping_add(tail[4] as u32);
-            a = a.wrapping_add(read_u32_le(tail, 0));
-        }
-        5 => {
-            b = b.wrapping_add(tail[4] as u32);
-            a = a.wrapping_add(read_u32_le(tail, 0));
-        }
-        4 => {
-            a = a.wrapping_add(read_u32_le(tail, 0));
-        }
-        3 => {
-            a = a.wrapping_add((tail[2] as u32) << 16);
-            a = a.wrapping_add((tail[1] as u32) << 8);
-            a = a.wrapping_add(tail[0] as u32);
-        }
-        2 => {
-            a = a.wrapping_add((tail[1] as u32) << 8);
-            a = a.wrapping_add(tail[0] as u32);
-        }
-        1 => {
-            a = a.wrapping_add(tail[0] as u32);
-        }
-        0 => return c,
-        _ => unreachable!(),
+    if tail.is_empty() {
+        return c;
     }
+    let mut words = [0u32; 3];
+    for (word, chunk) in words.iter_mut().zip(tail.chunks(4)) {
+        for (i, &byte) in chunk.iter().enumerate() {
+            *word |= u32::from(byte) << (8 * i);
+        }
+    }
+    a = a.wrapping_add(words[0]);
+    b = b.wrapping_add(words[1]);
+    c = c.wrapping_add(words[2]);
 
     final_mix(&mut a, &mut b, &mut c);
     c
@@ -209,63 +159,54 @@ fn hashlittle(data: &[u8], initval: u32) -> u32 {
 
 #[cfg(test)]
 mod tests {
+    use rstest::rstest;
+
     use super::*;
 
-    #[test]
-    fn empty_input() {
-        // Empty input should return the initial state after no mixing
-        let h = jenkins_lookup3(b"");
-        // Just verify it doesn't panic and returns something deterministic
-        assert_eq!(h, jenkins_lookup3(b""));
+    #[rstest]
+    #[case(0, 0xdead_beef)]
+    #[case(1, 0x04ec_883b)]
+    #[case(2, 0x022b_c7fb)]
+    #[case(3, 0x96c2_fd10)]
+    #[case(4, 0x46f8_eec9)]
+    #[case(5, 0xb217_35c1)]
+    #[case(6, 0x2779_a0dd)]
+    #[case(7, 0x098f_be6f)]
+    #[case(8, 0x9afd_b1b3)]
+    #[case(9, 0xdd6e_13f5)]
+    #[case(10, 0x3a58_a365)]
+    #[case(11, 0x7529_9b1b)]
+    #[case(12, 0x3891_9c27)]
+    #[case(13, 0xe1f0_cbae)]
+    #[case(14, 0x49ef_0328)]
+    fn each_input_length_through_one_block_and_its_tail_hashes_to_a_fixed_value(
+        #[case] len: usize,
+        #[case] expected: u32,
+    ) {
+        const PROBE: [u8; 14] = [1, 8, 15, 22, 29, 36, 43, 50, 57, 64, 71, 78, 85, 92];
+
+        assert_eq!(jenkins_lookup3(&PROBE[..len]), expected);
+    }
+
+    #[rstest]
+    #[case(0, 0x1777_0551)]
+    #[case(1, 0xcd62_8161)]
+    fn the_self_test_vector_of_lookup3_c_hashes_to_its_published_value(
+        #[case] initval: u32,
+        #[case] expected: u32,
+    ) {
+        assert_eq!(
+            hashlittle(b"Four score and seven years ago", initval),
+            expected
+        );
     }
 
     #[test]
-    fn known_values() {
-        // Test with known input to ensure consistency
-        let h1 = jenkins_lookup3(b"hello");
-        let h2 = jenkins_lookup3(b"hello");
-        assert_eq!(h1, h2);
-
-        // Different inputs should give different outputs
-        let h3 = jenkins_lookup3(b"world");
-        assert_ne!(h1, h3);
-    }
-
-    #[test]
-    fn twelve_byte_boundary() {
-        // Exactly 12 bytes
-        let h = jenkins_lookup3(b"abcdefghijkl");
-        assert_eq!(h, jenkins_lookup3(b"abcdefghijkl"));
-    }
-
-    #[test]
-    fn longer_than_12() {
-        let h = jenkins_lookup3(b"abcdefghijklmnop");
-        assert_eq!(h, jenkins_lookup3(b"abcdefghijklmnop"));
-    }
-
-    #[test]
-    fn all_tail_lengths() {
-        // Test every tail length from 1 to 12
-        for len in 1..=12 {
-            let data: Vec<u8> = (0..len).map(|i| i as u8).collect();
-            let h1 = jenkins_lookup3(&data);
-            let h2 = jenkins_lookup3(&data);
-            assert_eq!(h1, h2, "failed for length {len}");
-        }
-    }
-
-    #[test]
-    fn verify_against_hdf5_file() {
-        // Verify against a real HDF5 file checksum
+    fn a_files_stored_superblock_checksum_equals_jenkins_lookup3() {
         let file_data: &[u8] = include_bytes!("../tests/data/unattributed/v2_groups.h5");
         // Superblock v3: checksum at offset 44, covers bytes 0..44
         let stored =
             u32::from_le_bytes([file_data[44], file_data[45], file_data[46], file_data[47]]);
-        let computed = jenkins_lookup3(&file_data[0..44]);
-        assert_eq!(
-            computed, stored,
-            "Jenkins lookup3 should match HDF5 superblock checksum"
-        );
+        assert_eq!(jenkins_lookup3(&file_data[0..44]), stored);
     }
 }
