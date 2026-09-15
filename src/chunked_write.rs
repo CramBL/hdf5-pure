@@ -533,8 +533,8 @@ impl ChunkOptions {
 /// A chunk that has been written to the file buffer.
 #[derive(Debug, Clone)]
 pub struct WrittenChunk {
-    /// Address within the file where chunk data starts.
-    pub address: u64,
+    /// Where the chunk's data begins.
+    pub address: StoredAddress,
     /// Size of the (possibly compressed) chunk data in bytes.
     ///
     /// The chunk's *uncompressed* size is deliberately not a field here. It was
@@ -904,10 +904,10 @@ pub fn split_into_chunks(
     Ok(buffers)
 }
 
-/// Serialize a v4 single chunk layout message.
+/// Serializes a version 4 single-chunk data layout message.
 fn serialize_v4_single_chunk(
     chunk_dims: &[u32],
-    chunk_address: u64,
+    chunk_address: StoredAddress,
     filtered_size: Option<u64>,
     filter_mask: Option<u32>,
     offset_size: u8,
@@ -987,18 +987,18 @@ fn serialize_v4_single_chunk(
         reason = "chunk address written into the on-disk offset width selected for this file"
     )]
     match offset_size {
-        4 => buf.extend_from_slice(&(chunk_address as u32).to_le_bytes()),
-        8 => buf.extend_from_slice(&chunk_address.to_le_bytes()),
+        4 => buf.extend_from_slice(&(chunk_address.get() as u32).to_le_bytes()),
+        8 => buf.extend_from_slice(&chunk_address.get().to_le_bytes()),
         _ => {}
     }
 
     buf
 }
 
-/// Serialize a v4 Fixed Array layout message.
+/// Serializes a version 4 Fixed Array data layout message.
 fn serialize_v4_fixed_array(
     chunk_dims: &[u32],
-    fixed_array_address: u64,
+    fixed_array_address: StoredAddress,
     offset_size: u8,
     element_size: u32,
     max_bits: u8,
@@ -1067,8 +1067,8 @@ fn serialize_v4_fixed_array(
         reason = "fixed array header address written into the on-disk offset width selected for this file"
     )]
     match offset_size {
-        4 => buf.extend_from_slice(&(fixed_array_address as u32).to_le_bytes()),
-        8 => buf.extend_from_slice(&fixed_array_address.to_le_bytes()),
+        4 => buf.extend_from_slice(&(fixed_array_address.get() as u32).to_le_bytes()),
+        8 => buf.extend_from_slice(&fixed_array_address.get().to_le_bytes()),
         _ => {}
     }
 
@@ -1384,14 +1384,14 @@ pub(crate) fn chunk_index_len(
     }
 }
 
-/// Build a complete Fixed Array at a known absolute address.
+/// Builds a complete Fixed Array for `slots` at `fa_address`.
 pub fn build_fixed_array_at(
     slots: &IndexSlots<'_>,
     chunk_bytes: u64,
     offset_size: u8,
     length_size: u8,
     has_filters: bool,
-    fa_address: u64,
+    fa_address: StoredAddress,
 ) -> Vec<u8> {
     let num_elements = slots.len();
 
@@ -1402,7 +1402,7 @@ pub fn build_fixed_array_at(
         client_id,
     } = layout.encoding;
     let fahd_total_size = layout.fahd_size;
-    let fadb_address = fa_address + fahd_total_size as u64;
+    let fadb_address = fa_address.offset(fahd_total_size as u64);
 
     // Build FAHD
     let mut fahd = Vec::with_capacity(fahd_total_size);
@@ -1432,9 +1432,9 @@ pub fn build_fixed_array_at(
         reason = "FADB address written into the on-disk offset width selected for this file"
     )]
     match offset_size {
-        4 => fahd.extend_from_slice(&(fadb_address as u32).to_le_bytes()),
-        8 => fahd.extend_from_slice(&fadb_address.to_le_bytes()),
-        _ => fahd.extend_from_slice(&fadb_address.to_le_bytes()),
+        4 => fahd.extend_from_slice(&(fadb_address.get() as u32).to_le_bytes()),
+        8 => fahd.extend_from_slice(&fadb_address.get().to_le_bytes()),
+        _ => fahd.extend_from_slice(&fadb_address.get().to_le_bytes()),
     }
 
     // Checksum
@@ -1457,8 +1457,8 @@ pub fn build_fixed_array_at(
             reason = "chunk address written into the on-disk offset width selected for this file"
         )]
         match offset_size {
-            4 => buf.extend_from_slice(&(chunk.address as u32).to_le_bytes()),
-            _ => buf.extend_from_slice(&chunk.address.to_le_bytes()),
+            4 => buf.extend_from_slice(&(chunk.address.get() as u32).to_le_bytes()),
+            _ => buf.extend_from_slice(&chunk.address.get().to_le_bytes()),
         }
         if has_filters {
             // Compressed size, written using the variable chunk_size_bytes width.
@@ -1478,8 +1478,8 @@ pub fn build_fixed_array_at(
         reason = "fixed array header address written into the on-disk offset width selected for this file"
     )]
     match offset_size {
-        4 => fadb.extend_from_slice(&(fa_address as u32).to_le_bytes()),
-        _ => fadb.extend_from_slice(&fa_address.to_le_bytes()),
+        4 => fadb.extend_from_slice(&(fa_address.get() as u32).to_le_bytes()),
+        _ => fadb.extend_from_slice(&fa_address.get().to_le_bytes()),
     }
 
     let page_size = layout.page_size;
@@ -1532,10 +1532,10 @@ pub fn build_fixed_array_at(
     combined
 }
 
-/// Serialize a v4 Extensible Array layout message.
+/// Serializes a version 4 Extensible Array data layout message.
 pub(crate) fn serialize_v4_extensible_array(
     chunk_dims: &[u32],
-    ea_address: u64,
+    ea_address: StoredAddress,
     offset_size: u8,
     element_size: u32,
 ) -> Vec<u8> {
@@ -1605,27 +1605,27 @@ pub(crate) fn serialize_v4_extensible_array(
         reason = "extensible array header address written into the on-disk offset width selected for this file"
     )]
     match offset_size {
-        4 => buf.extend_from_slice(&(ea_address as u32).to_le_bytes()),
-        8 => buf.extend_from_slice(&ea_address.to_le_bytes()),
+        4 => buf.extend_from_slice(&(ea_address.get() as u32).to_le_bytes()),
+        8 => buf.extend_from_slice(&ea_address.get().to_le_bytes()),
         _ => {}
     }
 
     buf
 }
 
-/// Write an offset-sized address (little-endian) to `buf`.
-pub(crate) fn write_ea_addr(buf: &mut Vec<u8>, val: u64, offset_size: u8) {
+/// Writes `addr` to `buf` as a little-endian field of `offset_size` bytes.
+pub(crate) fn write_ea_addr(buf: &mut Vec<u8>, addr: StoredAddress, offset_size: u8) {
     #[expect(
         clippy::cast_possible_truncation,
         reason = "address written into the on-disk offset width selected for this file"
     )]
     match offset_size {
-        4 => buf.extend_from_slice(&(val as u32).to_le_bytes()),
-        _ => buf.extend_from_slice(&val.to_le_bytes()),
+        4 => buf.extend_from_slice(&(addr.get() as u32).to_le_bytes()),
+        _ => buf.extend_from_slice(&addr.get().to_le_bytes()),
     }
 }
 
-/// Build a single Extensible Array Data Block (`EADB`) holding the chunk
+/// Builds a single Extensible Array Data Block (`EADB`) holding the chunk
 /// elements for `[elem_start, elem_start + dblk_nelmts)`. A slot no chunk
 /// occupies is written as undefined, whether it falls past the last chunk or in a
 /// gap between them.
@@ -1642,7 +1642,7 @@ pub(crate) fn build_eadb(
     elem_start: usize,
     dblk_nelmts: usize,
     block_offset_rel: u64,
-    ea_address: u64,
+    ea_address: StoredAddress,
     offset_size: u8,
     has_filters: bool,
     chunk_size_bytes: usize,
@@ -1713,15 +1713,15 @@ pub(crate) fn build_eadb(
     }
 }
 
-/// Build an Extensible Array Super (secondary) Block (`EASB`) referencing
+/// Builds an Extensible Array Super (secondary) Block (`EASB`) referencing
 /// `dblk_addrs`. When `page_bitmap` is non-empty the block's data blocks are
 /// paged and the bitmap (already populated by the caller) is written between
 /// the block offset and the data block addresses.
 pub(crate) fn build_aesb(
-    ea_address: u64,
+    ea_address: StoredAddress,
     block_offset_rel: u64,
     page_bitmap: &[u8],
-    dblk_addrs: &[u64],
+    dblk_addrs: &[StoredAddress],
     offset_size: u8,
     blk_off_size: usize,
     client_id: u8,
@@ -2022,7 +2022,7 @@ pub(crate) fn extensible_array_len(
     .total_len
 }
 
-/// Build a complete Extensible Array at a known absolute address.
+/// Builds a complete Extensible Array for `slots` at `ea_address`.
 ///
 /// Lays out the header (`EAHD`), index block (`EAIB`), and — for datasets with
 /// more than `idx_blk_elmts + sum(direct data blocks)` chunks — the on-disk
@@ -2037,7 +2037,7 @@ pub fn build_extensible_array_at(
     offset_size: u8,
     length_size: u8,
     has_filters: bool,
-    ea_address: u64,
+    ea_address: StoredAddress,
 ) -> Result<Vec<u8>, FormatError> {
     let num_elements = slots.len();
 
@@ -2069,21 +2069,18 @@ pub fn build_extensible_array_at(
         ..
     } = layout;
 
-    let aeib_address = ea_address + aehd_size as u64;
-    let body_base = aeib_address + aeib_size as u64;
+    let aeib_address = ea_address.offset(aehd_size as u64);
+    let body_base = aeib_address.offset(aeib_size as u64);
 
-    let undef_addr: u64 = match offset_size {
-        4 => 0xFFFF_FFFF,
-        _ => u64::MAX,
-    };
+    let undef_addr = StoredAddress::undefined(offset_size);
 
     // ---- Build the body (direct data blocks, then super blocks) -----------
-    // Addresses are absolute, computed from `body_base`, so the body can be
+    // Each block's address is computed from `body_base`, so the body can be
     // built before the index block that references it.
     let mut body: Vec<u8> =
         Vec::with_capacity((layout.stats.data_blk_size + layout.stats.super_blk_size).to_usize()?);
-    let mut direct_addrs: Vec<u64> = Vec::with_capacity(geom.direct_dblk_nelmts.len());
-    let mut sblk_addrs: Vec<u64> = Vec::with_capacity(geom.nsblk_addrs);
+    let mut direct_addrs: Vec<StoredAddress> = Vec::with_capacity(geom.direct_dblk_nelmts.len());
+    let mut sblk_addrs: Vec<StoredAddress> = Vec::with_capacity(geom.nsblk_addrs);
 
     // Stats (match the C library's EAHD fields exactly).
     let mut ndata_blks: u64 = 0;
@@ -2110,7 +2107,7 @@ pub fn build_extensible_array_at(
             elem_cursor += dblk_nelmts;
             continue;
         }
-        let addr = body_base + body.len() as u64;
+        let addr = body_base.offset(body.len() as u64);
         let db_bytes = build_eadb(
             slots,
             elem_cursor.to_usize()?,
@@ -2156,7 +2153,7 @@ pub fn build_extensible_array_at(
         let sb_block_offset = elem_cursor - inline as u64;
         let mut page_bitmap = vec![0u8; sb.bitmap_size().to_usize()?];
 
-        let mut sb_dblk_addrs: Vec<u64> = Vec::with_capacity(ndblks.to_usize()?);
+        let mut sb_dblk_addrs: Vec<StoredAddress> = Vec::with_capacity(ndblks.to_usize()?);
         let mut local_elem = elem_cursor;
         for db_local in 0..ndblks {
             if !occupancy.any_occupied(local_elem, dblk_nelmts) {
@@ -2164,7 +2161,7 @@ pub fn build_extensible_array_at(
                 local_elem += dblk_nelmts;
                 continue;
             }
-            let addr = body_base + body.len() as u64;
+            let addr = body_base.offset(body.len() as u64);
             let db_bytes = build_eadb(
                 slots,
                 local_elem.to_usize()?,
@@ -2216,7 +2213,7 @@ pub fn build_extensible_array_at(
             local_elem += dblk_nelmts;
         }
 
-        let aesb_addr = body_base + body.len() as u64;
+        let aesb_addr = body_base.offset(body.len() as u64);
         let aesb = build_aesb(
             ea_address,
             sb_block_offset,
@@ -2330,9 +2327,9 @@ fn write_chunk_element(
         reason = "chunk address written into the on-disk offset width selected for this file"
     )]
     match offset_size {
-        4 => buf.extend_from_slice(&(chunk.address as u32).to_le_bytes()),
-        8 => buf.extend_from_slice(&chunk.address.to_le_bytes()),
-        _ => buf.extend_from_slice(&chunk.address.to_le_bytes()),
+        4 => buf.extend_from_slice(&(chunk.address.get() as u32).to_le_bytes()),
+        8 => buf.extend_from_slice(&chunk.address.get().to_le_bytes()),
+        _ => buf.extend_from_slice(&chunk.address.get().to_le_bytes()),
     }
     if has_filters {
         let cs_bytes = chunk.compressed_size.to_le_bytes();
@@ -2358,8 +2355,8 @@ fn write_undefined_element(
 /// A chunked dataset's chunks already split and compressed — the expensive,
 /// **address-independent** half of building a chunked layout. The compressed
 /// bytes, the chunk-index choice, and the pipeline message do not depend on
-/// where the data lands in the file; only the absolute addresses embedded in the
-/// chunk index do. The writer sizes a dataset's object header in one pass and
+/// where the data lands in the file. Only the addresses embedded in the chunk
+/// index do. The writer sizes a dataset's object header in one pass and
 /// emits its data in a later pass (it needs every prior object's size to know
 /// this object's address), so it computes this set once and feeds it to
 /// [`assemble_chunked_at`] twice — sizing at a dummy address, then emitting at
@@ -2690,7 +2687,10 @@ fn index_grid(
 /// Where each of a chunk set's chunks lands when the set is laid out at
 /// `data_address` — they are stored back to back from there — and the address the
 /// chunk index follows them at.
-fn plan_chunk_slots(set: &CompressedChunkSet, data_address: u64) -> (Vec<WrittenChunk>, u64) {
+fn plan_chunk_slots(
+    set: &CompressedChunkSet,
+    data_address: StoredAddress,
+) -> (Vec<WrittenChunk>, StoredAddress) {
     let mut cursor = data_address;
     let mut written_chunks = Vec::with_capacity(set.compressed.len());
     for chunk in &set.compressed {
@@ -2699,7 +2699,7 @@ fn plan_chunk_slots(set: &CompressedChunkSet, data_address: u64) -> (Vec<Written
             compressed_size: chunk.len() as u64,
             filter_mask: 0,
         });
-        cursor += chunk.len() as u64;
+        cursor = cursor.offset(chunk.len() as u64);
     }
     (written_chunks, cursor)
 }
@@ -2719,7 +2719,7 @@ fn chunk_index_bytes(
     set: &CompressedChunkSet,
     written_chunks: &[WrittenChunk],
     slots: &IndexSlots<'_>,
-    index_address: u64,
+    index_address: StoredAddress,
 ) -> Result<(Vec<u8>, Vec<u8>), FormatError> {
     let index = match set.kind {
         // Nothing stored, so nothing to index; the layout message below carries
@@ -2759,7 +2759,7 @@ fn chunk_index_bytes(
 fn chunk_index_layout(
     set: &CompressedChunkSet,
     written_chunks: &[WrittenChunk],
-    index_address: u64,
+    index_address: StoredAddress,
 ) -> Vec<u8> {
     let has_filters = set.has_filters;
 
@@ -2770,7 +2770,7 @@ fn chunk_index_layout(
     match set.kind {
         ChunkIndexKind::Unallocated => serialize_v4_fixed_array(
             &set.chunk_dims_u32,
-            HADDR_UNDEF,
+            StoredAddress::new(HADDR_UNDEF),
             INDEX_OFFSET_SIZE,
             set.element_size.get() as u32,
             FIXED_ARRAY_PAGE_BITS,
@@ -2811,10 +2811,10 @@ fn chunk_index_layout(
 /// and, if it gets one, assembles the set straight into it rather than growing
 /// the file (issue #261).
 pub(crate) fn chunked_data_len(set: &CompressedChunkSet) -> Result<u64, FormatError> {
-    let (written_chunks, index_address) = plan_chunk_slots(set, 0);
+    let (written_chunks, index_address) = plan_chunk_slots(set, StoredAddress::new(0));
     let slots = set.index_slots(&written_chunks)?;
     let kind = set.kind;
-    Ok(index_address
+    Ok(index_address.get()
         + kind.array_kind().map_or(0, |array| {
             chunk_index_len(
                 array,
@@ -2835,7 +2835,7 @@ pub(crate) fn chunked_data_len(set: &CompressedChunkSet) -> Result<u64, FormatEr
 /// message say" without building an entire copy of the dataset.
 fn plan_chunked_at(
     set: &CompressedChunkSet,
-    data_address: u64,
+    data_address: StoredAddress,
 ) -> Result<(usize, Vec<u8>, Vec<u8>), FormatError> {
     let (written_chunks, index_address) = plan_chunk_slots(set, data_address);
     let slots = set.index_slots(&written_chunks)?;
@@ -2857,7 +2857,7 @@ fn plan_chunked_at(
 /// and the length produced there cannot drift.
 pub(crate) fn measure_chunked_at(
     set: &CompressedChunkSet,
-    data_address: u64,
+    data_address: StoredAddress,
 ) -> Result<ChunkedMeasure, FormatError> {
     let (written_chunks, index_address) = plan_chunk_slots(set, data_address);
     let slots = set.index_slots(&written_chunks)?;
@@ -2874,7 +2874,7 @@ pub(crate) fn measure_chunked_at(
             set.has_filters,
         )
     });
-    let data_len = (index_address - data_address) + index_len;
+    let data_len = (index_address.get() - data_address.get()) + index_len;
     // Not building the index also stops it from *refusing*, and the only way it
     // can is a length that does not fit this platform's `usize`. Every such
     // check inside the build is on a part of this region, so the whole region
@@ -2899,14 +2899,14 @@ pub(crate) struct ChunkedMeasure {
     pub pipeline_message: Option<Vec<u8>>,
 }
 
-/// Lay an already-[`compress`ed](compress_chunks) chunk set out at `data_address`,
+/// Lays an already-[`compress`ed](compress_chunks) chunk set out at `data_address`,
 /// producing the on-disk data region (chunk bytes followed by the chunk index)
 /// and the v4 data-layout message. Cheap: this only concatenates and builds the
 /// index, so it can be run more than once (different addresses) without
 /// repeating the dataset's compression.
 pub(crate) fn assemble_chunked_at(
     set: &CompressedChunkSet,
-    data_address: u64,
+    data_address: StoredAddress,
 ) -> Result<ChunkedDataResult, FormatError> {
     let (chunk_bytes_total, index, layout_message) = plan_chunked_at(set, data_address)?;
 
@@ -2925,7 +2925,8 @@ pub(crate) fn assemble_chunked_at(
     })
 }
 
-/// Build chunked data with absolute addresses and optional maxshape.
+/// Builds a chunked dataset's data region at `data_address`, with an optional
+/// maximum shape.
 ///
 /// Convenience composition of [`compress_chunks`] + [`assemble_chunked_at`] for
 /// tests that build a single chunked dataset at a known address in one shot.
@@ -2943,7 +2944,7 @@ pub fn build_chunked_data_at_ext(
     shape: &[u64],
     ctx: ChunkContext<'_>,
     options: &ChunkOptions,
-    data_address: u64,
+    data_address: StoredAddress,
     maxshape: Option<&[MaxExtent]>,
     fill: FillPattern<'_>,
 ) -> Result<ChunkedDataResult, FormatError> {
@@ -3034,7 +3035,7 @@ struct VerbatimIndexPlan {
     /// the layout that writes no index is the `None` case of the field holding
     /// this, not a third variant of it.
     kind: ChunkArrayKind,
-    address: u64,
+    address: StoredAddress,
     /// Whether the element records carry a compressed size and filter mask. The
     /// address and length widths are not fields: every chunk index this module
     /// writes uses `INDEX_OFFSET_SIZE` / `INDEX_LENGTH_SIZE`, and reading them
@@ -3080,7 +3081,7 @@ pub(crate) struct VerbatimLayout {
     pub(crate) pipeline_message: Option<Vec<u8>>,
 }
 
-/// Compute the [`VerbatimLayout`] (data-region plan plus the v4 layout and
+/// Computes the [`VerbatimLayout`] (data-region plan plus the v4 layout and
 /// verbatim pipeline messages) for a dense, grid-ordered set of chunks, from
 /// their sizes and filter masks alone — no chunk bytes. The byte layout is
 /// identical whether the chunks are later buffered or streamed.
@@ -3090,7 +3091,7 @@ pub(crate) fn plan_chunked_data_verbatim(
     chunk_dims: &[u64],
     element_size: NonZeroUsize,
     pipeline_message: Option<&[u8]>,
-    data_address: u64,
+    data_address: StoredAddress,
     maxshape: Option<&[MaxExtent]>,
 ) -> Result<VerbatimLayout, FormatError> {
     if meta.is_empty() {
@@ -3107,14 +3108,21 @@ pub(crate) fn plan_chunked_data_verbatim(
     let mut written_chunks = Vec::with_capacity(num_chunks);
 
     for m in meta {
-        let address = data_address + cursor;
+        let address = data_address.offset(cursor);
         let compressed_size = m.compressed_size;
         written_chunks.push(WrittenChunk {
             address,
             compressed_size,
             filter_mask: m.filter_mask,
         });
-        cursor += compressed_size;
+        // The one length here a file supplies: a verbatim plan's chunk sizes come from the source
+        // dataset's index, so the running sum is checked before it offsets an address.
+        cursor = cursor
+            .checked_add(compressed_size)
+            .ok_or(FormatError::OffsetOverflow {
+                offset: cursor,
+                length: compressed_size,
+            })?;
     }
 
     #[expect(
@@ -3152,7 +3160,7 @@ pub(crate) fn plan_chunked_data_verbatim(
     // the index's own layout rather than from a build of it, so this planner
     // touches no index bytes either — which is what lets `write_chunked_relocatable`
     // plan at a provisional address purely to size the region.
-    let index_address = data_address + cursor;
+    let index_address = data_address.offset(cursor);
     let chunk_bytes = full_chunk_bytes(chunk_dims.iter().copied(), element_size);
     let index = kind.array_kind().map(|array| VerbatimIndexPlan {
         kind: array,
@@ -3179,7 +3187,7 @@ pub(crate) fn plan_chunked_data_verbatim(
         // least one chunk, and only a chunk-less fixed-shape set is unallocated.
         ChunkIndexKind::Unallocated => serialize_v4_fixed_array(
             &chunk_dims_u32,
-            HADDR_UNDEF,
+            StoredAddress::new(HADDR_UNDEF),
             offset_size,
             element_size.get() as u32,
             FIXED_ARRAY_PAGE_BITS,
@@ -3522,7 +3530,7 @@ mod tests {
             "and the dataset occupies no data region"
         );
 
-        let assembled = assemble_chunked_at(&set, 0x1000).unwrap();
+        let assembled = assemble_chunked_at(&set, StoredAddress::new(0x1000)).unwrap();
         assert!(assembled.data_bytes.is_empty(), "nothing to write out");
         // The layout message names no index. `HADDR_UNDEF` is all ones, and it
         // is the field the reference library reads to decide the dataset has no
@@ -3777,19 +3785,22 @@ mod tests {
             )
             .unwrap();
 
-            for base in [0u64, 0x1000, 0x1234_5678] {
+            for base in [0u64, 0x1000, 0x1234_5678].map(StoredAddress::new) {
                 let measured = measure_chunked_at(&set, base).unwrap();
                 let assembled = assemble_chunked_at(&set, base).unwrap();
                 assert_eq!(
                     measured.data_len,
                     assembled.data_bytes.len() as u64,
                     "measured and assembled lengths differ for shape {shape:?} in \
-                     chunks {chunk_dims:?} at {base:#x}"
+                     chunks {chunk_dims:?} at {:#x}",
+                    base.get()
                 );
                 assert_eq!(
-                    measured.layout_message, assembled.layout_message,
+                    measured.layout_message,
+                    assembled.layout_message,
                     "measured and assembled layout messages differ for shape \
-                     {shape:?} in chunks {chunk_dims:?} at {base:#x}"
+                     {shape:?} in chunks {chunk_dims:?} at {:#x}",
+                    base.get()
                 );
             }
         }
@@ -3803,7 +3814,7 @@ mod tests {
         options: &ChunkOptions,
     ) -> Vec<f64> {
         let raw = f64_to_bytes(values);
-        let data_address = 0x1000u64;
+        let data_address = StoredAddress::new(0x1000);
         let ctx = ChunkContext::basic(chunk_dims, 8);
         let result = build_chunked_data_at_ext(
             &raw,
@@ -3817,9 +3828,9 @@ mod tests {
         .unwrap();
 
         // Build a fake file buffer
-        let file_size = data_address as usize + result.data_bytes.len();
+        let file_size = data_address.get() as usize + result.data_bytes.len();
         let mut file_data = vec![0u8; file_size];
-        file_data[data_address as usize..].copy_from_slice(&result.data_bytes);
+        file_data[data_address.get() as usize..].copy_from_slice(&result.data_bytes);
 
         // Parse layout
         let layout = DataLayout::parse(&result.layout_message, 8, 8).unwrap();
@@ -3972,9 +3983,16 @@ mod tests {
         };
         let dims = [7u64];
         let ctx = ChunkContext::basic(&dims, 8);
-        let result =
-            build_chunked_data_at_ext(&raw, &[21], ctx, &options, 0x1000, None, FillPattern::ZERO)
-                .unwrap();
+        let result = build_chunked_data_at_ext(
+            &raw,
+            &[21],
+            ctx,
+            &options,
+            StoredAddress::new(0x1000),
+            None,
+            FillPattern::ZERO,
+        )
+        .unwrap();
 
         // Unfiltered chunks are stored verbatim, so the data region opens with
         // the raw bytes in order.
@@ -4005,8 +4023,16 @@ mod tests {
                 filter_mask: 0,
             })
             .collect();
-        let layout =
-            plan_chunked_data_verbatim(&meta, &[21], &[7], nz(8), Some(&[]), 0x1000, None).unwrap();
+        let layout = plan_chunked_data_verbatim(
+            &meta,
+            &[21],
+            &[7],
+            nz(8),
+            Some(&[]),
+            StoredAddress::new(0x1000),
+            None,
+        )
+        .unwrap();
 
         let planned: Vec<u64> = layout
             .plan
@@ -4067,9 +4093,16 @@ mod tests {
                     filter_mask: 0,
                 })
                 .collect();
-            let layout =
-                plan_chunked_data_verbatim(&meta, shape, &[7], nz(8), Some(&[]), 0x1000, maxshape)
-                    .unwrap();
+            let layout = plan_chunked_data_verbatim(
+                &meta,
+                shape,
+                &[7],
+                nz(8),
+                Some(&[]),
+                StoredAddress::new(0x1000),
+                maxshape,
+            )
+            .unwrap();
             let mut emitted: Vec<u8> = Vec::new();
             emit_chunked_data_verbatim(&mut emitted, &layout.plan, &SizedChunks(chunk_sizes))
                 .unwrap();
@@ -4099,7 +4132,15 @@ mod tests {
     /// is refused rather than planned as an empty region.
     #[test]
     fn a_verbatim_plan_with_no_chunks_is_refused() {
-        let result = plan_chunked_data_verbatim(&[], &[21], &[7], nz(8), None, 0x1000, None);
+        let result = plan_chunked_data_verbatim(
+            &[],
+            &[21],
+            &[7],
+            nz(8),
+            None,
+            StoredAddress::new(0x1000),
+            None,
+        );
         assert!(
             matches!(result, Err(FormatError::ChunkedReadError(_))),
             "a chunk-less plan must be refused"
@@ -4439,7 +4480,7 @@ mod tests {
 
     #[test]
     fn serialize_v4_single_chunk_no_filters_roundtrip() {
-        let msg = serialize_v4_single_chunk(&[20], 0x1000, None, None, 8, 8);
+        let msg = serialize_v4_single_chunk(&[20], StoredAddress::new(0x1000), None, None, 8, 8);
         assert_eq!(
             DataLayout::parse(&msg, 8, 8).unwrap(),
             DataLayout::Chunked {
@@ -4454,7 +4495,8 @@ mod tests {
 
     #[test]
     fn serialize_v4_single_chunk_with_filters_roundtrip() {
-        let msg = serialize_v4_single_chunk(&[100], 0x2000, Some(500), Some(0), 8, 8);
+        let msg =
+            serialize_v4_single_chunk(&[100], StoredAddress::new(0x2000), Some(500), Some(0), 8, 8);
         assert_eq!(
             DataLayout::parse(&msg, 8, 8).unwrap(),
             DataLayout::Chunked {
@@ -4472,7 +4514,7 @@ mod tests {
 
     #[test]
     fn serialize_v4_fixed_array_roundtrip() {
-        let msg = serialize_v4_fixed_array(&[20], 0x3000, 8, 8, 4);
+        let msg = serialize_v4_fixed_array(&[20], StoredAddress::new(0x3000), 8, 8, 4);
         assert_eq!(
             DataLayout::parse(&msg, 8, 8).unwrap(),
             DataLayout::Chunked {
@@ -4488,17 +4530,24 @@ mod tests {
     fn build_fixed_array_valid_structure() {
         let chunks = vec![
             WrittenChunk {
-                address: 0x1000,
+                address: StoredAddress::new(0x1000),
                 compressed_size: 160,
                 filter_mask: 0,
             },
             WrittenChunk {
-                address: 0x10A0,
+                address: StoredAddress::new(0x10A0),
                 compressed_size: 160,
                 filter_mask: 0,
             },
         ];
-        let fa = build_fixed_array_at(&IndexSlots::dense(&chunks), 160, 8, 8, false, 0x2000);
+        let fa = build_fixed_array_at(
+            &IndexSlots::dense(&chunks),
+            160,
+            8,
+            8,
+            false,
+            StoredAddress::new(0x2000),
+        );
         // Should start with FAHD
         assert_eq!(&fa[0..4], b"FAHD");
         // FAHD size = 4+1+1+1+1+8+8+4 = 28
@@ -4510,7 +4559,7 @@ mod tests {
 
     #[test]
     fn serialize_v4_extensible_array_roundtrip() {
-        let msg = serialize_v4_extensible_array(&[10], 0x4000, 8, 8);
+        let msg = serialize_v4_extensible_array(&[10], StoredAddress::new(0x4000), 8, 8);
         assert_eq!(
             DataLayout::parse(&msg, 8, 8).unwrap(),
             DataLayout::Chunked {
@@ -4526,18 +4575,25 @@ mod tests {
     fn build_extensible_array_valid_structure() {
         let chunks = vec![
             WrittenChunk {
-                address: 0x1000,
+                address: StoredAddress::new(0x1000),
                 compressed_size: 80,
                 filter_mask: 0,
             },
             WrittenChunk {
-                address: 0x1050,
+                address: StoredAddress::new(0x1050),
                 compressed_size: 80,
                 filter_mask: 0,
             },
         ];
-        let ea = build_extensible_array_at(&IndexSlots::dense(&chunks), 80, 8, 8, false, 0x2000)
-            .unwrap();
+        let ea = build_extensible_array_at(
+            &IndexSlots::dense(&chunks),
+            80,
+            8,
+            8,
+            false,
+            StoredAddress::new(0x2000),
+        )
+        .unwrap();
         assert_eq!(&ea[0..4], b"EAHD");
         // Find EAIB after EAHD: 12 fixed + 6*8 stats + 8 addr + 4 checksum = 72
         let aehd_size = 4 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 6 * 8 + 8 + 4;
@@ -4552,7 +4608,7 @@ mod tests {
         maxshape: &[MaxExtent],
     ) -> Vec<f64> {
         let raw = f64_to_bytes(values);
-        let data_address = 0x1000u64;
+        let data_address = StoredAddress::new(0x1000);
         let options = ChunkOptions {
             chunk_dims: Some(chunk_dims.to_vec()),
             ..Default::default()
@@ -4569,9 +4625,9 @@ mod tests {
         )
         .unwrap();
 
-        let file_size = data_address as usize + result.data_bytes.len();
+        let file_size = data_address.get() as usize + result.data_bytes.len();
         let mut file_data = vec![0u8; file_size];
-        file_data[data_address as usize..].copy_from_slice(&result.data_bytes);
+        file_data[data_address.get() as usize..].copy_from_slice(&result.data_bytes);
 
         let layout = DataLayout::parse(&result.layout_message, 8, 8).unwrap();
         assert!(
@@ -4673,14 +4729,20 @@ mod tests {
         for &n in &[1u64, 4, 20, 100, 244, 300, 2000, 50000, 131056, 140000] {
             let chunks: Vec<WrittenChunk> = (0..n)
                 .map(|i| WrittenChunk {
-                    address: 0x1000 + i * 8,
+                    address: StoredAddress::new(0x1000 + i * 8),
                     compressed_size: 8,
                     filter_mask: 0,
                 })
                 .collect();
-            let ea =
-                build_extensible_array_at(&IndexSlots::dense(&chunks), 8, 8, 8, false, 0x100000)
-                    .unwrap();
+            let ea = build_extensible_array_at(
+                &IndexSlots::dense(&chunks),
+                8,
+                8,
+                8,
+                false,
+                StoredAddress::new(0x100000),
+            )
+            .unwrap();
             // Parse the 6 stats from the EAHD (12-byte fixed prefix, then 6 * ls).
             let stat =
                 |k: usize| u64::from_le_bytes(ea[12 + k * 8..12 + k * 8 + 8].try_into().unwrap());
@@ -4737,7 +4799,8 @@ mod tests {
                     .unwrap();
 
                     let planned = chunked_data_len(&set).unwrap();
-                    let assembled = assemble_chunked_at(&set, 0x10_0000).unwrap();
+                    let assembled =
+                        assemble_chunked_at(&set, StoredAddress::new(0x10_0000)).unwrap();
                     assert_eq!(
                         planned,
                         assembled.data_bytes.len() as u64,
@@ -4774,7 +4837,7 @@ mod tests {
         fn check(n: u64, chunk_bytes: u64, offset_size: u8, length_size: u8, has_filters: bool) {
             let chunks: Vec<WrittenChunk> = (0..n)
                 .map(|i| WrittenChunk {
-                    address: 0x1000 + i * 8,
+                    address: StoredAddress::new(0x1000 + i * 8),
                     compressed_size: 8,
                     filter_mask: 0,
                 })
@@ -4792,7 +4855,7 @@ mod tests {
                 offset_size,
                 length_size,
                 has_filters,
-                0x10_0000,
+                StoredAddress::new(0x10_0000),
             );
             assert_eq!(
                 planned,
@@ -4844,7 +4907,7 @@ mod tests {
         fn check(n: u64, chunk_bytes: u64, offset_size: u8, length_size: u8, has_filters: bool) {
             let chunks: Vec<WrittenChunk> = (0..n)
                 .map(|i| WrittenChunk {
-                    address: 0x1000 + i * 8,
+                    address: StoredAddress::new(0x1000 + i * 8),
                     compressed_size: 8,
                     filter_mask: 0,
                 })
@@ -4862,7 +4925,7 @@ mod tests {
                 offset_size,
                 length_size,
                 has_filters,
-                0x10_0000,
+                StoredAddress::new(0x10_0000),
             )
             .unwrap();
             assert_eq!(

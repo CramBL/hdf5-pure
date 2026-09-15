@@ -109,6 +109,19 @@ impl StoredAddress {
         Self(stored)
     }
 
+    /// Creates the undefined address of a file whose addresses are `offset_size` bytes wide, the
+    /// value [`is_undefined`](Self::is_undefined) recognizes at that width.
+    ///
+    /// An `offset_size` other than 2, 4, or 8 gives the 8-byte value, the widest an address
+    /// field can be, for which [`is_undefined`](Self::is_undefined) returns `false`.
+    pub(crate) const fn undefined(offset_size: u8) -> Self {
+        Self(match offset_size {
+            2 => 0xFFFF,
+            4 => 0xFFFF_FFFF,
+            _ => 0xFFFF_FFFF_FFFF_FFFF,
+        })
+    }
+
     /// Returns the address as a plain integer.
     pub(crate) const fn get(self) -> u64 {
         self.0
@@ -198,6 +211,11 @@ mod tests {
         #[case] offset_size: u8,
         #[case] sentinel: u64,
     ) {
+        assert_eq!(
+            StoredAddress::undefined(offset_size),
+            StoredAddress::new(sentinel),
+            "the constructor and the predicate name the same value at this width"
+        );
         assert!(StoredAddress::new(sentinel).is_undefined(offset_size));
         assert!(!StoredAddress::new(sentinel - 1).is_undefined(offset_size));
         assert_eq!(

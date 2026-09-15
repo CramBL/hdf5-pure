@@ -82,21 +82,13 @@ pub(crate) mod alloc_probe {
     }
 }
 
-/// The undefined-address sentinel for a given offset size.
-pub(crate) fn undef_addr(offset_size: u8) -> u64 {
-    match offset_size {
-        4 => 0xFFFF_FFFF,
-        _ => u64::MAX,
-    }
-}
-
-/// Push one undefined Extensible-Array element to `buf`: an offset-sized
-/// all-`0xFF` address, followed (for a filtered array whose element is wider than
-/// one address) by zeroed compressed-size and filter-mask fields. Mirrors
-/// `chunked_write::write_undefined_element` so a freshly-allocated block matches
-/// what the bulk writer and reader expect.
+/// Pushes one undefined Extensible-Array element to `buf`: the undefined address
+/// in an offset-sized field, followed (for a filtered array whose element is
+/// wider than one address) by zeroed compressed-size and filter-mask fields.
+/// Mirrors `chunked_write::write_undefined_element` so a freshly-allocated block
+/// matches what the bulk writer and reader expect.
 fn push_undef_element(buf: &mut Vec<u8>, offset_size: u8, ea_elem_size: usize) {
-    write_ea_addr(buf, undef_addr(offset_size), offset_size);
+    write_ea_addr(buf, StoredAddress::undefined(offset_size), offset_size);
     for _ in offset_size as usize..ea_elem_size {
         buf.push(0);
     }
@@ -815,9 +807,9 @@ impl Located {
         let ndblk_addrs = self.geom.direct_dblk_nelmts.len();
 
         let bitmap = vec![0u8; sb.bitmap_size().to_usize()?];
-        let undef = vec![undef_addr(file.offset_size()); sb.ndblks.to_usize()?];
+        let undef = vec![StoredAddress::undefined(file.offset_size()); sb.ndblks.to_usize()?];
         let aesb = crate::chunked_write::build_aesb(
-            self.ea_addr.get(),
+            self.ea_addr,
             sb_block_offset,
             &bitmap,
             &undef,
@@ -862,7 +854,7 @@ impl Located {
         buf.extend_from_slice(b"EADB");
         buf.push(0); // version
         buf.push(self.client_id);
-        write_ea_addr(&mut buf, self.ea_addr.get(), os);
+        write_ea_addr(&mut buf, self.ea_addr, os);
         buf.extend_from_slice(&block_offset_rel.to_le_bytes()[..self.blk_off_size]);
         for _ in 0..dblk_nelmts {
             push_undef_element(&mut buf, os, self.ea_elem_size);
@@ -887,7 +879,7 @@ impl Located {
         buf.extend_from_slice(b"EADB");
         buf.push(0); // version
         buf.push(self.client_id);
-        write_ea_addr(&mut buf, self.ea_addr.get(), os);
+        write_ea_addr(&mut buf, self.ea_addr, os);
         buf.extend_from_slice(&block_offset_rel.to_le_bytes()[..self.blk_off_size]);
         let header_cks = jenkins_lookup3(&buf);
         buf.extend_from_slice(&header_cks.to_le_bytes());
