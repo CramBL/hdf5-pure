@@ -114,6 +114,16 @@ impl StoredAddress {
         self.0
     }
 
+    /// Returns the address `delta` bytes past this one.
+    ///
+    /// The sum is unchecked, as the layout arithmetic it serves is: a writer walks the byte lengths
+    /// it is about to emit from the address a structure begins at. A caller whose `delta` sums
+    /// lengths a file supplied adds those through [`u64::checked_add`] first, so that only a
+    /// bounded total reaches here.
+    pub(crate) const fn offset(self, delta: u64) -> Self {
+        Self(self.0 + delta)
+    }
+
     /// Returns `true` if this is the undefined address of a file whose addresses are
     /// `offset_size` bytes wide.
     ///

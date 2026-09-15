@@ -24,6 +24,7 @@
 #[cfg(not(feature = "std"))]
 use alloc::{vec, vec::Vec};
 
+use crate::address::StoredAddress;
 use crate::file_writer::{write_offset, write_undef_offset};
 
 /// Blocks per doubling-table row (`H5O_FHEAP_MAN_WIDTH`).
@@ -405,12 +406,12 @@ impl ManagedPlan {
         self.region_size
     }
 
-    /// Address of the block the heap header points at, given where the region
-    /// begins.
-    pub(crate) fn root_address(&self, region_address: u64) -> u64 {
+    /// Returns the address of the block the heap header points at, given where
+    /// the region begins.
+    pub(crate) fn root_address(&self, region_address: StoredAddress) -> StoredAddress {
         match self.indirects.last() {
-            Some(root) => region_address + root.region_offset,
-            None => region_address + self.directs[0].region_offset,
+            Some(root) => region_address.offset(root.region_offset),
+            None => region_address.offset(self.directs[0].region_offset),
         }
     }
 
@@ -446,14 +447,14 @@ impl ManagedPlan {
         self.offsets[index]
     }
 
-    /// Emit every block, back to back, in the order [`ManagedPlan::new`] laid
+    /// Emits every block, back to back, in the order [`ManagedPlan::new`] laid
     /// them out. `objects` supplies the bytes of each planned object, in the same
     /// order as the sizes it was planned from.
     pub(crate) fn serialize(
         &self,
         objects: &[&[u8]],
-        region_address: u64,
-        heap_header_address: u64,
+        region_address: StoredAddress,
+        heap_header_address: StoredAddress,
     ) -> Vec<u8> {
         let region_size = usize::try_from(self.region_size)
             .expect("ManagedPlan::new refuses a region this host cannot address");
@@ -468,11 +469,11 @@ impl ManagedPlan {
             for entry in block.entries.iter().copied() {
                 match entry {
                     Some(Child::Direct(at)) => {
-                        let address = region_address + self.directs[at].region_offset;
+                        let address = region_address.offset(self.directs[at].region_offset);
                         write_offset(&mut bytes, address, self.offset_size);
                     }
                     Some(Child::Indirect(at)) => {
-                        let address = region_address + self.indirects[at].region_offset;
+                        let address = region_address.offset(self.indirects[at].region_offset);
                         write_offset(&mut bytes, address, self.offset_size);
                     }
                     None => write_undef_offset(&mut bytes, self.offset_size),
