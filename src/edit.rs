@@ -8816,7 +8816,7 @@ impl WriteEngine {
         for ci in grid_order.iter().take(n_full) {
             kept_chunks.push(WrittenChunk {
                 address: ci.address,
-                compressed_size: u64::from(ci.chunk_size),
+                compressed_size: ci.chunk_size.get(),
                 // Preserve the source mask verbatim: a C/h5py file records a nonzero
                 // mask for a chunk whose filter was skipped (e.g. deflate on
                 // incompressible data), and forcing it to 0 would corrupt that chunk.
@@ -8831,7 +8831,7 @@ impl WriteEngine {
         let mut old_tail_extent: Option<(u64, u64)> = None;
         if has_partial {
             let partial = &grid_order[n_full];
-            let len = partial.chunk_size as usize;
+            let len = partial.chunk_size.to_usize()?;
             partial
                 .address
                 .get()
@@ -8856,10 +8856,7 @@ impl WriteEngine {
             }
             tail_raw.extend_from_slice(&full[..live_bytes]);
             // The old partial chunk's data block is dead once the new index lands.
-            old_tail_extent = Some((
-                base.absolute(partial.address)?,
-                u64::from(partial.chunk_size),
-            ));
+            old_tail_extent = Some((base.absolute(partial.address)?, partial.chunk_size.get()));
         }
         tail_raw.extend_from_slice(&ab.raw);
 
@@ -8897,11 +8894,10 @@ impl WriteEngine {
         grown.dimensions[0] = new_dim0;
         let new_dataspace_body = grown.serialize(LENGTH_SIZE);
 
-        #[expect(
-            clippy::cast_possible_truncation,
-            reason = "spatial chunk dims come from the on-disk u32 chunk_dimensions, so they fit u32"
-        )]
-        let chunk_dims_u32: Vec<u32> = spatial.iter().map(|&dm| dm as u32).collect();
+        let chunk_dims_u32: Vec<u32> = spatial
+            .iter()
+            .map(|&dim| dim.narrow::<u32>())
+            .collect::<Result<_, _>>()?;
 
         Ok(MovingWrite::AppendedChunks {
             region,
@@ -9283,7 +9279,7 @@ impl WriteEngine {
                 let mut meta = Vec::with_capacity(grid.grid_order.len());
                 let mut chunk_bytes = Vec::with_capacity(grid.grid_order.len());
                 for ci in &grid.grid_order {
-                    let len = ci.chunk_size as usize;
+                    let len = ci.chunk_size.to_usize()?;
                     ci.address
                         .get()
                         .checked_add(len as u64)
@@ -9291,7 +9287,7 @@ impl WriteEngine {
                         .ok_or(Error::EditUnsupported("chunk data is out of bounds"))?;
                     chunk_bytes.push(dview.read_exact_at(ci.address.get(), len)?);
                     meta.push(ChunkMeta {
-                        compressed_size: ci.chunk_size as u64,
+                        compressed_size: ci.chunk_size.get(),
                         filter_mask: ci.filter_mask,
                     });
                 }
@@ -12313,10 +12309,7 @@ fn chunked_geometry(
             "chunked layout has malformed dimensions",
         ));
     }
-    let spatial: Vec<u64> = chunk_dimensions[..rank]
-        .iter()
-        .map(|&c| u64::from(c))
-        .collect();
+    let spatial: Vec<u64> = chunk_dimensions[..rank].to_vec();
     let element_size = dt.element_size_usize()?;
     let raw_size = spatial
         .iter()
@@ -12434,7 +12427,7 @@ fn try_inplace_chunk_writes<S: Source + ?Sized>(
             return None;
         }
         let new_len = bytes.len() as u64;
-        let slot = u64::from(ci.chunk_size);
+        let slot = ci.chunk_size.get();
         // A chunk that no longer fits its slot must relocate.
         if new_len > slot {
             return None;

@@ -32,6 +32,7 @@ extern crate alloc;
 #[cfg(not(feature = "std"))]
 use alloc::{format, vec, vec::Vec};
 
+use crate::convert::Narrow;
 use crate::dataspace::MaxExtent;
 use crate::error::FormatError;
 
@@ -90,6 +91,14 @@ pub(crate) struct ChunkGrid {
     /// a zero maximum extent beside a non-zero current one — that reaches the
     /// division, and that is refused where the division is.
     unnumberable: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ChunkGridSlot {
+    /// Slot number in the maximum chunk grid.
+    pub(crate) slot: u64,
+    /// Element offsets of the chunk in the current dataspace.
+    pub(crate) offsets: Vec<u64>,
 }
 
 impl ChunkGrid {
@@ -245,6 +254,54 @@ impl ChunkGrid {
             .then_some(offsets))
     }
 
+    /// Returns the slots the current dataspace reaches.
+    ///
+    /// The slot numbers come from the maximum chunk grid, while the returned
+    /// offsets cover only chunks whose first element lies in the current
+    /// dataspace.
+    pub(crate) fn slots_in_extent(&self) -> Result<Vec<ChunkGridSlot>, FormatError> {
+        let counts = self.current_counts();
+        let num_chunks = counts.iter().try_fold(1u64, |acc, count| {
+            acc.checked_mul(*count).ok_or_else(|| {
+                FormatError::ChunkedReadError(
+                    "current shape describes more chunks than can be enumerated".into(),
+                )
+            })
+        })?;
+        if num_chunks == 0 {
+            return Ok(Vec::new());
+        }
+        self.check_numberable()?;
+
+        let mut slots = Vec::with_capacity(num_chunks.to_usize()?);
+        let mut coords = vec![0u64; counts.len()];
+        for dense in 0..num_chunks {
+            let mut remaining = dense;
+            for d in (0..counts.len()).rev() {
+                coords[d] = remaining % counts[d];
+                remaining /= counts[d];
+            }
+            slots.push(ChunkGridSlot {
+                slot: self.slot_of(&coords)?,
+                offsets: self.offsets_of(&coords)?,
+            });
+        }
+        Ok(slots)
+    }
+
+    /// Returns the logical byte size of one chunk.
+    pub(crate) fn chunk_byte_size(&self, element_size: u64) -> Result<u64, FormatError> {
+        self.chunk_dims
+            .iter()
+            .try_fold(element_size, |acc, chunk_dim| {
+                acc.checked_mul(*chunk_dim).ok_or_else(|| {
+                    FormatError::ChunkedReadError(
+                        "chunk logical byte size exceeds the addressable range".into(),
+                    )
+                })
+            })
+    }
+
     /// Refuse a grid that cannot number a slot; see
     /// [`unnumberable`](Self::unnumberable).
     fn check_numberable(&self) -> Result<(), FormatError> {
@@ -256,6 +313,28 @@ impl ChunkGrid {
             ));
         }
         Ok(())
+    }
+
+    fn current_counts(&self) -> Vec<u64> {
+        self.dims
+            .iter()
+            .zip(&self.chunk_dims)
+            .map(|(dim, chunk_dim)| dim.div_ceil(*chunk_dim))
+            .collect()
+    }
+
+    fn offsets_of(&self, coords: &[u64]) -> Result<Vec<u64>, FormatError> {
+        coords
+            .iter()
+            .zip(&self.chunk_dims)
+            .map(|(coord, chunk_dim)| {
+                coord.checked_mul(*chunk_dim).ok_or_else(|| {
+                    FormatError::ChunkedReadError(
+                        "chunk coordinates resolve past the addressable dataspace".into(),
+                    )
+                })
+            })
+            .collect()
     }
 
     /// The logical offsets — the first element's coordinate in each dimension,

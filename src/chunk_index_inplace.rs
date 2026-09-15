@@ -450,11 +450,11 @@ impl Located {
                 "unexpected chunk dimensionality (expected a rank-1 chunked layout)",
             ));
         }
-        let chunk_elems = chunk_dims[0] as u64;
+        let chunk_elems = chunk_dims[0];
         // A zero element-size pseudo-dimension is a malformed layout; refuse
         // rather than divide by it when validating an append length. The binding
         // carries that refusal forward, so no later step re-checks it.
-        let Some(elem_bytes) = NonZeroUsize::new(chunk_dims[1] as usize) else {
+        let Some(elem_bytes) = NonZeroUsize::new(chunk_dims[1].to_usize()?) else {
             return Err(unsupported("dataset has a zero-sized element"));
         };
         let chunk_bytes = chunk_elems.to_usize()? * elem_bytes.get();

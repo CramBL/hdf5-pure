@@ -13,6 +13,7 @@ use crate::address::StoredAddress;
 use crate::bytes::{read_length, read_offset, read_optional_offset};
 use crate::chunk_grid::ChunkGrid;
 use crate::chunked_read::ChunkInfo;
+use crate::chunked_read::StoredChunkSize;
 use crate::convert::Narrow;
 use crate::error::FormatError;
 use crate::source::Source;
@@ -353,7 +354,7 @@ fn read_element(
         };
         Ok((
             Some(ChunkInfo {
-                chunk_size: chunk_byte_size.narrow::<u32>()?,
+                chunk_size: StoredChunkSize::v4(chunk_byte_size),
                 filter_mask: 0,
                 offsets,
                 address,
@@ -393,7 +394,7 @@ fn read_element(
         ]);
         Ok((
             Some(ChunkInfo {
-                chunk_size: chunk_size.narrow::<u32>()?,
+                chunk_size: StoredChunkSize::v4(chunk_size),
                 filter_mask,
                 offsets,
                 address,
@@ -624,15 +625,20 @@ pub fn read_extensible_array_chunks(
     file_data: &[u8],
     header: &ExtensibleArrayHeader,
     grid: &ChunkGrid,
-    chunk_dimensions: &[u32],
-    element_size: u32,
+    chunk_dimensions: &[u64],
+    element_size: u64,
     offset_size: u8,
     _length_size: u8,
 ) -> Result<Vec<ChunkInfo>, FormatError> {
     let os = offset_size as usize;
 
-    let chunk_byte_size: u64 =
-        chunk_dimensions.iter().map(|&d| d as u64).product::<u64>() * element_size as u64;
+    let chunk_byte_size = chunk_dimensions.iter().try_fold(element_size, |acc, dim| {
+        acc.checked_mul(*dim).ok_or_else(|| {
+            FormatError::ChunkedReadError(
+                "chunk logical byte size exceeds the addressable range".into(),
+            )
+        })
+    })?;
 
     // Derive the (shared) extensible-array geometry from the header. This is
     // the same progression the writer uses, so reader and writer cannot drift.
@@ -1087,15 +1093,20 @@ pub fn read_extensible_array_chunks_from_source<S: Source + ?Sized>(
     source: &S,
     header: &ExtensibleArrayHeader,
     grid: &ChunkGrid,
-    chunk_dimensions: &[u32],
-    element_size: u32,
+    chunk_dimensions: &[u64],
+    element_size: u64,
     offset_size: u8,
     _length_size: u8,
 ) -> Result<Vec<ChunkInfo>, FormatError> {
     let os = offset_size as usize;
 
-    let chunk_byte_size: u64 =
-        chunk_dimensions.iter().map(|&d| d as u64).product::<u64>() * element_size as u64;
+    let chunk_byte_size = chunk_dimensions.iter().try_fold(element_size, |acc, dim| {
+        acc.checked_mul(*dim).ok_or_else(|| {
+            FormatError::ChunkedReadError(
+                "chunk logical byte size exceeds the addressable range".into(),
+            )
+        })
+    })?;
 
     // See `read_extensible_array_chunks` on why the dataspace does not bound
     // this count.
@@ -1513,9 +1524,14 @@ mod tests {
     /// The grid of a dataset with no maximum shape: dense row-major, which is
     /// what these tests read. The numbering rule itself is tested in
     /// [`crate::chunk_grid`]; these tests are about the array structures.
-    fn dense_grid(dims: &[u64], chunk_dims: &[u32]) -> ChunkGrid {
-        let cd: Vec<u64> = chunk_dims.iter().map(|&d| u64::from(d)).collect();
-        ChunkGrid::new(&cd, dims, None, crate::chunk_grid::GridOrder::RowMajor).unwrap()
+    fn dense_grid(dims: &[u64], chunk_dims: &[u64]) -> ChunkGrid {
+        ChunkGrid::new(
+            chunk_dims,
+            dims,
+            None,
+            crate::chunk_grid::GridOrder::RowMajor,
+        )
+        .unwrap()
     }
 
     use crate::checksum::stamp_trailing as stamp;
@@ -1731,7 +1747,7 @@ mod tests {
 
         let header = ExtensibleArrayHeader::parse(&file_data, aehd_offset, os, ls).unwrap();
         let ds_dims = vec![40u64]; // 2 chunks × 20 elements
-        let chunk_dims = vec![20u32];
+        let chunk_dims = vec![20u64];
         let chunks = read_extensible_array_chunks(
             &file_data,
             &header,
@@ -1746,7 +1762,7 @@ mod tests {
         assert_eq!(chunks.len(), 2);
         assert_eq!(chunks[0].address, StoredAddress::new(base_addr));
         assert_eq!(chunks[0].offsets, vec![0]);
-        assert_eq!(chunks[0].chunk_size, chunk_byte_size as u32);
+        assert_eq!(chunks[0].chunk_size, StoredChunkSize::v4(chunk_byte_size));
         assert_eq!(
             chunks[1].address,
             StoredAddress::new(base_addr + chunk_byte_size)
@@ -1764,8 +1780,8 @@ mod tests {
         file_data: &[u8],
         aehd_offset: usize,
         ds_dims: &[u64],
-        chunk_dims: &[u32],
-        element_size: u32,
+        chunk_dims: &[u64],
+        element_size: u64,
         os: u8,
         ls: u8,
     ) {
@@ -1923,7 +1939,7 @@ mod tests {
 
         let header = ExtensibleArrayHeader::parse(&file_data, aehd_offset, os, ls).unwrap();
         let ds_dims = vec![40u64];
-        let chunk_dims = vec![10u32];
+        let chunk_dims = vec![10u64];
         let chunks = read_extensible_array_chunks(
             &file_data,
             &header,
@@ -1983,7 +1999,7 @@ mod tests {
             file[base as usize..].copy_from_slice(&ea);
 
             let ds_dims = vec![n];
-            let chunk_dims = vec![1u32];
+            let chunk_dims = vec![1u64];
             let header = ExtensibleArrayHeader::parse(&file, base as usize, 8, 8).unwrap();
             let buffered = read_extensible_array_chunks(
                 &file,
@@ -2097,7 +2113,7 @@ mod tests {
     fn read_element_unallocated() {
         let data = vec![0xFFu8; 16];
         let ds_dims = vec![50u64];
-        let chunk_dims = vec![10u32];
+        let chunk_dims = vec![10u64];
         let (info, consumed) =
             read_element(&data, 0, 0, 8, 8, 80, 0, &dense_grid(&ds_dims, &chunk_dims)).unwrap();
         assert!(info.is_none());
@@ -2108,23 +2124,24 @@ mod tests {
     #[test]
     fn read_element_filtered() {
         let os: u8 = 8;
-        let chunk_size_bytes = 4usize;
+        let chunk_size_bytes = 5usize;
         let elem_size = os as usize + chunk_size_bytes + 4;
         let mut data = vec![0u8; elem_size + 16];
         // Address
         data[0..8].copy_from_slice(&0x2000u64.to_le_bytes());
-        // Compressed size (4 bytes LE)
-        data[8..12].copy_from_slice(&120u32.to_le_bytes());
+        let stored_size = u64::from(u32::MAX) + 120;
+        data[8..8 + chunk_size_bytes]
+            .copy_from_slice(&stored_size.to_le_bytes()[..chunk_size_bytes]);
         // Filter mask
-        data[12..16].copy_from_slice(&0u32.to_le_bytes());
+        data[8 + chunk_size_bytes..12 + chunk_size_bytes].copy_from_slice(&0u32.to_le_bytes());
 
         let ds_dims = vec![50u64];
-        let chunk_dims = vec![10u32];
+        let chunk_dims = vec![10u64];
         let (info, consumed) = read_element(
             &data,
             0,
             1,
-            elem_size as u8,
+            u8::try_from(elem_size).unwrap(),
             os,
             80,
             2,
@@ -2133,7 +2150,7 @@ mod tests {
         .unwrap();
         let ci = info.unwrap();
         assert_eq!(ci.address, StoredAddress::new(0x2000));
-        assert_eq!(ci.chunk_size, 120);
+        assert_eq!(ci.chunk_size, StoredChunkSize::v4(stored_size));
         assert_eq!(ci.filter_mask, 0);
         assert_eq!(ci.offsets, vec![20]);
         assert_eq!(consumed, elem_size);
@@ -2149,7 +2166,7 @@ mod tests {
     fn filtered_element_smaller_than_its_own_fields_is_refused() {
         let os: u8 = 8;
         let ds_dims = vec![50u64];
-        let chunk_dims = vec![10u32];
+        let chunk_dims = vec![10u64];
         let data = vec![0u8; 64];
 
         // `element_size` must be at least os + 4 = 12 to hold what it claims.
@@ -2222,7 +2239,7 @@ mod tests {
         file[base as usize..].copy_from_slice(&ea);
 
         let ds_dims = vec![n];
-        let chunk_dims = vec![1u32];
+        let chunk_dims = vec![1u64];
         let built = ExtensibleArrayHeader::parse(&file, base as usize, 8, 8).unwrap();
         let geom = EaGeometry::from_header(&built);
         assert!(
@@ -2370,7 +2387,7 @@ mod tests {
             file[base as usize..].copy_from_slice(&ea);
 
             let ds_dims = vec![n];
-            let chunk_dims = vec![1u32];
+            let chunk_dims = vec![1u64];
             let read_both = |file: &[u8]| -> (Result<Vec<ChunkInfo>, FormatError>, bool) {
                 let grid = dense_grid(&ds_dims, &chunk_dims);
                 let buffered =

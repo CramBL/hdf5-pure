@@ -787,11 +787,7 @@ fn emit_dataset(
         && n_elements > 0
     {
         let rank = dims.len();
-        let chunk_dims: Vec<u64> = chunk_dimensions
-            .iter()
-            .take(rank)
-            .map(|&c| c as u64)
-            .collect();
+        let chunk_dims: Vec<u64> = chunk_dimensions.iter().take(rank).copied().collect();
 
         if let Some(DenseChunkPlan { meta, grid_order }) =
             try_plan_dense_chunks(source_chunks, &dims, &chunk_dims)
@@ -907,11 +903,7 @@ fn carry_shape_and_pipeline(
     } = layout
     {
         let rank = dims.len();
-        let logical: Vec<u64> = chunk_dimensions
-            .iter()
-            .take(rank)
-            .map(|&c| c as u64)
-            .collect();
+        let logical: Vec<u64> = chunk_dimensions.iter().take(rank).copied().collect();
         db.with_chunks(&logical);
     }
 
@@ -1196,7 +1188,7 @@ impl ChunkProvider for DatasetChunkProvider {
         // chunk-sized allocation for the whole dataset.
         let info = &self.grid_order[index];
         let source = self.file.source();
-        let len = info.chunk_size as usize;
+        let len = info.chunk_size.to_usize()?;
         let at = self.file.base_address().absolute(info.address)?;
         // Bounds-check before growing the buffer, the way `Source::read_exact_at`
         // does and for its reason: `chunk_size` comes from the source's chunk
@@ -1251,7 +1243,7 @@ fn try_plan_dense_chunks(
     let meta = grid_order
         .iter()
         .map(|info| ChunkMeta {
-            compressed_size: u64::from(info.chunk_size),
+            compressed_size: info.chunk_size.get(),
             filter_mask: info.filter_mask,
         })
         .collect();
