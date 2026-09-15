@@ -6657,10 +6657,7 @@ impl WriteEngine {
                             let data: Vec<(u64, u64)> = kept_chunks
                                 .iter()
                                 .filter_map(|c| {
-                                    Some((
-                                        base.absolute(StoredAddress::new(c.address)).ok()?,
-                                        c.compressed_size,
-                                    ))
+                                    Some((base.absolute(c.address).ok()?, c.compressed_size))
                                 })
                                 .chain(*old_tail_extent)
                                 .collect();
@@ -8777,7 +8774,7 @@ impl WriteEngine {
         let mut kept_chunks: Vec<WrittenChunk> = Vec::with_capacity(n_full);
         for ci in grid_order.iter().take(n_full) {
             kept_chunks.push(WrittenChunk {
-                address: ci.address.get(),
+                address: ci.address,
                 compressed_size: u64::from(ci.chunk_size),
                 // Preserve the source mask verbatim: a C/h5py file records a nonzero
                 // mask for a chunk whose filter was skipped (e.g. deflate on
@@ -9444,7 +9441,7 @@ impl WriteEngine {
             chunk_dims,
             element_size,
             pipeline_message,
-            0,
+            StoredAddress::new(0),
             maxshape,
         )?;
         let (_addr, layout_message) =
@@ -9534,7 +9531,7 @@ impl WriteEngine {
         let plan = crate::file_writer::dense_attrs_plan(attrs, creation);
         let (_addr, attr_info_message) =
             self.place_relocatable(plan.blob_len(), PageType::Meta, |stored_base| {
-                let blob = plan.build(StoredAddress::new(stored_base));
+                let blob = plan.build(stored_base);
                 Ok((blob.blob, blob.attr_info_message))
             })?;
         Ok(attr_info_message)
@@ -9781,20 +9778,20 @@ impl WriteEngine {
         // so an appended chunk's mask is always 0. Kept chunks carry their own
         // (possibly nonzero) mask.
         let chunk_total: u64 = new_chunk_bytes.iter().map(|cb| cb.len() as u64).sum();
-        let placed_chunks = |blob_stored: u64| -> Vec<WrittenChunk> {
+        let placed_chunks = |blob_stored: StoredAddress| -> Vec<WrittenChunk> {
             let mut combined: Vec<WrittenChunk> = kept_chunks.to_vec();
-            let mut offset = blob_stored;
+            let mut next = blob_stored;
             for cb in new_chunk_bytes {
                 combined.push(WrittenChunk {
-                    address: offset,
+                    address: next,
                     compressed_size: cb.len() as u64,
                     filter_mask: 0,
                 });
-                offset += cb.len() as u64;
+                next = next.offset(cb.len() as u64);
             }
             combined
         };
-        let sizing = placed_chunks(0);
+        let sizing = placed_chunks(StoredAddress::new(0));
         let ea_len = extensible_array_len(
             &crate::chunked_write::IndexSlots::dense(&sizing),
             chunk_bytes,
@@ -9802,18 +9799,19 @@ impl WriteEngine {
             LENGTH_SIZE,
             has_filters,
         );
-        let ea =
-            |slots: &crate::chunked_write::IndexSlots<'_>, at: u64| -> Result<Vec<u8>, Error> {
-                build_extensible_array_at(
-                    slots,
-                    chunk_bytes,
-                    OFFSET_SIZE,
-                    LENGTH_SIZE,
-                    has_filters,
-                    at,
-                )
-                .map_err(Error::Format)
-            };
+        let ea = |slots: &crate::chunked_write::IndexSlots<'_>,
+                  at: StoredAddress|
+         -> Result<Vec<u8>, Error> {
+            build_extensible_array_at(
+                slots,
+                chunk_bytes,
+                OFFSET_SIZE,
+                LENGTH_SIZE,
+                has_filters,
+                at,
+            )
+            .map_err(Error::Format)
+        };
         // Reserved by hand rather than through `reserve`, which would fall back to
         // end-of-file: this asks only whether a freed region holds the whole blob,
         // and takes the per-chunk path when none does.
@@ -9827,8 +9825,8 @@ impl WriteEngine {
                 // build can fail has to put it back: a `?` straight out of this arm
                 // would leave it neither free nor written for the rest of the
                 // session. Collected into a `Result` and handed back on the way out.
-                let placed = (|| -> Result<u64, Error> {
-                    let blob_stored = base.relative(addr)?.get();
+                let placed = (|| -> Result<StoredAddress, Error> {
+                    let blob_stored = base.relative(addr)?;
                     let combined = placed_chunks(blob_stored);
                     let mut buf =
                         Vec::with_capacity(usize::try_from(chunk_total + ea_len).unwrap_or(0));
@@ -9837,7 +9835,7 @@ impl WriteEngine {
                     }
                     buf.extend_from_slice(&ea(
                         &crate::chunked_write::IndexSlots::dense(&combined),
-                        blob_stored + chunk_total,
+                        blob_stored.offset(chunk_total),
                     )?);
                     self.place(
                         Placement::Reused {
@@ -9846,7 +9844,7 @@ impl WriteEngine {
                         },
                         &buf,
                     )?;
-                    Ok(blob_stored + chunk_total)
+                    Ok(blob_stored.offset(chunk_total))
                 })();
                 match placed {
                     Ok(ea_stored) => ea_stored,
@@ -9863,7 +9861,7 @@ impl WriteEngine {
                 for cb in new_chunk_bytes {
                     let abs = self.alloc_or_append_typed(cb, PageType::Raw)?;
                     combined.push(WrittenChunk {
-                        address: base.relative(abs)?.get(),
+                        address: base.relative(abs)?,
                         compressed_size: cb.len() as u64,
                         filter_mask: 0,
                     });
@@ -9874,7 +9872,7 @@ impl WriteEngine {
                         (),
                     ))
                 })?;
-                base.relative(ea_addr)?.get()
+                base.relative(ea_addr)?
             }
         };
 
@@ -10045,10 +10043,9 @@ impl WriteEngine {
     /// there. Returns the address and whatever else `build` produced (typically the
     /// object-header message naming the blob, which embeds the same address).
     ///
-    /// `build` receives the *stored* (base-relative) address the blob will occupy,
-    /// since every address a blob embeds is stored base-relative and the reader
-    /// recovers it as `stored + base_address`. On a file without a userblock the
-    /// two are equal.
+    /// `build` receives the address the blob will occupy. Every address the blob
+    /// embeds is written in that same form, which a reader resolves against the
+    /// file's base address.
     ///
     /// `len` must be the length `build` will produce; [`place`](Self::place)
     /// rejects a mismatch. For every blob placed this way the length is a function
@@ -10063,10 +10060,10 @@ impl WriteEngine {
         &mut self,
         len: u64,
         ty: PageType,
-        build: impl FnOnce(u64) -> Result<(Vec<u8>, T), Error>,
+        build: impl FnOnce(StoredAddress) -> Result<(Vec<u8>, T), Error>,
     ) -> Result<(u64, T), Error> {
         let at = self.reserve(len, ty)?;
-        let (bytes, extra) = build(self.superblock.base_address.relative(at.address())?.get())?;
+        let (bytes, extra) = build(self.superblock.base_address.relative(at.address())?)?;
         let addr = self.place(at, &bytes)?;
         Ok((addr, extra))
     }
@@ -12471,12 +12468,12 @@ fn try_rebuild_index_in_place<S: Source + ?Sized>(
     let DataLayout::Chunked { index, .. } = layout else {
         return None;
     };
-    let index_addr = index.address()?.get();
+    let index_addr = index.address()?;
     let written: Vec<crate::chunked_write::WrittenChunk> = grid_order
         .iter()
         .zip(new_bytes)
         .map(|(ci, b)| crate::chunked_write::WrittenChunk {
-            address: ci.address.get(),
+            address: ci.address,
             compressed_size: b.len() as u64,
             filter_mask: 0,
         })
@@ -12543,23 +12540,24 @@ fn try_rebuild_index_in_place<S: Source + ?Sized>(
         return None;
     }
     spans.sort_unstable_by_key(|&(a, _)| a);
-    if spans[0].0 != index_addr {
+    if spans[0].0 != index_addr.get() {
         return None;
     }
-    let mut end = index_addr;
+    let mut end = index_addr.get();
     for &(a, l) in &spans {
         if a != end {
             return None; // a gap means the index is not contiguous
         }
         end = a.checked_add(l)?;
     }
-    if new_index.len() as u64 != end - index_addr {
+    if new_index.len() as u64 != end - index_addr.get() {
         return None;
     }
     index_addr
+        .get()
         .checked_add(new_index.len() as u64)
         .filter(|&e| e <= src.len())?;
-    Some((index_addr, new_index))
+    Some((index_addr.get(), new_index))
 }
 
 /// A [`ChunkProvider`] over chunk bytes already held in memory, in dense

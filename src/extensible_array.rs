@@ -1585,13 +1585,20 @@ mod tests {
     #[test]
     fn a_dimension_of_no_chunks_refuses_rather_than_dividing_by_zero() {
         let chunks = [crate::chunked_write::WrittenChunk {
-            address: 0x1000,
+            address: StoredAddress::new(0x1000),
             compressed_size: 8,
             filter_mask: 0,
         }];
         let slots = crate::chunked_write::IndexSlots::dense(&chunks);
-        let ea =
-            crate::chunked_write::build_extensible_array_at(&slots, 16, 8, 8, false, 0).unwrap();
+        let ea = crate::chunked_write::build_extensible_array_at(
+            &slots,
+            16,
+            8,
+            8,
+            false,
+            StoredAddress::new(0),
+        )
+        .unwrap();
         let header = ExtensibleArrayHeader::parse(&ea, 0, 8, 8).unwrap();
 
         // Maximum extent 0 in the trailing dimension, current extent 4.
@@ -1622,16 +1629,23 @@ mod tests {
         // (column, row): the dataset's own corner chunk is slot 5, and slot 2 in
         // between decodes to chunk row 2 — offsets [4, 0], past a 3-row dataset.
         let chunks: Vec<crate::chunked_write::WrittenChunk> = [0x1000u64, 0x2000, 0x3000]
-            .iter()
-            .map(|&address| crate::chunked_write::WrittenChunk {
-                address,
+            .into_iter()
+            .map(|address| crate::chunked_write::WrittenChunk {
+                address: StoredAddress::new(address),
                 compressed_size: 8,
                 filter_mask: 0,
             })
             .collect();
         let slots = crate::chunked_write::IndexSlots::new(&chunks, &[0, 1, 2], 3).unwrap();
-        let ea =
-            crate::chunked_write::build_extensible_array_at(&slots, 16, 8, 8, false, 0).unwrap();
+        let ea = crate::chunked_write::build_extensible_array_at(
+            &slots,
+            16,
+            8,
+            8,
+            false,
+            StoredAddress::new(0),
+        )
+        .unwrap();
 
         let grid = ChunkGrid::new(
             &[2, 2],
@@ -1950,7 +1964,7 @@ mod tests {
         for &n in &[2000u64, 50000, 140000] {
             let chunks: Vec<WrittenChunk> = (0..n)
                 .map(|i| WrittenChunk {
-                    address: 0x10 + i * 8,
+                    address: StoredAddress::new(0x10 + i * 8),
                     compressed_size: 8,
                     filter_mask: 0,
                 })
@@ -1962,7 +1976,7 @@ mod tests {
                 8,
                 8,
                 false,
-                base,
+                StoredAddress::new(base),
             )
             .unwrap();
             let mut file = vec![0u8; base as usize + ea.len()];
@@ -2189,7 +2203,7 @@ mod tests {
         let n = 100u64;
         let chunks: Vec<WrittenChunk> = (0..n)
             .map(|i| WrittenChunk {
-                address: 0x10 + i * 8,
+                address: StoredAddress::new(0x10 + i * 8),
                 compressed_size: 8,
                 filter_mask: 0,
             })
@@ -2201,7 +2215,7 @@ mod tests {
             8,
             8,
             false,
-            base,
+            StoredAddress::new(base),
         )
         .unwrap();
         let mut file = vec![0u8; base as usize + ea.len()];
@@ -2337,7 +2351,7 @@ mod tests {
         for &n in &[2000u64, 50000, 140000] {
             let chunks: Vec<WrittenChunk> = (0..n)
                 .map(|i| WrittenChunk {
-                    address: 0x10 + i * 8,
+                    address: StoredAddress::new(0x10 + i * 8),
                     compressed_size: 8,
                     filter_mask: 0,
                 })
@@ -2349,7 +2363,7 @@ mod tests {
                 8,
                 8,
                 false,
-                base,
+                StoredAddress::new(base),
             )
             .unwrap();
             let mut file = vec![0u8; base as usize + ea.len()];
@@ -2489,7 +2503,7 @@ mod tests {
         for &n in &[1u64, 4, 20, 100, 244, 300, 2000, 50000, 140000] {
             let chunks: Vec<WrittenChunk> = (0..n)
                 .map(|i| WrittenChunk {
-                    address: 0x100000 + i * 8,
+                    address: StoredAddress::new(0x100000 + i * 8),
                     compressed_size: 8,
                     filter_mask: 0,
                 })
@@ -2500,7 +2514,7 @@ mod tests {
                 os,
                 ls,
                 false,
-                base,
+                StoredAddress::new(base),
             )
             .unwrap();
             let mut file = vec![0u8; base as usize + ea.len()];

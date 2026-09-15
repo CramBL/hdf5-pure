@@ -1780,7 +1780,7 @@ impl FileWriter {
         /// the bytes written later.
         fn measure_chunked(
             d: &DsFlat,
-            data_address: u64,
+            data_address: StoredAddress,
             chunk_set: Option<&CompressedChunkSet>,
         ) -> Result<ChunkedMeasure, FormatError> {
             if let Some(rc) = &d.raw_chunks {
@@ -1824,7 +1824,7 @@ impl FileWriter {
         /// side and `plan_chunked_data_verbatim` being shared on the other.
         fn build_chunked(
             d: &DsFlat,
-            data_address: u64,
+            data_address: StoredAddress,
             chunk_set: Option<&CompressedChunkSet>,
         ) -> Result<ChunkedBuilt, FormatError> {
             if let Some(rc) = &d.raw_chunks {
@@ -2734,7 +2734,8 @@ impl FileWriter {
                     .transpose()?,
             );
             let oh = if is_chunked[i] {
-                let measured = measure_chunked(d, dummy_cursor, chunk_sets[i].as_ref())?;
+                let measured =
+                    measure_chunked(d, StoredAddress::new(dummy_cursor), chunk_sets[i].as_ref())?;
                 dummy_cursor += measured.data_len;
                 ds_data_lens.push(measured.data_len);
                 build_chunked_dataset_oh(
@@ -3181,7 +3182,11 @@ impl FileWriter {
             for &i in &small_indices {
                 let base_addr = c;
                 let layout = if is_chunked[i] {
-                    let built = build_chunked(&all_ds[i], base_addr, chunk_sets[i].as_ref())?;
+                    let built = build_chunked(
+                        &all_ds[i],
+                        StoredAddress::new(base_addr),
+                        chunk_sets[i].as_ref(),
+                    )?;
                     // The small/large classification and the free-space-manager
                     // sizing used the sizing-pass length (`ds_data_lens[i]`); the
                     // real build must match it, or the reserved manager space and
@@ -3225,7 +3230,11 @@ impl FileWriter {
                 let data_addr = c;
                 let built_len;
                 let layout = if is_chunked[i] {
-                    let built = build_chunked(&all_ds[i], data_addr, chunk_sets[i].as_ref())?;
+                    let built = build_chunked(
+                        &all_ds[i],
+                        StoredAddress::new(data_addr),
+                        chunk_sets[i].as_ref(),
+                    )?;
                     // See the small-run note: the real build length must equal the
                     // sizing-pass length the large classification/fragment used.
                     debug_assert_eq!(built.data.len(), ds_data_lens[i]);
@@ -3492,7 +3501,8 @@ impl FileWriter {
         for (i, d) in all_ds.iter_mut().enumerate() {
             if is_chunked[i] {
                 let data_address = cursor2 as u64;
-                let built = build_chunked(d, data_address, chunk_sets[i].as_ref())?;
+                let built =
+                    build_chunked(d, StoredAddress::new(data_address), chunk_sets[i].as_ref())?;
                 cursor2 += built.data.len().to_usize()?;
                 ds_layouts.push(DsLayout {
                     data: built.data,

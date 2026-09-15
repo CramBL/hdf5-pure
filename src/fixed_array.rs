@@ -622,15 +622,22 @@ mod tests {
         // Chunk [2] over shape [4] is two chunks; a maximum of [8] numbers four
         // slots. Put a chunk in each of slots 0, 1 and 3.
         let chunks: Vec<crate::chunked_write::WrittenChunk> = [0x1000u64, 0x2000, 0x3000]
-            .iter()
-            .map(|&address| crate::chunked_write::WrittenChunk {
-                address,
+            .into_iter()
+            .map(|address| crate::chunked_write::WrittenChunk {
+                address: StoredAddress::new(address),
                 compressed_size: 8,
                 filter_mask: 0,
             })
             .collect();
         let slots = crate::chunked_write::IndexSlots::new(&chunks, &[0, 1, 3], 4).unwrap();
-        let fa = crate::chunked_write::build_fixed_array_at(&slots, 8, 8, 8, false, 0);
+        let fa = crate::chunked_write::build_fixed_array_at(
+            &slots,
+            8,
+            8,
+            8,
+            false,
+            StoredAddress::new(0),
+        );
 
         let grid = ChunkGrid::new(
             &[2],
@@ -1058,7 +1065,7 @@ mod tests {
             for &n in &[5u64, 1024, 1025, 3000] {
                 let chunks: Vec<WrittenChunk> = (0..n)
                     .map(|i| WrittenChunk {
-                        address: 0x100000 + i * 8,
+                        address: StoredAddress::new(0x100000 + i * 8),
                         compressed_size: if has_filters { 8 + (i % 7) } else { 8 },
                         filter_mask: 0,
                     })
@@ -1069,7 +1076,7 @@ mod tests {
                     os,
                     ls,
                     has_filters,
-                    base,
+                    StoredAddress::new(base),
                 );
                 let mut file = vec![0u8; base as usize + fa.len()];
                 file[base as usize..].copy_from_slice(&fa);
@@ -1198,7 +1205,7 @@ mod tests {
             for &n in &[1u64, 5, 1024, 1025, 3000] {
                 let chunks: Vec<WrittenChunk> = (0..n)
                     .map(|i| WrittenChunk {
-                        address: 0x100000 + i * 8,
+                        address: StoredAddress::new(0x100000 + i * 8),
                         compressed_size: if has_filters { 8 + (i % 7) } else { 8 },
                         filter_mask: 0,
                     })
@@ -1209,7 +1216,7 @@ mod tests {
                     os,
                     ls,
                     has_filters,
-                    base,
+                    StoredAddress::new(base),
                 );
                 let mut file = vec![0u8; base as usize + fa.len()];
                 file[base as usize..].copy_from_slice(&fa);
