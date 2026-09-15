@@ -189,6 +189,13 @@ semicolon_inside_block = "warn"
 vec_init_then_push = "allow"
 # Approximate float constants in test data are intentional.
 approx_constant = "allow"
+# A public enum is `#[non_exhaustive]` only where a new variant is genuinely
+# likely, since a caller's fix for the rare break is one match arm. A public
+# struct takes the same rule for a new field, and one holding a private field
+# needs no marking. A workspace-internal crate is never sealed, so a variant
+# or a field added to one is a compile error in the workspace's own tests.
+exhaustive_enums = "allow"
+exhaustive_structs = "allow"
 
 # Allowed today and to be turned on.
 # TODO: let chains make the collapsed form read well.
@@ -259,10 +266,6 @@ cast_precision_loss = "allow"
 arithmetic_side_effects = "allow"
 
 # API shape.
-# TODO: each addition is a breaking change, with the next minor bump.
-exhaustive_enums = "allow"
-# TODO
-exhaustive_structs = "allow"
 # TODO
 unnecessary_wraps = "allow"
 # TODO
