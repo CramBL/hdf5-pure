@@ -1948,7 +1948,10 @@ impl FileInner {
         // unspecified. No `debug_assert` here: this parses untrusted bytes, which
         // must not panic a debug build.
         sections.sort_unstable_by_key(|s| s.addr);
-        sections.into_iter().map(|s| (s.addr, s.size)).collect()
+        sections
+            .into_iter()
+            .map(|s| (s.addr.get(), s.size))
+            .collect()
     }
 
     /// The size of the underlying file in bytes (the HDF5 `H5Fget_filesize`).
