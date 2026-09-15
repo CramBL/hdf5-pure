@@ -115,6 +115,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use crate::access_mode::AccessMode;
+use crate::address::StoredAddress;
 use crate::attribute::AttributeMessage;
 use crate::chunked_read::ChunkInfo;
 use crate::chunked_write::{ChunkMeta, ChunkProvider, FilterKind, FilterSpec};
@@ -1159,11 +1160,11 @@ fn resolve_embedded_references(
     for e in 0..n_elements {
         for &slot in slots {
             let at = e * stride + slot;
-            let v = u64::from_le_bytes(
+            let v = StoredAddress::new(u64::from_le_bytes(
                 raw[at..at + 8]
                     .try_into()
                     .expect("slot offsets leave 8 bytes inside the element"),
-            );
+            ));
             patches.push(ObjectRefPatch {
                 byte_offset: at,
                 target: resolve_reference_address(v, path, drop, addr_map)?,
@@ -1661,7 +1662,7 @@ fn emit_object_reference_dataset(
         }
         let mut targets = Vec::with_capacity(n_elements);
         for chunk in raw[..needed].as_chunks::<8>().0 {
-            let v = u64::from_le_bytes(*chunk);
+            let v = StoredAddress::new(u64::from_le_bytes(*chunk));
             targets.push(resolve_reference_address(v, path, drop, addr_map)?);
         }
         targets
@@ -1705,20 +1706,20 @@ fn check_embedded_reference_layout(
     Ok(())
 }
 
-/// Turn one stored object-reference address into the target the writer resolves
+/// Turns one stored object-reference address into the target the writer resolves
 /// at serialization time. Null (0) and undefined (`HADDR_UNDEF`) point at nothing
 /// and are carried verbatim; anything else must name a hard-linked object that
 /// survives the repack.
 fn resolve_reference_address(
-    address: u64,
+    address: StoredAddress,
     path: &ObjectPathBuf,
     drop: &BTreeSet<ObjectPathBuf>,
     addr_map: &HashMap<u64, ObjectPathBuf>,
 ) -> Result<ObjectRefTarget, Error> {
-    if address == 0 || address == u64::MAX {
+    if address.get() == 0 || address.is_undefined(OBJECT_REFERENCE_WIDTH) {
         return Ok(ObjectRefTarget::Raw(address));
     }
-    match addr_map.get(&address) {
+    match addr_map.get(&address.get()) {
         Some(target_path) if is_dropped(target_path, drop) => {
             Err(Error::RepackUnsupported(format!(
                 "dataset {path}: object reference to dropped object {:?} cannot be repacked",
@@ -1727,11 +1728,21 @@ fn resolve_reference_address(
         }
         Some(target_path) => Ok(ObjectRefTarget::Path(target_path.clone())),
         None => Err(Error::RepackUnsupported(format!(
-            "dataset {path}: object reference to address {address:#x} resolves to no hard-linked \
-             object in the source (dangling, or a region target not supported yet)"
+            "dataset {path}: object reference to address {:#x} resolves to no hard-linked \
+             object in the source (dangling, or a region target not supported yet)",
+            address.get()
         ))),
     }
 }
+
+/// Byte width of the object references this repack resolves.
+///
+/// The C library sizes an object reference at `H5R_OBJ_REF_BUF_SIZE`,
+/// `sizeof(haddr_t)` (`H5Rpublic.h`, HDF5 2.2.0), so the element is eight bytes
+/// whatever address width the file declares, and [`embedded_reference_slots`]
+/// locates no other form: an undefined reference has all eight of those bytes
+/// set.
+const OBJECT_REFERENCE_WIDTH: u8 = 8;
 
 /// Whether the source stores nothing at all: no chunk, no contiguous data
 /// region.
