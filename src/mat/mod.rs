@@ -64,7 +64,7 @@
 //!
 //! ```toml
 //! [dependencies]
-//! hdf5-pure = { version = "0.44", features = ["serde"] }
+//! hdf5-pure = { version = "0.46", features = ["serde"] }
 //! serde = { version = "1", features = ["derive"] }
 //! ```
 //!

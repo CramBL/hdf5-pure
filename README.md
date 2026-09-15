@@ -45,7 +45,7 @@ Or add it to `Cargo.toml` by hand:
 
 ```toml
 [dependencies]
-hdf5-pure = "0.44"
+hdf5-pure = "0.46"
 ```
 
 That pulls the default feature set (`std`, `checksum`, and `deflate`), which covers file I/O, the high-level reader and writer API, and deflate compression. The [Cargo features](#cargo-features) table below lists the rest. The crate is edition 2024 and builds on stable Rust 1.89 or newer.
@@ -670,7 +670,7 @@ For bare-metal `no_std`, disable default features (keep `checksum` for metadata 
 
 ```toml
 [dependencies]
-hdf5-pure = { version = "0.44", default-features = false, features = ["checksum"] }
+hdf5-pure = { version = "0.46", default-features = false, features = ["checksum"] }
 ```
 
 The high-level `File` / `FileBuilder` API is `std`-gated, so a `no_std` build exposes only the lower-level primitives. The Cargo features section of the crate documentation covers each feature: what it enables, what it pulls in, and which other features it implies.

@@ -223,7 +223,7 @@ ZFP support is gated behind the `zfp` Cargo feature. Enable it in `Cargo.toml`:
 
 ```toml
 [dependencies]
-hdf5-pure = { version = "0.44", features = ["zfp"] }
+hdf5-pure = { version = "0.46", features = ["zfp"] }
 ```
 
 Or, for the runnable example, `cargo run --example compression --features zfp` if you extend it to exercise ZFP.
