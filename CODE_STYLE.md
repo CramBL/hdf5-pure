@@ -264,9 +264,9 @@ We prefer to avoid type aliases as they hide the type behind them and do not pro
 
 ### Type exhaustiveness
 
-Public enums should be marked as _either_ `#[non_exhaustive]` or `#[allow(clippy::exhaustive_enums)]`. The latter is suitable for enums that are already complete by definition. For example: `enum ByteOrder { LittleEndian, BigEndian }` is complete. Err on the side of marking something `#[non_exhaustive]`.
+Mark a public enum `#[non_exhaustive]` only where a new variant is genuinely likely. Leave every other one exhaustive, since a caller's fix for the rare break is one match arm. `enum ByteOrder { LittleEndian, BigEndian }` is complete and stays exhaustive.
 
-The same applies to structs, with the detail that no manual marking is needed for structures with at least one private field.
+A public struct takes the same rule for a new field, and one with a private field needs no marking. Never mark a type of a workspace-internal crate, so a variant or a field added to one is a compile error in the workspace's own tests.
 
 ### `no_std`
 

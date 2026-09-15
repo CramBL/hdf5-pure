@@ -202,7 +202,6 @@ impl Dataspace {
 /// ```
 ///
 /// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_simple
-#[allow(clippy::exhaustive_enums)]
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum MaxExtent {
     /// The dimension grows to this many elements and no further.
