@@ -106,7 +106,7 @@ pub(crate) struct Plan {
     /// two of them leaves some elements repointed and some not — a mixture of
     /// the pre-commit address and the post-commit one, which is the state every
     /// such element was left in before this existed.
-    data_writes: Vec<(u64, u64)>,
+    data_writes: Vec<(u64, StoredAddress)>,
     /// Edits that land *inside* a version 2 object header — an attribute's value,
     /// or a compact dataset's inline elements — grouped by the header chunk
     /// holding them: `(chunk address, full on-disk length including the trailing
@@ -121,7 +121,7 @@ pub(crate) struct Plan {
     /// for every checksummed structure this crate patches in place, and
     /// [`Plan::apply`] follows the shape `chunk_index_inplace`'s
     /// `publish_checksummed` set for it.
-    header_writes: BTreeMap<(u64, u64), Vec<(usize, u64)>>,
+    header_writes: BTreeMap<(u64, u64), Vec<(usize, StoredAddress)>>,
     /// Whether the walk reached every object in the file and found none whose
     /// datatype holds an object address — the proof that no later commit on this
     /// session need walk it again, provided nothing is added meanwhile.
@@ -169,7 +169,7 @@ impl Plan {
     /// are `publish_checksummed`'s, for the reasons recorded there.
     pub(crate) fn apply(&self, target: &mut impl PatchTarget) -> Result<(), Error> {
         for &(at, value) in &self.data_writes {
-            target.write(at, &value.to_le_bytes())?;
+            target.write(at, &value.get().to_le_bytes())?;
         }
         for (&(at, len), edits) in &self.header_writes {
             // `read_oh_chunks` produced this span from a header it had already
@@ -190,7 +190,7 @@ impl Plan {
                         "a stored reference sits outside the object header chunk holding it",
                     ),
                 )?;
-                chunk[offset..end].copy_from_slice(&value.to_le_bytes());
+                chunk[offset..end].copy_from_slice(&value.get().to_le_bytes());
                 from = from.min(offset);
             }
             let checksum = jenkins_lookup3(&chunk[..body_len]);
@@ -549,7 +549,7 @@ fn scan_object<S: Source + ?Sized>(
     // walk takes of them. One per header; a dataset has at most one datatype.
     let mut committed: Option<Vec<u8>> = None;
     // Reused across messages: one attribute's edits at a time.
-    let mut edits: Vec<(u64, u64)> = Vec::new();
+    let mut edits: Vec<(u64, StoredAddress)> = Vec::new();
     for chunk in &chunks {
         let layout = chunk.layout();
         let (region, mut p) = chunk.message_region();
@@ -730,7 +730,7 @@ fn scan_object<S: Source + ?Sized>(
 /// bounds every offset against the chunk's message region before writing: two
 /// responses to one impossibility would only disagree, and `apply`'s is the
 /// tighter and the one that reports.
-fn record_header_edits(plan: &mut Plan, span: (u64, u64), edits: &[(u64, u64)]) {
+fn record_header_edits(plan: &mut Plan, span: (u64, u64), edits: &[(u64, StoredAddress)]) {
     for &(at, value) in edits {
         let Some(offset) = at.checked_sub(span.0).and_then(|o| usize::try_from(o).ok()) else {
             continue;
@@ -799,7 +799,7 @@ fn collect_slots(
     raw_at: u64,
     base: BaseAddress,
     relocations: &BTreeMap<u64, u64>,
-    out: &mut Vec<(u64, u64)>,
+    out: &mut Vec<(u64, StoredAddress)>,
 ) {
     for (offset, stored) in stored_object_references(raw, dt.type_size() as usize, slots) {
         // The two sentinels name no object and are never relocated; skipping
@@ -817,7 +817,7 @@ fn collect_slots(
         let Ok(value) = base.relative(new) else {
             continue;
         };
-        out.push((raw_at + offset as u64, value.get()));
+        out.push((raw_at + offset as u64, value));
     }
 }
 

@@ -2919,11 +2919,9 @@ impl FileWriter {
                         crate::type_builders::ObjectRefTarget::Path(path) => {
                             path_map.get(path).copied().unwrap_or(UNDEF_ADDRESS)
                         }
-                        crate::type_builders::ObjectRefTarget::Raw(addr) => {
-                            StoredAddress::new(*addr)
-                        }
+                        crate::type_builders::ObjectRefTarget::Raw(addr) => *addr,
                     };
-                    write_reference_address(&mut d.raw, patch.byte_offset, addr.get());
+                    write_reference_address(&mut d.raw, patch.byte_offset, addr);
                 }
             }
         }

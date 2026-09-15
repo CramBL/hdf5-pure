@@ -10229,11 +10229,10 @@ impl WriteEngine {
         }
     }
 
-    /// Resolve one object-reference element's target to the base-relative
-    /// address that should be stored on disk. [`ObjectRefTarget::Raw`] is
-    /// written back verbatim (a null or undefined reference is a sentinel, not
-    /// a real address, so it needs no base adjustment — mirrors the whole-file
-    /// writer). [`ObjectRefTarget::Path`] resolves, in order:
+    /// Resolves one object-reference element's target to the address stored on
+    /// disk. [`ObjectRefTarget::Raw`] is written back verbatim: a null or an
+    /// undefined reference points at nothing, and the whole-file writer treats
+    /// it the same way. [`ObjectRefTarget::Path`] resolves, in order:
     ///
     /// 1. Against `path_addr` — every group and dataset this commit has
     ///    already placed (a sibling dataset placed earlier in the same
@@ -10296,7 +10295,7 @@ impl WriteEngine {
         invalidated: &InvalidatedAddresses,
         src: &(impl Source + ?Sized),
         superblock: &Superblock,
-    ) -> Result<u64, Error> {
+    ) -> Result<StoredAddress, Error> {
         let path = match target {
             // An address carries no name to test, so the delete check the path
             // arm makes by prefix is made here on the address itself.
@@ -10309,7 +10308,7 @@ impl WriteEngine {
             // otherwise write it past the screen its `Path` twin gets — which
             // is the shape of this bug in the first place (issue #317).
             ObjectRefTarget::Raw(addr) => {
-                if let Some(refusal) = invalidated.refusal(StoredAddress::new(*addr)) {
+                if let Some(refusal) = invalidated.refusal(*addr) {
                     return Err(Error::EditUnsupported(refusal));
                 }
                 return Ok(*addr);
@@ -10318,7 +10317,7 @@ impl WriteEngine {
         };
         let base = superblock.base_address;
         if let Some(&addr) = path_addr.get(path) {
-            return Ok(base.relative(addr)?.get());
+            return Ok(base.relative(addr)?);
         }
         if nodes.contains_key(path)
             || add_targets.iter().any(|t| path.starts_with(t))
@@ -10345,8 +10344,8 @@ impl WriteEngine {
                 superblock,
                 &path.as_path(),
             ) {
-                Ok(addr) => base.relative(addr)?.get(),
-                Err(_) => UNDEF,
+                Ok(addr) => base.relative(addr)?,
+                Err(_) => StoredAddress::new(UNDEF),
             },
         )
     }
@@ -15575,7 +15574,7 @@ mod tests {
         let path_addr: BTreeMap<ObjectPathBuf, u64> = BTreeMap::new();
         let resolve = |address: u64, removed: Vec<(u64, u64)>, moved: Vec<u64>| {
             WriteEngine::resolve_reference_target(
-                &ObjectRefTarget::Raw(address),
+                &ObjectRefTarget::Raw(StoredAddress::new(address)),
                 &path_addr,
                 &nodes,
                 &[],
@@ -15601,20 +15600,23 @@ mod tests {
         );
         assert_eq!(
             resolve(300, vec![(400, 71)], vec![299, 301]).unwrap(),
-            300,
+            StoredAddress::new(300),
             "an address outside every reclaimed span and every moved header is carried through"
         );
         assert_eq!(
             resolve(300, Vec::new(), Vec::new()).unwrap(),
-            300,
+            StoredAddress::new(300),
             "a commit that reclaims nothing screens nothing"
         );
         // The two sentinels name no object, so they are carried through even
         // when they fall inside a reclaimed span.
-        assert_eq!(resolve(0, vec![(0, 4096)], vec![0]).unwrap(), 0);
+        assert_eq!(
+            resolve(0, vec![(0, 4096)], vec![0]).unwrap(),
+            StoredAddress::new(0)
+        );
         assert_eq!(
             resolve(UNDEF, vec![(0, u64::MAX)], vec![UNDEF]).unwrap(),
-            UNDEF
+            StoredAddress::new(UNDEF)
         );
     }
 
@@ -15653,7 +15655,7 @@ mod tests {
 
         let placed: BTreeMap<ObjectPathBuf, u64> =
             std::iter::once((ObjectPathBuf::parse("a/b"), 4096)).collect();
-        assert_eq!(resolve(&placed, &[]).unwrap(), 4096);
+        assert_eq!(resolve(&placed, &[]).unwrap(), StoredAddress::new(4096));
 
         let err = resolve(&BTreeMap::new(), &[ObjectPathBuf::parse("a/b")]).unwrap_err();
         let Error::EditUnsupported(reason) = &err else {

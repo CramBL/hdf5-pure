@@ -9,6 +9,7 @@ use core::fmt;
 
 use core::num::{NonZeroU32, NonZeroUsize};
 
+use crate::address::StoredAddress;
 use crate::attribute::AttributeMessage;
 use crate::chunked_write::{ChunkMeta, ChunkOptions, ChunkProvider, FilterKind, StorageAllocation};
 use crate::compound::CompoundType;
@@ -2231,9 +2232,9 @@ pub(crate) struct ProducedPayload {
 pub(crate) enum ObjectRefTarget {
     /// Resolve to the destination address of the object at this path.
     Path(ObjectPathBuf),
-    /// Write this exact 8-byte address (e.g. 0 for null, `u64::MAX` for
-    /// undefined).
-    Raw(u64),
+    /// The address written into the element verbatim: zero for a null
+    /// reference, and the undefined address for a reference to no object.
+    Raw(StoredAddress),
 }
 
 /// One object-reference address to resolve during serialization, and where in
@@ -2263,14 +2264,14 @@ pub(crate) struct ObjectRefPatch {
 /// staged by [`DatasetBuilder::with_embedded_object_references`], whose buffer is
 /// the source's element bytes. Neither is reachable without the assertion firing
 /// first.
-pub(crate) fn write_reference_address(raw: &mut [u8], byte_offset: usize, address: u64) {
+pub(crate) fn write_reference_address(raw: &mut [u8], byte_offset: usize, address: StoredAddress) {
     debug_assert!(
         byte_offset + 8 <= raw.len(),
         "object-reference slot at {byte_offset} does not fit {} element bytes",
         raw.len()
     );
     if let Some(slot) = raw.get_mut(byte_offset..byte_offset + 8) {
-        slot.copy_from_slice(&address.to_le_bytes());
+        slot.copy_from_slice(&address.get().to_le_bytes());
     }
 }
 
