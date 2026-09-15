@@ -7121,14 +7121,19 @@ impl WriteEngine {
                 ps.old_blocks.clone(),
             )
         };
+        let base = self.superblock.base_address;
 
-        let old_ext_rel = self
-            .superblock
-            .superblock_extension_address
-            .filter(|&a| a != UNDEF)
-            .ok_or(Error::EditUnsupported(
-                "a persisting file has no superblock extension to update",
-            ))?;
+        // The extension address is stored relative to the base address, and every
+        // reader of the extension below indexes the image, so it is shifted once
+        // here rather than at each of them.
+        let old_ext_addr = base.absolute(StoredAddress::new(
+            self.superblock
+                .superblock_extension_address
+                .filter(|&a| a != UNDEF)
+                .ok_or(Error::EditUnsupported(
+                    "a persisting file has no superblock extension to update",
+                ))?,
+        ))?;
 
         // The persist File Space Info message is fixed-size, so the rewritten
         // extension's length is independent of the addresses it will carry: size
@@ -7136,7 +7141,7 @@ impl WriteEngine {
         let placeholder =
             FileSpaceInfo::persistent_single_manager(strategy, threshold, page_size, 0, 0);
         let ext_len =
-            build_v2_object_header(&self.rewrite_extension_region(old_ext_rel, &placeholder)?)?
+            build_v2_object_header(&self.rewrite_extension_region(old_ext_addr, &placeholder)?)?
                 .len() as u64;
 
         // Place the tail — the rewritten extension and the manager blocks — in a
@@ -7155,7 +7160,6 @@ impl WriteEngine {
             return Ok(());
         }
         let reused = placed_at.is_some();
-        let base = self.superblock.base_address;
         let ext_addr = placed_at.unwrap_or_else(|| self.image.len());
         let sections = self.persisted_sections(&post);
         let fshd_addr = self.persisted_address(ext_addr + ext_len);
@@ -7176,7 +7180,7 @@ impl WriteEngine {
         let (ext_oh, fsm_blocks) = if sections.is_empty() {
             let info = FileSpaceInfo::persistent_empty(strategy, threshold, page_size);
             let ext_oh =
-                build_v2_object_header(&self.rewrite_extension_region(old_ext_rel, &info)?)?;
+                build_v2_object_header(&self.rewrite_extension_region(old_ext_addr, &info)?)?;
             (ext_oh, None)
         } else {
             // `eoa_pre_fsm` is the end-of-allocation before the free-space-manager
@@ -7200,7 +7204,7 @@ impl WriteEngine {
                 eoa_pre_fsm,
             );
             let ext_oh =
-                build_v2_object_header(&self.rewrite_extension_region(old_ext_rel, &info)?)?;
+                build_v2_object_header(&self.rewrite_extension_region(old_ext_addr, &info)?)?;
             let (fshd, fsse) =
                 serialize_file_fsm(&sections, fshd_addr, fsse_addr, os, SECT_CLASS_SIMPLE);
             (ext_oh, Some((fshd, fsse)))
@@ -7511,13 +7515,16 @@ impl WriteEngine {
         // The padded tail becomes free space of whatever type that page held.
         self.pad_to_page()?;
 
-        let old_ext_rel = self
-            .superblock
-            .superblock_extension_address
-            .filter(|&a| a != UNDEF)
-            .ok_or(Error::EditUnsupported(
-                "a persisting file has no superblock extension to update",
-            ))?;
+        // As on the flat path: the extension address is stored relative to the base
+        // address, and every reader of the extension below indexes the image.
+        let old_ext_addr = base.absolute(StoredAddress::new(
+            self.superblock
+                .superblock_extension_address
+                .filter(|&a| a != UNDEF)
+                .ok_or(Error::EditUnsupported(
+                    "a persisting file has no superblock extension to update",
+                ))?,
+        ))?;
 
         // The 12-slot persist message is fixed-size, so a placeholder sizes the
         // rewritten extension before its manager addresses are known — and before
@@ -7530,7 +7537,7 @@ impl WriteEngine {
             0,
         );
         let ext_len =
-            build_v2_object_header(&self.rewrite_extension_region(old_ext_rel, &placeholder)?)?
+            build_v2_object_header(&self.rewrite_extension_region(old_ext_addr, &placeholder)?)?
                 .len() as u64;
 
         // Place the tail — the rewritten extension and the manager blocks — as an
@@ -7600,7 +7607,7 @@ impl WriteEngine {
         let ext_oh = if plan.is_empty() {
             // No free space to track: an empty persist message, page-aligned.
             let info = FileSpaceInfo::persistent_empty(strategy, threshold, page_size);
-            build_v2_object_header(&self.rewrite_extension_region(old_ext_rel, &info)?)?
+            build_v2_object_header(&self.rewrite_extension_region(old_ext_addr, &info)?)?
         } else {
             // Paged convention (matching the from-scratch writer): the managers are
             // ordinary metadata below a page-aligned end-of-allocation.
@@ -7611,7 +7618,7 @@ impl WriteEngine {
                 plan.slots.map(StoredAddress::get),
                 final_eof,
             );
-            build_v2_object_header(&self.rewrite_extension_region(old_ext_rel, &info)?)?
+            build_v2_object_header(&self.rewrite_extension_region(old_ext_addr, &info)?)?
         };
         debug_assert_eq!(
             ext_oh.len() as u64,
@@ -7965,6 +7972,9 @@ impl WriteEngine {
     /// File Space Info message replaced by `info` (every other message preserved
     /// verbatim), ready to wrap with [`build_v2_object_header`]. The persisting
     /// message is fixed-size, so this never changes the region's length.
+    ///
+    /// `ext_addr` is the extension header's absolute file offset, which is where
+    /// the messages are read from, and not the address the superblock stores.
     fn rewrite_extension_region(
         &self,
         ext_addr: u64,
