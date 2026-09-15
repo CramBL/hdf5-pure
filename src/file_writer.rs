@@ -127,11 +127,13 @@ pub(crate) fn contiguous_layout_version(libver: LibVer) -> u8 {
     if libver >= LibVer::V110 { 4 } else { 3 }
 }
 
+/// Builds a contiguous dataset's object header, whose data layout message stores
+/// `data_addr` and the `data_size` bytes there.
 pub(crate) fn build_dataset_oh(
     dt: &Datatype,
     dt_location: &DatatypeLocation,
     ds: &Dataspace,
-    data_addr: u64,
+    data_addr: StoredAddress,
     data_size: u64,
     attrs: &[AttributeMessage],
     attr_info: Option<&[u8]>,
@@ -149,7 +151,7 @@ pub(crate) fn build_dataset_oh(
     let mut dl = Vec::new();
     dl.push(contiguous_layout_version(libver));
     dl.push(1); // class = contiguous
-    dl.extend_from_slice(&data_addr.to_le_bytes());
+    dl.extend_from_slice(&data_addr.get().to_le_bytes());
     dl.extend_from_slice(&data_size.to_le_bytes());
     w.add_message(MessageType::DataLayout, dl);
     add_attributes(&mut w, attrs, attr_info);
@@ -1144,6 +1146,16 @@ fn write_uint(buf: &mut Vec<u8>, val: u64, width: u8) {
         _ => {}
     }
 }
+
+/// The undefined address at the [`OFFSET_SIZE`] address width this writer emits.
+///
+/// The writer stores it in a data layout message for a dataset with no storage
+/// allocated, and in an object reference whose path it places nowhere. The
+/// undefined address is defined in "Appendix A: Definitions" of the [format
+/// specification, version 4.0][spec].
+///
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#sec_fmt4_appendixa
+const UNDEF_ADDRESS: StoredAddress = StoredAddress::undefined(OFFSET_SIZE);
 
 pub(crate) fn write_undef_offset(buf: &mut Vec<u8>, offset_size: u8) {
     for _ in 0..offset_size {
@@ -2345,9 +2357,9 @@ impl FileWriter {
             all_ds: &'a [DsFlat],
             committed: &'a [CtFlat],
             groups: &'a [GrpFlat],
-            ds_addrs: &'a [u64],
-            committed_addrs: &'a [u64],
-            group_addrs: &'a [u64],
+            ds_addrs: &'a [StoredAddress],
+            committed_addrs: &'a [StoredAddress],
+            group_addrs: &'a [StoredAddress],
         }
 
         impl LinkTables<'_> {
@@ -2369,21 +2381,18 @@ impl FileWriter {
                     ds_indices.len() + committed_indices.len() + sub_group_indices.len(),
                 );
                 for &i in ds_indices {
-                    links.push(make_link(
-                        self.all_ds[i].name.as_str(),
-                        StoredAddress::new(self.ds_addrs[i]),
-                    ));
+                    links.push(make_link(self.all_ds[i].name.as_str(), self.ds_addrs[i]));
                 }
                 for &ci in committed_indices {
                     links.push(make_link(
                         self.committed[ci].name.as_str(),
-                        StoredAddress::new(self.committed_addrs[ci]),
+                        self.committed_addrs[ci],
                     ));
                 }
                 for &gi in sub_group_indices {
                     links.push(make_link(
                         self.groups[gi].name.as_str(),
-                        StoredAddress::new(self.group_addrs[gi]),
+                        self.group_addrs[gi],
                     ));
                 }
                 links
@@ -2392,9 +2401,9 @@ impl FileWriter {
 
         // Addresses the sizing pass uses. A link's byte length does not depend on
         // the address it carries, so zeros give the real header size.
-        let dummy_ds_addrs = vec![0u64; all_ds.len()];
-        let dummy_ct_addrs = vec![0u64; committed.len()];
-        let dummy_grp_addrs = vec![0u64; groups.len()];
+        let dummy_ds_addrs = vec![StoredAddress::new(0); all_ds.len()];
+        let dummy_ct_addrs = vec![StoredAddress::new(0); committed.len()];
+        let dummy_grp_addrs = vec![StoredAddress::new(0); groups.len()];
 
         let root_dense = needs_dense_attrs(&root_attrs);
         let group_dense: Vec<bool> = groups.iter().map(|g| needs_dense_attrs(&g.attrs)).collect();
@@ -2553,9 +2562,9 @@ impl FileWriter {
         /// Where each object's dense-attribute heap will be written and how many
         /// bytes it occupies, for the objects that have one.
         struct DenseSpans {
-            root: Option<(u64, usize)>,
-            groups: Vec<Option<(u64, usize)>>,
-            datasets: Vec<Option<(u64, usize)>>,
+            root: Option<(StoredAddress, usize)>,
+            groups: Vec<Option<(StoredAddress, usize)>>,
+            datasets: Vec<Option<(StoredAddress, usize)>>,
         }
 
         /// The heaps themselves, in the same order as the spans reserved for them.
@@ -2595,16 +2604,12 @@ impl FileWriter {
             ) -> Result<DenseBlobs, FormatError> {
                 fn one(
                     attrs: &[AttributeMessage],
-                    span: Option<(u64, usize)>,
+                    span: Option<(StoredAddress, usize)>,
                 ) -> Result<Option<DenseAttrBlob>, FormatError> {
                     let Some((address, reserved)) = span else {
                         return Ok(None);
                     };
-                    let blob = build_dense_attrs(
-                        attrs,
-                        DenseAttrCreationOrder::Untracked,
-                        StoredAddress::new(address),
-                    );
+                    let blob = build_dense_attrs(attrs, DenseAttrCreationOrder::Untracked, address);
                     if blob.blob.len() != reserved {
                         return Err(FormatError::SerializationError(format!(
                             "a dense attribute heap built {} bytes into a span of {reserved} \
@@ -2754,7 +2759,7 @@ impl FileWriter {
                     &d.dt,
                     &d.dt_location,
                     &d.ds,
-                    0,
+                    StoredAddress::new(0),
                     d.declared_contiguous_len,
                     &d.attrs,
                     dense_attr_info.as_deref(),
@@ -2778,7 +2783,7 @@ impl FileWriter {
         // the superblock, so the root object header — and everything after it —
         // starts past them. `early_gcol_size` is 0 for a file without a chunked
         // VL dataset, leaving every other file's addresses unchanged.
-        let root_group_addr = (SUPERBLOCK_SIZE + early_gcol_size) as u64;
+        let root_group_addr = StoredAddress::new((SUPERBLOCK_SIZE + early_gcol_size) as u64);
         let mut cursor2 = SUPERBLOCK_SIZE + early_gcol_size + root_oh_size;
 
         // Space set aside for a dense-attribute heap, and the heaps themselves
@@ -2791,7 +2796,7 @@ impl FileWriter {
         // reader that cannot resolve them drops the attribute entirely.
         let reserve = |cursor2: &mut usize, len: Option<usize>| {
             len.map(|len| {
-                let addr = *cursor2 as u64;
+                let addr = StoredAddress::new(*cursor2 as u64);
                 *cursor2 += len;
                 (addr, len)
             })
@@ -2799,12 +2804,13 @@ impl FileWriter {
 
         let root_dense_span = reserve(&mut cursor2, root_dense_len);
 
-        let mut group_dense_spans: Vec<Option<(u64, usize)>> = Vec::with_capacity(groups.len());
-        let group_addrs2: Vec<u64> = group_oh_sizes
+        let mut group_dense_spans: Vec<Option<(StoredAddress, usize)>> =
+            Vec::with_capacity(groups.len());
+        let group_addrs2: Vec<StoredAddress> = group_oh_sizes
             .iter()
             .enumerate()
             .map(|(gi, &sz)| {
-                let addr = cursor2 as u64;
+                let addr = StoredAddress::new(cursor2 as u64);
                 cursor2 += sz;
                 group_dense_spans.push(reserve(&mut cursor2, group_dense_lens[gi]));
                 addr
@@ -2815,21 +2821,22 @@ impl FileWriter {
         // file keeps them in its metadata region, and before the datasets that
         // reference them only because the cursor has to run in some order —
         // nothing here depends on the relative placement.
-        let committed_addrs: Vec<u64> = committed_oh
+        let committed_addrs: Vec<StoredAddress> = committed_oh
             .iter()
             .map(|oh| {
-                let addr = cursor2 as u64;
+                let addr = StoredAddress::new(cursor2 as u64);
                 cursor2 += oh.len();
                 addr
             })
             .collect();
 
-        let mut ds_dense_spans: Vec<Option<(u64, usize)>> = Vec::with_capacity(all_ds.len());
-        let ds_oh_addrs2: Vec<u64> = actual_ds_oh_sizes
+        let mut ds_dense_spans: Vec<Option<(StoredAddress, usize)>> =
+            Vec::with_capacity(all_ds.len());
+        let ds_oh_addrs2: Vec<StoredAddress> = actual_ds_oh_sizes
             .iter()
             .enumerate()
             .map(|(i, &sz)| {
-                let addr = cursor2 as u64;
+                let addr = StoredAddress::new(cursor2 as u64);
                 cursor2 += sz;
                 ds_dense_spans.push(reserve(&mut cursor2, ds_dense_lens[i]));
                 addr
@@ -2849,7 +2856,7 @@ impl FileWriter {
             // Root-level datasets: path = dataset_name
             // Group-level datasets: path = group_name/dataset_name (recursive)
             // Groups: path = group_name (recursive)
-            let mut path_map = HashMap::<ObjectPathBuf, u64>::new();
+            let mut path_map = HashMap::<ObjectPathBuf, StoredAddress>::new();
             let root = ObjectPathBuf::root();
             // An object reference can point at the root group, which the map holds
             // under its own path, the one with no components (repack resolves a
@@ -2868,10 +2875,10 @@ impl FileWriter {
                     prefix: &ObjectPathBuf,
                     gi: usize,
                     groups: &[GrpFlat],
-                    ds_addrs: &[u64],
-                    grp_addrs: &[u64],
+                    ds_addrs: &[StoredAddress],
+                    grp_addrs: &[StoredAddress],
                     all_ds: &[DsFlat],
-                    map: &mut HashMap<ObjectPathBuf, u64>,
+                    map: &mut HashMap<ObjectPathBuf, StoredAddress>,
                 ) {
                     map.insert(prefix.clone(), grp_addrs[gi]);
                     for &di in &groups[gi].ds_indices {
@@ -2910,11 +2917,13 @@ impl FileWriter {
                 for patch in patches {
                     let addr = match &patch.target {
                         crate::type_builders::ObjectRefTarget::Path(path) => {
-                            path_map.get(path).copied().unwrap_or(u64::MAX)
+                            path_map.get(path).copied().unwrap_or(UNDEF_ADDRESS)
                         }
-                        crate::type_builders::ObjectRefTarget::Raw(addr) => *addr,
+                        crate::type_builders::ObjectRefTarget::Raw(addr) => {
+                            StoredAddress::new(*addr)
+                        }
                     };
-                    write_reference_address(&mut d.raw, patch.byte_offset, addr);
+                    write_reference_address(&mut d.raw, patch.byte_offset, addr.get());
                 }
             }
         }
@@ -2932,7 +2941,7 @@ impl FileWriter {
                     ),
                     None => return,
                 };
-                *location = DatatypeLocation::Committed(StoredAddress::new(committed_addrs[ci]));
+                *location = DatatypeLocation::Committed(committed_addrs[ci]);
             };
             for attr in &mut root_attrs {
                 resolve(&mut attr.datatype_location);
@@ -2954,7 +2963,7 @@ impl FileWriter {
         // so we can patch VL attrs before building OHs.
         struct DsLayout {
             data: DsData,
-            data_addr: u64,
+            data_addr: StoredAddress,
             chunked_msgs: Option<(Vec<u8>, Option<Vec<u8>>)>,
         }
 
@@ -3174,19 +3183,15 @@ impl FileWriter {
                 let raw = core::mem::take(&mut all_ds[i].raw);
                 layouts[i] = Some(DsLayout {
                     data: DsData::InMemory(raw),
-                    data_addr: u64::MAX,
+                    data_addr: UNDEF_ADDRESS,
                     chunked_msgs: None,
                 });
             }
             let mut c = raw_start;
             for &i in &small_indices {
-                let base_addr = c;
+                let base_addr = StoredAddress::new(c);
                 let layout = if is_chunked[i] {
-                    let built = build_chunked(
-                        &all_ds[i],
-                        StoredAddress::new(base_addr),
-                        chunk_sets[i].as_ref(),
-                    )?;
+                    let built = build_chunked(&all_ds[i], base_addr, chunk_sets[i].as_ref())?;
                     // The small/large classification and the free-space-manager
                     // sizing used the sizing-pass length (`ds_data_lens[i]`); the
                     // real build must match it, or the reserved manager space and
@@ -3227,14 +3232,10 @@ impl FileWriter {
             let mut large_sections: Vec<FreeSection> = Vec::new();
             for &i in &large_indices {
                 c = align_up(c, page_size);
-                let data_addr = c;
+                let data_addr = StoredAddress::new(c);
                 let built_len;
                 let layout = if is_chunked[i] {
-                    let built = build_chunked(
-                        &all_ds[i],
-                        StoredAddress::new(data_addr),
-                        chunk_sets[i].as_ref(),
-                    )?;
+                    let built = build_chunked(&all_ds[i], data_addr, chunk_sets[i].as_ref())?;
                     // See the small-run note: the real build length must equal the
                     // sizing-pass length the large classification/fragment used.
                     debug_assert_eq!(built.data.len(), ds_data_lens[i]);
@@ -3254,7 +3255,7 @@ impl FileWriter {
                     }
                 };
                 layouts[i] = Some(layout);
-                let data_end = data_addr + built_len;
+                let data_end = data_addr.get() + built_len;
                 let frag = align_up(data_end, page_size) - data_end;
                 if frag > 0 {
                     large_sections.push(FreeSection {
@@ -3354,7 +3355,7 @@ impl FileWriter {
                 length_width: LENGTH_WIDTH,
                 base_address: base,
                 eof_address: eof_addr2,
-                root_group_address: root_group_addr,
+                root_group_address: root_group_addr.get(),
                 group_leaf_node_k: None,
                 group_internal_node_k: None,
                 indexed_storage_internal_node_k: None,
@@ -3467,7 +3468,8 @@ impl FileWriter {
             // large runs (with their fragments), padded to the page-aligned EOA.
             sink.put_zeros((raw_start - meta_end).to_usize()?)?;
             for &i in &small_indices {
-                debug_assert_eq!(sink.position(), base.get() + ds_layouts[i].data_addr);
+                let at = base.absolute(ds_layouts[i].data_addr)?;
+                debug_assert_eq!(sink.position(), at);
                 emit_ds_data(
                     sink,
                     &ds_layouts[i].data,
@@ -3479,8 +3481,7 @@ impl FileWriter {
                 sink.put_zeros((align_up(small_raw_end, page_size) - small_raw_end).to_usize()?)?;
             }
             for &i in &large_indices {
-                let data_addr = ds_layouts[i].data_addr;
-                let gap = base.absolute(StoredAddress::new(data_addr))? - sink.position();
+                let gap = base.absolute(ds_layouts[i].data_addr)? - sink.position();
                 sink.put_zeros(gap.to_usize()?)?;
                 emit_ds_data(
                     sink,
@@ -3500,9 +3501,8 @@ impl FileWriter {
         let mut ds_layouts: Vec<DsLayout> = Vec::new();
         for (i, d) in all_ds.iter_mut().enumerate() {
             if is_chunked[i] {
-                let data_address = cursor2 as u64;
-                let built =
-                    build_chunked(d, StoredAddress::new(data_address), chunk_sets[i].as_ref())?;
+                let data_address = StoredAddress::new(cursor2 as u64);
+                let built = build_chunked(d, data_address, chunk_sets[i].as_ref())?;
                 cursor2 += built.data.len().to_usize()?;
                 ds_layouts.push(DsLayout {
                     data: built.data,
@@ -3515,9 +3515,9 @@ impl FileWriter {
                 // A produced region leaves its provider behind for the emitter.
                 let data = d.take_contiguous();
                 let addr = if data.len() == 0 {
-                    u64::MAX
+                    UNDEF_ADDRESS
                 } else {
-                    let a = cursor2 as u64;
+                    let a = StoredAddress::new(cursor2 as u64);
                     cursor2 += data.len().to_usize()?;
                     a
                 };
@@ -3632,7 +3632,7 @@ impl FileWriter {
             length_width: LENGTH_WIDTH,
             base_address: BaseAddress::new(ub as u64),
             eof_address: eof_addr2,
-            root_group_address: root_group_addr,
+            root_group_address: root_group_addr.get(),
             group_leaf_node_k: None,
             group_internal_node_k: None,
             indexed_storage_internal_node_k: None,
@@ -3657,7 +3657,7 @@ impl FileWriter {
         }
         debug_assert_eq!(
             sink.position(),
-            ub as u64 + root_group_addr,
+            ub as u64 + root_group_addr.get(),
             "early VL collections must occupy exactly the space reserved for them"
         );
 
