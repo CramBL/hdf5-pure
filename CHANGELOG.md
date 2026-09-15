@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.46.1] - 2026-09-15
+
 ### Fixed
 
 - `DatasetBuilder::with_path_references` resolves a target whose spelling holds a `.` component against the object that path identifies, where such a target kept the address it had before the commit and was left dangling by a commit that moved the object. A target the same commit writes, or deletes, is rejected for that spelling too ([#573](https://github.com/CramBL/hdf5-pure/pull/573))
@@ -948,7 +950,8 @@ Internal robustness and tests ([#26](https://github.com/CramBL/hdf5-pure/issues/
 - The MAT deserializer flattens 1×N and N×1 values to a 1-D sequence in `deserialize_any` (matching `deserialize_seq`).
 - Numeric/complex readers preserve 1×N / N×1 shape at the value layer; any flattening happens at the serde level.
 
-[Unreleased]: https://github.com/CramBL/hdf5-pure/compare/v0.46.0...HEAD
+[Unreleased]: https://github.com/CramBL/hdf5-pure/compare/v0.46.1...HEAD
+[0.46.1]: https://github.com/CramBL/hdf5-pure/compare/v0.46.0...v0.46.1
 [0.46.0]: https://github.com/CramBL/hdf5-pure/compare/v0.45.0...v0.46.0
 [0.45.0]: https://github.com/CramBL/hdf5-pure/compare/v0.44.2...v0.45.0
 [0.44.2]: https://github.com/CramBL/hdf5-pure/compare/v0.44.1...v0.44.2
