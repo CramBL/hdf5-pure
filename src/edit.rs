@@ -9534,7 +9534,7 @@ impl WriteEngine {
         let plan = crate::file_writer::dense_attrs_plan(attrs, creation);
         let (_addr, attr_info_message) =
             self.place_relocatable(plan.blob_len(), PageType::Meta, |stored_base| {
-                let blob = plan.build(stored_base);
+                let blob = plan.build(StoredAddress::new(stored_base));
                 Ok((blob.blob, blob.attr_info_message))
             })?;
         Ok(attr_info_message)

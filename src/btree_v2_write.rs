@@ -19,6 +19,7 @@
 #[cfg(not(feature = "std"))]
 use alloc::{vec, vec::Vec};
 
+use crate::address::StoredAddress;
 use crate::btree_v2::NodeInfo;
 
 /// The node size the reference C library uses for every B-tree v2 this crate
@@ -154,14 +155,14 @@ impl BTreeV2Plan {
         self.nodes.len() as u64 * self.node_size as u64
     }
 
-    /// Serialize the tree, with its nodes starting at `nodes_address`.
+    /// Serializes the tree, with its nodes starting at `nodes_address`.
     ///
     /// `records` holds every record back to back in the tree's sort order, so it
     /// is `total_records * record_size` bytes long.
     pub(crate) fn serialize(
         &self,
         records: &[u8],
-        nodes_address: u64,
+        nodes_address: StoredAddress,
         offset_size: u8,
         length_size: u8,
     ) -> BTreeV2Image {
@@ -181,7 +182,7 @@ impl BTreeV2Plan {
             subtree_total[i] = node.records.len() as u64 + below;
         }
 
-        let address_of = |index: usize| nodes_address + index as u64 * self.node_size as u64;
+        let address_of = |index: usize| nodes_address.offset(index as u64 * self.node_size as u64);
 
         let mut nodes = Vec::with_capacity(self.nodes.len() * self.node_size as usize);
         for (i, node) in self.nodes.iter().enumerate() {
@@ -196,7 +197,7 @@ impl BTreeV2Plan {
                 let nrec_width = self.info.max_nrec_size();
                 let total_width = self.info.total_nrec_size(node.depth);
                 for &child in &node.children {
-                    write_uint(&mut nodes, address_of(child), offset_size as usize);
+                    write_uint(&mut nodes, address_of(child).get(), offset_size as usize);
                     write_uint(
                         &mut nodes,
                         self.nodes[child].records.len() as u64,
@@ -214,7 +215,7 @@ impl BTreeV2Plan {
                 "a planned node overflows its node size"
             );
             nodes.resize(start + self.node_size as usize, 0);
-            debug_assert_eq!(address_of(i) - nodes_address, start as u64);
+            debug_assert_eq!(address_of(i).get() - nodes_address.get(), start as u64);
         }
 
         let root = self.nodes.last().expect("a plan always has a root");
@@ -229,7 +230,7 @@ impl BTreeV2Plan {
         header.push(MERGE_PERCENT);
         write_uint(
             &mut header,
-            address_of(self.nodes.len() - 1),
+            address_of(self.nodes.len() - 1).get(),
             offset_size as usize,
         );
         #[expect(
@@ -376,7 +377,7 @@ mod tests {
 
         // Put the header at 0 and the nodes right after it, then parse the
         // whole thing back out of one buffer.
-        let nodes_address = header_size(OFFSET_SIZE, LENGTH_SIZE) as u64;
+        let nodes_address = StoredAddress::new(header_size(OFFSET_SIZE, LENGTH_SIZE) as u64);
         let image = plan.serialize(&records, nodes_address, OFFSET_SIZE, LENGTH_SIZE);
         let mut file = image.header.clone();
         file.extend_from_slice(&image.nodes);
@@ -473,7 +474,7 @@ mod tests {
         let plan = BTreeV2Plan::new(8, 5_000, 17, NODE_SIZE, OFFSET_SIZE).expect("plannable");
         let image = plan.serialize(
             &numbered_records(5_000, 17),
-            4_096,
+            StoredAddress::new(4_096),
             OFFSET_SIZE,
             LENGTH_SIZE,
         );
