@@ -3049,18 +3049,14 @@ impl WriteEngine {
         let Some(ext_rel) = self.superblock.superblock_extension_address else {
             return;
         };
-        if ext_rel == UNDEF {
+        let ext_rel = StoredAddress::new(ext_rel);
+        if ext_rel.is_undefined(self.superblock.offset_size) {
             return;
         }
-        // The extension address is stored relative to the base address, so it is
-        // shifted to an absolute file offset before the header is read. This is a
-        // no-op on the base-0 file every path below the userblock check sees, but
-        // that check itself needs the strategy of a *userblock* file.
-        let Ok(ext_addr) = self
-            .superblock
-            .base_address
-            .absolute(StoredAddress::new(ext_rel))
-        else {
+        // The header is read at the extension's absolute file offset. That is the
+        // same offset on the base-0 file every path below the userblock check
+        // sees, but the check itself needs the strategy of a *userblock* file.
+        let Ok(ext_addr) = self.superblock.base_address.absolute(ext_rel) else {
             return;
         };
         let Some(info) = self.extension_fsinfo(ext_addr) else {
@@ -3120,7 +3116,7 @@ impl WriteEngine {
             let page_size = info.page_size;
             let mut tagged: Vec<(FreeSection, Option<PageType>)> = Vec::new();
             for (slot, &m) in info.manager_addrs.iter().enumerate() {
-                if m == UNDEF {
+                if StoredAddress::new(m).is_undefined(os) {
                     continue;
                 }
                 let Ok(sections) = free_space_manager::read_persisted_sections_source(
@@ -3818,12 +3814,16 @@ impl WriteEngine {
     /// Costs one small object-header parse per commit on a file that has a
     /// superblock extension at all, and nothing on one that does not.
     fn shared_message_table(&self) -> Result<Option<crate::sohm::SohmTable>, Error> {
-        let rel = match self.superblock.superblock_extension_address {
-            Some(rel) if rel != UNDEF => rel,
+        let os = self.superblock.offset_size;
+        let rel = match self
+            .superblock
+            .superblock_extension_address
+            .map(StoredAddress::new)
+        {
+            Some(rel) if !rel.is_undefined(os) => rel,
             _ => return Ok(None),
         };
         let base = self.superblock.base_address;
-        let os = self.superblock.offset_size;
         let ls = self.superblock.length_size;
         // Best-effort down to here, and strict past it. A superblock extension
         // this engine cannot parse is one nothing in this crate reads a shared
@@ -3831,7 +3831,7 @@ impl WriteEngine {
         // once the extension is readable and *says* the file shares messages,
         // failing to read the table is an error, because the screen below is
         // then the difference between a refusal and a corrupted index.
-        let Ok(abs) = base.absolute(StoredAddress::new(rel)) else {
+        let Ok(abs) = base.absolute(rel) else {
             return Ok(None);
         };
         let Ok(header) = ObjectHeader::parse_from_source(
@@ -7125,15 +7125,16 @@ impl WriteEngine {
 
         // The extension address is stored relative to the base address, and every
         // reader of the extension below indexes the image, so it is shifted once
-        // here rather than at each of them.
-        let old_ext_addr = base.absolute(StoredAddress::new(
+        // here for all of them.
+        let old_ext_addr = base.absolute(
             self.superblock
                 .superblock_extension_address
-                .filter(|&a| a != UNDEF)
+                .map(StoredAddress::new)
+                .filter(|a| !a.is_undefined(os))
                 .ok_or(Error::EditUnsupported(
                     "a persisting file has no superblock extension to update",
                 ))?,
-        ))?;
+        )?;
 
         // The persist File Space Info message is fixed-size, so the rewritten
         // extension's length is independent of the addresses it will carry: size
@@ -7517,14 +7518,15 @@ impl WriteEngine {
 
         // As on the flat path: the extension address is stored relative to the base
         // address, and every reader of the extension below indexes the image.
-        let old_ext_addr = base.absolute(StoredAddress::new(
+        let old_ext_addr = base.absolute(
             self.superblock
                 .superblock_extension_address
-                .filter(|&a| a != UNDEF)
+                .map(StoredAddress::new)
+                .filter(|a| !a.is_undefined(os))
                 .ok_or(Error::EditUnsupported(
                     "a persisting file has no superblock extension to update",
                 ))?,
-        ))?;
+        )?;
 
         // The 12-slot persist message is fixed-size, so a placeholder sizes the
         // rewritten extension before its manager addresses are known — and before
@@ -8388,14 +8390,14 @@ impl WriteEngine {
                     return Err(Error::EditUnsupported("malformed contiguous data layout"));
                 }
                 let addr_off = lb + 2;
-                let data_addr =
-                    u64::from_le_bytes(region[addr_off..addr_off + 8].try_into().unwrap());
+                let data_addr = StoredAddress::new(u64::from_le_bytes(
+                    region[addr_off..addr_off + 8].try_into().unwrap(),
+                ));
                 let data_size = u64::from_le_bytes(region[lb + 10..lb + 18].try_into().unwrap());
 
                 // Same length and a defined, in-bounds data block: overwrite the
-                // bytes straight in place. No header rewrite, no relink. The stored
-                // address is base-relative; the in-place write targets the absolute
-                // file offset `data_addr + base`.
+                // bytes straight in place. No header rewrite, no relink. The
+                // in-place write targets the data block's absolute file offset.
                 //
                 // Never for a staged variable-length overwrite, which relocates
                 // instead. Its resolution *allocates* — a global heap collection,
@@ -8413,10 +8415,10 @@ impl WriteEngine {
                 // failed attempt leaves the region genuinely dead and re-offering
                 // it is sound — which is the invariant `restore_free` states.
                 if fd.vl_string_staging.is_none()
-                    && data_addr != UNDEF
+                    && !data_addr.is_undefined(OFFSET_SIZE)
                     && data_size == fd.raw.len() as u64
                 {
-                    if let Ok(start) = base.absolute(StoredAddress::new(data_addr)) {
+                    if let Ok(start) = base.absolute(data_addr) {
                         if start.checked_add(data_size).is_some_and(|e| e <= src.len()) {
                             return Ok(WritePlan::InPlace {
                                 data_addr: start,
@@ -8428,10 +8430,10 @@ impl WriteEngine {
 
                 // Length differs or the block was undefined/out of bounds: the new
                 // data goes elsewhere and the old extent (if any) is freed. The
-                // freed extent is recorded as an absolute file offset (`+ base`) to
-                // match the session free list.
-                let old_extent = if data_addr != UNDEF && data_size > 0 {
-                    Some((base.absolute(StoredAddress::new(data_addr))?, data_size))
+                // freed extent is recorded as an absolute file offset, which is the
+                // frame the session free list uses.
+                let old_extent = if !data_addr.is_undefined(OFFSET_SIZE) && data_size > 0 {
+                    Some((base.absolute(data_addr)?, data_size))
                 } else {
                     None
                 };
@@ -9082,8 +9084,9 @@ impl WriteEngine {
                     if lbody + 18 > kept.len() {
                         return Err(Error::EditUnsupported("malformed contiguous data layout"));
                     }
-                    let data_addr =
-                        u64::from_le_bytes(kept[lbody + 2..lbody + 10].try_into().unwrap());
+                    let data_addr = StoredAddress::new(u64::from_le_bytes(
+                        kept[lbody + 2..lbody + 10].try_into().unwrap(),
+                    ));
                     let data_size =
                         u64::from_le_bytes(kept[lbody + 10..lbody + 18].try_into().unwrap());
                     Ok(ObjModel::DatasetContiguous {
@@ -9196,12 +9199,11 @@ impl WriteEngine {
                 // Only reached once external storage is out of the way: it uses
                 // this same undefined address for a dataset that *does* hold
                 // data, and `read_object` refuses it by name above.
-                let data = if data_addr == UNDEF {
+                let data = if data_addr.is_undefined(OFFSET_SIZE) {
                     None
                 } else {
-                    // The stored data address is base-relative; shift it to an absolute
-                    // offset into `src` before reading the data block out.
-                    let start = base.absolute(StoredAddress::new(data_addr))?;
+                    // The data block is read at its absolute offset into `src`.
+                    let start = base.absolute(data_addr)?;
                     start
                         .checked_add(data_size)
                         .filter(|&e| e <= src.len())
@@ -10608,10 +10610,10 @@ impl WriteEngine {
         // is keyed by absolute offset, and `oh_chunk_spans`/`chunked_storage_spans`
         // both take an absolute address and return absolute spans, so the whole
         // walk works in absolute file offsets. The one shift this method must apply
-        // itself is on the *stored* (base-relative) addresses `read_object` returns
-        // for a contiguous data block and a group's child links: each is converted
-        // to an absolute offset by adding `base` (a no-op on a base-0 file) before
-        // it is bounds-checked, recorded, or descended into.
+        // itself is on the stored addresses `read_object` returns for a contiguous
+        // data block and a group's child links: each is converted to an absolute
+        // offset (a no-op on a base-0 file) before it is bounds-checked, recorded,
+        // or descended into.
         let base = self.superblock.base_address;
         let file_len = self.image().len();
         if depth >= MAX_COPY_DEPTH {
@@ -10643,11 +10645,10 @@ impl WriteEngine {
             }) => {
                 out.extend(meta_spans(spans));
                 // A defined, in-bounds contiguous data block is owned outright;
-                // an empty dataset stores the undefined address and owns none. The
-                // stored address is base-relative, so shift it to an absolute file
-                // offset before bounds-checking and recording it.
-                if data_addr != u64::MAX && data_size > 0 {
-                    if let Ok(abs) = base.absolute(StoredAddress::new(data_addr)) {
+                // an empty dataset stores the undefined address and owns none. Its
+                // absolute file offset is what this bounds-checks and records.
+                if !data_addr.is_undefined(OFFSET_SIZE) && data_size > 0 {
+                    if let Ok(abs) = base.absolute(data_addr) {
                         if abs.checked_add(data_size).is_some_and(|e| e <= file_len) {
                             // A contiguous data block is raw data.
                             out.push((abs, data_size, FreeClass::Page(PageType::Raw)));
@@ -11004,7 +11005,7 @@ enum ObjModel {
     DatasetContiguous {
         region: OhRegion,
         addr_off: usize,
-        data_addr: u64,
+        data_addr: StoredAddress,
         data_size: u64,
         dense_attrs: DenseAttrSet,
     },
