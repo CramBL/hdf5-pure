@@ -6820,10 +6820,9 @@ impl WriteEngine {
                     // in the whole-file writer), matching every reader's and the
                     // reference C library's convention for "no storage allocated".
                     let data_addr = if fd.raw.is_empty() {
-                        u64::MAX
+                        StoredAddress::new(UNDEF)
                     } else {
                         base.relative(self.alloc_or_append_typed(&fd.raw, PageType::Raw)?)?
-                            .get()
                     };
                     // Attributes this dataset keeps in a fractal heap are placed
                     // now — after the variable-length patching above, so the heap
