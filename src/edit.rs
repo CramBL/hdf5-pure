@@ -2059,8 +2059,8 @@ struct PagedPostFree {
     /// lists together empty already promoted out of it
     /// ([`PagedEdit::promote_whole_free_pages`]).
     dead: FreeList,
-    /// Already flattened: nothing in a commit adds to or draws from this one.
-    unclassified: Vec<FreeSection>,
+    /// Nothing in a commit adds to or draws from this one.
+    unclassified: FreeList,
 }
 
 impl PagedPostFree {
@@ -2089,11 +2089,8 @@ impl PagedPostFree {
     /// file — with the same refusal to release a run that gives back less than it
     /// keeps.
     fn release_trailing(&mut self, eof: u64, page_size: u64, tail_len: u64) -> u64 {
-        let mut unclassified = FreeList::new();
-        for s in &self.unclassified {
-            unclassified.free(s.addr, s.size);
-        }
-        let start = trailing_run_start([&self.meta, &self.raw, &self.dead, &unclassified], eof);
+        let start =
+            trailing_run_start([&self.meta, &self.raw, &self.dead, &self.unclassified], eof);
         let cut = align_up(start, page_size);
         if cut >= eof {
             return eof;
@@ -2106,15 +2103,12 @@ impl PagedPostFree {
         }
         let eoa = cut + keep;
         let span = eof - eoa;
+        // A section straddling the cut keeps the part that is still inside the
+        // file, which is what `take_range` leaves of it.
         self.meta.take_range(eoa, span);
         self.raw.take_range(eoa, span);
         self.dead.take_range(eoa, span);
-        // Clamped rather than dropped: a section straddling the cut keeps the part
-        // that is still inside the file.
-        for s in &mut self.unclassified {
-            s.size = s.size.min(eoa.saturating_sub(s.addr));
-        }
-        self.unclassified.retain(|s| s.size > 0);
+        self.unclassified.take_range(eoa, span);
         eoa
     }
 }
@@ -7545,7 +7539,7 @@ impl WriteEngine {
                 let plan = plan_paged_managers(
                     &free_sections(&post.meta),
                     &free_sections(&post.raw),
-                    &post.unclassified,
+                    &free_sections(&post.unclassified),
                     page_size,
                     at + ext_len,
                     os,
@@ -7646,15 +7640,11 @@ impl WriteEngine {
             pg.meta = post.meta;
             pg.raw = post.raw;
             pg.dead = post.dead;
-            // Rebuilt rather than left alone: this list is otherwise constant for
-            // the session, but a released trailing run may have cut into it, and a
-            // section naming bytes the file no longer has would be written back to
-            // the managers by the next commit.
-            let mut unclassified = FreeList::new();
-            for s in &post.unclassified {
-                unclassified.free(s.addr, s.size);
-            }
-            pg.unclassified = unclassified;
+            // This list is otherwise constant for the session, but a released
+            // trailing run may have cut into it, and a section naming bytes the
+            // file no longer has would be written back to the managers by the
+            // next commit.
+            pg.unclassified = post.unclassified;
             pg.meta_pad.clear();
             pg.raw_pad.clear();
             if !reused {
@@ -7752,9 +7742,9 @@ impl WriteEngine {
             .as_ref()
             .expect("commit_persisting_paged is only called on a paged file");
         let (mut meta, mut raw, mut dead) = (pg.meta.clone(), pg.raw.clone(), pg.dead.clone());
-        // Carried through untouched: this engine never frees into that list, and
-        // nothing it places comes out of it.
-        let unclassified = free_sections(&pg.unclassified);
+        // This engine never frees into that list, and nothing it places comes out
+        // of it.
+        let unclassified = pg.unclassified.clone();
         let mut free = |a: u64, l: u64, class: FreeClass| {
             PagedEdit::route_free(&mut meta, &mut raw, &mut dead, a, l, class);
         };
@@ -7825,7 +7815,7 @@ impl WriteEngine {
             + plan_paged_managers(
                 &free_sections(&probe.meta),
                 &free_sections(&probe.raw),
-                &probe.unclassified,
+                &free_sections(&probe.unclassified),
                 page_size,
                 0,
                 os,
@@ -7851,7 +7841,7 @@ impl WriteEngine {
             let plan = plan_paged_managers(
                 &free_sections(&post.meta),
                 &free_sections(&post.raw),
-                &post.unclassified,
+                &free_sections(&post.unclassified),
                 page_size,
                 at + ext_len,
                 os,
