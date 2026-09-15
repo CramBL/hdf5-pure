@@ -3115,9 +3115,9 @@ impl FileWriter {
                 small_raw_total > 0 && align_up(small_raw_total, page_size) != small_raw_total;
             let large_active = !large_frag_sizes.is_empty();
             let mut slots = [u64::MAX; NUM_FILE_FSM_MANAGERS];
-            let mut super_fsm: Option<(u64, u64)> = None;
-            let mut draw_fsm: Option<(u64, u64)> = None;
-            let mut large_fsm: Option<(u64, u64)> = None;
+            let mut super_fsm: Option<(StoredAddress, StoredAddress)> = None;
+            let mut draw_fsm: Option<(StoredAddress, StoredAddress)> = None;
+            let mut large_fsm: Option<(StoredAddress, StoredAddress)> = None;
             let super_block_len = fshd_len(os) + fsse_len(&[0], os);
             let draw_block_len = if draw_active {
                 fshd_len(os) + fsse_len(&[0], os)
@@ -3141,27 +3141,27 @@ impl FileWriter {
             };
             if persist_paged {
                 if super_active {
-                    let fshd_addr = meta;
+                    let fshd_addr = StoredAddress::new(meta);
                     meta += fshd_len(os);
-                    let fsse_addr = meta;
+                    let fsse_addr = StoredAddress::new(meta);
                     meta += fsse_len(&[0], os);
-                    slots[0] = fshd_addr;
+                    slots[0] = fshd_addr.get();
                     super_fsm = Some((fshd_addr, fsse_addr));
                 }
                 if draw_active {
-                    let fshd_addr = meta;
+                    let fshd_addr = StoredAddress::new(meta);
                     meta += fshd_len(os);
-                    let fsse_addr = meta;
+                    let fsse_addr = StoredAddress::new(meta);
                     meta += fsse_len(&[0], os);
-                    slots[2] = fshd_addr;
+                    slots[2] = fshd_addr.get();
                     draw_fsm = Some((fshd_addr, fsse_addr));
                 }
                 if large_active {
-                    let fshd_addr = meta;
+                    let fshd_addr = StoredAddress::new(meta);
                     meta += fshd_len(os);
-                    let fsse_addr = meta;
+                    let fsse_addr = StoredAddress::new(meta);
                     meta += fsse_len(&large_frag_sizes, os);
-                    slots[6] = fshd_addr;
+                    slots[6] = fshd_addr.get();
                     large_fsm = Some((fshd_addr, fsse_addr));
                 }
             }
@@ -3171,7 +3171,7 @@ impl FileWriter {
             // metadata page tail is the SUPER section (when active).
             let raw_start = align_up(meta_end, page_size);
             let super_section = super_fsm.map(|_| FreeSection {
-                addr: meta_end,
+                addr: StoredAddress::new(meta_end),
                 size: raw_start - meta_end,
             });
 
@@ -3220,7 +3220,7 @@ impl FileWriter {
                 let padded = align_up(small_raw_end, page_size);
                 c = padded;
                 Some(FreeSection {
-                    addr: small_raw_end,
+                    addr: StoredAddress::new(small_raw_end),
                     size: padded - small_raw_end,
                 })
             } else {
@@ -3259,7 +3259,7 @@ impl FileWriter {
                 let frag = align_up(data_end, page_size) - data_end;
                 if frag > 0 {
                     large_sections.push(FreeSection {
-                        addr: data_end,
+                        addr: StoredAddress::new(data_end),
                         size: frag,
                     });
                 }

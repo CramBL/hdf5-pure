@@ -293,7 +293,7 @@ use crate::filters::{ChunkContext, FilterScratch, compress_chunk_with, decompres
 use crate::free_space::{FreeList, trailing_run_start};
 use crate::free_space_manager::{
     self, FreeSection, FsmHeader, PageType, PagedManagerPlan, SECT_CLASS_SIMPLE, align_up,
-    file_fsm_blocks_len, free_sections, fshd_len, plan_paged_managers, serialize_file_fsm,
+    file_fsm_blocks_len, fshd_len, plan_paged_managers, serialize_file_fsm,
 };
 use crate::group_v2::resolve_group_entries_from_source;
 use crate::image::{FileImage, HandleImage, MirrorImage, WriteBuffering};
@@ -3133,7 +3133,7 @@ impl WriteEngine {
                     continue;
                 };
                 for s in sections {
-                    let ty = PagedEdit::slot_list(slot, s.addr, s.size, page_size);
+                    let ty = PagedEdit::slot_list(slot, s.addr.get(), s.size, page_size);
                     tagged.push((s, ty));
                 }
             }
@@ -3145,10 +3145,10 @@ impl WriteEngine {
             tagged.sort_unstable_by_key(|(s, _)| s.addr);
             let mut prev_end = 0u64;
             for (s, ty) in tagged {
-                let Some(end) = s.addr.checked_add(s.size) else {
+                let Some(end) = s.addr.get().checked_add(s.size) else {
                     continue;
                 };
-                if s.size == 0 || end > file_len || s.addr < prev_end {
+                if s.size == 0 || end > file_len || s.addr.get() < prev_end {
                     continue;
                 }
                 prev_end = end;
@@ -3161,11 +3161,11 @@ impl WriteEngine {
                         &mut pg.meta,
                         &mut pg.raw,
                         &mut pg.dead,
-                        s.addr,
+                        s.addr.get(),
                         s.size,
                         ty.into(),
                     ),
-                    None => pg.unclassified.free(s.addr, s.size),
+                    None => pg.unclassified.free(s.addr.get(), s.size),
                 }
             }
             // A page the seeded lists empty between them belongs to no type and
@@ -3191,14 +3191,14 @@ impl WriteEngine {
             sections.sort_unstable_by_key(|s| s.addr);
             let mut prev_end = 0u64;
             for s in sections {
-                let Some(end) = s.addr.checked_add(s.size) else {
+                let Some(end) = s.addr.get().checked_add(s.size) else {
                     continue;
                 };
-                if s.size == 0 || end > file_len || s.addr < prev_end {
+                if s.size == 0 || end > file_len || s.addr.get() < prev_end {
                     continue;
                 }
                 prev_end = end;
-                self.free.free(s.addr, s.size);
+                self.free.free(s.addr.get(), s.size);
             }
         }
 
@@ -7155,10 +7155,11 @@ impl WriteEngine {
             return Ok(());
         }
         let reused = placed_at.is_some();
+        let base = self.superblock.base_address;
         let ext_addr = placed_at.unwrap_or_else(|| self.image.len());
-        let sections = free_sections(&post);
-        let fshd_addr = ext_addr + ext_len;
-        let fsse_addr = fshd_addr + fshd_len(os);
+        let sections = self.persisted_sections(&post);
+        let fshd_addr = self.persisted_address(ext_addr + ext_len);
+        let fsse_addr = self.persisted_address(ext_addr + ext_len + fshd_len(os));
         // A reused tail sits inside the file, which ends it at the end-of-allocation
         // the layout settled on — the current end-of-file, less any run of free
         // space reaching it, which `post` no longer records and the truncation
@@ -7190,12 +7191,12 @@ impl WriteEngine {
             // assertion-enabled libhdf5 aborts on open (issue #178), and is the
             // value `H5Fget_freespace` accounts for correctly (verified in the
             // crosscheck).
-            let eoa_pre_fsm = if reused { final_eof } else { fshd_addr };
+            let eoa_pre_fsm = if reused { final_eof } else { fshd_addr.get() };
             let info = FileSpaceInfo::persistent_single_manager(
                 strategy,
                 threshold,
                 page_size,
-                fshd_addr,
+                fshd_addr.get(),
                 eoa_pre_fsm,
             );
             let ext_oh =
@@ -7220,8 +7221,8 @@ impl WriteEngine {
         let region = (ext_addr, tail_len);
         self.write_tail_block(region, ext_addr, &ext_oh)?;
         if let Some((fshd, fsse)) = fsm_blocks {
-            self.write_tail_block(region, fshd_addr, &fshd)?;
-            self.write_tail_block(region, fsse_addr, &fsse)?;
+            self.write_tail_block(region, base.absolute(fshd_addr)?, &fshd)?;
+            self.write_tail_block(region, base.absolute(fsse_addr)?, &fsse)?;
         }
         // Exactly the bytes written, contiguous from the extension, which is what
         // the next commit supersedes.
@@ -7268,6 +7269,38 @@ impl WriteEngine {
         // it grows past them again.
         self.fsm_len = self.image.len();
         Ok(())
+    }
+
+    /// The free regions of `free` as the sections a free-space manager records.
+    fn persisted_sections(&self, free: &FreeList) -> Vec<FreeSection> {
+        free.sections()
+            .into_iter()
+            .map(|(addr, size)| FreeSection {
+                addr: self.persisted_address(addr),
+                size,
+            })
+            .collect()
+    }
+
+    /// The address a persisting commit records for the image position `at`.
+    ///
+    /// The free lists hold positions in this session's image, and a manager block
+    /// records the addresses the file stores. The two are the same number here,
+    /// since [`load_persisted_free_space`](Self::load_persisted_free_space) arms
+    /// persistence for a file whose image begins at byte zero alone, so this
+    /// changes the frame and not the value.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the file has a userblock, where the two frames differ and a
+    /// manager block would record every free region a userblock's length below
+    /// where it lies.
+    fn persisted_address(&self, at: u64) -> StoredAddress {
+        assert!(
+            self.superblock.base_address.is_zero(),
+            "a persisting commit requires a file whose image begins at byte zero"
+        );
+        StoredAddress::new(at)
     }
 
     /// The free space a flat persisting commit is about to record: the session's
@@ -7388,7 +7421,7 @@ impl WriteEngine {
         // on where it sits. It is also the answer for a tail that ends up appended,
         // since every round hands its reservation back before this returns.
         let probe = self.flat_post_free(to_free, old_blocks);
-        let appended_len = ext_len + file_fsm_blocks_len(&free_sections(&probe), os);
+        let appended_len = ext_len + file_fsm_blocks_len(&self.persisted_sections(&probe), os);
         let mut proposed = appended_len;
 
         for _ in 0..ROUNDS {
@@ -7406,7 +7439,7 @@ impl WriteEngine {
             // (issue #418). The reservation was taken before this list was built,
             // so the run can only begin at or above the tail's own end.
             let eoa = release_trailing_run(&mut post, eof, proposed);
-            let len = ext_len + file_fsm_blocks_len(&free_sections(&post), os);
+            let len = ext_len + file_fsm_blocks_len(&self.persisted_sections(&post), os);
             if len <= proposed {
                 debug_assert!(
                     at + proposed <= eoa,
@@ -7470,6 +7503,8 @@ impl WriteEngine {
                 ps.old_blocks.clone(),
             )
         };
+
+        let base = self.superblock.base_address;
 
         // Page-align the file before anything else, so the rewritten extension and
         // the manager blocks begin on a page boundary and stay in metadata pages.
@@ -7537,14 +7572,14 @@ impl WriteEngine {
                 let at = self.image.len();
                 let post = self.paged_post_free(&to_free, &old_blocks);
                 let plan = plan_paged_managers(
-                    &free_sections(&post.meta),
-                    &free_sections(&post.raw),
-                    &free_sections(&post.unclassified),
+                    &self.persisted_sections(&post.meta),
+                    &self.persisted_sections(&post.raw),
+                    &self.persisted_sections(&post.unclassified),
                     page_size,
-                    at + ext_len,
+                    self.persisted_address(at + ext_len),
                     os,
                 );
-                let blocks_len = plan.end_of_managers.max(at + ext_len) - at;
+                let blocks_len = plan.end_of_managers.get().max(at + ext_len) - at;
                 (post, plan, at, blocks_len, at)
             }
         };
@@ -7570,7 +7605,11 @@ impl WriteEngine {
             // Paged convention (matching the from-scratch writer): the managers are
             // ordinary metadata below a page-aligned end-of-allocation.
             let info = FileSpaceInfo::persistent_managers(
-                strategy, threshold, page_size, plan.slots, final_eof,
+                strategy,
+                threshold,
+                page_size,
+                plan.slots.map(StoredAddress::get),
+                final_eof,
             );
             build_v2_object_header(&self.rewrite_extension_region(old_ext_rel, &info)?)?
         };
@@ -7589,8 +7628,8 @@ impl WriteEngine {
         for b in &plan.blocks {
             let (fshd, fsse) =
                 serialize_file_fsm(&b.sections, b.fshd_addr, b.fsse_addr, os, b.class);
-            self.write_tail_block(region, b.fshd_addr, &fshd)?;
-            self.write_tail_block(region, b.fsse_addr, &fsse)?;
+            self.write_tail_block(region, base.absolute(b.fshd_addr)?, &fshd)?;
+            self.write_tail_block(region, base.absolute(b.fsse_addr)?, &fsse)?;
         }
         // An appended tail ends mid-page; pad it out, so the end-of-allocation stays
         // a whole number of pages. A reused tail is already inside the file, and
@@ -7813,14 +7852,15 @@ impl WriteEngine {
         let probe = self.paged_post_free(to_free, old_blocks);
         let mut proposed = ext_len
             + plan_paged_managers(
-                &free_sections(&probe.meta),
-                &free_sections(&probe.raw),
-                &free_sections(&probe.unclassified),
+                &self.persisted_sections(&probe.meta),
+                &self.persisted_sections(&probe.raw),
+                &self.persisted_sections(&probe.unclassified),
                 page_size,
-                0,
+                StoredAddress::new(0),
                 os,
             )
-            .end_of_managers;
+            .end_of_managers
+            .get();
 
         for _ in 0..ROUNDS {
             let pg = self
@@ -7839,16 +7879,16 @@ impl WriteEngine {
             // the extension. Shared with the bounded backend so both lay out
             // identically.
             let plan = plan_paged_managers(
-                &free_sections(&post.meta),
-                &free_sections(&post.raw),
-                &free_sections(&post.unclassified),
+                &self.persisted_sections(&post.meta),
+                &self.persisted_sections(&post.raw),
+                &self.persisted_sections(&post.unclassified),
                 page_size,
-                at + ext_len,
+                self.persisted_address(at + ext_len),
                 os,
             );
             // An empty plan writes no blocks at all, leaving the tail the extension
             // alone; `end_of_managers` is then its own start.
-            let blocks_len = plan.end_of_managers.max(at + ext_len) - at;
+            let blocks_len = plan.end_of_managers.get().max(at + ext_len) - at;
             if blocks_len == proposed {
                 debug_assert!(
                     at + blocks_len <= eoa,
@@ -16341,9 +16381,10 @@ mod tests {
             8,
         )
         .unwrap();
-        let fragments: Vec<&FreeSection> = sections
+        let fragments: Vec<(u64, u64)> = sections
             .iter()
-            .filter(|s| s.addr % PAGE != 0 || s.size % PAGE != 0)
+            .map(|s| (s.addr.get(), s.size))
+            .filter(|&(addr, size)| addr % PAGE != 0 || size % PAGE != 0)
             .collect();
         assert!(
             !fragments.is_empty(),
@@ -16357,20 +16398,16 @@ mod tests {
         let pg = s.paged.as_ref().expect("a paged file installs paged state");
         let unclassified = pg.unclassified.sections();
         let reusable = pg.reusable_sections();
-        for f in &fragments {
+        for &(addr, size) in &fragments {
             assert!(
-                unclassified.contains(&(f.addr, f.size)),
-                "fragment ({}, {}) must be recorded as unclassified, not lost",
-                f.addr,
-                f.size
+                unclassified.contains(&(addr, size)),
+                "fragment ({addr}, {size}) must be recorded as unclassified, not lost"
             );
             assert!(
                 !reusable
                     .iter()
-                    .any(|&(a, l)| a < f.addr + f.size && f.addr < a + l),
-                "fragment ({}, {}) must not be offered to any allocation: {reusable:?}",
-                f.addr,
-                f.size
+                    .any(|&(a, l)| a < addr + size && addr < a + l),
+                "fragment ({addr}, {size}) must not be offered to any allocation: {reusable:?}"
             );
         }
     }
@@ -16722,7 +16759,7 @@ mod tests {
             // consumed outright drops a section from the managers, so this comes out
             // shorter than the extent for some hole sizes and the difference is what
             // the extent has to cover.
-            let written = EXT_LEN + file_fsm_blocks_len(&free_sections(&post), os);
+            let written = EXT_LEN + file_fsm_blocks_len(&s.persisted_sections(&post), os);
             match at {
                 Some(at) => {
                     placed += 1;
