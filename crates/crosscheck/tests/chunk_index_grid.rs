@@ -13,6 +13,7 @@
 //! or `maxshape == shape`, and growing the *first* dimension changes no
 //! multiplier, so three of the four obvious fixtures pass over the bug.
 
+use hdf5::dataset::AllocTime;
 use hdf5::file::LibraryVersion;
 use hdf5_pure::{ChunkIndex, File, FileBuilder, MaxExtent};
 use tempfile::tempdir;
@@ -200,6 +201,34 @@ fn c_write(path: &std::path::Path, shape: &[u64], chunks: &[u64], maxshape: &[Ma
     file.close().unwrap();
 }
 
+fn c_write_early_allocated(
+    path: &std::path::Path,
+    shape: &[u64],
+    chunks: &[u64],
+    maxshape: &[MaxExtent],
+) {
+    let file = hdf5::FileBuilder::new()
+        .with_fapl(|fp| fp.libver_bounds(LibraryVersion::V110, LibraryVersion::latest()))
+        .create(path)
+        .unwrap();
+    let ds = file
+        .new_dataset::<u32>()
+        .alloc_time(Some(AllocTime::Early))
+        .chunk(chunks.iter().map(|&d| d as usize).collect::<Vec<_>>())
+        .shape(
+            shape
+                .iter()
+                .zip(maxshape)
+                .map(|(&s, &m)| hdf5::Extent::new(s as usize, m.size().map(|m| m as usize)))
+                .collect::<Vec<_>>(),
+        )
+        .create("d")
+        .unwrap();
+    ds.write_raw(&values(shape)).unwrap();
+    drop(ds);
+    file.close().unwrap();
+}
+
 /// Whether the reference library will create this geometry at all.
 ///
 /// It refuses a chunk larger than the dataset's current extent ("Chunk
@@ -266,6 +295,42 @@ fn pure_reads_every_maxshape_the_c_library_writes() {
     // over an empty sweep, so the number it drops is asserted rather than
     // assumed.
     assert_eq!(skipped, 7, "only the one-chunk families are skipped");
+}
+
+#[test]
+fn pure_reads_an_implicit_index_numbered_over_the_maximum_grid() {
+    let dir = tempdir().unwrap();
+    let src = dir.path().join("implicit.h5");
+    let dst = dir.path().join("repacked.h5");
+    let shape = [4u64, 4];
+    let maxshape = [MaxExtent::Fixed(4), MaxExtent::Fixed(8)];
+    let expected = values(&shape);
+    c_write_early_allocated(&src, &shape, &[2, 2], &maxshape);
+
+    assert_eq!(
+        File::open(&src)
+            .unwrap()
+            .dataset("d")
+            .unwrap()
+            .chunk_index()
+            .unwrap(),
+        Some(ChunkIndex::Implicit)
+    );
+    assert_eq!(pure_read(&src), expected, "buffered reader");
+    assert_eq!(
+        hdf5_pure::File::open_streaming(&src)
+            .unwrap()
+            .dataset("d")
+            .unwrap()
+            .read_u32()
+            .unwrap(),
+        expected,
+        "streaming reader"
+    );
+
+    hdf5_pure::repack(&src, &dst, &hdf5_pure::RepackOptions::new()).unwrap();
+    assert_eq!(pure_read(&dst), expected, "pure read of the repacked file");
+    assert_eq!(c_read(&dst), expected, "C read of the repacked file");
 }
 
 /// The index *kind* has to match the reference library's choice too, and it is

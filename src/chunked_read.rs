@@ -60,18 +60,61 @@ fn decompress_all_chunks_from_source<S: Source + ?Sized>(
 
 /// Information about a single chunk in a chunked dataset.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ChunkInfo {
+pub(crate) struct ChunkInfo {
     /// Size of chunk data in the file (after compression).
-    pub chunk_size: u32,
+    pub(crate) chunk_size: StoredChunkSize,
     /// Bitmask of filters that were NOT applied (0 = all applied).
-    pub filter_mask: u32,
+    pub(crate) filter_mask: u32,
     /// N-dimensional offset of this chunk in dataset space.
-    pub offsets: Vec<u64>,
+    pub(crate) offsets: Vec<u64>,
     /// Address of the chunk data, as the chunk index stores it.
     ///
     /// A caller that reads the bytes from a source that is not framed at the base address adds
     /// the base first.
-    pub address: StoredAddress,
+    pub(crate) address: StoredAddress,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StoredChunkSize {
+    /// A version 1 B-tree stores the chunk size in a four-byte field.
+    BTreeV1(u32),
+    /// A version 4 chunk index stores the chunk size in a variable-width field.
+    V4(u64),
+}
+
+impl StoredChunkSize {
+    /// Wraps the stored chunk size from a version 1 B-tree record.
+    pub(crate) const fn btree_v1(size: u32) -> Self {
+        Self::BTreeV1(size)
+    }
+
+    /// Wraps the stored chunk size from a version 4 chunk index.
+    pub(crate) const fn v4(size: u64) -> Self {
+        Self::V4(size)
+    }
+
+    /// Returns the stored chunk size as a `u64`.
+    pub(crate) const fn get(self) -> u64 {
+        match self {
+            Self::BTreeV1(size) => size as u64,
+            Self::V4(size) => size,
+        }
+    }
+
+    /// Returns `true` if the stored chunk size is zero.
+    pub(crate) const fn is_zero(self) -> bool {
+        self.get() == 0
+    }
+
+    /// Converts the stored chunk size to `usize`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::ValueTooLargeForPlatform`] if the size is larger
+    /// than this platform can address.
+    pub(crate) fn to_usize(self) -> Result<usize, FormatError> {
+        self.get().to_usize()
+    }
 }
 
 /// The size in bytes of a key in a version 1 B-tree of type 1 (raw data chunks):
@@ -190,7 +233,7 @@ fn collect_chunk_info_inner(
             pos += os;
 
             chunks.push(ChunkInfo {
-                chunk_size,
+                chunk_size: StoredChunkSize::btree_v1(chunk_size),
                 filter_mask,
                 offsets,
                 address,
@@ -419,7 +462,7 @@ fn collect_chunk_info_from_source_inner<S: Source + ?Sized>(
             let address = StoredAddress::new(read_offset(&body, pos, offset_size)?);
             pos += os;
             chunks.push(ChunkInfo {
-                chunk_size,
+                chunk_size: StoredChunkSize::btree_v1(chunk_size),
                 filter_mask,
                 offsets,
                 address,
@@ -452,63 +495,49 @@ fn collect_chunk_info_from_source_inner<S: Source + ?Sized>(
 ///
 /// Chunks are stored contiguously starting at `data_address`. No stored index;
 /// addresses are computed from the chunk position.
-pub fn generate_implicit_chunks(
+fn generate_implicit_chunks(
     data_address: StoredAddress,
-    dataset_dims: &[u64],
-    chunk_dimensions: &[u32],
-    element_size: u32,
-) -> Vec<ChunkInfo> {
-    let rank = chunk_dimensions.len();
-    let chunk_byte_size: u64 =
-        chunk_dimensions.iter().map(|&d| d as u64).product::<u64>() * element_size as u64;
+    grid: &ChunkGrid,
+    element_size: u64,
+) -> Result<Vec<ChunkInfo>, FormatError> {
+    let chunk_byte_size = grid.chunk_byte_size(element_size)?;
 
-    let mut num_chunks_per_dim = Vec::with_capacity(rank);
-    for d in 0..rank {
-        let ds = dataset_dims[d];
-        let ch = chunk_dimensions[d] as u64;
-        num_chunks_per_dim.push(ds.div_ceil(ch));
-    }
-    let total_chunks: u64 = num_chunks_per_dim.iter().product();
-
-    #[expect(
-        clippy::cast_possible_truncation,
-        reason = "with_capacity hint only; total_chunks is bounded by the dataset's chunk \
-                  grid and a truncated hint merely under-reserves (the Vec still grows)"
-    )]
-    let mut chunks = Vec::with_capacity(total_chunks as usize);
-    for linear_idx in 0..total_chunks {
-        let mut offsets = vec![0u64; rank];
-        let mut remaining = linear_idx;
-        for d in (0..rank).rev() {
-            let nchunks = num_chunks_per_dim[d];
-            let chunk_idx = remaining % nchunks;
-            remaining /= nchunks;
-            offsets[d] = chunk_idx * chunk_dimensions[d] as u64;
-        }
-
-        #[expect(
-            clippy::cast_possible_truncation,
-            reason = "chunk byte size is stored in the 32-bit ChunkInfo.chunk_size field \
-                      (HDF5 caps a chunk at 4 GiB)"
-        )]
-        chunks.push(ChunkInfo {
-            chunk_size: chunk_byte_size as u32,
-            filter_mask: 0,
-            offsets,
-            address: StoredAddress::new(data_address.get() + linear_idx * chunk_byte_size),
-        });
-    }
-
-    chunks
+    grid.slots_in_extent()?
+        .into_iter()
+        .map(|entry| {
+            let byte_offset = entry.slot.checked_mul(chunk_byte_size).ok_or_else(|| {
+                FormatError::ChunkedReadError(
+                    "implicit chunk slot resolves past the addressable data block".into(),
+                )
+            })?;
+            let address = data_address.get().checked_add(byte_offset).ok_or_else(|| {
+                FormatError::ChunkedReadError(
+                    "implicit chunk address resolves past the addressable file".into(),
+                )
+            })?;
+            Ok(ChunkInfo {
+                chunk_size: StoredChunkSize::v4(chunk_byte_size),
+                filter_mask: 0,
+                offsets: entry.offsets,
+                address: StoredAddress::new(address),
+            })
+        })
+        .collect()
 }
 
 /// The per-dimension geometry the chunked readers share: the data rank (the chunk
 /// layout's dimensions minus the trailing element-size dim), the chunk dimensions,
-/// and the dataset dimensions, all as `usize`. `chunk_dimensions` are `u32` and
-/// widen; the dataspace dims are `u64` and narrow with a checked conversion. Errors
-/// when the layout carries no dimensions or its rank disagrees with the dataspace.
+/// and the dataset dimensions, all as `usize`. `chunk_dimensions` and the
+/// dataspace dims narrow with checked conversions.
+///
+/// # Errors
+///
+/// Returns [`FormatError::ChunkedReadError`] if the layout carries no dimensions
+/// or its rank disagrees with the dataspace. Returns
+/// [`FormatError::ValueTooLargeForPlatform`] if a dimension does not fit in
+/// `usize`.
 fn chunked_dims(
-    chunk_dimensions: &[u32],
+    chunk_dimensions: &[u64],
     dataspace: &Dataspace,
 ) -> Result<(usize, Vec<usize>, Vec<usize>), FormatError> {
     let rank = chunk_dimensions
@@ -517,8 +546,8 @@ fn chunked_dims(
         .ok_or_else(|| FormatError::ChunkedReadError("chunked layout has no dimensions".into()))?;
     let chunk_dims: Vec<usize> = chunk_dimensions[..rank]
         .iter()
-        .map(|&d| d as usize)
-        .collect();
+        .map(|&d| d.to_usize())
+        .collect::<Result<_, _>>()?;
     let ds_dims: Vec<usize> = dataspace
         .dimensions
         .iter()
@@ -535,14 +564,7 @@ fn chunked_dims(
     Ok((rank, chunk_dims, ds_dims))
 }
 
-/// The largest logical (unfiltered) byte size a single chunk may declare.
-///
-/// HDF5 stores a chunk's on-disk size in a 32-bit field, so a chunk cannot
-/// occupy more than `u32::MAX` bytes on disk. An unfiltered chunk's logical size
-/// equals its on-disk size, and the reader also narrows the computed chunk byte
-/// size to `u32` on the single-chunk and implicit index paths, so a declared
-/// chunk larger than this is not representable in the format regardless.
-const MAX_CHUNK_LOGICAL_BYTES: u64 = u32::MAX as u64;
+const MAX_CHUNK_ALLOCATION_BYTES: u64 = u32::MAX as u64;
 
 /// Reject a chunk geometry whose logical byte size — `product(chunk_dims) *
 /// elem_size` — is impossible for the format, before it is used to size a
@@ -565,9 +587,9 @@ fn ensure_chunk_bytes_representable(
         .iter()
         .try_fold(elem_size.get() as u64, |acc, &d| acc.checked_mul(d as u64));
     match logical {
-        Some(bytes) if bytes <= MAX_CHUNK_LOGICAL_BYTES => Ok(()),
+        Some(bytes) if bytes <= MAX_CHUNK_ALLOCATION_BYTES => Ok(()),
         _ => Err(FormatError::InvalidChunkGeometry(
-            "chunk logical byte size exceeds the 4 GiB format limit",
+            "chunk logical byte size exceeds the reader's single-chunk allocation limit",
         )),
     }
 }
@@ -616,7 +638,7 @@ pub fn read_chunked_data_from_source<S: Source + ?Sized>(
         *index,
         chunk_dimensions,
         dataspace,
-        elem_size,
+        elem_size.get() as u64,
         offset_size,
         length_size,
     )?;
@@ -690,7 +712,7 @@ fn plan_chunk_spans(
                 let coord = &c.offsets[..rank.min(c.offsets.len())];
                 !cached.iter().any(|held| held.as_slice() == coord)
             })
-            .map(|c| (c.address, c.chunk_size)),
+            .map(|c| (c.address, c.chunk_size.get())),
     )
 }
 
@@ -844,7 +866,7 @@ pub(crate) fn read_chunked_rows_from_source<S: Source + ?Sized>(
             *index,
             chunk_dimensions,
             dataspace,
-            elem_size,
+            elem_size.get() as u64,
             offset_size,
             length_size,
         )?;
@@ -934,7 +956,7 @@ pub(crate) fn read_chunked_rows_from_source<S: Source + ?Sized>(
             continue;
         }
 
-        let len = chunk.chunk_size as usize;
+        let len = chunk.chunk_size.to_usize()?;
         let stored = match spans.as_mut() {
             Some(sp) => Cow::Borrowed(sp.chunk_bytes(source, chunk.address, len)?),
             None => Cow::Owned(source.read_exact_at(chunk.address.get(), len)?),
@@ -1036,7 +1058,7 @@ pub fn read_chunked_data_cached_from_source<S: Source + ?Sized>(
             *index,
             chunk_dimensions,
             dataspace,
-            elem_size,
+            elem_size.get() as u64,
             offset_size,
             length_size,
         )?;
@@ -1168,12 +1190,11 @@ fn spatial_coord(chunk_info: &ChunkInfo, rank: usize) -> &[u64] {
 /// [`crate::chunk_grid`] for the rule itself.
 fn index_grid(
     dataspace: &Dataspace,
-    spatial_chunk_dims: &[u32],
+    spatial_chunk_dims: &[u64],
     order: GridOrder,
 ) -> Result<ChunkGrid, FormatError> {
-    let chunk_dims: Vec<u64> = spatial_chunk_dims.iter().map(|&d| u64::from(d)).collect();
     ChunkGrid::new(
-        &chunk_dims,
+        spatial_chunk_dims,
         &dataspace.dimensions,
         dataspace.max_dimensions.as_deref(),
         order,
@@ -1194,9 +1215,9 @@ fn index_grid(
 pub(crate) fn collect_chunks_for_layout_from_source<S: Source + ?Sized>(
     source: &S,
     index: ChunkIndexLayout,
-    chunk_dimensions: &[u32],
+    chunk_dimensions: &[u64],
     dataspace: &Dataspace,
-    elem_size: NonZeroUsize,
+    elem_size: u64,
     offset_size: u8,
     length_size: u8,
 ) -> Result<Vec<ChunkInfo>, FormatError> {
@@ -1215,20 +1236,22 @@ pub(crate) fn collect_chunks_for_layout_from_source<S: Source + ?Sized>(
             collect_chunk_info_from_source(source, addr, ndims, offset_size, length_size)
         }
         ChunkIndexLayout::SingleChunk { filtered, .. } => {
-            let chunk_byte_size: usize = chunk_dimensions[..rank]
-                .iter()
-                .map(|&d| d as usize)
-                .product::<usize>()
-                * elem_size.get();
+            let chunk_byte_size: u64 =
+                chunk_dimensions[..rank]
+                    .iter()
+                    .try_fold(elem_size, |acc, dim| {
+                        acc.checked_mul(*dim).ok_or_else(|| {
+                            FormatError::ChunkedReadError(
+                                "chunk logical byte size exceeds the addressable range".into(),
+                            )
+                        })
+                    })?;
             let (chunk_size, filter_mask) = match filtered {
-                Some(filtered) => (
-                    filtered.filtered_size.narrow::<u32>()?,
-                    filtered.filter_mask,
-                ),
-                None => (chunk_byte_size.narrow::<u32>()?, 0),
+                Some(filtered) => (filtered.filtered_size, filtered.filter_mask),
+                None => (chunk_byte_size, 0),
             };
             Ok(vec![ChunkInfo {
-                chunk_size,
+                chunk_size: StoredChunkSize::v4(chunk_size),
                 filter_mask,
                 offsets: vec![0u64; rank],
                 address: addr,
@@ -1236,10 +1259,9 @@ pub(crate) fn collect_chunks_for_layout_from_source<S: Source + ?Sized>(
         }
         ChunkIndexLayout::Implicit { .. } => Ok(generate_implicit_chunks(
             addr,
-            &dataspace.dimensions,
-            &spatial_dims(),
-            elem_size.get().narrow::<u32>()?,
-        )),
+            &index_grid(dataspace, &spatial_dims(), GridOrder::RowMajor)?,
+            elem_size,
+        )?),
         ChunkIndexLayout::FixedArray { .. } => {
             let spatial_chunk_dims = spatial_dims();
             let header =
@@ -1249,7 +1271,7 @@ pub(crate) fn collect_chunks_for_layout_from_source<S: Source + ?Sized>(
                 &header,
                 &index_grid(dataspace, &spatial_chunk_dims, GridOrder::RowMajor)?,
                 &spatial_chunk_dims,
-                elem_size.get().narrow::<u32>()?,
+                elem_size,
                 offset_size,
                 length_size,
             )
@@ -1263,7 +1285,7 @@ pub(crate) fn collect_chunks_for_layout_from_source<S: Source + ?Sized>(
                 &header,
                 &index_grid(dataspace, &spatial_chunk_dims, GridOrder::UnlimitedFirst)?,
                 &spatial_chunk_dims,
-                elem_size.get().narrow::<u32>()?,
+                elem_size,
                 offset_size,
                 length_size,
             )
@@ -1307,9 +1329,12 @@ pub(crate) fn enumerate_chunks_from_source<S: Source + ?Sized>(
         .len()
         .checked_sub(1)
         .ok_or_else(|| FormatError::ChunkedReadError("chunked layout has no dimensions".into()))?;
-    let elem_size = NonZeroUsize::new(chunk_dimensions[rank] as usize).ok_or_else(|| {
-        FormatError::ChunkedReadError("chunked layout has a zero element size".into())
-    })?;
+    let elem_size = chunk_dimensions[rank];
+    if elem_size == 0 {
+        return Err(FormatError::ChunkedReadError(
+            "chunked layout has a zero element size".into(),
+        ));
+    }
     collect_chunks_for_layout_from_source(
         source,
         *index,
@@ -1441,9 +1466,12 @@ pub(crate) fn collect_chunked_storage_spans<S: Source + ?Sized>(
         .len()
         .checked_sub(1)
         .ok_or_else(|| FormatError::ChunkedReadError("chunked layout has no dimensions".into()))?;
-    let elem_size = NonZeroUsize::new(chunk_dimensions[rank] as usize).ok_or_else(|| {
-        FormatError::ChunkedReadError("chunked layout has a zero element size".into())
-    })?;
+    let elem_size = chunk_dimensions[rank];
+    if elem_size == 0 {
+        return Err(FormatError::ChunkedReadError(
+            "chunked layout has a zero element size".into(),
+        ));
+    }
 
     let mut data: Vec<(u64, u64)> = Vec::new();
 
@@ -1457,8 +1485,8 @@ pub(crate) fn collect_chunked_storage_spans<S: Source + ?Sized>(
         offset_size,
         length_size,
     )? {
-        if ci.chunk_size != 0 {
-            data.push((ci.address.get(), ci.chunk_size as u64));
+        if !ci.chunk_size.is_zero() {
+            data.push((ci.address.get(), ci.chunk_size.get()));
         }
     }
 
@@ -1674,16 +1702,22 @@ pub fn read_chunked_data_cached(
                 collect_chunk_info(file_data, addr, ndims, offset_size, length_size)?
             }
             ChunkIndexLayout::SingleChunk { filtered, .. } => {
-                let chunk_byte_size: usize = chunk_dims.iter().product::<usize>() * elem_size.get();
+                let chunk_byte_size: u64 = chunk_dimensions[..rank].iter().try_fold(
+                    u64::from(elem_width.get()),
+                    |acc, dim| {
+                        acc.checked_mul(*dim).ok_or_else(|| {
+                            FormatError::ChunkedReadError(
+                                "chunk logical byte size exceeds the addressable range".into(),
+                            )
+                        })
+                    },
+                )?;
                 let (chunk_size, filter_mask) = match filtered {
-                    Some(filtered) => (
-                        filtered.filtered_size.narrow::<u32>()?,
-                        filtered.filter_mask,
-                    ),
-                    None => (chunk_byte_size.narrow::<u32>()?, 0),
+                    Some(filtered) => (filtered.filtered_size, filtered.filter_mask),
+                    None => (chunk_byte_size, 0),
                 };
                 vec![ChunkInfo {
-                    chunk_size,
+                    chunk_size: StoredChunkSize::v4(chunk_size),
                     filter_mask,
                     offsets: vec![0u64; rank],
                     address: addr,
@@ -1691,10 +1725,9 @@ pub fn read_chunked_data_cached(
             }
             ChunkIndexLayout::Implicit { .. } => generate_implicit_chunks(
                 addr,
-                &dataspace.dimensions,
-                &spatial_dims(),
-                elem_width.get(),
-            ),
+                &index_grid(dataspace, &spatial_dims(), GridOrder::RowMajor)?,
+                u64::from(elem_width.get()),
+            )?,
             ChunkIndexLayout::FixedArray { .. } => {
                 let spatial_chunk_dims = spatial_dims();
                 let header = FixedArrayHeader::parse(
@@ -1708,7 +1741,7 @@ pub fn read_chunked_data_cached(
                     &header,
                     &index_grid(dataspace, &spatial_chunk_dims, GridOrder::RowMajor)?,
                     &spatial_chunk_dims,
-                    elem_width.get(),
+                    u64::from(elem_width.get()),
                     offset_size,
                     length_size,
                 )?
@@ -1726,7 +1759,7 @@ pub fn read_chunked_data_cached(
                     &header,
                     &index_grid(dataspace, &spatial_chunk_dims, GridOrder::UnlimitedFirst)?,
                     &spatial_chunk_dims,
-                    elem_width.get(),
+                    u64::from(elem_width.get()),
                     offset_size,
                     length_size,
                 )?
@@ -1799,7 +1832,7 @@ pub fn read_chunked_data_cached(
         }
 
         // Cache miss: read the chunk's bytes from the file.
-        let r = slice_range(chunk_info.address.get(), u64::from(chunk_info.chunk_size))?;
+        let r = slice_range(chunk_info.address.get(), chunk_info.chunk_size.get())?;
         if r.end > file_data.len() {
             return Err(FormatError::UnexpectedEof {
                 expected: r.end,
@@ -1966,8 +1999,11 @@ fn copy_chunk_to_output(
 
 #[cfg(test)]
 mod tests {
+    use rstest::rstest;
+
     use super::*;
     use crate::convert::nz;
+    use crate::dataspace::MaxExtent;
 
     #[test]
     fn chunk_bytes_within_limit_are_accepted() {
@@ -2016,7 +2052,7 @@ mod tests {
                 file_data[at..at + 8].copy_from_slice(&v.to_le_bytes());
             }
             chunk_infos.push(ChunkInfo {
-                chunk_size: (chunk_elems * elem) as u32,
+                chunk_size: StoredChunkSize::btree_v1((chunk_elems * elem) as u32),
                 filter_mask: 0,
                 offsets: vec![start_elem, 0],
                 address: StoredAddress::new(data_offset as u64),
@@ -2029,7 +2065,7 @@ mod tests {
         file_data[btree_addr..btree_addr + btree.len()].copy_from_slice(&btree);
 
         let layout = DataLayout::Chunked {
-            chunk_dimensions: vec![chunk_elems as u32, elem as u32],
+            chunk_dimensions: vec![chunk_elems as u64, elem as u64],
             index: ChunkIndexLayout::BTreeV1 {
                 address: Some(StoredAddress::new(btree_addr as u64)),
             },
@@ -2171,7 +2207,10 @@ mod tests {
         // Entries: key[i], child[i] pairs, then final key
         for chunk in chunks {
             // Key: chunk_size(4) + filter_mask(4) + ndims offsets
-            buf.extend_from_slice(&chunk.chunk_size.to_le_bytes());
+            let StoredChunkSize::BTreeV1(chunk_size) = chunk.chunk_size else {
+                panic!("B-tree fixture chunk sizes must use the B-tree v1 width");
+            };
+            buf.extend_from_slice(&chunk_size.to_le_bytes());
             buf.extend_from_slice(&chunk.filter_mask.to_le_bytes());
             for d in 0..ndims {
                 let off = if d < chunk.offsets.len() {
@@ -2204,13 +2243,13 @@ mod tests {
 
         let chunks = vec![
             ChunkInfo {
-                chunk_size: 80,
+                chunk_size: StoredChunkSize::btree_v1(80),
                 filter_mask: 0,
                 offsets: vec![0, 0],
                 address: StoredAddress::new(0x1000),
             },
             ChunkInfo {
-                chunk_size: 80,
+                chunk_size: StoredChunkSize::btree_v1(80),
                 filter_mask: 0,
                 offsets: vec![10, 0],
                 address: StoredAddress::new(0x2000),
@@ -2225,7 +2264,7 @@ mod tests {
         assert_eq!(result.len(), 2);
         assert_eq!(result[0].address, StoredAddress::new(0x1000));
         assert_eq!(result[0].offsets, vec![0, 0]);
-        assert_eq!(result[0].chunk_size, 80);
+        assert_eq!(result[0].chunk_size, StoredChunkSize::btree_v1(80));
         assert_eq!(result[1].address, StoredAddress::new(0x2000));
         assert_eq!(result[1].offsets, vec![10, 0]);
     }
@@ -2275,13 +2314,13 @@ mod tests {
         let os: u8 = 8;
         let chunks = vec![
             ChunkInfo {
-                chunk_size: 80,
+                chunk_size: StoredChunkSize::btree_v1(80),
                 filter_mask: 0,
                 offsets: vec![0, 0],
                 address: StoredAddress::new(0x1000),
             },
             ChunkInfo {
-                chunk_size: 80,
+                chunk_size: StoredChunkSize::btree_v1(80),
                 filter_mask: 0,
                 offsets: vec![10, 0],
                 address: StoredAddress::new(0x2000),
@@ -2309,7 +2348,7 @@ mod tests {
         let ndims = 2;
         let os: u8 = 8;
         let leaf_chunks = vec![ChunkInfo {
-            chunk_size: 40,
+            chunk_size: StoredChunkSize::btree_v1(40),
             filter_mask: 0,
             offsets: vec![0, 0],
             address: StoredAddress::new(0x100),
@@ -2349,19 +2388,19 @@ mod tests {
 
         let chunks = vec![
             ChunkInfo {
-                chunk_size: 40,
+                chunk_size: StoredChunkSize::btree_v1(40),
                 filter_mask: 0,
                 offsets: vec![0, 0],
                 address: StoredAddress::new(0x100),
             },
             ChunkInfo {
-                chunk_size: 40,
+                chunk_size: StoredChunkSize::btree_v1(40),
                 filter_mask: 0,
                 offsets: vec![5, 0],
                 address: StoredAddress::new(0x200),
             },
             ChunkInfo {
-                chunk_size: 40,
+                chunk_size: StoredChunkSize::btree_v1(40),
                 filter_mask: 0,
                 offsets: vec![10, 0],
                 address: StoredAddress::new(0x300),
@@ -2467,7 +2506,7 @@ mod tests {
             }
 
             chunk_infos.push(ChunkInfo {
-                chunk_size: chunk_bytes as u32,
+                chunk_size: StoredChunkSize::btree_v1(chunk_bytes as u32),
                 filter_mask: 0,
                 offsets: vec![start as u64, 0],
                 address: StoredAddress::new(data_offset as u64),
@@ -2483,7 +2522,7 @@ mod tests {
         file_data[btree_addr..btree_addr + btree.len()].copy_from_slice(&btree);
 
         let layout = DataLayout::Chunked {
-            chunk_dimensions: vec![chunk_size_elems as u32, elem_size as u32],
+            chunk_dimensions: vec![chunk_size_elems as u64, elem_size as u64],
             index: ChunkIndexLayout::BTreeV1 {
                 address: Some(StoredAddress::new(btree_addr as u64)),
             },
@@ -2625,7 +2664,7 @@ mod tests {
             file_data[data_offset..data_offset + compressed.len()].copy_from_slice(&compressed);
 
             chunk_infos.push(ChunkInfo {
-                chunk_size: compressed.len() as u32,
+                chunk_size: StoredChunkSize::btree_v1(compressed.len() as u32),
                 filter_mask: 0,
                 offsets: vec![start as u64, 0],
                 address: StoredAddress::new(data_offset as u64),
@@ -2639,7 +2678,7 @@ mod tests {
         file_data[btree_addr..btree_addr + btree.len()].copy_from_slice(&btree);
 
         let layout = DataLayout::Chunked {
-            chunk_dimensions: vec![chunk_elems as u32, elem_size as u32],
+            chunk_dimensions: vec![chunk_elems as u64, elem_size as u64],
             index: ChunkIndexLayout::BTreeV1 {
                 address: Some(StoredAddress::new(btree_addr as u64)),
             },
@@ -2711,7 +2750,7 @@ mod tests {
                 file_data[data_offset..data_offset + chunk_size].copy_from_slice(&chunk_bytes);
 
                 chunk_infos.push(ChunkInfo {
-                    chunk_size: chunk_size as u32,
+                    chunk_size: StoredChunkSize::btree_v1(chunk_size as u32),
                     filter_mask: 0,
                     offsets: vec![row_start as u64, col_start as u64, 0],
                     address: StoredAddress::new(data_offset as u64),
@@ -2726,7 +2765,7 @@ mod tests {
         file_data[btree_addr..btree_addr + btree.len()].copy_from_slice(&btree);
 
         let layout = DataLayout::Chunked {
-            chunk_dimensions: vec![chunk_dims[0] as u32, chunk_dims[1] as u32, elem_size as u32],
+            chunk_dimensions: vec![chunk_dims[0] as u64, chunk_dims[1] as u64, elem_size as u64],
             index: ChunkIndexLayout::BTreeV1 {
                 address: Some(StoredAddress::new(btree_addr as u64)),
             },
@@ -2779,61 +2818,80 @@ mod tests {
 
     // --- Implicit chunk generation tests ---
 
-    #[test]
-    fn implicit_chunks_1d_five_chunks() {
-        let chunks = generate_implicit_chunks(
-            StoredAddress::new(0x1000),
-            &[100],
-            &[20],
-            8, // f64
-        );
-        assert_eq!(chunks.len(), 5);
-        let chunk_byte_size = 20 * 8;
-        for (i, c) in chunks.iter().enumerate() {
-            assert_eq!(
-                c.address,
-                StoredAddress::new(0x1000 + i as u64 * chunk_byte_size as u64)
-            );
-            assert_eq!(c.offsets, vec![i as u64 * 20]);
-            assert_eq!(c.filter_mask, 0);
-            assert_eq!(c.chunk_size, chunk_byte_size as u32);
-        }
-    }
-
-    #[test]
-    fn implicit_chunks_2d() {
-        // 10x6 dataset, 4x3 chunks => ceil(10/4)=3, ceil(6/3)=2 => 6 chunks
-        let chunks = generate_implicit_chunks(
-            StoredAddress::new(0x2000),
-            &[10, 6],
-            &[4, 3],
-            4, // f32
-        );
-        assert_eq!(chunks.len(), 6);
-        let chunk_byte_size = 4 * 3 * 4;
-        // Row-major: (0,0), (0,3), (4,0), (4,3), (8,0), (8,3)
-        assert_eq!(chunks[0].offsets, vec![0, 0]);
-        assert_eq!(chunks[1].offsets, vec![0, 3]);
-        assert_eq!(chunks[2].offsets, vec![4, 0]);
-        assert_eq!(chunks[3].offsets, vec![4, 3]);
-        assert_eq!(chunks[4].offsets, vec![8, 0]);
-        assert_eq!(chunks[5].offsets, vec![8, 3]);
-        for (i, c) in chunks.iter().enumerate() {
-            assert_eq!(
-                c.address,
-                StoredAddress::new(0x2000 + i as u64 * chunk_byte_size as u64)
-            );
-        }
-    }
-
-    #[test]
-    fn implicit_chunks_partial_last() {
-        // 25 elements, chunk size 10 => 3 chunks (last partial)
-        let chunks = generate_implicit_chunks(StoredAddress::new(0x0), &[25], &[10], 8);
-        assert_eq!(chunks.len(), 3);
-        assert_eq!(chunks[0].offsets, vec![0]);
-        assert_eq!(chunks[1].offsets, vec![10]);
-        assert_eq!(chunks[2].offsets, vec![20]);
+    #[rstest]
+    #[case(
+        vec![100],
+        None,
+        vec![20],
+        8,
+        vec![
+            (0x1000, vec![0], 160),
+            (0x10a0, vec![20], 160),
+            (0x1140, vec![40], 160),
+            (0x11e0, vec![60], 160),
+            (0x1280, vec![80], 160),
+        ],
+    )]
+    #[case(
+        vec![10, 6],
+        None,
+        vec![4, 3],
+        4,
+        vec![
+            (0x1000, vec![0, 0], 48),
+            (0x1030, vec![0, 3], 48),
+            (0x1060, vec![4, 0], 48),
+            (0x1090, vec![4, 3], 48),
+            (0x10c0, vec![8, 0], 48),
+            (0x10f0, vec![8, 3], 48),
+        ],
+    )]
+    #[case(
+        vec![25],
+        None,
+        vec![10],
+        8,
+        vec![
+            (0x1000, vec![0], 80),
+            (0x1050, vec![10], 80),
+            (0x10a0, vec![20], 80),
+        ],
+    )]
+    #[case(
+        vec![1],
+        None,
+        vec![1],
+        u64::from(u32::MAX) + 1,
+        vec![(0x1000, vec![0], u64::from(u32::MAX) + 1)],
+    )]
+    #[case(
+        vec![4, 4],
+        Some(vec![MaxExtent::Fixed(4), MaxExtent::Fixed(8)]),
+        vec![2, 2],
+        4,
+        vec![
+            (0x1000, vec![0, 0], 16),
+            (0x1010, vec![0, 2], 16),
+            (0x1040, vec![2, 0], 16),
+            (0x1050, vec![2, 2], 16),
+        ],
+    )]
+    fn implicit_chunks_follow_the_index_grid(
+        #[case] dims: Vec<u64>,
+        #[case] max_dims: Option<Vec<MaxExtent>>,
+        #[case] chunk_dims: Vec<u64>,
+        #[case] element_size: u64,
+        #[case] expected: Vec<(u64, Vec<u64>, u64)>,
+    ) {
+        let grid =
+            ChunkGrid::new(&chunk_dims, &dims, max_dims.as_deref(), GridOrder::RowMajor).unwrap();
+        let chunks =
+            generate_implicit_chunks(StoredAddress::new(0x1000), &grid, element_size).unwrap();
+        let actual: Vec<_> = chunks
+            .into_iter()
+            .map(|chunk| (chunk.address.get(), chunk.offsets, chunk.chunk_size.get()))
+            .collect();
+        assert_eq!(actual, expected);
     }
 
     // --- V4 single chunk synthetic test ---
@@ -2853,7 +2911,7 @@ mod tests {
         }
 
         let layout = DataLayout::Chunked {
-            chunk_dimensions: vec![chunk_elems as u32, elem_size as u32],
+            chunk_dimensions: vec![chunk_elems as u64, elem_size as u64],
             index: ChunkIndexLayout::SingleChunk {
                 filtered: None,
                 address: Some(StoredAddress::new(data_addr as u64)),
@@ -3008,7 +3066,7 @@ mod tests {
     /// already overflows 32-bit, so this holds on both.
     #[test]
     fn windowed_rows_inner_dim_product_overflow_errors() {
-        let big: u32 = 1 << 22;
+        let big: u64 = 1 << 22;
         let layout = DataLayout::Chunked {
             chunk_dimensions: vec![1, 2, 2, 2, 8],
             index: ChunkIndexLayout::BTreeV1 {
@@ -3018,7 +3076,7 @@ mod tests {
         let dataspace = Dataspace {
             space_type: DataspaceType::Simple,
             rank: 4,
-            dimensions: vec![1, big.into(), big.into(), big.into()],
+            dimensions: vec![1, big, big, big],
             max_dimensions: None,
         };
         let cache = ChunkCache::new();
@@ -3039,15 +3097,15 @@ mod tests {
         );
     }
 
-    /// A chunk whose edges declare an impossible logical byte size — here a
-    /// `(2^22)^3` element chunk of `f64`, far past the 4 GiB format limit — must
+    /// A chunk whose edges declare an impossible logical byte size, here a
+    /// `(2^22)^3` element chunk of `f64` far past the read-allocation limit, must
     /// be refused up front, even when the dataset itself is small. The per-chunk
     /// geometry guard catches it before the windowed reader sizes any allocation
     /// or builds strides, so a crafted chunk extent cannot drive an out-of-memory
     /// abort. Checked before any I/O: the empty source would otherwise EOF first.
     #[test]
     fn windowed_rows_huge_chunk_geometry_refused() {
-        let big: u32 = 1 << 22;
+        let big: u64 = 1 << 22;
         let layout = DataLayout::Chunked {
             chunk_dimensions: vec![2, big, big, big, 8],
             index: ChunkIndexLayout::BTreeV1 {

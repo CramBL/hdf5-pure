@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Fixed
+
+- `Dataset::read` reads chunked datasets whose implicit indexes are numbered over a larger maximum chunk grid, where those chunks were read from the wrong addresses. Repacking such a dataset preserves the chunk data, and a version 4 chunk size wider than 32 bits is kept until a read or allocation needs a host-sized value.
+
 ## [0.46.1] - 2026-09-15
 
 ### Fixed

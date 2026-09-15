@@ -10,6 +10,7 @@ use crate::address::StoredAddress;
 use crate::bytes::{read_length, read_offset, read_optional_offset};
 use crate::chunk_grid::ChunkGrid;
 use crate::chunked_read::ChunkInfo;
+use crate::chunked_read::StoredChunkSize;
 use crate::convert::Narrow;
 use crate::error::FormatError;
 use crate::source::Source;
@@ -203,7 +204,7 @@ fn parse_fa_element(
     };
     if client_id == 0 {
         Ok(Some(ChunkInfo {
-            chunk_size: chunk_byte_size.narrow::<u32>()?,
+            chunk_size: StoredChunkSize::v4(chunk_byte_size),
             filter_mask: 0,
             offsets,
             address,
@@ -219,7 +220,7 @@ fn parse_fa_element(
             block[fm_off + 3],
         ]);
         Ok(Some(ChunkInfo {
-            chunk_size: chunk_size.narrow::<u32>()?,
+            chunk_size: StoredChunkSize::v4(chunk_size),
             filter_mask,
             offsets,
             address,
@@ -243,8 +244,8 @@ pub fn read_fixed_array_chunks(
     file_data: &[u8],
     header: &FixedArrayHeader,
     grid: &ChunkGrid,
-    chunk_dimensions: &[u32],
-    element_size: u32,
+    chunk_dimensions: &[u64],
+    element_size: u64,
     offset_size: u8,
     _length_size: u8,
 ) -> Result<Vec<ChunkInfo>, FormatError> {
@@ -283,8 +284,13 @@ pub fn read_fixed_array_chunks(
         header.element_size as usize
     };
 
-    let chunk_byte_size: u64 =
-        chunk_dimensions.iter().map(|&d| d as u64).product::<u64>() * element_size as u64;
+    let chunk_byte_size = chunk_dimensions.iter().try_fold(element_size, |acc, dim| {
+        acc.checked_mul(*dim).ok_or_else(|| {
+            FormatError::ChunkedReadError(
+                "chunk logical byte size exceeds the addressable range".into(),
+            )
+        })
+    })?;
 
     let num_elements = header.num_elements.to_usize()?;
     let page_size = (1u64 << header.max_nelmts_bits).to_usize()?;
@@ -421,8 +427,8 @@ pub fn read_fixed_array_chunks_from_source<S: Source + ?Sized>(
     source: &S,
     header: &FixedArrayHeader,
     grid: &ChunkGrid,
-    chunk_dimensions: &[u32],
-    element_size: u32,
+    chunk_dimensions: &[u64],
+    element_size: u64,
     offset_size: u8,
     _length_size: u8,
 ) -> Result<Vec<ChunkInfo>, FormatError> {
@@ -458,8 +464,13 @@ pub fn read_fixed_array_chunks_from_source<S: Source + ?Sized>(
         header.element_size as usize
     };
 
-    let chunk_byte_size: u64 =
-        chunk_dimensions.iter().map(|&d| d as u64).product::<u64>() * element_size as u64;
+    let chunk_byte_size = chunk_dimensions.iter().try_fold(element_size, |acc, dim| {
+        acc.checked_mul(*dim).ok_or_else(|| {
+            FormatError::ChunkedReadError(
+                "chunk logical byte size exceeds the addressable range".into(),
+            )
+        })
+    })?;
 
     let num_elements = header.num_elements.to_usize()?;
     let page_size = (1u64 << header.max_nelmts_bits).to_usize()?;
@@ -594,9 +605,14 @@ mod tests {
         8 + ls as usize + os as usize + 4
     }
 
-    fn dense_grid(dims: &[u64], chunk_dims: &[u32]) -> ChunkGrid {
-        let cd: Vec<u64> = chunk_dims.iter().map(|&d| u64::from(d)).collect();
-        ChunkGrid::new(&cd, dims, None, crate::chunk_grid::GridOrder::RowMajor).unwrap()
+    fn dense_grid(dims: &[u64], chunk_dims: &[u64]) -> ChunkGrid {
+        ChunkGrid::new(
+            chunk_dims,
+            dims,
+            None,
+            crate::chunk_grid::GridOrder::RowMajor,
+        )
+        .unwrap()
     }
 
     #[test]
@@ -736,7 +752,7 @@ mod tests {
         let base_addr = 0x1000u64;
         let chunk_byte_size = 20 * 8; // 20 elements × 8 bytes
         for i in 0..5 {
-            let addr = base_addr + i as u64 * chunk_byte_size as u64;
+            let addr = base_addr + i as u64 * chunk_byte_size;
             let pos = elem_start + i * os;
             file_data[pos..pos + os].copy_from_slice(&addr.to_le_bytes());
         }
@@ -751,7 +767,7 @@ mod tests {
         let header =
             FixedArrayHeader::parse(&file_data, fahd_offset, offset_size, length_size).unwrap();
         let ds_dims = vec![100u64];
-        let chunk_dims = vec![20u32];
+        let chunk_dims = vec![20u64];
         let chunks = read_fixed_array_chunks(
             &file_data,
             &header,
@@ -767,11 +783,11 @@ mod tests {
         for (i, c) in chunks.iter().enumerate() {
             assert_eq!(
                 c.address,
-                StoredAddress::new(base_addr + i as u64 * chunk_byte_size as u64)
+                StoredAddress::new(base_addr + i as u64 * chunk_byte_size)
             );
             assert_eq!(c.offsets, vec![i as u64 * 20]);
             assert_eq!(c.filter_mask, 0);
-            assert_eq!(c.chunk_size, chunk_byte_size as u32);
+            assert_eq!(c.chunk_size, StoredChunkSize::v4(chunk_byte_size));
         }
 
         #[cfg(feature = "std")]
@@ -785,8 +801,8 @@ mod tests {
         file_data: &[u8],
         header_offset: usize,
         ds_dims: &[u64],
-        chunk_dims: &[u32],
-        element_size: u32,
+        chunk_dims: &[u64],
+        element_size: u64,
         offset_size: u8,
         length_size: u8,
     ) {
@@ -854,8 +870,7 @@ mod tests {
         let os = offset_size as usize;
         let num_chunks = 3u64;
         // element_size for filtered: offset_size + chunk_size_bytes + 4(filter_mask)
-        // chunk_size_bytes: let's use 4 bytes
-        let chunk_size_bytes = 4usize;
+        let chunk_size_bytes = 5usize;
         let elem_size = os + chunk_size_bytes + 4;
 
         let mut file_data = vec![0u8; 0x3000];
@@ -865,7 +880,7 @@ mod tests {
         file_data[fahd_offset..fahd_offset + 4].copy_from_slice(b"FAHD");
         file_data[fahd_offset + 4] = 0;
         file_data[fahd_offset + 5] = 1; // client_id = filtered
-        file_data[fahd_offset + 6] = elem_size as u8;
+        file_data[fahd_offset + 6] = u8::try_from(elem_size).unwrap();
         file_data[fahd_offset + 7] = 10;
         file_data[fahd_offset + 8..fahd_offset + 16].copy_from_slice(&num_chunks.to_le_bytes());
         file_data[fahd_offset + 16..fahd_offset + 24]
@@ -884,17 +899,18 @@ mod tests {
 
         let elem_start = db_offset + 6 + os;
         let test_chunks = [
-            (0x1000u64, 120u32, 0u32),
-            (0x2000u64, 115u32, 0u32),
-            (0x3000u64, 100u32, 0u32),
+            (0x1000u64, u64::from(u32::MAX) + 120, 0u32),
+            (0x2000u64, 115u64, 0u32),
+            (0x3000u64, 100u64, 0u32),
         ];
 
         for (i, &(addr, csize, fmask)) in test_chunks.iter().enumerate() {
             let pos = elem_start + i * elem_size;
             file_data[pos..pos + os].copy_from_slice(&addr.to_le_bytes());
-            // chunk_size as 4 bytes LE
-            file_data[pos + os..pos + os + 4].copy_from_slice(&csize.to_le_bytes());
-            file_data[pos + os + 4..pos + os + 8].copy_from_slice(&fmask.to_le_bytes());
+            file_data[pos + os..pos + os + chunk_size_bytes]
+                .copy_from_slice(&csize.to_le_bytes()[..chunk_size_bytes]);
+            file_data[pos + os + chunk_size_bytes..pos + os + chunk_size_bytes + 4]
+                .copy_from_slice(&fmask.to_le_bytes());
         }
 
         // Prefix, one filtered element record per slot, checksum.
@@ -907,7 +923,7 @@ mod tests {
         let header =
             FixedArrayHeader::parse(&file_data, fahd_offset, offset_size, length_size).unwrap();
         let ds_dims = vec![60u64];
-        let chunk_dims = vec![20u32];
+        let chunk_dims = vec![20u64];
         let chunks = read_fixed_array_chunks(
             &file_data,
             &header,
@@ -921,13 +937,16 @@ mod tests {
 
         assert_eq!(chunks.len(), 3);
         assert_eq!(chunks[0].address, StoredAddress::new(0x1000));
-        assert_eq!(chunks[0].chunk_size, 120);
+        assert_eq!(
+            chunks[0].chunk_size,
+            StoredChunkSize::v4(u64::from(u32::MAX) + 120)
+        );
         assert_eq!(chunks[0].filter_mask, 0);
         assert_eq!(chunks[0].offsets, vec![0]);
         assert_eq!(chunks[1].address, StoredAddress::new(0x2000));
-        assert_eq!(chunks[1].chunk_size, 115);
+        assert_eq!(chunks[1].chunk_size, StoredChunkSize::v4(115));
         assert_eq!(chunks[2].address, StoredAddress::new(0x3000));
-        assert_eq!(chunks[2].chunk_size, 100);
+        assert_eq!(chunks[2].chunk_size, StoredChunkSize::v4(100));
 
         #[cfg(feature = "std")]
         assert_fa_streams_match(&file_data, fahd_offset, &ds_dims, &chunk_dims, 8, 8, 8);
@@ -1081,7 +1100,7 @@ mod tests {
                 let mut file = vec![0u8; base as usize + fa.len()];
                 file[base as usize..].copy_from_slice(&fa);
 
-                let chunk_dims = vec![1u32];
+                let chunk_dims = vec![1u64];
                 let read_both = |file: &[u8]| -> (Result<Vec<ChunkInfo>, FormatError>, bool) {
                     let grid = dense_grid(&[n], &chunk_dims);
                     let buffered =

@@ -107,14 +107,21 @@ impl ChunkSpanReader {
     /// chunk, and serving it through the buffer would only add a copy. A file
     /// whose writer had its chunk cache disabled scatters its chunks that way
     /// and pays nothing for this.
-    pub(crate) fn new(chunks: impl IntoIterator<Item = (StoredAddress, u32)>) -> Option<Self> {
+    pub(crate) fn new<I, N>(chunks: I) -> Option<Self>
+    where
+        I: IntoIterator<Item = (StoredAddress, N)>,
+        N: Into<u64>,
+    {
         let mut ranges: Vec<Span> = chunks
             .into_iter()
-            .map(|(address, size)| Span {
-                start: address.get(),
-                // A crafted address near `u64::MAX` saturates rather than
-                // wrapping; the read itself is bounds-checked by the source.
-                end: address.get().saturating_add(u64::from(size)),
+            .map(|(address, size)| {
+                let size = size.into();
+                Span {
+                    start: address.get(),
+                    // A crafted address near `u64::MAX` saturates here. The
+                    // read itself is bounds-checked by the source.
+                    end: address.get().saturating_add(size),
+                }
             })
             .collect();
         if ranges.len() < 2 {

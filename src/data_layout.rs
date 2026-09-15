@@ -35,7 +35,7 @@ pub enum DataLayout {
     Chunked {
         /// Chunk dimension sizes, one per dataset dimension and then the
         /// element size in bytes.
-        chunk_dimensions: Vec<u32>,
+        chunk_dimensions: Vec<u64>,
         /// The indexing type the message stores, and the address stored with it.
         index: ChunkIndexLayout,
     },
@@ -93,7 +93,7 @@ impl DataLayout {
                 let mut chunk_dimensions = Vec::with_capacity(dimensionality);
                 for _ in 0..dimensionality {
                     let dim = u32::from_le_bytes([data[p], data[p + 1], data[p + 2], data[p + 3]]);
-                    chunk_dimensions.push(dim);
+                    chunk_dimensions.push(u64::from(dim));
                     p += 4;
                 }
                 Ok(DataLayout::Chunked {
@@ -127,13 +127,24 @@ impl DataLayout {
                 let mut chunk_dimensions = Vec::with_capacity(dimensionality);
                 for _ in 0..dimensionality {
                     let val = match dim_size_encoded_length {
-                        1 => data[p] as u32,
-                        2 => u16::from_le_bytes([data[p], data[p + 1]]) as u32,
-                        4 => u32::from_le_bytes([data[p], data[p + 1], data[p + 2], data[p + 3]]),
-                        8 => {
-                            // Truncate to u32
-                            u32::from_le_bytes([data[p], data[p + 1], data[p + 2], data[p + 3]])
-                        }
+                        1 => u64::from(data[p]),
+                        2 => u64::from(u16::from_le_bytes([data[p], data[p + 1]])),
+                        4 => u64::from(u32::from_le_bytes([
+                            data[p],
+                            data[p + 1],
+                            data[p + 2],
+                            data[p + 3],
+                        ])),
+                        8 => u64::from_le_bytes([
+                            data[p],
+                            data[p + 1],
+                            data[p + 2],
+                            data[p + 3],
+                            data[p + 4],
+                            data[p + 5],
+                            data[p + 6],
+                            data[p + 7],
+                        ]),
                         _ => {
                             return Err(FormatError::UnexpectedEof {
                                 expected: p + dim_size_encoded_length,
@@ -435,6 +446,8 @@ const BTREE_V2_INFO_LEN: usize = 6;
 
 #[cfg(test)]
 mod tests {
+    use rstest::rstest;
+
     use super::*;
 
     #[test]
@@ -532,15 +545,54 @@ mod tests {
     }
 
     fn v4_chunked(flags: u8, index_type: u8, info: &[u8]) -> Vec<u8> {
+        v4_chunked_with_dims(flags, index_type, 4, &[64], info)
+    }
+
+    fn v4_chunked_with_dims(
+        flags: u8,
+        index_type: u8,
+        dim_size_encoded_length: u8,
+        dims: &[u64],
+        info: &[u8],
+    ) -> Vec<u8> {
         let mut buf = vec![4u8, 2]; // version=4, class=2 (chunked)
         buf.push(flags);
-        buf.push(1); // dimensionality=1
-        buf.push(4); // dim_size_encoded_length=4
-        buf.extend_from_slice(&64u32.to_le_bytes()); // dim 0
+        buf.push(u8::try_from(dims.len()).unwrap());
+        buf.push(dim_size_encoded_length);
+        for dim in dims {
+            let bytes = dim.to_le_bytes();
+            buf.extend_from_slice(&bytes[..usize::from(dim_size_encoded_length)]);
+        }
         buf.push(index_type);
         buf.extend_from_slice(info);
         buf.extend_from_slice(&0x3000u64.to_le_bytes()); // address
         buf
+    }
+
+    #[rstest]
+    #[case(1, 0x7f)]
+    #[case(2, 0x7fff)]
+    #[case(4, 0x7fff_ffff)]
+    #[case(8, 0x1_0000_0000)]
+    fn v4_chunked_dimension_width_is_preserved(
+        #[case] dim_size_encoded_length: u8,
+        #[case] dim: u64,
+    ) {
+        let layout = DataLayout::parse(
+            &v4_chunked_with_dims(0, 2, dim_size_encoded_length, &[dim], &[]),
+            8,
+            8,
+        )
+        .unwrap();
+        assert_eq!(
+            layout,
+            DataLayout::Chunked {
+                chunk_dimensions: vec![dim],
+                index: ChunkIndexLayout::Implicit {
+                    address: Some(StoredAddress::new(0x3000))
+                },
+            }
+        );
     }
 
     #[test]

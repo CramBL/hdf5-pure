@@ -4982,11 +4982,7 @@ fn typed_window_rows(
         // A chunked layout message carries rank + 1 dimensions, the last being
         // the element size, so the first is the leading dimension's chunk extent
         // for every layout version this crate parses.
-        if let Some(band) = chunk_dimensions
-            .first()
-            .map(|&d| u64::from(d))
-            .filter(|&d| d > 0)
-        {
+        if let Some(band) = chunk_dimensions.first().copied().filter(|&d| d > 0) {
             rows = if rows < band {
                 band
             } else {
@@ -5687,12 +5683,7 @@ the same commit to replace it",
         if chunk_dimensions.len() <= rank {
             return Ok(None);
         }
-        Ok(Some(
-            chunk_dimensions[..rank]
-                .iter()
-                .map(|&c| u64::from(c))
-                .collect(),
-        ))
+        Ok(Some(chunk_dimensions[..rank].to_vec()))
     }
 
     /// The HDF5 filter IDs applied to this dataset's chunks, in pipeline
@@ -5787,7 +5778,7 @@ the same commit to replace it",
                 Ok(Chunk {
                     offset: c.offsets.into_iter().take(rank).collect(),
                     address: base.absolute(c.address)?,
-                    storage_size: u64::from(c.chunk_size),
+                    storage_size: c.chunk_size.get(),
                     filter_mask: c.filter_mask,
                 })
             })
@@ -6567,7 +6558,7 @@ the same commit to replace it",
                     index,
                     &chunk_dimensions,
                     &dataspace,
-                    elem_size,
+                    elem_size.get() as u64,
                     self.file.offset_size(),
                     self.file.length_size(),
                 )?);
@@ -6581,7 +6572,7 @@ the same commit to replace it",
                 index,
                 &chunk_dimensions,
                 &dataspace,
-                elem_size,
+                elem_size.get() as u64,
                 self.file.offset_size(),
                 self.file.length_size(),
             )?)
@@ -8504,7 +8495,7 @@ mod tests {
             size: 0,
         };
         let chunked = |band: u32| DataLayout::Chunked {
-            chunk_dimensions: vec![band, 8],
+            chunk_dimensions: vec![u64::from(band), 8],
             index: ChunkIndexLayout::BTreeV1 {
                 address: Some(StoredAddress::new(0)),
             },
