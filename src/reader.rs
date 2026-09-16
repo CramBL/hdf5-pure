@@ -6535,6 +6535,7 @@ the same commit to replace it",
         let DataLayout::Chunked {
             chunk_dimensions,
             index,
+            ..
         } = self.data_layout()?
         else {
             return Err(Error::Format(crate::error::FormatError::ChunkedReadError(
@@ -6986,7 +6987,7 @@ const NO_LINK_TO_WRITE: &str = "a write needs a link name, and this path holds n
 mod tests {
     use super::*;
     use crate::FileBuilder;
-    use crate::data_layout::ChunkIndexLayout;
+    use crate::data_layout::{ChunkIndexLayout, ChunkedLayoutFlags};
     use crate::message_flags::MessageFlags;
     use std::sync::atomic::AtomicUsize;
 
@@ -8495,6 +8496,7 @@ mod tests {
             size: 0,
         };
         let chunked = |band: u32| DataLayout::Chunked {
+            flags: ChunkedLayoutFlags::NONE,
             chunk_dimensions: vec![u64::from(band), 8],
             index: ChunkIndexLayout::BTreeV1 {
                 address: Some(StoredAddress::new(0)),

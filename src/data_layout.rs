@@ -3,9 +3,10 @@
 //!
 //! [`DataLayout::parse`] reads a version 3 or a version 4 message. The two
 //! encode a compact and a contiguous dataset's properties alike, and a version 4
-//! message stores a chunked dataset's indexing type as well, which the parse
-//! turns into a [`ChunkIndexLayout`]. The message is defined in "The Data Layout
-//! Message" of the [format specification, version 4.0][spec].
+//! message stores a chunked dataset's feature flags and its indexing type as
+//! well, which the parse turns into a [`ChunkedLayoutFlags`] and a
+//! [`ChunkIndexLayout`]. The message is defined in "The Data Layout Message" of
+//! the [format specification, version 4.0][spec].
 //!
 //! [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_layout
 
@@ -33,6 +34,10 @@ pub enum DataLayout {
     },
     /// Chunked: data stored in chunks located through a chunk index.
     Chunked {
+        /// The chunked layout feature flags, from the message's Flags byte. A
+        /// version 3 message has no such byte, and its layout holds
+        /// [`ChunkedLayoutFlags::NONE`].
+        flags: ChunkedLayoutFlags,
         /// Chunk dimension sizes, one per dataset dimension and then the
         /// element size in bytes.
         chunk_dimensions: Vec<u64>,
@@ -97,6 +102,7 @@ impl DataLayout {
                     p += 4;
                 }
                 Ok(DataLayout::Chunked {
+                    flags: ChunkedLayoutFlags::NONE,
                     chunk_dimensions,
                     index: ChunkIndexLayout::BTreeV1 { address },
                 })
@@ -117,7 +123,7 @@ impl DataLayout {
             LAYOUT_CLASS_CONTIGUOUS => Self::parse_contiguous(data, offset_size, length_size),
             LAYOUT_CLASS_CHUNKED => {
                 ensure_len(data, pos, 3)?;
-                let flags = data[pos];
+                let flags = ChunkedLayoutFlags::new(data[pos]);
                 let dimensionality = data[pos + 1] as usize;
                 let dim_size_encoded_length = data[pos + 2] as usize;
                 let mut p = pos + 3;
@@ -157,6 +163,7 @@ impl DataLayout {
                 }
 
                 Ok(DataLayout::Chunked {
+                    flags,
                     chunk_dimensions,
                     index: parse_chunk_index(data, p, flags, offset_size, length_size)?,
                 })
@@ -189,6 +196,30 @@ impl DataLayout {
             size: read_length(data, pos + os, length_size)?,
         })
     }
+}
+
+/// The chunked layout feature flags, the Flags byte of a version 4 message's
+/// chunked property description.
+///
+/// Each bit the Flags table of "The Data Layout Message" in the [format
+/// specification, version 4.0][spec] defines has its predicate here.
+///
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_layout
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct ChunkedLayoutFlags(u8);
+
+impl ChunkedLayoutFlags {
+    /// Wraps the Flags byte of a chunked property description.
+    pub(crate) const fn new(raw: u8) -> Self {
+        Self(raw)
+    }
+
+    const fn single_index_with_filter(self) -> bool {
+        self.0 & SINGLE_INDEX_WITH_FILTER != 0
+    }
+
+    /// Flags with no bit set.
+    pub(crate) const NONE: Self = Self(0);
 }
 
 /// The index a chunked dataset's chunks are located through, and the address
@@ -295,7 +326,7 @@ pub(crate) struct FilteredSingleChunk {
 fn parse_chunk_index(
     data: &[u8],
     pos: usize,
-    flags: u8,
+    flags: ChunkedLayoutFlags,
     offset_size: u8,
     length_size: u8,
 ) -> Result<ChunkIndexLayout, FormatError> {
@@ -342,10 +373,10 @@ fn parse_chunk_index(
 fn read_filtered_single_chunk(
     data: &[u8],
     pos: usize,
-    flags: u8,
+    flags: ChunkedLayoutFlags,
     length_size: u8,
 ) -> Result<Option<FilteredSingleChunk>, FormatError> {
-    if flags & SINGLE_INDEX_WITH_FILTER == 0 {
+    if !flags.single_index_with_filter() {
         return Ok(None);
     }
     let mask_at = pos + length_size as usize;
@@ -427,7 +458,7 @@ const CHUNK_INDEX_BTREE_V2: u8 = 5;
 /// `SINGLE_INDEX_WITH_FILTER`, while its Single Chunk paragraph points at bit 0.
 /// libhdf5 writes and reads bit 1: `H5O_LAYOUT_CHUNK_SINGLE_INDEX_WITH_FILTER`
 /// in `H5Oprivate.h`, and `H5O__layout_decode` in `H5Olayout.c`, HDF5 1.14.6.
-const SINGLE_INDEX_WITH_FILTER: u8 = 0x02;
+pub(crate) const SINGLE_INDEX_WITH_FILTER: u8 = 0x02;
 
 /// Width of the Filters for chunk field of the Single Chunk indexing
 /// information, and of a chunk record's filter mask everywhere else.
@@ -507,6 +538,7 @@ mod tests {
         assert_eq!(
             layout,
             DataLayout::Chunked {
+                flags: ChunkedLayoutFlags::NONE,
                 chunk_dimensions: vec![100, 200, 8],
                 index: ChunkIndexLayout::BTreeV1 {
                     address: Some(StoredAddress::new(0x2000))
@@ -587,6 +619,7 @@ mod tests {
         assert_eq!(
             layout,
             DataLayout::Chunked {
+                flags: ChunkedLayoutFlags::NONE,
                 chunk_dimensions: vec![dim],
                 index: ChunkIndexLayout::Implicit {
                     address: Some(StoredAddress::new(0x3000))
@@ -601,6 +634,7 @@ mod tests {
         assert_eq!(
             layout,
             DataLayout::Chunked {
+                flags: ChunkedLayoutFlags::NONE,
                 chunk_dimensions: vec![64],
                 index: ChunkIndexLayout::SingleChunk {
                     filtered: None,
@@ -614,10 +648,16 @@ mod tests {
     fn v4_chunked_single_chunk_with_filters() {
         let mut info = 1024u64.to_le_bytes().to_vec();
         info.extend_from_slice(&0x0000_0003u32.to_le_bytes());
-        let layout = DataLayout::parse(&v4_chunked(0x02, 1, &info), 8, 8).unwrap();
+        let layout = DataLayout::parse(
+            &v4_chunked(SINGLE_INDEX_WITH_FILTER, CHUNK_INDEX_SINGLE_CHUNK, &info),
+            8,
+            8,
+        )
+        .unwrap();
         assert_eq!(
             layout,
             DataLayout::Chunked {
+                flags: ChunkedLayoutFlags::new(SINGLE_INDEX_WITH_FILTER),
                 chunk_dimensions: vec![64],
                 index: ChunkIndexLayout::SingleChunk {
                     filtered: Some(FilteredSingleChunk {
@@ -632,10 +672,16 @@ mod tests {
 
     #[test]
     fn v4_chunked_implicit_index_ignores_the_filter_flag() {
-        let layout = DataLayout::parse(&v4_chunked(0x02, 2, &[]), 8, 8).unwrap();
+        let layout = DataLayout::parse(
+            &v4_chunked(SINGLE_INDEX_WITH_FILTER, CHUNK_INDEX_IMPLICIT, &[]),
+            8,
+            8,
+        )
+        .unwrap();
         assert_eq!(
             layout,
             DataLayout::Chunked {
+                flags: ChunkedLayoutFlags::new(SINGLE_INDEX_WITH_FILTER),
                 chunk_dimensions: vec![64],
                 index: ChunkIndexLayout::Implicit {
                     address: Some(StoredAddress::new(0x3000))
@@ -650,6 +696,7 @@ mod tests {
         assert_eq!(
             layout,
             DataLayout::Chunked {
+                flags: ChunkedLayoutFlags::NONE,
                 chunk_dimensions: vec![64],
                 index: ChunkIndexLayout::FixedArray {
                     address: Some(StoredAddress::new(0x3000))
@@ -664,6 +711,7 @@ mod tests {
         assert_eq!(
             layout,
             DataLayout::Chunked {
+                flags: ChunkedLayoutFlags::NONE,
                 chunk_dimensions: vec![64],
                 index: ChunkIndexLayout::ExtensibleArray {
                     address: Some(StoredAddress::new(0x3000))
@@ -680,6 +728,7 @@ mod tests {
         assert_eq!(
             layout,
             DataLayout::Chunked {
+                flags: ChunkedLayoutFlags::NONE,
                 chunk_dimensions: vec![64],
                 index: ChunkIndexLayout::BTreeV2 {
                     address: Some(StoredAddress::new(0x3000))
@@ -697,6 +746,7 @@ mod tests {
         assert_eq!(
             layout,
             DataLayout::Chunked {
+                flags: ChunkedLayoutFlags::NONE,
                 chunk_dimensions: vec![64],
                 index: ChunkIndexLayout::ExtensibleArray { address: None },
             }

@@ -618,6 +618,7 @@ pub fn read_chunked_data_from_source<S: Source + ?Sized>(
     let DataLayout::Chunked {
         chunk_dimensions,
         index,
+        ..
     } = layout
     else {
         return Err(FormatError::ChunkedReadError(
@@ -761,6 +762,7 @@ pub(crate) fn read_chunked_rows_from_source<S: Source + ?Sized>(
     let DataLayout::Chunked {
         chunk_dimensions,
         index,
+        ..
     } = layout
     else {
         return Err(FormatError::ChunkedReadError(
@@ -1035,6 +1037,7 @@ pub fn read_chunked_data_cached_from_source<S: Source + ?Sized>(
     let DataLayout::Chunked {
         chunk_dimensions,
         index,
+        ..
     } = layout
     else {
         return Err(FormatError::ChunkedReadError(
@@ -1318,6 +1321,7 @@ pub(crate) fn enumerate_chunks_from_source<S: Source + ?Sized>(
     let DataLayout::Chunked {
         chunk_dimensions,
         index,
+        ..
     } = layout
     else {
         return Err(FormatError::ChunkedReadError(
@@ -1448,6 +1452,7 @@ pub(crate) fn collect_chunked_storage_spans<S: Source + ?Sized>(
     let DataLayout::Chunked {
         chunk_dimensions,
         index: chunk_index,
+        ..
     } = layout
     else {
         return Err(FormatError::ChunkedReadError(
@@ -1582,6 +1587,7 @@ pub(crate) fn chunk_index_spans_from_source<S: Source + ?Sized>(
     let DataLayout::Chunked {
         chunk_dimensions,
         index,
+        ..
     } = layout
     else {
         return Err(FormatError::ChunkedReadError(
@@ -1675,6 +1681,7 @@ pub fn read_chunked_data_cached(
     let DataLayout::Chunked {
         chunk_dimensions,
         index,
+        ..
     } = layout
     else {
         return Err(FormatError::ChunkedReadError(
@@ -2003,6 +2010,7 @@ mod tests {
 
     use super::*;
     use crate::convert::nz;
+    use crate::data_layout::ChunkedLayoutFlags;
     use crate::dataspace::MaxExtent;
 
     #[test]
@@ -2065,6 +2073,7 @@ mod tests {
         file_data[btree_addr..btree_addr + btree.len()].copy_from_slice(&btree);
 
         let layout = DataLayout::Chunked {
+            flags: ChunkedLayoutFlags::NONE,
             chunk_dimensions: vec![chunk_elems as u64, elem as u64],
             index: ChunkIndexLayout::BTreeV1 {
                 address: Some(StoredAddress::new(btree_addr as u64)),
@@ -2118,6 +2127,7 @@ mod tests {
     #[test]
     fn every_whole_dataset_reader_materializes_an_unallocated_dataset() {
         let layout = DataLayout::Chunked {
+            flags: ChunkedLayoutFlags::NONE,
             chunk_dimensions: vec![4, 8],
             index: ChunkIndexLayout::FixedArray { address: None },
         };
@@ -2522,6 +2532,7 @@ mod tests {
         file_data[btree_addr..btree_addr + btree.len()].copy_from_slice(&btree);
 
         let layout = DataLayout::Chunked {
+            flags: ChunkedLayoutFlags::NONE,
             chunk_dimensions: vec![chunk_size_elems as u64, elem_size as u64],
             index: ChunkIndexLayout::BTreeV1 {
                 address: Some(StoredAddress::new(btree_addr as u64)),
@@ -2678,6 +2689,7 @@ mod tests {
         file_data[btree_addr..btree_addr + btree.len()].copy_from_slice(&btree);
 
         let layout = DataLayout::Chunked {
+            flags: ChunkedLayoutFlags::NONE,
             chunk_dimensions: vec![chunk_elems as u64, elem_size as u64],
             index: ChunkIndexLayout::BTreeV1 {
                 address: Some(StoredAddress::new(btree_addr as u64)),
@@ -2765,6 +2777,7 @@ mod tests {
         file_data[btree_addr..btree_addr + btree.len()].copy_from_slice(&btree);
 
         let layout = DataLayout::Chunked {
+            flags: ChunkedLayoutFlags::NONE,
             chunk_dimensions: vec![chunk_dims[0] as u64, chunk_dims[1] as u64, elem_size as u64],
             index: ChunkIndexLayout::BTreeV1 {
                 address: Some(StoredAddress::new(btree_addr as u64)),
@@ -2911,6 +2924,7 @@ mod tests {
         }
 
         let layout = DataLayout::Chunked {
+            flags: ChunkedLayoutFlags::NONE,
             chunk_dimensions: vec![chunk_elems as u64, elem_size as u64],
             index: ChunkIndexLayout::SingleChunk {
                 filtered: None,
@@ -3030,6 +3044,7 @@ mod tests {
     #[test]
     fn windowed_rows_rank0_chunked_falls_back() {
         let layout = DataLayout::Chunked {
+            flags: ChunkedLayoutFlags::NONE,
             chunk_dimensions: vec![8], // dimensionality 1 => rank 0
             index: ChunkIndexLayout::BTreeV1 {
                 address: Some(StoredAddress::new(0)),
@@ -3068,6 +3083,7 @@ mod tests {
     fn windowed_rows_inner_dim_product_overflow_errors() {
         let big: u64 = 1 << 22;
         let layout = DataLayout::Chunked {
+            flags: ChunkedLayoutFlags::NONE,
             chunk_dimensions: vec![1, 2, 2, 2, 8],
             index: ChunkIndexLayout::BTreeV1 {
                 address: Some(StoredAddress::new(0)),
@@ -3107,6 +3123,7 @@ mod tests {
     fn windowed_rows_huge_chunk_geometry_refused() {
         let big: u64 = 1 << 22;
         let layout = DataLayout::Chunked {
+            flags: ChunkedLayoutFlags::NONE,
             chunk_dimensions: vec![2, big, big, big, 8],
             index: ChunkIndexLayout::BTreeV1 {
                 address: Some(StoredAddress::new(0)),
@@ -3148,6 +3165,7 @@ mod tests {
     #[test]
     fn windowed_rows_unallocated_index_matches_whole_read() {
         let layout = DataLayout::Chunked {
+            flags: ChunkedLayoutFlags::NONE,
             chunk_dimensions: vec![4, 8],
             index: ChunkIndexLayout::BTreeV1 { address: None },
         };

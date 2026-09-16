@@ -1855,7 +1855,7 @@ mod tests {
 
     use super::*;
     use crate::address::StoredAddress;
-    use crate::data_layout::ChunkIndexLayout;
+    use crate::data_layout::{ChunkIndexLayout, ChunkedLayoutFlags};
 
     /// A source's scale-offset fill availability is carried onto the rebuilt
     /// dataset, in both directions.
@@ -1894,6 +1894,7 @@ mod tests {
                 &[16],
                 None,
                 &DataLayout::Chunked {
+                    flags: ChunkedLayoutFlags::NONE,
                     // A v3 layout appends the element size, which is what the
                     // caller trims back off.
                     chunk_dimensions: vec![16, 4],

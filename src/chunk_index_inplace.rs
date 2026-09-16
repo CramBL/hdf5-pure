@@ -420,6 +420,7 @@ impl Located {
                     ChunkIndexLayout::ExtensibleArray {
                         address: Some(addr),
                     },
+                ..
             } => (addr, chunk_dimensions),
             DataLayout::Chunked {
                 index: ChunkIndexLayout::ExtensibleArray { address: None },

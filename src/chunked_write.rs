@@ -16,6 +16,7 @@ use core::num::NonZeroUsize;
 use crate::address::StoredAddress;
 use crate::chunk_grid::{ChunkGrid, GridOrder};
 use crate::convert::Narrow;
+use crate::data_layout::SINGLE_INDEX_WITH_FILTER;
 use crate::dataspace::{Extent, MaxExtent};
 use crate::error::FormatError;
 use crate::extensible_array::{DataBlockGeom, EaGeometry, ExtensibleArrayHeader, SuperBlockGeom};
@@ -917,8 +918,11 @@ fn serialize_v4_single_chunk(
     buf.push(4); // version
     buf.push(2); // class = chunked
 
-    // flags: bit 0 = unknown meaning in some files, bit 1 = filters for single chunk
-    let flags: u8 = if filtered_size.is_some() { 0x02 } else { 0x00 };
+    let flags: u8 = if filtered_size.is_some() {
+        SINGLE_INDEX_WITH_FILTER
+    } else {
+        0x00
+    };
     buf.push(flags);
 
     // dimensionality = rank + 1 (chunk dims + element size dim)
@@ -1007,8 +1011,7 @@ fn serialize_v4_fixed_array(
     buf.push(4); // version
     buf.push(2); // class = chunked
 
-    let flags: u8 = 0x00;
-    buf.push(flags);
+    buf.push(0x00); // flags
 
     #[expect(
         clippy::cast_possible_truncation,
@@ -3318,7 +3321,9 @@ mod tests {
 
     use crate::chunked_read::read_chunked_data_cached;
     use crate::convert::nz;
-    use crate::data_layout::{ChunkIndexLayout, DataLayout, FilteredSingleChunk};
+    use crate::data_layout::{
+        ChunkIndexLayout, ChunkedLayoutFlags, DataLayout, FilteredSingleChunk,
+    };
     use crate::dataspace::{Dataspace, DataspaceType};
     use crate::datatype::{Datatype, DatatypeByteOrder};
     use crate::fill_value::FillPattern;
@@ -4484,6 +4489,7 @@ mod tests {
         assert_eq!(
             DataLayout::parse(&msg, 8, 8).unwrap(),
             DataLayout::Chunked {
+                flags: ChunkedLayoutFlags::NONE,
                 chunk_dimensions: vec![20, 8],
                 index: ChunkIndexLayout::SingleChunk {
                     filtered: None,
@@ -4500,6 +4506,7 @@ mod tests {
         assert_eq!(
             DataLayout::parse(&msg, 8, 8).unwrap(),
             DataLayout::Chunked {
+                flags: ChunkedLayoutFlags::new(SINGLE_INDEX_WITH_FILTER),
                 chunk_dimensions: vec![100, 8],
                 index: ChunkIndexLayout::SingleChunk {
                     filtered: Some(FilteredSingleChunk {
@@ -4518,6 +4525,7 @@ mod tests {
         assert_eq!(
             DataLayout::parse(&msg, 8, 8).unwrap(),
             DataLayout::Chunked {
+                flags: ChunkedLayoutFlags::NONE,
                 chunk_dimensions: vec![20, 8],
                 index: ChunkIndexLayout::FixedArray {
                     address: Some(StoredAddress::new(0x3000)),
@@ -4563,6 +4571,7 @@ mod tests {
         assert_eq!(
             DataLayout::parse(&msg, 8, 8).unwrap(),
             DataLayout::Chunked {
+                flags: ChunkedLayoutFlags::NONE,
                 chunk_dimensions: vec![10, 8],
                 index: ChunkIndexLayout::ExtensibleArray {
                     address: Some(StoredAddress::new(0x4000)),
