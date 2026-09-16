@@ -214,6 +214,15 @@ impl ChunkedLayoutFlags {
         Self(raw)
     }
 
+    /// Returns `true` if a chunk that extends past the dataset's extent is
+    /// stored with the filter pipeline skipped,
+    /// [`DONT_FILTER_PARTIAL_BOUND_CHUNKS`].
+    pub(crate) const fn partial_edge_chunks_stored_raw(self) -> bool {
+        self.0 & DONT_FILTER_PARTIAL_BOUND_CHUNKS != 0
+    }
+
+    /// Returns `true` if the Single Chunk indexing information stores a
+    /// filtered chunk's size and filter mask, [`SINGLE_INDEX_WITH_FILTER`].
     const fn single_index_with_filter(self) -> bool {
         self.0 & SINGLE_INDEX_WITH_FILTER != 0
     }
@@ -451,6 +460,15 @@ const CHUNK_INDEX_EXTENSIBLE_ARRAY: u8 = 4;
 /// [`CHUNK_INDEX_SINGLE_CHUNK`].
 const CHUNK_INDEX_BTREE_V2: u8 = 5;
 
+/// The chunked layout flag under which a chunk that extends past the dataset's
+/// current extent is stored with the filter pipeline skipped.
+///
+/// Bit 0 of the Flags table of "The Data Layout Message", version 4.0.
+/// `H5Pset_chunk_opts` sets it from `H5D_CHUNK_DONT_FILTER_PARTIAL_CHUNKS`
+/// (`H5Pdcpl.c`), and `H5D__chunk_cacheable` reads it to decide whether the
+/// dataset's filters apply to such a chunk (`H5Dchunk.c`), HDF5 1.14.6.
+pub(crate) const DONT_FILTER_PARTIAL_BOUND_CHUNKS: u8 = 0x01;
+
 /// The chunked layout flag under which the message stores a filtered chunk's
 /// size and filter mask ahead of a Single Chunk index's address.
 ///
@@ -626,6 +644,20 @@ mod tests {
                 },
             }
         );
+    }
+
+    #[rstest]
+    #[case(0, false)]
+    #[case(DONT_FILTER_PARTIAL_BOUND_CHUNKS, true)]
+    #[case(SINGLE_INDEX_WITH_FILTER, false)]
+    #[case(DONT_FILTER_PARTIAL_BOUND_CHUNKS | SINGLE_INDEX_WITH_FILTER, true)]
+    fn v4_chunked_flags_reach_the_parsed_layout(#[case] raw: u8, #[case] stored_raw: bool) {
+        let layout = DataLayout::parse(&v4_chunked(raw, CHUNK_INDEX_IMPLICIT, &[]), 8, 8).unwrap();
+        let DataLayout::Chunked { flags, .. } = layout else {
+            panic!("expected a chunked layout, got {layout:?}");
+        };
+        assert_eq!(flags, ChunkedLayoutFlags::new(raw));
+        assert_eq!(flags.partial_edge_chunks_stored_raw(), stored_raw);
     }
 
     #[test]

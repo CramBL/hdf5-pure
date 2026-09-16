@@ -17,7 +17,7 @@ use crate::chunk_cache::{CachePass, ChunkCache};
 use crate::chunk_grid::{ChunkGrid, GridOrder};
 use crate::chunk_span::ChunkSpanReader;
 use crate::convert::{Narrow, slice_range};
-use crate::data_layout::{ChunkIndexLayout, DataLayout};
+use crate::data_layout::{ChunkIndexLayout, ChunkedLayoutFlags, DataLayout};
 use crate::dataspace::Dataspace;
 use crate::error::FormatError;
 use crate::extensible_array::{
@@ -32,15 +32,18 @@ use crate::fixed_array::{
 use crate::read_spec::RawReadSpec;
 use crate::source::Source;
 
-/// Decompress all chunks, reading each chunk's bytes from a [`Source`].
+/// Decodes every chunk, reading each chunk's bytes from a [`Source`].
 ///
-/// Decompression is sequential: a `ReadSeekSource` serializes on its mutex, so
+/// Decoding is sequential: a `ReadSeekSource` serializes on its mutex, so
 /// there is nothing for a concurrent decoder to overlap with here.
-fn decompress_all_chunks_from_source<S: Source + ?Sized>(
+fn decode_all_chunks_from_source<S: Source + ?Sized>(
     source: &S,
-    chunks: &[ChunkInfo],
+    flags: ChunkedLayoutFlags,
+    chunk_dims: &[u64],
+    ds_dims: &[u64],
     pipeline: Option<&FilterPipeline>,
     ctx: ChunkContext<'_>,
+    chunks: &[ChunkInfo],
 ) -> Result<Vec<Vec<u8>>, FormatError> {
     let mut result = Vec::with_capacity(chunks.len());
     // One decoder for every chunk; see `FilterScratch`.
@@ -48,14 +51,97 @@ fn decompress_all_chunks_from_source<S: Source + ?Sized>(
     for chunk_info in chunks {
         let raw_chunk =
             source.read_exact_at(chunk_info.address.get(), chunk_info.chunk_size.to_usize()?)?;
-        let decompressed = if let Some(pl) = pipeline {
-            decompress_chunk_with(&mut scratch, &raw_chunk, pl, ctx, chunk_info.filter_mask)?
-        } else {
-            raw_chunk
-        };
-        result.push(decompressed);
+        let filtering = ChunkFiltering::for_chunk(flags, chunk_dims, ds_dims, chunk_info);
+        result.push(
+            decode_chunk(
+                &mut scratch,
+                Cow::Owned(raw_chunk),
+                pipeline,
+                ctx,
+                filtering,
+            )?
+            .into_owned(),
+        );
     }
     Ok(result)
+}
+
+/// Runs the inverse filter pipeline over a chunk's stored bytes, and passes
+/// them through where `filtering` is [`ChunkFiltering::Raw`] or the dataset has
+/// no pipeline.
+///
+/// # Errors
+///
+/// Returns [`FormatError::UnsupportedFilter`] where the pipeline lists a filter
+/// this crate does not implement, [`FormatError::DataSizeMismatch`] where a
+/// chunk decodes to a length other than the chunk size, and the error a filter
+/// reports for stored bytes it rejects.
+fn decode_chunk<'a>(
+    scratch: &mut FilterScratch,
+    stored: Cow<'a, [u8]>,
+    pipeline: Option<&FilterPipeline>,
+    ctx: ChunkContext<'_>,
+    filtering: ChunkFiltering,
+) -> Result<Cow<'a, [u8]>, FormatError> {
+    let (Some(pipeline), ChunkFiltering::Filtered { filter_mask }) = (pipeline, filtering) else {
+        return Ok(stored);
+    };
+    Ok(Cow::Owned(decompress_chunk_with(
+        scratch,
+        &stored,
+        pipeline,
+        ctx,
+        filter_mask,
+    )?))
+}
+
+/// How a chunk's bytes are stored, which decides whether a read runs the
+/// inverse filter pipeline over them.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ChunkFiltering {
+    /// The pipeline produced the stored bytes, and this mask holds the filters
+    /// it skipped for this chunk.
+    Filtered { filter_mask: u32 },
+    /// The stored bytes are the chunk's data.
+    Raw,
+}
+
+impl ChunkFiltering {
+    /// Returns how `chunk` is stored, from the layout flags and the chunk's
+    /// place in the dataset.
+    ///
+    /// Under [`ChunkedLayoutFlags::partial_edge_chunks_stored_raw`] a chunk
+    /// that extends past the dataset's extent is [`Self::Raw`]. Every other
+    /// chunk is [`Self::Filtered`], with the mask its index record stores.
+    fn for_chunk(
+        flags: ChunkedLayoutFlags,
+        chunk_dims: &[u64],
+        ds_dims: &[u64],
+        chunk: &ChunkInfo,
+    ) -> Self {
+        if flags.partial_edge_chunks_stored_raw()
+            && extends_past_extent(chunk_dims, ds_dims, &chunk.offsets)
+        {
+            return Self::Raw;
+        }
+        Self::Filtered {
+            filter_mask: chunk.filter_mask,
+        }
+    }
+}
+
+/// Returns `true` if the chunk at `offsets` extends past the dataset's extent.
+///
+/// `H5D__chunk_is_partial_edge_chunk` in `H5Dchunk.c` (HDF5 1.14.6) tests the
+/// same condition on the scaled chunk coordinate, against the dataset's current
+/// extent. A version 1 B-tree's offset vector holds a trailing element offset
+/// beyond the dataset's dimensions, so the zip stops at the dataset's rank.
+fn extends_past_extent(chunk_dims: &[u64], ds_dims: &[u64], offsets: &[u64]) -> bool {
+    chunk_dims
+        .iter()
+        .zip(ds_dims)
+        .zip(offsets)
+        .any(|((&chunk_dim, &ds_dim), &offset)| offset.saturating_add(chunk_dim) > ds_dim)
 }
 
 /// Information about a single chunk in a chunked dataset.
@@ -601,7 +687,7 @@ fn ensure_chunk_bytes_representable(
 /// chunk-index coverage: the B-tree v1 (v3) index and the v4 single-chunk, implicit,
 /// Fixed-Array, and Extensible-Array indexes (index types 1-4). A v4 index
 /// type 5 (version-2 B-tree) is not supported, matching the buffered reader.
-/// The decompression is sequential.
+/// The decoding is sequential.
 pub fn read_chunked_data_from_source<S: Source + ?Sized>(
     source: &S,
     spec: RawReadSpec<'_>,
@@ -616,9 +702,9 @@ pub fn read_chunked_data_from_source<S: Source + ?Sized>(
         fill,
     } = spec;
     let DataLayout::Chunked {
+        flags,
         chunk_dimensions,
         index,
-        ..
     } = layout
     else {
         return Err(FormatError::ChunkedReadError(
@@ -646,7 +732,15 @@ pub fn read_chunked_data_from_source<S: Source + ?Sized>(
 
     let chunk_dims_u64: Vec<u64> = chunk_dims.iter().map(|&d| d as u64).collect();
     let ctx = ChunkContext::from_datatype(&chunk_dims_u64, datatype)?;
-    let decompressed_chunks = decompress_all_chunks_from_source(source, &chunks, pipeline, ctx)?;
+    let decoded_chunks = decode_all_chunks_from_source(
+        source,
+        *flags,
+        &chunk_dims_u64,
+        &dataspace.dimensions,
+        pipeline,
+        ctx,
+        &chunks,
+    )?;
     let num_elements = dataspace.num_elements();
     let total_bytes = num_elements
         .to_usize()?
@@ -657,7 +751,7 @@ pub fn read_chunked_data_from_source<S: Source + ?Sized>(
         })?;
     assemble_chunks(
         &chunks,
-        &decompressed_chunks,
+        &decoded_chunks,
         rank,
         &chunk_dims,
         &ds_dims,
@@ -760,9 +854,9 @@ pub(crate) fn read_chunked_rows_from_source<S: Source + ?Sized>(
         fill,
     } = spec;
     let DataLayout::Chunked {
+        flags,
         chunk_dimensions,
         index,
-        ..
     } = layout
     else {
         return Err(FormatError::ChunkedReadError(
@@ -963,16 +1057,13 @@ pub(crate) fn read_chunked_rows_from_source<S: Source + ?Sized>(
             Some(sp) => Cow::Borrowed(sp.chunk_bytes(source, chunk.address, len)?),
             None => Cow::Owned(source.read_exact_at(chunk.address.get(), len)?),
         };
-        match pipeline {
-            Some(pl) => {
-                let dec = decompress_chunk_with(&mut scratch, &stored, pl, ctx, chunk.filter_mask)?;
-                copy(&mut output, &dec);
-                cache.put_decompressed(pass, coord, dec);
-            }
-            None => {
-                copy(&mut output, &stored);
-                cache.put_decompressed_slice(pass, coord, &stored);
-            }
+        let filtering =
+            ChunkFiltering::for_chunk(*flags, &chunk_dims_u64, &dataspace.dimensions, chunk);
+        let dec = decode_chunk(&mut scratch, stored, pipeline, ctx, filtering)?;
+        copy(&mut output, &dec);
+        match dec {
+            Cow::Owned(bytes) => cache.put_decompressed(pass, coord, bytes), // move
+            Cow::Borrowed(bytes) => cache.put_decompressed_slice(pass, coord, bytes),
         }
     }
 
@@ -1035,9 +1126,9 @@ pub fn read_chunked_data_cached_from_source<S: Source + ?Sized>(
         fill,
     } = spec;
     let DataLayout::Chunked {
+        flags,
         chunk_dimensions,
         index,
-        ..
     } = layout
     else {
         return Err(FormatError::ChunkedReadError(
@@ -1138,18 +1229,12 @@ pub fn read_chunked_data_cached_from_source<S: Source + ?Sized>(
             Some(sp) => Cow::Borrowed(sp.chunk_bytes(source, chunk_info.address, len)?),
             None => Cow::Owned(source.read_exact_at(chunk_info.address.get(), len)?),
         };
-        let dec = match pipeline {
-            Some(pl) => Cow::Owned(decompress_chunk_with(
-                &mut scratch,
-                &stored,
-                pl,
-                ctx,
-                chunk_info.filter_mask,
-            )?),
-            // Unfiltered: a chunk's stored bytes are its data, so they are
-            // copied out of the span only if the cache admits them.
-            None => stored,
-        };
+        // A chunk that skipped the pipeline keeps its stored bytes: read on its
+        // own it moves into the cache, and borrowed from a coalesced span it is
+        // copied out of the span only if the cache admits it.
+        let filtering =
+            ChunkFiltering::for_chunk(*flags, &chunk_dims_u64, &dataspace.dimensions, chunk_info);
+        let dec = decode_chunk(&mut scratch, stored, pipeline, ctx, filtering)?;
         place_chunk(
             &dec,
             &mut output,
@@ -1161,7 +1246,6 @@ pub fn read_chunked_data_cached_from_source<S: Source + ?Sized>(
             elem_size,
             rank,
         );
-        // Dropped either way if the cache does not admit it.
         match dec {
             Cow::Owned(bytes) => cache.put_decompressed(pass, coord, bytes), // move
             Cow::Borrowed(bytes) => cache.put_decompressed_slice(pass, coord, bytes),
@@ -1603,11 +1687,11 @@ pub(crate) fn chunk_index_spans_from_source<S: Source + ?Sized>(
     )
 }
 
-/// Scatter decompressed chunks into the dense output buffer. Pure (no file
+/// Scatters the decoded chunks into the dense output buffer. Pure (no file
 /// access): shared by the buffered and streaming chunked readers.
 fn assemble_chunks(
     chunks: &[ChunkInfo],
-    decompressed: &[Vec<u8>],
+    decoded: &[Vec<u8>],
     rank: usize,
     chunk_dims: &[usize],
     ds_dims: &[usize],
@@ -1630,7 +1714,7 @@ fn assemble_chunks(
         chunk_strides[i] = chunk_strides[i + 1] * chunk_dims[i + 1];
     }
 
-    for (chunk_info, decompressed) in chunks.iter().zip(decompressed.iter()) {
+    for (chunk_info, decoded) in chunks.iter().zip(decoded.iter()) {
         // B-tree v1 (v3) offsets have rank+1 dims; v4 index offsets have rank dims
         #[expect(
             clippy::cast_possible_truncation,
@@ -1644,7 +1728,7 @@ fn assemble_chunks(
             .collect();
 
         place_chunk(
-            decompressed,
+            decoded,
             &mut output,
             &chunk_offsets,
             chunk_dims,
@@ -1679,9 +1763,9 @@ pub fn read_chunked_data_cached(
         fill,
     } = spec;
     let DataLayout::Chunked {
+        flags,
         chunk_dimensions,
         index,
-        ..
     } = layout
     else {
         return Err(FormatError::ChunkedReadError(
@@ -1847,43 +1931,38 @@ pub fn read_chunked_data_cached(
             });
         }
         let raw_chunk = &file_data[r];
-        if let Some(pl) = pipeline {
-            let dec =
-                decompress_chunk_with(&mut scratch, raw_chunk, pl, ctx, chunk_info.filter_mask)?;
-            place_chunk(
-                &dec,
-                &mut output,
-                &chunk_offsets,
-                &chunk_dims,
-                &ds_dims,
-                &ds_strides,
-                &chunk_strides,
-                elem_size,
-                rank,
-            );
-            cache.put_decompressed(pass, coord, dec); // move; dropped if not admitted
-        } else {
-            // No pipeline: scatter directly from the file buffer, and copy into
-            // the cache only if it would actually be retained.
-            place_chunk(
-                raw_chunk,
-                &mut output,
-                &chunk_offsets,
-                &chunk_dims,
-                &ds_dims,
-                &ds_strides,
-                &chunk_strides,
-                elem_size,
-                rank,
-            );
-            cache.put_decompressed_slice(pass, coord, raw_chunk);
+        let filtering =
+            ChunkFiltering::for_chunk(*flags, &chunk_dims_u64, &dataspace.dimensions, chunk_info);
+        // A chunk that skipped the pipeline scatters straight from the file
+        // buffer, and is copied into the cache only if it would be retained.
+        let dec = decode_chunk(
+            &mut scratch,
+            Cow::Borrowed(raw_chunk),
+            pipeline,
+            ctx,
+            filtering,
+        )?;
+        place_chunk(
+            &dec,
+            &mut output,
+            &chunk_offsets,
+            &chunk_dims,
+            &ds_dims,
+            &ds_strides,
+            &chunk_strides,
+            elem_size,
+            rank,
+        );
+        match dec {
+            Cow::Owned(bytes) => cache.put_decompressed(pass, coord, bytes), // move
+            Cow::Borrowed(bytes) => cache.put_decompressed_slice(pass, coord, bytes),
         }
     }
 
     Ok(output)
 }
 
-/// Place one decompressed chunk into the dense output buffer, handling the
+/// Places one decoded chunk into the dense output buffer, handling the
 /// scalar (`rank == 0`) case and delegating the N-D case to the row-copy kernel.
 /// Shared by the buffered, cached, and streaming chunked readers so they all use
 /// the same scatter logic.
@@ -2010,7 +2089,6 @@ mod tests {
 
     use super::*;
     use crate::convert::nz;
-    use crate::data_layout::ChunkedLayoutFlags;
     use crate::dataspace::MaxExtent;
 
     #[test]
@@ -2457,6 +2535,7 @@ mod tests {
 
     // --- Chunked read tests (synthetic) ---
 
+    use crate::data_layout::DONT_FILTER_PARTIAL_BOUND_CHUNKS;
     use crate::dataspace::{Dataspace, DataspaceType};
     use crate::datatype::{Datatype, DatatypeByteOrder};
     use crate::source::BytesSource;
@@ -2725,6 +2804,228 @@ mod tests {
 
         // The streaming reader must reproduce the same decompressed bytes.
         assert_chunked_streams_match(&file_data, &layout, &dataspace, &datatype, Some(&pipeline));
+    }
+
+    #[rstest]
+    #[case(ChunkedLayoutFlags::NONE, &[4, 4, 0], ChunkFiltering::Filtered { filter_mask: 3 })]
+    #[case(
+        ChunkedLayoutFlags::new(DONT_FILTER_PARTIAL_BOUND_CHUNKS),
+        &[0, 0, 0],
+        ChunkFiltering::Filtered { filter_mask: 3 }
+    )]
+    #[case(
+        ChunkedLayoutFlags::new(DONT_FILTER_PARTIAL_BOUND_CHUNKS),
+        &[4, 0, 0],
+        ChunkFiltering::Raw
+    )]
+    #[case(
+        ChunkedLayoutFlags::new(DONT_FILTER_PARTIAL_BOUND_CHUNKS),
+        &[0, 4, 0],
+        ChunkFiltering::Raw
+    )]
+    #[case(
+        ChunkedLayoutFlags::new(DONT_FILTER_PARTIAL_BOUND_CHUNKS),
+        &[4, 4, 0],
+        ChunkFiltering::Raw
+    )]
+    // 4x4 chunks over a 6x6 dataset: a chunk at offset 4 in either dimension
+    // extends past the extent.
+    fn the_flag_and_the_chunk_geometry_decide_the_filtering(
+        #[case] flags: ChunkedLayoutFlags,
+        #[case] offsets: &[u64],
+        #[case] expected: ChunkFiltering,
+    ) {
+        let chunk = ChunkInfo {
+            chunk_size: StoredChunkSize::btree_v1(128),
+            filter_mask: 3,
+            offsets: offsets.to_vec(),
+            address: StoredAddress::new(0x1000),
+        };
+        assert_eq!(
+            ChunkFiltering::for_chunk(flags, &[4, 4], &[6, 6], &chunk),
+            expected
+        );
+    }
+
+    /// Writes a shuffled one-dimensional dataset and overwrites its partial
+    /// edge chunk with the unfiltered element bytes, as a library writing under
+    /// `H5D_CHUNK_DONT_FILTER_PARTIAL_CHUNKS` stores that chunk.
+    fn file_with_a_raw_partial_edge_chunk(
+        values: &[f64],
+        chunk_elems: u64,
+    ) -> (Vec<u8>, DataLayout, Dataspace, FilterPipeline) {
+        use crate::chunked_write;
+        use crate::chunked_write::{ChunkOptions, FilterKind};
+
+        let elem_size = size_of::<f64>();
+        let raw: Vec<u8> = values.iter().flat_map(|v| v.to_le_bytes()).collect();
+        let shape = [values.len() as u64];
+        let mut options = ChunkOptions {
+            chunk_dims: Some(vec![chunk_elems]),
+            ..ChunkOptions::default()
+        };
+        options.set_filter(FilterKind::Shuffle);
+        let data_address = StoredAddress::new(0x1000);
+        let written = chunked_write::build_chunked_data_at_ext(
+            &raw,
+            &shape,
+            ChunkContext::basic(&[chunk_elems], elem_size as u32),
+            &options,
+            data_address,
+            None,
+            FillPattern::ZERO,
+        )
+        .unwrap();
+
+        let base = data_address.get() as usize;
+        let mut file_data = vec![0u8; base + written.data_bytes.len()];
+        file_data[base..].copy_from_slice(&written.data_bytes);
+
+        let written_layout = DataLayout::parse(&written.layout_message, 8, 8).unwrap();
+        let DataLayout::Chunked {
+            chunk_dimensions,
+            index,
+            ..
+        } = written_layout
+        else {
+            panic!("the chunked writer emitted {written_layout:?}");
+        };
+        let dataspace = Dataspace {
+            space_type: DataspaceType::Simple,
+            rank: 1,
+            dimensions: shape.to_vec(),
+            max_dimensions: None,
+        };
+
+        for chunk in collect_chunks_for_layout_from_source(
+            &BytesSource::new(&file_data),
+            index,
+            &chunk_dimensions,
+            &dataspace,
+            elem_size as u64,
+            8,
+            8,
+        )
+        .unwrap()
+        {
+            let offset = chunk.offsets[0];
+            if offset + chunk_elems <= shape[0] {
+                continue;
+            }
+            let unfiltered: Vec<u8> = (offset..offset + chunk_elems)
+                .flat_map(|i| values.get(i as usize).copied().unwrap_or(0.0).to_le_bytes())
+                .collect();
+            assert_eq!(
+                chunk.chunk_size.get() as usize,
+                unfiltered.len(),
+                "shuffle keeps a chunk's stored length"
+            );
+            let at = chunk.address.get() as usize;
+            file_data[at..at + unfiltered.len()].copy_from_slice(&unfiltered);
+        }
+
+        let layout = DataLayout::Chunked {
+            flags: ChunkedLayoutFlags::new(DONT_FILTER_PARTIAL_BOUND_CHUNKS),
+            chunk_dimensions,
+            index,
+        };
+        let pipeline = FilterPipeline::parse(&written.pipeline_message.unwrap()).unwrap();
+        (file_data, layout, dataspace, pipeline)
+    }
+
+    #[test]
+    fn a_raw_partial_edge_chunk_decodes_through_every_reader() {
+        let values: Vec<f64> = (0..10).map(f64::from).collect();
+        let (file_data, layout, dataspace, pipeline) =
+            file_with_a_raw_partial_edge_chunk(&values, 4);
+        let datatype = make_f64_type();
+        let spec = RawReadSpec {
+            layout: &layout,
+            dataspace: &dataspace,
+            datatype: &datatype,
+            pipeline: Some(&pipeline),
+            fill: FillPattern::ZERO,
+        };
+        let source = BytesSource::new(&file_data);
+        let decoded = |bytes: Vec<u8>| -> Vec<f64> {
+            bytes
+                .as_chunks::<8>()
+                .0
+                .iter()
+                .map(|b| f64::from_le_bytes(*b))
+                .collect()
+        };
+
+        assert_eq!(
+            decoded(read_chunked_data_from_source(&source, spec, 8, 8).unwrap()),
+            values
+        );
+        assert_eq!(
+            decoded(read_chunked_data_cached(&file_data, spec, 8, 8, &ChunkCache::new()).unwrap()),
+            values
+        );
+        assert_eq!(
+            decoded(
+                read_chunked_data_cached_from_source(&source, spec, 8, 8, &ChunkCache::new())
+                    .unwrap()
+            ),
+            values
+        );
+        let rows = read_chunked_rows_from_source(
+            &source,
+            spec,
+            8,
+            8,
+            &ChunkCache::new(),
+            CachePass::LRU,
+            8,
+            2,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(decoded(rows), values[8..].to_vec());
+    }
+
+    #[cfg(feature = "deflate")]
+    #[test]
+    fn a_raw_partial_edge_chunk_skips_the_deflate_decoder() {
+        use crate::filter_pipeline::{FILTER_DEFLATE, FilterDescription};
+
+        let pipeline = FilterPipeline {
+            version: 2,
+            filters: vec![FilterDescription {
+                filter_id: FILTER_DEFLATE,
+                name: None,
+                flags: 0,
+                client_data: vec![6],
+            }],
+        };
+        let stored: Vec<u8> = (0..32u8).collect();
+        let ctx = ChunkContext::basic(&[4], 8);
+        let mut scratch = FilterScratch::new();
+
+        let decoded = decode_chunk(
+            &mut scratch,
+            Cow::Borrowed(&stored),
+            Some(&pipeline),
+            ctx,
+            ChunkFiltering::Raw,
+        )
+        .unwrap();
+        assert_eq!(decoded.as_ref(), stored);
+
+        let err = decode_chunk(
+            &mut scratch,
+            Cow::Borrowed(&stored),
+            Some(&pipeline),
+            ctx,
+            ChunkFiltering::Filtered { filter_mask: 0 },
+        )
+        .unwrap_err();
+        let FormatError::FilterError(reason) = &err else {
+            panic!("expected FilterError, got {err:?}");
+        };
+        assert!(reason.starts_with("deflate: "), "{reason:?}");
     }
 
     #[test]
