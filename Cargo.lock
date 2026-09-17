@@ -473,7 +473,6 @@ name = "hdf5-pure-crosscheck"
 version = "0.0.0"
 dependencies = [
  "hdf5-metno",
- "hdf5-metno-sys",
  "hdf5-pure",
  "ndarray",
  "proptest",
