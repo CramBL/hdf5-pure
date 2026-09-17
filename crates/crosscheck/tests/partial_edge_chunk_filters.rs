@@ -10,6 +10,7 @@
 
 use std::path::Path;
 
+use hdf5::Extent;
 use hdf5::dataset::ChunkOpts;
 use hdf5::file::LibraryVersion;
 use rstest::rstest;
@@ -33,11 +34,26 @@ fn c_create(path: &Path, filter: Filter, shape: &[usize], chunk: &[usize], data:
     let ds = builder
         .chunk(chunk.to_vec())
         .chunk_opts(ChunkOpts::DONT_FILTER_PARTIAL_CHUNKS)
-        .shape(shape.to_vec())
+        .shape(extents_the_c_library_accepts(shape, chunk))
         .create("d")
         .unwrap();
     ds.write_raw(data).unwrap();
     file.close().unwrap();
+}
+
+// H5D__chunk_construct (H5Dchunk.c, 2.2.0) rejects a chunk edge past a fixed dimension's maximum.
+fn extents_the_c_library_accepts(shape: &[usize], chunk: &[usize]) -> Vec<Extent> {
+    shape
+        .iter()
+        .zip(chunk)
+        .map(|(&len, &edge)| {
+            if edge > len {
+                Extent::resizable(len)
+            } else {
+                Extent::fixed(len)
+            }
+        })
+        .collect()
 }
 
 fn read_c(path: &Path) -> Vec<i32> {
@@ -63,7 +79,13 @@ fn read_pure(path: &Path) -> Vec<i32> {
 #[case(Filter::Deflate, &[10], &[4])]
 #[case(Filter::Shuffle, &[5, 5], &[2, 3])]
 #[case(Filter::Deflate, &[5, 5], &[2, 3])]
-fn a_partial_edge_chunk_stored_unfiltered_reads_back(
+#[case(Filter::Shuffle, &[3], &[4])]
+#[case(Filter::Deflate, &[2, 2], &[4, 2])]
+#[case(Filter::Shuffle, &[12], &[4])]
+#[case(Filter::Deflate, &[6, 9], &[2, 3])]
+#[case(Filter::Deflate, &[4, 5], &[2, 3])]
+#[case(Filter::Shuffle, &[5, 6], &[2, 3])]
+fn a_dataset_exempting_its_partial_chunks_from_the_filters_reads_back(
     #[case] filter: Filter,
     #[case] shape: &[usize],
     #[case] chunk: &[usize],
