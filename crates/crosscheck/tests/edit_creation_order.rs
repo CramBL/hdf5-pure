@@ -22,42 +22,15 @@
 //! are `H5Literate2` over `H5_INDEX_CRT_ORDER`, `H5Lget_info2`'s `corder`, and
 //! `H5Gget_info`'s `max_corder`.
 
-use std::ffi::{CStr, CString, c_char, c_void};
-use std::mem::MaybeUninit;
 use std::path::Path;
-use std::sync::{Mutex, MutexGuard};
 
 use hdf5::file::LibraryVersion;
-use hdf5::plist::file_create::AttrCreationOrder;
-use hdf5::plist::file_create::FileCreateBuilder;
-use hdf5::plist::group_create::GroupCreate;
-use hdf5_pure::{AttrValue, Error, File};
-use hdf5_sys::h5::H5_index_t::{self, H5_INDEX_CRT_ORDER, H5_INDEX_NAME};
-use hdf5_sys::h5::H5_iter_order_t::H5_ITER_INC;
-use hdf5_sys::h5::{herr_t, hsize_t};
-use hdf5_sys::h5a::{
-    H5A_info_t, H5Aclose, H5Aget_info_by_name, H5Aget_name, H5Aiterate2, H5Aopen_by_idx,
+use hdf5::plist::group_create::{
+    AttrCreationOrder, GroupCreate, GroupCreateBuilder, LinkCreationOrder,
 };
-use hdf5_sys::h5g::{H5G_info_t, H5Gget_info};
-use hdf5_sys::h5i::hid_t;
-use hdf5_sys::h5l::{H5L_info_t, H5Literate};
-use hdf5_sys::h5p::{H5P_DEFAULT, H5Pset_attr_creation_order, H5Pset_link_creation_order};
+use hdf5::{IndexType, IterationOrder, LinkInfo};
+use hdf5_pure::{AttrValue, Error, File};
 use tempfile::tempdir;
-
-// The raw calls below, each marked with the upstream issue that would remove
-// it, bypass the lock the wrapper serializes its own calls through. Every
-// C-library use in this file takes this guard, so a raw call never races a
-// wrapper call on another test thread. Poisoning is ignored: a panic in one
-// test must not cascade into the others.
-static C_LIB: Mutex<()> = Mutex::new(());
-
-fn c_lib_guard() -> MutexGuard<'static, ()> {
-    C_LIB.lock().unwrap_or_else(|e| e.into_inner())
-}
-
-fn cstr(s: &str) -> CString {
-    CString::new(s).expect("a test name holds no NUL")
-}
 
 /// Whether the object creation property list should also index creation order,
 /// which is what adds the creation-order B-tree once attributes go dense.
@@ -68,10 +41,21 @@ enum Indexed {
 }
 
 impl Indexed {
-    fn flags(self) -> AttrCreationOrder {
+    /// The attribute creation-order property: tracked under either variant, and
+    /// indexed under [`Indexed::Yes`].
+    fn attr_order(self) -> AttrCreationOrder {
         match self {
-            Self::No => AttrCreationOrder::TRACKED,
-            Self::Yes => AttrCreationOrder::TRACKED | AttrCreationOrder::INDEXED,
+            Self::No => AttrCreationOrder::Tracked,
+            Self::Yes => AttrCreationOrder::Indexed,
+        }
+    }
+
+    /// The link creation-order property: tracked under either variant, and
+    /// indexed under [`Indexed::Yes`].
+    fn link_order(self) -> LinkCreationOrder {
+        match self {
+            Self::No => LinkCreationOrder::Tracked,
+            Self::Yes => LinkCreationOrder::Indexed,
         }
     }
 }
@@ -79,17 +63,12 @@ impl Indexed {
 /// A group creation property list tracking attribute creation order, and link
 /// creation order too when `links`.
 fn tracking_gcpl(indexed: Indexed, links: bool) -> GroupCreate {
-    let plist = GroupCreate::try_new().expect("a group creation property list");
-    let flags = indexed.flags().bits();
-    // TODO: https://github.com/metno/hdf5-rust/issues/229 and https://github.com/metno/hdf5-rust/issues/230
-    // Safety: a live property list id and the flags the C library defines.
-    unsafe {
-        assert_eq!(H5Pset_attr_creation_order(plist.id(), flags), 0);
-        if links {
-            assert_eq!(H5Pset_link_creation_order(plist.id(), flags), 0);
-        }
+    let mut builder = GroupCreateBuilder::new();
+    builder.attr_creation_order(indexed.attr_order());
+    if links {
+        builder.link_creation_order(indexed.link_order());
     }
-    plist
+    builder.finish().expect("a group creation property list")
 }
 
 /// Write a file whose group `/g` and dataset `/d` both track attribute creation
@@ -99,10 +78,9 @@ fn tracking_gcpl(indexed: Indexed, links: bool) -> GroupCreate {
 /// The file creation property list carries the same setting so the root group
 /// tracks it too, which is what h5py's `File(..., track_order=True)` does.
 fn write_tracked(path: &Path, names: &[String], indexed: Indexed) {
-    let _c = c_lib_guard();
     let file = hdf5::File::with_options()
         .with_fapl(|p| p.libver_bounds(LibraryVersion::V18, LibraryVersion::latest()))
-        .with_fcpl(|p| p.attr_creation_order(indexed.flags()))
+        .with_fcpl(|p| p.attr_creation_order(indexed.attr_order()))
         .create(path)
         .unwrap_or_else(|e| panic!("create {}: {e}", path.display()));
     let group = file
@@ -112,7 +90,7 @@ fn write_tracked(path: &Path, names: &[String], indexed: Indexed) {
         .expect("create group");
     let dataset = file
         .new_dataset::<i32>()
-        .with_dcpl(|p| p.attr_creation_order(indexed.flags()))
+        .with_dcpl(|p| p.attr_creation_order(indexed.attr_order()))
         .shape([4])
         .create("d")
         .expect("create dataset");
@@ -134,22 +112,12 @@ fn write_tracked(path: &Path, names: &[String], indexed: Indexed) {
 /// A file whose group `/g` tracks *link* creation order, as netCDF-4 writes,
 /// holding one dataset per name in `links`, created in that order.
 fn write_link_tracked(path: &Path, links: &[&str]) {
-    let _c = c_lib_guard();
-    let flags = Indexed::Yes.flags();
-    let fcpl = FileCreateBuilder::new()
-        .attr_creation_order(flags)
-        .finish()
-        .expect("a file creation property list");
-    // TODO: https://github.com/metno/hdf5-rust/issues/230
-    // Safety: a live property list id and the flags the C library defines.
-    let rc = unsafe { H5Pset_link_creation_order(fcpl.id(), flags.bits()) };
-    assert_eq!(rc, 0);
-    let mut builder = hdf5::File::with_options();
-    builder.with_fapl(|p| p.libver_bounds(LibraryVersion::V18, LibraryVersion::latest()));
-    builder
-        .set_fcpl(&fcpl)
-        .expect("set the file creation property list");
-    let file = builder
+    let file = hdf5::File::with_options()
+        .with_fapl(|p| p.libver_bounds(LibraryVersion::V18, LibraryVersion::latest()))
+        .with_fcpl(|p| {
+            p.attr_creation_order(Indexed::Yes.attr_order())
+                .link_creation_order(Indexed::Yes.link_order())
+        })
         .create(path)
         .unwrap_or_else(|e| panic!("create {}: {e}", path.display()));
     let group = file
@@ -167,73 +135,15 @@ fn write_link_tracked(path: &Path, links: &[&str]) {
     file.close().unwrap();
 }
 
-/// Collect attribute names into the `Vec<String>` `op_data` points at.
-unsafe extern "C" fn collect(
-    _loc: hid_t,
-    name: *const c_char,
-    _info: *const H5A_info_t,
-    op_data: *mut c_void,
-) -> herr_t {
-    // Safety: every caller passes a `&mut Vec<String>` as `op_data`, and the C
-    // library hands back a NUL-terminated attribute name.
-    unsafe {
-        let names = &mut *op_data.cast::<Vec<String>>();
-        names.push(CStr::from_ptr(name).to_string_lossy().into_owned());
-    }
-    0
-}
-
-/// A link as the C library lists it: its name, and its creation index when the
-/// group records one.
-struct Link {
-    name: String,
-    creation_index: Option<i64>,
-}
-
-/// Collect links into the `Vec<Link>` `op_data` points at.
-unsafe extern "C" fn collect_link(
-    _group: hid_t,
-    name: *const c_char,
-    info: *const H5L_info_t,
-    op_data: *mut c_void,
-) -> herr_t {
-    // Safety: every caller passes a `&mut Vec<Link>` as `op_data`, and the C
-    // library hands back a NUL-terminated link name and a filled-in info.
-    unsafe {
-        let links = &mut *op_data.cast::<Vec<Link>>();
-        let info = &*info;
-        links.push(Link {
-            name: CStr::from_ptr(name).to_string_lossy().into_owned(),
-            creation_index: (info.corder_valid != 0).then_some(info.corder),
-        });
-    }
-    0
-}
-
-/// The links of `group` in `path`, in the order `idx_type` orders them.
-fn links_of(path: &Path, group: &str, idx_type: H5_index_t) -> Vec<Link> {
-    let _c = c_lib_guard();
+/// The links of `group` in `path`, each with the info the C library reports for
+/// it, ordered by `index_type`.
+fn links_of(path: &Path, group: &str, index_type: IndexType) -> Vec<(String, LinkInfo)> {
     let file = hdf5::File::open(path)
         .unwrap_or_else(|e| panic!("the C library opens {}: {e}", path.display()));
-    let g = file
-        .group(group)
-        .unwrap_or_else(|e| panic!("the C library opens /{group}: {e}"));
-    let mut links: Vec<Link> = Vec::new();
-    let mut idx: hsize_t = 0;
-    // TODO: https://github.com/metno/hdf5-rust/issues/228
-    // Safety: `collect_link` interprets `op_data` as the `Vec<Link>` passed here.
-    let rc = unsafe {
-        H5Literate(
-            g.id(),
-            idx_type,
-            H5_ITER_INC,
-            &raw mut idx,
-            Some(collect_link),
-            (&raw mut links).cast(),
-        )
-    };
-    assert_eq!(rc, 0, "the C library iterates the links of /{group}");
-    links
+    file.group(group)
+        .unwrap_or_else(|e| panic!("the C library opens /{group}: {e}"))
+        .links(index_type, IterationOrder::Increasing)
+        .unwrap_or_else(|e| panic!("the C library iterates the links of /{group}: {e}"))
 }
 
 /// An open handle to `/g` or `/d`, whichever `path` names.
@@ -244,7 +154,6 @@ struct Owner {
 
 impl Owner {
     fn open(path: &Path, object: &str) -> Self {
-        let _c = c_lib_guard();
         let file = hdf5::File::open(path)
             .unwrap_or_else(|e| panic!("the C library opens {}: {e}", path.display()));
         let location = if object == "g" {
@@ -264,25 +173,11 @@ impl Owner {
         }
     }
 
-    /// Attribute names in the order `idx_type` orders them.
-    fn names(&self, idx_type: H5_index_t) -> Vec<String> {
-        let _c = c_lib_guard();
-        let mut names: Vec<String> = Vec::new();
-        let mut idx: hsize_t = 0;
-        // TODO: https://github.com/metno/hdf5-rust/issues/231
-        // Safety: `collect` interprets `op_data` as the `Vec<String>` passed here.
-        let rc = unsafe {
-            H5Aiterate2(
-                self.location.id(),
-                idx_type,
-                H5_ITER_INC,
-                &raw mut idx,
-                Some(collect),
-                (&raw mut names).cast(),
-            )
-        };
-        assert_eq!(rc, 0, "the C library iterates attributes");
-        names
+    /// Attribute names ordered by `index_type`.
+    fn names(&self, index_type: IndexType) -> Vec<String> {
+        self.location
+            .attr_names_by(index_type, IterationOrder::Increasing)
+            .unwrap_or_else(|e| panic!("the C library iterates attributes: {e}"))
     }
 
     /// The name of the `n`th attribute in creation order, read through
@@ -296,44 +191,30 @@ impl Owner {
     /// whenever the Attribute Info message names one — so a dense object whose
     /// message declares the index has to actually carry it.
     fn name_by_creation_index(&self, n: u64) -> String {
-        let _c = c_lib_guard();
-        let here = cstr(".");
-        // TODO: https://github.com/metno/hdf5-rust/issues/231
-        // Safety: the attribute id is closed below. The buffer is sized by the
-        // length the library reports for the name.
-        unsafe {
-            let attr = H5Aopen_by_idx(
-                self.location.id(),
-                here.as_ptr(),
-                H5_INDEX_CRT_ORDER,
-                H5_ITER_INC,
-                n,
-                H5P_DEFAULT,
-                H5P_DEFAULT,
-            );
-            assert!(
-                attr > 0,
-                "the C library opens attribute {n} by creation order"
-            );
-            let len = H5Aget_name(attr, 0, std::ptr::null_mut());
-            assert!(len > 0, "the C library reports a name length");
-            let mut buf = vec![0u8; len as usize + 1];
-            let got = H5Aget_name(attr, buf.len(), buf.as_mut_ptr().cast());
-            assert_eq!(got, len, "the C library reads the name");
-            H5Aclose(attr);
-            buf.truncate(len as usize);
-            String::from_utf8(buf).expect("a fixture name is UTF-8")
-        }
+        self.location
+            .attr_by_index(IndexType::CreationOrder, IterationOrder::Increasing, n)
+            .unwrap_or_else(|e| panic!("the C library opens attribute {n} by creation order: {e}"))
+            .name()
     }
 
     /// The value of the integer attribute `name`.
     fn value(&self, name: &str) -> i32 {
-        let _c = c_lib_guard();
         self.location
             .attr(name)
             .unwrap_or_else(|e| panic!("the C library opens attribute {name}: {e}"))
             .read_scalar::<i32>()
             .unwrap_or_else(|e| panic!("the C library reads attribute {name}: {e}"))
+    }
+
+    /// The creation index the C library reports for the attribute `name`.
+    fn creation_index(&self, name: &str) -> u32 {
+        self.location
+            .attr_info(name)
+            .unwrap_or_else(|e| panic!("the C library reads info for attribute {name}: {e}"))
+            .creation_order
+            .unwrap_or_else(|| {
+                panic!("{name} carries no creation index, so the object stopped tracking the order")
+            })
     }
 }
 
@@ -345,27 +226,17 @@ fn links_in_creation_order(path: &Path) -> (Vec<String>, i64) {
 /// The names of `group`'s links in link creation order, and the highest creation
 /// index the group has ever assigned — the counter a deletion must leave alone.
 fn links_in_creation_order_of(path: &Path, group: &str) -> (Vec<String>, i64) {
-    let names = links_of(path, group, H5_INDEX_CRT_ORDER)
+    let names = links_of(path, group, IndexType::CreationOrder)
         .into_iter()
-        .map(|link| link.name)
+        .map(|(name, _)| name)
         .collect();
-    let _c = c_lib_guard();
     let file = hdf5::File::open(path)
         .unwrap_or_else(|e| panic!("the C library opens {}: {e}", path.display()));
-    let g = file
+    let info = file
         .group(group)
-        .unwrap_or_else(|e| panic!("the C library opens /{group}: {e}"));
-    let mut info = MaybeUninit::<H5G_info_t>::uninit();
-    // TODO: https://github.com/metno/hdf5-rust/issues/233
-    // Safety: a live group id, and `info` is written by the call before it is read.
-    let info = unsafe {
-        assert_eq!(
-            H5Gget_info(g.id(), info.as_mut_ptr()),
-            0,
-            "the C library reads group info"
-        );
-        info.assume_init()
-    };
+        .unwrap_or_else(|e| panic!("the C library opens /{group}: {e}"))
+        .info()
+        .unwrap_or_else(|e| panic!("the C library reads info for /{group}: {e}"));
     (names, info.max_corder)
 }
 
@@ -378,44 +249,16 @@ fn link_creation_index(path: &Path, link: &str) -> i64 {
 /// must be one the group actually records: a link written without one reads back
 /// with `corder_valid` clear, and the assertion below is what catches that.
 fn link_creation_index_of(path: &Path, group: &str, link: &str) -> i64 {
-    let found = links_of(path, group, H5_INDEX_NAME)
+    let (_, info) = links_of(path, group, IndexType::Name)
         .into_iter()
-        .find(|l| l.name == link)
+        .find(|(name, _)| name == link)
         .unwrap_or_else(|| panic!("/{group}/{link} is not a link the C library lists"));
-    found.creation_index.unwrap_or_else(|| {
+    info.creation_order.unwrap_or_else(|| {
         panic!(
             "/{group}/{link} carries no creation index, so it is unnumbered in the group's \
              link order"
         )
     })
-}
-
-/// The creation index the C library reports for attribute `attr` of `/object`.
-fn creation_index(path: &Path, object: &str, attr: &str) -> u32 {
-    let _c = c_lib_guard();
-    let file = hdf5::File::open(path)
-        .unwrap_or_else(|e| panic!("the C library opens {}: {e}", path.display()));
-    let oname = cstr(object);
-    let aname = cstr(attr);
-    let mut info = MaybeUninit::<H5A_info_t>::uninit();
-    // TODO: https://github.com/metno/hdf5-rust/issues/231
-    // Safety: a live file id, and `info` is written by the call before it is read.
-    let info = unsafe {
-        let rc = H5Aget_info_by_name(
-            file.id(),
-            oname.as_ptr(),
-            aname.as_ptr(),
-            info.as_mut_ptr(),
-            H5P_DEFAULT,
-        );
-        assert_eq!(rc, 0, "the C library reads info for {object}/{attr}");
-        info.assume_init()
-    };
-    assert!(
-        info.corder_valid != 0,
-        "{object}/{attr} carries no creation index, so the object stopped tracking the order",
-    );
-    info.corder
 }
 
 fn names(count: usize) -> Vec<String> {
@@ -451,22 +294,21 @@ fn an_object_tracking_creation_order_can_be_edited_at_all() {
     for object in OBJECTS {
         let owner = Owner::open(&p, object);
         assert_eq!(
-            owner.names(H5_INDEX_NAME),
+            owner.names(IndexType::Name),
             ["a00", "a01", "a02", "added"],
             "/{object} lost an attribute by name",
         );
         // The new attribute takes the next creation index, so it iterates last —
         // which is exactly what h5py's `track_order` iteration shows.
         assert_eq!(
-            owner.names(H5_INDEX_CRT_ORDER),
+            owner.names(IndexType::CreationOrder),
             ["a00", "a01", "a02", "added"],
             "/{object} did not put the new attribute last in creation order",
         );
         assert_eq!(owner.value("added"), 99);
         assert_eq!(owner.value("a01"), 1, "/{object} lost an existing value");
+        assert_eq!(owner.creation_index("added"), 3);
     }
-    assert_eq!(creation_index(&p, "g", "added"), 3);
-    assert_eq!(creation_index(&p, "d", "added"), 3);
 }
 
 #[test]
@@ -494,14 +336,13 @@ fn overwriting_an_attribute_keeps_the_creation_index_it_had() {
     for object in OBJECTS {
         let owner = Owner::open(&p, object);
         assert_eq!(
-            owner.names(H5_INDEX_CRT_ORDER),
+            owner.names(IndexType::CreationOrder),
             ["a00", "a01", "a02"],
             "/{object} moved an overwritten attribute in the creation order",
         );
         assert_eq!(owner.value("a00"), -1);
+        assert_eq!(owner.creation_index("a00"), 0);
     }
-    assert_eq!(creation_index(&p, "g", "a00"), 0);
-    assert_eq!(creation_index(&p, "d", "a00"), 0);
 }
 
 #[test]
@@ -531,15 +372,18 @@ fn deleting_an_attribute_leaves_a_gap_rather_than_renumbering() {
 
     for object in OBJECTS {
         let owner = Owner::open(&p, object);
-        assert_eq!(owner.names(H5_INDEX_CRT_ORDER), ["a00", "a02", "added"]);
-        assert_eq!(creation_index(&p, object, "a00"), 0);
         assert_eq!(
-            creation_index(&p, object, "a02"),
+            owner.names(IndexType::CreationOrder),
+            ["a00", "a02", "added"]
+        );
+        assert_eq!(owner.creation_index("a00"), 0);
+        assert_eq!(
+            owner.creation_index("a02"),
             2,
             "/{object} renumbered the attributes that survived",
         );
         assert_eq!(
-            creation_index(&p, object, "added"),
+            owner.creation_index("added"),
             4,
             "/{object} lowered the creation-index counter a deletion must leave alone",
         );
@@ -576,11 +420,11 @@ fn a_compact_set_crossing_the_threshold_carries_its_creation_order_into_the_heap
     for object in OBJECTS {
         let owner = Owner::open(&p, object);
         assert_eq!(
-            owner.names(H5_INDEX_CRT_ORDER),
+            owner.names(IndexType::CreationOrder),
             expected,
             "/{object} lost the creation order on the way into the heap",
         );
-        assert_eq!(owner.names(H5_INDEX_NAME), expected);
+        assert_eq!(owner.names(IndexType::Name), expected);
         // Straight through the creation-order B-tree, which this object's
         // Attribute Info message declares.
         for (n, name) in expected.iter().enumerate() {
@@ -594,7 +438,7 @@ fn a_compact_set_crossing_the_threshold_carries_its_creation_order_into_the_heap
             let created: u32 = name[1..].parse().expect("a fixture name is a index");
             assert_eq!(owner.value(name), created as i32, "/{object} {name}");
             assert_eq!(
-                creation_index(&p, object, name),
+                owner.creation_index(name),
                 created,
                 "/{object} gave {name} an index that is not the order it was created in",
             );
@@ -621,9 +465,9 @@ fn a_tracked_set_goes_dense_without_a_creation_order_index_when_the_object_has_n
     }
 
     let owner = Owner::open(&p, "d");
-    assert_eq!(owner.names(H5_INDEX_NAME), names(13));
+    assert_eq!(owner.names(IndexType::Name), names(13));
     for (i, name) in names(13).iter().enumerate() {
-        assert_eq!(creation_index(&p, "d", name), i as u32);
+        assert_eq!(owner.creation_index(name), i as u32);
     }
 }
 
@@ -642,7 +486,7 @@ fn an_object_already_dense_keeps_its_creation_order_across_an_edit() {
     for object in OBJECTS {
         let owner = Owner::open(&p, object);
         assert_eq!(
-            owner.names(H5_INDEX_CRT_ORDER),
+            owner.names(IndexType::CreationOrder),
             expected,
             "/{object} reordered a dense set that was already tracked",
         );
@@ -655,9 +499,9 @@ fn an_object_already_dense_keeps_its_creation_order_across_an_edit() {
             );
         }
         for (i, name) in names(12).iter().enumerate() {
-            assert_eq!(creation_index(&p, object, name), i as u32);
+            assert_eq!(owner.creation_index(name), i as u32);
         }
-        assert_eq!(creation_index(&p, object, "added"), 12);
+        assert_eq!(owner.creation_index("added"), 12);
     }
 }
 
