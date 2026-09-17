@@ -18,12 +18,10 @@
 //! is the only thing that can say the file still means what it meant.
 
 use std::path::Path;
-use std::sync::{Mutex, MutexGuard};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use hdf5::plist::group_create::GroupCreate;
+use hdf5::plist::group_create::{AttrPhaseChange, GroupCreate, GroupCreateBuilder};
 use hdf5_pure::{AttrValue, File};
-use hdf5_sys::h5p::{H5Pget_attr_phase_change, H5Pset_attr_phase_change};
 use tempfile::tempdir;
 
 use hdf5_pure_crosscheck::create_v18;
@@ -31,30 +29,19 @@ use hdf5_pure_crosscheck::create_v18;
 /// A phase-change pair the C library would never write by default (its defaults
 /// are 8 and 6), and one it therefore stores in the header prefix rather than
 /// leaving implied.
-const MAX_COMPACT: u32 = 32;
-const MIN_DENSE: u32 = 24;
+const PHASE_CHANGE: AttrPhaseChange = AttrPhaseChange {
+    max_compact: 32,
+    min_dense: 24,
+};
 
 const OBJECTS: [&str; 2] = ["/g", "/d"];
 
-// The two raw calls below, each marked with the upstream issue that would
-// remove it, bypass the lock the wrapper serializes its own calls through.
-// Every C-library use in this file takes this guard, so a raw call never races
-// a wrapper call on another test thread. Poisoning is ignored: a panic in one
-// test must not cascade into the others.
-static C_LIB: Mutex<()> = Mutex::new(());
-
-fn c_lib_guard() -> MutexGuard<'static, ()> {
-    C_LIB.lock().unwrap_or_else(|e| e.into_inner())
-}
-
 /// A group creation property list carrying the phase-change pair.
 fn gcpl_with_phase_change() -> GroupCreate {
-    let plist = GroupCreate::try_new().expect("a group creation property list");
-    // TODO: https://github.com/metno/hdf5-rust/issues/229
-    // Safety: a live property list id and two in-range thresholds.
-    let rc = unsafe { H5Pset_attr_phase_change(plist.id(), MAX_COMPACT, MIN_DENSE) };
-    assert_eq!(rc, 0, "H5Pset_attr_phase_change");
-    plist
+    GroupCreateBuilder::new()
+        .attr_phase_change(PHASE_CHANGE.max_compact, PHASE_CHANGE.min_dense)
+        .finish()
+        .expect("a group creation property list")
 }
 
 /// A file with a group `/g` and a dataset `/d`, each carrying one integer
@@ -63,7 +50,6 @@ fn gcpl_with_phase_change() -> GroupCreate {
 /// Nothing here asks for timestamps: the C library stores them on every version 2
 /// header it writes, which is the whole point.
 fn write_fixture(path: &Path) {
-    let _c = c_lib_guard();
     let file = create_v18(path);
     let group = file
         .create_group_builder()
@@ -75,7 +61,7 @@ fn write_fixture(path: &Path) {
     let dataset = file
         .new_dataset::<i32>()
         .obj_track_times(true)
-        .with_dcpl(|p| p.attr_phase_change(MAX_COMPACT, MIN_DENSE))
+        .with_dcpl(|p| p.attr_phase_change(PHASE_CHANGE.max_compact, PHASE_CHANGE.min_dense))
         .shape([4])
         .create("d")
         .expect("create dataset");
@@ -94,7 +80,6 @@ fn write_fixture(path: &Path) {
 
 /// The object info the C library reports for `object` in `path`.
 fn object_info(path: &Path, object: &str) -> hdf5::LocationInfo {
-    let _c = c_lib_guard();
     hdf5::File::open(path)
         .unwrap_or_else(|e| panic!("the C library opens {}: {e}", path.display()))
         .loc_info_by_name(object)
@@ -103,31 +88,21 @@ fn object_info(path: &Path, object: &str) -> hdf5::LocationInfo {
 
 /// The attribute phase-change thresholds the C library reports for `object`'s
 /// creation property list.
-fn phase_change(path: &Path, object: &str) -> (u32, u32) {
-    let _c = c_lib_guard();
+fn phase_change(path: &Path, object: &str) -> AttrPhaseChange {
     let file = hdf5::File::open(path)
         .unwrap_or_else(|e| panic!("the C library opens {}: {e}", path.display()));
     if object == "/g" {
-        let gcpl = file.group(object).unwrap().gcpl().unwrap();
-        let (mut max_compact, mut min_dense) = (0u32, 0u32);
-        // TODO: https://github.com/metno/hdf5-rust/issues/229
-        // Safety: a live property list id and two out-pointers.
-        let rc = unsafe {
-            H5Pget_attr_phase_change(gcpl.id(), &raw mut max_compact, &raw mut min_dense)
-        };
-        assert_eq!(
-            rc, 0,
-            "the C library reads {object}'s phase-change thresholds"
-        );
-        (max_compact, min_dense)
+        file.group(object)
+            .unwrap()
+            .gcpl()
+            .unwrap()
+            .attr_phase_change()
     } else {
-        let pair = file
-            .dataset(object)
+        file.dataset(object)
             .unwrap()
             .dcpl()
             .unwrap()
-            .attr_phase_change();
-        (pair.max_compact, pair.min_dense)
+            .attr_phase_change()
     }
 }
 
@@ -158,7 +133,7 @@ fn an_in_place_edit_keeps_a_headers_times_and_phase_change_thresholds() {
         );
         assert_eq!(
             phase_change(&p, object),
-            (MAX_COMPACT, MIN_DENSE),
+            PHASE_CHANGE,
             "{object} was written without the phase-change block",
         );
     }
@@ -207,7 +182,7 @@ fn an_in_place_edit_keeps_a_headers_times_and_phase_change_thresholds() {
         );
         assert_eq!(
             phase_change(&p, object),
-            (MAX_COMPACT, MIN_DENSE),
+            PHASE_CHANGE,
             "{object} lost the attribute phase-change thresholds the header stored",
         );
     }
