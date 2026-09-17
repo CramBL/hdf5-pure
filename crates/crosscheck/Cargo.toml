@@ -12,6 +12,7 @@ build = "build.rs"
 [features]
 serde = ["hdf5-pure/serde"]
 ndarray = ["hdf5-pure/ndarray"]
+hdf5 = []
 # Which release series of libhdf5 the tests link, from 1.10 up: none of them
 # is 1.8. Each implies the one below, so a test gates on the lowest series that
 # has what it needs. The interop recipes derive it from the version they link,

@@ -176,14 +176,6 @@ pub enum Datatype {
     },
 }
 
-// ---- Display ----
-//
-// These types land in error messages, so `Display` is the short form: the width
-// and class, plus the fields that depart from the ordinary — a big-endian order,
-// a bit span narrower than the type. A string always names its charset and
-// padding, ordinary or not, because they decide how its bytes read. `Debug`
-// keeps the full record.
-
 impl fmt::Display for DatatypeByteOrder {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.pad(match self {
@@ -225,7 +217,7 @@ impl fmt::Display for ReferenceType {
 /// The width in bits of a `size`-byte type.
 ///
 /// Widens first: `size` is an on-disk `u32`, so a crafted size near [`u32::MAX`]
-/// would overflow a `u32` multiply (issue #140).
+/// would overflow a `u32` multiply.
 fn bit_width(size: u32) -> u64 {
     u64::from(size) * 8
 }

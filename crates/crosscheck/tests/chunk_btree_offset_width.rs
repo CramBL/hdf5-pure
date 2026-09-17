@@ -1,3 +1,4 @@
+#![cfg(feature = "hdf5")]
 use std::path::Path;
 
 use hdf5::plist::file_create::{Sizeof, SizeofInfo};

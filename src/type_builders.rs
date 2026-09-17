@@ -24,8 +24,6 @@ use crate::object_path::ObjectPathBuf;
 use crate::scaleoffset::{FillAvailability, ScaleOffset};
 use crate::shared_message::DatatypeLocation;
 
-// ---- Datatype constructors ----
-
 pub fn make_f64_type() -> Datatype {
     Datatype::FloatingPoint {
         size: 8,

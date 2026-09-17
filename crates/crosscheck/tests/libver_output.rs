@@ -1,3 +1,4 @@
+#![cfg(feature = "hdf5")]
 #![cfg(all(not(target_pointer_width = "32"), target_endian = "little"))]
 //! Reference-C-library interop for the HDF5 1.8 output format
 //! (`FileBuilder::with_libver_bounds` with an upper bound of `LibVer::V18`).

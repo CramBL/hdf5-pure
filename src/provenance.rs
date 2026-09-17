@@ -15,8 +15,6 @@ use sha2::{Digest, Sha256};
 use crate::attribute::AttributeMessage;
 use crate::type_builders::{AttrValue, build_attr_message};
 
-// ---- Attribute name constants ----
-
 /// SHA-256 hex digest of the raw dataset bytes.
 pub const ATTR_SHA256: &str = "_provenance_sha256";
 /// Creator identifier (tool/user).
@@ -25,8 +23,6 @@ pub const ATTR_CREATOR: &str = "_provenance_creator";
 pub const ATTR_TIMESTAMP: &str = "_provenance_timestamp";
 /// Optional free-form description of the data source.
 pub const ATTR_SOURCE: &str = "_provenance_source";
-
-// ---- SHA-256 hashing ----
 
 /// Compute the SHA-256 digest of `data` and return the lowercase hex string.
 pub fn sha256_hex(data: &[u8]) -> String {
@@ -37,8 +33,6 @@ pub fn sha256_hex(data: &[u8]) -> String {
     }
     hex
 }
-
-// ---- Provenance metadata builder ----
 
 /// Collects provenance information to be stored as HDF5 attributes.
 pub struct Provenance {
@@ -71,8 +65,6 @@ impl Provenance {
         attrs
     }
 }
-
-// ---- Verification ----
 
 /// Outcome of checking a dataset against its stored provenance hash.
 ///
