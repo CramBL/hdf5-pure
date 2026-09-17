@@ -30,13 +30,13 @@ test-hdf5-all FEATURES="serde,ndarray": (test-hdf5 "1.8" FEATURES) (test-hdf5 "1
 test-hdf5 VERSION FEATURES="serde,ndarray" *ARGS: (hdf5-build VERSION)
     release_feature="$(just interop::hdf5-release-feature {{ VERSION }})" && \
     eval "$(just interop::hdf5-env {{ VERSION }})" && \
-    cargo nextest run --locked {{ crosscheck }} --features "hdf5,hdf5_sys,{{ FEATURES }}$release_feature" {{ ARGS }}
+    cargo nextest run --locked {{ crosscheck }} --features "hdf5,{{ FEATURES }}$release_feature" {{ ARGS }}
 
 # Clippy over the crosschecks, linking libhdf5 VERSION.
 lint-hdf5 VERSION FEATURES="serde,ndarray":
     release_feature="$(just interop::hdf5-release-feature {{ VERSION }})" && \
     eval "$(just interop::hdf5-env {{ VERSION }})" && \
-    cargo clippy --locked {{ crosscheck }} --all-targets --features "hdf5,hdf5_sys,{{ FEATURES }}$release_feature" -- -D warnings
+    cargo clippy --locked {{ crosscheck }} --all-targets --features "hdf5,{{ FEATURES }}$release_feature" -- -D warnings
 
 # The crosschecks linking the libhdf5 `hdf5-metno` bundles, built from source
 # on first use. Needs no HDF5 on the host.
@@ -46,7 +46,7 @@ test-bundled *ARGS:
 # The crosschecks linking the HDF5 installed under HDF5_DIR. Pass the feature
 # naming its release series, as in `--features __hdf5-1.14`.
 test-external-hdf5 *ARGS:
-    cargo nextest run --locked {{ crosscheck }} --features hdf5,hdf5_sys,serde,ndarray {{ ARGS }}
+    cargo nextest run --locked {{ crosscheck }} --features hdf5,serde,ndarray {{ ARGS }}
 
 test-matio *ARGS:
     cargo nextest run --locked {{ crosscheck }} --features serde,__matio --test matio_crosscheck {{ ARGS }}
