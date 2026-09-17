@@ -13,12 +13,24 @@ use std::path::Path;
 use hdf5::Extent;
 use hdf5::dataset::ChunkOpts;
 use hdf5::file::LibraryVersion;
+use hdf5::filters::Filter as CFilter;
 use rstest::rstest;
 
 #[derive(Clone, Copy, Debug)]
 enum Filter {
     Deflate,
     Shuffle,
+    ShuffleDeflate,
+}
+
+impl Filter {
+    fn pipeline(self) -> Vec<CFilter> {
+        match self {
+            Self::Deflate => vec![CFilter::Deflate(DEFLATE_LEVEL)],
+            Self::Shuffle => vec![CFilter::Shuffle],
+            Self::ShuffleDeflate => vec![CFilter::Shuffle, CFilter::Deflate(DEFLATE_LEVEL)],
+        }
+    }
 }
 
 fn c_create(path: &Path, filter: Filter, shape: &[usize], chunk: &[usize], data: &[i32]) {
@@ -28,8 +40,9 @@ fn c_create(path: &Path, filter: Filter, shape: &[usize], chunk: &[usize], data:
         .unwrap();
     let builder = file.new_dataset::<i32>();
     let builder = match filter {
-        Filter::Deflate => builder.deflate(6),
+        Filter::Deflate => builder.deflate(DEFLATE_LEVEL),
         Filter::Shuffle => builder.shuffle(),
+        Filter::ShuffleDeflate => builder.shuffle().deflate(DEFLATE_LEVEL),
     };
     let ds = builder
         .chunk(chunk.to_vec())
@@ -54,6 +67,11 @@ fn extents_the_c_library_accepts(shape: &[usize], chunk: &[usize]) -> Vec<Extent
             }
         })
         .collect()
+}
+
+fn read_c_creation_properties(path: &Path) -> (Vec<CFilter>, Option<ChunkOpts>) {
+    let ds = hdf5::File::open(path).unwrap().dataset("d").unwrap();
+    (ds.filters(), ds.dcpl().unwrap().chunk_opts())
 }
 
 fn read_c(path: &Path) -> Vec<i32> {
@@ -85,6 +103,8 @@ fn read_pure(path: &Path) -> Vec<i32> {
 #[case(Filter::Deflate, &[6, 9], &[2, 3])]
 #[case(Filter::Deflate, &[4, 5], &[2, 3])]
 #[case(Filter::Shuffle, &[5, 6], &[2, 3])]
+#[case(Filter::ShuffleDeflate, &[10], &[4])]
+#[case(Filter::ShuffleDeflate, &[5, 5], &[2, 3])]
 fn a_dataset_exempting_its_partial_chunks_from_the_filters_reads_back(
     #[case] filter: Filter,
     #[case] shape: &[usize],
@@ -97,6 +117,15 @@ fn a_dataset_exempting_its_partial_chunks_from_the_filters_reads_back(
         .collect();
     c_create(&path, filter, shape, chunk, &data);
 
+    assert_eq!(
+        read_c_creation_properties(&path),
+        (
+            filter.pipeline(),
+            Some(ChunkOpts::DONT_FILTER_PARTIAL_CHUNKS)
+        )
+    );
     assert_eq!(read_c(&path), data);
     assert_eq!(read_pure(&path), data);
 }
+
+const DEFLATE_LEVEL: u8 = 6;
