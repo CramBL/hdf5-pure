@@ -9,20 +9,16 @@
 //! and the newest format it has, and this crate reads each back.
 //!
 //! This is the one crosscheck that compiles against every release, 1.8
-//! included, so the bounds on the C side go through the raw property list
-//! call. The wrapper's builder for them is gated to 1.10.2.
+//! included, and a test whose expected result differs before 1.10 is gated on
+//! the `__hdf5-1.10` feature.
 
 use std::path::Path;
 
-use hdf5::plist::FileAccess;
+use hdf5::file::LibraryVersion;
 use hdf5::types::{FixedAscii, VarLenArray};
 use hdf5::{H5Type, ObjectReference, ObjectReference1, ReferencedObject};
 use hdf5_pure::mat::{self, Options};
 use hdf5_pure::{AttrValue, FileBuilder, LibVer, make_i32_type};
-use hdf5_sys::h5f::{
-    H5F_ACC_TRUNC, H5F_LIBVER_EARLIEST, H5F_LIBVER_LATEST, H5F_libver_t, H5Fcreate,
-};
-use hdf5_sys::h5p::{H5P_DEFAULT, H5Pset_libver_bounds};
 use serde::Serialize;
 use tempfile::tempdir;
 
@@ -382,33 +378,14 @@ fn the_1_10_format_this_crate_writes_is_rejected_before_1_10() {
     }
 }
 
-/// The C library's file with the given library bounds.
-///
-/// Created through the raw call: the wrapper's file builder copies a property
-/// list into its own fields, and on 1.8 it has none for the bounds.
-fn c_create(path: &Path, low: H5F_libver_t, high: H5F_libver_t) -> hdf5::File {
-    let fapl = FileAccess::try_new().expect("a file access property list");
-    let name = std::ffi::CString::new(path.to_str().expect("a temp path is UTF-8")).unwrap();
-    // TODO: https://github.com/metno/hdf5-rust/issues/226
-    // Safety: live ids, bounds the C library defines, and a file id handed to
-    // the wrapper, which closes it.
-    unsafe {
-        assert_eq!(
-            H5Pset_libver_bounds(fapl.id(), low, high),
-            0,
-            "H5Pset_libver_bounds"
-        );
-        let id = H5Fcreate(name.as_ptr(), H5F_ACC_TRUNC, H5P_DEFAULT, fapl.id());
-        assert!(id > 0, "the C library creates {}", path.display());
-        hdf5::from_id::<hdf5::File>(id).expect("a file handle")
-    }
-}
-
 /// The C library's version of the plain fixture, plus a reference dataset and
 /// a compound dataset, which this crate's whole-file writer covers through
 /// `.mat` output instead.
-fn c_write(path: &Path, low: H5F_libver_t, high: H5F_libver_t) {
-    let file = c_create(path, low, high);
+fn c_write(path: &Path, low: LibraryVersion, high: LibraryVersion) {
+    let file = hdf5::File::with_options()
+        .with_fapl(|p| p.libver_bounds(low, high))
+        .create(path)
+        .unwrap_or_else(|e| panic!("the C library creates {}: {e}", path.display()));
     file.new_attr::<FixedAscii<1>>()
         .shape(())
         .create("root_attr")
@@ -597,7 +574,7 @@ fn check_compound(path: &Path) {
 fn this_crate_reads_the_oldest_format_the_release_writes() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("oldest.h5");
-    c_write(&path, H5F_LIBVER_EARLIEST, H5F_LIBVER_LATEST);
+    c_write(&path, LibraryVersion::Earliest, LibraryVersion::latest());
     assert_eq!(superblock_version(&path), 0);
     check_c_written(&path);
     check_compound(&path);
@@ -608,7 +585,7 @@ fn this_crate_reads_the_oldest_format_the_release_writes() {
 fn this_crate_reads_the_newest_format_the_release_writes() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("newest.h5");
-    c_write(&path, H5F_LIBVER_LATEST, H5F_LIBVER_LATEST);
+    c_write(&path, LibraryVersion::latest(), LibraryVersion::latest());
     assert_eq!(superblock_version(&path), 2);
     check_c_written(&path);
     check_compound(&path);
@@ -619,7 +596,7 @@ fn this_crate_reads_the_newest_format_the_release_writes() {
 fn this_crate_reads_the_newest_format_the_release_writes() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("newest.h5");
-    c_write(&path, H5F_LIBVER_LATEST, H5F_LIBVER_LATEST);
+    c_write(&path, LibraryVersion::latest(), LibraryVersion::latest());
     assert_eq!(superblock_version(&path), 3);
     check_c_written(&path);
     check_compound(&path);
