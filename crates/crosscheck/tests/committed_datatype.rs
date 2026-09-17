@@ -18,27 +18,14 @@
 //! about itself.
 
 use std::path::Path;
-use std::sync::{Mutex, MutexGuard};
 
 use hdf5::file::LibraryVersion;
+use hdf5::plist::attribute_create::CharEncoding;
 use hdf5::{ObjectReference1, ReferencedObject};
 use hdf5_pure::{AttrValue, Datatype, File, RepackOptions};
-use hdf5_sys::h5a::{H5Aclose, H5Acreate2, H5Awrite};
-use hdf5_sys::h5p::H5P_DEFAULT;
 use tempfile::tempdir;
 
 use hdf5_pure_crosscheck::create_v18;
-
-// The one raw call below, marked with the upstream issue that would remove
-// it, bypasses the lock the wrapper serializes its own calls through. Every
-// C-library use in this file takes this guard, so a raw call never races a
-// wrapper call on another test thread. Poisoning is ignored: a panic in one
-// test must not cascade into the others.
-static C_LIB: Mutex<()> = Mutex::new(());
-
-fn c_lib_guard() -> MutexGuard<'static, ()> {
-    C_LIB.lock().unwrap_or_else(|e| e.into_inner())
-}
 
 /// What a fixture puts in the file, so every assertion below names one constant
 /// rather than repeating a literal the fixture could drift away from.
@@ -160,35 +147,26 @@ fn fill_committed_fixture(file: &hdf5::File, fixture: Fixture) {
 /// committed type when the attribute is to reference one. `None` uses a fresh
 /// transient copy, whose encoding the C library stores inline in the message.
 fn write_attr(owner: &hdf5::Location, name: &str, committed: Option<&hdf5::Datatype>, value: i32) {
-    let Some(dtype) = committed else {
-        owner
-            .new_attr::<i32>()
-            .shape([1])
-            .create(name)
-            .unwrap_or_else(|e| panic!("create attribute {name}: {e}"))
-            .write(&[value])
-            .unwrap_or_else(|e| panic!("write attribute {name}: {e}"));
-        return;
+    let builder = match committed {
+        // ASCII, because the wrapper's attribute builder defaults to UTF-8.
+        // `H5A__set_version` in `H5Aint.c` of HDF5 2.2.0 encodes version 3
+        // whenever an attribute's declared character set is not ASCII, so the
+        // default would lift the `Earliest`-bound fixture's message from
+        // version 2 to version 3, and change the character set byte of the
+        // `V18`-bound fixtures, whose low bound pins version 3 through
+        // `H5O_attr_ver_bounds`.
+        Some(dtype) => owner
+            .new_attr_builder()
+            .empty_as(dtype)
+            .char_encoding(CharEncoding::Ascii),
+        None => owner.new_attr::<i32>(),
     };
-    let space = hdf5::Dataspace::try_new([1]).expect("a one-element dataspace");
-    let transient = hdf5::Datatype::from_type::<i32>().expect("transient i32 type");
-    let cname = std::ffi::CString::new(name).unwrap();
-    // TODO: https://github.com/metno/hdf5-rust/issues/232
-    // Safety: every id is live, and the buffer is one element of the memory type.
-    unsafe {
-        let attr = H5Acreate2(
-            owner.id(),
-            cname.as_ptr(),
-            dtype.id(),
-            space.id(),
-            H5P_DEFAULT,
-            H5P_DEFAULT,
-        );
-        assert!(attr >= 0, "H5Acreate2 failed for {name}");
-        let rc = H5Awrite(attr, transient.id(), std::ptr::from_ref(&value).cast());
-        assert!(rc >= 0, "H5Awrite failed for {name}");
-        H5Aclose(attr);
-    }
+    builder
+        .shape([1])
+        .create(name)
+        .unwrap_or_else(|e| panic!("create attribute {name}: {e}"))
+        .write(&[value])
+        .unwrap_or_else(|e| panic!("write attribute {name}: {e}"));
 }
 
 /// An attribute whose datatype is a committed one reports the type it names, on
@@ -196,7 +174,6 @@ fn write_attr(owner: &hdf5::Location, name: &str, committed: Option<&hdf5::Datat
 /// zero-width type the reference used to decode as made unreadable.
 #[test]
 fn a_committed_attribute_datatype_resolves_to_the_type_it_names() {
-    let _c = c_lib_guard();
     let dir = tempdir().unwrap();
     let path = dir.path().join("committed.h5");
     write_committed_fixture(&path, EVERYTHING);
@@ -239,7 +216,6 @@ fn a_committed_attribute_datatype_resolves_to_the_type_it_names() {
 /// at all.
 #[test]
 fn a_committed_dataset_datatype_resolves_and_its_data_reads() {
-    let _c = c_lib_guard();
     let dir = tempdir().unwrap();
     let path = dir.path().join("committed.h5");
     write_committed_fixture(&path, EVERYTHING);
@@ -256,7 +232,6 @@ fn a_committed_dataset_datatype_resolves_and_its_data_reads() {
 /// both are checked here rather than one standing in for the other.
 #[test]
 fn committed_datatypes_resolve_in_dense_attribute_storage() {
-    let _c = c_lib_guard();
     let dir = tempdir().unwrap();
     let path = dir.path().join("dense.h5");
     // Comfortably past the eight-attribute threshold that moves storage to a heap.
@@ -306,7 +281,6 @@ fn committed_datatypes_resolve_in_dense_attribute_storage() {
 /// committed would be a limit with no cause.
 #[test]
 fn an_edit_passes_over_a_committed_attribute_it_does_not_touch() {
-    let _c = c_lib_guard();
     let dir = tempdir().unwrap();
     let path = dir.path().join("committed.h5");
     write_committed_fixture(&path, EVERYTHING);
@@ -366,7 +340,6 @@ fn an_edit_passes_over_a_committed_attribute_it_does_not_touch() {
 /// attribute's flags byte to see it at all.
 #[test]
 fn a_cross_file_copy_refuses_a_committed_attribute() {
-    let _c = c_lib_guard();
     let dir = tempdir().unwrap();
     let src_path = dir.path().join("committed.h5");
     let dst_path = dir.path().join("dest.h5");
@@ -397,7 +370,6 @@ fn a_cross_file_copy_refuses_a_committed_attribute() {
 /// `maxshape=(None,)` on a latest-format file.
 #[test]
 fn an_in_place_append_refuses_a_committed_element_type() {
-    let _c = c_lib_guard();
     let dir = tempdir().unwrap();
     let path = dir.path().join("appendable.h5");
     write_appendable_committed_fixture(&path);
@@ -429,7 +401,6 @@ fn write_appendable_committed_fixture(path: &Path) {
 /// slice. Two backends, one answer.
 #[test]
 fn the_streaming_backend_resolves_a_committed_datatype_too() {
-    let _c = c_lib_guard();
     let dir = tempdir().unwrap();
     let path = dir.path().join("committed.h5");
     write_committed_fixture(&path, EVERYTHING);
@@ -492,7 +463,6 @@ fn attr_type_is_committed(file: &hdf5::File, owner: &str, attr: &str) -> bool {
 /// and produced a file libhdf5 could not read *any* attributes from.
 #[test]
 fn repack_reproduces_a_committed_datatype() {
-    let _c = c_lib_guard();
     let dir = tempdir().unwrap();
     let src = dir.path().join("committed.h5");
     let dst = dir.path().join("repacked.h5");
@@ -552,7 +522,6 @@ fn repack_reproduces_a_committed_datatype() {
 /// no longer share anything. Address identity is what distinguishes them.
 #[test]
 fn users_of_one_committed_type_still_share_one_object() {
-    let _c = c_lib_guard();
     let dir = tempdir().unwrap();
     let src = dir.path().join("committed.h5");
     let dst = dir.path().join("repacked.h5");
@@ -585,7 +554,6 @@ fn users_of_one_committed_type_still_share_one_object() {
 /// same drop is an ordinary one.
 #[test]
 fn repack_refuses_dropping_a_committed_type_still_in_use() {
-    let _c = c_lib_guard();
     let dir = tempdir().unwrap();
 
     for (what, fixture, expected) in [
@@ -645,7 +613,6 @@ fn repack_refuses_dropping_a_committed_type_still_in_use() {
 /// it is false for an inline encoding no matter how correct the bytes are.
 #[test]
 fn a_committed_datatype_this_crate_writes_reads_back_as_committed() {
-    let _c = c_lib_guard();
     let dir = tempdir().unwrap();
     let path = dir.path().join("written.h5");
 
@@ -697,7 +664,6 @@ fn a_committed_datatype_this_crate_writes_reads_back_as_committed() {
 /// count is the one the C library reads back from its own file.
 #[test]
 fn a_version_1_header_reports_the_reference_count_the_c_library_wrote() {
-    let _c = c_lib_guard();
     let dir = tempdir().unwrap();
     let path = dir.path().join("committed_v1.h5");
     let file = hdf5::FileBuilder::new()
@@ -735,7 +701,6 @@ fn a_version_1_header_reports_the_reference_count_the_c_library_wrote() {
 /// `H5Tcommit2` wrote rather than from a constant.
 #[test]
 fn the_reference_count_matches_what_the_c_library_writes() {
-    let _c = c_lib_guard();
     let dir = tempdir().unwrap();
     let src = dir.path().join("committed.h5");
     write_committed_fixture(&src, EVERYTHING);
@@ -832,7 +797,6 @@ fn a_dataset_naming_a_type_the_file_does_not_commit_is_refused() {
 /// group, so the check has to look at ancestors too.
 #[test]
 fn repack_refuses_dropping_the_group_a_named_type_lives_in() {
-    let _c = c_lib_guard();
     let dir = tempdir().unwrap();
     let src = dir.path().join("nested.h5");
     let dst = dir.path().join("repacked.h5");
@@ -864,7 +828,6 @@ fn repack_refuses_dropping_the_group_a_named_type_lives_in() {
 /// to point at, and the reference was refused.
 #[test]
 fn an_object_reference_to_a_committed_type_survives_a_repack() {
-    let _c = c_lib_guard();
     let dir = tempdir().unwrap();
     let src = dir.path().join("refs.h5");
     let dst = dir.path().join("repacked.h5");
@@ -978,7 +941,6 @@ fn an_in_place_edit_refuses_a_committed_datatype() {
 /// truth.
 #[test]
 fn only_what_the_c_library_calls_a_named_datatype_is_accepted() {
-    let _c = c_lib_guard();
     let dir = tempdir().unwrap();
     let path = dir.path().join("committed.h5");
     write_committed_fixture(&path, EVERYTHING);
