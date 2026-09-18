@@ -170,14 +170,14 @@ pub(crate) trait NumericReadTarget: Sized {
 
 impl NumericReadTarget for i8 {
     type I8Conversion = NoOpConversion;
-    type I16Conversion = HardConversion;
-    type I32Conversion = HardConversion;
-    type I64Conversion = HardConversion;
+    type I16Conversion = SoftIntegerConversion;
+    type I32Conversion = SoftIntegerConversion;
+    type I64Conversion = SoftIntegerConversion;
 
-    type U8Conversion = HardConversion;
-    type U16Conversion = HardConversion;
-    type U32Conversion = HardConversion;
-    type U64Conversion = HardConversion;
+    type U8Conversion = SoftIntegerConversion;
+    type U16Conversion = SoftIntegerConversion;
+    type U32Conversion = SoftIntegerConversion;
+    type U64Conversion = SoftIntegerConversion;
 
     type F32Conversion = HardConversion;
     type F64Conversion = HardConversion;
@@ -186,13 +186,13 @@ impl NumericReadTarget for i8 {
 impl NumericReadTarget for i16 {
     type I8Conversion = HardConversion;
     type I16Conversion = NoOpConversion;
-    type I32Conversion = HardConversion;
-    type I64Conversion = HardConversion;
+    type I32Conversion = SoftIntegerConversion;
+    type I64Conversion = SoftIntegerConversion;
 
     type U8Conversion = HardConversion;
-    type U16Conversion = HardConversion;
-    type U32Conversion = HardConversion;
-    type U64Conversion = HardConversion;
+    type U16Conversion = SoftIntegerConversion;
+    type U32Conversion = SoftIntegerConversion;
+    type U64Conversion = SoftIntegerConversion;
 
     type F32Conversion = HardConversion;
     type F64Conversion = HardConversion;
@@ -202,12 +202,12 @@ impl NumericReadTarget for i32 {
     type I8Conversion = HardConversion;
     type I16Conversion = HardConversion;
     type I32Conversion = NoOpConversion;
-    type I64Conversion = HardConversion;
+    type I64Conversion = SoftIntegerConversion;
 
     type U8Conversion = HardConversion;
     type U16Conversion = HardConversion;
-    type U32Conversion = HardConversion;
-    type U64Conversion = HardConversion;
+    type U32Conversion = SoftIntegerConversion;
+    type U64Conversion = SoftIntegerConversion;
 
     type F32Conversion = HardConversion;
     type F64Conversion = HardConversion;
@@ -222,62 +222,62 @@ impl NumericReadTarget for i64 {
     type U8Conversion = HardConversion;
     type U16Conversion = HardConversion;
     type U32Conversion = HardConversion;
-    type U64Conversion = HardConversion;
+    type U64Conversion = SoftIntegerConversion;
 
     type F32Conversion = HardConversion;
     type F64Conversion = HardConversion;
 }
 
 impl NumericReadTarget for u8 {
-    type I8Conversion = HardConversion;
-    type I16Conversion = HardConversion;
-    type I32Conversion = HardConversion;
-    type I64Conversion = HardConversion;
+    type I8Conversion = SoftIntegerConversion;
+    type I16Conversion = SoftIntegerConversion;
+    type I32Conversion = SoftIntegerConversion;
+    type I64Conversion = SoftIntegerConversion;
 
     type U8Conversion = NoOpConversion;
-    type U16Conversion = HardConversion;
-    type U32Conversion = HardConversion;
-    type U64Conversion = HardConversion;
+    type U16Conversion = SoftIntegerConversion;
+    type U32Conversion = SoftIntegerConversion;
+    type U64Conversion = SoftIntegerConversion;
 
     type F32Conversion = HardConversion;
     type F64Conversion = HardConversion;
 }
 
 impl NumericReadTarget for u16 {
-    type I8Conversion = HardConversion;
-    type I16Conversion = HardConversion;
-    type I32Conversion = HardConversion;
-    type I64Conversion = HardConversion;
+    type I8Conversion = SoftIntegerConversion;
+    type I16Conversion = SoftIntegerConversion;
+    type I32Conversion = SoftIntegerConversion;
+    type I64Conversion = SoftIntegerConversion;
 
     type U8Conversion = HardConversion;
     type U16Conversion = NoOpConversion;
-    type U32Conversion = HardConversion;
-    type U64Conversion = HardConversion;
+    type U32Conversion = SoftIntegerConversion;
+    type U64Conversion = SoftIntegerConversion;
 
     type F32Conversion = HardConversion;
     type F64Conversion = HardConversion;
 }
 
 impl NumericReadTarget for u32 {
-    type I8Conversion = HardConversion;
-    type I16Conversion = HardConversion;
-    type I32Conversion = HardConversion;
-    type I64Conversion = HardConversion;
+    type I8Conversion = SoftIntegerConversion;
+    type I16Conversion = SoftIntegerConversion;
+    type I32Conversion = SoftIntegerConversion;
+    type I64Conversion = SoftIntegerConversion;
 
     type U8Conversion = HardConversion;
     type U16Conversion = HardConversion;
     type U32Conversion = NoOpConversion;
-    type U64Conversion = HardConversion;
+    type U64Conversion = SoftIntegerConversion;
 
     type F32Conversion = HardConversion;
     type F64Conversion = HardConversion;
 }
 
 impl NumericReadTarget for u64 {
-    type I8Conversion = HardConversion;
-    type I16Conversion = HardConversion;
-    type I32Conversion = HardConversion;
-    type I64Conversion = HardConversion;
+    type I8Conversion = SoftIntegerConversion;
+    type I16Conversion = SoftIntegerConversion;
+    type I32Conversion = SoftIntegerConversion;
+    type I64Conversion = SoftIntegerConversion;
 
     type U8Conversion = HardConversion;
     type U16Conversion = HardConversion;
@@ -386,6 +386,53 @@ impl<T> H5Conversion<T, T> for NoOpConversion {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct SoftIntegerConversion;
+
+macro_rules! impl_soft_from_signed {
+    ($src:ty => $($dst:ty),+ $(,)?) => {
+        $(
+            impl H5Conversion<$src, $dst> for SoftIntegerConversion {
+                const KIND: ConversionKind = ConversionKind::Soft;
+
+                #[inline]
+                fn convert(&self, value: $src) -> $dst {
+                    match <$dst>::try_from(value) {
+                        Ok(value) => value,
+                        Err(_) if value < 0 => <$dst>::MIN,
+                        Err(_) => <$dst>::MAX,
+                    }
+                }
+            }
+        )+
+    };
+}
+
+macro_rules! impl_soft_from_unsigned {
+    ($src:ty => $($dst:ty),+ $(,)?) => {
+        $(
+            impl H5Conversion<$src, $dst> for SoftIntegerConversion {
+                const KIND: ConversionKind = ConversionKind::Soft;
+
+                #[inline]
+                fn convert(&self, value: $src) -> $dst {
+                    <$dst>::try_from(value).unwrap_or(<$dst>::MAX)
+                }
+            }
+        )+
+    };
+}
+
+impl_soft_from_signed!(i8  => u8, u16, u32, u64);
+impl_soft_from_signed!(i16 => i8, u8, u16, u32, u64);
+impl_soft_from_signed!(i32 => i8, i16, u8, u16, u32, u64);
+impl_soft_from_signed!(i64 => i8, i16, i32, u8, u16, u32, u64);
+
+impl_soft_from_unsigned!(u8  => i8);
+impl_soft_from_unsigned!(u16 => u8, i8, i16);
+impl_soft_from_unsigned!(u32 => u8, u16, i8, i16, i32);
+impl_soft_from_unsigned!(u64 => u8, u16, u32, i8, i16, i32, i64);
+
 /// Native/compiler conversion.
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct HardConversion;
@@ -408,12 +455,12 @@ macro_rules! impl_hard_from {
 }
 
 // Signed integer widening and exact integer -> float conversions.
-impl_hard_from!(i8 => i16, i32, i64, f32, f64);
+impl_hard_from!(i8  => i16, i32, i64, f32, f64);
 impl_hard_from!(i16 => i32, i64, f32, f64);
 impl_hard_from!(i32 => i64, f64);
 
 // Unsigned integer widening and exact integer -> float conversions.
-impl_hard_from!(u8 => u16, u32, u64, f32, f64);
+impl_hard_from!(u8  => u16, u32, u64, f32, f64);
 impl_hard_from!(u16 => u32, u64, f32, f64);
 impl_hard_from!(u32 => u64, f64);
 
@@ -484,14 +531,7 @@ impl_hard_cast!(f64 => u8, u16, u32, u64);
 // Floating-point narrowing.
 impl_hard_cast!(f64 => f32);
 
-// Signed integer -> unsigned integer.
-impl_hard_cast!(i8 => u8, u16, u32, u64);
-impl_hard_cast!(i16 => u8, u16, u32, u64);
-impl_hard_cast!(i32 => u8, u16, u32, u64);
-impl_hard_cast!(i64 => u8, u16, u32, u64);
-
 // Unsigned integer -> signed integer.
-impl_hard_cast!(u8 => i8, i16, i32, i64);
-impl_hard_cast!(u16 => i8, i16, i32, i64);
-impl_hard_cast!(u32 => i8, i16, i32, i64);
-impl_hard_cast!(u64 => i8, i16, i32, i64);
+impl_hard_cast!(u8  => i16, i32, i64);
+impl_hard_cast!(u16 => i32, i64);
+impl_hard_cast!(u32 => i64);
