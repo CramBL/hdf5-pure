@@ -60,7 +60,7 @@ pub(crate) fn decode_standard_fixed_point_into<T>(
     dst: &mut Vec<T>,
 ) -> Result<(), FormatError>
 where
-    T: FixedPointReadTarget,
+    T: NumericReadTarget,
 {
     match (signed, width) {
         (true, StandardWidth::OneByte) => decode_fixed_width_into::<1, i8, T, T::I8Conversion>(
@@ -121,7 +121,39 @@ where
     }
 }
 
-pub(crate) trait FixedPointReadTarget: Sized {
+#[allow(
+    clippy::unreachable,
+    reason = "Hopefully we'll get to 'parse, dont validate'-ifying this at some point"
+)]
+pub(crate) fn decode_standard_floating_point_into<T>(
+    src: &[u8],
+    StandardNumericLayout { width, order }: StandardNumericLayout,
+    dst: &mut Vec<T>,
+) -> Result<(), FormatError>
+where
+    T: NumericReadTarget,
+{
+    match width {
+        StandardWidth::FourBytes => decode_fixed_width_into::<4, f32, T, T::F32Conversion>(
+            src,
+            order,
+            T::F32Conversion::default(),
+            dst,
+        ),
+        StandardWidth::EightBytes => decode_fixed_width_into::<8, f64, T, T::F64Conversion>(
+            src,
+            order,
+            T::F64Conversion::default(),
+            dst,
+        ),
+
+        StandardWidth::OneByte | StandardWidth::TwoBytes => {
+            unreachable!("standard floating-point layouts are 4 or 8 bytes");
+        }
+    }
+}
+
+pub(crate) trait NumericReadTarget: Sized {
     type I8Conversion: H5Conversion<i8, Self> + Default;
     type I16Conversion: H5Conversion<i16, Self> + Default;
     type I32Conversion: H5Conversion<i32, Self> + Default;
@@ -131,9 +163,12 @@ pub(crate) trait FixedPointReadTarget: Sized {
     type U16Conversion: H5Conversion<u16, Self> + Default;
     type U32Conversion: H5Conversion<u32, Self> + Default;
     type U64Conversion: H5Conversion<u64, Self> + Default;
+
+    type F32Conversion: H5Conversion<f32, Self> + Default;
+    type F64Conversion: H5Conversion<f64, Self> + Default;
 }
 
-impl FixedPointReadTarget for i8 {
+impl NumericReadTarget for i8 {
     type I8Conversion = NoOpConversion;
     type I16Conversion = HardConversion;
     type I32Conversion = HardConversion;
@@ -143,9 +178,12 @@ impl FixedPointReadTarget for i8 {
     type U16Conversion = HardConversion;
     type U32Conversion = HardConversion;
     type U64Conversion = HardConversion;
+
+    type F32Conversion = HardConversion;
+    type F64Conversion = HardConversion;
 }
 
-impl FixedPointReadTarget for i16 {
+impl NumericReadTarget for i16 {
     type I8Conversion = HardConversion;
     type I16Conversion = NoOpConversion;
     type I32Conversion = HardConversion;
@@ -155,9 +193,12 @@ impl FixedPointReadTarget for i16 {
     type U16Conversion = HardConversion;
     type U32Conversion = HardConversion;
     type U64Conversion = HardConversion;
+
+    type F32Conversion = HardConversion;
+    type F64Conversion = HardConversion;
 }
 
-impl FixedPointReadTarget for i32 {
+impl NumericReadTarget for i32 {
     type I8Conversion = HardConversion;
     type I16Conversion = HardConversion;
     type I32Conversion = NoOpConversion;
@@ -167,9 +208,12 @@ impl FixedPointReadTarget for i32 {
     type U16Conversion = HardConversion;
     type U32Conversion = HardConversion;
     type U64Conversion = HardConversion;
+
+    type F32Conversion = HardConversion;
+    type F64Conversion = HardConversion;
 }
 
-impl FixedPointReadTarget for i64 {
+impl NumericReadTarget for i64 {
     type I8Conversion = HardConversion;
     type I16Conversion = HardConversion;
     type I32Conversion = HardConversion;
@@ -179,9 +223,12 @@ impl FixedPointReadTarget for i64 {
     type U16Conversion = HardConversion;
     type U32Conversion = HardConversion;
     type U64Conversion = HardConversion;
+
+    type F32Conversion = HardConversion;
+    type F64Conversion = HardConversion;
 }
 
-impl FixedPointReadTarget for u8 {
+impl NumericReadTarget for u8 {
     type I8Conversion = HardConversion;
     type I16Conversion = HardConversion;
     type I32Conversion = HardConversion;
@@ -191,9 +238,12 @@ impl FixedPointReadTarget for u8 {
     type U16Conversion = HardConversion;
     type U32Conversion = HardConversion;
     type U64Conversion = HardConversion;
+
+    type F32Conversion = HardConversion;
+    type F64Conversion = HardConversion;
 }
 
-impl FixedPointReadTarget for u16 {
+impl NumericReadTarget for u16 {
     type I8Conversion = HardConversion;
     type I16Conversion = HardConversion;
     type I32Conversion = HardConversion;
@@ -203,9 +253,12 @@ impl FixedPointReadTarget for u16 {
     type U16Conversion = NoOpConversion;
     type U32Conversion = HardConversion;
     type U64Conversion = HardConversion;
+
+    type F32Conversion = HardConversion;
+    type F64Conversion = HardConversion;
 }
 
-impl FixedPointReadTarget for u32 {
+impl NumericReadTarget for u32 {
     type I8Conversion = HardConversion;
     type I16Conversion = HardConversion;
     type I32Conversion = HardConversion;
@@ -215,9 +268,12 @@ impl FixedPointReadTarget for u32 {
     type U16Conversion = HardConversion;
     type U32Conversion = NoOpConversion;
     type U64Conversion = HardConversion;
+
+    type F32Conversion = HardConversion;
+    type F64Conversion = HardConversion;
 }
 
-impl FixedPointReadTarget for u64 {
+impl NumericReadTarget for u64 {
     type I8Conversion = HardConversion;
     type I16Conversion = HardConversion;
     type I32Conversion = HardConversion;
@@ -227,9 +283,12 @@ impl FixedPointReadTarget for u64 {
     type U16Conversion = HardConversion;
     type U32Conversion = HardConversion;
     type U64Conversion = NoOpConversion;
+
+    type F32Conversion = HardConversion;
+    type F64Conversion = HardConversion;
 }
 
-impl FixedPointReadTarget for f32 {
+impl NumericReadTarget for f32 {
     type I8Conversion = HardConversion;
     type I16Conversion = HardConversion;
     type I32Conversion = HardConversion;
@@ -239,9 +298,12 @@ impl FixedPointReadTarget for f32 {
     type U16Conversion = HardConversion;
     type U32Conversion = HardConversion;
     type U64Conversion = HardConversion;
+
+    type F32Conversion = NoOpConversion;
+    type F64Conversion = HardConversion;
 }
 
-impl FixedPointReadTarget for f64 {
+impl NumericReadTarget for f64 {
     type I8Conversion = HardConversion;
     type I16Conversion = HardConversion;
     type I32Conversion = HardConversion;
@@ -251,6 +313,9 @@ impl FixedPointReadTarget for f64 {
     type U16Conversion = HardConversion;
     type U32Conversion = HardConversion;
     type U64Conversion = HardConversion;
+
+    type F32Conversion = HardConversion;
+    type F64Conversion = NoOpConversion;
 }
 
 /// A primitive scalar that can be reconstructed from exactly `W` bytes.
@@ -407,6 +472,14 @@ impl_hard_cast!(i32 => f32);
 impl_hard_cast!(i64 => f32, f64);
 impl_hard_cast!(u32 => f32);
 impl_hard_cast!(u64 => f32, f64);
+
+// Floating-point -> signed integer.
+impl_hard_cast!(f32 => i8, i16, i32, i64);
+impl_hard_cast!(f64 => i8, i16, i32, i64);
+
+// Floating-point -> unsigned integer.
+impl_hard_cast!(f32 => u8, u16, u32, u64);
+impl_hard_cast!(f64 => u8, u16, u32, u64);
 
 // Floating-point narrowing.
 impl_hard_cast!(f64 => f32);
