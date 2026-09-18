@@ -211,80 +211,15 @@ pub fn read_as_f64_into(
     dst.reserve(count);
 
     // Fast path: standard full-width layout, bulk-decoded with `from_*_bytes`.
-    if let Some(StandardNumericLayout { width, order }) = num_dt.standard_layout() {
+    if let Some(standard) = num_dt.standard_layout() {
         match num_dt {
             NumericDatatype::FixedPoint { layout, .. } => {
-                if layout.signed {
-                    match width {
-                        StandardWidth::OneByte => {
-                            primitive::decode_fixed_width_into::<1, i8, f64, _>(
-                                src,
-                                order,
-                                HardConversion,
-                                dst,
-                            )?
-                        }
-                        StandardWidth::TwoBytes => {
-                            primitive::decode_fixed_width_into::<2, i16, f64, _>(
-                                src,
-                                order,
-                                HardConversion,
-                                dst,
-                            )?
-                        }
-                        StandardWidth::FourBytes => {
-                            primitive::decode_fixed_width_into::<4, i32, f64, _>(
-                                src,
-                                order,
-                                HardConversion,
-                                dst,
-                            )?
-                        }
-                        StandardWidth::EightBytes => {
-                            primitive::decode_fixed_width_into::<8, i64, f64, _>(
-                                src,
-                                order,
-                                HardConversion,
-                                dst,
-                            )?
-                        }
-                    }
-                } else {
-                    match width {
-                        StandardWidth::OneByte => {
-                            primitive::decode_fixed_width_into::<1, u8, f64, _>(
-                                src,
-                                order,
-                                HardConversion,
-                                dst,
-                            )?
-                        }
-                        StandardWidth::TwoBytes => {
-                            primitive::decode_fixed_width_into::<2, u16, f64, _>(
-                                src,
-                                order,
-                                HardConversion,
-                                dst,
-                            )?
-                        }
-                        StandardWidth::FourBytes => {
-                            primitive::decode_fixed_width_into::<4, u32, f64, _>(
-                                src,
-                                order,
-                                HardConversion,
-                                dst,
-                            )?
-                        }
-                        StandardWidth::EightBytes => {
-                            primitive::decode_fixed_width_into::<8, u64, f64, _>(
-                                src,
-                                order,
-                                HardConversion,
-                                dst,
-                            )?
-                        }
-                    }
-                }
+                primitive::decode_standard_fixed_point_into::<f64>(
+                    src,
+                    layout.signed,
+                    standard,
+                    dst,
+                )?;
             }
             NumericDatatype::FloatingPoint {
                 element_size,
@@ -293,14 +228,14 @@ pub fn read_as_f64_into(
             } => match element_size.get() {
                 4 => primitive::decode_fixed_width_into::<4, f32, f64, _>(
                     src,
-                    order,
+                    standard.order,
                     HardConversion,
                     dst,
                 )?,
 
                 8 => primitive::decode_fixed_width_into::<8, f64, f64, _>(
                     src,
-                    order,
+                    standard.order,
                     NoOpConversion,
                     dst,
                 )?,
@@ -561,47 +496,27 @@ fn try_read_as_f32_standard(
     num_dt: &NumericDatatype,
     dst: &mut Vec<f32>,
 ) -> Option<Result<(), FormatError>> {
-    let StandardNumericLayout { width, order } = num_dt.standard_layout()?;
+    let standard = num_dt.standard_layout()?;
 
     let result = match num_dt {
         NumericDatatype::FloatingPoint { element_size, .. } => match element_size.get() {
             4 => primitive::decode_fixed_width_into::<4, f32, f32, _>(
                 src,
-                order,
+                standard.order,
                 NoOpConversion,
                 dst,
             ),
             8 => primitive::decode_fixed_width_into::<8, f64, f32, _>(
                 src,
-                order,
+                standard.order,
                 HardConversion,
                 dst,
             ),
             _ => return None,
         },
-        NumericDatatype::FixedPoint { .. } => match width {
-            StandardWidth::OneByte => {
-                primitive::decode_fixed_width_into::<1, i8, f32, _>(src, order, HardConversion, dst)
-            }
-            StandardWidth::TwoBytes => primitive::decode_fixed_width_into::<2, i16, f32, _>(
-                src,
-                order,
-                HardConversion,
-                dst,
-            ),
-            StandardWidth::FourBytes => primitive::decode_fixed_width_into::<4, i32, f32, _>(
-                src,
-                order,
-                HardConversion,
-                dst,
-            ),
-            StandardWidth::EightBytes => primitive::decode_fixed_width_into::<8, i64, f32, _>(
-                src,
-                order,
-                HardConversion,
-                dst,
-            ),
-        },
+        NumericDatatype::FixedPoint { layout, .. } => {
+            primitive::decode_standard_fixed_point_into::<f32>(src, layout.signed, standard, dst)
+        }
     };
 
     Some(result)
@@ -1598,5 +1513,22 @@ mod wide_element_tests {
             read_as_u64(&[0xFFu8; 3], &dt),
             Err(FormatError::NumericElementTooWide { size: 16 })
         ));
+    }
+
+    #[test]
+    fn reads_standard_unsigned_u8_as_f32() {
+        let datatype = Datatype::FixedPoint {
+            size: 1,
+            byte_order: DatatypeByteOrder::LittleEndian,
+            layout: FixedPointLayout {
+                signed: false,
+                bit_offset: 0,
+                bit_precision: 8,
+            },
+        };
+
+        let values = read_as_f32(&[0xff], &datatype).unwrap();
+
+        assert_eq!(values, vec![255.0]);
     }
 }
