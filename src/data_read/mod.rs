@@ -12,13 +12,13 @@ use crate::chunked_read::{
 use crate::convert::slice_range;
 use crate::data_layout::DataLayout;
 use crate::data_read::primitive::{
-    HardConversion, NoOpConversion, SignedIntegerReadTarget, UnsignedIntegerReadTarget,
+    FixedPointReadTarget, H5Conversion, HardConversion, NoOpConversion,
 };
 #[cfg(test)]
 use crate::dataspace::Dataspace;
 use crate::datatype::Datatype;
 use crate::datatype::byte_order::DatatypeByteOrder;
-use crate::datatype::layout::{FixedPointLayout, StandardNumericLayout, StandardWidth};
+use crate::datatype::layout::FixedPointLayout;
 use crate::datatype::numeric::NumericDatatype;
 use crate::error::FormatError;
 use crate::read_spec::RawReadSpec;
@@ -165,6 +165,55 @@ pub fn read_raw_data_cached_from_source<S: Source + ?Sized>(
         }
         _ => read_raw_data_full_from_source(source, spec, offset_size, length_size),
     }
+}
+
+fn read_integer_into<T: FixedPointReadTarget>(
+    src: &[u8],
+    datatype: &Datatype,
+    dst: &mut Vec<T>,
+) -> Result<(), FormatError> {
+    let num_dt: NumericDatatype = datatype.try_into()?;
+    let elem_size = num_dt.element_size().get();
+
+    if !src.len().is_multiple_of(elem_size) {
+        return Err(FormatError::DataSizeMismatch {
+            expected: 0,
+            actual: src.len(),
+        });
+    }
+    let NumericDatatype::FixedPoint { layout, .. } = num_dt else {
+        return Err(FormatError::TypeMismatch {
+            expected: "fixed-point",
+            actual: datatype.name(),
+        });
+    };
+    dst.reserve(src.len() / elem_size);
+
+    if let Some(standard) = num_dt.standard_layout() {
+        return primitive::decode_standard_fixed_point_into(src, layout.signed, standard, dst);
+    }
+
+    let order = num_dt.byte_order();
+    let bit_offset = num_dt.bit_offset();
+    let bit_precision = num_dt.bit_precision();
+
+    if layout.signed {
+        let conversion = T::I64Conversion::default();
+
+        for chunk in src.chunks_exact(elem_size) {
+            let value = read_signed_int(chunk, elem_size, &order, bit_offset, bit_precision);
+            dst.push(conversion.convert(value));
+        }
+    } else {
+        let conversion = T::U64Conversion::default();
+
+        for chunk in src.chunks_exact(elem_size) {
+            let value = read_unsigned_int(chunk, elem_size, &order, bit_offset, bit_precision);
+            dst.push(conversion.convert(value));
+        }
+    }
+
+    Ok(())
 }
 
 /// Returns the datatype that governs numeric decoding of `dt`.
@@ -320,84 +369,15 @@ pub fn read_as_u16(src: &[u8], datatype: &Datatype) -> Result<Vec<u16>, FormatEr
 }
 
 pub fn read_as_u64_into(src: &[u8], dt: &Datatype, dst: &mut Vec<u64>) -> Result<(), FormatError> {
-    read_unsigned_integer_into(src, dt, dst)
+    read_integer_into(src, dt, dst)
 }
 
 pub fn read_as_u32_into(src: &[u8], dt: &Datatype, dst: &mut Vec<u32>) -> Result<(), FormatError> {
-    read_unsigned_integer_into(src, dt, dst)
+    read_integer_into(src, dt, dst)
 }
 
 pub fn read_as_u16_into(src: &[u8], dt: &Datatype, dst: &mut Vec<u16>) -> Result<(), FormatError> {
-    read_unsigned_integer_into(src, dt, dst)
-}
-
-fn read_unsigned_integer_into<T: UnsignedIntegerReadTarget>(
-    src: &[u8],
-    datatype: &Datatype,
-    dst: &mut Vec<T>,
-) -> Result<(), FormatError> {
-    let num_dt: NumericDatatype = datatype.try_into()?;
-    let elem_size = num_dt.element_size().get();
-
-    if !src.len().is_multiple_of(elem_size) {
-        return Err(FormatError::DataSizeMismatch {
-            expected: 0,
-            actual: src.len(),
-        });
-    }
-
-    dst.reserve(src.len() / elem_size);
-
-    match num_dt.standard_layout() {
-        Some(StandardNumericLayout { width, order }) => match width {
-            StandardWidth::OneByte => {
-                primitive::decode_fixed_width_into::<1, u8, T, T::FromU8>(
-                    src,
-                    order,
-                    T::FromU8::default(),
-                    dst,
-                )?;
-            }
-            StandardWidth::TwoBytes => {
-                primitive::decode_fixed_width_into::<2, u16, T, T::FromU16>(
-                    src,
-                    order,
-                    T::FromU16::default(),
-                    dst,
-                )?;
-            }
-            StandardWidth::FourBytes => {
-                primitive::decode_fixed_width_into::<4, u32, T, T::FromU32>(
-                    src,
-                    order,
-                    T::FromU32::default(),
-                    dst,
-                )?;
-            }
-            StandardWidth::EightBytes => {
-                primitive::decode_fixed_width_into::<8, u64, T, T::FromU64>(
-                    src,
-                    order,
-                    T::FromU64::default(),
-                    dst,
-                )?;
-            }
-        },
-
-        None => {
-            let order = num_dt.byte_order();
-            let bit_offset = num_dt.bit_offset();
-            let bit_precision = num_dt.bit_precision();
-
-            for chunk in src.chunks_exact(elem_size) {
-                let value = read_unsigned_int(chunk, elem_size, &order, bit_offset, bit_precision);
-
-                dst.push(T::from_u64(value));
-            }
-        }
-    }
-
-    Ok(())
+    read_integer_into(src, dt, dst)
 }
 
 /// Convert raw bytes to `f32` values.
@@ -545,7 +525,7 @@ pub fn read_as_i16(src: &[u8], datatype: &Datatype) -> Result<Vec<i16>, FormatEr
 }
 
 pub fn read_as_i64_into(src: &[u8], dt: &Datatype, dst: &mut Vec<i64>) -> Result<(), FormatError> {
-    read_signed_integer_into::<i64>(src, dt, dst)
+    read_integer_into(src, dt, dst)
 }
 
 /// Decode `src` and **append** the values to `dst`, the appending form of
@@ -554,7 +534,7 @@ pub fn read_as_i64_into(src: &[u8], dt: &Datatype, dst: &mut Vec<i64>) -> Result
 /// On error `dst` holds an unspecified prefix of this call's values: every
 /// caller abandons the buffer
 pub fn read_as_i32_into(src: &[u8], dt: &Datatype, dst: &mut Vec<i32>) -> Result<(), FormatError> {
-    read_signed_integer_into::<i32>(src, dt, dst)
+    read_integer_into(src, dt, dst)
 }
 
 /// Decode `src` and **append** the values to `dst`, the appending form of
@@ -563,75 +543,7 @@ pub fn read_as_i32_into(src: &[u8], dt: &Datatype, dst: &mut Vec<i32>) -> Result
 /// On error `dst` holds an unspecified prefix of this call's values: every
 /// caller abandons the buffer
 pub fn read_as_i16_into(src: &[u8], dt: &Datatype, dst: &mut Vec<i16>) -> Result<(), FormatError> {
-    read_signed_integer_into::<i16>(src, dt, dst)
-}
-
-fn read_signed_integer_into<T: SignedIntegerReadTarget>(
-    src: &[u8],
-    datatype: &Datatype,
-    dst: &mut Vec<T>,
-) -> Result<(), FormatError> {
-    let num_dt: NumericDatatype = datatype.try_into()?;
-    let elem_size = num_dt.element_size().get();
-
-    if !src.len().is_multiple_of(elem_size) {
-        return Err(FormatError::DataSizeMismatch {
-            expected: 0,
-            actual: src.len(),
-        });
-    }
-
-    dst.reserve(src.len() / elem_size);
-
-    match num_dt.standard_layout() {
-        Some(StandardNumericLayout { width, order }) => match width {
-            StandardWidth::OneByte => {
-                primitive::decode_fixed_width_into::<1, i8, T, T::FromI8>(
-                    src,
-                    order,
-                    T::FromI8::default(),
-                    dst,
-                )?;
-            }
-            StandardWidth::TwoBytes => {
-                primitive::decode_fixed_width_into::<2, i16, T, T::FromI16>(
-                    src,
-                    order,
-                    T::FromI16::default(),
-                    dst,
-                )?;
-            }
-            StandardWidth::FourBytes => {
-                primitive::decode_fixed_width_into::<4, i32, T, T::FromI32>(
-                    src,
-                    order,
-                    T::FromI32::default(),
-                    dst,
-                )?;
-            }
-            StandardWidth::EightBytes => {
-                primitive::decode_fixed_width_into::<8, i64, T, T::FromI64>(
-                    src,
-                    order,
-                    T::FromI64::default(),
-                    dst,
-                )?;
-            }
-        },
-
-        None => {
-            let order = num_dt.byte_order();
-            let bit_offset = num_dt.bit_offset();
-            let bit_precision = num_dt.bit_precision();
-
-            for chunk in src.chunks_exact(elem_size) {
-                let value = read_signed_int(chunk, elem_size, &order, bit_offset, bit_precision);
-                dst.push(T::from_i64(value));
-            }
-        }
-    }
-
-    Ok(())
+    read_integer_into(src, dt, dst)
 }
 
 /// Read fixed-length strings from raw bytes.
@@ -1271,13 +1183,11 @@ mod tests {
     }
 
     #[test]
-    fn fast_path_unsigned_read_as_signed_reinterprets() {
-        // An unsigned u32 read via read_as_i64 must sign-reinterpret the full
-        // width, exactly as the per-element `read_signed_int` did.
+    fn fast_path_unsigned_read_as_signed_preserves_value_when_representable() {
         let dt = make_int(4, false, false);
         let raw = 0xFFFF_FFFFu32.to_le_bytes();
-        assert_eq!(read_as_i64(&raw, &dt).unwrap(), vec![-1]);
-        // And read as u64 zero-extends.
+
+        assert_eq!(read_as_i64(&raw, &dt).unwrap(), vec![0xFFFF_FFFF]);
         assert_eq!(read_as_u64(&raw, &dt).unwrap(), vec![0xFFFF_FFFF]);
     }
 
