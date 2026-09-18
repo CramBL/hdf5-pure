@@ -6,7 +6,9 @@
 //! through the typed integer readers (via the base type) while the datatype
 //! itself preserves the member name/value pairs. See issue #129.
 
-use hdf5_pure::{DType, Datatype, EnumTypeBuilder, File, FileBuilder, FormatError};
+use hdf5_pure::{
+    DType, Datatype, EnumTypeBuilder, File, FileBuilder, FixedPointLayout, FormatError,
+};
 
 /// Build a file holding a single dataset `name`, serialize it, and reopen it.
 fn write_then_open(build: impl FnOnce(&mut FileBuilder)) -> File {
@@ -42,7 +44,7 @@ fn i32_enum_dataset_preserves_members_and_values() {
                     *base_type,
                     Datatype::FixedPoint {
                         size: 4,
-                        signed: true,
+                        layout: FixedPointLayout { signed: true, .. },
                         ..
                     }
                 ),

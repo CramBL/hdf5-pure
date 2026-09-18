@@ -16,8 +16,8 @@ use hdf5_pure::mat::{
     ComplexU16, ComplexU32, ComplexU64, Matrix, Options,
 };
 use hdf5_pure::{
-    AttrValue, CompoundTypeBuilder, Datatype, DatatypeByteOrder, File, FileBuilder, LibVer,
-    make_i64_type,
+    AttrValue, CompoundTypeBuilder, Datatype, DatatypeByteOrder, File, FileBuilder,
+    FixedPointLayout, LibVer, make_i64_type,
 };
 use serde::{Deserialize, Serialize};
 
@@ -171,9 +171,12 @@ fn assert_compound_of(dt: &Datatype, size: u32, signed: bool) {
             Datatype::FixedPoint {
                 size: component,
                 byte_order,
-                signed: is_signed,
-                bit_offset,
-                bit_precision,
+                layout:
+                    FixedPointLayout {
+                        signed: is_signed,
+                        bit_offset,
+                        bit_precision,
+                    },
             } => {
                 assert_eq!(*component, size);
                 assert_eq!(*byte_order, DatatypeByteOrder::LittleEndian);

@@ -22,7 +22,7 @@ use std::path::Path;
 use hdf5::file::LibraryVersion;
 use hdf5::plist::attribute_create::CharEncoding;
 use hdf5::{ObjectReference1, ReferencedObject};
-use hdf5_pure::{AttrValue, Datatype, File, RepackOptions};
+use hdf5_pure::{AttrValue, Datatype, File, FixedPointLayout, RepackOptions};
 use tempfile::tempdir;
 
 use hdf5_pure_crosscheck::create_v18;
@@ -39,9 +39,11 @@ fn committed_i32() -> Datatype {
     Datatype::FixedPoint {
         size: 4,
         byte_order: hdf5_pure::DatatypeByteOrder::LittleEndian,
-        signed: true,
-        bit_offset: 0,
-        bit_precision: 32,
+        layout: FixedPointLayout {
+            signed: true,
+            bit_offset: 0,
+            bit_precision: 32,
+        },
     }
 }
 

@@ -12,13 +12,13 @@ build = "build.rs"
 [features]
 serde = ["hdf5-pure/serde"]
 ndarray = ["hdf5-pure/ndarray"]
-hdf5 = []
+hdf5-rs = ["hdf5"]
 # Which release series of libhdf5 the tests link, from 1.10 up: none of them
 # is 1.8. Each implies the one below, so a test gates on the lowest series that
 # has what it needs. The interop recipes derive it from the version they link,
 # and `tests/hdf5_release_feature.rs` checks the one passed against the library
 # actually linked.
-"__hdf5-1.10" = ["hdf5"]
+"__hdf5-1.10" = ["hdf5-rs"]
 "__hdf5-1.12" = ["__hdf5-1.10"]
 "__hdf5-1.14" = ["__hdf5-1.12"]
 "__hdf5-2" = ["__hdf5-1.14"]

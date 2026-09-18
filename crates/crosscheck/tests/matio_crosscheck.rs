@@ -445,6 +445,7 @@ impl Drop for MatVar {
 // Tests
 // =======================================================================
 
+use hdf5_pure::FixedPointLayout;
 use hdf5_pure::mat::{self, ComplexI16, Matrix};
 use serde::{Deserialize, Serialize};
 use std::sync::{Mutex, MutexGuard};
@@ -844,7 +845,11 @@ fn hdf5_pure_reads_complex_int16_written_by_matio() {
             assert_eq!(members[1].byte_offset, 2);
             for m in &members {
                 match m.datatype {
-                    hdf5_pure::Datatype::FixedPoint { size, signed, .. } => {
+                    hdf5_pure::Datatype::FixedPoint {
+                        size,
+                        layout: FixedPointLayout { signed, .. },
+                        ..
+                    } => {
                         assert_eq!(size, 2);
                         assert!(signed);
                     }

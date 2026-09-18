@@ -273,8 +273,8 @@ use crate::convert::Narrow;
 use crate::data_layout::{ChunkIndexLayout, DataLayout};
 use crate::dataspace::{Dataspace, DataspaceType, Extent, MaxExtent};
 use crate::datatype::{
-    Datatype, DatatypeByteOrder, datatype_holds_file_address, datatype_holds_object_address,
-    embedded_reference_slots, stored_object_references,
+    Datatype, datatype_holds_file_address, datatype_holds_object_address, embedded_reference_slots,
+    stored_object_references,
 };
 use crate::error::{Error, FormatError, OBJECT_HEADER_MESSAGE_MAX};
 use crate::extensible_array::ExtensibleArrayHeader;
@@ -306,7 +306,6 @@ use crate::object_header::ObjectHeader;
 use crate::object_path::{LinkNameBuf, ObjectPathBuf};
 use crate::reader::FileAccessProperties;
 use crate::shared_message::DatatypeLocation;
-use crate::signature;
 use crate::source::{BaseOffsetSource, BytesSource, MetadataCacheConfig, Source};
 use crate::superblock::Superblock;
 use crate::type_builders::{
@@ -316,6 +315,7 @@ use crate::type_builders::{
     make_u64_type, patch_vl_refs, patch_vl_refs_masked, write_reference_address,
 };
 use crate::width::UintWidth;
+use crate::{DatatypeByteOrder, signature};
 
 /// An undefined on-disk address (all bits set), HDF5's "no address" sentinel.
 const UNDEF: u64 = u64::MAX;
@@ -15089,7 +15089,7 @@ mod tests {
     use rstest::rstest;
 
     use super::*;
-    use crate::object_path::ObjectPath;
+    use crate::{CompoundMember, datatype::layout::FloatingPointLayout, object_path::ObjectPath};
 
     /// The rule that places a chunk index on a paged file: some chunk-data span
     /// abuts it. Both sides count, which is what a repeatedly appended dataset
@@ -17640,18 +17640,18 @@ mod tests {
 
     #[test]
     fn raw_appendable_recurses_into_aggregates() {
-        use crate::datatype::{CompoundMember, DatatypeByteOrder};
-
         let f64_with = |byte_order| Datatype::FloatingPoint {
             size: 8,
             byte_order,
-            bit_offset: 0,
-            bit_precision: 64,
-            exponent_location: 52,
-            exponent_size: 11,
-            mantissa_location: 0,
-            mantissa_size: 52,
-            exponent_bias: 1023,
+            layout: FloatingPointLayout {
+                bit_offset: 0,
+                bit_precision: 64,
+                exponent_location: 52,
+                exponent_size: 11,
+                mantissa_location: 0,
+                mantissa_size: 52,
+                exponent_bias: 1023,
+            },
         };
         let le_f64 = f64_with(DatatypeByteOrder::LittleEndian);
         let be_f64 = f64_with(DatatypeByteOrder::BigEndian);

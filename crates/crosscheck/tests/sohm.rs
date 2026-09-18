@@ -18,7 +18,7 @@
 
 use hdf5::file::LibraryVersion;
 use hdf5::plist::file_create::{SharedMessageIndex, SharedMessageType};
-use hdf5_pure::{AttrValue, Datatype, DatatypeByteOrder, File};
+use hdf5_pure::{AttrValue, Datatype, DatatypeByteOrder, File, FixedPointLayout};
 use std::path::{Path, PathBuf};
 use tempfile::TempDir;
 
@@ -48,9 +48,11 @@ fn i32_type() -> Datatype {
     Datatype::FixedPoint {
         size: 4,
         byte_order: DatatypeByteOrder::LittleEndian,
-        signed: true,
-        bit_offset: 0,
-        bit_precision: 32,
+        layout: FixedPointLayout {
+            signed: true,
+            bit_offset: 0,
+            bit_precision: 32,
+        },
     }
 }
 

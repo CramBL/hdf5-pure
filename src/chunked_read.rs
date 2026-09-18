@@ -2211,10 +2211,12 @@ mod tests {
         };
         let datatype = Datatype::FixedPoint {
             size: 8,
-            signed: true,
-            byte_order: crate::datatype::DatatypeByteOrder::LittleEndian,
-            bit_offset: 0,
-            bit_precision: 64,
+            byte_order: byte_order::DatatypeByteOrder::LittleEndian,
+            layout: FixedPointLayout {
+                signed: true,
+                bit_offset: 0,
+                bit_precision: 64,
+            },
         };
         let simple = |dims: Vec<u64>| Dataspace {
             space_type: DataspaceType::Simple,
@@ -2537,20 +2539,24 @@ mod tests {
 
     use crate::data_layout::DONT_FILTER_PARTIAL_BOUND_CHUNKS;
     use crate::dataspace::{Dataspace, DataspaceType};
-    use crate::datatype::{Datatype, DatatypeByteOrder};
+    use crate::datatype::byte_order;
+    use crate::datatype::layout::{FixedPointLayout, FloatingPointLayout};
+    use crate::datatype::{Datatype, byte_order::DatatypeByteOrder};
     use crate::source::BytesSource;
 
     fn make_f64_type() -> Datatype {
         Datatype::FloatingPoint {
             size: 8,
             byte_order: DatatypeByteOrder::LittleEndian,
-            bit_offset: 0,
-            bit_precision: 64,
-            exponent_location: 52,
-            exponent_size: 11,
-            mantissa_location: 0,
-            mantissa_size: 52,
-            exponent_bias: 1023,
+            layout: FloatingPointLayout {
+                bit_offset: 0,
+                bit_precision: 64,
+                exponent_location: 52,
+                exponent_size: 11,
+                mantissa_location: 0,
+                mantissa_size: 52,
+                exponent_bias: 1023,
+            },
         }
     }
 
@@ -2558,13 +2564,15 @@ mod tests {
         Datatype::FloatingPoint {
             size: 4,
             byte_order: DatatypeByteOrder::LittleEndian,
-            bit_offset: 0,
-            bit_precision: 32,
-            exponent_location: 23,
-            exponent_size: 8,
-            mantissa_location: 0,
-            mantissa_size: 23,
-            exponent_bias: 127,
+            layout: FloatingPointLayout {
+                bit_offset: 0,
+                bit_precision: 32,
+                exponent_location: 23,
+                exponent_size: 8,
+                mantissa_location: 0,
+                mantissa_size: 23,
+                exponent_bias: 127,
+            },
         }
     }
 

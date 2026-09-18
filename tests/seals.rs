@@ -225,8 +225,8 @@ fn sealed_structs_keep_their_attribute() {
 
     let expected = [
         ("src/file_space_info.rs", "pub struct FileSpaceInfo {"),
-        ("src/datatype.rs", "pub struct CompoundMember {"),
-        ("src/datatype.rs", "pub struct EnumMember {"),
+        ("src/datatype/mod.rs", "pub struct CompoundMember {"),
+        ("src/datatype/mod.rs", "pub struct EnumMember {"),
         ("src/mat/opaque.rs", "pub struct MatDatetime {"),
         ("src/mat/opaque.rs", "pub struct MatDuration {"),
         ("src/mat/opaque.rs", "pub struct MatCategorical {"),

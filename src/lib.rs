@@ -593,12 +593,12 @@ pub use file_create_properties::FileCreateProperties;
 pub use file_space_info::{FileSpaceInfo, FileSpaceStrategy};
 
 pub use compound::{CompoundField, CompoundType};
-pub use datatype::{
-    CharacterSet, CompoundMember, Datatype, DatatypeByteOrder, EnumMember, ReferenceType,
-    StringPadding,
-};
-
 pub use dataspace::MaxExtent;
+pub use datatype::byte_order::DatatypeByteOrder;
+pub use datatype::layout::{FixedPointLayout, FloatingPointLayout};
+pub use datatype::{
+    CharacterSet, CompoundMember, Datatype, EnumMember, ReferenceType, StringPadding,
+};
 
 pub use type_builders::{
     CompoundTypeBuilder, DatasetBuilder, EnumTypeBuilder, ExplicitCompoundTypeBuilder,
