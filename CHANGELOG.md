@@ -15,6 +15,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - `Dataset::read` reads a chunked dataset whose layout stores its partial edge chunks with the filters skipped, where every chunk went through the inverse filter pipeline and such a chunk decoded to wrong values or failed the read. A whole chunk of the same dataset decodes through the pipeline. ([#589](https://github.com/CramBL/hdf5-pure/pull/589))
 - `Dataset::read` reads chunked datasets whose implicit indexes are numbered over a larger maximum chunk grid, where those chunks were read from the wrong addresses. Repacking such a dataset preserves the chunk data, and a version 4 chunk size wider than 32 bits is kept until a read or allocation needs a host-sized value. ([#587](https://github.com/CramBL/hdf5-pure/pull/587))
+- `Dataset::read` converts numeric values when the destination and stored type differ, where reads previously reinterpreted the stored bytes. ([#597](https://github.com/CramBL/hdf5-pure/pull/597))
 
 ## [0.46.1] - 2026-09-15
 

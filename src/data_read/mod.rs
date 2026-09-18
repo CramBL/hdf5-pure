@@ -11,9 +11,7 @@ use crate::chunked_read::{
 };
 use crate::convert::slice_range;
 use crate::data_layout::DataLayout;
-use crate::data_read::primitive::{
-    FixedPointReadTarget, H5Conversion, HardConversion, NoOpConversion,
-};
+use crate::data_read::primitive::{H5Conversion, HardConversion, NoOpConversion};
 #[cfg(test)]
 use crate::dataspace::Dataspace;
 use crate::datatype::Datatype;
@@ -167,7 +165,7 @@ pub fn read_raw_data_cached_from_source<S: Source + ?Sized>(
     }
 }
 
-fn read_integer_into<T: FixedPointReadTarget>(
+fn read_integer_into<T: primitive::NumericReadTarget>(
     src: &[u8],
     datatype: &Datatype,
     dst: &mut Vec<T>,
@@ -181,35 +179,75 @@ fn read_integer_into<T: FixedPointReadTarget>(
             actual: src.len(),
         });
     }
-    let NumericDatatype::FixedPoint { layout, .. } = num_dt else {
-        return Err(FormatError::TypeMismatch {
-            expected: "fixed-point",
-            actual: datatype.name(),
-        });
-    };
+
     dst.reserve(src.len() / elem_size);
 
     if let Some(standard) = num_dt.standard_layout() {
-        return primitive::decode_standard_fixed_point_into(src, layout.signed, standard, dst);
+        return match num_dt {
+            NumericDatatype::FixedPoint { layout, .. } => {
+                primitive::decode_standard_fixed_point_into(src, layout.signed, standard, dst)
+            }
+
+            NumericDatatype::FloatingPoint { .. } => {
+                primitive::decode_standard_floating_point_into(src, standard, dst)
+            }
+        };
     }
 
-    let order = num_dt.byte_order();
-    let bit_offset = num_dt.bit_offset();
-    let bit_precision = num_dt.bit_precision();
+    match num_dt {
+        NumericDatatype::FixedPoint { layout, .. } => {
+            let order = num_dt.byte_order();
+            let bit_offset = num_dt.bit_offset();
+            let bit_precision = num_dt.bit_precision();
 
-    if layout.signed {
-        let conversion = T::I64Conversion::default();
+            if layout.signed {
+                let conversion = T::I64Conversion::default();
 
-        for chunk in src.chunks_exact(elem_size) {
-            let value = read_signed_int(chunk, elem_size, &order, bit_offset, bit_precision);
-            dst.push(conversion.convert(value));
+                for chunk in src.chunks_exact(elem_size) {
+                    let value =
+                        read_signed_int(chunk, elem_size, &order, bit_offset, bit_precision);
+                    dst.push(conversion.convert(value));
+                }
+            } else {
+                let conversion = T::U64Conversion::default();
+
+                for chunk in src.chunks_exact(elem_size) {
+                    let value =
+                        read_unsigned_int(chunk, elem_size, &order, bit_offset, bit_precision);
+                    dst.push(conversion.convert(value));
+                }
+            }
         }
-    } else {
-        let conversion = T::U64Conversion::default();
 
-        for chunk in src.chunks_exact(elem_size) {
-            let value = read_unsigned_int(chunk, elem_size, &order, bit_offset, bit_precision);
-            dst.push(conversion.convert(value));
+        NumericDatatype::FloatingPoint { .. } => {
+            let order = num_dt.byte_order();
+
+            match elem_size {
+                4 => {
+                    let conversion = T::F32Conversion::default();
+
+                    let (chunks, _remainder) = src.as_chunks::<4>();
+                    debug_assert!(_remainder.is_empty(), "should be checked before this point");
+                    for chunk in chunks {
+                        dst.push(conversion.convert(read_f32_bytes(chunk, &order)));
+                    }
+                }
+                8 => {
+                    let conversion = T::F64Conversion::default();
+
+                    let (chunks, _remainder) = src.as_chunks::<8>();
+                    debug_assert!(_remainder.is_empty(), "should be checked before this point");
+                    for chunk in chunks {
+                        dst.push(conversion.convert(read_f64_bytes(chunk, &order)));
+                    }
+                }
+                _ => {
+                    return Err(FormatError::DataSizeMismatch {
+                        expected: 8,
+                        actual: elem_size,
+                    });
+                }
+            }
         }
     }
 

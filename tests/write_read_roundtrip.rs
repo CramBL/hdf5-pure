@@ -1493,3 +1493,22 @@ fn userblock_chunked_deflate_streaming_read() {
     assert_eq!(buffered, data);
     assert_eq!(streamed, data);
 }
+
+#[test]
+fn a_float_dataset_read_as_an_integer_converts_its_value() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("float_as_int.h5");
+
+    let mut b = FileBuilder::new();
+    b.create_dataset("d").with_f64_data(&[2.5, -3.75, 100.0]);
+    b.write(&path).unwrap();
+
+    let got = File::open(&path)
+        .unwrap()
+        .dataset("d")
+        .unwrap()
+        .read_i32()
+        .unwrap();
+
+    assert_eq!(got, [2, -3, 100]);
+}
