@@ -1,4 +1,10 @@
-use crate::{FormatError, datatype::byte_order::FixedWidthByteOrder};
+use crate::{
+    FormatError,
+    datatype::{
+        byte_order::FixedWidthByteOrder,
+        layout::{StandardNumericLayout, StandardWidth},
+    },
+};
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 
@@ -47,6 +53,44 @@ where
     Ok(())
 }
 
+pub(crate) fn decode_standard_fixed_point_into<T>(
+    src: &[u8],
+    signed: bool,
+    StandardNumericLayout { width, order }: StandardNumericLayout,
+    dst: &mut Vec<T>,
+) -> Result<(), FormatError>
+where
+    T: StandardFixedPointReadTarget,
+{
+    match (signed, width) {
+        (true, StandardWidth::OneByte) => {
+            decode_fixed_width_into::<1, i8, T, T::FromI8>(src, order, T::FromI8::default(), dst)
+        }
+        (true, StandardWidth::TwoBytes) => {
+            decode_fixed_width_into::<2, i16, T, T::FromI16>(src, order, T::FromI16::default(), dst)
+        }
+        (true, StandardWidth::FourBytes) => {
+            decode_fixed_width_into::<4, i32, T, T::FromI32>(src, order, T::FromI32::default(), dst)
+        }
+        (true, StandardWidth::EightBytes) => {
+            decode_fixed_width_into::<8, i64, T, T::FromI64>(src, order, T::FromI64::default(), dst)
+        }
+
+        (false, StandardWidth::OneByte) => {
+            decode_fixed_width_into::<1, u8, T, T::FromU8>(src, order, T::FromU8::default(), dst)
+        }
+        (false, StandardWidth::TwoBytes) => {
+            decode_fixed_width_into::<2, u16, T, T::FromU16>(src, order, T::FromU16::default(), dst)
+        }
+        (false, StandardWidth::FourBytes) => {
+            decode_fixed_width_into::<4, u32, T, T::FromU32>(src, order, T::FromU32::default(), dst)
+        }
+        (false, StandardWidth::EightBytes) => {
+            decode_fixed_width_into::<8, u64, T, T::FromU64>(src, order, T::FromU64::default(), dst)
+        }
+    }
+}
+
 pub(crate) trait SignedIntegerReadTarget: Sized {
     type FromI8: H5Conversion<i8, Self> + Default;
     type FromI16: H5Conversion<i16, Self> + Default;
@@ -63,6 +107,42 @@ pub(crate) trait UnsignedIntegerReadTarget: Sized {
     type FromU64: H5Conversion<u64, Self> + Default;
 
     fn from_u64(value: u64) -> Self;
+}
+
+pub(crate) trait StandardFixedPointReadTarget: Sized {
+    type FromI8: H5Conversion<i8, Self> + Default;
+    type FromI16: H5Conversion<i16, Self> + Default;
+    type FromI32: H5Conversion<i32, Self> + Default;
+    type FromI64: H5Conversion<i64, Self> + Default;
+
+    type FromU8: H5Conversion<u8, Self> + Default;
+    type FromU16: H5Conversion<u16, Self> + Default;
+    type FromU32: H5Conversion<u32, Self> + Default;
+    type FromU64: H5Conversion<u64, Self> + Default;
+}
+
+impl StandardFixedPointReadTarget for f32 {
+    type FromI8 = HardConversion;
+    type FromI16 = HardConversion;
+    type FromI32 = HardConversion;
+    type FromI64 = HardConversion;
+
+    type FromU8 = HardConversion;
+    type FromU16 = HardConversion;
+    type FromU32 = HardConversion;
+    type FromU64 = HardConversion;
+}
+
+impl StandardFixedPointReadTarget for f64 {
+    type FromI8 = HardConversion;
+    type FromI16 = HardConversion;
+    type FromI32 = HardConversion;
+    type FromI64 = HardConversion;
+
+    type FromU8 = HardConversion;
+    type FromU16 = HardConversion;
+    type FromU32 = HardConversion;
+    type FromU64 = HardConversion;
 }
 
 impl UnsignedIntegerReadTarget for u8 {
