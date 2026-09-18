@@ -6986,9 +6986,11 @@ const NO_LINK_TO_WRITE: &str = "a write needs a link name, and this path holds n
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::FileBuilder;
     use crate::data_layout::{ChunkIndexLayout, ChunkedLayoutFlags};
+    use crate::dataspace::DataspaceType;
+    use crate::datatype::layout::FixedPointLayout;
     use crate::message_flags::MessageFlags;
+    use crate::{DatatypeByteOrder, FileBuilder};
     use std::sync::atomic::AtomicUsize;
 
     // -----------------------------------------------------------------------
@@ -8382,10 +8384,12 @@ mod tests {
         };
         let dt = Datatype::FixedPoint {
             size: 8,
-            byte_order: crate::datatype::DatatypeByteOrder::LittleEndian,
-            signed: false,
-            bit_offset: 0,
-            bit_precision: 64,
+            byte_order: DatatypeByteOrder::LittleEndian,
+            layout: FixedPointLayout {
+                signed: false,
+                bit_offset: 0,
+                bit_precision: 64,
+            },
         };
         let cache = ChunkCache::new();
         let out = read_rows_framed(
@@ -8430,17 +8434,19 @@ mod tests {
             data: (0..16u8).collect(),
         };
         let ds = Dataspace {
-            space_type: crate::dataspace::DataspaceType::Simple,
+            space_type: DataspaceType::Simple,
             rank: 2,
             dimensions: vec![4, 4],
             max_dimensions: None,
         };
         let dt = Datatype::FixedPoint {
             size: 1,
-            byte_order: crate::datatype::DatatypeByteOrder::LittleEndian,
-            signed: false,
-            bit_offset: 0,
-            bit_precision: 8,
+            byte_order: DatatypeByteOrder::LittleEndian,
+            layout: FixedPointLayout {
+                signed: false,
+                bit_offset: 0,
+                bit_precision: 8,
+            },
         };
         let cache = ChunkCache::new();
         let rows = |start_row, num_rows| {
@@ -8652,10 +8658,12 @@ mod tests {
             name: "be".into(),
             datatype: Datatype::FixedPoint {
                 size: 4,
-                byte_order: crate::datatype::DatatypeByteOrder::BigEndian,
-                signed: true,
-                bit_offset: 0,
-                bit_precision: 32,
+                byte_order: DatatypeByteOrder::BigEndian,
+                layout: FixedPointLayout {
+                    signed: true,
+                    bit_offset: 0,
+                    bit_precision: 32,
+                },
             },
             dataspace: Dataspace {
                 space_type: crate::dataspace::DataspaceType::Scalar,
@@ -8674,7 +8682,12 @@ mod tests {
                 "{}: the value channel keeps the width the attribute was written at",
                 c.owner
             );
-            let Some(Datatype::FixedPoint { size, signed, .. }) = c.datatypes.get("count") else {
+            let Some(Datatype::FixedPoint {
+                size,
+                byte_order: _,
+                layout: FixedPointLayout { signed, .. },
+            }) = c.datatypes.get("count")
+            else {
                 panic!(
                     "{}: expected a fixed-point datatype, got {:?}",
                     c.owner,
@@ -8703,7 +8716,7 @@ mod tests {
             };
             assert_eq!(
                 *byte_order,
-                crate::datatype::DatatypeByteOrder::BigEndian,
+                DatatypeByteOrder::BigEndian,
                 "{}: the datatype channel is the only record of the byte order",
                 c.owner
             );
@@ -8765,10 +8778,12 @@ mod tests {
     fn a_wide_dataset_is_refused_by_the_typed_readers() {
         let dt = Datatype::FixedPoint {
             size: 16,
-            byte_order: crate::datatype::DatatypeByteOrder::LittleEndian,
-            signed: false,
-            bit_offset: 0,
-            bit_precision: 128,
+            byte_order: DatatypeByteOrder::LittleEndian,
+            layout: FixedPointLayout {
+                signed: false,
+                bit_offset: 0,
+                bit_precision: 128,
+            },
         };
         let mut b = FileBuilder::new();
         b.create_dataset("wide")
@@ -8811,10 +8826,12 @@ mod tests {
     fn an_attribute_too_wide_to_decode_is_omitted_rather_than_truncated() {
         let wide = Datatype::FixedPoint {
             size: 9,
-            byte_order: crate::datatype::DatatypeByteOrder::LittleEndian,
-            signed: false,
-            bit_offset: 0,
-            bit_precision: 72,
+            byte_order: DatatypeByteOrder::LittleEndian,
+            layout: FixedPointLayout {
+                signed: false,
+                bit_offset: 0,
+                bit_precision: 72,
+            },
         };
         // 2^64 exactly, so every one of the low 64 bits is zero.
         let mut raw_data = vec![0u8; 9];

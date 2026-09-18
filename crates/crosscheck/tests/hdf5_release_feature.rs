@@ -1,3 +1,4 @@
+#![cfg(feature = "hdf5")]
 #![cfg(all(not(target_pointer_width = "32"), target_endian = "little"))]
 //! The `__hdf5-*` feature the suite was built with names the release series
 //! of the library it links. The features are passed by hand, so this is the

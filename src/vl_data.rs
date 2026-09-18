@@ -786,7 +786,10 @@ mod tests {
 #[cfg(test)]
 mod embedded_slot_tests {
     use super::*;
-    use crate::datatype::{CompoundMember, StringPadding};
+    use crate::{
+        DatatypeByteOrder,
+        datatype::{CompoundMember, StringPadding, layout::FixedPointLayout},
+    };
 
     fn vlen_string() -> Datatype {
         Datatype::VariableLength {
@@ -806,10 +809,12 @@ mod embedded_slot_tests {
             is_string: false,
             base_type: Box::new(Datatype::FixedPoint {
                 size: 4,
-                signed: true,
-                byte_order: crate::datatype::DatatypeByteOrder::LittleEndian,
-                bit_offset: 0,
-                bit_precision: 32,
+                byte_order: DatatypeByteOrder::LittleEndian,
+                layout: FixedPointLayout {
+                    signed: true,
+                    bit_offset: 0,
+                    bit_precision: 32,
+                },
             }),
             padding: None,
             charset: None,
@@ -819,10 +824,12 @@ mod embedded_slot_tests {
     fn i32_type() -> Datatype {
         Datatype::FixedPoint {
             size: 4,
-            signed: true,
-            byte_order: crate::datatype::DatatypeByteOrder::LittleEndian,
-            bit_offset: 0,
-            bit_precision: 32,
+            byte_order: DatatypeByteOrder::LittleEndian,
+            layout: FixedPointLayout {
+                signed: true,
+                bit_offset: 0,
+                bit_precision: 32,
+            },
         }
     }
 

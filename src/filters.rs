@@ -13,6 +13,8 @@ use core::num::NonZeroU32;
 use alloc::format;
 
 #[cfg(feature = "zfp")]
+use crate::FixedPointLayout;
+#[cfg(feature = "zfp")]
 use crate::convert::Narrow;
 use crate::error::FormatError;
 #[cfg(feature = "zfp")]
@@ -118,12 +120,12 @@ pub fn zfp_element_type_from_datatype(
         Datatype::FloatingPoint { size: 8, .. } => Some(ZfpElementType::F64),
         Datatype::FixedPoint {
             size: 4,
-            signed: true,
+            layout: FixedPointLayout { signed: true, .. },
             ..
         } => Some(ZfpElementType::I32),
         Datatype::FixedPoint {
             size: 8,
-            signed: true,
+            layout: FixedPointLayout { signed: true, .. },
             ..
         } => Some(ZfpElementType::I64),
         _ => None,
@@ -823,7 +825,9 @@ fn fletcher32_append(data: &[u8]) -> Result<Vec<u8>, FormatError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::filter_pipeline::FilterDescription;
+    use crate::datatype::byte_order::DatatypeByteOrder;
+    use crate::datatype::layout::FixedPointLayout;
+    use crate::{Datatype, filter_pipeline::FilterDescription};
 
     /// The context is the single place a `Datatype` becomes an element width for
     /// the chunk splitter and the byte-oriented filters, so it is where a
@@ -831,13 +835,15 @@ mod tests {
     /// the width without a check of its own.
     #[test]
     fn a_context_cannot_be_built_from_a_zero_width_datatype() {
-        let degenerate = crate::datatype::Datatype::Array {
-            base_type: Box::new(crate::datatype::Datatype::FixedPoint {
+        let degenerate = Datatype::Array {
+            base_type: Box::new(Datatype::FixedPoint {
                 size: 4,
-                byte_order: crate::datatype::DatatypeByteOrder::LittleEndian,
-                signed: true,
-                bit_offset: 0,
-                bit_precision: 32,
+                byte_order: DatatypeByteOrder::LittleEndian,
+                layout: FixedPointLayout {
+                    signed: true,
+                    bit_offset: 0,
+                    bit_precision: 32,
+                },
             }),
             dimensions: vec![0],
         };
@@ -848,16 +854,16 @@ mod tests {
 
         let ordinary = crate::datatype::Datatype::FixedPoint {
             size: 4,
-            byte_order: crate::datatype::DatatypeByteOrder::LittleEndian,
-            signed: true,
-            bit_offset: 0,
-            bit_precision: 32,
+            byte_order: DatatypeByteOrder::LittleEndian,
+            layout: FixedPointLayout {
+                signed: true,
+                bit_offset: 0,
+                bit_precision: 32,
+            },
         };
         let ctx = ChunkContext::from_datatype(&[4], &ordinary).unwrap();
         assert_eq!(ctx.element_size.get(), 4);
     }
-
-    // --- Deflate tests ---
 
     #[test]
     #[cfg(feature = "deflate")]

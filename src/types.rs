@@ -5,6 +5,7 @@ use std::fmt;
 
 use crate::address::BaseAddress;
 use crate::datatype::Datatype;
+use crate::datatype::layout::FixedPointLayout;
 use crate::display::{DISPLAY_MAX_MEMBERS, Dims, EscapedName, write_elided};
 
 pub use crate::file_writer::AttrValue;
@@ -115,42 +116,42 @@ pub(crate) fn classify_datatype(dt: &Datatype) -> DType {
         Datatype::FloatingPoint { size: 8, .. } => DType::F64,
         Datatype::FixedPoint {
             size: 1,
-            signed: true,
+            layout: FixedPointLayout { signed: true, .. },
             ..
         } => DType::I8,
         Datatype::FixedPoint {
             size: 2,
-            signed: true,
+            layout: FixedPointLayout { signed: true, .. },
             ..
         } => DType::I16,
         Datatype::FixedPoint {
             size: 4,
-            signed: true,
+            layout: FixedPointLayout { signed: true, .. },
             ..
         } => DType::I32,
         Datatype::FixedPoint {
             size: 8,
-            signed: true,
+            layout: FixedPointLayout { signed: true, .. },
             ..
         } => DType::I64,
         Datatype::FixedPoint {
             size: 1,
-            signed: false,
+            layout: FixedPointLayout { signed: false, .. },
             ..
         } => DType::U8,
         Datatype::FixedPoint {
             size: 2,
-            signed: false,
+            layout: FixedPointLayout { signed: false, .. },
             ..
         } => DType::U16,
         Datatype::FixedPoint {
             size: 4,
-            signed: false,
+            layout: FixedPointLayout { signed: false, .. },
             ..
         } => DType::U32,
         Datatype::FixedPoint {
             size: 8,
-            signed: false,
+            layout: FixedPointLayout { signed: false, .. },
             ..
         } => DType::U64,
         Datatype::String { .. } => DType::String,
@@ -298,11 +299,13 @@ fn decode_attr_value<S: crate::source::Source + ?Sized>(
             }
         }
         Datatype::FixedPoint {
-            signed: true, size, ..
+            size,
+            layout: FixedPointLayout { signed: true, .. },
+            ..
         } => signed_attr_value(attr.read_as_i64().ok()?, scalar, *size),
         Datatype::FixedPoint {
-            signed: false,
             size,
+            layout: FixedPointLayout { signed: false, .. },
             ..
         } => unsigned_attr_value(attr.read_as_u64().ok()?, scalar, *size),
         Datatype::String { charset, size, .. } => {
@@ -537,7 +540,10 @@ fn is_ascii_char_vlen_base(base: &crate::datatype::Datatype) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::datatype::{Datatype, DatatypeByteOrder};
+    use crate::{
+        CharacterSet, DatatypeByteOrder, StringPadding,
+        datatype::{Datatype, layout::FloatingPointLayout},
+    };
 
     /// A width the curated set has no name for reaches the caller as the type
     /// itself, and writing it must not overflow the `size * 8` bit-width
@@ -548,20 +554,24 @@ mod tests {
         let int = Datatype::FixedPoint {
             size: u32::MAX,
             byte_order: DatatypeByteOrder::LittleEndian,
-            signed: true,
-            bit_offset: 0,
-            bit_precision: 0,
+            layout: FixedPointLayout {
+                signed: true,
+                bit_offset: 0,
+                bit_precision: 0,
+            },
         };
         let float = Datatype::FloatingPoint {
             size: u32::MAX,
             byte_order: DatatypeByteOrder::LittleEndian,
-            bit_offset: 0,
-            bit_precision: 0,
-            exponent_location: 0,
-            exponent_size: 0,
-            mantissa_location: 0,
-            mantissa_size: 0,
-            exponent_bias: 0,
+            layout: FloatingPointLayout {
+                bit_offset: 0,
+                bit_precision: 0,
+                exponent_location: 0,
+                exponent_size: 0,
+                mantissa_location: 0,
+                mantissa_size: 0,
+                exponent_bias: 0,
+            },
         };
 
         let bits = u64::from(u32::MAX) * 8;
@@ -930,8 +940,6 @@ mod tests {
     /// left to the C crosscheck, where the branch cannot be reached.
     #[test]
     fn only_a_sequence_of_ascii_chars_claims_the_matlab_shape() {
-        use crate::datatype::{CharacterSet, Datatype, DatatypeByteOrder, StringPadding};
-
         let char_base = Datatype::String {
             size: 1,
             padding: StringPadding::NullTerminate,
@@ -940,9 +948,11 @@ mod tests {
         let int_base = Datatype::FixedPoint {
             size: 1,
             byte_order: DatatypeByteOrder::LittleEndian,
-            signed: false,
-            bit_offset: 0,
-            bit_precision: 8,
+            layout: FixedPointLayout {
+                signed: false,
+                bit_offset: 0,
+                bit_precision: 8,
+            },
         };
 
         // What MATLAB and matio write, and what this crate writes for
@@ -1057,10 +1067,12 @@ mod tests {
     fn a_width_with_no_rust_integer_widens() {
         let three_byte = Datatype::FixedPoint {
             size: 3,
-            byte_order: crate::datatype::DatatypeByteOrder::LittleEndian,
-            signed: false,
-            bit_offset: 0,
-            bit_precision: 24,
+            byte_order: DatatypeByteOrder::LittleEndian,
+            layout: FixedPointLayout {
+                signed: false,
+                bit_offset: 0,
+                bit_precision: 24,
+            },
         };
         assert_eq!(
             decode_raw(three_byte.clone(), vec![0xFF, 0xFF, 0xFF], vec![]),
@@ -1084,10 +1096,12 @@ mod tests {
     fn a_value_outside_its_declared_width_is_not_wrapped() {
         let overwide = Datatype::FixedPoint {
             size: 1,
-            byte_order: crate::datatype::DatatypeByteOrder::LittleEndian,
-            signed: true,
-            bit_offset: 0,
-            bit_precision: 16,
+            byte_order: DatatypeByteOrder::LittleEndian,
+            layout: FixedPointLayout {
+                signed: true,
+                bit_offset: 0,
+                bit_precision: 16,
+            },
         };
         assert_eq!(
             decode_raw(overwide.clone(), vec![0xFF], vec![]),
@@ -1133,7 +1147,10 @@ mod tests {
 #[cfg(all(test, feature = "std"))]
 mod display_tests {
     use super::*;
-    use crate::datatype::{CharacterSet, Datatype, DatatypeByteOrder, StringPadding};
+    use crate::{
+        DatatypeByteOrder,
+        datatype::{CharacterSet, Datatype, StringPadding, layout::FloatingPointLayout},
+    };
 
     #[test]
     fn an_array_shape_is_not_a_debug_slice() {
@@ -1152,13 +1169,15 @@ mod display_tests {
         let vax = Datatype::FloatingPoint {
             size: 4,
             byte_order: DatatypeByteOrder::Vax,
-            bit_offset: 0,
-            bit_precision: 32,
-            exponent_location: 23,
-            exponent_size: 8,
-            mantissa_location: 0,
-            mantissa_size: 23,
-            exponent_bias: 127,
+            layout: FloatingPointLayout {
+                bit_offset: 0,
+                bit_precision: 32,
+                exponent_location: 23,
+                exponent_size: 8,
+                mantissa_location: 0,
+                mantissa_size: 23,
+                exponent_bias: 127,
+            },
         };
         // Classification keys off size alone, so this stays `F32`; the point is
         // the fallback below.
@@ -1233,20 +1252,24 @@ mod display_tests {
             Datatype::FixedPoint {
                 size: 4,
                 byte_order: DatatypeByteOrder::LittleEndian,
-                signed: true,
-                bit_offset: 0,
-                bit_precision: 32,
+                layout: FixedPointLayout {
+                    signed: true,
+                    bit_offset: 0,
+                    bit_precision: 32,
+                },
             },
             Datatype::FloatingPoint {
                 size: 4,
                 byte_order: DatatypeByteOrder::LittleEndian,
-                bit_offset: 0,
-                bit_precision: 32,
-                exponent_location: 23,
-                exponent_size: 8,
-                mantissa_location: 0,
-                mantissa_size: 23,
-                exponent_bias: 127,
+                layout: FloatingPointLayout {
+                    bit_offset: 0,
+                    bit_precision: 32,
+                    exponent_location: 23,
+                    exponent_size: 8,
+                    mantissa_location: 0,
+                    mantissa_size: 23,
+                    exponent_bias: 127,
+                },
             },
         ];
         for datatype in identical {

@@ -6,6 +6,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Changed
+
+- **Breaking:** Implement `Copy` on `DatatypeByteOrder`
+- **Breaking:** Refactored `Datatype::FixedPoint` and `Datatype::FloatingPoint` to group layout-related fields into the new `FixedPointLayout` and `FloatingPointLayout` structs
+
 ### Fixed
 
 - `Dataset::read` reads a chunked dataset whose layout stores its partial edge chunks with the filters skipped, where every chunk went through the inverse filter pipeline and such a chunk decoded to wrong values or failed the read. A whole chunk of the same dataset decodes through the pipeline. ([#589](https://github.com/CramBL/hdf5-pure/pull/589))

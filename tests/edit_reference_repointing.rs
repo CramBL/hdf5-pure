@@ -11,7 +11,7 @@
 
 use hdf5_pure::{
     AttrValue, CompoundTypeBuilder, Datatype, DatatypeByteOrder, File, FileBuilder,
-    FileSpaceStrategy, Group, MaxExtent, Object, ReferenceType,
+    FileSpaceStrategy, FixedPointLayout, Group, MaxExtent, Object, ReferenceType,
 };
 use tempfile::tempdir;
 
@@ -241,9 +241,11 @@ fn a_reference_inside_a_compound_element_is_repointed() {
             Datatype::FixedPoint {
                 size: 4,
                 byte_order: DatatypeByteOrder::LittleEndian,
-                signed: true,
-                bit_offset: 0,
-                bit_precision: 32,
+                layout: FixedPointLayout {
+                    signed: true,
+                    bit_offset: 0,
+                    bit_precision: 32,
+                },
             },
         )
         .build()

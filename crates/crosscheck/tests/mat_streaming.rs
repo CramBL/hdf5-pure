@@ -1,3 +1,4 @@
+#![cfg(feature = "hdf5")]
 #![cfg(all(not(target_pointer_width = "32"), target_endian = "little"))]
 //! The reference C library must read a `.mat` written by the streaming path.
 //!

@@ -1,3 +1,4 @@
+#![cfg(feature = "hdf5")]
 #![cfg(all(not(target_pointer_width = "32"), target_endian = "little"))]
 //! An enumeration *attribute* written by the reference C library must reach the
 //! caller, decoded through the enum's integer base type (#248).

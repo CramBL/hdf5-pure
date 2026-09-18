@@ -15,28 +15,29 @@ use crate::chunked_write::{ChunkMeta, ChunkOptions, ChunkProvider, FilterKind, S
 use crate::compound::CompoundType;
 use crate::convert::Narrow;
 use crate::dataspace::{Dataspace, DataspaceType, MaxExtent};
-use crate::datatype::{
-    CharacterSet, CompoundMember, Datatype, DatatypeByteOrder, EnumMember, StringPadding,
-};
+use crate::datatype::byte_order::DatatypeByteOrder;
+use crate::datatype::layout::{FixedPointLayout, FloatingPointLayout};
+use crate::datatype::{CharacterSet, CompoundMember, Datatype, EnumMember, StringPadding};
 use crate::display::write_elided;
 use crate::error::FormatError;
 use crate::object_path::ObjectPathBuf;
 use crate::scaleoffset::{FillAvailability, ScaleOffset};
 use crate::shared_message::DatatypeLocation;
 
-// ---- Datatype constructors ----
-
 pub fn make_f64_type() -> Datatype {
     Datatype::FloatingPoint {
         size: 8,
         byte_order: DatatypeByteOrder::LittleEndian,
-        bit_offset: 0,
-        bit_precision: 64,
-        exponent_location: 52,
-        exponent_size: 11,
-        mantissa_location: 0,
-        mantissa_size: 52,
-        exponent_bias: 1023,
+
+        layout: FloatingPointLayout {
+            bit_offset: 0,
+            bit_precision: 64,
+            exponent_location: 52,
+            exponent_size: 11,
+            mantissa_location: 0,
+            mantissa_size: 52,
+            exponent_bias: 1023,
+        },
     }
 }
 
@@ -44,13 +45,15 @@ pub fn make_f32_type() -> Datatype {
     Datatype::FloatingPoint {
         size: 4,
         byte_order: DatatypeByteOrder::LittleEndian,
-        bit_offset: 0,
-        bit_precision: 32,
-        exponent_location: 23,
-        exponent_size: 8,
-        mantissa_location: 0,
-        mantissa_size: 23,
-        exponent_bias: 127,
+        layout: FloatingPointLayout {
+            bit_offset: 0,
+            bit_precision: 32,
+            exponent_location: 23,
+            exponent_size: 8,
+            mantissa_location: 0,
+            mantissa_size: 23,
+            exponent_bias: 127,
+        },
     }
 }
 
@@ -58,9 +61,11 @@ pub fn make_i32_type() -> Datatype {
     Datatype::FixedPoint {
         size: 4,
         byte_order: DatatypeByteOrder::LittleEndian,
-        signed: true,
-        bit_offset: 0,
-        bit_precision: 32,
+        layout: FixedPointLayout {
+            signed: true,
+            bit_offset: 0,
+            bit_precision: 32,
+        },
     }
 }
 
@@ -68,9 +73,11 @@ pub fn make_i64_type() -> Datatype {
     Datatype::FixedPoint {
         size: 8,
         byte_order: DatatypeByteOrder::LittleEndian,
-        signed: true,
-        bit_offset: 0,
-        bit_precision: 64,
+        layout: FixedPointLayout {
+            signed: true,
+            bit_offset: 0,
+            bit_precision: 64,
+        },
     }
 }
 
@@ -78,9 +85,11 @@ pub fn make_u8_type() -> Datatype {
     Datatype::FixedPoint {
         size: 1,
         byte_order: DatatypeByteOrder::LittleEndian,
-        signed: false,
-        bit_offset: 0,
-        bit_precision: 8,
+        layout: FixedPointLayout {
+            signed: false,
+            bit_offset: 0,
+            bit_precision: 8,
+        },
     }
 }
 
@@ -88,9 +97,11 @@ pub fn make_i8_type() -> Datatype {
     Datatype::FixedPoint {
         size: 1,
         byte_order: DatatypeByteOrder::LittleEndian,
-        signed: true,
-        bit_offset: 0,
-        bit_precision: 8,
+        layout: FixedPointLayout {
+            signed: true,
+            bit_offset: 0,
+            bit_precision: 8,
+        },
     }
 }
 
@@ -98,9 +109,11 @@ pub fn make_i16_type() -> Datatype {
     Datatype::FixedPoint {
         size: 2,
         byte_order: DatatypeByteOrder::LittleEndian,
-        signed: true,
-        bit_offset: 0,
-        bit_precision: 16,
+        layout: FixedPointLayout {
+            signed: true,
+            bit_offset: 0,
+            bit_precision: 16,
+        },
     }
 }
 
@@ -108,9 +121,11 @@ pub fn make_u16_type() -> Datatype {
     Datatype::FixedPoint {
         size: 2,
         byte_order: DatatypeByteOrder::LittleEndian,
-        signed: false,
-        bit_offset: 0,
-        bit_precision: 16,
+        layout: FixedPointLayout {
+            signed: false,
+            bit_offset: 0,
+            bit_precision: 16,
+        },
     }
 }
 
@@ -118,9 +133,11 @@ pub fn make_u32_type() -> Datatype {
     Datatype::FixedPoint {
         size: 4,
         byte_order: DatatypeByteOrder::LittleEndian,
-        signed: false,
-        bit_offset: 0,
-        bit_precision: 32,
+        layout: FixedPointLayout {
+            signed: false,
+            bit_offset: 0,
+            bit_precision: 32,
+        },
     }
 }
 
@@ -128,9 +145,11 @@ pub fn make_u64_type() -> Datatype {
     Datatype::FixedPoint {
         size: 8,
         byte_order: DatatypeByteOrder::LittleEndian,
-        signed: false,
-        bit_offset: 0,
-        bit_precision: 64,
+        layout: FixedPointLayout {
+            signed: false,
+            bit_offset: 0,
+            bit_precision: 64,
+        },
     }
 }
 
@@ -613,7 +632,10 @@ impl EnumTypeBuilder {
     pub fn build(self) -> Result<Datatype, FormatError> {
         let size = self.base_type.type_size();
         let signed = match &self.base_type {
-            Datatype::FixedPoint { signed, .. } => *signed,
+            Datatype::FixedPoint {
+                layout: FixedPointLayout { signed, .. },
+                ..
+            } => *signed,
             _ => return Err(FormatError::EnumBaseNotInteger),
         };
         let width = size.to_usize()?;

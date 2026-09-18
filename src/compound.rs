@@ -4,7 +4,9 @@
 use alloc::{format, string::ToString, vec::Vec};
 
 use crate::convert::Narrow;
-use crate::datatype::{CompoundMember, Datatype, DatatypeByteOrder};
+use crate::datatype::byte_order::DatatypeByteOrder;
+use crate::datatype::layout::{FixedPointLayout, FloatingPointLayout};
+use crate::datatype::{CompoundMember, Datatype};
 use crate::error::FormatError;
 use crate::type_builders::{
     make_f32_type, make_f64_type, make_i8_type, make_i16_type, make_i32_type, make_i64_type,
@@ -72,14 +74,17 @@ fn integer_order(
         Datatype::FixedPoint {
             size: actual_size,
             byte_order,
-            signed: actual_signed,
-            bit_offset: 0,
-            bit_precision,
+            layout:
+                FixedPointLayout {
+                    signed: actual_signed,
+                    bit_offset: 0,
+                    bit_precision,
+                },
         } if *actual_size == size
             && *actual_signed == signed
             && u32::from(*bit_precision) == size * 8 =>
         {
-            Ok(byte_order.clone())
+            Ok(*byte_order)
         }
         _ => Err(FormatError::CompoundFieldTypeMismatch(name.to_string())),
     }
@@ -95,30 +100,36 @@ fn float_order(
             Datatype::FloatingPoint {
                 size: 4,
                 byte_order,
-                bit_offset: 0,
-                bit_precision: 32,
-                exponent_location: 23,
-                exponent_size: 8,
-                mantissa_location: 0,
-                mantissa_size: 23,
-                exponent_bias: 127,
+                layout:
+                    FloatingPointLayout {
+                        bit_offset: 0,
+                        bit_precision: 32,
+                        exponent_location: 23,
+                        exponent_size: 8,
+                        mantissa_location: 0,
+                        mantissa_size: 23,
+                        exponent_bias: 127,
+                    },
             },
             4,
-        ) => Some(byte_order.clone()),
+        ) => Some(*byte_order),
         (
             Datatype::FloatingPoint {
                 size: 8,
                 byte_order,
-                bit_offset: 0,
-                bit_precision: 64,
-                exponent_location: 52,
-                exponent_size: 11,
-                mantissa_location: 0,
-                mantissa_size: 52,
-                exponent_bias: 1023,
+                layout:
+                    FloatingPointLayout {
+                        bit_offset: 0,
+                        bit_precision: 64,
+                        exponent_location: 52,
+                        exponent_size: 11,
+                        mantissa_location: 0,
+                        mantissa_size: 52,
+                        exponent_bias: 1023,
+                    },
             },
             8,
-        ) => Some(byte_order.clone()),
+        ) => Some(*byte_order),
         _ => None,
     };
     standard.ok_or_else(|| FormatError::CompoundFieldTypeMismatch(name.to_string()))

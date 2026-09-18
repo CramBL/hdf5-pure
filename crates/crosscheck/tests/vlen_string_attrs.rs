@@ -13,7 +13,7 @@
 //! handed — which is what decides whether the C library can convert it at all.
 
 use hdf5::types::{TypeDescriptor, VarLenAscii, VarLenUnicode};
-use hdf5_pure::{AttrValue, File, FileBuilder};
+use hdf5_pure::{AttrValue, File, FileBuilder, FixedPointLayout};
 use tempfile::tempdir;
 
 /// The four values under test, one per variant, keyed by the attribute name
@@ -389,9 +389,11 @@ fn a_committed_datatype_attribute_stages_its_heap() {
         base_type: Box::new(Datatype::FixedPoint {
             size: 1,
             byte_order: DatatypeByteOrder::LittleEndian,
-            signed: false,
-            bit_offset: 0,
-            bit_precision: 8,
+            layout: FixedPointLayout {
+                signed: false,
+                bit_offset: 0,
+                bit_precision: 8,
+            },
         }),
     };
     let matlab = Datatype::VariableLength {

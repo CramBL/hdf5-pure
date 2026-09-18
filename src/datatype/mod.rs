@@ -9,20 +9,19 @@ use alloc::{boxed::Box, string::String, vec, vec::Vec};
 use core::fmt;
 use core::num::{NonZeroU32, NonZeroUsize};
 
+use byte_order::DatatypeByteOrder;
 use byteorder::{ByteOrder, LittleEndian};
+use layout::FloatingPointLayout;
 
 use crate::bytes::ensure_len;
 use crate::convert::Narrow;
+use crate::datatype::layout::FixedPointLayout;
 use crate::display::{DISPLAY_MAX_MEMBERS, Dims, EscapedName, QuotedBytes, write_elided};
 use crate::error::FormatError;
 
-/// Byte order of numeric data.
-#[derive(Debug, Clone, PartialEq)]
-pub enum DatatypeByteOrder {
-    LittleEndian,
-    BigEndian,
-    Vax,
-}
+pub mod byte_order;
+pub(crate) mod layout;
+pub(crate) mod numeric;
 
 /// String padding type.
 #[derive(Debug, Clone, PartialEq)]
@@ -101,10 +100,7 @@ pub struct EnumMember {
 ///
 /// Non-exhaustive: the format's class set is not closed (HDF5 1.14.6 added a
 /// complex-number class), so match with a `_` arm. Only the *class* set is
-/// sealed — the variants stay open, so an exotic type this crate has no
-/// constructor for can still be built as a literal, and surfacing a format field
-/// this crate currently discards (a fixed-point type's padding bits, say) would
-/// still be a breaking change.
+/// sealed.
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub enum Datatype {
@@ -112,21 +108,13 @@ pub enum Datatype {
     FixedPoint {
         size: u32,
         byte_order: DatatypeByteOrder,
-        signed: bool,
-        bit_offset: u16,
-        bit_precision: u16,
+        layout: FixedPointLayout,
     },
     /// Class 1: Floating-point types.
     FloatingPoint {
         size: u32,
         byte_order: DatatypeByteOrder,
-        bit_offset: u16,
-        bit_precision: u16,
-        exponent_location: u8,
-        exponent_size: u8,
-        mantissa_location: u8,
-        mantissa_size: u8,
-        exponent_bias: u32,
+        layout: FloatingPointLayout,
     },
     /// Class 2: Time type (rarely used).
     Time {
@@ -176,282 +164,6 @@ pub enum Datatype {
     },
 }
 
-// ---- Display ----
-//
-// These types land in error messages, so `Display` is the short form: the width
-// and class, plus the fields that depart from the ordinary — a big-endian order,
-// a bit span narrower than the type. A string always names its charset and
-// padding, ordinary or not, because they decide how its bytes read. `Debug`
-// keeps the full record.
-
-impl fmt::Display for DatatypeByteOrder {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.pad(match self {
-            Self::LittleEndian => "le",
-            Self::BigEndian => "be",
-            Self::Vax => "vax",
-        })
-    }
-}
-
-impl fmt::Display for StringPadding {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.pad(match self {
-            Self::NullTerminate => "null-term",
-            Self::NullPad => "null-pad",
-            Self::SpacePad => "space-pad",
-        })
-    }
-}
-
-impl fmt::Display for CharacterSet {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.pad(match self {
-            Self::Ascii => "ascii",
-            Self::Utf8 => "utf8",
-        })
-    }
-}
-
-impl fmt::Display for ReferenceType {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.pad(match self {
-            Self::Object => "object_ref",
-            Self::DatasetRegion => "region_ref",
-        })
-    }
-}
-
-/// The width in bits of a `size`-byte type.
-///
-/// Widens first: `size` is an on-disk `u32`, so a crafted size near [`u32::MAX`]
-/// would overflow a `u32` multiply (issue #140).
-fn bit_width(size: u32) -> u64 {
-    u64::from(size) * 8
-}
-
-/// The bit span, written only when it is narrower than the whole type.
-fn write_bit_span(
-    f: &mut fmt::Formatter<'_>,
-    size: u32,
-    bit_offset: u16,
-    bit_precision: u16,
-) -> fmt::Result {
-    if bit_offset != 0 || u64::from(bit_precision) != bit_width(size) {
-        let end = u64::from(bit_offset) + u64::from(bit_precision);
-        write!(f, "(bits {bit_offset}..{end})")?;
-    }
-    Ok(())
-}
-
-/// The byte order, written only when it is not little-endian.
-fn write_byte_order(f: &mut fmt::Formatter<'_>, byte_order: &DatatypeByteOrder) -> fmt::Result {
-    if *byte_order != DatatypeByteOrder::LittleEndian {
-        write!(f, " {byte_order}")?;
-    }
-    Ok(())
-}
-
-impl fmt::Display for Datatype {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::FixedPoint {
-                size,
-                byte_order,
-                signed,
-                bit_offset,
-                bit_precision,
-            } => {
-                let sign = if *signed { 'i' } else { 'u' };
-                write!(f, "{sign}{}", bit_width(*size))?;
-                write_bit_span(f, *size, *bit_offset, *bit_precision)?;
-                write_byte_order(f, byte_order)
-            }
-            Self::FloatingPoint {
-                size,
-                byte_order,
-                bit_offset,
-                bit_precision,
-                ..
-            } => {
-                write!(f, "f{}", bit_width(*size))?;
-                write_bit_span(f, *size, *bit_offset, *bit_precision)?;
-                write_byte_order(f, byte_order)
-            }
-            Self::Time {
-                size,
-                byte_order,
-                bit_precision,
-            } => {
-                write!(f, "time{}", bit_width(*size))?;
-                write_bit_span(f, *size, 0, *bit_precision)?;
-                write_byte_order(f, byte_order)
-            }
-            Self::String {
-                size,
-                padding,
-                charset,
-            } => write!(f, "string[{size}] {charset} {padding}"),
-            Self::BitField {
-                size,
-                byte_order,
-                bit_offset,
-                bit_precision,
-            } => {
-                write!(f, "bitfield{}", bit_width(*size))?;
-                write_bit_span(f, *size, *bit_offset, *bit_precision)?;
-                write_byte_order(f, byte_order)
-            }
-            Self::Opaque { size, tag } => {
-                write!(f, "opaque[{size}]")?;
-                if !tag.is_empty() {
-                    write!(f, " {}", QuotedBytes(tag))?;
-                }
-                Ok(())
-            }
-            Self::Compound { members, .. } => {
-                f.write_str("compound{")?;
-                for (i, member) in members.iter().take(DISPLAY_MAX_MEMBERS).enumerate() {
-                    if i > 0 {
-                        f.write_str(", ")?;
-                    }
-                    write!(f, "{}: {}", EscapedName(&member.name), member.datatype)?;
-                }
-                write_elided(f, members.len().saturating_sub(DISPLAY_MAX_MEMBERS))?;
-                f.write_str("}")
-            }
-            Self::Reference { ref_type, .. } => write!(f, "{ref_type}"),
-            Self::Enumeration {
-                base_type, members, ..
-            } => {
-                write!(f, "enum<{base_type}>[")?;
-                for (i, member) in members.iter().take(DISPLAY_MAX_MEMBERS).enumerate() {
-                    if i > 0 {
-                        f.write_str(", ")?;
-                    }
-                    write!(f, "{}", EscapedName(&member.name))?;
-                }
-                write_elided(f, members.len().saturating_sub(DISPLAY_MAX_MEMBERS))?;
-                f.write_str("]")
-            }
-            Self::VariableLength {
-                is_string,
-                charset,
-                base_type,
-                ..
-            } => {
-                if *is_string {
-                    f.write_str("vlen_string")?;
-                    if let Some(charset) = charset {
-                        write!(f, " {charset}")?;
-                    }
-                    Ok(())
-                } else {
-                    write!(f, "vlen<{base_type}>")
-                }
-            }
-            Self::Array {
-                base_type,
-                dimensions,
-            } => write!(f, "array<{base_type}, {}>", Dims(dimensions)),
-        }
-    }
-}
-
-fn parse_string_padding(val: u8) -> Result<StringPadding, FormatError> {
-    match val {
-        0 => Ok(StringPadding::NullTerminate),
-        1 => Ok(StringPadding::NullPad),
-        2 => Ok(StringPadding::SpacePad),
-        _ => Err(FormatError::InvalidStringPadding(val)),
-    }
-}
-
-/// Returns the byte order a floating-point datatype's class bit field encodes.
-///
-/// Bit 6 and bit 0 select it together: neither set is little-endian, bit 0 alone big-endian, and
-/// both VAX. Bit 6 alone is the reserved pattern, which parses as VAX, the encoding this crate
-/// writes for a VAX type.
-///
-/// The bit field is defined in "The Datatype Message" of the [format specification, version
-/// 4.0][spec].
-///
-/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_dtmessage
-fn parse_float_byte_order(bit_field: u8) -> DatatypeByteOrder {
-    match (
-        bit_field & FLOAT_BYTE_ORDER_HIGH_BIT != 0,
-        bit_field & FLOAT_BYTE_ORDER_LOW_BIT != 0,
-    ) {
-        (false, false) => DatatypeByteOrder::LittleEndian,
-        (false, true) => DatatypeByteOrder::BigEndian,
-        (true, _) => DatatypeByteOrder::Vax,
-    }
-}
-
-/// Bit 0 of a floating-point class bit field, the low bit of its byte order.
-const FLOAT_BYTE_ORDER_LOW_BIT: u8 = 0x01;
-
-/// Bit 6 of a floating-point class bit field, the high bit of its byte order.
-const FLOAT_BYTE_ORDER_HIGH_BIT: u8 = 0x40;
-
-fn parse_charset(val: u8) -> Result<CharacterSet, FormatError> {
-    match val {
-        0 => Ok(CharacterSet::Ascii),
-        1 => Ok(CharacterSet::Utf8),
-        _ => Err(FormatError::InvalidCharacterSet(val)),
-    }
-}
-
-/// Read a null-terminated string from `data` starting at `offset`.
-/// Returns (string, bytes_consumed including the null terminator).
-fn read_null_terminated_string(data: &[u8], offset: usize) -> Result<(String, usize), FormatError> {
-    if offset >= data.len() {
-        return Err(FormatError::UnexpectedEof {
-            expected: offset + 1,
-            available: data.len(),
-        });
-    }
-    let remaining = &data[offset..];
-    let null_pos = remaining
-        .iter()
-        .position(|&b| b == 0)
-        .ok_or(FormatError::UnexpectedEof {
-            expected: offset + 1,
-            available: data.len(),
-        })?;
-    let name = String::from_utf8_lossy(&remaining[..null_pos]).into_owned();
-    Ok((name, null_pos + 1))
-}
-
-/// Determine how many bytes are needed to encode `compound_size` as a byte offset (v3).
-fn offset_bytes_for_size(compound_size: u32) -> usize {
-    if compound_size <= 0xFF {
-        1
-    } else if compound_size <= 0xFFFF {
-        2
-    } else {
-        4
-    }
-}
-
-/// Read an unsigned integer of 1, 2, 4, or 8 bytes (LE).
-fn read_uint(data: &[u8], offset: usize, nbytes: usize) -> Result<u64, FormatError> {
-    ensure_len(data, offset, nbytes)?;
-    let slice = &data[offset..offset + nbytes];
-    Ok(match nbytes {
-        1 => slice[0] as u64,
-        2 => LittleEndian::read_u16(slice) as u64,
-        4 => LittleEndian::read_u32(slice) as u64,
-        8 => LittleEndian::read_u64(slice),
-        _ => {
-            return Err(FormatError::UnexpectedEof {
-                expected: offset + nbytes,
-                available: data.len(),
-            });
-        }
-    })
-}
-
 impl Datatype {
     /// Parse a datatype message from raw bytes.
     ///
@@ -462,16 +174,9 @@ impl Datatype {
     ///
     /// A parsed type always has a non-zero [`type_size`](Self::type_size): no HDF5
     /// type occupies zero bytes per element, and every reader divides raw bytes by
-    /// that size to recover an element count. Refusing it here — the one place an
-    /// untrusted datatype message becomes a `Datatype` — holds that invariant for
-    /// every reader of a file instead of asking each one to re-check it.
-    ///
-    /// It says nothing about a `Datatype` a caller builds and hands to the writer,
-    /// which never passes through here. `CompoundTypeBuilder::build` over no fields
-    /// yields a zero-size compound today, and the write path divides by the element
-    /// size just as the read path does.
+    /// that size to recover an element count.
     pub(crate) fn parse(data: &[u8]) -> Result<(Datatype, usize), FormatError> {
-        // Minimum header: 4 bytes (class_and_version + 3 bytes bit field) + 4 bytes size = 8
+        // Minimum header: 4 bytes (`class_and_version` + 3 bytes bit field) + 4 bytes size = 8
         ensure_len(data, 0, 8)?;
 
         let class_and_version = data[0];
@@ -504,9 +209,11 @@ impl Datatype {
                     Datatype::FixedPoint {
                         size,
                         byte_order,
-                        signed,
-                        bit_offset,
-                        bit_precision,
+                        layout: FixedPointLayout {
+                            signed,
+                            bit_offset,
+                            bit_precision,
+                        },
                     },
                     pos,
                 ))
@@ -527,13 +234,15 @@ impl Datatype {
                     Datatype::FloatingPoint {
                         size,
                         byte_order,
-                        bit_offset,
-                        bit_precision,
-                        exponent_location,
-                        exponent_size,
-                        mantissa_location,
-                        mantissa_size,
-                        exponent_bias,
+                        layout: FloatingPointLayout {
+                            bit_offset,
+                            bit_precision,
+                            exponent_location,
+                            exponent_size,
+                            mantissa_location,
+                            mantissa_size,
+                            exponent_bias,
+                        },
                     },
                     pos,
                 ))
@@ -630,10 +339,11 @@ impl Datatype {
                 } else if version == 1 || version == 2 {
                     // v1 and v2: the member name is NUL-terminated and padded with
                     // additional NULs to a multiple of 8 bytes, followed by a
-                    // 4-byte member byte offset. v1 then carries a fixed 28-byte
-                    // dimension block — dimensionality(1) + reserved(3) +
-                    // dimension permutation(4) + reserved(4) + dimension sizes(16)
-                    // — before the member datatype message; v2 drops that block.
+                    // 4-byte member byte offset.
+                    //
+                    // v1 then carries a fixed 28-byte dimension block before the member datatype message:
+                    //  dimensionality(1) + reserved(3) + dimension permutation(4) + reserved(4) + dimension sizes(16)
+                    // v2 drops that block.
                     for _ in 0..num_members {
                         let (name, name_len) = read_null_terminated_string(data, pos)?;
                         let padded = (name_len + 7) & !7;
@@ -680,7 +390,7 @@ impl Datatype {
                 pos += base_consumed;
                 let base_size = base_type.type_size();
                 let mut members = Vec::with_capacity(num_members as usize);
-                // Enum layout: base_type, then all names (null-terminated), then all values
+                // Enum layout: `base_type`, then all names (null-terminated), then all values
                 // v1/v2: names are padded to 8-byte boundaries
                 // v3: names are just null-terminated
                 let mut member_names = Vec::with_capacity(num_members as usize);
@@ -791,7 +501,8 @@ impl Datatype {
                 }
             }
             11 => {
-                // Complex number — store as compound of two floats internally
+                // Complex number:
+                // Store as compound of two floats internally.
                 // Parse like compound with version 3 and 2 members
                 // But actually class 11 has no special properties beyond class 6 compound.
                 // It's just recognized as a separate class. For now parse the 2 members
@@ -817,9 +528,8 @@ impl Datatype {
             _ => Err(FormatError::InvalidDatatypeClass(class_id)),
         };
 
-        // The declared size is checked through `type_size` rather than the header
-        // field, because the two differ: an array type derives its size from its
-        // base type and dimensions, so a zero dimension yields a zero-byte element
+        // The declared size is checked through `type_size` because it differs from the size in the header field:
+        // An array type derives its size from its base type and dimensions, so a zero dimension yields a zero-byte element
         // from a non-zero header field.
         let (datatype, consumed) = parsed?;
         if datatype.type_size() == 0 {
@@ -839,9 +549,12 @@ impl Datatype {
             Datatype::FixedPoint {
                 size,
                 byte_order,
-                signed,
-                bit_offset,
-                bit_precision,
+                layout:
+                    FixedPointLayout {
+                        signed,
+                        bit_offset,
+                        bit_precision,
+                    },
             } => {
                 let mut bf0 = 0u8;
                 if matches!(byte_order, DatatypeByteOrder::BigEndian) {
@@ -858,13 +571,16 @@ impl Datatype {
             Datatype::FloatingPoint {
                 size,
                 byte_order,
-                bit_offset,
-                bit_precision,
-                exponent_location,
-                exponent_size,
-                mantissa_location,
-                mantissa_size,
-                exponent_bias,
+                layout:
+                    FloatingPointLayout {
+                        bit_offset,
+                        bit_precision,
+                        exponent_location,
+                        exponent_size,
+                        mantissa_location,
+                        mantissa_size,
+                        exponent_bias,
+                    },
             } => {
                 let mut bf0 = 0x20u8; // bit 5: sign location bit (standard IEEE 754)
                 match byte_order {
@@ -1046,7 +762,7 @@ impl Datatype {
                 buf
             }
             Datatype::Opaque { size, tag } => {
-                // bf0 carries the ASCII tag length; the tag is padded with zero
+                // `bf0` carries the ASCII tag length the tag is padded with zero
                 // bytes to a multiple of 8, mirroring `parse`.
                 #[expect(
                     clippy::cast_possible_truncation,
@@ -1098,12 +814,7 @@ impl Datatype {
         }
     }
 
-    /// The class code this type encodes as, the low nibble of a datatype
-    /// message's first byte.
-    ///
-    /// Kept beside [`type_size`](Self::type_size) rather than read back out of
-    /// [`serialize`](Self::serialize), so naming the class in an error costs no
-    /// encoding.
+    /// The class code this type encodes as, the low nibble of a datatype message's first byte.
     pub(crate) fn class_code(&self) -> u8 {
         match self {
             Datatype::FixedPoint { .. } => 0,
@@ -1120,26 +831,21 @@ impl Datatype {
         }
     }
 
-    /// The element size in bytes, proven non-zero.
+    /// Returns the size in bytes of one element.
     ///
-    /// Prefer this to [`type_size`](Self::type_size) for any element size that
-    /// is about to be divided or divided *by*: it returns the size as a
-    /// [`NonZeroU32`], so the value carries its own proof and the code it is
-    /// handed to cannot divide by zero. Every such site in this crate takes a
-    /// non-zero size rather than re-checking one.
+    /// The size is returned as a [`NonZeroU32`], so callers can divide by it or
+    /// divide it into a byte count without a separate zero check. Prefer this
+    /// over [`type_size`](Self::type_size) whenever the result feeds a division.
     ///
-    /// The refusal has to live here rather than in the type because
-    /// `type_size()` is *computed*: an [`Array`](Self::Array) reports its base
-    /// type times its dimensions, so a zero dimension yields a zero-width
-    /// element behind a header that claims otherwise, and the variants are
-    /// deliberately open for a caller to build as a literal. A type read out of
-    /// a file is already refused when its message is decoded; this is the same
-    /// refusal for a constructed one, on the way into a writer.
+    /// The zero-size check is here because [`type_size`](Self::type_size) is
+    /// computed: an [`Array`](Self::Array) with a zero dimension reports a zero
+    /// size even though its header field is non-zero, and the public variants let a
+    /// caller build a zero-sized value directly.
     ///
     /// # Errors
     ///
-    /// [`FormatError::ZeroSizedDatatype`] if the type occupies zero bytes per
-    /// element.
+    /// Returns [`FormatError::ZeroSizedDatatype`] if the element type occupies
+    /// zero bytes.
     pub fn element_size(&self) -> Result<NonZeroU32, FormatError> {
         NonZeroU32::new(self.type_size()).ok_or(FormatError::ZeroSizedDatatype {
             class: self.class_code(),
@@ -1161,18 +867,306 @@ impl Datatype {
     pub(crate) fn element_size_usize(&self) -> Result<NonZeroUsize, FormatError> {
         self.element_size()?.narrow::<NonZeroUsize>()
     }
+
+    pub(crate) fn name(&self) -> &'static str {
+        match self {
+            Self::FixedPoint { .. } => "FixedPoint",
+            Self::FloatingPoint { .. } => "FloatingPoint",
+            Self::String { .. } => "String",
+            Self::Time { .. } => "Time",
+            Self::BitField { .. } => "BitField",
+            Self::Opaque { .. } => "Opaque",
+            Self::Compound { .. } => "Compound",
+            Self::Reference { .. } => "Reference",
+            Self::Enumeration { .. } => "Enumeration",
+            Self::VariableLength { .. } => "VariableLength",
+            Self::Array { .. } => "Array",
+        }
+    }
 }
-/// Whether a datatype of this encoded class *could* hold an object address,
-/// decided from the first byte of a datatype message rather than by parsing it.
+
+impl fmt::Display for DatatypeByteOrder {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.pad(match self {
+            Self::LittleEndian => "le",
+            Self::BigEndian => "be",
+            Self::Vax => "vax",
+        })
+    }
+}
+
+impl fmt::Display for StringPadding {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.pad(match self {
+            Self::NullTerminate => "null-term",
+            Self::NullPad => "null-pad",
+            Self::SpacePad => "space-pad",
+        })
+    }
+}
+
+impl fmt::Display for CharacterSet {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.pad(match self {
+            Self::Ascii => "ascii",
+            Self::Utf8 => "utf8",
+        })
+    }
+}
+
+impl fmt::Display for ReferenceType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.pad(match self {
+            Self::Object => "object_ref",
+            Self::DatasetRegion => "region_ref",
+        })
+    }
+}
+
+/// The width in bits of a `size`-byte type.
 ///
-/// A **necessary** condition for [`datatype_holds_object_address`] and never a
-/// sufficient one: a compound of two integers has a qualifying class and holds
-/// no address at all. It exists so a walk over every object in a file can reject
-/// the overwhelmingly common cases — a fixed-point, floating-point, string, or
-/// opaque dataset — without allocating a parsed [`Datatype`] for each. The
-/// classes it admits are exactly the ones `datatype_holds_object_address`
-/// recurses through, plus the reference itself; `class_predicate_admits_every_
-/// reference_holding_type` in this module's tests is what holds the two together.
+/// Widens first: `size` is an on-disk `u32`, so a crafted size near [`u32::MAX`]
+/// would overflow a `u32` multiply.
+fn bit_width(size: u32) -> u64 {
+    u64::from(size) * 8
+}
+
+/// The bit span, written only when it is narrower than the whole type.
+fn write_bit_span(
+    f: &mut fmt::Formatter<'_>,
+    size: u32,
+    bit_offset: u16,
+    bit_precision: u16,
+) -> fmt::Result {
+    if bit_offset != 0 || u64::from(bit_precision) != bit_width(size) {
+        let end = u64::from(bit_offset) + u64::from(bit_precision);
+        write!(f, "(bits {bit_offset}..{end})")?;
+    }
+    Ok(())
+}
+
+/// The byte order, written only when it is not little-endian.
+fn write_byte_order(f: &mut fmt::Formatter<'_>, byte_order: &DatatypeByteOrder) -> fmt::Result {
+    if *byte_order != DatatypeByteOrder::LittleEndian {
+        write!(f, " {byte_order}")?;
+    }
+    Ok(())
+}
+
+impl fmt::Display for Datatype {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::FixedPoint {
+                size,
+                byte_order,
+                layout:
+                    FixedPointLayout {
+                        signed,
+                        bit_offset,
+                        bit_precision,
+                    },
+            } => {
+                let sign = if *signed { 'i' } else { 'u' };
+                write!(f, "{sign}{}", bit_width(*size))?;
+                write_bit_span(f, *size, *bit_offset, *bit_precision)?;
+                write_byte_order(f, byte_order)
+            }
+            Self::FloatingPoint {
+                size,
+                byte_order,
+                layout,
+            } => {
+                write!(f, "f{}", bit_width(*size))?;
+                write_bit_span(f, *size, layout.bit_offset, layout.bit_precision)?;
+                write_byte_order(f, byte_order)
+            }
+            Self::Time {
+                size,
+                byte_order,
+                bit_precision,
+            } => {
+                write!(f, "time{}", bit_width(*size))?;
+                write_bit_span(f, *size, 0, *bit_precision)?;
+                write_byte_order(f, byte_order)
+            }
+            Self::String {
+                size,
+                padding,
+                charset,
+            } => write!(f, "string[{size}] {charset} {padding}"),
+            Self::BitField {
+                size,
+                byte_order,
+                bit_offset,
+                bit_precision,
+            } => {
+                write!(f, "bitfield{}", bit_width(*size))?;
+                write_bit_span(f, *size, *bit_offset, *bit_precision)?;
+                write_byte_order(f, byte_order)
+            }
+            Self::Opaque { size, tag } => {
+                write!(f, "opaque[{size}]")?;
+                if !tag.is_empty() {
+                    write!(f, " {}", QuotedBytes(tag))?;
+                }
+                Ok(())
+            }
+            Self::Compound { members, .. } => {
+                f.write_str("compound{")?;
+                for (i, member) in members.iter().take(DISPLAY_MAX_MEMBERS).enumerate() {
+                    if i > 0 {
+                        f.write_str(", ")?;
+                    }
+                    write!(f, "{}: {}", EscapedName(&member.name), member.datatype)?;
+                }
+                write_elided(f, members.len().saturating_sub(DISPLAY_MAX_MEMBERS))?;
+                f.write_str("}")
+            }
+            Self::Reference { ref_type, .. } => write!(f, "{ref_type}"),
+            Self::Enumeration {
+                base_type, members, ..
+            } => {
+                write!(f, "enum<{base_type}>[")?;
+                for (i, member) in members.iter().take(DISPLAY_MAX_MEMBERS).enumerate() {
+                    if i > 0 {
+                        f.write_str(", ")?;
+                    }
+                    write!(f, "{}", EscapedName(&member.name))?;
+                }
+                write_elided(f, members.len().saturating_sub(DISPLAY_MAX_MEMBERS))?;
+                f.write_str("]")
+            }
+            Self::VariableLength {
+                is_string,
+                charset,
+                base_type,
+                ..
+            } => {
+                if *is_string {
+                    f.write_str("vlen_string")?;
+                    if let Some(charset) = charset {
+                        write!(f, " {charset}")?;
+                    }
+                    Ok(())
+                } else {
+                    write!(f, "vlen<{base_type}>")
+                }
+            }
+            Self::Array {
+                base_type,
+                dimensions,
+            } => write!(f, "array<{base_type}, {}>", Dims(dimensions)),
+        }
+    }
+}
+
+fn parse_string_padding(val: u8) -> Result<StringPadding, FormatError> {
+    match val {
+        0 => Ok(StringPadding::NullTerminate),
+        1 => Ok(StringPadding::NullPad),
+        2 => Ok(StringPadding::SpacePad),
+        _ => Err(FormatError::InvalidStringPadding(val)),
+    }
+}
+
+/// Returns the byte order a floating-point datatype's class bit field encodes.
+///
+/// Bit 6 and bit 0 select it together: neither set is little-endian, bit 0 alone big-endian, and
+/// both VAX. Bit 6 alone is the reserved pattern, which parses as VAX, the encoding this crate
+/// writes for a VAX type.
+///
+/// The bit field is defined in "The Datatype Message" of the [format specification, version
+/// 4.0][spec].
+///
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_dtmessage
+fn parse_float_byte_order(bit_field: u8) -> DatatypeByteOrder {
+    match (
+        bit_field & FLOAT_BYTE_ORDER_HIGH_BIT != 0,
+        bit_field & FLOAT_BYTE_ORDER_LOW_BIT != 0,
+    ) {
+        (false, false) => DatatypeByteOrder::LittleEndian,
+        (false, true) => DatatypeByteOrder::BigEndian,
+        (true, _) => DatatypeByteOrder::Vax,
+    }
+}
+
+/// Bit 0 of a floating-point class bit field, the low bit of its byte order.
+const FLOAT_BYTE_ORDER_LOW_BIT: u8 = 0x01;
+
+/// Bit 6 of a floating-point class bit field, the high bit of its byte order.
+const FLOAT_BYTE_ORDER_HIGH_BIT: u8 = 0x40;
+
+fn parse_charset(val: u8) -> Result<CharacterSet, FormatError> {
+    match val {
+        0 => Ok(CharacterSet::Ascii),
+        1 => Ok(CharacterSet::Utf8),
+        _ => Err(FormatError::InvalidCharacterSet(val)),
+    }
+}
+
+/// Read a null-terminated string from `data` starting at `offset`.
+/// Returns (`string`, `bytes_consumed` including the null terminator).
+fn read_null_terminated_string(data: &[u8], offset: usize) -> Result<(String, usize), FormatError> {
+    if offset >= data.len() {
+        return Err(FormatError::UnexpectedEof {
+            expected: offset + 1,
+            available: data.len(),
+        });
+    }
+    let remaining = &data[offset..];
+    let null_pos = remaining
+        .iter()
+        .position(|&b| b == 0)
+        .ok_or(FormatError::UnexpectedEof {
+            expected: offset + 1,
+            available: data.len(),
+        })?;
+    let name = String::from_utf8_lossy(&remaining[..null_pos]).into_owned();
+    Ok((name, null_pos + 1))
+}
+
+/// Determine how many bytes are needed to encode `compound_size` as a byte offset (v3).
+fn offset_bytes_for_size(compound_size: u32) -> usize {
+    if compound_size <= 0xFF {
+        1
+    } else if compound_size <= 0xFFFF {
+        2
+    } else {
+        4
+    }
+}
+
+/// Read an unsigned integer of 1, 2, 4, or 8 bytes (LE).
+fn read_uint(data: &[u8], offset: usize, nbytes: usize) -> Result<u64, FormatError> {
+    ensure_len(data, offset, nbytes)?;
+    let slice = &data[offset..offset + nbytes];
+    Ok(match nbytes {
+        1 => slice[0] as u64,
+        2 => LittleEndian::read_u16(slice) as u64,
+        4 => LittleEndian::read_u32(slice) as u64,
+        8 => LittleEndian::read_u64(slice),
+        _ => {
+            return Err(FormatError::UnexpectedEof {
+                expected: offset + nbytes,
+                available: data.len(),
+            });
+        }
+    })
+}
+
+/// Returns `true` if a datatype of this encoded class can hold an object
+/// address, based only on the first byte of a datatype message.
+///
+/// The check is necessary for [`datatype_holds_object_address`] but not
+/// sufficient. A compound of two integers passes it, so the caller must not
+/// treat a `true` result as proof that an address is present. A walk over every
+/// object in a file calls this to skip the common cases, such as fixed-point,
+/// floating-point, string, and opaque datasets, without allocating a parsed
+/// [`Datatype`] for each.
+///
+/// The admitted classes match the ones that `datatype_holds_object_address`
+/// recurses through, plus the reference class. The test
+/// `class_predicate_admits_every_reference_holding_type` enforces that match.
 pub(crate) fn class_may_hold_object_address(class_and_version: u8) -> bool {
     matches!(
         class_and_version & 0x0F,
@@ -1188,32 +1182,26 @@ const ENUMERATION_CLASS: u8 = 8;
 const VARIABLE_LENGTH_CLASS: u8 = 9;
 const ARRAY_CLASS: u8 = 10;
 
-/// Whether `dt` reaches an **object address** anywhere in its structure — an
-/// object or dataset-region reference, directly or through a compound member,
-/// array entry, enumeration base, or the contents of a variable-length
-/// sequence.
+/// Returns `true` if `dt` contains an object address anywhere in its structure.
 ///
-/// The paired half of [`embedded_reference_slots`], which locates the ones it
-/// can address. This one recognises an object reference of any width and in any
-/// position; that one maps only the 8-byte form reachable through compound
-/// members and array entries. The gap between them is not an oversight but the
-/// point: a datatype this accepts and that cannot map is one whose addresses
-/// cannot be read, which callers must refuse rather than pass over. Their fall-
-/// through arm consults this function so the two cannot drift apart.
+/// An object address is an object reference or a dataset-region reference. This
+/// function searches compound members, array entries, enumeration bases, and
+/// variable-length contents.
 ///
-/// A variable-length datatype counts only when what it *holds* is an object
-/// reference. The heap itself is not at risk — a deletion frees object headers
-/// and dataset storage and never a global heap collection, so a variable-length
-/// string keeps pointing at data that is still there — but a `H5T_VLEN` of
-/// `H5T_STD_REF_OBJ`, which the reference library writes, keeps its addresses in
-/// the heap *contents*, where the element bytes hold only a heap id.
+/// [`embedded_reference_slots`] maps only the 8-byte form reachable through
+/// compound members and array entries. An address outside that form cannot be
+/// read or freed, so the caller must reject the datatype that carries it. The
+/// caller's fall-through arm consults this function so the two cannot drift
+/// apart.
+///
+/// A variable-length datatype counts only when its contents are an object
+/// reference. A deletion frees object headers and dataset storage, and a global
+/// heap collection survives, so a variable-length string keeps pointing at data
+/// that is still present. A `H5T_VLEN` of `H5T_STD_REF_OBJ`, which the
+/// reference library writes, keeps its addresses in the heap contents, where the
+/// element bytes hold only a heap id.
 pub(crate) fn datatype_holds_object_address(dt: &Datatype) -> bool {
     match dt {
-        // Both reference kinds name an object. An object reference *is* the
-        // header address; a dataset-region reference is a global-heap id whose
-        // heap object holds the address and a selection, so the address is one
-        // indirection further out — out of reach of a screen that reads element
-        // bytes, which is what makes it unmappable rather than absent.
         Datatype::Reference { .. } => true,
         Datatype::Compound { members, .. } => members
             .iter()
@@ -1225,29 +1213,33 @@ pub(crate) fn datatype_holds_object_address(dt: &Datatype) -> bool {
     }
 }
 
-/// Whether `dt`'s element bytes carry a **file-absolute address** at any depth:
-/// a variable-length element (a global-heap collection address and index) or a
-/// reference (an object address, or for a dataset-region reference a heap id),
-/// directly or through a compound member, array entry, or enumeration base.
+/// Returns `true` if `dt`'s element bytes carry a **file-absolute address** at
+/// any depth.
 ///
-/// The union of the two addresses an element can hold, and deliberately not a
-/// finer answer than that — both callers ask only whether an address is in
-/// there at all:
+/// A file-absolute address is a variable-length element (a global-heap
+/// collection address and index) or a reference (an object address, or for a
+/// dataset-region reference a heap id). This function searches compound
+/// members, array entries, and enumeration bases.
 ///
-/// - a **cross-file copy** (`reject_foreign_addresses`) refuses such a
+/// The result covers both addresses an element can hold. A finer distinction
+/// is not required, since either caller only requires whether an address is
+/// present at all:
+///
+/// - A **cross-file copy** (`reject_foreign_addresses`) rejects such a
 ///   datatype, since an address into the source file cannot be translated into
-///   another one;
-/// - the **heap-collection provenance** of a variable-length overwrite (issue
-///   #321) gives up its record when a raw-bytes write could name a collection a
-///   second time.
+///   another one.
+/// - A **variable-length overwrite** (issue #321) tracks which heap collection
+///   holds its value, and releases that record when a raw-bytes write could
+///   name a collection a second time.
 ///
-/// Both are one-sided: answering `true` too often costs a refusal or a reclaim,
-/// answering `false` too often would cost correctness.
+/// Both callers are one-sided. Returning `true` too often costs a rejection or
+/// a reclaim. Returning `false` too often would cost correctness.
 ///
-/// Distinct from [`datatype_holds_object_address`], which asks specifically
-/// whether an *object header* address is reachable — so it answers `false` for
-/// a variable-length string and `true` for a variable length *of* references,
-/// where this one answers `true` for both.
+/// Distinct from [`datatype_holds_object_address`], which checks specifically
+/// for an *object header* address. A variable-length string holds a heap id in
+/// its element bytes, and both callers of this function must treat that heap id
+/// as an address. The object-header check serves a caller that only relocates
+/// object headers, so a heap id falls outside its scope.
 pub(crate) fn datatype_holds_file_address(dt: &Datatype) -> bool {
     match dt {
         Datatype::VariableLength { .. } | Datatype::Reference { .. } => true,
@@ -1261,20 +1253,21 @@ pub(crate) fn datatype_holds_file_address(dt: &Datatype) -> bool {
     }
 }
 
-/// Every 8-byte object reference `datatype` reaches through a compound member or
-/// array entry, as byte offsets within one element, in declaration order.
+/// Returns the byte offset of every 8-byte object reference `datatype` contains
+/// in a compound member or array entry, in declaration order.
 ///
-/// Mirrors [`embedded_vlen_slots`](crate::vl_data::embedded_vlen_slots) for the
-/// other kind of address a rewrite invalidates. A datatype that *is* an object
-/// reference yields the single slot at offset 0, so callers handling that case
-/// separately should test for it first.
+/// A datatype that is itself an object reference produces a slot at offset 0,
+/// so a caller that handles that case separately must test for it first.
 ///
-/// Returns `None` when the element bytes cannot be walked safely: the offsets
-/// found do not fit the datatype's declared element size, or the type reaches an
-/// object reference this walker cannot address (see
-/// [`datatype_holds_object_address`]). Both mean the same thing to a caller —
-/// the addresses are not readable from here — so neither is reported as an empty
-/// slot list, which would read as "this type holds none".
+/// The counterpart of [`embedded_vlen_slots`](crate::vl_data::embedded_vlen_slots),
+/// which locates the variable-length heap addresses a rewrite invalidates.
+///
+/// Returns `None` when a computed offset exceeds the datatype's declared element
+/// size, or when the element contains an object reference whose location this
+/// walker cannot report (see [`datatype_holds_object_address`]). The caller must
+/// not treat `None` as an empty slot list. An empty list is safe to rewrite in
+/// place, while `None` means an address may be present with no known location,
+/// which the caller must reject.
 pub(crate) fn embedded_reference_slots(datatype: &Datatype) -> Option<Vec<usize>> {
     /// Returns `false` when the datatype cannot be walked on this target, for the
     /// reasons [`embedded_vlen_slots`]' walker documents.
@@ -1349,13 +1342,12 @@ pub(crate) fn embedded_reference_slots(datatype: &Datatype) -> Option<Vec<usize>
                 }
                 true
             }
-            // Anything this walker does not map. A type that nonetheless
-            // reaches an object reference — a width other than 8, an
-            // enumeration over one, a variable-length sequence *of* them — is
-            // one whose addresses cannot be located in the element bytes, so
-            // say so rather than report "no slots here" and let a caller read
-            // that as "nothing to check". Asking the predicate rather than
-            // restating its arms is what keeps the pair honest as either grows.
+            // The walker maps none of these variants. A datatype here can still contain
+            // an object reference, through a width other than 8, an enumeration over one,
+            // or a variable-length sequence of them. Its addresses exist with no location
+            // the walker can report, so the caller must not treat a `false` result as an
+            // empty slot list. Consulting the predicate keeps the pair in sync as either
+            // grows.
             _ => !datatype_holds_object_address(datatype),
         }
     }
@@ -1378,19 +1370,19 @@ pub(crate) fn embedded_reference_slots(datatype: &Datatype) -> Option<Vec<usize>
     Some(slots)
 }
 
-/// Every 8-byte object reference stored in `raw`, as
-/// `(byte offset within raw, the address stored there)`.
+/// Returns the byte offset within `raw` of each 8-byte object reference, paired
+/// with the address stored there.
 ///
-/// `slots` is [`embedded_reference_slots`] for the datatype `raw` holds elements
-/// of, and `element_size` its `type_size`. Callers differ in what they do with
-/// an address — screen it against what a commit vacates, rewrite it to where the
-/// object moved — but not in how they find one, and this is the one place that
-/// walk lives. A second copy of it would be free to disagree about the element
+/// `slots` is the result of [`embedded_reference_slots`] for the datatype `raw`
+/// holds elements of, and `element_size` is its `type_size`. This function is
+/// the single implementation of the slot scan, shared by callers that screen
+/// addresses against what a commit vacates and callers that rewrite them to a
+/// new location. A second implementation could disagree about the element
 /// stride, about a trailing partial element, or about which slots exist.
 ///
-/// A trailing run shorter than one element is skipped: `chunks_exact` yields
-/// whole elements only, which is the same thing every reader of these bytes does
-/// with a truncated tail.
+/// A trailing run shorter than one element is skipped. `chunks_exact` yields
+/// whole elements only, matching what every reader of these bytes does with a
+/// truncated tail.
 pub(crate) fn stored_object_references<'a>(
     raw: &'a [u8],
     element_size: usize,
@@ -1426,17 +1418,15 @@ mod tests {
 
     use super::*;
 
-    /// Every datatype that reaches an object address must have an encoded class
-    /// [`class_may_hold_object_address`] admits.
+    /// `class_may_hold_object_address` admits the encoded class of every datatype
+    /// that `datatype_holds_object_address` accepts.
     ///
-    /// The two are a pair with one job between them: the class predicate is the
-    /// cheap gate a whole-file walk applies before it will parse a datatype at
-    /// all (`crate::reference_patch`), and the type predicate is the answer it
-    /// gates. A type the gate rejects is never parsed, so if the gate ever
-    /// rejected one that holds an address, the walk would pass over a reference
-    /// in silence — no error, no refusal, just a stored address left dangling.
-    /// Nothing in either function's code says the other exists; this is what
-    /// says it.
+    /// A whole-file scan in `crate::reference_patch` calls the class predicate to
+    /// decide whether to parse a datatype. The class predicate reads only the first
+    /// byte, so it is cheap. A datatype the class predicate rejects is never parsed,
+    /// so a datatype that holds an address and fails the class predicate would leave
+    /// that address dangling with no error reported. Nothing in either function's
+    /// code enforces this correspondence, so this test does.
     #[test]
     fn the_class_gate_admits_every_reference_holding_datatype() {
         let object_ref = || Datatype::Reference {
@@ -1446,9 +1436,11 @@ mod tests {
         let i32_le = || Datatype::FixedPoint {
             size: 4,
             byte_order: DatatypeByteOrder::LittleEndian,
-            signed: true,
-            bit_offset: 0,
-            bit_precision: 32,
+            layout: FixedPointLayout {
+                signed: true,
+                bit_offset: 0,
+                bit_precision: 32,
+            },
         };
         let holds_an_address = [
             ("a bare object reference", object_ref()),
@@ -1534,9 +1526,11 @@ mod tests {
         }
     }
 
-    /// The gate is a *necessary* condition and nothing more: it admits types
-    /// that hold no address, and that is not a defect. Stated so a later reading
-    /// of it as "this type holds a reference" has something to contradict it.
+    /// `class_may_hold_object_address` is a necessary condition for holding an
+    /// object address but not a sufficient one.
+    ///
+    /// A compound of two integers passes the class predicate, so the caller must
+    /// not treat a `true` result as proof that an address is present.
     #[test]
     fn the_class_gate_is_necessary_and_not_sufficient() {
         let ints = Datatype::Compound {
@@ -1547,9 +1541,11 @@ mod tests {
                 datatype: Datatype::FixedPoint {
                     size: 8,
                     byte_order: DatatypeByteOrder::LittleEndian,
-                    signed: true,
-                    bit_offset: 0,
-                    bit_precision: 64,
+                    layout: FixedPointLayout {
+                        signed: true,
+                        bit_offset: 0,
+                        bit_precision: 64,
+                    },
                 },
             }],
         };
@@ -1593,8 +1589,8 @@ mod tests {
         let bf2 = 0x02u8; // norm = 2
         let mut buf = build_dt_header(1, 1, [bf0, bf1, bf2], size);
         let mut props = [0u8; 12];
-        LittleEndian::write_u16(&mut props[0..2], 0); // bit_offset
-        LittleEndian::write_u16(&mut props[2..4], (size * 8) as u16); // bit_precision
+        LittleEndian::write_u16(&mut props[0..2], 0); // `bit_offset`
+        LittleEndian::write_u16(&mut props[2..4], (size * 8) as u16); // `bit_precision`
         props[4] = exp_loc;
         props[5] = exp_size;
         props[6] = mant_loc;
@@ -1614,9 +1610,11 @@ mod tests {
             Datatype::FixedPoint {
                 size: 1,
                 byte_order: DatatypeByteOrder::LittleEndian,
-                signed: false,
-                bit_offset: 0,
-                bit_precision: 8,
+                layout: FixedPointLayout {
+                    signed: false,
+                    bit_offset: 0,
+                    bit_precision: 8,
+                }
             }
         );
     }
@@ -1630,9 +1628,11 @@ mod tests {
             Datatype::FixedPoint {
                 size: 2,
                 byte_order: DatatypeByteOrder::LittleEndian,
-                signed: true,
-                bit_offset: 0,
-                bit_precision: 16,
+                layout: FixedPointLayout {
+                    signed: true,
+                    bit_offset: 0,
+                    bit_precision: 16,
+                }
             }
         );
     }
@@ -1644,9 +1644,9 @@ mod tests {
         match &dt {
             Datatype::FixedPoint {
                 byte_order,
-                signed,
+
                 size,
-                ..
+                layout: FixedPointLayout { signed, .. },
             } => {
                 assert_eq!(*byte_order, DatatypeByteOrder::BigEndian);
                 assert!(!signed);
@@ -1665,9 +1665,11 @@ mod tests {
             Datatype::FixedPoint {
                 size: 8,
                 byte_order: DatatypeByteOrder::LittleEndian,
-                signed: true,
-                bit_offset: 0,
-                bit_precision: 64,
+                layout: FixedPointLayout {
+                    signed: true,
+                    bit_offset: 0,
+                    bit_precision: 64,
+                }
             }
         );
     }
@@ -1683,13 +1685,7 @@ mod tests {
             Datatype::FloatingPoint {
                 size: 4,
                 byte_order: DatatypeByteOrder::LittleEndian,
-                bit_offset: 0,
-                bit_precision: 32,
-                exponent_location: 23,
-                exponent_size: 8,
-                mantissa_location: 0,
-                mantissa_size: 23,
-                exponent_bias: 127,
+                layout: FloatingPointLayout::IEEE754_BINARY32
             }
         );
     }
@@ -1703,13 +1699,15 @@ mod tests {
             Datatype::FloatingPoint {
                 size: 8,
                 byte_order: DatatypeByteOrder::LittleEndian,
-                bit_offset: 0,
-                bit_precision: 64,
-                exponent_location: 52,
-                exponent_size: 11,
-                mantissa_location: 0,
-                mantissa_size: 52,
-                exponent_bias: 1023,
+                layout: FloatingPointLayout {
+                    bit_offset: 0,
+                    bit_precision: 64,
+                    exponent_location: 52,
+                    exponent_size: 11,
+                    mantissa_location: 0,
+                    mantissa_size: 52,
+                    exponent_bias: 1023,
+                }
             }
         );
     }
@@ -1765,7 +1763,7 @@ mod tests {
 
     #[test]
     fn test_opaque() {
-        // tag_len = 4, tag = "BLOB"
+        // `tag_len` = 4, `tag` = "BLOB"
         let mut buf = build_dt_header(5, 1, [4, 0, 0], 64);
         buf.extend_from_slice(b"BLOB");
         // Pad to 8 bytes
@@ -1788,11 +1786,11 @@ mod tests {
         let mut buf = build_dt_header(6, 3, [2, 0, 0], 12); // 2 members
         // Member "x": name "x\0", offset=0, then u32 LE datatype
         buf.extend_from_slice(b"x\0");
-        buf.push(0); // byte_offset = 0
+        buf.push(0); // `byte_offset` = 0
         buf.extend_from_slice(&build_fixed_point(4, false, false, 0, 32));
         // Member "y": name "y\0", offset=4, then f64 LE datatype
         buf.extend_from_slice(b"y\0");
-        buf.push(4); // byte_offset = 4
+        buf.push(4); // `byte_offset` = 4
         buf.extend_from_slice(&build_float(8, 52, 11, 0, 52, 1023));
 
         let (dt, _) = Datatype::parse(&buf).unwrap();
@@ -1807,7 +1805,7 @@ mod tests {
                 match &members[0].datatype {
                     Datatype::FixedPoint {
                         size: 4,
-                        signed: false,
+                        layout: FixedPointLayout { signed: false, .. },
                         ..
                     } => {}
                     other => panic!("expected u32, got {other:?}"),
@@ -1821,16 +1819,20 @@ mod tests {
         }
     }
 
+    /// A version-1 compound of two `f64` members named `real` and `imag`, at byte
+    /// offsets 0 and 8, parses as a 16-byte compound with those two members.
+    ///
+    /// MATLAB writes complex values in this layout. In version 1, each member name
+    /// is NUL-terminated and padded to a multiple of 8 bytes, and a fixed 28-byte
+    /// dimension block sits between the byte offset and the member datatype
+    /// message. The block holds one dimensionality byte, three reserved bytes, four
+    /// dimension permutation bytes, four reserved bytes, and sixteen dimension size
+    /// bytes.
+    ///
+    /// A stride bug previously skipped 24 bytes and omitted the second reserved
+    /// field, so the parser misread every real-MATLAB complex compound.
     #[test]
     fn test_compound_v1_complex_matlab_layout() {
-        // MATLAB stores a complex value as a version-1 compound of two f64
-        // members named "real" and "imag" at offsets 0 and 8. v1 members pad
-        // the NUL-terminated name to a multiple of 8 bytes and carry a fixed
-        // 28-byte dimension block — dimensionality(1) + reserved(3) +
-        // dimension permutation(4) + reserved(4) + dimension sizes(16) —
-        // between the byte offset and the member datatype message. Regression
-        // test for a stride bug that skipped only 24 bytes (omitting the second
-        // reserved field) and so misread every real-MATLAB complex compound.
         let mut buf = build_dt_header(6, 1, [2, 0, 0], 16); // v1, 2 members, size 16
         for (name, offset) in [(&b"real\0\0\0\0"[..], 0u32), (&b"imag\0\0\0\0"[..], 8)] {
             buf.extend_from_slice(name); // NUL-terminated, padded to 8
@@ -1920,8 +1922,8 @@ mod tests {
                 assert_eq!(members[2].value, 2i32.to_le_bytes().to_vec());
                 match *base_type {
                     Datatype::FixedPoint {
-                        signed: true,
                         size: 4,
+                        layout: FixedPointLayout { signed: true, .. },
                         ..
                     } => {}
                     other => panic!("expected i32, got {other:?}"),
@@ -2038,7 +2040,7 @@ mod tests {
                 match *base_type {
                     Datatype::FixedPoint {
                         size: 4,
-                        signed: true,
+                        layout: FixedPointLayout { signed: true, .. },
                         ..
                     } => {}
                     other => panic!("expected i32, got {other:?}"),
@@ -2048,9 +2050,8 @@ mod tests {
         }
     }
 
-    /// Nothing in HDF5 occupies zero bytes per element, and the readers divide by
-    /// the element size, so a declared zero is refused where an untrusted message
-    /// becomes a `Datatype` rather than at each division (issue #268).
+    /// A datatype message that declares a zero element size is rejected during
+    /// parsing, so every reader can divide by the element size.
     #[test]
     fn a_zero_width_element_type_is_refused() {
         let buf = build_dt_header(3, 1, [0x01, 0, 0], 0); // fixed-length string of 0 bytes
@@ -2060,15 +2061,17 @@ mod tests {
         );
     }
 
-    /// An array's element size is its base type across its dimensions, not the
-    /// size the header declares, and the two disagree: a zero dimension is a
-    /// zero-width element behind a header that claims 48 bytes. Reading the
-    /// declared field instead of the computed one lets this one through.
+    /// Parsing rejects an array with a zero dimension, even when the header
+    /// declares a 48-byte element size.
+    ///
+    /// An array's size is computed from its base type and dimensions, so a zero
+    /// dimension makes the element zero-width while the header field stays
+    /// non-zero.
     #[test]
     fn an_array_with_a_zero_dimension_is_refused_despite_its_header_size() {
         let mut buf = build_dt_header(10, 3, [0, 0, 0], 48);
         buf.push(2); // ndims=2
-        buf.extend_from_slice(&0u32.to_le_bytes()); // dim 0 — no elements
+        buf.extend_from_slice(&0u32.to_le_bytes()); // dim 0 (no elements)
         buf.extend_from_slice(&4u32.to_le_bytes()); // dim 1
         buf.extend_from_slice(&build_fixed_point(4, false, true, 0, 32));
 
@@ -2078,9 +2081,10 @@ mod tests {
         );
     }
 
-    /// The refusal reaches a nested type too: a compound member is parsed through
-    /// the same entry, so a zero-width member is caught where it is decoded rather
-    /// than becoming a member whose size no reader can use.
+    /// Parsing rejects a zero-width datatype nested inside a compound member.
+    ///
+    /// A member datatype is parsed through the same entry point as a top-level
+    /// datatype, so the zero-size check applies at any depth.
     #[test]
     fn a_zero_width_compound_member_is_refused() {
         let member = build_dt_header(3, 1, [0x01, 0, 0], 0);
@@ -2095,17 +2099,21 @@ mod tests {
         );
     }
 
-    /// The accessor the rest of the crate uses agrees with `type_size` for an
-    /// ordinary type. The point of the pair is that one of them carries a proof
-    /// and the other does not — not that they report different widths.
+    /// `element_size` returns the same value as `type_size` for a type with a
+    /// non-zero size.
+    ///
+    /// The two differ in their return type. `element_size` returns a `NonZeroU32`,
+    /// so a caller can divide by it without a separate zero check.
     #[test]
     fn element_size_matches_type_size_for_a_type_that_has_one() {
         let dt = Datatype::FixedPoint {
             size: 4,
             byte_order: DatatypeByteOrder::LittleEndian,
-            signed: true,
-            bit_offset: 0,
-            bit_precision: 32,
+            layout: FixedPointLayout {
+                signed: true,
+                bit_offset: 0,
+                bit_precision: 32,
+            },
         };
         assert_eq!(dt.element_size().unwrap().get(), dt.type_size());
     }
@@ -2115,14 +2123,16 @@ mod tests {
     /// `Array` case is the one that matters: its width is *computed* from its
     /// dimensions, so this cannot be caught by inspecting a stored size field.
     #[test]
-    fn element_size_refuses_a_constructed_array_with_a_zero_dimension() {
+    fn element_size_rejects_a_constructed_array_with_a_zero_dimensionq() {
         let dt = Datatype::Array {
             base_type: Box::new(Datatype::FixedPoint {
                 size: 4,
                 byte_order: DatatypeByteOrder::LittleEndian,
-                signed: true,
-                bit_offset: 0,
-                bit_precision: 32,
+                layout: FixedPointLayout {
+                    signed: true,
+                    bit_offset: 0,
+                    bit_precision: 32,
+                },
             }),
             dimensions: vec![0, 4],
         };
@@ -2137,8 +2147,10 @@ mod tests {
         );
     }
 
-    /// The class in the error names the type that was refused, not the base type
-    /// underneath it, so a report points at the message the writer was handed.
+    /// `element_size` reports the class of the datatype it was called on.
+    ///
+    /// A caller can match on the class to identify which datatype produced the
+    /// error, without reconstructing the path to a nested type.
     #[test]
     fn element_size_reports_the_refused_types_own_class() {
         let dt = Datatype::Compound {
@@ -2205,7 +2217,7 @@ mod tests {
                 dt,
                 Datatype::Time {
                     size: 4,
-                    byte_order: order.clone(),
+                    byte_order: order,
                     bit_precision: 32,
                 }
             );
@@ -2235,7 +2247,7 @@ mod tests {
         // Build compound with 1 member, size=8
         let mut buf = build_dt_header(6, 3, [1, 0, 0], 8); // 1 member
         buf.extend_from_slice(b"data\0");
-        buf.push(0); // byte_offset = 0 (size=8, so 1 byte offsets)
+        buf.push(0); // `byte_offset` = 0 (size=8, so 1 byte offsets)
         buf.extend_from_slice(&array_bytes);
 
         let (dt, _) = Datatype::parse(&buf).unwrap();
@@ -2314,13 +2326,15 @@ mod tests {
                     datatype: Datatype::FloatingPoint {
                         size: 8,
                         byte_order: DatatypeByteOrder::LittleEndian,
-                        bit_offset: 0,
-                        bit_precision: 64,
-                        exponent_location: 52,
-                        exponent_size: 11,
-                        mantissa_location: 0,
-                        mantissa_size: 52,
-                        exponent_bias: 1023,
+                        layout: FloatingPointLayout {
+                            bit_offset: 0,
+                            bit_precision: 64,
+                            exponent_location: 52,
+                            exponent_size: 11,
+                            mantissa_location: 0,
+                            mantissa_size: 52,
+                            exponent_bias: 1023,
+                        },
                     },
                 },
                 CompoundMember {
@@ -2329,13 +2343,15 @@ mod tests {
                     datatype: Datatype::FloatingPoint {
                         size: 8,
                         byte_order: DatatypeByteOrder::LittleEndian,
-                        bit_offset: 0,
-                        bit_precision: 64,
-                        exponent_location: 52,
-                        exponent_size: 11,
-                        mantissa_location: 0,
-                        mantissa_size: 52,
-                        exponent_bias: 1023,
+                        layout: FloatingPointLayout {
+                            bit_offset: 0,
+                            bit_precision: 64,
+                            exponent_location: 52,
+                            exponent_size: 11,
+                            mantissa_location: 0,
+                            mantissa_size: 52,
+                            exponent_bias: 1023,
+                        },
                     },
                 },
                 CompoundMember {
@@ -2344,9 +2360,11 @@ mod tests {
                     datatype: Datatype::FixedPoint {
                         size: 4,
                         byte_order: DatatypeByteOrder::LittleEndian,
-                        signed: true,
-                        bit_offset: 0,
-                        bit_precision: 32,
+                        layout: FixedPointLayout {
+                            signed: true,
+                            bit_offset: 0,
+                            bit_precision: 32,
+                        },
                     },
                 },
             ],
@@ -2363,9 +2381,11 @@ mod tests {
             base_type: Box::new(Datatype::FixedPoint {
                 size: 4,
                 byte_order: DatatypeByteOrder::LittleEndian,
-                signed: true,
-                bit_offset: 0,
-                bit_precision: 32,
+                layout: FixedPointLayout {
+                    signed: true,
+                    bit_offset: 0,
+                    bit_precision: 32,
+                },
             }),
             members: vec![
                 EnumMember {
@@ -2396,13 +2416,15 @@ mod tests {
             } else {
                 DatatypeByteOrder::LittleEndian
             },
-            signed,
-            bit_offset: 0,
-            #[expect(
-                clippy::cast_possible_truncation,
-                reason = "test builds byte-width base types; size*8 is well within u16"
-            )]
-            bit_precision: (size * 8) as u16,
+            layout: FixedPointLayout {
+                signed,
+                bit_offset: 0,
+                #[expect(
+                    clippy::cast_possible_truncation,
+                    reason = "test builds byte-width base types; size*8 is well within u16"
+                )]
+                bit_precision: (size * 8) as u16,
+            },
         }
     }
 
@@ -2426,8 +2448,6 @@ mod tests {
 
     #[test]
     fn serialize_parse_enum_base_type_variety() {
-        // The i32 base is already covered above; here u8, big-endian i16, and i64
-        // bases all round-trip through the enum wrapper.
         for base in [
             enum_base_fp(1, false, false), // u8
             enum_base_fp(2, true, true),   // i16 big-endian
@@ -2460,14 +2480,15 @@ mod tests {
         }
     }
 
+    /// A member value wider than the base type serializes in full and truncates on
+    /// parse.
+    ///
+    /// `EnumTypeBuilder::build` and `Datatype::Enumeration` take the element size
+    /// from the base type and do not check that member value blobs match it. A
+    /// 4-byte value on a 1-byte base therefore parses back as its low byte. This
+    /// test records that behavior, and the assertion fails if either side changes.
     #[test]
     fn enum_value_width_is_not_validated_against_base_size() {
-        // `EnumTypeBuilder::build`/`Datatype::Enumeration` take the element size
-        // from the base type only, with no check that member value blobs match it.
-        // A 4-byte value on a 1-byte base therefore serializes in full but parses
-        // back reading just `base_size` (1) byte per member, silently truncating.
-        // This documents the current permissiveness; it is NOT a supported
-        // round-trip, and the assertion guards against a silent change either way.
         let dt = Datatype::Enumeration {
             size: 1,
             base_type: Box::new(enum_base_fp(1, false, false)),
@@ -2494,13 +2515,15 @@ mod tests {
             base_type: Box::new(Datatype::FloatingPoint {
                 size: 8,
                 byte_order: DatatypeByteOrder::LittleEndian,
-                bit_offset: 0,
-                bit_precision: 64,
-                exponent_location: 52,
-                exponent_size: 11,
-                mantissa_location: 0,
-                mantissa_size: 52,
-                exponent_bias: 1023,
+                layout: FloatingPointLayout {
+                    bit_offset: 0,
+                    bit_precision: 64,
+                    exponent_location: 52,
+                    exponent_size: 11,
+                    mantissa_location: 0,
+                    mantissa_size: 52,
+                    exponent_bias: 1023,
+                },
             }),
             dimensions: vec![3],
         };
@@ -2566,9 +2589,11 @@ mod tests {
         let dt = Datatype::FixedPoint {
             size: 4,
             byte_order: DatatypeByteOrder::LittleEndian,
-            signed: true,
-            bit_offset: 0,
-            bit_precision: 32,
+            layout: FixedPointLayout {
+                signed: true,
+                bit_offset: 0,
+                bit_precision: 32,
+            },
         };
         assert_eq!(dt.type_size(), 4);
 
@@ -2576,9 +2601,11 @@ mod tests {
             base_type: Box::new(Datatype::FixedPoint {
                 size: 4,
                 byte_order: DatatypeByteOrder::LittleEndian,
-                signed: true,
-                bit_offset: 0,
-                bit_precision: 32,
+                layout: FixedPointLayout {
+                    signed: true,
+                    bit_offset: 0,
+                    bit_precision: 32,
+                },
             }),
             dimensions: vec![3, 4],
         };
@@ -2595,31 +2622,36 @@ mod display_tests {
         let int = Datatype::FixedPoint {
             size: 4,
             byte_order: DatatypeByteOrder::LittleEndian,
-            signed: true,
-            bit_offset: 0,
-            bit_precision: 32,
+            layout: FixedPointLayout {
+                signed: true,
+                bit_offset: 0,
+                bit_precision: 32,
+            },
         };
         assert_eq!(int.to_string(), "i32");
 
         let float = Datatype::FloatingPoint {
             size: 8,
             byte_order: DatatypeByteOrder::LittleEndian,
-            bit_offset: 0,
-            bit_precision: 64,
-            exponent_location: 52,
-            exponent_size: 11,
-            mantissa_location: 0,
-            mantissa_size: 52,
-            exponent_bias: 1023,
+            layout: FloatingPointLayout {
+                bit_offset: 0,
+                bit_precision: 64,
+                exponent_location: 52,
+                exponent_size: 11,
+                mantissa_location: 0,
+                mantissa_size: 52,
+                exponent_bias: 1023,
+            },
         };
         assert_eq!(float.to_string(), "f64");
     }
 
-    /// Every width a message writes is `size * 8` over an on-disk `u32`, so a
-    /// crafted size near [`u32::MAX`] overflows a `u32` multiply and panics a
-    /// debug build (issue #140). [`bit_width`] widens first; this holds each
-    /// class that calls it to that, rather than reaching one of them through
-    /// whatever `classify_datatype` happens to route here.
+    /// A datatype message with a size near [`u32::MAX`] writes the correct bit
+    /// width, where a direct `u32` multiply would overflow and panic a debug build
+    ///
+    /// Each width is `size * 8` over an on-disk `u32`. [`bit_width`] widens before
+    /// multiplying. The test exercises each class that calls it, including the
+    /// classes that `classify_datatype` routes here.
     #[test]
     fn a_crafted_size_writes_its_width_instead_of_overflowing() {
         let bits = u64::from(u32::MAX) * 8;
@@ -2628,9 +2660,11 @@ mod display_tests {
                 Datatype::FixedPoint {
                     size: u32::MAX,
                     byte_order: DatatypeByteOrder::LittleEndian,
-                    signed: true,
-                    bit_offset: 0,
-                    bit_precision: 0,
+                    layout: FixedPointLayout {
+                        signed: true,
+                        bit_offset: 0,
+                        bit_precision: 0,
+                    },
                 },
                 format!("i{bits}(bits 0..0)"),
             ),
@@ -2638,13 +2672,15 @@ mod display_tests {
                 Datatype::FloatingPoint {
                     size: u32::MAX,
                     byte_order: DatatypeByteOrder::LittleEndian,
-                    bit_offset: 0,
-                    bit_precision: 0,
-                    exponent_location: 0,
-                    exponent_size: 0,
-                    mantissa_location: 0,
-                    mantissa_size: 0,
-                    exponent_bias: 0,
+                    layout: FloatingPointLayout {
+                        bit_offset: 0,
+                        bit_precision: 0,
+                        exponent_location: 0,
+                        exponent_size: 0,
+                        mantissa_location: 0,
+                        mantissa_size: 0,
+                        exponent_bias: 0,
+                    },
                 },
                 format!("f{bits}(bits 0..0)"),
             ),
@@ -2672,16 +2708,21 @@ mod display_tests {
         }
     }
 
-    /// The bit span adds two `u16`s, which is the other place a crafted field
-    /// could wrap. Both widen, so the end is 131,070 rather than 65,534.
+    /// A bit offset and bit precision of `u16::MAX` together produce a bit span
+    /// whose end is 131,070.
+    ///
+    /// The end of the span is the sum of two `u16` values. Both widen to a larger
+    /// type before the add, so the result is 131,070.
     #[test]
     fn a_crafted_bit_span_does_not_wrap() {
         let dtype = Datatype::FixedPoint {
             size: 1,
             byte_order: DatatypeByteOrder::LittleEndian,
-            signed: false,
-            bit_offset: u16::MAX,
-            bit_precision: u16::MAX,
+            layout: FixedPointLayout {
+                signed: false,
+                bit_offset: u16::MAX,
+                bit_precision: u16::MAX,
+            },
         };
         assert_eq!(dtype.to_string(), "u8(bits 65535..131070)");
     }
@@ -2693,18 +2734,22 @@ mod display_tests {
         let big_endian = Datatype::FixedPoint {
             size: 2,
             byte_order: DatatypeByteOrder::BigEndian,
-            signed: false,
-            bit_offset: 0,
-            bit_precision: 16,
+            layout: FixedPointLayout {
+                signed: false,
+                bit_offset: 0,
+                bit_precision: 16,
+            },
         };
         assert_eq!(big_endian.to_string(), "u16 be");
 
         let narrow = Datatype::FixedPoint {
             size: 4,
             byte_order: DatatypeByteOrder::LittleEndian,
-            signed: true,
-            bit_offset: 0,
-            bit_precision: 24,
+            layout: FixedPointLayout {
+                signed: true,
+                bit_offset: 0,
+                bit_precision: 24,
+            },
         };
         assert_eq!(narrow.to_string(), "i32(bits 0..24)");
     }
@@ -2717,16 +2762,19 @@ mod display_tests {
                 CompoundMember {
                     name: "x".into(),
                     byte_offset: 0,
+
                     datatype: Datatype::FloatingPoint {
                         size: 4,
                         byte_order: DatatypeByteOrder::LittleEndian,
-                        bit_offset: 0,
-                        bit_precision: 32,
-                        exponent_location: 23,
-                        exponent_size: 8,
-                        mantissa_location: 0,
-                        mantissa_size: 23,
-                        exponent_bias: 127,
+                        layout: FloatingPointLayout {
+                            bit_offset: 0,
+                            bit_precision: 32,
+                            exponent_location: 23,
+                            exponent_size: 8,
+                            mantissa_location: 0,
+                            mantissa_size: 23,
+                            exponent_bias: 127,
+                        },
                     },
                 },
                 CompoundMember {
@@ -2735,9 +2783,11 @@ mod display_tests {
                     datatype: Datatype::FixedPoint {
                         size: 8,
                         byte_order: DatatypeByteOrder::LittleEndian,
-                        signed: true,
-                        bit_offset: 0,
-                        bit_precision: 64,
+                        layout: FixedPointLayout {
+                            signed: true,
+                            bit_offset: 0,
+                            bit_precision: 64,
+                        },
                     },
                 },
             ],
@@ -2748,9 +2798,11 @@ mod display_tests {
             base_type: Box::new(Datatype::FixedPoint {
                 size: 1,
                 byte_order: DatatypeByteOrder::LittleEndian,
-                signed: false,
-                bit_offset: 0,
-                bit_precision: 8,
+                layout: FixedPointLayout {
+                    signed: false,
+                    bit_offset: 0,
+                    bit_precision: 8,
+                },
             }),
             dimensions: vec![2, 3],
         };
@@ -2761,9 +2813,8 @@ mod display_tests {
         );
     }
 
-    /// The leaf enums format through `Formatter::pad`, so a caller lining these
-    /// up in a column gets the width it asked for rather than having it
-    /// silently dropped.
+    /// The leaf enums format through `Formatter::pad`, so a caller that lines these
+    /// up in a column receives the width it requested.
     #[test]
     fn a_leaf_enum_honors_the_width_it_is_given() {
         assert_eq!(format!("{:>8}", CharacterSet::Ascii), "   ascii");
@@ -2820,9 +2871,12 @@ mod display_tests {
         assert_eq!(shown, "enum<u32>[red\\0]");
     }
 
-    /// The member count is an on-disk `u16`, so the list a file can ask for is
-    /// far longer than a message can carry. Both member-bearing variants elide,
-    /// so both are checked.
+    /// A compound or enumeration with more members than `DISPLAY_MAX_MEMBERS`
+    /// elides the excess and reports the count of the remainder.
+    ///
+    /// The member count is an on-disk `u16`, so a message can describe far more
+    /// members than the display cap allows. Both variants that hold members elide
+    /// the excess.
     #[test]
     fn a_long_member_list_is_elided_and_reports_the_remainder() {
         let over_cap = DISPLAY_MAX_MEMBERS + 3;
@@ -2886,9 +2940,11 @@ mod display_tests {
         Datatype::FixedPoint {
             size: 4,
             byte_order: DatatypeByteOrder::LittleEndian,
-            signed: false,
-            bit_offset: 0,
-            bit_precision: 32,
+            layout: FixedPointLayout {
+                signed: false,
+                bit_offset: 0,
+                bit_precision: 32,
+            },
         }
     }
 }

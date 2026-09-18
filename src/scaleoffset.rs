@@ -31,7 +31,9 @@ extern crate alloc;
 use alloc::{format, string::ToString, vec, vec::Vec};
 
 use crate::convert::Narrow;
-use crate::datatype::{Datatype, DatatypeByteOrder};
+use crate::datatype::Datatype;
+use crate::datatype::byte_order::DatatypeByteOrder;
+use crate::datatype::layout::FixedPointLayout;
 use crate::error::FormatError;
 use crate::fill_value::FillPattern;
 use crate::filter_pipeline::FilterDescription;
@@ -125,8 +127,12 @@ pub fn scale_offset_type_from_datatype(dt: &Datatype) -> Option<ScaleOffsetType>
         Datatype::FixedPoint {
             size,
             byte_order,
-            signed,
-            ..
+            layout:
+                FixedPointLayout {
+                    signed,
+                    bit_offset: _,
+                    bit_precision: _,
+                },
         } if matches!(*size, 1 | 2 | 4 | 8) => Some(ScaleOffsetType {
             class: CLS_INTEGER,
             sign: if *signed { SGN_2 } else { SGN_NONE },
@@ -1470,6 +1476,8 @@ fn ceil_log2(num: u64) -> u32 {
 
 #[cfg(test)]
 mod tests {
+    use crate::datatype::layout::FloatingPointLayout;
+
     use super::*;
 
     fn int_filter(size: u32, signed: bool, order: u32, nelmts: u32) -> FilterDescription {
@@ -2724,9 +2732,11 @@ mod tests {
         let i32_ty = Datatype::FixedPoint {
             size: 4,
             byte_order: DatatypeByteOrder::LittleEndian,
-            signed: true,
-            bit_offset: 0,
-            bit_precision: 32,
+            layout: FixedPointLayout {
+                signed: true,
+                bit_offset: 0,
+                bit_precision: 32,
+            },
         };
         let so = scale_offset_type_from_datatype(&i32_ty).unwrap();
         assert_eq!(so.class, CLS_INTEGER);
@@ -2736,13 +2746,15 @@ mod tests {
         let f64_ty = Datatype::FloatingPoint {
             size: 8,
             byte_order: DatatypeByteOrder::BigEndian,
-            bit_offset: 0,
-            bit_precision: 64,
-            exponent_location: 52,
-            exponent_size: 11,
-            mantissa_location: 0,
-            mantissa_size: 52,
-            exponent_bias: 1023,
+            layout: FloatingPointLayout {
+                bit_offset: 0,
+                bit_precision: 64,
+                exponent_location: 52,
+                exponent_size: 11,
+                mantissa_location: 0,
+                mantissa_size: 52,
+                exponent_bias: 1023,
+            },
         };
         let so = scale_offset_type_from_datatype(&f64_ty).unwrap();
         assert_eq!(so.class, CLS_FLOAT);

@@ -1854,8 +1854,11 @@ mod tests {
     use rstest::rstest;
 
     use super::*;
+    use crate::DatatypeByteOrder;
     use crate::address::StoredAddress;
     use crate::data_layout::{ChunkIndexLayout, ChunkedLayoutFlags};
+    use crate::filter_pipeline::FilterDescription;
+    use crate::scaleoffset::{FillAvailability, ScaleOffsetFill};
 
     /// A source's scale-offset fill availability is carried onto the rebuilt
     /// dataset, in both directions.
@@ -1873,9 +1876,6 @@ mod tests {
     /// fill value undefined on.
     #[test]
     fn a_repacked_scale_offset_filter_keeps_the_sources_fill_availability() {
-        use crate::filter_pipeline::FilterDescription;
-        use crate::scaleoffset::{FillAvailability, ScaleOffsetFill, build_cd_values};
-
         let ty = crate::scaleoffset::scale_offset_type_from_datatype(&crate::make_i32_type())
             .expect("i32 is a scale-offset type");
         let carried = |fill: ScaleOffsetFill<'_>| {
@@ -1885,7 +1885,14 @@ mod tests {
                     filter_id: FILTER_SCALEOFFSET,
                     name: None,
                     flags: 0,
-                    client_data: build_cd_values(ScaleOffset::Integer(0), ty, 4, 16, fill).unwrap(),
+                    client_data: scaleoffset::build_cd_values(
+                        ScaleOffset::Integer(0),
+                        ty,
+                        4,
+                        16,
+                        fill,
+                    )
+                    .unwrap(),
                 }],
             });
             let mut db = DatasetBuilder::new("d");
@@ -1939,8 +1946,6 @@ mod tests {
     /// synthetic pipeline rather than a file-level test.
     #[test]
     fn lzf_plus_deflate_pipeline_is_refused() {
-        use crate::filter_pipeline::FilterDescription;
-
         let pipeline = FilterPipeline {
             version: 2,
             filters: vec![
@@ -1970,9 +1975,6 @@ mod tests {
         // The reference C library cannot create H5T_TIME, so this round-trips a
         // big-endian time dataset through our own writer and reader: repack must
         // preserve both the byte order (bf0 bit 0) and the raw element bytes.
-        use crate::datatype::{Datatype, DatatypeByteOrder};
-        use crate::reader::File;
-        use crate::writer::FileBuilder;
 
         let dir = tempfile::tempdir().unwrap();
         let dir = dir.path();
@@ -2046,17 +2048,20 @@ mod attribute_fidelity_tests {
     use super::*;
     use crate::dataspace::{Dataspace, DataspaceType};
     use crate::datatype::StringPadding;
-    use crate::datatype::{CharacterSet, CompoundMember, DatatypeByteOrder, ReferenceType};
-    use crate::{File, FileBuilder, RepackOptions};
+    use crate::datatype::layout::FixedPointLayout;
+    use crate::datatype::{CharacterSet, CompoundMember, ReferenceType};
+    use crate::{DatatypeByteOrder, File, FileBuilder, RepackOptions};
     use std::collections::BTreeMap;
 
     fn i32_type() -> Datatype {
         Datatype::FixedPoint {
             size: 4,
             byte_order: DatatypeByteOrder::LittleEndian,
-            signed: true,
-            bit_offset: 0,
-            bit_precision: 32,
+            layout: FixedPointLayout {
+                signed: true,
+                bit_offset: 0,
+                bit_precision: 32,
+            },
         }
     }
 
@@ -2220,10 +2225,12 @@ mod attribute_fidelity_tests {
                 name: "big_endian".into(),
                 datatype: Datatype::FixedPoint {
                     size: 4,
-                    byte_order: crate::datatype::DatatypeByteOrder::BigEndian,
-                    signed: true,
-                    bit_offset: 0,
-                    bit_precision: 32,
+                    byte_order: DatatypeByteOrder::BigEndian,
+                    layout: FixedPointLayout {
+                        signed: true,
+                        bit_offset: 0,
+                        bit_precision: 32,
+                    },
                 },
                 dataspace: Dataspace {
                     space_type: DataspaceType::Scalar,
