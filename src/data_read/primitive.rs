@@ -47,6 +47,109 @@ where
     Ok(())
 }
 
+pub(crate) trait SignedIntegerReadTarget: Sized {
+    type FromI8: H5Conversion<i8, Self> + Default;
+    type FromI16: H5Conversion<i16, Self> + Default;
+    type FromI32: H5Conversion<i32, Self> + Default;
+    type FromI64: H5Conversion<i64, Self> + Default;
+
+    fn from_i64(value: i64) -> Self;
+}
+
+pub(crate) trait UnsignedIntegerReadTarget: Sized {
+    type FromU8: H5Conversion<u8, Self> + Default;
+    type FromU16: H5Conversion<u16, Self> + Default;
+    type FromU32: H5Conversion<u32, Self> + Default;
+    type FromU64: H5Conversion<u64, Self> + Default;
+
+    fn from_u64(value: u64) -> Self;
+}
+
+impl UnsignedIntegerReadTarget for u8 {
+    type FromU8 = NoOpConversion;
+    type FromU16 = HardConversion;
+    type FromU32 = HardConversion;
+    type FromU64 = HardConversion;
+
+    fn from_u64(value: u64) -> Self {
+        value as Self
+    }
+}
+impl UnsignedIntegerReadTarget for u16 {
+    type FromU8 = HardConversion;
+    type FromU16 = NoOpConversion;
+    type FromU32 = HardConversion;
+    type FromU64 = HardConversion;
+
+    fn from_u64(value: u64) -> Self {
+        value as Self
+    }
+}
+impl UnsignedIntegerReadTarget for u32 {
+    type FromU8 = HardConversion;
+    type FromU16 = HardConversion;
+    type FromU32 = NoOpConversion;
+    type FromU64 = HardConversion;
+
+    fn from_u64(value: u64) -> Self {
+        value as Self
+    }
+}
+impl UnsignedIntegerReadTarget for u64 {
+    type FromU8 = HardConversion;
+    type FromU16 = HardConversion;
+    type FromU32 = HardConversion;
+    type FromU64 = NoOpConversion;
+
+    fn from_u64(value: u64) -> Self {
+        value as Self
+    }
+}
+
+impl SignedIntegerReadTarget for i8 {
+    type FromI8 = NoOpConversion;
+    type FromI16 = HardConversion;
+    type FromI32 = HardConversion;
+    type FromI64 = HardConversion;
+
+    fn from_i64(value: i64) -> Self {
+        value as Self
+    }
+}
+
+impl SignedIntegerReadTarget for i16 {
+    type FromI8 = HardConversion;
+    type FromI16 = NoOpConversion;
+    type FromI32 = HardConversion;
+    type FromI64 = HardConversion;
+
+    fn from_i64(value: i64) -> Self {
+        value as Self
+    }
+}
+
+impl SignedIntegerReadTarget for i32 {
+    type FromI8 = HardConversion;
+    type FromI16 = HardConversion;
+    type FromI32 = NoOpConversion;
+    type FromI64 = HardConversion;
+
+    fn from_i64(value: i64) -> Self {
+        value as Self
+    }
+}
+
+impl SignedIntegerReadTarget for i64 {
+    type FromI8 = HardConversion;
+    type FromI16 = HardConversion;
+    type FromI32 = HardConversion;
+    type FromI64 = NoOpConversion;
+
+    fn from_i64(value: i64) -> Self {
+        value
+    }
+}
+
 /// A primitive scalar that can be reconstructed from exactly `W` bytes.
 pub(crate) trait FromEndianBytes<const W: usize>: Sized {
     fn from_le_slice(slice: &[u8; W]) -> Self;
