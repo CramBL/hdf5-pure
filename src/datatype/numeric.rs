@@ -153,3 +153,10 @@ impl TryFrom<&Datatype> for NumericDatatype {
         }
     }
 }
+
+impl TryFrom<Datatype> for NumericDatatype {
+    type Error = FormatError;
+    fn try_from(dt: Datatype) -> Result<Self, Self::Error> {
+        NumericDatatype::try_from(&dt)
+    }
+}
