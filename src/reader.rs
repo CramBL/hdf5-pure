@@ -4930,18 +4930,6 @@ impl std::fmt::Debug for Dataset {
 /// window is read whole, exactly as before.
 const TYPED_READ_WINDOW_BYTES: u64 = 1 << 20;
 
-/// How many values of the requested type a whole-dataset read produces per
-/// stored element, which is what its output buffer is reserved at.
-#[derive(Clone, Copy)]
-enum OutputSize {
-    /// One value per stored element — every numeric decoder.
-    PerElement,
-    /// One value per stored *byte* — [`Dataset::read_i8`], which reinterprets
-    /// bytes rather than decoding elements, and so yields one per byte of a
-    /// dataset whose elements are wider than one.
-    PerByte,
-}
-
 /// How many leading-dimension rows a typed whole-dataset read decodes at a time.
 ///
 /// [`TYPED_READ_WINDOW_BYTES`] of stored bytes, rounded *down* to whole chunk
@@ -5954,7 +5942,7 @@ the same commit to replace it",
     /// what reports a datatype it cannot read, and a zero-element string dataset
     /// must go on failing a numeric read rather than answering with an empty
     /// vector.
-    fn read_whole_typed<T, F>(&self, out_size: OutputSize, decode: F) -> Result<Vec<T>, Error>
+    fn read_whole_typed<T, F>(&self, decode: F) -> Result<Vec<T>, Error>
     where
         F: Fn(&[u8], &Datatype, &mut Vec<T>) -> Result<(), FormatError>,
     {
@@ -5977,13 +5965,12 @@ the same commit to replace it",
             pipeline: pipeline.as_ref(),
             fill,
         };
-
         // What a whole read checks before it reads a byte, and what a sweep would
         // otherwise skip: a compact or contiguous layout whose declared size
         // disagrees with the dataspace is refused. Reading in windows must not
         // turn that into a check that fires only on datasets small enough to be
         // read whole.
-        let stored = spec.stored_byte_len()?;
+        spec.stored_byte_len()?;
 
         // A window is cut by the *stored* element width, while a decoder slices
         // what it is handed by the width of the type it decodes — the base type,
@@ -6004,10 +5991,7 @@ the same commit to replace it",
             return Ok(out);
         }
 
-        let values = match out_size {
-            OutputSize::PerElement => ds.num_elements().to_usize()?,
-            OutputSize::PerByte => stored,
-        };
+        let values = ds.num_elements().to_usize()?;
 
         // One pass for the whole sweep, not one per window: the sweep visits each
         // chunk exactly once, so a window that offered its chunks to a cache
@@ -6048,59 +6032,52 @@ the same commit to replace it",
     /// dataset stored as a narrower or wider type is converted, so pick the
     /// reader that matches the stored type for a lossless read.
     pub fn read_f64(&self) -> Result<Vec<f64>, Error> {
-        self.read_whole_typed(OutputSize::PerElement, data_read::read_as_f64_into)
+        self.read_whole_typed(data_read::read_as_f64_into)
     }
 
     /// Read all data as `f32` values.
     pub fn read_f32(&self) -> Result<Vec<f32>, Error> {
-        self.read_whole_typed(OutputSize::PerElement, data_read::read_as_f32_into)
+        self.read_whole_typed(data_read::read_as_f32_into)
     }
 
     /// Read all data as `i32` values.
     pub fn read_i32(&self) -> Result<Vec<i32>, Error> {
-        self.read_whole_typed(OutputSize::PerElement, data_read::read_as_i32_into)
+        self.read_whole_typed(data_read::read_as_i32_into)
     }
 
     /// Read all data as `i64` values.
     pub fn read_i64(&self) -> Result<Vec<i64>, Error> {
-        self.read_whole_typed(OutputSize::PerElement, data_read::read_as_i64_into)
+        self.read_whole_typed(data_read::read_as_i64_into)
     }
 
     /// Read all data as `u64` values.
     pub fn read_u64(&self) -> Result<Vec<u64>, Error> {
-        self.read_whole_typed(OutputSize::PerElement, data_read::read_as_u64_into)
+        self.read_whole_typed(data_read::read_as_u64_into)
     }
 
     /// Read all data as `u8` values.
     pub fn read_u8(&self) -> Result<Vec<u8>, Error> {
-        self.read_raw()
+        self.read_whole_typed(data_read::read_as_u8_into)
     }
 
     /// Read all data as `i8` values.
     pub fn read_i8(&self) -> Result<Vec<i8>, Error> {
-        self.read_whole_typed(OutputSize::PerByte, |raw, _dt, out| {
-            #[expect(
-                clippy::cast_possible_wrap,
-                reason = "read_i8 reinterprets each stored byte as the signed i8 the caller requested"
-            )]
-            out.extend(raw.iter().map(|&b| b as i8));
-            Ok(())
-        })
+        self.read_whole_typed(data_read::read_as_i8_into)
     }
 
     /// Read all data as `i16` values.
     pub fn read_i16(&self) -> Result<Vec<i16>, Error> {
-        self.read_whole_typed(OutputSize::PerElement, data_read::read_as_i16_into)
+        self.read_whole_typed(data_read::read_as_i16_into)
     }
 
     /// Read all data as `u16` values.
     pub fn read_u16(&self) -> Result<Vec<u16>, Error> {
-        self.read_whole_typed(OutputSize::PerElement, data_read::read_as_u16_into)
+        self.read_whole_typed(data_read::read_as_u16_into)
     }
 
     /// Read all data as `u32` values.
     pub fn read_u32(&self) -> Result<Vec<u32>, Error> {
-        self.read_whole_typed(OutputSize::PerElement, data_read::read_as_u32_into)
+        self.read_whole_typed(data_read::read_as_u32_into)
     }
 
     /// Read all data as `String` values.
@@ -6713,13 +6690,9 @@ the same commit to replace it",
     }
 
     /// Windowed [`read_i8`](Self::read_i8) — decodes only the row window.
-    #[expect(
-        clippy::cast_possible_wrap,
-        reason = "read_i8 reinterprets each stored byte as the signed i8 the caller requested"
-    )]
     pub fn read_i8_rows(&self, start_row: u64, num_rows: u64) -> Result<Vec<i8>, Error> {
         let raw = self.read_raw_rows(start_row, num_rows)?;
-        Ok(raw.iter().map(|&b| b as i8).collect())
+        Ok(data_read::read_as_i8(&raw, &self.datatype()?)?)
     }
 
     /// Windowed [`read_i16`](Self::read_i16) — decodes only the row window.
@@ -6742,7 +6715,8 @@ the same commit to replace it",
 
     /// Windowed [`read_u8`](Self::read_u8) — reads only the row window.
     pub fn read_u8_rows(&self, start_row: u64, num_rows: u64) -> Result<Vec<u8>, Error> {
-        self.read_raw_rows(start_row, num_rows)
+        let raw = self.read_raw_rows(start_row, num_rows)?;
+        Ok(data_read::read_as_u8(&raw, &self.datatype()?)?)
     }
 
     /// Windowed [`read_u16`](Self::read_u16) — decodes only the row window.

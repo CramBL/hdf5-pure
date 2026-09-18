@@ -11,7 +11,9 @@ use crate::chunked_read::{
 };
 use crate::convert::slice_range;
 use crate::data_layout::DataLayout;
-use crate::data_read::primitive::{H5Conversion, HardConversion, NoOpConversion};
+use crate::data_read::primitive::{
+    H5Conversion, HardConversion, NoOpConversion, NumericReadTarget,
+};
 #[cfg(test)]
 use crate::dataspace::Dataspace;
 use crate::datatype::Datatype;
@@ -165,7 +167,7 @@ pub fn read_raw_data_cached_from_source<S: Source + ?Sized>(
     }
 }
 
-fn read_integer_into<T: primitive::NumericReadTarget>(
+fn read_integer_into<T: NumericReadTarget>(
     src: &[u8],
     datatype: &Datatype,
     dst: &mut Vec<T>,
@@ -418,6 +420,16 @@ pub fn read_as_u16_into(src: &[u8], dt: &Datatype, dst: &mut Vec<u16>) -> Result
     read_integer_into(src, dt, dst)
 }
 
+pub fn read_as_u8(src: &[u8], datatype: &Datatype) -> Result<Vec<u8>, FormatError> {
+    let mut dst = Vec::new();
+    read_as_u8_into(src, datatype, &mut dst)?;
+    Ok(dst)
+}
+
+pub fn read_as_u8_into(src: &[u8], dt: &Datatype, dst: &mut Vec<u8>) -> Result<(), FormatError> {
+    read_integer_into(src, dt, dst)
+}
+
 /// Convert raw bytes to `f32` values.
 pub fn read_as_f32(src: &[u8], datatype: &Datatype) -> Result<Vec<f32>, FormatError> {
     let mut dst = Vec::new();
@@ -562,6 +574,12 @@ pub fn read_as_i16(src: &[u8], datatype: &Datatype) -> Result<Vec<i16>, FormatEr
     Ok(out)
 }
 
+pub fn read_as_i8(src: &[u8], datatype: &Datatype) -> Result<Vec<i8>, FormatError> {
+    let mut out = Vec::new();
+    read_as_i8_into(src, datatype, &mut out)?;
+    Ok(out)
+}
+
 pub fn read_as_i64_into(src: &[u8], dt: &Datatype, dst: &mut Vec<i64>) -> Result<(), FormatError> {
     read_integer_into(src, dt, dst)
 }
@@ -581,6 +599,10 @@ pub fn read_as_i32_into(src: &[u8], dt: &Datatype, dst: &mut Vec<i32>) -> Result
 /// On error `dst` holds an unspecified prefix of this call's values: every
 /// caller abandons the buffer
 pub fn read_as_i16_into(src: &[u8], dt: &Datatype, dst: &mut Vec<i16>) -> Result<(), FormatError> {
+    read_integer_into(src, dt, dst)
+}
+
+pub fn read_as_i8_into(src: &[u8], dt: &Datatype, dst: &mut Vec<i8>) -> Result<(), FormatError> {
     read_integer_into(src, dt, dst)
 }
 

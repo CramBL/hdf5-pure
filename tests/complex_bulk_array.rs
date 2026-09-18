@@ -243,7 +243,7 @@ fn payload_of(bytes: &[u8], name: &str) -> Vec<u8> {
     let file = File::from_bytes(bytes.to_vec()).expect("open");
     file.dataset(name)
         .expect("dataset")
-        .read_u8()
+        .read_raw()
         .expect("payload")
 }
 
