@@ -900,7 +900,7 @@ fn hdf5_pure_reads_complex_int16_written_by_matio() {
     let our_ds = hdf5_pure::File::open(&ours).unwrap();
     let our_ds = our_ds.dataset("samples").unwrap();
     assert_eq!(our_ds.shape().unwrap(), ds.shape().unwrap());
-    assert_eq!(our_ds.read_u8().unwrap(), ds.read_u8().unwrap());
+    assert_eq!(our_ds.read_raw().unwrap(), ds.read_raw().unwrap());
 }
 
 // ---------------------------------------------------------------------------

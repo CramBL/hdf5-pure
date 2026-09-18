@@ -135,7 +135,7 @@ fn an_empty_array_keeps_its_component_class() {
         Some("int16")
     );
     assert_compound_of(&ds.datatype().unwrap(), 2, true);
-    assert!(ds.read_u8().unwrap().is_empty());
+    assert!(ds.read_raw().unwrap().is_empty());
     // A zero-element compound of the component class is what this writer emits
     // for an empty complex array, and it round-trips. It is *not* what MATLAB
     // itself emits: `Mat_VarWriteEmpty` writes the dims as data under
@@ -248,7 +248,7 @@ fn payload_len(bytes: Vec<u8>, name: &str) -> usize {
         .unwrap()
         .dataset(name)
         .unwrap()
-        .read_u8()
+        .read_raw()
         .unwrap()
         .len()
 }
@@ -335,7 +335,7 @@ fn each_width_reports_its_own_class_and_size() {
         );
         assert_compound_of(&ds.datatype().unwrap(), size, signed);
         assert_eq!(
-            ds.read_u8().unwrap().len(),
+            ds.read_raw().unwrap().len(),
             2 * size as usize,
             "payload of {name}"
         );

@@ -986,7 +986,7 @@ fn read_complex(
         )));
     };
     validate_complex_dtype(dtype, tag)?;
-    let bytes = ds.read_u8().map_err(MatError::Hdf5)?;
+    let bytes = ds.read_raw().map_err(MatError::Hdf5)?;
     let pairs = parse_complex_vec(&bytes, total, tag)?;
 
     if total == 1 {
