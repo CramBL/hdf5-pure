@@ -1230,12 +1230,11 @@ mod tests {
     }
 
     #[test]
-    fn fast_path_narrowing_readers_match_wide_then_narrow() {
-        // read_as_i16/u16/u32 must equal the old "decode wide, then `as`" route
-        // for both LE and BE and for narrowing from a wider stored width.
+    fn fast_path_narrowing_readers_clamp_out_of_range_values() {
         for be in [false, true] {
             let i64t = make_int(8, true, be);
             let vals = [1i64, -1, 70_000, -70_000, i64::from(i32::MAX)];
+
             let mut raw = Vec::new();
             for v in vals {
                 if be {
@@ -1244,24 +1243,24 @@ mod tests {
                     raw.extend_from_slice(&v.to_le_bytes());
                 }
             }
-            let wide = read_as_i64(&raw, &i64t).unwrap();
-            let i16s = read_as_i16(&raw, &i64t).unwrap();
+
             assert_eq!(
-                i16s,
-                wide.iter().map(|&v| v as i16).collect::<Vec<_>>(),
+                read_as_i16(&raw, &i64t).unwrap(),
+                vec![1, -1, i16::MAX, i16::MIN, i16::MAX],
                 "i16 narrow be={be}"
             );
 
             let u64t = make_int(8, false, be);
-            let uwide = read_as_u64(&raw, &u64t).unwrap();
+
             assert_eq!(
                 read_as_u16(&raw, &u64t).unwrap(),
-                uwide.iter().map(|&v| v as u16).collect::<Vec<_>>(),
+                vec![1, u16::MAX, u16::MAX, u16::MAX, u16::MAX],
                 "u16 narrow be={be}"
             );
+
             assert_eq!(
                 read_as_u32(&raw, &u64t).unwrap(),
-                uwide.iter().map(|&v| v as u32).collect::<Vec<_>>(),
+                vec![1, u32::MAX, 70_000, u32::MAX, 2_147_483_647],
                 "u32 narrow be={be}"
             );
         }

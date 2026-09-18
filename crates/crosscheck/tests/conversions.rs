@@ -130,9 +130,7 @@ fn i32_to_i8_truncation(#[case] input: i32, #[case] expected: i8) {
 #[rstest]
 #[case::zero(0, 0)]
 #[case::in_bounds_positive(100, 100)]
-#[ignore = "TODO: Implement HDF5 soft conversion clamping logic"]
 #[case::clamps_negative_one_to_zero(-1, 0)]
-#[ignore = "TODO: Implement HDF5 soft conversion clamping logic"]
 #[case::clamps_large_negative_to_zero(-100, 0)]
 fn i32_to_u32_sign_loss(#[case] input: i32, #[case] expected: u32) {
     let dir = tempdir().unwrap();
@@ -252,9 +250,7 @@ fn i8_to_i64_widening(#[case] input: i8, #[case] expected: i64) {
 #[rstest]
 #[case::zero(0, 0)]
 #[case::in_bounds(32767, 32767)]
-#[ignore = "TODO: Implement HDF5 soft conversion clamping logic"]
 #[case::clamps_max(32768, 32767)]
-#[ignore = "TODO: Implement HDF5 soft conversion clamping logic"]
 #[case::clamps_max_far(65535, 32767)]
 fn u16_to_i16_wrap_prevention(#[case] input: u16, #[case] expected: i16) {
     let dir = tempdir().unwrap();

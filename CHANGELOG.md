@@ -10,6 +10,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - **Breaking:** Implement `Copy` on `DatatypeByteOrder`
 - **Breaking:** Refactored `Datatype::FixedPoint` and `Datatype::FloatingPoint` to group layout-related fields into the new `FixedPointLayout` and `FloatingPointLayout` structs
+- Replaced hard integer conversions with soft clamping conversions for lossy reads of numeric datatypes of width 2 or greater (e.g. `i32` to `u32`) to bring it in line with `libhdf5`
 
 ### Fixed
 
