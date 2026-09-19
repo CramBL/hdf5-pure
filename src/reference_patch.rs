@@ -387,7 +387,7 @@ fn scan_parsed_header<S: Source + ?Sized>(
             // unresolved body would be reading a shared-message header as a
             // datatype class, which is not an error, just an answer about the
             // wrong bytes.
-            MessageType::Datatype => {
+            MessageType::DATATYPE => {
                 let resolved;
                 let encoded = if message.flags.is_shared() {
                     let framed = crate::source::BaseOffsetSource { inner: src, base };
@@ -401,7 +401,7 @@ fn scan_parsed_header<S: Source + ?Sized>(
                         // one as a datatype this walk cannot read.
                         None,
                     );
-                    match resolver.resolve(&message.data, MessageType::Datatype) {
+                    match resolver.resolve(&message.data, MessageType::DATATYPE) {
                         Ok(bytes) => {
                             resolved = bytes;
                             &resolved[..]
@@ -420,7 +420,7 @@ fn scan_parsed_header<S: Source + ?Sized>(
                     }
                 }
             }
-            MessageType::DataLayout => {
+            MessageType::DATA_LAYOUT => {
                 layout = DataLayout::parse(
                     &message.data,
                     crate::file_writer::OFFSET_SIZE,
@@ -559,17 +559,17 @@ fn scan_object<S: Source + ?Sized>(
             // The flags byte is the 4th of the record header (type, size, flags).
             let shared = MessageFlags::new(region[p + 3]).is_shared();
             match msg_type {
-                MessageType::SymbolTable | MessageType::Link | MessageType::LinkInfo => {
+                MessageType::SYMBOL_TABLE | MessageType::LINK | MessageType::LINK_INFO => {
                     out.descend = true;
                 }
-                MessageType::Datatype => {
+                MessageType::DATATYPE => {
                     // A committed (shared) datatype's message body names the
                     // type rather than encoding it, so it is followed before the
                     // class can be read at all. A dataset of references through
                     // a committed type is otherwise invisible here, elements and
                     // all.
                     let encoded = if shared {
-                        match resolver.resolve(&region[body..body_end], MessageType::Datatype) {
+                        match resolver.resolve(&region[body..body_end], MessageType::DATATYPE) {
                             Ok(bytes) => committed.insert(bytes),
                             Err(_) => {
                                 out.fully_read = false;
@@ -599,7 +599,7 @@ fn scan_object<S: Source + ?Sized>(
                         Err(_) => out.fully_read = false,
                     }
                 }
-                MessageType::DataLayout => {
+                MessageType::DATA_LAYOUT => {
                     layout_msg = Some((&region[body..body_end], body_at));
                 }
                 // Dense (fractal-heap) attributes are not held in the header at
@@ -609,7 +609,7 @@ fn scan_object<S: Source + ?Sized>(
                 // defined heap address rather than the message's presence: the
                 // reference C library and h5py emit an Attribute Info message
                 // for compact attributes too, to carry creation-order metadata.
-                MessageType::AttributeInfo
+                MessageType::ATTRIBUTE_INFO
                     if crate::edit::attribute_info_is_dense(&region[body..body_end]) =>
                 {
                     out.fully_read = false;
@@ -618,8 +618,8 @@ fn scan_object<S: Source + ?Sized>(
                 // file's shared-message table — is not stored here, so its
                 // elements are not addressable from this header, and it leaves
                 // the object unproven rather than proven reference-free.
-                MessageType::Attribute if shared => out.fully_read = false,
-                MessageType::Attribute => {
+                MessageType::ATTRIBUTE if shared => out.fully_read = false,
+                MessageType::ATTRIBUTE => {
                     let Ok((attr, data_off)) = AttributeMessage::parse_resolving_at(
                         &region[body..body_end],
                         crate::file_writer::LENGTH_SIZE,
@@ -924,7 +924,7 @@ mod tests {
     #[test]
     fn an_inline_reference_attribute_is_repointed_and_the_chunk_resealed() {
         let region = message_record(
-            MessageType::Attribute,
+            MessageType::ATTRIBUTE,
             &reference_attr("target", 300).serialize_v3(crate::file_writer::LENGTH_SIZE),
         );
         let (src, bytes) = image_with_header(&region);
@@ -982,13 +982,13 @@ mod tests {
         // rather than in a data block. No writer in this crate emits one, so
         // this is the only way the path is reached at all.
         let mut region = message_record(
-            MessageType::Datatype,
+            MessageType::DATATYPE,
             &make_object_reference_type().serialize(),
         );
         let mut layout = vec![3u8, 0];
         layout.extend_from_slice(&8u16.to_le_bytes());
         layout.extend_from_slice(&300u64.to_le_bytes());
-        region.extend_from_slice(&message_record(MessageType::DataLayout, &layout));
+        region.extend_from_slice(&message_record(MessageType::DATA_LAYOUT, &layout));
 
         let (src, bytes) = image_with_header(&region);
         let (plan, scanned) = scan(&src, &[(300, 900)]);
@@ -1010,7 +1010,7 @@ mod tests {
         // happened to be the superblock base.
         for sentinel in [0u64, u64::MAX] {
             let region = message_record(
-                MessageType::Attribute,
+                MessageType::ATTRIBUTE,
                 &reference_attr("target", sentinel).serialize_v3(crate::file_writer::LENGTH_SIZE),
             );
             let (src, _) = image_with_header(&region);
@@ -1039,7 +1039,7 @@ mod tests {
         };
         attr.raw_data = vec![0u8; 16];
         let region = message_record(
-            MessageType::Attribute,
+            MessageType::ATTRIBUTE,
             &attr.serialize_v3(crate::file_writer::LENGTH_SIZE),
         );
         let (src, _) = image_with_header(&region);
@@ -1058,7 +1058,7 @@ mod tests {
         // Attribute message in its header, so nothing here can see what they
         // hold. Reading that as "no references in this object" is what would let
         // a later commit skip the walk over a file full of them.
-        let dense = message_record(MessageType::AttributeInfo, &attribute_info(Some(4096)));
+        let dense = message_record(MessageType::ATTRIBUTE_INFO, &attribute_info(Some(4096)));
         let (src, _) = image_with_header(&dense);
         let (plan, scanned) = scan(&src, &[(300, 900)]);
         assert!(plan.is_empty(), "there is nothing here this can address");
@@ -1070,7 +1070,7 @@ mod tests {
 
         // The same message with an *undefined* heap address is the compact form
         // nearly every object the C library writes carries, and it hides nothing.
-        let compact = message_record(MessageType::AttributeInfo, &attribute_info(None));
+        let compact = message_record(MessageType::ATTRIBUTE_INFO, &attribute_info(None));
         let (src, _) = image_with_header(&compact);
         let (_, scanned) = scan(&src, &[(300, 900)]);
         assert!(
@@ -1086,7 +1086,7 @@ mod tests {
         // references in this object" is what would let a later commit skip the
         // walk over a file that needs it.
         let attr = reference_attr("target", 300).serialize_v3(crate::file_writer::LENGTH_SIZE);
-        let mut record = message_record(MessageType::Attribute, &attr);
+        let mut record = message_record(MessageType::ATTRIBUTE, &attr);
         record[3] = MessageFlags::SHARED.get();
         let (src, _) = image_with_header(&record);
         let (plan, scanned) = scan(&src, &[(300, 900)]);
@@ -1108,7 +1108,7 @@ mod tests {
         // and worth its own assertion for the same reason that one has: the
         // write *count* is identical either way, so nothing else notices.
         let region = message_record(
-            MessageType::Attribute,
+            MessageType::ATTRIBUTE,
             &reference_attr("target", 300).serialize_v3(crate::file_writer::LENGTH_SIZE),
         );
         let (src, bytes) = image_with_header(&region);
@@ -1146,7 +1146,7 @@ mod tests {
         for base in [BaseAddress::ZERO, BaseAddress::new(1024)] {
             const TYPE_AT: u64 = 2048;
             let committed = build_v2_object_header(&plain_region(message_record(
-                MessageType::Datatype,
+                MessageType::DATATYPE,
                 &make_object_reference_type().serialize(),
             )))
             .unwrap();
@@ -1154,7 +1154,7 @@ mod tests {
             // The dataset's own header: a *shared* datatype message naming the
             // committed object, and a compact element holding the address.
             let mut shared = message_record(
-                MessageType::Datatype,
+                MessageType::DATATYPE,
                 &crate::shared_message::encode_committed_ref(
                     base.relative(TYPE_AT).unwrap(),
                     crate::file_writer::OFFSET_SIZE,
@@ -1164,7 +1164,7 @@ mod tests {
             let mut layout = vec![3u8, 0];
             layout.extend_from_slice(&8u16.to_le_bytes());
             layout.extend_from_slice(&(300u64).to_le_bytes());
-            shared.extend_from_slice(&message_record(MessageType::DataLayout, &layout));
+            shared.extend_from_slice(&message_record(MessageType::DATA_LAYOUT, &layout));
             let dataset = build_v2_object_header(&plain_region(shared)).unwrap();
 
             let mut bytes = vec![0xAAu8; TYPE_AT as usize];
@@ -1247,7 +1247,7 @@ mod tests {
     #[test]
     fn an_address_no_relocation_names_is_left_alone() {
         let region = message_record(
-            MessageType::Attribute,
+            MessageType::ATTRIBUTE,
             &reference_attr("target", 300).serialize_v3(crate::file_writer::LENGTH_SIZE),
         );
         let (src, _) = image_with_header(&region);

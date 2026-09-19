@@ -389,7 +389,7 @@ impl SharedResolver for Unresolvable {
     /// know, so any answer here would be a guess at the field width.
     fn committed_address(&self, _reference: &[u8]) -> Result<Option<StoredAddress>, FormatError> {
         Err(FormatError::UnresolvedSharedMessage(
-            MessageType::Datatype.to_u16(),
+            MessageType::DATATYPE.to_u16(),
         ))
     }
 }
@@ -608,7 +608,7 @@ mod tests {
         let resolver = BufferedResolver::new(&[], AccessMode::ReadOnly, 8, 8, None);
 
         let err = resolver
-            .resolve(&reference, MessageType::Datatype)
+            .resolve(&reference, MessageType::DATATYPE)
             .unwrap_err();
         assert_eq!(err, FormatError::UnsupportedSohmReference);
     }
@@ -627,16 +627,16 @@ mod tests {
     #[test]
     fn a_reference_to_a_header_without_that_message_is_an_error() {
         let header = header_with(vec![message(
-            MessageType::Dataspace,
+            MessageType::DATASPACE,
             MessageFlags::NONE,
             vec![1, 2, 3],
         )]);
-        let err = select_shared_message(&header, MessageType::Datatype, 0x320).unwrap_err();
+        let err = select_shared_message(&header, MessageType::DATATYPE, 0x320).unwrap_err();
         assert_eq!(
             err,
             FormatError::SharedMessageMissing {
                 object_header_address: 0x320,
-                message_type: MessageType::Datatype.to_u16(),
+                message_type: MessageType::DATATYPE.to_u16(),
             }
         );
     }
@@ -647,11 +647,11 @@ mod tests {
     #[test]
     fn a_shared_message_in_the_target_is_not_mistaken_for_content() {
         let header = header_with(vec![message(
-            MessageType::Datatype,
+            MessageType::DATATYPE,
             MessageFlags::SHARED,
             vec![2, 2, 0, 0],
         )]);
-        let err = select_shared_message(&header, MessageType::Datatype, 0x320).unwrap_err();
+        let err = select_shared_message(&header, MessageType::DATATYPE, 0x320).unwrap_err();
         assert!(matches!(err, FormatError::SharedMessageMissing { .. }));
     }
 
@@ -661,12 +661,12 @@ mod tests {
         let err = Unresolvable
             .resolve(
                 &[2, REF_TYPE_COMMITTED, 0, 0, 0, 0, 0, 0, 0, 0],
-                MessageType::Datatype,
+                MessageType::DATATYPE,
             )
             .unwrap_err();
         assert_eq!(
             err,
-            FormatError::UnresolvedSharedMessage(MessageType::Datatype.to_u16())
+            FormatError::UnresolvedSharedMessage(MessageType::DATATYPE.to_u16())
         );
     }
 }

@@ -402,7 +402,7 @@ fn decode_type_and_space(
         // back spelled out, which is what every reader of such a file already
         // shows.
         let address = resolver.committed_address(dt_field)?;
-        let body = resolver.resolve(dt_field, MessageType::Datatype)?;
+        let body = resolver.resolve(dt_field, MessageType::DATATYPE)?;
         (
             Datatype::parse(&body)?.0,
             match address {
@@ -415,7 +415,7 @@ fn decode_type_and_space(
     };
 
     let dataspace = if flags & FLAG_SHARED_DATASPACE != 0 {
-        let body = resolver.resolve(ds_field, MessageType::Dataspace)?;
+        let body = resolver.resolve(ds_field, MessageType::DATASPACE)?;
         Dataspace::parse(&body, length_size)?
     } else {
         Dataspace::parse(ds_field, length_size)?
@@ -524,7 +524,7 @@ pub fn extract_attributes(
 ) -> Result<Vec<AttributeMessage>, FormatError> {
     let mut attrs = Vec::new();
     for msg in &header.messages {
-        if msg.msg_type == MessageType::Attribute {
+        if msg.msg_type == MessageType::ATTRIBUTE {
             let attr = AttributeMessage::parse(&msg.data, length_size)?;
             attrs.push(attr);
         }
@@ -554,11 +554,11 @@ pub fn extract_attributes_full(
 
     // Collect compact attributes (inline in OH)
     for msg in &header.messages {
-        if msg.msg_type == MessageType::Attribute {
+        if msg.msg_type == MessageType::ATTRIBUTE {
             let attr = if msg.flags.is_shared() {
                 // The whole attribute message is shared: resolve the reference to
                 // get the message, which may itself name a committed datatype.
-                let resolved = resolver.resolve(&msg.data, MessageType::Attribute)?;
+                let resolved = resolver.resolve(&msg.data, MessageType::ATTRIBUTE)?;
                 AttributeMessage::parse_resolving(&resolved, length_size, &resolver)?
             } else {
                 AttributeMessage::parse_resolving(&msg.data, length_size, &resolver)?
@@ -646,9 +646,9 @@ pub fn extract_stored_attributes_from_source<S: Source + ?Sized>(
 
     // Collect compact attributes (inline in OH)
     for msg in &header.messages {
-        if msg.msg_type == MessageType::Attribute {
+        if msg.msg_type == MessageType::ATTRIBUTE {
             let attr = if msg.flags.is_shared() {
-                let resolved = resolver.resolve(&msg.data, MessageType::Attribute)?;
+                let resolved = resolver.resolve(&msg.data, MessageType::ATTRIBUTE)?;
                 AttributeMessage::parse_resolving(&resolved, length_size, &resolver)?
             } else {
                 AttributeMessage::parse_resolving(&msg.data, length_size, &resolver)?
@@ -686,7 +686,7 @@ fn find_attribute_info(
     offset_size: u8,
 ) -> Result<Option<AttributeInfoMessage>, FormatError> {
     for msg in &header.messages {
-        if msg.msg_type == MessageType::AttributeInfo {
+        if msg.msg_type == MessageType::ATTRIBUTE_INFO {
             let info = AttributeInfoMessage::parse(&msg.data, offset_size)?;
             return Ok(Some(info));
         }
@@ -1309,7 +1309,7 @@ mod tests {
             attr_data.extend_from_slice(&((i as f64) * 1.0).to_le_bytes());
 
             msgs.push(crate::object_header::HeaderMessage {
-                msg_type: MessageType::Attribute,
+                msg_type: MessageType::ATTRIBUTE,
                 size: attr_data.len(),
                 flags: MessageFlags::NONE,
                 creation_order: None,
@@ -1446,7 +1446,7 @@ mod tests {
         let err = AttributeMessage::parse(&data, 8).unwrap_err();
         assert_eq!(
             err,
-            FormatError::UnresolvedSharedMessage(MessageType::Datatype.to_u16())
+            FormatError::UnresolvedSharedMessage(MessageType::DATATYPE.to_u16())
         );
     }
 

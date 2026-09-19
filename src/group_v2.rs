@@ -65,7 +65,7 @@ fn resolve_compact_entries(
 ) -> Result<Vec<GroupEntry>, FormatError> {
     let mut entries = Vec::new();
     for msg in &object_header.messages {
-        if msg.msg_type == MessageType::Link {
+        if msg.msg_type == MessageType::LINK {
             let link = LinkMessage::parse(&msg.data, offset_size)?;
             if let LinkTarget::Hard {
                 object_header_address,
@@ -242,7 +242,7 @@ fn wanted_link_only<'a>(
     saw_link: &'a mut bool,
 ) -> impl FnMut(MessageType, &[u8]) -> bool + 'a {
     move |ty, body| {
-        if ty != MessageType::Link {
+        if ty != MessageType::LINK {
             return true;
         }
         *saw_link = true;
@@ -316,7 +316,7 @@ fn scan_compact_links(
 ) -> Result<Option<StoredAddress>, FormatError> {
     let mut found = None;
     for msg in &object_header.messages {
-        if msg.msg_type != MessageType::Link {
+        if msg.msg_type != MessageType::LINK {
             continue;
         }
         let addr = LinkMessage::hard_link_address_if_named(&msg.data, offset_size, name.as_str())?;
@@ -403,7 +403,7 @@ fn find_link_info(
     offset_size: u8,
 ) -> Result<LinkInfoMessage, FormatError> {
     for msg in &object_header.messages {
-        if msg.msg_type == MessageType::LinkInfo {
+        if msg.msg_type == MessageType::LINK_INFO {
             return LinkInfoMessage::parse(&msg.data, offset_size);
         }
     }
@@ -422,14 +422,14 @@ fn is_v2_group(object_header: &ObjectHeader) -> bool {
     object_header
         .messages
         .iter()
-        .any(|m| m.msg_type == MessageType::LinkInfo || m.msg_type == MessageType::Link)
+        .any(|m| m.msg_type == MessageType::LINK_INFO || m.msg_type == MessageType::LINK)
 }
 
 fn is_v1_group(object_header: &ObjectHeader) -> bool {
     object_header
         .messages
         .iter()
-        .any(|m| m.msg_type == MessageType::SymbolTable)
+        .any(|m| m.msg_type == MessageType::SYMBOL_TABLE)
 }
 
 /// Whether an object header describes a group at all, in either form.
@@ -504,7 +504,7 @@ pub fn resolve_group_entries(
         let sym_msg = object_header
             .messages
             .iter()
-            .find(|m| m.msg_type == MessageType::SymbolTable)
+            .find(|m| m.msg_type == MessageType::SYMBOL_TABLE)
             .ok_or_else(|| FormatError::PathNotFound(String::from("no symbol table message")))?;
         let stm = SymbolTableMessage::parse(&sym_msg.data, offset_size)?;
         group_v1::resolve_v1_group_entries(file_data, &stm, offset_size, length_size, base_address)
@@ -591,7 +591,7 @@ pub fn resolve_group_entries_from_source<S: Source + ?Sized>(
         let sym_msg = object_header
             .messages
             .iter()
-            .find(|m| m.msg_type == MessageType::SymbolTable)
+            .find(|m| m.msg_type == MessageType::SYMBOL_TABLE)
             .ok_or_else(|| FormatError::PathNotFound(String::from("no symbol table message")))?;
         let stm = SymbolTableMessage::parse(&sym_msg.data, offset_size)?;
         group_v1::resolve_v1_group_entries_from_source(
@@ -710,19 +710,19 @@ mod tests {
         let dt_data = &hdr
             .messages
             .iter()
-            .find(|m| m.msg_type == MessageType::Datatype)
+            .find(|m| m.msg_type == MessageType::DATATYPE)
             .unwrap()
             .data;
         let ds_data = &hdr
             .messages
             .iter()
-            .find(|m| m.msg_type == MessageType::Dataspace)
+            .find(|m| m.msg_type == MessageType::DATASPACE)
             .unwrap()
             .data;
         let dl_data = &hdr
             .messages
             .iter()
-            .find(|m| m.msg_type == MessageType::DataLayout)
+            .find(|m| m.msg_type == MessageType::DATA_LAYOUT)
             .unwrap()
             .data;
         let (dt, _) = Datatype::parse(dt_data).unwrap();
@@ -753,7 +753,7 @@ mod tests {
             version: 2,
             messages: vec![
                 crate::object_header::HeaderMessage {
-                    msg_type: MessageType::LinkInfo,
+                    msg_type: MessageType::LINK_INFO,
                     size: 18,
                     flags: MessageFlags::NONE,
                     creation_order: None,
@@ -767,7 +767,7 @@ mod tests {
                     },
                 },
                 crate::object_header::HeaderMessage {
-                    msg_type: MessageType::Link,
+                    msg_type: MessageType::LINK,
                     size: link_data.len(),
                     flags: MessageFlags::NONE,
                     creation_order: None,
@@ -817,7 +817,7 @@ mod tests {
         let mut d = vec![0, 0]; // version, flags
         d.extend_from_slice(&u64::MAX.to_le_bytes()); // fractal heap: undefined
         d.extend_from_slice(&u64::MAX.to_le_bytes()); // name index: undefined
-        (MessageType::LinkInfo, d)
+        (MessageType::LINK_INFO, d)
     }
 
     /// A Link Info message naming a fractal heap: dense storage.
@@ -825,7 +825,7 @@ mod tests {
         let mut d = vec![0, 0];
         d.extend_from_slice(&0x1000u64.to_le_bytes()); // fractal heap address
         d.extend_from_slice(&0x2000u64.to_le_bytes()); // name index address
-        (MessageType::LinkInfo, d)
+        (MessageType::LINK_INFO, d)
     }
 
     /// A lookup asks the parse for one link, so by the time the header is
@@ -883,8 +883,8 @@ mod tests {
 
         let header = header_of(vec![
             compact_link_info(),
-            (MessageType::Link, soft),
-            (MessageType::Link, hard),
+            (MessageType::LINK, soft),
+            (MessageType::LINK, hard),
         ]);
 
         assert_eq!(

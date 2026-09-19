@@ -141,14 +141,14 @@ mod tests {
     #[test]
     fn two_messages_roundtrip() {
         let mut writer = ObjectHeaderWriter::new();
-        writer.add_message(MessageType::Dataspace, vec![1, 2, 3, 4]);
-        writer.add_message(MessageType::Datatype, vec![5, 6]);
+        writer.add_message(MessageType::DATASPACE, vec![1, 2, 3, 4]);
+        writer.add_message(MessageType::DATATYPE, vec![5, 6]);
         let bytes = writer.serialize().unwrap();
         let hdr = ObjectHeader::parse(&bytes, AccessMode::ReadOnly, 0, 8, 8).unwrap();
         assert_eq!(hdr.messages.len(), 2);
-        assert_eq!(hdr.messages[0].msg_type, MessageType::Dataspace);
+        assert_eq!(hdr.messages[0].msg_type, MessageType::DATASPACE);
         assert_eq!(hdr.messages[0].data, vec![1, 2, 3, 4]);
-        assert_eq!(hdr.messages[1].msg_type, MessageType::Datatype);
+        assert_eq!(hdr.messages[1].msg_type, MessageType::DATATYPE);
         assert_eq!(hdr.messages[1].data, vec![5, 6]);
     }
 
@@ -156,7 +156,7 @@ mod tests {
     fn a_serialized_record_stores_the_flags_the_message_was_added_with() {
         let mut writer = ObjectHeaderWriter::new();
         writer.add_message_with_flags(
-            MessageType::Datatype,
+            MessageType::DATATYPE,
             vec![5, 6],
             MessageFlags::CONSTANT | MessageFlags::FORBID_SHARING,
         );
@@ -171,7 +171,7 @@ mod tests {
     #[test]
     fn a_message_added_without_flags_sets_no_flag_in_its_record() {
         let mut writer = ObjectHeaderWriter::new();
-        writer.add_message(MessageType::Datatype, vec![5, 6]);
+        writer.add_message(MessageType::DATATYPE, vec![5, 6]);
         let bytes = writer.serialize().unwrap();
         let hdr = ObjectHeader::parse(&bytes, AccessMode::ReadOnly, 0, 8, 8).unwrap();
         assert_eq!(hdr.messages[0].flags, MessageFlags::NONE);
@@ -181,7 +181,7 @@ mod tests {
     fn large_header_uses_2byte_chunk_size() {
         let mut writer = ObjectHeaderWriter::new();
         // Add a message with >255 bytes of payload
-        writer.add_message(MessageType::Datatype, vec![0xAA; 300]);
+        writer.add_message(MessageType::DATATYPE, vec![0xAA; 300]);
         let bytes = writer.serialize().unwrap();
         let hdr = ObjectHeader::parse(&bytes, AccessMode::ReadOnly, 0, 8, 8).unwrap();
         assert_eq!(hdr.messages.len(), 1);
@@ -192,7 +192,7 @@ mod tests {
     fn message_at_the_size_field_limit_still_serializes() {
         let mut writer = ObjectHeaderWriter::new();
         writer.add_message(
-            MessageType::Attribute,
+            MessageType::ATTRIBUTE,
             vec![0xAA; OBJECT_HEADER_MESSAGE_MAX],
         );
         let bytes = writer.serialize().unwrap();
@@ -204,15 +204,15 @@ mod tests {
     #[test]
     fn message_past_the_size_field_limit_is_refused() {
         let mut writer = ObjectHeaderWriter::new();
-        writer.add_message(MessageType::Dataspace, vec![0u8; 8]);
+        writer.add_message(MessageType::DATASPACE, vec![0u8; 8]);
         writer.add_message(
-            MessageType::Attribute,
+            MessageType::ATTRIBUTE,
             vec![0xAA; OBJECT_HEADER_MESSAGE_MAX + 1],
         );
         assert_eq!(
             writer.serialize(),
             Err(FormatError::ObjectHeaderMessageTooLarge {
-                message_type: MessageType::Attribute.to_u16(),
+                message_type: MessageType::ATTRIBUTE.to_u16(),
                 size: OBJECT_HEADER_MESSAGE_MAX + 1,
             })
         );
