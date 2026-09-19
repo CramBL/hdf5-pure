@@ -312,12 +312,15 @@ struct MessageRecord<'a> {
     body: &'a [u8],
 }
 
-/// Decodes one complete version 1 message record from a bounded chunk slice.
+/// Decodes one version 1 message record from a bounded chunk slice.
 ///
-/// An incomplete prefix or body produces `None`. Unknown message types whose
-/// flags require understanding under `access_mode` produce
-/// [`FormatError::UnsupportedMessage`]. The record layout is defined in
-/// "Version 1 Data Object Header Prefix" of the
+/// Fewer than [`MESSAGE_PREFIX_LEN`] bytes produces `None`. A complete prefix
+/// whose declared body extends past the bounded slice produces
+/// [`FormatError::UnexpectedEof`]. Unknown message types whose flags require
+/// understanding under `access_mode` produce
+/// [`FormatError::UnsupportedMessage`].
+///
+/// The record layout is defined in "Version 1 Data Object Header Prefix" of the
 /// [format specification, version 4.0][spec].
 ///
 /// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_prefix_one
@@ -332,11 +335,9 @@ fn parse_message_record(
     let msg_type = MessageType::from_u16(LittleEndian::read_u16(&data[..2]));
     let body_len = usize::from(LittleEndian::read_u16(&data[2..4]));
     let flags = MessageFlags::new(data[4]);
-    let record_len = MESSAGE_PREFIX_LEN + body_len;
 
-    if data.len() < record_len {
-        return Ok(None);
-    }
+    bytes::ensure_len(data, MESSAGE_PREFIX_LEN, body_len)?;
+    let record_len = MESSAGE_PREFIX_LEN + body_len;
 
     if let Some(id) = msg_type.unknown_id()
         && flags.must_be_understood(access_mode)

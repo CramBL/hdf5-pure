@@ -18,6 +18,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - `Dataset::read` decodes partial edge chunks stored with skipped filters. Unfiltered edge chunks bypass the inverse filter pipeline, while full chunks process through the pipeline ([#589](https://github.com/CramBL/hdf5-pure/pull/589)).
 - `Dataset::read` calculates chunk addresses for datasets whose implicit indices span expanded maximum chunk grids. Repacking these datasets preserves chunk data. Version 4 chunk sizes exceeding 32 bits remain intact until read or allocation operations require host-sized values ([#587](https://github.com/CramBL/hdf5-pure/pull/587)).
 - `Dataset::read` converts numeric values when destination and stored datatypes differ ([#597](https://github.com/CramBL/hdf5-pure/pull/597)).
+- Version 1 object-header parsing rejects message records whose bodies extend beyond the declared chunk boundary (matching `libhdf5`) ([#607](https://github.com/CramBL/hdf5-pure/pull/607)).
 
 ## [0.46.1] - 2026-09-15
 
