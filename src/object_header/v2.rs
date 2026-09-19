@@ -70,45 +70,23 @@ impl ObjectHeader {
     ) -> Result<ObjectHeader, FormatError> {
         // signature(4) + version(1) + flags(1) = 6
         bytes::ensure_len(data, offset, 6)?;
+        bytes::ensure_len(data, offset, 6)?;
+        let prefix = Self::parse_prefix(&data[offset..])?;
 
-        let version = data[offset + 4];
-        if version != 2 {
-            return Err(FormatError::InvalidObjectHeaderVersion(version));
-        }
-        let flags = HeaderFlags::new(data[offset + 5]);
-
-        let mut pos = offset + 6;
-
-        let (access_time, modification_time, change_time, birth_time) = if flags.stores_times() {
-            bytes::ensure_len(data, pos, 16)?;
-            let at = LittleEndian::read_u32(&data[pos..pos + 4]);
-            let mt = LittleEndian::read_u32(&data[pos + 4..pos + 8]);
-            let ct = LittleEndian::read_u32(&data[pos + 8..pos + 12]);
-            let bt = LittleEndian::read_u32(&data[pos + 12..pos + 16]);
-            pos += 16;
-            (Some(at), Some(mt), Some(ct), Some(bt))
-        } else {
-            (None, None, None, None)
-        };
-
-        // Optional attribute storage thresholds (flags bit 4)
-        if flags.stores_attribute_phase_change() {
-            bytes::ensure_len(data, pos, 4)?;
-            // The attribute phase change values occupy four bytes.
-            pos += 4;
-        }
-
-        let chunk_size_width = flags.chunk_size_width();
-        let chunk0_size = bytes::read_uint_width(data, pos, chunk_size_width)?.to_usize()?;
-        pos += usize::from(chunk_size_width.get());
-
-        let chunk0_msg_start = pos;
-        let chunk0_msg_end = pos
-            .checked_add(chunk0_size)
-            .ok_or(FormatError::UnexpectedEof {
-                expected: usize::MAX,
-                available: data.len(),
-            })?;
+        let chunk0_msg_start =
+            offset
+                .checked_add(prefix.len)
+                .ok_or(FormatError::UnexpectedEof {
+                    expected: usize::MAX,
+                    available: data.len(),
+                })?;
+        let chunk0_msg_end =
+            chunk0_msg_start
+                .checked_add(prefix.chunk0_size)
+                .ok_or(FormatError::UnexpectedEof {
+                    expected: usize::MAX,
+                    available: data.len(),
+                })?;
 
         // Validate checksum: from OHDR signature through all messages (before checksum)
         bytes::ensure_len(data, chunk0_msg_end, 4)?;
@@ -124,7 +102,7 @@ impl ObjectHeader {
             }
         }
 
-        let has_creation_order = flags.tracks_creation_order();
+        let has_creation_order = prefix.tracks_creation_order();
 
         // Parse messages from chunk0
         let mut messages = Vec::new();
@@ -168,11 +146,11 @@ impl ObjectHeader {
             version: 2,
             messages,
             reference_count: None,
-            flags: flags.raw(),
-            access_time,
-            modification_time,
-            change_time,
-            birth_time,
+            flags: prefix.flags.raw(),
+            access_time: prefix.timestamps.map(|timestamps| timestamps.access),
+            modification_time: prefix.timestamps.map(|timestamps| timestamps.modification),
+            change_time: prefix.timestamps.map(|timestamps| timestamps.change),
+            birth_time: prefix.timestamps.map(|timestamps| timestamps.birth),
         })
     }
 
@@ -345,50 +323,19 @@ impl ObjectHeader {
             .min(source.len().saturating_sub(address))
             .to_usize()?;
         let head = source.read_metadata_at(address, head_len)?;
-        if head.len() < 6 {
-            return Err(FormatError::UnexpectedEof {
-                expected: 6,
-                available: head.len(),
-            });
-        }
-        let version = head[4];
-        if version != 2 {
-            return Err(FormatError::InvalidObjectHeaderVersion(version));
-        }
-        let flags = HeaderFlags::new(head[5]);
-        let mut pos = 6usize;
-
-        let (access_time, modification_time, change_time, birth_time) = if flags.stores_times() {
-            bytes::ensure_len(&head, pos, 16)?;
-            let at = LittleEndian::read_u32(&head[pos..pos + 4]);
-            let mt = LittleEndian::read_u32(&head[pos + 4..pos + 8]);
-            let ct = LittleEndian::read_u32(&head[pos + 8..pos + 12]);
-            let bt = LittleEndian::read_u32(&head[pos + 12..pos + 16]);
-            pos += 16;
-            (Some(at), Some(mt), Some(ct), Some(bt))
-        } else {
-            (None, None, None, None)
-        };
-
-        if flags.stores_attribute_phase_change() {
-            bytes::ensure_len(&head, pos, 4)?;
-            pos += 4;
-        }
-
-        let chunk_size_width = flags.chunk_size_width();
-        let chunk0_size = bytes::read_uint_width(&head, pos, chunk_size_width)?.to_usize()?;
-        pos += usize::from(chunk_size_width.get());
-        let prefix_len = pos;
+        let prefix = Self::parse_prefix(&head)?;
+        let prefix_len = prefix.len;
 
         // The chunk 0 body, including the prefix, messages, and checksum, is
         // contiguous from `address`. Reading the complete region gives the checksum
         // the same byte range as the buffered parser.
-        let chunk0_end = prefix_len
-            .checked_add(chunk0_size)
-            .ok_or(FormatError::UnexpectedEof {
-                expected: usize::MAX,
-                available: head.len(),
-            })?;
+        let chunk0_end =
+            prefix_len
+                .checked_add(prefix.chunk0_size)
+                .ok_or(FormatError::UnexpectedEof {
+                    expected: usize::MAX,
+                    available: head.len(),
+                })?;
         let chunk0_total =
             (chunk0_end as u64)
                 .checked_add(4)
@@ -410,7 +357,7 @@ impl ObjectHeader {
             }
         }
 
-        let has_creation_order = flags.tracks_creation_order();
+        let has_creation_order = prefix.tracks_creation_order();
         let mut messages = Vec::new();
         let mut continuations = Vec::new();
         Self::parse_v2_messages(
@@ -453,12 +400,93 @@ impl ObjectHeader {
             version: 2,
             messages,
             reference_count: None,
-            flags: flags.raw(),
-            access_time,
-            modification_time,
-            change_time,
-            birth_time,
+            flags: prefix.flags.raw(),
+            access_time: prefix.timestamps.map(|timestamps| timestamps.access),
+            modification_time: prefix.timestamps.map(|timestamps| timestamps.modification),
+            change_time: prefix.timestamps.map(|timestamps| timestamps.change),
+            birth_time: prefix.timestamps.map(|timestamps| timestamps.birth),
         })
+    }
+
+    fn parse_prefix(data: &[u8]) -> Result<Prefix, FormatError> {
+        bytes::ensure_len(data, 0, 6)?;
+
+        let version = data[4];
+        if version != 2 {
+            return Err(FormatError::InvalidObjectHeaderVersion(version));
+        }
+
+        let flags = HeaderFlags::new(data[5]);
+        let mut pos = 6;
+
+        let timestamps = if flags.stores_times() {
+            bytes::ensure_len(data, pos, 16)?;
+
+            let timestamps = Timestamps {
+                access: LittleEndian::read_u32(&data[pos..pos + 4]),
+                modification: LittleEndian::read_u32(&data[pos + 4..pos + 8]),
+                change: LittleEndian::read_u32(&data[pos + 8..pos + 12]),
+                birth: LittleEndian::read_u32(&data[pos + 12..pos + 16]),
+            };
+
+            pos += 16;
+            Some(timestamps)
+        } else {
+            None
+        };
+
+        if flags.stores_attribute_phase_change() {
+            bytes::ensure_len(data, pos, 4)?;
+            pos += 4;
+        }
+
+        let chunk_size_width = flags.chunk_size_width();
+        let chunk0_size = bytes::read_uint_width(data, pos, chunk_size_width)?.to_usize()?;
+        pos += usize::from(chunk_size_width.get());
+
+        Ok(Prefix {
+            flags,
+            timestamps,
+            chunk0_size,
+            len: pos,
+        })
+    }
+}
+
+/// Groups the four timestamps stored together in a version 2 object header.
+///
+/// The fields are present when the timestamp flag is set in the version 2
+/// object header prefix. Their order is defined in "Version 2 Data Object
+/// Header Prefix" of the [format specification, version 4.0][spec].
+///
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_prefix_two
+#[derive(Clone, Copy)]
+struct Timestamps {
+    access: u32,
+    modification: u32,
+    change: u32,
+    birth: u32,
+}
+
+/// Represents the decoded variable-length prefix of a version 2 object header.
+///
+/// The prefix contains the flags byte, optional timestamp and attribute phase
+/// change fields, and the encoded size of chunk 0. `len` is the number of bytes
+/// from the `OHDR` signature through the chunk size field. The layout is
+/// defined in "Version 2 Data Object Header Prefix" of the
+/// [format specification, version 4.0][spec].
+///
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_prefix_two
+struct Prefix {
+    flags: HeaderFlags,
+    timestamps: Option<Timestamps>,
+    chunk0_size: usize,
+    len: usize,
+}
+
+impl Prefix {
+    fn tracks_creation_order(&self) -> bool {
+        self.flags.tracks_creation_order()
     }
 }
 
