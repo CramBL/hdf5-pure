@@ -279,7 +279,7 @@ impl ObjectHeader {
             ensure_len(data, pos, msg_data_size)?;
             let msg_type = MessageType::from_u16(msg_type_raw);
 
-            if let MessageType::Unknown(id) = msg_type
+            if let Some(id) = msg_type.unknown_id()
                 && msg_flags.must_be_understood(access_mode)
             {
                 return Err(FormatError::UnsupportedMessage(id));
@@ -369,7 +369,7 @@ impl ObjectHeader {
 
             let msg_type = MessageType::from_u16(msg_type_raw);
 
-            if let MessageType::Unknown(id) = msg_type
+            if let Some(id) = msg_type.unknown_id()
                 && msg_flags.must_be_understood(access_mode)
             {
                 return Err(FormatError::UnsupportedMessage(id));
@@ -611,7 +611,7 @@ impl ObjectHeader {
 
             let msg_type = MessageType::from_u16(msg_type_raw);
 
-            if let MessageType::Unknown(id) = msg_type
+            if let Some(id) = msg_type.unknown_id()
                 && msg_flags.must_be_understood(access_mode)
             {
                 return Err(FormatError::UnsupportedMessage(id));
@@ -992,7 +992,7 @@ impl ObjectHeader {
             count += 1;
 
             let msg_type = MessageType::from_u16(msg_type_raw);
-            if let MessageType::Unknown(id) = msg_type
+            if let Some(id) = msg_type.unknown_id()
                 && msg_flags.must_be_understood(access_mode)
             {
                 return Err(FormatError::UnsupportedMessage(id));
