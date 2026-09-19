@@ -33,6 +33,7 @@ const SYMBOL_TABLE_MESSAGE: u16 = 0x0011;
 struct FileLayout {
     offset_size: usize,
     length_size: usize,
+    eof_address_field: usize,
     root_chunk_start: usize,
     root_chunk_end: usize,
 }
@@ -81,6 +82,192 @@ fn write_earliest_file(path: &Path) {
     marker.write_scalar(&7).expect("write root attribute value");
 
     file.close().expect("close control file");
+}
+
+/// Creates an earliest-format file whose root object header uses a continuation.
+fn write_earliest_file_with_continuation(path: &Path) {
+    let file = hdf5::File::with_options()
+        .with_fapl(|fapl| fapl.libver_earliest())
+        .create(path)
+        .expect("create earliest-format file with libhdf5");
+
+    let dataset = file
+        .new_dataset::<i32>()
+        .shape([1])
+        .create("data")
+        .expect("create control dataset");
+    dataset
+        .write_raw(&[42])
+        .expect("write control dataset value");
+    drop(dataset);
+
+    // A large attribute added after creation forces the version 1 root object
+    // header to allocate additional message storage.
+    let root = file.group("/").expect("open root group");
+    let marker = root
+        .new_attr::<u8>()
+        .shape([1024])
+        .create("continuation_payload")
+        .expect("create large root attribute");
+    marker
+        .write_raw(&vec![0x5a; 1024])
+        .expect("write large root attribute");
+
+    drop(marker);
+    drop(root);
+    file.close().expect("close control file");
+}
+
+/// Writes an unsigned little-endian integer of at most eight bytes.
+fn write_uint(bytes: &mut [u8], offset: usize, width: usize, value: u64) {
+    assert!(
+        (1..=8).contains(&width),
+        "unsupported integer width {width}"
+    );
+
+    if width < 8 {
+        assert!(
+            value < (1u64 << (width * 8)),
+            "value {value:#x} does not fit in {width} bytes"
+        );
+    }
+
+    let end = offset
+        .checked_add(width)
+        .expect("integer field offset overflow");
+    let field = bytes
+        .get_mut(offset..end)
+        .unwrap_or_else(|| panic!("integer at {offset:#x} lies outside the file"));
+
+    for (index, byte) in field.iter_mut().enumerate() {
+        *byte = ((value >> (index * 8)) & 0xff) as u8;
+    }
+}
+
+/// Copies the first root continuation to EOF and adds one trailing byte.
+///
+/// The continuation message is repointed to the copy and its declared length is
+/// increased by one. The copied records themselves remain unchanged, leaving a
+/// single byte after the last complete version 1 message prefix and body.
+fn add_trailing_byte_to_root_continuation(bytes: &mut Vec<u8>) {
+    let layout = file_layout(bytes);
+    let root_records = chunk_records(bytes, layout.root_chunk_start, layout.root_chunk_end);
+
+    let continuation = root_records
+        .into_iter()
+        .find(|record| record.msg_type == CONTINUATION_MESSAGE)
+        .expect("large root attribute did not create a version 1 continuation");
+
+    let continuation_fields_len = layout
+        .offset_size
+        .checked_add(layout.length_size)
+        .expect("continuation field width overflow");
+
+    assert!(
+        usize::from(continuation.body_size) >= continuation_fields_len,
+        "continuation message at {:#x} is too short for its address and length",
+        continuation.offset
+    );
+
+    let original_address = read_uint(bytes, continuation.body_start, layout.offset_size);
+    let original_length = read_uint(
+        bytes,
+        continuation.body_start + layout.offset_size,
+        layout.length_size,
+    );
+
+    let original_start =
+        usize::try_from(original_address).expect("continuation address exceeds usize");
+    let original_length =
+        usize::try_from(original_length).expect("continuation length exceeds usize");
+    let original_end = original_start
+        .checked_add(original_length)
+        .expect("continuation end overflow");
+
+    assert!(
+        original_end <= bytes.len(),
+        "valid continuation {original_start:#x}..{original_end:#x} \
+         extends beyond EOF {:#x}",
+        bytes.len()
+    );
+
+    // Verifies that the original continuation consists entirely of complete
+    // version 1 records before introducing the malformed trailing byte.
+    let records = chunk_records(bytes, original_start, original_end);
+    assert!(
+        !records.is_empty(),
+        "generated continuation contains no object-header messages"
+    );
+
+    let original_chunk = bytes[original_start..original_end].to_vec();
+
+    // Places the replacement continuation at an aligned address. Any alignment
+    // padding is unreachable file space, not part of the continuation.
+    let alignment_padding = (8 - bytes.len() % 8) % 8;
+    bytes.resize(bytes.len() + alignment_padding, 0);
+
+    let replacement_start = bytes.len();
+    bytes.extend_from_slice(&original_chunk);
+    bytes.push(0);
+
+    let replacement_length = original_length
+        .checked_add(1)
+        .expect("replacement continuation length overflow");
+
+    assert_eq!(
+        &bytes[replacement_start..replacement_start + original_length],
+        original_chunk.as_slice(),
+        "replacement continuation differs from the valid source chunk"
+    );
+    assert_eq!(
+        bytes[replacement_start + original_length],
+        0,
+        "replacement continuation does not end with the expected trailing byte"
+    );
+
+    write_uint(
+        bytes,
+        continuation.body_start,
+        layout.offset_size,
+        replacement_start as u64,
+    );
+    write_uint(
+        bytes,
+        continuation.body_start + layout.offset_size,
+        layout.length_size,
+        replacement_length as u64,
+    );
+
+    let declared_eof = bytes.len() as u64;
+    write_uint(
+        bytes,
+        layout.eof_address_field,
+        layout.offset_size,
+        declared_eof,
+    );
+
+    assert_eq!(
+        read_uint(bytes, continuation.body_start, layout.offset_size),
+        replacement_start as u64,
+        "continuation address was not updated"
+    );
+    assert_eq!(
+        read_uint(
+            bytes,
+            continuation.body_start + layout.offset_size,
+            layout.length_size,
+        ),
+        replacement_length as u64,
+        "continuation length was not updated"
+    );
+
+    // The original records occupy exactly the original length. The replacement
+    // therefore contains one byte that cannot begin an eight-byte v1 prefix.
+    assert_eq!(
+        replacement_length - original_length,
+        1,
+        "malformed continuation must contain exactly one trailing byte"
+    );
 }
 
 /// Reads a little-endian `u16` at `offset`.
@@ -159,11 +346,14 @@ fn file_layout(bytes: &[u8]) -> FileLayout {
 
     // Superblock version 1 adds the indexed-storage K value and its reserved
     // field before the address fields.
-    let address_fields = match superblock_version {
+    let address_fields: usize = match superblock_version {
         0 => 24,
         1 => 32,
         _ => panic!("unreachable"),
     };
+    let eof_address_field = address_fields
+        .checked_add(2 * offset_size)
+        .expect("end-of-file address field offset overflow");
 
     let base_address = read_uint(bytes, address_fields, offset_size);
     assert_eq!(
@@ -212,6 +402,7 @@ fn file_layout(bytes: &[u8]) -> FileLayout {
     FileLayout {
         offset_size,
         length_size,
+        eof_address_field,
         root_chunk_start,
         root_chunk_end,
     }
@@ -549,5 +740,70 @@ fn a_v1_message_body_overrun_is_rejected_by_all_readers() {
         streaming_result.is_err(),
         "streaming hdf5-pure accepted a v1 Attribute message whose body overruns \
          its declared object-header chunk: {streaming_result:?}"
+    );
+}
+
+#[test]
+fn a_v1_continuation_with_a_trailing_partial_prefix_has_versioned_libhdf5_behavior() {
+    hdf5::silence_errors(true);
+
+    let dir = tempdir().unwrap();
+    let valid_path = dir.path().join("valid.h5");
+    let malformed_path = dir.path().join("malformed.h5");
+
+    write_earliest_file_with_continuation(&valid_path);
+
+    // Establishes that the generated continuation is valid for all readers
+    // before changing its declared extent.
+    assert_eq!(
+        read_with_c(&valid_path).unwrap(),
+        vec![42],
+        "libhdf5 cannot read its own valid continuation fixture"
+    );
+    assert_eq!(
+        read_with_pure_buffered(&valid_path).unwrap(),
+        vec![42],
+        "buffered hdf5-pure cannot read the valid continuation fixture"
+    );
+    assert_eq!(
+        read_with_pure_streaming(&valid_path).unwrap(),
+        vec![42],
+        "streaming hdf5-pure cannot read the valid continuation fixture"
+    );
+
+    let mut malformed = fs::read(&valid_path).unwrap();
+    add_trailing_byte_to_root_continuation(&mut malformed);
+    fs::write(&malformed_path, malformed).unwrap();
+
+    let version = hdf5::library_version();
+    let c_result = read_with_c(&malformed_path);
+
+    if version < (1, 14, 0) {
+        assert_eq!(
+            c_result.unwrap(),
+            vec![42],
+            "libhdf5 {version:?} rejected the legacy-accepted v1 continuation \
+             ending with a partial message prefix"
+        );
+    } else {
+        assert!(
+            c_result.is_err(),
+            "libhdf5 {version:?} accepted a v1 continuation ending with a partial \
+             message prefix: {c_result:?}"
+        );
+    }
+
+    // hdf5-pure currently follows the behavior of libhdf5 releases before 1.14:
+    // complete records are consumed and the remaining bytes shorter than a message
+    // prefix are ignored.
+    assert_eq!(
+        read_with_pure_buffered(&malformed_path).unwrap(),
+        vec![42],
+        "buffered hdf5-pure rejected the currently accepted trailing byte"
+    );
+    assert_eq!(
+        read_with_pure_streaming(&malformed_path).unwrap(),
+        vec![42],
+        "streaming hdf5-pure rejected the currently accepted trailing byte"
     );
 }
