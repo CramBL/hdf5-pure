@@ -942,4 +942,145 @@ mod tests {
         .unwrap();
         assert_eq!(buffered.messages.len(), 0);
     }
+
+    #[test]
+    fn a_filtered_version_1_parse_follows_unretained_continuations() {
+        let nested_data = [0xDE, 0xAD];
+        let nested_chunk = v1_message_records(&[(
+            MessageType::DATATYPE.to_u16(),
+            &nested_data[..],
+            MessageFlags::NONE,
+        )]);
+
+        let nested_offset = 512usize;
+        let mut nested_ptr = Vec::new();
+        nested_ptr.extend_from_slice(&(nested_offset as u64).to_le_bytes());
+        nested_ptr.extend_from_slice(&(nested_chunk.len() as u64).to_le_bytes());
+
+        let continuation_chunk = v1_message_records(&[(
+            MessageType::OBJECT_HEADER_CONTINUATION.to_u16(),
+            &nested_ptr[..],
+            MessageFlags::NONE,
+        )]);
+
+        let continuation_offset = 256usize;
+        let mut continuation_ptr = Vec::new();
+        continuation_ptr.extend_from_slice(&(continuation_offset as u64).to_le_bytes());
+        continuation_ptr.extend_from_slice(&(continuation_chunk.len() as u64).to_le_bytes());
+
+        let header = build_v1_header(
+            &[(
+                MessageType::OBJECT_HEADER_CONTINUATION.to_u16(),
+                &continuation_ptr[..],
+                MessageFlags::NONE,
+            )],
+            8,
+            8,
+        );
+
+        let mut file_data = vec![0u8; nested_offset + nested_chunk.len()];
+        file_data[..header.len()].copy_from_slice(&header);
+        file_data[continuation_offset..continuation_offset + continuation_chunk.len()]
+            .copy_from_slice(&continuation_chunk);
+        file_data[nested_offset..nested_offset + nested_chunk.len()].copy_from_slice(&nested_chunk);
+
+        let mut keep_datatype = |msg_type: MessageType, _: &[u8]| msg_type == MessageType::DATATYPE;
+        let buffered = ObjectHeader::parse_filtered(
+            &file_data,
+            AccessMode::ReadOnly,
+            0,
+            8,
+            8,
+            BaseAddress::ZERO,
+            MessageFilter::Only(&mut keep_datatype),
+        )
+        .unwrap();
+
+        assert_eq!(buffered.messages.len(), 1);
+        assert_eq!(buffered.messages[0].msg_type, MessageType::DATATYPE);
+        assert_eq!(buffered.messages[0].data, nested_data);
+
+        let source = BytesSource::new(&file_data);
+        let mut keep_datatype = |msg_type: MessageType, _: &[u8]| msg_type == MessageType::DATATYPE;
+        let streamed = ObjectHeader::parse_from_source_filtered(
+            &source,
+            AccessMode::ReadOnly,
+            0,
+            8,
+            8,
+            BaseAddress::ZERO,
+            MessageFilter::Only(&mut keep_datatype),
+        )
+        .unwrap();
+
+        assert_eq!(streamed.messages.len(), 1);
+        assert_eq!(streamed.messages[0].msg_type, MessageType::DATATYPE);
+        assert_eq!(streamed.messages[0].data, nested_data);
+    }
+
+    #[test]
+    fn a_filtered_version_1_parse_checks_must_understand_before_filtering() {
+        const UNKNOWN_TYPE: u16 = 0x00FF;
+
+        let data = build_v1_header(
+            &[(
+                UNKNOWN_TYPE,
+                &[0xAA][..],
+                MessageFlags::FAIL_IF_UNKNOWN_ALWAYS,
+            )],
+            8,
+            8,
+        );
+
+        let mut buffered_filter_called = false;
+        let err = {
+            let mut drop_all = |_: MessageType, _: &[u8]| {
+                buffered_filter_called = true;
+                false
+            };
+
+            ObjectHeader::parse_filtered(
+                &data,
+                AccessMode::ReadOnly,
+                0,
+                8,
+                8,
+                BaseAddress::ZERO,
+                MessageFilter::Only(&mut drop_all),
+            )
+        }
+        .unwrap_err();
+
+        assert_eq!(err, FormatError::UnsupportedMessage(UNKNOWN_TYPE));
+        assert!(
+            !buffered_filter_called,
+            "must-understand validation must run before retained-message filtering"
+        );
+
+        let source = BytesSource::new(&data);
+        let mut streamed_filter_called = false;
+        let err = {
+            let mut drop_all = |_: MessageType, _: &[u8]| {
+                streamed_filter_called = true;
+                false
+            };
+
+            ObjectHeader::parse_from_source_filtered(
+                &source,
+                AccessMode::ReadOnly,
+                0,
+                8,
+                8,
+                BaseAddress::ZERO,
+                MessageFilter::Only(&mut drop_all),
+            )
+        }
+        .unwrap_err();
+
+        assert_eq!(err, FormatError::UnsupportedMessage(UNKNOWN_TYPE));
+        assert!(
+            !streamed_filter_called,
+            "must-understand validation must run before retained-message filtering"
+        );
+    }
 }

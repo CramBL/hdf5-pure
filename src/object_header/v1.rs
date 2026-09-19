@@ -4,6 +4,7 @@ use alloc::vec::Vec;
 use byteorder::{ByteOrder, LittleEndian};
 
 use super::{HeaderMessage, MessageFilter, ObjectHeader, ParseContext};
+use crate::access_mode::AccessMode;
 use crate::address::StoredAddress;
 use crate::bytes;
 use crate::convert::Narrow;
@@ -11,6 +12,15 @@ use crate::error::FormatError;
 use crate::message_flags::MessageFlags;
 use crate::message_type::MessageType;
 use crate::source::Source;
+
+/// Defines the fixed prefix width of a version 1 object header message.
+///
+/// The prefix contains a two-byte type, two-byte data size, one-byte flags
+/// field, and three reserved bytes. The layout is defined in "Version 1 Data
+/// Object Header Prefix" of the [format specification, version 4.0][spec].
+///
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_prefix_one
+const MESSAGE_PREFIX_LEN: usize = 8;
 
 const MAX_V1_CONTINUATION_DEPTH: u16 = 32;
 
@@ -64,49 +74,26 @@ impl ObjectHeader {
                 })?;
 
         for _ in 0..num_messages {
-            if pos + 8 > msg_end {
+            let Some((record, record_len)) =
+                parse_message_record(&data[pos..msg_end], context.access_mode)?
+            else {
                 break;
-            }
-            let msg_type_raw = LittleEndian::read_u16(&data[pos..pos + 2]);
-            let msg_data_size = LittleEndian::read_u16(&data[pos + 2..pos + 4]) as usize;
-            let msg_flags = MessageFlags::new(data[pos + 4]);
-            // reserved(3) at pos+5..pos+8
-            pos += 8;
+            };
 
-            // A message must lie entirely within chunk 0 (`header_data_size`).
-            // All parser paths enforce the chunk boundary so malformed headers
-            // produce consistent results.
-            if pos + msg_data_size > msg_end {
-                break;
-            }
-
-            bytes::ensure_len(data, pos, msg_data_size)?;
-            let msg_type = MessageType::from_u16(msg_type_raw);
-
-            if let Some(id) = msg_type.unknown_id()
-                && msg_flags.must_be_understood(context.access_mode)
-            {
-                return Err(FormatError::UnsupportedMessage(id));
-            }
-
-            let msg_body = &data[pos..pos + msg_data_size];
-            if msg_type != MessageType::NIL && filter.keeps(msg_type, msg_body) {
+            if record.msg_type != MessageType::NIL && filter.keeps(record.msg_type, record.body) {
                 messages.push(HeaderMessage {
-                    msg_type,
-                    size: msg_data_size,
-                    flags: msg_flags,
+                    msg_type: record.msg_type,
+                    size: record.body.len(),
+                    flags: record.flags,
                     creation_order: None,
-                    data: msg_body.to_vec(),
+                    data: record.body.to_vec(),
                 });
             }
 
-            pos += msg_data_size;
+            pos += record_len;
 
-            // Follow continuations. The pointer is read directly from the message
-            // body because a filtered parse may not have kept the message.
-            // Continuations are followed independently of the filter.
-            if msg_type == MessageType::OBJECT_HEADER_CONTINUATION
-                && let Some(continuation) = parse_continuation(msg_body, context)?
+            if record.msg_type == MessageType::OBJECT_HEADER_CONTINUATION
+                && let Some(continuation) = parse_continuation(record.body, context)?
             {
                 let offset = context
                     .base_address
@@ -154,41 +141,27 @@ impl ObjectHeader {
         let mut pos = offset;
         let end = offset.saturating_add(length);
 
-        while pos + 8 <= end {
-            let msg_type_raw = LittleEndian::read_u16(&data[pos..pos + 2]);
-            let msg_data_size = LittleEndian::read_u16(&data[pos + 2..pos + 4]) as usize;
-            let msg_flags = MessageFlags::new(data[pos + 4]);
-            pos += 8;
-
-            if pos + msg_data_size > end {
+        while pos < end {
+            let Some((record, record_len)) =
+                parse_message_record(&data[pos..end], context.access_mode)?
+            else {
                 break;
-            }
+            };
 
-            let msg_type = MessageType::from_u16(msg_type_raw);
-
-            if let Some(id) = msg_type.unknown_id()
-                && msg_flags.must_be_understood(context.access_mode)
-            {
-                return Err(FormatError::UnsupportedMessage(id));
-            }
-
-            let msg_body = &data[pos..pos + msg_data_size];
-            if msg_type != MessageType::NIL && filter.keeps(msg_type, msg_body) {
+            if record.msg_type != MessageType::NIL && filter.keeps(record.msg_type, record.body) {
                 messages.push(HeaderMessage {
-                    msg_type,
-                    size: msg_data_size,
-                    flags: msg_flags,
+                    msg_type: record.msg_type,
+                    size: record.body.len(),
+                    flags: record.flags,
                     creation_order: None,
-                    data: msg_body.to_vec(),
+                    data: record.body.to_vec(),
                 });
             }
 
-            pos += msg_data_size;
+            pos += record_len;
 
-            // Recursive continuations, read from the body where it lies for the
-            // reason [`parse_v1`] gives.
-            if msg_type == MessageType::OBJECT_HEADER_CONTINUATION
-                && let Some(continuation) = parse_continuation(msg_body, context)?
+            if record.msg_type == MessageType::OBJECT_HEADER_CONTINUATION
+                && let Some(continuation) = parse_continuation(record.body, context)?
             {
                 let offset = context
                     .base_address
@@ -279,43 +252,29 @@ impl ObjectHeader {
         let mut pos = 0usize;
         let mut count = 0u16;
 
-        while count < max_messages && pos + 8 <= end {
-            let msg_type_raw = LittleEndian::read_u16(&region[pos..pos + 2]);
-            let msg_data_size = LittleEndian::read_u16(&region[pos + 2..pos + 4]) as usize;
-            let msg_flags = MessageFlags::new(region[pos + 4]);
-            // reserved(3) at pos+5..pos+8
-            pos += 8;
-
-            if pos + msg_data_size > end {
+        while count < max_messages && pos < end {
+            let Some((record, record_len)) =
+                parse_message_record(&region[pos..end], context.access_mode)?
+            else {
                 break;
-            }
+            };
+
             count += 1;
+            pos += record_len;
 
-            let msg_type = MessageType::from_u16(msg_type_raw);
-            if let Some(id) = msg_type.unknown_id()
-                && msg_flags.must_be_understood(context.access_mode)
-            {
-                return Err(FormatError::UnsupportedMessage(id));
-            }
-
-            let msg_data = &region[pos..pos + msg_data_size];
-            pos += msg_data_size;
-
-            // Decode the continuation pointer (if any) from the body where it
-            // lies: it is followed whatever the filter kept, as in [`parse_v1`].
-            let continuation = if msg_type == MessageType::OBJECT_HEADER_CONTINUATION {
-                parse_continuation(msg_data, context)?
+            let continuation = if record.msg_type == MessageType::OBJECT_HEADER_CONTINUATION {
+                parse_continuation(record.body, context)?
             } else {
                 None
             };
 
-            if msg_type != MessageType::NIL && filter.keeps(msg_type, msg_data) {
+            if record.msg_type != MessageType::NIL && filter.keeps(record.msg_type, record.body) {
                 messages.push(HeaderMessage {
-                    msg_type,
-                    size: msg_data_size,
-                    flags: msg_flags,
+                    msg_type: record.msg_type,
+                    size: record.body.len(),
+                    flags: record.flags,
                     creation_order: None,
-                    data: msg_data.to_vec(),
+                    data: record.body.to_vec(),
                 });
             }
 
@@ -337,6 +296,62 @@ impl ObjectHeader {
 
         Ok(())
     }
+}
+
+/// Represents one decoded message record from a version 1 object header.
+///
+/// The body borrows from the current header chunk. The type, size, flags,
+/// reserved bytes, and data layout are defined in "Version 1 Data Object
+/// Header Prefix" of the [format specification, version 4.0][spec].
+///
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_prefix_one
+#[derive(Clone, Copy)]
+struct MessageRecord<'a> {
+    msg_type: MessageType,
+    flags: MessageFlags,
+    body: &'a [u8],
+}
+
+/// Decodes one complete version 1 message record from a bounded chunk slice.
+///
+/// An incomplete prefix or body produces `None`. Unknown message types whose
+/// flags require understanding under `access_mode` produce
+/// [`FormatError::UnsupportedMessage`]. The record layout is defined in
+/// "Version 1 Data Object Header Prefix" of the
+/// [format specification, version 4.0][spec].
+///
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_prefix_one
+fn parse_message_record(
+    data: &[u8],
+    access_mode: AccessMode,
+) -> Result<Option<(MessageRecord<'_>, usize)>, FormatError> {
+    if data.len() < MESSAGE_PREFIX_LEN {
+        return Ok(None);
+    }
+
+    let msg_type = MessageType::from_u16(LittleEndian::read_u16(&data[..2]));
+    let body_len = usize::from(LittleEndian::read_u16(&data[2..4]));
+    let flags = MessageFlags::new(data[4]);
+    let record_len = MESSAGE_PREFIX_LEN + body_len;
+
+    if data.len() < record_len {
+        return Ok(None);
+    }
+
+    if let Some(id) = msg_type.unknown_id()
+        && flags.must_be_understood(access_mode)
+    {
+        return Err(FormatError::UnsupportedMessage(id));
+    }
+
+    Ok(Some((
+        MessageRecord {
+            msg_type,
+            flags,
+            body: &data[MESSAGE_PREFIX_LEN..record_len],
+        },
+        record_len,
+    )))
 }
 
 fn parse_continuation(
