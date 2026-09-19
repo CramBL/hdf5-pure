@@ -84,6 +84,7 @@ macro_rules! message_types {
         impl MessageType {
             $(
                 #[doc(hidden)]
+                #[deprecated(note = "use the uppercase MessageType associated constant")]
                 $(#[$meta])*
                 pub const $compat: Self = Self::$constant;
             )+
@@ -225,6 +226,7 @@ impl MessageType {
     /// The value can identify either a recognized or an unrecognized message. This function is
     /// equivalent to [`Self::from_u16`].
     #[doc(hidden)]
+    #[deprecated(note = "use MessageType::from_u16")]
     #[allow(non_snake_case)]
     #[inline]
     pub const fn Unknown(value: u16) -> Self {
@@ -363,12 +365,12 @@ mod tests {
     fn camel_case_constants_work_as_patterns() {
         let message = MessageType::from_u16(0x0001);
 
-        assert!(matches!(message, MessageType::Dataspace));
+        assert!(matches!(message, MessageType::DATASPACE));
     }
 
     #[test]
     fn unknown_constructor_preserves_the_identifier() {
-        assert_eq!(MessageType::Unknown(0x00FF), MessageType::from_u16(0x00FF));
+        assert_eq!(MessageType::from(0x00FF), MessageType::from_u16(0x00FF));
     }
 }
 

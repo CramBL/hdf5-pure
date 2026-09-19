@@ -726,13 +726,13 @@ mod tests {
     #[test]
     fn an_index_covers_exactly_the_types_its_flags_name() {
         let index = sample_index();
-        assert!(index.covers(MessageType::Dataspace));
-        assert!(index.covers(MessageType::Datatype));
-        assert!(index.covers(MessageType::Attribute));
-        assert!(!index.covers(MessageType::FillValue));
-        assert!(!index.covers(MessageType::FilterPipeline));
+        assert!(index.covers(MessageType::DATASPACE));
+        assert!(index.covers(MessageType::DATATYPE));
+        assert!(index.covers(MessageType::ATTRIBUTE));
+        assert!(!index.covers(MessageType::FILL_VALUE));
+        assert!(!index.covers(MessageType::FILTER_PIPELINE));
         // Past the flag word entirely, so not representable and not covered.
-        assert!(!index.covers(MessageType::AttributeInfo));
+        assert!(!index.covers(MessageType::ATTRIBUTE_INFO));
     }
 
     #[test]
@@ -748,16 +748,16 @@ mod tests {
 
         assert_eq!(
             table
-                .index_for(MessageType::Attribute)
+                .index_for(MessageType::ATTRIBUTE)
                 .unwrap()
                 .heap_address,
             Some(StoredAddress::new(0x9999))
         );
         assert_eq!(
-            table.index_for(MessageType::Datatype).unwrap().heap_address,
+            table.index_for(MessageType::DATATYPE).unwrap().heap_address,
             Some(StoredAddress::new(0x5678))
         );
-        assert!(table.index_for(MessageType::FillValue).is_none());
+        assert!(table.index_for(MessageType::FILL_VALUE).is_none());
     }
 
     /// Both record shapes are stored at the same stride, so a list walk that
@@ -940,8 +940,8 @@ mod tests {
             indexes: vec![sample_index()],
         };
         assert_eq!(
-            index_for_read(&table, MessageType::FillValue).unwrap_err(),
-            FormatError::SohmIndexMissing(MessageType::FillValue.to_u16())
+            index_for_read(&table, MessageType::FILL_VALUE).unwrap_err(),
+            FormatError::SohmIndexMissing(MessageType::FILL_VALUE.to_u16())
         );
     }
 
@@ -956,8 +956,8 @@ mod tests {
             indexes: vec![index],
         };
         assert_eq!(
-            index_for_read(&table, MessageType::Datatype).unwrap_err(),
-            FormatError::SohmIndexMissing(MessageType::Datatype.to_u16())
+            index_for_read(&table, MessageType::DATATYPE).unwrap_err(),
+            FormatError::SohmIndexMissing(MessageType::DATATYPE.to_u16())
         );
     }
 }

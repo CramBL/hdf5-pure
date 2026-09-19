@@ -3258,7 +3258,7 @@ impl WriteEngine {
         let msg = oh
             .messages
             .iter()
-            .find(|m| m.msg_type == MessageType::FileSpaceInfo)?;
+            .find(|m| m.msg_type == MessageType::FILE_SPACE_INFO)?;
         FileSpaceInfo::parse(&msg.data, os, ls).ok()
     }
 
@@ -3477,10 +3477,10 @@ impl WriteEngine {
         let mut p = 0;
         while let Ok(Some((msg_type, body, body_end))) = region.next_message(p) {
             match msg_type {
-                MessageType::Datatype => datatype = Some((body, body_end)),
-                MessageType::Dataspace => dataspace = Some((body, body_end)),
-                MessageType::DataLayout => layout = Some((body, body_end)),
-                MessageType::FilterPipeline => filter = Some((body, body_end)),
+                MessageType::DATATYPE => datatype = Some((body, body_end)),
+                MessageType::DATASPACE => dataspace = Some((body, body_end)),
+                MessageType::DATA_LAYOUT => layout = Some((body, body_end)),
+                MessageType::FILTER_PIPELINE => filter = Some((body, body_end)),
                 _ => {}
             }
             p = body_end;
@@ -3847,7 +3847,7 @@ impl WriteEngine {
         let Some(msg) = header
             .messages
             .iter()
-            .find(|m| m.msg_type == MessageType::SharedMessageTable)
+            .find(|m| m.msg_type == MessageType::SHARED_MESSAGE_TABLE)
         else {
             return Ok(None);
         };
@@ -8039,7 +8039,7 @@ impl WriteEngine {
             let layout = chunk.layout();
             let (region, mut p) = chunk.message_region();
             while let Some((msg_type, _body, body_end)) = layout.next_message(region, p)? {
-                if msg_type != MessageType::ObjectHeaderContinuation {
+                if msg_type != MessageType::OBJECT_HEADER_CONTINUATION {
                     out.push_bytes(&region[p..body_end]);
                 }
                 p = body_end;
@@ -8070,7 +8070,7 @@ impl WriteEngine {
         if oh
             .messages
             .iter()
-            .any(|m| m.msg_type == MessageType::DataLayout)
+            .any(|m| m.msg_type == MessageType::DATA_LAYOUT)
         {
             return Err(Error::EditUnsupported(
                 "a target path names a dataset, not a group",
@@ -8088,7 +8088,7 @@ impl WriteEngine {
             link_names.push(e.name.clone());
         }
         for m in &oh.messages {
-            if m.msg_type == MessageType::Attribute {
+            if m.msg_type == MessageType::ATTRIBUTE {
                 if m.data.len() > OBJECT_HEADER_MESSAGE_MAX {
                     return Err(Error::EditUnsupported(
                         "a v0/v1 group attribute is too large to convert in place",
@@ -8113,7 +8113,7 @@ impl WriteEngine {
                     // write — it moves an object to a version 2 header before
                     // sharing anything on it.
                     region.push_shared(
-                        MessageType::Attribute,
+                        MessageType::ATTRIBUTE,
                         &modernize_shared_reference(&m.data, os, ls)?,
                     );
                     continue;
@@ -8122,7 +8122,7 @@ impl WriteEngine {
                 // v2 message record. The rebuilt header does not track creation
                 // order — a version 1 header cannot have carried any — so the
                 // attribute needs no creation index.
-                region.push(MessageType::Attribute, &m.data);
+                region.push(MessageType::ATTRIBUTE, &m.data);
             }
         }
         Ok(GroupInfo { region, link_names })
@@ -8147,7 +8147,7 @@ impl WriteEngine {
         let mut link_names = Vec::new();
         while let Some((msg_type, body, body_end)) = region.next_message(p)? {
             match msg_type {
-                MessageType::LinkInfo => {
+                MessageType::LINK_INFO => {
                     has_link_info = true;
                     // LinkInfo: version(1) flags(1) [max_creation_index(8) if
                     // flags&0x01] fractal_heap_addr(8) … — dense storage has a
@@ -8167,12 +8167,12 @@ impl WriteEngine {
                         }
                     }
                 }
-                MessageType::Link => {
+                MessageType::LINK => {
                     if let Ok(link) = LinkMessage::parse(&region[body..body_end], OFFSET_SIZE) {
                         link_names.push(link.name);
                     }
                 }
-                MessageType::DataLayout => {
+                MessageType::DATA_LAYOUT => {
                     return Err(Error::EditUnsupported(
                         "a target path names a dataset, not a group",
                     ));
@@ -8306,22 +8306,22 @@ impl WriteEngine {
         let mut p = 0;
         while let Some((msg_type, body, body_end)) = region.next_message(p)? {
             match msg_type {
-                MessageType::Datatype => datatype = Some((body, body_end)),
-                MessageType::Dataspace => dataspace = Some((body, body_end)),
-                MessageType::DataLayout => layout = Some((body, body_end)),
-                MessageType::FilterPipeline => filter = Some((body, body_end)),
+                MessageType::DATATYPE => datatype = Some((body, body_end)),
+                MessageType::DATASPACE => dataspace = Some((body, body_end)),
+                MessageType::DATA_LAYOUT => layout = Some((body, body_end)),
+                MessageType::FILTER_PIPELINE => filter = Some((body, body_end)),
                 // Versioned beats legacy, and within a type the first wins —
                 // the same rule `Dataset::fill_bytes` and `Located::from_walk`
                 // apply, so all three agree on a header carrying more than one.
-                MessageType::FillValue
-                    if !matches!(fill_msg, Some((MessageType::FillValue, ..))) =>
+                MessageType::FILL_VALUE
+                    if !matches!(fill_msg, Some((MessageType::FILL_VALUE, ..))) =>
                 {
                     fill_msg = Some((msg_type, body, body_end));
                 }
-                MessageType::FillValueOld if fill_msg.is_none() => {
+                MessageType::FILL_VALUE_OLD if fill_msg.is_none() => {
                     fill_msg = Some((msg_type, body, body_end));
                 }
-                MessageType::Link | MessageType::LinkInfo | MessageType::SymbolTable => {
+                MessageType::LINK | MessageType::LINK_INFO | MessageType::SYMBOL_TABLE => {
                     has_link = true;
                 }
                 _ => {}
@@ -8620,22 +8620,22 @@ impl WriteEngine {
         let mut p = 0;
         while let Some((msg_type, body, body_end)) = region.next_message(p)? {
             match msg_type {
-                MessageType::Datatype => datatype = Some((body, body_end)),
-                MessageType::Dataspace => dataspace = Some((body, body_end)),
-                MessageType::DataLayout => layout = Some((body, body_end)),
-                MessageType::FilterPipeline => filter = Some((body, body_end)),
+                MessageType::DATATYPE => datatype = Some((body, body_end)),
+                MessageType::DATASPACE => dataspace = Some((body, body_end)),
+                MessageType::DATA_LAYOUT => layout = Some((body, body_end)),
+                MessageType::FILTER_PIPELINE => filter = Some((body, body_end)),
                 // Versioned beats legacy, and within a type the first wins —
                 // the same rule `Dataset::fill_bytes` and `Located::from_walk`
                 // apply, so all three agree on a header carrying more than one.
-                MessageType::FillValue
-                    if !matches!(fill_msg, Some((MessageType::FillValue, ..))) =>
+                MessageType::FILL_VALUE
+                    if !matches!(fill_msg, Some((MessageType::FILL_VALUE, ..))) =>
                 {
                     fill_msg = Some((msg_type, body, body_end));
                 }
-                MessageType::FillValueOld if fill_msg.is_none() => {
+                MessageType::FILL_VALUE_OLD if fill_msg.is_none() => {
                     fill_msg = Some((msg_type, body, body_end));
                 }
-                MessageType::Link | MessageType::LinkInfo | MessageType::SymbolTable => {
+                MessageType::LINK | MessageType::LINK_INFO | MessageType::SYMBOL_TABLE => {
                     has_link = true;
                 }
                 _ => {}
@@ -8947,7 +8947,7 @@ impl WriteEngine {
         let mut dense = false;
         let mut p = 0;
         while let Some((msg_type, body, body_end)) = region.next_message(p)? {
-            if msg_type == MessageType::AttributeInfo {
+            if msg_type == MessageType::ATTRIBUTE_INFO {
                 // An Attribute Info message does not by itself mean dense
                 // storage: the reference C library and h5py emit one (with an
                 // *undefined* fractal-heap address) even for compact, inline
@@ -8998,7 +8998,7 @@ impl WriteEngine {
         while let Some((msg_type, body, body_end)) = region.next_message(p)? {
             let mut keep = true;
             match msg_type {
-                MessageType::AttributeInfo => {
+                MessageType::ATTRIBUTE_INFO => {
                     // Already parsed in the first pass; drop the dense Attribute
                     // Info message so the rebuilt header references the fresh heap
                     // (spliced in on write) rather than the source one. A compact
@@ -9007,7 +9007,7 @@ impl WriteEngine {
                         keep = false;
                     }
                 }
-                MessageType::Attribute => {
+                MessageType::ATTRIBUTE => {
                     // A dense object should carry no inline Attribute messages,
                     // but drop any defensively so the rebuilt header's only
                     // attribute storage is the fresh heap.
@@ -9015,7 +9015,7 @@ impl WriteEngine {
                         keep = false;
                     }
                 }
-                MessageType::LinkInfo => {
+                MessageType::LINK_INFO => {
                     has_link_info = true;
                     let mut q = body + 2;
                     if body_end - body >= 2 && region[body + 1] & 0x01 != 0 {
@@ -9030,7 +9030,7 @@ impl WriteEngine {
                         }
                     }
                 }
-                MessageType::Link => {
+                MessageType::LINK => {
                     keep = false;
                     match LinkMessage::parse(&region[body..body_end], OFFSET_SIZE) {
                         Ok(LinkMessage {
@@ -9049,7 +9049,7 @@ impl WriteEngine {
                         }
                     }
                 }
-                MessageType::DataLayout => {
+                MessageType::DATA_LAYOUT => {
                     // Record the layout body offset within the *kept* region so a
                     // contiguous dataset's data-address field can be repointed
                     // even after earlier messages were dropped.
@@ -9539,7 +9539,7 @@ impl WriteEngine {
             return Ok(());
         }
         let attr_info_message = self.place_dense_attrs(&set.attrs, set.creation)?;
-        region.push(MessageType::AttributeInfo, &attr_info_message);
+        region.push(MessageType::ATTRIBUTE_INFO, &attr_info_message);
         Ok(())
     }
 
@@ -10553,7 +10553,7 @@ impl WriteEngine {
             let is_group = header.messages.iter().any(|m| {
                 matches!(
                     m.msg_type,
-                    MessageType::SymbolTable | MessageType::Link | MessageType::LinkInfo
+                    MessageType::SYMBOL_TABLE | MessageType::LINK | MessageType::LINK_INFO
                 )
             });
             if !is_group {
@@ -10730,8 +10730,8 @@ impl WriteEngine {
             match region.next_message(p) {
                 Ok(Some((msg_type, body, body_end))) => {
                     match msg_type {
-                        MessageType::DataLayout => layout_msg = Some((body, body_end)),
-                        MessageType::Dataspace => dataspace_msg = Some((body, body_end)),
+                        MessageType::DATA_LAYOUT => layout_msg = Some((body, body_end)),
+                        MessageType::DATASPACE => dataspace_msg = Some((body, body_end)),
                         _ => {}
                     }
                     p = body_end;
@@ -10904,7 +10904,7 @@ impl WriteEngine {
         loop {
             match region.next_message(p) {
                 Ok(Some((msg_type, body, body_end))) => {
-                    if msg_type == MessageType::DataLayout {
+                    if msg_type == MessageType::DATA_LAYOUT {
                         layout_msg = Some((body, body_end));
                     }
                     p = body_end;
@@ -12134,11 +12134,11 @@ fn replace_layout_message(region: &OhRegion, new_layout_body: &[u8]) -> Result<O
     let mut p = 0;
     let mut replaced = false;
     while let Some((msg_type, _body, body_end)) = region.next_message(p)? {
-        if msg_type == MessageType::DataLayout && !replaced {
+        if msg_type == MessageType::DATA_LAYOUT && !replaced {
             out.extend_from_slice(
                 &region
                     .layout()
-                    .record(MessageType::DataLayout, new_layout_body),
+                    .record(MessageType::DATA_LAYOUT, new_layout_body),
             );
             replaced = true;
         } else {
@@ -12169,11 +12169,11 @@ fn replace_dataspace_message(
     let mut p = 0;
     let mut replaced = false;
     while let Some((msg_type, _body, body_end)) = region.next_message(p)? {
-        if msg_type == MessageType::Dataspace && !replaced {
+        if msg_type == MessageType::DATASPACE && !replaced {
             out.extend_from_slice(
                 &region
                     .layout()
-                    .record(MessageType::Dataspace, new_dataspace_body),
+                    .record(MessageType::DATASPACE, new_dataspace_body),
             );
             replaced = true;
         } else {
@@ -12243,10 +12243,10 @@ fn parse_chunked_header(region: &OhRegion) -> Result<ChunkedHeaderParts, Error> 
     let mut p = 0;
     while let Some((msg_type, body, body_end)) = region.next_message(p)? {
         match msg_type {
-            MessageType::Datatype => datatype = Some((body, body_end)),
-            MessageType::Dataspace => dataspace = Some((body, body_end)),
-            MessageType::DataLayout => layout = Some((body, body_end)),
-            MessageType::FilterPipeline => pipeline = Some((body, body_end)),
+            MessageType::DATATYPE => datatype = Some((body, body_end)),
+            MessageType::DATASPACE => dataspace = Some((body, body_end)),
+            MessageType::DATA_LAYOUT => layout = Some((body, body_end)),
+            MessageType::FILTER_PIPELINE => pipeline = Some((body, body_end)),
             _ => {}
         }
         p = body_end;
@@ -12620,8 +12620,8 @@ fn fresh_group_region() -> OhRegion {
     li.extend_from_slice(&u64::MAX.to_le_bytes()); // fractal heap addr = UNDEF
     li.extend_from_slice(&u64::MAX.to_le_bytes()); // btree name index addr = UNDEF
     let mut region = OhRegion::empty(OhHeaderProps::PLAIN);
-    region.push(MessageType::LinkInfo, &li);
-    region.push(MessageType::GroupInfo, &GROUP_INFO_BODY);
+    region.push(MessageType::LINK_INFO, &li);
+    region.push(MessageType::GROUP_INFO, &GROUP_INFO_BODY);
     region
 }
 
@@ -12637,12 +12637,12 @@ fn fresh_group_region() -> OhRegion {
 fn ensure_group_info(region: &mut OhRegion) -> Result<(), Error> {
     let mut p = 0;
     while let Some((msg_type, _body, body_end)) = region.next_message(p)? {
-        if msg_type == MessageType::GroupInfo {
+        if msg_type == MessageType::GROUP_INFO {
             return Ok(());
         }
         p = body_end;
     }
-    region.push(MessageType::GroupInfo, &GROUP_INFO_BODY);
+    region.push(MessageType::GROUP_INFO, &GROUP_INFO_BODY);
     Ok(())
 }
 
@@ -12667,15 +12667,15 @@ fn ensure_attribute_info(region: &mut OhRegion) -> Result<(), Error> {
     let mut p = 0;
     while let Some((msg_type, _body, body_end)) = region.next_message(p)? {
         match msg_type {
-            MessageType::AttributeInfo => return Ok(()),
-            MessageType::Attribute => has_attrs = true,
+            MessageType::ATTRIBUTE_INFO => return Ok(()),
+            MessageType::ATTRIBUTE => has_attrs = true,
             _ => {}
         }
         p = body_end;
     }
     if has_attrs {
         let body = compact_attribute_info_body(region)?;
-        region.push(MessageType::AttributeInfo, &body);
+        region.push(MessageType::ATTRIBUTE_INFO, &body);
     }
     Ok(())
 }
@@ -12700,7 +12700,7 @@ fn encode_link_message(
     let mut link = make_link(name, addr);
     link.creation_order = creation_order;
     let body = link.serialize(OFFSET_SIZE);
-    layout.record(MessageType::Link, &body)
+    layout.record(MessageType::LINK, &body)
 }
 
 /// Patch an existing hard Link message in a chunk-0 message `region`, retargeting
@@ -12714,7 +12714,7 @@ fn patch_link_target(
 ) -> Result<(), Error> {
     let mut p = 0;
     while let Some((msg_type, body, body_end)) = region.next_message(p)? {
-        if msg_type == MessageType::Link {
+        if msg_type == MessageType::LINK {
             if let Ok(link) = LinkMessage::parse(&region[body..body_end], OFFSET_SIZE) {
                 if link.name == name {
                     return match link.link_target {
@@ -12765,7 +12765,7 @@ fn rebuild_compact_layout_region(region: &OhRegion, raw: &[u8]) -> Result<OhRegi
     let mut p = 0;
     let mut replaced = false;
     while let Some((msg_type, body, body_end)) = region.next_message(p)? {
-        if msg_type == MessageType::DataLayout {
+        if msg_type == MessageType::DATA_LAYOUT {
             if body_end - body < 2 || region[body + 1] != 0 {
                 return Err(Error::EditUnsupported(
                     "compact-layout overwrite found a non-compact data layout",
@@ -12900,7 +12900,7 @@ fn find_link_info(
 ) -> Result<Option<(usize, core::ops::Range<usize>, LinkInfoMessage)>, Error> {
     let mut p = 0;
     while let Some((msg_type, body, body_end)) = region.next_message(p)? {
-        if msg_type == MessageType::LinkInfo
+        if msg_type == MessageType::LINK_INFO
             && let Ok(info) = LinkInfoMessage::parse(&region[body..body_end], OFFSET_SIZE)
         {
             return Ok(Some((p, body..body_end, info)));
@@ -12929,7 +12929,7 @@ fn max_compact_links(region: &OhRegion) -> Result<u16, Error> {
     const DEFAULT_MAX_COMPACT: u16 = 8;
     let mut p = 0;
     while let Some((msg_type, body, body_end)) = region.next_message(p)? {
-        if msg_type == MessageType::GroupInfo {
+        if msg_type == MessageType::GROUP_INFO {
             let stores_phase_change = body_end - body >= 2 && region[body + 1] & 0x01 != 0;
             if stores_phase_change && body + 4 <= body_end {
                 return Ok(u16::from_le_bytes([region[body + 2], region[body + 3]]));
@@ -12989,7 +12989,7 @@ fn remove_link_from_region(region: &OhRegion, name: &str) -> Result<OhRegion, Er
     let mut removed = false;
     while let Some((msg_type, body, body_end)) = region.next_message(p)? {
         let mut skip = false;
-        if msg_type == MessageType::Link {
+        if msg_type == MessageType::LINK {
             if let Ok(link) = LinkMessage::parse(&region[body..body_end], OFFSET_SIZE) {
                 if link.name == name {
                     skip = true;
@@ -13386,7 +13386,7 @@ struct DenseAttrSlot {
 fn region_uses_dense_attrs(region: &OhRegion) -> Result<bool, Error> {
     let mut p = 0;
     while let Some((msg_type, body, body_end)) = region.next_message(p)? {
-        if msg_type == MessageType::AttributeInfo
+        if msg_type == MessageType::ATTRIBUTE_INFO
             && attribute_info_is_dense(&region[body..body_end])
         {
             return Ok(true);
@@ -13403,7 +13403,7 @@ fn region_uses_dense_attrs(region: &OhRegion) -> Result<bool, Error> {
 fn region_has_shared_attr(region: &OhRegion) -> Result<bool, Error> {
     let mut p = 0;
     while let Some((msg_type, _body, body_end)) = region.next_message(p)? {
-        if msg_type == MessageType::Attribute && region[p + 3] != 0 {
+        if msg_type == MessageType::ATTRIBUTE && region[p + 3] != 0 {
             return Ok(true);
         }
         p = body_end;
@@ -13420,7 +13420,7 @@ fn strip_attr_messages(region: &OhRegion) -> Result<OhRegion, Error> {
     while let Some((msg_type, _body, body_end)) = region.next_message(p)? {
         if !matches!(
             msg_type,
-            MessageType::Attribute | MessageType::AttributeInfo
+            MessageType::ATTRIBUTE | MessageType::ATTRIBUTE_INFO
         ) {
             out.extend_from_slice(&region[p..body_end]);
         }
@@ -13566,7 +13566,7 @@ fn attr_creation_index(region: &OhRegion, name: &str) -> Result<Option<u16>, Err
     }
     let mut p = 0;
     while let Some((msg_type, body, body_end)) = region.next_message(p)? {
-        if msg_type == MessageType::Attribute
+        if msg_type == MessageType::ATTRIBUTE
             && parse_compact_attr_name(region, p, body, body_end)? == name
         {
             return Ok(region.creation_index(p));
@@ -13581,7 +13581,7 @@ fn highest_attr_creation_index(region: &OhRegion) -> Result<Option<u16>, Error> 
     let mut highest = None;
     let mut p = 0;
     while let Some((msg_type, _body, body_end)) = region.next_message(p)? {
-        if msg_type == MessageType::Attribute {
+        if msg_type == MessageType::ATTRIBUTE {
             highest = highest.max(region.creation_index(p));
         }
         p = body_end;
@@ -13620,7 +13620,7 @@ fn find_attribute_info(
 ) -> Result<Option<(usize, core::ops::Range<usize>, AttributeInfoMessage)>, Error> {
     let mut p = 0;
     while let Some((msg_type, body, body_end)) = region.next_message(p)? {
-        if msg_type == MessageType::AttributeInfo
+        if msg_type == MessageType::ATTRIBUTE_INFO
             && let Ok(info) = AttributeInfoMessage::parse(&region[body..body_end], OFFSET_SIZE)
         {
             return Ok(Some((p, body..body_end, info)));
@@ -13684,13 +13684,13 @@ fn put_attr_message(
     } else {
         (0, None)
     };
-    let new_msg = layout.record_with_creation_index(MessageType::Attribute, body, creation_index);
+    let new_msg = layout.record_with_creation_index(MessageType::ATTRIBUTE, body, creation_index);
 
     let mut out = Vec::with_capacity(region.len() + new_msg.len());
     let mut p = 0;
     while let Some((msg_type, msg_body, body_end)) = region.next_message(p)? {
         match msg_type {
-            MessageType::Attribute
+            MessageType::ATTRIBUTE
                 if parse_compact_attr_name(region, p, msg_body, body_end)? == name =>
             {
                 p = body_end;
@@ -13698,7 +13698,7 @@ fn put_attr_message(
             }
             // Bumping the recorded maximum re-encodes the message, since a
             // header that was not recording one at all needs the field added.
-            MessageType::AttributeInfo if new_max.is_some() => {
+            MessageType::ATTRIBUTE_INFO if new_max.is_some() => {
                 if let Ok(mut info) =
                     AttributeInfoMessage::parse(&region[msg_body..body_end], OFFSET_SIZE)
                 {
@@ -13734,7 +13734,7 @@ fn put_attr_message(
     // just assigned is recorded rather than re-derived from the records.
     if new_max.is_some() && find_attribute_info(&out)?.is_none() {
         let body = compact_attribute_info_body(&out)?;
-        out.push(MessageType::AttributeInfo, &body);
+        out.push(MessageType::ATTRIBUTE_INFO, &body);
     }
     Ok(out)
 }
@@ -13754,7 +13754,7 @@ fn remove_attr_from_region(
     let mut removed = false;
     while let Some((msg_type, body, body_end)) = region.next_message(p)? {
         let mut skip = false;
-        if msg_type == MessageType::Attribute {
+        if msg_type == MessageType::ATTRIBUTE {
             let attr_name = parse_compact_attr_name(region, p, body, body_end)?;
             if attr_name == name {
                 skip = true;
@@ -13783,7 +13783,7 @@ fn compact_attr_count(region: &OhRegion) -> Result<usize, Error> {
     let mut count = 0usize;
     let mut p = 0;
     while let Some((msg_type, _body, body_end)) = region.next_message(p)? {
-        if msg_type == MessageType::Attribute {
+        if msg_type == MessageType::ATTRIBUTE {
             count += 1;
         }
         p = body_end;
@@ -13851,7 +13851,7 @@ pub(crate) fn rewrite_extension_region_bytes(
     let mut p = 0;
     let mut replaced = false;
     while let Some((msg_type, _body, body_end)) = region.next_message(p)? {
-        if msg_type == MessageType::FileSpaceInfo {
+        if msg_type == MessageType::FILE_SPACE_INFO {
             out.push(region[p]); // message type byte
             out.extend_from_slice(&new_len.to_le_bytes());
             // Preserve the message flags (0x14) and, where the header carries
@@ -14026,7 +14026,7 @@ pub(crate) fn read_oh_chunks<S: Source + ?Sized>(
         let layout = props.layout;
         let (region, mut p) = chunks[i].message_region();
         while let Some((msg_type, body, body_end)) = layout.next_message(region, p)? {
-            if msg_type == MessageType::ObjectHeaderContinuation {
+            if msg_type == MessageType::OBJECT_HEADER_CONTINUATION {
                 found.push(read_oh_continuation(
                     src, region, body, body_end, base, props,
                 )?);
@@ -14536,7 +14536,7 @@ impl OhRegion {
 fn reject_external_storage(region: &OhRegion) -> Result<(), Error> {
     let mut p = 0;
     while let Some((msg_type, _, body_end)) = region.next_message(p)? {
-        if msg_type == MessageType::ExternalDataFiles {
+        if msg_type == MessageType::EXTERNAL_DATA_FILES {
             return Err(Error::EditUnsupported(
                 "a dataset stores its elements in external files (H5Pset_external), \
                  which a copy cannot reproduce -- its data lives in files this crate \
@@ -14586,7 +14586,7 @@ fn reject_foreign_addresses(region: &OhRegion) -> Result<(), Error> {
             ));
         }
         match msg_type {
-            MessageType::Datatype => {
+            MessageType::DATATYPE => {
                 let (dt, _) = Datatype::parse(&region[body..body_end])?;
                 if datatype_holds_file_address(&dt) {
                     return Err(Error::EditUnsupported(
@@ -14594,7 +14594,7 @@ fn reject_foreign_addresses(region: &OhRegion) -> Result<(), Error> {
                     ));
                 }
             }
-            MessageType::Attribute => {
+            MessageType::ATTRIBUTE => {
                 // An attribute's *own* datatype or dataspace field can be a
                 // reference to a committed message, which the record's shared
                 // flag above does not report: that flag describes the attribute
@@ -14841,16 +14841,16 @@ fn screen_copied_references(
         // `next_message` returning `Some` guarantees it is in bounds.
         let shared = MessageFlags::new(region[p + 3]).is_shared();
         match msg_type {
-            MessageType::Datatype => {
+            MessageType::DATATYPE => {
                 // A committed datatype's message body is a pointer into the
                 // file's shared-message storage rather than an encoded type, so
                 // read the type it names before parsing.
                 let committed;
                 let encoded = if shared {
                     committed = resolver
-                        .resolve(&region[body..body_end], MessageType::Datatype)
+                        .resolve(&region[body..body_end], MessageType::DATATYPE)
                         .map_err(|source| Error::CopyScreenUnreadable {
-                            message: MessageType::Datatype,
+                            message: MessageType::DATATYPE,
                             source,
                         })?;
                     &committed[..]
@@ -14860,14 +14860,14 @@ fn screen_copied_references(
                 let (dt, _) = Datatype::parse(encoded)?;
                 element_dt = Some(dt);
             }
-            MessageType::DataLayout => {
+            MessageType::DATA_LAYOUT => {
                 if let Ok(DataLayout::Compact { data }) =
                     DataLayout::parse(&region[body..body_end], OFFSET_SIZE, LENGTH_SIZE)
                 {
                     compact = Some(data);
                 }
             }
-            MessageType::Attribute => {
+            MessageType::ATTRIBUTE => {
                 // A *shared record* is the whole attribute message held in the
                 // file's shared-message table, which is a different indirection
                 // from the committed datatype `parse_resolving` follows inside
@@ -14890,7 +14890,7 @@ fn screen_copied_references(
                     &resolver,
                 )
                 .map_err(|source| Error::CopyScreenUnreadable {
-                    message: MessageType::Attribute,
+                    message: MessageType::ATTRIBUTE,
                     source,
                 })?;
                 screen_resolved_references(&attr.datatype, &attr.raw_data, invalidated)?;
@@ -15213,7 +15213,7 @@ mod tests {
     fn a_shared_attribute_message_is_told_from_a_private_one_by_its_flags() {
         let body = crate::type_builders::build_attr_message("a", &AttrValue::I64(1))
             .serialize(LENGTH_SIZE);
-        let private = message_record(MessageType::Attribute, &body);
+        let private = message_record(MessageType::ATTRIBUTE, &body);
         assert!(!region_has_shared_attr(&plain_region(private.clone())).unwrap());
 
         let mut shared = private.clone();
@@ -15222,7 +15222,7 @@ mod tests {
 
         // The flag is only read on an Attribute message: the same byte set on a
         // neighbouring message says nothing about attribute storage.
-        let mut other = message_record(MessageType::Dataspace, &body);
+        let mut other = message_record(MessageType::DATASPACE, &body);
         other[3] = MessageFlags::SHARED.get();
         assert!(!region_has_shared_attr(&plain_region(other)).unwrap());
     }
@@ -15264,7 +15264,7 @@ mod tests {
     /// A header region holding one attribute inline.
     fn inline_attr_region(attr: &crate::attribute::AttributeMessage) -> OhRegion {
         plain_region(message_record(
-            MessageType::Attribute,
+            MessageType::ATTRIBUTE,
             &attr.serialize_v3(LENGTH_SIZE),
         ))
     }
@@ -15274,13 +15274,13 @@ mod tests {
     /// element inline (version, class 0, a 2-byte inline size, then the data).
     fn compact_reference_region(address: u64) -> OhRegion {
         let mut region = message_record(
-            MessageType::Datatype,
+            MessageType::DATATYPE,
             &crate::type_builders::make_object_reference_type().serialize(),
         );
         let mut layout = vec![3u8, 0];
         layout.extend_from_slice(&8u16.to_le_bytes());
         layout.extend_from_slice(&address.to_le_bytes());
-        region.extend_from_slice(&message_record(MessageType::DataLayout, &layout));
+        region.extend_from_slice(&message_record(MessageType::DATA_LAYOUT, &layout));
         plain_region(region)
     }
 
@@ -15316,7 +15316,7 @@ mod tests {
         // the copy path produces.
         let no_layout = CopyTree::DatasetVerbatim {
             region: plain_region(message_record(
-                MessageType::Datatype,
+                MessageType::DATATYPE,
                 &crate::type_builders::make_object_reference_type().serialize(),
             )),
             dense_attrs: DenseAttrSet::default(),
@@ -15339,7 +15339,7 @@ mod tests {
             base: BaseAddress::ZERO,
         };
         let mut bytes = message_record(
-            MessageType::Datatype,
+            MessageType::DATATYPE,
             &crate::shared_message::encode_committed_ref(StoredAddress::new(248), OFFSET_SIZE),
         );
         bytes[3] = MessageFlags::SHARED.get();
@@ -15352,7 +15352,7 @@ mod tests {
         let Error::CopyScreenUnreadable { message, source } = &err else {
             panic!("expected CopyScreenUnreadable, got {err:?}");
         };
-        assert_eq!(*message, MessageType::Datatype);
+        assert_eq!(*message, MessageType::DATATYPE);
         assert_eq!(
             *source,
             FormatError::UnexpectedEof {
@@ -17703,7 +17703,7 @@ mod tests {
         // A new-style group must carry both a Link Info and a Group Info message
         // (the C library requires the pair before it will insert a link).
         let types = region_types(&fresh_group_region());
-        assert_eq!(types, vec![MessageType::LinkInfo, MessageType::GroupInfo]);
+        assert_eq!(types, vec![MessageType::LINK_INFO, MessageType::GROUP_INFO]);
     }
 
     #[test]
@@ -17716,17 +17716,17 @@ mod tests {
             b.extend_from_slice(&u64::MAX.to_le_bytes());
             b
         };
-        let mut region = plain_region(message_record(MessageType::LinkInfo, &li_body));
+        let mut region = plain_region(message_record(MessageType::LINK_INFO, &li_body));
         ensure_group_info(&mut region).unwrap();
         assert_eq!(
             region_types(&region),
-            vec![MessageType::LinkInfo, MessageType::GroupInfo]
+            vec![MessageType::LINK_INFO, MessageType::GROUP_INFO]
         );
 
         // The appended message decodes as a minimal Group Info body.
         let mut p = 0;
         while let Some((mt, body, end)) = region.next_message(p).unwrap() {
-            if mt == MessageType::GroupInfo {
+            if mt == MessageType::GROUP_INFO {
                 assert_eq!(&region[body..end], &GROUP_INFO_BODY);
             }
             p = end;
@@ -17747,8 +17747,8 @@ mod tests {
             li.extend_from_slice(&u64::MAX.to_le_bytes()); // b-tree creation order
         }
         let mut region = OhRegion::empty(OhHeaderProps::PLAIN);
-        region.push(MessageType::LinkInfo, &li);
-        region.push(MessageType::GroupInfo, &GROUP_INFO_BODY);
+        region.push(MessageType::LINK_INFO, &li);
+        region.push(MessageType::GROUP_INFO, &GROUP_INFO_BODY);
         for (i, name) in links.iter().enumerate() {
             region.push_link(name, StoredAddress::new(0x100 + i as u64), Some(i as u64));
         }
@@ -17760,7 +17760,7 @@ mod tests {
         let mut out = Vec::new();
         let mut p = 0;
         while let Some((mt, body, end)) = region.next_message(p).unwrap() {
-            if mt == MessageType::Link {
+            if mt == MessageType::LINK {
                 let link = LinkMessage::parse(&region[body..end], OFFSET_SIZE).unwrap();
                 out.push((link.name, link.creation_order));
             }
@@ -17881,7 +17881,7 @@ mod tests {
         gi.extend_from_slice(&4u16.to_le_bytes()); // max compact
         gi.extend_from_slice(&2u16.to_le_bytes()); // min dense
         let mut region = OhRegion::empty(OhHeaderProps::PLAIN);
-        region.push(MessageType::GroupInfo, &gi);
+        region.push(MessageType::GROUP_INFO, &gi);
         assert_eq!(max_compact_links(&region).unwrap(), 4);
     }
 
@@ -17927,7 +17927,7 @@ mod tests {
         let named = crate::sohm::SohmRecord {
             hash: 1,
             location: crate::sohm::SohmLocation::ObjectHeader {
-                message_type: MessageType::Attribute.to_u16() as u8,
+                message_type: MessageType::ATTRIBUTE.to_u16() as u8,
                 creation_index: 0,
                 address: StoredAddress::new(0x400),
             },
@@ -18010,7 +18010,7 @@ mod tests {
     #[test]
     fn a_rewrapped_shared_message_keeps_its_flag() {
         let mut region = OhRegion::empty(OhHeaderProps::PLAIN);
-        region.push_shared(MessageType::Attribute, &[3, 1, 0, 0, 0, 0, 0, 0, 0, 0]);
+        region.push_shared(MessageType::ATTRIBUTE, &[3, 1, 0, 0, 0, 0, 0, 0, 0, 0]);
         assert_eq!(region[3], MessageFlags::SHARED.get());
         assert!(region_has_shared_attr(&region).unwrap());
     }
@@ -18021,12 +18021,12 @@ mod tests {
         // source-file reference in place of its body, so a verbatim cross-file
         // copy must refuse it, not only shared datatypes/attributes. (A plain,
         // non-shared dataspace embeds no foreign address and is accepted.)
-        let mut shared = message_record(MessageType::Dataspace, &[0u8; 8]);
+        let mut shared = message_record(MessageType::DATASPACE, &[0u8; 8]);
         shared[3] = MessageFlags::SHARED.get(); // set the message's shared flag
         let err = reject_foreign_addresses(&plain_region(shared)).unwrap_err();
         assert!(err.to_string().contains("shared"), "got: {err}");
 
-        let plain = message_record(MessageType::Dataspace, &[0u8; 8]);
+        let plain = message_record(MessageType::DATASPACE, &[0u8; 8]);
         reject_foreign_addresses(&plain_region(plain)).unwrap();
     }
 
@@ -18060,14 +18060,14 @@ mod tests {
             btree_name_index_address: None,
             btree_creation_order_address: None,
         };
-        let mut record = layout.record(MessageType::AttributeInfo, &info.serialize(OFFSET_SIZE));
+        let mut record = layout.record(MessageType::ATTRIBUTE_INFO, &info.serialize(OFFSET_SIZE));
         // The reference C library sets this flag on the Attribute Info message it writes
         // (`H5Oattribute.c`, HDF5 2.2.0), so a rewrite of that message has to keep it.
         record[3] = MessageFlags::FORBID_SHARING.get();
         region.push_bytes(&record);
         for (name, index) in attrs {
             let record = layout.record_with_creation_index(
-                MessageType::Attribute,
+                MessageType::ATTRIBUTE,
                 &attr_body(name, 1),
                 *index,
             );
@@ -18082,7 +18082,7 @@ mod tests {
         let mut out = Vec::new();
         let mut p = 0;
         while let Some((msg_type, body, body_end)) = region.next_message(p).unwrap() {
-            if msg_type == MessageType::Attribute {
+            if msg_type == MessageType::ATTRIBUTE {
                 let name = parse_compact_attr_name(region, p, body, body_end).unwrap();
                 out.push((name, region.creation_index(p)));
             }
@@ -18136,11 +18136,11 @@ mod tests {
     fn an_emitted_record_carries_a_creation_index_only_where_the_header_tracks_one() {
         let body = [0xABu8; 5];
         let plain =
-            OhRecordLayout::PLAIN.record_with_creation_index(MessageType::Attribute, &body, 9);
+            OhRecordLayout::PLAIN.record_with_creation_index(MessageType::ATTRIBUTE, &body, 9);
         assert_eq!(plain.len(), 4 + body.len());
         assert_eq!(&plain[4..], &body);
 
-        let tracked = TRACKED.record_with_creation_index(MessageType::Attribute, &body, 0x1234);
+        let tracked = TRACKED.record_with_creation_index(MessageType::ATTRIBUTE, &body, 0x1234);
         assert_eq!(tracked.len(), 6 + body.len());
         assert_eq!(
             &tracked[..4],
@@ -18152,7 +18152,7 @@ mod tests {
 
         // Every non-attribute message the reference C library writes carries a
         // zero creation index, which is what the plain emitter passes.
-        let group_info = TRACKED.record(MessageType::GroupInfo, &body);
+        let group_info = TRACKED.record(MessageType::GROUP_INFO, &body);
         assert_eq!(&group_info[4..6], &0u16.to_le_bytes());
     }
 
@@ -18431,7 +18431,7 @@ mod tests {
         let mut region = OhRegion::empty(OhHeaderProps::with_layout(TRACKED));
         for (name, index) in [("alpha", 0u16), ("beta", 4)] {
             let record = TRACKED.record_with_creation_index(
-                MessageType::Attribute,
+                MessageType::ATTRIBUTE,
                 &attr_body(name, 1),
                 index,
             );
@@ -18460,12 +18460,12 @@ mod tests {
         // A region with a Dataspace message, a compact Data Layout, and a trailing
         // Attribute message: rewriting the inline data must replace exactly the
         // layout's bytes and leave every other message verbatim.
-        let mut region = message_record(MessageType::Dataspace, &[0xAB; 8]);
+        let mut region = message_record(MessageType::DATASPACE, &[0xAB; 8]);
         region.extend_from_slice(&message_record(
-            MessageType::DataLayout,
+            MessageType::DATA_LAYOUT,
             &compact_layout_body(3, &[1, 2, 3, 4]),
         ));
-        region.extend_from_slice(&message_record(MessageType::Attribute, &[0xCD; 5]));
+        region.extend_from_slice(&message_record(MessageType::ATTRIBUTE, &[0xCD; 5]));
 
         let out = rebuild_compact_layout_region(&plain_region(region), &[9, 8, 7, 6]).unwrap();
 
@@ -18473,23 +18473,23 @@ mod tests {
         assert_eq!(
             region_types(&out),
             vec![
-                MessageType::Dataspace,
-                MessageType::DataLayout,
-                MessageType::Attribute,
+                MessageType::DATASPACE,
+                MessageType::DATA_LAYOUT,
+                MessageType::ATTRIBUTE,
             ]
         );
         let mut p = 0;
         while let Some((mt, body, end)) = out.next_message(p).unwrap() {
             match mt {
-                MessageType::Dataspace => assert_eq!(&out[body..end], &[0xAB; 8]),
-                MessageType::DataLayout => {
+                MessageType::DATASPACE => assert_eq!(&out[body..end], &[0xAB; 8]),
+                MessageType::DATA_LAYOUT => {
                     assert_eq!(out[body], 3, "version preserved");
                     assert_eq!(out[body + 1], 0, "still compact");
                     let size = u16::from_le_bytes([out[body + 2], out[body + 3]]) as usize;
                     assert_eq!(size, 4);
                     assert_eq!(&out[body + 4..body + 4 + size], &[9, 8, 7, 6]);
                 }
-                MessageType::Attribute => assert_eq!(&out[body..end], &[0xCD; 5]),
+                MessageType::ATTRIBUTE => assert_eq!(&out[body..end], &[0xCD; 5]),
                 other => panic!("unexpected message {other:?}"),
             }
             p = end;
@@ -18500,13 +18500,13 @@ mod tests {
     fn rebuild_compact_layout_refuses_non_compact() {
         // A contiguous (class 1) data layout is not compact, so the rebuild refuses
         // rather than corrupt it.
-        let mut region = message_record(MessageType::DataLayout, &{
+        let mut region = message_record(MessageType::DATA_LAYOUT, &{
             let mut b = vec![3u8, 1]; // version 3, class 1 (contiguous)
             b.extend_from_slice(&0u64.to_le_bytes());
             b.extend_from_slice(&0u64.to_le_bytes());
             b
         });
-        region.extend_from_slice(&message_record(MessageType::Dataspace, &[0; 8]));
+        region.extend_from_slice(&message_record(MessageType::DATASPACE, &[0; 8]));
         let err = rebuild_compact_layout_region(&plain_region(region), &[1, 2]).unwrap_err();
         assert!(err.to_string().contains("non-compact"), "got: {err}");
     }

@@ -350,32 +350,32 @@ impl Located {
         let dataspace_msg = walk
             .messages
             .iter()
-            .find(|m| m.msg_type == MessageType::Dataspace)
-            .ok_or(Error::MissingMessage(MessageType::Dataspace))?;
+            .find(|m| m.msg_type == MessageType::DATASPACE)
+            .ok_or(Error::MissingMessage(MessageType::DATASPACE))?;
         let layout_msg = walk
             .messages
             .iter()
-            .find(|m| m.msg_type == MessageType::DataLayout)
-            .ok_or(Error::MissingMessage(MessageType::DataLayout))?;
+            .find(|m| m.msg_type == MessageType::DATA_LAYOUT)
+            .ok_or(Error::MissingMessage(MessageType::DATA_LAYOUT))?;
         let datatype_msg = walk
             .messages
             .iter()
-            .find(|m| m.msg_type == MessageType::Datatype)
-            .ok_or(Error::MissingMessage(MessageType::Datatype))?;
+            .find(|m| m.msg_type == MessageType::DATATYPE)
+            .ok_or(Error::MissingMessage(MessageType::DATATYPE))?;
         let filter_msg = walk
             .messages
             .iter()
-            .find(|m| m.msg_type == MessageType::FilterPipeline);
+            .find(|m| m.msg_type == MessageType::FILTER_PIPELINE);
         // The versioned message wins over the legacy one when a header carries
         // both, matching how the read path picks.
         let fill_msg = walk
             .messages
             .iter()
-            .find(|m| m.msg_type == MessageType::FillValue)
+            .find(|m| m.msg_type == MessageType::FILL_VALUE)
             .or_else(|| {
                 walk.messages
                     .iter()
-                    .find(|m| m.msg_type == MessageType::FillValueOld)
+                    .find(|m| m.msg_type == MessageType::FILL_VALUE_OLD)
             });
 
         // Each of these is parsed below as though its bytes were the message. A
@@ -1587,7 +1587,7 @@ fn walk_messages(
             break; // padding
         }
         let msg_type = MessageType::from_u16(msg_type_raw);
-        if msg_type == MessageType::ObjectHeaderContinuation {
+        if msg_type == MessageType::OBJECT_HEADER_CONTINUATION {
             let cont_off = read_uint(chunk, pos, offset_size as usize)?;
             let cont_len =
                 read_uint(chunk, pos + offset_size as usize, length_size as usize)?.to_usize()?;

@@ -286,7 +286,7 @@ impl ObjectHeader {
             }
 
             let msg_body = &data[pos..pos + msg_data_size];
-            if msg_type != MessageType::Nil && filter.keeps(msg_type, msg_body) {
+            if msg_type != MessageType::NIL && filter.keeps(msg_type, msg_body) {
                 messages.push(HeaderMessage {
                     msg_type,
                     size: msg_data_size,
@@ -302,7 +302,7 @@ impl ObjectHeader {
             // where it lies rather than from the message just pushed: a filtered
             // parse may not have kept it, and a continuation is followed whatever
             // the filter says.
-            if msg_type == MessageType::ObjectHeaderContinuation
+            if msg_type == MessageType::OBJECT_HEADER_CONTINUATION
                 && msg_body.len() >= (offset_size as usize + length_size as usize)
             {
                 let cont_offset_raw = StoredAddress::new(read_offset(msg_body, 0, offset_size)?);
@@ -376,7 +376,7 @@ impl ObjectHeader {
             }
 
             let msg_body = &data[pos..pos + msg_data_size];
-            if msg_type != MessageType::Nil && filter.keeps(msg_type, msg_body) {
+            if msg_type != MessageType::NIL && filter.keeps(msg_type, msg_body) {
                 messages.push(HeaderMessage {
                     msg_type,
                     size: msg_data_size,
@@ -390,7 +390,7 @@ impl ObjectHeader {
 
             // Recursive continuations, read from the body where it lies for the
             // reason [`parse_v1`] gives.
-            if msg_type == MessageType::ObjectHeaderContinuation
+            if msg_type == MessageType::OBJECT_HEADER_CONTINUATION
                 && msg_body.len() >= (offset_size as usize + length_size as usize)
             {
                 let cont_offset_raw = StoredAddress::new(read_offset(msg_body, 0, offset_size)?);
@@ -567,7 +567,7 @@ impl ObjectHeader {
                 break;
             }
             pos += msg_data_size;
-            if msg_type != MessageType::Nil && msg_type != MessageType::ObjectHeaderContinuation {
+            if msg_type != MessageType::NIL && msg_type != MessageType::OBJECT_HEADER_CONTINUATION {
                 count += 1;
             }
         }
@@ -619,7 +619,7 @@ impl ObjectHeader {
 
             let msg_data = &data[pos..pos + msg_data_size];
 
-            if msg_type == MessageType::ObjectHeaderContinuation {
+            if msg_type == MessageType::OBJECT_HEADER_CONTINUATION {
                 // Neither the offset nor the length is narrowed here, so that
                 // the driver, buffered or streaming, can fetch a region a
                 // 32-bit `usize` does not reach: a streaming reader follows a
@@ -629,7 +629,7 @@ impl ObjectHeader {
                     let cont_len = read_length(msg_data, offset_size as usize, length_size)?;
                     continuations.push((cont_off, cont_len));
                 }
-            } else if msg_type != MessageType::Nil && filter.keeps(msg_type, msg_data) {
+            } else if msg_type != MessageType::NIL && filter.keeps(msg_type, msg_data) {
                 messages.push(HeaderMessage {
                     msg_type,
                     size: msg_data_size,
@@ -1003,7 +1003,7 @@ impl ObjectHeader {
 
             // Decode the continuation pointer (if any) from the body where it
             // lies: it is followed whatever the filter kept, as in [`parse_v1`].
-            let cont = if msg_type == MessageType::ObjectHeaderContinuation
+            let cont = if msg_type == MessageType::OBJECT_HEADER_CONTINUATION
                 && msg_data.len() >= (offset_size as usize + length_size as usize)
             {
                 let off_raw = StoredAddress::new(read_offset(msg_data, 0, offset_size)?);
@@ -1013,7 +1013,7 @@ impl ObjectHeader {
                 None
             };
 
-            if msg_type != MessageType::Nil && filter.keeps(msg_type, msg_data) {
+            if msg_type != MessageType::NIL && filter.keeps(msg_type, msg_data) {
                 messages.push(HeaderMessage {
                     msg_type,
                     size: msg_data_size,
@@ -1178,19 +1178,21 @@ mod tests {
         let data = build_v1_header(&messages, 8, 8);
         let hdr = ObjectHeader::parse(&data, AccessMode::ReadOnly, 0, 8, 8).unwrap();
         assert_eq!(hdr.messages.len(), 2);
-        assert_eq!(hdr.messages[0].msg_type, MessageType::Dataspace);
+        assert_eq!(hdr.messages[0].msg_type, MessageType::DATASPACE);
         assert_eq!(hdr.messages[0].data, vec![1, 2, 3, 4]);
-        assert_eq!(hdr.messages[1].msg_type, MessageType::DataLayout);
+        assert_eq!(hdr.messages[1].msg_type, MessageType::DATA_LAYOUT);
         assert_eq!(hdr.messages[1].data, vec![5, 6]);
     }
 
     #[test]
     fn parse_v1_unknown_message_ok() {
-        let messages = [(0x00FFu16, &[0xAA, 0xBB][..], MessageFlags::NONE)];
+        const UNKNOWN_TYPE: u16 = 0x00FF;
+        let messages = [(UNKNOWN_TYPE, &[0xAA, 0xBB][..], MessageFlags::NONE)];
         let data = build_v1_header(&messages, 8, 8);
         let hdr = ObjectHeader::parse(&data, AccessMode::ReadOnly, 0, 8, 8).unwrap();
+
         assert_eq!(hdr.messages.len(), 1);
-        assert_eq!(hdr.messages[0].msg_type, MessageType::Unknown(0x00FF));
+        assert_eq!(hdr.messages[0].msg_type.unknown_id(), Some(UNKNOWN_TYPE));
     }
 
     /// The must-understand guard fires on a message this parser cannot *name*,
@@ -1214,7 +1216,7 @@ mod tests {
         let data = build_v1_header(&messages, 8, 8);
         let hdr = ObjectHeader::parse(&data, AccessMode::ReadWrite, 0, 8, 8).unwrap();
         assert_eq!(hdr.messages.len(), 1);
-        assert_eq!(hdr.messages[0].msg_type, MessageType::ExternalDataFiles);
+        assert_eq!(hdr.messages[0].msg_type, MessageType::EXTERNAL_DATA_FILES);
     }
 
     #[test]
@@ -1237,7 +1239,7 @@ mod tests {
 
         let header = build_v1_header(
             &[(
-                MessageType::ObjectHeaderContinuation.to_u16(),
+                MessageType::OBJECT_HEADER_CONTINUATION.to_u16(),
                 &cont_ptr[..],
                 MessageFlags::NONE,
             )],
@@ -1281,27 +1283,32 @@ mod tests {
 
     #[test]
     fn a_version_1_header_rejects_an_unknown_message_a_writer_must_understand_only_for_write() {
+        const UNKNOWN_TYPE: u16 = 0x00FF;
+
         let messages = [(
-            0x00FFu16,
+            UNKNOWN_TYPE,
             &[0xAA][..],
             MessageFlags::FAIL_IF_UNKNOWN_AND_OPEN_FOR_WRITE,
         )];
         let data = build_v1_header(&messages, 8, 8);
 
         let hdr = ObjectHeader::parse(&data, AccessMode::ReadOnly, 0, 8, 8).unwrap();
+
         assert_eq!(hdr.messages.len(), 1);
-        assert_eq!(hdr.messages[0].msg_type, MessageType::Unknown(0x00FF));
+        assert_eq!(hdr.messages[0].msg_type.unknown_id(), Some(UNKNOWN_TYPE));
         assert_eq!(hdr.messages[0].data, vec![0xAA]);
 
         let err = ObjectHeader::parse(&data, AccessMode::ReadWrite, 0, 8, 8).unwrap_err();
-        assert_eq!(err, FormatError::UnsupportedMessage(0x00FF));
+        assert_eq!(err, FormatError::UnsupportedMessage(UNKNOWN_TYPE));
     }
 
     #[test]
     fn a_version_1_continuation_rejects_an_unknown_message_a_writer_must_understand_only_for_write()
     {
+        const UNKNOWN_TYPE: u16 = 0x00FF;
+
         let cont_chunk = v1_message_records(&[(
-            0x00FFu16,
+            UNKNOWN_TYPE,
             &[0xAA][..],
             MessageFlags::FAIL_IF_UNKNOWN_AND_OPEN_FOR_WRITE,
         )]);
@@ -1313,7 +1320,7 @@ mod tests {
 
         let header = build_v1_header(
             &[(
-                MessageType::ObjectHeaderContinuation.to_u16(),
+                MessageType::OBJECT_HEADER_CONTINUATION.to_u16(),
                 &cont_ptr[..],
                 MessageFlags::NONE,
             )],
@@ -1325,19 +1332,16 @@ mod tests {
         file_data[cont_offset..cont_offset + cont_chunk.len()].copy_from_slice(&cont_chunk);
 
         let hdr = ObjectHeader::parse(&file_data, AccessMode::ReadOnly, 0, 8, 8).unwrap();
+
+        assert_eq!(hdr.messages.len(), 2);
         assert_eq!(
-            hdr.messages
-                .iter()
-                .map(|m| m.msg_type)
-                .collect::<Vec<MessageType>>(),
-            vec![
-                MessageType::ObjectHeaderContinuation,
-                MessageType::Unknown(0x00FF),
-            ]
+            hdr.messages[0].msg_type,
+            MessageType::OBJECT_HEADER_CONTINUATION
         );
+        assert_eq!(hdr.messages[1].msg_type.unknown_id(), Some(UNKNOWN_TYPE));
 
         let err = ObjectHeader::parse(&file_data, AccessMode::ReadWrite, 0, 8, 8).unwrap_err();
-        assert_eq!(err, FormatError::UnsupportedMessage(0x00FF));
+        assert_eq!(err, FormatError::UnsupportedMessage(UNKNOWN_TYPE));
     }
 
     #[test]
@@ -1354,7 +1358,7 @@ mod tests {
 
         let hdr = ObjectHeader::parse(&data, AccessMode::ReadOnly, 0, 8, 8).unwrap();
         assert_eq!(hdr.messages.len(), 1);
-        assert_eq!(hdr.messages[0].msg_type, MessageType::Unknown(0x00FF));
+        assert_eq!(hdr.messages[0].msg_type, MessageType::from(0x00FF));
         assert_eq!(hdr.messages[0].data, vec![0xAA]);
 
         let err = ObjectHeader::parse(&data, AccessMode::ReadWrite, 0, 8, 8).unwrap_err();
@@ -1382,7 +1386,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(hdr.messages.len(), 1);
-        assert_eq!(hdr.messages[0].msg_type, MessageType::Unknown(0x00FF));
+        assert_eq!(hdr.messages[0].msg_type, MessageType::from(0x00FF));
         assert_eq!(hdr.messages[0].data, vec![0xAA]);
 
         let err = ObjectHeader::parse_from_source(
@@ -1404,7 +1408,7 @@ mod tests {
         assert_eq!(hdr.version, 2);
         assert_eq!(hdr.flags, 0);
         assert_eq!(hdr.messages.len(), 1);
-        assert_eq!(hdr.messages[0].msg_type, MessageType::Dataspace);
+        assert_eq!(hdr.messages[0].msg_type, MessageType::DATASPACE);
         assert_eq!(hdr.messages[0].data, vec![10, 20]);
         assert!(hdr.access_time.is_none());
     }
@@ -1476,7 +1480,7 @@ mod tests {
         );
         let hdr = ObjectHeader::parse(&data, AccessMode::ReadOnly, 0, 8, 8).unwrap();
         assert_eq!(hdr.messages.len(), 1);
-        assert_eq!(hdr.messages[0].msg_type, MessageType::Dataspace);
+        assert_eq!(hdr.messages[0].msg_type, MessageType::DATASPACE);
     }
 
     #[test]
@@ -1543,8 +1547,8 @@ mod tests {
 
         let hdr = ObjectHeader::parse(&file_data, AccessMode::ReadOnly, 0, 8, 8).unwrap();
         assert_eq!(hdr.messages.len(), 2);
-        assert_eq!(hdr.messages[0].msg_type, MessageType::Dataspace);
-        assert_eq!(hdr.messages[1].msg_type, MessageType::Datatype);
+        assert_eq!(hdr.messages[0].msg_type, MessageType::DATASPACE);
+        assert_eq!(hdr.messages[1].msg_type, MessageType::DATATYPE);
         assert_eq!(hdr.messages[1].data, vec![0xDE, 0xAD]);
     }
 

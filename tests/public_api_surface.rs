@@ -111,20 +111,21 @@ fn missing_message_id(e: &Error) -> Option<u16> {
 
 #[test]
 fn a_header_message_type_can_be_named_where_an_error_hands_one_over() {
-    let named: MessageType = MessageType::from_u16(0x0008);
-    assert_eq!(named, MessageType::DataLayout);
+    let named = MessageType::from_u16(0x0008);
+    assert_eq!(named, MessageType::DATA_LAYOUT);
     assert_eq!(
         missing_message_id(&Error::MissingMessage(named)),
         Some(0x0008)
     );
 
-    // An identifier this crate does not recognize keeps its number rather than
-    // being discarded, which is what makes the enum safe to grow.
-    let unknown = MessageType::from_u16(0x7FFF);
-    assert_eq!(unknown, MessageType::Unknown(0x7FFF));
+    const UNKNOWN_TYPE: u16 = 0x7FFF;
+
+    let unknown = MessageType::from_u16(UNKNOWN_TYPE);
+    assert_eq!(unknown.unknown_id(), Some(UNKNOWN_TYPE));
     assert_eq!(
         missing_message_id(&Error::MissingMessage(unknown)),
-        Some(0x7FFF)
+        Some(UNKNOWN_TYPE)
     );
+
     assert_eq!(missing_message_id(&Error::SwmrUnsupported), None);
 }

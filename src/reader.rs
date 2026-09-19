@@ -1661,7 +1661,7 @@ impl FileInner {
         let msg = header
             .messages
             .iter()
-            .find(|m| m.msg_type == MessageType::FileSpaceInfo)?;
+            .find(|m| m.msg_type == MessageType::FILE_SPACE_INFO)?;
         FileSpaceInfo::parse(
             &msg.data,
             self.superblock.offset_size,
@@ -1687,7 +1687,7 @@ impl FileInner {
         let msg = header
             .messages
             .iter()
-            .find(|m| m.msg_type == MessageType::SharedMessageTable)?;
+            .find(|m| m.msg_type == MessageType::SHARED_MESSAGE_TABLE)?;
         let message =
             crate::sohm::SharedMessageTableMessage::parse(&msg.data, self.superblock.offset_size)
                 .ok()?;
@@ -2039,7 +2039,7 @@ impl FileInner {
         let abs = file.addr_offset.absolute(StoredAddress::new(rel_addr))?;
         let at = revisions.at(abs);
         let hdr = file.parse_header(abs)?;
-        if has_message(&hdr, MessageType::DataLayout) {
+        if has_message(&hdr, MessageType::DATA_LAYOUT) {
             let chunk_cache = DatasetAccessProperties::new()
                 .resolved_chunk_cache(file.access_properties.chunk_cache);
             Ok(Object::Dataset(Box::new(Dataset::new(
@@ -3302,7 +3302,7 @@ impl File {
         let revisions = self.inner.revisions();
         let addr = self.inner.resolve_path(&path.as_path())?;
         let hdr = self.inner.parse_header(addr)?;
-        if !has_message(&hdr, MessageType::DataLayout) {
+        if !has_message(&hdr, MessageType::DATA_LAYOUT) {
             return Err(Error::NotADataset(path.to_string()));
         }
         Ok(Dataset::new(
@@ -3821,7 +3821,7 @@ impl Group {
                 continue;
             }
             let hdr = self.file.parse_header(self.file.entry_address(entry)?)?;
-            if has_message(&hdr, MessageType::DataLayout) {
+            if has_message(&hdr, MessageType::DATA_LAYOUT) {
                 names.push(entry.name.clone());
             }
         }
@@ -3891,7 +3891,7 @@ impl Group {
             }
             let address = self.file.entry_address(&entry)?;
             let hdr = self.file.parse_header(address)?;
-            if has_message(&hdr, MessageType::DataLayout) {
+            if has_message(&hdr, MessageType::DATA_LAYOUT) {
                 members.push((entry.name, Some((address, hdr))));
             }
         }
@@ -3979,7 +3979,7 @@ impl Group {
         if let Some(count) = hdr.reference_count {
             return Ok(count);
         }
-        let Ok(msg) = find_message(&hdr, MessageType::ObjectReferenceCount) else {
+        let Ok(msg) = find_message(&hdr, MessageType::OBJECT_REFERENCE_COUNT) else {
             return Ok(1);
         };
         // version(1) + count(4).
@@ -4019,7 +4019,7 @@ impl Group {
     /// matching them up by address rather than by what the type decodes to.
     pub(crate) fn named_datatype_at(&self, path: &str) -> Result<(Datatype, u64), Error> {
         let (address, hdr) = self.named_datatype_header(path)?;
-        let msg = find_message(&hdr, MessageType::Datatype)?;
+        let msg = find_message(&hdr, MessageType::DATATYPE)?;
         let (dt, _) = Datatype::parse(&self.file.message_body(msg)?)?;
         Ok((dt, address))
     }
@@ -4248,7 +4248,7 @@ impl Group {
         let revisions = self.file.revisions();
         let address = self.resolve_path(&relative)?;
         let hdr = self.file.parse_header(address)?;
-        if !has_message(&hdr, MessageType::DataLayout) {
+        if !has_message(&hdr, MessageType::DATA_LAYOUT) {
             return Err(Error::NotADataset(self.root_relative(&relative)));
         }
         Ok(Dataset::new(
@@ -5093,7 +5093,7 @@ impl Dataset {
         // report `NotADataset` once and then serve the other object's header —
         // which a commit replacing a dataset with a group at the same path
         // (issue #305) makes reachable.
-        if !has_message(&header, MessageType::DataLayout) {
+        if !has_message(&header, MessageType::DATA_LAYOUT) {
             // Only a path can reach this: an address memo that survived is the
             // address of the dataset this handle already read there.
             return Err(Error::NotADataset(reported_path(self.path.as_ref())));
@@ -5867,13 +5867,13 @@ the same commit to replace it",
             .header
             .messages
             .iter()
-            .find(|m| m.msg_type == MessageType::FillValue)
+            .find(|m| m.msg_type == MessageType::FILL_VALUE)
             .or_else(|| {
                 state
                     .header
                     .messages
                     .iter()
-                    .find(|m| m.msg_type == MessageType::FillValueOld)
+                    .find(|m| m.msg_type == MessageType::FILL_VALUE_OLD)
             });
         match msg {
             Some(m) => Ok(crate::fill_value::parse_defined_fill_value(
@@ -5902,13 +5902,13 @@ the same commit to replace it",
             .header
             .messages
             .iter()
-            .find(|m| m.msg_type == MessageType::FillValue)
+            .find(|m| m.msg_type == MessageType::FILL_VALUE)
             .or_else(|| {
                 state
                     .header
                     .messages
                     .iter()
-                    .find(|m| m.msg_type == MessageType::FillValueOld)
+                    .find(|m| m.msg_type == MessageType::FILL_VALUE_OLD)
             });
         let Some(m) = msg else {
             return Ok(None);
@@ -6407,7 +6407,7 @@ the same commit to replace it",
             return Ok(meta.datatype);
         }
         let state = self.resolved()?;
-        let msg = find_message(&state.header, MessageType::Datatype)?;
+        let msg = find_message(&state.header, MessageType::DATATYPE)?;
         let (dt, _) = Datatype::parse(&self.file.message_body(msg)?)?;
         Ok(dt)
     }
@@ -6421,13 +6421,13 @@ the same commit to replace it",
     /// address is what says which committed object to name instead.
     pub(crate) fn committed_datatype_address(&self) -> Result<Option<u64>, Error> {
         let state = self.resolved()?;
-        let msg = find_message(&state.header, MessageType::Datatype)?;
+        let msg = find_message(&state.header, MessageType::DATATYPE)?;
         self.file.shared_target_address(msg)
     }
 
     pub(crate) fn dataspace(&self) -> Result<Dataspace, Error> {
         let state = self.resolved()?;
-        let msg = find_message(&state.header, MessageType::Dataspace)?;
+        let msg = find_message(&state.header, MessageType::DATASPACE)?;
         Ok(Dataspace::parse(
             &self.file.message_body(msg)?,
             self.file.length_size(),
@@ -6436,7 +6436,7 @@ the same commit to replace it",
 
     pub(crate) fn data_layout(&self) -> Result<DataLayout, Error> {
         let state = self.resolved()?;
-        let msg = find_message(&state.header, MessageType::DataLayout)?;
+        let msg = find_message(&state.header, MessageType::DATA_LAYOUT)?;
         Ok(DataLayout::parse(
             &msg.data,
             self.file.offset_size(),
@@ -6455,7 +6455,7 @@ the same commit to replace it",
             .header
             .messages
             .iter()
-            .find(|m| m.msg_type == MessageType::FilterPipeline)?;
+            .find(|m| m.msg_type == MessageType::FILTER_PIPELINE)?;
         let body = self.file.message_body(msg).ok()?;
         FilterPipeline::parse(&body).ok()
     }
@@ -6476,7 +6476,7 @@ the same commit to replace it",
             .header
             .messages
             .iter()
-            .any(|m| m.msg_type == MessageType::ExternalDataFiles))
+            .any(|m| m.msg_type == MessageType::EXTERNAL_DATA_FILES))
     }
 
     /// The data layout to read element bytes through, as opposed to the one
@@ -6567,7 +6567,7 @@ the same commit to replace it",
             .header
             .messages
             .iter()
-            .find(|m| m.msg_type == MessageType::FilterPipeline)
+            .find(|m| m.msg_type == MessageType::FILTER_PIPELINE)
         else {
             return Ok(None);
         };
@@ -6929,8 +6929,8 @@ fn has_message(header: &ObjectHeader, msg_type: MessageType) -> bool {
 /// link message as well. Every object either library writes carries the messages
 /// that make those agree, so the rules part only on a malformed header.
 fn is_named_datatype(header: &ObjectHeader) -> bool {
-    has_message(header, MessageType::Datatype)
-        && !has_message(header, MessageType::DataLayout)
+    has_message(header, MessageType::DATATYPE)
+        && !has_message(header, MessageType::DATA_LAYOUT)
         && !is_group(header)
 }
 
@@ -7684,26 +7684,30 @@ mod tests {
     #[test]
     fn a_committed_datatype_is_a_datatype_that_is_neither_dataset_nor_group() {
         for (label, types, expected) in [
-            ("a committed datatype", &[MessageType::Datatype][..], true),
+            ("a committed datatype", &[MessageType::DATATYPE][..], true),
             (
                 "a dataset, whose element type is a datatype message too",
-                &[MessageType::Datatype, MessageType::DataLayout],
+                &[MessageType::DATATYPE, MessageType::DATA_LAYOUT],
                 false,
             ),
-            ("a group with a link table", &[MessageType::LinkInfo], false),
+            (
+                "a group with a link table",
+                &[MessageType::LINK_INFO],
+                false,
+            ),
             (
                 "a group with a symbol table",
-                &[MessageType::SymbolTable],
+                &[MessageType::SYMBOL_TABLE],
                 false,
             ),
             (
                 "a group carrying a datatype",
-                &[MessageType::LinkInfo, MessageType::Datatype],
+                &[MessageType::LINK_INFO, MessageType::DATATYPE],
                 false,
             ),
             (
                 "a header with no datatype at all",
-                &[MessageType::Dataspace],
+                &[MessageType::DATASPACE],
                 false,
             ),
         ] {

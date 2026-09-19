@@ -90,15 +90,15 @@ pub(crate) fn build_chunked_dataset_oh(
 ) -> Result<Vec<u8>, FormatError> {
     let mut w = ObjectHeaderWriter::new();
     add_datatype(&mut w, dt, dt_location);
-    w.add_message(MessageType::Dataspace, ds.serialize(LENGTH_SIZE));
+    w.add_message(MessageType::DATASPACE, ds.serialize(LENGTH_SIZE));
     w.add_message_with_flags(
-        MessageType::FillValue,
+        MessageType::FILL_VALUE,
         crate::fill_value::fill_value_message_v3(fill),
         MessageFlags::CONSTANT,
     );
-    w.add_message(MessageType::DataLayout, layout_message.to_vec());
+    w.add_message(MessageType::DATA_LAYOUT, layout_message.to_vec());
     if let Some(pm) = pipeline_message {
-        w.add_message(MessageType::FilterPipeline, pm.to_vec());
+        w.add_message(MessageType::FILTER_PIPELINE, pm.to_vec());
     }
     add_attributes(&mut w, attrs, attr_info);
     w.serialize()
@@ -142,9 +142,9 @@ pub(crate) fn build_dataset_oh(
 ) -> Result<Vec<u8>, FormatError> {
     let mut w = ObjectHeaderWriter::new();
     add_datatype(&mut w, dt, dt_location);
-    w.add_message(MessageType::Dataspace, ds.serialize(LENGTH_SIZE));
+    w.add_message(MessageType::DATASPACE, ds.serialize(LENGTH_SIZE));
     w.add_message_with_flags(
-        MessageType::FillValue,
+        MessageType::FILL_VALUE,
         crate::fill_value::fill_value_message_v3(fill),
         MessageFlags::CONSTANT,
     );
@@ -153,7 +153,7 @@ pub(crate) fn build_dataset_oh(
     dl.push(1); // class = contiguous
     dl.extend_from_slice(&data_addr.get().to_le_bytes());
     dl.extend_from_slice(&data_size.to_le_bytes());
-    w.add_message(MessageType::DataLayout, dl);
+    w.add_message(MessageType::DATA_LAYOUT, dl);
     add_attributes(&mut w, attrs, attr_info);
     w.serialize()
 }
@@ -166,13 +166,13 @@ fn add_datatype(w: &mut ObjectHeaderWriter, dt: &Datatype, location: &DatatypeLo
     match location.reference_bytes(OFFSET_SIZE) {
         Some(reference) => {
             w.add_message_with_flags(
-                MessageType::Datatype,
+                MessageType::DATATYPE,
                 reference,
                 MessageFlags::CONSTANT | MessageFlags::SHARED,
             );
         }
         None => w.add_message_with_flags(
-            MessageType::Datatype,
+            MessageType::DATATYPE,
             dt.serialize(),
             MessageFlags::CONSTANT,
         ),
@@ -209,7 +209,7 @@ pub(crate) fn build_committed_datatype_oh(
 ) -> Result<Vec<u8>, FormatError> {
     let mut w = ObjectHeaderWriter::new();
     w.add_message_with_flags(
-        MessageType::Datatype,
+        MessageType::DATATYPE,
         dt.serialize(),
         MessageFlags::CONSTANT | MessageFlags::FORBID_SHARING,
     );
@@ -218,7 +218,7 @@ pub(crate) fn build_committed_datatype_oh(
         refcount.push(0); // version
         refcount.extend_from_slice(&references.to_le_bytes());
         w.add_message_with_flags(
-            MessageType::ObjectReferenceCount,
+            MessageType::OBJECT_REFERENCE_COUNT,
             refcount,
             MessageFlags::FORBID_SHARING,
         );
@@ -237,16 +237,16 @@ pub(crate) fn build_group_oh(
     li.push(0); // flags
     li.extend_from_slice(&u64::MAX.to_le_bytes()); // fractal heap addr = UNDEF
     li.extend_from_slice(&u64::MAX.to_le_bytes()); // btree name index addr = UNDEF
-    w.add_message(MessageType::LinkInfo, li);
+    w.add_message(MessageType::LINK_INFO, li);
     // A new-style group (one with a Link Info message) must also carry a Group
     // Info message, or the HDF5 C library refuses to insert links into it:
     // `H5G_obj_insert` reads the Group Info message unconditionally and fails
     // with "message type not found", so the file is readable but not writable by
     // the C library. The minimal body (version 0, no optional fields) leaves the
     // C library to use its defaults (max compact = 8, min dense = 6).
-    w.add_message(MessageType::GroupInfo, vec![0, 0]);
+    w.add_message(MessageType::GROUP_INFO, vec![0, 0]);
     for link in links {
-        w.add_message(MessageType::Link, link.serialize(OFFSET_SIZE));
+        w.add_message(MessageType::LINK, link.serialize(OFFSET_SIZE));
     }
     add_attributes(&mut w, attrs, attr_info);
     w.serialize()
@@ -267,13 +267,16 @@ fn add_attributes(
     attr_info: Option<&[u8]>,
 ) {
     if let Some(message) = attr_info {
-        w.add_message(MessageType::AttributeInfo, message.to_vec());
+        w.add_message(MessageType::ATTRIBUTE_INFO, message.to_vec());
     } else {
         if !attrs.is_empty() {
-            w.add_message(MessageType::AttributeInfo, compact_attribute_info_message());
+            w.add_message(
+                MessageType::ATTRIBUTE_INFO,
+                compact_attribute_info_message(),
+            );
         }
         for attr in attrs {
-            w.add_message(MessageType::Attribute, attr.serialize(LENGTH_SIZE));
+            w.add_message(MessageType::ATTRIBUTE, attr.serialize(LENGTH_SIZE));
         }
     }
 }
@@ -1393,7 +1396,7 @@ impl FileWriter {
                 // HDF5 2.2.0). Neither must-understand bit is among them, so an older reader
                 // still opens the file.
                 oh.add_message_with_flags(
-                    MessageType::FileSpaceInfo,
+                    MessageType::FILE_SPACE_INFO,
                     info.serialize(),
                     MessageFlags::FORBID_SHARING | MessageFlags::MARK_IF_UNKNOWN,
                 );
@@ -3307,7 +3310,7 @@ impl FileWriter {
                 );
                 let mut oh = ObjectHeaderWriter::new();
                 oh.add_message_with_flags(
-                    MessageType::FileSpaceInfo,
+                    MessageType::FILE_SPACE_INFO,
                     info.serialize(),
                     MessageFlags::FORBID_SHARING | MessageFlags::MARK_IF_UNKNOWN,
                 );
@@ -3765,7 +3768,7 @@ impl FileWriter {
                 info.eoa_pre_fsm = eof_addr2 - ub as u64;
                 let mut oh = ObjectHeaderWriter::new();
                 oh.add_message_with_flags(
-                    MessageType::FileSpaceInfo,
+                    MessageType::FILE_SPACE_INFO,
                     info.serialize(),
                     MessageFlags::FORBID_SHARING | MessageFlags::MARK_IF_UNKNOWN,
                 );
@@ -3815,7 +3818,7 @@ mod tests {
         let types: Vec<MessageType> = hdr.messages.iter().map(|m| m.msg_type).collect();
         assert_eq!(
             types,
-            vec![MessageType::Datatype],
+            vec![MessageType::DATATYPE],
             "a singly referenced committed type carries its datatype and nothing else"
         );
         assert_eq!(
@@ -3841,7 +3844,7 @@ mod tests {
         let refcount = hdr
             .messages
             .iter()
-            .find(|m| m.msg_type == MessageType::ObjectReferenceCount)
+            .find(|m| m.msg_type == MessageType::OBJECT_REFERENCE_COUNT)
             .expect("a count above one is stored");
         assert_eq!(
             refcount.data,
@@ -3898,7 +3901,7 @@ mod tests {
         let msg = hdr
             .messages
             .iter()
-            .find(|m| m.msg_type == MessageType::ObjectReferenceCount)?;
+            .find(|m| m.msg_type == MessageType::OBJECT_REFERENCE_COUNT)?;
         Some(u32::from_le_bytes(msg.data[1..5].try_into().unwrap()))
     }
 
@@ -3944,7 +3947,7 @@ mod tests {
         let msg = hdr
             .messages
             .iter()
-            .find(|m| m.msg_type == MessageType::Datatype)
+            .find(|m| m.msg_type == MessageType::DATATYPE)
             .expect("a dataset always has a datatype message");
 
         assert!(
@@ -3989,19 +3992,19 @@ mod tests {
         let dt_data = &hdr
             .messages
             .iter()
-            .find(|m| m.msg_type == MessageType::Datatype)
+            .find(|m| m.msg_type == MessageType::DATATYPE)
             .unwrap()
             .data;
         let ds_data = &hdr
             .messages
             .iter()
-            .find(|m| m.msg_type == MessageType::Dataspace)
+            .find(|m| m.msg_type == MessageType::DATASPACE)
             .unwrap()
             .data;
         let dl_data = &hdr
             .messages
             .iter()
-            .find(|m| m.msg_type == MessageType::DataLayout)
+            .find(|m| m.msg_type == MessageType::DATA_LAYOUT)
             .unwrap()
             .data;
         let (dt, _) = Datatype::parse(dt_data).unwrap();
@@ -4149,7 +4152,7 @@ mod tests {
         let link_info_msg = hdr
             .messages
             .iter()
-            .find(|m| m.msg_type == MessageType::LinkInfo)
+            .find(|m| m.msg_type == MessageType::LINK_INFO)
             .unwrap();
         let link_info = LinkInfoMessage::parse(&link_info_msg.data, sb.offset_size).unwrap();
         assert!(
@@ -4160,14 +4163,14 @@ mod tests {
         let group_info_msg = hdr
             .messages
             .iter()
-            .find(|m| m.msg_type == MessageType::GroupInfo)
+            .find(|m| m.msg_type == MessageType::GROUP_INFO)
             .unwrap();
         assert_eq!(group_info_msg.data, vec![0, 0]);
 
         let link_count = hdr
             .messages
             .iter()
-            .filter(|m| m.msg_type == MessageType::Link)
+            .filter(|m| m.msg_type == MessageType::LINK)
             .count();
         assert_eq!(link_count, 20);
     }
@@ -4291,7 +4294,7 @@ mod tests {
         let info = hdr
             .messages
             .iter()
-            .find(|m| m.msg_type == MessageType::AttributeInfo)
+            .find(|m| m.msg_type == MessageType::ATTRIBUTE_INFO)
             .map(|m| {
                 crate::attribute_info::AttributeInfoMessage::parse(&m.data, sb.offset_size).unwrap()
             })
@@ -5330,7 +5333,7 @@ mod tests {
         .unwrap();
         oh.messages
             .iter()
-            .find(|m| m.msg_type == MessageType::DataLayout)
+            .find(|m| m.msg_type == MessageType::DATA_LAYOUT)
             .expect("a dataset carries a data-layout message")
             .data[0]
     }

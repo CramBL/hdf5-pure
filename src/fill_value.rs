@@ -249,8 +249,8 @@ pub(crate) fn fill_value_is_written(
     data: &[u8],
 ) -> Result<bool, FormatError> {
     match msg_type {
-        MessageType::FillValueOld => Ok(true),
-        MessageType::FillValue => {
+        MessageType::FILL_VALUE_OLD => Ok(true),
+        MessageType::FILL_VALUE => {
             let version = *data.first().ok_or(eof(1, data.len()))?;
             match version {
                 // Versions 1 and 2 give the write time a byte of its own.
@@ -324,14 +324,14 @@ pub(crate) fn parse_defined_fill_value(
     match msg_type {
         // Legacy format: a 4-byte size followed by that many value bytes, with no
         // version or "defined" flag. A zero size means no fill value.
-        MessageType::FillValueOld => {
+        MessageType::FILL_VALUE_OLD => {
             let size = read_u32(data, 0)? as usize;
             if size == 0 {
                 return Ok(None);
             }
             Ok(Some(read_bytes(data, 4, size)?))
         }
-        MessageType::FillValue => {
+        MessageType::FILL_VALUE => {
             let version = *data.first().ok_or(eof(1, data.len()))?;
             match version {
                 // Versions 1 and 2 share a 4-byte prefix (version, space
@@ -390,14 +390,14 @@ mod fill_pattern_tests {
         let mut defined = vec![3u8, V3_FLAGS_DEFAULT | 0x20, 4, 0, 0, 0];
         defined.extend_from_slice(&[7u8, 0, 0, 0]);
         assert!(matches!(
-            PaddingFill::from_message(MessageType::FillValue, &defined),
+            PaddingFill::from_message(MessageType::FILL_VALUE, &defined),
             PaddingFill::Value(ref b) if b == &[7u8, 0, 0, 0]
         ));
 
         // The library default: nothing to write, and that is a decided answer.
         let default = vec![3u8, V3_FLAGS_DEFAULT];
         assert!(matches!(
-            PaddingFill::from_message(MessageType::FillValue, &default),
+            PaddingFill::from_message(MessageType::FILL_VALUE, &default),
             PaddingFill::Zero
         ));
 
@@ -405,11 +405,11 @@ mod fill_pattern_tests {
         let mut unknown_version = defined.clone();
         unknown_version[0] = 9;
         assert!(matches!(
-            PaddingFill::from_message(MessageType::FillValue, &unknown_version),
+            PaddingFill::from_message(MessageType::FILL_VALUE, &unknown_version),
             PaddingFill::Unknown
         ));
         assert!(
-            PaddingFill::from_message(MessageType::FillValue, &unknown_version)
+            PaddingFill::from_message(MessageType::FILL_VALUE, &unknown_version)
                 .pattern(elem)
                 .apply(&mut [0u8; 4])
                 .is_err()
@@ -417,7 +417,7 @@ mod fill_pattern_tests {
 
         // Truncated before the fields it declares: likewise undetermined.
         assert!(matches!(
-            PaddingFill::from_message(MessageType::FillValue, &defined[..3]),
+            PaddingFill::from_message(MessageType::FILL_VALUE, &defined[..3]),
             PaddingFill::Unknown
         ));
     }
@@ -499,28 +499,28 @@ mod fill_pattern_tests {
         // and 0x2a the same with IfSet. The C library writes Defined for
         // `H5D_FILL_TIME_NEVER` whenever a fill value is set (`H5Ofill.c`, HDF5 2.1.0).
         let v3 = |flags: u8| vec![3u8, flags, 4, 0, 0, 0, 7, 0, 0, 0];
-        assert!(!fill_value_is_written(MessageType::FillValue, &v3(0x26)).unwrap());
-        assert!(fill_value_is_written(MessageType::FillValue, &v3(0x2a)).unwrap());
-        assert!(fill_value_is_written(MessageType::FillValue, &v3(0x22)).unwrap());
+        assert!(!fill_value_is_written(MessageType::FILL_VALUE, &v3(0x26)).unwrap());
+        assert!(fill_value_is_written(MessageType::FILL_VALUE, &v3(0x2a)).unwrap());
+        assert!(fill_value_is_written(MessageType::FILL_VALUE, &v3(0x22)).unwrap());
 
         // Versions 1 and 2: a byte of its own at index 2.
         for version in [1u8, 2] {
             let msg = |write_time: u8| vec![version, 2, write_time, 1, 4, 0, 0, 0, 7, 0, 0, 0];
-            assert!(!fill_value_is_written(MessageType::FillValue, &msg(1)).unwrap());
-            assert!(fill_value_is_written(MessageType::FillValue, &msg(0)).unwrap());
-            assert!(fill_value_is_written(MessageType::FillValue, &msg(2)).unwrap());
+            assert!(!fill_value_is_written(MessageType::FILL_VALUE, &msg(1)).unwrap());
+            assert!(fill_value_is_written(MessageType::FILL_VALUE, &msg(0)).unwrap());
+            assert!(fill_value_is_written(MessageType::FILL_VALUE, &msg(2)).unwrap());
         }
 
         // The legacy message has no write time to read.
         assert!(
-            fill_value_is_written(MessageType::FillValueOld, &[4, 0, 0, 0, 7, 0, 0, 0]).unwrap()
+            fill_value_is_written(MessageType::FILL_VALUE_OLD, &[4, 0, 0, 0, 7, 0, 0, 0]).unwrap()
         );
 
         // Truncated and unrecognized messages error rather than guessing.
-        assert!(fill_value_is_written(MessageType::FillValue, &[]).is_err());
-        assert!(fill_value_is_written(MessageType::FillValue, &[3]).is_err());
-        assert!(fill_value_is_written(MessageType::FillValue, &[2, 0]).is_err());
-        assert!(fill_value_is_written(MessageType::FillValue, &[9, 0]).is_err());
+        assert!(fill_value_is_written(MessageType::FILL_VALUE, &[]).is_err());
+        assert!(fill_value_is_written(MessageType::FILL_VALUE, &[3]).is_err());
+        assert!(fill_value_is_written(MessageType::FILL_VALUE, &[2, 0]).is_err());
+        assert!(fill_value_is_written(MessageType::FILL_VALUE, &[9, 0]).is_err());
     }
 }
 
@@ -572,7 +572,7 @@ mod tests {
     fn v3_defined_round_trips_through_the_parser() {
         let value = 3.5f64.to_le_bytes();
         let msg = fill_value_message_v3(Some(&value));
-        let got = parse_defined_fill_value(MessageType::FillValue, &msg).unwrap();
+        let got = parse_defined_fill_value(MessageType::FILL_VALUE, &msg).unwrap();
         assert_eq!(got.as_deref(), Some(&value[..]));
     }
 
@@ -580,7 +580,7 @@ mod tests {
     fn v3_default_parses_as_no_value() {
         let msg = fill_value_message_v3(None);
         assert_eq!(
-            parse_defined_fill_value(MessageType::FillValue, &msg).unwrap(),
+            parse_defined_fill_value(MessageType::FILL_VALUE, &msg).unwrap(),
             None
         );
     }
@@ -590,7 +590,7 @@ mod tests {
         // Flags 0x1a: the "undefined" bit (bit 4) set, "defined" bit clear.
         let msg = [3u8, 0x1a];
         assert_eq!(
-            parse_defined_fill_value(MessageType::FillValue, &msg).unwrap(),
+            parse_defined_fill_value(MessageType::FILL_VALUE, &msg).unwrap(),
             None
         );
     }
@@ -600,7 +600,7 @@ mod tests {
         // version 2, alloc=2, write=2, defined=1, size=4, value=-7. These are the
         // exact bytes the reference C library writes by default (v2 message).
         let msg = [2u8, 2, 2, 1, 4, 0, 0, 0, 0xf9, 0xff, 0xff, 0xff];
-        let got = parse_defined_fill_value(MessageType::FillValue, &msg).unwrap();
+        let got = parse_defined_fill_value(MessageType::FILL_VALUE, &msg).unwrap();
         assert_eq!(got.as_deref(), Some(&[0xf9, 0xff, 0xff, 0xff][..]));
     }
 
@@ -609,7 +609,7 @@ mod tests {
         // defined byte = 0: the Size and Fill Value fields are absent.
         let msg = [2u8, 2, 2, 0];
         assert_eq!(
-            parse_defined_fill_value(MessageType::FillValue, &msg).unwrap(),
+            parse_defined_fill_value(MessageType::FILL_VALUE, &msg).unwrap(),
             None
         );
     }
@@ -618,7 +618,7 @@ mod tests {
     fn v1_defined_parses_the_value() {
         // version 1 always carries Size and Fill Value; defined=1.
         let msg = [1u8, 2, 2, 1, 2, 0, 0, 0, 0xed, 0xfe];
-        let got = parse_defined_fill_value(MessageType::FillValue, &msg).unwrap();
+        let got = parse_defined_fill_value(MessageType::FILL_VALUE, &msg).unwrap();
         assert_eq!(got.as_deref(), Some(&[0xed, 0xfe][..]));
     }
 
@@ -627,7 +627,7 @@ mod tests {
         // version 1 carries the fields but marks the value undefined (defined=0).
         let msg = [1u8, 2, 2, 0, 4, 0, 0, 0, 1, 2, 3, 4];
         assert_eq!(
-            parse_defined_fill_value(MessageType::FillValue, &msg).unwrap(),
+            parse_defined_fill_value(MessageType::FILL_VALUE, &msg).unwrap(),
             None
         );
     }
@@ -636,7 +636,7 @@ mod tests {
     fn old_message_parses_the_value() {
         // Legacy 0x0004 message: size 4, value bytes.
         let msg = [4u8, 0, 0, 0, 10, 20, 30, 40];
-        let got = parse_defined_fill_value(MessageType::FillValueOld, &msg).unwrap();
+        let got = parse_defined_fill_value(MessageType::FILL_VALUE_OLD, &msg).unwrap();
         assert_eq!(got.as_deref(), Some(&[10, 20, 30, 40][..]));
     }
 
@@ -644,7 +644,7 @@ mod tests {
     fn old_message_zero_size_is_no_value() {
         let msg = [0u8, 0, 0, 0];
         assert_eq!(
-            parse_defined_fill_value(MessageType::FillValueOld, &msg).unwrap(),
+            parse_defined_fill_value(MessageType::FILL_VALUE_OLD, &msg).unwrap(),
             None
         );
     }
@@ -654,7 +654,7 @@ mod tests {
         // Defined v3 flags but the size field is cut short.
         let msg = [3u8, 0x2a, 4, 0];
         assert!(matches!(
-            parse_defined_fill_value(MessageType::FillValue, &msg),
+            parse_defined_fill_value(MessageType::FILL_VALUE, &msg),
             Err(FormatError::UnexpectedEof { .. })
         ));
     }
@@ -664,7 +664,7 @@ mod tests {
         // Declares 8 value bytes but supplies only 2.
         let msg = [3u8, 0x2a, 8, 0, 0, 0, 0xaa, 0xbb];
         assert!(matches!(
-            parse_defined_fill_value(MessageType::FillValue, &msg),
+            parse_defined_fill_value(MessageType::FILL_VALUE, &msg),
             Err(FormatError::UnexpectedEof { .. })
         ));
     }
@@ -673,7 +673,7 @@ mod tests {
     fn unknown_version_errors() {
         let msg = [9u8, 0];
         assert!(matches!(
-            parse_defined_fill_value(MessageType::FillValue, &msg),
+            parse_defined_fill_value(MessageType::FILL_VALUE, &msg),
             Err(FormatError::UnsupportedFillValueVersion(9))
         ));
     }
@@ -681,7 +681,7 @@ mod tests {
     #[test]
     fn empty_body_errors() {
         assert!(matches!(
-            parse_defined_fill_value(MessageType::FillValue, &[]),
+            parse_defined_fill_value(MessageType::FILL_VALUE, &[]),
             Err(FormatError::UnexpectedEof { .. })
         ));
     }

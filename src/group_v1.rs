@@ -326,19 +326,19 @@ mod tests {
         let dt_data = &hdr
             .messages
             .iter()
-            .find(|m| m.msg_type == MessageType::Datatype)
+            .find(|m| m.msg_type == MessageType::DATATYPE)
             .unwrap()
             .data;
         let ds_data = &hdr
             .messages
             .iter()
-            .find(|m| m.msg_type == MessageType::Dataspace)
+            .find(|m| m.msg_type == MessageType::DATASPACE)
             .unwrap()
             .data;
         let dl_data = &hdr
             .messages
             .iter()
-            .find(|m| m.msg_type == MessageType::DataLayout)
+            .find(|m| m.msg_type == MessageType::DATA_LAYOUT)
             .unwrap()
             .data;
         let (dt, _) = crate::datatype::Datatype::parse(dt_data).unwrap();
@@ -362,7 +362,7 @@ mod tests {
         let sym_msg = root_header
             .messages
             .iter()
-            .find(|m| m.msg_type == MessageType::SymbolTable)
+            .find(|m| m.msg_type == MessageType::SYMBOL_TABLE)
             .unwrap();
         SymbolTableMessage::parse(&sym_msg.data, sb.offset_size).unwrap()
     }
