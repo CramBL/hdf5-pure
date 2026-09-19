@@ -891,10 +891,11 @@ mod tests {
 
     #[cfg(feature = "std")]
     #[test]
-    fn streaming_v1_message_overrunning_chunk0_matches_buffered() {
+    fn version_1_message_overrunning_chunk0_is_rejected() {
         // Regression for #140: a v1 chunk 0 message whose data overruns the declared
-        // object header size (`header_data_size`). All parser paths stop at the chunk
-        // boundary, so the malformed continuation is not read or followed.
+        // object header size (`header_data_size`) is malformed. All parser paths
+        // reject the message at the chunk boundary, so the continuation is not
+        // followed.
         let cont_msg_data = [0xBE, 0xEF];
         let mut cont_chunk = Vec::new();
         cont_chunk.extend_from_slice(&0x03u16.to_le_bytes()); // Datatype
@@ -928,9 +929,6 @@ mod tests {
         file_data[..header.len()].copy_from_slice(&header);
         file_data[cont_offset..cont_offset + cont_chunk.len()].copy_from_slice(&cont_chunk);
 
-        // All three backends agree on an empty message list because the overrunning
-        // continuation is dropped and its Datatype message is unreachable.
-        parse_three_ways(file_data.clone(), 8, 8, BaseAddress::ZERO);
         let buffered = ObjectHeader::parse_with_base(
             &file_data,
             AccessMode::ReadOnly,
@@ -938,9 +936,37 @@ mod tests {
             8,
             8,
             BaseAddress::ZERO,
-        )
-        .unwrap();
-        assert_eq!(buffered.messages.len(), 0);
+        );
+        assert!(
+            matches!(buffered, Err(FormatError::UnexpectedEof { .. })),
+            "buffered parser accepted a v1 message crossing the chunk boundary"
+        );
+
+        let from_mem = ObjectHeader::parse_from_source(
+            &BytesSource::new(&file_data),
+            AccessMode::ReadOnly,
+            0,
+            8,
+            8,
+            BaseAddress::ZERO,
+        );
+        assert!(
+            matches!(from_mem, Err(FormatError::UnexpectedEof { .. })),
+            "memory source parser accepted a v1 message crossing the chunk boundary"
+        );
+
+        let from_seek = ObjectHeader::parse_from_source(
+            &crate::ReadSeekSource::new(std::io::Cursor::new(file_data)).unwrap(),
+            AccessMode::ReadOnly,
+            0,
+            8,
+            8,
+            BaseAddress::ZERO,
+        );
+        assert!(
+            matches!(from_seek, Err(FormatError::UnexpectedEof { .. })),
+            "seek source parser accepted a v1 message crossing the chunk boundary"
+        );
     }
 
     #[test]

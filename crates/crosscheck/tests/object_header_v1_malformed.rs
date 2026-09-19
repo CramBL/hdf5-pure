@@ -10,10 +10,8 @@
 //! The malformed size remains eight-byte aligned. This isolates chunk-boundary
 //! handling from message-size alignment validation.
 //!
-//! The current hdf5-pure parser stops before retaining the overrunning message
-//! and returns the preceding valid messages. The reference C library is expected
-//! to reject the same malformed object header. This test pins that difference
-//! before parser validation is tightened.
+//! The test verifies that `libhdf5` and both hdf5-pure parser backends reject the
+//! malformed object header.
 
 use std::collections::BTreeSet;
 use std::fs;
@@ -164,7 +162,7 @@ fn file_layout(bytes: &[u8]) -> FileLayout {
     let address_fields = match superblock_version {
         0 => 24,
         1 => 32,
-        _ => unreachable!(),
+        _ => panic!("unreachable"),
     };
 
     let base_address = read_uint(bytes, address_fields, offset_size);
@@ -279,9 +277,9 @@ fn chunk_records(bytes: &[u8], chunk_start: usize, chunk_end: usize) -> Vec<Reco
 
 /// Walks version 1 object-header chunks and locates the root attribute.
 ///
-/// A candidate Attribute message may be followed by Nil messages in its physical
-/// chunk. No meaningful message may follow it because the malformed size causes
-/// hdf5-pure's current parser to stop at that Attribute record.
+/// A candidate Attribute message may be followed only by Nil messages in its
+/// physical chunk. This keeps the mutation from covering any later meaningful
+/// message when the Attribute body is extended to cross the chunk boundary.
 fn find_root_attribute(bytes: &[u8], layout: FileLayout) -> AttributeCandidate {
     fn walk(
         bytes: &[u8],
@@ -477,7 +475,7 @@ fn read_with_pure_streaming(path: &Path) -> Result<Vec<i32>, hdf5_pure::Error> {
 }
 
 #[test]
-fn a_v1_message_body_overrun_is_rejected_by_libhdf5_but_currently_soft_stops_in_pure() {
+fn a_v1_message_body_overrun_is_rejected_by_all_readers() {
     hdf5::silence_errors(true);
 
     let dir = tempdir().unwrap();
@@ -539,18 +537,17 @@ fn a_v1_message_body_overrun_is_rejected_by_libhdf5_but_currently_soft_stops_in_
         hdf5::library_version()
     );
 
-    // These deliberately pin the current hdf5-pure behavior. The v1 parser
-    // reaches the malformed Attribute message after the root group's structural
-    // metadata, notices that its body crosses the chunk boundary, and stops.
-    // The preceding Symbol Table message remains available for path resolution.
-    assert_eq!(
-        read_with_pure_buffered(&malformed_path).unwrap(),
-        vec![42],
-        "buffered hdf5-pure no longer soft-stops on the malformed v1 Attribute"
+    let buffered_result = read_with_pure_buffered(&malformed_path);
+    assert!(
+        buffered_result.is_err(),
+        "buffered hdf5-pure accepted a v1 Attribute message whose body overruns \
+         its declared object-header chunk: {buffered_result:?}"
     );
-    assert_eq!(
-        read_with_pure_streaming(&malformed_path).unwrap(),
-        vec![42],
-        "streaming hdf5-pure no longer soft-stops on the malformed v1 Attribute"
+
+    let streaming_result = read_with_pure_streaming(&malformed_path);
+    assert!(
+        streaming_result.is_err(),
+        "streaming hdf5-pure accepted a v1 Attribute message whose body overruns \
+         its declared object-header chunk: {streaming_result:?}"
     );
 }
