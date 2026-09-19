@@ -1,6 +1,7 @@
 # The subject line is a sentence: a capital first letter and no trailing
 # period. An optional lowercase tag for the part of the crate the commit
-# touches may precede it, as in "edit: Keep the header's timestamps".
+# touches may precede it. Multiword tags use hyphens, as in
+# "object-header: Keep the header's timestamps".
 extends: existence
 message: "Commit subject: '%s'. A capital first letter after an optional lowercase 'tag: ', no trailing period."
 level: error
