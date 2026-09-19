@@ -68,7 +68,6 @@ fn write_earliest_file(path: &Path) {
     dataset
         .write_raw(&[42])
         .expect("write control dataset value");
-    drop(dataset);
 
     // Creates one optional root-header message after the group has otherwise
     // been populated. Depending on the HDF5 release, the message may reside in
@@ -99,7 +98,6 @@ fn write_earliest_file_with_continuation(path: &Path) {
     dataset
         .write_raw(&[42])
         .expect("write control dataset value");
-    drop(dataset);
 
     // A large attribute added after creation forces the version 1 root object
     // header to allocate additional message storage.
@@ -113,8 +111,6 @@ fn write_earliest_file_with_continuation(path: &Path) {
         .write_raw(&vec![0x5a; 1024])
         .expect("write large root attribute");
 
-    drop(marker);
-    drop(root);
     file.close().expect("close control file");
 }
 
@@ -796,14 +792,17 @@ fn a_v1_continuation_with_a_trailing_partial_prefix_has_versioned_libhdf5_behavi
     // hdf5-pure currently follows the behavior of libhdf5 releases before 1.14:
     // complete records are consumed and the remaining bytes shorter than a message
     // prefix are ignored.
-    assert_eq!(
-        read_with_pure_buffered(&malformed_path).unwrap(),
-        vec![42],
-        "buffered hdf5-pure rejected the currently accepted trailing byte"
+    let buffered_result = read_with_pure_buffered(&malformed_path);
+    assert!(
+        buffered_result.is_err(),
+        "buffered hdf5-pure accepted a v1 continuation ending with a partial \
+         message prefix: {buffered_result:?}"
     );
-    assert_eq!(
-        read_with_pure_streaming(&malformed_path).unwrap(),
-        vec![42],
-        "streaming hdf5-pure rejected the currently accepted trailing byte"
+
+    let streaming_result = read_with_pure_streaming(&malformed_path);
+    assert!(
+        streaming_result.is_err(),
+        "streaming hdf5-pure accepted a v1 continuation ending with a partial \
+         message prefix: {streaming_result:?}"
     );
 }

@@ -1,3 +1,8 @@
+#![allow(
+    clippy::unreachable,
+    reason = "TODO: make unreachable in the type system"
+)]
+
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 
@@ -142,10 +147,15 @@ impl ObjectHeader {
         let end = offset.saturating_add(length);
 
         while pos < end {
-            let Some((record, record_len)) =
-                parse_message_record(&data[pos..end], context.access_mode)?
+            let remaining = &data[pos..end];
+            let Some((record, record_len)) = parse_message_record(remaining, context.access_mode)?
             else {
-                break;
+                // A version 1 continuation is traversed to its declared boundary.
+                // Any non-empty remainder must therefore contain another complete
+                // message prefix.
+                bytes::ensure_len(remaining, 0, MESSAGE_PREFIX_LEN)?;
+
+                unreachable!("a complete message prefix must produce a record");
             };
 
             if record.msg_type != MessageType::NIL && filter.keeps(record.msg_type, record.body) {
@@ -214,6 +224,7 @@ impl ObjectHeader {
             address + 16,
             header_data_size,
             num_messages,
+            false,
             MAX_V1_CONTINUATION_DEPTH,
             &mut messages,
             filter,
@@ -240,6 +251,7 @@ impl ObjectHeader {
         region_addr: u64,
         region_len: u64,
         max_messages: u16,
+        reject_partial_prefix: bool,
         depth_remaining: u16,
         messages: &mut Vec<HeaderMessage>,
         filter: &mut MessageFilter<'_>,
@@ -253,9 +265,14 @@ impl ObjectHeader {
         let mut count = 0u16;
 
         while count < max_messages && pos < end {
-            let Some((record, record_len)) =
-                parse_message_record(&region[pos..end], context.access_mode)?
+            let remaining = &region[pos..end];
+            let Some((record, record_len)) = parse_message_record(remaining, context.access_mode)?
             else {
+                if reject_partial_prefix {
+                    bytes::ensure_len(remaining, 0, MESSAGE_PREFIX_LEN)?;
+                    unreachable!("a complete message prefix must produce a record");
+                }
+
                 break;
             };
 
@@ -287,6 +304,7 @@ impl ObjectHeader {
                     address,
                     continuation.length,
                     u16::MAX,
+                    true,
                     depth_remaining - 1,
                     messages,
                     filter,
