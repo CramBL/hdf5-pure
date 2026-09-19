@@ -5,7 +5,7 @@ use byteorder::{ByteOrder, LittleEndian};
 
 use super::{HeaderMessage, MessageFilter, ObjectHeader, ParseContext};
 use crate::address::StoredAddress;
-use crate::bytes::{ensure_len, read_length, read_offset};
+use crate::bytes;
 use crate::convert::Narrow;
 use crate::error::FormatError;
 use crate::message_flags::MessageFlags;
@@ -23,7 +23,7 @@ impl ObjectHeader {
     ) -> Result<ObjectHeader, FormatError> {
         // version(1) + reserved(1) + num_messages(2) + ref_count(4) + header_size(4) = 12
         // then pad to 8-byte alignment from start of header
-        ensure_len(data, offset, 12)?;
+        bytes::ensure_len(data, offset, 12)?;
 
         let version = data[offset];
         if version != 1 {
@@ -43,7 +43,7 @@ impl ObjectHeader {
                 available: data.len(),
             })?;
 
-        ensure_len(data, msg_start, header_data_size)?;
+        bytes::ensure_len(data, msg_start, header_data_size)?;
 
         // The v1 header states its own message count, so the vector is sized
         // once. The count is capped by what the chunk can physically hold.
@@ -80,7 +80,7 @@ impl ObjectHeader {
                 break;
             }
 
-            ensure_len(data, pos, msg_data_size)?;
+            bytes::ensure_len(data, pos, msg_data_size)?;
             let msg_type = MessageType::from_u16(msg_type_raw);
 
             if let Some(id) = msg_type.unknown_id()
@@ -106,23 +106,22 @@ impl ObjectHeader {
             // body because a filtered parse may not have kept the message.
             // Continuations are followed independently of the filter.
             if msg_type == MessageType::OBJECT_HEADER_CONTINUATION
-                && msg_body.len() >= (context.offset_size as usize + context.length_size as usize)
+                && let Some(continuation) = parse_continuation(msg_body, context)?
             {
-                let cont_offset_raw =
-                    StoredAddress::new(read_offset(msg_body, 0, context.offset_size)?);
-                let cont_offset = context.base_address.absolute(cont_offset_raw)?.to_usize()?;
-                let cont_length =
-                    read_length(msg_body, context.offset_size as usize, context.length_size)?
-                        .to_usize()?;
-                // Parse continuation block (v1: just raw messages, no signature)
+                let offset = context
+                    .base_address
+                    .absolute(continuation.address)?
+                    .to_usize()?;
+
                 let cont_msgs = Self::parse_v1_continuation(
                     data,
                     context,
-                    cont_offset,
-                    cont_length,
-                    32, // max continuation depth
+                    offset,
+                    continuation.length.to_usize()?,
+                    MAX_V1_CONTINUATION_DEPTH,
                     filter,
                 )?;
+
                 messages.extend(cont_msgs);
             }
         }
@@ -150,7 +149,7 @@ impl ObjectHeader {
         if depth_remaining == 0 {
             return Err(FormatError::NestingDepthExceeded);
         }
-        ensure_len(data, offset, length)?;
+        bytes::ensure_len(data, offset, length)?;
         let mut messages = Vec::new();
         let mut pos = offset;
         let end = offset.saturating_add(length);
@@ -189,22 +188,22 @@ impl ObjectHeader {
             // Recursive continuations, read from the body where it lies for the
             // reason [`parse_v1`] gives.
             if msg_type == MessageType::OBJECT_HEADER_CONTINUATION
-                && msg_body.len() >= (context.offset_size as usize + context.length_size as usize)
+                && let Some(continuation) = parse_continuation(msg_body, context)?
             {
-                let cont_offset_raw =
-                    StoredAddress::new(read_offset(msg_body, 0, context.offset_size)?);
-                let cont_offset = context.base_address.absolute(cont_offset_raw)?.to_usize()?;
-                let cont_length =
-                    read_length(msg_body, context.offset_size as usize, context.length_size)?
-                        .to_usize()?;
+                let offset = context
+                    .base_address
+                    .absolute(continuation.address)?
+                    .to_usize()?;
+
                 let cont_msgs = Self::parse_v1_continuation(
                     data,
                     context,
-                    cont_offset,
-                    cont_length,
+                    offset,
+                    continuation.length.to_usize()?,
                     depth_remaining - 1,
                     filter,
                 )?;
+
                 messages.extend(cont_msgs);
             }
         }
@@ -304,12 +303,8 @@ impl ObjectHeader {
 
             // Decode the continuation pointer (if any) from the body where it
             // lies: it is followed whatever the filter kept, as in [`parse_v1`].
-            let cont = if msg_type == MessageType::OBJECT_HEADER_CONTINUATION
-                && msg_data.len() >= (context.offset_size as usize + context.length_size as usize)
-            {
-                let off_raw = StoredAddress::new(read_offset(msg_data, 0, context.offset_size)?);
-                let len = read_length(msg_data, context.offset_size as usize, context.length_size)?;
-                Some((off_raw, len))
+            let continuation = if msg_type == MessageType::OBJECT_HEADER_CONTINUATION {
+                parse_continuation(msg_data, context)?
             } else {
                 None
             };
@@ -324,13 +319,14 @@ impl ObjectHeader {
                 });
             }
 
-            if let Some((off_raw, len)) = cont {
-                let cont_off = context.base_address.absolute(off_raw)?;
+            if let Some(continuation) = continuation {
+                let address = context.base_address.absolute(continuation.address)?;
+
                 Self::parse_v1_chunk_from_source(
                     source,
                     context,
-                    cont_off,
-                    len,
+                    address,
+                    continuation.length,
                     u16::MAX,
                     depth_remaining - 1,
                     messages,
@@ -341,4 +337,26 @@ impl ObjectHeader {
 
         Ok(())
     }
+}
+
+fn parse_continuation(
+    data: &[u8],
+    context: ParseContext,
+) -> Result<Option<Continuation>, FormatError> {
+    let required_len = usize::from(context.offset_size) + usize::from(context.length_size);
+
+    if data.len() < required_len {
+        return Ok(None);
+    }
+
+    let address = StoredAddress::new(bytes::read_offset(data, 0, context.offset_size)?);
+    let length = bytes::read_length(data, usize::from(context.offset_size), context.length_size)?;
+
+    Ok(Some(Continuation { address, length }))
+}
+
+#[derive(Clone, Copy)]
+struct Continuation {
+    address: StoredAddress,
+    length: u64,
 }
