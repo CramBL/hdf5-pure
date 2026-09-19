@@ -4,14 +4,19 @@ Pure-Rust HDF5 reader, writer, and in-place editor. No C dependencies, no build 
 
 **📖 [Documentation (docs.rs)](https://docs.rs/hdf5-pure)** · [Examples](examples) · [Changelog](CHANGELOG.md)
 
+> [!NOTE]
+> Fully compatible with HDF5 1.8, 1.10, 1.12, 1.14, and 2+. Checked in CI against `libhdf5`.
+
 ## Features
 
 - **Write** HDF5 files with datasets, groups, attributes, and nested hierarchies
 - **Read** HDF5 files (v0/v1/v2/v3 superblocks, v1/v2 object headers, contiguous/chunked/compact storage)
-- **Edit in place** — add, delete (`H5Ldelete`), and copy (`H5Ocopy`) datasets and groups in an existing file without rewriting it from scratch; the cost is proportional to what changes, not the file size, and an exclusive OS advisory lock guards against concurrent writers
-- **SWMR** (single-writer / multiple-reader) append and refreshing read for 1-D unlimited datasets, interoperable with the reference C library and h5py
-- **No C dependencies** — pure Rust, so it compiles to `wasm32-unknown-unknown` and to bare-metal `no_std` (with `alloc`)
-- **MATLAB v7.3 compatible** — userblock support, fixed-length ASCII attributes, variable-length string arrays, object references
+- **Edit in place** Incremental add, delete (`H5Ldelete`), and copy (`H5Ocopy`) for datasets and groups.
+- **SWMR** (single-writer / multiple-reader) append and refreshing read for 1-D unlimited datasets, interoperable with the `libhdf5` and `h5py`
+- **Free Space Management** persistent tracking and reuse of space from deleted objects across sessions to prevent file bloat during in-place edits
+- **Tunable metadata cache** configure memory limits and eviction behavior to optimize I/O performance for heavy read/write workloads
+- **No C dependencies** pure Rust, with support for WASM and bare-metal targets (`no_std` with `alloc`)
+- **MATLAB v7.3 compatible** userblock support, fixed-length ASCII attributes, variable-length string arrays, object references
 - Deflate, shuffle, LZF, and scale-offset (lossless integer / lossy float) compression
 - Compound types, enumerations, array types
 - Complex number datasets (as compound `{real, imag}`)
@@ -20,18 +25,18 @@ Pure-Rust HDF5 reader, writer, and in-place editor. No C dependencies, no build 
 
 Runnable, self-checking examples live in [`examples/`](examples). Run any with `cargo run --example <name>`:
 
-| Example | What it shows |
-|---|---|
-| `quickstart` | Build a file in memory and read it back |
-| `generic_io` | Read/write generically over the element type (`with_data` / `read::<T>`) |
-| `groups_and_attributes` | Nested groups and attributes of several types |
-| `compression` | Deflate, shuffle, scale-offset, and LZF filters |
-| `compound_types` | Compound (struct-like) records and complex numbers |
-| `ndarray_io` | N-dimensional array I/O (needs `--features ndarray`) |
-| `edit_in_place` | Add, copy, and delete objects with `File::open_rw` |
-| `repack` | Shrink a file and drop objects with `repack` |
-| `swmr` | Single-writer / multiple-reader append and refresh |
-| `file_space` | File-space strategy and persistent free-space reuse across sessions |
+| Example                 | What it shows                                                            |
+| ----------------------- | ------------------------------------------------------------------------ |
+| `quickstart`            | Build a file in memory and read it back                                  |
+| `generic_io`            | Read/write generically over the element type (`with_data` / `read::<T>`) |
+| `groups_and_attributes` | Nested groups and attributes of several types                            |
+| `compression`           | Deflate, shuffle, scale-offset, and LZF filters                          |
+| `compound_types`        | Compound (struct-like) records and complex numbers                       |
+| `ndarray_io`            | N-dimensional array I/O (needs `--features ndarray`)                     |
+| `edit_in_place`         | Add, copy, and delete objects with `File::open_rw`                       |
+| `repack`                | Shrink a file and drop objects with `repack`                             |
+| `swmr`                  | Single-writer / multiple-reader append and refresh                       |
+| `file_space`            | File-space strategy and persistent free-space reuse across sessions      |
 
 The `matlab_fixtures` example (run with `--features serde`) writes `.mat` v7.3 files for verification in MATLAB/Octave.
 
@@ -48,16 +53,15 @@ Or add it to `Cargo.toml` by hand:
 hdf5-pure = "0.46"
 ```
 
-That pulls the default feature set (`std`, `checksum`, and `deflate`), which covers file I/O, the high-level reader and writer API, and deflate compression. The [Cargo features](#cargo-features) table below lists the rest. The crate is edition 2024 and builds on stable Rust 1.89 or newer.
+That pulls the default feature set (`std`, `checksum`, and `deflate`), which covers file I/O, the high-level reader and writer API, and deflate compression. The [Cargo features](#cargo-features) table below lists the rest.
 
 For WebAssembly, keep the default features and add the target:
 
 ```console
-$ rustup target add wasm32-unknown-unknown
 $ cargo build --target wasm32-unknown-unknown
 ```
 
-A WASM build uses the in-memory API: `FileBuilder::finish` serializes the file into a `Vec<u8>` and `File::from_bytes` parses one. The path-based entry points (`File::open`, `FileBuilder::write`, `File::open_rw`, `File::open_swmr_writer`) compile for that target, and in the browser they have no filesystem to reach.
+A WASM build uses the in-memory API: `FileBuilder::finish` serializes the file into a `Vec<u8>` and `File::from_bytes` parses one.
 
 ## Quick start
 
@@ -125,7 +129,7 @@ let file = File::from_bytes(fb.finish().unwrap()).unwrap();
 let counts: Vec<u32> = load(&file, "counts").unwrap();  // [1, 2, 3]
 ```
 
-`read::<T>()` requests delivery as `T` (coercing like `read_f64`); it is not an
+`read::<T>()` requests delivery as `T` (coercing like `read_f64`). it is not an
 assertion about the stored datatype, so pick `T` to match the stored type for a
 lossless read. For N-dimensional arrays see the `ndarray` feature below.
 
@@ -149,7 +153,13 @@ file.commit().unwrap();  // apply staged edits in place
 
 Contiguous and chunked datasets — the latter with any supported filter (deflate, shuffle, fletcher32, scale-offset, lzf) and optionally extensible (unlimited) dimensions — and compact-link groups are supported, and the editor edits files across every on-disk format the reference C library and h5py produce — version 0/1/2/3 superblocks, single- and multi-chunk object headers (a multi-chunk header is collapsed into one chunk on rewrite, and a version 0/1 symbol-table group on the edited path is converted to the latest compact-link format). It refuses, rather than silently degrade the file, anything it cannot reproduce faithfully — a chunked or extensible variable-length addition, dense-storage headers on the edited path, or copying a version-1 object. Within a session the space a deletion frees — for contiguous and chunked datasets alike, including the chunk index — is reused for later writes and the file is truncated when the freed bytes reach the end, so add/delete churn stays bounded instead of only ever growing; for guaranteed compaction across a reopen, see `repack` below.
 
-Every commit and every immediate append ends in an `fsync` by default. `FileAccessProperties::with_sync_policy(SyncPolicy::OnClose)` issues none during the session — the cadence is the application's, through `File::sync` — and one at `close`, which is close to what the reference C library does, whose default `sec2` driver installs no flush callback at all. Writes reach the operating system by the time the commit or append making them returns, under either policy, so what `OnClose` gives up is durability against power loss *within* the session, not visibility to other processes on the machine. (`FileAccessProperties::with_page_buffer_size`, off by default, is the one setting that changes this: it holds dirty pages across those barriers, and marks the file in the superblock for the session's life so a writer that dies leaves one every reader refuses rather than one that reads clean.) The closing barrier is not optional, because `close` and `drop` write and then destroy the handle that could have ordered those writes.
+By default, every commit and immediate append operation concludes with an `fsync`. `FileAccessProperties::with_sync_policy(SyncPolicy::OnClose)` doesn't call `fsync` during the session - delegating that control to the application via `File::sync` - and performs a single `fsync` upon closure. This is consistent with `libhdf5`, whose default `sec2` driver omits flush callbacks entirely.
+
+Under either policy, the library executes `write` system calls before the commit or append operation returns. Therefore, `SyncPolicy::OnClose` sacrifices durability against power loss during the active session, but maintains write visibility to concurrent processes on the same machine through the OS page cache.
+
+(`FileAccessProperties::with_page_buffer_size`, which is off by default, alters this behavior. It retains dirty pages in user space across operation boundaries and marks the superblock for the duration of the write session. If the writer terminates abnormally, it leaves the file in an inconsistent state that subsequent readers reject.)
+
+The closing synchronization barrier is mandatory. Both `close` and `drop` flush terminal metadata and subsequently destroy the OS file handle required to synchronize those modifications.
 
 `File::open_rw` takes an exclusive OS advisory lock (the analogue of `H5Pset_file_locking`), so a second editor or any concurrent writer gets `Error::FileLocked` rather than racing on the file. The kernel releases the lock on any process exit, including a crash, so a crashed editor never leaves a stale lock behind. Override the policy with `FileAccessProperties::with_locking` and the `FileLocking` enum, passed to `File::open_rw_with_options`, or set `HDF5_USE_FILE_LOCKING=FALSE` for filesystems (such as some network mounts) where locking is unavailable. `File::open_swmr_writer` and the readers intentionally take no lock: SWMR is single-writer by contract and built for concurrent reads. What guards the SWMR writer instead is the superblock's status-flags byte, which outlives the process that set it: while a SWMR writer holds the file, every other open is refused with `Error::FileMarkedInUse` (as `H5Fopen` refuses it), and `File::clear_swmr_flag` clears a mark a crashed writer left. An `open_rw` editor is guarded only by the OS lock — it reads that byte but, unlike the C library, does not raise it. The one exception is a session given `FileAccessProperties::with_page_buffer_size`, which raises the write-access bit for its lifetime precisely so that a writer that dies holding dirty pages leaves a file every reader refuses.
 
@@ -363,21 +373,21 @@ Supported subset: one unlimited dimension, chunked, unfiltered (no compression o
 
 ### Datasets
 
-| Method | HDF5 type |
-|---|---|
-| `with_data` (generic, any scalar below) | Inferred from the element type |
-| `with_f64_data` | IEEE 64-bit float |
-| `with_f32_data` | IEEE 32-bit float |
-| `with_i8_data` / `with_i16_data` / `with_i32_data` / `with_i64_data` | Signed integers |
-| `with_u8_data` / `with_u16_data` / `with_u32_data` / `with_u64_data` | Unsigned integers |
-| `with_complex32_data` | Compound `{real: f32, imag: f32}` |
-| `with_complex64_data` | Compound `{real: f64, imag: f64}` |
-| `with_compound_data` | Arbitrary compound types |
-| `with_compound_values` | Safely encoded numeric tuples |
-| `with_enum_i32_data` / `with_enum_u8_data` | Enumeration types |
-| `with_array_data` | Fixed-size array types |
-| `with_path_references` | Object references (resolved by path) |
-| `with_dtype` + `with_shape` | Empty/zero-dimension datasets |
+| Method                                                               | HDF5 type                            |
+| -------------------------------------------------------------------- | ------------------------------------ |
+| `with_data` (generic, any scalar below)                              | Inferred from the element type       |
+| `with_f64_data`                                                      | IEEE 64-bit float                    |
+| `with_f32_data`                                                      | IEEE 32-bit float                    |
+| `with_i8_data` / `with_i16_data` / `with_i32_data` / `with_i64_data` | Signed integers                      |
+| `with_u8_data` / `with_u16_data` / `with_u32_data` / `with_u64_data` | Unsigned integers                    |
+| `with_complex32_data`                                                | Compound `{real: f32, imag: f32}`    |
+| `with_complex64_data`                                                | Compound `{real: f64, imag: f64}`    |
+| `with_compound_data`                                                 | Arbitrary compound types             |
+| `with_compound_values`                                               | Safely encoded numeric tuples        |
+| `with_enum_i32_data` / `with_enum_u8_data`                           | Enumeration types                    |
+| `with_array_data`                                                    | Fixed-size array types               |
+| `with_path_references`                                               | Object references (resolved by path) |
+| `with_dtype` + `with_shape`                                          | Empty/zero-dimension datasets        |
 
 ### Compound types
 
@@ -428,16 +438,16 @@ The payload limit covers bytes referenced by VL elements and excludes Rust conta
 
 ### Attributes
 
-| Variant | HDF5 encoding |
-|---|---|
-| `AttrValue::F32` / `F64` (+ `…Array`) | Float scalar/array, at that width |
-| `AttrValue::I8` / `I16` / `I32` / `I64` (+ `…Array`) | Signed integer scalar/array, at that width |
-| `AttrValue::U8` / `U16` / `U32` / `U64` (+ `…Array`) | Unsigned integer scalar/array, at that width |
-| `AttrValue::String` / `StringArray` | UTF-8 null-padded string |
-| `AttrValue::AsciiString` | Fixed-length ASCII string |
-| `AttrValue::VarLenString` / `VarLenStringArray` | Variable-length UTF-8 string, scalar or array (global heap) |
-| `AttrValue::VarLenAsciiString` / `VarLenAsciiStringArray` | The same, with `CSET = ASCII` |
-| `AttrValue::VarLenAsciiCharArray` | MATLAB's VLEN sequence of one-byte ASCII strings (global heap) |
+| Variant                                                   | HDF5 encoding                                                  |
+| --------------------------------------------------------- | -------------------------------------------------------------- |
+| `AttrValue::F32` / `F64` (+ `…Array`)                     | Float scalar/array, at that width                              |
+| `AttrValue::I8` / `I16` / `I32` / `I64` (+ `…Array`)      | Signed integer scalar/array, at that width                     |
+| `AttrValue::U8` / `U16` / `U32` / `U64` (+ `…Array`)      | Unsigned integer scalar/array, at that width                   |
+| `AttrValue::String` / `StringArray`                       | UTF-8 null-padded string                                       |
+| `AttrValue::AsciiString`                                  | Fixed-length ASCII string                                      |
+| `AttrValue::VarLenString` / `VarLenStringArray`           | Variable-length UTF-8 string, scalar or array (global heap)    |
+| `AttrValue::VarLenAsciiString` / `VarLenAsciiStringArray` | The same, with `CSET = ASCII`                                  |
+| `AttrValue::VarLenAsciiCharArray`                         | MATLAB's VLEN sequence of one-byte ASCII strings (global heap) |
 
 ## Compression
 
@@ -480,10 +490,10 @@ builder.create_dataset("readings")
     .with_deflate(6);                                // may be followed by deflate
 ```
 
-| Mode | Datatype | Loss |
-|---|---|---|
-| `ScaleOffset::Integer(minbits)` | signed/unsigned integers | lossless |
-| `ScaleOffset::FloatDScale(decimals)` | `f32` / `f64` | lossy to `decimals` digits |
+| Mode                                 | Datatype                 | Loss                       |
+| ------------------------------------ | ------------------------ | -------------------------- |
+| `ScaleOffset::Integer(minbits)`      | signed/unsigned integers | lossless                   |
+| `ScaleOffset::FloatDScale(decimals)` | `f32` / `f64`            | lossy to `decimals` digits |
 
 ### LZF (h5py filter id 32000)
 
@@ -607,21 +617,21 @@ assert_eq!(back, e);
 The top-level value must be a struct (or `HashMap<String, _>`); each field
 becomes a MATLAB variable. Mapping:
 
-| Rust | HDF5 / MATLAB encoding |
-|---|---|
-| `f64`, `f32`, `i*`, `u*` | scalar dataset `[1,1]`, `MATLAB_class = "double"` / `"single"` / `"int*"` / `"uint*"` |
-| `bool` | `uint8` scalar, `MATLAB_class = "logical"` |
-| `String` / `&str` | `uint16` `[1, N]` UTF-16LE, `MATLAB_class = "char"` |
-| `Vec<T>` of numeric `T` | MATLAB `[N, 1]` column vector (HDF5 shape `[1, N]`); `OneDimensionalMode::RowVector` makes it a MATLAB `[1, N]` row |
-| `Matrix<T>` or `Vec<Vec<T>>` of same length | column-major 2-D dataset, HDF5 shape `[cols, rows]` |
-| `Complex64` / `Complex32` / `ComplexI16` / … | compound `{real, imag}` dataset, `MATLAB_class` = the *component* class |
-| nested struct | HDF5 group with `MATLAB_class = "struct"`, `MATLAB_fields` |
-| `Option<T>` (struct field) | `struct([])` if `None`; `NullPolicy::Omit` drops the field instead, `NullPolicy::Error` refuses it |
-| `()`, unit struct, `serde_json::Value::Null` | same as `None`, through `NullPolicy` |
-| `None` / `()` / `Null` at the **root** | a valid file with no variables, byte-identical to what an empty root map writes; only `NullPolicy::Error` refuses it |
-| unit enum variant | UTF-16 char dataset holding the variant name; `UnitVariantEncoding::Index` writes the declaration index as `uint32` instead |
-| empty `Vec<T>` | empty `double` (`[]`); `EmptySequencePolicy::Cell` writes `{}` instead |
-| `Vec<Struct>` / `Vec<Option<T>>` / ragged `Vec<Vec<T>>` | cell array (`MATLAB_class = "cell"`, object references into `#refs#`); `None` slots become `struct([])` |
+| Rust                                                    | HDF5 / MATLAB encoding                                                                                                      |
+| ------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------- |
+| `f64`, `f32`, `i*`, `u*`                                | scalar dataset `[1,1]`, `MATLAB_class = "double"` / `"single"` / `"int*"` / `"uint*"`                                       |
+| `bool`                                                  | `uint8` scalar, `MATLAB_class = "logical"`                                                                                  |
+| `String` / `&str`                                       | `uint16` `[1, N]` UTF-16LE, `MATLAB_class = "char"`                                                                         |
+| `Vec<T>` of numeric `T`                                 | MATLAB `[N, 1]` column vector (HDF5 shape `[1, N]`) - `OneDimensionalMode::RowVector` makes it a MATLAB `[1, N]` row        |
+| `Matrix<T>` or `Vec<Vec<T>>` of same length             | column-major 2-D dataset, HDF5 shape `[cols, rows]`                                                                         |
+| `Complex64` / `Complex32` / `ComplexI16` / …            | compound `{real, imag}` dataset, `MATLAB_class` = the _component_ class                                                     |
+| nested struct                                           | HDF5 group with `MATLAB_class = "struct"`, `MATLAB_fields`                                                                  |
+| `Option<T>` (struct field)                              | `struct([])` if `None`, `NullPolicy::Omit` drops the field instead, `NullPolicy::Error` rejects it                          |
+| `()`, unit struct, `serde_json::Value::Null`            | same as `None`, through `NullPolicy`                                                                                        |
+| `None` / `()` / `Null` at the **root**                  | a valid file with no variables, byte-identical to what an empty root map writes, only `NullPolicy::Error` rejects it        |
+| unit enum variant                                       | UTF-16 char dataset holding the variant name. `UnitVariantEncoding::Index` writes the declaration index as `uint32` instead |
+| empty `Vec<T>`                                          | empty `double` (`[]`). `EmptySequencePolicy::Cell` writes `{}` instead                                                      |
+| `Vec<Struct>` / `Vec<Option<T>>` / ragged `Vec<Vec<T>>` | cell array (`MATLAB_class = "cell"`, object references into `#refs#`). `None` slots become `struct([])`                     |
 
 ### Cell array pattern
 
@@ -651,20 +661,20 @@ In MATLAB this loads as `iscell(path) == true`, `path{1}.x`, etc. Empty `None` s
 
 **Reader compatibility.** Cell arrays load correctly in MATLAB, libmatio (reference C library), Julia's `MAT.jl`, and Python via `pymatreader` / `hdf5storage`. GNU Octave 11's `load` does not yet follow object references for v7.3 cells (warns "unknown datatype"); load such files with one of the above instead.
 
-Reading decodes the MATLAB opaque value classes `datetime`, `duration`, and `categorical` into `MatDatetime` / `MatDuration` / `MatCategorical`, and surfaces any other opaque class (`table`, `containers.Map`, …) losslessly as its raw property map. Not supported for *writing*: non-unit enum variants, MATLAB objects (`classdef`), datetime / duration / categorical types.
+Reading decodes the MATLAB opaque value classes `datetime`, `duration`, and `categorical` into `MatDatetime` / `MatDuration` / `MatCategorical`, and surfaces any other opaque class (`table`, `containers.Map`, …) losslessly as its raw property map. Not supported for _writing_: non-unit enum variants, MATLAB objects (`classdef`), datetime / duration / categorical types.
 
 ## Cargo features
 
-| Feature | Default | Description |
-|---|---|---|
-| `std` | yes | File I/O, high-level reader API |
-| `checksum` | yes | Jenkins hash validating checksummed metadata |
-| `deflate` | yes | Deflate compression (pure Rust backend) |
-| `serde` | no | Serialize/deserialize MATLAB v7.3 `.mat` files via serde |
-| `fast-deflate` | no | zlib-ng backend for deflate via `flate2/zlib-ng` |
-| `ndarray` | no | N-dimensional array I/O via the [`ndarray`](https://docs.rs/ndarray) crate |
-| `provenance` | no | SHA-256 data provenance tracking |
-| `zfp` | no | ZFP fixed-rate compression (HDF5 filter 32013), f32/f64/i32/i64 × 1D–4D |
+| Feature        | Default | Description                                                                |
+| -------------- | ------- | -------------------------------------------------------------------------- |
+| `std`          | yes     | File I/O, high-level reader API                                            |
+| `checksum`     | yes     | Jenkins hash validating checksummed metadata                               |
+| `deflate`      | yes     | Deflate compression (pure Rust backend)                                    |
+| `serde`        | no      | Serialize/deserialize MATLAB v7.3 `.mat` files via serde                   |
+| `fast-deflate` | no      | zlib-ng backend for deflate via `flate2/zlib-ng`                           |
+| `ndarray`      | no      | N-dimensional array I/O via the [`ndarray`](https://docs.rs/ndarray) crate |
+| `provenance`   | no      | SHA-256 data provenance tracking                                           |
+| `zfp`          | no      | ZFP fixed-rate compression (HDF5 filter 32013), f32/f64/i32/i64 × 1D–4D    |
 
 For bare-metal `no_std`, disable default features (keep `checksum` for metadata validation):
 

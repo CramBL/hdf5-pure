@@ -153,6 +153,7 @@ profiler
 proptest
 pytest
 readback
+readme
 recompression
 recurse
 recurses
