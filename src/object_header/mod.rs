@@ -969,6 +969,79 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "std")]
+    #[test]
+    fn version_1_continuation_with_partial_message_prefix_is_rejected() {
+        let cont_msg_data = [0xAB; 8];
+        let mut cont_chunk = v1_message_records(&[(
+            MessageType::DATATYPE.to_u16(),
+            &cont_msg_data,
+            MessageFlags::NONE,
+        )]);
+
+        // The complete Datatype record occupies 16 bytes. One additional byte
+        // cannot form the eight-byte prefix of another version 1 message.
+        cont_chunk.push(0);
+
+        let cont_offset = 256usize;
+        let mut cont_ptr = Vec::new();
+        cont_ptr.extend_from_slice(&(cont_offset as u64).to_le_bytes());
+        cont_ptr.extend_from_slice(&(cont_chunk.len() as u64).to_le_bytes());
+
+        let header = build_v1_header(
+            &[(
+                MessageType::OBJECT_HEADER_CONTINUATION.to_u16(),
+                &cont_ptr,
+                MessageFlags::NONE,
+            )],
+            8,
+            8,
+        );
+
+        let mut file_data = vec![0u8; cont_offset + cont_chunk.len()];
+        file_data[..header.len()].copy_from_slice(&header);
+        file_data[cont_offset..].copy_from_slice(&cont_chunk);
+
+        let buffered = ObjectHeader::parse_with_base(
+            &file_data,
+            AccessMode::ReadOnly,
+            0,
+            8,
+            8,
+            BaseAddress::ZERO,
+        );
+        assert!(
+            matches!(buffered, Err(FormatError::UnexpectedEof { .. })),
+            "buffered parser accepted a partial v1 continuation prefix"
+        );
+
+        let from_mem = ObjectHeader::parse_from_source(
+            &BytesSource::new(&file_data),
+            AccessMode::ReadOnly,
+            0,
+            8,
+            8,
+            BaseAddress::ZERO,
+        );
+        assert!(
+            matches!(from_mem, Err(FormatError::UnexpectedEof { .. })),
+            "memory source parser accepted a partial v1 continuation prefix"
+        );
+
+        let from_seek = ObjectHeader::parse_from_source(
+            &crate::ReadSeekSource::new(std::io::Cursor::new(file_data)).unwrap(),
+            AccessMode::ReadOnly,
+            0,
+            8,
+            8,
+            BaseAddress::ZERO,
+        );
+        assert!(
+            matches!(from_seek, Err(FormatError::UnexpectedEof { .. })),
+            "seek source parser accepted a partial v1 continuation prefix"
+        );
+    }
+
     #[test]
     fn a_filtered_version_1_parse_follows_unretained_continuations() {
         let nested_data = [0xDE, 0xAD];
