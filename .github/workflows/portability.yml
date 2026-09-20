@@ -48,6 +48,8 @@ jobs:
               - .cargo/**
               - tests/**
               - crates/test-util/**
+              - crates/crosscheck/**
+              - Cross.toml
               - justfile
               - scripts/portability.just
               - .github/workflows/portability.yml
@@ -91,7 +93,9 @@ jobs:
         run: just portability
 
   # QEMU, for the two properties no native runner has: a 32-bit pointer width,
-  # and a big-endian host where `from_ne_bytes` and `from_le_bytes` differ.
+  # and a big-endian host where `from_ne_bytes` and `from_le_bytes` differ. The
+  # `-hdf5` recipes repeat this linking the reference C library, `cross`
+  # building it from source for the target.
   qemu:
     name: test / ${{ matrix.name }} (qemu)
     runs-on: ubuntu-latest
@@ -104,6 +108,8 @@ jobs:
         include:
           - {name: i686, recipe: portability::test-32bit}
           - {name: s390x, recipe: portability::test-big-endian}
+          - {name: i686-hdf5, recipe: portability::test-32bit-hdf5}
+          - {name: s390x-hdf5, recipe: portability::test-big-endian-hdf5}
 
     steps:
       - name: Checkout
