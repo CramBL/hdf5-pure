@@ -45,7 +45,3 @@ test-util = { path = "../test-util" }
 
 [lints]
 workspace = true
-
-[[test]]
-name = "libver_matrix"
-required-features = ["serde"]

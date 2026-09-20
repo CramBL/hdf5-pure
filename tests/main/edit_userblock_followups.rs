@@ -7,7 +7,7 @@
 //! every test asserts the 512-byte userblock survives the edit byte-for-byte.
 //!
 //! (The resizing-overwrite parity for the contiguous and compact layouts is
-//! exercised in `crates/crosscheck/tests/edit_userblock.rs`: only the reference C library can
+//! exercised in `crates/crosscheck/tests/main/edit_userblock.rs`: only the reference C library can
 //! create the never-written-contiguous and compact-layout fixtures those paths
 //! need.)
 

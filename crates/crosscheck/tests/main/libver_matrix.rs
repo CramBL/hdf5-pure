@@ -1,4 +1,9 @@
-#![cfg(all(not(target_pointer_width = "32"), target_endian = "little"))]
+#![cfg(all(
+    feature = "serde",
+    feature = "hdf5",
+    not(target_pointer_width = "32"),
+    target_endian = "little"
+))]
 //! The format boundary against the linked release of the C library, in both
 //! directions.
 //!

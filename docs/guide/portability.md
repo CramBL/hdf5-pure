@@ -145,7 +145,7 @@ MATLAB `.mat` path. The [`mat` module](crate::mat) has the cross-tool detail.
 
 The 1.8 output format is the one claim those tests cannot make, since every
 library they link is 1.10 or newer and reads both formats.
-`crates/crosscheck/tests/libver_matrix.rs` covers it against every release the
+`crates/crosscheck/tests/main/libver_matrix.rs` covers it against every release the
 interop workflow builds, 1.8.23 included: the 1.10 format cannot be opened at
 all before 1.10, and the 1.8 format reads completely everywhere. That measures
 the format boundary, which is a different thing from a particular MathWorks

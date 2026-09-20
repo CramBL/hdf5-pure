@@ -1,7 +1,7 @@
 //! Object paths through the public entry points: every spelling of one path, a path relative to a
 //! group, an absolute path from either, and the path each error reports the object by.
 //!
-//! `crates/crosscheck/tests/object_path.rs` runs the same spellings through the C library, which
+//! `crates/crosscheck/tests/main/object_path.rs` runs the same spellings through the C library, which
 //! is the oracle for the grammar.
 
 use hdf5_pure::{Dataset, Error, File, FileBuilder, FormatError, Group, Object};

@@ -40,7 +40,7 @@ enum CReads {
 /// Open `path` with libhdf5 in a child process, so an abort is a status rather
 /// than the end of this test run.
 fn c_reads(path: &std::path::Path) -> CReads {
-    c_child(path, "child_reads_with_libhdf5").verdict
+    c_child(path, "dense_attr_limits::child_reads_with_libhdf5").verdict
 }
 
 /// As [`c_reads`], plus what libhdf5 made of each attribute's contents.
@@ -66,7 +66,7 @@ impl CDetail {
 
 /// Read `path` with libhdf5 and report what it made of every attribute.
 fn c_reads_in_detail(path: &std::path::Path) -> CDetail {
-    c_child(path, "child_reads_attribute_sizes")
+    c_child(path, "dense_attr_limits::child_reads_attribute_sizes")
 }
 
 /// Re-exec this binary to run `child` against `path`, and parse what it reported.
@@ -217,7 +217,11 @@ fn child_looks_up_attributes_by_name() {
 
 /// Have libhdf5 open each of `names` by name and report the values it read.
 fn c_looks_up_by_name(path: &std::path::Path, names: &[String]) -> CDetail {
-    c_child_looking_up(path, "child_looks_up_attributes_by_name", &names.join(","))
+    c_child_looking_up(
+        path,
+        "dense_attr_limits::child_looks_up_attributes_by_name",
+        &names.join(","),
+    )
 }
 
 /// The child half of [`c_inserts_then_reads`]. Opens the file read-write with
@@ -256,7 +260,7 @@ fn child_inserts_with_libhdf5() {
 /// Have libhdf5 add a huge attribute to a heap this crate wrote, then read the
 /// result back.
 fn c_inserts_then_reads(path: &std::path::Path) -> CDetail {
-    c_child(path, "child_inserts_with_libhdf5")
+    c_child(path, "dense_attr_limits::child_inserts_with_libhdf5")
 }
 
 /// The child half of [`c_inserts_managed_then_reads`]. Adds an attribute small
@@ -295,7 +299,10 @@ fn child_inserts_managed_with_libhdf5() {
 /// Have libhdf5 add a managed attribute to a heap this crate wrote, then read
 /// every attribute back.
 fn c_inserts_managed_then_reads(path: &std::path::Path) -> CDetail {
-    c_child(path, "child_inserts_managed_with_libhdf5")
+    c_child(
+        path,
+        "dense_attr_limits::child_inserts_managed_with_libhdf5",
+    )
 }
 
 /// Nine attributes — enough to select dense storage — the first sized to

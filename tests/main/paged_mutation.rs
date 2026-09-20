@@ -1,7 +1,7 @@
 //! Bounded-memory mutation of genuine paged files (issue #173 Phase 2, B2):
 //! the bounded engine grows a persisting paged file, segregating raw and
 //! metadata into separate pages, and rewrites its per-page-type managers at
-//! close. libhdf5 interop lives in `crates/crosscheck/tests/file_space.rs`.
+//! close. libhdf5 interop lives in `crates/crosscheck/tests/main/file_space.rs`.
 
 use hdf5_pure::{
     Error, File, FileAccessProperties, FileBuilder, FileSpaceStrategy, MaxExtent, MemoryStrategy,

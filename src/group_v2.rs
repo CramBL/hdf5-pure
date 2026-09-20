@@ -1177,7 +1177,7 @@ mod huge_link_tests {
 
     /// A file with one group of `count` links, each name long enough that its
     /// link message exceeds the heap's managed-object limit and is stored as a
-    /// huge object. Written by `crates/crosscheck/tests/c_test_data.rs`.
+    /// huge object. Written by `crates/crosscheck/tests/main/c_test_data.rs`.
     fn file_with_huge_links(count: usize) -> Vec<u8> {
         std::fs::read(crate::test_data::path(&format!("c/huge_links_{count}.h5"))).unwrap()
     }

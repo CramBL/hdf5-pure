@@ -1,5 +1,6 @@
 #![cfg(all(
     feature = "serde",
+    feature = "hdf5",
     not(target_pointer_width = "32"),
     target_endian = "little"
 ))]

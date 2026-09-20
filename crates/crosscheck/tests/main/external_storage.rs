@@ -283,7 +283,7 @@ fn no_write_reaches_an_external_dataset() {
 /// recognising the External Data Files message itself. Asserting the message
 /// rather than merely `Err` is what distinguishes the two: a bounds check that
 /// crept back would refuse this dataset just as firmly, and this test would go
-/// on passing while the never-written datasets in `crates/crosscheck/tests/edit.rs` and
+/// on passing while the never-written datasets in `crates/crosscheck/tests/main/edit.rs` and
 /// `edit_in_place` broke.
 ///
 /// Both directions are covered, because they read the source at different

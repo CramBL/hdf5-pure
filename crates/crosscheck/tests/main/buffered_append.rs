@@ -23,7 +23,7 @@ use tempfile::tempdir;
 
 // libhdf5 is not built thread-safe here; every test that touches the C library
 // takes this guard as its first line and holds it for the whole body, so no two
-// run C-library code at once. See `crates/crosscheck/tests/bounded_append.rs` for the full note.
+// run C-library code at once. See `crates/crosscheck/tests/main/bounded_append.rs` for the full note.
 static C_LIB: Mutex<()> = Mutex::new(());
 
 fn c_lib_guard() -> MutexGuard<'static, ()> {

@@ -2291,7 +2291,7 @@ mod attribute_fidelity_tests {
     }
 
     /// `tests/data/pure/exotic_attributes.h5` is the source file of the
-    /// test above, committed so that `crates/crosscheck/tests/repack.rs` can
+    /// test above, committed so that `crates/crosscheck/tests/main/repack.rs` can
     /// repack it through the public API and read the result with the reference
     /// C library. Without that the test proves only that this crate agrees with
     /// itself, which a message it encodes wrongly and parses back just as
