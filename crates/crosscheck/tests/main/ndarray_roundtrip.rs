@@ -1,12 +1,16 @@
-#![cfg(all(
-    feature = "ndarray",
-    not(target_pointer_width = "32"),
-    target_endian = "little"
-))]
+#![cfg(feature = "ndarray")]
 
 use hdf5_pure::{Error, File, FileBuilder};
 use ndarray::{Array1, Array2, Array3, ArrayD, ShapeBuilder, array};
-#[cfg(feature = "__hdf5-1.10")]
+// The crosschecks below link `hdf5-metno`, which the portability jobs (32-bit,
+// big-endian) exclude to keep them scoped to this crate's own pointer-width
+// and byte-order handling. Only the items gated on it need this restriction,
+// not the rest of the file.
+#[cfg(all(
+    feature = "__hdf5-1.10",
+    not(target_pointer_width = "32"),
+    target_endian = "little"
+))]
 use tempfile::tempdir;
 
 /// Build a one-dataset file from an ndarray and reopen it in memory.
@@ -152,7 +156,11 @@ fn read_array_wrong_rank_errors() {
 // ---------------------------------------------------------------------------
 
 // Written in the 1.10 format, which a 1.8 library cannot open.
-#[cfg(feature = "__hdf5-1.10")]
+#[cfg(all(
+    feature = "__hdf5-1.10",
+    not(target_pointer_width = "32"),
+    target_endian = "little"
+))]
 #[test]
 fn crosscheck_2d_with_reference_library() {
     let dir = tempdir().unwrap();
@@ -171,7 +179,11 @@ fn crosscheck_2d_with_reference_library() {
     assert_eq!(read, a);
 }
 
-#[cfg(feature = "__hdf5-1.10")]
+#[cfg(all(
+    feature = "__hdf5-1.10",
+    not(target_pointer_width = "32"),
+    target_endian = "little"
+))]
 #[test]
 fn crosscheck_3d_with_reference_library() {
     let dir = tempdir().unwrap();
@@ -189,7 +201,11 @@ fn crosscheck_3d_with_reference_library() {
     assert_eq!(read, a.into_dyn());
 }
 
-#[cfg(feature = "__hdf5-1.10")]
+#[cfg(all(
+    feature = "__hdf5-1.10",
+    not(target_pointer_width = "32"),
+    target_endian = "little"
+))]
 #[test]
 fn crosscheck_chunked_compressed_ndarray() {
     // ndarray write composes with the existing chunking/compression builders.
