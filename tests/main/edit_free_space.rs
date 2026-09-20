@@ -14,7 +14,7 @@ use hdf5_pure::{
 use temp::temp_path;
 use test_util::temp;
 
-// Shared with `tests/paged_staged_commit.rs`, which holds the staged commit to
+// Shared with `tests/main/paged_staged_commit.rs`, which holds the staged commit to
 // the same invariant this holds the in-place append's reserve to (issue #387).
 use paged::assert_pages_homogeneous;
 use test_util::paged;
@@ -1651,7 +1651,7 @@ fn a_persisting_tail_holds_its_size_across_layouts() {
         // would spend two or three `fsync`s per commit establishing an ordering
         // no assertion here looks at; `OnClose` keeps the one barrier that is
         // load-bearing, at the close before each size is read, and writes the
-        // same bytes either way (`tests/sync_policy.rs`).
+        // same bytes either way (`tests/main/sync_policy.rs`).
         let open = |path: &std::path::Path| {
             File::open_rw_with_options(
                 path,

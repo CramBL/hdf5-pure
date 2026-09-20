@@ -23,7 +23,7 @@ mod prose "scripts/prose.just"
 _default:
     @just --list
 
-ci-essentials: fmt-check clippy doc test-full doctest-full
+ci-essentials: fmt-check clippy-full doc test-full doctest-full
 
 # Everything CI runs except fuzzing.
 ci: ci-essentials docs-rs check-release examples portability::default hygiene::default python::default prose::default api::default soundness::default interop::default test doctest
@@ -58,7 +58,12 @@ fmt:
 fmt-check:
     cargo fmt --all -- --check
 
+# clippy with the default features, sharing a build cache with `check` and `test`
 clippy *ARGS:
+    cargo clippy --locked --all-targets {{ ARGS }} -- -D warnings
+
+# clippy with all user-facing features, as CI and the agent gates run it
+clippy-full *ARGS:
     cargo clippy --locked --features "{{ USER_FACING_FEATURES }}" --all-targets {{ ARGS }} -- -D warnings
 
 # The published documentation, then the same with the private items contributors read.
@@ -70,11 +75,11 @@ doc *ARGS:
 docs-rs *ARGS:
     RUSTDOCFLAGS="--cfg docsrs -D warnings" cargo +nightly doc --locked --no-deps --features "{{ USER_FACING_FEATURES }}" {{ ARGS }}
 
-# cargo check
+# cargo check with the default features, sharing a build cache with `clippy` and `test`
 check *ARGS:
-    cargo check --locked --release --all-targets --features "{{ USER_FACING_FEATURES }}" {{ ARGS }}
+    cargo check --locked --all-targets {{ ARGS }}
 
-# cargo check --release
+# cargo check --release, with all user-facing features, as CI runs it
 check-release *ARGS:
     cargo check --locked --release --all-targets --features "{{ USER_FACING_FEATURES }}" {{ ARGS }}
 

@@ -18890,7 +18890,7 @@ mod tests {
     /// `finalize_persist` (the true-crash case) still reads back every durable
     /// append. Dropping the engine releases the exclusive lock, so the reopen is
     /// portable (no leaked lock). The finalize-at-close path is covered by the
-    /// `tests/bounded_append.rs` integration tests.
+    /// `tests/main/bounded_append.rs` integration tests.
     #[test]
     fn bounded_persist_append_without_finalize_is_readable() {
         let dir = tempdir().unwrap();

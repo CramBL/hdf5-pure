@@ -110,7 +110,7 @@ fn survives_in_place_edit() {
     // a delete that frees space (the extension pins end-of-file, so it is never
     // cut by truncation). Uses a non-paged strategy: a paged file cannot be edited
     // through the whole-file editor (issue #173 Phase 2), which is covered in
-    // `tests/paged_mutation.rs`.
+    // `tests/main/paged_mutation.rs`.
     let path = temp_path("hdf5_pure_fss_edit.h5");
     let mut b = FileBuilder::new();
     b.create_dataset("keep").with_i32_data(&[1, 2, 3]);

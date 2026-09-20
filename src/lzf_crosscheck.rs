@@ -22,7 +22,7 @@
 //! of `regen.py`, which needs a live h5py this test does not have.
 //!
 //! Chained (shuffle+lzf) and multi-chunk fixtures are covered end-to-end in
-//! `tests/lzf_roundtrip.rs`, which opens their `.h5` files through the full
+//! `tests/main/lzf_roundtrip.rs`, which opens their `.h5` files through the full
 //! reader.
 
 use std::fs;
@@ -154,7 +154,7 @@ fn lzf_crosscheck() {
     for fix in &manifest.fixtures {
         // Only single-filter LZF fixtures with an extracted single-chunk
         // stream are codec-comparable here; the rest are exercised through
-        // the full reader in tests/lzf_roundtrip.rs.
+        // the full reader in tests/main/lzf_roundtrip.rs.
         if fix.filters != [FILTER_LZF] || fix.compressed_bytes_len.is_none() {
             continue;
         }

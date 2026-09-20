@@ -1,7 +1,7 @@
 # HDF5 1.8 read fixtures
 
 `v1_superblock.h5` and `v2_superblock.h5` were written by HDF5 1.8.23, the last
-1.8 release. `tests/c_1_8_read_compat.rs` reads both, and the
+1.8 release. `tests/main/c_1_8_read_compat.rs` reads both, and the
 `parse_v1_against_a_c_written_superblock` unit test in `src/superblock.rs`
 parses the first. Both tests run under `cross test` on i686 and s390x, where
 the `hdf5-metno` dev-dependency is not linked, and these are the only committed

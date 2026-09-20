@@ -141,7 +141,7 @@ jobs:
         run: just fmt-check
 
       - name: Clippy
-        run: just clippy
+        run: just clippy-full
 
       # A debug build hides two things: `debug_assert!` still type-checks its
       # argument in release (issue #288), and `--release`-only lints never fire.

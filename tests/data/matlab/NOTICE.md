@@ -2,7 +2,7 @@
 
 The `.mat` files in this directory are **genuine real-MATLAB output** (the
 userblock header records `Platform: PCWIN64`), vendored as ground-truth read
-fixtures for `tests/mat_opaque_real_read.rs`. They let the MCOS opaque-class
+fixtures for `tests/main/mat_opaque_real_read.rs`. They let the MCOS opaque-class
 decoder be validated against MATLAB itself rather than only round-tripping
 against this crate's own writer.
 
@@ -17,7 +17,7 @@ library), directory `tests/data/`:
   `test_enum_v73.mat`, `test_maps_v73.mat`, `test_corrupted_subsystem.mat`,
   `test_corrupted_mcos_object_metadata.mat`
 
-The expected decoded values asserted in `tests/mat_opaque_real_read.rs` are
+The expected decoded values asserted in `tests/main/mat_opaque_real_read.rs` are
 transcribed from that project's MATLAB generator scripts
 (`tests/data/generators/*.m`) and its independent pytest oracle
 (`tests/test_datetime.py`, `test_duration.py`, `test_categorical.py`,

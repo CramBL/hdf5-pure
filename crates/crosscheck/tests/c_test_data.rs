@@ -160,7 +160,7 @@ fn paged_file_with_a_sub_page_fragment_in_the_large_manager() {
 
 /// A committed datatype in a version 1 object header, linked once and the
 /// element type of two datasets, so its reference count is 3 and lives in the
-/// header prefix. For `tests/named_datatypes.rs`.
+/// header prefix. For `tests/main/named_datatypes.rs`.
 #[test]
 fn committed_datatype_in_a_version_1_header() {
     let file = c_written("committed_datatype_v1.h5", |path| {

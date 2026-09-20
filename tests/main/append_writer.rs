@@ -51,7 +51,7 @@ fn with_writer<T>(path: &std::path::Path, f: impl FnOnce(&File) -> T) -> T {
     // `SyncPolicy::OnClose`: every test here asserts what the file contains, not
     // when it reached the platter, and the default costs one `fsync` per append
     // — the dominant cost of the session loops below. The policies write
-    // byte-identical files (`tests/sync_policy.rs` asserts that directly), and
+    // byte-identical files (`tests/main/sync_policy.rs` asserts that directly), and
     // dropping the handle still issues the closing barrier.
     let file = File::open_rw_with_options(
         path,

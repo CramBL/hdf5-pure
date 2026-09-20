@@ -1257,7 +1257,7 @@ fn apply_deflate(ds: &mut DatasetBuilder, compression: Compression) {
 ///
 /// This is the one place the encoding is acted on, and both MAT serde emitters
 /// route through it. They are required to produce identical bytes for the same
-/// value under default options (`tests/serde_roundtrip.rs`), and this is exactly
+/// value under default options (`tests/main/serde_roundtrip.rs`), and this is exactly
 /// where they last came apart: the no-options emitter had `ZeroElement` written
 /// into it as a constant, so moving the default to `DataAsDims` changed one
 /// emitter and not the other.

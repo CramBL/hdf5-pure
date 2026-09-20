@@ -848,7 +848,7 @@ fn roundtrip_empty_dataset_zero_dims() {
     assert_eq!(ds.shape().unwrap(), vec![0, 0]);
     assert_eq!(ds.dtype().unwrap(), DType::F64);
     // Empty dataset should return empty data
-    assert_eq!(ds.read_f64().unwrap(), vec![]);
+    assert_eq!(ds.read_f64().unwrap(), Vec::<f64>::new());
 }
 
 #[test]
