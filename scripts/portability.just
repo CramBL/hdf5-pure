@@ -42,3 +42,30 @@ test-big-endian:
         --target s390x-unknown-linux-gnu \
         --no-default-features \
         --features "{{ USER_FACING_FEATURES }}"
+
+# The crosschecks against the C library, cross-compiled and linked for the
+# same 32-bit target `test-32bit` checks. `Cross.toml` installs the newer
+# cmake the bundled build needs.
+test-32bit-hdf5 FEATURES="serde,ndarray":
+    cross test \
+        --config 'build.rustc-wrapper=""' \
+        --config 'target."i686-unknown-linux-gnu".linker="i686-linux-gnu-gcc"' \
+        --config 'target."x86_64-unknown-linux-gnu".linker="cc"' \
+        --locked \
+        --target i686-unknown-linux-gnu \
+        -p hdf5-pure-crosscheck \
+        --no-default-features \
+        --features "hdf5,__hdf5-bundled,{{ FEATURES }}"
+
+# The crosschecks against the C library, cross-compiled and linked for the
+# same big-endian target `test-big-endian` checks.
+test-big-endian-hdf5 FEATURES="serde,ndarray":
+    cross test \
+        --config 'build.rustc-wrapper=""' \
+        --config 'target."s390x-unknown-linux-gnu".linker="s390x-linux-gnu-gcc"' \
+        --config 'target."x86_64-unknown-linux-gnu".linker="cc"' \
+        --locked \
+        --target s390x-unknown-linux-gnu \
+        -p hdf5-pure-crosscheck \
+        --no-default-features \
+        --features "hdf5,__hdf5-bundled,{{ FEATURES }}"

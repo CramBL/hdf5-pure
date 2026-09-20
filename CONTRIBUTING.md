@@ -94,6 +94,7 @@ The fixtures under `tests/data/` are grouped by the library that wrote them: `c`
 ### Portability, soundness and the API
 
 - `just portability` checks the `no_std`, WASM and bare-metal builds, and runs Clippy on a 32-bit target with the truncating casts denied.
+- `just portability::test-32bit` and `test-big-endian` run the suite under QEMU. `test-32bit-hdf5` and `test-big-endian-hdf5` repeat that linking the reference C library.
 - `just soundness::miri` runs [Miri](https://github.com/rust-lang/miri) over the crate's `unsafe` code.
 - `just api::semver` runs [cargo-semver-checks](https://github.com/obi1kenobi/cargo-semver-checks) against the last release, and `just api::msrv` checks that the library builds on the `rust-version` in `Cargo.toml`.
 - `just fuzz` runs each fuzz target for thirty seconds on a nightly toolchain. The crate would benefit from more runtime, targets and corpora. A crafted file that makes it panic, allocate without bound or read a wrong value is a bug: file it.
