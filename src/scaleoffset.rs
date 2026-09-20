@@ -2372,10 +2372,10 @@ mod tests {
     /// Encode with a defined fill value and decode it back (issue #287).
     ///
     /// `crates/crosscheck/tests/main/scaleoffset_fill.rs` proves the *bytes* match what the
-    /// reference encoder produces, but it links the C library and so is gated
-    /// to 64-bit little-endian. This states the round-trip property on every
-    /// target, and covers the two chunk shapes that have no interior range:
-    /// nothing but fill values, and no fill value at all.
+    /// reference encoder produces, but its byte-comparison tests link the C
+    /// library and are excluded on big-endian. This states the round-trip
+    /// property on every target, and covers the two chunk shapes that have no
+    /// interior range: nothing but fill values, and no fill value at all.
     #[test]
     fn compress_round_trips_with_a_defined_fill_value() {
         let fill = 0xDEAD_u32;
@@ -2433,10 +2433,10 @@ mod tests {
     /// The float counterpart of [`compress_round_trips_with_a_defined_fill_value`].
     ///
     /// Worth its own test rather than folding into the integer one: the
-    /// crosschecks that pin the float encoding link the C library and so are
-    /// gated to 64-bit little-endian, which leaves the `cross` i686 and s390x
-    /// jobs with no float fill-defined coverage at all — and big-endian is
-    /// where byte-order handling is most likely to be wrong.
+    /// crosschecks that pin the float encoding link the C library and are
+    /// excluded on big-endian, which leaves the `cross` s390x job with no
+    /// float fill-defined coverage there, where byte-order handling is most
+    /// likely to be wrong.
     #[test]
     fn float_compress_round_trips_with_a_defined_fill_value() {
         let decimals = 3;
