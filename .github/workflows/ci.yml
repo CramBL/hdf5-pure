@@ -68,9 +68,7 @@ jobs:
         os: [ubuntu-latest, macos-latest, windows-latest]
         config:
           - name: default
-            flags: ""
           - name: full
-            flags: --features "serde zfp fast-deflate provenance ndarray"
 
     steps:
       - name: Checkout
@@ -95,11 +93,11 @@ jobs:
           tool: cargo-nextest,cargo-hack,just
 
       - name: Tests
-        run: cargo nextest run --locked ${{ matrix.config.flags }}
+        run: just ${{ matrix.config.name == 'full' && 'test-full' || 'test' }}
 
       # rustdoc compiles doctests, so nextest cannot run them.
       - name: Doctests
-        run: cargo test --locked --doc ${{ matrix.config.flags }}
+        run: just ${{ matrix.config.name == 'full' && 'doctest-full' || 'doctest' }}
 
       # Subsets of `full`, on one host: a feature that only compiles beside
       # another surfaces here.

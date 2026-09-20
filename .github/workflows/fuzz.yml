@@ -77,7 +77,8 @@ jobs:
       - name: Cache Cargo
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
-          key: cargo-fuzz
+          shared-key: cargo-fuzz
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Install tools
         uses: taiki-e/install-action@920ab1831fbf4fb3ef75c8ead83556c918bb7290 # v2.79.8
         with:
