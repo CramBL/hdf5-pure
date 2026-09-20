@@ -10,8 +10,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - **Breaking:** `DatatypeByteOrder` implements `Copy`.
 - **Breaking:** `Datatype::FixedPoint` and `Datatype::FloatingPoint` group layout fields into new `FixedPointLayout` and `FloatingPointLayout` structs.
-- Lossy reads of numeric datatypes (e.g. `i32` to `u32`) use soft clamping conversions, matching `libhdf5`.
 - **Breaking:** `MessageType` uses a transparent `u16` representation and preserves unknown message type identifiers without an enum payload. The former CamelCase variants and `Unknown(u16)` constructor remain as deprecated compatibility APIs. `Unknown(id)` pattern matching must use `unknown_id()`.
+- Lossy reads of numeric datatypes (e.g. `i32` to `u32`) use soft clamping conversions, matching `libhdf5`.
 
 ### Fixed
 
