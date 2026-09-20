@@ -43,6 +43,10 @@ pub enum FormatError {
     InvalidObjectHeaderSignature,
     /// Invalid object header version.
     InvalidObjectHeaderVersion(u8),
+    /// A version 1 object-header message has a data size that is not a multiple of eight.
+    ///
+    /// Contains the declared message data size.
+    InvalidObjectHeaderMessageSize(u16),
     /// Unknown message type that is marked as must-understand.
     UnsupportedMessage(u16),
     /// Invalid datatype class.
@@ -630,73 +634,79 @@ pub const OBJECT_HEADER_MESSAGE_MAX: usize = u16::MAX as usize;
 impl fmt::Display for FormatError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            FormatError::SignatureNotFound => {
+            Self::SignatureNotFound => {
                 write!(f, "HDF5 signature not found at any valid offset")
             }
-            FormatError::UnsupportedVersion(v) => {
+            Self::UnsupportedVersion(v) => {
                 write!(f, "unsupported superblock version: {v}")
             }
-            FormatError::UnexpectedEof {
+            Self::UnexpectedEof {
                 expected,
                 available,
             } => {
                 write!(f, "unexpected EOF: need {expected} bytes, have {available}")
             }
-            FormatError::InvalidOffsetSize(s) => {
+            Self::InvalidOffsetSize(s) => {
                 write!(f, "invalid offset size: {s} (must be 2, 4, or 8)")
             }
-            FormatError::InvalidLengthSize(s) => {
+            Self::InvalidLengthSize(s) => {
                 write!(f, "invalid length size: {s} (must be 2, 4, or 8)")
             }
-            FormatError::InvalidObjectHeaderSignature => {
+            Self::InvalidObjectHeaderSignature => {
                 write!(f, "invalid object header signature")
             }
-            FormatError::InvalidObjectHeaderVersion(v) => {
+            Self::InvalidObjectHeaderVersion(v) => {
                 write!(f, "invalid object header version: {v}")
             }
-            FormatError::UnsupportedMessage(id) => {
+            Self::InvalidObjectHeaderMessageSize(size) => {
+                write!(
+                    f,
+                    "invalid version 1 object-header message size {size}: size must be a multiple of eight"
+                )
+            }
+            Self::UnsupportedMessage(id) => {
                 write!(
                     f,
                     "unsupported message type {id:#06x} marked as must-understand"
                 )
             }
-            FormatError::InvalidDatatypeClass(c) => {
+            Self::InvalidDatatypeClass(c) => {
                 write!(f, "invalid datatype class: {c}")
             }
-            FormatError::InvalidDatatypeVersion { class, version } => {
+            Self::InvalidDatatypeVersion { class, version } => {
                 write!(f, "invalid datatype version {version} for class {class}")
             }
-            FormatError::ZeroSizedDatatype { class } => {
+            Self::ZeroSizedDatatype { class } => {
                 write!(
                     f,
                     "datatype class {class} declares a zero-byte element size"
                 )
             }
-            FormatError::InvalidStringPadding(p) => {
+            Self::InvalidStringPadding(p) => {
                 write!(f, "invalid string padding type: {p}")
             }
-            FormatError::InvalidCharacterSet(c) => {
+            Self::InvalidCharacterSet(c) => {
                 write!(f, "invalid character set: {c}")
             }
-            FormatError::InvalidByteOrder(b) => {
+            Self::InvalidByteOrder(b) => {
                 write!(f, "invalid byte order: {b}")
             }
-            FormatError::InvalidReferenceType(r) => {
+            Self::InvalidReferenceType(r) => {
                 write!(f, "invalid reference type: {r}")
             }
-            FormatError::InvalidFileSpaceStrategy(s) => {
+            Self::InvalidFileSpaceStrategy(s) => {
                 write!(f, "invalid file-space strategy code: {s}")
             }
-            FormatError::UnsupportedFileSpaceInfoVersion(v) => {
+            Self::UnsupportedFileSpaceInfoVersion(v) => {
                 write!(f, "unsupported File Space Info message version: {v}")
             }
-            FormatError::InvalidFileSpacePageSize(p) => {
+            Self::InvalidFileSpacePageSize(p) => {
                 write!(
                     f,
                     "invalid file-space page size {p}: must be a power of two >= 512"
                 )
             }
-            FormatError::UserblockNotPageAligned(userblock, page_size) => {
+            Self::UserblockNotPageAligned(userblock, page_size) => {
                 write!(
                     f,
                     "userblock of {userblock} bytes is not a whole number of {page_size}-byte \
@@ -704,52 +714,52 @@ impl fmt::Display for FormatError {
                      the userblock must be a multiple of the page size (or zero)"
                 )
             }
-            FormatError::InvalidUserblockSize(size) => {
+            Self::InvalidUserblockSize(size) => {
                 write!(
                     f,
                     "invalid userblock size {size}: must be zero or a power of two >= 512"
                 )
             }
-            FormatError::UserblockContentTooLarge { content, userblock } => {
+            Self::UserblockContentTooLarge { content, userblock } => {
                 write!(
                     f,
                     "{content} bytes of userblock content do not fit a userblock of {userblock} \
                      bytes"
                 )
             }
-            FormatError::InvalidFreeSpaceManager => {
+            Self::InvalidFreeSpaceManager => {
                 write!(f, "malformed free-space manager block (FSHD/FSSE)")
             }
-            FormatError::EnumBaseNotInteger => {
+            Self::EnumBaseNotInteger => {
                 write!(
                     f,
                     "an enumeration's base type must be an integer (fixed-point) type"
                 )
             }
-            FormatError::EnumMemberValueSize(name, expected, actual) => {
+            Self::EnumMemberValueSize(name, expected, actual) => {
                 write!(
                     f,
                     "enumeration member '{name}' has a {actual}-byte value, but its base type is \
                      {expected} bytes"
                 )
             }
-            FormatError::EnumMemberValueRange(name, value, size) => {
+            Self::EnumMemberValueRange(name, value, size) => {
                 write!(
                     f,
                     "enumeration member '{name}' value {value} does not fit in its \
                      {size}-byte base type"
                 )
             }
-            FormatError::InvalidCompoundSize => {
+            Self::InvalidCompoundSize => {
                 write!(f, "compound datatype size must be greater than zero")
             }
-            FormatError::EmptyCompoundType => {
+            Self::EmptyCompoundType => {
                 write!(f, "compound datatype must contain at least one field")
             }
-            FormatError::DuplicateCompoundField(name) => {
+            Self::DuplicateCompoundField(name) => {
                 write!(f, "duplicate compound field name: {name}")
             }
-            FormatError::CompoundFieldOutOfBounds {
+            Self::CompoundFieldOutOfBounds {
                 name,
                 offset,
                 field_size,
@@ -761,99 +771,99 @@ impl fmt::Display for FormatError {
                      exceeds compound size {compound_size}"
                 )
             }
-            FormatError::CompoundFieldOverlap { first, second } => {
+            Self::CompoundFieldOverlap { first, second } => {
                 write!(f, "compound fields {first:?} and {second:?} overlap")
             }
-            FormatError::CompoundFieldMissing(name) => {
+            Self::CompoundFieldMissing(name) => {
                 write!(f, "compound field {name:?} is missing")
             }
-            FormatError::CompoundFieldTypeMismatch(name) => {
+            Self::CompoundFieldTypeMismatch(name) => {
                 write!(f, "compound field {name:?} has an incompatible datatype")
             }
-            FormatError::InvalidDataspaceVersion(v) => {
+            Self::InvalidDataspaceVersion(v) => {
                 write!(f, "invalid dataspace version: {v}")
             }
-            FormatError::InvalidDataspaceType(t) => {
+            Self::InvalidDataspaceType(t) => {
                 write!(f, "invalid dataspace type: {t}")
             }
-            FormatError::InvalidLayoutVersion(v) => {
+            Self::InvalidLayoutVersion(v) => {
                 write!(f, "invalid data layout version: {v}")
             }
-            FormatError::InvalidLayoutClass(c) => {
+            Self::InvalidLayoutClass(c) => {
                 write!(f, "invalid data layout class: {c}")
             }
-            FormatError::InvalidChunkIndexType(t) => {
+            Self::InvalidChunkIndexType(t) => {
                 write!(f, "invalid chunk index type: {t}")
             }
-            FormatError::UnreadableFillValue => write!(
+            Self::UnreadableFillValue => write!(
                 f,
                 "the dataset's fill value message could not be parsed, and part of its \
                  storage was never allocated, so those elements have no determined value"
             ),
-            FormatError::TypeMismatch { expected, actual } => {
+            Self::TypeMismatch { expected, actual } => {
                 write!(f, "type mismatch: expected {expected}, got {actual}")
             }
-            FormatError::DataSizeMismatch { expected, actual } => {
+            Self::DataSizeMismatch { expected, actual } => {
                 write!(
                     f,
                     "data size mismatch: expected {expected} bytes, got {actual} bytes"
                 )
             }
-            FormatError::InvalidLocalHeapSignature => {
+            Self::InvalidLocalHeapSignature => {
                 write!(f, "invalid local heap signature")
             }
-            FormatError::InvalidLocalHeapVersion(v) => {
+            Self::InvalidLocalHeapVersion(v) => {
                 write!(f, "invalid local heap version: {v}")
             }
-            FormatError::InvalidLocalHeapName { offset, source } => {
+            Self::InvalidLocalHeapName { offset, source } => {
                 write!(
                     f,
                     "the local heap name at data segment offset {offset} is not UTF-8: {source}"
                 )
             }
-            FormatError::InvalidBTreeSignature => {
+            Self::InvalidBTreeSignature => {
                 write!(f, "invalid B-tree v1 signature")
             }
-            FormatError::InvalidBTreeNodeType(t) => {
+            Self::InvalidBTreeNodeType(t) => {
                 write!(f, "invalid B-tree node type: {t}")
             }
-            FormatError::InvalidSymbolTableNodeSignature => {
+            Self::InvalidSymbolTableNodeSignature => {
                 write!(f, "invalid symbol table node signature")
             }
-            FormatError::InvalidSymbolTableNodeVersion(v) => {
+            Self::InvalidSymbolTableNodeVersion(v) => {
                 write!(f, "invalid symbol table node version: {v}")
             }
-            FormatError::PathNotFound(p) => {
+            Self::PathNotFound(p) => {
                 write!(f, "path not found: {p}")
             }
-            FormatError::InvalidLinkVersion(v) => {
+            Self::InvalidLinkVersion(v) => {
                 write!(f, "invalid link message version: {v}")
             }
-            FormatError::InvalidLinkType(t) => {
+            Self::InvalidLinkType(t) => {
                 write!(f, "invalid link type: {t}")
             }
-            FormatError::InvalidLinkInfoVersion(v) => {
+            Self::InvalidLinkInfoVersion(v) => {
                 write!(f, "invalid link info message version: {v}")
             }
-            FormatError::InvalidBTreeV2Signature => {
+            Self::InvalidBTreeV2Signature => {
                 write!(f, "invalid B-tree v2 signature")
             }
-            FormatError::InvalidBTreeV2Version(v) => {
+            Self::InvalidBTreeV2Version(v) => {
                 write!(f, "invalid B-tree v2 version: {v}")
             }
-            FormatError::InvalidFractalHeapSignature => {
+            Self::InvalidFractalHeapSignature => {
                 write!(f, "invalid fractal heap signature")
             }
-            FormatError::InvalidFractalHeapVersion(v) => {
+            Self::InvalidFractalHeapVersion(v) => {
                 write!(f, "invalid fractal heap version: {v}")
             }
-            FormatError::InvalidHeapIdType(t) => {
+            Self::InvalidHeapIdType(t) => {
                 write!(f, "invalid heap ID type: {t}")
             }
-            FormatError::HugeObjectNotFound(id) => {
+            Self::HugeObjectNotFound(id) => {
                 write!(f, "fractal-heap huge object {id} not found in B-tree")
             }
-            FormatError::UnexpectedHugeObjectBTree {
+            Self::UnexpectedHugeObjectBTree {
                 tree_type,
                 record_size,
                 required,
@@ -864,65 +874,65 @@ impl fmt::Display for FormatError {
                      type {tree_type}, records of {record_size} bytes (type 1 needs {required})"
                 )
             }
-            FormatError::UnsupportedFilteredHeapObject => {
+            Self::UnsupportedFilteredHeapObject => {
                 write!(f, "filtered fractal-heap objects are not supported")
             }
-            FormatError::UnsupportedVirtualLayout => {
+            Self::UnsupportedVirtualLayout => {
                 write!(f, "virtual (VDS) data layout is not supported")
             }
-            FormatError::UnsupportedExternalStorage => {
+            Self::UnsupportedExternalStorage => {
                 write!(
                     f,
                     "dataset stores its elements in external files (H5Pset_external), \
                      which this reader does not follow"
                 )
             }
-            FormatError::InvalidAttributeVersion(v) => {
+            Self::InvalidAttributeVersion(v) => {
                 write!(f, "invalid attribute message version: {v}")
             }
-            FormatError::InvalidAttributeInfoVersion(v) => {
+            Self::InvalidAttributeInfoVersion(v) => {
                 write!(f, "invalid attribute info message version: {v}")
             }
-            FormatError::InvalidSharedMessageVersion(v) => {
+            Self::InvalidSharedMessageVersion(v) => {
                 write!(f, "invalid shared message version: {v}")
             }
-            FormatError::InvalidAttributeFlags(v) => {
+            Self::InvalidAttributeFlags(v) => {
                 write!(f, "undefined flag bits in attribute message: {v:#04x}")
             }
-            FormatError::UnsupportedSohmReference => {
+            Self::UnsupportedSohmReference => {
                 write!(
                     f,
                     "a message references the shared object header message (SOHM) heap, and no readable shared message table was found for it"
                 )
             }
-            FormatError::InvalidSohmTableVersion(v) => {
+            Self::InvalidSohmTableVersion(v) => {
                 write!(f, "invalid shared message table version: {v}")
             }
-            FormatError::InvalidSohmIndexCount(n) => {
+            Self::InvalidSohmIndexCount(n) => {
                 write!(f, "invalid shared message index count: {n}")
             }
-            FormatError::InvalidSohmTableSignature => {
+            Self::InvalidSohmTableSignature => {
                 write!(f, "invalid shared message table signature")
             }
-            FormatError::InvalidSohmListSignature => {
+            Self::InvalidSohmListSignature => {
                 write!(f, "invalid shared message list signature")
             }
-            FormatError::InvalidSohmIndexKind(v) => {
+            Self::InvalidSohmIndexKind(v) => {
                 write!(f, "invalid shared message index storage kind: {v}")
             }
-            FormatError::InvalidSohmBTreeType(v) => {
+            Self::InvalidSohmBTreeType(v) => {
                 write!(
                     f,
                     "a shared message index names a v2 B-tree of type {v}, not a shared message index"
                 )
             }
-            FormatError::InvalidSohmRecordLocation(v) => {
+            Self::InvalidSohmRecordLocation(v) => {
                 write!(f, "invalid shared message record location: {v}")
             }
-            FormatError::SohmIndexMissing(t) => {
+            Self::SohmIndexMissing(t) => {
                 write!(f, "no shared message index holds messages of type {t:#06x}")
             }
-            FormatError::SharedMessageMissing {
+            Self::SharedMessageMissing {
                 object_header_address,
                 message_type,
             } => {
@@ -931,28 +941,28 @@ impl fmt::Display for FormatError {
                     "object header at {object_header_address} holds no message of type {message_type:#06x} for a shared reference to it"
                 )
             }
-            FormatError::UnresolvedSharedMessage(t) => {
+            Self::UnresolvedSharedMessage(t) => {
                 write!(
                     f,
                     "a reference to a shared message of type {t:#06x} cannot be resolved without the file that holds it"
                 )
             }
-            FormatError::UnknownCommittedDatatype(path) => {
+            Self::UnknownCommittedDatatype(path) => {
                 write!(f, "no committed datatype is written at path {path:?}")
             }
-            FormatError::CommittedDatatypeMismatch { path, user } => {
+            Self::CommittedDatatypeMismatch { path, user } => {
                 write!(
                     f,
                     "{user} names the committed datatype {path:?} but declares a different type"
                 )
             }
-            FormatError::InvalidGlobalHeapSignature => {
+            Self::InvalidGlobalHeapSignature => {
                 write!(f, "invalid global heap collection signature")
             }
-            FormatError::InvalidGlobalHeapVersion(v) => {
+            Self::InvalidGlobalHeapVersion(v) => {
                 write!(f, "invalid global heap version: {v}")
             }
-            FormatError::GlobalHeapObjectNotFound {
+            Self::GlobalHeapObjectNotFound {
                 collection_address,
                 index,
             } => {
@@ -961,39 +971,39 @@ impl fmt::Display for FormatError {
                     "global heap object not found: collection {collection_address:#x}, index {index}"
                 )
             }
-            FormatError::VlDataError(msg) => {
+            Self::VlDataError(msg) => {
                 write!(f, "variable-length data error: {msg}")
             }
-            FormatError::VariableLengthElementLimitExceeded { limit, actual } => {
+            Self::VariableLengthElementLimitExceeded { limit, actual } => {
                 write!(
                     f,
                     "variable-length element limit exceeded: limit is {limit}, data contains {actual}"
                 )
             }
-            FormatError::VariableLengthByteLimitExceeded { limit, required } => {
+            Self::VariableLengthByteLimitExceeded { limit, required } => {
                 write!(
                     f,
                     "variable-length payload limit exceeded: limit is {limit} bytes, \
                      data requires {required} bytes"
                 )
             }
-            FormatError::SerializationError(msg) => {
+            Self::SerializationError(msg) => {
                 write!(f, "serialization error: {msg}")
             }
-            FormatError::InvalidLinkName(name) => {
+            Self::InvalidLinkName(name) => {
                 write!(
                     f,
                     "invalid link name {name:?}: a link name is one component of an object \
                      path, so it is not empty, is not \".\" and holds no \"/\""
                 )
             }
-            FormatError::DatasetMissingData => {
+            Self::DatasetMissingData => {
                 write!(f, "dataset is missing data")
             }
-            FormatError::DatasetMissingShape => {
+            Self::DatasetMissingShape => {
                 write!(f, "dataset is missing shape")
             }
-            FormatError::ShapeDataMismatch {
+            Self::ShapeDataMismatch {
                 expected,
                 actual,
                 element_size,
@@ -1006,66 +1016,66 @@ impl fmt::Display for FormatError {
                     actual / element_size.get(),
                 )
             }
-            FormatError::InvalidChunkGeometry(reason) => {
+            Self::InvalidChunkGeometry(reason) => {
                 write!(f, "invalid chunk geometry: {reason}")
             }
-            FormatError::InvalidFilterPipelineVersion(v) => {
+            Self::InvalidFilterPipelineVersion(v) => {
                 write!(f, "invalid filter pipeline version: {v}")
             }
-            FormatError::UnsupportedFilter(id) => {
+            Self::UnsupportedFilter(id) => {
                 write!(f, "unsupported filter: {id}")
             }
-            FormatError::FilterError(msg) => {
+            Self::FilterError(msg) => {
                 write!(f, "filter error: {msg}")
             }
-            FormatError::Fletcher32Mismatch { expected, computed } => {
+            Self::Fletcher32Mismatch { expected, computed } => {
                 write!(
                     f,
                     "fletcher32 mismatch: expected {expected:#010x}, computed {computed:#010x}"
                 )
             }
-            FormatError::ChunkedReadError(msg) => {
+            Self::ChunkedReadError(msg) => {
                 write!(f, "chunked read error: {msg}")
             }
-            FormatError::ChecksumMismatch { expected, computed } => {
+            Self::ChecksumMismatch { expected, computed } => {
                 write!(
                     f,
                     "checksum mismatch: expected {expected:#010x}, computed {computed:#010x}"
                 )
             }
-            FormatError::NestingDepthExceeded => {
+            Self::NestingDepthExceeded => {
                 write!(f, "maximum nesting/continuation depth exceeded")
             }
-            FormatError::UnsupportedZfp(msg) => {
+            Self::UnsupportedZfp(msg) => {
                 write!(f, "unsupported ZFP configuration: {msg}")
             }
-            FormatError::ValueTooLargeForPlatform { value, target } => {
+            Self::ValueTooLargeForPlatform { value, target } => {
                 write!(
                     f,
                     "file value {value} does not fit in {target} on this platform \
                      (a 64-bit HDF5 offset/length exceeds this target's address width)"
                 )
             }
-            FormatError::OffsetOverflow { offset, length } => {
+            Self::OffsetOverflow { offset, length } => {
                 write!(
                     f,
                     "offset arithmetic overflow: {offset} + {length} exceeds u64"
                 )
             }
-            FormatError::AddressBelowBase { address, base } => {
+            Self::AddressBelowBase { address, base } => {
                 write!(
                     f,
                     "file address {address} is below the superblock base address \
                      {base}, so it names no stored (base-relative) position"
                 )
             }
-            FormatError::AllocationFailed { values, source } => {
+            Self::AllocationFailed { values, source } => {
                 write!(f, "cannot reserve room for {values} values: {source}")
             }
-            FormatError::Source(msg) => {
+            Self::Source(msg) => {
                 write!(f, "byte source error: {msg}")
             }
-            FormatError::LibverBoundsUnsatisfiable {
+            Self::LibverBoundsUnsatisfiable {
                 writes,
                 requested_low,
                 requested_high,
@@ -1076,7 +1086,7 @@ impl fmt::Display for FormatError {
                      cannot be satisfied: this crate writes the v1.8 and {writes} formats"
                 )
             }
-            FormatError::LibverTooOldForContent {
+            Self::LibverTooOldForContent {
                 content,
                 needs,
                 writing,
@@ -1087,24 +1097,24 @@ impl fmt::Display for FormatError {
                      library-version bounds write {writing}"
                 )
             }
-            FormatError::InvalidObjectReference(addr) => {
+            Self::InvalidObjectReference(addr) => {
                 write!(
                     f,
                     "invalid HDF5 object reference: address {addr:#x} is null/undefined \
                      or does not point at a group or dataset"
                 )
             }
-            FormatError::UnsupportedFillValueVersion(v) => {
+            Self::UnsupportedFillValueVersion(v) => {
                 write!(f, "unsupported fill value message version: {v}")
             }
-            FormatError::FillValueSizeMismatch { expected, actual } => {
+            Self::FillValueSizeMismatch { expected, actual } => {
                 write!(
                     f,
                     "fill value size {actual} bytes does not match the dataset datatype \
                      element size of {expected} bytes"
                 )
             }
-            FormatError::AttributeMessageTooLarge { name, size } => {
+            Self::AttributeMessageTooLarge { name, size } => {
                 write!(
                     f,
                     "attribute {name:?} serializes to {size} bytes, past the \
@@ -1112,7 +1122,7 @@ impl fmt::Display for FormatError {
                      message size field"
                 )
             }
-            FormatError::ObjectHeaderMessageTooLarge { message_type, size } => {
+            Self::ObjectHeaderMessageTooLarge { message_type, size } => {
                 write!(
                     f,
                     "object header message {message_type:#06x} is {size} bytes, past the \
@@ -1120,7 +1130,7 @@ impl fmt::Display for FormatError {
                      message size field"
                 )
             }
-            FormatError::AttributeFieldTooLong {
+            Self::AttributeFieldTooLong {
                 name,
                 field,
                 size,
@@ -1132,26 +1142,26 @@ impl fmt::Display for FormatError {
                      the attribute message's {field} size field"
                 )
             }
-            FormatError::DenseAttributeHeapTooLarge { limit } => {
+            Self::DenseAttributeHeapTooLarge { limit } => {
                 write!(
                     f,
                     "these attributes need more than the {limit}-byte address space of a dense \
                      attribute heap"
                 )
             }
-            FormatError::ZeroFixedStringWidth => {
+            Self::ZeroFixedStringWidth => {
                 write!(
                     f,
                     "a fixed-width string datatype must be at least one byte wide"
                 )
             }
-            FormatError::FixedStringTooLong { index, len, width } => {
+            Self::FixedStringTooLong { index, len, width } => {
                 write!(
                     f,
                     "string element {index} is {len} bytes, past the declared {width}-byte width"
                 )
             }
-            FormatError::NumericElementTooWide { size } => {
+            Self::NumericElementTooWide { size } => {
                 write!(
                     f,
                     "a {size}-byte numeric element is wider than the 64-bit values these readers \

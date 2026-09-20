@@ -8,6 +8,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [0.47.0] - 2026-09-20
 
+### Fixed
+
+- Version 1 object-header parsing rejects message records whose data sizes are not multiples of eight, matching `libhdf5` 1.10+.
+
 ### Changed
 
 - **Breaking:** `DatatypeByteOrder` implements `Copy`.

@@ -332,11 +332,18 @@ struct MessageRecord<'a> {
 
 /// Decodes one version 1 message record from a bounded chunk slice.
 ///
-/// Fewer than [`MESSAGE_PREFIX_LEN`] bytes produces `None`. A complete prefix
-/// whose declared body extends past the bounded slice produces
-/// [`FormatError::UnexpectedEof`]. Unknown message types whose flags require
-/// understanding under `access_mode` produce
-/// [`FormatError::UnsupportedMessage`].
+/// Returns `Ok(None)` when fewer than [`MESSAGE_PREFIX_LEN`] bytes remain.
+///
+/// # Errors
+///
+/// Returns:
+///
+/// - [`FormatError::UnexpectedEof`] when a complete prefix declares a body that
+///   extends past the bounded slice.
+/// - [`FormatError::InvalidObjectHeaderMessageSize`] when the declared body size
+///   is not a multiple of eight.
+/// - [`FormatError::UnsupportedMessage`] when an unknown message type must be
+///   understood under `access_mode`.
 ///
 /// The record layout is defined in "Version 1 Data Object Header Prefix" of the
 /// [format specification, version 4.0][spec].
@@ -351,10 +358,16 @@ fn parse_message_record(
     }
 
     let msg_type = MessageType::from_u16(LittleEndian::read_u16(&data[..2]));
-    let body_len = usize::from(LittleEndian::read_u16(&data[2..4]));
+    let body_len_raw = LittleEndian::read_u16(&data[2..4]);
+    let body_len = usize::from(body_len_raw);
     let flags = MessageFlags::new(data[4]);
 
     bytes::ensure_len(data, MESSAGE_PREFIX_LEN, body_len)?;
+
+    if !body_len.is_multiple_of(8) {
+        return Err(FormatError::InvalidObjectHeaderMessageSize(body_len_raw));
+    }
+
     let record_len = MESSAGE_PREFIX_LEN + body_len;
 
     if let Some(id) = msg_type.unknown_id()

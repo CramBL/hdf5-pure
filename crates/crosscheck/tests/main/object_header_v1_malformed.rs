@@ -1,18 +1,14 @@
 #![cfg(feature = "hdf5")]
-//! Cross-checks malformed version 1 object-header message boundaries.
+//! Cross-checks malformed version 1 object-header message records.
 //!
 //! The reference C library creates earliest-format files whose root groups use
-//! version 1 object headers. One mutation increases only an Attribute message's
-//! data-size field so its declared body extends eight bytes past its containing
-//! chunk while remaining eight-byte aligned.
+//! version 1 object headers. Tests apply narrowly scoped mutations while
+//! preserving the surrounding file structure, then compare `libhdf5` with both
+//! hdf5-pure parser backends.
 //!
-//! A second mutation copies a valid root continuation to a controlled location,
-//! adds one trailing byte, and increases only the continuation's declared extent.
-//! The final byte cannot form another eight-byte version 1 message prefix.
-//!
-//! The tests pin the reference library's release-dependent handling of those
-//! malformed inputs. On HDF5 1.14 and 2.x they also check whether explicit
-//! `libver` bounds change handling of the partial continuation prefix.
+//! The tests pin release-dependent `libhdf5` behavior. When behavior differs
+//! across releases, modern HDF5 releases are also checked under explicit
+//! `libver` bounds where applicable.
 
 use std::collections::BTreeSet;
 use std::fs;
@@ -53,7 +49,19 @@ struct Record {
 #[derive(Clone, Copy, Debug)]
 struct AttributeCandidate {
     record: Record,
+    chunk_start: usize,
     chunk_end: usize,
+    chunk_length_field: usize,
+    chunk_length_width: usize,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct AlignmentTarget {
+    size_field_offset: usize,
+    chunk_start: usize,
+    chunk_end: usize,
+    chunk_length_field: usize,
+    chunk_length_width: usize,
 }
 
 /// Creates a simple earliest-format file with the reference C library.
@@ -476,6 +484,8 @@ fn find_root_attribute(bytes: &[u8], layout: FileLayout) -> AttributeCandidate {
         layout: FileLayout,
         chunk_start: usize,
         chunk_end: usize,
+        chunk_length_field: usize,
+        chunk_length_width: usize,
         visited: &mut BTreeSet<(usize, usize)>,
         attribute_count: &mut usize,
         saw_symbol_table: &mut bool,
@@ -506,7 +516,13 @@ fn find_root_attribute(bytes: &[u8], layout: FileLayout) -> AttributeCandidate {
                         candidate.is_none(),
                         "multiple root Attribute messages are suitable mutation targets"
                     );
-                    *candidate = Some(AttributeCandidate { record, chunk_end });
+                    *candidate = Some(AttributeCandidate {
+                        record,
+                        chunk_start,
+                        chunk_end,
+                        chunk_length_field,
+                        chunk_length_width,
+                    });
                 }
             }
         }
@@ -554,6 +570,8 @@ fn find_root_attribute(bytes: &[u8], layout: FileLayout) -> AttributeCandidate {
                 layout,
                 continuation_start,
                 continuation_end,
+                record.body_start + layout.offset_size,
+                layout.length_size,
                 visited,
                 attribute_count,
                 saw_symbol_table,
@@ -567,11 +585,21 @@ fn find_root_attribute(bytes: &[u8], layout: FileLayout) -> AttributeCandidate {
     let mut saw_symbol_table = false;
     let mut candidate = None;
 
+    let root_header_offset = layout
+        .root_chunk_start
+        .checked_sub(V1_HEADER_PREFIX_LEN)
+        .expect("root object-header prefix offset underflow");
+    let root_chunk_length_field = root_header_offset
+        .checked_add(8)
+        .expect("object-header data-size field offset overflow");
+
     walk(
         bytes,
         layout,
         layout.root_chunk_start,
         layout.root_chunk_end,
+        root_chunk_length_field,
+        4,
         &mut visited,
         &mut attribute_count,
         &mut saw_symbol_table,
@@ -643,6 +671,137 @@ fn corrupt_root_attribute_message(bytes: &mut [u8]) -> usize {
         .copy_from_slice(&malformed_body_size.to_le_bytes());
 
     size_field_offset
+}
+
+/// Replaces the final root Attribute message with an aligned Nil message.
+///
+/// The message's prefix location, declared size, and body bytes remain unchanged.
+/// This produces a controlled record whose body has no message-specific semantics.
+fn replace_final_root_attribute_with_nil(bytes: &mut [u8]) -> AlignmentTarget {
+    let layout = file_layout(bytes);
+    let candidate = find_root_attribute(bytes, layout);
+    let record = candidate.record;
+
+    assert_eq!(
+        record.msg_type, ATTRIBUTE_MESSAGE,
+        "mutation target is not an Attribute message"
+    );
+    assert_eq!(
+        record.body_end, candidate.chunk_end,
+        "control Attribute message is not the final physical record in its chunk"
+    );
+    assert_eq!(
+        record.body_size % 8,
+        0,
+        "control Attribute message size is not eight-byte aligned"
+    );
+
+    bytes[record.offset..record.offset + 2].copy_from_slice(&NIL_MESSAGE.to_le_bytes());
+
+    AlignmentTarget {
+        size_field_offset: record.offset + 2,
+        chunk_start: candidate.chunk_start,
+        chunk_end: candidate.chunk_end,
+        chunk_length_field: candidate.chunk_length_field,
+        chunk_length_width: candidate.chunk_length_width,
+    }
+}
+
+/// Makes the final controlled Nil message one byte shorter and unaligned.
+///
+/// The containing chunk is shortened by the same byte, so the malformed Nil
+/// record still ends exactly at the declared chunk boundary.
+fn corrupt_final_root_nil_message_alignment(bytes: &mut [u8], target: AlignmentTarget) {
+    let records = chunk_records(bytes, target.chunk_start, target.chunk_end);
+    let record = records
+        .last()
+        .copied()
+        .expect("target object-header chunk contains no messages");
+
+    assert_eq!(
+        record.msg_type, NIL_MESSAGE,
+        "alignment target is not the final Nil message"
+    );
+    assert_eq!(
+        record.offset + 2,
+        target.size_field_offset,
+        "final Nil message moved from its controlled location"
+    );
+    assert_eq!(
+        record.body_end, target.chunk_end,
+        "final Nil message does not end at the chunk boundary"
+    );
+    assert_eq!(
+        record.body_size % 8,
+        0,
+        "control Nil message size is not eight-byte aligned"
+    );
+
+    let declared_chunk_length =
+        read_uint(bytes, target.chunk_length_field, target.chunk_length_width);
+    let physical_chunk_length = target
+        .chunk_end
+        .checked_sub(target.chunk_start)
+        .expect("target chunk length underflow");
+
+    assert_eq!(
+        declared_chunk_length, physical_chunk_length as u64,
+        "target chunk's declared length does not match its physical extent"
+    );
+
+    let malformed_body_size = record
+        .body_size
+        .checked_sub(1)
+        .expect("malformed Nil message size underflow");
+
+    assert_ne!(
+        malformed_body_size % 8,
+        0,
+        "malformed Nil message size must not be eight-byte aligned"
+    );
+
+    bytes[target.size_field_offset..target.size_field_offset + 2]
+        .copy_from_slice(&malformed_body_size.to_le_bytes());
+
+    let malformed_chunk_length = physical_chunk_length
+        .checked_sub(1)
+        .expect("malformed chunk length underflow");
+
+    write_uint(
+        bytes,
+        target.chunk_length_field,
+        target.chunk_length_width,
+        malformed_chunk_length as u64,
+    );
+
+    let malformed_body_end = record
+        .body_start
+        .checked_add(usize::from(malformed_body_size))
+        .expect("malformed Nil message body end overflow");
+    let malformed_chunk_end = target
+        .chunk_start
+        .checked_add(malformed_chunk_length)
+        .expect("malformed chunk end overflow");
+
+    assert_eq!(
+        malformed_body_end, malformed_chunk_end,
+        "malformed Nil message does not end at the shortened chunk boundary"
+    );
+    assert_eq!(
+        read_u16(bytes, record.offset),
+        NIL_MESSAGE,
+        "malformed alignment target is not a Nil message"
+    );
+    assert_eq!(
+        read_u16(bytes, target.size_field_offset),
+        malformed_body_size,
+        "malformed Nil message has the wrong declared size"
+    );
+    assert_eq!(
+        read_uint(bytes, target.chunk_length_field, target.chunk_length_width,),
+        malformed_chunk_length as u64,
+        "containing chunk has the wrong malformed length"
+    );
 }
 
 /// Reads the control dataset through the reference C library.
@@ -941,5 +1100,226 @@ fn a_v1_continuation_partial_prefix_rejection_is_independent_of_libver_bounds() 
         latest_result.is_err(),
         "libhdf5 {version:?} accepted the malformed continuation with \
          {latest:?}..{latest:?} bounds: {latest_result:?}"
+    );
+}
+
+#[test]
+fn a_v1_message_size_not_aligned_to_eight_has_versioned_libhdf5_behavior() {
+    hdf5::silence_errors(true);
+
+    let dir = tempdir().unwrap();
+    let source_path = dir.path().join("source.h5");
+    let valid_path = dir.path().join("valid.h5");
+    let malformed_path = dir.path().join("malformed.h5");
+
+    write_earliest_file(&source_path);
+
+    let mut valid = fs::read(&source_path).unwrap();
+    let target = replace_final_root_attribute_with_nil(&mut valid);
+    fs::write(&valid_path, &valid).unwrap();
+
+    assert_eq!(
+        read_with_c(&valid_path).unwrap(),
+        vec![42],
+        "libhdf5 cannot read the controlled Nil-message fixture"
+    );
+    assert_eq!(
+        read_with_pure_buffered(&valid_path).unwrap(),
+        vec![42],
+        "buffered hdf5-pure cannot read the controlled Nil-message fixture"
+    );
+    assert_eq!(
+        read_with_pure_streaming(&valid_path).unwrap(),
+        vec![42],
+        "streaming hdf5-pure cannot read the controlled Nil-message fixture"
+    );
+
+    let mut malformed = valid.clone();
+    corrupt_final_root_nil_message_alignment(&mut malformed, target);
+
+    assert_eq!(
+        malformed.len(),
+        valid.len(),
+        "alignment corruption must not change the physical file length"
+    );
+
+    for (offset, (before, after)) in valid.iter().zip(&malformed).enumerate() {
+        if before == after {
+            continue;
+        }
+
+        let size_field = target.size_field_offset..target.size_field_offset + 2;
+        let chunk_length_field =
+            target.chunk_length_field..target.chunk_length_field + target.chunk_length_width;
+
+        assert!(
+            size_field.contains(&offset) || chunk_length_field.contains(&offset),
+            "mutation changed byte {offset:#x} outside the Nil message size \
+             or containing chunk-length field"
+        );
+    }
+
+    fs::write(&malformed_path, &malformed).unwrap();
+
+    let version = hdf5::library_version();
+    let c_result = read_with_c(&malformed_path);
+
+    if version < (1, 10, 0) {
+        assert_eq!(
+            c_result.unwrap(),
+            vec![42],
+            "libhdf5 {version:?} rejected the legacy-accepted unaligned \
+             version 1 Nil message"
+        );
+    } else {
+        assert!(
+            c_result.is_err(),
+            "libhdf5 {version:?} accepted an unaligned version 1 Nil \
+             message: {c_result:?}"
+        );
+    }
+
+    // hdf5-pure follows the stricter behavior of libhdf5 1.10+
+    let buffered_result = read_with_pure_buffered(&malformed_path);
+    assert!(
+        matches!(
+            buffered_result,
+            Err(hdf5_pure::Error::Format(
+                hdf5_pure::FormatError::InvalidObjectHeaderMessageSize(47)
+            ))
+        ),
+        "buffered hdf5-pure reported the wrong result for an unaligned \
+         version 1 Nil message: {buffered_result:?}"
+    );
+
+    let streaming_result = read_with_pure_streaming(&malformed_path);
+    assert!(
+        matches!(
+            streaming_result,
+            Err(hdf5_pure::Error::Format(
+                hdf5_pure::FormatError::InvalidObjectHeaderMessageSize(47)
+            ))
+        ),
+        "streaming hdf5-pure reported the wrong result for an unaligned \
+         version 1 Nil message: {streaming_result:?}"
+    );
+}
+
+#[cfg(any(feature = "__hdf5-1.14", feature = "__hdf5-2"))]
+#[test]
+fn a_v1_message_size_alignment_validation_is_independent_of_libver_bounds() {
+    hdf5::silence_errors(true);
+
+    let dir = tempdir().unwrap();
+    let source_path = dir.path().join("source.h5");
+    let valid_path = dir.path().join("valid.h5");
+    let malformed_path = dir.path().join("malformed.h5");
+
+    write_earliest_file(&source_path);
+
+    let mut valid = fs::read(&source_path).unwrap();
+    let target = replace_final_root_attribute_with_nil(&mut valid);
+    fs::write(&valid_path, &valid).unwrap();
+
+    let mut malformed = valid;
+    corrupt_final_root_nil_message_alignment(&mut malformed, target);
+    fs::write(&malformed_path, malformed).unwrap();
+
+    let version = hdf5::library_version();
+
+    assert_eq!(
+        read_with_c(&valid_path).unwrap(),
+        vec![42],
+        "libhdf5 {version:?} cannot read the valid Nil-message fixture \
+         with default libver bounds"
+    );
+    let default_result = read_with_c(&malformed_path);
+    assert!(
+        default_result.is_err(),
+        "libhdf5 {version:?} accepted the unaligned version 1 Nil message \
+         with default libver bounds: {default_result:?}"
+    );
+
+    assert_eq!(
+        read_with_c_libver(&valid_path, LibraryVersion::Earliest, LibraryVersion::V18,).unwrap(),
+        vec![42],
+        "libhdf5 {version:?} cannot read the valid Nil-message fixture \
+         with Earliest..V18 bounds"
+    );
+    let v18_result = read_with_c_libver(
+        &malformed_path,
+        LibraryVersion::Earliest,
+        LibraryVersion::V18,
+    );
+    assert!(
+        v18_result.is_err(),
+        "libhdf5 {version:?} accepted the unaligned version 1 Nil message \
+         with Earliest..V18 bounds: {v18_result:?}"
+    );
+
+    assert_eq!(
+        read_with_c_libver(&valid_path, LibraryVersion::Earliest, LibraryVersion::V110,).unwrap(),
+        vec![42],
+        "libhdf5 {version:?} cannot read the valid Nil-message fixture \
+         with Earliest..V110 bounds"
+    );
+    let v110_result = read_with_c_libver(
+        &malformed_path,
+        LibraryVersion::Earliest,
+        LibraryVersion::V110,
+    );
+    assert!(
+        v110_result.is_err(),
+        "libhdf5 {version:?} accepted the unaligned version 1 Nil message \
+         with Earliest..V110 bounds: {v110_result:?}"
+    );
+
+    assert_eq!(
+        read_with_c_libver(&valid_path, LibraryVersion::Earliest, LibraryVersion::V112,).unwrap(),
+        vec![42],
+        "libhdf5 {version:?} cannot read the valid Nil-message fixture \
+         with Earliest..V112 bounds"
+    );
+    let v112_result = read_with_c_libver(
+        &malformed_path,
+        LibraryVersion::Earliest,
+        LibraryVersion::V112,
+    );
+    assert!(
+        v112_result.is_err(),
+        "libhdf5 {version:?} accepted the unaligned version 1 Nil message \
+         with Earliest..V112 bounds: {v112_result:?}"
+    );
+
+    assert_eq!(
+        read_with_c_libver(&valid_path, LibraryVersion::Earliest, LibraryVersion::V114,).unwrap(),
+        vec![42],
+        "libhdf5 {version:?} cannot read the valid Nil-message fixture \
+         with Earliest..V114 bounds"
+    );
+    let v114_result = read_with_c_libver(
+        &malformed_path,
+        LibraryVersion::Earliest,
+        LibraryVersion::V114,
+    );
+    assert!(
+        v114_result.is_err(),
+        "libhdf5 {version:?} accepted the unaligned version 1 Nil message \
+         with Earliest..V114 bounds: {v114_result:?}"
+    );
+
+    let latest = LibraryVersion::latest();
+
+    assert_eq!(
+        read_with_c_libver(&valid_path, latest, latest).unwrap(),
+        vec![42],
+        "libhdf5 {version:?} cannot read the valid Nil-message fixture \
+         with {latest:?}..{latest:?} bounds"
+    );
+    let latest_result = read_with_c_libver(&malformed_path, latest, latest);
+    assert!(
+        latest_result.is_err(),
+        "libhdf5 {version:?} accepted the unaligned version 1 Nil message \
+         with {latest:?}..{latest:?} bounds: {latest_result:?}"
     );
 }

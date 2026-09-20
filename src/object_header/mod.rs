@@ -283,21 +283,24 @@ mod tests {
 
     #[test]
     fn parse_v1_two_messages() {
+        const DATASPACE: [u8; 8] = [1, 2, 3, 4, 0, 0, 0, 0];
+        const DATA_LAYOUT: [u8; 8] = [5, 6, 0, 0, 0, 0, 0, 0];
+
         let data = V1HeaderBuilder::new()
-            .message(MessageType::DATASPACE, &[1, 2, 3, 4])
-            .message(MessageType::DATA_LAYOUT, &[5, 6])
+            .message(MessageType::DATASPACE, &DATASPACE)
+            .message(MessageType::DATA_LAYOUT, &DATA_LAYOUT)
             .build();
         let header = parse(&data).unwrap();
 
         assert_eq!(header.messages.len(), 2);
-        assert_message(&header.messages[0], MessageType::DATASPACE, &[1, 2, 3, 4]);
-        assert_message(&header.messages[1], MessageType::DATA_LAYOUT, &[5, 6]);
+        assert_message(&header.messages[0], MessageType::DATASPACE, &DATASPACE);
+        assert_message(&header.messages[1], MessageType::DATA_LAYOUT, &DATA_LAYOUT);
     }
 
     #[test]
     fn parse_v1_unknown_message_ok() {
         let data = V1HeaderBuilder::new()
-            .raw_message(UNKNOWN_TYPE, &[0xAA, 0xBB])
+            .raw_message(UNKNOWN_TYPE, &[0xAA, 0, 0, 0, 0, 0, 0, 0])
             .build();
         let header = parse(&data).unwrap();
 
@@ -316,7 +319,7 @@ mod tests {
         let data = V1HeaderBuilder::new()
             .message_with_flags(
                 MessageType::EXTERNAL_DATA_FILES,
-                &[0xAA],
+                &[0xAA, 0, 0, 0, 0, 0, 0, 0],
                 MessageFlags::FAIL_IF_UNKNOWN_AND_OPEN_FOR_WRITE,
             )
             .build();
@@ -339,10 +342,11 @@ mod tests {
     fn unknown_message_data(location: UnknownMessageLocation, flags: MessageFlags) -> Vec<u8> {
         match location {
             UnknownMessageLocation::V1Header => V1HeaderBuilder::new()
-                .raw_message_with_flags(UNKNOWN_TYPE, &[0xAA], flags)
+                .raw_message_with_flags(UNKNOWN_TYPE, &[0xAA, 0, 0, 0, 0, 0, 0, 0], flags)
                 .build(),
             UnknownMessageLocation::V1Continuation => {
-                let continuation = v1_message_record(UNKNOWN_TYPE, &[0xAA], flags);
+                let continuation =
+                    v1_message_record(UNKNOWN_TYPE, &[0xAA, 0, 0, 0, 0, 0, 0, 0], flags);
                 TestFileBuilder::new(
                     V1HeaderBuilder::new()
                         .continuation(CONTINUATION_OFFSET, &continuation)
@@ -404,9 +408,26 @@ mod tests {
                         Some(UNKNOWN_TYPE),
                         "{parser}"
                     );
-                    assert_eq!(header.messages[1].data.as_slice(), &[0xAA], "{parser}");
+                    assert_eq!(
+                        header.messages[1].data.as_slice(),
+                        &[0xAA, 0, 0, 0, 0, 0, 0, 0],
+                        "{parser}"
+                    );
                 }
-                UnknownMessageLocation::V1Header | UnknownMessageLocation::V2Header => {
+                UnknownMessageLocation::V1Header => {
+                    assert_eq!(header.messages.len(), 1, "{parser}");
+                    assert_eq!(
+                        header.messages[0].msg_type.unknown_id(),
+                        Some(UNKNOWN_TYPE),
+                        "{parser}"
+                    );
+                    assert_eq!(
+                        header.messages[0].data.as_slice(),
+                        &[0xAA, 0, 0, 0, 0, 0, 0, 0],
+                        "{parser}"
+                    );
+                }
+                UnknownMessageLocation::V2Header => {
                     assert_eq!(header.messages.len(), 1, "{parser}");
                     assert_eq!(
                         header.messages[0].msg_type.unknown_id(),
@@ -581,12 +602,12 @@ mod tests {
     fn streaming_v1_with_continuation_matches_buffered() {
         let continuation = v1_message_record(
             MessageType::DATATYPE.to_u16(),
-            &[0xBE, 0xEF],
+            &[0xBE, 0xEF, 0, 0, 0, 0, 0, 0],
             MessageFlags::NONE,
         );
         let data = TestFileBuilder::new(
             V1HeaderBuilder::new()
-                .message(MessageType::DATASPACE, &[42])
+                .message(MessageType::DATASPACE, &[42, 0, 0, 0, 0, 0, 0, 0])
                 .continuation(CONTINUATION_OFFSET, &continuation)
                 .build(),
         )
@@ -605,7 +626,7 @@ mod tests {
         // followed.
         let continuation = v1_message_record(
             MessageType::DATATYPE.to_u16(),
-            &[0xBE, 0xEF],
+            &[0xBE, 0xEF, 0, 0, 0, 0, 0, 0],
             MessageFlags::NONE,
         );
         let data = TestFileBuilder::new(
@@ -646,7 +667,7 @@ mod tests {
     #[test]
     fn a_filtered_version_1_parse_follows_unretained_continuations() {
         let nested_offset = 512;
-        let nested_data = [0xDE, 0xAD];
+        let nested_data = [0xDE, 0xAD, 0, 0, 0, 0, 0, 0];
         let nested_chunk = v1_message_record(
             MessageType::DATATYPE.to_u16(),
             &nested_data,
@@ -699,7 +720,11 @@ mod tests {
     #[test]
     fn a_filtered_version_1_parse_checks_must_understand_before_filtering() {
         let data = V1HeaderBuilder::new()
-            .raw_message_with_flags(UNKNOWN_TYPE, &[0xAA], MessageFlags::FAIL_IF_UNKNOWN_ALWAYS)
+            .raw_message_with_flags(
+                UNKNOWN_TYPE,
+                &[0xAA, 0, 0, 0, 0, 0, 0, 0],
+                MessageFlags::FAIL_IF_UNKNOWN_ALWAYS,
+            )
             .build();
 
         let mut buffered_filter_called = false;
@@ -754,6 +779,36 @@ mod tests {
             !streamed_filter_called,
             "streamed parser filtered before must-understand validation"
         );
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn version_1_chunk0_message_with_unaligned_size_is_rejected() {
+        let data = V1HeaderBuilder::new()
+            .message(MessageType::DATATYPE, &[0xAB; 7])
+            .build();
+
+        assert_invalid_v1_message_size_all_parse_paths(&data, 7);
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn version_1_continuation_message_with_unaligned_size_is_rejected() {
+        let continuation = v1_message_record(
+            MessageType::DATATYPE.to_u16(),
+            &[0xAB; 7],
+            MessageFlags::NONE,
+        );
+
+        let data = TestFileBuilder::new(
+            V1HeaderBuilder::new()
+                .continuation(CONTINUATION_OFFSET, &continuation)
+                .build(),
+        )
+        .chunk(CONTINUATION_OFFSET, &continuation)
+        .build();
+
+        assert_invalid_v1_message_size_all_parse_paths(&data, 7);
     }
 
     fn assert_message(message: &HeaderMessage, msg_type: MessageType, data: &[u8]) {
@@ -843,6 +898,41 @@ mod tests {
         assert!(matches!(buffered, Err(FormatError::UnexpectedEof { .. })));
         assert!(matches!(memory, Err(FormatError::UnexpectedEof { .. })));
         assert!(matches!(seek, Err(FormatError::UnexpectedEof { .. })));
+    }
+
+    #[cfg(feature = "std")]
+    fn assert_invalid_v1_message_size_all_parse_paths(data: &[u8], size: u16) {
+        use crate::source::ReadSeekSource;
+
+        let buffered = ObjectHeader::parse_with_base(
+            data,
+            AccessMode::ReadOnly,
+            0,
+            OFFSET_SIZE,
+            LENGTH_SIZE,
+            BaseAddress::ZERO,
+        );
+        let memory = parse_from_source_for_mode(data, AccessMode::ReadOnly);
+        let seek = ObjectHeader::parse_from_source(
+            &ReadSeekSource::new(std::io::Cursor::new(data.to_vec())).unwrap(),
+            AccessMode::ReadOnly,
+            0,
+            OFFSET_SIZE,
+            LENGTH_SIZE,
+            BaseAddress::ZERO,
+        );
+
+        for (parser, result) in [
+            ("buffered", buffered),
+            ("memory source", memory),
+            ("seek source", seek),
+        ] {
+            assert_eq!(
+                result.unwrap_err(),
+                FormatError::InvalidObjectHeaderMessageSize(size),
+                "{parser}"
+            );
+        }
     }
 
     #[derive(Clone)]
