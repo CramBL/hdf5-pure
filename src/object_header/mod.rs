@@ -248,95 +248,7 @@ impl ObjectHeader {
 mod tests {
     use super::*;
     use crate::{source::BytesSource, width::UintWidth};
-
-    // Helper: build a v1 object header with given messages
-    fn build_v1_header(
-        messages: &[(u16, &[u8], MessageFlags)], // (type, data, flags)
-        offset_size: u8,
-        length_size: u8,
-    ) -> Vec<u8> {
-        let _ = (offset_size, length_size);
-        let msg_bytes = v1_message_records(messages);
-
-        let mut buf = Vec::new();
-        buf.push(1); // version
-        buf.push(0); // reserved
-        buf.extend_from_slice(&(messages.len() as u16).to_le_bytes()); // `num_messages`
-        buf.extend_from_slice(&1u32.to_le_bytes()); // `reference_count`
-        buf.extend_from_slice(&(msg_bytes.len() as u32).to_le_bytes()); // `header_data_size`
-        // Pad to 8-byte alignment (12 bytes so far, pad 4)
-        buf.extend_from_slice(&[0u8; 4]);
-        buf.extend_from_slice(&msg_bytes);
-        buf
-    }
-
-    /// Builds the message records of one version 1 object header chunk: for each message a type,
-    /// a size, a flags byte, three reserved bytes, and the body.
-    fn v1_message_records(messages: &[(u16, &[u8], MessageFlags)]) -> Vec<u8> {
-        let mut records = Vec::new();
-        for (msg_type, msg_data, msg_flags) in messages {
-            records.extend_from_slice(&msg_type.to_le_bytes());
-            records.extend_from_slice(&(msg_data.len() as u16).to_le_bytes());
-            records.push(msg_flags.get());
-            records.extend_from_slice(&[0u8; 3]);
-            records.extend_from_slice(msg_data);
-        }
-        records
-    }
-
-    // Helper: build a v2 object header chunk0 with given messages
-    fn build_v2_header(
-        flags: u8,
-        messages: &[(u8, &[u8], MessageFlags)],
-        timestamps: Option<(u32, u32, u32, u32)>,
-    ) -> Vec<u8> {
-        let header_flags = v2::HeaderFlags::new(flags);
-        let has_creation_order = header_flags.tracks_creation_order();
-        let has_timestamps = header_flags.stores_times();
-        let mut buf = Vec::new();
-        buf.extend_from_slice(&OHDR_SIGNATURE); // 4
-        buf.push(2); // version
-        buf.push(flags);
-
-        if has_timestamps && let Some((at, mt, ct, bt)) = timestamps {
-            buf.extend_from_slice(&at.to_le_bytes());
-            buf.extend_from_slice(&mt.to_le_bytes());
-            buf.extend_from_slice(&ct.to_le_bytes());
-            buf.extend_from_slice(&bt.to_le_bytes());
-        }
-
-        if header_flags.stores_attribute_phase_change() {
-            buf.extend_from_slice(&8u16.to_le_bytes()); // `max_compact`
-            buf.extend_from_slice(&6u16.to_le_bytes()); // `min_dense`
-        }
-
-        // Build message bytes to get chunk size
-        let mut msg_bytes = Vec::new();
-        for (mtype, mdata, mflags) in messages {
-            msg_bytes.push(*mtype); // type(1)
-            msg_bytes.extend_from_slice(&(mdata.len() as u16).to_le_bytes()); // size(2)
-            msg_bytes.push(mflags.get()); // flags(1)
-            if has_creation_order {
-                msg_bytes.extend_from_slice(&0u16.to_le_bytes()); // creation_order(2)
-            }
-            msg_bytes.extend_from_slice(mdata);
-        }
-
-        let chunk_size = msg_bytes.len();
-        match header_flags.chunk_size_width() {
-            UintWidth::One => buf.push(chunk_size as u8),
-            UintWidth::Two => buf.extend_from_slice(&(chunk_size as u16).to_le_bytes()),
-            UintWidth::Four => buf.extend_from_slice(&(chunk_size as u32).to_le_bytes()),
-            UintWidth::Eight => buf.extend_from_slice(&(chunk_size as u64).to_le_bytes()),
-        }
-
-        buf.extend_from_slice(&msg_bytes);
-
-        // Checksum (CRC32C of everything from OHDR to here)
-        let checksum = crate::checksum::jenkins_lookup3(&buf);
-        buf.extend_from_slice(&checksum.to_le_bytes());
-        buf
-    }
+    use rstest::rstest;
 
     /// A chunk of only Nil padding reserves nothing.
     ///
@@ -345,10 +257,11 @@ mod tests {
     /// excluded from the reservation count.
     #[test]
     fn a_chunk_of_padding_reserves_no_messages() {
-        // 256 empty Nil messages: 1 KiB of chunk, none of it kept.
-        let nils: Vec<(u8, &[u8], MessageFlags)> = vec![(0u8, &[][..], MessageFlags::NONE); 256];
-        let data = build_v2_header(0x01, &nils, None);
-        let header = ObjectHeader::parse(&data, AccessMode::ReadOnly, 0, 8, 8).unwrap();
+        let data = V2HeaderBuilder::new()
+            .flags(0x01)
+            .repeat_raw_message(256, 0x00, &[])
+            .build();
+        let header = parse(&data).unwrap();
 
         assert!(header.messages.is_empty(), "Nil messages are not kept");
         assert_eq!(
@@ -360,38 +273,36 @@ mod tests {
 
     #[test]
     fn parse_v1_zero_messages() {
-        let data = build_v1_header(&[], 8, 8);
-        let hdr = ObjectHeader::parse(&data, AccessMode::ReadOnly, 0, 8, 8).unwrap();
-        assert_eq!(hdr.version, 1);
-        assert_eq!(hdr.messages.len(), 0);
-        assert_eq!(hdr.reference_count, Some(1));
-        assert_eq!(hdr.flags, 0);
+        let header = parse(&V1HeaderBuilder::new().build()).unwrap();
+
+        assert_eq!(header.version, 1);
+        assert!(header.messages.is_empty());
+        assert_eq!(header.reference_count, Some(1));
+        assert_eq!(header.flags, 0);
     }
 
     #[test]
     fn parse_v1_two_messages() {
-        let messages = [
-            (0x0001u16, &[1u8, 2, 3, 4][..], MessageFlags::NONE), // Dataspace
-            (0x0008, &[5u8, 6][..], MessageFlags::NONE),          // DataLayout
-        ];
-        let data = build_v1_header(&messages, 8, 8);
-        let hdr = ObjectHeader::parse(&data, AccessMode::ReadOnly, 0, 8, 8).unwrap();
-        assert_eq!(hdr.messages.len(), 2);
-        assert_eq!(hdr.messages[0].msg_type, MessageType::DATASPACE);
-        assert_eq!(hdr.messages[0].data, vec![1, 2, 3, 4]);
-        assert_eq!(hdr.messages[1].msg_type, MessageType::DATA_LAYOUT);
-        assert_eq!(hdr.messages[1].data, vec![5, 6]);
+        let data = V1HeaderBuilder::new()
+            .message(MessageType::DATASPACE, &[1, 2, 3, 4])
+            .message(MessageType::DATA_LAYOUT, &[5, 6])
+            .build();
+        let header = parse(&data).unwrap();
+
+        assert_eq!(header.messages.len(), 2);
+        assert_message(&header.messages[0], MessageType::DATASPACE, &[1, 2, 3, 4]);
+        assert_message(&header.messages[1], MessageType::DATA_LAYOUT, &[5, 6]);
     }
 
     #[test]
     fn parse_v1_unknown_message_ok() {
-        const UNKNOWN_TYPE: u16 = 0x00FF;
-        let messages = [(UNKNOWN_TYPE, &[0xAA, 0xBB][..], MessageFlags::NONE)];
-        let data = build_v1_header(&messages, 8, 8);
-        let hdr = ObjectHeader::parse(&data, AccessMode::ReadOnly, 0, 8, 8).unwrap();
+        let data = V1HeaderBuilder::new()
+            .raw_message(UNKNOWN_TYPE, &[0xAA, 0xBB])
+            .build();
+        let header = parse(&data).unwrap();
 
-        assert_eq!(hdr.messages.len(), 1);
-        assert_eq!(hdr.messages[0].msg_type.unknown_id(), Some(UNKNOWN_TYPE));
+        assert_eq!(header.messages.len(), 1);
+        assert_eq!(header.messages[0].msg_type.unknown_id(), Some(UNKNOWN_TYPE));
     }
 
     /// The must-understand guard applies only to message types the parser cannot
@@ -399,494 +310,290 @@ mod tests {
     /// and the reader reports external storage when the message is used.
     ///
     /// The reference library writes flags `0x01` on this message. A crafted
-    /// `0x08` flag exercises the guard. The same check applies to both header
-    /// versions and their continuations. This test covers the version 1 header
-    /// path.
+    /// `0x08` flag exercises the guard.
     #[test]
     fn parse_v1_named_message_survives_must_understand() {
-        let messages = [(
-            0x0007u16,
-            &[0xAA][..],
-            MessageFlags::FAIL_IF_UNKNOWN_AND_OPEN_FOR_WRITE,
-        )];
-        let data = build_v1_header(&messages, 8, 8);
-        let hdr = ObjectHeader::parse(&data, AccessMode::ReadWrite, 0, 8, 8).unwrap();
-        assert_eq!(hdr.messages.len(), 1);
-        assert_eq!(hdr.messages[0].msg_type, MessageType::EXTERNAL_DATA_FILES);
-    }
-
-    #[test]
-    fn a_version_1_header_rejects_an_unknown_message_that_must_always_be_understood() {
-        let messages = [(0x00FFu16, &[0xAA][..], MessageFlags::FAIL_IF_UNKNOWN_ALWAYS)];
-        let data = build_v1_header(&messages, 8, 8);
-        let err = ObjectHeader::parse(&data, AccessMode::ReadOnly, 0, 8, 8).unwrap_err();
-        assert_eq!(err, FormatError::UnsupportedMessage(0x00FF));
-    }
-
-    #[test]
-    fn a_version_1_continuation_rejects_an_unknown_message_that_must_always_be_understood() {
-        let cont_chunk =
-            v1_message_records(&[(0x00FFu16, &[0xAA][..], MessageFlags::FAIL_IF_UNKNOWN_ALWAYS)]);
-
-        let cont_offset = 256usize;
-        let mut cont_ptr = Vec::new();
-        cont_ptr.extend_from_slice(&(cont_offset as u64).to_le_bytes());
-        cont_ptr.extend_from_slice(&(cont_chunk.len() as u64).to_le_bytes());
-
-        let header = build_v1_header(
-            &[(
-                MessageType::OBJECT_HEADER_CONTINUATION.to_u16(),
-                &cont_ptr[..],
-                MessageFlags::NONE,
-            )],
-            8,
-            8,
-        );
-        let mut file_data = vec![0u8; cont_offset + cont_chunk.len()];
-        file_data[..header.len()].copy_from_slice(&header);
-        file_data[cont_offset..cont_offset + cont_chunk.len()].copy_from_slice(&cont_chunk);
-
-        let err = ObjectHeader::parse(&file_data, AccessMode::ReadOnly, 0, 8, 8).unwrap_err();
-        assert_eq!(err, FormatError::UnsupportedMessage(0x00FF));
-    }
-
-    #[test]
-    fn a_version_2_header_rejects_an_unknown_message_that_must_always_be_understood() {
-        let data = build_v2_header(
-            0x00,
-            &[(0xFF, &[0xAA][..], MessageFlags::FAIL_IF_UNKNOWN_ALWAYS)],
-            None,
-        );
-        let err = ObjectHeader::parse(&data, AccessMode::ReadOnly, 0, 8, 8).unwrap_err();
-        assert_eq!(err, FormatError::UnsupportedMessage(0x00FF));
-    }
-
-    #[test]
-    fn a_streamed_version_1_header_rejects_an_unknown_message_that_must_always_be_understood() {
-        let messages = [(0x00FFu16, &[0xAA][..], MessageFlags::FAIL_IF_UNKNOWN_ALWAYS)];
-        let data = build_v1_header(&messages, 8, 8);
-        let err = ObjectHeader::parse_from_source(
-            &BytesSource::new(&data),
-            AccessMode::ReadOnly,
-            0,
-            8,
-            8,
-            BaseAddress::ZERO,
-        )
-        .unwrap_err();
-        assert_eq!(err, FormatError::UnsupportedMessage(0x00FF));
-    }
-
-    #[test]
-    fn a_version_1_header_rejects_an_unknown_message_a_writer_must_understand_only_for_write() {
-        const UNKNOWN_TYPE: u16 = 0x00FF;
-
-        let messages = [(
-            UNKNOWN_TYPE,
-            &[0xAA][..],
-            MessageFlags::FAIL_IF_UNKNOWN_AND_OPEN_FOR_WRITE,
-        )];
-        let data = build_v1_header(&messages, 8, 8);
-
-        let hdr = ObjectHeader::parse(&data, AccessMode::ReadOnly, 0, 8, 8).unwrap();
-
-        assert_eq!(hdr.messages.len(), 1);
-        assert_eq!(hdr.messages[0].msg_type.unknown_id(), Some(UNKNOWN_TYPE));
-        assert_eq!(hdr.messages[0].data, vec![0xAA]);
-
-        let err = ObjectHeader::parse(&data, AccessMode::ReadWrite, 0, 8, 8).unwrap_err();
-        assert_eq!(err, FormatError::UnsupportedMessage(UNKNOWN_TYPE));
-    }
-
-    #[test]
-    fn a_version_1_continuation_rejects_an_unknown_message_a_writer_must_understand_only_for_write()
-    {
-        const UNKNOWN_TYPE: u16 = 0x00FF;
-
-        let cont_chunk = v1_message_records(&[(
-            UNKNOWN_TYPE,
-            &[0xAA][..],
-            MessageFlags::FAIL_IF_UNKNOWN_AND_OPEN_FOR_WRITE,
-        )]);
-
-        let cont_offset = 256usize;
-        let mut cont_ptr = Vec::new();
-        cont_ptr.extend_from_slice(&(cont_offset as u64).to_le_bytes());
-        cont_ptr.extend_from_slice(&(cont_chunk.len() as u64).to_le_bytes());
-
-        let header = build_v1_header(
-            &[(
-                MessageType::OBJECT_HEADER_CONTINUATION.to_u16(),
-                &cont_ptr[..],
-                MessageFlags::NONE,
-            )],
-            8,
-            8,
-        );
-        let mut file_data = vec![0u8; cont_offset + cont_chunk.len()];
-        file_data[..header.len()].copy_from_slice(&header);
-        file_data[cont_offset..cont_offset + cont_chunk.len()].copy_from_slice(&cont_chunk);
-
-        let hdr = ObjectHeader::parse(&file_data, AccessMode::ReadOnly, 0, 8, 8).unwrap();
-
-        assert_eq!(hdr.messages.len(), 2);
-        assert_eq!(
-            hdr.messages[0].msg_type,
-            MessageType::OBJECT_HEADER_CONTINUATION
-        );
-        assert_eq!(hdr.messages[1].msg_type.unknown_id(), Some(UNKNOWN_TYPE));
-
-        let err = ObjectHeader::parse(&file_data, AccessMode::ReadWrite, 0, 8, 8).unwrap_err();
-        assert_eq!(err, FormatError::UnsupportedMessage(UNKNOWN_TYPE));
-    }
-
-    #[test]
-    fn a_version_2_header_rejects_an_unknown_message_a_writer_must_understand_only_for_write() {
-        let data = build_v2_header(
-            0x00,
-            &[(
-                0xFF,
-                &[0xAA][..],
+        let data = V1HeaderBuilder::new()
+            .message_with_flags(
+                MessageType::EXTERNAL_DATA_FILES,
+                &[0xAA],
                 MessageFlags::FAIL_IF_UNKNOWN_AND_OPEN_FOR_WRITE,
-            )],
-            None,
+            )
+            .build();
+        let header = parse_for_mode(&data, AccessMode::ReadWrite).unwrap();
+
+        assert_eq!(header.messages.len(), 1);
+        assert_eq!(
+            header.messages[0].msg_type,
+            MessageType::EXTERNAL_DATA_FILES
         );
-
-        let hdr = ObjectHeader::parse(&data, AccessMode::ReadOnly, 0, 8, 8).unwrap();
-        assert_eq!(hdr.messages.len(), 1);
-        assert_eq!(hdr.messages[0].msg_type, MessageType::from(0x00FF));
-        assert_eq!(hdr.messages[0].data, vec![0xAA]);
-
-        let err = ObjectHeader::parse(&data, AccessMode::ReadWrite, 0, 8, 8).unwrap_err();
-        assert_eq!(err, FormatError::UnsupportedMessage(0x00FF));
     }
 
-    #[test]
-    fn a_streamed_version_1_header_rejects_an_unknown_message_a_writer_must_understand_only_for_write()
-     {
-        let messages = [(
-            0x00FFu16,
-            &[0xAA][..],
-            MessageFlags::FAIL_IF_UNKNOWN_AND_OPEN_FOR_WRITE,
-        )];
-        let data = build_v1_header(&messages, 8, 8);
-        let source = BytesSource::new(&data);
+    #[derive(Clone, Copy, Debug)]
+    enum UnknownMessageLocation {
+        V1Header,
+        V1Continuation,
+        V2Header,
+    }
 
-        let hdr = ObjectHeader::parse_from_source(
-            &source,
-            AccessMode::ReadOnly,
-            0,
-            8,
-            8,
-            BaseAddress::ZERO,
-        )
-        .unwrap();
-        assert_eq!(hdr.messages.len(), 1);
-        assert_eq!(hdr.messages[0].msg_type, MessageType::from(0x00FF));
-        assert_eq!(hdr.messages[0].data, vec![0xAA]);
+    fn unknown_message_data(location: UnknownMessageLocation, flags: MessageFlags) -> Vec<u8> {
+        match location {
+            UnknownMessageLocation::V1Header => V1HeaderBuilder::new()
+                .raw_message_with_flags(UNKNOWN_TYPE, &[0xAA], flags)
+                .build(),
+            UnknownMessageLocation::V1Continuation => {
+                let continuation = v1_message_record(UNKNOWN_TYPE, &[0xAA], flags);
+                TestFileBuilder::new(
+                    V1HeaderBuilder::new()
+                        .continuation(CONTINUATION_OFFSET, &continuation)
+                        .build(),
+                )
+                .chunk(CONTINUATION_OFFSET, &continuation)
+                .build()
+            }
+            UnknownMessageLocation::V2Header => V2HeaderBuilder::new()
+                .raw_message_with_flags(0xFF, &[0xAA], flags)
+                .build(),
+        }
+    }
 
-        let err = ObjectHeader::parse_from_source(
-            &source,
-            AccessMode::ReadWrite,
-            0,
-            8,
-            8,
-            BaseAddress::ZERO,
-        )
-        .unwrap_err();
-        assert_eq!(err, FormatError::UnsupportedMessage(0x00FF));
+    #[rstest]
+    #[case::v1_header(UnknownMessageLocation::V1Header)]
+    #[case::v1_continuation(UnknownMessageLocation::V1Continuation)]
+    #[case::v2_header(UnknownMessageLocation::V2Header)]
+    fn unknown_message_that_must_always_be_understood_is_rejected(
+        #[case] location: UnknownMessageLocation,
+    ) {
+        let data = unknown_message_data(location, MessageFlags::FAIL_IF_UNKNOWN_ALWAYS);
+
+        assert_eq!(
+            parse(&data).unwrap_err(),
+            FormatError::UnsupportedMessage(UNKNOWN_TYPE),
+            "buffered {location:?}"
+        );
+        assert_eq!(
+            parse_from_source_for_mode(&data, AccessMode::ReadOnly).unwrap_err(),
+            FormatError::UnsupportedMessage(UNKNOWN_TYPE),
+            "streamed {location:?}"
+        );
+    }
+
+    #[rstest]
+    #[case::v1_header(UnknownMessageLocation::V1Header)]
+    #[case::v1_continuation(UnknownMessageLocation::V1Continuation)]
+    #[case::v2_header(UnknownMessageLocation::V2Header)]
+    fn unknown_message_that_a_writer_must_understand_is_rejected_only_for_write(
+        #[case] location: UnknownMessageLocation,
+    ) {
+        let data = unknown_message_data(location, MessageFlags::FAIL_IF_UNKNOWN_AND_OPEN_FOR_WRITE);
+
+        let buffered = parse_for_mode(&data, AccessMode::ReadOnly).unwrap();
+        let streamed = parse_from_source_for_mode(&data, AccessMode::ReadOnly).unwrap();
+
+        for (parser, header) in [("buffered", buffered), ("streamed", streamed)] {
+            match location {
+                UnknownMessageLocation::V1Continuation => {
+                    assert_eq!(header.messages.len(), 2, "{parser}");
+                    assert_eq!(
+                        header.messages[0].msg_type,
+                        MessageType::OBJECT_HEADER_CONTINUATION,
+                        "{parser}"
+                    );
+                    assert_eq!(
+                        header.messages[1].msg_type.unknown_id(),
+                        Some(UNKNOWN_TYPE),
+                        "{parser}"
+                    );
+                    assert_eq!(header.messages[1].data.as_slice(), &[0xAA], "{parser}");
+                }
+                UnknownMessageLocation::V1Header | UnknownMessageLocation::V2Header => {
+                    assert_eq!(header.messages.len(), 1, "{parser}");
+                    assert_eq!(
+                        header.messages[0].msg_type.unknown_id(),
+                        Some(UNKNOWN_TYPE),
+                        "{parser}"
+                    );
+                    assert_eq!(header.messages[0].data.as_slice(), &[0xAA], "{parser}");
+                }
+            }
+        }
+
+        assert_eq!(
+            parse_for_mode(&data, AccessMode::ReadWrite).unwrap_err(),
+            FormatError::UnsupportedMessage(UNKNOWN_TYPE),
+            "buffered"
+        );
+        assert_eq!(
+            parse_from_source_for_mode(&data, AccessMode::ReadWrite).unwrap_err(),
+            FormatError::UnsupportedMessage(UNKNOWN_TYPE),
+            "streamed"
+        );
     }
 
     #[test]
     fn parse_v2_no_timestamps_one_message() {
-        let data = build_v2_header(0x00, &[(0x01, &[10, 20], MessageFlags::NONE)], None);
-        let hdr = ObjectHeader::parse(&data, AccessMode::ReadOnly, 0, 8, 8).unwrap();
-        assert_eq!(hdr.version, 2);
-        assert_eq!(hdr.flags, 0);
-        assert_eq!(hdr.messages.len(), 1);
-        assert_eq!(hdr.messages[0].msg_type, MessageType::DATASPACE);
-        assert_eq!(hdr.messages[0].data, vec![10, 20]);
-        assert!(hdr.access_time.is_none());
+        let data = V2HeaderBuilder::new()
+            .message(MessageType::DATASPACE, &[10, 20])
+            .build();
+        let header = parse(&data).unwrap();
+
+        assert_eq!(header.version, 2);
+        assert_eq!(header.flags, 0);
+        assert_eq!(header.messages.len(), 1);
+        assert_message(&header.messages[0], MessageType::DATASPACE, &[10, 20]);
+        assert!(header.access_time.is_none());
     }
 
     #[test]
     fn parse_v2_with_timestamps() {
-        let data = build_v2_header(
-            0x20,
-            &[(0x01, &[1], MessageFlags::NONE)],
-            Some((100, 200, 300, 400)),
-        );
-        let hdr = ObjectHeader::parse(&data, AccessMode::ReadOnly, 0, 8, 8).unwrap();
-        assert_eq!(hdr.access_time, Some(100));
-        assert_eq!(hdr.modification_time, Some(200));
-        assert_eq!(hdr.change_time, Some(300));
-        assert_eq!(hdr.birth_time, Some(400));
-        assert_eq!(hdr.messages.len(), 1);
-        // flags bit 5 = timestamps, but bit 2 not set → no creation order in messages
-        assert!(hdr.messages[0].creation_order.is_none());
+        let data = V2HeaderBuilder::new()
+            .flags(V2_STORES_TIMES)
+            .timestamps((100, 200, 300, 400))
+            .message(MessageType::DATASPACE, &[1])
+            .build();
+        let header = parse(&data).unwrap();
+
+        assert_eq!(header.access_time, Some(100));
+        assert_eq!(header.modification_time, Some(200));
+        assert_eq!(header.change_time, Some(300));
+        assert_eq!(header.birth_time, Some(400));
+        assert_eq!(header.messages.len(), 1);
+        assert!(header.messages[0].creation_order.is_none());
     }
 
     #[test]
     fn parse_v2_creation_order() {
-        // flags bit 2 enables attribute/message creation order tracking
-        // flags bit 5 enables timestamps
-        // Use 0x24 = bit 2 + bit 5
-        let data = build_v2_header(
-            0x24,
-            &[
-                (0x03, &[9], MessageFlags::NONE),
-                (0x05, &[8], MessageFlags::NONE),
-            ],
-            Some((0, 0, 0, 0)),
-        );
-        let hdr = ObjectHeader::parse(&data, AccessMode::ReadOnly, 0, 8, 8).unwrap();
-        assert_eq!(hdr.messages.len(), 2);
-        assert!(hdr.messages[0].creation_order.is_some());
-        assert!(hdr.messages[1].creation_order.is_some());
-        assert_eq!(hdr.access_time, Some(0));
+        let data = V2HeaderBuilder::new()
+            .flags(V2_STORES_TIMES | V2_TRACKS_CREATION_ORDER)
+            .timestamps((0, 0, 0, 0))
+            .message(MessageType::DATATYPE, &[9])
+            .raw_message(0x05, &[8])
+            .build();
+        let header = parse(&data).unwrap();
+
+        assert_eq!(header.messages.len(), 2);
+        assert!(header.messages[0].creation_order.is_some());
+        assert!(header.messages[1].creation_order.is_some());
+        assert_eq!(header.access_time, Some(0));
     }
 
     #[test]
-    fn parse_v2_checksum_valid() {
-        let data = build_v2_header(0x00, &[(0x01, &[1, 2, 3], MessageFlags::NONE)], None);
-        // The valid checksum allows parsing to succeed.
-        let hdr = ObjectHeader::parse(&data, AccessMode::ReadOnly, 0, 8, 8).unwrap();
-        assert_eq!(hdr.messages.len(), 1);
-    }
+    fn parse_v2_checksum_is_validated() {
+        let mut data = V2HeaderBuilder::new()
+            .message(MessageType::DATASPACE, &[1, 2, 3])
+            .build();
 
-    #[test]
-    fn parse_v2_checksum_invalid() {
-        let mut data = build_v2_header(0x00, &[(0x01, &[1, 2, 3], MessageFlags::NONE)], None);
-        // Corrupt checksum
-        let len = data.len();
-        data[len - 1] ^= 0xFF;
-        let err = ObjectHeader::parse(&data, AccessMode::ReadOnly, 0, 8, 8).unwrap_err();
-        assert!(matches!(err, FormatError::ChecksumMismatch { .. }));
+        assert_eq!(parse(&data).unwrap().messages.len(), 1);
+
+        *data.last_mut().unwrap() ^= 0xFF;
+        assert!(matches!(
+            parse(&data),
+            Err(FormatError::ChecksumMismatch { .. })
+        ));
     }
 
     #[test]
     fn parse_v2_nil_padding_skipped() {
-        let data = build_v2_header(
-            0x00,
-            &[
-                (0x00, &[0, 0, 0, 0], MessageFlags::NONE), // NIL
-                (0x01, &[42], MessageFlags::NONE),         // Dataspace
-            ],
-            None,
-        );
-        let hdr = ObjectHeader::parse(&data, AccessMode::ReadOnly, 0, 8, 8).unwrap();
-        assert_eq!(hdr.messages.len(), 1);
-        assert_eq!(hdr.messages[0].msg_type, MessageType::DATASPACE);
+        let data = V2HeaderBuilder::new()
+            .raw_message(0x00, &[0, 0, 0, 0])
+            .message(MessageType::DATASPACE, &[42])
+            .build();
+        let header = parse(&data).unwrap();
+
+        assert_eq!(header.messages.len(), 1);
+        assert_eq!(header.messages[0].msg_type, MessageType::DATASPACE);
     }
 
     #[test]
-    fn parse_v2_chunk_size_1byte() {
-        // flags bits 0-1 = 0 → 1-byte chunk size
-        let data = build_v2_header(0x00, &[(0x01, &[1], MessageFlags::NONE)], None);
-        let hdr = ObjectHeader::parse(&data, AccessMode::ReadOnly, 0, 8, 8).unwrap();
-        assert_eq!(hdr.messages.len(), 1);
-    }
+    fn parse_v2_chunk_size_widths() {
+        for flags in [0x00, 0x01, 0x02] {
+            let data = V2HeaderBuilder::new()
+                .flags(flags)
+                .message(MessageType::DATASPACE, &[1])
+                .build();
 
-    #[test]
-    fn parse_v2_chunk_size_2byte() {
-        let data = build_v2_header(0x01, &[(0x01, &[1], MessageFlags::NONE)], None);
-        let hdr = ObjectHeader::parse(&data, AccessMode::ReadOnly, 0, 8, 8).unwrap();
-        assert_eq!(hdr.messages.len(), 1);
-    }
-
-    #[test]
-    fn parse_v2_chunk_size_4byte() {
-        let data = build_v2_header(0x02, &[(0x01, &[1], MessageFlags::NONE)], None);
-        let hdr = ObjectHeader::parse(&data, AccessMode::ReadOnly, 0, 8, 8).unwrap();
-        assert_eq!(hdr.messages.len(), 1);
+            assert_eq!(
+                parse(&data).unwrap().messages.len(),
+                1,
+                "flags={flags:#04x}"
+            );
+        }
     }
 
     #[test]
     fn parse_v2_continuation() {
-        // Build a continuation chunk (OCHK) at a known offset
-        let ochk_offset = 256usize;
-        let ochk_msg_type = 0x03u8; // Datatype
-        let ochk_msg_data = [0xDE, 0xAD];
+        let continuation = v2_continuation_chunk(MessageType::DATATYPE, &[0xDE, 0xAD]);
+        let data = TestFileBuilder::new(
+            V2HeaderBuilder::new()
+                .message(MessageType::DATASPACE, &[42])
+                .continuation(CONTINUATION_OFFSET, &continuation)
+                .build(),
+        )
+        .chunk(CONTINUATION_OFFSET, &continuation)
+        .build();
+        let header = parse(&data).unwrap();
 
-        // Build the OCHK chunk
-        let mut ochk_buf = Vec::new();
-        ochk_buf.extend_from_slice(&v2::OCHK_SIGNATURE);
-        ochk_buf.push(ochk_msg_type);
-        ochk_buf.extend_from_slice(&(ochk_msg_data.len() as u16).to_le_bytes());
-        ochk_buf.push(MessageFlags::NONE.get());
-        ochk_buf.extend_from_slice(&ochk_msg_data);
-        let checksum = crate::checksum::jenkins_lookup3(&ochk_buf);
-        ochk_buf.extend_from_slice(&checksum.to_le_bytes());
-
-        let ochk_length = ochk_buf.len();
-
-        // Build continuation message data: offset(8 LE) + length(8 LE)
-        let mut cont_data = Vec::new();
-        cont_data.extend_from_slice(&(ochk_offset as u64).to_le_bytes());
-        cont_data.extend_from_slice(&(ochk_length as u64).to_le_bytes());
-
-        // Build main header with continuation message + a regular message
-        let header = build_v2_header(
-            0x00,
-            &[
-                (0x01, &[42], MessageFlags::NONE),      // Dataspace
-                (0x10, &cont_data, MessageFlags::NONE), // Continuation
-            ],
-            None,
-        );
-
-        // Assemble full "file"
-        let total_size = ochk_offset + ochk_buf.len();
-        let mut file_data = vec![0u8; total_size];
-        file_data[..header.len()].copy_from_slice(&header);
-        file_data[ochk_offset..ochk_offset + ochk_buf.len()].copy_from_slice(&ochk_buf);
-
-        let hdr = ObjectHeader::parse(&file_data, AccessMode::ReadOnly, 0, 8, 8).unwrap();
-        assert_eq!(hdr.messages.len(), 2);
-        assert_eq!(hdr.messages[0].msg_type, MessageType::DATASPACE);
-        assert_eq!(hdr.messages[1].msg_type, MessageType::DATATYPE);
-        assert_eq!(hdr.messages[1].data, vec![0xDE, 0xAD]);
+        assert_eq!(header.messages.len(), 2);
+        assert_eq!(header.messages[0].msg_type, MessageType::DATASPACE);
+        assert_message(&header.messages[1], MessageType::DATATYPE, &[0xDE, 0xAD]);
     }
 
     #[test]
-    fn truncated_v1_header() {
-        let data = vec![1u8, 0]; // version 1, but too short
-        let err = ObjectHeader::parse(&data, AccessMode::ReadOnly, 0, 8, 8).unwrap_err();
-        assert!(matches!(err, FormatError::UnexpectedEof { .. }));
-    }
-
-    #[test]
-    fn truncated_v2_header() {
-        let data = [b'O', b'H', b'D', b'R', 2]; // signature + version, but no flags
-        let err = ObjectHeader::parse(&data, AccessMode::ReadOnly, 0, 8, 8).unwrap_err();
-        assert!(matches!(err, FormatError::UnexpectedEof { .. }));
-    }
-
-    #[cfg(feature = "std")]
-    fn assert_same_header(a: &ObjectHeader, b: &ObjectHeader) {
-        assert_eq!(a.version, b.version);
-        assert_eq!(a.reference_count, b.reference_count);
-        assert_eq!(a.flags, b.flags);
-        assert_eq!(a.access_time, b.access_time);
-        assert_eq!(a.modification_time, b.modification_time);
-        assert_eq!(a.messages.len(), b.messages.len(), "message count");
-        for (i, (x, y)) in a.messages.iter().zip(&b.messages).enumerate() {
-            assert_eq!(x.msg_type, y.msg_type, "msg {i} type");
-            assert_eq!(x.size, y.size, "msg {i} size");
-            assert_eq!(x.flags, y.flags, "msg {i} flags");
-            assert_eq!(x.creation_order, y.creation_order, "msg {i} creation_order");
-            assert_eq!(x.data, y.data, "msg {i} data");
+    fn truncated_headers_are_rejected() {
+        for (version, data) in [("v1", vec![1, 0]), ("v2", vec![b'O', b'H', b'D', b'R', 2])] {
+            assert!(
+                matches!(parse(&data), Err(FormatError::UnexpectedEof { .. })),
+                "{version}"
+            );
         }
-    }
-
-    #[cfg(feature = "std")]
-    fn parse_three_ways(file_data: Vec<u8>, os: u8, ls: u8, base: BaseAddress) {
-        use crate::source::{BytesSource, ReadSeekSource};
-        let buffered =
-            ObjectHeader::parse_with_base(&file_data, AccessMode::ReadOnly, 0, os, ls, base)
-                .unwrap();
-        let from_mem = ObjectHeader::parse_from_source(
-            &BytesSource::new(&file_data),
-            AccessMode::ReadOnly,
-            0,
-            os,
-            ls,
-            base,
-        )
-        .unwrap();
-        let from_seek = ObjectHeader::parse_from_source(
-            &ReadSeekSource::new(std::io::Cursor::new(file_data)).unwrap(),
-            AccessMode::ReadOnly,
-            0,
-            os,
-            ls,
-            base,
-        )
-        .unwrap();
-        assert_same_header(&buffered, &from_mem);
-        assert_same_header(&buffered, &from_seek);
     }
 
     #[cfg(feature = "std")]
     #[test]
     fn streaming_v2_simple_matches_buffered() {
-        let header = build_v2_header(
-            0x20,
-            &[(0x01, &[1, 2, 3], MessageFlags::NONE)],
-            Some((1, 2, 3, 4)),
-        );
-        parse_three_ways(header, 8, 8, BaseAddress::ZERO);
+        let data = V2HeaderBuilder::new()
+            .flags(V2_STORES_TIMES)
+            .timestamps((1, 2, 3, 4))
+            .message(MessageType::DATASPACE, &[1, 2, 3])
+            .build();
+
+        assert_all_parse_paths_match(&data);
     }
 
     #[cfg(feature = "std")]
     #[test]
     fn streaming_v2_with_continuation_matches_buffered() {
-        // A v2 header at offset 0 has a continuation that points to an OCHK chunk at
-        // offset 256. The streaming parser reads that chunk from the source and
-        // produces the same messages in the same order.
-        let ochk_msg_data = [0xDE, 0xAD];
-        let mut ochk_buf = Vec::new();
-        ochk_buf.extend_from_slice(&v2::OCHK_SIGNATURE);
-        ochk_buf.push(0x03); // Datatype
-        ochk_buf.extend_from_slice(&(ochk_msg_data.len() as u16).to_le_bytes());
-        ochk_buf.push(MessageFlags::NONE.get());
-        ochk_buf.extend_from_slice(&ochk_msg_data);
-        let cks = crate::checksum::jenkins_lookup3(&ochk_buf);
-        ochk_buf.extend_from_slice(&cks.to_le_bytes());
+        let continuation = v2_continuation_chunk(MessageType::DATATYPE, &[0xDE, 0xAD]);
+        let data = TestFileBuilder::new(
+            V2HeaderBuilder::new()
+                .message(MessageType::DATASPACE, &[42])
+                .continuation(CONTINUATION_OFFSET, &continuation)
+                .build(),
+        )
+        .chunk(CONTINUATION_OFFSET, &continuation)
+        .build();
 
-        let ochk_offset = 256usize;
-        let mut cont_data = Vec::new();
-        cont_data.extend_from_slice(&(ochk_offset as u64).to_le_bytes());
-        cont_data.extend_from_slice(&(ochk_buf.len() as u64).to_le_bytes());
-
-        let header = build_v2_header(
-            0x00,
-            &[
-                (0x01, &[42], MessageFlags::NONE),
-                (0x10, &cont_data, MessageFlags::NONE),
-            ],
-            None,
-        );
-        let mut file_data = vec![0u8; ochk_offset + ochk_buf.len()];
-        file_data[..header.len()].copy_from_slice(&header);
-        file_data[ochk_offset..ochk_offset + ochk_buf.len()].copy_from_slice(&ochk_buf);
-
-        parse_three_ways(file_data, 8, 8, BaseAddress::ZERO);
+        assert_all_parse_paths_match(&data);
     }
 
     #[cfg(feature = "std")]
     #[test]
     fn streaming_v1_with_continuation_matches_buffered() {
-        // A v1 header whose continuation points to a raw-message chunk at offset
-        // 256 (v1 continuations have no signature). The buffered parser keeps the
-        // continuation message in the list and follows it depth-first. The
-        // streaming parser does the same.
-        let cont_msg_data = [0xBE, 0xEF];
-        let mut cont_chunk = Vec::new();
-        cont_chunk.extend_from_slice(&0x03u16.to_le_bytes()); // Datatype
-        cont_chunk.extend_from_slice(&(cont_msg_data.len() as u16).to_le_bytes());
-        cont_chunk.push(MessageFlags::NONE.get());
-        cont_chunk.extend_from_slice(&[0u8; 3]); // reserved
-        cont_chunk.extend_from_slice(&cont_msg_data);
-
-        let cont_offset = 256usize;
-        let mut cont_ptr = Vec::new();
-        cont_ptr.extend_from_slice(&(cont_offset as u64).to_le_bytes());
-        cont_ptr.extend_from_slice(&(cont_chunk.len() as u64).to_le_bytes());
-
-        let header = build_v1_header(
-            &[
-                (0x01, &[42][..], MessageFlags::NONE),
-                (0x10, &cont_ptr[..], MessageFlags::NONE),
-            ],
-            8,
-            8,
+        let continuation = v1_message_record(
+            MessageType::DATATYPE.to_u16(),
+            &[0xBE, 0xEF],
+            MessageFlags::NONE,
         );
-        let mut file_data = vec![0u8; cont_offset + cont_chunk.len()];
-        file_data[..header.len()].copy_from_slice(&header);
-        file_data[cont_offset..cont_offset + cont_chunk.len()].copy_from_slice(&cont_chunk);
+        let data = TestFileBuilder::new(
+            V1HeaderBuilder::new()
+                .message(MessageType::DATASPACE, &[42])
+                .continuation(CONTINUATION_OFFSET, &continuation)
+                .build(),
+        )
+        .chunk(CONTINUATION_OFFSET, &continuation)
+        .build();
 
-        parse_three_ways(file_data, 8, 8, BaseAddress::ZERO);
+        assert_all_parse_paths_match(&data);
     }
 
     #[cfg(feature = "std")]
@@ -896,290 +603,526 @@ mod tests {
         // object header size (`header_data_size`) is malformed. All parser paths
         // reject the message at the chunk boundary, so the continuation is not
         // followed.
-        let cont_msg_data = [0xBE, 0xEF];
-        let mut cont_chunk = Vec::new();
-        cont_chunk.extend_from_slice(&0x03u16.to_le_bytes()); // Datatype
-        cont_chunk.extend_from_slice(&(cont_msg_data.len() as u16).to_le_bytes());
-        cont_chunk.push(MessageFlags::NONE.get());
-        cont_chunk.extend_from_slice(&[0u8; 3]); // reserved
-        cont_chunk.extend_from_slice(&cont_msg_data);
-
-        let cont_offset = 256usize;
-        let mut cont_ptr = Vec::new();
-        cont_ptr.extend_from_slice(&(cont_offset as u64).to_le_bytes());
-        cont_ptr.extend_from_slice(&(cont_chunk.len() as u64).to_le_bytes());
-
-        // Build the v1 prefix by hand so `header_data_size` can be understated:
-        // the sole continuation message occupies 8 (prefix) + 16 (pointer) = 24
-        // bytes, but we declare only 16, so its data overruns chunk 0 by 8 bytes.
-        let mut header = Vec::new();
-        header.push(1); // version
-        header.push(0); // reserved
-        header.extend_from_slice(&1u16.to_le_bytes()); // `num_messages`
-        header.extend_from_slice(&1u32.to_le_bytes()); // `reference_count`
-        header.extend_from_slice(&16u32.to_le_bytes()); // `header_data_size` (understated)
-        header.extend_from_slice(&[0u8; 4]); // pad prefix to 16 bytes
-        header.extend_from_slice(&0x0010u16.to_le_bytes()); // Continuation
-        header.extend_from_slice(&(cont_ptr.len() as u16).to_le_bytes()); // size = 16
-        header.push(MessageFlags::NONE.get());
-        header.extend_from_slice(&[0u8; 3]); // reserved
-        header.extend_from_slice(&cont_ptr); // pointer (overruns chunk 0)
-
-        let mut file_data = vec![0u8; cont_offset + cont_chunk.len()];
-        file_data[..header.len()].copy_from_slice(&header);
-        file_data[cont_offset..cont_offset + cont_chunk.len()].copy_from_slice(&cont_chunk);
-
-        let buffered = ObjectHeader::parse_with_base(
-            &file_data,
-            AccessMode::ReadOnly,
-            0,
-            8,
-            8,
-            BaseAddress::ZERO,
+        let continuation = v1_message_record(
+            MessageType::DATATYPE.to_u16(),
+            &[0xBE, 0xEF],
+            MessageFlags::NONE,
         );
-        assert!(
-            matches!(buffered, Err(FormatError::UnexpectedEof { .. })),
-            "buffered parser accepted a v1 message crossing the chunk boundary"
-        );
+        let data = TestFileBuilder::new(
+            V1HeaderBuilder::new()
+                .continuation(CONTINUATION_OFFSET, &continuation)
+                .declared_data_size(16)
+                .build(),
+        )
+        .chunk(CONTINUATION_OFFSET, &continuation)
+        .build();
 
-        let from_mem = ObjectHeader::parse_from_source(
-            &BytesSource::new(&file_data),
-            AccessMode::ReadOnly,
-            0,
-            8,
-            8,
-            BaseAddress::ZERO,
-        );
-        assert!(
-            matches!(from_mem, Err(FormatError::UnexpectedEof { .. })),
-            "memory source parser accepted a v1 message crossing the chunk boundary"
-        );
-
-        let from_seek = ObjectHeader::parse_from_source(
-            &crate::ReadSeekSource::new(std::io::Cursor::new(file_data)).unwrap(),
-            AccessMode::ReadOnly,
-            0,
-            8,
-            8,
-            BaseAddress::ZERO,
-        );
-        assert!(
-            matches!(from_seek, Err(FormatError::UnexpectedEof { .. })),
-            "seek source parser accepted a v1 message crossing the chunk boundary"
-        );
+        assert_unexpected_eof_all_parse_paths(&data);
     }
 
     #[cfg(feature = "std")]
     #[test]
     fn version_1_continuation_with_partial_message_prefix_is_rejected() {
-        let cont_msg_data = [0xAB; 8];
-        let mut cont_chunk = v1_message_records(&[(
+        let mut continuation = v1_message_record(
             MessageType::DATATYPE.to_u16(),
-            &cont_msg_data,
+            &[0xAB; 8],
             MessageFlags::NONE,
-        )]);
-
-        // The complete Datatype record occupies 16 bytes. One additional byte
-        // cannot form the eight-byte prefix of another version 1 message.
-        cont_chunk.push(0);
-
-        let cont_offset = 256usize;
-        let mut cont_ptr = Vec::new();
-        cont_ptr.extend_from_slice(&(cont_offset as u64).to_le_bytes());
-        cont_ptr.extend_from_slice(&(cont_chunk.len() as u64).to_le_bytes());
-
-        let header = build_v1_header(
-            &[(
-                MessageType::OBJECT_HEADER_CONTINUATION.to_u16(),
-                &cont_ptr,
-                MessageFlags::NONE,
-            )],
-            8,
-            8,
         );
 
-        let mut file_data = vec![0u8; cont_offset + cont_chunk.len()];
-        file_data[..header.len()].copy_from_slice(&header);
-        file_data[cont_offset..].copy_from_slice(&cont_chunk);
+        // One trailing byte cannot form the eight-byte prefix of another v1 message.
+        continuation.push(0);
 
-        let buffered = ObjectHeader::parse_with_base(
-            &file_data,
-            AccessMode::ReadOnly,
-            0,
-            8,
-            8,
-            BaseAddress::ZERO,
-        );
-        assert!(
-            matches!(buffered, Err(FormatError::UnexpectedEof { .. })),
-            "buffered parser accepted a partial v1 continuation prefix"
-        );
+        let data = TestFileBuilder::new(
+            V1HeaderBuilder::new()
+                .continuation(CONTINUATION_OFFSET, &continuation)
+                .build(),
+        )
+        .chunk(CONTINUATION_OFFSET, &continuation)
+        .build();
 
-        let from_mem = ObjectHeader::parse_from_source(
-            &BytesSource::new(&file_data),
-            AccessMode::ReadOnly,
-            0,
-            8,
-            8,
-            BaseAddress::ZERO,
-        );
-        assert!(
-            matches!(from_mem, Err(FormatError::UnexpectedEof { .. })),
-            "memory source parser accepted a partial v1 continuation prefix"
-        );
-
-        let from_seek = ObjectHeader::parse_from_source(
-            &crate::ReadSeekSource::new(std::io::Cursor::new(file_data)).unwrap(),
-            AccessMode::ReadOnly,
-            0,
-            8,
-            8,
-            BaseAddress::ZERO,
-        );
-        assert!(
-            matches!(from_seek, Err(FormatError::UnexpectedEof { .. })),
-            "seek source parser accepted a partial v1 continuation prefix"
-        );
+        assert_unexpected_eof_all_parse_paths(&data);
     }
 
     #[test]
     fn a_filtered_version_1_parse_follows_unretained_continuations() {
+        let nested_offset = 512;
         let nested_data = [0xDE, 0xAD];
-        let nested_chunk = v1_message_records(&[(
+        let nested_chunk = v1_message_record(
             MessageType::DATATYPE.to_u16(),
-            &nested_data[..],
+            &nested_data,
             MessageFlags::NONE,
-        )]);
-
-        let nested_offset = 512usize;
-        let mut nested_ptr = Vec::new();
-        nested_ptr.extend_from_slice(&(nested_offset as u64).to_le_bytes());
-        nested_ptr.extend_from_slice(&(nested_chunk.len() as u64).to_le_bytes());
-
-        let continuation_chunk = v1_message_records(&[(
-            MessageType::OBJECT_HEADER_CONTINUATION.to_u16(),
-            &nested_ptr[..],
-            MessageFlags::NONE,
-        )]);
-
-        let continuation_offset = 256usize;
-        let mut continuation_ptr = Vec::new();
-        continuation_ptr.extend_from_slice(&(continuation_offset as u64).to_le_bytes());
-        continuation_ptr.extend_from_slice(&(continuation_chunk.len() as u64).to_le_bytes());
-
-        let header = build_v1_header(
-            &[(
-                MessageType::OBJECT_HEADER_CONTINUATION.to_u16(),
-                &continuation_ptr[..],
-                MessageFlags::NONE,
-            )],
-            8,
-            8,
         );
-
-        let mut file_data = vec![0u8; nested_offset + nested_chunk.len()];
-        file_data[..header.len()].copy_from_slice(&header);
-        file_data[continuation_offset..continuation_offset + continuation_chunk.len()]
-            .copy_from_slice(&continuation_chunk);
-        file_data[nested_offset..nested_offset + nested_chunk.len()].copy_from_slice(&nested_chunk);
+        let continuation_chunk = v1_message_record(
+            MessageType::OBJECT_HEADER_CONTINUATION.to_u16(),
+            &continuation_pointer(nested_offset, nested_chunk.len()),
+            MessageFlags::NONE,
+        );
+        let data = TestFileBuilder::new(
+            V1HeaderBuilder::new()
+                .continuation(CONTINUATION_OFFSET, &continuation_chunk)
+                .build(),
+        )
+        .chunk(CONTINUATION_OFFSET, &continuation_chunk)
+        .chunk(nested_offset, &nested_chunk)
+        .build();
 
         let mut keep_datatype = |msg_type: MessageType, _: &[u8]| msg_type == MessageType::DATATYPE;
         let buffered = ObjectHeader::parse_filtered(
-            &file_data,
+            &data,
             AccessMode::ReadOnly,
             0,
-            8,
-            8,
+            OFFSET_SIZE,
+            LENGTH_SIZE,
             BaseAddress::ZERO,
             MessageFilter::Only(&mut keep_datatype),
         )
         .unwrap();
 
-        assert_eq!(buffered.messages.len(), 1);
-        assert_eq!(buffered.messages[0].msg_type, MessageType::DATATYPE);
-        assert_eq!(buffered.messages[0].data, nested_data);
-
-        let source = BytesSource::new(&file_data);
         let mut keep_datatype = |msg_type: MessageType, _: &[u8]| msg_type == MessageType::DATATYPE;
         let streamed = ObjectHeader::parse_from_source_filtered(
-            &source,
+            &BytesSource::new(&data),
             AccessMode::ReadOnly,
             0,
-            8,
-            8,
+            OFFSET_SIZE,
+            LENGTH_SIZE,
             BaseAddress::ZERO,
             MessageFilter::Only(&mut keep_datatype),
         )
         .unwrap();
 
-        assert_eq!(streamed.messages.len(), 1);
-        assert_eq!(streamed.messages[0].msg_type, MessageType::DATATYPE);
-        assert_eq!(streamed.messages[0].data, nested_data);
+        for header in [&buffered, &streamed] {
+            assert_eq!(header.messages.len(), 1);
+            assert_message(&header.messages[0], MessageType::DATATYPE, &nested_data);
+        }
     }
 
     #[test]
     fn a_filtered_version_1_parse_checks_must_understand_before_filtering() {
-        const UNKNOWN_TYPE: u16 = 0x00FF;
-
-        let data = build_v1_header(
-            &[(
-                UNKNOWN_TYPE,
-                &[0xAA][..],
-                MessageFlags::FAIL_IF_UNKNOWN_ALWAYS,
-            )],
-            8,
-            8,
-        );
+        let data = V1HeaderBuilder::new()
+            .raw_message_with_flags(UNKNOWN_TYPE, &[0xAA], MessageFlags::FAIL_IF_UNKNOWN_ALWAYS)
+            .build();
 
         let mut buffered_filter_called = false;
-        let err = {
+        let buffered_error = {
             let mut drop_all = |_: MessageType, _: &[u8]| {
                 buffered_filter_called = true;
                 false
             };
-
             ObjectHeader::parse_filtered(
                 &data,
                 AccessMode::ReadOnly,
                 0,
-                8,
-                8,
+                OFFSET_SIZE,
+                LENGTH_SIZE,
                 BaseAddress::ZERO,
                 MessageFilter::Only(&mut drop_all),
             )
         }
         .unwrap_err();
 
-        assert_eq!(err, FormatError::UnsupportedMessage(UNKNOWN_TYPE));
-        assert!(
-            !buffered_filter_called,
-            "must-understand validation must run before retained-message filtering"
-        );
-
-        let source = BytesSource::new(&data);
         let mut streamed_filter_called = false;
-        let err = {
+        let streamed_error = {
             let mut drop_all = |_: MessageType, _: &[u8]| {
                 streamed_filter_called = true;
                 false
             };
-
             ObjectHeader::parse_from_source_filtered(
-                &source,
+                &BytesSource::new(&data),
                 AccessMode::ReadOnly,
                 0,
-                8,
-                8,
+                OFFSET_SIZE,
+                LENGTH_SIZE,
                 BaseAddress::ZERO,
                 MessageFilter::Only(&mut drop_all),
             )
         }
         .unwrap_err();
 
-        assert_eq!(err, FormatError::UnsupportedMessage(UNKNOWN_TYPE));
+        assert_eq!(
+            buffered_error,
+            FormatError::UnsupportedMessage(UNKNOWN_TYPE)
+        );
+        assert_eq!(
+            streamed_error,
+            FormatError::UnsupportedMessage(UNKNOWN_TYPE)
+        );
+        assert!(
+            !buffered_filter_called,
+            "buffered parser filtered before must-understand validation"
+        );
         assert!(
             !streamed_filter_called,
-            "must-understand validation must run before retained-message filtering"
+            "streamed parser filtered before must-understand validation"
         );
     }
+
+    fn assert_message(message: &HeaderMessage, msg_type: MessageType, data: &[u8]) {
+        assert_eq!(message.msg_type, msg_type);
+        assert_eq!(message.data.as_slice(), data);
+    }
+
+    #[cfg(feature = "std")]
+    fn assert_same_header(actual: &ObjectHeader, expected: &ObjectHeader) {
+        assert_eq!(actual.version, expected.version);
+        assert_eq!(actual.reference_count, expected.reference_count);
+        assert_eq!(actual.flags, expected.flags);
+        assert_eq!(actual.access_time, expected.access_time);
+        assert_eq!(actual.modification_time, expected.modification_time);
+        assert_eq!(actual.change_time, expected.change_time);
+        assert_eq!(actual.birth_time, expected.birth_time);
+        assert_eq!(
+            actual.messages.len(),
+            expected.messages.len(),
+            "message count"
+        );
+
+        for (index, (actual, expected)) in
+            actual.messages.iter().zip(&expected.messages).enumerate()
+        {
+            assert_eq!(actual.msg_type, expected.msg_type, "msg {index} type");
+            assert_eq!(actual.size, expected.size, "msg {index} size");
+            assert_eq!(actual.flags, expected.flags, "msg {index} flags");
+            assert_eq!(
+                actual.creation_order, expected.creation_order,
+                "msg {index} creation_order"
+            );
+            assert_eq!(actual.data, expected.data, "msg {index} data");
+        }
+    }
+
+    #[cfg(feature = "std")]
+    fn assert_all_parse_paths_match(data: &[u8]) {
+        use crate::source::ReadSeekSource;
+
+        let buffered = ObjectHeader::parse_with_base(
+            data,
+            AccessMode::ReadOnly,
+            0,
+            OFFSET_SIZE,
+            LENGTH_SIZE,
+            BaseAddress::ZERO,
+        )
+        .unwrap();
+        let memory = parse_from_source_for_mode(data, AccessMode::ReadOnly).unwrap();
+        let seek = ObjectHeader::parse_from_source(
+            &ReadSeekSource::new(std::io::Cursor::new(data.to_vec())).unwrap(),
+            AccessMode::ReadOnly,
+            0,
+            OFFSET_SIZE,
+            LENGTH_SIZE,
+            BaseAddress::ZERO,
+        )
+        .unwrap();
+
+        assert_same_header(&memory, &buffered);
+        assert_same_header(&seek, &buffered);
+    }
+
+    #[cfg(feature = "std")]
+    fn assert_unexpected_eof_all_parse_paths(data: &[u8]) {
+        use crate::source::ReadSeekSource;
+
+        let buffered = ObjectHeader::parse_with_base(
+            data,
+            AccessMode::ReadOnly,
+            0,
+            OFFSET_SIZE,
+            LENGTH_SIZE,
+            BaseAddress::ZERO,
+        );
+        let memory = parse_from_source_for_mode(data, AccessMode::ReadOnly);
+        let seek = ObjectHeader::parse_from_source(
+            &ReadSeekSource::new(std::io::Cursor::new(data.to_vec())).unwrap(),
+            AccessMode::ReadOnly,
+            0,
+            OFFSET_SIZE,
+            LENGTH_SIZE,
+            BaseAddress::ZERO,
+        );
+
+        assert!(matches!(buffered, Err(FormatError::UnexpectedEof { .. })));
+        assert!(matches!(memory, Err(FormatError::UnexpectedEof { .. })));
+        assert!(matches!(seek, Err(FormatError::UnexpectedEof { .. })));
+    }
+
+    #[derive(Clone)]
+    struct TestMessage<T> {
+        msg_type: T,
+        data: Vec<u8>,
+        flags: MessageFlags,
+    }
+
+    impl<T> TestMessage<T> {
+        fn new(msg_type: T, data: &[u8], flags: MessageFlags) -> Self {
+            Self {
+                msg_type,
+                data: data.to_vec(),
+                flags,
+            }
+        }
+    }
+
+    struct V1HeaderBuilder {
+        messages: Vec<TestMessage<u16>>,
+        reference_count: u32,
+        declared_data_size: Option<usize>,
+    }
+
+    impl V1HeaderBuilder {
+        fn new() -> Self {
+            Self {
+                messages: Vec::new(),
+                reference_count: 1,
+                declared_data_size: None,
+            }
+        }
+
+        fn message(self, msg_type: MessageType, data: &[u8]) -> Self {
+            self.raw_message(msg_type.to_u16(), data)
+        }
+
+        fn message_with_flags(
+            self,
+            msg_type: MessageType,
+            data: &[u8],
+            flags: MessageFlags,
+        ) -> Self {
+            self.raw_message_with_flags(msg_type.to_u16(), data, flags)
+        }
+
+        fn raw_message(self, msg_type: u16, data: &[u8]) -> Self {
+            self.raw_message_with_flags(msg_type, data, MessageFlags::NONE)
+        }
+
+        fn raw_message_with_flags(
+            mut self,
+            msg_type: u16,
+            data: &[u8],
+            flags: MessageFlags,
+        ) -> Self {
+            self.messages.push(TestMessage::new(msg_type, data, flags));
+            self
+        }
+
+        fn continuation(self, offset: usize, chunk: &[u8]) -> Self {
+            self.message(
+                MessageType::OBJECT_HEADER_CONTINUATION,
+                &continuation_pointer(offset, chunk.len()),
+            )
+        }
+
+        fn declared_data_size(mut self, size: usize) -> Self {
+            self.declared_data_size = Some(size);
+            self
+        }
+
+        fn build(self) -> Vec<u8> {
+            let records = v1_message_records(&self.messages);
+            let data_size = self.declared_data_size.unwrap_or(records.len());
+
+            let mut buf = Vec::new();
+            buf.push(1);
+            buf.push(0);
+            buf.extend_from_slice(&(self.messages.len() as u16).to_le_bytes());
+            buf.extend_from_slice(&self.reference_count.to_le_bytes());
+            buf.extend_from_slice(&(data_size as u32).to_le_bytes());
+            buf.extend_from_slice(&[0u8; 4]);
+            buf.extend_from_slice(&records);
+            buf
+        }
+    }
+
+    struct V2HeaderBuilder {
+        flags: u8,
+        messages: Vec<TestMessage<u8>>,
+        timestamps: Option<(u32, u32, u32, u32)>,
+    }
+
+    impl V2HeaderBuilder {
+        fn new() -> Self {
+            Self {
+                flags: 0,
+                messages: Vec::new(),
+                timestamps: None,
+            }
+        }
+
+        fn flags(mut self, flags: u8) -> Self {
+            self.flags = flags;
+            self
+        }
+
+        fn timestamps(mut self, timestamps: (u32, u32, u32, u32)) -> Self {
+            self.timestamps = Some(timestamps);
+            self
+        }
+
+        fn message(self, msg_type: MessageType, data: &[u8]) -> Self {
+            self.raw_message(msg_type.to_u16() as u8, data)
+        }
+
+        fn raw_message(self, msg_type: u8, data: &[u8]) -> Self {
+            self.raw_message_with_flags(msg_type, data, MessageFlags::NONE)
+        }
+
+        fn raw_message_with_flags(
+            mut self,
+            msg_type: u8,
+            data: &[u8],
+            flags: MessageFlags,
+        ) -> Self {
+            self.messages.push(TestMessage::new(msg_type, data, flags));
+            self
+        }
+
+        fn repeat_raw_message(mut self, count: usize, msg_type: u8, data: &[u8]) -> Self {
+            for _ in 0..count {
+                self.messages
+                    .push(TestMessage::new(msg_type, data, MessageFlags::NONE));
+            }
+            self
+        }
+
+        fn continuation(self, offset: usize, chunk: &[u8]) -> Self {
+            self.message(
+                MessageType::OBJECT_HEADER_CONTINUATION,
+                &continuation_pointer(offset, chunk.len()),
+            )
+        }
+
+        fn build(self) -> Vec<u8> {
+            let header_flags = v2::HeaderFlags::new(self.flags);
+            let has_creation_order = header_flags.tracks_creation_order();
+
+            let mut buf = Vec::new();
+            buf.extend_from_slice(&OHDR_SIGNATURE);
+            buf.push(2);
+            buf.push(self.flags);
+
+            if header_flags.stores_times()
+                && let Some((access, modification, change, birth)) = self.timestamps
+            {
+                buf.extend_from_slice(&access.to_le_bytes());
+                buf.extend_from_slice(&modification.to_le_bytes());
+                buf.extend_from_slice(&change.to_le_bytes());
+                buf.extend_from_slice(&birth.to_le_bytes());
+            }
+
+            if header_flags.stores_attribute_phase_change() {
+                buf.extend_from_slice(&8u16.to_le_bytes());
+                buf.extend_from_slice(&6u16.to_le_bytes());
+            }
+
+            let mut records = Vec::new();
+            for message in &self.messages {
+                records.push(message.msg_type);
+                records.extend_from_slice(&(message.data.len() as u16).to_le_bytes());
+                records.push(message.flags.get());
+                if has_creation_order {
+                    records.extend_from_slice(&0u16.to_le_bytes());
+                }
+                records.extend_from_slice(&message.data);
+            }
+
+            match header_flags.chunk_size_width() {
+                UintWidth::One => buf.push(records.len() as u8),
+                UintWidth::Two => buf.extend_from_slice(&(records.len() as u16).to_le_bytes()),
+                UintWidth::Four => buf.extend_from_slice(&(records.len() as u32).to_le_bytes()),
+                UintWidth::Eight => buf.extend_from_slice(&(records.len() as u64).to_le_bytes()),
+            }
+
+            buf.extend_from_slice(&records);
+            append_checksum(&mut buf);
+            buf
+        }
+    }
+
+    struct TestFileBuilder {
+        data: Vec<u8>,
+    }
+
+    impl TestFileBuilder {
+        fn new(header: Vec<u8>) -> Self {
+            Self { data: header }
+        }
+
+        fn chunk(mut self, offset: usize, chunk: &[u8]) -> Self {
+            self.data
+                .resize(self.data.len().max(offset + chunk.len()), 0);
+            self.data[offset..offset + chunk.len()].copy_from_slice(chunk);
+            self
+        }
+
+        fn build(self) -> Vec<u8> {
+            self.data
+        }
+    }
+
+    fn v1_message_records(messages: &[TestMessage<u16>]) -> Vec<u8> {
+        let mut records = Vec::new();
+        for message in messages {
+            records.extend_from_slice(&message.msg_type.to_le_bytes());
+            records.extend_from_slice(&(message.data.len() as u16).to_le_bytes());
+            records.push(message.flags.get());
+            records.extend_from_slice(&[0u8; 3]);
+            records.extend_from_slice(&message.data);
+        }
+        records
+    }
+
+    fn v1_message_record(msg_type: u16, data: &[u8], flags: MessageFlags) -> Vec<u8> {
+        v1_message_records(&[TestMessage::new(msg_type, data, flags)])
+    }
+
+    fn v2_continuation_chunk(msg_type: MessageType, data: &[u8]) -> Vec<u8> {
+        let mut chunk = Vec::new();
+        chunk.extend_from_slice(&v2::OCHK_SIGNATURE);
+        chunk.push(msg_type.to_u16() as u8);
+        chunk.extend_from_slice(&(data.len() as u16).to_le_bytes());
+        chunk.push(MessageFlags::NONE.get());
+        chunk.extend_from_slice(data);
+        append_checksum(&mut chunk);
+        chunk
+    }
+
+    fn continuation_pointer(offset: usize, length: usize) -> Vec<u8> {
+        let mut pointer = Vec::with_capacity(16);
+        pointer.extend_from_slice(&(offset as u64).to_le_bytes());
+        pointer.extend_from_slice(&(length as u64).to_le_bytes());
+        pointer
+    }
+
+    fn append_checksum(data: &mut Vec<u8>) {
+        let checksum = crate::checksum::jenkins_lookup3(data);
+        data.extend_from_slice(&checksum.to_le_bytes());
+    }
+
+    fn parse(data: &[u8]) -> Result<ObjectHeader, FormatError> {
+        parse_for_mode(data, AccessMode::ReadOnly)
+    }
+
+    fn parse_for_mode(data: &[u8], access_mode: AccessMode) -> Result<ObjectHeader, FormatError> {
+        ObjectHeader::parse(data, access_mode, 0, OFFSET_SIZE, LENGTH_SIZE)
+    }
+
+    fn parse_from_source_for_mode(
+        data: &[u8],
+        access_mode: AccessMode,
+    ) -> Result<ObjectHeader, FormatError> {
+        ObjectHeader::parse_from_source(
+            &BytesSource::new(data),
+            access_mode,
+            0,
+            OFFSET_SIZE,
+            LENGTH_SIZE,
+            BaseAddress::ZERO,
+        )
+    }
+
+    const OFFSET_SIZE: u8 = 8;
+    const LENGTH_SIZE: u8 = 8;
+    const CONTINUATION_OFFSET: usize = 256;
+    const UNKNOWN_TYPE: u16 = 0x00FF;
+    const V2_TRACKS_CREATION_ORDER: u8 = 0x04;
+    const V2_STORES_TIMES: u8 = 0x20;
 }
