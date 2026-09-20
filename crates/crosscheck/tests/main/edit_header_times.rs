@@ -1,4 +1,3 @@
-#![cfg(all(not(target_pointer_width = "32"), target_endian = "little"))]
 #![cfg(feature = "__hdf5-1.10")]
 //! The optional prefix blocks of a version 2 object header survive an in-place
 //! edit (PR #422).

@@ -1,4 +1,3 @@
-#![cfg(all(not(target_pointer_width = "32"), target_endian = "little"))]
 #![cfg(feature = "__hdf5-1.10")]
 //! Cross-validation for Extensible-Array-indexed chunked datasets (one unlimited
 //! dimension), in both directions against the reference C HDF5 library.

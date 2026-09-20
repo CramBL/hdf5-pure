@@ -1,4 +1,3 @@
-#![cfg(all(not(target_pointer_width = "32"), target_endian = "little"))]
 #![cfg(feature = "__hdf5-1.10")]
 //! A chunk index numbers its slots over the dataset's *maximum* chunk grid, and
 //! an Extensible Array rotates its unlimited dimension to the front first

@@ -1,4 +1,3 @@
-#![cfg(all(not(target_pointer_width = "32"), target_endian = "little"))]
 #![cfg(feature = "__hdf5-1.10")]
 //! Cross-validation of the file-space strategy (`H5Pset_file_space_strategy`)
 //! against the reference HDF5 C library: a strategy hdf5-pure writes is read back
@@ -948,6 +947,7 @@ fn c_library_reads_our_paged_file_after_a_cross_page_type_claim() {
 }
 
 #[test]
+#[cfg(target_endian = "little")]
 fn pure_bounded_mutates_c_created_paged_file() {
     // The reverse direction: the reference C library creates a genuine paged
     // persisting file with an unlimited chunked dataset; hdf5-pure grows it through

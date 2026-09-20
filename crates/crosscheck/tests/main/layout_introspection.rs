@@ -1,4 +1,3 @@
-#![cfg(all(not(target_pointer_width = "32"), target_endian = "little"))]
 #![cfg(feature = "__hdf5-1.10")]
 //! Reference-C-library interop for the layout / filter introspection API
 //! (issue #149). The reference library *writes* datasets in every storage class
@@ -104,6 +103,7 @@ fn c_compact_classifies() {
 // ---- v4 chunk indices -------------------------------------------------------
 
 #[test]
+#[cfg(target_endian = "little")]
 fn c_single_chunk_classifies() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("single.h5");
@@ -128,6 +128,7 @@ fn c_single_chunk_classifies() {
 }
 
 #[test]
+#[cfg(target_endian = "little")]
 fn c_fixed_array_addresses_are_absolute() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("fixed.h5");
@@ -159,6 +160,7 @@ fn c_fixed_array_addresses_are_absolute() {
 }
 
 #[test]
+#[cfg(target_endian = "little")]
 fn c_extensible_array_supports_append() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("ea.h5");
@@ -190,6 +192,7 @@ fn c_extensible_array_supports_append() {
 // ---- legacy v1 B-tree -------------------------------------------------------
 
 #[test]
+#[cfg(target_endian = "little")]
 fn c_legacy_btree_v1_classifies_and_reads() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("btree_v1.h5");

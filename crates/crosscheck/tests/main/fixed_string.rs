@@ -1,4 +1,3 @@
-#![cfg(all(not(target_pointer_width = "32"), target_endian = "little"))]
 #![cfg(feature = "__hdf5-1.10")]
 //! The reference C library reads the fixed-width string datasets this crate
 //! writes (issue #355).

@@ -1,4 +1,3 @@
-#![cfg(all(not(target_pointer_width = "32"), target_endian = "little"))]
 #![cfg(feature = "__hdf5-1.10")]
 //! Interop for the owned SWMR writer (issue #148, PR B): after a clean
 //! `File::close`, the SWMR-write flag is cleared and the reference C library

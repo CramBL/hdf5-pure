@@ -1,9 +1,4 @@
-#![cfg(all(
-    feature = "serde",
-    feature = "hdf5",
-    not(target_pointer_width = "32"),
-    target_endian = "little"
-))]
+#![cfg(all(feature = "serde", feature = "hdf5"))]
 //! Cell-array serialization for sequences that don't fit a numeric matrix.
 //!
 //! `Vec<MyStruct>`, `Vec<Option<T>>` with `None` interspersed, and

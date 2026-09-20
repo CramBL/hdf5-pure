@@ -1,5 +1,6 @@
-#![cfg(all(not(target_pointer_width = "32"), target_endian = "little"))]
 #![cfg(feature = "__hdf5-1.10")]
+// Fails identically under `cross` on i686 and s390x, and passes natively.
+#![cfg(all(not(target_pointer_width = "32"), target_endian = "little"))]
 //! Reference-C-library interop for the dense (fractal-heap) attribute bounds
 //! (issue #191).
 //!

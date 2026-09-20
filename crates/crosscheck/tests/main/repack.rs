@@ -1,4 +1,3 @@
-#![cfg(all(not(target_pointer_width = "32"), target_endian = "little"))]
 #![cfg(feature = "__hdf5-1.10")]
 //! Cross-validation for whole-file repack (issue #21) against the reference
 //! HDF5 C library: a file the C library *writes* is repacked by `hdf5_pure`,
@@ -565,6 +564,7 @@ fn repack_roundtrips_filtered_and_resizable_vlen_string_datasets() {
 /// refusal that went away, not a special case for booleans — a compound or
 /// opaque attribute travels for the same reason (issue #241).
 #[test]
+#[cfg(target_endian = "little")]
 fn repack_carries_an_attribute_attr_value_cannot_express_faithfully() {
     use hdf5::types::TypeDescriptor;
 

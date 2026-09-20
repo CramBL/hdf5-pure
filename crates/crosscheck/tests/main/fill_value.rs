@@ -1,4 +1,3 @@
-#![cfg(all(not(target_pointer_width = "32"), target_endian = "little"))]
 #![cfg(feature = "__hdf5-1.10")]
 //! Reference-C-library interop for configurable fill values (issue #151).
 //!
@@ -414,6 +413,7 @@ fn an_immediate_append_leaves_the_fill_value_in_the_rest_of_the_chunk() {
 /// write path has to make the same distinction, or a dataset that declares
 /// nothing about its unwritten storage silently gains a claim.
 #[test]
+#[cfg(target_endian = "little")]
 fn a_fill_time_of_never_still_pads_with_zeros() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("never.h5");
@@ -461,6 +461,7 @@ fn a_fill_time_of_never_still_pads_with_zeros() {
 /// rather than from anything staged — `write_staged` refuses to change the fill
 /// value, so the existing message is the only source.
 #[test]
+#[cfg(target_endian = "little")]
 fn overwriting_values_keeps_the_fill_value_in_the_rest_of_the_chunk() {
     let dir = tempdir().unwrap();
     let fill = 77u32;
@@ -588,6 +589,7 @@ fn stored_chunks(path: &std::path::Path) -> Vec<(Vec<u64>, Vec<u8>)> {
 }
 
 #[test]
+#[cfg(target_endian = "little")]
 fn a_partial_chunk_is_filled_in_every_dimension() {
     // Overhang in the inner dimension only, the outer only, and both.
     assert_chunks_match_the_c_library(&[3, 3], &[2, 2], 77);

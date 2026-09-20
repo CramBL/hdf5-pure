@@ -1,4 +1,3 @@
-#![cfg(all(not(target_pointer_width = "32"), target_endian = "little"))]
 #![cfg(feature = "__hdf5-1.10")]
 //! SWMR append-writer tests: hdf5-pure appends in place to an unlimited
 //! Extensible-Array dataset, and the result is read back by hdf5-pure and by the
@@ -81,6 +80,7 @@ fn append_to_pure_file() {
 
 /// Append to a C-library-created file and confirm both readers agree.
 #[test]
+#[cfg(target_endian = "little")]
 fn append_to_c_file() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("d.h5");

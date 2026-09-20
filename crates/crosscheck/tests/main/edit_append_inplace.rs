@@ -1,4 +1,3 @@
-#![cfg(all(not(target_pointer_width = "32"), target_endian = "little"))]
 #![cfg(feature = "__hdf5-1.10")]
 //! Reference-C-library interop for issue #146: the unified append + edit session.
 //!
@@ -54,6 +53,7 @@ fn read_pure(path: &std::path::Path, name: &str) -> Vec<i32> {
 // ---- in-place append against C-written files --------------------------------
 
 #[test]
+#[cfg(target_endian = "little")]
 fn append_inplace_to_c_dataset_both_read() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("d.h5");
@@ -95,6 +95,7 @@ fn c_create_filtered_unlimited(path: &std::path::Path, name: &str, n: i32, chunk
 /// read the padding back as data — which is what the C library is here to rule
 /// out.
 #[test]
+#[cfg(target_endian = "little")]
 fn append_inplace_grows_a_filtered_partial_tail_both_read() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("filtered_tail.h5");
@@ -118,6 +119,7 @@ fn append_inplace_grows_a_filtered_partial_tail_both_read() {
 /// with that mask and re-encodes with none, which is what an aligned filtered
 /// append has always done.
 #[test]
+#[cfg(target_endian = "little")]
 fn append_inplace_grows_a_c_written_filtered_partial_tail() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("c_filtered_tail.h5");
@@ -137,6 +139,7 @@ fn append_inplace_grows_a_c_written_filtered_partial_tail() {
 }
 
 #[test]
+#[cfg(target_endian = "little")]
 fn hard_link_aliasing_append_inplace_stays_coherent() {
     // Two hard links to one dataset: appending in place via either path must stay
     // coherent, because the geometry cache is keyed by object-header address, not
@@ -252,6 +255,7 @@ fn c_group_with_attribute_info_accepts_set_group_attr() {
 }
 
 #[test]
+#[cfg(target_endian = "little")]
 fn set_dataset_attr_on_chunked_dataset_c_reads() {
     // An attribute edit on a *chunked* (Extensible-Array) dataset relocates the
     // header while preserving the data-layout message verbatim, so the chunk data
@@ -321,6 +325,7 @@ fn set_dataset_attr_multi_hard_link_refused() {
 // ---- combined mixed edits ---------------------------------------------------
 
 #[test]
+#[cfg(target_endian = "little")]
 fn combined_mixed_edits_c_readable() {
     // One long-lived session mixes an immediate in-place append, a staged group
     // creation, a staged dataset-attribute edit, and a staged recursive delete —
@@ -447,6 +452,7 @@ fn a_filtered_partial_tail_with_two_hard_links_appends_in_place() {
 /// succeeds just as well if the append quietly extended end-of-file instead, so
 /// the session is asked to confirm it spent the hole first.
 #[test]
+#[cfg(target_endian = "little")]
 fn an_append_into_freed_space_stays_c_readable() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("reuse.h5");

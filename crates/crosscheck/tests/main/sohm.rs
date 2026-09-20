@@ -1,4 +1,3 @@
-#![cfg(all(not(target_pointer_width = "32"), target_endian = "little"))]
 #![cfg(feature = "__hdf5-1.10")]
 //! Shared object header messages (SOHM), written by the reference C library and
 //! read back by hdf5-pure (issue #417).
@@ -202,6 +201,7 @@ fn assert_reads_back(path: &Path, count: usize) {
 /// `FormatError::UnsupportedSohmReference`, so this is the case the issue is
 /// about.
 #[test]
+#[cfg(target_endian = "little")]
 fn a_list_indexed_shared_message_file_reads_back_whole() {
     let fixture = list_fixture(4);
     assert_reads_back(&fixture.path, 4);
@@ -211,6 +211,7 @@ fn a_list_indexed_shared_message_file_reads_back_whole() {
 /// by reading windows of the file rather than indexing a whole-file image. The
 /// two backends have separate resolvers and separate heap readers.
 #[test]
+#[cfg(target_endian = "little")]
 fn the_streaming_backend_resolves_shared_messages_too() {
     let fixture = list_fixture(3);
     let file = File::open_streaming(&fixture.path).expect("streaming open");
@@ -230,6 +231,7 @@ fn the_streaming_backend_resolves_shared_messages_too() {
 /// in a reference locates the message directly, and the list-to-B-tree conversion
 /// changes only how a *writer* finds an equal message to share.
 #[test]
+#[cfg(target_endian = "little")]
 fn a_btree_indexed_shared_message_file_reads_back_whole() {
     let fixture = btree_fixture();
     // The fixture is only a B-tree fixture if the file really carries the low
@@ -260,6 +262,7 @@ fn a_btree_indexed_shared_message_file_reads_back_whole() {
 /// same value, and the count of users is not something the heap entry records
 /// per user.
 #[test]
+#[cfg(target_endian = "little")]
 fn one_message_shared_by_many_objects_reads_the_same_everywhere() {
     let fixture = list_fixture(12);
     assert_reads_back(&fixture.path, 12);
@@ -337,6 +340,7 @@ fn a_commit_on_a_shared_message_file_walks_its_index_and_proceeds() {
 /// is a storage choice, not something a reader can name) and one this crate can
 /// then edit freely.
 #[test]
+#[cfg(target_endian = "little")]
 fn repack_rewrites_a_shared_message_file_without_sharing() {
     let fixture = list_fixture(4);
     let dst = fixture.path.with_file_name("repacked.h5");

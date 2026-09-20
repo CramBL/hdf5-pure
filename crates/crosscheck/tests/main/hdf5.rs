@@ -1,5 +1,3 @@
-// Crosschecks link the reference HDF5 C library (the `hdf5-metno` dev-dependency),
-#![cfg(all(not(target_pointer_width = "32"), target_endian = "little"))]
 #![cfg(feature = "__hdf5-1.10")]
 //! Cross-validation tests: write with hdf5-pure, read with the official C HDF5 library.
 //!
@@ -808,6 +806,9 @@ fn c_library_reads_explicit_offset_compound() {
     assert_eq!(actual, expected);
 }
 
+// The x86 32-bit ABI aligns `u64` to 4 bytes, not 8, so the offsets below hold
+// only on a 64-bit target.
+#[cfg(not(target_pointer_width = "32"))]
 #[test]
 fn pure_reader_decodes_c_written_padded_compound() {
     let dir = tempdir().unwrap();
@@ -1798,6 +1799,7 @@ fn crosscheck_scale_offset_then_deflate() {
 }
 
 #[test]
+#[cfg(target_endian = "little")]
 fn crosscheck_vlen_string_dataset() {
     // hdf5-pure writes a variable-length UTF-8 string dataset; the reference C
     // library reads back the values and confirms the datatype is VL Unicode.

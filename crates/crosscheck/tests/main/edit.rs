@@ -1,4 +1,3 @@
-#![cfg(all(not(target_pointer_width = "32"), target_endian = "little"))]
 #![cfg(feature = "__hdf5-1.10")]
 //! Cross-validation for in-place editing against the reference C library
 //! (issue #32): files the C library *writes* are edited in place by
@@ -764,6 +763,7 @@ fn deleting_chunked_datasets_in_place_stays_c_readable() {
 }
 
 #[test]
+#[cfg(target_endian = "little")]
 fn overwriting_chunked_datasets_in_place_stays_c_readable() {
     // Issue #101: overwriting a chunked dataset's values in place must leave a
     // file the reference C library still reads. Two paths are exercised:
@@ -1457,6 +1457,7 @@ fn cross_file_copy_from_reproduces_c_written_dense_attributes() {
 /// the new values back through both readers. Covers the no-relocation fast path,
 /// in both the HDF5 1.8 (v2 superblock) and 1.10+ (v3 superblock) formats.
 #[test]
+#[cfg(target_endian = "little")]
 fn write_dataset_same_size_crosscheck() {
     for (low, high) in [
         (LibraryVersion::V18, LibraryVersion::V18),
@@ -1508,6 +1509,7 @@ fn write_dataset_same_size_crosscheck() {
 /// data-layout message, and relinks the parent. Read the result back with both
 /// readers (the relocation path proven against the reference library).
 #[test]
+#[cfg(target_endian = "little")]
 fn write_dataset_undefined_address_relocates_crosscheck() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("empty.h5");
@@ -1568,6 +1570,7 @@ fn write_dataset_undefined_address_relocates_crosscheck() {
 /// same-size in-place overwrite does not relocate that header, so both names see
 /// the new data — verified through both readers.
 #[test]
+#[cfg(target_endian = "little")]
 fn write_dataset_shared_hard_link_crosscheck() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("shared.h5");
@@ -1625,6 +1628,7 @@ fn write_dataset_shared_hard_link_crosscheck() {
 /// parent links could be repointed at the moved header — the others would diverge.
 /// The file is left untouched.
 #[test]
+#[cfg(target_endian = "little")]
 fn write_dataset_relocate_with_multiple_hard_links_is_refused() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("shared_relocate.h5");
