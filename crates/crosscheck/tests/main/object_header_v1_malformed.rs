@@ -1,22 +1,25 @@
 #![cfg(feature = "hdf5")]
 //! Cross-checks malformed version 1 object-header message boundaries.
 //!
-//! The reference C library creates an earliest-format file whose root group uses
-//! a version 1 object header. The test adds an attribute to that root group,
-//! locates the attribute message across the header and its continuation chunks,
-//! and increases only that message's data-size field so the declared body extends
-//! eight bytes past its containing chunk.
+//! The reference C library creates earliest-format files whose root groups use
+//! version 1 object headers. One mutation increases only an Attribute message's
+//! data-size field so its declared body extends eight bytes past its containing
+//! chunk while remaining eight-byte aligned.
 //!
-//! The malformed size remains eight-byte aligned. This isolates chunk-boundary
-//! handling from message-size alignment validation.
+//! A second mutation copies a valid root continuation to a controlled location,
+//! adds one trailing byte, and increases only the continuation's declared extent.
+//! The final byte cannot form another eight-byte version 1 message prefix.
 //!
-//! The test verifies that `libhdf5` and both hdf5-pure parser backends reject the
-//! malformed object header.
+//! The tests pin the reference library's release-dependent handling of those
+//! malformed inputs. On HDF5 1.14 and 2.x they also check whether explicit
+//! `libver` bounds change handling of the partial continuation prefix.
 
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::Path;
 
+#[cfg(any(feature = "__hdf5-1.14", feature = "__hdf5-2"))]
+use hdf5::file::LibraryVersion;
 use tempfile::tempdir;
 
 const HDF5_SIGNATURE: [u8; 8] = [0x89, b'H', b'D', b'F', b'\r', b'\n', 0x1a, b'\n'];
@@ -649,6 +652,21 @@ fn read_with_c(path: &Path) -> Result<Vec<i32>, hdf5::Error> {
     dataset.read_raw::<i32>()
 }
 
+/// Reads the control dataset through the reference C library under explicit
+/// file-format version bounds.
+#[cfg(any(feature = "__hdf5-1.14", feature = "__hdf5-2"))]
+fn read_with_c_libver(
+    path: &Path,
+    low: LibraryVersion,
+    high: LibraryVersion,
+) -> Result<Vec<i32>, hdf5::Error> {
+    let file = hdf5::File::with_options()
+        .with_fapl(|fapl| fapl.libver_bounds(low, high))
+        .open(path)?;
+    let dataset = file.dataset("data")?;
+    dataset.read_raw::<i32>()
+}
+
 /// Reads the control dataset through the buffered pure-Rust backend.
 fn read_with_pure_buffered(path: &Path) -> Result<Vec<i32>, hdf5_pure::Error> {
     let file = hdf5_pure::File::open(path)?;
@@ -789,9 +807,8 @@ fn a_v1_continuation_with_a_trailing_partial_prefix_has_versioned_libhdf5_behavi
         );
     }
 
-    // hdf5-pure currently follows the behavior of libhdf5 releases before 1.14:
-    // complete records are consumed and the remaining bytes shorter than a message
-    // prefix are ignored.
+    // hdf5-pure deliberately follows the stricter behavior of libhdf5 1.14
+    // and later for continuation boundaries.
     let buffered_result = read_with_pure_buffered(&malformed_path);
     assert!(
         buffered_result.is_err(),
@@ -804,5 +821,125 @@ fn a_v1_continuation_with_a_trailing_partial_prefix_has_versioned_libhdf5_behavi
         streaming_result.is_err(),
         "streaming hdf5-pure accepted a v1 continuation ending with a partial \
          message prefix: {streaming_result:?}"
+    );
+}
+
+#[cfg(any(feature = "__hdf5-1.14", feature = "__hdf5-2"))]
+#[test]
+fn a_v1_continuation_partial_prefix_rejection_is_independent_of_libver_bounds() {
+    hdf5::silence_errors(true);
+
+    let dir = tempdir().unwrap();
+    let valid_path = dir.path().join("valid.h5");
+    let malformed_path = dir.path().join("malformed.h5");
+
+    write_earliest_file_with_continuation(&valid_path);
+
+    let mut malformed = fs::read(&valid_path).unwrap();
+    add_trailing_byte_to_root_continuation(&mut malformed);
+    fs::write(&malformed_path, malformed).unwrap();
+
+    let version = hdf5::library_version();
+
+    // The default file-access properties establish the modern reference
+    // behavior before explicit bounds are varied.
+    assert_eq!(
+        read_with_c(&valid_path).unwrap(),
+        vec![42],
+        "libhdf5 {version:?} cannot read the valid continuation fixture \
+         with default libver bounds"
+    );
+    let default_result = read_with_c(&malformed_path);
+    assert!(
+        default_result.is_err(),
+        "libhdf5 {version:?} accepted the malformed continuation with \
+         default libver bounds: {default_result:?}"
+    );
+
+    // An upper bound of V18 requests HDF5 1.8-era compatibility.
+    assert_eq!(
+        read_with_c_libver(&valid_path, LibraryVersion::Earliest, LibraryVersion::V18).unwrap(),
+        vec![42],
+        "libhdf5 {version:?} cannot read the valid continuation fixture \
+         with Earliest..V18 bounds"
+    );
+    let v18_result = read_with_c_libver(
+        &malformed_path,
+        LibraryVersion::Earliest,
+        LibraryVersion::V18,
+    );
+    assert!(
+        v18_result.is_err(),
+        "libhdf5 {version:?} accepted the malformed continuation with \
+         Earliest..V18 bounds: {v18_result:?}"
+    );
+
+    // An upper bound of V110 requests HDF5 1.10-era compatibility.
+    assert_eq!(
+        read_with_c_libver(&valid_path, LibraryVersion::Earliest, LibraryVersion::V110,).unwrap(),
+        vec![42],
+        "libhdf5 {version:?} cannot read the valid continuation fixture \
+         with Earliest..V110 bounds"
+    );
+    let v110_result = read_with_c_libver(
+        &malformed_path,
+        LibraryVersion::Earliest,
+        LibraryVersion::V110,
+    );
+    assert!(
+        v110_result.is_err(),
+        "libhdf5 {version:?} accepted the malformed continuation with \
+         Earliest..V110 bounds: {v110_result:?}"
+    );
+
+    // An upper bound of V112 requests HDF5 1.12-era compatibility.
+    assert_eq!(
+        read_with_c_libver(&valid_path, LibraryVersion::Earliest, LibraryVersion::V112).unwrap(),
+        vec![42],
+        "libhdf5 {version:?} cannot read the valid continuation fixture \
+         with Earliest..V112 bounds"
+    );
+    let v112_result = read_with_c_libver(
+        &malformed_path,
+        LibraryVersion::Earliest,
+        LibraryVersion::V112,
+    );
+    assert!(
+        v112_result.is_err(),
+        "libhdf5 {version:?} accepted the malformed continuation with \
+         Earliest..V112 bounds: {v112_result:?}"
+    );
+
+    // An upper bound of V114 requests HDF5 1.14-era compatibility.
+    assert_eq!(
+        read_with_c_libver(&valid_path, LibraryVersion::Earliest, LibraryVersion::V114).unwrap(),
+        vec![42],
+        "libhdf5 {version:?} cannot read the valid continuation fixture \
+         with Earliest..V114 bounds"
+    );
+    let v114_result = read_with_c_libver(
+        &malformed_path,
+        LibraryVersion::Earliest,
+        LibraryVersion::V114,
+    );
+    assert!(
+        v114_result.is_err(),
+        "libhdf5 {version:?} accepted the malformed continuation with \
+         Earliest..V114 bounds: {v114_result:?}"
+    );
+
+    // Finally, pin the strictest bounds the linked release exposes.
+    let latest = LibraryVersion::latest();
+    assert_eq!(
+        read_with_c_libver(&valid_path, latest, latest).unwrap(),
+        vec![42],
+        "libhdf5 {version:?} cannot read the valid continuation fixture \
+         with {latest:?}..{latest:?} bounds"
+    );
+    let latest_result = read_with_c_libver(&malformed_path, latest, latest);
+    assert!(
+        latest_result.is_err(),
+        "libhdf5 {version:?} accepted the malformed continuation with \
+         {latest:?}..{latest:?} bounds: {latest_result:?}"
     );
 }
