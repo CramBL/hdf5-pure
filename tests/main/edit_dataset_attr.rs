@@ -3,7 +3,7 @@
 //! applied on commit by relocating the dataset's object header while preserving its
 //! data and chunk index. C-library interop — undefined-`AttributeInfo` acceptance
 //! (dataset and group) and the single-hard-link refusal — lives in
-//! `crates/crosscheck/tests/edit.rs`; edits that land in dense (fractal-heap) storage live in
+//! `crates/crosscheck/tests/main/edit.rs`; edits that land in dense (fractal-heap) storage live in
 //! `edit_dense_attr.rs`.
 
 use hdf5_pure::{AttrValue, Error, File, FileBuilder, FormatError, MaxExtent};

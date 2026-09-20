@@ -3,7 +3,7 @@
 //! Property-based cross-validation of the file-space (`fcpl`) and bounded-mutation
 //! (`fapl`) surface against the reference HDF5 C library (issue #178).
 //!
-//! The hand-written crosschecks in `crates/crosscheck/tests/file_space.rs` spot-check a few
+//! The hand-written crosschecks in `crates/crosscheck/tests/main/file_space.rs` spot-check a few
 //! fixed configurations. These properties fuzz the same invariants across a
 //! generated space of **strategy**, **persist**, **page size**, **threshold**,
 //! and **append patterns**, diffing every generated file against libhdf5:

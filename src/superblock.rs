@@ -484,7 +484,7 @@ mod tests {
     /// bytes out the wrong way in *both* the builder and the parser, leaves both
     /// hand-built tests passing.
     ///
-    /// `crates/crosscheck/tests/owned_swmr.rs` already covers this against a real file,
+    /// `crates/crosscheck/tests/main/owned_swmr.rs` already covers this against a real file,
     /// and catches the same mutation. What it costs is the `hdf5-metno`
     /// dev-dependency, which needs 64-bit pointers, so that whole file compiles
     /// out on the i686 target — where address arithmetic is most likely to be

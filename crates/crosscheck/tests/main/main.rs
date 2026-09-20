@@ -1,0 +1,65 @@
+//! One integration-test binary: every file under `tests/main/` is a module,
+//! so the suite links once. `fail_if_unknown/` stays a directory module: its
+//! three files share one pair of `cfg` gates, stated once on the `mod` item.
+
+mod append;
+mod append_writer;
+mod attr_count;
+mod attr_message_size;
+mod attr_width;
+mod bounded_append;
+mod buffered_append;
+mod c_absence_predicate;
+mod c_test_data;
+mod c_write_compat;
+mod cell_array;
+mod chunk_btree_offset_width;
+mod chunk_index_grid;
+mod committed_datatype;
+mod conversions;
+mod dense_attr_limits;
+mod dense_huge_objects;
+mod edit;
+mod edit_append_inplace;
+mod edit_creation_order;
+mod edit_dense_attr;
+mod edit_dense_attr_copy;
+mod edit_header_times;
+mod edit_reference_repointing;
+mod edit_userblock;
+mod empty_chunked;
+mod enum_attr;
+mod enum_base;
+mod extensible_array;
+mod external_storage;
+mod file_space;
+mod file_space_fuzz;
+mod fill_value;
+mod fixed_string;
+mod fractal_heap_dense_links;
+mod hdf5;
+mod hdf5_release_feature;
+mod layout_introspection;
+mod libver_matrix;
+mod libver_output;
+mod mat_streaming;
+mod matio_crosscheck;
+mod ndarray_roundtrip;
+mod null_attr_padding;
+mod object_header_v1_malformed;
+mod object_path;
+mod owned_append;
+mod owned_swmr;
+mod page_buffer;
+mod partial_edge_chunk_filters;
+mod repack;
+mod scaleoffset_fill;
+mod serde;
+mod sohm;
+mod swmr_append;
+mod swmr_refresh;
+mod userblock_base_address;
+mod vlen_chunked;
+mod vlen_string_attrs;
+
+mod fail_if_unknown;

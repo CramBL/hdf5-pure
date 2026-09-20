@@ -121,7 +121,7 @@ use crate::libver::LibVer;
 /// ## Compliance and known limits
 ///
 /// The paged and persistent-free-space paths are exercised by C-library crosschecks
-/// (`crates/crosscheck/tests/file_space.rs`, `crates/crosscheck/tests/bounded_append.rs`): the
+/// (`crates/crosscheck/tests/main/file_space.rs`, `crates/crosscheck/tests/main/bounded_append.rs`): the
 /// reference library recovers the strategy, `H5Fget_freespace` equals the crate's tracked total
 /// exactly, and the C library reopens a paged file read-write and re-paginates it. The crate also
 /// reads and bounded-mutates genuine C-created paged and persisted files. Compliance here means

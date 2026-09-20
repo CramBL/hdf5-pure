@@ -150,7 +150,7 @@ mod ffi {
 // lifetime discipline on borrowed struct-field pointers.
 // =======================================================================
 
-use std::ffi::{CStr, CString, c_void};
+use std::ffi::{CString, c_void};
 use std::path::Path;
 use std::ptr;
 
@@ -325,13 +325,6 @@ impl MatVar {
     }
     pub fn is_complex(&self) -> bool {
         unsafe { (*self.ptr).is_complex != 0 }
-    }
-    pub fn name(&self) -> String {
-        let p = unsafe { (*self.ptr).name };
-        if p.is_null() {
-            return String::new();
-        }
-        unsafe { CStr::from_ptr(p) }.to_string_lossy().into_owned()
     }
 
     /// Read data as a `Vec<T>`. The caller is responsible for picking a T

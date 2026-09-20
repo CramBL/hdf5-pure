@@ -19,8 +19,8 @@ use hdf5::{MajorErrorCode, MinorErrorCode};
 use hdf5_pure::{Error, File, FormatError, RepackOptions};
 use tempfile::tempdir;
 
-use crate::fixture;
-use crate::fixture::{
+use super::fixture;
+use super::fixture::{
     ATTRIBUTE_NAME, DATA, DATASET_NAME, FAIL_IF_UNKNOWN_AND_OPEN_FOR_WRITE, UNKNOWN_MESSAGE_TYPE,
 };
 

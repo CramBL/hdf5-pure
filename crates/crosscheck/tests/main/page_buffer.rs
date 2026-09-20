@@ -7,7 +7,7 @@
 //! with dirty pages in memory leaves a file the *whole ecosystem* refuses, not
 //! just this crate — the mark is worth its cost only if `H5Fopen` honors it, and
 //! `H5F_SUPER_WRITE_ACCESS` alone is a different bit pattern from the SWMR pair
-//! whose refusal `crates/crosscheck/tests/owned_swmr.rs` already pins. The second is that a file
+//! whose refusal `crates/crosscheck/tests/main/owned_swmr.rs` already pins. The second is that a file
 //! written *through* the buffer and closed cleanly is an ordinary file again:
 //! mark down, paged layout intact, data where the C library looks for it.
 

@@ -1,7 +1,7 @@
 //! Genuine paged file-space allocation (issue #173 Phase 2, B1): hdf5-pure
 //! creates page-aligned files whose free space is tracked by per-page-type
 //! free-space managers, and reads them back. C-library interop lives in
-//! `crates/crosscheck/tests/file_space.rs`.
+//! `crates/crosscheck/tests/main/file_space.rs`.
 
 use hdf5_pure::{AttrValue, File, FileBuilder, FileSpaceStrategy, VlenStringReadOptions};
 

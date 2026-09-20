@@ -8,7 +8,7 @@ committed copy and requires it to still hold what it writes, and
 
 - `exotic_attributes.h5`: attribute encodings the C library's own API cannot
   express, a fixed-width string with null termination and a Null dataspace,
-  written by `src/repack.rs` and repacked by `crates/crosscheck/tests/repack.rs`.
+  written by `src/repack.rs` and repacked by `crates/crosscheck/tests/main/repack.rs`.
 - `dense_attrs_colliding_v0_28_0.h5`: written by hdf5-pure 0.28.0 before the
   fix for colliding attribute names in a multi-level dense index (#225), read
-  by `crates/crosscheck/tests/dense_attr_limits.rs`. Not regenerated.
+  by `crates/crosscheck/tests/main/dense_attr_limits.rs`. Not regenerated.

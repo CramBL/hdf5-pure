@@ -12,7 +12,7 @@
 //! re-encoded chunks fit their slots, otherwise rebuilt and relocated with the
 //! old storage reclaimed), group creation, and compact group attributes. The
 //! delete, copy, and relocating contiguous/compact overwrite paths are covered in
-//! `edit_userblock_followups.rs` and `crates/crosscheck/tests/edit_userblock.rs`. The one
+//! `edit_userblock_followups.rs` and `crates/crosscheck/tests/main/edit_userblock.rs`. The one
 //! userblock-specific operation still refused — cross-file copy from a userblock
 //! *source* — is covered below; a refusal never corrupts the file.
 
@@ -163,7 +163,7 @@ fn userblock_inplace_overwrite_only_takes_fast_path() {
 /// base-address restriction in `copy_from`); the destination file must be left
 /// byte-identical by the refusal. Delete, in-file copy, cross-file copy into a
 /// userblock destination, and resizing overwrites are all supported now and are
-/// exercised in `edit_userblock_followups.rs` / `crates/crosscheck/tests/edit_userblock.rs`.
+/// exercised in `edit_userblock_followups.rs` / `crates/crosscheck/tests/main/edit_userblock.rs`.
 #[test]
 fn userblock_cross_file_copy_from_userblock_source_is_refused() {
     let src_path = temp_path("hdf5_pure_ub_xcopy_src_refuse.h5");

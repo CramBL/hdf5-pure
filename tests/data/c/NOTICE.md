@@ -2,7 +2,7 @@
 
 `1.8/` holds files HDF5 1.8.23 wrote, described there.
 
-The rest are written by `crates/crosscheck/tests/c_test_data.rs` for unit tests
+The rest are written by `crates/crosscheck/tests/main/c_test_data.rs` for unit tests
 that need what only the C library writes, and `just test-data::c` rewrites them
 with the release `hdf5-metno` bundles:
 

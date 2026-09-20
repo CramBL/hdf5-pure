@@ -2371,7 +2371,7 @@ mod tests {
 
     /// Encode with a defined fill value and decode it back (issue #287).
     ///
-    /// `crates/crosscheck/tests/scaleoffset_fill.rs` proves the *bytes* match what the
+    /// `crates/crosscheck/tests/main/scaleoffset_fill.rs` proves the *bytes* match what the
     /// reference encoder produces, but it links the C library and so is gated
     /// to 64-bit little-endian. This states the round-trip property on every
     /// target, and covers the two chunk shapes that have no interior range:

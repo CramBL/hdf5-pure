@@ -3897,7 +3897,7 @@ impl WriteEngine {
     /// to an older file does make that file need 1.10 — deliberately, since the
     /// alternative is a version 1 B-tree index this crate does not write, and
     /// refusing instead would take away in-place editing of every file the C
-    /// library wrote with its own default bounds. `crates/crosscheck/tests/edit.rs`
+    /// library wrote with its own default bounds. `crates/crosscheck/tests/main/edit.rs`
     /// covers exactly that case (issue #101).
     ///
     /// That is a default, not a verdict: a caller who needs the file to stay
@@ -10682,7 +10682,7 @@ impl WriteEngine {
             // was modelled as the contiguous dataset it structurally is and had
             // its header chunks reclaimed. Deleting one therefore leaves those
             // chunks behind: measured on the fixture in
-            // `crates/crosscheck/tests/external_storage.rs`, a commit that deletes it
+            // `crates/crosscheck/tests/main/external_storage.rs`, a commit that deletes it
             // reports 147 B reusable where it reported 431 B. That is a leak and
             // not a hazard — `oh_chunk_spans` never covered the local heap the
             // External Data Files message names either, so neither the old
@@ -16202,7 +16202,7 @@ mod tests {
     /// held live metadata beforehand.
     #[test]
     // The file is a committed one the reference C library wrote, see
-    // `crates/crosscheck/tests/c_test_data.rs`.
+    // `crates/crosscheck/tests/main/c_test_data.rs`.
     fn a_c_written_chunk_index_is_not_reclaimed_as_raw() {
         use tempfile::tempdir;
 
@@ -16361,7 +16361,7 @@ mod tests {
     /// manager it came from, but never offered to an allocation.
     #[test]
     // The file is a committed one the reference C library wrote, see
-    // `crates/crosscheck/tests/c_test_data.rs`.
+    // `crates/crosscheck/tests/main/c_test_data.rs`.
     fn a_generic_large_section_is_only_reusable_as_whole_pages() {
         use tempfile::tempdir;
 
@@ -20791,7 +20791,7 @@ mod tests {
     ///
     /// The second link is made with the reference C library because this crate
     /// has no API that creates one: the file is a committed one, see
-    /// `crates/crosscheck/tests/c_test_data.rs`.
+    /// `crates/crosscheck/tests/main/c_test_data.rs`.
     #[test]
     fn an_undo_replays_two_hard_links_to_one_block_newest_first() {
         use tempfile::tempdir;

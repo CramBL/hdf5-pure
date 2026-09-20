@@ -3,7 +3,7 @@
 //! An enumeration *attribute* written by the reference C library must reach the
 //! caller, decoded through the enum's integer base type (#248).
 //!
-//! This is the read direction of `crates/crosscheck/tests/enum_base.rs`, and it matters because
+//! This is the read direction of `crates/crosscheck/tests/main/enum_base.rs`, and it matters because
 //! the C library is what writes the files in the wild: `H5T_NATIVE_HBOOL` — what
 //! h5py gives every `np.bool_` and what `hdf5-metno` gives Rust's `bool` — is an
 //! `enum[FALSE, TRUE]` over an 8-bit integer, so a boolean attribute is an enum

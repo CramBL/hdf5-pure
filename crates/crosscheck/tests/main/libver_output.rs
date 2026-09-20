@@ -12,7 +12,7 @@
 //!
 //! It cannot check the boundary itself. The `hdf5-metno` dev-dependency builds a
 //! current libhdf5, which reads both formats without complaint, so nothing here
-//! would fail if the bound stopped working. `crates/crosscheck/tests/libver_matrix.rs`
+//! would fail if the bound stopped working. `crates/crosscheck/tests/main/libver_matrix.rs`
 //! covers that half against every release the interop workflow builds, 1.8.23
 //! included.
 //!
@@ -156,7 +156,7 @@ fn c_writes_into_a_1_8_format_file() {
 /// Chunked additions are the documented exception and are *not* refused: a
 /// chunked dataset needs a 1.10 chunk index whatever the superblock says, and
 /// refusing would take away in-place editing of every file the C library wrote
-/// under its own default bounds (issue #101, `crates/crosscheck/tests/edit.rs`).
+/// under its own default bounds (issue #101, `crates/crosscheck/tests/main/edit.rs`).
 #[test]
 fn an_edit_session_keeps_a_1_8_file_in_the_1_8_format() {
     let dir = tempdir().unwrap();
