@@ -1,4 +1,3 @@
-#![cfg(all(not(target_pointer_width = "32"), target_endian = "little"))]
 #![cfg(feature = "__hdf5-1.10")]
 //! Reference-C-library interop for the bounded read-write backend (issue #147):
 //! files grown through the bounded engine read back byte-correct in the
@@ -74,6 +73,7 @@ fn pure_create(path: &std::path::Path, n: i32, chunk: u64, deflate: bool) {
 }
 
 #[test]
+#[cfg(target_endian = "little")]
 fn bounded_append_to_c_dataset_both_read() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("c.h5");
@@ -186,6 +186,7 @@ fn bounded_persist_finalize_reads_back_in_c() {
 /// bounded backend grows it and finalizes at `close`, and both libraries read
 /// the full sequence back.
 #[test]
+#[cfg(target_endian = "little")]
 fn bounded_persist_on_c_created_file_reads_back() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("c_persist.h5");
@@ -229,6 +230,7 @@ fn bounded_persist_on_c_created_file_reads_back() {
 /// engine, not the empty borrowed view (which made every heap-backed VL read
 /// fail with UnexpectedEof).
 #[test]
+#[cfg(target_endian = "little")]
 fn vlen_strings_read_on_bounded_and_mirror_files() {
     use hdf5::types::VarLenUnicode;
     use std::str::FromStr;
@@ -288,6 +290,7 @@ fn vlen_strings_read_on_bounded_and_mirror_files() {
 /// overwrite, a new group, a new dataset, an attribute, a deletion) is verified
 /// through the C library rather than only through this crate's reader.
 #[test]
+#[cfg(target_endian = "little")]
 fn bounded_staged_commit_reads_back_in_c() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("staged_c.h5");

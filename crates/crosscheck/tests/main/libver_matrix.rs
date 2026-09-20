@@ -1,9 +1,4 @@
-#![cfg(all(
-    feature = "serde",
-    feature = "hdf5",
-    not(target_pointer_width = "32"),
-    target_endian = "little"
-))]
+#![cfg(all(feature = "serde", feature = "hdf5"))]
 //! The format boundary against the linked release of the C library, in both
 //! directions.
 //!
@@ -576,6 +571,7 @@ fn check_compound(path: &Path) {
 }
 
 #[test]
+#[cfg(target_endian = "little")]
 fn this_crate_reads_the_oldest_format_the_release_writes() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("oldest.h5");
@@ -587,6 +583,7 @@ fn this_crate_reads_the_oldest_format_the_release_writes() {
 
 #[cfg(not(feature = "__hdf5-1.10"))]
 #[test]
+#[cfg(target_endian = "little")]
 fn this_crate_reads_the_newest_format_the_release_writes() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("newest.h5");
@@ -598,6 +595,7 @@ fn this_crate_reads_the_newest_format_the_release_writes() {
 
 #[cfg(feature = "__hdf5-1.10")]
 #[test]
+#[cfg(target_endian = "little")]
 fn this_crate_reads_the_newest_format_the_release_writes() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("newest.h5");

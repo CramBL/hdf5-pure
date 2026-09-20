@@ -1,4 +1,3 @@
-#![cfg(all(not(target_pointer_width = "32"), target_endian = "little"))]
 #![cfg(feature = "__hdf5-1.10")]
 //! Interop tests for in-place appends through an owned handle: append to a
 //! filtered, unlimited,
@@ -112,6 +111,7 @@ fn pure_creates_writer_appends_c_reads() {
 }
 
 #[test]
+#[cfg(target_endian = "little")]
 fn c_creates_writer_appends_both_read() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("d.h5");
@@ -124,6 +124,7 @@ fn c_creates_writer_appends_both_read() {
 }
 
 #[test]
+#[cfg(target_endian = "little")]
 fn c_incompressible_kept_chunks_untouched() {
     // The C library stores incompressible chunks uncompressed with a nonzero
     // per-chunk filter mask. In-place appends never touch the kept chunk elements,
@@ -214,6 +215,7 @@ fn reopen_across_sessions_c_reads() {
 }
 
 #[test]
+#[cfg(target_endian = "little")]
 fn c_creates_writer_grows_an_unaligned_filtered_tail() {
     // A filtered dataset the C library left on a partial trailing chunk is
     // grown in place: this crate decodes that chunk with its recorded filter

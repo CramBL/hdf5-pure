@@ -1,4 +1,3 @@
-#![cfg(all(not(target_pointer_width = "32"), target_endian = "little"))]
 #![cfg(feature = "__hdf5-1.10")]
 //! Reading dense (fractal-heap) group link storage that the reference C library
 //! writes, across group sizes that grow the heap's root indirect block past a

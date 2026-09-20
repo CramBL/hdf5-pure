@@ -1,4 +1,3 @@
-#![cfg(all(not(target_pointer_width = "32"), target_endian = "little"))]
 #![cfg(feature = "__hdf5-1.10")]
 //! Scale-offset encoding with a **defined fill value** (issue #287).
 //!
@@ -127,6 +126,7 @@ fn filter_parms(path: &std::path::Path) -> Vec<u32> {
 /// packed one entry always, or eight bytes always, agrees with the reference on
 /// only part of this.
 #[test]
+#[cfg(target_endian = "little")]
 fn a_dataset_this_crate_writes_carries_the_filter_parameters_the_c_library_records() {
     let dir = tempdir().unwrap();
 
@@ -315,6 +315,7 @@ fn a_recorded_fill_value_shrinks_a_mostly_fill_chunk() {
 /// The issue as filed: append to a C-written scale-offset dataset that carries
 /// a defined fill value.
 #[test]
+#[cfg(target_endian = "little")]
 fn appending_to_a_c_written_fill_defined_dataset() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("append.h5");
@@ -330,6 +331,7 @@ fn appending_to_a_c_written_fill_defined_dataset() {
 /// stores them as the all-ones sentinel, and both decoders must map that back
 /// to the fill value rather than to `minval + sentinel`.
 #[test]
+#[cfg(target_endian = "little")]
 fn appended_fill_valued_elements_round_trip() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("append_fill.h5");
@@ -353,6 +355,7 @@ fn appended_fill_valued_elements_round_trip() {
 /// largest real offset *is* the all-ones sentinel and decodes as the fill
 /// value instead of as itself.
 #[test]
+#[cfg(target_endian = "little")]
 fn the_widest_value_in_a_chunk_is_not_mistaken_for_the_fill_value() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("sentinel.h5");
@@ -372,6 +375,7 @@ fn the_widest_value_in_a_chunk_is_not_mistaken_for_the_fill_value() {
 /// signed, and a negative `minval` rides in the header as a two's-complement
 /// bit pattern.
 #[test]
+#[cfg(target_endian = "little")]
 fn signed_data_with_a_negative_fill_value() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("signed.h5");
@@ -553,6 +557,7 @@ fn assert_byte_identical_encoding<T, A>(
 }
 
 #[test]
+#[cfg(target_endian = "little")]
 fn unsigned_integer_encoding_matches_the_c_library_byte_for_byte() {
     assert_byte_identical_encoding(
         CScaleOffset::Integer(0),
@@ -571,6 +576,7 @@ fn unsigned_integer_encoding_matches_the_c_library_byte_for_byte() {
 /// read as unsigned matches nothing, so every fill element would be encoded as
 /// an ordinary offset instead of as the sentinel.
 #[test]
+#[cfg(target_endian = "little")]
 fn signed_integer_encoding_matches_the_c_library_byte_for_byte() {
     assert_byte_identical_encoding(
         CScaleOffset::Integer(0),
@@ -598,6 +604,7 @@ fn signed_integer_encoding_matches_the_c_library_byte_for_byte() {
 /// equality. `-999.0004` sits inside that window for `D = 3` without being
 /// equal to it, so an encoder testing equality diverges here and nowhere else.
 #[test]
+#[cfg(target_endian = "little")]
 fn float_dscale_encoding_matches_the_c_library_byte_for_byte() {
     assert_byte_identical_encoding(
         CScaleOffset::FloatDScale(3),
@@ -622,6 +629,7 @@ fn float_dscale_encoding_matches_the_c_library_byte_for_byte() {
 /// only the bytes it is stored as — and through `span` one such element can
 /// widen every element in the chunk (issue #300).
 #[test]
+#[cfg(target_endian = "little")]
 fn a_residual_just_below_one_half_rounds_the_way_the_c_library_rounds() {
     let below_half = 0.499_999_999_999_999_94f64;
     assert!(
@@ -700,6 +708,7 @@ fn pure_append_f32(path: &std::path::Path, values: &[f32]) {
 
 /// The `f32` half of the D-scale path.
 #[test]
+#[cfg(target_endian = "little")]
 fn float32_dscale_encoding_matches_the_c_library_byte_for_byte() {
     assert_byte_identical_encoding(
         CScaleOffset::FloatDScale(3),
@@ -731,6 +740,7 @@ fn float32_dscale_encoding_matches_the_c_library_byte_for_byte() {
 /// nonsense in both libraries, which is the point. Reproducing the reference
 /// includes reproducing where it is strange.
 #[test]
+#[cfg(target_endian = "little")]
 fn the_f32_tolerance_window_between_the_two_precisions_matches() {
     let dir = tempdir().unwrap();
     let fill = 0.0f32;
@@ -758,6 +768,7 @@ fn the_f32_tolerance_window_between_the_two_precisions_matches() {
 /// (`|v - fill| < 10^-D`) rather than by exact equality, so this pins that
 /// tolerance as well as the sentinel.
 #[test]
+#[cfg(target_endian = "little")]
 fn float_dscale_with_a_defined_fill_value() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("float.h5");
@@ -832,6 +843,7 @@ fn float_dscale_with_a_defined_fill_value() {
 /// comparison sees, which is why the fixture is here rather than in a round
 /// trip.
 #[test]
+#[cfg(target_endian = "little")]
 fn the_full_precision_fallback_header_matches_the_c_library() {
     // Skipping the fill value leaves min = 1 and max = 255, a span of 254 —
     // past the point where the reference stops packing for a 1-byte type.
@@ -853,6 +865,7 @@ fn the_full_precision_fallback_header_matches_the_c_library() {
 /// reference leaves it at full precision by the same skip-past-`save_min`
 /// route, so the header's `minval` is zero rather than the chunk's minimum.
 #[test]
+#[cfg(target_endian = "little")]
 fn the_float_full_precision_fallback_header_matches_the_c_library() {
     // The chunk's minimum must not itself be zero, or a header carrying the
     // minimum and one carrying zero are the same bytes.
@@ -920,6 +933,7 @@ fn first_chunk_header(path: &std::path::Path) -> Vec<u8> {
 /// signed arithmetic at their extremes, and this build traps inside
 /// `H5Dwrite` rather than returning a comparison.
 #[test]
+#[cfg(target_endian = "little")]
 fn the_fallback_header_matches_the_c_library_at_every_width() {
     let dir = tempdir().unwrap();
 
@@ -1001,6 +1015,7 @@ fn the_fallback_header_matches_the_c_library_at_every_width() {
 /// chunk is the sentinel, so `minval` is written and never read — which is why
 /// a round trip cannot see this and the bytes can.
 #[test]
+#[cfg(target_endian = "little")]
 fn an_all_fill_chunk_matches_the_c_library_byte_for_byte() {
     assert_one_byte_identical_chunk(CScaleOffset::Integer(0), &[3u64; 6], pure_append);
     assert_one_byte_identical_chunk(

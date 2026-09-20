@@ -1,4 +1,3 @@
-#![cfg(all(not(target_pointer_width = "32"), target_endian = "little"))]
 #![cfg(feature = "__hdf5-1.10")]
 //! The reference C library's view of a file whose stored object references this
 //! crate repointed across a commit (issue #324).

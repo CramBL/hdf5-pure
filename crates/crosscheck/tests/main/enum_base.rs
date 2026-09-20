@@ -1,4 +1,3 @@
-#![cfg(all(not(target_pointer_width = "32"), target_endian = "little"))]
 #![cfg(feature = "__hdf5-1.10")]
 //! The reference C library must agree about an enumeration this crate wrote over
 //! a base type other than `i32`/`u8` (issue #208).
@@ -28,6 +27,7 @@ fn c_enum_descriptor(path: &std::path::Path, name: &str) -> hdf5::types::EnumTyp
 }
 
 #[test]
+#[cfg(target_endian = "little")]
 fn c_library_agrees_on_an_unsigned_16_bit_enum() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("u16_enum.h5");
@@ -63,6 +63,7 @@ fn c_library_agrees_on_an_unsigned_16_bit_enum() {
 }
 
 #[test]
+#[cfg(target_endian = "little")]
 fn c_library_agrees_on_a_signed_16_bit_enum() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("i16_enum.h5");

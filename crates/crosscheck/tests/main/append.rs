@@ -1,4 +1,3 @@
-#![cfg(all(not(target_pointer_width = "32"), target_endian = "little"))]
 #![cfg(feature = "__hdf5-1.10")]
 //! Interop tests for `Dataset::append_staged`: append to a filtered,
 //! unlimited, Extensible-Array-indexed dataset and confirm the reference C
@@ -95,6 +94,7 @@ fn pure_creates_pure_appends_c_reads() {
 }
 
 #[test]
+#[cfg(target_endian = "little")]
 fn c_creates_pure_appends_both_read() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("d.h5");
@@ -107,6 +107,7 @@ fn c_creates_pure_appends_both_read() {
 }
 
 #[test]
+#[cfg(target_endian = "little")]
 fn c_incompressible_kept_chunks_filter_mask_preserved() {
     // The load-bearing interop case: the C library stores incompressible chunks
     // uncompressed and records a nonzero per-chunk filter mask. The append must
@@ -132,6 +133,7 @@ fn c_incompressible_kept_chunks_filter_mask_preserved() {
 }
 
 #[test]
+#[cfg(target_endian = "little")]
 fn append_to_c_empty_extensible() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("d.h5");

@@ -1,4 +1,3 @@
-#![cfg(all(not(target_pointer_width = "32"), target_endian = "little"))]
 #![cfg(feature = "__hdf5-1.10")]
 //! An empty (zero-element) chunked dataset, across both writers and both readers
 //! (issue #284). This is the shape an incremental writer declares its schema at —

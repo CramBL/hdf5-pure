@@ -1,4 +1,3 @@
-#![cfg(all(not(target_pointer_width = "32"), target_endian = "little"))]
 #![cfg(feature = "__hdf5-1.10")]
 //! Reference-C-library interop for chunked, filtered, and resizable
 //! variable-length string datasets (issue #109).
@@ -402,6 +401,7 @@ fn c_library_reads_an_overwritten_filtered_chunked_vlen_string_dataset() {
 /// this is the case where an assumption about how *this* crate lays a
 /// variable-length dataset out would show up.
 #[test]
+#[cfg(target_endian = "little")]
 fn a_c_written_vlen_string_dataset_can_be_overwritten() {
     let _c = c_lib_guard();
     let dir = tempdir().unwrap();
@@ -451,6 +451,7 @@ fn a_c_written_vlen_string_dataset_can_be_overwritten() {
 /// library, which is also what makes this a test of the arm rather than of the
 /// writer's own habits.
 #[test]
+#[cfg(target_endian = "little")]
 fn c_library_reads_an_overwritten_compact_vlen_string_dataset() {
     let _c = c_lib_guard();
     let dir = tempdir().unwrap();

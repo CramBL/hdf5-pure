@@ -1,9 +1,4 @@
-#![cfg(all(
-    feature = "serde",
-    feature = "hdf5",
-    not(target_pointer_width = "32"),
-    target_endian = "little"
-))]
+#![cfg(all(feature = "serde", feature = "hdf5"))]
 //! Crosscheck: files produced by our serde layer are readable by the C HDF5
 //! library (via `hdf5-metno`). This gives us confidence that the `.mat` v7.3
 //! files we produce are valid HDF5 and follow MATLAB conventions that other

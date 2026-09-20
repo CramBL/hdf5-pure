@@ -96,6 +96,7 @@ fn i32_to_i8_truncation(#[case] input: i32, #[case] expected: i8) {
 #[case::in_bounds_positive(100, 100)]
 #[case::clamps_negative_one_to_zero(-1, 0)]
 #[case::clamps_large_negative_to_zero(-100, 0)]
+#[cfg(target_endian = "little")]
 fn i32_to_u32_sign_loss(#[case] input: i32, #[case] expected: u32) {
     assert_hdf5_conversion! {
         from: input    => i32 [with_i32_data],

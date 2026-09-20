@@ -1,4 +1,3 @@
-#![cfg(all(not(target_pointer_width = "32"), target_endian = "little"))]
 #![cfg(feature = "__hdf5-1.10")]
 //! Reference-C-library interop for issue #262: the two on-disk shapes this
 //! change newly produces must be readable by the C library, not merely by this
@@ -119,6 +118,7 @@ fn c_library_reads_a_buffered_appended_dataset() {
 }
 
 #[test]
+#[cfg(target_endian = "little")]
 fn c_library_reads_a_buffered_append_onto_its_own_dataset() {
     let _c = c_lib_guard();
     let dir = tempdir().unwrap();

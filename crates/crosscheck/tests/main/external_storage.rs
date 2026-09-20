@@ -1,5 +1,6 @@
-#![cfg(all(not(target_pointer_width = "32"), target_endian = "little"))]
 #![cfg(feature = "__hdf5-1.10")]
+// Fails under `cross` on i686 only. Passes natively and on s390x.
+#![cfg(not(target_pointer_width = "32"))]
 //! A dataset whose element bytes live in *external* files (`H5Pset_external`).
 //!
 //! Its data-layout message is contiguous with the data address **undefined** —

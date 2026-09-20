@@ -1,4 +1,3 @@
-#![cfg(all(not(target_pointer_width = "32"), target_endian = "little"))]
 #![cfg(feature = "__hdf5-1.10")]
 //! Cross-validation for editing files with a userblock (the userblock slice of
 //! issue #104) against the reference C library. A single off-by-base address in
@@ -261,6 +260,7 @@ fn userblock_chunked_reclaimed_space_reused_read_by_c_library() {
 }
 
 #[test]
+#[cfg(target_endian = "little")]
 fn userblock_contiguous_undefined_address_relocates_read_by_c_library() {
     // A contiguous dataset the C library created but never wrote has an undefined
     // data address, so overwriting it relocates the header and writes a fresh data
@@ -315,6 +315,7 @@ fn userblock_contiguous_undefined_address_relocates_read_by_c_library() {
 }
 
 #[test]
+#[cfg(target_endian = "little")]
 fn userblock_compact_overwrite_read_by_c_library() {
     // A compact dataset carries its data inline in the header, so any overwrite
     // rewrites and relocates the header and relinks the parent. On a userblock file

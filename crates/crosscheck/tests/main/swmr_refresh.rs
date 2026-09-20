@@ -1,4 +1,3 @@
-#![cfg(all(not(target_pointer_width = "32"), target_endian = "little"))]
 #![cfg(feature = "__hdf5-1.10")]
 //! SWMR-reader (refresh) tests: hdf5-pure follows an Extensible-Array dataset
 //! that an external HDF5 writer appends to.

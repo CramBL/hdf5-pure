@@ -1,4 +1,3 @@
-#![cfg(all(not(target_pointer_width = "32"), target_endian = "little"))]
 #![cfg(feature = "__hdf5-1.10")]
 //! Interop for owned-handle in-place append (issue #148, phase 2): append through
 //! a `File::open_rw` `Dataset` handle and confirm the reference C library
@@ -57,6 +56,7 @@ fn owned_append_filtered_reads_back_in_c() {
 }
 
 #[test]
+#[cfg(target_endian = "little")]
 fn owned_append_onto_c_created_dataset() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("d.h5");

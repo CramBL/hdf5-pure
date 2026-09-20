@@ -1,4 +1,3 @@
-#![cfg(all(not(target_pointer_width = "32"), target_endian = "little"))]
 #![cfg(feature = "__hdf5-1.10")]
 //! Committed (`H5Tcommit`) datatypes, written by the reference C library and read
 //! back by hdf5-pure (issue #254).
@@ -175,6 +174,7 @@ fn write_attr(owner: &hdf5::Location, name: &str, committed: Option<&hdf5::Datat
 /// the root group and on a dataset alike — and reports its value, which the
 /// zero-width type the reference used to decode as made unreadable.
 #[test]
+#[cfg(target_endian = "little")]
 fn a_committed_attribute_datatype_resolves_to_the_type_it_names() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("committed.h5");
@@ -217,6 +217,7 @@ fn a_committed_attribute_datatype_resolves_to_the_type_it_names() {
 /// produced a zero-width type, which is the one thing that cannot hold any data
 /// at all.
 #[test]
+#[cfg(target_endian = "little")]
 fn a_committed_dataset_datatype_resolves_and_its_data_reads() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("committed.h5");
@@ -233,6 +234,7 @@ fn a_committed_dataset_datatype_resolves_and_its_data_reads() {
 /// decode path — and each reader backend walks that heap with its own code, so
 /// both are checked here rather than one standing in for the other.
 #[test]
+#[cfg(target_endian = "little")]
 fn committed_datatypes_resolve_in_dense_attribute_storage() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("dense.h5");
@@ -282,6 +284,7 @@ fn committed_datatypes_resolve_in_dense_attribute_storage() {
 /// its datatype, so refusing the whole object because one of its neighbours is
 /// committed would be a limit with no cause.
 #[test]
+#[cfg(target_endian = "little")]
 fn an_edit_passes_over_a_committed_attribute_it_does_not_touch() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("committed.h5");
@@ -402,6 +405,7 @@ fn write_appendable_committed_fixture(path: &Path) {
 /// resolved by reading the target object header on demand rather than indexing a
 /// slice. Two backends, one answer.
 #[test]
+#[cfg(target_endian = "little")]
 fn the_streaming_backend_resolves_a_committed_datatype_too() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("committed.h5");
@@ -464,6 +468,7 @@ fn attr_type_is_committed(file: &hdf5::File, owner: &str, attr: &str) -> bool {
 /// object — not about the values alone. Before #254 this same call returned `Ok`
 /// and produced a file libhdf5 could not read *any* attributes from.
 #[test]
+#[cfg(target_endian = "little")]
 fn repack_reproduces_a_committed_datatype() {
     let dir = tempdir().unwrap();
     let src = dir.path().join("committed.h5");
@@ -523,6 +528,7 @@ fn repack_reproduces_a_committed_datatype() {
 /// still compares equal, and the file has silently become one where the objects
 /// no longer share anything. Address identity is what distinguishes them.
 #[test]
+#[cfg(target_endian = "little")]
 fn users_of_one_committed_type_still_share_one_object() {
     let dir = tempdir().unwrap();
     let src = dir.path().join("committed.h5");
@@ -942,6 +948,7 @@ fn an_in_place_edit_refuses_a_committed_datatype() {
 /// must classify the same file the same way, and only one of them is ground
 /// truth.
 #[test]
+#[cfg(target_endian = "little")]
 fn only_what_the_c_library_calls_a_named_datatype_is_accepted() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("committed.h5");
