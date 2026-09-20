@@ -120,7 +120,7 @@ jobs:
 
   # The reference C library for MATLAB files, reading back what `mat` writes.
   # From conda-forge because the test calls `Mat_VarCreateStruct2`, which no
-  # distribution package carries yet.
+  # distribution package has yet.
   matio:
     name: matio / ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
@@ -168,8 +168,6 @@ jobs:
       - name: Install libmatio
         run: conda install -y -c conda-forge libmatio
 
-      # Naming the test binary keeps the job honest: the file is behind a `cfg`
-      # on the feature, and nextest exits non-zero on "0 tests run".
       - name: Crosscheck against the reference library
         run: |
           export LIBRARY_PATH="$CONDA_PREFIX/lib:${LIBRARY_PATH:-}"
