@@ -18,7 +18,7 @@ use tempfile::tempdir;
 /// `SyncPolicy::OnClose` for the same reason the memory strategy is explicit:
 /// what these tests assert is content and batching behaviour, not durability,
 /// and the default `Always` costs one `fsync` per append. The policies write
-/// byte-identical files (`tests/sync_policy.rs`), and close still barriers.
+/// byte-identical files (`tests/main/sync_policy.rs`), and close still barriers.
 fn open_bounded(path: &std::path::Path) -> Result<File, Error> {
     File::open_rw_with_options(
         path,
@@ -405,7 +405,7 @@ fn persisted_free_space_noop_close_does_not_grow() {
 /// backend (issue #173 Phase 2): without on-disk managers there is no record of
 /// which pages are metadata vs raw, so bounded appends cannot keep the paging
 /// segregated. A paged file that *does* persist is supported (see
-/// `tests/paged_mutation.rs`).
+/// `tests/main/paged_mutation.rs`).
 #[test]
 fn paged_non_persist_is_refused_at_open() {
     let dir = tempdir().unwrap();

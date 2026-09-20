@@ -273,7 +273,7 @@ fn empty_vec_of_struct_serializes_as_empty_double() {
 /// Cell-array reading resolves each element's `#refs#` object reference back
 /// into a `MatValue` and reconstructs the sequence, so a `Vec<Struct>`
 /// round-trips through the pure-Rust deserializer. (Pure-Rust read coverage
-/// lives in `tests/mat_cell_read.rs`; this case pairs it with the C-library
+/// lives in `tests/main/mat_cell_read.rs`. This case pairs it with the C-library
 /// write checks above.)
 #[test]
 fn from_file_on_cell_array_roundtrips() {

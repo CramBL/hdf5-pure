@@ -17,7 +17,7 @@ Phase 1 (write) produces a `manifest.json` plus, per fixture:
                           (raw bytes when h5py skipped the optional filter —
                           see `filter_mask` in the manifest)
   <name>.h5               the h5py-written file, read end-to-end by
-                          tests/lzf_roundtrip.rs and handy for h5dump
+                          tests/main/lzf_roundtrip.rs and handy for h5dump
 
 Phase 2 (read back) points h5py at `pure_written.h5`, the committed file
 *hdf5-pure* wrote, and checks h5py decodes every dataset and can write an
@@ -27,7 +27,7 @@ compares our filter pipeline against this manifest, but it has no h5py, and
 our LZF stream is deliberately not byte-compared against liblzf's (any
 conforming stream is valid). Run it whenever `src/lzf.rs` or the LZF branch of
 `ChunkOptions::build_pipeline` changes. `pure_written.h5` is kept in step with
-the writer by `pure_written_fixture_is_current` in tests/lzf_roundtrip.rs.
+the writer by `pure_written_fixture_is_current` in tests/main/lzf_roundtrip.rs.
 
 LZF ships with h5py itself (no hdf5plugin needed). h5py registers it as an
 *optional* filter: when liblzf cannot shrink a chunk the chunk is stored raw
@@ -232,7 +232,7 @@ def write_fixture(case: Case) -> dict[str, Any]:
 PURE_WRITTEN = FIXTURE_DIR / "pure_written.h5"
 
 # Datasets in pure_written.h5, mirroring `build_pure_written` in
-# tests/lzf_roundtrip.rs. Keep the two in step: the Rust test owns the file's
+# tests/main/lzf_roundtrip.rs. Keep the two in step: the Rust test owns the file's
 # contents, this table only says what h5py should find there.
 PURE_EXPECTED = {
     "plain_i32": lambda: np.arange(1024, dtype=np.int32),
@@ -259,7 +259,7 @@ def verify_pure_written() -> None:
     if not PURE_WRITTEN.exists():
         raise SystemExit(
             f"{PURE_WRITTEN.name} is missing. It is committed; regenerate it via "
-            "`build_pure_written` in tests/lzf_roundtrip.rs."
+            "`build_pure_written` in tests/main/lzf_roundtrip.rs."
         )
 
     with h5py.File(PURE_WRITTEN, "r") as f:

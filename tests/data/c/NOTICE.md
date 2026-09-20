@@ -16,4 +16,4 @@ with the release `hdf5-metno` bundles:
 - `hard_link_undo.h5`: two hard links to one dataset, which this crate has no
   API to create, for `src/edit.rs`.
 - `committed_datatype_v1.h5`: a committed datatype in a version 1 object
-  header, linked once and used by two datasets, for `tests/named_datatypes.rs`.
+  header, linked once and used by two datasets, for `tests/main/named_datatypes.rs`.

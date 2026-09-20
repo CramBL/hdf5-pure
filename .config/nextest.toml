@@ -42,6 +42,6 @@ nextest-version = "0.9.90"
 #
 # The usual cause is the one above: a session left on the default
 # `SyncPolicy::Always` while looping over appends. `SyncPolicy::OnClose` writes
-# byte-identical files (`tests/sync_policy.rs` asserts that) and still barriers
+# byte-identical files (`tests/main/sync_policy.rs` asserts that) and still barriers
 # at `close`. Rule that out before reaching for a per-test override.
 slow-timeout = { period = "30s", terminate-after = 3 }

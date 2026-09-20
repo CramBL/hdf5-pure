@@ -14,7 +14,7 @@ rather than direct value datasets (a scalar struct). The layout matches the
 
 Top-level variables: `row` (1×6), `col` (6×1), `grid` (2×3), `nested` (1×2 with a
 nested scalar struct field), and `scalar` (a 1×1 scalar struct, as a regression
-guard). Read and asserted by `tests/mat_struct_array_read.rs`.
+guard). Read and asserted by `tests/main/mat_struct_array_read.rs`.
 
 Regenerate with:
 

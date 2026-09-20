@@ -989,7 +989,7 @@ fn crosscheck_varlen_ascii_array_attr_in_dense_storage() {
 /// Dense attributes in a file with a userblock. This crate's reader rejected these
 /// files for a while, which made the C library the arbiter of whether the *writer*
 /// was also wrong: it was not, and this pins that. `hdf5-pure`'s own side of it is
-/// `tests/userblock_dense_attrs.rs`.
+/// `tests/main/userblock_dense_attrs.rs`.
 #[test]
 fn crosscheck_dense_attributes_past_a_userblock() {
     let dir = tempdir().unwrap();

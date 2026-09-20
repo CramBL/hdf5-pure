@@ -82,7 +82,7 @@ fn writer_append(path: &std::path::Path, values: &[i32]) {
 /// not when it reached the platter, and the default `Always` costs one `fsync`
 /// per call — the dominant cost of a several-thousand-append loop, and nothing
 /// this test measures. The two policies write byte-identical files, which
-/// `tests/sync_policy.rs` asserts directly; `close` still issues the closing
+/// `tests/main/sync_policy.rs` asserts directly. `close` still issues the closing
 /// barrier, so the C library reads a fully published file either way.
 fn writer_append_each(path: &std::path::Path, values: &[i32]) {
     let file = File::open_rw_with_options(
