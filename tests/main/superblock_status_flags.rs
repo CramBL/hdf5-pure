@@ -13,6 +13,7 @@ use hdf5_pure::{
     MemoryStrategy, SyncPolicy, WriteMarkPolicy,
 };
 use tempfile::tempdir;
+use test_util::superblock;
 
 /// An appendable file: rank-1, unlimited, Extensible-Array indexed, unfiltered —
 /// what the SWMR writer accepts.
@@ -26,20 +27,15 @@ fn build_swmr(path: &std::path::Path) {
     b.write(path).unwrap();
 }
 
-/// The status-flags byte as it stands on disk, read as bytes because the opens
-/// under test refuse a flagged file.
-fn flags(path: &std::path::Path) -> u8 {
-    let bytes = std::fs::read(path).unwrap();
-    let sig = b"\x89HDF\r\n\x1a\n";
-    let off = bytes.windows(sig.len()).position(|w| w == sig).unwrap();
-    bytes[off + 11]
-}
-
 /// Leave the file flagged exactly as a crashed writer would: leak the writer so
 /// neither `close` nor `Drop` clears the byte.
 fn flag_as_if_crashed(path: &std::path::Path) {
     std::mem::forget(File::open_swmr_writer(path).unwrap());
-    assert_eq!(flags(path), 0x05, "the leaked writer left the file flagged");
+    assert_eq!(
+        superblock::consistency_flags(path),
+        0x05,
+        "the leaked writer left the file flagged"
+    );
 }
 
 #[track_caller]
@@ -141,7 +137,7 @@ fn clearing_the_flag_restores_every_open() {
     flag_as_if_crashed(&path);
 
     File::clear_swmr_flag(&path).unwrap();
-    assert_eq!(flags(&path), 0x00);
+    assert_eq!(superblock::consistency_flags(&path), 0x00);
 
     assert_eq!(
         File::open(&path)
@@ -233,11 +229,15 @@ fn a_page_buffered_session_marks_the_file_for_its_lifetime() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("buffered.h5");
     build_paged(&path);
-    assert_eq!(flags(&path), 0x00, "a fresh file carries no mark");
+    assert_eq!(
+        superblock::consistency_flags(&path),
+        0x00,
+        "a fresh file carries no mark"
+    );
 
     let file = File::open_rw_with_options(&path, page_buffered()).unwrap();
     assert_eq!(
-        flags(&path),
+        superblock::consistency_flags(&path),
         0x01,
         "the mark must be on the disk before the first buffered write, not at close"
     );
@@ -251,7 +251,11 @@ fn a_page_buffered_session_marks_the_file_for_its_lifetime() {
     drop(ds);
     file.close().unwrap();
 
-    assert_eq!(flags(&path), 0x00, "a clean close must take the mark down");
+    assert_eq!(
+        superblock::consistency_flags(&path),
+        0x00,
+        "a clean close must take the mark down"
+    );
     assert_eq!(
         File::open(&path)
             .unwrap()
@@ -295,7 +299,7 @@ fn a_commit_in_a_page_buffered_session_leaves_the_mark_standing() {
     file.commit().unwrap();
     file.sync().unwrap();
     assert_eq!(
-        flags(&path),
+        superblock::consistency_flags(&path),
         0x01,
         "a commit must publish the session's mark, not scrub it"
     );
@@ -311,10 +315,14 @@ fn a_commit_in_a_page_buffered_session_leaves_the_mark_standing() {
         .unwrap();
     file.commit().unwrap();
     file.sync().unwrap();
-    assert_eq!(flags(&path), 0x01, "and so must every later commit");
+    assert_eq!(
+        superblock::consistency_flags(&path),
+        0x01,
+        "and so must every later commit"
+    );
 
     file.close().unwrap();
-    assert_eq!(flags(&path), 0x00);
+    assert_eq!(superblock::consistency_flags(&path), 0x00);
     assert!(File::open(&path).is_ok(), "and the file must open again");
 }
 
@@ -336,7 +344,7 @@ fn a_crashed_page_buffered_session_leaves_a_file_every_open_refuses() {
     std::mem::forget(ds);
     std::mem::forget(file);
     assert_eq!(
-        flags(&path),
+        superblock::consistency_flags(&path),
         0x01,
         "the leaked session left the file marked"
     );
@@ -352,7 +360,7 @@ fn a_crashed_page_buffered_session_leaves_a_file_every_open_refuses() {
     // And the documented recovery reaches this mark too, since it clears the
     // byte whole. What comes back is access, not a promise about the contents.
     File::clear_swmr_flag(&path).unwrap();
-    assert_eq!(flags(&path), 0x00);
+    assert_eq!(superblock::consistency_flags(&path), 0x00);
     File::open(&path).unwrap();
 }
 
@@ -383,7 +391,11 @@ fn live_page_buffered_writer(path: &std::path::Path) {
     file.sync().unwrap();
     std::mem::forget(ds);
     std::mem::forget(file);
-    assert_eq!(flags(path), 0x01, "the live session marks the file");
+    assert_eq!(
+        superblock::consistency_flags(path),
+        0x01,
+        "the live session marks the file"
+    );
 }
 
 /// The issue's repro: every path-based read is refused, and the refusal points
@@ -491,7 +503,7 @@ fn the_opt_in_does_not_unlock_a_swmr_pair() {
         .unwrap()
         .append(&[4i32, 5, 6, 7])
         .unwrap();
-    assert_eq!(flags(&path), 0x05);
+    assert_eq!(superblock::consistency_flags(&path), 0x05);
 
     assert_marked_in_use(
         File::open_with_options(&path, snapshot()).unwrap_err(),
@@ -529,7 +541,7 @@ fn an_unbuffered_editor_raises_no_mark() {
     ds.append(&[1i32; 64]).unwrap();
     drop(ds);
     assert_eq!(
-        flags(&path),
+        superblock::consistency_flags(&path),
         0x00,
         "an open_rw session without a page buffer marks nothing"
     );
@@ -538,7 +550,7 @@ fn an_unbuffered_editor_raises_no_mark() {
     File::open(&path).unwrap();
     File::open_streaming(&path).unwrap();
     file.close().unwrap();
-    assert_eq!(flags(&path), 0x00);
+    assert_eq!(superblock::consistency_flags(&path), 0x00);
 }
 
 /// Dropping the handle without `close` takes the mark down too.
@@ -557,10 +569,18 @@ fn dropping_a_page_buffered_session_takes_the_mark_down() {
         let file = File::open_rw_with_options(&path, page_buffered()).unwrap();
         let mut ds = file.dataset("d").unwrap();
         ds.append(&[4i32; 64]).unwrap();
-        assert_eq!(flags(&path), 0x01, "the mark stands while the session does");
+        assert_eq!(
+            superblock::consistency_flags(&path),
+            0x01,
+            "the mark stands while the session does"
+        );
     }
 
-    assert_eq!(flags(&path), 0x00, "drop must take the mark down");
+    assert_eq!(
+        superblock::consistency_flags(&path),
+        0x00,
+        "drop must take the mark down"
+    );
     assert_eq!(
         File::open(&path)
             .unwrap()

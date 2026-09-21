@@ -7,6 +7,7 @@ pub mod allocation;
 pub mod bytes;
 pub mod heap;
 pub mod paged;
+pub mod superblock;
 pub mod temp;
 
 /// A file under `tests/data`, by its path there: `data("c/1.8/v1_superblock.h5")`.
@@ -14,4 +15,9 @@ pub fn data(relative: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../tests/data")
         .join(relative)
+}
+
+#[track_caller]
+pub(crate) fn read_file(path: &Path) -> Vec<u8> {
+    std::fs::read(path).unwrap_or_else(|e| panic!("read {path:?}: {e}"))
 }

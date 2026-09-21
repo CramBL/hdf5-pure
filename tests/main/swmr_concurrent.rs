@@ -13,6 +13,7 @@
 
 use hdf5_pure::{File, FileBuilder, MaxExtent};
 use tempfile::tempdir;
+use test_util::superblock;
 
 /// Open `path` with h5py and return `(len, first, last)` of dataset `d`, or
 /// `None` if python3/h5py are unavailable. `mode` is "swmr" or "plain".
@@ -128,26 +129,31 @@ fn swmr_flag_lifecycle() {
             .with_chunks(&[1]);
         b.write(&path).unwrap();
     }
-    let flag = |p: &std::path::Path| -> u8 {
-        let bytes = std::fs::read(p).unwrap();
-        let sig = b"\x89HDF\r\n\x1a\n";
-        let off = bytes.windows(8).position(|w| w == sig).unwrap();
-        bytes[off + 11] // v3 superblock consistency-flags byte
-    };
-
     assert_eq!(
-        flag(&path),
+        superblock::consistency_flags(&path),
         0x00,
         "freshly created file is not SWMR-flagged"
     );
     {
         let w = File::open_swmr_writer(&path).unwrap();
-        assert_eq!(flag(&path), 0x05, "flag set while writer is open");
+        assert_eq!(
+            superblock::consistency_flags(&path),
+            0x05,
+            "flag set while writer is open"
+        );
         w.dataset("d").unwrap().append(&[5, 6, 7]).unwrap();
-        assert_eq!(flag(&path), 0x05, "flag stays set across appends");
+        assert_eq!(
+            superblock::consistency_flags(&path),
+            0x05,
+            "flag stays set across appends"
+        );
         w.close().unwrap();
     }
-    assert_eq!(flag(&path), 0x00, "flag cleared on clean close");
+    assert_eq!(
+        superblock::consistency_flags(&path),
+        0x00,
+        "flag cleared on clean close"
+    );
 
     // Simulate a crashed writer (flag left set), then recover.
     {
@@ -157,7 +163,15 @@ fn swmr_flag_lifecycle() {
         #[expect(clippy::mem_forget, reason = "the test models a writer that crashed")]
         std::mem::forget(w);
     }
-    assert_eq!(flag(&path), 0x05, "flag left set after simulated crash");
+    assert_eq!(
+        superblock::consistency_flags(&path),
+        0x05,
+        "flag left set after simulated crash"
+    );
     File::clear_swmr_flag(&path).unwrap();
-    assert_eq!(flag(&path), 0x00, "clear_swmr_flag recovers the file");
+    assert_eq!(
+        superblock::consistency_flags(&path),
+        0x00,
+        "clear_swmr_flag recovers the file"
+    );
 }

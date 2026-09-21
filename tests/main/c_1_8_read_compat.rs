@@ -27,6 +27,7 @@
 //! `tests/data/c/1.8/NOTICE.md`.
 
 use hdf5_pure::{AttrValue, File};
+use test_util::superblock;
 
 const V1: &str = "tests/data/c/1.8/v1_superblock.h5";
 const V2: &str = "tests/data/c/1.8/v2_superblock.h5";
@@ -79,28 +80,16 @@ fn assert_contents(path: &str) {
     );
 }
 
-/// The superblock version byte. Both fixtures have base address 0, so the
-/// signature is at offset 0 and this needs no scan.
-fn superblock_version(path: &str) -> u8 {
-    let bytes = std::fs::read(path).unwrap();
-    assert_eq!(
-        &bytes[..8],
-        b"\x89HDF\r\n\x1a\n",
-        "{path}: no signature at offset 0; the fixture grew a userblock"
-    );
-    bytes[8]
-}
-
 #[test]
 fn reads_a_c_written_version_1_superblock() {
     // Guarded before the content checks: a fixture that stopped being a version
     // 1 superblock should say so, rather than surfacing as a content failure.
-    assert_eq!(superblock_version(V1), 1);
+    assert_eq!(superblock::version(V1), 1);
     assert_contents(V1);
 }
 
 #[test]
 fn reads_a_c_written_version_2_superblock() {
-    assert_eq!(superblock_version(V2), 2);
+    assert_eq!(superblock::version(V2), 2);
     assert_contents(V2);
 }
