@@ -21,17 +21,7 @@ use hdf5_pure::mat::{self, Options};
 use hdf5_pure::{AttrValue, FileBuilder, LibVer, make_i32_type};
 use serde::Serialize;
 use tempfile::tempdir;
-
-/// The superblock version byte. A `.mat` file carries a 512-byte user block
-/// ahead of the signature, so it is searched for.
-fn superblock_version(path: &Path) -> u8 {
-    let bytes = std::fs::read(path).unwrap();
-    let signature = bytes
-        .windows(8)
-        .position(|w| w == b"\x89HDF\r\n\x1a\n")
-        .unwrap_or_else(|| panic!("{}: no signature", path.display()));
-    bytes[signature + 8]
-}
+use test_util::superblock;
 
 #[derive(Serialize)]
 struct Inner {
@@ -330,7 +320,7 @@ fn the_1_8_format_this_crate_writes_opens_in_every_release() {
     mat::to_file_with_options(&demo(), &string, &options).unwrap();
 
     for path in [&plain, &mat, &string] {
-        assert_eq!(superblock_version(path), 2, "{}", path.display());
+        assert_eq!(superblock::version(path), 2, "{}", path.display());
     }
     check_plain(&hdf5::File::open(&plain).expect("the C library opens the 1.8 plain file"));
     check_mat(&hdf5::File::open(&mat).expect("the C library opens the 1.8 mat file"));
@@ -349,7 +339,7 @@ fn write_v110(dir: &Path) -> (std::path::PathBuf, std::path::PathBuf) {
     options.libver = LibVer::V110;
     mat::to_file_with_options(&demo(), &mat, &options).unwrap();
     for path in [&plain, &mat] {
-        assert_eq!(superblock_version(path), 3, "{}", path.display());
+        assert_eq!(superblock::version(path), 3, "{}", path.display());
     }
     (plain, mat)
 }
@@ -576,7 +566,7 @@ fn this_crate_reads_the_oldest_format_the_release_writes() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("oldest.h5");
     c_write(&path, LibraryVersion::Earliest, LibraryVersion::latest());
-    assert_eq!(superblock_version(&path), 0);
+    assert_eq!(superblock::version(&path), 0);
     check_c_written(&path);
     check_compound(&path);
 }
@@ -588,7 +578,7 @@ fn this_crate_reads_the_newest_format_the_release_writes() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("newest.h5");
     c_write(&path, LibraryVersion::latest(), LibraryVersion::latest());
-    assert_eq!(superblock_version(&path), 2);
+    assert_eq!(superblock::version(&path), 2);
     check_c_written(&path);
     check_compound(&path);
 }
@@ -600,7 +590,7 @@ fn this_crate_reads_the_newest_format_the_release_writes() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("newest.h5");
     c_write(&path, LibraryVersion::latest(), LibraryVersion::latest());
-    assert_eq!(superblock_version(&path), 3);
+    assert_eq!(superblock::version(&path), 3);
     check_c_written(&path);
     check_compound(&path);
 }

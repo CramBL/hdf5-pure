@@ -7,7 +7,7 @@ use hdf5_pure::{
 };
 use rstest::rstest;
 use temp::temp_path;
-use test_util::temp;
+use test_util::{superblock, temp};
 
 /// A variable-length attribute survives a repack still variable-length.
 ///
@@ -669,11 +669,11 @@ fn preserves_the_source_on_disk_format() {
     b.with_libver_bounds(LibVer::Earliest, LibVer::V18);
     b.create_dataset("values").with_f64_data(&[1.0, 2.0, 3.0]);
     b.write(&src).unwrap();
-    assert_eq!(superblock_version(&src), 2, "the source is the 1.8 format");
+    assert_eq!(superblock::version(&src), 2, "the source is the 1.8 format");
 
     repack(&src, &dst, &RepackOptions::new()).unwrap();
 
-    assert_eq!(superblock_version(&dst), 2, "repack rewrote the format");
+    assert_eq!(superblock::version(&dst), 2, "repack rewrote the format");
     assert_eq!(
         hdf5_pure::File::open(&dst)
             .unwrap()
@@ -711,7 +711,7 @@ fn upgrades_only_where_the_source_format_cannot_hold_the_content() {
     )
     .unwrap();
     assert_eq!(
-        superblock_version(&dst),
+        superblock::version(&dst),
         2,
         "a contiguous repack upgraded past the oldest writable format"
     );
@@ -730,7 +730,7 @@ fn upgrades_only_where_the_source_format_cannot_hold_the_content() {
         &RepackOptions::new(),
     )
     .unwrap();
-    assert_eq!(superblock_version(&dst), 3);
+    assert_eq!(superblock::version(&dst), 3);
     assert_eq!(
         hdf5_pure::File::open(&dst)
             .unwrap()
@@ -773,18 +773,7 @@ fn an_explicit_bound_refuses_content_it_cannot_express() {
     // content and not about the option being set at all.
     let to_v110 = RepackOptions::new().with_libver_bounds(LibVer::Earliest, LibVer::V110);
     repack(&src, &dst, &to_v110).unwrap();
-    assert_eq!(superblock_version(&dst), 3);
-}
-
-/// The superblock version byte of the file at `path`, found by scanning for the
-/// signature so a userblock does not throw the offset off.
-fn superblock_version(path: &std::path::Path) -> u8 {
-    let bytes = std::fs::read(path).unwrap();
-    let sig = bytes
-        .windows(8)
-        .position(|w| w == b"\x89HDF\r\n\x1a\n")
-        .expect("the file carries an HDF5 signature");
-    bytes[sig + 8]
+    assert_eq!(superblock::version(&dst), 3);
 }
 
 /// Every spelling of one path identifies one object to a drop, as it does to a read.

@@ -7,6 +7,7 @@
 
 use hdf5_pure::{AttrValue, Error, File, FileBuilder, MaxExtent};
 use tempfile::tempdir;
+use test_util::superblock;
 
 /// Build an unfiltered rank-1, unlimited, Extensible-Array-indexed i32 dataset
 /// `d` seeded with `0..n` and the given chunk length — a SWMR-eligible target.
@@ -33,17 +34,6 @@ fn build_swmr_filtered(path: &std::path::Path, n: i32, chunk: u64) {
     b.write(path).unwrap();
 }
 
-/// Read the superblock's consistency-flags byte straight from the file. It is
-/// read as bytes rather than through `File::open` because that open now *refuses*
-/// a flagged file (issue #245), and because the byte on disk is what these tests
-/// mean to assert.
-fn read_flags(path: &std::path::Path) -> u32 {
-    let bytes = std::fs::read(path).unwrap();
-    let sig = b"\x89HDF\r\n\x1a\n";
-    let off = bytes.windows(sig.len()).position(|w| w == sig).unwrap();
-    u32::from(bytes[off + 11]) // v2/v3 superblock consistency-flags byte
-}
-
 const SWMR_WRITE_FLAGS: u32 = 0x05;
 
 #[test]
@@ -54,17 +44,17 @@ fn swmr_append_reads_back_and_flag_lifecycle() {
 
     let file = File::open_swmr_writer(&path).unwrap();
     // The SWMR-write flag is raised on open.
-    assert_eq!(read_flags(&path), SWMR_WRITE_FLAGS);
+    assert_eq!(superblock::consistency_flags(&path), SWMR_WRITE_FLAGS);
     {
         let mut ds = file.dataset("d").unwrap();
         ds.append(&[4i32, 5, 6, 7]).unwrap(); // one whole chunk
         assert_eq!(ds.read_i32().unwrap(), (0..8).collect::<Vec<_>>());
     }
     // The append preserves the SWMR-write flag; it is cleared only on close.
-    assert_eq!(read_flags(&path), SWMR_WRITE_FLAGS);
+    assert_eq!(superblock::consistency_flags(&path), SWMR_WRITE_FLAGS);
     file.close().unwrap();
     // A clean close clears the flag.
-    assert_eq!(read_flags(&path), 0);
+    assert_eq!(superblock::consistency_flags(&path), 0);
     // The append persisted.
     let ro = File::open(&path).unwrap();
     assert_eq!(
@@ -185,10 +175,10 @@ fn clear_swmr_flag_recovers_a_stale_flag() {
     // Drop never runs, so the flag is left set.
     #[expect(clippy::mem_forget, reason = "the test models a writer that crashed")]
     std::mem::forget(file);
-    assert_eq!(read_flags(&path), SWMR_WRITE_FLAGS);
+    assert_eq!(superblock::consistency_flags(&path), SWMR_WRITE_FLAGS);
 
     File::clear_swmr_flag(&path).unwrap();
-    assert_eq!(read_flags(&path), 0);
+    assert_eq!(superblock::consistency_flags(&path), 0);
 }
 
 /// The SWMR writer takes no OS lock, so an exclusive-locking open gets past the
