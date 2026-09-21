@@ -15,30 +15,14 @@ use hdf5_pure::{AttrValue, File, FileBuilder};
 
 use temp::temp_path;
 use test_util::temp;
+use test_util::userblock::Userblock;
 
 const UB: usize = 512;
 
 const MARKER: &[u8] = b"USERBLOCK-FOLLOWUP-104";
 
-/// Stamp a recognizable marker across the userblock region of `bytes` and return
-/// the 512-byte userblock as written, for later byte-for-byte comparison.
-fn stamp_userblock(bytes: &mut [u8]) -> Vec<u8> {
-    bytes[..MARKER.len()].copy_from_slice(MARKER);
-    bytes[UB - 1] = 0xAB;
-    bytes[..UB].to_vec()
-}
-
-fn assert_userblock_unchanged(path: &std::path::Path, original: &[u8]) {
-    let after = std::fs::read(path).unwrap();
-    assert_eq!(
-        &after[..UB],
-        original,
-        "userblock bytes changed across the edit"
-    );
-}
-
 /// Build a userblock file with two root datasets and a nested group+dataset.
-fn build_userblock_file(path: &std::path::Path) -> Vec<u8> {
+fn build_userblock_file(path: &std::path::Path) -> Userblock {
     let mut b = FileBuilder::new();
     b.with_userblock(UB as u64);
     b.create_dataset("alpha")
@@ -48,7 +32,7 @@ fn build_userblock_file(path: &std::path::Path) -> Vec<u8> {
     g.create_dataset("inner").with_f64_data(&[7.5, 8.5]);
     b.add_group(g.finish());
     let mut bytes = b.finish().unwrap();
-    let userblock = stamp_userblock(&mut bytes);
+    let userblock = Userblock::stamp(&mut bytes, UB, MARKER);
     std::fs::write(path, &bytes).unwrap();
     userblock
 }
@@ -80,7 +64,7 @@ fn userblock_delete_dataset_roundtrip() {
     let mut datasets = file.root().datasets().unwrap();
     datasets.sort();
     assert_eq!(datasets, vec!["beta".to_string()]);
-    assert_userblock_unchanged(&path, &userblock);
+    userblock.assert_unchanged(&path);
 }
 
 #[test]
@@ -105,7 +89,7 @@ fn userblock_delete_group_subtree_roundtrip() {
         file.dataset("alpha").unwrap().read_f64().unwrap(),
         vec![1.0, 2.0, 3.0, 4.0]
     );
-    assert_userblock_unchanged(&path, &userblock);
+    userblock.assert_unchanged(&path);
 }
 
 #[test]
@@ -123,7 +107,7 @@ fn userblock_delete_chunked_dataset_roundtrip() {
         .with_chunks(&[50])
         .with_deflate(6);
     let mut bytes = b.finish().unwrap();
-    let userblock = stamp_userblock(&mut bytes);
+    let userblock = Userblock::stamp(&mut bytes, UB, MARKER);
     std::fs::write(&path, &bytes).unwrap();
 
     {
@@ -138,7 +122,7 @@ fn userblock_delete_chunked_dataset_roundtrip() {
         file.dataset("keep").unwrap().read_i32().unwrap(),
         vec![1, 2, 3]
     );
-    assert_userblock_unchanged(&path, &userblock);
+    userblock.assert_unchanged(&path);
 }
 
 #[test]
@@ -155,7 +139,7 @@ fn userblock_delete_then_reuse_freed_space() {
     b.create_dataset("big").with_f64_data(&big);
     b.create_dataset("keep").with_i32_data(&[7, 8, 9]);
     let mut bytes = b.finish().unwrap();
-    let userblock = stamp_userblock(&mut bytes);
+    let userblock = Userblock::stamp(&mut bytes, UB, MARKER);
     std::fs::write(&path, &bytes).unwrap();
 
     let reuse: Vec<f64> = (0..64).map(|i| (i as f64) * -1.5).collect();
@@ -185,7 +169,7 @@ fn userblock_delete_then_reuse_freed_space() {
         file.dataset("keep").unwrap().read_i32().unwrap(),
         vec![7, 8, 9]
     );
-    assert_userblock_unchanged(&path, &userblock);
+    userblock.assert_unchanged(&path);
 }
 
 #[test]
@@ -201,7 +185,7 @@ fn userblock_delete_one_of_several_then_read_attr() {
     g.set_attr("tag", AttrValue::AsciiString("kept".into()));
     b.add_group(g.finish());
     let mut bytes = b.finish().unwrap();
-    let userblock = stamp_userblock(&mut bytes);
+    let userblock = Userblock::stamp(&mut bytes, UB, MARKER);
     std::fs::write(&path, &bytes).unwrap();
 
     {
@@ -221,7 +205,7 @@ fn userblock_delete_one_of_several_then_read_attr() {
         attrs.get("tag"),
         Some(&AttrValue::AsciiString("kept".into()))
     );
-    assert_userblock_unchanged(&path, &userblock);
+    userblock.assert_unchanged(&path);
 }
 
 // ---- copy (in-file) ----
@@ -255,7 +239,7 @@ fn userblock_copy_dataset_roundtrip() {
         file.dataset("grp/inner_copy").unwrap().read_f64().unwrap(),
         vec![7.5, 8.5]
     );
-    assert_userblock_unchanged(&path, &userblock);
+    userblock.assert_unchanged(&path);
 }
 
 #[test]
@@ -284,7 +268,7 @@ fn userblock_copy_group_subtree_roundtrip() {
     let mut groups = file.root().groups().unwrap();
     groups.sort();
     assert_eq!(groups, vec!["grp".to_string(), "grp_copy".to_string()]);
-    assert_userblock_unchanged(&path, &userblock);
+    userblock.assert_unchanged(&path);
 }
 
 #[test]
@@ -301,7 +285,7 @@ fn userblock_copy_chunked_dataset_roundtrip() {
         .with_chunks(&[40])
         .with_deflate(6);
     let mut bytes = b.finish().unwrap();
-    let userblock = stamp_userblock(&mut bytes);
+    let userblock = Userblock::stamp(&mut bytes, UB, MARKER);
     std::fs::write(&path, &bytes).unwrap();
 
     {
@@ -313,7 +297,7 @@ fn userblock_copy_chunked_dataset_roundtrip() {
     let file = File::open(&path).unwrap();
     assert_eq!(file.dataset("c").unwrap().read_f64().unwrap(), data);
     assert_eq!(file.dataset("c_copy").unwrap().read_f64().unwrap(), data);
-    assert_userblock_unchanged(&path, &userblock);
+    userblock.assert_unchanged(&path);
 }
 
 // ---- copy (cross-file, into a userblock destination) ----
@@ -361,7 +345,7 @@ fn userblock_cross_file_copy_into_userblock_dest() {
         file.dataset("alpha").unwrap().read_f64().unwrap(),
         vec![1.0, 2.0, 3.0, 4.0]
     );
-    assert_userblock_unchanged(&dst_path, &userblock);
+    userblock.assert_unchanged(&dst_path);
 }
 
 // ---- reference screening (issue #317) ----
@@ -388,7 +372,7 @@ fn userblock_reference_into_deleted_space_is_refused() {
     b.create_dataset("refs")
         .with_path_references(&["grp/inner"]);
     let mut bytes = b.finish().unwrap();
-    let userblock = stamp_userblock(&mut bytes);
+    let userblock = Userblock::stamp(&mut bytes, UB, MARKER);
     std::fs::write(&path, &bytes).unwrap();
 
     let stored = {
@@ -421,7 +405,7 @@ fn userblock_reference_into_deleted_space_is_refused() {
     }
 
     assert_eq!(std::fs::read(&path).unwrap(), before);
-    assert_userblock_unchanged(&path, &userblock);
+    userblock.assert_unchanged(&path);
 }
 
 /// A path reference to an object the *same commit* places, on a userblock file.
@@ -438,7 +422,7 @@ fn userblock_reference_to_an_object_the_same_commit_places() {
     b.with_userblock(UB as u64);
     b.create_dataset("alpha").with_f64_data(&[1.0, 2.0]);
     let mut bytes = b.finish().unwrap();
-    let userblock = stamp_userblock(&mut bytes);
+    let userblock = Userblock::stamp(&mut bytes, UB, MARKER);
     std::fs::write(&path, &bytes).unwrap();
 
     {
@@ -476,5 +460,5 @@ fn userblock_reference_to_an_object_the_same_commit_places() {
         other => panic!("expected a dataset reference, got {other:?}"),
     }
     drop(file);
-    assert_userblock_unchanged(&path, &userblock);
+    userblock.assert_unchanged(&path);
 }

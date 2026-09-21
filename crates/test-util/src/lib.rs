@@ -9,6 +9,7 @@ pub mod heap;
 pub mod paged;
 pub mod superblock;
 pub mod temp;
+pub mod userblock;
 
 /// A file under `tests/data`, by its path there: `data("c/1.8/v1_superblock.h5")`.
 pub fn data(relative: &str) -> PathBuf {

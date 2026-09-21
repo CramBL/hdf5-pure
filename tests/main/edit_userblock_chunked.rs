@@ -17,27 +17,11 @@ use hdf5_pure::{File, FileBuilder, MaxExtent};
 
 use temp::temp_path;
 use test_util::temp;
+use test_util::userblock::Userblock;
 
 const UB: usize = 512;
 
 const MARKER: &[u8] = b"USERBLOCK-CHUNK-0104";
-
-/// Stamp a recognizable marker across the userblock region of `bytes` and return
-/// the 512-byte userblock as written, for later byte-for-byte comparison.
-fn stamp_userblock(bytes: &mut [u8]) -> Vec<u8> {
-    bytes[..MARKER.len()].copy_from_slice(MARKER);
-    bytes[UB - 1] = 0xAB;
-    bytes[..UB].to_vec()
-}
-
-fn assert_userblock_unchanged(path: &std::path::Path, original: &[u8]) {
-    let after = std::fs::read(path).unwrap();
-    assert_eq!(
-        &after[..UB],
-        original,
-        "userblock bytes changed across the edit"
-    );
-}
 
 #[test]
 fn userblock_chunked_add_roundtrip() {
@@ -49,7 +33,7 @@ fn userblock_chunked_add_roundtrip() {
     b.create_dataset("contig")
         .with_f64_data(&[1.0, 2.0, 3.0, 4.0]);
     let mut bytes = b.finish().unwrap();
-    let userblock = stamp_userblock(&mut bytes);
+    let userblock = Userblock::stamp(&mut bytes, UB, MARKER);
     std::fs::write(&path, &bytes).unwrap();
 
     let added: Vec<f64> = (0..1000).map(|i| (i % 13) as f64 * 0.25).collect();
@@ -72,8 +56,7 @@ fn userblock_chunked_add_roundtrip() {
         file.dataset("contig").unwrap().read_f64().unwrap(),
         vec![1.0, 2.0, 3.0, 4.0]
     );
-    assert_userblock_unchanged(&path, &userblock);
-    assert_eq!(&std::fs::read(&path).unwrap()[..MARKER.len()], MARKER);
+    userblock.assert_unchanged(&path);
 }
 
 #[test]
@@ -90,7 +73,7 @@ fn userblock_chunked_unfiltered_inplace_overwrite() {
         .with_shape(&[200])
         .with_chunks(&[32]);
     let mut bytes = b.finish().unwrap();
-    let userblock = stamp_userblock(&mut bytes);
+    let userblock = Userblock::stamp(&mut bytes, UB, MARKER);
     std::fs::write(&path, &bytes).unwrap();
     let len_before = std::fs::metadata(&path).unwrap().len();
 
@@ -120,7 +103,7 @@ fn userblock_chunked_unfiltered_inplace_overwrite() {
             .unwrap(),
         updated
     );
-    assert_userblock_unchanged(&path, &userblock);
+    userblock.assert_unchanged(&path);
 }
 
 #[test]
@@ -142,7 +125,7 @@ fn userblock_chunked_shrinking_inplace_overwrite() {
         .with_chunks(&[40])
         .with_deflate(6);
     let mut bytes = b.finish().unwrap();
-    let userblock = stamp_userblock(&mut bytes);
+    let userblock = Userblock::stamp(&mut bytes, UB, MARKER);
     std::fs::write(&path, &bytes).unwrap();
     let len_before = std::fs::metadata(&path).unwrap().len();
 
@@ -172,7 +155,7 @@ fn userblock_chunked_shrinking_inplace_overwrite() {
             .unwrap(),
         updated
     );
-    assert_userblock_unchanged(&path, &userblock);
+    userblock.assert_unchanged(&path);
 }
 
 #[test]
@@ -237,7 +220,7 @@ fn userblock_extensible_array_add_and_overwrite_roundtrip() {
     b.with_userblock(UB as u64);
     b.create_dataset("keep").with_i32_data(&[7, 8, 9]);
     let mut bytes = b.finish().unwrap();
-    let userblock = stamp_userblock(&mut bytes);
+    let userblock = Userblock::stamp(&mut bytes, UB, MARKER);
     std::fs::write(&path, &bytes).unwrap();
 
     let added: Vec<f64> = (0..500).map(|i| (i as f64).sin() * 1e3).collect();
@@ -284,7 +267,7 @@ fn userblock_extensible_array_add_and_overwrite_roundtrip() {
         file.dataset("keep").unwrap().read_i32().unwrap(),
         vec![7, 8, 9]
     );
-    assert_userblock_unchanged(&path, &userblock);
+    userblock.assert_unchanged(&path);
 }
 
 #[test]
@@ -296,7 +279,7 @@ fn userblock_single_chunk_index_add_and_overwrite() {
     let mut b = FileBuilder::new();
     b.with_userblock(UB as u64);
     let mut bytes = b.finish().unwrap();
-    let userblock = stamp_userblock(&mut bytes);
+    let userblock = Userblock::stamp(&mut bytes, UB, MARKER);
     std::fs::write(&path, &bytes).unwrap();
 
     let added: Vec<f64> = (0..50).map(|i| i as f64 * 0.5).collect();
@@ -335,7 +318,7 @@ fn userblock_single_chunk_index_add_and_overwrite() {
     }
     let file = File::open(&path).unwrap();
     assert_eq!(file.dataset("sc").unwrap().read_f64().unwrap(), updated);
-    assert_userblock_unchanged(&path, &userblock);
+    userblock.assert_unchanged(&path);
 }
 
 #[test]
@@ -356,7 +339,7 @@ fn userblock_chunked_relocating_overwrite_roundtrip() {
         .with_chunks(&[50])
         .with_deflate(6);
     let mut bytes = b.finish().unwrap();
-    let userblock = stamp_userblock(&mut bytes);
+    let userblock = Userblock::stamp(&mut bytes, UB, MARKER);
     std::fs::write(&path, &bytes).unwrap();
 
     let updated: Vec<f64> = (0..500).map(|i| (i as f64).sin()).collect();
@@ -377,7 +360,7 @@ fn userblock_chunked_relocating_overwrite_roundtrip() {
         file.dataset("keep").unwrap().read_i32().unwrap(),
         vec![11, 22, 33]
     );
-    assert_userblock_unchanged(&path, &userblock);
+    userblock.assert_unchanged(&path);
 }
 
 #[test]
@@ -401,7 +384,7 @@ fn userblock_chunked_add_reuses_a_freed_chunk_hole() {
     // trailing run the commit would truncate away.
     b.create_dataset("ceiling").with_i32_data(&[11, 22, 33]);
     let mut bytes = b.finish().unwrap();
-    let userblock = stamp_userblock(&mut bytes);
+    let userblock = Userblock::stamp(&mut bytes, UB, MARKER);
     std::fs::write(&path, &bytes).unwrap();
     let len_start = std::fs::metadata(&path).unwrap().len();
 
@@ -436,7 +419,7 @@ fn userblock_chunked_add_reuses_a_freed_chunk_hole() {
         vec![11, 22, 33]
     );
     assert!(file.dataset("victim").is_err());
-    assert_userblock_unchanged(&path, &userblock);
+    userblock.assert_unchanged(&path);
 }
 
 #[test]
@@ -465,7 +448,7 @@ fn userblock_chunked_overwrite_reuses_reclaimed_space() {
         .with_chunks(&[60])
         .with_deflate(6);
     let mut bytes = b.finish().unwrap();
-    let userblock = stamp_userblock(&mut bytes);
+    let userblock = Userblock::stamp(&mut bytes, UB, MARKER);
     std::fs::write(&path, &bytes).unwrap();
 
     let updated: Vec<f64> = (0..1200).map(|i| (i as f64).sin() * 1e9).collect();
@@ -508,5 +491,5 @@ fn userblock_chunked_overwrite_reuses_reclaimed_space() {
         file.dataset("keep").unwrap().read_f64().unwrap(),
         vec![1.0, 2.0, 3.0, 4.0, 5.0]
     );
-    assert_userblock_unchanged(&path, &userblock);
+    userblock.assert_unchanged(&path);
 }
