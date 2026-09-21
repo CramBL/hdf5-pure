@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 
 pub mod allocation;
 pub mod bytes;
+pub mod extensible_array;
 pub mod heap;
 pub mod paged;
 pub mod superblock;

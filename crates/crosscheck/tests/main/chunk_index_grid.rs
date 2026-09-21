@@ -16,6 +16,7 @@ use hdf5::dataset::AllocTime;
 use hdf5::file::LibraryVersion;
 use hdf5_pure::{ChunkIndex, File, FileBuilder, MaxExtent};
 use tempfile::tempdir;
+use test_util::extensible_array;
 
 /// One swept combination: a label for the assertion messages, then the shape,
 /// the chunk dimensions and the maximum shape.
@@ -810,20 +811,6 @@ fn a_shrinking_inplace_overwrite_keeps_ea_chunks_in_their_slots() {
 /// perfectly through both libraries (issue #299).
 #[test]
 fn a_sparse_extensible_array_matches_the_c_library_block_statistics() {
-    /// The six `EAHD` statistics, in stored order.
-    fn stats_of(path: &std::path::Path) -> Vec<u64> {
-        let b = std::fs::read(path).unwrap();
-        let h = (0..b.len() - 4)
-            .find(|&i| &b[i..i + 4] == b"EAHD")
-            .expect("this dataset must be Extensible-Array indexed");
-        (0..6)
-            .map(|k| {
-                let p = h + 12 + k * 8;
-                u64::from_le_bytes(b[p..p + 8].try_into().unwrap())
-            })
-            .collect()
-    }
-
     let dir = tempdir().unwrap();
     for (shape, wide) in [
         ([16u64, 16], 1024u64),
@@ -839,8 +826,8 @@ fn a_sparse_extensible_array_matches_the_c_library_block_statistics() {
         c_write(&c_path, &shape, &[1, 1], &maxshape);
 
         assert_eq!(
-            stats_of(&pure_path),
-            stats_of(&c_path),
+            extensible_array::header_stats(&pure_path),
+            extensible_array::header_stats(&c_path),
             "EAHD statistics differ for shape {shape:?} maxshape {maxshape:?}"
         );
         assert_eq!(pure_read(&pure_path), values(&shape));

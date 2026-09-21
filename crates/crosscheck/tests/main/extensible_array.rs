@@ -16,6 +16,7 @@ use hdf5::Extent;
 use hdf5::file::LibraryVersion;
 use hdf5_pure::{File, FileBuilder, MaxExtent};
 use tempfile::tempdir;
+use test_util::extensible_array;
 
 const SIZES: &[usize] = &[20, 300, 2000, 50000, 140000];
 
@@ -90,17 +91,6 @@ fn c_writes_pure_reads() {
 /// files for identical datasets.
 #[test]
 fn eahd_stats_match_c() {
-    fn stats_of(path: &std::path::Path) -> Vec<u64> {
-        let b = std::fs::read(path).unwrap();
-        let h = (0..b.len() - 4).find(|&i| &b[i..i + 4] == b"EAHD").unwrap();
-        (0..6)
-            .map(|k| {
-                let p = h + 12 + k * 8;
-                u64::from_le_bytes(b[p..p + 8].try_into().unwrap())
-            })
-            .collect()
-    }
-
     for &n in SIZES {
         let dir = tempdir().unwrap();
         let c_path = dir.path().join("c.h5");
@@ -108,8 +98,8 @@ fn eahd_stats_match_c() {
         write_with_c(&c_path, n);
         write_with_pure(&pure_path, n);
         assert_eq!(
-            stats_of(&pure_path),
-            stats_of(&c_path),
+            extensible_array::header_stats(&pure_path),
+            extensible_array::header_stats(&c_path),
             "EAHD stats differ from the C library at n={n}"
         );
     }
@@ -132,17 +122,6 @@ fn eahd_stats_match_c() {
 /// block, which is where the six values stop being constants.
 #[test]
 fn eahd_stats_match_c_after_an_in_place_append() {
-    fn stats_of(path: &std::path::Path) -> Vec<u64> {
-        let b = std::fs::read(path).unwrap();
-        let h = (0..b.len() - 4).find(|&i| &b[i..i + 4] == b"EAHD").unwrap();
-        (0..6)
-            .map(|k| {
-                let p = h + 12 + k * 8;
-                u64::from_le_bytes(b[p..p + 8].try_into().unwrap())
-            })
-            .collect()
-    }
-
     for &(start, grown) in &[(4usize, 20usize), (16, 300), (300, 700)] {
         let dir = tempdir().unwrap();
         let c_path = dir.path().join("c.h5");
@@ -159,8 +138,8 @@ fn eahd_stats_match_c_after_an_in_place_append() {
         }
 
         assert_eq!(
-            stats_of(&pure_path),
-            stats_of(&c_path),
+            extensible_array::header_stats(&pure_path),
+            extensible_array::header_stats(&c_path),
             "EAHD stats after growing {start} -> {grown} in place differ from the C library's \
              for a dataset written whole at {grown}"
         );
