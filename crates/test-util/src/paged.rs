@@ -5,6 +5,8 @@
 //! C-library helpers beside it.
 #![allow(dead_code)]
 
+use crate::bytes;
+
 /// Signatures that must never appear in a page holding raw dataset bytes: object
 /// headers and their continuations, the global heap, the free-space managers, the
 /// fractal heap that backs dense attributes, and the v2 B-tree and v1
@@ -75,10 +77,10 @@ pub fn assert_pages_homogeneous(path: &std::path::Path, page: u64, datasets: &[&
         let window = &bytes[start..end];
         for sig in METADATA_SIGNATURES {
             assert!(
-                !window.windows(4).any(|w| w == *sig),
+                bytes::find_signature(window, sig).is_none(),
                 "page {p} holds raw data and the {} signature: a metadata \
                  allocation landed in a raw page",
-                std::str::from_utf8(*sig).unwrap()
+                String::from_utf8_lossy(*sig)
             );
         }
     }
