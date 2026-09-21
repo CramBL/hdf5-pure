@@ -28,13 +28,13 @@ ci-essentials: fmt-check clippy-full doc test-full doctest-full
 # Everything CI runs except fuzzing.
 ci: ci-essentials docs-rs check-release examples portability::default hygiene::default python::default prose::default api::default soundness::default interop::default test doctest
 
-# run nextest with `ARGS`
+# run nextest over the crate and the `test-util` harness with `ARGS`
 test *ARGS:
-    cargo nextest run --locked {{ ARGS }}
+    cargo nextest run --locked {{ TESTED_PACKAGES }} {{ ARGS }}
 
-# run nextest with all user-facing features and `ARGS`
+# the same with all user-facing features and `ARGS`
 test-full *ARGS:
-    cargo nextest run --locked --features "{{ USER_FACING_FEATURES }}" {{ ARGS }}
+    cargo nextest run --locked {{ TESTED_PACKAGES }} --features "{{ USER_FACING_FEATURES }}" {{ ARGS }}
 
 # Each optional feature on its own beside the defaults, one run per feature.
 test-each-feature *ARGS:
@@ -60,11 +60,11 @@ fmt-check:
 
 # clippy with the default features, sharing a build cache with `check` and `test`
 clippy *ARGS:
-    cargo clippy --locked --all-targets {{ ARGS }} -- -D warnings
+    cargo clippy --locked {{ TESTED_PACKAGES }} --all-targets {{ ARGS }} -- -D warnings
 
 # clippy with all user-facing features, as CI and the agent gates run it
 clippy-full *ARGS:
-    cargo clippy --locked --features "{{ USER_FACING_FEATURES }}" --all-targets {{ ARGS }} -- -D warnings
+    cargo clippy --locked {{ TESTED_PACKAGES }} --features "{{ USER_FACING_FEATURES }}" --all-targets {{ ARGS }} -- -D warnings
 
 # The published documentation, then the same with the private items contributors read.
 doc *ARGS:

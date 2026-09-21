@@ -12,5 +12,8 @@ hdf5-pure = { path = "../.." }
 heapscope = "0.1"
 tempfile = "3"
 
+[dev-dependencies]
+rstest = "0.27"
+
 [lints]
 workspace = true

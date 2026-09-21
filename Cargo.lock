@@ -1122,6 +1122,7 @@ version = "0.0.0"
 dependencies = [
  "hdf5-pure",
  "heapscope",
+ "rstest",
  "tempfile",
 ]
 
