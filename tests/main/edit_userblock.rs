@@ -20,6 +20,7 @@ use hdf5_pure::{AttrValue, File, FileBuilder, MaxExtent, Object};
 
 use temp::temp_path;
 use test_util::temp;
+use test_util::userblock::Userblock;
 
 const UB: usize = 512;
 
@@ -28,7 +29,7 @@ const MARKER: &[u8] = b"USERBLOCK-MARKER-0104";
 /// Build a userblock file with two root datasets and a nested group+dataset,
 /// stamping a recognizable marker across the userblock region. Returns the
 /// 512-byte userblock as written, for later byte-for-byte comparison.
-fn build_userblock_file(path: &std::path::Path) -> Vec<u8> {
+fn build_userblock_file(path: &std::path::Path) -> Userblock {
     let mut b = FileBuilder::new();
     b.with_userblock(UB as u64);
     b.create_dataset("alpha")
@@ -38,13 +39,7 @@ fn build_userblock_file(path: &std::path::Path) -> Vec<u8> {
     g.create_dataset("inner").with_f64_data(&[7.5, 8.5]);
     b.add_group(g.finish());
     let mut bytes = b.finish().unwrap();
-
-    // The userblock region [0..512] is zero-filled by the writer; stamp a marker
-    // at the start and a sentinel at the last byte to catch any stray write into
-    // the userblock during an edit.
-    bytes[..MARKER.len()].copy_from_slice(MARKER);
-    bytes[UB - 1] = 0xAB;
-    let userblock = bytes[..UB].to_vec();
+    let userblock = Userblock::stamp(&mut bytes, UB, MARKER);
     std::fs::write(path, &bytes).unwrap();
     userblock
 }
@@ -118,14 +113,7 @@ fn synthetic_userblock_file_roundtrip() {
     );
 
     // The userblock bytes are preserved verbatim across the edit.
-    let after = std::fs::read(&path).unwrap();
-    assert_eq!(
-        &after[..UB],
-        &userblock[..],
-        "userblock bytes changed across the edit"
-    );
-    assert_eq!(&after[..MARKER.len()], MARKER);
-    assert_eq!(after[UB - 1], 0xAB);
+    userblock.assert_unchanged(&path);
 }
 
 #[test]
@@ -156,7 +144,7 @@ fn userblock_inplace_overwrite_only_takes_fast_path() {
         file.dataset("alpha").unwrap().read_f64().unwrap(),
         vec![1.0, 2.0, 3.0, 4.0]
     );
-    assert_eq!(&std::fs::read(&path).unwrap()[..UB], &userblock[..]);
+    userblock.assert_unchanged(&path);
 }
 
 /// Cross-file copy *from* a userblock source is still refused (the source-file
@@ -219,7 +207,7 @@ fn userblock_add_empty_dataset_roundtrip() {
         file.dataset("alpha").unwrap().read_f64().unwrap(),
         vec![1.0, 2.0, 3.0, 4.0]
     );
-    assert_eq!(&std::fs::read(&path).unwrap()[..UB], &userblock[..]);
+    userblock.assert_unchanged(&path);
 }
 
 /// The chunked counterpart of the test above: an empty chunked dataset added on
@@ -293,7 +281,7 @@ fn userblock_add_empty_chunked_dataset_and_grow_it() {
         file.dataset("alpha").unwrap().read_f64().unwrap(),
         vec![1.0, 2.0, 3.0, 4.0]
     );
-    assert_eq!(&std::fs::read(&path).unwrap()[..UB], &userblock[..]);
+    userblock.assert_unchanged(&path);
 }
 
 /// A provenance-tagged dataset added on a userblock file must round-trip
@@ -330,7 +318,7 @@ fn userblock_add_provenance_dataset_roundtrip() {
         ds.attrs().unwrap().get("_provenance_creator"),
         Some(&AttrValue::String("test-suite".into()))
     );
-    assert_eq!(&std::fs::read(&path).unwrap()[..UB], &userblock[..]);
+    userblock.assert_unchanged(&path);
 }
 
 /// A dataset with a variable-length attribute, added on a userblock file,
@@ -365,7 +353,7 @@ fn userblock_add_dataset_with_vlen_attribute_roundtrip() {
             "two".into()
         ]))
     );
-    assert_eq!(&std::fs::read(&path).unwrap()[..UB], &userblock[..]);
+    userblock.assert_unchanged(&path);
 }
 
 /// A variable-length-string dataset added on a userblock file must round-trip
@@ -393,7 +381,7 @@ fn userblock_add_vlen_string_dataset_roundtrip() {
         ds.read_string().unwrap(),
         vec!["alpha".to_string(), String::new(), "gamma".to_string()]
     );
-    assert_eq!(&std::fs::read(&path).unwrap()[..UB], &userblock[..]);
+    userblock.assert_unchanged(&path);
 }
 
 /// An object-reference dataset added on a userblock file must round-trip
@@ -425,7 +413,7 @@ fn userblock_add_reference_dataset_roundtrip() {
         ),
         other => panic!("expected a dataset reference, got {other:?}"),
     }
-    assert_eq!(&std::fs::read(&path).unwrap()[..UB], &userblock[..]);
+    userblock.assert_unchanged(&path);
 }
 
 #[test]
@@ -435,9 +423,9 @@ fn real_mat_add_dataset_preserves_userblock_and_data() {
     let path = temp_path("hdf5_pure_ub_real_mat.mat");
     std::fs::copy(src, &path).unwrap();
 
-    let original_userblock = std::fs::read(&path).unwrap()[..UB].to_vec();
+    let userblock = Userblock::read(&path, UB);
     assert_eq!(
-        &original_userblock[..10],
+        &userblock.bytes()[..10],
         b"MATLAB 7.3",
         "fixture is not a MATLAB v7.3 userblock file"
     );
@@ -489,9 +477,5 @@ fn real_mat_add_dataset_preserves_userblock_and_data() {
     assert!(groups.contains(&"#subsystem#".to_string()));
 
     // The MATLAB userblock (signature, version, endian indicator) is unchanged.
-    let after_userblock = std::fs::read(&path).unwrap()[..UB].to_vec();
-    assert_eq!(
-        after_userblock, original_userblock,
-        "MATLAB userblock changed across the edit"
-    );
+    userblock.assert_unchanged(&path);
 }
