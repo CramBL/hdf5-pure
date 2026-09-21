@@ -9,23 +9,17 @@
 //! cannot drift on the header layout, and so 32-bit targets (which have no
 //! reference C library) can still use it.
 
-/// Byte offsets are for the 8-byte offset/length sizes this writer emits.
-const SIZE: usize = 8;
+use crate::bytes;
 
 /// Whether the file contains a fractal heap at all — the signature of dense
 /// (heap) rather than compact (in-object-header) storage.
 pub fn has_fractal_heap(bytes: &[u8]) -> bool {
-    bytes.windows(4).any(|w| w == b"FRHP")
+    bytes::find_signature(bytes, FRHP_SIGNATURE).is_some()
 }
 
 /// Offsets of every fractal-heap header in `bytes`, in file order.
 pub fn frhp_offsets(bytes: &[u8]) -> Vec<usize> {
-    bytes
-        .windows(4)
-        .enumerate()
-        .filter(|(_, w)| *w == b"FRHP")
-        .map(|(at, _)| at)
-        .collect()
+    bytes::signature_offsets(bytes, FRHP_SIGNATURE)
 }
 
 /// Offset of the first fractal-heap header in `bytes`.
@@ -44,8 +38,7 @@ fn frhp(bytes: &[u8]) -> usize {
 /// I/O filter length(2) + flags(1) + maximum managed object size(4).
 #[track_caller]
 fn frhp_u64_at(bytes: &[u8], frhp: usize, fields: usize) -> u64 {
-    let at = frhp + 4 + 1 + 2 + 2 + 1 + 4 + fields * SIZE;
-    u64::from_le_bytes(bytes[at..at + SIZE].try_into().expect("8 bytes"))
+    bytes::u64_at(bytes, frhp + 4 + 1 + 2 + 2 + 1 + 4 + fields * SIZE)
 }
 
 /// Read a `u64` field from the first fractal-heap header in `bytes`.
@@ -97,14 +90,16 @@ pub fn huge_object_bytes(bytes: &[u8]) -> u64 {
 /// and this.
 #[track_caller]
 pub fn root_indirect_rows(bytes: &[u8]) -> u16 {
-    let at = frhp(bytes) + 4 + 1 + 2 + 2 + 1 + 4 + 12 * SIZE + 2 + SIZE + SIZE + 2 + 2 + SIZE;
-    u16::from_le_bytes(bytes[at..at + 2].try_into().expect("2 bytes"))
+    bytes::u16_at(
+        bytes,
+        frhp(bytes) + 4 + 1 + 2 + 2 + 1 + 4 + 12 * SIZE + 2 + SIZE + SIZE + 2 + 2 + SIZE,
+    )
 }
 
 /// How many fractal-heap indirect blocks the file holds. More than one means the
 /// root's own row of them filled up and the table nested.
 pub fn indirect_block_count(bytes: &[u8]) -> usize {
-    bytes.windows(4).filter(|w| *w == b"FHIB").count()
+    bytes::signature_offsets(bytes, FHIB_SIGNATURE).len()
 }
 
 /// Depth of the file's only v2 B-tree, from its header: 0 when the root is a
@@ -118,8 +113,7 @@ pub fn indirect_block_count(bytes: &[u8]) -> usize {
 /// Header layout: signature(4) + version(1) + type(1) + node size(4) + record
 /// size(2) + depth(2).
 pub fn sole_btree_depth(bytes: &[u8]) -> u16 {
-    let at = sole_btree_header(bytes) + 4 + 1 + 1 + 4 + 2;
-    u16::from_le_bytes(bytes[at..at + 2].try_into().expect("2 bytes"))
+    bytes::u16_at(bytes, sole_btree_header(bytes) + 4 + 1 + 1 + 4 + 2)
 }
 
 /// Offset of the file's only v2 B-tree header.
@@ -131,19 +125,7 @@ pub fn sole_btree_depth(bytes: &[u8]) -> u16 {
 /// only that.
 #[track_caller]
 fn sole_btree_header(bytes: &[u8]) -> usize {
-    let headers: Vec<usize> = bytes
-        .windows(4)
-        .enumerate()
-        .filter(|(_, w)| *w == b"BTHD")
-        .map(|(at, _)| at)
-        .collect();
-    assert_eq!(
-        headers.len(),
-        1,
-        "expected one v2 B-tree in the file, found {}",
-        headers.len()
-    );
-    headers[0]
+    bytes::sole_signature(bytes, BTHD_SIGNATURE)
 }
 
 /// The `(creation order, hash)` of `count` dense-attribute name-index records
@@ -157,10 +139,7 @@ fn name_index_records(bytes: &[u8], first: usize, count: usize) -> Vec<(u32, u32
     (0..count)
         .map(|i| {
             let at = first + i * RECORD;
-            let field = |off: usize| {
-                u32::from_le_bytes(bytes[at + off..at + off + 4].try_into().expect("4 bytes"))
-            };
-            (field(9), field(13))
+            (bytes::u32_at(bytes, at + 9), bytes::u32_at(bytes, at + 13))
         })
         .collect()
 }
@@ -178,9 +157,7 @@ fn name_index_records(bytes: &[u8], first: usize, count: usize) -> Vec<(u32, u32
 /// 8-byte heap IDs a dense attribute name index uses (record layout: heap ID(8) +
 /// message flags(1) + creation order(4) + name hash(4)).
 pub fn name_index_leaf_records(bytes: &[u8], count: usize) -> Vec<(u32, u32)> {
-    let leaf = bytes
-        .windows(4)
-        .position(|w| w == b"BTLF")
+    let leaf = bytes::find_signature(bytes, BTLF_SIGNATURE)
         .expect("a dense attribute name index has a leaf node");
     // signature(4) + version(1) + type(1), then the records.
     name_index_records(bytes, leaf + 6, count)
@@ -206,9 +183,19 @@ pub fn name_index_leaf_records(bytes: &[u8], count: usize) -> Vec<(u32, u32)> {
 /// address(8) + records in root(2).
 pub fn root_records(bytes: &[u8]) -> Vec<(u32, u32)> {
     let at = sole_btree_header(bytes) + 4 + 1 + 1 + 4 + 2 + 2 + 1 + 1;
-    let root = u64::from_le_bytes(bytes[at..at + SIZE].try_into().expect("8 bytes")) as usize;
-    let count =
-        u16::from_le_bytes(bytes[at + SIZE..at + SIZE + 2].try_into().expect("2 bytes")) as usize;
+    let root = bytes::u64_at(bytes, at) as usize;
+    let count = bytes::u16_at(bytes, at + SIZE) as usize;
     // signature(4) + version(1) + type(1), then the records.
     name_index_records(bytes, root + 6, count)
 }
+
+/// Byte offsets are for the 8-byte offset/length sizes this writer emits.
+const SIZE: usize = 8;
+
+const FRHP_SIGNATURE: &[u8; 4] = b"FRHP";
+
+const FHIB_SIGNATURE: &[u8; 4] = b"FHIB";
+
+const BTHD_SIGNATURE: &[u8; 4] = b"BTHD";
+
+const BTLF_SIGNATURE: &[u8; 4] = b"BTLF";
