@@ -600,6 +600,9 @@ fn collect_node_from_source<S: Source + ?Sized>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use test_util::btree_v2;
+    use test_util::image::Image;
+    use test_util::widths::Widths;
 
     fn build_btree_v2_header(
         tree_type: u8,
@@ -609,94 +612,57 @@ mod tests {
         root_addr: u64,
         num_records_root: u16,
         total_records: u64,
-        offset_size: u8,
-        length_size: u8,
+        widths: Widths,
     ) -> Vec<u8> {
-        let mut buf = Vec::new();
-        buf.extend_from_slice(b"BTHD");
-        buf.push(0); // version
-        buf.push(tree_type);
-        buf.extend_from_slice(&node_size.to_le_bytes());
-        buf.extend_from_slice(&record_size.to_le_bytes());
-        buf.extend_from_slice(&depth.to_le_bytes());
-        buf.push(85); // split_percent
-        buf.push(40); // merge_percent
-        match offset_size {
-            4 => buf.extend_from_slice(&(root_addr as u32).to_le_bytes()),
-            8 => buf.extend_from_slice(&root_addr.to_le_bytes()),
-            _ => {}
-        }
-        buf.extend_from_slice(&num_records_root.to_le_bytes());
-        match length_size {
-            4 => buf.extend_from_slice(&(total_records as u32).to_le_bytes()),
-            8 => buf.extend_from_slice(&total_records.to_le_bytes()),
-            _ => {}
-        }
-        let checksum = crate::checksum::jenkins_lookup3(&buf);
-        buf.extend_from_slice(&checksum.to_le_bytes());
-        buf
+        btree_v2::Header::new(tree_type, record_size, root_addr, num_records_root)
+            .node_size(node_size)
+            .depth(depth)
+            .total_records(total_records)
+            .build(widths)
     }
 
     fn build_leaf_node(tree_type: u8, records: &[&[u8]]) -> Vec<u8> {
-        let mut buf = Vec::new();
-        buf.extend_from_slice(b"BTLF");
-        buf.push(0); // version
-        buf.push(tree_type);
-        for rec in records {
-            buf.extend_from_slice(rec);
-        }
-        let checksum = crate::checksum::jenkins_lookup3(&buf);
-        buf.extend_from_slice(&checksum.to_le_bytes());
-        buf
+        let records: Vec<_> = records.iter().map(|record| record.to_vec()).collect();
+        btree_v2::leaf(tree_type, &records)
     }
 
-    // ---- Synthetic multi-level tree construction (8-byte offsets) ----
-
     /// An 11-byte record carrying its in-order id in byte 0.
-    fn rec(id: u8) -> [u8; 11] {
-        let mut r = [0u8; 11];
-        r[0] = id;
-        r
+    fn rec(id: u8) -> Vec<u8> {
+        let mut record = vec![0u8; 11];
+        record[0] = id;
+        record
     }
 
     /// Append a leaf node, returning its address.
-    fn put_leaf(file: &mut Vec<u8>, tree_type: u8, recs: &[[u8; 11]]) -> u64 {
-        let addr = file.len() as u64;
-        let mut node = vec![b'B', b'T', b'L', b'F', 0, tree_type];
-        for r in recs {
-            node.extend_from_slice(r);
-        }
-        let ck = crate::checksum::jenkins_lookup3(&node);
-        node.extend_from_slice(&ck.to_le_bytes());
-        file.extend_from_slice(&node);
-        addr
+    fn put_leaf(file: &mut Image, tree_type: u8, records: &[Vec<u8>]) -> u64 {
+        file.append(&btree_v2::leaf(tree_type, records)) as u64
     }
 
     /// Append an internal node. `children` is `(addr, records-in-child,
-    /// total-records-in-subtree)`; `max_nrec_size` / `total_width` are the
-    /// doubling-table field widths for the node's level.
+    /// total-records-in-subtree)`, and `max_nrec_size` and `total_width` are
+    /// the doubling-table field widths for the node's level. A node directly
+    /// above the leaves has no subtree field, so `total_width` is `None`.
     fn put_internal(
-        file: &mut Vec<u8>,
+        file: &mut Image,
         tree_type: u8,
-        recs: &[[u8; 11]],
+        records: &[Vec<u8>],
         children: &[(u64, u16, u64)],
         max_nrec_size: usize,
-        total_width: usize,
+        total_width: Option<usize>,
     ) -> u64 {
-        let addr = file.len() as u64;
-        let mut node = vec![b'B', b'T', b'I', b'N', 0, tree_type];
-        for r in recs {
-            node.extend_from_slice(r);
-        }
-        for &(caddr, nrec, total) in children {
-            node.extend_from_slice(&caddr.to_le_bytes()); // 8-byte offset
-            node.extend_from_slice(&u64::from(nrec).to_le_bytes()[..max_nrec_size]);
-            node.extend_from_slice(&total.to_le_bytes()[..total_width]);
-        }
-        let ck = crate::checksum::jenkins_lookup3(&node);
-        node.extend_from_slice(&ck.to_le_bytes());
-        file.extend_from_slice(&node);
-        addr
+        let children: Vec<_> = children
+            .iter()
+            .map(|&(address, records, subtree_records)| btree_v2::Child {
+                address,
+                records,
+                records_width: max_nrec_size,
+                subtree: total_width.map(|width| btree_v2::Subtree {
+                    records: subtree_records,
+                    width,
+                }),
+            })
+            .collect();
+        file.append(&btree_v2::internal(tree_type, records, &children, WIDTHS)) as u64
     }
 
     /// A hand-built depth-3 B-tree (the same node/record sizes the C library
@@ -709,36 +675,74 @@ mod tests {
         // For node_size=512, record_size=11, 8-byte offsets: max_nrec_size = 1,
         // cum_max_nrec_size = [0, 2, 2]; so depth-1 child pointers carry no
         // subtree total, while depth-2 and depth-3 pointers carry a 2-byte one.
-        let mut file = vec![0u8; 64]; // header occupies the front; tree follows
+        let mut image = Image::new();
+        // The header occupies the front, and the tree follows it.
+        image.place(0, &[0u8; 64]);
 
         // Eight leaves, each one record; four depth-1 nodes; two depth-2 nodes;
         // one depth-3 root. In-order traversal yields ids 0..15.
-        let leaf = |f: &mut Vec<u8>, id: u8| put_leaf(f, 5, &[rec(id)]);
-        let l0 = leaf(&mut file, 0);
-        let l2 = leaf(&mut file, 2);
-        let l4 = leaf(&mut file, 4);
-        let l6 = leaf(&mut file, 6);
-        let l8 = leaf(&mut file, 8);
-        let l10 = leaf(&mut file, 10);
-        let l12 = leaf(&mut file, 12);
-        let l14 = leaf(&mut file, 14);
+        let leaf = |f: &mut Image, id: u8| put_leaf(f, 5, &[rec(id)]);
+        let l0 = leaf(&mut image, 0);
+        let l2 = leaf(&mut image, 2);
+        let l4 = leaf(&mut image, 4);
+        let l6 = leaf(&mut image, 6);
+        let l8 = leaf(&mut image, 8);
+        let l10 = leaf(&mut image, 10);
+        let l12 = leaf(&mut image, 12);
+        let l14 = leaf(&mut image, 14);
 
-        // Depth-1 internal nodes (children are leaves: total_width = 0).
-        let n1 = put_internal(&mut file, 5, &[rec(1)], &[(l0, 1, 1), (l2, 1, 1)], 1, 0);
-        let n2 = put_internal(&mut file, 5, &[rec(5)], &[(l4, 1, 1), (l6, 1, 1)], 1, 0);
-        let n3 = put_internal(&mut file, 5, &[rec(9)], &[(l8, 1, 1), (l10, 1, 1)], 1, 0);
-        let n4 = put_internal(&mut file, 5, &[rec(13)], &[(l12, 1, 1), (l14, 1, 1)], 1, 0);
+        // Depth-1 internal nodes (children are leaves: no subtree total).
+        let n1 = put_internal(&mut image, 5, &[rec(1)], &[(l0, 1, 1), (l2, 1, 1)], 1, None);
+        let n2 = put_internal(&mut image, 5, &[rec(5)], &[(l4, 1, 1), (l6, 1, 1)], 1, None);
+        let n3 = put_internal(
+            &mut image,
+            5,
+            &[rec(9)],
+            &[(l8, 1, 1), (l10, 1, 1)],
+            1,
+            None,
+        );
+        let n4 = put_internal(
+            &mut image,
+            5,
+            &[rec(13)],
+            &[(l12, 1, 1), (l14, 1, 1)],
+            1,
+            None,
+        );
 
         // Depth-2 internal nodes (children are depth-1: total_width = 2).
-        let m1 = put_internal(&mut file, 5, &[rec(3)], &[(n1, 1, 3), (n2, 1, 3)], 1, 2);
-        let m2 = put_internal(&mut file, 5, &[rec(11)], &[(n3, 1, 3), (n4, 1, 3)], 1, 2);
+        let m1 = put_internal(
+            &mut image,
+            5,
+            &[rec(3)],
+            &[(n1, 1, 3), (n2, 1, 3)],
+            1,
+            Some(2),
+        );
+        let m2 = put_internal(
+            &mut image,
+            5,
+            &[rec(11)],
+            &[(n3, 1, 3), (n4, 1, 3)],
+            1,
+            Some(2),
+        );
 
         // Depth-3 root (children are depth-2: total_width = 2).
-        let root = put_internal(&mut file, 5, &[rec(7)], &[(m1, 1, 7), (m2, 1, 7)], 1, 2);
+        let root = put_internal(
+            &mut image,
+            5,
+            &[rec(7)],
+            &[(m1, 1, 7), (m2, 1, 7)],
+            1,
+            Some(2),
+        );
 
         // Lay the header (root address, depth 3, 15 total records) at the front.
-        let header = build_btree_v2_header(5, 512, 11, 3, root, 1, 15, 8, 8);
-        file[..header.len()].copy_from_slice(&header);
+        let header = build_btree_v2_header(5, 512, 11, 3, root, 1, 15, WIDTHS);
+        image.place(0, &header);
+        let file = image.build();
 
         let hdr = BTreeV2Header::parse(&file, 0, 8, 8).unwrap();
         let ids: Vec<u8> = collect_btree_v2_records(&file, &hdr, 8, 8)
@@ -765,7 +769,7 @@ mod tests {
 
     #[test]
     fn parse_header() {
-        let data = build_btree_v2_header(5, 512, 11, 0, 0x1000, 3, 3, 8, 8);
+        let data = build_btree_v2_header(5, 512, 11, 0, 0x1000, 3, 3, WIDTHS);
         let hdr = BTreeV2Header::parse(&data, 0, 8, 8).unwrap();
         assert_eq!(hdr.tree_type, 5);
         assert_eq!(hdr.node_size, 512);
@@ -806,7 +810,7 @@ mod tests {
         let leaf = build_leaf_node(5, &[&rec1, &rec2]);
 
         let leaf_offset = 256usize;
-        let header = build_btree_v2_header(5, 512, 11, 0, leaf_offset as u64, 2, 2, 8, 8);
+        let header = build_btree_v2_header(5, 512, 11, 0, leaf_offset as u64, 2, 2, WIDTHS);
 
         let mut file_data = vec![0u8; 512];
         file_data[..header.len()].copy_from_slice(&header);
@@ -821,7 +825,7 @@ mod tests {
 
     #[test]
     fn invalid_signature() {
-        let mut data = build_btree_v2_header(5, 512, 11, 0, 0, 0, 0, 8, 8);
+        let mut data = build_btree_v2_header(5, 512, 11, 0, 0, 0, 0, WIDTHS);
         data[0] = b'X';
         let err = BTreeV2Header::parse(&data, 0, 8, 8).unwrap_err();
         assert_eq!(err, FormatError::InvalidBTreeV2Signature);
@@ -829,7 +833,7 @@ mod tests {
 
     #[test]
     fn invalid_version() {
-        let mut data = build_btree_v2_header(5, 512, 11, 0, 0, 0, 0, 8, 8);
+        let mut data = build_btree_v2_header(5, 512, 11, 0, 0, 0, 0, WIDTHS);
         data[4] = 1; // bad version
         let err = BTreeV2Header::parse(&data, 0, 8, 8).unwrap_err();
         assert_eq!(err, FormatError::InvalidBTreeV2Version(1));
@@ -837,7 +841,7 @@ mod tests {
 
     #[test]
     fn empty_tree() {
-        let header = build_btree_v2_header(5, 512, 11, 0, 0, 0, 0, 8, 8);
+        let header = build_btree_v2_header(5, 512, 11, 0, 0, 0, 0, WIDTHS);
         let hdr = BTreeV2Header::parse(&header, 0, 8, 8).unwrap();
         let records = collect_btree_v2_records(&header, &hdr, 8, 8).unwrap();
         assert!(records.is_empty());
@@ -851,7 +855,7 @@ mod tests {
         let rec2 = [11u8, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21];
         let leaf = build_leaf_node(5, &[&rec1, &rec2]);
         let leaf_offset = 256usize;
-        let header = build_btree_v2_header(5, 512, 11, 0, leaf_offset as u64, 2, 2, 8, 8);
+        let header = build_btree_v2_header(5, 512, 11, 0, leaf_offset as u64, 2, 2, WIDTHS);
         let mut file_data = vec![0u8; 512];
         file_data[..header.len()].copy_from_slice(&header);
         file_data[leaf_offset..leaf_offset + leaf.len()].copy_from_slice(&leaf);
@@ -884,4 +888,6 @@ mod tests {
         assert_eq!(buffered, from_seek);
         assert_eq!(from_seek.len(), 2);
     }
+
+    const WIDTHS: Widths = Widths::EIGHT;
 }

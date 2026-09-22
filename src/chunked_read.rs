@@ -2086,6 +2086,8 @@ fn copy_chunk_to_output(
 #[cfg(test)]
 mod tests {
     use rstest::rstest;
+    use test_util::btree_v1;
+    use test_util::widths::Widths;
 
     use super::*;
     use crate::convert::nz;
@@ -2146,7 +2148,7 @@ mod tests {
             data_offset += chunk_elems * elem;
         }
 
-        let btree = build_chunk_btree_leaf(&chunk_infos, 2, 8);
+        let btree = build_chunk_btree_leaf(&chunk_infos, 2, WIDTHS);
         let btree_addr = 0x100usize;
         file_data[btree_addr..btree_addr + btree.len()].copy_from_slice(&btree);
 
@@ -2265,63 +2267,26 @@ mod tests {
         }
     }
 
-    fn write_offset(buf: &mut Vec<u8>, val: u64, size: u8) {
-        match size {
-            4 => buf.extend_from_slice(&(val as u32).to_le_bytes()),
-            8 => buf.extend_from_slice(&val.to_le_bytes()),
-            _ => panic!("unsupported offset size in test"),
-        }
-    }
-
-    /// Build a B-tree v1 type 1 leaf node with given chunk infos.
-    fn build_chunk_btree_leaf(chunks: &[ChunkInfo], ndims: usize, offset_size: u8) -> Vec<u8> {
-        let _os = offset_size as usize;
-        let entries_used = chunks.len() as u16;
-        let mut buf = Vec::new();
-
-        // Header
-        buf.extend_from_slice(b"TREE");
-        buf.push(1); // node_type = 1 (raw data chunks)
-        buf.push(0); // node_level = 0 (leaf)
-        buf.extend_from_slice(&entries_used.to_le_bytes());
-
-        // Left/right sibling = undefined
-        let undef: u64 = if offset_size == 4 {
-            0xFFFFFFFF
-        } else {
-            0xFFFFFFFFFFFFFFFF
-        };
-        write_offset(&mut buf, undef, offset_size);
-        write_offset(&mut buf, undef, offset_size);
-
-        // Entries: key[i], child[i] pairs, then final key
-        for chunk in chunks {
-            // Key: chunk_size(4) + filter_mask(4) + ndims offsets
-            let StoredChunkSize::BTreeV1(chunk_size) = chunk.chunk_size else {
-                panic!("B-tree fixture chunk sizes must use the B-tree v1 width");
-            };
-            buf.extend_from_slice(&chunk_size.to_le_bytes());
-            buf.extend_from_slice(&chunk.filter_mask.to_le_bytes());
-            for d in 0..ndims {
-                let off = if d < chunk.offsets.len() {
-                    chunk.offsets[d]
-                } else {
-                    0
+    /// A type 1 leaf node indexing `chunks`, whose keys carry `ndims` offsets:
+    /// the dataset's rank plus the trailing within-element offset.
+    fn build_chunk_btree_leaf(chunks: &[ChunkInfo], ndims: usize, widths: Widths) -> Vec<u8> {
+        let mut keys: Vec<_> = chunks
+            .iter()
+            .map(|chunk| {
+                let StoredChunkSize::BTreeV1(chunk_size) = chunk.chunk_size else {
+                    panic!("B-tree fixture chunk sizes must use the B-tree v1 width");
                 };
-                buf.extend_from_slice(&off.to_le_bytes());
-            }
-            // Child: address
-            write_offset(&mut buf, chunk.address.get(), offset_size);
-        }
+                let mut offsets = chunk.offsets.clone();
+                offsets.resize(ndims, 0);
+                btree_v1::chunk_key(chunk_size, chunk.filter_mask, &offsets)
+            })
+            .collect();
+        // The key past the last entry bounds the node, so its offsets are
+        // the largest a dataset can hold.
+        keys.push(btree_v1::chunk_key(0, 0, &vec![u64::MAX; ndims]));
 
-        // Final key (dummy)
-        buf.extend_from_slice(&0u32.to_le_bytes()); // chunk_size
-        buf.extend_from_slice(&0u32.to_le_bytes()); // filter_mask
-        for _ in 0..ndims {
-            buf.extend_from_slice(&u64::MAX.to_le_bytes());
-        }
-
-        buf
+        let children: Vec<u64> = chunks.iter().map(|chunk| chunk.address.get()).collect();
+        btree_v1::node(btree_v1::NodeType::CHUNK, 0, &keys, &children, widths)
     }
 
     // --- ChunkInfo collection tests ---
@@ -2346,7 +2311,7 @@ mod tests {
             },
         ];
 
-        let btree = build_chunk_btree_leaf(&chunks, ndims, os);
+        let btree = build_chunk_btree_leaf(&chunks, ndims, WIDTHS);
         let mut file_data = vec![0u8; 0x3000];
         file_data[..btree.len()].copy_from_slice(&btree);
 
@@ -2359,42 +2324,20 @@ mod tests {
         assert_eq!(result[1].offsets, vec![10, 0]);
     }
 
-    /// Build a B-tree v1 type 1 internal node pointing at the given child node
-    /// addresses (keys are dummies — the node-span walk reads only children).
+    /// A type 1 internal node above `child_addrs`, whose keys are placeholders:
+    /// the node-span walk this exercises reads only the children.
     fn build_chunk_btree_internal(
         level: u8,
         child_addrs: &[u64],
         ndims: usize,
-        offset_size: u8,
+        widths: Widths,
     ) -> Vec<u8> {
-        let entries_used = child_addrs.len() as u16;
-        let mut buf = Vec::new();
-        buf.extend_from_slice(b"TREE");
-        buf.push(1); // node_type = 1 (raw data chunks)
-        buf.push(level); // node_level > 0 (internal)
-        buf.extend_from_slice(&entries_used.to_le_bytes());
-        let undef: u64 = if offset_size == 4 {
-            0xFFFFFFFF
-        } else {
-            0xFFFFFFFFFFFFFFFF
-        };
-        write_offset(&mut buf, undef, offset_size);
-        write_offset(&mut buf, undef, offset_size);
-        for &addr in child_addrs {
-            buf.extend_from_slice(&0u32.to_le_bytes()); // key: chunk_size
-            buf.extend_from_slice(&0u32.to_le_bytes()); // key: filter_mask
-            for _ in 0..ndims {
-                buf.extend_from_slice(&0u64.to_le_bytes());
-            }
-            write_offset(&mut buf, addr, offset_size); // child node address
-        }
-        // Final key.
-        buf.extend_from_slice(&0u32.to_le_bytes());
-        buf.extend_from_slice(&0u32.to_le_bytes());
-        for _ in 0..ndims {
-            buf.extend_from_slice(&u64::MAX.to_le_bytes());
-        }
-        buf
+        let mut keys: Vec<_> = child_addrs
+            .iter()
+            .map(|_| btree_v1::chunk_key(0, 0, &vec![0; ndims]))
+            .collect();
+        keys.push(btree_v1::chunk_key(0, 0, &vec![u64::MAX; ndims]));
+        btree_v1::node(btree_v1::NodeType::CHUNK, level, &keys, child_addrs, widths)
     }
 
     #[test]
@@ -2416,7 +2359,7 @@ mod tests {
                 address: StoredAddress::new(0x2000),
             },
         ];
-        let leaf = build_chunk_btree_leaf(&chunks, ndims, os);
+        let leaf = build_chunk_btree_leaf(&chunks, ndims, WIDTHS);
         let at = 0x40usize;
         let mut file_data = vec![0u8; 0x3000];
         file_data[at..at + leaf.len()].copy_from_slice(&leaf);
@@ -2443,10 +2386,10 @@ mod tests {
             offsets: vec![0, 0],
             address: StoredAddress::new(0x100),
         }];
-        let leaf0 = build_chunk_btree_leaf(&leaf_chunks, ndims, os);
-        let leaf1 = build_chunk_btree_leaf(&leaf_chunks, ndims, os);
+        let leaf0 = build_chunk_btree_leaf(&leaf_chunks, ndims, WIDTHS);
+        let leaf1 = build_chunk_btree_leaf(&leaf_chunks, ndims, WIDTHS);
         let (l0, l1, root) = (0x1000usize, 0x2000usize, 0x3000usize);
-        let internal = build_chunk_btree_internal(1, &[l0 as u64, l1 as u64], ndims, os);
+        let internal = build_chunk_btree_internal(1, &[l0 as u64, l1 as u64], ndims, WIDTHS);
 
         let mut file = vec![0u8; 0x4000];
         file[l0..l0 + leaf0.len()].copy_from_slice(&leaf0);
@@ -2497,7 +2440,7 @@ mod tests {
             },
         ];
 
-        let btree = build_chunk_btree_leaf(&chunks, ndims, os);
+        let btree = build_chunk_btree_leaf(&chunks, ndims, WIDTHS);
         let mut file_data = vec![0u8; 0x1000];
         file_data[..btree.len()].copy_from_slice(&btree);
 
@@ -2512,7 +2455,7 @@ mod tests {
     fn collect_empty_btree() {
         let ndims = 2;
         let os: u8 = 8;
-        let btree = build_chunk_btree_leaf(&[], ndims, os);
+        let btree = build_chunk_btree_leaf(&[], ndims, WIDTHS);
         let mut file_data = vec![0u8; 0x1000];
         file_data[..btree.len()].copy_from_slice(&btree);
 
@@ -2527,7 +2470,7 @@ mod tests {
         // uncatchable process abort); the guard must turn it into an error.
         let ndims = 2;
         let os: u8 = 8;
-        let node = build_chunk_btree_internal(1, &[0u64], ndims, os);
+        let node = build_chunk_btree_internal(1, &[0u64], ndims, WIDTHS);
         let mut file_data = vec![0u8; 0x1000];
         file_data[..node.len()].copy_from_slice(&node);
 
@@ -2581,7 +2524,6 @@ mod tests {
         values: &[f64],
         chunk_size_elems: usize,
     ) -> (Vec<u8>, DataLayout, Dataspace) {
-        let os: u8 = 8;
         let elem_size = 8usize;
         let ndims = 2; // rank(1) + 1
         let total = values.len();
@@ -2614,7 +2556,7 @@ mod tests {
         }
 
         // Build B-tree at offset 0x100
-        let btree = build_chunk_btree_leaf(&chunk_infos, ndims, os);
+        let btree = build_chunk_btree_leaf(&chunk_infos, ndims, WIDTHS);
         let btree_addr = 0x100usize;
         file_data[btree_addr..btree_addr + btree.len()].copy_from_slice(&btree);
 
@@ -2728,7 +2670,6 @@ mod tests {
         use crate::filter_pipeline::{FILTER_DEFLATE, FilterDescription, FilterPipeline};
         use crate::filters::compress_chunk;
 
-        let os: u8 = 8;
         let elem_size = 8usize;
         let ndims = 2;
         let chunk_elems = 10usize;
@@ -2771,7 +2712,7 @@ mod tests {
             data_offset += compressed.len() + 16; // some padding
         }
 
-        let btree = build_chunk_btree_leaf(&chunk_infos, ndims, os);
+        let btree = build_chunk_btree_leaf(&chunk_infos, ndims, WIDTHS);
         let btree_addr = 0x100usize;
         file_data[btree_addr..btree_addr + btree.len()].copy_from_slice(&btree);
 
@@ -3039,7 +2980,6 @@ mod tests {
     #[test]
     fn read_2d_four_chunks() {
         // 4x6 dataset with chunk size 2x3 => 4 chunks
-        let os: u8 = 8;
         let elem_size = 4usize; // f32
         let ndims = 3; // rank(2) + 1
         let ds_dims = [4usize, 6];
@@ -3081,7 +3021,7 @@ mod tests {
             }
         }
 
-        let btree = build_chunk_btree_leaf(&chunk_infos, ndims, os);
+        let btree = build_chunk_btree_leaf(&chunk_infos, ndims, WIDTHS);
         let btree_addr = 0x100usize;
         file_data[btree_addr..btree_addr + btree.len()].copy_from_slice(&btree);
 
@@ -3528,4 +3468,6 @@ mod tests {
             assert_eq!(empty, Some(Vec::new()));
         }
     }
+
+    const WIDTHS: Widths = Widths::EIGHT;
 }
