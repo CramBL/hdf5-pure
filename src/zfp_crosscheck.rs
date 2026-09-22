@@ -1,28 +1,16 @@
-//! Crosscheck the pure-Rust ZFP codec against reference fixtures produced by
-//! h5py + the real H5Z-ZFP plugin.
+//! Checks ZFP encoding and decoding against H5Z-ZFP fixtures.
 //!
-//! Fixtures and generator script live in `tests/data/h5py/zfp/`. Regenerate:
+//! The fixtures and their generator live in `tests/data/h5py/zfp/`. Regenerate them with:
 //!
 //!     tests/data/h5py/zfp/.venv/bin/python tests/data/h5py/zfp/regen.py
 //!
-//! The test iterates every fixture in the manifest. For each fixture that
-//! falls inside the currently-implemented codec slice (see `is_supported`),
-//! it runs both paths:
-//!
-//!   * decompress: our codec reads the reference compressed bytes and the
-//!     decoded values are compared against the raw values within a
-//!     rate-dependent tolerance.
-//!   * compress: our codec encodes the raw values and the output is compared
-//!     byte-equal against the reference compressed bytes.
-//!
-//! Fixtures outside the supported slice are recorded as skipped; they become
-//! active as the codec is parameterized (Step 3) and extended to N-D
-//! (Step 5). Any supported-fixture failure fails the test.
+//! Each supported fixture checks encoded bytes exactly and decoded values within a
+//! rate-dependent tolerance. Unsupported modes and scalar types are skipped.
 
 use std::fs;
 use std::path::PathBuf;
 
-use crate::zfp::{self, ZfpElementType};
+use h5_filter::ZfpElementType;
 use serde::Deserialize;
 
 fn dtype_to_elem_type(dtype: &str) -> Result<ZfpElementType, String> {
@@ -77,8 +65,7 @@ fn read_bin(name: &str) -> Vec<u8> {
     fs::read(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
 }
 
-/// True if the fixture falls inside the slice of the codec implemented so
-/// far. All four types and 1D–4D are in scope after Step 5.
+/// Returns whether the codec supports the fixture's type, rank, and mode.
 fn is_supported(fix: &Fixture) -> bool {
     let dtype_ok = matches!(fix.dtype.as_str(), "f32" | "f64" | "i32" | "i64");
     let rank_ok = matches!(fix.shape.len(), 1..=4);
@@ -143,7 +130,8 @@ fn decode_and_max_err(
             .fold(0f64, f64::max)
     }
     let elem_ty = dtype_to_elem_type(dtype)?;
-    let decoded = zfp::decompress(reference, dims, rate, elem_ty).map_err(|e| format!("{e:?}"))?;
+    let decoded =
+        h5_filter::decompress_zfp(reference, dims, rate, elem_ty).map_err(|e| format!("{e:?}"))?;
     match dtype {
         "f32" => {
             let expected: Vec<f32> = raw
@@ -249,7 +237,7 @@ fn decode_and_max_err(
 
 fn encode_per_dtype(dtype: &str, raw: &[u8], dims: &[usize], rate: f64) -> Result<Vec<u8>, String> {
     let elem_ty = dtype_to_elem_type(dtype)?;
-    zfp::compress(raw, dims, rate, elem_ty).map_err(|e| format!("{e:?}"))
+    h5_filter::compress_zfp(raw, dims, rate, elem_ty).map_err(|e| format!("{e:?}"))
 }
 
 #[derive(Debug)]

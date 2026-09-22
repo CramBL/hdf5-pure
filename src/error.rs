@@ -635,7 +635,32 @@ pub const OBJECT_HEADER_MESSAGE_MAX: usize = u16::MAX as usize;
 
 impl From<h5_filter::Error> for FormatError {
     fn from(error: h5_filter::Error) -> Self {
-        Self::FilterError(format!("{error}"))
+        match error {
+            h5_filter::Error::InvalidLzfStream(reason) => {
+                Self::FilterError(format!("lzf: {reason}"))
+            }
+            #[cfg(feature = "zfp")]
+            h5_filter::Error::ZfpFilter(reason) => Self::FilterError(reason),
+            #[cfg(feature = "zfp")]
+            h5_filter::Error::UnsupportedZfp(reason) => Self::UnsupportedZfp(reason),
+            #[cfg(feature = "zfp")]
+            h5_filter::Error::ValueTooLargeForPlatform { value, target } => {
+                Self::ValueTooLargeForPlatform { value, target }
+            }
+            #[cfg(feature = "zfp")]
+            h5_filter::Error::TruncatedZfpStream { expected, actual } => Self::FilterError(
+                format!("ZFP: encoded chunk needs {expected} bytes, got {actual}"),
+            ),
+            #[cfg(feature = "zfp")]
+            h5_filter::Error::ZfpSizeOverflow => {
+                Self::FilterError("ZFP: chunk dimensions or encoded size overflow usize".into())
+            }
+            #[cfg(feature = "zfp")]
+            h5_filter::Error::ZfpHeaderTooLarge { budget, required } => Self::FilterError(format!(
+                "ZFP: nonzero float block needs {required} header bits, rate allows {budget} bits"
+            )),
+            _ => Self::FilterError(format!("{error}")),
+        }
     }
 }
 
@@ -1058,11 +1083,7 @@ impl fmt::Display for FormatError {
                 write!(f, "unsupported ZFP configuration: {msg}")
             }
             Self::ValueTooLargeForPlatform { value, target } => {
-                write!(
-                    f,
-                    "file value {value} does not fit in {target} on this platform \
-                     (a 64-bit HDF5 offset/length exceeds this target's address width)"
-                )
+                write!(f, "value {value} does not fit in {target} on this platform")
             }
             Self::OffsetOverflow { offset, length } => {
                 write!(

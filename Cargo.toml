@@ -330,7 +330,7 @@ fast-deflate = ["flate2/zlib-ng"]
 provenance = ["sha2"]
 # Pure-Rust ZFP fixed-rate compression filter (HDF5 filter ID 32013).
 # Supports f32/f64/i32/i64 datasets in 1D–4D.
-zfp = []
+zfp = ["h5-filter/zfp"]
 # Ergonomic N-dimensional array I/O via the `ndarray` crate
 # (`DatasetBuilder::with_ndarray`, `Dataset::read_array`/`read_array_dyn`).
 # Requires `std` (it builds on the File/Dataset reader and writer APIs).
