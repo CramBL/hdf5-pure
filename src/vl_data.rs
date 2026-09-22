@@ -634,76 +634,48 @@ pub fn read_vl_strings(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use test_util::global_heap;
+    use test_util::widths::Widths;
 
     /// Build a global heap collection at given offset in a file buffer.
-    fn build_gcol_at(
-        file_data: &mut Vec<u8>,
-        offset: usize,
-        objects: &[(u16, &[u8])], // (index, data)
-    ) {
-        let length_size = 8usize;
-
-        // Ensure file_data is large enough
-        let header_size = 8 + length_size;
-        let mut obj_total = 0usize;
-        for (_, data) in objects {
-            let padded = (data.len() + 7) & !7;
-            obj_total += 8 + length_size + padded;
-        }
-        obj_total += 2; // free space marker
-        let collection_size = header_size + obj_total;
-        let needed = offset + collection_size;
-        if file_data.len() < needed {
-            file_data.resize(needed, 0);
-        }
-
-        let mut pos = offset;
-        // Signature
-        file_data[pos..pos + 4].copy_from_slice(b"GCOL");
-        file_data[pos + 4] = 1; // version
-        // reserved(3) already 0
-        pos += 8;
-        file_data[pos..pos + 8].copy_from_slice(&(collection_size as u64).to_le_bytes());
-        pos += 8;
-
-        for (index, data) in objects {
-            file_data[pos..pos + 2].copy_from_slice(&index.to_le_bytes());
-            file_data[pos + 2..pos + 4].copy_from_slice(&1u16.to_le_bytes()); // ref_count
-            // reserved(4) already 0
-            pos += 8;
-            file_data[pos..pos + 8].copy_from_slice(&(data.len() as u64).to_le_bytes());
-            pos += 8;
-            file_data[pos..pos + data.len()].copy_from_slice(data);
-            let padded = (data.len() + 7) & !7;
-            pos += padded;
-        }
-        // free space marker
-        file_data[pos..pos + 2].copy_from_slice(&0u16.to_le_bytes());
+    /// Writes a global heap collection of `(index, data)` objects at `offset`,
+    /// growing `file_data` to hold it.
+    fn build_gcol_at(file_data: &mut Vec<u8>, offset: usize, objects: &[(u16, &[u8])]) {
+        let objects: Vec<_> = objects
+            .iter()
+            .map(|&(index, data)| global_heap::Object::new(index, data))
+            .collect();
+        let collection = global_heap::collection(&objects, WIDTHS);
+        file_data.resize(file_data.len().max(offset + collection.len()), 0);
+        file_data[offset..offset + collection.len()].copy_from_slice(&collection);
     }
 
-    /// Build VL reference raw data for given strings at a collection address.
+    /// The raw bytes of one variable-length element per string, each pointing
+    /// at the collection at `collection_address` and an object index counting
+    /// up from `start_index`.
     fn build_vl_refs(
         strings: &[&str],
         collection_address: u64,
         start_index: u16,
-        offset_size: u8,
+        widths: Widths,
     ) -> Vec<u8> {
-        let mut raw = Vec::new();
-        for (i, s) in strings.iter().enumerate() {
-            raw.extend_from_slice(&(s.len() as u32).to_le_bytes());
-            match offset_size {
-                4 => raw.extend_from_slice(&(collection_address as u32).to_le_bytes()),
-                8 => raw.extend_from_slice(&collection_address.to_le_bytes()),
-                _ => panic!("unsupported"),
-            }
-            raw.extend_from_slice(&(start_index as u32 + i as u32).to_le_bytes());
-        }
-        raw
+        strings
+            .iter()
+            .enumerate()
+            .flat_map(|(index, string)| {
+                global_heap::reference(
+                    string.len() as u32,
+                    collection_address,
+                    u32::from(start_index) + index as u32,
+                    widths,
+                )
+            })
+            .collect()
     }
 
     #[test]
     fn parse_vl_references_two_elements() {
-        let raw = build_vl_refs(&["hello", "world"], 0x1000, 1, 8);
+        let raw = build_vl_refs(&["hello", "world"], 0x1000, 1, WIDTHS);
         let refs = parse_vl_references(&raw, 2, 8).unwrap();
         assert_eq!(refs.len(), 2);
         assert_eq!(refs[0].length, 5);
@@ -719,7 +691,7 @@ mod tests {
         let mut file_data = vec![0u8; 512];
         build_gcol_at(&mut file_data, gcol_offset, &[(1, b"Alice"), (2, b"Bob")]);
 
-        let raw = build_vl_refs(&["Alice", "Bob"], gcol_offset as u64, 1, 8);
+        let raw = build_vl_refs(&["Alice", "Bob"], gcol_offset as u64, 1, WIDTHS);
         let strings = read_vl_strings(&file_data, &raw, 2, 8, 8).unwrap();
         assert_eq!(strings, vec!["Alice", "Bob"]);
     }
@@ -734,7 +706,7 @@ mod tests {
         let gcol_offset = 256usize;
         let mut file_data = vec![0u8; 512];
         build_gcol_at(&mut file_data, gcol_offset, &[(1, b"Alice"), (2, b"Bob")]);
-        let raw = build_vl_refs(&["Alice", "Bob"], gcol_offset as u64, 1, 8);
+        let raw = build_vl_refs(&["Alice", "Bob"], gcol_offset as u64, 1, WIDTHS);
         let source = ReadSeekSource::new(Cursor::new(file_data)).unwrap();
 
         let strings = read_vl_strings_from_source(
@@ -781,6 +753,8 @@ mod tests {
         let err = parse_vl_references(&raw, 1, 8).unwrap_err();
         assert!(matches!(err, FormatError::UnexpectedEof { .. }));
     }
+
+    const WIDTHS: Widths = Widths::EIGHT;
 }
 
 #[cfg(test)]

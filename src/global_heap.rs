@@ -33,12 +33,6 @@ pub struct GlobalHeapObjectInfo {
     pub size: u64,
 }
 
-/// Round up to next multiple of 8.
-#[cfg(test)]
-fn pad8(x: usize) -> usize {
-    (x + 7) & !7
-}
-
 fn pad8_u64(x: u64) -> Result<u64, FormatError> {
     x.checked_add(7)
         .map(|value| value & !7)
@@ -369,59 +363,20 @@ impl GlobalHeapIndex {
 mod tests {
     use super::*;
     use crate::source::BytesSource;
+    use test_util::global_heap;
+    use test_util::widths::Widths;
 
-    /// Build a global heap collection with given objects.
-    fn build_collection(
-        objects: &[(u16, u16, &[u8])], // (index, ref_count, data)
-        length_size: u8,
-    ) -> Vec<u8> {
-        let ls = length_size as usize;
-
-        // Calculate total size
-        let header_size = 8 + ls;
-        let mut obj_size_total = 0usize;
-        for (_, _, data) in objects {
-            let obj_header = 8 + ls;
-            obj_size_total += obj_header + pad8(data.len());
-        }
-        // Free space marker (2 bytes for index 0)
-        obj_size_total += 2;
-        let collection_size = header_size + obj_size_total;
-
-        let mut buf = Vec::new();
-        buf.extend_from_slice(&GCOL_SIGNATURE);
-        buf.push(1); // version
-        buf.extend_from_slice(&[0u8; 3]); // reserved
-
-        // collection_size
-        match length_size {
-            4 => buf.extend_from_slice(&(collection_size as u32).to_le_bytes()),
-            8 => buf.extend_from_slice(&(collection_size as u64).to_le_bytes()),
-            _ => panic!("unsupported length_size"),
-        }
-
-        // Objects
-        for (index, ref_count, data) in objects {
-            buf.extend_from_slice(&index.to_le_bytes());
-            buf.extend_from_slice(&ref_count.to_le_bytes());
-            buf.extend_from_slice(&[0u8; 4]); // reserved
-            match length_size {
-                4 => buf.extend_from_slice(&(data.len() as u32).to_le_bytes()),
-                8 => buf.extend_from_slice(&(data.len() as u64).to_le_bytes()),
-                _ => panic!("unsupported"),
-            }
-            buf.extend_from_slice(data);
-            // Pad to 8 bytes
-            let padded = pad8(data.len());
-            for _ in data.len()..padded {
-                buf.push(0);
-            }
-        }
-
-        // Free space marker
-        buf.extend_from_slice(&0u16.to_le_bytes());
-
-        buf
+    /// A collection of `(index, reference count, data)` objects.
+    fn build_collection(objects: &[(u16, u16, &[u8])], length_size: usize) -> Vec<u8> {
+        let objects: Vec<_> = objects
+            .iter()
+            .map(|&(index, reference_count, data)| global_heap::Object {
+                index,
+                reference_count,
+                data,
+            })
+            .collect();
+        global_heap::collection(&objects, Widths::new(8, length_size))
     }
 
     #[test]

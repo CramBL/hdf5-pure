@@ -1,6 +1,8 @@
 //! Page-homogeneity checking for genuine paged files (`FileSpaceStrategy::Page`).
 
-use test_util::bytes;
+use test_util::{
+    btree_v2, bytes, fractal_heap, free_space, global_heap, local_heap, object_header, symbol_table,
+};
 
 /// Signatures that must never appear in a page holding raw dataset bytes: object
 /// headers and their continuations, the global heap, the free-space managers, the
@@ -16,8 +18,19 @@ use test_util::bytes;
 /// raw to match. `TREE` is excluded for the same reason — a version 1 chunk index
 /// uses it too, so its presence is ambiguous.
 pub const METADATA_SIGNATURES: &[&[u8; 4]] = &[
-    b"OHDR", b"OCHK", b"GCOL", b"FSHD", b"FSSE", b"FRHP", b"FHDB", b"FHIB", b"BTHD", b"BTIN",
-    b"BTLF", b"SNOD", b"HEAP",
+    object_header::v2::SIGNATURE,
+    object_header::v2::CONTINUATION_SIGNATURE,
+    global_heap::SIGNATURE,
+    free_space::SIGNATURE,
+    free_space::SECTIONS_SIGNATURE,
+    fractal_heap::SIGNATURE,
+    fractal_heap::DIRECT_BLOCK_SIGNATURE,
+    fractal_heap::INDIRECT_BLOCK_SIGNATURE,
+    btree_v2::SIGNATURE,
+    btree_v2::INTERNAL_SIGNATURE,
+    btree_v2::LEAF_SIGNATURE,
+    symbol_table::SIGNATURE,
+    local_heap::SIGNATURE,
 ];
 
 /// Every page of `path` holding raw bytes of any of `datasets` must hold *only*

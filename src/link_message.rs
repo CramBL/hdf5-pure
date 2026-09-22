@@ -403,70 +403,25 @@ impl LinkMessage {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use test_util::link_message;
+    use test_util::widths::Widths;
 
-    /// Build a hard link message with given parameters.
     fn build_hard_link(
         name: &str,
         addr: u64,
-        offset_size: u8,
+        offset_size: usize,
         creation_order: Option<u64>,
         charset: Option<u8>,
-        name_size_width: u8, // 1, 2, 4
+        name_size_width: usize,
     ) -> Vec<u8> {
-        let mut buf = Vec::new();
-        buf.push(1); // version
-
-        let mut flags: u8 = 0;
-        // Bits 0-1: name length field size
-        let size_bits = match name_size_width {
-            1 => 0u8,
-            2 => 1,
-            4 => 2,
-            8 => 3,
-            _ => 0,
-        };
-        flags |= size_bits;
-        // Bit 2: creation order present
-        if creation_order.is_some() {
-            flags |= 0x04;
+        let mut link = link_message::HardLink::new(name, addr).name_size_width(name_size_width);
+        if let Some(creation_order) = creation_order {
+            link = link.creation_order(creation_order);
         }
-        // hard link: don't set bit 3 (link type field not present)
-        // Bit 4: charset present
-        if charset.is_some() {
-            flags |= 0x10;
+        if let Some(charset) = charset {
+            link = link.character_set(link_message::CharacterSet(charset));
         }
-        buf.push(flags);
-
-        // no link_type field for hard links (bit 1 not set)
-
-        if let Some(co) = creation_order {
-            buf.extend_from_slice(&co.to_le_bytes());
-        }
-
-        if let Some(cs) = charset {
-            buf.push(cs);
-        }
-
-        // name length
-        let name_len = name.len();
-        match name_size_width {
-            1 => buf.push(name_len as u8),
-            2 => buf.extend_from_slice(&(name_len as u16).to_le_bytes()),
-            4 => buf.extend_from_slice(&(name_len as u32).to_le_bytes()),
-            8 => buf.extend_from_slice(&(name_len as u64).to_le_bytes()),
-            _ => {}
-        }
-
-        buf.extend_from_slice(name.as_bytes());
-
-        // hard link data: address
-        match offset_size {
-            4 => buf.extend_from_slice(&(addr as u32).to_le_bytes()),
-            8 => buf.extend_from_slice(&addr.to_le_bytes()),
-            _ => {}
-        }
-
-        buf
+        link.build(Widths::new(offset_size, offset_size))
     }
 
     #[test]

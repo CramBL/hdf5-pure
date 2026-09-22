@@ -325,25 +325,10 @@ const UNLIMITED_LENGTH: u64 = u64::MAX;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use test_util::dataspace;
 
     fn build_v1_dataspace(rank: u8, flags: u8, dims: &[u64], max_dims: Option<&[u64]>) -> Vec<u8> {
-        let length_size = 8u8;
-        let mut buf = Vec::new();
-        buf.push(1); // version
-        buf.push(rank);
-        buf.push(flags);
-        buf.push(0); // reserved
-        buf.extend_from_slice(&[0u8; 4]); // reserved(4)
-        for &d in dims {
-            buf.extend_from_slice(&d.to_le_bytes());
-        }
-        if let Some(md) = max_dims {
-            for &d in md {
-                buf.extend_from_slice(&d.to_le_bytes());
-            }
-        }
-        let _ = length_size;
-        buf
+        dataspace::v1(rank, dataspace::Flags(flags), dims, max_dims)
     }
 
     fn build_v2_dataspace(
@@ -353,20 +338,13 @@ mod tests {
         dims: &[u64],
         max_dims: Option<&[u64]>,
     ) -> Vec<u8> {
-        let mut buf = Vec::new();
-        buf.push(2); // version
-        buf.push(rank);
-        buf.push(flags);
-        buf.push(type_byte);
-        for &d in dims {
-            buf.extend_from_slice(&d.to_le_bytes());
-        }
-        if let Some(md) = max_dims {
-            for &d in md {
-                buf.extend_from_slice(&d.to_le_bytes());
-            }
-        }
-        buf
+        dataspace::v2(
+            rank,
+            dataspace::Flags(flags),
+            dataspace::Kind(type_byte),
+            dims,
+            max_dims,
+        )
     }
 
     #[test]
