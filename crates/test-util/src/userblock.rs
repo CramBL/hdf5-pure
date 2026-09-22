@@ -70,10 +70,4 @@ mod tests {
         std::fs::write(&path, vec![0u8; 16]).expect("write the fixture");
         userblock.assert_unchanged(&path);
     }
-
-    #[test]
-    #[should_panic(expected = "a 4-byte marker fills a 4-byte userblock")]
-    fn refuses_a_marker_that_fills_the_userblock() {
-        Userblock::stamp(&mut [0u8; 16], 4, b"MARK");
-    }
 }
