@@ -829,6 +829,10 @@ mod tests {
     use crate::edit::build_v2_object_header;
     use crate::source::BytesSource;
     use crate::type_builders::{AttrValue, build_attr_message, make_object_reference_type};
+    use test_util::attribute;
+    use test_util::object_header::v2 as v2_bytes;
+    use test_util::object_header::{Message, MessageType as RecordType};
+    use test_util::widths::Widths;
 
     /// Where a hand-built header is placed in the test image. Non-zero so an
     /// offset accidentally taken relative to the *chunk* rather than the file —
@@ -838,10 +842,10 @@ mod tests {
     /// Wrap a message body in the object-header record a header region holds it
     /// in: type, body size, flags, body.
     fn message_record(msg_type: MessageType, body: &[u8]) -> Vec<u8> {
-        let mut record = vec![msg_type.to_u16() as u8, 0, 0, 0];
-        record[1..3].copy_from_slice(&(body.len() as u16).to_le_bytes());
-        record.extend_from_slice(body);
-        record
+        v2_bytes::message_record(
+            &Message::new(RecordType(msg_type.to_u16()), body),
+            v2_bytes::HeaderFlags::default(),
+        )
     }
 
     /// A region of plain (4-byte-record) messages, the layout every writer in
@@ -892,10 +896,7 @@ mod tests {
     /// (`None`) is what this crate and the reference library attach to an object
     /// with ordinary inline attributes.
     fn attribute_info(fractal_heap: Option<u64>) -> Vec<u8> {
-        let mut body = vec![0u8, 0x00];
-        body.extend_from_slice(&fractal_heap.unwrap_or(u64::MAX).to_le_bytes());
-        body.extend_from_slice(&u64::MAX.to_le_bytes());
-        body
+        attribute::info(fractal_heap, None, Widths::EIGHT)
     }
 
     /// A [`PatchTarget`] that records where each write started and how long it

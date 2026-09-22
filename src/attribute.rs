@@ -830,6 +830,7 @@ mod tests {
     use crate::shared_message;
     use crate::source::BytesSource;
     use core::cell::RefCell;
+    use test_util::{attribute, dataspace, datatype};
 
     /// A [`Source`] that records where each read started, so a walk can be asked
     /// how often it went back to a particular structure.
@@ -1037,46 +1038,20 @@ mod tests {
     }
 
     /// Build a datatype header for testing (8 bytes).
-    fn build_dt_header(class: u8, version: u8, bf: [u8; 3], size: u32) -> Vec<u8> {
-        let mut buf = vec![0u8; 8];
-        buf[0] = (class & 0x0F) | ((version & 0x0F) << 4);
-        buf[1] = bf[0];
-        buf[2] = bf[1];
-        buf[3] = bf[2];
-        buf[4..8].copy_from_slice(&size.to_le_bytes());
-        buf
-    }
-
-    /// Build an f64 LE datatype message.
     fn build_f64_dt() -> Vec<u8> {
-        let mut buf = build_dt_header(1, 1, [0x00, 0x00, 0x02], 8);
-        let mut props = [0u8; 12];
-        props[2..4].copy_from_slice(&64u16.to_le_bytes()); // bit_precision
-        props[4] = 52; // exp_location
-        props[5] = 11; // exp_size
-        props[6] = 0; // mant_location
-        props[7] = 52; // mant_size
-        props[8..12].copy_from_slice(&1023u32.to_le_bytes()); // exp_bias
-        buf.extend_from_slice(&props);
-        buf
+        datatype::f64_le()
     }
 
-    /// Build a scalar dataspace (v2).
     fn build_scalar_ds() -> Vec<u8> {
-        vec![2, 0, 0, 0] // version=2, rank=0, flags=0, type=0(scalar)
+        dataspace::scalar()
     }
 
-    /// Build a simple 1D dataspace (v1).
     fn build_simple_ds_v1(dim: u64) -> Vec<u8> {
-        let mut buf = vec![1u8, 1, 0, 0, 0, 0, 0, 0]; // version=1, rank=1, flags=0, reserved(5)
-        buf.extend_from_slice(&dim.to_le_bytes());
-        buf
+        dataspace::v1(1, dataspace::Flags::NONE, &[dim], None)
     }
 
-    /// Build a fixed-length string datatype.
     fn build_string_dt(size: u32) -> Vec<u8> {
-        // class=3, version=1, padding=NullPad(1), charset=ASCII(0) → bf0=0x01
-        build_dt_header(3, 1, [0x01, 0, 0], size)
+        datatype::fixed_string(size)
     }
 
     #[test]
@@ -1339,21 +1314,14 @@ mod tests {
     /// committed type, laid out exactly as libhdf5 1.14.6 wrote one: a 10-byte
     /// shared reference standing where an encoding usually is.
     fn attr_with_shared_datatype(flags: u8) -> Vec<u8> {
-        let name = b"shared_attr\0";
-        // version 2 shared reference: version, type = committed, address.
-        let mut dt_field = vec![2u8, 2];
-        dt_field.extend_from_slice(&0x320u64.to_le_bytes());
-        let ds_bytes = build_simple_ds_v1(1);
-
-        let mut data = vec![2u8, flags];
-        data.extend_from_slice(&(name.len() as u16).to_le_bytes());
-        data.extend_from_slice(&(dt_field.len() as u16).to_le_bytes());
-        data.extend_from_slice(&(ds_bytes.len() as u16).to_le_bytes());
-        data.extend_from_slice(name);
-        data.extend_from_slice(&dt_field);
-        data.extend_from_slice(&ds_bytes);
-        data.extend_from_slice(&7.0f64.to_le_bytes());
-        data
+        attribute::Attribute::new(
+            "shared_attr",
+            &datatype::committed_reference(0x320),
+            &build_simple_ds_v1(1),
+            &7.0f64.to_le_bytes(),
+        )
+        .flags(attribute::Flags(flags))
+        .build()
     }
 
     /// A resolver that answers with one fixed message body, standing in for the

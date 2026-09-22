@@ -1142,131 +1142,30 @@ impl FractalHeapHeader {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use test_util::fractal_heap;
+    use test_util::image::Image;
+    use test_util::widths::Widths;
 
-    /// Build a minimal fractal heap with a single direct block at the root.
-    /// Returns (file_data, FractalHeapHeader) where file_data contains
-    /// the heap header at offset 0 and a direct block with known data.
-    fn build_simple_heap(offset_size: u8, length_size: u8) -> (Vec<u8>, usize) {
-        let os = offset_size as usize;
-        let ls = length_size as usize;
-        let max_heap_size: u16 = 16; // bits
-        let block_offset_bytes = (max_heap_size as usize).div_ceil(8); // 2
+    /// A heap whose root is one direct block holding a single managed object,
+    /// with the offset just past the header returned beside the bytes.
+    fn build_simple_heap(widths: Widths) -> (Vec<u8>, usize) {
+        const BLOCK_AT: usize = 256;
 
-        // Direct block at a known offset
-        let dblock_offset = 256usize;
-        let block_size: u64 = 128;
+        let heap = fractal_heap::Header::new(BLOCK_AT as u64).managed_object_count(1);
+        let header = heap.build(widths);
+        let header_end = header.len();
 
-        // Build fractal heap header at offset 0
-        let mut buf = vec![0u8; 1024];
-        let mut pos = 0;
-        buf[pos..pos + 4].copy_from_slice(b"FRHP");
-        pos += 4;
-        buf[pos] = 0; // version
-        pos += 1;
-        // heap_id_length = 7
-        buf[pos..pos + 2].copy_from_slice(&7u16.to_le_bytes());
-        pos += 2;
-        // io_filter_encoded_length = 0
-        buf[pos..pos + 2].copy_from_slice(&0u16.to_le_bytes());
-        pos += 2;
-        // flags = 0
-        buf[pos] = 0;
-        pos += 1;
-        // max_managed_object_size
-        buf[pos..pos + 4].copy_from_slice(&64u32.to_le_bytes());
-        pos += 4;
-        // next_huge_object_id (length_size)
-        pos += ls;
-        // btree_huge_objects_address (offset_size) - undefined
-        for i in 0..os {
-            buf[pos + i] = 0xFF;
-        }
-        pos += os;
-        // free_space_managed_blocks (length_size)
-        pos += ls;
-        // managed_block_free_space_manager_address (offset_size) - undefined
-        for i in 0..os {
-            buf[pos + i] = 0xFF;
-        }
-        pos += os;
-        // managed_space_in_heap (length_size)
-        pos += ls;
-        // allocated_managed_space_in_heap (length_size)
-        pos += ls;
-        // direct_block_allocation_iterator_offset (length_size)
-        pos += ls;
-        // managed_objects_count (length_size) = 1
-        buf[pos] = 1;
-        pos += ls;
-        // huge_objects_size (length_size)
-        pos += ls;
-        // huge_objects_count (length_size)
-        pos += ls;
-        // tiny_objects_size (length_size)
-        pos += ls;
-        // tiny_objects_count (length_size)
-        pos += ls;
-        // table_width = 4
-        buf[pos..pos + 2].copy_from_slice(&4u16.to_le_bytes());
-        pos += 2;
-        // starting_block_size (length_size)
-        match length_size {
-            4 => buf[pos..pos + 4].copy_from_slice(&(block_size as u32).to_le_bytes()),
-            8 => buf[pos..pos + 8].copy_from_slice(&block_size.to_le_bytes()),
-            _ => {}
-        }
-        pos += ls;
-        // max_direct_block_size (length_size) = 1024
-        match length_size {
-            4 => buf[pos..pos + 4].copy_from_slice(&1024u32.to_le_bytes()),
-            8 => buf[pos..pos + 8].copy_from_slice(&1024u64.to_le_bytes()),
-            _ => {}
-        }
-        pos += ls;
-        // max_heap_size (2) = 16
-        buf[pos..pos + 2].copy_from_slice(&max_heap_size.to_le_bytes());
-        pos += 2;
-        // start_root_rows (2) = 2
-        buf[pos..pos + 2].copy_from_slice(&2u16.to_le_bytes());
-        pos += 2;
-        // root_block_address (offset_size) = dblock_offset
-        match offset_size {
-            4 => buf[pos..pos + 4].copy_from_slice(&(dblock_offset as u32).to_le_bytes()),
-            8 => buf[pos..pos + 8].copy_from_slice(&(dblock_offset as u64).to_le_bytes()),
-            _ => {}
-        }
-        pos += os;
-        // current_rows_in_root_indirect_block (2) = 0 (root is direct)
-        buf[pos..pos + 2].copy_from_slice(&0u16.to_le_bytes());
-        pos += 2;
-        // checksum
-        let checksum = crate::checksum::jenkins_lookup3(&buf[0..pos]);
-        buf[pos..pos + 4].copy_from_slice(&checksum.to_le_bytes());
-        pos += 4;
-        let header_end = pos;
+        let mut image = Image::starting_with(&header);
+        image.place(BLOCK_AT, &heap.direct_block(0, b"Hello, World!", widths));
+        // Room past the block for the tests that read off its end.
+        image.append(&[0; 64]);
 
-        // Build direct block at dblock_offset
-        pos = dblock_offset;
-        buf[pos..pos + 4].copy_from_slice(b"FHDB");
-        pos += 4;
-        buf[pos] = 0; // version
-        pos += 1;
-        // heap_header_address (offset_size) = 0
-        pos += os;
-        // block_offset (block_offset_bytes) = 0
-        pos += block_offset_bytes;
-        // Data starts here - write known pattern
-        let data_start = pos;
-        // Write "Hello, World!" at offset 0 in the data area
-        let test_data = b"Hello, World!";
-        buf[data_start..data_start + test_data.len()].copy_from_slice(test_data);
-
-        (buf, header_end)
+        (image.build(), header_end)
     }
 
     #[test]
     fn parse_header() {
-        let (file_data, _) = build_simple_heap(8, 8);
+        let (file_data, _) = build_simple_heap(Widths::EIGHT);
         let hdr = FractalHeapHeader::parse(&file_data, 0, 8, 8).unwrap();
         assert_eq!(hdr.heap_id_length, 7);
         assert_eq!(hdr.io_filter_encoded_length, 0);
@@ -1280,7 +1179,7 @@ mod tests {
 
     #[test]
     fn decode_managed_id() {
-        let (file_data, _) = build_simple_heap(8, 8);
+        let (file_data, _) = build_simple_heap(Widths::EIGHT);
         let hdr = FractalHeapHeader::parse(&file_data, 0, 8, 8).unwrap();
 
         // Build a managed heap ID:
@@ -1304,7 +1203,7 @@ mod tests {
 
     #[test]
     fn read_managed_object_from_direct_block() {
-        let (file_data, _) = build_simple_heap(8, 8);
+        let (file_data, _) = build_simple_heap(Widths::EIGHT);
         let hdr = FractalHeapHeader::parse(&file_data, 0, 8, 8).unwrap();
 
         // Build heap ID for the test data written in build_simple_heap.
@@ -1331,7 +1230,7 @@ mod tests {
     #[test]
     fn streaming_managed_object_matches_buffered() {
         use crate::source::{BytesSource, ReadSeekSource};
-        let (file_data, _) = build_simple_heap(8, 8);
+        let (file_data, _) = build_simple_heap(Widths::EIGHT);
 
         // Same heap ID as `read_managed_object_from_direct_block`.
         let hdr = FractalHeapHeader::parse(&file_data, 0, 8, 8).unwrap();
@@ -1381,7 +1280,7 @@ mod tests {
 
     #[test]
     fn invalid_heap_id_type() {
-        let (file_data, _) = build_simple_heap(8, 8);
+        let (file_data, _) = build_simple_heap(Widths::EIGHT);
         let hdr = FractalHeapHeader::parse(&file_data, 0, 8, 8).unwrap();
         // Type lives in bits 4-5; type 1 (huge) = 0x10. decode_managed_id only
         // accepts managed (type 0) IDs.

@@ -539,46 +539,35 @@ pub fn read_heap_message_from_source<S: Source + ?Sized>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use test_util::sohm;
+    use test_util::widths::Widths;
 
-    /// Build a master-table image with one index header, checksum included, so a
+    /// A master-table image with one header per index, checksum included, so a
     /// parse test states the bytes rather than a fixture file.
     fn table_image(indexes: &[SohmIndexHeader]) -> Vec<u8> {
-        let mut image = Vec::from(*TABLE_SIGNATURE);
-        for index in indexes {
-            image.push(SOHM_VERSION);
-            image.push(match index.kind {
-                SohmIndexKind::List => 0,
-                SohmIndexKind::BTree => 1,
-            });
-            image.extend_from_slice(&index.message_type_flags.to_le_bytes());
-            image.extend_from_slice(&index.min_message_size.to_le_bytes());
-            image.extend_from_slice(&index.list_max.to_le_bytes());
-            image.extend_from_slice(&index.btree_min.to_le_bytes());
-            image.extend_from_slice(&index.message_count.to_le_bytes());
-            image.extend_from_slice(
-                &index
-                    .index_address
-                    .map_or(u64::MAX, StoredAddress::get)
-                    .to_le_bytes(),
-            );
-            image.extend_from_slice(
-                &index
-                    .heap_address
-                    .map_or(u64::MAX, StoredAddress::get)
-                    .to_le_bytes(),
-            );
-        }
-        let checksum = crate::checksum::jenkins_lookup3(&image);
-        image.extend_from_slice(&checksum.to_le_bytes());
-        image
+        let indexes: Vec<_> = indexes
+            .iter()
+            .map(|index| sohm::Index {
+                kind: match index.kind {
+                    SohmIndexKind::List => sohm::Kind::LIST,
+                    SohmIndexKind::BTree => sohm::Kind::BTREE,
+                },
+                message_type_flags: index.message_type_flags,
+                min_message_size: index.min_message_size,
+                list_max: index.list_max,
+                btree_min: index.btree_min,
+                message_count: index.message_count,
+                index_address: index.index_address.map(StoredAddress::get),
+                heap_address: index.heap_address.map(StoredAddress::get),
+            })
+            .collect();
+        sohm::table(&indexes, Widths::EIGHT)
     }
 
     /// Recompute the trailing checksum of an image a test has edited, so the
     /// test exercises the field it changed rather than the checksum.
     fn reseal(image: &mut [u8]) {
-        let split = image.len() - 4;
-        let checksum = crate::checksum::jenkins_lookup3(&image[..split]);
-        image[split..].copy_from_slice(&checksum.to_le_bytes());
+        test_util::checksum::restamp(image, 0, image.len());
     }
 
     fn sample_index() -> SohmIndexHeader {
@@ -770,13 +759,13 @@ mod tests {
         assert_eq!(record_len(16), 25);
     }
 
-    fn heap_record_bytes(reference_count: u32, heap_id: [u8; 8], offset_size: u8) -> Vec<u8> {
-        let mut data = vec![LOCATION_HEAP];
-        data.extend_from_slice(&0xDEADBEEFu32.to_le_bytes());
-        data.extend_from_slice(&reference_count.to_le_bytes());
-        data.extend_from_slice(&heap_id);
-        data.resize(record_len(offset_size), 0);
-        data
+    fn heap_record_bytes(reference_count: u32, heap_id: [u8; 8], offset_size: usize) -> Vec<u8> {
+        sohm::heap_record(
+            0xDEAD_BEEF,
+            reference_count,
+            heap_id,
+            Widths::new(offset_size, offset_size),
+        )
     }
 
     #[test]
@@ -827,13 +816,7 @@ mod tests {
     }
 
     fn list_image(records: &[Vec<u8>]) -> Vec<u8> {
-        let mut image = Vec::from(*LIST_SIGNATURE);
-        for record in records {
-            image.extend_from_slice(record);
-        }
-        let checksum = crate::checksum::jenkins_lookup3(&image);
-        image.extend_from_slice(&checksum.to_le_bytes());
-        image
+        sohm::list(records)
     }
 
     #[test]
