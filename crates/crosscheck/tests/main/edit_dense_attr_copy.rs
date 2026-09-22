@@ -15,8 +15,7 @@ use hdf5::file::LibraryVersion;
 use hdf5_pure::{AttrValue, File, FileBuilder};
 use std::collections::HashMap;
 use tempfile::tempdir;
-
-use test_util::heap::{has_fractal_heap, huge_object_counts};
+use test_util::fractal_heap;
 
 /// Number of attributes that forces the whole-file writer into dense storage
 /// (its threshold is 8 compact attributes).
@@ -55,7 +54,7 @@ fn write_dense_source(path: &std::path::Path) {
 /// otherwise the test would pass trivially against compact storage.
 fn assert_file_has_fractal_heap(path: &std::path::Path) {
     assert!(
-        has_fractal_heap(&std::fs::read(path).unwrap()),
+        fractal_heap::has_fractal_heap(&std::fs::read(path).unwrap()),
         "source file does not use dense (fractal-heap) storage",
     );
 }
@@ -189,7 +188,10 @@ fn copy_reproduces_huge_dense_attrs() {
         }
         b.write(&path).unwrap();
     }
-    assert_eq!(huge_object_counts(&std::fs::read(&path).unwrap()), vec![1]);
+    assert_eq!(
+        fractal_heap::huge_object_counts(&std::fs::read(&path).unwrap()),
+        vec![1]
+    );
 
     {
         let session = File::open_rw(&path).unwrap();
@@ -201,7 +203,7 @@ fn copy_reproduces_huge_dense_attrs() {
     // rather than having quietly fallen back to a managed object it cannot hold.
     // Reading only the first heap would report the source's choice, not the copy's.
     assert_eq!(
-        huge_object_counts(&std::fs::read(&path).unwrap()),
+        fractal_heap::huge_object_counts(&std::fs::read(&path).unwrap()),
         vec![1, 1],
         "expected a second fractal heap for the copy, huge-storing as the source does"
     );

@@ -14,10 +14,8 @@
 
 use hdf5_pure::{AttrValue, FileBuilder};
 use tempfile::tempdir;
-
-use test_util::heap::{
-    huge_object_count, indirect_block_count, managed_object_count, root_indirect_rows,
-};
+use test_util::btree_v2;
+use test_util::fractal_heap;
 
 /// Set on the child process to make it open `$DENSE_XCHECK_FILE` with libhdf5
 /// and report what it found on stdout.
@@ -326,7 +324,7 @@ fn largest_managed_payload() -> usize {
         let bytes = nine_attrs(payload)
             .finish()
             .expect("every size is writable");
-        if huge_object_count(&bytes) == 0 {
+        if fractal_heap::huge_object_count(&bytes) == 0 {
             return payload;
         }
     }
@@ -355,7 +353,7 @@ fn c_reads_both_sides_of_the_managed_object_threshold() {
     let huge = dir.path().join("huge.h5");
     nine_attrs(payload + 1).write(&huge).unwrap();
     assert_eq!(
-        huge_object_count(&std::fs::read(&huge).unwrap()),
+        fractal_heap::huge_object_count(&std::fs::read(&huge).unwrap()),
         1,
         "one byte past the threshold must actually select huge storage, or this \
          test is comparing two managed heaps"
@@ -406,8 +404,8 @@ fn c_reads_a_lone_huge_attribute() {
         builder.write(&path).unwrap();
 
         let bytes = std::fs::read(&path).unwrap();
-        assert_eq!(huge_object_count(&bytes), 1);
-        assert_eq!(managed_object_count(&bytes), others as u64);
+        assert_eq!(fractal_heap::huge_object_count(&bytes), 1);
+        assert_eq!(fractal_heap::managed_object_count(&bytes), others as u64);
 
         let detail = c_reads_in_detail(&path);
         assert_eq!(detail.verdict, CReads::Attrs(others + 1));
@@ -443,7 +441,10 @@ fn c_adds_a_huge_attribute_to_a_heap_this_crate_wrote() {
     }
     builder.create_dataset("x").with_f64_data(&[1.0]);
     builder.write(&path).unwrap();
-    assert_eq!(huge_object_count(&std::fs::read(&path).unwrap()), 1);
+    assert_eq!(
+        fractal_heap::huge_object_count(&std::fs::read(&path).unwrap()),
+        1
+    );
 
     let detail = c_inserts_then_reads(&path);
     assert_eq!(
@@ -477,8 +478,8 @@ fn c_reads_a_heap_mixing_managed_and_huge_objects() {
     builder.write(&path).unwrap();
 
     let bytes = std::fs::read(&path).unwrap();
-    assert_eq!(huge_object_count(&bytes), 3);
-    assert_eq!(managed_object_count(&bytes), 6);
+    assert_eq!(fractal_heap::huge_object_count(&bytes), 3);
+    assert_eq!(fractal_heap::managed_object_count(&bytes), 6);
 
     let detail = c_reads_in_detail(&path);
     assert_eq!(detail.verdict, CReads::Attrs(9));
@@ -519,7 +520,10 @@ fn c_reads_a_heap_of_many_huge_objects() {
     builder.create_dataset("x").with_f64_data(&[1.0]);
     builder.write(&path).unwrap();
 
-    assert_eq!(huge_object_count(&std::fs::read(&path).unwrap()), 12);
+    assert_eq!(
+        fractal_heap::huge_object_count(&std::fs::read(&path).unwrap()),
+        12
+    );
 
     let detail = c_reads_in_detail(&path);
     assert_eq!(detail.verdict, CReads::Attrs(12));
@@ -579,8 +583,8 @@ fn c_rejects_a_heap_whose_objects_exceed_its_declared_limit() {
     // attribute leaves the managed blocks entirely rather than overflowing the
     // declared limit.
     let past = nine_attrs(largest_managed_payload() + 1).finish().unwrap();
-    assert_eq!(huge_object_count(&past), 1);
-    assert_eq!(managed_object_count(&past), 8);
+    assert_eq!(fractal_heap::huge_object_count(&past), 1);
+    assert_eq!(fractal_heap::managed_object_count(&past), 8);
 }
 
 /// Attribute counts that need a multi-level name index, against the library
@@ -681,20 +685,20 @@ fn c_reads_a_heap_whose_managed_blocks_need_indirect_blocks() {
 
         let bytes = std::fs::read(&path).unwrap();
         assert_eq!(
-            huge_object_count(&bytes),
+            fractal_heap::huge_object_count(&bytes),
             0,
             "{name}: these attributes must stay managed, or this is not a test \
              about the managed blocks"
         );
-        assert_eq!(managed_object_count(&bytes), count as u64);
+        assert_eq!(fractal_heap::managed_object_count(&bytes), count as u64);
         assert!(
-            root_indirect_rows(&bytes) > 0,
+            fractal_heap::root_indirect_rows(&bytes) > 0,
             "{name}: the root should have grown into an indirect block"
         );
         assert!(
-            indirect_block_count(&bytes) >= indirect,
+            fractal_heap::indirect_block_count(&bytes) >= indirect,
             "{name}: expected at least {indirect} indirect blocks, found {}",
-            indirect_block_count(&bytes)
+            fractal_heap::indirect_block_count(&bytes)
         );
 
         let detail = c_reads_in_detail(&path);
@@ -831,11 +835,11 @@ const STRADDLING_TOTAL: usize = 709;
 #[track_caller]
 fn assert_a_colliding_name_is_promoted(bytes: &[u8], colliding: usize, context: &str) {
     assert_eq!(
-        test_util::heap::sole_btree_depth(bytes),
+        btree_v2::sole_btree_depth(bytes),
         2,
         "{context}: the index is not the multi-level tree this test exists to search"
     );
-    let root = test_util::heap::root_records(bytes);
+    let root = btree_v2::root_records(bytes);
     // A record's creation order is the attribute's index in the order it was set,
     // and `colliding_attrs` sets every colliding name before any padding.
     assert!(

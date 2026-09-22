@@ -14,8 +14,7 @@
 
 use hdf5_pure::{AttrValue, File, FileBuilder, RepackOptions, repack};
 use tempfile::tempdir;
-
-use test_util::heap::has_fractal_heap;
+use test_util::fractal_heap;
 
 const USERBLOCK: u64 = 512;
 
@@ -55,7 +54,7 @@ fn write_source(path: &std::path::Path) {
 
     let bytes = std::fs::read(path).unwrap();
     assert!(
-        has_fractal_heap(&bytes),
+        fractal_heap::has_fractal_heap(&bytes),
         "fixture must use dense storage, or it proves nothing"
     );
 }

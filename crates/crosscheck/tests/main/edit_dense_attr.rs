@@ -14,8 +14,7 @@ use hdf5_pure::{
     MemoryStrategy, SyncPolicy,
 };
 use tempfile::tempdir;
-
-use test_util::heap::{frhp_offsets, has_fractal_heap};
+use test_util::fractal_heap;
 
 /// Past the writer's eight-attribute compact threshold.
 const DENSE_COUNT: usize = 12;
@@ -44,7 +43,7 @@ fn write_dense(path: &std::path::Path) {
     }
     b.write(path).unwrap();
     assert!(
-        has_fractal_heap(&std::fs::read(path).unwrap()),
+        fractal_heap::has_fractal_heap(&std::fs::read(path).unwrap()),
         "the fixture must already store its attributes densely",
     );
 }
@@ -59,7 +58,7 @@ fn write_compact(path: &std::path::Path) {
     }
     b.write(path).unwrap();
     assert!(
-        !has_fractal_heap(&std::fs::read(path).unwrap()),
+        !fractal_heap::has_fractal_heap(&std::fs::read(path).unwrap()),
         "the fixture must start out compact",
     );
 }
@@ -128,7 +127,7 @@ fn a_compact_edit_crossing_the_threshold_moves_the_set_to_a_heap() {
     }
 
     assert!(
-        has_fractal_heap(&std::fs::read(&p).unwrap()),
+        fractal_heap::has_fractal_heap(&std::fs::read(&p).unwrap()),
         "crossing the compact threshold must move the set into a fractal heap",
     );
     let f = File::open(&p).unwrap();
@@ -253,7 +252,7 @@ fn removing_every_dense_attribute_leaves_an_object_with_none() {
         }
         b.write(&p).unwrap();
     }
-    let heaps_before = frhp_offsets(&std::fs::read(&p).unwrap()).len();
+    let heaps_before = fractal_heap::header_offsets(&std::fs::read(&p).unwrap()).len();
     assert_eq!(
         heaps_before, 1,
         "the fixture has exactly one attribute heap"
@@ -273,7 +272,7 @@ fn removing_every_dense_attribute_leaves_an_object_with_none() {
     // is why the count is what says which of the two was written. The one still
     // in the file is the superseded heap the rebuild left behind.
     assert!(
-        frhp_offsets(&std::fs::read(&p).unwrap()).len() <= heaps_before,
+        fractal_heap::header_offsets(&std::fs::read(&p).unwrap()).len() <= heaps_before,
         "removing the last attribute must not build a heap to hold none",
     );
     let f = File::open(&p).unwrap();
@@ -304,7 +303,7 @@ fn an_attribute_too_large_for_the_object_header_goes_to_a_heap() {
     }
 
     assert!(
-        has_fractal_heap(&std::fs::read(&p).unwrap()),
+        fractal_heap::has_fractal_heap(&std::fs::read(&p).unwrap()),
         "an attribute the header cannot describe must go to a heap",
     );
     let f = File::open(&p).unwrap();
@@ -346,7 +345,7 @@ fn a_variable_length_attribute_survives_a_dense_rebuild() {
     }
 
     assert!(
-        has_fractal_heap(&std::fs::read(&p).unwrap()),
+        fractal_heap::has_fractal_heap(&std::fs::read(&p).unwrap()),
         "the edit crossed the threshold, so the set is in a heap",
     );
     let f = File::open(&p).unwrap();
@@ -432,7 +431,7 @@ fn a_dataset_added_in_place_may_carry_a_dense_attribute_set() {
     // Twelve *compact* attributes would read back just as well, so the storage
     // the writer chose is what this test is about: the fixture had no heap.
     assert!(
-        has_fractal_heap(&std::fs::read(&p).unwrap()),
+        fractal_heap::has_fractal_heap(&std::fs::read(&p).unwrap()),
         "a dataset added with more attributes than the header holds must get a heap",
     );
     let f = File::open(&p).unwrap();
@@ -482,7 +481,7 @@ fn a_group_created_in_place_may_carry_a_dense_attribute_set() {
     }
 
     assert!(
-        has_fractal_heap(&std::fs::read(&p).unwrap()),
+        fractal_heap::has_fractal_heap(&std::fs::read(&p).unwrap()),
         "a group created with more attributes than the header holds must get a heap",
     );
     let f = File::open(&p).unwrap();
@@ -511,7 +510,7 @@ fn the_root_group_takes_a_dense_attribute_set() {
     }
 
     assert!(
-        has_fractal_heap(&std::fs::read(&p).unwrap()),
+        fractal_heap::has_fractal_heap(&std::fs::read(&p).unwrap()),
         "the root group's set outgrew its header and must be in a heap",
     );
     let f = File::open(&p).unwrap();
@@ -687,7 +686,7 @@ fn an_attribute_holding_an_object_reference_is_not_moved_to_a_heap() {
     }
     let before = std::fs::read(&p).unwrap();
     assert!(
-        !has_fractal_heap(&before),
+        !fractal_heap::has_fractal_heap(&before),
         "six attributes still fit the object header",
     );
 
@@ -754,7 +753,7 @@ fn an_already_dense_object_keeps_its_reference_attribute_through_a_rebuild() {
         }
         c.close().unwrap();
     }
-    assert!(has_fractal_heap(&std::fs::read(&p).unwrap()));
+    assert!(fractal_heap::has_fractal_heap(&std::fs::read(&p).unwrap()));
 
     {
         let s = File::open_rw(&p).unwrap();
@@ -826,7 +825,7 @@ fn a_variable_length_of_references_does_not_block_the_move_to_a_heap() {
     }
 
     assert!(
-        has_fractal_heap(&std::fs::read(&p).unwrap()),
+        fractal_heap::has_fractal_heap(&std::fs::read(&p).unwrap()),
         "ten attributes are past what the object header holds",
     );
     let c = hdf5::File::open(&p).unwrap();

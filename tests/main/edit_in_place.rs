@@ -6,10 +6,8 @@ use hdf5_pure::{
     FormatError, MaxExtent, Object, ReferenceType, ScaleOffset, StringPadding,
 };
 
+use test_util::fractal_heap;
 use test_util::temp;
-
-use heap::has_fractal_heap;
-use test_util::heap;
 
 /// Write a starter file with one dataset, returning its path.
 fn write_starter(path: &std::path::Path) {
@@ -1157,7 +1155,9 @@ fn add_variable_length_group_attributes_over_budget_use_a_heap() {
     }
     b.add_group(g.finish());
     b.write(&path).unwrap();
-    assert!(!has_fractal_heap(&std::fs::read(&path).unwrap()));
+    assert!(!fractal_heap::has_fractal_heap(
+        &std::fs::read(&path).unwrap()
+    ));
 
     {
         let session = File::open_rw(&path).unwrap();
@@ -1175,7 +1175,7 @@ fn add_variable_length_group_attributes_over_budget_use_a_heap() {
     }
 
     assert!(
-        has_fractal_heap(&std::fs::read(&path).unwrap()),
+        fractal_heap::has_fractal_heap(&std::fs::read(&path).unwrap()),
         "six fixed plus three variable-length attributes are past the compact budget",
     );
     let file = File::open(&path).unwrap();
@@ -1207,7 +1207,9 @@ fn dense_group_attribute_storage_takes_a_variable_length_edit() {
     }
     b.add_group(g.finish());
     b.write(&path).unwrap();
-    assert!(has_fractal_heap(&std::fs::read(&path).unwrap()));
+    assert!(fractal_heap::has_fractal_heap(
+        &std::fs::read(&path).unwrap()
+    ));
 
     {
         let session = File::open_rw(&path).unwrap();
@@ -3122,7 +3124,9 @@ fn add_provenance_dataset_at_attr_budget_boundary_via_edit_session() {
 fn add_provenance_dataset_over_attr_budget_uses_a_heap() {
     let path = temp::temp_path("hdf5_pure_edit_add_provenance_over_budget.h5");
     write_starter(&path);
-    assert!(!has_fractal_heap(&std::fs::read(&path).unwrap()));
+    assert!(!fractal_heap::has_fractal_heap(
+        &std::fs::read(&path).unwrap()
+    ));
 
     {
         let session = File::open_rw(&path).unwrap();
@@ -3141,7 +3145,7 @@ fn add_provenance_dataset_over_attr_budget_uses_a_heap() {
     }
 
     assert!(
-        has_fractal_heap(&std::fs::read(&path).unwrap()),
+        fractal_heap::has_fractal_heap(&std::fs::read(&path).unwrap()),
         "nine attributes are one past what the object header holds",
     );
     let file = File::open(&path).unwrap();
@@ -3250,7 +3254,9 @@ fn add_chunked_dataset_with_variable_length_attribute_via_edit_session() {
 fn add_dataset_with_oversized_variable_length_attribute_uses_a_heap() {
     let path = temp::temp_path("hdf5_pure_edit_add_oversized_vlen_attr.h5");
     write_starter(&path);
-    assert!(!has_fractal_heap(&std::fs::read(&path).unwrap()));
+    assert!(!fractal_heap::has_fractal_heap(
+        &std::fs::read(&path).unwrap()
+    ));
 
     // Each element serializes to a fixed-size 16-byte global-heap reference;
     // 5000 of them (80000 bytes) comfortably overflows the object header's
@@ -3269,7 +3275,7 @@ fn add_dataset_with_oversized_variable_length_attribute_uses_a_heap() {
     }
 
     assert!(
-        has_fractal_heap(&std::fs::read(&path).unwrap()),
+        fractal_heap::has_fractal_heap(&std::fs::read(&path).unwrap()),
         "an attribute the object header cannot describe belongs in a heap",
     );
     let file = File::open(&path).unwrap();

@@ -13,8 +13,7 @@
 //! that do so, since the reserve and the build sit on opposite sides of a branch.
 
 use hdf5_pure::{AttrValue, File, FileBuilder, FileSpaceStrategy};
-
-use test_util::heap::{has_fractal_heap, huge_object_count};
+use test_util::fractal_heap;
 
 /// A builder whose root carries one variable-length string attribute alongside
 /// `others` small ones — enough of them to select dense storage by count, not by
@@ -48,7 +47,7 @@ fn labels(attrs: &std::collections::HashMap<String, AttrValue>, name: &str) -> V
 fn a_variable_length_attribute_survives_dense_storage() {
     let expected = ["alpha", "beta", "gamma"];
     let bytes = root_with_vlen(12, &expected).finish().unwrap();
-    assert!(has_fractal_heap(&bytes));
+    assert!(fractal_heap::has_fractal_heap(&bytes));
 
     let file = File::from_bytes(bytes).unwrap();
     let attrs = file.root().attrs().unwrap();
@@ -68,7 +67,7 @@ fn a_paged_file_stores_variable_length_attributes_densely_too() {
         .with_file_space_page_size(4096);
 
     let bytes = builder.finish().unwrap();
-    assert!(has_fractal_heap(&bytes));
+    assert!(fractal_heap::has_fractal_heap(&bytes));
 
     let file = File::from_bytes(bytes).unwrap();
     let attrs = file.root().attrs().unwrap();
@@ -118,7 +117,7 @@ fn a_huge_variable_length_attribute_keeps_its_values() {
 
     let bytes = builder.finish().unwrap();
     assert_eq!(
-        huge_object_count(&bytes),
+        fractal_heap::huge_object_count(&bytes),
         1,
         "16 bytes per element puts this past the managed-object limit"
     );
@@ -178,7 +177,7 @@ fn chunked_variable_length_elements_coexist_with_dense_attributes() {
         }
 
         let bytes = builder.finish().unwrap();
-        assert!(has_fractal_heap(&bytes), "paged={paged}");
+        assert!(fractal_heap::has_fractal_heap(&bytes), "paged={paged}");
         let file = File::from_bytes(bytes).unwrap();
         assert_eq!(
             labels(&file.root().attrs().unwrap(), "labels"),

@@ -11,8 +11,7 @@
 //! test here is that one.
 
 use hdf5_pure::{AttrValue, Error, File, FileBuilder, FormatError, OBJECT_HEADER_MESSAGE_MAX};
-
-use test_util::heap::has_fractal_heap;
+use test_util::fractal_heap;
 
 /// A `VarLenAsciiCharArray` past the message-size limit: each element contributes a
 /// 16-byte global-heap reference, so ~4,100 elements cross it. This is the shape
@@ -55,7 +54,7 @@ fn root_vlen_attr_past_the_limit_moves_to_heap_storage() {
     builder.create_dataset("x").with_f64_data(&[1.0]);
 
     let bytes = builder.finish().expect("written, not refused");
-    assert!(has_fractal_heap(&bytes));
+    assert!(fractal_heap::has_fractal_heap(&bytes));
 
     let file = File::from_bytes(bytes).unwrap();
     assert_eq!(strings(&file.root().attrs().unwrap(), "labels"), expected);
@@ -84,7 +83,7 @@ fn fixed_width_attrs_past_the_limit_move_to_heap_storage() {
     builder.add_group(group.finish());
 
     let bytes = builder.finish().expect("written, not refused");
-    assert!(has_fractal_heap(&bytes));
+    assert!(fractal_heap::has_fractal_heap(&bytes));
 
     let file = File::from_bytes(bytes).unwrap();
     for attrs in [
@@ -146,7 +145,7 @@ fn a_small_vlen_attribute_swept_into_the_heap_keeps_its_values() {
     builder.create_dataset("x").with_f64_data(&[1.0]);
 
     let bytes = builder.finish().expect("written, not refused");
-    assert!(has_fractal_heap(&bytes));
+    assert!(fractal_heap::has_fractal_heap(&bytes));
 
     let file = File::from_bytes(bytes).unwrap();
     let attrs = file.root().attrs().unwrap();
