@@ -15,8 +15,7 @@ use test_util::temp;
 
 // The page-homogeneity check is shared with the free-space tests, which exercise
 // the same invariant from the in-place append side (issue #387).
-use paged::assert_pages_homogeneous;
-use test_util::paged;
+use test_util_hdf5::paged;
 
 /// A fixture under the repository's gitignored `tmp/`, in a directory of its own
 /// so two concurrent runs of this binary cannot collide on the name (issue #334).
@@ -138,7 +137,7 @@ fn paged_staged_commit_keeps_pages_homogeneous() {
     );
     drop(f);
     assert_paged_ok(&path);
-    assert_pages_homogeneous(&path, PAGE, &["d", "added"]);
+    paged::assert_pages_homogeneous(&path, PAGE, &["d", "added"]);
 }
 
 /// A paged file with a userblock is refused rather than silently un-paged.

@@ -471,6 +471,7 @@ dependencies = [
  "sha2",
  "tempfile",
  "test-util",
+ "test-util-hdf5",
 ]
 
 [[package]]
@@ -1125,10 +1126,17 @@ dependencies = [
 name = "test-util"
 version = "0.0.0"
 dependencies = [
- "hdf5-pure",
  "heapscope",
  "rstest",
  "tempfile",
+]
+
+[[package]]
+name = "test-util-hdf5"
+version = "0.0.0"
+dependencies = [
+ "hdf5-pure",
+ "test-util",
 ]
 
 [[package]]

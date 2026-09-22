@@ -16,8 +16,7 @@ use test_util::temp;
 
 // Shared with `tests/main/paged_staged_commit.rs`, which holds the staged commit to
 // the same invariant this holds the in-place append's reserve to (issue #387).
-use paged::assert_pages_homogeneous;
-use test_util::paged;
+use test_util_hdf5::paged;
 
 /// The superblock's end-of-file must equal the actual file length after every
 /// commit, including ones that truncate.
@@ -2473,7 +2472,7 @@ fn a_paged_append_reserve_keeps_pages_homogeneous() {
     );
     drop(file);
     assert_no_persisted_free_space_holds_live_chunks(&path, &["log"]);
-    assert_pages_homogeneous(&path, RECLAIM_PAGE, &["log", "keep", "ceiling", "after"]);
+    paged::assert_pages_homogeneous(&path, RECLAIM_PAGE, &["log", "keep", "ceiling", "after"]);
 }
 
 /// The page size the paged reclaim tests below create their files with. Large
@@ -2792,7 +2791,7 @@ fn paged_group_churn_with_populated_datasets_reaches_a_steady_size() {
     assert_churn_survivors(&path);
     assert_last_group_populated(&path);
     let last = ["last/log0", "last/log1", "last/log2"];
-    assert_pages_homogeneous(&path, RECLAIM_PAGE, &last);
+    paged::assert_pages_homogeneous(&path, RECLAIM_PAGE, &last);
     assert_no_persisted_free_space_holds_live_chunks(&path, &last);
 }
 
@@ -2874,7 +2873,7 @@ fn paged_staged_append_churn_does_not_leak_the_old_index() {
     // mixes a page (issue #261), and offering a live chunk as free hands the next
     // session the bytes the dataset is stored in (issue #387). Neither shows up
     // in the size ceiling above, which a wrong answer satisfies best of all.
-    assert_pages_homogeneous(&path, RECLAIM_PAGE, &["d"]);
+    paged::assert_pages_homogeneous(&path, RECLAIM_PAGE, &["d"]);
     assert_no_persisted_free_space_holds_live_chunks(&path, &["d"]);
 }
 
@@ -2972,7 +2971,7 @@ fn a_multi_chunk_staged_append_fills_chunk_sized_holes() {
         // holes; both must land in raw pages, and neither may leave a live chunk
         // inside a region the managers advertise.
         if page > 0 {
-            assert_pages_homogeneous(&path, page, &["d"]);
+            paged::assert_pages_homogeneous(&path, page, &["d"]);
         }
         assert_no_persisted_free_space_holds_live_chunks(&path, &["d"]);
         let f = File::open(&path).unwrap();

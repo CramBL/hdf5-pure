@@ -1,0 +1,15 @@
+# The test helpers that need hdf5-pure's own API, kept out of `test-util` so
+# that crate stays free to build a file's bytes without the library that reads
+# them.
+[package]
+name = "test-util-hdf5"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+hdf5-pure = { path = "../.." }
+test-util = { path = "../test-util" }
+
+[lints]
+workspace = true
