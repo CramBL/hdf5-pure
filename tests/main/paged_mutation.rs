@@ -21,15 +21,6 @@ const PAGE: u64 = 4096;
 
 use test_util::temp;
 
-/// A fixture under the repository's gitignored `tmp/`, in a directory of its own
-/// so two concurrent runs of this binary cannot collide on the name (issue #334).
-fn tmp(name: &str) -> temp::TempPath {
-    let mut p = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    p.push("tmp");
-    std::fs::create_dir_all(&p).expect("create the repository's tmp directory");
-    temp::temp_path_in(&p, name)
-}
-
 /// Build a persisting paged file with an unlimited rank-1 chunked i32 dataset `d`
 /// seeded with `0..n`.
 fn build_paged(path: &std::path::Path, n: i32, chunk: u64) {
@@ -78,7 +69,7 @@ fn assert_paged_ok(path: &std::path::Path) {
 /// back and the paged invariants hold.
 #[test]
 fn paged_persist_append_roundtrip() {
-    let path = tmp("pure_paged_mut_roundtrip.h5");
+    let path = temp::repo_temp_path("pure_paged_mut_roundtrip.h5");
     build_paged(&path, 64, 64); // 1 chunk, ~one raw page
 
     {
@@ -105,7 +96,7 @@ fn paged_persist_append_roundtrip() {
 /// page-aligned raw run, then a single finalize at close.
 #[test]
 fn paged_persist_many_appends_one_finalize() {
-    let path = tmp("pure_paged_mut_many.h5");
+    let path = temp::repo_temp_path("pure_paged_mut_many.h5");
     build_paged(&path, 100, 32);
 
     let mut next = 100i32;
@@ -133,7 +124,7 @@ fn paged_persist_many_appends_one_finalize() {
 /// padding) occur in one call. Everything still reads back.
 #[test]
 fn paged_persist_large_append_multi_batch() {
-    let path = tmp("pure_paged_mut_large.h5");
+    let path = temp::repo_temp_path("pure_paged_mut_large.h5");
     build_paged(&path, 256, 256);
 
     {
@@ -161,7 +152,7 @@ fn paged_persist_large_append_multi_batch() {
 /// to refuse such a file and send the caller to the bounded engine.
 #[test]
 fn paged_mirror_commit_appends() {
-    let path = tmp("pure_paged_mirror_commit.h5");
+    let path = temp::repo_temp_path("pure_paged_mirror_commit.h5");
     build_paged(&path, 100, 32);
 
     {
@@ -188,7 +179,7 @@ fn paged_mirror_commit_appends() {
 /// type managers into canonical shape, just like an explicit `close`.
 #[test]
 fn paged_persist_drop_finalizes() {
-    let path = tmp("pure_paged_mut_drop.h5");
+    let path = temp::repo_temp_path("pure_paged_mut_drop.h5");
     build_paged(&path, 64, 64);
     {
         let file = open_bounded(&path).unwrap();
@@ -214,7 +205,7 @@ fn paged_persist_drop_finalizes() {
 /// reached here through `MemoryStrategy::Mirrored`.
 #[test]
 fn paged_non_persist_mirror_is_refused() {
-    let path = tmp("pure_paged_nonpersist_mirror.h5");
+    let path = temp::repo_temp_path("pure_paged_nonpersist_mirror.h5");
     let mut b = FileBuilder::new();
     b.create_dataset("d")
         .with_i32_data(&(0..100).collect::<Vec<i32>>())
@@ -274,7 +265,7 @@ fn paged_non_persist_mirror_is_refused() {
 /// A bounded session that appends nothing must not grow or re-page the file.
 #[test]
 fn paged_persist_noop_close_does_not_grow() {
-    let path = tmp("pure_paged_mut_noop.h5");
+    let path = temp::repo_temp_path("pure_paged_mut_noop.h5");
     build_paged(&path, 200, 50);
     let before = std::fs::metadata(&path).unwrap().len();
     open_bounded(&path).unwrap().close().unwrap();

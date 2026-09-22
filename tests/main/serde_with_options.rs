@@ -10,14 +10,6 @@ use serde::{Deserialize, Serialize};
 
 use test_util::temp;
 
-/// A `.mat` fixture, in a directory that goes away with the returned value.
-///
-/// Replaces a nanosecond-stamped name in the shared temporary directory, which
-/// no two runs collided on but no run ever cleaned up (issue #334).
-fn temp_path(name: &str) -> temp::TempPath {
-    temp::temp_path(&format!("{name}.mat"))
-}
-
 fn read_class(file: &File, ds_path: &str) -> String {
     let ds = file.dataset(ds_path).unwrap();
     let attrs = ds.attrs().unwrap();
@@ -40,7 +32,7 @@ fn default_options_produce_char_strings() {
         score: 9.5,
     };
     let bytes = mat::to_bytes_with_options(&doc, &Options::default()).unwrap();
-    let path = temp_path("default-char");
+    let path = temp::temp_path_with_extension("default-char", "mat");
     std::fs::write(&path, &bytes).unwrap();
     let f = File::open(&path).unwrap();
     assert_eq!(read_class(&f, "name"), "char");
@@ -57,7 +49,7 @@ fn string_class_option_produces_string_objects() {
     let mut opts = Options::default();
     opts.string_class = StringClass::String;
     let bytes = mat::to_bytes_with_options(&doc, &opts).unwrap();
-    let path = temp_path("string-class");
+    let path = temp::temp_path_with_extension("string-class", "mat");
     std::fs::write(&path, &bytes).unwrap();
     let f = File::open(&path).unwrap();
     assert_eq!(read_class(&f, "name"), "string");
@@ -82,7 +74,7 @@ fn sanitize_policy_rewrites_keywords() {
     let mut opts = Options::default();
     opts.invalid_name_policy = InvalidNamePolicy::Sanitize;
     let bytes = mat::to_bytes_with_options(&doc, &opts).unwrap();
-    let path = temp_path("sanitize");
+    let path = temp::temp_path_with_extension("sanitize", "mat");
     std::fs::write(&path, &bytes).unwrap();
     let f = File::open(&path).unwrap();
     assert_eq!(read_class(&f, "end_"), "uint32");
@@ -141,7 +133,7 @@ fn data_as_dims_empty_marker_encoding() {
     let mut opts = Options::default();
     opts.empty_marker_encoding = EmptyMarkerEncoding::DataAsDims;
     let bytes = mat::to_bytes_with_options(&doc, &opts).unwrap();
-    let path = temp_path("data-as-dims");
+    let path = temp::temp_path_with_extension("data-as-dims", "mat");
     std::fs::write(&path, &bytes).unwrap();
     let f = File::open(&path).unwrap();
     let ds = f.dataset("v").unwrap();

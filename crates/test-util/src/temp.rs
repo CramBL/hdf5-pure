@@ -11,8 +11,6 @@
 //! fixture name only has to be unique within its test, and removes that
 //! directory when the test ends whether it passed, failed, or panicked.
 
-#![allow(dead_code)]
-
 use std::path::{Path, PathBuf};
 
 /// A fixture path inside a temporary directory owned by the test.
@@ -38,17 +36,29 @@ pub fn temp_path(name: &str) -> TempPath {
     fixture_in(dir, name)
 }
 
-/// The same, with the temporary directory created inside `parent`.
+/// A path named `<name>.<extension>` in a temporary directory created for this
+/// call.
+pub fn temp_path_with_extension(name: &str, extension: &str) -> TempPath {
+    temp_path(&format!("{name}.{extension}"))
+}
+
+/// A path named `name` in a temporary directory under the repository's
+/// gitignored `tmp/`, which this call creates if it is absent.
 ///
-/// For the tests that keep their fixtures in the repository's gitignored `tmp/`
-/// rather than the system temporary directory. `parent` has to exist.
-pub fn temp_path_in(parent: &Path, name: &str) -> TempPath {
-    let dir = tempfile::TempDir::new_in(parent).unwrap_or_else(|e| {
-        panic!(
-            "create a temporary directory under {}: {e}",
-            parent.display()
-        )
-    });
+/// For the fixtures that have to sit on the same filesystem as the
+/// repository.
+pub fn repo_temp_path(name: &str) -> TempPath {
+    let parent = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tmp");
+    std::fs::create_dir_all(&parent)
+        .unwrap_or_else(|e| panic!("create the repository's tmp directory: {e}"));
+    temp_path_in(&parent, name)
+}
+
+/// The same as [`temp_path`], with the temporary directory created inside
+/// `parent`, which has to exist.
+fn temp_path_in(parent: &Path, name: &str) -> TempPath {
+    let dir = tempfile::TempDir::new_in(parent)
+        .unwrap_or_else(|e| panic!("create a temporary directory under {parent:?}: {e}"));
     fixture_in(dir, name)
 }
 

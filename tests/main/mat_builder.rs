@@ -5,14 +5,6 @@ use hdf5_pure::{AttrValue, File, LibVer};
 
 use test_util::temp;
 
-/// A `.mat` fixture, in a directory that goes away with the returned value.
-///
-/// Replaces a nanosecond-stamped name in the shared temporary directory, which
-/// no two runs collided on but no run ever cleaned up (issue #334).
-fn temp_path(name: &str) -> temp::TempPath {
-    temp::temp_path(&format!("{name}.mat"))
-}
-
 fn read_class(file: &File, ds_path: &str) -> String {
     let ds = file.dataset(ds_path).unwrap();
     let attrs = ds.attrs().unwrap();
@@ -32,7 +24,7 @@ fn scalar_numeric_classes() {
     mb.write_scalar_logical("flag", true).unwrap();
     let bytes = mb.finish().unwrap();
 
-    let path = temp_path("scalars");
+    let path = temp::temp_path_with_extension("scalars", "mat");
     std::fs::write(&path, &bytes).unwrap();
     let f = File::open(&path).unwrap();
     assert_eq!(read_class(&f, "d"), "double");
@@ -50,7 +42,7 @@ fn vector_round_trips_with_class() {
     mb.write_f64("v", &dims, &[1.0, 2.0, 3.0, 4.0]).unwrap();
     let bytes = mb.finish().unwrap();
 
-    let path = temp_path("vec");
+    let path = temp::temp_path_with_extension("vec", "mat");
     std::fs::write(&path, &bytes).unwrap();
     let f = File::open(&path).unwrap();
     let ds = f.dataset("v").unwrap();
@@ -70,7 +62,7 @@ fn struct_with_fields() {
     .unwrap();
     let bytes = mb.finish().unwrap();
 
-    let path = temp_path("struct");
+    let path = temp::temp_path_with_extension("struct", "mat");
     std::fs::write(&path, &bytes).unwrap();
     let f = File::open(&path).unwrap();
     let group = f.group("payload").unwrap();
@@ -101,7 +93,7 @@ fn cell_with_mixed_elements() {
     .unwrap();
     let bytes = mb.finish().unwrap();
 
-    let path = temp_path("cell");
+    let path = temp::temp_path_with_extension("cell", "mat");
     std::fs::write(&path, &bytes).unwrap();
     let f = File::open(&path).unwrap();
     assert_eq!(read_class(&f, "c"), "cell");
@@ -128,7 +120,7 @@ fn nested_struct_and_cell() {
     .unwrap();
     let bytes = mb.finish().unwrap();
 
-    let path = temp_path("nested");
+    let path = temp::temp_path_with_extension("nested", "mat");
     std::fs::write(&path, &bytes).unwrap();
     let f = File::open(&path).unwrap();
     assert_eq!(read_class(&f, "root/entries"), "cell");
@@ -155,7 +147,7 @@ fn string_object_emits_subsystem() {
         .unwrap();
     let bytes = mb.finish().unwrap();
 
-    let path = temp_path("string-obj");
+    let path = temp::temp_path_with_extension("string-obj", "mat");
     std::fs::write(&path, &bytes).unwrap();
     let f = File::open(&path).unwrap();
     assert_eq!(read_class(&f, "greeting"), "string");
@@ -193,7 +185,7 @@ fn name_sanitization_handles_keyword() {
     .unwrap();
     let bytes = mb.finish().unwrap();
 
-    let path = temp_path("sanitize");
+    let path = temp::temp_path_with_extension("sanitize", "mat");
     std::fs::write(&path, &bytes).unwrap();
     let f = File::open(&path).unwrap();
     // Sanitize appends `_` to keyword.
@@ -222,7 +214,7 @@ fn empty_marker_data_as_dims_default() {
     mb.write_empty("empty", MatClass::Double, &[0, 0]).unwrap();
     let bytes = mb.finish().unwrap();
 
-    let path = temp_path("empty");
+    let path = temp::temp_path_with_extension("empty", "mat");
     std::fs::write(&path, &bytes).unwrap();
     let f = File::open(&path).unwrap();
     let ds = f.dataset("empty").unwrap();

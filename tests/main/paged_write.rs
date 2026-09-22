@@ -9,21 +9,12 @@ const PAGE: u64 = 16384;
 
 use test_util::temp;
 
-/// A fixture under the repository's gitignored `tmp/`, in a directory of its own
-/// so two concurrent runs of this binary cannot collide on the name (issue #334).
-fn tmp(name: &str) -> temp::TempPath {
-    let mut p = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    p.push("tmp");
-    std::fs::create_dir_all(&p).expect("create the repository's tmp directory");
-    temp::temp_path_in(&p, name)
-}
-
 /// A persisting paged file with small and large datasets round-trips through
 /// hdf5-pure: the EOA is page-aligned, the free space is tracked in managers,
 /// and every dataset reads back.
 #[test]
 fn paged_persist_roundtrip() {
-    let path = tmp("pure_paged_b1.h5");
+    let path = temp::repo_temp_path("pure_paged_b1.h5");
     let small_a: Vec<i32> = (0..100).collect(); // 400 bytes
     let small_b: Vec<i32> = (0..400).collect(); // 1600 bytes
     let big: Vec<i32> = (0..5000).collect(); // 20000 bytes >= page -> large run
@@ -75,7 +66,7 @@ fn paged_persist_roundtrip() {
 /// A non-persisting paged file is still page-aligned, but records no managers.
 #[test]
 fn paged_non_persist_is_aligned_without_managers() {
-    let path = tmp("pure_paged_b1_nopersist.h5");
+    let path = temp::repo_temp_path("pure_paged_b1_nopersist.h5");
     let data: Vec<i32> = (0..300).collect();
     let mut b = FileBuilder::new();
     b.create_dataset("d").with_i32_data(&data);
@@ -100,7 +91,7 @@ fn paged_non_persist_is_aligned_without_managers() {
 /// A metadata-only paged file (no datasets) is one metadata page, page-aligned.
 #[test]
 fn paged_metadata_only() {
-    let path = tmp("pure_paged_b1_meta.h5");
+    let path = temp::repo_temp_path("pure_paged_b1_meta.h5");
     let mut b = FileBuilder::new();
     b.with_file_space_strategy(FileSpaceStrategy::Page, true, 0)
         .with_file_space_page_size(PAGE);
@@ -119,7 +110,7 @@ fn paged_metadata_only() {
 /// exercises a large page-aligned chunked run in the raw region.
 #[test]
 fn paged_chunked_roundtrip() {
-    let path = tmp("pure_paged_b1_chunked.h5");
+    let path = temp::repo_temp_path("pure_paged_b1_chunked.h5");
     let small: Vec<f64> = (0..64).map(|i| i as f64).collect(); // 512 bytes
     let big: Vec<f64> = (0..8000).map(|i| i as f64 * 0.5).collect(); // 64000 bytes >= page
 
@@ -155,7 +146,7 @@ fn paged_chunked_roundtrip() {
 /// (the generic-large manager stays empty).
 #[test]
 fn paged_exact_page_multiple_large_block() {
-    let path = tmp("pure_paged_b1_exact.h5");
+    let path = temp::repo_temp_path("pure_paged_b1_exact.h5");
     // 4096 i32 = 16384 bytes = exactly one page.
     let big: Vec<i32> = (0..4096).collect();
     let mut b = FileBuilder::new();
@@ -178,7 +169,7 @@ fn paged_exact_page_multiple_large_block() {
 /// a dataset attribute. All must round-trip through hdf5-pure.
 #[test]
 fn paged_groups_attrs_vlen() {
-    let path = tmp("pure_paged_b1_meta_heavy.h5");
+    let path = temp::repo_temp_path("pure_paged_b1_meta_heavy.h5");
     let mut b = FileBuilder::new();
     b.set_attr("title", AttrValue::String("paged file".into()));
     {
