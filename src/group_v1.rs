@@ -136,174 +136,76 @@ mod tests {
     use crate::access_mode::AccessMode;
     use crate::message_type::MessageType;
     use crate::object_header::ObjectHeader;
-    /// Build a minimal synthetic file with a group containing named children.
-    /// Returns (file_data, SymbolTableMessage).
+    use test_util::image::Image;
+    use test_util::widths::Widths;
+    use test_util::{btree_v1, local_heap, symbol_table};
+
+    /// A synthetic file holding one version 1 group: a local heap of the
+    /// children's names, one symbol table node of their entries, and a B-tree
+    /// leaf whose single child is that node.
     fn build_synthetic_group(
-        children: &[(&str, u64, u32)], // (name, obj_header_addr, cache_type)
-        offset_size: u8,
-        length_size: u8,
+        children: &[(&str, u64, u32)],
+        widths: Widths,
     ) -> (Vec<u8>, SymbolTableMessage) {
-        let os = offset_size as usize;
-        let ls = length_size as usize;
+        let names: Vec<&str> = children.iter().map(|&(name, _, _)| name).collect();
+        let mut image = Image::new();
 
-        // Build local heap data segment (names)
-        let mut heap_data = Vec::new();
-        let mut name_offsets = Vec::new();
-        for (name, _, _) in children {
-            name_offsets.push(heap_data.len() as u64);
-            heap_data.extend_from_slice(name.as_bytes());
-            heap_data.push(0);
-        }
-        let heap_data_size = heap_data.len();
+        // The heap header sits at offset zero, so the group's message can
+        // state a known address, and its data segment follows it.
+        let segment_at = local_heap::header_len(widths);
+        let segment = local_heap::Segment::of_names(segment_at as u64, &names);
+        image.place(0, &segment.header(widths));
+        image.place(segment_at, &segment.bytes);
 
-        // Layout:
-        // 0: local heap header
-        // heap_header_end: heap data segment
-        // after heap data: SNOD
-        // after SNOD: B-tree leaf
+        let entries: Vec<_> = children
+            .iter()
+            .enumerate()
+            .map(
+                |(index, &(_, header_address, cache_type))| symbol_table::Entry {
+                    cache_type,
+                    ..symbol_table::Entry::new(segment.offset_of(index), header_address)
+                },
+            )
+            .collect();
+        let node_at = image.append_aligned(&symbol_table::node(&entries, widths), 8);
 
-        let heap_offset = 0usize;
-        let heap_header_size = 8 + ls * 2 + os;
-        let heap_data_offset = heap_header_size;
-        let snod_offset = heap_data_offset + heap_data_size;
-        // Pad to nice offset
-        let snod_offset = (snod_offset + 7) & !7;
-
-        let entry_size = ls + os + 4 + 4 + 16;
-        let snod_size = 8 + children.len() * entry_size;
-        let btree_offset = snod_offset + snod_size;
-        let btree_offset = (btree_offset + 7) & !7;
-
-        // B-tree: entries_used = 1 child (the SNOD), keys = [0, last_name_end]
+        // One leaf entry, so two keys: the first name's heap offset and the
+        // offset just past the last.
         let last_key = if children.is_empty() {
-            0u64
+            0
         } else {
-            heap_data_size as u64
+            segment.bytes.len() as u64
         };
-        let btree_header_size = crate::btree_v1::btree_v1_node_header_size(offset_size);
-        let btree_keys_children = ls + os + ls; // key[0] + child[0] + key[1]
-        let total_size = btree_offset + btree_header_size + btree_keys_children + 64;
+        let keys = [
+            btree_v1::group_key(0, widths),
+            btree_v1::group_key(last_key, widths),
+        ];
+        let btree_at = image.append_aligned(
+            &btree_v1::node(
+                btree_v1::NodeType::GROUP,
+                0,
+                &keys,
+                &[node_at as u64],
+                widths,
+            ),
+            8,
+        );
 
-        let mut file = vec![0u8; total_size];
-
-        // Write heap header
-        {
-            let mut pos = heap_offset;
-            file[pos..pos + 4].copy_from_slice(b"HEAP");
-            pos += 4;
-            file[pos] = 0; // version
-            pos += 4; // version(1) + reserved(3)
-            // data_segment_size
-            match length_size {
-                4 => file[pos..pos + 4].copy_from_slice(&(heap_data_size as u32).to_le_bytes()),
-                8 => file[pos..pos + 8].copy_from_slice(&(heap_data_size as u64).to_le_bytes()),
-                _ => {}
-            }
-            pos += ls;
-            // free_list_head_offset
-            match length_size {
-                4 => file[pos..pos + 4].copy_from_slice(&0xFFFFFFFFu32.to_le_bytes()),
-                8 => file[pos..pos + 8].copy_from_slice(&0xFFFFFFFFFFFFFFFFu64.to_le_bytes()),
-                _ => {}
-            }
-            pos += ls;
-            // data_segment_address
-            match offset_size {
-                4 => file[pos..pos + 4].copy_from_slice(&(heap_data_offset as u32).to_le_bytes()),
-                8 => file[pos..pos + 8].copy_from_slice(&(heap_data_offset as u64).to_le_bytes()),
-                _ => {}
-            }
-        }
-
-        // Write heap data segment
-        file[heap_data_offset..heap_data_offset + heap_data_size].copy_from_slice(&heap_data);
-
-        // Write SNOD
-        {
-            let mut pos = snod_offset;
-            file[pos..pos + 4].copy_from_slice(b"SNOD");
-            pos += 4;
-            file[pos] = 1; // version
-            pos += 1;
-            pos += 1; // reserved
-            file[pos..pos + 2].copy_from_slice(&(children.len() as u16).to_le_bytes());
-            pos += 2;
-            for (idx, &(_, obj_addr, cache_type)) in children.iter().enumerate() {
-                // link_name_offset
-                match length_size {
-                    4 => file[pos..pos + 4]
-                        .copy_from_slice(&(name_offsets[idx] as u32).to_le_bytes()),
-                    8 => file[pos..pos + 8].copy_from_slice(&name_offsets[idx].to_le_bytes()),
-                    _ => {}
-                }
-                pos += ls;
-                // object_header_address
-                match offset_size {
-                    4 => file[pos..pos + 4].copy_from_slice(&(obj_addr as u32).to_le_bytes()),
-                    8 => file[pos..pos + 8].copy_from_slice(&obj_addr.to_le_bytes()),
-                    _ => {}
-                }
-                pos += os;
-                file[pos..pos + 4].copy_from_slice(&cache_type.to_le_bytes());
-                pos += 4;
-                pos += 4; // reserved
-                pos += 16; // scratch pad (zeros)
-            }
-        }
-
-        // Write B-tree (leaf, level 0, 1 entry pointing to SNOD)
-        {
-            let mut pos = btree_offset;
-            file[pos..pos + 4].copy_from_slice(b"TREE");
-            pos += 4;
-            file[pos] = 0; // type=group
-            pos += 1;
-            file[pos] = 0; // level=leaf
-            pos += 1;
-            file[pos..pos + 2].copy_from_slice(&1u16.to_le_bytes()); // entries_used=1
-            pos += 2;
-            // siblings = undefined
-            for _ in 0..2 {
-                match offset_size {
-                    4 => file[pos..pos + 4].copy_from_slice(&0xFFFFFFFFu32.to_le_bytes()),
-                    8 => file[pos..pos + 8].copy_from_slice(&0xFFFFFFFFFFFFFFFFu64.to_le_bytes()),
-                    _ => {}
-                }
-                pos += os;
-            }
-            // key[0]
-            match length_size {
-                4 => file[pos..pos + 4].copy_from_slice(&0u32.to_le_bytes()),
-                8 => file[pos..pos + 8].copy_from_slice(&0u64.to_le_bytes()),
-                _ => {}
-            }
-            pos += ls;
-            // child[0] = snod_offset
-            match offset_size {
-                4 => file[pos..pos + 4].copy_from_slice(&(snod_offset as u32).to_le_bytes()),
-                8 => file[pos..pos + 8].copy_from_slice(&(snod_offset as u64).to_le_bytes()),
-                _ => {}
-            }
-            pos += os;
-            // key[1]
-            match length_size {
-                4 => file[pos..pos + 4].copy_from_slice(&(last_key as u32).to_le_bytes()),
-                8 => file[pos..pos + 8].copy_from_slice(&last_key.to_le_bytes()),
-                _ => {}
-            }
-        }
+        // Room past the last structure for the tests that read off its end.
+        image.append(&[0; 64]);
 
         let msg = SymbolTableMessage {
-            btree_address: StoredAddress::new(btree_offset as u64),
-            local_heap_address: StoredAddress::new(heap_offset as u64),
+            btree_address: StoredAddress::new(btree_at as u64),
+            local_heap_address: StoredAddress::new(0),
         };
 
-        (file, msg)
+        (image.build(), msg)
     }
 
     #[test]
     fn resolve_entries_two_children() {
-        let (file, msg) = build_synthetic_group(&[("alpha", 0x1000, 0), ("beta", 0x2000, 0)], 8, 8);
+        let (file, msg) =
+            build_synthetic_group(&[("alpha", 0x1000, 0), ("beta", 0x2000, 0)], Widths::EIGHT);
         let entries = resolve_v1_group_entries(&file, &msg, 8, 8, BaseAddress::ZERO).unwrap();
         assert_eq!(entries.len(), 2);
         assert_eq!(entries[0].name, "alpha");

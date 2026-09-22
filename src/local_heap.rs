@@ -202,59 +202,30 @@ impl LocalHeap {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use test_util::image::Image;
+    use test_util::local_heap;
+    use test_util::widths::Widths;
 
+    /// A file holding a heap header at `heap_offset` whose data segment, at
+    /// `data_seg_offset`, holds `strings` null-terminated.
     fn build_heap_file(
         heap_offset: usize,
         data_seg_offset: usize,
         strings: &[&str],
-        offset_size: u8,
-        length_size: u8,
+        widths: Widths,
     ) -> Vec<u8> {
-        // Build data segment
-        let mut data_seg = Vec::new();
-        for s in strings {
-            data_seg.extend_from_slice(s.as_bytes());
-            data_seg.push(0); // null terminator
-        }
-        let data_seg_size = data_seg.len();
-
-        let total_size = data_seg_offset + data_seg_size + 64;
-        let mut file = vec![0u8; total_size];
-
-        // Write heap header at heap_offset
-        let mut pos = heap_offset;
-        file[pos..pos + 4].copy_from_slice(b"HEAP");
-        pos += 4;
-        file[pos] = 0; // version
-        pos += 1;
-        // reserved 3
-        pos += 3;
-        // data_segment_size
-        write_val(&mut file, pos, data_seg_size as u64, length_size);
-        pos += length_size as usize;
-        // free_list_head_offset
-        write_val(&mut file, pos, 0xFFFFFFFF, length_size);
-        pos += length_size as usize;
-        // data_segment_address
-        write_val(&mut file, pos, data_seg_offset as u64, offset_size);
-
-        // Write data segment
-        file[data_seg_offset..data_seg_offset + data_seg_size].copy_from_slice(&data_seg);
-
-        file
-    }
-
-    fn write_val(buf: &mut [u8], pos: usize, val: u64, size: u8) {
-        match size {
-            4 => buf[pos..pos + 4].copy_from_slice(&(val as u32).to_le_bytes()),
-            8 => buf[pos..pos + 8].copy_from_slice(&val.to_le_bytes()),
-            _ => panic!("test"),
-        }
+        let segment = local_heap::Segment::of_names(data_seg_offset as u64, strings);
+        let mut image = Image::new();
+        image.place(heap_offset, &segment.header(widths));
+        image.place(data_seg_offset, &segment.bytes);
+        // Room past the segment for the tests that read off its end.
+        image.append(&[0; 64]);
+        image.build()
     }
 
     #[test]
     fn parse_heap_header() {
-        let file = build_heap_file(0, 100, &["hello", "world"], 8, 8);
+        let file = build_heap_file(0, 100, &["hello", "world"], Widths::EIGHT);
         let heap = LocalHeap::parse(&file, 0, 8, 8).unwrap();
         assert_eq!(heap.data_segment_address, StoredAddress::new(100));
         assert_eq!(heap.data_segment_size, 12); // "hello\0world\0"
@@ -262,7 +233,7 @@ mod tests {
 
     #[test]
     fn read_string_at_offset_0() {
-        let file = build_heap_file(0, 100, &["hello", "world"], 8, 8);
+        let file = build_heap_file(0, 100, &["hello", "world"], Widths::EIGHT);
         let heap = LocalHeap::parse(&file, 0, 8, 8).unwrap();
         let s = heap.read_string(&file, BaseAddress::ZERO, 0).unwrap();
         assert_eq!(s, "hello");
@@ -270,7 +241,7 @@ mod tests {
 
     #[test]
     fn read_string_at_offset_6() {
-        let file = build_heap_file(0, 100, &["hello", "world"], 8, 8);
+        let file = build_heap_file(0, 100, &["hello", "world"], Widths::EIGHT);
         let heap = LocalHeap::parse(&file, 0, 8, 8).unwrap();
         let s = heap.read_string(&file, BaseAddress::ZERO, 6).unwrap();
         assert_eq!(s, "world");
@@ -280,7 +251,7 @@ mod tests {
     fn read_string_adds_the_base_address_to_the_stored_segment_address() {
         const BASE: usize = 512;
         let mut file = vec![0u8; BASE];
-        file.extend_from_slice(&build_heap_file(0, 100, &["hello", "world"], 8, 8));
+        file.extend_from_slice(&build_heap_file(0, 100, &["hello", "world"], Widths::EIGHT));
 
         let heap = LocalHeap::parse(&file, BASE, 8, 8).unwrap();
         assert_eq!(heap.data_segment_address, StoredAddress::new(100));
@@ -293,7 +264,7 @@ mod tests {
 
     #[test]
     fn invalid_signature() {
-        let mut file = build_heap_file(0, 100, &["x"], 8, 8);
+        let mut file = build_heap_file(0, 100, &["x"], Widths::EIGHT);
         file[0] = b'X';
         let err = LocalHeap::parse(&file, 0, 8, 8).unwrap_err();
         assert_eq!(err, FormatError::InvalidLocalHeapSignature);
@@ -302,7 +273,7 @@ mod tests {
     // The third byte of "hello" is 0xFF, so the decode is valid up to 2.
     #[test]
     fn read_string_rejects_a_name_that_is_not_utf8() {
-        let mut file = build_heap_file(0, 100, &["hello"], 8, 8);
+        let mut file = build_heap_file(0, 100, &["hello"], Widths::EIGHT);
         file[102] = 0xFF;
         let heap = LocalHeap::parse(&file, 0, 8, 8).unwrap();
 
@@ -322,7 +293,7 @@ mod tests {
 
     #[test]
     fn read_string_past_segment() {
-        let file = build_heap_file(0, 100, &["hi"], 8, 8);
+        let file = build_heap_file(0, 100, &["hi"], Widths::EIGHT);
         let heap = LocalHeap::parse(&file, 0, 8, 8).unwrap();
         let err = heap.read_string(&file, BaseAddress::ZERO, 100).unwrap_err();
         assert!(matches!(err, FormatError::UnexpectedEof { .. }));
@@ -330,7 +301,7 @@ mod tests {
 
     #[test]
     fn parse_heap_4byte_offsets() {
-        let file = build_heap_file(0, 80, &["test"], 4, 4);
+        let file = build_heap_file(0, 80, &["test"], Widths::FOUR);
         let heap = LocalHeap::parse(&file, 0, 4, 4).unwrap();
         assert_eq!(heap.data_segment_address, StoredAddress::new(80));
         let s = heap.read_string(&file, BaseAddress::ZERO, 0).unwrap();
@@ -339,7 +310,7 @@ mod tests {
 
     #[test]
     fn invalid_version() {
-        let mut file = build_heap_file(0, 100, &["x"], 8, 8);
+        let mut file = build_heap_file(0, 100, &["x"], Widths::EIGHT);
         file[4] = 1; // bad version
         let err = LocalHeap::parse(&file, 0, 8, 8).unwrap_err();
         assert_eq!(err, FormatError::InvalidLocalHeapVersion(1));
@@ -349,7 +320,7 @@ mod tests {
     fn parse_offset_near_usize_max_errors_without_overflow() {
         // A crafted heap address near `usize::MAX` must yield an EOF error, not
         // panic on `offset + total` overflowing `usize` (issue #140).
-        let file = build_heap_file(0, 80, &["test"], 8, 8);
+        let file = build_heap_file(0, 80, &["test"], Widths::EIGHT);
         let err = LocalHeap::parse(&file, usize::MAX - 3, 8, 8).unwrap_err();
         assert!(matches!(err, FormatError::UnexpectedEof { .. }));
     }
@@ -358,7 +329,7 @@ mod tests {
     fn read_string_offset_near_usize_max_errors_without_overflow() {
         // A crafted string offset near `usize::MAX` must not overflow the
         // diagnostic `start + 1` in either read path (issue #140).
-        let file = build_heap_file(0, 80, &["test"], 8, 8);
+        let file = build_heap_file(0, 80, &["test"], Widths::EIGHT);
         let heap = LocalHeap::parse(&file, 0, 8, 8).unwrap();
         assert!(
             heap.read_string(&file, BaseAddress::ZERO, u64::MAX)

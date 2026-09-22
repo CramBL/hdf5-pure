@@ -4,14 +4,17 @@
 use std::path::{Path, PathBuf};
 
 pub mod allocation;
+pub mod btree_v1;
 pub mod btree_v2;
 pub mod bytes;
 pub mod checksum;
 pub mod extensible_array;
 pub mod fractal_heap;
 pub mod image;
+pub mod local_heap;
 pub mod object_header;
 pub mod superblock;
+pub mod symbol_table;
 pub mod temp;
 pub mod userblock;
 pub mod widths;
