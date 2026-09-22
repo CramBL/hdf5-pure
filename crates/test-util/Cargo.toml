@@ -8,7 +8,6 @@ edition = "2024"
 publish = false
 
 [dependencies]
-hdf5-pure = { path = "../.." }
 heapscope = "0.1"
 tempfile = "3"
 

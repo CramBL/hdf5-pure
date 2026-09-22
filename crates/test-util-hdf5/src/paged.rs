@@ -1,11 +1,6 @@
 //! Page-homogeneity checking for genuine paged files (`FileSpaceStrategy::Page`).
-//!
-//! Included with `#[path = "common/paged.rs"] mod paged;` rather than through
-//! `common/mod.rs`, so a binary that wants only this does not also pull in the
-//! C-library helpers beside it.
-#![allow(dead_code)]
 
-use crate::bytes;
+use test_util::bytes;
 
 /// Signatures that must never appear in a page holding raw dataset bytes: object
 /// headers and their continuations, the global heap, the free-space managers, the
