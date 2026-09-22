@@ -430,7 +430,7 @@ impl ChunkOptions {
                     // and h5py's filter grows its buffer on `E2BIG`. Not new
                     // here — canonical rank already put LZF after scale-offset.
                     flags,
-                    client_data: crate::lzf::h5py_cd_values(element_size, chunk_dims).to_vec(),
+                    client_data: h5_filter::lzf_h5py_cd_values(element_size, chunk_dims).to_vec(),
                 },
                 FilterKind::Deflate(level) => FilterDescription {
                     filter_id: FILTER_DEFLATE,

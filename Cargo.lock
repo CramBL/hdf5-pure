@@ -361,6 +361,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e4eba85ea1d0a966a983acd07deee566e67395d2d96b6fb39e62b5a833f1eb0b"
 
 [[package]]
+name = "h5-filter"
+version = "0.47.0"
+
+[[package]]
 name = "half"
 version = "2.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -456,6 +460,7 @@ dependencies = [
  "byteorder",
  "criterion",
  "flate2",
+ "h5-filter",
  "heapscope",
  "ndarray",
  "num-complex",

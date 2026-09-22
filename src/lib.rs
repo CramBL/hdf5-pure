@@ -466,7 +466,6 @@ pub(crate) mod libver;
 pub(crate) mod link_info;
 pub(crate) mod link_message;
 pub(crate) mod local_heap;
-pub(crate) mod lzf;
 pub(crate) mod message_flags;
 pub(crate) mod message_type;
 pub(crate) mod object_header;
@@ -605,3 +604,6 @@ pub use type_builders::{
     FinishedGroup, GroupBuilder, make_f32_type, make_f64_type, make_i8_type, make_i16_type,
     make_i32_type, make_i64_type, make_u8_type, make_u16_type, make_u32_type, make_u64_type,
 };
+
+#[cfg(all(test, feature = "std"))]
+mod lzf_crosscheck;
