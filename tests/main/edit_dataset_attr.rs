@@ -8,8 +8,7 @@
 
 use hdf5_pure::{AttrValue, Error, File, FileBuilder, FormatError, MaxExtent};
 use tempfile::tempdir;
-
-use test_util::heap::has_fractal_heap;
+use test_util::fractal_heap;
 
 fn build_contig(path: &std::path::Path) {
     let mut b = FileBuilder::new();
@@ -206,7 +205,7 @@ fn the_ninth_attribute_moves_the_set_out_of_the_header() {
         s.commit().unwrap();
     }
     assert!(
-        !has_fractal_heap(&std::fs::read(&p).unwrap()),
+        !fractal_heap::has_fractal_heap(&std::fs::read(&p).unwrap()),
         "eight attributes still fit the object header",
     );
 
@@ -221,7 +220,7 @@ fn the_ninth_attribute_moves_the_set_out_of_the_header() {
         s.commit().unwrap();
     }
     assert!(
-        has_fractal_heap(&std::fs::read(&p).unwrap()),
+        fractal_heap::has_fractal_heap(&std::fs::read(&p).unwrap()),
         "the ninth attribute must move the set into a fractal heap",
     );
     let f = File::open(&p).unwrap();

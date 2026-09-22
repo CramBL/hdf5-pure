@@ -12,8 +12,7 @@
 
 use hdf5_pure::{AttrValue, FileBuilder, OBJECT_HEADER_MESSAGE_MAX};
 use tempfile::tempdir;
-
-use test_util::heap::has_fractal_heap;
+use test_util::fractal_heap;
 
 /// Whether a root `i64` attribute of `n` elements is stored compactly.
 fn stores_i64_attr_compactly(n: usize) -> bool {
@@ -21,7 +20,7 @@ fn stores_i64_attr_compactly(n: usize) -> bool {
     builder.set_attr("probe", AttrValue::I64Array(vec![0; n]));
     builder.create_dataset("x").with_f64_data(&[1.0]);
     let bytes = builder.finish().expect("every size is writable");
-    !has_fractal_heap(&bytes)
+    !fractal_heap::has_fractal_heap(&bytes)
 }
 
 /// The largest `i64` attribute the writer keeps compact, found by probing down
@@ -83,7 +82,7 @@ fn c_reads_one_element_past_the_compact_boundary() {
     builder.write(&path).unwrap();
 
     assert!(
-        has_fractal_heap(&std::fs::read(&path).unwrap()),
+        fractal_heap::has_fractal_heap(&std::fs::read(&path).unwrap()),
         "one element past the compact limit must select heap storage"
     );
 

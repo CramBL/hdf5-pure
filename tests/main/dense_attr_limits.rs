@@ -12,11 +12,8 @@
 //! use fewer reach it by size, and say so.
 
 use hdf5_pure::{AttrValue, Error, File, FileBuilder, FormatError};
-
-use test_util::heap::{
-    has_fractal_heap, huge_object_bytes, huge_object_count, indirect_block_count,
-    managed_object_count, name_index_leaf_records, root_indirect_rows,
-};
+use test_util::btree_v2;
+use test_util::fractal_heap;
 
 /// Nine attributes, the first sized to `payload` bytes of text and the rest
 /// small, which is enough to select dense storage.
@@ -49,7 +46,7 @@ fn largest_managed_payload() -> usize {
         let bytes = nine_attrs(payload)
             .finish()
             .expect("every size is writable");
-        if huge_object_count(&bytes) == 0 {
+        if fractal_heap::huge_object_count(&bytes) == 0 {
             return payload;
         }
     }
@@ -61,7 +58,7 @@ fn an_attribute_past_the_managed_object_limit_becomes_a_huge_object() {
     let payload = largest_managed_payload();
 
     let at_limit = nine_attrs(payload).finish().unwrap();
-    assert_eq!(huge_object_count(&at_limit), 0);
+    assert_eq!(fractal_heap::huge_object_count(&at_limit), 0);
     assert_eq!(
         File::from_bytes(at_limit)
             .unwrap()
@@ -74,7 +71,7 @@ fn an_attribute_past_the_managed_object_limit_becomes_a_huge_object() {
 
     // One byte more changes the storage class, and nothing else.
     let past = nine_attrs(payload + 1).finish().unwrap();
-    assert_eq!(huge_object_count(&past), 1);
+    assert_eq!(fractal_heap::huge_object_count(&past), 1);
 
     let file = File::from_bytes(past).unwrap();
     let attrs = file.root().attrs().unwrap();
@@ -105,7 +102,7 @@ fn one_large_attribute_forces_dense_storage_on_its_own() {
             .finish()
             .unwrap_or_else(|e| panic!("{} attributes refused: {e}", others + 1));
         assert_eq!(
-            huge_object_count(&bytes),
+            fractal_heap::huge_object_count(&bytes),
             1,
             "with {} attributes the large one should be a huge object",
             others + 1
@@ -131,7 +128,7 @@ fn small_attributes_below_the_count_threshold_stay_compact() {
 
     let bytes = builder.finish().unwrap();
     assert!(
-        !has_fractal_heap(&bytes),
+        !fractal_heap::has_fractal_heap(&bytes),
         "eight small attributes must stay compact"
     );
 
@@ -158,7 +155,7 @@ fn the_reported_shape_round_trips_through_huge_storage() {
     builder.write(&path).unwrap();
 
     let bytes = std::fs::read(&path).unwrap();
-    assert_eq!(huge_object_count(&bytes), 9);
+    assert_eq!(fractal_heap::huge_object_count(&bytes), 9);
 
     let file = File::open(&path).unwrap();
     let attrs = file.root().attrs().unwrap();
@@ -192,9 +189,9 @@ fn a_mixed_managed_and_huge_set_round_trips() {
     // The heap counts the two classes separately and every attribute is in
     // exactly one of them, so a miscount here is a heap that describes itself
     // wrongly even if the data survives.
-    assert_eq!(huge_object_count(&bytes), 3);
-    assert_eq!(managed_object_count(&bytes), 6);
-    let declared = huge_object_bytes(&bytes);
+    assert_eq!(fractal_heap::huge_object_count(&bytes), 3);
+    assert_eq!(fractal_heap::managed_object_count(&bytes), 6);
+    let declared = fractal_heap::huge_object_bytes(&bytes);
     assert!(
         (3 * 80_000..3 * 80_000 + 1_000).contains(&declared),
         "declared huge size {declared} does not account for three 80,000-byte payloads"
@@ -227,7 +224,7 @@ fn a_multi_megabyte_set_of_small_attributes_stays_managed() {
 
     let bytes = builder.finish().unwrap();
     assert!(bytes.len() > 2_000_000, "expected a multi-megabyte heap");
-    assert_eq!(huge_object_count(&bytes), 0);
+    assert_eq!(fractal_heap::huge_object_count(&bytes), 0);
 
     let file = File::from_bytes(bytes).unwrap();
     assert_eq!(file.root().attrs().unwrap().len(), 40);
@@ -258,18 +255,18 @@ fn managed_attributes_span_as_many_blocks_as_they_need() {
 
         let bytes = builder.finish().unwrap();
         assert_eq!(
-            huge_object_count(&bytes),
+            fractal_heap::huge_object_count(&bytes),
             0,
             "{name}: these attributes must stay managed"
         );
         assert!(
-            root_indirect_rows(&bytes) > 0,
+            fractal_heap::root_indirect_rows(&bytes) > 0,
             "{name}: the root should have grown into an indirect block"
         );
         assert!(
-            indirect_block_count(&bytes) >= indirect,
+            fractal_heap::indirect_block_count(&bytes) >= indirect,
             "{name}: expected at least {indirect} indirect blocks, found {}",
-            indirect_block_count(&bytes)
+            fractal_heap::indirect_block_count(&bytes)
         );
 
         let file = File::from_bytes(bytes).unwrap();
@@ -374,7 +371,7 @@ fn group_and_dataset_attributes_use_huge_storage_too() {
     builder.add_group(group.finish());
 
     let bytes = builder.finish().unwrap();
-    assert_eq!(huge_object_count(&bytes), 1);
+    assert_eq!(fractal_heap::huge_object_count(&bytes), 1);
     let file = File::from_bytes(bytes).unwrap();
     assert_eq!(file.group("g").unwrap().attrs().unwrap().len(), 9);
 
@@ -386,7 +383,7 @@ fn group_and_dataset_attributes_use_huge_storage_too() {
     }
 
     let bytes = builder.finish().unwrap();
-    assert_eq!(huge_object_count(&bytes), 1);
+    assert_eq!(fractal_heap::huge_object_count(&bytes), 1);
     let file = File::from_bytes(bytes).unwrap();
     assert_eq!(file.dataset("x").unwrap().attrs().unwrap().len(), 9);
 }
@@ -418,9 +415,12 @@ fn colliding_name_hashes_are_indexed_in_name_order() {
     builder.create_dataset("x").with_f64_data(&[1.0]);
 
     let bytes = builder.finish().unwrap();
-    assert!(has_fractal_heap(&bytes), "ten attributes are dense");
+    assert!(
+        fractal_heap::has_fractal_heap(&bytes),
+        "ten attributes are dense"
+    );
 
-    let records = name_index_leaf_records(&bytes, 10);
+    let records = btree_v2::name_index_leaf_records(&bytes, 10);
     let hash_of = |order: u32| {
         records
             .iter()

@@ -4,10 +4,11 @@
 use std::path::{Path, PathBuf};
 
 pub mod allocation;
+pub mod btree_v2;
 pub mod bytes;
 pub mod checksum;
 pub mod extensible_array;
-pub mod heap;
+pub mod fractal_heap;
 pub mod image;
 pub mod object_header;
 pub mod superblock;
