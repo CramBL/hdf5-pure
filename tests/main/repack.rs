@@ -6,7 +6,6 @@ use hdf5_pure::{
     RepackOptions, ScaleOffset, repack,
 };
 use rstest::rstest;
-use temp::temp_path;
 use test_util::{superblock, temp};
 
 /// A variable-length attribute survives a repack still variable-length.
@@ -19,8 +18,8 @@ use test_util::{superblock, temp};
 /// asserting the variant asserts the encoding, not just the values.
 #[test]
 fn carries_a_variable_length_attribute_without_re_encoding_it() {
-    let src = temp_path("hdf5_pure_repack_vlen_attr_src.h5");
-    let dst = temp_path("hdf5_pure_repack_vlen_attr_dst.h5");
+    let src = temp::temp_path("hdf5_pure_repack_vlen_attr_src.h5");
+    let dst = temp::temp_path("hdf5_pure_repack_vlen_attr_dst.h5");
     let fields: Vec<String> = vec!["x".into(), "y".into(), "velocity".into()];
     let mut b = FileBuilder::new();
     b.create_dataset("x").with_f64_data(&[1.0]);
@@ -48,8 +47,8 @@ fn carries_a_variable_length_attribute_without_re_encoding_it() {
 
 #[test]
 fn drops_object_and_shrinks_file() {
-    let src = temp_path("hdf5_pure_repack_drop_src.h5");
-    let dst = temp_path("hdf5_pure_repack_drop_dst.h5");
+    let src = temp::temp_path("hdf5_pure_repack_drop_src.h5");
+    let dst = temp::temp_path("hdf5_pure_repack_drop_dst.h5");
     let mut b = FileBuilder::new();
     b.create_dataset("keep").with_i32_data(&[1, 2, 3]);
     b.create_dataset("bulk").with_f64_data(&vec![9.0; 4096]);
@@ -75,8 +74,8 @@ fn drops_object_and_shrinks_file() {
 
 #[test]
 fn pure_compaction_preserves_everything() {
-    let src = temp_path("hdf5_pure_repack_compact_src.h5");
-    let dst = temp_path("hdf5_pure_repack_compact_dst.h5");
+    let src = temp::temp_path("hdf5_pure_repack_compact_src.h5");
+    let dst = temp::temp_path("hdf5_pure_repack_compact_dst.h5");
     let mut b = FileBuilder::new();
     b.create_dataset("ints").with_i64_data(&[10, 20, 30, 40]);
     b.create_dataset("floats").with_f64_data(&[1.5, 2.5, 3.5]);
@@ -124,7 +123,7 @@ fn repacks_v1_symbol_table_source_with_attributes() {
     // groups) carrying compact attributes. Repack now opens the source via the
     // streaming backend, so this drives v1 group traversal and compact attribute
     // reads end to end through the repack entry point (issues #82 / #27).
-    let dst = temp_path("hdf5_pure_repack_v1_attrs_dst.h5");
+    let dst = temp::temp_path("hdf5_pure_repack_v1_attrs_dst.h5");
     let src = "tests/data/unattributed/attrs.h5";
 
     let source = hdf5_pure::File::open(src).unwrap();
@@ -146,7 +145,7 @@ fn repacks_v1_nested_symbol_table_groups() {
     // `two_groups.h5` has v1 symbol-table groups nested under the root. Repacking
     // it exercises the streaming v1 B-tree/local-heap/SNOD traversal across
     // multiple groups and preserves the full subtree.
-    let dst = temp_path("hdf5_pure_repack_v1_groups_dst.h5");
+    let dst = temp::temp_path("hdf5_pure_repack_v1_groups_dst.h5");
     let src = "tests/data/unattributed/two_groups.h5";
 
     repack(src, &dst, &RepackOptions::new()).unwrap();
@@ -167,8 +166,8 @@ fn repacks_v1_nested_symbol_table_groups() {
 
 #[test]
 fn carries_dataset_attributes() {
-    let src = temp_path("hdf5_pure_repack_dsattr_src.h5");
-    let dst = temp_path("hdf5_pure_repack_dsattr_dst.h5");
+    let src = temp::temp_path("hdf5_pure_repack_dsattr_src.h5");
+    let dst = temp::temp_path("hdf5_pure_repack_dsattr_dst.h5");
     let mut b = FileBuilder::new();
     let ds = b.create_dataset("signal");
     ds.with_f64_data(&[1.0, 2.0, 3.0]);
@@ -193,8 +192,8 @@ fn carries_dataset_attributes() {
 
 #[test]
 fn drops_whole_group_subtree() {
-    let src = temp_path("hdf5_pure_repack_dropgrp_src.h5");
-    let dst = temp_path("hdf5_pure_repack_dropgrp_dst.h5");
+    let src = temp::temp_path("hdf5_pure_repack_dropgrp_src.h5");
+    let dst = temp::temp_path("hdf5_pure_repack_dropgrp_dst.h5");
     let mut b = FileBuilder::new();
     b.create_dataset("root_ds").with_i32_data(&[1]);
     let mut g = b.create_group("doomed");
@@ -213,8 +212,8 @@ fn drops_whole_group_subtree() {
 
 #[test]
 fn preserves_chunked_and_compressed_dataset() {
-    let src = temp_path("hdf5_pure_repack_chunk_src.h5");
-    let dst = temp_path("hdf5_pure_repack_chunk_dst.h5");
+    let src = temp::temp_path("hdf5_pure_repack_chunk_src.h5");
+    let dst = temp::temp_path("hdf5_pure_repack_chunk_dst.h5");
     let data: Vec<f64> = (0..2048).map(|i| i as f64 * 0.5).collect();
     let mut b = FileBuilder::new();
     b.create_dataset("keep").with_i32_data(&[7]);
@@ -236,8 +235,8 @@ fn preserves_chunked_and_compressed_dataset() {
 
 #[test]
 fn preserves_multidim_and_maxshape() {
-    let src = temp_path("hdf5_pure_repack_md_src.h5");
-    let dst = temp_path("hdf5_pure_repack_md_dst.h5");
+    let src = temp::temp_path("hdf5_pure_repack_md_src.h5");
+    let dst = temp::temp_path("hdf5_pure_repack_md_dst.h5");
     let mut b = FileBuilder::new();
     b.create_dataset("grid")
         .with_f64_data(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0])
@@ -261,10 +260,10 @@ fn roundtrips_integer_scale_offset() {
     // value range) makes the filter's survival observable from the file size.
     let data: Vec<i32> = (0..4096).map(|i| i % 8).collect();
 
-    let so_src = temp_path("hdf5_pure_repack_so_src.h5");
-    let so_dst = temp_path("hdf5_pure_repack_so_dst.h5");
-    let plain_src = temp_path("hdf5_pure_repack_soplain_src.h5");
-    let plain_dst = temp_path("hdf5_pure_repack_soplain_dst.h5");
+    let so_src = temp::temp_path("hdf5_pure_repack_so_src.h5");
+    let so_dst = temp::temp_path("hdf5_pure_repack_so_dst.h5");
+    let plain_src = temp::temp_path("hdf5_pure_repack_soplain_src.h5");
+    let plain_dst = temp::temp_path("hdf5_pure_repack_soplain_dst.h5");
 
     let mut b = FileBuilder::new();
     b.create_dataset("vals")
@@ -304,8 +303,8 @@ fn roundtrips_lossy_float_scale_offset_verbatim() {
     // byte-exact instead of refusing. The values read back from the repacked file
     // must equal the values read back from the source (the lossy rounding is
     // baked into the stored bytes and carried through unchanged).
-    let src = temp_path("hdf5_pure_repack_fso_src.h5");
-    let dst = temp_path("hdf5_pure_repack_fso_dst.h5");
+    let src = temp::temp_path("hdf5_pure_repack_fso_src.h5");
+    let dst = temp::temp_path("hdf5_pure_repack_fso_dst.h5");
     let data: Vec<f64> = (0..1024).map(|i| (i as f64) * 0.01).collect();
     let mut b = FileBuilder::new();
     b.create_dataset("vals")
@@ -346,8 +345,8 @@ fn roundtrips_lossy_float_scale_offset_verbatim() {
 fn roundtrips_opaque_and_bitfield_datatypes() {
     // Opaque and bit-field datatypes now serialize losslessly, so repack carries
     // them through byte-for-byte instead of refusing.
-    let src = temp_path("hdf5_pure_repack_dt_src.h5");
-    let dst = temp_path("hdf5_pure_repack_dt_dst.h5");
+    let src = temp::temp_path("hdf5_pure_repack_dt_src.h5");
+    let dst = temp::temp_path("hdf5_pure_repack_dt_dst.h5");
 
     let opaque_dt = Datatype::Opaque {
         size: 4,
@@ -382,8 +381,8 @@ fn roundtrips_opaque_and_bitfield_datatypes() {
 
 #[test]
 fn preserves_file_space_strategy() {
-    let src = temp_path("hdf5_pure_repack_fss_src.h5");
-    let dst = temp_path("hdf5_pure_repack_fss_dst.h5");
+    let src = temp::temp_path("hdf5_pure_repack_fss_src.h5");
+    let dst = temp::temp_path("hdf5_pure_repack_fss_dst.h5");
     let mut b = FileBuilder::new();
     b.create_dataset("keep").with_i32_data(&[1, 2, 3]);
     b.create_dataset("drop_me").with_f64_data(&vec![0.0; 1000]);
@@ -435,8 +434,8 @@ fn asking_a_repack_to_reject_unknown_messages_only_a_writer_must_understand_reco
 #[test]
 fn a_repack_asked_to_reject_unknown_messages_only_a_writer_must_understand_repacks_a_source_that_holds_none()
  {
-    let src = temp_path("hdf5_pure_repack_writer_message_src.h5");
-    let dst = temp_path("hdf5_pure_repack_writer_message_dst.h5");
+    let src = temp::temp_path("hdf5_pure_repack_writer_message_src.h5");
+    let dst = temp::temp_path("hdf5_pure_repack_writer_message_dst.h5");
     let mut b = FileBuilder::new();
     b.create_dataset("values").with_i32_data(&[1, 2, 3]);
     b.set_attr("note", AttrValue::I64(7));
@@ -459,8 +458,8 @@ fn a_repack_asked_to_reject_unknown_messages_only_a_writer_must_understand_repac
 
 #[test]
 fn rejects_nonexistent_drop_path() {
-    let src = temp_path("hdf5_pure_repack_baddrop_src.h5");
-    let dst = temp_path("hdf5_pure_repack_baddrop_dst.h5");
+    let src = temp::temp_path("hdf5_pure_repack_baddrop_src.h5");
+    let dst = temp::temp_path("hdf5_pure_repack_baddrop_dst.h5");
     let mut b = FileBuilder::new();
     b.create_dataset("present").with_i32_data(&[1]);
     b.write(&src).unwrap();
@@ -482,8 +481,8 @@ fn verbatim_chunk_copy_preserves_compressed_bytes() {
     // A chunked + deflate dataset: repack copies its compressed chunks verbatim,
     // so the values read back are byte-identical and the dataset stays chunked +
     // compressed (the file remains far smaller than the raw element bytes).
-    let src = temp_path("hdf5_pure_repack_verbatim_src.h5");
-    let dst = temp_path("hdf5_pure_repack_verbatim_dst.h5");
+    let src = temp::temp_path("hdf5_pure_repack_verbatim_src.h5");
+    let dst = temp::temp_path("hdf5_pure_repack_verbatim_dst.h5");
     // Highly compressible data so the filter's survival is observable by size.
     let data: Vec<i32> = (0..4096).map(|i| i % 4).collect();
     let mut b = FileBuilder::new();
@@ -518,8 +517,8 @@ fn repacks_multichunk_2d_fixed_array() {
     // A 2D dataset chunked into a 2x2 grid uses a v4 Fixed Array index. Repack's
     // verbatim path must lay the four chunks back in dense grid order so the
     // values round-trip exactly.
-    let src = temp_path("hdf5_pure_repack_fa_src.h5");
-    let dst = temp_path("hdf5_pure_repack_fa_dst.h5");
+    let src = temp::temp_path("hdf5_pure_repack_fa_src.h5");
+    let dst = temp::temp_path("hdf5_pure_repack_fa_dst.h5");
     // 4x4 grid, chunk 2x2 -> a 2x2 chunk grid (four chunks).
     let data: Vec<f64> = (0..16).map(|i| i as f64 * 1.5).collect();
     let mut b = FileBuilder::new();
@@ -543,8 +542,8 @@ fn repacks_multichunk_2d_fixed_array() {
 fn repacks_resizable_extensible_array() {
     // An unlimited-maxshape dataset uses a v4 Extensible Array index. Repack must
     // carry the maxshape through and reproduce the values exactly.
-    let src = temp_path("hdf5_pure_repack_ea_src.h5");
-    let dst = temp_path("hdf5_pure_repack_ea_dst.h5");
+    let src = temp::temp_path("hdf5_pure_repack_ea_src.h5");
+    let dst = temp::temp_path("hdf5_pure_repack_ea_dst.h5");
     let data: Vec<i64> = (0..1000).collect();
     let mut b = FileBuilder::new();
     b.create_dataset("series")
@@ -572,8 +571,8 @@ fn roundtrips_zfp_verbatim() {
     // but a chunked dataset's compressed chunks are copied verbatim, so repack
     // reproduces the stored (lossy-compressed) values byte-exact. The values read
     // back from the repacked file must equal those read back from the source.
-    let src = temp_path("hdf5_pure_repack_zfp_src.h5");
-    let dst = temp_path("hdf5_pure_repack_zfp_dst.h5");
+    let src = temp::temp_path("hdf5_pure_repack_zfp_src.h5");
+    let dst = temp::temp_path("hdf5_pure_repack_zfp_dst.h5");
     let data: Vec<f64> = (0..1024).map(|i| (i as f64).sin()).collect();
     let mut b = FileBuilder::new();
     b.create_dataset("vals")
@@ -608,8 +607,8 @@ fn repacks_single_chunk_filtered_verbatim() {
     // A dataset whose single chunk covers the whole dataset uses the v4
     // single-chunk index. The verbatim path must carry the chunk's real filter
     // mask into that index and reproduce the values exactly.
-    let src = temp_path("hdf5_pure_repack_single_src.h5");
-    let dst = temp_path("hdf5_pure_repack_single_dst.h5");
+    let src = temp::temp_path("hdf5_pure_repack_single_src.h5");
+    let dst = temp::temp_path("hdf5_pure_repack_single_dst.h5");
     let data: Vec<i32> = (0..256).map(|i| i % 5).collect();
     let mut b = FileBuilder::new();
     b.create_dataset("vals")
@@ -632,8 +631,8 @@ fn repacks_chunked_dataset_from_a_userblock_file() {
     // and chunk data are stored base-relative. Repack reads each chunk verbatim
     // from the source; it must apply the base address, or it reads the wrong bytes
     // and produces a corrupt copy.
-    let src = temp_path("hdf5_pure_repack_ub_src.h5");
-    let dst = temp_path("hdf5_pure_repack_ub_dst.h5");
+    let src = temp::temp_path("hdf5_pure_repack_ub_src.h5");
+    let dst = temp::temp_path("hdf5_pure_repack_ub_dst.h5");
     let data: Vec<f64> = (0..1000).map(|i| i as f64 * 0.25).collect();
     let mut b = FileBuilder::new();
     b.with_userblock(512);
@@ -663,8 +662,8 @@ fn repacks_chunked_dataset_from_a_userblock_file() {
 /// read that would pass either way.
 #[test]
 fn preserves_the_source_on_disk_format() {
-    let src = temp_path("hdf5_pure_repack_libver_src.h5");
-    let dst = temp_path("hdf5_pure_repack_libver_dst.h5");
+    let src = temp::temp_path("hdf5_pure_repack_libver_src.h5");
+    let dst = temp::temp_path("hdf5_pure_repack_libver_dst.h5");
     let mut b = FileBuilder::new();
     b.with_libver_bounds(LibVer::Earliest, LibVer::V18);
     b.create_dataset("values").with_f64_data(&[1.0, 2.0, 3.0]);
@@ -700,7 +699,7 @@ fn preserves_the_source_on_disk_format() {
 /// strict rule from the right one.
 #[test]
 fn upgrades_only_where_the_source_format_cannot_hold_the_content() {
-    let dst = temp_path("hdf5_pure_repack_libver_forced_dst.h5");
+    let dst = temp::temp_path("hdf5_pure_repack_libver_forced_dst.h5");
 
     // Contiguous content under a version 0 superblock: floored at the oldest
     // format this crate writes, and no further.
@@ -747,8 +746,8 @@ fn upgrades_only_where_the_source_format_cannot_hold_the_content() {
 /// and the carried-forward default above.
 #[test]
 fn an_explicit_bound_refuses_content_it_cannot_express() {
-    let src = temp_path("hdf5_pure_repack_libver_chunked_src.h5");
-    let dst = temp_path("hdf5_pure_repack_libver_chunked_dst.h5");
+    let src = temp::temp_path("hdf5_pure_repack_libver_chunked_src.h5");
+    let dst = temp::temp_path("hdf5_pure_repack_libver_chunked_dst.h5");
     let data: Vec<f64> = (0..1000).map(|i| i as f64).collect();
     let mut b = FileBuilder::new();
     b.create_dataset("chk")

@@ -17,15 +17,6 @@ use test_util::temp;
 // the same invariant from the in-place append side (issue #387).
 use test_util_hdf5::paged;
 
-/// A fixture under the repository's gitignored `tmp/`, in a directory of its own
-/// so two concurrent runs of this binary cannot collide on the name (issue #334).
-fn tmp(name: &str) -> temp::TempPath {
-    let mut p = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    p.push("tmp");
-    std::fs::create_dir_all(&p).expect("create the repository's tmp directory");
-    temp::temp_path_in(&p, name)
-}
-
 /// Build a paged file with one contiguous i32 dataset `d` seeded with `0..n`.
 fn build_paged(path: &std::path::Path, n: i32, persist: bool) {
     let data: Vec<i32> = (0..n).collect();
@@ -70,7 +61,7 @@ fn assert_paged_ok(path: &std::path::Path) {
 /// still satisfies every paged invariant.
 #[test]
 fn paged_persist_staged_create_dataset() {
-    let path = tmp("pure_paged_staged_create.h5");
+    let path = temp::repo_temp_path("pure_paged_staged_create.h5");
     build_paged(&path, 64, true);
 
     {
@@ -102,7 +93,7 @@ fn paged_persist_staged_create_dataset() {
 /// metadata object header, so the commit has to switch page type several times.
 #[test]
 fn paged_staged_commit_keeps_pages_homogeneous() {
-    let path = tmp("pure_paged_staged_homogeneous.h5");
+    let path = temp::repo_temp_path("pure_paged_staged_homogeneous.h5");
     // A chunked, unlimited dataset so the staged append rebuilds an index.
     {
         let mut b = FileBuilder::new();
@@ -155,7 +146,7 @@ fn paged_staged_commit_keeps_pages_homogeneous() {
 /// the refusals both backings share are checked first.
 #[test]
 fn paged_with_userblock_is_refused() {
-    let path = tmp("pure_paged_staged_userblock.h5");
+    let path = temp::repo_temp_path("pure_paged_staged_userblock.h5");
     {
         let mut b = FileBuilder::new();
         b.create_dataset("d")
@@ -211,7 +202,7 @@ fn paged_with_userblock_is_refused() {
 /// demanding the mirror, which opens the file because reading it is legitimate.
 #[test]
 fn paged_without_persist_is_refused() {
-    let path = tmp("pure_paged_staged_nopersist.h5");
+    let path = temp::repo_temp_path("pure_paged_staged_nopersist.h5");
     build_paged(&path, 64, false);
 
     let err = File::open_rw(&path).unwrap_err();

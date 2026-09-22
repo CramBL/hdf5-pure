@@ -6,7 +6,6 @@
 
 use hdf5_pure::{Error, File, FileBuilder, FormatError, RepackOptions, repack};
 
-use temp::temp_path;
 use test_util::temp;
 
 #[test]
@@ -128,7 +127,7 @@ fn lzf_plus_deflate_refused() {
 /// requires `pipeline_reencodable` to accept the filter) and reads back exact.
 #[test]
 fn add_lzf_dataset_in_place() {
-    let path = temp_path("hdf5_pure_edit_add_lzf.h5");
+    let path = temp::temp_path("hdf5_pure_edit_add_lzf.h5");
     {
         let mut b = FileBuilder::new();
         b.create_dataset("original").with_f64_data(&[1.0, 2.0]);
@@ -155,7 +154,7 @@ fn add_lzf_dataset_in_place() {
 /// compressor, the path `pipeline_reencodable` used to refuse.
 #[test]
 fn overwrite_lzf_dataset_in_place() {
-    let path = temp_path("hdf5_pure_edit_overwrite_lzf.h5");
+    let path = temp::temp_path("hdf5_pure_edit_overwrite_lzf.h5");
     let before: Vec<i32> = (0..256).collect();
     let after: Vec<i32> = (0..256).map(|i| i * 3).collect();
     {
@@ -322,8 +321,8 @@ fn reads_h5py_lzf_multichunk() {
 /// re-encode paths.
 #[test]
 fn repack_roundtrips_lzf() {
-    let src = temp_path("hdf5_pure_repack_lzf_src.h5");
-    let dst = temp_path("hdf5_pure_repack_lzf_dst.h5");
+    let src = temp::temp_path("hdf5_pure_repack_lzf_src.h5");
+    let dst = temp::temp_path("hdf5_pure_repack_lzf_dst.h5");
     let data: Vec<f64> = (0..1024).map(|i| (i as f64).cos()).collect();
     let mut b = FileBuilder::new();
     b.create_dataset("vals")

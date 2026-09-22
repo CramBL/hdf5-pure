@@ -5,7 +5,6 @@
 
 use hdf5_pure::{File, FileBuilder, FileSpaceStrategy};
 
-use temp::temp_path;
 use test_util::temp;
 
 #[test]
@@ -19,7 +18,7 @@ fn each_strategy_roundtrips() {
     .into_iter()
     .enumerate()
     {
-        let path = temp_path(&format!("hdf5_pure_fss_{i}.h5"));
+        let path = temp::temp_path(&format!("hdf5_pure_fss_{i}.h5"));
         let mut b = FileBuilder::new();
         b.create_dataset("d").with_i32_data(&[1, 2, 3, 4]);
         b.with_file_space_strategy(strategy, false, 7)
@@ -48,7 +47,7 @@ fn each_strategy_roundtrips() {
 
 #[test]
 fn no_config_writes_no_extension() {
-    let path = temp_path("hdf5_pure_fss_default.h5");
+    let path = temp::temp_path("hdf5_pure_fss_default.h5");
     let mut b = FileBuilder::new();
     b.create_dataset("d").with_f64_data(&[1.5, 2.5]);
     b.write(&path).unwrap();
@@ -66,7 +65,7 @@ fn no_config_writes_no_extension() {
 
 #[test]
 fn page_size_only_defaults_strategy() {
-    let path = temp_path("hdf5_pure_fss_pageonly.h5");
+    let path = temp::temp_path("hdf5_pure_fss_pageonly.h5");
     let mut b = FileBuilder::new();
     b.create_dataset("d").with_i32_data(&[9]);
     b.with_file_space_page_size(2048);
@@ -85,7 +84,7 @@ fn page_size_only_defaults_strategy() {
 fn strategy_survives_userblock_and_empty_file() {
     // A userblock shifts base_address, so the extension's base-relative address
     // must still resolve; and a file with no datasets must still carry it.
-    let path = temp_path("hdf5_pure_fss_userblock.h5");
+    let path = temp::temp_path("hdf5_pure_fss_userblock.h5");
     let mut b = FileBuilder::new();
     b.create_dataset("d").with_i32_data(&[5, 6]);
     b.with_userblock(512)
@@ -95,7 +94,7 @@ fn strategy_survives_userblock_and_empty_file() {
     assert_eq!(f.file_space_strategy(), Some(FileSpaceStrategy::None));
     assert_eq!(f.dataset("d").unwrap().read_i32().unwrap(), vec![5, 6]);
 
-    let path = temp_path("hdf5_pure_fss_empty.h5");
+    let path = temp::temp_path("hdf5_pure_fss_empty.h5");
     let mut b = FileBuilder::new();
     b.with_file_space_strategy(FileSpaceStrategy::Aggr, false, 1);
     b.write(&path).unwrap();
@@ -111,7 +110,7 @@ fn survives_in_place_edit() {
     // cut by truncation). Uses a non-paged strategy: a paged file cannot be edited
     // through the whole-file editor (issue #173 Phase 2), which is covered in
     // `tests/main/paged_mutation.rs`.
-    let path = temp_path("hdf5_pure_fss_edit.h5");
+    let path = temp::temp_path("hdf5_pure_fss_edit.h5");
     let mut b = FileBuilder::new();
     b.create_dataset("keep").with_i32_data(&[1, 2, 3]);
     b.with_file_space_strategy(FileSpaceStrategy::FsmAggr, false, 1);
@@ -143,7 +142,7 @@ fn persist_true_records_intent_on_a_fresh_file() {
     // A brand-new file has no free space, so persist = true records the persist
     // flag with no on-disk managers (matching the C library's brand-new persisted
     // file). A later File::open_rw that frees space fills the managers in.
-    let path = temp_path("hdf5_pure_fss_persist.h5");
+    let path = temp::temp_path("hdf5_pure_fss_persist.h5");
     let mut b = FileBuilder::new();
     b.create_dataset("d").with_i32_data(&[1, 2, 3]);
     b.with_file_space_strategy(FileSpaceStrategy::FsmAggr, true, 1);

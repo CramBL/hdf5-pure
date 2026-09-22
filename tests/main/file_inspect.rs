@@ -4,7 +4,6 @@
 
 use hdf5_pure::{File, FileBuilder, LibVer, is_hdf5, is_hdf5_bytes};
 
-use temp::temp_path;
 use test_util::temp;
 
 fn sample_file() -> Vec<u8> {
@@ -49,7 +48,7 @@ fn file_size_matches_buffer_and_metadata() {
     let file = File::from_bytes(bytes.clone()).unwrap();
     assert_eq!(file.file_size(), len);
 
-    let path = temp_path("hdf5_pure_file_size.h5");
+    let path = temp::temp_path("hdf5_pure_file_size.h5");
     std::fs::write(&path, &bytes).unwrap();
     let on_disk = File::open(&path).unwrap();
     assert_eq!(on_disk.file_size(), len);

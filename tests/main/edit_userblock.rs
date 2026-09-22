@@ -18,7 +18,6 @@
 
 use hdf5_pure::{AttrValue, File, FileBuilder, MaxExtent, Object};
 
-use temp::temp_path;
 use test_util::temp;
 use test_util::userblock::Userblock;
 
@@ -46,7 +45,7 @@ fn build_userblock_file(path: &std::path::Path) -> Userblock {
 
 #[test]
 fn synthetic_userblock_file_roundtrip() {
-    let path = temp_path("hdf5_pure_ub_roundtrip.h5");
+    let path = temp::temp_path("hdf5_pure_ub_roundtrip.h5");
     let userblock = build_userblock_file(&path);
 
     {
@@ -121,7 +120,7 @@ fn userblock_inplace_overwrite_only_takes_fast_path() {
     // A lone same-length overwrite takes the in-place fast path (no header
     // rewrite, no superblock flip); it must work on a userblock file and leave
     // the userblock untouched.
-    let path = temp_path("hdf5_pure_ub_inplace_only.h5");
+    let path = temp::temp_path("hdf5_pure_ub_inplace_only.h5");
     let userblock = build_userblock_file(&path);
 
     {
@@ -154,8 +153,8 @@ fn userblock_inplace_overwrite_only_takes_fast_path() {
 /// exercised in `edit_userblock_followups.rs` / `crates/crosscheck/tests/main/edit_userblock.rs`.
 #[test]
 fn userblock_cross_file_copy_from_userblock_source_is_refused() {
-    let src_path = temp_path("hdf5_pure_ub_xcopy_src_refuse.h5");
-    let dst_path = temp_path("hdf5_pure_ub_xcopy_dst_refuse.h5");
+    let src_path = temp::temp_path("hdf5_pure_ub_xcopy_src_refuse.h5");
+    let dst_path = temp::temp_path("hdf5_pure_ub_xcopy_dst_refuse.h5");
     build_userblock_file(&src_path);
     build_userblock_file(&dst_path);
     let dst_before = std::fs::read(&dst_path).unwrap();
@@ -185,7 +184,7 @@ fn userblock_cross_file_copy_from_userblock_source_is_refused() {
 /// identical, so only a non-zero base can catch a mistake here.
 #[test]
 fn userblock_add_empty_dataset_roundtrip() {
-    let path = temp_path("hdf5_pure_ub_add_empty.h5");
+    let path = temp::temp_path("hdf5_pure_ub_add_empty.h5");
     let userblock = build_userblock_file(&path);
 
     {
@@ -222,7 +221,7 @@ fn userblock_add_empty_dataset_roundtrip() {
 /// where it landed.
 #[test]
 fn userblock_add_empty_chunked_dataset_and_grow_it() {
-    let path = temp_path("hdf5_pure_ub_add_empty_chunked.h5");
+    let path = temp::temp_path("hdf5_pure_ub_add_empty_chunked.h5");
     let userblock = build_userblock_file(&path);
 
     {
@@ -293,7 +292,7 @@ fn userblock_add_empty_chunked_dataset_and_grow_it() {
 fn userblock_add_provenance_dataset_roundtrip() {
     use hdf5_pure::VerifyResult;
 
-    let path = temp_path("hdf5_pure_ub_add_provenance.h5");
+    let path = temp::temp_path("hdf5_pure_ub_add_provenance.h5");
     let userblock = build_userblock_file(&path);
 
     {
@@ -327,7 +326,7 @@ fn userblock_add_provenance_dataset_roundtrip() {
 /// a no-op at `base == 0`) once `base` is non-zero.
 #[test]
 fn userblock_add_dataset_with_vlen_attribute_roundtrip() {
-    let path = temp_path("hdf5_pure_ub_add_vlen_attr.h5");
+    let path = temp::temp_path("hdf5_pure_ub_add_vlen_attr.h5");
     let userblock = build_userblock_file(&path);
 
     {
@@ -362,7 +361,7 @@ fn userblock_add_dataset_with_vlen_attribute_roundtrip() {
 /// an attribute.
 #[test]
 fn userblock_add_vlen_string_dataset_roundtrip() {
-    let path = temp_path("hdf5_pure_ub_add_vlen_string_ds.h5");
+    let path = temp::temp_path("hdf5_pure_ub_add_vlen_string_ds.h5");
     let userblock = build_userblock_file(&path);
 
     {
@@ -389,7 +388,7 @@ fn userblock_add_vlen_string_dataset_roundtrip() {
 /// address is otherwise only ever exercised as a no-op at `base == 0`.
 #[test]
 fn userblock_add_reference_dataset_roundtrip() {
-    let path = temp_path("hdf5_pure_ub_add_ref.h5");
+    let path = temp::temp_path("hdf5_pure_ub_add_ref.h5");
     let userblock = build_userblock_file(&path);
 
     {
@@ -420,7 +419,7 @@ fn userblock_add_reference_dataset_roundtrip() {
 fn real_mat_add_dataset_preserves_userblock_and_data() {
     // Copy the fixture so the test never mutates the checked-in file.
     let src = std::path::Path::new("tests/data/matlab/test_string_v73.mat");
-    let path = temp_path("hdf5_pure_ub_real_mat.mat");
+    let path = temp::temp_path("hdf5_pure_ub_real_mat.mat");
     std::fs::copy(src, &path).unwrap();
 
     let userblock = Userblock::read(&path, UB);

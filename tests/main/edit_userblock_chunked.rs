@@ -15,7 +15,6 @@
 
 use hdf5_pure::{File, FileBuilder, MaxExtent};
 
-use temp::temp_path;
 use test_util::temp;
 use test_util::userblock::Userblock;
 
@@ -27,7 +26,7 @@ const MARKER: &[u8] = b"USERBLOCK-CHUNK-0104";
 fn userblock_chunked_add_roundtrip() {
     // Add a deflate-compressed multi-chunk dataset to a userblock file alongside
     // an untouched contiguous dataset, then read both back.
-    let path = temp_path("hdf5_pure_ub_chunk_add.h5");
+    let path = temp::temp_path("hdf5_pure_ub_chunk_add.h5");
     let mut b = FileBuilder::new();
     b.with_userblock(UB as u64);
     b.create_dataset("contig")
@@ -64,7 +63,7 @@ fn userblock_chunked_unfiltered_inplace_overwrite() {
     // An unfiltered chunked dataset: each chunk's slot is exactly its raw size, so
     // a same-shape overwrite re-fills every slot in place — no relocation, so the
     // file does not grow.
-    let path = temp_path("hdf5_pure_ub_chunk_inplace.h5");
+    let path = temp::temp_path("hdf5_pure_ub_chunk_inplace.h5");
     let original: Vec<f64> = (0..200).map(|i| i as f64).collect();
     let mut b = FileBuilder::new();
     b.with_userblock(UB as u64);
@@ -113,7 +112,7 @@ fn userblock_chunked_shrinking_inplace_overwrite() {
     // the index is rebuilt in place to record the new (smaller) sizes — no
     // relocation, so the file does not grow. This exercises the base-aware
     // in-place index rebuild on a userblock file.
-    let path = temp_path("hdf5_pure_ub_chunk_shrink.h5");
+    let path = temp::temp_path("hdf5_pure_ub_chunk_shrink.h5");
     // Poorly compressible original (high-entropy) vs. highly compressible
     // replacement (all equal): each new chunk re-encodes far smaller than its slot.
     let original: Vec<f64> = (0..400).map(|i| (i as f64).sin() * 1e6).collect();
@@ -164,7 +163,7 @@ fn real_mat_add_chunked_dataset_preserves_userblock() {
     // index and chunk data addresses are written relative to the 512-byte MATLAB
     // userblock, and the added value plus an untouched original both read back.
     let src = std::path::Path::new("tests/data/matlab/test_string_v73.mat");
-    let path = temp_path("hdf5_pure_ub_real_mat_chunk.mat");
+    let path = temp::temp_path("hdf5_pure_ub_real_mat_chunk.mat");
     std::fs::copy(src, &path).unwrap();
     let original_userblock = std::fs::read(&path).unwrap()[..UB].to_vec();
     assert_eq!(&original_userblock[..10], b"MATLAB 7.3");
@@ -215,7 +214,7 @@ fn userblock_extensible_array_add_and_overwrite_roundtrip() {
     // secondary/data blocks) — all built off the planner base. This exercises that
     // index type's base arithmetic on a userblock file, for both add and a
     // relocating overwrite.
-    let path = temp_path("hdf5_pure_ub_ea.h5");
+    let path = temp::temp_path("hdf5_pure_ub_ea.h5");
     let mut b = FileBuilder::new();
     b.with_userblock(UB as u64);
     b.create_dataset("keep").with_i32_data(&[7, 8, 9]);
@@ -275,7 +274,7 @@ fn userblock_single_chunk_index_add_and_overwrite() {
     // A dataset whose shape equals its chunk shape stores a single chunk (v4 type 1
     // single-chunk index), whose address lives in the data-layout message rather
     // than a separate index structure. Exercise add + overwrite on a userblock file.
-    let path = temp_path("hdf5_pure_ub_single_chunk.h5");
+    let path = temp::temp_path("hdf5_pure_ub_single_chunk.h5");
     let mut b = FileBuilder::new();
     b.with_userblock(UB as u64);
     let mut bytes = b.finish().unwrap();
@@ -326,7 +325,7 @@ fn userblock_chunked_relocating_overwrite_roundtrip() {
     // A deflate dataset whose new contents compress to different per-chunk sizes
     // cannot re-fill its slots, so the overwrite rebuilds and relocates the chunk
     // storage and reclaims the old blob. The new value must read back.
-    let path = temp_path("hdf5_pure_ub_chunk_reloc.h5");
+    let path = temp::temp_path("hdf5_pure_ub_chunk_reloc.h5");
     // Highly compressible original (all equal) vs. a varied replacement: their
     // compressed sizes differ, forcing the relocating path.
     let original = vec![7.0f64; 500];
@@ -372,7 +371,7 @@ fn userblock_chunked_add_reuses_a_freed_chunk_hole() {
     // the file stays exactly as small, and only reading the data back through the
     // index catches it. So delete a chunked dataset, write another into the hole
     // it left, and read every chunk of it.
-    let path = temp_path("hdf5_pure_ub_chunk_hole.h5");
+    let path = temp::temp_path("hdf5_pure_ub_chunk_hole.h5");
     let victim: Vec<f64> = (0..2048).map(|i| (i % 11) as f64).collect();
     let mut b = FileBuilder::new();
     b.with_userblock(UB as u64);
@@ -433,7 +432,7 @@ fn userblock_chunked_overwrite_reuses_reclaimed_space() {
     // `userblock_chunked_add_reuses_a_freed_chunk_hole` covers the same ground for
     // a chunk blob placed into the hole, where the base arithmetic runs on the
     // addresses the blob itself embeds.
-    let path = temp_path("hdf5_pure_ub_chunk_reclaim.h5");
+    let path = temp::temp_path("hdf5_pure_ub_chunk_reclaim.h5");
     // A moderately-compressible original lays down a sizeable contiguous chunk blob
     // (the hole that will be reclaimed). The high-entropy replacement re-encodes to
     // chunks that no longer fit those slots, forcing the relocating path.

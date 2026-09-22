@@ -21,7 +21,6 @@
 
 use hdf5_pure::{BaseAddress, Error, File, FileBuilder, LibVer, MessageType, Superblock};
 
-use temp::temp_path;
 use test_util::temp;
 
 /// A consumer's own helper over the superblock: both types in one signature,
@@ -63,7 +62,7 @@ fn field_types(sb: &Superblock) {
 
 #[test]
 fn the_superblock_and_its_base_address_can_both_be_named() {
-    let path = temp_path("hdf5_pure_api_surface_superblock.h5");
+    let path = temp::temp_path("hdf5_pure_api_surface_superblock.h5");
     let mut b = FileBuilder::new();
     b.with_userblock(512);
     b.create_dataset("alpha").with_f64_data(&[1.0]);
@@ -89,7 +88,7 @@ fn the_superblock_and_its_base_address_can_both_be_named() {
 
     // The other half of the same question: bounds that select the 1.8 format
     // are visible through the same accessor.
-    let old = temp_path("hdf5_pure_api_surface_libver18.h5");
+    let old = temp::temp_path("hdf5_pure_api_surface_libver18.h5");
     let mut b = FileBuilder::new();
     b.with_libver_bounds(LibVer::Earliest, LibVer::V18);
     b.create_dataset("alpha").with_f64_data(&[1.0]);
