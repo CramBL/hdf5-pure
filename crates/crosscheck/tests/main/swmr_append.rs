@@ -8,6 +8,8 @@ use hdf5::Extent;
 use hdf5::file::LibraryVersion;
 use hdf5_pure::{Error, File, FileBuilder, MaxExtent};
 use tempfile::tempdir;
+use test_util::bytes;
+use test_util::superblock;
 
 fn pure_create(path: &std::path::Path, n: usize) {
     let data: Vec<i32> = (0..n as i32).collect();
@@ -193,12 +195,12 @@ fn rejects_and_preserves_non_latest_format_file() {
     }
 
     let before = std::fs::read(&path).unwrap();
-    let sig = b"\x89HDF\r\n\x1a\n";
-    let off = before.windows(8).position(|w| w == sig).unwrap();
+    let off = bytes::find_signature(&before, superblock::SIGNATURE)
+        .expect("the file carries an HDF5 signature");
+    let version = superblock::version_at(&before, off);
     assert!(
-        before[off + 8] < 2,
-        "test precondition: expected a v0/v1 superblock, got version {}",
-        before[off + 8]
+        version < 2,
+        "test precondition: expected a v0/v1 superblock, got version {version}"
     );
 
     let err = match File::open_swmr_writer(&path) {

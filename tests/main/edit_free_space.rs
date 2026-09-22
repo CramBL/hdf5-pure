@@ -11,6 +11,7 @@ use hdf5_pure::{
     MemoryStrategy, SyncPolicy,
 };
 
+use test_util::free_space;
 use test_util::temp;
 
 // Shared with `tests/main/paged_staged_commit.rs`, which holds the staged commit to
@@ -1200,19 +1201,15 @@ fn corrupt_persisted_section_is_skipped_not_fatal() {
         .expect("the deletion left a persisted free section");
     let mut bytes = std::fs::read(&path).unwrap();
     let file_len = bytes.len() as u64;
-    let fsse = bytes
-        .windows(4)
-        .position(|w| w == b"FSSE")
+    let fsse = test_util::bytes::find_signature(&bytes, free_space::SECTIONS_SIGNATURE)
         .expect("a persisted file with a freed section has an FSSE block");
-    let size_le = big_len.to_le_bytes();
-    let size_pos = fsse
-        + 13
-        + bytes[fsse + 13..]
-            .windows(8)
-            .position(|w| w == size_le)
+    // Past the block's signature(4), version(1) and manager address(8) sit the
+    // sections themselves, each a size then an offset.
+    let sections = fsse + 13;
+    let size_pos = sections
+        + test_util::bytes::find_signature(&bytes[sections..], &big_len.to_le_bytes())
             .expect("the largest section's size field is in the FSSE block");
-    let off = size_pos + 8; // the offset field immediately follows the size
-    bytes[off..off + 8].copy_from_slice(&(file_len + 4096).to_le_bytes());
+    test_util::bytes::set_slice_at(&mut bytes, size_pos + 8, &(file_len + 4096).to_le_bytes());
     std::fs::write(&path, &bytes).unwrap();
 
     // Add a dataset large enough that only the (corrupt) largest region could

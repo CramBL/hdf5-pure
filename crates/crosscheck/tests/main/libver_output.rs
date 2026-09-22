@@ -36,6 +36,8 @@ use hdf5_pure::{AttrValue, File, FileBuilder, LibVer};
 #[cfg(feature = "__hdf5-1.10")]
 use hdf5_pure::{FileAccessProperties, FileCreateProperties};
 use tempfile::tempdir;
+use test_util::bytes;
+use test_util::superblock;
 
 /// A file exercising everything the 1.8 format still carries: contiguous
 /// datasets of two types, compact attributes on all three kinds of object, a
@@ -65,12 +67,14 @@ fn c_reads_every_part_of_a_1_8_format_file() {
     // The superblock version is the whole point, so read it out of the bytes
     // rather than trusting a library to report it.
     let bytes = std::fs::read(&path).unwrap();
-    let sig = bytes
-        .windows(8)
-        .position(|w| w == b"\x89HDF\r\n\x1a\n")
+    let sig = bytes::find_signature(&bytes, superblock::SIGNATURE)
         .expect("the file carries an HDF5 signature");
     assert_eq!(sig, 512, "the userblock precedes the superblock");
-    assert_eq!(bytes[sig + 8], 2, "version 2 superblock");
+    assert_eq!(
+        superblock::version_at(&bytes, sig),
+        2,
+        "version 2 superblock"
+    );
 
     let f = hdf5::File::open(&path).unwrap();
     let d = f.dataset("values").unwrap();
@@ -177,12 +181,10 @@ fn an_edit_session_keeps_a_1_8_file_in_the_1_8_format() {
     }
 
     let bytes = std::fs::read(&path).unwrap();
-    let sig = bytes
-        .windows(8)
-        .position(|w| w == b"\x89HDF\r\n\x1a\n")
-        .unwrap();
+    let sig = bytes::find_signature(&bytes, superblock::SIGNATURE)
+        .expect("the file carries an HDF5 signature");
     assert_eq!(
-        bytes[sig + 8],
+        superblock::version_at(&bytes, sig),
         2,
         "the commit kept the version 2 superblock"
     );
@@ -246,12 +248,10 @@ fn c_reads_a_file_written_at_a_lower_bound_of_latest() {
 
     for path in [via_builder, via_properties] {
         let bytes = std::fs::read(&path).unwrap();
-        let sig = bytes
-            .windows(8)
-            .position(|w| w == b"\x89HDF\r\n\x1a\n")
+        let sig = bytes::find_signature(&bytes, superblock::SIGNATURE)
             .expect("the file carries an HDF5 signature");
         assert_eq!(
-            bytes[sig + 8],
+            superblock::version_at(&bytes, sig),
             3,
             "{}: the 1.10 format, not one 1.12 or 1.14 would have named",
             path.display()
