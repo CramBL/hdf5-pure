@@ -5,11 +5,15 @@ use std::path::{Path, PathBuf};
 
 pub mod allocation;
 pub mod bytes;
+pub mod checksum;
 pub mod extensible_array;
 pub mod heap;
+pub mod image;
+pub mod object_header;
 pub mod superblock;
 pub mod temp;
 pub mod userblock;
+pub mod widths;
 
 /// A file under `tests/data`, by its path there: `data("c/1.8/v1_superblock.h5")`.
 pub fn data(relative: &str) -> PathBuf {

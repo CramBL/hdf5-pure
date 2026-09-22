@@ -1,6 +1,6 @@
-# Helpers shared by the crate's integration tests and by the crosscheck
-# package. Unit tests inside the crate do not use it: a lib test is its own
-# compilation of the crate, and the types here would not be its types.
+# Helpers shared by hdf5-pure's own unit tests, its integration tests and the
+# crosscheck package. It never depends on hdf5-pure: a test that feeds the
+# reader damaged bytes must not build them with the encoder under test.
 [package]
 name = "test-util"
 version = "0.0.0"

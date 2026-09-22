@@ -247,8 +247,15 @@ impl ObjectHeader {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{source::BytesSource, width::UintWidth};
+    use crate::source::BytesSource;
     use rstest::rstest;
+    use test_util::image::Image;
+    use test_util::object_header::v1 as v1_bytes;
+    use test_util::object_header::v2 as v2_bytes;
+    use test_util::object_header::{
+        Message, MessageFlags as RecordFlags, MessageType as RecordType,
+    };
+    use test_util::widths::Widths;
 
     /// A chunk of only Nil padding reserves nothing.
     ///
@@ -257,9 +264,9 @@ mod tests {
     /// excluded from the reservation count.
     #[test]
     fn a_chunk_of_padding_reserves_no_messages() {
-        let data = V2HeaderBuilder::new()
-            .flags(0x01)
-            .repeat_raw_message(256, 0x00, &[])
+        let data = v2_bytes::Header::new()
+            .flags(v2_bytes::HeaderFlags(0x01))
+            .messages((0..256).map(|_| Message::nil(0)))
             .build();
         let header = parse(&data).unwrap();
 
@@ -273,7 +280,7 @@ mod tests {
 
     #[test]
     fn parse_v1_zero_messages() {
-        let header = parse(&V1HeaderBuilder::new().build()).unwrap();
+        let header = parse(&v1_bytes::Header::new().build()).unwrap();
 
         assert_eq!(header.version, 1);
         assert!(header.messages.is_empty());
@@ -286,9 +293,9 @@ mod tests {
         const DATASPACE: [u8; 8] = [1, 2, 3, 4, 0, 0, 0, 0];
         const DATA_LAYOUT: [u8; 8] = [5, 6, 0, 0, 0, 0, 0, 0];
 
-        let data = V1HeaderBuilder::new()
-            .message(MessageType::DATASPACE, &DATASPACE)
-            .message(MessageType::DATA_LAYOUT, &DATA_LAYOUT)
+        let data = v1_bytes::Header::new()
+            .message(Message::new(RecordType::DATASPACE, &DATASPACE))
+            .message(Message::new(RecordType::DATA_LAYOUT, &DATA_LAYOUT))
             .build();
         let header = parse(&data).unwrap();
 
@@ -299,13 +306,16 @@ mod tests {
 
     #[test]
     fn parse_v1_unknown_message_ok() {
-        let data = V1HeaderBuilder::new()
-            .raw_message(UNKNOWN_TYPE, &[0xAA, 0, 0, 0, 0, 0, 0, 0])
+        let data = v1_bytes::Header::new()
+            .message(Message::new(RecordType::UNKNOWN, &UNKNOWN_BODY))
             .build();
         let header = parse(&data).unwrap();
 
         assert_eq!(header.messages.len(), 1);
-        assert_eq!(header.messages[0].msg_type.unknown_id(), Some(UNKNOWN_TYPE));
+        assert_eq!(
+            header.messages[0].msg_type.unknown_id(),
+            Some(RecordType::UNKNOWN.0)
+        );
     }
 
     /// The must-understand guard applies only to message types the parser cannot
@@ -316,11 +326,10 @@ mod tests {
     /// `0x08` flag exercises the guard.
     #[test]
     fn parse_v1_named_message_survives_must_understand() {
-        let data = V1HeaderBuilder::new()
-            .message_with_flags(
-                MessageType::EXTERNAL_DATA_FILES,
-                &[0xAA, 0, 0, 0, 0, 0, 0, 0],
-                MessageFlags::FAIL_IF_UNKNOWN_AND_OPEN_FOR_WRITE,
+        let data = v1_bytes::Header::new()
+            .message(
+                Message::new(RecordType::EXTERNAL_DATA_FILES, &UNKNOWN_BODY)
+                    .with_flags(RecordFlags::FAIL_IF_UNKNOWN_AND_OPEN_FOR_WRITE),
             )
             .build();
         let header = parse_for_mode(&data, AccessMode::ReadWrite).unwrap();
@@ -339,24 +348,22 @@ mod tests {
         V2Header,
     }
 
-    fn unknown_message_data(location: UnknownMessageLocation, flags: MessageFlags) -> Vec<u8> {
+    fn unknown_message_data(location: UnknownMessageLocation, flags: RecordFlags) -> Vec<u8> {
+        let unknown = Message::new(RecordType::UNKNOWN, &UNKNOWN_BODY).with_flags(flags);
         match location {
-            UnknownMessageLocation::V1Header => V1HeaderBuilder::new()
-                .raw_message_with_flags(UNKNOWN_TYPE, &[0xAA, 0, 0, 0, 0, 0, 0, 0], flags)
-                .build(),
+            UnknownMessageLocation::V1Header => v1_bytes::Header::new().message(unknown).build(),
             UnknownMessageLocation::V1Continuation => {
-                let continuation =
-                    v1_message_record(UNKNOWN_TYPE, &[0xAA, 0, 0, 0, 0, 0, 0, 0], flags);
-                TestFileBuilder::new(
-                    V1HeaderBuilder::new()
-                        .continuation(CONTINUATION_OFFSET, &continuation)
+                let continuation = v1_bytes::message_record(&unknown);
+                let mut image = Image::starting_with(
+                    &v1_bytes::Header::new()
+                        .continuation(CONTINUATION_OFFSET, &continuation, WIDTHS)
                         .build(),
-                )
-                .chunk(CONTINUATION_OFFSET, &continuation)
-                .build()
+                );
+                image.place(CONTINUATION_OFFSET, &continuation);
+                image.build()
             }
-            UnknownMessageLocation::V2Header => V2HeaderBuilder::new()
-                .raw_message_with_flags(0xFF, &[0xAA], flags)
+            UnknownMessageLocation::V2Header => v2_bytes::Header::new()
+                .message(Message::new(RecordType::UNKNOWN, &[0xAA]).with_flags(flags))
                 .build(),
         }
     }
@@ -368,16 +375,16 @@ mod tests {
     fn unknown_message_that_must_always_be_understood_is_rejected(
         #[case] location: UnknownMessageLocation,
     ) {
-        let data = unknown_message_data(location, MessageFlags::FAIL_IF_UNKNOWN_ALWAYS);
+        let data = unknown_message_data(location, RecordFlags::FAIL_IF_UNKNOWN_ALWAYS);
 
         assert_eq!(
             parse(&data).unwrap_err(),
-            FormatError::UnsupportedMessage(UNKNOWN_TYPE),
+            FormatError::UnsupportedMessage(RecordType::UNKNOWN.0),
             "buffered {location:?}"
         );
         assert_eq!(
             parse_from_source_for_mode(&data, AccessMode::ReadOnly).unwrap_err(),
-            FormatError::UnsupportedMessage(UNKNOWN_TYPE),
+            FormatError::UnsupportedMessage(RecordType::UNKNOWN.0),
             "streamed {location:?}"
         );
     }
@@ -389,7 +396,7 @@ mod tests {
     fn unknown_message_that_a_writer_must_understand_is_rejected_only_for_write(
         #[case] location: UnknownMessageLocation,
     ) {
-        let data = unknown_message_data(location, MessageFlags::FAIL_IF_UNKNOWN_AND_OPEN_FOR_WRITE);
+        let data = unknown_message_data(location, RecordFlags::FAIL_IF_UNKNOWN_AND_OPEN_FOR_WRITE);
 
         let buffered = parse_for_mode(&data, AccessMode::ReadOnly).unwrap();
         let streamed = parse_from_source_for_mode(&data, AccessMode::ReadOnly).unwrap();
@@ -405,12 +412,12 @@ mod tests {
                     );
                     assert_eq!(
                         header.messages[1].msg_type.unknown_id(),
-                        Some(UNKNOWN_TYPE),
+                        Some(RecordType::UNKNOWN.0),
                         "{parser}"
                     );
                     assert_eq!(
                         header.messages[1].data.as_slice(),
-                        &[0xAA, 0, 0, 0, 0, 0, 0, 0],
+                        &UNKNOWN_BODY,
                         "{parser}"
                     );
                 }
@@ -418,12 +425,12 @@ mod tests {
                     assert_eq!(header.messages.len(), 1, "{parser}");
                     assert_eq!(
                         header.messages[0].msg_type.unknown_id(),
-                        Some(UNKNOWN_TYPE),
+                        Some(RecordType::UNKNOWN.0),
                         "{parser}"
                     );
                     assert_eq!(
                         header.messages[0].data.as_slice(),
-                        &[0xAA, 0, 0, 0, 0, 0, 0, 0],
+                        &UNKNOWN_BODY,
                         "{parser}"
                     );
                 }
@@ -431,7 +438,7 @@ mod tests {
                     assert_eq!(header.messages.len(), 1, "{parser}");
                     assert_eq!(
                         header.messages[0].msg_type.unknown_id(),
-                        Some(UNKNOWN_TYPE),
+                        Some(RecordType::UNKNOWN.0),
                         "{parser}"
                     );
                     assert_eq!(header.messages[0].data.as_slice(), &[0xAA], "{parser}");
@@ -441,20 +448,20 @@ mod tests {
 
         assert_eq!(
             parse_for_mode(&data, AccessMode::ReadWrite).unwrap_err(),
-            FormatError::UnsupportedMessage(UNKNOWN_TYPE),
+            FormatError::UnsupportedMessage(RecordType::UNKNOWN.0),
             "buffered"
         );
         assert_eq!(
             parse_from_source_for_mode(&data, AccessMode::ReadWrite).unwrap_err(),
-            FormatError::UnsupportedMessage(UNKNOWN_TYPE),
+            FormatError::UnsupportedMessage(RecordType::UNKNOWN.0),
             "streamed"
         );
     }
 
     #[test]
     fn parse_v2_no_timestamps_one_message() {
-        let data = V2HeaderBuilder::new()
-            .message(MessageType::DATASPACE, &[10, 20])
+        let data = v2_bytes::Header::new()
+            .message(Message::new(RecordType::DATASPACE, &[10, 20]))
             .build();
         let header = parse(&data).unwrap();
 
@@ -467,10 +474,14 @@ mod tests {
 
     #[test]
     fn parse_v2_with_timestamps() {
-        let data = V2HeaderBuilder::new()
-            .flags(V2_STORES_TIMES)
-            .timestamps((100, 200, 300, 400))
-            .message(MessageType::DATASPACE, &[1])
+        let data = v2_bytes::Header::new()
+            .timestamps(v2_bytes::Timestamps {
+                access: 100,
+                modification: 200,
+                change: 300,
+                birth: 400,
+            })
+            .message(Message::new(RecordType::DATASPACE, &[1]))
             .build();
         let header = parse(&data).unwrap();
 
@@ -484,11 +495,11 @@ mod tests {
 
     #[test]
     fn parse_v2_creation_order() {
-        let data = V2HeaderBuilder::new()
-            .flags(V2_STORES_TIMES | V2_TRACKS_CREATION_ORDER)
-            .timestamps((0, 0, 0, 0))
-            .message(MessageType::DATATYPE, &[9])
-            .raw_message(0x05, &[8])
+        let data = v2_bytes::Header::new()
+            .flags(v2_bytes::HeaderFlags::TRACKS_CREATION_ORDER)
+            .timestamps(v2_bytes::Timestamps::default())
+            .message(Message::new(RecordType::DATATYPE, &[9]))
+            .message(Message::new(RecordType::FILL_VALUE, &[8]))
             .build();
         let header = parse(&data).unwrap();
 
@@ -500,8 +511,8 @@ mod tests {
 
     #[test]
     fn parse_v2_checksum_is_validated() {
-        let mut data = V2HeaderBuilder::new()
-            .message(MessageType::DATASPACE, &[1, 2, 3])
+        let mut data = v2_bytes::Header::new()
+            .message(Message::new(RecordType::DATASPACE, &[1, 2, 3]))
             .build();
 
         assert_eq!(parse(&data).unwrap().messages.len(), 1);
@@ -515,9 +526,9 @@ mod tests {
 
     #[test]
     fn parse_v2_nil_padding_skipped() {
-        let data = V2HeaderBuilder::new()
-            .raw_message(0x00, &[0, 0, 0, 0])
-            .message(MessageType::DATASPACE, &[42])
+        let data = v2_bytes::Header::new()
+            .message(Message::nil(4))
+            .message(Message::new(RecordType::DATASPACE, &[42]))
             .build();
         let header = parse(&data).unwrap();
 
@@ -525,33 +536,30 @@ mod tests {
         assert_eq!(header.messages[0].msg_type, MessageType::DATASPACE);
     }
 
-    #[test]
-    fn parse_v2_chunk_size_widths() {
-        for flags in [0x00, 0x01, 0x02] {
-            let data = V2HeaderBuilder::new()
-                .flags(flags)
-                .message(MessageType::DATASPACE, &[1])
-                .build();
+    #[rstest]
+    #[case::one_byte(0x00)]
+    #[case::two_bytes(0x01)]
+    #[case::four_bytes(0x02)]
+    fn parse_v2_chunk_size_widths(#[case] flags: u8) {
+        let data = v2_bytes::Header::new()
+            .flags(v2_bytes::HeaderFlags(flags))
+            .message(Message::new(RecordType::DATASPACE, &[1]))
+            .build();
 
-            assert_eq!(
-                parse(&data).unwrap().messages.len(),
-                1,
-                "flags={flags:#04x}"
-            );
-        }
+        assert_eq!(parse(&data).unwrap().messages.len(), 1);
     }
 
     #[test]
     fn parse_v2_continuation() {
-        let continuation = v2_continuation_chunk(MessageType::DATATYPE, &[0xDE, 0xAD]);
-        let data = TestFileBuilder::new(
-            V2HeaderBuilder::new()
-                .message(MessageType::DATASPACE, &[42])
-                .continuation(CONTINUATION_OFFSET, &continuation)
+        let continuation = v2_continuation(&[0xDE, 0xAD]);
+        let mut image = Image::starting_with(
+            &v2_bytes::Header::new()
+                .message(Message::new(RecordType::DATASPACE, &[42]))
+                .continuation(CONTINUATION_OFFSET, &continuation, WIDTHS)
                 .build(),
-        )
-        .chunk(CONTINUATION_OFFSET, &continuation)
-        .build();
+        );
+        image.place(CONTINUATION_OFFSET, &continuation);
+        let data = image.build();
         let header = parse(&data).unwrap();
 
         assert_eq!(header.messages.len(), 2);
@@ -572,10 +580,14 @@ mod tests {
     #[cfg(feature = "std")]
     #[test]
     fn streaming_v2_simple_matches_buffered() {
-        let data = V2HeaderBuilder::new()
-            .flags(V2_STORES_TIMES)
-            .timestamps((1, 2, 3, 4))
-            .message(MessageType::DATASPACE, &[1, 2, 3])
+        let data = v2_bytes::Header::new()
+            .timestamps(v2_bytes::Timestamps {
+                access: 1,
+                modification: 2,
+                change: 3,
+                birth: 4,
+            })
+            .message(Message::new(RecordType::DATASPACE, &[1, 2, 3]))
             .build();
 
         assert_all_parse_paths_match(&data);
@@ -584,37 +596,34 @@ mod tests {
     #[cfg(feature = "std")]
     #[test]
     fn streaming_v2_with_continuation_matches_buffered() {
-        let continuation = v2_continuation_chunk(MessageType::DATATYPE, &[0xDE, 0xAD]);
-        let data = TestFileBuilder::new(
-            V2HeaderBuilder::new()
-                .message(MessageType::DATASPACE, &[42])
-                .continuation(CONTINUATION_OFFSET, &continuation)
+        let continuation = v2_continuation(&[0xDE, 0xAD]);
+        let mut image = Image::starting_with(
+            &v2_bytes::Header::new()
+                .message(Message::new(RecordType::DATASPACE, &[42]))
+                .continuation(CONTINUATION_OFFSET, &continuation, WIDTHS)
                 .build(),
-        )
-        .chunk(CONTINUATION_OFFSET, &continuation)
-        .build();
+        );
+        image.place(CONTINUATION_OFFSET, &continuation);
 
-        assert_all_parse_paths_match(&data);
+        assert_all_parse_paths_match(image.as_bytes());
     }
 
     #[cfg(feature = "std")]
     #[test]
     fn streaming_v1_with_continuation_matches_buffered() {
-        let continuation = v1_message_record(
-            MessageType::DATATYPE.to_u16(),
-            &[0xBE, 0xEF, 0, 0, 0, 0, 0, 0],
-            MessageFlags::NONE,
-        );
-        let data = TestFileBuilder::new(
-            V1HeaderBuilder::new()
-                .message(MessageType::DATASPACE, &[42, 0, 0, 0, 0, 0, 0, 0])
-                .continuation(CONTINUATION_OFFSET, &continuation)
+        let continuation = v1_datatype_chunk(&[0xBE, 0xEF, 0, 0, 0, 0, 0, 0]);
+        let mut image = Image::starting_with(
+            &v1_bytes::Header::new()
+                .message(Message::new(
+                    RecordType::DATASPACE,
+                    &[42, 0, 0, 0, 0, 0, 0, 0],
+                ))
+                .continuation(CONTINUATION_OFFSET, &continuation, WIDTHS)
                 .build(),
-        )
-        .chunk(CONTINUATION_OFFSET, &continuation)
-        .build();
+        );
+        image.place(CONTINUATION_OFFSET, &continuation);
 
-        assert_all_parse_paths_match(&data);
+        assert_all_parse_paths_match(image.as_bytes());
     }
 
     #[cfg(feature = "std")]
@@ -624,68 +633,54 @@ mod tests {
         // object header size (`header_data_size`) is malformed. All parser paths
         // reject the message at the chunk boundary, so the continuation is not
         // followed.
-        let continuation = v1_message_record(
-            MessageType::DATATYPE.to_u16(),
-            &[0xBE, 0xEF, 0, 0, 0, 0, 0, 0],
-            MessageFlags::NONE,
-        );
-        let data = TestFileBuilder::new(
-            V1HeaderBuilder::new()
-                .continuation(CONTINUATION_OFFSET, &continuation)
+        let continuation = v1_datatype_chunk(&[0xBE, 0xEF, 0, 0, 0, 0, 0, 0]);
+        let mut image = Image::starting_with(
+            &v1_bytes::Header::new()
+                .continuation(CONTINUATION_OFFSET, &continuation, WIDTHS)
                 .declared_data_size(16)
                 .build(),
-        )
-        .chunk(CONTINUATION_OFFSET, &continuation)
-        .build();
+        );
+        image.place(CONTINUATION_OFFSET, &continuation);
 
-        assert_unexpected_eof_all_parse_paths(&data);
+        assert_unexpected_eof_all_parse_paths(image.as_bytes());
     }
 
     #[cfg(feature = "std")]
     #[test]
     fn version_1_continuation_with_partial_message_prefix_is_rejected() {
-        let mut continuation = v1_message_record(
-            MessageType::DATATYPE.to_u16(),
-            &[0xAB; 8],
-            MessageFlags::NONE,
-        );
+        let mut continuation = v1_datatype_chunk(&[0xAB; 8]);
 
         // One trailing byte cannot form the eight-byte prefix of another v1 message.
         continuation.push(0);
 
-        let data = TestFileBuilder::new(
-            V1HeaderBuilder::new()
-                .continuation(CONTINUATION_OFFSET, &continuation)
+        let mut image = Image::starting_with(
+            &v1_bytes::Header::new()
+                .continuation(CONTINUATION_OFFSET, &continuation, WIDTHS)
                 .build(),
-        )
-        .chunk(CONTINUATION_OFFSET, &continuation)
-        .build();
+        );
+        image.place(CONTINUATION_OFFSET, &continuation);
 
-        assert_unexpected_eof_all_parse_paths(&data);
+        assert_unexpected_eof_all_parse_paths(image.as_bytes());
     }
 
     #[test]
     fn a_filtered_version_1_parse_follows_unretained_continuations() {
         let nested_offset = 512;
         let nested_data = [0xDE, 0xAD, 0, 0, 0, 0, 0, 0];
-        let nested_chunk = v1_message_record(
-            MessageType::DATATYPE.to_u16(),
-            &nested_data,
-            MessageFlags::NONE,
-        );
-        let continuation_chunk = v1_message_record(
-            MessageType::OBJECT_HEADER_CONTINUATION.to_u16(),
-            &continuation_pointer(nested_offset, nested_chunk.len()),
-            MessageFlags::NONE,
-        );
-        let data = TestFileBuilder::new(
-            V1HeaderBuilder::new()
-                .continuation(CONTINUATION_OFFSET, &continuation_chunk)
+        let nested_chunk = v1_datatype_chunk(&nested_data);
+        let continuation_chunk = v1_bytes::message_record(&Message::continuation(
+            nested_offset as u64,
+            nested_chunk.len() as u64,
+            WIDTHS,
+        ));
+        let mut image = Image::starting_with(
+            &v1_bytes::Header::new()
+                .continuation(CONTINUATION_OFFSET, &continuation_chunk, WIDTHS)
                 .build(),
-        )
-        .chunk(CONTINUATION_OFFSET, &continuation_chunk)
-        .chunk(nested_offset, &nested_chunk)
-        .build();
+        );
+        image.place(CONTINUATION_OFFSET, &continuation_chunk);
+        image.place(nested_offset, &nested_chunk);
+        let data = image.build();
 
         let mut keep_datatype = |msg_type: MessageType, _: &[u8]| msg_type == MessageType::DATATYPE;
         let buffered = ObjectHeader::parse_filtered(
@@ -719,11 +714,10 @@ mod tests {
 
     #[test]
     fn a_filtered_version_1_parse_checks_must_understand_before_filtering() {
-        let data = V1HeaderBuilder::new()
-            .raw_message_with_flags(
-                UNKNOWN_TYPE,
-                &[0xAA, 0, 0, 0, 0, 0, 0, 0],
-                MessageFlags::FAIL_IF_UNKNOWN_ALWAYS,
+        let data = v1_bytes::Header::new()
+            .message(
+                Message::new(RecordType::UNKNOWN, &UNKNOWN_BODY)
+                    .with_flags(RecordFlags::FAIL_IF_UNKNOWN_ALWAYS),
             )
             .build();
 
@@ -765,11 +759,11 @@ mod tests {
 
         assert_eq!(
             buffered_error,
-            FormatError::UnsupportedMessage(UNKNOWN_TYPE)
+            FormatError::UnsupportedMessage(RecordType::UNKNOWN.0)
         );
         assert_eq!(
             streamed_error,
-            FormatError::UnsupportedMessage(UNKNOWN_TYPE)
+            FormatError::UnsupportedMessage(RecordType::UNKNOWN.0)
         );
         assert!(
             !buffered_filter_called,
@@ -784,8 +778,8 @@ mod tests {
     #[cfg(feature = "std")]
     #[test]
     fn version_1_chunk0_message_with_unaligned_size_is_rejected() {
-        let data = V1HeaderBuilder::new()
-            .message(MessageType::DATATYPE, &[0xAB; 7])
+        let data = v1_bytes::Header::new()
+            .message(Message::new(RecordType::DATATYPE, &[0xAB; 7]))
             .build();
 
         assert_invalid_v1_message_size_all_parse_paths(&data, 7);
@@ -794,21 +788,29 @@ mod tests {
     #[cfg(feature = "std")]
     #[test]
     fn version_1_continuation_message_with_unaligned_size_is_rejected() {
-        let continuation = v1_message_record(
-            MessageType::DATATYPE.to_u16(),
-            &[0xAB; 7],
-            MessageFlags::NONE,
-        );
+        let continuation = v1_datatype_chunk(&[0xAB; 7]);
 
-        let data = TestFileBuilder::new(
-            V1HeaderBuilder::new()
-                .continuation(CONTINUATION_OFFSET, &continuation)
+        let mut image = Image::starting_with(
+            &v1_bytes::Header::new()
+                .continuation(CONTINUATION_OFFSET, &continuation, WIDTHS)
                 .build(),
-        )
-        .chunk(CONTINUATION_OFFSET, &continuation)
-        .build();
+        );
+        image.place(CONTINUATION_OFFSET, &continuation);
 
-        assert_invalid_v1_message_size_all_parse_paths(&data, 7);
+        assert_invalid_v1_message_size_all_parse_paths(image.as_bytes(), 7);
+    }
+
+    /// A version 1 continuation chunk of one Datatype message carrying `data`.
+    fn v1_datatype_chunk(data: &[u8]) -> Vec<u8> {
+        v1_bytes::message_record(&Message::new(RecordType::DATATYPE, data))
+    }
+
+    /// A version 2 continuation chunk of one Datatype message carrying `data`.
+    fn v2_continuation(data: &[u8]) -> Vec<u8> {
+        v2_bytes::continuation_chunk(
+            &[Message::new(RecordType::DATATYPE, data)],
+            v2_bytes::HeaderFlags::default(),
+        )
     }
 
     fn assert_message(message: &HeaderMessage, msg_type: MessageType, data: &[u8]) {
@@ -935,258 +937,6 @@ mod tests {
         }
     }
 
-    #[derive(Clone)]
-    struct TestMessage<T> {
-        msg_type: T,
-        data: Vec<u8>,
-        flags: MessageFlags,
-    }
-
-    impl<T> TestMessage<T> {
-        fn new(msg_type: T, data: &[u8], flags: MessageFlags) -> Self {
-            Self {
-                msg_type,
-                data: data.to_vec(),
-                flags,
-            }
-        }
-    }
-
-    struct V1HeaderBuilder {
-        messages: Vec<TestMessage<u16>>,
-        reference_count: u32,
-        declared_data_size: Option<usize>,
-    }
-
-    impl V1HeaderBuilder {
-        fn new() -> Self {
-            Self {
-                messages: Vec::new(),
-                reference_count: 1,
-                declared_data_size: None,
-            }
-        }
-
-        fn message(self, msg_type: MessageType, data: &[u8]) -> Self {
-            self.raw_message(msg_type.to_u16(), data)
-        }
-
-        fn message_with_flags(
-            self,
-            msg_type: MessageType,
-            data: &[u8],
-            flags: MessageFlags,
-        ) -> Self {
-            self.raw_message_with_flags(msg_type.to_u16(), data, flags)
-        }
-
-        fn raw_message(self, msg_type: u16, data: &[u8]) -> Self {
-            self.raw_message_with_flags(msg_type, data, MessageFlags::NONE)
-        }
-
-        fn raw_message_with_flags(
-            mut self,
-            msg_type: u16,
-            data: &[u8],
-            flags: MessageFlags,
-        ) -> Self {
-            self.messages.push(TestMessage::new(msg_type, data, flags));
-            self
-        }
-
-        fn continuation(self, offset: usize, chunk: &[u8]) -> Self {
-            self.message(
-                MessageType::OBJECT_HEADER_CONTINUATION,
-                &continuation_pointer(offset, chunk.len()),
-            )
-        }
-
-        fn declared_data_size(mut self, size: usize) -> Self {
-            self.declared_data_size = Some(size);
-            self
-        }
-
-        fn build(self) -> Vec<u8> {
-            let records = v1_message_records(&self.messages);
-            let data_size = self.declared_data_size.unwrap_or(records.len());
-
-            let mut buf = Vec::new();
-            buf.push(1);
-            buf.push(0);
-            buf.extend_from_slice(&(self.messages.len() as u16).to_le_bytes());
-            buf.extend_from_slice(&self.reference_count.to_le_bytes());
-            buf.extend_from_slice(&(data_size as u32).to_le_bytes());
-            buf.extend_from_slice(&[0u8; 4]);
-            buf.extend_from_slice(&records);
-            buf
-        }
-    }
-
-    struct V2HeaderBuilder {
-        flags: u8,
-        messages: Vec<TestMessage<u8>>,
-        timestamps: Option<(u32, u32, u32, u32)>,
-    }
-
-    impl V2HeaderBuilder {
-        fn new() -> Self {
-            Self {
-                flags: 0,
-                messages: Vec::new(),
-                timestamps: None,
-            }
-        }
-
-        fn flags(mut self, flags: u8) -> Self {
-            self.flags = flags;
-            self
-        }
-
-        fn timestamps(mut self, timestamps: (u32, u32, u32, u32)) -> Self {
-            self.timestamps = Some(timestamps);
-            self
-        }
-
-        fn message(self, msg_type: MessageType, data: &[u8]) -> Self {
-            self.raw_message(msg_type.to_u16() as u8, data)
-        }
-
-        fn raw_message(self, msg_type: u8, data: &[u8]) -> Self {
-            self.raw_message_with_flags(msg_type, data, MessageFlags::NONE)
-        }
-
-        fn raw_message_with_flags(
-            mut self,
-            msg_type: u8,
-            data: &[u8],
-            flags: MessageFlags,
-        ) -> Self {
-            self.messages.push(TestMessage::new(msg_type, data, flags));
-            self
-        }
-
-        fn repeat_raw_message(mut self, count: usize, msg_type: u8, data: &[u8]) -> Self {
-            for _ in 0..count {
-                self.messages
-                    .push(TestMessage::new(msg_type, data, MessageFlags::NONE));
-            }
-            self
-        }
-
-        fn continuation(self, offset: usize, chunk: &[u8]) -> Self {
-            self.message(
-                MessageType::OBJECT_HEADER_CONTINUATION,
-                &continuation_pointer(offset, chunk.len()),
-            )
-        }
-
-        fn build(self) -> Vec<u8> {
-            let header_flags = v2::HeaderFlags::new(self.flags);
-            let has_creation_order = header_flags.tracks_creation_order();
-
-            let mut buf = Vec::new();
-            buf.extend_from_slice(&OHDR_SIGNATURE);
-            buf.push(2);
-            buf.push(self.flags);
-
-            if header_flags.stores_times()
-                && let Some((access, modification, change, birth)) = self.timestamps
-            {
-                buf.extend_from_slice(&access.to_le_bytes());
-                buf.extend_from_slice(&modification.to_le_bytes());
-                buf.extend_from_slice(&change.to_le_bytes());
-                buf.extend_from_slice(&birth.to_le_bytes());
-            }
-
-            if header_flags.stores_attribute_phase_change() {
-                buf.extend_from_slice(&8u16.to_le_bytes());
-                buf.extend_from_slice(&6u16.to_le_bytes());
-            }
-
-            let mut records = Vec::new();
-            for message in &self.messages {
-                records.push(message.msg_type);
-                records.extend_from_slice(&(message.data.len() as u16).to_le_bytes());
-                records.push(message.flags.get());
-                if has_creation_order {
-                    records.extend_from_slice(&0u16.to_le_bytes());
-                }
-                records.extend_from_slice(&message.data);
-            }
-
-            match header_flags.chunk_size_width() {
-                UintWidth::One => buf.push(records.len() as u8),
-                UintWidth::Two => buf.extend_from_slice(&(records.len() as u16).to_le_bytes()),
-                UintWidth::Four => buf.extend_from_slice(&(records.len() as u32).to_le_bytes()),
-                UintWidth::Eight => buf.extend_from_slice(&(records.len() as u64).to_le_bytes()),
-            }
-
-            buf.extend_from_slice(&records);
-            append_checksum(&mut buf);
-            buf
-        }
-    }
-
-    struct TestFileBuilder {
-        data: Vec<u8>,
-    }
-
-    impl TestFileBuilder {
-        fn new(header: Vec<u8>) -> Self {
-            Self { data: header }
-        }
-
-        fn chunk(mut self, offset: usize, chunk: &[u8]) -> Self {
-            self.data
-                .resize(self.data.len().max(offset + chunk.len()), 0);
-            self.data[offset..offset + chunk.len()].copy_from_slice(chunk);
-            self
-        }
-
-        fn build(self) -> Vec<u8> {
-            self.data
-        }
-    }
-
-    fn v1_message_records(messages: &[TestMessage<u16>]) -> Vec<u8> {
-        let mut records = Vec::new();
-        for message in messages {
-            records.extend_from_slice(&message.msg_type.to_le_bytes());
-            records.extend_from_slice(&(message.data.len() as u16).to_le_bytes());
-            records.push(message.flags.get());
-            records.extend_from_slice(&[0u8; 3]);
-            records.extend_from_slice(&message.data);
-        }
-        records
-    }
-
-    fn v1_message_record(msg_type: u16, data: &[u8], flags: MessageFlags) -> Vec<u8> {
-        v1_message_records(&[TestMessage::new(msg_type, data, flags)])
-    }
-
-    fn v2_continuation_chunk(msg_type: MessageType, data: &[u8]) -> Vec<u8> {
-        let mut chunk = Vec::new();
-        chunk.extend_from_slice(&v2::OCHK_SIGNATURE);
-        chunk.push(msg_type.to_u16() as u8);
-        chunk.extend_from_slice(&(data.len() as u16).to_le_bytes());
-        chunk.push(MessageFlags::NONE.get());
-        chunk.extend_from_slice(data);
-        append_checksum(&mut chunk);
-        chunk
-    }
-
-    fn continuation_pointer(offset: usize, length: usize) -> Vec<u8> {
-        let mut pointer = Vec::with_capacity(16);
-        pointer.extend_from_slice(&(offset as u64).to_le_bytes());
-        pointer.extend_from_slice(&(length as u64).to_le_bytes());
-        pointer
-    }
-
-    fn append_checksum(data: &mut Vec<u8>) {
-        let checksum = crate::checksum::jenkins_lookup3(data);
-        data.extend_from_slice(&checksum.to_le_bytes());
-    }
-
     fn parse(data: &[u8]) -> Result<ObjectHeader, FormatError> {
         parse_for_mode(data, AccessMode::ReadOnly)
     }
@@ -1209,10 +959,9 @@ mod tests {
         )
     }
 
+    const WIDTHS: Widths = Widths::EIGHT;
     const OFFSET_SIZE: u8 = 8;
     const LENGTH_SIZE: u8 = 8;
     const CONTINUATION_OFFSET: usize = 256;
-    const UNKNOWN_TYPE: u16 = 0x00FF;
-    const V2_TRACKS_CREATION_ORDER: u8 = 0x04;
-    const V2_STORES_TIMES: u8 = 0x20;
+    const UNKNOWN_BODY: [u8; 8] = [0xAA, 0, 0, 0, 0, 0, 0, 0];
 }
