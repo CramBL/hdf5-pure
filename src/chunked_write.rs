@@ -381,7 +381,7 @@ impl ChunkOptions {
                         filter_id: FILTER_ZFP,
                         name: Some("zfp".into()),
                         flags,
-                        client_data: crate::zfp::zfp_cd_values_rate(rate, elem_ty, chunk_dims)?,
+                        client_data: h5_filter::zfp_cd_values_rate(rate, elem_ty, chunk_dims)?,
                     }
                 }
                 FilterKind::ScaleOffset(mode, fill_avail) => {

@@ -10,6 +10,10 @@ repository = "https://github.com/CramBL/hdf5-pure"
 [features]
 default = []
 std = []
+zfp = []
+
+[dev-dependencies]
+rstest = "0.27"
 
 [lints]
 workspace = true

@@ -7,15 +7,12 @@ extern crate alloc;
 #[cfg(not(feature = "std"))]
 use alloc::{vec, vec::Vec};
 
-use core::num::NonZeroU32;
-// `format!` is only reached by the zfp-gated code paths below.
-#[cfg(all(not(feature = "std"), feature = "zfp"))]
+#[cfg(all(not(feature = "std"), feature = "deflate"))]
 use alloc::format;
+use core::num::NonZeroU32;
 
 #[cfg(feature = "zfp")]
 use crate::FixedPointLayout;
-#[cfg(feature = "zfp")]
-use crate::convert::Narrow;
 use crate::error::FormatError;
 #[cfg(feature = "zfp")]
 use crate::filter_pipeline::FILTER_ZFP;
@@ -25,7 +22,7 @@ use crate::filter_pipeline::{
 };
 use crate::scaleoffset::ScaleOffsetType;
 #[cfg(feature = "zfp")]
-use crate::zfp::ZfpElementType;
+use h5_filter::ZfpElementType;
 
 /// Context shared with filter pipeline operations.
 ///
@@ -52,8 +49,9 @@ pub struct ChunkContext<'a> {
     pub scale_offset_type: Option<ScaleOffsetType>,
 }
 
-/// Dummy wrapper so ChunkContext's type stays stable whether or not the
-/// `zfp` feature is on. With `zfp` on this aliases `zfp::ZfpElementType`.
+/// The scalar type a chunk context carries when the `zfp` feature is enabled.
+///
+/// Without the feature, the alias is [`core::convert::Infallible`].
 #[cfg(feature = "zfp")]
 pub type ZfpElementTypeWhenEnabled = ZfpElementType;
 #[cfg(not(feature = "zfp"))]
@@ -272,7 +270,12 @@ pub fn decompress_chunk_with(
                 inner_output_cap(expected, pipeline, filter_mask, i),
             )?,
             #[cfg(feature = "zfp")]
-            FILTER_ZFP => zfp_decompress(input, filter, &ctx)?,
+            FILTER_ZFP => h5_filter::decompress_zfp_filter(
+                input,
+                &filter.client_data,
+                ctx.chunk_dims,
+                ctx.element_type,
+            )?,
             other => return Err(FormatError::UnsupportedFilter(other)),
         };
         owned = Some(next);
@@ -404,68 +407,17 @@ pub fn compress_chunk_with(
             FILTER_FLETCHER32 => fletcher32_append(input)?,
             FILTER_SCALEOFFSET => crate::scaleoffset::compress(input, filter)?,
             #[cfg(feature = "zfp")]
-            FILTER_ZFP => zfp_compress(input, filter, &ctx)?,
+            FILTER_ZFP => h5_filter::compress_zfp_filter(
+                input,
+                &filter.client_data,
+                ctx.chunk_dims,
+                ctx.element_type,
+            )?,
             other => return Err(FormatError::UnsupportedFilter(other)),
         };
         owned = Some(next);
     }
     Ok(owned.unwrap_or_else(|| data.to_vec()))
-}
-
-#[cfg(feature = "zfp")]
-fn zfp_rate(filter: &crate::filter_pipeline::FilterDescription) -> Result<f64, FormatError> {
-    crate::zfp::zfp_rate_from_cd_values(&filter.client_data)
-        .ok_or_else(|| FormatError::FilterError("ZFP: invalid or non-rate cd_values".into()))
-}
-
-#[cfg(feature = "zfp")]
-fn zfp_element_type(ctx: &ChunkContext<'_>) -> Result<ZfpElementType, FormatError> {
-    ctx.element_type.ok_or_else(|| {
-        FormatError::FilterError(
-            "ZFP: element_type missing from ChunkContext (caller must set it)".into(),
-        )
-    })
-}
-
-/// Copy chunk dims into a stack buffer and return a slice of the valid
-/// prefix. ZFP's rank bound is 4, so a heap Vec is unnecessary per chunk.
-#[cfg(feature = "zfp")]
-fn zfp_dims_on_stack(ctx: &ChunkContext<'_>) -> Result<([usize; 4], usize), FormatError> {
-    let rank = ctx.chunk_dims.len();
-    if rank == 0 || rank > 4 {
-        return Err(FormatError::FilterError(format!(
-            "ZFP: chunk rank must be 1..=4, got {rank}",
-        )));
-    }
-    let mut buf = [0usize; 4];
-    for (slot, &d) in buf.iter_mut().zip(ctx.chunk_dims.iter()) {
-        *slot = d.to_usize()?;
-    }
-    Ok((buf, rank))
-}
-
-#[cfg(feature = "zfp")]
-fn zfp_compress(
-    data: &[u8],
-    filter: &crate::filter_pipeline::FilterDescription,
-    ctx: &ChunkContext<'_>,
-) -> Result<Vec<u8>, FormatError> {
-    let rate = zfp_rate(filter)?;
-    let elem_ty = zfp_element_type(ctx)?;
-    let (dims_buf, rank) = zfp_dims_on_stack(ctx)?;
-    crate::zfp::compress(data, &dims_buf[..rank], rate, elem_ty)
-}
-
-#[cfg(feature = "zfp")]
-fn zfp_decompress(
-    data: &[u8],
-    filter: &crate::filter_pipeline::FilterDescription,
-    ctx: &ChunkContext<'_>,
-) -> Result<Vec<u8>, FormatError> {
-    let rate = zfp_rate(filter)?;
-    let elem_ty = zfp_element_type(ctx)?;
-    let (dims_buf, rank) = zfp_dims_on_stack(ctx)?;
-    crate::zfp::decompress(data, &dims_buf[..rank], rate, elem_ty)
 }
 
 /// A deflate stream this decoder rejected, reported the way every other filter
@@ -1577,7 +1529,7 @@ mod tests {
     #[test]
     fn a_failed_decode_is_a_filter_error_whichever_compressor_failed() {
         let lzf = h5_filter::decompress_lzf(&[0x1f], None).unwrap_err();
-        let FormatError::FilterError(reason) = FormatError::from(lzf) else {
+        let FormatError::FilterError(reason) = FormatError::from(lzf.clone()) else {
             panic!("expected FilterError, got {lzf:?}");
         };
         assert_eq!(reason, "lzf: truncated literal run");

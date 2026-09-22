@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Fixed
+
+- With the `zfp` feature, `Dataset::read` reports an error for truncated ZFP chunks. Writes configured through `DatasetBuilder::with_zfp` reject nonzero float blocks whose rate cannot hold their headers ([#620](https://github.com/CramBL/hdf5-pure/pull/620)).
+
 ## [0.47.0] - 2026-09-20
 
 ### Fixed
