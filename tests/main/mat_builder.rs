@@ -3,6 +3,8 @@
 use hdf5_pure::mat::{Compression, MatBuilder, MatClass, MatError, Options, StringClass};
 use hdf5_pure::{AttrValue, File, LibVer};
 
+use test_util::bytes;
+use test_util::superblock;
 use test_util::temp;
 
 fn read_class(file: &File, ds_path: &str) -> String {
@@ -241,13 +243,11 @@ fn the_default_mat_file_is_in_the_1_8_format() {
     mb.write_f64("values", &[3, 1], &[1.0, 2.0, 3.0]).unwrap();
     let bytes = mb.finish().unwrap();
 
-    let sig = bytes
-        .windows(8)
-        .position(|w| w == b"\x89HDF\r\n\x1a\n")
+    let sig = bytes::find_signature(&bytes, superblock::SIGNATURE)
         .expect("the file carries an HDF5 signature");
     assert_eq!(sig, 512, "the MAT userblock precedes the superblock");
     assert_eq!(
-        bytes[sig + 8],
+        superblock::version_at(&bytes, sig),
         2,
         "a version 3 superblock is a 1.10 addition MATLAB's loader cannot read"
     );
@@ -259,7 +259,11 @@ fn the_default_mat_file_is_in_the_1_8_format() {
     let mut mb = MatBuilder::new(options);
     mb.write_f64("values", &[3, 1], &[1.0, 2.0, 3.0]).unwrap();
     let bytes = mb.finish().unwrap();
-    assert_eq!(bytes[sig + 8], 3);
+    assert_eq!(
+        superblock::version_at(&bytes, bytes::sole_signature(&bytes, superblock::SIGNATURE)),
+        3,
+        "opting into 1.10 must raise the superblock version"
+    );
 }
 
 /// Compression needs chunked storage, whose chunk indices need 1.10, so it

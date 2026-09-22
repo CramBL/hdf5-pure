@@ -83,13 +83,15 @@ pub fn push_undefined_address(bytes: &mut Vec<u8>, width: usize) {
     bytes.extend_from_slice(&[UNDEFINED_ADDRESS_BYTE; 8][..width]);
 }
 
-pub fn find_signature(bytes: &[u8], signature: &[u8; 4]) -> Option<usize> {
-    bytes.windows(signature.len()).position(|w| w == signature)
+/// The offset of the first occurrence of `signature`, which is a structure's
+/// four-byte signature or the file's own eight-byte one.
+pub fn find_signature<const N: usize>(bytes: &[u8], signature: &[u8; N]) -> Option<usize> {
+    bytes.windows(N).position(|w| w == signature)
 }
 
-pub fn signature_offsets(bytes: &[u8], signature: &[u8; 4]) -> Vec<usize> {
+pub fn signature_offsets<const N: usize>(bytes: &[u8], signature: &[u8; N]) -> Vec<usize> {
     bytes
-        .windows(signature.len())
+        .windows(N)
         .enumerate()
         .filter(|&(_, w)| w == signature)
         .map(|(at, _)| at)
@@ -97,7 +99,7 @@ pub fn signature_offsets(bytes: &[u8], signature: &[u8; 4]) -> Vec<usize> {
 }
 
 #[track_caller]
-pub fn sole_signature(bytes: &[u8], signature: &[u8; 4]) -> usize {
+pub fn sole_signature<const N: usize>(bytes: &[u8], signature: &[u8; N]) -> usize {
     let offsets = signature_offsets(bytes, signature);
     let &[sole] = &offsets[..] else {
         panic!(

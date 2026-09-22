@@ -35,8 +35,10 @@ pub fn consistency_flags(path: impl AsRef<Path>) -> u32 {
     }
 }
 
+/// The version of the superblock beginning at `at` in `file`, for a caller
+/// that has already located it.
 #[track_caller]
-fn version_at(file: &[u8], at: usize) -> u8 {
+pub fn version_at(file: &[u8], at: usize) -> u8 {
     // The version byte follows the signature: section `subsec_fmt4_boot_super`,
     // version 4.0.
     bytes::u8_at(file, at + SIGNATURE.len())

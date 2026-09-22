@@ -8,6 +8,8 @@
 use hdf5_pure::mat::{self, Complex32, Complex64, Matrix};
 use hdf5_pure::{AttrValue, File};
 use serde::{Deserialize, Serialize};
+use test_util::bytes;
+use test_util::superblock;
 
 // ---------------------------------------------------------------------------
 // Sanity checks on the raw output — userblock shape, HDF5 structure, MATLAB
@@ -1809,11 +1811,13 @@ fn both_emit_paths_produce_the_same_bytes() {
     );
 
     // And the shared result is the format MATLAB's `load` can read.
-    let sig = plain
-        .windows(8)
-        .position(|w| w == b"\x89HDF\r\n\x1a\n")
+    let sig = bytes::find_signature(&plain, superblock::SIGNATURE)
         .expect("the file carries an HDF5 signature");
-    assert_eq!(plain[sig + 8], 2, "version 2 superblock");
+    assert_eq!(
+        superblock::version_at(&plain, sig),
+        2,
+        "version 2 superblock"
+    );
 }
 
 /// The streaming entry points are a third and fourth copy of the same decision.
