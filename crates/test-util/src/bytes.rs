@@ -18,6 +18,17 @@ pub fn u64_at(bytes: &[u8], at: usize) -> u64 {
     u64::from_le_bytes(field(bytes, at))
 }
 
+/// The little-endian unsigned integer `width` bytes wide at `at`, for the
+/// offset and length fields whose width a file's superblock chooses.
+#[track_caller]
+pub fn uint_at(bytes: &[u8], at: usize, width: usize) -> u64 {
+    assert_width(width);
+    slice_at(bytes, at, width)
+        .iter()
+        .rev()
+        .fold(0, |value, &byte| (value << 8) | u64::from(byte))
+}
+
 #[track_caller]
 pub fn slice_at(bytes: &[u8], at: usize, len: usize) -> &[u8] {
     let available = bytes.len();
@@ -34,6 +45,12 @@ pub fn set_u8_at(bytes: &mut [u8], at: usize, value: u8) {
     set_slice_at(bytes, at, &value.to_le_bytes());
 }
 
+/// Overwrites the little-endian unsigned integer `width` bytes wide at `at`.
+#[track_caller]
+pub fn set_uint_at(bytes: &mut [u8], at: usize, value: u64, width: usize) {
+    set_slice_at(bytes, at, &uint_field(value, width)[..width]);
+}
+
 #[track_caller]
 pub fn set_slice_at(bytes: &mut [u8], at: usize, values: &[u8]) {
     let available = bytes.len();
@@ -47,6 +64,19 @@ pub fn set_slice_at(bytes: &mut [u8], at: usize, values: &[u8]) {
             )
         })
         .copy_from_slice(values);
+}
+
+/// Appends `value` as a little-endian unsigned integer `width` bytes wide.
+#[track_caller]
+pub fn push_uint(bytes: &mut Vec<u8>, value: u64, width: usize) {
+    bytes.extend_from_slice(&uint_field(value, width)[..width]);
+}
+
+/// Appends a `width`-byte address field left undefined.
+#[track_caller]
+pub fn push_undefined_address(bytes: &mut Vec<u8>, width: usize) {
+    assert_width(width);
+    bytes.extend_from_slice(&[UNDEFINED_ADDRESS_BYTE; 8][..width]);
 }
 
 pub fn find_signature(bytes: &[u8], signature: &[u8; 4]) -> Option<usize> {
@@ -83,6 +113,29 @@ fn field<const N: usize>(bytes: &[u8], at: usize) -> [u8; N] {
         .expect("a slice of the requested length")
 }
 
+// The whole eight bytes, of which a caller takes the low `width` as the field.
+#[track_caller]
+fn uint_field(value: u64, width: usize) -> [u8; 8] {
+    assert_width(width);
+    assert!(
+        width == 8 || value >> (width * 8) == 0,
+        "{value:#x} does not fit a {width}-byte field"
+    );
+    value.to_le_bytes()
+}
+
+#[track_caller]
+fn assert_width(width: usize) {
+    assert!(
+        (1..=8).contains(&width),
+        "a format field is one to eight bytes wide, not {width}"
+    );
+}
+
+// Every bit of an address field is set when the address is undefined: section
+// `subsec_fmt4_boot_super`, version 4.0.
+const UNDEFINED_ADDRESS_BYTE: u8 = 0xFF;
+
 #[cfg(test)]
 mod tests {
     use crate::bytes;
@@ -106,9 +159,28 @@ mod tests {
     }
 
     #[test]
+    fn reads_and_writes_a_field_of_a_chosen_width() {
+        let mut written = Vec::new();
+        bytes::push_uint(&mut written, 0x1234, 2);
+        bytes::push_uint(&mut written, 0x1234_5678, 4);
+        bytes::push_undefined_address(&mut written, 2);
+        assert_eq!(written, [0x34, 0x12, 0x78, 0x56, 0x34, 0x12, 0xFF, 0xFF]);
+        assert_eq!(bytes::uint_at(&written, 2, 4), 0x1234_5678);
+
+        bytes::set_uint_at(&mut written, 0, 0xABCD, 2);
+        assert_eq!(bytes::uint_at(&written, 0, 2), 0xABCD);
+    }
+
+    #[test]
     #[should_panic(expected = "runs past the end of 15 bytes")]
     fn refuses_a_field_that_does_not_fit() {
         bytes::u32_at(&FIELDS, 12);
+    }
+
+    #[test]
+    #[should_panic(expected = "0x1234 does not fit a 1-byte field")]
+    fn refuses_a_value_too_wide_for_its_field() {
+        bytes::push_uint(&mut Vec::new(), 0x1234, 1);
     }
 
     #[test]
