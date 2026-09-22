@@ -1,24 +1,16 @@
-//! LZF filter (H5Z filter id 32000), as registered by h5py.
+//! Encodes and decodes the LZF filter registered by h5py as filter 32000.
 //!
-//! LZF is an LZ77-family byte codec (liblzf, Marc Lehmann): a stream of control
-//! bytes where `ctrl < 32` introduces a literal run of `ctrl + 1` bytes, and
-//! anything else a back-reference of `(ctrl >> 5) + 2` bytes (`7` adds an
-//! extension byte) at distance `(((ctrl & 0x1f) << 8) | low) + 1`. There is no
-//! container or per-block header: h5py stores the raw codec stream per chunk.
+//! The LZF filter encodes its input as a raw stream without a container header.
+//! A control byte below 32 introduces a literal run; other control bytes
+//! introduce a back-reference.
 //!
-//! The compressor is format-compatible with liblzf's decoder but makes no
-//! attempt to reproduce liblzf's exact byte output — any conforming stream is
-//! valid. h5py registers the filter as *optional*, so on read a chunk h5py
-//! stored raw (its filter-mask bit set) must be tolerated. This crate's writer
-//! records the same optional flag — a later writer, h5py included, needs it to
-//! store an incompressible chunk raw rather than fail — but never exercises it
-//! itself: it applies LZF to every chunk and accepts the grown stream that
-//! incompressible input produces.
+//! The compressor produces streams compatible with liblzf's decoder. The
+//! surrounding pipeline handles optional filters and masked chunks.
 
-#[cfg(not(feature = "std"))]
-use alloc::{format, vec, vec::Vec};
+use alloc::vec;
+use alloc::vec::Vec;
 
-use crate::error::FormatError;
+use crate::Error;
 
 /// Longest literal run one control byte can introduce.
 const MAX_LITERAL_RUN: usize = 32;
@@ -30,20 +22,20 @@ const MAX_MATCH_LEN: usize = 264;
 /// Largest encodable back-reference distance (13 offset bits, plus one).
 const MAX_MATCH_DISTANCE: usize = 1 << 13;
 
-/// Slots in the compressor's match-hash table. Independent of
-/// [`MAX_MATCH_DISTANCE`], which the stream format fixes; this is only a
-/// speed/ratio choice, but the hash and the allocation must agree on it or a
-/// hashed slot indexes past the table.
+/// Is the number of slots in the compressor's match-hash table.
+///
+/// The hash and allocation use the same count. [`MAX_MATCH_DISTANCE`] limits
+/// encoded matches independently of the table size.
 const HASH_TABLE_SLOTS: usize = 1 << 13;
 
 /// Top bits of the 32-bit multiplicative hash product that select a slot.
 const HASH_TABLE_BITS: u32 = HASH_TABLE_SLOTS.trailing_zeros();
 
-/// Largest number of bytes a conforming LZF stream can decode to per byte of
-/// input. The densest token is a three-byte extended back-reference emitting
-/// [`MAX_MATCH_LEN`]; every other token is denser in the input, so the ratio
-/// bounds the stream as a whole.
-pub(crate) const MAX_EXPANSION: usize = MAX_MATCH_LEN / 3;
+/// Is the maximum number of decoded bytes per encoded byte in a conforming LZF
+/// stream.
+///
+/// A three-byte extended back-reference can emit 264 bytes.
+pub const MAX_EXPANSION: usize = MAX_MATCH_LEN / 3;
 
 /// h5py's `H5PY_FILTER_LZF_VERSION` (lzf/lzf_filter.h), `cd_values[0]`.
 const H5PY_FILTER_LZF_VERSION: u32 = 4;
@@ -51,11 +43,19 @@ const H5PY_FILTER_LZF_VERSION: u32 = 4;
 /// liblzf's `LZF_VERSION` (0x0105), `cd_values[1]` per h5py's `lzf_set_local`.
 const LIBLZF_API_VERSION: u32 = 0x0105;
 
-/// cd_values as h5py's `lzf_set_local` records them: `[filter version, liblzf
-/// version, chunk bytes]`. h5py's decoder reads only `[2]`, as a buffer-size
-/// hint, and treats 0 as "no hint" — so an overflowing chunk size degrades to
-/// no hint rather than an error.
-pub(crate) fn h5py_cd_values(element_size: u32, chunk_dims: &[u64]) -> [u32; 3] {
+/// Returns h5py's LZF client data for a chunk's element size and dimensions.
+///
+/// The entries are the filter version, liblzf version, and chunk byte size.
+/// The last entry is zero when the byte size exceeds `u32::MAX`.
+///
+/// # Examples
+///
+/// ```
+/// use h5_filter::lzf_h5py_cd_values;
+///
+/// assert_eq!(lzf_h5py_cd_values(2, &[3, 4]), [4, 0x0105, 24]);
+/// ```
+pub fn h5py_cd_values(element_size: u32, chunk_dims: &[u64]) -> [u32; 3] {
     let chunk_bytes = chunk_dims
         .iter()
         .try_fold(u64::from(element_size), |acc, &d| acc.checked_mul(d))
@@ -64,22 +64,33 @@ pub(crate) fn h5py_cd_values(element_size: u32, chunk_dims: &[u64]) -> [u32; 3] 
     [H5PY_FILTER_LZF_VERSION, LIBLZF_API_VERSION, chunk_bytes]
 }
 
-fn corrupt(reason: &str) -> FormatError {
-    FormatError::FilterError(format!("lzf: {reason}"))
+fn corrupt(reason: &'static str) -> Error {
+    Error::InvalidLzfStream(reason)
 }
 
-/// Decompress an LZF stream.
+/// Decodes a raw LZF stream into chunk bytes.
 ///
-/// `max_output` is the decoded size cap (the expected chunk size pushed through
-/// the surviving inner filters); exceeding it means a corrupt or hostile
-/// stream, and `None` (unknown chunk size) leaves the output uncapped.
+/// `max_output` bounds the decoded size. Passing `None` leaves it unbounded.
 ///
-/// The cap bounds the output but does not by itself size the allocation: see
-/// [`decode_reservation`](crate::filters::decode_reservation) for why a size the
-/// file merely claims is not enough to reserve on.
-pub(crate) fn decompress(input: &[u8], max_output: Option<usize>) -> Result<Vec<u8>, FormatError> {
+/// The decoder uses [`decode_reservation`](crate::decode_reservation) to size
+/// its initial allocation from the encoded input and the cap.
+///
+/// # Errors
+///
+/// Returns [`Error::InvalidLzfStream`] if a token is truncated, a match refers
+/// to bytes before the output, or decoding exceeds `max_output`.
+///
+/// # Examples
+///
+/// ```
+/// use h5_filter::decompress_lzf;
+///
+/// let stream = [4, b'a', b'b', b'c', b'd', b'e', 3 << 5, 4];
+/// assert_eq!(decompress_lzf(&stream, Some(10)).unwrap(), b"abcdeabcde");
+/// ```
+pub fn decompress(input: &[u8], max_output: Option<usize>) -> Result<Vec<u8>, Error> {
     let cap = max_output.unwrap_or(usize::MAX);
-    let mut out = Vec::with_capacity(crate::filters::decode_reservation(
+    let mut out = Vec::with_capacity(crate::decode_reservation(
         max_output,
         input.len(),
         MAX_EXPANSION,
@@ -143,8 +154,21 @@ pub(crate) fn decompress(input: &[u8], max_output: Option<usize>) -> Result<Vec<
     Ok(out)
 }
 
-/// Compress `input` into an LZF stream (greedy, single-probe hash matching).
-pub(crate) fn compress(input: &[u8]) -> Vec<u8> {
+/// Encodes chunk bytes as a raw LZF stream.
+///
+/// The compressor uses greedy single-probe matching. It may produce more
+/// bytes than it receives for incompressible input.
+///
+/// # Examples
+///
+/// ```
+/// use h5_filter::{compress_lzf, decompress_lzf};
+///
+/// let input = b"abcdeabcde";
+/// let encoded = compress_lzf(input);
+/// assert_eq!(decompress_lzf(&encoded, Some(input.len())).unwrap(), input);
+/// ```
+pub fn compress(input: &[u8]) -> Vec<u8> {
     /// Hash of a 3-byte window → slot in the table of `position + 1`.
     fn hash(a: u8, b: u8, c: u8) -> usize {
         let v = (usize::from(a) << 16) | (usize::from(b) << 8) | usize::from(c);
@@ -167,24 +191,9 @@ pub(crate) fn compress(input: &[u8]) -> Vec<u8> {
     // Slots hold `position + 1`; 0 marks an empty slot, which is why the
     // candidate check below is `> 0`.
     //
-    // The table lives on the heap, not in a `[usize; HASH_TABLE_SLOTS]` local.
-    // As a local it is a 64 KiB stack frame (32 KiB where pointers are 32-bit),
-    // zeroed behind a stack probe on every call, and was the only frame over
-    // 8 KiB in the whole crate — more than a bare-metal `no_std` target, which
-    // this crate supports, is likely to have in total. `alloc` is unconditional
-    // here, so this costs no feature split. Measured with both forms in one
-    // process: within noise from 64 KiB chunks up, +4% at 8 KiB, +15% (an
-    // absolute 0.35 us) at 1 KiB ([#234]).
-    //
-    // The slot type must index the whole input, not the match distance. A
-    // narrower table has been proposed and measured: `u16` slots wrap on any
-    // chunk over 64 KiB and silently destroy compression there (1 MiB of RLE
-    // data went from 14,356 bytes out to 1,013,048, with no error), and the
-    // speed case does not hold either — `u16` wins 26% at 1 KiB, an absolute
-    // 0.6 us, and loses 6-78% across the 6-16 KiB band on incompressible
-    // input. Keep `usize`.
-    //
-    // [#234]: https://github.com/CramBL/hdf5-pure/issues/234
+    // A heap allocation keeps the table off the stack for small-stack targets.
+    // Slots use `usize` because each holds an input position, which can exceed
+    // the maximum match distance and `u16::MAX`.
     let mut table = vec![0_usize; HASH_TABLE_SLOTS];
     let mut ip = 0;
     let mut literal_start = 0;
@@ -231,14 +240,6 @@ pub(crate) fn compress(input: &[u8]) -> Vec<u8> {
     out
 }
 
-// Byte-level crosscheck of this codec against h5py-produced fixtures. Lives
-// in-crate (rather than tests/) because it exercises the internal `compress`/
-// `decompress` entry points; std-gated (unlike zfp's) because this module also
-// compiles under no_std, where the fixture-reading `std::fs` would not resolve.
-#[cfg(all(test, feature = "std"))]
-#[path = "lzf_crosscheck.rs"]
-mod lzf_crosscheck;
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -281,26 +282,17 @@ mod tests {
 
     #[test]
     fn worst_case_expansion_stream_decodes() {
-        // A conforming encoder may emit every byte as its own literal run,
-        // doubling the stream relative to its decoded size. This checks only
-        // that the decoder accepts such a stream; the matching 2x cap in
-        // `filters::filter_max_forward_output`, which this test does not call,
-        // is pinned by `filters::tests::foreign_lzf_inner_deflate_outer_roundtrips`.
+        // One literal token per byte makes the encoded stream twice the decoded size.
         let stream: Vec<u8> = (0..=255u8).flat_map(|b| [0, b]).collect();
         let expected: Vec<u8> = (0..=255).collect();
         assert_eq!(stream.len(), 2 * expected.len());
         assert_eq!(decompress(&stream, Some(expected.len())).unwrap(), expected);
     }
 
-    /// The match-hash table is heap-allocated so that a caller on a small stack
-    /// — the bare-metal `no_std` target this crate advertises — can compress at
-    /// all. Stated as the rule rather than a fixed number: the thread gets less
-    /// stack than the table itself would occupy at this pointer width, so a
-    /// table that moved back into a local could not fit however wide `usize` is.
+    /// Compression succeeds with a stack smaller than the match table.
     ///
-    /// A regression here overflows the thread's stack, which aborts the whole
-    /// test binary rather than failing this one test. That is the loudest form
-    /// the invariant has; there is no portable way to assert a frame size.
+    /// The test runs in a separate thread because a stack overflow aborts the
+    /// process instead of returning an error.
     #[cfg(feature = "std")]
     #[test]
     fn compresses_on_a_stack_smaller_than_the_table() {
@@ -319,10 +311,19 @@ mod tests {
     #[test]
     fn corrupt_streams_error() {
         // Literal run past end of input.
-        assert!(decompress(&[10, b'x'], None).is_err());
+        assert_eq!(
+            decompress(&[10, b'x'], None).unwrap_err(),
+            Error::InvalidLzfStream("truncated literal run")
+        );
         // Match before start of output.
-        assert!(decompress(&[(3 << 5), 200], None).is_err());
+        assert_eq!(
+            decompress(&[(3 << 5), 200], None).unwrap_err(),
+            Error::InvalidLzfStream("match reaches before start of output")
+        );
         // Output larger than cap.
-        assert!(decompress(&[4, b'a', b'b', b'c', b'd', b'e'], Some(3)).is_err());
+        assert_eq!(
+            decompress(&[4, b'a', b'b', b'c', b'd', b'e'], Some(3)).unwrap_err(),
+            Error::InvalidLzfStream("output exceeds expected chunk size")
+        );
     }
 }

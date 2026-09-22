@@ -260,9 +260,11 @@ pub fn decompress_chunk_with(
                 input,
                 inner_output_cap(expected, pipeline, filter_mask, i),
             )?,
-            FILTER_LZF => {
-                crate::lzf::decompress(input, inner_output_cap(expected, pipeline, filter_mask, i))?
-            }
+            FILTER_LZF => h5_filter::decompress_lzf(
+                input,
+                inner_output_cap(expected, pipeline, filter_mask, i),
+            )
+            .map_err(FormatError::from)?,
             FILTER_FLETCHER32 => fletcher32_verify(input)?,
             FILTER_SCALEOFFSET => crate::scaleoffset::decompress(
                 input,
@@ -341,32 +343,6 @@ fn filter_max_forward_output(filter_id: u16, in_size: usize) -> usize {
 /// a real stream less dense, so the ratio bounds the stream as a whole.
 const MAX_DEFLATE_EXPANSION: usize = 1032;
 
-/// How many bytes to reserve up front for one decode stage's output.
-///
-/// `cap` is that stage's output bound, derived from the chunk geometry the
-/// *file* declares — which an untrusted file controls. Reserving it outright
-/// turns a small file claiming an enormous chunk into an allocation abort,
-/// before a single byte of the stream has been looked at. The stream itself is
-/// the evidence that the claim is plausible: a conforming stream of `in_size`
-/// bytes decodes to at most `in_size * max_expansion`, so reserving no more than
-/// that bounds a hostile file by the bytes it actually had to put on disk.
-///
-/// It costs a legitimate chunk nothing. The true decoded size is under `cap`
-/// (the pipeline enforces that) and under the format's expansion bound, so it is
-/// under the smaller of the two as well: the reservation still holds the whole
-/// output without a reallocation.
-///
-/// This is a reservation hint, not a limit — the decoder grows past it if a
-/// stream needs it to, and `cap` remains the enforced bound. `None` (chunk size
-/// unknown) reserves nothing, there being no claim to be exact about.
-pub(crate) fn decode_reservation(
-    cap: Option<usize>,
-    in_size: usize,
-    max_expansion: usize,
-) -> usize {
-    cap.map_or(0, |cap| cap.min(in_size.saturating_mul(max_expansion)))
-}
-
 /// Upper bound for a byte-compressor stage's decoded output: the final chunk size
 /// (`expected`) pushed forward through every surviving lower-forward-index
 /// filter. `None` (size unknown) leaves the byte-compressor stage (deflate,
@@ -424,7 +400,7 @@ pub fn compress_chunk_with(
                 let level = filter.client_data.first().copied().unwrap_or(6);
                 deflate_compress(scratch, input, level)?
             }
-            FILTER_LZF => crate::lzf::compress(input),
+            FILTER_LZF => h5_filter::compress_lzf(input),
             FILTER_FLETCHER32 => fletcher32_append(input)?,
             FILTER_SCALEOFFSET => crate::scaleoffset::compress(input, filter)?,
             #[cfg(feature = "zfp")]
@@ -556,7 +532,7 @@ fn deflate_decompress(
     // reserve it up front instead of growing through ~log2(N) doublings — but
     // only as far as this stream could possibly justify, so a declared size no
     // stream backs cannot drive the allocation on its own.
-    let reservation = decode_reservation(max_output, data.len(), MAX_DEFLATE_EXPANSION);
+    let reservation = h5_filter::decode_reservation(max_output, data.len(), MAX_DEFLATE_EXPANSION);
     // One past the limit, so an over-long stream is *detected* rather than
     // silently truncated into a plausible-looking chunk.
     let ceiling = max_output.map(|limit| limit.saturating_add(1));
@@ -1540,18 +1516,24 @@ mod tests {
         // 4 GiB is what `ensure_chunk_bytes_representable` still admits, so it
         // is a size a file can genuinely claim while carrying ten bytes.
         const CLAIMED: usize = u32::MAX as usize;
-        assert_eq!(decode_reservation(Some(CLAIMED), 10, 1032), 10_320);
+        assert_eq!(
+            h5_filter::decode_reservation(Some(CLAIMED), 10, 1032),
+            10_320
+        );
 
         // Where the claim is the smaller of the two, it is exact: a legitimate
         // chunk keeps its single up-front allocation.
-        assert_eq!(decode_reservation(Some(4096), 4096, 1032), 4096);
+        assert_eq!(h5_filter::decode_reservation(Some(4096), 4096, 1032), 4096);
 
         // No claim, nothing to be exact about.
-        assert_eq!(decode_reservation(None, 4096, 1032), 0);
+        assert_eq!(h5_filter::decode_reservation(None, 4096, 1032), 0);
 
         // A stream long enough to overflow the product still yields a bound,
         // not a panic or a wrapped-around small one.
-        assert_eq!(decode_reservation(Some(CLAIMED), usize::MAX, 1032), CLAIMED);
+        assert_eq!(
+            h5_filter::decode_reservation(Some(CLAIMED), usize::MAX, 1032),
+            CLAIMED
+        );
     }
 
     /// The bound is wired into the deflate decoder, not merely available to it.
@@ -1579,11 +1561,11 @@ mod tests {
     /// so the same declared size has to reserve less again.
     #[test]
     fn lzf_reserves_against_the_stream_not_the_declared_chunk_size() {
-        let stored = crate::lzf::compress(&[0u8; 64]);
-        let out = crate::lzf::decompress(&stored, Some(u32::MAX as usize)).unwrap();
+        let stored = h5_filter::compress_lzf(&[0u8; 64]);
+        let out = h5_filter::decompress_lzf(&stored, Some(u32::MAX as usize)).unwrap();
         assert_eq!(out, [0u8; 64]);
         assert!(
-            out.capacity() <= stored.len() * crate::lzf::MAX_EXPANSION,
+            out.capacity() <= stored.len() * h5_filter::LZF_MAX_EXPANSION,
             "reserved {} bytes for a {}-byte stream",
             out.capacity(),
             stored.len()
@@ -1594,8 +1576,11 @@ mod tests {
     /// variant, so a caller can match "this chunk did not decode" once.
     #[test]
     fn a_failed_decode_is_a_filter_error_whichever_compressor_failed() {
-        let lzf = crate::lzf::decompress(&[0x1f], None).unwrap_err();
-        assert!(matches!(lzf, FormatError::FilterError(_)), "{lzf}");
+        let lzf = h5_filter::decompress_lzf(&[0x1f], None).unwrap_err();
+        let FormatError::FilterError(reason) = FormatError::from(lzf) else {
+            panic!("expected FilterError, got {lzf:?}");
+        };
+        assert_eq!(reason, "lzf: truncated literal run");
 
         #[cfg(feature = "deflate")]
         {

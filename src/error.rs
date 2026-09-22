@@ -6,6 +6,8 @@ extern crate alloc;
 #[cfg(not(feature = "std"))]
 use alloc::collections::TryReserveError;
 #[cfg(not(feature = "std"))]
+use alloc::format;
+#[cfg(not(feature = "std"))]
 use alloc::string::String;
 
 #[cfg(feature = "std")]
@@ -630,6 +632,12 @@ pub enum FormatError {
 /// written with a truncated length (see
 /// [`FormatError::ObjectHeaderMessageTooLarge`]).
 pub const OBJECT_HEADER_MESSAGE_MAX: usize = u16::MAX as usize;
+
+impl From<h5_filter::Error> for FormatError {
+    fn from(error: h5_filter::Error) -> Self {
+        Self::FilterError(format!("{error}"))
+    }
+}
 
 impl fmt::Display for FormatError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {

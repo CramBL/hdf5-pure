@@ -323,7 +323,7 @@ unescaped_backticks = "deny"
 
 [features]
 default = ["std", "checksum", "deflate"]
-std = []
+std = ["h5-filter/std"]
 checksum = []
 deflate = ["flate2"]
 fast-deflate = ["flate2/zlib-ng"]
@@ -352,6 +352,7 @@ num-complex = ["dep:num-complex", "serde"]
 __heap-baseline = []
 
 [dependencies]
+h5-filter = { path = "crates/h5-filter", version = "0.47.0", default-features = false }
 byteorder = { version = "1", default-features = false }
 flate2 = { version = "1", optional = true, default-features = false, features = ["rust_backend"] }
 ndarray = { version = ">=0.16, <0.18", optional = true }
