@@ -331,78 +331,31 @@ impl Superblock {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use test_util::superblock::{v0, v2};
+    use test_util::widths::Widths;
 
-    /// Helper to build a v0 superblock byte buffer with 8-byte offsets.
-    fn build_v0_bytes(offset_size: u8) -> Vec<u8> {
-        let mut buf = Vec::new();
-        buf.extend_from_slice(&HDF5_SIGNATURE); // 0..8
-        buf.push(0); // version = 0
-        buf.push(0); // free_space_version
-        buf.push(0); // root_group_version
-        buf.push(0); // reserved
-        buf.push(0); // shared_header_version
-        buf.push(offset_size); // offset_size
-        buf.push(offset_size); // length_size (same for simplicity)
-        buf.push(0); // reserved
-        buf.extend_from_slice(&4u16.to_le_bytes()); // group_leaf_node_k
-        buf.extend_from_slice(&16u16.to_le_bytes()); // group_internal_node_k
-        buf.extend_from_slice(&0u32.to_le_bytes()); // consistency_flags
-        // base_address
-        write_offset(&mut buf, 0, offset_size);
-        // free_space_address
-        write_offset(&mut buf, 0xFFFFFFFFFFFFFFFF, offset_size);
-        // eof_address
-        write_offset(&mut buf, 4096, offset_size);
-        // driver_info_address
-        write_offset(&mut buf, 0xFFFFFFFFFFFFFFFF, offset_size);
-        // Root symbol table entry
-        write_offset(&mut buf, 0, offset_size); // link_name_offset
-        write_offset(&mut buf, 96, offset_size); // object_header_addr (root group)
-        buf.extend_from_slice(&0u32.to_le_bytes()); // cache_type
-        buf.extend_from_slice(&0u32.to_le_bytes()); // reserved
-        buf.extend_from_slice(&[0u8; 16]); // scratch pad
-        buf
+    /// A version 0 superblock whose end-of-file and root header addresses
+    /// differ, so a read taken from the neighbouring field is visible.
+    fn build_v0_bytes(offset_size: usize) -> Vec<u8> {
+        // The free-space and driver-info addresses are left undefined, which
+        // is every bit set at whatever width the superblock declares.
+        v0::Superblock::new(Widths::new(offset_size, offset_size))
+            .eof_address(4096)
+            .root_group(0, 96)
+            .build()
     }
 
-    fn write_offset(buf: &mut Vec<u8>, val: u64, size: u8) {
-        match size {
-            2 => buf.extend_from_slice(&(val as u16).to_le_bytes()),
-            4 => buf.extend_from_slice(&(val as u32).to_le_bytes()),
-            8 => buf.extend_from_slice(&val.to_le_bytes()),
-            _ => panic!("bad test offset size"),
-        }
-    }
-
-    fn build_v1_bytes(offset_size: u8) -> Vec<u8> {
-        let mut buf = Vec::new();
-        buf.extend_from_slice(&HDF5_SIGNATURE);
-        buf.push(1); // version
-        buf.push(0); // free_space_version
-        buf.push(0); // root_group_version
-        buf.push(0); // reserved
-        buf.push(0); // shared_header_version
-        buf.push(offset_size);
-        buf.push(offset_size);
-        buf.push(0); // reserved
-        buf.extend_from_slice(&4u16.to_le_bytes()); // group_leaf_node_k
-        buf.extend_from_slice(&16u16.to_le_bytes()); // group_internal_node_k
-        // The flags precede the chunk B-tree K in a v1 superblock. Distinct,
-        // non-zero values in both, so reading them in the wrong order (which
-        // this crate did until the fix for issue #245's review) is visible.
-        buf.extend_from_slice(&1u32.to_le_bytes()); // consistency_flags
-        buf.extend_from_slice(&32u16.to_le_bytes()); // indexed_storage_internal_node_k
-        buf.extend_from_slice(&0u16.to_le_bytes()); // reserved
-        write_offset(&mut buf, 0, offset_size); // base
-        write_offset(&mut buf, 0xFFFFFFFFFFFFFFFF, offset_size); // free space
-        write_offset(&mut buf, 8192, offset_size); // eof
-        write_offset(&mut buf, 0xFFFFFFFFFFFFFFFF, offset_size); // driver info
-        // Root symbol table entry
-        write_offset(&mut buf, 0, offset_size);
-        write_offset(&mut buf, 200, offset_size); // root group addr
-        buf.extend_from_slice(&0u32.to_le_bytes());
-        buf.extend_from_slice(&0u32.to_le_bytes());
-        buf.extend_from_slice(&[0u8; 16]);
-        buf
+    /// The same for version 1, whose consistency flags and indexed-storage K
+    /// sit either side of the reserved bytes and were once read from each
+    /// other's offsets.
+    fn build_v1_bytes(offset_size: usize) -> Vec<u8> {
+        v0::Superblock::new(Widths::new(offset_size, offset_size))
+            .version_1()
+            .consistency_flags(1)
+            .indexed_storage_internal_node_k(32)
+            .eof_address(8192)
+            .root_group(0, 200)
+            .build()
     }
 
     fn build_v2_bytes(
@@ -410,22 +363,14 @@ mod tests {
         length_width: LengthWidth,
         version: u8,
     ) -> Vec<u8> {
-        let offset_size = offset_width.get();
-        let mut buf = Vec::new();
-        buf.extend_from_slice(&HDF5_SIGNATURE);
-        buf.push(version);
-        buf.push(offset_size);
-        buf.push(length_width.get());
-        buf.push(0); // consistency_flags
-        write_offset(&mut buf, 0, offset_size); // base_address
-        write_offset(&mut buf, 0xFFFFFFFFFFFFFFFF, offset_size); // superblock ext
-        write_offset(&mut buf, 2048, offset_size); // eof
-        write_offset(&mut buf, 48, offset_size); // root group obj hdr
-
-        // Compute CRC32C of everything so far
-        let checksum = crate::checksum::jenkins_lookup3(&buf);
-        buf.extend_from_slice(&checksum.to_le_bytes());
-        buf
+        v2::Superblock::new(Widths::new(
+            usize::from(offset_width.get()),
+            usize::from(length_width.get()),
+        ))
+        .version(version)
+        .eof_address(2048)
+        .root_header_address(48)
+        .build()
     }
 
     #[test]

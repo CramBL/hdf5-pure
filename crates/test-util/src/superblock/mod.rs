@@ -1,6 +1,11 @@
+//! The superblock: section `subsec_fmt4_boot_super`, version 4.0.
+
 use std::path::Path;
 
 use crate::bytes;
+
+pub mod v0;
+pub mod v2;
 
 #[track_caller]
 pub fn version(path: impl AsRef<Path>) -> u8 {
@@ -60,8 +65,13 @@ fn located(path: &Path) -> (Vec<u8>, usize) {
     (file, at)
 }
 
-// Section `subsec_fmt4_boot_super`, version 4.0.
-const SIGNATURE: &[u8; 8] = b"\x89HDF\r\n\x1a\n";
+/// The byte a superblock spends on the width of an offset or a length field.
+#[track_caller]
+pub(crate) fn width_byte(width: usize) -> u8 {
+    u8::try_from(width).expect("a superblock field width is one to eight bytes")
+}
+
+pub const SIGNATURE: &[u8; 8] = b"\x89HDF\r\n\x1a\n";
 
 #[cfg(test)]
 mod tests {
