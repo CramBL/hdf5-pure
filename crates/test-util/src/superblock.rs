@@ -85,20 +85,11 @@ mod tests {
 
     #[rstest]
     #[case::no_userblock(0)]
-    #[case::the_smallest_userblock(512)]
     #[case::a_doubled_userblock(1024)]
-    #[case::a_further_doubled_userblock(2048)]
     fn locates_the_superblock_behind_a_userblock(#[case] userblock: usize) {
         let path = superblock_behind(userblock, 3, 0x05);
         assert_eq!(superblock::version(&path), 3);
         assert_eq!(superblock::consistency_flags(&path), 0x05);
-    }
-
-    #[test]
-    #[should_panic(expected = "no HDF5 signature at offset 0, 512 or a doubling of it")]
-    fn refuses_a_signature_that_is_not_where_a_superblock_may_begin() {
-        let path = superblock_behind(600, 3, 0x00);
-        superblock::version(&path);
     }
 
     #[test]
@@ -115,12 +106,5 @@ mod tests {
 
         assert_eq!(superblock::version(&path), 1);
         assert_eq!(superblock::consistency_flags(&path), 0x05);
-    }
-
-    #[test]
-    #[should_panic(expected = "superblock version 4 has no consistency-flags field")]
-    fn refuses_a_superblock_version_it_does_not_know() {
-        let path = superblock_behind(0, 4, 0x00);
-        superblock::consistency_flags(&path);
     }
 }

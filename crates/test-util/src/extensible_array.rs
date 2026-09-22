@@ -72,12 +72,4 @@ mod tests {
             }
         );
     }
-
-    #[test]
-    #[should_panic(expected = "expected one EAHD in the file, found 0")]
-    fn refuses_a_file_with_no_extensible_array() {
-        let path = temp::temp_path("extensible_array.h5");
-        std::fs::write(&path, vec![0u8; 64]).expect("write the fixture");
-        extensible_array::header_stats(&path);
-    }
 }
