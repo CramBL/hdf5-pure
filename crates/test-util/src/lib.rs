@@ -18,6 +18,7 @@ pub mod global_heap;
 pub mod image;
 pub mod link_message;
 pub mod local_heap;
+pub mod mcos;
 pub mod object_header;
 pub mod sohm;
 pub mod superblock;

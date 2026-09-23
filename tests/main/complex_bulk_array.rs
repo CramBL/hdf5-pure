@@ -16,8 +16,9 @@ use hdf5_pure::mat::{
     self, Complex32, Complex64, ComplexElement, ComplexI8, ComplexI16, ComplexI32, ComplexI64,
     ComplexU8, ComplexU16, ComplexU32, ComplexU64, Compression, Options,
 };
-use hdf5_pure::{AttrValue, File, LibVer};
+use hdf5_pure::{File, LibVer};
 use serde::{Deserialize, Serialize, Serializer};
+use test_util_hdf5::mat_file;
 
 /// A single pair, odd and even counts, and an element count past `u16::MAX`.
 /// The empty slice is deliberately absent — it is the one length where the two
@@ -312,8 +313,8 @@ fn an_empty_bulk_array_keeps_its_component_class_where_the_element_wise_path_can
         class_of(&element_wise, "data"),
         "the empty-slice difference this test documents has gone away"
     );
-    assert_eq!(class_of(&bulk, "samples"), "int16");
-    assert_eq!(class_of(&element_wise, "data"), "double");
+    assert_eq!(class_of(&bulk, "samples").as_deref(), Some("int16"));
+    assert_eq!(class_of(&element_wise, "data").as_deref(), Some("double"));
 
     // Both read back as an empty array, which is what makes the difference a
     // matter of what the file says it holds rather than of what it holds.
@@ -410,15 +411,8 @@ fn dims_of(bytes: &[u8], name: &str) -> Vec<u64> {
 }
 
 /// The `MATLAB_class` attribute of a top-level variable.
-fn class_of(bytes: &[u8], name: &str) -> String {
-    let file = File::from_bytes(bytes.to_vec()).expect("open");
-    let ds = file.dataset(name).expect("dataset");
-    ds.attrs()
-        .expect("attrs")
-        .get("MATLAB_class")
-        .and_then(AttrValue::as_str)
-        .unwrap_or_else(|| panic!("{name} has no MATLAB_class"))
-        .to_owned()
+fn class_of(bytes: &[u8], name: &str) -> Option<String> {
+    mat_file::class(&File::from_bytes(bytes.to_vec()).expect("open"), name)
 }
 
 // ---------------------------------------------------------------------------

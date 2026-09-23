@@ -22,56 +22,24 @@
 //! the measurement fails rather than silently disagreeing with the rule the
 //! writer follows.
 
+use hdf5_pure::File;
 use hdf5_pure::mat::{self, EmptySequencePolicy, MatBuilder, MatClass, Options};
-use hdf5_pure::{AttrValue, File};
 use serde::Serialize;
+use test_util_hdf5::mat_file::{self, ObjectKind};
 
 /// Every dataset in `file` that carries a `MATLAB_empty` attribute, as
 /// `(class, sorted attribute names, dims payload)`.
 fn empty_markers(file: &File) -> Vec<(String, Vec<String>, Vec<u64>)> {
-    fn walk(file: &File, path: &str, out: &mut Vec<(String, Vec<String>, Vec<u64>)>) {
-        let group = match if path.is_empty() {
-            Ok(file.root())
-        } else {
-            file.group(path)
-        } {
-            Ok(g) => g,
-            Err(_) => return,
-        };
-        for name in group.datasets().unwrap_or_default() {
-            let full = if path.is_empty() {
-                name.clone()
-            } else {
-                format!("{path}/{name}")
-            };
-            let Ok(ds) = file.dataset(&full) else {
-                continue;
-            };
-            let Ok(attrs) = ds.attrs() else { continue };
-            if !attrs.contains_key("MATLAB_empty") {
-                continue;
-            }
-            let class = match attrs.get("MATLAB_class") {
-                Some(AttrValue::AsciiString(s)) | Some(AttrValue::String(s)) => s.clone(),
-                _ => continue,
-            };
-            let mut names: Vec<String> = attrs.keys().cloned().collect();
-            names.sort();
-            let dims = ds.read_u64().unwrap_or_default();
-            out.push((class, names, dims));
-        }
-        for sub in group.groups().unwrap_or_default() {
-            let full = if path.is_empty() {
-                sub.clone()
-            } else {
-                format!("{path}/{sub}")
-            };
-            walk(file, &full, out);
-        }
-    }
-    let mut out = Vec::new();
-    walk(file, "", &mut out);
-    out
+    mat_file::objects(file)
+        .into_iter()
+        .filter(|object| object.kind == ObjectKind::Dataset)
+        .filter(|object| object.attrs.contains_key("MATLAB_empty"))
+        .filter_map(|object| {
+            let class = object.string_attr(mat_file::CLASS)?.to_owned();
+            let dims = file.dataset(&object.path).unwrap().read_u64().unwrap();
+            Some((class, object.attrs.into_keys().collect(), dims))
+        })
+        .collect()
 }
 
 fn all_matlab_empty_markers() -> Vec<(String, Vec<String>, Vec<u64>)> {

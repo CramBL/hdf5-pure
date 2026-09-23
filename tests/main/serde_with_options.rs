@@ -9,15 +9,7 @@ use hdf5_pure::{AttrValue, File, LibVer};
 use serde::{Deserialize, Serialize};
 
 use test_util::temp;
-
-fn read_class(file: &File, ds_path: &str) -> String {
-    let ds = file.dataset(ds_path).unwrap();
-    let attrs = ds.attrs().unwrap();
-    match &attrs["MATLAB_class"] {
-        AttrValue::AsciiString(s) | AttrValue::String(s) => s.clone(),
-        other => panic!("unexpected class: {other:?}"),
-    }
-}
+use test_util_hdf5::mat_file;
 
 #[derive(Serialize, Deserialize, Debug, PartialEq)]
 struct Doc {
@@ -35,8 +27,8 @@ fn default_options_produce_char_strings() {
     let path = temp::temp_path_with_extension("default-char", "mat");
     std::fs::write(&path, &bytes).unwrap();
     let f = File::open(&path).unwrap();
-    assert_eq!(read_class(&f, "name"), "char");
-    assert_eq!(read_class(&f, "score"), "double");
+    assert_eq!(mat_file::class(&f, "name").as_deref(), Some("char"));
+    assert_eq!(mat_file::class(&f, "score").as_deref(), Some("double"));
     std::fs::remove_file(path).unwrap();
 }
 
@@ -52,14 +44,11 @@ fn string_class_option_produces_string_objects() {
     let path = temp::temp_path_with_extension("string-class", "mat");
     std::fs::write(&path, &bytes).unwrap();
     let f = File::open(&path).unwrap();
-    assert_eq!(read_class(&f, "name"), "string");
-    let sub = f.dataset("#subsystem#/MCOS").unwrap();
-    let sub_attrs = sub.attrs().unwrap();
-    let sub_class = match &sub_attrs["MATLAB_class"] {
-        AttrValue::AsciiString(s) | AttrValue::String(s) => s.clone(),
-        _ => panic!(),
-    };
-    assert_eq!(sub_class, "FileWrapper__");
+    assert_eq!(mat_file::class(&f, "name").as_deref(), Some("string"));
+    assert_eq!(
+        mat_file::class(&f, "#subsystem#/MCOS").as_deref(),
+        Some("FileWrapper__")
+    );
     std::fs::remove_file(path).unwrap();
 }
 
@@ -77,7 +66,7 @@ fn sanitize_policy_rewrites_keywords() {
     let path = temp::temp_path_with_extension("sanitize", "mat");
     std::fs::write(&path, &bytes).unwrap();
     let f = File::open(&path).unwrap();
-    assert_eq!(read_class(&f, "end_"), "uint32");
+    assert_eq!(mat_file::class(&f, "end_").as_deref(), Some("uint32"));
     std::fs::remove_file(path).unwrap();
 }
 
@@ -210,8 +199,8 @@ fn the_one_dimensional_mode_orients_a_cell_array() {
         opts.one_dimensional_mode = mode;
         let f = File::from_bytes(mat::to_bytes_with_options(&doc, &opts).unwrap()).unwrap();
         assert_eq!(
-            read_class(&f, "cells"),
-            "cell",
+            mat_file::class(&f, "cells").as_deref(),
+            Some("cell"),
             "{mode:?}: not a cell array"
         );
         assert_eq!(

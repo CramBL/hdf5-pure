@@ -7,4 +7,5 @@ pub mod dataset;
 #[cfg(feature = "hdf5")]
 pub mod file;
 pub mod lock;
+pub mod mat_file;
 pub mod paged;
