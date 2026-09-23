@@ -7,7 +7,20 @@ version = "0.0.0"
 edition = "2024"
 publish = false
 
+# The same tiers as `hdf5-pure-crosscheck`, which forwards each of its own to the one here.
+[features]
+# Links the reference HDF5 C library for the helpers that call it.
+hdf5 = ["dep:hdf5"]
+# The release series of the linked libhdf5, each implying the one below.
+"__hdf5-1.10" = ["hdf5"]
+"__hdf5-1.12" = ["__hdf5-1.10"]
+"__hdf5-1.14" = ["__hdf5-1.12"]
+"__hdf5-2" = ["__hdf5-1.14"]
+# Builds and links the libhdf5 that `hdf5-metno` bundles.
+__hdf5-bundled = ["hdf5/static", "__hdf5-2"]
+
 [dependencies]
+hdf5 = { package = "hdf5-metno", git = "https://github.com/metno/hdf5-rust", rev = "605a2e28c17f2209bf2a6d0a8be11ef0b6546034", features = ["zlib"], optional = true }
 hdf5-pure = { path = "../.." }
 test-util = { path = "../test-util" }
 

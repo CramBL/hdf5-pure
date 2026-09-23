@@ -20,7 +20,7 @@ use hdf5_pure::{File, FileBuilder, FileSpaceStrategy, MaxExtent};
 use std::sync::{Mutex, MutexGuard, OnceLock};
 use tempfile::tempdir;
 
-use hdf5_pure_crosscheck::create_v18;
+use test_util_hdf5::file;
 
 /// The C library is not thread-safe across concurrent file handles in this
 /// harness; serialize every test that touches it.
@@ -408,7 +408,7 @@ fn a_c_written_vlen_string_dataset_can_be_overwritten() {
     let path = dir.path().join("c_written.h5");
 
     {
-        let f = create_v18(&path);
+        let f = file::libhdf5_create_v18(&path);
         let data: Vec<VarLenUnicode> = ["alpha", "beta", "gamma"]
             .iter()
             .map(|s| s.parse::<VarLenUnicode>().unwrap())
@@ -458,7 +458,7 @@ fn c_library_reads_an_overwritten_compact_vlen_string_dataset() {
     let path = dir.path().join("overwrite_compact.h5");
 
     {
-        let f = create_v18(&path);
+        let f = file::libhdf5_create_v18(&path);
         let data: Vec<VarLenUnicode> = ["one", "two", "three"]
             .iter()
             .map(|s| s.parse::<VarLenUnicode>().unwrap())

@@ -240,7 +240,7 @@ assert_eq!(reason, "chunk logical byte size exceeds the 4 GiB format limit");
 
 `assert!(matches!(err, Error::StaleHandle), "{err:?}")` is the short form for a variant with no field to check. The message prints the error a wrong variant fails with.
 
-An error from the C library follows the same rule: the test asserts the major and minor codes the condition produces, `err.contains_major(MajorErrorCode::Symbol)` and `err.contains_minor(MinorErrorCode::NotFound)`, or the frames in order where the order matters. Where one code covers two conditions, the test asserts what separates them, as `assert_c_absent` in `crates/crosscheck/src/lib.rs` does.
+An error from the C library follows the same rule: the test asserts the major and minor codes the condition produces, `err.contains_major(MajorErrorCode::Symbol)` and `err.contains_minor(MinorErrorCode::NotFound)`, or the frames in order where the order matters. Where one code covers two conditions, the test asserts what separates them.
 
 `hdf5::Error::Internal` is a failure in the binding. A test does not accept it in place of an error from the library.
 
@@ -248,7 +248,7 @@ An error from the C library follows the same rule: the test asserts the major an
 
 ### Test helpers
 
-A helper that several test binaries share lives in `crates/test-util`. A helper that one binary uses lives in that binary. A helper that needs the C library lives in `crates/crosscheck/src/lib.rs`, so that nothing else links it.
+A helper that several test binaries share lives in `crates/test-util`. A helper that one binary uses lives in that binary. A helper that needs the C library lives behind an optional feature, so that nothing else links it by default.
 
 ## Misc
 

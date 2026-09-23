@@ -23,7 +23,7 @@ fn open_bounded(path: &std::path::Path) -> Result<File, hdf5_pure::Error> {
 
 use tempfile::tempdir;
 
-use hdf5_pure_crosscheck::assert_c_absent;
+use test_util_hdf5::absence;
 
 #[test]
 fn c_library_reads_our_strategy() {
@@ -190,7 +190,7 @@ fn c_library_reads_our_persisted_free_space() {
         f.dataset("c").unwrap().read_raw::<i32>().unwrap(),
         vec![3; 100]
     );
-    assert_c_absent(&f.dataset("big").unwrap_err(), "big");
+    absence::assert_libhdf5_absent(&f.dataset("big").unwrap_err(), "big");
 
     // Loading the managers requires parsing our FSHD/FSSE blocks; the C library
     // reports at least the freed dataset's storage as free space.

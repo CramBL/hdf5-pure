@@ -12,7 +12,7 @@
 use hdf5_pure::File;
 use tempfile::tempdir;
 
-use hdf5_pure_crosscheck::create_v18;
+use test_util_hdf5::file;
 
 /// Dirty `g` so its object header is rebuilt at a fresh address, then spend the
 /// freed space, so a reference left behind resolves to reused bytes rather than
@@ -57,7 +57,7 @@ fn a_c_written_reference_attribute_is_repointed_and_the_header_resealed() {
     let path = dir.path().join("attr_ref.h5");
 
     {
-        let file = create_v18(&path);
+        let file = file::libhdf5_create_v18(&path);
         let g = file.create_group("g").unwrap();
         g.new_dataset::<i32>()
             .shape((3,))

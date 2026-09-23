@@ -10,7 +10,7 @@ use hdf5_pure::{
 use rstest::rstest;
 use tempfile::tempdir;
 
-use hdf5_pure_crosscheck::assert_c_absent;
+use test_util_hdf5::absence;
 
 #[test]
 fn c_file_repacked_then_read_by_c_library() {
@@ -68,7 +68,7 @@ fn c_file_repacked_then_read_by_c_library() {
         c.dataset("grp/beta").unwrap().read_raw::<i32>().unwrap(),
         vec![10, 20, 30, 40]
     );
-    assert_c_absent(&c.dataset("doomed").unwrap_err(), "doomed");
+    absence::assert_libhdf5_absent(&c.dataset("doomed").unwrap_err(), "doomed");
 }
 
 #[test]
@@ -2188,5 +2188,5 @@ fn every_spelling_of_a_drop_path_drops_one_object_the_c_library_wrote(#[case] sp
         c.dataset("grp/kept").unwrap().read_raw::<i32>().unwrap(),
         vec![1, 2]
     );
-    assert_c_absent(&c.dataset("grp/doomed").unwrap_err(), "doomed");
+    absence::assert_libhdf5_absent(&c.dataset("grp/doomed").unwrap_err(), "doomed");
 }

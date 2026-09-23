@@ -23,7 +23,7 @@ use hdf5::plist::group_create::{AttrPhaseChange, GroupCreate, GroupCreateBuilder
 use hdf5_pure::{AttrValue, File};
 use tempfile::tempdir;
 
-use hdf5_pure_crosscheck::create_v18;
+use test_util_hdf5::file;
 
 /// A phase-change pair the C library would never write by default (its defaults
 /// are 8 and 6), and one it therefore stores in the header prefix rather than
@@ -49,7 +49,7 @@ fn gcpl_with_phase_change() -> GroupCreate {
 /// Nothing here asks for timestamps: the C library stores them on every version 2
 /// header it writes, which is the whole point.
 fn write_fixture(path: &Path) {
-    let file = create_v18(path);
+    let file = file::libhdf5_create_v18(path);
     let group = file
         .create_group_builder()
         .set_gcpl(&gcpl_with_phase_change())

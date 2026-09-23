@@ -10,7 +10,7 @@ use hdf5::file::LibraryVersion;
 use hdf5_pure::{File, FileBuilder, MaxExtent};
 use tempfile::tempdir;
 
-use hdf5_pure_crosscheck::assert_c_absent;
+use test_util_hdf5::absence;
 
 const UB: u64 = 512;
 
@@ -429,8 +429,8 @@ fn userblock_delete_then_reuse_read_by_c_library() {
         c.dataset("keep").unwrap().read_raw::<f64>().unwrap(),
         vec![10.0, 20.0, 30.0]
     );
-    assert_c_absent(&c.dataset("doomed").unwrap_err(), "doomed");
-    assert_c_absent(&c.dataset("c").unwrap_err(), "c");
+    absence::assert_libhdf5_absent(&c.dataset("doomed").unwrap_err(), "doomed");
+    absence::assert_libhdf5_absent(&c.dataset("c").unwrap_err(), "c");
 }
 
 #[test]

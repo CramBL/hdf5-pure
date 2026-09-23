@@ -1,5 +1,5 @@
 #![cfg(feature = "__hdf5-1.10")]
-//! Guards the discriminating power of [`hdf5_pure_crosscheck::assert_c_absent`], which the
+//! Guards the discriminating power of [`test_util_hdf5::absence::assert_libhdf5_absent`], which the
 //! delete crosschecks use to prove a removed object is *absent* rather than
 //! merely unreachable.
 //!
@@ -19,7 +19,7 @@
 use hdf5_pure::FileBuilder;
 use tempfile::tempdir;
 
-use hdf5_pure_crosscheck::{assert_c_absent, c_reports_absent};
+use test_util_hdf5::absence;
 
 /// A file whose bytes are mostly metadata: 40 two-element datasets, so a
 /// corruption sweep lands on object headers and link tables rather than on raw
@@ -47,9 +47,9 @@ fn genuine_absences_are_accepted() {
     b.write(&compact).unwrap();
     {
         let c = hdf5::File::open(&compact).unwrap();
-        assert_c_absent(&c.dataset("nope").unwrap_err(), "missing dataset");
-        assert_c_absent(&c.group("nope").unwrap_err(), "missing group");
-        assert_c_absent(
+        absence::assert_libhdf5_absent(&c.dataset("nope").unwrap_err(), "missing dataset");
+        absence::assert_libhdf5_absent(&c.group("nope").unwrap_err(), "missing group");
+        absence::assert_libhdf5_absent(
             &c.dataset("c0").unwrap().attr("nope").unwrap_err(),
             "missing attribute",
         );
@@ -60,7 +60,7 @@ fn genuine_absences_are_accepted() {
     metadata_heavy(&dense);
     {
         let c = hdf5::File::open(&dense).unwrap();
-        assert_c_absent(&c.dataset("nope").unwrap_err(), "missing dataset (dense)");
+        absence::assert_libhdf5_absent(&c.dataset("nope").unwrap_err(), "missing dataset (dense)");
     }
 
     // Absence inside a subgroup, so traversal crosses a link first.
@@ -77,7 +77,7 @@ fn genuine_absences_are_accepted() {
             c.dataset("sub/inner").unwrap().read_raw::<i32>().unwrap(),
             vec![1]
         );
-        assert_c_absent(&c.dataset("sub/nope").unwrap_err(), "missing in subgroup");
+        absence::assert_libhdf5_absent(&c.dataset("sub/nope").unwrap_err(), "missing in subgroup");
     }
 }
 
@@ -126,7 +126,7 @@ fn corruption_is_never_mistaken_for_absence() {
                 accepted_by_bare_code += 1;
             }
             assert!(
-                !c_reports_absent(&err),
+                !absence::libhdf5_reports_absent(&err),
                 "corrupting {width} byte(s) at offset {at} produced a failure the \
                  absence helper accepted, so it cannot tell damage from absence: {err}"
             );
