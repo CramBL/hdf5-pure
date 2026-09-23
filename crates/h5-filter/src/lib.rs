@@ -1,6 +1,6 @@
 //! Encoding and decoding for HDF5 chunk filters.
 //!
-//! LZF and the optional ZFP codec work with `alloc` and do not require `std`.
+//! LZF, Scale-Offset, and the optional ZFP codec work with `alloc` and do not require `std`.
 
 #![cfg_attr(not(feature = "std"), no_std)]
 #![allow(rustdoc::missing_crate_level_docs)]
@@ -10,8 +10,15 @@ extern crate alloc;
 use core::fmt;
 
 mod lzf;
+mod scaleoffset;
 #[cfg(feature = "zfp")]
 mod zfp;
+
+pub use scaleoffset::{
+    FillAvailability, HEADER_LEN as SCALE_OFFSET_HEADER_LEN, ScaleOffset, ScaleOffsetByteOrder,
+    ScaleOffsetFill, ScaleOffsetType, build_cd_values as build_scale_offset_cd_values,
+    compress as compress_scale_offset, decompress as decompress_scale_offset, scale_offset_mode,
+};
 
 #[cfg(feature = "zfp")]
 pub use zfp::{
@@ -31,6 +38,10 @@ pub use lzf::{
 pub enum Error {
     /// Reports malformed LZF input or output beyond the caller's size limit.
     InvalidLzfStream(&'static str),
+    /// Reports invalid scale-offset parameters or input bytes.
+    ScaleOffset(alloc::string::String),
+    /// Reports a scale-offset element count that exceeds the platform's index width.
+    ScaleOffsetValueTooLargeForPlatform { value: u64, target: &'static str },
     #[cfg(feature = "zfp")]
     /// Reports fewer encoded bytes than the ZFP chunk requires.
     TruncatedZfpStream { expected: usize, actual: usize },
@@ -55,6 +66,11 @@ impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::InvalidLzfStream(reason) => write!(f, "lzf: {reason}"),
+            Self::ScaleOffset(reason) => write!(f, "filter error: {reason}"),
+            Self::ScaleOffsetValueTooLargeForPlatform { value, target } => write!(
+                f,
+                "scaleoffset: value {value} does not fit in {target} on this platform"
+            ),
             #[cfg(feature = "zfp")]
             Self::TruncatedZfpStream { expected, actual } => {
                 write!(f, "ZFP: encoded chunk needs {expected} bytes, got {actual}")

@@ -712,7 +712,7 @@ Unless you explicitly state otherwise, any contribution intentionally submitted 
 
 ### Third-party code
 
-- The scale-offset filter in `src/scaleoffset.rs` is a port of `H5Zscaleoffset.c` from the HDF5 library, which The HDF Group licenses under the BSD 3-Clause license in [LICENSE-HDF5](LICENSE-HDF5). The crosscheck tests build that library to compare against, and nothing of it ships in the crate.
+- The scale-offset filter in `crates/h5-filter/src/scaleoffset.rs` is a port of `H5Zscaleoffset.c` from the HDF5 library, which The HDF Group licenses under the BSD 3-Clause license in [LICENSE-HDF5](LICENSE-HDF5). The crosscheck tests build that library to compare against, and nothing of it ships in the crate.
 - The ZFP codec in `crates/h5-filter/src/zfp.rs` is a port of the reference implementation by
   Lawrence Livermore National Security, LLC, under the BSD 3-Clause license in
   [LICENSE-ZFP](LICENSE-ZFP).

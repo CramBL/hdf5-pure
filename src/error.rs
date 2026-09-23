@@ -639,6 +639,10 @@ impl From<h5_filter::Error> for FormatError {
             h5_filter::Error::InvalidLzfStream(reason) => {
                 Self::FilterError(format!("lzf: {reason}"))
             }
+            h5_filter::Error::ScaleOffset(reason) => Self::FilterError(reason),
+            h5_filter::Error::ScaleOffsetValueTooLargeForPlatform { value, target } => {
+                Self::ValueTooLargeForPlatform { value, target }
+            }
             #[cfg(feature = "zfp")]
             h5_filter::Error::ZfpFilter(reason) => Self::FilterError(reason),
             #[cfg(feature = "zfp")]
