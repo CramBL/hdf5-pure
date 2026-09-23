@@ -6,24 +6,15 @@ extern crate alloc;
 #[cfg(not(feature = "std"))]
 use alloc::{string::String, string::ToString, vec, vec::Vec};
 
+#[cfg(feature = "zfp")]
+pub use h5_filter::FILTER_ZFP;
+pub use h5_filter::{
+    FILTER_DEFLATE, FILTER_FLETCHER32, FILTER_LZF, FILTER_SCALEOFFSET, FILTER_SHUFFLE,
+    H5Z_FLAG_OPTIONAL,
+};
+
 use crate::bytes::ensure_len;
 use crate::error::FormatError;
-
-/// Well-known filter IDs.
-pub const FILTER_DEFLATE: u16 = 1;
-pub const FILTER_SHUFFLE: u16 = 2;
-pub const FILTER_FLETCHER32: u16 = 3;
-pub const FILTER_SCALEOFFSET: u16 = 6;
-/// LZF (h5py), <https://github.com/h5py/h5py/tree/master/lzf>.
-pub const FILTER_LZF: u16 = 32000;
-/// ZFP compression filter (registered HDF5 filter ID 32013).
-#[cfg(feature = "zfp")]
-pub const FILTER_ZFP: u16 = 32013;
-
-/// `H5Z_FLAG_OPTIONAL`, bit 0 of a filter's flags word: a reader that cannot
-/// apply the filter may skip it. Named so the paths that read the bit and the
-/// path that writes it cannot read different values.
-pub const H5Z_FLAG_OPTIONAL: u16 = 1;
 
 /// Description of a single filter in a pipeline.
 #[derive(Debug, Clone, PartialEq)]
@@ -32,18 +23,28 @@ pub struct FilterDescription {
     pub filter_id: u16,
     /// Optional filter name (required for filter_id >= 256 in v1).
     pub name: Option<String>,
-    /// Filter flags (bit 0 = optional).
+    /// Bit 0 permits omission during output.
     pub flags: u16,
     /// Client data values passed to the filter.
     pub client_data: Vec<u32>,
 }
 
 impl FilterDescription {
-    /// Whether a reader that cannot apply this filter may skip it
-    /// ([`H5Z_FLAG_OPTIONAL`]). A mandatory filter must be applied for the data
-    /// to decode, so a reader missing it has to fail.
+    /// Returns whether this filter is marked optional for output.
     pub fn is_optional(&self) -> bool {
-        self.flags & H5Z_FLAG_OPTIONAL != 0
+        h5_filter::FilterStep::optional(self)
+    }
+}
+
+impl h5_filter::FilterStep for FilterDescription {
+    fn id(&self) -> u16 {
+        self.filter_id
+    }
+    fn flags(&self) -> u16 {
+        self.flags
+    }
+    fn client_data(&self) -> &[u32] {
+        &self.client_data
     }
 }
 
