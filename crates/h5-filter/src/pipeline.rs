@@ -208,16 +208,17 @@ pub fn decompress_chunk_with(
             FILTER_DEFLATE => deflate_decompress(
                 scratch,
                 input,
-                inner_output_cap(expected, filters, filter_mask, i),
+                inner_output_cap(expected, filters, filter_mask, i, ctx)?,
             )?,
-            FILTER_LZF => {
-                crate::decompress_lzf(input, inner_output_cap(expected, filters, filter_mask, i))?
-            }
+            FILTER_LZF => crate::decompress_lzf(
+                input,
+                inner_output_cap(expected, filters, filter_mask, i, ctx)?,
+            )?,
             FILTER_FLETCHER32 => fletcher32_verify(input)?,
             FILTER_SCALEOFFSET => crate::decompress_scale_offset(
                 input,
                 filter.client_data(),
-                inner_output_cap(expected, filters, filter_mask, i),
+                inner_output_cap(expected, filters, filter_mask, i, ctx)?,
             )?,
             #[cfg(feature = "zfp")]
             FILTER_ZFP => crate::decompress_zfp_filter(
@@ -256,8 +257,15 @@ fn expected_chunk_len(ctx: &ChunkContext<'_>) -> Option<usize> {
     usize::try_from(bytes).ok().filter(|&n| n != 0)
 }
 
-fn filter_max_forward_output(filter_id: u16, in_size: usize) -> usize {
-    match filter_id {
+fn filter_max_forward_output(
+    filter: &impl FilterStep,
+    in_size: usize,
+    ctx: ChunkContext<'_>,
+) -> Result<usize, Error> {
+    #[cfg(not(feature = "zfp"))]
+    let _ = ctx;
+
+    Ok(match filter.id() {
         // Fletcher32 appends a 4-byte checksum.
         FILTER_FLETCHER32 => in_size.saturating_add(4),
         // A conforming LZF encoder may emit every byte as its own literal run
@@ -271,11 +279,13 @@ fn filter_max_forward_output(filter_id: u16, in_size: usize) -> usize {
         // Deflate can slightly expand incompressible input (zlib "stored" blocks
         // plus framing). The bound exceeds zlib's worst case.
         FILTER_DEFLATE => in_size.saturating_add(in_size / 16).saturating_add(64),
-        // Shuffle preserves size. Fixed-rate ZFP never exceeds the native
-        // element width. An unknown filter makes the read fail when it is reached
-        // after deflate regardless, so leaving the size unchanged is fine.
+        #[cfg(feature = "zfp")]
+        // ZFP encodes full blocks even when the chunk ends with a partial block.
+        FILTER_ZFP => {
+            crate::zfp::filter_encoded_len(filter.client_data(), ctx.chunk_dims, ctx.element_type)?
+        }
         _ => in_size,
-    }
+    })
 }
 
 #[cfg(feature = "deflate")]
@@ -286,15 +296,18 @@ fn inner_output_cap(
     filters: &[impl FilterStep],
     filter_mask: u32,
     filter_index: usize,
-) -> Option<usize> {
-    let mut size = expected?;
+    ctx: ChunkContext<'_>,
+) -> Result<Option<usize>, Error> {
+    let Some(mut size) = expected else {
+        return Ok(None);
+    };
     for (j, f) in filters[..filter_index].iter().enumerate() {
         if j < 32 && (filter_mask >> j) & 1 == 1 {
             continue;
         }
-        size = filter_max_forward_output(f.id(), size);
+        size = filter_max_forward_output(f, size, ctx)?;
     }
-    Some(size)
+    Ok(Some(size))
 }
 
 #[cfg(all(test, feature = "deflate"))]
@@ -1152,6 +1165,48 @@ mod tests {
         let compressed = compress_chunk(&data, &pipeline.filters, ctx).unwrap();
         let decoded = decompress_chunk(&compressed, &pipeline.filters, ctx, 0).unwrap();
         assert_eq!(decoded, data);
+    }
+
+    #[rstest::rstest]
+    #[cfg(all(feature = "deflate", feature = "zfp"))]
+    #[case::rank1(&[1], 16)]
+    #[case::rank2(&[1, 1], 64)]
+    #[case::rank3(&[1, 1, 1], 256)]
+    #[case::rank4(&[1, 1, 1, 1], 1024)]
+    fn zfp_partial_block_inner_deflate_outer_roundtrips(
+        #[case] dims: &[u64],
+        #[case] encoded_len: usize,
+    ) {
+        let cd_values = crate::zfp_cd_values_rate(32.0, ZfpElementType::F32, dims).unwrap();
+        let filters = [
+            FilterDescription {
+                filter_id: FILTER_ZFP,
+                flags: 0,
+                client_data: cd_values,
+            },
+            FilterDescription {
+                filter_id: FILTER_DEFLATE,
+                flags: 0,
+                client_data: vec![6],
+            },
+        ];
+        let ctx = ChunkContext {
+            chunk_dims: dims,
+            element_size: NonZeroU32::new(4).unwrap(),
+            element_type: Some(ZfpElementType::F32),
+            scale_offset_type: None,
+        };
+        let data = 1.0f32.to_le_bytes();
+        let zfp_bytes = crate::compress_zfp_filter(
+            &data,
+            filters[0].client_data(),
+            ctx.chunk_dims,
+            ctx.element_type,
+        )
+        .unwrap();
+        assert_eq!(zfp_bytes.len(), encoded_len);
+        let stored = compress_chunk_with(&mut FilterScratch::new(), &data, &filters, ctx).unwrap();
+        assert_eq!(decompress_chunk(&stored, &filters, ctx, 0).unwrap(), data);
     }
 
     #[test]

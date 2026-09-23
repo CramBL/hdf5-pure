@@ -297,6 +297,34 @@ def write_fixture(case: Case) -> dict[str, Any]:
     }
 
 
+def write_zfp_deflate_partial_fixture() -> None:
+    arr = np.array([0.0, 1.0], dtype=np.float32)
+    path = FIXTURE_DIR / "f32_1d_2_partial_rate32_zfp_deflate.h5"
+    with h5py.File(path, "w") as file:
+        properties = h5py.h5p.create(h5py.h5p.DATASET_CREATE)
+        properties.set_chunk(arr.shape)
+        properties.set_filter(
+            32013, 0, hdf5plugin.Zfp(rate=32.0).filter_options
+        )
+        properties.set_deflate(6)
+        dataset = h5py.h5d.create(
+            file.id,
+            b"v",
+            h5py.h5t.py_create(arr.dtype),
+            h5py.h5s.create_simple(arr.shape),
+            dcpl=properties,
+        )
+        dataset.write(h5py.h5s.ALL, h5py.h5s.ALL, arr)
+        assert [dataset.get_create_plist().get_filter(i)[0] for i in range(2)] == [
+            32013,
+            1,
+        ]
+        filter_mask, _ = dataset.read_direct_chunk((0,))
+        assert filter_mask == 0
+    with h5py.File(path, "r") as file:
+        assert np.array_equal(file["v"][:], arr)
+
+
 def main() -> int:
     cases = build_cases()
     manifest: list[dict[str, Any]] = []
@@ -306,6 +334,7 @@ def main() -> int:
         manifest.append(entry)
         print(f"  {c.name}: raw={entry['raw_bytes_len']}B compressed={entry['compressed_bytes_len']}B")
     MANIFEST.write_text(json.dumps({"fixtures": manifest}, indent=2) + "\n")
+    write_zfp_deflate_partial_fixture()
     print(f"wrote {MANIFEST}")
     return 0
 
