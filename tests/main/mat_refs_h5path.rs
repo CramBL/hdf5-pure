@@ -11,71 +11,15 @@
 //! from MATLAB's own files on every run rather than asserting it as a constant,
 //! including both of its exceptions.
 
+use hdf5_pure::File;
 use hdf5_pure::mat::{self, EmptySequencePolicy, Options, StringClass};
-use hdf5_pure::{AttrValue, File};
 use serde::Serialize;
-
-/// Every object in `file`, as `(path, is_group, H5PATH value)`.
-fn objects(file: &File) -> Vec<(String, bool, Option<String>)> {
-    fn h5path(attrs: &std::collections::HashMap<String, AttrValue>) -> Option<String> {
-        match attrs.get("H5PATH") {
-            Some(AttrValue::AsciiString(s)) | Some(AttrValue::String(s)) => Some(s.clone()),
-            Some(other) => Some(format!("unexpected type: {other:?}")),
-            None => None,
-        }
-    }
-    fn walk(file: &File, path: &str, out: &mut Vec<(String, bool, Option<String>)>) {
-        let group = match if path.is_empty() {
-            Ok(file.root())
-        } else {
-            file.group(path)
-        } {
-            Ok(g) => g,
-            Err(_) => return,
-        };
-        if !path.is_empty()
-            && let Ok(attrs) = group.attrs()
-        {
-            out.push((path.to_string(), true, h5path(&attrs)));
-        }
-        for name in group.datasets().unwrap_or_default() {
-            let full = if path.is_empty() {
-                name.clone()
-            } else {
-                format!("{path}/{name}")
-            };
-            if let Ok(ds) = file.dataset(&full)
-                && let Ok(attrs) = ds.attrs()
-            {
-                out.push((full, false, h5path(&attrs)));
-            }
-        }
-        for sub in group.groups().unwrap_or_default() {
-            let full = if path.is_empty() {
-                sub.clone()
-            } else {
-                format!("{path}/{sub}")
-            };
-            walk(file, &full, out);
-        }
-    }
-    let mut out = Vec::new();
-    walk(file, "", &mut out);
-    out
-}
+use test_util_hdf5::mat_file::{self, ObjectKind};
 
 /// True for `#refs#/<name>` and nothing deeper.
 fn is_refs_member(path: &str) -> bool {
     path.strip_prefix("#refs#/")
         .is_some_and(|rest| !rest.contains('/'))
-}
-
-fn matlab_class(file: &File, path: &str) -> Option<String> {
-    let attrs = file.dataset(path).ok()?.attrs().ok()?;
-    match attrs.get("MATLAB_class") {
-        Some(AttrValue::AsciiString(s)) | Some(AttrValue::String(s)) => Some(s.clone()),
-        _ => None,
-    }
 }
 
 /// The measurement the writer's rule is built on, re-derived from MATLAB's own
@@ -93,19 +37,20 @@ fn matlab_stamps_every_refs_object_with_its_own_path() {
         let Ok(file) = File::open(&path) else {
             continue;
         };
-        for (obj, _, h5path) in objects(&file) {
-            if !is_refs_member(&obj) {
+        for object in mat_file::objects(&file) {
+            if !is_refs_member(&object.path) {
                 continue;
             }
             members += 1;
-            match h5path {
+            match object.string_attr(H5PATH) {
                 Some(v) => assert_eq!(
                     v,
-                    format!("/{obj}"),
-                    "{}: {obj} carries an H5PATH that is not its own path",
-                    path.display()
+                    format!("/{}", object.path),
+                    "{}: {} carries an H5PATH that is not its own path",
+                    path.display(),
+                    object.path
                 ),
-                None => exceptions.push((path.clone(), obj)),
+                None => exceptions.push((path.clone(), object.path)),
             }
         }
     }
@@ -121,7 +66,7 @@ fn matlab_stamps_every_refs_object_with_its_own_path() {
     for (file, obj) in &exceptions {
         let f = File::open(file).unwrap();
         assert_eq!(
-            matlab_class(&f, obj).as_deref(),
+            mat_file::class(&f, obj).as_deref(),
             Some("canonical empty"),
             "{}: {obj} has no H5PATH and is not the canonical empty",
             file.display()
@@ -219,11 +164,11 @@ fn our_refs_objects_carry_their_own_path() {
         ),
     ] {
         let file = File::from_bytes(bytes).unwrap();
-        let objects = objects(&file);
+        let objects = mat_file::objects(&file);
 
         let members: Vec<_> = objects
             .iter()
-            .filter(|(path, _, _)| is_refs_member(path))
+            .filter(|object| is_refs_member(&object.path))
             .collect();
         assert!(
             members.len() >= min_members,
@@ -231,14 +176,17 @@ fn our_refs_objects_carry_their_own_path() {
             members.len()
         );
         assert!(
-            members.iter().any(|(_, is_group, _)| *is_group),
+            members
+                .iter()
+                .any(|object| object.kind == ObjectKind::Group),
             "{label}: expected at least one struct group under #refs#, got {members:?}"
         );
 
         let mut unstamped = Vec::new();
-        for (path, _, h5path) in &members {
-            match h5path {
-                Some(v) => assert_eq!(v, &format!("/{path}"), "{label}: {path}: wrong H5PATH"),
+        for object in &members {
+            let path = &object.path;
+            match object.string_attr(H5PATH) {
+                Some(v) => assert_eq!(v, format!("/{path}"), "{label}: {path}: wrong H5PATH"),
                 None => unstamped.push(path.clone()),
             }
         }
@@ -251,7 +199,7 @@ fn our_refs_objects_carry_their_own_path() {
         );
         if expect_canonical {
             assert_eq!(
-                matlab_class(&file, &unstamped[0]).as_deref(),
+                mat_file::class(&file, &unstamped[0]).as_deref(),
                 Some("canonical empty"),
                 "{label}: the unstamped object is the canonical empty"
             );
@@ -263,7 +211,7 @@ fn our_refs_objects_carry_their_own_path() {
         // `mat::builder::refs_h5path`), and a wrong path is worse than none.
         let stray: Vec<_> = objects
             .iter()
-            .filter(|(path, _, h5path)| h5path.is_some() && !is_refs_member(path))
+            .filter(|object| object.attrs.contains_key(H5PATH) && !is_refs_member(&object.path))
             .collect();
         assert!(
             stray.is_empty(),
@@ -271,3 +219,5 @@ fn our_refs_objects_carry_their_own_path() {
         );
     }
 }
+
+const H5PATH: &str = "H5PATH";

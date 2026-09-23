@@ -11,10 +11,11 @@
 //!   per block, into a buffer it shares with every other call. A refactor that
 //!   reintroduced buffering would leave every correctness test green.
 
+use hdf5_pure::File;
 use hdf5_pure::mat::{Block, Blocking, Compression, DataProducer, MatBuilder, MatError, Options};
-use hdf5_pure::{AttrValue, File};
 use std::sync::{Arc, Mutex};
 use tempfile::tempdir;
+use test_util_hdf5::mat_file;
 
 /// What a [`DataProducer`] did, observed from the outside.
 #[derive(Default, Debug)]
@@ -110,31 +111,12 @@ impl std::io::Write for Discard {
     }
 }
 
-/// Open a file this crate wrote, checking first that it is a `.mat` and not
-/// merely a readable HDF5 file.
-///
-/// `File::open` skips the userblock without inspecting it, so a `.mat` that lost
-/// its MATLAB signature entirely still reads back here — and MATLAB would refuse
-/// it. Every test that reaches into a written file goes through this, so the
-/// signature is checked wherever the contents are.
-fn open_mat(path: &std::path::Path) -> File {
-    let bytes = std::fs::read(path).unwrap();
-    hdf5_pure::mat::userblock::verify_header(&bytes)
-        .expect("a file written as a .mat must carry the MATLAB v7.3 userblock");
-    File::open(path).unwrap()
-}
-
 fn read_f64(path: &std::path::Path, name: &str) -> Vec<f64> {
-    open_mat(path).dataset(name).unwrap().read_f64().unwrap()
-}
-
-fn read_class(path: &std::path::Path, name: &str) -> String {
-    let file = open_mat(path);
-    let attrs = file.dataset(name).unwrap().attrs().unwrap();
-    match &attrs["MATLAB_class"] {
-        AttrValue::AsciiString(s) | AttrValue::String(s) => s.clone(),
-        other => panic!("unexpected class attribute: {other:?}"),
-    }
+    mat_file::open(path)
+        .dataset(name)
+        .unwrap()
+        .read_f64()
+        .unwrap()
 }
 
 // ---------------------------------------------------------------------------
@@ -386,7 +368,10 @@ fn produced_elements_read_back_in_order() {
     mb.write(&path).unwrap();
 
     assert_eq!(read_f64(&path, "ramp"), ramp_elements(21));
-    assert_eq!(read_class(&path, "ramp"), "double");
+    assert_eq!(
+        mat_file::class(&mat_file::open(&path), "ramp").as_deref(),
+        Some("double")
+    );
 }
 
 /// An element count that does not divide by the block size leaves a short last
@@ -653,9 +638,18 @@ fn every_element_type_matches_its_materialized_sibling() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("classes.mat");
     std::fs::write(&path, &produced).unwrap();
-    assert_eq!(read_class(&path, "iq"), "int16");
-    assert_eq!(read_class(&path, "flags"), "logical");
-    assert_eq!(read_class(&path, "counts"), "uint32");
+    assert_eq!(
+        mat_file::class(&mat_file::open(&path), "iq").as_deref(),
+        Some("int16")
+    );
+    assert_eq!(
+        mat_file::class(&mat_file::open(&path), "flags").as_deref(),
+        Some("logical")
+    );
+    assert_eq!(
+        mat_file::class(&mat_file::open(&path), "counts").as_deref(),
+        Some("uint32")
+    );
 }
 
 /// A produced dataset must be the same file whichever way it is delivered, so

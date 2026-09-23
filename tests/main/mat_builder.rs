@@ -6,15 +6,7 @@ use hdf5_pure::{AttrValue, File, LibVer};
 use test_util::bytes;
 use test_util::superblock;
 use test_util::temp;
-
-fn read_class(file: &File, ds_path: &str) -> String {
-    let ds = file.dataset(ds_path).unwrap();
-    let attrs = ds.attrs().unwrap();
-    match &attrs["MATLAB_class"] {
-        AttrValue::AsciiString(s) | AttrValue::String(s) => s.clone(),
-        other => panic!("unexpected class: {other:?}"),
-    }
-}
+use test_util_hdf5::mat_file;
 
 #[test]
 fn scalar_numeric_classes() {
@@ -29,11 +21,11 @@ fn scalar_numeric_classes() {
     let path = temp::temp_path_with_extension("scalars", "mat");
     std::fs::write(&path, &bytes).unwrap();
     let f = File::open(&path).unwrap();
-    assert_eq!(read_class(&f, "d"), "double");
-    assert_eq!(read_class(&f, "s"), "single");
-    assert_eq!(read_class(&f, "i"), "int32");
-    assert_eq!(read_class(&f, "b"), "uint8");
-    assert_eq!(read_class(&f, "flag"), "logical");
+    assert_eq!(mat_file::class(&f, "d").as_deref(), Some("double"));
+    assert_eq!(mat_file::class(&f, "s").as_deref(), Some("single"));
+    assert_eq!(mat_file::class(&f, "i").as_deref(), Some("int32"));
+    assert_eq!(mat_file::class(&f, "b").as_deref(), Some("uint8"));
+    assert_eq!(mat_file::class(&f, "flag").as_deref(), Some("logical"));
     std::fs::remove_file(path).unwrap();
 }
 
@@ -49,7 +41,7 @@ fn vector_round_trips_with_class() {
     let f = File::open(&path).unwrap();
     let ds = f.dataset("v").unwrap();
     assert_eq!(ds.read_f64().unwrap(), vec![1.0, 2.0, 3.0, 4.0]);
-    assert_eq!(read_class(&f, "v"), "double");
+    assert_eq!(mat_file::class(&f, "v").as_deref(), Some("double"));
     std::fs::remove_file(path).unwrap();
 }
 
@@ -67,19 +59,23 @@ fn struct_with_fields() {
     let path = temp::temp_path_with_extension("struct", "mat");
     std::fs::write(&path, &bytes).unwrap();
     let f = File::open(&path).unwrap();
-    let group = f.group("payload").unwrap();
-    let attrs = group.attrs().unwrap();
-    let class = match &attrs["MATLAB_class"] {
-        AttrValue::AsciiString(s) | AttrValue::String(s) => s.clone(),
-        other => panic!("unexpected: {other:?}"),
-    };
-    assert_eq!(class, "struct");
+    assert_eq!(
+        mat_file::group_class(&f, "payload").as_deref(),
+        Some("struct")
+    );
+    let attrs = f.group("payload").unwrap().attrs().unwrap();
     let fields = attrs["MATLAB_fields"]
         .as_strings()
         .expect("MATLAB_fields must hold strings");
     assert_eq!(fields, vec!["answer", "label"]);
-    assert_eq!(read_class(&f, "payload/answer"), "uint32");
-    assert_eq!(read_class(&f, "payload/label"), "char");
+    assert_eq!(
+        mat_file::class(&f, "payload/answer").as_deref(),
+        Some("uint32")
+    );
+    assert_eq!(
+        mat_file::class(&f, "payload/label").as_deref(),
+        Some("char")
+    );
     std::fs::remove_file(path).unwrap();
 }
 
@@ -98,10 +94,19 @@ fn cell_with_mixed_elements() {
     let path = temp::temp_path_with_extension("cell", "mat");
     std::fs::write(&path, &bytes).unwrap();
     let f = File::open(&path).unwrap();
-    assert_eq!(read_class(&f, "c"), "cell");
-    assert_eq!(read_class(&f, "#refs#/ref_0000000000000000"), "uint8");
-    assert_eq!(read_class(&f, "#refs#/ref_0000000000000001"), "double");
-    assert_eq!(read_class(&f, "#refs#/ref_0000000000000002"), "char");
+    assert_eq!(mat_file::class(&f, "c").as_deref(), Some("cell"));
+    assert_eq!(
+        mat_file::class(&f, "#refs#/ref_0000000000000000").as_deref(),
+        Some("uint8")
+    );
+    assert_eq!(
+        mat_file::class(&f, "#refs#/ref_0000000000000001").as_deref(),
+        Some("double")
+    );
+    assert_eq!(
+        mat_file::class(&f, "#refs#/ref_0000000000000002").as_deref(),
+        Some("char")
+    );
     std::fs::remove_file(path).unwrap();
 }
 
@@ -125,18 +130,21 @@ fn nested_struct_and_cell() {
     let path = temp::temp_path_with_extension("nested", "mat");
     std::fs::write(&path, &bytes).unwrap();
     let f = File::open(&path).unwrap();
-    assert_eq!(read_class(&f, "root/entries"), "cell");
+    assert_eq!(mat_file::class(&f, "root/entries").as_deref(), Some("cell"));
     // First ref is the inner struct (ref_0).
-    let g = f.group("#refs#/ref_0000000000000000").unwrap();
-    let attrs = g.attrs().unwrap();
-    let class = match &attrs["MATLAB_class"] {
-        AttrValue::AsciiString(s) | AttrValue::String(s) => s.clone(),
-        _ => panic!(),
-    };
-    assert_eq!(class, "struct");
-    assert_eq!(read_class(&f, "#refs#/ref_0000000000000000/x"), "uint32");
+    assert_eq!(
+        mat_file::group_class(&f, "#refs#/ref_0000000000000000").as_deref(),
+        Some("struct")
+    );
+    assert_eq!(
+        mat_file::class(&f, "#refs#/ref_0000000000000000/x").as_deref(),
+        Some("uint32")
+    );
     // Second ref is the scalar.
-    assert_eq!(read_class(&f, "#refs#/ref_0000000000000001"), "uint32");
+    assert_eq!(
+        mat_file::class(&f, "#refs#/ref_0000000000000001").as_deref(),
+        Some("uint32")
+    );
     std::fs::remove_file(path).unwrap();
 }
 
@@ -152,7 +160,7 @@ fn string_object_emits_subsystem() {
     let path = temp::temp_path_with_extension("string-obj", "mat");
     std::fs::write(&path, &bytes).unwrap();
     let f = File::open(&path).unwrap();
-    assert_eq!(read_class(&f, "greeting"), "string");
+    assert_eq!(mat_file::class(&f, "greeting").as_deref(), Some("string"));
     let ds = f.dataset("greeting").unwrap();
     let attrs = ds.attrs().unwrap();
     let decode = match &attrs["MATLAB_object_decode"] {
@@ -163,12 +171,10 @@ fn string_object_emits_subsystem() {
     assert_eq!(decode, 3);
     // Subsystem must be present.
     let sub = f.dataset("#subsystem#/MCOS").unwrap();
-    let sub_attrs = sub.attrs().unwrap();
-    let sub_class = match &sub_attrs["MATLAB_class"] {
-        AttrValue::AsciiString(s) | AttrValue::String(s) => s.clone(),
-        _ => panic!(),
-    };
-    assert_eq!(sub_class, "FileWrapper__");
+    assert_eq!(
+        mat_file::class(&f, "#subsystem#/MCOS").as_deref(),
+        Some("FileWrapper__")
+    );
     // 5 helpers + 1 string payload = 6 entries total.
     assert_eq!(sub.shape().unwrap(), vec![1, 6]);
     std::fs::remove_file(path).unwrap();
@@ -191,7 +197,10 @@ fn name_sanitization_handles_keyword() {
     std::fs::write(&path, &bytes).unwrap();
     let f = File::open(&path).unwrap();
     // Sanitize appends `_` to keyword.
-    assert_eq!(read_class(&f, "payload/end_"), "uint32");
+    assert_eq!(
+        mat_file::class(&f, "payload/end_").as_deref(),
+        Some("uint32")
+    );
     std::fs::remove_file(path).unwrap();
 }
 
