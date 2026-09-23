@@ -14,13 +14,13 @@
 use hdf5_pure::{File, RepackOptions, repack};
 use tempfile::tempdir;
 
-use hdf5_pure_crosscheck::create_v18;
+use test_util_hdf5::file;
 
 const N: usize = 16;
 
 /// Write `path` holding `/d`, an `N`-element i32 dataset stored in `payload`.
 fn write_external_fixture(path: &std::path::Path, payload: &str) {
-    let file = create_v18(path);
+    let file = file::libhdf5_create_v18(path);
     file.new_dataset::<i32>()
         .external(payload, 0, N * 4)
         .shape([N])

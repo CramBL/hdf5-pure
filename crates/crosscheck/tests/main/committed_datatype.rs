@@ -24,7 +24,7 @@ use hdf5::{ObjectReference1, ReferencedObject};
 use hdf5_pure::{AttrValue, Datatype, File, FixedPointLayout, RepackOptions};
 use tempfile::tempdir;
 
-use hdf5_pure_crosscheck::create_v18;
+use test_util_hdf5::file;
 
 /// What a fixture puts in the file, so every assertion below names one constant
 /// rather than repeating a literal the fixture could drift away from.
@@ -107,7 +107,7 @@ const EVERYTHING: Fixture = Fixture {
 /// names. `/data` and the ordinary `plain` attribute beside each committed one
 /// are always present.
 fn write_committed_fixture(path: &Path, fixture: Fixture) {
-    fill_committed_fixture(&create_v18(path), fixture);
+    fill_committed_fixture(&file::libhdf5_create_v18(path), fixture);
 }
 
 /// The objects of [`write_committed_fixture`], in a file already created.
@@ -395,7 +395,7 @@ fn an_in_place_append_refuses_a_committed_element_type() {
 /// dimension, and typed by the committed `/mytype` — the extensible-array shape
 /// this crate's in-place append engine maintains.
 fn write_appendable_committed_fixture(path: &Path) {
-    let file = create_v18(path);
+    let file = file::libhdf5_create_v18(path);
     let dtype = hdf5::Datatype::from_type::<i32>().expect("transient i32 type");
     commit_type(&file, "mytype", &dtype);
     write_i32_dataset(&file, "typed", &dtype, Some(4), &DATASET_VALUES);
@@ -810,7 +810,7 @@ fn repack_refuses_dropping_the_group_a_named_type_lives_in() {
     let dst = dir.path().join("repacked.h5");
 
     {
-        let file = create_v18(&src);
+        let file = file::libhdf5_create_v18(&src);
         let dtype = hdf5::Datatype::from_type::<i32>().expect("transient i32 type");
         let group = file.create_group("types").expect("create /types");
         commit_type(&group, "mytype", &dtype);

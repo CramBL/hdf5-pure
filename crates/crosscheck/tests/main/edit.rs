@@ -16,7 +16,8 @@ use hdf5::file::LibraryVersion;
 use hdf5_pure::{AttrValue, File, FileBuilder, MaxExtent, ScaleOffset};
 use tempfile::tempdir;
 
-use hdf5_pure_crosscheck::{assert_c_absent, create_v18};
+use test_util_hdf5::absence;
+use test_util_hdf5::file;
 
 /// Stage an add, an add-into-a-group, a delete, and a copy — the full op set.
 fn stage_edits(session: &File) {
@@ -84,7 +85,7 @@ fn assert_edits_applied(path: &std::path::Path) {
         c.dataset("grp/gamma").unwrap().read_raw::<i32>().unwrap(),
         vec![1, 2, 3]
     );
-    assert_c_absent(&c.dataset("doomed").unwrap_err(), "doomed");
+    absence::assert_libhdf5_absent(&c.dataset("doomed").unwrap_err(), "doomed");
 }
 
 /// Write the starter file (two root datasets + a group with a dataset) with the
@@ -304,7 +305,7 @@ fn c_v0_symboltable_file_edited_then_read_by_c_library() {
         c.dataset("grp/gamma").unwrap().read_raw::<i32>().unwrap(),
         vec![1, 2, 3]
     );
-    assert_c_absent(&c.dataset("doomed").unwrap_err(), "doomed");
+    absence::assert_libhdf5_absent(&c.dataset("doomed").unwrap_err(), "doomed");
 }
 
 #[test]
@@ -398,7 +399,7 @@ fn c_library_reads_group_attributes_edited_in_place() {
     let added: i64 = grp.attr("added").unwrap().read_scalar().unwrap();
     assert_eq!(count, 2);
     assert_eq!(added, 3);
-    assert_c_absent(&grp.attr("drop").unwrap_err(), "grp/@drop");
+    absence::assert_libhdf5_absent(&grp.attr("drop").unwrap_err(), "grp/@drop");
     let tag: i64 = c
         .group("new_grp")
         .unwrap()
@@ -448,7 +449,7 @@ fn free_space_reuse_and_truncation_stay_c_readable() {
 
     // The reference C library reads the shrunken file and the survivors intact.
     let c = hdf5::File::open(&path).unwrap();
-    assert_c_absent(&c.dataset("bulk").unwrap_err(), "bulk");
+    absence::assert_libhdf5_absent(&c.dataset("bulk").unwrap_err(), "bulk");
     assert_eq!(
         c.dataset("alpha").unwrap().read_raw::<f64>().unwrap(),
         vec![1.0, 2.0, 3.0]
@@ -516,7 +517,7 @@ fn a_chunked_dataset_written_into_a_freed_hole_stays_c_readable() {
     );
 
     let c = hdf5::File::open(&path).unwrap();
-    assert_c_absent(&c.dataset("victim").unwrap_err(), "victim");
+    absence::assert_libhdf5_absent(&c.dataset("victim").unwrap_err(), "victim");
     assert_eq!(
         c.dataset("replacement").unwrap().read_raw::<f64>().unwrap(),
         filtered,
@@ -746,7 +747,7 @@ fn deleting_chunked_datasets_in_place_stays_c_readable() {
 
     // The reference C library reads the reclaimed file too.
     let c = hdf5::File::open(&path).unwrap();
-    assert_c_absent(&c.dataset("c_chunked").unwrap_err(), "c_chunked");
+    absence::assert_libhdf5_absent(&c.dataset("c_chunked").unwrap_err(), "c_chunked");
     assert_eq!(
         c.dataset("keep").unwrap().read_raw::<f64>().unwrap(),
         vec![1.0, 2.0, 3.0]
@@ -1152,7 +1153,7 @@ fn deleting_one_of_several_hard_links_keeps_the_survivor() {
     );
 
     let c = hdf5::File::open(&path).unwrap();
-    assert_c_absent(&c.dataset("chunked_orig").unwrap_err(), "chunked_orig");
+    absence::assert_libhdf5_absent(&c.dataset("chunked_orig").unwrap_err(), "chunked_orig");
     assert_eq!(
         c.dataset("chunked_alias")
             .unwrap()
@@ -1725,7 +1726,7 @@ fn a_replaced_object_is_read_by_the_c_library() {
             c.dataset("grp/delta").unwrap().read_raw::<f64>().unwrap(),
             vec![9.5]
         );
-        assert_c_absent(&c.dataset("grp/beta").unwrap_err(), "grp/beta");
+        absence::assert_libhdf5_absent(&c.dataset("grp/beta").unwrap_err(), "grp/beta");
         assert_eq!(
             c.group("grp")
                 .unwrap()
@@ -1851,7 +1852,7 @@ fn the_hard_link_rule_does_not_refuse_an_ordinary_group() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("c_hardlink_group_ok.h5");
     {
-        let file = create_v18(&path);
+        let file = file::libhdf5_create_v18(&path);
         let g = file.create_group("g").unwrap();
         g.create_group("child").unwrap();
         // A *soft* link is not a hard link: it resolves by path, so it still
@@ -1936,7 +1937,7 @@ fn editing_a_group_is_refused_when_the_links_cannot_be_walked() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("c_hardlink_group_damaged.h5");
     {
-        let file = create_v18(&path);
+        let file = file::libhdf5_create_v18(&path);
         let g = file.create_group("g").unwrap();
         g.new_dataset::<i32>()
             .shape((3,))

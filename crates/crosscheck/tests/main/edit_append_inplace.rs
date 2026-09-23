@@ -15,7 +15,7 @@ use hdf5::file::LibraryVersion;
 use hdf5_pure::{AttrValue, Error, File, MaxExtent};
 use tempfile::tempdir;
 
-use hdf5_pure_crosscheck::assert_c_absent;
+use test_util_hdf5::absence;
 
 /// Create a rank-1 unlimited (Extensible-Array indexed) i32 dataset `name` with the
 /// C library under the latest format, seeded with `0..n`, chunk length `chunk`.
@@ -393,7 +393,7 @@ fn combined_mixed_edits_c_readable() {
         .unwrap();
     assert_eq!(checked, 1);
     assert!(c.group("run").is_ok(), "created group missing");
-    assert_c_absent(&c.group("old").unwrap_err(), "old");
+    absence::assert_libhdf5_absent(&c.group("old").unwrap_err(), "old");
     c.close().unwrap();
 
     // Pure reader agrees on the grown dataset.
@@ -516,7 +516,7 @@ fn an_append_into_freed_space_stays_c_readable() {
         c.dataset("ceiling").unwrap().read_raw::<i32>().unwrap(),
         vec![7, 8, 9]
     );
-    assert_c_absent(&c.dataset("scratch").unwrap_err(), "scratch");
+    absence::assert_libhdf5_absent(&c.dataset("scratch").unwrap_err(), "scratch");
     c.close().unwrap();
 
     assert_eq!(read_pure(&path, "log"), (0..8196).collect::<Vec<_>>());
