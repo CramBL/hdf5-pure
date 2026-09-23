@@ -24,21 +24,12 @@
 //! with the fix.
 
 use hdf5::plist::file_create::FileSpaceStrategy as CStrategy;
-use hdf5_pure::{File, FileAccessProperties, FileBuilder, FileSpaceStrategy, MemoryStrategy};
-
-/// Open with the bounded engine demanded rather than merely preferred: these
-/// tests are about that engine, so a file it stops accepting must fail here
-/// rather than quietly retarget the whole file at the mirror.
-fn open_bounded(path: &std::path::Path) -> Result<File, hdf5_pure::Error> {
-    File::open_rw_with_options(
-        path,
-        FileAccessProperties::new().with_memory_strategy(MemoryStrategy::Bounded),
-    )
-}
+use hdf5_pure::{File, FileBuilder, FileSpaceStrategy};
 
 use proptest::prelude::*;
 use tempfile::tempdir;
 use test_util_hdf5::dataset::Unlimited;
+use test_util_hdf5::session;
 
 /// The four file-space strategies, each mapped to the name the C library reports.
 fn strategy() -> impl Strategy<Value = FileSpaceStrategy> {
@@ -180,7 +171,7 @@ proptest! {
         // exclusive OS lock, which is mandatory on Windows) before the C open.
         let mut next = chunk_size as i32;
         {
-            let file = open_bounded(&path).unwrap();
+            let file = session::open_bounded(&path).unwrap();
             let mut ds = file.dataset("d").unwrap();
             for &count in &appends {
                 let chunk: Vec<i32> = (next..next + count as i32).collect();

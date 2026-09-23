@@ -13,6 +13,7 @@ use hdf5::Extent;
 use hdf5::dataset::ChunkOpts;
 use hdf5::filters::Filter as CFilter;
 use rstest::rstest;
+use test_util_hdf5::dataset;
 use test_util_hdf5::file;
 
 #[derive(Clone, Copy, Debug)]
@@ -70,24 +71,6 @@ fn read_c_creation_properties(path: &Path) -> (Vec<CFilter>, Option<ChunkOpts>) 
     (ds.filters(), ds.dcpl().unwrap().chunk_opts())
 }
 
-fn read_c(path: &Path) -> Vec<i32> {
-    hdf5::File::open(path)
-        .unwrap()
-        .dataset("d")
-        .unwrap()
-        .read_raw::<i32>()
-        .unwrap()
-}
-
-fn read_pure(path: &Path) -> Vec<i32> {
-    hdf5_pure::File::open(path)
-        .unwrap()
-        .dataset("d")
-        .unwrap()
-        .read_i32()
-        .unwrap()
-}
-
 #[rstest]
 #[case(Filter::Shuffle, &[10], &[4])]
 #[case(Filter::Deflate, &[10], &[4])]
@@ -120,8 +103,8 @@ fn a_dataset_exempting_its_partial_chunks_from_the_filters_reads_back(
             Some(ChunkOpts::DONT_FILTER_PARTIAL_CHUNKS)
         )
     );
-    assert_eq!(read_c(&path), data);
-    assert_eq!(read_pure(&path), data);
+    assert_eq!(dataset::read_libhdf5::<i32>(&path, "d"), data);
+    assert_eq!(dataset::read_pure::<i32>(&path, "d"), data);
 }
 
 const DEFLATE_LEVEL: u8 = 6;

@@ -9,3 +9,4 @@ pub mod file;
 pub mod lock;
 pub mod mat_file;
 pub mod paged;
+pub mod session;

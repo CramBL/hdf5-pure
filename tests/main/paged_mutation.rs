@@ -6,21 +6,9 @@
 use hdf5_pure::{
     Error, File, FileAccessProperties, FileBuilder, FileSpaceStrategy, MemoryStrategy,
 };
-
-/// Open with the bounded engine demanded rather than merely preferred: these
-/// tests are about that engine, so a file it stops accepting must fail here
-/// rather than quietly retarget the whole file at the mirror.
-fn open_bounded(path: &std::path::Path) -> Result<File, hdf5_pure::Error> {
-    File::open_rw_with_options(
-        path,
-        FileAccessProperties::new().with_memory_strategy(MemoryStrategy::Bounded),
-    )
-}
-
-const PAGE: u64 = 4096;
-
 use test_util::temp;
 use test_util_hdf5::dataset::Unlimited;
+use test_util_hdf5::session;
 
 /// Build a persisting paged file with an unlimited rank-1 chunked i32 dataset `d`
 /// seeded with `0..n`.
@@ -70,7 +58,7 @@ fn paged_persist_append_roundtrip() {
     build_paged(&path, 64, 64); // 1 chunk, ~one raw page
 
     {
-        let file = open_bounded(&path).unwrap();
+        let file = session::open_bounded(&path).unwrap();
         let mut ds = file.dataset("d").unwrap();
         let extra: Vec<i32> = (64..5000).collect(); // 77 more chunks -> EA index grows, new pages
         ds.append(&extra).unwrap();
@@ -98,7 +86,7 @@ fn paged_persist_many_appends_one_finalize() {
 
     let mut next = 100i32;
     {
-        let file = open_bounded(&path).unwrap();
+        let file = session::open_bounded(&path).unwrap();
         let mut ds = file.dataset("d").unwrap();
         for _ in 0..20 {
             let batch: Vec<i32> = (next..next + 250).collect();
@@ -125,7 +113,7 @@ fn paged_persist_large_append_multi_batch() {
     build_paged(&path, 256, 256);
 
     {
-        let file = open_bounded(&path).unwrap();
+        let file = session::open_bounded(&path).unwrap();
         let mut ds = file.dataset("d").unwrap();
         // ~1.5 MiB of raw i32 -> more than one internal 1 MiB batch.
         let extra: Vec<i32> = (256..400_000).collect();
@@ -179,7 +167,7 @@ fn paged_persist_drop_finalizes() {
     let path = temp::repo_temp_path("pure_paged_mut_drop.h5");
     build_paged(&path, 64, 64);
     {
-        let file = open_bounded(&path).unwrap();
+        let file = session::open_bounded(&path).unwrap();
         let mut ds = file.dataset("d").unwrap();
         ds.append(&(64..3000).collect::<Vec<i32>>()).unwrap();
         // Drop without close: the Drop guard runs finalize_persist best-effort.
@@ -261,7 +249,7 @@ fn paged_persist_noop_close_does_not_grow() {
     let path = temp::repo_temp_path("pure_paged_mut_noop.h5");
     build_paged(&path, 200, 50);
     let before = std::fs::metadata(&path).unwrap().len();
-    open_bounded(&path).unwrap().close().unwrap();
+    session::open_bounded(&path).unwrap().close().unwrap();
     assert_eq!(
         std::fs::metadata(&path).unwrap().len(),
         before,
@@ -269,3 +257,5 @@ fn paged_persist_noop_close_does_not_grow() {
     );
     assert_paged_ok(&path);
 }
+
+const PAGE: u64 = 4096;
