@@ -13,12 +13,10 @@
 use hdf5::{MajorErrorCode, MinorErrorCode};
 use hdf5_pure::{Error, File, FormatError};
 use tempfile::tempdir;
+use test_util::object_header::{MessageFlags, MessageType};
 
 use super::fixture;
-use super::fixture::{
-    ATTRIBUTE_NAME, ATTRIBUTE_VALUE, DATA, DATASET_NAME, FAIL_IF_UNKNOWN_ALWAYS,
-    UNKNOWN_MESSAGE_TYPE,
-};
+use super::fixture::{ATTRIBUTE_NAME, ATTRIBUTE_VALUE, DATA, DATASET_NAME};
 
 #[test]
 fn an_unknown_message_that_must_always_be_understood_is_rejected_as_the_c_library_rejects_it() {
@@ -47,7 +45,10 @@ fn an_unknown_message_that_must_always_be_understood_is_rejected_as_the_c_librar
     drop(pure);
 
     let mut bytes = std::fs::read(&path).unwrap();
-    fixture::retype_the_root_group_attribute_message_as_unknown(&mut bytes, FAIL_IF_UNKNOWN_ALWAYS);
+    fixture::retype_the_root_group_attribute_message_as_unknown(
+        &mut bytes,
+        MessageFlags::FAIL_IF_UNKNOWN_ALWAYS,
+    );
     std::fs::write(&path, &bytes).unwrap();
 
     let c_err = hdf5::File::open(&path).unwrap_err();
@@ -64,5 +65,5 @@ fn an_unknown_message_that_must_always_be_understood_is_rejected_as_the_c_librar
     let Error::Format(FormatError::UnsupportedMessage(id)) = &err else {
         panic!("expected UnsupportedMessage, got {err:?}");
     };
-    assert_eq!(*id, UNKNOWN_MESSAGE_TYPE);
+    assert_eq!(*id, MessageType::UNKNOWN.0);
 }
