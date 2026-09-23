@@ -9,6 +9,7 @@ use hdf5_pure::{
     make_f64_type,
 };
 use tempfile::tempdir;
+use test_util_hdf5::file;
 
 /// Read a MATLAB-style variable-length ASCII attribute from an `hdf5::Attribute`.
 /// Our serializer emits the same `H5T_VLEN { H5T_STRING { STRSIZE 1 } }` shape
@@ -575,10 +576,7 @@ fn crosscheck_read_paged_fixed_array_from_c_lib() {
     let n = 2500usize;
     let data: Vec<f64> = (0..n).map(|i| i as f64 * 0.25).collect();
     {
-        let file = hdf5::FileBuilder::new()
-            .with_fapl(|fapl| fapl.libver_v110())
-            .create(&path)
-            .unwrap();
+        let file = file::libhdf5_create_v110(&path);
         let ds = file
             .new_dataset::<f64>()
             .chunk([1])
@@ -613,10 +611,7 @@ fn crosscheck_read_paged_fixed_array_with_uninitialized_page() {
     let written = 1000usize; // entirely within page 0
     let head: Vec<f64> = (0..written).map(|i| (i + 1) as f64).collect();
     {
-        let file = hdf5::FileBuilder::new()
-            .with_fapl(|fapl| fapl.libver_v110())
-            .create(&path)
-            .unwrap();
+        let file = file::libhdf5_create_v110(&path);
         let ds = file
             .new_dataset::<f64>()
             .chunk([1])

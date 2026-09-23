@@ -15,6 +15,7 @@ use hdf5_pure::{
 };
 use tempfile::tempdir;
 use test_util::fractal_heap;
+use test_util_hdf5::file;
 
 /// Past the writer's eight-attribute compact threshold.
 const DENSE_COUNT: usize = 12;
@@ -644,16 +645,12 @@ fn an_attribute_name_past_its_length_field_is_refused_without_writing() {
 /// bounds are what give the objects the version 2 headers this engine edits.
 #[test]
 fn an_attribute_holding_an_object_reference_is_not_moved_to_a_heap() {
-    use hdf5::file::LibraryVersion;
     use hdf5::{ObjectReference, ObjectReference1};
 
     let dir = tempdir().unwrap();
     let p = dir.path().join("ref_attr.h5");
     {
-        let c = hdf5::File::with_options()
-            .with_fapl(|f| f.libver_bounds(LibraryVersion::V110, LibraryVersion::latest()))
-            .create(&p)
-            .unwrap();
+        let c = file::libhdf5_create_v110(&p);
         c.create_group("g").unwrap();
         let holder = c.new_dataset::<i32>().shape((1,)).create("d").unwrap();
         holder.write(&[0i32]).unwrap();
@@ -721,16 +718,12 @@ fn an_attribute_holding_an_object_reference_is_not_moved_to_a_heap() {
 /// the reference has to come back out of the rebuilt heap intact.
 #[test]
 fn an_already_dense_object_keeps_its_reference_attribute_through_a_rebuild() {
-    use hdf5::file::LibraryVersion;
     use hdf5::{ObjectReference, ObjectReference1, ReferencedObject};
 
     let dir = tempdir().unwrap();
     let p = dir.path().join("dense_ref_attr.h5");
     {
-        let c = hdf5::File::with_options()
-            .with_fapl(|f| f.libver_bounds(LibraryVersion::V110, LibraryVersion::latest()))
-            .create(&p)
-            .unwrap();
+        let c = file::libhdf5_create_v110(&p);
         c.create_group("g").unwrap();
         let holder = c.new_dataset::<i32>().shape((1,)).create("d").unwrap();
         holder.write(&[0i32]).unwrap();
@@ -791,17 +784,13 @@ fn an_already_dense_object_keeps_its_reference_attribute_through_a_rebuild() {
 /// cost the edit for no gain.
 #[test]
 fn a_variable_length_of_references_does_not_block_the_move_to_a_heap() {
-    use hdf5::file::LibraryVersion;
     use hdf5::types::VarLenArray;
     use hdf5::{ObjectReference, ObjectReference1, ReferencedObject};
 
     let dir = tempdir().unwrap();
     let p = dir.path().join("dimension_list.h5");
     {
-        let c = hdf5::File::with_options()
-            .with_fapl(|f| f.libver_bounds(LibraryVersion::V110, LibraryVersion::latest()))
-            .create(&p)
-            .unwrap();
+        let c = file::libhdf5_create_v110(&p);
         c.create_group("g").unwrap();
         let d = c.new_dataset::<i32>().shape((1,)).create("d").unwrap();
         d.write(&[0i32]).unwrap();

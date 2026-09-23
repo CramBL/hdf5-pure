@@ -13,10 +13,10 @@
 //! multiplier, so three of the four obvious fixtures pass over the bug.
 
 use hdf5::dataset::AllocTime;
-use hdf5::file::LibraryVersion;
 use hdf5_pure::{ChunkIndex, File, FileBuilder, MaxExtent};
 use tempfile::tempdir;
 use test_util::extensible_array;
+use test_util_hdf5::file;
 
 /// One swept combination: a label for the assertion messages, then the shape,
 /// the chunk dimensions and the maximum shape.
@@ -178,10 +178,7 @@ fn pure_write(path: &std::path::Path, shape: &[u64], chunks: &[u64], maxshape: &
 /// coordinates explicitly — so it exercises none of the positional numbering
 /// this file is about, and a read crosscheck against it passes no matter what.
 fn c_write(path: &std::path::Path, shape: &[u64], chunks: &[u64], maxshape: &[MaxExtent]) {
-    let file = hdf5::FileBuilder::new()
-        .with_fapl(|fp| fp.libver_bounds(LibraryVersion::V110, LibraryVersion::latest()))
-        .create(path)
-        .unwrap();
+    let file = file::libhdf5_create_v110(path);
     let ds = file
         .new_dataset::<u32>()
         .chunk(chunks.iter().map(|&d| d as usize).collect::<Vec<_>>())
@@ -207,10 +204,7 @@ fn c_write_early_allocated(
     chunks: &[u64],
     maxshape: &[MaxExtent],
 ) {
-    let file = hdf5::FileBuilder::new()
-        .with_fapl(|fp| fp.libver_bounds(LibraryVersion::V110, LibraryVersion::latest()))
-        .create(path)
-        .unwrap();
+    let file = file::libhdf5_create_v110(path);
     let ds = file
         .new_dataset::<u32>()
         .alloc_time(Some(AllocTime::Early))
@@ -572,10 +566,7 @@ fn a_grown_multidimensional_dataset_reads_back_through_both_libraries() {
     let path = dir.path().join("grown.h5");
 
     // Written by the C library, since this crate's own resize is rank-1 only.
-    let file = hdf5::FileBuilder::new()
-        .with_fapl(|fp| fp.libver_bounds(LibraryVersion::V110, LibraryVersion::latest()))
-        .create(&path)
-        .unwrap();
+    let file = file::libhdf5_create_v110(&path);
     let ds = file
         .new_dataset::<u32>()
         .chunk([2usize, 2])

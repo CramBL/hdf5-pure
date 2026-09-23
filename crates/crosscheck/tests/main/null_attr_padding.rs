@@ -4,6 +4,7 @@ use hdf5::Extents;
 
 use hdf5_pure::AttrValue;
 use hdf5_pure::File;
+use test_util_hdf5::file;
 
 #[test]
 fn a_null_dataspace_attribute_in_a_padded_header_record_reads_back_holding_nothing() {
@@ -11,10 +12,7 @@ fn a_null_dataspace_attribute_in_a_padded_header_record_reads_back_holding_nothi
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("null-earliest.h5");
     {
-        let file = hdf5::File::with_options()
-            .with_fapl(|p| p.libver_earliest())
-            .create(&path)
-            .unwrap();
+        let file = file::libhdf5_create_earliest(&path);
         file.new_attr::<i32>()
             .shape(Extents::Null)
             .create("empty")
