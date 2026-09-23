@@ -4,7 +4,7 @@ version = "0.47.0"
 edition = "2024"
 rust-version = "1.89"
 license = "MIT OR Apache-2.0"
-description = "Pure-Rust LZF filter codec and decoding utilities"
+description = "Pure-Rust HDF5 filter codecs and decoding utilities"
 repository = "https://github.com/CramBL/hdf5-pure"
 
 [features]

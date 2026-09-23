@@ -1,4 +1,4 @@
-//! HDF5 filter implementations: deflate, shuffle, fletcher32, scale-offset,
+//! HDF5 filter integration: deflate, shuffle, fletcher32, scale-offset,
 //! LZF, and ZFP (the last two behind their own modules).
 
 #[cfg(not(feature = "std"))]
@@ -264,11 +264,12 @@ pub fn decompress_chunk_with(
             )
             .map_err(FormatError::from)?,
             FILTER_FLETCHER32 => fletcher32_verify(input)?,
-            FILTER_SCALEOFFSET => crate::scaleoffset::decompress(
+            FILTER_SCALEOFFSET => h5_filter::decompress_scale_offset(
                 input,
-                filter,
+                &filter.client_data,
                 inner_output_cap(expected, pipeline, filter_mask, i),
-            )?,
+            )
+            .map_err(FormatError::from)?,
             #[cfg(feature = "zfp")]
             FILTER_ZFP => h5_filter::decompress_zfp_filter(
                 input,
@@ -328,7 +329,7 @@ fn filter_max_forward_output(filter_id: u16, in_size: usize) -> usize {
         FILTER_LZF => in_size.saturating_mul(2),
         // Scale-offset prepends a fixed header and, when the data does not pack
         // smaller, stores it verbatim after that header.
-        FILTER_SCALEOFFSET => in_size.saturating_add(crate::scaleoffset::HEADER_LEN),
+        FILTER_SCALEOFFSET => in_size.saturating_add(h5_filter::SCALE_OFFSET_HEADER_LEN),
         // Deflate can slightly expand incompressible input (zlib "stored" blocks
         // plus framing); bound it well above zlib's worst case.
         FILTER_DEFLATE => in_size.saturating_add(in_size / 16).saturating_add(64),
@@ -405,7 +406,7 @@ pub fn compress_chunk_with(
             }
             FILTER_LZF => h5_filter::compress_lzf(input),
             FILTER_FLETCHER32 => fletcher32_append(input)?,
-            FILTER_SCALEOFFSET => crate::scaleoffset::compress(input, filter)?,
+            FILTER_SCALEOFFSET => h5_filter::compress_scale_offset(input, &filter.client_data)?,
             #[cfg(feature = "zfp")]
             FILTER_ZFP => h5_filter::compress_zfp_filter(
                 input,

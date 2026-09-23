@@ -404,7 +404,7 @@ impl ChunkOptions {
                             ty,
                             element_size,
                             nelmts,
-                            fill_avail.with_value(fill)?,
+                            crate::scaleoffset::scale_offset_fill_with_value(fill_avail, fill)?,
                         )?,
                     }
                 }
