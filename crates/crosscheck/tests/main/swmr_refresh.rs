@@ -7,28 +7,9 @@
 //! the appended rows. The append crosses the direct-data-block -> super-block
 //! boundary, so the chunk index grows structurally between refreshes.
 
-use hdf5::Extent;
-use hdf5::file::LibraryVersion;
 use hdf5_pure::{Error, File};
 use tempfile::tempdir;
-
-/// Create a 1-D unlimited, chunked i32 dataset (latest format -> EA index) with
-/// `n` rows valued 0..n.
-fn c_create(path: &std::path::Path, n: usize) {
-    let file = hdf5::File::with_options()
-        .with_fapl(|p| p.libver_bounds(LibraryVersion::V110, LibraryVersion::latest()))
-        .create(path)
-        .unwrap();
-    let ds = file
-        .new_dataset::<i32>()
-        .chunk((1,))
-        .shape((Extent::resizable(n),))
-        .create("d")
-        .unwrap();
-    let data: Vec<i32> = (0..n as i32).collect();
-    ds.write(&data).unwrap();
-    file.close().unwrap();
-}
+use test_util_hdf5::dataset::Unlimited;
 
 /// Reopen `path` read-write and grow the dataset to `new_total` rows valued
 /// 0..new_total.
@@ -47,7 +28,7 @@ fn refresh_follows_external_appends() {
     let path = dir.path().join("swmr.h5");
 
     // Writer creates 100 rows (within the direct data blocks).
-    c_create(&path, 100);
+    Unlimited::new("d", &(0..100).collect::<Vec<i32>>(), 1).libhdf5_create(&path);
 
     // Reader opens for SWMR and sees the initial snapshot.
     let mut file = File::open_swmr(&path).unwrap();
@@ -92,7 +73,7 @@ fn refresh_follows_external_appends() {
 fn refresh_requires_open_swmr() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("plain.h5");
-    c_create(&path, 50);
+    Unlimited::new("d", &(0..50).collect::<Vec<i32>>(), 1).libhdf5_create(&path);
     let bytes = std::fs::read(&path).unwrap();
     let mut file = File::from_bytes(bytes).unwrap();
     assert!(matches!(file.refresh(), Err(Error::SwmrUnsupported)));

@@ -4,49 +4,12 @@
 //! reference C library. Appends cross the inline -> direct-block -> super-block
 //! boundaries so the in-place index growth is exercised.
 
-use hdf5::Extent;
 use hdf5::file::LibraryVersion;
-use hdf5_pure::{Error, File, FileBuilder, MaxExtent};
+use hdf5_pure::{Error, File, FileBuilder};
 use tempfile::tempdir;
 use test_util::bytes;
 use test_util::superblock;
-
-fn pure_create(path: &std::path::Path, n: usize) {
-    let data: Vec<i32> = (0..n as i32).collect();
-    let mut b = FileBuilder::new();
-    b.create_dataset("d")
-        .with_i32_data(&data)
-        .with_shape(&[n as u64])
-        .with_maxshape(&[MaxExtent::Unlimited])
-        .with_chunks(&[1]);
-    b.write(path).unwrap();
-}
-
-fn c_create(path: &std::path::Path, n: usize) {
-    let file = hdf5::File::with_options()
-        .with_fapl(|p| p.libver_bounds(LibraryVersion::V110, LibraryVersion::latest()))
-        .create(path)
-        .unwrap();
-    let ds = file
-        .new_dataset::<i32>()
-        .chunk((1,))
-        .shape((Extent::resizable(n),))
-        .create("d")
-        .unwrap();
-    let data: Vec<i32> = (0..n as i32).collect();
-    ds.write(&data).unwrap();
-    file.close().unwrap();
-}
-
-fn read_pure(path: &std::path::Path) -> Vec<i32> {
-    let f = File::from_bytes(std::fs::read(path).unwrap()).unwrap();
-    f.dataset("d").unwrap().read_i32().unwrap()
-}
-
-fn read_c(path: &std::path::Path) -> Vec<i32> {
-    let f = hdf5::File::open(path).unwrap();
-    f.dataset("d").unwrap().read_raw::<i32>().unwrap()
-}
+use test_util_hdf5::dataset::{self, Filter, Unlimited};
 
 /// Append to an hdf5-pure-created file, crossing every structural boundary, and
 /// confirm both hdf5-pure and the C library read the full result.
@@ -54,7 +17,7 @@ fn read_c(path: &std::path::Path) -> Vec<i32> {
 fn append_to_pure_file() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("d.h5");
-    pure_create(&path, 10);
+    Unlimited::new("d", &(0..10).collect::<Vec<i32>>(), 1).pure_create(&path);
 
     {
         let w = File::open_swmr_writer(&path).unwrap();
@@ -76,8 +39,16 @@ fn append_to_pure_file() {
     }
 
     let expected: Vec<i32> = (0..5000).collect();
-    assert_eq!(read_pure(&path), expected, "hdf5-pure read mismatch");
-    assert_eq!(read_c(&path), expected, "C-library read mismatch");
+    assert_eq!(
+        dataset::read_pure::<i32>(&path, "d"),
+        expected,
+        "hdf5-pure read mismatch"
+    );
+    assert_eq!(
+        dataset::read_libhdf5::<i32>(&path, "d"),
+        expected,
+        "C-library read mismatch"
+    );
 }
 
 /// Append to a C-library-created file and confirm both readers agree.
@@ -86,7 +57,7 @@ fn append_to_pure_file() {
 fn append_to_c_file() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("d.h5");
-    c_create(&path, 10);
+    Unlimited::new("d", &(0..10).collect::<Vec<i32>>(), 1).libhdf5_create(&path);
 
     {
         let w = File::open_swmr_writer(&path).unwrap();
@@ -97,8 +68,16 @@ fn append_to_c_file() {
     }
 
     let expected: Vec<i32> = (0..1000).collect();
-    assert_eq!(read_c(&path), expected, "C-library read mismatch");
-    assert_eq!(read_pure(&path), expected, "hdf5-pure read mismatch");
+    assert_eq!(
+        dataset::read_libhdf5::<i32>(&path, "d"),
+        expected,
+        "C-library read mismatch"
+    );
+    assert_eq!(
+        dataset::read_pure::<i32>(&path, "d"),
+        expected,
+        "hdf5-pure read mismatch"
+    );
 }
 
 /// End-to-end SWMR loop within hdf5-pure: a refreshing reader follows the
@@ -107,7 +86,7 @@ fn append_to_c_file() {
 fn refreshing_reader_follows_pure_appends() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("d.h5");
-    pure_create(&path, 10);
+    Unlimited::new("d", &(0..10).collect::<Vec<i32>>(), 1).pure_create(&path);
 
     let mut reader = File::open_swmr(&path).unwrap();
     assert_eq!(
@@ -151,13 +130,7 @@ fn append_crosses_paging_boundary() {
     let end = 135_000usize;
     {
         let data: Vec<i32> = (0..start as i32).collect();
-        let mut b = FileBuilder::new();
-        b.create_dataset("d")
-            .with_i32_data(&data)
-            .with_shape(&[start as u64])
-            .with_maxshape(&[MaxExtent::Unlimited])
-            .with_chunks(&[1]);
-        b.write(&path).unwrap();
+        Unlimited::new("d", &data, 1).pure_create(&path);
     }
     {
         let w = File::open_swmr_writer(&path).unwrap();
@@ -168,11 +141,15 @@ fn append_crosses_paging_boundary() {
     }
     let expected: Vec<i32> = (0..end as i32).collect();
     assert_eq!(
-        read_pure(&path),
+        dataset::read_pure::<i32>(&path, "d"),
         expected,
         "hdf5-pure read mismatch (paged)"
     );
-    assert_eq!(read_c(&path), expected, "C-library read mismatch (paged)");
+    assert_eq!(
+        dataset::read_libhdf5::<i32>(&path, "d"),
+        expected,
+        "C-library read mismatch (paged)"
+    );
 }
 
 /// A non-latest-format (v0/v1 superblock) file must be rejected with a clear
@@ -214,7 +191,10 @@ fn rejects_and_preserves_non_latest_format_file() {
 
     let after = std::fs::read(&path).unwrap();
     assert_eq!(before, after, "open() must not mutate a rejected file");
-    assert_eq!(read_c(&path), (0..5).collect::<Vec<i32>>());
+    assert_eq!(
+        dataset::read_libhdf5::<i32>(&path, "d"),
+        (0..5).collect::<Vec<i32>>()
+    );
 }
 
 /// f64 dataset append, just to exercise a non-4-byte element size.
@@ -224,13 +204,7 @@ fn append_f64_pure_file() {
     let path = dir.path().join("f.h5");
     {
         let data: Vec<f64> = (0..5).map(|i| i as f64).collect();
-        let mut b = FileBuilder::new();
-        b.create_dataset("d")
-            .with_f64_data(&data)
-            .with_shape(&[5])
-            .with_maxshape(&[MaxExtent::Unlimited])
-            .with_chunks(&[1]);
-        b.write(&path).unwrap();
+        Unlimited::new("d", &data, 1).pure_create(&path);
     }
     {
         let w = File::open_swmr_writer(&path).unwrap();
@@ -254,13 +228,7 @@ fn append_chunk_size_greater_than_one() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("chunk4.h5");
 
-    let mut b = FileBuilder::new();
-    b.create_dataset("d")
-        .with_i32_data(&(0..16).collect::<Vec<_>>())
-        .with_shape(&[16])
-        .with_maxshape(&[MaxExtent::Unlimited])
-        .with_chunks(&[4]);
-    b.write(&path).unwrap();
+    Unlimited::new("d", &(0..16).collect::<Vec<i32>>(), 4).pure_create(&path);
 
     {
         let w = File::open_swmr_writer(&path).unwrap();
@@ -287,11 +255,15 @@ fn append_chunk_size_greater_than_one() {
 
     let expected: Vec<i32> = (0..400).collect();
     assert_eq!(
-        read_pure(&path),
+        dataset::read_pure::<i32>(&path, "d"),
         expected,
         "hdf5-pure read mismatch (chunk=4)"
     );
-    assert_eq!(read_c(&path), expected, "C-library read mismatch (chunk=4)");
+    assert_eq!(
+        dataset::read_libhdf5::<i32>(&path, "d"),
+        expected,
+        "C-library read mismatch (chunk=4)"
+    );
 }
 
 /// Appending to one dataset must not disturb a sibling. No other test has more
@@ -305,26 +277,9 @@ fn append_to_one_of_multiple_datasets_leaves_others_intact() {
     let path = dir.path().join("multi.h5");
 
     let mut b = FileBuilder::new();
-    b.create_dataset("a")
-        .with_i32_data(&(0..10).collect::<Vec<_>>())
-        .with_shape(&[10])
-        .with_maxshape(&[MaxExtent::Unlimited])
-        .with_chunks(&[1]);
-    b.create_dataset("b")
-        .with_i32_data(&(100..110).collect::<Vec<_>>())
-        .with_shape(&[10])
-        .with_maxshape(&[MaxExtent::Unlimited])
-        .with_chunks(&[1]);
+    Unlimited::new("a", &(0..10).collect::<Vec<i32>>(), 1).add_to(&mut b);
+    Unlimited::new("b", &(100..110).collect::<Vec<i32>>(), 1).add_to(&mut b);
     b.write(&path).unwrap();
-
-    let read_pure_named = |name: &str| -> Vec<i32> {
-        let f = File::from_bytes(std::fs::read(&path).unwrap()).unwrap();
-        f.dataset(name).unwrap().read_i32().unwrap()
-    };
-    let read_c_named = |name: &str| -> Vec<i32> {
-        let f = hdf5::File::open(&path).unwrap();
-        f.dataset(name).unwrap().read_raw::<i32>().unwrap()
-    };
 
     // Append into "a", crossing into the super blocks; "b" must be untouched.
     {
@@ -334,14 +289,17 @@ fn append_to_one_of_multiple_datasets_leaves_others_intact() {
             .append(&(10..300).collect::<Vec<_>>())
             .unwrap();
     }
-    assert_eq!(read_pure_named("a"), (0..300).collect::<Vec<_>>());
     assert_eq!(
-        read_pure_named("b"),
+        dataset::read_pure::<i32>(&path, "a"),
+        (0..300).collect::<Vec<_>>()
+    );
+    assert_eq!(
+        dataset::read_pure::<i32>(&path, "b"),
         (100..110).collect::<Vec<_>>(),
         "sibling b changed (pure)"
     );
     assert_eq!(
-        read_c_named("b"),
+        dataset::read_libhdf5::<i32>(&path, "b"),
         (100..110).collect::<Vec<_>>(),
         "sibling b changed (C)"
     );
@@ -355,17 +313,23 @@ fn append_to_one_of_multiple_datasets_leaves_others_intact() {
             .unwrap();
     }
     assert_eq!(
-        read_pure_named("a"),
+        dataset::read_pure::<i32>(&path, "a"),
         (0..300).collect::<Vec<_>>(),
         "sibling a changed (pure)"
     );
-    assert_eq!(read_pure_named("b"), (100..400).collect::<Vec<_>>());
     assert_eq!(
-        read_c_named("a"),
+        dataset::read_pure::<i32>(&path, "b"),
+        (100..400).collect::<Vec<_>>()
+    );
+    assert_eq!(
+        dataset::read_libhdf5::<i32>(&path, "a"),
         (0..300).collect::<Vec<_>>(),
         "sibling a changed (C)"
     );
-    assert_eq!(read_c_named("b"), (100..400).collect::<Vec<_>>());
+    assert_eq!(
+        dataset::read_libhdf5::<i32>(&path, "b"),
+        (100..400).collect::<Vec<_>>()
+    );
 }
 
 /// Reopen a cleanly-closed file with a fresh writer and keep appending. Every
@@ -377,7 +341,7 @@ fn append_to_one_of_multiple_datasets_leaves_others_intact() {
 fn recover_and_reappend_after_clean_phase4() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("reopen.h5");
-    pure_create(&path, 10);
+    Unlimited::new("d", &(0..10).collect::<Vec<i32>>(), 1).pure_create(&path);
 
     // Writer 1: append across inline -> direct -> super, clean close.
     {
@@ -400,12 +364,12 @@ fn recover_and_reappend_after_clean_phase4() {
 
     let expected: Vec<i32> = (0..900).collect();
     assert_eq!(
-        read_pure(&path),
+        dataset::read_pure::<i32>(&path, "d"),
         expected,
         "hdf5-pure read mismatch after reopen"
     );
     assert_eq!(
-        read_c(&path),
+        dataset::read_libhdf5::<i32>(&path, "d"),
         expected,
         "C-library read mismatch after reopen"
     );
@@ -421,14 +385,9 @@ fn rejects_filtered_pure_dataset() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("filtered.h5");
     {
-        let mut b = FileBuilder::new();
-        b.create_dataset("d")
-            .with_i32_data(&(0..100).collect::<Vec<_>>())
-            .with_shape(&[100])
-            .with_maxshape(&[MaxExtent::Unlimited])
-            .with_chunks(&[10])
-            .with_deflate(4);
-        b.write(&path).unwrap();
+        Unlimited::new("d", &(0..100).collect::<Vec<i32>>(), 10)
+            .filters(&[Filter::Deflate(4)])
+            .pure_create(&path);
     }
 
     {
@@ -452,12 +411,12 @@ fn rejects_filtered_pure_dataset() {
 
     // The rejected append did not corrupt the compressed dataset.
     assert_eq!(
-        read_pure(&path),
+        dataset::read_pure::<i32>(&path, "d"),
         (0..100).collect::<Vec<_>>(),
         "pure read after rejected append"
     );
     assert_eq!(
-        read_c(&path),
+        dataset::read_libhdf5::<i32>(&path, "d"),
         (0..100).collect::<Vec<_>>(),
         "C read after rejected append"
     );
@@ -473,14 +432,10 @@ fn rejects_filtered_pure_dataset_with_a_partial_trailing_chunk() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("filtered_partial.h5");
     {
-        let mut b = FileBuilder::new();
-        b.create_dataset("d")
-            .with_i32_data(&(0..105).collect::<Vec<_>>())
-            .with_shape(&[105]) // 105 % 10 != 0: a partial trailing chunk
-            .with_maxshape(&[MaxExtent::Unlimited])
-            .with_chunks(&[10])
-            .with_deflate(4);
-        b.write(&path).unwrap();
+        // 105 % 10 != 0: a partial trailing chunk
+        Unlimited::new("d", &(0..105).collect::<Vec<i32>>(), 10)
+            .filters(&[Filter::Deflate(4)])
+            .pure_create(&path);
     }
 
     {
@@ -498,8 +453,14 @@ fn rejects_filtered_pure_dataset_with_a_partial_trailing_chunk() {
         }
     }
 
-    assert_eq!(read_pure(&path), (0..105).collect::<Vec<_>>());
-    assert_eq!(read_c(&path), (0..105).collect::<Vec<_>>());
+    assert_eq!(
+        dataset::read_pure::<i32>(&path, "d"),
+        (0..105).collect::<Vec<_>>()
+    );
+    assert_eq!(
+        dataset::read_libhdf5::<i32>(&path, "d"),
+        (0..105).collect::<Vec<_>>()
+    );
 
     // The same file, the same shape, through `File::open_rw`: accepted.
     {
@@ -509,6 +470,12 @@ fn rejects_filtered_pure_dataset_with_a_partial_trailing_chunk() {
             .append(&(105..115).collect::<Vec<_>>())
             .unwrap();
     }
-    assert_eq!(read_pure(&path), (0..115).collect::<Vec<_>>());
-    assert_eq!(read_c(&path), (0..115).collect::<Vec<_>>());
+    assert_eq!(
+        dataset::read_pure::<i32>(&path, "d"),
+        (0..115).collect::<Vec<_>>()
+    );
+    assert_eq!(
+        dataset::read_libhdf5::<i32>(&path, "d"),
+        (0..115).collect::<Vec<_>>()
+    );
 }

@@ -3,10 +3,11 @@
 //! mirror-only.
 
 use hdf5_pure::{
-    AttrValue, Error, File, FileAccessProperties, FileBuilder, FileSpaceStrategy, MaxExtent,
-    MemoryStrategy, MetadataCacheConfig, SyncPolicy,
+    AttrValue, Error, File, FileAccessProperties, FileBuilder, FileSpaceStrategy, MemoryStrategy,
+    MetadataCacheConfig, SyncPolicy,
 };
 use tempfile::tempdir;
+use test_util_hdf5::dataset::{self, Filter, Unlimited};
 
 /// Open with the bounded engine demanded rather than merely preferred.
 ///
@@ -28,37 +29,11 @@ fn open_bounded(path: &std::path::Path) -> Result<File, Error> {
     )
 }
 
-/// Build a rank-1 unlimited chunked i32 dataset `d` seeded with `0..n`, with
-/// optional deflate.
-fn build(path: &std::path::Path, n: i32, chunk: u64, deflate: bool) {
-    let data: Vec<i32> = (0..n).collect();
-    let mut b = FileBuilder::new();
-    let ds = b
-        .create_dataset("d")
-        .with_i32_data(&data)
-        .with_shape(&[n as u64])
-        .with_maxshape(&[MaxExtent::Unlimited])
-        .with_chunks(&[chunk]);
-    if deflate {
-        ds.with_deflate(6);
-    }
-    b.write(path).unwrap();
-}
-
-fn read_i32(path: &std::path::Path) -> Vec<i32> {
-    File::open(path)
-        .unwrap()
-        .dataset("d")
-        .unwrap()
-        .read_i32()
-        .unwrap()
-}
-
 #[test]
 fn append_and_read_through_one_handle() {
     let dir = tempdir().unwrap();
     let p = dir.path().join("a.h5");
-    build(&p, 6, 4, false);
+    Unlimited::new("d", &(0..6).collect::<Vec<i32>>(), 4).pure_create(&p);
     {
         let file = open_bounded(&p).unwrap();
         let mut ds = file.dataset("d").unwrap();
@@ -70,14 +45,17 @@ fn append_and_read_through_one_handle() {
         assert_eq!(ds.read_i32().unwrap(), (0..10).collect::<Vec<_>>());
     }
     // Scope the writer before re-opening: Windows file locks are mandatory.
-    assert_eq!(read_i32(&p), (0..10).collect::<Vec<_>>());
+    assert_eq!(
+        dataset::read_pure::<i32>(&p, "d"),
+        (0..10).collect::<Vec<_>>()
+    );
 }
 
 #[test]
 fn many_appends_across_calls_stay_o1() {
     let dir = tempdir().unwrap();
     let p = dir.path().join("many.h5");
-    build(&p, 0, 8, false);
+    Unlimited::<i32>::new("d", &[], 8).pure_create(&p);
     {
         let file = open_bounded(&p).unwrap();
         let mut ds = file.dataset("d").unwrap();
@@ -89,14 +67,17 @@ fn many_appends_across_calls_stay_o1() {
         }
         assert_eq!(ds.shape().unwrap(), vec![1000]);
     }
-    assert_eq!(read_i32(&p), (0..1000).collect::<Vec<_>>());
+    assert_eq!(
+        dataset::read_pure::<i32>(&p, "d"),
+        (0..1000).collect::<Vec<_>>()
+    );
 }
 
 #[test]
 fn refetched_handle_observes_appends() {
     let dir = tempdir().unwrap();
     let p = dir.path().join("refetch.h5");
-    build(&p, 4, 4, false);
+    Unlimited::new("d", &(0..4).collect::<Vec<i32>>(), 4).pure_create(&p);
     let file = open_bounded(&p).unwrap();
     let mut ds = file.dataset("d").unwrap();
     ds.append(&[4i32, 5, 6, 7]).unwrap();
@@ -109,7 +90,9 @@ fn refetched_handle_observes_appends() {
 fn filtered_appends_start_and_end_at_any_length() {
     let dir = tempdir().unwrap();
     let p = dir.path().join("filtered.h5");
-    build(&p, 8, 4, true);
+    Unlimited::new("d", &(0..8).collect::<Vec<i32>>(), 4)
+        .filters(&[Filter::Deflate(6)])
+        .pure_create(&p);
     {
         let file = open_bounded(&p).unwrap();
         let mut ds = file.dataset("d").unwrap();
@@ -125,14 +108,17 @@ fn filtered_appends_start_and_end_at_any_length() {
         ds.append(&[14i32, 15, 16]).unwrap();
         assert_eq!(ds.read_i32().unwrap(), (0..17).collect::<Vec<_>>());
     }
-    assert_eq!(read_i32(&p), (0..17).collect::<Vec<_>>());
+    assert_eq!(
+        dataset::read_pure::<i32>(&p, "d"),
+        (0..17).collect::<Vec<_>>()
+    );
 }
 
 #[test]
 fn large_append_batches_internally() {
     let dir = tempdir().unwrap();
     let p = dir.path().join("large.h5");
-    build(&p, 3, 256, false);
+    Unlimited::new("d", &(0..3).collect::<Vec<i32>>(), 256).pure_create(&p);
     // ~2.5 MiB of i32 in ONE call: far past the 1 MiB batch budget, unaligned
     // start (3), so the run exercises partial-tail fill + several whole-chunk
     // batches + a trailing remainder.
@@ -144,7 +130,7 @@ fn large_append_batches_internally() {
         ds.append(&batch).unwrap();
         assert_eq!(ds.shape().unwrap(), vec![total as u64]);
     }
-    let got = read_i32(&p);
+    let got = dataset::read_pure::<i32>(&p, "d");
     assert_eq!(got.len(), total as usize);
     assert!(got.iter().enumerate().all(|(i, &v)| v == i as i32));
 }
@@ -157,7 +143,7 @@ fn large_append_batches_internally() {
 fn staged_surface_works_on_a_bounded_file() {
     let dir = tempdir().unwrap();
     let p = dir.path().join("staged.h5");
-    build(&p, 4, 4, false);
+    Unlimited::new("d", &(0..4).collect::<Vec<i32>>(), 4).pure_create(&p);
     {
         let file = open_bounded(&p).unwrap();
         let mut ds = file.dataset("d").unwrap();
@@ -230,7 +216,7 @@ fn staged_surface_works_on_a_bounded_file() {
 fn close_seals_writes_but_not_reads() {
     let dir = tempdir().unwrap();
     let p = dir.path().join("close.h5");
-    build(&p, 4, 4, false);
+    Unlimited::new("d", &(0..4).collect::<Vec<i32>>(), 4).pure_create(&p);
     let file = open_bounded(&p).unwrap();
     let mut ds = file.dataset("d").unwrap();
     ds.append(&[4i32]).unwrap();
@@ -244,7 +230,7 @@ fn close_seals_writes_but_not_reads() {
 fn bounded_open_takes_the_exclusive_lock() {
     let dir = tempdir().unwrap();
     let p = dir.path().join("lock.h5");
-    build(&p, 4, 4, false);
+    Unlimited::new("d", &(0..4).collect::<Vec<i32>>(), 4).pure_create(&p);
     let bounded = open_bounded(&p).unwrap();
     let err = File::open_rw(&p).unwrap_err();
     assert!(matches!(err, Error::FileLocked(_)), "got: {err:?}");
@@ -258,11 +244,7 @@ fn userblock_file_is_refused_at_open() {
     let p = dir.path().join("userblock.h5");
     let mut b = FileBuilder::new();
     b.with_userblock(512);
-    b.create_dataset("d")
-        .with_i32_data(&[1, 2, 3])
-        .with_shape(&[3])
-        .with_maxshape(&[MaxExtent::Unlimited])
-        .with_chunks(&[2]);
+    Unlimited::new("d", &[1, 2, 3], 2).add_to(&mut b);
     b.write(&p).unwrap();
     let err = open_bounded(&p).unwrap_err();
     assert!(matches!(err, Error::EditUnsupported(_)), "got: {err:?}");
@@ -277,11 +259,7 @@ fn persisted_free_space_file_appends_and_finalizes() {
     let p = dir.path().join("persist.h5");
     let mut b = FileBuilder::new();
     b.with_file_space_strategy(FileSpaceStrategy::FsmAggr, true, 1);
-    b.create_dataset("d")
-        .with_i32_data(&(0..10).collect::<Vec<i32>>())
-        .with_shape(&[10])
-        .with_maxshape(&[MaxExtent::Unlimited])
-        .with_chunks(&[4]);
+    Unlimited::new("d", &(0..10).collect::<Vec<i32>>(), 4).add_to(&mut b);
     b.write(&p).unwrap();
 
     {
@@ -319,11 +297,7 @@ fn persisted_free_space_many_appends_one_finalize() {
     let p = dir.path().join("persist_many.h5");
     let mut b = FileBuilder::new();
     b.with_file_space_strategy(FileSpaceStrategy::FsmAggr, true, 3);
-    b.create_dataset("d")
-        .with_i32_data(&[0])
-        .with_shape(&[1])
-        .with_maxshape(&[MaxExtent::Unlimited])
-        .with_chunks(&[16]);
+    Unlimited::new("d", &[0], 16).add_to(&mut b);
     b.write(&p).unwrap();
 
     {
@@ -335,7 +309,10 @@ fn persisted_free_space_many_appends_one_finalize() {
         }
         file.close().unwrap();
     }
-    assert_eq!(read_i32(&p), (0..200).collect::<Vec<_>>());
+    assert_eq!(
+        dataset::read_pure::<i32>(&p, "d"),
+        (0..200).collect::<Vec<_>>()
+    );
 }
 
 /// A dropped bounded persisting session (no `close`, i.e. an unclean exit) still
@@ -348,11 +325,7 @@ fn persisted_free_space_drop_finalizes() {
     let p = dir.path().join("persist_drop.h5");
     let mut b = FileBuilder::new();
     b.with_file_space_strategy(FileSpaceStrategy::FsmAggr, true, 1);
-    b.create_dataset("d")
-        .with_i32_data(&(0..8).collect::<Vec<i32>>())
-        .with_shape(&[8])
-        .with_maxshape(&[MaxExtent::Unlimited])
-        .with_chunks(&[4]);
+    Unlimited::new("d", &(0..8).collect::<Vec<i32>>(), 4).add_to(&mut b);
     b.write(&p).unwrap();
 
     {
@@ -361,7 +334,10 @@ fn persisted_free_space_drop_finalizes() {
         ds.append(&(8..16).collect::<Vec<i32>>()).unwrap();
         // Drop without close: the Drop guard runs the finalize best-effort.
     }
-    assert_eq!(read_i32(&p), (0..16).collect::<Vec<_>>());
+    assert_eq!(
+        dataset::read_pure::<i32>(&p, "d"),
+        (0..16).collect::<Vec<_>>()
+    );
     // The dropped-without-close file is finalized: managers are canonical, so a
     // reopen recovers persisted free space, exactly as after an explicit close.
     let f = File::open(&p).unwrap();
@@ -380,11 +356,7 @@ fn persisted_free_space_noop_close_does_not_grow() {
     let p = dir.path().join("persist_noop.h5");
     let mut b = FileBuilder::new();
     b.with_file_space_strategy(FileSpaceStrategy::FsmAggr, true, 1);
-    b.create_dataset("d")
-        .with_i32_data(&(0..8).collect::<Vec<i32>>())
-        .with_shape(&[8])
-        .with_maxshape(&[MaxExtent::Unlimited])
-        .with_chunks(&[4]);
+    Unlimited::new("d", &(0..8).collect::<Vec<i32>>(), 4).add_to(&mut b);
     b.write(&p).unwrap();
     let before = std::fs::metadata(&p).unwrap().len();
 
@@ -413,11 +385,7 @@ fn paged_non_persist_is_refused_at_open() {
     let mut b = FileBuilder::new();
     b.with_file_space_strategy(FileSpaceStrategy::Page, false, 0)
         .with_file_space_page_size(4096);
-    b.create_dataset("d")
-        .with_i32_data(&[1, 2, 3])
-        .with_shape(&[3])
-        .with_maxshape(&[MaxExtent::Unlimited])
-        .with_chunks(&[2]);
+    Unlimited::new("d", &[1, 2, 3], 2).add_to(&mut b);
     b.write(&p).unwrap();
     let err = open_bounded(&p).unwrap_err();
     let Error::EditUnsupported(msg) = err else {
@@ -438,7 +406,7 @@ fn paged_non_persist_is_refused_at_open() {
 fn metadata_cache_stays_coherent_across_appends() {
     let dir = tempdir().unwrap();
     let p = dir.path().join("cache.h5");
-    build(&p, 4, 4, false);
+    Unlimited::new("d", &(0..4).collect::<Vec<i32>>(), 4).pure_create(&p);
     let properties = FileAccessProperties::new()
         .with_memory_strategy(MemoryStrategy::Bounded)
         .with_metadata_cache(MetadataCacheConfig::new(256 * 1024));
@@ -463,7 +431,7 @@ fn metadata_cache_stays_coherent_across_appends() {
 fn appends_report_the_cached_windows_they_invalidate() {
     let dir = tempdir().unwrap();
     let p = dir.path().join("mdc_invalidations.h5");
-    build(&p, 4, 4, false);
+    Unlimited::new("d", &(0..4).collect::<Vec<i32>>(), 4).pure_create(&p);
     let properties = FileAccessProperties::new()
         .with_memory_strategy(MemoryStrategy::Bounded)
         .with_sync_policy(SyncPolicy::OnClose)
@@ -494,7 +462,7 @@ fn appends_report_the_cached_windows_they_invalidate() {
 fn a_mirrored_session_reports_no_metadata_cache() {
     let dir = tempdir().unwrap();
     let p = dir.path().join("mdc_mirrored.h5");
-    build(&p, 4, 4, false);
+    Unlimited::new("d", &(0..4).collect::<Vec<i32>>(), 4).pure_create(&p);
     let file = File::open_rw_with_options(
         &p,
         FileAccessProperties::new()
@@ -515,11 +483,7 @@ fn reads_match_streaming_capabilities() {
     let dir = tempdir().unwrap();
     let p = dir.path().join("reads.h5");
     let mut b = FileBuilder::new();
-    b.create_dataset("d")
-        .with_i32_data(&[1, 2, 3])
-        .with_shape(&[3])
-        .with_maxshape(&[MaxExtent::Unlimited])
-        .with_chunks(&[2]);
+    Unlimited::new("d", &[1, 2, 3], 2).add_to(&mut b);
     let mut grp = b.create_group("grp");
     grp.create_dataset("nested")
         .with_f64_data(&[1.5, 2.5])
@@ -550,7 +514,9 @@ fn unaligned_filtered_multi_batch_append_lands_every_element() {
     // batching mistake shows up as lost or duplicated elements.
     let dir = tempdir().unwrap();
     let p = dir.path().join("atomic.h5");
-    build(&p, 257, 256, true); // one element past a chunk boundary
+    Unlimited::new("d", &(0..257).collect::<Vec<i32>>(), 256)
+        .filters(&[Filter::Deflate(6)])
+        .pure_create(&p); // one element past a chunk boundary
     const ADDED: i32 = 524_288; // ~2 MiB of i32, several batches
     {
         let file = open_bounded(&p).unwrap();
@@ -559,7 +525,10 @@ fn unaligned_filtered_multi_batch_append_lands_every_element() {
             .unwrap();
         assert_eq!(ds.shape().unwrap(), vec![(257 + ADDED) as u64]);
     }
-    assert_eq!(read_i32(&p), (0..257 + ADDED).collect::<Vec<_>>());
+    assert_eq!(
+        dataset::read_pure::<i32>(&p, "d"),
+        (0..257 + ADDED).collect::<Vec<_>>()
+    );
 
     // A raw append whose byte length is not a whole number of elements is
     // refused before any batch applies, so the file is untouched.
@@ -585,7 +554,7 @@ fn chunk_introspection_works_on_bounded_files() {
     // empty borrowed view.
     let dir = tempdir().unwrap();
     let p = dir.path().join("chunks.h5");
-    build(&p, 8, 4, false);
+    Unlimited::new("d", &(0..8).collect::<Vec<i32>>(), 4).pure_create(&p);
     let file = open_bounded(&p).unwrap();
     let mut ds = file.dataset("d").unwrap();
     let chunks = ds.chunks().unwrap();
@@ -606,7 +575,7 @@ fn chunk_introspection_works_on_bounded_files() {
 fn a_bounded_commit_truncates_when_the_freed_run_reaches_the_end() {
     let dir = tempdir().unwrap();
     let p = dir.path().join("truncate.h5");
-    build(&p, 4, 4, false);
+    Unlimited::new("d", &(0..4).collect::<Vec<i32>>(), 4).pure_create(&p);
 
     let (grown, shrunk) = {
         let file = open_bounded(&p).unwrap();
@@ -631,6 +600,9 @@ fn a_bounded_commit_truncates_when_the_freed_run_reaches_the_end() {
         "deleting the trailing dataset did not shrink the file: {grown} -> {shrunk}"
     );
     // The surviving dataset is intact, so the truncate cut slack rather than data.
-    assert_eq!(read_i32(&p), (0..4).collect::<Vec<_>>());
+    assert_eq!(
+        dataset::read_pure::<i32>(&p, "d"),
+        (0..4).collect::<Vec<_>>()
+    );
     assert!(File::open(&p).unwrap().dataset("big").is_err());
 }

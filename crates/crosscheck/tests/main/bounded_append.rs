@@ -7,9 +7,9 @@
 use hdf5::Extent;
 use hdf5::file::LibraryVersion;
 use hdf5::plist::file_create::FileSpaceStrategy as CStrategy;
-use hdf5_pure::{
-    File, FileAccessProperties, FileBuilder, FileSpaceStrategy, MaxExtent, MemoryStrategy,
-};
+use hdf5_pure::{File, FileAccessProperties, FileBuilder, FileSpaceStrategy, MemoryStrategy};
+use tempfile::tempdir;
+use test_util_hdf5::dataset::{self, Filter, Unlimited};
 
 /// Open with the bounded engine demanded rather than merely preferred: these
 /// tests are about that engine, so a file it stops accepting must fail here
@@ -21,63 +21,12 @@ fn open_bounded(path: &std::path::Path) -> Result<File, hdf5_pure::Error> {
     )
 }
 
-use tempfile::tempdir;
-
-/// Create a rank-1 unlimited (Extensible-Array indexed) i32 dataset `name` with the
-/// C library under the latest format, seeded with `0..n`, chunk length `chunk`.
-fn c_create_unlimited(path: &std::path::Path, name: &str, n: i32, chunk: usize) {
-    let file = hdf5::File::with_options()
-        .with_fapl(|p| p.libver_bounds(LibraryVersion::V110, LibraryVersion::latest()))
-        .create(path)
-        .unwrap();
-    let ds = file
-        .new_dataset::<i32>()
-        .chunk((chunk,))
-        .shape((Extent::resizable(n as usize),))
-        .create(name)
-        .unwrap();
-    ds.write(&(0..n).collect::<Vec<_>>()).unwrap();
-    file.close().unwrap();
-}
-
-fn read_c(path: &std::path::Path, name: &str) -> Vec<i32> {
-    let f = hdf5::File::open(path).unwrap();
-    let v = f.dataset(name).unwrap().read_raw::<i32>().unwrap();
-    f.close().unwrap();
-    v
-}
-
-fn read_pure(path: &std::path::Path, name: &str) -> Vec<i32> {
-    File::open(path)
-        .unwrap()
-        .dataset(name)
-        .unwrap()
-        .read_i32()
-        .unwrap()
-}
-
-/// Create a rank-1 unlimited chunked i32 dataset with this crate's writer.
-fn pure_create(path: &std::path::Path, n: i32, chunk: u64, deflate: bool) {
-    let data: Vec<i32> = (0..n).collect();
-    let mut b = FileBuilder::new();
-    let ds = b
-        .create_dataset("d")
-        .with_i32_data(&data)
-        .with_shape(&[n as u64])
-        .with_maxshape(&[MaxExtent::Unlimited])
-        .with_chunks(&[chunk]);
-    if deflate {
-        ds.with_deflate(6);
-    }
-    b.write(path).unwrap();
-}
-
 #[test]
 #[cfg(target_endian = "little")]
 fn bounded_append_to_c_dataset_both_read() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("c.h5");
-    c_create_unlimited(&path, "d", 8, 4);
+    Unlimited::new("d", &(0..8).collect::<Vec<i32>>(), 4).libhdf5_create(&path);
 
     {
         let file = open_bounded(&path).unwrap();
@@ -87,15 +36,17 @@ fn bounded_append_to_c_dataset_both_read() {
     }
 
     let expected: Vec<i32> = (0..14).collect();
-    assert_eq!(read_pure(&path, "d"), expected);
-    assert_eq!(read_c(&path, "d"), expected);
+    assert_eq!(dataset::read_pure::<i32>(&path, "d"), expected);
+    assert_eq!(dataset::read_libhdf5::<i32>(&path, "d"), expected);
 }
 
 #[test]
 fn bounded_filtered_append_reads_back_in_c() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("filtered.h5");
-    pure_create(&path, 8, 4, true);
+    Unlimited::new("d", &(0..8).collect::<Vec<i32>>(), 4)
+        .filters(&[Filter::Deflate(6)])
+        .pure_create(&path);
 
     {
         let file = open_bounded(&path).unwrap();
@@ -105,15 +56,15 @@ fn bounded_filtered_append_reads_back_in_c() {
     }
 
     let expected: Vec<i32> = (0..16).collect();
-    assert_eq!(read_pure(&path, "d"), expected);
-    assert_eq!(read_c(&path, "d"), expected);
+    assert_eq!(dataset::read_pure::<i32>(&path, "d"), expected);
+    assert_eq!(dataset::read_libhdf5::<i32>(&path, "d"), expected);
 }
 
 #[test]
 fn bounded_batched_large_append_reads_back_in_c() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("large.h5");
-    pure_create(&path, 3, 256, false);
+    Unlimited::new("d", &(0..3).collect::<Vec<i32>>(), 256).pure_create(&path);
 
     // One call far past the internal 1 MiB batch budget, from an unaligned
     // start, so the C library reads back a file grown through several
@@ -125,10 +76,10 @@ fn bounded_batched_large_append_reads_back_in_c() {
         ds.append(&(3..total).collect::<Vec<i32>>()).unwrap();
     }
 
-    let got = read_c(&path, "d");
+    let got = dataset::read_libhdf5::<i32>(&path, "d");
     assert_eq!(got.len(), total as usize);
     assert!(got.iter().enumerate().all(|(i, &v)| v == i as i32));
-    assert_eq!(read_pure(&path, "d").len(), total as usize);
+    assert_eq!(dataset::read_pure::<i32>(&path, "d").len(), total as usize);
 }
 
 /// A persisting file (this crate's writer, `persist = true`, non-paged) grown
@@ -142,11 +93,7 @@ fn bounded_persist_finalize_reads_back_in_c() {
 
     let mut b = FileBuilder::new();
     b.with_file_space_strategy(FileSpaceStrategy::FsmAggr, true, 1);
-    b.create_dataset("d")
-        .with_i32_data(&(0..10).collect::<Vec<i32>>())
-        .with_shape(&[10])
-        .with_maxshape(&[MaxExtent::Unlimited])
-        .with_chunks(&[4]);
+    Unlimited::new("d", &(0..10).collect::<Vec<i32>>(), 4).add_to(&mut b);
     b.write(&path).unwrap();
 
     {
@@ -157,7 +104,7 @@ fn bounded_persist_finalize_reads_back_in_c() {
     }
 
     let expected: Vec<i32> = (0..30).collect();
-    assert_eq!(read_pure(&path, "d"), expected);
+    assert_eq!(dataset::read_pure::<i32>(&path, "d"), expected);
 
     // The C library reads the data, recovers the persisting strategy, and its
     // free-space query parses the managers the finalize wrote.
@@ -221,8 +168,8 @@ fn bounded_persist_on_c_created_file_reads_back() {
     }
 
     let expected: Vec<i32> = (0..20).collect();
-    assert_eq!(read_pure(&path, "d"), expected);
-    assert_eq!(read_c(&path, "d"), expected);
+    assert_eq!(dataset::read_pure::<i32>(&path, "d"), expected);
+    assert_eq!(dataset::read_libhdf5::<i32>(&path, "d"), expected);
 }
 
 /// Variable-length string reads route through the file source; on read-write
@@ -280,7 +227,10 @@ fn vlen_strings_read_on_bounded_and_mirror_files() {
             expected
         );
     }
-    assert_eq!(read_c(&path, "samples"), (0..6).collect::<Vec<_>>());
+    assert_eq!(
+        dataset::read_libhdf5::<i32>(&path, "samples"),
+        (0..6).collect::<Vec<_>>()
+    );
 }
 
 /// A staged commit through the bounded backend produces a file the reference C
@@ -294,7 +244,7 @@ fn vlen_strings_read_on_bounded_and_mirror_files() {
 fn bounded_staged_commit_reads_back_in_c() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("staged_c.h5");
-    c_create_unlimited(&path, "d", 8, 4);
+    Unlimited::new("d", &(0..8).collect::<Vec<i32>>(), 4).libhdf5_create(&path);
 
     {
         let file = open_bounded(&path).unwrap();
@@ -314,9 +264,18 @@ fn bounded_staged_commit_reads_back_in_c() {
         file.close().unwrap();
     }
 
-    assert_eq!(read_pure(&path, "d"), (100..108).collect::<Vec<i32>>());
-    assert_eq!(read_c(&path, "d"), (100..108).collect::<Vec<i32>>());
-    assert_eq!(read_c(&path, "g/fresh"), vec![1, 2, 3]);
+    assert_eq!(
+        dataset::read_pure::<i32>(&path, "d"),
+        (100..108).collect::<Vec<i32>>()
+    );
+    assert_eq!(
+        dataset::read_libhdf5::<i32>(&path, "d"),
+        (100..108).collect::<Vec<i32>>()
+    );
+    assert_eq!(
+        dataset::read_libhdf5::<i32>(&path, "g/fresh"),
+        vec![1, 2, 3]
+    );
 
     // This crate writes a fixed-length string attribute, so read it as one.
     let f = hdf5::File::open(&path).unwrap();
@@ -347,11 +306,7 @@ fn mirror_inplace_append_to_a_persisting_file_reads_back_in_c() {
 
     let mut b = FileBuilder::new();
     b.with_file_space_strategy(FileSpaceStrategy::FsmAggr, true, 1);
-    b.create_dataset("d")
-        .with_i32_data(&(0..8).collect::<Vec<i32>>())
-        .with_shape(&[8])
-        .with_maxshape(&[MaxExtent::Unlimited])
-        .with_chunks(&[4]);
+    Unlimited::new("d", &(0..8).collect::<Vec<i32>>(), 4).add_to(&mut b);
     b.write(&path).unwrap();
 
     {
@@ -362,8 +317,8 @@ fn mirror_inplace_append_to_a_persisting_file_reads_back_in_c() {
     }
 
     let expected: Vec<i32> = (0..40).collect();
-    assert_eq!(read_pure(&path, "d"), expected);
-    assert_eq!(read_c(&path, "d"), expected);
+    assert_eq!(dataset::read_pure::<i32>(&path, "d"), expected);
+    assert_eq!(dataset::read_libhdf5::<i32>(&path, "d"), expected);
 
     let f = hdf5::File::open(&path).unwrap();
     // The C-library guard above serializes every C call in this suite.
@@ -387,11 +342,7 @@ fn mirror_inplace_append_to_a_paged_file_stays_page_aligned() {
     let mut b = FileBuilder::new();
     b.with_file_space_strategy(FileSpaceStrategy::Page, true, 0)
         .with_file_space_page_size(4096);
-    b.create_dataset("d")
-        .with_i32_data(&(0..64).collect::<Vec<i32>>())
-        .with_shape(&[64])
-        .with_maxshape(&[MaxExtent::Unlimited])
-        .with_chunks(&[64]);
+    Unlimited::new("d", &(0..64).collect::<Vec<i32>>(), 64).add_to(&mut b);
     b.write(&path).unwrap();
 
     {
@@ -407,8 +358,8 @@ fn mirror_inplace_append_to_a_paged_file_stays_page_aligned() {
         "a closed paged file must end on a page boundary"
     );
     let expected: Vec<i32> = (0..2000).collect();
-    assert_eq!(read_pure(&path, "d"), expected);
-    assert_eq!(read_c(&path, "d"), expected);
+    assert_eq!(dataset::read_pure::<i32>(&path, "d"), expected);
+    assert_eq!(dataset::read_libhdf5::<i32>(&path, "d"), expected);
 
     let f = hdf5::File::open(&path).unwrap();
     // The C-library guard above serializes every C call in this suite.
