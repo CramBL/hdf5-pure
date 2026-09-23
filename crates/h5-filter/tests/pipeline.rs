@@ -1,10 +1,15 @@
 use core::num::NonZeroU32;
 
-use h5_filter::{ChunkContext, FilterScratch, FilterStep, H5Z_FLAG_OPTIONAL};
+use h5_filter::{
+    ChunkContext, FilterScratch, FilterStep, H5Z_FLAG_OPTIONAL, ScaleOffset, ScaleOffsetByteOrder,
+    ScaleOffsetFill, ScaleOffsetType,
+};
+use rstest::rstest;
 
 struct Step {
     id: u16,
     flags: u16,
+    data: Vec<u32>,
 }
 
 impl FilterStep for Step {
@@ -17,7 +22,7 @@ impl FilterStep for Step {
     }
 
     fn client_data(&self) -> &[u32] {
-        &[]
+        &self.data
     }
 }
 
@@ -27,10 +32,12 @@ fn exported_pipeline_encodes_known_bytes_and_decodes_a_partial_mask() {
         Step {
             id: h5_filter::FILTER_SHUFFLE,
             flags: 0,
+            data: Vec::new(),
         },
         Step {
             id: h5_filter::FILTER_FLETCHER32,
             flags: H5Z_FLAG_OPTIONAL,
+            data: Vec::new(),
         },
     ];
     assert!(steps[1].optional());
@@ -52,4 +59,98 @@ fn exported_pipeline_encodes_known_bytes_and_decodes_a_partial_mask() {
         h5_filter::decompress_chunk(&encoded[..4], &steps, ctx, 1 << 1).unwrap(),
         data
     );
+}
+
+#[rstest]
+#[case(&[h5_filter::FILTER_DEFLATE, h5_filter::FILTER_FLETCHER32], h5_filter::FILTER_SHUFFLE, 0)]
+#[case(&[h5_filter::FILTER_SHUFFLE, h5_filter::FILTER_FLETCHER32], h5_filter::FILTER_DEFLATE, 1)]
+#[case(&[h5_filter::FILTER_SHUFFLE, h5_filter::FILTER_DEFLATE], h5_filter::FILTER_FLETCHER32, 2)]
+#[case(&[h5_filter::FILTER_FLETCHER32, h5_filter::FILTER_DEFLATE], h5_filter::FILTER_SHUFFLE, 0)]
+fn canonical_position_keeps_existing_pipeline_order(
+    #[case] existing: &[u16],
+    #[case] added: u16,
+    #[case] position: usize,
+) {
+    assert_eq!(
+        h5_filter::canonical_filter_position(existing.iter().copied(), added),
+        position
+    );
+}
+
+#[rstest]
+#[case(&[h5_filter::FILTER_LZF, h5_filter::FILTER_DEFLATE], Some(("lzf", "deflate")))]
+#[case(&[h5_filter::FILTER_DEFLATE, h5_filter::FILTER_LZF], Some(("lzf", "deflate")))]
+#[case(&[h5_filter::FILTER_SCALEOFFSET, h5_filter::FILTER_SHUFFLE], Some(("shuffle", "scale-offset")))]
+#[case(&[h5_filter::FILTER_SHUFFLE, h5_filter::FILTER_SCALEOFFSET], Some(("shuffle", "scale-offset")))]
+#[case(&[h5_filter::FILTER_SHUFFLE, h5_filter::FILTER_FLETCHER32], None)]
+fn conflicts_are_independent_of_filter_order(
+    #[case] filters: &[u16],
+    #[case] expected: Option<(&str, &str)>,
+) {
+    assert_eq!(
+        h5_filter::first_filter_conflict(filters.iter().copied()),
+        expected
+    );
+}
+
+#[cfg(feature = "zfp")]
+#[test]
+fn zfp_conflict_precedes_other_conflicts() {
+    assert_eq!(
+        h5_filter::first_filter_conflict(
+            [
+                h5_filter::FILTER_LZF,
+                h5_filter::FILTER_DEFLATE,
+                h5_filter::FILTER_ZFP,
+                h5_filter::FILTER_SHUFFLE,
+            ]
+            .into_iter(),
+        ),
+        Some(("shuffle", "ZFP"))
+    );
+}
+
+#[test]
+fn edit_classification_distinguishes_lossless_scale_offset() {
+    let scalar = ScaleOffsetType::integer(false, ScaleOffsetByteOrder::LittleEndian);
+    let integer = h5_filter::build_scale_offset_cd_values(
+        ScaleOffset::Integer(0),
+        scalar,
+        1,
+        4,
+        ScaleOffsetFill::Undefined,
+    )
+    .unwrap();
+    let integer_pipeline = [Step {
+        id: h5_filter::FILTER_SCALEOFFSET,
+        flags: 0,
+        data: integer,
+    }];
+    assert!(h5_filter::filters_reencodable(&integer_pipeline));
+    assert!(h5_filter::filters_lossless(&integer_pipeline));
+
+    let scalar = ScaleOffsetType::floating(ScaleOffsetByteOrder::LittleEndian);
+    let float = h5_filter::build_scale_offset_cd_values(
+        ScaleOffset::FloatDScale(2),
+        scalar,
+        4,
+        4,
+        ScaleOffsetFill::Undefined,
+    )
+    .unwrap();
+    let float_pipeline = [Step {
+        id: h5_filter::FILTER_SCALEOFFSET,
+        flags: 0,
+        data: float,
+    }];
+    assert!(h5_filter::filters_reencodable(&float_pipeline));
+    assert!(!h5_filter::filters_lossless(&float_pipeline));
+
+    let unknown_pipeline = [Step {
+        id: u16::MAX,
+        flags: 0,
+        data: Vec::new(),
+    }];
+    assert!(!h5_filter::filters_reencodable(&unknown_pipeline));
+    assert!(!h5_filter::filters_lossless(&unknown_pipeline));
 }

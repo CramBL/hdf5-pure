@@ -2,6 +2,8 @@
 //!
 //! Shuffle, Fletcher32, LZF, Scale-Offset, and the optional ZFP codec work with `alloc`.
 //! Deflate requires the `deflate` feature and `std`.
+//! Pipeline ordering, conflict detection, and re-encoding classification use filter identifiers
+//! and parameters supplied by the caller.
 
 #![cfg_attr(not(feature = "std"), no_std)]
 #![allow(rustdoc::missing_crate_level_docs)]
@@ -33,8 +35,9 @@ pub use zfp::{
 pub use pipeline::FILTER_ZFP;
 pub use pipeline::{
     ChunkContext, FILTER_DEFLATE, FILTER_FLETCHER32, FILTER_LZF, FILTER_SCALEOFFSET,
-    FILTER_SHUFFLE, FilterScratch, FilterStep, H5Z_FLAG_OPTIONAL, compress_chunk_with,
-    decompress_chunk, decompress_chunk_with,
+    FILTER_SHUFFLE, FilterScratch, FilterStep, H5Z_FLAG_OPTIONAL, canonical_filter_position,
+    compress_chunk_with, decompress_chunk, decompress_chunk_with, filters_lossless,
+    filters_reencodable, first_filter_conflict,
 };
 
 pub use lzf::{

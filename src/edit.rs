@@ -285,10 +285,7 @@ use crate::file_writer::{
     DenseAttrCreationOrder, LENGTH_SIZE, OFFSET_SIZE, build_chunked_dataset_oh, build_dataset_oh,
     make_link,
 };
-use crate::filter_pipeline::{
-    FILTER_DEFLATE, FILTER_FLETCHER32, FILTER_LZF, FILTER_SCALEOFFSET, FILTER_SHUFFLE,
-    FilterPipeline,
-};
+use crate::filter_pipeline::FilterPipeline;
 use crate::filters::{ChunkContext, FilterScratch, compress_chunk_with, decompress_chunk};
 use crate::free_space::{FreeList, trailing_run_start};
 use crate::free_space_manager::{
@@ -12065,51 +12062,19 @@ fn flatten_dataset(db: DatasetBuilder, name: LinkNameBuf) -> Result<FlatDataset,
 /// 6). See [`ensure_group_info`] for why every group needs this message.
 const GROUP_INFO_BODY: [u8; 2] = [0, 0];
 
-/// Whether every filter in `pipeline` is one this crate can *apply* (re-encode a
-/// chunk through) — not merely decode. A pipeline with any other filter cannot be
-/// re-encoded for an in-place overwrite, so the caller refuses with a typed error
-/// rather than letting `compress_chunk` surface a raw `UnsupportedFilter`.
+/// Returns whether every filter in `pipeline` has a known encoder.
+///
+/// An in-place overwrite checks this classification before writing chunk data.
 pub(crate) fn pipeline_reencodable(pipeline: &FilterPipeline) -> bool {
-    pipeline.filters.iter().all(|f| match f.filter_id {
-        FILTER_DEFLATE | FILTER_SHUFFLE | FILTER_FLETCHER32 | FILTER_SCALEOFFSET | FILTER_LZF => {
-            true
-        }
-        #[cfg(feature = "zfp")]
-        crate::filter_pipeline::FILTER_ZFP => true,
-        _ => false,
-    })
+    h5_filter::filters_reencodable(&pipeline.filters)
 }
 
-/// Whether re-encoding a chunk through `pipeline` reproduces the values it was
-/// decoded from — the condition for rewriting a chunk that is **already
-/// committed**, as growing a partial trailing chunk does.
+/// Returns whether the pipeline's filters guarantee preservation of element values.
 ///
-/// Stricter than [`pipeline_reencodable`], and for a different question. That
-/// one asks whether this crate can *apply* the filters at all, which is what a
-/// brand-new chunk needs. This one asks whether decode-then-encode is the
-/// identity, which is what a chunk somebody has already read needs. Deflate,
-/// shuffle, fletcher32 and LZF are lossless by construction; scale-offset only
-/// in its integer mode; ZFP fixed-rate quantizes every block to a bit budget, so
-/// re-encoding it against a *different* set of neighbours in the same block
-/// re-quantizes the values that were already there.
-///
-/// This is the line [`repack`](crate::repack())'s `check_pipeline` already draws
-/// for its two re-encoding paths, stated once more here because the append
-/// engine reaches it by a different route.
+/// Appending to a partial trailing chunk decodes committed values before writing
+/// the expanded chunk. Lossy filters may change those values through this operation.
 pub(crate) fn pipeline_lossless(pipeline: &FilterPipeline) -> bool {
-    pipeline.filters.iter().all(|f| match f.filter_id {
-        FILTER_DEFLATE | FILTER_SHUFFLE | FILTER_FLETCHER32 | FILTER_LZF => true,
-        // The integer mode subtracts a per-chunk minimum and packs the residuals
-        // whole; float D-scale rounds to a decimal count and is documented lossy.
-        // Anything else (float E-scale) this crate neither writes nor decodes.
-        FILTER_SCALEOFFSET => matches!(
-            crate::scaleoffset::scale_offset_mode(&f.client_data),
-            Some((crate::scaleoffset::ScaleOffset::Integer(_), _))
-        ),
-        // Unknown ids included: a filter whose semantics are unknown is not one
-        // to assume round-trips.
-        _ => false,
-    })
+    h5_filter::filters_lossless(&pipeline.filters)
 }
 
 /// The refusal both append paths raise for a lossy pipeline sitting on a partial

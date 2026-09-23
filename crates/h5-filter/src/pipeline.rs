@@ -5,9 +5,9 @@ use alloc::vec::Vec;
 use core::num::NonZeroU32;
 
 use crate::Error;
-use crate::ScaleOffsetType;
 #[cfg(feature = "zfp")]
 use crate::ZfpElementType;
+use crate::{ScaleOffset, ScaleOffsetType};
 
 /// Supplies the identifier, flags, and parameters for one pipeline filter.
 ///
@@ -26,6 +26,162 @@ pub trait FilterStep {
     /// Returns whether this filter is marked optional for output.
     fn optional(&self) -> bool {
         self.flags() & H5Z_FLAG_OPTIONAL != 0
+    }
+}
+
+/// Returns the insertion index for a filter in the writer's canonical order.
+///
+/// Known filters rank ZFP when enabled, Scale-Offset, Shuffle, LZF, Deflate, then Fletcher32.
+/// Unknown identifiers share the last rank. The input identifiers must already follow this order,
+/// and a filter with the same rank stays before the new filter.
+///
+/// # Examples
+///
+/// ```
+/// use h5_filter::FILTER_DEFLATE;
+/// use h5_filter::FILTER_FLETCHER32;
+/// use h5_filter::FILTER_SHUFFLE;
+///
+/// let ids = [FILTER_SHUFFLE, FILTER_FLETCHER32];
+/// let index = h5_filter::canonical_filter_position(ids.into_iter(), FILTER_DEFLATE);
+/// assert_eq!(index, 1);
+/// ```
+pub fn canonical_filter_position(ids: impl Iterator<Item = u16>, id: u16) -> usize {
+    let rank = canonical_rank(id);
+    ids.take_while(|&existing| canonical_rank(existing) <= rank)
+        .count()
+}
+
+/// Returns the first incompatible pair of filters, independent of input order.
+///
+/// The names in the pair are suitable for an error message. ZFP conflicts take precedence when
+/// ZFP support is enabled, followed by scale-offset with shuffle and LZF with Deflate.
+///
+/// # Examples
+///
+/// ```
+/// use h5_filter::FILTER_DEFLATE;
+/// use h5_filter::FILTER_LZF;
+///
+/// let ids = [FILTER_DEFLATE, FILTER_LZF];
+/// assert_eq!(
+///     h5_filter::first_filter_conflict(ids.into_iter()),
+///     Some(("lzf", "deflate")),
+/// );
+/// ```
+pub fn first_filter_conflict(
+    ids: impl Iterator<Item = u16>,
+) -> Option<(&'static str, &'static str)> {
+    let ids: Vec<u16> = ids.collect();
+    let has = |id| ids.contains(&id);
+
+    #[cfg(feature = "zfp")]
+    if has(FILTER_ZFP) {
+        for (id, name) in [
+            (FILTER_SCALEOFFSET, "scale-offset"),
+            (FILTER_SHUFFLE, "shuffle"),
+            (FILTER_LZF, "lzf"),
+            (FILTER_DEFLATE, "deflate"),
+        ] {
+            if has(id) {
+                return Some((name, "ZFP"));
+            }
+        }
+    }
+    if has(FILTER_SCALEOFFSET) && has(FILTER_SHUFFLE) {
+        return Some(("shuffle", "scale-offset"));
+    }
+    if has(FILTER_LZF) && has(FILTER_DEFLATE) {
+        return Some(("lzf", "deflate"));
+    }
+    None
+}
+
+/// Returns whether every filter identifier is supported for re-encoding.
+///
+/// This classification does not check whether an optional codec feature is enabled or whether
+/// the filter parameters are valid. An empty pipeline qualifies.
+///
+/// # Examples
+///
+/// ```
+/// use h5_filter::FILTER_SHUFFLE;
+/// use h5_filter::FilterStep;
+///
+/// struct Step(u16);
+/// impl FilterStep for Step {
+///     fn id(&self) -> u16 { self.0 }
+///     fn flags(&self) -> u16 { 0 }
+///     fn client_data(&self) -> &[u32] { &[] }
+/// }
+///
+/// assert!(h5_filter::filters_reencodable(&[Step(FILTER_SHUFFLE)]));
+/// assert!(!h5_filter::filters_reencodable(&[Step(u16::MAX)]));
+/// ```
+pub fn filters_reencodable(filters: &[impl FilterStep]) -> bool {
+    filters.iter().all(|filter| match filter.id() {
+        FILTER_DEFLATE | FILTER_SHUFFLE | FILTER_FLETCHER32 | FILTER_SCALEOFFSET | FILTER_LZF => {
+            true
+        }
+        #[cfg(feature = "zfp")]
+        FILTER_ZFP => true,
+        _ => false,
+    })
+}
+
+/// Returns whether the pipeline's filters guarantee preservation of element values through
+/// decoding and re-encoding.
+///
+/// Integer scale-offset qualifies. Floating-point scale-offset, ZFP, and unknown filters do not.
+/// An empty pipeline qualifies.
+///
+/// # Examples
+///
+/// ```
+/// use h5_filter::FILTER_SCALEOFFSET;
+/// use h5_filter::FilterStep;
+/// use h5_filter::ScaleOffset;
+/// use h5_filter::ScaleOffsetByteOrder;
+/// use h5_filter::ScaleOffsetFill;
+/// use h5_filter::ScaleOffsetType;
+///
+/// struct Step(Vec<u32>);
+/// impl FilterStep for Step {
+///     fn id(&self) -> u16 { FILTER_SCALEOFFSET }
+///     fn flags(&self) -> u16 { 0 }
+///     fn client_data(&self) -> &[u32] { &self.0 }
+/// }
+///
+/// # fn main() -> Result<(), h5_filter::Error> {
+/// let scalar = ScaleOffsetType::integer(false, ScaleOffsetByteOrder::LittleEndian);
+/// let params = h5_filter::build_scale_offset_cd_values(
+///     ScaleOffset::Integer(0), scalar, 1, 4, ScaleOffsetFill::Undefined,
+/// )?;
+/// assert!(h5_filter::filters_lossless(&[Step(params)]));
+/// # Ok(())
+/// # }
+/// ```
+pub fn filters_lossless(filters: &[impl FilterStep]) -> bool {
+    filters.iter().all(|filter| match filter.id() {
+        FILTER_DEFLATE | FILTER_SHUFFLE | FILTER_FLETCHER32 | FILTER_LZF => true,
+        FILTER_SCALEOFFSET => matches!(
+            crate::scaleoffset::scale_offset_mode(filter.client_data()),
+            Some((ScaleOffset::Integer(_), _))
+        ),
+        _ => false,
+    })
+}
+
+fn canonical_rank(id: u16) -> u8 {
+    match id {
+        #[cfg(feature = "zfp")]
+        FILTER_ZFP => 0,
+        FILTER_SCALEOFFSET => 1,
+        FILTER_SHUFFLE => 2,
+        FILTER_LZF => 3,
+        FILTER_DEFLATE => 4,
+        FILTER_FLETCHER32 => 5,
+        _ => u8::MAX,
     }
 }
 
