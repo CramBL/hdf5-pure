@@ -18,11 +18,10 @@
 use hdf5::{MajorErrorCode, MinorErrorCode};
 use hdf5_pure::{Error, File, FormatError, RepackOptions};
 use tempfile::tempdir;
+use test_util::object_header::{MessageFlags, MessageType};
 
 use super::fixture;
-use super::fixture::{
-    ATTRIBUTE_NAME, DATA, DATASET_NAME, FAIL_IF_UNKNOWN_AND_OPEN_FOR_WRITE, UNKNOWN_MESSAGE_TYPE,
-};
+use super::fixture::{ATTRIBUTE_NAME, DATA, DATASET_NAME};
 
 /// The name a copy of the fixture's dataset is written under.
 const COPY_NAME: &str = "copied";
@@ -71,7 +70,7 @@ fn an_unknown_message_only_a_writer_must_understand_is_read_as_the_c_library_rea
     let Error::Format(FormatError::UnsupportedMessage(id)) = &err else {
         panic!("expected UnsupportedMessage, got {err:?}");
     };
-    assert_eq!(*id, UNKNOWN_MESSAGE_TYPE);
+    assert_eq!(*id, MessageType::UNKNOWN.0);
 }
 
 #[test]
@@ -127,7 +126,7 @@ fn a_repack_asked_to_reject_unknown_messages_only_a_writer_must_understand_names
     let Error::Format(FormatError::UnsupportedMessage(id)) = &err else {
         panic!("expected UnsupportedMessage, got {err:?}");
     };
-    assert_eq!(*id, UNKNOWN_MESSAGE_TYPE);
+    assert_eq!(*id, MessageType::UNKNOWN.0);
     assert!(
         !dst.exists(),
         "a rejected repack leaves the destination absent"
@@ -182,7 +181,7 @@ fn a_same_file_copy_rejects_a_file_whose_root_group_header_holds_a_message_only_
     let Error::Format(FormatError::UnsupportedMessage(id)) = &err else {
         panic!("expected UnsupportedMessage, got {err:?}");
     };
-    assert_eq!(*id, UNKNOWN_MESSAGE_TYPE);
+    assert_eq!(*id, MessageType::UNKNOWN.0);
 }
 
 /// Writes the fixture with its root group attribute retyped to a message of an unknown type,
@@ -192,7 +191,7 @@ fn write_fixture_with_the_flagged_message(path: &std::path::Path) {
     let mut bytes = std::fs::read(path).unwrap();
     fixture::retype_the_root_group_attribute_message_as_unknown(
         &mut bytes,
-        FAIL_IF_UNKNOWN_AND_OPEN_FOR_WRITE,
+        MessageFlags::FAIL_IF_UNKNOWN_AND_OPEN_FOR_WRITE,
     );
     std::fs::write(path, &bytes).unwrap();
 }

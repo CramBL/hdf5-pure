@@ -1,9 +1,7 @@
 //! Files the reference C library creates under a chosen low bound on the format version.
 
-#[cfg(feature = "__hdf5-1.10")]
 use std::path::Path;
 
-#[cfg(feature = "__hdf5-1.10")]
 use hdf5::file::LibraryVersion;
 
 /// A file the C library creates in the 1.8 format or newer: version 2 object
@@ -21,7 +19,12 @@ pub fn libhdf5_create_v110(path: &Path) -> hdf5::File {
     create_bounded(path, LibraryVersion::V110)
 }
 
-#[cfg(feature = "__hdf5-1.10")]
+/// A file the C library creates under a low bound of `H5F_LIBVER_EARLIEST`: a version 0
+/// superblock and version 1 object headers, which no checksum covers.
+pub fn libhdf5_create_earliest(path: &Path) -> hdf5::File {
+    create_bounded(path, LibraryVersion::Earliest)
+}
+
 #[track_caller]
 fn create_bounded(path: &Path, low: LibraryVersion) -> hdf5::File {
     hdf5::File::with_options()
