@@ -48,6 +48,7 @@ jobs:
               - .cargo/**
               - tests/**
               - crates/test-util/**
+              - crates/test-util-hdf5/**
               - crates/crosscheck/**
               - Cross.toml
               - justfile
