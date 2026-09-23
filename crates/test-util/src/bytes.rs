@@ -46,6 +46,17 @@ pub fn set_u8_at(bytes: &mut [u8], at: usize, value: u8) {
 }
 
 #[track_caller]
+pub fn set_u16_at(bytes: &mut [u8], at: usize, value: u16) {
+    set_slice_at(bytes, at, &value.to_le_bytes());
+}
+
+/// Overwrites the little-endian unsigned integer `width` bytes wide at `at`.
+#[track_caller]
+pub fn set_uint_at(bytes: &mut [u8], at: usize, width: usize, value: u64) {
+    set_slice_at(bytes, at, &uint_field(value, width)[..width]);
+}
+
+#[track_caller]
 pub fn set_slice_at(bytes: &mut [u8], at: usize, values: &[u8]) {
     let available = bytes.len();
     bytes
@@ -172,6 +183,10 @@ mod tests {
         bytes::push_undefined_address(&mut written, 2);
         assert_eq!(written, [0x34, 0x12, 0x78, 0x56, 0x34, 0x12, 0xFF, 0xFF]);
         assert_eq!(bytes::uint_at(&written, 2, 4), 0x1234_5678);
+
+        bytes::set_uint_at(&mut written, 2, 3, 0xAB_CDEF);
+        bytes::set_u16_at(&mut written, 0, 0x5678);
+        assert_eq!(written, [0x78, 0x56, 0xEF, 0xCD, 0xAB, 0x12, 0xFF, 0xFF]);
     }
 
     #[test]
