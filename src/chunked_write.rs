@@ -102,22 +102,6 @@ impl FilterKind {
         }
     }
 
-    /// Where this filter sits in the pipeline this crate's own writer builds:
-    /// a primary transform first, then shuffle, then a byte compressor, then
-    /// the checksum last. Lower runs earlier, so it is applied to less
-    /// processed bytes.
-    fn canonical_rank(self) -> u8 {
-        match self {
-            #[cfg(feature = "zfp")]
-            Self::Zfp(_) => 0,
-            Self::ScaleOffset(..) => 1,
-            Self::Shuffle => 2,
-            Self::Lzf => 3,
-            Self::Deflate(_) => 4,
-            Self::Fletcher32 => 5,
-        }
-    }
-
     /// Whether a filter added through [`ChunkOptions::set_filter`] is recorded
     /// optional.
     ///
@@ -181,9 +165,8 @@ impl ChunkOptions {
     /// any filter with the same id already present.
     ///
     /// This is what the `DatasetBuilder` switches (`with_shuffle`,
-    /// `with_deflate`, ...) call. Placing by
-    /// [`canonical_rank`](FilterKind::canonical_rank) rather than by call order
-    /// is what keeps `with_deflate(6).with_shuffle()` and
+    /// `with_deflate`, ...) call. Canonical filter order keeps
+    /// `with_deflate(6).with_shuffle()` and
     /// `with_shuffle().with_deflate(6)` writing the same bytes: those setters
     /// name a filter to apply, not a position to apply it at.
     pub fn set_filter(&mut self, kind: FilterKind) {
@@ -207,11 +190,10 @@ impl ChunkOptions {
             *slot = spec;
             return;
         }
-        let at = self
-            .filters
-            .iter()
-            .position(|f| f.kind.canonical_rank() > kind.canonical_rank())
-            .unwrap_or(self.filters.len());
+        let at = h5_filter::canonical_filter_position(
+            self.filters.iter().map(|f| f.kind.filter_id()),
+            kind.filter_id(),
+        );
         self.filters.insert(at, spec);
     }
 
@@ -224,11 +206,6 @@ impl ChunkOptions {
     /// [`set_filter`](Self::set_filter) produces.
     pub fn push_filter(&mut self, spec: FilterSpec) {
         self.filters.push(spec);
-    }
-
-    /// Whether the pipeline includes the filter with this id.
-    fn has(&self, id: u16) -> bool {
-        self.filters.iter().any(|f| f.kind.filter_id() == id)
     }
 
     /// Refuse a filter the pipeline asks for that this build cannot apply.
@@ -247,45 +224,24 @@ impl ChunkOptions {
     /// discarded buffer.
     pub fn refuse_unavailable_filters(&self) -> Result<(), &'static str> {
         #[cfg(not(feature = "deflate"))]
-        if self.has(FILTER_DEFLATE) {
+        if self
+            .filters
+            .iter()
+            .any(|f| f.kind.filter_id() == FILTER_DEFLATE)
+        {
             return Err("deflate compression requires the `deflate` crate feature");
         }
         Ok(())
     }
 
-    #[cfg(feature = "zfp")]
-    #[inline]
-    fn zfp_enabled(&self) -> bool {
-        self.has(FILTER_ZFP)
-    }
-
-    #[cfg(not(feature = "zfp"))]
-    #[inline]
-    fn zfp_enabled(&self) -> bool {
-        false
-    }
-
-    /// Refuse a combination of filters where honoring one means discarding
-    /// another.
+    /// Reports a conflicting filter pair as a dataset format error.
     ///
-    /// Two filters here are *primary transforms* that consume the raw elements
-    /// and hand on something else: ZFP, and scale-offset. Each displaces
-    /// whatever it sits on top of, so a request naming a displaced filter as
-    /// well is a contradiction — the caller asked for something the file cannot
-    /// end up containing.
+    /// [`h5_filter::first_filter_conflict`] selects the pair independently of the
+    /// order in which the caller added the filters.
     ///
-    /// Every such contradiction is an error. Dropping the loser silently is the
-    /// one option a caller cannot detect: nothing in the resulting file records
-    /// that a filter was requested, so `with_shuffle().with_zfp(16.0)` produced
-    /// an unshuffled dataset and no way to tell that from `with_zfp(16.0)`
-    /// alone. Documented precedence is not a substitute, because a precedence
-    /// rule still has to be read to be obeyed and there is nothing to read it
-    /// against at the call site.
+    /// # Errors
     ///
-    /// Checked in one place, before any filter is built, so which contradiction
-    /// gets reported does not depend on the order the pipeline happens to be
-    /// assembled in, and so a filter added later inherits the rule rather than
-    /// having to restate it.
+    /// Returns [`FormatError::FilterError`] if the pipeline contains incompatible filters.
     fn refuse_conflicting_filters(&self) -> Result<(), FormatError> {
         let clash = |a: &str, b: &str| {
             Err(FormatError::FilterError(format!(
@@ -293,29 +249,12 @@ impl ChunkOptions {
             )))
         };
 
-        if self.zfp_enabled() {
-            if self.has(FILTER_SCALEOFFSET) {
-                return clash("scale-offset", "ZFP");
-            }
-            if self.has(FILTER_SHUFFLE) {
-                return clash("shuffle", "ZFP");
-            }
-            if self.has(FILTER_LZF) {
-                return clash("lzf", "ZFP");
-            }
-            if self.has(FILTER_DEFLATE) {
-                return clash("deflate", "ZFP");
-            }
-        }
-        if self.has(FILTER_SCALEOFFSET) && self.has(FILTER_SHUFFLE) {
-            return clash("shuffle", "scale-offset");
-        }
-        // Not a primary transform, but the same shape: LZF and deflate fill one
-        // byte-compressor slot, and stacking two of them is never useful.
-        if self.has(FILTER_LZF) && self.has(FILTER_DEFLATE) {
-            return clash("lzf", "deflate");
-        }
-        Ok(())
+        let Some((first, second)) =
+            h5_filter::first_filter_conflict(self.filters.iter().map(|f| f.kind.filter_id()))
+        else {
+            return Ok(());
+        };
+        clash(first, second)
     }
 
     /// Build a FilterPipeline from the options.
