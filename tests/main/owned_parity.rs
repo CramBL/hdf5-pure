@@ -6,28 +6,15 @@
 //! per-open file-locking policy — now work through owned `File` / `Dataset` /
 //! `Group` handles. Plus the post-`close` seal (`Error::FileClosed`).
 
-use hdf5_pure::{
-    AttrValue, Error, File, FileAccessProperties, FileBuilder, FileLocking, MaxExtent,
-};
+use hdf5_pure::{AttrValue, Error, File, FileAccessProperties, FileBuilder, FileLocking};
 use tempfile::tempdir;
+use test_util_hdf5::dataset::{Filter, Unlimited};
 
 fn build_simple(path: &std::path::Path, data: &[i32]) {
     let mut b = FileBuilder::new();
     b.create_dataset("d")
         .with_i32_data(data)
         .with_shape(&[data.len() as u64]);
-    b.write(path).unwrap();
-}
-
-fn build_filtered_unlimited(path: &std::path::Path, n: i32, chunk: u64) {
-    let data: Vec<i32> = (0..n).collect();
-    let mut b = FileBuilder::new();
-    b.create_dataset("d")
-        .with_i32_data(&data)
-        .with_shape(&[n as u64])
-        .with_maxshape(&[MaxExtent::Unlimited])
-        .with_chunks(&[chunk])
-        .with_deflate(6);
     b.write(path).unwrap();
 }
 
@@ -40,7 +27,9 @@ fn build_filtered_unlimited(path: &std::path::Path, n: i32, chunk: u64) {
 fn append_staged_grows_filtered_any_length() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("f.h5");
-    build_filtered_unlimited(&path, 3, 4); // length 3, chunk 4 -> partial tail
+    Unlimited::new("d", &(0..3).collect::<Vec<i32>>(), 4)
+        .filters(&[Filter::Deflate(6)])
+        .pure_create(&path); // length 3, chunk 4 -> partial tail
 
     let file = File::open_rw(&path).unwrap();
     {

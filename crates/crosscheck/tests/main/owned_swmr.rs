@@ -3,25 +3,15 @@
 //! `File::close`, the SWMR-write flag is cleared and the reference C library
 //! reads the streamed appends back exactly.
 
-use hdf5_pure::{File, FileBuilder, MaxExtent};
+use hdf5_pure::File;
 use tempfile::tempdir;
-
-fn build_swmr(path: &std::path::Path, n: i32, chunk: u64) {
-    let data: Vec<i32> = (0..n).collect();
-    let mut b = FileBuilder::new();
-    b.create_dataset("d")
-        .with_i32_data(&data)
-        .with_shape(&[n as u64])
-        .with_maxshape(&[MaxExtent::Unlimited])
-        .with_chunks(&[chunk]);
-    b.write(path).unwrap();
-}
+use test_util_hdf5::dataset::{self, Unlimited};
 
 #[test]
 fn c_library_reads_swmr_appends_after_close() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("s.h5");
-    build_swmr(&path, 50, 1); // chunk length 1: the common streaming layout
+    Unlimited::new("d", &(0..50).collect::<Vec<i32>>(), 1).pure_create(&path); // chunk length 1: the common streaming layout
 
     {
         let file = File::open_swmr_writer(&path).unwrap();
@@ -33,10 +23,10 @@ fn c_library_reads_swmr_appends_after_close() {
         file.close().unwrap();
     }
 
-    let f = hdf5::File::open(&path).unwrap();
-    let v = f.dataset("d").unwrap().read_raw::<i32>().unwrap();
-    assert_eq!(v, (0..250).collect::<Vec<_>>());
-    f.close().unwrap();
+    assert_eq!(
+        dataset::read_libhdf5::<i32>(&path, "d"),
+        (0..250).collect::<Vec<_>>()
+    );
 }
 
 /// The status-flags field of a *version-1* superblock is read from the offset
@@ -101,7 +91,7 @@ fn a_v1_superblock_reports_the_flags_the_c_library_wrote() {
 fn both_libraries_refuse_a_file_a_crashed_swmr_writer_left_flagged() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("flagged.h5");
-    build_swmr(&path, 4, 4);
+    Unlimited::new("d", &(0..4).collect::<Vec<i32>>(), 4).pure_create(&path);
 
     // A crashed writer: leak the handle so neither `close` nor `Drop` clears the
     // flag it raised.

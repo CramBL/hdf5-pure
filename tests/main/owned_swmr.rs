@@ -5,34 +5,10 @@
 //! and cleared on `close`, only immediate `Dataset::append` permitted (over the
 //! unfiltered, chunk-aligned SWMR subset), and the staged edit surface refused.
 
-use hdf5_pure::{AttrValue, Error, File, FileBuilder, MaxExtent};
+use hdf5_pure::{AttrValue, Error, File};
 use tempfile::tempdir;
 use test_util::superblock;
-
-/// Build an unfiltered rank-1, unlimited, Extensible-Array-indexed i32 dataset
-/// `d` seeded with `0..n` and the given chunk length — a SWMR-eligible target.
-fn build_swmr(path: &std::path::Path, n: i32, chunk: u64) {
-    let data: Vec<i32> = (0..n).collect();
-    let mut b = FileBuilder::new();
-    b.create_dataset("d")
-        .with_i32_data(&data)
-        .with_shape(&[n as u64])
-        .with_maxshape(&[MaxExtent::Unlimited])
-        .with_chunks(&[chunk]);
-    b.write(path).unwrap();
-}
-
-fn build_swmr_filtered(path: &std::path::Path, n: i32, chunk: u64) {
-    let data: Vec<i32> = (0..n).collect();
-    let mut b = FileBuilder::new();
-    b.create_dataset("d")
-        .with_i32_data(&data)
-        .with_shape(&[n as u64])
-        .with_maxshape(&[MaxExtent::Unlimited])
-        .with_chunks(&[chunk])
-        .with_deflate(6);
-    b.write(path).unwrap();
-}
+use test_util_hdf5::dataset::{Filter, Unlimited};
 
 const SWMR_WRITE_FLAGS: u32 = 0x05;
 
@@ -40,7 +16,7 @@ const SWMR_WRITE_FLAGS: u32 = 0x05;
 fn swmr_append_reads_back_and_flag_lifecycle() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("s.h5");
-    build_swmr(&path, 4, 4);
+    Unlimited::new("d", &(0..4).collect::<Vec<i32>>(), 4).pure_create(&path);
 
     let file = File::open_swmr_writer(&path).unwrap();
     // The SWMR-write flag is raised on open.
@@ -67,7 +43,7 @@ fn swmr_append_reads_back_and_flag_lifecycle() {
 fn swmr_refuses_the_staged_surface() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("s.h5");
-    build_swmr(&path, 4, 4);
+    Unlimited::new("d", &(0..4).collect::<Vec<i32>>(), 4).pure_create(&path);
 
     let file = File::open_swmr_writer(&path).unwrap();
     let mut ds = file.dataset("d").unwrap();
@@ -125,7 +101,7 @@ fn swmr_refuses_filtered_and_unaligned_appends() {
 
     // Unaligned: length 4 (chunk 4, aligned), append 3 -> not a whole chunk.
     let upath = dir.path().join("u.h5");
-    build_swmr(&upath, 4, 4);
+    Unlimited::new("d", &(0..4).collect::<Vec<i32>>(), 4).pure_create(&upath);
     {
         let file = File::open_swmr_writer(&upath).unwrap();
         let mut ds = file.dataset("d").unwrap();
@@ -137,7 +113,9 @@ fn swmr_refuses_filtered_and_unaligned_appends() {
 
     // Filtered: opening is fine (the filter is per dataset), the append is refused.
     let fpath = dir.path().join("f.h5");
-    build_swmr_filtered(&fpath, 4, 4);
+    Unlimited::new("d", &(0..4).collect::<Vec<i32>>(), 4)
+        .filters(&[Filter::Deflate(6)])
+        .pure_create(&fpath);
     let file = File::open_swmr_writer(&fpath).unwrap();
     let mut ds = file.dataset("d").unwrap();
     assert!(matches!(
@@ -150,7 +128,7 @@ fn swmr_refuses_filtered_and_unaligned_appends() {
 fn swmr_post_close_append_is_sealed() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("c.h5");
-    build_swmr(&path, 4, 4);
+    Unlimited::new("d", &(0..4).collect::<Vec<i32>>(), 4).pure_create(&path);
 
     let file = File::open_swmr_writer(&path).unwrap();
     let mut ds = file.dataset("d").unwrap();
@@ -169,7 +147,7 @@ fn swmr_post_close_append_is_sealed() {
 fn clear_swmr_flag_recovers_a_stale_flag() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("r.h5");
-    build_swmr(&path, 4, 4);
+    Unlimited::new("d", &(0..4).collect::<Vec<i32>>(), 4).pure_create(&path);
 
     let file = File::open_swmr_writer(&path).unwrap();
     // Drop never runs, so the flag is left set.
@@ -193,7 +171,7 @@ fn clear_swmr_flag_recovers_a_stale_flag() {
 fn swmr_holds_no_os_lock() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("l.h5");
-    build_swmr(&path, 4, 4);
+    Unlimited::new("d", &(0..4).collect::<Vec<i32>>(), 4).pure_create(&path);
 
     let writer = File::open_swmr_writer(&path).unwrap();
     let err = File::open_rw(&path).expect_err("a live SWMR writer holds the file");

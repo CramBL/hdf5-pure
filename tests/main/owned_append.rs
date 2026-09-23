@@ -5,26 +5,15 @@
 //! the same handle observe the new length and data. A read-only file refuses the
 //! append.
 
-use hdf5_pure::{Error, File, FileBuilder, MaxExtent};
+use hdf5_pure::{Error, File};
 use tempfile::tempdir;
-
-/// Create a rank-1, unlimited i32 dataset with chunk length `chunk`, seeded 0..n.
-fn create_i32(path: &std::path::Path, n: i32, chunk: u64) {
-    let data: Vec<i32> = (0..n).collect();
-    let mut b = FileBuilder::new();
-    b.create_dataset("d")
-        .with_i32_data(&data)
-        .with_shape(&[n as u64])
-        .with_maxshape(&[MaxExtent::Unlimited])
-        .with_chunks(&[chunk]);
-    b.write(path).unwrap();
-}
+use test_util_hdf5::dataset::Unlimited;
 
 #[test]
 fn append_and_read_through_one_handle() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("d.h5");
-    create_i32(&path, 5, 4); // [0,1,2,3,4]
+    Unlimited::new("d", &(0..5).collect::<Vec<i32>>(), 4).pure_create(&path); // [0,1,2,3,4]
     {
         let file = File::open_rw(&path).unwrap();
         let mut ds = file.dataset("d").unwrap();
@@ -45,7 +34,7 @@ fn append_and_read_through_one_handle() {
 fn many_appends_across_calls() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("d.h5");
-    create_i32(&path, 0, 4);
+    Unlimited::<i32>::new("d", &[], 4).pure_create(&path);
     {
         let file = File::open_rw(&path).unwrap();
         let mut ds = file.dataset("d").unwrap();
@@ -65,7 +54,7 @@ fn many_appends_across_calls() {
 fn append_to_readonly_file_is_refused() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("d.h5");
-    create_i32(&path, 3, 4);
+    Unlimited::new("d", &(0..3).collect::<Vec<i32>>(), 4).pure_create(&path);
     let bytes = std::fs::read(&path).unwrap();
     let file = File::from_bytes(bytes).unwrap();
     let mut ds = file.dataset("d").unwrap();
@@ -76,7 +65,7 @@ fn append_to_readonly_file_is_refused() {
 fn open_rw_reads_like_open() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("d.h5");
-    create_i32(&path, 6, 3);
+    Unlimited::new("d", &(0..6).collect::<Vec<i32>>(), 3).pure_create(&path);
     let file = File::open_rw(&path).unwrap();
     assert_eq!(
         file.dataset("d").unwrap().read_i32().unwrap(),
@@ -94,7 +83,7 @@ fn open_rw_reads_like_open() {
 fn interleaved_reads_observe_every_append() {
     let dir = tempdir().unwrap();
     let p = dir.path().join("interleaved.h5");
-    create_i32(&p, 6, 4);
+    Unlimited::new("d", &(0..6).collect::<Vec<i32>>(), 4).pure_create(&p);
     let file = File::open_rw(&p).unwrap();
     let mut ds = file.dataset("d").unwrap();
     ds.append(&[6i32, 7, 8]).unwrap();

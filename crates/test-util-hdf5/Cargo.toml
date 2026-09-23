@@ -26,5 +26,8 @@ hdf5 = { package = "hdf5-metno", git = "https://github.com/metno/hdf5-rust", rev
 hdf5-pure = { path = "../.." }
 test-util = { path = "../test-util" }
 
+[dev-dependencies]
+tempfile = "3"
+
 [lints]
 workspace = true

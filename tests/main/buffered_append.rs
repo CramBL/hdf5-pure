@@ -4,33 +4,11 @@
 //! issue #393 every write it makes is the immediate in-place one, filtered or
 //! not, so the type buys write *frequency* and nothing else.
 
-use hdf5_pure::{AttrValue, Error, File, FileBuilder, MaxExtent, ScaleOffset};
+use hdf5_pure::{AttrValue, Error, File, FileBuilder, ScaleOffset};
 use tempfile::tempdir;
+use test_util_hdf5::dataset::{self, Filter, Unlimited};
 
-/// A rank-1 unlimited chunked i32 dataset `d` seeded with `0..n`.
-fn build(path: &std::path::Path, n: i32, chunk: u64, filtered: bool) {
-    let data: Vec<i32> = (0..n).collect();
-    let mut b = FileBuilder::new();
-    let d = b
-        .create_dataset("d")
-        .with_i32_data(&data)
-        .with_shape(&[n as u64])
-        .with_maxshape(&[MaxExtent::Unlimited])
-        .with_chunks(&[chunk]);
-    if filtered {
-        d.with_shuffle().with_deflate(4);
-    }
-    b.write(path).unwrap();
-}
-
-fn read_i32(path: &std::path::Path) -> Vec<i32> {
-    File::open(path)
-        .unwrap()
-        .dataset("d")
-        .unwrap()
-        .read_i32()
-        .unwrap()
-}
+const SHUFFLE_DEFLATE: &[Filter] = &[Filter::Shuffle, Filter::Deflate(4)];
 
 // ---- what the buffer buys ----------------------------------------------------
 
@@ -43,7 +21,9 @@ fn a_call_that_does_not_complete_a_chunk_does_not_touch_the_file() {
     let dir = tempdir().unwrap();
     let p = dir.path().join("d.h5");
     let chunk = 16u64;
-    build(&p, 0, chunk, true);
+    Unlimited::<i32>::new("d", &[], chunk)
+        .filters(SHUFFLE_DEFLATE)
+        .pure_create(&p);
 
     let session = File::open_rw(&p).unwrap();
     let mut ds = session.dataset("d").unwrap();
@@ -73,7 +53,10 @@ fn a_call_that_does_not_complete_a_chunk_does_not_touch_the_file() {
     app.finish().unwrap();
     drop(ds);
     drop(session);
-    assert_eq!(read_i32(&p), (0..48).collect::<Vec<_>>());
+    assert_eq!(
+        dataset::read_pure::<i32>(&p, "d"),
+        (0..48).collect::<Vec<_>>()
+    );
 }
 
 /// The invariant the whole type rests on: after every call the dataset's
@@ -94,7 +77,9 @@ fn the_on_disk_length_stays_chunk_aligned_after_every_call() {
     for &filtered in &[true, false] {
         let p = dir.path().join(format!("aligned_{filtered}.h5"));
         let chunk = 16u64;
-        build(&p, 0, chunk, filtered);
+        Unlimited::<i32>::new("d", &[], chunk)
+            .filters(if filtered { SHUFFLE_DEFLATE } else { &[] })
+            .pure_create(&p);
 
         let session = File::open_rw(&p).unwrap();
         let mut ds = session.dataset("d").unwrap();
@@ -119,7 +104,10 @@ fn the_on_disk_length_stays_chunk_aligned_after_every_call() {
         app.finish().unwrap();
         drop(ds);
         drop(session);
-        assert_eq!(read_i32(&p), (0..60).collect::<Vec<_>>());
+        assert_eq!(
+            dataset::read_pure::<i32>(&p, "d"),
+            (0..60).collect::<Vec<_>>()
+        );
     }
 }
 
@@ -131,7 +119,9 @@ fn the_on_disk_length_stays_chunk_aligned_after_every_call() {
 fn an_unaligned_filtered_flush_never_commits() {
     let dir = tempdir().unwrap();
     let p = dir.path().join("d.h5");
-    build(&p, 10, 8, true); // filtered, and sitting on a partial trailing chunk
+    Unlimited::new("d", &(0..10).collect::<Vec<i32>>(), 8)
+        .filters(SHUFFLE_DEFLATE)
+        .pure_create(&p); // filtered, and sitting on a partial trailing chunk
 
     let session = File::open_rw(&p).unwrap();
     let mut ds = session.dataset("d").unwrap();
@@ -166,7 +156,10 @@ fn an_unaligned_filtered_flush_never_commits() {
     drop(ds);
     session.commit().unwrap();
     drop(session);
-    assert_eq!(read_i32(&p), (0..78).collect::<Vec<_>>());
+    assert_eq!(
+        dataset::read_pure::<i32>(&p, "d"),
+        (0..78).collect::<Vec<_>>()
+    );
 }
 
 /// Every element still shows up, across filtered and unfiltered datasets,
@@ -187,7 +180,9 @@ fn every_shape_round_trips() {
             let p = dir
                 .path()
                 .join(format!("r_{filtered}_{start}_{chunk}_{batch}_{calls}.h5"));
-            build(&p, start, chunk, filtered);
+            Unlimited::new("d", &(0..start).collect::<Vec<i32>>(), chunk)
+                .filters(if filtered { SHUFFLE_DEFLATE } else { &[] })
+                .pure_create(&p);
             let total = start + (batch * calls) as i32;
             {
                 let session = File::open_rw(&p).unwrap();
@@ -201,7 +196,7 @@ fn every_shape_round_trips() {
                 app.finish().unwrap();
             }
             assert_eq!(
-                read_i32(&p),
+                dataset::read_pure::<i32>(&p, "d"),
                 (0..total).collect::<Vec<_>>(),
                 "filtered={filtered} start={start} chunk={chunk} batch={batch} calls={calls}"
             );
@@ -216,7 +211,9 @@ fn every_shape_round_trips() {
 fn a_filtered_dataset_takes_any_append_length() {
     let dir = tempdir().unwrap();
     let p = dir.path().join("d.h5");
-    build(&p, 0, 100, true);
+    Unlimited::<i32>::new("d", &[], 100)
+        .filters(SHUFFLE_DEFLATE)
+        .pure_create(&p);
     {
         let session = File::open_rw(&p).unwrap();
         let mut ds = session.dataset("d").unwrap();
@@ -227,7 +224,10 @@ fn a_filtered_dataset_takes_any_append_length() {
         }
         app.finish().unwrap();
     }
-    assert_eq!(read_i32(&p), (0..259).collect::<Vec<_>>());
+    assert_eq!(
+        dataset::read_pure::<i32>(&p, "d"),
+        (0..259).collect::<Vec<_>>()
+    );
 }
 
 // ---- durability boundaries ---------------------------------------------------
@@ -239,7 +239,9 @@ fn a_filtered_dataset_takes_any_append_length() {
 fn the_file_holds_exactly_what_was_written_not_what_was_buffered() {
     let dir = tempdir().unwrap();
     let p = dir.path().join("d.h5");
-    build(&p, 0, 8, true);
+    Unlimited::<i32>::new("d", &[], 8)
+        .filters(SHUFFLE_DEFLATE)
+        .pure_create(&p);
 
     let session = File::open_rw(&p).unwrap();
     let mut ds = session.dataset("d").unwrap();
@@ -253,7 +255,10 @@ fn the_file_holds_exactly_what_was_written_not_what_was_buffered() {
     // The dataset is the written prefix, not the buffered whole. (`drop` on the
     // appender flushes, so the drops above are ordered: appender, handle,
     // session — this asserts the state *between* those flushes is coherent.)
-    assert_eq!(read_i32(&p), (0..11).collect::<Vec<_>>());
+    assert_eq!(
+        dataset::read_pure::<i32>(&p, "d"),
+        (0..11).collect::<Vec<_>>()
+    );
 }
 
 /// `flush` publishes the buffered tail immediately, without consuming the
@@ -262,7 +267,9 @@ fn the_file_holds_exactly_what_was_written_not_what_was_buffered() {
 fn flush_publishes_the_tail_and_the_appender_stays_usable() {
     let dir = tempdir().unwrap();
     let p = dir.path().join("d.h5");
-    build(&p, 0, 8, true);
+    Unlimited::<i32>::new("d", &[], 8)
+        .filters(SHUFFLE_DEFLATE)
+        .pure_create(&p);
 
     let session = File::open_rw(&p).unwrap();
     let mut ds = session.dataset("d").unwrap();
@@ -282,7 +289,10 @@ fn flush_publishes_the_tail_and_the_appender_stays_usable() {
     app.finish().unwrap();
     drop(ds);
     drop(session);
-    assert_eq!(read_i32(&p), (0..20).collect::<Vec<_>>());
+    assert_eq!(
+        dataset::read_pure::<i32>(&p, "d"),
+        (0..20).collect::<Vec<_>>()
+    );
 }
 
 /// Dropping without `finish` still flushes: forgetting the call must not lose
@@ -291,7 +301,9 @@ fn flush_publishes_the_tail_and_the_appender_stays_usable() {
 fn dropping_the_appender_flushes_its_buffer() {
     let dir = tempdir().unwrap();
     let p = dir.path().join("d.h5");
-    build(&p, 0, 16, true);
+    Unlimited::<i32>::new("d", &[], 16)
+        .filters(SHUFFLE_DEFLATE)
+        .pure_create(&p);
     {
         let session = File::open_rw(&p).unwrap();
         let mut ds = session.dataset("d").unwrap();
@@ -299,7 +311,10 @@ fn dropping_the_appender_flushes_its_buffer() {
         app.append(&(0..5i32).collect::<Vec<_>>()).unwrap();
         // no finish()
     }
-    assert_eq!(read_i32(&p), (0..5).collect::<Vec<_>>());
+    assert_eq!(
+        dataset::read_pure::<i32>(&p, "d"),
+        (0..5).collect::<Vec<_>>()
+    );
 }
 
 // ---- resuming an unaligned log ----------------------------------------------
@@ -311,7 +326,9 @@ fn dropping_the_appender_flushes_its_buffer() {
 fn resuming_an_unaligned_filtered_log_lands_back_on_a_boundary() {
     let dir = tempdir().unwrap();
     let p = dir.path().join("d.h5");
-    build(&p, 10, 8, true); // 10 of 8 = a partial trailing chunk
+    Unlimited::new("d", &(0..10).collect::<Vec<i32>>(), 8)
+        .filters(SHUFFLE_DEFLATE)
+        .pure_create(&p); // 10 of 8 = a partial trailing chunk
 
     {
         let session = File::open_rw(&p).unwrap();
@@ -326,7 +343,10 @@ fn resuming_an_unaligned_filtered_log_lands_back_on_a_boundary() {
         assert_eq!(app.buffered_elements(), 0);
         app.finish().unwrap();
     }
-    assert_eq!(read_i32(&p), (0..40).collect::<Vec<_>>());
+    assert_eq!(
+        dataset::read_pure::<i32>(&p, "d"),
+        (0..40).collect::<Vec<_>>()
+    );
 
     // Chunk-aligned now, which is exactly what the immediate path requires.
     {
@@ -337,7 +357,10 @@ fn resuming_an_unaligned_filtered_log_lands_back_on_a_boundary() {
             .append(&(40..48i32).collect::<Vec<_>>())
             .unwrap();
     }
-    assert_eq!(read_i32(&p), (0..48).collect::<Vec<_>>());
+    assert_eq!(
+        dataset::read_pure::<i32>(&p, "d"),
+        (0..48).collect::<Vec<_>>()
+    );
 }
 
 /// The borrowed handle keeps working across the writes, and reads the length
@@ -346,7 +369,9 @@ fn resuming_an_unaligned_filtered_log_lands_back_on_a_boundary() {
 fn the_handle_reads_what_the_appender_wrote() {
     let dir = tempdir().unwrap();
     let p = dir.path().join("d.h5");
-    build(&p, 10, 8, true); // filtered, sitting on a partial trailing chunk
+    Unlimited::new("d", &(0..10).collect::<Vec<i32>>(), 8)
+        .filters(SHUFFLE_DEFLATE)
+        .pure_create(&p); // filtered, sitting on a partial trailing chunk
 
     let session = File::open_rw(&p).unwrap();
     let mut ds = session.dataset("d").unwrap();
@@ -367,7 +392,9 @@ fn the_handle_reads_what_the_appender_wrote() {
 fn an_appender_on_an_unaligned_filtered_dataset_is_made_beside_staged_edits() {
     let dir = tempdir().unwrap();
     let p = dir.path().join("d.h5");
-    build(&p, 10, 8, true);
+    Unlimited::new("d", &(0..10).collect::<Vec<i32>>(), 8)
+        .filters(SHUFFLE_DEFLATE)
+        .pure_create(&p);
 
     let session = File::open_rw(&p).unwrap();
     session
@@ -388,7 +415,10 @@ fn an_appender_on_an_unaligned_filtered_dataset_is_made_beside_staged_edits() {
     drop(ds);
     session.commit().unwrap();
     drop(session);
-    assert_eq!(read_i32(&p), (0..30).collect::<Vec<_>>());
+    assert_eq!(
+        dataset::read_pure::<i32>(&p, "d"),
+        (0..30).collect::<Vec<_>>()
+    );
     assert_eq!(
         File::open(&p)
             .unwrap()
@@ -428,7 +458,7 @@ fn an_ineligible_dataset_is_refused_at_construction() {
 fn a_read_only_file_is_refused() {
     let dir = tempdir().unwrap();
     let p = dir.path().join("d.h5");
-    build(&p, 8, 4, false);
+    Unlimited::new("d", &(0..8).collect::<Vec<i32>>(), 4).pure_create(&p);
     let file = File::open(&p).unwrap();
     let mut ds = file.dataset("d").unwrap();
     assert!(matches!(
@@ -446,7 +476,7 @@ fn a_read_only_file_is_refused() {
 fn a_refused_append_buffers_nothing() {
     let dir = tempdir().unwrap();
     let p = dir.path().join("d.h5");
-    build(&p, 0, 8, false);
+    Unlimited::<i32>::new("d", &[], 8).pure_create(&p);
 
     let session = File::open_rw(&p).unwrap();
     let mut ds = session.dataset("d").unwrap();
@@ -475,7 +505,7 @@ fn a_refused_append_buffers_nothing() {
 fn a_staged_edit_on_a_dataset_with_a_live_appender_is_refused() {
     let dir = tempdir().unwrap();
     let p = dir.path().join("d.h5");
-    build(&p, 0, 8, false);
+    Unlimited::<i32>::new("d", &[], 8).pure_create(&p);
 
     let session = File::open_rw(&p).unwrap();
     let mut ds = session.dataset("d").unwrap();
@@ -498,7 +528,10 @@ fn a_staged_edit_on_a_dataset_with_a_live_appender_is_refused() {
     drop(app);
     drop(ds);
     drop(session);
-    assert_eq!(read_i32(&p), (0..3).collect::<Vec<_>>());
+    assert_eq!(
+        dataset::read_pure::<i32>(&p, "d"),
+        (0..3).collect::<Vec<_>>()
+    );
 }
 
 /// An edit naming a *different* object is not blocked: the claim refuses what
@@ -507,7 +540,7 @@ fn a_staged_edit_on_a_dataset_with_a_live_appender_is_refused() {
 fn an_unrelated_staged_edit_is_allowed_beside_a_live_appender() {
     let dir = tempdir().unwrap();
     let p = dir.path().join("d.h5");
-    build(&p, 0, 8, false);
+    Unlimited::<i32>::new("d", &[], 8).pure_create(&p);
 
     let session = File::open_rw(&p).unwrap();
     let mut ds = session.dataset("d").unwrap();
@@ -525,7 +558,10 @@ fn an_unrelated_staged_edit_is_allowed_beside_a_live_appender() {
     drop(ds);
     session.commit().unwrap();
     drop(session);
-    assert_eq!(read_i32(&p), (0..3).collect::<Vec<_>>());
+    assert_eq!(
+        dataset::read_pure::<i32>(&p, "d"),
+        (0..3).collect::<Vec<_>>()
+    );
     let f = File::open(&p).unwrap();
     assert_eq!(
         f.dataset("other").unwrap().read_i32().unwrap(),
@@ -540,7 +576,9 @@ fn an_unrelated_staged_edit_is_allowed_beside_a_live_appender() {
 fn an_unrelated_staged_edit_is_allowed_beside_an_unaligned_filtered_appender() {
     let dir = tempdir().unwrap();
     let p = dir.path().join("d.h5");
-    build(&p, 10, 8, true); // filtered and unaligned
+    Unlimited::new("d", &(0..10).collect::<Vec<i32>>(), 8)
+        .filters(SHUFFLE_DEFLATE)
+        .pure_create(&p); // filtered and unaligned
 
     let session = File::open_rw(&p).unwrap();
     let mut ds = session.dataset("d").unwrap();
@@ -558,7 +596,10 @@ fn an_unrelated_staged_edit_is_allowed_beside_an_unaligned_filtered_appender() {
     drop(ds);
     session.commit().unwrap();
     drop(session);
-    assert_eq!(read_i32(&p), (0..30).collect::<Vec<_>>());
+    assert_eq!(
+        dataset::read_pure::<i32>(&p, "d"),
+        (0..30).collect::<Vec<_>>()
+    );
 }
 
 /// Two appenders on one dataset would interleave their buffers a chunk at a
@@ -568,7 +609,7 @@ fn an_unrelated_staged_edit_is_allowed_beside_an_unaligned_filtered_appender() {
 fn a_second_appender_on_the_same_dataset_is_refused() {
     let dir = tempdir().unwrap();
     let p = dir.path().join("d.h5");
-    build(&p, 0, 8, false);
+    Unlimited::<i32>::new("d", &[], 8).pure_create(&p);
 
     let session = File::open_rw(&p).unwrap();
     let mut first = session.dataset("d").unwrap();
@@ -589,7 +630,10 @@ fn a_second_appender_on_the_same_dataset_is_refused() {
     app.finish().unwrap();
     drop(second);
     drop(session);
-    assert_eq!(read_i32(&p), (0..3).collect::<Vec<_>>());
+    assert_eq!(
+        dataset::read_pure::<i32>(&p, "d"),
+        (0..3).collect::<Vec<_>>()
+    );
 }
 
 /// A SWMR writer requires the *appended* length to be chunk-aligned too, so the
@@ -600,7 +644,7 @@ fn a_second_appender_on_the_same_dataset_is_refused() {
 fn a_swmr_writer_is_refused_at_construction() {
     let dir = tempdir().unwrap();
     let p = dir.path().join("d.h5");
-    build(&p, 8, 8, false); // unfiltered and aligned: SWMR-eligible otherwise
+    Unlimited::new("d", &(0..8).collect::<Vec<i32>>(), 8).pure_create(&p); // unfiltered and aligned: SWMR-eligible otherwise
 
     let file = File::open_swmr_writer(&p).unwrap();
     let mut ds = file.dataset("d").unwrap();
@@ -613,7 +657,10 @@ fn a_swmr_writer_is_refused_at_construction() {
     ds.append(&(8..16i32).collect::<Vec<_>>()).unwrap();
     drop(ds);
     file.close().unwrap();
-    assert_eq!(read_i32(&p), (0..16).collect::<Vec<_>>());
+    assert_eq!(
+        dataset::read_pure::<i32>(&p, "d"),
+        (0..16).collect::<Vec<_>>()
+    );
 }
 
 /// A failed write leaves the file holding exactly the elements that landed and
@@ -622,7 +669,7 @@ fn a_swmr_writer_is_refused_at_construction() {
 fn a_failed_write_keeps_the_unwritten_elements() {
     let dir = tempdir().unwrap();
     let p = dir.path().join("d.h5");
-    build(&p, 0, 4, false);
+    Unlimited::<i32>::new("d", &[], 4).pure_create(&p);
 
     let session = File::open_rw(&p).unwrap();
     let mut ds = session.dataset("d").unwrap();
@@ -636,7 +683,10 @@ fn a_failed_write_keeps_the_unwritten_elements() {
     drop(app);
     drop(ds);
     drop(session);
-    assert!(read_i32(&p).is_empty(), "a refused append wrote data");
+    assert!(
+        dataset::read_pure::<i32>(&p, "d").is_empty(),
+        "a refused append wrote data"
+    );
 }
 
 /// `append_raw` admits a trailing partial element so a byte-oriented caller can
@@ -645,7 +695,7 @@ fn a_failed_write_keeps_the_unwritten_elements() {
 fn append_raw_completes_an_element_split_across_calls() {
     let dir = tempdir().unwrap();
     let p = dir.path().join("d.h5");
-    build(&p, 0, 4, false);
+    Unlimited::<i32>::new("d", &[], 4).pure_create(&p);
     {
         let session = File::open_rw(&p).unwrap();
         let mut ds = session.dataset("d").unwrap();
@@ -656,7 +706,10 @@ fn append_raw_completes_an_element_split_across_calls() {
         app.append_raw(&bytes[10..]).unwrap();
         app.finish().unwrap();
     }
-    assert_eq!(read_i32(&p), (0..6).collect::<Vec<_>>());
+    assert_eq!(
+        dataset::read_pure::<i32>(&p, "d"),
+        (0..6).collect::<Vec<_>>()
+    );
 }
 
 /// Flushing a buffer that ends mid-element is refused rather than writing a
@@ -665,7 +718,7 @@ fn append_raw_completes_an_element_split_across_calls() {
 fn a_partial_trailing_element_is_refused_at_the_flush() {
     let dir = tempdir().unwrap();
     let p = dir.path().join("d.h5");
-    build(&p, 0, 4, false);
+    Unlimited::<i32>::new("d", &[], 4).pure_create(&p);
     let session = File::open_rw(&p).unwrap();
     let mut ds = session.dataset("d").unwrap();
     let mut app = ds.buffered_appender().unwrap();
@@ -683,7 +736,9 @@ fn a_partial_trailing_element_is_refused_at_the_flush() {
 fn discard_abandons_the_buffer_but_not_what_was_written() {
     let dir = tempdir().unwrap();
     let p = dir.path().join("d.h5");
-    build(&p, 0, 4, true);
+    Unlimited::<i32>::new("d", &[], 4)
+        .filters(SHUFFLE_DEFLATE)
+        .pure_create(&p);
     {
         let session = File::open_rw(&p).unwrap();
         let mut ds = session.dataset("d").unwrap();
@@ -693,7 +748,10 @@ fn discard_abandons_the_buffer_but_not_what_was_written() {
         let abandoned = app.discard();
         assert_eq!(abandoned.len(), 8); // two i32
     }
-    assert_eq!(read_i32(&p), (0..4).collect::<Vec<_>>());
+    assert_eq!(
+        dataset::read_pure::<i32>(&p, "d"),
+        (0..4).collect::<Vec<_>>()
+    );
 }
 
 /// A `BufferedAppender`'s writes draw on freed space like any other immediate
@@ -704,7 +762,7 @@ fn discard_abandons_the_buffer_but_not_what_was_written() {
 fn a_buffered_appender_writes_into_freed_space() {
     let dir = tempdir().unwrap();
     let p = dir.path().join("d.h5");
-    build(&p, 0, 1024, false);
+    Unlimited::<i32>::new("d", &[], 1024).pure_create(&p);
     let payload: Vec<i32> = (0..16384).collect();
 
     let session = File::open_rw(&p).unwrap();
@@ -746,7 +804,7 @@ fn a_buffered_appender_writes_into_freed_space() {
     );
     session.close().unwrap();
 
-    assert_eq!(read_i32(&p), payload);
+    assert_eq!(dataset::read_pure::<i32>(&p, "d"), payload);
     assert_eq!(
         File::open(&p)
             .unwrap()
@@ -765,25 +823,10 @@ fn a_buffered_appender_writes_into_freed_space() {
 /// tolerance window, so each is stored as itself.
 fn build_lossy(path: &std::path::Path, n: usize) {
     let data: Vec<f64> = (0..n).map(|i| 1.05 + i as f64 * 0.1).collect();
-    let mut b = FileBuilder::new();
-    b.create_dataset("d")
-        .with_f64_data(&data)
-        .with_shape(&[n as u64])
-        .with_maxshape(&[MaxExtent::Unlimited])
-        .with_chunks(&[4])
-        .with_scale_offset(ScaleOffset::FloatDScale(1));
-    b.write(path).unwrap();
+    Unlimited::new("d", &data, 4)
+        .filters(&[Filter::ScaleOffset(ScaleOffset::FloatDScale(1))])
+        .pure_create(path);
 }
-
-fn read_f64(path: &std::path::Path) -> Vec<f64> {
-    File::open(path)
-        .unwrap()
-        .dataset("d")
-        .unwrap()
-        .read_f64()
-        .unwrap()
-}
-
 /// A mid-stream `flush` on a lossy dataset is refused rather than left to strand
 /// the appender one call later.
 ///
@@ -797,7 +840,7 @@ fn a_partial_flush_on_a_lossy_dataset_is_refused_with_the_buffer_intact() {
     let dir = tempdir().unwrap();
     let p = dir.path().join("d.h5");
     build_lossy(&p, 4);
-    let committed = read_f64(&p);
+    let committed = dataset::read_pure::<f64>(&p, "d");
 
     let session = File::open_rw(&p).unwrap();
     let mut ds = session.dataset("d").unwrap();
@@ -832,7 +875,7 @@ fn a_partial_flush_on_a_lossy_dataset_is_refused_with_the_buffer_intact() {
     drop(ds);
     session.close().unwrap();
 
-    let back = read_f64(&p);
+    let back = dataset::read_pure::<f64>(&p, "d");
     assert_eq!(back.len(), 9);
     assert_eq!(
         back[..4],
@@ -865,5 +908,5 @@ fn dropping_a_lossy_appender_still_writes_its_partial_tail() {
         drop(ds);
         session.close().unwrap();
     }
-    assert_eq!(read_f64(&p).len(), 6);
+    assert_eq!(dataset::read_pure::<f64>(&p, "d").len(), 6);
 }

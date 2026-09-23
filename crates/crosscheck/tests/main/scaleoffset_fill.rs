@@ -12,58 +12,13 @@
 //! test are the reference library's own, then checks that what hdf5-pure
 //! encodes is what the C library reads back.
 
-use hdf5::Extent;
-use hdf5::file::LibraryVersion;
-use hdf5::filters::ScaleOffset as CScaleOffset;
+use hdf5_pure::{H5Element, ScaleOffset};
 use tempfile::tempdir;
+use test_util_hdf5::dataset::{self, Filter, Unlimited};
 
-/// Create a rank-1 unlimited scale-offset `u64` dataset with the C library,
-/// under the latest format so it gets an Extensible-Array index (which is what
-/// `append_staged` requires), carrying a defined fill value.
-fn c_create(path: &std::path::Path, data: &[u64], chunk: usize, fill: u64) {
-    let file = hdf5::File::with_options()
-        .with_fapl(|p| p.libver_bounds(LibraryVersion::V110, LibraryVersion::latest()))
-        .create(path)
-        .unwrap();
-    let ds = file
-        .new_dataset::<u64>()
-        .scale_offset(CScaleOffset::Integer(0))
-        .chunk((chunk,))
-        .shape((Extent::resizable(data.len()),))
-        .fill_value(fill)
-        .create("col")
-        .unwrap();
-    ds.write_raw(data).unwrap();
-    file.close().unwrap();
-}
-
-fn read_c(path: &std::path::Path) -> Vec<u64> {
-    hdf5::File::open(path)
-        .unwrap()
-        .dataset("col")
-        .unwrap()
-        .read_raw::<u64>()
-        .unwrap()
-}
-
-fn read_pure(path: &std::path::Path) -> Vec<u64> {
-    hdf5_pure::File::open(path)
-        .unwrap()
-        .dataset("col")
-        .unwrap()
-        .read_u64()
-        .unwrap()
-}
-
-fn pure_append(path: &std::path::Path, values: &[u64]) {
-    let f = hdf5_pure::File::open_rw(path).unwrap();
-    f.dataset("col")
-        .unwrap()
-        .append_staged(|b| {
-            b.append_u64(values);
-        })
-        .unwrap();
-    f.commit().unwrap();
+/// Appends `values` to `col` through a staged append.
+fn append_to_col<T: H5Element>(path: &std::path::Path, values: &[T]) {
+    dataset::pure_append_staged(path, "col", values);
 }
 
 /// The premise of the whole file, and wider than the issue that prompted it:
@@ -81,7 +36,7 @@ fn the_c_library_records_a_defined_fill_value_even_without_one() {
     let dir = tempdir().unwrap();
     let filavail_and_filval = |fill: Option<u64>, name: &str| {
         let path = dir.path().join(name);
-        c_create_typed(&path, &[1u64, 2, 3], 512, CScaleOffset::Integer(0), fill);
+        c_create_typed(&path, &[1u64, 2, 3], 512, ScaleOffset::Integer(0), fill);
         let f = hdf5_pure::File::open(&path).unwrap();
         let ds = f.dataset("col").unwrap();
         let so = ds
@@ -132,22 +87,14 @@ fn a_dataset_this_crate_writes_carries_the_filter_parameters_the_c_library_recor
 
     macro_rules! compare {
         ($name:literal, $ty:ty, $with:ident, $data:expr, $fill:expr) => {
-            compare!(
-                $name,
-                $ty,
-                $with,
-                $data,
-                $fill,
-                CScaleOffset::Integer(0),
-                hdf5_pure::ScaleOffset::Integer(0)
-            )
+            compare!($name, $ty, $with, $data, $fill, ScaleOffset::Integer(0))
         };
-        ($name:literal, $ty:ty, $with:ident, $data:expr, $fill:expr, $c_mode:expr, $mode:expr) => {{
+        ($name:literal, $ty:ty, $with:ident, $data:expr, $fill:expr, $mode:expr) => {{
             let data: Vec<$ty> = $data;
             let fill: Option<$ty> = $fill;
             let c_path = dir.path().join(concat!($name, "-c.h5"));
             let pure_path = dir.path().join(concat!($name, "-pure.h5"));
-            c_create_typed(&c_path, &data, data.len(), $c_mode, fill);
+            c_create_typed(&c_path, &data, data.len(), $mode, fill);
             let mut b = hdf5_pure::FileBuilder::new();
             let ds = b
                 .create_dataset("col")
@@ -240,8 +187,7 @@ fn a_dataset_this_crate_writes_carries_the_filter_parameters_the_c_library_recor
         with_f64_data,
         vec![-999.0, 1.5, 2.25, -999.0004, 3.125],
         Some(-999.0),
-        CScaleOffset::FloatDScale(3),
-        hdf5_pure::ScaleOffset::FloatDScale(3)
+        ScaleOffset::FloatDScale(3)
     );
     compare!(
         "f64-default",
@@ -249,8 +195,7 @@ fn a_dataset_this_crate_writes_carries_the_filter_parameters_the_c_library_recor
         with_f64_data,
         vec![0.0, 1.5, 0.0004, 2.25, -0.0002],
         None,
-        CScaleOffset::FloatDScale(3),
-        hdf5_pure::ScaleOffset::FloatDScale(3)
+        ScaleOffset::FloatDScale(3)
     );
     compare!(
         "f32-default",
@@ -258,8 +203,7 @@ fn a_dataset_this_crate_writes_carries_the_filter_parameters_the_c_library_recor
         with_f32_data,
         vec![0.0, 1.5, 0.0004, 2.25, -0.0002],
         None,
-        CScaleOffset::FloatDScale(3),
-        hdf5_pure::ScaleOffset::FloatDScale(3)
+        ScaleOffset::FloatDScale(3)
     );
 }
 
@@ -286,18 +230,13 @@ fn a_recorded_fill_value_shrinks_a_mostly_fill_chunk() {
             .with_i32_data(&data)
             .with_shape(&[data.len() as u64])
             .with_chunks(&[data.len() as u64])
-            .with_scale_offset(hdf5_pure::ScaleOffset::Integer(0));
+            .with_scale_offset(ScaleOffset::Integer(0));
         if which == "with" {
             ds.with_fill_value(-1_000_000_i32);
         }
         b.write(&path).unwrap();
         assert_eq!(
-            hdf5_pure::File::open(&path)
-                .unwrap()
-                .dataset("col")
-                .unwrap()
-                .read_i32()
-                .unwrap(),
+            dataset::read_pure::<i32>(&path, "col"),
             data,
             "{which}: the values must survive either way"
         );
@@ -319,12 +258,15 @@ fn a_recorded_fill_value_shrinks_a_mostly_fill_chunk() {
 fn appending_to_a_c_written_fill_defined_dataset() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("append.h5");
-    c_create(&path, &[1, 2, 3], 512, 0);
+    c_create_typed(&path, &[1, 2, 3], 512, ScaleOffset::Integer(0), Some(0));
 
-    pure_append(&path, &[4, 5]);
+    append_to_col(&path, &[4, 5]);
 
-    assert_eq!(read_c(&path), vec![1, 2, 3, 4, 5]);
-    assert_eq!(read_pure(&path), vec![1, 2, 3, 4, 5]);
+    assert_eq!(
+        dataset::read_libhdf5::<u64>(&path, "col"),
+        vec![1, 2, 3, 4, 5]
+    );
+    assert_eq!(dataset::read_pure::<u64>(&path, "col"), vec![1, 2, 3, 4, 5]);
 }
 
 /// Appended elements that *are* the fill value must round-trip: the encoder
@@ -336,17 +278,17 @@ fn appended_fill_valued_elements_round_trip() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("append_fill.h5");
     let fill = 7u64;
-    c_create(&path, &[10, 11, 12], 8, fill);
+    c_create_typed(&path, &[10, 11, 12], 8, ScaleOffset::Integer(0), Some(fill));
 
     // A chunk mixing real values with the fill value, then a chunk that is
     // nothing but fill values.
-    pure_append(&path, &[20, fill, 21, fill, fill]);
-    pure_append(&path, &[fill; 8]);
+    append_to_col(&path, &[20, fill, 21, fill, fill]);
+    append_to_col(&path, &[fill; 8]);
 
     let mut want = vec![10, 11, 12, 20, fill, 21, fill, fill];
     want.extend([fill; 8]);
-    assert_eq!(read_c(&path), want);
-    assert_eq!(read_pure(&path), want);
+    assert_eq!(dataset::read_libhdf5::<u64>(&path, "col"), want);
+    assert_eq!(dataset::read_pure::<u64>(&path, "col"), want);
 }
 
 /// The sentinel must not collide with a legitimate offset. A chunk whose
@@ -360,15 +302,15 @@ fn the_widest_value_in_a_chunk_is_not_mistaken_for_the_fill_value() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("sentinel.h5");
     let fill = 0u64;
-    c_create(&path, &[100], 8, fill);
+    c_create_typed(&path, &[100], 8, ScaleOffset::Integer(0), Some(fill));
 
     // min = 100, max = 103: span 4, so an unwidened minbits would be 2 and the
     // offset for 103 would be 0b11 — the sentinel.
-    pure_append(&path, &[101, 102, 103, fill, 100, 101, 102]);
+    append_to_col(&path, &[101, 102, 103, fill, 100, 101, 102]);
 
     let want = vec![100, 101, 102, 103, fill, 100, 101, 102];
-    assert_eq!(read_c(&path), want);
-    assert_eq!(read_pure(&path), want);
+    assert_eq!(dataset::read_libhdf5::<u64>(&path, "col"), want);
+    assert_eq!(dataset::read_pure::<u64>(&path, "col"), want);
 }
 
 /// Signed data: the fill value comparison and the `value - min` offsets are
@@ -380,53 +322,19 @@ fn signed_data_with_a_negative_fill_value() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("signed.h5");
     let fill = -9i32;
-    {
-        let file = hdf5::File::with_options()
-            .with_fapl(|p| p.libver_bounds(LibraryVersion::V110, LibraryVersion::latest()))
-            .create(&path)
-            .unwrap();
-        let ds = file
-            .new_dataset::<i32>()
-            .scale_offset(CScaleOffset::Integer(0))
-            .chunk((8,))
-            .shape((Extent::resizable(3),))
-            .fill_value(fill)
-            .create("col")
-            .unwrap();
-        ds.write_raw(&[-100i32, 0, 100]).unwrap();
-        file.close().unwrap();
-    }
+    c_create_typed(
+        &path,
+        &[-100i32, 0, 100],
+        8,
+        ScaleOffset::Integer(0),
+        Some(fill),
+    );
 
-    {
-        let f = hdf5_pure::File::open_rw(&path).unwrap();
-        f.dataset("col")
-            .unwrap()
-            .append_staged(|b| {
-                b.append_i32(&[-5, fill, 5, fill]);
-            })
-            .unwrap();
-        f.commit().unwrap();
-    }
+    append_to_col(&path, &[-5, fill, 5, fill]);
 
     let want = vec![-100i32, 0, 100, -5, fill, 5, fill];
-    assert_eq!(
-        hdf5::File::open(&path)
-            .unwrap()
-            .dataset("col")
-            .unwrap()
-            .read_raw::<i32>()
-            .unwrap(),
-        want
-    );
-    assert_eq!(
-        hdf5_pure::File::open(&path)
-            .unwrap()
-            .dataset("col")
-            .unwrap()
-            .read_i32()
-            .unwrap(),
-        want
-    );
+    assert_eq!(dataset::read_libhdf5::<i32>(&path, "col"), want);
+    assert_eq!(dataset::read_pure::<i32>(&path, "col"), want);
 }
 
 /// Read the raw (still-compressed) bytes of every chunk of `col`, in chunk
@@ -461,26 +369,15 @@ fn c_create_typed<T: hdf5::H5Type + Copy>(
     path: &std::path::Path,
     data: &[T],
     chunk: usize,
-    mode: CScaleOffset,
+    mode: ScaleOffset,
     fill: Option<T>,
 ) {
-    let file = hdf5::File::with_options()
-        .with_fapl(|p| p.libver_bounds(LibraryVersion::V110, LibraryVersion::latest()))
-        .create(path)
-        .unwrap();
-    let mut builder = file
-        .new_dataset::<T>()
-        .scale_offset(mode)
-        .chunk((chunk,))
-        .shape((Extent::resizable(data.len()),));
-    if let Some(f) = fill {
-        builder = builder.fill_value(f);
+    let dataset = Unlimited::new("col", data, chunk as u64).filters(&[Filter::ScaleOffset(mode)]);
+    match fill {
+        Some(fill) => dataset.fill_value(fill),
+        None => dataset,
     }
-    let ds = builder.create("col").unwrap();
-    if !data.is_empty() {
-        ds.write_raw(data).unwrap();
-    }
-    file.close().unwrap();
+    .libhdf5_create(path);
 }
 
 /// Both files end up holding the same elements in one chunk. In the first the C
@@ -509,7 +406,7 @@ fn c_create_typed<T: hdf5::H5Type + Copy>(
 /// [`assert_byte_identical_encoding`] is this over a swept fixture; a test whose
 /// fixture does not vary calls this directly rather than running the identical
 /// case twenty times.
-fn assert_one_byte_identical_chunk<T, A>(mode: CScaleOffset, values: &[T], append: A)
+fn assert_one_byte_identical_chunk<T, A>(mode: ScaleOffset, values: &[T], append: A)
 where
     T: hdf5::H5Type + Copy + PartialEq + std::fmt::Debug,
     A: Fn(&std::path::Path, &[T]),
@@ -535,15 +432,15 @@ where
 /// chunk; the lossy float modes seed none, because a staged append refuses to
 /// re-encode a partial trailing chunk under them (issue #407), and grow the
 /// whole chunk from an empty dataset instead.
-fn seed_len(mode: CScaleOffset) -> usize {
+fn seed_len(mode: ScaleOffset) -> usize {
     match mode {
-        CScaleOffset::Integer(_) => 1,
+        ScaleOffset::Integer(_) => 1,
         _ => 0,
     }
 }
 
 fn assert_byte_identical_encoding<T, A>(
-    mode: CScaleOffset,
+    mode: ScaleOffset,
     values_for: impl Fn(u64) -> Vec<T>,
     append: A,
 ) where
@@ -560,14 +457,14 @@ fn assert_byte_identical_encoding<T, A>(
 #[cfg(target_endian = "little")]
 fn unsigned_integer_encoding_matches_the_c_library_byte_for_byte() {
     assert_byte_identical_encoding(
-        CScaleOffset::Integer(0),
+        ScaleOffset::Integer(0),
         |span| {
             let mut v = vec![7u64];
             v.extend(100..100 + span);
             v.push(7);
             v
         },
-        pure_append,
+        append_to_col,
     );
 }
 
@@ -579,23 +476,14 @@ fn unsigned_integer_encoding_matches_the_c_library_byte_for_byte() {
 #[cfg(target_endian = "little")]
 fn signed_integer_encoding_matches_the_c_library_byte_for_byte() {
     assert_byte_identical_encoding(
-        CScaleOffset::Integer(0),
+        ScaleOffset::Integer(0),
         |span| {
             let mut v = vec![-9i64];
             v.extend(-50..-50 + span as i64);
             v.push(-9);
             v
         },
-        |path, values| {
-            let f = hdf5_pure::File::open_rw(path).unwrap();
-            f.dataset("col")
-                .unwrap()
-                .append_staged(|b| {
-                    b.append_i64(values);
-                })
-                .unwrap();
-            f.commit().unwrap();
-        },
+        append_to_col,
     );
 }
 
@@ -607,7 +495,7 @@ fn signed_integer_encoding_matches_the_c_library_byte_for_byte() {
 #[cfg(target_endian = "little")]
 fn float_dscale_encoding_matches_the_c_library_byte_for_byte() {
     assert_byte_identical_encoding(
-        CScaleOffset::FloatDScale(3),
+        ScaleOffset::FloatDScale(3),
         |span| {
             let mut v = vec![-999.0f64];
             v.extend((0..span).map(|i| 1.5 + i as f64 * 0.25));
@@ -615,7 +503,7 @@ fn float_dscale_encoding_matches_the_c_library_byte_for_byte() {
             v.push(-999.0004);
             v
         },
-        pure_append_f64,
+        append_to_col,
     );
 }
 
@@ -637,7 +525,7 @@ fn a_residual_just_below_one_half_rounds_the_way_the_c_library_rounds() {
         "the fixture must be a value the two roundings disagree on"
     );
     let values = [-999.0f64, 0.0, below_half, 3.0, -999.0];
-    assert_one_byte_identical_chunk(CScaleOffset::FloatDScale(0), &values, pure_append_f64);
+    assert_one_byte_identical_chunk(ScaleOffset::FloatDScale(0), &values, append_to_col);
 
     // The `f32` helper is a separate function with the same defect available to
     // it, and the value it parts company with the reference on is its own: the
@@ -645,9 +533,9 @@ fn a_residual_just_below_one_half_rounds_the_way_the_c_library_rounds() {
     let below_half_f32 = 0.499_999_97f32;
     assert!(below_half_f32 < 0.5 && below_half_f32 + 0.5 == 1.0);
     assert_one_byte_identical_chunk(
-        CScaleOffset::FloatDScale(0),
+        ScaleOffset::FloatDScale(0),
         &[-999.0f32, 0.0, below_half_f32, 3.0, -999.0],
-        pure_append_f32,
+        append_to_col,
     );
 
     // The same divergence as a value, which is how a user meets it: this crate
@@ -658,52 +546,20 @@ fn a_residual_just_below_one_half_rounds_the_way_the_c_library_rounds() {
         &path,
         &[],
         values.len(),
-        CScaleOffset::FloatDScale(0),
+        ScaleOffset::FloatDScale(0),
         Some(values[0]),
     );
-    pure_append_f64(&path, &values);
+    append_to_col(&path, &values);
     assert_eq!(
-        hdf5_pure::File::open(&path)
-            .unwrap()
-            .dataset("col")
-            .unwrap()
-            .read_f64()
-            .unwrap()[2],
+        dataset::read_pure::<f64>(&path, "col")[2],
         0.0,
         "a residual below one half must round down"
     );
     assert_eq!(
-        hdf5::File::open(&path)
-            .unwrap()
-            .dataset("col")
-            .unwrap()
-            .read_raw::<f64>()
-            .unwrap()[2],
+        dataset::read_libhdf5::<f64>(&path, "col")[2],
         0.0,
         "and the C library must read back the same element"
     );
-}
-
-fn pure_append_f64(path: &std::path::Path, values: &[f64]) {
-    let f = hdf5_pure::File::open_rw(path).unwrap();
-    f.dataset("col")
-        .unwrap()
-        .append_staged(|b| {
-            b.append_f64(values);
-        })
-        .unwrap();
-    f.commit().unwrap();
-}
-
-fn pure_append_f32(path: &std::path::Path, values: &[f32]) {
-    let f = hdf5_pure::File::open_rw(path).unwrap();
-    f.dataset("col")
-        .unwrap()
-        .append_staged(|b| {
-            b.append_f32(values);
-        })
-        .unwrap();
-    f.commit().unwrap();
 }
 
 /// The `f32` half of the D-scale path.
@@ -711,14 +567,14 @@ fn pure_append_f32(path: &std::path::Path, values: &[f32]) {
 #[cfg(target_endian = "little")]
 fn float32_dscale_encoding_matches_the_c_library_byte_for_byte() {
     assert_byte_identical_encoding(
-        CScaleOffset::FloatDScale(3),
+        ScaleOffset::FloatDScale(3),
         |span| {
             let mut v = vec![-999.0f32];
             v.extend((0..span).map(|i| 1.5 + i as f32 * 0.25));
             v.push(-999.0004);
             v
         },
-        pure_append_f32,
+        append_to_col,
     );
 }
 
@@ -755,10 +611,10 @@ fn the_f32_tolerance_window_between_the_two_precisions_matches() {
 
     let c_written = dir.path().join("c.h5");
     let appended = dir.path().join("appended.h5");
-    let mode = CScaleOffset::FloatDScale(2);
+    let mode = ScaleOffset::FloatDScale(2);
     c_create_typed(&c_written, &values, values.len(), mode, Some(fill));
     c_create_typed(&appended, &[], values.len(), mode, Some(fill));
-    pure_append_f32(&appended, &values);
+    append_to_col(&appended, &values);
 
     assert_eq!(raw_chunks(&appended), raw_chunks(&c_written));
 }
@@ -774,55 +630,23 @@ fn float_dscale_with_a_defined_fill_value() {
     let path = dir.path().join("float.h5");
     let decimals = 3u8;
     let fill = -999.0f64;
-    {
-        let file = hdf5::File::with_options()
-            .with_fapl(|p| p.libver_bounds(LibraryVersion::V110, LibraryVersion::latest()))
-            .create(&path)
-            .unwrap();
-        file.new_dataset::<f64>()
-            .scale_offset(CScaleOffset::FloatDScale(decimals))
-            .chunk((8,))
-            .shape((Extent::resizable(0),))
-            .fill_value(fill)
-            .create("col")
-            .unwrap();
-        file.close().unwrap();
-    }
+    c_create_typed(
+        &path,
+        &[],
+        8,
+        ScaleOffset::FloatDScale(i32::from(decimals)),
+        Some(fill),
+    );
 
     // The whole chunk comes from this crate: D-scale is lossy, so a staged
     // append does not re-encode a partial chunk the C library wrote.
-    {
-        let f = hdf5_pure::File::open_rw(&path).unwrap();
-        f.dataset("col")
-            .unwrap()
-            .append_staged(|b| {
-                b.append_f64(&[1.5, 2.25, 3.125, 4.0, fill, 5.5, fill, 6.75]);
-            })
-            .unwrap();
-        f.commit().unwrap();
-    }
+    append_to_col(&path, &[1.5, 2.25, 3.125, 4.0, fill, 5.5, fill, 6.75]);
 
     let want = [1.5f64, 2.25, 3.125, 4.0, fill, 5.5, fill, 6.75];
     let tol = 0.5 * 10f64.powi(-(i32::from(decimals)));
     for (label, got) in [
-        (
-            "C",
-            hdf5::File::open(&path)
-                .unwrap()
-                .dataset("col")
-                .unwrap()
-                .read_raw::<f64>()
-                .unwrap(),
-        ),
-        (
-            "pure",
-            hdf5_pure::File::open(&path)
-                .unwrap()
-                .dataset("col")
-                .unwrap()
-                .read_f64()
-                .unwrap(),
-        ),
+        ("C", dataset::read_libhdf5::<f64>(&path, "col")),
+        ("pure", dataset::read_pure::<f64>(&path, "col")),
     ] {
         assert_eq!(got.len(), want.len(), "{label} length");
         for (g, w) in got.iter().zip(want.iter()) {
@@ -848,7 +672,7 @@ fn the_full_precision_fallback_header_matches_the_c_library() {
     // Skipping the fill value leaves min = 1 and max = 255, a span of 254 —
     // past the point where the reference stops packing for a 1-byte type.
     let values: Vec<u8> = vec![0, 200, 1, 255, 0, 200, 1, 255];
-    assert_one_byte_identical_chunk(CScaleOffset::Integer(0), &values, |path, v| {
+    assert_one_byte_identical_chunk(ScaleOffset::Integer(0), &values, |path, v| {
         let f = hdf5_pure::File::open_rw(path).unwrap();
         f.dataset("col")
             .unwrap()
@@ -870,19 +694,10 @@ fn the_float_full_precision_fallback_header_matches_the_c_library() {
     // The chunk's minimum must not itself be zero, or a header carrying the
     // minimum and one carrying zero are the same bytes.
     let f64_values = vec![-999.0f64, 5.0, 1e19, 6.0, -999.0, 7.0];
-    assert_one_byte_identical_chunk(CScaleOffset::FloatDScale(0), &f64_values, |path, v| {
-        let f = hdf5_pure::File::open_rw(path).unwrap();
-        f.dataset("col")
-            .unwrap()
-            .append_staged(|b| {
-                b.append_f64(v);
-            })
-            .unwrap();
-        f.commit().unwrap();
-    });
+    assert_one_byte_identical_chunk(ScaleOffset::FloatDScale(0), &f64_values, append_to_col);
 
     let f32_values = vec![-999.0f32, 5.0, 1e10, 6.0, -999.0, 7.0];
-    assert_one_byte_identical_chunk(CScaleOffset::FloatDScale(0), &f32_values, pure_append_f32);
+    assert_one_byte_identical_chunk(ScaleOffset::FloatDScale(0), &f32_values, append_to_col);
 }
 
 /// A **fill-undefined** fixture, which the C library's own API cannot create:
@@ -969,7 +784,7 @@ fn the_fallback_header_matches_the_c_library_at_every_width() {
                     .$with(&$data)
                     .with_shape(&[$data.len() as u64])
                     .with_chunks(&[$data.len() as u64])
-                    .with_scale_offset(hdf5_pure::ScaleOffset::Integer(0));
+                    .with_scale_offset(ScaleOffset::Integer(0));
                 b.write(p).unwrap();
             });
             let path = dir.path().join(format!("{}.h5", $name));
@@ -994,18 +809,9 @@ fn the_fallback_header_matches_the_c_library_at_every_width() {
     // hand-expanded branch could have differed. Non-fill values spread
     // -128..127, past the fallback threshold.
     assert_one_byte_identical_chunk(
-        CScaleOffset::Integer(0),
+        ScaleOffset::Integer(0),
         &[5i8, -128, 127, 5, -128, 127, 0, 1],
-        |path, values| {
-            let f = hdf5_pure::File::open_rw(path).unwrap();
-            f.dataset("col")
-                .unwrap()
-                .append_staged(|b| {
-                    b.append_i8(values);
-                })
-                .unwrap();
-            f.commit().unwrap();
-        },
+        append_to_col,
     );
 }
 
@@ -1017,21 +823,8 @@ fn the_fallback_header_matches_the_c_library_at_every_width() {
 #[test]
 #[cfg(target_endian = "little")]
 fn an_all_fill_chunk_matches_the_c_library_byte_for_byte() {
-    assert_one_byte_identical_chunk(CScaleOffset::Integer(0), &[3u64; 6], pure_append);
-    assert_one_byte_identical_chunk(
-        CScaleOffset::FloatDScale(3),
-        &[2.5f64; 6],
-        |path, values| {
-            let f = hdf5_pure::File::open_rw(path).unwrap();
-            f.dataset("col")
-                .unwrap()
-                .append_staged(|b| {
-                    b.append_f64(values);
-                })
-                .unwrap();
-            f.commit().unwrap();
-        },
-    );
+    assert_one_byte_identical_chunk(ScaleOffset::Integer(0), &[3u64; 6], append_to_col);
+    assert_one_byte_identical_chunk(ScaleOffset::FloatDScale(3), &[2.5f64; 6], append_to_col);
 }
 
 /// `ScaleOffset::Integer(n)` with `n` equal to the datatype's bit width selects
@@ -1054,7 +847,7 @@ fn a_full_width_minbits_stores_the_chunk_unfiltered() {
         .with_i32_data(&data)
         .with_shape(&[64])
         .with_chunks(&[64])
-        .with_scale_offset(hdf5_pure::ScaleOffset::Integer(32));
+        .with_scale_offset(ScaleOffset::Integer(32));
     b.write(&path).unwrap();
 
     // Stored verbatim: one chunk, exactly the element bytes, no 21-byte header.
@@ -1062,22 +855,6 @@ fn a_full_width_minbits_stores_the_chunk_unfiltered() {
     let expected: Vec<u8> = data.iter().flat_map(|v| v.to_le_bytes()).collect();
     assert_eq!(raw, &expected, "the chunk must be stored unfiltered");
 
-    assert_eq!(
-        hdf5_pure::File::open(&path)
-            .unwrap()
-            .dataset("col")
-            .unwrap()
-            .read_i32()
-            .unwrap(),
-        data
-    );
-    assert_eq!(
-        hdf5::File::open(&path)
-            .unwrap()
-            .dataset("col")
-            .unwrap()
-            .read_raw::<i32>()
-            .unwrap(),
-        data
-    );
+    assert_eq!(dataset::read_pure::<i32>(&path, "col"), data);
+    assert_eq!(dataset::read_libhdf5::<i32>(&path, "col"), data);
 }

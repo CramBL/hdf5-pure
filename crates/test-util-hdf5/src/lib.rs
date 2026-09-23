@@ -3,6 +3,7 @@
 
 #[cfg(feature = "hdf5")]
 pub mod absence;
+pub mod dataset;
 #[cfg(feature = "hdf5")]
 pub mod file;
 pub mod lock;

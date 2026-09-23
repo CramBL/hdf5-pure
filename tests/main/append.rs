@@ -7,61 +7,21 @@ use hdf5_pure::{
     AppendBuilder, AttrValue, Error, File, FileBuilder, FormatError, MaxExtent, ScaleOffset,
 };
 use tempfile::tempdir;
-
-/// Create a rank-1, unlimited i32 dataset with the given chunk length and
-/// (optional) filters, seeded with `0..n`.
-fn create_i32(
-    path: &std::path::Path,
-    n: i32,
-    chunk: u64,
-    deflate: bool,
-    shuffle: bool,
-    fletcher32: bool,
-) {
-    let data: Vec<i32> = (0..n).collect();
-    let mut b = FileBuilder::new();
-    let ds = b
-        .create_dataset("d")
-        .with_i32_data(&data)
-        .with_shape(&[n as u64])
-        .with_maxshape(&[MaxExtent::Unlimited])
-        .with_chunks(&[chunk]);
-    if shuffle {
-        ds.with_shuffle();
-    }
-    if deflate {
-        ds.with_deflate(6);
-    }
-    if fletcher32 {
-        ds.with_fletcher32();
-    }
-    b.write(path).unwrap();
-}
-
-fn read_i32(path: &std::path::Path) -> Vec<i32> {
-    let f = File::open(path).unwrap();
-    f.dataset("d").unwrap().read_i32().unwrap()
-}
-
-fn append_i32(path: &std::path::Path, values: &[i32]) {
-    let s = File::open_rw(path).unwrap();
-    s.dataset("d")
-        .unwrap()
-        .append_staged(|b| {
-            b.append_i32(values);
-        })
-        .unwrap();
-    s.commit().unwrap();
-}
+use test_util_hdf5::dataset::{self, Filter, Unlimited};
 
 #[test]
 fn append_deflate_shuffle_chunk_aligned() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("d.h5");
     // 8 elements, chunk 4 => 2 full chunks. Append 8 more (2 chunks): aligned.
-    create_i32(&path, 8, 4, true, true, false);
-    append_i32(&path, &(8..16).collect::<Vec<_>>());
-    assert_eq!(read_i32(&path), (0..16).collect::<Vec<_>>());
+    Unlimited::new("d", &(0..8).collect::<Vec<i32>>(), 4)
+        .filters(&[Filter::Shuffle, Filter::Deflate(6)])
+        .pure_create(&path);
+    dataset::pure_append_staged(&path, "d", &(8..16).collect::<Vec<_>>());
+    assert_eq!(
+        dataset::read_pure::<i32>(&path, "d"),
+        (0..16).collect::<Vec<_>>()
+    );
 }
 
 #[test]
@@ -70,38 +30,56 @@ fn append_unaligned_crosses_chunk_boundary() {
     let path = dir.path().join("d.h5");
     // 6 elements, chunk 4 => 1 full chunk + a partial (2 of 4). Append 5 => 11:
     // the partial chunk is rewritten and the tail grows to 3 chunks.
-    create_i32(&path, 6, 4, true, true, false);
-    append_i32(&path, &(6..11).collect::<Vec<_>>());
-    assert_eq!(read_i32(&path), (0..11).collect::<Vec<_>>());
+    Unlimited::new("d", &(0..6).collect::<Vec<i32>>(), 4)
+        .filters(&[Filter::Shuffle, Filter::Deflate(6)])
+        .pure_create(&path);
+    dataset::pure_append_staged(&path, "d", &(6..11).collect::<Vec<_>>());
+    assert_eq!(
+        dataset::read_pure::<i32>(&path, "d"),
+        (0..11).collect::<Vec<_>>()
+    );
 }
 
 #[test]
 fn append_repeated_partial_then_partial() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("d.h5");
-    create_i32(&path, 3, 4, true, false, false); // 1 partial chunk (3 of 4)
-    append_i32(&path, &[3, 4]); // -> 5 (crosses into chunk 1, partial)
-    append_i32(&path, &[5, 6, 7]); // -> 8 (fills chunk 1)
-    append_i32(&path, &[8]); // -> 9 (new partial chunk 2)
-    assert_eq!(read_i32(&path), (0..9).collect::<Vec<_>>());
+    Unlimited::new("d", &(0..3).collect::<Vec<i32>>(), 4)
+        .filters(&[Filter::Deflate(6)])
+        .pure_create(&path); // 1 partial chunk (3 of 4)
+    dataset::pure_append_staged(&path, "d", &[3, 4]); // -> 5 (crosses into chunk 1, partial)
+    dataset::pure_append_staged(&path, "d", &[5, 6, 7]); // -> 8 (fills chunk 1)
+    dataset::pure_append_staged(&path, "d", &[8]); // -> 9 (new partial chunk 2)
+    assert_eq!(
+        dataset::read_pure::<i32>(&path, "d"),
+        (0..9).collect::<Vec<_>>()
+    );
 }
 
 #[test]
 fn append_unfiltered() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("d.h5");
-    create_i32(&path, 6, 3, false, false, false);
-    append_i32(&path, &(6..13).collect::<Vec<_>>()); // unaligned (6->13)
-    assert_eq!(read_i32(&path), (0..13).collect::<Vec<_>>());
+    Unlimited::new("d", &(0..6).collect::<Vec<i32>>(), 3).pure_create(&path);
+    dataset::pure_append_staged(&path, "d", &(6..13).collect::<Vec<_>>()); // unaligned (6->13)
+    assert_eq!(
+        dataset::read_pure::<i32>(&path, "d"),
+        (0..13).collect::<Vec<_>>()
+    );
 }
 
 #[test]
 fn append_fletcher32() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("d.h5");
-    create_i32(&path, 5, 4, true, false, true);
-    append_i32(&path, &(5..12).collect::<Vec<_>>());
-    assert_eq!(read_i32(&path), (0..12).collect::<Vec<_>>());
+    Unlimited::new("d", &(0..5).collect::<Vec<i32>>(), 4)
+        .filters(&[Filter::Deflate(6), Filter::Fletcher32])
+        .pure_create(&path);
+    dataset::pure_append_staged(&path, "d", &(5..12).collect::<Vec<_>>());
+    assert_eq!(
+        dataset::read_pure::<i32>(&path, "d"),
+        (0..12).collect::<Vec<_>>()
+    );
 }
 
 #[test]
@@ -111,14 +89,9 @@ fn append_scale_offset_f64() {
     // Float D-scale is lossy, so the length has to be chunk-aligned: growing a
     // partial trailing chunk is refused (see the test below).
     let init: Vec<f64> = (0..6).map(|i| i as f64 * 0.25).collect();
-    let mut b = FileBuilder::new();
-    b.create_dataset("d")
-        .with_f64_data(&init)
-        .with_shape(&[6])
-        .with_maxshape(&[MaxExtent::Unlimited])
-        .with_chunks(&[3])
-        .with_scale_offset(ScaleOffset::FloatDScale(2));
-    b.write(&path).unwrap();
+    Unlimited::new("d", &init, 3)
+        .filters(&[Filter::ScaleOffset(ScaleOffset::FloatDScale(2))])
+        .pure_create(&path);
 
     let more: Vec<f64> = (6..14).map(|i| i as f64 * 0.25).collect();
     {
@@ -166,14 +139,9 @@ fn a_staged_append_onto_a_lossy_partial_tail_is_refused() {
     // stored as itself.
     let written = [1.05f64, 1.15, 1.25, 1.35, 1.45, 1.55];
     let build = |path: &std::path::Path, data: &[f64]| {
-        let mut b = FileBuilder::new();
-        b.create_dataset("d")
-            .with_f64_data(data)
-            .with_shape(&[data.len() as u64])
-            .with_maxshape(&[MaxExtent::Unlimited])
-            .with_chunks(&[4])
-            .with_scale_offset(ScaleOffset::FloatDScale(1));
-        b.write(path).unwrap();
+        Unlimited::new("d", data, 4)
+            .filters(&[Filter::ScaleOffset(ScaleOffset::FloatDScale(1))])
+            .pure_create(path);
     };
     let read = |path: &std::path::Path| {
         File::open(path)
@@ -267,7 +235,9 @@ fn a_staged_append_onto_a_lossy_partial_tail_is_refused() {
 fn append_generic_and_raw() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("d.h5");
-    create_i32(&path, 4, 4, true, false, false);
+    Unlimited::new("d", &(0..4).collect::<Vec<i32>>(), 4)
+        .filters(&[Filter::Deflate(6)])
+        .pure_create(&path);
     // Generic append<T>.
     {
         let s = File::open_rw(&path).unwrap();
@@ -294,7 +264,10 @@ fn append_generic_and_raw() {
             .unwrap();
         s.commit().unwrap();
     }
-    assert_eq!(read_i32(&path), (0..11).collect::<Vec<_>>());
+    assert_eq!(
+        dataset::read_pure::<i32>(&path, "d"),
+        (0..11).collect::<Vec<_>>()
+    );
 }
 
 #[test]
@@ -306,23 +279,24 @@ fn append_to_userblock_file() {
     // its new chunks base-relative too.
     let mut b = FileBuilder::new();
     b.with_userblock(512);
-    b.create_dataset("d")
-        .with_i32_data(&(0..8).collect::<Vec<_>>())
-        .with_shape(&[8])
-        .with_maxshape(&[MaxExtent::Unlimited])
-        .with_chunks(&[4])
-        .with_shuffle()
-        .with_deflate(6);
+    Unlimited::new("d", &(0..8).collect::<Vec<i32>>(), 4)
+        .filters(&[Filter::Shuffle, Filter::Deflate(6)])
+        .add_to(&mut b);
     b.write(&path).unwrap();
-    append_i32(&path, &(8..17).collect::<Vec<_>>()); // unaligned 8 -> 17
-    assert_eq!(read_i32(&path), (0..17).collect::<Vec<_>>());
+    dataset::pure_append_staged(&path, "d", &(8..17).collect::<Vec<_>>()); // unaligned 8 -> 17
+    assert_eq!(
+        dataset::read_pure::<i32>(&path, "d"),
+        (0..17).collect::<Vec<_>>()
+    );
 }
 
 #[test]
 fn zero_length_append_is_noop() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("d.h5");
-    create_i32(&path, 5, 4, true, false, false);
+    Unlimited::new("d", &(0..5).collect::<Vec<i32>>(), 4)
+        .filters(&[Filter::Deflate(6)])
+        .pure_create(&path);
     {
         let s = File::open_rw(&path).unwrap();
         s.dataset("d")
@@ -333,7 +307,10 @@ fn zero_length_append_is_noop() {
             .unwrap();
         s.commit().unwrap();
     }
-    assert_eq!(read_i32(&path), (0..5).collect::<Vec<_>>());
+    assert_eq!(
+        dataset::read_pure::<i32>(&path, "d"),
+        (0..5).collect::<Vec<_>>()
+    );
 }
 
 #[test]
@@ -353,14 +330,9 @@ fn many_appends_do_not_rewrite_existing_data() {
     let mut rng = lcg(0x1234_5678);
     let base: Vec<i32> = (0..base_n).map(|_| rng()).collect();
     {
-        let mut b = FileBuilder::new();
-        b.create_dataset("d")
-            .with_i32_data(&base)
-            .with_shape(&[base_n as u64])
-            .with_maxshape(&[MaxExtent::Unlimited])
-            .with_chunks(&[200])
-            .with_deflate(6);
-        b.write(&path).unwrap();
+        Unlimited::new("d", &base, 200)
+            .filters(&[Filter::Deflate(6)])
+            .pure_create(&path);
     }
     let size_after_create = std::fs::metadata(&path).unwrap().len();
 
@@ -379,7 +351,7 @@ fn many_appends_do_not_rewrite_existing_data() {
             s.commit().unwrap();
         }
     }
-    assert_eq!(read_i32(&path), expected);
+    assert_eq!(dataset::read_pure::<i32>(&path, "d"), expected);
 
     let final_size = std::fs::metadata(&path).unwrap().len();
     // 10 appends of 200 to a 20 000-element incompressible base. Rewriting the
@@ -395,7 +367,9 @@ fn many_appends_do_not_rewrite_existing_data() {
 fn introspection_reports_eligibility() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("d.h5");
-    create_i32(&path, 8, 4, true, true, false);
+    Unlimited::new("d", &(0..8).collect::<Vec<i32>>(), 4)
+        .filters(&[Filter::Shuffle, Filter::Deflate(6)])
+        .pure_create(&path);
     let f = File::open(&path).unwrap();
     let ds = f.dataset("d").unwrap();
     assert!(ds.is_chunked());
@@ -460,7 +434,7 @@ fn refuse_contiguous() {
     assert_append_unsupported(commit_append(&path, "d", |a| {
         a.append_i32(&[4, 5]);
     }));
-    assert_eq!(read_i32(&path), vec![1, 2, 3]);
+    assert_eq!(dataset::read_pure::<i32>(&path, "d"), vec![1, 2, 3]);
 }
 
 #[test]
@@ -478,7 +452,10 @@ fn refuse_fixed_chunked_not_unlimited() {
     assert_append_unsupported(commit_append(&path, "d", |a| {
         a.append_i32(&[6, 7, 8]);
     }));
-    assert_eq!(read_i32(&path), (0..6).collect::<Vec<_>>());
+    assert_eq!(
+        dataset::read_pure::<i32>(&path, "d"),
+        (0..6).collect::<Vec<_>>()
+    );
 }
 
 #[test]
@@ -502,40 +479,57 @@ fn refuse_rank2() {
 fn refuse_datatype_mismatch() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("d.h5");
-    create_i32(&path, 4, 4, true, false, false);
+    Unlimited::new("d", &(0..4).collect::<Vec<i32>>(), 4)
+        .filters(&[Filter::Deflate(6)])
+        .pure_create(&path);
     assert_append_unsupported(commit_append(&path, "d", |a| {
         a.append_f64(&[1.0, 2.0]); // f64 onto i32
     }));
-    assert_eq!(read_i32(&path), (0..4).collect::<Vec<_>>());
+    assert_eq!(
+        dataset::read_pure::<i32>(&path, "d"),
+        (0..4).collect::<Vec<_>>()
+    );
 }
 
 #[test]
 fn refuse_raw_wrong_length() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("d.h5");
-    create_i32(&path, 4, 4, true, false, false);
+    Unlimited::new("d", &(0..4).collect::<Vec<i32>>(), 4)
+        .filters(&[Filter::Deflate(6)])
+        .pure_create(&path);
     assert_append_unsupported(commit_append(&path, "d", |a| {
         a.append_raw(&[1, 2, 3]); // 3 bytes, elem size 4
     }));
-    assert_eq!(read_i32(&path), (0..4).collect::<Vec<_>>());
+    assert_eq!(
+        dataset::read_pure::<i32>(&path, "d"),
+        (0..4).collect::<Vec<_>>()
+    );
 }
 
 #[test]
 fn refuse_mixed_element_types() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("d.h5");
-    create_i32(&path, 4, 4, true, false, false);
+    Unlimited::new("d", &(0..4).collect::<Vec<i32>>(), 4)
+        .filters(&[Filter::Deflate(6)])
+        .pure_create(&path);
     assert_append_unsupported(commit_append(&path, "d", |a| {
         a.append_i32(&[4, 5]).append_i64(&[6]);
     }));
-    assert_eq!(read_i32(&path), (0..4).collect::<Vec<_>>());
+    assert_eq!(
+        dataset::read_pure::<i32>(&path, "d"),
+        (0..4).collect::<Vec<_>>()
+    );
 }
 
 #[test]
 fn refuse_nonexistent_dataset() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("d.h5");
-    create_i32(&path, 4, 4, true, false, false);
+    Unlimited::new("d", &(0..4).collect::<Vec<i32>>(), 4)
+        .filters(&[Filter::Deflate(6)])
+        .pure_create(&path);
     // A missing dataset is now caught when the handle is resolved, before an
     // append can be staged at all, rather than at commit.
     let err = commit_append(&path, "missing", |a| {

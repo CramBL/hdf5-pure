@@ -14,49 +14,21 @@
 //!    in-place one — including, since issue #393, the first write onto a
 //!    filtered dataset that starts on a partial trailing chunk.
 
-use hdf5::Extent;
-use hdf5::file::LibraryVersion;
-use hdf5_pure::{File, FileBuilder, MaxExtent};
+use hdf5_pure::File;
 use tempfile::tempdir;
+use test_util_hdf5::dataset::{self, Filter, Unlimited};
 use test_util_hdf5::lock;
 
-/// A rank-1 unlimited chunked i32 dataset `d` seeded with `0..n`, shuffled and
-/// deflated, written by this crate.
-fn pure_create(path: &std::path::Path, n: i32, chunk: u64) {
-    let data: Vec<i32> = (0..n).collect();
-    let mut b = FileBuilder::new();
-    b.create_dataset("d")
-        .with_i32_data(&data)
-        .with_shape(&[n as u64])
-        .with_maxshape(&[MaxExtent::Unlimited])
-        .with_chunks(&[chunk])
-        .with_shuffle()
-        .with_deflate(4);
-    b.write(path).unwrap();
-}
-
-fn read_c(path: &std::path::Path) -> Vec<i32> {
-    let f = hdf5::File::open(path).unwrap();
-    let v = f.dataset("d").unwrap().read_raw::<i32>().unwrap();
-    f.close().unwrap();
-    v
-}
-
-fn read_pure(path: &std::path::Path) -> Vec<i32> {
-    File::open(path)
-        .unwrap()
-        .dataset("d")
-        .unwrap()
-        .read_i32()
-        .unwrap()
-}
+const SHUFFLE_DEFLATE: &[Filter] = &[Filter::Shuffle, Filter::Deflate(4)];
 
 #[test]
 fn c_library_reads_a_filtered_partial_last_chunk_written_in_place() {
     let _c = lock::libhdf5_guard();
     let dir = tempdir().unwrap();
     let path = dir.path().join("partial.h5");
-    pure_create(&path, 8, 4); // two whole chunks
+    Unlimited::new("d", &(0..8).collect::<Vec<i32>>(), 4)
+        .filters(SHUFFLE_DEFLATE)
+        .pure_create(&path); // two whole chunks
 
     {
         let session = File::open_rw(&path).unwrap();
@@ -70,8 +42,12 @@ fn c_library_reads_a_filtered_partial_last_chunk_written_in_place() {
     }
 
     let expected: Vec<i32> = (0..13).collect();
-    assert_eq!(read_pure(&path), expected);
-    assert_eq!(read_c(&path), expected, "the C library disagreed");
+    assert_eq!(dataset::read_pure::<i32>(&path, "d"), expected);
+    assert_eq!(
+        dataset::read_libhdf5::<i32>(&path, "d"),
+        expected,
+        "the C library disagreed"
+    );
 
     // The C library's own view of the shape, not just the values it hands back:
     // a padding-as-data misread would show up as a longer dataset.
@@ -88,7 +64,9 @@ fn c_library_reads_a_buffered_appended_dataset() {
     // Start unaligned (10 of a chunk of 8), so the appender's first write
     // re-encodes the partial trailing chunk and its later ones extend from a
     // boundary — both shapes in one file.
-    pure_create(&path, 10, 8);
+    Unlimited::new("d", &(0..10).collect::<Vec<i32>>(), 8)
+        .filters(SHUFFLE_DEFLATE)
+        .pure_create(&path);
 
     {
         let session = File::open_rw(&path).unwrap();
@@ -102,8 +80,12 @@ fn c_library_reads_a_buffered_appended_dataset() {
     }
 
     let expected: Vec<i32> = (0..73).collect();
-    assert_eq!(read_pure(&path), expected);
-    assert_eq!(read_c(&path), expected, "the C library disagreed");
+    assert_eq!(dataset::read_pure::<i32>(&path, "d"), expected);
+    assert_eq!(
+        dataset::read_libhdf5::<i32>(&path, "d"),
+        expected,
+        "the C library disagreed"
+    );
 }
 
 #[test]
@@ -116,22 +98,9 @@ fn c_library_reads_a_buffered_append_onto_its_own_dataset() {
     // The C library writes the file; this crate appends to it. The latest-format
     // bounds are what make the index an Extensible Array rather than a version-1
     // B-tree, which is the index the in-place path grows.
-    {
-        let file = hdf5::File::with_options()
-            .with_fapl(|p| p.libver_bounds(LibraryVersion::V110, LibraryVersion::latest()))
-            .create(&path)
-            .unwrap();
-        let ds = file
-            .new_dataset::<i32>()
-            .chunk((8,))
-            .shuffle()
-            .deflate(4)
-            .shape((Extent::resizable(24),))
-            .create("d")
-            .unwrap();
-        ds.write(&(0..24i32).collect::<Vec<_>>()).unwrap();
-        file.close().unwrap();
-    }
+    Unlimited::new("d", &(0..24).collect::<Vec<i32>>(), 8)
+        .filters(SHUFFLE_DEFLATE)
+        .libhdf5_create(&path);
 
     {
         let session = File::open_rw(&path).unwrap();
@@ -145,6 +114,10 @@ fn c_library_reads_a_buffered_append_onto_its_own_dataset() {
     }
 
     let expected: Vec<i32> = (0..74).collect();
-    assert_eq!(read_pure(&path), expected);
-    assert_eq!(read_c(&path), expected, "the C library disagreed");
+    assert_eq!(dataset::read_pure::<i32>(&path, "d"), expected);
+    assert_eq!(
+        dataset::read_libhdf5::<i32>(&path, "d"),
+        expected,
+        "the C library disagreed"
+    );
 }

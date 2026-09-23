@@ -10,29 +10,9 @@ use hdf5_pure::{
     AttrValue, Error, File, FileAccessProperties, FileBuilder, FileSpaceStrategy, MaxExtent,
     ScaleOffset, SyncPolicy,
 };
+use rstest::rstest;
 use tempfile::tempdir;
-
-/// Build a rank-1, unlimited i32 dataset at `name` with the given chunk length and
-/// optional deflate, seeded with `0..n`.
-fn build(path: &std::path::Path, name: &str, n: i32, chunk: u64, deflate: bool) {
-    let data: Vec<i32> = (0..n).collect();
-    let mut b = FileBuilder::new();
-    let ds = b
-        .create_dataset(name)
-        .with_i32_data(&data)
-        .with_shape(&[n as u64])
-        .with_maxshape(&[MaxExtent::Unlimited])
-        .with_chunks(&[chunk]);
-    if deflate {
-        ds.with_deflate(6);
-    }
-    b.write(path).unwrap();
-}
-
-fn read_i32(path: &std::path::Path, name: &str) -> Vec<i32> {
-    let f = File::open(path).unwrap();
-    f.dataset(name).unwrap().read_i32().unwrap()
-}
+use test_util_hdf5::dataset::{self, Filter, Unlimited};
 
 // ---- functional -------------------------------------------------------------
 
@@ -40,7 +20,7 @@ fn read_i32(path: &std::path::Path, name: &str) -> Vec<i32> {
 fn unfiltered_any_length_across_calls() {
     let dir = tempdir().unwrap();
     let p = dir.path().join("d.h5");
-    build(&p, "d", 6, 4, false); // partial tail (6 % 4 != 0)
+    Unlimited::new("d", &(0..6).collect::<Vec<i32>>(), 4).pure_create(&p); // partial tail (6 % 4 != 0)
 
     {
         let s = File::open_rw(&p).unwrap();
@@ -49,14 +29,17 @@ fn unfiltered_any_length_across_calls() {
         s.dataset("d").unwrap().append(&[13i32]).unwrap(); // generic entry point
     }
 
-    assert_eq!(read_i32(&p, "d"), (0..14).collect::<Vec<_>>());
+    assert_eq!(
+        dataset::read_pure::<i32>(&p, "d"),
+        (0..14).collect::<Vec<_>>()
+    );
 }
 
 #[test]
 fn unfiltered_raw_append() {
     let dir = tempdir().unwrap();
     let p = dir.path().join("d.h5");
-    build(&p, "d", 4, 4, false);
+    Unlimited::new("d", &(0..4).collect::<Vec<i32>>(), 4).pure_create(&p);
 
     {
         let s = File::open_rw(&p).unwrap();
@@ -64,21 +47,29 @@ fn unfiltered_raw_append() {
         s.dataset("d").unwrap().append_raw(&bytes).unwrap();
     }
 
-    assert_eq!(read_i32(&p, "d"), (0..7).collect::<Vec<_>>());
+    assert_eq!(
+        dataset::read_pure::<i32>(&p, "d"),
+        (0..7).collect::<Vec<_>>()
+    );
 }
 
 #[test]
 fn filtered_whole_chunk() {
     let dir = tempdir().unwrap();
     let p = dir.path().join("d.h5");
-    build(&p, "d", 8, 4, true); // 2 full chunks, deflate
+    Unlimited::new("d", &(0..8).collect::<Vec<i32>>(), 4)
+        .filters(&[Filter::Deflate(6)])
+        .pure_create(&p); // 2 full chunks, deflate
 
     {
         let s = File::open_rw(&p).unwrap();
         s.dataset("d").unwrap().append(&[8, 9, 10, 11]).unwrap(); // one whole chunk
     }
 
-    assert_eq!(read_i32(&p, "d"), (0..12).collect::<Vec<_>>());
+    assert_eq!(
+        dataset::read_pure::<i32>(&p, "d"),
+        (0..12).collect::<Vec<_>>()
+    );
 }
 
 /// A filtered dataset left on a partial trailing chunk grows in place (issue
@@ -90,7 +81,9 @@ fn filtered_whole_chunk() {
 fn filtered_onto_a_partial_trailing_chunk_grows() {
     let dir = tempdir().unwrap();
     let p = dir.path().join("d.h5");
-    build(&p, "d", 8, 4, true);
+    Unlimited::new("d", &(0..8).collect::<Vec<i32>>(), 4)
+        .filters(&[Filter::Deflate(6)])
+        .pure_create(&p);
 
     {
         let s = File::open_rw(&p).unwrap();
@@ -103,113 +96,79 @@ fn filtered_onto_a_partial_trailing_chunk_grows() {
         s.dataset("d").unwrap().append(&[15]).unwrap();
     }
 
-    assert_eq!(read_i32(&p, "d"), (0..16).collect::<Vec<_>>());
-}
-
-/// The filter stacks a re-encoded trailing chunk has to survive. Named rather
-/// than a boolean because the growth is filter-agnostic and the point of the
-/// test below is that all four behave the same.
-#[derive(Clone, Copy, Debug)]
-enum Filters {
-    Deflate,
-    ShuffleDeflate,
-    ScaleOffset,
-    Lzf,
-}
-
-const FILTER_STACKS: [Filters; 4] = [
-    Filters::Deflate,
-    Filters::ShuffleDeflate,
-    Filters::ScaleOffset,
-    Filters::Lzf,
-];
-
-/// A rank-1 unlimited u64 dataset under `filters`, seeded with `0..n`.
-fn build_u64_filtered(path: &std::path::Path, n: u64, chunk: u64, filters: Filters) {
-    let data: Vec<u64> = (0..n).collect();
-    let mut b = FileBuilder::new();
-    let ds = b
-        .create_dataset("d")
-        .with_u64_data(&data)
-        .with_shape(&[n])
-        .with_maxshape(&[MaxExtent::Unlimited])
-        .with_chunks(&[chunk]);
-    match filters {
-        Filters::Deflate => {
-            ds.with_deflate(6);
-        }
-        Filters::ShuffleDeflate => {
-            ds.with_shuffle().with_deflate(6);
-        }
-        Filters::ScaleOffset => {
-            ds.with_scale_offset(ScaleOffset::Integer(0));
-        }
-        Filters::Lzf => {
-            ds.with_lzf();
-        }
-    }
-    b.write(path).unwrap();
+    assert_eq!(
+        dataset::read_pure::<i32>(&p, "d"),
+        (0..16).collect::<Vec<_>>()
+    );
 }
 
 /// The shape issue #393 reports: chunk 1000, then appends of 1000, 100 and 100.
 /// The first lands on a boundary, the second leaves a partial tail, and the
 /// third has to grow that tail — under every filter stack this crate can
 /// re-encode.
-#[test]
-fn a_filtered_timer_flush_pattern_appends_by_any_length() {
+#[rstest]
+#[case::deflate(&[Filter::Deflate(6)])]
+#[case::shuffle_deflate(&[Filter::Shuffle, Filter::Deflate(6)])]
+#[case::scale_offset(&[Filter::ScaleOffset(ScaleOffset::Integer(0))])]
+#[case::lzf(&[Filter::Lzf])]
+fn a_filtered_timer_flush_pattern_appends_by_any_length(#[case] filters: &[Filter]) {
     let dir = tempdir().unwrap();
-    for filters in FILTER_STACKS {
-        let p = dir.path().join(format!("{filters:?}.h5"));
-        build_u64_filtered(&p, 0, 1000, filters);
+    let p = dir.path().join("d.h5");
+    Unlimited::<u64>::new("d", &[], 1000)
+        .filters(filters)
+        .pure_create(&p);
 
-        {
-            let s = File::open_rw(&p).unwrap();
-            let mut ds = s.dataset("d").unwrap();
-            ds.append(&(0..1000u64).collect::<Vec<_>>()).unwrap();
-            ds.append(&(1000..1100u64).collect::<Vec<_>>()).unwrap();
-            ds.append(&(1100..1200u64).collect::<Vec<_>>()).unwrap();
-        }
-
-        let f = File::open(&p).unwrap();
-        assert_eq!(
-            f.dataset("d").unwrap().read_u64().unwrap(),
-            (0..1200u64).collect::<Vec<_>>(),
-            "{filters:?}"
-        );
+    {
+        let s = File::open_rw(&p).unwrap();
+        let mut ds = s.dataset("d").unwrap();
+        ds.append(&(0..1000u64).collect::<Vec<_>>()).unwrap();
+        ds.append(&(1000..1100u64).collect::<Vec<_>>()).unwrap();
+        ds.append(&(1100..1200u64).collect::<Vec<_>>()).unwrap();
     }
+
+    let f = File::open(&p).unwrap();
+    assert_eq!(
+        f.dataset("d").unwrap().read_u64().unwrap(),
+        (0..1200u64).collect::<Vec<_>>(),
+        "{filters:?}"
+    );
 }
 
 /// A hundred short appends in a row, each one re-encoding the tail the previous
 /// one left. The values are what catch a chunk that was decoded, extended and
 /// re-encoded against the wrong live prefix.
-#[test]
-fn repeated_short_filtered_appends_keep_every_element() {
+#[rstest]
+#[case::deflate(&[Filter::Deflate(6)])]
+#[case::shuffle_deflate(&[Filter::Shuffle, Filter::Deflate(6)])]
+#[case::scale_offset(&[Filter::ScaleOffset(ScaleOffset::Integer(0))])]
+#[case::lzf(&[Filter::Lzf])]
+fn repeated_short_filtered_appends_keep_every_element(#[case] filters: &[Filter]) {
     let dir = tempdir().unwrap();
-    for filters in FILTER_STACKS {
-        let p = dir.path().join(format!("many_{filters:?}.h5"));
-        build_u64_filtered(&p, 0, 64, filters);
+    let p = dir.path().join("d.h5");
+    Unlimited::<u64>::new("d", &[], 64)
+        .filters(filters)
+        .pure_create(&p);
 
-        {
-            // One barrier at close rather than five per append: this loop is
-            // about what the file ends up holding, not about fsync cadence.
-            let s = File::open_rw_with_options(
-                &p,
-                FileAccessProperties::new().with_sync_policy(SyncPolicy::OnClose),
-            )
-            .unwrap();
-            let mut ds = s.dataset("d").unwrap();
-            for i in 0..100u64 {
-                ds.append(&(i * 7..i * 7 + 7).collect::<Vec<_>>()).unwrap();
-            }
+    {
+        // One barrier, at close: this loop is about what the file ends up
+        // holding, and the fsync cadence plays no part in it.
+        let s = File::open_rw_with_options(
+            &p,
+            FileAccessProperties::new().with_sync_policy(SyncPolicy::OnClose),
+        )
+        .unwrap();
+        let mut ds = s.dataset("d").unwrap();
+        for i in 0..100u64 {
+            ds.append(&(i * 7..i * 7 + 7).collect::<Vec<_>>()).unwrap();
         }
-
-        let f = File::open(&p).unwrap();
-        assert_eq!(
-            f.dataset("d").unwrap().read_u64().unwrap(),
-            (0..700u64).collect::<Vec<_>>(),
-            "{filters:?}"
-        );
     }
+
+    let f = File::open(&p).unwrap();
+    assert_eq!(
+        f.dataset("d").unwrap().read_u64().unwrap(),
+        (0..700u64).collect::<Vec<_>>(),
+        "{filters:?}"
+    );
 }
 
 /// `append_raw` reaches the same engine, so it grows a filtered partial tail too.
@@ -217,7 +176,9 @@ fn repeated_short_filtered_appends_keep_every_element() {
 fn filtered_raw_append_onto_a_partial_trailing_chunk() {
     let dir = tempdir().unwrap();
     let p = dir.path().join("d.h5");
-    build(&p, "d", 8, 4, true);
+    Unlimited::new("d", &(0..8).collect::<Vec<i32>>(), 4)
+        .filters(&[Filter::Deflate(6)])
+        .pure_create(&p);
 
     {
         let s = File::open_rw(&p).unwrap();
@@ -229,7 +190,10 @@ fn filtered_raw_append_onto_a_partial_trailing_chunk() {
         s.dataset("d").unwrap().append_raw(&bytes).unwrap();
     }
 
-    assert_eq!(read_i32(&p, "d"), (0..13).collect::<Vec<_>>());
+    assert_eq!(
+        dataset::read_pure::<i32>(&p, "d"),
+        (0..13).collect::<Vec<_>>()
+    );
 }
 
 // ---- interleave with staged tree edits --------------------------------------
@@ -241,11 +205,7 @@ fn interleave_append_stage_commit_append() {
     // Two datasets: "d" grows in place, "doomed" is deleted.
     {
         let mut b = FileBuilder::new();
-        b.create_dataset("d")
-            .with_i32_data(&(0..6).collect::<Vec<_>>())
-            .with_shape(&[6])
-            .with_maxshape(&[MaxExtent::Unlimited])
-            .with_chunks(&[4]);
+        Unlimited::new("d", &(0..6).collect::<Vec<i32>>(), 4).add_to(&mut b);
         b.create_dataset("doomed").with_i32_data(&[1, 2, 3]);
         b.write(&p).unwrap();
     }
@@ -282,8 +242,14 @@ fn interleave_append_stage_commit_append() {
         s.dataset("created").unwrap().append(&[4, 5, 6, 7]).unwrap(); // created -> 0..8
     }
 
-    assert_eq!(read_i32(&p, "d"), (0..11).collect::<Vec<_>>());
-    assert_eq!(read_i32(&p, "created"), (0..8).collect::<Vec<_>>());
+    assert_eq!(
+        dataset::read_pure::<i32>(&p, "d"),
+        (0..11).collect::<Vec<_>>()
+    );
+    assert_eq!(
+        dataset::read_pure::<i32>(&p, "created"),
+        (0..8).collect::<Vec<_>>()
+    );
 
     let f = File::open(&p).unwrap();
     let attrs = f.group("run2").unwrap().attrs().unwrap();
@@ -297,7 +263,7 @@ fn interleave_append_stage_commit_append() {
 fn guard_refuses_pending_delete() {
     let dir = tempdir().unwrap();
     let p = dir.path().join("d.h5");
-    build(&p, "d", 4, 4, false);
+    Unlimited::new("d", &(0..4).collect::<Vec<i32>>(), 4).pure_create(&p);
 
     let s = File::open_rw(&p).unwrap();
     s.root().delete("d").unwrap();
@@ -309,7 +275,7 @@ fn guard_refuses_pending_delete() {
 fn guard_refuses_append_after_staged_write() {
     let dir = tempdir().unwrap();
     let p = dir.path().join("d.h5");
-    build(&p, "d", 4, 4, false);
+    Unlimited::new("d", &(0..4).collect::<Vec<i32>>(), 4).pure_create(&p);
 
     let s = File::open_rw(&p).unwrap();
     // First append is fine (nothing staged yet).
@@ -385,11 +351,7 @@ fn userblock_refuses_inplace_but_staged_append_dataset_works() {
     {
         let mut b = FileBuilder::new();
         b.with_userblock(512);
-        b.create_dataset("d")
-            .with_i32_data(&(0..8).collect::<Vec<_>>())
-            .with_shape(&[8])
-            .with_maxshape(&[MaxExtent::Unlimited])
-            .with_chunks(&[4]);
+        Unlimited::new("d", &(0..8).collect::<Vec<i32>>(), 4).add_to(&mut b);
         b.write(&p).unwrap();
     }
 
@@ -409,14 +371,17 @@ fn userblock_refuses_inplace_but_staged_append_dataset_works() {
         s.commit().unwrap();
     }
 
-    assert_eq!(read_i32(&p, "d"), (0..12).collect::<Vec<_>>());
+    assert_eq!(
+        dataset::read_pure::<i32>(&p, "d"),
+        (0..12).collect::<Vec<_>>()
+    );
 }
 
 #[test]
 fn refusal_leaves_session_usable() {
     let dir = tempdir().unwrap();
     let p = dir.path().join("d.h5");
-    build(&p, "d", 4, 4, false);
+    Unlimited::new("d", &(0..4).collect::<Vec<i32>>(), 4).pure_create(&p);
 
     {
         let s = File::open_rw(&p).unwrap();
@@ -427,7 +392,10 @@ fn refusal_leaves_session_usable() {
         s.dataset("d").unwrap().append(&[4, 5, 6]).unwrap();
     }
 
-    assert_eq!(read_i32(&p, "d"), (0..7).collect::<Vec<_>>());
+    assert_eq!(
+        dataset::read_pure::<i32>(&p, "d"),
+        (0..7).collect::<Vec<_>>()
+    );
 }
 
 /// A file that persists its free space accepts an immediate in-place append as
@@ -441,11 +409,7 @@ fn persisting_file_takes_both_inplace_and_staged_appends() {
     {
         let mut b = FileBuilder::new();
         b.with_file_space_strategy(FileSpaceStrategy::FsmAggr, true, 1);
-        b.create_dataset("d")
-            .with_i32_data(&(0..8).collect::<Vec<_>>())
-            .with_shape(&[8])
-            .with_maxshape(&[MaxExtent::Unlimited])
-            .with_chunks(&[4]);
+        Unlimited::new("d", &(0..8).collect::<Vec<i32>>(), 4).add_to(&mut b);
         b.write(&p).unwrap();
     }
 
@@ -462,7 +426,10 @@ fn persisting_file_takes_both_inplace_and_staged_appends() {
         s.close().unwrap();
     }
 
-    assert_eq!(read_i32(&p, "d"), (0..16).collect::<Vec<_>>());
+    assert_eq!(
+        dataset::read_pure::<i32>(&p, "d"),
+        (0..16).collect::<Vec<_>>()
+    );
     let before = File::open(&p).unwrap().persisted_free_space();
 
     // A second session appends in place again and closes without staging
@@ -475,7 +442,10 @@ fn persisting_file_takes_both_inplace_and_staged_appends() {
         s.dataset("d").unwrap().append(&[16, 17]).unwrap();
         s.close().unwrap();
     }
-    assert_eq!(read_i32(&p, "d"), (0..18).collect::<Vec<_>>());
+    assert_eq!(
+        dataset::read_pure::<i32>(&p, "d"),
+        (0..18).collect::<Vec<_>>()
+    );
     assert_ne!(
         File::open(&p).unwrap().persisted_free_space(),
         before,
@@ -498,7 +468,7 @@ fn persisting_file_takes_both_inplace_and_staged_appends() {
 fn many_small_appends_one_session() {
     let dir = tempdir().unwrap();
     let p = dir.path().join("d.h5");
-    build(&p, "d", 0, 8, false); // start empty (but index allocated by the writer)
+    Unlimited::<i32>::new("d", &[], 8).pure_create(&p); // start empty (but index allocated by the writer)
 
     {
         let s = File::open_rw(&p).unwrap();
@@ -507,5 +477,8 @@ fn many_small_appends_one_session() {
         }
     }
 
-    assert_eq!(read_i32(&p, "d"), (0..100).collect::<Vec<_>>());
+    assert_eq!(
+        dataset::read_pure::<i32>(&p, "d"),
+        (0..100).collect::<Vec<_>>()
+    );
 }

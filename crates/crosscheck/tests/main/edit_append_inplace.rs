@@ -16,39 +16,7 @@ use hdf5_pure::{AttrValue, Error, File, MaxExtent};
 use tempfile::tempdir;
 
 use test_util_hdf5::absence;
-
-/// Create a rank-1 unlimited (Extensible-Array indexed) i32 dataset `name` with the
-/// C library under the latest format, seeded with `0..n`, chunk length `chunk`.
-fn c_create_unlimited(path: &std::path::Path, name: &str, n: i32, chunk: usize) {
-    let file = hdf5::File::with_options()
-        .with_fapl(|p| p.libver_bounds(LibraryVersion::V110, LibraryVersion::latest()))
-        .create(path)
-        .unwrap();
-    let ds = file
-        .new_dataset::<i32>()
-        .chunk((chunk,))
-        .shape((Extent::resizable(n as usize),))
-        .create(name)
-        .unwrap();
-    ds.write(&(0..n).collect::<Vec<_>>()).unwrap();
-    file.close().unwrap();
-}
-
-fn read_c(path: &std::path::Path, name: &str) -> Vec<i32> {
-    let f = hdf5::File::open(path).unwrap();
-    let v = f.dataset(name).unwrap().read_raw::<i32>().unwrap();
-    f.close().unwrap();
-    v
-}
-
-fn read_pure(path: &std::path::Path, name: &str) -> Vec<i32> {
-    File::open(path)
-        .unwrap()
-        .dataset(name)
-        .unwrap()
-        .read_i32()
-        .unwrap()
-}
+use test_util_hdf5::dataset::{self, Filter, Unlimited};
 
 // ---- in-place append against C-written files --------------------------------
 
@@ -57,7 +25,7 @@ fn read_pure(path: &std::path::Path, name: &str) -> Vec<i32> {
 fn append_inplace_to_c_dataset_both_read() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("d.h5");
-    c_create_unlimited(&path, "d", 8, 4);
+    Unlimited::new("d", &(0..8).collect::<Vec<i32>>(), 4).libhdf5_create(&path);
 
     {
         let s = File::open_rw(&path).unwrap();
@@ -65,27 +33,8 @@ fn append_inplace_to_c_dataset_both_read() {
     }
 
     let expected: Vec<i32> = (0..13).collect();
-    assert_eq!(read_pure(&path, "d"), expected);
-    assert_eq!(read_c(&path, "d"), expected);
-}
-
-/// Create a rank-1 unlimited, shuffle+deflate i32 dataset with the C library,
-/// seeded with `0..n` and left on a partial trailing chunk when `n % chunk != 0`.
-fn c_create_filtered_unlimited(path: &std::path::Path, name: &str, n: i32, chunk: usize) {
-    let file = hdf5::File::with_options()
-        .with_fapl(|p| p.libver_bounds(LibraryVersion::V110, LibraryVersion::latest()))
-        .create(path)
-        .unwrap();
-    let ds = file
-        .new_dataset::<i32>()
-        .chunk((chunk,))
-        .shuffle()
-        .deflate(4)
-        .shape((Extent::resizable(n as usize),))
-        .create(name)
-        .unwrap();
-    ds.write(&(0..n).collect::<Vec<_>>()).unwrap();
-    file.close().unwrap();
+    assert_eq!(dataset::read_pure::<i32>(&path, "d"), expected);
+    assert_eq!(dataset::read_libhdf5::<i32>(&path, "d"), expected);
 }
 
 /// A filtered dataset this crate leaves on a partial trailing chunk, then grows
@@ -99,7 +48,9 @@ fn c_create_filtered_unlimited(path: &std::path::Path, name: &str, n: i32, chunk
 fn append_inplace_grows_a_filtered_partial_tail_both_read() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("filtered_tail.h5");
-    c_create_filtered_unlimited(&path, "d", 8, 4);
+    Unlimited::new("d", &(0..8).collect::<Vec<i32>>(), 4)
+        .filters(&[Filter::Shuffle, Filter::Deflate(4)])
+        .libhdf5_create(&path);
 
     {
         let s = File::open_rw(&path).unwrap();
@@ -110,8 +61,8 @@ fn append_inplace_grows_a_filtered_partial_tail_both_read() {
     }
 
     let expected: Vec<i32> = (0..15).collect();
-    assert_eq!(read_pure(&path, "d"), expected);
-    assert_eq!(read_c(&path, "d"), expected);
+    assert_eq!(dataset::read_pure::<i32>(&path, "d"), expected);
+    assert_eq!(dataset::read_libhdf5::<i32>(&path, "d"), expected);
 }
 
 /// The same growth onto a partial trailing chunk the **C library itself** wrote,
@@ -123,7 +74,9 @@ fn append_inplace_grows_a_filtered_partial_tail_both_read() {
 fn append_inplace_grows_a_c_written_filtered_partial_tail() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("c_filtered_tail.h5");
-    c_create_filtered_unlimited(&path, "d", 10, 4); // 10 % 4 != 0
+    Unlimited::new("d", &(0..10).collect::<Vec<i32>>(), 4)
+        .filters(&[Filter::Shuffle, Filter::Deflate(4)])
+        .libhdf5_create(&path); // 10 % 4 != 0
 
     {
         let s = File::open_rw(&path).unwrap();
@@ -134,8 +87,8 @@ fn append_inplace_grows_a_c_written_filtered_partial_tail() {
     }
 
     let expected: Vec<i32> = (0..20).collect();
-    assert_eq!(read_pure(&path, "d"), expected);
-    assert_eq!(read_c(&path, "d"), expected);
+    assert_eq!(dataset::read_pure::<i32>(&path, "d"), expected);
+    assert_eq!(dataset::read_libhdf5::<i32>(&path, "d"), expected);
 }
 
 #[test]
@@ -146,7 +99,7 @@ fn hard_link_aliasing_append_inplace_stays_coherent() {
     // by path (both links share the one header).
     let dir = tempdir().unwrap();
     let path = dir.path().join("alias.h5");
-    c_create_unlimited(&path, "d", 4, 4);
+    Unlimited::new("d", &(0..4).collect::<Vec<i32>>(), 4).libhdf5_create(&path);
     {
         let file = hdf5::File::open_rw(&path).unwrap();
         file.link_hard("d", "alias").unwrap();
@@ -161,8 +114,8 @@ fn hard_link_aliasing_append_inplace_stays_coherent() {
     }
 
     let expected: Vec<i32> = (0..9).collect();
-    assert_eq!(read_pure(&path, "d"), expected);
-    assert_eq!(read_c(&path, "alias"), expected); // same object, both names
+    assert_eq!(dataset::read_pure::<i32>(&path, "d"), expected);
+    assert_eq!(dataset::read_libhdf5::<i32>(&path, "alias"), expected); // same object, both names
 }
 
 // ---- dataset attributes on C-written objects (undefined-AttributeInfo) -------
@@ -264,7 +217,7 @@ fn set_dataset_attr_on_chunked_dataset_c_reads() {
     // (the header address changed, so the geometry cache re-locates).
     let dir = tempdir().unwrap();
     let path = dir.path().join("c_chunked_attr.h5");
-    c_create_unlimited(&path, "d", 8, 4);
+    Unlimited::new("d", &(0..8).collect::<Vec<i32>>(), 4).libhdf5_create(&path);
 
     {
         let s = File::open_rw(&path).unwrap();
@@ -277,7 +230,7 @@ fn set_dataset_attr_on_chunked_dataset_c_reads() {
     }
 
     let expected: Vec<i32> = (0..12).collect();
-    assert_eq!(read_pure(&path, "d"), expected);
+    assert_eq!(dataset::read_pure::<i32>(&path, "d"), expected);
     let c = hdf5::File::open(&path).unwrap();
     assert_eq!(c.dataset("d").unwrap().read_raw::<i32>().unwrap(), expected);
     let checked: i64 = c
@@ -294,7 +247,7 @@ fn set_dataset_attr_on_chunked_dataset_c_reads() {
 fn set_dataset_attr_multi_hard_link_refused() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("c_ds_multilink.h5");
-    c_create_unlimited(&path, "d", 4, 4);
+    Unlimited::new("d", &(0..4).collect::<Vec<i32>>(), 4).libhdf5_create(&path);
     {
         let file = hdf5::File::open_rw(&path).unwrap();
         file.link_hard("d", "alias").unwrap();
@@ -397,7 +350,10 @@ fn combined_mixed_edits_c_readable() {
     c.close().unwrap();
 
     // Pure reader agrees on the grown dataset.
-    assert_eq!(read_pure(&path, "log"), (0..10).collect::<Vec<_>>());
+    assert_eq!(
+        dataset::read_pure::<i32>(&path, "log"),
+        (0..10).collect::<Vec<_>>()
+    );
 }
 
 /// The shape that used to wedge a `BufferedAppender`: a *filtered* dataset
@@ -439,9 +395,9 @@ fn a_filtered_partial_tail_with_two_hard_links_appends_in_place() {
     session.close().unwrap();
 
     let expected: Vec<i32> = (0..30).collect();
-    assert_eq!(read_pure(&path, "d"), expected);
-    assert_eq!(read_pure(&path, "alias"), expected);
-    assert_eq!(read_c(&path, "alias"), expected);
+    assert_eq!(dataset::read_pure::<i32>(&path, "d"), expected);
+    assert_eq!(dataset::read_pure::<i32>(&path, "alias"), expected);
+    assert_eq!(dataset::read_libhdf5::<i32>(&path, "alias"), expected);
 }
 
 /// An immediate append that draws its chunks from freed space (issue #349)
@@ -519,5 +475,8 @@ fn an_append_into_freed_space_stays_c_readable() {
     absence::assert_libhdf5_absent(&c.dataset("scratch").unwrap_err(), "scratch");
     c.close().unwrap();
 
-    assert_eq!(read_pure(&path, "log"), (0..8196).collect::<Vec<_>>());
+    assert_eq!(
+        dataset::read_pure::<i32>(&path, "log"),
+        (0..8196).collect::<Vec<_>>()
+    );
 }
