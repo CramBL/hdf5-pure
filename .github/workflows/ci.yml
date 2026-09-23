@@ -51,6 +51,7 @@ jobs:
               - examples/**
               - benches/**
               - crates/test-util/**
+              - crates/test-util-hdf5/**
               - justfile
               - .github/workflows/ci.yml
 
