@@ -364,6 +364,7 @@ checksum = "e4eba85ea1d0a966a983acd07deee566e67395d2d96b6fb39e62b5a833f1eb0b"
 name = "h5-filter"
 version = "0.47.0"
 dependencies = [
+ "flate2",
  "rstest",
 ]
 
@@ -462,7 +463,6 @@ version = "0.47.0"
 dependencies = [
  "byteorder",
  "criterion",
- "flate2",
  "h5-filter",
  "heapscope",
  "ndarray",

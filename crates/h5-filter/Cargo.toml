@@ -4,13 +4,19 @@ version = "0.47.0"
 edition = "2024"
 rust-version = "1.89"
 license = "MIT OR Apache-2.0"
-description = "Pure-Rust HDF5 filter codecs and decoding utilities"
+description = "Pure-Rust HDF5 chunk filter codecs and pipelines"
 repository = "https://github.com/CramBL/hdf5-pure"
 
 [features]
 default = []
 std = []
+deflate = ["std", "flate2"]
+flate2 = ["dep:flate2"]
+fast-deflate = ["deflate", "flate2/zlib-ng"]
 zfp = []
+
+[dependencies]
+flate2 = { version = "1", optional = true, default-features = false, features = ["rust_backend"] }
 
 [dev-dependencies]
 rstest = "0.27"

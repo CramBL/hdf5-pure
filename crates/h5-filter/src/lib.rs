@@ -1,6 +1,7 @@
-//! Encoding and decoding for HDF5 chunk filters.
+//! Encodes and decodes HDF5 chunk filter pipelines.
 //!
-//! LZF, Scale-Offset, and the optional ZFP codec work with `alloc` and do not require `std`.
+//! Shuffle, Fletcher32, LZF, Scale-Offset, and the optional ZFP codec work with `alloc`.
+//! Deflate requires the `deflate` feature and `std`.
 
 #![cfg_attr(not(feature = "std"), no_std)]
 #![allow(rustdoc::missing_crate_level_docs)]
@@ -10,6 +11,7 @@ extern crate alloc;
 use core::fmt;
 
 mod lzf;
+mod pipeline;
 mod scaleoffset;
 #[cfg(feature = "zfp")]
 mod zfp;
@@ -27,6 +29,14 @@ pub use zfp::{
     zfp_rate_from_cd_values,
 };
 
+#[cfg(feature = "zfp")]
+pub use pipeline::FILTER_ZFP;
+pub use pipeline::{
+    ChunkContext, FILTER_DEFLATE, FILTER_FLETCHER32, FILTER_LZF, FILTER_SCALEOFFSET,
+    FILTER_SHUFFLE, FilterScratch, FilterStep, H5Z_FLAG_OPTIONAL, compress_chunk_with,
+    decompress_chunk, decompress_chunk_with,
+};
+
 pub use lzf::{
     MAX_EXPANSION as LZF_MAX_EXPANSION, compress as compress_lzf, decompress as decompress_lzf,
     h5py_cd_values as lzf_h5py_cd_values,
@@ -36,35 +46,81 @@ pub use lzf::{
 #[derive(Clone, Debug, Eq, PartialEq)]
 /// Reports an invalid filter stream or codec configuration.
 pub enum Error {
+    /// Reports a decoded chunk whose length differs from its full chunk size.
+    DataSizeMismatch {
+        /// Number of bytes required by the chunk dimensions and element size.
+        expected: usize,
+        /// Number of bytes returned by the filter pipeline.
+        actual: usize,
+    },
+    /// Reports malformed Deflate or Shuffle input, or a filter operation that failed.
+    FilterError(alloc::string::String),
+    /// Reports a Fletcher32 checksum that differs from the stored checksum.
+    Fletcher32Mismatch {
+        /// Checksum stored after the payload.
+        expected: u32,
+        /// Checksum calculated from the payload.
+        computed: u32,
+    },
     /// Reports malformed LZF input or output beyond the caller's size limit.
     InvalidLzfStream(&'static str),
     /// Reports invalid scale-offset parameters or input bytes.
     ScaleOffset(alloc::string::String),
     /// Reports a scale-offset element count that exceeds the platform's index width.
-    ScaleOffsetValueTooLargeForPlatform { value: u64, target: &'static str },
-    #[cfg(feature = "zfp")]
+    ScaleOffsetValueTooLargeForPlatform {
+        /// Element count read from the filter parameters.
+        value: u64,
+        /// Platform index type that cannot hold the value.
+        target: &'static str,
+    },
     /// Reports fewer encoded bytes than the ZFP chunk requires.
-    TruncatedZfpStream { expected: usize, actual: usize },
     #[cfg(feature = "zfp")]
+    TruncatedZfpStream {
+        /// Number of encoded bytes required for the chunk.
+        expected: usize,
+        /// Number of encoded bytes present.
+        actual: usize,
+    },
+    /// Reports a filter identifier without an available encoder or decoder.
+    UnsupportedFilter(u16),
     /// Reports a ZFP configuration the codec cannot encode.
+    #[cfg(feature = "zfp")]
     UnsupportedZfp(alloc::string::String),
-    #[cfg(feature = "zfp")]
     /// Reports a dimension that does not fit the platform's index width.
-    ValueTooLargeForPlatform { value: u64, target: &'static str },
     #[cfg(feature = "zfp")]
+    ValueTooLargeForPlatform {
+        /// Dimension read from the chunk shape.
+        value: u64,
+        /// Platform index type that cannot hold the value.
+        target: &'static str,
+    },
     /// Reports invalid ZFP parameters or input bytes.
+    #[cfg(feature = "zfp")]
     ZfpFilter(alloc::string::String),
-    #[cfg(feature = "zfp")]
     /// Reports a float block whose header exceeds the fixed-rate bit budget.
-    ZfpHeaderTooLarge { budget: usize, required: usize },
     #[cfg(feature = "zfp")]
+    ZfpHeaderTooLarge {
+        /// Number of bits available at the configured rate.
+        budget: usize,
+        /// Number of bits required by the block header.
+        required: usize,
+    },
     /// Reports an overflow while calculating a ZFP chunk size.
+    #[cfg(feature = "zfp")]
     ZfpSizeOverflow,
 }
 
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::DataSizeMismatch { expected, actual } => {
+                write!(f, "data size mismatch: expected {expected}, got {actual}")
+            }
+            Self::FilterError(reason) => write!(f, "filter error: {reason}"),
+            Self::Fletcher32Mismatch { expected, computed } => write!(
+                f,
+                "fletcher32 checksum mismatch: expected {expected}, computed {computed}"
+            ),
             Self::InvalidLzfStream(reason) => write!(f, "lzf: {reason}"),
             Self::ScaleOffset(reason) => write!(f, "filter error: {reason}"),
             Self::ScaleOffsetValueTooLargeForPlatform { value, target } => write!(
@@ -75,6 +131,7 @@ impl fmt::Display for Error {
             Self::TruncatedZfpStream { expected, actual } => {
                 write!(f, "ZFP: encoded chunk needs {expected} bytes, got {actual}")
             }
+            Self::UnsupportedFilter(id) => write!(f, "unsupported filter {id}"),
             #[cfg(feature = "zfp")]
             Self::UnsupportedZfp(reason) => write!(f, "unsupported ZFP configuration: {reason}"),
             #[cfg(feature = "zfp")]

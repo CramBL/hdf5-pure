@@ -640,6 +640,14 @@ impl From<h5_filter::Error> for FormatError {
                 Self::FilterError(format!("lzf: {reason}"))
             }
             h5_filter::Error::ScaleOffset(reason) => Self::FilterError(reason),
+            h5_filter::Error::FilterError(reason) => Self::FilterError(reason),
+            h5_filter::Error::UnsupportedFilter(id) => Self::UnsupportedFilter(id),
+            h5_filter::Error::DataSizeMismatch { expected, actual } => {
+                Self::DataSizeMismatch { expected, actual }
+            }
+            h5_filter::Error::Fletcher32Mismatch { expected, computed } => {
+                Self::Fletcher32Mismatch { expected, computed }
+            }
             h5_filter::Error::ScaleOffsetValueTooLargeForPlatform { value, target } => {
                 Self::ValueTooLargeForPlatform { value, target }
             }
