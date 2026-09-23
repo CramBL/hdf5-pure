@@ -170,7 +170,7 @@ impl std::error::Error for Error {}
 /// # Examples
 ///
 /// ```
-/// use h5_filter::decode_reservation;
+/// use hdf5_pure_filter::decode_reservation;
 ///
 /// assert_eq!(decode_reservation(Some(4096), 10, 88), 880);
 /// assert_eq!(decode_reservation(Some(4096), 100, 88), 4096);

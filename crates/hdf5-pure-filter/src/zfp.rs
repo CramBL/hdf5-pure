@@ -2398,17 +2398,17 @@ fn filter_arguments(
 ///
 /// ```
 /// # #[cfg(feature = "zfp")] {
-/// use h5_filter::ZfpElementType;
+/// use hdf5_pure_filter::ZfpElementType;
 ///
 /// let raw = [0u8; 16];
-/// let encoded = h5_filter::compress_zfp(&raw, &[4], 16.0, ZfpElementType::F32)?;
+/// let encoded = hdf5_pure_filter::compress_zfp(&raw, &[4], 16.0, ZfpElementType::F32)?;
 /// assert_eq!(encoded.len(), 8);
 /// assert_eq!(
-///     h5_filter::decompress_zfp(&encoded, &[4], 16.0, ZfpElementType::F32)?,
+///     hdf5_pure_filter::decompress_zfp(&encoded, &[4], 16.0, ZfpElementType::F32)?,
 ///     raw,
 /// );
 /// # }
-/// # Ok::<(), h5_filter::Error>(())
+/// # Ok::<(), hdf5_pure_filter::Error>(())
 /// ```
 pub fn compress(
     data: &[u8],
@@ -2756,23 +2756,23 @@ fn zfp_meta_for(elem: ZfpElementType, dims: ZfpChunkDims) -> u64 {
 ///
 /// ```
 /// # #[cfg(feature = "zfp")] {
-/// use h5_filter::ZfpElementType;
+/// use hdf5_pure_filter::ZfpElementType;
 ///
-/// let client_data = h5_filter::zfp_cd_values_rate(16.0, ZfpElementType::F32, &[4])?;
-/// assert_eq!(h5_filter::zfp_rate_from_cd_values(&client_data), Some(16.0));
+/// let client_data = hdf5_pure_filter::zfp_cd_values_rate(16.0, ZfpElementType::F32, &[4])?;
+/// assert_eq!(hdf5_pure_filter::zfp_rate_from_cd_values(&client_data), Some(16.0));
 ///
 /// let raw = [0u8; 16];
-/// let encoded = h5_filter::compress_zfp_filter(
+/// let encoded = hdf5_pure_filter::compress_zfp_filter(
 ///     &raw, &client_data, &[4], Some(ZfpElementType::F32),
 /// )?;
 /// assert_eq!(
-///     h5_filter::decompress_zfp_filter(
+///     hdf5_pure_filter::decompress_zfp_filter(
 ///         &encoded, &client_data, &[4], Some(ZfpElementType::F32),
 ///     )?,
 ///     raw,
 /// );
 /// # }
-/// # Ok::<(), h5_filter::Error>(())
+/// # Ok::<(), hdf5_pure_filter::Error>(())
 /// ```
 pub fn zfp_cd_values_rate(
     rate: f64,

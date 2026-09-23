@@ -361,14 +361,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e4eba85ea1d0a966a983acd07deee566e67395d2d96b6fb39e62b5a833f1eb0b"
 
 [[package]]
-name = "h5-filter"
-version = "0.47.0"
-dependencies = [
- "flate2",
- "rstest",
-]
-
-[[package]]
 name = "half"
 version = "2.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -463,7 +455,7 @@ version = "0.47.0"
 dependencies = [
  "byteorder",
  "criterion",
- "h5-filter",
+ "hdf5-pure-filter",
  "heapscope",
  "ndarray",
  "num-complex",
@@ -490,6 +482,14 @@ dependencies = [
  "tempfile",
  "test-util",
  "test-util-hdf5",
+]
+
+[[package]]
+name = "hdf5-pure-filter"
+version = "0.47.0"
+dependencies = [
+ "flate2",
+ "rstest",
 ]
 
 [[package]]

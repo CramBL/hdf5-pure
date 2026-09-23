@@ -51,7 +51,7 @@ const LIBLZF_API_VERSION: u32 = 0x0105;
 /// # Examples
 ///
 /// ```
-/// use h5_filter::lzf_h5py_cd_values;
+/// use hdf5_pure_filter::lzf_h5py_cd_values;
 ///
 /// assert_eq!(lzf_h5py_cd_values(2, &[3, 4]), [4, 0x0105, 24]);
 /// ```
@@ -83,7 +83,7 @@ fn corrupt(reason: &'static str) -> Error {
 /// # Examples
 ///
 /// ```
-/// use h5_filter::decompress_lzf;
+/// use hdf5_pure_filter::decompress_lzf;
 ///
 /// let stream = [4, b'a', b'b', b'c', b'd', b'e', 3 << 5, 4];
 /// assert_eq!(decompress_lzf(&stream, Some(10)).unwrap(), b"abcdeabcde");
@@ -162,7 +162,7 @@ pub fn decompress(input: &[u8], max_output: Option<usize>) -> Result<Vec<u8>, Er
 /// # Examples
 ///
 /// ```
-/// use h5_filter::{compress_lzf, decompress_lzf};
+/// use hdf5_pure_filter::{compress_lzf, decompress_lzf};
 ///
 /// let input = b"abcdeabcde";
 /// let encoded = compress_lzf(input);

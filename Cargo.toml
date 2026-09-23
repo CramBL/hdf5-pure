@@ -323,15 +323,15 @@ unescaped_backticks = "deny"
 
 [features]
 default = ["std", "checksum", "deflate"]
-std = ["h5-filter/std"]
+std = ["hdf5-pure-filter/std"]
 checksum = []
-deflate = ["flate2", "h5-filter/deflate"]
-flate2 = ["h5-filter/flate2"]
-fast-deflate = ["flate2", "h5-filter/fast-deflate"]
+deflate = ["flate2", "hdf5-pure-filter/deflate"]
+flate2 = ["hdf5-pure-filter/flate2"]
+fast-deflate = ["flate2", "hdf5-pure-filter/fast-deflate"]
 provenance = ["sha2"]
 # Pure-Rust ZFP fixed-rate compression filter (HDF5 filter ID 32013).
 # Supports f32/f64/i32/i64 datasets in 1D–4D.
-zfp = ["h5-filter/zfp"]
+zfp = ["hdf5-pure-filter/zfp"]
 # Ergonomic N-dimensional array I/O via the `ndarray` crate
 # (`DatasetBuilder::with_ndarray`, `Dataset::read_array`/`read_array_dyn`).
 # Requires `std` (it builds on the File/Dataset reader and writer APIs).
@@ -353,7 +353,7 @@ num-complex = ["dep:num-complex", "serde"]
 __heap-baseline = []
 
 [dependencies]
-h5-filter = { path = "crates/h5-filter", version = "0.47.0", default-features = false }
+hdf5-pure-filter = { path = "crates/hdf5-pure-filter", version = "=0.47.0", default-features = false }
 byteorder = { version = "1", default-features = false }
 ndarray = { version = ">=0.16, <0.18", optional = true }
 num-complex = { version = "0.4", optional = true, default-features = false }

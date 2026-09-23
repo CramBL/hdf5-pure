@@ -1,5 +1,5 @@
 [package]
-name = "h5-filter"
+name = "hdf5-pure-filter"
 version = "0.47.0"
 edition = "2024"
 rust-version = "1.89"

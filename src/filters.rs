@@ -8,9 +8,9 @@ use alloc::vec::Vec;
 
 use core::num::NonZeroU32;
 
-pub use h5_filter::FilterScratch;
+pub use hdf5_pure_filter::FilterScratch;
 #[cfg(feature = "zfp")]
-use h5_filter::ZfpElementType;
+use hdf5_pure_filter::ZfpElementType;
 
 #[cfg(feature = "zfp")]
 use crate::FixedPointLayout;
@@ -117,8 +117,8 @@ pub fn zfp_element_type_from_datatype(
 }
 
 impl<'a> ChunkContext<'a> {
-    fn filter_context(self) -> h5_filter::ChunkContext<'a> {
-        h5_filter::ChunkContext {
+    fn filter_context(self) -> hdf5_pure_filter::ChunkContext<'a> {
+        hdf5_pure_filter::ChunkContext {
             chunk_dims: self.chunk_dims,
             element_size: self.element_size,
             element_type: self.element_type,
@@ -139,7 +139,7 @@ pub fn decompress_chunk(
     ctx: ChunkContext<'_>,
     filter_mask: u32,
 ) -> Result<Vec<u8>, FormatError> {
-    h5_filter::decompress_chunk(
+    hdf5_pure_filter::decompress_chunk(
         compressed,
         &pipeline.filters,
         ctx.filter_context(),
@@ -161,7 +161,7 @@ pub fn decompress_chunk_with(
     ctx: ChunkContext<'_>,
     filter_mask: u32,
 ) -> Result<Vec<u8>, FormatError> {
-    h5_filter::decompress_chunk_with(
+    hdf5_pure_filter::decompress_chunk_with(
         scratch,
         compressed,
         &pipeline.filters,
@@ -183,7 +183,7 @@ pub fn compress_chunk(
     pipeline: &FilterPipeline,
     ctx: ChunkContext<'_>,
 ) -> Result<Vec<u8>, FormatError> {
-    h5_filter::compress_chunk_with(
+    hdf5_pure_filter::compress_chunk_with(
         &mut FilterScratch::new(),
         data,
         &pipeline.filters,
@@ -204,7 +204,7 @@ pub fn compress_chunk_with(
     pipeline: &FilterPipeline,
     ctx: ChunkContext<'_>,
 ) -> Result<Vec<u8>, FormatError> {
-    h5_filter::compress_chunk_with(scratch, data, &pipeline.filters, ctx.filter_context())
+    hdf5_pure_filter::compress_chunk_with(scratch, data, &pipeline.filters, ctx.filter_context())
         .map_err(FormatError::from)
 }
 
@@ -248,7 +248,7 @@ mod tests {
 
     #[test]
     fn a_failed_filter_decode_preserves_the_public_error() {
-        let lzf = h5_filter::decompress_lzf(&[0x1f], None).unwrap_err();
+        let lzf = hdf5_pure_filter::decompress_lzf(&[0x1f], None).unwrap_err();
         let err = FormatError::from(lzf);
         let FormatError::FilterError(reason) = err else {
             panic!("expected FilterError, got {err:?}");

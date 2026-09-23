@@ -38,12 +38,12 @@ pub trait FilterStep {
 /// # Examples
 ///
 /// ```
-/// use h5_filter::FILTER_DEFLATE;
-/// use h5_filter::FILTER_FLETCHER32;
-/// use h5_filter::FILTER_SHUFFLE;
+/// use hdf5_pure_filter::FILTER_DEFLATE;
+/// use hdf5_pure_filter::FILTER_FLETCHER32;
+/// use hdf5_pure_filter::FILTER_SHUFFLE;
 ///
 /// let ids = [FILTER_SHUFFLE, FILTER_FLETCHER32];
-/// let index = h5_filter::canonical_filter_position(ids.into_iter(), FILTER_DEFLATE);
+/// let index = hdf5_pure_filter::canonical_filter_position(ids.into_iter(), FILTER_DEFLATE);
 /// assert_eq!(index, 1);
 /// ```
 pub fn canonical_filter_position(ids: impl Iterator<Item = u16>, id: u16) -> usize {
@@ -60,12 +60,12 @@ pub fn canonical_filter_position(ids: impl Iterator<Item = u16>, id: u16) -> usi
 /// # Examples
 ///
 /// ```
-/// use h5_filter::FILTER_DEFLATE;
-/// use h5_filter::FILTER_LZF;
+/// use hdf5_pure_filter::FILTER_DEFLATE;
+/// use hdf5_pure_filter::FILTER_LZF;
 ///
 /// let ids = [FILTER_DEFLATE, FILTER_LZF];
 /// assert_eq!(
-///     h5_filter::first_filter_conflict(ids.into_iter()),
+///     hdf5_pure_filter::first_filter_conflict(ids.into_iter()),
 ///     Some(("lzf", "deflate")),
 /// );
 /// ```
@@ -105,8 +105,8 @@ pub fn first_filter_conflict(
 /// # Examples
 ///
 /// ```
-/// use h5_filter::FILTER_SHUFFLE;
-/// use h5_filter::FilterStep;
+/// use hdf5_pure_filter::FILTER_SHUFFLE;
+/// use hdf5_pure_filter::FilterStep;
 ///
 /// struct Step(u16);
 /// impl FilterStep for Step {
@@ -115,8 +115,8 @@ pub fn first_filter_conflict(
 ///     fn client_data(&self) -> &[u32] { &[] }
 /// }
 ///
-/// assert!(h5_filter::filters_reencodable(&[Step(FILTER_SHUFFLE)]));
-/// assert!(!h5_filter::filters_reencodable(&[Step(u16::MAX)]));
+/// assert!(hdf5_pure_filter::filters_reencodable(&[Step(FILTER_SHUFFLE)]));
+/// assert!(!hdf5_pure_filter::filters_reencodable(&[Step(u16::MAX)]));
 /// ```
 pub fn filters_reencodable(filters: &[impl FilterStep]) -> bool {
     filters.iter().all(|filter| match filter.id() {
@@ -138,12 +138,12 @@ pub fn filters_reencodable(filters: &[impl FilterStep]) -> bool {
 /// # Examples
 ///
 /// ```
-/// use h5_filter::FILTER_SCALEOFFSET;
-/// use h5_filter::FilterStep;
-/// use h5_filter::ScaleOffset;
-/// use h5_filter::ScaleOffsetByteOrder;
-/// use h5_filter::ScaleOffsetFill;
-/// use h5_filter::ScaleOffsetType;
+/// use hdf5_pure_filter::FILTER_SCALEOFFSET;
+/// use hdf5_pure_filter::FilterStep;
+/// use hdf5_pure_filter::ScaleOffset;
+/// use hdf5_pure_filter::ScaleOffsetByteOrder;
+/// use hdf5_pure_filter::ScaleOffsetFill;
+/// use hdf5_pure_filter::ScaleOffsetType;
 ///
 /// struct Step(Vec<u32>);
 /// impl FilterStep for Step {
@@ -152,12 +152,12 @@ pub fn filters_reencodable(filters: &[impl FilterStep]) -> bool {
 ///     fn client_data(&self) -> &[u32] { &self.0 }
 /// }
 ///
-/// # fn main() -> Result<(), h5_filter::Error> {
+/// # fn main() -> Result<(), hdf5_pure_filter::Error> {
 /// let scalar = ScaleOffsetType::integer(false, ScaleOffsetByteOrder::LittleEndian);
-/// let params = h5_filter::build_scale_offset_cd_values(
+/// let params = hdf5_pure_filter::build_scale_offset_cd_values(
 ///     ScaleOffset::Integer(0), scalar, 1, 4, ScaleOffsetFill::Undefined,
 /// )?;
-/// assert!(h5_filter::filters_lossless(&[Step(params)]));
+/// assert!(hdf5_pure_filter::filters_lossless(&[Step(params)]));
 /// # Ok(())
 /// # }
 /// ```
@@ -276,7 +276,7 @@ impl FilterScratch {
 ///
 /// ```
 /// use core::num::NonZeroU32;
-/// use h5_filter::{
+/// use hdf5_pure_filter::{
 ///     ChunkContext, FILTER_FLETCHER32, FILTER_SHUFFLE, FilterScratch, FilterStep,
 ///     H5Z_FLAG_OPTIONAL, compress_chunk_with, decompress_chunk, decompress_chunk_with,
 /// };
@@ -292,7 +292,7 @@ impl FilterScratch {
 ///     fn client_data(&self) -> &[u32] { &[] }
 /// }
 ///
-/// # fn main() -> Result<(), h5_filter::Error> {
+/// # fn main() -> Result<(), hdf5_pure_filter::Error> {
 /// let filters = [
 ///     Step { id: FILTER_SHUFFLE, flags: 0 },
 ///     Step { id: FILTER_FLETCHER32, flags: H5Z_FLAG_OPTIONAL },
