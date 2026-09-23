@@ -10,66 +10,27 @@
 //! across releases, modern HDF5 releases are also checked under explicit
 //! `libver` bounds where applicable.
 
-use std::collections::BTreeSet;
 use std::fs;
 use std::path::Path;
 
 #[cfg(any(feature = "__hdf5-1.14", feature = "__hdf5-2"))]
 use hdf5::file::LibraryVersion;
 use tempfile::tempdir;
+use test_util::bytes;
+use test_util::object_header::{MessageType, v1};
+use test_util::superblock::v0;
+use test_util_hdf5::file;
 
-const HDF5_SIGNATURE: [u8; 8] = [0x89, b'H', b'D', b'F', b'\r', b'\n', 0x1a, b'\n'];
-
-const V1_HEADER_PREFIX_LEN: usize = 16;
-const V1_MESSAGE_PREFIX_LEN: usize = 8;
-
-const NIL_MESSAGE: u16 = 0x0000;
-const ATTRIBUTE_MESSAGE: u16 = 0x000c;
-const CONTINUATION_MESSAGE: u16 = 0x0010;
-const SYMBOL_TABLE_MESSAGE: u16 = 0x0011;
-
-#[derive(Clone, Copy, Debug)]
-struct FileLayout {
-    offset_size: usize,
-    length_size: usize,
-    eof_address_field: usize,
-    root_chunk_start: usize,
-    root_chunk_end: usize,
-}
-
-#[derive(Clone, Copy, Debug)]
-struct Record {
-    offset: usize,
-    msg_type: u16,
-    body_size: u16,
-    body_start: usize,
-    body_end: usize,
-}
-
-#[derive(Clone, Copy, Debug)]
-struct AttributeCandidate {
-    record: Record,
-    chunk_start: usize,
-    chunk_end: usize,
-    chunk_length_field: usize,
-    chunk_length_width: usize,
-}
-
-#[derive(Clone, Copy, Debug)]
+/// A root Attribute message the tests edit, and the chunk that stores it.
+#[derive(Clone, Debug)]
 struct AlignmentTarget {
-    size_field_offset: usize,
-    chunk_start: usize,
-    chunk_end: usize,
-    chunk_length_field: usize,
-    chunk_length_width: usize,
+    chunk: v1::Chunk,
+    record: v1::Record,
 }
 
 /// Creates a simple earliest-format file with the reference C library.
 fn write_earliest_file(path: &Path) {
-    let file = hdf5::File::with_options()
-        .with_fapl(|fapl| fapl.libver_earliest())
-        .create(path)
-        .expect("create earliest-format file with libhdf5");
+    let file = file::libhdf5_create_earliest(path);
 
     let dataset = file
         .new_dataset::<i32>()
@@ -96,10 +57,7 @@ fn write_earliest_file(path: &Path) {
 
 /// Creates an earliest-format file whose root object header uses a continuation.
 fn write_earliest_file_with_continuation(path: &Path) {
-    let file = hdf5::File::with_options()
-        .with_fapl(|fapl| fapl.libver_earliest())
-        .create(path)
-        .expect("create earliest-format file with libhdf5");
+    let file = file::libhdf5_create_earliest(path);
 
     let dataset = file
         .new_dataset::<i32>()
@@ -125,352 +83,52 @@ fn write_earliest_file_with_continuation(path: &Path) {
     file.close().expect("close control file");
 }
 
-/// Writes an unsigned little-endian integer of at most eight bytes.
-fn write_uint(bytes: &mut [u8], offset: usize, width: usize, value: u64) {
-    assert!(
-        (1..=8).contains(&width),
-        "unsupported integer width {width}"
-    );
-
-    if width < 8 {
-        assert!(
-            value < (1u64 << (width * 8)),
-            "value {value:#x} does not fit in {width} bytes"
-        );
-    }
-
-    let end = offset
-        .checked_add(width)
-        .expect("integer field offset overflow");
-    let field = bytes
-        .get_mut(offset..end)
-        .unwrap_or_else(|| panic!("integer at {offset:#x} lies outside the file"));
-
-    for (index, byte) in field.iter_mut().enumerate() {
-        *byte = ((value >> (index * 8)) & 0xff) as u8;
-    }
-}
-
 /// Copies the first root continuation to EOF and adds one trailing byte.
 ///
 /// The continuation message is repointed to the copy and its declared length is
 /// increased by one. The copied records themselves remain unchanged, leaving a
 /// single byte after the last complete version 1 message prefix and body.
 fn add_trailing_byte_to_root_continuation(bytes: &mut Vec<u8>) {
-    let layout = file_layout(bytes);
-    let root_records = chunk_records(bytes, layout.root_chunk_start, layout.root_chunk_end);
+    let superblock = v0::Fields::read(bytes, 0);
+    let offset_width = superblock.widths.offset;
+    let chunks = v1::root_group_chunks(bytes);
 
-    let continuation = root_records
-        .into_iter()
-        .find(|record| record.msg_type == CONTINUATION_MESSAGE)
+    let continuation = chunks[0]
+        .records
+        .iter()
+        .find(|record| record.msg_type == MessageType::OBJECT_HEADER_CONTINUATION)
         .expect("large root attribute did not create a version 1 continuation");
-
-    let continuation_fields_len = layout
-        .offset_size
-        .checked_add(layout.length_size)
-        .expect("continuation field width overflow");
-
-    assert!(
-        usize::from(continuation.body_size) >= continuation_fields_len,
-        "continuation message at {:#x} is too short for its address and length",
-        continuation.offset
-    );
-
-    let original_address = read_uint(bytes, continuation.body_start, layout.offset_size);
-    let original_length = read_uint(
-        bytes,
-        continuation.body_start + layout.offset_size,
-        layout.length_size,
-    );
-
-    let original_start =
-        usize::try_from(original_address).expect("continuation address exceeds usize");
-    let original_length =
-        usize::try_from(original_length).expect("continuation length exceeds usize");
-    let original_end = original_start
-        .checked_add(original_length)
-        .expect("continuation end overflow");
-
-    assert!(
-        original_end <= bytes.len(),
-        "valid continuation {original_start:#x}..{original_end:#x} \
-         extends beyond EOF {:#x}",
-        bytes.len()
-    );
+    let original = chunks
+        .iter()
+        .find(|chunk| chunk.length_field.at == continuation.body.start + offset_width)
+        .expect("the walk reaches the chunk the continuation names");
 
     // Verifies that the original continuation consists entirely of complete
     // version 1 records before introducing the malformed trailing byte.
-    let records = chunk_records(bytes, original_start, original_end);
     assert!(
-        !records.is_empty(),
+        !original.records.is_empty(),
         "generated continuation contains no object-header messages"
     );
-
-    let original_chunk = bytes[original_start..original_end].to_vec();
+    let original_chunk = bytes[original.range.clone()].to_vec();
 
     // Places the replacement continuation at an aligned address. Any alignment
     // padding is unreachable file space, not part of the continuation.
-    let alignment_padding = (8 - bytes.len() % 8) % 8;
-    bytes.resize(bytes.len() + alignment_padding, 0);
-
+    bytes.resize(bytes.len().next_multiple_of(8), 0);
     let replacement_start = bytes.len();
     bytes.extend_from_slice(&original_chunk);
     bytes.push(0);
 
-    let replacement_length = original_length
-        .checked_add(1)
-        .expect("replacement continuation length overflow");
-
-    assert_eq!(
-        &bytes[replacement_start..replacement_start + original_length],
-        original_chunk.as_slice(),
-        "replacement continuation differs from the valid source chunk"
-    );
-    assert_eq!(
-        bytes[replacement_start + original_length],
-        0,
-        "replacement continuation does not end with the expected trailing byte"
-    );
-
-    write_uint(
+    bytes::set_uint_at(
         bytes,
-        continuation.body_start,
-        layout.offset_size,
+        continuation.body.start,
+        offset_width,
         replacement_start as u64,
     );
-    write_uint(
-        bytes,
-        continuation.body_start + layout.offset_size,
-        layout.length_size,
-        replacement_length as u64,
-    );
-
+    original
+        .length_field
+        .set(bytes, original_chunk.len() as u64 + 1);
     let declared_eof = bytes.len() as u64;
-    write_uint(
-        bytes,
-        layout.eof_address_field,
-        layout.offset_size,
-        declared_eof,
-    );
-
-    assert_eq!(
-        read_uint(bytes, continuation.body_start, layout.offset_size),
-        replacement_start as u64,
-        "continuation address was not updated"
-    );
-    assert_eq!(
-        read_uint(
-            bytes,
-            continuation.body_start + layout.offset_size,
-            layout.length_size,
-        ),
-        replacement_length as u64,
-        "continuation length was not updated"
-    );
-
-    // The original records occupy exactly the original length. The replacement
-    // therefore contains one byte that cannot begin an eight-byte v1 prefix.
-    assert_eq!(
-        replacement_length - original_length,
-        1,
-        "malformed continuation must contain exactly one trailing byte"
-    );
-}
-
-/// Reads a little-endian `u16` at `offset`.
-fn read_u16(bytes: &[u8], offset: usize) -> u16 {
-    let end = offset.checked_add(2).expect("u16 offset overflow");
-    let field = bytes
-        .get(offset..end)
-        .unwrap_or_else(|| panic!("u16 at {offset:#x} lies outside the file"));
-
-    u16::from_le_bytes(field.try_into().unwrap())
-}
-
-/// Reads a little-endian `u32` at `offset`.
-fn read_u32(bytes: &[u8], offset: usize) -> u32 {
-    let end = offset.checked_add(4).expect("u32 offset overflow");
-    let field = bytes
-        .get(offset..end)
-        .unwrap_or_else(|| panic!("u32 at {offset:#x} lies outside the file"));
-
-    u32::from_le_bytes(field.try_into().unwrap())
-}
-
-/// Reads an unsigned little-endian integer of at most eight bytes.
-fn read_uint(bytes: &[u8], offset: usize, width: usize) -> u64 {
-    assert!(
-        (1..=8).contains(&width),
-        "unsupported integer width {width}"
-    );
-
-    let end = offset
-        .checked_add(width)
-        .expect("integer field offset overflow");
-    let field = bytes
-        .get(offset..end)
-        .unwrap_or_else(|| panic!("integer at {offset:#x} lies outside the file"));
-
-    field.iter().enumerate().fold(0u64, |value, (index, byte)| {
-        value | (u64::from(*byte) << (index * 8))
-    })
-}
-
-/// Locates the root group's version 1 object header.
-///
-/// Versions 0 and 1 of the superblock contain a root-group symbol-table entry.
-/// Its second address field identifies the root object header. The generated
-/// file has no userblock, so its base address is expected to be zero.
-fn file_layout(bytes: &[u8]) -> FileLayout {
-    assert!(
-        bytes.len() >= 24,
-        "libhdf5 produced an unexpectedly short file"
-    );
-    assert_eq!(
-        &bytes[..HDF5_SIGNATURE.len()],
-        &HDF5_SIGNATURE,
-        "libhdf5 did not produce an HDF5 signature at offset zero"
-    );
-
-    let superblock_version = bytes[8];
-    assert!(
-        matches!(superblock_version, 0 | 1),
-        "earliest-format libhdf5 output used superblock version \
-         {superblock_version}, expected version 0 or 1"
-    );
-
-    let offset_size = usize::from(bytes[13]);
-    let length_size = usize::from(bytes[14]);
-
-    assert!(
-        (1..=8).contains(&offset_size),
-        "unexpected HDF5 offset width {offset_size}"
-    );
-    assert!(
-        (1..=8).contains(&length_size),
-        "unexpected HDF5 length width {length_size}"
-    );
-
-    // Superblock version 1 adds the indexed-storage K value and its reserved
-    // field before the address fields.
-    let address_fields: usize = match superblock_version {
-        0 => 24,
-        1 => 32,
-        _ => panic!("unreachable"),
-    };
-    let eof_address_field = address_fields
-        .checked_add(2 * offset_size)
-        .expect("end-of-file address field offset overflow");
-
-    let base_address = read_uint(bytes, address_fields, offset_size);
-    assert_eq!(
-        base_address, 0,
-        "the generated control file unexpectedly has a nonzero base address"
-    );
-
-    // Four superblock addresses precede the root-group symbol-table entry.
-    // The entry starts with the link-name offset followed by the object-header
-    // address.
-    let root_entry = address_fields
-        .checked_add(4 * offset_size)
-        .expect("root symbol-table entry offset overflow");
-    let root_header_address_field = root_entry
-        .checked_add(offset_size)
-        .expect("root object-header address field overflow");
-
-    let root_header_address = read_uint(bytes, root_header_address_field, offset_size);
-    let root_header_offset =
-        usize::try_from(root_header_address).expect("root object-header address exceeds usize");
-
-    let version = *bytes.get(root_header_offset).unwrap_or_else(|| {
-        panic!("root object header at {root_header_offset:#x} is outside the file")
-    });
-    assert_eq!(
-        version, 1,
-        "earliest-format root object header has version {version}, expected version 1"
-    );
-
-    let header_data_size = usize::try_from(read_u32(bytes, root_header_offset + 8)).unwrap();
-
-    let root_chunk_start = root_header_offset
-        .checked_add(V1_HEADER_PREFIX_LEN)
-        .expect("object-header chunk offset overflow");
-    let root_chunk_end = root_chunk_start
-        .checked_add(header_data_size)
-        .expect("object-header chunk end overflow");
-
-    assert!(
-        root_chunk_end <= bytes.len(),
-        "valid root object-header chunk {root_chunk_start:#x}..{root_chunk_end:#x} \
-         extends beyond EOF {:#x}",
-        bytes.len()
-    );
-
-    FileLayout {
-        offset_size,
-        length_size,
-        eof_address_field,
-        root_chunk_start,
-        root_chunk_end,
-    }
-}
-
-/// Parses the records physically stored in one version 1 object-header chunk.
-fn chunk_records(bytes: &[u8], chunk_start: usize, chunk_end: usize) -> Vec<Record> {
-    assert!(
-        chunk_start <= chunk_end && chunk_end <= bytes.len(),
-        "invalid object-header chunk {chunk_start:#x}..{chunk_end:#x}"
-    );
-
-    let mut records = Vec::new();
-    let mut pos = chunk_start;
-
-    while pos < chunk_end {
-        let remaining = chunk_end - pos;
-        assert!(
-            remaining >= V1_MESSAGE_PREFIX_LEN,
-            "valid control chunk ends with only {remaining} bytes at {pos:#x}"
-        );
-
-        let msg_type = read_u16(bytes, pos);
-        let body_size = read_u16(bytes, pos + 2);
-
-        assert_eq!(
-            body_size % 8,
-            0,
-            "libhdf5 wrote unaligned v1 message size {body_size} at {pos:#x}"
-        );
-
-        let body_start = pos
-            .checked_add(V1_MESSAGE_PREFIX_LEN)
-            .expect("message body offset overflow");
-        let body_end = body_start
-            .checked_add(usize::from(body_size))
-            .expect("message body end overflow");
-
-        assert!(
-            body_end <= chunk_end,
-            "valid control message at {pos:#x} overruns its chunk: \
-             body_end={body_end:#x}, chunk_end={chunk_end:#x}"
-        );
-
-        records.push(Record {
-            offset: pos,
-            msg_type,
-            body_size,
-            body_start,
-            body_end,
-        });
-
-        pos = body_end;
-    }
-
-    assert_eq!(
-        pos, chunk_end,
-        "control records do not end at the declared chunk boundary"
-    );
-
-    records
+    bytes::set_uint_at(bytes, superblock.eof_address_at, offset_width, declared_eof);
 }
 
 /// Walks version 1 object-header chunks and locates the root attribute.
@@ -478,144 +136,47 @@ fn chunk_records(bytes: &[u8], chunk_start: usize, chunk_end: usize) -> Vec<Reco
 /// A candidate Attribute message may be followed only by Nil messages in its
 /// physical chunk. This keeps the mutation from covering any later meaningful
 /// message when the Attribute body is extended to cross the chunk boundary.
-fn find_root_attribute(bytes: &[u8], layout: FileLayout) -> AttributeCandidate {
-    fn walk(
-        bytes: &[u8],
-        layout: FileLayout,
-        chunk_start: usize,
-        chunk_end: usize,
-        chunk_length_field: usize,
-        chunk_length_width: usize,
-        visited: &mut BTreeSet<(usize, usize)>,
-        attribute_count: &mut usize,
-        saw_symbol_table: &mut bool,
-        candidate: &mut Option<AttributeCandidate>,
-    ) {
-        assert!(
-            visited.insert((chunk_start, chunk_end)),
-            "object-header continuation cycle or duplicate chunk \
-             {chunk_start:#x}..{chunk_end:#x}"
+fn find_root_attribute(bytes: &[u8]) -> AlignmentTarget {
+    let chunks = v1::root_group_chunks(bytes);
+    let records = || chunks.iter().flat_map(|chunk| &chunk.records);
+
+    for record in records() {
+        assert_eq!(
+            record.body.len() % 8,
+            0,
+            "libhdf5 wrote unaligned v1 message size {} at {:#x}",
+            record.body.len(),
+            record.at
         );
-
-        let records = chunk_records(bytes, chunk_start, chunk_end);
-
-        for (index, record) in records.iter().copied().enumerate() {
-            if record.msg_type == SYMBOL_TABLE_MESSAGE {
-                *saw_symbol_table = true;
-            }
-
-            if record.msg_type == ATTRIBUTE_MESSAGE {
-                *attribute_count += 1;
-
-                let trailing_records_are_nil = records[index + 1..]
-                    .iter()
-                    .all(|record| record.msg_type == NIL_MESSAGE);
-
-                if trailing_records_are_nil {
-                    assert!(
-                        candidate.is_none(),
-                        "multiple root Attribute messages are suitable mutation targets"
-                    );
-                    *candidate = Some(AttributeCandidate {
-                        record,
-                        chunk_start,
-                        chunk_end,
-                        chunk_length_field,
-                        chunk_length_width,
-                    });
-                }
-            }
-        }
-
-        for record in records {
-            if record.msg_type != CONTINUATION_MESSAGE {
-                continue;
-            }
-
-            let fields_len = layout
-                .offset_size
-                .checked_add(layout.length_size)
-                .expect("continuation field width overflow");
-
-            assert!(
-                usize::from(record.body_size) >= fields_len,
-                "continuation message at {:#x} is too short for its address and length",
-                record.offset
-            );
-
-            let continuation_address = read_uint(bytes, record.body_start, layout.offset_size);
-            let continuation_length = read_uint(
-                bytes,
-                record.body_start + layout.offset_size,
-                layout.length_size,
-            );
-
-            let continuation_start =
-                usize::try_from(continuation_address).expect("continuation address exceeds usize");
-            let continuation_length =
-                usize::try_from(continuation_length).expect("continuation length exceeds usize");
-            let continuation_end = continuation_start
-                .checked_add(continuation_length)
-                .expect("continuation end overflow");
-
-            assert!(
-                continuation_end <= bytes.len(),
-                "valid continuation {continuation_start:#x}..{continuation_end:#x} \
-                 extends beyond EOF {:#x}",
-                bytes.len()
-            );
-
-            walk(
-                bytes,
-                layout,
-                continuation_start,
-                continuation_end,
-                record.body_start + layout.offset_size,
-                layout.length_size,
-                visited,
-                attribute_count,
-                saw_symbol_table,
-                candidate,
-            );
-        }
     }
-
-    let mut visited = BTreeSet::new();
-    let mut attribute_count = 0;
-    let mut saw_symbol_table = false;
-    let mut candidate = None;
-
-    let root_header_offset = layout
-        .root_chunk_start
-        .checked_sub(V1_HEADER_PREFIX_LEN)
-        .expect("root object-header prefix offset underflow");
-    let root_chunk_length_field = root_header_offset
-        .checked_add(8)
-        .expect("object-header data-size field offset overflow");
-
-    walk(
-        bytes,
-        layout,
-        layout.root_chunk_start,
-        layout.root_chunk_end,
-        root_chunk_length_field,
-        4,
-        &mut visited,
-        &mut attribute_count,
-        &mut saw_symbol_table,
-        &mut candidate,
-    );
-
     assert!(
-        saw_symbol_table,
+        records().any(|record| record.msg_type == MessageType::SYMBOL_TABLE),
         "generated earliest-format root header has no Symbol Table message"
     );
+    let attribute_count = records()
+        .filter(|record| record.msg_type == MessageType::ATTRIBUTE)
+        .count();
     assert_eq!(
         attribute_count, 1,
         "generated root header contains {attribute_count} Attribute messages, expected one"
     );
 
-    candidate.expect("the root Attribute message is followed by a meaningful message in its chunk")
+    chunks
+        .iter()
+        .find_map(|chunk| {
+            let index = chunk
+                .records
+                .iter()
+                .position(|record| record.msg_type == MessageType::ATTRIBUTE)?;
+            chunk.records[index + 1..]
+                .iter()
+                .all(|record| record.msg_type == MessageType::NIL)
+                .then(|| AlignmentTarget {
+                    chunk: chunk.clone(),
+                    record: chunk.records[index].clone(),
+                })
+        })
+        .expect("the root Attribute message is followed by a meaningful message in its chunk")
 }
 
 /// Extends the root Attribute message eight bytes beyond its containing chunk.
@@ -623,54 +184,17 @@ fn find_root_attribute(bytes: &[u8], layout: FileLayout) -> AttributeCandidate {
 /// Returns the offset of the two-byte size field so the caller can verify that
 /// no unrelated file bytes changed.
 fn corrupt_root_attribute_message(bytes: &mut [u8]) -> usize {
-    let layout = file_layout(bytes);
-    let candidate = find_root_attribute(bytes, layout);
-    let record = candidate.record;
+    let AlignmentTarget { chunk, record } = find_root_attribute(bytes);
 
-    assert_eq!(
-        record.msg_type, ATTRIBUTE_MESSAGE,
-        "mutation target is not an Attribute message"
-    );
+    let malformed_body_size = u16::try_from(chunk.range.end - record.body.start + 8)
+        .expect("malformed Attribute size exceeds u16");
     assert!(
-        record.body_end <= candidate.chunk_end,
-        "control Attribute message already crosses its chunk boundary"
-    );
-
-    let malformed_body_size = candidate
-        .chunk_end
-        .checked_sub(record.body_start)
-        .and_then(|size| size.checked_add(8))
-        .expect("malformed Attribute size overflow");
-
-    let malformed_body_size =
-        u16::try_from(malformed_body_size).expect("malformed Attribute size exceeds u16");
-
-    assert!(
-        malformed_body_size > record.body_size,
+        usize::from(malformed_body_size) > record.body.len(),
         "malformed Attribute size must exceed its original size"
     );
-    assert_eq!(
-        malformed_body_size % 8,
-        0,
-        "malformed Attribute size must remain eight-byte aligned"
-    );
 
-    let malformed_body_end = record
-        .body_start
-        .checked_add(usize::from(malformed_body_size))
-        .expect("malformed Attribute body end overflow");
-
-    assert_eq!(
-        malformed_body_end,
-        candidate.chunk_end + 8,
-        "mutation must extend exactly eight bytes beyond its containing chunk"
-    );
-
-    let size_field_offset = record.offset + 2;
-    bytes[size_field_offset..size_field_offset + 2]
-        .copy_from_slice(&malformed_body_size.to_le_bytes());
-
-    size_field_offset
+    record.set_body_size(bytes, malformed_body_size);
+    record.size_at()
 }
 
 /// Replaces the final root Attribute message with an aligned Nil message.
@@ -678,130 +202,41 @@ fn corrupt_root_attribute_message(bytes: &mut [u8]) -> usize {
 /// The message's prefix location, declared size, and body bytes remain unchanged.
 /// This produces a controlled record whose body has no message-specific semantics.
 fn replace_final_root_attribute_with_nil(bytes: &mut [u8]) -> AlignmentTarget {
-    let layout = file_layout(bytes);
-    let candidate = find_root_attribute(bytes, layout);
-    let record = candidate.record;
-
+    let target = find_root_attribute(bytes);
     assert_eq!(
-        record.msg_type, ATTRIBUTE_MESSAGE,
-        "mutation target is not an Attribute message"
-    );
-    assert_eq!(
-        record.body_end, candidate.chunk_end,
+        target.record.body.end, target.chunk.range.end,
         "control Attribute message is not the final physical record in its chunk"
     );
-    assert_eq!(
-        record.body_size % 8,
-        0,
-        "control Attribute message size is not eight-byte aligned"
-    );
 
-    bytes[record.offset..record.offset + 2].copy_from_slice(&NIL_MESSAGE.to_le_bytes());
-
-    AlignmentTarget {
-        size_field_offset: record.offset + 2,
-        chunk_start: candidate.chunk_start,
-        chunk_end: candidate.chunk_end,
-        chunk_length_field: candidate.chunk_length_field,
-        chunk_length_width: candidate.chunk_length_width,
-    }
+    target.record.set_type(bytes, MessageType::NIL);
+    target
 }
 
 /// Makes the final controlled Nil message one byte shorter and unaligned.
 ///
 /// The containing chunk is shortened by the same byte, so the malformed Nil
 /// record still ends exactly at the declared chunk boundary.
-fn corrupt_final_root_nil_message_alignment(bytes: &mut [u8], target: AlignmentTarget) {
-    let records = chunk_records(bytes, target.chunk_start, target.chunk_end);
-    let record = records
+fn corrupt_final_root_nil_message_alignment(bytes: &mut [u8], target: &AlignmentTarget) {
+    let chunks = v1::root_group_chunks(bytes);
+    let chunk = chunks
+        .iter()
+        .find(|chunk| chunk.range == target.chunk.range)
+        .expect("the target chunk is still part of the root header");
+    let record = chunk
+        .records
         .last()
-        .copied()
         .expect("target object-header chunk contains no messages");
-
     assert_eq!(
-        record.msg_type, NIL_MESSAGE,
+        (record.at, record.msg_type),
+        (target.record.at, MessageType::NIL),
         "alignment target is not the final Nil message"
     );
-    assert_eq!(
-        record.offset + 2,
-        target.size_field_offset,
-        "final Nil message moved from its controlled location"
-    );
-    assert_eq!(
-        record.body_end, target.chunk_end,
-        "final Nil message does not end at the chunk boundary"
-    );
-    assert_eq!(
-        record.body_size % 8,
-        0,
-        "control Nil message size is not eight-byte aligned"
-    );
 
-    let declared_chunk_length =
-        read_uint(bytes, target.chunk_length_field, target.chunk_length_width);
-    let physical_chunk_length = target
-        .chunk_end
-        .checked_sub(target.chunk_start)
-        .expect("target chunk length underflow");
-
-    assert_eq!(
-        declared_chunk_length, physical_chunk_length as u64,
-        "target chunk's declared length does not match its physical extent"
-    );
-
-    let malformed_body_size = record
-        .body_size
-        .checked_sub(1)
-        .expect("malformed Nil message size underflow");
-
-    assert_ne!(
-        malformed_body_size % 8,
-        0,
-        "malformed Nil message size must not be eight-byte aligned"
-    );
-
-    bytes[target.size_field_offset..target.size_field_offset + 2]
-        .copy_from_slice(&malformed_body_size.to_le_bytes());
-
-    let malformed_chunk_length = physical_chunk_length
-        .checked_sub(1)
-        .expect("malformed chunk length underflow");
-
-    write_uint(
-        bytes,
-        target.chunk_length_field,
-        target.chunk_length_width,
-        malformed_chunk_length as u64,
-    );
-
-    let malformed_body_end = record
-        .body_start
-        .checked_add(usize::from(malformed_body_size))
-        .expect("malformed Nil message body end overflow");
-    let malformed_chunk_end = target
-        .chunk_start
-        .checked_add(malformed_chunk_length)
-        .expect("malformed chunk end overflow");
-
-    assert_eq!(
-        malformed_body_end, malformed_chunk_end,
-        "malformed Nil message does not end at the shortened chunk boundary"
-    );
-    assert_eq!(
-        read_u16(bytes, record.offset),
-        NIL_MESSAGE,
-        "malformed alignment target is not a Nil message"
-    );
-    assert_eq!(
-        read_u16(bytes, target.size_field_offset),
-        malformed_body_size,
-        "malformed Nil message has the wrong declared size"
-    );
-    assert_eq!(
-        read_uint(bytes, target.chunk_length_field, target.chunk_length_width,),
-        malformed_chunk_length as u64,
-        "containing chunk has the wrong malformed length"
-    );
+    let malformed_body_size = u16::try_from(record.body.len() - 1).expect("a v1 message size");
+    record.set_body_size(bytes, malformed_body_size);
+    chunk
+        .length_field
+        .set(bytes, (chunk.range.len() - 1) as u64);
 }
 
 /// Reads the control dataset through the reference C library.
@@ -1135,7 +570,7 @@ fn a_v1_message_size_not_aligned_to_eight_has_versioned_libhdf5_behavior() {
     );
 
     let mut malformed = valid.clone();
-    corrupt_final_root_nil_message_alignment(&mut malformed, target);
+    corrupt_final_root_nil_message_alignment(&mut malformed, &target);
 
     assert_eq!(
         malformed.len(),
@@ -1148,9 +583,9 @@ fn a_v1_message_size_not_aligned_to_eight_has_versioned_libhdf5_behavior() {
             continue;
         }
 
-        let size_field = target.size_field_offset..target.size_field_offset + 2;
-        let chunk_length_field =
-            target.chunk_length_field..target.chunk_length_field + target.chunk_length_width;
+        let size_field = target.record.size_at()..target.record.size_at() + 2;
+        let length_field = target.chunk.length_field;
+        let chunk_length_field = length_field.at..length_field.at + length_field.width;
 
         assert!(
             size_field.contains(&offset) || chunk_length_field.contains(&offset),
@@ -1222,7 +657,7 @@ fn a_v1_message_size_alignment_validation_is_independent_of_libver_bounds() {
     fs::write(&valid_path, &valid).unwrap();
 
     let mut malformed = valid;
-    corrupt_final_root_nil_message_alignment(&mut malformed, target);
+    corrupt_final_root_nil_message_alignment(&mut malformed, &target);
     fs::write(&malformed_path, malformed).unwrap();
 
     let version = hdf5::library_version();
