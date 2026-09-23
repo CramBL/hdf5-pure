@@ -10,6 +10,7 @@ use hdf5::plist::file_create::FileSpaceStrategy as CStrategy;
 use hdf5_pure::{File, FileAccessProperties, FileBuilder, FileSpaceStrategy, MemoryStrategy};
 use tempfile::tempdir;
 use test_util_hdf5::dataset::{self, Filter, Unlimited};
+use test_util_hdf5::file;
 
 /// Open with the bounded engine demanded rather than merely preferred: these
 /// tests are about that engine, so a file it stops accepting must fail here
@@ -186,10 +187,7 @@ fn vlen_strings_read_on_bounded_and_mirror_files() {
     let path = dir.path().join("vlen.h5");
     let words = ["alpha", "beta", "", "δelta"];
     {
-        let file = hdf5::File::with_options()
-            .with_fapl(|p| p.libver_bounds(LibraryVersion::V110, LibraryVersion::latest()))
-            .create(&path)
-            .unwrap();
+        let file = file::libhdf5_create_v110(&path);
         let vals: Vec<VarLenUnicode> = words
             .iter()
             .map(|s| VarLenUnicode::from_str(s).unwrap())

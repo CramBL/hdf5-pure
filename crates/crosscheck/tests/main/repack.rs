@@ -11,6 +11,7 @@ use rstest::rstest;
 use tempfile::tempdir;
 
 use test_util_hdf5::absence;
+use test_util_hdf5::file;
 
 #[test]
 fn c_file_repacked_then_read_by_c_library() {
@@ -717,10 +718,7 @@ fn c_sparse_chunked_lossless_repacked_falls_back() {
     let written = 1000usize;
     let head: Vec<i32> = (1..=written as i32).collect();
     {
-        let file = hdf5::FileBuilder::new()
-            .with_fapl(|fapl| fapl.libver_v110())
-            .create(&src)
-            .unwrap();
+        let file = file::libhdf5_create_v110(&src);
         let ds = file
             .new_dataset::<i32>()
             .shape([n])
@@ -780,10 +778,7 @@ fn c_sparse_chunked_scale_offset_repacks_with_its_fill_value() {
         })
         .collect();
     {
-        let file = hdf5::FileBuilder::new()
-            .with_fapl(|fapl| fapl.libver_v110())
-            .create(&src)
-            .unwrap();
+        let file = file::libhdf5_create_v110(&src);
         let ds = file
             .new_dataset::<i32>()
             .shape([n])
@@ -856,10 +851,7 @@ fn c_sparse_chunked_lossy_repack_refused() {
     let written = 1000usize;
     let head: Vec<f64> = (0..written).map(|i| i as f64 * 0.01).collect();
     {
-        let file = hdf5::FileBuilder::new()
-            .with_fapl(|fapl| fapl.libver_v110())
-            .create(&src)
-            .unwrap();
+        let file = file::libhdf5_create_v110(&src);
         let ds = file
             .new_dataset::<f64>()
             .shape([n])
@@ -1860,10 +1852,7 @@ fn repack_still_refuses_a_never_written_dataset_with_a_lossy_filter() {
     let src = dir.path().join("c_unwritten_lossy.h5");
     let dst = dir.path().join("c_unwritten_lossy_repacked.h5");
     {
-        let file = hdf5::FileBuilder::new()
-            .with_fapl(|fapl| fapl.libver_v110())
-            .create(&src)
-            .unwrap();
+        let file = file::libhdf5_create_v110(&src);
         let ds = file
             .new_dataset::<f64>()
             .shape([2000])

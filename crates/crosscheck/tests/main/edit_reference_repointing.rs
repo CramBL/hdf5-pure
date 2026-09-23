@@ -342,10 +342,7 @@ fn an_earliest_format_reference_dataset_is_repointed() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("earliest.h5");
     {
-        let file = hdf5::FileBuilder::new()
-            .with_fapl(|p| p.libver_earliest())
-            .create(&path)
-            .unwrap();
+        let file = file::libhdf5_create_earliest(&path);
         let g = file.create_group("g").unwrap();
         g.new_dataset::<i32>()
             .shape((3,))

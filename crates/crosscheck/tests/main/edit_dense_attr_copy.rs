@@ -11,11 +11,11 @@
 //! sources, copy them, and verify every attribute (name + value) survives, in
 //! this crate's reader and the reference C library.
 
-use hdf5::file::LibraryVersion;
 use hdf5_pure::{AttrValue, File, FileBuilder};
 use std::collections::HashMap;
 use tempfile::tempdir;
 use test_util::fractal_heap;
+use test_util_hdf5::file;
 
 /// Number of attributes that forces the whole-file writer into dense storage
 /// (its threshold is 8 compact attributes).
@@ -288,10 +288,7 @@ fn c_written_dense_attr_dataset_copies_in_place() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("c_dense.h5");
     {
-        let file = hdf5::File::with_options()
-            .with_fapl(|p| p.libver_bounds(LibraryVersion::V110, LibraryVersion::latest()))
-            .create(&path)
-            .unwrap();
+        let file = file::libhdf5_create_v110(&path);
         let ds = file
             .new_dataset::<f64>()
             .shape((3,))
@@ -342,10 +339,7 @@ fn cross_file_copy_refuses_variable_length_dense_attrs() {
     let src_path = dir.path().join("vlen_dense_src.h5");
     let dst_path = dir.path().join("vlen_dense_dst.h5");
     {
-        let file = hdf5::File::with_options()
-            .with_fapl(|p| p.libver_bounds(LibraryVersion::V110, LibraryVersion::latest()))
-            .create(&src_path)
-            .unwrap();
+        let file = file::libhdf5_create_v110(&src_path);
         let ds = file.new_dataset::<f64>().shape((2,)).create("vds").unwrap();
         ds.write(&[1.0f64, 2.0]).unwrap();
         // Enough variable-length string attributes to force dense storage.

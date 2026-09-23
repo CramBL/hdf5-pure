@@ -13,20 +13,17 @@
 //! Before the geometry fix, anything past 20 chunks silently corrupted on read.
 
 use hdf5::Extent;
-use hdf5::file::LibraryVersion;
 use hdf5_pure::{File, FileBuilder, MaxExtent};
 use tempfile::tempdir;
 use test_util::extensible_array;
+use test_util_hdf5::file;
 
 const SIZES: &[usize] = &[20, 300, 2000, 50000, 140000];
 
 /// Create a 1-D unlimited, chunked i32 dataset with the reference C library,
 /// using the latest format so the chunk index is an Extensible Array.
 fn write_with_c(path: &std::path::Path, n: usize) {
-    let file = hdf5::File::with_options()
-        .with_fapl(|p| p.libver_bounds(LibraryVersion::V110, LibraryVersion::latest()))
-        .create(path)
-        .unwrap();
+    let file = file::libhdf5_create_v110(path);
     let ds = file
         .new_dataset::<i32>()
         .chunk((1,))

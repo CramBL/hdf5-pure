@@ -11,9 +11,9 @@ use std::path::Path;
 
 use hdf5::Extent;
 use hdf5::dataset::ChunkOpts;
-use hdf5::file::LibraryVersion;
 use hdf5::filters::Filter as CFilter;
 use rstest::rstest;
+use test_util_hdf5::file;
 
 #[derive(Clone, Copy, Debug)]
 enum Filter {
@@ -33,10 +33,7 @@ impl Filter {
 }
 
 fn c_create(path: &Path, filter: Filter, shape: &[usize], chunk: &[usize], data: &[i32]) {
-    let file = hdf5::File::with_options()
-        .with_fapl(|p| p.libver_bounds(LibraryVersion::V110, LibraryVersion::latest()))
-        .create(path)
-        .unwrap();
+    let file = file::libhdf5_create_v110(path);
     let builder = file.new_dataset::<i32>();
     let builder = match filter {
         Filter::Deflate => builder.deflate(DEFLATE_LEVEL),

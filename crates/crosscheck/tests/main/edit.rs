@@ -179,10 +179,7 @@ fn c_multichunk_group_header_is_collapsed_and_edited() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("c_multichunk.h5");
     {
-        let file = hdf5::File::with_options()
-            .with_fapl(|p| p.libver_bounds(LibraryVersion::V110, LibraryVersion::latest()))
-            .create(&path)
-            .unwrap();
+        let file = file::libhdf5_create_v110(&path);
         file.new_dataset::<f64>()
             .shape((3,))
             .create("alpha")
@@ -1029,10 +1026,7 @@ fn overwriting_multiply_linked_chunked_that_relocates_is_refused() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("c_chunked_multilink.h5");
     {
-        let file = hdf5::File::with_options()
-            .with_fapl(|p| p.libver_bounds(LibraryVersion::V110, LibraryVersion::latest()))
-            .create(&path)
-            .unwrap();
+        let file = file::libhdf5_create_v110(&path);
         file.new_dataset::<f64>()
             .shape((3,))
             .create("anchor")
@@ -1098,10 +1092,7 @@ fn deleting_one_of_several_hard_links_keeps_the_survivor() {
     let path = dir.path().join("c_hardlink_survivor.h5");
     let chunked: Vec<i32> = (0..512).collect();
     {
-        let file = hdf5::File::with_options()
-            .with_fapl(|p| p.libver_bounds(LibraryVersion::V110, LibraryVersion::latest()))
-            .create(&path)
-            .unwrap();
+        let file = file::libhdf5_create_v110(&path);
         file.new_dataset::<i32>()
             .shape((512,))
             .chunk((64,))
@@ -1179,10 +1170,7 @@ fn deleting_all_hard_links_to_an_object_in_one_commit_is_safe() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("c_hardlink_all.h5");
     {
-        let file = hdf5::File::with_options()
-            .with_fapl(|p| p.libver_bounds(LibraryVersion::V110, LibraryVersion::latest()))
-            .create(&path)
-            .unwrap();
+        let file = file::libhdf5_create_v110(&path);
         file.new_dataset::<i32>()
             .shape((512,))
             .chunk((64,))
@@ -1305,10 +1293,7 @@ fn cross_file_copy_from_c_written_attributed_dataset() {
     let src_path = dir.path().join("c_attr_src.h5");
     let dst_path = dir.path().join("c_attr_dst.h5");
     {
-        let file = hdf5::File::with_options()
-            .with_fapl(|p| p.libver_bounds(LibraryVersion::V110, LibraryVersion::latest()))
-            .create(&src_path)
-            .unwrap();
+        let file = file::libhdf5_create_v110(&src_path);
         let ds = file
             .new_dataset::<f64>()
             .shape((3,))
@@ -1370,10 +1355,7 @@ fn same_file_copy_of_c_written_attributed_object() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("c_attr_infile.h5");
     {
-        let file = hdf5::File::with_options()
-            .with_fapl(|p| p.libver_bounds(LibraryVersion::V110, LibraryVersion::latest()))
-            .create(&path)
-            .unwrap();
+        let file = file::libhdf5_create_v110(&path);
         let ds = file.new_dataset::<i32>().shape((2,)).create("src").unwrap();
         ds.write(&[10i32, 20]).unwrap();
         ds.new_attr::<i64>()
@@ -1418,10 +1400,7 @@ fn cross_file_copy_from_reproduces_c_written_dense_attributes() {
     let src_path = dir.path().join("dense_src.h5");
     let dst_path = dir.path().join("dense_dst.h5");
     {
-        let file = hdf5::File::with_options()
-            .with_fapl(|p| p.libver_bounds(LibraryVersion::V110, LibraryVersion::latest()))
-            .create(&src_path)
-            .unwrap();
+        let file = file::libhdf5_create_v110(&src_path);
         let ds = file.new_dataset::<i32>().shape((1,)).create("ds").unwrap();
         ds.write(&[1i32]).unwrap();
         for i in 0..12 {
@@ -1515,10 +1494,7 @@ fn write_dataset_undefined_address_relocates_crosscheck() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("empty.h5");
     {
-        let file = hdf5::File::with_options()
-            .with_fapl(|p| p.libver_bounds(LibraryVersion::V110, LibraryVersion::latest()))
-            .create(&path)
-            .unwrap();
+        let file = file::libhdf5_create_v110(&path);
         // `new_dataset(...).create(...)` creates without writing: a contiguous
         // dataset whose data address stays undefined until data is written.
         file.new_dataset::<i32>()
@@ -1576,10 +1552,7 @@ fn write_dataset_shared_hard_link_crosscheck() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("shared.h5");
     {
-        let file = hdf5::File::with_options()
-            .with_fapl(|p| p.libver_bounds(LibraryVersion::V110, LibraryVersion::latest()))
-            .create(&path)
-            .unwrap();
+        let file = file::libhdf5_create_v110(&path);
         file.new_dataset::<i32>()
             .shape((3,))
             .create("a")
@@ -1634,10 +1607,7 @@ fn write_dataset_relocate_with_multiple_hard_links_is_refused() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("shared_relocate.h5");
     {
-        let file = hdf5::File::with_options()
-            .with_fapl(|p| p.libver_bounds(LibraryVersion::V110, LibraryVersion::latest()))
-            .create(&path)
-            .unwrap();
+        let file = file::libhdf5_create_v110(&path);
         // Created but never written: contiguous address undefined, so an overwrite
         // relocates the header.
         file.new_dataset::<i32>().shape((3,)).create("a").unwrap();
@@ -2012,10 +1982,7 @@ fn a_never_written_dataset_is_copied_as_the_storage_it_never_had() {
     {
         // The copy path needs a version 2 object header, so the format is named
         // rather than left to the linked library's default (which has moved).
-        let file = hdf5::File::with_options()
-            .with_fapl(|p| p.libver_bounds(LibraryVersion::V110, LibraryVersion::latest()))
-            .create(&path)
-            .unwrap();
+        let file = file::libhdf5_create_v110(&path);
         let ds = file
             .new_dataset::<i32>()
             .shape((N,))
@@ -2184,10 +2151,7 @@ fn a_never_written_reference_dataset_copies_beside_a_delete() {
         let path = dir.path().join("never_written_refs.h5");
         {
             // As above: the copy path needs a version 2 object header.
-            let file = hdf5::File::with_options()
-                .with_fapl(|p| p.libver_bounds(LibraryVersion::V110, LibraryVersion::latest()))
-                .create(&path)
-                .unwrap();
+            let file = file::libhdf5_create_v110(&path);
             file.new_dataset_builder()
                 .empty_as(&desc)
                 .shape((4,))

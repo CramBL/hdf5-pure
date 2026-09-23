@@ -12,6 +12,7 @@
 use hdf5::file::LibraryVersion;
 use hdf5_pure::{File, FileBuilder, MaxExtent, ScaleOffset};
 use tempfile::tempdir;
+use test_util_hdf5::file;
 
 /// Read a dataset's typed fill value back through the reference C library.
 fn c_fill_value<T: hdf5::H5Type>(path: &std::path::Path, name: &str) -> Option<T> {
@@ -120,10 +121,7 @@ fn pure_reads_c_written_v3_fill() {
 /// The handles are dropped when this returns, so the file is fully flushed before
 /// the caller reopens it.
 fn c_write_chunked_f64_fill(path: &std::path::Path) {
-    let file = hdf5::File::with_options()
-        .with_fapl(|p| p.libver_bounds(LibraryVersion::V110, LibraryVersion::latest()))
-        .create(path)
-        .unwrap();
+    let file = file::libhdf5_create_v110(path);
     let ds = file
         .new_dataset::<f64>()
         .fill_value(2.5_f64)
@@ -150,10 +148,7 @@ fn pure_reads_c_written_chunked_f64_fill() {
 /// Create an i32 dataset whose fill value is explicitly *undefined* (a version-3
 /// message with the "undefined" bit set), with the reference C library.
 fn c_write_i32_no_fill(path: &std::path::Path) {
-    let file = hdf5::File::with_options()
-        .with_fapl(|p| p.libver_bounds(LibraryVersion::V110, LibraryVersion::latest()))
-        .create(path)
-        .unwrap();
+    let file = file::libhdf5_create_v110(path);
     let ds = file
         .new_dataset::<i32>()
         .no_fill_value()
@@ -232,10 +227,7 @@ fn c_extend_and_read(path: &std::path::Path, to: usize) -> Vec<u32> {
 }
 
 fn c_create_chunked(path: &std::path::Path, data: &[u32], chunk: usize, fill: Option<u32>) {
-    let file = hdf5::File::with_options()
-        .with_fapl(|p| p.libver_bounds(LibraryVersion::V110, LibraryVersion::latest()))
-        .create(path)
-        .unwrap();
+    let file = file::libhdf5_create_v110(path);
     let mut b = file
         .new_dataset::<u32>()
         .chunk((chunk,))
@@ -420,10 +412,7 @@ fn a_fill_time_of_never_still_pads_with_zeros() {
     // Only the C library can express this today, so it builds the fixture and
     // this crate's append rewrites the trailing chunk through it.
     {
-        let file = hdf5::File::with_options()
-            .with_fapl(|p| p.libver_bounds(LibraryVersion::V110, LibraryVersion::latest()))
-            .create(&path)
-            .unwrap();
+        let file = file::libhdf5_create_v110(&path);
         let ds = file
             .new_dataset::<u32>()
             .chunk((4,))
@@ -536,10 +525,7 @@ fn assert_chunks_match_the_c_library(shape: &[usize], chunks: &[usize], fill: u3
 
     let c_path = dir.path().join("c.h5");
     {
-        let file = hdf5::File::with_options()
-            .with_fapl(|p| p.libver_bounds(LibraryVersion::V110, LibraryVersion::latest()))
-            .create(&c_path)
-            .unwrap();
+        let file = file::libhdf5_create_v110(&c_path);
         let ds = file
             .new_dataset::<u32>()
             .chunk(chunks)

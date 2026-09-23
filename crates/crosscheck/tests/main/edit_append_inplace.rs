@@ -11,12 +11,12 @@
 //! storage.
 
 use hdf5::Extent;
-use hdf5::file::LibraryVersion;
 use hdf5_pure::{AttrValue, Error, File, MaxExtent};
 use tempfile::tempdir;
 
 use test_util_hdf5::absence;
 use test_util_hdf5::dataset::{self, Filter, Unlimited};
+use test_util_hdf5::file;
 
 // ---- in-place append against C-written files --------------------------------
 
@@ -129,10 +129,7 @@ fn c_dataset_with_attribute_info_accepts_set_dataset_attr() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("c_ds_attr.h5");
     {
-        let file = hdf5::File::with_options()
-            .with_fapl(|p| p.libver_bounds(LibraryVersion::V110, LibraryVersion::latest()))
-            .create(&path)
-            .unwrap();
+        let file = file::libhdf5_create_v110(&path);
         let ds = file.new_dataset::<i32>().shape((4,)).create("d").unwrap();
         ds.write(&[1i32, 2, 3, 4]).unwrap();
         let a = ds.new_attr::<i64>().shape(()).create("orig").unwrap();
@@ -174,10 +171,7 @@ fn c_group_with_attribute_info_accepts_set_group_attr() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("c_grp_attr.h5");
     {
-        let file = hdf5::File::with_options()
-            .with_fapl(|p| p.libver_bounds(LibraryVersion::V110, LibraryVersion::latest()))
-            .create(&path)
-            .unwrap();
+        let file = file::libhdf5_create_v110(&path);
         let g = file.create_group("grp").unwrap();
         let a = g.new_attr::<i64>().shape(()).create("orig").unwrap();
         a.write_scalar(&11i64).unwrap();
@@ -287,10 +281,7 @@ fn combined_mixed_edits_c_readable() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("combined.h5");
     {
-        let file = hdf5::File::with_options()
-            .with_fapl(|p| p.libver_bounds(LibraryVersion::V110, LibraryVersion::latest()))
-            .create(&path)
-            .unwrap();
+        let file = file::libhdf5_create_v110(&path);
         file.new_dataset::<i32>()
             .chunk((4,))
             .shape((Extent::resizable(4),))
@@ -414,10 +405,7 @@ fn an_append_into_freed_space_stays_c_readable() {
     let path = dir.path().join("reuse.h5");
     let payload: Vec<i32> = (4..8196).collect();
     {
-        let file = hdf5::File::with_options()
-            .with_fapl(|p| p.libver_bounds(LibraryVersion::V110, LibraryVersion::latest()))
-            .create(&path)
-            .unwrap();
+        let file = file::libhdf5_create_v110(&path);
         file.new_dataset::<i32>()
             .chunk((1024,))
             .shape((Extent::resizable(4),))
