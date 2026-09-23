@@ -3,7 +3,7 @@
 //! (issue #198).
 
 use hdf5_pure::{
-    AttrValue, Error, File, FileAccessProperties, FileBuilder, MaxExtent, MemoryStrategy, Object,
+    AttrValue, Error, File, FileAccessProperties, FileBuilder, MemoryStrategy, Object,
 };
 
 /// Open with the bounded engine demanded rather than merely preferred: these
@@ -17,16 +17,13 @@ fn open_bounded(path: &std::path::Path) -> Result<File, hdf5_pure::Error> {
 }
 
 use tempfile::tempdir;
+use test_util_hdf5::dataset::Unlimited;
 
 /// A dataset `d` (rank-1, unlimited, chunked) plus a `refs` dataset holding one
 /// object reference to it.
 fn build(path: &std::path::Path) {
     let mut b = FileBuilder::new();
-    b.create_dataset("d")
-        .with_i32_data(&(0..8).collect::<Vec<i32>>())
-        .with_shape(&[8])
-        .with_maxshape(&[MaxExtent::Unlimited])
-        .with_chunks(&[4]);
+    Unlimited::new("d", &(0..8).collect::<Vec<i32>>(), 4).add_to(&mut b);
     b.create_dataset("refs").with_path_references(&["d"]);
     b.write(path).unwrap();
 }

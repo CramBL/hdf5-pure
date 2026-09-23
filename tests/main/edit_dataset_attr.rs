@@ -6,9 +6,10 @@
 //! `crates/crosscheck/tests/main/edit.rs`; edits that land in dense (fractal-heap) storage live in
 //! `edit_dense_attr.rs`.
 
-use hdf5_pure::{AttrValue, Error, File, FileBuilder, FormatError, MaxExtent};
+use hdf5_pure::{AttrValue, Error, File, FileBuilder, FormatError};
 use tempfile::tempdir;
 use test_util::fractal_heap;
+use test_util_hdf5::dataset::Unlimited;
 
 fn build_contig(path: &std::path::Path) {
     let mut b = FileBuilder::new();
@@ -17,13 +18,7 @@ fn build_contig(path: &std::path::Path) {
 }
 
 fn build_chunked(path: &std::path::Path, n: i32, chunk: u64) {
-    let mut b = FileBuilder::new();
-    b.create_dataset("d")
-        .with_i32_data(&(0..n).collect::<Vec<_>>())
-        .with_shape(&[n as u64])
-        .with_maxshape(&[MaxExtent::Unlimited])
-        .with_chunks(&[chunk]);
-    b.write(path).unwrap();
+    Unlimited::new("d", &(0..n).collect::<Vec<i32>>(), chunk).pure_create(path);
 }
 
 #[test]

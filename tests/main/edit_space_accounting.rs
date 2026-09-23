@@ -8,8 +8,9 @@
 //! its reusable free from disk on open, and the total always equals the summed
 //! region lengths.
 
-use hdf5_pure::{File, FileBuilder, FileSpaceStrategy, MaxExtent};
+use hdf5_pure::{File, FileBuilder, FileSpaceStrategy};
 use tempfile::tempdir;
+use test_util_hdf5::dataset::{Filter, Unlimited};
 
 /// The scalar total must always equal the summed lengths of the reported regions,
 /// which must be sorted, disjoint, and contained within the logical size.
@@ -79,13 +80,7 @@ fn fresh_session_reports_file_size_and_no_reusable_free() {
 fn logical_size_grows_with_immediate_append() {
     let dir = tempdir().unwrap();
     let p = dir.path().join("append.h5");
-    let mut b = FileBuilder::new();
-    b.create_dataset("d")
-        .with_i32_data(&(0..8).collect::<Vec<_>>())
-        .with_shape(&[8])
-        .with_maxshape(&[MaxExtent::Unlimited])
-        .with_chunks(&[4]);
-    b.write(&p).unwrap();
+    Unlimited::new("d", &(0..8).collect::<Vec<i32>>(), 4).pure_create(&p);
 
     let s = File::open_rw(&p).unwrap();
     let before = s.space_accounting().unwrap().logical_size;
@@ -263,16 +258,11 @@ fn a_relocating_overwrite_reclaims_the_old_header_with_its_storage() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("relocate.h5");
 
-    let mut b = FileBuilder::new();
     // Zeros compress to almost nothing, so the replacement below cannot fit back
     // into the chunk slots and the dataset is rebuilt elsewhere.
-    b.create_dataset("d")
-        .with_i32_data(&vec![0i32; 64])
-        .with_shape(&[64])
-        .with_maxshape(&[MaxExtent::Unlimited])
-        .with_chunks(&[16])
-        .with_deflate(6);
-    b.write(&path).unwrap();
+    Unlimited::new("d", &[0i32; 64], 16)
+        .filters(&[Filter::Deflate(6)])
+        .pure_create(&path);
 
     let session = File::open_rw(&path).unwrap();
     let incompressible: Vec<i32> = (0..64)

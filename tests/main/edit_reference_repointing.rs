@@ -11,9 +11,10 @@
 
 use hdf5_pure::{
     AttrValue, CompoundTypeBuilder, Datatype, DatatypeByteOrder, File, FileBuilder,
-    FileSpaceStrategy, FixedPointLayout, Group, MaxExtent, Object, ReferenceType,
+    FileSpaceStrategy, FixedPointLayout, Group, Object, ReferenceType,
 };
 use tempfile::tempdir;
+use test_util_hdf5::dataset::Unlimited;
 
 /// The names of the datasets the file's first stored reference resolves to,
 /// dereferenced through the reference rather than looked up by path.
@@ -516,11 +517,7 @@ fn a_reference_to_an_appended_dataset_follows_its_relocating_append() {
     // elsewhere, which moves the object a reference names just as an attribute
     // edit does — and it arrives through a different staged collection.
     let mut b = FileBuilder::new();
-    b.create_dataset("target")
-        .with_i32_data(&[1, 2, 3])
-        .with_shape(&[3])
-        .with_maxshape(&[MaxExtent::Unlimited])
-        .with_chunks(&[3]);
+    Unlimited::new("target", &[1i32, 2, 3], 3).add_to(&mut b);
     b.create_dataset("refs").with_path_references(&["target"]);
     b.write(&path).unwrap();
 

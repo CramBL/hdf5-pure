@@ -4,7 +4,7 @@
 //! close. libhdf5 interop lives in `crates/crosscheck/tests/main/file_space.rs`.
 
 use hdf5_pure::{
-    Error, File, FileAccessProperties, FileBuilder, FileSpaceStrategy, MaxExtent, MemoryStrategy,
+    Error, File, FileAccessProperties, FileBuilder, FileSpaceStrategy, MemoryStrategy,
 };
 
 /// Open with the bounded engine demanded rather than merely preferred: these
@@ -20,17 +20,14 @@ fn open_bounded(path: &std::path::Path) -> Result<File, hdf5_pure::Error> {
 const PAGE: u64 = 4096;
 
 use test_util::temp;
+use test_util_hdf5::dataset::Unlimited;
 
 /// Build a persisting paged file with an unlimited rank-1 chunked i32 dataset `d`
 /// seeded with `0..n`.
 fn build_paged(path: &std::path::Path, n: i32, chunk: u64) {
     let data: Vec<i32> = (0..n).collect();
     let mut b = FileBuilder::new();
-    b.create_dataset("d")
-        .with_i32_data(&data)
-        .with_shape(&[n as u64])
-        .with_maxshape(&[MaxExtent::Unlimited])
-        .with_chunks(&[chunk]);
+    Unlimited::new("d", &data, chunk).add_to(&mut b);
     b.with_file_space_strategy(FileSpaceStrategy::Page, true, 0)
         .with_file_space_page_size(PAGE);
     b.write(path).unwrap();
@@ -207,11 +204,7 @@ fn paged_persist_drop_finalizes() {
 fn paged_non_persist_mirror_is_refused() {
     let path = temp::repo_temp_path("pure_paged_nonpersist_mirror.h5");
     let mut b = FileBuilder::new();
-    b.create_dataset("d")
-        .with_i32_data(&(0..100).collect::<Vec<i32>>())
-        .with_shape(&[100])
-        .with_maxshape(&[MaxExtent::Unlimited])
-        .with_chunks(&[32]);
+    Unlimited::new("d", &(0..100).collect::<Vec<i32>>(), 32).add_to(&mut b);
     b.with_file_space_strategy(FileSpaceStrategy::Page, false, 0)
         .with_file_space_page_size(PAGE);
     b.write(&path).unwrap();
