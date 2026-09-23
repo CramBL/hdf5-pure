@@ -26,7 +26,7 @@ impl Superblock {
     /// A version 0 superblock, the oldest the format defines.
     pub fn new(widths: Widths) -> Self {
         Self {
-            version: 0,
+            version: VERSION_0,
             widths,
             consistency_flags: 0,
             group_leaf_node_k: 4,
@@ -44,7 +44,7 @@ impl Superblock {
     /// Writes version 1, which adds the indexed-storage B-tree K value and its
     /// reserved bytes between the consistency flags and the addresses.
     pub fn version_1(mut self) -> Self {
-        self.version = 1;
+        self.version = VERSION_1;
         self
     }
 
@@ -91,7 +91,7 @@ impl Superblock {
         superblock.extend_from_slice(&self.group_leaf_node_k.to_le_bytes());
         superblock.extend_from_slice(&self.group_internal_node_k.to_le_bytes());
         superblock.extend_from_slice(&self.consistency_flags.to_le_bytes());
-        if self.version >= 1 {
+        if self.version == VERSION_1 {
             superblock.extend_from_slice(&self.indexed_storage_internal_node_k.to_le_bytes());
             superblock.extend_from_slice(&0u16.to_le_bytes());
         }
@@ -113,6 +113,84 @@ impl Superblock {
     }
 }
 
+/// The fields of a version 0 or version 1 superblock a test follows or edits, as a file stores
+/// them.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Fields {
+    pub widths: Widths,
+    pub base_address: u64,
+    /// Where the end-of-file address is stored.
+    pub eof_address_at: usize,
+    /// The address of the root group's object header, from its symbol-table entry.
+    pub root_header_address: u64,
+}
+
+impl Fields {
+    /// The fields of the superblock beginning at `at` in `file`.
+    #[track_caller]
+    pub fn read(file: &[u8], at: usize) -> Self {
+        let version = superblock::version_at(file, at);
+        // Signature(8) + version(1) + three versions and a reserved byte(4), then the widths:
+        // section `subsec_fmt4_boot_super`, version 4.0.
+        let widths_at = at + SIGNATURE.len() + 1 + 4;
+        let widths = Widths::new(
+            usize::from(bytes::u8_at(file, widths_at)),
+            usize::from(bytes::u8_at(file, widths_at + 1)),
+        );
+        // Two widths(2) + reserved(1) + two group K values(4) + consistency flags(4), same
+        // section.
+        let addresses_at = widths_at
+            + 2
+            + 1
+            + 4
+            + 4
+            + match version {
+                VERSION_0 => 0,
+                VERSION_1 => INDEXED_STORAGE_K_AND_RESERVED,
+                other => panic!("superblock version {other} at {at:#x} is not version 0 or 1"),
+            };
+        let offset = widths.offset;
+        // The base, free-space, end-of-file and driver-information addresses, then the root
+        // group's symbol-table entry: its link name offset, then its object header's address.
+        Self {
+            widths,
+            base_address: bytes::uint_at(file, addresses_at, offset),
+            eof_address_at: addresses_at + 2 * offset,
+            root_header_address: bytes::uint_at(file, addresses_at + 5 * offset, offset),
+        }
+    }
+}
+
 /// The scratch pad a symbol-table entry ends with, whose meaning its cache type
 /// decides.
 const SCRATCH_PAD: usize = 16;
+
+/// The indexed-storage B-tree K value(2) and its reserved bytes(2) that version 1 adds after the
+/// consistency flags: section `subsec_fmt4_boot_super`, version 4.0.
+const INDEXED_STORAGE_K_AND_RESERVED: usize = 4;
+
+/// The two superblock versions this module builds and reads, same section.
+const VERSION_0: u8 = 0;
+const VERSION_1: u8 = 1;
+
+#[cfg(test)]
+mod tests {
+    use rstest::rstest;
+
+    use crate::bytes;
+    use crate::superblock::v0::{Fields, Superblock};
+    use crate::widths::Widths;
+
+    #[rstest]
+    #[case::version_0(Superblock::new(Widths::EIGHT))]
+    #[case::version_1(Superblock::new(Widths::EIGHT).version_1())]
+    fn reads_back_the_fields_it_builds(#[case] superblock: Superblock) {
+        let file = superblock.eof_address(4096).root_group(0, 96).build();
+
+        let fields = Fields::read(&file, 0);
+        assert_eq!(fields.widths, Widths::EIGHT);
+        assert_eq!(fields.base_address, 0);
+        assert_eq!(fields.root_header_address, 96);
+        assert_eq!(bytes::u64_at(&file, fields.eof_address_at), 4096);
+    }
+}

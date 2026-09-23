@@ -6,6 +6,7 @@ use std::ops::Range;
 
 use crate::bytes;
 use crate::object_header::{Message, MessageFlags, MessageType};
+use crate::superblock::v0;
 use crate::widths::Widths;
 
 /// The bytes of a version 1 object header's chunk zero, prefix included.
@@ -139,6 +140,19 @@ pub fn chunks(file: &[u8], at: usize, widths: Widths) -> Vec<Chunk> {
     walked
 }
 
+/// Every chunk of the root group's header, in a file whose version 0 or 1 superblock begins it
+/// and whose base address is zero, so that every address is a file offset.
+#[track_caller]
+pub fn root_group_chunks(file: &[u8]) -> Vec<Chunk> {
+    let superblock = v0::Fields::read(file, 0);
+    assert_eq!(
+        superblock.base_address, 0,
+        "the superblock's base address is not zero, so its addresses are not file offsets"
+    );
+    let at = usize::try_from(superblock.root_header_address).expect("a root header address");
+    chunks(file, at, superblock.widths)
+}
+
 /// One chunk of a version 1 object header.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Chunk {
@@ -161,6 +175,25 @@ pub struct Record {
     pub body: Range<usize>,
 }
 
+impl Record {
+    /// Where the record states its body's size.
+    pub fn size_at(&self) -> usize {
+        self.at + 2
+    }
+
+    pub fn set_type(&self, file: &mut [u8], msg_type: MessageType) {
+        bytes::set_u16_at(file, self.at, msg_type.0);
+    }
+
+    pub fn set_body_size(&self, file: &mut [u8], size: u16) {
+        bytes::set_u16_at(file, self.size_at(), size);
+    }
+
+    pub fn set_flags(&self, file: &mut [u8], flags: MessageFlags) {
+        bytes::set_u8_at(file, self.at + 4, flags.0);
+    }
+}
+
 /// Where a file states an offset or a length, and how wide that statement is.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Field {
@@ -170,9 +203,21 @@ pub struct Field {
     pub start: usize,
 }
 
+impl Field {
+    #[track_caller]
+    pub fn value(&self, file: &[u8]) -> u64 {
+        bytes::uint_at(file, self.at, self.width)
+    }
+
+    #[track_caller]
+    pub fn set(&self, file: &mut [u8], value: u64) {
+        bytes::set_uint_at(file, self.at, self.width, value);
+    }
+}
+
 #[track_caller]
 fn read_chunk(file: &[u8], length_field: Field) -> Chunk {
-    let length = bytes::uint_at(file, length_field.at, length_field.width);
+    let length = length_field.value(file);
     let end = length_field.start + usize::try_from(length).expect("a chunk length");
     assert!(
         end <= file.len(),
@@ -227,7 +272,8 @@ const VERSION: u8 = 1;
 #[cfg(test)]
 mod tests {
     use crate::image::Image;
-    use crate::object_header::{Message, MessageType, v1};
+    use crate::object_header::{Message, MessageFlags, MessageType, v1};
+    use crate::superblock::v0;
     use crate::widths::Widths;
 
     #[test]
@@ -263,6 +309,54 @@ mod tests {
             file[chunks[1].records[0].body.clone()],
             [7; 8],
             "the continuation's message body"
+        );
+    }
+
+    #[test]
+    fn edits_a_record_of_the_root_group_header_in_place() {
+        let mut image = Image::starting_with(
+            &v0::Superblock::new(Widths::EIGHT)
+                .root_group(0, 512)
+                .build(),
+        );
+        image.place(
+            512,
+            &v1::Header::new()
+                .message(Message::new(MessageType::ATTRIBUTE, &[1; 8]))
+                .message(Message::nil(8))
+                .build(),
+        );
+        let mut file = image.build();
+
+        // The first record loses its body and chunk zero shrinks to that record, which drops the
+        // Nil message after it.
+        let chunk_zero = v1::root_group_chunks(&file)[0].clone();
+        let record = &chunk_zero.records[0];
+        record.set_type(&mut file, MessageType::UNKNOWN);
+        record.set_flags(&mut file, MessageFlags::FAIL_IF_UNKNOWN_ALWAYS);
+        record.set_body_size(&mut file, 0);
+        chunk_zero
+            .length_field
+            .set(&mut file, v1::RECORD_PREFIX as u64);
+
+        let start = 512 + v1::PREFIX;
+        assert_eq!(record.size_at(), start + 2);
+        assert_eq!(
+            v1::root_group_chunks(&file),
+            vec![v1::Chunk {
+                range: start..start + v1::RECORD_PREFIX,
+                length_field: v1::Field {
+                    at: 512 + 8,
+                    width: 4,
+                    start,
+                },
+                records: vec![v1::Record {
+                    at: start,
+                    msg_type: MessageType::UNKNOWN,
+                    flags: MessageFlags::FAIL_IF_UNKNOWN_ALWAYS,
+                    body: start + v1::RECORD_PREFIX..start + v1::RECORD_PREFIX,
+                }],
+            }]
         );
     }
 }
