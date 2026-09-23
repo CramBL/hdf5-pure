@@ -16,6 +16,16 @@ fn max_abs_err(a: &[f32], b: &[f32]) -> f64 {
 }
 
 #[test]
+fn read_reference_zfp_then_deflate_partial_block() {
+    let bytes = include_bytes!("../data/h5py/zfp/f32_1d_2_partial_rate32_zfp_deflate.h5");
+    let file = File::from_bytes(bytes.to_vec()).unwrap();
+    assert_eq!(
+        file.dataset("v").unwrap().read_f32().unwrap(),
+        vec![0.0, 1.0]
+    );
+}
+
+#[test]
 fn zfp_f32_roundtrip_rate16() {
     let vals: Vec<f32> = (0..32).map(|i| i as f32 * 0.25).collect();
     let mut builder = FileBuilder::new();

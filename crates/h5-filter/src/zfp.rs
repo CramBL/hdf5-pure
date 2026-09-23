@@ -2342,6 +2342,20 @@ pub fn decompress_filter(
     decompress(data, &dims[..chunk_dims.len()], rate, element_type)
 }
 
+pub(crate) fn filter_encoded_len(
+    cd_values: &[u32],
+    chunk_dims: &[u64],
+    element_type: Option<ZfpElementType>,
+) -> Result<usize, Error> {
+    let (rate, dims, element_type) = filter_arguments(cd_values, chunk_dims, element_type)?;
+    validate_rate(rate, element_type)?;
+    checked_codec_sizes(
+        ZfpChunkDims::try_from(&dims[..chunk_dims.len()])?,
+        rate,
+        element_type,
+    )
+}
+
 fn filter_arguments(
     cd_values: &[u32],
     chunk_dims: &[u64],
