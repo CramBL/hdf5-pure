@@ -165,15 +165,15 @@ fn lzf_crosscheck() {
             // h5py skipped its optional LZF: the chunk is stored raw.
             assert_eq!(stored, raw, "{}: masked chunk must be raw", fix.name);
         } else {
-            let decoded = h5_filter::decompress_lzf(&stored, Some(raw.len()))
+            let decoded = hdf5_pure_filter::decompress_lzf(&stored, Some(raw.len()))
                 .unwrap_or_else(|e| panic!("{}: reference stream decode: {e:?}", fix.name));
             assert_eq!(decoded, raw, "{}: decode mismatch", fix.name);
         }
 
         // Our stream need not equal liblzf's, but it must round-trip.
-        let ours = h5_filter::compress_lzf(&raw);
+        let ours = hdf5_pure_filter::compress_lzf(&raw);
         assert_eq!(
-            h5_filter::decompress_lzf(&ours, Some(raw.len())).unwrap(),
+            hdf5_pure_filter::decompress_lzf(&ours, Some(raw.len())).unwrap(),
             raw,
             "{}: our stream fails to round-trip",
             fix.name

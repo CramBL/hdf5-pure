@@ -10,7 +10,7 @@
 use std::fs;
 use std::path::PathBuf;
 
-use h5_filter::ZfpElementType;
+use hdf5_pure_filter::ZfpElementType;
 use serde::Deserialize;
 
 fn dtype_to_elem_type(dtype: &str) -> Result<ZfpElementType, String> {
@@ -130,8 +130,8 @@ fn decode_and_max_err(
             .fold(0f64, f64::max)
     }
     let elem_ty = dtype_to_elem_type(dtype)?;
-    let decoded =
-        h5_filter::decompress_zfp(reference, dims, rate, elem_ty).map_err(|e| format!("{e:?}"))?;
+    let decoded = hdf5_pure_filter::decompress_zfp(reference, dims, rate, elem_ty)
+        .map_err(|e| format!("{e:?}"))?;
     match dtype {
         "f32" => {
             let expected: Vec<f32> = raw
@@ -237,7 +237,7 @@ fn decode_and_max_err(
 
 fn encode_per_dtype(dtype: &str, raw: &[u8], dims: &[usize], rate: f64) -> Result<Vec<u8>, String> {
     let elem_ty = dtype_to_elem_type(dtype)?;
-    h5_filter::compress_zfp(raw, dims, rate, elem_ty).map_err(|e| format!("{e:?}"))
+    hdf5_pure_filter::compress_zfp(raw, dims, rate, elem_ty).map_err(|e| format!("{e:?}"))
 }
 
 #[derive(Debug)]

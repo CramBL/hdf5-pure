@@ -190,7 +190,7 @@ impl ChunkOptions {
             *slot = spec;
             return;
         }
-        let at = h5_filter::canonical_filter_position(
+        let at = hdf5_pure_filter::canonical_filter_position(
             self.filters.iter().map(|f| f.kind.filter_id()),
             kind.filter_id(),
         );
@@ -236,7 +236,7 @@ impl ChunkOptions {
 
     /// Reports a conflicting filter pair as a dataset format error.
     ///
-    /// [`h5_filter::first_filter_conflict`] selects the pair independently of the
+    /// [`hdf5_pure_filter::first_filter_conflict`] selects the pair independently of the
     /// order in which the caller added the filters.
     ///
     /// # Errors
@@ -249,9 +249,9 @@ impl ChunkOptions {
             )))
         };
 
-        let Some((first, second)) =
-            h5_filter::first_filter_conflict(self.filters.iter().map(|f| f.kind.filter_id()))
-        else {
+        let Some((first, second)) = hdf5_pure_filter::first_filter_conflict(
+            self.filters.iter().map(|f| f.kind.filter_id()),
+        ) else {
             return Ok(());
         };
         clash(first, second)
@@ -320,7 +320,9 @@ impl ChunkOptions {
                         filter_id: FILTER_ZFP,
                         name: Some("zfp".into()),
                         flags,
-                        client_data: h5_filter::zfp_cd_values_rate(rate, elem_ty, chunk_dims)?,
+                        client_data: hdf5_pure_filter::zfp_cd_values_rate(
+                            rate, elem_ty, chunk_dims,
+                        )?,
                     }
                 }
                 FilterKind::ScaleOffset(mode, fill_avail) => {
@@ -369,7 +371,8 @@ impl ChunkOptions {
                     // and h5py's filter grows its buffer on `E2BIG`. Not new
                     // here — canonical rank already put LZF after scale-offset.
                     flags,
-                    client_data: h5_filter::lzf_h5py_cd_values(element_size, chunk_dims).to_vec(),
+                    client_data: hdf5_pure_filter::lzf_h5py_cd_values(element_size, chunk_dims)
+                        .to_vec(),
                 },
                 FilterKind::Deflate(level) => FilterDescription {
                     filter_id: FILTER_DEFLATE,

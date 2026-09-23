@@ -633,44 +633,46 @@ pub enum FormatError {
 /// [`FormatError::ObjectHeaderMessageTooLarge`]).
 pub const OBJECT_HEADER_MESSAGE_MAX: usize = u16::MAX as usize;
 
-impl From<h5_filter::Error> for FormatError {
-    fn from(error: h5_filter::Error) -> Self {
+impl From<hdf5_pure_filter::Error> for FormatError {
+    fn from(error: hdf5_pure_filter::Error) -> Self {
         match error {
-            h5_filter::Error::InvalidLzfStream(reason) => {
+            hdf5_pure_filter::Error::InvalidLzfStream(reason) => {
                 Self::FilterError(format!("lzf: {reason}"))
             }
-            h5_filter::Error::ScaleOffset(reason) => Self::FilterError(reason),
-            h5_filter::Error::FilterError(reason) => Self::FilterError(reason),
-            h5_filter::Error::UnsupportedFilter(id) => Self::UnsupportedFilter(id),
-            h5_filter::Error::DataSizeMismatch { expected, actual } => {
+            hdf5_pure_filter::Error::ScaleOffset(reason) => Self::FilterError(reason),
+            hdf5_pure_filter::Error::FilterError(reason) => Self::FilterError(reason),
+            hdf5_pure_filter::Error::UnsupportedFilter(id) => Self::UnsupportedFilter(id),
+            hdf5_pure_filter::Error::DataSizeMismatch { expected, actual } => {
                 Self::DataSizeMismatch { expected, actual }
             }
-            h5_filter::Error::Fletcher32Mismatch { expected, computed } => {
+            hdf5_pure_filter::Error::Fletcher32Mismatch { expected, computed } => {
                 Self::Fletcher32Mismatch { expected, computed }
             }
-            h5_filter::Error::ScaleOffsetValueTooLargeForPlatform { value, target } => {
+            hdf5_pure_filter::Error::ScaleOffsetValueTooLargeForPlatform { value, target } => {
                 Self::ValueTooLargeForPlatform { value, target }
             }
             #[cfg(feature = "zfp")]
-            h5_filter::Error::ZfpFilter(reason) => Self::FilterError(reason),
+            hdf5_pure_filter::Error::ZfpFilter(reason) => Self::FilterError(reason),
             #[cfg(feature = "zfp")]
-            h5_filter::Error::UnsupportedZfp(reason) => Self::UnsupportedZfp(reason),
+            hdf5_pure_filter::Error::UnsupportedZfp(reason) => Self::UnsupportedZfp(reason),
             #[cfg(feature = "zfp")]
-            h5_filter::Error::ValueTooLargeForPlatform { value, target } => {
+            hdf5_pure_filter::Error::ValueTooLargeForPlatform { value, target } => {
                 Self::ValueTooLargeForPlatform { value, target }
             }
             #[cfg(feature = "zfp")]
-            h5_filter::Error::TruncatedZfpStream { expected, actual } => Self::FilterError(
+            hdf5_pure_filter::Error::TruncatedZfpStream { expected, actual } => Self::FilterError(
                 format!("ZFP: encoded chunk needs {expected} bytes, got {actual}"),
             ),
             #[cfg(feature = "zfp")]
-            h5_filter::Error::ZfpSizeOverflow => {
+            hdf5_pure_filter::Error::ZfpSizeOverflow => {
                 Self::FilterError("ZFP: chunk dimensions or encoded size overflow usize".into())
             }
             #[cfg(feature = "zfp")]
-            h5_filter::Error::ZfpHeaderTooLarge { budget, required } => Self::FilterError(format!(
-                "ZFP: nonzero float block needs {required} header bits, rate allows {budget} bits"
-            )),
+            hdf5_pure_filter::Error::ZfpHeaderTooLarge { budget, required } => {
+                Self::FilterError(format!(
+                    "ZFP: nonzero float block needs {required} header bits, rate allows {budget} bits"
+                ))
+            }
             _ => Self::FilterError(format!("{error}")),
         }
     }

@@ -7,8 +7,8 @@ extern crate alloc;
 use alloc::{string::String, string::ToString, vec, vec::Vec};
 
 #[cfg(feature = "zfp")]
-pub use h5_filter::FILTER_ZFP;
-pub use h5_filter::{
+pub use hdf5_pure_filter::FILTER_ZFP;
+pub use hdf5_pure_filter::{
     FILTER_DEFLATE, FILTER_FLETCHER32, FILTER_LZF, FILTER_SCALEOFFSET, FILTER_SHUFFLE,
     H5Z_FLAG_OPTIONAL,
 };
@@ -32,11 +32,11 @@ pub struct FilterDescription {
 impl FilterDescription {
     /// Returns whether this filter is marked optional for output.
     pub fn is_optional(&self) -> bool {
-        h5_filter::FilterStep::optional(self)
+        hdf5_pure_filter::FilterStep::optional(self)
     }
 }
 
-impl h5_filter::FilterStep for FilterDescription {
+impl hdf5_pure_filter::FilterStep for FilterDescription {
     fn id(&self) -> u16 {
         self.filter_id
     }

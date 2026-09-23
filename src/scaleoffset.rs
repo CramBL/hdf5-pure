@@ -6,10 +6,10 @@ use alloc::vec::Vec;
 #[cfg(feature = "std")]
 use std::vec::Vec;
 
-pub(crate) use h5_filter::FillAvailability;
-use h5_filter::ScaleOffsetByteOrder;
-pub(crate) use h5_filter::ScaleOffsetFill;
-pub(crate) use h5_filter::ScaleOffsetType;
+pub(crate) use hdf5_pure_filter::FillAvailability;
+use hdf5_pure_filter::ScaleOffsetByteOrder;
+pub(crate) use hdf5_pure_filter::ScaleOffsetFill;
+pub(crate) use hdf5_pure_filter::ScaleOffsetType;
 
 use crate::datatype::Datatype;
 use crate::datatype::byte_order::DatatypeByteOrder;
@@ -39,7 +39,7 @@ pub enum ScaleOffset {
     FloatDScale(i32),
 }
 
-impl From<ScaleOffset> for h5_filter::ScaleOffset {
+impl From<ScaleOffset> for hdf5_pure_filter::ScaleOffset {
     fn from(mode: ScaleOffset) -> Self {
         match mode {
             ScaleOffset::Integer(bits) => Self::Integer(bits),
@@ -48,11 +48,11 @@ impl From<ScaleOffset> for h5_filter::ScaleOffset {
     }
 }
 
-impl From<h5_filter::ScaleOffset> for ScaleOffset {
-    fn from(mode: h5_filter::ScaleOffset) -> Self {
+impl From<hdf5_pure_filter::ScaleOffset> for ScaleOffset {
+    fn from(mode: hdf5_pure_filter::ScaleOffset) -> Self {
         match mode {
-            h5_filter::ScaleOffset::Integer(bits) => Self::Integer(bits),
-            h5_filter::ScaleOffset::FloatDScale(decimals) => Self::FloatDScale(decimals),
+            hdf5_pure_filter::ScaleOffset::Integer(bits) => Self::Integer(bits),
+            hdf5_pure_filter::ScaleOffset::FloatDScale(decimals) => Self::FloatDScale(decimals),
         }
     }
 }
@@ -64,12 +64,12 @@ pub(crate) fn build_cd_values(
     nelmts: u32,
     fill: ScaleOffsetFill<'_>,
 ) -> Result<Vec<u32>, FormatError> {
-    h5_filter::build_scale_offset_cd_values(mode.into(), ty, size, nelmts, fill)
+    hdf5_pure_filter::build_scale_offset_cd_values(mode.into(), ty, size, nelmts, fill)
         .map_err(FormatError::from)
 }
 
 pub(crate) fn scale_offset_mode(cd_values: &[u32]) -> Option<(ScaleOffset, FillAvailability)> {
-    h5_filter::scale_offset_mode(cd_values).map(|(mode, fill)| (mode.into(), fill))
+    hdf5_pure_filter::scale_offset_mode(cd_values).map(|(mode, fill)| (mode.into(), fill))
 }
 
 /// Extracts scalar facts from a datatype supported by the Scale-Offset filter.
