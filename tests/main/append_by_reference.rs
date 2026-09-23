@@ -2,22 +2,11 @@
 //! which has no resolvable path and so names its dataset by object-header address
 //! (issue #198).
 
-use hdf5_pure::{
-    AttrValue, Error, File, FileAccessProperties, FileBuilder, MemoryStrategy, Object,
-};
-
-/// Open with the bounded engine demanded rather than merely preferred: these
-/// tests are about that engine, so a file it stops accepting must fail here
-/// rather than quietly retarget the whole file at the mirror.
-fn open_bounded(path: &std::path::Path) -> Result<File, hdf5_pure::Error> {
-    File::open_rw_with_options(
-        path,
-        FileAccessProperties::new().with_memory_strategy(MemoryStrategy::Bounded),
-    )
-}
+use hdf5_pure::{AttrValue, Error, File, FileBuilder, Object};
 
 use tempfile::tempdir;
 use test_util_hdf5::dataset::Unlimited;
+use test_util_hdf5::session;
 
 /// A dataset `d` (rank-1, unlimited, chunked) plus a `refs` dataset holding one
 /// object reference to it.
@@ -68,7 +57,7 @@ fn a_dereferenced_handle_can_append_on_a_bounded_file() {
     let p = dir.path().join("byref_bounded.h5");
     build(&p);
     {
-        let file = open_bounded(&p).unwrap();
+        let file = session::open_bounded(&p).unwrap();
         let mut by_ref = deref_dataset(&file);
         by_ref.append(&[8i32, 9, 10, 11]).unwrap();
         file.close().unwrap();
