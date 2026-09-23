@@ -18,6 +18,8 @@ hdf5 = ["dep:hdf5"]
 "__hdf5-2" = ["__hdf5-1.14"]
 # Builds and links the libhdf5 that `hdf5-metno` bundles.
 __hdf5-bundled = ["hdf5/static", "__hdf5-2"]
+# The helpers for the tests that link the system libmatio.
+__matio = []
 
 [dependencies]
 hdf5 = { package = "hdf5-metno", git = "https://github.com/metno/hdf5-rust", rev = "605a2e28c17f2209bf2a6d0a8be11ef0b6546034", features = ["zlib"], optional = true }

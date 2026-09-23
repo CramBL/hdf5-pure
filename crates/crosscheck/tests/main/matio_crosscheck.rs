@@ -441,17 +441,8 @@ impl Drop for MatVar {
 use hdf5_pure::FixedPointLayout;
 use hdf5_pure::mat::{self, ComplexI16, Matrix};
 use serde::{Deserialize, Serialize};
-use std::sync::{Mutex, MutexGuard};
 use tempfile::tempdir;
-
-/// Serializes all libmatio calls — HDF5 (which libmatio calls internally)
-/// isn't thread-safe by default and cargo runs tests in parallel.
-static MATIO_LOCK: Mutex<()> = Mutex::new(());
-fn matio_lock() -> MutexGuard<'static, ()> {
-    // Intentionally ignore poisoning — a panicking test should not break
-    // later ones.
-    MATIO_LOCK.lock().unwrap_or_else(|e| e.into_inner())
-}
+use test_util_hdf5::lock;
 
 #[derive(Serialize, Deserialize, Debug, PartialEq)]
 struct Scalars {
@@ -462,7 +453,7 @@ struct Scalars {
 
 #[test]
 fn matio_reads_scalars_from_hdf5_pure() {
-    let _g = matio_lock();
+    let _g = lock::matio_lock();
     let dir = tempdir().unwrap();
     let path = dir.path().join("scalars.mat");
     mat::to_file(
@@ -489,7 +480,7 @@ struct Vectors {
 
 #[test]
 fn matio_reads_vectors_from_hdf5_pure() {
-    let _g = matio_lock();
+    let _g = lock::matio_lock();
     let dir = tempdir().unwrap();
     let path = dir.path().join("vectors.mat");
     mat::to_file(
@@ -523,7 +514,7 @@ struct MatrixOnly {
 
 #[test]
 fn matio_reads_2d_matrix_from_hdf5_pure() {
-    let _g = matio_lock();
+    let _g = lock::matio_lock();
     let dir = tempdir().unwrap();
     let path = dir.path().join("matrix.mat");
 
@@ -558,7 +549,7 @@ struct Nested {
 
 #[test]
 fn matio_reads_nested_struct_from_hdf5_pure() {
-    let _g = matio_lock();
+    let _g = lock::matio_lock();
     let dir = tempdir().unwrap();
     let path = dir.path().join("nested.mat");
 
@@ -591,7 +582,7 @@ fn matio_reads_nested_struct_from_hdf5_pure() {
 
 #[test]
 fn hdf5_pure_reads_scalars_written_by_matio() {
-    let _g = matio_lock();
+    let _g = lock::matio_lock();
     let dir = tempdir().unwrap();
     let path = dir.path().join("matio_scalars.mat");
     {
@@ -614,7 +605,7 @@ fn hdf5_pure_reads_scalars_written_by_matio() {
 
 #[test]
 fn hdf5_pure_reads_vectors_written_by_matio() {
-    let _g = matio_lock();
+    let _g = lock::matio_lock();
     let dir = tempdir().unwrap();
     let path = dir.path().join("matio_vectors.mat");
     {
@@ -635,7 +626,7 @@ fn hdf5_pure_reads_vectors_written_by_matio() {
 
 #[test]
 fn hdf5_pure_reads_matrix_written_by_matio() {
-    let _g = matio_lock();
+    let _g = lock::matio_lock();
     let dir = tempdir().unwrap();
     let path = dir.path().join("matio_matrix.mat");
     {
@@ -659,7 +650,7 @@ fn hdf5_pure_reads_matrix_written_by_matio() {
 
 #[test]
 fn hdf5_pure_reads_nested_struct_written_by_matio() {
-    let _g = matio_lock();
+    let _g = lock::matio_lock();
     let dir = tempdir().unwrap();
     let path = dir.path().join("matio_nested.mat");
     {
@@ -691,7 +682,7 @@ fn hdf5_pure_reads_nested_struct_written_by_matio() {
 
 #[test]
 fn full_roundtrip_via_matio() {
-    let _g = matio_lock();
+    let _g = lock::matio_lock();
     let dir = tempdir().unwrap();
     let path1 = dir.path().join("a.mat");
     let path2 = dir.path().join("b.mat");
@@ -728,7 +719,7 @@ fn full_roundtrip_via_matio() {
 #[test]
 fn hdf5_pure_reads_column_vector_matrix_from_matio() {
     use hdf5_pure::mat::Matrix;
-    let _g = matio_lock();
+    let _g = lock::matio_lock();
     let dir = tempdir().unwrap();
     let path = dir.path().join("colvec.mat");
     {
@@ -751,7 +742,7 @@ fn hdf5_pure_reads_column_vector_matrix_from_matio() {
 #[test]
 fn hdf5_pure_reads_row_vector_matrix_from_matio() {
     use hdf5_pure::mat::Matrix;
-    let _g = matio_lock();
+    let _g = lock::matio_lock();
     let dir = tempdir().unwrap();
     let path = dir.path().join("rowvec.mat");
     {
@@ -780,7 +771,7 @@ struct Capture {
 /// a complex double and not a two-field struct.
 #[test]
 fn matio_reads_complex_int16_from_hdf5_pure() {
-    let _g = matio_lock();
+    let _g = lock::matio_lock();
     let dir = tempdir().unwrap();
     let path = dir.path().join("capture.mat");
 
@@ -813,7 +804,7 @@ fn matio_reads_complex_int16_from_hdf5_pure() {
 /// is this crate's choice here.
 #[test]
 fn hdf5_pure_reads_complex_int16_written_by_matio() {
-    let _g = matio_lock();
+    let _g = lock::matio_lock();
     let dir = tempdir().unwrap();
     let path = dir.path().join("matio_capture.mat");
     {
@@ -916,7 +907,7 @@ struct MaybeHolder {
 /// nothing noticed while `None` still dropped the field.
 #[test]
 fn empty_struct_array_agrees_with_matio_and_across_both_emitters() {
-    let _g = matio_lock();
+    let _g = lock::matio_lock();
     let dir = tempdir().unwrap();
     let v = MaybeHolder {
         maybe: None,
@@ -988,7 +979,7 @@ fn empty_struct_array_agrees_with_matio_and_across_both_emitters() {
 /// `#[serde(default)]` the dropped-field encoding used to require.
 #[test]
 fn empty_struct_array_reads_back_as_none() {
-    let _g = matio_lock();
+    let _g = lock::matio_lock();
     let dir = tempdir().unwrap();
     let path = dir.path().join("maybe_roundtrip.mat");
     let v = MaybeHolder {

@@ -17,19 +17,8 @@
 use hdf5::Extent;
 use hdf5::file::LibraryVersion;
 use hdf5_pure::{File, FileBuilder, MaxExtent};
-use std::sync::{Mutex, MutexGuard};
 use tempfile::tempdir;
-
-// libhdf5 is not built thread-safe here; every test that touches the C library
-// takes this guard as its first line and holds it for the whole body, so no two
-// run C-library code at once. See `crates/crosscheck/tests/main/bounded_append.rs` for the full note.
-static C_LIB: Mutex<()> = Mutex::new(());
-
-fn c_lib_guard() -> MutexGuard<'static, ()> {
-    C_LIB
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-}
+use test_util_hdf5::lock;
 
 /// A rank-1 unlimited chunked i32 dataset `d` seeded with `0..n`, shuffled and
 /// deflated, written by this crate.
@@ -64,7 +53,7 @@ fn read_pure(path: &std::path::Path) -> Vec<i32> {
 
 #[test]
 fn c_library_reads_a_filtered_partial_last_chunk_written_in_place() {
-    let _c = c_lib_guard();
+    let _c = lock::libhdf5_guard();
     let dir = tempdir().unwrap();
     let path = dir.path().join("partial.h5");
     pure_create(&path, 8, 4); // two whole chunks
@@ -93,7 +82,7 @@ fn c_library_reads_a_filtered_partial_last_chunk_written_in_place() {
 
 #[test]
 fn c_library_reads_a_buffered_appended_dataset() {
-    let _c = c_lib_guard();
+    let _c = lock::libhdf5_guard();
     let dir = tempdir().unwrap();
     let path = dir.path().join("buffered.h5");
     // Start unaligned (10 of a chunk of 8), so the appender's first write
@@ -120,7 +109,7 @@ fn c_library_reads_a_buffered_appended_dataset() {
 #[test]
 #[cfg(target_endian = "little")]
 fn c_library_reads_a_buffered_append_onto_its_own_dataset() {
-    let _c = c_lib_guard();
+    let _c = lock::libhdf5_guard();
     let dir = tempdir().unwrap();
     let path = dir.path().join("c_written.h5");
 

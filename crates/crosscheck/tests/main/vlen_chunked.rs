@@ -17,21 +17,9 @@
 
 use hdf5::types::VarLenUnicode;
 use hdf5_pure::{File, FileBuilder, FileSpaceStrategy, MaxExtent};
-use std::sync::{Mutex, MutexGuard, OnceLock};
 use tempfile::tempdir;
 
-use test_util_hdf5::file;
-
-/// The C library is not thread-safe across concurrent file handles in this
-/// harness; serialize every test that touches it.
-static C_LIB: OnceLock<Mutex<()>> = OnceLock::new();
-
-fn c_lib_guard() -> MutexGuard<'static, ()> {
-    C_LIB
-        .get_or_init(|| Mutex::new(()))
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-}
+use test_util_hdf5::{file, lock};
 
 /// Read a VL-string dataset with the reference C library.
 fn read_c(path: &std::path::Path, name: &str) -> Vec<String> {
@@ -68,7 +56,7 @@ fn words(n: usize) -> Vec<String> {
 /// Plain chunked: no filter, so the references are merely split across chunks.
 #[test]
 fn c_library_reads_chunked_vlen_strings() {
-    let _c = c_lib_guard();
+    let _c = lock::libhdf5_guard();
     let dir = tempdir().unwrap();
     let path = dir.path().join("chunked.h5");
     let data = words(10);
@@ -95,7 +83,7 @@ fn c_library_reads_chunked_vlen_strings() {
 /// placement exists for.
 #[test]
 fn c_library_reads_filtered_chunked_vlen_strings() {
-    let _c = c_lib_guard();
+    let _c = lock::libhdf5_guard();
     let dir = tempdir().unwrap();
     let path = dir.path().join("filtered.h5");
     let data = words(64);
@@ -120,7 +108,7 @@ fn c_library_reads_filtered_chunked_vlen_strings() {
 /// see a genuine unlimited dimension.
 #[test]
 fn c_library_reads_resizable_vlen_strings() {
-    let _c = c_lib_guard();
+    let _c = lock::libhdf5_guard();
     let dir = tempdir().unwrap();
     let path = dir.path().join("resizable.h5");
     let data = words(7);
@@ -144,7 +132,7 @@ fn c_library_reads_resizable_vlen_strings() {
 /// per-element reference offsets differ from the flat 1-D case.
 #[test]
 fn c_library_reads_2d_chunked_vlen_strings() {
-    let _c = c_lib_guard();
+    let _c = lock::libhdf5_guard();
     let dir = tempdir().unwrap();
     let path = dir.path().join("grid.h5");
     let data = words(12); // 4 x 3
@@ -165,7 +153,7 @@ fn c_library_reads_2d_chunked_vlen_strings() {
 /// garbage in the C library.
 #[test]
 fn c_library_reads_chunked_vlen_strings_across_heap_collections() {
-    let _c = c_lib_guard();
+    let _c = lock::libhdf5_guard();
     let dir = tempdir().unwrap();
     let path = dir.path().join("many.h5");
     let data = words(70_000);
@@ -192,7 +180,7 @@ fn c_library_reads_chunked_vlen_strings_across_heap_collections() {
 /// where that region starts.
 #[test]
 fn c_library_reads_paged_chunked_vlen_strings() {
-    let _c = c_lib_guard();
+    let _c = lock::libhdf5_guard();
     let dir = tempdir().unwrap();
     let path = dir.path().join("paged.h5");
     let data = words(20);
@@ -212,7 +200,7 @@ fn c_library_reads_paged_chunked_vlen_strings() {
 /// address/emission-order mismatch would show up.
 #[test]
 fn c_library_reads_mixed_chunked_and_contiguous_vlen_strings() {
-    let _c = c_lib_guard();
+    let _c = lock::libhdf5_guard();
     let dir = tempdir().unwrap();
     let path = dir.path().join("mixed.h5");
     let chunked = words(9);
@@ -244,7 +232,7 @@ fn c_library_reads_mixed_chunked_and_contiguous_vlen_strings() {
 /// library rejects the file outright.
 #[test]
 fn c_library_reads_two_distinct_chunked_vlen_string_datasets() {
-    let _c = c_lib_guard();
+    let _c = lock::libhdf5_guard();
     let dir = tempdir().unwrap();
     let path = dir.path().join("two_early.h5");
 
@@ -275,7 +263,7 @@ fn c_library_reads_two_distinct_chunked_vlen_string_datasets() {
 /// reversal of two.
 #[test]
 fn c_library_reads_many_chunked_vlen_string_datasets() {
-    let _c = c_lib_guard();
+    let _c = lock::libhdf5_guard();
     let dir = tempdir().unwrap();
     let path = dir.path().join("many_early.h5");
 
@@ -316,7 +304,7 @@ fn c_library_reads_many_chunked_vlen_string_datasets() {
 /// by offset, does not.
 #[test]
 fn c_library_reads_an_overwritten_contiguous_vlen_string_dataset() {
-    let _c = c_lib_guard();
+    let _c = lock::libhdf5_guard();
     let dir = tempdir().unwrap();
     let path = dir.path().join("overwrite_contiguous.h5");
 
@@ -355,7 +343,7 @@ fn c_library_reads_an_overwritten_contiguous_vlen_string_dataset() {
 /// write is the assertion that matters.
 #[test]
 fn c_library_reads_an_overwritten_filtered_chunked_vlen_string_dataset() {
-    let _c = c_lib_guard();
+    let _c = lock::libhdf5_guard();
     let dir = tempdir().unwrap();
     let path = dir.path().join("overwrite_filtered.h5");
     let before = words(64);
@@ -403,7 +391,7 @@ fn c_library_reads_an_overwritten_filtered_chunked_vlen_string_dataset() {
 #[test]
 #[cfg(target_endian = "little")]
 fn a_c_written_vlen_string_dataset_can_be_overwritten() {
-    let _c = c_lib_guard();
+    let _c = lock::libhdf5_guard();
     let dir = tempdir().unwrap();
     let path = dir.path().join("c_written.h5");
 
@@ -453,7 +441,7 @@ fn a_c_written_vlen_string_dataset_can_be_overwritten() {
 #[test]
 #[cfg(target_endian = "little")]
 fn c_library_reads_an_overwritten_compact_vlen_string_dataset() {
-    let _c = c_lib_guard();
+    let _c = lock::libhdf5_guard();
     let dir = tempdir().unwrap();
     let path = dir.path().join("overwrite_compact.h5");
 
