@@ -2,7 +2,8 @@
 //! downstream caller confirm their chunk-cache tuning is taking effect, without
 //! reaching into crate internals.
 
-use hdf5_pure::{ChunkCacheConfig, File, FileAccessProperties, FileBuilder, MaxExtent};
+use hdf5_pure::{ChunkCacheConfig, File, FileAccessProperties, FileBuilder};
+use test_util_hdf5::dataset::Unlimited;
 
 fn chunked_file_bytes() -> Vec<u8> {
     let data: Vec<i32> = (0..256).collect();
@@ -291,11 +292,7 @@ fn resetting_the_counters_leaves_the_retained_chunks_in_place() {
 fn two_dataset_session(path: &std::path::Path) {
     let mut b = FileBuilder::new();
     for name in ["log", "other"] {
-        b.create_dataset(name)
-            .with_i32_data(&(0..64).collect::<Vec<i32>>())
-            .with_shape(&[64])
-            .with_maxshape(&[MaxExtent::Unlimited])
-            .with_chunks(&[8]);
+        Unlimited::new(name, &(0..64).collect::<Vec<i32>>(), 8).add_to(&mut b);
     }
     b.write(path).unwrap();
 }

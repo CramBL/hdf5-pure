@@ -9,22 +9,17 @@
 #![expect(clippy::mem_forget, reason = "the tests model a writer that crashed")]
 
 use hdf5_pure::{
-    Error, File, FileAccessProperties, FileBuilder, FileLocking, FileSpaceStrategy, MaxExtent,
-    MemoryStrategy, SyncPolicy, WriteMarkPolicy,
+    Error, File, FileAccessProperties, FileBuilder, FileLocking, FileSpaceStrategy, MemoryStrategy,
+    SyncPolicy, WriteMarkPolicy,
 };
 use tempfile::tempdir;
 use test_util::superblock;
+use test_util_hdf5::dataset::Unlimited;
 
 /// An appendable file: rank-1, unlimited, Extensible-Array indexed, unfiltered —
 /// what the SWMR writer accepts.
 fn build_swmr(path: &std::path::Path) {
-    let mut b = FileBuilder::new();
-    b.create_dataset("d")
-        .with_i32_data(&[0i32, 1, 2, 3])
-        .with_shape(&[4])
-        .with_maxshape(&[MaxExtent::Unlimited])
-        .with_chunks(&[4]);
-    b.write(path).unwrap();
+    Unlimited::new("d", &[0i32, 1, 2, 3], 4).pure_create(path);
 }
 
 /// Leave the file flagged exactly as a crashed writer would: leak the writer so
@@ -196,11 +191,7 @@ fn build_paged(path: &std::path::Path) {
     let mut b = FileBuilder::new();
     b.with_file_space_strategy(FileSpaceStrategy::Page, true, 1)
         .with_file_space_page_size(4096);
-    b.create_dataset("d")
-        .with_i32_data(&[0i32; 64])
-        .with_shape(&[64])
-        .with_maxshape(&[MaxExtent::Unlimited])
-        .with_chunks(&[64]);
+    Unlimited::new("d", &[0i32; 64], 64).add_to(&mut b);
     b.write(path).unwrap();
 }
 

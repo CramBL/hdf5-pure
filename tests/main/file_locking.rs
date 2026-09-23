@@ -7,8 +7,9 @@
 //! editor still holds its lock, because that read is permitted on Unix but
 //! blocked by the OS on Windows.
 
-use hdf5_pure::{Error, File, FileAccessProperties, FileBuilder, FileLocking, MaxExtent};
+use hdf5_pure::{Error, File, FileAccessProperties, FileBuilder, FileLocking};
 use tempfile::tempdir;
+use test_util_hdf5::dataset::Unlimited;
 
 /// A plain, in-place-editable starter file.
 fn write_starter(path: &std::path::Path) {
@@ -19,13 +20,7 @@ fn write_starter(path: &std::path::Path) {
 
 /// An unlimited Extensible-Array dataset the SWMR append writer can open.
 fn write_appendable(path: &std::path::Path) {
-    let mut b = FileBuilder::new();
-    b.create_dataset("d")
-        .with_i32_data(&[0, 1, 2, 3])
-        .with_shape(&[4])
-        .with_maxshape(&[MaxExtent::Unlimited])
-        .with_chunks(&[1]);
-    b.write(path).unwrap();
+    Unlimited::new("d", &[0i32, 1, 2, 3], 1).pure_create(path);
 }
 
 #[test]

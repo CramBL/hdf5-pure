@@ -19,6 +19,7 @@ use hdf5_pure::{
     EditBacking, File, FileAccessProperties, FileBuilder, FileCreateProperties, FileSpaceStrategy,
     LibVer, MaxExtent, MemoryStrategy, SyncPolicy,
 };
+use test_util_hdf5::dataset::Unlimited;
 
 fn with_strategy(strategy: MemoryStrategy) -> FileAccessProperties {
     FileAccessProperties::new().with_memory_strategy(strategy)
@@ -26,24 +27,14 @@ fn with_strategy(strategy: MemoryStrategy) -> FileAccessProperties {
 
 /// A latest-format file the bounded engine handles: no userblock, v2+ superblock.
 fn plain_file(path: &std::path::Path) {
-    let mut b = FileBuilder::new();
-    b.create_dataset("d")
-        .with_i32_data(&[1, 2, 3])
-        .with_shape(&[3])
-        .with_maxshape(&[MaxExtent::Unlimited])
-        .with_chunks(&[3]);
-    b.write(path).unwrap();
+    Unlimited::new("d", &[1i32, 2, 3], 3).pure_create(path);
 }
 
 /// The same file behind a 512-byte userblock, which the bounded engine refuses.
 fn userblock_file(path: &std::path::Path) {
     let mut b = FileBuilder::new();
     b.with_userblock(512);
-    b.create_dataset("d")
-        .with_i32_data(&[1, 2, 3])
-        .with_shape(&[3])
-        .with_maxshape(&[MaxExtent::Unlimited])
-        .with_chunks(&[3]);
+    Unlimited::new("d", &[1i32, 2, 3], 3).add_to(&mut b);
     b.write(path).unwrap();
 }
 
@@ -52,11 +43,7 @@ fn userblock_file(path: &std::path::Path) {
 fn paged_nonpersist_file(path: &std::path::Path) {
     let mut b = FileBuilder::new();
     b.with_file_space_strategy(FileSpaceStrategy::Page, false, 0);
-    b.create_dataset("d")
-        .with_i32_data(&[1, 2, 3])
-        .with_shape(&[3])
-        .with_maxshape(&[MaxExtent::Unlimited])
-        .with_chunks(&[3]);
+    Unlimited::new("d", &[1i32, 2, 3], 3).add_to(&mut b);
     b.write(path).unwrap();
 }
 
@@ -417,11 +404,7 @@ fn create_refuses_a_pair_it_could_not_reopen_before_writing_anything() {
 fn fsm_persisting_file(path: &std::path::Path) {
     let mut b = FileBuilder::new();
     b.with_file_space_strategy(FileSpaceStrategy::FsmAggr, true, 0);
-    b.create_dataset("samples")
-        .with_u64_data(&[0, 1, 2, 3])
-        .with_shape(&[4])
-        .with_maxshape(&[MaxExtent::Unlimited])
-        .with_chunks(&[4]);
+    Unlimited::new("samples", &[0u64, 1, 2, 3], 4).add_to(&mut b);
     b.write(path).unwrap();
 }
 

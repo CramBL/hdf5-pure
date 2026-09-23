@@ -12,6 +12,7 @@
 use hdf5::file::LibraryVersion;
 use hdf5_pure::{File, FileBuilder, MaxExtent, ScaleOffset};
 use tempfile::tempdir;
+use test_util_hdf5::dataset::{Filter, Unlimited};
 use test_util_hdf5::file;
 
 /// Read a dataset's typed fill value back through the reference C library.
@@ -42,14 +43,9 @@ fn c_reads_pure_written_contiguous_fill() {
 fn c_reads_pure_written_chunked_fill() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("pure_chunked.h5");
-    let mut fb = FileBuilder::new();
-    fb.create_dataset("d")
-        .with_f64_data(&[1.0, 2.0, 3.0, 4.0])
-        .with_shape(&[4])
-        .with_maxshape(&[MaxExtent::Unlimited])
-        .with_chunks(&[2])
-        .with_fill_value(3.5_f64);
-    fb.write(&path).unwrap();
+    Unlimited::new("d", &[1.0, 2.0, 3.0, 4.0], 2)
+        .fill_value(3.5_f64)
+        .pure_create(&path);
 
     assert_eq!(c_fill_value::<f64>(&path, "d"), Some(3.5));
 }
@@ -226,34 +222,6 @@ fn c_extend_and_read(path: &std::path::Path, to: usize) -> Vec<u32> {
     v
 }
 
-fn c_create_chunked(path: &std::path::Path, data: &[u32], chunk: usize, fill: Option<u32>) {
-    let file = file::libhdf5_create_v110(path);
-    let mut b = file
-        .new_dataset::<u32>()
-        .chunk((chunk,))
-        .shape((hdf5::Extent::resizable(data.len()),));
-    if let Some(f) = fill {
-        b = b.fill_value(f);
-    }
-    let ds = b.create("col").unwrap();
-    ds.write_raw(data).unwrap();
-    file.close().unwrap();
-}
-
-fn pure_create_chunked(path: &std::path::Path, data: &[u32], chunk: u64, fill: Option<u32>) {
-    let mut b = FileBuilder::new();
-    let ds = b
-        .create_dataset("col")
-        .with_u32_data(data)
-        .with_shape(&[data.len() as u64])
-        .with_maxshape(&[MaxExtent::Unlimited])
-        .with_chunks(&[chunk]);
-    if let Some(f) = fill {
-        ds.with_fill_value(f);
-    }
-    b.write(path).unwrap();
-}
-
 /// The whole point, stated as agreement with the reference: extend a dataset
 /// into the tail of its last chunk and both writers' files must read the same.
 #[test]
@@ -263,7 +231,9 @@ fn extending_into_a_partial_chunk_reads_the_fill_value() {
     let fill = 77u32;
 
     let c_path = dir.path().join("c.h5");
-    c_create_chunked(&c_path, &data, 4, Some(fill));
+    Unlimited::new("col", &data, 4)
+        .fill_value(fill)
+        .libhdf5_create(&c_path);
     let want = c_extend_and_read(&c_path, 8);
     assert_eq!(
         want,
@@ -272,7 +242,9 @@ fn extending_into_a_partial_chunk_reads_the_fill_value() {
     );
 
     let p_path = dir.path().join("pure.h5");
-    pure_create_chunked(&p_path, &data, 4, Some(fill));
+    Unlimited::new("col", &data, 4)
+        .fill_value(fill)
+        .pure_create(&p_path);
     assert_eq!(c_extend_and_read(&p_path, 8), want);
 }
 
@@ -284,7 +256,9 @@ fn appending_leaves_the_fill_value_in_the_rest_of_the_chunk() {
     let fill = 77u32;
 
     let p_path = dir.path().join("appended.h5");
-    pure_create_chunked(&p_path, &[1u32, 2], 4, Some(fill));
+    Unlimited::new("col", &[1u32, 2], 4)
+        .fill_value(fill)
+        .pure_create(&p_path);
     {
         let f = File::open_rw(&p_path).unwrap();
         f.dataset("col")
@@ -309,9 +283,9 @@ fn no_fill_value_still_pads_with_zeros() {
     let data = [1u32, 2, 3, 4, 5];
 
     let c_path = dir.path().join("c.h5");
-    c_create_chunked(&c_path, &data, 4, None);
+    Unlimited::new("col", &data, 4).libhdf5_create(&c_path);
     let p_path = dir.path().join("pure.h5");
-    pure_create_chunked(&p_path, &data, 4, None);
+    Unlimited::new("col", &data, 4).pure_create(&p_path);
 
     let want = vec![1, 2, 3, 4, 5, 0, 0, 0];
     assert_eq!(c_extend_and_read(&c_path, 8), want);
@@ -325,7 +299,9 @@ fn a_zero_fill_value_pads_with_zeros() {
     let dir = tempdir().unwrap();
     let data = [1u32, 2, 3, 4, 5];
     let p_path = dir.path().join("pure.h5");
-    pure_create_chunked(&p_path, &data, 4, Some(0));
+    Unlimited::new("col", &data, 4)
+        .fill_value(0)
+        .pure_create(&p_path);
     assert_eq!(c_extend_and_read(&p_path, 8), vec![1, 2, 3, 4, 5, 0, 0, 0]);
 }
 
@@ -338,15 +314,10 @@ fn a_filtered_partial_chunk_is_padded_before_compression() {
     let fill = 77u32;
     let data: Vec<u32> = (0..5).collect();
     let p_path = dir.path().join("deflate.h5");
-    let mut b = FileBuilder::new();
-    b.create_dataset("col")
-        .with_u32_data(&data)
-        .with_shape(&[5])
-        .with_maxshape(&[MaxExtent::Unlimited])
-        .with_chunks(&[4])
-        .with_fill_value(fill)
-        .with_deflate(6);
-    b.write(&p_path).unwrap();
+    Unlimited::new("col", &data, 4)
+        .fill_value(fill)
+        .filters(&[Filter::Deflate(6)])
+        .pure_create(&p_path);
 
     assert_eq!(
         c_extend_and_read(&p_path, 8),
@@ -364,15 +335,10 @@ fn a_scale_offset_partial_chunk_is_padded_before_encoding() {
     let fill = 77u32;
     let data: Vec<u32> = (0..5).collect();
     let p_path = dir.path().join("so.h5");
-    let mut b = FileBuilder::new();
-    b.create_dataset("col")
-        .with_u32_data(&data)
-        .with_shape(&[5])
-        .with_maxshape(&[MaxExtent::Unlimited])
-        .with_chunks(&[4])
-        .with_fill_value(fill)
-        .with_scale_offset(ScaleOffset::Integer(0));
-    b.write(&p_path).unwrap();
+    Unlimited::new("col", &data, 4)
+        .fill_value(fill)
+        .filters(&[Filter::ScaleOffset(ScaleOffset::Integer(0))])
+        .pure_create(&p_path);
 
     assert_eq!(
         c_extend_and_read(&p_path, 8),
@@ -389,7 +355,9 @@ fn an_immediate_append_leaves_the_fill_value_in_the_rest_of_the_chunk() {
     let dir = tempdir().unwrap();
     let fill = 77u32;
     let path = dir.path().join("immediate.h5");
-    pure_create_chunked(&path, &[1u32, 2], 4, Some(fill));
+    Unlimited::new("col", &[1u32, 2], 4)
+        .fill_value(fill)
+        .pure_create(&path);
     {
         let f = File::open_rw(&path).unwrap();
         let mut ds = f.dataset("col").unwrap();
@@ -455,7 +423,9 @@ fn overwriting_values_keeps_the_fill_value_in_the_rest_of_the_chunk() {
     let dir = tempdir().unwrap();
     let fill = 77u32;
     let path = dir.path().join("overwrite.h5");
-    c_create_chunked(&path, &[1u32, 2, 3, 4, 5], 4, Some(fill));
+    Unlimited::new("col", &[1u32, 2, 3, 4, 5], 4)
+        .fill_value(fill)
+        .libhdf5_create(&path);
 
     {
         let session = File::open_rw(&path).unwrap();
@@ -591,14 +561,9 @@ fn a_partial_chunk_is_filled_in_every_dimension() {
 fn a_partial_chunk_of_single_byte_elements_is_filled() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("u8.h5");
-    let mut b = FileBuilder::new();
-    b.create_dataset("col")
-        .with_u8_data(&[1u8, 2, 3, 4, 5])
-        .with_shape(&[5])
-        .with_maxshape(&[MaxExtent::Unlimited])
-        .with_chunks(&[4])
-        .with_fill_value(9u8);
-    b.write(&path).unwrap();
+    Unlimited::new("col", &[1u8, 2, 3, 4, 5], 4)
+        .fill_value(9u8)
+        .pure_create(&path);
 
     {
         let f = hdf5::File::open_rw(&path).unwrap();

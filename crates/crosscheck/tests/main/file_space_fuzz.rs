@@ -24,9 +24,7 @@
 //! with the fix.
 
 use hdf5::plist::file_create::FileSpaceStrategy as CStrategy;
-use hdf5_pure::{
-    File, FileAccessProperties, FileBuilder, FileSpaceStrategy, MaxExtent, MemoryStrategy,
-};
+use hdf5_pure::{File, FileAccessProperties, FileBuilder, FileSpaceStrategy, MemoryStrategy};
 
 /// Open with the bounded engine demanded rather than merely preferred: these
 /// tests are about that engine, so a file it stops accepting must fail here
@@ -40,6 +38,7 @@ fn open_bounded(path: &std::path::Path) -> Result<File, hdf5_pure::Error> {
 
 use proptest::prelude::*;
 use tempfile::tempdir;
+use test_util_hdf5::dataset::Unlimited;
 
 /// The four file-space strategies, each mapped to the name the C library reports.
 fn strategy() -> impl Strategy<Value = FileSpaceStrategy> {
@@ -169,11 +168,8 @@ proptest! {
         // Create a paged, persisting, unlimited chunked i32 dataset with one chunk.
         {
             let mut b = FileBuilder::new();
-            b.create_dataset("d")
-                .with_i32_data(&(0..chunk_size as i32).collect::<Vec<i32>>())
-                .with_shape(&[chunk_size as u64])
-                .with_maxshape(&[MaxExtent::Unlimited])
-                .with_chunks(&[chunk_size as u64]);
+            let data: Vec<i32> = (0..chunk_size as i32).collect();
+            Unlimited::new("d", &data, chunk_size as u64).add_to(&mut b);
             b.with_file_space_strategy(FileSpaceStrategy::Page, true, 0)
                 .with_file_space_page_size(page_size);
             b.write(&path).unwrap();

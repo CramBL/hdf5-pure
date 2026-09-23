@@ -24,6 +24,7 @@ fn open_bounded(path: &std::path::Path) -> Result<File, hdf5_pure::Error> {
 use tempfile::tempdir;
 
 use test_util_hdf5::absence;
+use test_util_hdf5::dataset::Unlimited;
 
 #[test]
 fn c_library_reads_our_strategy() {
@@ -595,11 +596,7 @@ fn c_library_reads_our_bounded_mutated_paged_file() {
     // Create with one chunk, then bounded-append to 5000 rows.
     {
         let mut b = FileBuilder::new();
-        b.create_dataset("d")
-            .with_i32_data(&(0..64).collect::<Vec<i32>>())
-            .with_shape(&[64])
-            .with_maxshape(&[MaxExtent::Unlimited])
-            .with_chunks(&[64]);
+        Unlimited::new("d", &(0..64).collect::<Vec<i32>>(), 64).add_to(&mut b);
         b.with_file_space_strategy(FileSpaceStrategy::Page, true, 0)
             .with_file_space_page_size(4096);
         b.write(&path).unwrap();
@@ -670,11 +667,7 @@ fn c_library_reads_our_staged_mutated_paged_file() {
 
     {
         let mut b = FileBuilder::new();
-        b.create_dataset("d")
-            .with_i32_data(&(0..64).collect::<Vec<i32>>())
-            .with_shape(&[64])
-            .with_maxshape(&[MaxExtent::Unlimited])
-            .with_chunks(&[64]);
+        Unlimited::new("d", &(0..64).collect::<Vec<i32>>(), 64).add_to(&mut b);
         b.with_file_space_strategy(FileSpaceStrategy::Page, true, 0)
             .with_file_space_page_size(4096);
         b.write(&path).unwrap();

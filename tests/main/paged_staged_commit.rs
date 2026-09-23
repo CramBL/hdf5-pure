@@ -6,13 +6,10 @@
 //! on disk records which pages hold metadata and which hold raw data.
 
 use hdf5_pure::{
-    Error, File, FileAccessProperties, FileBuilder, FileSpaceStrategy, MaxExtent, MemoryStrategy,
+    Error, File, FileAccessProperties, FileBuilder, FileSpaceStrategy, MemoryStrategy,
 };
-
-const PAGE: u64 = 4096;
-
 use test_util::temp;
-
+use test_util_hdf5::dataset::Unlimited;
 // The page-homogeneity check is shared with the free-space tests, which exercise
 // the same invariant from the in-place append side (issue #387).
 use test_util_hdf5::paged;
@@ -97,11 +94,7 @@ fn paged_staged_commit_keeps_pages_homogeneous() {
     // A chunked, unlimited dataset so the staged append rebuilds an index.
     {
         let mut b = FileBuilder::new();
-        b.create_dataset("d")
-            .with_i32_data(&(0..64).collect::<Vec<i32>>())
-            .with_shape(&[64])
-            .with_maxshape(&[MaxExtent::Unlimited])
-            .with_chunks(&[64]);
+        Unlimited::new("d", &(0..64).collect::<Vec<i32>>(), 64).add_to(&mut b);
         b.with_file_space_strategy(FileSpaceStrategy::Page, true, 0)
             .with_file_space_page_size(PAGE);
         b.write(&path).unwrap();
@@ -227,3 +220,5 @@ fn paged_without_persist_is_refused() {
         "expected a persisted-free-space refusal, got {err:?}"
     );
 }
+
+const PAGE: u64 = 4096;

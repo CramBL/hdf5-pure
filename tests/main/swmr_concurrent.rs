@@ -11,9 +11,10 @@
 //!
 //! `uv run` puts a pinned python3 + h5py on PATH for the duration of the test.
 
-use hdf5_pure::{File, FileBuilder, MaxExtent};
+use hdf5_pure::File;
 use tempfile::tempdir;
 use test_util::superblock;
+use test_util_hdf5::dataset::Unlimited;
 
 /// Open `path` with h5py and return `(len, first, last)` of dataset `d`, or
 /// `None` if python3/h5py are unavailable. `mode` is "swmr" or "plain".
@@ -63,13 +64,7 @@ fn h5py_swmr_reads_pure_appends_concurrently() {
     // Create the dataset (unlimited, chunked) with hdf5-pure.
     {
         let data: Vec<i32> = (0..5).collect();
-        let mut b = FileBuilder::new();
-        b.create_dataset("d")
-            .with_i32_data(&data)
-            .with_shape(&[5])
-            .with_maxshape(&[MaxExtent::Unlimited])
-            .with_chunks(&[1]);
-        b.write(&path).unwrap();
+        Unlimited::new("d", &data, 1).pure_create(&path);
     }
 
     // Open as a SWMR writer (sets the superblock SWMR flag) and keep it open
@@ -121,13 +116,7 @@ fn swmr_flag_lifecycle() {
     let path = dir.path().join("d.h5");
     {
         let data: Vec<i32> = (0..5).collect();
-        let mut b = FileBuilder::new();
-        b.create_dataset("d")
-            .with_i32_data(&data)
-            .with_shape(&[5])
-            .with_maxshape(&[MaxExtent::Unlimited])
-            .with_chunks(&[1]);
-        b.write(&path).unwrap();
+        Unlimited::new("d", &data, 1).pure_create(&path);
     }
     assert_eq!(
         superblock::consistency_flags(&path),

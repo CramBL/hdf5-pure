@@ -16,6 +16,7 @@ use hdf5::Extent;
 use hdf5::file::LibraryVersion;
 use hdf5_pure::{File, FileBuilder, MaxExtent};
 use tempfile::tempdir;
+use test_util_hdf5::dataset::{Filter, Unlimited};
 
 /// Write a starter file and add one empty chunked dataset to it through the
 /// in-place edit engine, the path issue #284 refused.
@@ -186,14 +187,9 @@ fn an_empty_filtered_dataset_declares_the_width_its_first_chunk_needs() {
     let empty = dir.path().join("empty.h5");
     let seeded = dir.path().join("seeded.h5");
     let write = |path: &std::path::Path, values: &[i32]| {
-        let mut b = FileBuilder::new();
-        b.create_dataset("col")
-            .with_i32_data(values)
-            .with_shape(&[values.len() as u64])
-            .with_maxshape(&[MaxExtent::Unlimited])
-            .with_chunks(&[chunk_elems as u64])
-            .with_deflate(6);
-        b.write(path).unwrap();
+        Unlimited::new("col", values, chunk_elems as u64)
+            .filters(&[Filter::Deflate(6)])
+            .pure_create(path);
     };
     write(&empty, &[]);
     write(&seeded, &data);
@@ -237,14 +233,9 @@ fn an_empty_filtered_dataset_accepts_an_append_that_fills_its_chunk() {
 
     let dir = tempdir().unwrap();
     let path = dir.path().join("append.h5");
-    let mut b = FileBuilder::new();
-    b.create_dataset("col")
-        .with_i32_data(&[])
-        .with_shape(&[0])
-        .with_maxshape(&[MaxExtent::Unlimited])
-        .with_chunks(&[chunk_elems as u64])
-        .with_deflate(6);
-    b.write(&path).unwrap();
+    Unlimited::<i32>::new("col", &[], chunk_elems as u64)
+        .filters(&[Filter::Deflate(6)])
+        .pure_create(&path);
 
     {
         let session = File::open_rw(&path).unwrap();

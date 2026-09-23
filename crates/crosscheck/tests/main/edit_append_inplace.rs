@@ -11,7 +11,7 @@
 //! storage.
 
 use hdf5::Extent;
-use hdf5_pure::{AttrValue, Error, File, MaxExtent};
+use hdf5_pure::{AttrValue, Error, File};
 use tempfile::tempdir;
 
 use test_util_hdf5::absence;
@@ -362,12 +362,9 @@ fn a_filtered_partial_tail_with_two_hard_links_appends_in_place() {
     let path = dir.path().join("aliased_tail.h5");
     {
         let mut b = hdf5_pure::FileBuilder::new();
-        b.create_dataset("d")
-            .with_i32_data(&(0..10).collect::<Vec<i32>>())
-            .with_shape(&[10])
-            .with_maxshape(&[MaxExtent::Unlimited])
-            .with_chunks(&[8])
-            .with_deflate(1);
+        Unlimited::new("d", &(0..10).collect::<Vec<i32>>(), 8)
+            .filters(&[Filter::Deflate(1)])
+            .add_to(&mut b);
         b.write(&path).unwrap();
     }
     {

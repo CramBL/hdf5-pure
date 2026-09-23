@@ -8,6 +8,7 @@ use hdf5_pure::{
 
 use test_util::fractal_heap;
 use test_util::temp;
+use test_util_hdf5::dataset::{Filter, Unlimited};
 
 /// Write a starter file with one dataset, returning its path.
 fn write_starter(path: &std::path::Path) {
@@ -4472,12 +4473,9 @@ fn a_reference_address_to_a_dataset_a_write_relocates_is_refused() {
         let mut b = FileBuilder::new();
         // Zeros so every chunk compresses to almost nothing, leaving slots the
         // replacement below cannot fit back into.
-        b.create_dataset("d")
-            .with_i32_data(&vec![0i32; 64])
-            .with_shape(&[64])
-            .with_maxshape(&[MaxExtent::Unlimited])
-            .with_chunks(&[16])
-            .with_deflate(6);
+        Unlimited::new("d", &[0i32; 64], 16)
+            .filters(&[Filter::Deflate(6)])
+            .add_to(&mut b);
         b.create_dataset("refs").with_path_references(&["d"]);
         b.write(&path).unwrap();
 

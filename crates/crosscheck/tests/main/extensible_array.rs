@@ -13,9 +13,10 @@
 //! Before the geometry fix, anything past 20 chunks silently corrupted on read.
 
 use hdf5::Extent;
-use hdf5_pure::{File, FileBuilder, MaxExtent};
+use hdf5_pure::File;
 use tempfile::tempdir;
 use test_util::extensible_array;
+use test_util_hdf5::dataset::Unlimited;
 use test_util_hdf5::file;
 
 const SIZES: &[usize] = &[20, 300, 2000, 50000, 140000];
@@ -38,13 +39,7 @@ fn write_with_c(path: &std::path::Path, n: usize) {
 /// Create the same dataset with hdf5-pure.
 fn write_with_pure(path: &std::path::Path, n: usize) {
     let data: Vec<i32> = (0..n as i32).collect();
-    let mut b = FileBuilder::new();
-    b.create_dataset("d")
-        .with_i32_data(&data)
-        .with_shape(&[n as u64])
-        .with_maxshape(&[MaxExtent::Unlimited])
-        .with_chunks(&[1]);
-    b.write(path).unwrap();
+    Unlimited::new("d", &data, 1).pure_create(path);
 }
 
 /// Direction 1: hdf5-pure writes, the reference C library reads.

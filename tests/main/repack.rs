@@ -7,6 +7,7 @@ use hdf5_pure::{
 };
 use rstest::rstest;
 use test_util::{superblock, temp};
+use test_util_hdf5::dataset::{Filter, Unlimited};
 
 /// A variable-length attribute survives a repack still variable-length.
 ///
@@ -545,14 +546,9 @@ fn repacks_resizable_extensible_array() {
     let src = temp::temp_path("hdf5_pure_repack_ea_src.h5");
     let dst = temp::temp_path("hdf5_pure_repack_ea_dst.h5");
     let data: Vec<i64> = (0..1000).collect();
-    let mut b = FileBuilder::new();
-    b.create_dataset("series")
-        .with_i64_data(&data)
-        .with_shape(&[1000])
-        .with_maxshape(&[MaxExtent::Unlimited])
-        .with_chunks(&[128])
-        .with_deflate(3);
-    b.write(&src).unwrap();
+    Unlimited::new("series", &data, 128)
+        .filters(&[Filter::Deflate(3)])
+        .pure_create(&src);
 
     repack(&src, &dst, &RepackOptions::new()).unwrap();
 

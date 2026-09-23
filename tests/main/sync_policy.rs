@@ -11,21 +11,15 @@
 //! else*: the same file, the same content, the same refusals.
 
 use hdf5_pure::{
-    AttrValue, Error, File, FileAccessProperties, FileBuilder, FileSpaceStrategy, MaxExtent,
-    SyncPolicy,
+    AttrValue, Error, File, FileAccessProperties, FileBuilder, FileSpaceStrategy, SyncPolicy,
 };
 use tempfile::tempdir;
+use test_util_hdf5::dataset::Unlimited;
 
 /// A file with one unlimited chunked dataset, so a session can reach it by both
 /// an immediate append and a staged commit.
 fn fixture(path: &std::path::Path) {
-    let mut b = FileBuilder::new();
-    b.create_dataset("d")
-        .with_i32_data(&(0..8).collect::<Vec<_>>())
-        .with_shape(&[8])
-        .with_maxshape(&[MaxExtent::Unlimited])
-        .with_chunks(&[4]);
-    b.write(path).unwrap();
+    Unlimited::new("d", &(0..8).collect::<Vec<i32>>(), 4).pure_create(path);
 }
 
 /// Drive one read-write session through every write path there is, under
@@ -123,11 +117,7 @@ fn a_closed_file_refuses_sync_and_does_not_need_one() {
     // do after the last barrier the caller could have asked for.
     let path = dir.path().join("persist.h5");
     let mut b = FileBuilder::new();
-    b.create_dataset("d")
-        .with_i32_data(&(0..8).collect::<Vec<_>>())
-        .with_shape(&[8])
-        .with_maxshape(&[MaxExtent::Unlimited])
-        .with_chunks(&[4]);
+    Unlimited::new("d", &(0..8).collect::<Vec<i32>>(), 4).add_to(&mut b);
     b.with_file_space_strategy(FileSpaceStrategy::FsmAggr, true, 1);
     b.write(&path).unwrap();
 

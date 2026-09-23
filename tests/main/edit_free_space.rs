@@ -13,6 +13,7 @@ use hdf5_pure::{
 
 use test_util::free_space;
 use test_util::temp;
+use test_util_hdf5::dataset::Unlimited;
 
 // Shared with `tests/main/paged_staged_commit.rs`, which holds the staged commit to
 // the same invariant this holds the in-place append's reserve to (issue #387).
@@ -2827,11 +2828,7 @@ fn paged_staged_append_churn_does_not_leak_the_old_index() {
     let mut b = FileBuilder::new();
     b.with_file_space_strategy(FileSpaceStrategy::Page, true, 0)
         .with_file_space_page_size(RECLAIM_PAGE);
-    b.create_dataset("d")
-        .with_i32_data(&[0i32; ROWS])
-        .with_shape(&[ROWS as u64])
-        .with_maxshape(&[MaxExtent::Unlimited])
-        .with_chunks(&[ROWS as u64]);
+    Unlimited::new("d", &[0i32; ROWS], ROWS as u64).add_to(&mut b);
     b.write(&path).unwrap();
 
     let f = open_rw_on_close(&path);
@@ -2910,11 +2907,7 @@ fn a_multi_chunk_staged_append_fills_chunk_sized_holes() {
         if page > 0 {
             b.with_file_space_page_size(page);
         }
-        b.create_dataset("d")
-            .with_i32_data(&(0..CHUNK as i32).collect::<Vec<i32>>())
-            .with_shape(&[CHUNK as u64])
-            .with_maxshape(&[MaxExtent::Unlimited])
-            .with_chunks(&[CHUNK as u64]);
+        Unlimited::new("d", &(0..CHUNK as i32).collect::<Vec<i32>>(), CHUNK as u64).add_to(&mut b);
         // Scratch and spacer alternate, so deleting the scratch datasets leaves
         // four separated holes rather than one run.
         for i in 0..APPENDED {

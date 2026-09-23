@@ -12,9 +12,10 @@
 
 use hdf5::plist::file_create::FileSpaceStrategy as CStrategy;
 use hdf5_pure::{
-    File, FileAccessProperties, FileBuilder, FileLocking, FileSpaceStrategy, MaxExtent, SyncPolicy,
+    File, FileAccessProperties, FileBuilder, FileLocking, FileSpaceStrategy, SyncPolicy,
 };
 use tempfile::tempdir;
+use test_util_hdf5::dataset::Unlimited;
 
 /// An appendable file, paged or not. A page buffer requires neither (issue
 /// #357), which is why the reading crosscheck below runs on both.
@@ -24,11 +25,7 @@ fn build(path: &std::path::Path, paged: bool) {
         b.with_file_space_strategy(FileSpaceStrategy::Page, true, 1)
             .with_file_space_page_size(4096);
     }
-    b.create_dataset("d")
-        .with_i32_data(&(0..64).collect::<Vec<i32>>())
-        .with_shape(&[64])
-        .with_maxshape(&[MaxExtent::Unlimited])
-        .with_chunks(&[64]);
+    Unlimited::new("d", &(0..64).collect::<Vec<i32>>(), 64).add_to(&mut b);
     b.write(path).unwrap();
 }
 
