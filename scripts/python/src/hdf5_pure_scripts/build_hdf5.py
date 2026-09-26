@@ -15,12 +15,14 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import json
 import os
 import platform
 import shutil
 import subprocess
 import sys
 import tarfile
+import tomllib
 import urllib.request
 from pathlib import Path
 
@@ -28,15 +30,6 @@ from hdf5_pure_scripts import repo_root
 
 WORK = repo_root() / "tmp" / "hdf5"
 
-# The last patch release of each series: its git tag, and the sha256 of the
-# archive GitHub serves for the tag.
-RELEASES = {
-    "1.8.23": ("hdf5-1_8_23", "e5f575403ae05c080950dba8d2cb3d06e7ccbe566b69b20cba08bec41fd4fa5f"),
-    "1.10.11": ("hdf5-1_10_11", "4ef6375fc7d8c54dcd66e9bc35a7a3580d33cd8878bdf21ad1eb388a43863159"),
-    "1.12.3": ("hdf5-1_12_3", "39e2e3e25f2263f2dc3370556c174952675d7ac51c4d6f7d4f5e8b3a8bd10ac6"),
-    "1.14.6": ("hdf5_1.14.6", "09ee1c671a87401a5201c06106650f62badeea5a3b3941e9b1e2e1e08317357f"),
-    "2.2.0": ("2.2.0", "5b8d75125ae7b4fef55d3b39e8d3dbfd238cdf63b6518afd67fa69ac80f06542"),
-}
 ARCHIVE_URL = "https://github.com/HDFGroup/hdf5/archive/refs/tags/{tag}.tar.gz"
 
 # GCC 14 and recent clang make these errors. The older releases trip all three.
@@ -47,6 +40,17 @@ RELAXED_C_FLAGS = (
 )
 
 WINDOWS = platform.system() == "Windows"
+
+
+def series() -> dict[str, dict]:
+    return tomllib.loads((repo_root() / "scripts" / "hdf5-releases.toml").read_text())["series"]
+
+
+def release(name: str) -> dict:
+    for key, entry in series().items():
+        if name in (key, entry["version"]):
+            return entry
+    sys.exit(f"no HDF5 release {name!r} in scripts/hdf5-releases.toml")
 
 
 def prefix_of(version: str) -> Path:
@@ -98,12 +102,12 @@ def run(step: str, command: list[str], cwd: Path) -> None:
         sys.exit(f"{step} failed, see {log}:\n" + "\n".join(errors[:40]) + "\n...\n" + text[-1500:])
 
 
-def build(version: str) -> Path:
+def build(entry: dict) -> Path:
+    version = entry["version"]
     prefix = prefix_of(version)
     if tool(prefix, "h5dump"):
         return prefix
-    tag, sha256 = RELEASES[version]
-    source = extract(download(tag, sha256))
+    source = extract(download(entry["tag"], entry["sha256"]))
     build_dir = WORK / "src" / f"build-{version}"
     shutil.rmtree(build_dir, ignore_errors=True)
 
@@ -215,20 +219,37 @@ def exports(prefix: Path) -> list[str]:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("version", choices=sorted(RELEASES))
-    parser.add_argument("--env", action="store_true", help="print shell exports for the build")
+    parser.add_argument("version", nargs="?", help="a release series such as 1.14, or its release")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--env", action="store_true", help="print shell exports for the build")
+    mode.add_argument("--feature", action="store_true", help="print the series' crosscheck feature")
+    mode.add_argument("--list", action="store_true", help="print every release, one per line")
+    parser.add_argument("--json", action="store_true", help="with --list, as a JSON array")
     arguments = parser.parse_args()
+
+    if arguments.json and not arguments.list:
+        parser.error("--json needs --list")
+    if arguments.list:
+        versions = [entry["version"] for entry in series().values()]
+        print(json.dumps(versions) if arguments.json else "\n".join(versions))
+        return
+    if arguments.version is None:
+        parser.error("a version is needed unless --list or --json is given")
+    entry = release(arguments.version)
+    if arguments.feature:
+        print(entry["feature"])
+        return
 
     WORK.mkdir(parents=True, exist_ok=True)
     if arguments.env:
-        prefix = prefix_of(arguments.version)
+        prefix = prefix_of(entry["version"])
         if not tool(prefix, "h5dump"):
             sys.exit(
-                f"no build under {prefix}: run `just interop::hdf5-build {arguments.version}` first"
+                f"no build under {prefix}: run `just interop::hdf5-build {entry['version']}` first"
             )
         print("\n".join(exports(prefix)))
         return
 
     sys.stdout.reconfigure(line_buffering=True)
-    prefix = build(arguments.version)
+    prefix = build(entry)
     print(f"==> HDF5 {installed_version(prefix)} under {prefix}")

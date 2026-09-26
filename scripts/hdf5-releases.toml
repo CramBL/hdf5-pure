@@ -1,0 +1,31 @@
+# Each libhdf5 series the crosschecks link: its last patch release, the tag and archive digest, and its crosscheck feature.
+[series."1.8"]
+version = "1.8.23"
+tag = "hdf5-1_8_23"
+sha256 = "e5f575403ae05c080950dba8d2cb3d06e7ccbe566b69b20cba08bec41fd4fa5f"
+# The 1.8 series has no crosscheck feature: the tests without one run on every series.
+feature = ""
+
+[series."1.10"]
+version = "1.10.11"
+tag = "hdf5-1_10_11"
+sha256 = "4ef6375fc7d8c54dcd66e9bc35a7a3580d33cd8878bdf21ad1eb388a43863159"
+feature = "__hdf5-1.10"
+
+[series."1.12"]
+version = "1.12.3"
+tag = "hdf5-1_12_3"
+sha256 = "39e2e3e25f2263f2dc3370556c174952675d7ac51c4d6f7d4f5e8b3a8bd10ac6"
+feature = "__hdf5-1.12"
+
+[series."1.14"]
+version = "1.14.6"
+tag = "hdf5_1.14.6"
+sha256 = "09ee1c671a87401a5201c06106650f62badeea5a3b3941e9b1e2e1e08317357f"
+feature = "__hdf5-1.14"
+
+[series."2"]
+version = "2.2.0"
+tag = "2.2.0"
+sha256 = "5b8d75125ae7b4fef55d3b39e8d3dbfd238cdf63b6518afd67fa69ac80f06542"
+feature = "__hdf5-2"
