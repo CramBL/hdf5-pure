@@ -47,11 +47,15 @@ jobs:
               - rust-toolchain.toml
               - .cargo/**
               - tests/**
+              - crates/hdf5-pure-core/**
+              - crates/hdf5-pure-filter/**
+              - crates/hdf5-pure-format/**
               - crates/test-util/**
               - crates/test-util-hdf5/**
               - crates/crosscheck/**
               - Cross.toml
               - justfile
+              - scripts/constants.just
               - scripts/portability.just
               - .github/workflows/portability.yml
 

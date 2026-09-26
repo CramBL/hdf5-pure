@@ -41,6 +41,7 @@ jobs:
           filters: |
             run:
               - src/**
+              - crates/**
               - build.rs
               - Cargo.toml
               - Cargo.lock
@@ -48,12 +49,13 @@ jobs:
               - .cargo/**
               - tests/allocation_baseline.rs
               - tests/baselines/**
-              - crates/test-util/**
               - justfile
+              - scripts/constants.just
+              - scripts/nightly.txt
               - scripts/soundness.just
               - .github/workflows/soundness.yml
 
-  # Undefined behaviour in the crate's only non-trivial unsafe (issue #26).
+  # Undefined behaviour in the selected unsafe and high-risk paths `just soundness::miri` runs.
   miri:
     name: miri / ubuntu-latest
     runs-on: ubuntu-latest
@@ -62,7 +64,6 @@ jobs:
 
     env:
       MIRIFLAGS: -Zmiri-strict-provenance
-      RUSTUP_TOOLCHAIN: nightly
 
     steps:
       - name: Checkout
@@ -70,11 +71,8 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Install Rust nightly
-        uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # 2026-03-27
-        with:
-          toolchain: nightly
-          components: miri
+      - name: Install Rust
+        run: rustup toolchain install
 
       - name: Cache Cargo
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
@@ -86,6 +84,9 @@ jobs:
         uses: taiki-e/install-action@920ab1831fbf4fb3ef75c8ead83556c918bb7290 # v2.79.8
         with:
           tool: just
+
+      - name: Install the Miri toolchain
+        run: just soundness::miri-toolchain
 
       - name: Miri
         run: just soundness::miri

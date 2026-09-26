@@ -1,6 +1,6 @@
 set working-directory := ".."
 
-default: shear zizmor typos lychee-added
+default: shear zizmor typos justfiles lychee-added
 
 shear:
     cargo shear
@@ -8,6 +8,14 @@ shear:
 # Static analysis of the workflows under .github.
 zizmor:
     zizmor .github
+
+# The root `justfile` and every module, parsed and formatted as `just --fmt` writes them.
+justfiles:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    for justfile in $(git ls-files -- justfile '*.just'); do
+        {{ quote(just_executable()) }} --fmt --check --justfile "$justfile"
+    done
 
 # Spelling, over every tracked file. typos.toml lists the words the format uses.
 typos:

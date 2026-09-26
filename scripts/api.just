@@ -11,7 +11,7 @@ default: semver msrv
 semver BASE="origin/main" PACKAGE="" PROFILE="":
     {{ uv }} semver {{ if PACKAGE == "" { "" } else { "--package " + PACKAGE } }} \
         {{ if PROFILE == "" { "" } else { "--profile " + PROFILE } }} \
-        --release-type "$({{ just_executable() }} api::semver-release-type {{ BASE }})"
+        --release-type "$({{ quote(just_executable()) }} api::semver-release-type {{ BASE }})"
 
 # The release type the changelog calls for: minor with a **Breaking:** entry
 # under [Unreleased], or in the dated section the diff against BASE promotes.

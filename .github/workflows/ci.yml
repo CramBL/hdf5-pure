@@ -50,9 +50,10 @@ jobs:
               - tests/**
               - examples/**
               - benches/**
-              - crates/test-util/**
-              - crates/test-util-hdf5/**
+              - crates/**
               - justfile
+              - scripts/nightly.txt
+              - scripts/constants.just
               - .github/workflows/ci.yml
 
   # The crate's own suite. The crosschecks against the reference C library
@@ -171,10 +172,8 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Install Rust nightly
-        uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # 2026-03-27
-        with:
-          toolchain: nightly
+      - name: Install Rust
+        run: rustup toolchain install
 
       - name: Cache Cargo
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
@@ -186,6 +185,9 @@ jobs:
         uses: taiki-e/install-action@920ab1831fbf4fb3ef75c8ead83556c918bb7290 # v2.79.8
         with:
           tool: just
+
+      - name: Install the pinned nightly
+        run: just nightly
 
       - name: Rustdoc
         run: just docs-rs
