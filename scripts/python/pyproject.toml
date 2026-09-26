@@ -1,13 +1,14 @@
 [project]
 name = "hdf5-pure-scripts"
 version = "0"
-description = "The repository's Python tooling: HDF5 builds for interop, the API surface scan, the prose lint and the release"
+description = "The repository's Python tooling: HDF5 builds for interop, the API checks, the prose lint and the release"
 requires-python = ">=3.11"
 dependencies = []
 
 [project.scripts]
 hdf5-build = "hdf5_pure_scripts.build_hdf5:main"
-api-surface = "hdf5_pure_scripts.api_surface:main"
+# Check the semver delta and compile the moved public re-exports.
+semver = "hdf5_pure_scripts.semver:main"
 release = "hdf5_pure_scripts.release:main"
 lint-prose = "hdf5_pure_scripts.prose:main"
 

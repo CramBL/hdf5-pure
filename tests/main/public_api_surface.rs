@@ -16,8 +16,6 @@
 //! `Superblock::base_address` changed from `u64` to `BaseAddress` in 0.40.0
 //! with no finding and no changelog line, leaving callers a value they could
 //! compare and print but not use as a number.
-//!
-//! `scripts/check-api-surface.sh` audits the whole surface for the same class.
 
 use hdf5_pure::{BaseAddress, Error, File, FileBuilder, LibVer, MessageType, Superblock};
 

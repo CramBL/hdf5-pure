@@ -4,7 +4,7 @@ import "scripts/constants.just"
 mod portability "scripts/portability.just"
 # Check unsafe with miri, and allocations with heapscope
 mod soundness "scripts/soundness.just"
-# Check API with `semver`, `msrv`, and a python api-surface checking script
+# Check API with `semver` and `msrv`
 mod api "scripts/api.just"
 # Check for unused dependencies, typos, dead links, and bad GitHub actions usage
 mod hygiene "scripts/hygiene.just"
