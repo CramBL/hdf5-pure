@@ -29,6 +29,7 @@ because it cannot be undone.
 """
 
 import argparse
+import json
 import os
 import re
 import subprocess
@@ -41,10 +42,10 @@ from datetime import date
 from pathlib import Path
 
 from hdf5_pure_scripts import repo_root
+from hdf5_pure_scripts.semver import check_all
 
 CRATE = "hdf5-pure"
 RELEASE_FILES = {"Cargo.toml", "Cargo.lock", "CHANGELOG.md"}
-SEMVER_FEATURES = "serde,zfp,provenance,ndarray,num-complex"
 
 
 def fail(message):
@@ -134,21 +135,68 @@ def latest(versions):
 
 
 def manifest():
-    return tomllib.loads(Path("Cargo.toml").read_text())["package"]
+    return tomllib.loads(Path("Cargo.toml").read_text())["workspace"]["package"]
 
 
-def set_version(manifest_text, version):
+def published_packages():
+    metadata = json.loads(
+        output("cargo", "metadata", "--locked", "--no-deps", "--format-version", "1")
+    )
+    pending = {
+        package["name"]: package
+        for package in sorted(metadata["packages"], key=lambda package: package["name"])
+        if package["publish"] != []
+    }
+    ordered = []
+    while pending:
+        ready = [
+            package
+            for package in pending.values()
+            if not any(
+                dependency["name"] in pending
+                for dependency in package["dependencies"]
+                if dependency["kind"] != "dev"
+            )
+        ]
+        if not ready:
+            fail(f"the published packages depend on each other in a cycle: {', '.join(pending)}")
+        for package in ready:
+            ordered.append(package)
+            del pending[package["name"]]
+    return ordered
+
+
+def set_version(manifest_text, version, package=CRATE):
     """Cargo.toml or Cargo.lock with the crate's own version line, the one
     that follows its `name` line, set to `version`."""
     lines = manifest_text.splitlines(keepends=True)
     seen_name = False
     for i, line in enumerate(lines):
-        if line.startswith(f'name = "{CRATE}"'):
+        if line.startswith(f'name = "{package}"'):
             seen_name = True
         elif seen_name and line.startswith("version = "):
             lines[i] = f'version = "{version}"\n'
             return "".join(lines)
-    raise ValueError(f"no version line for {CRATE}")
+    raise ValueError(f"no version line for {package}")
+
+
+def set_workspace_version(manifest_text, version, packages):
+    lines = manifest_text.splitlines(keepends=True)
+    section = None
+    found = False
+    for i, line in enumerate(lines):
+        if line.startswith("["):
+            section = line.strip()
+        elif section == "[workspace.package]" and line.startswith("version = "):
+            lines[i] = f'version = "{version}"\n'
+            found = True
+        elif section == "[workspace.dependencies]" and any(
+            line.startswith(f"{package} = {{") for package in packages
+        ):
+            lines[i] = re.sub(r'version = "=[^"]+"', f'version = "={version}"', line)
+    if not found:
+        raise ValueError("no version line in [workspace.package]")
+    return "".join(lines)
 
 
 def changed_files():
@@ -226,15 +274,6 @@ def promote_changelog(changelog, version, previous, summary, repo_url, today):
     return text
 
 
-def required_bump(verdict):
-    """The release type a cargo semver-checks verdict requires, or None."""
-    if "requires new major" in verdict:
-        return "major"
-    if "requires new minor" in verdict:
-        return "minor"
-    return None
-
-
 def bump_allows(release_type, required):
     order = {"patch": 0, "minor": 1, "major": 2}
     return required is None or order[release_type] >= order[required]
@@ -260,43 +299,17 @@ CHANGELOG = Path("CHANGELOG.md")
 
 
 def semver_verdict(baseline, release_type_word):
-    """The `Summary` line cargo semver-checks prints, with the report on stderr.
+    check_all(release_type_word, str(baseline))
+    return "API compatibility passed"
 
-    Dies when there is no verdict, because a tool that cannot run says so in
-    words rather than in an exit status that one version shares with "found
-    breaks" (cargo-semver-checks #337).
-    """
-    if subprocess.run(["cargo", "semver-checks", "--version"], capture_output=True).returncode != 0:
-        fail(
-            "cargo-semver-checks is not installed (`cargo binstall cargo-semver-checks`), "
-            "or pass --skip-api-delta"
-        )
-    result = subprocess.run(
-        [
-            "cargo",
-            "semver-checks",
-            "--baseline-version",
-            str(baseline),
-            "--release-type",
-            release_type_word,
-            "--default-features",
-            "--features",
-            SEMVER_FEATURES,
-        ],
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-    )
-    sys.stderr.write(result.stdout)
-    m = re.search(r"Summary.*", result.stdout)
-    if not m:
-        fail(
-            f"cargo-semver-checks printed no verdict for the delta since v{baseline}; see its "
-            "output above. A version older than the toolchain cannot read rustdoc's JSON, and "
-            "`cargo binstall cargo-semver-checks` installs the current one. "
-            "--skip-api-delta releases without the check"
-        )
-    return m.group(0)
+
+def previous_release_baseline(tags, version):
+    if any(tagged > version for tagged in tags):
+        raise ValueError(f"a release after v{version} is already tagged")
+    previous = latest([tagged for tagged in tags if not tagged.is_rc and tagged < version.final])
+    if previous is None:
+        raise ValueError("no vX.Y.Z tag found")
+    return previous
 
 
 def release_notes(version):
@@ -377,9 +390,15 @@ def prepare(args):
         release_type_word = semver_checks_release_type(release_type, previous_stable)
         note(semver_verdict(previous_stable, release_type_word))
 
-    note(f"Setting the version to {version} in Cargo.toml and Cargo.lock")
-    for path in (Path("Cargo.toml"), Path("Cargo.lock")):
-        path.write_text(set_version(path.read_text(), version))
+    note(f"Setting the published package versions to {version}")
+    names = [package["name"] for package in published_packages()]
+    root = Path("Cargo.toml")
+    root.write_text(set_workspace_version(root.read_text(), version, names))
+    lock = Path("Cargo.lock")
+    updated_lock = lock.read_text()
+    for name in names:
+        updated_lock = set_version(updated_lock, version, name)
+    lock.write_text(updated_lock)
 
     if not version.is_rc:
         note(f"Promoting CHANGELOG.md [Unreleased] into [{version}]")
@@ -388,8 +407,9 @@ def prepare(args):
         )
         CHANGELOG.write_text(promoted)
 
-    note("Packaging with cargo publish --dry-run")
-    run("cargo", "publish", "--dry-run", "--allow-dirty")
+    note("Checking workspace packages and packaging the first published dependency")
+    run("cargo", "check", "--locked", "--all-features", "-p", CRATE)
+    run("cargo", "publish", "--dry-run", "--allow-dirty", "-p", names[0])
 
     note(f"Prepared {tag} in the working tree. Next: `just release::pr {version}`")
     run("git", "status", "--short")
@@ -457,6 +477,11 @@ def pr(args):
     )
 
 
+def is_release_subject(subject, tag):
+    """Whether `subject` is the release commit's, as a rebase or a squash merge leaves it."""
+    return re.fullmatch(rf"Release {re.escape(tag)}(?: \(#\d+\))?", subject) is not None
+
+
 def publish(args):
     current = manifest()["version"]
     version = args.version or Version.parse(current)
@@ -471,49 +496,52 @@ def publish(args):
     run("git", "fetch", "-q", "origin", "main", "refs/tags/*:refs/tags/*")
     if subprocess.run(["git", "merge-base", "--is-ancestor", sha, "origin/main"]).returncode != 0:
         fail("HEAD is not on origin/main")
+    if not is_release_subject(output("git", "log", "-1", "--format=%s"), tag):
+        fail(f"HEAD is not the Release {tag} commit")
     if not version.is_rc and changelog_section(CHANGELOG.read_text(), str(version)) is None:
         fail(f"CHANGELOG.md has no [{version}] section; run `just release::prepare` first")
 
+    packages = published_packages()
+    for package in packages:
+        if package["version"] != str(version):
+            fail(f"{package['name']} reads {package['version']}, not {version}")
+
     # The whole cycle's public-API delta. A verdict that requires a larger bump
     # than this release makes stops the release.
-    previous_stable = latest([v for v in tagged_versions() if not v.is_rc])
-    if previous_stable is None:
-        fail("no vX.Y.Z tag found")
+    previous_stable = previous_release_baseline(tagged_versions(), version)
     release_type = version.final.release_type(previous_stable)
     if args.skip_api_delta:
         warn("Skipping the public-API delta gate (--skip-api-delta)")
     else:
         note(f"Public API delta since v{previous_stable}, for a {release_type} release")
         release_type_word = semver_checks_release_type(release_type, previous_stable)
-        verdict = semver_verdict(previous_stable, release_type_word)
-        if not bump_allows(release_type_word, required_bump(verdict)):
-            fail(f"{verdict}, but {version} is a {release_type} release after {previous_stable}")
-        note(verdict)
+        note(semver_verdict(previous_stable, release_type_word))
 
-    note("Packaging with cargo publish --dry-run")
-    run("cargo", "publish", "--dry-run")
+    note("Checking workspace packages and packaging the first published dependency")
+    run("cargo", "check", "--locked", "--all-features", "-p", CRATE)
+    run("cargo", "publish", "--dry-run", "-p", packages[0]["name"])
 
     if args.dry_run:
         note(f"Dry run: {tag} would be published from {sha}")
         return
 
-    # crates.io. Yanked or not, a published version answers 200.
-    request = urllib.request.Request(
-        f"https://crates.io/api/v1/crates/{CRATE}/{version}",
-        headers={"User-Agent": f"{CRATE} release script"},
-    )
-    try:
-        with urllib.request.urlopen(request):
-            published = True
-    except urllib.error.HTTPError as e:
-        if e.code != 404:
-            raise
-        published = False
-    if published:
-        note(f"{CRATE} {version} is already on crates.io")
-    else:
-        note(f"Publishing {CRATE} {version} to crates.io")
-        run("cargo", "publish")
+    for name in (package["name"] for package in packages):
+        request = urllib.request.Request(
+            f"https://crates.io/api/v1/crates/{name}/{version}",
+            headers={"User-Agent": f"{CRATE} release script"},
+        )
+        try:
+            with urllib.request.urlopen(request):
+                published = True
+        except urllib.error.HTTPError as error:
+            if error.code != 404:
+                raise
+            published = False
+        if published:
+            note(f"{name} {version} is already on crates.io")
+        else:
+            note(f"Publishing {name} {version} to crates.io")
+            run("cargo", "publish", "-p", name)
 
     # The tag, at this commit. A tag at another commit is an error.
     existing = output("git", "ls-remote", "--tags", "origin", f"refs/tags/{tag}^{{}}").split()
@@ -522,8 +550,13 @@ def publish(args):
             fail(f"{tag} already exists at {existing[0]}, not at {sha}")
         note(f"{tag} already exists")
     else:
-        note(f"Tagging {tag}")
-        run("git", "tag", "-a", tag, "-m", f"Release {tag}")
+        if output("git", "tag", "--list", tag):
+            local_target = output("git", "rev-parse", f"refs/tags/{tag}^{{}}")
+            if local_target != sha:
+                fail(f"local {tag} exists at {local_target}, not at {sha}")
+        else:
+            note(f"Tagging {tag}")
+            run("git", "tag", "-a", tag, "-m", f"Release {tag}")
         run("git", "push", "-q", "origin", tag)
 
     if subprocess.run(["gh", "release", "view", tag], capture_output=True).returncode == 0:

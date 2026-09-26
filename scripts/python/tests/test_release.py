@@ -1,17 +1,23 @@
+import json
 from datetime import date
+from types import SimpleNamespace
+from unittest.mock import patch
 
 import pytest
 
+from hdf5_pure_scripts import release
 from hdf5_pure_scripts.release import (
     Version,
     bump_allows,
     changelog_section,
     cycle_release_type,
+    is_release_subject,
+    previous_release_baseline,
     promote_changelog,
     pull_request_release_type,
-    required_bump,
     semver_checks_release_type,
     set_version,
+    set_workspace_version,
 )
 
 
@@ -56,6 +62,130 @@ def test_set_version_touches_only_the_crate_after_its_name_line():
     assert updated.startswith('[dependencies]\nversion = "0.1.0"')
     with pytest.raises(ValueError):
         set_version('name = "other"\nversion = "1"\n', v("0.45.0"))
+
+
+def test_workspace_version_updates_the_package_version_and_the_exact_pins():
+    manifest = (
+        '[package]\nname = "hdf5-pure"\nversion.workspace = true\n'
+        '[workspace.package]\nversion = "0.47.0"\nedition = "2024"\n'
+        "[workspace.dependencies]\n"
+        'hdf5-pure = { path = "." }\n'
+        'hdf5-pure-core = { path = "crates/hdf5-pure-core", version = "=0.47.0" }\n'
+        'rstest = "0.27"\n'
+        "[dependencies]\n"
+        'serde = { version = "=1.0.0" }\n'
+    )
+    assert set_workspace_version(manifest, v("0.48.0"), ["hdf5-pure-core", "hdf5-pure"]) == (
+        manifest.replace('version = "0.47.0"', 'version = "0.48.0"').replace(
+            'version = "=0.47.0"', 'version = "=0.48.0"'
+        )
+    )
+    with pytest.raises(ValueError, match="workspace.package"):
+        set_workspace_version('[package]\nversion = "0.47.0"\n', v("0.48.0"), [])
+
+
+@pytest.mark.parametrize("local_tag", ["", "v0.48.0"])
+def test_publish_resumes_tagging_after_every_package_was_published(local_tag):
+    args = SimpleNamespace(version=v("0.48.0"), skip_api_delta=False, dry_run=False)
+
+    def git_output(*command):
+        if command == ("git", "rev-parse", "HEAD"):
+            return "release-sha"
+        if command == ("git", "log", "-1", "--format=%s"):
+            return "Release v0.48.0"
+        if command == ("git", "tag", "--list", "v0.48.0"):
+            return local_tag
+        if command == ("git", "rev-parse", "refs/tags/v0.48.0^{}"):
+            return "release-sha"
+        if command[:3] == ("git", "ls-remote", "--tags"):
+            return ""
+        raise AssertionError(command)
+
+    with (
+        patch.object(release, "manifest", return_value={"version": "0.48.0"}),
+        patch.object(release, "worktree_clean", return_value=True),
+        patch.object(release, "output", side_effect=git_output),
+        patch.object(release, "run") as run,
+        patch.object(release.subprocess, "run", return_value=SimpleNamespace(returncode=0)),
+        patch.object(release, "CHANGELOG") as changelog,
+        patch.object(
+            release,
+            "tagged_versions",
+            return_value=[v("0.47.0"), v("0.48.0")] if local_tag else [v("0.47.0")],
+        ),
+        patch.object(release, "semver_verdict", return_value="API compatibility passed") as semver,
+        patch.object(
+            release,
+            "published_packages",
+            return_value=[
+                {"name": "hdf5-pure-core", "version": "0.48.0"},
+                {"name": "hdf5-pure", "version": "0.48.0"},
+            ],
+        ),
+        patch.object(release.urllib.request, "urlopen"),
+    ):
+        changelog.read_text.return_value = "## [0.48.0] - 2026-09-25\n"
+        release.publish(args)
+
+    semver.assert_called_once_with(v("0.47.0"), "major")
+    assert (
+        ("git", "tag", "-a", "v0.48.0", "-m", "Release v0.48.0")
+        in [call.args for call in run.call_args_list]
+    ) == (local_tag == "")
+    assert ("git", "push", "-q", "origin", "v0.48.0") in [call.args for call in run.call_args_list]
+    assert not any(
+        call.args[:2] == ("cargo", "publish") and "--dry-run" not in call.args
+        for call in run.call_args_list
+    )
+
+
+@pytest.mark.parametrize("subject", ["Release v0.48.0", "Release v0.48.0 (#636)"])
+def test_the_release_subject_survives_a_rebase_or_a_squash_merge(subject):
+    assert is_release_subject(subject, "v0.48.0")
+
+
+@pytest.mark.parametrize(
+    "subject",
+    [
+        "Release v0.48.1",
+        "Release v0.48.0 fixups",
+        "Release v0.48.0 (#636) extra",
+        "Release v0.48.0 (#)",
+        "Merge pull request #636 from release/v0.48.0",
+        "Release v0.48.0-rc.1",
+    ],
+)
+def test_any_other_subject_is_not_the_release_commit(subject):
+    assert not is_release_subject(subject, "v0.48.0")
+
+
+def test_published_packages_come_after_their_dependencies():
+    def package(name, *dependencies, publish=None):
+        return {
+            "name": name,
+            "publish": publish,
+            "dependencies": [
+                {"name": dependency, "kind": kind} for dependency, kind in dependencies
+            ],
+        }
+
+    metadata = {
+        "packages": [
+            package("hdf5-pure", ("hdf5-pure-format", None), ("test-util", "dev")),
+            package("hdf5-pure-format", ("hdf5-pure-core", None), ("test-util", "dev")),
+            package("hdf5-pure-core"),
+            package("test-util", ("hdf5-pure", None), publish=[]),
+        ]
+    }
+    with patch.object(release, "output", return_value=json.dumps(metadata)):
+        names = [package["name"] for package in release.published_packages()]
+    assert names == ["hdf5-pure-core", "hdf5-pure-format", "hdf5-pure"]
+
+
+def test_release_baseline_precedes_the_candidate_and_refuses_later_tags():
+    assert previous_release_baseline([v("0.47.0"), v("0.48.0")], v("0.48.0")) == v("0.47.0")
+    with pytest.raises(ValueError, match="after v0.48.0"):
+        previous_release_baseline([v("0.47.0"), v("0.49.0")], v("0.48.0"))
 
 
 CHANGELOG = """# Changelog
@@ -127,17 +257,7 @@ def test_promotion_needs_the_section_and_the_link_line():
         )
 
 
-def test_semver_verdict_gates_the_release_type():
-    assert (
-        required_bump(
-            "Summary semver requires new major version: 2 major and 0 minor checks failed"
-        )
-        == "major"
-    )
-    assert (
-        required_bump("Summary semver requires new minor version: 1 minor check failed") == "minor"
-    )
-    assert required_bump("Summary no semver update required") is None
+def test_release_type_order():
     assert (
         bump_allows("major", "major")
         and bump_allows("minor", "minor")

@@ -3,7 +3,7 @@ set working-directory := ".."
 uv := "uv run --project scripts/python --locked"
 
 default:
-    @just --list release
+    @{{ quote(just_executable()) }} --list release
 
 # Set VERSION in the manifests and the changelog, and package. Commits nothing.
 prepare VERSION *ARGS:
