@@ -2,10 +2,15 @@
 
 Pure-Rust HDF5 reader, writer, and in-place editor. No C dependencies, no build scripts, WASM-compatible.
 
-**📖 [Documentation (docs.rs)](https://docs.rs/hdf5-pure)** · [Examples](examples) · [Changelog](CHANGELOG.md)
+**📖 [Documentation (docs.rs)](https://docs.rs/hdf5-pure)** ·
+[Compatibility](docs/guide/compatibility.md) ·
+[Examples](examples) ·
+[Changelog](CHANGELOG.md)
 
 > [!NOTE]
-> Fully compatible with HDF5 1.8, 1.10, 1.12, 1.14, and 2+. Checked in CI against `libhdf5`.
+> Compatible with HDF5 1.8, 1.10, 1.12, 1.14, and 2.x. Checked in CI against `libhdf5`. See the
+> [HDF5 compatibility matrix](docs/guide/compatibility.md) for feature-level
+> read and write support.
 
 ## Features
 
@@ -17,7 +22,7 @@ Pure-Rust HDF5 reader, writer, and in-place editor. No C dependencies, no build 
 - **Tunable metadata cache** configure memory limits and eviction behavior to optimize I/O performance for heavy read/write workloads
 - **No C dependencies** pure Rust, with support for WASM and bare-metal targets (`no_std` with `alloc`)
 - **MATLAB v7.3 compatible** userblock support, fixed-length ASCII attributes, variable-length string arrays, object references
-- Deflate, shuffle, LZF, and scale-offset (lossless integer / lossy float) compression
+- **Filters** Deflate, shuffle, Fletcher32, LZF, scale-offset, and optional ZFP
 - Compound types, enumerations, array types
 - Complex number datasets (as compound `{real, imag}`)
 
@@ -165,19 +170,28 @@ The closing synchronization barrier is mandatory. Both `close` and `drop` flush 
 
 ### Reclaiming space (`repack`)
 
-Deleting an object inside a `File::open_rw` session reuses the freed space within the session, but a single delete-then-close cannot shrink a file whose freed region is not at the very end — the same reason the HDF5 C library ships `h5repack`. `repack` is the guaranteed-shrink answer: it reads every surviving object and rewrites the whole file compact, optionally dropping objects.
+Deleting objects through `File::open_rw` makes their space available for reuse, but closing the file does not guarantee that the file shrinks. `repack` writes the surviving objects into a new compact file. `RepackOptions::drop_path` can omit individual objects or whole group subtrees.
 
 ```rust,no_run
 use hdf5_pure::{repack, RepackOptions};
 
-// Drop a dataset and a whole group subtree, then write a fresh, compact file.
+// Drop a dataset and a whole group subtree, then write a compact file.
 let options = RepackOptions::new()
     .drop_path("scratch")
     .drop_path("runs/aborted");
+
 repack("input.h5", "compact.h5", &options).unwrap();
 ```
 
-`repack` never silently degrades data: every surviving object is reproduced byte-for-byte — datatype, shape, chunking, supported filters, raw data, and attributes — or the whole operation fails with `Error::RepackUnsupported` naming the object, leaving no output file. It reproduces fixed-point, floating-point, string, time, bit-field, opaque, compound, enumeration, and array datatypes, contiguous or chunked, filtered with deflate, shuffle, fletcher32, LZF, and/or lossless integer scale-offset, plus variable-length strings and sequences (contiguous, chunked, filtered, or resizable) and 8-byte object references, whose addresses are rewritten to their targets' new locations. Anything it cannot reproduce exactly — chunked, filtered, or resizable reference datasets, region references, virtual layouts, lossy filters (float D-scale scale-offset, ZFP, SZIP), or an attribute the reader cannot decode — it refuses by name rather than write a file that quietly differs.
+`repack` preserves datatype, shape, maximum shape, chunking, filters, element data, attributes, group hierarchy, committed datatypes, variable-length values, and supported object references. Content that cannot be reproduced faithfully returns `Error::RepackUnsupported` before output bytes are written.
+
+Fully allocated chunked datasets copy their encoded chunks verbatim. The filter pipeline is preserved without decoding or re-encoding the chunk data. This supports deflate, shuffle, Fletcher32, integer and floating-point scale-offset, ZFP, SZIP, and filters that `hdf5-pure` cannot decode.
+
+Contiguous and compact filtered datasets require re-encoding. Sparse chunked datasets also require re-encoding because their chunk grid contains unallocated entries. These paths require a lossless filter pipeline.
+
+Variable-length strings and sequences are rebuilt with new global-heap entries. Object references are rewritten to the referenced object's address in the output file. The same address rewriting applies to supported compound and array datatypes that contain variable-length values or object references.
+
+`repack` rejects region references, non-8-byte object references, unsupported reference layouts, virtual datasets, external raw-data storage, lossy filters on a path that requires re-encoding, unsupported reference attributes, and references to objects omitted from the output.
 
 ### File-space strategy
 
@@ -209,7 +223,7 @@ let ds = file.dataset("signal").unwrap();
 let values = ds.read_f64().unwrap();  // only this dataset's chunks are read
 ```
 
-The reading API is identical to `File::open`; only the backing store differs. Dataset reads are fully supported: contiguous, compact, and every chunk-index layout (B-tree v1, fixed array, and extensible array). Both group forms (v2 and v1 symbol-table) resolve along a path and attributes read the same as `File::open`; the differences are that `File::as_bytes` returns an empty slice, a streaming file cannot be the source of a cross-file copy, and chunk decompression is sequential. `open_streaming` requires the `std` filesystem.
+The reading API is identical to `File::open`: only the backing store differs. Dataset reads are fully supported: contiguous, compact, and chunked with version 1 B-tree, single-chunk, implicit, fixed-array, Extensible Array, and version 2 B-tree indexes. Both group forms (v2 and v1 symbol-table) resolve along a path and attributes read the same as `File::open`, the differences are that `File::as_bytes` returns an empty slice, a streaming file cannot be the source of a cross-file copy, and chunk decompression is sequential. `open_streaming` requires the `std` filesystem.
 
 To read a single dataset that is itself too large to hold decompressed, read it in **row windows** rather than whole: `read_raw_rows(start, count)` and the typed `read_f64_rows` … `read_string_rows` decode only the leading-dimension rows `[start, start + count)`, touching only the chunks that window overlaps, so peak memory scales with the window rather than the dataset — for variable-length strings included, whose window resolves only its own heap references.
 
@@ -687,7 +701,7 @@ The high-level `File` / `FileBuilder` API is `std`-gated, so a `no_std` build ex
 
 ## Limitations
 
-Where `hdf5-pure` cannot handle something, it returns a typed error. The [Limitations](https://docs.rs/hdf5-pure/latest/hdf5_pure/#limitations) section of the crate documentation catalogs every such rejection, split into **deliberately unsupported** (by-design constraints and foreign-format guards) and **planned support** (deferred features, each tracked by an issue).
+Unsupported and partially supported HDF5 file-format features are listed in the [HDF5 compatibility matrix](docs/guide/compatibility.md). Operations that cannot preserve data faithfully return a typed error.
 
 ## Contributing
 
