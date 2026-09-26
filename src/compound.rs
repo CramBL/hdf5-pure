@@ -260,11 +260,7 @@ macro_rules! impl_compound_tuple {
                 let mut members = Vec::new();
                 $(
                     let datatype = $type::datatype()?;
-                    members.push(CompoundMember {
-                        name: stringify!($index).to_string(),
-                        byte_offset: offset,
-                        datatype: datatype.clone(),
-                    });
+                    members.push(crate::datatype::__private::compound_member(stringify!($index).to_string(), offset, datatype.clone()));
                     offset += u64::from(datatype.type_size());
                 )+
                 Ok(Datatype::Compound {

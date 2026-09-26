@@ -1797,7 +1797,7 @@ mod tests {
         let result = Located::locate_at(store, oh_addr, Error::AppendUnsupported).unwrap();
         let (dt_off, dt_size) = result.spans.datatype;
         let dt_bytes = store.read_metadata_at(dt_off, dt_size).unwrap();
-        let (datatype, _) = crate::datatype::Datatype::parse(&dt_bytes).unwrap();
+        let (datatype, _) = hdf5_pure_format::parse_datatype(&dt_bytes).unwrap();
         (result.located, datatype)
     }
 

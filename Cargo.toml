@@ -1,11 +1,11 @@
 [package]
 name = "hdf5-pure"
-version = "0.47.0"
-edition = "2024"
-rust-version = "1.89"
-license = "MIT OR Apache-2.0"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
 description = "Pure-Rust HDF5 library: read, write, and edit files in place (WASM-compatible, no C dependencies)"
-repository = "https://github.com/CramBL/hdf5-pure"
 keywords = ["hdf5", "serialization", "scientific", "no-std", "wasm"]
 categories = ["science", "encoding", "filesystem", "wasm", "no-std"]
 # What the published crate holds: the library, the examples, the guide pages
@@ -33,6 +33,16 @@ include = [
     "/LICENSE-*",
 ]
 
+# Report 0.47.0 ownership artifacts as warnings until the API checker expires the bridge.
+[package.metadata.cargo-semver-checks.lints]
+enum_missing = "warn"
+struct_missing = "warn"
+pub_module_level_const_missing = "warn"
+
+# The release the one-time ownership migration check compares hdf5-pure-core's types with.
+[package.metadata.hdf5-pure-api-migration]
+from-version = "0.47.0"
+
 # Publish the full public API on docs.rs. The default feature set hides the
 # `ndarray`, `serde` (`mat`), `zfp`, and `provenance` surfaces (and
 # leaves their cross-references as dead links).
@@ -52,6 +62,31 @@ ignored-paths = ["src/_guide/*.rs"]
 [workspace]
 members = ["crates/*"]
 exclude = ["fuzz"]
+resolver = "3"
+
+# The metadata every published crate shares. The release tooling writes the version here and below.
+[workspace.package]
+version = "0.47.0"
+edition = "2024"
+rust-version = "1.89"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/CramBL/hdf5-pure"
+
+# Workspace crates, the published ones at the exact release, and versions several crates share.
+[workspace.dependencies]
+hdf5-pure = { path = "." }
+hdf5-pure-core = { path = "crates/hdf5-pure-core", version = "=0.47.0", default-features = false }
+hdf5-pure-filter = { path = "crates/hdf5-pure-filter", version = "=0.47.0", default-features = false }
+hdf5-pure-format = { path = "crates/hdf5-pure-format", version = "=0.47.0", default-features = false }
+test-util = { path = "crates/test-util" }
+test-util-hdf5 = { path = "crates/test-util-hdf5" }
+byteorder = { version = "1", default-features = false }
+hdf5 = { package = "hdf5-metno", git = "https://github.com/metno/hdf5-rust", rev = "605a2e28c17f2209bf2a6d0a8be11ef0b6546034", features = ["zlib"] }
+heapscope = "0.1"
+ndarray = ">=0.16, <0.18"
+proptest = "1"
+rstest = "0.27"
+tempfile = "3"
 
 [workspace.lints.rust]
 macro_use_extern_crate = "warn"
@@ -60,6 +95,7 @@ non_ascii_idents = "warn"
 redundant_lifetimes = "warn"
 trivial_casts = "warn"
 unexpected_cfgs = "warn"
+unnameable_types = "warn"
 unused_import_braces = "warn"
 unused_lifetimes = "warn"
 variant_size_differences = "warn"
@@ -83,8 +119,6 @@ trivial_numeric_casts = "allow"
 unused_qualifications = "allow"
 # TODO
 let_underscore_drop = "allow"
-# TODO
-unnameable_types = "allow"
 # TODO: each site carries an `expect` with the reason.
 unsafe_code = "allow"
 
@@ -323,8 +357,8 @@ unescaped_backticks = "deny"
 
 [features]
 default = ["std", "checksum", "deflate"]
-std = ["hdf5-pure-filter/std"]
-checksum = []
+std = ["hdf5-pure-core/std", "hdf5-pure-filter/std", "hdf5-pure-format/std"]
+checksum = ["hdf5-pure-format/checksum"]
 deflate = ["flate2", "hdf5-pure-filter/deflate"]
 flate2 = ["hdf5-pure-filter/flate2"]
 fast-deflate = ["flate2", "hdf5-pure-filter/fast-deflate"]
@@ -353,23 +387,25 @@ num-complex = ["dep:num-complex", "serde"]
 __heap-baseline = []
 
 [dependencies]
-hdf5-pure-filter = { path = "crates/hdf5-pure-filter", version = "=0.47.0", default-features = false }
-byteorder = { version = "1", default-features = false }
-ndarray = { version = ">=0.16, <0.18", optional = true }
+hdf5-pure-core.workspace = true
+hdf5-pure-format.workspace = true
+hdf5-pure-filter.workspace = true
+byteorder.workspace = true
+ndarray = { workspace = true, optional = true }
 num-complex = { version = "0.4", optional = true, default-features = false }
 serde = { version = "1", optional = true, default-features = false, features = ["derive", "alloc"] }
 sha2 = { version = "0.11", optional = true, default-features = false }
 
 [dev-dependencies]
 criterion = { version = "0.5", default-features = false }
-heapscope = "0.1"
-proptest = "1"
-rstest = "0.27"
+heapscope.workspace = true
+proptest.workspace = true
+rstest.workspace = true
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-tempfile = "3"
-test-util = { path = "crates/test-util" }
-test-util-hdf5 = { path = "crates/test-util-hdf5" }
+tempfile.workspace = true
+test-util.workspace = true
+test-util-hdf5.workspace = true
 
 [[example]]
 name = "matlab_fixtures"

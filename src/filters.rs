@@ -15,6 +15,7 @@ use hdf5_pure_filter::ZfpElementType;
 #[cfg(feature = "zfp")]
 use crate::FixedPointLayout;
 use crate::error::FormatError;
+use crate::filter_pipeline;
 use crate::filter_pipeline::FilterPipeline;
 use crate::scaleoffset::ScaleOffsetType;
 
@@ -141,7 +142,7 @@ pub fn decompress_chunk(
 ) -> Result<Vec<u8>, FormatError> {
     hdf5_pure_filter::decompress_chunk(
         compressed,
-        &pipeline.filters,
+        &filter_pipeline::FilterStepsRef::new(pipeline),
         ctx.filter_context(),
         filter_mask,
     )
@@ -164,7 +165,7 @@ pub fn decompress_chunk_with(
     hdf5_pure_filter::decompress_chunk_with(
         scratch,
         compressed,
-        &pipeline.filters,
+        &filter_pipeline::FilterStepsRef::new(pipeline),
         ctx.filter_context(),
         filter_mask,
     )
@@ -186,7 +187,7 @@ pub fn compress_chunk(
     hdf5_pure_filter::compress_chunk_with(
         &mut FilterScratch::new(),
         data,
-        &pipeline.filters,
+        &filter_pipeline::FilterStepsRef::new(pipeline),
         ctx.filter_context(),
     )
     .map_err(FormatError::from)
@@ -204,8 +205,13 @@ pub fn compress_chunk_with(
     pipeline: &FilterPipeline,
     ctx: ChunkContext<'_>,
 ) -> Result<Vec<u8>, FormatError> {
-    hdf5_pure_filter::compress_chunk_with(scratch, data, &pipeline.filters, ctx.filter_context())
-        .map_err(FormatError::from)
+    hdf5_pure_filter::compress_chunk_with(
+        scratch,
+        data,
+        &filter_pipeline::FilterStepsRef::new(pipeline),
+        ctx.filter_context(),
+    )
+    .map_err(FormatError::from)
 }
 
 #[cfg(test)]

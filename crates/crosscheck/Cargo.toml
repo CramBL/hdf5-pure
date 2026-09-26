@@ -4,8 +4,11 @@
 [package]
 name = "hdf5-pure-crosscheck"
 version = "0.0.0"
-edition = "2024"
 publish = false
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
 build = "build.rs"
 
 [features]
@@ -34,21 +37,21 @@ __hdf5-bundled = ["hdf5/static", "__hdf5-2", "test-util-hdf5/__hdf5-bundled"]
 __matio = ["serde", "test-util-hdf5/__matio"]
 
 [dependencies]
-hdf5 = { package = "hdf5-metno", git = "https://github.com/metno/hdf5-rust", rev = "605a2e28c17f2209bf2a6d0a8be11ef0b6546034", features = ["zlib"], optional = true }
+hdf5 = { workspace = true, optional = true }
 
 # The `hdf5` feature turns the dependency on for the tests, the package's only targets.
 [package.metadata.cargo-shear]
 ignored = ["hdf5"]
 
 [dev-dependencies]
-hdf5-pure = { path = "../.." }
-ndarray = ">=0.16, <0.18"
-proptest = "1"
-rstest = "0.27"
+hdf5-pure.workspace = true
+ndarray.workspace = true
+proptest.workspace = true
+rstest.workspace = true
 serde = { version = "1", features = ["derive"] }
-tempfile = "3"
-test-util = { path = "../test-util" }
-test-util-hdf5 = { path = "../test-util-hdf5" }
+tempfile.workspace = true
+test-util.workspace = true
+test-util-hdf5.workspace = true
 
 [lints]
 workspace = true

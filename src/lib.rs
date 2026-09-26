@@ -419,6 +419,7 @@
 #![cfg_attr(docsrs, feature(doc_cfg))]
 #![cfg_attr(not(feature = "std"), no_std)]
 #![cfg_attr(not(feature = "std"), allow(dead_code))]
+#![deny(unnameable_types)]
 
 #[cfg(not(feature = "std"))]
 extern crate alloc;
@@ -489,7 +490,14 @@ mod zfp_crosscheck;
 #[cfg(feature = "provenance")]
 pub(crate) mod provenance;
 
-#[cfg(not(feature = "std"))]
+#[cfg(any(not(feature = "std"), test))]
+#[cfg_attr(
+    all(feature = "std", test),
+    expect(
+        dead_code,
+        reason = "with `std` the chunk cache takes std's mutex, and only the tests use this one"
+    )
+)]
 pub(crate) mod nosync;
 
 #[cfg(feature = "std")]
@@ -530,12 +538,16 @@ pub(crate) mod ndarray_support;
 
 #[cfg(feature = "std")]
 pub use error::Error;
-pub use error::{FormatError, OBJECT_HEADER_MESSAGE_MAX};
+#[doc(inline)]
+pub use hdf5_pure_core::FormatError;
+pub use hdf5_pure_core::OBJECT_HEADER_MESSAGE_MAX;
 
 #[cfg(feature = "std")]
+#[doc(inline)]
 pub use address::BaseAddress;
 #[cfg(feature = "std")]
-pub use message_type::MessageType;
+#[doc(inline)]
+pub use hdf5_pure_core::MessageType;
 #[cfg(feature = "std")]
 pub use superblock::Superblock;
 
@@ -569,8 +581,9 @@ pub use libver::LibVer;
 #[cfg(all(feature = "std", feature = "provenance"))]
 pub use provenance::VerifyResult;
 
+pub use type_builders::AttrValue;
 #[cfg(feature = "std")]
-pub use types::{AttrValue, DType};
+pub use types::DType;
 
 #[cfg(feature = "std")]
 pub use writer::FileBuilder;
@@ -593,12 +606,26 @@ pub use file_create_properties::FileCreateProperties;
 pub use file_space_info::{FileSpaceInfo, FileSpaceStrategy};
 
 pub use compound::{CompoundField, CompoundType};
-pub use dataspace::MaxExtent;
-pub use datatype::byte_order::DatatypeByteOrder;
-pub use datatype::layout::{FixedPointLayout, FloatingPointLayout};
-pub use datatype::{
-    CharacterSet, CompoundMember, Datatype, EnumMember, ReferenceType, StringPadding,
-};
+#[doc(inline)]
+pub use hdf5_pure_core::CharacterSet;
+#[doc(inline)]
+pub use hdf5_pure_core::CompoundMember;
+#[doc(inline)]
+pub use hdf5_pure_core::Datatype;
+#[doc(inline)]
+pub use hdf5_pure_core::DatatypeByteOrder;
+#[doc(inline)]
+pub use hdf5_pure_core::EnumMember;
+#[doc(inline)]
+pub use hdf5_pure_core::FixedPointLayout;
+#[doc(inline)]
+pub use hdf5_pure_core::FloatingPointLayout;
+#[doc(inline)]
+pub use hdf5_pure_core::MaxExtent;
+#[doc(inline)]
+pub use hdf5_pure_core::ReferenceType;
+#[doc(inline)]
+pub use hdf5_pure_core::StringPadding;
 
 pub use type_builders::{
     CompoundTypeBuilder, DatasetBuilder, EnumTypeBuilder, ExplicitCompoundTypeBuilder,

@@ -39,20 +39,18 @@ pub enum ScaleOffset {
     FloatDScale(i32),
 }
 
-impl From<ScaleOffset> for hdf5_pure_filter::ScaleOffset {
-    fn from(mode: ScaleOffset) -> Self {
-        match mode {
-            ScaleOffset::Integer(bits) => Self::Integer(bits),
-            ScaleOffset::FloatDScale(decimals) => Self::FloatDScale(decimals),
-        }
-    }
-}
-
-impl From<hdf5_pure_filter::ScaleOffset> for ScaleOffset {
-    fn from(mode: hdf5_pure_filter::ScaleOffset) -> Self {
+impl ScaleOffset {
+    pub(crate) fn from_filter_mode(mode: hdf5_pure_filter::ScaleOffset) -> Self {
         match mode {
             hdf5_pure_filter::ScaleOffset::Integer(bits) => Self::Integer(bits),
             hdf5_pure_filter::ScaleOffset::FloatDScale(decimals) => Self::FloatDScale(decimals),
+        }
+    }
+
+    pub(crate) fn to_filter_mode(self) -> hdf5_pure_filter::ScaleOffset {
+        match self {
+            Self::Integer(bits) => hdf5_pure_filter::ScaleOffset::Integer(bits),
+            Self::FloatDScale(decimals) => hdf5_pure_filter::ScaleOffset::FloatDScale(decimals),
         }
     }
 }
@@ -64,12 +62,13 @@ pub(crate) fn build_cd_values(
     nelmts: u32,
     fill: ScaleOffsetFill<'_>,
 ) -> Result<Vec<u32>, FormatError> {
-    hdf5_pure_filter::build_scale_offset_cd_values(mode.into(), ty, size, nelmts, fill)
+    hdf5_pure_filter::build_scale_offset_cd_values(mode.to_filter_mode(), ty, size, nelmts, fill)
         .map_err(FormatError::from)
 }
 
 pub(crate) fn scale_offset_mode(cd_values: &[u32]) -> Option<(ScaleOffset, FillAvailability)> {
-    hdf5_pure_filter::scale_offset_mode(cd_values).map(|(mode, fill)| (mode.into(), fill))
+    hdf5_pure_filter::scale_offset_mode(cd_values)
+        .map(|(mode, fill)| (ScaleOffset::from_filter_mode(mode), fill))
 }
 
 /// Extracts scalar facts from a datatype supported by the Scale-Offset filter.

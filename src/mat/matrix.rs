@@ -87,6 +87,10 @@ matrix_complex_sentinels! {
 }
 
 mod sealed {
+    #[expect(
+        unnameable_types,
+        reason = "the supertrait that seals `MatElement` has no path outside the crate, so no other crate implements `MatElement`"
+    )]
     pub trait Sealed {}
 }
 

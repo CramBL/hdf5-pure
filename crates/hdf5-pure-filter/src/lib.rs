@@ -4,11 +4,14 @@
 //! Deflate requires the `deflate` feature and `std`.
 //! Pipeline ordering, conflict detection, and re-encoding classification use filter identifiers
 //! and parameters supplied by the caller.
+//!
+//! The project supports `hdf5-pure` as its API entry point. Direct use of this published
+//! support crate has no independent API compatibility guarantee.
 
 #![cfg_attr(not(feature = "std"), no_std)]
-#![allow(rustdoc::missing_crate_level_docs)]
 
 extern crate alloc;
+use alloc::format;
 
 use core::fmt;
 
@@ -35,9 +38,9 @@ pub use zfp::{
 pub use pipeline::FILTER_ZFP;
 pub use pipeline::{
     ChunkContext, FILTER_DEFLATE, FILTER_FLETCHER32, FILTER_LZF, FILTER_SCALEOFFSET,
-    FILTER_SHUFFLE, FilterScratch, FilterStep, H5Z_FLAG_OPTIONAL, canonical_filter_position,
-    compress_chunk_with, decompress_chunk, decompress_chunk_with, filters_lossless,
-    filters_reencodable, first_filter_conflict,
+    FILTER_SHUFFLE, FilterScratch, FilterStep, FilterSteps, H5Z_FLAG_OPTIONAL,
+    canonical_filter_position, compress_chunk_with, decompress_chunk, decompress_chunk_with,
+    filters_lossless, filters_reencodable, first_filter_conflict,
 };
 
 pub use lzf::{
@@ -178,4 +181,44 @@ impl std::error::Error for Error {}
 /// ```
 pub fn decode_reservation(cap: Option<usize>, in_size: usize, max_expansion: usize) -> usize {
     cap.map_or(0, |cap| cap.min(in_size.saturating_mul(max_expansion)))
+}
+
+impl From<Error> for hdf5_pure_core::FormatError {
+    fn from(error: Error) -> Self {
+        match error {
+            Error::InvalidLzfStream(reason) => Self::FilterError(format!("lzf: {reason}")),
+            Error::ScaleOffset(reason) => Self::FilterError(reason),
+            Error::FilterError(reason) => Self::FilterError(reason),
+            Error::UnsupportedFilter(id) => Self::UnsupportedFilter(id),
+            Error::DataSizeMismatch { expected, actual } => {
+                Self::DataSizeMismatch { expected, actual }
+            }
+            Error::Fletcher32Mismatch { expected, computed } => {
+                Self::Fletcher32Mismatch { expected, computed }
+            }
+            Error::ScaleOffsetValueTooLargeForPlatform { value, target } => {
+                Self::ValueTooLargeForPlatform { value, target }
+            }
+            #[cfg(feature = "zfp")]
+            Error::ZfpFilter(reason) => Self::FilterError(reason),
+            #[cfg(feature = "zfp")]
+            Error::UnsupportedZfp(reason) => Self::UnsupportedZfp(reason),
+            #[cfg(feature = "zfp")]
+            Error::ValueTooLargeForPlatform { value, target } => {
+                Self::ValueTooLargeForPlatform { value, target }
+            }
+            #[cfg(feature = "zfp")]
+            Error::TruncatedZfpStream { expected, actual } => Self::FilterError(format!(
+                "ZFP: encoded chunk needs {expected} bytes, got {actual}"
+            )),
+            #[cfg(feature = "zfp")]
+            Error::ZfpSizeOverflow => {
+                Self::FilterError("ZFP: chunk dimensions or encoded size overflow usize".into())
+            }
+            #[cfg(feature = "zfp")]
+            Error::ZfpHeaderTooLarge { budget, required } => Self::FilterError(format!(
+                "ZFP: nonzero float block needs {required} header bits, rate allows {budget} bits"
+            )),
+        }
+    }
 }

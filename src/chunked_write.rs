@@ -322,7 +322,8 @@ impl ChunkOptions {
                         flags,
                         client_data: hdf5_pure_filter::zfp_cd_values_rate(
                             rate, elem_ty, chunk_dims,
-                        )?,
+                        )
+                        .map_err(FormatError::from)?,
                     }
                 }
                 FilterKind::ScaleOffset(mode, fill_avail) => {
@@ -2425,7 +2426,11 @@ pub(crate) fn compress_chunks(
         kind,
         slot_of_chunk,
         index_slots,
-        pipeline_message: pipeline.as_ref().map(|pl| pl.serialize()),
+        pipeline_message: pipeline
+            .as_ref()
+            .map(FilterPipeline::serialize)
+            .transpose()
+            .map_err(crate::filter_pipeline::map_filter_pipeline_error)?,
     })
 }
 

@@ -1,0 +1,24 @@
+[package]
+name = "hdf5-pure-format"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Pure-Rust HDF5 on-disk structures and codecs"
+
+[features]
+default = ["checksum"]
+std = ["hdf5-pure-core/std"]
+checksum = []
+
+[dependencies]
+hdf5-pure-core.workspace = true
+byteorder.workspace = true
+
+[dev-dependencies]
+rstest.workspace = true
+test-util.workspace = true
+
+[lints]
+workspace = true

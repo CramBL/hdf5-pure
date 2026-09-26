@@ -1,318 +1,90 @@
-//! HDF5 Filter Pipeline message parsing (message type 0x000B).
-
 #[cfg(not(feature = "std"))]
-extern crate alloc;
+use alloc::format;
 
-#[cfg(not(feature = "std"))]
-use alloc::{string::String, string::ToString, vec, vec::Vec};
+use hdf5_pure_format::FilterPipelineError;
 
-#[cfg(feature = "zfp")]
-pub use hdf5_pure_filter::FILTER_ZFP;
-pub use hdf5_pure_filter::{
-    FILTER_DEFLATE, FILTER_FLETCHER32, FILTER_LZF, FILTER_SCALEOFFSET, FILTER_SHUFFLE,
-    H5Z_FLAG_OPTIONAL,
-};
-
-use crate::bytes::ensure_len;
 use crate::error::FormatError;
 
-/// Description of a single filter in a pipeline.
-#[derive(Debug, Clone, PartialEq)]
-pub struct FilterDescription {
-    /// Filter identification value.
-    pub filter_id: u16,
-    /// Optional filter name (required for filter_id >= 256 in v1).
-    pub name: Option<String>,
-    /// Bit 0 permits omission during output.
-    pub flags: u16,
-    /// Client data values passed to the filter.
-    pub client_data: Vec<u32>,
+pub use hdf5_pure_filter::FILTER_DEFLATE;
+pub use hdf5_pure_filter::FILTER_FLETCHER32;
+pub use hdf5_pure_filter::FILTER_LZF;
+pub use hdf5_pure_filter::FILTER_SCALEOFFSET;
+pub use hdf5_pure_filter::FILTER_SHUFFLE;
+#[cfg(feature = "zfp")]
+pub use hdf5_pure_filter::FILTER_ZFP;
+pub use hdf5_pure_filter::H5Z_FLAG_OPTIONAL;
+pub use hdf5_pure_format::FilterDescription;
+pub use hdf5_pure_format::FilterPipeline;
+
+pub(crate) fn parse_filter_pipeline(data: &[u8]) -> Result<FilterPipeline, FormatError> {
+    FilterPipeline::parse(data).map_err(map_filter_pipeline_error)
 }
 
-impl FilterDescription {
-    /// Returns whether this filter is marked optional for output.
-    pub fn is_optional(&self) -> bool {
-        hdf5_pure_filter::FilterStep::optional(self)
+pub(crate) fn map_filter_pipeline_error(error: FilterPipelineError) -> FormatError {
+    match error {
+        FilterPipelineError::Format(error) => error,
+        FilterPipelineError::InvalidName { filter_id, reason } => {
+            FormatError::FilterError(format!("invalid name for filter {filter_id}: {reason}"))
+        }
+        FilterPipelineError::FieldTooLarge {
+            field,
+            value,
+            maximum,
+        } => FormatError::FilterError(format!(
+            "filter pipeline {field} is {value}, above maximum {maximum}"
+        )),
     }
 }
 
-impl hdf5_pure_filter::FilterStep for FilterDescription {
-    fn id(&self) -> u16 {
-        self.filter_id
-    }
-    fn flags(&self) -> u16 {
-        self.flags
-    }
-    fn client_data(&self) -> &[u32] {
-        &self.client_data
+/// Presents a pipeline's stored filter descriptions to the filter routines.
+pub(crate) struct FilterStepsRef<'a>(&'a [FilterDescription]);
+
+impl<'a> FilterStepsRef<'a> {
+    pub(crate) fn new(pipeline: &'a FilterPipeline) -> Self {
+        Self(&pipeline.filters)
     }
 }
 
-/// A filter pipeline consisting of one or more filters.
-#[derive(Debug, Clone, PartialEq)]
-pub struct FilterPipeline {
-    /// Pipeline version (1 or 2).
-    pub version: u8,
-    /// Ordered list of filters.
-    pub filters: Vec<FilterDescription>,
-}
-
-impl FilterPipeline {
-    /// Parse a filter pipeline message from raw message bytes.
-    pub fn parse(data: &[u8]) -> Result<FilterPipeline, FormatError> {
-        ensure_len(data, 0, 2)?;
-        let version = data[0];
-        let number_of_filters = data[1] as usize;
-
-        match version {
-            1 => Self::parse_v1(data, number_of_filters),
-            2 => Self::parse_v2(data, number_of_filters),
-            _ => Err(FormatError::InvalidFilterPipelineVersion(version)),
-        }
+impl hdf5_pure_filter::FilterSteps for FilterStepsRef<'_> {
+    fn len(&self) -> usize {
+        self.0.len()
     }
 
-    fn parse_v1(data: &[u8], number_of_filters: usize) -> Result<FilterPipeline, FormatError> {
-        // version(1) + nfilters(1) + reserved(6) = 8 bytes header
-        ensure_len(data, 0, 8)?;
-        let mut pos = 8;
-        let mut filters = Vec::with_capacity(number_of_filters);
-
-        for _ in 0..number_of_filters {
-            ensure_len(data, pos, 8)?;
-            let filter_id = u16::from_le_bytes([data[pos], data[pos + 1]]);
-            let name_length = u16::from_le_bytes([data[pos + 2], data[pos + 3]]) as usize;
-            let flags = u16::from_le_bytes([data[pos + 4], data[pos + 5]]);
-            let num_client_data = u16::from_le_bytes([data[pos + 6], data[pos + 7]]) as usize;
-            pos += 8;
-
-            // Name (if present)
-            let name = if name_length > 0 {
-                ensure_len(data, pos, name_length)?;
-                let name_bytes = &data[pos..pos + name_length];
-                // Strip null terminator
-                let name_str = core::str::from_utf8(
-                    name_bytes.split(|&b| b == 0).next().unwrap_or(name_bytes),
-                )
-                .unwrap_or("")
-                .to_string();
-                // Pad to 8-byte boundary
-                let padded = (name_length + 7) & !7;
-                pos += padded;
-                Some(name_str)
-            } else {
-                None
-            };
-
-            // Client data
-            ensure_len(data, pos, num_client_data * 4)?;
-            let mut client_data = Vec::with_capacity(num_client_data);
-            for _ in 0..num_client_data {
-                let val =
-                    u32::from_le_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]);
-                client_data.push(val);
-                pos += 4;
-            }
-
-            // Padding to 8-byte boundary if num_client_data is odd
-            if !num_client_data.is_multiple_of(2) {
-                pos += 4;
-            }
-
-            filters.push(FilterDescription {
-                filter_id,
-                name,
-                flags,
-                client_data,
-            });
-        }
-
-        Ok(FilterPipeline {
-            version: 1,
-            filters,
-        })
+    fn id(&self, index: usize) -> u16 {
+        self.0[index].filter_id
     }
 
-    fn parse_v2(data: &[u8], number_of_filters: usize) -> Result<FilterPipeline, FormatError> {
-        // version(1) + nfilters(1) = 2 bytes header (no reserved in v2)
-        let mut pos = 2;
-        let mut filters = Vec::with_capacity(number_of_filters);
-
-        for _ in 0..number_of_filters {
-            ensure_len(data, pos, 2)?;
-            let filter_id = u16::from_le_bytes([data[pos], data[pos + 1]]);
-            pos += 2;
-
-            let name_length = if filter_id >= 256 {
-                ensure_len(data, pos, 2)?;
-                let nl = u16::from_le_bytes([data[pos], data[pos + 1]]) as usize;
-                pos += 2;
-                nl
-            } else {
-                0
-            };
-
-            ensure_len(data, pos, 4)?;
-            let flags = u16::from_le_bytes([data[pos], data[pos + 1]]);
-            let num_client_data = u16::from_le_bytes([data[pos + 2], data[pos + 3]]) as usize;
-            pos += 4;
-
-            let name = if name_length > 0 {
-                ensure_len(data, pos, name_length)?;
-                let name_bytes = &data[pos..pos + name_length];
-                let name_str = core::str::from_utf8(
-                    name_bytes.split(|&b| b == 0).next().unwrap_or(name_bytes),
-                )
-                .unwrap_or("")
-                .to_string();
-                pos += name_length;
-                Some(name_str)
-            } else {
-                None
-            };
-
-            ensure_len(data, pos, num_client_data * 4)?;
-            let mut client_data = Vec::with_capacity(num_client_data);
-            for _ in 0..num_client_data {
-                let val =
-                    u32::from_le_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]);
-                client_data.push(val);
-                pos += 4;
-            }
-
-            // No padding in v2
-
-            filters.push(FilterDescription {
-                filter_id,
-                name,
-                flags,
-                client_data,
-            });
-        }
-
-        Ok(FilterPipeline {
-            version: 2,
-            filters,
-        })
+    fn flags(&self, index: usize) -> u16 {
+        self.0[index].flags
     }
 
-    /// Serialize the filter pipeline to bytes.
-    pub fn serialize(&self) -> Vec<u8> {
-        match self.version {
-            1 => self.serialize_v1(),
-            2 => self.serialize_v2(),
-            _ => vec![self.version, 0],
-        }
-    }
-
-    fn serialize_v1(&self) -> Vec<u8> {
-        let mut buf = Vec::new();
-        buf.push(1); // version
-        #[expect(
-            clippy::cast_possible_truncation,
-            reason = "filter count is written into the 1-byte number-of-filters field of the v1 pipeline message"
-        )]
-        buf.push(self.filters.len() as u8);
-        buf.extend_from_slice(&[0u8; 6]); // reserved
-
-        for f in &self.filters {
-            buf.extend_from_slice(&f.filter_id.to_le_bytes());
-
-            let name_bytes = match &f.name {
-                Some(name) => {
-                    let mut nb = name.as_bytes().to_vec();
-                    nb.push(0); // null terminate
-                    nb
-                }
-                None => Vec::new(),
-            };
-            #[expect(
-                clippy::cast_possible_truncation,
-                reason = "filter name length is written into the 2-byte name-length field of the v1 pipeline message"
-            )]
-            let name_length = name_bytes.len() as u16;
-            buf.extend_from_slice(&name_length.to_le_bytes());
-            buf.extend_from_slice(&f.flags.to_le_bytes());
-            #[expect(
-                clippy::cast_possible_truncation,
-                reason = "client-data value count is written into the 2-byte client-data-values field of the v1 pipeline message"
-            )]
-            buf.extend_from_slice(&(f.client_data.len() as u16).to_le_bytes());
-
-            if !name_bytes.is_empty() {
-                buf.extend_from_slice(&name_bytes);
-                // Pad to 8-byte boundary
-                let padded = (name_bytes.len() + 7) & !7;
-                let padding = padded - name_bytes.len();
-                buf.extend_from_slice(&vec![0u8; padding]);
-            }
-
-            for &val in &f.client_data {
-                buf.extend_from_slice(&val.to_le_bytes());
-            }
-
-            // Pad if odd number of client data values
-            if f.client_data.len() % 2 != 0 {
-                buf.extend_from_slice(&[0u8; 4]);
-            }
-        }
-
-        buf
-    }
-
-    fn serialize_v2(&self) -> Vec<u8> {
-        let mut buf = Vec::new();
-        buf.push(2); // version
-        #[expect(
-            clippy::cast_possible_truncation,
-            reason = "filter count is written into the 1-byte number-of-filters field of the v2 pipeline message"
-        )]
-        buf.push(self.filters.len() as u8);
-
-        for f in &self.filters {
-            buf.extend_from_slice(&f.filter_id.to_le_bytes());
-
-            if f.filter_id >= 256 {
-                let name_bytes = match &f.name {
-                    Some(name) => {
-                        let mut nb = name.as_bytes().to_vec();
-                        nb.push(0);
-                        nb
-                    }
-                    None => vec![0],
-                };
-                #[expect(
-                    clippy::cast_possible_truncation,
-                    reason = "filter name length is written into the 2-byte name-length field of the v2 pipeline message"
-                )]
-                buf.extend_from_slice(&(name_bytes.len() as u16).to_le_bytes());
-                buf.extend_from_slice(&f.flags.to_le_bytes());
-                #[expect(
-                    clippy::cast_possible_truncation,
-                    reason = "client-data value count is written into the 2-byte client-data-values field of the v2 pipeline message"
-                )]
-                buf.extend_from_slice(&(f.client_data.len() as u16).to_le_bytes());
-                buf.extend_from_slice(&name_bytes);
-            } else {
-                buf.extend_from_slice(&f.flags.to_le_bytes());
-                #[expect(
-                    clippy::cast_possible_truncation,
-                    reason = "client-data value count is written into the 2-byte client-data-values field of the v2 pipeline message"
-                )]
-                buf.extend_from_slice(&(f.client_data.len() as u16).to_le_bytes());
-            }
-
-            for &val in &f.client_data {
-                buf.extend_from_slice(&val.to_le_bytes());
-            }
-        }
-
-        buf
+    fn client_data(&self, index: usize) -> &[u32] {
+        &self.0[index].client_data
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[rstest::rstest]
+    #[case(
+        FilterPipelineError::InvalidName { filter_id: 300, reason: "invalid UTF-8" },
+        "invalid name for filter 300: invalid UTF-8"
+    )]
+    #[case(
+        FilterPipelineError::FieldTooLarge { field: "filter count", value: 33, maximum: 32 },
+        "filter pipeline filter count is 33, above maximum 32"
+    )]
+    fn filter_pipeline_validation_errors_map_to_filter_error(
+        #[case] error: FilterPipelineError,
+        #[case] message: &str,
+    ) {
+        assert_eq!(
+            map_filter_pipeline_error(error),
+            FormatError::FilterError(message.into())
+        );
+    }
 
     #[test]
     fn parse_v1_single_deflate() {
@@ -417,7 +189,7 @@ mod tests {
                 },
             ],
         };
-        let serialized = pipeline.serialize();
+        let serialized = pipeline.serialize().unwrap();
         let parsed = FilterPipeline::parse(&serialized).unwrap();
         assert_eq!(parsed, pipeline);
     }
@@ -441,7 +213,7 @@ mod tests {
                 },
             ],
         };
-        let serialized = pipeline.serialize();
+        let serialized = pipeline.serialize().unwrap();
         let parsed = FilterPipeline::parse(&serialized).unwrap();
         assert_eq!(parsed, pipeline);
     }
@@ -450,10 +222,10 @@ mod tests {
     fn custom_filter_with_name_v1() {
         let mut buf = vec![1u8, 1];
         buf.extend_from_slice(&[0u8; 6]);
-        // custom filter: id=300 (>=256), name_length=11 ("myfilter\0" padded to 8)
+        // custom filter: id=300 (>=256), name_length=16 ("myfilter\0" padded to 8)
         buf.extend_from_slice(&300u16.to_le_bytes());
         let name = b"myfilter\0"; // 9 bytes, pad to 16
-        buf.extend_from_slice(&(name.len() as u16).to_le_bytes());
+        buf.extend_from_slice(&16u16.to_le_bytes());
         buf.extend_from_slice(&0u16.to_le_bytes()); // flags
         buf.extend_from_slice(&2u16.to_le_bytes()); // nclient=2
         // name padded to 8-byte boundary: 9 bytes -> 16 bytes
@@ -475,20 +247,184 @@ mod tests {
         // id=300 (>=256), so name_length field present
         buf.extend_from_slice(&300u16.to_le_bytes());
         let name = b"custom\0";
-        buf.extend_from_slice(&(name.len() as u16).to_le_bytes());
+        buf.extend_from_slice(&7u16.to_le_bytes());
         buf.extend_from_slice(&0u16.to_le_bytes()); // flags
         buf.extend_from_slice(&0u16.to_le_bytes()); // nclient=0
         buf.extend_from_slice(name);
-
-        let fp = FilterPipeline::parse(&buf).unwrap();
-        assert_eq!(fp.filters[0].filter_id, 300);
-        assert_eq!(fp.filters[0].name, Some("custom".to_string()));
+        let pipeline = FilterPipeline {
+            version: 2,
+            filters: vec![FilterDescription {
+                filter_id: 300,
+                name: Some("custom".to_string()),
+                flags: 0,
+                client_data: Vec::new(),
+            }],
+        };
+        assert_eq!(FilterPipeline::parse(&buf), Ok(pipeline.clone()));
+        assert_eq!(pipeline.serialize(), Ok(buf));
     }
 
     #[test]
     fn invalid_version() {
         let buf = vec![3u8, 0];
         let err = FilterPipeline::parse(&buf).unwrap_err();
-        assert_eq!(err, FormatError::InvalidFilterPipelineVersion(3));
+        assert_eq!(
+            err,
+            FilterPipelineError::Format(FormatError::InvalidFilterPipelineVersion(3))
+        );
+    }
+
+    #[test]
+    fn encoding_rejects_an_unknown_version() {
+        let pipeline = FilterPipeline {
+            version: 3,
+            filters: Vec::new(),
+        };
+        assert_eq!(
+            pipeline.serialize().unwrap_err(),
+            FilterPipelineError::Format(FormatError::InvalidFilterPipelineVersion(3))
+        );
+    }
+
+    #[test]
+    fn version_two_predefined_filter_rejects_a_name_it_cannot_store() {
+        let pipeline = FilterPipeline {
+            version: 2,
+            filters: vec![FilterDescription {
+                filter_id: FILTER_DEFLATE,
+                name: Some("deflate".to_string()),
+                flags: 0,
+                client_data: Vec::new(),
+            }],
+        };
+        assert_eq!(
+            pipeline.serialize().unwrap_err(),
+            FilterPipelineError::InvalidName {
+                filter_id: FILTER_DEFLATE,
+                reason: "predefined filters have no name field in version 2",
+            }
+        );
+    }
+
+    #[test]
+    fn version_two_custom_filter_without_name_round_trips() {
+        let pipeline = FilterPipeline {
+            version: 2,
+            filters: vec![FilterDescription {
+                filter_id: 300,
+                name: None,
+                flags: 0,
+                client_data: Vec::new(),
+            }],
+        };
+        assert_eq!(
+            FilterPipeline::parse(&pipeline.serialize().unwrap()),
+            Ok(pipeline)
+        );
+    }
+
+    #[rstest::rstest]
+    #[case(1)]
+    #[case(2)]
+    fn encoding_rejects_too_many_filters(#[case] version: u8) {
+        let pipeline = FilterPipeline {
+            version,
+            filters: vec![filter_description(); 33],
+        };
+        assert_eq!(
+            pipeline.serialize().unwrap_err(),
+            FilterPipelineError::FieldTooLarge {
+                field: "filter count",
+                value: 33,
+                maximum: 32,
+            }
+        );
+    }
+
+    #[test]
+    fn parsing_rejects_a_count_above_the_format_limit() {
+        assert_eq!(
+            FilterPipeline::parse(&[2, 33]).unwrap_err(),
+            FilterPipelineError::FieldTooLarge {
+                field: "filter count",
+                value: 33,
+                maximum: 32,
+            }
+        );
+    }
+
+    #[rstest::rstest]
+    #[case(1)]
+    #[case(2)]
+    fn encoding_rejects_a_name_longer_than_its_field(#[case] version: u8) {
+        let mut filter = filter_description();
+        filter.name = Some("x".repeat(65_535));
+        let pipeline = FilterPipeline {
+            version,
+            filters: vec![filter],
+        };
+        assert_eq!(
+            pipeline.serialize().unwrap_err(),
+            FilterPipelineError::FieldTooLarge {
+                field: "filter name length",
+                value: 65_536,
+                maximum: 65_535,
+            }
+        );
+    }
+
+    #[rstest::rstest]
+    #[case(1)]
+    #[case(2)]
+    fn encoding_rejects_too_many_client_values(#[case] version: u8) {
+        let mut filter = filter_description();
+        filter.client_data = vec![0; 65_536];
+        let pipeline = FilterPipeline {
+            version,
+            filters: vec![filter],
+        };
+        assert_eq!(
+            pipeline.serialize().unwrap_err(),
+            FilterPipelineError::FieldTooLarge {
+                field: "client data count",
+                value: 65_536,
+                maximum: 65_535,
+            }
+        );
+    }
+
+    #[rstest::rstest]
+    #[case(1)]
+    #[case(2)]
+    fn parsing_rejects_invalid_utf8_in_a_filter_name(#[case] version: u8) {
+        let mut bytes = vec![version, 1];
+        if version == 1 {
+            bytes.extend_from_slice(&[0; 6]);
+        }
+        bytes.extend_from_slice(&300u16.to_le_bytes());
+        let name_length = if version == 1 { 8u16 } else { 2u16 };
+        bytes.extend_from_slice(&name_length.to_le_bytes());
+        bytes.extend_from_slice(&0u16.to_le_bytes());
+        bytes.extend_from_slice(&0u16.to_le_bytes());
+        bytes.extend_from_slice(&[0xff, 0]);
+        if version == 1 {
+            bytes.extend_from_slice(&[0; 6]);
+        }
+        assert_eq!(
+            FilterPipeline::parse(&bytes).unwrap_err(),
+            FilterPipelineError::InvalidName {
+                filter_id: 300,
+                reason: "invalid UTF-8",
+            }
+        );
+    }
+
+    fn filter_description() -> FilterDescription {
+        FilterDescription {
+            filter_id: 300,
+            name: Some("custom".to_string()),
+            flags: 0,
+            client_data: Vec::new(),
+        }
     }
 }

@@ -380,7 +380,7 @@ fn convert_to_f64(
         }
         _ => Err(FormatError::TypeMismatch {
             expected: "numeric",
-            actual: dt.name(),
+            actual: crate::datatype::datatype_class_name(dt),
         }),
     }
 }
@@ -513,7 +513,7 @@ pub fn read_as_f32_into(
             _ => {
                 return Err(FormatError::TypeMismatch {
                     expected: "numeric",
-                    actual: datatype.name(),
+                    actual: crate::datatype::datatype_class_name(datatype),
                 });
             }
         }
@@ -643,7 +643,7 @@ pub fn read_as_strings(src: &[u8], datatype: &Datatype) -> Result<Vec<String>, F
         }
         _ => Err(FormatError::TypeMismatch {
             expected: "String",
-            actual: datatype.name(),
+            actual: crate::datatype::datatype_class_name(datatype),
         }),
     }
 }
@@ -892,9 +892,11 @@ mod tests {
             base_type: Box::new(base),
             members: members
                 .iter()
-                .map(|(name, v)| crate::datatype::EnumMember {
-                    name: (*name).to_string(),
-                    value: v.to_le_bytes()[..width].to_vec(),
+                .map(|(name, v)| {
+                    crate::datatype::__private::enum_member(
+                        (*name).to_string(),
+                        v.to_le_bytes()[..width].to_vec(),
+                    )
                 })
                 .collect(),
         }
