@@ -725,7 +725,7 @@ mod tests {
             .find(|m| m.msg_type == MessageType::DATA_LAYOUT)
             .unwrap()
             .data;
-        let (dt, _) = Datatype::parse(dt_data).unwrap();
+        let (dt, _) = hdf5_pure_format::parse_datatype(dt_data).unwrap();
         let ds = Dataspace::parse(ds_data, length_size).unwrap();
         let dl = DataLayout::parse(dl_data, offset_size, length_size).unwrap();
         (dt, ds, dl)

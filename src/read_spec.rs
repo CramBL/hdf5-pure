@@ -115,7 +115,7 @@ impl<'a> RawReadSpec<'a> {
     /// [`FormatError::OffsetOverflow`] if the materialized dataset would be
     /// larger than this target can address.
     pub(crate) fn unallocated_buffer(&self) -> Result<Vec<u8>, FormatError> {
-        let elem_size = self.datatype.element_size_usize()?;
+        let elem_size = crate::datatype::element_size_usize(self.datatype)?;
         let total = self
             .dataspace
             .num_elements()

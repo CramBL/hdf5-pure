@@ -52,6 +52,10 @@ fn exported_pipeline_encodes_known_bytes_and_decodes_a_partial_mask() {
         hdf5_pure_filter::compress_chunk_with(&mut FilterScratch::new(), &data, &steps, ctx)
             .unwrap();
     assert_eq!(encoded, [1, 3, 2, 4, 7, 3, 10, 4]);
+    let sliced =
+        hdf5_pure_filter::compress_chunk_with(&mut FilterScratch::new(), &data, &steps[..1], ctx)
+            .unwrap();
+    assert_eq!(sliced, [1, 3, 2, 4]);
     assert_eq!(
         hdf5_pure_filter::decompress_chunk(&encoded, &steps, ctx, 0).unwrap(),
         data

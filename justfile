@@ -1,15 +1,17 @@
+set lazy
+
 import "scripts/constants.just"
 
 # Test on 32-bit and big-endian via QEMU
 mod portability "scripts/portability.just"
 # Check unsafe with miri, and allocations with heapscope
 mod soundness "scripts/soundness.just"
-# Check API with `semver`, `msrv`, and a python api-surface checking script
+# Check API with `semver` and `msrv`
 mod api "scripts/api.just"
 # Check for unused dependencies, typos, dead links, and bad GitHub actions usage
 mod hygiene "scripts/hygiene.just"
 mod fuzz "scripts/fuzz.just"
-# Test with libhdf5 and libmatio in the `hdf5-pure-crosstest` crate
+# Test with libhdf5 and libmatio in the `hdf5-pure-crosscheck` crate
 mod interop "scripts/interop.just"
 mod release "scripts/release.just"
 # format, lint, test python scripts
@@ -21,35 +23,36 @@ mod prose "scripts/prose.just"
 
 [default]
 _default:
-    @just --list
+    @{{ quote(just_executable()) }} --list
 
 ci-essentials: fmt-check clippy-full doc test-full doctest-full
 
-# Everything CI runs except fuzzing.
-ci: ci-essentials docs-rs check-release examples portability::default hygiene::default python::default prose::default api::default soundness::default interop::default test doctest
+# Broad local validation gate. GitHub Actions additionally runs CI-specific matrix and cross-target checks.
+ci-local: nightly ci-essentials docs-rs check-release examples portability::default hygiene::default python::default prose::default api::default soundness::default interop::default test doctest
 
-# run nextest over the crate and the `test-util` harness with `ARGS`
+# Nextest over every workspace crate but the crosschecks, with `ARGS`.
 test *ARGS:
-    cargo nextest run --locked {{ TESTED_PACKAGES }} {{ ARGS }}
+    cargo nextest run --locked {{ WORKSPACE }} {{ ARGS }}
 
-# the same with all user-facing features and `ARGS`
+# The same with the facade's full-public features and `ARGS`.
 test-full *ARGS:
-    cargo nextest run --locked {{ TESTED_PACKAGES }} --features "{{ USER_FACING_FEATURES }}" {{ ARGS }}
+    cargo nextest run --locked {{ WORKSPACE }} {{ FULL_PUBLIC }} {{ ARGS }}
 
-# Each optional feature on its own beside the defaults, one run per feature.
+# The facade's tests once per feature of its full-public profile, each beside the defaults.
 test-each-feature *ARGS:
-    cargo hack --each-feature --include-features serde,zfp,ndarray --exclude-no-default-features --features default nextest run --locked {{ ARGS }}
+    cargo hack -p hdf5-pure --each-feature --include-features {{ FULL_PUBLIC_FEATURES }} --exclude-no-default-features --features default nextest run --locked {{ ARGS }}
 
-# Run rustdoc tests with `ARGS`
+# The doctests of every workspace crate but the crosschecks, with `ARGS`.
 doctest *ARGS:
-    cargo test --locked --doc {{ ARGS }}
+    cargo test --locked --doc {{ WORKSPACE }} {{ ARGS }}
 
-# Run rustdoc tests with all user-facing features and `ARGS`
+# The same with the facade's full-public features and `ARGS`.
 doctest-full *ARGS:
-    cargo test --locked --doc --features "{{ USER_FACING_FEATURES }}" {{ ARGS }}
+    cargo test --locked --doc {{ WORKSPACE }} {{ FULL_PUBLIC }} {{ ARGS }}
 
+# The facade's doctests once per feature of its full-public profile, each beside the defaults.
 doctest-each-feature *ARGS:
-    cargo hack --each-feature --include-features serde,zfp,ndarray --exclude-no-default-features --features default test --locked --doc {{ ARGS }}
+    cargo hack -p hdf5-pure --each-feature --include-features {{ FULL_PUBLIC_FEATURES }} --exclude-no-default-features --features default test --locked --doc {{ ARGS }}
 
 fmt:
     cargo fmt --all
@@ -58,44 +61,50 @@ fmt:
 fmt-check:
     cargo fmt --all -- --check
 
-# clippy with the default features, sharing a build cache with `check` and `test`
+# Clippy over every workspace crate but the crosschecks, with the default features.
 clippy *ARGS:
-    cargo clippy --locked {{ TESTED_PACKAGES }} --all-targets {{ ARGS }} -- -D warnings
+    cargo clippy --locked {{ WORKSPACE }} --all-targets {{ ARGS }} -- -D warnings
 
-# clippy with all user-facing features, as CI and the agent gates run it
+# The same with the facade's full-public features, as CI and the agent gates run it.
 clippy-full *ARGS:
-    cargo clippy --locked {{ TESTED_PACKAGES }} --features "{{ USER_FACING_FEATURES }}" --all-targets {{ ARGS }} -- -D warnings
+    cargo clippy --locked {{ WORKSPACE }} {{ FULL_PUBLIC }} --all-targets {{ ARGS }} -- -D warnings
 
-# The published documentation, then the same with the private items contributors read.
+# The published crates' documentation, then the same with the private items contributors read.
 doc *ARGS:
-    RUSTDOCFLAGS="-D warnings" cargo doc --locked --no-deps --features "{{ USER_FACING_FEATURES }}" {{ ARGS }}
-    RUSTDOCFLAGS="-D warnings" cargo doc --locked --no-deps --document-private-items --features "{{ USER_FACING_FEATURES }}" {{ ARGS }}
+    RUSTDOCFLAGS="-D warnings" cargo doc --locked {{ PUBLISHED }} --no-deps {{ FULL_PUBLIC }} {{ ARGS }}
+    RUSTDOCFLAGS="-D warnings" cargo doc --locked {{ PUBLISHED }} --no-deps --document-private-items {{ FULL_PUBLIC }} {{ ARGS }}
 
-# The published documentation as docs.rs builds it: nightly, the feature badges on.
+# The facade's documentation with its `[package.metadata.docs.rs]` settings, then the other published crates' with their defaults.
 docs-rs *ARGS:
-    RUSTDOCFLAGS="--cfg docsrs -D warnings" cargo +nightly doc --locked --no-deps --features "{{ USER_FACING_FEATURES }}" {{ ARGS }}
+    RUSTDOCFLAGS="--cfg docsrs -D warnings" cargo +{{ NIGHTLY }} doc --locked -p hdf5-pure --no-deps --features provenance,zfp,ndarray,serde,num-complex {{ ARGS }}
+    RUSTDOCFLAGS="-D warnings" cargo +{{ NIGHTLY }} doc --locked -p hdf5-pure-core -p hdf5-pure-filter -p hdf5-pure-format --no-deps {{ ARGS }}
 
-# cargo check with the default features, sharing a build cache with `clippy` and `test`
+# Cargo check over every workspace crate but the crosschecks, with the default features.
 check *ARGS:
-    cargo check --locked --all-targets {{ ARGS }}
+    cargo check --locked {{ WORKSPACE }} --all-targets {{ ARGS }}
 
-# cargo check --release, with all user-facing features, as CI runs it
+# The same in release mode with the facade's full-public features, as CI runs it.
 check-release *ARGS:
-    cargo check --locked --release --all-targets --features "{{ USER_FACING_FEATURES }}" {{ ARGS }}
+    cargo check --locked {{ WORKSPACE }} --release --all-targets {{ FULL_PUBLIC }} {{ ARGS }}
 
-# Run all examples
+# Every example of every workspace package, each with the features it requires.
 examples:
     #!/usr/bin/env bash
     set -euo pipefail
-    command -v jq || (echo "requires 'jq'"; exit 1)
-    for ex in $(cargo metadata --no-deps --format-version 1 | jq -r '.packages[].targets[] | select(.kind[] == "example") | .name'); do
-        cargo run --locked --features "serde ndarray" --example "$ex"
-    done
+    command -v jq >/dev/null || { echo "requires 'jq'" >&2; exit 1; }
+    cargo metadata --locked --no-deps --format-version 1 \
+        | jq -r '.packages[] | .name as $package | .targets[] | select(.kind[] == "example") | [$package, .name, ((."required-features" // []) | join(","))] | @tsv' \
+        | while IFS=$'\t' read -r package example features; do
+            cargo run --locked -p "$package" --example "$example" ${features:+--features "$features"} </dev/null
+        done
 
-# cargo clean
+# Install the pinned nightly the rustdoc JSON, docs.rs and fuzzing checks use.
+nightly:
+    rustup toolchain install --no-self-update --profile minimal {{ NIGHTLY }}
+
+# Everything cargo built for the workspace.
 clean:
-    cargo clean -p hdf5-pure
-    cargo clean -p hdf5-pure-crosscheck
+    cargo clean
 
 alias c := check
 alias l := clippy

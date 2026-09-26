@@ -1,0 +1,35 @@
+# The crates whose public API carries a compatibility guarantee, each with the feature sets it is checked under.
+[[crate]]
+package = "hdf5-pure"
+
+[[crate.profile]]
+name = "default"
+default_features = true
+features = []
+# The hdf5-pure-core features the profile enables, which the 0.47.0 migration check builds it with.
+core_features = ["std"]
+
+[[crate.profile]]
+name = "no-std"
+default_features = false
+features = ["checksum"]
+core_features = []
+
+[[crate.profile]]
+name = "full-public"
+default_features = true
+features = ["fast-deflate", "ndarray", "provenance", "serde", "zfp", "num-complex", "checksum"]
+core_features = ["std"]
+
+[[crate]]
+package = "hdf5-pure-core"
+
+[[crate.profile]]
+name = "no-std"
+default_features = false
+features = []
+
+[[crate.profile]]
+name = "std"
+default_features = false
+features = ["std"]

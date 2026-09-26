@@ -4,8 +4,11 @@
 [package]
 name = "test-util-hdf5"
 version = "0.0.0"
-edition = "2024"
 publish = false
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
 
 # The same tiers as `hdf5-pure-crosscheck`, which forwards each of its own to the one here.
 [features]
@@ -22,12 +25,12 @@ __hdf5-bundled = ["hdf5/static", "__hdf5-2"]
 __matio = []
 
 [dependencies]
-hdf5 = { package = "hdf5-metno", git = "https://github.com/metno/hdf5-rust", rev = "605a2e28c17f2209bf2a6d0a8be11ef0b6546034", features = ["zlib"], optional = true }
-hdf5-pure = { path = "../.." }
-test-util = { path = "../test-util" }
+hdf5 = { workspace = true, optional = true }
+hdf5-pure.workspace = true
+test-util.workspace = true
 
 [dev-dependencies]
-tempfile = "3"
+tempfile.workspace = true
 
 [lints]
 workspace = true

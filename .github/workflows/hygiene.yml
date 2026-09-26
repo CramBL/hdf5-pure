@@ -63,14 +63,17 @@ jobs:
       - name: Spelling
         run: just hygiene::typos
 
+      - name: Justfiles
+        run: just hygiene::justfiles
+
       # The interop matrix must include the release `hdf5-metno` bundles, which
       # the crosschecks in `ci.yml` link.
       - name: Interop matrix lists the bundled release
         run: |
           version="$(just interop::hdf5-bundled-version)"
           echo "hdf5-metno bundles $version"
-          if ! grep -qE "^\s+version: \[.*\"$version\".*\]" .github/workflows/interop.yml; then
-            echo "::error::$version is not in the interop matrix version list."
+          if ! just interop::hdf5-versions | grep -qxF "$version"; then
+            echo "::error::$version is not in scripts/hdf5-releases.toml."
             exit 1
           fi
 

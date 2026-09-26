@@ -365,14 +365,14 @@ fn read_enum_indices(group: &Group, depth: usize) -> Result<Vec<usize>, MatError
 /// into row-major `usize` indices.
 fn enum_indices_to_usize(value: &MatValue) -> Result<Vec<usize>, MatError> {
     match value {
-        MatValue::Scalar(ScalarNum::U32(x)) => Ok(vec![x.to_usize().map_err(MatError::Format)?]),
+        MatValue::Scalar(ScalarNum::U32(x)) => Ok(vec![x.to_usize().map_err(MatError::from)?]),
         MatValue::Vec1D(NumVec::U32(v))
         | MatValue::Matrix {
             vec: NumVec::U32(v),
             ..
         } => v
             .iter()
-            .map(|&x| x.to_usize().map_err(MatError::Format))
+            .map(|&x| x.to_usize().map_err(MatError::from))
             .collect(),
         other => Err(MatError::Custom(format!(
             "enum ValueIndices is not a uint32 array (got {})",

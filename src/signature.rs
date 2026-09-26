@@ -5,7 +5,7 @@ use crate::error::FormatError;
 use crate::source::{BytesSource, Source};
 
 /// The 8-byte HDF5 magic signature.
-pub const HDF5_SIGNATURE: [u8; 8] = [0x89, b'H', b'D', b'F', b'\r', b'\n', 0x1A, b'\n'];
+pub use hdf5_pure_format::HDF5_SIGNATURE;
 
 /// Search a [`Source`] for the HDF5 signature, returning its byte offset.
 ///
@@ -50,7 +50,7 @@ pub fn find_signature_in<S: Source + ?Sized>(source: &S) -> Result<u64, FormatEr
 /// Search for the HDF5 signature in an in-memory buffer, returning its byte
 /// offset. Thin wrapper over [`find_signature_in`] for the buffered reader path.
 pub fn find_signature(data: &[u8]) -> Result<usize, FormatError> {
-    find_signature_in(&BytesSource::new(data)).and_then(|off| off.to_usize())
+    find_signature_in(&BytesSource::new(data))?.to_usize()
 }
 
 #[cfg(test)]

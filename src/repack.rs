@@ -793,7 +793,7 @@ fn emit_dataset(
             try_plan_dense_chunks(source_chunks, &dims, &chunk_dims)
         {
             let maxshape = dataspace.extensible_max_dimensions();
-            let elem_size = datatype.element_size_usize()?;
+            let elem_size = crate::datatype::element_size_usize(&datatype)?;
             // Stream the chunks from the source at write time rather than reading
             // them all now: the provider holds an `Arc<File>` and fetches one
             // chunk at a time, so a huge dataset never sits in memory.
@@ -1282,7 +1282,7 @@ fn attr_bytes_are_position_independent(dt: &Datatype) -> bool {
         Datatype::Enumeration { base_type, .. } | Datatype::Array { base_type, .. } => {
             attr_bytes_are_position_independent(base_type)
         }
-        Datatype::VariableLength { .. } | Datatype::Reference { .. } => false,
+        Datatype::VariableLength { .. } | Datatype::Reference { .. } | _ => false,
     }
 }
 
@@ -1428,6 +1428,7 @@ fn check_datatype(dt: &Datatype, owner: &str) -> Result<(), Error> {
             ref_type: ReferenceType::DatasetRegion,
             ..
         } => bad("dataset-region reference"),
+        Datatype::Reference { .. } => bad("unknown reference"),
         Datatype::Compound { members, .. } => {
             for m in members {
                 check_datatype(&m.datatype, owner)?;
@@ -1436,6 +1437,7 @@ fn check_datatype(dt: &Datatype, owner: &str) -> Result<(), Error> {
         }
         Datatype::Enumeration { base_type, .. } => check_datatype(base_type, owner),
         Datatype::Array { base_type, .. } => check_datatype(base_type, owner),
+        _ => bad("unknown class"),
     }
 }
 
@@ -1475,6 +1477,7 @@ fn check_vlen_base_type(dt: &Datatype, owner: &str) -> Result<(), Error> {
         }
         Datatype::Enumeration { base_type, .. } => check_vlen_base_type(base_type, owner),
         Datatype::Array { base_type, .. } => check_vlen_base_type(base_type, owner),
+        _ => bad("unknown class"),
     }
 }
 
@@ -2047,9 +2050,10 @@ mod tests {
 mod attribute_fidelity_tests {
     use super::*;
     use crate::dataspace::{Dataspace, DataspaceType};
+    use crate::datatype::CharacterSet;
+    use crate::datatype::ReferenceType;
     use crate::datatype::StringPadding;
     use crate::datatype::layout::FixedPointLayout;
-    use crate::datatype::{CharacterSet, CompoundMember, ReferenceType};
     use crate::{DatatypeByteOrder, File, FileBuilder, RepackOptions};
     use std::collections::BTreeMap;
 
@@ -2383,16 +2387,8 @@ mod attribute_fidelity_tests {
         let compound_of = |member: Datatype| Datatype::Compound {
             size: 24,
             members: vec![
-                CompoundMember {
-                    name: "plain".into(),
-                    byte_offset: 0,
-                    datatype: i32_type(),
-                },
-                CompoundMember {
-                    name: "nested".into(),
-                    byte_offset: 8,
-                    datatype: member,
-                },
+                crate::datatype::__private::compound_member("plain".into(), 0, i32_type()),
+                crate::datatype::__private::compound_member("nested".into(), 8, member),
             ],
         };
         let array_of = |base: Datatype| Datatype::Array {
