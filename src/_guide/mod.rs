@@ -1,5 +1,6 @@
 //! Documentation pages of the crate, under `cfg(doc)`.
 
+pub mod compatibility;
 pub mod compound_types;
 pub mod compression;
 pub mod editing;

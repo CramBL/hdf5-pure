@@ -14,7 +14,8 @@
 //!   The in-memory parsing and serialization machinery is not.
 //! - **Interoperable.** Files this crate writes are read by the reference HDF5 C
 //!   library, h5py, and MATLAB, and vice versa. Interop is verified by crosscheck
-//!   tests that compare byte-for-byte against fixtures produced by those tools.
+//!   tests against fixtures produced by those tools. See the
+//!   [compatibility guide](crate::_guide::compatibility) for feature-level support.
 //! - **Faithful or nothing.** Every operation that cannot reproduce data exactly
 //!   fails with a named error. See [Fidelity](#fidelity-faithful-or-nothing) below.
 //!
