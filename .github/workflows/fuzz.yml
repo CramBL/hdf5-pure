@@ -47,8 +47,11 @@ jobs:
               - Cargo.lock
               - rust-toolchain.toml
               - .cargo/**
+              - crates/**
               - fuzz/**
               - justfile
+              - scripts/constants.just
+              - scripts/nightly.txt
               - scripts/fuzz.just
               - .github/workflows/fuzz.yml
 
@@ -62,18 +65,13 @@ jobs:
       contents: read
       issues: write
 
-    env:
-      RUSTUP_TOOLCHAIN: nightly
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Install Rust nightly
-        uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # 2026-03-27
-        with:
-          toolchain: nightly
-          targets: x86_64-unknown-linux-gnu
+      - name: Install Rust
+        run: rustup toolchain install
       - name: Cache Cargo
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
@@ -83,6 +81,8 @@ jobs:
         uses: taiki-e/install-action@920ab1831fbf4fb3ef75c8ead83556c918bb7290 # v2.79.8
         with:
           tool: cargo-fuzz,just
+      - name: Install the pinned nightly
+        run: just nightly
       - name: Use PR smoke duration
         if: github.event_name == 'pull_request'
         run: |
@@ -91,7 +91,7 @@ jobs:
       - name: Run every fuzz target
         run: just fuzz::fuzz-all "$FUZZ_DURATION"
       # To reproduce a crash, download fuzz-artifacts and run:
-      # cargo +nightly fuzz run <target> fuzz/artifacts/<target>/<crash-file> --target x86_64-unknown-linux-gnu -- -rss_limit_mb=4096
+      # just fuzz::fuzz <target> 30 fuzz/artifacts/<target>/<crash-file>
       - name: Upload crash artifacts
         id: upload-crash-artifacts
         if: failure()
@@ -120,7 +120,7 @@ jobs:
             echo "To reproduce, download and extract fuzz-artifacts at the repo root, then run:"
             echo
             echo '```sh'
-            echo 'cargo +nightly fuzz run <target> fuzz/artifacts/<target>/<crash-file> --target x86_64-unknown-linux-gnu -- -rss_limit_mb=4096'
+            echo 'just fuzz::fuzz <target> 30 fuzz/artifacts/<target>/<crash-file>'
             echo '```'
           } > issue.md
 

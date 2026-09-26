@@ -46,7 +46,7 @@ Before pushing, run the checks CI runs on every pull request:
 just ci-essentials   # fmt, clippy, docs, tests and doctests with every feature
 ```
 
-`just ci` runs the rest as well: portability, hygiene, prose, the API checks and the crosschecks against one release of the HDF5 C library. `just --list` shows every recipe, and [Testing](#testing) explains what each group covers.
+`just ci-local` runs the rest as well: portability, hygiene, prose, the API checks and the crosschecks against one release of the HDF5 C library. GitHub Actions additionally runs the QEMU, cross-target and full HDF5 matrix jobs, and fuzzing. `just --list` shows every recipe, and [Testing](#testing) explains what each group covers.
 
 ## Crate features
 
@@ -95,8 +95,8 @@ The fixtures under `tests/data/` are grouped by the library that wrote them: `c`
 
 - `just portability` checks the `no_std`, WASM and bare-metal builds, and runs Clippy on a 32-bit target with the truncating casts denied.
 - `just portability::test-32bit` and `test-big-endian` run the suite under QEMU. `test-32bit-hdf5` and `test-big-endian-hdf5` repeat that linking the reference C library.
-- `just soundness::miri` runs [Miri](https://github.com/rust-lang/miri) over the crate's `unsafe` code.
-- `just api::semver` runs [cargo-semver-checks](https://github.com/obi1kenobi/cargo-semver-checks) against the last release, and `just api::msrv` checks that the library builds on the `rust-version` in `Cargo.toml`.
+- `just soundness::miri` runs [Miri](https://github.com/rust-lang/miri) over selected tests of the `unsafe` and other high-risk paths.
+- `just api::semver` runs [cargo-semver-checks](https://github.com/obi1kenobi/cargo-semver-checks) against the last release, and `just api::msrv` checks that every published crate builds on the `rust-version` in `Cargo.toml`.
 - `just fuzz` runs each fuzz target for thirty seconds on a nightly toolchain. The crate would benefit from more runtime, targets and corpora. A crafted file that makes it panic, allocate without bound or read a wrong value is a bug: file it.
 
 ### Hygiene and prose
