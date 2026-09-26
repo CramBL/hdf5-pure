@@ -48,6 +48,10 @@ use crate::reader::Dataset;
 use crate::type_builders::DatasetBuilder;
 
 mod sealed {
+    #[expect(
+        unnameable_types,
+        reason = "the supertrait that seals `H5Element` has no path outside the crate, so no other crate implements `H5Element`"
+    )]
     pub trait Sealed {}
 }
 

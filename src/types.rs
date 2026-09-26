@@ -602,11 +602,11 @@ mod tests {
 
         let compound = Datatype::Compound {
             size: 3,
-            members: vec![crate::datatype::CompoundMember {
-                name: "pixel".into(),
-                byte_offset: 0,
-                datatype: opaque.clone(),
-            }],
+            members: vec![crate::datatype::__private::compound_member(
+                "pixel".into(),
+                0,
+                opaque.clone(),
+            )],
         };
         let DType::Compound(fields) = classify_datatype(&compound) else {
             panic!("a compound classifies as one");

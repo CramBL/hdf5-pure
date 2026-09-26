@@ -93,7 +93,7 @@ pub(crate) fn build_chunked_dataset_oh(
     w.add_message(MessageType::DATASPACE, ds.serialize(LENGTH_SIZE));
     w.add_message_with_flags(
         MessageType::FILL_VALUE,
-        crate::fill_value::fill_value_message_v3(fill),
+        crate::fill_value::fill_value_message_v3(fill)?,
         MessageFlags::CONSTANT,
     );
     w.add_message(MessageType::DATA_LAYOUT, layout_message.to_vec());
@@ -145,7 +145,7 @@ pub(crate) fn build_dataset_oh(
     w.add_message(MessageType::DATASPACE, ds.serialize(LENGTH_SIZE));
     w.add_message_with_flags(
         MessageType::FILL_VALUE,
-        crate::fill_value::fill_value_message_v3(fill),
+        crate::fill_value::fill_value_message_v3(fill)?,
         MessageFlags::CONSTANT,
     );
     let mut dl = Vec::new();
@@ -173,7 +173,7 @@ fn add_datatype(w: &mut ObjectHeaderWriter, dt: &Datatype, location: &DatatypeLo
         }
         None => w.add_message_with_flags(
             MessageType::DATATYPE,
-            dt.serialize(),
+            hdf5_pure_format::serialize_datatype(dt),
             MessageFlags::CONSTANT,
         ),
     }
@@ -210,7 +210,7 @@ pub(crate) fn build_committed_datatype_oh(
     let mut w = ObjectHeaderWriter::new();
     w.add_message_with_flags(
         MessageType::DATATYPE,
-        dt.serialize(),
+        hdf5_pure_format::serialize_datatype(dt),
         MessageFlags::CONSTANT | MessageFlags::FORBID_SHARING,
     );
     if references > 1 {
@@ -1955,7 +1955,7 @@ impl FileWriter {
             // Taking the size as a `NonZeroU32` here is what holds that for the
             // rest of the write: every later stage receives the proof rather
             // than the bare number, so none of them re-checks it.
-            let elem_size = dt.element_size_usize()?;
+            let elem_size = crate::datatype::element_size_usize(&dt)?;
             let elem_bytes = elem_size.get() as u64;
             // The bytes this dataset's elements occupy end to end — the same
             // `num_elements * element_size` invariant the reader enforces (see
@@ -2292,7 +2292,9 @@ impl FileWriter {
             let Some(&ci) = by_path.get(path) else {
                 return Err(FormatError::UnknownCommittedDatatype(path.to_string()));
             };
-            if committed[ci].dt.serialize() != dt.serialize() {
+            if hdf5_pure_format::serialize_datatype(&committed[ci].dt)
+                != hdf5_pure_format::serialize_datatype(dt)
+            {
                 return Err(FormatError::CommittedDatatypeMismatch {
                     path: path.to_string(),
                     user: user(),
@@ -3822,7 +3824,9 @@ mod tests {
             "a singly referenced committed type carries its datatype and nothing else"
         );
         assert_eq!(
-            Datatype::parse(&hdr.messages[0].data).unwrap().0,
+            hdf5_pure_format::parse_datatype(&hdr.messages[0].data)
+                .unwrap()
+                .0,
             make_i32_type()
         );
         assert_eq!(
@@ -4007,7 +4011,7 @@ mod tests {
             .find(|m| m.msg_type == MessageType::DATA_LAYOUT)
             .unwrap()
             .data;
-        let (dt, _) = Datatype::parse(dt_data).unwrap();
+        let (dt, _) = hdf5_pure_format::parse_datatype(dt_data).unwrap();
         let ds = Dataspace::parse(ds_data, sb.length_size).unwrap();
         let dl =
             crate::data_layout::DataLayout::parse(dl_data, sb.offset_size, sb.length_size).unwrap();

@@ -716,7 +716,7 @@ pub fn read_chunked_data_from_source<S: Source + ?Sized>(
         return spec.unallocated_buffer();
     }
 
-    let elem_size = datatype.element_size_usize()?;
+    let elem_size = crate::datatype::element_size_usize(datatype)?;
     let (rank, chunk_dims, ds_dims) = chunked_dims(chunk_dimensions, dataspace)?;
     ensure_chunk_bytes_representable(&chunk_dims, elem_size)?;
 
@@ -864,7 +864,7 @@ pub(crate) fn read_chunked_rows_from_source<S: Source + ?Sized>(
         ));
     };
 
-    let elem_size = datatype.element_size_usize()?;
+    let elem_size = crate::datatype::element_size_usize(datatype)?;
     let (rank, chunk_dims, ds_dims) = chunked_dims(chunk_dimensions, dataspace)?;
     ensure_chunk_bytes_representable(&chunk_dims, elem_size)?;
 
@@ -1140,7 +1140,7 @@ pub fn read_chunked_data_cached_from_source<S: Source + ?Sized>(
         return spec.unallocated_buffer();
     }
 
-    let elem_size = datatype.element_size_usize()?;
+    let elem_size = crate::datatype::element_size_usize(datatype)?;
     let (rank, chunk_dims, ds_dims) = chunked_dims(chunk_dimensions, dataspace)?;
     ensure_chunk_bytes_representable(&chunk_dims, elem_size)?;
 

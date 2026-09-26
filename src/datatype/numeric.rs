@@ -118,7 +118,7 @@ impl TryFrom<&Datatype> for NumericDatatype {
             Datatype::Enumeration { base_type, .. } => Self::try_from(base_type.as_ref()),
 
             Datatype::FixedPoint {
-                size,
+                size: _,
                 byte_order,
                 layout:
                     FixedPointLayout {
@@ -127,7 +127,7 @@ impl TryFrom<&Datatype> for NumericDatatype {
                         bit_precision,
                     },
             } => Ok(Self::FixedPoint {
-                element_size: NumericElementSize::new(*size)?,
+                element_size: NumericElementSize::new(datatype.element_size()?)?,
                 byte_order: *byte_order,
                 layout: FixedPointLayout {
                     signed: *signed,
@@ -137,18 +137,18 @@ impl TryFrom<&Datatype> for NumericDatatype {
             }),
 
             Datatype::FloatingPoint {
-                size,
+                size: _,
                 byte_order,
                 layout,
             } => Ok(Self::FloatingPoint {
-                element_size: NumericElementSize::new(*size)?,
+                element_size: NumericElementSize::new(datatype.element_size()?)?,
                 byte_order: *byte_order,
                 layout: *layout,
             }),
 
             other => Err(FormatError::TypeMismatch {
                 expected: "numeric",
-                actual: other.name(),
+                actual: crate::datatype::datatype_class_name(other),
             }),
         }
     }
@@ -158,5 +158,31 @@ impl TryFrom<Datatype> for NumericDatatype {
     type Error = FormatError;
     fn try_from(dt: Datatype) -> Result<Self, Self::Error> {
         NumericDatatype::try_from(&dt)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use rstest::rstest;
+
+    use super::*;
+
+    #[rstest]
+    #[case(Datatype::FixedPoint {
+        size: 0,
+        byte_order: DatatypeByteOrder::LittleEndian,
+        layout: FixedPointLayout { signed: false, bit_offset: 0, bit_precision: 0 },
+    }, 0)]
+    #[case(Datatype::FloatingPoint {
+        size: 0,
+        byte_order: DatatypeByteOrder::LittleEndian,
+        layout: FloatingPointLayout::IEEE754_BINARY32,
+    }, 1)]
+    fn zero_sized_numeric_datatype_returns_zero_sized_datatype(
+        #[case] datatype: Datatype,
+        #[case] class: u8,
+    ) {
+        let error = NumericDatatype::try_from(&datatype).unwrap_err();
+        assert_eq!(error, FormatError::ZeroSizedDatatype { class });
     }
 }

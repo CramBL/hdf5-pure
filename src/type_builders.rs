@@ -15,9 +15,12 @@ use crate::chunked_write::{ChunkMeta, ChunkOptions, ChunkProvider, FilterKind, S
 use crate::compound::CompoundType;
 use crate::convert::Narrow;
 use crate::dataspace::{Dataspace, DataspaceType, MaxExtent};
+use crate::datatype::CharacterSet;
+use crate::datatype::CompoundMember;
+use crate::datatype::Datatype;
+use crate::datatype::StringPadding;
 use crate::datatype::byte_order::DatatypeByteOrder;
 use crate::datatype::layout::{FixedPointLayout, FloatingPointLayout};
-use crate::datatype::{CharacterSet, CompoundMember, Datatype, EnumMember, StringPadding};
 use crate::display::write_elided;
 use crate::error::FormatError;
 use crate::object_path::ObjectPathBuf;
@@ -278,11 +281,9 @@ impl CompoundTypeBuilder {
         let mut members = Vec::with_capacity(self.fields.len());
         for (name, dt) in self.fields {
             let sz = dt.type_size();
-            members.push(CompoundMember {
-                name,
-                byte_offset: offset,
-                datatype: dt,
-            });
+            members.push(crate::datatype::__private::compound_member(
+                name, offset, dt,
+            ));
             offset += sz as u64;
         }
         if offset == 0 {
@@ -408,11 +409,12 @@ pub struct ExplicitCompoundTypeBuilder {
 impl ExplicitCompoundTypeBuilder {
     /// Add a field at an explicit byte offset.
     pub fn field(mut self, name: &str, byte_offset: u64, datatype: Datatype) -> Self {
-        self.fields.push(CompoundMember {
-            name: name.to_string(),
-            byte_offset,
-            datatype,
-        });
+        self.fields
+            .push(crate::datatype::__private::compound_member(
+                name.to_string(),
+                byte_offset,
+                datatype,
+            ));
         self
     }
 
@@ -610,7 +612,7 @@ impl EnumTypeBuilder {
     }
 
     /// Add a named value from its raw little-endian bytes — the form the format
-    /// stores and [`EnumMember::value`] holds.
+    /// stores and [`crate::EnumMember::value`] holds.
     ///
     /// `bytes` must be exactly the base type's size, or [`build`](Self::build)
     /// refuses it with [`FormatError::EnumMemberValueSize`]. Use this for a base
@@ -656,7 +658,7 @@ impl EnumTypeBuilder {
                     v.to_le_bytes()[..width].to_vec()
                 }
             };
-            members.push(EnumMember { name, value });
+            members.push(crate::datatype::__private::enum_member(name, value));
         }
 
         Ok(Datatype::Enumeration {

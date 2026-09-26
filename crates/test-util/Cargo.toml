@@ -4,15 +4,18 @@
 [package]
 name = "test-util"
 version = "0.0.0"
-edition = "2024"
 publish = false
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
 
 [dependencies]
-heapscope = "0.1"
-tempfile = "3"
+heapscope.workspace = true
+tempfile.workspace = true
 
 [dev-dependencies]
-rstest = "0.27"
+rstest.workspace = true
 
 [lints]
 workspace = true

@@ -107,6 +107,17 @@ pub enum ChunkIndex {
 }
 
 impl ChunkIndex {
+    pub(crate) fn from_layout(index: ChunkIndexLayout) -> Self {
+        match index {
+            ChunkIndexLayout::BTreeV1 { .. } => ChunkIndex::BTreeV1,
+            ChunkIndexLayout::SingleChunk { .. } => ChunkIndex::SingleChunk,
+            ChunkIndexLayout::Implicit { .. } => ChunkIndex::Implicit,
+            ChunkIndexLayout::FixedArray { .. } => ChunkIndex::FixedArray,
+            ChunkIndexLayout::ExtensibleArray { .. } => ChunkIndex::ExtensibleArray,
+            ChunkIndexLayout::BTreeV2 { .. } => ChunkIndex::BTreeV2,
+        }
+    }
+
     /// Whether a dataset with this index kind can be grown in place with
     /// [`Dataset::append`](crate::Dataset::append) — true only for
     /// [`ExtensibleArray`](ChunkIndex::ExtensibleArray).
@@ -117,19 +128,6 @@ impl ChunkIndex {
     #[must_use]
     pub const fn supports_inplace_append(self) -> bool {
         matches!(self, ChunkIndex::ExtensibleArray)
-    }
-}
-
-impl From<ChunkIndexLayout> for ChunkIndex {
-    fn from(index: ChunkIndexLayout) -> Self {
-        match index {
-            ChunkIndexLayout::BTreeV1 { .. } => ChunkIndex::BTreeV1,
-            ChunkIndexLayout::SingleChunk { .. } => ChunkIndex::SingleChunk,
-            ChunkIndexLayout::Implicit { .. } => ChunkIndex::Implicit,
-            ChunkIndexLayout::FixedArray { .. } => ChunkIndex::FixedArray,
-            ChunkIndexLayout::ExtensibleArray { .. } => ChunkIndex::ExtensibleArray,
-            ChunkIndexLayout::BTreeV2 { .. } => ChunkIndex::BTreeV2,
-        }
     }
 }
 
@@ -315,7 +313,7 @@ mod tests {
         #[case] parsed: ChunkIndexLayout,
         #[case] kind: ChunkIndex,
     ) {
-        assert_eq!(ChunkIndex::from(parsed), kind);
+        assert_eq!(ChunkIndex::from_layout(parsed), kind);
     }
 
     #[test]

@@ -3489,13 +3489,13 @@ impl WriteEngine {
         else {
             return false;
         };
-        let Ok(pipeline) = FilterPipeline::parse(&region[fb..fe]) else {
+        let Ok(pipeline) = crate::filter_pipeline::parse_filter_pipeline(&region[fb..fe]) else {
             return false;
         };
         if pipeline_lossless(&pipeline) {
             return false;
         }
-        let Ok((disk_dt, _)) = Datatype::parse(&region[dt_b..dt_e]) else {
+        let Ok((disk_dt, _)) = hdf5_pure_format::parse_datatype(&region[dt_b..dt_e]) else {
             return false;
         };
         let Ok(disk_ds) = Dataspace::parse(&region[ds_b..ds_e], LENGTH_SIZE) else {
@@ -3645,7 +3645,7 @@ impl WriteEngine {
             .max_dimensions
             .as_ref()
             .and_then(|m| m.first().copied())
-            && !max.admits(grown)
+            && matches!(max, MaxExtent::Fixed(limit) if limit < grown)
         {
             return Err(Error::AppendUnsupported(
                 "appending would grow the staged dataset past its maximum shape",
@@ -8347,7 +8347,7 @@ impl WriteEngine {
         // library (e.g. the C library records a maximum-dimensions array equal to
         // the current dimensions, which this crate omits) while still refusing any
         // real retype or reshape.
-        let (disk_dt, _) = Datatype::parse(&region[dt_b..dt_e])?;
+        let (disk_dt, _) = hdf5_pure_format::parse_datatype(&region[dt_b..dt_e])?;
         if disk_dt != fd.dt {
             return Err(Error::EditUnsupported(
                 "write_dataset datatype does not match the on-disk dataset (overwrite, not retype)",
@@ -8492,7 +8492,7 @@ impl WriteEngine {
                 // splitting in the apply phase and so has no other chance to make
                 // it.
                 if let Some(pm) = &pipeline_message {
-                    let pipeline = FilterPipeline::parse(pm)?;
+                    let pipeline = crate::filter_pipeline::parse_filter_pipeline(pm)?;
                     if !pipeline_reencodable(&pipeline) {
                         return Err(Error::EditUnsupported(
                             "a chunked dataset using a filter this engine cannot re-encode \
@@ -8652,7 +8652,7 @@ impl WriteEngine {
             "dataset header has no data layout",
         ))?;
 
-        let (disk_dt, _) = Datatype::parse(&region[dt_b..dt_e])?;
+        let (disk_dt, _) = hdf5_pure_format::parse_datatype(&region[dt_b..dt_e])?;
         let disk_ds = Dataspace::parse(&region[ds_b..ds_e], LENGTH_SIZE)?;
         let dl = DataLayout::parse(&region[lb..le], OFFSET_SIZE, LENGTH_SIZE)?;
 
@@ -8744,7 +8744,7 @@ impl WriteEngine {
         let has_filters = pipeline_message.is_some();
         let pipeline = match &pipeline_message {
             Some(pm) => {
-                let parsed = FilterPipeline::parse(pm)?;
+                let parsed = crate::filter_pipeline::parse_filter_pipeline(pm)?;
                 if !pipeline_reencodable(&parsed) {
                     return Err(Error::AppendUnsupported(
                         "dataset uses a filter this engine cannot re-encode",
@@ -11646,11 +11646,11 @@ pub(crate) fn locate_dataset_state<F: Store>(
     }
     let (dt_off, dt_size) = result.spans.datatype;
     let dt_bytes = file.read_metadata_at(dt_off, dt_size)?;
-    let (datatype, _) = Datatype::parse(&dt_bytes)?;
+    let (datatype, _) = hdf5_pure_format::parse_datatype(&dt_bytes)?;
     let pipeline = match result.spans.filter {
         Some((fb, fsize)) => {
             let fp_bytes = file.read_metadata_at(fb, fsize)?;
-            let parsed = FilterPipeline::parse(&fp_bytes)?;
+            let parsed = crate::filter_pipeline::parse_filter_pipeline(&fp_bytes)?;
             if !pipeline_reencodable(&parsed) {
                 return Err(Error::AppendInPlaceUnsupported(
                     "dataset uses a filter this engine cannot re-encode",
@@ -11873,7 +11873,7 @@ fn flatten_dataset(db: DatasetBuilder, name: LinkNameBuf) -> Result<FlatDataset,
     // and a caller-built `Datatype` never passes through `Datatype::parse`.
     // Taking it as a `NonZeroUsize` hands the proof to the staging below rather
     // than leaving each step to re-derive it.
-    let elem_size = dt.element_size_usize()?;
+    let elem_size = crate::datatype::element_size_usize(&dt)?;
 
     let elem = elem_size.get() as u64;
     // Multiply with checked arithmetic: an absurd shape whose element count
@@ -12066,7 +12066,7 @@ const GROUP_INFO_BODY: [u8; 2] = [0, 0];
 ///
 /// An in-place overwrite checks this classification before writing chunk data.
 pub(crate) fn pipeline_reencodable(pipeline: &FilterPipeline) -> bool {
-    hdf5_pure_filter::filters_reencodable(&pipeline.filters)
+    hdf5_pure_filter::filters_reencodable(&crate::filter_pipeline::FilterStepsRef::new(pipeline))
 }
 
 /// Returns whether the pipeline's filters guarantee preservation of element values.
@@ -12074,7 +12074,7 @@ pub(crate) fn pipeline_reencodable(pipeline: &FilterPipeline) -> bool {
 /// Appending to a partial trailing chunk decodes committed values before writing
 /// the expanded chunk. Lossy filters may change those values through this operation.
 pub(crate) fn pipeline_lossless(pipeline: &FilterPipeline) -> bool {
-    hdf5_pure_filter::filters_lossless(&pipeline.filters)
+    hdf5_pure_filter::filters_lossless(&crate::filter_pipeline::FilterStepsRef::new(pipeline))
 }
 
 /// The refusal both append paths raise for a lossy pipeline sitting on a partial
@@ -12182,7 +12182,7 @@ pub(crate) fn datatype_is_raw_appendable(dt: &Datatype) -> bool {
         Datatype::Compound { members, .. } => members
             .iter()
             .all(|m| datatype_is_raw_appendable(&m.datatype)),
-        Datatype::VariableLength { .. } | Datatype::Reference { .. } => false,
+        Datatype::VariableLength { .. } | Datatype::Reference { .. } | _ => false,
     }
 }
 
@@ -12220,7 +12220,7 @@ fn parse_chunked_header(region: &OhRegion) -> Result<ChunkedHeaderParts, Error> 
     let (ds_b, ds_e) =
         dataspace.ok_or(Error::EditUnsupported("dataset header has no dataspace"))?;
     let (lb, le) = layout.ok_or(Error::EditUnsupported("dataset header has no data layout"))?;
-    let (dt, _) = Datatype::parse(&region[dt_b..dt_e])?;
+    let (dt, _) = hdf5_pure_format::parse_datatype(&region[dt_b..dt_e])?;
     let ds = Dataspace::parse(&region[ds_b..ds_e], LENGTH_SIZE)?;
     let dl = DataLayout::parse(&region[lb..le], OFFSET_SIZE, LENGTH_SIZE)?;
     if !matches!(dl, DataLayout::Chunked { .. }) {
@@ -12275,7 +12275,7 @@ fn chunked_geometry(
         ));
     }
     let spatial: Vec<u64> = chunk_dimensions[..rank].to_vec();
-    let element_size = dt.element_size_usize()?;
+    let element_size = crate::datatype::element_size_usize(dt)?;
     let raw_size = spatial
         .iter()
         .copied()
@@ -12338,7 +12338,7 @@ fn split_and_encode_chunks(
     let Some(pm) = pipeline_message else {
         return Ok(split);
     };
-    let pipeline = FilterPipeline::parse(pm)?;
+    let pipeline = crate::filter_pipeline::parse_filter_pipeline(pm)?;
     let ctx = ChunkContext::from_datatype(chunk_dims, dt)?;
     let mut encoded = Vec::with_capacity(split.len());
     // One encoder across the rewrite; see `FilterScratch`.
@@ -14552,7 +14552,7 @@ fn reject_foreign_addresses(region: &OhRegion) -> Result<(), Error> {
         }
         match msg_type {
             MessageType::DATATYPE => {
-                let (dt, _) = Datatype::parse(&region[body..body_end])?;
+                let (dt, _) = hdf5_pure_format::parse_datatype(&region[body..body_end])?;
                 if datatype_holds_file_address(&dt) {
                     return Err(Error::EditUnsupported(
                         "variable-length or reference datasets cannot be copied to another file yet",
@@ -14822,7 +14822,7 @@ fn screen_copied_references(
                 } else {
                     &region[body..body_end]
                 };
-                let (dt, _) = Datatype::parse(encoded)?;
+                let (dt, _) = hdf5_pure_format::parse_datatype(encoded)?;
                 element_dt = Some(dt);
             }
             MessageType::DATA_LAYOUT => {
@@ -15054,7 +15054,8 @@ mod tests {
     use rstest::rstest;
 
     use super::*;
-    use crate::{CompoundMember, datatype::layout::FloatingPointLayout, object_path::ObjectPath};
+    use crate::datatype::layout::FloatingPointLayout;
+    use crate::object_path::ObjectPath;
 
     /// The rule that places a chunk index on a paged file: some chunk-data span
     /// abuts it. Both sides count, which is what a repeatedly appended dataset
@@ -15240,7 +15241,9 @@ mod tests {
     fn compact_reference_region(address: u64) -> OhRegion {
         let mut region = message_record(
             MessageType::DATATYPE,
-            &crate::type_builders::make_object_reference_type().serialize(),
+            &hdf5_pure_format::serialize_datatype(
+                &crate::type_builders::make_object_reference_type(),
+            ),
         );
         let mut layout = vec![3u8, 0];
         layout.extend_from_slice(&8u16.to_le_bytes());
@@ -15282,7 +15285,9 @@ mod tests {
         let no_layout = CopyTree::DatasetVerbatim {
             region: plain_region(message_record(
                 MessageType::DATATYPE,
-                &crate::type_builders::make_object_reference_type().serialize(),
+                &hdf5_pure_format::serialize_datatype(
+                    &crate::type_builders::make_object_reference_type(),
+                ),
             )),
             dense_attrs: DenseAttrSet::default(),
         };
@@ -15336,19 +15341,19 @@ mod tests {
     /// builds sizes its element to its members. Driven directly for that reason.
     #[test]
     fn a_datatype_whose_reference_slots_do_not_fit_is_refused() {
-        use crate::datatype::{CompoundMember, ReferenceType};
+        use crate::datatype::ReferenceType;
         // An 8-byte compound declaring an 8-byte reference at offset 4: the slot
         // runs four bytes past the element.
         let dt = Datatype::Compound {
             size: 8,
-            members: vec![CompoundMember {
-                name: "r".to_string(),
-                byte_offset: 4,
-                datatype: Datatype::Reference {
+            members: vec![crate::datatype::__private::compound_member(
+                "r".to_string(),
+                4,
+                Datatype::Reference {
                     size: 8,
                     ref_type: ReferenceType::Object,
                 },
-            }],
+            )],
         };
         assert!(
             embedded_reference_slots(&dt).is_none(),
@@ -17629,20 +17634,20 @@ mod tests {
         // refused (it was wrongly accepted before recursion was added).
         let be_member = Datatype::Compound {
             size: 8,
-            members: vec![CompoundMember {
-                name: "x".into(),
-                byte_offset: 0,
-                datatype: be_f64.clone(),
-            }],
+            members: vec![crate::datatype::__private::compound_member(
+                "x".into(),
+                0,
+                be_f64.clone(),
+            )],
         };
         assert!(!datatype_is_raw_appendable(&be_member));
         let le_member = Datatype::Compound {
             size: 8,
-            members: vec![CompoundMember {
-                name: "x".into(),
-                byte_offset: 0,
-                datatype: le_f64.clone(),
-            }],
+            members: vec![crate::datatype::__private::compound_member(
+                "x".into(),
+                0,
+                le_f64.clone(),
+            )],
         };
         assert!(datatype_is_raw_appendable(&le_member));
         assert!(!datatype_is_raw_appendable(&Datatype::Array {

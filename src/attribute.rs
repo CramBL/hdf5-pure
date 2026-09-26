@@ -129,7 +129,7 @@ impl AttributeMessage {
         // Datatype (padded to 8-byte boundary). Version 1 has no flags byte, so
         // neither field can be a reference.
         ensure_len(data, pos, datatype_size)?;
-        let (datatype, _) = Datatype::parse(&data[pos..pos + datatype_size])?;
+        let (datatype, _) = hdf5_pure_format::parse_datatype(&data[pos..pos + datatype_size])?;
         pos += pad8(datatype_size);
 
         // Dataspace (padded to 8-byte boundary)
@@ -289,7 +289,7 @@ impl AttributeMessage {
             .reference_bytes(crate::file_writer::OFFSET_SIZE)
         {
             Some(reference) => reference,
-            None => self.datatype.serialize(),
+            None => hdf5_pure_format::serialize_datatype(&self.datatype),
         }
     }
 
@@ -404,14 +404,17 @@ fn decode_type_and_space(
         let address = resolver.committed_address(dt_field)?;
         let body = resolver.resolve(dt_field, MessageType::DATATYPE)?;
         (
-            Datatype::parse(&body)?.0,
+            hdf5_pure_format::parse_datatype(&body)?.0,
             match address {
                 Some(address) => DatatypeLocation::Committed(address),
                 None => DatatypeLocation::Inline,
             },
         )
     } else {
-        (Datatype::parse(dt_field)?.0, DatatypeLocation::Inline)
+        (
+            hdf5_pure_format::parse_datatype(dt_field)?.0,
+            DatatypeLocation::Inline,
+        )
     };
 
     let dataspace = if flags & FLAG_SHARED_DATASPACE != 0 {

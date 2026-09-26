@@ -313,6 +313,10 @@ impl ChunkProvider for ProducerChunks {
 }
 
 mod sealed {
+    #[expect(
+        unnameable_types,
+        reason = "the supertrait that seals `BlockElement` has no path outside the crate, so no other crate implements `BlockElement`"
+    )]
     pub trait Sealed {}
 }
 

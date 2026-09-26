@@ -44,3 +44,15 @@ impl<T> core::ops::DerefMut for MutexGuard<'_, T> {
         unsafe { &mut *self.mutex.data.get() }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::Mutex;
+
+    #[test]
+    fn a_guard_writes_the_value_the_next_guard_reads() {
+        let mutex = Mutex::new(1);
+        *mutex.lock().unwrap() += 1;
+        assert_eq!(*mutex.lock().unwrap(), 2);
+    }
+}

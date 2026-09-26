@@ -2367,7 +2367,7 @@ impl FileInner {
     ) -> Result<Vec<u8>, FormatError> {
         let (os, ls) = (self.offset_size(), self.length_size());
         let (dl, ds, dt) = (spec.layout, spec.dataspace, spec.datatype);
-        let elem_size = dt.element_size_usize()?;
+        let elem_size = crate::datatype::element_size_usize(dt)?;
         // Elements per row (product of inner dims; 1 when 0-D or 1-D). Checked so
         // a crafted dataspace whose inner dims overflow `usize` errors instead of
         // panicking (debug) or wrapping (release).
@@ -4020,7 +4020,7 @@ impl Group {
     pub(crate) fn named_datatype_at(&self, path: &str) -> Result<(Datatype, u64), Error> {
         let (address, hdr) = self.named_datatype_header(path)?;
         let msg = find_message(&hdr, MessageType::DATATYPE)?;
-        let (dt, _) = Datatype::parse(&self.file.message_body(msg)?)?;
+        let (dt, _) = hdf5_pure_format::parse_datatype(&self.file.message_body(msg)?)?;
         Ok((dt, address))
     }
 
@@ -5718,7 +5718,7 @@ the same commit to replace it",
                 // Reuse `chunk_shape` so the two accessors can never disagree on
                 // how the element-size dimension is stripped.
                 chunk_shape: self.chunk_shape()?.unwrap_or_default(),
-                index: ChunkIndex::from(index),
+                index: ChunkIndex::from_layout(index),
             },
             DataLayout::Virtual => Layout::Virtual,
         })
@@ -5737,7 +5737,7 @@ the same commit to replace it",
     /// Returns [`Error::Format`] if the data-layout message cannot be parsed.
     pub fn chunk_index(&self) -> Result<Option<ChunkIndex>, Error> {
         match self.data_layout()? {
-            DataLayout::Chunked { index, .. } => Ok(Some(ChunkIndex::from(index))),
+            DataLayout::Chunked { index, .. } => Ok(Some(ChunkIndex::from_layout(index))),
             _ => Ok(None),
         }
     }
@@ -5953,7 +5953,7 @@ the same commit to replace it",
         // See `read_raw`: an unparseable fill value message is carried into the
         // read rather than failing it up front.
         let fill_bytes = self.fill_bytes();
-        let elem_size = dt.element_size_usize()?;
+        let elem_size = crate::datatype::element_size_usize(&dt)?;
         let fill = match &fill_bytes {
             Ok(b) => FillPattern::new(b.as_deref(), elem_size),
             Err(_) => FillPattern::UNKNOWN,
@@ -6408,7 +6408,7 @@ the same commit to replace it",
         }
         let state = self.resolved()?;
         let msg = find_message(&state.header, MessageType::DATATYPE)?;
-        let (dt, _) = Datatype::parse(&self.file.message_body(msg)?)?;
+        let (dt, _) = hdf5_pure_format::parse_datatype(&self.file.message_body(msg)?)?;
         Ok(dt)
     }
 
@@ -6457,7 +6457,7 @@ the same commit to replace it",
             .iter()
             .find(|m| m.msg_type == MessageType::FILTER_PIPELINE)?;
         let body = self.file.message_body(msg).ok()?;
-        FilterPipeline::parse(&body).ok()
+        crate::filter_pipeline::parse_filter_pipeline(&body).ok()
     }
 
     /// Whether this dataset's element bytes live in files outside this one
@@ -6524,7 +6524,7 @@ the same commit to replace it",
             return Ok(Vec::new());
         }
         let dataspace = self.dataspace()?;
-        let elem_size = self.datatype()?.element_size_usize()?;
+        let elem_size = crate::datatype::element_size_usize(&self.datatype()?)?;
         let base = self.file.addr_offset;
         // The chunk index stores base-relative addresses, in its root and in every internal
         // node, so the walk runs over a view of the file framed at the base. Every address it
@@ -6603,7 +6603,7 @@ the same commit to replace it",
         // parse error to a caller asking about the value.
         let fill_bytes = self.fill_bytes();
         let fill = match &fill_bytes {
-            Ok(b) => FillPattern::new(b.as_deref(), dt.element_size_usize()?),
+            Ok(b) => FillPattern::new(b.as_deref(), crate::datatype::element_size_usize(&dt)?),
             Err(_) => FillPattern::UNKNOWN,
         };
         let spec = RawReadSpec {
@@ -6649,7 +6649,7 @@ the same commit to replace it",
         // read rather than failing it up front.
         let parsed_fill = self.fill_bytes();
         let fill = match &parsed_fill {
-            Ok(b) => FillPattern::new(b.as_deref(), dt.element_size_usize()?),
+            Ok(b) => FillPattern::new(b.as_deref(), crate::datatype::element_size_usize(&dt)?),
             Err(_) => FillPattern::UNKNOWN,
         };
 
@@ -6844,7 +6844,7 @@ the same commit to replace it",
     /// memory layout, so padded compound records are supported safely.
     pub fn read_compound<T: CompoundType>(&self) -> Result<Vec<T>, Error> {
         let datatype = self.datatype()?;
-        let element_size = datatype.element_size_usize()?;
+        let element_size = crate::datatype::element_size_usize(&datatype)?;
         if !matches!(datatype, Datatype::Compound { .. }) {
             return Err(FormatError::TypeMismatch {
                 expected: "Compound",

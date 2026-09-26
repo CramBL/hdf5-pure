@@ -808,11 +808,7 @@ mod embedded_slot_tests {
     }
 
     fn member(name: &str, byte_offset: u64, datatype: Datatype) -> CompoundMember {
-        CompoundMember {
-            name: name.to_string(),
-            byte_offset,
-            datatype,
-        }
+        crate::datatype::__private::compound_member(name.to_string(), byte_offset, datatype)
     }
 
     #[test]

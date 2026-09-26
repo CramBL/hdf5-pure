@@ -471,6 +471,12 @@ fn filtered_write_does_not_build_a_compressor_per_chunk() {
          {measured} against a {DATASET_BYTES}-byte dataset over {CHUNKS} chunks"
     );
 
+    // The block limit also catches one allocation for each filter description per chunk.
+    assert!(
+        measured.blocks <= 7 * CHUNKS / 2 + 256,
+        "filtered write allocated an extra block per chunk: {measured} over {CHUNKS} chunks"
+    );
+
     let file = File::open(&path).unwrap();
     let back = file.dataset("t").unwrap().read_f64().unwrap();
     assert_eq!(back.len(), N0);
@@ -483,6 +489,7 @@ fn filtered_write_does_not_build_a_compressor_per_chunk() {
 fn filtered_read_does_not_build_a_decompressor_per_chunk() {
     const N0: usize = 1024 * 1024;
     const DATASET_BYTES: usize = N0 * 8;
+    const CHUNKS: u64 = (N0 as u64) / 512;
 
     let data: Vec<f64> = (0..N0).map(|i| i as f64).collect();
     let dir = tempfile::tempdir().unwrap();
@@ -512,6 +519,12 @@ fn filtered_read_does_not_build_a_decompressor_per_chunk() {
         measured.bytes < (DATASET_BYTES * 4) as u64,
         "a filtered read must build its decoder once, not per chunk: measured \
          {measured} against a {DATASET_BYTES}-byte dataset"
+    );
+
+    // The block limit also catches one allocation for each filter description per chunk.
+    assert!(
+        measured.blocks <= 9 * CHUNKS / 2 + 256,
+        "filtered read allocated an extra block per chunk: {measured} over {CHUNKS} chunks"
     );
 
     assert_eq!(all.len(), DATASET_BYTES);

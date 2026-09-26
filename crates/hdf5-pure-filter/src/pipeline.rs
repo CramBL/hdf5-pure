@@ -29,6 +29,123 @@ pub trait FilterStep {
     }
 }
 
+/// Provides indexed filter metadata to the chunk routines.
+///
+/// An implementation may read its entries from a slice or another representation. The caller
+/// passes an index less than [`Self::len`] to each indexed method. The routines use the supplied
+/// metadata directly, without collecting filter descriptions into another sequence.
+/// See [`decompress_chunk`] for an example using a slice of [`FilterStep`] values.
+///
+/// # Examples
+///
+/// An indexed view can read filter identifiers without building a collection of
+/// [`FilterStep`] values:
+///
+/// ```
+/// use core::num::NonZeroU32;
+/// use hdf5_pure_filter::{
+///     ChunkContext, FILTER_FLETCHER32, FilterScratch, FilterSteps,
+///     compress_chunk_with, decompress_chunk,
+/// };
+///
+/// struct Ids<'a>(&'a [u16]);
+///
+/// impl FilterSteps for Ids<'_> {
+///     fn len(&self) -> usize { self.0.len() }
+///     fn id(&self, index: usize) -> u16 { self.0[index] }
+///     fn flags(&self, _index: usize) -> u16 { 0 }
+///     fn client_data(&self, _index: usize) -> &[u32] { &[] }
+/// }
+///
+/// # fn main() -> Result<(), hdf5_pure_filter::Error> {
+/// let filters = Ids(&[FILTER_FLETCHER32]);
+/// let context = ChunkContext {
+///     chunk_dims: &[2],
+///     element_size: NonZeroU32::new(1).unwrap(),
+///     element_type: None,
+///     scale_offset_type: None,
+/// };
+/// let stored = compress_chunk_with(&mut FilterScratch::new(), &[1, 2], &filters, context)?;
+/// assert_eq!(decompress_chunk(&stored, &filters, context, 0)?, [1, 2]);
+/// # Ok(())
+/// # }
+/// ```
+pub trait FilterSteps {
+    /// Returns the number of filters in the pipeline.
+    fn len(&self) -> usize;
+
+    /// Returns whether the pipeline has no filters.
+    fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Returns the registered HDF5 filter identifier at `index`.
+    ///
+    /// # Panics
+    ///
+    /// The slice, array, and vector implementations panic if `index` is at least [`Self::len`].
+    fn id(&self, index: usize) -> u16;
+
+    /// Returns the filter flags at `index`.
+    ///
+    /// # Panics
+    ///
+    /// The slice, array, and vector implementations panic if `index` is at least [`Self::len`].
+    fn flags(&self, index: usize) -> u16;
+
+    /// Returns the stored client data values for the filter at `index`.
+    ///
+    /// # Panics
+    ///
+    /// The slice, array, and vector implementations panic if `index` is at least [`Self::len`].
+    fn client_data(&self, index: usize) -> &[u32];
+}
+
+impl<T: FilterStep> FilterSteps for [T] {
+    fn len(&self) -> usize {
+        <[T]>::len(self)
+    }
+    fn id(&self, index: usize) -> u16 {
+        self[index].id()
+    }
+    fn flags(&self, index: usize) -> u16 {
+        self[index].flags()
+    }
+    fn client_data(&self, index: usize) -> &[u32] {
+        self[index].client_data()
+    }
+}
+
+impl<T: FilterStep, const N: usize> FilterSteps for [T; N] {
+    fn len(&self) -> usize {
+        N
+    }
+    fn id(&self, index: usize) -> u16 {
+        self[index].id()
+    }
+    fn flags(&self, index: usize) -> u16 {
+        self[index].flags()
+    }
+    fn client_data(&self, index: usize) -> &[u32] {
+        self[index].client_data()
+    }
+}
+
+impl<T: FilterStep> FilterSteps for Vec<T> {
+    fn len(&self) -> usize {
+        Vec::len(self)
+    }
+    fn id(&self, index: usize) -> u16 {
+        self[index].id()
+    }
+    fn flags(&self, index: usize) -> u16 {
+        self[index].flags()
+    }
+    fn client_data(&self, index: usize) -> &[u32] {
+        self[index].client_data()
+    }
+}
+
 /// Returns the insertion index for a filter in the writer's canonical order.
 ///
 /// Known filters rank ZFP when enabled, Scale-Offset, Shuffle, LZF, Deflate, then Fletcher32.
@@ -118,8 +235,8 @@ pub fn first_filter_conflict(
 /// assert!(hdf5_pure_filter::filters_reencodable(&[Step(FILTER_SHUFFLE)]));
 /// assert!(!hdf5_pure_filter::filters_reencodable(&[Step(u16::MAX)]));
 /// ```
-pub fn filters_reencodable(filters: &[impl FilterStep]) -> bool {
-    filters.iter().all(|filter| match filter.id() {
+pub fn filters_reencodable(filters: &(impl FilterSteps + ?Sized)) -> bool {
+    (0..filters.len()).all(|index| match filters.id(index) {
         FILTER_DEFLATE | FILTER_SHUFFLE | FILTER_FLETCHER32 | FILTER_SCALEOFFSET | FILTER_LZF => {
             true
         }
@@ -161,11 +278,11 @@ pub fn filters_reencodable(filters: &[impl FilterStep]) -> bool {
 /// # Ok(())
 /// # }
 /// ```
-pub fn filters_lossless(filters: &[impl FilterStep]) -> bool {
-    filters.iter().all(|filter| match filter.id() {
+pub fn filters_lossless(filters: &(impl FilterSteps + ?Sized)) -> bool {
+    (0..filters.len()).all(|index| match filters.id(index) {
         FILTER_DEFLATE | FILTER_SHUFFLE | FILTER_FLETCHER32 | FILTER_LZF => true,
         FILTER_SCALEOFFSET => matches!(
-            crate::scaleoffset::scale_offset_mode(filter.client_data()),
+            crate::scaleoffset::scale_offset_mode(filters.client_data(index)),
             Some((ScaleOffset::Integer(_), _))
         ),
         _ => false,
@@ -315,7 +432,7 @@ impl FilterScratch {
 /// ```
 pub fn decompress_chunk(
     compressed: &[u8],
-    filters: &[impl FilterStep],
+    filters: &(impl FilterSteps + ?Sized),
     ctx: ChunkContext<'_>,
     filter_mask: u32,
 ) -> Result<Vec<u8>, Error> {
@@ -342,7 +459,7 @@ pub fn decompress_chunk(
 pub fn decompress_chunk_with(
     scratch: &mut FilterScratch,
     compressed: &[u8],
-    filters: &[impl FilterStep],
+    filters: &(impl FilterSteps + ?Sized),
     ctx: ChunkContext<'_>,
     filter_mask: u32,
 ) -> Result<Vec<u8>, Error> {
@@ -354,12 +471,12 @@ pub fn decompress_chunk_with(
     // Filters are listed in application order. Decoding reverses them.
     // `i` is the filter's forward index and its bit position in `filter_mask`.
     // A set bit means the filter was skipped for this chunk.
-    for (i, filter) in filters.iter().enumerate().rev() {
+    for i in (0..filters.len()).rev() {
         if i < 32 && (filter_mask >> i) & 1 == 1 {
             continue;
         }
         let input: &[u8] = owned.as_deref().unwrap_or(compressed);
-        let next = match filter.id() {
+        let next = match filters.id(i) {
             FILTER_SHUFFLE => shuffle_decompress(input, ctx.element_size.get() as usize)?,
             FILTER_DEFLATE => deflate_decompress(
                 scratch,
@@ -373,13 +490,13 @@ pub fn decompress_chunk_with(
             FILTER_FLETCHER32 => fletcher32_verify(input)?,
             FILTER_SCALEOFFSET => crate::decompress_scale_offset(
                 input,
-                filter.client_data(),
+                filters.client_data(i),
                 inner_output_cap(expected, filters, filter_mask, i, ctx)?,
             )?,
             #[cfg(feature = "zfp")]
             FILTER_ZFP => crate::decompress_zfp_filter(
                 input,
-                filter.client_data(),
+                filters.client_data(i),
                 ctx.chunk_dims,
                 ctx.element_type,
             )?,
@@ -414,14 +531,15 @@ fn expected_chunk_len(ctx: &ChunkContext<'_>) -> Option<usize> {
 }
 
 fn filter_max_forward_output(
-    filter: &impl FilterStep,
+    filters: &(impl FilterSteps + ?Sized),
+    index: usize,
     in_size: usize,
     ctx: ChunkContext<'_>,
 ) -> Result<usize, Error> {
     #[cfg(not(feature = "zfp"))]
     let _ = ctx;
 
-    Ok(match filter.id() {
+    Ok(match filters.id(index) {
         // Fletcher32 appends a 4-byte checksum.
         FILTER_FLETCHER32 => in_size.saturating_add(4),
         // A conforming LZF encoder may emit every byte as its own literal run
@@ -437,9 +555,11 @@ fn filter_max_forward_output(
         FILTER_DEFLATE => in_size.saturating_add(in_size / 16).saturating_add(64),
         #[cfg(feature = "zfp")]
         // ZFP encodes full blocks even when the chunk ends with a partial block.
-        FILTER_ZFP => {
-            crate::zfp::filter_encoded_len(filter.client_data(), ctx.chunk_dims, ctx.element_type)?
-        }
+        FILTER_ZFP => crate::zfp::filter_encoded_len(
+            filters.client_data(index),
+            ctx.chunk_dims,
+            ctx.element_type,
+        )?,
         _ => in_size,
     })
 }
@@ -449,7 +569,7 @@ const MAX_DEFLATE_EXPANSION: usize = 1032;
 
 fn inner_output_cap(
     expected: Option<usize>,
-    filters: &[impl FilterStep],
+    filters: &(impl FilterSteps + ?Sized),
     filter_mask: u32,
     filter_index: usize,
     ctx: ChunkContext<'_>,
@@ -457,11 +577,11 @@ fn inner_output_cap(
     let Some(mut size) = expected else {
         return Ok(None);
     };
-    for (j, f) in filters[..filter_index].iter().enumerate() {
+    for j in 0..filter_index {
         if j < 32 && (filter_mask >> j) & 1 == 1 {
             continue;
         }
-        size = filter_max_forward_output(f, size, ctx)?;
+        size = filter_max_forward_output(filters, j, size, ctx)?;
     }
     Ok(Some(size))
 }
@@ -469,7 +589,7 @@ fn inner_output_cap(
 #[cfg(all(test, feature = "deflate"))]
 fn compress_chunk(
     data: &[u8],
-    filters: &[impl FilterStep],
+    filters: &(impl FilterSteps + ?Sized),
     ctx: ChunkContext<'_>,
 ) -> Result<Vec<u8>, Error> {
     compress_chunk_with(&mut FilterScratch::new(), data, filters, ctx)
@@ -486,25 +606,25 @@ fn compress_chunk(
 pub fn compress_chunk_with(
     scratch: &mut FilterScratch,
     data: &[u8],
-    filters: &[impl FilterStep],
+    filters: &(impl FilterSteps + ?Sized),
     ctx: ChunkContext<'_>,
 ) -> Result<Vec<u8>, Error> {
     let mut owned: Option<Vec<u8>> = None;
-    for filter in filters {
+    for i in 0..filters.len() {
         let input: &[u8] = owned.as_deref().unwrap_or(data);
-        let next = match filter.id() {
+        let next = match filters.id(i) {
             FILTER_SHUFFLE => shuffle_compress(input, ctx.element_size.get() as usize)?,
             FILTER_DEFLATE => {
-                let level = filter.client_data().first().copied().unwrap_or(6);
+                let level = filters.client_data(i).first().copied().unwrap_or(6);
                 deflate_compress(scratch, input, level)?
             }
             FILTER_LZF => crate::compress_lzf(input),
             FILTER_FLETCHER32 => fletcher32_append(input)?,
-            FILTER_SCALEOFFSET => crate::compress_scale_offset(input, filter.client_data())?,
+            FILTER_SCALEOFFSET => crate::compress_scale_offset(input, filters.client_data(i))?,
             #[cfg(feature = "zfp")]
             FILTER_ZFP => crate::compress_zfp_filter(
                 input,
-                filter.client_data(),
+                filters.client_data(i),
                 ctx.chunk_dims,
                 ctx.element_type,
             )?,
