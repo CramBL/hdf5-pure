@@ -22,6 +22,18 @@ Re-running the workflow's job resumes after a failure.
 
 `just release::publish` runs the same steps from a checkout of the merged commit on a machine with `cargo login` and `gh auth login` done, if Actions is unavailable.
 
+## A crate's first publication
+
+Trusted Publishing cannot create a crate on crates.io, so the Release workflow fails on a crate name that has not been published yet. The first release with `hdf5-pure-core`, `hdf5-pure-format` and `hdf5-pure-filter` publishes by hand:
+
+1. Prepare and merge the release as usual.
+2. Check out the merged release commit.
+3. Run `cargo login` with a crates.io token, and `gh auth login`.
+4. Run `just release::publish`. It publishes the workspace packages in dependency order and skips any already published.
+5. On crates.io, add a Trusted Publishing entry for each new crate that lists this repository and `release.yml`.
+
+Later releases publish from the Release workflow.
+
 ## Release candidates
 
 `X.Y.Z-rc.N`, published as a pre-release. `[Unreleased]` stays open until the final release promotes it. While a candidate cycle is open, no other version can be prepared.
