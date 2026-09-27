@@ -14,6 +14,8 @@ use crate::CompoundMember;
 use crate::Datatype;
 use crate::EnumMember;
 
+pub use crate::address::BaseAddressExt;
+pub use crate::address::StoredAddress;
 pub use crate::display::DISPLAY_MAX_MEMBERS;
 pub use crate::display::Dims;
 pub use crate::display::EscapedName;

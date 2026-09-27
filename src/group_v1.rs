@@ -3,6 +3,7 @@
 #[cfg(not(feature = "std"))]
 use alloc::{string::String, vec::Vec};
 
+use crate::address::BaseAddressExt;
 use crate::address::{BaseAddress, StoredAddress};
 use crate::btree_v1::{collect_symbol_table_nodes, collect_symbol_table_nodes_from_source};
 use crate::convert::Narrow;

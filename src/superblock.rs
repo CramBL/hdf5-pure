@@ -6,6 +6,7 @@ use alloc::vec::Vec;
 use byteorder::{ByteOrder, LittleEndian};
 
 use crate::address::BaseAddress;
+use crate::address::BaseAddressExt;
 use crate::bytes;
 use crate::convert::Narrow;
 use crate::error::FormatError;

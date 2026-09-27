@@ -428,6 +428,7 @@ pub(crate) fn clear_swmr_flag_at(path: &Path) -> Result<(), Error> {
 mod tests {
     use super::*;
 
+    use crate::address::BaseAddressExt;
     use crate::width::LengthWidth;
     use crate::width::OffsetWidth;
 

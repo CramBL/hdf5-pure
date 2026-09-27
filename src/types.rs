@@ -540,6 +540,7 @@ fn is_ascii_char_vlen_base(base: &crate::datatype::Datatype) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::address::BaseAddressExt;
     use crate::{
         CharacterSet, DatatypeByteOrder, StringPadding,
         datatype::{Datatype, layout::FloatingPointLayout},

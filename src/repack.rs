@@ -115,6 +115,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use crate::access_mode::AccessMode;
+use crate::address::BaseAddressExt;
 use crate::address::StoredAddress;
 use crate::attribute::AttributeMessage;
 use crate::chunked_read::ChunkInfo;
