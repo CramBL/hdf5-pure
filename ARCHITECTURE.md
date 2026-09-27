@@ -9,10 +9,10 @@ The workspace separates HDF5 byte representations from operations on files.
 
 | Package | Responsibility |
 |---|---|
-| `hdf5-pure-core` | Shared public definitions, including `FormatError`, datatype types, maximum extents, and message identifiers |
-| `hdf5-pure-format` | Stored addresses, checked byte reads, checksums, and parsers and encoders for datatype, dataspace, layout, fill-value, and filter-pipeline messages |
+| `hdf5-pure-core` | Shared public definitions, including `FormatError`, datatype types, maximum extents, message identifiers, base and stored addresses, the superblock, and the File Space Info message |
+| `hdf5-pure-format` | Checked byte reads, checksums, message flags, object headers and the version 2 object header writer, the Link Info message parser, and parsers and encoders for the superblock, for datatype, dataspace, layout, fill-value, filter-pipeline, link, attribute info, and File Space Info messages, and for shared message references |
 | `hdf5-pure-filter` | Filter algorithms and execution primitives |
-| `hdf5-pure` | Base-address conversion, file access, object navigation, chunk lookup, allocation, editing, caching, the public file API, and MATLAB v7.3 support |
+| `hdf5-pure` | File access, object navigation, chunk lookup, allocation, editing, caching, the public file API, and MATLAB v7.3 support |
 
 The format crate parses bytes supplied by its caller and writes metadata
 back into bytes. The file crate obtains those bytes from storage and uses the

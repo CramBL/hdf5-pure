@@ -281,7 +281,7 @@ use crate::error::{Error, FormatError, OBJECT_HEADER_MESSAGE_MAX};
 use crate::extensible_array::ExtensibleArrayHeader;
 use crate::file_create_properties::FileCreateProperties;
 use crate::file_lock::{self, FileLocking};
-use crate::file_space_info::{FileSpaceInfo, FileSpaceStrategy, NUM_FILE_FSM_MANAGERS};
+use crate::file_space_info::{self, FileSpaceInfo, FileSpaceStrategy, NUM_FILE_FSM_MANAGERS};
 use crate::file_writer::{
     DenseAttrCreationOrder, LENGTH_SIZE, OFFSET_SIZE, build_chunked_dataset_oh, build_dataset_oh,
     make_link,
@@ -3260,7 +3260,7 @@ impl WriteEngine {
             .messages
             .iter()
             .find(|m| m.msg_type == MessageType::FILE_SPACE_INFO)?;
-        FileSpaceInfo::parse(&msg.data, os, ls).ok()
+        hdf5_pure_format::parse_file_space_info(&msg.data, os, ls).ok()
     }
 
     /// Stage a new dataset, added on the next [`commit`](Self::commit).
@@ -7141,7 +7141,7 @@ impl WriteEngine {
         // extension's length is independent of the addresses it will carry: size
         // it with a placeholder to place the FSM blocks that follow it.
         let placeholder =
-            FileSpaceInfo::persistent_single_manager(strategy, threshold, page_size, 0, 0);
+            file_space_info::persistent_single_manager(strategy, threshold, page_size, 0, 0);
         let ext_len =
             build_v2_object_header(&self.rewrite_extension_region(old_ext_addr, &placeholder)?)?
                 .len() as u64;
@@ -7180,7 +7180,7 @@ impl WriteEngine {
         // Build the real extension and the FSM blocks. With no free space to
         // record we still refresh the extension (persist on, managers undefined).
         let (ext_oh, fsm_blocks) = if sections.is_empty() {
-            let info = FileSpaceInfo::persistent_empty(strategy, threshold, page_size);
+            let info = file_space_info::persistent_empty(strategy, threshold, page_size);
             let ext_oh =
                 build_v2_object_header(&self.rewrite_extension_region(old_ext_addr, &info)?)?;
             (ext_oh, None)
@@ -7198,7 +7198,7 @@ impl WriteEngine {
             // value `H5Fget_freespace` accounts for correctly (verified in the
             // crosscheck).
             let eoa_pre_fsm = if reused { final_eof } else { fshd_addr.get() };
-            let info = FileSpaceInfo::persistent_single_manager(
+            let info = file_space_info::persistent_single_manager(
                 strategy,
                 threshold,
                 page_size,
@@ -7532,7 +7532,7 @@ impl WriteEngine {
         // The 12-slot persist message is fixed-size, so a placeholder sizes the
         // rewritten extension before its manager addresses are known — and before
         // its address is, which is what lets the tail be sized before it is placed.
-        let placeholder = FileSpaceInfo::persistent_managers(
+        let placeholder = file_space_info::persistent_managers(
             strategy,
             threshold,
             page_size,
@@ -7609,12 +7609,12 @@ impl WriteEngine {
 
         let ext_oh = if plan.is_empty() {
             // No free space to track: an empty persist message, page-aligned.
-            let info = FileSpaceInfo::persistent_empty(strategy, threshold, page_size);
+            let info = file_space_info::persistent_empty(strategy, threshold, page_size);
             build_v2_object_header(&self.rewrite_extension_region(old_ext_addr, &info)?)?
         } else {
             // Paged convention (matching the from-scratch writer): the managers are
             // ordinary metadata below a page-aligned end-of-allocation.
-            let info = FileSpaceInfo::persistent_managers(
+            let info = file_space_info::persistent_managers(
                 strategy,
                 threshold,
                 page_size,
@@ -13816,7 +13816,7 @@ pub(crate) fn rewrite_extension_region_bytes(
     region: &OhRegion,
     info: &FileSpaceInfo,
 ) -> Result<OhRegion, Error> {
-    let new_body = info.serialize();
+    let new_body = hdf5_pure_format::serialize_file_space_info(info);
     // The message body is the fixed-size File Space Info record (≤ 125 bytes),
     // so it always fits the u16 size field.
     let new_len: u16 = new_body

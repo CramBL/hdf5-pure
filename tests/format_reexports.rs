@@ -20,6 +20,9 @@ fn core_types_keep_their_original_paths() {
     let _: Option<hdf5_pure::CharacterSet> = None::<hdf5_pure_core::CharacterSet>;
     let _: Option<hdf5_pure::StringPadding> = None::<hdf5_pure_core::StringPadding>;
     let _: Option<MaxExtent> = None::<hdf5_pure_core::MaxExtent>;
+    let _: Option<hdf5_pure::FileSpaceInfo> = None::<hdf5_pure_core::FileSpaceInfo>;
+    let _: Option<hdf5_pure::FileSpaceInfo> = None::<hdf5_pure_format::FileSpaceInfo>;
+    let _: Option<hdf5_pure::FileSpaceStrategy> = None::<hdf5_pure_core::FileSpaceStrategy>;
     assert_eq!(
         hdf5_pure::OBJECT_HEADER_MESSAGE_MAX,
         hdf5_pure_core::OBJECT_HEADER_MESSAGE_MAX

@@ -201,3 +201,23 @@ fn a_superblock_round_trips_through_the_public_api() {
     assert_eq!(parsed.superblock_extension_address, Some(u64::MAX));
     assert_eq!(hdf5_pure_format::serialize_superblock(&parsed), Ok(bytes));
 }
+
+#[test]
+fn a_file_space_info_message_round_trips_through_the_public_api() {
+    let info = hdf5_pure_core::__private::FileSpaceInfoFields {
+        strategy: hdf5_pure_format::FileSpaceStrategy::Page,
+        persist: false,
+        threshold: 1,
+        page_size: 4096,
+        page_end_meta_threshold: 0,
+        eoa_pre_fsm: u64::MAX,
+        manager_addrs: Vec::new(),
+    }
+    .build();
+    let bytes = hdf5_pure_format::serialize_file_space_info(&info);
+
+    assert_eq!(
+        hdf5_pure_format::parse_file_space_info(&bytes, 8, 8),
+        Ok(info)
+    );
+}
