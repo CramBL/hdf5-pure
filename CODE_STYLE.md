@@ -108,6 +108,7 @@ A file is untrusted input. The fuzz targets and the property tests feed the read
 - A failure mode is a variant of `Error` or `FormatError`, with the values a caller needs to act on it as fields. A new failure mode is a new variant, not a string.
 - An invariant the type system can express is a type: a value that cannot be zero is a `NonZeroU64`.
 - An invariant it cannot express is a `debug_assert!`, or an `assert!` where a violation would write a wrong file. The code panics only on a bug in the code.
+- A value read from a file never reaches a panic. A file that breaks an invariant is an error, and a violation that only a bug in the crate can produce is `FormatError::Internal` in a function that returns a `Result`.
 - A `Result` that is deliberately dropped is dropped with `.ok()`, which stops compiling if the return type changes. `let _ = f();` and `unwrap_or(())` are not used for that.
 - A string in an error message is formatted with `{:?}`, so that a path or a name is quoted and an embedded newline or tab is escaped.
 

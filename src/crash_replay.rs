@@ -585,7 +585,7 @@ fn recorded_eof_covers_the_file(path: &Path) -> Result<(), String> {
     let bytes = std::fs::read(path).map_err(|e| std::format!("reading the file back: {e}"))?;
     // A prefix whose superblock does not parse is a *loud* state, not this
     // function's business; the read below will classify it.
-    let Ok(sb) = crate::superblock::Superblock::parse(&bytes, 0) else {
+    let Ok(sb) = hdf5_pure_format::parse_superblock(&bytes, 0) else {
         return Ok(());
     };
     if sb.eof_address > bytes.len() as u64 {

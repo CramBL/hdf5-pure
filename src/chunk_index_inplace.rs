@@ -1668,7 +1668,7 @@ mod tests {
     impl WindowProbeStore {
         fn open(data: Vec<u8>) -> Self {
             let sb_sig_off = signature::find_signature(&data).unwrap();
-            let superblock = Superblock::parse(&data, sb_sig_off).unwrap();
+            let superblock = hdf5_pure_format::parse_superblock(&data, sb_sig_off).unwrap();
             Self {
                 data,
                 superblock,
@@ -1760,7 +1760,7 @@ mod tests {
             self.superblock_patches
                 .set(self.superblock_patches.get() + 1);
             self.superblock.eof_address = self.data.len() as u64;
-            let bytes = self.superblock.serialize();
+            let bytes = hdf5_pure_format::serialize_superblock(&self.superblock).unwrap();
             let off = self.sb_sig_off;
             self.data[off..off + bytes.len()].copy_from_slice(&bytes);
             Ok(())
