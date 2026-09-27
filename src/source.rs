@@ -10,6 +10,8 @@ use alloc::{vec, vec::Vec};
 #[cfg(feature = "std")]
 use std::collections::BTreeMap;
 
+use hdf5_pure_format::MetadataSource;
+
 use crate::address::BaseAddressExt;
 use crate::address::{BaseAddress, StoredAddress};
 use crate::convert::Narrow;
@@ -517,6 +519,26 @@ impl<S: Source + ?Sized> Source for BaseOffsetSource<'_, S> {
 
     fn reset_metadata_cache_stats(&self) {
         self.inner.reset_metadata_cache_stats();
+    }
+}
+
+/// Adapts a [`Source`] to the [`MetadataSource`] trait that the format crate's parsers take.
+///
+/// Each method calls the method of the same name on the wrapped source, so the parsers read
+/// metadata through the source's metadata cache, where it has one.
+pub(crate) struct SourceMetadata<'a, S: Source + ?Sized>(pub(crate) &'a S);
+
+impl<S: Source + ?Sized> MetadataSource for SourceMetadata<'_, S> {
+    fn len(&self) -> u64 {
+        self.0.len()
+    }
+
+    fn read_at(&self, offset: u64, buf: &mut [u8]) -> Result<(), FormatError> {
+        self.0.read_at(offset, buf)
+    }
+
+    fn read_metadata_at(&self, offset: u64, len: usize) -> Result<Vec<u8>, FormatError> {
+        self.0.read_metadata_at(offset, len)
     }
 }
 

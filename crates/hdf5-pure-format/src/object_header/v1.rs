@@ -3,7 +3,6 @@
     reason = "TODO: make unreachable in the type system"
 )]
 
-#[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 
 use byteorder::{ByteOrder, LittleEndian};
@@ -17,7 +16,7 @@ use crate::convert::Narrow;
 use crate::error::FormatError;
 use crate::message_flags::MessageFlags;
 use crate::message_type::MessageType;
-use crate::source::Source;
+use crate::metadata_source::MetadataSource;
 
 /// Defines the fixed prefix width of a version 1 object header message.
 ///
@@ -195,7 +194,7 @@ impl ObjectHeader {
         Ok(messages)
     }
 
-    pub(super) fn parse_v1_from_source<S: Source + ?Sized>(
+    pub(super) fn parse_v1_from_source<S: MetadataSource + ?Sized>(
         source: &S,
         context: ParseContext,
         address: u64,
@@ -246,7 +245,7 @@ impl ObjectHeader {
     /// Parse the messages of one v1 header chunk read from the source, following
     /// each continuation depth-first (as the buffered v1 parser does) so the
     /// resulting message order is identical.
-    fn parse_v1_chunk_from_source<S: Source + ?Sized>(
+    fn parse_v1_chunk_from_source<S: MetadataSource + ?Sized>(
         source: &S,
         context: ParseContext,
         region_addr: u64,

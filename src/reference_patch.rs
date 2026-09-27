@@ -91,6 +91,7 @@ use crate::message_flags::MessageFlags;
 use crate::message_type::MessageType;
 use crate::object_header::ObjectHeader;
 use crate::source::Source;
+use crate::source::SourceMetadata;
 use crate::superblock::Superblock;
 
 /// The byte edits that repoint a commit's relocated object headers.
@@ -324,9 +325,14 @@ pub(crate) fn plan<S: Source + ?Sized>(
         }
         // A group whose header or links cannot be read hides its subtree from
         // the walk; that leaves references below it unpatched, never mispatched.
-        let Ok(header) =
-            ObjectHeader::parse_from_source(src, AccessMode::ReadWrite, addr, os, ls, base)
-        else {
+        let Ok(header) = ObjectHeader::parse_from_source(
+            &SourceMetadata(src),
+            AccessMode::ReadWrite,
+            addr,
+            os,
+            ls,
+            base,
+        ) else {
             complete = false;
             continue;
         };

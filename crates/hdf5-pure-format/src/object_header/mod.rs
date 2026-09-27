@@ -1,6 +1,5 @@
 //! HDF5 Object Header parsing (v1 and v2).
 
-#[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 
 use crate::access_mode::AccessMode;
@@ -10,7 +9,7 @@ use crate::bytes::ensure_len;
 use crate::error::FormatError;
 use crate::message_flags::MessageFlags;
 use crate::message_type::MessageType;
-use crate::source::Source;
+use crate::metadata_source::MetadataSource;
 
 mod v1;
 mod v2;
@@ -36,7 +35,7 @@ const OHDR_SIGNATURE: [u8; 4] = *b"OHDR";
 /// Filtering affects retention only. A filter that cannot determine whether a
 /// message is relevant retains it for the message reader. Continuation messages
 /// are always followed.
-pub(crate) enum MessageFilter<'f> {
+pub enum MessageFilter<'f> {
     /// Keeps every message.
     All,
     /// Keep a message only if this says so, given its type and its body.
@@ -145,6 +144,10 @@ impl ObjectHeader {
     /// `offset` itself is already absolute: every caller resolves an address to a
     /// file position before parsing there. Every message record is tested against
     /// `access_mode`, as in [`parse`](Self::parse).
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors [`parse`](Self::parse) returns.
     pub fn parse_with_base(
         data: &[u8],
         access_mode: AccessMode,
@@ -170,7 +173,11 @@ impl ObjectHeader {
     /// traversal as [`parse_with_base`](Self::parse_with_base). The result differs
     /// only in which messages it carries. See [`MessageFilter`] for targeted
     /// parsing.
-    pub(crate) fn parse_filtered(
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors [`parse`](Self::parse) returns.
+    pub fn parse_filtered(
         data: &[u8],
         access_mode: AccessMode,
         offset: usize,
@@ -193,14 +200,19 @@ impl ObjectHeader {
         }
     }
 
-    /// Parses an object header from a [`Source`] using bounded reads for each
+    /// Parses an object header from a [`MetadataSource`] using bounded reads for each
     /// header and continuation chunk.
     ///
     /// `base_address` is added to v1 continuation offsets as in
     /// [`Self::parse_with_base`]. The parser holds at most one chunk at a time, so
     /// it supports files larger than the address space on a 32-bit host. Every
     /// message record is tested against `access_mode` as in [`parse`](Self::parse).
-    pub fn parse_from_source<S: Source + ?Sized>(
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors [`parse`](Self::parse) returns, and the error `source` returns if a read
+    /// fails.
+    pub fn parse_from_source<S: MetadataSource + ?Sized>(
         source: &S,
         access_mode: AccessMode,
         address: u64,
@@ -219,8 +231,15 @@ impl ObjectHeader {
         )
     }
 
-    /// Streaming counterpart of [`parse_filtered`](Self::parse_filtered).
-    pub(crate) fn parse_from_source_filtered<S: Source + ?Sized>(
+    /// Parses an object header from a [`MetadataSource`], keeping only the messages `filter` names.
+    ///
+    /// The streaming counterpart of [`parse_filtered`](Self::parse_filtered).
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors [`parse`](Self::parse) returns, and the error `source` returns if a read
+    /// fails.
+    pub fn parse_from_source_filtered<S: MetadataSource + ?Sized>(
         source: &S,
         access_mode: AccessMode,
         address: u64,
@@ -248,7 +267,6 @@ impl ObjectHeader {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::source::BytesSource;
     use rstest::rstest;
     use test_util::image::Image;
     use test_util::object_header::v1 as v1_bytes;
@@ -578,7 +596,6 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "std")]
     #[test]
     fn streaming_v2_simple_matches_buffered() {
         let data = v2_bytes::Header::new()
@@ -594,7 +611,6 @@ mod tests {
         assert_all_parse_paths_match(&data);
     }
 
-    #[cfg(feature = "std")]
     #[test]
     fn streaming_v2_with_continuation_matches_buffered() {
         let continuation = v2_continuation(&[0xDE, 0xAD]);
@@ -609,7 +625,6 @@ mod tests {
         assert_all_parse_paths_match(image.as_bytes());
     }
 
-    #[cfg(feature = "std")]
     #[test]
     fn streaming_v1_with_continuation_matches_buffered() {
         let continuation = v1_datatype_chunk(&[0xBE, 0xEF, 0, 0, 0, 0, 0, 0]);
@@ -627,7 +642,6 @@ mod tests {
         assert_all_parse_paths_match(image.as_bytes());
     }
 
-    #[cfg(feature = "std")]
     #[test]
     fn version_1_message_overrunning_chunk0_is_rejected() {
         // Regression for #140: a v1 chunk 0 message whose data overruns the declared
@@ -646,7 +660,6 @@ mod tests {
         assert_unexpected_eof_all_parse_paths(image.as_bytes());
     }
 
-    #[cfg(feature = "std")]
     #[test]
     fn version_1_continuation_with_partial_message_prefix_is_rejected() {
         let mut continuation = v1_datatype_chunk(&[0xAB; 8]);
@@ -697,7 +710,7 @@ mod tests {
 
         let mut keep_datatype = |msg_type: MessageType, _: &[u8]| msg_type == MessageType::DATATYPE;
         let streamed = ObjectHeader::parse_from_source_filtered(
-            &BytesSource::new(&data),
+            data.as_slice(),
             AccessMode::ReadOnly,
             0,
             OFFSET_SIZE,
@@ -747,7 +760,7 @@ mod tests {
                 false
             };
             ObjectHeader::parse_from_source_filtered(
-                &BytesSource::new(&data),
+                data.as_slice(),
                 AccessMode::ReadOnly,
                 0,
                 OFFSET_SIZE,
@@ -776,7 +789,6 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "std")]
     #[test]
     fn version_1_chunk0_message_with_unaligned_size_is_rejected() {
         let data = v1_bytes::Header::new()
@@ -786,7 +798,6 @@ mod tests {
         assert_invalid_v1_message_size_all_parse_paths(&data, 7);
     }
 
-    #[cfg(feature = "std")]
     #[test]
     fn version_1_continuation_message_with_unaligned_size_is_rejected() {
         let continuation = v1_datatype_chunk(&[0xAB; 7]);
@@ -819,7 +830,6 @@ mod tests {
         assert_eq!(message.data.as_slice(), data);
     }
 
-    #[cfg(feature = "std")]
     fn assert_same_header(actual: &ObjectHeader, expected: &ObjectHeader) {
         assert_eq!(actual.version, expected.version);
         assert_eq!(actual.reference_count, expected.reference_count);
@@ -848,10 +858,7 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "std")]
     fn assert_all_parse_paths_match(data: &[u8]) {
-        use crate::source::ReadSeekSource;
-
         let buffered = ObjectHeader::parse_with_base(
             data,
             AccessMode::ReadOnly,
@@ -862,24 +869,11 @@ mod tests {
         )
         .unwrap();
         let memory = parse_from_source_for_mode(data, AccessMode::ReadOnly).unwrap();
-        let seek = ObjectHeader::parse_from_source(
-            &ReadSeekSource::new(std::io::Cursor::new(data.to_vec())).unwrap(),
-            AccessMode::ReadOnly,
-            0,
-            OFFSET_SIZE,
-            LENGTH_SIZE,
-            BaseAddress::ZERO,
-        )
-        .unwrap();
 
         assert_same_header(&memory, &buffered);
-        assert_same_header(&seek, &buffered);
     }
 
-    #[cfg(feature = "std")]
     fn assert_unexpected_eof_all_parse_paths(data: &[u8]) {
-        use crate::source::ReadSeekSource;
-
         let buffered = ObjectHeader::parse_with_base(
             data,
             AccessMode::ReadOnly,
@@ -889,24 +883,12 @@ mod tests {
             BaseAddress::ZERO,
         );
         let memory = parse_from_source_for_mode(data, AccessMode::ReadOnly);
-        let seek = ObjectHeader::parse_from_source(
-            &ReadSeekSource::new(std::io::Cursor::new(data.to_vec())).unwrap(),
-            AccessMode::ReadOnly,
-            0,
-            OFFSET_SIZE,
-            LENGTH_SIZE,
-            BaseAddress::ZERO,
-        );
 
         assert!(matches!(buffered, Err(FormatError::UnexpectedEof { .. })));
         assert!(matches!(memory, Err(FormatError::UnexpectedEof { .. })));
-        assert!(matches!(seek, Err(FormatError::UnexpectedEof { .. })));
     }
 
-    #[cfg(feature = "std")]
     fn assert_invalid_v1_message_size_all_parse_paths(data: &[u8], size: u16) {
-        use crate::source::ReadSeekSource;
-
         let buffered = ObjectHeader::parse_with_base(
             data,
             AccessMode::ReadOnly,
@@ -916,20 +898,8 @@ mod tests {
             BaseAddress::ZERO,
         );
         let memory = parse_from_source_for_mode(data, AccessMode::ReadOnly);
-        let seek = ObjectHeader::parse_from_source(
-            &ReadSeekSource::new(std::io::Cursor::new(data.to_vec())).unwrap(),
-            AccessMode::ReadOnly,
-            0,
-            OFFSET_SIZE,
-            LENGTH_SIZE,
-            BaseAddress::ZERO,
-        );
 
-        for (parser, result) in [
-            ("buffered", buffered),
-            ("memory source", memory),
-            ("seek source", seek),
-        ] {
+        for (parser, result) in [("buffered", buffered), ("memory source", memory)] {
             assert_eq!(
                 result.unwrap_err(),
                 FormatError::InvalidObjectHeaderMessageSize(size),
@@ -951,7 +921,7 @@ mod tests {
         access_mode: AccessMode,
     ) -> Result<ObjectHeader, FormatError> {
         ObjectHeader::parse_from_source(
-            &BytesSource::new(data),
+            data,
             access_mode,
             0,
             OFFSET_SIZE,

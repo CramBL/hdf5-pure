@@ -31,6 +31,7 @@ fn core_types_keep_their_original_paths() {
 fn std_message_type_reexport_and_base_address_get_are_public() {
     let _: Option<hdf5_pure::MessageType> = None::<hdf5_pure_core::MessageType>;
     let _: Option<hdf5_pure::BaseAddress> = None::<hdf5_pure_core::BaseAddress>;
+    let _: Option<hdf5_pure::BaseAddress> = None::<hdf5_pure_format::BaseAddress>;
     fn get(base: hdf5_pure::BaseAddress) -> u64 {
         base.get()
     }

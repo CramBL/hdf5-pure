@@ -14,6 +14,7 @@ extern crate alloc;
 #[cfg(feature = "std")]
 extern crate std;
 
+mod access_mode;
 mod address;
 mod bytes;
 mod checksum;
@@ -24,10 +25,16 @@ mod datatype;
 mod error;
 mod fill_value;
 mod filter_pipeline;
+mod message_flags;
 mod message_type;
+mod metadata_source;
+mod object_header;
+mod object_header_writer;
 mod signature;
 mod width;
 
+pub use access_mode::AccessMode;
+pub use address::BaseAddress;
 pub use address::StoredAddress;
 pub use bytes::ensure_len;
 pub use bytes::read_length;
@@ -94,7 +101,13 @@ pub use hdf5_pure_core::__private::EscapedName;
 pub use hdf5_pure_core::__private::QuotedBytes;
 #[doc(hidden)]
 pub use hdf5_pure_core::__private::write_elided;
+pub use message_flags::MessageFlags;
 pub use message_type::MessageType;
+pub use metadata_source::MetadataSource;
+pub use object_header::HeaderMessage;
+pub use object_header::MessageFilter;
+pub use object_header::ObjectHeader;
+pub use object_header_writer::ObjectHeaderWriter;
 pub use signature::HDF5_SIGNATURE;
 pub use width::LengthWidth;
 pub use width::OffsetWidth;

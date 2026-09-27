@@ -17,6 +17,9 @@
 //!
 //! [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsec_fmt4_boot_super
 
+use alloc::vec::Vec;
+
+use crate::convert::Narrow;
 use crate::error::FormatError;
 
 /// The width of a file address in bytes, the superblock's "Size of Offsets" field.
@@ -174,6 +177,32 @@ impl UintWidth {
             Self::Eight => 3,
         }
     }
+
+    /// Appends `value` to `buf` as a little-endian integer of this width.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `value` does not fit this width.
+    pub(crate) fn write(self, buf: &mut Vec<u8>, value: usize) {
+        let value = value.to_u64();
+        assert!(
+            value
+                .checked_shr(8 * u32::from(self.get()))
+                .is_none_or(|high| high == 0),
+            "{value} does not fit a {}-byte field",
+            self.get()
+        );
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "the assertion above admits only a value that fits the width of each arm"
+        )]
+        match self {
+            Self::One => buf.push(value as u8),
+            Self::Two => buf.extend_from_slice(&(value as u16).to_le_bytes()),
+            Self::Four => buf.extend_from_slice(&(value as u32).to_le_bytes()),
+            Self::Eight => buf.extend_from_slice(&value.to_le_bytes()),
+        }
+    }
 }
 
 /// Bits 0-1 of a flag byte, the two bits that select a [`UintWidth`].
@@ -264,5 +293,27 @@ mod tests {
                 Err(FormatError::InvalidLengthSize(size))
             );
         }
+    }
+
+    #[rstest]
+    #[case(UintWidth::One, 0xFF, vec![0xFF])]
+    #[case(UintWidth::Two, 0x0102, vec![0x02, 0x01])]
+    #[case(UintWidth::Four, 0x0102, vec![0x02, 0x01, 0, 0])]
+    #[case(UintWidth::Eight, 0x0102, vec![0x02, 0x01, 0, 0, 0, 0, 0, 0])]
+    fn a_value_is_written_little_endian_at_its_width(
+        #[case] width: UintWidth,
+        #[case] value: usize,
+        #[case] expected: Vec<u8>,
+    ) {
+        let mut buf = Vec::new();
+        width.write(&mut buf, value);
+
+        assert_eq!(buf, expected);
+    }
+
+    #[test]
+    #[should_panic(expected = "256 does not fit a 1-byte field")]
+    fn a_value_wider_than_its_field_panics() {
+        UintWidth::One.write(&mut Vec::new(), 256);
     }
 }
