@@ -405,19 +405,18 @@ pub(crate) fn clear_swmr_flag_at(path: &Path) -> Result<(), Error> {
     let mut data = Vec::new();
     w.read_to_end(&mut data).map_err(Error::Io)?;
     let sig = signature::find_signature(&data)?;
-    let mut sb = Superblock::parse(&data, sig)?;
+    let mut sb = hdf5_pure_format::parse_superblock(&data, sig)?;
     if sb.version < 2 {
-        // `Superblock::serialize` emits the v2/v3 layout, so rewriting a
-        // v0/v1 superblock here would corrupt it. This crate never SWMR-flags
-        // a v0/v1 file, so there is nothing to clear; treat it as already
-        // clean rather than risk a destructive rewrite.
+        // `serialize_superblock` writes only the v2/v3 layout and returns an error for a v0/v1
+        // superblock. `check_status_flags`, like `H5Fopen`, reads the status flags from version 3
+        // on, so a flag left in a v0/v1 superblock does not block an open.
         return Ok(());
     }
     if sb.consistency_flags == 0 {
         return Ok(());
     }
     sb.consistency_flags = 0;
-    let bytes = sb.serialize();
+    let bytes = hdf5_pure_format::serialize_superblock(&sb)?;
     w.seek(SeekFrom::Start(sig as u64)).map_err(Error::Io)?;
     w.write_all(&bytes).map_err(Error::Io)?;
     w.sync_data().map_err(Error::Io)?;
@@ -426,8 +425,9 @@ pub(crate) fn clear_swmr_flag_at(path: &Path) -> Result<(), Error> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use hdf5_pure_core::__private::SuperblockFields;
 
+    use super::*;
     use crate::address::BaseAddressExt;
     use crate::width::LengthWidth;
     use crate::width::OffsetWidth;
@@ -463,12 +463,10 @@ mod tests {
     /// A minimal superblock carrying `version` and `flags`; every other field is
     /// irrelevant to the status-flag rules.
     fn flagged(version: u8, flags: u32) -> Superblock {
-        Superblock {
+        SuperblockFields {
             version,
             offset_size: OffsetWidth::Eight.get(),
-            offset_width: OffsetWidth::Eight,
             length_size: LengthWidth::Eight.get(),
-            length_width: LengthWidth::Eight,
             base_address: crate::address::BaseAddress::ZERO,
             eof_address: 0,
             root_group_address: 0,
@@ -481,6 +479,7 @@ mod tests {
             superblock_extension_address: None,
             checksum: None,
         }
+        .build()
     }
 
     /// A snapshot read under the default policy, which is what every rule
@@ -675,11 +674,11 @@ mod tests {
     fn write_file_with(path: &Path, version: u8, flags: u32) {
         let mut bytes = crate::writer::FileBuilder::new().finish().unwrap();
         let off = crate::signature::find_signature(&bytes).unwrap();
-        let mut sb = Superblock::parse(&bytes, off).unwrap();
+        let mut sb = hdf5_pure_format::parse_superblock(&bytes, off).unwrap();
         assert_eq!(sb.version, 3, "this writer emits a v3 superblock");
         sb.version = version;
         sb.consistency_flags = flags;
-        let patched = sb.serialize();
+        let patched = hdf5_pure_format::serialize_superblock(&sb).unwrap();
         bytes[off..off + patched.len()].copy_from_slice(&patched);
         std::fs::write(path, &bytes).unwrap();
     }

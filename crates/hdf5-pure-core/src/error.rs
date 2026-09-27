@@ -533,6 +533,10 @@ pub enum FormatError {
         /// Storage width of one element, in bytes.
         size: usize,
     },
+    /// An internal error, a condition that only a bug in `hdf5-pure` can produce.
+    ///
+    /// The string describes the condition.
+    Internal(String),
 }
 
 pub const OBJECT_HEADER_MESSAGE_MAX: usize = u16::MAX as usize;
@@ -1070,6 +1074,7 @@ impl fmt::Display for FormatError {
                      decode into"
                 )
             }
+            Self::Internal(detail) => write!(f, "internal error in hdf5-pure: {detail}"),
         }
     }
 }

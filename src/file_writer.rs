@@ -16,6 +16,8 @@ use alloc::collections::BTreeMap as HashMap;
 #[cfg(feature = "std")]
 use std::collections::HashMap;
 
+use hdf5_pure_core::__private::SuperblockFields;
+
 use crate::address::BaseAddressExt;
 use crate::address::{BaseAddress, StoredAddress};
 use crate::attribute::AttributeMessage;
@@ -44,7 +46,6 @@ use crate::message_type::MessageType;
 use crate::object_header_writer::ObjectHeaderWriter;
 use crate::object_path::{LinkNameBuf, ObjectPathBuf};
 use crate::shared_message::DatatypeLocation;
-use crate::superblock::Superblock;
 use crate::type_builders::{
     AttrSpec, CommittedDatatype, DatasetBuilder, FinishedGroup, GroupBuilder, VlStringStaging,
     build_global_heap_collections, patch_vl_refs, patch_vl_refs_masked, write_reference_address,
@@ -3351,12 +3352,10 @@ impl FileWriter {
             // (k) Emit, address-ascending, zero-filling every alignment gap.
             sink.reserve(eof_addr2.to_usize()?);
             Self::put_userblock(sink, ub, &self.userblock_content)?;
-            let sb = Superblock {
+            let sb = SuperblockFields {
                 version: superblock_version(libver),
                 offset_size: OFFSET_SIZE,
-                offset_width: OFFSET_WIDTH,
                 length_size: LENGTH_SIZE,
-                length_width: LENGTH_WIDTH,
                 base_address: base,
                 eof_address: eof_addr2,
                 root_group_address: root_group_addr.get(),
@@ -3368,8 +3367,9 @@ impl FileWriter {
                 consistency_flags: 0,
                 superblock_extension_address: Some(ext_addr),
                 checksum: None,
-            };
-            sink.put(&sb.serialize())?;
+            }
+            .build();
+            sink.put(&hdf5_pure_format::serialize_superblock(&sb)?)?;
 
             // Early-placed VL collections, at the addresses patched into the
             // chunked datasets' references before their chunks were encoded.
@@ -3628,12 +3628,10 @@ impl FileWriter {
         // Userblock: the caller's header bytes, then zeros.
         Self::put_userblock(sink, ub, &self.userblock_content)?;
 
-        let sb = Superblock {
+        let sb = SuperblockFields {
             version: superblock_version(libver),
             offset_size: OFFSET_SIZE,
-            offset_width: OFFSET_WIDTH,
             length_size: LENGTH_SIZE,
-            length_width: LENGTH_WIDTH,
             base_address: BaseAddress::new(ub as u64),
             eof_address: eof_addr2,
             root_group_address: root_group_addr.get(),
@@ -3645,8 +3643,9 @@ impl FileWriter {
             consistency_flags: 0,
             superblock_extension_address: Some(ext_addr.unwrap_or(u64::MAX)),
             checksum: None,
-        };
-        sink.put(&sb.serialize())?;
+        }
+        .build();
+        sink.put(&hdf5_pure_format::serialize_superblock(&sb)?)?;
 
         // Early-placed VL collections, at the addresses patched into the chunked
         // datasets' references before their chunks were encoded. This must walk
@@ -3806,6 +3805,7 @@ mod tests {
     use crate::object_header::ObjectHeader;
     use crate::object_path::ObjectPath;
     use crate::signature;
+    use crate::superblock::Superblock;
     use crate::type_builders::{build_attr_message, make_i32_type};
 
     /// A committed datatype object is a header holding the type and nothing else,
@@ -3891,7 +3891,7 @@ mod tests {
     /// `None` when the header carries no Object Reference Count message.
     fn committed_reference_count(bytes: &[u8], path: &str) -> Option<u32> {
         let sig = signature::find_signature(bytes).unwrap();
-        let sb = Superblock::parse(bytes, sig).unwrap();
+        let sb = hdf5_pure_format::parse_superblock(bytes, sig).unwrap();
         let addr =
             group_v2::resolve_path_any(bytes, AccessMode::ReadOnly, &sb, &ObjectPath::parse(path))
                 .unwrap();
@@ -3926,7 +3926,7 @@ mod tests {
         let bytes = w.finish().unwrap();
 
         let sig = signature::find_signature(&bytes).unwrap();
-        let sb = Superblock::parse(&bytes, sig).unwrap();
+        let sb = hdf5_pure_format::parse_superblock(&bytes, sig).unwrap();
         let type_addr = group_v2::resolve_path_any(
             &bytes,
             AccessMode::ReadOnly,
@@ -3971,7 +3971,7 @@ mod tests {
 
     fn parse_file(bytes: &[u8]) -> (Superblock, ObjectHeader) {
         let sig = signature::find_signature(bytes).unwrap();
-        let sb = Superblock::parse(bytes, sig).unwrap();
+        let sb = hdf5_pure_format::parse_superblock(bytes, sig).unwrap();
         let oh = ObjectHeader::parse(
             bytes,
             AccessMode::ReadOnly,
@@ -3985,7 +3985,7 @@ mod tests {
 
     fn read_dataset_f64(bytes: &[u8], path: &str) -> Vec<f64> {
         let sig = signature::find_signature(bytes).unwrap();
-        let sb = Superblock::parse(bytes, sig).unwrap();
+        let sb = hdf5_pure_format::parse_superblock(bytes, sig).unwrap();
         let addr =
             group_v2::resolve_path_any(bytes, AccessMode::ReadOnly, &sb, &ObjectPath::parse(path))
                 .unwrap();
@@ -4049,7 +4049,7 @@ mod tests {
         let bytes = fw.finish().unwrap();
         assert_eq!(read_dataset_f64(&bytes, "data"), vec![1.0, 2.0]);
         let sig = signature::find_signature(&bytes).unwrap();
-        let sb = Superblock::parse(&bytes, sig).unwrap();
+        let sb = hdf5_pure_format::parse_superblock(&bytes, sig).unwrap();
         let addr = group_v2::resolve_path_any(
             &bytes,
             AccessMode::ReadOnly,
@@ -4105,7 +4105,7 @@ mod tests {
         fw.add_group(gb.finish());
         let bytes = fw.finish().unwrap();
         let sig = signature::find_signature(&bytes).unwrap();
-        let sb = Superblock::parse(&bytes, sig).unwrap();
+        let sb = hdf5_pure_format::parse_superblock(&bytes, sig).unwrap();
         let addr = group_v2::resolve_path_any(
             &bytes,
             AccessMode::ReadOnly,
@@ -4140,7 +4140,7 @@ mod tests {
         fw.add_group(gb.finish());
         let bytes = fw.finish().unwrap();
         let sig = signature::find_signature(&bytes).unwrap();
-        let sb = Superblock::parse(&bytes, sig).unwrap();
+        let sb = hdf5_pure_format::parse_superblock(&bytes, sig).unwrap();
         let addr = group_v2::resolve_path_any(
             &bytes,
             AccessMode::ReadOnly,
@@ -4203,7 +4203,7 @@ mod tests {
         }
         let bytes = fw.finish().unwrap();
         let sig = signature::find_signature(&bytes).unwrap();
-        let sb = Superblock::parse(&bytes, sig).unwrap();
+        let sb = hdf5_pure_format::parse_superblock(&bytes, sig).unwrap();
         let addr = group_v2::resolve_path_any(
             &bytes,
             AccessMode::ReadOnly,
@@ -4249,7 +4249,7 @@ mod tests {
         }
         let bytes = fw.finish().unwrap();
         let sig = signature::find_signature(&bytes).unwrap();
-        let sb = Superblock::parse(&bytes, sig).unwrap();
+        let sb = hdf5_pure_format::parse_superblock(&bytes, sig).unwrap();
         let oh = ObjectHeader::parse(
             &bytes,
             AccessMode::ReadOnly,
@@ -4280,7 +4280,7 @@ mod tests {
         }
         let bytes = fw.finish().unwrap();
         let sig = signature::find_signature(&bytes).unwrap();
-        let sb = Superblock::parse(&bytes, sig).unwrap();
+        let sb = hdf5_pure_format::parse_superblock(&bytes, sig).unwrap();
         let addr = group_v2::resolve_path_any(
             &bytes,
             AccessMode::ReadOnly,
@@ -4861,7 +4861,7 @@ mod tests {
         );
 
         let sig = signature::find_signature(&bytes).unwrap();
-        let sb = Superblock::parse(&bytes, sig).unwrap();
+        let sb = hdf5_pure_format::parse_superblock(&bytes, sig).unwrap();
         let addr = group_v2::resolve_path_any(
             &bytes,
             AccessMode::ReadOnly,
@@ -5327,7 +5327,7 @@ mod tests {
     /// the other could not tell whether they had come apart.
     fn layout_message_version(bytes: &[u8], path: &str) -> u8 {
         let sig = signature::find_signature(bytes).unwrap();
-        let sb = Superblock::parse(bytes, sig).unwrap();
+        let sb = hdf5_pure_format::parse_superblock(bytes, sig).unwrap();
         let addr =
             group_v2::resolve_path_any(bytes, AccessMode::ReadOnly, &sb, &ObjectPath::parse(path))
                 .unwrap();

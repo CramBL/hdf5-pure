@@ -170,3 +170,34 @@ fn shared_message_references_round_trip_through_the_public_api() {
         ))
     );
 }
+
+#[test]
+fn a_superblock_round_trips_through_the_public_api() {
+    let superblock = hdf5_pure_core::__private::SuperblockFields {
+        version: 2,
+        offset_size: 8,
+        length_size: 8,
+        base_address: hdf5_pure_format::BaseAddress::ZERO,
+        eof_address: 4096,
+        root_group_address: 48,
+        group_leaf_node_k: None,
+        group_internal_node_k: None,
+        indexed_storage_internal_node_k: None,
+        free_space_address: None,
+        driver_info_address: None,
+        consistency_flags: 0,
+        superblock_extension_address: Some(u64::MAX),
+        checksum: None,
+    }
+    .build();
+    let bytes = hdf5_pure_format::serialize_superblock(&superblock).unwrap();
+
+    let parsed = hdf5_pure_format::parse_superblock(&bytes, 0).unwrap();
+    let streamed = hdf5_pure_format::parse_superblock_from_source(bytes.as_slice(), 0).unwrap();
+
+    assert_eq!(parsed, streamed);
+    assert_eq!(parsed.eof_address, 4096);
+    assert_eq!(parsed.root_group_address, 48);
+    assert_eq!(parsed.superblock_extension_address, Some(u64::MAX));
+    assert_eq!(hdf5_pure_format::serialize_superblock(&parsed), Ok(bytes));
+}

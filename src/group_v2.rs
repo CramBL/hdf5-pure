@@ -908,7 +908,7 @@ mod tests {
     fn integration_v2_groups_temperature() {
         let file_data: &[u8] = include_bytes!("../tests/data/unattributed/v2_groups.h5");
         let sig_offset = signature::find_signature(file_data).unwrap();
-        let sb = Superblock::parse(file_data, sig_offset).unwrap();
+        let sb = hdf5_pure_format::parse_superblock(file_data, sig_offset).unwrap();
         assert!(sb.version >= 2); // v2/v3 superblock
 
         let addr = resolve_path_any(
@@ -936,7 +936,7 @@ mod tests {
     fn integration_v2_groups_humidity() {
         let file_data: &[u8] = include_bytes!("../tests/data/unattributed/v2_groups.h5");
         let sig_offset = signature::find_signature(file_data).unwrap();
-        let sb = Superblock::parse(file_data, sig_offset).unwrap();
+        let sb = hdf5_pure_format::parse_superblock(file_data, sig_offset).unwrap();
 
         let addr = resolve_path_any(
             file_data,
@@ -963,7 +963,7 @@ mod tests {
     fn integration_v2_many_links() {
         let file_data: &[u8] = include_bytes!("../tests/data/unattributed/v2_many_links.h5");
         let sig_offset = signature::find_signature(file_data).unwrap();
-        let sb = Superblock::parse(file_data, sig_offset).unwrap();
+        let sb = hdf5_pure_format::parse_superblock(file_data, sig_offset).unwrap();
 
         let addr = resolve_path_any(
             file_data,
@@ -991,7 +991,7 @@ mod tests {
         // Test that resolve_path_any also works for v1 files
         let file_data: &[u8] = include_bytes!("../tests/data/unattributed/two_groups.h5");
         let sig_offset = signature::find_signature(file_data).unwrap();
-        let sb = Superblock::parse(file_data, sig_offset).unwrap();
+        let sb = hdf5_pure_format::parse_superblock(file_data, sig_offset).unwrap();
 
         let addr = resolve_path_any(
             file_data,
@@ -1018,7 +1018,7 @@ mod tests {
     fn integration_resolve_path_any_v2() {
         let file_data: &[u8] = include_bytes!("../tests/data/unattributed/v2_groups.h5");
         let sig_offset = signature::find_signature(file_data).unwrap();
-        let sb = Superblock::parse(file_data, sig_offset).unwrap();
+        let sb = hdf5_pure_format::parse_superblock(file_data, sig_offset).unwrap();
 
         let addr = resolve_path_any(
             file_data,
@@ -1045,7 +1045,7 @@ mod tests {
     fn path_not_found_v2() {
         let file_data: &[u8] = include_bytes!("../tests/data/unattributed/v2_groups.h5");
         let sig_offset = signature::find_signature(file_data).unwrap();
-        let sb = Superblock::parse(file_data, sig_offset).unwrap();
+        let sb = hdf5_pure_format::parse_superblock(file_data, sig_offset).unwrap();
 
         let err = resolve_path_any(
             file_data,
@@ -1188,7 +1188,7 @@ mod huge_link_tests {
     /// the file's offset and length sizes.
     fn dense_link_info(bytes: &[u8]) -> (LinkInfoMessage, StoredAddress, u8, u8) {
         let sig = signature::find_signature(bytes).unwrap();
-        let superblock = Superblock::parse(bytes, sig).unwrap();
+        let superblock = hdf5_pure_format::parse_superblock(bytes, sig).unwrap();
         let (offset_size, length_size) = (superblock.offset_size, superblock.length_size);
         let group_addr = resolve_path_any(
             bytes,

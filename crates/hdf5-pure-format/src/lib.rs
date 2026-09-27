@@ -35,6 +35,7 @@ mod object_header;
 mod object_header_writer;
 mod shared_message;
 mod signature;
+mod superblock;
 mod width;
 
 pub use access_mode::AccessMode;
@@ -127,6 +128,10 @@ pub use shared_message::encode_committed_ref;
 pub use shared_message::encode_sohm_ref;
 pub use shared_message::parse_shared_ref;
 pub use signature::HDF5_SIGNATURE;
+pub use superblock::Superblock;
+pub use superblock::parse_superblock;
+pub use superblock::parse_superblock_from_source;
+pub use superblock::serialize_superblock;
 pub use width::LengthWidth;
 pub use width::OffsetWidth;
 pub use width::UintWidth;

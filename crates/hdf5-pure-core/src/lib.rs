@@ -16,6 +16,7 @@ mod datatype;
 mod display;
 mod error;
 mod message_type;
+mod superblock;
 
 #[doc(hidden)]
 pub mod __private;
@@ -34,3 +35,4 @@ pub use datatype::layout::FloatingPointLayout;
 pub use error::FormatError;
 pub use error::OBJECT_HEADER_MESSAGE_MAX;
 pub use message_type::MessageType;
+pub use superblock::Superblock;

@@ -32,6 +32,8 @@ fn std_message_type_reexport_and_base_address_get_are_public() {
     let _: Option<hdf5_pure::MessageType> = None::<hdf5_pure_core::MessageType>;
     let _: Option<hdf5_pure::BaseAddress> = None::<hdf5_pure_core::BaseAddress>;
     let _: Option<hdf5_pure::BaseAddress> = None::<hdf5_pure_format::BaseAddress>;
+    let _: Option<hdf5_pure::Superblock> = None::<hdf5_pure_core::Superblock>;
+    let _: Option<hdf5_pure::Superblock> = None::<hdf5_pure_format::Superblock>;
     fn get(base: hdf5_pure::BaseAddress) -> u64 {
         base.get()
     }

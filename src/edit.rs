@@ -2637,7 +2637,7 @@ impl WriteEngine {
     /// open and off on close, and the page buffer's crash mark
     /// ([`raise_crash_mark`](Self::raise_crash_mark)).
     ///
-    /// Requires a version-2/3 superblock, since [`Superblock::serialize`] emits
+    /// Requires a version-2/3 superblock, since [`hdf5_pure_format::serialize_superblock`] emits
     /// that layout; `open_swmr_writer` and
     /// [`set_page_buffer_size`](Self::set_page_buffer_size) each check it.
     ///
@@ -2667,7 +2667,7 @@ impl WriteEngine {
             .base_address
             .relative(on_disk.root_group_address)?
             .get();
-        let bytes = on_disk.serialize();
+        let bytes = hdf5_pure_format::serialize_superblock(&on_disk)?;
         self.write_at(self.sb_sig_off, &bytes)?;
         self.barrier_data()?;
         Ok(())
@@ -2798,7 +2798,8 @@ impl WriteEngine {
         // which is why the mirror positions the handle before reading it whole.
         let probe = crate::image::BorrowedHandle::new(&handle, len);
         let sb_sig_off = signature::find_signature_in(&probe)?;
-        let mut superblock = Superblock::parse_from_source(&probe, sb_sig_off)?;
+        let mut superblock =
+            hdf5_pure_format::parse_superblock_from_source(&SourceMetadata(&probe), sb_sig_off)?;
 
         if superblock.version > 3 {
             return Err(Error::EditUnsupported("unsupported superblock version"));
@@ -6996,7 +6997,7 @@ impl WriteEngine {
             // rule, and a site that states it as a literal is one refactor away
             // from being wrong silently (issue #308).
             new_sb.consistency_flags = self.held_status_flags;
-            let sb_bytes = new_sb.serialize();
+            let sb_bytes = hdf5_pure_format::serialize_superblock(&new_sb)?;
             self.publish_attempted = true;
             self.write_at(self.sb_sig_off, &sb_bytes)?;
             self.barrier()?;
@@ -7243,7 +7244,7 @@ impl WriteEngine {
         // As above, and zero for the same reason: this is the *unpaged* persisting
         // tail, which no page-buffered session reaches (issue #73, issue #308).
         new_sb.consistency_flags = self.held_status_flags;
-        let sb_bytes = new_sb.serialize();
+        let sb_bytes = hdf5_pure_format::serialize_superblock(&new_sb)?;
         self.publish_attempted = true;
         self.write_at(self.sb_sig_off, &sb_bytes)?;
         self.barrier()?;
@@ -7664,7 +7665,7 @@ impl WriteEngine {
         // the one where this must not be a literal zero: a crash mark has to
         // outlive every commit the session makes (issue #308).
         new_sb.consistency_flags = self.held_status_flags;
-        let sb_bytes = new_sb.serialize();
+        let sb_bytes = hdf5_pure_format::serialize_superblock(&new_sb)?;
         self.publish_attempted = true;
         self.write_at(self.sb_sig_off, &sb_bytes)?;
         self.barrier()?;
@@ -11575,7 +11576,7 @@ impl Store for EditStore<'_> {
         // address serializes back to the same stored value.
         let eof = self.image.len();
         self.superblock.eof_address = eof;
-        let bytes = self.superblock.serialize();
+        let bytes = hdf5_pure_format::serialize_superblock(self.superblock)?;
         self.write_at(self.sb_sig_off, &bytes)
     }
     fn sync(&mut self) -> Result<(), Error> {
@@ -18518,10 +18519,10 @@ mod tests {
         for (path, version, flags) in [(&flagged, 3, SWMR_WRITE_FLAGS), (&ancient, 9, 0)] {
             let mut data = std::fs::read(path).unwrap();
             let off = signature::find_signature(&data).unwrap();
-            let mut sb = Superblock::parse(&data, off).unwrap();
-            sb.version = version;
+            let mut sb = hdf5_pure_format::parse_superblock(&data, off).unwrap();
             sb.consistency_flags = flags;
-            let bytes = sb.serialize();
+            let mut bytes = hdf5_pure_format::serialize_superblock(&sb).unwrap();
+            bytes[signature::HDF5_SIGNATURE.len()] = version;
             data[off..off + bytes.len()].copy_from_slice(&bytes);
             std::fs::write(path, &data).unwrap();
         }
@@ -18569,18 +18570,20 @@ mod tests {
         {
             let mut data = std::fs::read(&path).unwrap();
             let off = signature::find_signature(&data).unwrap();
-            let mut sb = Superblock::parse(&data, off).unwrap();
+            let mut sb = hdf5_pure_format::parse_superblock(&data, off).unwrap();
             assert!(
                 sb.version >= 2,
                 "FileBuilder should emit a v2/v3 superblock"
             );
             sb.consistency_flags = 0x05;
-            let bytes = sb.serialize();
+            let bytes = hdf5_pure_format::serialize_superblock(&sb).unwrap();
             data[off..off + bytes.len()].copy_from_slice(&bytes);
             std::fs::write(&path, &data).unwrap();
             // Sanity: the stale flag is really set on disk now.
             assert_eq!(
-                Superblock::parse(&data, off).unwrap().consistency_flags,
+                hdf5_pure_format::parse_superblock(&data, off)
+                    .unwrap()
+                    .consistency_flags,
                 0x05
             );
         }
@@ -18601,10 +18604,10 @@ mod tests {
         {
             let mut data = std::fs::read(&path).unwrap();
             let off = signature::find_signature(&data).unwrap();
-            let mut sb = Superblock::parse(&data, off).unwrap();
+            let mut sb = hdf5_pure_format::parse_superblock(&data, off).unwrap();
             sb.version = 2;
             sb.consistency_flags = crate::file_lock::WRITE_ACCESS;
-            let bytes = sb.serialize();
+            let bytes = hdf5_pure_format::serialize_superblock(&sb).unwrap();
             data[off..off + bytes.len()].copy_from_slice(&bytes);
             std::fs::write(&path, &data).unwrap();
         }
@@ -18623,7 +18626,9 @@ mod tests {
         let data = std::fs::read(&path).unwrap();
         let off = signature::find_signature(&data).unwrap();
         assert_eq!(
-            Superblock::parse(&data, off).unwrap().consistency_flags,
+            hdf5_pure_format::parse_superblock(&data, off)
+                .unwrap()
+                .consistency_flags,
             0,
             "commit must clear the stale consistency flag"
         );
@@ -18697,14 +18702,14 @@ mod tests {
         // editor reaches the `root_group_address + base` normalization.
         let mut data = std::fs::read(&path).unwrap();
         let off = signature::find_signature(&data).unwrap();
-        let mut sb = Superblock::parse(&data, off).unwrap();
+        let mut sb = hdf5_pure_format::parse_superblock(&data, off).unwrap();
         assert_eq!(
             sb.base_address,
             BaseAddress::new(UB),
             "userblock file must have base == UB"
         );
         sb.root_group_address = u64::MAX;
-        let bytes = sb.serialize();
+        let bytes = hdf5_pure_format::serialize_superblock(&sb).unwrap();
         data[off..off + bytes.len()].copy_from_slice(&bytes);
         std::fs::write(&path, &data).unwrap();
 

@@ -190,9 +190,9 @@ def migration_shapes(baseline: dict, candidate: dict, core: dict) -> list[str]:
     core_items = public_root_items(core)
     moved = root_paths(core)
     failures = []
-    # Pre-extraction main defines InvalidObjectHeaderMessageSize. Published 0.47.0 does not.
-    # The allowance covers that prior delta, not PR #635's extraction.
-    allowed_added_variants = {"FormatError": {"InvalidObjectHeaderMessageSize"}}
+    # The FormatError variants that 0.47.0 does not define, which the comparison removes from the
+    # moved shape.
+    allowed_added_variants = {"FormatError": {"Internal", "InvalidObjectHeaderMessageSize"}}
     for path, kind in sorted(moved):
         name = path.rsplit("::", 1)[-1]
         if name not in baseline_items:

@@ -153,9 +153,7 @@ fn append_crosses_paging_boundary() {
 }
 
 /// A non-latest-format (v0/v1 superblock) file must be rejected with a clear
-/// error and left byte-for-byte unchanged. Regression for the bug where
-/// `open()` wrote the SWMR flag through `Superblock::serialize` (which always
-/// emits the v2/v3 layout), clobbering a v0/v1 superblock before any append.
+/// error and left byte-for-byte unchanged.
 #[test]
 fn rejects_and_preserves_non_latest_format_file() {
     let dir = tempdir().unwrap();
