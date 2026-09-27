@@ -59,7 +59,7 @@ pub use crate::type_builders::AttrValue;
 use crate::datatype::{CharacterSet, Datatype};
 
 /// The width of every address in a file this crate writes.
-const OFFSET_WIDTH: OffsetWidth = OffsetWidth::Eight;
+pub(crate) const OFFSET_WIDTH: OffsetWidth = OffsetWidth::Eight;
 /// The width of every length in a file this crate writes.
 const LENGTH_WIDTH: LengthWidth = LengthWidth::Eight;
 /// [`OFFSET_WIDTH`] as the `u8` width the writers take.
@@ -247,7 +247,7 @@ pub(crate) fn build_group_oh(
     // C library to use its defaults (max compact = 8, min dense = 6).
     w.add_message(MessageType::GROUP_INFO, vec![0, 0]);
     for link in links {
-        w.add_message(MessageType::LINK, link.serialize(OFFSET_SIZE));
+        w.add_message(MessageType::LINK, link.serialize(OFFSET_WIDTH));
     }
     add_attributes(&mut w, attrs, attr_info);
     w.serialize()
@@ -792,7 +792,7 @@ impl DenseAttrPlan {
     /// `heap_address`. Its length does not depend on the address, so an
     /// object-header sizing pass can take it from a provisional one.
     pub(crate) fn attr_info_message(&self, heap_address: StoredAddress) -> Vec<u8> {
-        self.attribute_info(heap_address).serialize(OFFSET_SIZE)
+        self.attribute_info(heap_address).serialize(OFFSET_WIDTH)
     }
 
     /// The Attribute Info message this storage is named by, once placed at
@@ -1121,7 +1121,7 @@ pub(crate) fn compact_attribute_info_message() -> Vec<u8> {
         btree_name_index_address: None,
         btree_creation_order_address: None,
     }
-    .serialize(OFFSET_SIZE)
+    .serialize(OFFSET_WIDTH)
 }
 
 /// Writes `addr` to `buf` as a little-endian address field of `offset_size` bytes.
