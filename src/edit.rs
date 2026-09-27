@@ -256,6 +256,7 @@ use std::path::Path;
 use core::num::NonZeroUsize;
 
 use crate::access_mode::AccessMode;
+use crate::address::BaseAddressExt;
 use crate::address::{BaseAddress, StoredAddress};
 use crate::attribute_info::AttributeInfoMessage;
 use crate::checksum::jenkins_lookup3;

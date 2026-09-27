@@ -2,6 +2,7 @@
 use alloc::vec::Vec;
 use byteorder::{ByteOrder, LittleEndian};
 
+use crate::address::BaseAddressExt;
 use crate::address::StoredAddress;
 use crate::bytes;
 use crate::convert::Narrow;

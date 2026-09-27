@@ -474,6 +474,9 @@ dependencies = [
 [[package]]
 name = "hdf5-pure-core"
 version = "0.47.0"
+dependencies = [
+ "rstest",
+]
 
 [[package]]
 name = "hdf5-pure-crosscheck"

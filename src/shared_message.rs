@@ -24,6 +24,7 @@
 use alloc::vec::Vec;
 
 use crate::access_mode::AccessMode;
+use crate::address::BaseAddressExt;
 use crate::address::{BaseAddress, StoredAddress};
 use crate::bytes::{ensure_len, read_offset};
 use crate::convert::Narrow;

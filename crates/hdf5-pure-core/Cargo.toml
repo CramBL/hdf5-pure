@@ -11,5 +11,8 @@ description = "Shared public types of hdf5-pure"
 default = []
 std = []
 
+[dev-dependencies]
+rstest.workspace = true
+
 [lints]
 workspace = true

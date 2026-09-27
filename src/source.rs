@@ -10,6 +10,7 @@ use alloc::{vec, vec::Vec};
 #[cfg(feature = "std")]
 use std::collections::BTreeMap;
 
+use crate::address::BaseAddressExt;
 use crate::address::{BaseAddress, StoredAddress};
 use crate::convert::Narrow;
 use crate::error::FormatError;

@@ -10,6 +10,7 @@ extern crate alloc;
 #[cfg(feature = "std")]
 extern crate std;
 
+mod address;
 mod dataspace;
 mod datatype;
 mod display;
@@ -19,6 +20,7 @@ mod message_type;
 #[doc(hidden)]
 pub mod __private;
 
+pub use address::BaseAddress;
 pub use dataspace::MaxExtent;
 pub use datatype::CharacterSet;
 pub use datatype::CompoundMember;

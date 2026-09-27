@@ -74,6 +74,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::access_mode::AccessMode;
+use crate::address::BaseAddressExt;
 use crate::address::{BaseAddress, StoredAddress};
 use crate::attribute::AttributeMessage;
 use crate::checksum::jenkins_lookup3;

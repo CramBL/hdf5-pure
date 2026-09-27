@@ -9,6 +9,7 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use crate::access_mode::AccessMode;
+use crate::address::BaseAddressExt;
 use crate::address::{BaseAddress, StoredAddress};
 use crate::btree_v2::{
     BTreeV2Header, collect_btree_v2_records, collect_btree_v2_records_from_source,

@@ -5,6 +5,7 @@ use alloc::vec::Vec;
 
 use crate::access_mode::AccessMode;
 use crate::address::BaseAddress;
+use crate::address::BaseAddressExt;
 use crate::bytes::ensure_len;
 use crate::error::FormatError;
 use crate::message_flags::MessageFlags;

@@ -10,6 +10,7 @@ use byteorder::{ByteOrder, LittleEndian};
 
 use super::{HeaderMessage, MessageFilter, ObjectHeader, ParseContext};
 use crate::access_mode::AccessMode;
+use crate::address::BaseAddressExt;
 use crate::address::StoredAddress;
 use crate::bytes;
 use crate::convert::Narrow;

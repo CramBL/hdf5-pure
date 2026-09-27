@@ -544,7 +544,7 @@ pub use hdf5_pure_core::OBJECT_HEADER_MESSAGE_MAX;
 
 #[cfg(feature = "std")]
 #[doc(inline)]
-pub use address::BaseAddress;
+pub use hdf5_pure_core::BaseAddress;
 #[cfg(feature = "std")]
 #[doc(inline)]
 pub use hdf5_pure_core::MessageType;
