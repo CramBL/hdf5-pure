@@ -1165,7 +1165,7 @@ mod tests {
                 MessageType::DATATYPE,
                 &crate::shared_message::encode_committed_ref(
                     base.relative(TYPE_AT).unwrap(),
-                    crate::file_writer::OFFSET_SIZE,
+                    crate::file_writer::OFFSET_WIDTH,
                 ),
             );
             shared[3] = MessageFlags::SHARED.get();

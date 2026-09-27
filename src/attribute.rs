@@ -286,7 +286,7 @@ impl AttributeMessage {
     fn datatype_field(&self) -> Vec<u8> {
         match self
             .datatype_location
-            .reference_bytes(crate::file_writer::OFFSET_SIZE)
+            .reference_bytes(crate::file_writer::OFFSET_WIDTH)
         {
             Some(reference) => reference,
             None => hdf5_pure_format::serialize_datatype(&self.datatype),

@@ -140,3 +140,33 @@ fn group_and_attribute_storage_messages_round_trip_through_the_public_api() {
         })
     );
 }
+
+#[test]
+fn shared_message_references_round_trip_through_the_public_api() {
+    use hdf5_pure_format::SharedResolver;
+
+    let address = hdf5_pure_format::StoredAddress::new(800);
+    let committed =
+        hdf5_pure_format::encode_committed_ref(address, hdf5_pure_format::OffsetWidth::Eight);
+    assert_eq!(
+        hdf5_pure_format::parse_shared_ref(&committed, 8, 8).map(|reference| reference.location),
+        Ok(hdf5_pure_format::SharedLocation::ObjectHeader(address))
+    );
+    assert_eq!(
+        hdf5_pure_format::committed_address_in(&committed, 8, 8),
+        Ok(Some(address))
+    );
+
+    let heap_id = [7; hdf5_pure_format::FHEAP_ID_LEN];
+    let heap = hdf5_pure_format::encode_sohm_ref(&heap_id);
+    assert_eq!(
+        hdf5_pure_format::committed_address_in(&heap, 8, 8),
+        Ok(None)
+    );
+    assert_eq!(
+        hdf5_pure_format::Unresolvable.resolve(&heap, hdf5_pure_format::MessageType::DATASPACE),
+        Err(hdf5_pure_format::FormatError::UnresolvedSharedMessage(
+            hdf5_pure_format::MessageType::DATASPACE.to_u16()
+        ))
+    );
+}

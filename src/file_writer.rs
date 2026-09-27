@@ -164,7 +164,7 @@ pub(crate) fn build_dataset_oh(
 /// says the body is one. Without that flag the ten reference bytes decode as a
 /// zero-width time datatype, which is the defect issue #254 was filed for.
 fn add_datatype(w: &mut ObjectHeaderWriter, dt: &Datatype, location: &DatatypeLocation) {
-    match location.reference_bytes(OFFSET_SIZE) {
+    match location.reference_bytes(OFFSET_WIDTH) {
         Some(reference) => {
             w.add_message_with_flags(
                 MessageType::DATATYPE,
@@ -3961,7 +3961,10 @@ mod tests {
         );
         assert_eq!(
             msg.data,
-            crate::shared_message::encode_committed_ref(StoredAddress::new(type_addr), OFFSET_SIZE),
+            crate::shared_message::encode_committed_ref(
+                StoredAddress::new(type_addr),
+                OFFSET_WIDTH
+            ),
             "the reference must name the object the link resolves to"
         );
     }
