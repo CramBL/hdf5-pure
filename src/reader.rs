@@ -1665,7 +1665,7 @@ impl FileInner {
             .messages
             .iter()
             .find(|m| m.msg_type == MessageType::FILE_SPACE_INFO)?;
-        FileSpaceInfo::parse(
+        hdf5_pure_format::parse_file_space_info(
             &msg.data,
             self.superblock.offset_size,
             self.superblock.length_size,

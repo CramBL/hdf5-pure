@@ -224,7 +224,10 @@ fn sealed_structs_keep_their_attribute() {
     }
 
     let expected = [
-        ("src/file_space_info.rs", "pub struct FileSpaceInfo {"),
+        (
+            "crates/hdf5-pure-core/src/file_space_info.rs",
+            "pub struct FileSpaceInfo {",
+        ),
         (
             "crates/hdf5-pure-core/src/datatype/mod.rs",
             "pub struct CompoundMember {",

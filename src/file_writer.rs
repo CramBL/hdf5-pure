@@ -33,7 +33,8 @@ use crate::dataspace::{Dataspace, DataspaceType, Extent, MaxExtent};
 use crate::error::{FormatError, OBJECT_HEADER_MESSAGE_MAX};
 use crate::file_create_properties::FileCreateProperties;
 use crate::file_space_info::{
-    DEFAULT_PAGE_SIZE, DEFAULT_THRESHOLD, FileSpaceInfo, FileSpaceStrategy, NUM_FILE_FSM_MANAGERS,
+    self, DEFAULT_PAGE_SIZE, DEFAULT_THRESHOLD, FileSpaceInfo, FileSpaceStrategy,
+    NUM_FILE_FSM_MANAGERS,
 };
 use crate::fractal_heap_write::{self, ManagedPlan, PlanRefusal};
 use crate::free_space_manager::{
@@ -1382,9 +1383,9 @@ impl FileWriter {
         ));
         let page_size = self.file_space_page_size.unwrap_or(DEFAULT_PAGE_SIZE);
         Some(if persist {
-            FileSpaceInfo::persistent_empty(strategy, threshold, page_size)
+            file_space_info::persistent_empty(strategy, threshold, page_size)
         } else {
-            FileSpaceInfo::non_persistent(strategy, threshold, page_size)
+            file_space_info::non_persistent(strategy, threshold, page_size)
         })
     }
 
@@ -1399,7 +1400,7 @@ impl FileWriter {
                 // still opens the file.
                 oh.add_message_with_flags(
                     MessageType::FILE_SPACE_INFO,
-                    info.serialize(),
+                    hdf5_pure_format::serialize_file_space_info(&info),
                     MessageFlags::FORBID_SHARING | MessageFlags::MARK_IF_UNKNOWN,
                 );
                 oh.serialize()
@@ -3305,7 +3306,7 @@ impl FileWriter {
             // files this replaces the placeholder (empty-manager) message with
             // the per-page-type manager addresses; its length is unchanged.
             let real_ext_oh = if persist_paged {
-                let info = FileSpaceInfo::persistent_managers(
+                let info = file_space_info::persistent_managers(
                     FileSpaceStrategy::Page,
                     fs_threshold,
                     page_size,
@@ -3315,7 +3316,7 @@ impl FileWriter {
                 let mut oh = ObjectHeaderWriter::new();
                 oh.add_message_with_flags(
                     MessageType::FILE_SPACE_INFO,
-                    info.serialize(),
+                    hdf5_pure_format::serialize_file_space_info(&info),
                     MessageFlags::FORBID_SHARING | MessageFlags::MARK_IF_UNKNOWN,
                 );
                 oh.serialize()?
@@ -3766,12 +3767,12 @@ impl FileWriter {
         // reserved layout still holds.
         let real_ext_oh = match (&ext_oh, nonpaged_persist) {
             (Some(_), Some((strategy, threshold, np_page_size))) => {
-                let mut info = FileSpaceInfo::persistent_empty(strategy, threshold, np_page_size);
+                let mut info = file_space_info::persistent_empty(strategy, threshold, np_page_size);
                 info.eoa_pre_fsm = eof_addr2 - ub as u64;
                 let mut oh = ObjectHeaderWriter::new();
                 oh.add_message_with_flags(
                     MessageType::FILE_SPACE_INFO,
-                    info.serialize(),
+                    hdf5_pure_format::serialize_file_space_info(&info),
                     MessageFlags::FORBID_SHARING | MessageFlags::MARK_IF_UNKNOWN,
                 );
                 Some(oh.serialize()?)

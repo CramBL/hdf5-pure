@@ -603,7 +603,10 @@ pub use element::H5Element;
 pub use scaleoffset::ScaleOffset;
 
 pub use file_create_properties::FileCreateProperties;
-pub use file_space_info::{FileSpaceInfo, FileSpaceStrategy};
+#[doc(inline)]
+pub use hdf5_pure_core::FileSpaceInfo;
+#[doc(inline)]
+pub use hdf5_pure_core::FileSpaceStrategy;
 
 pub use compound::{CompoundField, CompoundType};
 #[doc(inline)]

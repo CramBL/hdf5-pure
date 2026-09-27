@@ -154,7 +154,7 @@ const FILE_FSM_CLIENT_ID: u8 = 1;
 
 /// Byte width of one manager address in the File Space Info message.
 ///
-/// [`FileSpaceInfo::serialize`](crate::file_space_info::FileSpaceInfo::serialize)
+/// [`serialize_file_space_info`](hdf5_pure_format::serialize_file_space_info)
 /// emits every slot in eight bytes, whatever address width the superblock
 /// declares.
 const FILE_SPACE_INFO_SLOT_WIDTH: u8 = 8;

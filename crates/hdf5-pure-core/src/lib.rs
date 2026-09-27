@@ -15,6 +15,7 @@ mod dataspace;
 mod datatype;
 mod display;
 mod error;
+mod file_space_info;
 mod message_type;
 mod superblock;
 
@@ -34,5 +35,7 @@ pub use datatype::layout::FixedPointLayout;
 pub use datatype::layout::FloatingPointLayout;
 pub use error::FormatError;
 pub use error::OBJECT_HEADER_MESSAGE_MAX;
+pub use file_space_info::FileSpaceInfo;
+pub use file_space_info::FileSpaceStrategy;
 pub use message_type::MessageType;
 pub use superblock::Superblock;

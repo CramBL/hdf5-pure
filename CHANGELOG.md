@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Added
+
+- `FormatError::Internal` reports a condition that only a bug in this crate can produce, such as a superblock value too wide for its field.
+
 ### Fixed
 
 - `AttrValue` is available at the crate root under `no_std` where `alloc` is available ([#635](https://github.com/CramBL/hdf5-pure/pull/635)).
