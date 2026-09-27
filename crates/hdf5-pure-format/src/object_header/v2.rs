@@ -1,4 +1,3 @@
-#[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 use byteorder::{ByteOrder, LittleEndian};
 
@@ -9,8 +8,8 @@ use crate::convert::Narrow;
 use crate::error::FormatError;
 use crate::message_flags::MessageFlags;
 use crate::message_type::MessageType;
+use crate::metadata_source::MetadataSource;
 use crate::object_header::{HeaderMessage, MessageFilter, ObjectHeader, ParseContext};
-use crate::source::Source;
 use crate::width::UintWidth;
 
 /// Interprets the flags byte in a version 2 object header prefix.
@@ -310,7 +309,7 @@ impl ObjectHeader {
         Ok(())
     }
 
-    pub(super) fn parse_v2_from_source<S: Source + ?Sized>(
+    pub(super) fn parse_v2_from_source<S: MetadataSource + ?Sized>(
         source: &S,
         context: ParseContext,
         address: u64,

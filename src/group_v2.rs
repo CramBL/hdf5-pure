@@ -23,6 +23,7 @@ use crate::link_message::{LinkMessage, LinkTarget, link_is_named};
 use crate::message_type::MessageType;
 use crate::object_header::{MessageFilter, ObjectHeader};
 use crate::object_path::{LinkName, ObjectPath};
+use crate::source::SourceMetadata;
 use crate::source::{BaseOffsetSource, Source, frame};
 use crate::superblock::Superblock;
 use crate::symbol_table::SymbolTableMessage;
@@ -203,7 +204,7 @@ pub(crate) fn find_child_address_from_source<S: Source + ?Sized>(
     let header = {
         let mut wanted = wanted_link_only(name, &mut saw_link);
         ObjectHeader::parse_from_source_filtered(
-            source,
+            &SourceMetadata(source),
             access_mode,
             group_address,
             offset_size,

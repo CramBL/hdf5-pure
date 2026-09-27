@@ -43,6 +43,7 @@ use crate::object_path::{LinkName, LinkNameBuf, ObjectPath, ObjectPathBuf};
 use crate::read_spec::RawReadSpec;
 use crate::shared_message::{self, BufferedResolver, SharedResolver, SourceResolver};
 use crate::signature;
+use crate::source::SourceMetadata;
 use crate::source::{
     BaseOffsetSource, BytesSource, MetadataCacheConfig, MetadataCacheStats, MetadataCachingSource,
     ReadSeekSource, Source, ValidatedSource, frame,
@@ -1996,7 +1997,7 @@ impl FileInner {
                 self.addr_offset,
             ),
             Backend::Streaming(s) => ObjectHeader::parse_from_source(
-                s.as_ref(),
+                &SourceMetadata(s.as_ref()),
                 access,
                 address,
                 os,
@@ -2015,7 +2016,16 @@ impl FileInner {
                         self.addr_offset,
                     )
                 },
-                |s| ObjectHeader::parse_from_source(s, access, address, os, ls, self.addr_offset),
+                |s| {
+                    ObjectHeader::parse_from_source(
+                        &SourceMetadata(s),
+                        access,
+                        address,
+                        os,
+                        ls,
+                        self.addr_offset,
+                    )
+                },
             ),
         }
     }

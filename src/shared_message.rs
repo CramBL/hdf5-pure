@@ -33,7 +33,7 @@ use crate::message_type::MessageType;
 use crate::object_header::ObjectHeader;
 use crate::object_path::ObjectPathBuf;
 use crate::sohm::SohmTable;
-use crate::source::Source;
+use crate::source::{Source, SourceMetadata};
 
 /// Fractal heap ID length for SOHM entries (fixed at 8 bytes).
 pub(crate) const FHEAP_ID_LEN: usize = 8;
@@ -360,7 +360,7 @@ impl<S: Source + ?Sized> SharedResolver for SourceResolver<'_, S> {
         // base_address 0 matches the buffered path, whose slice is already framed
         // at the base address, so both treat the reference as absolute within it.
         let header = ObjectHeader::parse_from_source(
-            self.source,
+            &SourceMetadata(self.source),
             self.access_mode,
             addr.get(),
             self.offset_size,

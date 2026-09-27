@@ -1,3 +1,4 @@
+use hdf5_pure_core::__private::BaseAddressExt;
 use hdf5_pure_format::Dataspace;
 use hdf5_pure_format::DataspaceType;
 use hdf5_pure_format::Datatype;
@@ -59,4 +60,42 @@ fn on_disk_messages_round_trip_through_the_public_api() {
     let fill_message: Result<Vec<u8>, FillValueError> =
         hdf5_pure_format::fill_value_message_v3(None);
     assert_eq!(fill_message, Ok(vec![3, V3_FLAGS_DEFAULT]));
+}
+
+#[test]
+fn an_object_header_round_trips_through_the_public_api() {
+    let mut writer = hdf5_pure_format::ObjectHeaderWriter::new();
+    writer.add_message_with_flags(
+        hdf5_pure_format::MessageType::DATASPACE,
+        vec![1, 2, 3],
+        hdf5_pure_format::MessageFlags::CONSTANT,
+    );
+    let bytes = writer.serialize().unwrap();
+
+    let buffered = hdf5_pure_format::ObjectHeader::parse(
+        &bytes,
+        hdf5_pure_format::AccessMode::ReadOnly,
+        0,
+        8,
+        8,
+    )
+    .unwrap();
+    let streamed = hdf5_pure_format::ObjectHeader::parse_from_source(
+        bytes.as_slice(),
+        hdf5_pure_format::AccessMode::ReadOnly,
+        0,
+        8,
+        8,
+        hdf5_pure_format::BaseAddress::ZERO,
+    )
+    .unwrap();
+
+    for header in [buffered, streamed] {
+        let [message] = header.messages.as_slice() else {
+            panic!("expected one message, got {:?}", header.messages);
+        };
+        assert_eq!(message.msg_type, hdf5_pure_format::MessageType::DATASPACE);
+        assert_eq!(message.flags, hdf5_pure_format::MessageFlags::CONSTANT);
+        assert_eq!(message.data, vec![1, 2, 3]);
+    }
 }

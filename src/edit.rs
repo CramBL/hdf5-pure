@@ -304,6 +304,7 @@ use crate::object_header::ObjectHeader;
 use crate::object_path::{LinkNameBuf, ObjectPathBuf};
 use crate::reader::FileAccessProperties;
 use crate::shared_message::DatatypeLocation;
+use crate::source::SourceMetadata;
 use crate::source::{BaseOffsetSource, BytesSource, MetadataCacheConfig, Source};
 use crate::superblock::Superblock;
 use crate::type_builders::{
@@ -3245,7 +3246,7 @@ impl WriteEngine {
         let ls = self.superblock.length_size;
         let base = self.superblock.base_address;
         let oh = ObjectHeader::parse_from_source(
-            &self.image(),
+            &SourceMetadata(&self.image()),
             AccessMode::ReadWrite,
             ext_addr,
             os,
@@ -3833,7 +3834,7 @@ impl WriteEngine {
             return Ok(None);
         };
         let Ok(header) = ObjectHeader::parse_from_source(
-            &self.image(),
+            &SourceMetadata(&self.image()),
             AccessMode::ReadWrite,
             abs,
             os,
@@ -8058,7 +8059,7 @@ impl WriteEngine {
         let ls = self.superblock.length_size;
         let base = self.superblock.base_address;
         let oh = ObjectHeader::parse_from_source(
-            &self.image(),
+            &SourceMetadata(&self.image()),
             AccessMode::ReadWrite,
             addr,
             os,
@@ -10539,7 +10540,7 @@ impl WriteEngine {
             }
             budget -= 1;
             let header = ObjectHeader::parse_from_source(
-                &self.image(),
+                &SourceMetadata(&self.image()),
                 AccessMode::ReadWrite,
                 addr,
                 os,
@@ -13416,8 +13417,14 @@ fn read_object_attrs<S: Source + ?Sized>(
     addr: u64,
     base: BaseAddress,
 ) -> Result<Vec<crate::attribute::StoredAttribute>, Error> {
-    let header =
-        ObjectHeader::parse_from_source(src, access_mode, addr, OFFSET_SIZE, LENGTH_SIZE, base)?;
+    let header = ObjectHeader::parse_from_source(
+        &SourceMetadata(src),
+        access_mode,
+        addr,
+        OFFSET_SIZE,
+        LENGTH_SIZE,
+        base,
+    )?;
     if base.get() > src.len() {
         return Err(Error::EditUnsupported(
             "this file's userblock is larger than the file itself",
