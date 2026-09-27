@@ -11950,7 +11950,7 @@ fn flatten_dataset(db: DatasetBuilder, name: LinkNameBuf) -> Result<FlatDataset,
     // link creation order — since the parent group is not known here.
     let mut sized = make_link(name.as_str(), StoredAddress::new(0));
     sized.creation_order = Some(0);
-    if sized.serialize(OFFSET_SIZE).len() > OBJECT_HEADER_MESSAGE_MAX {
+    if sized.serialize(crate::file_writer::OFFSET_WIDTH).len() > OBJECT_HEADER_MESSAGE_MAX {
         return Err(Error::EditUnsupported(
             "dataset name is too long to encode as a link message",
         ));
@@ -12666,7 +12666,7 @@ fn encode_link_message(
 ) -> Vec<u8> {
     let mut link = make_link(name, addr);
     link.creation_order = creation_order;
-    let body = link.serialize(OFFSET_SIZE);
+    let body = link.serialize(crate::file_writer::OFFSET_WIDTH);
     layout.record(MessageType::LINK, &body)
 }
 
@@ -13624,7 +13624,7 @@ fn compact_attribute_info_body(region: &OhRegion) -> Result<Vec<u8>, Error> {
         btree_name_index_address: None,
         btree_creation_order_address: None,
     };
-    Ok(info.serialize(OFFSET_SIZE))
+    Ok(info.serialize(crate::file_writer::OFFSET_WIDTH))
 }
 
 /// Copy a message region, dropping every Attribute message named `name` and
@@ -13677,7 +13677,7 @@ fn put_attr_message(
                 {
                     info.max_creation_index = new_max;
                     info.indexes_creation_order |= layout.indexes_creation_order();
-                    let encoded = info.serialize(OFFSET_SIZE);
+                    let encoded = info.serialize(crate::file_writer::OFFSET_WIDTH);
                     let len: u16 = encoded.len().narrow_or_else(|| {
                         Error::EditUnsupported("an Attribute Info message is too large to record")
                     })?;
@@ -18038,7 +18038,10 @@ mod tests {
             btree_name_index_address: None,
             btree_creation_order_address: None,
         };
-        let mut record = layout.record(MessageType::ATTRIBUTE_INFO, &info.serialize(OFFSET_SIZE));
+        let mut record = layout.record(
+            MessageType::ATTRIBUTE_INFO,
+            &info.serialize(crate::file_writer::OFFSET_WIDTH),
+        );
         // The reference C library sets this flag on the Attribute Info message it writes
         // (`H5Oattribute.c`, HDF5 2.2.0), so a rewrite of that message has to keep it.
         record[3] = MessageFlags::FORBID_SHARING.get();

@@ -50,6 +50,16 @@ impl OffsetWidth {
             Self::Eight => 8,
         }
     }
+
+    /// Returns `true` if an address field of this width can store `address`.
+    ///
+    /// `u64::MAX` fits every width, as the undefined address, which a writer writes as all ones.
+    pub(crate) fn holds(self, address: u64) -> bool {
+        address == u64::MAX
+            || address
+                .checked_shr(8 * u32::from(self.get()))
+                .is_none_or(|high| high == 0)
+    }
 }
 
 impl TryFrom<u8> for OffsetWidth {

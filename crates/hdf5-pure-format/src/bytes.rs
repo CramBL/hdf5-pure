@@ -26,6 +26,8 @@
 //!
 //! Reads are from an in-memory slice.
 
+use alloc::vec::Vec;
+
 use crate::convert;
 use crate::error::FormatError;
 use crate::width::LengthWidth;
@@ -200,6 +202,31 @@ pub fn read_optional_offset_width(
         Ok(None)
     } else {
         Ok(Some(addr))
+    }
+}
+
+/// Appends `val` to `buf` as a little-endian integer of `width` bytes.
+///
+/// Writes `u64::MAX` as the undefined address at `width`, all ones.
+///
+/// # Panics
+///
+/// Panics if `val` does not fit `width` and is not `u64::MAX`.
+pub(crate) fn write_offset(buf: &mut Vec<u8>, val: u64, width: OffsetWidth) {
+    assert!(
+        width.holds(val),
+        "address {val:#x} does not fit a {}-byte address field",
+        width.get()
+    );
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "the assertion above admits a value that fits `width`, or `u64::MAX`, whose \
+                  low `width` bytes are the undefined address at `width`"
+    )]
+    match width {
+        OffsetWidth::Two => buf.extend_from_slice(&(val as u16).to_le_bytes()),
+        OffsetWidth::Four => buf.extend_from_slice(&(val as u32).to_le_bytes()),
+        OffsetWidth::Eight => buf.extend_from_slice(&val.to_le_bytes()),
     }
 }
 
@@ -423,5 +450,26 @@ mod tests {
             read_optional_offset(&ones, 0, 3).unwrap_err(),
             FormatError::InvalidOffsetSize(3)
         );
+    }
+
+    #[rstest::rstest]
+    #[case::fits(OffsetWidth::Four, 0xFFFF_FFFF, vec![0xFF; 4])]
+    #[case::undefined(OffsetWidth::Two, u64::MAX, vec![0xFF; 2])]
+    #[case::eight_bytes(OffsetWidth::Eight, 0x0102, vec![2, 1, 0, 0, 0, 0, 0, 0])]
+    fn an_address_that_fits_its_field_is_written_whole(
+        #[case] width: OffsetWidth,
+        #[case] val: u64,
+        #[case] expected: Vec<u8>,
+    ) {
+        let mut buf = Vec::new();
+        write_offset(&mut buf, val, width);
+
+        assert_eq!(buf, expected);
+    }
+
+    #[test]
+    #[should_panic(expected = "address 0x10000 does not fit a 2-byte address field")]
+    fn an_address_wider_than_its_field_panics() {
+        write_offset(&mut Vec::new(), 0x1_0000, OffsetWidth::Two);
     }
 }

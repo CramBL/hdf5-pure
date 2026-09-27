@@ -99,3 +99,44 @@ fn an_object_header_round_trips_through_the_public_api() {
         assert_eq!(message.data, vec![1, 2, 3]);
     }
 }
+
+#[test]
+fn group_and_attribute_storage_messages_round_trip_through_the_public_api() {
+    let link = hdf5_pure_format::LinkMessage {
+        name: "data".into(),
+        link_target: hdf5_pure_format::LinkTarget::Hard {
+            object_header_address: hdf5_pure_format::StoredAddress::new(96),
+        },
+        creation_order: None,
+        charset: hdf5_pure_format::CharacterSet::Ascii,
+    };
+    let link_bytes = link.serialize(hdf5_pure_format::OffsetWidth::Eight);
+    assert!(hdf5_pure_format::link_is_named(&link_bytes, "data"));
+    assert_eq!(
+        hdf5_pure_format::LinkMessage::parse(&link_bytes, 8),
+        Ok(link)
+    );
+
+    let attribute_info = hdf5_pure_format::AttributeInfoMessage {
+        max_creation_index: Some(2),
+        indexes_creation_order: true,
+        fractal_heap_address: Some(hdf5_pure_format::StoredAddress::new(4096)),
+        btree_name_index_address: Some(hdf5_pure_format::StoredAddress::new(8192)),
+        btree_creation_order_address: None,
+    };
+    let attribute_info_bytes = attribute_info.serialize(hdf5_pure_format::OffsetWidth::Eight);
+    assert_eq!(
+        hdf5_pure_format::AttributeInfoMessage::parse(&attribute_info_bytes, 8),
+        Ok(attribute_info)
+    );
+
+    assert_eq!(
+        hdf5_pure_format::LinkInfoMessage::parse(&[0, 0, 0xFF, 0xFF, 0xFF, 0xFF], 2),
+        Ok(hdf5_pure_format::LinkInfoMessage {
+            max_creation_order: None,
+            fractal_heap_address: None,
+            btree_name_index_address: None,
+            btree_creation_order_address: None,
+        })
+    );
+}
