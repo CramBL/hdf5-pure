@@ -313,6 +313,7 @@ use crate::type_builders::{
     make_i16_type, make_i32_type, make_i64_type, make_u8_type, make_u16_type, make_u32_type,
     make_u64_type, patch_vl_refs, patch_vl_refs_masked, write_reference_address,
 };
+use crate::width::OffsetWidth;
 use crate::width::UintWidth;
 use crate::{DatatypeByteOrder, signature};
 
@@ -14637,7 +14638,7 @@ fn modernize_shared_reference(
     let reference = crate::shared_message::parse_shared_ref(body, offset_size, length_size)?;
     Ok(match reference.location {
         crate::shared_message::SharedLocation::ObjectHeader(addr) => {
-            crate::shared_message::encode_committed_ref(addr, offset_size)
+            crate::shared_message::encode_committed_ref(addr, OffsetWidth::try_from(offset_size)?)
         }
         crate::shared_message::SharedLocation::SohmHeap(id) => {
             crate::shared_message::encode_sohm_ref(&id)
@@ -15318,7 +15319,10 @@ mod tests {
         };
         let mut bytes = message_record(
             MessageType::DATATYPE,
-            &crate::shared_message::encode_committed_ref(StoredAddress::new(248), OFFSET_SIZE),
+            &crate::shared_message::encode_committed_ref(
+                StoredAddress::new(248),
+                crate::file_writer::OFFSET_WIDTH,
+            ),
         );
         bytes[3] = MessageFlags::SHARED.get();
         let tree = CopyTree::DatasetVerbatim {
