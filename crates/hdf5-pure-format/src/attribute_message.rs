@@ -612,8 +612,8 @@ mod tests {
     }
 
     #[test]
-    fn truncated_attribute_error() {
-        let data = [1u8]; // too short
+    fn a_one_byte_message_is_unexpected_eof() {
+        let data = [1u8];
         let err = AttributeMessage::parse(&data, 8).unwrap_err();
         assert_eq!(
             err,
@@ -625,16 +625,16 @@ mod tests {
     }
 
     #[test]
-    fn invalid_version_error() {
+    fn version_5_is_an_invalid_attribute_version() {
         let data = [5u8, 0, 0, 0, 0, 0, 0, 0, 0, 0];
         let err = AttributeMessage::parse(&data, 8).unwrap_err();
         assert_eq!(err, FormatError::InvalidAttributeVersion(5));
     }
 
-    /// A version 2 attribute message whose datatype field is a reference to a
-    /// committed type, laid out exactly as libhdf5 1.14.6 wrote one: a 10-byte
-    /// shared reference standing where an encoding usually is.
-    fn attr_with_shared_datatype(flags: u8) -> Vec<u8> {
+    /// Returns a version 2 attribute message with the flags byte `flags`, whose datatype field is
+    /// a 10-byte reference to the committed type at address `0x320`, laid out as libhdf5 1.14.6
+    /// wrote one.
+    fn attr_with_committed_reference(flags: u8) -> Vec<u8> {
         attribute::Attribute::new(
             "shared_attr",
             &datatype::committed_reference(0x320),
@@ -664,7 +664,7 @@ mod tests {
 
     #[test]
     fn a_shared_datatype_field_is_resolved_not_decoded() {
-        let data = attr_with_shared_datatype(FLAG_SHARED_DATATYPE);
+        let data = attr_with_committed_reference(FLAG_SHARED_DATATYPE);
         let attr =
             AttributeMessage::parse_resolving(&data, 8, &StubResolver(datatype::f64_le())).unwrap();
 
@@ -681,8 +681,8 @@ mod tests {
     }
 
     #[test]
-    fn the_same_bytes_without_the_flag_are_refused_as_a_zero_width_type() {
-        let data = attr_with_shared_datatype(0);
+    fn the_same_bytes_without_the_flag_are_rejected_as_a_zero_width_type() {
+        let data = attr_with_committed_reference(0);
         let err = AttributeMessage::parse(&data, 8).unwrap_err();
 
         assert_eq!(
@@ -718,8 +718,8 @@ mod tests {
     }
 
     #[test]
-    fn a_shared_datatype_field_is_refused_without_a_resolver() {
-        let data = attr_with_shared_datatype(FLAG_SHARED_DATATYPE);
+    fn a_shared_datatype_field_is_rejected_without_a_resolver() {
+        let data = attr_with_committed_reference(FLAG_SHARED_DATATYPE);
         let err = AttributeMessage::parse(&data, 8).unwrap_err();
         assert_eq!(
             err,
@@ -728,15 +728,15 @@ mod tests {
     }
 
     #[test]
-    fn an_undefined_attribute_flag_bit_is_refused() {
-        let data = attr_with_shared_datatype(0x04);
+    fn an_undefined_attribute_flag_bit_is_rejected() {
+        let data = attr_with_committed_reference(0x04);
         let err = AttributeMessage::parse(&data, 8).unwrap_err();
         assert_eq!(err, FormatError::InvalidAttributeFlags(0x04));
     }
 
     #[test]
     fn a_name_reads_out_of_a_message_whose_datatype_is_a_reference() {
-        let data = attr_with_shared_datatype(FLAG_SHARED_DATATYPE);
+        let data = attr_with_committed_reference(FLAG_SHARED_DATATYPE);
         assert_eq!(AttributeMessage::parse_name(&data).unwrap(), "shared_attr");
         assert_eq!(
             AttributeMessage::parse(&data, 8),
@@ -747,17 +747,14 @@ mod tests {
     }
 
     #[rstest]
-    #[case::shared_datatype(attr_with_shared_datatype(FLAG_SHARED_DATATYPE), true)]
-    #[case::shared_dataspace(attr_with_shared_datatype(FLAG_SHARED_DATASPACE), true)]
-    #[case::no_shared_field(attr_with_shared_datatype(0), false)]
+    #[case::shared_datatype(attr_with_committed_reference(FLAG_SHARED_DATATYPE), true)]
+    #[case::shared_dataspace(attr_with_committed_reference(FLAG_SHARED_DATASPACE), true)]
+    #[case::no_shared_field(attr_with_committed_reference(0), false)]
     #[case::version_1_second_byte_unused(vec![1, 0xFF, 0, 0], false)]
     #[case::truncated(vec![2], true)]
     #[case::empty(Vec::new(), true)]
     #[case::unknown_version(vec![9, 0], true)]
-    fn the_shared_field_screen_reads_the_flags_byte(
-        #[case] message: Vec<u8>,
-        #[case] shares_a_field: bool,
-    ) {
+    fn shares_a_field_reads_the_flags_byte(#[case] message: Vec<u8>, #[case] shares_a_field: bool) {
         assert_eq!(AttributeMessage::shares_a_field(&message), shares_a_field);
     }
 
