@@ -8,13 +8,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
-- `FormatError::Internal` reports a condition that only a bug in this crate can produce, such as a superblock value too wide for its field.
+- `FormatError::Internal` reports a condition that only a bug in this crate can produce, such as a superblock value too wide for its field ([#675](https://github.com/CramBL/hdf5-pure/pull/675)).
 
 ### Fixed
 
-- `AttrValue` is available at the crate root under `no_std` where `alloc` is available ([#635](https://github.com/CramBL/hdf5-pure/pull/635)).
-- With the `zfp` feature, `Dataset::read` reports an error for truncated ZFP chunks. Writes configured through `DatasetBuilder::with_zfp` reject nonzero float blocks whose rate cannot hold their headers ([#620](https://github.com/CramBL/hdf5-pure/pull/620)).
-- With the `zfp` feature, `Dataset::read` decodes partial ZFP blocks followed by Deflate, including chunks whose encoded blocks exceed their unfiltered byte size ([#632](https://github.com/CramBL/hdf5-pure/pull/632)).
+- Fixed `AttrValue` missing from the crate root under `no_std` with `alloc` ([#635](https://github.com/CramBL/hdf5-pure/pull/635)).
+- Fixed `Dataset::read` decoding a truncated ZFP chunk to zeros, and `DatasetBuilder::with_zfp` writing float blocks whose rate cannot hold their headers ([#620](https://github.com/CramBL/hdf5-pure/pull/620)).
+- Fixed `Dataset::read` failing on ZFP chunks whose partial blocks are followed by Deflate ([#632](https://github.com/CramBL/hdf5-pure/pull/632)).
+- Fixed truncated length fields when writing a link name of 4 GiB or more, or a version 2 object header whose first chunk reaches 4 GiB ([#675](https://github.com/CramBL/hdf5-pure/pull/675)).
 
 ## [0.47.0] - 2026-09-20
 
