@@ -19,7 +19,7 @@ use crate::source::SourceMetadata;
 /// The kind of object a fractal-heap heap ID refers to, encoded in bits 4-5 of
 /// the heap ID's first byte (bits 6-7 are the format version, which must be 0).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum HeapIdType {
+enum FractalHeapIdType {
     /// Stored in the heap's managed direct/indirect blocks.
     Managed,
     /// Too large to manage; stored directly in the file and indexed by the
@@ -33,7 +33,7 @@ enum HeapIdType {
 /// holding object bytes) or a nested indirect block. Returned by
 /// [`FractalHeapHeader::find_child_for_offset`] so the buffered and streaming
 /// readers share the indirect-block navigation logic.
-enum HeapChild {
+enum FractalHeapChild {
     Direct {
         addr: StoredAddress,
         block_size: u64,
@@ -239,7 +239,7 @@ impl HugeObjectIndex {
 
 /// What a huge object's heap ID resolves to: its location outright, or the id
 /// the heap's huge-object index knows it by.
-pub enum HugeReference {
+pub enum HugeObjectReference {
     Inline { addr: StoredAddress, len: u64 },
     Indexed(u64),
 }
@@ -295,9 +295,9 @@ impl<'h> HeapObjectReader<'h> {
     /// through the huge-objects v2 B-tree); tiny objects are encoded in the ID.
     pub fn read(&mut self, file_data: &[u8], id_bytes: &[u8]) -> Result<Vec<u8>, FormatError> {
         match FractalHeapHeader::heap_id_type(id_bytes)? {
-            HeapIdType::Managed => self.read_managed_object(file_data, id_bytes),
-            HeapIdType::Huge => self.read_huge(file_data, id_bytes),
-            HeapIdType::Tiny => self.header.decode_tiny_id(id_bytes),
+            FractalHeapIdType::Managed => self.read_managed_object(file_data, id_bytes),
+            FractalHeapIdType::Huge => self.read_huge(file_data, id_bytes),
+            FractalHeapIdType::Tiny => self.header.decode_tiny_id(id_bytes),
         }
     }
 
@@ -308,9 +308,9 @@ impl<'h> HeapObjectReader<'h> {
         id_bytes: &[u8],
     ) -> Result<Vec<u8>, FormatError> {
         match FractalHeapHeader::heap_id_type(id_bytes)? {
-            HeapIdType::Managed => self.read_managed_object_from_source(source, id_bytes),
-            HeapIdType::Huge => self.read_huge_from_source(source, id_bytes),
-            HeapIdType::Tiny => self.header.decode_tiny_id(id_bytes),
+            FractalHeapIdType::Managed => self.read_managed_object_from_source(source, id_bytes),
+            FractalHeapIdType::Huge => self.read_huge_from_source(source, id_bytes),
+            FractalHeapIdType::Tiny => self.header.decode_tiny_id(id_bytes),
         }
     }
 
@@ -357,8 +357,8 @@ impl<'h> HeapObjectReader<'h> {
                 .header
                 .decode_huge_id(id_bytes, self.offset_size, self.length_size)?
             {
-                HugeReference::Inline { addr, len } => (addr, len),
-                HugeReference::Indexed(huge_id) => {
+                HugeObjectReference::Inline { addr, len } => (addr, len),
+                HugeObjectReference::Indexed(huge_id) => {
                     let (offset_size, length_size) = (self.offset_size, self.length_size);
                     let btree_addr = self.header.btree_huge_objects_address.get().to_usize()?;
                     self.locate_huge(huge_id, Backend::Buffered, || {
@@ -383,8 +383,8 @@ impl<'h> HeapObjectReader<'h> {
                 .header
                 .decode_huge_id(id_bytes, self.offset_size, self.length_size)?
             {
-                HugeReference::Inline { addr, len } => (addr, len),
-                HugeReference::Indexed(huge_id) => {
+                HugeObjectReference::Inline { addr, len } => (addr, len),
+                HugeObjectReference::Indexed(huge_id) => {
                     let (offset_size, length_size) = (self.offset_size, self.length_size);
                     let btree_addr = self.header.btree_huge_objects_address.get();
                     self.locate_huge(huge_id, Backend::Streaming, || {
@@ -504,7 +504,7 @@ impl<'h> HeapObjectReader<'h> {
             target_offset,
             self.offset_size,
         )? {
-            Some(HeapChild::Direct {
+            Some(FractalHeapChild::Direct {
                 addr,
                 block_size,
                 heap_offset,
@@ -516,7 +516,7 @@ impl<'h> HeapObjectReader<'h> {
                 target_offset,
                 length,
             ),
-            Some(HeapChild::Indirect {
+            Some(FractalHeapChild::Indirect {
                 addr,
                 nrows: child_nrows,
                 heap_offset,
@@ -624,7 +624,7 @@ impl<'h> HeapObjectReader<'h> {
             target_offset,
             self.offset_size,
         )? {
-            Some(HeapChild::Direct {
+            Some(FractalHeapChild::Direct {
                 addr, heap_offset, ..
             }) => self.read_from_direct_block_from_source(
                 source,
@@ -633,7 +633,7 @@ impl<'h> HeapObjectReader<'h> {
                 target_offset,
                 length,
             ),
-            Some(HeapChild::Indirect {
+            Some(FractalHeapChild::Indirect {
                 addr,
                 nrows: child_nrows,
                 heap_offset,
@@ -899,7 +899,7 @@ impl FractalHeapHeader {
         id_bytes: &[u8],
         offset_size: u8,
         length_size: u8,
-    ) -> Result<HugeReference, FormatError> {
+    ) -> Result<HugeObjectReference, FormatError> {
         if self.io_filter_encoded_length > 0 {
             return Err(FormatError::UnsupportedFilteredHeapObject);
         }
@@ -909,7 +909,7 @@ impl FractalHeapHeader {
             // The address and length are stored inline in the heap ID.
             let addr = StoredAddress::new(read_offset(payload, 0, offset_size)?);
             let len = read_length(payload, offset_size as usize, length_size)?;
-            return Ok(HugeReference::Inline { addr, len });
+            return Ok(HugeObjectReference::Inline { addr, len });
         }
 
         // Indirect: the heap ID holds a B-tree key (the huge object ID); the
@@ -918,20 +918,20 @@ impl FractalHeapHeader {
         if is_undefined_addr(self.btree_huge_objects_address.get(), offset_size) {
             return Err(FormatError::HugeObjectNotFound(huge_id));
         }
-        Ok(HugeReference::Indexed(huge_id))
+        Ok(HugeObjectReference::Indexed(huge_id))
     }
 
     /// Classify a heap ID by its type bits (bits 4-5 of byte 0). Bits 6-7 carry
     /// the format version, which must be 0.
-    fn heap_id_type(id_bytes: &[u8]) -> Result<HeapIdType, FormatError> {
+    fn heap_id_type(id_bytes: &[u8]) -> Result<FractalHeapIdType, FormatError> {
         let byte0 = *id_bytes.first().ok_or(FormatError::UnexpectedEof {
             expected: 1,
             available: 0,
         })?;
         match (byte0 >> 4) & 0x03 {
-            0 => Ok(HeapIdType::Managed),
-            1 => Ok(HeapIdType::Huge),
-            2 => Ok(HeapIdType::Tiny),
+            0 => Ok(FractalHeapIdType::Managed),
+            1 => Ok(FractalHeapIdType::Huge),
+            2 => Ok(FractalHeapIdType::Tiny),
             other => Err(FormatError::InvalidHeapIdType(other)),
         }
     }
@@ -964,7 +964,7 @@ impl FractalHeapHeader {
         iblock_heap_offset: u64,
         target_offset: u64,
         offset_size: u8,
-    ) -> Result<Option<HeapChild>, FormatError> {
+    ) -> Result<Option<FractalHeapChild>, FormatError> {
         ensure_len(block, 0, 4)?;
         if &block[0..4] != b"FHIB" {
             return Err(FormatError::InvalidFractalHeapSignature);
@@ -1003,7 +1003,7 @@ impl FractalHeapHeader {
                 if !is_undefined_addr(child_addr, offset_size) {
                     let block_end = current_heap_offset.saturating_add(block_size);
                     if target_offset >= current_heap_offset && target_offset < block_end {
-                        return Ok(Some(HeapChild::Direct {
+                        return Ok(Some(FractalHeapChild::Direct {
                             addr: StoredAddress::new(child_addr),
                             block_size,
                             heap_offset: current_heap_offset,
@@ -1031,7 +1031,7 @@ impl FractalHeapHeader {
                             reason = "fractal-heap row count is log-scale (bounded by \
                                       max_heap_size bits), so it fits u16"
                         )]
-                        return Ok(Some(HeapChild::Indirect {
+                        return Ok(Some(FractalHeapChild::Indirect {
                             addr: StoredAddress::new(child_addr),
                             nrows: child_nrows as u16,
                             heap_offset: current_heap_offset,
@@ -1300,15 +1300,15 @@ mod tests {
         // Type is bits 4-5; the version (bits 6-7) must not be read as type.
         assert_eq!(
             FractalHeapHeader::heap_id_type(&[0x00]).unwrap(),
-            HeapIdType::Managed
+            FractalHeapIdType::Managed
         );
         assert_eq!(
             FractalHeapHeader::heap_id_type(&[0x10]).unwrap(),
-            HeapIdType::Huge
+            FractalHeapIdType::Huge
         );
         assert_eq!(
             FractalHeapHeader::heap_id_type(&[0x20]).unwrap(),
-            HeapIdType::Tiny
+            FractalHeapIdType::Tiny
         );
         // Reserved type 3.
         assert_eq!(
@@ -1318,7 +1318,7 @@ mod tests {
         // Version bits set (0xC0) must not change the decoded type.
         assert_eq!(
             FractalHeapHeader::heap_id_type(&[0xC0 | 0x10]).unwrap(),
-            HeapIdType::Huge
+            FractalHeapIdType::Huge
         );
     }
 
