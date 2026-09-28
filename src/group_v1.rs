@@ -118,8 +118,12 @@ pub fn resolve_v1_group_entries_from_source<S: Source + ?Sized>(
     let mut entries = Vec::new();
     for snod_addr in snod_addrs {
         let snod_offset = base_address.absolute(snod_addr)?;
-        let snod =
-            SymbolTableNode::parse_from_source(source, snod_offset, offset_size, length_size)?;
+        let snod = SymbolTableNode::parse_from_source(
+            &SourceMetadata(source),
+            snod_offset,
+            offset_size,
+            length_size,
+        )?;
         for entry in &snod.entries {
             let name = heap.read_string_in_segment(&segment, entry.link_name_offset)?;
             entries.push(GroupEntry {

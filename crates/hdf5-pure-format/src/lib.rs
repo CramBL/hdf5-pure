@@ -39,6 +39,7 @@ mod object_header_writer;
 mod shared_message;
 mod signature;
 mod superblock;
+mod symbol_table;
 mod width;
 
 pub use access_mode::AccessMode;
@@ -142,6 +143,9 @@ pub use superblock::Superblock;
 pub use superblock::parse_superblock;
 pub use superblock::parse_superblock_from_source;
 pub use superblock::serialize_superblock;
+pub use symbol_table::SymbolTableEntry;
+pub use symbol_table::SymbolTableMessage;
+pub use symbol_table::SymbolTableNode;
 pub use width::LengthWidth;
 pub use width::OffsetWidth;
 pub use width::UintWidth;

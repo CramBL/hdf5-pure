@@ -18,6 +18,9 @@ use hdf5_pure_format::MessageType;
 use hdf5_pure_format::OffsetWidth;
 use hdf5_pure_format::SharedResolver;
 use hdf5_pure_format::StoredAddress;
+use hdf5_pure_format::SymbolTableEntry;
+use hdf5_pure_format::SymbolTableMessage;
+use hdf5_pure_format::SymbolTableNode;
 use hdf5_pure_format::V3_FLAGS_DEFAULT;
 use rstest::rstest;
 use test_util::attribute;
@@ -25,6 +28,7 @@ use test_util::dataspace;
 use test_util::datatype;
 use test_util::image::Image;
 use test_util::local_heap;
+use test_util::symbol_table;
 use test_util::widths::Widths;
 
 #[test]
@@ -261,6 +265,39 @@ fn a_local_heap_reads_its_names_through_the_public_api() {
     assert_eq!(
         expected.read_string_in_segment(&segment.bytes, segment.offset_of(0)),
         Ok("alpha".into())
+    );
+}
+
+#[test]
+fn symbol_table_structures_parse_through_the_public_api() {
+    let mut message = 0x100u64.to_le_bytes().to_vec();
+    message.extend_from_slice(&0x200u64.to_le_bytes());
+    assert_eq!(
+        SymbolTableMessage::parse(&message, 8),
+        Ok(SymbolTableMessage {
+            btree_address: StoredAddress::new(0x100),
+            local_heap_address: StoredAddress::new(0x200),
+        })
+    );
+
+    let entry = symbol_table::Entry {
+        cache_type: 1,
+        scratch_pad: [7; symbol_table::SCRATCH_PAD],
+        ..symbol_table::Entry::new(8, 0x300)
+    };
+    let node = symbol_table::node(&[entry], Widths::EIGHT);
+    let expected = SymbolTableNode {
+        entries: vec![SymbolTableEntry {
+            link_name_offset: 8,
+            object_header_address: StoredAddress::new(0x300),
+            cache_type: 1,
+            scratch_pad: [7; 16],
+        }],
+    };
+    assert_eq!(SymbolTableNode::parse(&node, 0, 8, 8), Ok(expected.clone()));
+    assert_eq!(
+        SymbolTableNode::parse_from_source(node.as_slice(), 0, 8, 8),
+        Ok(expected)
     );
 }
 
