@@ -11,7 +11,7 @@
 //! by inserting records one at a time — balanced, all leaves at one depth, no
 //! node over capacity — without reproducing its split-and-promote machinery.
 //!
-//! Node capacities come from [`NodeInfo`], the table
+//! Node capacities come from [`BTreeV2NodeInfo`], the table
 //! [`btree_v2`](crate::btree_v2) already computes to decode a tree's
 //! variable-width child pointers, so an emitted tree cannot declare a geometry
 //! this crate would then read it back with differently.
@@ -20,13 +20,13 @@
 use alloc::{vec, vec::Vec};
 
 use crate::address::StoredAddress;
-use crate::btree_v2::NodeInfo;
+use crate::btree_v2::BTreeV2NodeInfo;
 
 /// The node size the reference C library uses for every B-tree v2 this crate
 /// emits: `H5A_NAME_BT2_NODE_SIZE` for the attribute name index and
 /// `H5HF_HUGE_BT2_NODE_SIZE` for a fractal heap's huge-object index are both
 /// 512 bytes.
-pub(crate) const NODE_SIZE: u32 = 512;
+pub(crate) const BTREE_V2_NODE_SIZE: u32 = 512;
 
 /// Split threshold, as a percentage of a node's capacity
 /// (`H5A_NAME_BT2_SPLIT_PERC` and its siblings, all 100).
@@ -64,7 +64,7 @@ pub(crate) struct BTreeV2Plan {
     /// Every node, children before parents, so the root is last and a parent's
     /// children always have smaller indices than it does.
     nodes: Vec<PlannedNode>,
-    info: NodeInfo,
+    info: BTreeV2NodeInfo,
 }
 
 /// A serialized tree: a header and the block of nodes it points into.
@@ -76,7 +76,7 @@ pub(crate) struct BTreeV2Image {
 }
 
 /// On-disk size of a v2 B-tree header.
-pub(crate) const fn header_size(offset_size: u8, length_size: u8) -> usize {
+pub(crate) const fn btree_v2_header_size(offset_size: u8, length_size: u8) -> usize {
     // signature(4) + version(1) + type(1) + node size(4) + record size(2) +
     // depth(2) + split %(1) + merge %(1) + root address + records in root(2) +
     // total records + checksum(4)
@@ -121,8 +121,12 @@ impl BTreeV2Plan {
         node_size: u32,
         offset_size: u8,
     ) -> Option<BTreeV2Plan> {
-        let (info, depth) =
-            NodeInfo::for_record_count(node_size, record_size, offset_size, record_count as u64)?;
+        let (info, depth) = BTreeV2NodeInfo::for_record_count(
+            node_size,
+            record_size,
+            offset_size,
+            record_count as u64,
+        )?;
 
         let mut nodes = Vec::new();
         if record_count == 0 {
@@ -219,7 +223,7 @@ impl BTreeV2Plan {
         }
 
         let root = self.nodes.last().expect("a plan always has a root");
-        let mut header = Vec::with_capacity(header_size(offset_size, length_size));
+        let mut header = Vec::with_capacity(btree_v2_header_size(offset_size, length_size));
         header.extend_from_slice(b"BTHD");
         header.push(0); // version
         header.push(self.tree_type);
@@ -236,7 +240,7 @@ impl BTreeV2Plan {
         #[expect(
             clippy::cast_possible_truncation,
             reason = "the root's own record count is bounded by its level's capacity, which \
-                      `NodeInfo` derives from the node size — far below u16::MAX for any node \
+                      `BTreeV2NodeInfo` derives from the node size — far below u16::MAX for any node \
                       size this crate emits"
         )]
         let root_nrec = root.records.len() as u16;
@@ -244,7 +248,7 @@ impl BTreeV2Plan {
         write_uint(&mut header, self.total_records, length_size as usize);
         let checksum = crate::checksum::jenkins_lookup3(&header);
         header.extend_from_slice(&checksum.to_le_bytes());
-        debug_assert_eq!(header.len(), header_size(offset_size, length_size));
+        debug_assert_eq!(header.len(), btree_v2_header_size(offset_size, length_size));
 
         BTreeV2Image { header, nodes }
     }
@@ -279,7 +283,7 @@ fn min_records(depth: u16) -> u64 {
 fn plan_subtree(
     count: usize,
     depth: u16,
-    info: &NodeInfo,
+    info: &BTreeV2NodeInfo,
     next_record: &mut usize,
     out: &mut Vec<PlannedNode>,
 ) -> Option<usize> {
@@ -371,19 +375,20 @@ mod tests {
     /// Build a tree, then read it back through the parser this crate ships,
     /// returning the record indices in traversal order alongside the depth.
     fn round_trip(count: usize, record_size: u16) -> (u16, Vec<u64>) {
-        let plan =
-            BTreeV2Plan::new(8, count, record_size, NODE_SIZE, OFFSET_SIZE).expect("plannable");
+        let plan = BTreeV2Plan::new(8, count, record_size, BTREE_V2_NODE_SIZE, OFFSET_SIZE)
+            .expect("plannable");
         let records = numbered_records(count, record_size);
 
         // Put the header at 0 and the nodes right after it, then parse the
         // whole thing back out of one buffer.
-        let nodes_address = StoredAddress::new(header_size(OFFSET_SIZE, LENGTH_SIZE) as u64);
+        let nodes_address =
+            StoredAddress::new(btree_v2_header_size(OFFSET_SIZE, LENGTH_SIZE) as u64);
         let image = plan.serialize(&records, nodes_address, OFFSET_SIZE, LENGTH_SIZE);
         let mut file = image.header.clone();
         file.extend_from_slice(&image.nodes);
 
         let header = BTreeV2Header::parse(&file, 0, OFFSET_SIZE, LENGTH_SIZE).expect("header");
-        assert_eq!(header.node_size, NODE_SIZE);
+        assert_eq!(header.node_size, BTREE_V2_NODE_SIZE);
         assert_eq!(header.total_records, count as u64);
         let read =
             collect_btree_v2_records(&file, &header, OFFSET_SIZE, LENGTH_SIZE).expect("read");
@@ -440,7 +445,8 @@ mod tests {
     #[test]
     fn no_node_exceeds_its_capacity_or_sits_empty() {
         for count in [1usize, 30, 569, 570, 10_260, 40_000] {
-            let plan = BTreeV2Plan::new(8, count, 17, NODE_SIZE, OFFSET_SIZE).expect("plannable");
+            let plan =
+                BTreeV2Plan::new(8, count, 17, BTREE_V2_NODE_SIZE, OFFSET_SIZE).expect("plannable");
             for node in &plan.nodes {
                 assert!(
                     !node.records.is_empty(),
@@ -471,7 +477,8 @@ mod tests {
     /// computed from an index rather than tracked while serializing.
     #[test]
     fn nodes_are_all_one_node_size_long() {
-        let plan = BTreeV2Plan::new(8, 5_000, 17, NODE_SIZE, OFFSET_SIZE).expect("plannable");
+        let plan =
+            BTreeV2Plan::new(8, 5_000, 17, BTREE_V2_NODE_SIZE, OFFSET_SIZE).expect("plannable");
         let image = plan.serialize(
             &numbered_records(5_000, 17),
             StoredAddress::new(4_096),
@@ -479,7 +486,7 @@ mod tests {
             LENGTH_SIZE,
         );
         assert_eq!(image.nodes.len() as u64, plan.nodes_size());
-        assert_eq!(image.nodes.len() % NODE_SIZE as usize, 0);
+        assert_eq!(image.nodes.len() % BTREE_V2_NODE_SIZE as usize, 0);
     }
 
     /// A node that fits only one record beside an internal node's pointers has

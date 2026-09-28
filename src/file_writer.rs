@@ -656,7 +656,7 @@ pub(crate) fn dense_attrs_plan(
 
     // Every v2 B-tree header this emitter writes has the same fixed layout, so
     // one size covers both the name index and the huge-objects index.
-    let bthd_size = btree_v2_write::header_size(OFFSET_SIZE, LENGTH_SIZE);
+    let bthd_size = btree_v2_write::btree_v2_header_size(OFFSET_SIZE, LENGTH_SIZE);
     debug_assert_eq!(
         bthd_size,
         4 + 1 + 1 + 4 + 2 + 2 + 1 + 1 + OFFSET_SIZE as usize + 2 + LENGTH_SIZE as usize + 4
@@ -671,7 +671,7 @@ pub(crate) fn dense_attrs_plan(
         DENSE_ATTR_NAME_BTREE_TYPE,
         attrs.len(),
         DENSE_ATTR_BTREE_RECORD,
-        btree_v2_write::NODE_SIZE,
+        btree_v2_write::BTREE_V2_NODE_SIZE,
         OFFSET_SIZE,
     )
     .expect("a 512-byte node holds 29 name records, enough to plan any count");
@@ -680,7 +680,7 @@ pub(crate) fn dense_attrs_plan(
             DENSE_ATTR_CORDER_BTREE_TYPE,
             attrs.len(),
             DENSE_ATTR_CORDER_BTREE_RECORD,
-            btree_v2_write::NODE_SIZE,
+            btree_v2_write::BTREE_V2_NODE_SIZE,
             OFFSET_SIZE,
         )
         .expect("a 512-byte node holds 38 creation-order records, enough to plan any count")
@@ -690,7 +690,7 @@ pub(crate) fn dense_attrs_plan(
             DENSE_ATTR_HUGE_BTREE_TYPE,
             huge_count,
             DENSE_ATTR_HUGE_BTREE_RECORD,
-            btree_v2_write::NODE_SIZE,
+            btree_v2_write::BTREE_V2_NODE_SIZE,
             OFFSET_SIZE,
         )
         .expect("a 512-byte node holds 20 huge records, enough to plan any count")
@@ -4826,8 +4826,8 @@ mod tests {
     #[test]
     fn a_fixed_node_size_keeps_the_derived_count_width_at_one_byte() {
         for record_size in [DENSE_ATTR_BTREE_RECORD, DENSE_ATTR_HUGE_BTREE_RECORD] {
-            let (info, depth) = crate::btree_v2::NodeInfo::for_record_count(
-                btree_v2_write::NODE_SIZE,
+            let (info, depth) = crate::btree_v2::BTreeV2NodeInfo::for_record_count(
+                btree_v2_write::BTREE_V2_NODE_SIZE,
                 record_size,
                 OFFSET_SIZE,
                 0,
