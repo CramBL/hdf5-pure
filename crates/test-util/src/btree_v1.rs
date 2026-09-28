@@ -42,6 +42,23 @@ pub fn node(
     node
 }
 
+/// The bytes of one node of `node_type` whose keys are group keys, the offsets of link names in the
+/// group's local heap.
+#[track_caller]
+pub fn node_with_group_keys(
+    node_type: NodeType,
+    level: u8,
+    link_name_offsets: &[u64],
+    children: &[u64],
+    widths: Widths,
+) -> Vec<u8> {
+    let keys: Vec<_> = link_name_offsets
+        .iter()
+        .map(|&offset| group_key(offset, widths))
+        .collect();
+    node(node_type, level, &keys, children, widths)
+}
+
 /// The key of a type 0 node: the offset in the group's local heap of the first
 /// link name in the subtree below it.
 pub fn group_key(link_name_offset: u64, widths: Widths) -> Vec<u8> {

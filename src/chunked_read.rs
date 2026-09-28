@@ -11,7 +11,6 @@ use std::borrow::Cow;
 use core::num::NonZeroUsize;
 
 use crate::address::StoredAddress;
-use crate::btree_v1::btree_v1_node_header_size;
 use crate::bytes::read_offset;
 use crate::chunk_cache::{CachePass, ChunkCache};
 use crate::chunk_grid::{ChunkGrid, GridOrder};
@@ -249,7 +248,7 @@ fn collect_chunk_info_inner(
     let os = offset_size as usize;
 
     // Parse B-tree v1 header
-    let header_size = btree_v1_node_header_size(offset_size);
+    let header_size = hdf5_pure_format::btree_v1_node_header_size(offset_size);
     if header_size > file_data.len() || offset > file_data.len() - header_size {
         return Err(FormatError::UnexpectedEof {
             expected: offset.saturating_add(header_size),
@@ -407,7 +406,7 @@ fn collect_chunk_btree_node_spans_inner<S: Source + ?Sized>(
         ));
     }
     let os = offset_size as usize;
-    let header_size = btree_v1_node_header_size(offset_size);
+    let header_size = hdf5_pure_format::btree_v1_node_header_size(offset_size);
 
     // Node header: signature(4) + type(1) + level(1) + entries_used(2) + 2 siblings.
     let header = source.read_metadata_at(btree_address.get(), header_size)?;
@@ -498,7 +497,7 @@ fn collect_chunk_info_from_source_inner<S: Source + ?Sized>(
         ));
     }
     let os = offset_size as usize;
-    let header_size = btree_v1_node_header_size(offset_size);
+    let header_size = hdf5_pure_format::btree_v1_node_header_size(offset_size);
 
     // Node header: signature(4) + type(1) + level(1) + entries_used(2) + 2 siblings.
     let header = source.read_metadata_at(btree_address.get(), header_size)?;

@@ -1,5 +1,6 @@
 use hdf5_pure_core::__private::BaseAddressExt;
 use hdf5_pure_format::AttributeMessage;
+use hdf5_pure_format::BTreeV1Node;
 use hdf5_pure_format::BaseAddress;
 use hdf5_pure_format::Dataspace;
 use hdf5_pure_format::DataspaceType;
@@ -24,6 +25,7 @@ use hdf5_pure_format::SymbolTableNode;
 use hdf5_pure_format::V3_FLAGS_DEFAULT;
 use rstest::rstest;
 use test_util::attribute;
+use test_util::btree_v1;
 use test_util::dataspace;
 use test_util::datatype;
 use test_util::image::Image;
@@ -297,6 +299,32 @@ fn symbol_table_structures_parse_through_the_public_api() {
     assert_eq!(SymbolTableNode::parse(&node, 0, 8, 8), Ok(expected.clone()));
     assert_eq!(
         SymbolTableNode::parse_from_source(node.as_slice(), 0, 8, 8),
+        Ok(expected)
+    );
+}
+
+#[test]
+fn a_version_1_group_btree_node_parses_through_the_public_api() {
+    let widths = Widths::new(4, 8);
+    let keys = [
+        btree_v1::group_key(0, widths),
+        btree_v1::group_key(6, widths),
+    ];
+    let node = btree_v1::node(btree_v1::NodeType::GROUP, 0, &keys, &[0x300], widths);
+    let expected = BTreeV1Node {
+        node_type: 0,
+        node_level: 0,
+        entries_used: 1,
+        left_sibling: None,
+        right_sibling: None,
+        keys: vec![0, 6],
+        children: vec![StoredAddress::new(0x300)],
+    };
+
+    assert_eq!(hdf5_pure_format::btree_v1_node_header_size(4), 16);
+    assert_eq!(BTreeV1Node::parse(&node, 0, 4, 8), Ok(expected.clone()));
+    assert_eq!(
+        BTreeV1Node::parse_from_source(node.as_slice(), 0, 4, 8),
         Ok(expected)
     );
 }
