@@ -103,7 +103,7 @@ pub(crate) fn build_chunked_dataset_oh(
     if let Some(pm) = pipeline_message {
         w.add_message(MessageType::FILTER_PIPELINE, pm.to_vec());
     }
-    add_attributes(&mut w, attrs, attr_info);
+    add_attributes(&mut w, attrs, attr_info)?;
     w.serialize()
 }
 
@@ -157,7 +157,7 @@ pub(crate) fn build_dataset_oh(
     dl.extend_from_slice(&data_addr.get().to_le_bytes());
     dl.extend_from_slice(&data_size.to_le_bytes());
     w.add_message(MessageType::DATA_LAYOUT, dl);
-    add_attributes(&mut w, attrs, attr_info);
+    add_attributes(&mut w, attrs, attr_info)?;
     w.serialize()
 }
 
@@ -251,7 +251,7 @@ pub(crate) fn build_group_oh(
     for link in links {
         w.add_message(MessageType::LINK, link.serialize(OFFSET_WIDTH));
     }
-    add_attributes(&mut w, attrs, attr_info);
+    add_attributes(&mut w, attrs, attr_info)?;
     w.serialize()
 }
 
@@ -264,11 +264,16 @@ pub(crate) fn build_group_oh(
 /// The dense case takes the Attribute Info message rather than the heap itself
 /// because that message is all a header needs. A sizing pass can therefore get
 /// its header size from a [`DenseAttrPlan`] without the heap's bytes existing.
+///
+/// # Errors
+///
+/// Returns [`FormatError::AttributeFieldTooLong`] if an attribute's name, datatype, or dataspace
+/// is longer than its 2-byte size field can hold.
 fn add_attributes(
     w: &mut ObjectHeaderWriter,
     attrs: &[AttributeMessage],
     attr_info: Option<&[u8]>,
-) {
+) -> Result<(), FormatError> {
     if let Some(message) = attr_info {
         w.add_message(MessageType::ATTRIBUTE_INFO, message.to_vec());
     } else {
@@ -279,9 +284,13 @@ fn add_attributes(
             );
         }
         for attr in attrs {
-            w.add_message(MessageType::ATTRIBUTE, attr.serialize(LENGTH_SIZE));
+            w.add_message(
+                MessageType::ATTRIBUTE,
+                attr.serialize(OFFSET_WIDTH, LENGTH_SIZE)?,
+            );
         }
     }
+    Ok(())
 }
 
 /// Returns the link name `name` spells.
@@ -354,11 +363,21 @@ const DENSE_ATTR_BLOCK_OFFSET_BYTES: usize = fractal_heap_write::BLOCK_OFFSET_BY
 /// before their global-heap references were patched embedded the placeholders and
 /// this crate's reader then dropped the attribute; the writer now builds each
 /// heap after that patching, so there is nothing to exclude.
-pub(crate) fn needs_dense_attrs(attrs: &[AttributeMessage]) -> bool {
-    attrs.len() > DENSE_ATTR_THRESHOLD
-        || attrs
-            .iter()
-            .any(|a| a.serialize(LENGTH_SIZE).len() > OBJECT_HEADER_MESSAGE_MAX)
+///
+/// # Errors
+///
+/// Returns [`FormatError::AttributeFieldTooLong`] if an attribute's name, datatype, or dataspace
+/// is longer than its 2-byte size field can hold.
+pub(crate) fn needs_dense_attrs(attrs: &[AttributeMessage]) -> Result<bool, FormatError> {
+    if attrs.len() > DENSE_ATTR_THRESHOLD {
+        return Ok(true);
+    }
+    for a in attrs {
+        if a.serialize(OFFSET_WIDTH, LENGTH_SIZE)?.len() > OBJECT_HEADER_MESSAGE_MAX {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// The largest attribute [`build_dense_attrs`] stores as a managed object: what
@@ -484,25 +503,24 @@ impl DenseAttrCreationOrder {
 /// not, since the blocks holding it are a doubling table rather than one block
 /// sized to the whole set.
 ///
-/// What remains refused is what the attribute message itself cannot encode: its
-/// name, datatype and dataspace lengths live in 2-byte fields, and huge storage
-/// lifts the limit on an attribute's *data*, not on those. Without this check
-/// they would truncate silently rather than fail.
+/// Huge storage lifts the limit on an attribute's data and not on the 2-byte size fields of its
+/// name, datatype, and dataspace, so the check serializes each attribute with
+/// [`AttributeMessage::serialize_v3`], which rejects a field too long for its size field.
 ///
 /// Callers that cannot fall back to a larger layout must refuse rather than
 /// mis-encode (see [`build_dense_attrs`]).
+///
+/// # Errors
+///
+/// Returns [`FormatError::AttributeFieldTooLong`] if an attribute's name, datatype, or dataspace
+/// is longer than its 2-byte size field can hold, [`FormatError::DenseAttributeHeapTooLarge`] if
+/// the managed attributes need more space than the heap can address, and
+/// [`FormatError::ValueTooLargeForPlatform`] if the size of the blocks that hold them does not fit
+/// a `usize`.
 pub(crate) fn dense_attrs_check(attrs: &[AttributeMessage]) -> Result<(), FormatError> {
     let mut managed = Vec::new();
     for a in attrs {
-        if let Some((field, size)) = a.v3_header_field_overflow(LENGTH_SIZE) {
-            return Err(FormatError::AttributeFieldTooLong {
-                name: a.name.clone(),
-                field,
-                size,
-                limit: u16::MAX as usize,
-            });
-        }
-        let size = a.serialize_v3(LENGTH_SIZE).len();
+        let size = a.serialize_v3(OFFSET_WIDTH, LENGTH_SIZE)?.len();
         if size <= DENSE_ATTR_MAX_MANAGED_OBJECT {
             // A managed attribute's bytes go in the heap's direct blocks; a huge
             // one's sit outside them and are bounded only by the file.
@@ -576,10 +594,15 @@ pub(crate) struct DenseAttrPlan {
 /// The caller must have checked [`dense_attrs_check`] first: an attribute set
 /// past the heap's own address space cannot be laid out, and this emitter has
 /// nowhere left to put it.
+///
+/// # Errors
+///
+/// Returns [`FormatError::AttributeFieldTooLong`] if an attribute's name, datatype, or dataspace
+/// is longer than its 2-byte size field can hold.
 pub(crate) fn dense_attrs_plan(
     attrs: &[AttributeMessage],
     creation: DenseAttrCreationOrder,
-) -> DenseAttrPlan {
+) -> Result<DenseAttrPlan, FormatError> {
     debug_assert!(
         match &creation {
             DenseAttrCreationOrder::Untracked => true,
@@ -588,7 +611,10 @@ pub(crate) fn dense_attrs_plan(
         "a tracked set needs one creation index per attribute"
     );
     // Dense attrs use v3 attribute messages (adds character set encoding byte).
-    let serialized: Vec<Vec<u8>> = attrs.iter().map(|a| a.serialize_v3(LENGTH_SIZE)).collect();
+    let serialized: Vec<Vec<u8>> = attrs
+        .iter()
+        .map(|a| a.serialize_v3(OFFSET_WIDTH, LENGTH_SIZE))
+        .collect::<Result<_, _>>()?;
 
     let name_hashes: Vec<u32> = attrs
         .iter()
@@ -728,7 +754,7 @@ pub(crate) fn dense_attrs_plan(
     };
     corder_order.sort_unstable_by_key(|&i| creation.index_of(i));
 
-    DenseAttrPlan {
+    Ok(DenseAttrPlan {
         serialized,
         huge_id_of,
         huge_count,
@@ -749,7 +775,7 @@ pub(crate) fn dense_attrs_plan(
         huge_nodes_off,
         huge_data_off,
         total_len,
-    }
+    })
 }
 
 /// On-disk byte size of the fractal heap header this emitter writes.
@@ -1045,12 +1071,17 @@ const DUMMY_DENSE_BASE: StoredAddress = StoredAddress::new(0);
 /// A caller that has to reserve the heap's span before its bytes exist wants
 /// [`dense_attrs_plan`] and [`DenseAttrPlan::blob_len`] instead; this is the
 /// one-shot form for callers that already know where the heap goes.
+///
+/// # Errors
+///
+/// Returns [`FormatError::AttributeFieldTooLong`] if an attribute's name, datatype, or dataspace
+/// is longer than its 2-byte size field can hold.
 pub(crate) fn build_dense_attrs(
     attrs: &[AttributeMessage],
     creation: DenseAttrCreationOrder,
     heap_address: StoredAddress,
-) -> DenseAttrBlob {
-    dense_attrs_plan(attrs, creation).build(heap_address)
+) -> Result<DenseAttrBlob, FormatError> {
+    Ok(dense_attrs_plan(attrs, creation)?.build(heap_address))
 }
 
 /// Bytes the reference C library uses to encode a limit of `value`
@@ -2453,9 +2484,15 @@ impl FileWriter {
         let dummy_ct_addrs = vec![StoredAddress::new(0); committed.len()];
         let dummy_grp_addrs = vec![StoredAddress::new(0); groups.len()];
 
-        let root_dense = needs_dense_attrs(&root_attrs);
-        let group_dense: Vec<bool> = groups.iter().map(|g| needs_dense_attrs(&g.attrs)).collect();
-        let ds_dense: Vec<bool> = all_ds.iter().map(|d| needs_dense_attrs(&d.attrs)).collect();
+        let root_dense = needs_dense_attrs(&root_attrs)?;
+        let group_dense: Vec<bool> = groups
+            .iter()
+            .map(|g| needs_dense_attrs(&g.attrs))
+            .collect::<Result<_, _>>()?;
+        let ds_dense: Vec<bool> = all_ds
+            .iter()
+            .map(|d| needs_dense_attrs(&d.attrs))
+            .collect::<Result<_, _>>()?;
 
         // A compact attribute is stored as an object-header message, whose size
         // field is 2 bytes wide. An oversized one would be written with a
@@ -2475,7 +2512,7 @@ impl FileWriter {
         // is only what a header can hold — this is a backstop, not the decision.
         fn check_compact_attrs(attrs: &[AttributeMessage]) -> Result<(), FormatError> {
             for a in attrs {
-                let size = a.serialize(LENGTH_SIZE).len();
+                let size = a.serialize(OFFSET_WIDTH, LENGTH_SIZE)?.len();
                 if size > OBJECT_HEADER_MESSAGE_MAX {
                     return Err(FormatError::AttributeMessageTooLarge {
                         name: a.name.clone(),
@@ -2657,7 +2694,8 @@ impl FileWriter {
                     let Some((address, reserved)) = span else {
                         return Ok(None);
                     };
-                    let blob = build_dense_attrs(attrs, DenseAttrCreationOrder::Untracked, address);
+                    let blob =
+                        build_dense_attrs(attrs, DenseAttrCreationOrder::Untracked, address)?;
                     if blob.blob.len() != reserved {
                         return Err(FormatError::SerializationError(format!(
                             "a dense attribute heap built {} bytes into a span of {reserved} \
@@ -2715,7 +2753,7 @@ impl FileWriter {
                 // heap will be, and what its Attribute Info message costs the
                 // header — without emitting the heap, which pass 2 does once at
                 // the address reserved here.
-                let plan = dense_attrs_plan(&g.attrs, DenseAttrCreationOrder::Untracked);
+                let plan = dense_attrs_plan(&g.attrs, DenseAttrCreationOrder::Untracked)?;
                 (
                     build_group_oh(
                         &dummy_links,
@@ -2737,7 +2775,7 @@ impl FileWriter {
             &root_group_indices,
         );
         let (root_oh_size, root_dense_len) = if root_dense {
-            let plan = dense_attrs_plan(&root_attrs, DenseAttrCreationOrder::Untracked);
+            let plan = dense_attrs_plan(&root_attrs, DenseAttrCreationOrder::Untracked)?;
             (
                 build_group_oh(
                     &root_dummy_links,
@@ -2773,7 +2811,7 @@ impl FileWriter {
                 Some(dense_attrs_plan(
                     &d.attrs,
                     DenseAttrCreationOrder::Untracked,
-                ))
+                )?)
             } else {
                 None
             };
@@ -4276,7 +4314,7 @@ mod tests {
                 .iter()
                 .find(|a| a.name == format!("attr_{i:03}"))
                 .unwrap();
-            let v = attr.read_as_f64().unwrap();
+            let v = crate::data_read::read_as_f64(&attr.raw_data, &attr.datatype).unwrap();
             assert!((v[0] - i as f64 * 1.5).abs() < 1e-10);
         }
         assert_eq!(read_dataset_f64(&bytes, "data"), vec![1.0, 2.0, 3.0]);
@@ -4385,9 +4423,12 @@ mod tests {
         // so an empty value still carries a padding byte and would be measured
         // as overhead.
         let probe = build_attr_message(name, &AttrValue::AsciiString("y".to_string()));
-        let overhead = probe.serialize_v3(LENGTH_SIZE).len() - 1;
+        let overhead = probe.serialize_v3(OFFSET_WIDTH, LENGTH_SIZE).unwrap().len() - 1;
         let attr = build_attr_message(name, &AttrValue::AsciiString("y".repeat(size - overhead)));
-        assert_eq!(attr.serialize_v3(LENGTH_SIZE).len(), size);
+        assert_eq!(
+            attr.serialize_v3(OFFSET_WIDTH, LENGTH_SIZE).unwrap().len(),
+            size
+        );
         attr
     }
 
@@ -4400,7 +4441,10 @@ mod tests {
         let many: Vec<AttributeMessage> = (0..40)
             .map(|i| dense_attr_of_size(&format!("a{i}"), 60_000))
             .collect();
-        let total: usize = many.iter().map(|a| a.serialize_v3(LENGTH_SIZE).len()).sum();
+        let total: usize = many
+            .iter()
+            .map(|a| a.serialize_v3(OFFSET_WIDTH, LENGTH_SIZE).unwrap().len())
+            .sum();
         assert!(total > 2_000_000, "expected a multi-megabyte set");
         assert_eq!(dense_attrs_check(&many), Ok(()));
 
@@ -4423,6 +4467,7 @@ mod tests {
                     DenseAttrCreationOrder::Untracked,
                     StoredAddress::new(0)
                 )
+                .unwrap()
                 .blob
             ),
             1
@@ -4434,6 +4479,7 @@ mod tests {
                     DenseAttrCreationOrder::Untracked,
                     StoredAddress::new(0)
                 )
+                .unwrap()
                 .blob
             ),
             0
@@ -4514,7 +4560,7 @@ mod tests {
 
         for (label, attrs) in shapes {
             assert_eq!(dense_attrs_check(&attrs), Ok(()), "{label}");
-            let plan = dense_attrs_plan(&attrs, DenseAttrCreationOrder::Untracked);
+            let plan = dense_attrs_plan(&attrs, DenseAttrCreationOrder::Untracked).unwrap();
             for base in [0u64, 0x1000, 0x8000_0000].map(StoredAddress::new) {
                 let built = plan.build(base);
                 assert_eq!(
@@ -4540,6 +4586,7 @@ mod tests {
             DenseAttrCreationOrder::Untracked,
             StoredAddress::new(0),
         )
+        .unwrap()
         .blob;
         let header = blob
             .windows(4)
@@ -4665,7 +4712,7 @@ mod tests {
         const COUNT: usize = SCRAMBLE.len();
         let (attrs, creation) = scrambled_creation_order();
         let heap_address = StoredAddress::new(0x4000);
-        let built = build_dense_attrs(&attrs, creation, heap_address);
+        let built = build_dense_attrs(&attrs, creation, heap_address).unwrap();
 
         let info = crate::attribute_info::AttributeInfoMessage::parse(
             &built.attr_info_message,
@@ -4737,7 +4784,8 @@ mod tests {
             &attrs,
             DenseAttrCreationOrder::Untracked,
             StoredAddress::new(0x4000),
-        );
+        )
+        .unwrap();
         let info = crate::attribute_info::AttributeInfoMessage::parse(
             &built.attr_info_message,
             OFFSET_SIZE,
@@ -4816,6 +4864,7 @@ mod tests {
             DenseAttrCreationOrder::Untracked,
             StoredAddress::new(0),
         )
+        .unwrap()
         .blob;
         assert_eq!(huge_object_count(&blob), 1);
         assert_eq!(managed_object_count(&blob), 1);
@@ -4859,6 +4908,7 @@ mod tests {
             DenseAttrCreationOrder::Untracked,
             StoredAddress::new(0),
         )
+        .unwrap()
         .blob;
         let (address, rows) = root_block(&blob);
         assert_eq!(rows, 0, "one starting-size block still holds this heap");
@@ -4872,6 +4922,7 @@ mod tests {
             DenseAttrCreationOrder::Untracked,
             StoredAddress::new(0),
         )
+        .unwrap()
         .blob;
         let (address, rows) = root_block(&blob);
         assert!(rows >= 1, "content past one block needs an indirect root");
@@ -4931,7 +4982,10 @@ mod tests {
         assert_eq!(attrs.len(), count);
         for i in 0..count {
             let attr = attrs.iter().find(|a| a.name == format!("big{i}")).unwrap();
-            assert_eq!(attr.read_as_string().unwrap(), value(i));
+            assert_eq!(
+                crate::data_read::read_as_strings(&attr.raw_data, &attr.datatype).unwrap(),
+                vec![value(i)]
+            );
         }
     }
 
@@ -4940,7 +4994,7 @@ mod tests {
     /// from a measured probe rather than hard-coded so it tracks the encoder.
     fn largest_fitting_i64_attr_elements() -> usize {
         let one = build_attr_message("boundary", &AttrValue::I64Array(vec![0i64; 1]));
-        let overhead = one.serialize(LENGTH_SIZE).len() - 8;
+        let overhead = one.serialize(OFFSET_WIDTH, LENGTH_SIZE).unwrap().len() - 8;
         (OBJECT_HEADER_MESSAGE_MAX - overhead) / 8
     }
 
@@ -4950,7 +5004,7 @@ mod tests {
         let attr = build_attr_message("boundary", &AttrValue::I64Array(vec![7i64; n]));
         // Pin the probe to the boundary itself: one more element must not fit,
         // or this test would still pass while exercising a tiny attribute.
-        let size = attr.serialize(LENGTH_SIZE).len();
+        let size = attr.serialize(OFFSET_WIDTH, LENGTH_SIZE).unwrap().len();
         assert!(size <= OBJECT_HEADER_MESSAGE_MAX);
         assert!(
             size + 8 > OBJECT_HEADER_MESSAGE_MAX,
@@ -4978,9 +5032,12 @@ mod tests {
             "boundary",
             &AttrValue::I64Array(vec![0i64; n]),
         )];
-        assert!(attrs[0].serialize(LENGTH_SIZE).len() > OBJECT_HEADER_MESSAGE_MAX);
         assert!(
-            needs_dense_attrs(&attrs),
+            attrs[0].serialize(OFFSET_WIDTH, LENGTH_SIZE).unwrap().len()
+                > OBJECT_HEADER_MESSAGE_MAX
+        );
+        assert!(
+            needs_dense_attrs(&attrs).unwrap(),
             "one oversized attribute must select dense storage by itself"
         );
 
@@ -5007,7 +5064,7 @@ mod tests {
             "boundary",
             &AttrValue::I64Array(vec![0i64; n]),
         )];
-        assert!(!needs_dense_attrs(&attrs));
+        assert!(!needs_dense_attrs(&attrs).unwrap());
     }
 
     /// Read a dataset's VL-string byte objects from a freshly-written file.

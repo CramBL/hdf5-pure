@@ -44,13 +44,13 @@ use crate::width::OffsetWidth;
 /// A datatype is the one part of a dataset or attribute that can live outside
 /// the message describing it: `H5Tcommit` puts it in its own object header, and
 /// everything using it carries a reference in place of the encoding. Both forms
-/// decode to the same [`Datatype`](crate::datatype::Datatype), so this is what
-/// separates a message that *names* a type from one that spells it out — a
+/// decode to the same [`Datatype`](crate::Datatype), so this is what
+/// separates a message that *refers to* a type from one that spells it out, a
 /// distinction `h5dump` reports, and a rewrite has to preserve.
 ///
 /// No `Default`: an omitted location silently means `Inline`, and a reference
 /// that decodes as an encoding is the whole defect this type exists to prevent.
-/// Every construction names its variant.
+/// Every construction states its variant.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DatatypeLocation {
     /// Encoded in the message itself.
@@ -71,7 +71,7 @@ impl DatatypeLocation {
         }
     }
 
-    /// Whether the datatype lives in a committed object rather than in the
+    /// Whether the datatype lives in a committed object and not in the
     /// message.
     pub fn is_committed(&self) -> bool {
         !matches!(self, Self::Inline)
