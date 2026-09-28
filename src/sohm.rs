@@ -39,6 +39,7 @@ use alloc::vec::Vec;
 use crate::address::StoredAddress;
 use crate::btree_v2::{BTreeV2Header, collect_btree_v2_records_from_source};
 use crate::bytes::{ensure_len, read_offset, read_optional_offset};
+use crate::checksum;
 use crate::convert::Narrow;
 use crate::error::FormatError;
 use crate::fractal_heap::{FractalHeapHeader, HeapObjectReader};
@@ -202,30 +203,6 @@ pub fn record_len(offset_size: u8) -> usize {
     RECORD_PREFIX_LEN + HEAP_LOCATION_LEN.max(object_header_location)
 }
 
-/// Verify the trailing Jenkins checksum of a metadata block whose last four
-/// bytes hold it.
-#[cfg_attr(not(feature = "checksum"), allow(unused_variables))]
-fn verify_checksum(image: &[u8]) -> Result<(), FormatError> {
-    #[cfg(feature = "checksum")]
-    {
-        let split = image.len() - 4;
-        let stored = u32::from_le_bytes([
-            image[split],
-            image[split + 1],
-            image[split + 2],
-            image[split + 3],
-        ]);
-        let computed = crate::checksum::jenkins_lookup3(&image[..split]);
-        if computed != stored {
-            return Err(FormatError::ChecksumMismatch {
-                expected: stored,
-                computed,
-            });
-        }
-    }
-    Ok(())
-}
-
 impl SohmTable {
     /// Parse a master table from its exact on-disk image.
     ///
@@ -242,7 +219,7 @@ impl SohmTable {
         if &image[..4] != TABLE_SIGNATURE {
             return Err(FormatError::InvalidSohmTableSignature);
         }
-        verify_checksum(image)?;
+        checksum::verify_trailing(image)?;
 
         let mut indexes = Vec::with_capacity(index_count as usize);
         let mut pos = 4;
@@ -415,7 +392,7 @@ pub fn parse_list(
     if &image[..4] != LIST_SIGNATURE {
         return Err(FormatError::InvalidSohmListSignature);
     }
-    verify_checksum(image)?;
+    checksum::verify_trailing(image)?;
 
     let mut records = Vec::with_capacity(message_count as usize);
     for i in 0..message_count as usize {
