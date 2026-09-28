@@ -6,7 +6,7 @@
 
 ## Changelog
 
-One or two sentences per entry: the capability, the public API name, one caveat clause, then the pull request link, `([#NN](url))`. Prefix breaking changes with `**Breaking:**` and list them first in their section.
+One or two sentences per entry: the capability, the public API name, one caveat clause, then the pull request link, `([#NN](url))`. A `Fixed` entry states the bug that no longer happens, "Fixed <the bug>". It describes the behavior that replaces it only where a user may act on it, such as a change in performance or durability. Prefix breaking changes with `**Breaking:**` and list them first in their section.
 
 A released section may open with a summary paragraph, written by hand.
 
