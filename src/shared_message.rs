@@ -17,11 +17,12 @@
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 
+pub use hdf5_pure_format::DatatypeLocation;
 pub use hdf5_pure_format::FHEAP_ID_LEN;
 pub use hdf5_pure_format::SharedLocation;
 pub use hdf5_pure_format::SharedResolver;
-pub use hdf5_pure_format::Unresolvable;
 pub use hdf5_pure_format::committed_address_in;
+#[cfg(any(feature = "std", test))]
 pub use hdf5_pure_format::encode_committed_ref;
 #[cfg(any(feature = "std", test))]
 pub use hdf5_pure_format::encode_sohm_ref;
@@ -37,46 +38,6 @@ use crate::object_header::ObjectHeader;
 use crate::sohm::SohmTable;
 use crate::source::Source;
 use crate::source::SourceMetadata;
-use crate::width::OffsetWidth;
-
-/// Where a datatype is stored, for a message that could hold it either way.
-///
-/// A datatype is the one part of a dataset or attribute that can live outside
-/// the message describing it: `H5Tcommit` puts it in its own object header, and
-/// everything using it carries a reference in place of the encoding. Both forms
-/// decode to the same [`Datatype`](crate::Datatype), so this is what
-/// separates a message that *refers to* a type from one that spells it out, a
-/// distinction `h5dump` reports, and a rewrite has to preserve.
-///
-/// No `Default`: an omitted location silently means `Inline`, and a reference
-/// that decodes as an encoding is the whole defect this type exists to prevent.
-/// Every construction states its variant.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum DatatypeLocation {
-    /// Encoded in the message itself.
-    Inline,
-    /// A reference to the committed datatype object at this address, in the file
-    /// the message belongs to. What a parse reads out of a file, and what a
-    /// writer emits once the object's address is fixed.
-    Committed(StoredAddress),
-}
-
-impl DatatypeLocation {
-    /// The reference body to write in place of the datatype encoding, or `None`
-    /// when the datatype is written inline.
-    pub fn reference_bytes(&self, offset_width: OffsetWidth) -> Option<Vec<u8>> {
-        match self {
-            Self::Inline => None,
-            Self::Committed(addr) => Some(encode_committed_ref(*addr, offset_width)),
-        }
-    }
-
-    /// Whether the datatype lives in a committed object and not in the
-    /// message.
-    pub fn is_committed(&self) -> bool {
-        !matches!(self, Self::Inline)
-    }
-}
 
 /// Resolves references against a whole-file slice, already framed at the file's
 /// base address (shared-message addresses are stored relative to it).

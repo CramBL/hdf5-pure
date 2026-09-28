@@ -52,6 +52,39 @@ pub struct SharedMessageRef {
     pub location: SharedLocation,
 }
 
+/// Whether a message refers to a committed datatype for its datatype, and where that datatype is.
+///
+/// `H5Tcommit` writes a datatype to an object header of its own, and a dataset or attribute that
+/// uses it stores a reference to that header in place of the encoding. A parser returns the same
+/// [`Datatype`](crate::Datatype) for both forms, and `h5dump` reports which form a message has.
+///
+/// The type does not implement `Default`, so a caller chooses the variant at every construction.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DatatypeLocation {
+    /// Not in a committed datatype: encoded in the message, or in the file's shared-message heap.
+    /// A serializer encodes it in the message.
+    Inline,
+    /// In the committed datatype whose object header is at this address, in the file the message
+    /// belongs to.
+    Committed(StoredAddress),
+}
+
+impl DatatypeLocation {
+    /// Returns the reference a message stores in place of the datatype encoding, with an address
+    /// `offset_width` bytes wide, or `None` for an inline datatype.
+    pub fn reference_bytes(&self, offset_width: OffsetWidth) -> Option<Vec<u8>> {
+        match self {
+            Self::Inline => None,
+            Self::Committed(addr) => Some(encode_committed_ref(*addr, offset_width)),
+        }
+    }
+
+    /// Returns `true` if the datatype is stored in a committed datatype and not in the message.
+    pub fn is_committed(&self) -> bool {
+        !matches!(self, Self::Inline)
+    }
+}
+
 /// Parses a shared message reference from a message body.
 ///
 /// `length_size` is needed for version 1 only, whose reference is a symbol-table

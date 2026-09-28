@@ -1,15 +1,26 @@
 use hdf5_pure_core::__private::BaseAddressExt;
+use hdf5_pure_format::AttributeMessage;
 use hdf5_pure_format::Dataspace;
 use hdf5_pure_format::DataspaceType;
 use hdf5_pure_format::Datatype;
 use hdf5_pure_format::DatatypeByteOrder;
+use hdf5_pure_format::DatatypeLocation;
 use hdf5_pure_format::FillValueError;
 use hdf5_pure_format::FilterDescription;
 use hdf5_pure_format::FilterPipeline;
 use hdf5_pure_format::FilterPipelineError;
 use hdf5_pure_format::FixedPointLayout;
+use hdf5_pure_format::FormatError;
 use hdf5_pure_format::MaxExtent;
+use hdf5_pure_format::MessageType;
+use hdf5_pure_format::OffsetWidth;
+use hdf5_pure_format::SharedResolver;
+use hdf5_pure_format::StoredAddress;
 use hdf5_pure_format::V3_FLAGS_DEFAULT;
+use rstest::rstest;
+use test_util::attribute;
+use test_util::dataspace;
+use test_util::datatype;
 
 #[test]
 fn on_disk_messages_round_trip_through_the_public_api() {
@@ -143,11 +154,8 @@ fn group_and_attribute_storage_messages_round_trip_through_the_public_api() {
 
 #[test]
 fn shared_message_references_round_trip_through_the_public_api() {
-    use hdf5_pure_format::SharedResolver;
-
-    let address = hdf5_pure_format::StoredAddress::new(800);
-    let committed =
-        hdf5_pure_format::encode_committed_ref(address, hdf5_pure_format::OffsetWidth::Eight);
+    let address = StoredAddress::new(800);
+    let committed = hdf5_pure_format::encode_committed_ref(address, OffsetWidth::Eight);
     assert_eq!(
         hdf5_pure_format::parse_shared_ref(&committed, 8, 8).map(|reference| reference.location),
         Ok(hdf5_pure_format::SharedLocation::ObjectHeader(address))
@@ -164,9 +172,9 @@ fn shared_message_references_round_trip_through_the_public_api() {
         Ok(None)
     );
     assert_eq!(
-        hdf5_pure_format::Unresolvable.resolve(&heap, hdf5_pure_format::MessageType::DATASPACE),
-        Err(hdf5_pure_format::FormatError::UnresolvedSharedMessage(
-            hdf5_pure_format::MessageType::DATASPACE.to_u16()
+        hdf5_pure_format::Unresolvable.resolve(&heap, MessageType::DATASPACE),
+        Err(FormatError::UnresolvedSharedMessage(
+            MessageType::DATASPACE.to_u16()
         ))
     );
 }
@@ -220,4 +228,83 @@ fn a_file_space_info_message_round_trips_through_the_public_api() {
         hdf5_pure_format::parse_file_space_info(&bytes, 8, 8),
         Ok(info)
     );
+}
+
+#[rstest]
+#[case::inline(
+    DatatypeLocation::Inline,
+    hdf5_pure_format::serialize_datatype(&i32_datatype()),
+    attribute::Flags::NONE
+)]
+#[case::committed(
+    DatatypeLocation::Committed(StoredAddress::new(800)),
+    datatype::committed_reference(800),
+    attribute::Flags::SHARED_DATATYPE
+)]
+fn an_attribute_message_round_trips_through_the_public_api(
+    #[case] datatype_location: DatatypeLocation,
+    #[case] datatype_field: Vec<u8>,
+    #[case] flags: attribute::Flags,
+) {
+    let attribute = AttributeMessage {
+        name: "scale".into(),
+        datatype: i32_datatype(),
+        dataspace: Dataspace {
+            space_type: DataspaceType::Scalar,
+            rank: 0,
+            dimensions: Vec::new(),
+            max_dimensions: None,
+        },
+        raw_data: 7i32.to_le_bytes().to_vec(),
+        datatype_location,
+    };
+    let bytes = attribute.serialize_v3(OffsetWidth::Eight, 8).unwrap();
+
+    assert_eq!(
+        bytes,
+        attribute::Attribute::new(
+            "scale",
+            &datatype_field,
+            &dataspace::scalar(),
+            &7i32.to_le_bytes(),
+        )
+        .flags(flags)
+        .character_set(0)
+        .build()
+    );
+    assert_eq!(AttributeMessage::parse_name(&bytes), Ok("scale".into()));
+    assert_eq!(
+        AttributeMessage::shares_a_field(&bytes),
+        flags != attribute::Flags::NONE
+    );
+    assert_eq!(
+        AttributeMessage::parse_resolving_at(&bytes, 8, &CommittedI32),
+        Ok((attribute, bytes.len() - 4))
+    );
+}
+
+/// A resolver that returns the `i32` datatype for every reference, as if it were committed at the
+/// address the reference holds.
+struct CommittedI32;
+
+impl SharedResolver for CommittedI32 {
+    fn resolve(&self, _reference: &[u8], _target: MessageType) -> Result<Vec<u8>, FormatError> {
+        Ok(hdf5_pure_format::serialize_datatype(&i32_datatype()))
+    }
+
+    fn committed_address(&self, reference: &[u8]) -> Result<Option<StoredAddress>, FormatError> {
+        hdf5_pure_format::committed_address_in(reference, 8, 8)
+    }
+}
+
+fn i32_datatype() -> Datatype {
+    Datatype::FixedPoint {
+        size: 4,
+        byte_order: DatatypeByteOrder::LittleEndian,
+        layout: FixedPointLayout {
+            signed: true,
+            bit_offset: 0,
+            bit_precision: 32,
+        },
+    }
 }
