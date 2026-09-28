@@ -21,6 +21,7 @@ use crate::btree_v2::{
 use crate::convert::Narrow;
 use crate::error::FormatError;
 use crate::fractal_heap::FractalHeapHeader;
+use crate::fractal_heap::HeapObjectReader;
 use crate::message_type::MessageType;
 use crate::object_header::ObjectHeader;
 use crate::shared_message::BufferedResolver;
@@ -251,7 +252,7 @@ fn extract_dense_attributes(
     let records = collect_btree_v2_records(file_data, &btree_hdr, offset_size, length_size)?;
 
     let resolver = BufferedResolver::new(file_data, access_mode, offset_size, length_size, sohm);
-    let mut heap = fh.object_reader(offset_size, length_size);
+    let mut heap = HeapObjectReader::new(&fh, offset_size, length_size);
     let mut attrs = Vec::new();
     for record in &records {
         // Per HDF5 spec, both type 8 and type 9 records start with heap_id:
@@ -305,7 +306,7 @@ fn extract_dense_attributes_from_source<S: Source + ?Sized>(
         collect_btree_v2_records_from_source(source, &btree_hdr, offset_size, length_size)?;
 
     let resolver = SourceResolver::new(source, access_mode, offset_size, length_size, sohm);
-    let mut heap = fh.object_reader(offset_size, length_size);
+    let mut heap = HeapObjectReader::new(&fh, offset_size, length_size);
     let mut attrs = Vec::new();
     for record in &records {
         // Both type 8 and type 9 records begin with the heap_id.

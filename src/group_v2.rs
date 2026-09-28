@@ -17,6 +17,7 @@ use crate::btree_v2::{
 use crate::convert::Narrow;
 use crate::error::{FormatError, ResolveError};
 use crate::fractal_heap::FractalHeapHeader;
+use crate::fractal_heap::HeapObjectReader;
 use crate::group_v1::{self, GroupEntry};
 use crate::link_info::LinkInfoMessage;
 use crate::link_message::{LinkMessage, LinkTarget, link_is_named};
@@ -363,7 +364,7 @@ fn resolve_dense_entries(
     )?;
     let records = collect_btree_v2_records(file_data, &btree_hdr, offset_size, length_size)?;
 
-    let mut heap = fh.object_reader(offset_size, length_size);
+    let mut heap = HeapObjectReader::new(&fh, offset_size, length_size);
     let mut entries = Vec::new();
     for record in &records {
         // For type 5 (name index): hash(4) + heap_id(heap_id_length)
@@ -672,7 +673,7 @@ fn resolve_dense_entries_from_source<S: Source + ?Sized>(
     let records =
         collect_btree_v2_records_from_source(source, &btree_hdr, offset_size, length_size)?;
 
-    let mut heap = fh.object_reader(offset_size, length_size);
+    let mut heap = HeapObjectReader::new(&fh, offset_size, length_size);
     let mut entries = Vec::new();
     for record in &records {
         let id_offset = if btree_hdr.tree_type == 5 { 4 } else { 8 };
