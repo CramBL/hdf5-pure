@@ -20,8 +20,13 @@ use std::path::Path;
 
 use hdf5::file::LibraryVersion;
 use hdf5::plist::attribute_create::CharEncoding;
+use hdf5::types::TypeDescriptor;
+use hdf5::types::VarLenUnicode;
 use hdf5::{ObjectReference1, ReferencedObject};
+use hdf5_pure::CharacterSet;
+use hdf5_pure::StringPadding;
 use hdf5_pure::{AttrValue, Datatype, File, FixedPointLayout, RepackOptions};
+use rstest::rstest;
 use tempfile::tempdir;
 
 use test_util_hdf5::file;
@@ -552,6 +557,125 @@ fn users_of_one_committed_type_still_share_one_object() {
         out.root().named_datatype("mytype").unwrap(),
         committed_i32()
     );
+}
+
+#[rstest]
+#[case::c_written(write_c_committed_string_fixture)]
+#[case::pure_written(write_pure_committed_string_fixture)]
+fn a_committed_string_attribute_stays_committed_across_a_repack(#[case] write: fn(&Path)) {
+    let dir = tempfile::tempdir().unwrap();
+    let (src, dst) = (dir.path().join("src.h5"), dir.path().join("dst.h5"));
+    write(&src);
+    assert!(attr_type_is_committed(
+        &hdf5::File::open(&src).unwrap(),
+        "",
+        "label"
+    ));
+
+    hdf5_pure::repack(&src, &dst, &RepackOptions::new()).unwrap();
+
+    let file = hdf5::File::open(&dst).unwrap();
+    assert!(attr_type_is_committed(&file, "", "label"));
+    assert_eq!(
+        file.attr("label")
+            .unwrap()
+            .read_scalar::<VarLenUnicode>()
+            .unwrap()
+            .as_str(),
+        "m/s"
+    );
+    let out = File::open(&dst).unwrap();
+    assert_eq!(
+        out.root().named_datatypes().unwrap(),
+        vec!["strtype".to_string()]
+    );
+    assert_eq!(
+        out.root().attrs().unwrap().get("label"),
+        Some(&AttrValue::VarLenString("m/s".into()))
+    );
+}
+
+#[test]
+fn a_committed_char_sequence_attribute_on_a_dataset_stays_committed_across_a_repack() {
+    let dir = tempfile::tempdir().unwrap();
+    let (src, dst) = (dir.path().join("src.h5"), dir.path().join("dst.h5"));
+    let mut builder = hdf5_pure::FileBuilder::new();
+    let char_sequence = Datatype::VariableLength {
+        is_string: false,
+        padding: None,
+        charset: None,
+        base_type: Box::new(Datatype::String {
+            size: 1,
+            padding: StringPadding::NullTerminate,
+            charset: CharacterSet::Ascii,
+        }),
+    };
+    builder.commit_datatype("fields", char_sequence);
+    builder
+        .create_dataset("data")
+        .with_i32_data(&[1])
+        .set_attr_committed(
+            "names",
+            AttrValue::VarLenAsciiCharArray(vec!["a".into(), "bc".into()]),
+            "fields",
+        );
+    builder.write(&src).unwrap();
+    assert!(attr_type_is_committed(
+        &hdf5::File::open(&src).unwrap(),
+        "data",
+        "names"
+    ));
+
+    hdf5_pure::repack(&src, &dst, &RepackOptions::new()).unwrap();
+
+    assert!(attr_type_is_committed(
+        &hdf5::File::open(&dst).unwrap(),
+        "data",
+        "names"
+    ));
+    let out = File::open(&dst).unwrap();
+    assert_eq!(
+        out.root().named_datatypes().unwrap(),
+        vec!["fields".to_string()]
+    );
+    assert_eq!(
+        out.dataset("data").unwrap().attrs().unwrap().get("names"),
+        Some(&AttrValue::VarLenAsciiCharArray(vec![
+            "a".into(),
+            "bc".into()
+        ]))
+    );
+}
+
+/// Writes, through the C library, a root attribute `label` that holds "m/s" and whose datatype is
+/// the variable-length UTF-8 string type committed at `/strtype`.
+fn write_c_committed_string_fixture(path: &Path) {
+    let file = hdf5::File::create(path).unwrap();
+    let dtype = hdf5::Datatype::from_descriptor(&TypeDescriptor::VarLenUnicode).unwrap();
+    file.commit_datatype("strtype", &dtype).unwrap();
+    let value: VarLenUnicode = "m/s".parse().unwrap();
+    file.new_attr_builder()
+        .empty_as(&dtype)
+        .shape(())
+        .create("label")
+        .unwrap()
+        .write_scalar(&value)
+        .unwrap();
+}
+
+/// Writes the attribute and the committed type of [`write_c_committed_string_fixture`] through
+/// this crate.
+fn write_pure_committed_string_fixture(path: &Path) {
+    let mut builder = hdf5_pure::FileBuilder::new();
+    let strtype = Datatype::VariableLength {
+        is_string: true,
+        padding: Some(StringPadding::NullTerminate),
+        charset: Some(CharacterSet::Utf8),
+        base_type: Box::new(hdf5_pure::make_u8_type()),
+    };
+    builder.commit_datatype("strtype", strtype);
+    builder.set_attr_committed("label", AttrValue::VarLenString("m/s".into()), "strtype");
+    builder.write(path).unwrap();
 }
 
 /// A committed type a repack *drops* is refused by name rather than left dangling.
