@@ -17,6 +17,15 @@ use alloc::collections::BTreeMap as HashMap;
 use std::collections::HashMap;
 
 use hdf5_pure_core::__private::SuperblockFields;
+use hdf5_pure_format::ATTRIBUTE_HEAP_BLOCK_OFFSET_BYTES;
+use hdf5_pure_format::ATTRIBUTE_HEAP_MAX_DIRECT_BLOCK_SIZE;
+use hdf5_pure_format::ATTRIBUTE_HEAP_MAX_HEAP_SIZE_BITS;
+use hdf5_pure_format::ATTRIBUTE_HEAP_MAX_HEAP_SPACE;
+use hdf5_pure_format::ATTRIBUTE_HEAP_START_ROOT_ROWS;
+use hdf5_pure_format::ATTRIBUTE_HEAP_STARTING_BLOCK_SIZE;
+use hdf5_pure_format::ATTRIBUTE_HEAP_TABLE_WIDTH;
+use hdf5_pure_format::AttributeHeapPlan;
+use hdf5_pure_format::AttributeHeapPlanError;
 use hdf5_pure_format::BTREE_V2_NODE_SIZE;
 use hdf5_pure_format::BTreeV2Plan;
 
@@ -37,7 +46,6 @@ use crate::file_space_info::{
     self, DEFAULT_PAGE_SIZE, DEFAULT_THRESHOLD, FileSpaceInfo, FileSpaceStrategy,
     NUM_FILE_FSM_MANAGERS,
 };
-use crate::fractal_heap_write::{self, AttributeHeapPlan, AttributeHeapPlanError};
 use crate::free_space_manager::{
     FreeSection, SECT_CLASS_LARGE, SECT_CLASS_SMALL, fshd_len, fsse_len, serialize_file_fsm,
 };
@@ -335,8 +343,8 @@ pub(crate) struct DenseAttrBlob {
 
 /// Bits of heap offset the dense attribute heap declares (its "Maximum Heap
 /// Size"), and the byte width that implies for a block offset.
-const DENSE_ATTR_MAX_HEAP_SIZE_BITS: u16 = fractal_heap_write::ATTRIBUTE_HEAP_MAX_HEAP_SIZE_BITS;
-const DENSE_ATTR_BLOCK_OFFSET_BYTES: usize = fractal_heap_write::ATTRIBUTE_HEAP_BLOCK_OFFSET_BYTES;
+const DENSE_ATTR_MAX_HEAP_SIZE_BITS: u16 = ATTRIBUTE_HEAP_MAX_HEAP_SIZE_BITS;
+const DENSE_ATTR_BLOCK_OFFSET_BYTES: usize = ATTRIBUTE_HEAP_BLOCK_OFFSET_BYTES;
 
 /// Whether `attrs` must go in a fractal heap rather than the object header.
 ///
@@ -402,7 +410,7 @@ pub(crate) fn needs_dense_attrs(attrs: &[AttributeMessage]) -> Result<bool, Form
 /// attribute heap — but the threshold is the heap's own declaration, read back
 /// out of the header, so a higher one is equally readable.
 pub(crate) const DENSE_ATTR_MAX_MANAGED_OBJECT: usize =
-    fractal_heap_write::attribute_heap_max_managed_object(OFFSET_WIDTH);
+    hdf5_pure_format::attribute_heap_max_managed_object(OFFSET_WIDTH);
 
 /// One name-index B-tree v2 record as [`build_dense_attrs`] writes it: heap
 /// ID(8) + message flags(1) + creation order(4) + name hash(4).
@@ -536,7 +544,7 @@ pub(crate) fn dense_attrs_check(attrs: &[AttributeMessage]) -> Result<(), Format
     match AttributeHeapPlan::new(&managed, OFFSET_WIDTH) {
         Ok(_) => Ok(()),
         Err(AttributeHeapPlanError::HeapSpace) => Err(FormatError::DenseAttributeHeapTooLarge {
-            limit: fractal_heap_write::ATTRIBUTE_HEAP_MAX_HEAP_SPACE,
+            limit: ATTRIBUTE_HEAP_MAX_HEAP_SPACE,
         }),
         Err(AttributeHeapPlanError::Host { bytes }) => Err(FormatError::ValueTooLargeForPlatform {
             value: bytes,
@@ -923,19 +931,11 @@ impl DenseAttrPlan {
         write_length(&mut frhp, huge_count as u64, LENGTH_SIZE); // huge_objects_count
         write_length(&mut frhp, 0, LENGTH_SIZE); // tiny_objects_size
         write_length(&mut frhp, 0, LENGTH_SIZE); // tiny_objects_count
-        frhp.extend_from_slice(&fractal_heap_write::ATTRIBUTE_HEAP_TABLE_WIDTH.to_le_bytes()); // table_width
-        write_length(
-            &mut frhp,
-            fractal_heap_write::ATTRIBUTE_HEAP_STARTING_BLOCK_SIZE,
-            LENGTH_SIZE,
-        );
-        write_length(
-            &mut frhp,
-            fractal_heap_write::ATTRIBUTE_HEAP_MAX_DIRECT_BLOCK_SIZE,
-            LENGTH_SIZE,
-        ); // max_direct_block_size
+        frhp.extend_from_slice(&ATTRIBUTE_HEAP_TABLE_WIDTH.to_le_bytes()); // `table_width`
+        write_length(&mut frhp, ATTRIBUTE_HEAP_STARTING_BLOCK_SIZE, LENGTH_SIZE);
+        write_length(&mut frhp, ATTRIBUTE_HEAP_MAX_DIRECT_BLOCK_SIZE, LENGTH_SIZE); // `max_direct_block_size`
         frhp.extend_from_slice(&max_heap_size.to_le_bytes());
-        frhp.extend_from_slice(&fractal_heap_write::ATTRIBUTE_HEAP_START_ROOT_ROWS.to_le_bytes()); // start_root_rows
+        frhp.extend_from_slice(&ATTRIBUTE_HEAP_START_ROOT_ROWS.to_le_bytes()); // `start_root_rows`
         write_offset(
             &mut frhp,
             managed_plan.root_address(managed_addr),
