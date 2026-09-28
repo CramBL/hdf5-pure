@@ -457,7 +457,7 @@ where
                 element.object_index
             ))
         })?;
-        let object = collections[collection_pos].1.get_object(index).ok_or(
+        let object = collections[collection_pos].1.object(index).ok_or(
             FormatError::GlobalHeapObjectNotFound {
                 collection_address,
                 index,
@@ -580,7 +580,7 @@ pub(crate) fn read_vl_byte_objects_from_source<S: Source + ?Sized>(
                 element.object_index
             ))
         })?;
-        let object = collections[collection_pos].1.get_object(index).ok_or(
+        let object = collections[collection_pos].1.object(index).ok_or(
             FormatError::GlobalHeapObjectNotFound {
                 collection_address,
                 index,
