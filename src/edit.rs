@@ -3858,7 +3858,9 @@ impl WriteEngine {
             base,
         };
         Ok(Some(crate::sohm::SohmTable::read_from_source(
-            &framed, &message, os,
+            &SourceMetadata(&framed),
+            &message,
+            os,
         )?))
     }
 
