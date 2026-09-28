@@ -35,7 +35,13 @@ use hdf5_pure_format::LocalHeap;
 use hdf5_pure_format::MaxExtent;
 use hdf5_pure_format::MessageType;
 use hdf5_pure_format::OffsetWidth;
+use hdf5_pure_format::SharedMessageTableMessage;
 use hdf5_pure_format::SharedResolver;
+use hdf5_pure_format::SohmIndexHeader;
+use hdf5_pure_format::SohmIndexKind;
+use hdf5_pure_format::SohmLocation;
+use hdf5_pure_format::SohmRecord;
+use hdf5_pure_format::SohmTable;
 use hdf5_pure_format::StoredAddress;
 use hdf5_pure_format::SymbolTableEntry;
 use hdf5_pure_format::SymbolTableMessage;
@@ -50,6 +56,7 @@ use test_util::datatype;
 use test_util::fractal_heap;
 use test_util::image::Image;
 use test_util::local_heap;
+use test_util::sohm;
 use test_util::symbol_table;
 use test_util::widths::Widths;
 
@@ -659,6 +666,78 @@ fn the_encoder_rejects_more_than_global_heap_max_objects() {
     assert_eq!(
         hdf5_pure_format::encode_global_heap_collection(LengthWidth::Eight, &objects),
         Err(GlobalHeapCollectionError::TooManyObjects { count: 65_536 })
+    );
+}
+
+#[test]
+fn shared_message_table_structures_parse_through_the_public_api() {
+    let mut message = vec![0];
+    message.extend_from_slice(&0x40u64.to_le_bytes());
+    message.push(1);
+    let table = sohm::table(
+        &[sohm::Index {
+            kind: sohm::Kind::LIST,
+            message_type_flags: 1 << 3,
+            min_message_size: 250,
+            list_max: 50,
+            btree_min: 40,
+            message_count: 1,
+            index_address: Some(0x100),
+            heap_address: None,
+        }],
+        Widths::EIGHT,
+    );
+    let mut image = Image::new();
+    image.place(0x40, &table);
+    let file = image.build();
+    let record = sohm::heap_record(0xDEAD_BEEF, 2, [1, 2, 3, 4, 5, 6, 7, 8], Widths::EIGHT);
+    let list = sohm::list(std::slice::from_ref(&record));
+    let table_message = SharedMessageTableMessage {
+        table_address: StoredAddress::new(0x40),
+        index_count: 1,
+    };
+    let expected_table = SohmTable {
+        indexes: vec![SohmIndexHeader {
+            message_type_flags: 1 << 3,
+            min_message_size: 250,
+            list_max: 50,
+            btree_min: 40,
+            message_count: 1,
+            kind: SohmIndexKind::List,
+            index_address: Some(StoredAddress::new(0x100)),
+            heap_address: None,
+        }],
+    };
+    let expected_record = SohmRecord {
+        hash: 0xDEAD_BEEF,
+        location: SohmLocation::Heap {
+            reference_count: 2,
+            heap_id: [1, 2, 3, 4, 5, 6, 7, 8],
+        },
+    };
+
+    assert_eq!(
+        SharedMessageTableMessage::parse(&message, 8),
+        Ok(table_message)
+    );
+    assert_eq!(
+        SohmTable::read(&file, &table_message, 8),
+        Ok(expected_table.clone())
+    );
+    assert_eq!(
+        SohmTable::read_from_source(file.as_slice(), &table_message, 8),
+        Ok(expected_table.clone())
+    );
+    assert_eq!(
+        expected_table.index_for(MessageType::DATATYPE),
+        Some(&expected_table.indexes[0])
+    );
+    assert_eq!(hdf5_pure_format::sohm_record_len(8), 17);
+    assert_eq!(hdf5_pure_format::sohm_list_len(1, 8), list.len());
+    assert_eq!(SohmRecord::parse(&record, 8), Ok(expected_record.clone()));
+    assert_eq!(
+        hdf5_pure_format::parse_sohm_list(&list, 1, 8),
+        Ok(vec![expected_record])
     );
 }
 

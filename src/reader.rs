@@ -1704,13 +1704,14 @@ impl FileInner {
                 crate::sohm::SohmTable::read(frame(v, base).ok()?, &message, os).ok()
             }
             Backend::Streaming(s) if base.is_zero() => {
-                crate::sohm::SohmTable::read_from_source(s.as_ref(), &message, os).ok()
+                crate::sohm::SohmTable::read_from_source(&SourceMetadata(s.as_ref()), &message, os)
+                    .ok()
             }
             Backend::Streaming(s) => crate::sohm::SohmTable::read_from_source(
-                &BaseOffsetSource {
+                &SourceMetadata(&BaseOffsetSource {
                     inner: s.as_ref(),
                     base,
-                },
+                }),
                 &message,
                 os,
             )
@@ -1720,10 +1721,14 @@ impl FileInner {
                 |d| Ok::<_, Error>(crate::sohm::SohmTable::read(frame(d, base)?, &message, os)?),
                 |s| {
                     if base.is_zero() {
-                        Ok(crate::sohm::SohmTable::read_from_source(s, &message, os)?)
+                        Ok(crate::sohm::SohmTable::read_from_source(
+                            &SourceMetadata(s),
+                            &message,
+                            os,
+                        )?)
                     } else {
                         Ok(crate::sohm::SohmTable::read_from_source(
-                            &BaseOffsetSource { inner: s, base },
+                            &SourceMetadata(&BaseOffsetSource { inner: s, base }),
                             &message,
                             os,
                         )?)
