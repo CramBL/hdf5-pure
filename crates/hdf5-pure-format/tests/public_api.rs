@@ -14,8 +14,10 @@ use hdf5_pure_format::FilterPipelineError;
 use hdf5_pure_format::FixedPointLayout;
 use hdf5_pure_format::FormatError;
 use hdf5_pure_format::GLOBAL_HEAP_MAX_OBJECTS;
+use hdf5_pure_format::GlobalHeapCollectionError;
 use hdf5_pure_format::GlobalHeapIndex;
 use hdf5_pure_format::GlobalHeapObjectInfo;
+use hdf5_pure_format::LengthWidth;
 use hdf5_pure_format::LocalHeap;
 use hdf5_pure_format::MaxExtent;
 use hdf5_pure_format::MessageType;
@@ -335,7 +337,8 @@ fn a_version_1_group_btree_node_parses_through_the_public_api() {
 #[test]
 fn a_global_heap_collection_round_trips_through_the_public_api() {
     let objects: [&[u8]; 2] = [b"alpha", b"beta"];
-    let bytes = hdf5_pure_format::encode_global_heap_collection(&objects);
+    let bytes =
+        hdf5_pure_format::encode_global_heap_collection(LengthWidth::Eight, &objects).unwrap();
 
     let collection = GlobalHeapIndex::parse(bytes.as_slice(), 0, 8).unwrap();
     let filtered =
@@ -361,6 +364,40 @@ fn a_global_heap_collection_round_trips_through_the_public_api() {
     assert_eq!(collection.object(2), Some(&beta));
     assert_eq!(&bytes[56..60], b"beta");
     assert_eq!(GLOBAL_HEAP_MAX_OBJECTS, usize::from(u16::MAX));
+}
+
+// 16 + 16 + 65,480 + 16 bytes fit the 65,535 of a 2-byte length, and 65,481 bytes of data pad
+// to 65,488 and a collection of 65,536.
+#[rstest]
+#[case::fits(65_480, Ok(65_528))]
+#[case::overflows(
+    65_481,
+    Err(GlobalHeapCollectionError::TooLarge {
+        size: 65_536,
+        length_width: LengthWidth::Two,
+    })
+)]
+fn a_two_byte_length_collection_holds_at_most_its_field_maximum(
+    #[case] object_len: usize,
+    #[case] expected: Result<usize, GlobalHeapCollectionError>,
+) {
+    let object = vec![0u8; object_len];
+
+    assert_eq!(
+        hdf5_pure_format::encode_global_heap_collection(LengthWidth::Two, &[&object])
+            .map(|bytes| bytes.len()),
+        expected
+    );
+}
+
+#[test]
+fn the_encoder_rejects_more_than_global_heap_max_objects() {
+    let objects = vec![b"".as_slice(); GLOBAL_HEAP_MAX_OBJECTS + 1];
+
+    assert_eq!(
+        hdf5_pure_format::encode_global_heap_collection(LengthWidth::Eight, &objects),
+        Err(GlobalHeapCollectionError::TooManyObjects { count: 65_536 })
+    );
 }
 
 #[rstest]

@@ -45,6 +45,7 @@ ignored = ["hdf5"]
 
 [dev-dependencies]
 hdf5-pure.workspace = true
+hdf5-pure-format.workspace = true
 ndarray.workspace = true
 proptest.workspace = true
 rstest.workspace = true

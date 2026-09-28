@@ -6,10 +6,11 @@
 
 use alloc::vec::Vec;
 
-use crate::bytes::read_length;
+use crate::bytes;
 use crate::convert::Narrow;
 use crate::error::FormatError;
 use crate::metadata_source::MetadataSource;
+use crate::width::LengthWidth;
 
 /// The directory of a global heap collection: where each of its objects sits and how large it is.
 ///
@@ -216,7 +217,7 @@ impl GlobalHeapIndex {
             return Err(FormatError::InvalidGlobalHeapVersion(version));
         }
 
-        let collection_size = read_length(&header, 8, length_size)?;
+        let collection_size = bytes::read_length(&header, 8, length_size)?;
         if collection_size < header_size as u64 {
             return Err(FormatError::VlDataError(
                 "global heap collection is smaller than its header".into(),
@@ -261,16 +262,16 @@ impl GlobalHeapIndex {
             } else {
                 2
             };
-            let bytes = window.get(source, pos, need, collection_end)?;
-            let object_index = u16::from_le_bytes([bytes[0], bytes[1]]);
+            let object_header = window.get(source, pos, need, collection_end)?;
+            let object_index = u16::from_le_bytes([object_header[0], object_header[1]]);
             if object_index == 0 {
                 break;
             }
 
-            // A short tail could legally hold nothing but that terminator. These
-            // are the two checks the walk always made, in the order it made them,
-            // so a malformed collection fails with the error it always failed
-            // with. Reaching them at all means `bytes` is a whole header.
+            // The specification leaves a tail too short for a header unwritten, and
+            // `H5HG__cache_heap_deserialize` reads it as free space (`H5HGcache.c`, HDF5 2.2.0).
+            // This parser rejects a nonzero index there. Past these checks `object_header` is a
+            // whole header.
             let object_header_end =
                 pos.checked_add(object_header_size as u64)
                     .ok_or(FormatError::OffsetOverflow {
@@ -283,7 +284,7 @@ impl GlobalHeapIndex {
                     available: collection_end.to_usize().unwrap_or(usize::MAX),
                 });
             }
-            let object_size = read_length(bytes, 8, length_size)?;
+            let object_size = bytes::read_length(object_header, 8, length_size)?;
             let data_address = object_header_end;
             let data_end =
                 data_address
@@ -336,17 +337,53 @@ impl GlobalHeapIndex {
     }
 }
 
-/// Build one global heap collection holding `objects` (at most
-/// [`GLOBAL_HEAP_MAX_OBJECTS`] of them), assigning 1-based object indices in order.
-/// Returns the serialized collection bytes.
-pub fn encode_global_heap_collection(objects: &[&[u8]]) -> Vec<u8> {
-    assert!(
-        objects.len() <= GLOBAL_HEAP_MAX_OBJECTS,
-        "a collection's 2-byte object index cannot address more than {GLOBAL_HEAP_MAX_OBJECTS} objects"
-    );
-    // The collection header, sig(4) + ver(1) + reserved(3) + `collection_size`, and each object
-    // header, index(2) + reference count(2) + reserved(4) + size, are both this long.
-    let header_size = 8 + 8;
+/// Encodes a global heap collection that holds `objects` at the indices 1, 2, and so on, in order.
+///
+/// Every length field is `length_width` bytes wide. The collection header, each object header and
+/// each object's data are padded to a multiple of 8 bytes, and a free space object at index 0
+/// spans the rest of the collection. A collection smaller than 4096 bytes, the minimum collection
+/// size the specification defines, is padded to 4096. Each object stores a reference count of 1.
+/// The collection is defined in "Global Heap" of the [format specification, version 4.0][spec].
+///
+/// The C library pads a header to a multiple of 8 bytes at every length width (`H5HG_SIZEOF_HDR`
+/// and `H5HG_SIZEOF_OBJHDR` in `H5HGpkg.h`, HDF5 2.2.0).
+///
+/// # Errors
+///
+/// Returns [`GlobalHeapCollectionError::TooManyObjects`] if `objects` has more than
+/// [`GLOBAL_HEAP_MAX_OBJECTS`] objects, and [`GlobalHeapCollectionError::TooLarge`] if the size of
+/// the collection does not fit a length field of `length_width` bytes.
+///
+/// # Examples
+///
+/// ```
+/// use hdf5_pure_format::{GlobalHeapIndex, LengthWidth};
+///
+/// let objects: [&[u8]; 2] = [b"alpha", b"beta"];
+/// let collection =
+///     hdf5_pure_format::encode_global_heap_collection(LengthWidth::Eight, &objects).unwrap();
+/// assert_eq!(collection.len(), 4096);
+///
+/// let directory = GlobalHeapIndex::parse(collection.as_slice(), 0, 8).unwrap();
+/// let beta = directory.object(2).unwrap();
+/// let start = beta.data_address as usize;
+/// assert_eq!(&collection[start..start + beta.size as usize], b"beta");
+/// ```
+///
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsec_fmt4_infra_globalheap
+pub fn encode_global_heap_collection(
+    length_width: LengthWidth,
+    objects: &[&[u8]],
+) -> Result<Vec<u8>, GlobalHeapCollectionError> {
+    if objects.len() > GLOBAL_HEAP_MAX_OBJECTS {
+        return Err(GlobalHeapCollectionError::TooManyObjects {
+            count: objects.len(),
+        });
+    }
+    // The length of the collection header, sig(4) + ver(1) + reserved(3) + `collection_size`, and
+    // of each object header, index(2) + reference count(2) + reserved(4) + size, padded to
+    // `ALIGNMENT`.
+    let header_size = (8 + usize::from(length_width.get())).next_multiple_of(ALIGNMENT);
     let collection_size = header_size
         + objects
             .iter()
@@ -356,26 +393,36 @@ pub fn encode_global_heap_collection(objects: &[&[u8]]) -> Vec<u8> {
     let padded_collection = collection_size
         .max(MIN_COLLECTION_SIZE)
         .next_multiple_of(ALIGNMENT);
+    // Every length the collection stores is at most its own size.
+    if !length_width.holds(padded_collection as u64) {
+        return Err(GlobalHeapCollectionError::TooLarge {
+            size: padded_collection,
+            length_width,
+        });
+    }
 
     let mut buf = Vec::with_capacity(padded_collection);
     // Header
     buf.extend_from_slice(&GCOL_SIGNATURE);
     buf.push(GCOL_VERSION);
     buf.extend_from_slice(&[0u8; 3]); // reserved
-    buf.extend_from_slice(&(padded_collection as u64).to_le_bytes());
+    bytes::write_length(&mut buf, padded_collection as u64, length_width);
+    buf.resize(header_size, 0);
 
     // Objects (1-based indices)
     for (i, obj) in objects.iter().enumerate() {
         #[expect(
             clippy::cast_possible_truncation,
-            reason = "the assertion above bounds the object count by `u16::MAX`, so the 1-based \
+            reason = "the check above bounds the object count by `u16::MAX`, so the 1-based \
                       index `i + 1` fits the 2-byte heap object index field"
         )]
         let index = (i + 1) as u16;
+        let start = buf.len();
         buf.extend_from_slice(&index.to_le_bytes());
         buf.extend_from_slice(&1u16.to_le_bytes()); // reference count
         buf.extend_from_slice(&[0u8; 4]); // reserved
-        buf.extend_from_slice(&(obj.len() as u64).to_le_bytes());
+        bytes::write_length(&mut buf, obj.len() as u64, length_width);
+        buf.resize(start + header_size, 0);
         buf.extend_from_slice(obj);
         // Pad to 8-byte boundary
         buf.resize(buf.len().next_multiple_of(ALIGNMENT), 0);
@@ -388,12 +435,29 @@ pub fn encode_global_heap_collection(objects: &[&[u8]]) -> Vec<u8> {
     buf.extend_from_slice(&0u16.to_le_bytes()); // index 0
     buf.extend_from_slice(&0u16.to_le_bytes()); // reference count
     buf.extend_from_slice(&[0u8; 4]); // reserved
-    buf.extend_from_slice(&(free_total_size as u64).to_le_bytes()); // size
+    bytes::write_length(&mut buf, free_total_size as u64, length_width); // size
 
     // Pad collection to full size
     buf.resize(padded_collection, 0);
 
-    buf
+    Ok(buf)
+}
+
+/// The error [`encode_global_heap_collection`] returns for objects one collection cannot hold.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum GlobalHeapCollectionError {
+    /// The size of the collection does not fit a length field of `length_width` bytes.
+    TooLarge {
+        /// The size in bytes of the collection, padding included.
+        size: usize,
+        /// The width of the collection's length fields.
+        length_width: LengthWidth,
+    },
+    /// The caller passed more objects than [`GLOBAL_HEAP_MAX_OBJECTS`].
+    TooManyObjects {
+        /// The number of objects the caller passed.
+        count: usize,
+    },
 }
 
 /// The most objects one global heap collection holds, 65,535.
@@ -674,17 +738,17 @@ mod tests {
         #[case] objects: &[&[u8]],
         #[case] size: usize,
     ) {
-        let bytes = encode_global_heap_collection(objects);
-        let collection = GlobalHeapIndex::parse(bytes.as_slice(), 0, 8).unwrap();
+        let encoded = encode_global_heap_collection(LengthWidth::Eight, objects).unwrap();
+        let collection = GlobalHeapIndex::parse(encoded.as_slice(), 0, 8).unwrap();
 
-        assert_eq!(bytes.len(), size);
-        assert_eq!(read_length(&bytes, 8, 8), Ok(size as u64));
+        assert_eq!(encoded.len(), size);
+        assert_eq!(bytes::read_length(&encoded, 8, 8), Ok(size as u64));
         let read_back: Vec<(u16, &[u8])> = collection
             .objects
             .iter()
             .map(|object| {
                 let start = object.data_address as usize;
-                (object.index, &bytes[start..start + object.size as usize])
+                (object.index, &encoded[start..start + object.size as usize])
             })
             .collect();
         let expected: Vec<(u16, &[u8])> = (1..).zip(objects.iter().copied()).collect();
@@ -695,11 +759,33 @@ mod tests {
             .map(|object| 16 + object.len().next_multiple_of(8))
             .sum::<usize>()
             + 16;
-        assert_eq!(bytes[free_space..free_space + 8], [0; 8]);
+        assert_eq!(encoded[free_space..free_space + 8], [0; 8]);
         assert_eq!(
-            read_length(&bytes, free_space + 8, 8),
+            bytes::read_length(&encoded, free_space + 8, 8),
             Ok((size - free_space) as u64)
         );
+    }
+
+    #[rstest]
+    #[case::two_byte_lengths(LengthWidth::Two)]
+    #[case::four_byte_lengths(LengthWidth::Four)]
+    fn the_encoder_pads_each_narrow_length_header_to_eight_bytes(#[case] width: LengthWidth) {
+        let bytes = encode_global_heap_collection(width, &[b"abc"]).unwrap();
+        let length = usize::from(width.get());
+
+        let mut expected = GCOL_SIGNATURE.to_vec();
+        expected.extend_from_slice(&[GCOL_VERSION, 0, 0, 0]);
+        expected.extend_from_slice(&4096u64.to_le_bytes()[..length]);
+        expected.resize(16, 0);
+        expected.extend_from_slice(&[1, 0, 1, 0, 0, 0, 0, 0]);
+        expected.extend_from_slice(&3u64.to_le_bytes()[..length]);
+        expected.resize(32, 0);
+        expected.extend_from_slice(b"abc\0\0\0\0\0");
+        // The free space object at byte 40 spans the rest of the 4096 bytes.
+        expected.extend_from_slice(&[0; 8]);
+        expected.extend_from_slice(&(4096u64 - 40).to_le_bytes()[..length]);
+        expected.resize(4096, 0);
+        assert_eq!(bytes, expected);
     }
 
     #[test]

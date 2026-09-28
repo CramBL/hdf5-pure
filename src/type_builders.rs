@@ -28,6 +28,7 @@ use crate::error::FormatError;
 use crate::object_path::ObjectPathBuf;
 use crate::scaleoffset::{FillAvailability, ScaleOffset};
 use crate::shared_message::DatatypeLocation;
+use crate::width::LengthWidth;
 
 pub fn make_f64_type() -> Datatype {
     Datatype::FloatingPoint {
@@ -1069,7 +1070,11 @@ pub(crate) fn build_global_heap_collections(strings: &[String]) -> Vec<Vec<u8>> 
 pub(crate) fn build_global_heap_collections_from_bytes(objects: &[&[u8]]) -> Vec<Vec<u8>> {
     objects
         .chunks(GLOBAL_HEAP_MAX_OBJECTS)
-        .map(hdf5_pure_format::encode_global_heap_collection)
+        .map(|objects| {
+            hdf5_pure_format::encode_global_heap_collection(LengthWidth::Eight, objects).expect(
+                "a chunk of at most GLOBAL_HEAP_MAX_OBJECTS objects fits an 8-byte length collection",
+            )
+        })
         .collect()
 }
 

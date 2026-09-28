@@ -108,6 +108,13 @@ impl LengthWidth {
             Self::Eight => 8,
         }
     }
+
+    /// Returns `true` if a length field of this width can store `length`.
+    pub(crate) fn holds(self, length: u64) -> bool {
+        length
+            .checked_shr(8 * u32::from(self.get()))
+            .is_none_or(|high| high == 0)
+    }
 }
 
 impl TryFrom<u8> for LengthWidth {

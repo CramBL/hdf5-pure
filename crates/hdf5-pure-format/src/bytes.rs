@@ -230,6 +230,28 @@ pub(crate) fn write_offset(buf: &mut Vec<u8>, val: u64, width: OffsetWidth) {
     }
 }
 
+/// Appends the length `val` to `buf` as a little-endian field of `width` bytes.
+///
+/// # Panics
+///
+/// Panics if `val` does not fit in `width` bytes.
+pub(crate) fn write_length(buf: &mut Vec<u8>, val: u64, width: LengthWidth) {
+    assert!(
+        width.holds(val),
+        "length {val} does not fit a {}-byte length field",
+        width.get()
+    );
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "the assertion above admits only a value that fits `width`"
+    )]
+    match width {
+        LengthWidth::Two => buf.extend_from_slice(&(val as u16).to_le_bytes()),
+        LengthWidth::Four => buf.extend_from_slice(&(val as u32).to_le_bytes()),
+        LengthWidth::Eight => buf.extend_from_slice(&val.to_le_bytes()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
