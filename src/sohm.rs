@@ -198,7 +198,7 @@ fn table_len(index_count: u8, offset_size: u8) -> usize {
 ///
 /// A record is one of two shapes and the wider one sizes both, so that a list's
 /// entries stay a fixed stride (`H5SM_SOHM_ENTRY_SIZE`).
-pub fn record_len(offset_size: u8) -> usize {
+pub fn sohm_record_len(offset_size: u8) -> usize {
     let object_header_location = 1 + 1 + 2 + offset_size as usize;
     RECORD_PREFIX_LEN + HEAP_LOCATION_LEN.max(object_header_location)
 }
@@ -380,12 +380,12 @@ impl SohmRecord {
 /// `list_max` records so the index can grow in place. The checksum covers only
 /// the records in use, which is why the count rather than the allocation decides
 /// where the image ends.
-pub fn parse_list(
+pub fn parse_sohm_list(
     image: &[u8],
     message_count: u16,
     offset_size: u8,
 ) -> Result<Vec<SohmRecord>, FormatError> {
-    let stride = record_len(offset_size);
+    let stride = sohm_record_len(offset_size);
     let expected = LIST_FIXED_LEN + message_count as usize * stride;
     ensure_len(image, 0, expected)?;
     let image = &image[..expected];
@@ -404,8 +404,8 @@ pub fn parse_list(
 
 /// Encoded size of a list index holding `message_count` records, checksum
 /// included.
-fn list_image_len(message_count: u16, offset_size: u8) -> usize {
-    LIST_FIXED_LEN + message_count as usize * record_len(offset_size)
+fn sohm_list_len(message_count: u16, offset_size: u8) -> usize {
+    LIST_FIXED_LEN + message_count as usize * sohm_record_len(offset_size)
 }
 
 /// Every record of `index`, whichever kind of index it is.
@@ -428,9 +428,9 @@ pub fn read_index_records_from_source<S: Source + ?Sized>(
     };
     match index.kind {
         SohmIndexKind::List => {
-            let len = list_image_len(index.message_count, offset_size);
+            let len = sohm_list_len(index.message_count, offset_size);
             let image = source.read_metadata_at(address.get(), len)?;
-            parse_list(&image, index.message_count, offset_size)
+            parse_sohm_list(&image, index.message_count, offset_size)
         }
         SohmIndexKind::BTree => {
             let header = BTreeV2Header::parse_from_source(
@@ -739,10 +739,10 @@ mod tests {
     /// sized entries by their own shape would drift after the first heap record.
     #[test]
     fn both_record_shapes_share_one_stride() {
-        assert_eq!(record_len(8), 17);
-        assert_eq!(record_len(4), 17);
+        assert_eq!(sohm_record_len(8), 17);
+        assert_eq!(sohm_record_len(4), 17);
         // A 16-byte address makes the object-header shape the wider one.
-        assert_eq!(record_len(16), 25);
+        assert_eq!(sohm_record_len(16), 25);
     }
 
     fn heap_record_bytes(reference_count: u32, heap_id: [u8; 8], offset_size: usize) -> Vec<u8> {
@@ -811,7 +811,7 @@ mod tests {
         let second = heap_record_bytes(2, [2, 0, 0, 0, 0, 0, 0, 0], 8);
         let image = list_image(&[first, second]);
 
-        let records = parse_list(&image, 2, 8).unwrap();
+        let records = parse_sohm_list(&image, 2, 8).unwrap();
         assert_eq!(records.len(), 2);
         assert_eq!(
             records[1].location,
@@ -830,9 +830,9 @@ mod tests {
         let record = heap_record_bytes(1, [1, 0, 0, 0, 0, 0, 0, 0], 8);
         let mut image = list_image(&[record]);
         // The unused tail of the allocation, which the file zeroes.
-        image.extend_from_slice(&vec![0u8; 4 * record_len(8)]);
+        image.extend_from_slice(&vec![0u8; 4 * sohm_record_len(8)]);
 
-        assert_eq!(parse_list(&image, 1, 8).unwrap().len(), 1);
+        assert_eq!(parse_sohm_list(&image, 1, 8).unwrap().len(), 1);
     }
 
     #[test]
@@ -840,7 +840,7 @@ mod tests {
         let mut image = list_image(&[heap_record_bytes(1, [0; 8], 8)]);
         image[0] = b'X';
         assert_eq!(
-            parse_list(&image, 1, 8).unwrap_err(),
+            parse_sohm_list(&image, 1, 8).unwrap_err(),
             FormatError::InvalidSohmListSignature
         );
     }
@@ -851,7 +851,7 @@ mod tests {
         let mut image = list_image(&[heap_record_bytes(1, [0; 8], 8)]);
         image[6] ^= 0x01;
         assert!(matches!(
-            parse_list(&image, 1, 8).unwrap_err(),
+            parse_sohm_list(&image, 1, 8).unwrap_err(),
             FormatError::ChecksumMismatch { .. }
         ));
     }
@@ -860,7 +860,7 @@ mod tests {
     fn a_list_shorter_than_its_record_count_is_refused() {
         let image = list_image(&[heap_record_bytes(1, [0; 8], 8)]);
         assert!(matches!(
-            parse_list(&image, 4, 8).unwrap_err(),
+            parse_sohm_list(&image, 4, 8).unwrap_err(),
             FormatError::UnexpectedEof { .. }
         ));
     }
