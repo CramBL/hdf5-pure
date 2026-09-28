@@ -45,6 +45,7 @@ use crate::fractal_heap::FractalHeapHeader;
 use crate::message_type::MessageType;
 use crate::shared_message::FHEAP_ID_LEN;
 use crate::source::Source;
+use crate::source::SourceMetadata;
 
 /// Signature of the shared-message master table (`H5SM_TABLE_MAGIC`).
 const TABLE_SIGNATURE: &[u8; 4] = b"SMTB";
@@ -455,8 +456,12 @@ pub fn read_index_records_from_source<S: Source + ?Sized>(
             parse_list(&image, index.message_count, offset_size)
         }
         SohmIndexKind::BTree => {
-            let header =
-                BTreeV2Header::parse_from_source(source, address.get(), offset_size, length_size)?;
+            let header = BTreeV2Header::parse_from_source(
+                &SourceMetadata(source),
+                address.get(),
+                offset_size,
+                length_size,
+            )?;
             check_btree_type(&header)?;
             let records =
                 collect_btree_v2_records_from_source(source, &header, offset_size, length_size)?;

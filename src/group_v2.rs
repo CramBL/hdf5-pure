@@ -663,8 +663,12 @@ fn resolve_dense_entries_from_source<S: Source + ?Sized>(
     let btree_addr = link_info
         .btree_name_index_address
         .ok_or_else(|| FormatError::PathNotFound(String::from("no B-tree v2 name index")))?;
-    let btree_hdr =
-        BTreeV2Header::parse_from_source(source, btree_addr.get(), offset_size, length_size)?;
+    let btree_hdr = BTreeV2Header::parse_from_source(
+        &SourceMetadata(source),
+        btree_addr.get(),
+        offset_size,
+        length_size,
+    )?;
     let records =
         collect_btree_v2_records_from_source(source, &btree_hdr, offset_size, length_size)?;
 

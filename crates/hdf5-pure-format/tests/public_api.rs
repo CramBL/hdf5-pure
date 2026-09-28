@@ -1,6 +1,13 @@
+use core::num::NonZeroU16;
+
 use hdf5_pure_core::__private::BaseAddressExt;
 use hdf5_pure_format::AttributeMessage;
+use hdf5_pure_format::BTREE_V2_NODE_SIZE;
 use hdf5_pure_format::BTreeV1Node;
+use hdf5_pure_format::BTreeV2Header;
+use hdf5_pure_format::BTreeV2NodeInfo;
+use hdf5_pure_format::BTreeV2Plan;
+use hdf5_pure_format::BTreeV2Record;
 use hdf5_pure_format::BaseAddress;
 use hdf5_pure_format::Dataspace;
 use hdf5_pure_format::DataspaceType;
@@ -31,6 +38,7 @@ use hdf5_pure_format::V3_FLAGS_DEFAULT;
 use rstest::rstest;
 use test_util::attribute;
 use test_util::btree_v1;
+use test_util::btree_v2;
 use test_util::dataspace;
 use test_util::datatype;
 use test_util::image::Image;
@@ -331,6 +339,107 @@ fn a_version_1_group_btree_node_parses_through_the_public_api() {
     assert_eq!(
         BTreeV1Node::parse_from_source(node.as_slice(), 0, 4, 8),
         Ok(expected)
+    );
+}
+
+#[test]
+fn version_2_btree_nodes_parse_through_the_public_api() {
+    let widths = Widths::new(4, 8);
+    let header = btree_v2::Header::new(5, 11, 0x200, 1)
+        .depth(1)
+        .total_records(3)
+        .build(widths);
+    let leaf = btree_v2::leaf(5, &[vec![1; 11], vec![2; 11]]);
+    let child = |address| btree_v2::Child {
+        address,
+        records: 1,
+        records_width: 1,
+        subtree: None,
+    };
+    let internal = btree_v2::internal(5, &[vec![3; 11]], &[child(0x300), child(0x400)], widths);
+    let expected = BTreeV2Header {
+        tree_type: 5,
+        node_size: 512,
+        record_size: 11,
+        depth: 1,
+        root_node_address: StoredAddress::new(0x200),
+        num_records_in_root: 1,
+        total_records: 3,
+    };
+
+    assert_eq!(BTreeV2Header::parse(&header, 0, 4, 8), Ok(expected.clone()));
+    assert_eq!(
+        BTreeV2Header::parse_from_source(header.as_slice(), 0, 4, 8),
+        Ok(expected)
+    );
+    assert_eq!(
+        hdf5_pure_format::parse_btree_v2_leaf_records(&leaf, 0, 2, 11),
+        Ok(vec![
+            BTreeV2Record { data: vec![1; 11] },
+            BTreeV2Record { data: vec![2; 11] },
+        ])
+    );
+    assert_eq!(
+        hdf5_pure_format::parse_btree_v2_internal_child_pointers(
+            &internal,
+            1,
+            NonZeroU16::MIN,
+            11,
+            4,
+            &BTreeV2NodeInfo::compute(512, 11, 4, 1),
+        ),
+        Ok(vec![
+            (StoredAddress::new(0x300), 1),
+            (StoredAddress::new(0x400), 1),
+        ])
+    );
+}
+
+#[test]
+fn a_planned_version_2_btree_parses_back_through_the_public_api() {
+    let records: Vec<u8> = (0..34).collect();
+    let nodes_address = StoredAddress::new(hdf5_pure_format::btree_v2_header_size(
+        OffsetWidth::Eight,
+        LengthWidth::Eight,
+    ) as u64);
+    let plan = BTreeV2Plan::new(8, 2, 17, BTREE_V2_NODE_SIZE, OffsetWidth::Eight).unwrap();
+    let image = plan.serialize(
+        &records,
+        nodes_address,
+        OffsetWidth::Eight,
+        LengthWidth::Eight,
+    );
+    let (node_info, depth) =
+        BTreeV2NodeInfo::for_record_count(BTREE_V2_NODE_SIZE, 17, 8, 30).unwrap();
+
+    assert_eq!(depth, 1);
+    assert_eq!(node_info.max_nrec(0), 29);
+    assert!(BTreeV2Plan::new(8, 100_000, 1, 1_000_000, OffsetWidth::Eight).is_none());
+    assert_eq!(plan.nodes_size(), u64::from(BTREE_V2_NODE_SIZE));
+
+    assert_eq!(
+        BTreeV2Header::parse(&image.header, 0, 8, 8),
+        Ok(BTreeV2Header {
+            tree_type: 8,
+            node_size: BTREE_V2_NODE_SIZE,
+            record_size: 17,
+            depth: 0,
+            root_node_address: nodes_address,
+            num_records_in_root: 2,
+            total_records: 2,
+        })
+    );
+    assert_eq!(image.nodes.len(), BTREE_V2_NODE_SIZE as usize);
+    assert_eq!(
+        hdf5_pure_format::parse_btree_v2_leaf_records(&image.nodes, 0, 2, 17),
+        Ok(vec![
+            BTreeV2Record {
+                data: records[..17].to_vec(),
+            },
+            BTreeV2Record {
+                data: records[17..].to_vec(),
+            },
+        ])
     );
 }
 
