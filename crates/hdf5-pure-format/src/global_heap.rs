@@ -11,10 +11,7 @@ use crate::convert::Narrow;
 use crate::error::FormatError;
 use crate::metadata_source::MetadataSource;
 
-/// Magic signature for global heap collections.
-const GCOL_SIGNATURE: [u8; 4] = *b"GCOL";
-
-/// Metadata index for a global heap collection.
+/// The directory of a global heap collection: where each of its objects sits and how large it is.
 ///
 /// The directory holds none of the object data, so a caller parses a collection once and reads
 /// only the objects it looks up. The collection is defined in "Global Heap" of the [format
@@ -215,7 +212,7 @@ impl GlobalHeapIndex {
             return Err(FormatError::InvalidGlobalHeapSignature);
         }
         let version = header[4];
-        if version != 1 {
+        if version != GCOL_VERSION {
             return Err(FormatError::InvalidGlobalHeapVersion(version));
         }
 
@@ -343,30 +340,27 @@ impl GlobalHeapIndex {
 /// [`GLOBAL_HEAP_MAX_OBJECTS`] of them), assigning 1-based object indices in order.
 /// Returns the serialized collection bytes.
 pub fn encode_global_heap_collection(objects: &[&[u8]]) -> Vec<u8> {
-    debug_assert!(
+    assert!(
         objects.len() <= GLOBAL_HEAP_MAX_OBJECTS,
         "a collection's 2-byte object index cannot address more than {GLOBAL_HEAP_MAX_OBJECTS} objects"
     );
-    let length_size = 8usize;
-    let header_size = 8 + length_size; // sig(4) + ver(1) + reserved(3) + `collection_size`
-
-    // Calculate total size
-    let mut obj_size_total = 0usize;
-    for obj in objects {
-        let obj_header = 8 + length_size; // index(2) + refcount(2) + reserved(4) + size
-        let padded_data_len = (obj.len() + 7) & !7; // pad to 8 bytes
-        obj_size_total += obj_header + padded_data_len;
-    }
-    obj_size_total += 8 + length_size; // free space marker (full object header size)
-    let collection_size = header_size + obj_size_total;
-    // The C HDF5 library enforces a minimum collection size of 4096 bytes.
-    let min_collection_size = 4096;
-    let padded_collection = ((collection_size.max(min_collection_size)) + 7) & !7;
+    // The collection header, sig(4) + ver(1) + reserved(3) + `collection_size`, and each object
+    // header, index(2) + reference count(2) + reserved(4) + size, are both this long.
+    let header_size = 8 + 8;
+    let collection_size = header_size
+        + objects
+            .iter()
+            .map(|obj| header_size + obj.len().next_multiple_of(ALIGNMENT))
+            .sum::<usize>()
+        + header_size; // free space marker (full object header size)
+    let padded_collection = collection_size
+        .max(MIN_COLLECTION_SIZE)
+        .next_multiple_of(ALIGNMENT);
 
     let mut buf = Vec::with_capacity(padded_collection);
     // Header
-    buf.extend_from_slice(b"GCOL");
-    buf.push(1); // version
+    buf.extend_from_slice(&GCOL_SIGNATURE);
+    buf.push(GCOL_VERSION);
     buf.extend_from_slice(&[0u8; 3]); // reserved
     buf.extend_from_slice(&(padded_collection as u64).to_le_bytes());
 
@@ -374,7 +368,8 @@ pub fn encode_global_heap_collection(objects: &[&[u8]]) -> Vec<u8> {
     for (i, obj) in objects.iter().enumerate() {
         #[expect(
             clippy::cast_possible_truncation,
-            reason = "1-based heap object index is written into the 2-byte heap-object index field"
+            reason = "the assertion above bounds the object count by `u16::MAX`, so the 1-based \
+                      index `i + 1` fits the 2-byte heap object index field"
         )]
         let index = (i + 1) as u16;
         buf.extend_from_slice(&index.to_le_bytes());
@@ -383,10 +378,7 @@ pub fn encode_global_heap_collection(objects: &[&[u8]]) -> Vec<u8> {
         buf.extend_from_slice(&(obj.len() as u64).to_le_bytes());
         buf.extend_from_slice(obj);
         // Pad to 8-byte boundary
-        let padded = (obj.len() + 7) & !7;
-        for _ in obj.len()..padded {
-            buf.push(0);
-        }
+        buf.resize(buf.len().next_multiple_of(ALIGNMENT), 0);
     }
 
     // Free space marker (index 0): the C library uses this size as the total
@@ -412,6 +404,20 @@ pub fn encode_global_heap_collection(objects: &[&[u8]]) -> Vec<u8> {
 ///
 /// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsec_fmt4_infra_globalheap
 pub const GLOBAL_HEAP_MAX_OBJECTS: usize = u16::MAX as usize;
+
+/// The signature a global heap collection begins with.
+const GCOL_SIGNATURE: [u8; 4] = *b"GCOL";
+
+/// The version of a global heap collection, the one version the specification defines.
+const GCOL_VERSION: u8 = 1;
+
+// The collection header, each object header and each object's data are padded to a multiple of
+// this many bytes, `H5HG_ALIGNMENT` in the C library (`H5HGpkg.h`, HDF5 2.2.0).
+const ALIGNMENT: usize = 8;
+
+// The minimum collection size "Global Heap" of the format specification, version 4.0, defines,
+// and `H5HG_MINSIZE` in the C library (`H5HGpkg.h`, HDF5 2.2.0).
+const MIN_COLLECTION_SIZE: usize = 4096;
 
 #[cfg(test)]
 mod tests {
@@ -662,7 +668,7 @@ mod tests {
     }
 
     #[rstest]
-    #[case::padded_to_the_minimum(&[b"alpha".as_slice(), b"".as_slice()], 4096)]
+    #[case::padded_to_the_minimum(&[b"alpha".as_slice(), b"".as_slice()], MIN_COLLECTION_SIZE)]
     #[case::past_the_minimum(&[[7u8; 5000].as_slice()], 5048)]
     fn an_encoded_collection_parses_back_to_its_objects(
         #[case] objects: &[&[u8]],
