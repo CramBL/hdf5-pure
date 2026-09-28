@@ -714,8 +714,14 @@ fn int_fits(v: i64, width: usize, signed: bool) -> bool {
 pub(crate) enum AttrSpec {
     /// A decoded value the writer encodes with [`build_attr_message`].
     Value(AttrValue),
-    /// An already-encoded message, written as given.
-    Verbatim(AttributeMessage),
+    /// An already-encoded message, written as given except for its datatype location.
+    Verbatim {
+        message: AttributeMessage,
+        /// The path of a committed datatype in the file under construction, which the written
+        /// message refers to for its datatype, or `None` to keep the datatype location of
+        /// `message`.
+        committed_datatype_path: Option<ObjectPathBuf>,
+    },
     /// A message whose datatype and dataspace are given, but whose element bytes
     /// are global-heap references the writer builds and patches from `strings`.
     ///
@@ -734,16 +740,52 @@ pub(crate) enum AttrSpec {
     VerbatimVarLen {
         message: AttributeMessage,
         strings: Vec<String>,
+        /// The path of a committed datatype, as in [`Verbatim`](AttrSpec::Verbatim).
+        committed_datatype_path: Option<ObjectPathBuf>,
     },
 }
 
 impl AttrSpec {
-    /// The message this attribute writes, encoding a [`Value`](AttrSpec::Value)
-    /// and handing back an already-encoded one unchanged.
+    /// Returns the message this attribute writes: a [`Value`](AttrSpec::Value) encoded, or a copy
+    /// of an already-encoded message.
+    ///
+    /// A copy with a committed datatype path refers to the undefined address, which the writer
+    /// replaces once it places the committed datatype at that path.
     pub(crate) fn to_message(&self, name: &str) -> AttributeMessage {
         match self {
             Self::Value(v) => build_attr_message(name, v),
-            Self::Verbatim(m) | Self::VerbatimVarLen { message: m, .. } => m.clone(),
+            Self::Verbatim {
+                message,
+                committed_datatype_path,
+            }
+            | Self::VerbatimVarLen {
+                message,
+                committed_datatype_path,
+                ..
+            } => {
+                let mut message = message.clone();
+                if committed_datatype_path.is_some() {
+                    message.datatype_location =
+                        DatatypeLocation::Committed(crate::file_writer::UNDEF_ADDRESS);
+                }
+                message
+            }
+        }
+    }
+
+    /// Returns the path of the committed datatype the written message refers to, or `None` if
+    /// the message keeps its own datatype location.
+    pub(crate) fn committed_datatype_path(&self) -> Option<&ObjectPathBuf> {
+        match self {
+            Self::Value(_) => None,
+            Self::Verbatim {
+                committed_datatype_path,
+                ..
+            }
+            | Self::VerbatimVarLen {
+                committed_datatype_path,
+                ..
+            } => committed_datatype_path.as_ref(),
         }
     }
 
@@ -753,7 +795,7 @@ impl AttrSpec {
         match self {
             Self::Value(v) => v.var_len_strings(),
             Self::VerbatimVarLen { strings, .. } => Some(strings),
-            Self::Verbatim(_) => None,
+            Self::Verbatim { .. } => None,
         }
     }
 }
@@ -2394,9 +2436,9 @@ pub struct DatasetBuilder {
     /// preserves a never-written dataset through a rewrite rather than
     /// materializing a grid of fill values (issue #293).
     pub(crate) allocation: StorageAllocation,
-    /// Where this dataset's element type is written: in its own header, or as a
-    /// reference to a committed datatype object named by path.
-    pub(crate) datatype_location: DatatypeLocation,
+    /// The path of the committed datatype this dataset's header refers to for its element type,
+    /// or `None` to encode the type in the header.
+    pub(crate) committed_datatype_path: Option<ObjectPathBuf>,
     #[cfg(feature = "provenance")]
     pub(crate) provenance: Option<ProvenanceConfig>,
 }
@@ -2417,7 +2459,7 @@ impl DatasetBuilder {
             vl_string_staging: None,
             fill: None,
             allocation: StorageAllocation::Allocated,
-            datatype_location: DatatypeLocation::Inline,
+            committed_datatype_path: None,
             #[cfg(feature = "provenance")]
             provenance: None,
         }
@@ -2445,7 +2487,7 @@ impl DatasetBuilder {
     ///
     /// A repack resolves a source's committed type to a path of the output and passes it here.
     pub(crate) fn with_committed_datatype_path(&mut self, path: ObjectPathBuf) -> &mut Self {
-        self.datatype_location = DatatypeLocation::CommittedPath(path);
+        self.committed_datatype_path = Some(path);
         self
     }
 
@@ -3318,28 +3360,46 @@ impl DatasetBuilder {
         self
     }
 
-    /// Attach an already-encoded attribute message, written exactly as given.
+    /// Attaches an already-encoded attribute message, written as given except for its datatype
+    /// location.
     ///
-    /// See [`AttrSpec::Verbatim`] for what this preserves that `set_attr` cannot,
-    /// and for the datatypes it must not be used with.
-    pub(crate) fn set_attr_verbatim(&mut self, message: AttributeMessage) -> &mut Self {
-        self.attrs
-            .push((message.name.clone(), AttrSpec::Verbatim(message)));
+    /// Where `committed_datatype_path` is set, the written message refers to the committed
+    /// datatype at that path. See [`AttrSpec::Verbatim`] for what this preserves that `set_attr`
+    /// cannot, and for the datatypes it must not be used with.
+    pub(crate) fn set_attr_verbatim(
+        &mut self,
+        message: AttributeMessage,
+        committed_datatype_path: Option<ObjectPathBuf>,
+    ) -> &mut Self {
+        self.attrs.push((
+            message.name.clone(),
+            AttrSpec::Verbatim {
+                message,
+                committed_datatype_path,
+            },
+        ));
         self
     }
 
-    /// Attach a variable-length string attribute with the given datatype and
-    /// dataspace, staging `strings` into a heap of this file's own.
-    /// See [`AttrSpec::VerbatimVarLen`].
+    /// Attaches a variable-length string attribute with the datatype and dataspace of
+    /// `message`, staging `strings` into a heap of this file's own.
+    ///
+    /// Where `committed_datatype_path` is set, the written message refers to the committed
+    /// datatype at that path. See [`AttrSpec::VerbatimVarLen`].
     pub(crate) fn set_attr_var_len_verbatim(
         &mut self,
         mut message: AttributeMessage,
         strings: Vec<String>,
+        committed_datatype_path: Option<ObjectPathBuf>,
     ) -> &mut Self {
         message.raw_data = vl_string_reference_bytes(&strings);
         self.attrs.push((
             message.name.clone(),
-            AttrSpec::VerbatimVarLen { message, strings },
+            AttrSpec::VerbatimVarLen {
+                message,
+                strings,
+                committed_datatype_path,
+            },
         ));
         self
     }
@@ -3545,13 +3605,24 @@ impl GroupBuilder {
         self.attrs.push((name.to_string(), AttrSpec::Value(value)));
     }
 
-    /// Attach an already-encoded attribute message, written exactly as given.
+    /// Attaches an already-encoded attribute message, written as given except for its datatype
+    /// location.
     ///
-    /// See [`AttrSpec::Verbatim`] for what this preserves that `set_attr` cannot,
-    /// and for the datatypes it must not be used with.
-    pub(crate) fn set_attr_verbatim(&mut self, message: AttributeMessage) {
-        self.attrs
-            .push((message.name.clone(), AttrSpec::Verbatim(message)));
+    /// Where `committed_datatype_path` is set, the written message refers to the committed
+    /// datatype at that path. See [`AttrSpec::Verbatim`] for what this preserves that `set_attr`
+    /// cannot, and for the datatypes it must not be used with.
+    pub(crate) fn set_attr_verbatim(
+        &mut self,
+        message: AttributeMessage,
+        committed_datatype_path: Option<ObjectPathBuf>,
+    ) {
+        self.attrs.push((
+            message.name.clone(),
+            AttrSpec::Verbatim {
+                message,
+                committed_datatype_path,
+            },
+        ));
     }
 
     /// Attach an attribute whose datatype is the committed one at `path`.
@@ -3562,18 +3633,25 @@ impl GroupBuilder {
             .push((name.to_string(), committed_attr_spec(name, &value, path)));
     }
 
-    /// Attach a variable-length string attribute with the given datatype and
-    /// dataspace, staging `strings` into a heap of this file's own.
-    /// See [`AttrSpec::VerbatimVarLen`].
+    /// Attaches a variable-length string attribute with the datatype and dataspace of
+    /// `message`, staging `strings` into a heap of this file's own.
+    ///
+    /// Where `committed_datatype_path` is set, the written message refers to the committed
+    /// datatype at that path. See [`AttrSpec::VerbatimVarLen`].
     pub(crate) fn set_attr_var_len_verbatim(
         &mut self,
         mut message: AttributeMessage,
         strings: Vec<String>,
+        committed_datatype_path: Option<ObjectPathBuf>,
     ) {
         message.raw_data = vl_string_reference_bytes(&strings);
         self.attrs.push((
             message.name.clone(),
-            AttrSpec::VerbatimVarLen { message, strings },
+            AttrSpec::VerbatimVarLen {
+                message,
+                strings,
+                committed_datatype_path,
+            },
         ));
     }
 
@@ -3637,14 +3715,18 @@ pub(crate) struct CommittedDatatype {
 /// a file that returned `Ok`, dropped the attribute from `attrs`, and read as
 /// an empty string in the C library.
 pub(crate) fn committed_attr_spec(name: &str, value: &AttrValue, path: &str) -> AttrSpec {
-    let mut message = build_attr_message(name, value);
-    message.datatype_location = DatatypeLocation::CommittedPath(ObjectPathBuf::parse(path));
+    let message = build_attr_message(name, value);
+    let committed_datatype_path = Some(ObjectPathBuf::parse(path));
     match value.var_len_strings() {
         Some(strings) => AttrSpec::VerbatimVarLen {
             message,
             strings: strings.to_vec(),
+            committed_datatype_path,
         },
-        None => AttrSpec::Verbatim(message),
+        None => AttrSpec::Verbatim {
+            message,
+            committed_datatype_path,
+        },
     }
 }
 

@@ -1161,7 +1161,7 @@ fn write_uint(buf: &mut Vec<u8>, val: u64, width: u8) {
 /// specification, version 4.0][spec].
 ///
 /// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#sec_fmt4_appendixa
-const UNDEF_ADDRESS: StoredAddress = StoredAddress::undefined(OFFSET_SIZE);
+pub(crate) const UNDEF_ADDRESS: StoredAddress = StoredAddress::undefined(OFFSET_SIZE);
 
 pub(crate) fn write_undef_offset(buf: &mut Vec<u8>, offset_size: u8) {
     for _ in 0..offset_size {
@@ -1445,28 +1445,45 @@ impl FileWriter {
             .push((name.to_string(), AttrSpec::Value(value)));
     }
 
-    /// Attach an already-encoded attribute message to the root group, written
-    /// exactly as given.
+    /// Attaches an already-encoded attribute message to the root group, written as given except
+    /// for its datatype location.
     ///
-    /// See [`AttrSpec::Verbatim`] for what this preserves that `set_root_attr`
-    /// cannot, and for the datatypes it must not be used with.
-    pub(crate) fn set_root_attr_verbatim(&mut self, message: crate::attribute::AttributeMessage) {
-        self.root_attrs
-            .push((message.name.clone(), AttrSpec::Verbatim(message)));
+    /// Where `committed_datatype_path` is set, the written message refers to the committed
+    /// datatype at that path. See [`AttrSpec::Verbatim`] for what this preserves that
+    /// `set_root_attr` cannot, and for the datatypes it must not be used with.
+    pub(crate) fn set_root_attr_verbatim(
+        &mut self,
+        message: crate::attribute::AttributeMessage,
+        committed_datatype_path: Option<ObjectPathBuf>,
+    ) {
+        self.root_attrs.push((
+            message.name.clone(),
+            AttrSpec::Verbatim {
+                message,
+                committed_datatype_path,
+            },
+        ));
     }
 
-    /// Attach a variable-length string attribute to the root group with the given
-    /// datatype and dataspace, staging `strings` into a heap of this file's own.
-    /// See [`AttrSpec::VerbatimVarLen`].
+    /// Attaches a variable-length string attribute to the root group with the datatype and
+    /// dataspace of `message`, staging `strings` into a heap of this file's own.
+    ///
+    /// Where `committed_datatype_path` is set, the written message refers to the committed
+    /// datatype at that path. See [`AttrSpec::VerbatimVarLen`].
     pub(crate) fn set_root_attr_var_len_verbatim(
         &mut self,
         mut message: crate::attribute::AttributeMessage,
         strings: Vec<String>,
+        committed_datatype_path: Option<ObjectPathBuf>,
     ) {
         message.raw_data = crate::type_builders::vl_string_reference_bytes(&strings);
         self.root_attrs.push((
             message.name.clone(),
-            AttrSpec::VerbatimVarLen { message, strings },
+            AttrSpec::VerbatimVarLen {
+                message,
+                strings,
+                committed_datatype_path,
+            },
         ));
     }
 
@@ -1576,9 +1593,14 @@ impl FileWriter {
             /// Where `dt` is written: in this dataset's header, or in a committed
             /// datatype object it names.
             dt_location: DatatypeLocation,
+            /// The path of the committed datatype `dt_location` refers to. `dt_location`
+            /// holds the undefined address until the writer places that datatype.
+            committed_datatype_path: Option<ObjectPathBuf>,
             ds: Dataspace,
             raw: Vec<u8>,
             attrs: Vec<AttributeMessage>,
+            /// The committed datatype path of each attribute, parallel to `attrs`.
+            attr_committed_datatype_paths: Vec<Option<ObjectPathBuf>>,
             chunk_options: ChunkOptions,
             maxshape: Option<Vec<MaxExtent>>,
             /// Repack's verbatim chunk payload, when this dataset's chunks are
@@ -1885,6 +1907,8 @@ impl FileWriter {
             /// Link name in the owning group.
             name: LinkNameBuf,
             attrs: Vec<AttributeMessage>,
+            /// The committed datatype path of each attribute, parallel to `attrs`.
+            attr_committed_datatype_paths: Vec<Option<ObjectPathBuf>>,
             ds_indices: Vec<usize>,
             sub_group_indices: Vec<usize>,
             committed_indices: Vec<usize>,
@@ -2062,8 +2086,10 @@ impl FileWriter {
             };
             let patches = collect_vl_patches(&db.attrs);
             let mut attrs = Vec::new();
+            let mut attr_committed_datatype_paths = Vec::new();
             for (n, v) in &db.attrs {
                 attrs.push(v.to_message(n));
+                attr_committed_datatype_paths.push(v.committed_datatype_path().cloned());
             }
             #[cfg(feature = "provenance")]
             if let Some(ref prov) = db.provenance {
@@ -2088,10 +2114,15 @@ impl FileWriter {
             all_ds.push(DsFlat {
                 name,
                 dt,
-                dt_location: db.datatype_location,
+                dt_location: match db.committed_datatype_path {
+                    Some(_) => DatatypeLocation::Committed(UNDEF_ADDRESS),
+                    None => DatatypeLocation::Inline,
+                },
+                committed_datatype_path: db.committed_datatype_path,
                 ds: dspace,
                 raw,
                 attrs,
+                attr_committed_datatype_paths,
                 chunk_options: db.chunk_options,
                 maxshape: db.maxshape,
                 raw_chunks,
@@ -2144,8 +2175,10 @@ impl FileWriter {
             let name = link_name(g.name)?;
             let patches = collect_vl_patches(&g.attrs);
             let mut gattrs = Vec::new();
+            let mut attr_committed_datatype_paths = Vec::new();
             for (n, v) in &g.attrs {
                 gattrs.push(v.to_message(n));
+                attr_committed_datatype_paths.push(v.committed_datatype_path().cloned());
             }
             let committed_idx = flatten_committed(g.committed, committed)?;
             let mut ds_idx = Vec::new();
@@ -2160,6 +2193,7 @@ impl FileWriter {
             groups.push(GrpFlat {
                 name,
                 attrs: gattrs,
+                attr_committed_datatype_paths,
                 ds_indices: ds_idx,
                 sub_group_indices: sub_grp_idx,
                 committed_indices: committed_idx,
@@ -2228,8 +2262,10 @@ impl FileWriter {
         let vl_root = collect_vl_patches(&self.root_attrs);
 
         let mut root_attrs: Vec<AttributeMessage> = Vec::new();
+        let mut root_attr_committed_datatype_paths = Vec::new();
         for (n, v) in &self.root_attrs {
             root_attrs.push(v.to_message(n));
+            root_attr_committed_datatype_paths.push(v.committed_datatype_path().cloned());
         }
 
         // ---- Committed datatypes: paths, reference counts, and agreement ----
@@ -2285,13 +2321,10 @@ impl FileWriter {
         fn register_committed_use(
             committed: &mut [CtFlat],
             by_path: &HashMap<ObjectPathBuf, usize>,
-            location: &DatatypeLocation,
+            path: &ObjectPathBuf,
             dt: &Datatype,
             user: impl FnOnce() -> String,
         ) -> Result<(), FormatError> {
-            let Some(path) = location.unresolved_path() else {
-                return Ok(());
-            };
             let Some(&ci) = by_path.get(path) else {
                 return Err(FormatError::UnknownCommittedDatatype(path.to_string()));
             };
@@ -2307,39 +2340,46 @@ impl FileWriter {
             Ok(())
         }
 
-        for attr in &root_attrs {
+        for (attr, path) in root_attrs.iter().zip(&root_attr_committed_datatype_paths) {
+            let Some(path) = path else {
+                continue;
+            };
             register_committed_use(
                 &mut committed,
                 &committed_by_path,
-                &attr.datatype_location,
+                path,
                 &attr.datatype,
                 || format!("root attribute {:?}", attr.name),
             )?;
         }
         for g in &groups {
-            for attr in &g.attrs {
+            for (attr, path) in g.attrs.iter().zip(&g.attr_committed_datatype_paths) {
+                let Some(path) = path else {
+                    continue;
+                };
                 register_committed_use(
                     &mut committed,
                     &committed_by_path,
-                    &attr.datatype_location,
+                    path,
                     &attr.datatype,
                     || format!("attribute {:?} of group {:?}", attr.name, g.name.as_str()),
                 )?;
             }
         }
         for d in &all_ds {
-            register_committed_use(
-                &mut committed,
-                &committed_by_path,
-                &d.dt_location,
-                &d.dt,
-                || format!("dataset {:?}", d.name.as_str()),
-            )?;
-            for attr in &d.attrs {
+            if let Some(path) = &d.committed_datatype_path {
+                register_committed_use(&mut committed, &committed_by_path, path, &d.dt, || {
+                    format!("dataset {:?}", d.name.as_str())
+                })?;
+            }
+            for (attr, path) in d.attrs.iter().zip(&d.attr_committed_datatype_paths) {
+                let Some(path) = path else {
+                    continue;
+                };
                 register_committed_use(
                     &mut committed,
                     &committed_by_path,
-                    &attr.datatype_location,
+                    path,
                     &attr.datatype,
                     || format!("attribute {:?} of dataset {:?}", attr.name, d.name.as_str()),
                 )?;
@@ -2935,33 +2975,34 @@ impl FileWriter {
         }
 
         // Resolve every committed-datatype reference, now that the objects have
-        // addresses. From here on a `CommittedPath` cannot survive: the loops
+        // addresses. From here on no staged path is left unresolved: the loops
         // below cover every dataset and every attribute in the file, which is
         // exactly the set `register_committed_use` walked to validate the paths.
         {
-            let resolve = |location: &mut DatatypeLocation| {
-                let ci = match location.unresolved_path() {
-                    Some(path) => *committed_by_path.get(path).expect(
-                        "every committed-datatype path was resolved against this same map \
-                         before any header was sized",
-                    ),
-                    None => return,
-                };
-                *location = DatatypeLocation::Committed(committed_addrs[ci]);
+            let committed_location = |path: &ObjectPathBuf| {
+                let ci = *committed_by_path.get(path).expect(
+                    "every committed-datatype path was resolved against this same map \
+                     before any header was sized",
+                );
+                DatatypeLocation::Committed(committed_addrs[ci])
             };
-            for attr in &mut root_attrs {
-                resolve(&mut attr.datatype_location);
-            }
-            for g in &mut groups {
-                for attr in &mut g.attrs {
-                    resolve(&mut attr.datatype_location);
+            let resolve_attrs = |attrs: &mut [AttributeMessage],
+                                 paths: &[Option<ObjectPathBuf>]| {
+                for (attr, path) in attrs.iter_mut().zip(paths) {
+                    if let Some(path) = path {
+                        attr.datatype_location = committed_location(path);
+                    }
                 }
+            };
+            resolve_attrs(&mut root_attrs, &root_attr_committed_datatype_paths);
+            for g in &mut groups {
+                resolve_attrs(&mut g.attrs, &g.attr_committed_datatype_paths);
             }
             for d in &mut all_ds {
-                resolve(&mut d.dt_location);
-                for attr in &mut d.attrs {
-                    resolve(&mut attr.datatype_location);
+                if let Some(path) = &d.committed_datatype_path {
+                    d.dt_location = committed_location(path);
                 }
+                resolve_attrs(&mut d.attrs, &d.attr_committed_datatype_paths);
             }
         }
 

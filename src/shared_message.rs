@@ -34,7 +34,6 @@ use crate::convert::Narrow;
 use crate::error::FormatError;
 use crate::message_type::MessageType;
 use crate::object_header::ObjectHeader;
-use crate::object_path::ObjectPathBuf;
 use crate::sohm::SohmTable;
 use crate::source::Source;
 use crate::source::SourceMetadata;
@@ -60,15 +59,6 @@ pub enum DatatypeLocation {
     /// the message belongs to. What a parse reads out of a file, and what a
     /// writer emits once the object's address is fixed.
     Committed(StoredAddress),
-    /// Staged for writing: a reference to the committed datatype object the file
-    /// under construction places at this path.
-    ///
-    /// Addresses are not known until the whole layout is, so the writer sizes
-    /// headers against this variant and resolves it to [`Self::Committed`] in the
-    /// same pass that assigns addresses. Serializing one writes the undefined
-    /// address, so a reference that misses that pass names nothing rather than
-    /// silently naming the superblock.
-    CommittedPath(ObjectPathBuf),
 }
 
 impl DatatypeLocation {
@@ -78,18 +68,6 @@ impl DatatypeLocation {
         match self {
             Self::Inline => None,
             Self::Committed(addr) => Some(encode_committed_ref(*addr, offset_width)),
-            Self::CommittedPath(_) => Some(encode_committed_ref(
-                StoredAddress::new(u64::MAX),
-                offset_width,
-            )),
-        }
-    }
-
-    /// The path this location still has to have resolved, if any.
-    pub fn unresolved_path(&self) -> Option<&ObjectPathBuf> {
-        match self {
-            Self::CommittedPath(path) => Some(path),
-            Self::Inline | Self::Committed(_) => None,
         }
     }
 

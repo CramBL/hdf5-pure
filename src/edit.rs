@@ -12021,7 +12021,7 @@ fn flatten_dataset(db: DatasetBuilder, name: LinkNameBuf) -> Result<FlatDataset,
     // inline instead would produce a dataset that reads correctly but no longer
     // shares the named type, so refuse by name. The whole-file writer places
     // them; [`crate::repack`] is the route from an edited file to one.
-    if db.datatype_location.is_committed()
+    if db.committed_datatype_path.is_some()
         || attrs.iter().any(|a| a.datatype_location.is_committed())
     {
         return Err(Error::EditUnsupported(
