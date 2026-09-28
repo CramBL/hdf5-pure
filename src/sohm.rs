@@ -41,7 +41,7 @@ use crate::btree_v2::{BTreeV2Header, collect_btree_v2_records_from_source};
 use crate::bytes::{ensure_len, read_offset, read_optional_offset};
 use crate::convert::Narrow;
 use crate::error::FormatError;
-use crate::fractal_heap::FractalHeapHeader;
+use crate::fractal_heap::{FractalHeapHeader, HeapObjectReader};
 use crate::message_type::MessageType;
 use crate::shared_message::FHEAP_ID_LEN;
 use crate::source::Source;
@@ -521,7 +521,7 @@ pub fn read_heap_message(
         offset_size,
         length_size,
     )?;
-    heap.object_reader(offset_size, length_size)
+    HeapObjectReader::new(&heap, offset_size, length_size)
         .read(file_data, &heap_id[..heap.heap_id_length as usize])
 }
 
@@ -537,7 +537,7 @@ pub fn read_heap_message_from_source<S: Source + ?Sized>(
     let (_, heap_address) = index_for_read(table, message_type)?;
     let heap =
         FractalHeapHeader::parse_from_source(source, heap_address.get(), offset_size, length_size)?;
-    heap.object_reader(offset_size, length_size)
+    HeapObjectReader::new(&heap, offset_size, length_size)
         .read_from_source(source, &heap_id[..heap.heap_id_length as usize])
 }
 

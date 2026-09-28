@@ -274,17 +274,28 @@ enum Backend {
     Streaming,
 }
 
-impl HeapObjectReader<'_> {
+impl<'h> HeapObjectReader<'h> {
+    /// Returns a reader of the objects of the heap `header` describes.
+    ///
+    /// `offset_size` and `length_size` are the superblock's "Size of Offsets" and "Size of
+    /// Lengths" bytes.
+    pub fn new(header: &'h FractalHeapHeader, offset_size: u8, length_size: u8) -> Self {
+        HeapObjectReader {
+            header,
+            offset_size,
+            length_size,
+            huge: None,
+            huge_backend: None,
+        }
+    }
+
     /// Read the object `id_bytes` names from an in-memory file image,
     /// dispatching on the heap-ID type. Managed objects live in the doubling
     /// table's blocks; huge objects are stored directly in the file (resolved
     /// through the huge-objects v2 B-tree); tiny objects are encoded in the ID.
     pub fn read(&mut self, file_data: &[u8], id_bytes: &[u8]) -> Result<Vec<u8>, FormatError> {
         match FractalHeapHeader::heap_id_type(id_bytes)? {
-            HeapIdType::Managed => {
-                self.header
-                    .read_managed_object(file_data, id_bytes, self.offset_size)
-            }
+            HeapIdType::Managed => self.read_managed_object(file_data, id_bytes),
             HeapIdType::Huge => self.read_huge(file_data, id_bytes),
             HeapIdType::Tiny => read_tiny_object(self.header.heap_id_length, id_bytes),
         }
@@ -297,10 +308,7 @@ impl HeapObjectReader<'_> {
         id_bytes: &[u8],
     ) -> Result<Vec<u8>, FormatError> {
         match FractalHeapHeader::heap_id_type(id_bytes)? {
-            HeapIdType::Managed => {
-                self.header
-                    .read_managed_object_from_source(source, id_bytes, self.offset_size)
-            }
+            HeapIdType::Managed => self.read_managed_object_from_source(source, id_bytes),
             HeapIdType::Huge => self.read_huge_from_source(source, id_bytes),
             HeapIdType::Tiny => read_tiny_object(self.header.heap_id_length, id_bytes),
         }
@@ -414,6 +422,252 @@ impl HeapObjectReader<'_> {
             }
         };
         read_object_at_source(source, addr.get(), len.to_usize()?)
+    }
+
+    /// Reads the managed object the heap ID `id_bytes` refers to from `file_data`.
+    fn read_managed_object(
+        &self,
+        file_data: &[u8],
+        id_bytes: &[u8],
+    ) -> Result<Vec<u8>, FormatError> {
+        // A filtered heap stores its direct blocks filter-encoded, and the reader has no decoder
+        // for them, so it returns an error.
+        if self.header.io_filter_encoded_length > 0 {
+            return Err(FormatError::UnsupportedFilteredHeapObject);
+        }
+        let (heap_offset, obj_len) = self.header.decode_managed_id(id_bytes)?;
+
+        if is_undefined_addr(self.header.root_block_address.get(), self.offset_size) {
+            return Err(FormatError::UnexpectedEof {
+                expected: 1,
+                available: 0,
+            });
+        }
+
+        if self.header.current_rows_in_root_indirect_block == 0 {
+            // Root is a direct block
+            self.read_from_direct_block(
+                file_data,
+                self.header.root_block_address.get().to_usize()?,
+                self.header.starting_block_size,
+                0, // block offset in heap = 0 for root
+                heap_offset,
+                obj_len.to_usize()?,
+            )
+        } else {
+            // The root is an indirect block, and the walk descends 64 levels at most.
+            self.read_from_indirect_block(
+                file_data,
+                self.header.root_block_address.get().to_usize()?,
+                self.header.current_rows_in_root_indirect_block,
+                0, // block offset
+                heap_offset,
+                obj_len.to_usize()?,
+                64, // max recursion depth
+            )
+        }
+    }
+
+    /// Reads `length` bytes at heap offset `target_offset` from the direct block at `block_addr`,
+    /// whose space begins at heap offset `block_heap_offset`.
+    ///
+    /// The prefix of the block is inside its heap space, so the object is at
+    /// `block_addr + target_offset - block_heap_offset`.
+    #[allow(clippy::too_many_arguments)]
+    fn read_from_direct_block(
+        &self,
+        file_data: &[u8],
+        block_addr: usize,
+        _block_size: u64,
+        block_heap_offset: u64,
+        target_offset: u64,
+        length: usize,
+    ) -> Result<Vec<u8>, FormatError> {
+        let local_offset = (target_offset - block_heap_offset).to_usize()?;
+        let pos = block_addr
+            .checked_add(local_offset)
+            .ok_or(FormatError::OffsetOverflow {
+                offset: block_addr as u64,
+                length: target_offset - block_heap_offset,
+            })?;
+        ensure_len(file_data, pos, length)?;
+        Ok(file_data[pos..pos + length].to_vec())
+    }
+
+    /// Reads `length` bytes at heap offset `target_offset` from a direct block below the indirect
+    /// block at `iblock_addr`, descending `depth_remaining` levels at most.
+    #[allow(clippy::too_many_arguments)]
+    fn read_from_indirect_block(
+        &self,
+        file_data: &[u8],
+        iblock_addr: usize,
+        nrows: u16,
+        iblock_heap_offset: u64,
+        target_offset: u64,
+        length: usize,
+        depth_remaining: u16,
+    ) -> Result<Vec<u8>, FormatError> {
+        if depth_remaining == 0 {
+            return Err(FormatError::ChunkedReadError(
+                "fractal heap: maximum recursion depth exceeded".into(),
+            ));
+        }
+        ensure_len(file_data, iblock_addr, 4)?;
+        let block = &file_data[iblock_addr..];
+        match self.header.find_child_for_offset(
+            block,
+            nrows,
+            iblock_heap_offset,
+            target_offset,
+            self.offset_size,
+        )? {
+            Some(HeapChild::Direct {
+                addr,
+                block_size,
+                heap_offset,
+            }) => self.read_from_direct_block(
+                file_data,
+                addr.get().to_usize()?,
+                block_size,
+                heap_offset,
+                target_offset,
+                length,
+            ),
+            Some(HeapChild::Indirect {
+                addr,
+                nrows: child_nrows,
+                heap_offset,
+            }) => self.read_from_indirect_block(
+                file_data,
+                addr.get().to_usize()?,
+                child_nrows,
+                heap_offset,
+                target_offset,
+                length,
+                depth_remaining - 1,
+            ),
+            None => Err(FormatError::UnexpectedEof {
+                expected: target_offset.to_usize()?.saturating_add(length),
+                available: file_data.len(),
+            }),
+        }
+    }
+
+    /// Reads the managed object the heap ID `id_bytes` refers to from `source`.
+    fn read_managed_object_from_source<S: Source + ?Sized>(
+        &self,
+        source: &S,
+        id_bytes: &[u8],
+    ) -> Result<Vec<u8>, FormatError> {
+        if self.header.io_filter_encoded_length > 0 {
+            return Err(FormatError::UnsupportedFilteredHeapObject);
+        }
+        let (heap_offset, obj_len) = self.header.decode_managed_id(id_bytes)?;
+        if is_undefined_addr(self.header.root_block_address.get(), self.offset_size) {
+            return Err(FormatError::UnexpectedEof {
+                expected: 1,
+                available: 0,
+            });
+        }
+        if self.header.current_rows_in_root_indirect_block == 0 {
+            self.read_from_direct_block_from_source(
+                source,
+                self.header.root_block_address.get(),
+                0, // root direct block starts at heap offset 0
+                heap_offset,
+                obj_len.to_usize()?,
+            )
+        } else {
+            self.read_from_indirect_block_from_source(
+                source,
+                self.header.root_block_address.get(),
+                self.header.current_rows_in_root_indirect_block,
+                0,
+                heap_offset,
+                obj_len.to_usize()?,
+                64,
+            )
+        }
+    }
+
+    /// Reads `length` bytes at heap offset `target_offset` from the direct block at `block_addr`
+    /// in `source`, whose space begins at heap offset `block_heap_offset`.
+    fn read_from_direct_block_from_source<S: Source + ?Sized>(
+        &self,
+        source: &S,
+        block_addr: u64,
+        block_heap_offset: u64,
+        target_offset: u64,
+        length: usize,
+    ) -> Result<Vec<u8>, FormatError> {
+        let local_offset = target_offset - block_heap_offset;
+        let pos = block_addr
+            .checked_add(local_offset)
+            .ok_or(FormatError::OffsetOverflow {
+                offset: block_addr,
+                length: local_offset,
+            })?;
+        source.read_metadata_at(pos, length)
+    }
+
+    /// Reads `length` bytes at heap offset `target_offset` from a direct block below the indirect
+    /// block at `iblock_addr` in `source`, descending `depth_remaining` levels at most.
+    #[allow(clippy::too_many_arguments)]
+    fn read_from_indirect_block_from_source<S: Source + ?Sized>(
+        &self,
+        source: &S,
+        iblock_addr: u64,
+        nrows: u16,
+        iblock_heap_offset: u64,
+        target_offset: u64,
+        length: usize,
+        depth_remaining: u16,
+    ) -> Result<Vec<u8>, FormatError> {
+        if depth_remaining == 0 {
+            return Err(FormatError::ChunkedReadError(
+                "fractal heap: maximum recursion depth exceeded".into(),
+            ));
+        }
+        let region_len = (self
+            .header
+            .indirect_block_entries_len(nrows, self.offset_size) as u64)
+            .min(source.len().saturating_sub(iblock_addr))
+            .to_usize()?;
+        let block = source.read_metadata_at(iblock_addr, region_len)?;
+        match self.header.find_child_for_offset(
+            &block,
+            nrows,
+            iblock_heap_offset,
+            target_offset,
+            self.offset_size,
+        )? {
+            Some(HeapChild::Direct {
+                addr, heap_offset, ..
+            }) => self.read_from_direct_block_from_source(
+                source,
+                addr.get(),
+                heap_offset,
+                target_offset,
+                length,
+            ),
+            Some(HeapChild::Indirect {
+                addr,
+                nrows: child_nrows,
+                heap_offset,
+            }) => self.read_from_indirect_block_from_source(
+                source,
+                addr.get(),
+                child_nrows,
+                heap_offset,
+                target_offset,
+                length,
+                depth_remaining - 1,
+            ),
+            None => Err(FormatError::UnexpectedEof {
+                expected: target_offset.to_usize()?.saturating_add(length),
+                available: source.len().to_usize().unwrap_or(usize::MAX),
+            }),
+        }
     }
 }
 
@@ -655,53 +909,6 @@ impl FractalHeapHeader {
         Ok((heap_offset, length_val))
     }
 
-    /// Read a managed object from the heap given its raw heap ID bytes.
-    pub fn read_managed_object(
-        &self,
-        file_data: &[u8],
-        id_bytes: &[u8],
-        offset_size: u8,
-    ) -> Result<Vec<u8>, FormatError> {
-        // A filtered managed heap stores its direct-block contents filter-encoded;
-        // we do not decode them, so refuse rather than return raw (wrong) bytes.
-        if self.io_filter_encoded_length > 0 {
-            return Err(FormatError::UnsupportedFilteredHeapObject);
-        }
-        let (heap_offset, obj_len) = self.decode_managed_id(id_bytes)?;
-
-        if is_undefined_addr(self.root_block_address.get(), offset_size) {
-            return Err(FormatError::UnexpectedEof {
-                expected: 1,
-                available: 0,
-            });
-        }
-
-        if self.current_rows_in_root_indirect_block == 0 {
-            // Root is a direct block
-            self.read_from_direct_block(
-                file_data,
-                self.root_block_address.get().to_usize()?,
-                self.starting_block_size,
-                0, // block offset in heap = 0 for root
-                heap_offset,
-                obj_len.to_usize()?,
-                offset_size,
-            )
-        } else {
-            // Root is an indirect block — limit recursion to 64 levels
-            self.read_from_indirect_block(
-                file_data,
-                self.root_block_address.get().to_usize()?,
-                self.current_rows_in_root_indirect_block,
-                0, // block offset
-                heap_offset,
-                obj_len.to_usize()?,
-                offset_size,
-                64, // max recursion depth
-            )
-        }
-    }
-
     /// Classify a heap ID by its type bits (bits 4-5 of byte 0). Bits 6-7 carry
     /// the format version, which must be 0.
     fn heap_id_type(id_bytes: &[u8]) -> Result<HeapIdType, FormatError> {
@@ -729,47 +936,6 @@ impl FractalHeapHeader {
         } else {
             avail >= offset_size as usize + length_size as usize
         }
-    }
-
-    /// A reader for the objects in this heap.
-    ///
-    /// Objects are read through one of these rather than one at a time off the
-    /// header, so that a walk over a heap parses its huge-object index once
-    /// instead of once per object. See [`HeapObjectReader`].
-    pub fn object_reader(&self, offset_size: u8, length_size: u8) -> HeapObjectReader<'_> {
-        HeapObjectReader {
-            header: self,
-            offset_size,
-            length_size,
-            huge: None,
-            huge_backend: None,
-        }
-    }
-
-    /// Read an object from a direct block.
-    ///
-    /// The heap offset is relative to the start of the block (including its header),
-    /// so we just add it to the block address minus the block's heap offset.
-    #[allow(clippy::too_many_arguments)]
-    fn read_from_direct_block(
-        &self,
-        file_data: &[u8],
-        block_addr: usize,
-        _block_size: u64,
-        block_heap_offset: u64,
-        target_offset: u64,
-        length: usize,
-        _offset_size: u8,
-    ) -> Result<Vec<u8>, FormatError> {
-        let local_offset = (target_offset - block_heap_offset).to_usize()?;
-        let pos = block_addr
-            .checked_add(local_offset)
-            .ok_or(FormatError::OffsetOverflow {
-                offset: block_addr as u64,
-                length: target_offset - block_heap_offset,
-            })?;
-        ensure_len(file_data, pos, length)?;
-        Ok(file_data[pos..pos + length].to_vec())
     }
 
     /// Locate the indirect-block child whose heap range contains `target_offset`.
@@ -891,67 +1057,6 @@ impl FractalHeapHeader {
             + num_indirect_rows * tw * (offset_size as usize)
     }
 
-    /// Read an object by traversing an indirect block to find the right direct block.
-    #[allow(clippy::too_many_arguments)]
-    fn read_from_indirect_block(
-        &self,
-        file_data: &[u8],
-        iblock_addr: usize,
-        nrows: u16,
-        iblock_heap_offset: u64,
-        target_offset: u64,
-        length: usize,
-        offset_size: u8,
-        depth_remaining: u16,
-    ) -> Result<Vec<u8>, FormatError> {
-        if depth_remaining == 0 {
-            return Err(FormatError::ChunkedReadError(
-                "fractal heap: maximum recursion depth exceeded".into(),
-            ));
-        }
-        ensure_len(file_data, iblock_addr, 4)?;
-        let block = &file_data[iblock_addr..];
-        match self.find_child_for_offset(
-            block,
-            nrows,
-            iblock_heap_offset,
-            target_offset,
-            offset_size,
-        )? {
-            Some(HeapChild::Direct {
-                addr,
-                block_size,
-                heap_offset,
-            }) => self.read_from_direct_block(
-                file_data,
-                addr.get().to_usize()?,
-                block_size,
-                heap_offset,
-                target_offset,
-                length,
-                offset_size,
-            ),
-            Some(HeapChild::Indirect {
-                addr,
-                nrows: child_nrows,
-                heap_offset,
-            }) => self.read_from_indirect_block(
-                file_data,
-                addr.get().to_usize()?,
-                child_nrows,
-                heap_offset,
-                target_offset,
-                length,
-                offset_size,
-                depth_remaining - 1,
-            ),
-            None => Err(FormatError::UnexpectedEof {
-                expected: target_offset.to_usize()?.saturating_add(length),
-                available: file_data.len(),
-            }),
-        }
-    }
-
     // -----------------------------------------------------------------------
     // Streaming readers (fetch each block from a `Source` on demand)
     // -----------------------------------------------------------------------
@@ -971,122 +1076,6 @@ impl FractalHeapHeader {
             .to_usize()?;
         let buf = source.read_metadata_at(address, window)?;
         Self::parse(&buf, 0, offset_size, length_size)
-    }
-
-    /// Read a managed object from the heap (by raw heap ID) via a [`Source`].
-    pub fn read_managed_object_from_source<S: Source + ?Sized>(
-        &self,
-        source: &S,
-        id_bytes: &[u8],
-        offset_size: u8,
-    ) -> Result<Vec<u8>, FormatError> {
-        // Filtered managed heaps are not decoded (see `read_managed_object`).
-        if self.io_filter_encoded_length > 0 {
-            return Err(FormatError::UnsupportedFilteredHeapObject);
-        }
-        let (heap_offset, obj_len) = self.decode_managed_id(id_bytes)?;
-        if is_undefined_addr(self.root_block_address.get(), offset_size) {
-            return Err(FormatError::UnexpectedEof {
-                expected: 1,
-                available: 0,
-            });
-        }
-        if self.current_rows_in_root_indirect_block == 0 {
-            self.read_from_direct_block_from_source(
-                source,
-                self.root_block_address.get(),
-                0, // root direct block starts at heap offset 0
-                heap_offset,
-                obj_len.to_usize()?,
-            )
-        } else {
-            self.read_from_indirect_block_from_source(
-                source,
-                self.root_block_address.get(),
-                self.current_rows_in_root_indirect_block,
-                0,
-                heap_offset,
-                obj_len.to_usize()?,
-                offset_size,
-                64,
-            )
-        }
-    }
-
-    fn read_from_direct_block_from_source<S: Source + ?Sized>(
-        &self,
-        source: &S,
-        block_addr: u64,
-        block_heap_offset: u64,
-        target_offset: u64,
-        length: usize,
-    ) -> Result<Vec<u8>, FormatError> {
-        let local_offset = target_offset - block_heap_offset;
-        let pos = block_addr
-            .checked_add(local_offset)
-            .ok_or(FormatError::OffsetOverflow {
-                offset: block_addr,
-                length: local_offset,
-            })?;
-        source.read_metadata_at(pos, length)
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn read_from_indirect_block_from_source<S: Source + ?Sized>(
-        &self,
-        source: &S,
-        iblock_addr: u64,
-        nrows: u16,
-        iblock_heap_offset: u64,
-        target_offset: u64,
-        length: usize,
-        offset_size: u8,
-        depth_remaining: u16,
-    ) -> Result<Vec<u8>, FormatError> {
-        if depth_remaining == 0 {
-            return Err(FormatError::ChunkedReadError(
-                "fractal heap: maximum recursion depth exceeded".into(),
-            ));
-        }
-        let region_len = (self.indirect_block_entries_len(nrows, offset_size) as u64)
-            .min(source.len().saturating_sub(iblock_addr))
-            .to_usize()?;
-        let block = source.read_metadata_at(iblock_addr, region_len)?;
-        match self.find_child_for_offset(
-            &block,
-            nrows,
-            iblock_heap_offset,
-            target_offset,
-            offset_size,
-        )? {
-            Some(HeapChild::Direct {
-                addr, heap_offset, ..
-            }) => self.read_from_direct_block_from_source(
-                source,
-                addr.get(),
-                heap_offset,
-                target_offset,
-                length,
-            ),
-            Some(HeapChild::Indirect {
-                addr,
-                nrows: child_nrows,
-                heap_offset,
-            }) => self.read_from_indirect_block_from_source(
-                source,
-                addr.get(),
-                child_nrows,
-                heap_offset,
-                target_offset,
-                length,
-                offset_size,
-                depth_remaining - 1,
-            ),
-            None => Err(FormatError::UnexpectedEof {
-                expected: target_offset.to_usize()?.saturating_add(length),
-                available: source.len().to_usize().unwrap_or(usize::MAX),
-            }),
-        }
     }
 
     /// Get block size for a given row in the doubling table. Saturates rather
@@ -1223,7 +1212,9 @@ mod tests {
             id[1 + i] = ((payload >> (i * 8)) & 0xFF) as u8;
         }
 
-        let obj = hdr.read_managed_object(&file_data, &id, 8).unwrap();
+        let obj = HeapObjectReader::new(&hdr, 8, 8)
+            .read(&file_data, &id)
+            .unwrap();
         assert_eq!(&obj, b"Hello, World!");
     }
 
@@ -1242,19 +1233,21 @@ mod tests {
             id[1 + i] = ((payload >> (i * 8)) & 0xFF) as u8;
         }
 
-        let buffered = hdr.read_managed_object(&file_data, &id, 8).unwrap();
+        let buffered = HeapObjectReader::new(&hdr, 8, 8)
+            .read(&file_data, &id)
+            .unwrap();
 
         // Header parsed from a source, then the object fetched from a source.
         let mem = BytesSource::new(&file_data);
         let hdr_mem = FractalHeapHeader::parse_from_source(&mem, 0, 8, 8).unwrap();
-        let from_mem = hdr_mem
-            .read_managed_object_from_source(&mem, &id, 8)
+        let from_mem = HeapObjectReader::new(&hdr_mem, 8, 8)
+            .read_from_source(&mem, &id)
             .unwrap();
 
         let seek = ReadSeekSource::new(std::io::Cursor::new(file_data)).unwrap();
         let hdr_seek = FractalHeapHeader::parse_from_source(&seek, 0, 8, 8).unwrap();
-        let from_seek = hdr_seek
-            .read_managed_object_from_source(&seek, &id, 8)
+        let from_seek = HeapObjectReader::new(&hdr_seek, 8, 8)
+            .read_from_source(&seek, &id)
             .unwrap();
 
         assert_eq!(buffered, from_mem);
@@ -1347,14 +1340,14 @@ mod tests {
         h.current_rows_in_root_indirect_block = 0;
         let file = vec![0u8; 0x400];
         assert_eq!(
-            h.read_managed_object(&file, &managed_id, 8),
+            HeapObjectReader::new(&h, 8, 8).read(&file, &managed_id),
             Err(FormatError::UnsupportedFilteredHeapObject)
         );
 
         // Root is an indirect block: the refusal happens before any child walk.
         h.current_rows_in_root_indirect_block = 2;
         assert_eq!(
-            h.read_managed_object(&file, &managed_id, 8),
+            HeapObjectReader::new(&h, 8, 8).read(&file, &managed_id),
             Err(FormatError::UnsupportedFilteredHeapObject)
         );
 
@@ -1519,7 +1512,7 @@ mod tests {
         let ids: Vec<Vec<u8>> = (1..=COUNT).map(heap_id).collect();
 
         reset_huge_index_decodes();
-        let mut reader = heap.object_reader(8, 8);
+        let mut reader = HeapObjectReader::new(&heap, 8, 8);
         let buffered: Vec<Vec<u8>> = ids
             .iter()
             .map(|id| reader.read(&bytes, id).unwrap())
@@ -1532,7 +1525,7 @@ mod tests {
 
         reset_huge_index_decodes();
         let source = BytesSource::new(bytes.clone());
-        let mut reader = heap.object_reader(8, 8);
+        let mut reader = HeapObjectReader::new(&heap, 8, 8);
         let streamed: Vec<Vec<u8>> = ids
             .iter()
             .map(|id| reader.read_from_source(&source, id).unwrap())
