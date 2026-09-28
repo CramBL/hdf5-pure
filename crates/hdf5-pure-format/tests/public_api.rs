@@ -1,5 +1,6 @@
 use hdf5_pure_core::__private::BaseAddressExt;
 use hdf5_pure_format::AttributeMessage;
+use hdf5_pure_format::BaseAddress;
 use hdf5_pure_format::Dataspace;
 use hdf5_pure_format::DataspaceType;
 use hdf5_pure_format::Datatype;
@@ -11,6 +12,7 @@ use hdf5_pure_format::FilterPipeline;
 use hdf5_pure_format::FilterPipelineError;
 use hdf5_pure_format::FixedPointLayout;
 use hdf5_pure_format::FormatError;
+use hdf5_pure_format::LocalHeap;
 use hdf5_pure_format::MaxExtent;
 use hdf5_pure_format::MessageType;
 use hdf5_pure_format::OffsetWidth;
@@ -21,6 +23,9 @@ use rstest::rstest;
 use test_util::attribute;
 use test_util::dataspace;
 use test_util::datatype;
+use test_util::image::Image;
+use test_util::local_heap;
+use test_util::widths::Widths;
 
 #[test]
 fn on_disk_messages_round_trip_through_the_public_api() {
@@ -227,6 +232,35 @@ fn a_file_space_info_message_round_trips_through_the_public_api() {
     assert_eq!(
         hdf5_pure_format::parse_file_space_info(&bytes, 8, 8),
         Ok(info)
+    );
+}
+
+#[test]
+fn a_local_heap_reads_its_names_through_the_public_api() {
+    let segment_at = local_heap::header_len(Widths::EIGHT);
+    let segment = local_heap::Segment::of_names(segment_at as u64, &["alpha", "beta"]);
+    let mut image = Image::starting_with(&segment.header(Widths::EIGHT));
+    image.place(segment_at, &segment.bytes);
+    let file = image.build();
+
+    let expected = LocalHeap {
+        data_segment_size: segment.bytes.len() as u64,
+        free_list_head_offset: segment.free_list_head,
+        data_segment_address: StoredAddress::new(segment_at as u64),
+    };
+
+    assert_eq!(LocalHeap::parse(&file, 0, 8, 8), Ok(expected.clone()));
+    assert_eq!(
+        LocalHeap::parse_from_source(file.as_slice(), 0, 8, 8),
+        Ok(expected.clone())
+    );
+    assert_eq!(
+        expected.read_string(&file, BaseAddress::ZERO, segment.offset_of(1)),
+        Ok("beta".into())
+    );
+    assert_eq!(
+        expected.read_string_in_segment(&segment.bytes, segment.offset_of(0)),
+        Ok("alpha".into())
     );
 }
 

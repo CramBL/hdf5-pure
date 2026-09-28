@@ -10,6 +10,7 @@ use crate::convert::Narrow;
 use crate::error::FormatError;
 use crate::local_heap::LocalHeap;
 use crate::source::Source;
+use crate::source::SourceMetadata;
 use crate::symbol_table::{SymbolTableMessage, SymbolTableNode};
 
 /// A resolved group entry (child name + object header address).
@@ -97,7 +98,8 @@ pub fn resolve_v1_group_entries_from_source<S: Source + ?Sized>(
     base_address: BaseAddress,
 ) -> Result<Vec<GroupEntry>, FormatError> {
     let heap_addr = base_address.absolute(sym_table_msg.local_heap_address)?;
-    let heap = LocalHeap::parse_from_source(source, heap_addr, offset_size, length_size)?;
+    let heap =
+        LocalHeap::parse_from_source(&SourceMetadata(source), heap_addr, offset_size, length_size)?;
 
     // Read the heap data segment once; every link name is sliced from it.
     let segment = source.read_metadata_at(
