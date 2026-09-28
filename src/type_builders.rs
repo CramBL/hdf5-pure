@@ -9,7 +9,7 @@ use core::fmt;
 
 use core::num::{NonZeroU32, NonZeroUsize};
 
-use hdf5_pure_format::MAX_HEAP_OBJECTS;
+use hdf5_pure_format::GLOBAL_HEAP_MAX_OBJECTS;
 
 use crate::address::StoredAddress;
 use crate::attribute::AttributeMessage;
@@ -1044,7 +1044,7 @@ pub(crate) fn vl_string_reference_bytes(strings: &[String]) -> Vec<u8> {
             clippy::cast_possible_truncation,
             reason = "1-based heap object index is written into the 4-byte object-index field of the variable-length reference"
         )]
-        raw.extend_from_slice(&((i % MAX_HEAP_OBJECTS + 1) as u32).to_le_bytes());
+        raw.extend_from_slice(&((i % GLOBAL_HEAP_MAX_OBJECTS + 1) as u32).to_le_bytes());
     }
     raw
 }
@@ -1061,15 +1061,15 @@ pub(crate) fn build_global_heap_collections(strings: &[String]) -> Vec<Vec<u8>> 
 /// accepts arbitrary bytes so a faithful rewrite can carry embedded-NUL or
 /// non-UTF-8 VL payloads.
 ///
-/// Objects are packed [`MAX_HEAP_OBJECTS`] to a collection, so object `n` lives
-/// in collection `n / MAX_HEAP_OBJECTS` at 1-based index
-/// `n % MAX_HEAP_OBJECTS + 1`. [`patch_vl_refs`] and [`patch_vl_refs_masked`]
+/// Objects are packed [`GLOBAL_HEAP_MAX_OBJECTS`] to a collection, so object `n` lives
+/// in collection `n / GLOBAL_HEAP_MAX_OBJECTS` at 1-based index
+/// `n % GLOBAL_HEAP_MAX_OBJECTS + 1`. [`patch_vl_refs`] and [`patch_vl_refs_masked`]
 /// resolve references with that same rule, and [`stage_vl_elements`] and
 /// [`build_attr_message`] write the matching indices.
 pub(crate) fn build_global_heap_collections_from_bytes(objects: &[&[u8]]) -> Vec<Vec<u8>> {
     objects
-        .chunks(MAX_HEAP_OBJECTS)
-        .map(hdf5_pure_format::build_global_heap_collection_bytes)
+        .chunks(GLOBAL_HEAP_MAX_OBJECTS)
+        .map(hdf5_pure_format::encode_global_heap_collection)
         .collect()
 }
 
@@ -1093,7 +1093,7 @@ pub(crate) fn patch_vl_refs(raw_data: &mut [u8], collection_addresses: &[u64]) {
     );
     let count = raw_data.len() / VL_REF_SIZE;
     for i in 0..count {
-        let address = collection_addresses[i / MAX_HEAP_OBJECTS];
+        let address = collection_addresses[i / GLOBAL_HEAP_MAX_OBJECTS];
         let addr_offset = i * VL_REF_SIZE + 4; // skip sequence_length
         raw_data[addr_offset..addr_offset + 8].copy_from_slice(&address.to_le_bytes());
     }
@@ -1123,7 +1123,7 @@ pub(crate) const VL_REF_SIZE: usize = 16;
 /// collections holding the non-null elements' bytes.
 ///
 /// The non-null elements' bytes become heap objects in order, packed
-/// [`MAX_HEAP_OBJECTS`] to a collection, and each reference carries its
+/// [`GLOBAL_HEAP_MAX_OBJECTS`] to a collection, and each reference stores its
 /// object's 1-based index within its own collection — matching
 /// [`build_global_heap_collections_from_bytes`]. Null elements carry a zero
 /// address and object index 0, and are never patched so they read back as null.
@@ -1210,7 +1210,7 @@ pub(crate) fn stage_vl_payloads<'a>(
                 refs.extend_from_slice(&((bytes.len() / element_size) as u32).to_le_bytes());
                 refs.extend_from_slice(&0u64.to_le_bytes()); // patched later
                 // 1-based index within this object's own collection.
-                let index = objects.len() % MAX_HEAP_OBJECTS + 1;
+                let index = objects.len() % GLOBAL_HEAP_MAX_OBJECTS + 1;
                 #[expect(
                     clippy::cast_possible_truncation,
                     reason = "1-based heap object index is written into the 4-byte object-index \
@@ -1266,7 +1266,7 @@ pub(crate) fn stage_embedded_vl_elements(
                 // and blank the address so an unpatched reference is visibly null
                 // rather than a stale source address.
                 slot[4..12].fill(0);
-                let index = objects.len() % MAX_HEAP_OBJECTS + 1;
+                let index = objects.len() % GLOBAL_HEAP_MAX_OBJECTS + 1;
                 #[expect(
                     clippy::cast_possible_truncation,
                     reason = "1-based heap object index is written into the 4-byte object-index \
@@ -1300,7 +1300,7 @@ pub(crate) fn patch_vl_refs_masked(
     collection_addresses: &[u64],
 ) {
     for (object_ordinal, &offset) in patch_offsets.iter().enumerate() {
-        let address = collection_addresses[object_ordinal / MAX_HEAP_OBJECTS];
+        let address = collection_addresses[object_ordinal / GLOBAL_HEAP_MAX_OBJECTS];
         let addr_offset = offset + 4; // skip sequence_length
         raw_data[addr_offset..addr_offset + 8].copy_from_slice(&address.to_le_bytes());
     }
