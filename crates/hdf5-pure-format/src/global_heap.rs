@@ -340,12 +340,12 @@ impl GlobalHeapIndex {
 }
 
 /// Build one global heap collection holding `objects` (at most
-/// [`MAX_HEAP_OBJECTS`] of them), assigning 1-based object indices in order.
+/// [`GLOBAL_HEAP_MAX_OBJECTS`] of them), assigning 1-based object indices in order.
 /// Returns the serialized collection bytes.
-pub fn build_global_heap_collection_bytes(objects: &[&[u8]]) -> Vec<u8> {
+pub fn encode_global_heap_collection(objects: &[&[u8]]) -> Vec<u8> {
     debug_assert!(
-        objects.len() <= MAX_HEAP_OBJECTS,
-        "a collection's 2-byte object index cannot address more than {MAX_HEAP_OBJECTS} objects"
+        objects.len() <= GLOBAL_HEAP_MAX_OBJECTS,
+        "a collection's 2-byte object index cannot address more than {GLOBAL_HEAP_MAX_OBJECTS} objects"
     );
     let length_size = 8usize;
     let header_size = 8 + length_size; // sig(4) + ver(1) + reserved(3) + `collection_size`
@@ -404,14 +404,14 @@ pub fn build_global_heap_collection_bytes(objects: &[&[u8]]) -> Vec<u8> {
     buf
 }
 
-/// Maximum number of objects one global heap collection can index.
+/// The most objects one global heap collection holds, 65,535.
 ///
-/// The heap-object index field is a `u16` with 0 reserved for the free-space
-/// marker, so a single collection addresses at most `u16::MAX` objects. Data
-/// with more objects than this is split across consecutive collections, whose
-/// indices restart at 1, as the reference C library does when a
-/// collection fills.
-pub const MAX_HEAP_OBJECTS: usize = u16::MAX as usize;
+/// The "Heap Object Index" field is 2 bytes wide, and index 0 is the free space. A writer with more
+/// objects writes them to several collections, each with its objects at indices from 1. The field
+/// is defined in "Global Heap" of the [format specification, version 4.0][spec].
+///
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsec_fmt4_infra_globalheap
+pub const GLOBAL_HEAP_MAX_OBJECTS: usize = u16::MAX as usize;
 
 #[cfg(test)]
 mod tests {
@@ -668,7 +668,7 @@ mod tests {
         #[case] objects: &[&[u8]],
         #[case] size: usize,
     ) {
-        let bytes = build_global_heap_collection_bytes(objects);
+        let bytes = encode_global_heap_collection(objects);
         let collection = GlobalHeapIndex::parse(bytes.as_slice(), 0, 8).unwrap();
 
         assert_eq!(bytes.len(), size);

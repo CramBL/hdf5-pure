@@ -111,10 +111,10 @@ pub use fill_value::parse_defined_fill_value;
 pub use filter_pipeline::FilterDescription;
 pub use filter_pipeline::FilterPipeline;
 pub use filter_pipeline::FilterPipelineError;
+pub use global_heap::GLOBAL_HEAP_MAX_OBJECTS;
 pub use global_heap::GlobalHeapIndex;
 pub use global_heap::GlobalHeapObjectInfo;
-pub use global_heap::MAX_HEAP_OBJECTS;
-pub use global_heap::build_global_heap_collection_bytes;
+pub use global_heap::encode_global_heap_collection;
 #[doc(hidden)]
 pub use hdf5_pure_core::__private::DISPLAY_MAX_MEMBERS;
 #[doc(hidden)]
