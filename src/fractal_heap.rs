@@ -14,6 +14,7 @@ use crate::bytes::{ensure_len, read_length, read_offset};
 use crate::convert::{Narrow, is_undefined_addr};
 use crate::error::FormatError;
 use crate::source::Source;
+use crate::source::SourceMetadata;
 
 /// The kind of object a fractal-heap heap ID refers to, encoded in bits 4-5 of
 /// the heap ID's first byte (bits 6-7 are the format version, which must be 0).
@@ -402,7 +403,7 @@ impl HeapObjectReader<'_> {
                 let btree_addr = self.header.btree_huge_objects_address.get();
                 self.locate_huge(huge_id, Backend::Streaming, || {
                     let header = BTreeV2Header::parse_from_source(
-                        source,
+                        &SourceMetadata(source),
                         btree_addr,
                         offset_size,
                         length_size,

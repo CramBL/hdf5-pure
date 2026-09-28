@@ -17,12 +17,13 @@ use alloc::collections::BTreeMap as HashMap;
 use std::collections::HashMap;
 
 use hdf5_pure_core::__private::SuperblockFields;
+use hdf5_pure_format::BTREE_V2_NODE_SIZE;
+use hdf5_pure_format::BTreeV2Plan;
 
 use crate::address::BaseAddressExt;
 use crate::address::{BaseAddress, StoredAddress};
 use crate::attribute::AttributeMessage;
 use crate::attribute_info::AttributeInfoMessage;
-use crate::btree_v2_write::{self, BTreeV2Plan};
 use crate::chunked_write::{
     ByteSink, ChunkOptions, ChunkProvider, ChunkedMeasure, CompressedChunkSet, StorageAllocation,
     VerbatimLayout, VerbatimPlan, assemble_chunked_at, compress_chunks, emit_chunked_data_verbatim,
@@ -656,7 +657,7 @@ pub(crate) fn dense_attrs_plan(
 
     // Every v2 B-tree header this emitter writes has the same fixed layout, so
     // one size covers both the name index and the huge-objects index.
-    let bthd_size = btree_v2_write::btree_v2_header_size(OFFSET_SIZE, LENGTH_SIZE);
+    let bthd_size = hdf5_pure_format::btree_v2_header_size(OFFSET_WIDTH, LENGTH_WIDTH);
     debug_assert_eq!(
         bthd_size,
         4 + 1 + 1 + 4 + 2 + 2 + 1 + 1 + OFFSET_SIZE as usize + 2 + LENGTH_SIZE as usize + 4
@@ -671,8 +672,8 @@ pub(crate) fn dense_attrs_plan(
         DENSE_ATTR_NAME_BTREE_TYPE,
         attrs.len(),
         DENSE_ATTR_BTREE_RECORD,
-        btree_v2_write::BTREE_V2_NODE_SIZE,
-        OFFSET_SIZE,
+        BTREE_V2_NODE_SIZE,
+        OFFSET_WIDTH,
     )
     .expect("a 512-byte node holds 29 name records, enough to plan any count");
     let corder_plan = creation.indexed().then(|| {
@@ -680,8 +681,8 @@ pub(crate) fn dense_attrs_plan(
             DENSE_ATTR_CORDER_BTREE_TYPE,
             attrs.len(),
             DENSE_ATTR_CORDER_BTREE_RECORD,
-            btree_v2_write::BTREE_V2_NODE_SIZE,
-            OFFSET_SIZE,
+            BTREE_V2_NODE_SIZE,
+            OFFSET_WIDTH,
         )
         .expect("a 512-byte node holds 38 creation-order records, enough to plan any count")
     });
@@ -690,8 +691,8 @@ pub(crate) fn dense_attrs_plan(
             DENSE_ATTR_HUGE_BTREE_TYPE,
             huge_count,
             DENSE_ATTR_HUGE_BTREE_RECORD,
-            btree_v2_write::BTREE_V2_NODE_SIZE,
-            OFFSET_SIZE,
+            BTREE_V2_NODE_SIZE,
+            OFFSET_WIDTH,
         )
         .expect("a 512-byte node holds 20 huge records, enough to plan any count")
     });
@@ -992,7 +993,7 @@ impl DenseAttrPlan {
         }
 
         let name_tree =
-            name_plan.serialize(&name_records, name_nodes_addr, OFFSET_SIZE, LENGTH_SIZE);
+            name_plan.serialize(&name_records, name_nodes_addr, OFFSET_WIDTH, LENGTH_WIDTH);
 
         let mut blob = Vec::with_capacity(self.total_len.to_usize().unwrap_or(0));
         blob.extend_from_slice(&frhp);
@@ -1012,8 +1013,12 @@ impl DenseAttrPlan {
                 corder_records.push(MessageFlags::NONE.get());
                 corder_records.extend_from_slice(&creation.index_of(i).to_le_bytes());
             }
-            let corder_tree =
-                corder_plan.serialize(&corder_records, corder_nodes_addr, OFFSET_SIZE, LENGTH_SIZE);
+            let corder_tree = corder_plan.serialize(
+                &corder_records,
+                corder_nodes_addr,
+                OFFSET_WIDTH,
+                LENGTH_WIDTH,
+            );
             debug_assert_eq!(blob.len() as u64, self.corder_bthd_off);
             blob.extend_from_slice(&corder_tree.header);
             blob.extend_from_slice(&corder_tree.nodes);
@@ -1030,7 +1035,7 @@ impl DenseAttrPlan {
                 write_length(&mut huge_bytes, *id, LENGTH_SIZE);
             }
             let huge_tree =
-                huge_plan.serialize(&huge_bytes, huge_nodes_addr, OFFSET_SIZE, LENGTH_SIZE);
+                huge_plan.serialize(&huge_bytes, huge_nodes_addr, OFFSET_WIDTH, LENGTH_WIDTH);
 
             debug_assert_eq!(blob.len() as u64, self.huge_bthd_off);
             blob.extend_from_slice(&huge_tree.header);
@@ -4826,8 +4831,8 @@ mod tests {
     #[test]
     fn a_fixed_node_size_keeps_the_derived_count_width_at_one_byte() {
         for record_size in [DENSE_ATTR_BTREE_RECORD, DENSE_ATTR_HUGE_BTREE_RECORD] {
-            let (info, depth) = crate::btree_v2::BTreeV2NodeInfo::for_record_count(
-                btree_v2_write::BTREE_V2_NODE_SIZE,
+            let (info, depth) = hdf5_pure_format::BTreeV2NodeInfo::for_record_count(
+                BTREE_V2_NODE_SIZE,
                 record_size,
                 OFFSET_SIZE,
                 0,

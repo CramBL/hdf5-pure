@@ -28,6 +28,7 @@ use crate::shared_message::SharedResolver;
 use crate::shared_message::SourceResolver;
 use crate::sohm::SohmTable;
 use crate::source::Source;
+use crate::source::SourceMetadata;
 
 /// Extract all (compact) attribute messages from an object header.
 ///
@@ -294,8 +295,12 @@ fn extract_dense_attributes_from_source<S: Source + ?Sized>(
             expected: 1,
             available: 0,
         })?;
-    let btree_hdr =
-        BTreeV2Header::parse_from_source(source, btree_addr.get(), offset_size, length_size)?;
+    let btree_hdr = BTreeV2Header::parse_from_source(
+        &SourceMetadata(source),
+        btree_addr.get(),
+        offset_size,
+        length_size,
+    )?;
     let records =
         collect_btree_v2_records_from_source(source, &btree_hdr, offset_size, length_size)?;
 
