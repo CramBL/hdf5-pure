@@ -402,7 +402,7 @@ pub(crate) fn needs_dense_attrs(attrs: &[AttributeMessage]) -> Result<bool, Form
 /// attribute heap — but the threshold is the heap's own declaration, read back
 /// out of the header, so a higher one is equally readable.
 pub(crate) const DENSE_ATTR_MAX_MANAGED_OBJECT: usize =
-    fractal_heap_write::max_managed_object(OFFSET_SIZE);
+    fractal_heap_write::max_managed_object(OFFSET_WIDTH);
 
 /// One name-index B-tree v2 record as [`build_dense_attrs`] writes it: heap
 /// ID(8) + message flags(1) + creation order(4) + name hash(4).
@@ -533,7 +533,7 @@ pub(crate) fn dense_attrs_check(attrs: &[AttributeMessage]) -> Result<(), Format
     // apart. Reaching either refusal takes about a terabyte of attributes on one
     // object, which is why nothing exercises them end to end; the boundary each
     // draws is tested where it is computed.
-    match ManagedPlan::new(&managed, OFFSET_SIZE) {
+    match ManagedPlan::new(&managed, OFFSET_WIDTH) {
         Ok(_) => Ok(()),
         Err(PlanRefusal::HeapSpace) => Err(FormatError::DenseAttributeHeapTooLarge {
             limit: fractal_heap_write::MAX_HEAP_SPACE,
@@ -652,7 +652,7 @@ pub(crate) fn dense_attrs_plan(
         .filter(|(_, id)| id.is_none())
         .map(|(s, _)| s.len() as u64)
         .collect();
-    let managed_plan = ManagedPlan::new(&managed_sizes, OFFSET_SIZE)
+    let managed_plan = ManagedPlan::new(&managed_sizes, OFFSET_WIDTH)
         .expect("dense_attrs_check, which every caller must run first, plans the same layout");
 
     // Every v2 B-tree header this emitter writes has the same fixed layout, so
