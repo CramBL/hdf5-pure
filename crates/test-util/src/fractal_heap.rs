@@ -3,6 +3,7 @@
 
 use crate::bytes;
 use crate::checksum;
+use crate::image::Image;
 use crate::widths::Widths;
 
 /// The bytes of a fractal heap's header, checksum included.
@@ -120,6 +121,20 @@ impl Header {
         block.extend_from_slice(objects);
         block
     }
+}
+
+/// Returns a file image with a fractal heap of one managed object: the header at offset 0, and
+/// the root direct block at offset 256, with `object` after the prefix of the block.
+///
+/// The image has 64 bytes past the end of the block.
+pub fn heap_with_one_object(object: &[u8], widths: Widths) -> Vec<u8> {
+    const BLOCK_AT: usize = 256;
+
+    let heap = Header::new(BLOCK_AT as u64).managed_object_count(1);
+    let mut image = Image::starting_with(&heap.build(widths));
+    image.place(BLOCK_AT, &heap.direct_block(0, object, widths));
+    image.append(&[0; 64]);
+    image.build()
 }
 
 /// Whether the file contains a fractal heap at all, which is the signature of

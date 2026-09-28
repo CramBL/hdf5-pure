@@ -535,8 +535,12 @@ pub fn read_heap_message_from_source<S: Source + ?Sized>(
     length_size: u8,
 ) -> Result<Vec<u8>, FormatError> {
     let (_, heap_address) = index_for_read(table, message_type)?;
-    let heap =
-        FractalHeapHeader::parse_from_source(source, heap_address.get(), offset_size, length_size)?;
+    let heap = FractalHeapHeader::parse_from_source(
+        &SourceMetadata(source),
+        heap_address.get(),
+        offset_size,
+        length_size,
+    )?;
     HeapObjectReader::new(&heap, offset_size, length_size)
         .read_from_source(source, &heap_id[..heap.heap_id_length as usize])
 }

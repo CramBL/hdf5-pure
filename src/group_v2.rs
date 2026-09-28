@@ -659,7 +659,12 @@ fn resolve_dense_entries_from_source<S: Source + ?Sized>(
     offset_size: u8,
     length_size: u8,
 ) -> Result<Vec<GroupEntry>, FormatError> {
-    let fh = FractalHeapHeader::parse_from_source(source, fh_addr.get(), offset_size, length_size)?;
+    let fh = FractalHeapHeader::parse_from_source(
+        &SourceMetadata(source),
+        fh_addr.get(),
+        offset_size,
+        length_size,
+    )?;
 
     let btree_addr = link_info
         .btree_name_index_address
