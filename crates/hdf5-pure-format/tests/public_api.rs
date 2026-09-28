@@ -1,6 +1,8 @@
 use core::num::NonZeroU16;
 
 use hdf5_pure_core::__private::BaseAddressExt;
+use hdf5_pure_format::ATTRIBUTE_HEAP_STARTING_BLOCK_SIZE;
+use hdf5_pure_format::AttributeHeapPlan;
 use hdf5_pure_format::AttributeMessage;
 use hdf5_pure_format::BTREE_V2_NODE_SIZE;
 use hdf5_pure_format::BTreeV1Node;
@@ -565,6 +567,33 @@ fn an_indirect_block_locates_its_children_through_the_public_api() {
         filtered.find_child_for_offset(&block, 1, 0, 300, 8),
         Err(FormatError::UnsupportedFilteredHeapObject)
     );
+}
+
+#[test]
+fn a_planned_attribute_heap_places_its_objects_through_the_public_api() {
+    let region_address = StoredAddress::new(0x1000);
+    let plan = AttributeHeapPlan::new(&[5], OffsetWidth::Eight).unwrap();
+    let region = plan.serialize(&[b"hello"], region_address, StoredAddress::new(0x800));
+
+    assert_eq!(
+        hdf5_pure_format::attribute_heap_max_managed_object(OffsetWidth::Eight),
+        65_536 - 22
+    );
+    assert_eq!(plan.root_rows(), 0);
+    assert_eq!(plan.root_address(region_address), region_address);
+    assert_eq!(plan.heap_offset(0), 22);
+    assert_eq!(plan.region_size(), ATTRIBUTE_HEAP_STARTING_BLOCK_SIZE);
+    assert_eq!(plan.managed_space(), ATTRIBUTE_HEAP_STARTING_BLOCK_SIZE);
+    assert_eq!(plan.allocated_space(), ATTRIBUTE_HEAP_STARTING_BLOCK_SIZE);
+    assert_eq!(plan.allocation_iterator(), 0);
+    assert_eq!(
+        plan.free_space(),
+        ATTRIBUTE_HEAP_STARTING_BLOCK_SIZE - 22 - 5
+    );
+    assert_eq!(region.len() as u64, ATTRIBUTE_HEAP_STARTING_BLOCK_SIZE);
+    assert_eq!(&region[..4], fractal_heap::DIRECT_BLOCK_SIGNATURE);
+    assert_eq!(&region[5..13], &0x800u64.to_le_bytes());
+    assert_eq!(&region[22..27], b"hello");
 }
 
 #[test]
