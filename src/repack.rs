@@ -441,19 +441,37 @@ trait GroupSink: AttrSink {
 /// holds no children, so one attribute-copying routine serves all three.
 trait AttrSink {
     fn sink_set_attr(&mut self, name: &str, value: AttrValue);
-    fn sink_set_attr_verbatim(&mut self, message: AttributeMessage);
-    fn sink_set_attr_var_len_verbatim(&mut self, message: AttributeMessage, strings: Vec<String>);
+    fn sink_set_attr_verbatim(
+        &mut self,
+        message: AttributeMessage,
+        committed_datatype_path: Option<ObjectPathBuf>,
+    );
+    fn sink_set_attr_var_len_verbatim(
+        &mut self,
+        message: AttributeMessage,
+        strings: Vec<String>,
+        committed_datatype_path: Option<ObjectPathBuf>,
+    );
 }
 
 impl AttrSink for FileBuilder {
     fn sink_set_attr(&mut self, name: &str, value: AttrValue) {
         self.set_attr(name, value);
     }
-    fn sink_set_attr_verbatim(&mut self, message: AttributeMessage) {
-        self.set_attr_verbatim(message);
+    fn sink_set_attr_verbatim(
+        &mut self,
+        message: AttributeMessage,
+        committed_datatype_path: Option<ObjectPathBuf>,
+    ) {
+        self.set_attr_verbatim(message, committed_datatype_path);
     }
-    fn sink_set_attr_var_len_verbatim(&mut self, message: AttributeMessage, strings: Vec<String>) {
-        self.set_attr_var_len_verbatim(message, strings);
+    fn sink_set_attr_var_len_verbatim(
+        &mut self,
+        message: AttributeMessage,
+        strings: Vec<String>,
+        committed_datatype_path: Option<ObjectPathBuf>,
+    ) {
+        self.set_attr_var_len_verbatim(message, strings, committed_datatype_path);
     }
 }
 
@@ -461,11 +479,20 @@ impl AttrSink for GroupBuilder {
     fn sink_set_attr(&mut self, name: &str, value: AttrValue) {
         self.set_attr(name, value);
     }
-    fn sink_set_attr_verbatim(&mut self, message: AttributeMessage) {
-        self.set_attr_verbatim(message);
+    fn sink_set_attr_verbatim(
+        &mut self,
+        message: AttributeMessage,
+        committed_datatype_path: Option<ObjectPathBuf>,
+    ) {
+        self.set_attr_verbatim(message, committed_datatype_path);
     }
-    fn sink_set_attr_var_len_verbatim(&mut self, message: AttributeMessage, strings: Vec<String>) {
-        self.set_attr_var_len_verbatim(message, strings);
+    fn sink_set_attr_var_len_verbatim(
+        &mut self,
+        message: AttributeMessage,
+        strings: Vec<String>,
+        committed_datatype_path: Option<ObjectPathBuf>,
+    ) {
+        self.set_attr_var_len_verbatim(message, strings, committed_datatype_path);
     }
 }
 
@@ -473,11 +500,20 @@ impl AttrSink for DatasetBuilder {
     fn sink_set_attr(&mut self, name: &str, value: AttrValue) {
         self.set_attr(name, value);
     }
-    fn sink_set_attr_verbatim(&mut self, message: AttributeMessage) {
-        self.set_attr_verbatim(message);
+    fn sink_set_attr_verbatim(
+        &mut self,
+        message: AttributeMessage,
+        committed_datatype_path: Option<ObjectPathBuf>,
+    ) {
+        self.set_attr_verbatim(message, committed_datatype_path);
     }
-    fn sink_set_attr_var_len_verbatim(&mut self, message: AttributeMessage, strings: Vec<String>) {
-        self.set_attr_var_len_verbatim(message, strings);
+    fn sink_set_attr_var_len_verbatim(
+        &mut self,
+        message: AttributeMessage,
+        strings: Vec<String>,
+        committed_datatype_path: Option<ObjectPathBuf>,
+    ) {
+        self.set_attr_var_len_verbatim(message, strings, committed_datatype_path);
     }
 }
 
@@ -1336,31 +1372,36 @@ where
     // The source address is what says *which* committed object, so two attributes
     // sharing one type still share one in the output rather than each getting a
     // copy of the encoding.
-    for message in &mut messages {
-        let DatatypeLocation::Committed(address) = message.datatype_location else {
-            continue;
-        };
-        let name = &message.name;
-        let type_path = committed_type_path(
-            address.get(),
-            &format!("{owner} attribute {name:?}"),
-            drop,
-            addr_map,
-        )?;
-        message.datatype_location = DatatypeLocation::CommittedPath(type_path);
-    }
+    let messages = messages
+        .into_iter()
+        .map(|message| {
+            let committed_datatype_path = match message.datatype_location {
+                DatatypeLocation::Committed(address) => {
+                    let name = &message.name;
+                    Some(committed_type_path(
+                        address.get(),
+                        &format!("{owner} attribute {name:?}"),
+                        drop,
+                        addr_map,
+                    )?)
+                }
+                DatatypeLocation::Inline => None,
+            };
+            Ok((message, committed_datatype_path))
+        })
+        .collect::<Result<Vec<_>, Error>>()?;
     let any_needs_decoding = messages
         .iter()
-        .any(|m| !attr_bytes_are_position_independent(&m.datatype));
+        .any(|(m, _)| !attr_bytes_are_position_independent(&m.datatype));
     let decoded = if any_needs_decoding {
         decode()?
     } else {
         std::collections::HashMap::new()
     };
 
-    for message in messages {
+    for (message, committed_datatype_path) in messages {
         if attr_bytes_are_position_independent(&message.datatype) {
-            sink.sink_set_attr_verbatim(message);
+            sink.sink_set_attr_verbatim(message, committed_datatype_path);
         } else if let Some(value) = decoded.get(&message.name) {
             // A variable-length datatype the decode resolved into strings is
             // exactly the case that keeps its datatype and dataspace but restages
@@ -1369,7 +1410,7 @@ where
             match (&message.datatype, value.as_strings()) {
                 (Datatype::VariableLength { .. }, Some(strings)) => {
                     let strings = strings.to_vec();
-                    sink.sink_set_attr_var_len_verbatim(message, strings);
+                    sink.sink_set_attr_var_len_verbatim(message, strings, committed_datatype_path);
                 }
                 _ => sink.sink_set_attr(&message.name, value.clone()),
             }
@@ -2263,11 +2304,11 @@ mod attribute_fidelity_tests {
 
         let mut b = FileBuilder::new();
         for message in &exotic {
-            b.set_attr_verbatim(message.clone());
+            b.set_attr_verbatim(message.clone(), None);
         }
         let ds = b.create_dataset("data").with_f64_data(&[1.0]);
         for message in &exotic {
-            ds.set_attr_verbatim(message.clone());
+            ds.set_attr_verbatim(message.clone(), None);
         }
         b.write(&src).unwrap();
 

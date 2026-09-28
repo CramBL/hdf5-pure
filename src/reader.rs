@@ -8601,7 +8601,7 @@ mod tests {
             b.set_attr(name, value.clone());
         }
         for message in verbatim {
-            b.set_attr_verbatim(message.clone());
+            b.set_attr_verbatim(message.clone(), None);
         }
         {
             let ds = b.create_dataset("data").with_f64_data(&[1.0]);
@@ -8609,7 +8609,7 @@ mod tests {
                 ds.set_attr(name, value.clone());
             }
             for message in verbatim {
-                ds.set_attr_verbatim(message.clone());
+                ds.set_attr_verbatim(message.clone(), None);
             }
         }
         let bytes = b.finish().unwrap();

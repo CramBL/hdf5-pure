@@ -14,6 +14,7 @@ use crate::error::{Error, FormatError};
 use crate::file_create_properties::FileCreateProperties;
 use crate::file_space_info::FileSpaceStrategy;
 use crate::libver::LibVer;
+use crate::object_path::ObjectPathBuf;
 
 /// Builder for creating a new HDF5 file.
 ///
@@ -279,25 +280,37 @@ impl FileBuilder {
         self.writer.set_root_attr(name, value);
     }
 
-    /// Attach an already-encoded attribute message to the root group, written
-    /// exactly as given.
+    /// Attaches an already-encoded attribute message to the root group, written as given except
+    /// for its datatype location.
     ///
-    /// See [`AttrSpec::Verbatim`](crate::type_builders::AttrSpec::Verbatim) for
+    /// Where `committed_datatype_path` is set, the written message refers to the committed
+    /// datatype at that path. See
+    /// [`AttrSpec::Verbatim`](crate::type_builders::AttrSpec::Verbatim) for
     /// what this preserves that [`set_attr`](Self::set_attr) cannot, and for the
     /// datatypes it must not be used with.
-    pub(crate) fn set_attr_verbatim(&mut self, message: crate::attribute::AttributeMessage) {
-        self.writer.set_root_attr_verbatim(message);
+    pub(crate) fn set_attr_verbatim(
+        &mut self,
+        message: crate::attribute::AttributeMessage,
+        committed_datatype_path: Option<ObjectPathBuf>,
+    ) {
+        self.writer
+            .set_root_attr_verbatim(message, committed_datatype_path);
     }
 
-    /// Attach a variable-length string attribute to the root group with the given
-    /// datatype and dataspace, staging `strings` into a heap of this file's own.
-    /// See [`AttrSpec::VerbatimVarLen`](crate::type_builders::AttrSpec::VerbatimVarLen).
+    /// Attaches a variable-length string attribute to the root group with the datatype and
+    /// dataspace of `message`, staging `strings` into a heap of this file's own.
+    ///
+    /// Where `committed_datatype_path` is set, the written message refers to the committed
+    /// datatype at that path. See
+    /// [`AttrSpec::VerbatimVarLen`](crate::type_builders::AttrSpec::VerbatimVarLen).
     pub(crate) fn set_attr_var_len_verbatim(
         &mut self,
         message: crate::attribute::AttributeMessage,
         strings: Vec<String>,
+        committed_datatype_path: Option<ObjectPathBuf>,
     ) {
-        self.writer.set_root_attr_var_len_verbatim(message, strings);
+        self.writer
+            .set_root_attr_var_len_verbatim(message, strings, committed_datatype_path);
     }
 
     /// Whether the staged content needs the 1.10 format — see
