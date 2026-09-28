@@ -13,7 +13,10 @@ use hdf5_pure_format::FilterPipeline;
 use hdf5_pure_format::FilterPipelineError;
 use hdf5_pure_format::FixedPointLayout;
 use hdf5_pure_format::FormatError;
+use hdf5_pure_format::GlobalHeapIndex;
+use hdf5_pure_format::GlobalHeapObjectInfo;
 use hdf5_pure_format::LocalHeap;
+use hdf5_pure_format::MAX_HEAP_OBJECTS;
 use hdf5_pure_format::MaxExtent;
 use hdf5_pure_format::MessageType;
 use hdf5_pure_format::OffsetWidth;
@@ -327,6 +330,37 @@ fn a_version_1_group_btree_node_parses_through_the_public_api() {
         BTreeV1Node::parse_from_source(node.as_slice(), 0, 4, 8),
         Ok(expected)
     );
+}
+
+#[test]
+fn a_global_heap_collection_round_trips_through_the_public_api() {
+    let objects: [&[u8]; 2] = [b"alpha", b"beta"];
+    let bytes = hdf5_pure_format::build_global_heap_collection_bytes(&objects);
+
+    let collection = GlobalHeapIndex::parse(bytes.as_slice(), 0, 8).unwrap();
+    let filtered =
+        GlobalHeapIndex::parse_filtered(bytes.as_slice(), 0, 8, |index| index == 2).unwrap();
+
+    let beta = GlobalHeapObjectInfo {
+        index: 2,
+        data_address: 56,
+        size: 4,
+    };
+    assert_eq!(
+        collection.objects,
+        vec![
+            GlobalHeapObjectInfo {
+                index: 1,
+                data_address: 32,
+                size: 5,
+            },
+            beta.clone(),
+        ]
+    );
+    assert_eq!(filtered.objects, vec![beta.clone()]);
+    assert_eq!(collection.object(2), Some(&beta));
+    assert_eq!(&bytes[56..60], b"beta");
+    assert_eq!(MAX_HEAP_OBJECTS, usize::from(u16::MAX));
 }
 
 #[rstest]

@@ -17,6 +17,7 @@ use crate::global_heap::GlobalHeapIndex;
 #[cfg(test)]
 use crate::source::BytesSource;
 use crate::source::Source;
+use crate::source::SourceMetadata;
 
 /// Allocation limits for reading variable-length strings.
 ///
@@ -441,7 +442,7 @@ where
                     .map(|pos| wanted[pos].1.as_slice())
                     .unwrap_or(&[]);
                 let collection = GlobalHeapIndex::parse_filtered(
-                    source,
+                    &SourceMetadata(source),
                     collection_address,
                     length_size,
                     |i| keep.binary_search(&i).is_ok(),
@@ -568,7 +569,11 @@ pub(crate) fn read_vl_byte_objects_from_source<S: Source + ?Sized>(
         {
             Some(pos) => pos,
             None => {
-                let collection = GlobalHeapIndex::parse(source, collection_address, length_size)?;
+                let collection = GlobalHeapIndex::parse(
+                    &SourceMetadata(source),
+                    collection_address,
+                    length_size,
+                )?;
                 collections.push((collection_address, collection));
                 collections.len() - 1
             }

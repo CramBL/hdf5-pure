@@ -9,6 +9,8 @@ use core::fmt;
 
 use core::num::{NonZeroU32, NonZeroUsize};
 
+use hdf5_pure_format::MAX_HEAP_OBJECTS;
+
 use crate::address::StoredAddress;
 use crate::attribute::AttributeMessage;
 use crate::chunked_write::{ChunkMeta, ChunkOptions, ChunkProvider, FilterKind, StorageAllocation};
@@ -1047,15 +1049,6 @@ pub(crate) fn vl_string_reference_bytes(strings: &[String]) -> Vec<u8> {
     raw
 }
 
-/// Maximum number of objects one global heap collection can index.
-///
-/// The heap-object index field is a `u16` with 0 reserved for the free-space
-/// marker, so a single collection addresses at most `u16::MAX` objects. Data
-/// with more objects than this is split across consecutive collections, whose
-/// indices restart at 1 — the same thing the reference C library does when a
-/// collection fills.
-pub(crate) const MAX_HEAP_OBJECTS: usize = u16::MAX as usize;
-
 /// Build the global heap collections holding the given strings, splitting them
 /// across as many collections as their count needs.
 pub(crate) fn build_global_heap_collections(strings: &[String]) -> Vec<Vec<u8>> {
@@ -1076,73 +1069,8 @@ pub(crate) fn build_global_heap_collections(strings: &[String]) -> Vec<Vec<u8>> 
 pub(crate) fn build_global_heap_collections_from_bytes(objects: &[&[u8]]) -> Vec<Vec<u8>> {
     objects
         .chunks(MAX_HEAP_OBJECTS)
-        .map(build_global_heap_collection_bytes)
+        .map(hdf5_pure_format::build_global_heap_collection_bytes)
         .collect()
-}
-
-/// Build one global heap collection holding `objects` (at most
-/// [`MAX_HEAP_OBJECTS`] of them), assigning 1-based object indices in order.
-/// Returns the serialized collection bytes.
-fn build_global_heap_collection_bytes(objects: &[&[u8]]) -> Vec<u8> {
-    debug_assert!(
-        objects.len() <= MAX_HEAP_OBJECTS,
-        "a collection's 2-byte object index cannot address more than {MAX_HEAP_OBJECTS} objects"
-    );
-    let length_size = 8usize;
-    let header_size = 8 + length_size; // sig(4) + ver(1) + reserved(3) + collection_size
-
-    // Calculate total size
-    let mut obj_size_total = 0usize;
-    for obj in objects {
-        let obj_header = 8 + length_size; // index(2) + refcount(2) + reserved(4) + size
-        let padded_data_len = (obj.len() + 7) & !7; // pad to 8 bytes
-        obj_size_total += obj_header + padded_data_len;
-    }
-    obj_size_total += 8 + length_size; // free space marker (full object header size)
-    let collection_size = header_size + obj_size_total;
-    // The C HDF5 library enforces a minimum collection size of 4096 bytes.
-    let min_collection_size = 4096;
-    let padded_collection = ((collection_size.max(min_collection_size)) + 7) & !7;
-
-    let mut buf = Vec::with_capacity(padded_collection);
-    // Header
-    buf.extend_from_slice(b"GCOL");
-    buf.push(1); // version
-    buf.extend_from_slice(&[0u8; 3]); // reserved
-    buf.extend_from_slice(&(padded_collection as u64).to_le_bytes());
-
-    // Objects (1-based indices)
-    for (i, obj) in objects.iter().enumerate() {
-        #[expect(
-            clippy::cast_possible_truncation,
-            reason = "1-based heap object index is written into the 2-byte heap-object index field"
-        )]
-        let index = (i + 1) as u16;
-        buf.extend_from_slice(&index.to_le_bytes());
-        buf.extend_from_slice(&1u16.to_le_bytes()); // ref_count
-        buf.extend_from_slice(&[0u8; 4]); // reserved
-        buf.extend_from_slice(&(obj.len() as u64).to_le_bytes());
-        buf.extend_from_slice(obj);
-        // Pad to 8-byte boundary
-        let padded = (obj.len() + 7) & !7;
-        for _ in obj.len()..padded {
-            buf.push(0);
-        }
-    }
-
-    // Free space marker (index 0): the C library uses this size as the total
-    // skip distance from the start of the object (including its header), so
-    // it must equal the remaining bytes in the collection from this point.
-    let free_total_size = padded_collection - buf.len();
-    buf.extend_from_slice(&0u16.to_le_bytes()); // index 0
-    buf.extend_from_slice(&0u16.to_le_bytes()); // ref_count
-    buf.extend_from_slice(&[0u8; 4]); // reserved
-    buf.extend_from_slice(&(free_total_size as u64).to_le_bytes()); // size
-
-    // Pad collection to full size
-    buf.resize(padded_collection, 0);
-
-    buf
 }
 
 /// Patch VL attribute references with the actual global heap collection

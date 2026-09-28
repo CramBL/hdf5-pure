@@ -29,6 +29,7 @@ mod error;
 mod file_space_info;
 mod fill_value;
 mod filter_pipeline;
+mod global_heap;
 mod link_info;
 mod link_message;
 mod local_heap;
@@ -110,6 +111,10 @@ pub use fill_value::parse_defined_fill_value;
 pub use filter_pipeline::FilterDescription;
 pub use filter_pipeline::FilterPipeline;
 pub use filter_pipeline::FilterPipelineError;
+pub use global_heap::GlobalHeapIndex;
+pub use global_heap::GlobalHeapObjectInfo;
+pub use global_heap::MAX_HEAP_OBJECTS;
+pub use global_heap::build_global_heap_collection_bytes;
 #[doc(hidden)]
 pub use hdf5_pure_core::__private::DISPLAY_MAX_MEMBERS;
 #[doc(hidden)]
