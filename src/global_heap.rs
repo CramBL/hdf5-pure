@@ -351,7 +351,7 @@ impl GlobalHeapIndex {
     /// search; the format does not guarantee that ordering, so an out-of-order
     /// collection falls back to a scan rather than reporting a present object
     /// as missing.
-    pub fn get_object(&self, index: u16) -> Option<&GlobalHeapObjectInfo> {
+    pub fn object(&self, index: u16) -> Option<&GlobalHeapObjectInfo> {
         match self.objects.binary_search_by_key(&index, |o| o.index) {
             Ok(pos) => Some(&self.objects[pos]),
             Err(_) => self.objects.iter().find(|object| object.index == index),
@@ -631,18 +631,18 @@ mod tests {
     }
 
     #[test]
-    fn get_object_by_index() {
+    fn object_finds_an_object_by_its_index() {
         let data = build_collection(&[(1, 1, b"aaa"), (3, 2, b"bbb")], 8);
         let source = BytesSource::new(&data);
         let coll = GlobalHeapIndex::parse(&source, 0, 8).unwrap();
-        let obj = coll.get_object(3).unwrap();
+        let obj = coll.object(3).unwrap();
         assert_eq!(
             source
                 .read_exact_at(obj.data_address, obj.size as usize)
                 .unwrap(),
             b"bbb"
         );
-        assert!(coll.get_object(99).is_none());
+        assert!(coll.object(99).is_none());
     }
 
     #[test]
