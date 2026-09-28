@@ -453,7 +453,6 @@ dependencies = [
 name = "hdf5-pure"
 version = "0.47.0"
 dependencies = [
- "byteorder",
  "criterion",
  "hdf5-pure-core",
  "hdf5-pure-filter",

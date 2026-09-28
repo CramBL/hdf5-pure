@@ -288,7 +288,12 @@ fn extract_dense_attributes_from_source<S: Source + ?Sized>(
     length_size: u8,
     sohm: Option<&SohmTable>,
 ) -> Result<Vec<StoredAttribute>, FormatError> {
-    let fh = FractalHeapHeader::parse_from_source(source, fh_addr.get(), offset_size, length_size)?;
+    let fh = FractalHeapHeader::parse_from_source(
+        &SourceMetadata(source),
+        fh_addr.get(),
+        offset_size,
+        length_size,
+    )?;
 
     let btree_addr = attr_info
         .btree_name_index_address

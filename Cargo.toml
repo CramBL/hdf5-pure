@@ -390,7 +390,6 @@ __heap-baseline = []
 hdf5-pure-core.workspace = true
 hdf5-pure-format.workspace = true
 hdf5-pure-filter.workspace = true
-byteorder.workspace = true
 ndarray = { workspace = true, optional = true }
 num-complex = { version = "0.4", optional = true, default-features = false }
 serde = { version = "1", optional = true, default-features = false, features = ["derive", "alloc"] }
