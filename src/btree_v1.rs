@@ -1,163 +1,16 @@
-//! HDF5 B-tree v1 parsing (type 0 for groups).
+//! The walk of a group's version 1 B-tree to its symbol table nodes.
 
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 
+use hdf5_pure_format::BTreeV1Node;
+
 use crate::address::BaseAddressExt;
 use crate::address::{BaseAddress, StoredAddress};
-use crate::bytes::{read_length, read_offset, read_optional_offset};
 use crate::convert::Narrow;
 use crate::error::FormatError;
 use crate::source::Source;
-
-/// The size in bytes of the prefix of a version 1 B-tree node that does not depend on the
-/// offset width: the signature (4), the node type (1), the node level (1), and the entries
-/// used (2). The two sibling addresses that follow are each `offset_size` bytes wide, see
-/// [`btree_v1_node_header_size`]. The node is defined in "Version 1 B-trees" of the
-/// [format specification, version 4.0][spec].
-///
-/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_infra_btrees_v1
-pub(crate) const BTREE_V1_NODE_PREFIX_LEN: usize = 8;
-
-/// Total size of a version 1 B-tree node header for a file whose size-of-offsets
-/// is `offset_size`: the fixed [`BTREE_V1_NODE_PREFIX_LEN`] prefix plus the left
-/// and right sibling addresses (`offset_size` bytes each). This is the offset
-/// from the start of a node to its first key.
-pub(crate) const fn btree_v1_node_header_size(offset_size: u8) -> usize {
-    BTREE_V1_NODE_PREFIX_LEN + (offset_size as usize) * 2
-}
-
-/// A parsed B-tree v1 node.
-///
-/// Some fields are decoded from the on-disk node for completeness but are not
-/// consulted by the current traversal (which walks `children`); they are kept
-/// to document the format and allow future use.
-#[allow(dead_code)]
-#[derive(Debug, Clone)]
-pub struct BTreeV1Node {
-    /// Node type: 0=group, 1=raw data chunks.
-    pub node_type: u8,
-    /// Node level: 0=leaf, >0=internal.
-    pub node_level: u8,
-    /// Number of entries used.
-    pub entries_used: u16,
-    /// Address of the left sibling, or `None` where the node stores the undefined address.
-    pub left_sibling: Option<StoredAddress>,
-    /// Address of the right sibling, or `None` where the node stores the undefined address.
-    pub right_sibling: Option<StoredAddress>,
-    /// Keys (entries_used + 1 values).
-    pub keys: Vec<u64>,
-    /// Address of each child, one per used entry.
-    pub children: Vec<StoredAddress>,
-}
-
-impl BTreeV1Node {
-    /// Parse a B-tree v1 node at the given offset in the file data.
-    ///
-    /// For type 0 (group) nodes, keys are `length_size` bytes each (heap name offsets).
-    pub fn parse(
-        file_data: &[u8],
-        offset: usize,
-        offset_size: u8,
-        length_size: u8,
-    ) -> Result<BTreeV1Node, FormatError> {
-        // signature(4) + node_type(1) + node_level(1) + entries_used(2),
-        // then left_sibling(offset_size) + right_sibling(offset_size).
-        let os = offset_size as usize;
-        let ls = length_size as usize;
-        let header_size = btree_v1_node_header_size(offset_size);
-        if header_size > file_data.len() || offset > file_data.len() - header_size {
-            return Err(FormatError::UnexpectedEof {
-                expected: offset.saturating_add(header_size),
-                available: file_data.len(),
-            });
-        }
-
-        if &file_data[offset..offset + 4] != b"TREE" {
-            return Err(FormatError::InvalidBTreeSignature);
-        }
-
-        let node_type = file_data[offset + 4];
-        let node_level = file_data[offset + 5];
-        let entries_used = u16::from_le_bytes([file_data[offset + 6], file_data[offset + 7]]);
-
-        let mut pos = offset + BTREE_V1_NODE_PREFIX_LEN;
-        let left_sibling =
-            read_optional_offset(file_data, pos, offset_size)?.map(StoredAddress::new);
-        pos += os;
-        let right_sibling =
-            read_optional_offset(file_data, pos, offset_size)?.map(StoredAddress::new);
-        pos += os;
-
-        // For type 0: keys are `length_size` bytes, children are `offset_size` bytes
-        // Layout: key[0], child[0], key[1], child[1], ..., key[N-1], child[N-1], key[N]
-        let eu = entries_used as usize;
-        let key_size = ls; // For type 0, key = `length_size`
-        let needed = eu * (key_size + os) + key_size; // eu children + (eu+1) keys
-        if needed > file_data.len() || pos > file_data.len() - needed {
-            return Err(FormatError::UnexpectedEof {
-                expected: pos.saturating_add(needed),
-                available: file_data.len(),
-            });
-        }
-
-        let mut keys = Vec::with_capacity(eu + 1);
-        let mut children = Vec::with_capacity(eu);
-
-        for i in 0..eu {
-            // key[i]
-            let key = read_length(file_data, pos, length_size)?;
-            keys.push(key);
-            pos += key_size;
-            // child[i]
-            children.push(StoredAddress::new(read_offset(
-                file_data,
-                pos,
-                offset_size,
-            )?));
-            pos += os;
-            let _ = i;
-        }
-        // final key
-        let key = read_length(file_data, pos, length_size)?;
-        keys.push(key);
-
-        Ok(BTreeV1Node {
-            node_type,
-            node_level,
-            entries_used,
-            left_sibling,
-            right_sibling,
-            keys,
-            children,
-        })
-    }
-
-    /// Parse a B-tree v1 (type 0, group) node from a [`Source`] on demand.
-    ///
-    /// Reads the fixed node prefix to learn `entries_used`, then the exact node
-    /// body, so no more than one node is resident at a time.
-    pub fn parse_from_source<S: Source + ?Sized>(
-        source: &S,
-        address: u64,
-        offset_size: u8,
-        length_size: u8,
-    ) -> Result<BTreeV1Node, FormatError> {
-        let prefix = source.read_metadata_at(address, BTREE_V1_NODE_PREFIX_LEN)?;
-        if &prefix[0..4] != b"TREE" {
-            return Err(FormatError::InvalidBTreeSignature);
-        }
-        let entries_used = u16::from_le_bytes([prefix[6], prefix[7]]) as usize;
-
-        // For type 0: header + entries_used*(key + child) + a trailing key,
-        // with child `offset_size` bytes wide and key `length_size` bytes wide.
-        let os = offset_size as usize;
-        let ls = length_size as usize;
-        let total = btree_v1_node_header_size(offset_size) + entries_used * (ls + os) + ls;
-        let buf = source.read_metadata_at(address, total)?;
-        Self::parse(&buf, 0, offset_size, length_size)
-    }
-}
+use crate::source::SourceMetadata;
 
 /// Recursion-depth cap for the symbol-table (group) B-tree walk, guarding
 /// against a stack overflow on a cyclic or pathological internal node in a
@@ -273,7 +126,12 @@ fn collect_symbol_table_nodes_from_source_inner<S: Source + ?Sized>(
         return Err(FormatError::NestingDepthExceeded);
     }
     let node_offset = base_address.absolute(btree_address)?;
-    let node = BTreeV1Node::parse_from_source(source, node_offset, offset_size, length_size)?;
+    let node = BTreeV1Node::parse_from_source(
+        &SourceMetadata(source),
+        node_offset,
+        offset_size,
+        length_size,
+    )?;
 
     if node.node_type != 0 {
         return Err(FormatError::InvalidBTreeNodeType(node.node_type));
@@ -300,64 +158,10 @@ fn collect_symbol_table_nodes_from_source_inner<S: Source + ?Sized>(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use test_util::btree_v1;
     use test_util::widths::Widths;
 
-    /// A node whose keys are group keys: a link name's offset in the group's
-    /// local heap, which is what a type 0 node indexes by.
-    fn build_btree_node(
-        node_type: u8,
-        level: u8,
-        keys: &[u64],
-        children: &[u64],
-        widths: Widths,
-    ) -> Vec<u8> {
-        let keys: Vec<_> = keys
-            .iter()
-            .map(|&offset| btree_v1::group_key(offset, widths))
-            .collect();
-        btree_v1::node(
-            btree_v1::NodeType(node_type),
-            level,
-            &keys,
-            children,
-            widths,
-        )
-    }
-
-    #[test]
-    fn parse_leaf_node() {
-        let data = build_btree_node(0, 0, &[0, 5, 10], &[0x100, 0x200], WIDTHS);
-        let node = BTreeV1Node::parse(&data, 0, 8, 8).unwrap();
-        assert_eq!(node.node_type, 0);
-        assert_eq!(node.node_level, 0);
-        assert_eq!(node.entries_used, 2);
-        assert_eq!(node.keys, vec![0, 5, 10]);
-        assert_eq!(
-            node.children,
-            vec![StoredAddress::new(0x100), StoredAddress::new(0x200)]
-        );
-        assert_eq!(node.left_sibling, None);
-        assert_eq!(node.right_sibling, None);
-    }
-
-    #[test]
-    fn parse_with_siblings_none() {
-        let data = build_btree_node(0, 0, &[0, 8], &[0x300], WIDTHS);
-        let node = BTreeV1Node::parse(&data, 0, 8, 8).unwrap();
-        assert_eq!(node.left_sibling, None);
-        assert_eq!(node.right_sibling, None);
-    }
-
-    #[test]
-    fn parse_leaf_node_differing_offset_and_length_sizes() {
-        let data = build_btree_node(0, 0, &[0x10, 0x20], &[0x300], Widths::new(4, 8));
-        let node = BTreeV1Node::parse(&data, 0, 4, 8).unwrap();
-        assert_eq!(node.entries_used, 1);
-        assert_eq!(node.keys, vec![0x10, 0x20]);
-        assert_eq!(node.children, vec![StoredAddress::new(0x300)]);
-    }
+    use super::*;
 
     #[test]
     fn parse_internal_node_and_collect() {
@@ -368,10 +172,17 @@ mod tests {
         let leaf2_offset: usize = 256;
         let internal_offset: usize = 512;
 
-        let leaf1 = build_btree_node(0, 0, &[0, 5], &[0xA00], WIDTHS);
-        let leaf2 = build_btree_node(0, 0, &[5, 10], &[0xB00], WIDTHS);
-        let internal = build_btree_node(
+        let leaf1 =
+            btree_v1::node_with_group_keys(btree_v1::NodeType::GROUP, 0, &[0, 5], &[0xA00], WIDTHS);
+        let leaf2 = btree_v1::node_with_group_keys(
+            btree_v1::NodeType::GROUP,
             0,
+            &[5, 10],
+            &[0xB00],
+            WIDTHS,
+        );
+        let internal = btree_v1::node_with_group_keys(
+            btree_v1::NodeType::GROUP,
             1,
             &[0, 5, 10],
             &[leaf1_offset as u64, leaf2_offset as u64],
@@ -398,29 +209,14 @@ mod tests {
     }
 
     #[test]
-    fn invalid_signature() {
-        let mut data = build_btree_node(0, 0, &[0, 1], &[0x100], WIDTHS);
-        data[0] = b'X';
-        let err = BTreeV1Node::parse(&data, 0, 8, 8).unwrap_err();
-        assert_eq!(err, FormatError::InvalidBTreeSignature);
-    }
-
-    #[test]
     fn collect_wrong_node_type() {
-        let data = build_btree_node(1, 0, &[0, 1], &[0x100], WIDTHS);
+        let data =
+            btree_v1::node_with_group_keys(btree_v1::NodeType::CHUNK, 0, &[0, 1], &[0x100], WIDTHS);
         let mut file = vec![0u8; 512];
         file[..data.len()].copy_from_slice(&data);
         let err = collect_symbol_table_nodes(&file, StoredAddress::new(0), 8, 8, BaseAddress::ZERO)
             .unwrap_err();
         assert_eq!(err, FormatError::InvalidBTreeNodeType(1));
-    }
-
-    #[test]
-    fn parse_4byte_offsets() {
-        let data = build_btree_node(0, 0, &[0, 4], &[0x50], Widths::new(4, 4));
-        let node = BTreeV1Node::parse(&data, 0, 4, 4).unwrap();
-        assert_eq!(node.entries_used, 1);
-        assert_eq!(node.children, vec![StoredAddress::new(0x50)]);
     }
 
     #[test]
@@ -430,7 +226,8 @@ mod tests {
         // than recurse until the stack overflows (an uncatchable abort).
         let os: u8 = 8;
         let ls: u8 = 8;
-        let node = build_btree_node(0, 1, &[0, 0], &[0], WIDTHS);
+        let node =
+            btree_v1::node_with_group_keys(btree_v1::NodeType::GROUP, 1, &[0, 0], &[0], WIDTHS);
         let mut file = vec![0u8; 1024];
         file[..node.len()].copy_from_slice(&node);
 
