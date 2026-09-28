@@ -1,8 +1,8 @@
 //! Planning and emitting the *managed* blocks of a dense-attribute fractal heap.
 //!
-//! A fractal heap's managed space is a doubling table: a row of [`TABLE_WIDTH`]
-//! blocks of [`STARTING_BLOCK_SIZE`], a second row of the same size, and then a
-//! row at each successive power of two up to [`MAX_DIRECT_BLOCK_SIZE`]. Rows past
+//! A fractal heap's managed space is a doubling table: a row of [`ATTRIBUTE_HEAP_TABLE_WIDTH`]
+//! blocks of [`ATTRIBUTE_HEAP_STARTING_BLOCK_SIZE`], a second row of the same size, and then a
+//! row at each successive power of two up to [`ATTRIBUTE_HEAP_MAX_DIRECT_BLOCK_SIZE`]. Rows past
 //! that hold *indirect* blocks, each of which is a doubling table in turn, so the
 //! heap's address space tiles exactly and grows without any block growing past
 //! 64 KiB.
@@ -29,42 +29,43 @@ use crate::file_writer::{write_offset, write_undef_offset};
 use crate::width::OffsetWidth;
 
 /// Blocks per doubling-table row (`H5O_FHEAP_MAN_WIDTH`).
-pub(crate) const TABLE_WIDTH: u16 = 4;
+pub(crate) const ATTRIBUTE_HEAP_TABLE_WIDTH: u16 = 4;
 
 /// Size of a block in the first two doubling-table rows
 /// (`H5O_FHEAP_MAN_START_BLOCK_SIZE`).
-pub(crate) const STARTING_BLOCK_SIZE: u64 = 1024;
+pub(crate) const ATTRIBUTE_HEAP_STARTING_BLOCK_SIZE: u64 = 1024;
 
 /// The largest direct block the table ever reaches
 /// (`H5O_FHEAP_MAN_MAX_DIRECT_SIZE`). Rows whose blocks would be larger hold
 /// indirect blocks instead, which is what makes the heap grow by levels rather
 /// than by block size.
-pub(crate) const MAX_DIRECT_BLOCK_SIZE: u64 = 65_536;
+pub(crate) const ATTRIBUTE_HEAP_MAX_DIRECT_BLOCK_SIZE: u64 = 65_536;
 
 /// Bits of heap offset the heap declares as its "Maximum Heap Size"
 /// (`H5O_FHEAP_MAN_MAX_INDEX`), and so the width of the offset packed into every
 /// managed heap ID.
-pub(crate) const MAX_HEAP_SIZE_BITS: u16 = 40;
+pub(crate) const ATTRIBUTE_HEAP_MAX_HEAP_SIZE_BITS: u16 = 40;
 
-/// Byte width [`MAX_HEAP_SIZE_BITS`] implies for a block offset.
-pub(crate) const BLOCK_OFFSET_BYTES: usize = (MAX_HEAP_SIZE_BITS as usize).div_ceil(8);
+/// Byte width [`ATTRIBUTE_HEAP_MAX_HEAP_SIZE_BITS`] implies for a block offset.
+pub(crate) const ATTRIBUTE_HEAP_BLOCK_OFFSET_BYTES: usize =
+    (ATTRIBUTE_HEAP_MAX_HEAP_SIZE_BITS as usize).div_ceil(8);
 
 /// Rows the root indirect block starts out with
 /// (`H5O_FHEAP_MAN_START_ROOT_ROWS`). A hint for the C library's own allocator
 /// rather than a bound on what this emitter writes, which sizes the root to the
 /// blocks it actually placed.
-pub(crate) const START_ROOT_ROWS: u16 = 1;
+pub(crate) const ATTRIBUTE_HEAP_START_ROOT_ROWS: u16 = 1;
 
-const WIDTH: u64 = TABLE_WIDTH as u64;
+const WIDTH: u64 = ATTRIBUTE_HEAP_TABLE_WIDTH as u64;
 
 /// `log2` of the geometry constants, each asserted against the constant it
 /// describes so a change to one cannot leave the other behind.
 const START_BITS: u32 = 10;
 const WIDTH_BITS: u32 = 2;
 const MAX_DIRECT_BITS: u32 = 16;
-const _: () = assert!(1u64 << START_BITS == STARTING_BLOCK_SIZE);
+const _: () = assert!(1u64 << START_BITS == ATTRIBUTE_HEAP_STARTING_BLOCK_SIZE);
 const _: () = assert!(1u64 << WIDTH_BITS == WIDTH);
-const _: () = assert!(1u64 << MAX_DIRECT_BITS == MAX_DIRECT_BLOCK_SIZE);
+const _: () = assert!(1u64 << MAX_DIRECT_BITS == ATTRIBUTE_HEAP_MAX_DIRECT_BLOCK_SIZE);
 
 /// Bits spanned by one whole row of starting-size blocks
 /// (`H5HF_dtable_t::first_row_bits`).
@@ -77,11 +78,12 @@ const MAX_DIRECT_ROWS: usize = (MAX_DIRECT_BITS - START_BITS + 2) as usize;
 
 /// Rows a root indirect block can have before its blocks run past the heap's
 /// declared address space (`H5HF_dtable_t::max_root_rows`).
-const MAX_ROOT_ROWS: usize = (MAX_HEAP_SIZE_BITS as u32 - FIRST_ROW_BITS + 1) as usize;
+const MAX_ROOT_ROWS: usize =
+    (ATTRIBUTE_HEAP_MAX_HEAP_SIZE_BITS as u32 - FIRST_ROW_BITS + 1) as usize;
 
-/// Heap offsets are [`MAX_HEAP_SIZE_BITS`] wide, so this is the whole address
+/// Heap offsets are [`ATTRIBUTE_HEAP_MAX_HEAP_SIZE_BITS`] wide, so this is the whole address
 /// space one heap can describe.
-pub(crate) const MAX_HEAP_SPACE: u64 = 1u64 << MAX_HEAP_SIZE_BITS;
+pub(crate) const ATTRIBUTE_HEAP_MAX_HEAP_SPACE: u64 = 1u64 << ATTRIBUTE_HEAP_MAX_HEAP_SIZE_BITS;
 
 /// Bytes of a direct block taken by its header: signature(4) + version(1) + heap
 /// header address + block offset + checksum(4). The checksum is unconditional
@@ -91,15 +93,15 @@ pub(crate) const MAX_HEAP_SPACE: u64 = 1u64 << MAX_HEAP_SIZE_BITS;
 /// A `usize` rather than a heap offset: it is subtracted from in-memory buffer
 /// sizes as often as from block sizes, and widening it is free where a narrowing
 /// cast would not be.
-pub(crate) const fn direct_block_header(offset_width: OffsetWidth) -> usize {
-    4 + 1 + offset_width.get() as usize + BLOCK_OFFSET_BYTES + 4
+pub(crate) const fn attribute_heap_direct_block_header(offset_width: OffsetWidth) -> usize {
+    4 + 1 + offset_width.get() as usize + ATTRIBUTE_HEAP_BLOCK_OFFSET_BYTES + 4
 }
 
 /// The largest object a managed block can hold: the whole of the table's largest
 /// direct block, less that block's header. Anything larger belongs in the heap's
 /// *huge* storage instead.
-pub(crate) const fn max_managed_object(offset_width: OffsetWidth) -> usize {
-    (1usize << MAX_DIRECT_BITS) - direct_block_header(offset_width)
+pub(crate) const fn attribute_heap_max_managed_object(offset_width: OffsetWidth) -> usize {
+    (1usize << MAX_DIRECT_BITS) - attribute_heap_direct_block_header(offset_width)
 }
 
 /// Bytes of an indirect block with `nrows` rows: the same header, then one child
@@ -109,7 +111,7 @@ pub(crate) const fn max_managed_object(offset_width: OffsetWidth) -> usize {
 const fn indirect_block_size(nrows: u16, offset_width: OffsetWidth) -> u64 {
     4 + 1
         + offset_width.get() as u64
-        + BLOCK_OFFSET_BYTES as u64
+        + ATTRIBUTE_HEAP_BLOCK_OFFSET_BYTES as u64
         + nrows as u64 * WIDTH * offset_width.get() as u64
         + 4
 }
@@ -118,9 +120,9 @@ const fn indirect_block_size(nrows: u16, offset_width: OffsetWidth) -> u64 {
 /// every row after that doubles.
 fn row_block_size(row: usize) -> u64 {
     if row <= 1 {
-        STARTING_BLOCK_SIZE
+        ATTRIBUTE_HEAP_STARTING_BLOCK_SIZE
     } else {
-        STARTING_BLOCK_SIZE << (row - 1)
+        ATTRIBUTE_HEAP_STARTING_BLOCK_SIZE << (row - 1)
     }
 }
 
@@ -131,14 +133,14 @@ fn row_offset(row: usize) -> u64 {
     if row == 0 {
         0
     } else {
-        (STARTING_BLOCK_SIZE * WIDTH) << (row - 1)
+        (ATTRIBUTE_HEAP_STARTING_BLOCK_SIZE * WIDTH) << (row - 1)
     }
 }
 
 /// Row and column of `offset` within an indirect block (`H5HF__dtable_lookup`).
 fn lookup(offset: u64) -> (usize, u64) {
-    if offset < STARTING_BLOCK_SIZE * WIDTH {
-        return (0, offset / STARTING_BLOCK_SIZE);
+    if offset < ATTRIBUTE_HEAP_STARTING_BLOCK_SIZE * WIDTH {
+        return (0, offset / ATTRIBUTE_HEAP_STARTING_BLOCK_SIZE);
     }
     let high_bit = 63 - offset.leading_zeros();
     let row = (high_bit - FIRST_ROW_BITS + 1) as usize;
@@ -180,7 +182,7 @@ fn rows_capacity(nrows: usize, offset_width: OffsetWidth) -> u64 {
     let mut total = 0;
     for row in 0..nrows {
         per_block[row] = if row < MAX_DIRECT_ROWS {
-            row_block_size(row) - direct_block_header(offset_width) as u64
+            row_block_size(row) - attribute_heap_direct_block_header(offset_width) as u64
         } else {
             let child_rows = size_to_rows(row_block_size(row));
             WIDTH * per_block[..child_rows].iter().sum::<u64>()
@@ -194,7 +196,7 @@ fn rows_capacity(nrows: usize, offset_width: OffsetWidth) -> u64 {
 /// table runs out of rows first.
 ///
 /// The boundary this draws is the heap's whole address space: rows
-/// `[0, MAX_ROOT_ROWS)` span exactly [`MAX_HEAP_SPACE`] between them, so any span
+/// `[0, MAX_ROOT_ROWS)` span exactly [`ATTRIBUTE_HEAP_MAX_HEAP_SPACE`] between them, so any span
 /// at or past that has nowhere left to go. Named separately from the placement
 /// walk it serves because the walk cannot reach the boundary without something on
 /// the order of a terabyte of objects, and the arithmetic deserves a test that
@@ -208,8 +210,8 @@ fn root_rows_covering(span: u64) -> Option<usize> {
 /// other object's bytes, and a region too large for `usize` cannot be built in
 /// memory at all.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum PlanRefusal {
-    /// The blocks would run past the heap's [`MAX_HEAP_SIZE_BITS`]-bit address
+pub(crate) enum AttributeHeapPlanError {
+    /// The blocks would run past the heap's [`ATTRIBUTE_HEAP_MAX_HEAP_SIZE_BITS`]-bit address
     /// space.
     HeapSpace,
     /// The blocks fit the heap, but the bytes they occupy do not fit this host's
@@ -223,9 +225,9 @@ pub(crate) enum PlanRefusal {
 /// A child slot of an indirect block, once a block has been planned for it.
 #[derive(Clone, Copy)]
 enum Child {
-    /// Index into [`ManagedPlan::directs`].
+    /// Index into [`AttributeHeapPlan::directs`].
     Direct(usize),
-    /// Index into [`ManagedPlan::indirects`].
+    /// Index into [`AttributeHeapPlan::indirects`].
     Indirect(usize),
 }
 
@@ -237,7 +239,7 @@ struct PlannedDirect {
     size: u64,
     /// Byte offset of the block within the region the plan lays out.
     region_offset: u64,
-    /// Indices into the object list given to [`ManagedPlan::new`], in the order
+    /// Indices into the object list given to [`AttributeHeapPlan::new`], in the order
     /// they were packed into this block.
     objects: Vec<usize>,
 }
@@ -255,9 +257,9 @@ struct PlannedIndirect {
 /// A laid-out set of managed blocks: where every object sits in the heap's
 /// address space, which blocks hold them, and the statistics the heap header
 /// declares alongside.
-pub(crate) struct ManagedPlan {
+pub(crate) struct AttributeHeapPlan {
     offset_width: OffsetWidth,
-    /// Heap offset of each object, in the order given to [`ManagedPlan::new`].
+    /// Heap offset of each object, in the order given to [`AttributeHeapPlan::new`].
     offsets: Vec<u64>,
     directs: Vec<PlannedDirect>,
     /// Empty when the root is a direct block. Otherwise the root is the *last*
@@ -270,7 +272,7 @@ pub(crate) struct ManagedPlan {
     free_space: u64,
 }
 
-impl ManagedPlan {
+impl AttributeHeapPlan {
     /// Lay out blocks holding objects of `sizes`, in that order.
     ///
     /// Objects are packed into a block until the next one does not fit, and the
@@ -278,15 +280,15 @@ impl ManagedPlan {
     /// library's own allocation iterator uses. A block too small for the object
     /// at hand is skipped rather than allocated, so an object larger than a
     /// starting-size block simply lands in the first row whose blocks can hold
-    /// it. Every size up to `MAX_DIRECT_BLOCK_SIZE - direct_block_header`
+    /// it. Every size up to `ATTRIBUTE_HEAP_MAX_DIRECT_BLOCK_SIZE - attribute_heap_direct_block_header`
     /// therefore has somewhere to go, and the walk always terminates.
     ///
     /// Refuses rather than lays out a set the heap or the host cannot address;
-    /// see [`PlanRefusal`].
+    /// see [`AttributeHeapPlanError`].
     pub(crate) fn new(
         sizes: &[u64],
         offset_width: OffsetWidth,
-    ) -> Result<ManagedPlan, PlanRefusal> {
+    ) -> Result<AttributeHeapPlan, AttributeHeapPlanError> {
         // An object past the largest direct block fits no slot at all, and the
         // walk below would look for one all the way to the top of the heap's
         // address space — a billion iterations before it gives up. Callers split
@@ -297,10 +299,10 @@ impl ManagedPlan {
         debug_assert!(
             sizes
                 .iter()
-                .all(|&size| size <= max_managed_object(offset_width) as u64),
+                .all(|&size| size <= attribute_heap_max_managed_object(offset_width) as u64),
             "an object too large for a managed block belongs in huge storage"
         );
-        let header = direct_block_header(offset_width) as u64;
+        let header = attribute_heap_direct_block_header(offset_width) as u64;
         let mut directs: Vec<PlannedDirect> = Vec::new();
         let mut offsets: Vec<u64> = Vec::with_capacity(sizes.len());
         // Heap offset of the next slot the walk has not looked at, and how much of
@@ -318,8 +320,8 @@ impl ManagedPlan {
                         break;
                     }
                 }
-                if cursor >= MAX_HEAP_SPACE {
-                    return Err(PlanRefusal::HeapSpace);
+                if cursor >= ATTRIBUTE_HEAP_MAX_HEAP_SPACE {
+                    return Err(AttributeHeapPlanError::HeapSpace);
                 }
                 let (heap_offset, block_size) = locate(cursor);
                 debug_assert_eq!(
@@ -344,25 +346,28 @@ impl ManagedPlan {
         if directs.is_empty() {
             directs.push(PlannedDirect {
                 heap_offset: 0,
-                size: STARTING_BLOCK_SIZE,
+                size: ATTRIBUTE_HEAP_STARTING_BLOCK_SIZE,
                 region_offset: 0,
                 objects: Vec::new(),
             });
-            cursor = STARTING_BLOCK_SIZE;
+            cursor = ATTRIBUTE_HEAP_STARTING_BLOCK_SIZE;
         }
 
         // One starting-size block at the front of the heap is the root itself,
         // exactly as the C library leaves it until a second block is needed.
         let root_is_direct = directs.len() == 1
             && directs[0].heap_offset == 0
-            && directs[0].size == STARTING_BLOCK_SIZE;
+            && directs[0].size == ATTRIBUTE_HEAP_STARTING_BLOCK_SIZE;
 
         let mut indirects = Vec::new();
         let (managed_space, capacity) = if root_is_direct {
-            (STARTING_BLOCK_SIZE, STARTING_BLOCK_SIZE - header)
+            (
+                ATTRIBUTE_HEAP_STARTING_BLOCK_SIZE,
+                ATTRIBUTE_HEAP_STARTING_BLOCK_SIZE - header,
+            )
         } else {
             // The fewest rows whose blocks cover every block placed.
-            let nrows = root_rows_covering(cursor).ok_or(PlanRefusal::HeapSpace)?;
+            let nrows = root_rows_covering(cursor).ok_or(AttributeHeapPlanError::HeapSpace)?;
             let mut placed = 0;
             build_indirect(0, nrows, &directs, &mut placed, &mut indirects);
             debug_assert_eq!(placed, directs.len(), "every block belongs to a slot");
@@ -379,7 +384,7 @@ impl ManagedPlan {
             region_size += block.size;
         }
         if usize::try_from(region_size).is_err() {
-            return Err(PlanRefusal::Host { bytes: region_size });
+            return Err(AttributeHeapPlanError::Host { bytes: region_size });
         }
 
         let used: u64 = sizes.iter().sum();
@@ -387,7 +392,7 @@ impl ManagedPlan {
             used <= capacity,
             "objects cannot exceed the blocks holding them"
         );
-        Ok(ManagedPlan {
+        Ok(AttributeHeapPlan {
             offset_width,
             offsets,
             allocated_space: directs.iter().map(|b| b.size).sum(),
@@ -451,7 +456,7 @@ impl ManagedPlan {
         self.offsets[index]
     }
 
-    /// Emits every block, back to back, in the order [`ManagedPlan::new`] laid
+    /// Emits every block, back to back, in the order [`AttributeHeapPlan::new`] laid
     /// them out. `objects` supplies the bytes of each planned object, in the same
     /// order as the sizes it was planned from.
     pub(crate) fn serialize(
@@ -461,7 +466,7 @@ impl ManagedPlan {
         heap_header_address: StoredAddress,
     ) -> Vec<u8> {
         let region_size = usize::try_from(self.region_size)
-            .expect("ManagedPlan::new refuses a region this host cannot address");
+            .expect("AttributeHeapPlan::new refuses a region this host cannot address");
         let mut region = vec![0u8; region_size];
 
         for block in &self.indirects {
@@ -503,7 +508,10 @@ impl ManagedPlan {
             write_heap_offset(&mut bytes, block.heap_offset);
             let checksum_at = bytes.len();
             bytes.extend_from_slice(&[0u8; 4]); // checksum placeholder
-            debug_assert_eq!(bytes.len(), direct_block_header(self.offset_width));
+            debug_assert_eq!(
+                bytes.len(),
+                attribute_heap_direct_block_header(self.offset_width)
+            );
             for &object in &block.objects {
                 debug_assert_eq!(
                     block.heap_offset + bytes.len() as u64,
@@ -528,11 +536,14 @@ fn place(region: &mut [u8], at: u64, bytes: &[u8]) {
     region[at..at + bytes.len()].copy_from_slice(bytes);
 }
 
-/// Write a heap offset in the width [`MAX_HEAP_SIZE_BITS`] implies, little-endian
+/// Write a heap offset in the width [`ATTRIBUTE_HEAP_MAX_HEAP_SIZE_BITS`] implies, little-endian
 /// — HDF5's `UINT64ENCODE_VAR` against `heap_off_size`.
 fn write_heap_offset(buf: &mut Vec<u8>, offset: u64) {
-    debug_assert!(offset < MAX_HEAP_SPACE, "heap offset overflows its field");
-    buf.extend_from_slice(&offset.to_le_bytes()[..BLOCK_OFFSET_BYTES]);
+    debug_assert!(
+        offset < ATTRIBUTE_HEAP_MAX_HEAP_SPACE,
+        "heap offset overflows its field"
+    );
+    buf.extend_from_slice(&offset.to_le_bytes()[..ATTRIBUTE_HEAP_BLOCK_OFFSET_BYTES]);
 }
 
 /// Build the indirect block covering `nrows` rows from `base`, and every indirect
@@ -548,10 +559,10 @@ fn build_indirect(
     placed: &mut usize,
     indirects: &mut Vec<PlannedIndirect>,
 ) -> usize {
-    let mut entries = vec![None; nrows * TABLE_WIDTH as usize];
+    let mut entries = vec![None; nrows * ATTRIBUTE_HEAP_TABLE_WIDTH as usize];
     'rows: for row in 0..nrows {
         let block_size = row_block_size(row);
-        for col in 0..TABLE_WIDTH as usize {
+        for col in 0..ATTRIBUTE_HEAP_TABLE_WIDTH as usize {
             let Some(next) = directs.get(*placed) else {
                 break 'rows;
             };
@@ -559,22 +570,23 @@ fn build_indirect(
             if next.heap_offset >= slot_offset + block_size {
                 continue;
             }
-            entries[row * TABLE_WIDTH as usize + col] = Some(if row < MAX_DIRECT_ROWS {
-                debug_assert_eq!(
-                    next.heap_offset, slot_offset,
-                    "a block fills its whole slot"
-                );
-                *placed += 1;
-                Child::Direct(*placed - 1)
-            } else {
-                Child::Indirect(build_indirect(
-                    slot_offset,
-                    size_to_rows(block_size),
-                    directs,
-                    placed,
-                    indirects,
-                ))
-            });
+            entries[row * ATTRIBUTE_HEAP_TABLE_WIDTH as usize + col] =
+                Some(if row < MAX_DIRECT_ROWS {
+                    debug_assert_eq!(
+                        next.heap_offset, slot_offset,
+                        "a block fills its whole slot"
+                    );
+                    *placed += 1;
+                    Child::Direct(*placed - 1)
+                } else {
+                    Child::Indirect(build_indirect(
+                        slot_offset,
+                        size_to_rows(block_size),
+                        directs,
+                        placed,
+                        indirects,
+                    ))
+                });
         }
     }
     indirects.push(PlannedIndirect {
@@ -596,12 +608,14 @@ mod tests {
     /// The largest object the table can hold in a managed block: the whole of its
     /// largest direct block, less that block's header.
     fn largest_object() -> u64 {
-        MAX_DIRECT_BLOCK_SIZE - direct_block_header(OFFSET_WIDTH) as u64
+        ATTRIBUTE_HEAP_MAX_DIRECT_BLOCK_SIZE
+            - attribute_heap_direct_block_header(OFFSET_WIDTH) as u64
     }
 
     /// Object-size shapes worth planning, each named by what it exercises.
     fn shapes() -> Vec<(&'static str, Vec<u64>)> {
-        let starting_capacity = STARTING_BLOCK_SIZE - direct_block_header(OFFSET_WIDTH) as u64;
+        let starting_capacity = ATTRIBUTE_HEAP_STARTING_BLOCK_SIZE
+            - attribute_heap_direct_block_header(OFFSET_WIDTH) as u64;
         vec![
             ("empty", Vec::new()),
             ("one tiny object", vec![1]),
@@ -633,8 +647,8 @@ mod tests {
     #[test]
     fn objects_sit_inside_the_blocks_planned_for_them() {
         for (name, sizes) in shapes() {
-            let plan = ManagedPlan::new(&sizes, OFFSET_WIDTH).expect("plannable");
-            let header = direct_block_header(OFFSET_WIDTH) as u64;
+            let plan = AttributeHeapPlan::new(&sizes, OFFSET_WIDTH).expect("plannable");
+            let header = attribute_heap_direct_block_header(OFFSET_WIDTH) as u64;
             let mut previous_end = 0;
             for (index, &size) in sizes.iter().enumerate() {
                 let at = plan.heap_offset(index);
@@ -666,7 +680,7 @@ mod tests {
     #[test]
     fn blocks_are_doubling_table_slots_in_heap_order() {
         for (name, sizes) in shapes() {
-            let plan = ManagedPlan::new(&sizes, OFFSET_WIDTH).expect("plannable");
+            let plan = AttributeHeapPlan::new(&sizes, OFFSET_WIDTH).expect("plannable");
             let mut previous_end = 0;
             for block in &plan.directs {
                 assert_eq!(
@@ -683,7 +697,7 @@ mod tests {
                 "{name}: the declared managed space does not cover the blocks"
             );
             assert!(
-                plan.managed_space() <= MAX_HEAP_SPACE,
+                plan.managed_space() <= ATTRIBUTE_HEAP_MAX_HEAP_SPACE,
                 "{name}: the heap outgrew its own address space"
             );
         }
@@ -695,7 +709,7 @@ mod tests {
     #[test]
     fn no_indirect_block_is_childless() {
         for (name, sizes) in shapes() {
-            let plan = ManagedPlan::new(&sizes, OFFSET_WIDTH).expect("plannable");
+            let plan = AttributeHeapPlan::new(&sizes, OFFSET_WIDTH).expect("plannable");
             for block in &plan.indirects {
                 assert!(
                     block.entries.iter().any(Option::is_some),
@@ -712,7 +726,7 @@ mod tests {
     #[test]
     fn the_tree_puts_every_block_at_the_slot_its_heap_offset_names() {
         for (name, sizes) in shapes() {
-            let plan = ManagedPlan::new(&sizes, OFFSET_WIDTH).expect("plannable");
+            let plan = AttributeHeapPlan::new(&sizes, OFFSET_WIDTH).expect("plannable");
             let Some(root) = plan.indirects.len().checked_sub(1) else {
                 assert_eq!(plan.directs.len(), 1, "{name}: a direct root is one block");
                 assert_eq!(plan.directs[0].heap_offset, 0);
@@ -728,7 +742,13 @@ mod tests {
         }
     }
 
-    fn walk(plan: &ManagedPlan, index: usize, expected: u64, reached: &mut Vec<u64>, name: &str) {
+    fn walk(
+        plan: &AttributeHeapPlan,
+        index: usize,
+        expected: u64,
+        reached: &mut Vec<u64>,
+        name: &str,
+    ) {
         let block = &plan.indirects[index];
         assert_eq!(
             block.heap_offset, expected,
@@ -736,11 +756,11 @@ mod tests {
         );
         assert_eq!(
             block.entries.len(),
-            block.nrows as usize * TABLE_WIDTH as usize
+            block.nrows as usize * ATTRIBUTE_HEAP_TABLE_WIDTH as usize
         );
         for (slot, entry) in block.entries.iter().enumerate() {
-            let row = slot / TABLE_WIDTH as usize;
-            let col = (slot % TABLE_WIDTH as usize) as u64;
+            let row = slot / ATTRIBUTE_HEAP_TABLE_WIDTH as usize;
+            let col = (slot % ATTRIBUTE_HEAP_TABLE_WIDTH as usize) as u64;
             let size = row_block_size(row);
             let at = block.heap_offset + row_offset(row) + col * size;
             match entry {
@@ -777,9 +797,9 @@ mod tests {
     /// the emitter's own expression for them cannot fail.
     #[test]
     fn the_header_statistics_describe_the_blocks_that_were_planned() {
-        let header = direct_block_header(OFFSET_WIDTH) as u64;
+        let header = attribute_heap_direct_block_header(OFFSET_WIDTH) as u64;
         for (name, sizes) in shapes() {
-            let plan = ManagedPlan::new(&sizes, OFFSET_WIDTH).expect("plannable");
+            let plan = AttributeHeapPlan::new(&sizes, OFFSET_WIDTH).expect("plannable");
 
             let mut at = 0;
             let mut capacity = 0;
@@ -834,15 +854,21 @@ mod tests {
     /// The table's rows span the heap's address space exactly, so the last row
     /// that can hold a block is the one whose blocks end at the top of it.
     ///
-    /// This is the boundary [`ManagedPlan::new`] refuses at. Reaching it through
+    /// This is the boundary [`AttributeHeapPlan::new`] refuses at. Reaching it through
     /// the placement walk would take on the order of a terabyte of objects, so
     /// this is the only place the arithmetic can be tested at all.
     #[test]
     fn the_root_runs_out_of_rows_exactly_at_the_heaps_address_space() {
-        assert_eq!(row_offset(MAX_ROOT_ROWS), MAX_HEAP_SPACE);
-        assert_eq!(root_rows_covering(MAX_HEAP_SPACE), Some(MAX_ROOT_ROWS));
-        assert_eq!(root_rows_covering(MAX_HEAP_SPACE - 1), Some(MAX_ROOT_ROWS));
-        assert_eq!(root_rows_covering(MAX_HEAP_SPACE + 1), None);
+        assert_eq!(row_offset(MAX_ROOT_ROWS), ATTRIBUTE_HEAP_MAX_HEAP_SPACE);
+        assert_eq!(
+            root_rows_covering(ATTRIBUTE_HEAP_MAX_HEAP_SPACE),
+            Some(MAX_ROOT_ROWS)
+        );
+        assert_eq!(
+            root_rows_covering(ATTRIBUTE_HEAP_MAX_HEAP_SPACE - 1),
+            Some(MAX_ROOT_ROWS)
+        );
+        assert_eq!(root_rows_covering(ATTRIBUTE_HEAP_MAX_HEAP_SPACE + 1), None);
         // A span one byte past a row needs the next row up.
         assert_eq!(root_rows_covering(row_offset(3)), Some(3));
         assert_eq!(root_rows_covering(row_offset(3) + 1), Some(4));
@@ -852,7 +878,8 @@ mod tests {
     /// holds everything, which is the shape the C library leaves a small heap in.
     #[test]
     fn the_root_is_direct_only_while_one_starting_block_holds_everything() {
-        let capacity = STARTING_BLOCK_SIZE - direct_block_header(OFFSET_WIDTH) as u64;
+        let capacity = ATTRIBUTE_HEAP_STARTING_BLOCK_SIZE
+            - attribute_heap_direct_block_header(OFFSET_WIDTH) as u64;
         for (sizes, direct) in [
             (vec![], true),
             (vec![capacity], true),
@@ -860,7 +887,7 @@ mod tests {
             (vec![capacity - 1, 1], true),
             (vec![capacity + 1], false),
         ] {
-            let plan = ManagedPlan::new(&sizes, OFFSET_WIDTH).expect("plannable");
+            let plan = AttributeHeapPlan::new(&sizes, OFFSET_WIDTH).expect("plannable");
             assert_eq!(
                 plan.root_rows() == 0,
                 direct,
@@ -868,7 +895,7 @@ mod tests {
                 if direct { "" } else { " not" }
             );
             if direct {
-                assert_eq!(plan.managed_space(), STARTING_BLOCK_SIZE);
+                assert_eq!(plan.managed_space(), ATTRIBUTE_HEAP_STARTING_BLOCK_SIZE);
             }
         }
     }

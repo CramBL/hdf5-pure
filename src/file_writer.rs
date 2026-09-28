@@ -37,7 +37,7 @@ use crate::file_space_info::{
     self, DEFAULT_PAGE_SIZE, DEFAULT_THRESHOLD, FileSpaceInfo, FileSpaceStrategy,
     NUM_FILE_FSM_MANAGERS,
 };
-use crate::fractal_heap_write::{self, ManagedPlan, PlanRefusal};
+use crate::fractal_heap_write::{self, AttributeHeapPlan, AttributeHeapPlanError};
 use crate::free_space_manager::{
     FreeSection, SECT_CLASS_LARGE, SECT_CLASS_SMALL, fshd_len, fsse_len, serialize_file_fsm,
 };
@@ -335,8 +335,8 @@ pub(crate) struct DenseAttrBlob {
 
 /// Bits of heap offset the dense attribute heap declares (its "Maximum Heap
 /// Size"), and the byte width that implies for a block offset.
-const DENSE_ATTR_MAX_HEAP_SIZE_BITS: u16 = fractal_heap_write::MAX_HEAP_SIZE_BITS;
-const DENSE_ATTR_BLOCK_OFFSET_BYTES: usize = fractal_heap_write::BLOCK_OFFSET_BYTES;
+const DENSE_ATTR_MAX_HEAP_SIZE_BITS: u16 = fractal_heap_write::ATTRIBUTE_HEAP_MAX_HEAP_SIZE_BITS;
+const DENSE_ATTR_BLOCK_OFFSET_BYTES: usize = fractal_heap_write::ATTRIBUTE_HEAP_BLOCK_OFFSET_BYTES;
 
 /// Whether `attrs` must go in a fractal heap rather than the object header.
 ///
@@ -402,7 +402,7 @@ pub(crate) fn needs_dense_attrs(attrs: &[AttributeMessage]) -> Result<bool, Form
 /// attribute heap — but the threshold is the heap's own declaration, read back
 /// out of the header, so a higher one is equally readable.
 pub(crate) const DENSE_ATTR_MAX_MANAGED_OBJECT: usize =
-    fractal_heap_write::max_managed_object(OFFSET_WIDTH);
+    fractal_heap_write::attribute_heap_max_managed_object(OFFSET_WIDTH);
 
 /// One name-index B-tree v2 record as [`build_dense_attrs`] writes it: heap
 /// ID(8) + message flags(1) + creation order(4) + name hash(4).
@@ -533,12 +533,12 @@ pub(crate) fn dense_attrs_check(attrs: &[AttributeMessage]) -> Result<(), Format
     // apart. Reaching either refusal takes about a terabyte of attributes on one
     // object, which is why nothing exercises them end to end; the boundary each
     // draws is tested where it is computed.
-    match ManagedPlan::new(&managed, OFFSET_WIDTH) {
+    match AttributeHeapPlan::new(&managed, OFFSET_WIDTH) {
         Ok(_) => Ok(()),
-        Err(PlanRefusal::HeapSpace) => Err(FormatError::DenseAttributeHeapTooLarge {
-            limit: fractal_heap_write::MAX_HEAP_SPACE,
+        Err(AttributeHeapPlanError::HeapSpace) => Err(FormatError::DenseAttributeHeapTooLarge {
+            limit: fractal_heap_write::ATTRIBUTE_HEAP_MAX_HEAP_SPACE,
         }),
-        Err(PlanRefusal::Host { bytes }) => Err(FormatError::ValueTooLargeForPlatform {
+        Err(AttributeHeapPlanError::Host { bytes }) => Err(FormatError::ValueTooLargeForPlatform {
             value: bytes,
             target: "usize",
         }),
@@ -562,7 +562,7 @@ pub(crate) struct DenseAttrPlan {
     huge_id_of: Vec<Option<u64>>,
     huge_count: usize,
     huge_total: u64,
-    managed_plan: ManagedPlan,
+    managed_plan: AttributeHeapPlan,
     name_plan: BTreeV2Plan,
     corder_plan: Option<BTreeV2Plan>,
     huge_plan: Option<BTreeV2Plan>,
@@ -652,7 +652,7 @@ pub(crate) fn dense_attrs_plan(
         .filter(|(_, id)| id.is_none())
         .map(|(s, _)| s.len() as u64)
         .collect();
-    let managed_plan = ManagedPlan::new(&managed_sizes, OFFSET_WIDTH)
+    let managed_plan = AttributeHeapPlan::new(&managed_sizes, OFFSET_WIDTH)
         .expect("dense_attrs_check, which every caller must run first, plans the same layout");
 
     // Every v2 B-tree header this emitter writes has the same fixed layout, so
@@ -923,19 +923,19 @@ impl DenseAttrPlan {
         write_length(&mut frhp, huge_count as u64, LENGTH_SIZE); // huge_objects_count
         write_length(&mut frhp, 0, LENGTH_SIZE); // tiny_objects_size
         write_length(&mut frhp, 0, LENGTH_SIZE); // tiny_objects_count
-        frhp.extend_from_slice(&fractal_heap_write::TABLE_WIDTH.to_le_bytes()); // table_width
+        frhp.extend_from_slice(&fractal_heap_write::ATTRIBUTE_HEAP_TABLE_WIDTH.to_le_bytes()); // table_width
         write_length(
             &mut frhp,
-            fractal_heap_write::STARTING_BLOCK_SIZE,
+            fractal_heap_write::ATTRIBUTE_HEAP_STARTING_BLOCK_SIZE,
             LENGTH_SIZE,
         );
         write_length(
             &mut frhp,
-            fractal_heap_write::MAX_DIRECT_BLOCK_SIZE,
+            fractal_heap_write::ATTRIBUTE_HEAP_MAX_DIRECT_BLOCK_SIZE,
             LENGTH_SIZE,
         ); // max_direct_block_size
         frhp.extend_from_slice(&max_heap_size.to_le_bytes());
-        frhp.extend_from_slice(&fractal_heap_write::START_ROOT_ROWS.to_le_bytes()); // start_root_rows
+        frhp.extend_from_slice(&fractal_heap_write::ATTRIBUTE_HEAP_START_ROOT_ROWS.to_le_bytes()); // start_root_rows
         write_offset(
             &mut frhp,
             managed_plan.root_address(managed_addr),
