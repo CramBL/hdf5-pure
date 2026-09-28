@@ -484,6 +484,7 @@ version = "0.0.0"
 dependencies = [
  "hdf5-metno",
  "hdf5-pure",
+ "hdf5-pure-format",
  "ndarray",
  "proptest",
  "rstest",

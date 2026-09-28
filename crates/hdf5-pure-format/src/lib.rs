@@ -112,6 +112,7 @@ pub use filter_pipeline::FilterDescription;
 pub use filter_pipeline::FilterPipeline;
 pub use filter_pipeline::FilterPipelineError;
 pub use global_heap::GLOBAL_HEAP_MAX_OBJECTS;
+pub use global_heap::GlobalHeapCollectionError;
 pub use global_heap::GlobalHeapIndex;
 pub use global_heap::GlobalHeapObjectInfo;
 pub use global_heap::encode_global_heap_collection;
