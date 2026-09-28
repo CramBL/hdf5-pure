@@ -9566,7 +9566,7 @@ impl WriteEngine {
         attrs: &[crate::attribute::AttributeMessage],
         creation: DenseAttrCreationOrder,
     ) -> Result<Vec<u8>, Error> {
-        let plan = crate::file_writer::dense_attrs_plan(attrs, creation);
+        let plan = crate::file_writer::dense_attrs_plan(attrs, creation)?;
         let (_addr, attr_info_message) =
             self.place_relocatable(plan.blob_len(), PageType::Meta, |stored_base| {
                 let blob = plan.build(stored_base);
@@ -9608,7 +9608,7 @@ impl WriteEngine {
                     *region = put_attr_message(
                         region,
                         &msg.name,
-                        &msg.serialize(LENGTH_SIZE),
+                        &msg.serialize(crate::file_writer::OFFSET_WIDTH, LENGTH_SIZE)?,
                         creation_index,
                     )?;
                 }
@@ -12010,7 +12010,7 @@ fn flatten_dataset(db: DatasetBuilder, name: LinkNameBuf) -> Result<FlatDataset,
     // the same disjunction, and the same heap, the whole-file writer uses. What
     // that heap cannot represent is refused here, in the preflight, so a staged
     // dataset that cannot be written is refused before the commit places a byte.
-    let attrs_are_dense = crate::file_writer::needs_dense_attrs(&attrs);
+    let attrs_are_dense = crate::file_writer::needs_dense_attrs(&attrs).map_err(Error::Format)?;
     if attrs_are_dense {
         crate::file_writer::dense_attrs_check(&attrs).map_err(Error::Format)?;
     }
@@ -13018,7 +13018,11 @@ fn apply_compact_attr_ops(
                     // never been set as a fixed-size attribute.
                     out = remove_attr_from_region(&out, name, false)?;
                     let msg = build_attr_message(name, value);
-                    if msg.serialize(LENGTH_SIZE).len() > OBJECT_HEADER_MESSAGE_MAX {
+                    if msg
+                        .serialize(crate::file_writer::OFFSET_WIDTH, LENGTH_SIZE)?
+                        .len()
+                        > OBJECT_HEADER_MESSAGE_MAX
+                    {
                         return Err(Error::EditUnsupported(
                             "attribute is too large to encode in place",
                         ));
@@ -13169,13 +13173,15 @@ fn plan_attr_ops<S: Source + ?Sized>(
         // An attribute past the header's message-size field has no compact form
         // at all, so the compact pass would refuse it rather than report a count
         // this could act on. Ask before running it, not after.
-        let oversized = ops.iter().any(|op| match op {
-            AttrOp::Set { name, value } => {
-                build_attr_message(name, value).serialize(LENGTH_SIZE).len()
-                    > OBJECT_HEADER_MESSAGE_MAX
+        let mut oversized = false;
+        for op in ops {
+            if let AttrOp::Set { name, value } = op {
+                oversized |= build_attr_message(name, value)
+                    .serialize(crate::file_writer::OFFSET_WIDTH, LENGTH_SIZE)?
+                    .len()
+                    > OBJECT_HEADER_MESSAGE_MAX;
             }
-            AttrOp::Remove { .. } => false,
-        });
+        }
         if !oversized {
             let (out, pending_vl) = apply_compact_attr_ops(region, ops)?;
             // An edit that only *removes* stays compact whatever the count is.
@@ -13780,7 +13786,7 @@ fn parse_compact_attr_name(
     // committed message this walk has no file context to follow. Reading the name
     // alone lets an edit pass over such an attribute instead of refusing the
     // whole object because one of its neighbours is committed.
-    crate::attribute::message_name(&region[body..body_end]).map_err(Error::Format)
+    crate::attribute::AttributeMessage::parse_name(&region[body..body_end]).map_err(Error::Format)
 }
 
 fn encode_attr_body(name: &str, value: &AttrValue) -> Result<Vec<u8>, Error> {
@@ -13792,7 +13798,8 @@ fn encode_attr_body(name: &str, value: &AttrValue) -> Result<Vec<u8>, Error> {
         value.var_len_strings().is_none(),
         "a variable-length attribute must be intercepted by apply_compact_attr_ops before reaching encode_attr_message"
     );
-    let body = build_attr_message(name, value).serialize(LENGTH_SIZE);
+    let body =
+        build_attr_message(name, value).serialize(crate::file_writer::OFFSET_WIDTH, LENGTH_SIZE)?;
     if body.len() > OBJECT_HEADER_MESSAGE_MAX {
         return Err(Error::EditUnsupported(
             "group attribute is too large to encode in place",
@@ -14576,7 +14583,7 @@ fn reject_foreign_addresses(region: &OhRegion) -> Result<(), Error> {
                 // message, not the fields inside it. The reference addresses the
                 // source file, so it cannot travel any more than a shared record
                 // can — and the parse below cannot resolve it here in any case.
-                if crate::attribute::message_shares_a_field(&region[body..body_end]) {
+                if crate::attribute::AttributeMessage::shares_a_field(&region[body..body_end]) {
                     return Err(Error::EditUnsupported(
                         "an attribute with a committed (shared) datatype cannot be copied to another file yet",
                     ));
@@ -15188,7 +15195,8 @@ mod tests {
     #[test]
     fn a_shared_attribute_message_is_told_from_a_private_one_by_its_flags() {
         let body = crate::type_builders::build_attr_message("a", &AttrValue::I64(1))
-            .serialize(LENGTH_SIZE);
+            .serialize(crate::file_writer::OFFSET_WIDTH, LENGTH_SIZE)
+            .unwrap();
         let private = message_record(MessageType::ATTRIBUTE, &body);
         assert!(!region_has_shared_attr(&plain_region(private.clone())).unwrap());
 
@@ -15241,7 +15249,9 @@ mod tests {
     fn inline_attr_region(attr: &crate::attribute::AttributeMessage) -> OhRegion {
         plain_region(message_record(
             MessageType::ATTRIBUTE,
-            &attr.serialize_v3(LENGTH_SIZE),
+            &attr
+                .serialize_v3(crate::file_writer::OFFSET_WIDTH, LENGTH_SIZE)
+                .unwrap(),
         ))
     }
 
@@ -18022,7 +18032,8 @@ mod tests {
     /// One compact Attribute message body for `name`.
     fn attr_body(name: &str, value: i64) -> Vec<u8> {
         crate::type_builders::build_attr_message(name, &AttrValue::I64(value))
-            .serialize(LENGTH_SIZE)
+            .serialize(crate::file_writer::OFFSET_WIDTH, LENGTH_SIZE)
+            .unwrap()
     }
 
     /// [`attr_region_in`] for a header carrying neither optional prefix block.

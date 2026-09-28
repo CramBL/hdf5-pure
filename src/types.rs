@@ -281,7 +281,7 @@ fn decode_attr_value<S: crate::source::Source + ?Sized>(
     // through that base — the same view the numeric readers take of an enum dataset.
     match crate::data_read::effective_numeric(&attr.datatype) {
         Datatype::FloatingPoint { size: 4, .. } => {
-            let vals = attr.read_as_f64().ok()?;
+            let vals = crate::data_read::read_as_f64(&attr.raw_data, &attr.datatype).ok()?;
             if scalar {
                 Some(AttrValue::F32(narrow_f32(*vals.first()?)))
             } else {
@@ -291,7 +291,7 @@ fn decode_attr_value<S: crate::source::Source + ?Sized>(
             }
         }
         Datatype::FloatingPoint { .. } => {
-            let vals = attr.read_as_f64().ok()?;
+            let vals = crate::data_read::read_as_f64(&attr.raw_data, &attr.datatype).ok()?;
             if scalar {
                 Some(AttrValue::F64(*vals.first()?))
             } else {
@@ -302,14 +302,22 @@ fn decode_attr_value<S: crate::source::Source + ?Sized>(
             size,
             layout: FixedPointLayout { signed: true, .. },
             ..
-        } => signed_attr_value(attr.read_as_i64().ok()?, scalar, *size),
+        } => signed_attr_value(
+            crate::data_read::read_as_i64(&attr.raw_data, &attr.datatype).ok()?,
+            scalar,
+            *size,
+        ),
         Datatype::FixedPoint {
             size,
             layout: FixedPointLayout { signed: false, .. },
             ..
-        } => unsigned_attr_value(attr.read_as_u64().ok()?, scalar, *size),
+        } => unsigned_attr_value(
+            crate::data_read::read_as_u64(&attr.raw_data, &attr.datatype).ok()?,
+            scalar,
+            *size,
+        ),
         Datatype::String { charset, size, .. } => {
-            let strings = attr.read_as_strings().ok()?;
+            let strings = crate::data_read::read_as_strings(&attr.raw_data, &attr.datatype).ok()?;
             // A zero-size string datatype decodes to no elements at all, so a
             // scalar takes the empty string rather than reporting the whole
             // attribute undecodable — `attrs_to_map` drops what this returns

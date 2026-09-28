@@ -9,36 +9,28 @@ use crate::attribute_info::AttributeInfoMessage;
 use crate::btree_v2::{
     BTreeV2Header, collect_btree_v2_records, collect_btree_v2_records_from_source,
 };
-use crate::bytes::ensure_len;
+use crate::bytes;
 use crate::convert::Narrow;
-use crate::data_read;
 use crate::dataspace::Dataspace;
+use crate::datatype::CharacterSet;
 use crate::datatype::Datatype;
 use crate::error::FormatError;
 use crate::fractal_heap::FractalHeapHeader;
 use crate::message_type::MessageType;
 use crate::object_header::ObjectHeader;
-use crate::shared_message::{
-    BufferedResolver, DatatypeLocation, SharedResolver, SourceResolver, Unresolvable,
-};
+use crate::shared_message::BufferedResolver;
+use crate::shared_message::DatatypeLocation;
+use crate::shared_message::SharedResolver;
+use crate::shared_message::SourceResolver;
+use crate::shared_message::Unresolvable;
 use crate::sohm::SohmTable;
 use crate::source::Source;
-
-/// Bit 0 of an attribute message's flags byte: the datatype field holds a
-/// reference to a committed (shared) datatype rather than the datatype itself
-/// (`H5O_ATTR_FLAG_TYPE_SHARED`).
-const FLAG_SHARED_DATATYPE: u8 = 0x01;
-
-/// Bit 1: the same for the dataspace field (`H5O_ATTR_FLAG_SPACE_SHARED`).
-const FLAG_SHARED_DATASPACE: u8 = 0x02;
-
-/// Every flag bit the format defines (`H5O_ATTR_FLAG_ALL`).
-const FLAG_ALL: u8 = FLAG_SHARED_DATATYPE | FLAG_SHARED_DATASPACE;
+use crate::width::OffsetWidth;
 
 /// A parsed HDF5 attribute message.
 ///
 /// `PartialEq` compares every field, which is what makes "this attribute crossed
-/// a rewrite unchanged" a single assertion — the shape repack's fidelity tests
+/// a rewrite unchanged" a single assertion, the shape repack's fidelity tests
 /// take.
 #[derive(Debug, Clone, PartialEq)]
 pub struct AttributeMessage {
@@ -56,18 +48,51 @@ pub struct AttributeMessage {
     pub datatype_location: DatatypeLocation,
 }
 
-/// Round up to the next multiple of 8.
-fn pad8(x: usize) -> usize {
-    (x + 7) & !7
-}
-
 impl AttributeMessage {
+    /// The name of an attribute message, without decoding its datatype or dataspace.
+    ///
+    /// The in-place editor identifies attributes by name while walking an object
+    /// header region it has no file context for, and a committed datatype is exactly
+    /// what it cannot decode there. The name never depends on either field, so
+    /// reading it alone lets an edit pass over such an attribute and not reject
+    /// the whole object.
+    pub fn parse_name(data: &[u8]) -> Result<String, FormatError> {
+        bytes::ensure_len(data, 0, V1_V2_PREFIX_SIZE)?;
+        let version = data[0];
+        let name_size = u16::from_le_bytes([data[2], data[3]]) as usize;
+        let name_start = match version {
+            VERSION_ONE | VERSION_TWO => V1_V2_PREFIX_SIZE,
+            VERSION_THREE => V3_PREFIX_SIZE,
+            _ => return Err(FormatError::InvalidAttributeVersion(version)),
+        };
+        bytes::ensure_len(data, name_start, name_size)?;
+        Ok(extract_name(&data[name_start..name_start + name_size]))
+    }
+
+    /// Whether an attribute message stores its datatype or dataspace as a reference
+    /// to a committed (shared) message, read from the flags byte alone.
+    ///
+    /// A byte-level screen for callers that hold a message body and must decide
+    /// whether it may be copied, without decoding it. A malformed or truncated
+    /// message reports `true`, so a header this cannot read is rejected and not
+    /// waved through.
+    pub fn shares_a_field(data: &[u8]) -> bool {
+        match data.first().copied() {
+            // Version 1 has no flags byte. The field after the version is unused.
+            Some(VERSION_ONE) => false,
+            Some(VERSION_TWO | VERSION_THREE) => {
+                data.get(1).is_none_or(|flags| flags & FLAG_ALL != 0)
+            }
+            _ => true,
+        }
+    }
+
     /// Parse an attribute message from raw message bytes, without the file the
     /// message came from.
     ///
     /// An attribute whose datatype or dataspace field is a *reference* to a
-    /// committed (shared) message cannot be decoded this way and is refused with
-    /// [`FormatError::UnresolvedSharedMessage`]; use
+    /// committed (shared) message cannot be decoded this way and is rejected with
+    /// [`FormatError::UnresolvedSharedMessage`]. Use
     /// [`parse_resolving`](Self::parse_resolving) where the file is reachable.
     ///
     /// `length_size` is needed for dataspace dimension parsing.
@@ -90,54 +115,54 @@ impl AttributeMessage {
     /// value bytes start within `data`.
     ///
     /// The offset is what lets a caller address an attribute's elements *in the
-    /// file* rather than only in the copy `raw_data` holds — needed to repoint a
-    /// stored object reference in place (issue #324). It is returned from the
-    /// same field walk that produces `raw_data` rather than recomputed by a
+    /// file* and not only in the copy `raw_data` holds, as repointing a stored
+    /// object reference in place needs (issue #324). It is returned from the
+    /// same field walk that produces `raw_data` and not recomputed by a
     /// second one: the three versions pad their name, datatype and dataspace
     /// fields differently, and a separate derivation of the same offset would be
     /// free to drift from this one.
-    pub(crate) fn parse_resolving_at(
+    pub fn parse_resolving_at(
         data: &[u8],
         length_size: u8,
         resolver: &dyn SharedResolver,
     ) -> Result<(AttributeMessage, usize), FormatError> {
-        ensure_len(data, 0, 2)?;
+        bytes::ensure_len(data, 0, 2)?;
         let version = data[0];
 
         match version {
-            1 => Self::parse_v1(data, length_size),
-            2 => Self::parse_v2(data, length_size, resolver),
-            3 => Self::parse_v3(data, length_size, resolver),
+            VERSION_ONE => Self::parse_v1(data, length_size),
+            VERSION_TWO => Self::parse_v2(data, length_size, resolver),
+            VERSION_THREE => Self::parse_v3(data, length_size, resolver),
             _ => Err(FormatError::InvalidAttributeVersion(version)),
         }
     }
 
     fn parse_v1(data: &[u8], length_size: u8) -> Result<(AttributeMessage, usize), FormatError> {
         // version(1) + reserved(1) + name_size(2) + datatype_size(2) + dataspace_size(2) = 8
-        ensure_len(data, 0, 8)?;
+        bytes::ensure_len(data, 0, V1_V2_PREFIX_SIZE)?;
         let name_size = u16::from_le_bytes([data[2], data[3]]) as usize;
         let datatype_size = u16::from_le_bytes([data[4], data[5]]) as usize;
         let dataspace_size = u16::from_le_bytes([data[6], data[7]]) as usize;
 
-        let mut pos = 8;
+        let mut pos = V1_V2_PREFIX_SIZE;
 
         // Name (padded to 8-byte boundary)
-        ensure_len(data, pos, name_size)?;
+        bytes::ensure_len(data, pos, name_size)?;
         let name = extract_name(&data[pos..pos + name_size]);
         pos += pad8(name_size);
 
         // Datatype (padded to 8-byte boundary). Version 1 has no flags byte, so
         // neither field can be a reference.
-        ensure_len(data, pos, datatype_size)?;
+        bytes::ensure_len(data, pos, datatype_size)?;
         let (datatype, _) = hdf5_pure_format::parse_datatype(&data[pos..pos + datatype_size])?;
         pos += pad8(datatype_size);
 
         // Dataspace (padded to 8-byte boundary)
-        ensure_len(data, pos, dataspace_size)?;
+        bytes::ensure_len(data, pos, dataspace_size)?;
         let dataspace = Dataspace::parse(&data[pos..pos + dataspace_size], length_size)?;
         pos += pad8(dataspace_size);
 
-        // Raw data: num_elements × type_size bytes
+        // Raw data: `num_elements` × `type_size` bytes
         let raw_data = compute_raw_data(data, pos, &dataspace, &datatype)?;
 
         Ok((
@@ -158,26 +183,26 @@ impl AttributeMessage {
         resolver: &dyn SharedResolver,
     ) -> Result<(AttributeMessage, usize), FormatError> {
         // version(1) + flags(1) + name_size(2) + datatype_size(2) + dataspace_size(2) = 8
-        ensure_len(data, 0, 8)?;
+        bytes::ensure_len(data, 0, V1_V2_PREFIX_SIZE)?;
         let flags = data[1];
         let name_size = u16::from_le_bytes([data[2], data[3]]) as usize;
         let datatype_size = u16::from_le_bytes([data[4], data[5]]) as usize;
         let dataspace_size = u16::from_le_bytes([data[6], data[7]]) as usize;
 
-        let mut pos = 8;
+        let mut pos = V1_V2_PREFIX_SIZE;
 
         // Name (NO padding)
-        ensure_len(data, pos, name_size)?;
+        bytes::ensure_len(data, pos, name_size)?;
         let name = extract_name(&data[pos..pos + name_size]);
         pos += name_size;
 
         // Datatype (NO padding)
-        ensure_len(data, pos, datatype_size)?;
+        bytes::ensure_len(data, pos, datatype_size)?;
         let dt_field = &data[pos..pos + datatype_size];
         pos += datatype_size;
 
         // Dataspace (NO padding)
-        ensure_len(data, pos, dataspace_size)?;
+        bytes::ensure_len(data, pos, dataspace_size)?;
         let ds_field = &data[pos..pos + dataspace_size];
         pos += dataspace_size;
 
@@ -203,27 +228,27 @@ impl AttributeMessage {
         resolver: &dyn SharedResolver,
     ) -> Result<(AttributeMessage, usize), FormatError> {
         // version(1) + flags(1) + name_size(2) + datatype_size(2) + dataspace_size(2) + encoding(1) = 9
-        ensure_len(data, 0, 9)?;
+        bytes::ensure_len(data, 0, V3_PREFIX_SIZE)?;
         let flags = data[1];
         let name_size = u16::from_le_bytes([data[2], data[3]]) as usize;
         let datatype_size = u16::from_le_bytes([data[4], data[5]]) as usize;
         let dataspace_size = u16::from_le_bytes([data[6], data[7]]) as usize;
         let _encoding = data[8]; // 0=ASCII, 1=UTF-8
 
-        let mut pos = 9;
+        let mut pos = V3_PREFIX_SIZE;
 
         // Name (NO padding)
-        ensure_len(data, pos, name_size)?;
+        bytes::ensure_len(data, pos, name_size)?;
         let name = extract_name(&data[pos..pos + name_size]);
         pos += name_size;
 
         // Datatype (NO padding)
-        ensure_len(data, pos, datatype_size)?;
+        bytes::ensure_len(data, pos, datatype_size)?;
         let dt_field = &data[pos..pos + datatype_size];
         pos += datatype_size;
 
         // Dataspace (NO padding)
-        ensure_len(data, pos, dataspace_size)?;
+        bytes::ensure_len(data, pos, dataspace_size)?;
         let ds_field = &data[pos..pos + dataspace_size];
         pos += dataspace_size;
 
@@ -244,127 +269,88 @@ impl AttributeMessage {
     }
 
     /// Serialize attribute message (v2 format, no padding).
-    pub fn serialize(&self, length_size: u8) -> Vec<u8> {
-        self.serialize_version(2, length_size)
+    pub fn serialize(
+        &self,
+        offset_width: OffsetWidth,
+        length_size: u8,
+    ) -> Result<Vec<u8>, FormatError> {
+        self.serialize_version(VERSION_TWO, offset_width, length_size)
     }
 
     /// Serialize attribute message as v3 (adds character set encoding byte).
-    pub fn serialize_v3(&self, length_size: u8) -> Vec<u8> {
-        self.serialize_version(3, length_size)
-    }
-
-    /// The first of the message's three 2-byte header fields that this attribute
-    /// would overflow, as `(field name, encoded length)`.
-    ///
-    /// [`Self::serialize_version`] writes the name, datatype and dataspace
-    /// lengths into `u16` fields, so a value past 65,535 truncates and produces a
-    /// message that decodes as something else entirely. Callers that can refuse
-    /// must check this first; the attribute's *data* is not length-prefixed and
-    /// so is not bounded here.
-    pub(crate) fn v3_header_field_overflow(
+    pub fn serialize_v3(
         &self,
+        offset_width: OffsetWidth,
         length_size: u8,
-    ) -> Option<(&'static str, usize)> {
-        let limit = u16::MAX as usize;
-        let fields = [
-            // The null terminator the message carries counts toward the field.
-            ("name", self.name.len() + 1),
-            ("datatype", self.datatype_field().len()),
-            ("dataspace", self.dataspace.serialize(length_size).len()),
-        ];
-        fields.into_iter().find(|&(_, len)| len > limit)
+    ) -> Result<Vec<u8>, FormatError> {
+        self.serialize_version(VERSION_THREE, offset_width, length_size)
     }
 
     /// The bytes of the message's datatype field: the encoding itself, or the
     /// reference standing in for it when the type is committed.
     ///
-    /// A reference is written in the *writer's* offset width rather than in the
-    /// width of whatever file the message was read from, because that is the file
-    /// the bytes are going into. Re-serializing a message parsed from a file with
-    /// a different width is therefore a re-encoding, not a copy — which is what
-    /// it already is for every other field.
-    fn datatype_field(&self) -> Vec<u8> {
-        match self
-            .datatype_location
-            .reference_bytes(crate::file_writer::OFFSET_WIDTH)
-        {
+    /// A reference is written in `offset_width`, the width of the file the bytes
+    /// are going into, and not in the width of whatever file the message was read
+    /// from. Re-serializing a message parsed from a file with a different width is
+    /// therefore a re-encoding, not a copy, which is what it already is for every
+    /// other field.
+    fn datatype_field(&self, offset_width: OffsetWidth) -> Vec<u8> {
+        match self.datatype_location.reference_bytes(offset_width) {
             Some(reference) => reference,
             None => hdf5_pure_format::serialize_datatype(&self.datatype),
         }
     }
 
-    fn serialize_version(&self, version: u8, length_size: u8) -> Vec<u8> {
+    fn serialize_version(
+        &self,
+        version: u8,
+        offset_width: OffsetWidth,
+        length_size: u8,
+    ) -> Result<Vec<u8>, FormatError> {
         let name_bytes = {
             let mut n = self.name.as_bytes().to_vec();
             n.push(0); // null terminator
             n
         };
-        let dt_bytes = self.datatype_field();
+        let dt_bytes = self.datatype_field(offset_width);
         let ds_bytes = self.dataspace.serialize(length_size);
+        let name_size = self.field_size("name", &name_bytes)?;
+        let datatype_size = self.field_size("datatype", &dt_bytes)?;
+        let dataspace_size = self.field_size("dataspace", &ds_bytes)?;
 
         let mut buf = Vec::new();
         buf.push(version);
         // Version 1 has no flags byte, but nothing serializes one: both callers
-        // ask for version 2 or 3, whose second byte says which fields are
-        // references. Only the datatype is ever one here — this crate does not
-        // write a shared dataspace.
+        // request version 2 or 3, whose second byte says which fields are
+        // references. Only the datatype is ever one here, since this crate does
+        // not write a shared dataspace.
         buf.push(if self.datatype_location.is_committed() {
             FLAG_SHARED_DATATYPE
         } else {
             0
         });
-        #[expect(
-            clippy::cast_possible_truncation,
-            reason = "attribute name length is written into the 2-byte name-size field of the attribute message"
-        )]
-        buf.extend_from_slice(&(name_bytes.len() as u16).to_le_bytes());
-        #[expect(
-            clippy::cast_possible_truncation,
-            reason = "serialized datatype length is written into the 2-byte datatype-size field of the attribute message"
-        )]
-        buf.extend_from_slice(&(dt_bytes.len() as u16).to_le_bytes());
-        #[expect(
-            clippy::cast_possible_truncation,
-            reason = "serialized dataspace length is written into the 2-byte dataspace-size field of the attribute message"
-        )]
-        buf.extend_from_slice(&(ds_bytes.len() as u16).to_le_bytes());
-        if version >= 3 {
-            buf.push(0x00); // character set encoding: ASCII
+        buf.extend_from_slice(&name_size.to_le_bytes());
+        buf.extend_from_slice(&datatype_size.to_le_bytes());
+        buf.extend_from_slice(&dataspace_size.to_le_bytes());
+        if version >= VERSION_THREE {
+            buf.push(name_character_set(CharacterSet::Ascii));
         }
         buf.extend_from_slice(&name_bytes);
         buf.extend_from_slice(&dt_bytes);
         buf.extend_from_slice(&ds_bytes);
         buf.extend_from_slice(&self.raw_data);
-        buf
+        Ok(buf)
     }
 
-    /// Read attribute value as f64 values.
-    pub fn read_as_f64(&self) -> Result<Vec<f64>, FormatError> {
-        data_read::read_as_f64(&self.raw_data, &self.datatype)
-    }
-
-    /// Read attribute value as i64 values.
-    pub fn read_as_i64(&self) -> Result<Vec<i64>, FormatError> {
-        data_read::read_as_i64(&self.raw_data, &self.datatype)
-    }
-
-    /// Read attribute value as u64 values.
-    pub fn read_as_u64(&self) -> Result<Vec<u64>, FormatError> {
-        data_read::read_as_u64(&self.raw_data, &self.datatype)
-    }
-
-    /// Read attribute value as a single string (first element).
-    ///
-    /// Only used by tests; gated so it is not shipped as dead code.
-    #[cfg(test)]
-    pub fn read_as_string(&self) -> Result<String, FormatError> {
-        let strings = data_read::read_as_strings(&self.raw_data, &self.datatype)?;
-        Ok(strings.into_iter().next().unwrap_or_default())
-    }
-
-    /// Read attribute value as a vector of fixed-length strings.
-    pub fn read_as_strings(&self) -> Result<Vec<String>, FormatError> {
-        data_read::read_as_strings(&self.raw_data, &self.datatype)
+    fn field_size(&self, field: &'static str, encoded: &[u8]) -> Result<u16, FormatError> {
+        encoded
+            .len()
+            .narrow_or_else(|| FormatError::AttributeFieldTooLong {
+                name: self.name.clone(),
+                field,
+                size: encoded.len(),
+                limit: usize::from(u16::MAX),
+            })
     }
 }
 
@@ -372,8 +358,8 @@ impl AttributeMessage {
 ///
 /// A message's flags byte says, per field, whether the bytes are the encoding or
 /// a *reference* to a committed (shared) message holding it. The two are not
-/// distinguishable by inspection — a version 2 reference to address `0x320` reads
-/// as a valid time datatype of size zero — so the flag is the only thing that
+/// distinguishable by inspection: a version 2 reference to address `0x320` decodes
+/// as a valid time datatype of size zero. So the flag is the only thing that
 /// tells them apart, and reading the field without it is how a committed datatype
 /// silently becomes the wrong type.
 ///
@@ -388,8 +374,8 @@ fn decode_type_and_space(
     length_size: u8,
     resolver: &dyn SharedResolver,
 ) -> Result<(Datatype, Dataspace, DatatypeLocation), FormatError> {
-    // The C library refuses a flags byte with any other bit set, so a message
-    // carrying one is not an attribute message this or any reader can trust.
+    // The C library rejects a flags byte with any other bit set, so a message
+    // carrying one is not an attribute message this or any reader can decode.
     if flags & !FLAG_ALL != 0 {
         return Err(FormatError::InvalidAttributeFlags(flags));
     }
@@ -425,42 +411,6 @@ fn decode_type_and_space(
     };
 
     Ok((datatype, dataspace, location))
-}
-
-/// The name of an attribute message, without decoding its datatype or dataspace.
-///
-/// The in-place editor identifies attributes by name while walking an object
-/// header region it has no file context for, and a committed datatype is exactly
-/// what it cannot decode there. The name never depends on either field, so
-/// reading it alone lets an edit pass over such an attribute rather than refuse
-/// the whole object.
-pub fn message_name(data: &[u8]) -> Result<String, FormatError> {
-    ensure_len(data, 0, 8)?;
-    let version = data[0];
-    let name_size = u16::from_le_bytes([data[2], data[3]]) as usize;
-    let name_start = match version {
-        1 | 2 => 8,
-        3 => 9,
-        _ => return Err(FormatError::InvalidAttributeVersion(version)),
-    };
-    ensure_len(data, name_start, name_size)?;
-    Ok(extract_name(&data[name_start..name_start + name_size]))
-}
-
-/// Whether an attribute message stores its datatype or dataspace as a reference
-/// to a committed (shared) message, read from the flags byte alone.
-///
-/// A byte-level screen for callers that hold a message body and must decide
-/// whether it may be copied, without decoding it. A malformed or truncated
-/// message reports `true`, so a header this cannot read is refused rather than
-/// waved through.
-pub fn message_shares_a_field(data: &[u8]) -> bool {
-    match data.first().copied() {
-        // Version 1 has no flags byte; the field after the version is unused.
-        Some(1) => false,
-        Some(2 | 3) => data.get(1).is_none_or(|flags| flags & FLAG_ALL != 0),
-        _ => true,
-    }
 }
 
 /// Reads an attribute's value bytes from its message, sized by the datatype
@@ -500,7 +450,7 @@ fn compute_raw_data(
             length: elem_size,
         })?
         .to_usize()?;
-    ensure_len(data, pos, expected_size)?;
+    bytes::ensure_len(data, pos, expected_size)?;
     Ok(if expected_size > 0 {
         data.get(pos..pos + expected_size)
             .map(<[u8]>::to_vec)
@@ -514,6 +464,20 @@ fn compute_raw_data(
 fn extract_name(bytes: &[u8]) -> String {
     let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
     String::from_utf8_lossy(&bytes[..end]).into_owned()
+}
+
+/// Round up to the next multiple of 8.
+fn pad8(x: usize) -> usize {
+    x.next_multiple_of(V1_FIELD_ALIGNMENT)
+}
+
+// The "Name Character Set Encoding" values of section
+// `subsubsec_fmt4_dataobject_hdr_msg_attribute`, version 4.0.
+fn name_character_set(charset: CharacterSet) -> u8 {
+    match charset {
+        CharacterSet::Ascii => 0,
+        CharacterSet::Utf8 => 1,
+    }
 }
 
 /// Extract all (compact) attribute messages from an object header.
@@ -826,14 +790,39 @@ fn record_creation_index(
     u16::try_from(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]])).ok()
 }
 
+/// Bit 0 of an attribute message's flags byte: the datatype field holds a
+/// reference to a committed (shared) datatype and not the datatype itself
+/// (`H5O_ATTR_FLAG_TYPE_SHARED`).
+const FLAG_SHARED_DATATYPE: u8 = 0x01;
+
+/// Bit 1: the same for the dataspace field (`H5O_ATTR_FLAG_SPACE_SHARED`).
+const FLAG_SHARED_DATASPACE: u8 = 0x02;
+
+/// Every flag bit the format defines (`H5O_ATTR_FLAG_ALL`).
+const FLAG_ALL: u8 = FLAG_SHARED_DATATYPE | FLAG_SHARED_DATASPACE;
+
+// The versions, the prefix sizes and the version 1 field alignment of section
+// `subsubsec_fmt4_dataobject_hdr_msg_attribute`, version 4.0.
+const VERSION_ONE: u8 = 1;
+const VERSION_TWO: u8 = 2;
+const VERSION_THREE: u8 = 3;
+const V1_V2_PREFIX_SIZE: usize = 8;
+const V3_PREFIX_SIZE: usize = 9;
+const V1_FIELD_ALIGNMENT: usize = 8;
+
 #[cfg(test)]
 mod tests {
+    use rstest::rstest;
+    use test_util::attribute;
+    use test_util::dataspace;
+    use test_util::datatype;
+
     use super::*;
+    use crate::data_read;
     use crate::message_flags::MessageFlags;
     use crate::shared_message;
     use crate::source::BytesSource;
     use core::cell::RefCell;
-    use test_util::{attribute, dataspace, datatype};
 
     /// A [`Source`] that records where each read started, so a walk can be asked
     /// how often it went back to a particular structure.
@@ -1040,240 +1029,14 @@ mod tests {
         );
     }
 
-    /// Build a datatype header for testing (8 bytes).
-    fn build_f64_dt() -> Vec<u8> {
-        datatype::f64_le()
-    }
-
-    fn build_scalar_ds() -> Vec<u8> {
-        dataspace::scalar()
-    }
-
-    fn build_simple_ds_v1(dim: u64) -> Vec<u8> {
-        dataspace::v1(1, dataspace::Flags::NONE, &[dim], None)
-    }
-
-    fn build_string_dt(size: u32) -> Vec<u8> {
-        datatype::fixed_string(size)
-    }
-
-    #[test]
-    fn parse_v1_attribute_f64_scalar() {
-        let name = b"temp\0";
-        let dt_bytes = build_f64_dt();
-        let ds_bytes = build_scalar_ds();
-
-        let name_size = name.len();
-        let dt_size = dt_bytes.len();
-        let ds_size = ds_bytes.len();
-
-        let mut data = Vec::new();
-        data.push(1); // version
-        data.push(0); // reserved
-        data.extend_from_slice(&(name_size as u16).to_le_bytes());
-        data.extend_from_slice(&(dt_size as u16).to_le_bytes());
-        data.extend_from_slice(&(ds_size as u16).to_le_bytes());
-
-        // Name padded to 8 bytes
-        data.extend_from_slice(name);
-        if data.len() % 8 != 0 || data.len() == 8 {
-            // Pad name to 8-byte boundary from start of name
-            let name_start = 8;
-            let name_padded = pad8(name_size);
-            while data.len() < name_start + name_padded {
-                data.push(0);
-            }
-        }
-
-        // Datatype padded to 8 bytes
-        let dt_start = data.len();
-        data.extend_from_slice(&dt_bytes);
-        let dt_padded = pad8(dt_size);
-        while data.len() < dt_start + dt_padded {
-            data.push(0);
-        }
-
-        // Dataspace padded to 8 bytes
-        let ds_start = data.len();
-        data.extend_from_slice(&ds_bytes);
-        let ds_padded = pad8(ds_size);
-        while data.len() < ds_start + ds_padded {
-            data.push(0);
-        }
-
-        // Raw data: f64 value 98.6
-        data.extend_from_slice(&98.6f64.to_le_bytes());
-
-        let attr = AttributeMessage::parse(&data, 8).unwrap();
-        assert_eq!(attr.name, "temp");
-        assert_eq!(attr.dataspace.num_elements(), 1);
-        let vals = attr.read_as_f64().unwrap();
-        assert_eq!(vals.len(), 1);
-        assert!((vals[0] - 98.6).abs() < 1e-10);
-    }
-
-    #[test]
-    fn parse_v2_attribute_fixed_string() {
-        let name = b"label\0";
-        let dt_bytes = build_string_dt(5);
-        let ds_bytes = build_scalar_ds();
-
-        let mut data = Vec::new();
-        data.push(2); // version
-        data.push(0); // flags
-        data.extend_from_slice(&(name.len() as u16).to_le_bytes());
-        data.extend_from_slice(&(dt_bytes.len() as u16).to_le_bytes());
-        data.extend_from_slice(&(ds_bytes.len() as u16).to_le_bytes());
-
-        // No padding in v2
-        data.extend_from_slice(name);
-        data.extend_from_slice(&dt_bytes);
-        data.extend_from_slice(&ds_bytes);
-
-        // Raw data: "hello"
-        data.extend_from_slice(b"hello");
-
-        let attr = AttributeMessage::parse(&data, 8).unwrap();
-        assert_eq!(attr.name, "label");
-        let s = attr.read_as_string().unwrap();
-        assert_eq!(s, "hello");
-    }
-
-    #[test]
-    fn parse_v3_attribute_utf8() {
-        let name = b"note\0";
-        let dt_bytes = build_string_dt(3);
-        let ds_bytes = build_scalar_ds();
-
-        let mut data = Vec::new();
-        data.push(3); // version
-        data.push(0); // flags
-        data.extend_from_slice(&(name.len() as u16).to_le_bytes());
-        data.extend_from_slice(&(dt_bytes.len() as u16).to_le_bytes());
-        data.extend_from_slice(&(ds_bytes.len() as u16).to_le_bytes());
-        data.push(1); // encoding = UTF-8
-
-        data.extend_from_slice(name);
-        data.extend_from_slice(&dt_bytes);
-        data.extend_from_slice(&ds_bytes);
-        data.extend_from_slice(b"abc");
-
-        let attr = AttributeMessage::parse(&data, 8).unwrap();
-        assert_eq!(attr.name, "note");
-        let s = attr.read_as_string().unwrap();
-        assert_eq!(s, "abc");
-    }
-
-    #[test]
-    fn parse_v2_attribute_1d_array() {
-        let name = b"vals\0";
-        let dt_bytes = build_f64_dt();
-        let ds_bytes = build_simple_ds_v1(3);
-
-        let mut data = Vec::new();
-        data.push(2); // version
-        data.push(0); // flags
-        data.extend_from_slice(&(name.len() as u16).to_le_bytes());
-        data.extend_from_slice(&(dt_bytes.len() as u16).to_le_bytes());
-        data.extend_from_slice(&(ds_bytes.len() as u16).to_le_bytes());
-
-        data.extend_from_slice(name);
-        data.extend_from_slice(&dt_bytes);
-        data.extend_from_slice(&ds_bytes);
-
-        // 3 f64 values
-        data.extend_from_slice(&1.0f64.to_le_bytes());
-        data.extend_from_slice(&2.0f64.to_le_bytes());
-        data.extend_from_slice(&3.0f64.to_le_bytes());
-
-        let attr = AttributeMessage::parse(&data, 8).unwrap();
-        assert_eq!(attr.name, "vals");
-        let vals = attr.read_as_f64().unwrap();
-        assert_eq!(vals, vec![1.0, 2.0, 3.0]);
-    }
-
-    #[test]
-    fn parse_v1_padding_alignment() {
-        // Verify v1 pads name, dt, ds each to 8 bytes
-        let name = b"x\0"; // 2 bytes → pad to 8
-        let dt_bytes = build_f64_dt(); // 20 bytes → pad to 24
-        let ds_bytes = build_scalar_ds(); // 4 bytes → pad to 8
-
-        let mut data = Vec::new();
-        data.push(1); // version
-        data.push(0); // reserved
-        data.extend_from_slice(&(name.len() as u16).to_le_bytes());
-        data.extend_from_slice(&(dt_bytes.len() as u16).to_le_bytes());
-        data.extend_from_slice(&(ds_bytes.len() as u16).to_le_bytes());
-
-        // Name padded to 8
-        data.extend_from_slice(name);
-        data.resize(8 + pad8(name.len()), 0);
-
-        // DT padded to 8
-        let dt_start = data.len();
-        data.extend_from_slice(&dt_bytes);
-        data.resize(dt_start + pad8(dt_bytes.len()), 0);
-
-        // DS padded to 8
-        let ds_start = data.len();
-        data.extend_from_slice(&ds_bytes);
-        data.resize(ds_start + pad8(ds_bytes.len()), 0);
-
-        // raw data
-        data.extend_from_slice(&42.0f64.to_le_bytes());
-
-        let attr = AttributeMessage::parse(&data, 8).unwrap();
-        assert_eq!(attr.name, "x");
-        let vals = attr.read_as_f64().unwrap();
-        assert_eq!(vals, vec![42.0]);
-    }
-
-    #[test]
-    fn parse_v2_no_padding() {
-        // Same as parse_v2_attribute_fixed_string but verifying no padding
-        let name = b"ab\0"; // 3 bytes, no padding
-        let dt_bytes = build_string_dt(2); // 8 bytes, no padding
-        let ds_bytes = build_scalar_ds(); // 4 bytes, no padding
-
-        let mut data = Vec::new();
-        data.push(2);
-        data.push(0);
-        data.extend_from_slice(&(name.len() as u16).to_le_bytes());
-        data.extend_from_slice(&(dt_bytes.len() as u16).to_le_bytes());
-        data.extend_from_slice(&(ds_bytes.len() as u16).to_le_bytes());
-        data.extend_from_slice(name);
-        data.extend_from_slice(&dt_bytes);
-        data.extend_from_slice(&ds_bytes);
-        data.extend_from_slice(b"hi");
-
-        let attr = AttributeMessage::parse(&data, 8).unwrap();
-        assert_eq!(attr.name, "ab");
-        assert_eq!(attr.read_as_string().unwrap(), "hi");
-    }
-
-    #[test]
-    fn truncated_attribute_error() {
-        let data = [1u8]; // too short
-        let err = AttributeMessage::parse(&data, 8).unwrap_err();
-        assert!(matches!(err, FormatError::UnexpectedEof { .. }));
-    }
-
-    #[test]
-    fn invalid_version_error() {
-        let data = [5u8, 0, 0, 0, 0, 0, 0, 0, 0, 0];
-        let err = AttributeMessage::parse(&data, 8).unwrap_err();
-        assert_eq!(err, FormatError::InvalidAttributeVersion(5));
-    }
-
     #[test]
     fn extract_attributes_from_header() {
         // Build a fake ObjectHeader with 3 attribute messages
         let mut msgs = Vec::new();
         for i in 0..3 {
             let name = format!("attr{}\0", i);
-            let dt_bytes = build_f64_dt();
-            let ds_bytes = build_scalar_ds();
+            let dt_bytes = datatype::f64_le();
+            let ds_bytes = dataspace::scalar();
 
             let mut attr_data = Vec::new();
             attr_data.push(2); // version
@@ -1313,6 +1076,160 @@ mod tests {
         assert_eq!(attrs[2].name, "attr2");
     }
 
+    #[test]
+    fn read_as_f64_scalar() {
+        let name = b"v\0";
+        let dt_bytes = datatype::f64_le();
+        let ds_bytes = dataspace::scalar();
+
+        let mut data = Vec::new();
+        data.push(2);
+        data.push(0);
+        data.extend_from_slice(&(name.len() as u16).to_le_bytes());
+        data.extend_from_slice(&(dt_bytes.len() as u16).to_le_bytes());
+        data.extend_from_slice(&(ds_bytes.len() as u16).to_le_bytes());
+        data.extend_from_slice(name);
+        data.extend_from_slice(&dt_bytes);
+        data.extend_from_slice(&ds_bytes);
+        data.extend_from_slice(&3.14f64.to_le_bytes());
+
+        let attr = AttributeMessage::parse(&data, 8).unwrap();
+        let vals = data_read::read_as_f64(&attr.raw_data, &attr.datatype).unwrap();
+        assert_eq!(vals, vec![3.14]);
+    }
+
+    #[test]
+    fn read_as_string_fixed() {
+        let name = b"s\0";
+        let dt_bytes = datatype::fixed_string(5);
+        let ds_bytes = dataspace::scalar();
+
+        let mut data = Vec::new();
+        data.push(2);
+        data.push(0);
+        data.extend_from_slice(&(name.len() as u16).to_le_bytes());
+        data.extend_from_slice(&(dt_bytes.len() as u16).to_le_bytes());
+        data.extend_from_slice(&(ds_bytes.len() as u16).to_le_bytes());
+        data.extend_from_slice(name);
+        data.extend_from_slice(&dt_bytes);
+        data.extend_from_slice(&ds_bytes);
+        data.extend_from_slice(b"world");
+
+        let attr = AttributeMessage::parse(&data, 8).unwrap();
+        let strs = data_read::read_as_strings(&attr.raw_data, &attr.datatype).unwrap();
+        assert_eq!(strs, vec!["world"]);
+    }
+
+    #[test]
+    fn read_as_strings_array() {
+        let name = b"arr\0";
+        let dt_bytes = datatype::fixed_string(4);
+        let ds_bytes = dataspace::v1(1, dataspace::Flags::NONE, &[2], None);
+
+        let mut data = Vec::new();
+        data.push(2);
+        data.push(0);
+        data.extend_from_slice(&(name.len() as u16).to_le_bytes());
+        data.extend_from_slice(&(dt_bytes.len() as u16).to_le_bytes());
+        data.extend_from_slice(&(ds_bytes.len() as u16).to_le_bytes());
+        data.extend_from_slice(name);
+        data.extend_from_slice(&dt_bytes);
+        data.extend_from_slice(&ds_bytes);
+        data.extend_from_slice(b"abcdEFGH");
+
+        let attr = AttributeMessage::parse(&data, 8).unwrap();
+        let strs = data_read::read_as_strings(&attr.raw_data, &attr.datatype).unwrap();
+        assert_eq!(strs, vec!["abcd", "EFGH"]);
+    }
+
+    #[rstest]
+    #[case::version_1(
+        attribute::Attribute::new(
+            "temp",
+            &datatype::f64_le(),
+            &dataspace::scalar(),
+            &98.6f64.to_le_bytes(),
+        )
+        .build(),
+        "temp",
+        98.6f64.to_le_bytes().to_vec()
+    )]
+    #[case::version_1_short_name(
+        attribute::Attribute::new(
+            "x",
+            &datatype::f64_le(),
+            &dataspace::scalar(),
+            &42.0f64.to_le_bytes(),
+        )
+        .build(),
+        "x",
+        42.0f64.to_le_bytes().to_vec()
+    )]
+    #[case::version_2_fixed_string(
+        attribute::Attribute::new("label", &datatype::fixed_string(5), &dataspace::scalar(), b"hello")
+            .flags(attribute::Flags::NONE)
+            .build(),
+        "label",
+        b"hello".to_vec()
+    )]
+    #[case::version_2_short_fields(
+        attribute::Attribute::new("ab", &datatype::fixed_string(2), &dataspace::scalar(), b"hi")
+            .flags(attribute::Flags::NONE)
+            .build(),
+        "ab",
+        b"hi".to_vec()
+    )]
+    #[case::version_2_array(
+        attribute::Attribute::new(
+            "vals",
+            &datatype::f64_le(),
+            &dataspace::v1(1, dataspace::Flags::NONE, &[3], None),
+            &[1.0f64, 2.0, 3.0].map(f64::to_le_bytes).concat(),
+        )
+        .flags(attribute::Flags::NONE)
+        .build(),
+        "vals",
+        [1.0f64, 2.0, 3.0].map(f64::to_le_bytes).concat()
+    )]
+    #[case::version_3_utf8_name(
+        attribute::Attribute::new("note", &datatype::fixed_string(3), &dataspace::scalar(), b"abc")
+            .character_set(1)
+            .build(),
+        "note",
+        b"abc".to_vec()
+    )]
+    fn a_message_parses_to_its_name_and_value(
+        #[case] message: Vec<u8>,
+        #[case] attr_name: &str,
+        #[case] raw_data: Vec<u8>,
+    ) {
+        let attr = AttributeMessage::parse(&message, 8).unwrap();
+        assert_eq!(
+            (attr.name.as_str(), attr.raw_data, attr.datatype_location),
+            (attr_name, raw_data, DatatypeLocation::Inline)
+        );
+    }
+
+    #[test]
+    fn truncated_attribute_error() {
+        let data = [1u8]; // too short
+        let err = AttributeMessage::parse(&data, 8).unwrap_err();
+        assert_eq!(
+            err,
+            FormatError::UnexpectedEof {
+                expected: 2,
+                available: 1
+            }
+        );
+    }
+
+    #[test]
+    fn invalid_version_error() {
+        let data = [5u8, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+        let err = AttributeMessage::parse(&data, 8).unwrap_err();
+        assert_eq!(err, FormatError::InvalidAttributeVersion(5));
+    }
+
     /// A version 2 attribute message whose datatype field is a reference to a
     /// committed type, laid out exactly as libhdf5 1.14.6 wrote one: a 10-byte
     /// shared reference standing where an encoding usually is.
@@ -1320,14 +1237,14 @@ mod tests {
         attribute::Attribute::new(
             "shared_attr",
             &datatype::committed_reference(0x320),
-            &build_simple_ds_v1(1),
+            &dataspace::v1(1, dataspace::Flags::NONE, &[1], None),
             &7.0f64.to_le_bytes(),
         )
         .flags(attribute::Flags(flags))
         .build()
     }
 
-    /// A resolver that answers with one fixed message body, standing in for the
+    /// A resolver that returns one fixed message body, standing in for the
     /// object header a committed datatype lives in.
     struct StubResolver(Vec<u8>);
 
@@ -1345,12 +1262,12 @@ mod tests {
     }
 
     /// The flags byte decides how the datatype field is read. Given a resolver,
-    /// the attribute reports the referenced type — and says so.
+    /// the attribute reports the referenced type, and says so.
     #[test]
     fn a_shared_datatype_field_is_resolved_not_decoded() {
         let data = attr_with_shared_datatype(FLAG_SHARED_DATATYPE);
         let attr =
-            AttributeMessage::parse_resolving(&data, 8, &StubResolver(build_f64_dt())).unwrap();
+            AttributeMessage::parse_resolving(&data, 8, &StubResolver(datatype::f64_le())).unwrap();
 
         assert_eq!(attr.name, "shared_attr");
         assert!(matches!(
@@ -1367,7 +1284,7 @@ mod tests {
     /// With the flag clear the same bytes are decoded inline, which is how the
     /// reference used to be read: they form a syntactically well-formed time type
     /// of zero width. Nothing occupies zero bytes per element, so that decode is
-    /// refused rather than returned, and the flag is left as the only thing that
+    /// rejected and not returned, and the flag is left as the only thing that
     /// makes these bytes name a type at all.
     #[test]
     fn the_same_bytes_without_the_flag_are_refused_as_a_zero_width_type() {
@@ -1387,8 +1304,8 @@ mod tests {
     #[test]
     fn a_datatype_field_without_the_flag_is_recorded_as_inline() {
         let name = b"inline_attr\0";
-        let dt_bytes = build_f64_dt();
-        let ds_bytes = build_simple_ds_v1(1);
+        let dt_bytes = datatype::f64_le();
+        let ds_bytes = dataspace::v1(1, dataspace::Flags::NONE, &[1], None);
 
         let mut data = vec![2u8, 0];
         data.extend_from_slice(&(name.len() as u16).to_le_bytes());
@@ -1409,8 +1326,8 @@ mod tests {
         assert_eq!(attr.datatype_location, DatatypeLocation::Inline);
     }
 
-    /// Without the file the reference addresses, there is no honest answer, so
-    /// the parse refuses rather than decoding the reference as a type.
+    /// Without the file the reference addresses, there is no true result, so
+    /// the parse rejects the message and does not decode the reference as a type.
     #[test]
     fn a_shared_datatype_field_is_refused_without_a_resolver() {
         let data = attr_with_shared_datatype(FLAG_SHARED_DATATYPE);
@@ -1421,7 +1338,7 @@ mod tests {
         );
     }
 
-    /// Only two flag bits exist. The C library refuses a message that sets any
+    /// Only two flag bits exist. The C library rejects a message that sets any
     /// other, and a reader that shrugs at one is reading a message it cannot
     /// claim to understand.
     #[test]
@@ -1436,99 +1353,37 @@ mod tests {
     #[test]
     fn a_name_reads_out_of_a_message_whose_datatype_is_a_reference() {
         let data = attr_with_shared_datatype(FLAG_SHARED_DATATYPE);
-        assert_eq!(message_name(&data).unwrap(), "shared_attr");
-        assert!(AttributeMessage::parse(&data, 8).is_err());
+        assert_eq!(AttributeMessage::parse_name(&data).unwrap(), "shared_attr");
+        assert_eq!(
+            AttributeMessage::parse(&data, 8),
+            Err(FormatError::UnresolvedSharedMessage(
+                MessageType::DATATYPE.to_u16()
+            ))
+        );
     }
 
     /// The byte-level screen agrees with the parse, on every version and on
     /// bytes too short to be a message at all.
-    #[test]
-    fn the_shared_field_screen_reads_the_flags_byte() {
-        assert!(message_shares_a_field(&attr_with_shared_datatype(
-            FLAG_SHARED_DATATYPE
-        )));
-        assert!(message_shares_a_field(&attr_with_shared_datatype(
-            FLAG_SHARED_DATASPACE
-        )));
-        assert!(!message_shares_a_field(&attr_with_shared_datatype(0)));
-        // Version 1 has no flags byte: the second byte is unused, whatever it says.
-        assert!(!message_shares_a_field(&[1u8, 0xFF, 0, 0]));
-        // A message this cannot read is refused, not waved through.
-        assert!(message_shares_a_field(&[2u8]));
-        assert!(message_shares_a_field(&[]));
-        assert!(message_shares_a_field(&[9u8, 0]));
-    }
-
-    #[test]
-    fn read_as_f64_scalar() {
-        let name = b"v\0";
-        let dt_bytes = build_f64_dt();
-        let ds_bytes = build_scalar_ds();
-
-        let mut data = Vec::new();
-        data.push(2);
-        data.push(0);
-        data.extend_from_slice(&(name.len() as u16).to_le_bytes());
-        data.extend_from_slice(&(dt_bytes.len() as u16).to_le_bytes());
-        data.extend_from_slice(&(ds_bytes.len() as u16).to_le_bytes());
-        data.extend_from_slice(name);
-        data.extend_from_slice(&dt_bytes);
-        data.extend_from_slice(&ds_bytes);
-        data.extend_from_slice(&3.14f64.to_le_bytes());
-
-        let attr = AttributeMessage::parse(&data, 8).unwrap();
-        let vals = attr.read_as_f64().unwrap();
-        assert_eq!(vals, vec![3.14]);
-    }
-
-    #[test]
-    fn read_as_string_fixed() {
-        let name = b"s\0";
-        let dt_bytes = build_string_dt(5);
-        let ds_bytes = build_scalar_ds();
-
-        let mut data = Vec::new();
-        data.push(2);
-        data.push(0);
-        data.extend_from_slice(&(name.len() as u16).to_le_bytes());
-        data.extend_from_slice(&(dt_bytes.len() as u16).to_le_bytes());
-        data.extend_from_slice(&(ds_bytes.len() as u16).to_le_bytes());
-        data.extend_from_slice(name);
-        data.extend_from_slice(&dt_bytes);
-        data.extend_from_slice(&ds_bytes);
-        data.extend_from_slice(b"world");
-
-        let attr = AttributeMessage::parse(&data, 8).unwrap();
-        assert_eq!(attr.read_as_string().unwrap(), "world");
-    }
-
-    #[test]
-    fn read_as_strings_array() {
-        let name = b"arr\0";
-        let dt_bytes = build_string_dt(4);
-        let ds_bytes = build_simple_ds_v1(2);
-
-        let mut data = Vec::new();
-        data.push(2);
-        data.push(0);
-        data.extend_from_slice(&(name.len() as u16).to_le_bytes());
-        data.extend_from_slice(&(dt_bytes.len() as u16).to_le_bytes());
-        data.extend_from_slice(&(ds_bytes.len() as u16).to_le_bytes());
-        data.extend_from_slice(name);
-        data.extend_from_slice(&dt_bytes);
-        data.extend_from_slice(&ds_bytes);
-        data.extend_from_slice(b"abcdEFGH");
-
-        let attr = AttributeMessage::parse(&data, 8).unwrap();
-        let strs = attr.read_as_strings().unwrap();
-        assert_eq!(strs, vec!["abcd", "EFGH"]);
+    #[rstest]
+    #[case::shared_datatype(attr_with_shared_datatype(FLAG_SHARED_DATATYPE), true)]
+    #[case::shared_dataspace(attr_with_shared_datatype(FLAG_SHARED_DATASPACE), true)]
+    #[case::no_shared_field(attr_with_shared_datatype(0), false)]
+    #[case::version_1_second_byte_unused(vec![1, 0xFF, 0, 0], false)]
+    #[case::truncated(vec![2], true)]
+    #[case::empty(Vec::new(), true)]
+    #[case::unknown_version(vec![9, 0], true)]
+    fn the_shared_field_screen_reads_the_flags_byte(
+        #[case] message: Vec<u8>,
+        #[case] shares_a_field: bool,
+    ) {
+        assert_eq!(AttributeMessage::shares_a_field(&message), shares_a_field);
     }
 
     #[test]
     fn a_null_dataspace_attribute_ignores_record_padding() {
         // Five trailing zero bytes provide the record's 8-byte alignment padding.
         let name = b"empty\0";
-        let dt_bytes = build_f64_dt();
+        let dt_bytes = datatype::f64_le();
         let ds_bytes = vec![2u8, 0, 0, 2];
 
         let name_size = u16::try_from(name.len()).unwrap();
@@ -1554,8 +1409,8 @@ mod tests {
     #[test]
     fn a_truncated_attribute_payload_is_rejected() {
         let name = b"truncated\0";
-        let dt_bytes = build_f64_dt();
-        let ds_bytes = build_scalar_ds();
+        let dt_bytes = datatype::f64_le();
+        let ds_bytes = dataspace::scalar();
 
         let name_size = u16::try_from(name.len()).unwrap();
         let dt_size = u16::try_from(dt_bytes.len()).unwrap();

@@ -933,7 +933,12 @@ mod tests {
     fn an_inline_reference_attribute_is_repointed_and_the_chunk_resealed() {
         let region = message_record(
             MessageType::ATTRIBUTE,
-            &reference_attr("target", 300).serialize_v3(crate::file_writer::LENGTH_SIZE),
+            &reference_attr("target", 300)
+                .serialize_v3(
+                    crate::file_writer::OFFSET_WIDTH,
+                    crate::file_writer::LENGTH_SIZE,
+                )
+                .unwrap(),
         );
         let (src, bytes) = image_with_header(&region);
         let (plan, scanned) = scan(&src, &[(300, 900)]);
@@ -1019,7 +1024,12 @@ mod tests {
         for sentinel in [0u64, u64::MAX] {
             let region = message_record(
                 MessageType::ATTRIBUTE,
-                &reference_attr("target", sentinel).serialize_v3(crate::file_writer::LENGTH_SIZE),
+                &reference_attr("target", sentinel)
+                    .serialize_v3(
+                        crate::file_writer::OFFSET_WIDTH,
+                        crate::file_writer::LENGTH_SIZE,
+                    )
+                    .unwrap(),
             );
             let (src, _) = image_with_header(&region);
             let (plan, scanned) = scan(&src, &[(sentinel, 900), (0, 900)]);
@@ -1048,7 +1058,12 @@ mod tests {
         attr.raw_data = vec![0u8; 16];
         let region = message_record(
             MessageType::ATTRIBUTE,
-            &attr.serialize_v3(crate::file_writer::LENGTH_SIZE),
+            &attr
+                .serialize_v3(
+                    crate::file_writer::OFFSET_WIDTH,
+                    crate::file_writer::LENGTH_SIZE,
+                )
+                .unwrap(),
         );
         let (src, _) = image_with_header(&region);
         let (plan, scanned) = scan(&src, &[(300, 900)]);
@@ -1093,7 +1108,12 @@ mod tests {
         // header, so nothing here can see what it holds. Reading that as "no
         // references in this object" is what would let a later commit skip the
         // walk over a file that needs it.
-        let attr = reference_attr("target", 300).serialize_v3(crate::file_writer::LENGTH_SIZE);
+        let attr = reference_attr("target", 300)
+            .serialize_v3(
+                crate::file_writer::OFFSET_WIDTH,
+                crate::file_writer::LENGTH_SIZE,
+            )
+            .unwrap();
         let mut record = message_record(MessageType::ATTRIBUTE, &attr);
         record[3] = MessageFlags::SHARED.get();
         let (src, _) = image_with_header(&record);
@@ -1117,7 +1137,12 @@ mod tests {
         // write *count* is identical either way, so nothing else notices.
         let region = message_record(
             MessageType::ATTRIBUTE,
-            &reference_attr("target", 300).serialize_v3(crate::file_writer::LENGTH_SIZE),
+            &reference_attr("target", 300)
+                .serialize_v3(
+                    crate::file_writer::OFFSET_WIDTH,
+                    crate::file_writer::LENGTH_SIZE,
+                )
+                .unwrap(),
         );
         let (src, bytes) = image_with_header(&region);
         let (plan, _) = scan(&src, &[(300, 900)]);
@@ -1256,7 +1281,12 @@ mod tests {
     fn an_address_no_relocation_names_is_left_alone() {
         let region = message_record(
             MessageType::ATTRIBUTE,
-            &reference_attr("target", 300).serialize_v3(crate::file_writer::LENGTH_SIZE),
+            &reference_attr("target", 300)
+                .serialize_v3(
+                    crate::file_writer::OFFSET_WIDTH,
+                    crate::file_writer::LENGTH_SIZE,
+                )
+                .unwrap(),
         );
         let (src, _) = image_with_header(&region);
         let (plan, _) = scan(&src, &[(301, 900), (299, 900)]);
