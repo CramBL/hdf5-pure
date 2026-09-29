@@ -12,6 +12,9 @@
 
 extern crate alloc;
 
+#[doc(hidden)]
+pub mod __private;
+
 mod error;
 mod lzf;
 mod pipeline;
