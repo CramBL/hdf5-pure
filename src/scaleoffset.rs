@@ -6,10 +6,10 @@ use alloc::vec::Vec;
 #[cfg(feature = "std")]
 use std::vec::Vec;
 
-pub(crate) use hdf5_pure_filter::FillAvailability;
-use hdf5_pure_filter::ScaleOffsetByteOrder;
-pub(crate) use hdf5_pure_filter::ScaleOffsetFill;
-pub(crate) use hdf5_pure_filter::ScaleOffsetType;
+pub(crate) use hdf5_pure_filter::__private::FillAvailability;
+use hdf5_pure_filter::__private::ScaleOffsetByteOrder;
+pub(crate) use hdf5_pure_filter::__private::ScaleOffsetFill;
+pub(crate) use hdf5_pure_filter::__private::ScaleOffsetType;
 
 use crate::datatype::Datatype;
 use crate::datatype::byte_order::DatatypeByteOrder;
@@ -40,17 +40,21 @@ pub enum ScaleOffset {
 }
 
 impl ScaleOffset {
-    pub(crate) fn from_filter_mode(mode: hdf5_pure_filter::ScaleOffset) -> Self {
+    pub(crate) fn from_filter_mode(mode: hdf5_pure_filter::__private::ScaleOffset) -> Self {
         match mode {
-            hdf5_pure_filter::ScaleOffset::Integer(bits) => Self::Integer(bits),
-            hdf5_pure_filter::ScaleOffset::FloatDScale(decimals) => Self::FloatDScale(decimals),
+            hdf5_pure_filter::__private::ScaleOffset::Integer(bits) => Self::Integer(bits),
+            hdf5_pure_filter::__private::ScaleOffset::FloatDScale(decimals) => {
+                Self::FloatDScale(decimals)
+            }
         }
     }
 
-    pub(crate) fn to_filter_mode(self) -> hdf5_pure_filter::ScaleOffset {
+    pub(crate) fn to_filter_mode(self) -> hdf5_pure_filter::__private::ScaleOffset {
         match self {
-            Self::Integer(bits) => hdf5_pure_filter::ScaleOffset::Integer(bits),
-            Self::FloatDScale(decimals) => hdf5_pure_filter::ScaleOffset::FloatDScale(decimals),
+            Self::Integer(bits) => hdf5_pure_filter::__private::ScaleOffset::Integer(bits),
+            Self::FloatDScale(decimals) => {
+                hdf5_pure_filter::__private::ScaleOffset::FloatDScale(decimals)
+            }
         }
     }
 }
@@ -62,12 +66,18 @@ pub(crate) fn build_cd_values(
     nelmts: u32,
     fill: ScaleOffsetFill<'_>,
 ) -> Result<Vec<u32>, FormatError> {
-    hdf5_pure_filter::build_scale_offset_cd_values(mode.to_filter_mode(), ty, size, nelmts, fill)
-        .map_err(FormatError::from)
+    hdf5_pure_filter::__private::build_scale_offset_cd_values(
+        mode.to_filter_mode(),
+        ty,
+        size,
+        nelmts,
+        fill,
+    )
+    .map_err(FormatError::from)
 }
 
 pub(crate) fn scale_offset_mode(cd_values: &[u32]) -> Option<(ScaleOffset, FillAvailability)> {
-    hdf5_pure_filter::scale_offset_mode(cd_values)
+    hdf5_pure_filter::__private::scale_offset_mode(cd_values)
         .map(|(mode, fill)| (ScaleOffset::from_filter_mode(mode), fill))
 }
 
