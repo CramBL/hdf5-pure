@@ -5,9 +5,14 @@ use alloc::vec::Vec;
 use core::num::NonZeroU32;
 
 use crate::Error;
+use crate::lzf;
+use crate::scaleoffset;
+use crate::scaleoffset::ScaleOffset;
+use crate::scaleoffset::ScaleOffsetType;
 #[cfg(feature = "zfp")]
-use crate::ZfpElementType;
-use crate::{ScaleOffset, ScaleOffsetType};
+use crate::zfp;
+#[cfg(feature = "zfp")]
+use crate::zfp::ZfpElementType;
 
 /// Supplies the identifier, flags, and parameters for one pipeline filter.
 ///
@@ -335,18 +340,18 @@ pub fn decompress_chunk_with(
                 input,
                 inner_output_cap(expected, filters, filter_mask, i, ctx)?,
             )?,
-            FILTER_LZF => crate::decompress_lzf(
+            FILTER_LZF => lzf::decompress(
                 input,
                 inner_output_cap(expected, filters, filter_mask, i, ctx)?,
             )?,
             FILTER_FLETCHER32 => fletcher32_verify(input)?,
-            FILTER_SCALEOFFSET => crate::decompress_scale_offset(
+            FILTER_SCALEOFFSET => scaleoffset::decompress(
                 input,
                 filters.client_data(i),
                 inner_output_cap(expected, filters, filter_mask, i, ctx)?,
             )?,
             #[cfg(feature = "zfp")]
-            FILTER_ZFP => crate::decompress_zfp_filter(
+            FILTER_ZFP => zfp::decompress_filter(
                 input,
                 filters.client_data(i),
                 ctx.chunk_dims,
@@ -401,7 +406,7 @@ fn filter_max_forward_output(
         FILTER_LZF => in_size.saturating_mul(2),
         // Scale-offset writes a fixed header before the payload and, when the data does not pack
         // smaller, stores it verbatim after that header.
-        FILTER_SCALEOFFSET => in_size.saturating_add(crate::SCALE_OFFSET_HEADER_LEN),
+        FILTER_SCALEOFFSET => in_size.saturating_add(scaleoffset::HEADER_LEN),
         // Deflate can slightly expand incompressible input (zlib "stored" blocks
         // plus framing). The bound exceeds zlib's worst case.
         FILTER_DEFLATE => in_size.saturating_add(in_size / 16).saturating_add(64),
@@ -468,11 +473,11 @@ pub fn compress_chunk_with(
                 let level = filters.client_data(i).first().copied().unwrap_or(6);
                 deflate_compress(scratch, input, level)?
             }
-            FILTER_LZF => crate::compress_lzf(input),
+            FILTER_LZF => lzf::compress(input),
             FILTER_FLETCHER32 => fletcher32_append(input)?,
-            FILTER_SCALEOFFSET => crate::compress_scale_offset(input, filters.client_data(i))?,
+            FILTER_SCALEOFFSET => scaleoffset::compress(input, filters.client_data(i))?,
             #[cfg(feature = "zfp")]
-            FILTER_ZFP => crate::compress_zfp_filter(
+            FILTER_ZFP => zfp::compress_filter(
                 input,
                 filters.client_data(i),
                 ctx.chunk_dims,
@@ -1307,7 +1312,7 @@ mod tests {
         #[case] dims: &[u64],
         #[case] encoded_len: usize,
     ) {
-        let cd_values = crate::zfp_cd_values_rate(32.0, ZfpElementType::F32, dims).unwrap();
+        let cd_values = zfp::zfp_cd_values_rate(32.0, ZfpElementType::F32, dims).unwrap();
         let filters = [
             FilterDescription {
                 filter_id: FILTER_ZFP,
@@ -1327,7 +1332,7 @@ mod tests {
             scale_offset_type: None,
         };
         let data = 1.0f32.to_le_bytes();
-        let zfp_bytes = crate::compress_zfp_filter(
+        let zfp_bytes = zfp::compress_filter(
             &data,
             filters[0].client_data(),
             ctx.chunk_dims,
@@ -1405,11 +1410,11 @@ mod tests {
 
     #[test]
     fn lzf_reserves_against_the_stream_not_the_declared_chunk_size() {
-        let stored = crate::compress_lzf(&[0u8; 64]);
-        let out = crate::decompress_lzf(&stored, Some(u32::MAX as usize)).unwrap();
+        let stored = lzf::compress(&[0u8; 64]);
+        let out = lzf::decompress(&stored, Some(u32::MAX as usize)).unwrap();
         assert_eq!(out, [0u8; 64]);
         assert!(
-            out.capacity() <= stored.len() * crate::LZF_MAX_EXPANSION,
+            out.capacity() <= stored.len() * lzf::MAX_EXPANSION,
             "reserved {} bytes for a {}-byte stream",
             out.capacity(),
             stored.len()
@@ -1418,7 +1423,7 @@ mod tests {
 
     #[test]
     fn a_failed_decode_reports_which_compressor_failed() {
-        let lzf = crate::decompress_lzf(&[0x1f], None).unwrap_err();
+        let lzf = lzf::decompress(&[0x1f], None).unwrap_err();
         assert_eq!(lzf, Error::InvalidLzfStream("truncated literal run"));
 
         #[cfg(feature = "deflate")]
