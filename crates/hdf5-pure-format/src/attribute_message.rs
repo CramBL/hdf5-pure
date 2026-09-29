@@ -534,6 +534,7 @@ const V1_FIELD_ALIGNMENT: usize = 8;
 
 #[cfg(test)]
 mod tests {
+    use hdf5_pure_core::FixedPointLayout;
     use rstest::rstest;
     use test_util::attribute;
     use test_util::dataspace;
@@ -543,7 +544,6 @@ mod tests {
     use crate::address::StoredAddress;
     use crate::dataspace::DataspaceType;
     use crate::datatype::byte_order::DatatypeByteOrder;
-    use crate::datatype::layout::FixedPointLayout;
     use crate::shared_message;
 
     #[rstest]

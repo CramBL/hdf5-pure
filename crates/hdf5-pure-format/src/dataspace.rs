@@ -190,7 +190,7 @@ impl Dataspace {
     }
 }
 
-pub use hdf5_pure_core::MaxExtent;
+pub(crate) use hdf5_pure_core::MaxExtent;
 
 /// A dataset's shape beside the maximum shape that bounds it.
 ///

@@ -1,6 +1,3 @@
-pub use hdf5_pure_core::FixedPointLayout;
-pub use hdf5_pure_core::FloatingPointLayout;
-
 use crate::datatype::byte_order::FixedWidthByteOrder;
 
 /// The width of a numeric element in the standard layout: 1, 2, 4, or 8 bytes.

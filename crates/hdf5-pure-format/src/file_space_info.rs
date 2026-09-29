@@ -10,8 +10,8 @@
 use alloc::vec::Vec;
 
 use hdf5_pure_core::__private::FileSpaceInfoFields;
-pub use hdf5_pure_core::FileSpaceInfo;
-pub use hdf5_pure_core::FileSpaceStrategy;
+pub(crate) use hdf5_pure_core::FileSpaceInfo;
+pub(crate) use hdf5_pure_core::FileSpaceStrategy;
 
 use crate::error::FormatError;
 use crate::width::LengthWidth;

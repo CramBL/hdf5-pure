@@ -10,18 +10,14 @@ use byteorder::ByteOrder;
 use byteorder::LittleEndian;
 
 use hdf5_pure_core::__private;
-pub use hdf5_pure_core::CharacterSet;
-pub use hdf5_pure_core::CompoundMember;
-pub use hdf5_pure_core::Datatype;
+pub(crate) use hdf5_pure_core::CharacterSet;
+pub(crate) use hdf5_pure_core::Datatype;
 use hdf5_pure_core::DatatypeByteOrder;
-pub use hdf5_pure_core::EnumMember;
 use hdf5_pure_core::FixedPointLayout;
 use hdf5_pure_core::FloatingPointLayout;
-pub use hdf5_pure_core::ReferenceType;
-pub use hdf5_pure_core::StringPadding;
+pub(crate) use hdf5_pure_core::ReferenceType;
+pub(crate) use hdf5_pure_core::StringPadding;
 
-#[cfg(test)]
-use crate::DISPLAY_MAX_MEMBERS;
 use crate::bytes;
 use crate::error::FormatError;
 
@@ -2219,6 +2215,8 @@ mod tests {
 
 #[cfg(all(test, feature = "std"))]
 mod display_tests {
+    use hdf5_pure_core::__private::DISPLAY_MAX_MEMBERS;
+
     use super::*;
 
     #[test]
