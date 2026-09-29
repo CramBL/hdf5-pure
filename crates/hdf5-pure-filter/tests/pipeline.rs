@@ -27,7 +27,7 @@ impl FilterStep for Step {
 }
 
 #[test]
-fn exported_pipeline_encodes_known_bytes_and_decodes_a_partial_mask() {
+fn shuffle_and_fletcher32_encode_and_a_chunk_that_skips_fletcher32_decodes() {
     let steps = [
         Step {
             id: hdf5_pure_filter::FILTER_SHUFFLE,

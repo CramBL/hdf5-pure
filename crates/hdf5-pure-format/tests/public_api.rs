@@ -169,7 +169,7 @@ fn group_and_attribute_storage_messages_round_trip_through_the_public_api() {
 }
 
 #[test]
-fn shared_message_references_round_trip_through_the_public_api() {
+fn encoded_references_parse_back_to_their_locations() {
     let address = StoredAddress::new(800);
     let committed = hdf5_pure_format::encode_committed_ref(address, OffsetWidth::Eight);
     assert_eq!(
@@ -276,7 +276,7 @@ fn a_local_heap_reads_its_names_through_the_public_api() {
 }
 
 #[test]
-fn symbol_table_structures_parse_through_the_public_api() {
+fn a_symbol_table_message_and_node_parse_and_the_node_reads_from_a_source() {
     let mut message = 0x100u64.to_le_bytes().to_vec();
     message.extend_from_slice(&0x200u64.to_le_bytes());
     assert_eq!(
@@ -309,7 +309,7 @@ fn symbol_table_structures_parse_through_the_public_api() {
 }
 
 #[test]
-fn a_version_1_group_btree_node_parses_through_the_public_api() {
+fn a_group_node_parses_from_bytes_and_from_a_source() {
     let widths = Widths::new(4, 8);
     let keys = [
         btree_v1::group_key(0, widths),
@@ -335,7 +335,7 @@ fn a_version_1_group_btree_node_parses_through_the_public_api() {
 }
 
 #[test]
-fn a_global_heap_collection_round_trips_through_the_public_api() {
+fn an_encoded_collection_parses_whole_and_filtered() {
     let objects: [&[u8]; 2] = [b"alpha", b"beta"];
     let bytes =
         hdf5_pure_format::encode_global_heap_collection(LengthWidth::Eight, &objects).unwrap();
@@ -411,7 +411,7 @@ fn the_encoder_rejects_more_than_global_heap_max_objects() {
     datatype::committed_reference(800),
     attribute::Flags::SHARED_DATATYPE
 )]
-fn an_attribute_message_round_trips_through_the_public_api(
+fn a_version_3_message_round_trips_with_an_inline_or_committed_datatype(
     #[case] datatype_location: DatatypeLocation,
     #[case] datatype_field: Vec<u8>,
     #[case] flags: attribute::Flags,
