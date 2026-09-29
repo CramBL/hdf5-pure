@@ -1,3 +1,3 @@
-pub use hdf5_pure_format::LinkMessage;
-pub use hdf5_pure_format::LinkTarget;
-pub use hdf5_pure_format::link_is_named;
+pub use hdf5_pure_format::__private::LinkMessage;
+pub use hdf5_pure_format::__private::LinkTarget;
+pub use hdf5_pure_format::__private::link_is_named;

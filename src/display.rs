@@ -1,6 +1,6 @@
-pub use hdf5_pure_format::Dims;
-pub use hdf5_pure_format::EscapedName;
-pub use hdf5_pure_format::write_elided;
+pub use hdf5_pure_core::__private::Dims;
+pub use hdf5_pure_core::__private::EscapedName;
+pub use hdf5_pure_core::__private::write_elided;
 
 #[cfg(feature = "std")]
-pub use hdf5_pure_format::DISPLAY_MAX_MEMBERS;
+pub use hdf5_pure_core::__private::DISPLAY_MAX_MEMBERS;

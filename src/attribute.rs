@@ -10,7 +10,7 @@
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 
-pub use hdf5_pure_format::AttributeMessage;
+pub use hdf5_pure_format::__private::AttributeMessage;
 
 use crate::access_mode::AccessMode;
 use crate::address::StoredAddress;
@@ -423,7 +423,7 @@ mod tests {
     /// address, and the file's offset and length sizes.
     fn dense_attribute_info(bytes: &[u8]) -> (AttributeInfoMessage, StoredAddress, u8, u8) {
         let sig = crate::signature::find_signature(bytes).unwrap();
-        let superblock = hdf5_pure_format::parse_superblock(bytes, sig).unwrap();
+        let superblock = hdf5_pure_format::__private::parse_superblock(bytes, sig).unwrap();
         let (offset_size, length_size) = (superblock.offset_size, superblock.length_size);
         let root = ObjectHeader::parse(
             bytes,

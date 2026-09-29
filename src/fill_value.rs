@@ -10,7 +10,7 @@ use alloc::format;
 use alloc::{vec, vec::Vec};
 use core::num::NonZeroUsize;
 
-use hdf5_pure_format::FillValueError;
+use hdf5_pure_format::__private::FillValueError;
 
 use crate::error::FormatError;
 use crate::message_type::MessageType;
@@ -191,11 +191,11 @@ impl PaddingFill {
     }
 }
 
-pub use hdf5_pure_format::fill_value_is_written;
-pub use hdf5_pure_format::parse_defined_fill_value;
+pub use hdf5_pure_format::__private::fill_value_is_written;
+pub use hdf5_pure_format::__private::parse_defined_fill_value;
 
 pub(crate) fn fill_value_message_v3(fill: Option<&[u8]>) -> Result<Vec<u8>, FormatError> {
-    hdf5_pure_format::fill_value_message_v3(fill).map_err(|error| match error {
+    hdf5_pure_format::__private::fill_value_message_v3(fill).map_err(|error| match error {
         FillValueError::TooLarge { length } => FormatError::SerializationError(format!(
             "fill value length {length} exceeds the u32 message field"
         )),
@@ -204,7 +204,7 @@ pub(crate) fn fill_value_message_v3(fill: Option<&[u8]>) -> Result<Vec<u8>, Form
 
 #[cfg(test)]
 mod fill_pattern_tests {
-    use hdf5_pure_format::V3_FLAGS_DEFAULT;
+    use hdf5_pure_format::__private::V3_FLAGS_DEFAULT;
 
     use super::*;
     use crate::convert;

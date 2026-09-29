@@ -1,1 +1,1 @@
-pub use hdf5_pure_format::LocalHeap;
+pub use hdf5_pure_format::__private::LocalHeap;

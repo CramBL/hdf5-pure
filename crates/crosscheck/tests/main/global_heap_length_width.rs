@@ -4,7 +4,7 @@ use std::ops::Range;
 use hdf5::plist::file_create::Sizeof;
 use hdf5::plist::file_create::SizeofInfo;
 use hdf5::types::VarLenUnicode;
-use hdf5_pure_format::LengthWidth;
+use hdf5_pure_format::__private::LengthWidth;
 use rstest::rstest;
 
 #[rstest]
@@ -40,7 +40,8 @@ fn a_narrow_length_collection_matches_the_one_libhdf5_writes(
         .expect("libhdf5 writes the string into a global heap collection");
     let written = &bytes[start..start + COLLECTION_SIZE];
     let encoded =
-        hdf5_pure_format::encode_global_heap_collection(width, &[PAYLOAD.as_bytes()]).unwrap();
+        hdf5_pure_format::__private::encode_global_heap_collection(width, &[PAYLOAD.as_bytes()])
+            .unwrap();
 
     let fields = written_fields(width);
     assert_eq!(encoded.len(), COLLECTION_SIZE);

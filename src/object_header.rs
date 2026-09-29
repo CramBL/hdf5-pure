@@ -1,7 +1,7 @@
 #[cfg(any(feature = "std", test))]
-pub use hdf5_pure_format::HeaderMessage;
-pub use hdf5_pure_format::MessageFilter;
-pub use hdf5_pure_format::ObjectHeader;
+pub use hdf5_pure_format::__private::HeaderMessage;
+pub use hdf5_pure_format::__private::MessageFilter;
+pub use hdf5_pure_format::__private::ObjectHeader;
 
 #[cfg(all(test, feature = "std"))]
 mod tests {

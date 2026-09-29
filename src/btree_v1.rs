@@ -3,7 +3,7 @@
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 
-use hdf5_pure_format::BTreeV1Node;
+use hdf5_pure_format::__private::BTreeV1Node;
 
 use crate::address::BaseAddressExt;
 use crate::address::{BaseAddress, StoredAddress};
