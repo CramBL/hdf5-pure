@@ -260,6 +260,10 @@ mod tests {
         let heap = LocalHeap::parse(&file, 0, 8, 8).unwrap();
         assert_eq!(heap.data_segment_address, StoredAddress::new(100));
         assert_eq!(heap.data_segment_size, 12); // "hello\0world\0"
+        assert_eq!(
+            LocalHeap::parse_from_source(file.as_slice(), 0, 8, 8),
+            Ok(heap)
+        );
     }
 
     #[test]
@@ -276,6 +280,10 @@ mod tests {
         let heap = LocalHeap::parse(&file, 0, 8, 8).unwrap();
         let s = heap.read_string(&file, BaseAddress::ZERO, 6).unwrap();
         assert_eq!(s, "world");
+        assert_eq!(
+            heap.read_string_in_segment(&file[100..112], 6),
+            Ok("world".into())
+        );
     }
 
     #[test]

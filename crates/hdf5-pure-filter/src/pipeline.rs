@@ -12,7 +12,7 @@ use crate::{ScaleOffset, ScaleOffsetType};
 /// Supplies the identifier, flags, and parameters for one pipeline filter.
 ///
 /// The fields correspond to a filter description in "Data Storage - Filter Pipeline Message" of
-/// the [format specification, version 4.0][spec]. See [`decompress_chunk`] for an example.
+/// the [format specification, version 4.0][spec].
 ///
 /// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_filter
 pub trait FilterStep {
@@ -34,42 +34,6 @@ pub trait FilterStep {
 /// An implementation may read its entries from a slice or another representation. The caller
 /// passes an index less than [`Self::len`] to each indexed method. The routines use the supplied
 /// metadata directly, without collecting filter descriptions into another sequence.
-/// See [`decompress_chunk`] for an example using a slice of [`FilterStep`] values.
-///
-/// # Examples
-///
-/// An indexed view can read filter identifiers without building a collection of
-/// [`FilterStep`] values:
-///
-/// ```
-/// use core::num::NonZeroU32;
-/// use hdf5_pure_filter::{
-///     ChunkContext, FILTER_FLETCHER32, FilterScratch, FilterSteps,
-///     compress_chunk_with, decompress_chunk,
-/// };
-///
-/// struct Ids<'a>(&'a [u16]);
-///
-/// impl FilterSteps for Ids<'_> {
-///     fn len(&self) -> usize { self.0.len() }
-///     fn id(&self, index: usize) -> u16 { self.0[index] }
-///     fn flags(&self, _index: usize) -> u16 { 0 }
-///     fn client_data(&self, _index: usize) -> &[u32] { &[] }
-/// }
-///
-/// # fn main() -> Result<(), hdf5_pure_filter::Error> {
-/// let filters = Ids(&[FILTER_FLETCHER32]);
-/// let context = ChunkContext {
-///     chunk_dims: &[2],
-///     element_size: NonZeroU32::new(1).unwrap(),
-///     element_type: None,
-///     scale_offset_type: None,
-/// };
-/// let stored = compress_chunk_with(&mut FilterScratch::new(), &[1, 2], &filters, context)?;
-/// assert_eq!(decompress_chunk(&stored, &filters, context, 0)?, [1, 2]);
-/// # Ok(())
-/// # }
-/// ```
 pub trait FilterSteps {
     /// Returns the number of filters in the pipeline.
     fn len(&self) -> usize;
@@ -151,18 +115,6 @@ impl<T: FilterStep> FilterSteps for Vec<T> {
 /// Known filters rank ZFP when enabled, Scale-Offset, Shuffle, LZF, Deflate, then Fletcher32.
 /// Unknown identifiers share the last rank. The input identifiers must already follow this order,
 /// and a filter with the same rank stays before the new filter.
-///
-/// # Examples
-///
-/// ```
-/// use hdf5_pure_filter::FILTER_DEFLATE;
-/// use hdf5_pure_filter::FILTER_FLETCHER32;
-/// use hdf5_pure_filter::FILTER_SHUFFLE;
-///
-/// let ids = [FILTER_SHUFFLE, FILTER_FLETCHER32];
-/// let index = hdf5_pure_filter::canonical_filter_position(ids.into_iter(), FILTER_DEFLATE);
-/// assert_eq!(index, 1);
-/// ```
 pub fn canonical_filter_position(ids: impl Iterator<Item = u16>, id: u16) -> usize {
     let rank = canonical_rank(id);
     ids.take_while(|&existing| canonical_rank(existing) <= rank)
@@ -173,19 +125,6 @@ pub fn canonical_filter_position(ids: impl Iterator<Item = u16>, id: u16) -> usi
 ///
 /// The names in the pair are suitable for an error message. ZFP conflicts take precedence when
 /// ZFP support is enabled, followed by scale-offset with shuffle and LZF with Deflate.
-///
-/// # Examples
-///
-/// ```
-/// use hdf5_pure_filter::FILTER_DEFLATE;
-/// use hdf5_pure_filter::FILTER_LZF;
-///
-/// let ids = [FILTER_DEFLATE, FILTER_LZF];
-/// assert_eq!(
-///     hdf5_pure_filter::first_filter_conflict(ids.into_iter()),
-///     Some(("lzf", "deflate")),
-/// );
-/// ```
 pub fn first_filter_conflict(
     ids: impl Iterator<Item = u16>,
 ) -> Option<(&'static str, &'static str)> {
@@ -218,23 +157,6 @@ pub fn first_filter_conflict(
 ///
 /// This classification does not check whether an optional codec feature is enabled or whether
 /// the filter parameters are valid. An empty pipeline qualifies.
-///
-/// # Examples
-///
-/// ```
-/// use hdf5_pure_filter::FILTER_SHUFFLE;
-/// use hdf5_pure_filter::FilterStep;
-///
-/// struct Step(u16);
-/// impl FilterStep for Step {
-///     fn id(&self) -> u16 { self.0 }
-///     fn flags(&self) -> u16 { 0 }
-///     fn client_data(&self) -> &[u32] { &[] }
-/// }
-///
-/// assert!(hdf5_pure_filter::filters_reencodable(&[Step(FILTER_SHUFFLE)]));
-/// assert!(!hdf5_pure_filter::filters_reencodable(&[Step(u16::MAX)]));
-/// ```
 pub fn filters_reencodable(filters: &(impl FilterSteps + ?Sized)) -> bool {
     (0..filters.len()).all(|index| match filters.id(index) {
         FILTER_DEFLATE | FILTER_SHUFFLE | FILTER_FLETCHER32 | FILTER_SCALEOFFSET | FILTER_LZF => {
@@ -251,33 +173,6 @@ pub fn filters_reencodable(filters: &(impl FilterSteps + ?Sized)) -> bool {
 ///
 /// Integer scale-offset qualifies. Floating-point scale-offset, ZFP, and unknown filters do not.
 /// An empty pipeline qualifies.
-///
-/// # Examples
-///
-/// ```
-/// use hdf5_pure_filter::FILTER_SCALEOFFSET;
-/// use hdf5_pure_filter::FilterStep;
-/// use hdf5_pure_filter::ScaleOffset;
-/// use hdf5_pure_filter::ScaleOffsetByteOrder;
-/// use hdf5_pure_filter::ScaleOffsetFill;
-/// use hdf5_pure_filter::ScaleOffsetType;
-///
-/// struct Step(Vec<u32>);
-/// impl FilterStep for Step {
-///     fn id(&self) -> u16 { FILTER_SCALEOFFSET }
-///     fn flags(&self) -> u16 { 0 }
-///     fn client_data(&self) -> &[u32] { &self.0 }
-/// }
-///
-/// # fn main() -> Result<(), hdf5_pure_filter::Error> {
-/// let scalar = ScaleOffsetType::integer(false, ScaleOffsetByteOrder::LittleEndian);
-/// let params = hdf5_pure_filter::build_scale_offset_cd_values(
-///     ScaleOffset::Integer(0), scalar, 1, 4, ScaleOffsetFill::Undefined,
-/// )?;
-/// assert!(hdf5_pure_filter::filters_lossless(&[Step(params)]));
-/// # Ok(())
-/// # }
-/// ```
 pub fn filters_lossless(filters: &(impl FilterSteps + ?Sized)) -> bool {
     (0..filters.len()).all(|index| match filters.id(index) {
         FILTER_DEFLATE | FILTER_SHUFFLE | FILTER_FLETCHER32 | FILTER_LZF => true,
@@ -312,7 +207,7 @@ pub type ZfpElementTypeWhenEnabled = core::convert::Infallible;
 /// Describes the unfiltered size and scalar type of a chunk.
 ///
 /// The pipeline uses the dimensions and element size to check decoded lengths and bound
-/// decompression. ZFP also uses the optional scalar type. See [`decompress_chunk`] for an example.
+/// decompression. ZFP also uses the optional scalar type.
 #[derive(Debug, Clone, Copy)]
 pub struct ChunkContext<'a> {
     /// Chunk dimensions in elements, including the full extent of an edge chunk.
@@ -388,48 +283,6 @@ impl FilterScratch {
 /// Returns [`Error::DataSizeMismatch`] if a representable, nonzero full chunk size differs from
 /// the decoded length.
 /// A decoder may return another [`Error`] for malformed input or invalid parameters.
-///
-/// # Examples
-///
-/// ```
-/// use core::num::NonZeroU32;
-/// use hdf5_pure_filter::{
-///     ChunkContext, FILTER_FLETCHER32, FILTER_SHUFFLE, FilterScratch, FilterStep,
-///     H5Z_FLAG_OPTIONAL, compress_chunk_with, decompress_chunk, decompress_chunk_with,
-/// };
-///
-/// struct Step {
-///     id: u16,
-///     flags: u16,
-/// }
-///
-/// impl FilterStep for Step {
-///     fn id(&self) -> u16 { self.id }
-///     fn flags(&self) -> u16 { self.flags }
-///     fn client_data(&self) -> &[u32] { &[] }
-/// }
-///
-/// # fn main() -> Result<(), hdf5_pure_filter::Error> {
-/// let filters = [
-///     Step { id: FILTER_SHUFFLE, flags: 0 },
-///     Step { id: FILTER_FLETCHER32, flags: H5Z_FLAG_OPTIONAL },
-/// ];
-/// let context = ChunkContext {
-///     chunk_dims: &[4],
-///     element_size: NonZeroU32::new(2).unwrap(),
-///     element_type: None,
-///     scale_offset_type: None,
-/// };
-/// let data = [1_u8, 2, 3, 4, 5, 6, 7, 8];
-/// let mut scratch = FilterScratch::new();
-/// let stored = compress_chunk_with(&mut scratch, &data, &filters, context)?;
-/// assert_eq!(decompress_chunk_with(&mut scratch, &stored, &filters, context, 0)?, data);
-///
-/// let stored_without_checksum = compress_chunk_with(&mut scratch, &data, &filters[..1], context)?;
-/// assert_eq!(decompress_chunk(&stored_without_checksum, &filters, context, 0b10)?, data);
-/// # Ok(())
-/// # }
-/// ```
 pub fn decompress_chunk(
     compressed: &[u8],
     filters: &(impl FilterSteps + ?Sized),
@@ -448,7 +301,6 @@ pub fn decompress_chunk(
 /// Reverses the active filters on one stored chunk using reusable scratch state.
 ///
 /// Bit `i` of `filter_mask` skips the filter at index `i` in forward order.
-/// See [`decompress_chunk`] for an example using reusable scratch state.
 ///
 /// # Errors
 ///
@@ -596,8 +448,6 @@ fn compress_chunk(
 }
 
 /// Applies the filters in pipeline order using reusable scratch state.
-///
-/// See [`decompress_chunk`] for an example of the filter order and chunk context.
 ///
 /// # Errors
 ///

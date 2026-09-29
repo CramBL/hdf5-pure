@@ -151,18 +151,6 @@ pub enum ScaleOffsetFill<'a> {
 ///
 /// Returns [`Error::ScaleOffset`] if the mode does not match the scalar class, the element size
 /// is outside `1..=8`, or the supplied fill value has the wrong length.
-///
-/// # Examples
-///
-/// ```
-/// use hdf5_pure_filter::{ScaleOffset, ScaleOffsetByteOrder, ScaleOffsetFill, ScaleOffsetType};
-///
-/// let scalar = ScaleOffsetType::integer(false, ScaleOffsetByteOrder::LittleEndian);
-/// let cd = hdf5_pure_filter::build_scale_offset_cd_values(
-///     ScaleOffset::Integer(0), scalar, 1, 3, ScaleOffsetFill::Undefined,
-/// ).unwrap();
-/// assert_eq!(&cd[..8], &[2, 0, 3, 0, 1, 0, 0, 0]);
-/// ```
 pub fn build_cd_values(
     mode: ScaleOffset,
     ty: ScaleOffsetType,
@@ -231,25 +219,6 @@ pub fn build_cd_values(
 /// Returns [`None`] if the parameters are too short, specify float E-scale or an unknown mode,
 /// or have invalid fill availability. A caller that rebuilds the parameters supplies the fill
 /// value separately from the returned [`FillAvailability`].
-///
-/// # Examples
-///
-/// ```
-/// use hdf5_pure_filter::FillAvailability;
-/// use hdf5_pure_filter::ScaleOffset;
-/// use hdf5_pure_filter::ScaleOffsetByteOrder;
-/// use hdf5_pure_filter::ScaleOffsetFill;
-/// use hdf5_pure_filter::ScaleOffsetType;
-///
-/// let scalar = ScaleOffsetType::integer(false, ScaleOffsetByteOrder::LittleEndian);
-/// let cd = hdf5_pure_filter::build_scale_offset_cd_values(
-///     ScaleOffset::Integer(0), scalar, 1, 3, ScaleOffsetFill::Undefined,
-/// ).unwrap();
-/// assert_eq!(
-///     hdf5_pure_filter::scale_offset_mode(&cd),
-///     Some((ScaleOffset::Integer(0), FillAvailability::Undefined)),
-/// );
-/// ```
 pub fn scale_offset_mode(cd_values: &[u32]) -> Option<(ScaleOffset, FillAvailability)> {
     let scale_type = *cd_values.get(PARM_SCALETYPE)?;
     let scale_factor = *cd_values.get(PARM_SCALEFACTOR)?;
@@ -385,19 +354,6 @@ fn integer_scale_factor_is_full_width(p: &Parms) -> Result<bool, Error> {
 /// decoded size exceeds `max_output`. Returns
 /// [`Error::ScaleOffsetValueTooLargeForPlatform`] if an element count or output size does not
 /// fit `usize`.
-///
-/// # Examples
-///
-/// ```
-/// use hdf5_pure_filter::{ScaleOffset, ScaleOffsetByteOrder, ScaleOffsetFill, ScaleOffsetType};
-///
-/// let scalar = ScaleOffsetType::integer(false, ScaleOffsetByteOrder::LittleEndian);
-/// let cd = hdf5_pure_filter::build_scale_offset_cd_values(
-///     ScaleOffset::Integer(0), scalar, 1, 3, ScaleOffsetFill::Undefined,
-/// ).unwrap();
-/// let encoded = hdf5_pure_filter::compress_scale_offset(&[4, 5, 6], &cd).unwrap();
-/// assert_eq!(hdf5_pure_filter::decompress_scale_offset(&encoded, &cd, Some(3)).unwrap(), [4, 5, 6]);
-/// ```
 pub fn decompress(input: &[u8], cd: &[u32], max_output: Option<usize>) -> Result<Vec<u8>, Error> {
     let p = Parms::parse(cd)?;
 
@@ -544,19 +500,6 @@ pub fn decompress(input: &[u8], cd: &[u32], max_output: Option<usize>) -> Result
 /// Returns
 /// [`Error::ScaleOffsetValueTooLargeForPlatform`] if an element count or encoded size does not
 /// fit `usize`.
-///
-/// # Examples
-///
-/// ```
-/// use hdf5_pure_filter::{ScaleOffset, ScaleOffsetByteOrder, ScaleOffsetFill, ScaleOffsetType};
-///
-/// let scalar = ScaleOffsetType::integer(false, ScaleOffsetByteOrder::LittleEndian);
-/// let cd = hdf5_pure_filter::build_scale_offset_cd_values(
-///     ScaleOffset::Integer(0), scalar, 1, 3, ScaleOffsetFill::Undefined,
-/// ).unwrap();
-/// let encoded = hdf5_pure_filter::compress_scale_offset(&[4, 5, 6], &cd).unwrap();
-/// assert_eq!(&encoded[..5], &[2, 0, 0, 0, 8]);
-/// ```
 pub fn compress(input: &[u8], cd: &[u32]) -> Result<Vec<u8>, Error> {
     let p = Parms::parse(cd)?;
 

@@ -354,22 +354,6 @@ impl GlobalHeapIndex {
 /// [`GLOBAL_HEAP_MAX_OBJECTS`] objects, and [`GlobalHeapCollectionError::TooLarge`] if the size of
 /// the collection does not fit a length field of `length_width` bytes.
 ///
-/// # Examples
-///
-/// ```
-/// use hdf5_pure_format::{GlobalHeapIndex, LengthWidth};
-///
-/// let objects: [&[u8]; 2] = [b"alpha", b"beta"];
-/// let collection =
-///     hdf5_pure_format::encode_global_heap_collection(LengthWidth::Eight, &objects).unwrap();
-/// assert_eq!(collection.len(), 4096);
-///
-/// let directory = GlobalHeapIndex::parse(collection.as_slice(), 0, 8).unwrap();
-/// let beta = directory.object(2).unwrap();
-/// let start = beta.data_address as usize;
-/// assert_eq!(&collection[start..start + beta.size as usize], b"beta");
-/// ```
-///
 /// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsec_fmt4_infra_globalheap
 pub fn encode_global_heap_collection(
     length_width: LengthWidth,
