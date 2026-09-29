@@ -18,9 +18,11 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use crate::address::StoredAddress;
+use crate::bytes;
 use crate::checksum;
 use crate::convert::Narrow;
 use crate::error::FormatError;
+use crate::width::OffsetWidth;
 
 const FSHD_SIGNATURE: &[u8; 4] = b"FSHD";
 const FSSE_SIGNATURE: &[u8; 4] = b"FSSE";
@@ -75,9 +77,18 @@ fn read_uint_le(bytes: &[u8]) -> u64 {
 }
 
 impl FreeSpaceManagerHeader {
-    /// Parse an `FSHD` at the start of `data`.
+    /// Parses the free-space manager header at the start of `data`.
+    ///
+    /// Reads each length field as 8 bytes wide, and checks neither the version, the client ID,
+    /// nor the checksum.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::InvalidOffsetSize`] if `offset_size` is not 2, 4, or 8,
+    /// [`FormatError::UnexpectedEof`] if `data` is shorter than the header, and
+    /// [`FormatError::InvalidFreeSpaceManager`] if the signature is not `FSHD`.
     pub fn parse(data: &[u8], offset_size: u8) -> Result<FreeSpaceManagerHeader, FormatError> {
-        let os = offset_size as usize;
+        let os = usize::from(OffsetWidth::try_from(offset_size)?.get());
         // sig(4) ver(1) client(1) + 4*L + classes/shrink/expand/abits (2 each) +
         // max(L) + fsse_addr(O) + used(L) + alloc(L) + checksum(4)
         let need = 4 + 1 + 1 + 4 * 8 + 2 * 4 + 8 + os + 8 + 8 + 4;
@@ -146,7 +157,7 @@ pub const SECTION_CLASS_LARGE: u8 = 2;
 
 /// Appends the low `width` bytes of `value` to `buf`, little-endian.
 fn push_uint_le(buf: &mut Vec<u8>, value: u64, width: usize) {
-    // `width` is always 1..=8 (offset/size/count widths). Take the low bytes of
+    // `width` is always 1..=8 (the count, size, and length widths). Take the low bytes of
     // the little-endian encoding without a narrowing cast.
     buf.extend_from_slice(&value.to_le_bytes()[..width]);
 }
@@ -166,15 +177,15 @@ pub fn serialize_free_space_manager(
     sections: &[FreeSection],
     fshd_addr: StoredAddress,
     fsse_addr: StoredAddress,
-    offset_size: u8,
+    offset_size: OffsetWidth,
     class_id: u8,
 ) -> (Vec<u8>, Vec<u8>) {
-    let os = offset_size as usize;
-    let addr_space_bits = (offset_size as u16) * 8 - 1;
+    let os = usize::from(offset_size.get());
+    let addr_space_bits = u16::from(offset_size.get()) * 8 - 1;
     let total_sections = sections.len() as u64;
     let total_space: u64 = sections.iter().map(|s| s.size).sum();
 
-    let off_w = offset_width(addr_space_bits);
+    // A section offset takes `ceil(addr_space_bits / 8)` bytes, which is `os`.
     let size_w = enc_size(FILE_FSM_MAX_SECTION_SIZE);
     let count_w = enc_size(total_sections);
 
@@ -183,10 +194,9 @@ pub fn serialize_free_space_manager(
     let mut fsse = Vec::new();
     fsse.extend_from_slice(FSSE_SIGNATURE);
     fsse.push(0); // version
-    push_uint_le(&mut fsse, fshd_addr.get(), os); // back-pointer to the header
+    bytes::write_offset(&mut fsse, fshd_addr.get(), offset_size); // back-pointer to the header
 
-    // Group sections by size, then emit the groups in ascending size order with
-    // ascending offsets within each, matching the C library's size-ordered list.
+    // One entry per distinct size, sorted below.
     let mut by_size: Vec<(u64, Vec<StoredAddress>)> = Vec::new();
     for s in sections {
         match by_size.iter_mut().find(|(size, _)| *size == s.size) {
@@ -202,7 +212,7 @@ pub fn serialize_free_space_manager(
         push_uint_le(&mut fsse, offsets.len() as u64, count_w);
         push_uint_le(&mut fsse, size, size_w);
         for addr in offsets {
-            push_uint_le(&mut fsse, addr.get(), off_w);
+            bytes::write_offset(&mut fsse, addr.get(), offset_size);
             fsse.push(class_id); // section class id (no class-specific data)
         }
     }
@@ -224,7 +234,7 @@ pub fn serialize_free_space_manager(
     fshd.extend_from_slice(&FILE_FSM_EXPAND_PCT.to_le_bytes());
     fshd.extend_from_slice(&addr_space_bits.to_le_bytes());
     push_uint_le(&mut fshd, FILE_FSM_MAX_SECTION_SIZE, 8);
-    push_uint_le(&mut fshd, fsse_addr.get(), os);
+    bytes::write_offset(&mut fshd, fsse_addr.get(), offset_size);
     push_uint_le(&mut fshd, section_info_len, 8); // section info used
     push_uint_le(&mut fshd, section_info_len, 8); // section info allocated (== used)
     let checksum = checksum::jenkins_lookup3(&fshd);
@@ -236,11 +246,10 @@ pub fn serialize_free_space_manager(
 /// Returns the length in bytes of the header and the section list of a file free-space manager
 /// that holds `sections`, or 0 if `sections` is empty.
 ///
-/// The flat counterpart of `plan_paged_managers`, which computes the same length
-/// for a paged file's several managers and places them as well. Both depend only on
-/// the sections' count and sizes, never on their addresses, which is what lets a
-/// commit size its tail before it has an address for it.
-pub fn free_space_manager_len(sections: &[FreeSection], offset_size: u8) -> u64 {
+/// A file with no free space stores the undefined address in place of a manager. The length
+/// depends on the number and the sizes of the sections alone, so a caller sizes the blocks before
+/// it places them.
+pub fn free_space_manager_len(sections: &[FreeSection], offset_size: OffsetWidth) -> u64 {
     if sections.is_empty() {
         return 0;
     }
@@ -248,20 +257,18 @@ pub fn free_space_manager_len(sections: &[FreeSection], offset_size: u8) -> u64 
     free_space_manager_header_len(offset_size) + section_info_len(&sizes, offset_size)
 }
 
-/// The fixed serialized byte length of an `FSHD` header with `offset_size`-byte
-/// addresses (82 bytes for standard 8-byte offsets).
-pub fn free_space_manager_header_len(offset_size: u8) -> u64 {
-    (4 + 1 + 1 + 4 * 8 + 2 * 4 + 8 + offset_size as usize + 8 + 8 + 4) as u64
+/// Returns the length in bytes of a header with `offset_size`-byte addresses, 82 for 8-byte
+/// addresses.
+pub fn free_space_manager_header_len(offset_size: OffsetWidth) -> u64 {
+    (4 + 1 + 1 + 4 * 8 + 2 * 4 + 8 + usize::from(offset_size.get()) + 8 + 8 + 4) as u64
 }
 
-/// The serialized byte length an `FSSE` block will occupy for a manager holding
-/// sections of `section_sizes`, which the paged writer uses to reserve
-/// space for a manager's section list before the sections' offsets are placed. The
-/// length depends only on the sizes (they determine the size-group count) and the
-/// section count, never on the offsets or class id, so this defers to
-/// [`serialize_free_space_manager`] with placeholder addresses and stays exact by
-/// construction.
-pub fn section_info_len(section_sizes: &[u64], offset_size: u8) -> u64 {
+/// Returns the length in bytes of the section list of a manager that holds sections of
+/// `section_sizes`.
+///
+/// The length depends on the number and the sizes of the sections alone, and the function
+/// measures the section list [`serialize_free_space_manager`] serializes at placeholder addresses.
+pub fn section_info_len(section_sizes: &[u64], offset_size: OffsetWidth) -> u64 {
     let sections: Vec<FreeSection> = section_sizes
         .iter()
         .map(|&size| FreeSection {
@@ -297,7 +304,7 @@ pub fn parse_section_info(
     header: &FreeSpaceManagerHeader,
     offset_size: u8,
 ) -> Result<Vec<FreeSection>, FormatError> {
-    let os = offset_size as usize;
+    let os = usize::from(OffsetWidth::try_from(offset_size)?.get());
     let header_len = 4 + 1 + os; // "FSSE" + version + back-pointer
     if data.len() < header_len + 4 {
         return Err(FormatError::UnexpectedEof {
@@ -343,6 +350,7 @@ pub fn parse_section_info(
 
 #[cfg(test)]
 mod tests {
+    use rstest::rstest;
     use test_util::free_space;
 
     use super::*;
@@ -400,13 +408,16 @@ mod tests {
             &[section(2848, 1600)],
             StoredAddress::new(619),
             StoredAddress::new(701),
-            8,
+            OffsetWidth::Eight,
             SECTION_CLASS_SIMPLE,
         );
         assert_eq!(fshd, fshd_fixture, "FSHD bytes match the C library");
         assert_eq!(fsse, fsse_fixture, "FSSE bytes match the C library");
         // The header length helper agrees with the produced bytes.
-        assert_eq!(free_space_manager_header_len(8), fshd.len() as u64);
+        assert_eq!(
+            free_space_manager_header_len(OffsetWidth::Eight),
+            fshd.len() as u64
+        );
     }
 
     #[test]
@@ -419,7 +430,7 @@ mod tests {
             &[section(1155, 893), section(871, 16)],
             StoredAddress::new(736),
             StoredAddress::new(818),
-            8,
+            OffsetWidth::Eight,
             SECTION_CLASS_SIMPLE,
         );
         assert_eq!(fshd, fshd_fixture, "FSHD bytes match the C library");
@@ -446,11 +457,11 @@ mod tests {
                 &sections,
                 StoredAddress::new(1000),
                 StoredAddress::new(1100),
-                8,
+                OffsetWidth::Eight,
                 SECTION_CLASS_LARGE,
             );
             assert_eq!(
-                section_info_len(&sizes, 8),
+                section_info_len(&sizes, OffsetWidth::Eight),
                 fsse.len() as u64,
                 "sizes {sizes:?}"
             );
@@ -473,5 +484,22 @@ mod tests {
             FreeSpaceManagerHeader::parse(&fshd, 8),
             Err(FormatError::InvalidFreeSpaceManager)
         ));
+    }
+
+    #[rstest]
+    #[case(0)]
+    #[case(3)]
+    #[case(16)]
+    fn a_width_other_than_2_4_or_8_fails_to_parse(#[case] offset_size: u8) {
+        let header_bytes = free_space::single_section_header();
+        assert_eq!(
+            FreeSpaceManagerHeader::parse(&header_bytes, offset_size),
+            Err(FormatError::InvalidOffsetSize(offset_size))
+        );
+        let header = FreeSpaceManagerHeader::parse(&header_bytes, 8).unwrap();
+        assert_eq!(
+            parse_section_info(&free_space::single_section_info(), &header, offset_size),
+            Err(FormatError::InvalidOffsetSize(offset_size))
+        );
     }
 }

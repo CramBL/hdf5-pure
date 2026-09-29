@@ -3102,6 +3102,9 @@ impl WriteEngine {
             return;
         }
         let os = self.superblock.offset_size;
+        let Ok(offset_width) = OffsetWidth::try_from(os) else {
+            return;
+        };
         let file_len = self.image.len();
 
         // Seed the free list(s) with every persisted section (addresses are stored
@@ -3215,7 +3218,7 @@ impl WriteEngine {
                 continue;
             }
             let Ok(hdr_len) =
-                hdf5_pure_format::__private::free_space_manager_header_len(os).to_usize()
+                hdf5_pure_format::__private::free_space_manager_header_len(offset_width).to_usize()
             else {
                 continue;
             };
@@ -3223,13 +3226,12 @@ impl WriteEngine {
                 continue;
             };
             if let Ok(h) = FreeSpaceManagerHeader::parse(&fshd, os) {
-                // `FreeSpaceManagerHeader::parse` succeeding guarantees the header's own bytes
-                // are present, so the FSHD extent is in-bounds; validate the
-                // section-info extent before recording it, so a malformed
-                // `fsse_used` can't later free a region running past end-of-file.
+                // The read returned the header's bytes, so the header's extent is in the file.
+                // The section list's extent is checked before it is recorded, so a malformed
+                // `fsse_used` cannot free a region past the end of the file.
                 old_blocks.push((
                     m,
-                    hdf5_pure_format::__private::free_space_manager_header_len(os),
+                    hdf5_pure_format::__private::free_space_manager_header_len(offset_width),
                 ));
                 if !h.fsse_addr.is_undefined(os)
                     && h.fsse_addr
@@ -7119,6 +7121,7 @@ impl WriteEngine {
             return self.commit_persisting_paged(new_root, to_free, placement);
         }
         let os = self.superblock.offset_size;
+        let offset_width = OffsetWidth::try_from(os)?;
         let (strategy, threshold, page_size, old_blocks) = {
             // Copy what we need so no borrow of `self.persist` is held across the
             // `&mut self` writes below; the old state stays in place so a failure
@@ -7165,7 +7168,7 @@ impl WriteEngine {
         // already unreachable from the on-disk root, which is the guarantee
         // [`reserve`](Self::reserve) rests on too.
         let (post, placed_at, tail_len, eoa) =
-            self.flat_tail_layout(&to_free, &old_blocks, ext_len, os);
+            self.flat_tail_layout(&to_free, &old_blocks, ext_len, offset_width);
         if placed_at.is_none() && placement == TailPlacement::ReuseOnly {
             // The shrink pass appends nothing: growing the file by a tail is the
             // opposite of what it was called for. Nothing has been written and the
@@ -7178,7 +7181,9 @@ impl WriteEngine {
         let sections = self.persisted_sections(&post);
         let fshd_addr = self.persisted_address(ext_addr + ext_len);
         let fsse_addr = self.persisted_address(
-            ext_addr + ext_len + hdf5_pure_format::__private::free_space_manager_header_len(os),
+            ext_addr
+                + ext_len
+                + hdf5_pure_format::__private::free_space_manager_header_len(offset_width),
         );
         // A reused tail sits inside the file, which ends it at the end-of-allocation
         // the layout settled on — the current end-of-file, less any run of free
@@ -7225,7 +7230,7 @@ impl WriteEngine {
                 &sections,
                 fshd_addr,
                 fsse_addr,
-                os,
+                offset_width,
                 SECTION_CLASS_SIMPLE,
             );
             (ext_oh, Some((fshd, fsse)))
@@ -7434,7 +7439,7 @@ impl WriteEngine {
         to_free: &[(u64, u64, FreeClass)],
         old_blocks: &[(u64, u64)],
         ext_len: u64,
-        os: u8,
+        os: OffsetWidth,
     ) -> (FreeList, Option<u64>, u64, u64) {
         /// Enough rounds for the section set to settle after a reservation shrinks
         /// it, without letting a proposal that keeps growing spin.
@@ -7524,6 +7529,7 @@ impl WriteEngine {
         placement: TailPlacement,
     ) -> Result<(), Error> {
         let os = self.superblock.offset_size;
+        let offset_width = OffsetWidth::try_from(os)?;
         let (strategy, threshold, page_size, old_blocks) = {
             let ps = self
                 .persist
@@ -7591,7 +7597,7 @@ impl WriteEngine {
         // past it into whatever lives next. A few rounds settle it; a proposal that
         // will not converge falls through to the append below, which has no length
         // to satisfy.
-        let placed = self.tail_layout(&to_free, &old_blocks, ext_len, page_size, os);
+        let placed = self.tail_layout(&to_free, &old_blocks, ext_len, page_size, offset_width);
         if placed.is_none() && placement == TailPlacement::ReuseOnly {
             // As on the flat path: the shrink pass opens no page of its own.
             return Ok(());
@@ -7614,7 +7620,7 @@ impl WriteEngine {
                     &self.persisted_sections(&post.unclassified),
                     page_size,
                     self.persisted_address(at + ext_len),
-                    os,
+                    offset_width,
                 );
                 let blocks_len = plan.end_of_managers.get().max(at + ext_len) - at;
                 (post, plan, at, blocks_len, at)
@@ -7667,7 +7673,7 @@ impl WriteEngine {
                 &b.sections,
                 b.fshd_addr,
                 b.fsse_addr,
-                os,
+                offset_width,
                 b.class,
             );
             self.write_tail_block(region, base.absolute(b.fshd_addr)?, &fshd)?;
@@ -7880,7 +7886,7 @@ impl WriteEngine {
         old_blocks: &[(u64, u64)],
         ext_len: u64,
         page_size: u64,
-        os: u8,
+        os: OffsetWidth,
     ) -> Option<(PagedPostFree, PagedManagerPlan, u64, u64, u64)> {
         /// Enough rounds for the section set to settle after a reservation shrinks
         /// it, without letting an oscillating proposal spin.
@@ -16660,7 +16666,7 @@ mod tests {
                 pg.meta.free(PAGE, hole);
             }
             let free_before = free_total(&s);
-            let layout = s.tail_layout(&[], &[], EXT_LEN, PAGE, os);
+            let layout = s.tail_layout(&[], &[], EXT_LEN, PAGE, OffsetWidth::try_from(os).unwrap());
             let free_after = free_total(&s);
             match layout {
                 Some((_, _, at, blocks_len, _)) => {
@@ -16784,7 +16790,8 @@ mod tests {
             s.free = FreeList::new();
             s.free.free(HOLE_AT, hole);
             let free_before = free_total(&s);
-            let (post, at, tail_len, _) = s.flat_tail_layout(&[], &[], EXT_LEN, os);
+            let (post, at, tail_len, _) =
+                s.flat_tail_layout(&[], &[], EXT_LEN, OffsetWidth::try_from(os).unwrap());
             let free_after = free_total(&s);
             // The blocks the commit will write into the extent it was handed. A hole
             // consumed outright drops a section from the managers, so this comes out
@@ -16793,7 +16800,7 @@ mod tests {
             let written = EXT_LEN
                 + hdf5_pure_format::__private::free_space_manager_len(
                     &s.persisted_sections(&post),
-                    os,
+                    OffsetWidth::try_from(os).unwrap(),
                 );
             match at {
                 Some(at) => {

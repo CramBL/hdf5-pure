@@ -3117,7 +3117,6 @@ impl FileWriter {
         // persisting. Emission is address-driven: gaps are zero-filled so the
         // physical file reaches the page-aligned end-of-allocation.
         if paged {
-            let os = OFFSET_SIZE;
             let base = BaseAddress::new(ub as u64);
             let mut meta = cursor2 as u64; // metadata cursor, base-relative
 
@@ -3208,17 +3207,18 @@ impl FileWriter {
             let mut super_fsm: Option<(StoredAddress, StoredAddress)> = None;
             let mut draw_fsm: Option<(StoredAddress, StoredAddress)> = None;
             let mut large_fsm: Option<(StoredAddress, StoredAddress)> = None;
-            let super_block_len = hdf5_pure_format::__private::free_space_manager_header_len(os)
-                + hdf5_pure_format::__private::section_info_len(&[0], os);
+            let super_block_len =
+                hdf5_pure_format::__private::free_space_manager_header_len(OFFSET_WIDTH)
+                    + hdf5_pure_format::__private::section_info_len(&[0], OFFSET_WIDTH);
             let draw_block_len = if draw_active {
-                hdf5_pure_format::__private::free_space_manager_header_len(os)
-                    + hdf5_pure_format::__private::section_info_len(&[0], os)
+                hdf5_pure_format::__private::free_space_manager_header_len(OFFSET_WIDTH)
+                    + hdf5_pure_format::__private::section_info_len(&[0], OFFSET_WIDTH)
             } else {
                 0
             };
             let large_block_len = if large_active {
-                hdf5_pure_format::__private::free_space_manager_header_len(os)
-                    + hdf5_pure_format::__private::section_info_len(&large_frag_sizes, os)
+                hdf5_pure_format::__private::free_space_manager_header_len(OFFSET_WIDTH)
+                    + hdf5_pure_format::__private::section_info_len(&large_frag_sizes, OFFSET_WIDTH)
             } else {
                 0
             };
@@ -3235,25 +3235,31 @@ impl FileWriter {
             if persist_paged {
                 if super_active {
                     let fshd_addr = StoredAddress::new(meta);
-                    meta += hdf5_pure_format::__private::free_space_manager_header_len(os);
+                    meta +=
+                        hdf5_pure_format::__private::free_space_manager_header_len(OFFSET_WIDTH);
                     let fsse_addr = StoredAddress::new(meta);
-                    meta += hdf5_pure_format::__private::section_info_len(&[0], os);
+                    meta += hdf5_pure_format::__private::section_info_len(&[0], OFFSET_WIDTH);
                     slots[0] = fshd_addr.get();
                     super_fsm = Some((fshd_addr, fsse_addr));
                 }
                 if draw_active {
                     let fshd_addr = StoredAddress::new(meta);
-                    meta += hdf5_pure_format::__private::free_space_manager_header_len(os);
+                    meta +=
+                        hdf5_pure_format::__private::free_space_manager_header_len(OFFSET_WIDTH);
                     let fsse_addr = StoredAddress::new(meta);
-                    meta += hdf5_pure_format::__private::section_info_len(&[0], os);
+                    meta += hdf5_pure_format::__private::section_info_len(&[0], OFFSET_WIDTH);
                     slots[2] = fshd_addr.get();
                     draw_fsm = Some((fshd_addr, fsse_addr));
                 }
                 if large_active {
                     let fshd_addr = StoredAddress::new(meta);
-                    meta += hdf5_pure_format::__private::free_space_manager_header_len(os);
+                    meta +=
+                        hdf5_pure_format::__private::free_space_manager_header_len(OFFSET_WIDTH);
                     let fsse_addr = StoredAddress::new(meta);
-                    meta += hdf5_pure_format::__private::section_info_len(&large_frag_sizes, os);
+                    meta += hdf5_pure_format::__private::section_info_len(
+                        &large_frag_sizes,
+                        OFFSET_WIDTH,
+                    );
                     slots[6] = fshd_addr.get();
                     large_fsm = Some((fshd_addr, fsse_addr));
                 }
@@ -3420,7 +3426,7 @@ impl FileWriter {
                     &[super_section.expect("SUPER active implies a section")],
                     fshd_addr,
                     fsse_addr,
-                    os,
+                    OFFSET_WIDTH,
                     SECTION_CLASS_SMALL,
                 )
             });
@@ -3429,7 +3435,7 @@ impl FileWriter {
                     &[draw_section.expect("DRAW active implies a section")],
                     fshd_addr,
                     fsse_addr,
-                    os,
+                    OFFSET_WIDTH,
                     SECTION_CLASS_SMALL,
                 )
             });
@@ -3438,7 +3444,7 @@ impl FileWriter {
                     &large_sections,
                     fshd_addr,
                     fsse_addr,
-                    os,
+                    OFFSET_WIDTH,
                     SECTION_CLASS_LARGE,
                 )
             });

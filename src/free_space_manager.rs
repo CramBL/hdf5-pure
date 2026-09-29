@@ -16,6 +16,7 @@ use crate::address::{BaseAddress, StoredAddress};
 use crate::convert::Narrow;
 use crate::error::FormatError;
 use crate::file_space_info::NUM_FILE_FSM_MANAGERS;
+use crate::width::OffsetWidth;
 
 /// Byte width of one manager address in the File Space Info message.
 ///
@@ -79,7 +80,9 @@ pub(crate) fn read_persisted_sections_source<S: crate::source::Source>(
 ) -> Result<PersistedSections, FormatError> {
     let mut sections = Vec::new();
     let mut blocks = Vec::new();
-    let hdr_len = hdf5_pure_format::__private::free_space_manager_header_len(offset_size);
+    let hdr_len = hdf5_pure_format::__private::free_space_manager_header_len(
+        OffsetWidth::try_from(offset_size)?,
+    );
     for &addr in manager_addrs {
         let addr = StoredAddress::new(addr);
         if addr.is_undefined(offset_size) {
@@ -213,7 +216,7 @@ pub(crate) fn plan_paged_managers(
     unclassified: &[FreeSection],
     page_size: u64,
     start: StoredAddress,
-    offset_size: u8,
+    offset_size: OffsetWidth,
 ) -> PagedManagerPlan {
     let mut slot0 = Vec::new();
     let mut slot2 = Vec::new();
@@ -328,7 +331,7 @@ mod tests {
             &[],
             StoredAddress::new(0),
             StoredAddress::new(0xFFFF_FFFF),
-            OS,
+            OffsetWidth::Four,
             SECTION_CLASS_SIMPLE,
         );
 
@@ -351,7 +354,7 @@ mod tests {
             blocks,
             vec![(
                 0,
-                hdf5_pure_format::__private::free_space_manager_header_len(OS)
+                hdf5_pure_format::__private::free_space_manager_header_len(OffsetWidth::Four)
             )],
             "only the header block was read"
         );
@@ -368,7 +371,7 @@ mod tests {
             &sections,
             StoredAddress::new(1000),
             StoredAddress::new(1100),
-            8,
+            OffsetWidth::Eight,
             SECTION_CLASS_SIMPLE,
         );
         let header = FreeSpaceManagerHeader::parse(&fshd, 8).unwrap();
@@ -382,7 +385,7 @@ mod tests {
             &sections,
             StoredAddress::new(1000),
             StoredAddress::new(1100),
-            8,
+            OffsetWidth::Eight,
             SECTION_CLASS_SIMPLE,
         );
         let mut buf = vec![0u8; 1100 + fsse.len()];
@@ -409,7 +412,7 @@ mod tests {
                 &sections,
                 StoredAddress::new(1000),
                 StoredAddress::new(1100),
-                8,
+                OffsetWidth::Eight,
                 class,
             );
             // The last section record's class byte precedes the 4-byte checksum.
