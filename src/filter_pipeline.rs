@@ -5,14 +5,14 @@ use hdf5_pure_format::__private::FilterPipelineError;
 
 use crate::error::FormatError;
 
-pub use hdf5_pure_filter::FILTER_DEFLATE;
-pub use hdf5_pure_filter::FILTER_FLETCHER32;
-pub use hdf5_pure_filter::FILTER_LZF;
-pub use hdf5_pure_filter::FILTER_SCALEOFFSET;
-pub use hdf5_pure_filter::FILTER_SHUFFLE;
+pub use hdf5_pure_filter::__private::FILTER_DEFLATE;
+pub use hdf5_pure_filter::__private::FILTER_FLETCHER32;
+pub use hdf5_pure_filter::__private::FILTER_LZF;
+pub use hdf5_pure_filter::__private::FILTER_SCALEOFFSET;
+pub use hdf5_pure_filter::__private::FILTER_SHUFFLE;
 #[cfg(feature = "zfp")]
-pub use hdf5_pure_filter::FILTER_ZFP;
-pub use hdf5_pure_filter::H5Z_FLAG_OPTIONAL;
+pub use hdf5_pure_filter::__private::FILTER_ZFP;
+pub use hdf5_pure_filter::__private::H5Z_FLAG_OPTIONAL;
 pub use hdf5_pure_format::__private::FilterDescription;
 pub use hdf5_pure_format::__private::FilterPipeline;
 
@@ -45,7 +45,7 @@ impl<'a> FilterStepsRef<'a> {
     }
 }
 
-impl hdf5_pure_filter::FilterSteps for FilterStepsRef<'_> {
+impl hdf5_pure_filter::__private::FilterSteps for FilterStepsRef<'_> {
     fn len(&self) -> usize {
         self.0.len()
     }

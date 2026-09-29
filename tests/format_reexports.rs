@@ -137,6 +137,6 @@ fn public_member_fields_remain_nameable() {
 
 #[test]
 fn filter_errors_convert_to_the_public_error() {
-    let filter_error: FormatError = hdf5_pure_filter::Error::UnsupportedFilter(1).into();
+    let filter_error: FormatError = hdf5_pure_filter::__private::Error::UnsupportedFilter(1).into();
     assert_eq!(filter_error, FormatError::UnsupportedFilter(1));
 }

@@ -12075,7 +12075,9 @@ const GROUP_INFO_BODY: [u8; 2] = [0, 0];
 ///
 /// An in-place overwrite checks this classification before writing chunk data.
 pub(crate) fn pipeline_reencodable(pipeline: &FilterPipeline) -> bool {
-    hdf5_pure_filter::filters_reencodable(&crate::filter_pipeline::FilterStepsRef::new(pipeline))
+    hdf5_pure_filter::__private::filters_reencodable(&crate::filter_pipeline::FilterStepsRef::new(
+        pipeline,
+    ))
 }
 
 /// Returns whether the pipeline's filters guarantee preservation of element values.
@@ -12083,7 +12085,9 @@ pub(crate) fn pipeline_reencodable(pipeline: &FilterPipeline) -> bool {
 /// Appending to a partial trailing chunk decodes committed values before writing
 /// the expanded chunk. Lossy filters may change those values through this operation.
 pub(crate) fn pipeline_lossless(pipeline: &FilterPipeline) -> bool {
-    hdf5_pure_filter::filters_lossless(&crate::filter_pipeline::FilterStepsRef::new(pipeline))
+    hdf5_pure_filter::__private::filters_lossless(&crate::filter_pipeline::FilterStepsRef::new(
+        pipeline,
+    ))
 }
 
 /// The refusal both append paths raise for a lossy pipeline sitting on a partial
