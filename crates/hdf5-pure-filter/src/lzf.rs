@@ -326,4 +326,19 @@ mod tests {
             Error::InvalidLzfStream("output exceeds expected chunk size")
         );
     }
+
+    #[test]
+    fn the_codec_round_trips_builds_h5py_cd_values_and_rejects_a_truncated_literal_run() {
+        let stream = [4, b'a', b'b', b'c', b'd', b'e', 3 << 5, 4];
+        assert_eq!(decompress(&stream, Some(10)).unwrap(), b"abcdeabcde");
+
+        let raw = b"abcdeabcde";
+        let encoded = compress(raw);
+        assert_eq!(decompress(&encoded, Some(raw.len())).unwrap(), raw);
+        assert_eq!(h5py_cd_values(2, &[3, 4]), [4, 0x0105, 24]);
+        assert_eq!(
+            decompress(&[10, b'x'], None).unwrap_err(),
+            Error::InvalidLzfStream("truncated literal run")
+        );
+    }
 }
