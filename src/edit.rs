@@ -8784,7 +8784,7 @@ impl WriteEngine {
         // re-encoded in the wrong element width.
         if let Some(idx_addr) = *address {
             let hdr = ExtensibleArrayHeader::parse_from_source(
-                &view,
+                &SourceMetadata(&view),
                 idx_addr,
                 OFFSET_SIZE,
                 LENGTH_SIZE,

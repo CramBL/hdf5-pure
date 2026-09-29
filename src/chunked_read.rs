@@ -15,21 +15,21 @@ use crate::bytes::read_offset;
 use crate::chunk_cache::{CachePass, ChunkCache};
 use crate::chunk_grid::{ChunkGrid, GridOrder};
 use crate::chunk_span::ChunkSpanReader;
+use crate::chunked_write::ChunkRecord;
 use crate::convert::{Narrow, slice_range};
 use crate::data_layout::{ChunkIndexLayout, ChunkedLayoutFlags, DataLayout};
 use crate::dataspace::Dataspace;
 use crate::error::FormatError;
-use crate::extensible_array::{
-    ExtensibleArrayHeader, read_extensible_array_chunks, read_extensible_array_chunks_from_source,
-};
+use crate::extensible_array;
+use crate::extensible_array::ExtensibleArrayHeader;
 use crate::fill_value::FillPattern;
 use crate::filter_pipeline::FilterPipeline;
 use crate::filters::{ChunkContext, FilterScratch, decompress_chunk_with};
-use crate::fixed_array::{
-    FixedArrayHeader, read_fixed_array_chunks, read_fixed_array_chunks_from_source,
-};
+use crate::fixed_array;
+use crate::fixed_array::FixedArrayHeader;
 use crate::read_spec::RawReadSpec;
 use crate::source::Source;
+use crate::source::SourceMetadata;
 
 /// Decodes every chunk, reading each chunk's bytes from a [`Source`].
 ///
@@ -157,6 +157,26 @@ pub(crate) struct ChunkInfo {
     /// A caller that reads the bytes from a source that is not framed at the base address adds
     /// the base first.
     pub(crate) address: StoredAddress,
+}
+
+impl ChunkInfo {
+    fn in_extent(
+        grid: &ChunkGrid,
+        slot: u64,
+        record: ChunkRecord,
+    ) -> Result<Option<Self>, FormatError> {
+        let ChunkRecord {
+            address,
+            stored_size,
+            filter_mask,
+        } = record;
+        Ok(grid.offsets_in_extent(slot)?.map(|offsets| Self {
+            chunk_size: StoredChunkSize::v4(stored_size),
+            filter_mask,
+            offsets,
+            address,
+        }))
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1349,32 +1369,40 @@ pub(crate) fn collect_chunks_for_layout_from_source<S: Source + ?Sized>(
             elem_size,
         )?),
         ChunkIndexLayout::FixedArray { .. } => {
-            let spatial_chunk_dims = spatial_dims();
+            let source = SourceMetadata(source);
             let header =
-                FixedArrayHeader::parse_from_source(source, addr, offset_size, length_size)?;
-            read_fixed_array_chunks_from_source(
-                source,
+                FixedArrayHeader::parse_from_source(&source, addr, offset_size, length_size)?;
+            let grid = index_grid(dataspace, &spatial_dims(), GridOrder::RowMajor)?;
+            let mut chunks = Vec::new();
+            fixed_array::read_fixed_array_chunks_from_source(
+                &source,
                 &header,
-                &index_grid(dataspace, &spatial_chunk_dims, GridOrder::RowMajor)?,
-                &spatial_chunk_dims,
-                elem_size,
                 offset_size,
-                length_size,
-            )
+                grid.chunk_byte_size(elem_size)?,
+                |slot, record| {
+                    chunks.extend(ChunkInfo::in_extent(&grid, slot, record)?);
+                    Ok(())
+                },
+            )?;
+            Ok(chunks)
         }
         ChunkIndexLayout::ExtensibleArray { .. } => {
-            let spatial_chunk_dims = spatial_dims();
+            let source = SourceMetadata(source);
             let header =
-                ExtensibleArrayHeader::parse_from_source(source, addr, offset_size, length_size)?;
-            read_extensible_array_chunks_from_source(
-                source,
+                ExtensibleArrayHeader::parse_from_source(&source, addr, offset_size, length_size)?;
+            let grid = index_grid(dataspace, &spatial_dims(), GridOrder::UnlimitedFirst)?;
+            let mut chunks = Vec::new();
+            extensible_array::read_extensible_array_chunks_from_source(
+                &source,
                 &header,
-                &index_grid(dataspace, &spatial_chunk_dims, GridOrder::UnlimitedFirst)?,
-                &spatial_chunk_dims,
-                elem_size,
                 offset_size,
-                length_size,
-            )
+                grid.chunk_byte_size(elem_size)?,
+                |slot, record| {
+                    chunks.extend(ChunkInfo::in_extent(&grid, slot, record)?);
+                    Ok(())
+                },
+            )?;
+            Ok(chunks)
         }
         ChunkIndexLayout::BTreeV2 { .. } => Err(FormatError::ChunkedReadError(
             "a version 2 B-tree chunk index cannot be enumerated".into(),
@@ -1633,20 +1661,18 @@ fn collect_chunk_index_spans<S: Source + ?Sized>(
         }
         // Single chunk and implicit indexes have no separate index structure.
         ChunkIndexLayout::SingleChunk { .. } | ChunkIndexLayout::Implicit { .. } => Ok(Vec::new()),
-        ChunkIndexLayout::FixedArray { .. } => crate::fixed_array::fixed_array_index_spans(
-            source,
+        ChunkIndexLayout::FixedArray { .. } => fixed_array::fixed_array_index_spans(
+            &SourceMetadata(source),
             index_addr,
             offset_size,
             length_size,
         ),
-        ChunkIndexLayout::ExtensibleArray { .. } => {
-            crate::extensible_array::extensible_array_index_spans(
-                source,
-                index_addr,
-                offset_size,
-                length_size,
-            )
-        }
+        ChunkIndexLayout::ExtensibleArray { .. } => extensible_array::extensible_array_index_spans(
+            &SourceMetadata(source),
+            index_addr,
+            offset_size,
+            length_size,
+        ),
         ChunkIndexLayout::BTreeV2 { .. } => Err(FormatError::ChunkedReadError(
             "a version 2 B-tree chunk index has no reclaim walker".into(),
         )),
@@ -1819,40 +1845,46 @@ pub fn read_chunked_data_cached(
                 u64::from(elem_width.get()),
             )?,
             ChunkIndexLayout::FixedArray { .. } => {
-                let spatial_chunk_dims = spatial_dims();
                 let header = FixedArrayHeader::parse(
                     file_data,
                     addr.get().to_usize()?,
                     offset_size,
                     length_size,
                 )?;
-                read_fixed_array_chunks(
+                let grid = index_grid(dataspace, &spatial_dims(), GridOrder::RowMajor)?;
+                let mut chunks = Vec::new();
+                fixed_array::read_fixed_array_chunks(
                     file_data,
                     &header,
-                    &index_grid(dataspace, &spatial_chunk_dims, GridOrder::RowMajor)?,
-                    &spatial_chunk_dims,
-                    u64::from(elem_width.get()),
                     offset_size,
-                    length_size,
-                )?
+                    grid.chunk_byte_size(u64::from(elem_width.get()))?,
+                    |slot, record| {
+                        chunks.extend(ChunkInfo::in_extent(&grid, slot, record)?);
+                        Ok(())
+                    },
+                )?;
+                chunks
             }
             ChunkIndexLayout::ExtensibleArray { .. } => {
-                let spatial_chunk_dims = spatial_dims();
                 let header = ExtensibleArrayHeader::parse(
                     file_data,
                     addr.get().to_usize()?,
                     offset_size,
                     length_size,
                 )?;
-                read_extensible_array_chunks(
+                let grid = index_grid(dataspace, &spatial_dims(), GridOrder::UnlimitedFirst)?;
+                let mut chunks = Vec::new();
+                extensible_array::read_extensible_array_chunks(
                     file_data,
                     &header,
-                    &index_grid(dataspace, &spatial_chunk_dims, GridOrder::UnlimitedFirst)?,
-                    &spatial_chunk_dims,
-                    u64::from(elem_width.get()),
                     offset_size,
-                    length_size,
-                )?
+                    grid.chunk_byte_size(u64::from(elem_width.get()))?,
+                    |slot, record| {
+                        chunks.extend(ChunkInfo::in_extent(&grid, slot, record)?);
+                        Ok(())
+                    },
+                )?;
+                chunks
             }
             ChunkIndexLayout::BTreeV2 { .. } => {
                 return Err(FormatError::ChunkedReadError(
@@ -2089,6 +2121,7 @@ mod tests {
     use test_util::widths::Widths;
 
     use super::*;
+    use crate::chunked_write::ChunkArrayKind;
     use crate::convert::nz;
     use crate::dataspace::MaxExtent;
 
@@ -2632,7 +2665,7 @@ mod tests {
         dataspace: &Dataspace,
         datatype: &Datatype,
         pipeline: Option<&FilterPipeline>,
-    ) {
+    ) -> Vec<u8> {
         use crate::source::ReadSeekSource;
         let spec = RawReadSpec {
             layout,
@@ -2653,6 +2686,7 @@ mod tests {
         .unwrap();
         assert_eq!(buffered, from_mem, "BytesSource mismatch");
         assert_eq!(buffered, from_seek, "ReadSeekSource mismatch");
+        buffered
     }
 
     #[cfg(feature = "std")]
@@ -2660,7 +2694,212 @@ mod tests {
     fn streaming_chunked_btree_v1_matches_buffered() {
         let values: Vec<f64> = (0..25).map(|i| i as f64).collect();
         let (file_data, layout, dataspace) = build_1d_chunked_file(&values, 10);
-        assert_chunked_streams_match(&file_data, &layout, &dataspace, &make_f64_type(), None);
+        let raw: Vec<u8> = values.iter().flat_map(|v| v.to_le_bytes()).collect();
+        assert_eq!(
+            assert_chunked_streams_match(&file_data, &layout, &dataspace, &make_f64_type(), None),
+            raw
+        );
+    }
+
+    #[cfg(feature = "std")]
+    #[rstest]
+    #[case::paged_fixed_array(3_000, None)]
+    #[case::extensible_array_super_blocks(2_000, Some(MaxExtent::Unlimited))]
+    #[case::paged_extensible_array(140_000, Some(MaxExtent::Unlimited))]
+    fn streaming_chunk_arrays_match_buffered(
+        #[case] elements: u64,
+        #[case] max_extent: Option<MaxExtent>,
+    ) {
+        let values: Vec<f64> = (0..elements).map(|i| i as f64).collect();
+        let raw: Vec<u8> = values.iter().flat_map(|v| v.to_le_bytes()).collect();
+        let data_address = StoredAddress::new(0x1000);
+        let options = crate::chunked_write::ChunkOptions {
+            chunk_dims: Some(vec![1]),
+            ..Default::default()
+        };
+        let maxshape = max_extent.map(|extent| vec![extent]);
+        let built = crate::chunked_write::build_chunked_data_at_ext(
+            &raw,
+            &[elements],
+            ChunkContext::basic(&[1], 8),
+            &options,
+            data_address,
+            maxshape.as_deref(),
+            FillPattern::ZERO,
+        )
+        .unwrap();
+        let mut file_data = vec![0u8; 0x1000];
+        file_data.extend_from_slice(&built.data_bytes);
+        let layout = DataLayout::parse(&built.layout_message, 8, 8).unwrap();
+        let dataspace = Dataspace {
+            space_type: DataspaceType::Simple,
+            rank: 1,
+            dimensions: vec![elements],
+            max_dimensions: maxshape,
+        };
+        assert_eq!(
+            assert_chunked_streams_match(&file_data, &layout, &dataspace, &make_f64_type(), None),
+            raw
+        );
+    }
+
+    fn indexed_chunk(address: u64) -> ChunkRecord {
+        ChunkRecord {
+            address: StoredAddress::new(address),
+            stored_size: 8,
+            filter_mask: 0,
+        }
+    }
+
+    fn array_index(
+        kind: ChunkArrayKind,
+        chunks: &[ChunkRecord],
+        slot_of: &[u64],
+        slots: u64,
+        chunk_bytes: u64,
+    ) -> (ChunkIndexLayout, Vec<u8>) {
+        let slots = crate::chunked_write::IndexSlots::new(chunks, slot_of, slots).unwrap();
+        let address = StoredAddress::new(0);
+        match kind {
+            ChunkArrayKind::FixedArray => (
+                ChunkIndexLayout::FixedArray {
+                    address: Some(address),
+                },
+                crate::chunked_write::build_fixed_array_at(
+                    &slots,
+                    chunk_bytes,
+                    8,
+                    8,
+                    false,
+                    address,
+                ),
+            ),
+            ChunkArrayKind::ExtensibleArray => (
+                ChunkIndexLayout::ExtensibleArray {
+                    address: Some(address),
+                },
+                crate::chunked_write::build_extensible_array_at(
+                    &slots,
+                    chunk_bytes,
+                    8,
+                    8,
+                    false,
+                    address,
+                )
+                .unwrap(),
+            ),
+        }
+    }
+
+    // The Extensible Array case uses slot 2, between the dataset's chunks at grid slots 1 and 4,
+    // since its walk stops at the highest slot set.
+    #[rstest]
+    // Chunk [2] over shape [4] is two chunks, and a maximum of [8] numbers four
+    // slots, and slot 3 lies past the dataset's four elements.
+    #[case::fixed_array(
+        ChunkArrayKind::FixedArray,
+        &[2],
+        &[4],
+        &[MaxExtent::Fixed(8)],
+        &[0, 1, 3],
+        4,
+        &[vec![0], vec![2]],
+    )]
+    // Shape [3, 3] with [2, 2] chunks, maximum [8, unlimited]. The rotation
+    // puts the unlimited dimension first, so the multipliers are [4, 1] over
+    // (column, row), and slot 2 decodes to chunk row 2, past a 3-row dataset.
+    #[case::extensible_array(
+        ChunkArrayKind::ExtensibleArray,
+        &[2, 2],
+        &[3, 3],
+        &[MaxExtent::Fixed(8), MaxExtent::Unlimited],
+        &[0, 1, 2],
+        3,
+        &[vec![0, 0], vec![2, 0]],
+    )]
+    fn a_chunk_at_a_slot_outside_the_dataset_is_dropped(
+        #[case] kind: ChunkArrayKind,
+        #[case] chunk_dims: &[u64],
+        #[case] dims: &[u64],
+        #[case] max_dims: &[MaxExtent],
+        #[case] slot_of: &[u64],
+        #[case] slots: u64,
+        #[case] offsets: &[Vec<u64>],
+    ) {
+        let chunks = [
+            indexed_chunk(0x1000),
+            indexed_chunk(0x2000),
+            indexed_chunk(0x3000),
+        ];
+        let chunk_bytes = chunk_dims.iter().product::<u64>() * 4;
+        let (index, file) = array_index(kind, &chunks, slot_of, slots, chunk_bytes);
+        let dataspace = Dataspace {
+            space_type: DataspaceType::Simple,
+            rank: dims.len() as u8,
+            dimensions: dims.to_vec(),
+            max_dimensions: Some(max_dims.to_vec()),
+        };
+        let chunk_dimensions: Vec<u64> = chunk_dims.iter().copied().chain([4]).collect();
+
+        let read = collect_chunks_for_layout_from_source(
+            &BytesSource::new(&file),
+            index,
+            &chunk_dimensions,
+            &dataspace,
+            4,
+            8,
+            8,
+        )
+        .unwrap();
+        let expected: Vec<ChunkInfo> = [0x1000, 0x2000]
+            .into_iter()
+            .zip(offsets)
+            .map(|(address, offsets)| ChunkInfo {
+                chunk_size: StoredChunkSize::v4(chunk_bytes),
+                filter_mask: 0,
+                offsets: offsets.clone(),
+                address: StoredAddress::new(address),
+            })
+            .collect();
+        assert_eq!(read, expected);
+    }
+
+    // `fuzz_targets/parse_file.rs` reaches this path with a crafted dataspace.
+    #[test]
+    fn a_dimension_of_no_chunks_refuses_rather_than_dividing_by_zero() {
+        let (index, file) = array_index(
+            ChunkArrayKind::ExtensibleArray,
+            &[indexed_chunk(0x1000)],
+            &[0],
+            1,
+            16,
+        );
+        // Maximum extent 0 in the trailing dimension, current extent 4.
+        let dataspace = Dataspace {
+            space_type: DataspaceType::Simple,
+            rank: 2,
+            dimensions: vec![3, 4],
+            max_dimensions: Some(vec![MaxExtent::Unlimited, MaxExtent::Fixed(0)]),
+        };
+
+        let err = collect_chunks_for_layout_from_source(
+            &BytesSource::new(&file),
+            index,
+            &[2, 2, 4],
+            &dataspace,
+            4,
+            8,
+            8,
+        )
+        .unwrap_err();
+        let FormatError::ChunkedReadError(message) = &err else {
+            panic!("expected ChunkedReadError, got {err:?}");
+        };
+        assert_eq!(
+            message,
+            "this chunked dataset has a dimension of no chunks at all, so its chunk index \
+             numbers nothing; a slot in it cannot be resolved"
+        );
     }
 
     #[cfg(feature = "deflate")]

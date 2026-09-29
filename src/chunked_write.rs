@@ -480,7 +480,7 @@ impl ChunkOptions {
 }
 
 /// A chunk that has been written to the file buffer.
-#[derive(Debug, Clone)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ChunkRecord {
     /// Where the chunk's data begins.
     pub address: StoredAddress,
@@ -4675,7 +4675,6 @@ mod tests {
     /// `extensible_array_stats` must reproduce the EAHD statistics that
     /// `build_extensible_array_at` actually writes (these feed the in-place
     /// append writer, so any drift would corrupt appended files).
-    #[cfg(feature = "std")]
     #[test]
     fn ea_compute_stats_matches_builder() {
         use crate::extensible_array::{ExtensibleArrayGeometry, ExtensibleArrayHeader};

@@ -47,6 +47,7 @@ use crate::filters::{ChunkContext, FilterScratch, compress_chunk_with, decompres
 use crate::message_flags::MessageFlags;
 use crate::message_type::MessageType;
 use crate::source::Source;
+use crate::source::SourceMetadata;
 
 /// Counts the two index-block allocations, so a test can say whether its fixture
 /// reached them.
@@ -462,7 +463,8 @@ impl Located {
         };
         let chunk_bytes = chunk_elems.to_usize()? * elem_bytes.get();
 
-        let ea_header = ExtensibleArrayHeader::parse_from_source(file, ea_addr, os, ls)?;
+        let ea_header =
+            ExtensibleArrayHeader::parse_from_source(&SourceMetadata(file), ea_addr, os, ls)?;
         let has_filters = filter_msg.is_some();
         if (ea_header.client_id == 1) != has_filters {
             return Err(unsupported(
