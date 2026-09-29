@@ -532,15 +532,7 @@ pub fn serialize_datatype(datatype: &Datatype) -> Vec<u8> {
                 buf.extend_from_slice(m.name.as_bytes());
                 buf.push(0);
                 // Byte offset (variable-width)
-                #[expect(
-                    clippy::cast_possible_truncation,
-                    reason = "ob is the offset-byte width chosen to hold byte_offset, so each arm casts to a width that fits by construction"
-                )]
-                match ob {
-                    1 => buf.push(m.byte_offset as u8),
-                    2 => buf.extend_from_slice(&(m.byte_offset as u16).to_le_bytes()),
-                    _ => buf.extend_from_slice(&(m.byte_offset as u32).to_le_bytes()),
-                }
+                buf.extend_from_slice(&m.byte_offset.to_le_bytes()[..ob]);
                 // Recursively serialize member datatype
                 buf.extend_from_slice(&serialize_datatype(&m.datatype));
             }
@@ -738,24 +730,30 @@ fn read_null_terminated_string(data: &[u8], offset: usize) -> Result<(String, us
     Ok((name, null_pos + 1))
 }
 
-/// Determine how many bytes are needed to encode `compound_size` as a byte offset (v3).
+/// Returns the member offset width for a version 3 compound datatype of `compound_size` bytes.
 fn offset_bytes_for_size(compound_size: u32) -> usize {
-    if compound_size <= 0xFF {
-        1
-    } else if compound_size <= 0xFFFF {
-        2
-    } else {
-        4
-    }
+    // "The Datatype Message" in the format specification, version 4.0, defines the
+    // version 3 member offset width as the minimum byte count that holds the datatype size.
+    compound_size
+        .to_le_bytes()
+        .iter()
+        .rposition(|&byte| byte != 0)
+        .map_or(1, |index| index + 1)
 }
 
-/// Read an unsigned integer of 1, 2, 4, or 8 bytes (LE).
+/// Reads a little-endian unsigned integer of 1, 2, 3, 4, or 8 bytes.
+///
+/// # Errors
+///
+/// Returns [`FormatError::UnexpectedEof`] if the integer extends beyond `data` or `nbytes`
+/// is not a supported width.
 fn read_uint(data: &[u8], offset: usize, nbytes: usize) -> Result<u64, FormatError> {
     bytes::ensure_len(data, offset, nbytes)?;
     let slice = &data[offset..offset + nbytes];
     Ok(match nbytes {
         1 => slice[0] as u64,
         2 => LittleEndian::read_u16(slice) as u64,
+        3 => LittleEndian::read_uint(slice, 3),
         4 => LittleEndian::read_u32(slice) as u64,
         8 => LittleEndian::read_u64(slice),
         _ => {
@@ -1386,6 +1384,68 @@ mod tests {
                 size: 64,
                 tag: b"BLOB".to_vec(),
             }
+        );
+    }
+
+    #[rstest]
+    #[case(1, 1)]
+    #[case(255, 1)]
+    #[case(256, 2)]
+    #[case(65_535, 2)]
+    #[case(65_536, 3)]
+    #[case(70_000, 3)]
+    #[case(16_777_215, 3)]
+    #[case(16_777_216, 4)]
+    #[case(u32::MAX, 4)]
+    fn compound_offsets_use_the_minimum_byte_width(#[case] size: u32, #[case] width: usize) {
+        let datatype = Datatype::Compound {
+            size,
+            members: vec![__private::compound_member(
+                "last".into(),
+                u64::from(size - 1),
+                byte_member_type(),
+            )],
+        };
+        let mut expected = build_dt_header(COMPOUND_CLASS, DATATYPE_VERSION_THREE, [1, 0, 0], size);
+        expected.extend_from_slice(b"last\0");
+        expected.extend_from_slice(&(size - 1).to_le_bytes()[..width]);
+        expected.extend_from_slice(&serialize_datatype(&byte_member_type()));
+
+        assert_eq!(offset_bytes_for_size(size), width);
+        assert_eq!(serialize_datatype(&datatype), expected);
+        assert_eq!(
+            parse_datatype(&expected).unwrap(),
+            (datatype, expected.len())
+        );
+    }
+
+    #[rstest]
+    #[case(COMPOUND_CLASS, DATATYPE_VERSION_THREE)]
+    #[case(COMPOUND_CLASS, DATATYPE_VERSION_FOUR)]
+    #[case(COMPOUND_CLASS, DATATYPE_VERSION_FIVE)]
+    #[case(COMPLEX_CLASS, DATATYPE_VERSION_FIVE)]
+    fn three_byte_member_offsets_preserve_the_next_datatype(
+        #[case] class: u8,
+        #[case] version: u8,
+    ) {
+        let member = byte_member_type();
+        let mut encoded = build_dt_header(class, version, [2, 0, 0], 70_000);
+        encoded.extend_from_slice(b"first\0\0\0\0");
+        encoded.extend_from_slice(&serialize_datatype(&member));
+        encoded.extend_from_slice(b"last\0\x6f\x11\x01");
+        encoded.extend_from_slice(&serialize_datatype(&member));
+        assert_eq!(
+            parse_datatype(&encoded).unwrap(),
+            (
+                Datatype::Compound {
+                    size: 70_000,
+                    members: vec![
+                        __private::compound_member("first".into(), 0, member.clone()),
+                        __private::compound_member("last".into(), 69_999, member),
+                    ],
+                },
+                encoded.len(),
+            )
         );
     }
 
@@ -2211,6 +2271,20 @@ mod tests {
         };
         assert_eq!(dt.type_size(), 48);
     }
+
+    fn byte_member_type() -> Datatype {
+        Datatype::FixedPoint {
+            size: 1,
+            byte_order: DatatypeByteOrder::LittleEndian,
+            layout: FixedPointLayout {
+                signed: false,
+                bit_offset: 0,
+                bit_precision: 8,
+            },
+        }
+    }
+
+    const DATATYPE_VERSION_FOUR: u8 = 4;
 }
 
 #[cfg(all(test, feature = "std"))]

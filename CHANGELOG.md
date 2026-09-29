@@ -16,6 +16,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- Fixed incorrect member offset widths when reading and writing `Datatype::Compound` values whose element sizes are between 65,536 and 16,777,215 bytes ([#688](https://github.com/CramBL/hdf5-pure/pull/688)).
 - Fixed `AttrValue` missing from the crate root under `no_std` with `alloc` ([#635](https://github.com/CramBL/hdf5-pure/pull/635)).
 - Fixed `Dataset::read` decoding a truncated ZFP chunk to zeros, and `DatasetBuilder::with_zfp` writing float blocks whose rate cannot hold their headers ([#620](https://github.com/CramBL/hdf5-pure/pull/620)).
 - Fixed `Dataset::read` failing on ZFP chunks whose partial blocks are followed by Deflate ([#632](https://github.com/CramBL/hdf5-pure/pull/632)).
