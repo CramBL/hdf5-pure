@@ -5,7 +5,7 @@ use hdf5_pure_filter::ScaleOffsetFill;
 use hdf5_pure_filter::ScaleOffsetType;
 
 #[test]
-fn public_scale_offset_round_trip_and_zero_width_error() {
+fn an_integer_chunk_round_trips_and_a_zero_element_size_is_rejected() {
     let scalar = ScaleOffsetType::integer(false, ScaleOffsetByteOrder::LittleEndian);
     let cd = hdf5_pure_filter::build_scale_offset_cd_values(
         ScaleOffset::Integer(0),

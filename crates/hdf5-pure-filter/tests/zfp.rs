@@ -4,7 +4,7 @@ use hdf5_pure_filter::Error;
 use hdf5_pure_filter::ZfpElementType;
 
 #[test]
-fn exported_codec_and_filter_entry_points_encode_the_same_chunk() {
+fn the_codec_and_filter_entry_points_encode_the_same_chunk() {
     let raw = [0u8; 16];
     let cd_values = hdf5_pure_filter::zfp_cd_values_rate(16.0, ZfpElementType::F32, &[4]).unwrap();
     let encoded = hdf5_pure_filter::compress_zfp(&raw, &[4], 16.0, ZfpElementType::F32).unwrap();
@@ -28,7 +28,7 @@ fn exported_codec_and_filter_entry_points_encode_the_same_chunk() {
 }
 
 #[test]
-fn exported_filter_rejects_truncated_input_and_invalid_parameters() {
+fn the_filter_rejects_truncated_input_and_invalid_parameters() {
     let cd_values = hdf5_pure_filter::zfp_cd_values_rate(16.0, ZfpElementType::F32, &[4]).unwrap();
     assert_eq!(
         hdf5_pure_filter::decompress_zfp_filter(&[], &cd_values, &[4], Some(ZfpElementType::F32)),
@@ -52,7 +52,7 @@ fn exported_filter_rejects_truncated_input_and_invalid_parameters() {
 }
 
 #[test]
-fn exported_codec_rejects_dimensions_that_cannot_be_encoded_or_multiplied() {
+fn the_codec_rejects_dimensions_that_cannot_be_encoded_or_multiplied() {
     assert_eq!(
         hdf5_pure_filter::zfp_cd_values_rate(16.0, ZfpElementType::F32, &[0]),
         Err(Error::UnsupportedZfp(

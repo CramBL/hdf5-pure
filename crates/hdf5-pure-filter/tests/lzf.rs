@@ -1,7 +1,7 @@
 use hdf5_pure_filter::Error;
 
 #[test]
-fn exported_lzf_codec_and_parameters() {
+fn the_codec_round_trips_builds_h5py_cd_values_and_rejects_a_truncated_literal_run() {
     let stream = [4, b'a', b'b', b'c', b'd', b'e', 3 << 5, 4];
     assert_eq!(
         hdf5_pure_filter::decompress_lzf(&stream, Some(10)).unwrap(),
