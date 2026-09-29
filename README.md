@@ -685,7 +685,7 @@ Reading decodes the MATLAB opaque value classes `datetime`, `duration`, and `cat
 | `checksum`     | yes     | Jenkins hash validating checksummed metadata                               |
 | `deflate`      | yes     | Deflate compression (pure Rust backend)                                    |
 | `serde`        | no      | Serialize/deserialize MATLAB v7.3 `.mat` files via serde                   |
-| `fast-deflate` | no      | zlib-ng backend for deflate via `flate2/zlib-ng`                           |
+| `fast-deflate` | no      | zlib-ng backend for deflate                                                |
 | `ndarray`      | no      | N-dimensional array I/O via the [`ndarray`](https://docs.rs/ndarray) crate |
 | `provenance`   | no      | SHA-256 data provenance tracking                                           |
 | `zfp`          | no      | ZFP fixed-rate compression (HDF5 filter 32013), f32/f64/i32/i64 × 1D–4D    |

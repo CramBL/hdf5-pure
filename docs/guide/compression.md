@@ -257,4 +257,4 @@ The scalar type is derived from the dataset's datatype when the file is written,
 
 ## `fast-deflate` backend
 
-The `fast-deflate` feature swaps the deflate backend in for the zlib-ng backend (`flate2/zlib-ng`), which is faster on supported platforms while producing standard-compatible output. The deflate API ([`with_deflate`](crate::DatasetBuilder::with_deflate)) is the same under either backend. [Cargo features](crate#cargo-features) has the full feature matrix.
+The `fast-deflate` feature swaps the deflate backend in for the zlib-ng backend, which is faster on supported platforms while producing standard-compatible output. The deflate API ([`with_deflate`](crate::DatasetBuilder::with_deflate)) is the same under either backend. [Cargo features](crate#cargo-features) has the full feature matrix.

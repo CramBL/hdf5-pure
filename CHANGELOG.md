@@ -10,6 +10,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - `FormatError::Internal` reports a condition that only a bug in this crate can produce, such as a superblock value too wide for its field ([#675](https://github.com/CramBL/hdf5-pure/pull/675)).
 
+### Changed
+
+- **Breaking:** The `flate2` Cargo feature is removed. Enable `deflate` instead. The `provenance` feature no longer exposes `sha2` as a selectable feature ([#689](https://github.com/CramBL/hdf5-pure/pull/689)).
+
 ### Fixed
 
 - Fixed `AttrValue` missing from the crate root under `no_std` with `alloc` ([#635](https://github.com/CramBL/hdf5-pure/pull/635)).
