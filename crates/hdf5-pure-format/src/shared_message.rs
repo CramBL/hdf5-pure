@@ -423,4 +423,25 @@ mod tests {
             FormatError::UnresolvedSharedMessage(MessageType::DATATYPE.to_u16())
         );
     }
+
+    #[test]
+    fn encoded_references_parse_back_to_their_locations() {
+        let address = StoredAddress::new(800);
+        let committed = encode_committed_ref(address, OffsetWidth::Eight);
+        assert_eq!(
+            parse_shared_ref(&committed, 8, 8).map(|reference| reference.location),
+            Ok(SharedLocation::ObjectHeader(address))
+        );
+        assert_eq!(committed_address_in(&committed, 8, 8), Ok(Some(address)));
+
+        let heap_id = [7; FHEAP_ID_LEN];
+        let heap = encode_sohm_ref(&heap_id);
+        assert_eq!(committed_address_in(&heap, 8, 8), Ok(None));
+        assert_eq!(
+            Unresolvable.resolve(&heap, MessageType::DATASPACE),
+            Err(FormatError::UnresolvedSharedMessage(
+                MessageType::DATASPACE.to_u16()
+            ))
+        );
+    }
 }

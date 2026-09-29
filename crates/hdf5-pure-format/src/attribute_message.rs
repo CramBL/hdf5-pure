@@ -541,6 +541,9 @@ mod tests {
 
     use super::*;
     use crate::address::StoredAddress;
+    use crate::dataspace::DataspaceType;
+    use crate::datatype::byte_order::DatatypeByteOrder;
+    use crate::datatype::layout::FixedPointLayout;
     use crate::shared_message;
 
     #[rstest]
@@ -817,5 +820,87 @@ mod tests {
         };
         assert_eq!(available, data.len());
         assert_eq!(expected, data.len() + 4);
+    }
+
+    #[rstest]
+    #[case::inline(
+        DatatypeLocation::Inline,
+        crate::datatype::serialize_datatype(&i32_datatype()),
+        attribute::Flags::NONE
+    )]
+    #[case::committed(
+        DatatypeLocation::Committed(StoredAddress::new(800)),
+        datatype::committed_reference(800),
+        attribute::Flags::SHARED_DATATYPE
+    )]
+    fn a_version_3_message_round_trips_with_an_inline_or_committed_datatype(
+        #[case] datatype_location: DatatypeLocation,
+        #[case] datatype_field: Vec<u8>,
+        #[case] flags: attribute::Flags,
+    ) {
+        let attribute = AttributeMessage {
+            name: "scale".into(),
+            datatype: i32_datatype(),
+            dataspace: Dataspace {
+                space_type: DataspaceType::Scalar,
+                rank: 0,
+                dimensions: Vec::new(),
+                max_dimensions: None,
+            },
+            raw_data: 7i32.to_le_bytes().to_vec(),
+            datatype_location,
+        };
+        let bytes = attribute.serialize_v3(OffsetWidth::Eight, 8).unwrap();
+
+        assert_eq!(
+            bytes,
+            attribute::Attribute::new(
+                "scale",
+                &datatype_field,
+                &dataspace::scalar(),
+                &7i32.to_le_bytes(),
+            )
+            .flags(flags)
+            .character_set(0)
+            .build()
+        );
+        assert_eq!(AttributeMessage::parse_name(&bytes), Ok("scale".into()));
+        assert_eq!(
+            AttributeMessage::shares_a_field(&bytes),
+            flags != attribute::Flags::NONE
+        );
+        assert_eq!(
+            AttributeMessage::parse_resolving_at(&bytes, 8, &CommittedI32),
+            Ok((attribute, bytes.len() - 4))
+        );
+    }
+
+    /// A resolver that returns the `i32` datatype for every reference, as if it were committed at
+    /// the address the reference holds.
+    struct CommittedI32;
+
+    impl SharedResolver for CommittedI32 {
+        fn resolve(&self, _reference: &[u8], _target: MessageType) -> Result<Vec<u8>, FormatError> {
+            Ok(crate::datatype::serialize_datatype(&i32_datatype()))
+        }
+
+        fn committed_address(
+            &self,
+            reference: &[u8],
+        ) -> Result<Option<StoredAddress>, FormatError> {
+            shared_message::committed_address_in(reference, 8, 8)
+        }
+    }
+
+    fn i32_datatype() -> Datatype {
+        Datatype::FixedPoint {
+            size: 4,
+            byte_order: DatatypeByteOrder::LittleEndian,
+            layout: FixedPointLayout {
+                signed: true,
+                bit_offset: 0,
+                bit_precision: 32,
+            },
+        }
     }
 }

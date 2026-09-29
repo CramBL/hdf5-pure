@@ -254,4 +254,30 @@ mod tests {
     }
 
     const WIDTHS: Widths = Widths::EIGHT;
+
+    #[test]
+    fn a_group_node_parses_from_bytes_and_from_a_source() {
+        let widths = Widths::new(4, 8);
+        let keys = [
+            btree_v1::group_key(0, widths),
+            btree_v1::group_key(6, widths),
+        ];
+        let node = btree_v1::node(btree_v1::NodeType::GROUP, 0, &keys, &[0x300], widths);
+        let expected = BTreeV1Node {
+            node_type: 0,
+            node_level: 0,
+            entries_used: 1,
+            left_sibling: None,
+            right_sibling: None,
+            keys: vec![0, 6],
+            children: vec![StoredAddress::new(0x300)],
+        };
+
+        assert_eq!(btree_v1_node_header_size(4), 16);
+        assert_eq!(BTreeV1Node::parse(&node, 0, 4, 8), Ok(expected.clone()));
+        assert_eq!(
+            BTreeV1Node::parse_from_source(node.as_slice(), 0, 4, 8),
+            Ok(expected)
+        );
+    }
 }
