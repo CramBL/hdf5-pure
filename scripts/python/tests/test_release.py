@@ -5,6 +5,7 @@ from unittest.mock import patch
 
 import pytest
 
+import repository
 from hdf5_pure_scripts import release
 from hdf5_pure_scripts.release import (
     Version,
@@ -348,3 +349,26 @@ def test_a_release_pull_request_promoting_an_unmarked_section_is_a_patch():
 def test_a_pull_request_that_leaves_the_changelog_alone_reads_unreleased():
     assert pull_request_release_type(BREAKING_CHANGELOG, "") == "minor"
     assert pull_request_release_type(CHANGELOG, "") == "patch"
+
+
+@pytest.mark.parametrize(
+    ("key", "value"),
+    [
+        ("color.ui", "always"),
+        ("diff.external", "true"),
+        ("diff.lines.textconv", "head -n 1"),
+    ],
+)
+def test_a_release_pull_request_reads_the_promoted_section_whatever_the_diff_config(
+    tmp_path, monkeypatch, capsys, key, value
+):
+    repository.git(tmp_path, ["init", "--quiet"])
+    before = {".gitattributes": "*.md diff=lines\n", "CHANGELOG.md": BREAKING_CHANGELOG}
+    repository.commit_files(tmp_path, before, "Before")
+    repository.commit_files(tmp_path, {"CHANGELOG.md": released(BREAKING_CHANGELOG)}, "Release")
+    repository.git(tmp_path, ["config", key, value])
+    monkeypatch.chdir(tmp_path)
+
+    release.print_release_type(SimpleNamespace(base="HEAD~1", for_semver_checks=False))
+
+    assert capsys.readouterr().out == "minor\n"
