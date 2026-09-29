@@ -684,7 +684,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parse_header() {
+    fn a_header_parses_to_its_fields() {
         let file_data = fractal_heap::heap_with_one_object(b"Hello, World!", Widths::EIGHT);
         let hdr = FractalHeapHeader::parse(&file_data, 0, 8, 8).unwrap();
         assert_eq!(hdr.heap_id_length, 7);
@@ -698,7 +698,7 @@ mod tests {
     }
 
     #[test]
-    fn decode_managed_id() {
+    fn a_managed_id_decodes_to_its_offset_and_length() {
         let file_data = fractal_heap::heap_with_one_object(b"Hello, World!", Widths::EIGHT);
         let hdr = FractalHeapHeader::parse(&file_data, 0, 8, 8).unwrap();
 
@@ -719,7 +719,7 @@ mod tests {
     }
 
     #[test]
-    fn invalid_signature() {
+    fn a_header_without_frhp_is_an_invalid_signature() {
         let mut data = vec![0u8; 128];
         data[0..4].copy_from_slice(b"XXXX");
         let err = FractalHeapHeader::parse(&data, 0, 8, 8).unwrap_err();
@@ -727,16 +727,16 @@ mod tests {
     }
 
     #[test]
-    fn invalid_version() {
+    fn a_header_of_version_1_is_an_invalid_version() {
         let mut data = vec![0u8; 128];
         data[0..4].copy_from_slice(b"FRHP");
-        data[4] = 1; // bad version
+        data[4] = 1;
         let err = FractalHeapHeader::parse(&data, 0, 8, 8).unwrap_err();
         assert_eq!(err, FormatError::InvalidFractalHeapVersion(1));
     }
 
     #[test]
-    fn invalid_heap_id_type() {
+    fn a_huge_id_is_an_invalid_type_for_the_managed_decoder() {
         let file_data = fractal_heap::heap_with_one_object(b"Hello, World!", Widths::EIGHT);
         let hdr = FractalHeapHeader::parse(&file_data, 0, 8, 8).unwrap();
         // 0x10 is type 1, huge, in bits 4-5.
@@ -824,7 +824,7 @@ mod tests {
     }
 
     #[test]
-    fn log2_floor_basics() {
+    fn log2_floor_rounds_down_and_maps_0_to_0() {
         assert_eq!(log2_floor(0), 0);
         assert_eq!(log2_floor(1), 0);
         assert_eq!(log2_floor(512), 9);

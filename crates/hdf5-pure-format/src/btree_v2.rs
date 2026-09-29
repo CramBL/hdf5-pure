@@ -467,7 +467,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parse_header() {
+    fn a_header_parses_to_its_fields() {
         let data = btree_v2::Header::new(5, 11, 0x1000, 3).build(WIDTHS);
         let hdr = BTreeV2Header::parse(&data, 0, 8, 8).unwrap();
         assert_eq!(hdr.tree_type, 5);
@@ -498,7 +498,7 @@ mod tests {
     }
 
     #[test]
-    fn invalid_signature() {
+    fn a_header_without_bthd_is_an_invalid_signature() {
         let mut data = btree_v2::Header::new(5, 11, 0, 0).build(WIDTHS);
         data[0] = b'X';
         let err = BTreeV2Header::parse(&data, 0, 8, 8).unwrap_err();
@@ -506,9 +506,9 @@ mod tests {
     }
 
     #[test]
-    fn invalid_version() {
+    fn a_header_of_version_1_is_an_invalid_version() {
         let mut data = btree_v2::Header::new(5, 11, 0, 0).build(WIDTHS);
-        data[4] = 1; // bad version
+        data[4] = 1;
         let err = BTreeV2Header::parse(&data, 0, 8, 8).unwrap_err();
         assert_eq!(err, FormatError::InvalidBTreeV2Version(1));
     }

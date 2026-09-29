@@ -516,7 +516,7 @@ mod tests {
     }
 
     #[test]
-    fn a_table_message_with_no_indexes_is_refused() {
+    fn a_table_message_with_no_indexes_is_an_invalid_index_count() {
         let mut data = vec![0u8];
         data.extend_from_slice(&0x400u64.to_le_bytes());
         data.push(0);
@@ -528,7 +528,7 @@ mod tests {
     }
 
     #[test]
-    fn a_table_message_past_the_index_maximum_is_refused() {
+    fn a_table_message_past_the_index_maximum_is_an_invalid_index_count() {
         let mut data = vec![0u8];
         data.extend_from_slice(&0x400u64.to_le_bytes());
         data.push(MAX_INDEXES + 1);
@@ -540,7 +540,7 @@ mod tests {
     }
 
     #[test]
-    fn a_table_message_of_another_version_is_refused() {
+    fn a_table_message_of_another_version_is_an_invalid_version() {
         let mut data = vec![1u8];
         data.extend_from_slice(&0x400u64.to_le_bytes());
         data.push(1);
@@ -585,7 +585,7 @@ mod tests {
     }
 
     #[test]
-    fn a_table_with_a_bad_signature_is_refused() {
+    fn a_table_with_a_bad_signature_is_an_invalid_signature() {
         let mut image = table_image(&[sample_index()]);
         image[0] = b'X';
         assert_eq!(
@@ -596,7 +596,7 @@ mod tests {
 
     #[cfg(feature = "checksum")]
     #[test]
-    fn a_table_whose_checksum_disagrees_is_refused() {
+    fn a_table_whose_checksum_disagrees_is_a_checksum_mismatch() {
         let mut image = table_image(&[sample_index()]);
         // Flip a bit in the list maximum, which no other field repeats.
         image[12] ^= 0x01;
@@ -607,7 +607,7 @@ mod tests {
     }
 
     #[test]
-    fn an_index_kind_the_format_does_not_define_is_refused() {
+    fn an_index_kind_the_format_does_not_define_is_an_invalid_index_kind() {
         let mut image = table_image(&[sample_index()]);
         image[5] = 2;
         reseal(&mut image);
@@ -618,7 +618,7 @@ mod tests {
     }
 
     #[test]
-    fn a_table_shorter_than_its_index_count_is_refused() {
+    fn a_table_shorter_than_its_index_count_is_an_unexpected_eof() {
         let image = table_image(&[sample_index()]);
         assert!(matches!(
             SohmTable::parse(&image, 2, 8).unwrap_err(),
@@ -627,7 +627,7 @@ mod tests {
     }
 
     #[test]
-    fn an_index_covers_exactly_the_types_its_flags_name() {
+    fn an_index_covers_exactly_the_types_whose_flag_bits_are_set() {
         let index = sample_index();
         assert!(index.covers(MessageType::DATASPACE));
         assert!(index.covers(MessageType::DATATYPE));
@@ -674,7 +674,7 @@ mod tests {
     }
 
     #[test]
-    fn a_heap_record_carries_its_reference_count_and_heap_id() {
+    fn a_heap_record_parses_to_its_reference_count_and_heap_id() {
         let id = [1, 2, 3, 4, 5, 6, 7, 8];
         let record =
             SohmRecord::parse(&sohm::heap_record(0xDEAD_BEEF, 3, id, Widths::EIGHT), 8).unwrap();
@@ -712,7 +712,7 @@ mod tests {
     }
 
     #[test]
-    fn a_record_location_the_format_does_not_define_is_refused() {
+    fn a_record_location_the_format_does_not_define_is_an_invalid_record_location() {
         let mut data = vec![9u8];
         data.extend_from_slice(&[0u8; 16]);
         assert_eq!(
@@ -751,7 +751,7 @@ mod tests {
     }
 
     #[test]
-    fn a_list_with_a_bad_signature_is_refused() {
+    fn a_list_with_a_bad_signature_is_an_invalid_signature() {
         let mut image = sohm::list(&[sohm::heap_record(0xDEAD_BEEF, 1, [0; 8], Widths::EIGHT)]);
         image[0] = b'X';
         assert_eq!(
@@ -762,7 +762,7 @@ mod tests {
 
     #[cfg(feature = "checksum")]
     #[test]
-    fn a_list_whose_checksum_disagrees_is_refused() {
+    fn a_list_whose_checksum_disagrees_is_a_checksum_mismatch() {
         let mut image = sohm::list(&[sohm::heap_record(0xDEAD_BEEF, 1, [0; 8], Widths::EIGHT)]);
         image[6] ^= 0x01;
         assert!(matches!(
@@ -772,7 +772,7 @@ mod tests {
     }
 
     #[test]
-    fn a_list_shorter_than_its_record_count_is_refused() {
+    fn a_list_shorter_than_its_record_count_is_an_unexpected_eof() {
         let image = sohm::list(&[sohm::heap_record(0xDEAD_BEEF, 1, [0; 8], Widths::EIGHT)]);
         assert!(matches!(
             parse_sohm_list(&image, 4, 8).unwrap_err(),
