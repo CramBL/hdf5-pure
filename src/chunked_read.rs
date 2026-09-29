@@ -10,12 +10,13 @@ use std::borrow::Cow;
 
 use core::num::NonZeroUsize;
 
+use hdf5_pure_format::__private::BTreeV1ChunkNode;
+use hdf5_pure_format::__private::BTreeV1ChunkNodeBytes;
 use hdf5_pure_format::__private::ChunkRecord;
 use hdf5_pure_format::__private::ExtensibleArrayHeader;
 use hdf5_pure_format::__private::FixedArrayHeader;
 
 use crate::address::StoredAddress;
-use crate::bytes::read_offset;
 use crate::chunk_cache::{CachePass, ChunkCache};
 use crate::chunk_grid::{ChunkGrid, GridOrder};
 use crate::chunk_span::ChunkSpanReader;
@@ -159,6 +160,32 @@ pub(crate) struct ChunkInfo {
 }
 
 impl ChunkInfo {
+    /// Returns the chunks a leaf of a version 1 B-tree chunk index points to.
+    ///
+    /// # Errors
+    ///
+    /// Returns the error [`BTreeV1ChunkNode::entries`] yields for an entry of `node`.
+    fn leaf_chunks(node: BTreeV1ChunkNode<'_>) -> Result<Vec<Self>, FormatError> {
+        let mut chunks = Vec::with_capacity(usize::from(node.entries_used()));
+        for entry in node.entries() {
+            let (key, address) = entry?;
+            chunks.push(Self {
+                chunk_size: StoredChunkSize::btree_v1(key.chunk_size),
+                filter_mask: key.filter_mask,
+                offsets: key.offsets().collect(),
+                address,
+            });
+        }
+        Ok(chunks)
+    }
+
+    /// Returns the chunk `record` describes at `slot` of `grid`, or `None` where the slot is
+    /// outside the extent of the dataset.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::ChunkedReadError`] if `grid` has a dimension of no chunks, or if
+    /// `slot` resolves past the offsets a `u64` holds.
     fn in_extent(
         grid: &ChunkGrid,
         slot: u64,
@@ -221,17 +248,6 @@ impl StoredChunkSize {
     }
 }
 
-/// The size in bytes of a key in a version 1 B-tree of type 1 (raw data chunks):
-/// the chunk byte size (4), the filter mask (4), and `ndims` 64-bit offsets (8 bytes each).
-/// The offsets are `(D + 1)` coordinates: one per dataset dimension, followed by a trailing
-/// element offset that is always zero. The key is defined in "Version 1 B-trees" of the
-/// [format specification, version 4.0][spec].
-///
-/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_infra_btrees_v1
-const fn chunk_record_key_size(ndims: usize) -> usize {
-    4 + 4 + ndims * 8
-}
-
 /// Traverse B-tree v1 type 1 to collect all chunk locations.
 ///
 /// `ndims` is the number of offset dimensions in each key, which equals
@@ -263,120 +279,27 @@ fn collect_chunk_info_inner(
             "chunk B-tree nested too deeply".into(),
         ));
     }
-    let offset = btree_address.get().to_usize()?;
-    let os = offset_size as usize;
-
-    // Parse B-tree v1 header
-    let header_size = hdf5_pure_format::__private::btree_v1_node_header_size(offset_size);
-    if header_size > file_data.len() || offset > file_data.len() - header_size {
-        return Err(FormatError::UnexpectedEof {
-            expected: offset.saturating_add(header_size),
-            available: file_data.len(),
-        });
+    let node = BTreeV1ChunkNode::parse(
+        file_data,
+        btree_address.get().to_usize()?,
+        offset_size,
+        ndims,
+    )?;
+    if node.node_level() == 0 {
+        return ChunkInfo::leaf_chunks(node);
     }
-
-    if &file_data[offset..offset + 4] != b"TREE" {
-        return Err(FormatError::InvalidBTreeSignature);
+    let mut all_chunks = Vec::new();
+    for child_addr in node.children() {
+        all_chunks.extend(collect_chunk_info_inner(
+            file_data,
+            child_addr?,
+            ndims,
+            offset_size,
+            _length_size,
+            depth + 1,
+        )?);
     }
-
-    let node_type = file_data[offset + 4];
-    if node_type != 1 {
-        return Err(FormatError::InvalidBTreeNodeType(node_type));
-    }
-
-    let node_level = file_data[offset + 5];
-    let entries_used = u16::from_le_bytes([file_data[offset + 6], file_data[offset + 7]]) as usize;
-
-    let mut pos = offset + header_size; // first key, past signature/siblings
-
-    let key_size = chunk_record_key_size(ndims);
-
-    if node_level == 0 {
-        // Leaf node: keys and children interleaved
-        // key[0], child[0], key[1], child[1], ..., key[N-1], child[N-1], key[N]
-        let needed = entries_used * (key_size + os) + key_size;
-        if needed > file_data.len() || pos > file_data.len() - needed {
-            return Err(FormatError::UnexpectedEof {
-                expected: pos.saturating_add(needed),
-                available: file_data.len(),
-            });
-        }
-
-        let mut chunks = Vec::with_capacity(entries_used);
-        for _ in 0..entries_used {
-            // Parse key
-            let chunk_size = u32::from_le_bytes([
-                file_data[pos],
-                file_data[pos + 1],
-                file_data[pos + 2],
-                file_data[pos + 3],
-            ]);
-            let filter_mask = u32::from_le_bytes([
-                file_data[pos + 4],
-                file_data[pos + 5],
-                file_data[pos + 6],
-                file_data[pos + 7],
-            ]);
-            let mut offsets = Vec::with_capacity(ndims);
-            let mut kp = pos + 8;
-            for _ in 0..ndims {
-                let bytes = file_data
-                    .get(kp..kp + 8)
-                    .ok_or(FormatError::UnexpectedEof {
-                        expected: kp.saturating_add(8),
-                        available: file_data.len(),
-                    })?;
-                // Invariant: slice length is exactly 8 bytes.
-                offsets.push(u64::from_le_bytes(bytes.try_into().unwrap()));
-                kp += 8;
-            }
-            pos += key_size;
-
-            // Parse child address
-            let address = StoredAddress::new(read_offset(file_data, pos, offset_size)?);
-            pos += os;
-
-            chunks.push(ChunkInfo {
-                chunk_size: StoredChunkSize::btree_v1(chunk_size),
-                filter_mask,
-                offsets,
-                address,
-            });
-        }
-        // Skip final key
-        Ok(chunks)
-    } else {
-        // Internal node: recurse into children
-        let needed = entries_used * (key_size + os) + key_size;
-        if needed > file_data.len() || pos > file_data.len() - needed {
-            return Err(FormatError::UnexpectedEof {
-                expected: pos.saturating_add(needed),
-                available: file_data.len(),
-            });
-        }
-
-        let mut child_addrs = Vec::with_capacity(entries_used);
-        for _ in 0..entries_used {
-            pos += key_size; // skip key
-            let child_addr = StoredAddress::new(read_offset(file_data, pos, offset_size)?);
-            child_addrs.push(child_addr);
-            pos += os;
-        }
-
-        let mut all_chunks = Vec::new();
-        for child_addr in child_addrs {
-            let child_chunks = collect_chunk_info_inner(
-                file_data,
-                child_addr,
-                ndims,
-                offset_size,
-                _length_size,
-                depth + 1,
-            )?;
-            all_chunks.extend(child_chunks);
-        }
-        Ok(all_chunks)
-    }
+    Ok(all_chunks)
 }
 
 /// Recursion-depth cap for the chunk B-tree node-span walk, guarding against a
@@ -424,56 +347,24 @@ fn collect_chunk_btree_node_spans_inner<S: Source + ?Sized>(
             "chunk B-tree nested too deeply".into(),
         ));
     }
-    let os = offset_size as usize;
-    let header_size = hdf5_pure_format::__private::btree_v1_node_header_size(offset_size);
-
-    // Node header: signature(4) + type(1) + level(1) + entries_used(2) + 2 siblings.
-    let header = source.read_metadata_at(btree_address.get(), header_size)?;
-    if &header[0..4] != b"TREE" {
-        return Err(FormatError::InvalidBTreeSignature);
-    }
-    let node_type = header[4];
-    if node_type != 1 {
-        return Err(FormatError::InvalidBTreeNodeType(node_type));
-    }
-    let node_level = header[5];
-    let entries_used = u16::from_le_bytes([header[6], header[7]]) as usize;
-    let key_size = chunk_record_key_size(ndims);
-
-    // The reader-consumed body: `entries_used` (key, child) pairs and a trailing
-    // key. This is the conservative node extent (see the doc comment).
-    let body_len = entries_used
-        .checked_mul(key_size + os)
-        .and_then(|b| b.checked_add(key_size))
-        .ok_or(FormatError::OffsetOverflow {
-            offset: entries_used as u64,
-            length: (key_size + os) as u64,
-        })?;
-    let node_len = header_size + body_len;
-    let body_addr =
-        btree_address
-            .get()
-            .checked_add(header_size as u64)
-            .ok_or(FormatError::OffsetOverflow {
-                offset: btree_address.get(),
-                length: header_size as u64,
-            })?;
-    // Reading the body is also the bounds check: a node claiming to run past
+    // Reading the node is also the bounds check: a node claiming to run past
     // end-of-file fails here rather than being recorded as reclaimable.
-    let body = source.read_metadata_at(body_addr, body_len)?;
-    out.push((btree_address.get(), node_len as u64));
+    let bytes = BTreeV1ChunkNodeBytes::read_from_source(
+        &SourceMetadata(source),
+        btree_address.get(),
+        offset_size,
+        ndims,
+    )?;
+    let node = bytes.node();
+    out.push((btree_address.get(), node.stored_len().to_u64()));
 
     // Internal nodes (level > 0) hold child node addresses, not chunk records;
     // recurse so their nodes are reclaimed too.
-    if node_level != 0 {
-        let mut pos = 0usize;
-        for _ in 0..entries_used {
-            pos += key_size; // skip the key
-            let child_addr = StoredAddress::new(read_offset(&body, pos, offset_size)?);
-            pos += os;
+    if node.node_level() != 0 {
+        for child_addr in node.children() {
             collect_chunk_btree_node_spans_inner(
                 source,
-                child_addr,
+                child_addr?,
                 ndims,
                 offset_size,
                 depth + 1,
@@ -515,84 +406,28 @@ fn collect_chunk_info_from_source_inner<S: Source + ?Sized>(
             "chunk B-tree nested too deeply".into(),
         ));
     }
-    let os = offset_size as usize;
-    let header_size = hdf5_pure_format::__private::btree_v1_node_header_size(offset_size);
-
-    // Node header: signature(4) + type(1) + level(1) + entries_used(2) + 2 siblings.
-    let header = source.read_metadata_at(btree_address.get(), header_size)?;
-    if &header[0..4] != b"TREE" {
-        return Err(FormatError::InvalidBTreeSignature);
+    let bytes = BTreeV1ChunkNodeBytes::read_from_source(
+        &SourceMetadata(source),
+        btree_address.get(),
+        offset_size,
+        ndims,
+    )?;
+    let node = bytes.node();
+    if node.node_level() == 0 {
+        return ChunkInfo::leaf_chunks(node);
     }
-    let node_type = header[4];
-    if node_type != 1 {
-        return Err(FormatError::InvalidBTreeNodeType(node_type));
+    let mut all_chunks = Vec::new();
+    for child_addr in node.children() {
+        all_chunks.extend(collect_chunk_info_from_source_inner(
+            source,
+            child_addr?,
+            ndims,
+            offset_size,
+            _length_size,
+            depth + 1,
+        )?);
     }
-    let node_level = header[5];
-    let entries_used = u16::from_le_bytes([header[6], header[7]]) as usize;
-
-    // Key/child region begins right after the header (siblings already included).
-    let key_size = chunk_record_key_size(ndims);
-    let needed = entries_used * (key_size + os) + key_size;
-    let body_addr =
-        btree_address
-            .get()
-            .checked_add(header_size as u64)
-            .ok_or(FormatError::OffsetOverflow {
-                offset: btree_address.get(),
-                length: header_size as u64,
-            })?;
-    let body = source.read_metadata_at(body_addr, needed)?;
-    let mut pos = 0usize;
-
-    if node_level == 0 {
-        let mut chunks = Vec::with_capacity(entries_used);
-        for _ in 0..entries_used {
-            let chunk_size =
-                u32::from_le_bytes([body[pos], body[pos + 1], body[pos + 2], body[pos + 3]]);
-            let filter_mask =
-                u32::from_le_bytes([body[pos + 4], body[pos + 5], body[pos + 6], body[pos + 7]]);
-            let mut offsets = Vec::with_capacity(ndims);
-            let mut kp = pos + 8;
-            for _ in 0..ndims {
-                let bytes = body.get(kp..kp + 8).ok_or(FormatError::UnexpectedEof {
-                    expected: kp.saturating_add(8),
-                    available: body.len(),
-                })?;
-                // Invariant: slice length is exactly 8 bytes.
-                offsets.push(u64::from_le_bytes(bytes.try_into().unwrap()));
-                kp += 8;
-            }
-            pos += key_size;
-            let address = StoredAddress::new(read_offset(&body, pos, offset_size)?);
-            pos += os;
-            chunks.push(ChunkInfo {
-                chunk_size: StoredChunkSize::btree_v1(chunk_size),
-                filter_mask,
-                offsets,
-                address,
-            });
-        }
-        Ok(chunks)
-    } else {
-        let mut child_addrs = Vec::with_capacity(entries_used);
-        for _ in 0..entries_used {
-            pos += key_size; // skip key
-            child_addrs.push(StoredAddress::new(read_offset(&body, pos, offset_size)?));
-            pos += os;
-        }
-        let mut all_chunks = Vec::new();
-        for child_addr in child_addrs {
-            all_chunks.extend(collect_chunk_info_from_source_inner(
-                source,
-                child_addr,
-                ndims,
-                offset_size,
-                _length_size,
-                depth + 1,
-            )?);
-        }
-        Ok(all_chunks)
-    }
+    Ok(all_chunks)
 }
 
 /// Generate ChunkInfo entries for an implicit index (v4 index type 2).

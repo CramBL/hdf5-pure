@@ -5,6 +5,9 @@
 pub use crate::access_mode::AccessMode;
 pub use crate::attribute_info::AttributeInfoMessage;
 pub use crate::attribute_message::AttributeMessage;
+pub use crate::btree_v1::BTreeV1ChunkKey;
+pub use crate::btree_v1::BTreeV1ChunkNode;
+pub use crate::btree_v1::BTreeV1ChunkNodeBytes;
 pub use crate::btree_v1::BTreeV1Node;
 pub use crate::btree_v1::btree_v1_node_header_size;
 pub use crate::btree_v2::BTreeV2Header;
