@@ -257,7 +257,10 @@ use core::num::NonZeroUsize;
 
 use hdf5_pure_format::__private::ChunkRecord;
 use hdf5_pure_format::__private::ExtensibleArrayHeader;
+use hdf5_pure_format::__private::FreeSection;
+use hdf5_pure_format::__private::FreeSpaceManagerHeader;
 use hdf5_pure_format::__private::IndexSlots;
+use hdf5_pure_format::__private::SECTION_CLASS_SIMPLE;
 
 use crate::access_mode::AccessMode;
 use crate::address::BaseAddressExt;
@@ -291,11 +294,7 @@ use crate::file_writer::{
 use crate::filter_pipeline::FilterPipeline;
 use crate::filters::{ChunkContext, FilterScratch, compress_chunk_with, decompress_chunk};
 use crate::free_space::{FreeList, trailing_run_start};
-use crate::free_space_manager::{
-    self, FreeSection, FreeSpaceManagerHeader, PageType, PagedManagerPlan, SECTION_CLASS_SIMPLE,
-    align_up, free_space_manager_header_len, free_space_manager_len, plan_paged_managers,
-    serialize_free_space_manager,
-};
+use crate::free_space_manager::{self, PageType, PagedManagerPlan, align_up, plan_paged_managers};
 use crate::group_v2::resolve_group_entries_from_source;
 use crate::image::{FileImage, HandleImage, MirrorImage, WriteBuffering};
 use crate::libver::LibVer;
@@ -3215,7 +3214,9 @@ impl WriteEngine {
             if StoredAddress::new(m).is_undefined(os) {
                 continue;
             }
-            let Ok(hdr_len) = free_space_manager_header_len(os).to_usize() else {
+            let Ok(hdr_len) =
+                hdf5_pure_format::__private::free_space_manager_header_len(os).to_usize()
+            else {
                 continue;
             };
             let Ok(fshd) = self.image().read_metadata_at(m, hdr_len) else {
@@ -3226,7 +3227,10 @@ impl WriteEngine {
                 // are present, so the FSHD extent is in-bounds; validate the
                 // section-info extent before recording it, so a malformed
                 // `fsse_used` can't later free a region running past end-of-file.
-                old_blocks.push((m, free_space_manager_header_len(os)));
+                old_blocks.push((
+                    m,
+                    hdf5_pure_format::__private::free_space_manager_header_len(os),
+                ));
                 if !h.fsse_addr.is_undefined(os)
                     && h.fsse_addr
                         .get()
@@ -7173,8 +7177,9 @@ impl WriteEngine {
         let ext_addr = placed_at.unwrap_or_else(|| self.image.len());
         let sections = self.persisted_sections(&post);
         let fshd_addr = self.persisted_address(ext_addr + ext_len);
-        let fsse_addr =
-            self.persisted_address(ext_addr + ext_len + free_space_manager_header_len(os));
+        let fsse_addr = self.persisted_address(
+            ext_addr + ext_len + hdf5_pure_format::__private::free_space_manager_header_len(os),
+        );
         // A reused tail sits inside the file, which ends it at the end-of-allocation
         // the layout settled on — the current end-of-file, less any run of free
         // space reaching it, which `post` no longer records and the truncation
@@ -7216,7 +7221,7 @@ impl WriteEngine {
             );
             let ext_oh =
                 build_v2_object_header(&self.rewrite_extension_region(old_ext_addr, &info)?)?;
-            let (fshd, fsse) = serialize_free_space_manager(
+            let (fshd, fsse) = hdf5_pure_format::__private::serialize_free_space_manager(
                 &sections,
                 fshd_addr,
                 fsse_addr,
@@ -7441,7 +7446,11 @@ impl WriteEngine {
         // on where it sits. It is also the answer for a tail that ends up appended,
         // since every round hands its reservation back before this returns.
         let probe = self.flat_post_free(to_free, old_blocks);
-        let appended_len = ext_len + free_space_manager_len(&self.persisted_sections(&probe), os);
+        let appended_len = ext_len
+            + hdf5_pure_format::__private::free_space_manager_len(
+                &self.persisted_sections(&probe),
+                os,
+            );
         let mut proposed = appended_len;
 
         for _ in 0..ROUNDS {
@@ -7459,7 +7468,11 @@ impl WriteEngine {
             // (issue #418). The reservation was taken before this list was built,
             // so the run can only begin at or above the tail's own end.
             let eoa = release_trailing_run(&mut post, eof, proposed);
-            let len = ext_len + free_space_manager_len(&self.persisted_sections(&post), os);
+            let len = ext_len
+                + hdf5_pure_format::__private::free_space_manager_len(
+                    &self.persisted_sections(&post),
+                    os,
+                );
             if len <= proposed {
                 debug_assert!(
                     at + proposed <= eoa,
@@ -7650,8 +7663,13 @@ impl WriteEngine {
         let region = (ext_addr, blocks_len);
         self.write_tail_block(region, ext_addr, &ext_oh)?;
         for b in &plan.blocks {
-            let (fshd, fsse) =
-                serialize_free_space_manager(&b.sections, b.fshd_addr, b.fsse_addr, os, b.class);
+            let (fshd, fsse) = hdf5_pure_format::__private::serialize_free_space_manager(
+                &b.sections,
+                b.fshd_addr,
+                b.fsse_addr,
+                os,
+                b.class,
+            );
             self.write_tail_block(region, base.absolute(b.fshd_addr)?, &fshd)?;
             self.write_tail_block(region, base.absolute(b.fsse_addr)?, &fsse)?;
         }
@@ -16772,7 +16790,11 @@ mod tests {
             // consumed outright drops a section from the managers, so this comes out
             // shorter than the extent for some hole sizes and the difference is what
             // the extent has to cover.
-            let written = EXT_LEN + free_space_manager_len(&s.persisted_sections(&post), os);
+            let written = EXT_LEN
+                + hdf5_pure_format::__private::free_space_manager_len(
+                    &s.persisted_sections(&post),
+                    os,
+                );
             match at {
                 Some(at) => {
                     placed += 1;

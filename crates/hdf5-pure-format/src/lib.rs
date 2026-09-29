@@ -40,6 +40,7 @@ mod filter_pipeline;
 mod fixed_array;
 mod fractal_heap;
 mod fractal_heap_write;
+mod free_space_manager;
 mod global_heap;
 mod link_info;
 mod link_message;

@@ -28,6 +28,9 @@ use hdf5_pure_format::__private::AttributeHeapPlan;
 use hdf5_pure_format::__private::AttributeHeapPlanError;
 use hdf5_pure_format::__private::BTREE_V2_NODE_SIZE;
 use hdf5_pure_format::__private::BTreeV2Plan;
+use hdf5_pure_format::__private::FreeSection;
+use hdf5_pure_format::__private::SECTION_CLASS_LARGE;
+use hdf5_pure_format::__private::SECTION_CLASS_SMALL;
 
 use crate::address::BaseAddressExt;
 use crate::address::{BaseAddress, StoredAddress};
@@ -45,10 +48,6 @@ use crate::file_create_properties::FileCreateProperties;
 use crate::file_space_info::{
     self, DEFAULT_PAGE_SIZE, DEFAULT_THRESHOLD, FileSpaceInfo, FileSpaceStrategy,
     NUM_FILE_FSM_MANAGERS,
-};
-use crate::free_space_manager::{
-    FreeSection, SECTION_CLASS_LARGE, SECTION_CLASS_SMALL, free_space_manager_header_len,
-    section_info_len, serialize_free_space_manager,
 };
 use crate::libver::LibVer;
 use crate::link_message::{LinkMessage, LinkTarget};
@@ -3209,14 +3208,17 @@ impl FileWriter {
             let mut super_fsm: Option<(StoredAddress, StoredAddress)> = None;
             let mut draw_fsm: Option<(StoredAddress, StoredAddress)> = None;
             let mut large_fsm: Option<(StoredAddress, StoredAddress)> = None;
-            let super_block_len = free_space_manager_header_len(os) + section_info_len(&[0], os);
+            let super_block_len = hdf5_pure_format::__private::free_space_manager_header_len(os)
+                + hdf5_pure_format::__private::section_info_len(&[0], os);
             let draw_block_len = if draw_active {
-                free_space_manager_header_len(os) + section_info_len(&[0], os)
+                hdf5_pure_format::__private::free_space_manager_header_len(os)
+                    + hdf5_pure_format::__private::section_info_len(&[0], os)
             } else {
                 0
             };
             let large_block_len = if large_active {
-                free_space_manager_header_len(os) + section_info_len(&large_frag_sizes, os)
+                hdf5_pure_format::__private::free_space_manager_header_len(os)
+                    + hdf5_pure_format::__private::section_info_len(&large_frag_sizes, os)
             } else {
                 0
             };
@@ -3233,25 +3235,25 @@ impl FileWriter {
             if persist_paged {
                 if super_active {
                     let fshd_addr = StoredAddress::new(meta);
-                    meta += free_space_manager_header_len(os);
+                    meta += hdf5_pure_format::__private::free_space_manager_header_len(os);
                     let fsse_addr = StoredAddress::new(meta);
-                    meta += section_info_len(&[0], os);
+                    meta += hdf5_pure_format::__private::section_info_len(&[0], os);
                     slots[0] = fshd_addr.get();
                     super_fsm = Some((fshd_addr, fsse_addr));
                 }
                 if draw_active {
                     let fshd_addr = StoredAddress::new(meta);
-                    meta += free_space_manager_header_len(os);
+                    meta += hdf5_pure_format::__private::free_space_manager_header_len(os);
                     let fsse_addr = StoredAddress::new(meta);
-                    meta += section_info_len(&[0], os);
+                    meta += hdf5_pure_format::__private::section_info_len(&[0], os);
                     slots[2] = fshd_addr.get();
                     draw_fsm = Some((fshd_addr, fsse_addr));
                 }
                 if large_active {
                     let fshd_addr = StoredAddress::new(meta);
-                    meta += free_space_manager_header_len(os);
+                    meta += hdf5_pure_format::__private::free_space_manager_header_len(os);
                     let fsse_addr = StoredAddress::new(meta);
-                    meta += section_info_len(&large_frag_sizes, os);
+                    meta += hdf5_pure_format::__private::section_info_len(&large_frag_sizes, os);
                     slots[6] = fshd_addr.get();
                     large_fsm = Some((fshd_addr, fsse_addr));
                 }
@@ -3414,7 +3416,7 @@ impl FileWriter {
 
             // (j) Serialize the free-space-manager blocks.
             let super_blocks = super_fsm.map(|(fshd_addr, fsse_addr)| {
-                serialize_free_space_manager(
+                hdf5_pure_format::__private::serialize_free_space_manager(
                     &[super_section.expect("SUPER active implies a section")],
                     fshd_addr,
                     fsse_addr,
@@ -3423,7 +3425,7 @@ impl FileWriter {
                 )
             });
             let draw_blocks = draw_fsm.map(|(fshd_addr, fsse_addr)| {
-                serialize_free_space_manager(
+                hdf5_pure_format::__private::serialize_free_space_manager(
                     &[draw_section.expect("DRAW active implies a section")],
                     fshd_addr,
                     fsse_addr,
@@ -3432,7 +3434,7 @@ impl FileWriter {
                 )
             });
             let large_blocks = large_fsm.map(|(fshd_addr, fsse_addr)| {
-                serialize_free_space_manager(
+                hdf5_pure_format::__private::serialize_free_space_manager(
                     &large_sections,
                     fshd_addr,
                     fsse_addr,
