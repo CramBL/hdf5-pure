@@ -637,11 +637,11 @@ mod tests {
     fn a_chunk_at_a_slot_outside_the_dataset_is_dropped() {
         // Chunk [2] over shape [4] is two chunks; a maximum of [8] numbers four
         // slots. Put a chunk in each of slots 0, 1 and 3.
-        let chunks: Vec<crate::chunked_write::WrittenChunk> = [0x1000u64, 0x2000, 0x3000]
+        let chunks: Vec<crate::chunked_write::ChunkRecord> = [0x1000u64, 0x2000, 0x3000]
             .into_iter()
-            .map(|address| crate::chunked_write::WrittenChunk {
+            .map(|address| crate::chunked_write::ChunkRecord {
                 address: StoredAddress::new(address),
-                compressed_size: 8,
+                stored_size: 8,
                 filter_mask: 0,
             })
             .collect();
@@ -1072,7 +1072,7 @@ mod tests {
     #[cfg(all(feature = "std", feature = "checksum"))]
     #[test]
     fn a_corrupted_fixed_array_structure_is_refused() {
-        use crate::chunked_write::{WrittenChunk, build_fixed_array_at};
+        use crate::chunked_write::{ChunkRecord, build_fixed_array_at};
         use crate::source::BytesSource;
 
         let os: u8 = 8;
@@ -1082,10 +1082,10 @@ mod tests {
             // 1024 = the page size, so 1025 and 3000 are paged: 3000 also
             // leaves a partial final page, which the writer does not pad.
             for &n in &[5u64, 1024, 1025, 3000] {
-                let chunks: Vec<WrittenChunk> = (0..n)
-                    .map(|i| WrittenChunk {
+                let chunks: Vec<ChunkRecord> = (0..n)
+                    .map(|i| ChunkRecord {
                         address: StoredAddress::new(0x100000 + i * 8),
-                        compressed_size: if has_filters { 8 + (i % 7) } else { 8 },
+                        stored_size: if has_filters { 8 + (i % 7) } else { 8 },
                         filter_mask: 0,
                     })
                     .collect();
@@ -1214,7 +1214,7 @@ mod tests {
     #[cfg(feature = "std")]
     #[test]
     fn index_spans_tile_fixed_array_blob() {
-        use crate::chunked_write::{WrittenChunk, build_fixed_array_at};
+        use crate::chunked_write::{ChunkRecord, build_fixed_array_at};
 
         let os: u8 = 8;
         let ls: u8 = 8;
@@ -1222,10 +1222,10 @@ mod tests {
         for has_filters in [false, true] {
             // 1024 = page_size, so 1025+ exercises the paged FADB layout.
             for &n in &[1u64, 5, 1024, 1025, 3000] {
-                let chunks: Vec<WrittenChunk> = (0..n)
-                    .map(|i| WrittenChunk {
+                let chunks: Vec<ChunkRecord> = (0..n)
+                    .map(|i| ChunkRecord {
                         address: StoredAddress::new(0x100000 + i * 8),
-                        compressed_size: if has_filters { 8 + (i % 7) } else { 8 },
+                        stored_size: if has_filters { 8 + (i % 7) } else { 8 },
                         filter_mask: 0,
                     })
                     .collect();

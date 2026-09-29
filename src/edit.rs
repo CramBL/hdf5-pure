@@ -265,7 +265,7 @@ use crate::chunked_read::{
     chunk_index_spans_from_source, enumerate_chunks_from_source, plan_dense_grid,
 };
 use crate::chunked_write::{
-    ChunkMeta, ChunkOptions, ChunkProvider, StorageAllocation, WrittenChunk, assemble_chunked_at,
+    ChunkMeta, ChunkOptions, ChunkProvider, ChunkRecord, StorageAllocation, assemble_chunked_at,
     build_extensible_array_at, chunked_data_len, compress_chunks, emit_chunked_data_verbatim,
     extensible_array_len, full_chunk_bytes, plan_chunked_data_verbatim,
     serialize_v4_extensible_array, split_into_chunks,
@@ -290,8 +290,9 @@ use crate::filter_pipeline::FilterPipeline;
 use crate::filters::{ChunkContext, FilterScratch, compress_chunk_with, decompress_chunk};
 use crate::free_space::{FreeList, trailing_run_start};
 use crate::free_space_manager::{
-    self, FreeSection, FsmHeader, PageType, PagedManagerPlan, SECT_CLASS_SIMPLE, align_up,
-    file_fsm_blocks_len, fshd_len, plan_paged_managers, serialize_file_fsm,
+    self, FreeSection, FreeSpaceManagerHeader, PageType, PagedManagerPlan, SECTION_CLASS_SIMPLE,
+    align_up, free_space_manager_header_len, free_space_manager_len, plan_paged_managers,
+    serialize_free_space_manager,
 };
 use crate::group_v2::resolve_group_entries_from_source;
 use crate::image::{FileImage, HandleImage, MirrorImage, WriteBuffering};
@@ -3212,18 +3213,18 @@ impl WriteEngine {
             if StoredAddress::new(m).is_undefined(os) {
                 continue;
             }
-            let Ok(hdr_len) = fshd_len(os).to_usize() else {
+            let Ok(hdr_len) = free_space_manager_header_len(os).to_usize() else {
                 continue;
             };
             let Ok(fshd) = self.image().read_metadata_at(m, hdr_len) else {
                 continue;
             };
-            if let Ok(h) = FsmHeader::parse(&fshd, os) {
-                // `FsmHeader::parse` succeeding guarantees the header's own bytes
+            if let Ok(h) = FreeSpaceManagerHeader::parse(&fshd, os) {
+                // `FreeSpaceManagerHeader::parse` succeeding guarantees the header's own bytes
                 // are present, so the FSHD extent is in-bounds; validate the
                 // section-info extent before recording it, so a malformed
                 // `fsse_used` can't later free a region running past end-of-file.
-                old_blocks.push((m, fshd_len(os)));
+                old_blocks.push((m, free_space_manager_header_len(os)));
                 if !h.fsse_addr.is_undefined(os)
                     && h.fsse_addr
                         .get()
@@ -6657,7 +6658,7 @@ impl WriteEngine {
                             let data: Vec<(u64, u64)> = kept_chunks
                                 .iter()
                                 .filter_map(|c| {
-                                    Some((base.absolute(c.address).ok()?, c.compressed_size))
+                                    Some((base.absolute(c.address).ok()?, c.stored_size))
                                 })
                                 .chain(*old_tail_extent)
                                 .collect();
@@ -7170,7 +7171,8 @@ impl WriteEngine {
         let ext_addr = placed_at.unwrap_or_else(|| self.image.len());
         let sections = self.persisted_sections(&post);
         let fshd_addr = self.persisted_address(ext_addr + ext_len);
-        let fsse_addr = self.persisted_address(ext_addr + ext_len + fshd_len(os));
+        let fsse_addr =
+            self.persisted_address(ext_addr + ext_len + free_space_manager_header_len(os));
         // A reused tail sits inside the file, which ends it at the end-of-allocation
         // the layout settled on — the current end-of-file, less any run of free
         // space reaching it, which `post` no longer records and the truncation
@@ -7212,8 +7214,13 @@ impl WriteEngine {
             );
             let ext_oh =
                 build_v2_object_header(&self.rewrite_extension_region(old_ext_addr, &info)?)?;
-            let (fshd, fsse) =
-                serialize_file_fsm(&sections, fshd_addr, fsse_addr, os, SECT_CLASS_SIMPLE);
+            let (fshd, fsse) = serialize_free_space_manager(
+                &sections,
+                fshd_addr,
+                fsse_addr,
+                os,
+                SECTION_CLASS_SIMPLE,
+            );
             (ext_oh, Some((fshd, fsse)))
         };
         // Both forms of the message carry the same twelve manager slots, so either
@@ -7432,7 +7439,7 @@ impl WriteEngine {
         // on where it sits. It is also the answer for a tail that ends up appended,
         // since every round hands its reservation back before this returns.
         let probe = self.flat_post_free(to_free, old_blocks);
-        let appended_len = ext_len + file_fsm_blocks_len(&self.persisted_sections(&probe), os);
+        let appended_len = ext_len + free_space_manager_len(&self.persisted_sections(&probe), os);
         let mut proposed = appended_len;
 
         for _ in 0..ROUNDS {
@@ -7450,7 +7457,7 @@ impl WriteEngine {
             // (issue #418). The reservation was taken before this list was built,
             // so the run can only begin at or above the tail's own end.
             let eoa = release_trailing_run(&mut post, eof, proposed);
-            let len = ext_len + file_fsm_blocks_len(&self.persisted_sections(&post), os);
+            let len = ext_len + free_space_manager_len(&self.persisted_sections(&post), os);
             if len <= proposed {
                 debug_assert!(
                     at + proposed <= eoa,
@@ -7642,7 +7649,7 @@ impl WriteEngine {
         self.write_tail_block(region, ext_addr, &ext_oh)?;
         for b in &plan.blocks {
             let (fshd, fsse) =
-                serialize_file_fsm(&b.sections, b.fshd_addr, b.fsse_addr, os, b.class);
+                serialize_free_space_manager(&b.sections, b.fshd_addr, b.fsse_addr, os, b.class);
             self.write_tail_block(region, base.absolute(b.fshd_addr)?, &fshd)?;
             self.write_tail_block(region, base.absolute(b.fsse_addr)?, &fsse)?;
         }
@@ -8818,11 +8825,11 @@ impl WriteEngine {
             return Err(Error::AppendUnsupported(LOSSY_TAIL_REFUSAL));
         }
 
-        let mut kept_chunks: Vec<WrittenChunk> = Vec::with_capacity(n_full);
+        let mut kept_chunks: Vec<ChunkRecord> = Vec::with_capacity(n_full);
         for ci in grid_order.iter().take(n_full) {
-            kept_chunks.push(WrittenChunk {
+            kept_chunks.push(ChunkRecord {
                 address: ci.address,
-                compressed_size: ci.chunk_size.get(),
+                stored_size: ci.chunk_size.get(),
                 // Preserve the source mask verbatim: a C/h5py file records a nonzero
                 // mask for a chunk whose filter was skipped (e.g. deflate on
                 // incompressible data), and forcing it to 0 would corrupt that chunk.
@@ -9774,7 +9781,7 @@ impl WriteEngine {
         chunk_dims_u32: &[u32],
         element_size: NonZeroUsize,
         has_filters: bool,
-        kept_chunks: &[WrittenChunk],
+        kept_chunks: &[ChunkRecord],
         new_chunk_bytes: &[Vec<u8>],
     ) -> Result<u64, Error> {
         let base = self.superblock.base_address;
@@ -9821,13 +9828,13 @@ impl WriteEngine {
         // so an appended chunk's mask is always 0. Kept chunks carry their own
         // (possibly nonzero) mask.
         let chunk_total: u64 = new_chunk_bytes.iter().map(|cb| cb.len() as u64).sum();
-        let placed_chunks = |blob_stored: StoredAddress| -> Vec<WrittenChunk> {
-            let mut combined: Vec<WrittenChunk> = kept_chunks.to_vec();
+        let placed_chunks = |blob_stored: StoredAddress| -> Vec<ChunkRecord> {
+            let mut combined: Vec<ChunkRecord> = kept_chunks.to_vec();
             let mut next = blob_stored;
             for cb in new_chunk_bytes {
-                combined.push(WrittenChunk {
+                combined.push(ChunkRecord {
                     address: next,
-                    compressed_size: cb.len() as u64,
+                    stored_size: cb.len() as u64,
                     filter_mask: 0,
                 });
                 next = next.offset(cb.len() as u64);
@@ -9900,12 +9907,12 @@ impl WriteEngine {
             None => {
                 // A chunk embeds no addresses of its own, so it can go anywhere and
                 // the index below simply records where it went.
-                let mut combined: Vec<WrittenChunk> = kept_chunks.to_vec();
+                let mut combined: Vec<ChunkRecord> = kept_chunks.to_vec();
                 for cb in new_chunk_bytes {
                     let abs = self.alloc_or_append_typed(cb, PageType::Raw)?;
-                    combined.push(WrittenChunk {
+                    combined.push(ChunkRecord {
                         address: base.relative(abs)?,
-                        compressed_size: cb.len() as u64,
+                        stored_size: cb.len() as u64,
                         filter_mask: 0,
                     });
                 }
@@ -11333,7 +11340,7 @@ enum MovingWrite {
         /// Existing complete chunks, in index order, carried by metadata alone —
         /// their base-relative addresses, on-disk stored sizes, and filter masks
         /// preserved exactly (a nonzero mask from a C/h5py-skipped filter is kept).
-        kept_chunks: Vec<WrittenChunk>,
+        kept_chunks: Vec<ChunkRecord>,
         /// The appended chunks in index order: the recompressed trailing partial
         /// chunk first (when present), then the remaining new full chunks.
         new_chunk_bytes: Vec<Vec<u8>>,
@@ -12479,12 +12486,12 @@ fn try_rebuild_index_in_place<S: Source + ?Sized>(
         return None;
     };
     let index_addr = index.address()?;
-    let written: Vec<crate::chunked_write::WrittenChunk> = grid_order
+    let written: Vec<crate::chunked_write::ChunkRecord> = grid_order
         .iter()
         .zip(new_bytes)
-        .map(|(ci, b)| crate::chunked_write::WrittenChunk {
+        .map(|(ci, b)| crate::chunked_write::ChunkRecord {
             address: ci.address,
-            compressed_size: b.len() as u64,
+            stored_size: b.len() as u64,
             filter_mask: 0,
         })
         .collect();
@@ -16767,7 +16774,7 @@ mod tests {
             // consumed outright drops a section from the managers, so this comes out
             // shorter than the extent for some hole sizes and the difference is what
             // the extent has to cover.
-            let written = EXT_LEN + file_fsm_blocks_len(&s.persisted_sections(&post), os);
+            let written = EXT_LEN + free_space_manager_len(&s.persisted_sections(&post), os);
             match at {
                 Some(at) => {
                     placed += 1;
