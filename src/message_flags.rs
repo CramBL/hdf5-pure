@@ -1,1 +1,1 @@
-pub use hdf5_pure_format::MessageFlags;
+pub use hdf5_pure_format::__private::MessageFlags;

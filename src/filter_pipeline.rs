@@ -1,7 +1,7 @@
 #[cfg(not(feature = "std"))]
 use alloc::format;
 
-use hdf5_pure_format::FilterPipelineError;
+use hdf5_pure_format::__private::FilterPipelineError;
 
 use crate::error::FormatError;
 
@@ -13,8 +13,8 @@ pub use hdf5_pure_filter::FILTER_SHUFFLE;
 #[cfg(feature = "zfp")]
 pub use hdf5_pure_filter::FILTER_ZFP;
 pub use hdf5_pure_filter::H5Z_FLAG_OPTIONAL;
-pub use hdf5_pure_format::FilterDescription;
-pub use hdf5_pure_format::FilterPipeline;
+pub use hdf5_pure_format::__private::FilterDescription;
+pub use hdf5_pure_format::__private::FilterPipeline;
 
 pub(crate) fn parse_filter_pipeline(data: &[u8]) -> Result<FilterPipeline, FormatError> {
     FilterPipeline::parse(data).map_err(map_filter_pipeline_error)

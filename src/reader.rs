@@ -1599,7 +1599,7 @@ impl FileInner {
     /// normalized to an absolute offset) and the base-address offset.
     fn parse_superblock(data: &[u8]) -> Result<(Superblock, BaseAddress), Error> {
         let sig_offset = signature::find_signature(data)?;
-        let mut superblock = hdf5_pure_format::parse_superblock(data, sig_offset)?;
+        let mut superblock = hdf5_pure_format::__private::parse_superblock(data, sig_offset)?;
         let addr_offset = superblock.base_address;
         // Normalize root_group_address to absolute so resolve_path_any works.
         superblock.root_group_address =
@@ -1613,8 +1613,10 @@ impl FileInner {
         source: &S,
     ) -> Result<(Superblock, BaseAddress), Error> {
         let sig_offset = signature::find_signature_in(source)?;
-        let mut superblock =
-            hdf5_pure_format::parse_superblock_from_source(&SourceMetadata(source), sig_offset)?;
+        let mut superblock = hdf5_pure_format::__private::parse_superblock_from_source(
+            &SourceMetadata(source),
+            sig_offset,
+        )?;
         let addr_offset = superblock.base_address;
         superblock.root_group_address =
             addr_offset.absolute(StoredAddress::new(superblock.root_group_address))?;
@@ -1665,7 +1667,7 @@ impl FileInner {
             .messages
             .iter()
             .find(|m| m.msg_type == MessageType::FILE_SPACE_INFO)?;
-        hdf5_pure_format::parse_file_space_info(
+        hdf5_pure_format::__private::parse_file_space_info(
             &msg.data,
             self.superblock.offset_size,
             self.superblock.length_size,
@@ -4037,7 +4039,7 @@ impl Group {
     pub(crate) fn named_datatype_at(&self, path: &str) -> Result<(Datatype, u64), Error> {
         let (address, hdr) = self.named_datatype_header(path)?;
         let msg = find_message(&hdr, MessageType::DATATYPE)?;
-        let (dt, _) = hdf5_pure_format::parse_datatype(&self.file.message_body(msg)?)?;
+        let (dt, _) = hdf5_pure_format::__private::parse_datatype(&self.file.message_body(msg)?)?;
         Ok((dt, address))
     }
 
@@ -6425,7 +6427,7 @@ the same commit to replace it",
         }
         let state = self.resolved()?;
         let msg = find_message(&state.header, MessageType::DATATYPE)?;
-        let (dt, _) = hdf5_pure_format::parse_datatype(&self.file.message_body(msg)?)?;
+        let (dt, _) = hdf5_pure_format::__private::parse_datatype(&self.file.message_body(msg)?)?;
         Ok(dt)
     }
 
@@ -7947,7 +7949,7 @@ mod tests {
     fn a_root_that_is_not_a_group_refuses_rather_than_being_searched() {
         let mut bytes = nested_dataset_bytes();
         let sig = crate::signature::find_signature(&bytes).unwrap();
-        let mut sb = hdf5_pure_format::parse_superblock(&bytes, sig).unwrap();
+        let mut sb = hdf5_pure_format::__private::parse_superblock(&bytes, sig).unwrap();
         // The fixture has no userblock, so its base address is zero and the
         // absolute address a walk returns is also the stored one the superblock
         // field wants.
@@ -7959,7 +7961,7 @@ mod tests {
             &ObjectPath::parse("plain"),
         )
         .unwrap();
-        let rewritten = hdf5_pure_format::serialize_superblock(&sb).unwrap();
+        let rewritten = hdf5_pure_format::__private::serialize_superblock(&sb).unwrap();
         bytes[sig..sig + rewritten.len()].copy_from_slice(&rewritten);
 
         let file = File::from_bytes(bytes).unwrap();
@@ -9654,10 +9656,10 @@ mod tests {
         {
             let mut bytes = std::fs::read(&old_format).unwrap();
             let sig = crate::signature::find_signature(&bytes).unwrap();
-            let mut sb = hdf5_pure_format::parse_superblock(&bytes, sig).unwrap();
+            let mut sb = hdf5_pure_format::__private::parse_superblock(&bytes, sig).unwrap();
             assert_eq!(sb.version, 3, "the fixture must start at the newer format");
             sb.version = 2;
-            let rewritten = hdf5_pure_format::serialize_superblock(&sb).unwrap();
+            let rewritten = hdf5_pure_format::__private::serialize_superblock(&sb).unwrap();
             bytes[sig..sig + rewritten.len()].copy_from_slice(&rewritten);
             std::fs::write(&old_format, &bytes).unwrap();
         }

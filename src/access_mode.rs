@@ -1,1 +1,1 @@
-pub use hdf5_pure_format::AccessMode;
+pub use hdf5_pure_format::__private::AccessMode;

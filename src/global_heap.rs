@@ -1,1 +1,1 @@
-pub use hdf5_pure_format::GlobalHeapIndex;
+pub use hdf5_pure_format::__private::GlobalHeapIndex;

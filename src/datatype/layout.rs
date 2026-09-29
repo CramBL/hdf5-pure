@@ -5,8 +5,8 @@ use crate::FormatError;
 
 pub use hdf5_pure_core::FixedPointLayout;
 pub use hdf5_pure_core::FloatingPointLayout;
-pub use hdf5_pure_format::StandardNumericLayout;
-pub use hdf5_pure_format::StandardWidth;
+pub use hdf5_pure_format::__private::StandardNumericLayout;
+pub use hdf5_pure_format::__private::StandardWidth;
 
 /// A numeric element size supported by the integer and floating-point readers.
 ///

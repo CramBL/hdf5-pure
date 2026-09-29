@@ -1,5 +1,5 @@
-pub use hdf5_pure_format::jenkins_lookup3;
-pub use hdf5_pure_format::verify_trailing;
+pub use hdf5_pure_format::__private::jenkins_lookup3;
+pub use hdf5_pure_format::__private::verify_trailing;
 
 #[cfg(test)]
 pub(crate) fn stamp_trailing(file: &mut [u8], at: usize, len: usize) {

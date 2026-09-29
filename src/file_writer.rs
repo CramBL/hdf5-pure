@@ -185,7 +185,7 @@ fn add_datatype(w: &mut ObjectHeaderWriter, dt: &Datatype, location: &DatatypeLo
         }
         None => w.add_message_with_flags(
             MessageType::DATATYPE,
-            hdf5_pure_format::serialize_datatype(dt),
+            hdf5_pure_format::__private::serialize_datatype(dt),
             MessageFlags::CONSTANT,
         ),
     }
@@ -222,7 +222,7 @@ pub(crate) fn build_committed_datatype_oh(
     let mut w = ObjectHeaderWriter::new();
     w.add_message_with_flags(
         MessageType::DATATYPE,
-        hdf5_pure_format::serialize_datatype(dt),
+        hdf5_pure_format::__private::serialize_datatype(dt),
         MessageFlags::CONSTANT | MessageFlags::FORBID_SHARING,
     );
     if references > 1 {
@@ -1436,7 +1436,7 @@ impl FileWriter {
                 // still opens the file.
                 oh.add_message_with_flags(
                     MessageType::FILE_SPACE_INFO,
-                    hdf5_pure_format::serialize_file_space_info(&info),
+                    hdf5_pure_format::__private::serialize_file_space_info(&info),
                     MessageFlags::FORBID_SHARING | MessageFlags::MARK_IF_UNKNOWN,
                 );
                 oh.serialize()
@@ -2364,8 +2364,8 @@ impl FileWriter {
             let Some(&ci) = by_path.get(path) else {
                 return Err(FormatError::UnknownCommittedDatatype(path.to_string()));
             };
-            if hdf5_pure_format::serialize_datatype(&committed[ci].dt)
-                != hdf5_pure_format::serialize_datatype(dt)
+            if hdf5_pure_format::__private::serialize_datatype(&committed[ci].dt)
+                != hdf5_pure_format::__private::serialize_datatype(dt)
             {
                 return Err(FormatError::CommittedDatatypeMismatch {
                     path: path.to_string(),
@@ -3400,7 +3400,7 @@ impl FileWriter {
                 let mut oh = ObjectHeaderWriter::new();
                 oh.add_message_with_flags(
                     MessageType::FILE_SPACE_INFO,
-                    hdf5_pure_format::serialize_file_space_info(&info),
+                    hdf5_pure_format::__private::serialize_file_space_info(&info),
                     MessageFlags::FORBID_SHARING | MessageFlags::MARK_IF_UNKNOWN,
                 );
                 oh.serialize()?
@@ -3454,7 +3454,7 @@ impl FileWriter {
                 checksum: None,
             }
             .build();
-            sink.put(&hdf5_pure_format::serialize_superblock(&sb)?)?;
+            sink.put(&hdf5_pure_format::__private::serialize_superblock(&sb)?)?;
 
             // Early-placed VL collections, at the addresses patched into the
             // chunked datasets' references before their chunks were encoded.
@@ -3730,7 +3730,7 @@ impl FileWriter {
             checksum: None,
         }
         .build();
-        sink.put(&hdf5_pure_format::serialize_superblock(&sb)?)?;
+        sink.put(&hdf5_pure_format::__private::serialize_superblock(&sb)?)?;
 
         // Early-placed VL collections, at the addresses patched into the chunked
         // datasets' references before their chunks were encoded. This must walk
@@ -3856,7 +3856,7 @@ impl FileWriter {
                 let mut oh = ObjectHeaderWriter::new();
                 oh.add_message_with_flags(
                     MessageType::FILE_SPACE_INFO,
-                    hdf5_pure_format::serialize_file_space_info(&info),
+                    hdf5_pure_format::__private::serialize_file_space_info(&info),
                     MessageFlags::FORBID_SHARING | MessageFlags::MARK_IF_UNKNOWN,
                 );
                 Some(oh.serialize()?)
@@ -3910,7 +3910,7 @@ mod tests {
             "a singly referenced committed type carries its datatype and nothing else"
         );
         assert_eq!(
-            hdf5_pure_format::parse_datatype(&hdr.messages[0].data)
+            hdf5_pure_format::__private::parse_datatype(&hdr.messages[0].data)
                 .unwrap()
                 .0,
             make_i32_type()
@@ -3976,7 +3976,7 @@ mod tests {
     /// `None` when the header carries no Object Reference Count message.
     fn committed_reference_count(bytes: &[u8], path: &str) -> Option<u32> {
         let sig = signature::find_signature(bytes).unwrap();
-        let sb = hdf5_pure_format::parse_superblock(bytes, sig).unwrap();
+        let sb = hdf5_pure_format::__private::parse_superblock(bytes, sig).unwrap();
         let addr =
             group_v2::resolve_path_any(bytes, AccessMode::ReadOnly, &sb, &ObjectPath::parse(path))
                 .unwrap();
@@ -4011,7 +4011,7 @@ mod tests {
         let bytes = w.finish().unwrap();
 
         let sig = signature::find_signature(&bytes).unwrap();
-        let sb = hdf5_pure_format::parse_superblock(&bytes, sig).unwrap();
+        let sb = hdf5_pure_format::__private::parse_superblock(&bytes, sig).unwrap();
         let type_addr = group_v2::resolve_path_any(
             &bytes,
             AccessMode::ReadOnly,
@@ -4056,7 +4056,7 @@ mod tests {
 
     fn parse_file(bytes: &[u8]) -> (Superblock, ObjectHeader) {
         let sig = signature::find_signature(bytes).unwrap();
-        let sb = hdf5_pure_format::parse_superblock(bytes, sig).unwrap();
+        let sb = hdf5_pure_format::__private::parse_superblock(bytes, sig).unwrap();
         let oh = ObjectHeader::parse(
             bytes,
             AccessMode::ReadOnly,
@@ -4070,7 +4070,7 @@ mod tests {
 
     fn read_dataset_f64(bytes: &[u8], path: &str) -> Vec<f64> {
         let sig = signature::find_signature(bytes).unwrap();
-        let sb = hdf5_pure_format::parse_superblock(bytes, sig).unwrap();
+        let sb = hdf5_pure_format::__private::parse_superblock(bytes, sig).unwrap();
         let addr =
             group_v2::resolve_path_any(bytes, AccessMode::ReadOnly, &sb, &ObjectPath::parse(path))
                 .unwrap();
@@ -4100,7 +4100,7 @@ mod tests {
             .find(|m| m.msg_type == MessageType::DATA_LAYOUT)
             .unwrap()
             .data;
-        let (dt, _) = hdf5_pure_format::parse_datatype(dt_data).unwrap();
+        let (dt, _) = hdf5_pure_format::__private::parse_datatype(dt_data).unwrap();
         let ds = Dataspace::parse(ds_data, sb.length_size).unwrap();
         let dl =
             crate::data_layout::DataLayout::parse(dl_data, sb.offset_size, sb.length_size).unwrap();
@@ -4134,7 +4134,7 @@ mod tests {
         let bytes = fw.finish().unwrap();
         assert_eq!(read_dataset_f64(&bytes, "data"), vec![1.0, 2.0]);
         let sig = signature::find_signature(&bytes).unwrap();
-        let sb = hdf5_pure_format::parse_superblock(&bytes, sig).unwrap();
+        let sb = hdf5_pure_format::__private::parse_superblock(&bytes, sig).unwrap();
         let addr = group_v2::resolve_path_any(
             &bytes,
             AccessMode::ReadOnly,
@@ -4190,7 +4190,7 @@ mod tests {
         fw.add_group(gb.finish());
         let bytes = fw.finish().unwrap();
         let sig = signature::find_signature(&bytes).unwrap();
-        let sb = hdf5_pure_format::parse_superblock(&bytes, sig).unwrap();
+        let sb = hdf5_pure_format::__private::parse_superblock(&bytes, sig).unwrap();
         let addr = group_v2::resolve_path_any(
             &bytes,
             AccessMode::ReadOnly,
@@ -4225,7 +4225,7 @@ mod tests {
         fw.add_group(gb.finish());
         let bytes = fw.finish().unwrap();
         let sig = signature::find_signature(&bytes).unwrap();
-        let sb = hdf5_pure_format::parse_superblock(&bytes, sig).unwrap();
+        let sb = hdf5_pure_format::__private::parse_superblock(&bytes, sig).unwrap();
         let addr = group_v2::resolve_path_any(
             &bytes,
             AccessMode::ReadOnly,
@@ -4288,7 +4288,7 @@ mod tests {
         }
         let bytes = fw.finish().unwrap();
         let sig = signature::find_signature(&bytes).unwrap();
-        let sb = hdf5_pure_format::parse_superblock(&bytes, sig).unwrap();
+        let sb = hdf5_pure_format::__private::parse_superblock(&bytes, sig).unwrap();
         let addr = group_v2::resolve_path_any(
             &bytes,
             AccessMode::ReadOnly,
@@ -4334,7 +4334,7 @@ mod tests {
         }
         let bytes = fw.finish().unwrap();
         let sig = signature::find_signature(&bytes).unwrap();
-        let sb = hdf5_pure_format::parse_superblock(&bytes, sig).unwrap();
+        let sb = hdf5_pure_format::__private::parse_superblock(&bytes, sig).unwrap();
         let oh = ObjectHeader::parse(
             &bytes,
             AccessMode::ReadOnly,
@@ -4365,7 +4365,7 @@ mod tests {
         }
         let bytes = fw.finish().unwrap();
         let sig = signature::find_signature(&bytes).unwrap();
-        let sb = hdf5_pure_format::parse_superblock(&bytes, sig).unwrap();
+        let sb = hdf5_pure_format::__private::parse_superblock(&bytes, sig).unwrap();
         let addr = group_v2::resolve_path_any(
             &bytes,
             AccessMode::ReadOnly,
@@ -4959,7 +4959,7 @@ mod tests {
         );
 
         let sig = signature::find_signature(&bytes).unwrap();
-        let sb = hdf5_pure_format::parse_superblock(&bytes, sig).unwrap();
+        let sb = hdf5_pure_format::__private::parse_superblock(&bytes, sig).unwrap();
         let addr = group_v2::resolve_path_any(
             &bytes,
             AccessMode::ReadOnly,
@@ -5431,7 +5431,7 @@ mod tests {
     /// the other could not tell whether they had come apart.
     fn layout_message_version(bytes: &[u8], path: &str) -> u8 {
         let sig = signature::find_signature(bytes).unwrap();
-        let sb = hdf5_pure_format::parse_superblock(bytes, sig).unwrap();
+        let sb = hdf5_pure_format::__private::parse_superblock(bytes, sig).unwrap();
         let addr =
             group_v2::resolve_path_any(bytes, AccessMode::ReadOnly, &sb, &ObjectPath::parse(path))
                 .unwrap();

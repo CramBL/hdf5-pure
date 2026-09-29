@@ -422,7 +422,7 @@ fn scan_parsed_header<S: Source + ?Sized>(
                     .first()
                     .is_some_and(|&b| crate::datatype::class_may_hold_object_address(b))
                 {
-                    if let Ok((dt, _)) = hdf5_pure_format::parse_datatype(encoded) {
+                    if let Ok((dt, _)) = hdf5_pure_format::__private::parse_datatype(encoded) {
                         element_dt = Some(dt);
                     }
                 }
@@ -595,7 +595,7 @@ fn scan_object<S: Source + ?Sized>(
                         p = body_end;
                         continue;
                     }
-                    match hdf5_pure_format::parse_datatype(encoded) {
+                    match hdf5_pure_format::__private::parse_datatype(encoded) {
                         Ok((dt, _)) => {
                             out.holds_a_reference |= datatype_holds_object_address(&dt);
                             element_dt = Some(dt);
@@ -996,7 +996,7 @@ mod tests {
         // this is the only way the path is reached at all.
         let mut region = message_record(
             MessageType::DATATYPE,
-            &hdf5_pure_format::serialize_datatype(&make_object_reference_type()),
+            &hdf5_pure_format::__private::serialize_datatype(&make_object_reference_type()),
         );
         let mut layout = vec![3u8, 0];
         layout.extend_from_slice(&8u16.to_le_bytes());
@@ -1180,7 +1180,7 @@ mod tests {
             const TYPE_AT: u64 = 2048;
             let committed = build_v2_object_header(&plain_region(message_record(
                 MessageType::DATATYPE,
-                &hdf5_pure_format::serialize_datatype(&make_object_reference_type()),
+                &hdf5_pure_format::__private::serialize_datatype(&make_object_reference_type()),
             )))
             .unwrap();
 

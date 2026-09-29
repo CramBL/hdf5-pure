@@ -9,7 +9,7 @@ use core::fmt;
 
 use core::num::{NonZeroU32, NonZeroUsize};
 
-use hdf5_pure_format::GLOBAL_HEAP_MAX_OBJECTS;
+use hdf5_pure_format::__private::GLOBAL_HEAP_MAX_OBJECTS;
 
 use crate::address::StoredAddress;
 use crate::attribute::AttributeMessage;
@@ -1071,7 +1071,7 @@ pub(crate) fn build_global_heap_collections_from_bytes(objects: &[&[u8]]) -> Vec
     objects
         .chunks(GLOBAL_HEAP_MAX_OBJECTS)
         .map(|objects| {
-            hdf5_pure_format::encode_global_heap_collection(LengthWidth::Eight, objects).expect(
+            hdf5_pure_format::__private::encode_global_heap_collection(LengthWidth::Eight, objects).expect(
                 "a chunk of at most GLOBAL_HEAP_MAX_OBJECTS objects fits an 8-byte length collection",
             )
         })

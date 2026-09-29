@@ -15,7 +15,7 @@ mod tests {
         let superblock = superblock_bytes();
         data[512..512 + superblock.len()].copy_from_slice(&superblock);
 
-        let buffered = hdf5_pure_format::parse_superblock(&data, 512).unwrap();
+        let buffered = hdf5_pure_format::__private::parse_superblock(&data, 512).unwrap();
         let memory = parse_through(&BytesSource::new(&data), 512).unwrap();
         let seek = parse_through(
             &ReadSeekSource::new(std::io::Cursor::new(data)).unwrap(),
@@ -45,7 +45,10 @@ mod tests {
         source: &impl Source,
         signature_offset: u64,
     ) -> Result<Superblock, FormatError> {
-        hdf5_pure_format::parse_superblock_from_source(&SourceMetadata(source), signature_offset)
+        hdf5_pure_format::__private::parse_superblock_from_source(
+            &SourceMetadata(source),
+            signature_offset,
+        )
     }
 
     fn superblock_bytes() -> Vec<u8> {

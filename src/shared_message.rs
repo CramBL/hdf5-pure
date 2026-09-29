@@ -17,16 +17,16 @@
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 
-pub use hdf5_pure_format::DatatypeLocation;
-pub use hdf5_pure_format::FHEAP_ID_LEN;
-pub use hdf5_pure_format::SharedLocation;
-pub use hdf5_pure_format::SharedResolver;
-pub use hdf5_pure_format::committed_address_in;
+pub use hdf5_pure_format::__private::DatatypeLocation;
+pub use hdf5_pure_format::__private::FHEAP_ID_LEN;
+pub use hdf5_pure_format::__private::SharedLocation;
+pub use hdf5_pure_format::__private::SharedResolver;
+pub use hdf5_pure_format::__private::committed_address_in;
 #[cfg(any(feature = "std", test))]
-pub use hdf5_pure_format::encode_committed_ref;
+pub use hdf5_pure_format::__private::encode_committed_ref;
 #[cfg(any(feature = "std", test))]
-pub use hdf5_pure_format::encode_sohm_ref;
-pub use hdf5_pure_format::parse_shared_ref;
+pub use hdf5_pure_format::__private::encode_sohm_ref;
+pub use hdf5_pure_format::__private::parse_shared_ref;
 
 use crate::access_mode::AccessMode;
 use crate::address::BaseAddressExt;

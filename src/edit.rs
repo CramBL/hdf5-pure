@@ -2637,9 +2637,9 @@ impl WriteEngine {
     /// open and off on close, and the page buffer's crash mark
     /// ([`raise_crash_mark`](Self::raise_crash_mark)).
     ///
-    /// Requires a version-2/3 superblock, since [`hdf5_pure_format::serialize_superblock`] emits
-    /// that layout; `open_swmr_writer` and
-    /// [`set_page_buffer_size`](Self::set_page_buffer_size) each check it.
+    /// Requires a version 2 or 3 superblock, since
+    /// [`hdf5_pure_format::__private::serialize_superblock`] writes that layout.
+    /// `open_swmr_writer` and [`set_page_buffer_size`](Self::set_page_buffer_size) each check it.
     ///
     /// The root address is stored on disk *relative to the base address* while
     /// the session holds it absolute (see the normalization in `open_imaged`), so
@@ -2667,7 +2667,7 @@ impl WriteEngine {
             .base_address
             .relative(on_disk.root_group_address)?
             .get();
-        let bytes = hdf5_pure_format::serialize_superblock(&on_disk)?;
+        let bytes = hdf5_pure_format::__private::serialize_superblock(&on_disk)?;
         self.write_at(self.sb_sig_off, &bytes)?;
         self.barrier_data()?;
         Ok(())
@@ -2798,8 +2798,10 @@ impl WriteEngine {
         // which is why the mirror positions the handle before reading it whole.
         let probe = crate::image::BorrowedHandle::new(&handle, len);
         let sb_sig_off = signature::find_signature_in(&probe)?;
-        let mut superblock =
-            hdf5_pure_format::parse_superblock_from_source(&SourceMetadata(&probe), sb_sig_off)?;
+        let mut superblock = hdf5_pure_format::__private::parse_superblock_from_source(
+            &SourceMetadata(&probe),
+            sb_sig_off,
+        )?;
 
         if superblock.version > 3 {
             return Err(Error::EditUnsupported("unsupported superblock version"));
@@ -3260,7 +3262,7 @@ impl WriteEngine {
             .messages
             .iter()
             .find(|m| m.msg_type == MessageType::FILE_SPACE_INFO)?;
-        hdf5_pure_format::parse_file_space_info(&msg.data, os, ls).ok()
+        hdf5_pure_format::__private::parse_file_space_info(&msg.data, os, ls).ok()
     }
 
     /// Stage a new dataset, added on the next [`commit`](Self::commit).
@@ -3499,7 +3501,8 @@ impl WriteEngine {
         if pipeline_lossless(&pipeline) {
             return false;
         }
-        let Ok((disk_dt, _)) = hdf5_pure_format::parse_datatype(&region[dt_b..dt_e]) else {
+        let Ok((disk_dt, _)) = hdf5_pure_format::__private::parse_datatype(&region[dt_b..dt_e])
+        else {
             return false;
         };
         let Ok(disk_ds) = Dataspace::parse(&region[ds_b..ds_e], LENGTH_SIZE) else {
@@ -6999,7 +7002,7 @@ impl WriteEngine {
             // rule, and a site that states it as a literal is one refactor away
             // from being wrong silently (issue #308).
             new_sb.consistency_flags = self.held_status_flags;
-            let sb_bytes = hdf5_pure_format::serialize_superblock(&new_sb)?;
+            let sb_bytes = hdf5_pure_format::__private::serialize_superblock(&new_sb)?;
             self.publish_attempted = true;
             self.write_at(self.sb_sig_off, &sb_bytes)?;
             self.barrier()?;
@@ -7246,7 +7249,7 @@ impl WriteEngine {
         // As above, and zero for the same reason: this is the *unpaged* persisting
         // tail, which no page-buffered session reaches (issue #73, issue #308).
         new_sb.consistency_flags = self.held_status_flags;
-        let sb_bytes = hdf5_pure_format::serialize_superblock(&new_sb)?;
+        let sb_bytes = hdf5_pure_format::__private::serialize_superblock(&new_sb)?;
         self.publish_attempted = true;
         self.write_at(self.sb_sig_off, &sb_bytes)?;
         self.barrier()?;
@@ -7667,7 +7670,7 @@ impl WriteEngine {
         // the one where this must not be a literal zero: a crash mark has to
         // outlive every commit the session makes (issue #308).
         new_sb.consistency_flags = self.held_status_flags;
-        let sb_bytes = hdf5_pure_format::serialize_superblock(&new_sb)?;
+        let sb_bytes = hdf5_pure_format::__private::serialize_superblock(&new_sb)?;
         self.publish_attempted = true;
         self.write_at(self.sb_sig_off, &sb_bytes)?;
         self.barrier()?;
@@ -8353,7 +8356,7 @@ impl WriteEngine {
         // library (e.g. the C library records a maximum-dimensions array equal to
         // the current dimensions, which this crate omits) while still refusing any
         // real retype or reshape.
-        let (disk_dt, _) = hdf5_pure_format::parse_datatype(&region[dt_b..dt_e])?;
+        let (disk_dt, _) = hdf5_pure_format::__private::parse_datatype(&region[dt_b..dt_e])?;
         if disk_dt != fd.dt {
             return Err(Error::EditUnsupported(
                 "write_dataset datatype does not match the on-disk dataset (overwrite, not retype)",
@@ -8658,7 +8661,7 @@ impl WriteEngine {
             "dataset header has no data layout",
         ))?;
 
-        let (disk_dt, _) = hdf5_pure_format::parse_datatype(&region[dt_b..dt_e])?;
+        let (disk_dt, _) = hdf5_pure_format::__private::parse_datatype(&region[dt_b..dt_e])?;
         let disk_ds = Dataspace::parse(&region[ds_b..ds_e], LENGTH_SIZE)?;
         let dl = DataLayout::parse(&region[lb..le], OFFSET_SIZE, LENGTH_SIZE)?;
 
@@ -11578,7 +11581,7 @@ impl Store for EditStore<'_> {
         // address serializes back to the same stored value.
         let eof = self.image.len();
         self.superblock.eof_address = eof;
-        let bytes = hdf5_pure_format::serialize_superblock(self.superblock)?;
+        let bytes = hdf5_pure_format::__private::serialize_superblock(self.superblock)?;
         self.write_at(self.sb_sig_off, &bytes)
     }
     fn sync(&mut self) -> Result<(), Error> {
@@ -11652,7 +11655,7 @@ pub(crate) fn locate_dataset_state<F: Store>(
     }
     let (dt_off, dt_size) = result.spans.datatype;
     let dt_bytes = file.read_metadata_at(dt_off, dt_size)?;
-    let (datatype, _) = hdf5_pure_format::parse_datatype(&dt_bytes)?;
+    let (datatype, _) = hdf5_pure_format::__private::parse_datatype(&dt_bytes)?;
     let pipeline = match result.spans.filter {
         Some((fb, fsize)) => {
             let fp_bytes = file.read_metadata_at(fb, fsize)?;
@@ -12226,7 +12229,7 @@ fn parse_chunked_header(region: &OhRegion) -> Result<ChunkedHeaderParts, Error> 
     let (ds_b, ds_e) =
         dataspace.ok_or(Error::EditUnsupported("dataset header has no dataspace"))?;
     let (lb, le) = layout.ok_or(Error::EditUnsupported("dataset header has no data layout"))?;
-    let (dt, _) = hdf5_pure_format::parse_datatype(&region[dt_b..dt_e])?;
+    let (dt, _) = hdf5_pure_format::__private::parse_datatype(&region[dt_b..dt_e])?;
     let ds = Dataspace::parse(&region[ds_b..ds_e], LENGTH_SIZE)?;
     let dl = DataLayout::parse(&region[lb..le], OFFSET_SIZE, LENGTH_SIZE)?;
     if !matches!(dl, DataLayout::Chunked { .. }) {
@@ -13825,7 +13828,7 @@ pub(crate) fn rewrite_extension_region_bytes(
     region: &OhRegion,
     info: &FileSpaceInfo,
 ) -> Result<OhRegion, Error> {
-    let new_body = hdf5_pure_format::serialize_file_space_info(info);
+    let new_body = hdf5_pure_format::__private::serialize_file_space_info(info);
     // The message body is the fixed-size File Space Info record (≤ 125 bytes),
     // so it always fits the u16 size field.
     let new_len: u16 = new_body
@@ -14571,7 +14574,7 @@ fn reject_foreign_addresses(region: &OhRegion) -> Result<(), Error> {
         }
         match msg_type {
             MessageType::DATATYPE => {
-                let (dt, _) = hdf5_pure_format::parse_datatype(&region[body..body_end])?;
+                let (dt, _) = hdf5_pure_format::__private::parse_datatype(&region[body..body_end])?;
                 if datatype_holds_file_address(&dt) {
                     return Err(Error::EditUnsupported(
                         "variable-length or reference datasets cannot be copied to another file yet",
@@ -14841,7 +14844,7 @@ fn screen_copied_references(
                 } else {
                     &region[body..body_end]
                 };
-                let (dt, _) = hdf5_pure_format::parse_datatype(encoded)?;
+                let (dt, _) = hdf5_pure_format::__private::parse_datatype(encoded)?;
                 element_dt = Some(dt);
             }
             MessageType::DATA_LAYOUT => {
@@ -15263,7 +15266,7 @@ mod tests {
     fn compact_reference_region(address: u64) -> OhRegion {
         let mut region = message_record(
             MessageType::DATATYPE,
-            &hdf5_pure_format::serialize_datatype(
+            &hdf5_pure_format::__private::serialize_datatype(
                 &crate::type_builders::make_object_reference_type(),
             ),
         );
@@ -15307,7 +15310,7 @@ mod tests {
         let no_layout = CopyTree::DatasetVerbatim {
             region: plain_region(message_record(
                 MessageType::DATATYPE,
-                &hdf5_pure_format::serialize_datatype(
+                &hdf5_pure_format::__private::serialize_datatype(
                     &crate::type_builders::make_object_reference_type(),
                 ),
             )),
@@ -18532,9 +18535,9 @@ mod tests {
         for (path, version, flags) in [(&flagged, 3, SWMR_WRITE_FLAGS), (&ancient, 9, 0)] {
             let mut data = std::fs::read(path).unwrap();
             let off = signature::find_signature(&data).unwrap();
-            let mut sb = hdf5_pure_format::parse_superblock(&data, off).unwrap();
+            let mut sb = hdf5_pure_format::__private::parse_superblock(&data, off).unwrap();
             sb.consistency_flags = flags;
-            let mut bytes = hdf5_pure_format::serialize_superblock(&sb).unwrap();
+            let mut bytes = hdf5_pure_format::__private::serialize_superblock(&sb).unwrap();
             bytes[signature::HDF5_SIGNATURE.len()] = version;
             data[off..off + bytes.len()].copy_from_slice(&bytes);
             std::fs::write(path, &data).unwrap();
@@ -18583,18 +18586,18 @@ mod tests {
         {
             let mut data = std::fs::read(&path).unwrap();
             let off = signature::find_signature(&data).unwrap();
-            let mut sb = hdf5_pure_format::parse_superblock(&data, off).unwrap();
+            let mut sb = hdf5_pure_format::__private::parse_superblock(&data, off).unwrap();
             assert!(
                 sb.version >= 2,
                 "FileBuilder should emit a v2/v3 superblock"
             );
             sb.consistency_flags = 0x05;
-            let bytes = hdf5_pure_format::serialize_superblock(&sb).unwrap();
+            let bytes = hdf5_pure_format::__private::serialize_superblock(&sb).unwrap();
             data[off..off + bytes.len()].copy_from_slice(&bytes);
             std::fs::write(&path, &data).unwrap();
             // Sanity: the stale flag is really set on disk now.
             assert_eq!(
-                hdf5_pure_format::parse_superblock(&data, off)
+                hdf5_pure_format::__private::parse_superblock(&data, off)
                     .unwrap()
                     .consistency_flags,
                 0x05
@@ -18617,10 +18620,10 @@ mod tests {
         {
             let mut data = std::fs::read(&path).unwrap();
             let off = signature::find_signature(&data).unwrap();
-            let mut sb = hdf5_pure_format::parse_superblock(&data, off).unwrap();
+            let mut sb = hdf5_pure_format::__private::parse_superblock(&data, off).unwrap();
             sb.version = 2;
             sb.consistency_flags = crate::file_lock::WRITE_ACCESS;
-            let bytes = hdf5_pure_format::serialize_superblock(&sb).unwrap();
+            let bytes = hdf5_pure_format::__private::serialize_superblock(&sb).unwrap();
             data[off..off + bytes.len()].copy_from_slice(&bytes);
             std::fs::write(&path, &data).unwrap();
         }
@@ -18639,7 +18642,7 @@ mod tests {
         let data = std::fs::read(&path).unwrap();
         let off = signature::find_signature(&data).unwrap();
         assert_eq!(
-            hdf5_pure_format::parse_superblock(&data, off)
+            hdf5_pure_format::__private::parse_superblock(&data, off)
                 .unwrap()
                 .consistency_flags,
             0,
@@ -18715,14 +18718,14 @@ mod tests {
         // editor reaches the `root_group_address + base` normalization.
         let mut data = std::fs::read(&path).unwrap();
         let off = signature::find_signature(&data).unwrap();
-        let mut sb = hdf5_pure_format::parse_superblock(&data, off).unwrap();
+        let mut sb = hdf5_pure_format::__private::parse_superblock(&data, off).unwrap();
         assert_eq!(
             sb.base_address,
             BaseAddress::new(UB),
             "userblock file must have base == UB"
         );
         sb.root_group_address = u64::MAX;
-        let bytes = hdf5_pure_format::serialize_superblock(&sb).unwrap();
+        let bytes = hdf5_pure_format::__private::serialize_superblock(&sb).unwrap();
         data[off..off + bytes.len()].copy_from_slice(&bytes);
         std::fs::write(&path, &data).unwrap();
 

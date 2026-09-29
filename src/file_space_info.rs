@@ -1,7 +1,4 @@
 //! The File Space Info messages the writers write, with and without persisted free space.
-//!
-//! [`serialize_file_space_info`](hdf5_pure_format::serialize_file_space_info) serializes a message
-//! and [`parse_file_space_info`](hdf5_pure_format::parse_file_space_info) parses one.
 
 #[cfg(not(feature = "std"))]
 use alloc::{vec, vec::Vec};
@@ -131,9 +128,9 @@ mod tests {
             FileSpaceStrategy::None,
         ] {
             let info = non_persistent(strategy, 1, 4096);
-            let bytes = hdf5_pure_format::serialize_file_space_info(&info);
+            let bytes = hdf5_pure_format::__private::serialize_file_space_info(&info);
             assert_eq!(bytes.len(), 29, "non-persistent message is 29 bytes");
-            let parsed = hdf5_pure_format::parse_file_space_info(&bytes, 8, 8).unwrap();
+            let parsed = hdf5_pure_format::__private::parse_file_space_info(&bytes, 8, 8).unwrap();
             assert_eq!(parsed, info);
             assert_eq!(parsed.eoa_pre_fsm, u64::MAX);
             assert!(parsed.manager_addrs.is_empty());
@@ -152,7 +149,10 @@ mod tests {
             0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, // eoa = UNDEF
         ];
         let info = non_persistent(FileSpaceStrategy::None, 1, 4096);
-        assert_eq!(hdf5_pure_format::serialize_file_space_info(&info), expected);
+        assert_eq!(
+            hdf5_pure_format::__private::serialize_file_space_info(&info),
+            expected
+        );
     }
 
     #[test]
@@ -166,10 +166,10 @@ mod tests {
         let info = persistent_managers(FileSpaceStrategy::Page, 0, 16384, slots, 65536);
         assert!(info.persist);
         assert_eq!(info.eoa_pre_fsm, 65536);
-        let bytes = hdf5_pure_format::serialize_file_space_info(&info);
+        let bytes = hdf5_pure_format::__private::serialize_file_space_info(&info);
         // 29-byte head + 12 * 8 manager slots.
         assert_eq!(bytes.len(), 29 + NUM_FILE_FSM_MANAGERS * 8);
-        let parsed = hdf5_pure_format::parse_file_space_info(&bytes, 8, 8).unwrap();
+        let parsed = hdf5_pure_format::__private::parse_file_space_info(&bytes, 8, 8).unwrap();
         assert_eq!(parsed, info);
         assert_eq!(parsed.manager_addrs[0], 841);
         assert_eq!(parsed.manager_addrs[2], 18384);

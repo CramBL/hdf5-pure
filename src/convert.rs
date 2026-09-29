@@ -1,6 +1,6 @@
-pub use hdf5_pure_format::Narrow;
-pub use hdf5_pure_format::is_undefined_addr;
-pub use hdf5_pure_format::slice_range;
+pub use hdf5_pure_format::__private::Narrow;
+pub use hdf5_pure_format::__private::is_undefined_addr;
+pub use hdf5_pure_format::__private::slice_range;
 
 #[cfg(test)]
 pub(crate) fn nz(value: usize) -> core::num::NonZeroUsize {

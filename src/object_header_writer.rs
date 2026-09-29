@@ -1,1 +1,1 @@
-pub use hdf5_pure_format::ObjectHeaderWriter;
+pub use hdf5_pure_format::__private::ObjectHeaderWriter;

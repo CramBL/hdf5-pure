@@ -5,7 +5,7 @@ use crate::error::FormatError;
 use crate::source::{BytesSource, Source};
 
 /// The 8-byte HDF5 magic signature.
-pub use hdf5_pure_format::HDF5_SIGNATURE;
+pub use hdf5_pure_format::__private::HDF5_SIGNATURE;
 
 /// Search a [`Source`] for the HDF5 signature, returning its byte offset.
 ///
