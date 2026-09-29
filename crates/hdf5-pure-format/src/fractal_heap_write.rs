@@ -767,7 +767,7 @@ mod tests {
     /// A walk that computes the heap offset of each slot from the doubling table, as a reader
     /// does, reaches every block at its planned offset.
     #[test]
-    fn the_tree_puts_every_block_at_the_slot_its_heap_offset_names() {
+    fn every_block_is_at_the_slot_of_its_heap_offset() {
         for (name, sizes) in shapes() {
             let plan = AttributeHeapPlan::new(&sizes, OFFSET_WIDTH).expect("plannable");
             let Some(root) = plan.indirects.len().checked_sub(1) else {

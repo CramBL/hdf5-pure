@@ -427,7 +427,7 @@ mod tests {
     }
 
     #[test]
-    fn a_shape_needing_an_empty_node_is_refused() {
+    fn a_shape_needing_an_empty_node_has_no_plan() {
         // A 256-byte node holds one 200-byte record at every depth, so the counts are 1, 3, 7, 15,
         // and so on.
         assert!(BTreeV2Plan::new(8, 1_000, 200, 256, OFFSET_WIDTH).is_none());
