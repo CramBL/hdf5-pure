@@ -187,8 +187,7 @@ pub fn encode_sohm_ref(heap_id: &[u8; FHEAP_ID_LEN]) -> Vec<u8> {
 /// Reads the message that a shared message reference stands for.
 ///
 /// A reference locates the message in another object header or in the shared message heap, so
-/// resolving it reads past the message body. A parser that may meet a reference takes a resolver,
-/// and a caller that has a message body without its file passes [`Unresolvable`].
+/// resolving it reads past the message body. A parser that may meet a reference takes a resolver.
 pub trait SharedResolver {
     /// Resolves `reference`, the body of a shared message, into the bytes of the
     /// `target`-typed message it refers to.
@@ -196,8 +195,7 @@ pub trait SharedResolver {
     /// # Errors
     ///
     /// An implementation returns an error if `reference` is malformed or the read of the message
-    /// fails. [`Unresolvable`] returns [`FormatError::UnresolvedSharedMessage`] for every
-    /// reference.
+    /// fails.
     fn resolve(&self, reference: &[u8], target: MessageType) -> Result<Vec<u8>, FormatError>;
 
     /// Returns the object header address `reference` names, without reading the object there,
@@ -212,15 +210,14 @@ pub trait SharedResolver {
     ///
     /// # Errors
     ///
-    /// An implementation returns an error if `reference` is malformed. [`Unresolvable`] returns
-    /// [`FormatError::UnresolvedSharedMessage`] for every reference.
+    /// An implementation returns an error if `reference` is malformed.
     fn committed_address(&self, reference: &[u8]) -> Result<Option<StoredAddress>, FormatError>;
 }
 
 /// Rejects every reference, for parses that hold a message body but not the file
 /// it came from. Returning the encoding stored *at* the reference would be a
 /// different message entirely, so the only honest result is an error.
-pub struct Unresolvable;
+pub(crate) struct Unresolvable;
 
 impl SharedResolver for Unresolvable {
     fn resolve(&self, _reference: &[u8], target: MessageType) -> Result<Vec<u8>, FormatError> {

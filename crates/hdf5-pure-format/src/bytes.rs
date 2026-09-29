@@ -96,9 +96,7 @@ fn read_le(data: &[u8], pos: usize, width: u8) -> u64 {
 
 /// Reads a file address of `offset_size` bytes at `pos`.
 ///
-/// `offset_size` is the superblock's "Size of Offsets" field. For the 1, 2, 4
-/// or 8 byte width that an object header or a link message encodes in a flag
-/// field, use [`read_uint_width`].
+/// `offset_size` is the superblock's "Size of Offsets" field.
 ///
 /// # Errors
 ///
@@ -115,7 +113,11 @@ pub fn read_offset(data: &[u8], pos: usize, offset_size: u8) -> Result<u64, Form
 ///
 /// Returns [`FormatError::UnexpectedEof`] if fewer than `width` bytes remain at `pos`.
 #[inline]
-pub fn read_offset_width(data: &[u8], pos: usize, width: OffsetWidth) -> Result<u64, FormatError> {
+pub(crate) fn read_offset_width(
+    data: &[u8],
+    pos: usize,
+    width: OffsetWidth,
+) -> Result<u64, FormatError> {
     ensure_len(data, pos, usize::from(width.get()))?;
     Ok(read_le(data, pos, width.get()))
 }
@@ -139,7 +141,11 @@ pub fn read_length(data: &[u8], pos: usize, length_size: u8) -> Result<u64, Form
 ///
 /// Returns [`FormatError::UnexpectedEof`] if fewer than `width` bytes remain at `pos`.
 #[inline]
-pub fn read_length_width(data: &[u8], pos: usize, width: LengthWidth) -> Result<u64, FormatError> {
+pub(crate) fn read_length_width(
+    data: &[u8],
+    pos: usize,
+    width: LengthWidth,
+) -> Result<u64, FormatError> {
     ensure_len(data, pos, usize::from(width.get()))?;
     Ok(read_le(data, pos, width.get()))
 }
@@ -155,7 +161,11 @@ pub fn read_length_width(data: &[u8], pos: usize, width: LengthWidth) -> Result<
 /// Returns [`FormatError::UnexpectedEof`] if fewer than `width` bytes remain at
 /// `pos`.
 #[inline]
-pub fn read_uint_width(data: &[u8], pos: usize, width: UintWidth) -> Result<u64, FormatError> {
+pub(crate) fn read_uint_width(
+    data: &[u8],
+    pos: usize,
+    width: UintWidth,
+) -> Result<u64, FormatError> {
     ensure_len(data, pos, usize::from(width.get()))?;
     Ok(read_le(data, pos, width.get()))
 }
@@ -192,7 +202,7 @@ pub fn read_optional_offset(
 ///
 /// Returns [`FormatError::UnexpectedEof`] if fewer than `width` bytes remain at `pos`.
 #[inline]
-pub fn read_optional_offset_width(
+pub(crate) fn read_optional_offset_width(
     data: &[u8],
     pos: usize,
     width: OffsetWidth,

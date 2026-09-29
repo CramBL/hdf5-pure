@@ -13,9 +13,10 @@ use crate::error::FormatError;
 /// Supplies the bytes of a file to the parsers that read its metadata.
 ///
 /// A parser that takes a `MetadataSource`, such as
-/// [`ObjectHeader::parse_from_source`](crate::ObjectHeader::parse_from_source), reads a structure
-/// one piece at a time and holds no more of the file than the piece it parses. Every offset is an
-/// absolute position in the file. `[u8]` implements the trait for a file held in memory.
+/// [`ObjectHeader::parse_from_source`](crate::object_header::ObjectHeader::parse_from_source),
+/// reads a structure one piece at a time and holds no more of the file than the piece it parses.
+/// Every offset is an absolute position in the file. `[u8]` implements the trait for a file held
+/// in memory.
 pub trait MetadataSource {
     /// Returns the length of the file in bytes.
     fn len(&self) -> u64;

@@ -17,12 +17,12 @@ use crate::metadata_source::MetadataSource;
 /// [format specification, version 4.0][spec].
 ///
 /// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_infra_btrees_v1
-pub const BTREE_V1_NODE_PREFIX_LEN: usize = 8;
+pub(crate) const BTREE_V1_NODE_PREFIX_LEN: usize = 8;
 
 /// Returns the size in bytes of a version 1 B-tree node header, the offset of the node's first key.
 ///
-/// The header is the [`BTREE_V1_NODE_PREFIX_LEN`] bytes of the prefix and the left and right
-/// sibling addresses, `offset_size` bytes each.
+/// The header is the 8-byte prefix and the left and right sibling addresses, `offset_size` bytes
+/// each.
 pub const fn btree_v1_node_header_size(offset_size: u8) -> usize {
     BTREE_V1_NODE_PREFIX_LEN + (offset_size as usize) * 2
 }
@@ -148,8 +148,8 @@ impl BTreeV1Node {
 
     /// Parses the version 1 B-tree node at `address` in `source`.
     ///
-    /// Reads the [`BTREE_V1_NODE_PREFIX_LEN`] bytes of the prefix for the number of entries in use,
-    /// then the node up to its last key in use, and parses it as [`parse`](Self::parse) does.
+    /// Reads the 8-byte prefix for the number of entries in use, then the node up to its last key
+    /// in use, and parses it as [`parse`](Self::parse) does.
     ///
     /// # Errors
     ///

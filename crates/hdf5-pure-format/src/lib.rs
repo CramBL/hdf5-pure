@@ -1,16 +1,16 @@
 //! HDF5 on-disk structures and their byte encodings.
 //!
-//! The types describe metadata stored in HDF5 files. Parsers read message bodies
-//! from byte slices, and writers produce bytes for file operations. File
-//! navigation, storage access, and filter execution belong to `hdf5-pure` and
+//! Besides a hidden module, the crate root holds only re-exports of `hdf5-pure-core` items, such
+//! as [`Datatype`], [`Superblock`], and [`FormatError`]. The crate exports its parsers and its
+//! writers to the workspace crates alone, through that module, which may change in any release.
+//! File navigation, storage access, and filter execution belong to `hdf5-pure` and
 //! `hdf5-pure-filter`.
 //!
-//! The project supports `hdf5-pure` as its API entry point. Types re-exported there follow
-//! that crate's compatibility policy. Direct use of this published support crate has no
-//! independent API compatibility guarantee. The hidden `__private` module serves the workspace
-//! crates alone.
+//! The project supports `hdf5-pure` as its API entry point. A type that `hdf5-pure` re-exports
+//! follows the compatibility policy of `hdf5-pure`.
 
 #![cfg_attr(not(test), no_std)]
+#![warn(unreachable_pub)]
 extern crate alloc;
 #[cfg(feature = "std")]
 extern crate std;
@@ -53,118 +53,23 @@ mod superblock;
 mod symbol_table;
 mod width;
 
-pub use access_mode::AccessMode;
-pub use address::BaseAddress;
-pub use address::StoredAddress;
-pub use attribute_info::AttributeInfoMessage;
-pub use attribute_message::AttributeMessage;
-pub use btree_v1::BTREE_V1_NODE_PREFIX_LEN;
-pub use btree_v1::BTreeV1Node;
-pub use btree_v1::btree_v1_node_header_size;
-pub use bytes::ensure_len;
-pub use bytes::read_length;
-pub use bytes::read_length_width;
-pub use bytes::read_offset;
-pub use bytes::read_offset_width;
-pub use bytes::read_optional_offset;
-pub use bytes::read_optional_offset_width;
-pub use bytes::read_uint_width;
-pub use checksum::jenkins_lookup3;
-pub use checksum::verify_trailing;
-pub use convert::Narrow;
-pub use convert::NarrowTarget;
-pub use convert::is_undefined_addr;
-pub use convert::slice_range;
-pub use data_layout::COMPACT_DATA_OFFSET;
-pub use data_layout::ChunkIndexLayout;
-pub use data_layout::ChunkedLayoutFlags;
-pub use data_layout::DONT_FILTER_PARTIAL_BOUND_CHUNKS;
-pub use data_layout::DataLayout;
-pub use data_layout::FilteredSingleChunk;
-pub use data_layout::SINGLE_INDEX_WITH_FILTER;
-pub use dataspace::Dataspace;
-pub use dataspace::DataspaceType;
-pub use dataspace::Extent;
-pub use dataspace::MaxExtent;
-pub use datatype::CharacterSet;
-pub use datatype::CompoundMember;
-pub use datatype::Datatype;
-pub use datatype::EnumMember;
-pub use datatype::ReferenceType;
-pub use datatype::StringPadding;
-pub use datatype::byte_order::DatatypeByteOrder;
-pub use datatype::byte_order::FixedWidthByteOrder;
-pub use datatype::class_may_hold_object_address;
-pub use datatype::datatype_holds_file_address;
-pub use datatype::datatype_holds_object_address;
-pub use datatype::element_size_usize;
-pub use datatype::embedded_reference_slots;
-pub use datatype::layout::FixedPointLayout;
-pub use datatype::layout::FloatingPointLayout;
-pub use datatype::layout::StandardNumericLayout;
-pub use datatype::layout::StandardWidth;
-pub use datatype::parse_datatype;
-pub use datatype::serialize_datatype;
-pub use datatype::stored_object_references;
-pub use error::FormatError;
-pub use error::OBJECT_HEADER_MESSAGE_MAX;
-pub use file_space_info::FileSpaceInfo;
-pub use file_space_info::FileSpaceStrategy;
-pub use file_space_info::parse_file_space_info;
-pub use file_space_info::serialize_file_space_info;
-pub use fill_value::FillValueError;
-pub use fill_value::V3_FLAGS_DEFAULT;
-pub use fill_value::fill_value_is_written;
-pub use fill_value::fill_value_message_v3;
-pub use fill_value::parse_defined_fill_value;
-pub use filter_pipeline::FilterDescription;
-pub use filter_pipeline::FilterPipeline;
-pub use filter_pipeline::FilterPipelineError;
-pub use global_heap::GLOBAL_HEAP_MAX_OBJECTS;
-pub use global_heap::GlobalHeapCollectionError;
-pub use global_heap::GlobalHeapIndex;
-pub use global_heap::GlobalHeapObjectInfo;
-pub use global_heap::encode_global_heap_collection;
-#[doc(hidden)]
-pub use hdf5_pure_core::__private::DISPLAY_MAX_MEMBERS;
-#[doc(hidden)]
-pub use hdf5_pure_core::__private::Dims;
-#[doc(hidden)]
-pub use hdf5_pure_core::__private::EscapedName;
-#[doc(hidden)]
-pub use hdf5_pure_core::__private::QuotedBytes;
-#[doc(hidden)]
-pub use hdf5_pure_core::__private::write_elided;
-pub use link_info::LinkInfoMessage;
-pub use link_message::LinkMessage;
-pub use link_message::LinkTarget;
-pub use link_message::link_is_named;
-pub use local_heap::LocalHeap;
-pub use message_flags::MessageFlags;
-pub use message_type::MessageType;
-pub use metadata_source::MetadataSource;
-pub use object_header::HeaderMessage;
-pub use object_header::MessageFilter;
-pub use object_header::ObjectHeader;
-pub use object_header_writer::ObjectHeaderWriter;
-pub use shared_message::DatatypeLocation;
-pub use shared_message::FHEAP_ID_LEN;
-pub use shared_message::SharedLocation;
-pub use shared_message::SharedMessageRef;
-pub use shared_message::SharedResolver;
-pub use shared_message::Unresolvable;
-pub use shared_message::committed_address_in;
-pub use shared_message::encode_committed_ref;
-pub use shared_message::encode_sohm_ref;
-pub use shared_message::parse_shared_ref;
-pub use signature::HDF5_SIGNATURE;
-pub use superblock::Superblock;
-pub use superblock::parse_superblock;
-pub use superblock::parse_superblock_from_source;
-pub use superblock::serialize_superblock;
-pub use symbol_table::SymbolTableEntry;
-pub use symbol_table::SymbolTableMessage;
-pub use symbol_table::SymbolTableNode;
-pub use width::LengthWidth;
-pub use width::OffsetWidth;
-pub use width::UintWidth;
+pub use hdf5_pure_core::BaseAddress;
+pub use hdf5_pure_core::FileSpaceInfo;
+pub use hdf5_pure_core::FileSpaceStrategy;
+pub use hdf5_pure_core::Superblock;
+
+pub use hdf5_pure_core::FormatError;
+pub use hdf5_pure_core::MessageType;
+pub use hdf5_pure_core::OBJECT_HEADER_MESSAGE_MAX;
+
+pub use hdf5_pure_core::CharacterSet;
+pub use hdf5_pure_core::CompoundMember;
+pub use hdf5_pure_core::Datatype;
+pub use hdf5_pure_core::DatatypeByteOrder;
+pub use hdf5_pure_core::EnumMember;
+pub use hdf5_pure_core::FixedPointLayout;
+pub use hdf5_pure_core::FloatingPointLayout;
+pub use hdf5_pure_core::ReferenceType;
+pub use hdf5_pure_core::StringPadding;
+
+pub use hdf5_pure_core::MaxExtent;

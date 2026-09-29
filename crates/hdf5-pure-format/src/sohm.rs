@@ -4,8 +4,8 @@
 //! A file created with `H5Pset_shared_mesg_nindexes` and `H5Pset_shared_mesg_index` stores one
 //! copy of each message it shares, in the fractal heap of the index that covers the message type.
 //! An object that uses the message holds an 8-byte heap ID in place of its body, which
-//! [`parse_shared_ref`](crate::parse_shared_ref) reads into a [`SharedLocation::SohmHeap`]. Three
-//! structures lead from the superblock to the heap:
+//! [`parse_shared_ref`](crate::shared_message::parse_shared_ref) reads into a
+//! [`SharedLocation::SohmHeap`]. Three structures lead from the superblock to the heap:
 //!
 //! - the Shared Message Table message (type 0x000F) in the superblock extension, with the address
 //!   of the master table and its number of indexes ([`SharedMessageTableMessage`])
@@ -18,7 +18,7 @@
 //! A reader finds a message through the first two, since the heap ID in a reference locates the
 //! message in the heap. A writer searches the records of the index for an equal message to share.
 //!
-//! [`SharedLocation::SohmHeap`]: crate::SharedLocation::SohmHeap
+//! [`SharedLocation::SohmHeap`]: crate::shared_message::SharedLocation::SohmHeap
 
 use alloc::vec::Vec;
 

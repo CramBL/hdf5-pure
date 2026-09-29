@@ -10,7 +10,7 @@ use alloc::vec::Vec;
 
 use byteorder::{ByteOrder, LittleEndian};
 use hdf5_pure_core::__private::SuperblockFields;
-pub use hdf5_pure_core::Superblock;
+pub(crate) use hdf5_pure_core::Superblock;
 
 use crate::address::BaseAddress;
 use crate::address::BaseAddressExt;
