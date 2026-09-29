@@ -606,6 +606,8 @@ pub(crate) fn plan_paged_managers(
 
 #[cfg(test)]
 mod tests {
+    use test_util::free_space;
+
     use super::*;
 
     /// A free section at `addr` spanning `size` bytes.
@@ -616,21 +618,12 @@ mod tests {
         }
     }
 
-    fn bytes(hex: &str) -> Vec<u8> {
-        (0..hex.len())
-            .step_by(2)
-            .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).unwrap())
-            .collect()
-    }
-
     // Fixtures captured from HDF5 1.14.6 (tmp/probe_fsm.py).
 
     #[test]
     fn parses_c_library_single_section() {
         // manager @619: one 1600-byte free section at offset 2848, FSSE @701.
-        let fshd = bytes(
-            "46534844000140060000000000000100000000000000010000000000000000000000000000000300500078003f00ffffffffffffff7fbd0200000000000023000000000000002300000000000000ea133710",
-        );
+        let fshd = free_space::single_section_header();
         let header = FreeSpaceManagerHeader::parse(&fshd, 8).unwrap();
         assert_eq!(header.total_space, 1600);
         assert_eq!(header.total_sections, 1);
@@ -638,7 +631,7 @@ mod tests {
         assert_eq!(header.fsse_addr, StoredAddress::new(701));
         assert_eq!(header.fsse_used, 35);
 
-        let fsse = bytes("46535345006b02000000000000014006000000000000200b000000000000005c797631");
+        let fsse = free_space::single_section_info();
         let sections = parse_section_info(&fsse, &header, 8).unwrap();
         assert_eq!(sections, vec![section(2848, 1600)]);
     }
@@ -646,18 +639,14 @@ mod tests {
     #[test]
     fn parses_c_library_two_sections() {
         // manager @736: 16 bytes @871 and 893 bytes @1155, FSSE @818.
-        let fshd = bytes(
-            "4653484400018d030000000000000200000000000000020000000000000000000000000000000300500078003f00ffffffffffffff7f320300000000000035000000000000003500000000000000d681e354",
-        );
+        let fshd = free_space::two_section_header();
         let header = FreeSpaceManagerHeader::parse(&fshd, 8).unwrap();
         assert_eq!(header.total_space, 909);
         assert_eq!(header.total_sections, 2);
         assert_eq!(header.fsse_addr, StoredAddress::new(818));
         assert_eq!(header.fsse_used, 53);
 
-        let fsse = bytes(
-            "4653534500e002000000000000011000000000000000670300000000000000017d03000000000000830400000000000000910245b2",
-        );
+        let fsse = free_space::two_section_info();
         let mut sections = parse_section_info(&fsse, &header, 8).unwrap();
         sections.sort_by_key(|s| s.addr);
         assert_eq!(sections, vec![section(871, 16), section(1155, 893),]);
@@ -670,10 +659,8 @@ mod tests {
     fn read_persisted_sections_follows_managers() {
         // Place the single-section FSHD@619 + FSSE@701 fixtures in a buffer at
         // their real offsets and read them through the manager-address indirection.
-        let fshd = bytes(
-            "46534844000140060000000000000100000000000000010000000000000000000000000000000300500078003f00ffffffffffffff7fbd0200000000000023000000000000002300000000000000ea133710",
-        );
-        let fsse = bytes("46535345006b02000000000000014006000000000000200b000000000000005c797631");
+        let fshd = free_space::single_section_header();
+        let fsse = free_space::single_section_info();
         let mut buf = vec![0u8; 701 + fsse.len()];
         buf[619..619 + fshd.len()].copy_from_slice(&fshd);
         buf[701..701 + fsse.len()].copy_from_slice(&fsse);
@@ -736,11 +723,8 @@ mod tests {
     fn serialize_matches_c_library_single_section() {
         // Byte-for-byte reproduction of the FSHD@619 / FSSE@701 fixtures,
         // including the Jenkins checksums the C library verifies on read.
-        let fshd_fixture = bytes(
-            "46534844000140060000000000000100000000000000010000000000000000000000000000000300500078003f00ffffffffffffff7fbd0200000000000023000000000000002300000000000000ea133710",
-        );
-        let fsse_fixture =
-            bytes("46535345006b02000000000000014006000000000000200b000000000000005c797631");
+        let fshd_fixture = free_space::single_section_header();
+        let fsse_fixture = free_space::single_section_info();
         let (fshd, fsse) = serialize_free_space_manager(
             &[section(2848, 1600)],
             StoredAddress::new(619),
@@ -758,12 +742,8 @@ mod tests {
     fn serialize_matches_c_library_two_sections() {
         // FSHD@736 / FSSE@818: two differently-sized sections (16 @871, 893 @1155)
         // emitted as two ascending size-groups.
-        let fshd_fixture = bytes(
-            "4653484400018d030000000000000200000000000000020000000000000000000000000000000300500078003f00ffffffffffffff7f320300000000000035000000000000003500000000000000d681e354",
-        );
-        let fsse_fixture = bytes(
-            "4653534500e002000000000000011000000000000000670300000000000000017d03000000000000830400000000000000910245b2",
-        );
+        let fshd_fixture = free_space::two_section_header();
+        let fsse_fixture = free_space::two_section_info();
         let (fshd, fsse) = serialize_free_space_manager(
             &[section(1155, 893), section(871, 16)],
             StoredAddress::new(736),
@@ -881,9 +861,7 @@ mod tests {
 
     #[test]
     fn rejects_bad_signature() {
-        let mut fshd = bytes(
-            "46534844000140060000000000000100000000000000010000000000000000000000000000000300500078003f00ffffffffffffff7fbd0200000000000023000000000000002300000000000000ea133710",
-        );
+        let mut fshd = free_space::single_section_header();
         fshd[0] = b'X';
         assert!(matches!(
             FreeSpaceManagerHeader::parse(&fshd, 8),
