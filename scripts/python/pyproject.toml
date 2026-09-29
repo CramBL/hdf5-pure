@@ -24,6 +24,8 @@ build-backend = "uv_build"
 
 [tool.ruff]
 line-length = 100
+# The directories whose modules ruff sorts as first-party imports.
+src = ["src", "tests"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]

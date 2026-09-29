@@ -41,7 +41,7 @@ from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
 
-from hdf5_pure_scripts import repo_root
+from hdf5_pure_scripts import REPRODUCIBLE_DIFF, repo_root
 from hdf5_pure_scripts.semver import check_all
 
 CRATE = "hdf5-pure"
@@ -416,12 +416,13 @@ def prepare(args):
 
 
 def print_release_type(args):
+    """Prints the release type of a pull request from `HEAD` into `args.base`."""
     resolve = subprocess.run(
         ["git", "rev-parse", "--verify", "--quiet", f"{args.base}^{{commit}}"], capture_output=True
     )
     if resolve.returncode != 0:
         fail(f"no such commit: {args.base!r} (a shallow clone has no remote branches)")
-    diff = output("git", "diff", f"{args.base}...HEAD", "--", str(CHANGELOG))
+    diff = output("git", *REPRODUCIBLE_DIFF, f"{args.base}...HEAD", "--", str(CHANGELOG))
     release_type = pull_request_release_type(CHANGELOG.read_text(), diff)
     if args.for_semver_checks:
         baseline = Version.parse(manifest()["version"])

@@ -20,7 +20,7 @@ from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
-from hdf5_pure_scripts import repo_root
+from hdf5_pure_scripts import REPRODUCIBLE_DIFF, repo_root
 
 PINNED_VERSION = "3.20.0"
 _IMAGE = "docker.io/jdkato/vale:v" + PINNED_VERSION
@@ -409,11 +409,17 @@ def _merge_base_with_head(root: Path, base: str) -> str:
     return _git(root, ["merge-base", base, "HEAD"]).strip()
 
 
-def _collect_run(engine: Engine, root: Path, base: str) -> Run:
-    merge_base = _merge_base_with_head(root, base)
-    diff = _git(root, ["diff", "-U0", "--no-color", "--diff-filter=AM", merge_base])
+def added_since(root: Path, merge_base: str) -> dict[str, set[int]]:
+    """Returns the line numbers each file in the working tree adds over `merge_base`."""
+    diff = _git(root, [*REPRODUCIBLE_DIFF, "-U0", "--diff-filter=AMR", merge_base])
     added = added_lines(diff)
     added.update(_untracked_added(root))
+    return added
+
+
+def _collect_run(engine: Engine, root: Path, base: str) -> Run:
+    merge_base = _merge_base_with_head(root, base)
+    added = added_since(root, merge_base)
 
     linted = docs_files(root) + source_files(root)
     prose = [path for path in linted if path in added]

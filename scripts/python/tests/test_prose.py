@@ -4,12 +4,12 @@ No test runs Vale or reaches the network: `_VALE_JSON` and `_CONTRASTIVE_JSON`
 are captured replies.
 """
 
-import subprocess
 from collections.abc import Sequence
 from pathlib import Path
 
 import pytest
 
+import repository
 from hdf5_pure_scripts import prose
 
 _VALE_JSON = """\
@@ -172,21 +172,12 @@ def test_summary_says_nothing_to_check_when_the_range_is_empty() -> None:
     )
 
 
-def _run_git(root: Path, args: Sequence[str]) -> None:
-    subprocess.run(
-        ["git", "-c", "user.email=test@example.com", "-c", "user.name=Test", *args],
-        cwd=root,
-        check=True,
-        capture_output=True,
-    )
-
-
 def _commit_empty(root: Path, message: str) -> None:
-    _run_git(root, ["commit", "--quiet", "--allow-empty", "-m", message])
+    repository.git(root, ["commit", "--quiet", "--allow-empty", "-m", message])
 
 
 def _repository_with_one_commit(root: Path) -> None:
-    _run_git(root, ["init", "--quiet"])
+    repository.git(root, ["init", "--quiet"])
     _commit_empty(root, "Root")
 
 
@@ -204,7 +195,7 @@ def test_script_files_reads_every_toml_file_and_only_the_workflow_yaml(tmp_path:
         path = tmp_path / rel
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("# A comment.\n")
-    _run_git(tmp_path, ["init", "--quiet"])
+    repository.git(tmp_path, ["init", "--quiet"])
 
     assert prose.script_files(tmp_path) == [
         ".github/workflows/ci.yml",
@@ -225,6 +216,72 @@ def test_merge_base_exits_with_one_line_when_the_base_ref_does_not_resolve(tmp_p
     assert str(raised.value) == (
         "error: base ref origin/main does not resolve: fetch it, or pass another base"
     )
+
+
+# Each Markdown file's added lines change under one of the config values the test below sets.
+_BEFORE = {
+    ".gitattributes": "hunks.md diff=lines\n",
+    "algorithm.md": "a\nb\nb\n",
+    "hunks.md": "1\n2\n3\n4\n5\n6\n7\n",
+    "indent.md": "}\n  b\n",
+    "one.md": "one\ntwo\nthree\nfour\n",
+    "renamed.md": "a file\nmoved as it is\n",
+    "two.md": "alpha\nbeta\ngamma\ndelta\n",
+}
+
+_REMOVED = ("one.md", "renamed.md", "two.md")
+
+_AFTER = {
+    "algorithm.md": "b\na\nx\n",
+    "copied.md": _BEFORE["algorithm.md"],
+    "hunks.md": "1\ntwo\n3\n4\n5\nsix\n7\n",
+    "indent.md": "}\n}\n  b\n",
+    "moved.md": _BEFORE["renamed.md"],
+    "one_renamed.md": "one\ntwo\nthree\nfive\n",
+    "two_renamed.md": "alpha\nbeta\ngamma\nepsilon\n",
+    "é.md": "é\n",
+}
+
+
+@pytest.mark.parametrize(
+    ("key", "value"),
+    [
+        ("color.ui", "always"),
+        ("core.attributesFile", ".git/global-attributes"),
+        ("core.quotePath", "true"),
+        ("diff.algorithm", "histogram"),
+        ("diff.external", "true"),
+        ("diff.indentHeuristic", "false"),
+        ("diff.interHunkContext", "5"),
+        ("diff.lines.textconv", "head -n 1"),
+        ("diff.mnemonicPrefix", "true"),
+        ("diff.noprefix", "true"),
+        ("diff.renameLimit", "1"),
+        ("diff.renames", "copies"),
+        ("diff.renames", "false"),
+    ],
+)
+def test_added_since_reads_the_same_lines_whatever_the_diff_config(
+    tmp_path: Path, key: str, value: str
+) -> None:
+    repository.git(tmp_path, ["init", "--quiet"])
+    repository.commit_files(tmp_path, _BEFORE, "Before")
+    for path in _REMOVED:
+        (tmp_path / path).unlink()
+    repository.commit_files(tmp_path, _AFTER, "After")
+    (tmp_path / ".git" / "global-attributes").write_text("*.md -diff\n")
+    repository.git(tmp_path, ["config", key, value])
+
+    # `git diff -U0 --diff-filter=AMR` reports these as added under `core.quotePath=false` alone.
+    assert prose.added_since(tmp_path, "HEAD~1") == {
+        "algorithm.md": {2, 3},
+        "copied.md": {1, 2, 3},
+        "hunks.md": {2, 6},
+        "indent.md": {1},
+        "one_renamed.md": {4},
+        "two_renamed.md": {4},
+        "é.md": {1},
+    }
 
 
 def test_commits_in_drops_a_fixup_subject_and_keeps_a_body_that_quotes_one(
