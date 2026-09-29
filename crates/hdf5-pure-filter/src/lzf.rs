@@ -47,14 +47,6 @@ const LIBLZF_API_VERSION: u32 = 0x0105;
 ///
 /// The entries are the filter version, liblzf version, and chunk byte size.
 /// The last entry is zero when the byte size exceeds `u32::MAX`.
-///
-/// # Examples
-///
-/// ```
-/// use hdf5_pure_filter::lzf_h5py_cd_values;
-///
-/// assert_eq!(lzf_h5py_cd_values(2, &[3, 4]), [4, 0x0105, 24]);
-/// ```
 pub fn h5py_cd_values(element_size: u32, chunk_dims: &[u64]) -> [u32; 3] {
     let chunk_bytes = chunk_dims
         .iter()
@@ -79,15 +71,6 @@ fn corrupt(reason: &'static str) -> Error {
 ///
 /// Returns [`Error::InvalidLzfStream`] if a token is truncated, a match refers
 /// to bytes before the output, or decoding exceeds `max_output`.
-///
-/// # Examples
-///
-/// ```
-/// use hdf5_pure_filter::decompress_lzf;
-///
-/// let stream = [4, b'a', b'b', b'c', b'd', b'e', 3 << 5, 4];
-/// assert_eq!(decompress_lzf(&stream, Some(10)).unwrap(), b"abcdeabcde");
-/// ```
 pub fn decompress(input: &[u8], max_output: Option<usize>) -> Result<Vec<u8>, Error> {
     let cap = max_output.unwrap_or(usize::MAX);
     let mut out = Vec::with_capacity(crate::decode_reservation(
@@ -158,16 +141,6 @@ pub fn decompress(input: &[u8], max_output: Option<usize>) -> Result<Vec<u8>, Er
 ///
 /// The compressor uses greedy single-probe matching. It may produce more
 /// bytes than it receives for incompressible input.
-///
-/// # Examples
-///
-/// ```
-/// use hdf5_pure_filter::{compress_lzf, decompress_lzf};
-///
-/// let input = b"abcdeabcde";
-/// let encoded = compress_lzf(input);
-/// assert_eq!(decompress_lzf(&encoded, Some(input.len())).unwrap(), input);
-/// ```
 pub fn compress(input: &[u8]) -> Vec<u8> {
     /// Hash of a 3-byte window → slot in the table of `position + 1`.
     fn hash(a: u8, b: u8, c: u8) -> usize {

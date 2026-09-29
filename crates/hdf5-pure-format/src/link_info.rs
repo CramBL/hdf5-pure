@@ -82,24 +82,27 @@ impl LinkInfoMessage {
 
 #[cfg(test)]
 mod tests {
+    use rstest::rstest;
+
     use super::*;
 
-    #[test]
-    fn compact_storage() {
+    #[rstest]
+    #[case::eight(8)]
+    #[case::two(2)]
+    fn compact_storage(#[case] offset_size: u8) {
         // version=0, flags=0, fractal_heap=undef, btree=undef
-        let mut data = vec![0u8; 2 + 8 + 8];
-        data[0] = 0; // version
-        data[1] = 0; // flags
-        // fractal heap address = undefined
-        data[2..10].copy_from_slice(&0xFFFF_FFFF_FFFF_FFFFu64.to_le_bytes());
-        // btree name index = undefined
-        data[10..18].copy_from_slice(&0xFFFF_FFFF_FFFF_FFFFu64.to_le_bytes());
+        let mut data = vec![0u8; 2];
+        data.resize(2 + 2 * usize::from(offset_size), 0xFF);
 
-        let msg = LinkInfoMessage::parse(&data, 8).unwrap();
-        assert_eq!(msg.fractal_heap_address, None);
-        assert_eq!(msg.btree_name_index_address, None);
-        assert_eq!(msg.max_creation_order, None);
-        assert_eq!(msg.btree_creation_order_address, None);
+        assert_eq!(
+            LinkInfoMessage::parse(&data, offset_size),
+            Ok(LinkInfoMessage {
+                max_creation_order: None,
+                fractal_heap_address: None,
+                btree_name_index_address: None,
+                btree_creation_order_address: None,
+            })
+        );
     }
 
     #[test]

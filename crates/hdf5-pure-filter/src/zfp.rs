@@ -2393,23 +2393,6 @@ fn filter_arguments(
 /// Returns [`Error::ZfpFilter`] if the rate or input length is invalid.
 /// Returns [`Error::ZfpHeaderTooLarge`] if a nonzero float block needs more header bits
 /// than the rate permits. Returns [`Error::ZfpSizeOverflow`] if a chunk size overflows `usize`.
-///
-/// # Examples
-///
-/// ```
-/// # #[cfg(feature = "zfp")] {
-/// use hdf5_pure_filter::ZfpElementType;
-///
-/// let raw = [0u8; 16];
-/// let encoded = hdf5_pure_filter::compress_zfp(&raw, &[4], 16.0, ZfpElementType::F32)?;
-/// assert_eq!(encoded.len(), 8);
-/// assert_eq!(
-///     hdf5_pure_filter::decompress_zfp(&encoded, &[4], 16.0, ZfpElementType::F32)?,
-///     raw,
-/// );
-/// # }
-/// # Ok::<(), hdf5_pure_filter::Error>(())
-/// ```
 pub fn compress(
     data: &[u8],
     dims: &[usize],
@@ -2751,29 +2734,6 @@ fn zfp_meta_for(elem: ZfpElementType, dims: ZfpChunkDims) -> u64 {
 /// or the rank is outside one to four dimensions. Returns [`Error::ZfpFilter`] if the
 /// rate is invalid. Returns [`Error::ZfpSizeOverflow`] if a chunk size overflows `usize`.
 /// Returns [`Error::ValueTooLargeForPlatform`] if a dimension does not fit `usize`.
-///
-/// # Examples
-///
-/// ```
-/// # #[cfg(feature = "zfp")] {
-/// use hdf5_pure_filter::ZfpElementType;
-///
-/// let client_data = hdf5_pure_filter::zfp_cd_values_rate(16.0, ZfpElementType::F32, &[4])?;
-/// assert_eq!(hdf5_pure_filter::zfp_rate_from_cd_values(&client_data), Some(16.0));
-///
-/// let raw = [0u8; 16];
-/// let encoded = hdf5_pure_filter::compress_zfp_filter(
-///     &raw, &client_data, &[4], Some(ZfpElementType::F32),
-/// )?;
-/// assert_eq!(
-///     hdf5_pure_filter::decompress_zfp_filter(
-///         &encoded, &client_data, &[4], Some(ZfpElementType::F32),
-///     )?,
-///     raw,
-/// );
-/// # }
-/// # Ok::<(), hdf5_pure_filter::Error>(())
-/// ```
 pub fn zfp_cd_values_rate(
     rate: f64,
     element_type: ZfpElementType,

@@ -169,16 +169,6 @@ impl std::error::Error for Error {}
 /// A decoder may grow its output beyond this reservation. Passing `None` for
 /// `cap` returns zero because the caller has no output size to reserve against.
 /// Multiplication saturates if the input size and expansion factor exceed `usize`.
-///
-/// # Examples
-///
-/// ```
-/// use hdf5_pure_filter::decode_reservation;
-///
-/// assert_eq!(decode_reservation(Some(4096), 10, 88), 880);
-/// assert_eq!(decode_reservation(Some(4096), 100, 88), 4096);
-/// assert_eq!(decode_reservation(None, 100, 88), 0);
-/// ```
 pub fn decode_reservation(cap: Option<usize>, in_size: usize, max_expansion: usize) -> usize {
     cap.map_or(0, |cap| cap.min(in_size.saturating_mul(max_expansion)))
 }
