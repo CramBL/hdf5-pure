@@ -4,10 +4,10 @@
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 
-use hdf5_pure_format::FractalHeapChild;
-pub use hdf5_pure_format::FractalHeapHeader;
-use hdf5_pure_format::FractalHeapIdType;
-use hdf5_pure_format::HugeObjectReference;
+use hdf5_pure_format::__private::FractalHeapChild;
+pub use hdf5_pure_format::__private::FractalHeapHeader;
+use hdf5_pure_format::__private::FractalHeapIdType;
+use hdf5_pure_format::__private::HugeObjectReference;
 
 use crate::address::StoredAddress;
 use crate::btree_v2::{

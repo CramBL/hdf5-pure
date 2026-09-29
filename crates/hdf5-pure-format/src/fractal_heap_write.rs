@@ -66,7 +66,7 @@ const FIRST_ROW_BITS: u32 = START_BITS + WIDTH_BITS;
 /// The number of rows that hold direct blocks, the rows before the first row of indirect blocks.
 ///
 /// The count is `(max_direct_bits - start_bits) + 2`, as `H5HF__dtable_init` and
-/// [`FractalHeapHeader::find_child_for_offset`](crate::FractalHeapHeader::find_child_for_offset)
+/// [`FractalHeapHeader::find_child_for_offset`](crate::fractal_heap::FractalHeapHeader::find_child_for_offset)
 /// compute it.
 const MAX_DIRECT_ROWS: usize = (MAX_DIRECT_BITS - START_BITS + 2) as usize;
 
@@ -252,29 +252,6 @@ struct PlannedIndirect {
 /// they take, which a caller allocates, and [`serialize`](Self::serialize) writes them at the
 /// address the caller chose. The heap is defined in "Fractal Heap" of the [format specification,
 /// version 4.0][spec].
-///
-/// # Examples
-///
-/// ```
-/// use hdf5_pure_format::ATTRIBUTE_HEAP_STARTING_BLOCK_SIZE;
-/// use hdf5_pure_format::AttributeHeapPlan;
-/// use hdf5_pure_format::OffsetWidth;
-/// use hdf5_pure_format::StoredAddress;
-///
-/// let objects: [&[u8]; 2] = [b"first", b"second"];
-/// let sizes: Vec<u64> = objects.iter().map(|object| object.len() as u64).collect();
-/// let plan = AttributeHeapPlan::new(&sizes, OffsetWidth::Eight).unwrap();
-/// assert_eq!(plan.region_size(), ATTRIBUTE_HEAP_STARTING_BLOCK_SIZE);
-///
-/// // The caller allocates `region_size` bytes, and writes the heap header at another address.
-/// let region_address = StoredAddress::new(0x1000);
-/// let region = plan.serialize(&objects, region_address, StoredAddress::new(0x800));
-///
-/// // The root is a direct block at the start of the region, so a heap offset is an offset in it.
-/// assert_eq!(plan.root_address(region_address), region_address);
-/// let at = plan.heap_offset(1) as usize;
-/// assert_eq!(&region[at..at + 6], b"second");
-/// ```
 ///
 /// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsec_fmt4_infra_fractalheap
 pub struct AttributeHeapPlan {
@@ -647,6 +624,8 @@ fn build_indirect(
 
 #[cfg(test)]
 mod tests {
+    use test_util::fractal_heap;
+
     use super::*;
 
     /// The offset width of the plans the tests lay out.
@@ -934,5 +913,29 @@ mod tests {
     fn serializing_objects_of_other_sizes_panics() {
         let plan = AttributeHeapPlan::new(&[5], OFFSET_WIDTH).expect("plannable");
         plan.serialize(&[b"hello!"], StoredAddress::new(0), StoredAddress::new(0));
+    }
+
+    #[test]
+    fn a_plan_of_one_object_places_it_past_the_root_block_prefix() {
+        let region_address = StoredAddress::new(0x1000);
+        let plan = AttributeHeapPlan::new(&[5], OFFSET_WIDTH).unwrap();
+        let region = plan.serialize(&[b"hello"], region_address, StoredAddress::new(0x800));
+
+        assert_eq!(attribute_heap_max_managed_object(OFFSET_WIDTH), 65_536 - 22);
+        assert_eq!(plan.root_rows(), 0);
+        assert_eq!(plan.root_address(region_address), region_address);
+        assert_eq!(plan.heap_offset(0), 22);
+        assert_eq!(plan.region_size(), ATTRIBUTE_HEAP_STARTING_BLOCK_SIZE);
+        assert_eq!(plan.managed_space(), ATTRIBUTE_HEAP_STARTING_BLOCK_SIZE);
+        assert_eq!(plan.allocated_space(), ATTRIBUTE_HEAP_STARTING_BLOCK_SIZE);
+        assert_eq!(plan.allocation_iterator(), 0);
+        assert_eq!(
+            plan.free_space(),
+            ATTRIBUTE_HEAP_STARTING_BLOCK_SIZE - 22 - 5
+        );
+        assert_eq!(region.len() as u64, ATTRIBUTE_HEAP_STARTING_BLOCK_SIZE);
+        assert_eq!(&region[..4], fractal_heap::DIRECT_BLOCK_SIGNATURE);
+        assert_eq!(&region[5..13], &0x800u64.to_le_bytes());
+        assert_eq!(&region[22..27], b"hello");
     }
 }

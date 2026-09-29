@@ -686,15 +686,29 @@ mod tests {
     #[test]
     fn a_header_parses_to_its_fields() {
         let file_data = fractal_heap::heap_with_one_object(b"Hello, World!", Widths::EIGHT);
-        let hdr = FractalHeapHeader::parse(&file_data, 0, 8, 8).unwrap();
-        assert_eq!(hdr.heap_id_length, 7);
-        assert_eq!(hdr.io_filter_encoded_length, 0);
-        assert_eq!(hdr.max_managed_object_size, 64);
-        assert_eq!(hdr.table_width, 4);
-        assert_eq!(hdr.starting_block_size, 128);
-        assert_eq!(hdr.max_heap_size, 16);
-        assert_eq!(hdr.current_rows_in_root_indirect_block, 0);
-        assert_eq!(hdr.managed_objects_count, 1);
+        let expected = FractalHeapHeader {
+            heap_id_length: 7,
+            io_filter_encoded_length: 0,
+            max_managed_object_size: 64,
+            btree_huge_objects_address: StoredAddress::new(u64::MAX),
+            table_width: 4,
+            starting_block_size: 128,
+            max_direct_block_size: 1024,
+            max_heap_size: 16,
+            start_root_rows: 2,
+            root_block_address: StoredAddress::new(256),
+            current_rows_in_root_indirect_block: 0,
+            managed_objects_count: 1,
+        };
+
+        assert_eq!(
+            FractalHeapHeader::parse(&file_data, 0, 8, 8),
+            Ok(expected.clone())
+        );
+        assert_eq!(
+            FractalHeapHeader::parse_from_source(file_data.as_slice(), 0, 8, 8),
+            Ok(expected)
+        );
     }
 
     #[test]
@@ -792,6 +806,10 @@ mod tests {
         let mut block = b"FHIB".to_vec();
         block.resize(256, 0);
         assert_eq!(
+            h.indirect_block_entries_len(2, 8),
+            Err(FormatError::UnsupportedFilteredHeapObject)
+        );
+        assert_eq!(
             h.find_child_for_offset(&block, 2, 0, 0, 8),
             Err(FormatError::UnsupportedFilteredHeapObject)
         );
@@ -821,6 +839,57 @@ mod tests {
         id.extend_from_slice(b"world");
         id.resize(17, 0);
         assert_eq!(header(17).decode_tiny_id(&id).unwrap(), b"world");
+
+        assert_eq!(
+            header(7).decode_tiny_id(&[]),
+            Err(FormatError::UnexpectedEof {
+                expected: 1,
+                available: 0,
+            })
+        );
+    }
+
+    #[test]
+    fn a_huge_id_decodes_to_an_index_key_or_an_inline_location() {
+        let indexed = FractalHeapHeader {
+            btree_huge_objects_address: StoredAddress::new(0x800),
+            ..dtable_header(512, 65536, 4)
+        };
+        let wide = FractalHeapHeader {
+            heap_id_length: 17,
+            ..dtable_header(512, 65536, 4)
+        };
+        let mut inline_huge = vec![0x10];
+        inline_huge.extend_from_slice(&0x900u64.to_le_bytes());
+        inline_huge.extend_from_slice(&40u64.to_le_bytes());
+
+        assert_eq!(
+            indexed.decode_huge_id(&[0x10, 5, 0, 0, 0, 0, 0], 8, 8),
+            Ok(HugeObjectReference::Indexed(5))
+        );
+        assert_eq!(
+            wide.decode_huge_id(&inline_huge, 8, 8),
+            Ok(HugeObjectReference::Inline {
+                addr: StoredAddress::new(0x900),
+                len: 40,
+            })
+        );
+    }
+
+    #[test]
+    fn an_empty_huge_id_is_an_unexpected_eof() {
+        let indexed = FractalHeapHeader {
+            btree_huge_objects_address: StoredAddress::new(0x800),
+            ..dtable_header(512, 65536, 4)
+        };
+
+        assert_eq!(
+            indexed.decode_huge_id(&[], 8, 8),
+            Err(FormatError::UnexpectedEof {
+                expected: 1,
+                available: 0,
+            })
+        );
     }
 
     #[test]
@@ -877,5 +946,37 @@ mod tests {
         // A size below `first_row_bits` saturates to one row.
         assert_eq!(h.size_to_rows(512), 1);
         assert_eq!(h.size_to_rows(1), 1);
+    }
+
+    #[test]
+    fn an_indirect_block_locates_the_child_that_holds_an_offset() {
+        let header = FractalHeapHeader::parse(
+            &fractal_heap::Header::new(0x100).build(Widths::EIGHT),
+            0,
+            8,
+            8,
+        )
+        .unwrap();
+        let mut block = fractal_heap::INDIRECT_BLOCK_SIGNATURE.to_vec();
+        block.push(0);
+        block.extend_from_slice(&0u64.to_le_bytes());
+        block.extend_from_slice(&[0, 0]);
+        for address in [0x1000u64, u64::MAX, 0x2000, u64::MAX] {
+            block.extend_from_slice(&address.to_le_bytes());
+        }
+
+        assert_eq!(
+            header.indirect_block_entries_len(1, 8),
+            Ok(block.len() as u64)
+        );
+        assert_eq!(
+            header.find_child_for_offset(&block, 1, 0, 300, 8),
+            Ok(Some(FractalHeapChild::Direct {
+                addr: StoredAddress::new(0x2000),
+                block_size: 128,
+                heap_offset: 256,
+            }))
+        );
+        assert_eq!(header.find_child_for_offset(&block, 1, 0, 200, 8), Ok(None));
     }
 }

@@ -49,31 +49,6 @@ struct PlannedNode {
 /// before [`serialize`](Self::serialize) writes the tree at the address the caller chose. The tree
 /// is defined in "Version 2 B-trees" of the [format specification, version 4.0][spec].
 ///
-/// # Examples
-///
-/// ```
-/// use hdf5_pure_format::BTreeV2Header;
-/// use hdf5_pure_format::BTreeV2Plan;
-/// use hdf5_pure_format::BTREE_V2_NODE_SIZE;
-/// use hdf5_pure_format::LengthWidth;
-/// use hdf5_pure_format::OffsetWidth;
-/// use hdf5_pure_format::StoredAddress;
-///
-/// // Two 17-byte records of a tree of type 8, in their sort order.
-/// let records = [[1u8; 17], [2u8; 17]].concat();
-/// let plan = BTreeV2Plan::new(8, 2, 17, BTREE_V2_NODE_SIZE, OffsetWidth::Eight).unwrap();
-/// assert_eq!(plan.nodes_size(), 512);
-///
-/// // The caller allocates `nodes_size` bytes at an address of its choice.
-/// let nodes_address = StoredAddress::new(0x1000);
-/// let image = plan.serialize(&records, nodes_address, OffsetWidth::Eight, LengthWidth::Eight);
-///
-/// let header = BTreeV2Header::parse(&image.header, 0, 8, 8).unwrap();
-/// assert_eq!(header.root_node_address, nodes_address);
-/// assert_eq!(header.total_records, 2);
-/// assert_eq!(image.nodes.len(), 512);
-/// ```
-///
 /// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_infra_btrees_v2
 pub struct BTreeV2Plan {
     tree_type: u8,
@@ -377,6 +352,9 @@ fn write_uint(buf: &mut Vec<u8>, value: u64, width: usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::btree_v2;
+    use crate::btree_v2::BTreeV2Header;
+    use crate::btree_v2::BTreeV2Record;
 
     const OFFSET_WIDTH: OffsetWidth = OffsetWidth::Eight;
     const LENGTH_WIDTH: LengthWidth = LengthWidth::Eight;
@@ -436,9 +414,48 @@ mod tests {
     }
 
     #[test]
+    fn a_leaf_that_holds_more_than_u16_max_records_has_no_plan() {
+        assert!(BTreeV2Plan::new(8, 100_000, 1, 1_000_000, OFFSET_WIDTH).is_none());
+    }
+
+    #[test]
     #[should_panic(expected = "record buffer must hold exactly the records the plan placed")]
     fn serializing_a_record_buffer_of_another_length_panics() {
         let plan = BTreeV2Plan::new(8, 2, 17, BTREE_V2_NODE_SIZE, OFFSET_WIDTH).expect("plannable");
         plan.serialize(&[0; 35], StoredAddress::new(0), OFFSET_WIDTH, LENGTH_WIDTH);
+    }
+
+    #[test]
+    fn a_planned_tree_parses_back_to_its_header_and_records() {
+        let records: Vec<u8> = (0..34).collect();
+        let nodes_address =
+            StoredAddress::new(btree_v2_header_size(OFFSET_WIDTH, LENGTH_WIDTH) as u64);
+        let plan = BTreeV2Plan::new(8, 2, 17, BTREE_V2_NODE_SIZE, OFFSET_WIDTH).unwrap();
+        let image = plan.serialize(&records, nodes_address, OFFSET_WIDTH, LENGTH_WIDTH);
+
+        assert_eq!(
+            BTreeV2Header::parse(&image.header, 0, 8, 8),
+            Ok(BTreeV2Header {
+                tree_type: 8,
+                node_size: BTREE_V2_NODE_SIZE,
+                record_size: 17,
+                depth: 0,
+                root_node_address: nodes_address,
+                num_records_in_root: 2,
+                total_records: 2,
+            })
+        );
+        assert_eq!(image.nodes.len(), BTREE_V2_NODE_SIZE as usize);
+        assert_eq!(
+            btree_v2::parse_btree_v2_leaf_records(&image.nodes, 0, 2, 17),
+            Ok(vec![
+                BTreeV2Record {
+                    data: records[..17].to_vec(),
+                },
+                BTreeV2Record {
+                    data: records[17..].to_vec(),
+                },
+            ])
+        );
     }
 }

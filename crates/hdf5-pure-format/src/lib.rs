@@ -7,12 +7,16 @@
 //!
 //! The project supports `hdf5-pure` as its API entry point. Types re-exported there follow
 //! that crate's compatibility policy. Direct use of this published support crate has no
-//! independent API compatibility guarantee.
+//! independent API compatibility guarantee. The hidden `__private` module serves the workspace
+//! crates alone.
 
 #![cfg_attr(not(test), no_std)]
 extern crate alloc;
 #[cfg(feature = "std")]
 extern crate std;
+
+#[doc(hidden)]
+pub mod __private;
 
 mod access_mode;
 mod address;
@@ -57,15 +61,6 @@ pub use attribute_message::AttributeMessage;
 pub use btree_v1::BTREE_V1_NODE_PREFIX_LEN;
 pub use btree_v1::BTreeV1Node;
 pub use btree_v1::btree_v1_node_header_size;
-pub use btree_v2::BTreeV2Header;
-pub use btree_v2::BTreeV2NodeInfo;
-pub use btree_v2::BTreeV2Record;
-pub use btree_v2::parse_btree_v2_internal_child_pointers;
-pub use btree_v2::parse_btree_v2_leaf_records;
-pub use btree_v2_write::BTREE_V2_NODE_SIZE;
-pub use btree_v2_write::BTreeV2Image;
-pub use btree_v2_write::BTreeV2Plan;
-pub use btree_v2_write::btree_v2_header_size;
 pub use bytes::ensure_len;
 pub use bytes::read_length;
 pub use bytes::read_length_width;
@@ -125,20 +120,6 @@ pub use fill_value::parse_defined_fill_value;
 pub use filter_pipeline::FilterDescription;
 pub use filter_pipeline::FilterPipeline;
 pub use filter_pipeline::FilterPipelineError;
-pub use fractal_heap::FractalHeapChild;
-pub use fractal_heap::FractalHeapHeader;
-pub use fractal_heap::FractalHeapIdType;
-pub use fractal_heap::HugeObjectReference;
-pub use fractal_heap_write::ATTRIBUTE_HEAP_BLOCK_OFFSET_BYTES;
-pub use fractal_heap_write::ATTRIBUTE_HEAP_MAX_DIRECT_BLOCK_SIZE;
-pub use fractal_heap_write::ATTRIBUTE_HEAP_MAX_HEAP_SIZE_BITS;
-pub use fractal_heap_write::ATTRIBUTE_HEAP_MAX_HEAP_SPACE;
-pub use fractal_heap_write::ATTRIBUTE_HEAP_START_ROOT_ROWS;
-pub use fractal_heap_write::ATTRIBUTE_HEAP_STARTING_BLOCK_SIZE;
-pub use fractal_heap_write::ATTRIBUTE_HEAP_TABLE_WIDTH;
-pub use fractal_heap_write::AttributeHeapPlan;
-pub use fractal_heap_write::AttributeHeapPlanError;
-pub use fractal_heap_write::attribute_heap_max_managed_object;
 pub use global_heap::GLOBAL_HEAP_MAX_OBJECTS;
 pub use global_heap::GlobalHeapCollectionError;
 pub use global_heap::GlobalHeapIndex;
@@ -177,15 +158,6 @@ pub use shared_message::encode_committed_ref;
 pub use shared_message::encode_sohm_ref;
 pub use shared_message::parse_shared_ref;
 pub use signature::HDF5_SIGNATURE;
-pub use sohm::SharedMessageTableMessage;
-pub use sohm::SohmIndexHeader;
-pub use sohm::SohmIndexKind;
-pub use sohm::SohmLocation;
-pub use sohm::SohmRecord;
-pub use sohm::SohmTable;
-pub use sohm::parse_sohm_list;
-pub use sohm::sohm_list_len;
-pub use sohm::sohm_record_len;
 pub use superblock::Superblock;
 pub use superblock::parse_superblock;
 pub use superblock::parse_superblock_from_source;

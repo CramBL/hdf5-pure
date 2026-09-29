@@ -17,17 +17,17 @@ use alloc::collections::BTreeMap as HashMap;
 use std::collections::HashMap;
 
 use hdf5_pure_core::__private::SuperblockFields;
-use hdf5_pure_format::ATTRIBUTE_HEAP_BLOCK_OFFSET_BYTES;
-use hdf5_pure_format::ATTRIBUTE_HEAP_MAX_DIRECT_BLOCK_SIZE;
-use hdf5_pure_format::ATTRIBUTE_HEAP_MAX_HEAP_SIZE_BITS;
-use hdf5_pure_format::ATTRIBUTE_HEAP_MAX_HEAP_SPACE;
-use hdf5_pure_format::ATTRIBUTE_HEAP_START_ROOT_ROWS;
-use hdf5_pure_format::ATTRIBUTE_HEAP_STARTING_BLOCK_SIZE;
-use hdf5_pure_format::ATTRIBUTE_HEAP_TABLE_WIDTH;
-use hdf5_pure_format::AttributeHeapPlan;
-use hdf5_pure_format::AttributeHeapPlanError;
-use hdf5_pure_format::BTREE_V2_NODE_SIZE;
-use hdf5_pure_format::BTreeV2Plan;
+use hdf5_pure_format::__private::ATTRIBUTE_HEAP_BLOCK_OFFSET_BYTES;
+use hdf5_pure_format::__private::ATTRIBUTE_HEAP_MAX_DIRECT_BLOCK_SIZE;
+use hdf5_pure_format::__private::ATTRIBUTE_HEAP_MAX_HEAP_SIZE_BITS;
+use hdf5_pure_format::__private::ATTRIBUTE_HEAP_MAX_HEAP_SPACE;
+use hdf5_pure_format::__private::ATTRIBUTE_HEAP_START_ROOT_ROWS;
+use hdf5_pure_format::__private::ATTRIBUTE_HEAP_STARTING_BLOCK_SIZE;
+use hdf5_pure_format::__private::ATTRIBUTE_HEAP_TABLE_WIDTH;
+use hdf5_pure_format::__private::AttributeHeapPlan;
+use hdf5_pure_format::__private::AttributeHeapPlanError;
+use hdf5_pure_format::__private::BTREE_V2_NODE_SIZE;
+use hdf5_pure_format::__private::BTreeV2Plan;
 
 use crate::address::BaseAddressExt;
 use crate::address::{BaseAddress, StoredAddress};
@@ -410,7 +410,7 @@ pub(crate) fn needs_dense_attrs(attrs: &[AttributeMessage]) -> Result<bool, Form
 /// attribute heap — but the threshold is the heap's own declaration, read back
 /// out of the header, so a higher one is equally readable.
 pub(crate) const DENSE_ATTR_MAX_MANAGED_OBJECT: usize =
-    hdf5_pure_format::attribute_heap_max_managed_object(OFFSET_WIDTH);
+    hdf5_pure_format::__private::attribute_heap_max_managed_object(OFFSET_WIDTH);
 
 /// One name-index B-tree v2 record as [`build_dense_attrs`] writes it: heap
 /// ID(8) + message flags(1) + creation order(4) + name hash(4).
@@ -665,7 +665,7 @@ pub(crate) fn dense_attrs_plan(
 
     // Every v2 B-tree header this emitter writes has the same fixed layout, so
     // one size covers both the name index and the huge-objects index.
-    let bthd_size = hdf5_pure_format::btree_v2_header_size(OFFSET_WIDTH, LENGTH_WIDTH);
+    let bthd_size = hdf5_pure_format::__private::btree_v2_header_size(OFFSET_WIDTH, LENGTH_WIDTH);
     debug_assert_eq!(
         bthd_size,
         4 + 1 + 1 + 4 + 2 + 2 + 1 + 1 + OFFSET_SIZE as usize + 2 + LENGTH_SIZE as usize + 4
@@ -4831,7 +4831,7 @@ mod tests {
     #[test]
     fn a_fixed_node_size_keeps_the_derived_count_width_at_one_byte() {
         for record_size in [DENSE_ATTR_BTREE_RECORD, DENSE_ATTR_HUGE_BTREE_RECORD] {
-            let (info, depth) = hdf5_pure_format::BTreeV2NodeInfo::for_record_count(
+            let (info, depth) = hdf5_pure_format::__private::BTreeV2NodeInfo::for_record_count(
                 BTREE_V2_NODE_SIZE,
                 record_size,
                 OFFSET_SIZE,

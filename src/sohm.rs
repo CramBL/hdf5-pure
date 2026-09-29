@@ -4,12 +4,12 @@
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 
-pub use hdf5_pure_format::SharedMessageTableMessage;
-pub use hdf5_pure_format::SohmIndexHeader;
-use hdf5_pure_format::SohmIndexKind;
-pub use hdf5_pure_format::SohmLocation;
-pub use hdf5_pure_format::SohmRecord;
-pub use hdf5_pure_format::SohmTable;
+pub use hdf5_pure_format::__private::SharedMessageTableMessage;
+pub use hdf5_pure_format::__private::SohmIndexHeader;
+use hdf5_pure_format::__private::SohmIndexKind;
+pub use hdf5_pure_format::__private::SohmLocation;
+pub use hdf5_pure_format::__private::SohmRecord;
+pub use hdf5_pure_format::__private::SohmTable;
 
 use crate::address::StoredAddress;
 use crate::btree_v2::{BTreeV2Header, collect_btree_v2_records_from_source};
@@ -45,9 +45,9 @@ pub fn read_index_records_from_source<S: Source + ?Sized>(
     };
     match index.kind {
         SohmIndexKind::List => {
-            let len = hdf5_pure_format::sohm_list_len(index.message_count, offset_size);
+            let len = hdf5_pure_format::__private::sohm_list_len(index.message_count, offset_size);
             let image = source.read_metadata_at(address.get(), len)?;
-            hdf5_pure_format::parse_sohm_list(&image, index.message_count, offset_size)
+            hdf5_pure_format::__private::parse_sohm_list(&image, index.message_count, offset_size)
         }
         SohmIndexKind::BTree => {
             let header = BTreeV2Header::parse_from_source(
