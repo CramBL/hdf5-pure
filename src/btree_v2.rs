@@ -6,9 +6,9 @@ use core::num::NonZeroU16;
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 
-pub use hdf5_pure_format::BTreeV2Header;
-use hdf5_pure_format::BTreeV2NodeInfo;
-pub use hdf5_pure_format::BTreeV2Record;
+pub use hdf5_pure_format::__private::BTreeV2Header;
+use hdf5_pure_format::__private::BTreeV2NodeInfo;
+pub use hdf5_pure_format::__private::BTreeV2Record;
 
 use crate::bytes;
 use crate::convert::Narrow;
@@ -28,7 +28,7 @@ pub fn collect_btree_v2_records(
 
     let Some(depth) = NonZeroU16::new(header.depth) else {
         // Root is a leaf
-        return hdf5_pure_format::parse_btree_v2_leaf_records(
+        return hdf5_pure_format::__private::parse_btree_v2_leaf_records(
             file_data,
             header.root_node_address.get().to_usize()?,
             header.num_records_in_root,
@@ -74,7 +74,7 @@ fn collect_internal_records(
 ) -> Result<(), FormatError> {
     bytes::ensure_len(file_data, offset, 6)?;
     let node = &file_data[offset..];
-    let children = hdf5_pure_format::parse_btree_v2_internal_child_pointers(
+    let children = hdf5_pure_format::__private::parse_btree_v2_internal_child_pointers(
         node,
         num_records,
         depth,
@@ -103,7 +103,7 @@ fn collect_internal_records(
                 out,
             )?;
         } else {
-            out.extend(hdf5_pure_format::parse_btree_v2_leaf_records(
+            out.extend(hdf5_pure_format::__private::parse_btree_v2_leaf_records(
                 file_data,
                 child_addr.get().to_usize()?,
                 child_nrec,
@@ -178,7 +178,7 @@ fn collect_node_from_source<S: Source + ?Sized>(
     let node = source.read_metadata_at(address, node_len)?;
 
     let Some(depth) = NonZeroU16::new(depth) else {
-        out.extend(hdf5_pure_format::parse_btree_v2_leaf_records(
+        out.extend(hdf5_pure_format::__private::parse_btree_v2_leaf_records(
             &node,
             0,
             num_records,
@@ -187,7 +187,7 @@ fn collect_node_from_source<S: Source + ?Sized>(
         return Ok(());
     };
 
-    let children = hdf5_pure_format::parse_btree_v2_internal_child_pointers(
+    let children = hdf5_pure_format::__private::parse_btree_v2_internal_child_pointers(
         &node,
         num_records,
         depth,
@@ -224,8 +224,8 @@ fn collect_node_from_source<S: Source + ?Sized>(
 
 #[cfg(test)]
 mod tests {
-    use hdf5_pure_format::BTREE_V2_NODE_SIZE;
-    use hdf5_pure_format::BTreeV2Plan;
+    use hdf5_pure_format::__private::BTREE_V2_NODE_SIZE;
+    use hdf5_pure_format::__private::BTreeV2Plan;
     use test_util::btree_v2;
     use test_util::image::Image;
     use test_util::widths::Widths;
@@ -484,7 +484,7 @@ mod tests {
 
         // Put the header at 0 and the nodes right after it, then parse the
         // whole thing back out of one buffer.
-        let nodes_address = StoredAddress::new(hdf5_pure_format::btree_v2_header_size(
+        let nodes_address = StoredAddress::new(hdf5_pure_format::__private::btree_v2_header_size(
             OffsetWidth::Eight,
             LengthWidth::Eight,
         ) as u64);

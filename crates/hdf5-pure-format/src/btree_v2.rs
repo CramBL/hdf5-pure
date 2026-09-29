@@ -208,8 +208,8 @@ fn max_records_leaf(node_size: u32, record_size: u16) -> u64 {
 /// `cum_max_nrec[u] = (max_nrec[u] + 1) * cum_max_nrec[u - 1] + max_nrec[u]`, and the table follows
 /// the C library.
 ///
-/// [`BTreeV2Plan`](crate::BTreeV2Plan) lays out a tree from the same table, so a written tree has
-/// the widths a reader computes for it.
+/// [`BTreeV2Plan`](crate::btree_v2_write::BTreeV2Plan) lays out a tree from the same table, so a
+/// written tree has the widths a reader computes for it.
 ///
 /// The child pointers are defined in "Version 2 B-trees" of the [format specification, version
 /// 4.0][spec].
@@ -495,6 +495,10 @@ mod tests {
         // A leaf of (4096 - 10) / 8 = 510 records needs a 2-byte record count.
         let big = BTreeV2NodeInfo::compute(4096, 8, 8, 1);
         assert_eq!(big.max_nrec_size, 2);
+
+        let (node_info, depth) = BTreeV2NodeInfo::for_record_count(512, 17, 8, 30).unwrap();
+        assert_eq!(depth, 1);
+        assert_eq!(node_info.max_nrec(0), 29);
     }
 
     #[test]
@@ -511,6 +515,59 @@ mod tests {
         data[4] = 1;
         let err = BTreeV2Header::parse(&data, 0, 8, 8).unwrap_err();
         assert_eq!(err, FormatError::InvalidBTreeV2Version(1));
+    }
+
+    #[test]
+    fn nodes_with_4_byte_addresses_parse_to_their_fields() {
+        let widths = Widths::new(4, 8);
+        let header = btree_v2::Header::new(5, 11, 0x200, 1)
+            .depth(1)
+            .total_records(3)
+            .build(widths);
+        let leaf = btree_v2::leaf(5, &[vec![1; 11], vec![2; 11]]);
+        let child = |address| btree_v2::Child {
+            address,
+            records: 1,
+            records_width: 1,
+            subtree: None,
+        };
+        let internal = btree_v2::internal(5, &[vec![3; 11]], &[child(0x300), child(0x400)], widths);
+        let expected = BTreeV2Header {
+            tree_type: 5,
+            node_size: 512,
+            record_size: 11,
+            depth: 1,
+            root_node_address: StoredAddress::new(0x200),
+            num_records_in_root: 1,
+            total_records: 3,
+        };
+
+        assert_eq!(BTreeV2Header::parse(&header, 0, 4, 8), Ok(expected.clone()));
+        assert_eq!(
+            BTreeV2Header::parse_from_source(header.as_slice(), 0, 4, 8),
+            Ok(expected)
+        );
+        assert_eq!(
+            parse_btree_v2_leaf_records(&leaf, 0, 2, 11),
+            Ok(vec![
+                BTreeV2Record { data: vec![1; 11] },
+                BTreeV2Record { data: vec![2; 11] },
+            ])
+        );
+        assert_eq!(
+            parse_btree_v2_internal_child_pointers(
+                &internal,
+                1,
+                NonZeroU16::MIN,
+                11,
+                4,
+                &BTreeV2NodeInfo::compute(512, 11, 4, 1),
+            ),
+            Ok(vec![
+                (StoredAddress::new(0x300), 1),
+                (StoredAddress::new(0x400), 1),
+            ])
+        );
     }
 
     const WIDTHS: Widths = Widths::EIGHT;

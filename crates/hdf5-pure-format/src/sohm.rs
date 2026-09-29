@@ -204,7 +204,7 @@ fn table_len(index_count: u8, offset_size: u8) -> usize {
 ///
 /// A record has one of two shapes, and a list gives every record the size of the wider shape,
 /// `H5SM_SOHM_ENTRY_SIZE`.
-pub fn sohm_record_len(offset_size: u8) -> usize {
+pub(crate) fn sohm_record_len(offset_size: u8) -> usize {
     let object_header_location = 1 + 1 + 2 + offset_size as usize;
     RECORD_PREFIX_LEN + HEAP_LOCATION_LEN.max(object_header_location)
 }
@@ -456,6 +456,7 @@ pub fn sohm_list_len(message_count: u16, offset_size: u8) -> usize {
 
 #[cfg(test)]
 mod tests {
+    use test_util::image::Image;
     use test_util::sohm;
     use test_util::widths::Widths;
 
@@ -728,6 +729,7 @@ mod tests {
         let image = sohm::list(&[first, second]);
 
         let records = parse_sohm_list(&image, 2, 8).unwrap();
+        assert_eq!(sohm_list_len(2, 8), image.len());
         assert_eq!(records.len(), 2);
         assert_eq!(
             records[1].location,
@@ -778,5 +780,50 @@ mod tests {
             parse_sohm_list(&image, 4, 8).unwrap_err(),
             FormatError::UnexpectedEof { .. }
         ));
+    }
+
+    #[test]
+    fn a_table_is_read_from_the_address_its_message_stores() {
+        let table = sohm::table(
+            &[sohm::Index {
+                kind: sohm::Kind::LIST,
+                message_type_flags: 1 << 3,
+                min_message_size: 250,
+                list_max: 50,
+                btree_min: 40,
+                message_count: 1,
+                index_address: Some(0x100),
+                heap_address: None,
+            }],
+            Widths::EIGHT,
+        );
+        let mut image = Image::new();
+        image.place(0x40, &table);
+        let file = image.build();
+        let table_message = SharedMessageTableMessage {
+            table_address: StoredAddress::new(0x40),
+            index_count: 1,
+        };
+        let expected_table = SohmTable {
+            indexes: vec![SohmIndexHeader {
+                message_type_flags: 1 << 3,
+                min_message_size: 250,
+                list_max: 50,
+                btree_min: 40,
+                message_count: 1,
+                kind: SohmIndexKind::List,
+                index_address: Some(StoredAddress::new(0x100)),
+                heap_address: None,
+            }],
+        };
+
+        assert_eq!(
+            SohmTable::read(&file, &table_message, 8),
+            Ok(expected_table.clone())
+        );
+        assert_eq!(
+            SohmTable::read_from_source(file.as_slice(), &table_message, 8),
+            Ok(expected_table)
+        );
     }
 }

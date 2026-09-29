@@ -1,15 +1,6 @@
-use core::num::NonZeroU16;
-
 use hdf5_pure_core::__private::BaseAddressExt;
-use hdf5_pure_format::ATTRIBUTE_HEAP_STARTING_BLOCK_SIZE;
-use hdf5_pure_format::AttributeHeapPlan;
 use hdf5_pure_format::AttributeMessage;
-use hdf5_pure_format::BTREE_V2_NODE_SIZE;
 use hdf5_pure_format::BTreeV1Node;
-use hdf5_pure_format::BTreeV2Header;
-use hdf5_pure_format::BTreeV2NodeInfo;
-use hdf5_pure_format::BTreeV2Plan;
-use hdf5_pure_format::BTreeV2Record;
 use hdf5_pure_format::BaseAddress;
 use hdf5_pure_format::Dataspace;
 use hdf5_pure_format::DataspaceType;
@@ -22,26 +13,16 @@ use hdf5_pure_format::FilterPipeline;
 use hdf5_pure_format::FilterPipelineError;
 use hdf5_pure_format::FixedPointLayout;
 use hdf5_pure_format::FormatError;
-use hdf5_pure_format::FractalHeapChild;
-use hdf5_pure_format::FractalHeapHeader;
-use hdf5_pure_format::FractalHeapIdType;
 use hdf5_pure_format::GLOBAL_HEAP_MAX_OBJECTS;
 use hdf5_pure_format::GlobalHeapCollectionError;
 use hdf5_pure_format::GlobalHeapIndex;
 use hdf5_pure_format::GlobalHeapObjectInfo;
-use hdf5_pure_format::HugeObjectReference;
 use hdf5_pure_format::LengthWidth;
 use hdf5_pure_format::LocalHeap;
 use hdf5_pure_format::MaxExtent;
 use hdf5_pure_format::MessageType;
 use hdf5_pure_format::OffsetWidth;
-use hdf5_pure_format::SharedMessageTableMessage;
 use hdf5_pure_format::SharedResolver;
-use hdf5_pure_format::SohmIndexHeader;
-use hdf5_pure_format::SohmIndexKind;
-use hdf5_pure_format::SohmLocation;
-use hdf5_pure_format::SohmRecord;
-use hdf5_pure_format::SohmTable;
 use hdf5_pure_format::StoredAddress;
 use hdf5_pure_format::SymbolTableEntry;
 use hdf5_pure_format::SymbolTableMessage;
@@ -50,13 +31,10 @@ use hdf5_pure_format::V3_FLAGS_DEFAULT;
 use rstest::rstest;
 use test_util::attribute;
 use test_util::btree_v1;
-use test_util::btree_v2;
 use test_util::dataspace;
 use test_util::datatype;
-use test_util::fractal_heap;
 use test_util::image::Image;
 use test_util::local_heap;
-use test_util::sohm;
 use test_util::symbol_table;
 use test_util::widths::Widths;
 
@@ -357,253 +335,6 @@ fn a_version_1_group_btree_node_parses_through_the_public_api() {
 }
 
 #[test]
-fn version_2_btree_nodes_parse_through_the_public_api() {
-    let widths = Widths::new(4, 8);
-    let header = btree_v2::Header::new(5, 11, 0x200, 1)
-        .depth(1)
-        .total_records(3)
-        .build(widths);
-    let leaf = btree_v2::leaf(5, &[vec![1; 11], vec![2; 11]]);
-    let child = |address| btree_v2::Child {
-        address,
-        records: 1,
-        records_width: 1,
-        subtree: None,
-    };
-    let internal = btree_v2::internal(5, &[vec![3; 11]], &[child(0x300), child(0x400)], widths);
-    let expected = BTreeV2Header {
-        tree_type: 5,
-        node_size: 512,
-        record_size: 11,
-        depth: 1,
-        root_node_address: StoredAddress::new(0x200),
-        num_records_in_root: 1,
-        total_records: 3,
-    };
-
-    assert_eq!(BTreeV2Header::parse(&header, 0, 4, 8), Ok(expected.clone()));
-    assert_eq!(
-        BTreeV2Header::parse_from_source(header.as_slice(), 0, 4, 8),
-        Ok(expected)
-    );
-    assert_eq!(
-        hdf5_pure_format::parse_btree_v2_leaf_records(&leaf, 0, 2, 11),
-        Ok(vec![
-            BTreeV2Record { data: vec![1; 11] },
-            BTreeV2Record { data: vec![2; 11] },
-        ])
-    );
-    assert_eq!(
-        hdf5_pure_format::parse_btree_v2_internal_child_pointers(
-            &internal,
-            1,
-            NonZeroU16::MIN,
-            11,
-            4,
-            &BTreeV2NodeInfo::compute(512, 11, 4, 1),
-        ),
-        Ok(vec![
-            (StoredAddress::new(0x300), 1),
-            (StoredAddress::new(0x400), 1),
-        ])
-    );
-}
-
-#[test]
-fn a_planned_version_2_btree_parses_back_through_the_public_api() {
-    let records: Vec<u8> = (0..34).collect();
-    let nodes_address = StoredAddress::new(hdf5_pure_format::btree_v2_header_size(
-        OffsetWidth::Eight,
-        LengthWidth::Eight,
-    ) as u64);
-    let plan = BTreeV2Plan::new(8, 2, 17, BTREE_V2_NODE_SIZE, OffsetWidth::Eight).unwrap();
-    let image = plan.serialize(
-        &records,
-        nodes_address,
-        OffsetWidth::Eight,
-        LengthWidth::Eight,
-    );
-    let (node_info, depth) =
-        BTreeV2NodeInfo::for_record_count(BTREE_V2_NODE_SIZE, 17, 8, 30).unwrap();
-
-    assert_eq!(depth, 1);
-    assert_eq!(node_info.max_nrec(0), 29);
-    assert!(BTreeV2Plan::new(8, 100_000, 1, 1_000_000, OffsetWidth::Eight).is_none());
-    assert_eq!(plan.nodes_size(), u64::from(BTREE_V2_NODE_SIZE));
-
-    assert_eq!(
-        BTreeV2Header::parse(&image.header, 0, 8, 8),
-        Ok(BTreeV2Header {
-            tree_type: 8,
-            node_size: BTREE_V2_NODE_SIZE,
-            record_size: 17,
-            depth: 0,
-            root_node_address: nodes_address,
-            num_records_in_root: 2,
-            total_records: 2,
-        })
-    );
-    assert_eq!(image.nodes.len(), BTREE_V2_NODE_SIZE as usize);
-    assert_eq!(
-        hdf5_pure_format::parse_btree_v2_leaf_records(&image.nodes, 0, 2, 17),
-        Ok(vec![
-            BTreeV2Record {
-                data: records[..17].to_vec(),
-            },
-            BTreeV2Record {
-                data: records[17..].to_vec(),
-            },
-        ])
-    );
-}
-
-#[test]
-fn a_fractal_heap_header_and_its_heap_ids_decode_through_the_public_api() {
-    let bytes = fractal_heap::heap_with_one_object(b"Hello, World!", Widths::EIGHT);
-    let expected = FractalHeapHeader {
-        heap_id_length: 7,
-        io_filter_encoded_length: 0,
-        max_managed_object_size: 64,
-        btree_huge_objects_address: StoredAddress::new(u64::MAX),
-        table_width: 4,
-        starting_block_size: 128,
-        max_direct_block_size: 1024,
-        max_heap_size: 16,
-        start_root_rows: 2,
-        root_block_address: StoredAddress::new(256),
-        current_rows_in_root_indirect_block: 0,
-        managed_objects_count: 1,
-    };
-    let managed = [0x00, 15, 0, 13, 0, 0, 0];
-    let huge = [0x10, 5, 0, 0, 0, 0, 0];
-    let mut inline_huge = vec![0x10];
-    inline_huge.extend_from_slice(&0x900u64.to_le_bytes());
-    inline_huge.extend_from_slice(&40u64.to_le_bytes());
-    let indexed = FractalHeapHeader {
-        btree_huge_objects_address: StoredAddress::new(0x800),
-        ..expected.clone()
-    };
-    let wide = FractalHeapHeader {
-        heap_id_length: 17,
-        ..expected.clone()
-    };
-
-    assert_eq!(
-        FractalHeapHeader::parse(&bytes, 0, 8, 8),
-        Ok(expected.clone())
-    );
-    assert_eq!(
-        FractalHeapHeader::parse_from_source(bytes.as_slice(), 0, 8, 8),
-        Ok(expected.clone())
-    );
-    assert_eq!(
-        FractalHeapIdType::from_heap_id(&managed),
-        Ok(FractalHeapIdType::Managed)
-    );
-    assert_eq!(expected.decode_managed_id(&managed), Ok((15, 13)));
-    assert_eq!(
-        expected.decode_tiny_id(&[0x22, b'a', b'b', b'c', 0, 0, 0]),
-        Ok(b"abc".to_vec())
-    );
-    assert_eq!(
-        indexed.decode_huge_id(&huge, 8, 8),
-        Ok(HugeObjectReference::Indexed(5))
-    );
-    assert_eq!(
-        wide.decode_huge_id(&inline_huge, 8, 8),
-        Ok(HugeObjectReference::Inline {
-            addr: StoredAddress::new(0x900),
-            len: 40,
-        })
-    );
-    assert_eq!(
-        expected.decode_tiny_id(&[]),
-        Err(FormatError::UnexpectedEof {
-            expected: 1,
-            available: 0,
-        })
-    );
-    assert_eq!(
-        indexed.decode_huge_id(&[], 8, 8),
-        Err(FormatError::UnexpectedEof {
-            expected: 1,
-            available: 0,
-        })
-    );
-}
-
-#[test]
-fn an_indirect_block_locates_its_children_through_the_public_api() {
-    let header = FractalHeapHeader::parse(
-        &fractal_heap::Header::new(0x100).build(Widths::EIGHT),
-        0,
-        8,
-        8,
-    )
-    .unwrap();
-    let filtered = FractalHeapHeader {
-        io_filter_encoded_length: 8,
-        ..header.clone()
-    };
-    let mut block = fractal_heap::INDIRECT_BLOCK_SIGNATURE.to_vec();
-    block.push(0);
-    block.extend_from_slice(&0u64.to_le_bytes());
-    block.extend_from_slice(&[0, 0]);
-    for address in [0x1000u64, u64::MAX, 0x2000, u64::MAX] {
-        block.extend_from_slice(&address.to_le_bytes());
-    }
-
-    assert_eq!(
-        header.indirect_block_entries_len(1, 8),
-        Ok(block.len() as u64)
-    );
-    assert_eq!(
-        header.find_child_for_offset(&block, 1, 0, 300, 8),
-        Ok(Some(FractalHeapChild::Direct {
-            addr: StoredAddress::new(0x2000),
-            block_size: 128,
-            heap_offset: 256,
-        }))
-    );
-    assert_eq!(header.find_child_for_offset(&block, 1, 0, 200, 8), Ok(None));
-    assert_eq!(
-        filtered.indirect_block_entries_len(1, 8),
-        Err(FormatError::UnsupportedFilteredHeapObject)
-    );
-    assert_eq!(
-        filtered.find_child_for_offset(&block, 1, 0, 300, 8),
-        Err(FormatError::UnsupportedFilteredHeapObject)
-    );
-}
-
-#[test]
-fn a_planned_attribute_heap_places_its_objects_through_the_public_api() {
-    let region_address = StoredAddress::new(0x1000);
-    let plan = AttributeHeapPlan::new(&[5], OffsetWidth::Eight).unwrap();
-    let region = plan.serialize(&[b"hello"], region_address, StoredAddress::new(0x800));
-
-    assert_eq!(
-        hdf5_pure_format::attribute_heap_max_managed_object(OffsetWidth::Eight),
-        65_536 - 22
-    );
-    assert_eq!(plan.root_rows(), 0);
-    assert_eq!(plan.root_address(region_address), region_address);
-    assert_eq!(plan.heap_offset(0), 22);
-    assert_eq!(plan.region_size(), ATTRIBUTE_HEAP_STARTING_BLOCK_SIZE);
-    assert_eq!(plan.managed_space(), ATTRIBUTE_HEAP_STARTING_BLOCK_SIZE);
-    assert_eq!(plan.allocated_space(), ATTRIBUTE_HEAP_STARTING_BLOCK_SIZE);
-    assert_eq!(plan.allocation_iterator(), 0);
-    assert_eq!(
-        plan.free_space(),
-        ATTRIBUTE_HEAP_STARTING_BLOCK_SIZE - 22 - 5
-    );
-    assert_eq!(region.len() as u64, ATTRIBUTE_HEAP_STARTING_BLOCK_SIZE);
-    assert_eq!(&region[..4], fractal_heap::DIRECT_BLOCK_SIGNATURE);
-    assert_eq!(&region[5..13], &0x800u64.to_le_bytes());
-    assert_eq!(&region[22..27], b"hello");
-}
-
-#[test]
 fn a_global_heap_collection_round_trips_through_the_public_api() {
     let objects: [&[u8]; 2] = [b"alpha", b"beta"];
     let bytes =
@@ -666,78 +397,6 @@ fn the_encoder_rejects_more_than_global_heap_max_objects() {
     assert_eq!(
         hdf5_pure_format::encode_global_heap_collection(LengthWidth::Eight, &objects),
         Err(GlobalHeapCollectionError::TooManyObjects { count: 65_536 })
-    );
-}
-
-#[test]
-fn shared_message_table_structures_parse_through_the_public_api() {
-    let mut message = vec![0];
-    message.extend_from_slice(&0x40u64.to_le_bytes());
-    message.push(1);
-    let table = sohm::table(
-        &[sohm::Index {
-            kind: sohm::Kind::LIST,
-            message_type_flags: 1 << 3,
-            min_message_size: 250,
-            list_max: 50,
-            btree_min: 40,
-            message_count: 1,
-            index_address: Some(0x100),
-            heap_address: None,
-        }],
-        Widths::EIGHT,
-    );
-    let mut image = Image::new();
-    image.place(0x40, &table);
-    let file = image.build();
-    let record = sohm::heap_record(0xDEAD_BEEF, 2, [1, 2, 3, 4, 5, 6, 7, 8], Widths::EIGHT);
-    let list = sohm::list(std::slice::from_ref(&record));
-    let table_message = SharedMessageTableMessage {
-        table_address: StoredAddress::new(0x40),
-        index_count: 1,
-    };
-    let expected_table = SohmTable {
-        indexes: vec![SohmIndexHeader {
-            message_type_flags: 1 << 3,
-            min_message_size: 250,
-            list_max: 50,
-            btree_min: 40,
-            message_count: 1,
-            kind: SohmIndexKind::List,
-            index_address: Some(StoredAddress::new(0x100)),
-            heap_address: None,
-        }],
-    };
-    let expected_record = SohmRecord {
-        hash: 0xDEAD_BEEF,
-        location: SohmLocation::Heap {
-            reference_count: 2,
-            heap_id: [1, 2, 3, 4, 5, 6, 7, 8],
-        },
-    };
-
-    assert_eq!(
-        SharedMessageTableMessage::parse(&message, 8),
-        Ok(table_message)
-    );
-    assert_eq!(
-        SohmTable::read(&file, &table_message, 8),
-        Ok(expected_table.clone())
-    );
-    assert_eq!(
-        SohmTable::read_from_source(file.as_slice(), &table_message, 8),
-        Ok(expected_table.clone())
-    );
-    assert_eq!(
-        expected_table.index_for(MessageType::DATATYPE),
-        Some(&expected_table.indexes[0])
-    );
-    assert_eq!(hdf5_pure_format::sohm_record_len(8), 17);
-    assert_eq!(hdf5_pure_format::sohm_list_len(1, 8), list.len());
-    assert_eq!(SohmRecord::parse(&record, 8), Ok(expected_record.clone()));
-    assert_eq!(
-        hdf5_pure_format::parse_sohm_list(&list, 1, 8),
-        Ok(vec![expected_record])
     );
 }
 
