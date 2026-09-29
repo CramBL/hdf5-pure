@@ -32,6 +32,8 @@ use crate::filter_pipeline::{
 };
 use crate::filters::{ChunkContext, compress_chunk_with};
 use crate::scaleoffset::{FillAvailability, ScaleOffset, build_cd_values};
+use crate::width::LengthWidth;
+use crate::width::OffsetWidth;
 
 /// The on-disk address and length widths every chunk index *this module* writes
 /// uses. Named so the path that sizes an index and the path that emits it cannot
@@ -42,8 +44,8 @@ use crate::scaleoffset::{FillAvailability, ScaleOffset, build_cd_values};
 /// meaning and the same values. Both are what this crate's superblock declares,
 /// and `edit` refuses a file whose superblock disagrees, so the two cannot drift
 /// apart within one file.
-const INDEX_OFFSET_SIZE: u8 = 8;
-const INDEX_LENGTH_SIZE: u8 = 8;
+const INDEX_OFFSET_SIZE: OffsetWidth = OffsetWidth::Eight;
+const INDEX_LENGTH_SIZE: LengthWidth = LengthWidth::Eight;
 
 /// Which filter, and the parameters that are the caller's to choose.
 ///
@@ -986,8 +988,8 @@ pub(crate) fn chunk_index_len(
     kind: ChunkArrayKind,
     slots: &IndexSlots<'_>,
     chunk_bytes: u64,
-    offset_size: u8,
-    length_size: u8,
+    offset_size: OffsetWidth,
+    length_size: LengthWidth,
     has_filters: bool,
 ) -> u64 {
     match kind {
@@ -1420,7 +1422,6 @@ fn plan_chunk_slots(
 fn chunk_index_bytes(
     set: &CompressedChunkSet,
     written_chunks: &[ChunkRecord],
-    slots: &IndexSlots<'_>,
     index_address: StoredAddress,
 ) -> Result<(Vec<u8>, Vec<u8>), FormatError> {
     let index = match set.kind {
@@ -1428,7 +1429,7 @@ fn chunk_index_bytes(
         // the undefined address in place of one.
         ChunkIndexKind::Unallocated => Vec::new(),
         ChunkIndexKind::ExtensibleArray => hdf5_pure_format::__private::build_extensible_array_at(
-            slots,
+            &set.index_slots(written_chunks)?,
             set.full_chunk_bytes(),
             INDEX_OFFSET_SIZE,
             INDEX_LENGTH_SIZE,
@@ -1437,13 +1438,13 @@ fn chunk_index_bytes(
         )?,
         ChunkIndexKind::SingleChunk => Vec::new(),
         ChunkIndexKind::FixedArray => hdf5_pure_format::__private::build_fixed_array_at(
-            slots,
+            &set.index_slots(written_chunks)?,
             set.full_chunk_bytes(),
             INDEX_OFFSET_SIZE,
             INDEX_LENGTH_SIZE,
             set.has_filters,
             index_address,
-        ),
+        )?,
     };
     Ok((
         index,
@@ -1473,14 +1474,14 @@ fn chunk_index_layout(
         ChunkIndexKind::Unallocated => serialize_v4_fixed_array(
             &set.chunk_dims_u32,
             StoredAddress::new(HADDR_UNDEF),
-            INDEX_OFFSET_SIZE,
+            INDEX_OFFSET_SIZE.get(),
             set.element_size.get() as u32,
             FIXED_ARRAY_PAGE_BITS,
         ),
         ChunkIndexKind::ExtensibleArray => serialize_v4_extensible_array(
             &set.chunk_dims_u32,
             index_address,
-            INDEX_OFFSET_SIZE,
+            INDEX_OFFSET_SIZE.get(),
             set.element_size.get() as u32,
         ),
         ChunkIndexKind::SingleChunk => {
@@ -1490,14 +1491,14 @@ fn chunk_index_layout(
                 chunk.address,
                 has_filters.then_some(chunk.stored_size),
                 has_filters.then_some(0u32),
-                INDEX_OFFSET_SIZE,
+                INDEX_OFFSET_SIZE.get(),
                 set.element_size.get() as u32,
             )
         }
         ChunkIndexKind::FixedArray => serialize_v4_fixed_array(
             &set.chunk_dims_u32,
             index_address,
-            INDEX_OFFSET_SIZE,
+            INDEX_OFFSET_SIZE.get(),
             set.element_size.get() as u32,
             FIXED_ARRAY_PAGE_BITS,
         ),
@@ -1514,19 +1515,18 @@ fn chunk_index_layout(
 /// the file (issue #261).
 pub(crate) fn chunked_data_len(set: &CompressedChunkSet) -> Result<u64, FormatError> {
     let (written_chunks, index_address) = plan_chunk_slots(set, StoredAddress::new(0));
-    let slots = set.index_slots(&written_chunks)?;
-    let kind = set.kind;
-    Ok(index_address.get()
-        + kind.array_kind().map_or(0, |array| {
-            chunk_index_len(
-                array,
-                &slots,
-                set.full_chunk_bytes(),
-                INDEX_OFFSET_SIZE,
-                INDEX_LENGTH_SIZE,
-                set.has_filters,
-            )
-        }))
+    let index_len = match set.kind.array_kind() {
+        Some(array) => chunk_index_len(
+            array,
+            &set.index_slots(&written_chunks)?,
+            set.full_chunk_bytes(),
+            INDEX_OFFSET_SIZE,
+            INDEX_LENGTH_SIZE,
+            set.has_filters,
+        ),
+        None => 0,
+    };
+    Ok(index_address.get() + index_len)
 }
 
 /// The chunk-index bytes and data-layout message for `set` at `data_address`,
@@ -1540,8 +1540,7 @@ fn plan_chunked_at(
     data_address: StoredAddress,
 ) -> Result<(usize, Vec<u8>, Vec<u8>), FormatError> {
     let (written_chunks, index_address) = plan_chunk_slots(set, data_address);
-    let slots = set.index_slots(&written_chunks)?;
-    let (index, layout_message) = chunk_index_bytes(set, &written_chunks, &slots, index_address)?;
+    let (index, layout_message) = chunk_index_bytes(set, &written_chunks, index_address)?;
     let chunk_bytes_total: usize = set.compressed.iter().map(Vec::len).sum();
     Ok((chunk_bytes_total, index, layout_message))
 }
@@ -1562,20 +1561,20 @@ pub(crate) fn measure_chunked_at(
     data_address: StoredAddress,
 ) -> Result<ChunkedMeasure, FormatError> {
     let (written_chunks, index_address) = plan_chunk_slots(set, data_address);
-    let slots = set.index_slots(&written_chunks)?;
     // Derived from the plan already in hand rather than by building the index —
     // and from *this* plan rather than by calling `chunked_data_len`, which
     // would lay the chunks out a second time to reach the same answer.
-    let index_len = set.kind.array_kind().map_or(0, |array| {
-        chunk_index_len(
+    let index_len = match set.kind.array_kind() {
+        Some(array) => chunk_index_len(
             array,
-            &slots,
+            &set.index_slots(&written_chunks)?,
             set.full_chunk_bytes(),
             INDEX_OFFSET_SIZE,
             INDEX_LENGTH_SIZE,
             set.has_filters,
-        )
-    });
+        ),
+        None => 0,
+    };
     let data_len = (index_address.get() - data_address.get()) + index_len;
     // Not building the index also stops it from *refusing*, and the only way it
     // can is a length that does not fit this platform's `usize`. Every such
@@ -1838,11 +1837,12 @@ pub(crate) fn plan_chunked_data_verbatim(
     // The chunks arrived in dense grid order; where each one's index element
     // sits is the maximum grid's business, and the same decision the encode path
     // makes (`plan_index_slots`).
+    let chunk_bytes = full_chunk_bytes(chunk_dims.iter().copied(), element_size);
     let (kind, slot_of_chunk, index_slots) = plan_index_slots(
         shape,
         chunk_dims,
         maxshape,
-        full_chunk_bytes(chunk_dims.iter().copied(), element_size),
+        chunk_bytes,
         has_filters,
         // A verbatim payload is the chunks the source held. Its own count is
         // checked against the plan's just below, so an empty one is reported
@@ -1856,28 +1856,32 @@ pub(crate) fn plan_chunked_data_verbatim(
             slot_of_chunk.len(),
         )));
     }
-    let slots = IndexSlots::new(&written_chunks, &slot_of_chunk, index_slots)?;
+    if kind.array_kind().is_some() {
+        check_chunks_fit_index(meta, chunk_bytes, has_filters)?;
+    }
 
     // The index sits immediately after the chunk bytes. Its length is taken from
     // the index's own layout rather than from a build of it, so this planner
     // touches no index bytes either — which is what lets `write_chunked_relocatable`
     // plan at a provisional address purely to size the region.
     let index_address = data_address.offset(cursor);
-    let chunk_bytes = full_chunk_bytes(chunk_dims.iter().copied(), element_size);
-    let index = kind.array_kind().map(|array| VerbatimIndexPlan {
-        kind: array,
-        address: index_address,
-        has_filters,
-        chunk_bytes,
-        len: chunk_index_len(
-            array,
-            &slots,
-            chunk_bytes,
-            offset_size,
-            length_size,
+    let index = match kind.array_kind() {
+        Some(array) => Some(VerbatimIndexPlan {
+            kind: array,
+            address: index_address,
             has_filters,
-        ),
-    });
+            chunk_bytes,
+            len: chunk_index_len(
+                array,
+                &IndexSlots::new(&written_chunks, &slot_of_chunk, index_slots)?,
+                chunk_bytes,
+                offset_size,
+                length_size,
+                has_filters,
+            ),
+        }),
+        None => None,
+    };
     cursor += index.as_ref().map_or(0, |i| i.len);
 
     #[expect(
@@ -1890,14 +1894,14 @@ pub(crate) fn plan_chunked_data_verbatim(
         ChunkIndexKind::Unallocated => serialize_v4_fixed_array(
             &chunk_dims_u32,
             StoredAddress::new(HADDR_UNDEF),
-            offset_size,
+            offset_size.get(),
             element_size.get() as u32,
             FIXED_ARRAY_PAGE_BITS,
         ),
         ChunkIndexKind::ExtensibleArray => serialize_v4_extensible_array(
             &chunk_dims_u32,
             index_address,
-            offset_size,
+            offset_size.get(),
             element_size.get() as u32,
         ),
         ChunkIndexKind::SingleChunk => {
@@ -1917,14 +1921,14 @@ pub(crate) fn plan_chunked_data_verbatim(
                 chunk_addr,
                 filtered_size,
                 filter_mask,
-                offset_size,
+                offset_size.get(),
                 element_size.get() as u32,
             )
         }
         ChunkIndexKind::FixedArray => serialize_v4_fixed_array(
             &chunk_dims_u32,
             index_address,
-            offset_size,
+            offset_size.get(),
             element_size.get() as u32,
             FIXED_ARRAY_PAGE_BITS,
         ),
@@ -1941,6 +1945,37 @@ pub(crate) fn plan_chunked_data_verbatim(
         layout_message,
         pipeline_message: pipeline_message.map(<[u8]>::to_vec),
     })
+}
+
+/// Checks that the chunk size field of a filtered chunk index holds the stored size of every chunk
+/// in `meta`.
+///
+/// # Errors
+///
+/// Returns [`FormatError::ChunkedReadError`] if a chunk is too large for the field of an index
+/// over chunks of `chunk_bytes` bytes.
+fn check_chunks_fit_index(
+    meta: &[ChunkMeta],
+    chunk_bytes: u64,
+    has_filters: bool,
+) -> Result<(), FormatError> {
+    if !has_filters {
+        return Ok(());
+    }
+    let encoding =
+        hdf5_pure_format::__private::chunk_element_encoding(chunk_bytes, INDEX_OFFSET_SIZE, true);
+    match meta
+        .iter()
+        .enumerate()
+        .find(|(_, m)| !encoding.holds_stored_size(m.compressed_size))
+    {
+        Some((slot, m)) => Err(FormatError::ChunkedReadError(format!(
+            "chunk {slot} of a verbatim chunked dataset stores {} bytes, more than the chunk \
+             index records for a filtered chunk of {chunk_bytes} bytes",
+            m.compressed_size,
+        ))),
+        None => Ok(()),
+    }
 }
 
 /// Stream a planned verbatim dataset's data region to `sink`, pulling each
@@ -2000,7 +2035,7 @@ pub(crate) fn emit_chunked_data_verbatim<S: ByteSink>(
                 INDEX_LENGTH_SIZE,
                 index.has_filters,
                 index.address,
-            ),
+            )?,
         };
         if bytes.len() as u64 != index.len {
             return Err(FormatError::SerializationError(format!(
@@ -2852,6 +2887,33 @@ mod tests {
         assert!(
             matches!(result, Err(FormatError::ChunkedReadError(_))),
             "a chunk-less plan must be refused"
+        );
+    }
+
+    #[test]
+    fn a_verbatim_chunk_too_large_for_its_index_field_fails() {
+        let meta = [37, 70_000, 5].map(|compressed_size| ChunkMeta {
+            compressed_size,
+            filter_mask: 0,
+        });
+        let err = plan_chunked_data_verbatim(
+            &meta,
+            &[6],
+            &[2],
+            nz(1),
+            Some(&[]),
+            StoredAddress::new(0x1000),
+            None,
+        )
+        .err()
+        .unwrap();
+        let FormatError::ChunkedReadError(message) = &err else {
+            panic!("expected ChunkedReadError, got {err:?}");
+        };
+        assert_eq!(
+            message,
+            "chunk 1 of a verbatim chunked dataset stores 70000 bytes, more than the chunk index \
+             records for a filtered chunk of 2 bytes"
         );
     }
 
