@@ -16,12 +16,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Fixed `Dataset::read` decoding a truncated ZFP chunk to zeros, and `DatasetBuilder::with_zfp` writing float blocks whose rate cannot hold their headers ([#620](https://github.com/CramBL/hdf5-pure/pull/620)).
 - Fixed `Dataset::read` failing on ZFP chunks whose partial blocks are followed by Deflate ([#632](https://github.com/CramBL/hdf5-pure/pull/632)).
 - Fixed truncated length fields when writing a link name of 4 GiB or more, or a version 2 object header whose first chunk reaches 4 GiB ([#675](https://github.com/CramBL/hdf5-pure/pull/675)).
+- Fixed reads accepting a version 1 object header whose message data size is not a multiple of eight ([#615](https://github.com/CramBL/hdf5-pure/pull/615)).
 
 ## [0.47.0] - 2026-09-20
-
-### Fixed
-
-- Version 1 object-header parsing rejects message records whose data sizes are not multiples of eight, matching `libhdf5` 1.10+.
 
 ### Changed
 
