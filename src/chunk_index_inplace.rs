@@ -29,18 +29,21 @@
 
 use core::num::NonZeroUsize;
 
+use hdf5_pure_format::__private::DataBlockGeometry;
+use hdf5_pure_format::__private::ExtensibleArrayGeometry;
+use hdf5_pure_format::__private::ExtensibleArrayHeader;
+use hdf5_pure_format::__private::SlotOccupancy;
+use hdf5_pure_format::__private::SuperBlockGeometry;
+
 use crate::address::StoredAddress;
 use crate::checksum::jenkins_lookup3;
-use crate::chunked_write::{extensible_array_stats, split_into_chunks, write_stored_address};
+use crate::chunked_write::split_into_chunks;
 use crate::convert::Narrow;
 use crate::data_layout::{ChunkIndexLayout, DataLayout};
 use crate::dataspace::{Dataspace, MaxExtent};
 use crate::datatype::Datatype;
 use crate::edit::{LOSSY_TAIL_REFUSAL, pipeline_lossless};
 use crate::error::{Error, FormatError};
-use crate::extensible_array::{
-    DataBlockGeometry, ExtensibleArrayGeometry, ExtensibleArrayHeader, SuperBlockGeometry,
-};
 use crate::fill_value::FillPattern;
 use crate::filter_pipeline::FilterPipeline;
 use crate::filters::{ChunkContext, FilterScratch, compress_chunk_with, decompress_chunk};
@@ -91,7 +94,11 @@ pub(crate) mod alloc_probe {
 /// Mirrors `chunked_write::write_undefined_element` so a freshly-allocated block
 /// matches what the bulk writer and reader expect.
 fn push_undef_element(buf: &mut Vec<u8>, offset_size: u8, ea_elem_size: usize) {
-    write_stored_address(buf, StoredAddress::undefined(offset_size), offset_size);
+    hdf5_pure_format::__private::write_stored_address(
+        buf,
+        StoredAddress::undefined(offset_size),
+        offset_size,
+    );
     for _ in offset_size as usize..ea_elem_size {
         buf.push(0);
     }
@@ -813,7 +820,7 @@ impl Located {
 
         let bitmap = vec![0u8; sb.bitmap_size().to_usize()?];
         let undef = vec![StoredAddress::undefined(file.offset_size()); sb.ndblks.to_usize()?];
-        let aesb = crate::chunked_write::encode_super_block(
+        let aesb = hdf5_pure_format::__private::encode_super_block(
             self.ea_addr,
             sb_block_offset,
             &bitmap,
@@ -859,7 +866,7 @@ impl Located {
         buf.extend_from_slice(b"EADB");
         buf.push(0); // version
         buf.push(self.client_id);
-        write_stored_address(&mut buf, self.ea_addr, os);
+        hdf5_pure_format::__private::write_stored_address(&mut buf, self.ea_addr, os);
         buf.extend_from_slice(&block_offset_rel.to_le_bytes()[..self.blk_off_size]);
         for _ in 0..dblk_nelmts {
             push_undef_element(&mut buf, os, self.ea_elem_size);
@@ -884,7 +891,7 @@ impl Located {
         buf.extend_from_slice(b"EADB");
         buf.push(0); // version
         buf.push(self.client_id);
-        write_stored_address(&mut buf, self.ea_addr, os);
+        hdf5_pure_format::__private::write_stored_address(&mut buf, self.ea_addr, os);
         buf.extend_from_slice(&block_offset_rel.to_le_bytes()[..self.blk_off_size]);
         let header_cks = jenkins_lookup3(&buf);
         buf.extend_from_slice(&header_cks.to_le_bytes());
@@ -1000,7 +1007,7 @@ impl Located {
         file: &mut F,
         num_chunks: u64,
     ) -> Result<(), Error> {
-        let stats = extensible_array_stats(
+        let stats = hdf5_pure_format::__private::extensible_array_stats(
             &self.geom,
             self.idx_blk_elmts,
             self.ea_elem_size,
@@ -1012,7 +1019,7 @@ impl Located {
             // refuses any other), and a rank-1 index numbers its chunks
             // 0..n with no gap to skip, so the occupancy is dense by
             // construction and this is the predicate the walk always had.
-            crate::chunked_write::SlotOccupancy::Dense(num_chunks),
+            SlotOccupancy::Dense(num_chunks),
         );
         let ls = file.length_size() as usize;
         let ea_addr = self.ea_addr.get();

@@ -255,6 +255,10 @@ use std::path::Path;
 
 use core::num::NonZeroUsize;
 
+use hdf5_pure_format::__private::ChunkRecord;
+use hdf5_pure_format::__private::ExtensibleArrayHeader;
+use hdf5_pure_format::__private::IndexSlots;
+
 use crate::access_mode::AccessMode;
 use crate::address::BaseAddressExt;
 use crate::address::{BaseAddress, StoredAddress};
@@ -265,10 +269,9 @@ use crate::chunked_read::{
     chunk_index_spans_from_source, enumerate_chunks_from_source, plan_dense_grid,
 };
 use crate::chunked_write::{
-    ChunkMeta, ChunkOptions, ChunkProvider, ChunkRecord, StorageAllocation, assemble_chunked_at,
-    build_extensible_array_at, chunked_data_len, compress_chunks, emit_chunked_data_verbatim,
-    extensible_array_len, full_chunk_bytes, plan_chunked_data_verbatim,
-    serialize_v4_extensible_array, split_into_chunks,
+    ChunkMeta, ChunkOptions, ChunkProvider, StorageAllocation, assemble_chunked_at,
+    chunked_data_len, compress_chunks, emit_chunked_data_verbatim, full_chunk_bytes,
+    plan_chunked_data_verbatim, serialize_v4_extensible_array, split_into_chunks,
 };
 use crate::convert::Narrow;
 use crate::data_layout::{ChunkIndexLayout, DataLayout};
@@ -278,7 +281,6 @@ use crate::datatype::{
     stored_object_references,
 };
 use crate::error::{Error, FormatError, OBJECT_HEADER_MESSAGE_MAX};
-use crate::extensible_array::ExtensibleArrayHeader;
 use crate::file_create_properties::FileCreateProperties;
 use crate::file_lock::{self, FileLocking};
 use crate::file_space_info::{self, FileSpaceInfo, FileSpaceStrategy, NUM_FILE_FSM_MANAGERS};
@@ -9842,17 +9844,15 @@ impl WriteEngine {
             combined
         };
         let sizing = placed_chunks(StoredAddress::new(0));
-        let ea_len = extensible_array_len(
-            &crate::chunked_write::IndexSlots::dense(&sizing),
+        let ea_len = hdf5_pure_format::__private::extensible_array_len(
+            &IndexSlots::dense(&sizing),
             chunk_bytes,
             OFFSET_SIZE,
             LENGTH_SIZE,
             has_filters,
         );
-        let ea = |slots: &crate::chunked_write::IndexSlots<'_>,
-                  at: StoredAddress|
-         -> Result<Vec<u8>, Error> {
-            build_extensible_array_at(
+        let ea = |slots: &IndexSlots<'_>, at: StoredAddress| -> Result<Vec<u8>, Error> {
+            hdf5_pure_format::__private::build_extensible_array_at(
                 slots,
                 chunk_bytes,
                 OFFSET_SIZE,
@@ -9884,7 +9884,7 @@ impl WriteEngine {
                         buf.extend_from_slice(cb);
                     }
                     buf.extend_from_slice(&ea(
-                        &crate::chunked_write::IndexSlots::dense(&combined),
+                        &IndexSlots::dense(&combined),
                         blob_stored.offset(chunk_total),
                     )?);
                     self.place(
@@ -9917,10 +9917,7 @@ impl WriteEngine {
                     });
                 }
                 let (ea_addr, ()) = self.place_relocatable(ea_len, PageType::Raw, |at| {
-                    Ok((
-                        ea(&crate::chunked_write::IndexSlots::dense(&combined), at)?,
-                        (),
-                    ))
+                    Ok((ea(&IndexSlots::dense(&combined), at)?, ()))
                 })?;
                 base.relative(ea_addr)?
             }
@@ -10102,7 +10099,8 @@ impl WriteEngine {
     /// of the content alone — the addresses sit in fixed-width fields — so every
     /// caller derives it, and none builds the blob to measure it:
     /// [`DenseAttrPlan::blob_len`](crate::file_writer::DenseAttrPlan::blob_len)
-    /// for a dense attribute heap, [`extensible_array_len`] for an appended
+    /// for a dense attribute heap,
+    /// [`extensible_array_len`](hdf5_pure_format::__private::extensible_array_len) for an appended
     /// chunk index, and [`chunked_data_len`] / [`plan_chunked_data_verbatim`]
     /// for a whole chunked data region, both of which size their index through
     /// [`chunk_index_len`](crate::chunked_write::chunk_index_len).
@@ -12486,10 +12484,10 @@ fn try_rebuild_index_in_place<S: Source + ?Sized>(
         return None;
     };
     let index_addr = index.address()?;
-    let written: Vec<crate::chunked_write::ChunkRecord> = grid_order
+    let written: Vec<ChunkRecord> = grid_order
         .iter()
         .zip(new_bytes)
-        .map(|(ci, b)| crate::chunked_write::ChunkRecord {
+        .map(|(ci, b)| ChunkRecord {
             address: ci.address,
             stored_size: b.len() as u64,
             filter_mask: 0,
@@ -12509,8 +12507,7 @@ fn try_rebuild_index_in_place<S: Source + ?Sized>(
         crate::chunked_write::StorageAllocation::Allocated,
     )
     .ok()?;
-    let slots =
-        crate::chunked_write::IndexSlots::new(&written, &slot_of_chunk, index_slots).ok()?;
+    let slots = IndexSlots::new(&written, &slot_of_chunk, index_slots).ok()?;
     let new_index = match index {
         // `raw_size` is the whole-chunk byte size, which is what the element
         // width derives from — the same value the original index was built with,
@@ -12518,7 +12515,7 @@ fn try_rebuild_index_in_place<S: Source + ?Sized>(
         // version that derived the width from the written chunks instead can
         // disagree; the length check below then rejects it and the caller
         // relocates, which is the safe direction.)
-        ChunkIndexLayout::FixedArray { .. } => crate::chunked_write::build_fixed_array_at(
+        ChunkIndexLayout::FixedArray { .. } => hdf5_pure_format::__private::build_fixed_array_at(
             &slots,
             raw_size,
             OFFSET_SIZE,
@@ -12527,7 +12524,7 @@ fn try_rebuild_index_in_place<S: Source + ?Sized>(
             index_addr,
         ),
         ChunkIndexLayout::ExtensibleArray { .. } => {
-            crate::chunked_write::build_extensible_array_at(
+            hdf5_pure_format::__private::build_extensible_array_at(
                 &slots,
                 raw_size,
                 OFFSET_SIZE,
