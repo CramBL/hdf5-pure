@@ -2663,4 +2663,45 @@ mod tests {
         let got = f64::from_le_bytes(dec.as_slice().try_into().unwrap());
         assert!((got - 3.14).abs() <= 0.5e-3);
     }
+
+    #[test]
+    fn an_integer_chunk_round_trips_and_a_zero_element_size_is_rejected() {
+        let scalar = ScaleOffsetType::integer(false, ScaleOffsetByteOrder::LittleEndian);
+        let cd = build_cd_values(
+            ScaleOffset::Integer(0),
+            scalar,
+            1,
+            3,
+            ScaleOffsetFill::Undefined,
+        )
+        .unwrap();
+        assert_eq!(
+            cd,
+            [2, 0, 3, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+        );
+        assert_eq!(
+            scale_offset_mode(&cd),
+            Some((ScaleOffset::Integer(0), FillAvailability::Undefined))
+        );
+
+        let encoded = compress(&[4, 5, 6], &cd).unwrap();
+        let mut expected = vec![2, 0, 0, 0, 8];
+        expected.extend_from_slice(&4u64.to_le_bytes());
+        expected.extend_from_slice(&[0; 8]);
+        expected.push(0x18);
+        assert_eq!(encoded, expected);
+        assert_eq!(decompress(&encoded, &cd, Some(3)).unwrap(), [4, 5, 6]);
+
+        assert_eq!(
+            build_cd_values(
+                ScaleOffset::Integer(0),
+                scalar,
+                0,
+                3,
+                ScaleOffsetFill::Undefined,
+            )
+            .unwrap_err(),
+            Error::ScaleOffset("scaleoffset: unsupported datatype size 0".into())
+        );
+    }
 }
