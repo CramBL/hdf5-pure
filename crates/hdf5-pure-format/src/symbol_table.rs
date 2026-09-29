@@ -299,4 +299,37 @@ mod tests {
         let err = SymbolTableNode::parse(&data, 0, 8, 8).unwrap_err();
         assert_eq!(err, FormatError::InvalidSymbolTableNodeVersion(2));
     }
+
+    #[test]
+    fn a_symbol_table_message_and_node_parse_and_the_node_reads_from_a_source() {
+        let mut message = 0x100u64.to_le_bytes().to_vec();
+        message.extend_from_slice(&0x200u64.to_le_bytes());
+        assert_eq!(
+            SymbolTableMessage::parse(&message, 8),
+            Ok(SymbolTableMessage {
+                btree_address: StoredAddress::new(0x100),
+                local_heap_address: StoredAddress::new(0x200),
+            })
+        );
+
+        let entry = symbol_table::Entry {
+            cache_type: 1,
+            scratch_pad: [7; symbol_table::SCRATCH_PAD],
+            ..symbol_table::Entry::new(8, 0x300)
+        };
+        let node = symbol_table::node(&[entry], Widths::EIGHT);
+        let expected = SymbolTableNode {
+            entries: vec![SymbolTableEntry {
+                link_name_offset: 8,
+                object_header_address: StoredAddress::new(0x300),
+                cache_type: 1,
+                scratch_pad: [7; 16],
+            }],
+        };
+        assert_eq!(SymbolTableNode::parse(&node, 0, 8, 8), Ok(expected.clone()));
+        assert_eq!(
+            SymbolTableNode::parse_from_source(node.as_slice(), 0, 8, 8),
+            Ok(expected)
+        );
+    }
 }

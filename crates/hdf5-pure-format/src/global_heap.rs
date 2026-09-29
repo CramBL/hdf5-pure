@@ -843,4 +843,68 @@ mod tests {
             b"test"
         );
     }
+
+    #[test]
+    fn an_encoded_collection_parses_whole_and_filtered() {
+        let objects: [&[u8]; 2] = [b"alpha", b"beta"];
+        let bytes = encode_global_heap_collection(LengthWidth::Eight, &objects).unwrap();
+
+        let collection = GlobalHeapIndex::parse(bytes.as_slice(), 0, 8).unwrap();
+        let filtered =
+            GlobalHeapIndex::parse_filtered(bytes.as_slice(), 0, 8, |index| index == 2).unwrap();
+
+        let beta = GlobalHeapObjectInfo {
+            index: 2,
+            data_address: 56,
+            size: 4,
+        };
+        assert_eq!(
+            collection.objects,
+            vec![
+                GlobalHeapObjectInfo {
+                    index: 1,
+                    data_address: 32,
+                    size: 5,
+                },
+                beta.clone(),
+            ]
+        );
+        assert_eq!(filtered.objects, vec![beta.clone()]);
+        assert_eq!(collection.object(2), Some(&beta));
+        assert_eq!(&bytes[56..60], b"beta");
+        assert_eq!(GLOBAL_HEAP_MAX_OBJECTS, usize::from(u16::MAX));
+    }
+
+    // 16 + 16 + 65,480 + 16 bytes fit the 65,535 of a 2-byte length, and 65,481 bytes of data pad
+    // to 65,488 and a collection of 65,536.
+    #[rstest]
+    #[case::fits(65_480, Ok(65_528))]
+    #[case::overflows(
+        65_481,
+        Err(GlobalHeapCollectionError::TooLarge {
+            size: 65_536,
+            length_width: LengthWidth::Two,
+        })
+    )]
+    fn a_two_byte_length_collection_holds_at_most_its_field_maximum(
+        #[case] object_len: usize,
+        #[case] expected: Result<usize, GlobalHeapCollectionError>,
+    ) {
+        let object = vec![0u8; object_len];
+
+        assert_eq!(
+            encode_global_heap_collection(LengthWidth::Two, &[&object]).map(|bytes| bytes.len()),
+            expected
+        );
+    }
+
+    #[test]
+    fn the_encoder_rejects_more_than_global_heap_max_objects() {
+        let objects = vec![b"".as_slice(); GLOBAL_HEAP_MAX_OBJECTS + 1];
+
+        assert_eq!(
+            encode_global_heap_collection(LengthWidth::Eight, &objects),
+            Err(GlobalHeapCollectionError::TooManyObjects { count: 65_536 })
+        );
+    }
 }
