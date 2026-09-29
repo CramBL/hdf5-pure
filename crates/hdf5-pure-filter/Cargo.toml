@@ -10,8 +10,7 @@ description = "Pure-Rust HDF5 chunk filter codecs and pipelines"
 [features]
 default = []
 std = ["hdf5-pure-core/std"]
-deflate = ["std", "flate2"]
-flate2 = ["dep:flate2"]
+deflate = ["std", "dep:flate2"]
 fast-deflate = ["deflate", "flate2/zlib-ng"]
 zfp = []
 

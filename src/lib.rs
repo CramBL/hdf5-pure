@@ -198,9 +198,9 @@
 //! |---|---|---|---|---|
 //! | `std` | yes | nothing | nothing | file I/O and the high-level reader and writer API |
 //! | `checksum` | yes | nothing | nothing | the Jenkins hash that validates checksummed metadata |
-//! | `deflate` | yes | `flate2`, Rust backend | nothing | deflate (zlib) compression, pure-Rust backend |
+//! | `deflate` | yes | `flate2` (pure Rust) | nothing | deflate (zlib) compression, pure-Rust backend |
 //! | `serde` | no | `serde` | `std` | serialization of MATLAB v7.3 `.mat` files through serde |
-//! | `fast-deflate` | no | `flate2/zlib-ng` | nothing | the zlib-ng backend for deflate |
+//! | `fast-deflate` | no | `zlib-ng` | nothing | the zlib-ng backend for deflate |
 //! | `ndarray` | no | the `ndarray` crate | `std` | N-dimensional array I/O through the [`ndarray`](https://docs.rs/ndarray) crate |
 //! | `num-complex` | no | `num-complex` | `serde` | [`mat::ComplexElement`] for `num_complex::Complex<T>`, for the bulk complex-array helpers |
 //! | `provenance` | no | `sha2` | nothing | SHA-256 data provenance tracking |
@@ -255,7 +255,7 @@
 //!
 //! ## `fast-deflate`
 //!
-//! Switches the deflate backend to zlib-ng through `flate2/zlib-ng`, which compresses faster than
+//! Switches the deflate backend to zlib-ng, which compresses faster than
 //! the pure-Rust backend. It complements `deflate` and leaves the deflate API as it is. zlib-ng is
 //! a native dependency, so this feature is for native builds, and the pure-Rust `deflate` backend
 //! is what a WASM target compiles.
