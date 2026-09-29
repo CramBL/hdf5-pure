@@ -11,7 +11,7 @@ use alloc::string::ToString;
 use alloc::vec;
 use alloc::vec::Vec;
 
-use crate::Error;
+use crate::error::Error;
 
 // `cd_values` indices (H5Z_SCALEOFFSET_PARM_*).
 const PARM_SCALETYPE: usize = 0;
@@ -53,7 +53,7 @@ const FILL_DEFINED: u32 = 1;
 ///
 /// A chunk that cannot be packed more tightly stores its input after this header, so encoding
 /// expands the input by at most this many bytes.
-pub const HEADER_LEN: usize = 21;
+pub(crate) const HEADER_LEN: usize = 21;
 
 /// Selects integer packing or decimal scaling for a chunk.
 #[allow(clippy::exhaustive_enums)]
@@ -354,7 +354,11 @@ fn integer_scale_factor_is_full_width(p: &Parms) -> Result<bool, Error> {
 /// decoded size exceeds `max_output`. Returns
 /// [`Error::ScaleOffsetValueTooLargeForPlatform`] if an element count or output size does not
 /// fit `usize`.
-pub fn decompress(input: &[u8], cd: &[u32], max_output: Option<usize>) -> Result<Vec<u8>, Error> {
+pub(crate) fn decompress(
+    input: &[u8],
+    cd: &[u32],
+    max_output: Option<usize>,
+) -> Result<Vec<u8>, Error> {
     let p = Parms::parse(cd)?;
 
     if p.scale_type == SO_FLOAT_ESCALE {
@@ -500,7 +504,7 @@ pub fn decompress(input: &[u8], cd: &[u32], max_output: Option<usize>) -> Result
 /// Returns
 /// [`Error::ScaleOffsetValueTooLargeForPlatform`] if an element count or encoded size does not
 /// fit `usize`.
-pub fn compress(input: &[u8], cd: &[u32]) -> Result<Vec<u8>, Error> {
+pub(crate) fn compress(input: &[u8], cd: &[u32]) -> Result<Vec<u8>, Error> {
     let p = Parms::parse(cd)?;
 
     // The class/scale-type agreement is checked first, matching the reference's

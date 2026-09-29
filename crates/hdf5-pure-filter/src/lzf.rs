@@ -10,7 +10,7 @@
 use alloc::vec;
 use alloc::vec::Vec;
 
-use crate::Error;
+use crate::error::Error;
 
 /// Longest literal run one control byte can introduce.
 const MAX_LITERAL_RUN: usize = 32;
@@ -35,7 +35,7 @@ const HASH_TABLE_BITS: u32 = HASH_TABLE_SLOTS.trailing_zeros();
 /// stream.
 ///
 /// A three-byte extended back-reference can emit 264 bytes.
-pub const MAX_EXPANSION: usize = MAX_MATCH_LEN / 3;
+pub(crate) const MAX_EXPANSION: usize = MAX_MATCH_LEN / 3;
 
 /// h5py's `H5PY_FILTER_LZF_VERSION` (lzf/lzf_filter.h), `cd_values[0]`.
 const H5PY_FILTER_LZF_VERSION: u32 = 4;
@@ -64,8 +64,8 @@ fn corrupt(reason: &'static str) -> Error {
 ///
 /// `max_output` bounds the decoded size. Passing `None` leaves it unbounded.
 ///
-/// The decoder uses [`decode_reservation`](crate::decode_reservation) to size
-/// its initial allocation from the encoded input and the cap.
+/// The initial allocation is at most `max_output` and at most 88 times the length of `input`,
+/// and is empty when `max_output` is `None`.
 ///
 /// # Errors
 ///
