@@ -69,7 +69,7 @@ pub(crate) struct FreeSection {
 
 /// A parsed Free-space Manager Header (`FSHD`).
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct FsmHeader {
+pub(crate) struct FreeSpaceManagerHeader {
     pub total_space: u64,
     pub total_sections: u64,
     pub addr_space_bits: u16,
@@ -97,9 +97,12 @@ fn read_uint_le(bytes: &[u8]) -> u64 {
     v
 }
 
-impl FsmHeader {
+impl FreeSpaceManagerHeader {
     /// Parse an `FSHD` at the start of `data`.
-    pub(crate) fn parse(data: &[u8], offset_size: u8) -> Result<FsmHeader, FormatError> {
+    pub(crate) fn parse(
+        data: &[u8],
+        offset_size: u8,
+    ) -> Result<FreeSpaceManagerHeader, FormatError> {
         let os = offset_size as usize;
         // sig(4) ver(1) client(1) + 4*L + classes/shrink/expand/abits (2 each) +
         // max(L) + fsse_addr(O) + used(L) + alloc(L) + checksum(4)
@@ -130,7 +133,7 @@ impl FsmHeader {
         let fsse_addr = StoredAddress::new(read_uint_le(&data[pos..pos + os]));
         pos += os;
         let fsse_used = read_uint_le(&data[pos..pos + 8]);
-        Ok(FsmHeader {
+        Ok(FreeSpaceManagerHeader {
             total_space,
             total_sections,
             addr_space_bits,
@@ -166,13 +169,13 @@ const FILE_FSM_MAX_SECTION_SIZE: u64 = (1u64 << 63) - 1;
 /// `[offset][class_id]` — so the class id only selects which manager/page-type a
 /// section belongs to, never its byte width.
 /// Simple section: non-paged (`FSM_AGGR`) free space.
-pub(crate) const SECT_CLASS_SIMPLE: u8 = 0;
+pub(crate) const SECTION_CLASS_SIMPLE: u8 = 0;
 /// Small section: paged free space smaller than a page (SUPER / DRAW managers).
-pub(crate) const SECT_CLASS_SMALL: u8 = 1;
+pub(crate) const SECTION_CLASS_SMALL: u8 = 1;
 /// Large section: the trailing fragment of a paged multi-page allocation
 /// (the generic-large manager). Note this fragment is itself smaller than a page;
 /// the class reflects the manager, not the section size.
-pub(crate) const SECT_CLASS_LARGE: u8 = 2;
+pub(crate) const SECTION_CLASS_LARGE: u8 = 2;
 
 /// Append `value` as a little-endian unsigned integer of `width` bytes.
 fn push_uint_le(buf: &mut Vec<u8>, value: u64, width: usize) {
@@ -187,14 +190,14 @@ fn push_uint_le(buf: &mut Vec<u8>, value: u64, width: usize) {
 /// address and the section info back-points at the header. Returns
 /// `(fshd_bytes, fsse_bytes)`, each ending in its Jenkins checksum, ready to
 /// write at those addresses in a view of the file framed at the base. The
-/// encoding round-trips through [`FsmHeader::parse`] / [`parse_fsse`] and is
+/// encoding round-trips through [`FreeSpaceManagerHeader::parse`] / [`parse_section_info`] and is
 /// byte-identical to the reference C library's.
 ///
 /// `class_id` is the on-disk section class every section is tagged with
-/// ([`SECT_CLASS_SIMPLE`] for non-paged managers, [`SECT_CLASS_SMALL`] /
-/// [`SECT_CLASS_LARGE`] for the paged SUPER/DRAW and generic-large managers). A
+/// ([`SECTION_CLASS_SIMPLE`] for non-paged managers, [`SECTION_CLASS_SMALL`] /
+/// [`SECTION_CLASS_LARGE`] for the paged SUPER/DRAW and generic-large managers). A
 /// single manager holds sections of one class, so one id applies to all of them.
-pub(crate) fn serialize_file_fsm(
+pub(crate) fn serialize_free_space_manager(
     sections: &[FreeSection],
     fshd_addr: StoredAddress,
     fsse_addr: StoredAddress,
@@ -240,7 +243,7 @@ pub(crate) fn serialize_file_fsm(
     }
     let checksum = crate::checksum::jenkins_lookup3(&fsse);
     fsse.extend_from_slice(&checksum.to_le_bytes());
-    let fsse_len = fsse.len() as u64;
+    let section_info_len = fsse.len() as u64;
 
     // --- FSHD: fixed-layout header referencing the section info just built. ---
     let mut fshd = Vec::with_capacity(4 + 1 + 1 + 4 * 8 + 2 * 4 + 8 + os + 8 + 8 + 4);
@@ -257,8 +260,8 @@ pub(crate) fn serialize_file_fsm(
     fshd.extend_from_slice(&addr_space_bits.to_le_bytes());
     push_uint_le(&mut fshd, FILE_FSM_MAX_SECTION_SIZE, 8);
     push_uint_le(&mut fshd, fsse_addr.get(), os);
-    push_uint_le(&mut fshd, fsse_len, 8); // section info used
-    push_uint_le(&mut fshd, fsse_len, 8); // section info allocated (== used)
+    push_uint_le(&mut fshd, section_info_len, 8); // section info used
+    push_uint_le(&mut fshd, section_info_len, 8); // section info allocated (== used)
     let checksum = crate::checksum::jenkins_lookup3(&fshd);
     fshd.extend_from_slice(&checksum.to_le_bytes());
 
@@ -273,17 +276,17 @@ pub(crate) fn serialize_file_fsm(
 /// for a paged file's several managers and places them as well. Both depend only on
 /// the sections' count and sizes, never on their addresses, which is what lets a
 /// commit size its tail before it knows where the tail will sit.
-pub(crate) fn file_fsm_blocks_len(sections: &[FreeSection], offset_size: u8) -> u64 {
+pub(crate) fn free_space_manager_len(sections: &[FreeSection], offset_size: u8) -> u64 {
     if sections.is_empty() {
         return 0;
     }
     let sizes: Vec<u64> = sections.iter().map(|s| s.size).collect();
-    fshd_len(offset_size) + fsse_len(&sizes, offset_size)
+    free_space_manager_header_len(offset_size) + section_info_len(&sizes, offset_size)
 }
 
 /// The fixed serialized byte length of an `FSHD` header for the given offset size
 /// (82 bytes for standard 8-byte offsets).
-pub(crate) fn fshd_len(offset_size: u8) -> u64 {
+pub(crate) fn free_space_manager_header_len(offset_size: u8) -> u64 {
     (4 + 1 + 1 + 4 * 8 + 2 * 4 + 8 + offset_size as usize + 8 + 8 + 4) as u64
 }
 
@@ -292,9 +295,9 @@ pub(crate) fn fshd_len(offset_size: u8) -> u64 {
 /// space for a manager's section list before it knows the sections' offsets. The
 /// length depends only on the sizes (they determine the size-group count) and the
 /// section count, never on the offsets or class id, so this defers to
-/// [`serialize_file_fsm`] with placeholder addresses and stays exact by
+/// [`serialize_free_space_manager`] with placeholder addresses and stays exact by
 /// construction.
-pub(crate) fn fsse_len(section_sizes: &[u64], offset_size: u8) -> u64 {
+pub(crate) fn section_info_len(section_sizes: &[u64], offset_size: u8) -> u64 {
     let sections: Vec<FreeSection> = section_sizes
         .iter()
         .map(|&size| FreeSection {
@@ -302,21 +305,21 @@ pub(crate) fn fsse_len(section_sizes: &[u64], offset_size: u8) -> u64 {
             size,
         })
         .collect();
-    let (_fshd, fsse) = serialize_file_fsm(
+    let (_fshd, fsse) = serialize_free_space_manager(
         &sections,
         StoredAddress::new(0),
         StoredAddress::new(0),
         offset_size,
-        SECT_CLASS_SIMPLE,
+        SECTION_CLASS_SIMPLE,
     );
     fsse.len() as u64
 }
 
 /// Parse the `FSSE` section list `data` (the whole block, including checksum) for
 /// the manager described by `header`, returning its free sections.
-pub(crate) fn parse_fsse(
+pub(crate) fn parse_section_info(
     data: &[u8],
-    header: &FsmHeader,
+    header: &FreeSpaceManagerHeader,
     offset_size: u8,
 ) -> Result<Vec<FreeSection>, FormatError> {
     let os = offset_size as usize;
@@ -382,7 +385,7 @@ pub(crate) fn read_persisted_sections(
             continue;
         }
         let a = base.absolute(addr)?.to_usize()?;
-        let header = FsmHeader::parse(data.get(a..).ok_or_else(bad)?, offset_size)?;
+        let header = FreeSpaceManagerHeader::parse(data.get(a..).ok_or_else(bad)?, offset_size)?;
         if header.fsse_addr.is_undefined(offset_size) {
             continue;
         }
@@ -391,7 +394,7 @@ pub(crate) fn read_persisted_sections(
             .checked_add(header.fsse_used.to_usize()?)
             .ok_or_else(bad)?;
         let block = data.get(fa..end).ok_or_else(bad)?;
-        sections.extend(parse_fsse(block, &header, offset_size)?);
+        sections.extend(parse_section_info(block, &header, offset_size)?);
     }
     Ok(sections)
 }
@@ -414,7 +417,7 @@ pub(crate) fn read_persisted_sections_source<S: crate::source::Source>(
 ) -> Result<PersistedSections, FormatError> {
     let mut sections = Vec::new();
     let mut blocks = Vec::new();
-    let hdr_len = fshd_len(offset_size);
+    let hdr_len = free_space_manager_header_len(offset_size);
     for &addr in manager_addrs {
         let addr = StoredAddress::new(addr);
         if addr.is_undefined(offset_size) {
@@ -422,7 +425,7 @@ pub(crate) fn read_persisted_sections_source<S: crate::source::Source>(
         }
         let a = base.absolute(addr)?;
         let fshd = src.read_exact_at(a, hdr_len.to_usize()?)?;
-        let header = FsmHeader::parse(&fshd, offset_size)?;
+        let header = FreeSpaceManagerHeader::parse(&fshd, offset_size)?;
         blocks.push((a, hdr_len));
         if header.fsse_addr.is_undefined(offset_size) {
             continue;
@@ -430,7 +433,7 @@ pub(crate) fn read_persisted_sections_source<S: crate::source::Source>(
         let fa = base.absolute(header.fsse_addr)?;
         let used = header.fsse_used;
         let block = src.read_exact_at(fa, used.to_usize()?)?;
-        sections.extend(parse_fsse(&block, &header, offset_size)?);
+        sections.extend(parse_section_info(&block, &header, offset_size)?);
         blocks.push((fa, used));
     }
     Ok((sections, blocks))
@@ -575,17 +578,17 @@ pub(crate) fn plan_paged_managers(
     let mut blocks = Vec::new();
     let mut cursor = start;
     for (slot, class, sections) in [
-        (0usize, SECT_CLASS_SMALL, slot0),
-        (2usize, SECT_CLASS_SMALL, slot2),
-        (6usize, SECT_CLASS_LARGE, slot6),
+        (0usize, SECTION_CLASS_SMALL, slot0),
+        (2usize, SECTION_CLASS_SMALL, slot2),
+        (6usize, SECTION_CLASS_LARGE, slot6),
     ] {
         if sections.is_empty() {
             continue;
         }
         let fshd_addr = cursor;
-        let fsse_addr = fshd_addr.offset(fshd_len(offset_size));
+        let fsse_addr = fshd_addr.offset(free_space_manager_header_len(offset_size));
         let section_sizes: Vec<u64> = sections.iter().map(|s| s.size).collect();
-        cursor = fsse_addr.offset(fsse_len(&section_sizes, offset_size));
+        cursor = fsse_addr.offset(section_info_len(&section_sizes, offset_size));
         slots[slot] = fshd_addr;
         blocks.push(PagedManagerBlock {
             fshd_addr,
@@ -628,7 +631,7 @@ mod tests {
         let fshd = bytes(
             "46534844000140060000000000000100000000000000010000000000000000000000000000000300500078003f00ffffffffffffff7fbd0200000000000023000000000000002300000000000000ea133710",
         );
-        let header = FsmHeader::parse(&fshd, 8).unwrap();
+        let header = FreeSpaceManagerHeader::parse(&fshd, 8).unwrap();
         assert_eq!(header.total_space, 1600);
         assert_eq!(header.total_sections, 1);
         assert_eq!(header.addr_space_bits, 63);
@@ -636,7 +639,7 @@ mod tests {
         assert_eq!(header.fsse_used, 35);
 
         let fsse = bytes("46535345006b02000000000000014006000000000000200b000000000000005c797631");
-        let sections = parse_fsse(&fsse, &header, 8).unwrap();
+        let sections = parse_section_info(&fsse, &header, 8).unwrap();
         assert_eq!(sections, vec![section(2848, 1600)]);
     }
 
@@ -646,7 +649,7 @@ mod tests {
         let fshd = bytes(
             "4653484400018d030000000000000200000000000000020000000000000000000000000000000300500078003f00ffffffffffffff7f320300000000000035000000000000003500000000000000d681e354",
         );
-        let header = FsmHeader::parse(&fshd, 8).unwrap();
+        let header = FreeSpaceManagerHeader::parse(&fshd, 8).unwrap();
         assert_eq!(header.total_space, 909);
         assert_eq!(header.total_sections, 2);
         assert_eq!(header.fsse_addr, StoredAddress::new(818));
@@ -655,7 +658,7 @@ mod tests {
         let fsse = bytes(
             "4653534500e002000000000000011000000000000000670300000000000000017d03000000000000830400000000000000910245b2",
         );
-        let mut sections = parse_fsse(&fsse, &header, 8).unwrap();
+        let mut sections = parse_section_info(&fsse, &header, 8).unwrap();
         sections.sort_by_key(|s| s.addr);
         assert_eq!(sections, vec![section(871, 16), section(1155, 893),]);
         // The section sizes sum to the header's tracked total.
@@ -699,12 +702,12 @@ mod tests {
     #[test]
     fn a_manager_with_no_section_info_is_skipped_in_a_four_byte_offset_file() {
         const OS: u8 = 4;
-        let (fshd, _fsse) = serialize_file_fsm(
+        let (fshd, _fsse) = serialize_free_space_manager(
             &[],
             StoredAddress::new(0),
             StoredAddress::new(0xFFFF_FFFF),
             OS,
-            SECT_CLASS_SIMPLE,
+            SECTION_CLASS_SIMPLE,
         );
 
         assert!(
@@ -724,7 +727,7 @@ mod tests {
         assert!(sections.is_empty());
         assert_eq!(
             blocks,
-            vec![(0, fshd_len(OS))],
+            vec![(0, free_space_manager_header_len(OS))],
             "only the header block was read"
         );
     }
@@ -738,17 +741,17 @@ mod tests {
         );
         let fsse_fixture =
             bytes("46535345006b02000000000000014006000000000000200b000000000000005c797631");
-        let (fshd, fsse) = serialize_file_fsm(
+        let (fshd, fsse) = serialize_free_space_manager(
             &[section(2848, 1600)],
             StoredAddress::new(619),
             StoredAddress::new(701),
             8,
-            SECT_CLASS_SIMPLE,
+            SECTION_CLASS_SIMPLE,
         );
         assert_eq!(fshd, fshd_fixture, "FSHD bytes match the C library");
         assert_eq!(fsse, fsse_fixture, "FSSE bytes match the C library");
         // The header length helper agrees with the produced bytes.
-        assert_eq!(fshd_len(8), fshd.len() as u64);
+        assert_eq!(free_space_manager_header_len(8), fshd.len() as u64);
     }
 
     #[test]
@@ -761,12 +764,12 @@ mod tests {
         let fsse_fixture = bytes(
             "4653534500e002000000000000011000000000000000670300000000000000017d03000000000000830400000000000000910245b2",
         );
-        let (fshd, fsse) = serialize_file_fsm(
+        let (fshd, fsse) = serialize_free_space_manager(
             &[section(1155, 893), section(871, 16)],
             StoredAddress::new(736),
             StoredAddress::new(818),
             8,
-            SECT_CLASS_SIMPLE,
+            SECTION_CLASS_SIMPLE,
         );
         assert_eq!(fshd, fshd_fixture, "FSHD bytes match the C library");
         assert_eq!(fsse, fsse_fixture, "FSSE bytes match the C library");
@@ -779,26 +782,26 @@ mod tests {
             section(9000, 512),
             section(20000, 70000),
         ];
-        let (fshd, _fsse) = serialize_file_fsm(
+        let (fshd, _fsse) = serialize_free_space_manager(
             &sections,
             StoredAddress::new(1000),
             StoredAddress::new(1100),
             8,
-            SECT_CLASS_SIMPLE,
+            SECTION_CLASS_SIMPLE,
         );
-        let header = FsmHeader::parse(&fshd, 8).unwrap();
+        let header = FreeSpaceManagerHeader::parse(&fshd, 8).unwrap();
         assert_eq!(header.total_sections, 3);
         assert_eq!(header.total_space, 512 + 512 + 70000);
         assert_eq!(header.fsse_addr, StoredAddress::new(1100));
 
         // Place both blocks in a buffer and read them back through the manager
         // indirection; the recovered sections match (order-independent).
-        let (fshd, fsse) = serialize_file_fsm(
+        let (fshd, fsse) = serialize_free_space_manager(
             &sections,
             StoredAddress::new(1000),
             StoredAddress::new(1100),
             8,
-            SECT_CLASS_SIMPLE,
+            SECTION_CLASS_SIMPLE,
         );
         let mut buf = vec![0u8; 1100 + fsse.len()];
         buf[1000..1000 + fshd.len()].copy_from_slice(&fshd);
@@ -826,14 +829,18 @@ mod tests {
                 .enumerate()
                 .map(|(i, &size)| section(4096 + i as u64 * 8, size))
                 .collect();
-            let (_fshd, fsse) = serialize_file_fsm(
+            let (_fshd, fsse) = serialize_free_space_manager(
                 &sections,
                 StoredAddress::new(1000),
                 StoredAddress::new(1100),
                 8,
-                SECT_CLASS_LARGE,
+                SECTION_CLASS_LARGE,
             );
-            assert_eq!(fsse_len(&sizes, 8), fsse.len() as u64, "sizes {sizes:?}");
+            assert_eq!(
+                section_info_len(&sizes, 8),
+                fsse.len() as u64,
+                "sizes {sizes:?}"
+            );
         }
     }
 
@@ -842,8 +849,12 @@ mod tests {
         // The class-id byte is written per section and round-trips (the reader
         // ignores its value, recovering the same offsets/sizes for any class).
         let sections = [section(2000, 12768)];
-        for class in [SECT_CLASS_SIMPLE, SECT_CLASS_SMALL, SECT_CLASS_LARGE] {
-            let (fshd, fsse) = serialize_file_fsm(
+        for class in [
+            SECTION_CLASS_SIMPLE,
+            SECTION_CLASS_SMALL,
+            SECTION_CLASS_LARGE,
+        ] {
+            let (fshd, fsse) = serialize_free_space_manager(
                 &sections,
                 StoredAddress::new(1000),
                 StoredAddress::new(1100),
@@ -875,7 +886,7 @@ mod tests {
         );
         fshd[0] = b'X';
         assert!(matches!(
-            FsmHeader::parse(&fshd, 8),
+            FreeSpaceManagerHeader::parse(&fshd, 8),
             Err(FormatError::InvalidFreeSpaceManager)
         ));
     }

@@ -173,7 +173,7 @@ fn ea_elem_stride(header: &ExtensibleArrayHeader, offset_size: u8) -> usize {
 /// addresses stored directly in the index block; the rest are reached through
 /// on-disk super blocks (`EASB`) whose addresses are stored in the index block.
 #[derive(Debug, Clone)]
-pub(crate) struct EaGeometry {
+pub(crate) struct ExtensibleArrayGeometry {
     /// `(ndblks, dblk_nelmts)` for each super block index `0..nsblks`.
     pub sblks: Vec<(u64, u64)>,
     /// Element count of each direct data block whose address is stored in the
@@ -186,7 +186,7 @@ pub(crate) struct EaGeometry {
     pub first_indirect_sblk: usize,
 }
 
-impl EaGeometry {
+impl ExtensibleArrayGeometry {
     /// The shape of the super block reached by the `j`-th super-block pointer in
     /// the index block, in an array whose pages hold `page_nelmts` elements.
     ///
@@ -194,11 +194,11 @@ impl EaGeometry {
     /// `first_indirect_sblk` super blocks are stored directly in the index block
     /// and have no pointer, which is the offset every caller was applying by
     /// hand before this existed.
-    pub(crate) fn super_block_at(&self, j: usize, page_nelmts: u64) -> SuperBlockGeom {
+    pub(crate) fn super_block_at(&self, j: usize, page_nelmts: u64) -> SuperBlockGeometry {
         let (ndblks, dblk_nelmts) = self.sblks[self.first_indirect_sblk + j];
-        SuperBlockGeom {
+        SuperBlockGeometry {
             ndblks,
-            blocks: DataBlockGeom {
+            blocks: DataBlockGeometry {
                 dblk_nelmts,
                 page_nelmts,
             },
@@ -244,7 +244,7 @@ impl EaGeometry {
         }
 
         let nsblk_addrs = nsblks.saturating_sub(sup_blk_min);
-        EaGeometry {
+        ExtensibleArrayGeometry {
             sblks,
             direct_dblk_nelmts,
             nsblk_addrs,
@@ -261,18 +261,18 @@ impl EaGeometry {
 /// page's worth is not paged — the boundary is strictly greater, matching
 /// libhdf5's `H5EA__dblock_alloc`.
 ///
-/// Separate from [`SuperBlockGeom`] because that is the whole dependency: a
+/// Separate from [`SuperBlockGeometry`] because that is the whole dependency: a
 /// direct data block, whose address sits in the index block and which has no
 /// super block at all, is paged by the same rule.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct DataBlockGeom {
+pub(crate) struct DataBlockGeometry {
     /// Elements the data block holds.
     pub(crate) dblk_nelmts: u64,
     /// Elements that fill one page.
     pub(crate) page_nelmts: u64,
 }
 
-impl DataBlockGeom {
+impl DataBlockGeometry {
     /// Whether the block is stored as pages.
     pub(crate) const fn is_paged(self) -> bool {
         self.dblk_nelmts > self.page_nelmts
@@ -293,18 +293,18 @@ impl DataBlockGeom {
 ///
 /// A super block whose data blocks are paged carries a page-init bitmap between
 /// its header and its data-block addresses; one whose blocks are not carries no
-/// bitmap at all. [`DataBlockGeom::is_paged`] therefore decides the *position* of
+/// bitmap at all. [`DataBlockGeometry::is_paged`] therefore decides the *position* of
 /// every data-block address in the block rather than merely a size, and every
 /// reader of an `EASB` has to agree with every writer about it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct SuperBlockGeom {
+pub(crate) struct SuperBlockGeometry {
     /// Data-block pointers the super block holds.
     pub(crate) ndblks: u64,
     /// How each of those data blocks is paged.
-    pub(crate) blocks: DataBlockGeom,
+    pub(crate) blocks: DataBlockGeometry,
 }
 
-impl SuperBlockGeom {
+impl SuperBlockGeometry {
     /// Byte size of the page-init bitmap, zero when the data blocks are not
     /// paged.
     ///
@@ -479,7 +479,7 @@ fn read_data_block_elements(
 /// Every slot is written when the block is allocated, so this is fixed by the
 /// block's element count and does not shrink for a read that decodes fewer.
 ///
-/// [`crate::chunked_write::eadb_size`] states the same rule for the writer, and
+/// [`crate::chunked_write::data_block_len`] states the same rule for the writer, and
 /// deliberately stays a separate function: it sizes a block from an in-memory
 /// write request, which is bounded, while this one sizes it from a header
 /// parsed out of a file, which is not — hence the checked arithmetic.
@@ -642,14 +642,14 @@ pub fn read_extensible_array_chunks(
 
     // Derive the (shared) extensible-array geometry from the header. This is
     // the same progression the writer uses, so reader and writer cannot drift.
-    let geom = EaGeometry::from_header(header);
+    let geom = ExtensibleArrayGeometry::from_header(header);
 
     // Parse index block (AEIB). Its length is fixed by the geometry -- every
     // inline slot and every block pointer is always written -- so the whole
     // block, checksum included, can be bounded before anything in it is read.
     let ib_offset = header.index_block_address.get().to_usize()?;
     let ib_header_size = 4 + 1 + 1 + offset_size as usize; // sig + ver + client + hdr_addr
-    let ib_len = crate::chunked_write::aeib_size(
+    let ib_len = crate::chunked_write::index_block_len(
         offset_size,
         header.idx_blk_elmts as usize,
         ea_elem_stride(header, offset_size),
@@ -816,9 +816,9 @@ fn read_super_block(
     // addresses. Its size is `ndblks * ceil(npages / 8)` bytes, and it is a
     // contiguous bit stream indexed by `db_local_idx * npages + page`.
     let page_nelmts = 1usize << header.max_dblk_nelmts_bits;
-    let sb = SuperBlockGeom {
+    let sb = SuperBlockGeometry {
         ndblks: ndblks as u64,
-        blocks: DataBlockGeom {
+        blocks: DataBlockGeometry {
             dblk_nelmts: nelmts_per_dblk as u64,
             page_nelmts: page_nelmts as u64,
         },
@@ -922,15 +922,15 @@ fn read_super_block(
 ///
 /// `ea_base` is the Extensible Array header address from the data-layout
 /// message. The walk mirrors [`read_extensible_array_chunks`] exactly — same
-/// [`EaGeometry`], same block addresses read from the index and super blocks —
-/// but records each block's extent (sized by [`eadb_size`] / [`aesb_size`],
+/// [`ExtensibleArrayGeometry`], same block addresses read from the index and super blocks —
+/// but records each block's extent (sized by [`data_block_len`] / [`super_block_len`],
 /// shared with the writer) instead of decoding chunk records. Only blocks with
 /// a defined (non-`0xFF`) address are emitted, so a partially-grown array
 /// contributes exactly its allocated blocks. The caller validates the spans
 /// against the file bounds.
 ///
-/// [`eadb_size`]: crate::chunked_write::eadb_size
-/// [`aesb_size`]: crate::chunked_write::aesb_size
+/// [`data_block_len`]: crate::chunked_write::data_block_len
+/// [`super_block_len`]: crate::chunked_write::super_block_len
 #[cfg(feature = "std")]
 pub(crate) fn extensible_array_index_spans<S: Source + ?Sized>(
     source: &S,
@@ -938,7 +938,7 @@ pub(crate) fn extensible_array_index_spans<S: Source + ?Sized>(
     offset_size: u8,
     length_size: u8,
 ) -> Result<Vec<(u64, u64)>, FormatError> {
-    use crate::chunked_write::{aesb_size, eadb_size};
+    use crate::chunked_write::{data_block_len, super_block_len};
 
     let header =
         ExtensibleArrayHeader::parse_from_source(source, ea_base, offset_size, length_size)?;
@@ -963,18 +963,23 @@ pub(crate) fn extensible_array_index_spans<S: Source + ?Sized>(
     // EAIB index block. Its size — inline element slots plus direct- and
     // super-block address pointers — comes from the same geometry the writer
     // uses (see `build_extensible_array_at`).
-    let geom = EaGeometry::from_header(&header);
+    let geom = ExtensibleArrayGeometry::from_header(&header);
     let ndblk_addrs = geom.direct_dblk_nelmts.len();
     let nsblk_addrs = geom.nsblk_addrs;
     let inline = header.idx_blk_elmts as usize;
     let ib_header = 4 + 1 + 1 + os; // sig + ver + client + hdr_addr
-    let aeib_size =
-        crate::chunked_write::aeib_size(offset_size, inline, elem_size, ndblk_addrs, nsblk_addrs);
+    let index_block_len = crate::chunked_write::index_block_len(
+        offset_size,
+        inline,
+        elem_size,
+        ndblk_addrs,
+        nsblk_addrs,
+    );
     let ib_addr = header.index_block_address;
     // Read the index block as one bounded window; the read is also the bounds
     // check, so a block claiming to run past end-of-file errors here rather than
     // being recorded as reclaimable.
-    let ib = source.read_metadata_at(ib_addr.get(), aeib_size)?;
+    let ib = source.read_metadata_at(ib_addr.get(), index_block_len)?;
     if &ib[..4] != b"EAIB" {
         return Err(FormatError::ChunkedReadError(
             "invalid Extensible Array index block signature".into(),
@@ -985,7 +990,7 @@ pub(crate) fn extensible_array_index_spans<S: Source + ?Sized>(
     // a span derived from bytes we cannot trust would hand live storage back to
     // the allocator.
     crate::checksum::verify_trailing(&ib)?;
-    spans.push((ib_addr.get(), aeib_size as u64));
+    spans.push((ib_addr.get(), index_block_len as u64));
 
     // Read the index block's direct data-block addresses, then its super-block
     // addresses, immediately following the inline element slots.
@@ -998,8 +1003,8 @@ pub(crate) fn extensible_array_index_spans<S: Source + ?Sized>(
         }
         spans.push((
             addr.get(),
-            eadb_size(
-                DataBlockGeom {
+            data_block_len(
+                DataBlockGeometry {
                     dblk_nelmts,
                     page_nelmts,
                 },
@@ -1016,7 +1021,7 @@ pub(crate) fn extensible_array_index_spans<S: Source + ?Sized>(
             continue;
         }
         let sb = geom.super_block_at(j, page_nelmts);
-        spans.push((addr.get(), aesb_size(sb, offset_size, blk_off_size)));
+        spans.push((addr.get(), super_block_len(sb, offset_size, blk_off_size)));
         easb_data_block_spans(
             source,
             addr,
@@ -1039,20 +1044,20 @@ pub(crate) fn extensible_array_index_spans<S: Source + ?Sized>(
 fn easb_data_block_spans<S: Source + ?Sized>(
     source: &S,
     sb_addr: StoredAddress,
-    sb: SuperBlockGeom,
+    sb: SuperBlockGeometry,
     offset_size: u8,
     blk_off_size: usize,
     elem_size: usize,
     spans: &mut Vec<(u64, u64)>,
 ) -> Result<(), FormatError> {
-    use crate::chunked_write::{aesb_size, eadb_size};
+    use crate::chunked_write::{data_block_len, super_block_len};
 
     let os = offset_size as usize;
     let sb_header = 4 + 1 + 1 + os + blk_off_size; // sig + ver + client + hdr_addr + block_offset
     // The whole super block in one read: its checksum covers all of it, and the
     // addresses read out of it become free space, so one that fails is refused
     // rather than reclaimed from.
-    let sb_len = aesb_size(sb, offset_size, blk_off_size).to_usize()?;
+    let sb_len = super_block_len(sb, offset_size, blk_off_size).to_usize()?;
     let block = source.read_metadata_at(sb_addr.get(), sb_len)?;
     if &block[..4] != b"EASB" {
         return Err(FormatError::ChunkedReadError(
@@ -1072,7 +1077,7 @@ fn easb_data_block_spans<S: Source + ?Sized>(
         }
         spans.push((
             addr.get(),
-            eadb_size(sb.blocks, elem_size, offset_size, blk_off_size),
+            data_block_len(sb.blocks, elem_size, offset_size, blk_off_size),
         ));
     }
     Ok(())
@@ -1087,7 +1092,7 @@ fn easb_data_block_spans<S: Source + ?Sized>(
 /// Streaming counterpart of [`read_extensible_array_chunks`]: reads the index
 /// block, then each direct data block and super block (and its paged data
 /// blocks) as bounded windows via `read_at`. The shared `read_element` /
-/// `EaGeometry` drive the decoding, so the layout logic stays in one place.
+/// `ExtensibleArrayGeometry` drive the decoding, so the layout logic stays in one place.
 #[allow(clippy::too_many_arguments)]
 pub fn read_extensible_array_chunks_from_source<S: Source + ?Sized>(
     source: &S,
@@ -1112,7 +1117,7 @@ pub fn read_extensible_array_chunks_from_source<S: Source + ?Sized>(
     // this count.
     let total_elements = header.num_elements.to_usize()?;
 
-    let geom = EaGeometry::from_header(header);
+    let geom = ExtensibleArrayGeometry::from_header(header);
     let elem_stride = ea_elem_stride(header, offset_size);
 
     // Read the whole index block: header + inline element slots + direct
@@ -1394,9 +1399,9 @@ fn read_super_block_from_source<S: Source + ?Sized>(
     let sb_header_size = 4 + 1 + 1 + os + blk_off_size;
 
     let page_nelmts = 1usize << header.max_dblk_nelmts_bits;
-    let sb = SuperBlockGeom {
+    let sb = SuperBlockGeometry {
         ndblks: ndblks as u64,
-        blocks: DataBlockGeom {
+        blocks: DataBlockGeometry {
             dblk_nelmts: nelmts_per_dblk as u64,
             page_nelmts: page_nelmts as u64,
         },
@@ -1488,7 +1493,7 @@ mod tests {
     /// `H5EA__dblock_alloc`.
     #[test]
     fn a_data_block_is_paged_only_past_a_full_page() {
-        let at = |dblk_nelmts| DataBlockGeom {
+        let at = |dblk_nelmts| DataBlockGeometry {
             dblk_nelmts,
             page_nelmts: 16,
         };
@@ -1503,9 +1508,9 @@ mod tests {
     /// up to a whole byte — so eight pages fit one byte and nine need two.
     #[test]
     fn the_page_init_bitmap_is_a_byte_per_eight_pages_per_block() {
-        let sb = |ndblks, dblk_nelmts| SuperBlockGeom {
+        let sb = |ndblks, dblk_nelmts| SuperBlockGeometry {
             ndblks,
-            blocks: DataBlockGeom {
+            blocks: DataBlockGeometry {
                 dblk_nelmts,
                 page_nelmts: 16,
             },
@@ -1600,9 +1605,9 @@ mod tests {
     /// `fuzz_targets/parse_file.rs` drives exactly this path.
     #[test]
     fn a_dimension_of_no_chunks_refuses_rather_than_dividing_by_zero() {
-        let chunks = [crate::chunked_write::WrittenChunk {
+        let chunks = [crate::chunked_write::ChunkRecord {
             address: StoredAddress::new(0x1000),
-            compressed_size: 8,
+            stored_size: 8,
             filter_mask: 0,
         }];
         let slots = crate::chunked_write::IndexSlots::dense(&chunks);
@@ -1644,11 +1649,11 @@ mod tests {
         // puts the unlimited dimension first, so the multipliers are [4, 1] over
         // (column, row): the dataset's own corner chunk is slot 5, and slot 2 in
         // between decodes to chunk row 2 — offsets [4, 0], past a 3-row dataset.
-        let chunks: Vec<crate::chunked_write::WrittenChunk> = [0x1000u64, 0x2000, 0x3000]
+        let chunks: Vec<crate::chunked_write::ChunkRecord> = [0x1000u64, 0x2000, 0x3000]
             .into_iter()
-            .map(|address| crate::chunked_write::WrittenChunk {
+            .map(|address| crate::chunked_write::ChunkRecord {
                 address: StoredAddress::new(address),
-                compressed_size: 8,
+                stored_size: 8,
                 filter_mask: 0,
             })
             .collect();
@@ -1971,17 +1976,17 @@ mod tests {
     #[cfg(feature = "std")]
     #[test]
     fn streaming_ea_super_blocks_and_paged_match_buffered() {
-        use crate::chunked_write::{WrittenChunk, build_extensible_array_at};
+        use crate::chunked_write::{ChunkRecord, build_extensible_array_at};
         use crate::source::{BytesSource, ReadSeekSource};
 
         // n covers: inline+direct (2000), several super blocks (50000), and
         // paged super-block data blocks (140000, since dblk_nelmts exceeds the
         // 1024-element page size at the higher super blocks).
         for &n in &[2000u64, 50000, 140000] {
-            let chunks: Vec<WrittenChunk> = (0..n)
-                .map(|i| WrittenChunk {
+            let chunks: Vec<ChunkRecord> = (0..n)
+                .map(|i| ChunkRecord {
                     address: StoredAddress::new(0x10 + i * 8),
-                    compressed_size: 8,
+                    stored_size: 8,
                     filter_mask: 0,
                 })
                 .collect();
@@ -2048,7 +2053,7 @@ mod tests {
     }
 
     /// Test serialized_size computation.
-    /// [`eadb_extent`] must agree with [`crate::chunked_write::eadb_size`], the
+    /// [`eadb_extent`] must agree with [`crate::chunked_write::data_block_len`], the
     /// writer's own sizing, for every non-paged block.
     ///
     /// Not the thing that catches a divergence: a reader that sizes a block
@@ -2082,8 +2087,8 @@ mod tests {
                         assert_eq!(
                             eadb_extent(nelmts as usize, &header, offset_size, blk_off).unwrap()
                                 as u64,
-                            crate::chunked_write::eadb_size(
-                                DataBlockGeom {
+                            crate::chunked_write::data_block_len(
+                                DataBlockGeometry {
                                     dblk_nelmts: nelmts,
                                     page_nelmts,
                                 },
@@ -2214,14 +2219,14 @@ mod tests {
     #[cfg(feature = "std")]
     #[test]
     fn truncated_super_block_addresses_are_refused_by_both_backends() {
-        use crate::chunked_write::{WrittenChunk, build_extensible_array_at};
+        use crate::chunked_write::{ChunkRecord, build_extensible_array_at};
         use crate::source::BytesSource;
 
         let n = 100u64;
-        let chunks: Vec<WrittenChunk> = (0..n)
-            .map(|i| WrittenChunk {
+        let chunks: Vec<ChunkRecord> = (0..n)
+            .map(|i| ChunkRecord {
                 address: StoredAddress::new(0x10 + i * 8),
-                compressed_size: 8,
+                stored_size: 8,
                 filter_mask: 0,
             })
             .collect();
@@ -2241,7 +2246,7 @@ mod tests {
         let ds_dims = vec![n];
         let chunk_dims = vec![1u64];
         let built = ExtensibleArrayHeader::parse(&file, base as usize, 8, 8).unwrap();
-        let geom = EaGeometry::from_header(&built);
+        let geom = ExtensibleArrayGeometry::from_header(&built);
         assert!(
             geom.nsblk_addrs > 0,
             "fixture must reach the super-block address array"
@@ -2360,16 +2365,16 @@ mod tests {
     #[cfg(all(feature = "std", feature = "checksum"))]
     #[test]
     fn a_corrupted_extensible_array_structure_is_refused() {
-        use crate::chunked_write::{WrittenChunk, build_extensible_array_at};
+        use crate::chunked_write::{ChunkRecord, build_extensible_array_at};
         use crate::source::BytesSource;
 
         // The same progression as `streaming_ea_super_blocks_and_paged_match_buffered`:
         // inline and direct blocks, then super blocks, then paged data blocks.
         for &n in &[2000u64, 50000, 140000] {
-            let chunks: Vec<WrittenChunk> = (0..n)
-                .map(|i| WrittenChunk {
+            let chunks: Vec<ChunkRecord> = (0..n)
+                .map(|i| ChunkRecord {
                     address: StoredAddress::new(0x10 + i * 8),
-                    compressed_size: 8,
+                    stored_size: 8,
                     filter_mask: 0,
                 })
                 .collect();
@@ -2510,7 +2515,7 @@ mod tests {
     #[cfg(feature = "std")]
     #[test]
     fn index_spans_match_builder_layout() {
-        use crate::chunked_write::{WrittenChunk, build_extensible_array_at};
+        use crate::chunked_write::{ChunkRecord, build_extensible_array_at};
 
         let os: u8 = 8;
         let ls: u8 = 8;
@@ -2518,10 +2523,10 @@ mod tests {
         // Sizes spanning inline-only, direct data blocks, super blocks, and the
         // paged regime — every branch of the walk.
         for &n in &[1u64, 4, 20, 100, 244, 300, 2000, 50000, 140000] {
-            let chunks: Vec<WrittenChunk> = (0..n)
-                .map(|i| WrittenChunk {
+            let chunks: Vec<ChunkRecord> = (0..n)
+                .map(|i| ChunkRecord {
                     address: StoredAddress::new(0x100000 + i * 8),
-                    compressed_size: 8,
+                    stored_size: 8,
                     filter_mask: 0,
                 })
                 .collect();
@@ -2548,10 +2553,10 @@ mod tests {
             // Expected total = EAHD + EAIB + super_blk_size + data_blk_size, the
             // last two read straight from the statistics the builder wrote.
             let header = ExtensibleArrayHeader::parse(&file, base as usize, os, ls).unwrap();
-            let geom = EaGeometry::from_header(&header);
+            let geom = ExtensibleArrayGeometry::from_header(&header);
             let aehd = ExtensibleArrayHeader::serialized_size(os, ls) as u64;
             // Unfiltered EA: element stride equals the offset size.
-            let aeib = crate::chunked_write::aeib_size(
+            let aeib = crate::chunked_write::index_block_len(
                 os,
                 header.idx_blk_elmts as usize,
                 os as usize,

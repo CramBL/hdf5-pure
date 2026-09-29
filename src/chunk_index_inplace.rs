@@ -31,14 +31,16 @@ use core::num::NonZeroUsize;
 
 use crate::address::StoredAddress;
 use crate::checksum::jenkins_lookup3;
-use crate::chunked_write::{ea_compute_stats, split_into_chunks, write_ea_addr};
+use crate::chunked_write::{extensible_array_stats, split_into_chunks, write_stored_address};
 use crate::convert::Narrow;
 use crate::data_layout::{ChunkIndexLayout, DataLayout};
 use crate::dataspace::{Dataspace, MaxExtent};
 use crate::datatype::Datatype;
 use crate::edit::{LOSSY_TAIL_REFUSAL, pipeline_lossless};
 use crate::error::{Error, FormatError};
-use crate::extensible_array::{DataBlockGeom, EaGeometry, ExtensibleArrayHeader, SuperBlockGeom};
+use crate::extensible_array::{
+    DataBlockGeometry, ExtensibleArrayGeometry, ExtensibleArrayHeader, SuperBlockGeometry,
+};
 use crate::fill_value::FillPattern;
 use crate::filter_pipeline::FilterPipeline;
 use crate::filters::{ChunkContext, FilterScratch, compress_chunk_with, decompress_chunk};
@@ -88,7 +90,7 @@ pub(crate) mod alloc_probe {
 /// Mirrors `chunked_write::write_undefined_element` so a freshly-allocated block
 /// matches what the bulk writer and reader expect.
 fn push_undef_element(buf: &mut Vec<u8>, offset_size: u8, ea_elem_size: usize) {
-    write_ea_addr(buf, StoredAddress::undefined(offset_size), offset_size);
+    write_stored_address(buf, StoredAddress::undefined(offset_size), offset_size);
     for _ in offset_size as usize..ea_elem_size {
         buf.push(0);
     }
@@ -310,7 +312,7 @@ pub(crate) struct Located {
     pub client_id: u8,
     /// Extensible Array header address and derived geometry.
     pub ea_addr: StoredAddress,
-    pub geom: EaGeometry,
+    pub geom: ExtensibleArrayGeometry,
     pub idx_blk_elmts: u64,
     /// Size of one stored EA element in bytes (offset size for unfiltered; wider
     /// for filtered).
@@ -480,7 +482,7 @@ impl Located {
                 "malformed filtered extensible-array element width",
             ));
         }
-        let geom = EaGeometry::from_header(&ea_header);
+        let geom = ExtensibleArrayGeometry::from_header(&ea_header);
         let page_nelmts = 1u64 << ea_header.max_dblk_nelmts_bits;
         let blk_off_size = (ea_header.max_nelmts_bits as usize).div_ceil(8);
         let index_block_addr = ea_header.index_block_address;
@@ -797,7 +799,7 @@ impl Located {
         file: &mut F,
         sblk_j: usize,
         sb_block_offset: u64,
-        sb: SuperBlockGeom,
+        sb: SuperBlockGeometry,
     ) -> Result<StoredAddress, Error> {
         let existing = self.super_block_addr(file, sblk_j)?;
         if !existing.is_undefined(file.offset_size()) {
@@ -809,7 +811,7 @@ impl Located {
 
         let bitmap = vec![0u8; sb.bitmap_size().to_usize()?];
         let undef = vec![StoredAddress::undefined(file.offset_size()); sb.ndblks.to_usize()?];
-        let aesb = crate::chunked_write::build_aesb(
+        let aesb = crate::chunked_write::encode_super_block(
             self.ea_addr,
             sb_block_offset,
             &bitmap,
@@ -855,7 +857,7 @@ impl Located {
         buf.extend_from_slice(b"EADB");
         buf.push(0); // version
         buf.push(self.client_id);
-        write_ea_addr(&mut buf, self.ea_addr, os);
+        write_stored_address(&mut buf, self.ea_addr, os);
         buf.extend_from_slice(&block_offset_rel.to_le_bytes()[..self.blk_off_size]);
         for _ in 0..dblk_nelmts {
             push_undef_element(&mut buf, os, self.ea_elem_size);
@@ -880,7 +882,7 @@ impl Located {
         buf.extend_from_slice(b"EADB");
         buf.push(0); // version
         buf.push(self.client_id);
-        write_ea_addr(&mut buf, self.ea_addr, os);
+        write_stored_address(&mut buf, self.ea_addr, os);
         buf.extend_from_slice(&block_offset_rel.to_le_bytes()[..self.blk_off_size]);
         let header_cks = jenkins_lookup3(&buf);
         buf.extend_from_slice(&header_cks.to_le_bytes());
@@ -978,7 +980,7 @@ impl Located {
         &self,
         file: &mut F,
         sblk_addr: StoredAddress,
-        sb: SuperBlockGeom,
+        sb: SuperBlockGeometry,
         blk_off: usize,
         at: u64,
         value: &[u8],
@@ -996,7 +998,7 @@ impl Located {
         file: &mut F,
         num_chunks: u64,
     ) -> Result<(), Error> {
-        let stats = ea_compute_stats(
+        let stats = extensible_array_stats(
             &self.geom,
             self.idx_blk_elmts,
             self.ea_elem_size,
@@ -1350,7 +1352,7 @@ fn sb_dblk_slot_off(
     os: usize,
     sblk_addr: StoredAddress,
     dblk_local: usize,
-    sb: SuperBlockGeom,
+    sb: SuperBlockGeometry,
     blk_off: usize,
 ) -> u64 {
     let prefix = (4 + 1 + 1 + os + blk_off) as u64;
@@ -1384,8 +1386,8 @@ impl DataBlockLoc {
     /// Meaningful for a [`Parent::Super`] block; for a [`Parent::IndexDirect`]
     /// one the counts describe the single block itself and no `EASB` exists to
     /// apply them to.
-    fn super_block(&self, page_nelmts: u64) -> SuperBlockGeom {
-        SuperBlockGeom {
+    fn super_block(&self, page_nelmts: u64) -> SuperBlockGeometry {
+        SuperBlockGeometry {
             ndblks: self.ndblks,
             blocks: self.blocks(page_nelmts),
         }
@@ -1393,8 +1395,8 @@ impl DataBlockLoc {
 
     /// How this data block is paged, which holds whether or not it has a super
     /// block above it.
-    fn blocks(&self, page_nelmts: u64) -> DataBlockGeom {
-        DataBlockGeom {
+    fn blocks(&self, page_nelmts: u64) -> DataBlockGeometry {
+        DataBlockGeometry {
             dblk_nelmts: self.dblk_nelmts,
             page_nelmts,
         }
@@ -1402,7 +1404,7 @@ impl DataBlockLoc {
 }
 
 /// Locate the data block containing element `e` (which is `>= idx_blk_elmts`).
-fn locate_data_block(geom: &EaGeometry, idx_blk_elmts: u64, e: u64) -> DataBlockLoc {
+fn locate_data_block(geom: &ExtensibleArrayGeometry, idx_blk_elmts: u64, e: u64) -> DataBlockLoc {
     let mut elem = idx_blk_elmts;
     for (ordinal, &dn) in geom.direct_dblk_nelmts.iter().enumerate() {
         if e < elem + dn {

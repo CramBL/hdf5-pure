@@ -47,7 +47,8 @@ use crate::file_space_info::{
     NUM_FILE_FSM_MANAGERS,
 };
 use crate::free_space_manager::{
-    FreeSection, SECT_CLASS_LARGE, SECT_CLASS_SMALL, fshd_len, fsse_len, serialize_file_fsm,
+    FreeSection, SECTION_CLASS_LARGE, SECTION_CLASS_SMALL, free_space_manager_header_len,
+    section_info_len, serialize_free_space_manager,
 };
 use crate::libver::LibVer;
 use crate::link_message::{LinkMessage, LinkTarget};
@@ -3208,14 +3209,14 @@ impl FileWriter {
             let mut super_fsm: Option<(StoredAddress, StoredAddress)> = None;
             let mut draw_fsm: Option<(StoredAddress, StoredAddress)> = None;
             let mut large_fsm: Option<(StoredAddress, StoredAddress)> = None;
-            let super_block_len = fshd_len(os) + fsse_len(&[0], os);
+            let super_block_len = free_space_manager_header_len(os) + section_info_len(&[0], os);
             let draw_block_len = if draw_active {
-                fshd_len(os) + fsse_len(&[0], os)
+                free_space_manager_header_len(os) + section_info_len(&[0], os)
             } else {
                 0
             };
             let large_block_len = if large_active {
-                fshd_len(os) + fsse_len(&large_frag_sizes, os)
+                free_space_manager_header_len(os) + section_info_len(&large_frag_sizes, os)
             } else {
                 0
             };
@@ -3232,25 +3233,25 @@ impl FileWriter {
             if persist_paged {
                 if super_active {
                     let fshd_addr = StoredAddress::new(meta);
-                    meta += fshd_len(os);
+                    meta += free_space_manager_header_len(os);
                     let fsse_addr = StoredAddress::new(meta);
-                    meta += fsse_len(&[0], os);
+                    meta += section_info_len(&[0], os);
                     slots[0] = fshd_addr.get();
                     super_fsm = Some((fshd_addr, fsse_addr));
                 }
                 if draw_active {
                     let fshd_addr = StoredAddress::new(meta);
-                    meta += fshd_len(os);
+                    meta += free_space_manager_header_len(os);
                     let fsse_addr = StoredAddress::new(meta);
-                    meta += fsse_len(&[0], os);
+                    meta += section_info_len(&[0], os);
                     slots[2] = fshd_addr.get();
                     draw_fsm = Some((fshd_addr, fsse_addr));
                 }
                 if large_active {
                     let fshd_addr = StoredAddress::new(meta);
-                    meta += fshd_len(os);
+                    meta += free_space_manager_header_len(os);
                     let fsse_addr = StoredAddress::new(meta);
-                    meta += fsse_len(&large_frag_sizes, os);
+                    meta += section_info_len(&large_frag_sizes, os);
                     slots[6] = fshd_addr.get();
                     large_fsm = Some((fshd_addr, fsse_addr));
                 }
@@ -3413,25 +3414,31 @@ impl FileWriter {
 
             // (j) Serialize the free-space-manager blocks.
             let super_blocks = super_fsm.map(|(fshd_addr, fsse_addr)| {
-                serialize_file_fsm(
+                serialize_free_space_manager(
                     &[super_section.expect("SUPER active implies a section")],
                     fshd_addr,
                     fsse_addr,
                     os,
-                    SECT_CLASS_SMALL,
+                    SECTION_CLASS_SMALL,
                 )
             });
             let draw_blocks = draw_fsm.map(|(fshd_addr, fsse_addr)| {
-                serialize_file_fsm(
+                serialize_free_space_manager(
                     &[draw_section.expect("DRAW active implies a section")],
                     fshd_addr,
                     fsse_addr,
                     os,
-                    SECT_CLASS_SMALL,
+                    SECTION_CLASS_SMALL,
                 )
             });
             let large_blocks = large_fsm.map(|(fshd_addr, fsse_addr)| {
-                serialize_file_fsm(&large_sections, fshd_addr, fsse_addr, os, SECT_CLASS_LARGE)
+                serialize_free_space_manager(
+                    &large_sections,
+                    fshd_addr,
+                    fsse_addr,
+                    os,
+                    SECTION_CLASS_LARGE,
+                )
             });
 
             // (k) Emit, address-ascending, zero-filling every alignment gap.
