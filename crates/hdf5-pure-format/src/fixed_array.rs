@@ -22,8 +22,10 @@ use crate::chunk_record::IndexSlots;
 use crate::convert::Narrow;
 use crate::error::FormatError;
 use crate::metadata_source::MetadataSource;
+use crate::width::LengthWidth;
+use crate::width::OffsetWidth;
 
-/// Parsed Fixed Array header (FAHD).
+/// A Fixed Array header, signature `FAHD`, version 0.
 #[derive(Debug, Clone)]
 pub struct FixedArrayHeader {
     /// The client ID: 0 for unfiltered chunks and 1 for filtered ones.
@@ -604,28 +606,19 @@ struct FixedArrayLayout {
 fn fixed_array_layout(
     slots: &IndexSlots<'_>,
     chunk_bytes: u64,
-    offset_size: u8,
-    length_size: u8,
+    offset_size: OffsetWidth,
+    length_size: LengthWidth,
     has_filters: bool,
 ) -> FixedArrayLayout {
-    // Both widths go into fixed-width header fields below, and the emitter
-    // writes 8 bytes for anything that is not 4 — so a third width would make
-    // this length disagree with the bytes. Every caller passes
-    // `INDEX_OFFSET_SIZE` / `INDEX_LENGTH_SIZE`.
-    debug_assert!(
-        matches!(offset_size, 4 | 8) && matches!(length_size, 4 | 8),
-        "a fixed array is written at a 4- or 8-byte address and length width"
-    );
-    let os = offset_size as usize;
+    let os = usize::from(offset_size.get());
     let num_elements = slots.len();
     let encoding = chunk_record::chunk_element_encoding(chunk_bytes, offset_size, has_filters);
 
-    let fahd_size = 4 + 1 + 1 + 1 + 1 + length_size as usize + os + 4;
+    let fahd_size = 4 + 1 + 1 + 1 + 1 + usize::from(length_size.get()) + os + 4;
 
-    // The data block is a prefix, then either every element inline followed by
-    // one checksum, or a page-init bitmap and its checksum followed by whole
-    // pages that each carry their own. Every element is written in exactly one
-    // page, so the element bytes total the same either way.
+    // The data block is the prefix, then either the elements and one checksum, or the page-init
+    // bitmap, its checksum, and the pages with a checksum each. The element bytes are the same in
+    // both.
     let fadb_prefix = 4 + 1 + 1 + os;
     let page_bits = FIXED_ARRAY_PAGE_BITS;
     let page_size = 1usize << page_bits;
@@ -646,16 +639,13 @@ fn fixed_array_layout(
     }
 }
 
-/// The byte length [`build_fixed_array_at`] would produce for `slots`, without
-/// building it. See `extensible_array_len` for why this exists.
-///
-/// `offset_size` and `length_size` must be 4 or 8, which is what the emitter
-/// writes; every caller passes `INDEX_OFFSET_SIZE` / `INDEX_LENGTH_SIZE`.
+/// Returns the length in bytes of the Fixed Array [`build_fixed_array_at`] builds for `slots`,
+/// without building it.
 pub fn fixed_array_len(
     slots: &IndexSlots<'_>,
     chunk_bytes: u64,
-    offset_size: u8,
-    length_size: u8,
+    offset_size: OffsetWidth,
+    length_size: LengthWidth,
     has_filters: bool,
 ) -> u64 {
     fixed_array_layout(slots, chunk_bytes, offset_size, length_size, has_filters).total_len
@@ -667,14 +657,19 @@ pub fn fixed_array_len(
 /// field of a filtered element. A slot no chunk occupies stores the undefined address. Past
 /// `1 << FIXED_ARRAY_PAGE_BITS` slots the data block is paged, and every page is marked
 /// initialized.
+///
+/// # Errors
+///
+/// Returns [`FormatError::Internal`] if the stored size of a chunk does not fit the chunk size
+/// field.
 pub fn build_fixed_array_at(
     slots: &IndexSlots<'_>,
     chunk_bytes: u64,
-    offset_size: u8,
-    length_size: u8,
+    offset_size: OffsetWidth,
+    length_size: LengthWidth,
     has_filters: bool,
     fa_address: StoredAddress,
-) -> Vec<u8> {
+) -> Result<Vec<u8>, FormatError> {
     let num_elements = slots.len();
 
     let layout = fixed_array_layout(slots, chunk_bytes, offset_size, length_size, has_filters);
@@ -693,31 +688,15 @@ pub fn build_fixed_array_at(
     fahd.push(client_id);
     #[expect(
         clippy::cast_possible_truncation,
-        reason = "element record size written into the 1-byte FAHD field selected for this file"
+        reason = "an element record is an address of at most 8 bytes, a chunk size of at most \
+                  8 and a 4-byte filter mask, so its size fits the 1-byte FAHD field"
     )]
     fahd.push(elem_size as u8);
 
     fahd.push(layout.page_bits);
 
-    #[expect(
-        clippy::cast_possible_truncation,
-        reason = "element count written into the on-disk length width selected for this file"
-    )]
-    match length_size {
-        4 => fahd.extend_from_slice(&(num_elements as u32).to_le_bytes()),
-        8 => fahd.extend_from_slice(&(num_elements as u64).to_le_bytes()),
-        _ => fahd.extend_from_slice(&(num_elements as u64).to_le_bytes()),
-    }
-
-    #[expect(
-        clippy::cast_possible_truncation,
-        reason = "FADB address written into the on-disk offset width selected for this file"
-    )]
-    match offset_size {
-        4 => fahd.extend_from_slice(&(fadb_address.get() as u32).to_le_bytes()),
-        8 => fahd.extend_from_slice(&fadb_address.get().to_le_bytes()),
-        _ => fahd.extend_from_slice(&fadb_address.get().to_le_bytes()),
-    }
+    bytes::write_length(&mut fahd, num_elements.to_u64(), length_size);
+    bytes::write_offset(&mut fahd, fadb_address.get(), offset_size);
 
     // Checksum
     let checksum = checksum::jenkins_lookup3(&fahd);
@@ -725,28 +704,17 @@ pub fn build_fixed_array_at(
 
     debug_assert_eq!(fahd.len(), fahd_total_size);
 
-    // Append one element record (chunk address, plus filtered size + mask), or
-    // the undefined address for a slot no chunk occupies, which is how a Fixed
-    // Array says "this chunk of the maximum grid has never been written", and
-    // what the reader tests before it decodes anything else about the element.
-    let write_element = |buf: &mut Vec<u8>, chunk: Option<&ChunkRecord>| {
-        let Some(chunk) = chunk else {
+    let write_element = |buf: &mut Vec<u8>, chunk: Option<&ChunkRecord>| match chunk {
+        Some(chunk) => chunk_record::write_chunk_element(
+            buf,
+            chunk,
+            offset_size,
+            has_filters,
+            chunk_size_bytes,
+        ),
+        None => {
             chunk_record::write_undefined_element(buf, offset_size, has_filters, chunk_size_bytes);
-            return;
-        };
-        #[expect(
-            clippy::cast_possible_truncation,
-            reason = "chunk address written into the on-disk offset width selected for this file"
-        )]
-        match offset_size {
-            4 => buf.extend_from_slice(&(chunk.address.get() as u32).to_le_bytes()),
-            _ => buf.extend_from_slice(&chunk.address.get().to_le_bytes()),
-        }
-        if has_filters {
-            // Compressed size, written using the variable chunk_size_bytes width.
-            let cs_bytes = chunk.stored_size.to_le_bytes();
-            buf.extend_from_slice(&cs_bytes[..chunk_size_bytes]);
-            buf.extend_from_slice(&chunk.filter_mask.to_le_bytes());
+            Ok(())
         }
     };
 
@@ -755,20 +723,13 @@ pub fn build_fixed_array_at(
     fadb.extend_from_slice(b"FADB");
     fadb.push(0); // version
     fadb.push(client_id);
-    #[expect(
-        clippy::cast_possible_truncation,
-        reason = "fixed array header address written into the on-disk offset width selected for this file"
-    )]
-    match offset_size {
-        4 => fadb.extend_from_slice(&(fa_address.get() as u32).to_le_bytes()),
-        _ => fadb.extend_from_slice(&fa_address.get().to_le_bytes()),
-    }
+    bytes::write_offset(&mut fadb, fa_address.get(), offset_size);
 
     let page_size = layout.page_size;
     if num_elements <= page_size {
         // Non-paged: elements stored directly, then a single checksum.
         for slot in 0..num_elements {
-            write_element(&mut fadb, slots.at(slot));
+            write_element(&mut fadb, slots.at(slot))?;
         }
         let fadb_checksum = checksum::jenkins_lookup3(&fadb);
         fadb.extend_from_slice(&fadb_checksum.to_le_bytes());
@@ -791,7 +752,7 @@ pub fn build_fixed_array_at(
             let end = core::cmp::min(start + page_size, num_elements);
             let mut page_buf = Vec::with_capacity((end - start) * elem_size);
             for slot in start..end {
-                write_element(&mut page_buf, slots.at(slot));
+                write_element(&mut page_buf, slots.at(slot))?;
             }
             let page_checksum = checksum::jenkins_lookup3(&page_buf);
             page_buf.extend_from_slice(&page_checksum.to_le_bytes());
@@ -807,11 +768,12 @@ pub fn build_fixed_array_at(
         layout.total_len,
         "a fixed array must fill the length its layout promised"
     );
-    combined
+    Ok(combined)
 }
 
 #[cfg(test)]
 mod tests {
+    use rstest::rstest;
     use test_util::checksum::restamp as stamp;
 
     use super::*;
@@ -1167,11 +1129,12 @@ mod tests {
                 let fa = build_fixed_array_at(
                     &IndexSlots::dense(&chunks),
                     8,
-                    os,
-                    ls,
+                    OffsetWidth::Eight,
+                    LengthWidth::Eight,
                     has_filters,
                     StoredAddress::new(base),
-                );
+                )
+                .unwrap();
                 let mut file = vec![0u8; base as usize + fa.len()];
                 file[base as usize..].copy_from_slice(&fa);
 
@@ -1278,11 +1241,12 @@ mod tests {
                 let fa = build_fixed_array_at(
                     &IndexSlots::dense(&chunks),
                     8,
-                    os,
-                    ls,
+                    OffsetWidth::Eight,
+                    LengthWidth::Eight,
                     has_filters,
                     StoredAddress::new(base),
-                );
+                )
+                .unwrap();
                 let mut file = vec![0u8; base as usize + fa.len()];
                 file[base as usize..].copy_from_slice(&fa);
 
@@ -1330,11 +1294,12 @@ mod tests {
         let fa = build_fixed_array_at(
             &IndexSlots::dense(&chunks),
             160,
-            8,
-            8,
+            OffsetWidth::Eight,
+            LengthWidth::Eight,
             false,
             StoredAddress::new(0x2000),
-        );
+        )
+        .unwrap();
         // Should start with FAHD
         assert_eq!(&fa[0..4], b"FAHD");
         // FAHD size = 4+1+1+1+1+8+8+4 = 28
@@ -1342,18 +1307,17 @@ mod tests {
         assert_eq!(&fa[28..32], b"FADB");
     }
 
-    /// `fixed_array_len` is the span a caller reserves for a Fixed Array before a
-    /// byte of it exists, so it has to equal the length `build_fixed_array_at`
-    /// goes on to emit.
-    ///
-    /// Swept contiguously past the page size, so it crosses the transition from
-    /// a data block holding every element inline under one checksum to a paged
-    /// one carrying a page-init bitmap and a checksum per page, including the
-    /// partial last page, whose element count the closed form has to get right
-    /// without walking the pages.
+    // Sweeps every count across the page size, where the data block becomes paged, and counts
+    // that leave a partial last page.
     #[test]
     fn fixed_array_len_matches_what_it_builds() {
-        fn check(n: u64, chunk_bytes: u64, offset_size: u8, length_size: u8, has_filters: bool) {
+        fn check(
+            n: u64,
+            chunk_bytes: u64,
+            offset_size: OffsetWidth,
+            length_size: LengthWidth,
+            has_filters: bool,
+        ) {
             let chunks: Vec<ChunkRecord> = (0..n)
                 .map(|i| ChunkRecord {
                     address: StoredAddress::new(0x1000 + i * 8),
@@ -1375,20 +1339,23 @@ mod tests {
                 length_size,
                 has_filters,
                 StoredAddress::new(0x10_0000),
-            );
+            )
+            .unwrap();
             assert_eq!(
                 planned,
                 built.len() as u64,
                 "planned length must match the emitted array at n={n}, \
-                 chunk_bytes={chunk_bytes}, offset_size={offset_size}, \
+                 chunk_bytes={chunk_bytes}, offset_size={offset_size:?}, \
                  has_filters={has_filters}"
             );
         }
 
-        for &(offset_size, length_size) in &[(8u8, 8u8), (4u8, 4u8)] {
+        for (offset_size, length_size) in [
+            (OffsetWidth::Eight, LengthWidth::Eight),
+            (OffsetWidth::Four, LengthWidth::Four),
+        ] {
             for &has_filters in &[false, true] {
-                // Contiguous across the page boundary: the array is paged only
-                // past `1 << FIXED_ARRAY_PAGE_BITS` elements.
+                // The array is paged past `1 << FIXED_ARRAY_PAGE_BITS` elements.
                 for n in 0..=1_100u64 {
                     check(n, 8, offset_size, length_size, has_filters);
                 }
@@ -1399,12 +1366,55 @@ mod tests {
             }
         }
 
-        // The filtered element record's compressed-size field is sized to a whole
-        // raw chunk, and every element and page is sized from it.
+        // Each chunk size selects a different chunk size field width.
         for &chunk_bytes in &chunk_record::CHUNK_BYTES {
             for &n in &[1u64, 1_024, 1_025, 5_000] {
-                check(n, chunk_bytes, 8, 8, true);
+                check(n, chunk_bytes, OffsetWidth::Eight, LengthWidth::Eight, true);
             }
         }
+    }
+
+    #[rstest]
+    fn an_array_reads_back_at_every_width(
+        #[values(
+            (OffsetWidth::Two, LengthWidth::Two),
+            (OffsetWidth::Four, LengthWidth::Four),
+            (OffsetWidth::Eight, LengthWidth::Eight)
+        )]
+        widths: (OffsetWidth, LengthWidth),
+        #[values(5, 3_000)] n: u64,
+        #[values(false, true)] has_filters: bool,
+    ) {
+        let (offset_size, length_size) = widths;
+        let chunks: Vec<ChunkRecord> = (0..n)
+            .map(|i| ChunkRecord {
+                address: StoredAddress::new(0x100 + i * 8),
+                stored_size: if has_filters { 8 + (i % 7) } else { 8 },
+                filter_mask: 0,
+            })
+            .collect();
+        let base = 0x80;
+        let fa = build_fixed_array_at(
+            &IndexSlots::dense(&chunks),
+            8,
+            offset_size,
+            length_size,
+            has_filters,
+            StoredAddress::new(base),
+        )
+        .unwrap();
+        let mut file = vec![0u8; base as usize];
+        file.extend_from_slice(&fa);
+
+        let header =
+            FixedArrayHeader::parse(&file, base as usize, offset_size.get(), length_size.get())
+                .unwrap();
+        let mut read = Vec::new();
+        read_fixed_array_chunks(&file, &header, offset_size.get(), 8, |_, record| {
+            read.push(record);
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(read, chunks);
     }
 }

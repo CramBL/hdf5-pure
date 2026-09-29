@@ -285,8 +285,8 @@ use crate::file_create_properties::FileCreateProperties;
 use crate::file_lock::{self, FileLocking};
 use crate::file_space_info::{self, FileSpaceInfo, FileSpaceStrategy, NUM_FILE_FSM_MANAGERS};
 use crate::file_writer::{
-    DenseAttrCreationOrder, LENGTH_SIZE, OFFSET_SIZE, build_chunked_dataset_oh, build_dataset_oh,
-    make_link,
+    DenseAttrCreationOrder, LENGTH_SIZE, LENGTH_WIDTH, OFFSET_SIZE, OFFSET_WIDTH,
+    build_chunked_dataset_oh, build_dataset_oh, make_link,
 };
 use crate::filter_pipeline::FilterPipeline;
 use crate::filters::{ChunkContext, FilterScratch, compress_chunk_with, decompress_chunk};
@@ -9847,16 +9847,16 @@ impl WriteEngine {
         let ea_len = hdf5_pure_format::__private::extensible_array_len(
             &IndexSlots::dense(&sizing),
             chunk_bytes,
-            OFFSET_SIZE,
-            LENGTH_SIZE,
+            OFFSET_WIDTH,
+            LENGTH_WIDTH,
             has_filters,
         );
         let ea = |slots: &IndexSlots<'_>, at: StoredAddress| -> Result<Vec<u8>, Error> {
             hdf5_pure_format::__private::build_extensible_array_at(
                 slots,
                 chunk_bytes,
-                OFFSET_SIZE,
-                LENGTH_SIZE,
+                OFFSET_WIDTH,
+                LENGTH_WIDTH,
                 has_filters,
                 at,
             )
@@ -12518,17 +12518,18 @@ fn try_rebuild_index_in_place<S: Source + ?Sized>(
         ChunkIndexLayout::FixedArray { .. } => hdf5_pure_format::__private::build_fixed_array_at(
             &slots,
             raw_size,
-            OFFSET_SIZE,
-            LENGTH_SIZE,
+            OFFSET_WIDTH,
+            LENGTH_WIDTH,
             true,
             index_addr,
-        ),
+        )
+        .ok()?,
         ChunkIndexLayout::ExtensibleArray { .. } => {
             hdf5_pure_format::__private::build_extensible_array_at(
                 &slots,
                 raw_size,
-                OFFSET_SIZE,
-                LENGTH_SIZE,
+                OFFSET_WIDTH,
+                LENGTH_WIDTH,
                 true,
                 index_addr,
             )

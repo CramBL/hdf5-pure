@@ -73,7 +73,7 @@ use crate::datatype::{CharacterSet, Datatype};
 /// The width of every address in a file this crate writes.
 pub(crate) const OFFSET_WIDTH: OffsetWidth = OffsetWidth::Eight;
 /// The width of every length in a file this crate writes.
-const LENGTH_WIDTH: LengthWidth = LengthWidth::Eight;
+pub(crate) const LENGTH_WIDTH: LengthWidth = LengthWidth::Eight;
 /// [`OFFSET_WIDTH`] as the `u8` width the writers take.
 pub(crate) const OFFSET_SIZE: u8 = OFFSET_WIDTH.get();
 /// [`LENGTH_WIDTH`] as the `u8` width the writers take.

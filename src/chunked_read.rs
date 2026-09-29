@@ -2771,11 +2771,12 @@ mod tests {
                 hdf5_pure_format::__private::build_fixed_array_at(
                     &slots,
                     chunk_bytes,
-                    8,
-                    8,
+                    crate::width::OffsetWidth::Eight,
+                    crate::width::LengthWidth::Eight,
                     false,
                     address,
-                ),
+                )
+                .unwrap(),
             ),
             ChunkArrayKind::ExtensibleArray => (
                 ChunkIndexLayout::ExtensibleArray {
@@ -2784,8 +2785,8 @@ mod tests {
                 hdf5_pure_format::__private::build_extensible_array_at(
                     &slots,
                     chunk_bytes,
-                    8,
-                    8,
+                    crate::width::OffsetWidth::Eight,
+                    crate::width::LengthWidth::Eight,
                     false,
                     address,
                 )

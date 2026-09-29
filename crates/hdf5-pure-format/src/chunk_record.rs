@@ -1,11 +1,29 @@
+//! The chunk records of the Fixed Array and Extensible Array chunk indexes, and the element
+//! encoding the two share.
+//!
+//! Both indexes store one element per slot: the address of the chunk, and for a filtered dataset
+//! its stored size and filter mask. A slot no chunk occupies stores the undefined address. The
+//! elements are defined in "[The Fixed Array Index][fixed]" and "[The Extensible Array
+//! Index][extensible]" of the format specification, version 4.0.
+//!
+//! [fixed]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsec_fmt4_appendixc_fixedarr
+//! [extensible]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsec_fmt4_appendixc_extarr
+
+use alloc::format;
 use alloc::vec;
 use alloc::vec::Vec;
 
 use crate::address::StoredAddress;
+use crate::bytes;
 use crate::convert::Narrow;
 use crate::error::FormatError;
+use crate::width::OffsetWidth;
 
-/// A chunk that has been written to the file buffer.
+/// The address, stored size, and filter mask of one chunk, as an element of a chunk index
+/// records them.
+///
+/// A reader of a Fixed Array or an Extensible Array reports one record per occupied slot, and a
+/// writer encodes one per chunk it places.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ChunkRecord {
     /// The address of the chunk in the file.
@@ -42,18 +60,19 @@ impl<'a> IndexSlots<'a> {
     ///
     /// # Errors
     ///
-    /// Returns [`FormatError::ValueTooLargeForPlatform`] if `len` or a slot does not fit a
-    /// `usize`.
+    /// Returns [`FormatError::Internal`] if `slot_of` and `chunks` differ in length, a slot is
+    /// past `len`, or two chunks share a slot, and [`FormatError::ValueTooLargeForPlatform`] if
+    /// `len` or a slot does not fit a `usize`.
     pub fn new(chunks: &'a [ChunkRecord], slot_of: &[u64], len: u64) -> Result<Self, FormatError> {
-        debug_assert_eq!(
-            chunks.len(),
-            slot_of.len(),
-            "every chunk has exactly one index slot"
-        );
+        if chunks.len() != slot_of.len() {
+            return Err(FormatError::Internal(format!(
+                "{} chunks were given {} index slots",
+                chunks.len(),
+                slot_of.len()
+            )));
+        }
         let len = len.to_usize()?;
-        // The dense case is the overwhelming majority of writes. Recognizing it
-        // here keeps them from allocating a table describing an order they are
-        // already in.
+        // Chunks already in slot order need no table.
         if len == chunks.len() && slot_of.iter().enumerate().all(|(i, &s)| s == i as u64) {
             return Ok(Self {
                 chunks,
@@ -66,6 +85,17 @@ impl<'a> IndexSlots<'a> {
             scattered.push((slot.to_usize()?, i));
         }
         scattered.sort_unstable();
+        if let Some(&(slot, _)) = scattered.last().filter(|&&(slot, _)| slot >= len) {
+            return Err(FormatError::Internal(format!(
+                "a chunk occupies slot {slot} of an index spanning {len} slots"
+            )));
+        }
+        if let Some(pair) = scattered.windows(2).find(|pair| pair[0].0 == pair[1].0) {
+            return Err(FormatError::Internal(format!(
+                "two chunks occupy slot {} of the index",
+                pair[0].0
+            )));
+        }
         Ok(Self {
             chunks,
             scattered,
@@ -137,7 +167,17 @@ pub struct ChunkElementEncoding {
     pub(crate) client_id: u8,
 }
 
-/// Derive the element encoding for a chunk set.
+impl ChunkElementEncoding {
+    /// Returns whether the chunk size field of an element is wide enough for `stored_size`.
+    ///
+    /// An unfiltered index has no size field, and only a stored size of 0 fits it.
+    pub fn holds_stored_size(self, stored_size: u64) -> bool {
+        low_bytes(&stored_size.to_le_bytes(), self.chunk_size_bytes).is_some()
+    }
+}
+
+/// Returns the element encoding of an index over chunks of `chunk_bytes` bytes each before
+/// filtering.
 ///
 /// `chunk_bytes` is the product of the chunk dimensions and the element size. The chunk size
 /// field of a filtered element is one byte wider than the fewest bytes that hold `chunk_bytes`,
@@ -145,24 +185,14 @@ pub struct ChunkElementEncoding {
 /// layout message. The C library computes the width in `H5D_FARRAY_FILT_COMPUTE_CHUNK_SIZE_LEN`
 /// (`H5Dfarray.c`, HDF5 2.2.0).
 ///
-/// It is taken from the geometry, not from the chunks that happen to have
-/// been written, because the two part company exactly where it matters. Every
-/// chunk `split_into_chunks` produces is padded to the full chunk size,
-/// so for one chunk or a thousand the largest `raw_size` *is* `chunk_bytes` and
-/// the two agree byte for byte. For **zero** chunks there is no `raw_size` to
-/// take a maximum of, and the fallback this used to apply, treating the largest
-/// chunk as 1 byte, declared a 2-byte compressed-size field for a dataset whose
-/// chunks need up to 8. Nothing catches that later: the width is a header field
-/// every reader honours, so an empty filtered dataset handed to the reference C
-/// library came back with chunks encoded to a width our reader then decoded as
-/// truncated deflate streams, and our own append rejected a chunk that no longer
-/// fit the width its own index had declared.
+/// The width depends on `chunk_bytes` alone and not on the stored sizes, so an index of no
+/// chunks has the width its first chunk needs.
 pub fn chunk_element_encoding(
     chunk_bytes: u64,
-    offset_size: u8,
+    offset_size: OffsetWidth,
     has_filters: bool,
 ) -> ChunkElementEncoding {
-    let os = offset_size as usize;
+    let os = usize::from(offset_size.get());
     let chunk_size_bytes: usize = if has_filters {
         let log2_val = if chunk_bytes <= 1 {
             0
@@ -187,37 +217,49 @@ pub fn chunk_element_encoding(
 
 /// Appends the element of `chunk` to `buf`: the address, and for a filtered index the stored size
 /// in `chunk_size_bytes` bytes and the filter mask.
+///
+/// # Errors
+///
+/// Returns [`FormatError::Internal`] if the index is filtered and `chunk_size_bytes` is more than 8
+/// or the stored size does not fit `chunk_size_bytes` bytes.
 pub(crate) fn write_chunk_element(
     buf: &mut Vec<u8>,
     chunk: &ChunkRecord,
-    offset_size: u8,
+    offset_size: OffsetWidth,
     has_filters: bool,
     chunk_size_bytes: usize,
-) {
-    #[expect(
-        clippy::cast_possible_truncation,
-        reason = "chunk address written into the on-disk offset width selected for this file"
-    )]
-    match offset_size {
-        4 => buf.extend_from_slice(&(chunk.address.get() as u32).to_le_bytes()),
-        8 => buf.extend_from_slice(&chunk.address.get().to_le_bytes()),
-        _ => buf.extend_from_slice(&chunk.address.get().to_le_bytes()),
-    }
+) -> Result<(), FormatError> {
+    bytes::write_offset(buf, chunk.address.get(), offset_size);
     if has_filters {
-        let cs_bytes = chunk.stored_size.to_le_bytes();
-        buf.extend_from_slice(&cs_bytes[..chunk_size_bytes]);
+        let stored_size = chunk.stored_size.to_le_bytes();
+        let low = low_bytes(&stored_size, chunk_size_bytes).ok_or_else(|| {
+            FormatError::Internal(format!(
+                "a chunk of {} bytes does not fit a {chunk_size_bytes}-byte chunk size field",
+                chunk.stored_size
+            ))
+        })?;
+        buf.extend_from_slice(low);
         buf.extend_from_slice(&chunk.filter_mask.to_le_bytes());
     }
+    Ok(())
 }
 
+/// Returns the low `field_bytes` bytes of `bytes`, or `None` if a byte above them is not zero or
+/// `field_bytes` is more than 8.
+fn low_bytes(bytes: &[u8; 8], field_bytes: usize) -> Option<&[u8]> {
+    let (low, high) = bytes.split_at_checked(field_bytes)?;
+    high.iter().all(|&byte| byte == 0).then_some(low)
+}
+
+/// Appends the element of a slot no chunk occupies to `buf`: the undefined address, and for a
+/// filtered index a zero size and a zero filter mask.
 pub(crate) fn write_undefined_element(
     buf: &mut Vec<u8>,
-    offset_size: u8,
+    offset_size: OffsetWidth,
     has_filters: bool,
     chunk_size_bytes: usize,
 ) {
-    let os = offset_size as usize;
-    buf.extend_from_slice(&vec![0xFF; os]);
+    bytes::write_offset(buf, u64::MAX, offset_size);
     if has_filters {
         buf.extend_from_slice(&vec![0x00; chunk_size_bytes]);
         buf.extend_from_slice(&0u32.to_le_bytes());
@@ -230,3 +272,77 @@ pub(crate) fn write_undefined_element(
 /// `extensible_array_len_matches_what_it_builds` asserts that the four widths differ.
 #[cfg(test)]
 pub(crate) const CHUNK_BYTES: [u64; 4] = [8, 300, 100_000, 1 << 32];
+
+#[cfg(test)]
+mod tests {
+    use rstest::rstest;
+
+    use super::*;
+
+    fn record(address: u64) -> ChunkRecord {
+        ChunkRecord {
+            address: StoredAddress::new(address),
+            stored_size: 8,
+            filter_mask: 0,
+        }
+    }
+
+    #[test]
+    fn scattered_slots_hold_their_chunks() {
+        let chunks = [record(0x100), record(0x200)];
+        let slots = IndexSlots::new(&chunks, &[3, 1], 4).unwrap();
+        assert_eq!(slots.len(), 4);
+        assert_eq!(
+            (0..4).map(|slot| slots.at(slot)).collect::<Vec<_>>(),
+            vec![None, Some(&chunks[1]), None, Some(&chunks[0])]
+        );
+    }
+
+    #[rstest]
+    #[case::a_slot_short(&[0], 2, "2 chunks were given 1 index slots")]
+    #[case::a_slot_past_the_span(&[0, 2], 2, "a chunk occupies slot 2 of an index spanning 2 slots")]
+    #[case::a_shared_slot(&[1, 1], 2, "two chunks occupy slot 1 of the index")]
+    fn slots_that_misplace_a_chunk_are_an_internal_error(
+        #[case] slot_of: &[u64],
+        #[case] len: u64,
+        #[case] expected: &str,
+    ) {
+        let chunks = [record(0x100), record(0x200)];
+        let err = IndexSlots::new(&chunks, slot_of, len).err().unwrap();
+        let FormatError::Internal(detail) = &err else {
+            panic!("expected Internal, got {err:?}");
+        };
+        assert_eq!(detail, expected);
+    }
+
+    #[rstest]
+    #[case::a_size_past_the_field(1 << 16, 2)]
+    #[case::a_field_past_8_bytes(8, 9)]
+    fn a_stored_size_that_does_not_fit_its_field_is_an_error(
+        #[case] stored_size: u64,
+        #[case] chunk_size_bytes: usize,
+    ) {
+        let chunk = ChunkRecord {
+            stored_size,
+            ..record(0x100)
+        };
+        let err = write_chunk_element(
+            &mut Vec::new(),
+            &chunk,
+            OffsetWidth::Eight,
+            true,
+            chunk_size_bytes,
+        )
+        .unwrap_err();
+        let FormatError::Internal(detail) = &err else {
+            panic!("expected Internal, got {err:?}");
+        };
+        assert_eq!(
+            detail,
+            &format!(
+                "a chunk of {stored_size} bytes does not fit a {chunk_size_bytes}-byte chunk size \
+                 field"
+            )
+        );
+    }
+}

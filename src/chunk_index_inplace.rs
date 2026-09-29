@@ -51,6 +51,7 @@ use crate::message_flags::MessageFlags;
 use crate::message_type::MessageType;
 use crate::source::Source;
 use crate::source::SourceMetadata;
+use crate::width::OffsetWidth;
 
 /// Counts the two index-block allocations, so a test can say whether its fixture
 /// reached them.
@@ -93,13 +94,13 @@ pub(crate) mod alloc_probe {
 /// wider than one address) by zeroed compressed-size and filter-mask fields.
 /// Mirrors `chunked_write::write_undefined_element` so a freshly-allocated block
 /// matches what the bulk writer and reader expect.
-fn push_undef_element(buf: &mut Vec<u8>, offset_size: u8, ea_elem_size: usize) {
+fn push_undef_element(buf: &mut Vec<u8>, offset_size: OffsetWidth, ea_elem_size: usize) {
     hdf5_pure_format::__private::write_stored_address(
         buf,
-        StoredAddress::undefined(offset_size),
+        StoredAddress::undefined(offset_size.get()),
         offset_size,
     );
-    for _ in offset_size as usize..ea_elem_size {
+    for _ in usize::from(offset_size.get())..ea_elem_size {
         buf.push(0);
     }
 }
@@ -320,6 +321,7 @@ pub(crate) struct Located {
     pub client_id: u8,
     /// Extensible Array header address and derived geometry.
     pub ea_addr: StoredAddress,
+    pub offset_width: OffsetWidth,
     pub geom: ExtensibleArrayGeometry,
     pub idx_blk_elmts: u64,
     /// Size of one stored EA element in bytes (offset size for unfiltered; wider
@@ -518,6 +520,7 @@ impl Located {
                 chunk_bytes,
                 client_id: ea_header.client_id,
                 ea_addr,
+                offset_width: OffsetWidth::try_from(os)?,
                 geom,
                 idx_blk_elmts: ea_header.idx_blk_elmts as u64,
                 ea_elem_size: ea_header.element_size as usize,
@@ -792,7 +795,7 @@ impl Located {
     fn super_block_addr<F: Store>(&self, file: &F, sblk_j: usize) -> Result<StoredAddress, Error> {
         let os = file.offset_size() as usize;
         let ib_prefix = (4 + 1 + 1 + os) as u64;
-        let ndblk_addrs = self.geom.direct_dblk_nelmts.len();
+        let ndblk_addrs = self.geom.direct_dblk_nelmts().len();
         let slot_off = self.index_block_addr.get()
             + ib_prefix
             + self.idx_blk_elmts * self.ea_elem_size as u64
@@ -816,7 +819,7 @@ impl Located {
         }
         let os = file.offset_size() as usize;
         let ib_prefix = (4 + 1 + 1 + os) as u64;
-        let ndblk_addrs = self.geom.direct_dblk_nelmts.len();
+        let ndblk_addrs = self.geom.direct_dblk_nelmts().len();
 
         let bitmap = vec![0u8; sb.bitmap_size().to_usize()?];
         let undef = vec![StoredAddress::undefined(file.offset_size()); sb.ndblks.to_usize()?];
@@ -825,7 +828,7 @@ impl Located {
             sb_block_offset,
             &bitmap,
             &undef,
-            file.offset_size(),
+            self.offset_width,
             self.blk_off_size,
             self.client_id,
         );
@@ -861,7 +864,7 @@ impl Located {
         dblk_nelmts: u64,
         block_offset_rel: u64,
     ) -> Result<StoredAddress, Error> {
-        let os = file.offset_size();
+        let os = self.offset_width;
         let mut buf = Vec::new();
         buf.extend_from_slice(b"EADB");
         buf.push(0); // version
@@ -885,7 +888,7 @@ impl Located {
         dblk_nelmts: u64,
         block_offset_rel: u64,
     ) -> Result<StoredAddress, Error> {
-        let os = file.offset_size();
+        let os = self.offset_width;
         let page_nelmts = self.page_nelmts;
         let mut buf = Vec::new();
         buf.extend_from_slice(b"EADB");
@@ -975,8 +978,8 @@ impl Located {
     ) -> Result<(), Error> {
         let os = file.offset_size() as usize;
         let ib_prefix = (4 + 1 + 1 + os) as u64;
-        let ndblk_addrs = self.geom.direct_dblk_nelmts.len();
-        let nsblk_addrs = self.geom.nsblk_addrs;
+        let ndblk_addrs = self.geom.direct_dblk_nelmts().len();
+        let nsblk_addrs = self.geom.nsblk_addrs();
         let cks_off = self.index_block_addr.get()
             + ib_prefix
             + self.idx_blk_elmts * self.ea_elem_size as u64
@@ -1012,7 +1015,7 @@ impl Located {
             self.idx_blk_elmts,
             self.ea_elem_size,
             self.page_nelmts,
-            file.offset_size(),
+            self.offset_width,
             self.blk_off_size,
             num_chunks,
             // This engine grows a rank-1 unlimited dataset (the parse above
@@ -1415,7 +1418,7 @@ impl DataBlockLoc {
 /// Locate the data block containing element `e` (which is `>= idx_blk_elmts`).
 fn locate_data_block(geom: &ExtensibleArrayGeometry, idx_blk_elmts: u64, e: u64) -> DataBlockLoc {
     let mut elem = idx_blk_elmts;
-    for (ordinal, &dn) in geom.direct_dblk_nelmts.iter().enumerate() {
+    for (ordinal, &dn) in geom.direct_dblk_nelmts().iter().enumerate() {
         if e < elem + dn {
             return DataBlockLoc {
                 db_start: elem,
@@ -1427,8 +1430,8 @@ fn locate_data_block(geom: &ExtensibleArrayGeometry, idx_blk_elmts: u64, e: u64)
         }
         elem += dn;
     }
-    for j in 0..geom.nsblk_addrs {
-        let (ndblks, dn) = geom.sblks[geom.first_indirect_sblk + j];
+    for j in 0..geom.nsblk_addrs() {
+        let (ndblks, dn) = geom.sblks()[geom.first_indirect_sblk() + j];
         let span = ndblks * dn;
         if e < elem + span {
             let sb_block_offset = elem - idx_blk_elmts;
