@@ -4,7 +4,7 @@
 
 The workspace separates HDF5 byte representations from operations on files.
 `hdf5-pure-core` owns shared types exposed through the `hdf5-pure` API.
-`hdf5-pure-format` defines extracted structures and byte encodings.
+`hdf5-pure-format` defines the on-disk structures and their byte encodings.
 `hdf5-pure` depends on both and retains the file API.
 
 | Package | Responsibility |
@@ -28,6 +28,11 @@ paths.
 | `hdf5-pure` | The primary stable public facade |
 | `hdf5-pure-core` | Stable: a small portable crate that owns the canonical shared public types |
 | `hdf5-pure-format`, `hdf5-pure-filter`, and later implementation crates such as `hdf5-pure-fs` | No independent compatibility guarantee at this time |
+
+`hdf5-pure-format` and `hdf5-pure-filter` export their items to the other
+workspace crates through a hidden `__private` module each. Besides that module,
+the format crate's root exports only `hdf5-pure-core` items, and the filter
+crate's root exports nothing.
 
 Public API exposed by `hdf5-pure` does not use types canonically owned by an
 implementation crate. A shared type that needs a stable identity across crate

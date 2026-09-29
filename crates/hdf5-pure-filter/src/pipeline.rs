@@ -4,7 +4,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 use core::num::NonZeroU32;
 
-use crate::Error;
+use crate::error::Error;
 use crate::lzf;
 use crate::scaleoffset;
 use crate::scaleoffset::ScaleOffset;
@@ -204,10 +204,10 @@ fn canonical_rank(id: u16) -> u8 {
 
 /// The ZFP scalar type carried by [`ChunkContext`] when ZFP is enabled.
 #[cfg(feature = "zfp")]
-pub type ZfpElementTypeWhenEnabled = ZfpElementType;
+pub(crate) type ZfpElementTypeWhenEnabled = ZfpElementType;
 /// An uninhabited scalar type carried by [`ChunkContext`] when ZFP is disabled.
 #[cfg(not(feature = "zfp"))]
-pub type ZfpElementTypeWhenEnabled = core::convert::Infallible;
+pub(crate) type ZfpElementTypeWhenEnabled = core::convert::Infallible;
 
 /// Describes the unfiltered size and scalar type of a chunk.
 ///

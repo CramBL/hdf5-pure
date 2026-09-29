@@ -10,7 +10,7 @@ extern crate alloc;
 #[cfg(not(feature = "std"))]
 use alloc::{format, vec, vec::Vec};
 
-use crate::Error;
+use crate::error::Error;
 
 /// The scalar type of a ZFP chunk.
 ///
@@ -1719,7 +1719,7 @@ macro_rules! impl_codec {
         pub(crate) mod $mod_name {
             use super::*;
 
-            pub fn compress(
+            pub(crate) fn compress(
                 data: &[u8],
                 dims: ZfpChunkDims,
                 rate: f64,
@@ -1745,7 +1745,7 @@ macro_rules! impl_codec {
                 }
             }
 
-            pub fn decompress(
+            pub(crate) fn decompress(
                 compressed: &[u8],
                 dims: ZfpChunkDims,
                 rate: f64,
@@ -2314,7 +2314,7 @@ impl_codec!(
 ///
 /// Returns [`Error::ZfpFilter`] if the client data, rank, or scalar type is invalid.
 /// Returns the errors from [`compress`] for invalid dimensions, rate, or input bytes.
-pub fn compress_filter(
+pub(crate) fn compress_filter(
     data: &[u8],
     cd_values: &[u32],
     chunk_dims: &[u64],
@@ -2332,7 +2332,7 @@ pub fn compress_filter(
 ///
 /// Returns [`Error::ZfpFilter`] if the client data, rank, or scalar type is invalid.
 /// Returns the errors from [`decompress`] for invalid dimensions, rate, or encoded bytes.
-pub fn decompress_filter(
+pub(crate) fn decompress_filter(
     data: &[u8],
     cd_values: &[u32],
     chunk_dims: &[u64],
@@ -2806,7 +2806,7 @@ pub fn zfp_cd_values_rate(
 /// Metadata parsed from H5Z-ZFP client data in tests.
 #[cfg(test)]
 #[derive(Debug, Clone, PartialEq)]
-pub struct ZfpFilterMeta {
+pub(crate) struct ZfpFilterMeta {
     /// The scalar type stored in the metadata.
     pub element_type: ZfpElementType,
     /// The chunk dimensions in row-major order.
@@ -2821,7 +2821,7 @@ pub struct ZfpFilterMeta {
 /// the short or long mode field. The version word and other mode parameters are ignored.
 /// Returns `None` if the required bytes are missing or the magic bytes differ.
 #[cfg(test)]
-pub fn zfp_filter_meta_from_cd_values(cd_values: &[u32]) -> Option<ZfpFilterMeta> {
+pub(crate) fn zfp_filter_meta_from_cd_values(cd_values: &[u32]) -> Option<ZfpFilterMeta> {
     if cd_values.len() < 4 {
         return None;
     }
@@ -2909,7 +2909,7 @@ pub fn zfp_filter_meta_from_cd_values(cd_values: &[u32]) -> Option<ZfpFilterMeta
 /// The parser checks the magic bytes and reads `maxbits` from a short or long mode field.
 /// It uses no heap allocation. Returns `None` if the required words are missing or the
 /// magic bytes differ.
-pub fn zfp_rate_from_cd_values(cd_values: &[u32]) -> Option<f64> {
+pub(crate) fn zfp_rate_from_cd_values(cd_values: &[u32]) -> Option<f64> {
     if cd_values.len() < 4 {
         return None;
     }
