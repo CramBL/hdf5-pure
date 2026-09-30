@@ -4,8 +4,10 @@ use byteorder::{ByteOrder, LittleEndian};
 use crate::address::BaseAddressExt;
 use crate::address::StoredAddress;
 use crate::bytes;
+use crate::checksum::jenkins_lookup3;
 use crate::convert::Narrow;
 use crate::error::FormatError;
+use crate::error::OBJECT_HEADER_MESSAGE_MAX;
 use crate::message_flags::MessageFlags;
 use crate::message_type::MessageType;
 use crate::metadata_source::MetadataSource;
@@ -451,6 +453,453 @@ impl ObjectHeader {
             len: pos,
         })
     }
+}
+
+/// Maximum length of a version 2 object header's fixed prefix: signature (4) +
+/// version (1) + flags (1) + optional access/modification/change/birth times
+/// (16) + optional attribute phase-change thresholds (4) + the chunk-0 size
+/// field (up to 8). Reading this many bytes always covers the prefix, so a
+/// caller reads one bounded window of the file.
+pub const OBJECT_HEADER_PREFIX_MAX_LEN: usize = 34;
+
+pub struct ParsedObjectHeaderPrefix {
+    pub prefix: ObjectHeaderPrefix,
+    pub chunk0_size: u64,
+    pub len: usize,
+}
+
+/// How a version 2 object header's message records are laid out, and what its
+/// flags say about attribute creation order.
+///
+/// Every record opens with a type byte, a 2-byte body size and a flags byte. A
+/// header that *tracks* attribute creation order - bit 2 of the object header's
+/// own flags, what `H5Pset_attr_creation_order` and h5py's `track_order=True`
+/// turn on, and what netCDF-4 sets on every object it writes - follows those
+/// with a 2-byte creation index, so each of its records is 6 bytes wide.
+/// A header that also *indexes* that order (bit 3) carries a creation-order
+/// B-tree beside the name index once its attributes go dense. The reference C
+/// library reads that bit back out of the header when it builds an Attribute
+/// Info message, so a rewrite that dropped it would quietly stop indexing.
+///
+/// Both bits are properties of the whole header, so chunk 0 and every
+/// continuation block of one header share a layout. Carrying it beside the bytes
+/// (`OhRegion`) is what keeps the two dozen walkers and the emitters in this
+/// module from having to agree about it one by one.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct MessageRecordLayout {
+    /// Every record stores a 2-byte creation index (object header flags bit 2).
+    tracked: bool,
+    /// The header indexes attribute creation order (object header flags bit 3).
+    indexed: bool,
+}
+
+/// Bit 2 of the flags of a version 2 object header, set where the header tracks attribute
+/// creation order and every message record stores a creation index.
+///
+/// The bit is defined in "Version 2 Data Object Header Prefix" of the [format specification,
+/// version 4.0][spec].
+///
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_prefix_two
+const OH_FLAG_CREATION_ORDER_TRACKED: u8 = 0x04;
+
+/// Bit 3 of the flags, set where the header indexes attribute creation order as well as tracking
+/// it, from the same section as [`OH_FLAG_CREATION_ORDER_TRACKED`].
+const OH_FLAG_CREATION_ORDER_INDEXED: u8 = 0x08;
+
+/// Bit 4 of the flags, set where the prefix stores the attribute phase change values, from the
+/// same section as [`OH_FLAG_CREATION_ORDER_TRACKED`]. The C library calls it
+/// `H5O_HDR_ATTR_STORE_PHASE_CHANGE`.
+const OH_FLAG_ATTRIBUTE_PHASE_CHANGE: u8 = 0x10;
+
+/// Bit 5 of the flags, set where the prefix stores the four times, from the same section as
+/// [`OH_FLAG_CREATION_ORDER_TRACKED`]. The C library calls it `H5O_HDR_STORE_TIMES`.
+const OH_FLAG_STORE_TIMES: u8 = 0x20;
+
+/// The access, modification, change, and birth times a version 2 object header prefix stores,
+/// each in seconds since the Unix epoch.
+///
+/// The prefix stores them where bit 5 of its flags is set. The C library sets that bit on every
+/// version 2 header it writes by default: `H5O_CRT_OHDR_FLAGS_DEF` is `H5O_HDR_STORE_TIMES`
+/// (`H5Opkg.h`, HDF5 2.2.0).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ObjectTimes {
+    /// The time the raw data of the object was last read or written.
+    pub access: u32,
+    /// The time the raw data of the object was last written.
+    pub modification: u32,
+    /// The time the metadata of the object was last changed.
+    pub change: u32,
+    /// The time the object was created.
+    pub birth: u32,
+}
+
+impl ObjectTimes {
+    /// The length in bytes of the four times in a prefix.
+    const LEN: usize = 16;
+
+    /// Parse the block at `at`. The caller must have checked that 16 bytes are
+    /// available there.
+    fn parse(prefix: &[u8], at: usize) -> Self {
+        let field =
+            |i: usize| u32::from_le_bytes(prefix[at + 4 * i..at + 4 * i + 4].try_into().unwrap());
+        Self {
+            access: field(0),
+            modification: field(1),
+            change: field(2),
+            birth: field(3),
+        }
+    }
+
+    /// Returns the four times as the prefix stores them.
+    fn to_bytes(self) -> [u8; Self::LEN] {
+        let mut out = [0u8; Self::LEN];
+        out[0..4].copy_from_slice(&self.access.to_le_bytes());
+        out[4..8].copy_from_slice(&self.modification.to_le_bytes());
+        out[8..12].copy_from_slice(&self.change.to_le_bytes());
+        out[12..16].copy_from_slice(&self.birth.to_le_bytes());
+        out
+    }
+
+    /// Returns the times with the modification and change times set to `now`, for a rewrite of
+    /// the header.
+    ///
+    /// The access and birth times keep their values. On a version 2 header, `H5O_touch_oh` sets
+    /// the access and change times, with a source comment that the modification time needs code to
+    /// update it (`H5Oint.c`, HDF5 2.2.0).
+    pub fn touched(self, now: u32) -> Self {
+        Self {
+            modification: now,
+            change: now,
+            ..self
+        }
+    }
+}
+
+/// The attribute phase change values a version 2 object header prefix stores, which
+/// `H5Pset_attr_phase_change` sets.
+///
+/// The prefix stores them where bit 4 of its flags is set. The C library sets that bit only where
+/// the values differ from its defaults of 8 and 6 (`H5O_apply_ohdr` in `H5Oint.c`, HDF5 2.2.0).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AttributePhaseChange {
+    /// The most attributes the object stores compactly, as messages in its header.
+    pub max_compact: u16,
+    /// The fewest attributes the object stores densely, in a fractal heap.
+    pub min_dense: u16,
+}
+
+impl AttributePhaseChange {
+    /// The length in bytes of the two values in a prefix.
+    const LEN: usize = 4;
+
+    /// Parse the block at `at`. The caller must have checked that 4 bytes are
+    /// available there.
+    fn parse(prefix: &[u8], at: usize) -> Self {
+        Self {
+            max_compact: u16::from_le_bytes(prefix[at..at + 2].try_into().unwrap()),
+            min_dense: u16::from_le_bytes(prefix[at + 2..at + 4].try_into().unwrap()),
+        }
+    }
+
+    /// Returns the two values as the prefix stores them.
+    fn to_bytes(self) -> [u8; Self::LEN] {
+        let mut out = [0u8; Self::LEN];
+        out[0..2].copy_from_slice(&self.max_compact.to_le_bytes());
+        out[2..4].copy_from_slice(&self.min_dense.to_le_bytes());
+        out
+    }
+}
+
+/// The properties of a version 2 object header that its prefix stores: the layout of its message
+/// records, the four times, and the attribute phase change values.
+///
+/// The message records do not store them, so a caller that rewrites a header keeps them beside
+/// its messages. [`parse`](Self::parse) reads them from a header, and
+/// [`encode_header`](Self::encode_header) writes them back.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ObjectHeaderPrefix {
+    /// The layout of the message records.
+    pub layout: MessageRecordLayout,
+    /// The four times, where the prefix stores them.
+    pub times: Option<ObjectTimes>,
+    /// The attribute phase change values, where the prefix stores them.
+    pub attribute_phase_change: Option<AttributePhaseChange>,
+}
+
+impl ObjectHeaderPrefix {
+    /// The prefix of a header with [`MessageRecordLayout::PLAIN`] records and neither optional
+    /// block.
+    pub const PLAIN: Self = Self::with_layout(MessageRecordLayout::PLAIN);
+
+    /// Returns the prefix of a header whose records are in `layout`, with neither optional block.
+    pub const fn with_layout(layout: MessageRecordLayout) -> Self {
+        Self {
+            layout,
+            times: None,
+            attribute_phase_change: None,
+        }
+    }
+
+    /// Parses the prefix at the start of `data`, from the `OHDR` signature to the end of the Size
+    /// of Chunk #0 field.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::InvalidObjectHeaderSignature`] if `data` does not begin with
+    /// `OHDR`, [`FormatError::InvalidObjectHeaderVersion`] if the version is not 2, and
+    /// [`FormatError::UnexpectedEof`] if `data` ends inside the prefix.
+    pub fn parse(data: &[u8]) -> Result<ParsedObjectHeaderPrefix, FormatError> {
+        crate::bytes::ensure_len(data, 0, 6)?;
+        if data[..4] != *b"OHDR" {
+            return Err(FormatError::InvalidObjectHeaderSignature);
+        }
+        if data[4] != 2 {
+            return Err(FormatError::InvalidObjectHeaderVersion(data[4]));
+        }
+        let flags = data[5];
+        let mut pos = 6usize;
+        let times = if flags & OH_FLAG_STORE_TIMES != 0 {
+            crate::bytes::ensure_len(data, pos, ObjectTimes::LEN)?;
+            let times = ObjectTimes::parse(data, pos);
+            pos += ObjectTimes::LEN;
+            Some(times)
+        } else {
+            None
+        };
+        let attribute_phase_change = if flags & OH_FLAG_ATTRIBUTE_PHASE_CHANGE != 0 {
+            crate::bytes::ensure_len(data, pos, AttributePhaseChange::LEN)?;
+            let phase = AttributePhaseChange::parse(data, pos);
+            pos += AttributePhaseChange::LEN;
+            Some(phase)
+        } else {
+            None
+        };
+        let size_width = usize::from(UintWidth::from_flags(flags).get());
+        crate::bytes::ensure_len(data, pos, size_width)?;
+        let chunk0_size = read_le(&data[pos..pos + size_width]) as u64;
+        pos += size_width;
+        Ok(ParsedObjectHeaderPrefix {
+            prefix: Self {
+                layout: MessageRecordLayout::from_header_flags(flags),
+                times,
+                attribute_phase_change,
+            },
+            chunk0_size,
+            len: pos,
+        })
+    }
+
+    /// Returns a version 2 object header of one chunk: this prefix, the message records
+    /// `messages`, and the checksum.
+    ///
+    /// The Size of Chunk #0 field takes the fewest bytes that hold the length of `messages`.
+    pub fn encode_header(self, messages: &[u8]) -> Vec<u8> {
+        let total = messages.len();
+        let width = UintWidth::smallest_for_len(total);
+        let mut buf = Vec::with_capacity(8 + self.optional_len() + total + 4);
+        buf.extend_from_slice(b"OHDR");
+        buf.push(2); // version
+        buf.push(width.flag_bits() | self.header_flags());
+        if let Some(times) = self.times {
+            buf.extend_from_slice(&times.to_bytes());
+        }
+        if let Some(phase) = self.attribute_phase_change {
+            buf.extend_from_slice(&phase.to_bytes());
+        }
+        buf.extend_from_slice(&(total as u64).to_le_bytes()[..usize::from(width.get())]);
+        buf.extend_from_slice(messages);
+        let checksum = jenkins_lookup3(&buf);
+        buf.extend_from_slice(&checksum.to_le_bytes());
+        buf
+    }
+
+    /// Returns the flag bits of these properties, apart from the two bits of the width of the
+    /// Size of Chunk #0 field.
+    const fn header_flags(self) -> u8 {
+        let times = if self.times.is_some() {
+            OH_FLAG_STORE_TIMES
+        } else {
+            0
+        };
+        let phase = if self.attribute_phase_change.is_some() {
+            OH_FLAG_ATTRIBUTE_PHASE_CHANGE
+        } else {
+            0
+        };
+        self.layout.header_flags() | times | phase
+    }
+
+    /// Returns the length in bytes the optional blocks add to the prefix.
+    const fn optional_len(self) -> usize {
+        let times = if self.times.is_some() {
+            ObjectTimes::LEN
+        } else {
+            0
+        };
+        let phase = if self.attribute_phase_change.is_some() {
+            AttributePhaseChange::LEN
+        } else {
+            0
+        };
+        times + phase
+    }
+}
+
+impl MessageRecordLayout {
+    /// The layout of a header that does not track creation order, whose record prefixes are 4
+    /// bytes long.
+    pub const PLAIN: Self = Self {
+        tracked: false,
+        indexed: false,
+    };
+
+    /// Returns the layout that the flags byte of a version 2 object header declares.
+    pub const fn from_header_flags(flags: u8) -> Self {
+        Self {
+            tracked: flags & OH_FLAG_CREATION_ORDER_TRACKED != 0,
+            indexed: flags & OH_FLAG_CREATION_ORDER_INDEXED != 0,
+        }
+    }
+
+    /// Returns the length in bytes of a message record before its body: 4, or 6 with a creation
+    /// index.
+    pub const fn prefix_len(self) -> usize {
+        if self.tracked { 6 } else { 4 }
+    }
+
+    /// Returns the flag bits of this layout.
+    const fn header_flags(self) -> u8 {
+        let tracked = if self.tracked {
+            OH_FLAG_CREATION_ORDER_TRACKED
+        } else {
+            0
+        };
+        let indexed = if self.indexed {
+            OH_FLAG_CREATION_ORDER_INDEXED
+        } else {
+            0
+        };
+        tracked | indexed
+    }
+
+    /// Returns `true` if every message record stores a creation index.
+    pub const fn tracks_creation_order(self) -> bool {
+        self.tracked
+    }
+
+    /// Returns `true` if the header indexes attribute creation order, with a creation-order index
+    /// beside the name index once its attributes are in dense storage.
+    pub const fn indexes_creation_order(self) -> bool {
+        self.indexed
+    }
+
+    /// Parse the message record at `p` within a chunk's message region,
+    /// returning `(message type, body start, body end)`. The next record begins
+    /// at `body end`. Returns `Ok(None)` once fewer bytes remain than a record
+    /// prefix takes (a clean end of the region, or the gap the reference C
+    /// library leaves when a chunk's free space is too small to hold a message),
+    /// and `Err` if a record's declared body runs past the region. Centralizes
+    /// the bounds check shared by every walker.
+    pub fn next_message(
+        self,
+        region: &[u8],
+        p: usize,
+    ) -> Result<Option<(MessageType, usize, usize)>, FormatError> {
+        if p + self.prefix_len() > region.len() {
+            return Ok(None);
+        }
+        let msg_type = MessageType::from_u16(region[p] as u16);
+        let msg_size = u16::from_le_bytes([region[p + 1], region[p + 2]]) as usize;
+        let body = p + self.prefix_len();
+        let body_end = body + msg_size;
+        if body_end > region.len() {
+            return Err(FormatError::UnexpectedEof {
+                expected: body_end,
+                available: region.len(),
+            });
+        }
+        Ok(Some((msg_type, body, body_end)))
+    }
+
+    /// The creation index the record at `msg_start` carries, or `None` where the
+    /// layout has no such field. The caller must have located `msg_start` with
+    /// [`next_message`](Self::next_message), which bounds the read.
+    pub fn creation_index(self, region: &[u8], msg_start: usize) -> Option<u16> {
+        self.tracked
+            .then(|| u16::from_le_bytes([region[msg_start + 4], region[msg_start + 5]]))
+    }
+
+    /// Returns a message record of `msg_type` with `flags`, `creation_index`, and `body`.
+    ///
+    /// The record stores `creation_index` only where the layout tracks creation order. The
+    /// creation index of an Attribute message is the creation order of the attribute, and the C
+    /// library writes 0 for every other message type (`H5Omessage.c`, HDF5 2.2.0), which
+    /// [`record`](Self::record) passes.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `msg_type` does not fit the 1-byte message type field, or if `body` is longer
+    /// than [`OBJECT_HEADER_MESSAGE_MAX`].
+    pub fn record_with_creation_index(
+        self,
+        msg_type: MessageType,
+        flags: MessageFlags,
+        creation_index: u16,
+        body: &[u8],
+    ) -> Vec<u8> {
+        assert!(
+            u8::try_from(msg_type.to_u16()).is_ok(),
+            "message type {:#06x} does not fit the 1-byte type field of a version 2 object header",
+            msg_type.to_u16()
+        );
+        assert!(
+            body.len() <= OBJECT_HEADER_MESSAGE_MAX,
+            "a {}-byte message body does not fit the 2-byte message size field",
+            body.len()
+        );
+        let mut m = Vec::with_capacity(self.prefix_len() + body.len());
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "the first assertion above admits only a type that fits the 1-byte field"
+        )]
+        m.push(msg_type.to_u16() as u8);
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "the second assertion above bounds the body to the 2-byte size field"
+        )]
+        m.extend_from_slice(&(body.len() as u16).to_le_bytes());
+        m.push(flags.get());
+        if self.tracks_creation_order() {
+            m.extend_from_slice(&creation_index.to_le_bytes());
+        }
+        m.extend_from_slice(body);
+        m
+    }
+
+    /// Returns a message record of `msg_type` and `body` with no flag set, and with a creation
+    /// index of 0 where the layout tracks creation order.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `msg_type` does not fit the 1-byte message type field, or if `body` is longer
+    /// than [`OBJECT_HEADER_MESSAGE_MAX`].
+    pub fn record(self, msg_type: MessageType, body: &[u8]) -> Vec<u8> {
+        self.record_with_creation_index(msg_type, MessageFlags::NONE, 0, body)
+    }
+}
+
+/// Read a little-endian unsigned integer of `bytes.len()` (≤ 8) bytes.
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "callers parse in-file sizes/offsets bounded by the in-memory image; downstream \
+              slicing is length-checked, so a malformed oversized field errors rather than reads OOB"
+)]
+fn read_le(bytes: &[u8]) -> usize {
+    let mut v = 0u64;
+    for (i, &b) in bytes.iter().enumerate() {
+        v |= (b as u64) << (8 * i);
+    }
+    v as usize
 }
 
 /// Groups the four timestamps stored together in a version 2 object header.

@@ -262,13 +262,15 @@ use hdf5_pure_format::__private::FreeSection;
 use hdf5_pure_format::__private::FreeSpaceManagerHeader;
 use hdf5_pure_format::__private::IndexSlots;
 use hdf5_pure_format::__private::LayoutVersion;
+use hdf5_pure_format::__private::MessageRecordLayout;
+use hdf5_pure_format::__private::OBJECT_HEADER_PREFIX_MAX_LEN;
+use hdf5_pure_format::__private::ObjectHeaderPrefix;
 use hdf5_pure_format::__private::SECTION_CLASS_SIMPLE;
 
 use crate::access_mode::AccessMode;
 use crate::address::BaseAddressExt;
 use crate::address::{BaseAddress, StoredAddress};
 use crate::attribute_info::AttributeInfoMessage;
-use crate::checksum::jenkins_lookup3;
 use crate::chunk_index_inplace::{Located, Store, apply_ea_append, plan_ea_append};
 use crate::chunked_read::{
     chunk_index_spans_from_source, enumerate_chunks_from_source, plan_dense_grid,
@@ -319,7 +321,6 @@ use crate::type_builders::{
     make_u64_type, patch_vl_refs, patch_vl_refs_masked, write_reference_address,
 };
 use crate::width::OffsetWidth;
-use crate::width::UintWidth;
 use crate::{DatatypeByteOrder, signature};
 
 /// An undefined on-disk address (all bits set), HDF5's "no address" sentinel.
@@ -12910,8 +12911,10 @@ fn find_link_info(
 /// and name length (2) if bit 1 is. An absent or truncated message reads as the
 /// default, which is the value the C library itself would use for it.
 ///
-/// Not to be confused with [`AttributePhaseChange`], the *attribute* thresholds
-/// (`H5Pset_attr_phase_change`) that live in the object header's own prefix:
+/// Not to be confused with
+/// [`AttributePhaseChange`](hdf5_pure_format::__private::AttributePhaseChange), the
+/// *attribute* thresholds (`H5Pset_attr_phase_change`) that live in the object
+/// header's own prefix:
 /// this is the *link* phase change, it lives in a message, and it is what
 /// [`reject_dense_link_creation_order`] measures an addition against.
 fn max_compact_links(region: &OhRegion) -> Result<u16, Error> {
@@ -14075,425 +14078,6 @@ pub(crate) fn next_record(
     }
 }
 
-/// Maximum length of a version 2 object header's fixed prefix: signature (4) +
-/// version (1) + flags (1) + optional access/modification/change/birth times
-/// (16) + optional attribute phase-change thresholds (4) + the chunk-0 size
-/// field (up to 8). Reading this many bytes always covers the prefix, so
-/// [`oh_region_at`] can be handed one bounded window instead of a whole-file
-/// image.
-pub(crate) const OBJECT_HEADER_PREFIX_MAX_LEN: usize = 34;
-
-pub(crate) struct ParsedObjectHeaderPrefix {
-    pub(crate) prefix: ObjectHeaderPrefix,
-    pub(crate) chunk0_size: u64,
-    pub(crate) len: usize,
-}
-
-/// How a version 2 object header's message records are laid out, and what its
-/// flags say about attribute creation order.
-///
-/// Every record opens with a type byte, a 2-byte body size and a flags byte. A
-/// header that *tracks* attribute creation order — bit 2 of the object header's
-/// own flags, what `H5Pset_attr_creation_order` and h5py's `track_order=True`
-/// turn on, and what netCDF-4 sets on every object it writes — follows those
-/// with a 2-byte creation index, so its records are 6 bytes wide rather than 4.
-/// A header that also *indexes* that order (bit 3) carries a creation-order
-/// B-tree beside the name index once its attributes go dense; the reference C
-/// library reads that bit back out of the header when it builds an Attribute
-/// Info message, so a rewrite that dropped it would quietly stop indexing.
-///
-/// Both bits are properties of the whole header, so chunk 0 and every
-/// continuation block of one header share a layout. Carrying it beside the bytes
-/// ([`OhRegion`]) is what keeps the two dozen walkers and the emitters in this
-/// module from having to agree about it one by one.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(crate) struct MessageRecordLayout {
-    /// Records carry a 2-byte creation index (object header flags bit 2).
-    tracked: bool,
-    /// Dense attribute storage indexes that order (object header flags bit 3).
-    indexed: bool,
-}
-
-/// Object header flags bit 2: message creation order is tracked, so every
-/// message record carries a creation index.
-const OH_FLAG_CREATION_ORDER_TRACKED: u8 = 0x04;
-
-/// Object header flags bit 3: attribute creation order is *indexed* as well as
-/// tracked, so dense attribute storage carries a creation-order B-tree beside
-/// its name index.
-const OH_FLAG_CREATION_ORDER_INDEXED: u8 = 0x08;
-
-/// Object header flags bit 4: the header prefix carries the attribute
-/// phase-change thresholds (`H5O_HDR_ATTR_STORE_PHASE_CHANGE`).
-const OH_FLAG_ATTRIBUTE_PHASE_CHANGE: u8 = 0x10;
-
-/// Object header flags bit 5: the header prefix carries the four access,
-/// modification, change and birth timestamps (`H5O_HDR_STORE_TIMES`).
-const OH_FLAG_STORE_TIMES: u8 = 0x20;
-
-/// The four timestamps a version 2 object header stores when
-/// [`OH_FLAG_STORE_TIMES`] is set, each 4 bytes of seconds since the Unix epoch
-/// and stored in this order.
-///
-/// The reference C library stores them on **every** version 2 header it writes:
-/// `H5O_CRT_OHDR_FLAGS_DEF` is `H5O_HDR_STORE_TIMES`, so a header from libhdf5,
-/// h5py or netCDF-4 carries all four, and `H5Oget_info` reads them straight out
-/// of this block.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct ObjectTimes {
-    pub(crate) access: u32,
-    pub(crate) modification: u32,
-    pub(crate) change: u32,
-    pub(crate) birth: u32,
-}
-
-impl ObjectTimes {
-    /// Bytes this block occupies in a header prefix.
-    const LEN: usize = 16;
-
-    /// Parse the block at `at`. The caller must have checked that 16 bytes are
-    /// available there.
-    fn parse(prefix: &[u8], at: usize) -> Self {
-        let field =
-            |i: usize| u32::from_le_bytes(prefix[at + 4 * i..at + 4 * i + 4].try_into().unwrap());
-        Self {
-            access: field(0),
-            modification: field(1),
-            change: field(2),
-            birth: field(3),
-        }
-    }
-
-    /// The block's on-disk bytes.
-    fn to_bytes(self) -> [u8; Self::LEN] {
-        let mut out = [0u8; Self::LEN];
-        out[0..4].copy_from_slice(&self.access.to_le_bytes());
-        out[4..8].copy_from_slice(&self.modification.to_le_bytes());
-        out[8..12].copy_from_slice(&self.change.to_le_bytes());
-        out[12..16].copy_from_slice(&self.birth.to_le_bytes());
-        out
-    }
-
-    /// The same times with the modification and change times moved to `now`.
-    /// The access and birth times are the object's own history and are left
-    /// where they were.
-    ///
-    /// The reference C library's `H5O_touch_oh` reaches the same two-of-four
-    /// shape by a different pair: on a version 2 header it writes
-    /// `oh->atime = oh->ctime = now` and carries a source comment saying the
-    /// modification time still needs code to update. A rewrite is a
-    /// modification, and it is not an *access*, so this writes the field that
-    /// says so; both agree on the change time, and neither disturbs the birth
-    /// time.
-    fn touched(self, now: u32) -> Self {
-        Self {
-            modification: now,
-            change: now,
-            ..self
-        }
-    }
-}
-
-/// The attribute phase-change thresholds a version 2 object header stores when
-/// [`OH_FLAG_ATTRIBUTE_PHASE_CHANGE`] is set: `H5Pset_attr_phase_change`'s maximum
-/// number of attributes kept compact (in the header) and minimum kept dense (in
-/// a fractal heap).
-///
-/// The reference C library writes this block only when the pair differs from its
-/// defaults of 8 and 6, so most headers carry no such block at all. Preserved
-/// verbatim: this editor's own compact/dense decision still uses
-/// [`MAX_COMPACT_ATTRS`], so a non-default pair survives a rewrite without yet
-/// steering it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct AttributePhaseChange {
-    pub(crate) max_compact: u16,
-    pub(crate) min_dense: u16,
-}
-
-impl AttributePhaseChange {
-    /// Bytes this block occupies in a header prefix.
-    const LEN: usize = 4;
-
-    /// Parse the block at `at`. The caller must have checked that 4 bytes are
-    /// available there.
-    fn parse(prefix: &[u8], at: usize) -> Self {
-        Self {
-            max_compact: u16::from_le_bytes(prefix[at..at + 2].try_into().unwrap()),
-            min_dense: u16::from_le_bytes(prefix[at + 2..at + 4].try_into().unwrap()),
-        }
-    }
-
-    /// The block's on-disk bytes.
-    fn to_bytes(self) -> [u8; Self::LEN] {
-        let mut out = [0u8; Self::LEN];
-        out[0..2].copy_from_slice(&self.max_compact.to_le_bytes());
-        out[2..4].copy_from_slice(&self.min_dense.to_le_bytes());
-        out
-    }
-}
-
-/// Everything chunk 0's prefix declares about a version 2 object header: the
-/// record layout its messages are written in, and the two optional blocks the
-/// prefix itself may carry.
-///
-/// All of it is a property of the *header*, shared by chunk 0 and every
-/// continuation block, and none of it can be re-derived from the message bytes —
-/// so it travels beside them ([`OhRegion`]) from the parse right through to the
-/// rebuild. A rewrite that dropped the optional blocks would silently zero every
-/// timestamp `H5Oget_info` reports on a file the C library wrote, and reset the
-/// phase-change thresholds a caller set with `H5Pset_attr_phase_change`.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(crate) struct ObjectHeaderPrefix {
-    /// How wide a message record prefix is, and whether creation order is
-    /// tracked and indexed.
-    pub(crate) layout: MessageRecordLayout,
-    /// The access/modification/change/birth block, where the header stores one.
-    pub(crate) times: Option<ObjectTimes>,
-    /// The compact/dense attribute thresholds, where the header stores them.
-    pub(crate) attribute_phase_change: Option<AttributePhaseChange>,
-}
-
-impl ObjectHeaderPrefix {
-    /// 4-byte records, no creation order, and neither optional block: what this
-    /// crate's whole-file writer emits, and what a header this editor creates
-    /// from nothing uses.
-    pub(crate) const PLAIN: Self = Self::with_layout(MessageRecordLayout::PLAIN);
-
-    /// A header in `layout` carrying neither optional block.
-    pub(crate) const fn with_layout(layout: MessageRecordLayout) -> Self {
-        Self {
-            layout,
-            times: None,
-            attribute_phase_change: None,
-        }
-    }
-
-    pub(crate) fn parse(data: &[u8]) -> Result<ParsedObjectHeaderPrefix, FormatError> {
-        crate::bytes::ensure_len(data, 0, 6)?;
-        if data[..4] != *b"OHDR" {
-            return Err(FormatError::InvalidObjectHeaderSignature);
-        }
-        if data[4] != 2 {
-            return Err(FormatError::InvalidObjectHeaderVersion(data[4]));
-        }
-        let flags = data[5];
-        let mut pos = 6usize;
-        let times = if flags & OH_FLAG_STORE_TIMES != 0 {
-            crate::bytes::ensure_len(data, pos, ObjectTimes::LEN)?;
-            let times = ObjectTimes::parse(data, pos);
-            pos += ObjectTimes::LEN;
-            Some(times)
-        } else {
-            None
-        };
-        let attribute_phase_change = if flags & OH_FLAG_ATTRIBUTE_PHASE_CHANGE != 0 {
-            crate::bytes::ensure_len(data, pos, AttributePhaseChange::LEN)?;
-            let phase = AttributePhaseChange::parse(data, pos);
-            pos += AttributePhaseChange::LEN;
-            Some(phase)
-        } else {
-            None
-        };
-        let size_width = usize::from(UintWidth::from_flags(flags).get());
-        crate::bytes::ensure_len(data, pos, size_width)?;
-        let chunk0_size = read_le(&data[pos..pos + size_width]) as u64;
-        pos += size_width;
-        Ok(ParsedObjectHeaderPrefix {
-            prefix: Self {
-                layout: MessageRecordLayout::from_header_flags(flags),
-                times,
-                attribute_phase_change,
-            },
-            chunk0_size,
-            len: pos,
-        })
-    }
-
-    pub(crate) fn encode_header(self, messages: &[u8]) -> Vec<u8> {
-        let total = messages.len();
-        let width = UintWidth::smallest_for_len(total);
-        let mut buf = Vec::with_capacity(8 + self.optional_len() + total + 4);
-        buf.extend_from_slice(b"OHDR");
-        buf.push(2); // version
-        buf.push(width.flag_bits() | self.header_flags());
-        if let Some(times) = self.times {
-            buf.extend_from_slice(&times.to_bytes());
-        }
-        if let Some(phase) = self.attribute_phase_change {
-            buf.extend_from_slice(&phase.to_bytes());
-        }
-        buf.extend_from_slice(&(total as u64).to_le_bytes()[..usize::from(width.get())]);
-        buf.extend_from_slice(messages);
-        let checksum = jenkins_lookup3(&buf);
-        buf.extend_from_slice(&checksum.to_le_bytes());
-        buf
-    }
-
-    /// The object-header flag bits these properties imply, above the two size
-    /// bits the emitter chooses from the region's length.
-    const fn header_flags(self) -> u8 {
-        let times = if self.times.is_some() {
-            OH_FLAG_STORE_TIMES
-        } else {
-            0
-        };
-        let phase = if self.attribute_phase_change.is_some() {
-            OH_FLAG_ATTRIBUTE_PHASE_CHANGE
-        } else {
-            0
-        };
-        self.layout.header_flags() | times | phase
-    }
-
-    /// Bytes the optional blocks add to the header prefix.
-    const fn optional_len(self) -> usize {
-        let times = if self.times.is_some() {
-            ObjectTimes::LEN
-        } else {
-            0
-        };
-        let phase = if self.attribute_phase_change.is_some() {
-            AttributePhaseChange::LEN
-        } else {
-            0
-        };
-        times + phase
-    }
-}
-
-impl MessageRecordLayout {
-    /// 4-byte record prefixes and no creation order at all: what this crate's
-    /// whole-file writer emits, and what a header this editor creates from
-    /// nothing uses.
-    pub(crate) const PLAIN: Self = Self {
-        tracked: false,
-        indexed: false,
-    };
-
-    /// The layout a version 2 object header's flags byte declares.
-    pub(crate) const fn from_header_flags(flags: u8) -> Self {
-        Self {
-            tracked: flags & OH_FLAG_CREATION_ORDER_TRACKED != 0,
-            indexed: flags & OH_FLAG_CREATION_ORDER_INDEXED != 0,
-        }
-    }
-
-    /// Bytes a message record spends before its body.
-    pub(crate) const fn prefix_len(self) -> usize {
-        if self.tracked { 6 } else { 4 }
-    }
-
-    /// The object-header flag bits this layout implies.
-    const fn header_flags(self) -> u8 {
-        let tracked = if self.tracked {
-            OH_FLAG_CREATION_ORDER_TRACKED
-        } else {
-            0
-        };
-        let indexed = if self.indexed {
-            OH_FLAG_CREATION_ORDER_INDEXED
-        } else {
-            0
-        };
-        tracked | indexed
-    }
-
-    /// Whether records carry a creation index at all.
-    pub(crate) const fn tracks_creation_order(self) -> bool {
-        self.tracked
-    }
-
-    /// Whether dense attribute storage on this object indexes that order, with
-    /// a creation-order B-tree beside the name index.
-    pub(crate) const fn indexes_creation_order(self) -> bool {
-        self.indexed
-    }
-
-    /// Parse the message record at `p` within a chunk's message region,
-    /// returning `(message type, body start, body end)`; the next record begins
-    /// at `body end`. Returns `Ok(None)` once fewer bytes remain than a record
-    /// prefix takes (a clean end of the region, or the gap the reference C
-    /// library leaves when a chunk's free space is too small to hold a message),
-    /// and `Err` if a record's declared body runs past the region. Centralizes
-    /// the bounds check shared by every walker.
-    pub(crate) fn next_message(
-        self,
-        region: &[u8],
-        p: usize,
-    ) -> Result<Option<(MessageType, usize, usize)>, FormatError> {
-        if p + self.prefix_len() > region.len() {
-            return Ok(None);
-        }
-        let msg_type = MessageType::from_u16(region[p] as u16);
-        let msg_size = u16::from_le_bytes([region[p + 1], region[p + 2]]) as usize;
-        let body = p + self.prefix_len();
-        let body_end = body + msg_size;
-        if body_end > region.len() {
-            return Err(FormatError::UnexpectedEof {
-                expected: body_end,
-                available: region.len(),
-            });
-        }
-        Ok(Some((msg_type, body, body_end)))
-    }
-
-    /// The creation index the record at `msg_start` carries, or `None` where the
-    /// layout has no such field. The caller must have located `msg_start` with
-    /// [`next_message`](Self::next_message), which bounds the read.
-    fn creation_index(self, region: &[u8], msg_start: usize) -> Option<u16> {
-        self.tracked
-            .then(|| u16::from_le_bytes([region[msg_start + 4], region[msg_start + 5]]))
-    }
-
-    /// Encode one message record: this layout's prefix, then `body`.
-    ///
-    /// `creation_index` is written only where the layout carries one. It is
-    /// meaningful for an Attribute message, whose creation index *is* the
-    /// attribute's creation order; the reference C library writes zero on every
-    /// other message type, which is what [`Self::record`] passes.
-    pub(crate) fn record_with_creation_index(
-        self,
-        msg_type: MessageType,
-        flags: MessageFlags,
-        creation_index: u16,
-        body: &[u8],
-    ) -> Vec<u8> {
-        assert!(
-            u8::try_from(msg_type.to_u16()).is_ok(),
-            "message type {:#06x} does not fit the 1-byte type field of a version 2 object header",
-            msg_type.to_u16()
-        );
-        assert!(
-            body.len() <= OBJECT_HEADER_MESSAGE_MAX,
-            "a {}-byte message body does not fit the 2-byte message size field",
-            body.len()
-        );
-        let mut m = Vec::with_capacity(self.prefix_len() + body.len());
-        #[expect(
-            clippy::cast_possible_truncation,
-            reason = "the first assertion above admits only a type that fits the 1-byte field"
-        )]
-        m.push(msg_type.to_u16() as u8);
-        #[expect(
-            clippy::cast_possible_truncation,
-            reason = "the second assertion above bounds the body to the 2-byte size field"
-        )]
-        m.extend_from_slice(&(body.len() as u16).to_le_bytes());
-        m.push(flags.get());
-        if self.tracks_creation_order() {
-            m.extend_from_slice(&creation_index.to_le_bytes());
-        }
-        m.extend_from_slice(body);
-        m
-    }
-
-    /// Encode one message record whose creation index, if the layout has one, is
-    /// the zero the reference C library writes for every non-attribute message.
-    pub(crate) fn record(self, msg_type: MessageType, body: &[u8]) -> Vec<u8> {
-        self.record_with_creation_index(msg_type, MessageFlags::NONE, 0, body)
-    }
-}
-
 /// A version 2 object header's message records, in the layout the header
 /// declares them in.
 ///
@@ -15081,7 +14665,8 @@ pub(crate) fn build_v2_object_header(region: &OhRegion) -> Result<Vec<u8>, Error
 /// Of those, the **modification and change times are moved to now**: this
 /// function runs once per rebuilt header, and every rebuild is a modification.
 /// Access and birth times are the object's own history and are copied verbatim
-/// ([`ObjectTimes::touched`] says how that compares with `H5O_touch_oh`).
+/// ([`ObjectTimes::touched`](hdf5_pure_format::__private::ObjectTimes::touched) says
+/// how that compares with `H5O_touch_oh`).
 /// Under `no_std` there is no clock to read, so all four are preserved as they
 /// were rather than zeroed — a stale modification time being the honest reading
 /// of "this build cannot tell the time", where a zero would claim the epoch.
@@ -15122,20 +14707,6 @@ fn unix_time_now() -> Option<u32> {
     None
 }
 
-/// Read a little-endian unsigned integer of `bytes.len()` (≤ 8) bytes.
-#[expect(
-    clippy::cast_possible_truncation,
-    reason = "callers parse in-file sizes/offsets bounded by the in-memory image; downstream \
-              slicing is length-checked, so a malformed oversized field errors rather than reads OOB"
-)]
-fn read_le(bytes: &[u8]) -> usize {
-    let mut v = 0u64;
-    for (i, &b) in bytes.iter().enumerate() {
-        v |= (b as u64) << (8 * i);
-    }
-    v as usize
-}
-
 /// The engine as the target a [`reference_patch::Plan`] is applied to
 /// (issue #324).
 ///
@@ -15157,10 +14728,13 @@ impl crate::reference_patch::PatchTarget for WriteEngine {
 
 #[cfg(test)]
 mod tests {
+    use hdf5_pure_format::__private::AttributePhaseChange;
+    use hdf5_pure_format::__private::ObjectTimes;
     use rstest::rstest;
     use test_util::object_header::v2::HeaderFlags;
 
     use super::*;
+    use crate::checksum;
     use crate::datatype::layout::FloatingPointLayout;
     use crate::object_path::ObjectPath;
 
@@ -18334,7 +17908,7 @@ mod tests {
         }
         buf.push(u8::try_from(region.len()).expect("the fixture region is under 256 bytes"));
         buf.extend_from_slice(region);
-        let checksum = jenkins_lookup3(&buf);
+        let checksum = checksum::jenkins_lookup3(&buf);
         buf.extend_from_slice(&checksum.to_le_bytes());
         buf
     }
