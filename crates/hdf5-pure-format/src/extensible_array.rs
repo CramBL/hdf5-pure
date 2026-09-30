@@ -41,11 +41,11 @@ pub struct ExtensibleArrayHeader {
     /// The number of elements in the smallest data block.
     pub min_dblk_nelmts: u8,
     /// The fewest data block addresses a super block holds.
-    pub super_blk_min_nelmts: u8,
+    pub super_blk_min_data_ptrs: u8,
     /// The base 2 logarithm of the number of elements in a data block page.
     pub max_dblk_nelmts_bits: u8,
     /// One more than the highest element index set, the "Max Index Set" field.
-    pub num_elements: u64,
+    pub max_idx_set: u64,
     /// The address of the index block.
     pub index_block_address: StoredAddress,
 }
@@ -114,7 +114,7 @@ impl ExtensibleArrayHeader {
         let max_nelmts_bits = d[7];
         let idx_blk_elmts = d[8];
         let min_dblk_nelmts = d[9];
-        let super_blk_min_nelmts = d[10];
+        let super_blk_min_data_ptrs = d[10];
         let max_dblk_nelmts_bits = d[11];
 
         let mut pos = 12;
@@ -125,7 +125,7 @@ impl ExtensibleArrayHeader {
         // bounds the elements in use. `nelmts` counts every slot of the allocated blocks.
         let ls = length_size as usize;
         pos += 4 * ls; // skip [0]..[3]
-        let num_elements = bytes::read_length(d, pos, length_size)?; // [4] `max_idx_set`
+        let max_idx_set = bytes::read_length(d, pos, length_size)?; // [4]
         pos += ls;
         pos += ls; // skip [5] nelmts
         let index_block_address = StoredAddress::new(bytes::read_offset(d, pos, offset_size)?);
@@ -138,9 +138,9 @@ impl ExtensibleArrayHeader {
             max_nelmts_bits,
             idx_blk_elmts,
             min_dblk_nelmts,
-            super_blk_min_nelmts,
+            super_blk_min_data_ptrs,
             max_dblk_nelmts_bits,
-            num_elements,
+            max_idx_set,
             index_block_address,
         })
     }
@@ -189,7 +189,7 @@ fn ea_elem_stride(header: &ExtensibleArrayHeader, offset_size: u8) -> usize {
 /// SB0: 1 x 16   SB1: 1 x 32   SB2: 2 x 32   SB3: 2 x 64   SB4: 4 x 64 ...
 /// ```
 ///
-/// The index block holds the data block addresses of the first `super_blk_min_nelmts` super
+/// The index block holds the data block addresses of the first `super_blk_min_data_ptrs` super
 /// blocks, and the addresses of the super blocks after them.
 #[derive(Debug, Clone)]
 pub struct ExtensibleArrayGeometry {
@@ -200,7 +200,7 @@ pub struct ExtensibleArrayGeometry {
     /// The number of super block addresses in the index block.
     pub(crate) nsblk_addrs: usize,
     /// The index in `sblks` of the super block the first super block address points at,
-    /// `super_blk_min_nelmts`.
+    /// `super_blk_min_data_ptrs`.
     pub(crate) first_indirect_sblk: usize,
 }
 
@@ -224,7 +224,7 @@ impl ExtensibleArrayGeometry {
     /// Returns the geometry of the array `h` describes.
     pub fn from_header(h: &ExtensibleArrayHeader) -> Self {
         let min_dblk = h.min_dblk_nelmts as u64;
-        let sup_blk_min = h.super_blk_min_nelmts as usize;
+        let sup_blk_min = h.super_blk_min_data_ptrs as usize;
         // `nsblks = max_nelmts_bits - log2(min_dblk_nelmts) + 1`
         let log2_min = if min_dblk <= 1 {
             0
@@ -688,7 +688,7 @@ pub fn read_extensible_array_chunks(
     // A SWMR writer raises the header's count before the dataspace grows, so an interrupted
     // append leaves elements past the dataspace, which the caller drops. The geometry bounds the
     // walk, whatever the count.
-    let total_elements = header.num_elements.to_usize()?;
+    let total_elements = header.max_idx_set.to_usize()?;
 
     // 1. Read inline elements in index block
     let n_inline = header.idx_blk_elmts as usize;
@@ -951,8 +951,8 @@ pub fn extensible_array_index_spans(
     let blk_off_size = (header.max_nelmts_bits as usize).div_ceil(8);
 
     // EAHD header block.
-    let aehd_size = ExtensibleArrayHeader::serialized_size(offset_size, length_size) as u64;
-    let mut spans = vec![(ea_base.get(), aehd_size)];
+    let header_len = ExtensibleArrayHeader::serialized_size(offset_size, length_size) as u64;
+    let mut spans = vec![(ea_base.get(), header_len)];
 
     if header.index_block_address.is_undefined(offset_size) {
         return Ok(spans);
@@ -1093,7 +1093,7 @@ pub fn read_extensible_array_chunks_from_source(
 
     // See `read_extensible_array_chunks` on why the dataspace does not bound
     // this count.
-    let total_elements = header.num_elements.to_usize()?;
+    let total_elements = header.max_idx_set.to_usize()?;
 
     let geom = ExtensibleArrayGeometry::from_header(header);
     let elem_stride = ea_elem_stride(header, offset_size);
@@ -1732,8 +1732,6 @@ pub(crate) fn super_block_len(
 
 /// Returns the header statistics of the array whose occupied slots are `occupancy`, from the
 /// blocks [`build_extensible_array_at`] allocates for them.
-///
-/// `num_elements` is the "Max Index Set" the header stores.
 pub fn extensible_array_stats(
     geom: &ExtensibleArrayGeometry,
     idx_blk_elmts: u64,
@@ -1741,7 +1739,7 @@ pub fn extensible_array_stats(
     page_nelmts: u64,
     offset_size: OffsetWidth,
     blk_off_size: usize,
-    num_elements: u64,
+    max_idx_set: u64,
     occupancy: SlotOccupancy<'_>,
 ) -> ExtensibleArrayStats {
     let offset_size = offset_size.get();
@@ -1750,7 +1748,7 @@ pub fn extensible_array_stats(
         super_blk_size: 0,
         ndata_blks: 0,
         data_blk_size: 0,
-        max_idx_set: num_elements,
+        max_idx_set,
         nelmts: idx_blk_elmts,
     };
     let mut elem = idx_blk_elmts;
@@ -1800,7 +1798,7 @@ pub struct ExtensibleArrayLayout {
     max_nelmts_bits: u8,
     idx_blk_elmts: u8,
     min_dblk_nelmts: u8,
-    super_blk_min_nelmts: u8,
+    super_blk_min_data_ptrs: u8,
     max_dblk_nelmts_bits: u8,
     geom: ExtensibleArrayGeometry,
     page_nelmts: usize,
@@ -1809,7 +1807,7 @@ pub struct ExtensibleArrayLayout {
     /// The number of elements in the index block, `idx_blk_elmts`.
     inline: usize,
     /// The length of the header in bytes.
-    aehd_size: usize,
+    header_len: usize,
     index_block_len: usize,
     /// The header statistics.
     pub stats: ExtensibleArrayStats,
@@ -1838,13 +1836,13 @@ pub fn extensible_array_layout(
         max_nelmts_bits,
         idx_blk_elmts,
         min_dblk_nelmts,
-        super_blk_min_nelmts,
+        super_blk_min_data_ptrs,
         max_dblk_nelmts_bits,
     ) = (
         EA_MAX_NELMTS_BITS,
         EA_IDX_BLK_ELMTS,
         EA_MIN_DBLK_NELMTS,
-        EA_SUPER_BLK_MIN_NELMTS,
+        EA_SUPER_BLK_MIN_DATA_PTRS,
         EA_MAX_DBLK_NELMTS_BITS,
     );
 
@@ -1859,9 +1857,9 @@ pub fn extensible_array_layout(
         max_nelmts_bits,
         idx_blk_elmts,
         min_dblk_nelmts,
-        super_blk_min_nelmts,
+        super_blk_min_data_ptrs,
         max_dblk_nelmts_bits,
-        num_elements: 0,
+        max_idx_set: 0,
         index_block_address: StoredAddress::new(0),
     };
     let geom = ExtensibleArrayGeometry::from_header(&geom_header);
@@ -1869,7 +1867,7 @@ pub fn extensible_array_layout(
     let blk_off_size = (max_nelmts_bits as usize).div_ceil(8);
     let inline = idx_blk_elmts as usize;
 
-    let aehd_size = ExtensibleArrayHeader::serialized_size(offset_size.get(), length_size.get());
+    let header_len = ExtensibleArrayHeader::serialized_size(offset_size.get(), length_size.get());
     let index_block_len = index_block_len(
         offset_size.get(),
         inline,
@@ -1889,20 +1887,20 @@ pub fn extensible_array_layout(
         occupancy,
     );
     let total_len =
-        (aehd_size + index_block_len) as u64 + stats.data_blk_size + stats.super_blk_size;
+        (header_len + index_block_len) as u64 + stats.data_blk_size + stats.super_blk_size;
 
     ExtensibleArrayLayout {
         encoding,
         max_nelmts_bits,
         idx_blk_elmts,
         min_dblk_nelmts,
-        super_blk_min_nelmts,
+        super_blk_min_data_ptrs,
         max_dblk_nelmts_bits,
         geom,
         page_nelmts,
         blk_off_size,
         inline,
-        aehd_size,
+        header_len,
         index_block_len,
         stats,
         total_len,
@@ -1954,7 +1952,7 @@ pub fn build_extensible_array_at(
     has_filters: bool,
     ea_address: StoredAddress,
 ) -> Result<Vec<u8>, FormatError> {
-    let num_elements = slots.len();
+    let max_idx_set = slots.len();
 
     let layout = extensible_array_layout(
         SlotOccupancy::Sparse(slots),
@@ -1973,19 +1971,19 @@ pub fn build_extensible_array_at(
         max_nelmts_bits,
         idx_blk_elmts,
         min_dblk_nelmts,
-        super_blk_min_nelmts,
+        super_blk_min_data_ptrs,
         max_dblk_nelmts_bits,
         ref geom,
         page_nelmts,
         blk_off_size,
         inline,
-        aehd_size,
+        header_len,
         index_block_len,
         ..
     } = layout;
 
-    let aeib_address = ea_address.offset(aehd_size as u64);
-    let body_base = aeib_address.offset(index_block_len as u64);
+    let index_block_address = ea_address.offset(header_len as u64);
+    let body_base = index_block_address.offset(index_block_len as u64);
 
     let undef_addr = StoredAddress::undefined(offset_size.get());
 
@@ -2105,8 +2103,8 @@ pub fn build_extensible_array_at(
             local_elem += dblk_nelmts;
         }
 
-        let aesb_addr = body_base.offset(body.len() as u64);
-        let aesb = encode_super_block(
+        let super_block_address = body_base.offset(body.len() as u64);
+        let super_block = encode_super_block(
             ea_address,
             sb_block_offset,
             &page_bitmap,
@@ -2116,9 +2114,9 @@ pub fn build_extensible_array_at(
             client_id,
         );
         nsuper_blks += 1;
-        super_blk_size += aesb.len() as u64;
-        body.extend_from_slice(&aesb);
-        sblk_addrs.push(aesb_addr);
+        super_blk_size += super_block.len() as u64;
+        body.extend_from_slice(&super_block);
+        sblk_addrs.push(super_block_address);
 
         elem_cursor += sb_span;
     }
@@ -2126,50 +2124,50 @@ pub fn build_extensible_array_at(
     // ---- Build the header (EAHD) ------------------------------------------
     let write_length = |buf: &mut Vec<u8>, val: u64| bytes::write_length(buf, val, length_size);
 
-    let mut aehd = Vec::with_capacity(aehd_size);
-    aehd.extend_from_slice(b"EAHD");
-    aehd.push(0); // version
-    aehd.push(client_id);
+    let mut header = Vec::with_capacity(header_len);
+    header.extend_from_slice(b"EAHD");
+    header.push(0); // version
+    header.push(client_id);
     #[expect(
         clippy::cast_possible_truncation,
         reason = "element record size written into the 1-byte EA header field selected for this file"
     )]
-    aehd.push(elem_size as u8);
-    aehd.push(max_nelmts_bits);
-    aehd.push(idx_blk_elmts);
-    aehd.push(min_dblk_nelmts);
-    aehd.push(super_blk_min_nelmts);
-    aehd.push(max_dblk_nelmts_bits);
+    header.push(elem_size as u8);
+    header.push(max_nelmts_bits);
+    header.push(idx_blk_elmts);
+    header.push(min_dblk_nelmts);
+    header.push(super_blk_min_data_ptrs);
+    header.push(max_dblk_nelmts_bits);
 
     // 6 statistics, in the C library's order:
     //   [0] `nsuper_blks`   [1] `super_blk_size`   [2] `ndata_blks`
     //   [3] `data_blk_size` [4] `max_idx_set`      [5] `nelmts`
-    write_length(&mut aehd, nsuper_blks);
-    write_length(&mut aehd, super_blk_size);
-    write_length(&mut aehd, ndata_blks);
-    write_length(&mut aehd, data_blk_size);
-    write_length(&mut aehd, num_elements.to_u64()); // `max_idx_set`, one past the last slot
-    write_length(&mut aehd, alloc_slots); // nelmts (allocated slots)
+    write_length(&mut header, nsuper_blks);
+    write_length(&mut header, super_blk_size);
+    write_length(&mut header, ndata_blks);
+    write_length(&mut header, data_blk_size);
+    write_length(&mut header, max_idx_set.to_u64()); // one past the last slot
+    write_length(&mut header, alloc_slots); // nelmts (allocated slots)
 
-    write_stored_address(&mut aehd, aeib_address, offset_size);
+    write_stored_address(&mut header, index_block_address, offset_size);
 
-    let aehd_checksum = checksum::jenkins_lookup3(&aehd);
-    aehd.extend_from_slice(&aehd_checksum.to_le_bytes());
-    debug_assert_eq!(aehd.len(), aehd_size);
+    let header_checksum = checksum::jenkins_lookup3(&header);
+    header.extend_from_slice(&header_checksum.to_le_bytes());
+    debug_assert_eq!(header.len(), header_len);
 
     // ---- Build the index block (EAIB) -------------------------------------
-    let mut aeib = Vec::with_capacity(index_block_len);
-    aeib.extend_from_slice(b"EAIB");
-    aeib.push(0); // version
-    aeib.push(client_id);
-    write_stored_address(&mut aeib, ea_address, offset_size);
+    let mut index_block = Vec::with_capacity(index_block_len);
+    index_block.extend_from_slice(b"EAIB");
+    index_block.push(0); // version
+    index_block.push(client_id);
+    write_stored_address(&mut index_block, ea_address, offset_size);
 
     // Inline elements: always `idx_blk_elmts` slots, the unused ones undefined.
     #[allow(clippy::needless_range_loop)]
     for i in 0..inline {
         if let Some(chunk) = slots.at(i) {
             chunk_record::write_chunk_element(
-                &mut aeib,
+                &mut index_block,
                 chunk,
                 offset_size,
                 has_filters,
@@ -2177,7 +2175,7 @@ pub fn build_extensible_array_at(
             )?;
         } else {
             chunk_record::write_undefined_element(
-                &mut aeib,
+                &mut index_block,
                 offset_size,
                 has_filters,
                 chunk_size_bytes,
@@ -2186,18 +2184,18 @@ pub fn build_extensible_array_at(
     }
     // Direct data block addresses, then super block addresses.
     for &addr in &direct_addrs {
-        write_stored_address(&mut aeib, addr, offset_size);
+        write_stored_address(&mut index_block, addr, offset_size);
     }
     for &addr in &sblk_addrs {
-        write_stored_address(&mut aeib, addr, offset_size);
+        write_stored_address(&mut index_block, addr, offset_size);
     }
 
-    let aeib_checksum = checksum::jenkins_lookup3(&aeib);
-    aeib.extend_from_slice(&aeib_checksum.to_le_bytes());
-    debug_assert_eq!(aeib.len(), index_block_len);
+    let index_block_checksum = checksum::jenkins_lookup3(&index_block);
+    index_block.extend_from_slice(&index_block_checksum.to_le_bytes());
+    debug_assert_eq!(index_block.len(), index_block_len);
 
-    let mut combined = aehd;
-    combined.extend_from_slice(&aeib);
+    let mut combined = header;
+    combined.extend_from_slice(&index_block);
     combined.extend_from_slice(&body);
     // The caller reserved the length `extensible_array_len` returns, and a longer array would
     // overlap the next object.
@@ -2222,9 +2220,9 @@ pub fn extensible_array_capacity() -> u64 {
         max_nelmts_bits: EA_MAX_NELMTS_BITS,
         idx_blk_elmts: EA_IDX_BLK_ELMTS,
         min_dblk_nelmts: EA_MIN_DBLK_NELMTS,
-        super_blk_min_nelmts: EA_SUPER_BLK_MIN_NELMTS,
+        super_blk_min_data_ptrs: EA_SUPER_BLK_MIN_DATA_PTRS,
         max_dblk_nelmts_bits: EA_MAX_DBLK_NELMTS_BITS,
-        num_elements: 0,
+        max_idx_set: 0,
         index_block_address: StoredAddress::new(0),
     };
     let geom = ExtensibleArrayGeometry::from_header(&geom_header);
@@ -2248,7 +2246,7 @@ const EA_IDX_BLK_ELMTS: u8 = 4;
 /// The number of elements in the smallest data block, `H5D_EARRAY_DATA_BLK_MIN_ELMTS`.
 const EA_MIN_DBLK_NELMTS: u8 = 16;
 /// The fewest data block addresses a super block holds, `H5D_EARRAY_SUP_BLK_MIN_DATA_PTRS`.
-const EA_SUPER_BLK_MIN_NELMTS: u8 = 4;
+const EA_SUPER_BLK_MIN_DATA_PTRS: u8 = 4;
 /// The base 2 logarithm of the number of elements in a data block page,
 /// `H5D_EARRAY_MAX_DBLOCK_PAGE_NELMTS_BITS`.
 const EA_MAX_DBLK_NELMTS_BITS: u8 = 10;
@@ -2310,14 +2308,14 @@ mod tests {
         buf[7] = 10; // `max_nelmts_bits`
         buf[8] = 2; // `idx_blk_elmts`
         buf[9] = 4; // `min_dblk_nelmts`
-        buf[10] = 2; // `super_blk_min_nelmts`
+        buf[10] = 2; // `super_blk_min_data_ptrs`
         buf[11] = 8; // `max_dblk_nelmts_bits`
         // 6 stats fields (each 8 bytes)
         buf[12..20].copy_from_slice(&0u64.to_le_bytes()); // stat[0]
         buf[20..28].copy_from_slice(&0u64.to_le_bytes()); // stat[1]
         buf[28..36].copy_from_slice(&0u64.to_le_bytes()); // stat[2]
         buf[36..44].copy_from_slice(&0u64.to_le_bytes()); // stat[3]
-        buf[44..52].copy_from_slice(&5u64.to_le_bytes()); // stat[4] = `num_elements`
+        buf[44..52].copy_from_slice(&5u64.to_le_bytes()); // stat[4] = `max_idx_set`
         buf[52..60].copy_from_slice(&0u64.to_le_bytes()); // stat[5]
         buf[60..68].copy_from_slice(&0x1000u64.to_le_bytes()); // `index_block_address`
         stamp(&mut buf, 0, eahd_len(os, ls));
@@ -2327,7 +2325,7 @@ mod tests {
         assert_eq!(hdr.element_size, 8);
         assert_eq!(hdr.idx_blk_elmts, 2);
         assert_eq!(hdr.min_dblk_nelmts, 4);
-        assert_eq!(hdr.num_elements, 5);
+        assert_eq!(hdr.max_idx_set, 5);
         assert_eq!(hdr.index_block_address, StoredAddress::new(0x1000));
     }
 
@@ -2433,35 +2431,35 @@ mod tests {
         let mut file_data = vec![0u8; 0x3000];
 
         // EAHD at offset 0x100
-        let aehd_offset = 0x100usize;
-        let aeib_offset = 0x200usize;
+        let header_offset = 0x100usize;
+        let index_block_offset = 0x200usize;
 
         // Build EAHD
-        file_data[aehd_offset..aehd_offset + 4].copy_from_slice(b"EAHD");
-        file_data[aehd_offset + 4] = 0; // version
-        file_data[aehd_offset + 5] = 0; // `client_id` = non-filtered
-        file_data[aehd_offset + 6] = osv as u8; // `element_size`
-        file_data[aehd_offset + 7] = 10; // `max_nelmts_bits`
-        file_data[aehd_offset + 8] = num_chunks as u8; // `idx_blk_elmts` (all inline)
-        file_data[aehd_offset + 9] = 4; // `min_dblk_nelmts`
-        file_data[aehd_offset + 10] = 2; // `super_blk_min_nelmts`
-        file_data[aehd_offset + 11] = 8; // `max_dblk_nelmts_bits`
+        file_data[header_offset..header_offset + 4].copy_from_slice(b"EAHD");
+        file_data[header_offset + 4] = 0; // version
+        file_data[header_offset + 5] = 0; // `client_id` = non-filtered
+        file_data[header_offset + 6] = osv as u8; // `element_size`
+        file_data[header_offset + 7] = 10; // `max_nelmts_bits`
+        file_data[header_offset + 8] = num_chunks as u8; // `idx_blk_elmts` (all inline)
+        file_data[header_offset + 9] = 4; // `min_dblk_nelmts`
+        file_data[header_offset + 10] = 2; // `super_blk_min_data_ptrs`
+        file_data[header_offset + 11] = 8; // `max_dblk_nelmts_bits`
         // 6 stats fields (each 8 bytes), `max_idx_set` at stat[4]
-        file_data[aehd_offset + 44..aehd_offset + 52]
+        file_data[header_offset + 44..header_offset + 52]
             .copy_from_slice(&(num_chunks as u64).to_le_bytes());
-        file_data[aehd_offset + 60..aehd_offset + 68]
-            .copy_from_slice(&(aeib_offset as u64).to_le_bytes());
-        stamp(&mut file_data, aehd_offset, eahd_len(os, ls));
+        file_data[header_offset + 60..header_offset + 68]
+            .copy_from_slice(&(index_block_offset as u64).to_le_bytes());
+        stamp(&mut file_data, header_offset, eahd_len(os, ls));
 
-        // Build EAIB at `aeib_offset`
-        file_data[aeib_offset..aeib_offset + 4].copy_from_slice(b"EAIB");
-        file_data[aeib_offset + 4] = 0; // version
-        file_data[aeib_offset + 5] = 0; // `client_id`
-        file_data[aeib_offset + 6..aeib_offset + 14]
-            .copy_from_slice(&(aehd_offset as u64).to_le_bytes());
+        // Build EAIB at `index_block_offset`
+        file_data[index_block_offset..index_block_offset + 4].copy_from_slice(b"EAIB");
+        file_data[index_block_offset + 4] = 0; // version
+        file_data[index_block_offset + 5] = 0; // `client_id`
+        file_data[index_block_offset + 6..index_block_offset + 14]
+            .copy_from_slice(&(header_offset as u64).to_le_bytes());
 
         // Inline elements
-        let elem_start = aeib_offset + 6 + osv;
+        let elem_start = index_block_offset + 6 + osv;
         let base_addr = 0x1000u64;
         for i in 0..num_chunks {
             let addr = base_addr + i as u64 * chunk_byte_size;
@@ -2471,17 +2469,17 @@ mod tests {
 
         // The index block is sized by the header's geometry whatever the array
         // holds: prefix, two inline slots, then a pointer per direct data block
-        // (min_dblk_nelmts=4 and super_blk_min_nelmts=2 give two) and one per
+        // (min_dblk_nelmts=4 and super_blk_min_data_ptrs=2 give two) and one per
         // super block (nine levels less the two taken as direct, so seven).
         // The pointers stay zero, and the read stops at the inline slots.
         stamp(
             &mut file_data,
-            aeib_offset,
+            index_block_offset,
             (6 + osv) + 2 * osv + 2 * osv + 7 * osv + 4,
         );
 
         assert_eq!(
-            walk_both(&file_data, aehd_offset, chunk_byte_size),
+            walk_both(&file_data, header_offset, chunk_byte_size),
             back_to_back(0..2, base_addr, chunk_byte_size)
         );
     }
@@ -2498,36 +2496,36 @@ mod tests {
         let total_chunks = 4usize; // 2 inline and 2 in the first data block
 
         let mut file_data = vec![0u8; 0x5000];
-        let aehd_offset = 0x100usize;
-        let aeib_offset = 0x200usize;
-        let aedb_offset = 0x300usize;
+        let header_offset = 0x100usize;
+        let index_block_offset = 0x200usize;
+        let data_block_offset = 0x300usize;
 
         // EAHD
-        file_data[aehd_offset..aehd_offset + 4].copy_from_slice(b"EAHD");
-        file_data[aehd_offset + 4] = 0;
-        file_data[aehd_offset + 5] = 0; // `client_id`
-        file_data[aehd_offset + 6] = osv as u8; // `element_size`
-        file_data[aehd_offset + 7] = 10;
-        file_data[aehd_offset + 8] = idx_blk_elmts;
-        file_data[aehd_offset + 9] = min_dblk_nelmts;
-        file_data[aehd_offset + 10] = sblk_min;
-        file_data[aehd_offset + 11] = 8;
+        file_data[header_offset..header_offset + 4].copy_from_slice(b"EAHD");
+        file_data[header_offset + 4] = 0;
+        file_data[header_offset + 5] = 0; // `client_id`
+        file_data[header_offset + 6] = osv as u8; // `element_size`
+        file_data[header_offset + 7] = 10;
+        file_data[header_offset + 8] = idx_blk_elmts;
+        file_data[header_offset + 9] = min_dblk_nelmts;
+        file_data[header_offset + 10] = sblk_min;
+        file_data[header_offset + 11] = 8;
         // 6 stats fields (each 8 bytes), `max_idx_set` at stat[4] (offset 12 + 4*8 = 44)
-        file_data[aehd_offset + 44..aehd_offset + 52]
+        file_data[header_offset + 44..header_offset + 52]
             .copy_from_slice(&(total_chunks as u64).to_le_bytes());
         // The index block address at offset 12 + 6*8 = 60
-        file_data[aehd_offset + 60..aehd_offset + 68]
-            .copy_from_slice(&(aeib_offset as u64).to_le_bytes());
-        stamp(&mut file_data, aehd_offset, eahd_len(os, ls));
+        file_data[header_offset + 60..header_offset + 68]
+            .copy_from_slice(&(index_block_offset as u64).to_le_bytes());
+        stamp(&mut file_data, header_offset, eahd_len(os, ls));
 
         // EAIB
-        file_data[aeib_offset..aeib_offset + 4].copy_from_slice(b"EAIB");
-        file_data[aeib_offset + 4] = 0;
-        file_data[aeib_offset + 5] = 0;
-        file_data[aeib_offset + 6..aeib_offset + 14]
-            .copy_from_slice(&(aehd_offset as u64).to_le_bytes());
+        file_data[index_block_offset..index_block_offset + 4].copy_from_slice(b"EAIB");
+        file_data[index_block_offset + 4] = 0;
+        file_data[index_block_offset + 5] = 0;
+        file_data[index_block_offset + 6..index_block_offset + 14]
+            .copy_from_slice(&(header_offset as u64).to_le_bytes());
 
-        let mut pos = aeib_offset + 6 + osv;
+        let mut pos = index_block_offset + 6 + osv;
 
         // Inline elements (2 chunks)
         let base_addr = 0x1000u64;
@@ -2537,26 +2535,26 @@ mod tests {
             pos += osv;
         }
 
-        // The index block addresses the data blocks of the first `super_blk_min_nelmts` super
+        // The index block addresses the data blocks of the first `super_blk_min_data_ptrs` super
         // blocks, which with `min_dblk_nelmts = 2` are 1 block of 2 and 1 block of 4. The first
         // holds the two elements past the two inline ones.
         let n_direct_dblks = 2;
-        file_data[pos..pos + osv].copy_from_slice(&(aedb_offset as u64).to_le_bytes());
+        file_data[pos..pos + osv].copy_from_slice(&(data_block_offset as u64).to_le_bytes());
         pos += osv;
         for _ in 1..n_direct_dblks {
             file_data[pos..pos + osv].copy_from_slice(&u64::MAX.to_le_bytes());
             pos += osv;
         }
 
-        // EADB at `aedb_offset` (`min_dblk_nelmts` elements)
-        file_data[aedb_offset..aedb_offset + 4].copy_from_slice(b"EADB");
-        file_data[aedb_offset + 4] = 0;
-        file_data[aedb_offset + 5] = 0;
-        file_data[aedb_offset + 6..aedb_offset + 14]
-            .copy_from_slice(&(aehd_offset as u64).to_le_bytes());
+        // EADB at `data_block_offset` (`min_dblk_nelmts` elements)
+        file_data[data_block_offset..data_block_offset + 4].copy_from_slice(b"EADB");
+        file_data[data_block_offset + 4] = 0;
+        file_data[data_block_offset + 5] = 0;
+        file_data[data_block_offset + 6..data_block_offset + 14]
+            .copy_from_slice(&(header_offset as u64).to_le_bytes());
         // The block offset takes ceil(10 / 8) = 2 bytes, and is 0 for the first data block.
         let blk_off_size = (10usize).div_ceil(8); // max_nelmts_bits=10
-        let mut dbpos = aedb_offset + 6 + osv + blk_off_size;
+        let mut dbpos = data_block_offset + 6 + osv + blk_off_size;
         for i in 0..min_dblk_nelmts as usize {
             let addr = base_addr + (idx_blk_elmts as u64 + i as u64) * chunk_byte_size;
             file_data[dbpos..dbpos + osv].copy_from_slice(&addr.to_le_bytes());
@@ -2568,18 +2566,18 @@ mod tests {
         // as direct).
         stamp(
             &mut file_data,
-            aeib_offset,
+            index_block_offset,
             (6 + osv) + 2 * osv + n_direct_dblks * osv + 8 * osv + 4,
         );
         // Prefix, block offset, `min_dblk_nelmts` element slots, checksum.
         stamp(
             &mut file_data,
-            aedb_offset,
+            data_block_offset,
             (6 + osv) + blk_off_size + min_dblk_nelmts as usize * osv + 4,
         );
 
         assert_eq!(
-            walk_both(&file_data, aehd_offset, chunk_byte_size),
+            walk_both(&file_data, header_offset, chunk_byte_size),
             back_to_back(0..4, base_addr, chunk_byte_size)
         );
     }
@@ -2627,9 +2625,9 @@ mod tests {
                         max_nelmts_bits,
                         idx_blk_elmts: 4,
                         min_dblk_nelmts: 4,
-                        super_blk_min_nelmts: 2,
+                        super_blk_min_data_ptrs: 2,
                         max_dblk_nelmts_bits: 10,
-                        num_elements: 0,
+                        max_idx_set: 0,
                         index_block_address: StoredAddress::new(0),
                     };
                     let blk_off = (max_nelmts_bits as usize).div_ceil(8);
@@ -2973,9 +2971,9 @@ mod tests {
             // last two read straight from the statistics the builder wrote.
             let header = ExtensibleArrayHeader::parse(&file, base as usize, os, ls).unwrap();
             let geom = ExtensibleArrayGeometry::from_header(&header);
-            let aehd = ExtensibleArrayHeader::serialized_size(os, ls) as u64;
+            let header_len = ExtensibleArrayHeader::serialized_size(os, ls) as u64;
             // Unfiltered EA: element stride equals the offset size.
-            let aeib = index_block_len(
+            let index_block_len = index_block_len(
                 os,
                 header.idx_blk_elmts as usize,
                 os as usize,
@@ -2988,7 +2986,7 @@ mod tests {
             };
             let super_blk_size = stat(1);
             let data_blk_size = stat(3);
-            let expected_total = aehd + aeib + super_blk_size + data_blk_size;
+            let expected_total = header_len + index_block_len + super_blk_size + data_blk_size;
 
             let total: u64 = spans.iter().map(|&(_, l)| l).sum();
             assert_eq!(
@@ -3039,8 +3037,8 @@ mod tests {
         .unwrap();
         assert_eq!(&ea[0..4], b"EAHD");
         // `EAIB` follows `EAHD`: 12 fixed + 6*8 stats + 8 address + 4 checksum = 72
-        let aehd_size = 4 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 6 * 8 + 8 + 4;
-        assert_eq!(&ea[aehd_size..aehd_size + 4], b"EAIB");
+        let header_len = 4 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 6 * 8 + 8 + 4;
+        assert_eq!(&ea[header_len..header_len + 4], b"EAIB");
     }
 
     #[test]
@@ -3051,9 +3049,9 @@ mod tests {
             max_nelmts_bits: 32,
             idx_blk_elmts: 4,
             min_dblk_nelmts: 16,
-            super_blk_min_nelmts: 4,
+            super_blk_min_data_ptrs: 4,
             max_dblk_nelmts_bits: 10,
-            num_elements: 0,
+            max_idx_set: 0,
             index_block_address: StoredAddress::new(0),
         };
         let geom = ExtensibleArrayGeometry::from_header(&geom_header);
