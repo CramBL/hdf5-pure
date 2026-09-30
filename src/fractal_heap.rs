@@ -4,20 +4,24 @@
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 
+use hdf5_pure_format::__private::BTREE_V2_HUGE_OBJECT;
 use hdf5_pure_format::__private::FractalHeapChild;
 pub use hdf5_pure_format::__private::FractalHeapHeader;
 use hdf5_pure_format::__private::FractalHeapIdType;
+use hdf5_pure_format::__private::HugeObjectRecord;
 use hdf5_pure_format::__private::HugeObjectReference;
 
 use crate::address::StoredAddress;
 use crate::btree_v2::{
     BTreeV2Header, BTreeV2Record, collect_btree_v2_records, collect_btree_v2_records_from_source,
 };
-use crate::bytes::{ensure_len, read_length, read_offset};
+use crate::bytes;
 use crate::convert::{Narrow, is_undefined_addr};
 use crate::error::FormatError;
 use crate::source::Source;
 use crate::source::SourceMetadata;
+use crate::width::LengthWidth;
+use crate::width::OffsetWidth;
 
 /// Copy `len` bytes at `addr` out of an in-memory file image, bounds-checked.
 fn slice_object(file_data: &[u8], addr: u64, len: usize) -> Result<Vec<u8>, FormatError> {
@@ -44,11 +48,6 @@ fn read_object_at_source<S: Source + ?Sized>(
     source.read_metadata_at(addr, len)
 }
 
-/// The v2 B-tree record type for indirectly accessed, non-filtered "huge"
-/// fractal-heap objects: `address(offset_size) + length(length_size) +
-/// id(length_size)`. The only layout [`HugeObjectIndex`] decodes.
-const HUGE_OBJECT_BTREE_TYPE: u8 = 1;
-
 /// Confirm a heap's huge-objects B-tree is the one [`HugeObjectIndex::decode`]
 /// knows how to read, before its records are read as that layout.
 ///
@@ -64,12 +63,15 @@ fn check_huge_object_btree(
     offset_size: u8,
     length_size: u8,
 ) -> Result<(), FormatError> {
-    let required = offset_size as usize + 2 * length_size as usize;
-    if header.tree_type != HUGE_OBJECT_BTREE_TYPE || (header.record_size as usize) < required {
+    let required = HugeObjectRecord::size(
+        OffsetWidth::try_from(offset_size)?,
+        LengthWidth::try_from(length_size)?,
+    );
+    if header.tree_type != BTREE_V2_HUGE_OBJECT || header.record_size < required {
         return Err(FormatError::UnexpectedHugeObjectBTree {
             tree_type: header.tree_type,
-            record_size: header.record_size as usize,
-            required,
+            record_size: usize::from(header.record_size),
+            required: usize::from(required),
         });
     }
     Ok(())
@@ -125,15 +127,16 @@ impl HugeObjectIndex {
         #[cfg(test)]
         HUGE_INDEX_DECODES.with(|count| count.set(count.get() + 1));
 
-        let os = offset_size as usize;
-        let ls = length_size as usize;
+        let offset_width = OffsetWidth::try_from(offset_size)?;
+        let length_width = LengthWidth::try_from(length_size)?;
         let mut entries = Vec::with_capacity(records.len());
         for record in records {
-            let data = &record.data;
-            let addr = StoredAddress::new(read_offset(data, 0, offset_size)?);
-            let len = read_length(data, os, length_size)?;
-            let id = read_length(data, os + ls, length_size)?;
-            entries.push((id, addr, len));
+            let HugeObjectRecord {
+                address,
+                length,
+                id,
+            } = record.huge_object(offset_width, length_width)?;
+            entries.push((id, address, length));
         }
         entries.sort_unstable();
         Ok(Self { entries })
@@ -383,7 +386,7 @@ impl<'h> HeapObjectReader<'h> {
                 offset: block_addr as u64,
                 length: target_offset - block_heap_offset,
             })?;
-        ensure_len(file_data, pos, length)?;
+        bytes::ensure_len(file_data, pos, length)?;
         Ok(file_data[pos..pos + length].to_vec())
     }
 
@@ -405,7 +408,7 @@ impl<'h> HeapObjectReader<'h> {
                 "fractal heap: maximum recursion depth exceeded".into(),
             ));
         }
-        ensure_len(file_data, iblock_addr, 4)?;
+        bytes::ensure_len(file_data, iblock_addr, 4)?;
         let block = &file_data[iblock_addr..];
         match self.header.find_child_for_offset(
             block,

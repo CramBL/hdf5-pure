@@ -255,15 +255,9 @@ fn extract_dense_attributes(
     let mut heap = HeapObjectReader::new(&fh, offset_size, length_size);
     let mut attrs = Vec::new();
     for record in &records {
-        // Per HDF5 spec, both type 8 and type 9 records start with heap_id:
-        //   Type 8: heap_id(8) + msg_flags(1) + creation_order(4) + hash(4)
-        //   Type 9: heap_id(8) + msg_flags(1) + creation_order(4)
-        let id_offset = 0;
-
-        if record.data.len() < id_offset + fh.heap_id_length as usize {
+        let Some(id_bytes) = record.attribute_heap_id(fh.heap_id_length) else {
             continue;
-        }
-        let id_bytes = &record.data[id_offset..id_offset + fh.heap_id_length as usize];
+        };
 
         // Read the attribute message from the fractal heap (managed or huge object).
         let attr_data = heap.read(file_data, id_bytes)?;
@@ -314,12 +308,9 @@ fn extract_dense_attributes_from_source<S: Source + ?Sized>(
     let mut heap = HeapObjectReader::new(&fh, offset_size, length_size);
     let mut attrs = Vec::new();
     for record in &records {
-        // Both type 8 and type 9 records begin with the heap_id.
-        let id_offset = 0;
-        if record.data.len() < id_offset + fh.heap_id_length as usize {
+        let Some(id_bytes) = record.attribute_heap_id(fh.heap_id_length) else {
             continue;
-        }
-        let id_bytes = &record.data[id_offset..id_offset + fh.heap_id_length as usize];
+        };
         let attr_data = heap.read_from_source(source, id_bytes)?;
         attrs.push(StoredAttribute {
             message: AttributeMessage::parse_resolving(&attr_data, length_size, &resolver)?,
@@ -345,9 +336,7 @@ fn record_creation_index(
     attr_info: &AttributeInfoMessage,
 ) -> Option<u16> {
     attr_info.max_creation_index?;
-    let at = fh.heap_id_length as usize + 1;
-    let bytes = record.data.get(at..at + 4)?;
-    u16::try_from(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]])).ok()
+    u16::try_from(record.attribute_creation_order(fh.heap_id_length)?).ok()
 }
 
 #[cfg(test)]

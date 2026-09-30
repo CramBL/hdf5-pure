@@ -367,18 +367,9 @@ fn resolve_dense_entries(
     let mut heap = HeapObjectReader::new(&fh, offset_size, length_size);
     let mut entries = Vec::new();
     for record in &records {
-        // For type 5 (name index): hash(4) + heap_id(heap_id_length)
-        // For type 6 (creation order): creation_order(8) + heap_id(heap_id_length)
-        let id_offset = if btree_hdr.tree_type == 5 {
-            4 // skip hash
-        } else {
-            8 // skip creation_order
-        };
-
-        if record.data.len() < id_offset + fh.heap_id_length as usize {
+        let Some(id_bytes) = record.link_heap_id(btree_hdr.tree_type, fh.heap_id_length) else {
             continue;
-        }
-        let id_bytes = &record.data[id_offset..id_offset + fh.heap_id_length as usize];
+        };
 
         // Read the link message from the fractal heap (managed or huge object).
         let link_data = heap.read(file_data, id_bytes)?;
@@ -681,11 +672,9 @@ fn resolve_dense_entries_from_source<S: Source + ?Sized>(
     let mut heap = HeapObjectReader::new(&fh, offset_size, length_size);
     let mut entries = Vec::new();
     for record in &records {
-        let id_offset = if btree_hdr.tree_type == 5 { 4 } else { 8 };
-        if record.data.len() < id_offset + fh.heap_id_length as usize {
+        let Some(id_bytes) = record.link_heap_id(btree_hdr.tree_type, fh.heap_id_length) else {
             continue;
-        }
-        let id_bytes = &record.data[id_offset..id_offset + fh.heap_id_length as usize];
+        };
         let link_data = heap.read_from_source(source, id_bytes)?;
         let link = LinkMessage::parse(&link_data, offset_size)?;
         if let LinkTarget::Hard {
