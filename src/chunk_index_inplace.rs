@@ -504,7 +504,7 @@ impl Located {
         // forward from the last commit -- overwriting any slots a crashed writer
         // wrote but never committed -- instead of appending past them.
         let num_chunks = if chunk_elems == 0 {
-            ea_header.num_elements
+            ea_header.max_idx_set
         } else {
             current_dim.div_ceil(chunk_elems)
         };
@@ -823,7 +823,7 @@ impl Located {
 
         let bitmap = vec![0u8; sb.bitmap_size().to_usize()?];
         let undef = vec![StoredAddress::undefined(file.offset_size()); sb.ndblks.to_usize()?];
-        let aesb = hdf5_pure_format::__private::encode_super_block(
+        let super_block = hdf5_pure_format::__private::encode_super_block(
             self.ea_addr,
             sb_block_offset,
             &bitmap,
@@ -836,7 +836,7 @@ impl Located {
         // (`WriteEngine::append_prepare` and `File::open_swmr_writer`), so the base address
         // is zero and the position `alloc_raw` returns is the address the file stores. The
         // three further allocations below rest on the same invariant.
-        let new_addr = StoredAddress::new(file.alloc_raw(&aesb)?);
+        let new_addr = StoredAddress::new(file.alloc_raw(&super_block)?);
         #[cfg(test)]
         alloc_probe::note_super_block();
         // The block exists before anything names it. When its bytes were appended
@@ -1046,9 +1046,9 @@ impl Located {
             stat_block[at..at + ls].copy_from_slice(&value.to_le_bytes()[..ls]);
             at += ls;
         }
-        let aehd_size =
+        let header_len =
             ExtensibleArrayHeader::serialized_size(file.offset_size(), file.length_size()) as u64;
-        let cks_off = ea_addr + aehd_size - 4;
+        let cks_off = ea_addr + header_len - 4;
         file.publish_checksummed(ea_addr, cks_off, ea_addr + 12, &stat_block[..at])
     }
 
