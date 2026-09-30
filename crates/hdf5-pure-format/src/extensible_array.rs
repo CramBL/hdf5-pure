@@ -13,6 +13,8 @@
 use alloc::format;
 use alloc::vec;
 use alloc::vec::Vec;
+use core::num::NonZeroU8;
+use core::num::NonZeroU64;
 
 use crate::address::StoredAddress;
 use crate::bytes;
@@ -28,45 +30,27 @@ use crate::width::LengthWidth;
 use crate::width::OffsetWidth;
 
 /// An Extensible Array header, signature `EAHD`, version 0.
+///
+/// The maximum element bit count is in `1..=64`, and the page exponent is at most that count
+/// and at most 63. The page element count fits a [`u64`], and the block offset is 1 to 8 bytes
+/// wide.
 #[derive(Debug, Clone)]
 pub struct ExtensibleArrayHeader {
     /// The client ID: 0 for unfiltered chunks and 1 for filtered ones.
     pub client_id: u8,
     /// The width in bytes of one element.
     pub element_size: u8,
-    /// The number of bits that hold the maximum number of elements.
-    pub max_nelmts_bits: u8,
+    bit_geometry: ExtensibleArrayBitGeometry,
     /// The number of elements the index block holds.
     pub idx_blk_elmts: u8,
     /// The number of elements in the smallest data block.
     pub min_dblk_nelmts: u8,
     /// The fewest data block addresses a super block holds.
     pub super_blk_min_data_ptrs: u8,
-    /// The base 2 logarithm of the number of elements in a data block page.
-    pub max_dblk_nelmts_bits: u8,
     /// One more than the highest element index set, the "Max Index Set" field.
     pub max_idx_set: u64,
     /// The address of the index block.
     pub index_block_address: StoredAddress,
-}
-
-/// Reads a little-endian unsigned integer `size` bytes wide from the start of `data`.
-///
-/// # Errors
-///
-/// Returns [`FormatError::ChunkedReadError`] if `size` is more than 8 or `data` is shorter than
-/// `size`.
-fn read_variable_length(data: &[u8], size: usize) -> Result<u64, FormatError> {
-    if size > 8 || data.len() < size {
-        return Err(FormatError::ChunkedReadError(
-            "invalid variable-length size".into(),
-        ));
-    }
-    let mut val = 0u64;
-    for (i, &byte) in data.iter().enumerate().take(size) {
-        val |= (byte as u64) << (i * 8);
-    }
-    Ok(val)
 }
 
 impl ExtensibleArrayHeader {
@@ -78,6 +62,10 @@ impl ExtensibleArrayHeader {
     /// [`FormatError::ChunkedReadError`] if the signature is not `EAHD` or the version is not 0,
     /// [`FormatError::InvalidOffsetSize`] or [`FormatError::InvalidLengthSize`] if a width is not
     /// 2, 4, or 8, and [`FormatError::ChecksumMismatch`] if the checksum does not match.
+    ///
+    /// Returns [`FormatError::InvalidChunkGeometry`] if the maximum element bit count is outside
+    /// `1..=64`, the page element count does not fit a [`u64`], or the page exponent exceeds the
+    /// maximum element bit count.
     pub fn parse(
         file_data: &[u8],
         offset: usize,
@@ -116,6 +104,8 @@ impl ExtensibleArrayHeader {
         let min_dblk_nelmts = d[9];
         let super_blk_min_data_ptrs = d[10];
         let max_dblk_nelmts_bits = d[11];
+        let bit_geometry =
+            ExtensibleArrayBitGeometry::parse(max_nelmts_bits, max_dblk_nelmts_bits)?;
 
         let mut pos = 12;
         // The six statistics, in the order the header stores them:
@@ -135,11 +125,10 @@ impl ExtensibleArrayHeader {
         Ok(ExtensibleArrayHeader {
             client_id,
             element_size,
-            max_nelmts_bits,
+            bit_geometry,
             idx_blk_elmts,
             min_dblk_nelmts,
             super_blk_min_data_ptrs,
-            max_dblk_nelmts_bits,
             max_idx_set,
             index_block_address,
         })
@@ -167,6 +156,212 @@ impl ExtensibleArrayHeader {
         let buf = source.read_metadata_at(address.get(), size)?;
         Self::parse(&buf, 0, offset_size, length_size)
     }
+
+    /// Returns the parsed maximum element bit count and data block page exponent.
+    pub fn bit_geometry(&self) -> ExtensibleArrayBitGeometry {
+        self.bit_geometry
+    }
+
+    /// Returns the "Max Nelmts Bits" field, in `1..=64`.
+    pub fn max_index_bits(&self) -> MaxIndexBits {
+        self.bit_geometry.max_index_bits()
+    }
+
+    /// Returns the number of elements in a data block page, a nonzero power of two.
+    pub fn page_nelmts(&self) -> NonZeroU64 {
+        self.bit_geometry.page_nelmts()
+    }
+
+    /// Returns the width in bytes of a block offset, in `1..=8`.
+    pub fn block_offset_width(&self) -> BlockOffsetWidth {
+        self.bit_geometry.block_offset_width()
+    }
+}
+
+/// The parsed maximum element bit count and data block page exponent.
+///
+/// The maximum element bit count is in `1..=64`, and the page exponent is in `0..=63` and at
+/// most that count. The page element count is a nonzero power of two representable by a [`u64`].
+/// The block-offset width is the maximum element bit count rounded up to whole bytes.
+/// The C library computes the block-offset width with `H5EA_SIZEOF_OFFSET_BITS` (`H5EApkg.h`,
+/// HDF5 2.2.0).
+#[derive(Clone, Copy, Debug)]
+pub struct ExtensibleArrayBitGeometry {
+    max_index_bits: MaxIndexBits,
+    page_bits: PageBits,
+}
+
+impl ExtensibleArrayBitGeometry {
+    fn for_writer() -> Self {
+        // The constant creation parameters have a 32-bit index and 1024-element pages.
+        Self::parse(EA_MAX_NELMTS_BITS, EA_MAX_DBLK_NELMTS_BITS)
+            .expect("writer bit geometry is representable")
+    }
+
+    /// Parses the maximum element bit count and the data block page exponent.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::InvalidChunkGeometry`] if `max_index_bits` is outside `1..=64`,
+    /// the page count does not fit a [`u64`], or `page_bits` exceeds `max_index_bits`.
+    fn parse(max_index_bits: u8, page_bits: u8) -> Result<Self, FormatError> {
+        let max_index_bits = MaxIndexBits::parse(max_index_bits)?;
+        let page_bits = PageBits::parse(page_bits)?;
+        if page_bits.0 > max_index_bits.get() {
+            return Err(FormatError::InvalidChunkGeometry(
+                "Extensible Array page exponent exceeds maximum element bit count",
+            ));
+        }
+        Ok(Self {
+            max_index_bits,
+            page_bits,
+        })
+    }
+
+    /// Returns the "Max Nelmts Bits" field, in `1..=64`.
+    pub fn max_index_bits(self) -> MaxIndexBits {
+        self.max_index_bits
+    }
+
+    /// Returns the number of elements in a data block page, a nonzero power of two.
+    pub fn page_nelmts(self) -> NonZeroU64 {
+        self.page_bits.nelmts()
+    }
+
+    /// Returns the maximum element bit count rounded up to a block-offset byte width.
+    pub fn block_offset_width(self) -> BlockOffsetWidth {
+        match self.max_index_bits.get() {
+            1..=8 => BlockOffsetWidth::One,
+            9..=16 => BlockOffsetWidth::Two,
+            17..=24 => BlockOffsetWidth::Three,
+            25..=32 => BlockOffsetWidth::Four,
+            33..=40 => BlockOffsetWidth::Five,
+            41..=48 => BlockOffsetWidth::Six,
+            49..=56 => BlockOffsetWidth::Seven,
+            _ => BlockOffsetWidth::Eight,
+        }
+    }
+}
+
+/// An Extensible Array header's "Max Nelmts Bits" field, in `1..=64`.
+///
+/// The field is defined in "The Extensible Array Index" of the [format specification,
+/// version 4.0][spec].
+///
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsec_fmt4_appendixc_extarr
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(transparent)]
+pub struct MaxIndexBits(NonZeroU8);
+
+impl MaxIndexBits {
+    /// Parses the maximum element bit count supported by the reader and writer.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::InvalidChunkGeometry`] if `bits` is outside `1..=64`.
+    fn parse(bits: u8) -> Result<Self, FormatError> {
+        NonZeroU8::new(bits)
+            .filter(|bits| bits.get() <= 64)
+            .map(Self)
+            .ok_or(FormatError::InvalidChunkGeometry(
+                "Extensible Array maximum element bit count must be in 1..=64",
+            ))
+    }
+
+    /// Returns the bit count as a [`u8`], in `1..=64`.
+    pub fn get(self) -> u8 {
+        self.0.get()
+    }
+}
+
+/// The base 2 logarithm of the number of elements in a data block page, in `0..=63`.
+#[derive(Clone, Copy, Debug)]
+#[repr(transparent)]
+struct PageBits(u8);
+
+impl PageBits {
+    /// Parses a page exponent whose element count fits a [`u64`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::InvalidChunkGeometry`] if `bits` exceeds 63.
+    fn parse(bits: u8) -> Result<Self, FormatError> {
+        if bits > 63 {
+            return Err(FormatError::InvalidChunkGeometry(
+                "Extensible Array page element count does not fit u64",
+            ));
+        }
+        Ok(Self(bits))
+    }
+
+    /// Returns the number of elements in a page, a nonzero power of two.
+    fn nelmts(self) -> NonZeroU64 {
+        // The constructor admits only exponents at most 63, so this power of two is nonzero.
+        NonZeroU64::new(1u64 << self.0).expect("a parsed page exponent produces a nonzero count")
+    }
+}
+
+/// The width in bytes of an Extensible Array block offset, in `1..=8`.
+///
+/// The block offset is defined in "The Extensible Array Index" of the [format specification,
+/// version 4.0][spec].
+///
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsec_fmt4_appendixc_extarr
+#[derive(Clone, Copy, Debug)]
+#[repr(u8)]
+pub enum BlockOffsetWidth {
+    One = 1,
+    Two = 2,
+    Three = 3,
+    Four = 4,
+    Five = 5,
+    Six = 6,
+    Seven = 7,
+    Eight = 8,
+}
+
+impl BlockOffsetWidth {
+    /// Returns the number of bytes in the field, in `1..=8`.
+    pub fn bytes(self) -> usize {
+        self as usize
+    }
+
+    /// Reads a little-endian block offset from the start of `data`.
+    ///
+    /// Reads [`bytes`](Self::bytes) bytes and ignores any remaining bytes.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::UnexpectedEof`] if `data` is shorter than the field width.
+    pub fn read(self, data: &[u8]) -> Result<u64, FormatError> {
+        let size = self.bytes();
+        let field = data.get(..size).ok_or(FormatError::UnexpectedEof {
+            expected: size,
+            available: data.len(),
+        })?;
+        let mut bytes = [0u8; 8];
+        bytes[..size].copy_from_slice(field);
+        Ok(u64::from_le_bytes(bytes))
+    }
+}
+
+/// Reads a little-endian unsigned integer `size` bytes wide from the start of `data`.
+///
+/// # Errors
+///
+/// Returns [`FormatError::ChunkedReadError`] if `size` is more than 8 or `data` is shorter than
+/// `size`.
+fn read_variable_length(data: &[u8], size: usize) -> Result<u64, FormatError> {
+    if size > 8 || data.len() < size {
+        return Err(FormatError::ChunkedReadError(
+            "invalid variable-length size".into(),
+        ));
+    }
+    let mut val = 0u64;
+    for (i, &byte) in data.iter().enumerate().take(size) {
+        val |= (byte as u64) << (i * 8);
+    }
+    Ok(val)
 }
 
 /// Returns the width in bytes of an element: the address alone for an unfiltered index, and the
@@ -231,13 +426,13 @@ impl ExtensibleArrayGeometry {
         } else {
             min_dblk.trailing_zeros() as u64
         };
-        // `max_nelmts_bits` is a bit-count header field, so the difference is a
+        // The parsed maximum-index bit count is at most 64, so the difference is a
         // small super-block count that always fits `usize`.
         #[expect(
             clippy::cast_possible_truncation,
-            reason = "max_nelmts_bits is a bit count (<= 64); the super-block count fits usize"
+            reason = "the parsed maximum-index bit count is at most 64; the super-block count fits usize"
         )]
-        let nsblks = (h.max_nelmts_bits as u64).saturating_sub(log2_min) as usize + 1;
+        let nsblks = (u64::from(h.max_index_bits().get())).saturating_sub(log2_min) as usize + 1;
 
         let mut sblks = Vec::with_capacity(nsblks);
         let mut ndblks = 1u64;
@@ -448,11 +643,10 @@ fn read_data_block_elements(
 ) -> Result<(), FormatError> {
     // EADB: signature(4) + version(1) + client_id(1) + header_address(offset_size)
     let db_header_size = 4 + 1 + 1 + offset_size as usize;
-    // Block offset is encoded in ceil(max_nelmts_bits/8) bytes.
-    let blk_off_size = (header.max_nelmts_bits as usize).div_ceil(8);
+    let blk_off_size = header.block_offset_width().bytes();
     // The checksum covers all `nelmts` elements, and the reader parses those before
     // `total_elements`.
-    let db_len = eadb_extent(nelmts, header, offset_size, blk_off_size)?;
+    let db_len = eadb_extent(nelmts, header, offset_size)?;
     if db_len > file_data.len() || db_offset > file_data.len() - db_len {
         return Err(FormatError::UnexpectedEof {
             expected: db_offset.saturating_add(db_len),
@@ -505,8 +699,8 @@ fn eadb_extent(
     nelmts: usize,
     header: &ExtensibleArrayHeader,
     offset_size: u8,
-    blk_off_size: usize,
 ) -> Result<usize, FormatError> {
+    let blk_off_size = header.block_offset_width().bytes();
     let elem_stride = ea_elem_stride(header, offset_size);
     nelmts
         .checked_mul(elem_stride)
@@ -530,9 +724,10 @@ fn page_is_initialized(bitmap: &[u8], page_idx: usize) -> bool {
 /// Reads the paged data block at `db_offset` in `file_data`, and calls `visit` for each element
 /// before `total_elements` that stores a chunk address.
 ///
-/// A paged data block has a prefix with its own checksum, then `npages` pages of `page_nelmts`
-/// elements and a checksum each. The super block that addresses it marks page `p` of its data
-/// block `db_local_idx` initialized at bit `db_local_idx * npages + p` of `page_bitmap`. A page
+/// A paged data block has a prefix with its own checksum, then `npages` pages, each with
+/// [`header.page_nelmts()`](ExtensibleArrayHeader::page_nelmts) elements and a checksum.
+/// The super block that addresses it marks page `p` of data block `db_local_idx` initialized
+/// at bit `db_local_idx * npages + p` of `page_bitmap`. A page
 /// the bitmap does not mark takes its full length in the block, and the reader steps over it.
 ///
 /// # Errors
@@ -540,13 +735,13 @@ fn page_is_initialized(bitmap: &[u8], page_idx: usize) -> bool {
 /// Returns [`FormatError::UnexpectedEof`] if the prefix or an initialized page runs past the end
 /// of `file_data`, [`FormatError::ChunkedReadError`] if the signature is not `EADB`,
 /// [`FormatError::ChecksumMismatch`] if a checksum does not match,
-/// [`FormatError::OffsetOverflow`] if the length of a page does not fit a `usize`, the errors
+/// [`FormatError::ValueTooLargeForPlatform`] if the page element count does not fit a [`usize`],
+/// [`FormatError::OffsetOverflow`] if the length of a page does not fit a [`usize`], the errors
 /// [`read_element`] returns, and the error `visit` returns.
 #[allow(clippy::too_many_arguments)]
 fn read_paged_data_block(
     file_data: &[u8],
     db_offset: usize,
-    page_nelmts: usize,
     npages: usize,
     db_local_idx: usize,
     page_bitmap: &[u8],
@@ -557,7 +752,8 @@ fn read_paged_data_block(
     total_elements: usize,
     visit: &mut impl FnMut(u64, ChunkRecord) -> Result<(), FormatError>,
 ) -> Result<(), FormatError> {
-    let blk_off_size = (header.max_nelmts_bits as usize).div_ceil(8);
+    let page_nelmts = header.page_nelmts().get().to_usize()?;
+    let blk_off_size = header.block_offset_width().bytes();
     // Header includes its own checksum: sig(4)+ver(1)+cid(1)+hdr_addr+block_offset+checksum(4)
     let db_header_size = 4 + 1 + 1 + offset_size as usize + blk_off_size + 4;
     if db_header_size > file_data.len() || db_offset > file_data.len() - db_header_size {
@@ -820,15 +1016,14 @@ fn read_super_block(
     //       + [page-init bitmap, if data blocks are paged]
     //       + data block addresses
     //       + checksum
-    let blk_off_size = (header.max_nelmts_bits as usize).div_ceil(8);
+    let blk_off_size = header.block_offset_width().bytes();
     let sb_header_size = 4 + 1 + 1 + os + blk_off_size;
 
-    let page_nelmts = 1usize << header.max_dblk_nelmts_bits;
     let sb = SuperBlockGeometry {
         ndblks: ndblks as u64,
         blocks: DataBlockGeometry {
             dblk_nelmts: nelmts_per_dblk as u64,
-            page_nelmts: page_nelmts as u64,
+            page_nelmts: header.page_nelmts().get(),
         },
     };
     let is_paged = sb.blocks.is_paged();
@@ -887,7 +1082,6 @@ fn read_super_block(
                 read_paged_data_block(
                     file_data,
                     addr.get().to_usize()?,
-                    page_nelmts,
                     npages,
                     db_local,
                     &page_bitmap,
@@ -929,8 +1123,8 @@ fn read_super_block(
 /// # Errors
 ///
 /// Returns the errors [`ExtensibleArrayHeader::parse_from_source`] returns,
-/// [`FormatError::ChunkedReadError`] if the page exponent is 64 or more or a signature does not
-/// match, [`FormatError::ChecksumMismatch`] if the checksum of the index block or a super block
+/// [`FormatError::ChunkedReadError`] if a signature does not match,
+/// [`FormatError::ChecksumMismatch`] if the checksum of the index block or a super block
 /// does not match, and the error `source` returns if a read fails.
 pub fn extensible_array_index_spans(
     source: &(impl MetadataSource + ?Sized),
@@ -942,13 +1136,8 @@ pub fn extensible_array_index_spans(
         ExtensibleArrayHeader::parse_from_source(source, ea_base, offset_size, length_size)?;
     let os = offset_size as usize;
     let elem_size = ea_elem_stride(&header, offset_size);
-    if header.max_dblk_nelmts_bits >= 64 {
-        return Err(FormatError::ChunkedReadError(
-            "Extensible Array page exponent out of range".into(),
-        ));
-    }
-    let page_nelmts = 1u64 << header.max_dblk_nelmts_bits;
-    let blk_off_size = (header.max_nelmts_bits as usize).div_ceil(8);
+    let page_nelmts = header.page_nelmts().get();
+    let blk_off_size = header.block_offset_width();
 
     // EAHD header block.
     let header_len = ExtensibleArrayHeader::serialized_size(offset_size, length_size) as u64;
@@ -1036,13 +1225,13 @@ fn easb_data_block_spans(
     sb_addr: StoredAddress,
     sb: SuperBlockGeometry,
     offset_size: u8,
-    blk_off_size: usize,
+    blk_off_size: BlockOffsetWidth,
     elem_size: usize,
     spans: &mut Vec<(u64, u64)>,
 ) -> Result<(), FormatError> {
     let os = offset_size as usize;
     // The signature, the version, the client ID, the header address, and the block offset.
-    let sb_header = 4 + 1 + 1 + os + blk_off_size;
+    let sb_header = 4 + 1 + 1 + os + blk_off_size.bytes();
     // The caller frees the spans, so the walk verifies the checksum of the whole block before it
     // reads an address.
     let sb_len = super_block_len(sb, offset_size, blk_off_size).to_usize()?;
@@ -1240,12 +1429,12 @@ fn read_data_block_elements_from_source(
 ) -> Result<(), FormatError> {
     let os = offset_size as usize;
     let db_header_size = 4 + 1 + 1 + os;
-    let blk_off_size = (header.max_nelmts_bits as usize).div_ceil(8);
+    let blk_off_size = header.block_offset_width().bytes();
     let limit = total_elements.saturating_sub(start_index).min(nelmts);
 
     // The whole block, since its checksum covers the elements past `limit` too. An unpaged block
     // holds at most one page of elements.
-    let region_len = eadb_extent(nelmts, header, offset_size, blk_off_size)?;
+    let region_len = eadb_extent(nelmts, header, offset_size)?;
     let block = source.read_metadata_at(db_address.get(), region_len)?;
     if &block[0..4] != b"EADB" {
         return Err(FormatError::ChunkedReadError(
@@ -1285,7 +1474,6 @@ fn read_data_block_elements_from_source(
 fn read_paged_data_block_from_source(
     source: &(impl MetadataSource + ?Sized),
     db_address: StoredAddress,
-    page_nelmts: usize,
     npages: usize,
     db_local_idx: usize,
     page_bitmap: &[u8],
@@ -1296,7 +1484,8 @@ fn read_paged_data_block_from_source(
     total_elements: usize,
     visit: &mut impl FnMut(u64, ChunkRecord) -> Result<(), FormatError>,
 ) -> Result<(), FormatError> {
-    let blk_off_size = (header.max_nelmts_bits as usize).div_ceil(8);
+    let page_nelmts = header.page_nelmts().get().to_usize()?;
+    let blk_off_size = header.block_offset_width().bytes();
     let db_header_size = 4 + 1 + 1 + offset_size as usize + blk_off_size + 4;
     let elem_stride = ea_elem_stride(header, offset_size);
     let page_stride = page_nelmts
@@ -1385,15 +1574,14 @@ fn read_super_block_from_source(
     visit: &mut impl FnMut(u64, ChunkRecord) -> Result<(), FormatError>,
 ) -> Result<(), FormatError> {
     let os = offset_size as usize;
-    let blk_off_size = (header.max_nelmts_bits as usize).div_ceil(8);
+    let blk_off_size = header.block_offset_width().bytes();
     let sb_header_size = 4 + 1 + 1 + os + blk_off_size;
 
-    let page_nelmts = 1usize << header.max_dblk_nelmts_bits;
     let sb = SuperBlockGeometry {
         ndblks: ndblks as u64,
         blocks: DataBlockGeometry {
             dblk_nelmts: nelmts_per_dblk as u64,
-            page_nelmts: page_nelmts as u64,
+            page_nelmts: header.page_nelmts().get(),
         },
     };
     let is_paged = sb.blocks.is_paged();
@@ -1440,7 +1628,6 @@ fn read_super_block_from_source(
                 read_paged_data_block_from_source(
                     source,
                     addr,
-                    page_nelmts,
                     npages,
                     db_local,
                     &page_bitmap,
@@ -1511,16 +1698,17 @@ pub fn write_stored_address(buf: &mut Vec<u8>, addr: StoredAddress, offset_size:
     bytes::write_offset(buf, addr.get(), offset_size);
 }
 
-/// Appends a block's offset in the array's element space as a little-endian field of
-/// `blk_off_size` bytes, the width `ceil(max_nelmts_bits / 8)` the header gives it.
+/// Appends a block's offset in the array's element space as a little-endian field of `width`
+/// bytes.
 ///
 /// # Panics
 ///
-/// Panics if `block_offset` does not fit `blk_off_size` bytes.
-fn write_block_offset(buf: &mut Vec<u8>, block_offset: u64, blk_off_size: usize) {
+/// Panics if `block_offset` does not fit the number of bytes specified by `width`.
+fn write_block_offset(buf: &mut Vec<u8>, block_offset: u64, width: BlockOffsetWidth) {
+    let blk_off_size = width.bytes();
     let bytes = block_offset.to_le_bytes();
     assert!(
-        blk_off_size <= bytes.len() && bytes[blk_off_size..].iter().all(|&byte| byte == 0),
+        bytes[blk_off_size..].iter().all(|&byte| byte == 0),
         "block offset {block_offset} does not fit a {blk_off_size}-byte field"
     );
     buf.extend_from_slice(&bytes[..blk_off_size]);
@@ -1529,18 +1717,19 @@ fn write_block_offset(buf: &mut Vec<u8>, block_offset: u64, blk_off_size: usize)
 /// Builds the data block (`EADB`) of the elements in slots `elem_start..elem_start + dblk_nelmts`,
 /// with `block_offset_rel` as its block offset.
 ///
-/// A slot no chunk occupies stores the undefined address. A block of more than `page_nelmts`
-/// elements is paged: its prefix has its own checksum, and every page follows with a checksum
-/// each.
+/// An unoccupied slot stores the undefined address. A block of more than
+/// [`bits.page_nelmts()`](ExtensibleArrayBitGeometry::page_nelmts) elements is paged: its prefix
+/// has its own checksum, and each page has a checksum.
 ///
 /// # Errors
 ///
 /// Returns [`FormatError::Internal`] if the stored size of a chunk does not fit the chunk size
-/// field.
+/// field, and [`FormatError::ValueTooLargeForPlatform`] if the page element count does not fit a
+/// [`usize`].
 ///
 /// # Panics
 ///
-/// Panics if `block_offset_rel` does not fit `blk_off_size` bytes.
+/// Panics if `block_offset_rel` does not fit the block-offset width in `bits`.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn encode_data_block(
     slots: &IndexSlots<'_>,
@@ -1552,15 +1741,15 @@ pub(crate) fn encode_data_block(
     has_filters: bool,
     chunk_size_bytes: usize,
     client_id: u8,
-    page_nelmts: usize,
-    blk_off_size: usize,
+    bits: ExtensibleArrayBitGeometry,
 ) -> Result<Vec<u8>, FormatError> {
+    let page_nelmts = bits.page_nelmts().get().to_usize()?;
     let mut buf = Vec::new();
     buf.extend_from_slice(b"EADB");
     buf.push(0); // version
     buf.push(client_id);
     write_stored_address(&mut buf, ea_address, offset_size);
-    write_block_offset(&mut buf, block_offset_rel, blk_off_size);
+    write_block_offset(&mut buf, block_offset_rel, bits.block_offset_width());
 
     // The counts are `usize` loop bounds, and the page arithmetic below stays in `usize`.
     let blocks = DataBlockGeometry {
@@ -1634,22 +1823,23 @@ pub(crate) fn encode_data_block(
 ///
 /// # Panics
 ///
-/// Panics if `block_offset_rel` does not fit `blk_off_size` bytes.
+/// Panics if `block_offset_rel` does not fit the number of bytes returned by
+/// [`width.bytes()`](BlockOffsetWidth::bytes).
 pub fn encode_super_block(
     ea_address: StoredAddress,
     block_offset_rel: u64,
     page_bitmap: &[u8],
     dblk_addrs: &[StoredAddress],
     offset_size: OffsetWidth,
-    blk_off_size: usize,
     client_id: u8,
+    width: BlockOffsetWidth,
 ) -> Vec<u8> {
     let mut buf = Vec::new();
     buf.extend_from_slice(b"EASB");
     buf.push(0); // version
     buf.push(client_id);
     write_stored_address(&mut buf, ea_address, offset_size);
-    write_block_offset(&mut buf, block_offset_rel, blk_off_size);
+    write_block_offset(&mut buf, block_offset_rel, width);
     buf.extend_from_slice(page_bitmap);
     for &addr in dblk_addrs {
         write_stored_address(&mut buf, addr, offset_size);
@@ -1704,9 +1894,9 @@ pub(crate) fn data_block_len(
     blocks: DataBlockGeometry,
     elem_size: usize,
     offset_size: u8,
-    blk_off_size: usize,
+    blk_off_size: BlockOffsetWidth,
 ) -> u64 {
-    let prefix = (4 + 1 + 1 + offset_size as u64) + blk_off_size as u64;
+    let prefix = (4 + 1 + 1 + offset_size as u64) + blk_off_size.bytes() as u64;
     if blocks.is_paged() {
         // Paged: the prefix and its checksum, then every page and its checksum.
         prefix + 4 + blocks.npages() * (blocks.page_nelmts * elem_size as u64 + 4)
@@ -1723,26 +1913,29 @@ pub(crate) fn data_block_len(
 pub(crate) fn super_block_len(
     geom: SuperBlockGeometry,
     offset_size: u8,
-    blk_off_size: usize,
+    blk_off_size: BlockOffsetWidth,
 ) -> u64 {
     let os = offset_size as u64;
-    let header = 4 + 1 + 1 + os + blk_off_size as u64;
+    let header = 4 + 1 + 1 + os + blk_off_size.bytes() as u64;
     header + geom.bitmap_size() + geom.ndblks * os + 4
 }
 
 /// Returns the header statistics of the array whose occupied slots are `occupancy`, from the
 /// blocks [`build_extensible_array_at`] allocates for them.
+///
+/// The caller passes `idx_blk_elmts`, `bits`, and `geom` from the same header.
 pub fn extensible_array_stats(
     geom: &ExtensibleArrayGeometry,
     idx_blk_elmts: u64,
+    bits: ExtensibleArrayBitGeometry,
     elem_size: usize,
-    page_nelmts: u64,
     offset_size: OffsetWidth,
-    blk_off_size: usize,
     max_idx_set: u64,
     occupancy: SlotOccupancy<'_>,
 ) -> ExtensibleArrayStats {
     let offset_size = offset_size.get();
+    let page_nelmts = bits.page_nelmts().get();
+    let blk_off_size = bits.block_offset_width();
     let mut s = ExtensibleArrayStats {
         nsuper_blks: 0,
         super_blk_size: 0,
@@ -1795,15 +1988,8 @@ pub fn extensible_array_stats(
 /// itself, and a debug assertion checks its length against the layout's.
 pub struct ExtensibleArrayLayout {
     encoding: ChunkElementEncoding,
-    max_nelmts_bits: u8,
-    idx_blk_elmts: u8,
-    min_dblk_nelmts: u8,
-    super_blk_min_data_ptrs: u8,
-    max_dblk_nelmts_bits: u8,
+    bits: ExtensibleArrayBitGeometry,
     geom: ExtensibleArrayGeometry,
-    page_nelmts: usize,
-    /// The width in bytes of a block offset.
-    blk_off_size: usize,
     /// The number of elements in the index block, `idx_blk_elmts`.
     inline: usize,
     /// The length of the header in bytes.
@@ -1832,20 +2018,6 @@ pub fn extensible_array_layout(
         ..
     } = encoding;
 
-    let (
-        max_nelmts_bits,
-        idx_blk_elmts,
-        min_dblk_nelmts,
-        super_blk_min_data_ptrs,
-        max_dblk_nelmts_bits,
-    ) = (
-        EA_MAX_NELMTS_BITS,
-        EA_IDX_BLK_ELMTS,
-        EA_MIN_DBLK_NELMTS,
-        EA_SUPER_BLK_MIN_DATA_PTRS,
-        EA_MAX_DBLK_NELMTS_BITS,
-    );
-
     // The reader derives its geometry the same way.
     #[expect(
         clippy::cast_possible_truncation,
@@ -1854,18 +2026,15 @@ pub fn extensible_array_layout(
     let geom_header = ExtensibleArrayHeader {
         client_id,
         element_size: elem_size as u8,
-        max_nelmts_bits,
-        idx_blk_elmts,
-        min_dblk_nelmts,
-        super_blk_min_data_ptrs,
-        max_dblk_nelmts_bits,
+        bit_geometry: ExtensibleArrayBitGeometry::for_writer(),
+        idx_blk_elmts: EA_IDX_BLK_ELMTS,
+        min_dblk_nelmts: EA_MIN_DBLK_NELMTS,
+        super_blk_min_data_ptrs: EA_SUPER_BLK_MIN_DATA_PTRS,
         max_idx_set: 0,
         index_block_address: StoredAddress::new(0),
     };
     let geom = ExtensibleArrayGeometry::from_header(&geom_header);
-    let page_nelmts = 1usize << max_dblk_nelmts_bits;
-    let blk_off_size = (max_nelmts_bits as usize).div_ceil(8);
-    let inline = idx_blk_elmts as usize;
+    let inline = geom_header.idx_blk_elmts as usize;
 
     let header_len = ExtensibleArrayHeader::serialized_size(offset_size.get(), length_size.get());
     let index_block_len = index_block_len(
@@ -1878,11 +2047,10 @@ pub fn extensible_array_layout(
 
     let stats = extensible_array_stats(
         &geom,
-        idx_blk_elmts as u64,
+        u64::from(geom_header.idx_blk_elmts),
+        geom_header.bit_geometry(),
         elem_size,
-        page_nelmts as u64,
         offset_size,
-        blk_off_size,
         num_slots,
         occupancy,
     );
@@ -1891,14 +2059,8 @@ pub fn extensible_array_layout(
 
     ExtensibleArrayLayout {
         encoding,
-        max_nelmts_bits,
-        idx_blk_elmts,
-        min_dblk_nelmts,
-        super_blk_min_data_ptrs,
-        max_dblk_nelmts_bits,
+        bits: geom_header.bit_geometry(),
         geom,
-        page_nelmts,
-        blk_off_size,
         inline,
         header_len,
         index_block_len,
@@ -1968,19 +2130,15 @@ pub fn build_extensible_array_at(
         client_id,
     } = layout.encoding;
     let ExtensibleArrayLayout {
-        max_nelmts_bits,
-        idx_blk_elmts,
-        min_dblk_nelmts,
-        super_blk_min_data_ptrs,
-        max_dblk_nelmts_bits,
+        bits,
         ref geom,
-        page_nelmts,
-        blk_off_size,
         inline,
         header_len,
         index_block_len,
         ..
     } = layout;
+
+    let page_nelmts = bits.page_nelmts().get().to_usize()?;
 
     let index_block_address = ea_address.offset(header_len as u64);
     let body_base = index_block_address.offset(index_block_len as u64);
@@ -2028,8 +2186,7 @@ pub fn build_extensible_array_at(
             has_filters,
             chunk_size_bytes,
             client_id,
-            page_nelmts,
-            blk_off_size,
+            bits,
         )?;
         ndata_blks += 1;
         data_blk_size += db_bytes.len() as u64;
@@ -2078,8 +2235,7 @@ pub fn build_extensible_array_at(
                 has_filters,
                 chunk_size_bytes,
                 client_id,
-                page_nelmts,
-                blk_off_size,
+                bits,
             )?;
             ndata_blks += 1;
             data_blk_size += db_bytes.len() as u64;
@@ -2110,8 +2266,8 @@ pub fn build_extensible_array_at(
             &page_bitmap,
             &sb_dblk_addrs,
             offset_size,
-            blk_off_size,
             client_id,
+            bits.block_offset_width(),
         );
         nsuper_blks += 1;
         super_blk_size += super_block.len() as u64;
@@ -2124,36 +2280,36 @@ pub fn build_extensible_array_at(
     // ---- Build the header (EAHD) ------------------------------------------
     let write_length = |buf: &mut Vec<u8>, val: u64| bytes::write_length(buf, val, length_size);
 
-    let mut header = Vec::with_capacity(header_len);
-    header.extend_from_slice(b"EAHD");
-    header.push(0); // version
-    header.push(client_id);
+    let mut header_bytes = Vec::with_capacity(header_len);
+    header_bytes.extend_from_slice(b"EAHD");
+    header_bytes.push(0); // version
+    header_bytes.push(client_id);
     #[expect(
         clippy::cast_possible_truncation,
         reason = "element record size written into the 1-byte EA header field selected for this file"
     )]
-    header.push(elem_size as u8);
-    header.push(max_nelmts_bits);
-    header.push(idx_blk_elmts);
-    header.push(min_dblk_nelmts);
-    header.push(super_blk_min_data_ptrs);
-    header.push(max_dblk_nelmts_bits);
+    header_bytes.push(elem_size as u8);
+    header_bytes.push(bits.max_index_bits().get());
+    header_bytes.push(EA_IDX_BLK_ELMTS);
+    header_bytes.push(EA_MIN_DBLK_NELMTS);
+    header_bytes.push(EA_SUPER_BLK_MIN_DATA_PTRS);
+    header_bytes.push(bits.page_bits.0);
 
     // 6 statistics, in the C library's order:
     //   [0] `nsuper_blks`   [1] `super_blk_size`   [2] `ndata_blks`
     //   [3] `data_blk_size` [4] `max_idx_set`      [5] `nelmts`
-    write_length(&mut header, nsuper_blks);
-    write_length(&mut header, super_blk_size);
-    write_length(&mut header, ndata_blks);
-    write_length(&mut header, data_blk_size);
-    write_length(&mut header, max_idx_set.to_u64()); // one past the last slot
-    write_length(&mut header, alloc_slots); // nelmts (allocated slots)
+    write_length(&mut header_bytes, nsuper_blks);
+    write_length(&mut header_bytes, super_blk_size);
+    write_length(&mut header_bytes, ndata_blks);
+    write_length(&mut header_bytes, data_blk_size);
+    write_length(&mut header_bytes, max_idx_set.to_u64()); // one past the last slot
+    write_length(&mut header_bytes, alloc_slots); // nelmts (allocated slots)
 
-    write_stored_address(&mut header, index_block_address, offset_size);
+    write_stored_address(&mut header_bytes, index_block_address, offset_size);
 
-    let header_checksum = checksum::jenkins_lookup3(&header);
-    header.extend_from_slice(&header_checksum.to_le_bytes());
-    debug_assert_eq!(header.len(), header_len);
+    let header_checksum = checksum::jenkins_lookup3(&header_bytes);
+    header_bytes.extend_from_slice(&header_checksum.to_le_bytes());
+    debug_assert_eq!(header_bytes.len(), header_len);
 
     // ---- Build the index block (EAIB) -------------------------------------
     let mut index_block = Vec::with_capacity(index_block_len);
@@ -2194,7 +2350,7 @@ pub fn build_extensible_array_at(
     index_block.extend_from_slice(&index_block_checksum.to_le_bytes());
     debug_assert_eq!(index_block.len(), index_block_len);
 
-    let mut combined = header;
+    let mut combined = header_bytes;
     combined.extend_from_slice(&index_block);
     combined.extend_from_slice(&body);
     // The caller reserved the length `extensible_array_len` returns, and a longer array would
@@ -2217,11 +2373,10 @@ pub fn extensible_array_capacity() -> u64 {
     let geom_header = ExtensibleArrayHeader {
         client_id: 0,
         element_size: 8,
-        max_nelmts_bits: EA_MAX_NELMTS_BITS,
+        bit_geometry: ExtensibleArrayBitGeometry::for_writer(),
         idx_blk_elmts: EA_IDX_BLK_ELMTS,
         min_dblk_nelmts: EA_MIN_DBLK_NELMTS,
         super_blk_min_data_ptrs: EA_SUPER_BLK_MIN_DATA_PTRS,
-        max_dblk_nelmts_bits: EA_MAX_DBLK_NELMTS_BITS,
         max_idx_set: 0,
         index_block_address: StoredAddress::new(0),
     };
@@ -2327,6 +2482,137 @@ mod tests {
         assert_eq!(hdr.min_dblk_nelmts, 4);
         assert_eq!(hdr.max_idx_set, 5);
         assert_eq!(hdr.index_block_address, StoredAddress::new(0x1000));
+    }
+
+    #[test]
+    fn bit_geometry_stores_two_bytes_with_byte_alignment() {
+        assert_eq!(core::mem::size_of::<MaxIndexBits>(), 1);
+        assert_eq!(core::mem::align_of::<MaxIndexBits>(), 1);
+        assert_eq!(core::mem::size_of::<PageBits>(), 1);
+        assert_eq!(core::mem::align_of::<PageBits>(), 1);
+        assert_eq!(core::mem::size_of::<ExtensibleArrayBitGeometry>(), 2);
+        assert_eq!(core::mem::align_of::<ExtensibleArrayBitGeometry>(), 1);
+        assert_eq!(core::mem::size_of::<BlockOffsetWidth>(), 1);
+        assert_eq!(core::mem::align_of::<BlockOffsetWidth>(), 1);
+    }
+
+    #[rstest]
+    #[case(BlockOffsetWidth::One, &[0x01], 0x01)]
+    #[case(BlockOffsetWidth::Two, &[0x01, 0x02], 0x0201)]
+    #[case(BlockOffsetWidth::Three, &[0x01, 0x02, 0x03], 0x03_0201)]
+    #[case(BlockOffsetWidth::Four, &[0x01, 0x02, 0x03, 0x04], 0x0403_0201)]
+    #[case(BlockOffsetWidth::Five, &[0x01, 0x02, 0x03, 0x04, 0x05], 0x0005_0403_0201)]
+    #[case(BlockOffsetWidth::Six, &[0x01, 0x02, 0x03, 0x04, 0x05, 0x06], 0x0605_0403_0201)]
+    #[case(BlockOffsetWidth::Seven, &[0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07], 0x0007_0605_0403_0201)]
+    #[case(BlockOffsetWidth::Eight, &[0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08], 0x0807_0605_0403_0201)]
+    fn block_offset_width_reads_the_value_and_reports_missing_bytes(
+        #[case] width: BlockOffsetWidth,
+        #[case] bytes: &[u8],
+        #[case] value: u64,
+    ) {
+        assert_eq!(width.read(bytes).unwrap(), value);
+        let err = width.read(&bytes[..bytes.len() - 1]).unwrap_err();
+        let FormatError::UnexpectedEof {
+            expected,
+            available,
+        } = err
+        else {
+            panic!("expected UnexpectedEof, got {err:?}");
+        };
+        assert_eq!(expected, width.bytes());
+        assert_eq!(available, bytes.len() - 1);
+    }
+
+    #[rstest]
+    #[case::zero_maximum(0, 10, "Extensible Array maximum element bit count must be in 1..=64")]
+    #[case::maximum_65(65, 10, "Extensible Array maximum element bit count must be in 1..=64")]
+    #[case::maximum_255(
+        255,
+        10,
+        "Extensible Array maximum element bit count must be in 1..=64"
+    )]
+    #[case::page_64(64, 64, "Extensible Array page element count does not fit u64")]
+    #[case::page_255(64, 255, "Extensible Array page element count does not fit u64")]
+    #[case::page_exceeds_maximum(
+        10,
+        11,
+        "Extensible Array page exponent exceeds maximum element bit count"
+    )]
+    fn malformed_bit_geometry_fails_at_the_header(
+        #[case] max_bits: u8,
+        #[case] page_bits: u8,
+        #[case] reason: &str,
+        #[values(false, true)] source: bool,
+    ) {
+        let mut header = empty_array();
+        header[7] = max_bits;
+        header[11] = page_bits;
+        stamp(&mut header, 0, eahd_len(8, 8));
+
+        let err = if source {
+            ExtensibleArrayHeader::parse_from_source(header.as_slice(), StoredAddress::new(0), 8, 8)
+        } else {
+            ExtensibleArrayHeader::parse(&header, 0, 8, 8)
+        }
+        .unwrap_err();
+        let FormatError::InvalidChunkGeometry(actual) = err else {
+            panic!("expected InvalidChunkGeometry, got {err:?}");
+        };
+        assert_eq!(actual, reason);
+    }
+
+    #[rstest]
+    #[case::one_byte(1, 0, 1, 1)]
+    #[case::byte_boundary(8, 8, 256, 1)]
+    #[case::two_bytes(9, 9, 512, 2)]
+    #[case::eight_bytes(64, 10, 1024, 8)]
+    #[case::largest_page(64, 63, 1u64 << 63, 8)]
+    fn parsed_bit_geometry_supplies_page_count_and_offset_width(
+        #[case] max_bits: u8,
+        #[case] page_bits: u8,
+        #[case] page_nelmts: u64,
+        #[case] offset_size: usize,
+    ) {
+        let mut bytes = empty_array();
+        bytes[7] = max_bits;
+        bytes[11] = page_bits;
+        stamp(&mut bytes, 0, eahd_len(8, 8));
+        let header = ExtensibleArrayHeader::parse(&bytes, 0, 8, 8).unwrap();
+        assert_eq!(header.max_index_bits().get(), max_bits);
+        assert_eq!(header.page_nelmts().get(), page_nelmts);
+        assert_eq!(header.block_offset_width().bytes(), offset_size);
+
+        let offset = u64::MAX >> (8 * (8 - offset_size));
+        let block = encode_super_block(
+            StoredAddress::new(0),
+            offset,
+            &[],
+            &[],
+            OffsetWidth::Eight,
+            header.client_id,
+            header.block_offset_width(),
+        );
+        assert_eq!(
+            &block[14..14 + offset_size],
+            &offset.to_le_bytes()[..offset_size]
+        );
+        assert_eq!(
+            header.block_offset_width().read(&block[14..]).unwrap(),
+            offset
+        );
+        checksum::verify_trailing(&block).unwrap();
+    }
+
+    fn empty_array() -> Vec<u8> {
+        build_extensible_array_at(
+            &IndexSlots::dense(&[]),
+            8,
+            OffsetWidth::Eight,
+            LengthWidth::Eight,
+            false,
+            StoredAddress::new(0),
+        )
+        .unwrap()
     }
 
     #[test]
@@ -2622,23 +2908,22 @@ mod tests {
                     let header = ExtensibleArrayHeader {
                         client_id,
                         element_size,
-                        max_nelmts_bits,
+                        bit_geometry: ExtensibleArrayBitGeometry::parse(max_nelmts_bits, 10)
+                            .unwrap(),
                         idx_blk_elmts: 4,
                         min_dblk_nelmts: 4,
                         super_blk_min_data_ptrs: 2,
-                        max_dblk_nelmts_bits: 10,
                         max_idx_set: 0,
                         index_block_address: StoredAddress::new(0),
                     };
-                    let blk_off = (max_nelmts_bits as usize).div_ceil(8);
+                    let blk_off = header.block_offset_width();
                     let stride = ea_elem_stride(&header, offset_size);
-                    let page_nelmts = 1u64 << header.max_dblk_nelmts_bits;
+                    let page_nelmts = header.page_nelmts().get();
                     // Every count a non-paged block can have, up to the page
                     // size that would make it paged instead.
                     for nelmts in [0u64, 1, 2, 4, 16, 64, 255, 256, 1023, page_nelmts] {
                         assert_eq!(
-                            eadb_extent(nelmts as usize, &header, offset_size, blk_off).unwrap()
-                                as u64,
+                            eadb_extent(nelmts as usize, &header, offset_size).unwrap() as u64,
                             data_block_len(
                                 DataBlockGeometry {
                                     dblk_nelmts: nelmts,
@@ -2869,10 +3154,10 @@ mod tests {
 
             let header = ExtensibleArrayHeader::parse(&file, base as usize, 8, 8).unwrap();
             let stride = ea_elem_stride(&header, 8);
-            let page_nelmts = 1usize << header.max_dblk_nelmts_bits;
+            let page_nelmts = header.page_nelmts().get().to_usize().unwrap();
             // The prefix of a data block, and the length of the largest unpaged one. A paged block
             // holds at least two pages and is longer.
-            let db_prefix = 4 + 1 + 1 + 8 + (header.max_nelmts_bits as usize).div_ceil(8);
+            let db_prefix = 4 + 1 + 1 + 8 + header.block_offset_width().bytes();
             let max_unpaged = db_prefix + page_nelmts * stride + 4;
 
             // Each site is a byte to flip and whether the span walk reads its structure. The walk
@@ -3046,11 +3331,10 @@ mod tests {
         let geom_header = ExtensibleArrayHeader {
             client_id: 0,
             element_size: 8,
-            max_nelmts_bits: 32,
+            bit_geometry: ExtensibleArrayBitGeometry::for_writer(),
             idx_blk_elmts: 4,
             min_dblk_nelmts: 16,
             super_blk_min_data_ptrs: 4,
-            max_dblk_nelmts_bits: 10,
             max_idx_set: 0,
             index_block_address: StoredAddress::new(0),
         };
@@ -3085,11 +3369,10 @@ mod tests {
             };
             let computed = super::extensible_array_stats(
                 &geom,
-                4,
+                u64::from(geom_header.idx_blk_elmts),
+                geom_header.bit_geometry(),
                 8,
-                1024,
                 OffsetWidth::Eight,
-                4,
                 n,
                 SlotOccupancy::Dense(n),
             );

@@ -6,12 +6,18 @@
 //! hard-link aliasing and a combined mixed-edit file) lives in
 //! `crates/crosscheck/tests/main/edit.rs`.
 
+use std::fs;
+use std::panic;
+use std::panic::AssertUnwindSafe;
+
 use hdf5_pure::{
-    AttrValue, Error, File, FileAccessProperties, FileBuilder, FileSpaceStrategy, MaxExtent,
-    ScaleOffset, SyncPolicy,
+    AttrValue, Error, File, FileAccessProperties, FileBuilder, FileSpaceStrategy, FormatError,
+    MaxExtent, ScaleOffset, SyncPolicy,
 };
+use hdf5_pure_format::__private::ExtensibleArrayHeader;
 use rstest::rstest;
 use tempfile::tempdir;
+use test_util::checksum;
 use test_util_hdf5::dataset::{self, Filter, Unlimited};
 
 // ---- functional -------------------------------------------------------------
@@ -194,6 +200,47 @@ fn filtered_raw_append_onto_a_partial_trailing_chunk() {
         dataset::read_pure::<i32>(&p, "d"),
         (0..13).collect::<Vec<_>>()
     );
+}
+
+#[rstest]
+#[case::page_exponent_64(11, 64, "Extensible Array page element count does not fit u64")]
+#[case::maximum_element_bits_255(
+    7,
+    255,
+    "Extensible Array maximum element bit count must be in 1..=64"
+)]
+fn append_to_malformed_ea_bit_geometry_returns_a_format_error_and_preserves_the_file(
+    #[case] byte: usize,
+    #[case] value: u8,
+    #[case] reason: &str,
+) {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("d.h5");
+    Unlimited::new("d", &[0i32, 1, 2, 3], 4).pure_create(&path);
+    let mut bytes = fs::read(&path).unwrap();
+    let at = bytes
+        .windows(EA_HEADER_SIGNATURE.len())
+        .position(|signature| signature == EA_HEADER_SIGNATURE)
+        .unwrap();
+    let header_len = ExtensibleArrayHeader::serialized_size(8, 8);
+    let header = ExtensibleArrayHeader::parse(&bytes, at, 8, 8).unwrap();
+    assert_eq!(header.max_idx_set, 1);
+    bytes[at + byte] = value;
+    checksum::restamp(&mut bytes, at, header_len);
+    fs::write(&path, &bytes).unwrap();
+
+    {
+        let file = File::open_rw(&path).unwrap();
+        let mut dataset = file.dataset("d").unwrap();
+        let err = panic::catch_unwind(AssertUnwindSafe(|| dataset.append(&[4i32, 5, 6, 7])))
+            .expect("append must reject malformed geometry without panicking")
+            .unwrap_err();
+        let Error::Format(FormatError::InvalidChunkGeometry(actual)) = err else {
+            panic!("expected InvalidChunkGeometry, got {err:?}");
+        };
+        assert_eq!(actual, reason);
+    }
+    assert_eq!(fs::read(&path).unwrap(), bytes);
 }
 
 // ---- interleave with staged tree edits --------------------------------------
@@ -482,3 +529,6 @@ fn many_small_appends_one_session() {
         (0..100).collect::<Vec<_>>()
     );
 }
+
+// Section `subsec_fmt4_appendixc_extarr`, version 4.0, defines the EA header signature.
+const EA_HEADER_SIGNATURE: &[u8; 4] = b"EAHD";
