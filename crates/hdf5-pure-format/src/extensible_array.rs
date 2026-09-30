@@ -1731,7 +1731,7 @@ fn write_block_offset(buf: &mut Vec<u8>, block_offset: u64, width: BlockOffsetWi
 ///
 /// Panics if `block_offset_rel` does not fit the block-offset width in `bits`.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn encode_data_block(
+pub fn encode_data_block(
     slots: &IndexSlots<'_>,
     elem_start: usize,
     dblk_nelmts: usize,
@@ -2372,6 +2372,15 @@ pub fn extensible_array_capacity() -> u64 {
         .sum();
     u64::from(EA_IDX_BLK_ELMTS) + direct + indirect
 }
+
+/// The client ID of an array that indexes unfiltered chunks, whose elements each store a chunk
+/// address alone.
+///
+/// The ID is defined in the Client ID table of "The Extensible Array Index" of the [format
+/// specification, version 4.0][spec].
+///
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsec_fmt4_appendixc_extarr
+pub const EA_CLIENT_ID_UNFILTERED: u8 = 0;
 
 // The creation parameters the writer stores and `extensible_array_capacity` derives the capacity
 // from, the C library's defaults (`H5Dpkg.h`, HDF5 2.2.0).
