@@ -1,6 +1,8 @@
-//! The fractal heap header parser, the heap ID decoders, and the lookup of a child in an indirect
-//! block.
+//! The fractal heap header and the heap IDs, each with its parser and its encoder, and the lookup
+//! of a child in an indirect block.
 
+use alloc::format;
+use alloc::vec;
 use alloc::vec::Vec;
 
 #[cfg(feature = "checksum")]
@@ -14,6 +16,8 @@ use crate::convert;
 use crate::convert::Narrow;
 use crate::error::FormatError;
 use crate::metadata_source::MetadataSource;
+use crate::width::LengthWidth;
+use crate::width::OffsetWidth;
 
 /// The type of a fractal heap ID: where the heap stores the object the ID refers to.
 ///
@@ -48,12 +52,22 @@ impl FractalHeapIdType {
             expected: 1,
             available: 0,
         })?;
-        match (byte0 >> 4) & 0x03 {
-            0 => Ok(FractalHeapIdType::Managed),
-            1 => Ok(FractalHeapIdType::Huge),
-            2 => Ok(FractalHeapIdType::Tiny),
+        match (byte0 >> HEAP_ID_TYPE_SHIFT) & HEAP_ID_TYPE_MASK {
+            HEAP_ID_TYPE_MANAGED => Ok(FractalHeapIdType::Managed),
+            HEAP_ID_TYPE_HUGE => Ok(FractalHeapIdType::Huge),
+            HEAP_ID_TYPE_TINY => Ok(FractalHeapIdType::Tiny),
             other => Err(FormatError::InvalidHeapIdType(other)),
         }
+    }
+
+    /// Returns the first byte of a heap ID of this type, whose version bits are 0.
+    const fn first_byte(self) -> u8 {
+        let type_bits = match self {
+            Self::Managed => HEAP_ID_TYPE_MANAGED,
+            Self::Huge => HEAP_ID_TYPE_HUGE,
+            Self::Tiny => HEAP_ID_TYPE_TINY,
+        };
+        type_bits << HEAP_ID_TYPE_SHIFT
     }
 }
 
@@ -87,7 +101,8 @@ pub enum FractalHeapChild {
 /// A group in dense storage keeps its links in a fractal heap, an object in dense storage keeps
 /// its attributes in one, and a file that shares messages keeps the messages of each index in one.
 /// [`parse`](Self::parse) accepts version 0, the one version the specification defines, and keeps
-/// the fields a reader needs to find an object.
+/// every field of the header of a heap that does not filter its objects, which
+/// [`serialize`](Self::serialize) writes back.
 ///
 /// The header is defined in "Fractal Heap" of the [format specification, version 4.0][spec].
 ///
@@ -99,12 +114,38 @@ pub struct FractalHeapHeader {
     /// The size in bytes of the encoded I/O filter pipeline, 0 for a heap that does not filter its
     /// objects.
     pub io_filter_encoded_length: u16,
+    /// The heap status flags: bit 0 is set once the huge object IDs have wrapped around, and bit
+    /// 1, [`FRACTAL_HEAP_DIRECT_BLOCKS_CHECKSUMMED`], where the direct blocks store a checksum.
+    pub flags: u8,
     /// The size in bytes of the largest managed object. The heap stores a larger object as a huge
     /// object, outside its blocks.
     pub max_managed_object_size: u32,
+    /// The ID value of the next huge object the heap stores.
+    pub next_huge_object_id: u64,
     /// The address of the version 2 B-tree that indexes the heap's huge objects, or the undefined
     /// address where the heap has no such tree.
     pub btree_huge_objects_address: StoredAddress,
+    /// The free space in bytes in the managed direct blocks.
+    pub free_space_in_managed_blocks: u64,
+    /// The address of the free-space manager of the managed blocks.
+    pub managed_block_free_space_manager_address: StoredAddress,
+    /// The size in bytes of the managed space of the heap, the upper bound of its heap offsets.
+    pub managed_space: u64,
+    /// The size in bytes of the managed space allocated to direct blocks, less than
+    /// [`managed_space`](Self::managed_space) where a direct block is not allocated.
+    pub allocated_managed_space: u64,
+    /// The heap offset of the next direct block the heap allocates.
+    pub direct_block_allocation_iterator_offset: u64,
+    /// The number of managed objects in the heap.
+    pub managed_objects_count: u64,
+    /// The total size in bytes of the huge objects of the heap.
+    pub huge_objects_size: u64,
+    /// The number of huge objects in the heap.
+    pub huge_objects_count: u64,
+    /// The total size in bytes of the tiny objects the heap IDs store.
+    pub tiny_objects_size: u64,
+    /// The number of tiny objects the heap IDs store.
+    pub tiny_objects_count: u64,
     /// The number of blocks in each row of the doubling table.
     pub table_width: u16,
     /// The size in bytes of the blocks in the first two rows of the doubling table.
@@ -128,8 +169,6 @@ pub struct FractalHeapHeader {
     pub root_block_address: StoredAddress,
     /// The number of rows in the root indirect block, 0 where the root is a direct block.
     pub current_rows_in_root_indirect_block: u16,
-    /// The number of managed objects in the heap.
-    pub managed_objects_count: u64,
 }
 
 /// Returns the base-2 logarithm of `v` rounded down, and 0 for 0, as `H5VM_log2_gen` does.
@@ -185,114 +224,51 @@ impl FractalHeapHeader {
         length_size: u8,
     ) -> Result<FractalHeapHeader, FormatError> {
         bytes::ensure_len(file_data, offset, 5)?;
-        if &file_data[offset..offset + 4] != b"FRHP" {
+        if file_data[offset..offset + 4] != FRACTAL_HEAP_SIGNATURE {
             return Err(FormatError::InvalidFractalHeapSignature);
         }
 
         let version = file_data[offset + 4];
-        if version != 0 {
+        if version != FRACTAL_HEAP_VERSION {
             return Err(FormatError::InvalidFractalHeapVersion(version));
         }
 
-        let os = offset_size as usize;
-        let ls = length_size as usize;
-
-        let mut pos = offset + 5;
-        bytes::ensure_len(file_data, pos, 2)?;
-        let heap_id_length = u16::from_le_bytes([file_data[pos], file_data[pos + 1]]);
-        pos += 2;
-
-        bytes::ensure_len(file_data, pos, 2)?;
-        let io_filter_encoded_length = u16::from_le_bytes([file_data[pos], file_data[pos + 1]]);
-        pos += 2;
-
-        bytes::ensure_len(file_data, pos, 1)?;
-        let _flags = file_data[pos];
-        pos += 1;
-
-        bytes::ensure_len(file_data, pos, 4)?;
-        let max_managed_object_size = u32::from_le_bytes([
-            file_data[pos],
-            file_data[pos + 1],
-            file_data[pos + 2],
-            file_data[pos + 3],
-        ]);
-        pos += 4;
-
-        // `next_huge_object_id` (`length_size`), skipped
-        bytes::ensure_len(file_data, pos, ls)?;
-        pos += ls;
-
-        // `btree_huge_objects_address` (`offset_size`)
-        let btree_huge_objects_address =
-            StoredAddress::new(bytes::read_offset(file_data, pos, offset_size)?);
-        pos += os;
-
-        // Skip the remaining fixed fields: free_space_managed_blocks(ls),
-        // managed_block_free_space_manager_address(os), managed_space_in_heap(ls),
-        // allocated_managed_space_in_heap(ls),
-        // direct_block_allocation_iterator_offset(ls)
-        let skip_size = 4 * ls + os;
-        bytes::ensure_len(file_data, pos, skip_size)?;
-        pos += skip_size;
-
-        // `managed_objects_count` (`length_size`)
-        let managed_objects_count = bytes::read_length(file_data, pos, length_size)?;
-        pos += ls;
-
-        // `huge_objects_size` (`length_size`)
-        pos += ls;
-        // `huge_objects_count` (`length_size`)
-        pos += ls;
-        // `tiny_objects_size` (`length_size`)
-        pos += ls;
-        // `tiny_objects_count` (`length_size`)
-        pos += ls;
-
-        // `table_width` (2)
-        bytes::ensure_len(file_data, pos, 2)?;
-        let table_width = u16::from_le_bytes([file_data[pos], file_data[pos + 1]]);
-        pos += 2;
-
-        // `starting_block_size` (`length_size`)
-        let starting_block_size = bytes::read_length(file_data, pos, length_size)?;
-        pos += ls;
-
-        // `max_direct_block_size` (`length_size`)
-        let max_direct_block_size = bytes::read_length(file_data, pos, length_size)?;
-        pos += ls;
-
-        // `max_heap_size` (2)
-        bytes::ensure_len(file_data, pos, 2)?;
-        let max_heap_size = u16::from_le_bytes([file_data[pos], file_data[pos + 1]]);
-        pos += 2;
-
-        // `start_root_rows`: starting # of rows in the root indirect block (2)
-        bytes::ensure_len(file_data, pos, 2)?;
-        let start_root_rows = u16::from_le_bytes([file_data[pos], file_data[pos + 1]]);
-        pos += 2;
-
-        // `root_block_address` (`offset_size`)
-        let root_block_address =
-            StoredAddress::new(bytes::read_offset(file_data, pos, offset_size)?);
-        pos += os;
-
-        // `current_rows_in_root_indirect_block` (2)
-        bytes::ensure_len(file_data, pos, 2)?;
-        let current_rows_in_root_indirect_block =
-            u16::from_le_bytes([file_data[pos], file_data[pos + 1]]);
-        #[allow(unused_variables, unused_mut, unused_assignments)]
-        let mut pos = pos + 2;
+        let mut fields = HeaderFields {
+            data: file_data,
+            pos: offset + 5,
+            offset_size,
+            length_size,
+        };
+        let heap_id_length = fields.u16()?;
+        let io_filter_encoded_length = fields.u16()?;
+        let flags = fields.u8()?;
+        let max_managed_object_size = fields.u32()?;
+        let next_huge_object_id = fields.length()?;
+        let btree_huge_objects_address = fields.address()?;
+        let free_space_in_managed_blocks = fields.length()?;
+        let managed_block_free_space_manager_address = fields.address()?;
+        let managed_space = fields.length()?;
+        let allocated_managed_space = fields.length()?;
+        let direct_block_allocation_iterator_offset = fields.length()?;
+        let managed_objects_count = fields.length()?;
+        let huge_objects_size = fields.length()?;
+        let huge_objects_count = fields.length()?;
+        let tiny_objects_size = fields.length()?;
+        let tiny_objects_count = fields.length()?;
+        let table_width = fields.u16()?;
+        let starting_block_size = fields.length()?;
+        let max_direct_block_size = fields.length()?;
+        let max_heap_size = fields.u16()?;
+        let start_root_rows = fields.u16()?;
+        let root_block_address = fields.address()?;
+        let current_rows_in_root_indirect_block = fields.u16()?;
+        let mut pos = fields.pos;
 
         // Skip the size of the filtered root direct block and its filter mask.
         if io_filter_encoded_length > 0 {
-            #[allow(unused_assignments)]
-            {
-                pos += ls + 4;
-            }
+            pos += usize::from(length_size) + 4;
         }
 
-        // Validate header checksum
         #[cfg(feature = "checksum")]
         {
             bytes::ensure_len(file_data, pos, 4)?;
@@ -305,12 +281,26 @@ impl FractalHeapHeader {
                 });
             }
         }
+        #[cfg(not(feature = "checksum"))]
+        let _ = pos;
 
         Ok(FractalHeapHeader {
             heap_id_length,
             io_filter_encoded_length,
+            flags,
             max_managed_object_size,
+            next_huge_object_id,
             btree_huge_objects_address,
+            free_space_in_managed_blocks,
+            managed_block_free_space_manager_address,
+            managed_space,
+            allocated_managed_space,
+            direct_block_allocation_iterator_offset,
+            managed_objects_count,
+            huge_objects_size,
+            huge_objects_count,
+            tiny_objects_size,
+            tiny_objects_count,
             table_width,
             starting_block_size,
             max_direct_block_size,
@@ -318,8 +308,94 @@ impl FractalHeapHeader {
             start_root_rows,
             root_block_address,
             current_rows_in_root_indirect_block,
-            managed_objects_count,
         })
+    }
+
+    /// Returns the length in bytes of the header of a heap that does not filter its objects, from
+    /// its signature to its checksum.
+    pub const fn serialized_size(offset_width: OffsetWidth, length_width: LengthWidth) -> usize {
+        let os = offset_width.get() as usize;
+        let ls = length_width.get() as usize;
+        FRACTAL_HEAP_SIGNATURE.len() + 1 + 2 + 2 + 1 + 4 + 12 * ls + 3 * os + 2 + 2 + 2 + 2 + 4
+    }
+
+    /// Returns the bytes of the header from its signature to its checksum, the inverse of
+    /// [`parse`](Self::parse).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::UnsupportedFilteredHeapObject`] if the heap filters its objects,
+    /// whose header stores the filter fields this type does not hold.
+    pub fn serialize(
+        &self,
+        offset_width: OffsetWidth,
+        length_width: LengthWidth,
+    ) -> Result<Vec<u8>, FormatError> {
+        let Self {
+            heap_id_length,
+            io_filter_encoded_length,
+            flags,
+            max_managed_object_size,
+            next_huge_object_id,
+            btree_huge_objects_address,
+            free_space_in_managed_blocks,
+            managed_block_free_space_manager_address,
+            managed_space,
+            allocated_managed_space,
+            direct_block_allocation_iterator_offset,
+            managed_objects_count,
+            huge_objects_size,
+            huge_objects_count,
+            tiny_objects_size,
+            tiny_objects_count,
+            table_width,
+            starting_block_size,
+            max_direct_block_size,
+            max_heap_size,
+            start_root_rows,
+            root_block_address,
+            current_rows_in_root_indirect_block,
+        } = *self;
+        if io_filter_encoded_length > 0 {
+            return Err(FormatError::UnsupportedFilteredHeapObject);
+        }
+        let mut buf = Vec::with_capacity(Self::serialized_size(offset_width, length_width));
+        buf.extend_from_slice(&FRACTAL_HEAP_SIGNATURE);
+        buf.push(FRACTAL_HEAP_VERSION);
+        buf.extend_from_slice(&heap_id_length.to_le_bytes());
+        buf.extend_from_slice(&io_filter_encoded_length.to_le_bytes());
+        buf.push(flags);
+        buf.extend_from_slice(&max_managed_object_size.to_le_bytes());
+        bytes::write_length(&mut buf, next_huge_object_id, length_width);
+        bytes::write_offset(&mut buf, btree_huge_objects_address.get(), offset_width);
+        bytes::write_length(&mut buf, free_space_in_managed_blocks, length_width);
+        bytes::write_offset(
+            &mut buf,
+            managed_block_free_space_manager_address.get(),
+            offset_width,
+        );
+        for length in [
+            managed_space,
+            allocated_managed_space,
+            direct_block_allocation_iterator_offset,
+            managed_objects_count,
+            huge_objects_size,
+            huge_objects_count,
+            tiny_objects_size,
+            tiny_objects_count,
+        ] {
+            bytes::write_length(&mut buf, length, length_width);
+        }
+        buf.extend_from_slice(&table_width.to_le_bytes());
+        bytes::write_length(&mut buf, starting_block_size, length_width);
+        bytes::write_length(&mut buf, max_direct_block_size, length_width);
+        buf.extend_from_slice(&max_heap_size.to_le_bytes());
+        buf.extend_from_slice(&start_root_rows.to_le_bytes());
+        bytes::write_offset(&mut buf, root_block_address.get(), offset_width);
+        buf.extend_from_slice(&current_rows_in_root_indirect_block.to_le_bytes());
+        let checksum = crate::checksum::jenkins_lookup3(&buf);
+        buf.extend_from_slice(&checksum.to_le_bytes());
+        Ok(buf)
     }
 
     /// Returns the heap offset and the length of the managed object the heap ID `id_bytes` refers
@@ -381,6 +457,38 @@ impl FractalHeapHeader {
         };
 
         Ok((heap_offset, length_val))
+    }
+
+    /// Returns the heap ID of the managed object of `length` bytes at heap offset `heap_offset`.
+    ///
+    /// After its first byte, the ID stores the offset in [`max_heap_size`](Self::max_heap_size)
+    /// bits and then the length, as [`decode_managed_id`](Self::decode_managed_id) reads them.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::Internal`] if `max_heap_size` is not a multiple of 8, or if
+    /// `heap_offset` or `length` does not fit the ID. The C library stores the offset in whole
+    /// bytes (`H5HF_MAN_ID_ENCODE` in `H5HFpkg.h`, HDF5 2.2.0), and
+    /// [`decode_managed_id`](Self::decode_managed_id) reads it as `max_heap_size` packed bits.
+    pub fn encode_managed_id(&self, heap_offset: u64, length: u64) -> Result<Vec<u8>, FormatError> {
+        if self.max_heap_size % 8 != 0 {
+            return Err(FormatError::Internal(format!(
+                "a managed heap ID was encoded for a heap of {}-bit offsets, which fill no whole \
+                 number of bytes",
+                self.max_heap_size
+            )));
+        }
+        let offset_bits = u32::from(self.max_heap_size);
+        if !fits_bits(heap_offset, offset_bits) {
+            return Err(FormatError::Internal(format!(
+                "heap offset {heap_offset} does not fit the heap's {offset_bits}-bit offsets"
+            )));
+        }
+        let packed = length
+            .checked_shl(offset_bits)
+            .filter(|&shifted| shifted >> offset_bits == length)
+            .map(|shifted| shifted | heap_offset);
+        self.encode_id(FractalHeapIdType::Managed, packed, "managed object length")
     }
 
     /// Returns the tiny object the heap ID `id_bytes` holds.
@@ -468,6 +576,67 @@ impl FractalHeapHeader {
             return Err(FormatError::HugeObjectNotFound(huge_id));
         }
         Ok(HugeObjectReference::Indexed(huge_id))
+    }
+
+    /// Returns the heap ID of the huge object whose key in the huge-object B-tree is `huge_id`.
+    ///
+    /// The huge IDs of a heap store a key where they are too short for an address of
+    /// `offset_width` and a length of `length_width`, as [`decode_huge_id`](Self::decode_huge_id)
+    /// reads them.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::UnsupportedFilteredHeapObject`] if the heap filters its objects,
+    /// and [`FormatError::Internal`] if the huge IDs of the heap store an address and a length, or
+    /// if `huge_id` does not fit the ID.
+    pub fn encode_huge_id(
+        &self,
+        huge_id: u64,
+        offset_width: OffsetWidth,
+        length_width: LengthWidth,
+    ) -> Result<Vec<u8>, FormatError> {
+        if self.io_filter_encoded_length > 0 {
+            return Err(FormatError::UnsupportedFilteredHeapObject);
+        }
+        if self.huge_ids_direct(offset_width.get(), length_width.get()) {
+            return Err(FormatError::Internal(
+                "a key was encoded into a heap ID that holds its object's address".into(),
+            ));
+        }
+        self.encode_id(FractalHeapIdType::Huge, Some(huge_id), "huge object key")
+    }
+
+    /// Returns a heap ID of `id_type` whose bytes after the first store `payload` little-endian.
+    ///
+    /// A `payload` of `None` is one too wide for the ID, and the error names it as `what`.
+    fn encode_id(
+        &self,
+        id_type: FractalHeapIdType,
+        payload: Option<u64>,
+        what: &str,
+    ) -> Result<Vec<u8>, FormatError> {
+        let mut id = vec![0; usize::from(self.heap_id_length)];
+        let Some((first, rest)) = id.split_first_mut() else {
+            return Err(FormatError::Internal(
+                "a heap ID was encoded for a heap whose IDs are empty".into(),
+            ));
+        };
+        let too_wide = || {
+            FormatError::Internal(format!(
+                "a {what} does not fit a {}-byte heap ID",
+                self.heap_id_length
+            ))
+        };
+        let payload = payload.ok_or_else(too_wide)?.to_le_bytes();
+        let (low, high) = payload.split_at(rest.len().min(payload.len()));
+        if high.iter().any(|&byte| byte != 0) {
+            return Err(too_wide());
+        }
+        *first = id_type.first_byte();
+        for (byte, &value) in rest.iter_mut().zip(low) {
+            *byte = value;
+        }
+        Ok(id)
     }
 
     /// Returns `true` if the huge heap IDs of the heap hold the address and the length of their
@@ -676,8 +845,101 @@ impl FractalHeapHeader {
     }
 }
 
+/// The fields of a fractal heap header from `pos` on, read in the order the header stores them.
+struct HeaderFields<'a> {
+    data: &'a [u8],
+    pos: usize,
+    offset_size: u8,
+    length_size: u8,
+}
+
+impl HeaderFields<'_> {
+    fn u8(&mut self) -> Result<u8, FormatError> {
+        let value = *self.data.get(self.pos).ok_or(FormatError::UnexpectedEof {
+            expected: self.pos.saturating_add(1),
+            available: self.data.len(),
+        })?;
+        self.pos += 1;
+        Ok(value)
+    }
+
+    fn u16(&mut self) -> Result<u16, FormatError> {
+        Ok(u16::from_le_bytes(self.array()?))
+    }
+
+    fn u32(&mut self) -> Result<u32, FormatError> {
+        Ok(u32::from_le_bytes(self.array()?))
+    }
+
+    fn length(&mut self) -> Result<u64, FormatError> {
+        let value = bytes::read_length(self.data, self.pos, self.length_size)?;
+        self.pos += usize::from(self.length_size);
+        Ok(value)
+    }
+
+    fn address(&mut self) -> Result<StoredAddress, FormatError> {
+        let value = bytes::read_offset(self.data, self.pos, self.offset_size)?;
+        self.pos += usize::from(self.offset_size);
+        Ok(StoredAddress::new(value))
+    }
+
+    fn array<const N: usize>(&mut self) -> Result<[u8; N], FormatError> {
+        let value = self
+            .data
+            .get(self.pos..)
+            .and_then(|rest| rest.first_chunk::<N>())
+            .copied()
+            .ok_or(FormatError::UnexpectedEof {
+                expected: self.pos.saturating_add(N),
+                available: self.data.len(),
+            })?;
+        self.pos += N;
+        Ok(value)
+    }
+}
+
+fn fits_bits(value: u64, bits: u32) -> bool {
+    value.checked_shr(bits).is_none_or(|high| high == 0)
+}
+
+/// The signature of a fractal heap header, from "Fractal Heap" of the [format specification,
+/// version 4.0][spec].
+///
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsec_fmt4_infra_fractalheap
+const FRACTAL_HEAP_SIGNATURE: [u8; 4] = *b"FRHP";
+
+/// The fractal heap header version, the one version the same section as
+/// [`FRACTAL_HEAP_SIGNATURE`] defines.
+const FRACTAL_HEAP_VERSION: u8 = 0;
+
+/// The bit of the header's Flags field that is set where the direct blocks of the heap store a
+/// checksum, bit 1.
+///
+/// The bit is defined in "Fractal Heap" of the [format specification, version 4.0][spec].
+///
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsec_fmt4_infra_fractalheap
+pub const FRACTAL_HEAP_DIRECT_BLOCKS_CHECKSUMMED: u8 = 0x02;
+
+/// The position of the type bits, bits 4 and 5, in the first byte of a heap ID, from the same
+/// section as [`FRACTAL_HEAP_SIGNATURE`].
+const HEAP_ID_TYPE_SHIFT: u8 = 4;
+
+/// The mask of the two type bits once shifted down by [`HEAP_ID_TYPE_SHIFT`].
+const HEAP_ID_TYPE_MASK: u8 = 0x03;
+
+/// The type of the heap ID of a managed object, from the same section as
+/// [`FRACTAL_HEAP_SIGNATURE`].
+const HEAP_ID_TYPE_MANAGED: u8 = 0;
+
+/// The type of the heap ID of a huge object, from the same section as [`FRACTAL_HEAP_SIGNATURE`].
+const HEAP_ID_TYPE_HUGE: u8 = 1;
+
+/// The type of the heap ID of a tiny object, from the same section as [`FRACTAL_HEAP_SIGNATURE`].
+const HEAP_ID_TYPE_TINY: u8 = 2;
+
 #[cfg(test)]
 mod tests {
+    use rstest::rstest;
     use test_util::fractal_heap;
     use test_util::widths::Widths;
 
@@ -689,8 +951,20 @@ mod tests {
         let expected = FractalHeapHeader {
             heap_id_length: 7,
             io_filter_encoded_length: 0,
+            flags: 0,
             max_managed_object_size: 64,
+            next_huge_object_id: 0,
             btree_huge_objects_address: StoredAddress::new(u64::MAX),
+            free_space_in_managed_blocks: 0,
+            managed_block_free_space_manager_address: StoredAddress::new(u64::MAX),
+            managed_space: 0,
+            allocated_managed_space: 0,
+            direct_block_allocation_iterator_offset: 0,
+            managed_objects_count: 1,
+            huge_objects_size: 0,
+            huge_objects_count: 0,
+            tiny_objects_size: 0,
+            tiny_objects_count: 0,
             table_width: 4,
             starting_block_size: 128,
             max_direct_block_size: 1024,
@@ -698,7 +972,6 @@ mod tests {
             start_root_rows: 2,
             root_block_address: StoredAddress::new(256),
             current_rows_in_root_indirect_block: 0,
-            managed_objects_count: 1,
         };
 
         assert_eq!(
@@ -914,8 +1187,20 @@ mod tests {
         FractalHeapHeader {
             heap_id_length: 7,
             io_filter_encoded_length: 0,
+            flags: 0,
             max_managed_object_size: 0,
+            next_huge_object_id: 0,
             btree_huge_objects_address: StoredAddress::new(u64::MAX),
+            free_space_in_managed_blocks: 0,
+            managed_block_free_space_manager_address: StoredAddress::new(u64::MAX),
+            managed_space: 0,
+            allocated_managed_space: 0,
+            direct_block_allocation_iterator_offset: 0,
+            managed_objects_count: 0,
+            huge_objects_size: 0,
+            huge_objects_count: 0,
+            tiny_objects_size: 0,
+            tiny_objects_count: 0,
             table_width,
             starting_block_size: start_block_size,
             max_direct_block_size,
@@ -923,7 +1208,6 @@ mod tests {
             start_root_rows: 1,
             root_block_address: StoredAddress::new(0),
             current_rows_in_root_indirect_block: 0,
-            managed_objects_count: 0,
         }
     }
 
@@ -978,5 +1262,144 @@ mod tests {
             }))
         );
         assert_eq!(header.find_child_for_offset(&block, 1, 0, 200, 8), Ok(None));
+    }
+
+    #[rstest]
+    #[case::eight_byte_fields(Widths::EIGHT, OffsetWidth::Eight, LengthWidth::Eight)]
+    #[case::four_byte_fields(Widths::FOUR, OffsetWidth::Four, LengthWidth::Four)]
+    fn a_parsed_header_serializes_to_the_bytes_it_was_parsed_from(
+        #[case] widths: Widths,
+        #[case] offset_width: OffsetWidth,
+        #[case] length_width: LengthWidth,
+    ) {
+        let bytes = fractal_heap::Header::new(0x100)
+            .managed_object_count(3)
+            .build(widths);
+        let header =
+            FractalHeapHeader::parse(&bytes, 0, offset_width.get(), length_width.get()).unwrap();
+
+        assert_eq!(
+            header.serialize(offset_width, length_width),
+            Ok(bytes.clone())
+        );
+        assert_eq!(
+            FractalHeapHeader::serialized_size(offset_width, length_width),
+            bytes.len()
+        );
+    }
+
+    #[test]
+    fn serializing_a_filtered_header_is_an_error() {
+        let header = FractalHeapHeader {
+            io_filter_encoded_length: 8,
+            ..dtable_header(512, 65536, 4)
+        };
+        assert_eq!(
+            header.serialize(OffsetWidth::Eight, LengthWidth::Eight),
+            Err(FormatError::UnsupportedFilteredHeapObject)
+        );
+    }
+
+    #[rstest]
+    #[case::the_first_object(0, 13, [0, 0, 0, 0, 0, 0, 13, 0])]
+    #[case::an_offset_and_a_length(100, 42, [0, 100, 0, 0, 0, 0, 42, 0])]
+    #[case::the_widest_offset_and_length(
+        (1 << 40) - 1,
+        u64::from(u16::MAX),
+        [0, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF]
+    )]
+    fn an_encoded_managed_id_holds_its_offset_then_its_length(
+        #[case] heap_offset: u64,
+        #[case] length: u64,
+        #[case] expected: [u8; 8],
+    ) {
+        let header = attribute_heap_header();
+        let id = header.encode_managed_id(heap_offset, length).unwrap();
+        assert_eq!(id, expected);
+        assert_eq!(
+            FractalHeapIdType::from_heap_id(&id),
+            Ok(FractalHeapIdType::Managed)
+        );
+        assert_eq!(header.decode_managed_id(&id), Ok((heap_offset, length)));
+    }
+
+    #[rstest]
+    #[case::an_offset_past_the_offset_bits(
+        1 << 40,
+        1,
+        "heap offset 1099511627776 does not fit the heap's 40-bit offsets"
+    )]
+    #[case::a_length_past_the_id(0, 1 << 16, "a managed object length does not fit a 8-byte heap ID")]
+    fn a_managed_id_that_does_not_fit_is_an_error(
+        #[case] heap_offset: u64,
+        #[case] length: u64,
+        #[case] message: &str,
+    ) {
+        assert_eq!(
+            attribute_heap_header().encode_managed_id(heap_offset, length),
+            Err(FormatError::Internal(message.into()))
+        );
+    }
+
+    #[test]
+    fn a_managed_id_of_a_heap_whose_offset_bits_are_not_a_multiple_of_8_is_an_error() {
+        let header = FractalHeapHeader {
+            max_heap_size: 33,
+            ..attribute_heap_header()
+        };
+        assert_eq!(
+            header.encode_managed_id(0, 1),
+            Err(FormatError::Internal(
+                "a managed heap ID was encoded for a heap of 33-bit offsets, which fill no whole \
+                 number of bytes"
+                    .into()
+            ))
+        );
+    }
+
+    #[test]
+    fn an_encoded_huge_id_decodes_to_its_key() {
+        let header = attribute_heap_header();
+        let id = header
+            .encode_huge_id(5, OffsetWidth::Eight, LengthWidth::Eight)
+            .unwrap();
+        assert_eq!(id, [0x10, 5, 0, 0, 0, 0, 0, 0]);
+        assert_eq!(
+            header.decode_huge_id(&id, 8, 8),
+            Ok(HugeObjectReference::Indexed(5))
+        );
+    }
+
+    #[rstest]
+    #[case::a_key_past_the_id(
+        attribute_heap_header(),
+        1 << 56,
+        FormatError::Internal("a huge object key does not fit a 8-byte heap ID".into())
+    )]
+    #[case::an_id_that_holds_the_address(
+        FractalHeapHeader { heap_id_length: 17, ..attribute_heap_header() },
+        1,
+        FormatError::Internal("a key was encoded into a heap ID that holds its object's address".into())
+    )]
+    fn a_huge_id_the_heap_cannot_hold_is_an_error(
+        #[case] header: FractalHeapHeader,
+        #[case] huge_id: u64,
+        #[case] expected: FormatError,
+    ) {
+        assert_eq!(
+            header.encode_huge_id(huge_id, OffsetWidth::Eight, LengthWidth::Eight),
+            Err(expected)
+        );
+    }
+
+    /// Returns a header with the heap ID layout of the attribute heaps `hdf5-pure` writes: 8-byte
+    /// IDs over a 40-bit heap, with a huge-object B-tree.
+    fn attribute_heap_header() -> FractalHeapHeader {
+        FractalHeapHeader {
+            heap_id_length: 8,
+            max_heap_size: 40,
+            btree_huge_objects_address: StoredAddress::new(0x800),
+            ..dtable_header(1024, 65536, 4)
+        }
     }
 }

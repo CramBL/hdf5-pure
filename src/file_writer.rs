@@ -28,6 +28,8 @@ use hdf5_pure_format::__private::AttributeHeapPlan;
 use hdf5_pure_format::__private::AttributeHeapPlanError;
 use hdf5_pure_format::__private::BTREE_V2_NODE_SIZE;
 use hdf5_pure_format::__private::BTreeV2Plan;
+use hdf5_pure_format::__private::FRACTAL_HEAP_DIRECT_BLOCKS_CHECKSUMMED;
+use hdf5_pure_format::__private::FractalHeapHeader;
 use hdf5_pure_format::__private::FreeSection;
 use hdf5_pure_format::__private::LayoutVersion;
 use hdf5_pure_format::__private::SECTION_CLASS_LARGE;
@@ -719,7 +721,7 @@ pub(crate) fn dense_attrs_plan(
     // its length is the same wherever it lands: heap header, the managed blocks,
     // name index (header + nodes), then — only when there are huge objects — the
     // huge index (header + nodes) and the huge object bytes themselves.
-    let managed_off = DENSE_ATTR_FRHP_SIZE as u64;
+    let managed_off = FractalHeapHeader::serialized_size(OFFSET_WIDTH, LENGTH_WIDTH) as u64;
     let btree_off = managed_off + managed_plan.region_size();
     let name_nodes_off = btree_off + bthd_size as u64;
     let corder_bthd_off = name_nodes_off + name_plan.nodes_size();
@@ -797,37 +799,6 @@ pub(crate) fn dense_attrs_plan(
     })
 }
 
-/// On-disk byte size of the fractal heap header this emitter writes.
-const DENSE_ATTR_FRHP_SIZE: usize = {
-    let os = OFFSET_SIZE as usize;
-    let ls = LENGTH_SIZE as usize;
-    4 + 1
-        + 2
-        + 2
-        + 1
-        + 4
-        + ls
-        + os
-        + ls
-        + os
-        + ls
-        + ls
-        + ls
-        + ls
-        + ls
-        + ls
-        + ls
-        + ls
-        + 2
-        + ls
-        + ls
-        + 2
-        + 2
-        + os
-        + 2
-        + 4
-};
-
 impl DenseAttrPlan {
     /// Byte length of the blob [`DenseAttrPlan::build`] produces, at any heap
     /// address.
@@ -858,7 +829,12 @@ impl DenseAttrPlan {
     }
 
     /// Emits the blob for a heap placed at `heap_address`.
-    pub(crate) fn build(&self, heap_address: StoredAddress) -> DenseAttrBlob {
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::Internal`] if the heap ID of an attribute does not
+    /// fit the 8-byte heap IDs of the heap.
+    pub(crate) fn build(&self, heap_address: StoredAddress) -> Result<DenseAttrBlob, FormatError> {
         let max_heap_size: u16 = DENSE_ATTR_MAX_HEAP_SIZE_BITS;
         let block_offset_bytes = DENSE_ATTR_BLOCK_OFFSET_BYTES; // 5
         let heap_id_length: u16 = 8;
@@ -904,13 +880,6 @@ impl DenseAttrPlan {
             "managed heap ID width must match what the declared maximum managed object size implies"
         );
 
-        // Build fractal heap header
-        let mut frhp = Vec::with_capacity(DENSE_ATTR_FRHP_SIZE);
-        frhp.extend_from_slice(b"FRHP");
-        frhp.push(0); // version
-        frhp.extend_from_slice(&heap_id_length.to_le_bytes());
-        frhp.extend_from_slice(&0u16.to_le_bytes()); // io_filter_encoded_length
-        frhp.push(0x02); // flags: bit 1 = checksum direct blocks
         // Deliberately a constant rather than a function of `max_direct_block_size`:
         // this is the per-object cap the 2-byte length field of an 8-byte managed
         // heap ID can encode, so it must not grow with the block. `dense_attrs_check`
@@ -921,42 +890,40 @@ impl DenseAttrPlan {
                       max-managed-object-size field"
         )]
         let max_managed = DENSE_ATTR_MAX_MANAGED_OBJECT as u32;
-        frhp.extend_from_slice(&max_managed.to_le_bytes());
-        write_length(&mut frhp, huge_count as u64, LENGTH_SIZE); // next_huge_object_id
-        if huge_count == 0 {
-            write_undef_offset(&mut frhp, OFFSET_SIZE); // btree_huge_objects_address
-        } else {
-            write_offset(&mut frhp, huge_bthd_addr, OFFSET_SIZE);
-        }
-        write_length(&mut frhp, managed_plan.free_space(), LENGTH_SIZE); // free_space_managed_blocks
-        write_undef_offset(&mut frhp, OFFSET_SIZE); // free_space_mgr_addr
-        write_length(&mut frhp, managed_plan.managed_space(), LENGTH_SIZE); // managed_space_in_heap
-        write_length(&mut frhp, managed_plan.allocated_space(), LENGTH_SIZE); // allocated_managed_space
-        write_length(&mut frhp, managed_plan.allocation_iterator(), LENGTH_SIZE); // dblock_alloc_iter
-        // Managed and huge objects are counted separately; an attribute is in exactly
-        // one of the two.
-        let managed_count = (serialized.len() - huge_count) as u64;
-        write_length(&mut frhp, managed_count, LENGTH_SIZE); // managed_objects_count
-        write_length(&mut frhp, *huge_total, LENGTH_SIZE); // huge_objects_size
-        write_length(&mut frhp, huge_count as u64, LENGTH_SIZE); // huge_objects_count
-        write_length(&mut frhp, 0, LENGTH_SIZE); // tiny_objects_size
-        write_length(&mut frhp, 0, LENGTH_SIZE); // tiny_objects_count
-        frhp.extend_from_slice(&ATTRIBUTE_HEAP_TABLE_WIDTH.to_le_bytes()); // `table_width`
-        write_length(&mut frhp, ATTRIBUTE_HEAP_STARTING_BLOCK_SIZE, LENGTH_SIZE);
-        write_length(&mut frhp, ATTRIBUTE_HEAP_MAX_DIRECT_BLOCK_SIZE, LENGTH_SIZE); // `max_direct_block_size`
-        frhp.extend_from_slice(&max_heap_size.to_le_bytes());
-        frhp.extend_from_slice(&ATTRIBUTE_HEAP_START_ROOT_ROWS.to_le_bytes()); // `start_root_rows`
-        write_offset(
-            &mut frhp,
-            managed_plan.root_address(managed_addr),
-            OFFSET_SIZE,
-        );
-        // Zero when the root is a direct block, which is how a reader tells which of
-        // the two the address above points at.
-        frhp.extend_from_slice(&managed_plan.root_rows().to_le_bytes());
-        let frhp_checksum = crate::checksum::jenkins_lookup3(&frhp);
-        frhp.extend_from_slice(&frhp_checksum.to_le_bytes());
-        debug_assert_eq!(frhp.len(), DENSE_ATTR_FRHP_SIZE);
+        let header = FractalHeapHeader {
+            heap_id_length,
+            io_filter_encoded_length: 0,
+            flags: FRACTAL_HEAP_DIRECT_BLOCKS_CHECKSUMMED,
+            max_managed_object_size: max_managed,
+            next_huge_object_id: huge_count as u64,
+            btree_huge_objects_address: if huge_count == 0 {
+                UNDEF_ADDRESS
+            } else {
+                huge_bthd_addr
+            },
+            free_space_in_managed_blocks: managed_plan.free_space(),
+            managed_block_free_space_manager_address: UNDEF_ADDRESS,
+            managed_space: managed_plan.managed_space(),
+            allocated_managed_space: managed_plan.allocated_space(),
+            direct_block_allocation_iterator_offset: managed_plan.allocation_iterator(),
+            // Managed and huge objects are counted separately, and an attribute is
+            // in exactly one of the two.
+            managed_objects_count: (serialized.len() - huge_count) as u64,
+            huge_objects_size: *huge_total,
+            huge_objects_count: huge_count as u64,
+            tiny_objects_size: 0,
+            tiny_objects_count: 0,
+            table_width: ATTRIBUTE_HEAP_TABLE_WIDTH,
+            starting_block_size: ATTRIBUTE_HEAP_STARTING_BLOCK_SIZE,
+            max_direct_block_size: ATTRIBUTE_HEAP_MAX_DIRECT_BLOCK_SIZE,
+            max_heap_size,
+            start_root_rows: ATTRIBUTE_HEAP_START_ROOT_ROWS,
+            root_block_address: managed_plan.root_address(managed_addr),
+            // Zero when the root is a direct block, which is how a reader decides
+            // which of the two the address above points at.
+            current_rows_in_root_indirect_block: managed_plan.root_rows(),
+        };
+        let frhp = header.serialize(OFFSET_WIDTH, LENGTH_WIDTH)?;
 
         // Heap IDs. A managed object's carries the offset the plan gave it; a huge
         // object's carries a B-tree key instead, since its bytes sit outside the
@@ -973,15 +940,13 @@ impl DenseAttrPlan {
                 Some(id) => {
                     huge_records.push((*id, next_huge_addr, s.len() as u64));
                     next_huge_addr = next_huge_addr.offset(s.len() as u64);
-                    heap_ids.push(encode_huge_id(*id, heap_id_length));
+                    heap_ids.push(header.encode_huge_id(*id, OFFSET_WIDTH, LENGTH_WIDTH)?);
                 }
                 None => {
-                    heap_ids.push(encode_managed_id(
+                    heap_ids.push(header.encode_managed_id(
                         managed_plan.heap_offset(managed.len()),
                         s.len() as u64,
-                        max_heap_size,
-                        heap_id_length,
-                    ));
+                    )?);
                     managed.push(s.as_slice());
                 }
             }
@@ -1068,10 +1033,10 @@ impl DenseAttrPlan {
             "a dense attribute heap must fill the length its plan promised"
         );
 
-        DenseAttrBlob {
+        Ok(DenseAttrBlob {
             attr_info_message: self.attr_info_message(frhp_addr),
             blob,
-        }
+        })
     }
 }
 
@@ -1096,54 +1061,13 @@ pub(crate) fn build_dense_attrs(
     creation: DenseAttrCreationOrder,
     heap_address: StoredAddress,
 ) -> Result<DenseAttrBlob, FormatError> {
-    Ok(dense_attrs_plan(attrs, creation)?.build(heap_address))
+    dense_attrs_plan(attrs, creation)?.build(heap_address)
 }
 
 /// Bytes the reference C library uses to encode a limit of `value`
 /// (`H5VM_limit_enc_size`): the width of the smallest field that can hold it.
 fn encoded_size_width(value: u64) -> usize {
     (64 - value.leading_zeros() as usize).div_ceil(8).max(1)
-}
-
-/// A heap ID for a "huge" object: type 1 in bits 4-5 of the first byte, then the
-/// huge object ID little-endian across the rest.
-///
-/// The ID is a B-tree key rather than an address because this heap's IDs are too
-/// narrow to hold an address and a length inline — `huge_ids_direct` in
-/// `fractal_heap` recomputes that same choice on the way back in, so the two must
-/// agree on the ID width.
-fn encode_huge_id(huge_id: u64, id_length: u16) -> Vec<u8> {
-    let payload_len = (id_length as usize) - 1;
-    debug_assert!(
-        payload_len >= 8 || huge_id < (1u64 << (payload_len * 8)),
-        "huge object ID overflows the heap ID payload"
-    );
-    let mut id = vec![0u8; id_length as usize];
-    id[0] = 0x10; // type = 1 (huge)
-    for i in 0..payload_len.min(8) {
-        id[1 + i] = ((huge_id >> (i * 8)) & 0xFF) as u8;
-    }
-    id
-}
-
-fn encode_managed_id(offset: u64, length: u64, max_heap_size: u16, id_length: u16) -> Vec<u8> {
-    // `length << max_heap_size` must not overflow, and the offset must not run
-    // into the length's bits. Both hold for every set `dense_attrs_check` admits;
-    // asserted so a change to either constant cannot silently break the packing.
-    debug_assert!(length <= DENSE_ATTR_MAX_MANAGED_OBJECT as u64);
-    debug_assert_eq!(
-        offset >> max_heap_size,
-        0,
-        "heap offset overflows its field"
-    );
-    let mut id = vec![0u8; id_length as usize];
-    id[0] = 0x00; // type = 0 (managed)
-    let combined = offset | (length << max_heap_size);
-    let payload_len = (id_length as usize) - 1;
-    for i in 0..payload_len.min(8) {
-        id[1 + i] = ((combined >> (i * 8)) & 0xFF) as u8;
-    }
-    id
 }
 
 /// The Attribute Info (0x0015) message a version 2 object header needs when its
@@ -1208,12 +1132,6 @@ fn write_uint(buf: &mut Vec<u8>, val: u64, width: u8) {
 ///
 /// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#sec_fmt4_appendixa
 pub(crate) const UNDEF_ADDRESS: StoredAddress = StoredAddress::undefined(OFFSET_SIZE);
-
-pub(crate) fn write_undef_offset(buf: &mut Vec<u8>, offset_size: u8) {
-    for _ in 0..offset_size {
-        buf.push(0xFF);
-    }
-}
 
 // ---- FileWriter ----
 
@@ -4423,28 +4341,6 @@ mod tests {
         assert_eq!(attrs.len(), 5);
     }
 
-    #[test]
-    fn encode_decode_managed_id_roundtrip() {
-        let id = encode_managed_id(100, 42, 40, 8);
-        let fh = crate::fractal_heap::FractalHeapHeader {
-            heap_id_length: 8,
-            io_filter_encoded_length: 0,
-            max_managed_object_size: 1024,
-            btree_huge_objects_address: StoredAddress::new(u64::MAX),
-            table_width: 4,
-            starting_block_size: 4096,
-            max_direct_block_size: 65536,
-            max_heap_size: 40,
-            start_root_rows: 1,
-            root_block_address: StoredAddress::new(0),
-            current_rows_in_root_indirect_block: 0,
-            managed_objects_count: 0,
-        };
-        let (off, len) = fh.decode_managed_id(&id).unwrap();
-        assert_eq!(off, 100);
-        assert_eq!(len, 42);
-    }
-
     /// An `AsciiString` attribute named `name` whose serialized (v3) size is
     /// exactly `size` bytes, so a bound can be tested on the value it bounds.
     fn dense_attr_of_size(name: &str, size: usize) -> AttributeMessage {
@@ -4592,7 +4488,7 @@ mod tests {
             assert_eq!(dense_attrs_check(&attrs), Ok(()), "{label}");
             let plan = dense_attrs_plan(&attrs, DenseAttrCreationOrder::Untracked).unwrap();
             for base in [0u64, 0x1000, 0x8000_0000].map(StoredAddress::new) {
-                let built = plan.build(base);
+                let built = plan.build(base).unwrap();
                 assert_eq!(
                     plan.blob_len(),
                     built.blob.len() as u64,
