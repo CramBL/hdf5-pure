@@ -264,6 +264,7 @@ use hdf5_pure_format::__private::IndexSlots;
 use hdf5_pure_format::__private::LayoutVersion;
 use hdf5_pure_format::__private::MessageRecordLayout;
 use hdf5_pure_format::__private::OBJECT_HEADER_PREFIX_MAX_LEN;
+use hdf5_pure_format::__private::ObjectHeaderContinuation;
 use hdf5_pure_format::__private::ObjectHeaderPrefix;
 use hdf5_pure_format::__private::SECTION_CLASS_SIMPLE;
 
@@ -14027,14 +14028,18 @@ fn read_oh_continuation<S: Source + ?Sized>(
     base: BaseAddress,
     props: ObjectHeaderPrefix,
 ) -> Result<OhChunk, Error> {
-    if body_end - body < (OFFSET_SIZE + LENGTH_SIZE) as usize {
-        return Err(Error::EditUnsupported("malformed continuation message"));
-    }
-    let off = u64::from_le_bytes(region[body..body + 8].try_into().unwrap());
-    let len = u64::from_le_bytes(region[body + 8..body + 16].try_into().unwrap());
+    let continuation =
+        match ObjectHeaderContinuation::parse(&region[body..body_end], OFFSET_SIZE, LENGTH_SIZE) {
+            Ok(continuation) => continuation,
+            Err(FormatError::UnexpectedEof { .. }) => {
+                return Err(Error::EditUnsupported("malformed continuation message"));
+            }
+            Err(err) => return Err(Error::Format(err)),
+        };
+    let len = continuation.length;
     // The block address is stored relative to the base address; shift it to an
     // absolute file offset before reading.
-    let off = base.absolute(StoredAddress::new(off))?;
+    let off = base.absolute(continuation.address)?;
     // An OCHK block is signature(4) + messages + checksum(4).
     let end = off
         .checked_add(len)
@@ -14042,22 +14047,26 @@ fn read_oh_continuation<S: Source + ?Sized>(
         .ok_or(Error::EditUnsupported("continuation block out of bounds"))?;
     let want = (end - off).to_usize()?;
     let mut buf = src.read_metadata_at(off, want)?;
-    if buf[..4] != *b"OCHK" {
-        return Err(Error::EditUnsupported(
-            "invalid continuation block signature",
-        ));
-    }
+    let messages = match hdf5_pure_format::__private::continuation_block_messages(&buf) {
+        Ok(messages) => messages,
+        Err(FormatError::InvalidObjectHeaderSignature) => {
+            return Err(Error::EditUnsupported(
+                "invalid continuation block signature",
+            ));
+        }
+        Err(err) => return Err(Error::Format(err)),
+    };
     // Trim the trailing checksum so the message walk stops at the last message.
-    buf.truncate(want - 4);
+    buf.truncate(messages.end);
     Ok(OhChunk {
         span: (off, len),
         buf,
-        messages_start: 4,
+        messages_start: messages.start,
         props,
     })
 }
 
-/// Returns the type and the body range of the message record at `p` in `region`,
+/// Returns the type and the body range of the message record at `msg_start` in `region`,
 /// as [`MessageRecordLayout::next_message`] reads it.
 ///
 /// # Errors
@@ -14067,10 +14076,16 @@ fn read_oh_continuation<S: Source + ?Sized>(
 pub(crate) fn next_record(
     layout: MessageRecordLayout,
     region: &[u8],
-    p: usize,
+    msg_start: usize,
 ) -> Result<Option<(MessageType, usize, usize)>, Error> {
-    match layout.next_message(region, p) {
-        Ok(record) => Ok(record),
+    match layout.next_message(region, msg_start) {
+        Ok(record) => Ok(record.map(|record| {
+            (
+                record.msg_type,
+                record.body_range.start,
+                record.body_range.end,
+            )
+        })),
         Err(FormatError::UnexpectedEof { .. }) => {
             Err(Error::EditUnsupported("malformed object header message"))
         }
@@ -17797,41 +17812,6 @@ mod tests {
         );
     }
 
-    /// An emitted record carries the creation index only where the layout has
-    /// the field, and the flags byte stays where every reader looks for it.
-    #[test]
-    fn an_emitted_record_carries_a_creation_index_only_where_the_header_tracks_one() {
-        let body = [0xABu8; 5];
-        let plain = MessageRecordLayout::PLAIN.record_with_creation_index(
-            MessageType::ATTRIBUTE,
-            MessageFlags::NONE,
-            9,
-            &body,
-        );
-        assert_eq!(plain.len(), 4 + body.len());
-        assert_eq!(&plain[4..], &body);
-
-        let tracked = TRACKED.record_with_creation_index(
-            MessageType::ATTRIBUTE,
-            MessageFlags::NONE,
-            0x1234,
-            &body,
-        );
-        assert_eq!(tracked.len(), 6 + body.len());
-        assert_eq!(
-            &tracked[..4],
-            &plain[..4],
-            "type, size and flags are shared"
-        );
-        assert_eq!(&tracked[4..6], &0x1234u16.to_le_bytes());
-        assert_eq!(&tracked[6..], &body);
-
-        // Every non-attribute message the reference C library writes carries a
-        // zero creation index, which is what the plain emitter passes.
-        let group_info = TRACKED.record(MessageType::GROUP_INFO, &body);
-        assert_eq!(&group_info[4..6], &0u16.to_le_bytes());
-    }
-
     /// A rebuilt header declares the record layout its bytes are written in, so
     /// re-reading it walks them the same way.
     #[test]
@@ -17959,33 +17939,6 @@ mod tests {
                 }
             }
         }
-    }
-
-    /// The flag bits the emitter sets are the ones the format assigns: bit 4 for
-    /// the phase-change block, bit 5 for the timestamps.
-    #[test]
-    fn the_optional_blocks_are_announced_by_their_own_flag_bits() {
-        let with_times = ObjectHeaderPrefix {
-            times: Some(FIXTURE_TIMES),
-            ..ObjectHeaderPrefix::PLAIN
-        };
-        let with_phase = ObjectHeaderPrefix {
-            attribute_phase_change: Some(FIXTURE_PHASE),
-            ..ObjectHeaderPrefix::PLAIN
-        };
-        let flags_and_len = |prefix: ObjectHeaderPrefix| {
-            let header = prefix.encode_header(&[]);
-            (header[5], header.len())
-        };
-        assert_eq!(flags_and_len(ObjectHeaderPrefix::PLAIN), (0, 11));
-        assert_eq!(
-            flags_and_len(with_times),
-            (HeaderFlags::STORES_TIMES.0, 11 + 16)
-        );
-        assert_eq!(
-            flags_and_len(with_phase),
-            (HeaderFlags::STORES_ATTRIBUTE_PHASE_CHANGE.0, 11 + 4)
-        );
     }
 
     /// A rebuild of a header that stores times moves the modification and change

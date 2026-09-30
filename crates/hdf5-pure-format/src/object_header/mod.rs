@@ -1,4 +1,5 @@
-//! HDF5 Object Header parsing (v1 and v2).
+//! The object header, version 1 and version 2: the parser, and the codec of the prefix and the
+//! message records of a version 2 header.
 
 use alloc::vec::Vec;
 
@@ -15,11 +16,14 @@ mod v1;
 mod v2;
 
 pub use v2::AttributePhaseChange;
+pub use v2::MessageRecord;
 pub use v2::MessageRecordLayout;
 pub use v2::OBJECT_HEADER_PREFIX_MAX_LEN;
+pub use v2::ObjectHeaderContinuation;
 pub use v2::ObjectHeaderPrefix;
 pub use v2::ObjectTimes;
 pub use v2::ParsedObjectHeaderPrefix;
+pub use v2::continuation_block_messages;
 
 #[derive(Clone, Copy)]
 struct ParseContext {
@@ -30,7 +34,7 @@ struct ParseContext {
 }
 
 /// OHDR signature for v2 object headers.
-const OHDR_SIGNATURE: [u8; 4] = *b"OHDR";
+pub(super) const OHDR_SIGNATURE: [u8; 4] = *b"OHDR";
 
 /// Controls which parsed messages are retained.
 ///
