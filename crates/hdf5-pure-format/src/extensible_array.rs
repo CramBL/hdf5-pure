@@ -2702,14 +2702,14 @@ mod tests {
 
     // The address and the 4-byte mask of a filtered element take `offset_size + 4` bytes.
     #[test]
-    fn filtered_element_smaller_than_its_own_fields_is_refused() {
+    fn a_filtered_element_smaller_than_its_own_fields_is_an_error() {
         let os: u8 = 8;
         let data = vec![0u8; 64];
 
         // `element_size` must be at least os + 4 = 12 to hold what it claims.
         for element_size in 0..(os + 4) {
             let err = read_element(&data, 0, 1, element_size, os, 80)
-                .expect_err("a filtered element narrower than its own fields must be refused");
+                .expect_err("a filtered element narrower than its own fields must be rejected");
             assert!(
                 matches!(err, FormatError::ChunkedReadError(_)),
                 "element_size {element_size} gave {err:?}, want a ChunkedReadError"
@@ -2723,7 +2723,7 @@ mod tests {
 
     // The oracle is the end of the index block, which both readers bound before they read a field.
     #[test]
-    fn truncated_super_block_addresses_are_refused_by_both_backends() {
+    fn truncated_super_block_addresses_fail_to_read_in_both_backends() {
         let n = 100u64;
         let chunks: Vec<ChunkRecord> = (0..n)
             .map(|i| ChunkRecord {
@@ -2803,7 +2803,7 @@ mod tests {
                 );
                 assert_eq!(available, file.len());
             }
-            other => panic!("buffered read must refuse a truncated address array, got {other:?}"),
+            other => panic!("buffered read must reject a truncated address array, got {other:?}"),
         }
 
         let hm = ExtensibleArrayHeader::parse_from_source(
@@ -2816,7 +2816,7 @@ mod tests {
         let streamed = records_from_source(&file, &hm, 8);
         assert!(
             streamed.is_err(),
-            "streaming read must refuse the same file, got {streamed:?}"
+            "streaming read must reject the same file, got {streamed:?}"
         );
     }
 
@@ -2824,7 +2824,7 @@ mod tests {
     // structure to reject.
     #[cfg(feature = "checksum")]
     #[test]
-    fn a_corrupted_extensible_array_structure_is_refused() {
+    fn a_corrupted_extensible_array_structure_fails_its_checksum() {
         // The same progression as `streaming_ea_super_blocks_and_paged_match_buffered`:
         // inline and direct blocks, then super blocks, then paged data blocks.
         for &n in &[2000u64, 50000, 140000] {
@@ -2911,11 +2911,11 @@ mod tests {
                 let (buffered, streamed_err) = read_both(&file);
                 assert!(
                     matches!(buffered, Err(FormatError::ChecksumMismatch { .. })),
-                    "n={n}: a corrupted checksum at {at:#x} must be refused, got {buffered:?}"
+                    "n={n}: a corrupted checksum at {at:#x} must be rejected, got {buffered:?}"
                 );
                 assert!(
                     streamed_err,
-                    "n={n}: the streaming backend must refuse what the buffered one does, at {at:#x}"
+                    "n={n}: the streaming backend must reject what the buffered one does, at {at:#x}"
                 );
                 if walked {
                     let walk = extensible_array_index_spans(
@@ -2926,7 +2926,7 @@ mod tests {
                     );
                     assert!(
                         matches!(walk, Err(FormatError::ChecksumMismatch { .. })),
-                        "n={n}: the reclaim walk must refuse a corrupt structure at {at:#x} \
+                        "n={n}: the reclaim walk must reject a corrupt structure at {at:#x} \
                          rather than release spans read out of it, got {walk:?}"
                     );
                 }
@@ -3042,7 +3042,7 @@ mod tests {
     }
 
     #[test]
-    fn ea_compute_stats_matches_builder() {
+    fn extensible_array_stats_matches_what_it_builds() {
         let geom_header = ExtensibleArrayHeader {
             client_id: 0,
             element_size: 8,
