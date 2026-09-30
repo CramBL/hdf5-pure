@@ -10,7 +10,6 @@
 //! [extensible]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsec_fmt4_appendixc_extarr
 
 use alloc::format;
-use alloc::vec;
 use alloc::vec::Vec;
 
 use crate::address::StoredAddress;
@@ -261,7 +260,7 @@ pub(crate) fn write_undefined_element(
 ) {
     bytes::write_offset(buf, u64::MAX, offset_size);
     if has_filters {
-        buf.extend_from_slice(&vec![0x00; chunk_size_bytes]);
+        buf.resize(buf.len() + chunk_size_bytes, 0x00);
         buf.extend_from_slice(&0u32.to_le_bytes());
     }
 }
