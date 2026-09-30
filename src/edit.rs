@@ -12620,13 +12620,11 @@ impl ChunkProvider for SliceChunkProvider<'_> {
 /// message advertising no dense storage, followed by a GroupInfo message.
 /// Mirrors `build_group_oh`.
 fn fresh_group_region() -> OhRegion {
-    let mut li = Vec::with_capacity(18);
-    li.push(0); // version
-    li.push(0); // flags
-    li.extend_from_slice(&u64::MAX.to_le_bytes()); // fractal heap addr = UNDEF
-    li.extend_from_slice(&u64::MAX.to_le_bytes()); // btree name index addr = UNDEF
     let mut region = OhRegion::empty(ObjectHeaderPrefix::PLAIN);
-    region.push(MessageType::LINK_INFO, &li);
+    region.push(
+        MessageType::LINK_INFO,
+        &crate::file_writer::COMPACT_LINK_INFO.serialize(OFFSET_WIDTH),
+    );
     region.push(MessageType::GROUP_INFO, &GROUP_INFO_BODY);
     region
 }
@@ -12721,20 +12719,26 @@ fn patch_link_target(
     let mut p = 0;
     while let Some((msg_type, body, body_end)) = region.next_message(p)? {
         if msg_type == MessageType::LINK {
-            if let Ok(link) = LinkMessage::parse(&region[body..body_end], OFFSET_SIZE) {
-                if link.name == name {
-                    return match link.link_target {
-                        LinkTarget::Hard { .. } => {
-                            let ofs = body_end - OFFSET_SIZE as usize;
-                            region.bytes_mut()[ofs..body_end]
-                                .copy_from_slice(&new_addr.get().to_le_bytes());
-                            Ok(())
-                        }
-                        _ => Err(Error::EditUnsupported(
-                            "a group on the edited path is reached by a soft/external link",
-                        )),
-                    };
+            if let Ok(link) = LinkMessage::parse(&region[body..body_end], OFFSET_SIZE)
+                && link.name == name
+            {
+                let Some(address) =
+                    LinkMessage::hard_link_address_range(&region[body..body_end], OFFSET_WIDTH)?
+                else {
+                    return Err(Error::EditUnsupported(
+                        "a group on the edited path is reached by a soft/external link",
+                    ));
+                };
+                // The patch writes the address up to the end of the body, so the
+                // address has to be the last field of the message.
+                if body + address.end != body_end {
+                    return Err(Error::EditUnsupported(
+                        "a link message holds bytes past its hard link address",
+                    ));
                 }
+                region.bytes_mut()[body + address.start..body_end]
+                    .copy_from_slice(&new_addr.get().to_le_bytes());
+                return Ok(());
             }
         }
         p = body_end;
@@ -14922,6 +14926,37 @@ mod tests {
     /// this crate emits.
     fn plain_region(bytes: Vec<u8>) -> OhRegion {
         OhRegion::new(bytes, ObjectHeaderPrefix::PLAIN)
+    }
+
+    fn hard_link_region(trailing: &[u8]) -> OhRegion {
+        let mut body = make_link("child", StoredAddress::new(0x1000))
+            .serialize(crate::file_writer::OFFSET_WIDTH);
+        body.extend_from_slice(trailing);
+        plain_region(message_record(MessageType::LINK, &body))
+    }
+
+    #[test]
+    fn a_hard_link_is_retargeted_at_its_address_field() {
+        let mut region = hard_link_region(&[]);
+        patch_link_target(&mut region, "child", StoredAddress::new(0x2000)).unwrap();
+        assert_eq!(
+            region[region.len() - 8..],
+            0x2000u64.to_le_bytes(),
+            "the address field holds the new target"
+        );
+    }
+
+    #[test]
+    fn a_hard_link_with_bytes_past_its_address_is_unsupported() {
+        let mut region = hard_link_region(&[0]);
+        let err = patch_link_target(&mut region, "child", StoredAddress::new(0x2000)).unwrap_err();
+        let Error::EditUnsupported(reason) = err else {
+            panic!("expected EditUnsupported, got {err:?}");
+        };
+        assert_eq!(
+            reason,
+            "a link message holds bytes past its hard link address"
+        );
     }
 
     /// A header region holding one attribute inline.
@@ -17511,7 +17546,7 @@ mod tests {
         assert_eq!(info.max_creation_order, Some(2));
         assert_eq!(info.fractal_heap_address, None);
         assert_eq!(info.btree_name_index_address, None);
-        assert_eq!(info.btree_creation_order_address, None);
+        assert_eq!(info.btree_creation_order_address, Some(None));
         assert_eq!(region_links(&region).last().unwrap().1, Some(1));
     }
 
