@@ -649,8 +649,20 @@ mod tests {
         let mut h = FractalHeapHeader {
             heap_id_length: 7,
             io_filter_encoded_length: 8,
+            flags: 0,
             max_managed_object_size: 0,
+            next_huge_object_id: 0,
             btree_huge_objects_address: StoredAddress::new(u64::MAX),
+            free_space_in_managed_blocks: 0,
+            managed_block_free_space_manager_address: StoredAddress::new(u64::MAX),
+            managed_space: 0,
+            allocated_managed_space: 0,
+            direct_block_allocation_iterator_offset: 0,
+            managed_objects_count: 0,
+            huge_objects_size: 0,
+            huge_objects_count: 0,
+            tiny_objects_size: 0,
+            tiny_objects_count: 0,
             table_width: 4,
             starting_block_size: 512,
             max_direct_block_size: 65536,
@@ -658,7 +670,6 @@ mod tests {
             start_root_rows: 1,
             root_block_address: StoredAddress::new(0x100),
             current_rows_in_root_indirect_block: 0,
-            managed_objects_count: 0,
         };
         let file = vec![0u8; 0x400];
         assert_eq!(
