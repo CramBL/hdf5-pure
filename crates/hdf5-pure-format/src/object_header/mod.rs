@@ -14,6 +14,13 @@ use crate::metadata_source::MetadataSource;
 mod v1;
 mod v2;
 
+pub use v2::AttributePhaseChange;
+pub use v2::MessageRecordLayout;
+pub use v2::OBJECT_HEADER_PREFIX_MAX_LEN;
+pub use v2::ObjectHeaderPrefix;
+pub use v2::ObjectTimes;
+pub use v2::ParsedObjectHeaderPrefix;
+
 #[derive(Clone, Copy)]
 struct ParseContext {
     access_mode: AccessMode,
