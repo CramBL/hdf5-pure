@@ -26,11 +26,16 @@ use hdf5_pure_format::__private::ATTRIBUTE_HEAP_STARTING_BLOCK_SIZE;
 use hdf5_pure_format::__private::ATTRIBUTE_HEAP_TABLE_WIDTH;
 use hdf5_pure_format::__private::AttributeHeapPlan;
 use hdf5_pure_format::__private::AttributeHeapPlanError;
+use hdf5_pure_format::__private::AttributeRecord;
+use hdf5_pure_format::__private::BTREE_V2_ATTRIBUTE_CREATION_ORDER;
+use hdf5_pure_format::__private::BTREE_V2_ATTRIBUTE_NAME;
+use hdf5_pure_format::__private::BTREE_V2_HUGE_OBJECT;
 use hdf5_pure_format::__private::BTREE_V2_NODE_SIZE;
 use hdf5_pure_format::__private::BTreeV2Plan;
 use hdf5_pure_format::__private::FRACTAL_HEAP_DIRECT_BLOCKS_CHECKSUMMED;
 use hdf5_pure_format::__private::FractalHeapHeader;
 use hdf5_pure_format::__private::FreeSection;
+use hdf5_pure_format::__private::HugeObjectRecord;
 use hdf5_pure_format::__private::LayoutVersion;
 use hdf5_pure_format::__private::SECTION_CLASS_LARGE;
 use hdf5_pure_format::__private::SECTION_CLASS_SMALL;
@@ -424,29 +429,18 @@ pub(crate) fn needs_dense_attrs(attrs: &[AttributeMessage]) -> Result<bool, Form
 pub(crate) const DENSE_ATTR_MAX_MANAGED_OBJECT: usize =
     hdf5_pure_format::__private::attribute_heap_max_managed_object(OFFSET_WIDTH);
 
-/// One name-index B-tree v2 record as [`build_dense_attrs`] writes it: heap
-/// ID(8) + message flags(1) + creation order(4) + name hash(4).
-const DENSE_ATTR_BTREE_RECORD: u16 = 8 + 1 + 4 + 4;
+/// The length of the heap IDs of the attribute heaps [`build_dense_attrs`] writes.
+const DENSE_ATTR_HEAP_ID_LENGTH: u16 = 8;
 
-/// One huge-objects B-tree v2 record (type 1, indirectly accessed and
-/// non-filtered): address + length + huge object ID. Matches what
-/// `fractal_heap::HugeObjectIndex::decode` reads on the way back in.
-const DENSE_ATTR_HUGE_BTREE_RECORD: u16 =
-    OFFSET_SIZE as u16 + LENGTH_SIZE as u16 + LENGTH_SIZE as u16;
+/// One name-index B-tree v2 record as [`build_dense_attrs`] writes it.
+const DENSE_ATTR_BTREE_RECORD: u16 = AttributeRecord::name_record_size(DENSE_ATTR_HEAP_ID_LENGTH);
 
-/// B-tree v2 type for an attribute name index.
-const DENSE_ATTR_NAME_BTREE_TYPE: u8 = 8;
+/// One huge-objects B-tree v2 record as [`build_dense_attrs`] writes it.
+const DENSE_ATTR_HUGE_BTREE_RECORD: u16 = HugeObjectRecord::size(OFFSET_WIDTH, LENGTH_WIDTH);
 
-/// B-tree v2 type for an attribute creation-order index, and the record it
-/// stores: heap ID(8) + message flags(1) + creation order(4). The name index's
-/// record is this plus the name hash, which is why the two indexes can be built
-/// over the same heap IDs.
-const DENSE_ATTR_CORDER_BTREE_TYPE: u8 = 9;
-const DENSE_ATTR_CORDER_BTREE_RECORD: u16 = 8 + 1 + 4;
-
-/// B-tree v2 type for a fractal heap's huge objects, indirectly accessed and
-/// not filtered.
-const DENSE_ATTR_HUGE_BTREE_TYPE: u8 = 1;
+/// One creation-order B-tree v2 record as [`build_dense_attrs`] writes it.
+const DENSE_ATTR_CORDER_BTREE_RECORD: u16 =
+    AttributeRecord::creation_order_record_size(DENSE_ATTR_HEAP_ID_LENGTH);
 
 /// What a dense attribute set records about attribute creation order.
 ///
@@ -689,7 +683,7 @@ pub(crate) fn dense_attrs_plan(
     // a tree grows a level long before it could need an empty node — so a plan
     // here cannot fail on anything a caller controls.
     let name_plan = BTreeV2Plan::new(
-        DENSE_ATTR_NAME_BTREE_TYPE,
+        BTREE_V2_ATTRIBUTE_NAME,
         attrs.len(),
         DENSE_ATTR_BTREE_RECORD,
         BTREE_V2_NODE_SIZE,
@@ -698,7 +692,7 @@ pub(crate) fn dense_attrs_plan(
     .expect("a 512-byte node holds 29 name records, enough to plan any count");
     let corder_plan = creation.indexed().then(|| {
         BTreeV2Plan::new(
-            DENSE_ATTR_CORDER_BTREE_TYPE,
+            BTREE_V2_ATTRIBUTE_CREATION_ORDER,
             attrs.len(),
             DENSE_ATTR_CORDER_BTREE_RECORD,
             BTREE_V2_NODE_SIZE,
@@ -708,7 +702,7 @@ pub(crate) fn dense_attrs_plan(
     });
     let huge_plan = (huge_count > 0).then(|| {
         BTreeV2Plan::new(
-            DENSE_ATTR_HUGE_BTREE_TYPE,
+            BTREE_V2_HUGE_OBJECT,
             huge_count,
             DENSE_ATTR_HUGE_BTREE_RECORD,
             BTREE_V2_NODE_SIZE,
@@ -837,7 +831,7 @@ impl DenseAttrPlan {
     pub(crate) fn build(&self, heap_address: StoredAddress) -> Result<DenseAttrBlob, FormatError> {
         let max_heap_size: u16 = DENSE_ATTR_MAX_HEAP_SIZE_BITS;
         let block_offset_bytes = DENSE_ATTR_BLOCK_OFFSET_BYTES; // 5
-        let heap_id_length: u16 = 8;
+        let heap_id_length = DENSE_ATTR_HEAP_ID_LENGTH;
 
         let Self {
             serialized,
@@ -957,14 +951,15 @@ impl DenseAttrPlan {
 
         // Build B-tree v2 type 8 records (17 bytes each), in the order the plan
         // sorted them into — the order the index is searched in.
-        let record_size: u16 = heap_id_length + 1 + 4 + 4;
-        debug_assert_eq!(record_size, DENSE_ATTR_BTREE_RECORD);
-        let mut name_records = Vec::with_capacity(serialized.len() * record_size as usize);
+        let mut name_records =
+            Vec::with_capacity(serialized.len() * usize::from(DENSE_ATTR_BTREE_RECORD));
         for &(hash, i) in order {
-            name_records.extend_from_slice(&heap_ids[i as usize]);
-            name_records.push(MessageFlags::NONE.get());
-            name_records.extend_from_slice(&creation.index_of(i).to_le_bytes()); // creation_order
-            name_records.extend_from_slice(&hash.to_le_bytes()); // hash
+            AttributeRecord {
+                heap_id: &heap_ids[i as usize],
+                flags: MessageFlags::NONE,
+                creation_order: creation.index_of(i),
+            }
+            .encode_name_record(&mut name_records, hash);
         }
 
         let name_tree =
@@ -984,9 +979,12 @@ impl DenseAttrPlan {
             let mut corder_records =
                 Vec::with_capacity(corder_order.len() * DENSE_ATTR_CORDER_BTREE_RECORD as usize);
             for &i in corder_order {
-                corder_records.extend_from_slice(&heap_ids[i as usize]);
-                corder_records.push(MessageFlags::NONE.get());
-                corder_records.extend_from_slice(&creation.index_of(i).to_le_bytes());
+                AttributeRecord {
+                    heap_id: &heap_ids[i as usize],
+                    flags: MessageFlags::NONE,
+                    creation_order: creation.index_of(i),
+                }
+                .encode_creation_order_record(&mut corder_records);
             }
             let corder_tree = corder_plan.serialize(
                 &corder_records,
@@ -1005,9 +1003,12 @@ impl DenseAttrPlan {
             let mut huge_bytes =
                 Vec::with_capacity(huge_records.len() * DENSE_ATTR_HUGE_BTREE_RECORD as usize);
             for (id, addr, len) in &huge_records {
-                write_offset(&mut huge_bytes, *addr, OFFSET_SIZE);
-                write_length(&mut huge_bytes, *len, LENGTH_SIZE);
-                write_length(&mut huge_bytes, *id, LENGTH_SIZE);
+                HugeObjectRecord {
+                    address: *addr,
+                    length: *len,
+                    id: *id,
+                }
+                .encode(&mut huge_bytes, OFFSET_WIDTH, LENGTH_WIDTH);
             }
             let huge_tree =
                 huge_plan.serialize(&huge_bytes, huge_nodes_addr, OFFSET_WIDTH, LENGTH_WIDTH);
@@ -1094,33 +1095,6 @@ pub(crate) fn compact_attribute_info_message() -> Vec<u8> {
         btree_creation_order_address: None,
     }
     .serialize(OFFSET_WIDTH)
-}
-
-/// Writes `addr` to `buf` as a little-endian address field of `offset_size` bytes.
-pub(crate) fn write_offset(buf: &mut Vec<u8>, addr: StoredAddress, offset_size: u8) {
-    write_uint(buf, addr.get(), offset_size);
-}
-
-/// Writes `val` to `buf` as a little-endian length field of `length_size` bytes.
-fn write_length(buf: &mut Vec<u8>, val: u64, length_size: u8) {
-    write_uint(buf, val, length_size);
-}
-
-/// Writes `val` to `buf` in `width` little-endian bytes.
-///
-/// Writes nothing for a `width` other than 2, 4, or 8, the widths a superblock
-/// declares for an address and for a length.
-fn write_uint(buf: &mut Vec<u8>, val: u64, width: u8) {
-    #[expect(
-        clippy::cast_possible_truncation,
-        reason = "each arm narrows to width, the on-disk field width chosen for this file"
-    )]
-    match width {
-        2 => buf.extend_from_slice(&(val as u16).to_le_bytes()),
-        4 => buf.extend_from_slice(&(val as u32).to_le_bytes()),
-        8 => buf.extend_from_slice(&val.to_le_bytes()),
-        _ => {}
-    }
 }
 
 /// The undefined address at the [`OFFSET_SIZE`] address width this writer emits.

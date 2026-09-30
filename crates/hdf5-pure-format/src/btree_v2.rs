@@ -1,5 +1,10 @@
 //! The version 2 B-tree parsers: the header, the leaf and internal nodes, and the table of node
 //! capacities, which gives the widths of the record counts in an internal node's child pointers.
+//!
+//! [`HugeObjectRecord`] and [`AttributeRecord`] are the records of the huge-object index of a
+//! fractal heap and of the attribute indexes, with their encoders. A reader parses a huge-object
+//! record with [`BTreeV2Record::huge_object`], and reads the heap ID and the creation order of the
+//! other records with the other methods of [`BTreeV2Record`].
 
 use core::num::NonZeroU16;
 
@@ -15,7 +20,10 @@ use crate::address::StoredAddress;
 use crate::bytes;
 use crate::convert::Narrow;
 use crate::error::FormatError;
+use crate::message_flags::MessageFlags;
 use crate::metadata_source::MetadataSource;
+use crate::width::LengthWidth;
+use crate::width::OffsetWidth;
 
 /// A version 2 B-tree header, signature `BTHD`: the geometry every node of the tree shares, and
 /// the address of the root node.
@@ -183,6 +191,142 @@ impl BTreeV2Header {
             .to_usize()?;
         let buf = source.read_metadata_at(address, window)?;
         Self::parse(&buf, 0, offset_size, length_size)
+    }
+}
+
+impl BTreeV2Record {
+    /// Parses the record as a record of the huge-object index of a fractal heap, type 1.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::UnexpectedEof`] if the record ends before its three fields.
+    pub fn huge_object(
+        &self,
+        offset_width: OffsetWidth,
+        length_width: LengthWidth,
+    ) -> Result<HugeObjectRecord, FormatError> {
+        let os = usize::from(offset_width.get());
+        let ls = usize::from(length_width.get());
+        Ok(HugeObjectRecord {
+            address: StoredAddress::new(bytes::read_offset_width(&self.data, 0, offset_width)?),
+            length: bytes::read_length_width(&self.data, os, length_width)?,
+            id: bytes::read_length_width(&self.data, os + ls, length_width)?,
+        })
+    }
+
+    /// Returns the heap ID in the record of a link index of `tree_type`, or `None` if the record
+    /// ends before an ID of `heap_id_length` bytes.
+    ///
+    /// The heap ID follows the 4-byte name hash in a type 5 record of a name index, and the
+    /// 8-byte creation order in a type 6 record of a creation-order index. A record of any other
+    /// `tree_type` is read as type 6.
+    pub fn link_heap_id(&self, tree_type: u8, heap_id_length: u16) -> Option<&[u8]> {
+        let at = if tree_type == BTREE_V2_LINK_NAME {
+            usize::from(NAME_HASH_LEN)
+        } else {
+            LINK_CREATION_ORDER_LEN
+        };
+        self.data.get(at..at + usize::from(heap_id_length))
+    }
+
+    /// Returns the heap ID that opens a type 8 or type 9 record of an attribute index, or `None`
+    /// if the record is shorter than `heap_id_length` bytes.
+    pub fn attribute_heap_id(&self, heap_id_length: u16) -> Option<&[u8]> {
+        self.data.get(..usize::from(heap_id_length))
+    }
+
+    /// Returns the creation order in a type 8 or type 9 record of an attribute index, past a heap
+    /// ID of `heap_id_length` bytes and the message flags, or `None` if the record ends before it.
+    pub fn attribute_creation_order(&self, heap_id_length: u16) -> Option<u32> {
+        let at = usize::from(heap_id_length) + usize::from(MESSAGE_FLAGS_LEN);
+        self.data
+            .get(at..)
+            .and_then(|rest| rest.first_chunk())
+            .map(|&bytes| u32::from_le_bytes(bytes))
+    }
+}
+
+/// A record of the version 2 B-tree that indexes the huge objects of a fractal heap, type 1: the
+/// objects the heap does not filter and whose heap IDs store the key of their record.
+///
+/// The record is defined in "Version 2 B-trees" of the [format specification, version
+/// 4.0][spec], which calls the key the Huge Object ID.
+///
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_infra_btrees_v2
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct HugeObjectRecord {
+    /// The address of the object.
+    pub address: StoredAddress,
+    /// The length of the object in bytes.
+    pub length: u64,
+    /// The key of the object, which its heap ID stores.
+    pub id: u64,
+}
+
+impl HugeObjectRecord {
+    /// Returns the length in bytes of a record whose address is `offset_width` bytes wide and
+    /// whose length and key are `length_width` bytes wide each.
+    pub const fn size(offset_width: OffsetWidth, length_width: LengthWidth) -> u16 {
+        offset_width.get() as u16 + 2 * length_width.get() as u16
+    }
+
+    /// Appends the record to `buf`, with the address in `offset_width` bytes and the length and
+    /// the key in `length_width` bytes each.
+    pub fn encode(&self, buf: &mut Vec<u8>, offset_width: OffsetWidth, length_width: LengthWidth) {
+        let Self {
+            address,
+            length,
+            id,
+        } = *self;
+        bytes::write_offset(buf, address.get(), offset_width);
+        bytes::write_length(buf, length, length_width);
+        bytes::write_length(buf, id, length_width);
+    }
+}
+
+/// A record of a version 2 B-tree that indexes the attributes of an object in dense storage, type
+/// 8 in the name index and type 9 in the creation-order index.
+///
+/// A type 9 record stores the three fields, and a type 8 record adds the hash of the attribute
+/// name. Both are defined in "Version 2 B-trees" of the [format specification, version
+/// 4.0][spec].
+///
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_infra_btrees_v2
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct AttributeRecord<'a> {
+    /// The heap ID of the Attribute message in the attribute heap of the object.
+    pub heap_id: &'a [u8],
+    /// The object header message flags of the Attribute message.
+    pub flags: MessageFlags,
+    /// The creation order of the attribute.
+    pub creation_order: u32,
+}
+
+impl AttributeRecord<'_> {
+    /// Returns the length in bytes of a type 8 record whose heap ID is `heap_id_length` bytes
+    /// long.
+    pub const fn name_record_size(heap_id_length: u16) -> u16 {
+        Self::creation_order_record_size(heap_id_length) + NAME_HASH_LEN
+    }
+
+    /// Returns the length in bytes of a type 9 record whose heap ID is `heap_id_length` bytes
+    /// long.
+    pub const fn creation_order_record_size(heap_id_length: u16) -> u16 {
+        heap_id_length + MESSAGE_FLAGS_LEN + ATTRIBUTE_CREATION_ORDER_LEN
+    }
+
+    /// Appends the type 8 record of the attribute to `buf`, with `name_hash` as the hash of its
+    /// name.
+    pub fn encode_name_record(&self, buf: &mut Vec<u8>, name_hash: u32) {
+        self.encode_creation_order_record(buf);
+        buf.extend_from_slice(&name_hash.to_le_bytes());
+    }
+
+    /// Appends the type 9 record of the attribute to `buf`.
+    pub fn encode_creation_order_record(&self, buf: &mut Vec<u8>) {
+        buf.extend_from_slice(self.heap_id);
+        buf.push(self.flags.get());
+        buf.extend_from_slice(&self.creation_order.to_le_bytes());
     }
 }
 
@@ -459,8 +603,43 @@ pub fn parse_btree_v2_internal_child_pointers(
     Ok(children)
 }
 
+/// The type of a version 2 B-tree that indexes the huge objects of a fractal heap that the heap
+/// does not filter and whose heap IDs store a key.
+///
+/// The type is defined in the Type table of "Version 2 B-trees" of the [format specification,
+/// version 4.0][spec].
+///
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_infra_btrees_v2
+pub const BTREE_V2_HUGE_OBJECT: u8 = 1;
+
+/// The type of a version 2 B-tree that indexes the link names of a group, from the same table as
+/// [`BTREE_V2_HUGE_OBJECT`].
+const BTREE_V2_LINK_NAME: u8 = 5;
+
+/// The type of a version 2 B-tree that indexes the attribute names of an object, from the same
+/// table as [`BTREE_V2_HUGE_OBJECT`].
+pub const BTREE_V2_ATTRIBUTE_NAME: u8 = 8;
+
+/// The type of a version 2 B-tree that indexes the attribute creation order of an object, from
+/// the same table as [`BTREE_V2_HUGE_OBJECT`].
+pub const BTREE_V2_ATTRIBUTE_CREATION_ORDER: u8 = 9;
+
+/// The width of the creation order that opens a type 6 record, from the same section as
+/// [`BTREE_V2_HUGE_OBJECT`].
+const LINK_CREATION_ORDER_LEN: usize = 8;
+
+/// The width of the message flags in a type 8 or type 9 record.
+const MESSAGE_FLAGS_LEN: u16 = 1;
+
+/// The width of the creation order in a type 8 or type 9 record.
+const ATTRIBUTE_CREATION_ORDER_LEN: u16 = 4;
+
+/// The width of the name hash that opens a type 5 record and closes a type 8 record.
+const NAME_HASH_LEN: u16 = 4;
+
 #[cfg(test)]
 mod tests {
+    use rstest::rstest;
     use test_util::btree_v2;
     use test_util::widths::Widths;
 
@@ -571,4 +750,117 @@ mod tests {
     }
 
     const WIDTHS: Widths = Widths::EIGHT;
+
+    #[rstest]
+    fn an_encoded_huge_object_record_decodes_to_its_fields(
+        #[values(OffsetWidth::Four, OffsetWidth::Eight)] offset_width: OffsetWidth,
+        #[values(LengthWidth::Four, LengthWidth::Eight)] length_width: LengthWidth,
+    ) {
+        let record = HugeObjectRecord {
+            address: StoredAddress::new(0x1234),
+            length: 700,
+            id: 3,
+        };
+        let mut data = Vec::new();
+        record.encode(&mut data, offset_width, length_width);
+
+        assert_eq!(
+            data.len(),
+            usize::from(HugeObjectRecord::size(offset_width, length_width))
+        );
+        let [os, ls] = [offset_width.get(), length_width.get()].map(usize::from);
+        let mut expected = 0x1234u64.to_le_bytes()[..os].to_vec();
+        expected.extend_from_slice(&700u64.to_le_bytes()[..ls]);
+        expected.extend_from_slice(&3u64.to_le_bytes()[..ls]);
+        assert_eq!(data, expected);
+        assert_eq!(
+            BTreeV2Record { data }.huge_object(offset_width, length_width),
+            Ok(record)
+        );
+    }
+
+    #[test]
+    fn a_huge_object_record_shorter_than_its_fields_is_unexpected_eof() {
+        let record = BTreeV2Record { data: vec![0; 20] };
+        assert_eq!(
+            record.huge_object(OffsetWidth::Eight, LengthWidth::Eight),
+            Err(FormatError::UnexpectedEof {
+                expected: 24,
+                available: 20,
+            })
+        );
+    }
+
+    #[test]
+    fn an_attribute_name_record_holds_its_heap_id_flags_creation_order_and_hash() {
+        let mut data = Vec::new();
+        AttributeRecord {
+            heap_id: &[1, 2, 3, 4, 5, 6, 7, 8],
+            flags: MessageFlags::CONSTANT,
+            creation_order: 0x0A0B,
+        }
+        .encode_name_record(&mut data, 0x1122_3344);
+
+        assert_eq!(
+            data,
+            [
+                1, 2, 3, 4, 5, 6, 7, 8, 0x01, 0x0B, 0x0A, 0, 0, 0x44, 0x33, 0x22, 0x11
+            ]
+        );
+        assert_eq!(
+            data.len(),
+            usize::from(AttributeRecord::name_record_size(8))
+        );
+        let record = BTreeV2Record { data };
+        assert_eq!(
+            record.attribute_heap_id(8),
+            Some(&[1, 2, 3, 4, 5, 6, 7, 8][..])
+        );
+        assert_eq!(record.attribute_creation_order(8), Some(0x0A0B));
+    }
+
+    #[test]
+    fn an_attribute_creation_order_record_omits_the_hash() {
+        let mut data = Vec::new();
+        AttributeRecord {
+            heap_id: &[9; 8],
+            flags: MessageFlags::NONE,
+            creation_order: 7,
+        }
+        .encode_creation_order_record(&mut data);
+
+        assert_eq!(data, [9, 9, 9, 9, 9, 9, 9, 9, 0, 7, 0, 0, 0]);
+        assert_eq!(
+            data.len(),
+            usize::from(AttributeRecord::creation_order_record_size(8))
+        );
+    }
+
+    #[rstest]
+    #[case::without_a_creation_order(vec![1, 2, 3, 4, 5, 6, 7, 8, 0], Some(&[1, 2, 3, 4, 5, 6, 7, 8][..]), None)]
+    #[case::shorter_than_a_heap_id(vec![1, 2, 3], None, None)]
+    fn a_short_attribute_record_yields_the_fields_it_holds(
+        #[case] data: Vec<u8>,
+        #[case] heap_id: Option<&[u8]>,
+        #[case] creation_order: Option<u32>,
+    ) {
+        let record = BTreeV2Record { data };
+        assert_eq!(record.attribute_heap_id(8), heap_id);
+        assert_eq!(record.attribute_creation_order(8), creation_order);
+    }
+
+    #[rstest]
+    #[case::a_name_index(BTREE_V2_LINK_NAME, &[0xA, 0xB, 0xC, 0xD, 1, 2, 3, 4, 5, 6, 7], Some(&[1, 2, 3, 4, 5, 6, 7][..]))]
+    #[case::a_creation_order_index(6, &[0, 0, 0, 0, 0, 0, 0, 0, 1, 2, 3, 4, 5, 6, 7], Some(&[1, 2, 3, 4, 5, 6, 7][..]))]
+    #[case::a_record_shorter_than_its_heap_id(BTREE_V2_LINK_NAME, &[0xA, 0xB, 0xC, 0xD, 1, 2], None)]
+    fn a_link_record_yields_the_heap_id_past_its_key(
+        #[case] tree_type: u8,
+        #[case] data: &[u8],
+        #[case] heap_id: Option<&[u8]>,
+    ) {
+        let record = BTreeV2Record {
+            data: data.to_vec(),
+        };
+        assert_eq!(record.link_heap_id(tree_type, 7), heap_id);
+    }
 }
