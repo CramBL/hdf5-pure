@@ -198,7 +198,7 @@ We use 3 blocks of imports in our Rust files:
 
 This makes it easier to see where a particular import comes from.
 
-Within the import blocks we prefer to separate imports that do not share a parent module. For example,
+Within the import blocks we prefer to separate imports whose items have different immediate parent modules. For example,
 
 ```rust
 // Incorrect
@@ -208,6 +208,8 @@ use alloc::{format, vec::Vec};
 use alloc::format;
 use alloc::vec::Vec;
 ```
+
+Items from the same parent module may share a `use`. A module may be grouped with its own items through `self`, as in `use std::panic::{self, AssertUnwindSafe};`.
 
 A function is never imported by its bare name. It is called through at least one level of its path: `convert::u32_from(value)` after `use crate::convert;`, and never `use crate::convert::u32_from;`. A bare function call then always means a function in the current module, and a qualified one says where it comes from.
 
