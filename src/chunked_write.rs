@@ -12,14 +12,16 @@ use alloc::{format, vec, vec::Vec};
 const HADDR_UNDEF: u64 = u64::MAX;
 use core::num::NonZeroUsize;
 
+use hdf5_pure_format::__private::ChunkIndexInfo;
 use hdf5_pure_format::__private::ChunkRecord;
-use hdf5_pure_format::__private::FIXED_ARRAY_PAGE_BITS;
+use hdf5_pure_format::__private::FilteredSingleChunk;
 use hdf5_pure_format::__private::IndexSlots;
 use hdf5_pure_format::__private::SlotOccupancy;
 
 use crate::address::StoredAddress;
 use crate::chunk_grid::{ChunkGrid, GridOrder};
 use crate::convert::Narrow;
+use crate::data_layout::DataLayout;
 use crate::dataspace::{Extent, MaxExtent};
 use crate::error::FormatError;
 use crate::fill_value::FillPattern;
@@ -782,6 +784,50 @@ impl ChunkIndexKind {
             Self::ExtensibleArray => Some(ChunkArrayKind::ExtensibleArray),
         }
     }
+
+    /// Returns the body of the version 4 data layout message of chunks indexed
+    /// by this kind, with `index_address` as the address of a Fixed Array or an
+    /// Extensible Array.
+    ///
+    /// A Single Chunk layout stores the address of the first of `chunks`, and an
+    /// unallocated layout a Fixed Array index at the undefined address.
+    fn layout_message(
+        self,
+        chunk_dims: &[u32],
+        element_size: NonZeroUsize,
+        chunks: &[ChunkRecord],
+        index_address: StoredAddress,
+        has_filters: bool,
+    ) -> Result<Vec<u8>, FormatError> {
+        let (info, address) = match self {
+            Self::Unallocated => (ChunkIndexInfo::FixedArray, StoredAddress::new(HADDR_UNDEF)),
+            Self::SingleChunk => {
+                let chunk = chunks.first().ok_or_else(|| {
+                    FormatError::Internal("a single-chunk layout was planned with no chunk".into())
+                })?;
+                let filtered = has_filters.then_some(FilteredSingleChunk {
+                    filtered_size: chunk.stored_size,
+                    filter_mask: chunk.filter_mask,
+                });
+                (ChunkIndexInfo::SingleChunk { filtered }, chunk.address)
+            }
+            Self::FixedArray => (ChunkIndexInfo::FixedArray, index_address),
+            Self::ExtensibleArray => (ChunkIndexInfo::ExtensibleArray, index_address),
+        };
+        let element_size: u32 = element_size.get().narrow_or_else(|| {
+            FormatError::Internal(
+                "a chunked element size wider than its u32 dimension field".into(),
+            )
+        })?;
+        DataLayout::encode_chunked(
+            chunk_dims,
+            element_size,
+            info,
+            address,
+            INDEX_OFFSET_SIZE,
+            INDEX_LENGTH_SIZE,
+        )
+    }
 }
 
 /// Decide which index a chunk set gets, from the grid its slots are numbered
@@ -1193,7 +1239,7 @@ fn chunk_index_bytes(
     };
     Ok((
         index,
-        chunk_index_layout(set, written_chunks, index_address),
+        chunk_index_layout(set, written_chunks, index_address)?,
     ))
 }
 
@@ -1208,48 +1254,14 @@ fn chunk_index_layout(
     set: &CompressedChunkSet,
     written_chunks: &[ChunkRecord],
     index_address: StoredAddress,
-) -> Vec<u8> {
-    let has_filters = set.has_filters;
-
-    #[expect(
-        clippy::cast_possible_truncation,
-        reason = "element size written into the on-disk u32 dimension field selected for this file"
-    )]
-    match set.kind {
-        ChunkIndexKind::Unallocated => hdf5_pure_format::__private::serialize_v4_fixed_array(
-            &set.chunk_dims_u32,
-            StoredAddress::new(HADDR_UNDEF),
-            INDEX_OFFSET_SIZE.get(),
-            set.element_size.get() as u32,
-            FIXED_ARRAY_PAGE_BITS,
-        ),
-        ChunkIndexKind::ExtensibleArray => {
-            hdf5_pure_format::__private::serialize_v4_extensible_array(
-                &set.chunk_dims_u32,
-                index_address,
-                INDEX_OFFSET_SIZE.get(),
-                set.element_size.get() as u32,
-            )
-        }
-        ChunkIndexKind::SingleChunk => {
-            let chunk = &written_chunks[0];
-            hdf5_pure_format::__private::serialize_v4_single_chunk(
-                &set.chunk_dims_u32,
-                chunk.address,
-                has_filters.then_some(chunk.stored_size),
-                has_filters.then_some(0u32),
-                INDEX_OFFSET_SIZE.get(),
-                set.element_size.get() as u32,
-            )
-        }
-        ChunkIndexKind::FixedArray => hdf5_pure_format::__private::serialize_v4_fixed_array(
-            &set.chunk_dims_u32,
-            index_address,
-            INDEX_OFFSET_SIZE.get(),
-            set.element_size.get() as u32,
-            FIXED_ARRAY_PAGE_BITS,
-        ),
-    }
+) -> Result<Vec<u8>, FormatError> {
+    set.kind.layout_message(
+        &set.chunk_dims_u32,
+        set.element_size,
+        written_chunks,
+        index_address,
+        set.has_filters,
+    )
 }
 
 /// The exact byte length [`assemble_chunked_at`] produces for `set` — the same
@@ -1331,7 +1343,7 @@ pub(crate) fn measure_chunked_at(
     data_len.to_usize()?;
     Ok(ChunkedMeasure {
         data_len,
-        layout_message: chunk_index_layout(set, &written_chunks, index_address),
+        layout_message: chunk_index_layout(set, &written_chunks, index_address)?,
         pipeline_message: set.pipeline_message.clone(),
     })
 }
@@ -1631,57 +1643,13 @@ pub(crate) fn plan_chunked_data_verbatim(
     };
     cursor += index.as_ref().map_or(0, |i| i.len);
 
-    #[expect(
-        clippy::cast_possible_truncation,
-        reason = "element size written into the on-disk u32 dimension field selected for this file"
-    )]
-    let layout_message = match kind {
-        // Unreachable here: a verbatim plan is refused above unless it has at
-        // least one chunk, and only a chunk-less fixed-shape set is unallocated.
-        ChunkIndexKind::Unallocated => hdf5_pure_format::__private::serialize_v4_fixed_array(
-            &chunk_dims_u32,
-            StoredAddress::new(HADDR_UNDEF),
-            offset_size.get(),
-            element_size.get() as u32,
-            FIXED_ARRAY_PAGE_BITS,
-        ),
-        ChunkIndexKind::ExtensibleArray => {
-            hdf5_pure_format::__private::serialize_v4_extensible_array(
-                &chunk_dims_u32,
-                index_address,
-                offset_size.get(),
-                element_size.get() as u32,
-            )
-        }
-        ChunkIndexKind::SingleChunk => {
-            let chunk_addr = written_chunks[0].address;
-            let filtered_size = if has_filters {
-                Some(written_chunks[0].stored_size)
-            } else {
-                None
-            };
-            let filter_mask = if has_filters {
-                Some(written_chunks[0].filter_mask)
-            } else {
-                None
-            };
-            hdf5_pure_format::__private::serialize_v4_single_chunk(
-                &chunk_dims_u32,
-                chunk_addr,
-                filtered_size,
-                filter_mask,
-                offset_size.get(),
-                element_size.get() as u32,
-            )
-        }
-        ChunkIndexKind::FixedArray => hdf5_pure_format::__private::serialize_v4_fixed_array(
-            &chunk_dims_u32,
-            index_address,
-            offset_size.get(),
-            element_size.get() as u32,
-            FIXED_ARRAY_PAGE_BITS,
-        ),
-    };
+    let layout_message = kind.layout_message(
+        &chunk_dims_u32,
+        element_size,
+        &written_chunks,
+        index_address,
+        has_filters,
+    )?;
 
     Ok(VerbatimLayout {
         plan: VerbatimPlan {

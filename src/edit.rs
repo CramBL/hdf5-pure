@@ -255,11 +255,13 @@ use std::path::Path;
 
 use core::num::NonZeroUsize;
 
+use hdf5_pure_format::__private::ChunkIndexInfo;
 use hdf5_pure_format::__private::ChunkRecord;
 use hdf5_pure_format::__private::ExtensibleArrayHeader;
 use hdf5_pure_format::__private::FreeSection;
 use hdf5_pure_format::__private::FreeSpaceManagerHeader;
 use hdf5_pure_format::__private::IndexSlots;
+use hdf5_pure_format::__private::LayoutVersion;
 use hdf5_pure_format::__private::SECTION_CLASS_SIMPLE;
 
 use crate::access_mode::AccessMode;
@@ -277,6 +279,7 @@ use crate::chunked_write::{
     plan_chunked_data_verbatim, split_into_chunks,
 };
 use crate::convert::Narrow;
+use crate::data_layout::COMPACT_DATA_OFFSET;
 use crate::data_layout::{ChunkIndexLayout, DataLayout};
 use crate::dataspace::{Dataspace, DataspaceType, Extent, MaxExtent};
 use crate::datatype::{
@@ -9953,12 +9956,14 @@ impl WriteEngine {
             clippy::cast_possible_truncation,
             reason = "element size is a datatype byte width that fits u32"
         )]
-        let layout_body = hdf5_pure_format::__private::serialize_v4_extensible_array(
+        let layout_body = DataLayout::encode_chunked(
             chunk_dims_u32,
-            ea_stored,
-            OFFSET_SIZE,
             element_size.get() as u32,
-        );
+            ChunkIndexInfo::ExtensibleArray,
+            ea_stored,
+            OFFSET_WIDTH,
+            LENGTH_WIDTH,
+        )?;
         let region = replace_dataspace_message(region, new_dataspace_body)?;
         let region = replace_layout_message(&region, &layout_body)?;
         let oh = build_v2_object_header(&region)?;
@@ -12745,10 +12750,6 @@ fn patch_link_target(
     ))
 }
 
-/// Bytes a compact Data Layout message carries ahead of its inline data:
-/// version(1) + class(1) + the 2-byte inline size.
-const COMPACT_LAYOUT_PREAMBLE: usize = 4;
-
 /// Copy a chunk-0 message `region`, replacing the single (compact) Data Layout
 /// message's inline data with `raw` and preserving every other message verbatim.
 /// Used by `write_dataset` to overwrite a compact dataset's values. The message
@@ -12763,7 +12764,7 @@ fn rebuild_compact_layout_region(region: &OhRegion, raw: &[u8]) -> Result<OhRegi
     // and the 2-byte inline size ahead of the data — not on `raw` alone, or the
     // last four lengths below the limit would truncate the size field written
     // for them.
-    if raw.len() > OBJECT_HEADER_MESSAGE_MAX - COMPACT_LAYOUT_PREAMBLE {
+    if raw.len() > OBJECT_HEADER_MESSAGE_MAX - COMPACT_DATA_OFFSET {
         return Err(Error::EditUnsupported(
             "compact dataset data is too large to overwrite in place",
         ));
@@ -12778,25 +12779,15 @@ fn rebuild_compact_layout_region(region: &OhRegion, raw: &[u8]) -> Result<OhRegi
                     "compact-layout overwrite found a non-compact data layout",
                 ));
             }
-            // New compact layout body: version (kept), class=0, 2-byte inline
-            // size, then the data.
-            let mut layout = Vec::with_capacity(COMPACT_LAYOUT_PREAMBLE + raw.len());
-            layout.push(region[body]); // version (3 or 4)
-            layout.push(0); // class = compact
-            #[expect(
-                clippy::cast_possible_truncation,
-                reason = "raw.len() bounded below the u16 inline-size field above"
-            )]
-            layout.extend_from_slice(&(raw.len() as u16).to_le_bytes());
-            layout.extend_from_slice(raw);
+            let layout = DataLayout::encode_compact(LayoutVersion::try_from(region[body])?, raw)?;
             // Message record: type byte, 2-byte size (LE), then the rest of
             // the prefix — flags, and a creation index where the header has one
             // — kept verbatim.
             out.push(region[p]);
             #[expect(
                 clippy::cast_possible_truncation,
-                reason = "the guard above bounds COMPACT_LAYOUT_PREAMBLE + raw.len(), this \
-                          body's exact length, to the 2-byte message-size field"
+                reason = "the guard above bounds COMPACT_DATA_OFFSET + raw.len(), this body's \
+                          exact length, to the 2-byte message-size field"
             )]
             out.extend_from_slice(&(layout.len() as u16).to_le_bytes());
             out.extend_from_slice(&region[p + 3..p + region.layout().prefix_len()]);

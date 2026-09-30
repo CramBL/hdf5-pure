@@ -29,6 +29,7 @@ use hdf5_pure_format::__private::AttributeHeapPlanError;
 use hdf5_pure_format::__private::BTREE_V2_NODE_SIZE;
 use hdf5_pure_format::__private::BTreeV2Plan;
 use hdf5_pure_format::__private::FreeSection;
+use hdf5_pure_format::__private::LayoutVersion;
 use hdf5_pure_format::__private::SECTION_CLASS_LARGE;
 use hdf5_pure_format::__private::SECTION_CLASS_SMALL;
 
@@ -42,6 +43,7 @@ use crate::chunked_write::{
     measure_chunked_at, plan_chunked_data_verbatim,
 };
 use crate::convert::Narrow;
+use crate::data_layout::DataLayout;
 use crate::dataspace::{Dataspace, DataspaceType, Extent, MaxExtent};
 use crate::error::{FormatError, OBJECT_HEADER_MESSAGE_MAX};
 use crate::file_create_properties::FileCreateProperties;
@@ -135,8 +137,12 @@ pub(crate) fn superblock_version(libver: LibVer) -> u8 {
 /// only substantive addition; for a contiguous dataset the version 3 and version
 /// 4 bodies are byte-identical (address then size), so the 1.8 format writes the
 /// same bytes under the version number a 1.8 library understands.
-pub(crate) fn contiguous_layout_version(libver: LibVer) -> u8 {
-    if libver >= LibVer::V110 { 4 } else { 3 }
+pub(crate) fn contiguous_layout_version(libver: LibVer) -> LayoutVersion {
+    if libver >= LibVer::V110 {
+        LayoutVersion::Four
+    } else {
+        LayoutVersion::Three
+    }
 }
 
 /// Builds a contiguous dataset's object header, whose data layout message stores
@@ -160,12 +166,16 @@ pub(crate) fn build_dataset_oh(
         crate::fill_value::fill_value_message_v3(fill)?,
         MessageFlags::CONSTANT,
     );
-    let mut dl = Vec::new();
-    dl.push(contiguous_layout_version(libver));
-    dl.push(1); // class = contiguous
-    dl.extend_from_slice(&data_addr.get().to_le_bytes());
-    dl.extend_from_slice(&data_size.to_le_bytes());
-    w.add_message(MessageType::DATA_LAYOUT, dl);
+    w.add_message(
+        MessageType::DATA_LAYOUT,
+        DataLayout::encode_contiguous(
+            contiguous_layout_version(libver),
+            data_addr,
+            data_size,
+            OFFSET_WIDTH,
+            LENGTH_WIDTH,
+        ),
+    );
     add_attributes(&mut w, attrs, attr_info)?;
     w.serialize()
 }

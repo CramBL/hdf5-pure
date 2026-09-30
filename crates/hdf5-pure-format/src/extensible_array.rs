@@ -2395,16 +2395,16 @@ pub fn extensible_array_capacity() -> u64 {
 // from, the C library's defaults (`H5Dpkg.h`, HDF5 2.2.0).
 
 /// The number of bits that hold the maximum number of elements, `H5D_EARRAY_MAX_NELMTS_BITS`.
-const EA_MAX_NELMTS_BITS: u8 = 32;
+pub(crate) const EA_MAX_NELMTS_BITS: u8 = 32;
 /// The number of elements in the index block, `H5D_EARRAY_IDX_BLK_ELMTS`.
-const EA_IDX_BLK_ELMTS: u8 = 4;
+pub(crate) const EA_IDX_BLK_ELMTS: u8 = 4;
 /// The number of elements in the smallest data block, `H5D_EARRAY_DATA_BLK_MIN_ELMTS`.
-const EA_MIN_DBLK_NELMTS: u8 = 16;
+pub(crate) const EA_MIN_DBLK_NELMTS: u8 = 16;
 /// The fewest data block addresses a super block holds, `H5D_EARRAY_SUP_BLK_MIN_DATA_PTRS`.
-const EA_SUPER_BLK_MIN_DATA_PTRS: u8 = 4;
+pub(crate) const EA_SUPER_BLK_MIN_DATA_PTRS: u8 = 4;
 /// The base 2 logarithm of the number of elements in a data block page,
 /// `H5D_EARRAY_MAX_DBLOCK_PAGE_NELMTS_BITS`.
-const EA_MAX_DBLK_NELMTS_BITS: u8 = 10;
+pub(crate) const EA_MAX_DBLK_NELMTS_BITS: u8 = 10;
 
 #[cfg(test)]
 mod tests {
