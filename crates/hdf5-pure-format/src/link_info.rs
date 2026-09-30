@@ -1,8 +1,17 @@
-//! HDF5 Link Info message parsing (message type 0x0002).
+//! The Link Info message (type 0x0002) of a group: the dense storage of its links, and whether it
+//! tracks and indexes their creation order.
+//!
+//! The message is defined in "The Link Info Message" of the [format specification, version
+//! 4.0][spec].
+//!
+//! [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_linkinfo
+
+use alloc::vec::Vec;
 
 use crate::address::StoredAddress;
-use crate::bytes::{ensure_len, read_optional_offset};
+use crate::bytes;
 use crate::error::FormatError;
+use crate::width::OffsetWidth;
 
 /// Parsed Link Info message from a v2 group object header.
 #[derive(Debug, Clone, PartialEq)]
@@ -13,8 +22,10 @@ pub struct LinkInfoMessage {
     pub fractal_heap_address: Option<StoredAddress>,
     /// Address of B-tree v2 for name-ordered link index.
     pub btree_name_index_address: Option<StoredAddress>,
-    /// Address of B-tree v2 for creation-order link index.
-    pub btree_creation_order_address: Option<StoredAddress>,
+    /// The address of the version 2 B-tree that indexes the links by creation order: `None` where
+    /// the group does not index creation order, and `Some(None)` where it does and the message
+    /// stores the undefined address.
+    pub btree_creation_order_address: Option<Option<StoredAddress>>,
 }
 
 impl LinkInfoMessage {
@@ -26,21 +37,21 @@ impl LinkInfoMessage {
     /// [`FormatError::InvalidOffsetSize`] if `offset_size` is not 2, 4, or 8, and
     /// [`FormatError::UnexpectedEof`] if `data` ends inside a field.
     pub fn parse(data: &[u8], offset_size: u8) -> Result<LinkInfoMessage, FormatError> {
-        ensure_len(data, 0, 2)?;
+        bytes::ensure_len(data, 0, 2)?;
 
         let version = data[0];
-        if version != 0 {
+        if version != LINK_INFO_VERSION {
             return Err(FormatError::InvalidLinkInfoVersion(version));
         }
 
         let flags = data[1];
-        let has_max_creation_order = flags & 0x01 != 0;
-        let has_creation_order_index = flags & 0x02 != 0;
+        let has_max_creation_order = flags & TRACKS_CREATION_ORDER != 0;
+        let has_creation_order_index = flags & INDEXES_CREATION_ORDER != 0;
 
         let mut pos = 2;
 
         let max_creation_order = if has_max_creation_order {
-            ensure_len(data, pos, 8)?;
+            bytes::ensure_len(data, pos, 8)?;
             let v = u64::from_le_bytes([
                 data[pos],
                 data[pos + 1],
@@ -58,15 +69,15 @@ impl LinkInfoMessage {
         };
 
         let fractal_heap_address =
-            read_optional_offset(data, pos, offset_size)?.map(StoredAddress::new);
+            bytes::read_optional_offset(data, pos, offset_size)?.map(StoredAddress::new);
         pos += offset_size as usize;
 
         let btree_name_index_address =
-            read_optional_offset(data, pos, offset_size)?.map(StoredAddress::new);
+            bytes::read_optional_offset(data, pos, offset_size)?.map(StoredAddress::new);
         pos += offset_size as usize;
 
         let btree_creation_order_address = if has_creation_order_index {
-            read_optional_offset(data, pos, offset_size)?.map(StoredAddress::new)
+            Some(bytes::read_optional_offset(data, pos, offset_size)?.map(StoredAddress::new))
         } else {
             None
         };
@@ -78,7 +89,58 @@ impl LinkInfoMessage {
             btree_creation_order_address,
         })
     }
+
+    /// Returns the body of the message, the inverse of [`parse`](Self::parse).
+    ///
+    /// The Flags byte has bit 0 set where [`max_creation_order`](Self::max_creation_order) is
+    /// `Some`, and bit 1 where [`btree_creation_order_address`](Self::btree_creation_order_address)
+    /// is. An address of `None` is stored as the undefined address.
+    pub fn serialize(&self, offset_width: OffsetWidth) -> Vec<u8> {
+        let Self {
+            max_creation_order,
+            fractal_heap_address,
+            btree_name_index_address,
+            btree_creation_order_address,
+        } = *self;
+        let mut data = Vec::with_capacity(2 + 8 + 3 * usize::from(offset_width.get()));
+        data.push(LINK_INFO_VERSION);
+        let mut flags = 0;
+        if max_creation_order.is_some() {
+            flags |= TRACKS_CREATION_ORDER;
+        }
+        if btree_creation_order_address.is_some() {
+            flags |= INDEXES_CREATION_ORDER;
+        }
+        data.push(flags);
+        if let Some(max) = max_creation_order {
+            data.extend_from_slice(&max.to_le_bytes());
+        }
+        let mut address = |address: Option<StoredAddress>| {
+            bytes::write_offset(
+                &mut data,
+                address.map_or(u64::MAX, StoredAddress::get),
+                offset_width,
+            );
+        };
+        address(fractal_heap_address);
+        address(btree_name_index_address);
+        if let Some(btree_creation_order_address) = btree_creation_order_address {
+            address(btree_creation_order_address);
+        }
+        data
+    }
 }
+
+/// The Link Info message version, the one version "The Link Info Message", version 4.0, defines.
+const LINK_INFO_VERSION: u8 = 0;
+
+/// Bit 0 of the Flags field, set where the group tracks the creation order of its links, from the
+/// same section as [`LINK_INFO_VERSION`].
+const TRACKS_CREATION_ORDER: u8 = 0x01;
+
+/// Bit 1 of the Flags field, set where the group indexes the creation order of its links, from the
+/// same section as [`LINK_INFO_VERSION`].
+const INDEXES_CREATION_ORDER: u8 = 0x02;
 
 #[cfg(test)]
 mod tests {
@@ -125,7 +187,7 @@ mod tests {
         );
         assert_eq!(
             msg.btree_creation_order_address,
-            Some(StoredAddress::new(0x3000))
+            Some(Some(StoredAddress::new(0x3000)))
         );
     }
 
@@ -168,5 +230,47 @@ mod tests {
             msg.btree_name_index_address,
             Some(StoredAddress::new(0x200))
         );
+    }
+
+    #[rstest]
+    #[case::compact_storage(LinkInfoMessage {
+        max_creation_order: None,
+        fractal_heap_address: None,
+        btree_name_index_address: None,
+        btree_creation_order_address: None,
+    })]
+    #[case::tracked_and_indexed_dense_storage(LinkInfoMessage {
+        max_creation_order: Some(42),
+        fractal_heap_address: Some(StoredAddress::new(0x1000)),
+        btree_name_index_address: Some(StoredAddress::new(0x2000)),
+        btree_creation_order_address: Some(Some(StoredAddress::new(0x3000))),
+    })]
+    #[case::indexed_with_no_index_yet(LinkInfoMessage {
+        max_creation_order: Some(0),
+        fractal_heap_address: None,
+        btree_name_index_address: None,
+        btree_creation_order_address: Some(None),
+    })]
+    fn a_serialized_message_parses_back_to_itself(
+        #[values(OffsetWidth::Four, OffsetWidth::Eight)] offset_width: OffsetWidth,
+        #[case] message: LinkInfoMessage,
+    ) {
+        assert_eq!(
+            LinkInfoMessage::parse(&message.serialize(offset_width), offset_width.get()),
+            Ok(message)
+        );
+    }
+
+    #[test]
+    fn a_compact_message_stores_two_undefined_addresses() {
+        let message = LinkInfoMessage {
+            max_creation_order: None,
+            fractal_heap_address: None,
+            btree_name_index_address: None,
+            btree_creation_order_address: None,
+        };
+        let mut expected = vec![0, 0];
+        expected.extend_from_slice(&[0xFF; 16]);
+        assert_eq!(message.serialize(OffsetWidth::Eight), expected);
     }
 }

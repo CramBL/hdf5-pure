@@ -59,6 +59,7 @@ use crate::file_space_info::{
     NUM_FILE_FSM_MANAGERS,
 };
 use crate::libver::LibVer;
+use crate::link_info::LinkInfoMessage;
 use crate::link_message::{LinkMessage, LinkTarget};
 use crate::message_flags::MessageFlags;
 use crate::message_type::MessageType;
@@ -90,6 +91,15 @@ const SUPERBLOCK_SIZE: usize = 48;
 
 /// Threshold for switching from compact (inline) to dense attribute storage.
 pub(crate) const DENSE_ATTR_THRESHOLD: usize = 8;
+
+/// The Link Info message of a group that keeps its links in its object header and
+/// does not track their creation order.
+pub(crate) const COMPACT_LINK_INFO: LinkInfoMessage = LinkInfoMessage {
+    max_creation_order: None,
+    fractal_heap_address: None,
+    btree_name_index_address: None,
+    btree_creation_order_address: None,
+};
 
 /// Round `value` up to the next multiple of `page` (a power of two). Used by the
 /// paged file-space writer to page-align region starts and the end-of-allocation.
@@ -261,12 +271,10 @@ pub(crate) fn build_group_oh(
     attr_info: Option<&[u8]>,
 ) -> Result<Vec<u8>, FormatError> {
     let mut w = ObjectHeaderWriter::new();
-    let mut li = Vec::new();
-    li.push(0); // version
-    li.push(0); // flags
-    li.extend_from_slice(&u64::MAX.to_le_bytes()); // fractal heap addr = UNDEF
-    li.extend_from_slice(&u64::MAX.to_le_bytes()); // btree name index addr = UNDEF
-    w.add_message(MessageType::LINK_INFO, li);
+    w.add_message(
+        MessageType::LINK_INFO,
+        COMPACT_LINK_INFO.serialize(OFFSET_WIDTH),
+    );
     // A new-style group (one with a Link Info message) must also carry a Group
     // Info message, or the HDF5 C library refuses to insert links into it:
     // `H5G_obj_insert` reads the Group Info message unconditionally and fails
