@@ -274,7 +274,7 @@ use crate::chunked_read::{
 use crate::chunked_write::{
     ChunkMeta, ChunkOptions, ChunkProvider, StorageAllocation, assemble_chunked_at,
     chunked_data_len, compress_chunks, emit_chunked_data_verbatim, full_chunk_bytes,
-    plan_chunked_data_verbatim, serialize_v4_extensible_array, split_into_chunks,
+    plan_chunked_data_verbatim, split_into_chunks,
 };
 use crate::convert::Narrow;
 use crate::data_layout::{ChunkIndexLayout, DataLayout};
@@ -9953,7 +9953,7 @@ impl WriteEngine {
             clippy::cast_possible_truncation,
             reason = "element size is a datatype byte width that fits u32"
         )]
-        let layout_body = serialize_v4_extensible_array(
+        let layout_body = hdf5_pure_format::__private::serialize_v4_extensible_array(
             chunk_dims_u32,
             ea_stored,
             OFFSET_SIZE,

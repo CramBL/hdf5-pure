@@ -20,7 +20,6 @@ use hdf5_pure_format::__private::SlotOccupancy;
 use crate::address::StoredAddress;
 use crate::chunk_grid::{ChunkGrid, GridOrder};
 use crate::convert::Narrow;
-use crate::data_layout::SINGLE_INDEX_WITH_FILTER;
 use crate::dataspace::{Extent, MaxExtent};
 use crate::error::FormatError;
 use crate::fill_value::FillPattern;
@@ -668,179 +667,6 @@ pub fn split_into_chunks(
     Ok(buffers)
 }
 
-/// Serializes a version 4 single-chunk data layout message.
-fn serialize_v4_single_chunk(
-    chunk_dims: &[u32],
-    chunk_address: StoredAddress,
-    filtered_size: Option<u64>,
-    filter_mask: Option<u32>,
-    offset_size: u8,
-    element_size: u32,
-) -> Vec<u8> {
-    let mut buf = Vec::new();
-    buf.push(4); // version
-    buf.push(2); // class = chunked
-
-    let flags: u8 = if filtered_size.is_some() {
-        SINGLE_INDEX_WITH_FILTER
-    } else {
-        0x00
-    };
-    buf.push(flags);
-
-    // dimensionality = rank + 1 (chunk dims + element size dim)
-    #[expect(
-        clippy::cast_possible_truncation,
-        reason = "rank written into the 1-byte dimensionality field selected for this file"
-    )]
-    let ndims = chunk_dims.len() as u8 + 1;
-    buf.push(ndims);
-
-    // dim_size_encoded_length: how many bytes per dimension
-    // We need to figure out the minimum encoding width
-    let max_dim = chunk_dims
-        .iter()
-        .map(|&d| d as u64)
-        .chain(core::iter::once(element_size as u64))
-        .max()
-        .unwrap_or(1);
-    let dim_encoded_len: u8 = if max_dim <= 0xFF {
-        1
-    } else if max_dim <= 0xFFFF {
-        2
-    } else {
-        4
-    };
-    buf.push(dim_encoded_len);
-
-    // dimension sizes (chunk dims + element size)
-    for &d in chunk_dims {
-        #[expect(
-            clippy::cast_possible_truncation,
-            reason = "dimension written into the on-disk encoding width selected for this file"
-        )]
-        match dim_encoded_len {
-            1 => buf.push(d as u8),
-            2 => buf.extend_from_slice(&(d as u16).to_le_bytes()),
-            4 => buf.extend_from_slice(&d.to_le_bytes()),
-            _ => {}
-        }
-    }
-    // Element size dimension
-    #[expect(
-        clippy::cast_possible_truncation,
-        reason = "element size written into the on-disk encoding width selected for this file"
-    )]
-    match dim_encoded_len {
-        1 => buf.push(element_size as u8),
-        2 => buf.extend_from_slice(&(element_size as u16).to_le_bytes()),
-        4 => buf.extend_from_slice(&element_size.to_le_bytes()),
-        _ => {}
-    }
-
-    // chunk index type = 1 (single chunk)
-    buf.push(1);
-
-    // Index-specific fields
-    if let (Some(fs), Some(fm)) = (filtered_size, filter_mask) {
-        // filtered_size (length_size bytes)
-        buf.extend_from_slice(&fs.to_le_bytes()); // 8 bytes for length_size=8
-        buf.extend_from_slice(&fm.to_le_bytes()); // 4 bytes
-    }
-
-    // chunk address
-    #[expect(
-        clippy::cast_possible_truncation,
-        reason = "chunk address written into the on-disk offset width selected for this file"
-    )]
-    match offset_size {
-        4 => buf.extend_from_slice(&(chunk_address.get() as u32).to_le_bytes()),
-        8 => buf.extend_from_slice(&chunk_address.get().to_le_bytes()),
-        _ => {}
-    }
-
-    buf
-}
-
-/// Serializes a version 4 Fixed Array data layout message.
-fn serialize_v4_fixed_array(
-    chunk_dims: &[u32],
-    fixed_array_address: StoredAddress,
-    offset_size: u8,
-    element_size: u32,
-    max_bits: u8,
-) -> Vec<u8> {
-    let mut buf = Vec::new();
-    buf.push(4); // version
-    buf.push(2); // class = chunked
-
-    buf.push(0x00); // flags
-
-    #[expect(
-        clippy::cast_possible_truncation,
-        reason = "rank written into the 1-byte dimensionality field selected for this file"
-    )]
-    let ndims = chunk_dims.len() as u8 + 1;
-    buf.push(ndims);
-
-    let max_dim = chunk_dims
-        .iter()
-        .map(|&d| d as u64)
-        .chain(core::iter::once(element_size as u64))
-        .max()
-        .unwrap_or(1);
-    let dim_encoded_len: u8 = if max_dim <= 0xFF {
-        1
-    } else if max_dim <= 0xFFFF {
-        2
-    } else {
-        4
-    };
-    buf.push(dim_encoded_len);
-
-    for &d in chunk_dims {
-        #[expect(
-            clippy::cast_possible_truncation,
-            reason = "dimension written into the on-disk encoding width selected for this file"
-        )]
-        match dim_encoded_len {
-            1 => buf.push(d as u8),
-            2 => buf.extend_from_slice(&(d as u16).to_le_bytes()),
-            4 => buf.extend_from_slice(&d.to_le_bytes()),
-            _ => {}
-        }
-    }
-    #[expect(
-        clippy::cast_possible_truncation,
-        reason = "element size written into the on-disk encoding width selected for this file"
-    )]
-    match dim_encoded_len {
-        1 => buf.push(element_size as u8),
-        2 => buf.extend_from_slice(&(element_size as u16).to_le_bytes()),
-        4 => buf.extend_from_slice(&element_size.to_le_bytes()),
-        _ => {}
-    }
-
-    // chunk index type = 3 (Fixed Array)
-    buf.push(3);
-
-    // max_dblk_page_nelmts_bits — must match FAHD max_nelmts_bits
-    buf.push(max_bits);
-
-    // Fixed Array header address
-    #[expect(
-        clippy::cast_possible_truncation,
-        reason = "fixed array header address written into the on-disk offset width selected for this file"
-    )]
-    match offset_size {
-        4 => buf.extend_from_slice(&(fixed_array_address.get() as u32).to_le_bytes()),
-        8 => buf.extend_from_slice(&fixed_array_address.get().to_le_bytes()),
-        _ => {}
-    }
-
-    buf
-}
-
 /// The unfiltered byte size of one whole chunk: the product of the chunk
 /// dimensions and the element size.
 ///
@@ -1008,87 +834,6 @@ pub(crate) fn chunk_index_len(
             has_filters,
         ),
     }
-}
-
-/// Serializes a version 4 Extensible Array data layout message.
-pub(crate) fn serialize_v4_extensible_array(
-    chunk_dims: &[u32],
-    ea_address: StoredAddress,
-    offset_size: u8,
-    element_size: u32,
-) -> Vec<u8> {
-    let mut buf = Vec::new();
-    buf.push(4); // version
-    buf.push(2); // class = chunked
-    buf.push(0x00); // flags
-
-    #[expect(
-        clippy::cast_possible_truncation,
-        reason = "rank written into the 1-byte dimensionality field selected for this file"
-    )]
-    let ndims = chunk_dims.len() as u8 + 1;
-    buf.push(ndims);
-
-    let max_dim = chunk_dims
-        .iter()
-        .map(|&d| d as u64)
-        .chain(core::iter::once(element_size as u64))
-        .max()
-        .unwrap_or(1);
-    let dim_encoded_len: u8 = if max_dim <= 0xFF {
-        1
-    } else if max_dim <= 0xFFFF {
-        2
-    } else {
-        4
-    };
-    buf.push(dim_encoded_len);
-
-    for &d in chunk_dims {
-        #[expect(
-            clippy::cast_possible_truncation,
-            reason = "dimension written into the on-disk encoding width selected for this file"
-        )]
-        match dim_encoded_len {
-            1 => buf.push(d as u8),
-            2 => buf.extend_from_slice(&(d as u16).to_le_bytes()),
-            4 => buf.extend_from_slice(&d.to_le_bytes()),
-            _ => {}
-        }
-    }
-    #[expect(
-        clippy::cast_possible_truncation,
-        reason = "element size written into the on-disk encoding width selected for this file"
-    )]
-    match dim_encoded_len {
-        1 => buf.push(element_size as u8),
-        2 => buf.extend_from_slice(&(element_size as u16).to_le_bytes()),
-        4 => buf.extend_from_slice(&element_size.to_le_bytes()),
-        _ => {}
-    }
-
-    // chunk index type = 4 (Extensible Array)
-    buf.push(4);
-
-    // EA creation parameters (must match AEHD and HDF5 C library defaults)
-    buf.push(32); // max_nelmts_bits
-    buf.push(4); // idx_blk_elmts
-    buf.push(4); // super_blk_min_data_ptrs
-    buf.push(16); // data_blk_min_elmts
-    buf.push(10); // max_dblk_page_nelmts_bits
-
-    // EA header address
-    #[expect(
-        clippy::cast_possible_truncation,
-        reason = "extensible array header address written into the on-disk offset width selected for this file"
-    )]
-    match offset_size {
-        4 => buf.extend_from_slice(&(ea_address.get() as u32).to_le_bytes()),
-        8 => buf.extend_from_slice(&ea_address.get().to_le_bytes()),
-        _ => {}
-    }
-
-    buf
 }
 
 /// A chunked dataset's chunks already split and compressed — the expensive,
@@ -1471,22 +1216,24 @@ fn chunk_index_layout(
         reason = "element size written into the on-disk u32 dimension field selected for this file"
     )]
     match set.kind {
-        ChunkIndexKind::Unallocated => serialize_v4_fixed_array(
+        ChunkIndexKind::Unallocated => hdf5_pure_format::__private::serialize_v4_fixed_array(
             &set.chunk_dims_u32,
             StoredAddress::new(HADDR_UNDEF),
             INDEX_OFFSET_SIZE.get(),
             set.element_size.get() as u32,
             FIXED_ARRAY_PAGE_BITS,
         ),
-        ChunkIndexKind::ExtensibleArray => serialize_v4_extensible_array(
-            &set.chunk_dims_u32,
-            index_address,
-            INDEX_OFFSET_SIZE.get(),
-            set.element_size.get() as u32,
-        ),
+        ChunkIndexKind::ExtensibleArray => {
+            hdf5_pure_format::__private::serialize_v4_extensible_array(
+                &set.chunk_dims_u32,
+                index_address,
+                INDEX_OFFSET_SIZE.get(),
+                set.element_size.get() as u32,
+            )
+        }
         ChunkIndexKind::SingleChunk => {
             let chunk = &written_chunks[0];
-            serialize_v4_single_chunk(
+            hdf5_pure_format::__private::serialize_v4_single_chunk(
                 &set.chunk_dims_u32,
                 chunk.address,
                 has_filters.then_some(chunk.stored_size),
@@ -1495,7 +1242,7 @@ fn chunk_index_layout(
                 set.element_size.get() as u32,
             )
         }
-        ChunkIndexKind::FixedArray => serialize_v4_fixed_array(
+        ChunkIndexKind::FixedArray => hdf5_pure_format::__private::serialize_v4_fixed_array(
             &set.chunk_dims_u32,
             index_address,
             INDEX_OFFSET_SIZE.get(),
@@ -1891,19 +1638,21 @@ pub(crate) fn plan_chunked_data_verbatim(
     let layout_message = match kind {
         // Unreachable here: a verbatim plan is refused above unless it has at
         // least one chunk, and only a chunk-less fixed-shape set is unallocated.
-        ChunkIndexKind::Unallocated => serialize_v4_fixed_array(
+        ChunkIndexKind::Unallocated => hdf5_pure_format::__private::serialize_v4_fixed_array(
             &chunk_dims_u32,
             StoredAddress::new(HADDR_UNDEF),
             offset_size.get(),
             element_size.get() as u32,
             FIXED_ARRAY_PAGE_BITS,
         ),
-        ChunkIndexKind::ExtensibleArray => serialize_v4_extensible_array(
-            &chunk_dims_u32,
-            index_address,
-            offset_size.get(),
-            element_size.get() as u32,
-        ),
+        ChunkIndexKind::ExtensibleArray => {
+            hdf5_pure_format::__private::serialize_v4_extensible_array(
+                &chunk_dims_u32,
+                index_address,
+                offset_size.get(),
+                element_size.get() as u32,
+            )
+        }
         ChunkIndexKind::SingleChunk => {
             let chunk_addr = written_chunks[0].address;
             let filtered_size = if has_filters {
@@ -1916,7 +1665,7 @@ pub(crate) fn plan_chunked_data_verbatim(
             } else {
                 None
             };
-            serialize_v4_single_chunk(
+            hdf5_pure_format::__private::serialize_v4_single_chunk(
                 &chunk_dims_u32,
                 chunk_addr,
                 filtered_size,
@@ -1925,7 +1674,7 @@ pub(crate) fn plan_chunked_data_verbatim(
                 element_size.get() as u32,
             )
         }
-        ChunkIndexKind::FixedArray => serialize_v4_fixed_array(
+        ChunkIndexKind::FixedArray => hdf5_pure_format::__private::serialize_v4_fixed_array(
             &chunk_dims_u32,
             index_address,
             offset_size.get(),
@@ -2057,9 +1806,8 @@ mod tests {
 
     use crate::chunked_read::read_chunked_data_cached;
     use crate::convert::nz;
-    use crate::data_layout::{
-        ChunkIndexLayout, ChunkedLayoutFlags, DataLayout, FilteredSingleChunk,
-    };
+    use crate::data_layout::ChunkIndexLayout;
+    use crate::data_layout::DataLayout;
     use crate::dataspace::{Dataspace, DataspaceType};
     use crate::datatype::layout::FloatingPointLayout;
     use crate::datatype::{Datatype, byte_order};
@@ -3246,74 +2994,6 @@ mod tests {
             let ids: Vec<u16> = pl.filters.iter().map(|f| f.filter_id).collect();
             assert_eq!(&ids, expected);
         }
-    }
-
-    #[test]
-    fn serialize_v4_single_chunk_no_filters_roundtrip() {
-        let msg = serialize_v4_single_chunk(&[20], StoredAddress::new(0x1000), None, None, 8, 8);
-        assert_eq!(
-            DataLayout::parse(&msg, 8, 8).unwrap(),
-            DataLayout::Chunked {
-                flags: ChunkedLayoutFlags::NONE,
-                chunk_dimensions: vec![20, 8],
-                index: ChunkIndexLayout::SingleChunk {
-                    filtered: None,
-                    address: Some(StoredAddress::new(0x1000)),
-                },
-            }
-        );
-    }
-
-    #[test]
-    fn serialize_v4_single_chunk_with_filters_roundtrip() {
-        let msg =
-            serialize_v4_single_chunk(&[100], StoredAddress::new(0x2000), Some(500), Some(0), 8, 8);
-        assert_eq!(
-            DataLayout::parse(&msg, 8, 8).unwrap(),
-            DataLayout::Chunked {
-                flags: ChunkedLayoutFlags::new(SINGLE_INDEX_WITH_FILTER),
-                chunk_dimensions: vec![100, 8],
-                index: ChunkIndexLayout::SingleChunk {
-                    filtered: Some(FilteredSingleChunk {
-                        filtered_size: 500,
-                        filter_mask: 0,
-                    }),
-                    address: Some(StoredAddress::new(0x2000)),
-                },
-            }
-        );
-    }
-
-    #[test]
-    fn serialize_v4_fixed_array_roundtrip() {
-        let msg = serialize_v4_fixed_array(&[20], StoredAddress::new(0x3000), 8, 8, 4);
-        assert_eq!(
-            DataLayout::parse(&msg, 8, 8).unwrap(),
-            DataLayout::Chunked {
-                flags: ChunkedLayoutFlags::NONE,
-                chunk_dimensions: vec![20, 8],
-                index: ChunkIndexLayout::FixedArray {
-                    address: Some(StoredAddress::new(0x3000)),
-                },
-            }
-        );
-    }
-
-    // ---- Extensible Array tests ----
-
-    #[test]
-    fn serialize_v4_extensible_array_roundtrip() {
-        let msg = serialize_v4_extensible_array(&[10], StoredAddress::new(0x4000), 8, 8);
-        assert_eq!(
-            DataLayout::parse(&msg, 8, 8).unwrap(),
-            DataLayout::Chunked {
-                flags: ChunkedLayoutFlags::NONE,
-                chunk_dimensions: vec![10, 8],
-                index: ChunkIndexLayout::ExtensibleArray {
-                    address: Some(StoredAddress::new(0x4000)),
-                },
-            }
-        );
     }
 
     /// Helper: roundtrip with EA (maxshape)
