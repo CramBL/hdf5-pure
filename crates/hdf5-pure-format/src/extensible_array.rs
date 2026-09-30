@@ -1756,63 +1756,45 @@ pub(crate) fn encode_data_block(
         dblk_nelmts: dblk_nelmts as u64,
         page_nelmts: page_nelmts as u64,
     };
-    if !blocks.is_paged() {
-        // Non-paged: elements inline, single checksum.
-        for slot in 0..dblk_nelmts {
-            if let Some(chunk) = slots.at(elem_start + slot) {
-                chunk_record::write_chunk_element(
-                    &mut buf,
+    let write_elements = |buf: &mut Vec<u8>, start: usize, count: usize| {
+        for slot in start..start + count {
+            match slots.at(slot) {
+                Some(chunk) => chunk_record::write_chunk_element(
+                    buf,
                     chunk,
                     offset_size,
                     has_filters,
                     chunk_size_bytes,
-                )?;
-            } else {
-                chunk_record::write_undefined_element(
-                    &mut buf,
+                )?,
+                None => chunk_record::write_undefined_element(
+                    buf,
                     offset_size,
                     has_filters,
                     chunk_size_bytes,
-                );
+                ),
             }
         }
+        Ok::<(), FormatError>(())
+    };
+    if !blocks.is_paged() {
+        // Non-paged: elements inline, single checksum.
+        write_elements(&mut buf, elem_start, dblk_nelmts)?;
         let cks = checksum::jenkins_lookup3(&buf);
         buf.extend_from_slice(&cks.to_le_bytes());
-        Ok(buf)
     } else {
         // Paged: the prefix and its checksum, then every page, as the C library allocates them
         // (`H5EAdblock.c`, HDF5 2.2.0).
         let header_cks = checksum::jenkins_lookup3(&buf);
         buf.extend_from_slice(&header_cks.to_le_bytes());
 
-        let npages = dblk_nelmts / page_nelmts;
-        for page in 0..npages {
-            let page_start = elem_start + page * page_nelmts;
-            let mut page_buf = Vec::new();
-            for slot in 0..page_nelmts {
-                if let Some(chunk) = slots.at(page_start + slot) {
-                    chunk_record::write_chunk_element(
-                        &mut page_buf,
-                        chunk,
-                        offset_size,
-                        has_filters,
-                        chunk_size_bytes,
-                    )?;
-                } else {
-                    chunk_record::write_undefined_element(
-                        &mut page_buf,
-                        offset_size,
-                        has_filters,
-                        chunk_size_bytes,
-                    );
-                }
-            }
-            let page_cks = checksum::jenkins_lookup3(&page_buf);
-            page_buf.extend_from_slice(&page_cks.to_le_bytes());
-            buf.extend_from_slice(&page_buf);
+        for page in 0..dblk_nelmts / page_nelmts {
+            let page_at = buf.len();
+            write_elements(&mut buf, elem_start + page * page_nelmts, page_nelmts)?;
+            let page_cks = checksum::jenkins_lookup3(&buf[page_at..]);
+            buf.extend_from_slice(&page_cks.to_le_bytes());
         }
-        Ok(buf)
     }
+    Ok(buf)
 }
 
 /// Builds the super block (`EASB`) that addresses `dblk_addrs`, with `block_offset_rel` as its
