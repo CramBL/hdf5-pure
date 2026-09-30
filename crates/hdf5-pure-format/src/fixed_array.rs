@@ -1112,7 +1112,7 @@ mod tests {
     // Flips a checksum byte of each structure for every reader of the structure to reject.
     #[cfg(feature = "checksum")]
     #[test]
-    fn a_corrupted_fixed_array_structure_is_refused() {
+    fn a_corrupted_fixed_array_structure_fails_its_checksum() {
         let os: u8 = 8;
         let ls: u8 = 8;
         let base = 0x800u64;
@@ -1195,11 +1195,11 @@ mod tests {
                     assert!(
                         matches!(buffered, Err(FormatError::ChecksumMismatch { .. })),
                         "filters={has_filters}, n={n}: a corrupted checksum at {at:#x} must be \
-                         refused, got {buffered:?}"
+                         rejected, got {buffered:?}"
                     );
                     assert!(
                         streamed_err,
-                        "filters={has_filters}, n={n}: the streaming backend must refuse what the \
+                        "filters={has_filters}, n={n}: the streaming backend must reject what the \
                          buffered one does, at {at:#x}"
                     );
                     if walked {
@@ -1211,7 +1211,7 @@ mod tests {
                         );
                         assert!(
                             matches!(walk, Err(FormatError::ChecksumMismatch { .. })),
-                            "filters={has_filters}, n={n}: the reclaim walk must refuse a corrupt \
+                            "filters={has_filters}, n={n}: the reclaim walk must reject a corrupt \
                              header at {at:#x} rather than release spans read out of it, got \
                              {walk:?}"
                         );

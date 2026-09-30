@@ -2705,7 +2705,7 @@ mod tests {
 
     // `fuzz_targets/parse_file.rs` reaches this path with a crafted dataspace.
     #[test]
-    fn a_dimension_of_no_chunks_refuses_rather_than_dividing_by_zero() {
+    fn a_dimension_of_no_chunks_is_an_error() {
         let (index, file) = array_index(
             ChunkArrayKind::ExtensibleArray,
             &[indexed_chunk(0x1000)],
