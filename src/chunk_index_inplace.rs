@@ -36,6 +36,11 @@ use hdf5_pure_format::__private::ExtensibleArrayBitGeometry;
 use hdf5_pure_format::__private::ExtensibleArrayGeometry;
 use hdf5_pure_format::__private::ExtensibleArrayHeader;
 use hdf5_pure_format::__private::IndexSlots;
+use hdf5_pure_format::__private::MessageRecord;
+use hdf5_pure_format::__private::MessageRecordLayout;
+use hdf5_pure_format::__private::OBJECT_HEADER_PREFIX_MAX_LEN;
+use hdf5_pure_format::__private::ObjectHeaderContinuation;
+use hdf5_pure_format::__private::ObjectHeaderPrefix;
 use hdf5_pure_format::__private::SlotOccupancy;
 use hdf5_pure_format::__private::SuperBlockGeometry;
 
@@ -1440,55 +1445,47 @@ struct Walk {
     messages: Vec<WalkedMessage>,
 }
 
-/// Walk a version-2 object header (chunk 0 plus any continuation chunks),
-/// recording each message's absolute data offset and its containing chunk's
-/// checksum region. Reads one bounded window per header chunk from `source`, so
-/// the walk works over a store with no whole-file mirror.
+/// Walks a version 2 object header, chunk 0 and every continuation block, and
+/// records, for each message other than a continuation, the absolute offset of
+/// its body and the checksum region of its chunk.
+///
+/// The walk works over a store with no whole-file mirror. It reads the first
+/// [`OBJECT_HEADER_PREFIX_MAX_LEN`] bytes of the header, or fewer where the file
+/// ends sooner, then the message region of chunk 0, then one window per
+/// continuation block.
+///
+/// # Errors
+///
+/// Returns [`Error::Format`] if the header ends inside its prefix or does not
+/// begin with its signature, if the version is not 2, if a continuation block
+/// lacks its signature or is too short for it and its checksum, if a chunk runs
+/// past the end of `source`, if the body of a message record runs past the end
+/// of its chunk, if a continuation message ends inside its fields, or if the
+/// header has more than 255 continuation blocks.
 fn walk_v2_object_header<S: Source + ?Sized>(
     source: &S,
     offset: u64,
     offset_size: u8,
     length_size: u8,
 ) -> Result<Walk, Error> {
-    let head = match source.read_metadata_at(offset, 6) {
-        Ok(head) => head,
-        // A header running past end-of-file reads as a missing signature, like
-        // the whole-buffer walk before it; other backend errors pass through.
-        Err(FormatError::UnexpectedEof { .. }) => {
-            return Err(Error::Format(FormatError::InvalidObjectHeaderSignature));
-        }
-        Err(e) => return Err(Error::Format(e)),
-    };
-    if &head[..4] != b"OHDR" {
-        return Err(Error::Format(FormatError::InvalidObjectHeaderSignature));
-    }
-    let flags = head[5];
-    let mut pos = offset + 6;
-    if flags & 0x20 != 0 {
-        pos += 16; // timestamps
-    }
-    if flags & 0x10 != 0 {
-        pos += 4; // attr storage phase-change
-    }
-    let chunk_size_width = 1usize << (flags & 0x03);
-    let size_buf = source.read_metadata_at(pos, chunk_size_width)?;
-    let chunk0_size = read_uint(&size_buf, 0, chunk_size_width)?.to_usize()?;
-    pos += chunk_size_width as u64;
-    let chunk0_start = offset;
-    let chunk0_msg_start = pos;
-    let chunk0_msg_end = chunk0_msg_start + chunk0_size as u64;
-
-    let has_creation_order = flags & 0x04 != 0;
+    let head_len = source
+        .len()
+        .saturating_sub(offset)
+        .min(OBJECT_HEADER_PREFIX_MAX_LEN.to_u64())
+        .to_usize()?;
+    let head = source.read_metadata_at(offset, head_len)?;
+    let prefix = ObjectHeaderPrefix::parse(&head)?;
+    let chunk0_msg_start = offset + prefix.len.to_u64();
+    let chunk0 = source.read_metadata_at(chunk0_msg_start, prefix.chunk0_size.to_usize()?)?;
+    let layout = prefix.prefix.layout;
     let mut messages = Vec::new();
     let mut continuations: Vec<(u64, usize)> = Vec::new();
-
-    let chunk0 = source.read_metadata_at(chunk0_msg_start, chunk0_size)?;
     walk_messages(
         &chunk0,
         chunk0_msg_start,
-        chunk0_start,
-        chunk0_msg_end,
-        has_creation_order,
+        offset,
+        chunk0_msg_start + chunk0.len().to_u64(),
+        layout,
         offset_size,
         length_size,
         &mut messages,
@@ -1501,23 +1498,23 @@ fn walk_v2_object_header<S: Source + ?Sized>(
         if guard == 0 {
             return Err(Error::Format(FormatError::NestingDepthExceeded));
         }
-        // A continuation chunk is `OCHK` + messages + a trailing 4-byte
-        // checksum, so anything shorter than 8 bytes is malformed.
-        if cont_len < 8 {
-            return Err(Error::Format(FormatError::InvalidObjectHeaderSignature));
-        }
-        let chunk = source.read_metadata_at(cont_off, cont_len)?;
-        if &chunk[..4] != b"OCHK" {
-            return Err(Error::Format(FormatError::InvalidObjectHeaderSignature));
-        }
-        let msg_start = cont_off + 4;
-        let msg_end = cont_off + (cont_len - 4) as u64; // checksum is the last 4 bytes
+        let block = source.read_metadata_at(cont_off, cont_len)?;
+        let messages_range = hdf5_pure_format::__private::continuation_block_messages(&block)
+            .map_err(|err| {
+                Error::Format(match err {
+                    FormatError::UnexpectedEof { .. } => FormatError::InvalidObjectHeaderSignature,
+                    err => err,
+                })
+            })?;
+        let region = block.get(messages_range.clone()).ok_or_else(|| {
+            FormatError::Internal("a continuation block's messages lie outside the block".into())
+        })?;
         walk_messages(
-            &chunk[4..cont_len - 4],
-            msg_start,
+            region,
+            cont_off + messages_range.start.to_u64(),
             cont_off,
-            msg_end,
-            has_creation_order,
+            cont_off + messages_range.end.to_u64(),
+            layout,
             offset_size,
             length_size,
             &mut messages,
@@ -1528,69 +1525,67 @@ fn walk_v2_object_header<S: Source + ?Sized>(
     Ok(Walk { messages })
 }
 
-/// Scan one object-header chunk's message region. `chunk` holds exactly the
-/// message bytes and `base` is the absolute file offset of `chunk[0]`, so
-/// recorded message offsets are absolute.
+/// Appends each message of one object header chunk to `messages`, except a
+/// continuation message, whose block location it appends to `continuations`.
+///
+/// `chunk` holds the message region of the chunk, whose records are in
+/// `layout`, and `base` is the absolute file offset of `chunk[0]`, so recorded
+/// message offsets are absolute.
+///
+/// # Errors
+///
+/// Returns [`Error::Format`] if the body of a record runs past the end of
+/// `chunk`, or if a continuation message ends inside its fields.
 #[allow(clippy::too_many_arguments)]
 fn walk_messages(
     chunk: &[u8],
     base: u64,
     chunk_start: u64,
     chunk_msg_end: u64,
-    has_creation_order: bool,
+    layout: MessageRecordLayout,
     offset_size: u8,
     length_size: u8,
     messages: &mut Vec<WalkedMessage>,
     continuations: &mut Vec<(u64, usize)>,
 ) -> Result<(), Error> {
-    let msg_header_size = if has_creation_order { 6 } else { 4 };
-    let end = chunk.len();
-    let mut pos = 0usize;
-    while pos + msg_header_size <= end {
-        let msg_type_raw = chunk[pos] as u16;
-        let msg_data_size = u16::from_le_bytes([chunk[pos + 1], chunk[pos + 2]]) as usize;
-        let msg_flags = MessageFlags::new(chunk[pos + 3]);
-        pos += msg_header_size;
-        if pos + msg_data_size > end {
-            break; // padding
-        }
-        let msg_type = MessageType::from_u16(msg_type_raw);
+    let mut msg_start = 0;
+    while let Some(record) = layout.next_message(chunk, msg_start)? {
+        let MessageRecord {
+            msg_type,
+            flags,
+            body,
+            body_range,
+            ..
+        } = record;
         if msg_type == MessageType::OBJECT_HEADER_CONTINUATION {
-            let cont_off = read_uint(chunk, pos, offset_size as usize)?;
-            let cont_len =
-                read_uint(chunk, pos + offset_size as usize, length_size as usize)?.to_usize()?;
-            continuations.push((cont_off, cont_len));
+            let continuation = ObjectHeaderContinuation::parse(body, offset_size, length_size)?;
+            continuations.push((continuation.address.get(), continuation.length.to_usize()?));
         } else {
             messages.push(WalkedMessage {
                 msg_type,
-                flags: msg_flags,
-                data_off: base + pos as u64,
-                size: msg_data_size,
+                flags,
+                data_off: base + body_range.start.to_u64(),
+                size: body.len(),
                 chunk_start,
                 chunk_msg_end,
             });
         }
-        pos += msg_data_size;
+        msg_start = body_range.end;
     }
     Ok(())
 }
 
-fn read_uint(data: &[u8], pos: usize, size: usize) -> Result<u64, Error> {
-    if pos + size > data.len() {
-        return Err(Error::Format(FormatError::UnexpectedEof {
-            expected: pos + size,
-            available: data.len(),
-        }));
-    }
-    let mut v = 0u64;
-    for i in 0..size {
-        v |= (data[pos + i] as u64) << (8 * i);
-    }
-    Ok(v)
-}
-
 #[cfg(test)]
 mod tests {
+    use std::cell::Cell;
+    use std::cell::RefCell;
+
+    use test_util::image::Image;
+    use test_util::object_header::Message;
+    use test_util::object_header::MessageType as RecordType;
+    use test_util::object_header::v2 as v2_bytes;
+    use test_util::widths::Widths;
+
     use super::*;
     use crate::access_mode::AccessMode;
     use crate::group_v2;
@@ -1599,7 +1594,6 @@ mod tests {
     use crate::source::BytesSource;
     use crate::superblock::Superblock;
     use crate::writer::FileBuilder;
-    use std::cell::{Cell, RefCell};
 
     /// An in-test [`Store`] over a `Vec<u8>` that records every read window, so
     /// the tests below can assert the engine's bounded-memory contract: the
@@ -1833,6 +1827,150 @@ mod tests {
         prefix.extend_from_slice(&loc.ea_addr.get().to_le_bytes());
         prefix.extend_from_slice(&32u64.to_le_bytes()[..loc.ea_bits.block_offset_width().bytes()]);
         (store.data[at..].to_vec(), prefix)
+    }
+
+    #[test]
+    fn the_header_walk_reads_the_prefix_window_then_the_chunk_0_messages() {
+        let store = WindowProbeStore::open(build_unlimited(4, 1));
+        let oh_addr = group_v2::resolve_path_any(
+            &store.data,
+            AccessMode::ReadOnly,
+            &store.superblock,
+            &ObjectPath::parse("d"),
+        )
+        .unwrap();
+        store.reset_counters();
+
+        let walk = walk_v2_object_header(&store, oh_addr, 8, 8).unwrap();
+
+        let reads = store.reads.borrow().clone();
+        let [(head_at, head_len), (messages_at, messages_len)] = reads[..] else {
+            panic!("expected the prefix window and the chunk 0 messages, got {reads:?}");
+        };
+        assert_eq!((head_at, head_len), (oh_addr, OBJECT_HEADER_PREFIX_MAX_LEN));
+        let record_prefix = MessageRecordLayout::PLAIN.prefix_len().to_u64();
+        assert_eq!(
+            walk.messages
+                .iter()
+                .map(|message| (message.msg_type, message.chunk_msg_end))
+                .collect::<Vec<_>>(),
+            [
+                MessageType::DATATYPE,
+                MessageType::DATASPACE,
+                MessageType::FILL_VALUE,
+                MessageType::DATA_LAYOUT,
+            ]
+            .map(|msg_type| (msg_type, messages_at + messages_len.to_u64()))
+        );
+        assert_eq!(walk.messages[0].data_off, messages_at + record_prefix);
+    }
+
+    #[rstest::rstest]
+    #[case::a_version_other_than_2(header_of_version_1())]
+    #[case::a_prefix_cut_short(header_cut_inside_its_prefix())]
+    #[case::a_chunk_0_past_the_end_of_the_file(chunk_0_past_the_end_of_the_file())]
+    #[case::a_record_past_the_end_of_chunk_0(record_past_the_end_of_chunk_0())]
+    #[case::a_short_continuation_message(continuation_message_shorter_than_its_fields())]
+    #[case::a_short_continuation_block(continuation_block_shorter_than_its_signature_and_checksum())]
+    #[case::a_continuation_block_without_its_signature(continuation_block_without_its_signature())]
+    fn a_damaged_header_fails_the_walk(#[case] (bytes, expected): (Vec<u8>, FormatError)) {
+        let Err(err) = walk_v2_object_header(&BytesSource::new(&bytes), 0, 8, 8) else {
+            panic!("expected the walk to fail with {expected:?}");
+        };
+        let Error::Format(format_error) = err else {
+            panic!("expected a format error, got {err:?}");
+        };
+        assert_eq!(format_error, expected);
+    }
+
+    fn header_of_version_1() -> (Vec<u8>, FormatError) {
+        let mut header = one_message_header().build();
+        header[4] = 1;
+        (header, FormatError::InvalidObjectHeaderVersion(1))
+    }
+
+    fn header_cut_inside_its_prefix() -> (Vec<u8>, FormatError) {
+        let header = one_message_header().build()[..5].to_vec();
+        (
+            header,
+            FormatError::UnexpectedEof {
+                expected: 6,
+                available: 5,
+            },
+        )
+    }
+
+    fn chunk_0_past_the_end_of_the_file() -> (Vec<u8>, FormatError) {
+        let mut header = one_message_header()
+            .flags(v2_bytes::HeaderFlags::CHUNK_SIZE_WIDTH)
+            .build();
+        header[6..14].copy_from_slice(&(1u64 << 31).to_le_bytes());
+        let available = header.len();
+        (
+            header,
+            FormatError::UnexpectedEof {
+                expected: 14 + (1 << 31),
+                available,
+            },
+        )
+    }
+
+    fn record_past_the_end_of_chunk_0() -> (Vec<u8>, FormatError) {
+        let mut header = one_message_header().build();
+        header[8] = 0xFF;
+        (
+            header,
+            FormatError::UnexpectedEof {
+                expected: 4 + 0xFF,
+                available: 8,
+            },
+        )
+    }
+
+    fn continuation_message_shorter_than_its_fields() -> (Vec<u8>, FormatError) {
+        let header = v2_bytes::Header::new()
+            .message(Message::new(
+                RecordType::OBJECT_HEADER_CONTINUATION,
+                &[0; 4],
+            ))
+            .build();
+        (
+            header,
+            FormatError::UnexpectedEof {
+                expected: 8,
+                available: 4,
+            },
+        )
+    }
+
+    fn continuation_block_shorter_than_its_signature_and_checksum() -> (Vec<u8>, FormatError) {
+        (
+            image_with_continuation_block(
+                &[v2_bytes::CONTINUATION_SIGNATURE.as_slice(), &[0; 3]].concat(),
+            ),
+            FormatError::InvalidObjectHeaderSignature,
+        )
+    }
+
+    fn continuation_block_without_its_signature() -> (Vec<u8>, FormatError) {
+        (
+            image_with_continuation_block(&[v2_bytes::SIGNATURE.as_slice(), &[0; 4]].concat()),
+            FormatError::InvalidObjectHeaderSignature,
+        )
+    }
+
+    fn one_message_header() -> v2_bytes::Header {
+        v2_bytes::Header::new().message(Message::new(RecordType::DATASPACE, &[1, 2, 3, 4]))
+    }
+
+    fn image_with_continuation_block(block: &[u8]) -> Vec<u8> {
+        const BLOCK_AT: usize = 0x100;
+        let header = v2_bytes::Header::new()
+            .continuation(BLOCK_AT, block, Widths::EIGHT)
+            .build();
+        let mut image = Image::starting_with(&header);
+        image.place(BLOCK_AT, block);
+        image.build()
     }
 
     #[test]
