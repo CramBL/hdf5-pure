@@ -24,6 +24,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Fixed truncated length fields when writing a link name of 4 GiB or more, or a version 2 object header whose first chunk reaches 4 GiB ([#675](https://github.com/CramBL/hdf5-pure/pull/675)).
 - Fixed reads accepting a version 1 object header whose message data size is not a multiple of eight ([#615](https://github.com/CramBL/hdf5-pure/pull/615)).
 - Fixed `repack` and `File::commit` writing a truncated chunk size into a filtered chunk index when a stored chunk is too large for the index's size field ([#690](https://github.com/CramBL/hdf5-pure/pull/690)).
+- Fixed `Dataset::append` accepting a damaged version 2 object header, and reading past a continuation message too short for its fields ([#695](https://github.com/CramBL/hdf5-pure/pull/695)).
 
 ## [0.47.0] - 2026-09-20
 
