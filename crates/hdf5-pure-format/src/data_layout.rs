@@ -5,8 +5,10 @@
 //! encode a compact and a contiguous dataset's properties alike, and a version 4
 //! message stores a chunked dataset's feature flags and its indexing type as
 //! well, which the parse turns into a [`ChunkedLayoutFlags`] and a
-//! [`ChunkIndexLayout`]. The message is defined in "The Data Layout Message" of
-//! the [format specification, version 4.0][spec].
+//! [`ChunkIndexLayout`]. [`DataLayout::encode_compact`],
+//! [`DataLayout::encode_contiguous`] and [`DataLayout::encode_chunked`] return
+//! the body of a message of each class the writer stores. The message is defined
+//! in "The Data Layout Message" of the [format specification, version 4.0][spec].
 //!
 //! [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_layout
 
@@ -14,7 +16,15 @@ use alloc::vec::Vec;
 
 use crate::address::StoredAddress;
 use crate::bytes;
+use crate::convert::Narrow;
 use crate::error::FormatError;
+use crate::error::OBJECT_HEADER_MESSAGE_MAX;
+use crate::extensible_array;
+use crate::fixed_array::FIXED_ARRAY_PAGE_BITS;
+use crate::message_type::MessageType;
+use crate::width::LengthWidth;
+use crate::width::OffsetWidth;
+use crate::width::UintWidth;
 
 /// Parsed HDF5 data layout message.
 #[derive(Debug, Clone, PartialEq)]
@@ -63,14 +73,131 @@ impl DataLayout {
     /// [`FormatError::UnexpectedEof`] if the message body ends inside a field.
     pub fn parse(data: &[u8], offset_size: u8, length_size: u8) -> Result<DataLayout, FormatError> {
         bytes::ensure_len(data, 0, 2)?;
-        let version = data[0];
         let layout_class = data[1];
-
-        match version {
-            LAYOUT_VERSION_3 => Self::parse_v3(data, layout_class, offset_size, length_size),
-            LAYOUT_VERSION_4 => Self::parse_v4(data, layout_class, offset_size, length_size),
-            _ => Err(FormatError::InvalidLayoutVersion(version)),
+        match LayoutVersion::try_from(data[0])? {
+            LayoutVersion::Three => Self::parse_v3(data, layout_class, offset_size, length_size),
+            LayoutVersion::Four => Self::parse_v4(data, layout_class, offset_size, length_size),
         }
+    }
+
+    /// Returns the body of a compact data layout message whose inline data is
+    /// `data`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::ObjectHeaderMessageTooLarge`] if the message is
+    /// longer than [`OBJECT_HEADER_MESSAGE_MAX`], the largest size a message
+    /// record stores.
+    pub fn encode_compact(version: LayoutVersion, data: &[u8]) -> Result<Vec<u8>, FormatError> {
+        let message_len = COMPACT_DATA_OFFSET + data.len();
+        if message_len > OBJECT_HEADER_MESSAGE_MAX {
+            return Err(FormatError::ObjectHeaderMessageTooLarge {
+                message_type: MessageType::DATA_LAYOUT.to_u16(),
+                size: message_len,
+            });
+        }
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "the data is shorter than the message, which the check above bounds to the \
+                      2-byte message size field"
+        )]
+        let data_size = data.len() as u16;
+        let mut buf = Vec::with_capacity(message_len);
+        buf.push(version.get());
+        buf.push(LAYOUT_CLASS_COMPACT);
+        buf.extend_from_slice(&data_size.to_le_bytes());
+        buf.extend_from_slice(data);
+        Ok(buf)
+    }
+
+    /// Returns the body of a contiguous data layout message for `size` bytes of
+    /// data at `address`.
+    ///
+    /// A dataset with no storage allocated has the undefined address.
+    pub fn encode_contiguous(
+        version: LayoutVersion,
+        address: StoredAddress,
+        size: u64,
+        offset_width: OffsetWidth,
+        length_width: LengthWidth,
+    ) -> Vec<u8> {
+        let mut buf = Vec::new();
+        buf.push(version.get());
+        buf.push(LAYOUT_CLASS_CONTIGUOUS);
+        bytes::write_offset(&mut buf, address.get(), offset_width);
+        bytes::write_length(&mut buf, size, length_width);
+        buf
+    }
+
+    /// Returns the body of a version 4 chunked data layout message, for chunks of
+    /// `chunk_dims` elements of `element_size` bytes indexed by `index` at
+    /// `address`.
+    ///
+    /// The message stores every chunk dimension and the element size in the
+    /// fewest bytes, of 1, 2, or 4, that hold the largest of them. A Fixed Array
+    /// and an Extensible Array index store the creation parameters the writer
+    /// gives the header of that array. For a Single Chunk index, `address` is the
+    /// address of the chunk.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::InvalidChunkGeometry`] if `chunk_dims` has more
+    /// than 254 dimensions, which with the element size do not fit the 1-byte
+    /// Dimensionality field.
+    pub fn encode_chunked(
+        chunk_dims: &[u32],
+        element_size: u32,
+        index: ChunkIndexInfo,
+        address: StoredAddress,
+        offset_width: OffsetWidth,
+        length_width: LengthWidth,
+    ) -> Result<Vec<u8>, FormatError> {
+        let dimensionality: u8 = (chunk_dims.len() + 1).narrow_or_else(|| {
+            FormatError::InvalidChunkGeometry(
+                "a chunked layout message stores at most 254 chunk dimensions",
+            )
+        })?;
+        let flags = match index {
+            ChunkIndexInfo::SingleChunk {
+                filtered: Some(_), ..
+            } => SINGLE_INDEX_WITH_FILTER,
+            _ => 0,
+        };
+        let dimension_width =
+            dimension_width(chunk_dims.iter().copied().fold(element_size, u32::max));
+
+        let mut buf = Vec::new();
+        buf.push(LayoutVersion::Four.get());
+        buf.push(LAYOUT_CLASS_CHUNKED);
+        buf.push(flags);
+        buf.push(dimensionality);
+        buf.push(dimension_width.get());
+        for &dim in chunk_dims.iter().chain(core::iter::once(&element_size)) {
+            write_dimension(&mut buf, dim, dimension_width);
+        }
+        match index {
+            ChunkIndexInfo::SingleChunk { filtered } => {
+                buf.push(CHUNK_INDEX_SINGLE_CHUNK);
+                if let Some(FilteredSingleChunk {
+                    filtered_size,
+                    filter_mask,
+                }) = filtered
+                {
+                    bytes::write_length(&mut buf, filtered_size, length_width);
+                    buf.extend_from_slice(&filter_mask.to_le_bytes());
+                }
+            }
+            ChunkIndexInfo::FixedArray => {
+                buf.push(CHUNK_INDEX_FIXED_ARRAY);
+                buf.push(FIXED_ARRAY_PAGE_BITS);
+            }
+            ChunkIndexInfo::ExtensibleArray => {
+                buf.push(CHUNK_INDEX_EXTENSIBLE_ARRAY);
+                buf.extend_from_slice(&EXTENSIBLE_ARRAY_CREATION_PARAMETERS);
+            }
+        }
+        bytes::write_offset(&mut buf, address.get(), offset_width);
+        Ok(buf)
     }
 
     fn parse_v3(
@@ -323,6 +450,67 @@ pub struct FilteredSingleChunk {
     pub filter_mask: u32,
 }
 
+/// The index of the chunks a [`DataLayout::encode_chunked`] message stores, with
+/// the indexing information that depends on the chunks.
+///
+/// [`ChunkIndexLayout`] has the six indexes a reader meets, and this type the
+/// three the writer builds.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ChunkIndexInfo {
+    /// One chunk holds the whole dataset.
+    SingleChunk {
+        /// The stored size and filter mask of a filtered chunk, or `None` for a
+        /// dataset without filters.
+        filtered: Option<FilteredSingleChunk>,
+    },
+    /// A Fixed Array indexes the chunks of a dataspace of fixed maximum
+    /// dimensions.
+    FixedArray,
+    /// An Extensible Array indexes the chunks of a dataspace with one unlimited
+    /// dimension.
+    ExtensibleArray,
+}
+
+/// The version of a data layout message, of the two [`DataLayout::parse`] reads.
+///
+/// Both versions encode a compact and a contiguous layout alike.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LayoutVersion {
+    /// Version 3, used by libhdf5 1.6.3 and later.
+    Three,
+    /// Version 4, used by libhdf5 1.10.0 and later, which adds the chunk indexing
+    /// type and the virtual storage class.
+    Four,
+}
+
+impl LayoutVersion {
+    /// Returns the version byte of the message.
+    pub const fn get(self) -> u8 {
+        match self {
+            Self::Three => LAYOUT_VERSION_3,
+            Self::Four => LAYOUT_VERSION_4,
+        }
+    }
+}
+
+impl TryFrom<u8> for LayoutVersion {
+    type Error = FormatError;
+
+    /// Parses the version byte of a data layout message.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::InvalidLayoutVersion`] if `version` is neither 3
+    /// nor 4.
+    fn try_from(version: u8) -> Result<Self, FormatError> {
+        match version {
+            LAYOUT_VERSION_3 => Ok(Self::Three),
+            LAYOUT_VERSION_4 => Ok(Self::Four),
+            other => Err(FormatError::InvalidLayoutVersion(other)),
+        }
+    }
+}
+
 /// Parses the chunk indexing type byte at `pos`, with the indexing information
 /// and the address that follow it.
 ///
@@ -399,6 +587,30 @@ fn read_filtered_single_chunk(
             data[mask_at + 3],
         ]),
     }))
+}
+
+/// Returns the narrowest of the 1-, 2- and 4-byte widths that holds `largest`.
+fn dimension_width(largest: u32) -> UintWidth {
+    if u8::try_from(largest).is_ok() {
+        UintWidth::One
+    } else if u16::try_from(largest).is_ok() {
+        UintWidth::Two
+    } else {
+        UintWidth::Four
+    }
+}
+
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "`dimension_width` picks a width that holds the largest dimension of the message"
+)]
+fn write_dimension(buf: &mut Vec<u8>, dim: u32, width: UintWidth) {
+    match width {
+        UintWidth::One => buf.push(dim as u8),
+        UintWidth::Two => buf.extend_from_slice(&(dim as u16).to_le_bytes()),
+        UintWidth::Four => buf.extend_from_slice(&dim.to_le_bytes()),
+        UintWidth::Eight => buf.extend_from_slice(&u64::from(dim).to_le_bytes()),
+    }
 }
 
 /// Byte offset of a layout message's class-specific property description, past
@@ -492,6 +704,16 @@ const EXTENSIBLE_ARRAY_INFO_LEN: usize = 5;
 /// Width of the version 2 B-tree indexing information: a four-byte Node Size
 /// and the one-byte Split Percent and Merge Percent.
 const BTREE_V2_INFO_LEN: usize = 6;
+
+/// The Extensible Array indexing information the writer stores, the creation
+/// parameters of the array header it builds, in the order of the message fields.
+const EXTENSIBLE_ARRAY_CREATION_PARAMETERS: [u8; EXTENSIBLE_ARRAY_INFO_LEN] = [
+    extensible_array::EA_MAX_NELMTS_BITS,
+    extensible_array::EA_IDX_BLK_ELMTS,
+    extensible_array::EA_SUPER_BLK_MIN_DATA_PTRS,
+    extensible_array::EA_MIN_DBLK_NELMTS,
+    extensible_array::EA_MAX_DBLK_NELMTS_BITS,
+];
 
 #[cfg(test)]
 mod tests {
@@ -846,4 +1068,200 @@ mod tests {
         let layout = DataLayout::parse(&buf, 8, 8).unwrap();
         assert_eq!(layout, DataLayout::Virtual);
     }
+
+    #[rstest]
+    #[case::single_chunk(
+        ChunkIndexInfo::SingleChunk { filtered: None },
+        ChunkedLayoutFlags::NONE,
+        ChunkIndexLayout::SingleChunk { filtered: None, address: Some(StoredAddress::new(0x1000)) }
+    )]
+    #[case::filtered_single_chunk(
+        ChunkIndexInfo::SingleChunk { filtered: Some(FILTERED) },
+        ChunkedLayoutFlags::new(SINGLE_INDEX_WITH_FILTER),
+        ChunkIndexLayout::SingleChunk { filtered: Some(FILTERED), address: Some(StoredAddress::new(0x1000)) }
+    )]
+    #[case::fixed_array(
+        ChunkIndexInfo::FixedArray,
+        ChunkedLayoutFlags::NONE,
+        ChunkIndexLayout::FixedArray { address: Some(StoredAddress::new(0x1000)) }
+    )]
+    #[case::extensible_array(
+        ChunkIndexInfo::ExtensibleArray,
+        ChunkedLayoutFlags::NONE,
+        ChunkIndexLayout::ExtensibleArray { address: Some(StoredAddress::new(0x1000)) }
+    )]
+    fn an_encoded_chunked_layout_parses_back_to_its_index(
+        #[values(OffsetWidth::Four, OffsetWidth::Eight)] offset_width: OffsetWidth,
+        #[case] info: ChunkIndexInfo,
+        #[case] flags: ChunkedLayoutFlags,
+        #[case] index: ChunkIndexLayout,
+    ) {
+        let message = DataLayout::encode_chunked(
+            &[20],
+            8,
+            info,
+            StoredAddress::new(0x1000),
+            offset_width,
+            LengthWidth::Four,
+        )
+        .unwrap();
+        assert_eq!(
+            DataLayout::parse(&message, offset_width.get(), 4).unwrap(),
+            DataLayout::Chunked {
+                flags,
+                chunk_dimensions: vec![20, 8],
+                index,
+            }
+        );
+    }
+
+    #[rstest]
+    #[case::fixed_array(ChunkIndexInfo::FixedArray, &[CHUNK_INDEX_FIXED_ARRAY, FIXED_ARRAY_PAGE_BITS])]
+    #[case::extensible_array(ChunkIndexInfo::ExtensibleArray, &[CHUNK_INDEX_EXTENSIBLE_ARRAY, 32, 4, 4, 16, 10])]
+    fn an_array_layout_stores_the_parameters_the_array_header_does(
+        #[case] info: ChunkIndexInfo,
+        #[case] indexing: &[u8],
+    ) {
+        let message = DataLayout::encode_chunked(
+            &[10],
+            8,
+            info,
+            StoredAddress::new(0x4000),
+            OffsetWidth::Eight,
+            LengthWidth::Eight,
+        )
+        .unwrap();
+        let mut expected = vec![4, LAYOUT_CLASS_CHUNKED, 0, 2, 1, 10, 8];
+        expected.extend_from_slice(indexing);
+        expected.extend_from_slice(&0x4000u64.to_le_bytes());
+        assert_eq!(message, expected);
+    }
+
+    #[rstest]
+    #[case::one_byte(255, 1)]
+    #[case::two_bytes(256, 2)]
+    #[case::four_bytes(65_536, 4)]
+    fn a_dimension_takes_the_narrowest_width_that_holds_the_largest(
+        #[case] largest: u32,
+        #[case] width: u8,
+    ) {
+        let message = DataLayout::encode_chunked(
+            &[1, largest],
+            1,
+            ChunkIndexInfo::FixedArray,
+            StoredAddress::new(0),
+            OffsetWidth::Eight,
+            LengthWidth::Eight,
+        )
+        .unwrap();
+        assert_eq!(message[4], width);
+        let DataLayout::Chunked {
+            chunk_dimensions, ..
+        } = DataLayout::parse(&message, 8, 8).unwrap()
+        else {
+            panic!("expected a chunked layout");
+        };
+        assert_eq!(chunk_dimensions, vec![1, u64::from(largest), 1]);
+    }
+
+    #[test]
+    fn a_chunked_layout_of_more_dimensions_than_its_field_holds_is_an_error() {
+        let err = DataLayout::encode_chunked(
+            &[1; 255],
+            1,
+            ChunkIndexInfo::FixedArray,
+            StoredAddress::new(0),
+            OffsetWidth::Eight,
+            LengthWidth::Eight,
+        )
+        .unwrap_err();
+        assert_eq!(
+            err,
+            FormatError::InvalidChunkGeometry(
+                "a chunked layout message stores at most 254 chunk dimensions"
+            )
+        );
+    }
+
+    #[rstest]
+    fn an_encoded_contiguous_layout_parses_back_to_its_address_and_size(
+        #[values(LayoutVersion::Three, LayoutVersion::Four)] version: LayoutVersion,
+        #[values(OffsetWidth::Two, OffsetWidth::Eight)] offset_width: OffsetWidth,
+        #[values(LengthWidth::Four, LengthWidth::Eight)] length_width: LengthWidth,
+    ) {
+        let message = DataLayout::encode_contiguous(
+            version,
+            StoredAddress::new(0x800),
+            24,
+            offset_width,
+            length_width,
+        );
+        assert_eq!(message[0], version.get());
+        assert_eq!(
+            DataLayout::parse(&message, offset_width.get(), length_width.get()).unwrap(),
+            DataLayout::Contiguous {
+                address: Some(StoredAddress::new(0x800)),
+                size: 24,
+            }
+        );
+    }
+
+    #[test]
+    fn an_undefined_contiguous_address_parses_back_as_none() {
+        let message = DataLayout::encode_contiguous(
+            LayoutVersion::Four,
+            StoredAddress::undefined(4),
+            0,
+            OffsetWidth::Four,
+            LengthWidth::Eight,
+        );
+        assert_eq!(
+            DataLayout::parse(&message, 4, 8).unwrap(),
+            DataLayout::Contiguous {
+                address: None,
+                size: 0,
+            }
+        );
+    }
+
+    #[rstest]
+    fn an_encoded_compact_layout_parses_back_to_its_data(
+        #[values(LayoutVersion::Three, LayoutVersion::Four)] version: LayoutVersion,
+    ) {
+        let message = DataLayout::encode_compact(version, &[1, 2, 3]).unwrap();
+        assert_eq!(message[0], version.get());
+        assert_eq!(
+            DataLayout::parse(&message, 8, 8).unwrap(),
+            DataLayout::Compact {
+                data: vec![1, 2, 3]
+            }
+        );
+    }
+
+    #[rstest]
+    #[case::at_the_limit(
+        OBJECT_HEADER_MESSAGE_MAX - COMPACT_DATA_OFFSET,
+        Ok(OBJECT_HEADER_MESSAGE_MAX)
+    )]
+    #[case::past_the_limit(
+        OBJECT_HEADER_MESSAGE_MAX - COMPACT_DATA_OFFSET + 1,
+        Err(FormatError::ObjectHeaderMessageTooLarge {
+            message_type: MessageType::DATA_LAYOUT.to_u16(),
+            size: OBJECT_HEADER_MESSAGE_MAX + 1,
+        })
+    )]
+    fn a_compact_layout_is_an_error_only_past_the_message_size_field(
+        #[case] data_len: usize,
+        #[case] expected: Result<usize, FormatError>,
+    ) {
+        assert_eq!(
+            DataLayout::encode_compact(LayoutVersion::Four, &vec![0; data_len]).map(|m| m.len()),
+            expected
+        );
+    }
+
+    const FILTERED: FilteredSingleChunk = FilteredSingleChunk {
+        filtered_size: 500,
+        filter_mask: 3,
+    };
 }

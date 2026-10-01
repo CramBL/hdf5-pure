@@ -13,3 +13,5 @@ mis = "mis"
 unparseable = "unparseable"
 # The flate2 crate.
 flate = "flate"
+# libhdf5 source files, such as H5Oint.c.
+Oint = "Oint"

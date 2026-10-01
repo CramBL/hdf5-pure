@@ -583,7 +583,7 @@ fn read_variable_length(data: &[u8], size: usize) -> Result<u64, FormatError> {
 /// The writer stores it in the "Page Bits" field of both the header and the version 4 data layout
 /// message. The C library calls this value `H5D_FARRAY_MAX_DBLK_PAGE_NELMTS_BITS`. A reader takes
 /// the page size from the header.
-pub const FIXED_ARRAY_PAGE_BITS: u8 = 10;
+pub(crate) const FIXED_ARRAY_PAGE_BITS: u8 = 10;
 
 /// The layout of a Fixed Array that does not depend on its address: the element encoding, the
 /// paging, and the lengths.

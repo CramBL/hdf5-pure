@@ -560,7 +560,7 @@ fn scan_object<S: Source + ?Sized>(
     for chunk in &chunks {
         let layout = chunk.layout();
         let (region, mut p) = chunk.message_region();
-        while let Some((msg_type, body, body_end)) = layout.next_message(region, p)? {
+        while let Some((msg_type, body, body_end)) = crate::edit::next_record(layout, region, p)? {
             // Absolute file offset of this message's body.
             let body_at = chunk.span.0 + body as u64;
             // The flags byte is the 4th of the record header (type, size, flags).
@@ -858,7 +858,10 @@ mod tests {
     /// A region of plain (4-byte-record) messages, the layout every writer in
     /// this crate emits.
     fn plain_region(bytes: Vec<u8>) -> crate::edit::OhRegion {
-        crate::edit::OhRegion::new(bytes, crate::edit::OhHeaderProps::PLAIN)
+        crate::edit::OhRegion::new(
+            bytes,
+            hdf5_pure_format::__private::ObjectHeaderPrefix::PLAIN,
+        )
     }
 
     /// An object-reference attribute named `name` pointing at `address`.

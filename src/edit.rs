@@ -255,18 +255,23 @@ use std::path::Path;
 
 use core::num::NonZeroUsize;
 
+use hdf5_pure_format::__private::ChunkIndexInfo;
 use hdf5_pure_format::__private::ChunkRecord;
 use hdf5_pure_format::__private::ExtensibleArrayHeader;
 use hdf5_pure_format::__private::FreeSection;
 use hdf5_pure_format::__private::FreeSpaceManagerHeader;
 use hdf5_pure_format::__private::IndexSlots;
+use hdf5_pure_format::__private::LayoutVersion;
+use hdf5_pure_format::__private::MessageRecordLayout;
+use hdf5_pure_format::__private::OBJECT_HEADER_PREFIX_MAX_LEN;
+use hdf5_pure_format::__private::ObjectHeaderContinuation;
+use hdf5_pure_format::__private::ObjectHeaderPrefix;
 use hdf5_pure_format::__private::SECTION_CLASS_SIMPLE;
 
 use crate::access_mode::AccessMode;
 use crate::address::BaseAddressExt;
 use crate::address::{BaseAddress, StoredAddress};
 use crate::attribute_info::AttributeInfoMessage;
-use crate::checksum::jenkins_lookup3;
 use crate::chunk_index_inplace::{Located, Store, apply_ea_append, plan_ea_append};
 use crate::chunked_read::{
     chunk_index_spans_from_source, enumerate_chunks_from_source, plan_dense_grid,
@@ -274,9 +279,10 @@ use crate::chunked_read::{
 use crate::chunked_write::{
     ChunkMeta, ChunkOptions, ChunkProvider, StorageAllocation, assemble_chunked_at,
     chunked_data_len, compress_chunks, emit_chunked_data_verbatim, full_chunk_bytes,
-    plan_chunked_data_verbatim, serialize_v4_extensible_array, split_into_chunks,
+    plan_chunked_data_verbatim, split_into_chunks,
 };
 use crate::convert::Narrow;
+use crate::data_layout::COMPACT_DATA_OFFSET;
 use crate::data_layout::{ChunkIndexLayout, DataLayout};
 use crate::dataspace::{Dataspace, DataspaceType, Extent, MaxExtent};
 use crate::datatype::{
@@ -316,7 +322,6 @@ use crate::type_builders::{
     make_u64_type, patch_vl_refs, patch_vl_refs_masked, write_reference_address,
 };
 use crate::width::OffsetWidth;
-use crate::width::UintWidth;
 use crate::{DatatypeByteOrder, signature};
 
 /// An undefined on-disk address (all bits set), HDF5's "no address" sentinel.
@@ -442,14 +447,6 @@ const MAX_LINK_GRAPH_NODES: u32 = 1 << 24;
 /// spans continuation blocks, guarding against a cyclic continuation chain.
 /// Matches the reader's continuation-depth cap.
 const MAX_OH_CHUNKS: usize = 256;
-
-/// Maximum length of a version 2 object header's fixed prefix: signature (4) +
-/// version (1) + flags (1) + optional access/modification/change/birth times
-/// (16) + optional attribute phase-change thresholds (4) + the chunk-0 size
-/// field (up to 8). Reading this many bytes always covers the prefix, so
-/// [`oh_region_at`] can be handed one bounded window instead of a whole-file
-/// image.
-const OH_PREFIX_MAX: usize = 34;
 
 /// A live [`BufferedAppender`](crate::BufferedAppender)'s hold on a dataset.
 ///
@@ -8077,7 +8074,7 @@ impl WriteEngine {
         for chunk in &chunks {
             let layout = chunk.layout();
             let (region, mut p) = chunk.message_region();
-            while let Some((msg_type, _body, body_end)) = layout.next_message(region, p)? {
+            while let Some((msg_type, _body, body_end)) = next_record(layout, region, p)? {
                 if msg_type != MessageType::OBJECT_HEADER_CONTINUATION {
                     out.push_bytes(&region[p..body_end]);
                 }
@@ -9607,7 +9604,7 @@ impl WriteEngine {
         let plan = crate::file_writer::dense_attrs_plan(attrs, creation)?;
         let (_addr, attr_info_message) =
             self.place_relocatable(plan.blob_len(), PageType::Meta, |stored_base| {
-                let blob = plan.build(stored_base);
+                let blob = plan.build(stored_base)?;
                 Ok((blob.blob, blob.attr_info_message))
             })?;
         Ok(attr_info_message)
@@ -9953,12 +9950,14 @@ impl WriteEngine {
             clippy::cast_possible_truncation,
             reason = "element size is a datatype byte width that fits u32"
         )]
-        let layout_body = serialize_v4_extensible_array(
+        let layout_body = DataLayout::encode_chunked(
             chunk_dims_u32,
-            ea_stored,
-            OFFSET_SIZE,
             element_size.get() as u32,
-        );
+            ChunkIndexInfo::ExtensibleArray,
+            ea_stored,
+            OFFSET_WIDTH,
+            LENGTH_WIDTH,
+        )?;
         let region = replace_dataspace_message(region, new_dataspace_body)?;
         let region = replace_layout_message(&region, &layout_body)?;
         let oh = build_v2_object_header(&region)?;
@@ -12133,7 +12132,7 @@ pub(crate) const LOSSY_TAIL_REFUSAL: &str = "this dataset's filter pipeline is l
 /// (datatype, dataspace, fill value, filter pipeline, attributes, attribute info)
 /// byte-for-byte. The replacement may differ in length from the original — a
 /// chunked rebuild can change the index type and thus the layout message size — so
-/// the record is rebuilt via [`OhRecordLayout::record`]. The chunked overwrite
+/// the record is rebuilt via [`MessageRecordLayout::record`]. The chunked overwrite
 /// and copy paths use this to relocate a dataset's chunk storage while preserving
 /// the rest of its header exactly.
 fn replace_layout_message(region: &OhRegion, new_layout_body: &[u8]) -> Result<OhRegion, Error> {
@@ -12167,7 +12166,7 @@ fn replace_layout_message(region: &OhRegion, new_layout_body: &[u8]) -> Result<O
 /// byte-for-byte. Used by the append path to grow a dataset's axis-0 dimension.
 /// The replacement may differ in length from the original (a v1 on-disk
 /// dataspace is normalized to v2 in the rebuilt header), so the record is rebuilt
-/// via [`OhRecordLayout::record`].
+/// via [`MessageRecordLayout::record`].
 fn replace_dataspace_message(
     region: &OhRegion,
     new_dataspace_body: &[u8],
@@ -12621,13 +12620,11 @@ impl ChunkProvider for SliceChunkProvider<'_> {
 /// message advertising no dense storage, followed by a GroupInfo message.
 /// Mirrors `build_group_oh`.
 fn fresh_group_region() -> OhRegion {
-    let mut li = Vec::with_capacity(18);
-    li.push(0); // version
-    li.push(0); // flags
-    li.extend_from_slice(&u64::MAX.to_le_bytes()); // fractal heap addr = UNDEF
-    li.extend_from_slice(&u64::MAX.to_le_bytes()); // btree name index addr = UNDEF
-    let mut region = OhRegion::empty(OhHeaderProps::PLAIN);
-    region.push(MessageType::LINK_INFO, &li);
+    let mut region = OhRegion::empty(ObjectHeaderPrefix::PLAIN);
+    region.push(
+        MessageType::LINK_INFO,
+        &crate::file_writer::COMPACT_LINK_INFO.serialize(OFFSET_WIDTH),
+    );
     region.push(MessageType::GROUP_INFO, &GROUP_INFO_BODY);
     region
 }
@@ -12696,10 +12693,10 @@ fn ensure_attribute_info(region: &mut OhRegion) -> Result<(), Error> {
 /// ([`LinkCreationOrder`] is what hands one out). It is a flagged field of the
 /// Link message *body*, quite separate from the object header's own per-message
 /// creation index: that one records an *attribute*'s creation order, and the
-/// reference C library writes it as the zero [`OhRecordLayout::record`] passes
+/// reference C library writes it as the zero [`MessageRecordLayout::record`] passes
 /// for every other message type.
 fn encode_link_message(
-    layout: OhRecordLayout,
+    layout: MessageRecordLayout,
     name: &str,
     addr: StoredAddress,
     creation_order: Option<u64>,
@@ -12722,20 +12719,26 @@ fn patch_link_target(
     let mut p = 0;
     while let Some((msg_type, body, body_end)) = region.next_message(p)? {
         if msg_type == MessageType::LINK {
-            if let Ok(link) = LinkMessage::parse(&region[body..body_end], OFFSET_SIZE) {
-                if link.name == name {
-                    return match link.link_target {
-                        LinkTarget::Hard { .. } => {
-                            let ofs = body_end - OFFSET_SIZE as usize;
-                            region.bytes_mut()[ofs..body_end]
-                                .copy_from_slice(&new_addr.get().to_le_bytes());
-                            Ok(())
-                        }
-                        _ => Err(Error::EditUnsupported(
-                            "a group on the edited path is reached by a soft/external link",
-                        )),
-                    };
+            if let Ok(link) = LinkMessage::parse(&region[body..body_end], OFFSET_SIZE)
+                && link.name == name
+            {
+                let Some(address) =
+                    LinkMessage::hard_link_address_range(&region[body..body_end], OFFSET_WIDTH)?
+                else {
+                    return Err(Error::EditUnsupported(
+                        "a group on the edited path is reached by a soft/external link",
+                    ));
+                };
+                // The patch writes the address up to the end of the body, so the
+                // address has to be the last field of the message.
+                if body + address.end != body_end {
+                    return Err(Error::EditUnsupported(
+                        "a link message holds bytes past its hard link address",
+                    ));
                 }
+                region.bytes_mut()[body + address.start..body_end]
+                    .copy_from_slice(&new_addr.get().to_le_bytes());
+                return Ok(());
             }
         }
         p = body_end;
@@ -12744,10 +12747,6 @@ fn patch_link_target(
         "expected child link not found in parent group",
     ))
 }
-
-/// Bytes a compact Data Layout message carries ahead of its inline data:
-/// version(1) + class(1) + the 2-byte inline size.
-const COMPACT_LAYOUT_PREAMBLE: usize = 4;
 
 /// Copy a chunk-0 message `region`, replacing the single (compact) Data Layout
 /// message's inline data with `raw` and preserving every other message verbatim.
@@ -12763,7 +12762,7 @@ fn rebuild_compact_layout_region(region: &OhRegion, raw: &[u8]) -> Result<OhRegi
     // and the 2-byte inline size ahead of the data — not on `raw` alone, or the
     // last four lengths below the limit would truncate the size field written
     // for them.
-    if raw.len() > OBJECT_HEADER_MESSAGE_MAX - COMPACT_LAYOUT_PREAMBLE {
+    if raw.len() > OBJECT_HEADER_MESSAGE_MAX - COMPACT_DATA_OFFSET {
         return Err(Error::EditUnsupported(
             "compact dataset data is too large to overwrite in place",
         ));
@@ -12778,25 +12777,15 @@ fn rebuild_compact_layout_region(region: &OhRegion, raw: &[u8]) -> Result<OhRegi
                     "compact-layout overwrite found a non-compact data layout",
                 ));
             }
-            // New compact layout body: version (kept), class=0, 2-byte inline
-            // size, then the data.
-            let mut layout = Vec::with_capacity(COMPACT_LAYOUT_PREAMBLE + raw.len());
-            layout.push(region[body]); // version (3 or 4)
-            layout.push(0); // class = compact
-            #[expect(
-                clippy::cast_possible_truncation,
-                reason = "raw.len() bounded below the u16 inline-size field above"
-            )]
-            layout.extend_from_slice(&(raw.len() as u16).to_le_bytes());
-            layout.extend_from_slice(raw);
+            let layout = DataLayout::encode_compact(LayoutVersion::try_from(region[body])?, raw)?;
             // Message record: type byte, 2-byte size (LE), then the rest of
             // the prefix — flags, and a creation index where the header has one
             // — kept verbatim.
             out.push(region[p]);
             #[expect(
                 clippy::cast_possible_truncation,
-                reason = "the guard above bounds COMPACT_LAYOUT_PREAMBLE + raw.len(), this \
-                          body's exact length, to the 2-byte message-size field"
+                reason = "the guard above bounds COMPACT_DATA_OFFSET + raw.len(), this body's \
+                          exact length, to the 2-byte message-size field"
             )]
             out.extend_from_slice(&(layout.len() as u16).to_le_bytes());
             out.extend_from_slice(&region[p + 3..p + region.layout().prefix_len()]);
@@ -12927,8 +12916,10 @@ fn find_link_info(
 /// and name length (2) if bit 1 is. An absent or truncated message reads as the
 /// default, which is the value the C library itself would use for it.
 ///
-/// Not to be confused with [`AttrPhaseChange`], the *attribute* thresholds
-/// (`H5Pset_attr_phase_change`) that live in the object header's own prefix:
+/// Not to be confused with
+/// [`AttributePhaseChange`](hdf5_pure_format::__private::AttributePhaseChange), the
+/// *attribute* thresholds (`H5Pset_attr_phase_change`) that live in the object
+/// header's own prefix:
 /// this is the *link* phase change, it lives in a message, and it is what
 /// [`reject_dense_link_creation_order`] measures an addition against.
 fn max_compact_links(region: &OhRegion) -> Result<u16, Error> {
@@ -13703,7 +13694,12 @@ fn put_attr_message(
     } else {
         (0, None)
     };
-    let new_msg = layout.record_with_creation_index(MessageType::ATTRIBUTE, body, creation_index);
+    let new_msg = layout.record_with_creation_index(
+        MessageType::ATTRIBUTE,
+        MessageFlags::NONE,
+        creation_index,
+        body,
+    );
 
     let mut out = Vec::with_capacity(region.len() + new_msg.len());
     let mut p = 0;
@@ -13846,11 +13842,6 @@ fn encode_attr_body(name: &str, value: &AttrValue) -> Result<Vec<u8>, Error> {
     Ok(body)
 }
 
-/// Parse the version-2 object-header message record at `p` within a chunk-0
-/// message region, returning `(message type, body start, body end)`; the next
-/// record begins at `body end`. Returns `Ok(None)` once fewer than 4 bytes
-/// remain (a clean end of the region), and `Err` if a record's declared body
-/// runs past the region. Centralizes the bounds check shared by every walker.
 /// Rebuild a superblock-extension object header's message region (as collapsed by
 /// [`WriteEngine::gather_oh_messages`]) with
 /// its File Space Info message replaced by `info`, preserving every other message
@@ -13895,71 +13886,41 @@ pub(crate) fn rewrite_extension_region_bytes(
     Ok(region.with_bytes(out))
 }
 
-/// Parse and validate a version 2 object header's prefix, returning the absolute
-/// `[start, end)` byte range of its chunk-0 message region.
+/// Parses the version 2 object header prefix at `addr` and returns the absolute
+/// byte range `start..end` of its chunk 0 message region, with the
+/// [`ObjectHeaderPrefix`] it declares.
 ///
-/// `prefix` holds the bytes at `[addr, addr + prefix.len())` — up to
-/// [`OH_PREFIX_MAX`], fewer when the header sits near the end of the image — and
-/// `file_len` is the length of the image the header lives in, which bounds the
-/// region. Rejects headers that are not OHDR v2. Everything the prefix declares
-/// ([`OhHeaderProps`]) is returned with the region: the record layout, because a
-/// header that tracks attribute creation order carries 6-byte message records
-/// and every walk of this region has to step by that width, and the two optional
-/// blocks, because nothing below the prefix records them and a rebuild has to
-/// put them back.
+/// `prefix` holds the bytes at `addr`, up to [`OBJECT_HEADER_PREFIX_MAX_LEN`] of
+/// them and fewer where the header sits near the end of the image, and `file_len`
+/// is the length of the image, which bounds the region. A walk of the region
+/// steps by the width of the record layout, and a rebuild writes back the two
+/// optional blocks, which only the prefix stores.
+///
+/// # Errors
+///
+/// Returns [`Error::EditUnsupported`] if the header is not a version 2 object
+/// header or ends before its chunk 0 checksum.
 fn oh_region_at(
     prefix: &[u8],
     addr: u64,
     file_len: u64,
-) -> Result<(u64, u64, OhHeaderProps), Error> {
-    if prefix.len() < 6 || &prefix[..4] != b"OHDR" || prefix[4] != 2 {
-        return Err(Error::EditUnsupported(
-            "an object does not use a version 2 object header",
-        ));
-    }
-    let flags = prefix[5];
-    let layout = OhRecordLayout::from_header_flags(flags);
-    let mut pos = 6usize;
-    let mut take = |len: usize| -> Result<usize, Error> {
-        let at = pos;
-        pos += len;
-        if prefix.len() < pos {
-            return Err(Error::EditUnsupported("truncated object header"));
+) -> Result<(u64, u64, ObjectHeaderPrefix), Error> {
+    let parsed = ObjectHeaderPrefix::parse(prefix).map_err(|err| match err {
+        FormatError::InvalidObjectHeaderSignature | FormatError::InvalidObjectHeaderVersion(_) => {
+            Error::EditUnsupported("an object does not use a version 2 object header")
         }
-        Ok(at)
-    };
-    let times = if flags & OH_FLAG_STORE_TIMES != 0 {
-        let at = take(ObjectTimes::LEN)?;
-        Some(ObjectTimes::parse(prefix, at))
-    } else {
-        None
-    };
-    let attr_phase_change = if flags & OH_FLAG_ATTR_PHASE_CHANGE != 0 {
-        let at = take(AttrPhaseChange::LEN)?;
-        Some(AttrPhaseChange::parse(prefix, at))
-    } else {
-        None
-    };
-    let props = OhHeaderProps {
-        layout,
-        times,
-        attr_phase_change,
-    };
-    let size_width = usize::from(UintWidth::from_flags(flags).get());
-    if prefix.len() < pos + size_width {
-        return Err(Error::EditUnsupported("truncated object header"));
-    }
-    let chunk0_size = read_le(&prefix[pos..pos + size_width]) as u64;
-    pos += size_width;
+        FormatError::UnexpectedEof { .. } => Error::EditUnsupported("truncated object header"),
+        err => Error::Format(err),
+    })?;
     let region_start = addr
-        .checked_add(pos as u64)
+        .checked_add(parsed.len.to_u64())
         .ok_or(Error::EditUnsupported("truncated object header"))?;
     // The region is followed by a 4-byte checksum, which must also be present.
     let region_end = region_start
-        .checked_add(chunk0_size)
+        .checked_add(parsed.chunk0_size)
         .filter(|e| e.checked_add(4).is_some_and(|end| end <= file_len))
         .ok_or(Error::EditUnsupported("truncated object header"))?;
-    Ok((region_start, region_end, props))
+    Ok((region_start, region_end, parsed.prefix))
 }
 
 /// One chunk of a version 2 object header, read out of a file image.
@@ -13977,24 +13938,24 @@ pub(crate) struct OhChunk {
     messages_start: usize,
     /// What chunk 0 of this header declared in its prefix, which every chunk of
     /// the header shares.
-    props: OhHeaderProps,
+    props: ObjectHeaderPrefix,
 }
 
 impl OhChunk {
     /// The slice to walk messages in, and the offset to start at. The two are
-    /// returned together because [`OhRecordLayout::next_message`] must not read
+    /// returned together because [`MessageRecordLayout::next_message`] must not read
     /// past the end of the message region into the checksum.
     pub(crate) fn message_region(&self) -> (&[u8], usize) {
         (&self.buf, self.messages_start)
     }
 
     /// The record layout to walk [`message_region`](Self::message_region) in.
-    pub(crate) fn layout(&self) -> OhRecordLayout {
+    pub(crate) fn layout(&self) -> MessageRecordLayout {
         self.props.layout
     }
 
     /// Everything this header's chunk-0 prefix declared.
-    pub(crate) fn props(&self) -> OhHeaderProps {
+    pub(crate) fn props(&self) -> ObjectHeaderPrefix {
         self.props
     }
 }
@@ -14004,7 +13965,7 @@ fn read_oh_chunk0<S: Source + ?Sized>(src: &S, addr: u64) -> Result<OhChunk, Err
     let file_len = src.len();
     let window = file_len
         .saturating_sub(addr)
-        .min(OH_PREFIX_MAX as u64)
+        .min(OBJECT_HEADER_PREFIX_MAX_LEN as u64)
         .to_usize()?;
     let prefix = src.read_metadata_at(addr, window)?;
     let (rs, re, props) = oh_region_at(&prefix, addr, file_len)?;
@@ -14045,7 +14006,7 @@ pub(crate) fn read_oh_chunks<S: Source + ?Sized>(
         let props = chunks[i].props();
         let layout = props.layout;
         let (region, mut p) = chunks[i].message_region();
-        while let Some((msg_type, body, body_end)) = layout.next_message(region, p)? {
+        while let Some((msg_type, body, body_end)) = next_record(layout, region, p)? {
             if msg_type == MessageType::OBJECT_HEADER_CONTINUATION {
                 found.push(read_oh_continuation(
                     src, region, body, body_end, base, props,
@@ -14069,16 +14030,20 @@ fn read_oh_continuation<S: Source + ?Sized>(
     body: usize,
     body_end: usize,
     base: BaseAddress,
-    props: OhHeaderProps,
+    props: ObjectHeaderPrefix,
 ) -> Result<OhChunk, Error> {
-    if body_end - body < (OFFSET_SIZE + LENGTH_SIZE) as usize {
-        return Err(Error::EditUnsupported("malformed continuation message"));
-    }
-    let off = u64::from_le_bytes(region[body..body + 8].try_into().unwrap());
-    let len = u64::from_le_bytes(region[body + 8..body + 16].try_into().unwrap());
+    let continuation =
+        match ObjectHeaderContinuation::parse(&region[body..body_end], OFFSET_SIZE, LENGTH_SIZE) {
+            Ok(continuation) => continuation,
+            Err(FormatError::UnexpectedEof { .. }) => {
+                return Err(Error::EditUnsupported("malformed continuation message"));
+            }
+            Err(err) => return Err(Error::Format(err)),
+        };
+    let len = continuation.length;
     // The block address is stored relative to the base address; shift it to an
     // absolute file offset before reading.
-    let off = base.absolute(StoredAddress::new(off))?;
+    let off = base.absolute(continuation.address)?;
     // An OCHK block is signature(4) + messages + checksum(4).
     let end = off
         .checked_add(len)
@@ -14086,348 +14051,49 @@ fn read_oh_continuation<S: Source + ?Sized>(
         .ok_or(Error::EditUnsupported("continuation block out of bounds"))?;
     let want = (end - off).to_usize()?;
     let mut buf = src.read_metadata_at(off, want)?;
-    if buf[..4] != *b"OCHK" {
-        return Err(Error::EditUnsupported(
-            "invalid continuation block signature",
-        ));
-    }
+    let messages = match hdf5_pure_format::__private::continuation_block_messages(&buf) {
+        Ok(messages) => messages,
+        Err(FormatError::InvalidObjectHeaderSignature) => {
+            return Err(Error::EditUnsupported(
+                "invalid continuation block signature",
+            ));
+        }
+        Err(err) => return Err(Error::Format(err)),
+    };
     // Trim the trailing checksum so the message walk stops at the last message.
-    buf.truncate(want - 4);
+    buf.truncate(messages.end);
     Ok(OhChunk {
         span: (off, len),
         buf,
-        messages_start: 4,
+        messages_start: messages.start,
         props,
     })
 }
 
-/// How a version 2 object header's message records are laid out, and what its
-/// flags say about attribute creation order.
+/// Returns the type and the body range of the message record at `msg_start` in `region`,
+/// as [`MessageRecordLayout::next_message`] reads it.
 ///
-/// Every record opens with a type byte, a 2-byte body size and a flags byte. A
-/// header that *tracks* attribute creation order — bit 2 of the object header's
-/// own flags, what `H5Pset_attr_creation_order` and h5py's `track_order=True`
-/// turn on, and what netCDF-4 sets on every object it writes — follows those
-/// with a 2-byte creation index, so its records are 6 bytes wide rather than 4.
-/// A header that also *indexes* that order (bit 3) carries a creation-order
-/// B-tree beside the name index once its attributes go dense; the reference C
-/// library reads that bit back out of the header when it builds an Attribute
-/// Info message, so a rewrite that dropped it would quietly stop indexing.
+/// # Errors
 ///
-/// Both bits are properties of the whole header, so chunk 0 and every
-/// continuation block of one header share a layout. Carrying it beside the bytes
-/// ([`OhRegion`]) is what keeps the two dozen walkers and the emitters in this
-/// module from having to agree about it one by one.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(crate) struct OhRecordLayout {
-    /// Records carry a 2-byte creation index (object header flags bit 2).
-    tracked: bool,
-    /// Dense attribute storage indexes that order (object header flags bit 3).
-    indexed: bool,
-}
-
-/// Object header flags bit 2: message creation order is tracked, so every
-/// message record carries a creation index.
-const OH_FLAG_CREATION_ORDER_TRACKED: u8 = 0x04;
-
-/// Object header flags bit 3: attribute creation order is *indexed* as well as
-/// tracked, so dense attribute storage carries a creation-order B-tree beside
-/// its name index.
-const OH_FLAG_CREATION_ORDER_INDEXED: u8 = 0x08;
-
-/// Object header flags bit 4: the header prefix carries the attribute
-/// phase-change thresholds (`H5O_HDR_ATTR_STORE_PHASE_CHANGE`).
-const OH_FLAG_ATTR_PHASE_CHANGE: u8 = 0x10;
-
-/// Object header flags bit 5: the header prefix carries the four access,
-/// modification, change and birth timestamps (`H5O_HDR_STORE_TIMES`).
-const OH_FLAG_STORE_TIMES: u8 = 0x20;
-
-/// The four timestamps a version 2 object header stores when
-/// [`OH_FLAG_STORE_TIMES`] is set, each 4 bytes of seconds since the Unix epoch
-/// and stored in this order.
-///
-/// The reference C library stores them on **every** version 2 header it writes:
-/// `H5O_CRT_OHDR_FLAGS_DEF` is `H5O_HDR_STORE_TIMES`, so a header from libhdf5,
-/// h5py or netCDF-4 carries all four, and `H5Oget_info` reads them straight out
-/// of this block.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct ObjectTimes {
-    access: u32,
-    modification: u32,
-    change: u32,
-    birth: u32,
-}
-
-impl ObjectTimes {
-    /// Bytes this block occupies in a header prefix.
-    const LEN: usize = 16;
-
-    /// Parse the block at `at`. The caller must have checked that 16 bytes are
-    /// available there.
-    fn parse(prefix: &[u8], at: usize) -> Self {
-        let field =
-            |i: usize| u32::from_le_bytes(prefix[at + 4 * i..at + 4 * i + 4].try_into().unwrap());
-        Self {
-            access: field(0),
-            modification: field(1),
-            change: field(2),
-            birth: field(3),
+/// Returns [`Error::EditUnsupported`] if the body of the record runs past the end
+/// of `region`.
+pub(crate) fn next_record(
+    layout: MessageRecordLayout,
+    region: &[u8],
+    msg_start: usize,
+) -> Result<Option<(MessageType, usize, usize)>, Error> {
+    match layout.next_message(region, msg_start) {
+        Ok(record) => Ok(record.map(|record| {
+            (
+                record.msg_type,
+                record.body_range.start,
+                record.body_range.end,
+            )
+        })),
+        Err(FormatError::UnexpectedEof { .. }) => {
+            Err(Error::EditUnsupported("malformed object header message"))
         }
-    }
-
-    /// The block's on-disk bytes.
-    fn to_bytes(self) -> [u8; Self::LEN] {
-        let mut out = [0u8; Self::LEN];
-        out[0..4].copy_from_slice(&self.access.to_le_bytes());
-        out[4..8].copy_from_slice(&self.modification.to_le_bytes());
-        out[8..12].copy_from_slice(&self.change.to_le_bytes());
-        out[12..16].copy_from_slice(&self.birth.to_le_bytes());
-        out
-    }
-
-    /// The same times with the modification and change times moved to `now`.
-    /// The access and birth times are the object's own history and are left
-    /// where they were.
-    ///
-    /// The reference C library's `H5O_touch_oh` reaches the same two-of-four
-    /// shape by a different pair: on a version 2 header it writes
-    /// `oh->atime = oh->ctime = now` and carries a source comment saying the
-    /// modification time still needs code to update. A rewrite is a
-    /// modification, and it is not an *access*, so this writes the field that
-    /// says so; both agree on the change time, and neither disturbs the birth
-    /// time.
-    fn touched(self, now: u32) -> Self {
-        Self {
-            modification: now,
-            change: now,
-            ..self
-        }
-    }
-}
-
-/// The attribute phase-change thresholds a version 2 object header stores when
-/// [`OH_FLAG_ATTR_PHASE_CHANGE`] is set: `H5Pset_attr_phase_change`'s maximum
-/// number of attributes kept compact (in the header) and minimum kept dense (in
-/// a fractal heap).
-///
-/// The reference C library writes this block only when the pair differs from its
-/// defaults of 8 and 6, so most headers carry no such block at all. Preserved
-/// verbatim: this editor's own compact/dense decision still uses
-/// [`MAX_COMPACT_ATTRS`], so a non-default pair survives a rewrite without yet
-/// steering it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct AttrPhaseChange {
-    max_compact: u16,
-    min_dense: u16,
-}
-
-impl AttrPhaseChange {
-    /// Bytes this block occupies in a header prefix.
-    const LEN: usize = 4;
-
-    /// Parse the block at `at`. The caller must have checked that 4 bytes are
-    /// available there.
-    fn parse(prefix: &[u8], at: usize) -> Self {
-        Self {
-            max_compact: u16::from_le_bytes(prefix[at..at + 2].try_into().unwrap()),
-            min_dense: u16::from_le_bytes(prefix[at + 2..at + 4].try_into().unwrap()),
-        }
-    }
-
-    /// The block's on-disk bytes.
-    fn to_bytes(self) -> [u8; Self::LEN] {
-        let mut out = [0u8; Self::LEN];
-        out[0..2].copy_from_slice(&self.max_compact.to_le_bytes());
-        out[2..4].copy_from_slice(&self.min_dense.to_le_bytes());
-        out
-    }
-}
-
-/// Everything chunk 0's prefix declares about a version 2 object header: the
-/// record layout its messages are written in, and the two optional blocks the
-/// prefix itself may carry.
-///
-/// All of it is a property of the *header*, shared by chunk 0 and every
-/// continuation block, and none of it can be re-derived from the message bytes —
-/// so it travels beside them ([`OhRegion`]) from the parse right through to the
-/// rebuild. A rewrite that dropped the optional blocks would silently zero every
-/// timestamp `H5Oget_info` reports on a file the C library wrote, and reset the
-/// phase-change thresholds a caller set with `H5Pset_attr_phase_change`.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(crate) struct OhHeaderProps {
-    /// How wide a message record prefix is, and whether creation order is
-    /// tracked and indexed.
-    layout: OhRecordLayout,
-    /// The access/modification/change/birth block, where the header stores one.
-    times: Option<ObjectTimes>,
-    /// The compact/dense attribute thresholds, where the header stores them.
-    attr_phase_change: Option<AttrPhaseChange>,
-}
-
-impl OhHeaderProps {
-    /// 4-byte records, no creation order, and neither optional block: what this
-    /// crate's whole-file writer emits, and what a header this editor creates
-    /// from nothing uses.
-    pub(crate) const PLAIN: Self = Self::with_layout(OhRecordLayout::PLAIN);
-
-    /// A header in `layout` carrying neither optional block.
-    pub(crate) const fn with_layout(layout: OhRecordLayout) -> Self {
-        Self {
-            layout,
-            times: None,
-            attr_phase_change: None,
-        }
-    }
-
-    /// The object-header flag bits these properties imply, above the two size
-    /// bits the emitter chooses from the region's length.
-    const fn header_flags(self) -> u8 {
-        let times = if self.times.is_some() {
-            OH_FLAG_STORE_TIMES
-        } else {
-            0
-        };
-        let phase = if self.attr_phase_change.is_some() {
-            OH_FLAG_ATTR_PHASE_CHANGE
-        } else {
-            0
-        };
-        self.layout.header_flags() | times | phase
-    }
-
-    /// Bytes the optional blocks add to the header prefix.
-    const fn optional_len(self) -> usize {
-        let times = if self.times.is_some() {
-            ObjectTimes::LEN
-        } else {
-            0
-        };
-        let phase = if self.attr_phase_change.is_some() {
-            AttrPhaseChange::LEN
-        } else {
-            0
-        };
-        times + phase
-    }
-}
-
-impl OhRecordLayout {
-    /// 4-byte record prefixes and no creation order at all: what this crate's
-    /// whole-file writer emits, and what a header this editor creates from
-    /// nothing uses.
-    pub(crate) const PLAIN: Self = Self {
-        tracked: false,
-        indexed: false,
-    };
-
-    /// The layout a version 2 object header's flags byte declares.
-    pub(crate) const fn from_header_flags(flags: u8) -> Self {
-        Self {
-            tracked: flags & OH_FLAG_CREATION_ORDER_TRACKED != 0,
-            indexed: flags & OH_FLAG_CREATION_ORDER_INDEXED != 0,
-        }
-    }
-
-    /// Bytes a message record spends before its body.
-    pub(crate) const fn prefix_len(self) -> usize {
-        if self.tracked { 6 } else { 4 }
-    }
-
-    /// The object-header flag bits this layout implies.
-    const fn header_flags(self) -> u8 {
-        let tracked = if self.tracked {
-            OH_FLAG_CREATION_ORDER_TRACKED
-        } else {
-            0
-        };
-        let indexed = if self.indexed {
-            OH_FLAG_CREATION_ORDER_INDEXED
-        } else {
-            0
-        };
-        tracked | indexed
-    }
-
-    /// Whether records carry a creation index at all.
-    pub(crate) const fn tracks_creation_order(self) -> bool {
-        self.tracked
-    }
-
-    /// Whether dense attribute storage on this object indexes that order, with
-    /// a creation-order B-tree beside the name index.
-    pub(crate) const fn indexes_creation_order(self) -> bool {
-        self.indexed
-    }
-
-    /// Parse the message record at `p` within a chunk's message region,
-    /// returning `(message type, body start, body end)`; the next record begins
-    /// at `body end`. Returns `Ok(None)` once fewer bytes remain than a record
-    /// prefix takes (a clean end of the region, or the gap the reference C
-    /// library leaves when a chunk's free space is too small to hold a message),
-    /// and `Err` if a record's declared body runs past the region. Centralizes
-    /// the bounds check shared by every walker.
-    pub(crate) fn next_message(
-        self,
-        region: &[u8],
-        p: usize,
-    ) -> Result<Option<(MessageType, usize, usize)>, Error> {
-        if p + self.prefix_len() > region.len() {
-            return Ok(None);
-        }
-        let msg_type = MessageType::from_u16(region[p] as u16);
-        let msg_size = u16::from_le_bytes([region[p + 1], region[p + 2]]) as usize;
-        let body = p + self.prefix_len();
-        let body_end = body + msg_size;
-        if body_end > region.len() {
-            return Err(Error::EditUnsupported("malformed object header message"));
-        }
-        Ok(Some((msg_type, body, body_end)))
-    }
-
-    /// The creation index the record at `msg_start` carries, or `None` where the
-    /// layout has no such field. The caller must have located `msg_start` with
-    /// [`next_message`](Self::next_message), which bounds the read.
-    fn creation_index(self, region: &[u8], msg_start: usize) -> Option<u16> {
-        self.tracked
-            .then(|| u16::from_le_bytes([region[msg_start + 4], region[msg_start + 5]]))
-    }
-
-    /// Encode one message record: this layout's prefix, then `body`.
-    ///
-    /// `creation_index` is written only where the layout carries one. It is
-    /// meaningful for an Attribute message, whose creation index *is* the
-    /// attribute's creation order; the reference C library writes zero on every
-    /// other message type, which is what [`Self::record`] passes.
-    fn record_with_creation_index(
-        self,
-        msg_type: MessageType,
-        body: &[u8],
-        creation_index: u16,
-    ) -> Vec<u8> {
-        let mut m = Vec::with_capacity(self.prefix_len() + body.len());
-        #[expect(
-            clippy::cast_possible_truncation,
-            reason = "message type ids are a small enum that fits the 1-byte v2 type field"
-        )]
-        m.push(msg_type.to_u16() as u8);
-        #[expect(
-            clippy::cast_possible_truncation,
-            reason = "callers pass bodies that fit the 2-byte message-size field (see doc comment)"
-        )]
-        m.extend_from_slice(&(body.len() as u16).to_le_bytes());
-        m.push(MessageFlags::NONE.get()); // message flags
-        if self.tracks_creation_order() {
-            m.extend_from_slice(&creation_index.to_le_bytes());
-        }
-        m.extend_from_slice(body);
-        m
-    }
-
-    /// Encode one message record whose creation index, if the layout has one, is
-    /// the zero the reference C library writes for every non-attribute message.
-    fn record(self, msg_type: MessageType, body: &[u8]) -> Vec<u8> {
-        self.record_with_creation_index(msg_type, body, 0)
+        Err(err) => Err(Error::Format(err)),
     }
 }
 
@@ -14444,7 +14110,7 @@ impl OhRecordLayout {
 #[derive(Clone, Debug, Default)]
 pub(crate) struct OhRegion {
     bytes: Vec<u8>,
-    props: OhHeaderProps,
+    props: ObjectHeaderPrefix,
 }
 
 impl core::ops::Deref for OhRegion {
@@ -14456,13 +14122,13 @@ impl core::ops::Deref for OhRegion {
 
 impl OhRegion {
     /// A region of `bytes` belonging to a header with these `props`.
-    pub(crate) fn new(bytes: Vec<u8>, props: OhHeaderProps) -> Self {
+    pub(crate) fn new(bytes: Vec<u8>, props: ObjectHeaderPrefix) -> Self {
         Self { bytes, props }
     }
 
     /// An empty region for a header with these `props`, to be filled record by
     /// record.
-    fn empty(props: OhHeaderProps) -> Self {
+    fn empty(props: ObjectHeaderPrefix) -> Self {
         Self::new(Vec::new(), props)
     }
 
@@ -14472,21 +14138,22 @@ impl OhRegion {
         Self::new(bytes, self.props)
     }
 
-    pub(crate) fn layout(&self) -> OhRecordLayout {
+    pub(crate) fn layout(&self) -> MessageRecordLayout {
         self.props.layout
     }
 
     /// Everything the header's prefix declares, which a rebuild re-emits.
-    pub(crate) fn props(&self) -> OhHeaderProps {
+    pub(crate) fn props(&self) -> ObjectHeaderPrefix {
         self.props
     }
 
-    /// [`OhRecordLayout::next_message`] over this region's own bytes.
+    /// Returns the type and the body range of the message record at `msg_start` in this
+    /// region, as [`next_record`] reads it.
     pub(crate) fn next_message(
         &self,
-        p: usize,
+        msg_start: usize,
     ) -> Result<Option<(MessageType, usize, usize)>, Error> {
-        self.props.layout.next_message(&self.bytes, p)
+        next_record(self.props.layout, &self.bytes, msg_start)
     }
 
     /// The creation index of the record at `msg_start`, or `None` for a header
@@ -14530,8 +14197,12 @@ impl OhRegion {
     /// decoding it, so it travels with the bytes: a rewrite that dropped it
     /// would leave a reference to be read as content.
     fn push_shared(&mut self, msg_type: MessageType, reference: &[u8]) {
-        let mut record = self.props.layout.record(msg_type, reference);
-        record[3] = MessageFlags::SHARED.get();
+        let record = self.props.layout.record_with_creation_index(
+            msg_type,
+            MessageFlags::SHARED,
+            0,
+            reference,
+        );
         self.push_bytes(&record);
     }
 }
@@ -15006,46 +14677,30 @@ pub(crate) fn build_v2_object_header(region: &OhRegion) -> Result<Vec<u8>, Error
 ///
 /// **The header's optional prefix blocks are re-emitted, and its timestamps are
 /// stamped.** A region carries whatever chunk 0's prefix declared
-/// ([`OhHeaderProps`]), so a rewrite of a header from the reference C library,
+/// ([`ObjectHeaderPrefix`]), so a rewrite of a header from the reference C library,
 /// h5py or netCDF-4 puts its four timestamps and any attribute phase-change
 /// thresholds back where it found them, with the flag bits that announce them.
 ///
 /// Of those, the **modification and change times are moved to now**: this
 /// function runs once per rebuilt header, and every rebuild is a modification.
 /// Access and birth times are the object's own history and are copied verbatim
-/// ([`ObjectTimes::touched`] says how that compares with `H5O_touch_oh`).
+/// ([`ObjectTimes::touched`](hdf5_pure_format::__private::ObjectTimes::touched) says
+/// how that compares with `H5O_touch_oh`).
 /// Under `no_std` there is no clock to read, so all four are preserved as they
 /// were rather than zeroed — a stale modification time being the honest reading
 /// of "this build cannot tell the time", where a zero would claim the epoch.
 /// A header this crate creates from nothing stores no times at all, so nothing
 /// here applies to it.
 fn build_v2_object_header_verbatim(region: &OhRegion) -> Vec<u8> {
-    let total = region.len();
-    let width = UintWidth::smallest_for_len(total);
-    let props = region.props();
-    // The creation-order bits and the two optional-block bits are the header's
-    // own claim about what follows, so they come from the properties the region
-    // was parsed with.
-    let flags = width.flag_bits() | props.header_flags();
-    let mut buf = Vec::with_capacity(8 + props.optional_len() + total + 4);
-    buf.extend_from_slice(b"OHDR");
-    buf.push(2); // version
-    buf.push(flags);
-    if let Some(times) = props.times {
-        let stamped = match unix_time_now() {
+    let prefix = region.props();
+    let stamped = ObjectHeaderPrefix {
+        times: prefix.times.map(|times| match unix_time_now() {
             Some(now) => times.touched(now),
             None => times,
-        };
-        buf.extend_from_slice(&stamped.to_bytes());
-    }
-    if let Some(phase) = props.attr_phase_change {
-        buf.extend_from_slice(&phase.to_bytes());
-    }
-    buf.extend_from_slice(&(total as u64).to_le_bytes()[..usize::from(width.get())]);
-    buf.extend_from_slice(region);
-    let checksum = jenkins_lookup3(&buf);
-    buf.extend_from_slice(&checksum.to_le_bytes());
-    buf
+        }),
+        ..prefix
+    };
+    stamped.encode_header(region)
 }
 
 /// Seconds since the Unix epoch, for the object-header timestamps a rebuild
@@ -15071,20 +14726,6 @@ fn unix_time_now() -> Option<u32> {
     None
 }
 
-/// Read a little-endian unsigned integer of `bytes.len()` (≤ 8) bytes.
-#[expect(
-    clippy::cast_possible_truncation,
-    reason = "callers parse in-file sizes/offsets bounded by the in-memory image; downstream \
-              slicing is length-checked, so a malformed oversized field errors rather than reads OOB"
-)]
-fn read_le(bytes: &[u8]) -> usize {
-    let mut v = 0u64;
-    for (i, &b) in bytes.iter().enumerate() {
-        v |= (b as u64) << (8 * i);
-    }
-    v as usize
-}
-
 /// The engine as the target a [`reference_patch::Plan`] is applied to
 /// (issue #324).
 ///
@@ -15106,9 +14747,13 @@ impl crate::reference_patch::PatchTarget for WriteEngine {
 
 #[cfg(test)]
 mod tests {
+    use hdf5_pure_format::__private::AttributePhaseChange;
+    use hdf5_pure_format::__private::ObjectTimes;
     use rstest::rstest;
+    use test_util::object_header::v2::HeaderFlags;
 
     use super::*;
+    use crate::checksum;
     use crate::datatype::layout::FloatingPointLayout;
     use crate::object_path::ObjectPath;
 
@@ -15274,13 +14919,44 @@ mod tests {
     /// Wrap a message body in the object-header record a header region holds it
     /// in: type, body size, flags, body.
     fn message_record(msg_type: MessageType, body: &[u8]) -> Vec<u8> {
-        OhRecordLayout::PLAIN.record(msg_type, body)
+        MessageRecordLayout::PLAIN.record(msg_type, body)
     }
 
     /// A region of plain (4-byte-record) messages, the layout every writer in
     /// this crate emits.
     fn plain_region(bytes: Vec<u8>) -> OhRegion {
-        OhRegion::new(bytes, OhHeaderProps::PLAIN)
+        OhRegion::new(bytes, ObjectHeaderPrefix::PLAIN)
+    }
+
+    fn hard_link_region(trailing: &[u8]) -> OhRegion {
+        let mut body = make_link("child", StoredAddress::new(0x1000))
+            .serialize(crate::file_writer::OFFSET_WIDTH);
+        body.extend_from_slice(trailing);
+        plain_region(message_record(MessageType::LINK, &body))
+    }
+
+    #[test]
+    fn a_hard_link_is_retargeted_at_its_address_field() {
+        let mut region = hard_link_region(&[]);
+        patch_link_target(&mut region, "child", StoredAddress::new(0x2000)).unwrap();
+        assert_eq!(
+            region[region.len() - 8..],
+            0x2000u64.to_le_bytes(),
+            "the address field holds the new target"
+        );
+    }
+
+    #[test]
+    fn a_hard_link_with_bytes_past_its_address_is_unsupported() {
+        let mut region = hard_link_region(&[0]);
+        let err = patch_link_target(&mut region, "child", StoredAddress::new(0x2000)).unwrap_err();
+        let Error::EditUnsupported(reason) = err else {
+            panic!("expected EditUnsupported, got {err:?}");
+        };
+        assert_eq!(
+            reason,
+            "a link message holds bytes past its hard link address"
+        );
     }
 
     /// A header region holding one attribute inline.
@@ -17782,7 +17458,7 @@ mod tests {
         if indexed {
             li.extend_from_slice(&u64::MAX.to_le_bytes()); // b-tree creation order
         }
-        let mut region = OhRegion::empty(OhHeaderProps::PLAIN);
+        let mut region = OhRegion::empty(ObjectHeaderPrefix::PLAIN);
         region.push(MessageType::LINK_INFO, &li);
         region.push(MessageType::GROUP_INFO, &GROUP_INFO_BODY);
         for (i, name) in links.iter().enumerate() {
@@ -17870,7 +17546,7 @@ mod tests {
         assert_eq!(info.max_creation_order, Some(2));
         assert_eq!(info.fractal_heap_address, None);
         assert_eq!(info.btree_name_index_address, None);
-        assert_eq!(info.btree_creation_order_address, None);
+        assert_eq!(info.btree_creation_order_address, Some(None));
         assert_eq!(region_links(&region).last().unwrap().1, Some(1));
     }
 
@@ -17916,7 +17592,7 @@ mod tests {
         let mut gi = vec![0u8, 0x01];
         gi.extend_from_slice(&4u16.to_le_bytes()); // max compact
         gi.extend_from_slice(&2u16.to_le_bytes()); // min dense
-        let mut region = OhRegion::empty(OhHeaderProps::PLAIN);
+        let mut region = OhRegion::empty(ObjectHeaderPrefix::PLAIN);
         region.push(MessageType::GROUP_INFO, &gi);
         assert_eq!(max_compact_links(&region).unwrap(), 4);
     }
@@ -18045,7 +17721,7 @@ mod tests {
     /// decodes the reference as the attribute it stands for.
     #[test]
     fn a_rewrapped_shared_message_keeps_its_flag() {
-        let mut region = OhRegion::empty(OhHeaderProps::PLAIN);
+        let mut region = OhRegion::empty(ObjectHeaderPrefix::PLAIN);
         region.push_shared(MessageType::ATTRIBUTE, &[3, 1, 0, 0, 0, 0, 0, 0, 0, 0]);
         assert_eq!(region[3], MessageFlags::SHARED.get());
         assert!(region_has_shared_attr(&region).unwrap());
@@ -18070,7 +17746,7 @@ mod tests {
 
     /// The layout of a header that tracks *and* indexes attribute creation
     /// order: object-header flag bits 2 and 3, and 6-byte message records.
-    const TRACKED: OhRecordLayout = OhRecordLayout::from_header_flags(0x0C);
+    const TRACKED: MessageRecordLayout = MessageRecordLayout::from_header_flags(0x0C);
 
     /// One compact Attribute message body for `name`.
     fn attr_body(name: &str, value: i64) -> Vec<u8> {
@@ -18080,14 +17756,14 @@ mod tests {
     }
 
     /// [`attr_region_in`] for a header carrying neither optional prefix block.
-    fn attr_region(layout: OhRecordLayout, attrs: &[(&str, u16)], max: u16) -> OhRegion {
-        attr_region_in(OhHeaderProps::with_layout(layout), attrs, max)
+    fn attr_region(layout: MessageRecordLayout, attrs: &[(&str, u16)], max: u16) -> OhRegion {
+        attr_region_in(ObjectHeaderPrefix::with_layout(layout), attrs, max)
     }
 
     /// A region belonging to a header with `props`, holding one Attribute message
     /// per `(name, creation index)`, preceded by the Attribute Info message a
     /// tracked object carries.
-    fn attr_region_in(props: OhHeaderProps, attrs: &[(&str, u16)], max: u16) -> OhRegion {
+    fn attr_region_in(props: ObjectHeaderPrefix, attrs: &[(&str, u16)], max: u16) -> OhRegion {
         let layout = props.layout;
         let mut region = OhRegion::empty(props);
         let info = AttributeInfoMessage {
@@ -18108,8 +17784,9 @@ mod tests {
         for (name, index) in attrs {
             let record = layout.record_with_creation_index(
                 MessageType::ATTRIBUTE,
-                &attr_body(name, 1),
+                MessageFlags::NONE,
                 *index,
+                &attr_body(name, 1),
             );
             region.push_bytes(&record);
         }
@@ -18135,7 +17812,7 @@ mod tests {
     /// bytes of record prefix without creation-order tracking, six with it.
     #[test]
     fn a_record_walk_steps_by_the_width_the_header_declares() {
-        for layout in [OhRecordLayout::PLAIN, TRACKED] {
+        for layout in [MessageRecordLayout::PLAIN, TRACKED] {
             let region = attr_region(layout, &[("alpha", 0), ("beta", 7)], 8);
             assert_eq!(
                 walk_attrs(&region),
@@ -18157,7 +17834,7 @@ mod tests {
         // region four bytes at a time misparses it from the first record on,
         // which is the defect this width exists to prevent.
         let tracked = attr_region(TRACKED, &[("alpha", 0), ("beta", 7)], 8);
-        let misread = OhRegion::new(tracked.to_vec(), OhHeaderProps::PLAIN);
+        let misread = OhRegion::new(tracked.to_vec(), ObjectHeaderPrefix::PLAIN);
         let mut p = 0;
         let mut agreed = true;
         while let Ok(Some((_, _, body_end))) = misread.next_message(p) {
@@ -18170,44 +17847,18 @@ mod tests {
         );
     }
 
-    /// An emitted record carries the creation index only where the layout has
-    /// the field, and the flags byte stays where every reader looks for it.
-    #[test]
-    fn an_emitted_record_carries_a_creation_index_only_where_the_header_tracks_one() {
-        let body = [0xABu8; 5];
-        let plain =
-            OhRecordLayout::PLAIN.record_with_creation_index(MessageType::ATTRIBUTE, &body, 9);
-        assert_eq!(plain.len(), 4 + body.len());
-        assert_eq!(&plain[4..], &body);
-
-        let tracked = TRACKED.record_with_creation_index(MessageType::ATTRIBUTE, &body, 0x1234);
-        assert_eq!(tracked.len(), 6 + body.len());
-        assert_eq!(
-            &tracked[..4],
-            &plain[..4],
-            "type, size and flags are shared"
-        );
-        assert_eq!(&tracked[4..6], &0x1234u16.to_le_bytes());
-        assert_eq!(&tracked[6..], &body);
-
-        // Every non-attribute message the reference C library writes carries a
-        // zero creation index, which is what the plain emitter passes.
-        let group_info = TRACKED.record(MessageType::GROUP_INFO, &body);
-        assert_eq!(&group_info[4..6], &0u16.to_le_bytes());
-    }
-
     /// A rebuilt header declares the record layout its bytes are written in, so
     /// re-reading it walks them the same way.
     #[test]
     fn a_rebuilt_header_declares_the_record_layout_it_used() {
-        for layout in [OhRecordLayout::PLAIN, TRACKED] {
+        for layout in [MessageRecordLayout::PLAIN, TRACKED] {
             let region = attr_region(layout, &[("alpha", 3)], 4);
             let header = build_v2_object_header(&region).unwrap();
             let (start, end, read_back) =
                 oh_region_at(&header, 0, header.len() as u64).expect("the header parses");
             assert_eq!(
                 read_back,
-                OhHeaderProps::with_layout(layout),
+                ObjectHeaderPrefix::with_layout(layout),
                 "the flags lost the layout"
             );
             let round_tripped =
@@ -18234,7 +17885,7 @@ mod tests {
     /// A phase-change pair the reference C library would never write by default
     /// (its defaults are 8 and 6), so a rebuild that dropped the block and a
     /// rebuild that substituted the defaults both fail.
-    const FIXTURE_PHASE: AttrPhaseChange = AttrPhaseChange {
+    const FIXTURE_PHASE: AttributePhaseChange = AttributePhaseChange {
         max_compact: 32,
         min_dense: 24,
     };
@@ -18245,20 +17896,34 @@ mod tests {
     /// Written out here rather than taken from [`build_v2_object_header`] so the
     /// parse is checked against bytes the emitter did not produce: an emitter and
     /// a parser that agreed on a wrong prefix layout would round-trip perfectly.
-    fn v2_header_bytes(props: OhHeaderProps, region: &OhRegion) -> Vec<u8> {
+    fn v2_header_bytes(props: ObjectHeaderPrefix, region: &OhRegion) -> Vec<u8> {
         let mut buf = Vec::new();
         buf.extend_from_slice(b"OHDR");
         buf.push(2); // version
-        buf.push(props.header_flags()); // size flags 0: a 1-byte length field
-        if let Some(times) = props.times {
-            buf.extend_from_slice(&times.to_bytes());
+        let mut flags = HeaderFlags::default();
+        if props.layout == TRACKED {
+            flags =
+                flags | HeaderFlags::TRACKS_CREATION_ORDER | HeaderFlags::INDEXES_CREATION_ORDER;
         }
-        if let Some(phase) = props.attr_phase_change {
-            buf.extend_from_slice(&phase.to_bytes());
+        if props.times.is_some() {
+            flags = flags | HeaderFlags::STORES_TIMES;
+        }
+        if props.attribute_phase_change.is_some() {
+            flags = flags | HeaderFlags::STORES_ATTRIBUTE_PHASE_CHANGE;
+        }
+        buf.push(flags.0); // size flags 0: a 1-byte length field
+        if let Some(times) = props.times {
+            for time in [times.access, times.modification, times.change, times.birth] {
+                buf.extend_from_slice(&time.to_le_bytes());
+            }
+        }
+        if let Some(phase) = props.attribute_phase_change {
+            buf.extend_from_slice(&phase.max_compact.to_le_bytes());
+            buf.extend_from_slice(&phase.min_dense.to_le_bytes());
         }
         buf.push(u8::try_from(region.len()).expect("the fixture region is under 256 bytes"));
         buf.extend_from_slice(region);
-        let checksum = jenkins_lookup3(&buf);
+        let checksum = checksum::jenkins_lookup3(&buf);
         buf.extend_from_slice(&checksum.to_le_bytes());
         buf
     }
@@ -18271,13 +17936,13 @@ mod tests {
     /// *after* both, so the message walk is checked too.
     #[test]
     fn a_headers_optional_prefix_blocks_survive_a_rebuild() {
-        for layout in [OhRecordLayout::PLAIN, TRACKED] {
+        for layout in [MessageRecordLayout::PLAIN, TRACKED] {
             for times in [None, Some(FIXTURE_TIMES)] {
-                for attr_phase_change in [None, Some(FIXTURE_PHASE)] {
-                    let props = OhHeaderProps {
+                for attribute_phase_change in [None, Some(FIXTURE_PHASE)] {
+                    let props = ObjectHeaderPrefix {
                         layout,
                         times,
-                        attr_phase_change,
+                        attribute_phase_change,
                     };
                     let region = attr_region_in(props, &[("alpha", 3), ("beta", 5)], 6);
                     let header = v2_header_bytes(props, &region);
@@ -18297,7 +17962,7 @@ mod tests {
                     let (_, _, again) = oh_region_at(&rebuilt, 0, rebuilt.len() as u64)
                         .expect("the rebuilt header parses");
                     assert_eq!(
-                        again.attr_phase_change, attr_phase_change,
+                        again.attribute_phase_change, attribute_phase_change,
                         "the rebuild lost the attribute phase-change thresholds",
                     );
                     assert_eq!(
@@ -18311,34 +17976,14 @@ mod tests {
         }
     }
 
-    /// The flag bits the emitter sets are the ones the format assigns: bit 4 for
-    /// the phase-change block, bit 5 for the timestamps.
-    #[test]
-    fn the_optional_blocks_are_announced_by_their_own_flag_bits() {
-        let with_times = OhHeaderProps {
-            times: Some(FIXTURE_TIMES),
-            ..OhHeaderProps::PLAIN
-        };
-        let with_phase = OhHeaderProps {
-            attr_phase_change: Some(FIXTURE_PHASE),
-            ..OhHeaderProps::PLAIN
-        };
-        assert_eq!(OhHeaderProps::PLAIN.header_flags(), 0);
-        assert_eq!(with_times.header_flags(), 0x20);
-        assert_eq!(with_phase.header_flags(), 0x10);
-        assert_eq!(OhHeaderProps::PLAIN.optional_len(), 0);
-        assert_eq!(with_times.optional_len(), 16);
-        assert_eq!(with_phase.optional_len(), 4);
-    }
-
     /// A rebuild of a header that stores times moves the modification and change
     /// times to now and leaves the access and birth times alone.
     #[cfg(feature = "std")]
     #[test]
     fn a_rebuild_stamps_the_modification_and_change_times() {
-        let props = OhHeaderProps {
+        let props = ObjectHeaderPrefix {
             times: Some(FIXTURE_TIMES),
-            ..OhHeaderProps::PLAIN
+            ..ObjectHeaderPrefix::PLAIN
         };
         let region = attr_region_in(props, &[("alpha", 0)], 1);
 
@@ -18369,10 +18014,10 @@ mod tests {
     /// a panic: the parse reads only what the buffer holds.
     #[test]
     fn a_prefix_truncated_inside_an_optional_block_is_refused() {
-        let props = OhHeaderProps {
+        let props = ObjectHeaderPrefix {
             times: Some(FIXTURE_TIMES),
-            attr_phase_change: Some(FIXTURE_PHASE),
-            ..OhHeaderProps::PLAIN
+            attribute_phase_change: Some(FIXTURE_PHASE),
+            ..ObjectHeaderPrefix::PLAIN
         };
         let region = attr_region_in(props, &[("alpha", 0)], 1);
         let header = v2_header_bytes(props, &region);
@@ -18468,12 +18113,13 @@ mod tests {
     /// records themselves.
     #[test]
     fn a_tracked_header_without_an_info_message_gains_one() {
-        let mut region = OhRegion::empty(OhHeaderProps::with_layout(TRACKED));
+        let mut region = OhRegion::empty(ObjectHeaderPrefix::with_layout(TRACKED));
         for (name, index) in [("alpha", 0u16), ("beta", 4)] {
             let record = TRACKED.record_with_creation_index(
                 MessageType::ATTRIBUTE,
-                &attr_body(name, 1),
+                MessageFlags::NONE,
                 index,
+                &attr_body(name, 1),
             );
             region.push_bytes(&record);
         }
@@ -21789,7 +21435,8 @@ mod object_header_wrap_tests {
         region.push(0); // flags
         region.extend_from_slice(&[0u8; 4]); // a body far shorter than declared
 
-        let err = build_v2_object_header(&OhRegion::new(region, OhHeaderProps::PLAIN)).unwrap_err();
+        let err =
+            build_v2_object_header(&OhRegion::new(region, ObjectHeaderPrefix::PLAIN)).unwrap_err();
         assert!(
             matches!(err, Error::EditUnsupported(_)),
             "an unwalkable region gave {err:?}"
@@ -21806,8 +21453,8 @@ mod object_header_wrap_tests {
         region.push(0); // flags
         region.extend_from_slice(&body);
 
-        let oh =
-            build_v2_object_header(&OhRegion::new(region.clone(), OhHeaderProps::PLAIN)).unwrap();
+        let oh = build_v2_object_header(&OhRegion::new(region.clone(), ObjectHeaderPrefix::PLAIN))
+            .unwrap();
         assert_eq!(&oh[..4], b"OHDR");
         assert!(
             oh.len() > 8 + region.len() + 4,

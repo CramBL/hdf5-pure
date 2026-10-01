@@ -1731,7 +1731,7 @@ fn write_block_offset(buf: &mut Vec<u8>, block_offset: u64, width: BlockOffsetWi
 ///
 /// Panics if `block_offset_rel` does not fit the block-offset width in `bits`.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn encode_data_block(
+pub fn encode_data_block(
     slots: &IndexSlots<'_>,
     elem_start: usize,
     dblk_nelmts: usize,
@@ -1756,63 +1756,45 @@ pub(crate) fn encode_data_block(
         dblk_nelmts: dblk_nelmts as u64,
         page_nelmts: page_nelmts as u64,
     };
-    if !blocks.is_paged() {
-        // Non-paged: elements inline, single checksum.
-        for slot in 0..dblk_nelmts {
-            if let Some(chunk) = slots.at(elem_start + slot) {
-                chunk_record::write_chunk_element(
-                    &mut buf,
+    let write_elements = |buf: &mut Vec<u8>, start: usize, count: usize| {
+        for slot in start..start + count {
+            match slots.at(slot) {
+                Some(chunk) => chunk_record::write_chunk_element(
+                    buf,
                     chunk,
                     offset_size,
                     has_filters,
                     chunk_size_bytes,
-                )?;
-            } else {
-                chunk_record::write_undefined_element(
-                    &mut buf,
+                )?,
+                None => chunk_record::write_undefined_element(
+                    buf,
                     offset_size,
                     has_filters,
                     chunk_size_bytes,
-                );
+                ),
             }
         }
+        Ok::<(), FormatError>(())
+    };
+    if !blocks.is_paged() {
+        // Non-paged: elements inline, single checksum.
+        write_elements(&mut buf, elem_start, dblk_nelmts)?;
         let cks = checksum::jenkins_lookup3(&buf);
         buf.extend_from_slice(&cks.to_le_bytes());
-        Ok(buf)
     } else {
         // Paged: the prefix and its checksum, then every page, as the C library allocates them
         // (`H5EAdblock.c`, HDF5 2.2.0).
         let header_cks = checksum::jenkins_lookup3(&buf);
         buf.extend_from_slice(&header_cks.to_le_bytes());
 
-        let npages = dblk_nelmts / page_nelmts;
-        for page in 0..npages {
-            let page_start = elem_start + page * page_nelmts;
-            let mut page_buf = Vec::new();
-            for slot in 0..page_nelmts {
-                if let Some(chunk) = slots.at(page_start + slot) {
-                    chunk_record::write_chunk_element(
-                        &mut page_buf,
-                        chunk,
-                        offset_size,
-                        has_filters,
-                        chunk_size_bytes,
-                    )?;
-                } else {
-                    chunk_record::write_undefined_element(
-                        &mut page_buf,
-                        offset_size,
-                        has_filters,
-                        chunk_size_bytes,
-                    );
-                }
-            }
-            let page_cks = checksum::jenkins_lookup3(&page_buf);
-            page_buf.extend_from_slice(&page_cks.to_le_bytes());
-            buf.extend_from_slice(&page_buf);
+        for page in 0..dblk_nelmts / page_nelmts {
+            let page_at = buf.len();
+            write_elements(&mut buf, elem_start + page * page_nelmts, page_nelmts)?;
+            let page_cks = checksum::jenkins_lookup3(&buf[page_at..]);
+            buf.extend_from_slice(&page_cks.to_le_bytes());
         }
-        Ok(buf)
     }
+    Ok(buf)
 }
 
 /// Builds the super block (`EASB`) that addresses `dblk_addrs`, with `block_offset_rel` as its
@@ -2391,20 +2373,29 @@ pub fn extensible_array_capacity() -> u64 {
     u64::from(EA_IDX_BLK_ELMTS) + direct + indirect
 }
 
+/// The client ID of an array that indexes unfiltered chunks, whose elements each store a chunk
+/// address alone.
+///
+/// The ID is defined in the Client ID table of "The Extensible Array Index" of the [format
+/// specification, version 4.0][spec].
+///
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsec_fmt4_appendixc_extarr
+pub const EA_CLIENT_ID_UNFILTERED: u8 = 0;
+
 // The creation parameters the writer stores and `extensible_array_capacity` derives the capacity
 // from, the C library's defaults (`H5Dpkg.h`, HDF5 2.2.0).
 
 /// The number of bits that hold the maximum number of elements, `H5D_EARRAY_MAX_NELMTS_BITS`.
-const EA_MAX_NELMTS_BITS: u8 = 32;
+pub(crate) const EA_MAX_NELMTS_BITS: u8 = 32;
 /// The number of elements in the index block, `H5D_EARRAY_IDX_BLK_ELMTS`.
-const EA_IDX_BLK_ELMTS: u8 = 4;
+pub(crate) const EA_IDX_BLK_ELMTS: u8 = 4;
 /// The number of elements in the smallest data block, `H5D_EARRAY_DATA_BLK_MIN_ELMTS`.
-const EA_MIN_DBLK_NELMTS: u8 = 16;
+pub(crate) const EA_MIN_DBLK_NELMTS: u8 = 16;
 /// The fewest data block addresses a super block holds, `H5D_EARRAY_SUP_BLK_MIN_DATA_PTRS`.
-const EA_SUPER_BLK_MIN_DATA_PTRS: u8 = 4;
+pub(crate) const EA_SUPER_BLK_MIN_DATA_PTRS: u8 = 4;
 /// The base 2 logarithm of the number of elements in a data block page,
 /// `H5D_EARRAY_MAX_DBLOCK_PAGE_NELMTS_BITS`.
-const EA_MAX_DBLK_NELMTS_BITS: u8 = 10;
+pub(crate) const EA_MAX_DBLK_NELMTS_BITS: u8 = 10;
 
 #[cfg(test)]
 mod tests {

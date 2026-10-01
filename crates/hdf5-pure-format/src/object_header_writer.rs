@@ -2,11 +2,11 @@
 
 use alloc::vec::Vec;
 
-use crate::checksum::jenkins_lookup3;
 use crate::error::{FormatError, OBJECT_HEADER_MESSAGE_MAX};
 use crate::message_flags::MessageFlags;
 use crate::message_type::MessageType;
-use crate::width::UintWidth;
+use crate::object_header::MessageRecordLayout;
+use crate::object_header::ObjectHeaderPrefix;
 
 /// Writer for v2 object headers with proper checksums.
 pub struct ObjectHeaderWriter {
@@ -72,48 +72,19 @@ impl ObjectHeaderWriter {
             }
         }
 
-        // Calculate total message bytes: each message has type(1) + size(2) + flags(1) + data
-        let msg_bytes_total: usize = self
+        let layout = MessageRecordLayout::PLAIN;
+        let messages_len = self
             .messages
             .iter()
-            .map(|(_, data, _)| 4 + data.len())
+            .map(|(_, data, _)| layout.prefix_len() + data.len())
             .sum();
-
-        let chunk0_width = UintWidth::smallest_for_len(msg_bytes_total);
-
-        let mut buf = Vec::new();
-
-        // OHDR signature
-        buf.extend_from_slice(b"OHDR");
-        // version
-        buf.push(2);
-        // flags
-        buf.push(chunk0_width.flag_bits());
-        // chunk0 size
-        chunk0_width.write(&mut buf, msg_bytes_total);
-
-        // Messages
-        for (msg_type, data, msg_flags) in &self.messages {
-            #[expect(
-                clippy::cast_possible_truncation,
-                reason = "`add_message_with_flags` asserts that every message type fits the 1-byte \
-                          message-type field of the v2 object header"
-            )]
-            buf.push(msg_type.to_u16() as u8); // type (1 byte in v2)
-            #[expect(
-                clippy::cast_possible_truncation,
-                reason = "message data length is bounded by OBJECT_HEADER_MESSAGE_MAX above, so it fits the 2-byte message-size field of the v2 object header"
-            )]
-            buf.extend_from_slice(&(data.len() as u16).to_le_bytes()); // size (2 bytes)
-            buf.push(msg_flags.get()); // flags
-            buf.extend_from_slice(data);
-        }
-
-        // Checksum
-        let checksum = jenkins_lookup3(&buf);
-        buf.extend_from_slice(&checksum.to_le_bytes());
-
-        Ok(buf)
+        Ok(
+            ObjectHeaderPrefix::PLAIN.encode_header_with(messages_len, |buf| {
+                for (msg_type, data, msg_flags) in &self.messages {
+                    layout.write_record(buf, *msg_type, *msg_flags, 0, data);
+                }
+            }),
+        )
     }
 }
 
