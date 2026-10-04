@@ -13,84 +13,95 @@ use hdf5_pure_core::__private::FileSpaceInfoFields;
 pub(crate) use hdf5_pure_core::FileSpaceInfo;
 pub(crate) use hdf5_pure_core::FileSpaceStrategy;
 
+use crate::bytes;
 use crate::error::FormatError;
-use crate::width::LengthWidth;
-use crate::width::OffsetWidth;
+use crate::width::FormatWidths;
 
 /// Serializes the body of a version 1 File Space Info message, without the object header message
 /// prefix.
 ///
-/// Writes every length and address 8 bytes wide, and the free-space manager addresses only if
-/// [`persist`] is set.
+/// Writes the threshold and the page size at the length width of `widths` and every address at its
+/// offset width, and writes the free-space manager addresses only if [`persist`] is set.
+///
+/// # Errors
+///
+/// Returns [`FormatError::LengthTooLarge`] if the threshold or the page size does not fit the
+/// length width, and [`FormatError::AddressTooLarge`] if an address it writes does not fit the
+/// offset width and is not `u64::MAX`, the undefined address.
 ///
 /// [`persist`]: FileSpaceInfo::persist
-pub fn serialize_file_space_info(info: &FileSpaceInfo) -> Vec<u8> {
-    let mut buf = Vec::with_capacity(29 + info.manager_addrs.len() * 8);
-    buf.push(1); // version
+pub fn serialize_file_space_info(
+    widths: FormatWidths,
+    info: &FileSpaceInfo,
+) -> Result<Vec<u8>, FormatError> {
+    let FormatWidths { offsets, lengths } = widths;
+    let manager_addrs: &[u64] = if info.persist {
+        &info.manager_addrs
+    } else {
+        &[]
+    };
+    let mut buf =
+        Vec::with_capacity(fixed_len(widths) + manager_addrs.len() * usize::from(offsets.get()));
+    buf.push(VERSION);
     buf.push(strategy_code(info.strategy));
-    buf.push(info.persist as u8);
-    buf.extend_from_slice(&info.threshold.to_le_bytes());
-    buf.extend_from_slice(&info.page_size.to_le_bytes());
+    buf.push(u8::from(info.persist));
+    bytes::try_write_length(&mut buf, info.threshold, lengths)?;
+    bytes::try_write_length(&mut buf, info.page_size, lengths)?;
     buf.extend_from_slice(&info.page_end_meta_threshold.to_le_bytes());
-    buf.extend_from_slice(&info.eoa_pre_fsm.to_le_bytes());
-    if info.persist {
-        for &addr in &info.manager_addrs {
-            buf.extend_from_slice(&addr.to_le_bytes());
-        }
+    bytes::try_write_offset(&mut buf, info.eoa_pre_fsm, offsets)?;
+    for &addr in manager_addrs {
+        bytes::try_write_offset(&mut buf, addr, offsets)?;
     }
-    buf
+    Ok(buf)
 }
 
 /// Parses the body of a version 1 File Space Info message.
 ///
-/// `offset_size` and `length_size` are the widths the superblock stores. If the message persists
-/// free space, the parser reads as many free-space manager addresses as the body holds.
+/// Reads the threshold and the page size at the length width of `widths` and every address at its
+/// offset width. If the message persists free space, the parser reads as many whole free-space
+/// manager addresses as the body holds.
 ///
 /// # Errors
 ///
-/// Returns [`FormatError::InvalidOffsetSize`] or [`FormatError::InvalidLengthSize`] if a width is
-/// not 2, 4, or 8, [`FormatError::UnexpectedEof`] if `data` ends inside the fixed fields,
+/// Returns [`FormatError::UnexpectedEof`] if `data` ends inside the fixed fields,
 /// [`FormatError::UnsupportedFileSpaceInfoVersion`] if the version is not 1, and
 /// [`FormatError::InvalidFileSpaceStrategy`] if the strategy code is above 3.
 pub fn parse_file_space_info(
+    widths: FormatWidths,
     data: &[u8],
-    offset_size: u8,
-    length_size: u8,
 ) -> Result<FileSpaceInfo, FormatError> {
-    let os = usize::from(OffsetWidth::try_from(offset_size)?.get());
-    let ls = usize::from(LengthWidth::try_from(length_size)?.get());
-    // version(1) + strategy(1) + persist(1) + threshold(ls) + page_size(ls)
-    // + page_end(2) + eoa(os)
-    let fixed = 3 + ls + ls + 2 + os;
-    if data.len() < fixed {
-        return Err(FormatError::UnexpectedEof {
+    let FormatWidths { offsets, lengths } = widths;
+    let fixed = fixed_len(widths);
+    let (head, managers) = data
+        .split_at_checked(fixed)
+        .ok_or(FormatError::UnexpectedEof {
             expected: fixed,
             available: data.len(),
-        });
-    }
-    let version = data[0];
-    if version != 1 {
+        })?;
+    // `head` is `fixed_len(widths)` bytes long, so every index below is inside it.
+    let version = head[0];
+    if version != VERSION {
         return Err(FormatError::UnsupportedFileSpaceInfoVersion(version));
     }
-    let strategy = strategy_from_code(data[1])?;
-    let persist = data[2] != 0;
+    let strategy = strategy_from_code(head[1])?;
+    let persist = head[2] != 0;
     let mut pos = 3;
-    let threshold = read_uint_le(&data[pos..pos + ls]);
-    pos += ls;
-    let page_size = read_uint_le(&data[pos..pos + ls]);
-    pos += ls;
-    let page_end_meta_threshold = u16::from_le_bytes([data[pos], data[pos + 1]]);
+    let threshold = bytes::read_length_width(head, pos, lengths)?;
+    pos += usize::from(lengths.get());
+    let page_size = bytes::read_length_width(head, pos, lengths)?;
+    pos += usize::from(lengths.get());
+    let page_end_meta_threshold = u16::from_le_bytes([head[pos], head[pos + 1]]);
     pos += 2;
-    let eoa_pre_fsm = read_uint_le(&data[pos..pos + os]);
-    pos += os;
+    let eoa_pre_fsm = bytes::read_offset_width(head, pos, offsets)?;
 
-    let mut manager_addrs = Vec::new();
-    if persist {
-        while pos + os <= data.len() {
-            manager_addrs.push(read_uint_le(&data[pos..pos + os]));
-            pos += os;
-        }
-    }
+    let manager_addrs = if persist {
+        managers
+            .chunks_exact(usize::from(offsets.get()))
+            .map(|addr| bytes::read_offset_width(addr, 0, offsets))
+            .collect::<Result<Vec<u64>, FormatError>>()?
+    } else {
+        Vec::new()
+    };
 
     Ok(FileSpaceInfoFields {
         strategy,
@@ -102,6 +113,13 @@ pub fn parse_file_space_info(
         manager_addrs,
     }
     .build())
+}
+
+/// Returns the length in bytes of the fields before the free-space manager addresses: the version,
+/// the strategy, and the persist flag (1 byte each), the threshold and the page size (one length
+/// each), the page-end metadata threshold (2), and the end of allocation (one address).
+fn fixed_len(widths: FormatWidths) -> usize {
+    3 + 2 * usize::from(widths.lengths.get()) + 2 + usize::from(widths.offsets.get())
 }
 
 /// The on-disk numeric code (0–3).
@@ -124,25 +142,21 @@ fn strategy_from_code(code: u8) -> Result<FileSpaceStrategy, FormatError> {
     }
 }
 
-/// Read a little-endian unsigned integer of 1–8 bytes into a `u64`.
-fn read_uint_le(bytes: &[u8]) -> u64 {
-    let mut v = 0u64;
-    for (i, &b) in bytes.iter().enumerate() {
-        v |= (b as u64) << (8 * i);
-    }
-    v
-}
+/// The version of the message that the parser reads and the writer writes.
+const VERSION: u8 = 1;
 
 #[cfg(test)]
 mod tests {
     use rstest::rstest;
 
     use super::*;
+    use crate::address::StoredAddress;
 
     #[test]
     fn parses_persistent_manager_addresses() {
         // A persisting message: 29-byte head + three 8-byte manager addresses.
         let mut bytes = serialize_file_space_info(
+            widths(8, 8),
             &FileSpaceInfoFields {
                 strategy: FileSpaceStrategy::FsmAggr,
                 persist: true,
@@ -153,45 +167,154 @@ mod tests {
                 manager_addrs: vec![619, u64::MAX, u64::MAX],
             }
             .build(),
-        );
+        )
+        .unwrap();
         assert_eq!(bytes.len(), 29 + 3 * 8);
-        let parsed = parse_file_space_info(&bytes, 8, 8).unwrap();
+        let parsed = parse_file_space_info(widths(8, 8), &bytes).unwrap();
         assert_eq!(parsed.manager_addrs, vec![619, u64::MAX, u64::MAX]);
         assert_eq!(parsed.eoa_pre_fsm, 2072);
         assert!(parsed.persist);
 
         // Set the version byte to an unsupported value.
         bytes[0] = 0;
-        assert!(matches!(
-            parse_file_space_info(&bytes, 8, 8),
+        assert_eq!(
+            parse_file_space_info(widths(8, 8), &bytes),
             Err(FormatError::UnsupportedFileSpaceInfoVersion(0))
-        ));
+        );
     }
 
     #[test]
     fn rejects_bad_strategy_code() {
-        let mut bytes = serialize_file_space_info(&non_persistent(FileSpaceStrategy::None));
+        let mut bytes =
+            serialize_file_space_info(widths(8, 8), &non_persistent(FileSpaceStrategy::None))
+                .unwrap();
         bytes[1] = 4;
         assert_eq!(
-            parse_file_space_info(&bytes, 8, 8),
+            parse_file_space_info(widths(8, 8), &bytes),
             Err(FormatError::InvalidFileSpaceStrategy(4))
         );
     }
 
     #[rstest]
-    #[case::offset_size(0, 8, FormatError::InvalidOffsetSize(0))]
-    #[case::length_size(8, 16, FormatError::InvalidLengthSize(16))]
-    fn a_width_the_superblock_cannot_hold_returns_its_width_error(
-        #[case] offset_size: u8,
-        #[case] length_size: u8,
-        #[case] expected: FormatError,
+    fn a_message_round_trips_at_the_widths_of_its_file(
+        #[values(2, 4, 8)] offset_size: u8,
+        #[values(2, 4, 8)] length_size: u8,
     ) {
-        let bytes = serialize_file_space_info(&non_persistent(FileSpaceStrategy::FsmAggr));
+        let undefined = StoredAddress::undefined(offset_size).get();
+        let info = FileSpaceInfoFields {
+            strategy: FileSpaceStrategy::Page,
+            persist: true,
+            threshold: 1,
+            page_size: 4096,
+            page_end_meta_threshold: 0,
+            eoa_pre_fsm: 0x2000,
+            manager_addrs: vec![0x0841, undefined, 0x1806],
+        }
+        .build();
+
+        let bytes = serialize_file_space_info(widths(offset_size, length_size), &info).unwrap();
+
+        // The version, strategy and persist bytes, the 2-byte page-end threshold, two lengths, and
+        // four addresses.
+        let (offset_len, length_len) = (usize::from(offset_size), usize::from(length_size));
+        assert_eq!(
+            bytes.len(),
+            5 + 2 * length_len + offset_len + 3 * offset_len
+        );
+        assert_eq!(
+            parse_file_space_info(widths(offset_size, length_size), &bytes),
+            Ok(info)
+        );
+    }
+
+    #[test]
+    fn a_mixed_width_message_holds_each_field_at_its_width() {
+        let info = FileSpaceInfoFields {
+            strategy: FileSpaceStrategy::Page,
+            persist: true,
+            threshold: 1,
+            page_size: 4096,
+            page_end_meta_threshold: 0,
+            eoa_pre_fsm: 0x2000,
+            manager_addrs: vec![0x0841, 0xFFFF_FFFF, 0x1806],
+        }
+        .build();
 
         assert_eq!(
-            parse_file_space_info(&bytes, offset_size, length_size),
+            serialize_file_space_info(widths(4, 2), &info),
+            Ok(vec![
+                0x01, 0x01, 0x01, 0x01, 0x00, 0x00, 0x10, 0x00, 0x00, 0x00, 0x20, 0x00, 0x00, 0x41,
+                0x08, 0x00, 0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0x06, 0x18, 0x00, 0x00,
+            ])
+        );
+    }
+
+    #[test]
+    fn a_body_that_ends_inside_the_fixed_fields_returns_unexpected_eof() {
+        let truncated = [
+            0x01, 0x01, 0x01, 0x01, 0x00, 0x00, 0x10, 0x00, 0x00, 0x00, 0x20, 0x00,
+        ];
+
+        assert_eq!(
+            parse_file_space_info(widths(4, 2), &truncated),
+            Err(FormatError::UnexpectedEof {
+                expected: 13,
+                available: 12,
+            })
+        );
+    }
+
+    #[rstest]
+    #[case::two(2)]
+    #[case::four(4)]
+    #[case::eight(8)]
+    fn the_undefined_end_of_allocation_is_all_ones_at_the_offset_width(#[case] offset_size: u8) {
+        let bytes = serialize_file_space_info(
+            widths(offset_size, 8),
+            &non_persistent(FileSpaceStrategy::FsmAggr),
+        )
+        .unwrap();
+
+        assert_eq!(bytes[3 + 8 + 8 + 2..], vec![0xFF; usize::from(offset_size)]);
+    }
+
+    #[rstest]
+    #[case::end_of_allocation(
+        |info: &mut FileSpaceInfo| info.eoa_pre_fsm = 0x1_0000_0000,
+        FormatError::AddressTooLarge { address: 0x1_0000_0000, offset_size: 4 },
+    )]
+    #[case::manager_address(
+        |info: &mut FileSpaceInfo| info.manager_addrs[1] = 0x1_0000_0000,
+        FormatError::AddressTooLarge { address: 0x1_0000_0000, offset_size: 4 },
+    )]
+    #[case::page_size(
+        |info: &mut FileSpaceInfo| info.page_size = 0x1_0000,
+        FormatError::LengthTooLarge { length: 0x1_0000, length_size: 2 },
+    )]
+    fn a_value_wider_than_its_field_returns_an_error(
+        #[case] widen: fn(&mut FileSpaceInfo),
+        #[case] expected: FormatError,
+    ) {
+        let mut info = FileSpaceInfoFields {
+            strategy: FileSpaceStrategy::FsmAggr,
+            persist: true,
+            threshold: 1,
+            page_size: 4096,
+            page_end_meta_threshold: 0,
+            eoa_pre_fsm: 0x2000,
+            manager_addrs: vec![0x0841, 0x1806],
+        }
+        .build();
+        widen(&mut info);
+
+        assert_eq!(
+            serialize_file_space_info(widths(4, 2), &info),
             Err(expected)
         );
+    }
+
+    fn widths(offset_size: u8, length_size: u8) -> FormatWidths {
+        FormatWidths::from_sizes(offset_size, length_size).unwrap()
     }
 
     fn non_persistent(strategy: FileSpaceStrategy) -> FileSpaceInfo {

@@ -42,11 +42,12 @@ pub struct FileSpaceInfo {
     /// Page-end metadata threshold (paged allocation tuning).
     pub page_end_meta_threshold: u16,
     /// End-of-allocation address recorded before free-space manager metadata
-    /// was allocated, or [`u64::MAX`] when free space is not persisted.
+    /// was allocated, or the undefined address, all ones at the file's offset
+    /// width, where the file records none.
     pub eoa_pre_fsm: u64,
     /// The addresses of the free-space manager headers, present only if [`persist`] is set. An
-    /// unused slot holds [`u64::MAX`]. `hdf5_pure::File::persisted_free_space` reads the free
-    /// regions that these managers track.
+    /// unused slot holds the undefined address, all ones at the file's offset width.
+    /// `hdf5_pure::File::persisted_free_space` reads the free regions that these managers track.
     ///
     /// [`persist`]: Self::persist
     pub manager_addrs: Vec<u64>,

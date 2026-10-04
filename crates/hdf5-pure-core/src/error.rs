@@ -23,6 +23,10 @@ pub enum FormatError {
     InvalidOffsetSize(u8),
     /// Invalid length size (must be 2, 4, or 8).
     InvalidLengthSize(u8),
+    /// An address is too large for an address field of `offset_size` bytes.
+    AddressTooLarge { address: u64, offset_size: u8 },
+    /// A length is too large for a length field of `length_size` bytes.
+    LengthTooLarge { length: u64, length_size: u8 },
     /// Invalid object header signature.
     InvalidObjectHeaderSignature,
     /// Invalid object header version.
@@ -561,6 +565,24 @@ impl fmt::Display for FormatError {
             }
             Self::InvalidLengthSize(s) => {
                 write!(f, "invalid length size: {s} (must be 2, 4, or 8)")
+            }
+            Self::AddressTooLarge {
+                address,
+                offset_size,
+            } => {
+                write!(
+                    f,
+                    "address {address:#x} does not fit a {offset_size}-byte address field"
+                )
+            }
+            Self::LengthTooLarge {
+                length,
+                length_size,
+            } => {
+                write!(
+                    f,
+                    "length {length} does not fit a {length_size}-byte length field"
+                )
             }
             Self::InvalidObjectHeaderSignature => {
                 write!(f, "invalid object header signature")

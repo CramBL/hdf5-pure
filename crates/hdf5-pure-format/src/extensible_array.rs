@@ -2403,6 +2403,7 @@ mod tests {
     use test_util::checksum::restamp as stamp;
 
     use super::*;
+    use crate::width::FormatWidths;
 
     // The oracle is `H5EA__dblock_alloc`, which pages a block of more elements than a page.
     #[test]
@@ -3470,15 +3471,15 @@ mod tests {
     #[rstest]
     fn an_array_reads_back_at_every_width(
         #[values(
-            (OffsetWidth::Two, LengthWidth::Two),
-            (OffsetWidth::Four, LengthWidth::Four),
-            (OffsetWidth::Eight, LengthWidth::Eight)
+            FormatWidths { offsets: OffsetWidth::Two, lengths: LengthWidth::Two },
+            FormatWidths { offsets: OffsetWidth::Four, lengths: LengthWidth::Four },
+            FormatWidths { offsets: OffsetWidth::Eight, lengths: LengthWidth::Eight }
         )]
-        widths: (OffsetWidth, LengthWidth),
+        widths: FormatWidths,
         #[values(3, 2_000)] n: u64,
         #[values(false, true)] has_filters: bool,
     ) {
-        let (offset_size, length_size) = widths;
+        let FormatWidths { offsets, lengths } = widths;
         let chunks: Vec<ChunkRecord> = (0..n)
             .map(|i| ChunkRecord {
                 address: StoredAddress::new(0x100 + i * 8),
@@ -3490,8 +3491,8 @@ mod tests {
         let ea = build_extensible_array_at(
             &IndexSlots::dense(&chunks),
             8,
-            offset_size,
-            length_size,
+            offsets,
+            lengths,
             has_filters,
             StoredAddress::new(base),
         )
@@ -3499,15 +3500,11 @@ mod tests {
         let mut file = vec![0u8; base as usize];
         file.extend_from_slice(&ea);
 
-        let header = ExtensibleArrayHeader::parse(
-            &file,
-            base as usize,
-            offset_size.get(),
-            length_size.get(),
-        )
-        .unwrap();
+        let header =
+            ExtensibleArrayHeader::parse(&file, base as usize, offsets.get(), lengths.get())
+                .unwrap();
         let mut read = Vec::new();
-        read_extensible_array_chunks(&file, &header, offset_size.get(), 8, |_, record| {
+        read_extensible_array_chunks(&file, &header, offsets.get(), 8, |_, record| {
             read.push(record);
             Ok(())
         })

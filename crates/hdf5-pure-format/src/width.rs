@@ -3,7 +3,7 @@
 //! The superblock stores the two widths in one byte each, in its "Size of Offsets" and "Size of
 //! Lengths" fields, and a file may pair 2-byte addresses with 4-byte lengths. [`OffsetWidth`] and
 //! [`LengthWidth`] are distinct types, so a function that takes one of them cannot be called with
-//! the other.
+//! the other. [`FormatWidths`] holds the two widths of one file.
 //!
 //! Both types parse 2, 4 and 8. `H5Pset_sizes` sets 16 as well, which exceeds the `u64` the
 //! readers in [`crate::bytes`] return, so a superblock that stores 16 is rejected with
@@ -21,6 +21,28 @@ use alloc::vec::Vec;
 
 use crate::convert::Narrow;
 use crate::error::FormatError;
+
+/// The width of a file's addresses and the width of its lengths, as its superblock stores them.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct FormatWidths {
+    pub offsets: OffsetWidth,
+    pub lengths: LengthWidth,
+}
+
+impl FormatWidths {
+    /// Parses the superblock's "Size of Offsets" and "Size of Lengths" bytes.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::InvalidOffsetSize`] if `offset_size` is not 2, 4, or 8, and otherwise
+    /// [`FormatError::InvalidLengthSize`] if `length_size` is not 2, 4, or 8.
+    pub fn from_sizes(offset_size: u8, length_size: u8) -> Result<Self, FormatError> {
+        Ok(Self {
+            offsets: OffsetWidth::try_from(offset_size)?,
+            lengths: LengthWidth::try_from(length_size)?,
+        })
+    }
+}
 
 /// The width of a file address in bytes, the superblock's "Size of Offsets" field.
 ///
@@ -248,6 +270,35 @@ mod tests {
             assert_eq!(OffsetWidth::try_from(size).unwrap().get(), size);
             assert_eq!(LengthWidth::try_from(size).unwrap().get(), size);
         }
+    }
+
+    #[rstest]
+    #[case::mixed(4, 8, FormatWidths { offsets: OffsetWidth::Four, lengths: LengthWidth::Eight })]
+    #[case::equal(2, 2, FormatWidths { offsets: OffsetWidth::Two, lengths: LengthWidth::Two })]
+    fn sizes_parse_to_their_widths(
+        #[case] offset_size: u8,
+        #[case] length_size: u8,
+        #[case] expected: FormatWidths,
+    ) {
+        assert_eq!(
+            FormatWidths::from_sizes(offset_size, length_size),
+            Ok(expected)
+        );
+    }
+
+    #[rstest]
+    #[case::offset_size(0, 8, FormatError::InvalidOffsetSize(0))]
+    #[case::length_size(8, 16, FormatError::InvalidLengthSize(16))]
+    #[case::both(3, 16, FormatError::InvalidOffsetSize(3))]
+    fn a_size_other_than_2_4_or_8_returns_its_width_error(
+        #[case] offset_size: u8,
+        #[case] length_size: u8,
+        #[case] expected: FormatError,
+    ) {
+        assert_eq!(
+            FormatWidths::from_sizes(offset_size, length_size),
+            Err(expected)
+        );
     }
 
     #[rstest]
