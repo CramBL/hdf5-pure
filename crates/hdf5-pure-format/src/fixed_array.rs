@@ -777,6 +777,7 @@ mod tests {
     use test_util::checksum::restamp as stamp;
 
     use super::*;
+    use crate::width::FormatWidths;
 
     /// Returns the length of a header: 8 fixed bytes, the element count, the data block address,
     /// and the checksum.
@@ -1377,15 +1378,15 @@ mod tests {
     #[rstest]
     fn an_array_reads_back_at_every_width(
         #[values(
-            (OffsetWidth::Two, LengthWidth::Two),
-            (OffsetWidth::Four, LengthWidth::Four),
-            (OffsetWidth::Eight, LengthWidth::Eight)
+            FormatWidths { offsets: OffsetWidth::Two, lengths: LengthWidth::Two },
+            FormatWidths { offsets: OffsetWidth::Four, lengths: LengthWidth::Four },
+            FormatWidths { offsets: OffsetWidth::Eight, lengths: LengthWidth::Eight }
         )]
-        widths: (OffsetWidth, LengthWidth),
+        widths: FormatWidths,
         #[values(5, 3_000)] n: u64,
         #[values(false, true)] has_filters: bool,
     ) {
-        let (offset_size, length_size) = widths;
+        let FormatWidths { offsets, lengths } = widths;
         let chunks: Vec<ChunkRecord> = (0..n)
             .map(|i| ChunkRecord {
                 address: StoredAddress::new(0x100 + i * 8),
@@ -1397,8 +1398,8 @@ mod tests {
         let fa = build_fixed_array_at(
             &IndexSlots::dense(&chunks),
             8,
-            offset_size,
-            length_size,
+            offsets,
+            lengths,
             has_filters,
             StoredAddress::new(base),
         )
@@ -1407,10 +1408,9 @@ mod tests {
         file.extend_from_slice(&fa);
 
         let header =
-            FixedArrayHeader::parse(&file, base as usize, offset_size.get(), length_size.get())
-                .unwrap();
+            FixedArrayHeader::parse(&file, base as usize, offsets.get(), lengths.get()).unwrap();
         let mut read = Vec::new();
-        read_fixed_array_chunks(&file, &header, offset_size.get(), 8, |_, record| {
+        read_fixed_array_chunks(&file, &header, offsets.get(), 8, |_, record| {
             read.push(record);
             Ok(())
         })

@@ -50,6 +50,7 @@ use crate::source::{
 };
 use crate::superblock::Superblock;
 use crate::vl_data::{self, VlenStringReadOptions};
+use crate::width::FormatWidths;
 
 use crate::types::{AttrValue, DType, attrs_to_map, classify_datatype};
 
@@ -1667,12 +1668,10 @@ impl FileInner {
             .messages
             .iter()
             .find(|m| m.msg_type == MessageType::FILE_SPACE_INFO)?;
-        hdf5_pure_format::__private::parse_file_space_info(
-            &msg.data,
-            self.superblock.offset_size,
-            self.superblock.length_size,
-        )
-        .ok()
+        let widths =
+            FormatWidths::from_sizes(self.superblock.offset_size, self.superblock.length_size)
+                .ok()?;
+        hdf5_pure_format::__private::parse_file_space_info(widths, &msg.data).ok()
     }
 
     /// Parse the Shared Message Table message from the superblock extension and

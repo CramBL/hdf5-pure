@@ -215,6 +215,50 @@ pub(crate) fn read_optional_offset_width(
     }
 }
 
+/// Appends the address `val` to `buf` as a little-endian field of `width` bytes, as
+/// [`write_offset`] does, and returns an error where [`write_offset`] panics.
+///
+/// # Errors
+///
+/// Returns [`FormatError::AddressTooLarge`] if `val` does not fit `width` and is not `u64::MAX`,
+/// and leaves `buf` unchanged.
+pub(crate) fn try_write_offset(
+    buf: &mut Vec<u8>,
+    val: u64,
+    width: OffsetWidth,
+) -> Result<(), FormatError> {
+    if !width.holds(val) {
+        return Err(FormatError::AddressTooLarge {
+            address: val,
+            offset_size: width.get(),
+        });
+    }
+    write_offset(buf, val, width);
+    Ok(())
+}
+
+/// Appends the length `val` to `buf` as a little-endian field of `width` bytes, as
+/// [`write_length`] does, and returns an error where [`write_length`] panics.
+///
+/// # Errors
+///
+/// Returns [`FormatError::LengthTooLarge`] if `val` does not fit in `width` bytes, and leaves `buf`
+/// unchanged.
+pub(crate) fn try_write_length(
+    buf: &mut Vec<u8>,
+    val: u64,
+    width: LengthWidth,
+) -> Result<(), FormatError> {
+    if !width.holds(val) {
+        return Err(FormatError::LengthTooLarge {
+            length: val,
+            length_size: width.get(),
+        });
+    }
+    write_length(buf, val, width);
+    Ok(())
+}
+
 /// Appends `val` to `buf` as a little-endian integer of `width` bytes.
 ///
 /// Writes `u64::MAX` as the undefined address at `width`, all ones.

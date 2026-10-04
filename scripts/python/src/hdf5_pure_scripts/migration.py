@@ -192,7 +192,14 @@ def migration_shapes(baseline: dict, candidate: dict, core: dict) -> list[str]:
     failures = []
     # The FormatError variants that 0.47.0 does not define, which the comparison removes from the
     # moved shape.
-    allowed_added_variants = {"FormatError": {"Internal", "InvalidObjectHeaderMessageSize"}}
+    allowed_added_variants = {
+        "FormatError": {
+            "AddressTooLarge",
+            "Internal",
+            "InvalidObjectHeaderMessageSize",
+            "LengthTooLarge",
+        }
+    }
     for path, kind in sorted(moved):
         name = path.rsplit("::", 1)[-1]
         if name not in baseline_items:

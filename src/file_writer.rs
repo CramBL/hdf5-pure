@@ -70,6 +70,7 @@ use crate::type_builders::{
     AttrSpec, CommittedDatatype, DatasetBuilder, FinishedGroup, GroupBuilder, VlStringStaging,
     build_global_heap_collections, patch_vl_refs, patch_vl_refs_masked, write_reference_address,
 };
+use crate::width::FormatWidths;
 use crate::width::LengthWidth;
 use crate::width::OffsetWidth;
 
@@ -83,6 +84,11 @@ use crate::datatype::{CharacterSet, Datatype};
 pub(crate) const OFFSET_WIDTH: OffsetWidth = OffsetWidth::Eight;
 /// The width of every length in a file this crate writes.
 pub(crate) const LENGTH_WIDTH: LengthWidth = LengthWidth::Eight;
+/// [`OFFSET_WIDTH`] and [`LENGTH_WIDTH`] as one [`FormatWidths`].
+pub(crate) const WIDTHS: FormatWidths = FormatWidths {
+    offsets: OFFSET_WIDTH,
+    lengths: LENGTH_WIDTH,
+};
 /// [`OFFSET_WIDTH`] as the `u8` width the writers take.
 pub(crate) const OFFSET_SIZE: u8 = OFFSET_WIDTH.get();
 /// [`LENGTH_WIDTH`] as the `u8` width the writers take.
@@ -1329,9 +1335,9 @@ impl FileWriter {
         ));
         let page_size = self.file_space_page_size.unwrap_or(DEFAULT_PAGE_SIZE);
         Some(if persist {
-            file_space_info::persistent_empty(strategy, threshold, page_size)
+            file_space_info::persistent_empty(OFFSET_WIDTH, strategy, threshold, page_size)
         } else {
-            file_space_info::non_persistent(strategy, threshold, page_size)
+            file_space_info::non_persistent(OFFSET_WIDTH, strategy, threshold, page_size)
         })
     }
 
@@ -1346,7 +1352,7 @@ impl FileWriter {
                 // still opens the file.
                 oh.add_message_with_flags(
                     MessageType::FILE_SPACE_INFO,
-                    hdf5_pure_format::__private::serialize_file_space_info(&info),
+                    hdf5_pure_format::__private::serialize_file_space_info(WIDTHS, &info)?,
                     MessageFlags::FORBID_SHARING | MessageFlags::MARK_IF_UNKNOWN,
                 );
                 oh.serialize()
@@ -3319,7 +3325,7 @@ impl FileWriter {
                 let mut oh = ObjectHeaderWriter::new();
                 oh.add_message_with_flags(
                     MessageType::FILE_SPACE_INFO,
-                    hdf5_pure_format::__private::serialize_file_space_info(&info),
+                    hdf5_pure_format::__private::serialize_file_space_info(WIDTHS, &info)?,
                     MessageFlags::FORBID_SHARING | MessageFlags::MARK_IF_UNKNOWN,
                 );
                 oh.serialize()?
@@ -3776,12 +3782,17 @@ impl FileWriter {
         // reserved layout still holds.
         let real_ext_oh = match (&ext_oh, nonpaged_persist) {
             (Some(_), Some((strategy, threshold, np_page_size))) => {
-                let mut info = file_space_info::persistent_empty(strategy, threshold, np_page_size);
+                let mut info = file_space_info::persistent_empty(
+                    OFFSET_WIDTH,
+                    strategy,
+                    threshold,
+                    np_page_size,
+                );
                 info.eoa_pre_fsm = eof_addr2 - ub as u64;
                 let mut oh = ObjectHeaderWriter::new();
                 oh.add_message_with_flags(
                     MessageType::FILE_SPACE_INFO,
-                    hdf5_pure_format::__private::serialize_file_space_info(&info),
+                    hdf5_pure_format::__private::serialize_file_space_info(WIDTHS, &info)?,
                     MessageFlags::FORBID_SHARING | MessageFlags::MARK_IF_UNKNOWN,
                 );
                 Some(oh.serialize()?)

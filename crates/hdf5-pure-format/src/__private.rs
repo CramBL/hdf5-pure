@@ -173,6 +173,7 @@ pub use crate::superblock::serialize_superblock;
 pub use crate::symbol_table::SymbolTableEntry;
 pub use crate::symbol_table::SymbolTableMessage;
 pub use crate::symbol_table::SymbolTableNode;
+pub use crate::width::FormatWidths;
 pub use crate::width::LengthWidth;
 pub use crate::width::OffsetWidth;
 pub use crate::width::UintWidth;

@@ -16,6 +16,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- Fixed `File::commit` writing malformed file space settings to a file that persists its free space and stores 2- or 4-byte addresses or lengths ([696](https://github.com/CramBL/hdf5-pure/pull/696)).
 - Fixed a panic in `Dataset::append` when a crafted Extensible Array header encodes unsupported bit geometry ([#693](https://github.com/CramBL/hdf5-pure/pull/693)).
 - Fixed incorrect member offset widths when reading and writing `Datatype::Compound` values whose element sizes are between 65,536 and 16,777,215 bytes ([#688](https://github.com/CramBL/hdf5-pure/pull/688)).
 - Fixed `AttrValue` missing from the crate root under `no_std` with `alloc` ([#635](https://github.com/CramBL/hdf5-pure/pull/635)).

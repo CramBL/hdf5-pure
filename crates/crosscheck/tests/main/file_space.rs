@@ -6,9 +6,13 @@
 //! message carries free-space-manager addresses.
 
 use hdf5::plist::file_create::FileSpaceStrategy as CStrategy;
+use hdf5::plist::file_create::Sizeof;
+use hdf5::plist::file_create::SizeofInfo;
 use hdf5_pure::{
     AttrValue, File, FileAccessProperties, FileBuilder, FileSpaceStrategy, Layout, MaxExtent,
 };
+use hdf5_pure_format::__private::FormatWidths;
+use rstest::rstest;
 
 use tempfile::tempdir;
 
@@ -317,6 +321,82 @@ fn c_library_reads_managers_we_placed_mid_file() {
     assert_eq!(
         ours.dataset("above").unwrap().read_i32().unwrap(),
         vec![5; 8000]
+    );
+}
+
+#[rstest]
+fn the_serializer_writes_the_message_libhdf5_writes_at_the_widths_of_its_file(
+    #[values(Sizeof::Bytes2, Sizeof::Bytes4, Sizeof::Bytes8)] sizeof_addr: Sizeof,
+    #[values(Sizeof::Bytes2, Sizeof::Bytes4, Sizeof::Bytes8)] sizeof_size: Sizeof,
+) {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("c_persisted_widths.h5");
+    {
+        let file = hdf5::FileBuilder::new()
+            .with_fapl(|fapl| fapl.libver_v110())
+            .with_fcpl(|fcpl| {
+                fcpl.sizes(SizeofInfo {
+                    sizeof_addr,
+                    sizeof_size,
+                })
+                .file_space_strategy(CStrategy::FreeSpaceManager {
+                    paged: false,
+                    persist: true,
+                    threshold: 1,
+                })
+            })
+            .create(&path)
+            .unwrap();
+        for name in ["a", "b"] {
+            file.new_dataset::<i32>()
+                .shape((400,))
+                .create(name)
+                .unwrap()
+                .write(&vec![1i32; 400])
+                .unwrap();
+        }
+        file.unlink("a").unwrap();
+        file.close().unwrap();
+    }
+
+    let file = File::open(&path).unwrap();
+    let superblock = file.superblock();
+    let widths = FormatWidths::from_sizes(superblock.offset_size, superblock.length_size).unwrap();
+    let info = file.file_space_info().unwrap();
+    assert_eq!(
+        (
+            info.strategy,
+            info.persist,
+            info.threshold,
+            info.page_size,
+            info.page_end_meta_threshold,
+            info.manager_addrs.len(),
+        ),
+        (FileSpaceStrategy::FsmAggr, true, 1, 4096, 0, 12)
+    );
+    assert!(
+        info.manager_addrs
+            .iter()
+            .any(|&addr| !hdf5_pure_format::__private::is_undefined_addr(
+                addr,
+                superblock.offset_size
+            )),
+        "libhdf5 records a manager for the deleted dataset's space"
+    );
+    let encoded = hdf5_pure_format::__private::serialize_file_space_info(widths, info).unwrap();
+    // The version, strategy and persist bytes, the 2-byte page-end threshold, two lengths, the end
+    // of allocation, and twelve manager addresses.
+    assert_eq!(
+        encoded.len(),
+        5 + 2 * usize::from(superblock.length_size) + 13 * usize::from(superblock.offset_size)
+    );
+
+    let written = std::fs::read(&path).unwrap();
+    assert!(
+        written
+            .windows(encoded.len())
+            .any(|window| window == encoded),
+        "libhdf5 writes the message the serializer produces, {encoded:02x?}"
     );
 }
 

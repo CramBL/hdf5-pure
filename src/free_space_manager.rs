@@ -18,13 +18,6 @@ use crate::error::FormatError;
 use crate::file_space_info::NUM_FILE_FSM_MANAGERS;
 use crate::width::OffsetWidth;
 
-/// Byte width of one manager address in the File Space Info message.
-///
-/// [`serialize_file_space_info`](hdf5_pure_format::__private::serialize_file_space_info)
-/// emits every slot in eight bytes, whatever address width the superblock
-/// declares.
-const FILE_SPACE_INFO_SLOT_WIDTH: u8 = 8;
-
 /// Read every persisted free section from the managers named in `manager_addrs`,
 /// fetching the `FSHD`/`FSSE` blocks from `data`. `base` is added to every stored
 /// address (the file's base address, normally 0). A slot whose address is
@@ -165,10 +158,8 @@ pub(crate) struct PagedManagerBlock {
 
 /// The closed-form layout of a paged file's per-page-type free-space managers.
 pub(crate) struct PagedManagerPlan {
-    /// Manager address per File Space Info slot, undefined where inactive.
-    ///
-    /// The undefined value is the one at [`FILE_SPACE_INFO_SLOT_WIDTH`], not the
-    /// one at the address width the file declares.
+    /// Manager address per File Space Info slot, the undefined address at the
+    /// file's offset width where inactive.
     pub(crate) slots: [StoredAddress; NUM_FILE_FSM_MANAGERS],
     /// The active managers, in ascending address order. Empty when the file has
     /// no free space to record.
@@ -243,7 +234,7 @@ pub(crate) fn plan_paged_managers(
          unclassified lists, so they have stopped being disjoint"
     );
 
-    let mut slots = [StoredAddress::undefined(FILE_SPACE_INFO_SLOT_WIDTH); NUM_FILE_FSM_MANAGERS];
+    let mut slots = [StoredAddress::undefined(offset_size.get()); NUM_FILE_FSM_MANAGERS];
     let mut blocks = Vec::new();
     let mut cursor = start;
     for (slot, class, sections) in [
