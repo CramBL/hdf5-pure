@@ -13,10 +13,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 ### Changed
 
 - **Breaking:** The `flate2` Cargo feature is removed. Enable `deflate` instead. The `provenance` feature no longer exposes `sha2` as a selectable feature ([#689](https://github.com/CramBL/hdf5-pure/pull/689)).
+- **Breaking:** `FormatError::InvalidFreeSpaceManager` holds a message that describes the invalid free-space manager, and a write returns it for a free section too large to persist at the file's length width.
 
 ### Fixed
 
-- Fixed `File::commit` writing malformed file space settings to a file that persists its free space and stores 2- or 4-byte addresses or lengths ([696](https://github.com/CramBL/hdf5-pure/pull/696)).
+- Fixed `File::persisted_free_space` misreading the free regions of a file that stores 2- or 4-byte lengths ([#697](https://github.com/CramBL/hdf5-pure/pull/697)).
+- Fixed `File::commit` writing malformed file space settings to a file that persists its free space and stores 2- or 4-byte addresses or lengths ([#696](https://github.com/CramBL/hdf5-pure/pull/696)).
 - Fixed a panic in `Dataset::append` when a crafted Extensible Array header encodes unsupported bit geometry ([#693](https://github.com/CramBL/hdf5-pure/pull/693)).
 - Fixed incorrect member offset widths when reading and writing `Datatype::Compound` values whose element sizes are between 65,536 and 16,777,215 bytes ([#688](https://github.com/CramBL/hdf5-pure/pull/688)).
 - Fixed `AttrValue` missing from the crate root under `no_std` with `alloc` ([#635](https://github.com/CramBL/hdf5-pure/pull/635)).

@@ -45,6 +45,8 @@ ignored = ["hdf5"]
 
 [dev-dependencies]
 hdf5-pure.workspace = true
+# The address type the hdf5-pure-format parsers and writers take, for the tests that call them.
+hdf5-pure-core.workspace = true
 hdf5-pure-format.workspace = true
 ndarray.workspace = true
 proptest.workspace = true

@@ -4,6 +4,8 @@
 #[cfg(not(feature = "std"))]
 extern crate alloc;
 #[cfg(not(feature = "std"))]
+use alloc::format;
+#[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 
 use hdf5_pure_format::__private::FreeSection;
@@ -37,7 +39,6 @@ pub(crate) fn read_persisted_sections(
     base: BaseAddress,
     manager_addrs: &[u64],
 ) -> Result<Vec<FreeSection>, FormatError> {
-    let bad = || FormatError::InvalidFreeSpaceManager;
     let offset_size = widths.offsets.get();
     let mut sections = Vec::new();
     for &addr in manager_addrs {
@@ -46,15 +47,30 @@ pub(crate) fn read_persisted_sections(
             continue;
         }
         let a = base.absolute(addr)?.to_usize()?;
-        let header = FreeSpaceManagerHeader::parse(widths, data.get(a..).ok_or_else(bad)?)?;
+        let header = FreeSpaceManagerHeader::parse(
+            widths,
+            data.get(a..).ok_or_else(|| {
+                FormatError::InvalidFreeSpaceManager(format!(
+                    "the header at {a} is past the end of the file, {} bytes long",
+                    data.len()
+                ))
+            })?,
+        )?;
         if header.fsse_addr.is_undefined(offset_size) {
             continue;
         }
         let fa = base.absolute(header.fsse_addr)?.to_usize()?;
-        let end = fa
-            .checked_add(header.fsse_used.to_usize()?)
-            .ok_or_else(bad)?;
-        let block = data.get(fa..end).ok_or_else(bad)?;
+        let used = header.fsse_used.to_usize()?;
+        let block = fa
+            .checked_add(used)
+            .and_then(|end| data.get(fa..end))
+            .ok_or_else(|| {
+                FormatError::InvalidFreeSpaceManager(format!(
+                    "the section list at {fa}, {used} bytes long, runs past the end of the file, \
+                     {} bytes long",
+                    data.len()
+                ))
+            })?;
         sections.extend(hdf5_pure_format::__private::parse_section_info(
             widths, block, &header,
         )?);
@@ -276,6 +292,7 @@ pub(crate) fn plan_paged_managers(
 #[cfg(test)]
 mod tests {
     use hdf5_pure_format::__private::SECTION_CLASS_SIMPLE;
+    use rstest::rstest;
     use test_util::free_space;
 
     use super::*;
@@ -290,6 +307,36 @@ mod tests {
 
     fn widths(offset_size: u8, length_size: u8) -> FormatWidths {
         FormatWidths::from_sizes(offset_size, length_size).unwrap()
+    }
+
+    #[rstest]
+    #[case::header(
+        736,
+        1000,
+        "the header at 1000 is past the end of the file, 736 bytes long"
+    )]
+    #[case::section_list(
+        735,
+        619,
+        "the section list at 701, 35 bytes long, runs past the end of the file, 735 bytes long"
+    )]
+    fn a_manager_past_the_end_of_the_file_fails_to_read(
+        #[case] file_len: usize,
+        #[case] manager_addr: u64,
+        #[case] reason: &str,
+    ) {
+        // The header is at 619 and its 35-byte section list at 701, so the file ends at 736.
+        let fshd = free_space::single_section_header();
+        let fsse = free_space::single_section_info();
+        let mut buf = vec![0u8; 736];
+        buf[619..619 + fshd.len()].copy_from_slice(&fshd);
+        buf[701..701 + fsse.len()].copy_from_slice(&fsse);
+        buf.truncate(file_len);
+
+        assert_eq!(
+            read_persisted_sections(&buf, widths(8, 8), BaseAddress::ZERO, &[manager_addr]),
+            Err(FormatError::InvalidFreeSpaceManager(reason.to_owned()))
+        );
     }
 
     #[test]
