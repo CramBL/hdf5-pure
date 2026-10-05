@@ -284,7 +284,7 @@ fn persisted_free_space_file_appends_and_finalizes() {
     // The finalize freed the superseded extension + manager blocks, so the
     // reopened file recovers at least one persisted free section.
     assert!(
-        !f.persisted_free_space().is_empty(),
+        !f.persisted_free_space().unwrap().is_empty(),
         "expected persisted free sections after finalize"
     );
 }
@@ -343,7 +343,7 @@ fn persisted_free_space_drop_finalizes() {
     let f = File::open(&p).unwrap();
     assert_eq!(f.file_space_strategy(), Some(FileSpaceStrategy::FsmAggr));
     assert!(
-        !f.persisted_free_space().is_empty(),
+        !f.persisted_free_space().unwrap().is_empty(),
         "a dropped handle finalizes like close"
     );
 }

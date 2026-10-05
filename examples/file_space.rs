@@ -191,7 +191,7 @@ fn churn(path: &Path) -> Cycle {
     // For a persisting file, whatever the delete did not give back to the
     // filesystem is recorded on disk and a later session draws on it; for a
     // non-persisting file the list is empty here.
-    let free = File::open(path).unwrap().persisted_free_space();
+    let free = File::open(path).unwrap().persisted_free_space().unwrap();
     let total_free: u64 = free.iter().map(|&(_, len)| len).sum();
     println!(
         "  after delete: {after_delete} bytes, {} persisted free region(s) ({total_free} bytes)",

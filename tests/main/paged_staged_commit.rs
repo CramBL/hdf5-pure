@@ -43,7 +43,7 @@ fn assert_paged_ok(path: &std::path::Path) {
     assert_eq!(info.page_size, PAGE);
     assert_eq!(info.eoa_pre_fsm % PAGE, 0, "EOA page-aligned");
     assert_eq!(info.eoa_pre_fsm, bytes.len() as u64, "EOA == file size");
-    let mut free = f.persisted_free_space();
+    let mut free = f.persisted_free_space().unwrap();
     free.sort_by_key(|&(a, _)| a);
     let mut prev_end = 0u64;
     for (addr, len) in &free {

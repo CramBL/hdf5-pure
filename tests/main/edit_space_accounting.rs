@@ -222,6 +222,7 @@ fn persisting_session_seeds_reusable_free_on_open() {
     let persisted: u64 = File::open(&p)
         .unwrap()
         .persisted_free_space()
+        .unwrap()
         .iter()
         .map(|(_, len)| len)
         .sum();

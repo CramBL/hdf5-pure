@@ -1926,45 +1926,39 @@ impl FileInner {
         self.file_space_info.as_ref()
     }
 
-    /// The free regions a file persists on disk in its free-space managers (when
-    /// written with `H5Pset_file_space_strategy(..., persist = true)`), as
-    /// `(address, length)` pairs sorted by address.
+    /// Returns the free regions the free-space managers of the file track, as `(address, length)`
+    /// pairs sorted by address.
     ///
-    /// Empty when the file does not persist free space, or for the streaming
-    /// backend (which does not load the manager blocks). The addresses are file
-    /// offsets (relative to the base address); reading data is unaffected by the
-    /// presence or absence of these managers.
-    pub fn persisted_free_space(&self) -> Vec<(u64, u64)> {
+    /// # Errors
+    ///
+    /// Returns the errors of [`free_space_manager::read_persisted_sections`] for a manager that is
+    /// malformed or out of the bounds of the file.
+    pub fn persisted_free_space(&self) -> Result<Vec<(u64, u64)>, FormatError> {
         let Some(info) = &self.file_space_info else {
-            return Vec::new();
+            return Ok(Vec::new());
         };
         if !info.persist {
-            return Vec::new();
+            return Ok(Vec::new());
         }
         let Backend::InMemory(data) = &self.backend else {
-            return Vec::new();
+            return Ok(Vec::new());
         };
-        let mut sections =
-            FormatWidths::from_sizes(self.superblock.offset_size, self.superblock.length_size)
-                .and_then(|widths| {
-                    free_space_manager::read_persisted_sections(
-                        data,
-                        widths,
-                        self.addr_offset,
-                        &info.manager_addrs,
-                    )
-                })
-                .unwrap_or_default();
+        let mut sections = free_space_manager::read_persisted_sections(
+            data,
+            FormatWidths::from_sizes(self.superblock.offset_size, self.superblock.length_size)?,
+            self.addr_offset,
+            &info.manager_addrs,
+        )?;
         // Distinct sections have distinct addresses in any well-formed file, so
         // the tie-break never arises; only a malformed manager can advertise one
         // address twice, and which of the pair is reported first is already
         // unspecified. No `debug_assert` here: this parses untrusted bytes, which
         // must not panic a debug build.
         sections.sort_unstable_by_key(|s| s.addr);
-        sections
+        Ok(sections
             .into_iter()
             .map(|s| (s.addr.get(), s.size))
-            .collect()
+            .collect())
     }
 
     /// The size of the underlying file in bytes (the HDF5 `H5Fget_filesize`).
@@ -3481,10 +3475,24 @@ impl File {
         self.inner.file_space_info()
     }
 
-    /// The free regions a file persists on disk in its free-space managers, as
-    /// `(address, length)` pairs sorted by address.
-    pub fn persisted_free_space(&self) -> Vec<(u64, u64)> {
-        self.inner.persisted_free_space()
+    /// Returns the free regions the free-space managers of the file track, as `(address, length)`
+    /// pairs sorted by address.
+    ///
+    /// A file persists its free space when its writer passes `persist` as `true` to
+    /// [`FileBuilder::with_file_space_strategy`](crate::FileBuilder::with_file_space_strategy).
+    /// The C library takes the same flag in `H5Pset_file_space_strategy`. The addresses are
+    /// relative to the base address. Returns an empty `Vec` if the file does not persist its free
+    /// space, and on a handle that reads the file on demand or edits it, such as one
+    /// [`File::open_streaming`] or [`File::open_rw`] returns.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Format`] if a free-space manager is malformed or out of the bounds of the
+    /// file: [`FormatError::ChecksumMismatch`] if the checksum of a manager block does not match and
+    /// the `checksum` feature is enabled, and otherwise most often
+    /// [`FormatError::InvalidFreeSpaceManager`], which holds a message that describes the defect.
+    pub fn persisted_free_space(&self) -> Result<Vec<(u64, u64)>, Error> {
+        Ok(self.inner.persisted_free_space()?)
     }
 
     /// The size of the underlying file in bytes (the HDF5 `H5Fget_filesize`).

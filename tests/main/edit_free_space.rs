@@ -605,7 +605,7 @@ fn persisted_chunked_reclaim_is_disjoint_and_reusable() {
 
     let f = File::open(&path).unwrap();
     assert!(f.file_space_info().unwrap().persist);
-    let mut free = f.persisted_free_space();
+    let mut free = f.persisted_free_space().unwrap();
     free.sort();
     for w in free.windows(2) {
         assert!(
@@ -644,7 +644,7 @@ fn persisted_free_space_survives_reopen_and_is_reused() {
     let f = File::open(&path).unwrap();
     assert_eq!(f.file_space_strategy(), Some(FileSpaceStrategy::FsmAggr));
     assert!(f.file_space_info().unwrap().persist);
-    let free = f.persisted_free_space();
+    let free = f.persisted_free_space().unwrap();
     let total: u64 = free.iter().map(|(_, l)| l).sum();
     assert!(
         total >= 1600 && free.iter().any(|&(_, l)| l >= 1600),
@@ -714,7 +714,7 @@ fn persisted_managers_stay_consistent_across_many_commits() {
         assert_eof_matches_file(&path);
         let f = File::open(&path).unwrap();
         assert!(f.file_space_info().unwrap().persist);
-        let mut free = f.persisted_free_space();
+        let mut free = f.persisted_free_space().unwrap();
         free.sort();
         for w in free.windows(2) {
             assert!(
@@ -1196,6 +1196,7 @@ fn corrupt_persisted_section_is_skipped_not_fatal() {
     let big_len = File::open(&path)
         .unwrap()
         .persisted_free_space()
+        .unwrap()
         .into_iter()
         .map(|(_, len)| len)
         .max()
@@ -1301,6 +1302,7 @@ fn paged_churn_reaches_a_steady_size() {
             let persisted: u64 = File::open(&path)
                 .unwrap()
                 .persisted_free_space()
+                .unwrap()
                 .iter()
                 .map(|(_, len)| len)
                 .sum();
@@ -1358,7 +1360,7 @@ fn a_paged_commit_tail_is_placed_in_free_space() {
     // Three commits that change nothing but one attribute and the tail the commit
     // has to rewrite regardless.
     for i in 0..3 {
-        let before: Vec<(u64, u64)> = File::open(&path).unwrap().persisted_free_space();
+        let before: Vec<(u64, u64)> = File::open(&path).unwrap().persisted_free_space().unwrap();
         let f = File::open_rw(&path).unwrap();
         f.root().set_attr("n", AttrValue::I64(i)).unwrap();
         f.commit().unwrap();
@@ -1397,7 +1399,12 @@ fn a_paged_commit_tail_is_placed_in_free_space() {
         // is the same leak in miniature.
         if i > 0 {
             let before_total: u64 = before.iter().map(|(_, len)| len).sum();
-            let after_total: u64 = f.persisted_free_space().iter().map(|(_, len)| len).sum();
+            let after_total: u64 = f
+                .persisted_free_space()
+                .unwrap()
+                .iter()
+                .map(|(_, len)| len)
+                .sum();
             assert_eq!(
                 after_total, before_total,
                 "commit {i}: rewriting the tail must conserve free space"
@@ -1453,6 +1460,7 @@ fn a_paged_tail_conserves_free_space_across_layouts() {
                 File::open(&path)
                     .unwrap()
                     .persisted_free_space()
+                    .unwrap()
                     .iter()
                     .map(|(_, len)| len)
                     .sum::<u64>(),
@@ -1501,7 +1509,7 @@ fn a_persisting_commit_tail_is_placed_in_free_space() {
     // Three commits that change nothing but one attribute and the tail the commit
     // has to rewrite regardless.
     for i in 0..3 {
-        let before: Vec<(u64, u64)> = File::open(&path).unwrap().persisted_free_space();
+        let before: Vec<(u64, u64)> = File::open(&path).unwrap().persisted_free_space().unwrap();
         let f = File::open_rw(&path).unwrap();
         f.root().set_attr("n", AttrValue::I64(i)).unwrap();
         f.commit().unwrap();
@@ -1761,7 +1769,7 @@ fn assert_released_file_is_self_consistent(path: &std::path::Path) {
     assert_eof_matches_file(path);
     let len = std::fs::metadata(path).unwrap().len();
     let f = File::open(path).unwrap();
-    for (addr, size) in f.persisted_free_space() {
+    for (addr, size) in f.persisted_free_space().unwrap() {
         assert!(
             addr + size <= len,
             "a persisted free section [{addr}, {}) runs past the end of the \
@@ -2187,7 +2195,12 @@ fn a_persisting_file_reuses_a_hole_smaller_than_a_batch() {
     let file = File::open(&path).unwrap();
     assert_eq!(file.dataset("log").unwrap().read_i32().unwrap(), payload);
     assert_eq!(file.dataset("keep").unwrap().read_i32().unwrap(), [1, 2, 3]);
-    let persisted: u64 = file.persisted_free_space().iter().map(|(_, l)| l).sum();
+    let persisted: u64 = file
+        .persisted_free_space()
+        .unwrap()
+        .iter()
+        .map(|(_, l)| l)
+        .sum();
     assert!(
         persisted + payload_bytes <= freed,
         "the managers must describe the hole less what the append placed in it \
@@ -2224,7 +2237,7 @@ const CEILING_ELEMS: usize = 4096;
 /// those managers and would write over the top of live data.
 fn assert_no_persisted_free_space_holds_live_chunks(path: &std::path::Path, datasets: &[&str]) {
     let file = File::open(path).unwrap();
-    let free = file.persisted_free_space();
+    let free = file.persisted_free_space().unwrap();
     for name in datasets {
         for chunk in file.dataset(name).unwrap().chunks().unwrap() {
             let (lo, hi) = (chunk.address, chunk.address + chunk.storage_size);
