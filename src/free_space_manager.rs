@@ -16,20 +16,29 @@ use crate::address::{BaseAddress, StoredAddress};
 use crate::convert::Narrow;
 use crate::error::FormatError;
 use crate::file_space_info::NUM_FILE_FSM_MANAGERS;
-use crate::width::OffsetWidth;
+use crate::width::FormatWidths;
 
-/// Read every persisted free section from the managers named in `manager_addrs`,
-/// fetching the `FSHD`/`FSSE` blocks from `data`. `base` is added to every stored
-/// address (the file's base address, normally 0). A slot whose address is
-/// undefined at `offset_size` is skipped, and so is a manager whose section-info
-/// address is undefined. Used on reopen to restore a free list.
+/// Reads the free sections of the managers at `manager_addrs` from the file `data`.
+///
+/// Adds `base`, the file's base address, to every address the file stores. Skips a manager whose
+/// address is undefined at the offset width of `widths`, and a manager whose section list address
+/// is undefined.
+///
+/// # Errors
+///
+/// Returns [`FormatError::OffsetOverflow`] if `base` and a stored address sum past `u64::MAX`,
+/// [`FormatError::ValueTooLargeForPlatform`] if a position in the file or the length of a section
+/// list does not fit a `usize`, [`FormatError::InvalidFreeSpaceManager`] if a header or a section
+/// list is past the end of `data`, and the errors of [`FreeSpaceManagerHeader::parse`] and
+/// [`parse_section_info`](hdf5_pure_format::__private::parse_section_info) for each block it reads.
 pub(crate) fn read_persisted_sections(
     data: &[u8],
-    manager_addrs: &[u64],
+    widths: FormatWidths,
     base: BaseAddress,
-    offset_size: u8,
+    manager_addrs: &[u64],
 ) -> Result<Vec<FreeSection>, FormatError> {
     let bad = || FormatError::InvalidFreeSpaceManager;
+    let offset_size = widths.offsets.get();
     let mut sections = Vec::new();
     for &addr in manager_addrs {
         let addr = StoredAddress::new(addr);
@@ -37,7 +46,7 @@ pub(crate) fn read_persisted_sections(
             continue;
         }
         let a = base.absolute(addr)?.to_usize()?;
-        let header = FreeSpaceManagerHeader::parse(data.get(a..).ok_or_else(bad)?, offset_size)?;
+        let header = FreeSpaceManagerHeader::parse(widths, data.get(a..).ok_or_else(bad)?)?;
         if header.fsse_addr.is_undefined(offset_size) {
             continue;
         }
@@ -47,9 +56,7 @@ pub(crate) fn read_persisted_sections(
             .ok_or_else(bad)?;
         let block = data.get(fa..end).ok_or_else(bad)?;
         sections.extend(hdf5_pure_format::__private::parse_section_info(
-            block,
-            &header,
-            offset_size,
+            widths, block, &header,
         )?);
     }
     Ok(sections)
@@ -67,15 +74,14 @@ pub(crate) type PersistedSections = (Vec<FreeSection>, Vec<(u64, u64)>);
 /// blocks are read; nothing scales with file size.
 pub(crate) fn read_persisted_sections_source<S: crate::source::Source>(
     src: &S,
-    manager_addrs: &[u64],
+    widths: FormatWidths,
     base: BaseAddress,
-    offset_size: u8,
+    manager_addrs: &[u64],
 ) -> Result<PersistedSections, FormatError> {
+    let offset_size = widths.offsets.get();
     let mut sections = Vec::new();
     let mut blocks = Vec::new();
-    let hdr_len = hdf5_pure_format::__private::free_space_manager_header_len(
-        OffsetWidth::try_from(offset_size)?,
-    );
+    let hdr_len = hdf5_pure_format::__private::free_space_manager_header_len(widths);
     for &addr in manager_addrs {
         let addr = StoredAddress::new(addr);
         if addr.is_undefined(offset_size) {
@@ -83,7 +89,7 @@ pub(crate) fn read_persisted_sections_source<S: crate::source::Source>(
         }
         let a = base.absolute(addr)?;
         let fshd = src.read_exact_at(a, hdr_len.to_usize()?)?;
-        let header = FreeSpaceManagerHeader::parse(&fshd, offset_size)?;
+        let header = FreeSpaceManagerHeader::parse(widths, &fshd)?;
         blocks.push((a, hdr_len));
         if header.fsse_addr.is_undefined(offset_size) {
             continue;
@@ -92,9 +98,7 @@ pub(crate) fn read_persisted_sections_source<S: crate::source::Source>(
         let used = header.fsse_used;
         let block = src.read_exact_at(fa, used.to_usize()?)?;
         sections.extend(hdf5_pure_format::__private::parse_section_info(
-            &block,
-            &header,
-            offset_size,
+            widths, &block, &header,
         )?);
         blocks.push((fa, used));
     }
@@ -207,7 +211,7 @@ pub(crate) fn plan_paged_managers(
     unclassified: &[FreeSection],
     page_size: u64,
     start: StoredAddress,
-    offset_size: OffsetWidth,
+    widths: FormatWidths,
 ) -> PagedManagerPlan {
     let mut slot0 = Vec::new();
     let mut slot2 = Vec::new();
@@ -234,7 +238,7 @@ pub(crate) fn plan_paged_managers(
          unclassified lists, so they have stopped being disjoint"
     );
 
-    let mut slots = [StoredAddress::undefined(offset_size.get()); NUM_FILE_FSM_MANAGERS];
+    let mut slots = [StoredAddress::undefined(widths.offsets.get()); NUM_FILE_FSM_MANAGERS];
     let mut blocks = Vec::new();
     let mut cursor = start;
     for (slot, class, sections) in [
@@ -247,12 +251,12 @@ pub(crate) fn plan_paged_managers(
         }
         let fshd_addr = cursor;
         let fsse_addr = fshd_addr.offset(
-            hdf5_pure_format::__private::free_space_manager_header_len(offset_size),
+            hdf5_pure_format::__private::free_space_manager_header_len(widths),
         );
         let section_sizes: Vec<u64> = sections.iter().map(|s| s.size).collect();
         cursor = fsse_addr.offset(hdf5_pure_format::__private::section_info_len(
+            widths,
             &section_sizes,
-            offset_size,
         ));
         slots[slot] = fshd_addr;
         blocks.push(PagedManagerBlock {
@@ -284,6 +288,10 @@ mod tests {
         }
     }
 
+    fn widths(offset_size: u8, length_size: u8) -> FormatWidths {
+        FormatWidths::from_sizes(offset_size, length_size).unwrap()
+    }
+
     #[test]
     fn read_persisted_sections_follows_managers() {
         // Place the single-section FSHD@619 + FSSE@701 fixtures in a buffer at
@@ -294,12 +302,17 @@ mod tests {
         buf[619..619 + fshd.len()].copy_from_slice(&fshd);
         buf[701..701 + fsse.len()].copy_from_slice(&fsse);
 
-        let got = read_persisted_sections(&buf, &[619, u64::MAX, u64::MAX], BaseAddress::ZERO, 8)
-            .unwrap();
+        let got = read_persisted_sections(
+            &buf,
+            widths(8, 8),
+            BaseAddress::ZERO,
+            &[619, u64::MAX, u64::MAX],
+        )
+        .unwrap();
         assert_eq!(got, vec![section(2848, 1600)]);
         // No defined managers -> no sections.
         assert!(
-            read_persisted_sections(&buf, &[u64::MAX], BaseAddress::ZERO, 8)
+            read_persisted_sections(&buf, widths(8, 8), BaseAddress::ZERO, &[u64::MAX])
                 .unwrap()
                 .is_empty()
         );
@@ -308,7 +321,7 @@ mod tests {
     #[test]
     fn an_undefined_manager_slot_is_skipped_in_a_four_byte_offset_file() {
         assert!(
-            read_persisted_sections(&[], &[0xFFFF_FFFF], BaseAddress::ZERO, 4)
+            read_persisted_sections(&[], widths(4, 8), BaseAddress::ZERO, &[0xFFFF_FFFF])
                 .unwrap()
                 .is_empty(),
             "an all-0xFF manager address is the sentinel for an unused slot"
@@ -317,17 +330,17 @@ mod tests {
 
     #[test]
     fn a_manager_with_no_section_info_is_skipped_in_a_four_byte_offset_file() {
-        const OS: u8 = 4;
         let (fshd, _fsse) = hdf5_pure_format::__private::serialize_free_space_manager(
+            widths(4, 8),
             &[],
             StoredAddress::new(0),
             StoredAddress::new(0xFFFF_FFFF),
-            OffsetWidth::Four,
             SECTION_CLASS_SIMPLE,
-        );
+        )
+        .unwrap();
 
         assert!(
-            read_persisted_sections(&fshd, &[0], BaseAddress::ZERO, OS)
+            read_persisted_sections(&fshd, widths(4, 8), BaseAddress::ZERO, &[0])
                 .unwrap()
                 .is_empty(),
             "a manager tracking nothing records no section info"
@@ -335,9 +348,9 @@ mod tests {
 
         let (sections, blocks) = read_persisted_sections_source(
             &crate::source::BytesSource::new(&fshd),
-            &[0],
+            widths(4, 8),
             BaseAddress::ZERO,
-            OS,
+            &[0],
         )
         .unwrap();
         assert!(sections.is_empty());
@@ -345,7 +358,7 @@ mod tests {
             blocks,
             vec![(
                 0,
-                hdf5_pure_format::__private::free_space_manager_header_len(OffsetWidth::Four)
+                hdf5_pure_format::__private::free_space_manager_header_len(widths(4, 8))
             )],
             "only the header block was read"
         );
@@ -359,13 +372,14 @@ mod tests {
             section(20000, 70000),
         ];
         let (fshd, _fsse) = hdf5_pure_format::__private::serialize_free_space_manager(
+            widths(8, 8),
             &sections,
             StoredAddress::new(1000),
             StoredAddress::new(1100),
-            OffsetWidth::Eight,
             SECTION_CLASS_SIMPLE,
-        );
-        let header = FreeSpaceManagerHeader::parse(&fshd, 8).unwrap();
+        )
+        .unwrap();
+        let header = FreeSpaceManagerHeader::parse(widths(8, 8), &fshd).unwrap();
         assert_eq!(header.total_sections, 3);
         assert_eq!(header.total_space, 512 + 512 + 70000);
         assert_eq!(header.fsse_addr, StoredAddress::new(1100));
@@ -373,16 +387,18 @@ mod tests {
         // Place both blocks in a buffer and read them back through the manager
         // indirection; the recovered sections match (order-independent).
         let (fshd, fsse) = hdf5_pure_format::__private::serialize_free_space_manager(
+            widths(8, 8),
             &sections,
             StoredAddress::new(1000),
             StoredAddress::new(1100),
-            OffsetWidth::Eight,
             SECTION_CLASS_SIMPLE,
-        );
+        )
+        .unwrap();
         let mut buf = vec![0u8; 1100 + fsse.len()];
         buf[1000..1000 + fshd.len()].copy_from_slice(&fshd);
         buf[1100..1100 + fsse.len()].copy_from_slice(&fsse);
-        let mut got = read_persisted_sections(&buf, &[1000], BaseAddress::ZERO, 8).unwrap();
+        let mut got =
+            read_persisted_sections(&buf, widths(8, 8), BaseAddress::ZERO, &[1000]).unwrap();
         got.sort_by_key(|s| s.addr);
         let mut want = sections.to_vec();
         want.sort_by_key(|s| s.addr);
@@ -400,18 +416,20 @@ mod tests {
             SECTION_CLASS_LARGE,
         ] {
             let (fshd, fsse) = hdf5_pure_format::__private::serialize_free_space_manager(
+                widths(8, 8),
                 &sections,
                 StoredAddress::new(1000),
                 StoredAddress::new(1100),
-                OffsetWidth::Eight,
                 class,
-            );
+            )
+            .unwrap();
             // The last section record's class byte precedes the 4-byte checksum.
             assert_eq!(fsse[fsse.len() - 5], class, "class byte written");
             let mut buf = vec![0u8; 1100 + fsse.len()];
             buf[1000..1000 + fshd.len()].copy_from_slice(&fshd);
             buf[1100..1100 + fsse.len()].copy_from_slice(&fsse);
-            let got = read_persisted_sections(&buf, &[1000], BaseAddress::ZERO, 8).unwrap();
+            let got =
+                read_persisted_sections(&buf, widths(8, 8), BaseAddress::ZERO, &[1000]).unwrap();
             assert_eq!(got, sections, "class {class} round-trips");
         }
     }
