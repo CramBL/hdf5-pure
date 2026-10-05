@@ -549,12 +549,16 @@ fn the_sections_libhdf5_persists_in_an_oversized_section_list_are_read() {
                 FreeSpaceManagerHeader::parse(widths, &bytes[usize::try_from(addr).unwrap()..])
                     .unwrap();
             let fsse_at = usize::try_from(header.section_list_addr().get()).unwrap();
-            let sizes: Vec<u64> =
-                hdf5_pure_format::__private::parse_section_info(widths, &bytes[fsse_at..], &header)
-                    .unwrap()
-                    .iter()
-                    .map(|section| section.size)
-                    .collect();
+            let sizes: Vec<u64> = hdf5_pure_format::__private::parse_section_info(
+                widths,
+                &bytes[fsse_at..],
+                StoredAddress::new(addr),
+                &header,
+            )
+            .unwrap()
+            .iter()
+            .map(|section| section.size)
+            .collect();
             (
                 header.section_list_used(),
                 hdf5_pure_format::__private::section_info_len(widths, &sizes),
@@ -607,6 +611,7 @@ fn libhdf5_loads_the_managers_the_serializer_writes_at_the_widths_of_its_file(
         let manager_sections = hdf5_pure_format::__private::parse_section_info(
             widths,
             &bytes[fsse_at..fsse_at + fsse_used],
+            StoredAddress::new(addr),
             &header,
         )
         .unwrap();
