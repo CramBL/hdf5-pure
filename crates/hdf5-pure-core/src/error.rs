@@ -84,8 +84,11 @@ pub enum FormatError {
         /// Bytes the userblock region holds.
         userblock: u64,
     },
-    /// A free-space manager block (`FSHD`/`FSSE`) is malformed.
-    InvalidFreeSpaceManager,
+    /// A free-space manager block (`FSHD` or `FSSE`) is malformed or past the end of the file, or a
+    /// free section is too large for a manager at the file's length width.
+    ///
+    /// The string describes the condition.
+    InvalidFreeSpaceManager(String),
     /// An enumeration datatype was built over a base type that is not an
     /// integer. HDF5 enumerations must have a fixed-point base.
     EnumBaseNotInteger,
@@ -659,8 +662,8 @@ impl fmt::Display for FormatError {
                      bytes"
                 )
             }
-            Self::InvalidFreeSpaceManager => {
-                write!(f, "malformed free-space manager block (FSHD/FSSE)")
+            Self::InvalidFreeSpaceManager(reason) => {
+                write!(f, "invalid free-space manager: {reason}")
             }
             Self::EnumBaseNotInteger => {
                 write!(

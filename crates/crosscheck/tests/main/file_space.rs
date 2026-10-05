@@ -11,7 +11,10 @@ use hdf5::plist::file_create::SizeofInfo;
 use hdf5_pure::{
     AttrValue, File, FileAccessProperties, FileBuilder, FileSpaceStrategy, Layout, MaxExtent,
 };
+use hdf5_pure_core::__private::StoredAddress;
 use hdf5_pure_format::__private::FormatWidths;
+use hdf5_pure_format::__private::FreeSpaceManagerHeader;
+use hdf5_pure_format::__private::SECTION_CLASS_SIMPLE;
 use rstest::rstest;
 
 use tempfile::tempdir;
@@ -398,6 +401,320 @@ fn the_serializer_writes_the_message_libhdf5_writes_at_the_widths_of_its_file(
             .any(|window| window == encoded),
         "libhdf5 writes the message the serializer produces, {encoded:02x?}"
     );
+}
+
+// TODO: Report to HDF Group
+// Below 8-byte lengths, libhdf5 writes the maximum address of its file driver into the "Maximum
+// Section Size" of a free-space manager header truncated to the length width
+// (`H5FS__cache_hdr_serialize` in `H5FScache.c`), and writes each section size in the bytes the
+// whole address takes (`H5FS__sinfo_new` in `H5FSsection.c`), HDF5 1.10.11 to 2.2.0. A section
+// offset takes as many bytes, since libhdf5 sets the "Size of Address Space" to the number of bits
+// of the whole address (`H5MF__create_fstype` in `H5MF.c`): 8 under the sec2 driver, and under the
+// core driver, whose maximum address is `SIZE_MAX - 1`, the width of a `size_t` on the host.
+// "Free-space Index" of the format specification, version 4.0, defines a section size field as the
+// fewest bytes that hold the stored maximum. The truncated address is all ones under the sec2
+// driver and all ones less one under the core driver. On reopen libhdf5 sizes the section size
+// fields from the truncated value, and misreads its own section list where the truncated value
+// takes fewer bytes than the whole address. When it reopens such a file read-write, 1.10.11 calls a
+// null function pointer and 1.14.6 ends the process with SIGSEGV. At 2-byte offsets 1.14.6 loads
+// the misread list without an error.
+#[rstest]
+#[case::default_driver(Driver::Sec2, 0, 63)]
+#[case::core_driver(Driver::Core, 1, usize::BITS)]
+fn libhdf5_truncates_the_maximum_section_size_and_writes_section_sizes_as_wide_as_its_address_space(
+    #[case] driver: Driver,
+    #[case] below_all_ones: u64,
+    #[case] addr_space_bits: u32,
+    #[values(Sizeof::Bytes2, Sizeof::Bytes4, Sizeof::Bytes8)] sizeof_addr: Sizeof,
+    #[values(Sizeof::Bytes2, Sizeof::Bytes4)] sizeof_size: Sizeof,
+) {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("c_truncated_maximum.h5");
+    let freed = write_c_persisted_with_a_hole(&path, driver, sizeof_addr, sizeof_size);
+    let file = File::open(&path).unwrap();
+    let (offset_size, length_size) = (file.superblock().offset_size, file.superblock().length_size);
+    let manager_addrs = file.file_space_info().unwrap().manager_addrs.clone();
+    drop(file);
+    let widths = FormatWidths::from_sizes(offset_size, length_size).unwrap();
+    let bytes = std::fs::read(&path).unwrap();
+    let headers: Vec<FreeSpaceManagerHeader> = manager_addrs
+        .into_iter()
+        .filter(|&addr| !hdf5_pure_format::__private::is_undefined_addr(addr, offset_size))
+        .map(|addr| {
+            FreeSpaceManagerHeader::parse(widths, &bytes[usize::try_from(addr).unwrap()..]).unwrap()
+        })
+        .collect();
+
+    let truncated = u64::MAX >> (64 - 8 * u32::from(length_size));
+    for header in &headers {
+        assert_eq!(
+            (header.max_section_size, u32::from(header.addr_space_bits)),
+            (truncated - below_all_ones, addr_space_bits)
+        );
+    }
+    let width = usize::try_from(addr_space_bits.div_ceil(8)).unwrap();
+    let header = headers
+        .iter()
+        .find(|header| (header.total_space, header.total_sections) == (1600, 1))
+        .expect("libhdf5 records the deleted dataset's storage in a manager of its own");
+    let fsse_at = usize::try_from(header.fsse_addr.get()).unwrap();
+    let fsse = &bytes[fsse_at..fsse_at + usize::try_from(header.fsse_used).unwrap()];
+    assert_eq!(
+        fsse[4 + 1 + usize::from(offset_size)..fsse.len() - 4],
+        [
+            &[1][..],
+            &1600u64.to_le_bytes()[..width],
+            &freed.to_le_bytes()[..width],
+            &[SECTION_CLASS_SIMPLE],
+        ]
+        .concat()
+    );
+}
+
+#[rstest]
+fn the_free_sections_libhdf5_persists_are_read_at_the_widths_of_its_file(
+    #[values(Driver::Sec2, Driver::Core)] driver: Driver,
+    #[values(Sizeof::Bytes2, Sizeof::Bytes4, Sizeof::Bytes8)] sizeof_addr: Sizeof,
+    #[values(Sizeof::Bytes2, Sizeof::Bytes4, Sizeof::Bytes8)] sizeof_size: Sizeof,
+) {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("c_persisted_sections.h5");
+    let freed = write_c_persisted_with_a_hole(&path, driver, sizeof_addr, sizeof_size);
+    let free_c = hdf5::File::open(&path).unwrap().free_space();
+
+    let free = File::open(&path).unwrap().persisted_free_space();
+
+    assert!(
+        free.contains(&(freed, 1600)),
+        "the deleted dataset's storage at {freed} is a free section, {free:?}"
+    );
+    assert_eq!(free.iter().map(|&(_, len)| len).sum::<u64>(), free_c);
+}
+
+// libhdf5 writes one 197-byte section list with 9 zero bytes before its checksum.
+#[cfg(feature = "__hdf5-1.12")]
+#[test]
+fn the_sections_libhdf5_persists_in_an_oversized_section_list_are_read() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("c_oversized_section_list.h5");
+    {
+        let file = hdf5::FileBuilder::new()
+            .with_fapl(|fapl| fapl.libver_v110())
+            .with_fcpl(|fcpl| {
+                fcpl.file_space_strategy(CStrategy::FreeSpaceManager {
+                    paged: false,
+                    persist: true,
+                    threshold: 1,
+                })
+            })
+            .create(&path)
+            .unwrap();
+        for i in 0..16 {
+            let group = file.create_group(&format!("g{i}")).unwrap();
+            for j in 0..i % 7 {
+                let len = 1 + (i + j) % 5;
+                group
+                    .new_attr::<i32>()
+                    .shape(len)
+                    .create(format!("attr{j}").as_str())
+                    .unwrap()
+                    .write(&vec![0; len])
+                    .unwrap();
+            }
+        }
+        for i in (0..16).step_by(2) {
+            file.unlink(&format!("g{i}")).unwrap();
+        }
+        file.close().unwrap();
+    }
+    let free_c = hdf5::File::open(&path).unwrap().free_space();
+
+    let file = File::open(&path).unwrap();
+    let superblock = file.superblock();
+    let widths = FormatWidths::from_sizes(superblock.offset_size, superblock.length_size).unwrap();
+    let bytes = std::fs::read(&path).unwrap();
+    let padded: Vec<(u64, u64)> = file
+        .file_space_info()
+        .unwrap()
+        .manager_addrs
+        .iter()
+        .filter(|&&addr| {
+            !hdf5_pure_format::__private::is_undefined_addr(addr, superblock.offset_size)
+        })
+        .map(|&addr| {
+            let header =
+                FreeSpaceManagerHeader::parse(widths, &bytes[usize::try_from(addr).unwrap()..])
+                    .unwrap();
+            let fsse_at = usize::try_from(header.fsse_addr.get()).unwrap();
+            let sizes: Vec<u64> =
+                hdf5_pure_format::__private::parse_section_info(widths, &bytes[fsse_at..], &header)
+                    .unwrap()
+                    .iter()
+                    .map(|section| section.size)
+                    .collect();
+            (
+                header.fsse_used,
+                hdf5_pure_format::__private::section_info_len(widths, &sizes),
+            )
+        })
+        .filter(|&(used, len)| used > len)
+        .collect();
+
+    assert_eq!(padded, vec![(197, 188)]);
+    assert_eq!(
+        file.persisted_free_space()
+            .iter()
+            .map(|&(_, len)| len)
+            .sum::<u64>(),
+        free_c
+    );
+}
+
+// The serializer rewrites each manager libhdf5 wrote in place, and libhdf5 then edits the file.
+#[rstest]
+fn libhdf5_loads_the_managers_the_serializer_writes_at_the_widths_of_its_file(
+    #[values(Sizeof::Bytes2, Sizeof::Bytes4, Sizeof::Bytes8)] sizeof_addr: Sizeof,
+    #[values(Sizeof::Bytes2, Sizeof::Bytes4, Sizeof::Bytes8)] sizeof_size: Sizeof,
+) {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("ours_persisted_sections.h5");
+    let freed = write_c_persisted_with_a_hole(&path, Driver::Sec2, sizeof_addr, sizeof_size);
+    let file = File::open(&path).unwrap();
+    let superblock = file.superblock();
+    let widths = FormatWidths::from_sizes(superblock.offset_size, superblock.length_size).unwrap();
+    let managers: Vec<u64> = file
+        .file_space_info()
+        .unwrap()
+        .manager_addrs
+        .iter()
+        .copied()
+        .filter(|&addr| {
+            !hdf5_pure_format::__private::is_undefined_addr(addr, superblock.offset_size)
+        })
+        .collect();
+    drop(file);
+
+    let mut bytes = std::fs::read(&path).unwrap();
+    let mut sections = Vec::new();
+    for addr in managers {
+        let fshd_at = usize::try_from(addr).unwrap();
+        let header = FreeSpaceManagerHeader::parse(widths, &bytes[fshd_at..]).unwrap();
+        let fsse_at = usize::try_from(header.fsse_addr.get()).unwrap();
+        let fsse_used = usize::try_from(header.fsse_used).unwrap();
+        let manager_sections = hdf5_pure_format::__private::parse_section_info(
+            widths,
+            &bytes[fsse_at..fsse_at + fsse_used],
+            &header,
+        )
+        .unwrap();
+        let (fshd, fsse) = hdf5_pure_format::__private::serialize_free_space_manager(
+            widths,
+            &manager_sections,
+            StoredAddress::new(addr),
+            header.fsse_addr,
+            SECTION_CLASS_SIMPLE,
+        )
+        .unwrap();
+        assert!(fsse.len() <= fsse_used, "{} > {fsse_used}", fsse.len());
+        bytes[fshd_at..fshd_at + fshd.len()].copy_from_slice(&fshd);
+        bytes[fsse_at..fsse_at + fsse.len()].copy_from_slice(&fsse);
+        sections.extend(manager_sections);
+    }
+    std::fs::write(&path, &bytes).unwrap();
+    assert!(
+        sections
+            .iter()
+            .any(|section| (section.addr.get(), section.size) == (freed, 1600)),
+        "the deleted dataset's storage at {freed} is a free section, {sections:?}"
+    );
+
+    let file = hdf5::File::open(&path).unwrap();
+    assert_eq!(
+        file.free_space(),
+        sections.iter().map(|section| section.size).sum::<u64>()
+    );
+    drop(file);
+    {
+        let file = hdf5::File::open_rw(&path).unwrap();
+        file.new_dataset::<i32>()
+            .shape((30,))
+            .create("added")
+            .unwrap()
+            .write(&(0..30).collect::<Vec<i32>>())
+            .unwrap();
+        file.unlink("big").unwrap();
+        file.close().unwrap();
+    }
+    let file = hdf5::File::open(&path).unwrap();
+    for (name, value) in [("a", 1), ("c", 3)] {
+        assert_eq!(
+            file.dataset(name).unwrap().read_raw::<i32>().unwrap(),
+            vec![value; 400]
+        );
+    }
+    assert_eq!(
+        file.dataset("added").unwrap().read_raw::<i32>().unwrap(),
+        (0..30).collect::<Vec<i32>>()
+    );
+    let free_c = file.free_space();
+    drop(file);
+    let free = File::open(&path).unwrap().persisted_free_space();
+    assert_eq!(free.iter().map(|&(_, len)| len).sum::<u64>(), free_c);
+}
+
+/// The file driver libhdf5 writes a file through.
+#[derive(Clone, Copy, Debug)]
+enum Driver {
+    /// The core driver, with the file as its backing store.
+    Core,
+    /// The default driver.
+    Sec2,
+}
+
+/// Creates a file at `path` with libhdf5, through `driver` and at the widths `sizeof_addr` and
+/// `sizeof_size`, that persists its free-space managers, and returns the address of the 1600 bytes
+/// the deleted dataset `b` held.
+fn write_c_persisted_with_a_hole(
+    path: &std::path::Path,
+    driver: Driver,
+    sizeof_addr: Sizeof,
+    sizeof_size: Sizeof,
+) -> u64 {
+    let file = hdf5::FileBuilder::new()
+        .with_fapl(|fapl| match driver {
+            Driver::Core => fapl.libver_v110().core_filebacked(true),
+            Driver::Sec2 => fapl.libver_v110(),
+        })
+        .with_fcpl(|fcpl| {
+            fcpl.sizes(SizeofInfo {
+                sizeof_addr,
+                sizeof_size,
+            })
+            .file_space_strategy(CStrategy::FreeSpaceManager {
+                paged: false,
+                persist: true,
+                threshold: 1,
+            })
+        })
+        .create(path)
+        .unwrap();
+    for (name, value, len) in [
+        ("a", 1, 400),
+        ("b", 2, 400),
+        ("c", 3, 400),
+        ("big", 4, 5000),
+    ] {
+        file.new_dataset::<i32>()
+            .shape((len,))
+            .create(name)
+            .unwrap()
+            .write(&vec![value; len])
+            .unwrap();
+    }
+    let freed = file.dataset("b").unwrap().offset().unwrap();
+    file.unlink("b").unwrap();
+    file.close().unwrap();
+    freed
 }
 
 #[test]

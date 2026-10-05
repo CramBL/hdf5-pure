@@ -200,6 +200,9 @@ def migration_shapes(baseline: dict, candidate: dict, core: dict) -> list[str]:
             "LengthTooLarge",
         }
     }
+    # The FormatError variants whose fields differ from 0.47.0's, which the comparison removes from
+    # both shapes.
+    allowed_changed_variants = {"FormatError": {"InvalidFreeSpaceManager"}}
     for path, kind in sorted(moved):
         name = path.rsplit("::", 1)[-1]
         if name not in baseline_items:
@@ -221,6 +224,9 @@ def migration_shapes(baseline: dict, candidate: dict, core: dict) -> list[str]:
             new["variants"].pop(variant, None)
             if variant in new["variant_order"]:
                 new["variant_order"].remove(variant)
+        for variant in allowed_changed_variants.get(name, set()):
+            old["variants"].pop(variant, None)
+            new["variants"].pop(variant, None)
         for part in old:
             if old[part] != new[part]:
                 failures.append(f"{name}: {part} changed")

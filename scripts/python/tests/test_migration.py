@@ -208,6 +208,37 @@ def test_migration_shape_detects_changed_enum_variant_and_field():
     assert migration_shapes(baseline, baseline, core) == ["Thing: variants changed"]
 
 
+@pytest.mark.parametrize(
+    ("variant", "expected"),
+    [
+        ("InvalidFreeSpaceManager", []),
+        ("InvalidLengthSize", ["FormatError: variants changed"]),
+    ],
+)
+def test_migration_shape_ignores_only_the_allowed_variant_changes(variant, expected):
+    baseline = core_shape_fixture()
+    baseline["index"]["1"]["name"] = "FormatError"
+    baseline["index"]["1"]["inner"] = {
+        "enum": {
+            "generics": {"params": [], "where_predicates": []},
+            "variants": [6],
+            "impls": [],
+        }
+    }
+    baseline["index"]["6"] = {
+        "name": variant,
+        "inner": {"variant": {"kind": "unit", "discriminant": None}},
+    }
+    core = deepcopy(baseline)
+    core["index"]["6"]["inner"]["variant"]["kind"] = {"tuple": [7]}
+    core["index"]["7"] = {
+        "name": None,
+        "visibility": "default",
+        "inner": {"struct_field": {"primitive": "u32"}},
+    }
+    assert migration_shapes(baseline, baseline, core) == expected
+
+
 def test_migration_shape_detects_variant_order_change():
     baseline = core_shape_fixture()
     baseline["index"]["1"]["inner"] = {

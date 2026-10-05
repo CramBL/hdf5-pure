@@ -131,6 +131,11 @@ impl LengthWidth {
         }
     }
 
+    /// Returns the largest length a field of this width can store.
+    pub(crate) const fn max(self) -> u64 {
+        u64::MAX >> (64 - 8 * self.get())
+    }
+
     /// Returns `true` if a length field of this width can store `length`.
     pub(crate) fn holds(self, length: u64) -> bool {
         length
