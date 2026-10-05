@@ -3226,18 +3226,18 @@ impl WriteEngine {
             if let Ok(h) = FreeSpaceManagerHeader::parse(widths, &fshd) {
                 // The read returned the header's bytes, so the header's extent is in the file.
                 // The section list's extent is checked before it is recorded, so a malformed
-                // `fsse_used` cannot free a region past the end of the file.
+                // `section_list_used` cannot free a region past the end of the file.
                 old_blocks.push((
                     m,
                     hdf5_pure_format::__private::free_space_manager_header_len(widths),
                 ));
-                if !h.fsse_addr.is_undefined(os)
-                    && h.fsse_addr
+                if !h.section_list_addr().is_undefined(os)
+                    && h.section_list_addr()
                         .get()
-                        .checked_add(h.fsse_used)
+                        .checked_add(h.section_list_used())
                         .is_some_and(|end| end <= file_len)
                 {
-                    old_blocks.push((h.fsse_addr.get(), h.fsse_used));
+                    old_blocks.push((h.section_list_addr().get(), h.section_list_used()));
                 }
             }
         }
