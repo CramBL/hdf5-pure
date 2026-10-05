@@ -1944,13 +1944,17 @@ impl FileInner {
         let Backend::InMemory(data) = &self.backend else {
             return Vec::new();
         };
-        let mut sections = free_space_manager::read_persisted_sections(
-            data,
-            &info.manager_addrs,
-            self.addr_offset,
-            self.superblock.offset_size,
-        )
-        .unwrap_or_default();
+        let mut sections =
+            FormatWidths::from_sizes(self.superblock.offset_size, self.superblock.length_size)
+                .and_then(|widths| {
+                    free_space_manager::read_persisted_sections(
+                        data,
+                        widths,
+                        self.addr_offset,
+                        &info.manager_addrs,
+                    )
+                })
+                .unwrap_or_default();
         // Distinct sections have distinct addresses in any well-formed file, so
         // the tie-break never arises; only a malformed manager can advertise one
         // address twice, and which of the pair is reported first is already
