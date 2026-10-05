@@ -54,13 +54,13 @@ pub struct FreeSpaceManagerHeader {
     total_sections: u64,
     /// The number of bits an address in the section list takes, the "Size of Address Space"
     /// field.
-    addr_space_bits: u16,
+    addr_space_bits: AddressSpaceBits,
     /// The largest section the manager tracks, the "Maximum Section Size" field.
     max_section_size: u64,
     /// The address of the section list.
-    fsse_addr: StoredAddress,
+    section_list_addr: StoredAddress,
     /// The length of the section list in bytes, the "Size of Serialized Section List Used" field.
-    fsse_used: u64,
+    section_list_used: u64,
 }
 
 /// Returns the fewest bytes that hold `value`, and at least 1, as `H5VM_limit_enc_size` computes
@@ -68,11 +68,6 @@ pub struct FreeSpaceManagerHeader {
 fn enc_size(value: u64) -> usize {
     let bits = 64 - value.leading_zeros() as usize;
     bits.div_ceil(8).max(1)
-}
-
-/// Returns the width in bytes of a section offset in an address space of `addr_space_bits` bits.
-fn offset_width(addr_space_bits: u16) -> usize {
-    (addr_space_bits as usize).div_ceil(8)
 }
 
 /// Reads `bytes` as a little-endian unsigned integer.
@@ -87,50 +82,115 @@ fn read_uint_le(bytes: &[u8]) -> u64 {
 impl FreeSpaceManagerHeader {
     /// Parses the free-space manager header at the start of `data`.
     ///
-    /// Reads each length field at the length width of `widths`, and checks neither the version,
-    /// the client ID, nor the checksum.
+    /// Reads each length field at the length width of `widths` and the section list address at the
+    /// offset width, and accepts version 0 of the header of a file client, client ID 1, alone. For
+    /// a header of one or more sections, checks that the section list address is defined and that
+    /// the used length holds that many sections and is at most the allocated length, so a reader
+    /// may reserve room for [`total_sections`](Self::total_sections) sections before it reads the
+    /// section list.
     ///
     /// # Errors
     ///
-    /// Returns [`FormatError::UnexpectedEof`] if `data` is shorter than the header, and
-    /// [`FormatError::InvalidFreeSpaceManager`] if the signature is not `FSHD`.
+    /// Returns [`FormatError::UnexpectedEof`] if `data` is shorter than the header,
+    /// [`FormatError::ChecksumMismatch`] if the checksum does not match and the `checksum` feature
+    /// is enabled, and [`FormatError::InvalidFreeSpaceManager`] if the signature is not `FSHD`, the
+    /// version is not 0, the client ID is not 1, the serialized section count differs from the
+    /// section count, the "Number of Un-Serialized Sections" field is not 0, the header counts more
+    /// section classes than the 3 the C library registers for the file client (`H5MF.c`, HDF5
+    /// 2.2.0), the address space is 0 bits or wider than 64 bits, or a header of one or more
+    /// sections stores the undefined address for its section list, a used length past the
+    /// allocated length, or a used length too short for its sections.
     pub fn parse(widths: FormatWidths, data: &[u8]) -> Result<FreeSpaceManagerHeader, FormatError> {
         let FormatWidths { offsets, lengths } = widths;
-        let ls = usize::from(lengths.get());
-        bytes::ensure_len(data, 0, header_len(widths))?;
-        if &data[0..4] != FSHD_SIGNATURE {
+        let block = data
+            .get(..header_len(widths))
+            .ok_or(FormatError::UnexpectedEof {
+                expected: header_len(widths),
+                available: data.len(),
+            })?;
+        let mut fields = bytes::Fields::new(block, 0);
+        let signature = fields.array::<{ FSHD_SIGNATURE.len() }>()?;
+        if &signature != FSHD_SIGNATURE {
             return Err(FormatError::InvalidFreeSpaceManager(format!(
                 "the header signature is b\"{}\", not b\"{}\"",
-                data[0..4].escape_ascii(),
+                signature.escape_ascii(),
                 FSHD_SIGNATURE.escape_ascii()
             )));
         }
-        // sig(4) + version(1) + client(1)
-        let mut pos = 6;
-        let total_space = bytes::read_length_width(data, pos, lengths)?;
-        pos += ls;
-        let total_sections = bytes::read_length_width(data, pos, lengths)?;
-        pos += ls;
-        // skip serialized + ghost section counts
-        pos += 2 * ls;
-        // skip section-class count + shrink% + expand%
-        pos += 6;
-        // `ensure_len` checked the length of the whole header, so both bytes are in `data`.
-        let addr_space_bits = u16::from_le_bytes([data[pos], data[pos + 1]]);
-        pos += 2;
-        let max_section_size = bytes::read_length_width(data, pos, lengths)?;
-        pos += ls;
-        let fsse_addr = StoredAddress::new(bytes::read_offset_width(data, pos, offsets)?);
-        pos += usize::from(offsets.get());
-        let fsse_used = bytes::read_length_width(data, pos, lengths)?;
-        Ok(FreeSpaceManagerHeader {
+        checksum::verify_trailing(block)?;
+        let version = fields.u8()?;
+        if version != FSHD_VERSION {
+            return Err(FormatError::InvalidFreeSpaceManager(format!(
+                "the header version is {version}, not {FSHD_VERSION}"
+            )));
+        }
+        let client_id = fields.u8()?;
+        if client_id != FILE_FSM_CLIENT_ID {
+            return Err(FormatError::InvalidFreeSpaceManager(format!(
+                "the client ID is {client_id}, not {FILE_FSM_CLIENT_ID}, the ID of the file client"
+            )));
+        }
+        let total_space = fields.length(lengths)?;
+        let total_sections = fields.length(lengths)?;
+        let serialized_sections = fields.length(lengths)?;
+        let unserialized_sections = fields.length(lengths)?;
+        if (serialized_sections, unserialized_sections) != (total_sections, 0) {
+            return Err(FormatError::InvalidFreeSpaceManager(format!(
+                "the header's section count is {total_sections}, its serialized section count \
+                 {serialized_sections} and its unserialized section count {unserialized_sections}, \
+                 and the file client serializes every section"
+            )));
+        }
+        let section_classes = fields.u16()?;
+        if section_classes > FILE_FSM_NUM_CLASSES {
+            return Err(FormatError::InvalidFreeSpaceManager(format!(
+                "the header registers {section_classes} section classes, more than the \
+                 {FILE_FSM_NUM_CLASSES} of the file client"
+            )));
+        }
+        let (_shrink_percent, _expand_percent) = (fields.u16()?, fields.u16()?);
+        let bits = fields.u16()?;
+        let addr_space_bits = AddressSpaceBits::new(bits).ok_or_else(|| {
+            FormatError::InvalidFreeSpaceManager(format!(
+                "an address space of {bits} bits is not 1 to 64 bits wide"
+            ))
+        })?;
+        let max_section_size = fields.length(lengths)?;
+        let section_list_addr = fields.address(offsets)?;
+        let section_list_used = fields.length(lengths)?;
+        let section_list_allocated = fields.length(lengths)?;
+        let header = FreeSpaceManagerHeader {
             total_space,
             total_sections,
             addr_space_bits,
             max_section_size,
-            fsse_addr,
-            fsse_used,
-        })
+            section_list_addr,
+            section_list_used,
+        };
+        if total_sections == 0 {
+            return Ok(header);
+        }
+        if section_list_addr.is_undefined(offsets.get()) {
+            return Err(FormatError::InvalidFreeSpaceManager(format!(
+                "the header's section count is {total_sections}, and it stores no section list"
+            )));
+        }
+        if section_list_used > section_list_allocated {
+            return Err(FormatError::InvalidFreeSpaceManager(format!(
+                "the section list uses {section_list_used} bytes, more than the {section_list_allocated} bytes \
+                 allocated to it"
+            )));
+        }
+        let max_sections = header
+            .section_fields(lengths)
+            .max_sections(offsets, section_list_used);
+        if total_sections > max_sections {
+            return Err(FormatError::InvalidFreeSpaceManager(format!(
+                "the header's section count is {total_sections}, and a section list of {section_list_used} \
+                 bytes holds at most {max_sections}"
+            )));
+        }
+        Ok(header)
     }
 
     /// Returns the number of free bytes the manager tracks, the "Total Space Tracked" field.
@@ -146,7 +206,7 @@ impl FreeSpaceManagerHeader {
     /// Returns the number of bits an address in the section list takes, the "Size of Address
     /// Space" field.
     pub fn addr_space_bits(&self) -> u16 {
-        self.addr_space_bits
+        self.addr_space_bits.get()
     }
 
     /// Returns the largest section size the manager tracks, the "Maximum Section Size" field.
@@ -156,35 +216,24 @@ impl FreeSpaceManagerHeader {
 
     /// Returns the address of the section list, the "Address of Serialized Section List" field.
     pub fn section_list_addr(&self) -> StoredAddress {
-        self.fsse_addr
+        self.section_list_addr
     }
 
     /// Returns the length of the section list in bytes, the "Size of Serialized Section List
     /// Used" field.
     pub fn section_list_used(&self) -> u64 {
-        self.fsse_used
+        self.section_list_used
     }
 
     /// Returns the widths of the fields of the section list this header describes, in a file with
     /// lengths of `lengths`.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`FormatError::InvalidFreeSpaceManager`] if the address space is 0 bits or wider
-    /// than 64 bits.
-    fn section_fields(&self, lengths: LengthWidth) -> Result<SectionFields, FormatError> {
-        let offset = offset_width(self.addr_space_bits);
-        if !(1..=8).contains(&offset) {
-            return Err(FormatError::InvalidFreeSpaceManager(format!(
-                "an address space of {} bits is not 1 to 64 bits wide",
-                self.addr_space_bits
-            )));
-        }
-        Ok(SectionFields {
+    fn section_fields(&self, lengths: LengthWidth) -> SectionFields {
+        let offset = self.addr_space_bits.offset_width();
+        SectionFields {
             count: enc_size(self.total_sections),
             size: self.section_size_width(lengths, offset),
             offset,
-        })
+        }
     }
 
     /// Returns the width in bytes of a section size in the section list this header describes, in
@@ -219,13 +268,13 @@ impl FreeSpaceManagerHeader {
             total_sections,
             addr_space_bits,
             max_section_size,
-            fsse_addr,
-            fsse_used,
+            section_list_addr,
+            section_list_used,
         } = *self;
         let FormatWidths { offsets, lengths } = widths;
         let mut fshd = Vec::with_capacity(header_len(widths));
         fshd.extend_from_slice(FSHD_SIGNATURE);
-        fshd.push(0); // version
+        fshd.push(FSHD_VERSION);
         fshd.push(FILE_FSM_CLIENT_ID);
         bytes::try_write_length(&mut fshd, total_space, lengths)?;
         bytes::try_write_length(&mut fshd, total_sections, lengths)?;
@@ -234,11 +283,11 @@ impl FreeSpaceManagerHeader {
         fshd.extend_from_slice(&FILE_FSM_NUM_CLASSES.to_le_bytes());
         fshd.extend_from_slice(&FILE_FSM_SHRINK_PCT.to_le_bytes());
         fshd.extend_from_slice(&FILE_FSM_EXPAND_PCT.to_le_bytes());
-        fshd.extend_from_slice(&addr_space_bits.to_le_bytes());
+        fshd.extend_from_slice(&addr_space_bits.get().to_le_bytes());
         bytes::try_write_length(&mut fshd, max_section_size, lengths)?;
-        bytes::try_write_offset(&mut fshd, fsse_addr.get(), offsets)?;
-        bytes::try_write_length(&mut fshd, fsse_used, lengths)?; // section info used
-        bytes::try_write_length(&mut fshd, fsse_used, lengths)?; // section info allocated (== used)
+        bytes::try_write_offset(&mut fshd, section_list_addr.get(), offsets)?;
+        bytes::try_write_length(&mut fshd, section_list_used, lengths)?; // section info used
+        bytes::try_write_length(&mut fshd, section_list_used, lengths)?; // allocated (== used)
         let checksum = checksum::jenkins_lookup3(&fshd);
         fshd.extend_from_slice(&checksum.to_le_bytes());
         Ok(fshd)
@@ -339,10 +388,10 @@ pub fn serialize_free_space_manager(
                 ))
             })?,
         total_sections: sections.len().to_u64(),
-        addr_space_bits: address_space_bits(widths.offsets),
+        addr_space_bits: AddressSpaceBits::written(widths.offsets),
         max_section_size: max_section_size.get(),
-        fsse_addr,
-        fsse_used: fsse.len().to_u64(),
+        section_list_addr: fsse_addr,
+        section_list_used: fsse.len().to_u64(),
     };
     Ok((header.encode(widths)?, fsse))
 }
@@ -405,7 +454,7 @@ pub fn parse_section_info(
     data: &[u8],
     header: &FreeSpaceManagerHeader,
 ) -> Result<Vec<FreeSection>, FormatError> {
-    let used = header.fsse_used.to_usize()?;
+    let used = header.section_list_used.to_usize()?;
     let list = data.get(..used).ok_or(FormatError::UnexpectedEof {
         expected: used,
         available: data.len(),
@@ -426,7 +475,7 @@ pub fn parse_section_info(
     }
     checksum::verify_trailing(list)?;
     let body = &list[..list.len() - CHECKSUM_LEN];
-    let (sections, sets_end) = header.section_fields(widths.lengths)?.decode_sets(
+    let (sections, sets_end) = header.section_fields(widths.lengths).decode_sets(
         body,
         prefix_len,
         header.total_sections.to_usize()?,
@@ -461,8 +510,23 @@ impl SectionFields {
         Self {
             count: enc_size(sections.to_u64()),
             size: enc_size(written_max_section_size(widths.lengths).get()),
-            offset: offset_width(address_space_bits(widths.offsets)),
+            offset: AddressSpaceBits::written(widths.offsets).offset_width(),
         }
+    }
+
+    /// Returns the most sections a section list of `list_len` bytes holds at these widths, in a
+    /// file with addresses of `offsets`: the sections of one set between the prefix and the
+    /// checksum.
+    fn max_sections(self, offsets: OffsetWidth, list_len: u64) -> u64 {
+        let Self {
+            count,
+            size,
+            offset,
+        } = self;
+        let fixed = (section_list_prefix_len(offsets) + count + size + CHECKSUM_LEN).to_u64();
+        list_len
+            .checked_sub(fixed)
+            .map_or(0, |payload| payload / (offset + SECTION_CLASS_LEN).to_u64())
     }
 
     /// Reads the sets of the section list `body`, checksum excluded, from byte `start` until they
@@ -534,7 +598,7 @@ impl SectionFields {
         let Self { count, size, .. } = self;
         let mut fsse = Vec::new();
         fsse.extend_from_slice(FSSE_SIGNATURE);
-        fsse.push(0); // version
+        fsse.push(FSSE_VERSION);
         bytes::try_write_offset(&mut fsse, fshd_addr.get(), offsets)?;
         for (&section_size, addresses) in sets {
             push_uint_le(&mut fsse, addresses.len().to_u64(), count);
@@ -608,12 +672,40 @@ fn section_list_prefix_len(offsets: OffsetWidth) -> usize {
     FSSE_SIGNATURE.len() + 1 + usize::from(offsets.get())
 }
 
-/// Returns the "Size of Address Space" the serializer writes in a file with addresses of
-/// `offsets`, one bit less than the width of an address.
-fn address_space_bits(offsets: OffsetWidth) -> u16 {
-    u16::from(offsets.get()) * 8 - 1
+/// The "Size of Address Space" field of a free-space manager header: the number of bits of an
+/// address in the space the manager tracks, 1 to 64.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct AddressSpaceBits(u8);
+
+impl AddressSpaceBits {
+    /// Returns the address space of `bits` bits, or `None` if `bits` is 0 or more than 64.
+    fn new(bits: u16) -> Option<Self> {
+        u8::try_from(bits)
+            .ok()
+            .filter(|bits| (1..=64).contains(bits))
+            .map(Self)
+    }
+
+    /// Returns the "Size of Address Space" the serializer writes in a file with addresses of
+    /// `offsets`, one bit less than the width of an address.
+    fn written(offsets: OffsetWidth) -> Self {
+        Self(offsets.get() * 8 - 1)
+    }
+
+    fn get(self) -> u16 {
+        u16::from(self.0)
+    }
+
+    /// Returns the width in bytes of a section offset in this address space.
+    fn offset_width(self) -> usize {
+        usize::from(self.0).div_ceil(8)
+    }
 }
 
+/// The version of a free-space manager header, the one version the format specification describes.
+const FSHD_VERSION: u8 = 0;
+/// The version of a section list, the one version the format specification describes.
+const FSSE_VERSION: u8 = 0;
 const CHECKSUM_LEN: usize = 4;
 const SECTION_CLASS_LEN: usize = 1;
 
@@ -639,9 +731,9 @@ mod tests {
         let header = FreeSpaceManagerHeader::parse(widths(8, 8), &fshd).unwrap();
         assert_eq!(header.total_space, 1600);
         assert_eq!(header.total_sections, 1);
-        assert_eq!(header.addr_space_bits, 63);
-        assert_eq!(header.fsse_addr, StoredAddress::new(701));
-        assert_eq!(header.fsse_used, 35);
+        assert_eq!(header.addr_space_bits(), 63);
+        assert_eq!(header.section_list_addr, StoredAddress::new(701));
+        assert_eq!(header.section_list_used, 35);
 
         let fsse = free_space::single_section_info();
         let sections = parse_section_info(widths(8, 8), &fsse, &header).unwrap();
@@ -655,8 +747,8 @@ mod tests {
         let header = FreeSpaceManagerHeader::parse(widths(8, 8), &fshd).unwrap();
         assert_eq!(header.total_space, 909);
         assert_eq!(header.total_sections, 2);
-        assert_eq!(header.fsse_addr, StoredAddress::new(818));
-        assert_eq!(header.fsse_used, 53);
+        assert_eq!(header.section_list_addr, StoredAddress::new(818));
+        assert_eq!(header.section_list_used, 53);
 
         let fsse = free_space::two_section_info();
         let mut sections = parse_section_info(widths(8, 8), &fsse, &header).unwrap();
@@ -734,8 +826,8 @@ mod tests {
         #[case] widths: FormatWidths,
         #[case] header_bytes: Vec<u8>,
         #[case] section_list: Vec<u8>,
-        #[case] fsse_addr: u64,
-        #[case] fsse_used: u64,
+        #[case] section_list_addr: u64,
+        #[case] section_list_used: u64,
     ) {
         let header = FreeSpaceManagerHeader::parse(widths, &header_bytes).unwrap();
 
@@ -744,10 +836,10 @@ mod tests {
             FreeSpaceManagerHeader {
                 total_space: 1600,
                 total_sections: 1,
-                addr_space_bits: 63,
+                addr_space_bits: AddressSpaceBits(63),
                 max_section_size: widths.lengths.max(),
-                fsse_addr: StoredAddress::new(fsse_addr),
-                fsse_used,
+                section_list_addr: StoredAddress::new(section_list_addr),
+                section_list_used,
             }
         );
         assert_eq!(
@@ -804,7 +896,7 @@ mod tests {
                 section_info_len(widths, sizes)
             )
         );
-        assert_eq!(header.fsse_used, fsse.len() as u64);
+        assert_eq!(header.section_list_used, fsse.len() as u64);
         let mut parsed = parse_section_info(widths, &fsse, &header).unwrap();
         parsed.sort_by_key(|s| s.addr);
         assert_eq!(parsed, sections);
@@ -929,14 +1021,14 @@ mod tests {
     )]
     fn section_sizes_under_a_truncated_driver_address_are_as_wide_as_section_offsets(
         #[case] max_section_size: u64,
-        #[case] addr_space_bits: u16,
+        #[case] addr_space_bits: u8,
         #[case] list: Vec<u8>,
     ) {
         let widths = widths(4, 4);
         let header = FreeSpaceManagerHeader {
             max_section_size,
-            addr_space_bits,
-            fsse_used: list.len() as u64,
+            addr_space_bits: AddressSpaceBits(addr_space_bits),
+            section_list_used: list.len() as u64,
             ..FreeSpaceManagerHeader::parse(widths, &free_space::four_byte_widths_header()).unwrap()
         };
 
@@ -1033,7 +1125,7 @@ mod tests {
         let list = section_list(widths, 0x80, payload);
         let header = FreeSpaceManagerHeader {
             max_section_size: 0xFFFD,
-            addr_space_bits: 15,
+            addr_space_bits: AddressSpaceBits(15),
             ..header_of(&list, total_sections)
         };
 
@@ -1053,7 +1145,7 @@ mod tests {
         );
         let header = FreeSpaceManagerHeader {
             max_section_size: 0xFFFD,
-            addr_space_bits: 15,
+            addr_space_bits: AddressSpaceBits(15),
             ..header_of(&list, 1)
         };
 
@@ -1104,19 +1196,102 @@ mod tests {
         );
     }
 
-    #[test]
-    fn an_address_space_wider_than_eight_bytes_fails_to_parse() {
-        let header = FreeSpaceManagerHeader {
-            addr_space_bits: 65,
-            ..FreeSpaceManagerHeader::parse(widths(8, 8), &free_space::single_section_header())
-                .unwrap()
-        };
+    #[rstest]
+    #[case::version(vec![(4, vec![1])], "the header version is 1, not 0")]
+    #[case::fractal_heap_client(
+        vec![(5, vec![0])],
+        "the client ID is 0, not 1, the ID of the file client"
+    )]
+    #[case::unserialized_sections(
+        vec![(30, vec![1, 0, 0, 0, 0, 0, 0, 0])],
+        "the header's section count is 1, its serialized section count 1 and its unserialized \
+         section count 1, and the file client serializes every section"
+    )]
+    #[case::more_section_classes_than_the_file_client(
+        vec![(38, vec![4, 0])],
+        "the header registers 4 section classes, more than the 3 of the file client"
+    )]
+    #[case::empty_address_space(vec![(44, vec![0, 0])], "an address space of 0 bits is not 1 to 64 bits wide")]
+    #[case::address_space_wider_than_eight_bytes(
+        vec![(44, vec![72, 0])],
+        "an address space of 72 bits is not 1 to 64 bits wide"
+    )]
+    #[case::section_list_used_past_its_allocation(
+        vec![(70, vec![34, 0, 0, 0, 0, 0, 0, 0])],
+        "the section list uses 35 bytes, more than the 34 bytes allocated to it"
+    )]
+    #[case::no_section_list(
+        vec![(54, vec![0xFF; 8])],
+        "the header's section count is 1, and it stores no section list"
+    )]
+    #[case::more_sections_than_the_section_list_holds(
+        vec![(14, vec![2, 0, 0, 0, 0, 0, 0, 0]), (22, vec![2, 0, 0, 0, 0, 0, 0, 0])],
+        "the header's section count is 2, and a section list of 35 bytes holds at most 1"
+    )]
+    #[case::the_largest_section_count(
+        vec![(14, vec![0xFF; 8]), (22, vec![0xFF; 8])],
+        "the header's section count is 18446744073709551615, and a section list of 35 bytes holds \
+         at most 0"
+    )]
+    fn an_invalid_header_fails_to_parse(
+        #[case] fields: Vec<(usize, Vec<u8>)>,
+        #[case] reason: &str,
+    ) {
+        let mut fshd = free_space::single_section_header();
+        for (at, value) in fields {
+            test_util::bytes::set_slice_at(&mut fshd, at, &value);
+        }
+        let len = fshd.len();
+        test_util::checksum::restamp(&mut fshd, 0, len);
 
         assert_eq!(
-            parse_section_info(widths(8, 8), &free_space::single_section_info(), &header),
-            Err(FormatError::InvalidFreeSpaceManager(
-                "an address space of 65 bits is not 1 to 64 bits wide".to_owned()
-            ))
+            FreeSpaceManagerHeader::parse(widths(8, 8), &fshd),
+            Err(FormatError::InvalidFreeSpaceManager(reason.to_owned()))
+        );
+    }
+
+    #[test]
+    fn a_header_of_no_sections_parses_whatever_its_section_list_fields() {
+        let mut fshd = free_space::single_section_header();
+        for (at, value) in [
+            (6, [0; 8]),
+            (14, [0; 8]),
+            (22, [0; 8]),
+            (54, [0xFF; 8]),
+            (62, 17u64.to_le_bytes()),
+            (70, [0; 8]),
+        ] {
+            test_util::bytes::set_slice_at(&mut fshd, at, &value);
+        }
+        let len = fshd.len();
+        test_util::checksum::restamp(&mut fshd, 0, len);
+
+        assert_eq!(
+            FreeSpaceManagerHeader::parse(widths(8, 8), &fshd),
+            Ok(FreeSpaceManagerHeader {
+                total_space: 0,
+                total_sections: 0,
+                addr_space_bits: AddressSpaceBits(63),
+                max_section_size: FILE_FSM_MAX_SECTION_SIZE,
+                section_list_addr: StoredAddress::new(u64::MAX),
+                section_list_used: 17,
+            })
+        );
+    }
+
+    #[cfg(feature = "checksum")]
+    #[test]
+    fn a_header_whose_checksum_does_not_match_fails_to_parse() {
+        let mut fshd = free_space::single_section_header();
+        let stored = fshd.len() - 4;
+        fshd[stored] ^= 0xFF;
+
+        assert_eq!(
+            FreeSpaceManagerHeader::parse(widths(8, 8), &fshd),
+            Err(FormatError::ChecksumMismatch {
+                expected: 0x1037_1315,
+                computed: 0x1037_13EA,
+            })
         );
     }
 
@@ -1208,7 +1383,7 @@ mod tests {
     /// Returns the section list of `payload` for the header at `fshd_addr`, with its prefix and its
     /// checksum.
     fn section_list(widths: FormatWidths, fshd_addr: u64, payload: &[u8]) -> Vec<u8> {
-        let mut list = [&FSSE_SIGNATURE[..], &[0]].concat();
+        let mut list = [&FSSE_SIGNATURE[..], &[FSSE_VERSION]].concat();
         bytes::try_write_offset(&mut list, fshd_addr, widths.offsets).unwrap();
         list.extend_from_slice(payload);
         let checksum = checksum::jenkins_lookup3(&list);
@@ -1222,10 +1397,10 @@ mod tests {
         FreeSpaceManagerHeader {
             total_space: 0,
             total_sections,
-            addr_space_bits: 63,
+            addr_space_bits: AddressSpaceBits(63),
             max_section_size: FILE_FSM_MAX_SECTION_SIZE,
-            fsse_addr: StoredAddress::new(0x100),
-            fsse_used: list.len() as u64,
+            section_list_addr: StoredAddress::new(0x100),
+            section_list_used: list.len() as u64,
         }
     }
 }
