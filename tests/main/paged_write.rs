@@ -43,7 +43,7 @@ fn paged_persist_roundtrip() {
     assert_eq!(info.eoa_pre_fsm, bytes.len() as u64, "EOA == file size");
 
     // Free space is tracked (page tails), non-overlapping and within the file.
-    let free = f.persisted_free_space();
+    let free = f.persisted_free_space().unwrap();
     assert!(
         !free.is_empty(),
         "paged persist tracks page-tail free space"
@@ -84,7 +84,7 @@ fn paged_non_persist_is_aligned_without_managers() {
         info.manager_addrs.is_empty(),
         "non-persist records no managers"
     );
-    assert!(f.persisted_free_space().is_empty());
+    assert!(f.persisted_free_space().unwrap().is_empty());
     assert_eq!(f.dataset("d").unwrap().read_i32().unwrap(), data);
 }
 

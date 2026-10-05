@@ -889,29 +889,33 @@ fn warmed_base_with_a_persisted_hole(path: &Path) {
 /// a file the next writer corrupts. A prefix caught between the reservation's
 /// repoint and the bytes it lets the append write must still satisfy it, and so
 /// must one caught before the reservation at all.
-fn persisted_free_space_holds_nothing_live(path: &Path) -> Result<(), String> {
+///
+/// Returns [`Verdict::Loud`] if a manager does not parse, and [`Verdict::Silent`] if a free
+/// region overlaps a chunk.
+fn persisted_free_space_holds_nothing_live(path: &Path) -> Verdict {
     let Ok(f) = crate::reader::File::open(path) else {
         // A prefix whose file does not open at all is the read's business, not
         // this one's; it is classified there.
-        return Ok(());
+        return Verdict::Clean;
     };
-    let free = f.persisted_free_space();
     let Ok(chunks) = f.dataset("d").and_then(|d| d.chunks()) else {
-        return Ok(());
+        return Verdict::Clean;
     };
-    for c in chunks {
-        let (lo, hi) = (c.address, c.address + c.storage_size);
-        for &(addr, len) in &free {
-            if addr < hi && lo < addr + len {
-                return Err(std::format!(
-                    "the managers advertise [{addr}, {}) as free, which overlaps a live \
-                     chunk of `d` at [{lo}, {hi})",
-                    addr + len
-                ));
+    Verdict::of(f.persisted_free_space(), |free| {
+        for c in chunks {
+            let (lo, hi) = (c.address, c.address + c.storage_size);
+            for &(addr, len) in &free {
+                if addr < hi && lo < addr + len {
+                    return Err(std::format!(
+                        "the managers advertise [{addr}, {}) as free, which overlaps a live \
+                         chunk of `d` at [{lo}, {hi})",
+                        addr + len
+                    ));
+                }
             }
         }
-    }
-    Ok(())
+        Ok(())
+    })
 }
 
 /// One prefix of the reserved-append sweep: the dataset reads as a prefix of
@@ -929,10 +933,7 @@ fn reserved_append_prefix_is_sound(path: &Path, lo: i32, hi: i32) -> Verdict {
         Ok(v) => return Verdict::Silent(std::format!("`ceiling` reads as {v:?}")),
         Err(e) => return Verdict::Loud(std::format!("{e:?}")),
     }
-    match persisted_free_space_holds_nothing_live(path) {
-        Ok(()) => Verdict::Clean,
-        Err(why) => Verdict::Silent(why),
-    }
+    persisted_free_space_holds_nothing_live(path)
 }
 
 /// An in-place append on a file that persists its free space takes the space it

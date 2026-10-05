@@ -37,7 +37,7 @@ fn assert_paged_ok(path: &std::path::Path) {
     assert_eq!(info.page_size, PAGE);
     assert_eq!(info.eoa_pre_fsm % PAGE, 0, "EOA page-aligned");
     assert_eq!(info.eoa_pre_fsm, bytes.len() as u64, "EOA == file size");
-    let free = f.persisted_free_space();
+    let free = f.persisted_free_space().unwrap();
     let mut sorted = free.clone();
     sorted.sort_by_key(|&(a, _)| a);
     let mut prev_end = 0u64;
@@ -179,7 +179,7 @@ fn paged_persist_drop_finalizes() {
         (0..3000).collect::<Vec<i32>>()
     );
     assert!(
-        !f.persisted_free_space().is_empty(),
+        !f.persisted_free_space().unwrap().is_empty(),
         "a dropped paged handle finalizes like close"
     );
 }

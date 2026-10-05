@@ -477,7 +477,7 @@ fn persisting_file_takes_both_inplace_and_staged_appends() {
         dataset::read_pure::<i32>(&p, "d"),
         (0..16).collect::<Vec<_>>()
     );
-    let before = File::open(&p).unwrap().persisted_free_space();
+    let before = File::open(&p).unwrap().persisted_free_space().unwrap();
 
     // A second session appends in place again and closes without staging
     // anything, so the manager re-homing is `close`'s doing rather than a
@@ -494,7 +494,7 @@ fn persisting_file_takes_both_inplace_and_staged_appends() {
         (0..18).collect::<Vec<_>>()
     );
     assert_ne!(
-        File::open(&p).unwrap().persisted_free_space(),
+        File::open(&p).unwrap().persisted_free_space().unwrap(),
         before,
         "closing the session did not rewrite the free-space managers"
     );
@@ -503,7 +503,7 @@ fn persisting_file_takes_both_inplace_and_staged_appends() {
     // not survive.
     let reopened = File::open(&p).unwrap();
     let size = reopened.file_size();
-    for (addr, len) in reopened.persisted_free_space() {
+    for (addr, len) in reopened.persisted_free_space().unwrap() {
         assert!(
             addr + len <= size,
             "free region {addr}+{len} runs past the {size}-byte file"

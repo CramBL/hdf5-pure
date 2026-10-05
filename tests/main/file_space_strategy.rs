@@ -154,6 +154,6 @@ fn persist_true_records_intent_on_a_fresh_file() {
     assert!(info.persist, "persist flag is recorded");
     // No free space yet: every manager slot is undefined and nothing is persisted.
     assert!(info.manager_addrs.iter().all(|&a| a == u64::MAX));
-    assert!(f.persisted_free_space().is_empty());
+    assert!(f.persisted_free_space().unwrap().is_empty());
     assert_eq!(f.dataset("d").unwrap().read_i32().unwrap(), vec![1, 2, 3]);
 }

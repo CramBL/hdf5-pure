@@ -15864,6 +15864,7 @@ mod tests {
         let on_disk: u64 = crate::reader::File::open(&path)
             .unwrap()
             .persisted_free_space()
+            .unwrap()
             .iter()
             .map(|&(_, l)| l)
             .sum();
@@ -16739,7 +16740,12 @@ mod tests {
         let f = crate::reader::File::open(&path).unwrap();
         let kept = f.dataset("keep").unwrap().read_i32().unwrap();
         assert_eq!(kept, (0..200).collect::<Vec<i32>>(), "keep survives intact");
-        let freed: u64 = f.persisted_free_space().iter().map(|&(_, l)| l).sum();
+        let freed: u64 = f
+            .persisted_free_space()
+            .unwrap()
+            .iter()
+            .map(|&(_, l)| l)
+            .sum();
         let live_end = f.file_size();
         assert!(
             freed < live_end,
@@ -19931,6 +19937,7 @@ mod tests {
             crate::reader::File::open(p)
                 .unwrap()
                 .persisted_free_space()
+                .unwrap()
                 .iter()
                 .map(|&(_, len)| len)
                 .sum()

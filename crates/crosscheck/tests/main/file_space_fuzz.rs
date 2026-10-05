@@ -113,7 +113,7 @@ proptest! {
                 let got = ours.dataset(&format!("d{i}")).unwrap().read_i32().unwrap();
                 prop_assert_eq!(&got, data);
             }
-            ours.persisted_free_space().iter().map(|(_, l)| l).sum()
+            ours.persisted_free_space().unwrap().iter().map(|(_, l)| l).sum()
         };
 
         // The reference C library recovers the strategy and reads every dataset.
@@ -189,7 +189,7 @@ proptest! {
             let ours = File::open(&path).unwrap();
             let got = ours.dataset("d").unwrap().read_i32().unwrap();
             prop_assert_eq!(&got, &want);
-            ours.persisted_free_space().iter().map(|(_, l)| l).sum()
+            ours.persisted_free_space().unwrap().iter().map(|(_, l)| l).sum()
         };
 
         // The C library recovers the paged strategy, reads every row, and its

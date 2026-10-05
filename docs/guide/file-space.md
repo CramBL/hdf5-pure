@@ -147,7 +147,7 @@ file.close()?;
 
 // Later opens can read the persisted free regions.
 let file = File::open(&path)?;
-let free = file.persisted_free_space();
+let free = file.persisted_free_space()?;
 let total_free: u64 = free.iter().map(|&(_, len)| len).sum();
 println!("persisted free regions: {}", free.len());
 println!("total persisted free bytes: {total_free}");
@@ -155,6 +155,6 @@ println!("total persisted free bytes: {total_free}");
 # Ok::<(), hdf5_pure::Error>(())
 ```
 
-[`persisted_free_space()`](crate::File::persisted_free_space) is empty when the file does not persist free space, and for the streaming backend (which does not load the manager blocks). The addresses are file offsets relative to the base address, and [reading data](crate::_guide::reading) is unaffected by the presence or absence of these managers.
+[`persisted_free_space()`](crate::File::persisted_free_space) returns an empty list when the file does not persist free space, and on a handle that reads the file on demand or edits it. It returns an error for a malformed free-space manager. A read-write session opens such a file and skips the free regions of that manager, and in a file that is not paged those of every other manager too. The addresses are file offsets relative to the base address, and [reading data](crate::_guide::reading) is unaffected by the presence or absence of these managers.
 
 When free space is not persisted, a read-write session still reuses space within a single session but does not carry a free list across closes. If churn has left a file with unused gaps and you want to reclaim them outright, [repacking](crate::_guide::repack) rewrites the file compactly.
