@@ -72,7 +72,7 @@ pub(crate) fn read_persisted_sections(
                 ))
             })?;
         sections.extend(hdf5_pure_format::__private::parse_section_info(
-            widths, block, &header,
+            widths, block, addr, &header,
         )?);
     }
     Ok(sections)
@@ -114,7 +114,7 @@ pub(crate) fn read_persisted_sections_source<S: crate::source::Source>(
         let used = header.section_list_used();
         let block = src.read_exact_at(fa, used.to_usize()?)?;
         sections.extend(hdf5_pure_format::__private::parse_section_info(
-            widths, &block, &header,
+            widths, &block, addr, &header,
         )?);
         blocks.push((fa, used));
     }
