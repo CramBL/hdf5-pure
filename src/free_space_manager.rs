@@ -56,11 +56,11 @@ pub(crate) fn read_persisted_sections(
                 ))
             })?,
         )?;
-        if header.fsse_addr.is_undefined(offset_size) {
+        if header.section_list_addr().is_undefined(offset_size) {
             continue;
         }
-        let fa = base.absolute(header.fsse_addr)?.to_usize()?;
-        let used = header.fsse_used.to_usize()?;
+        let fa = base.absolute(header.section_list_addr())?.to_usize()?;
+        let used = header.section_list_used().to_usize()?;
         let block = fa
             .checked_add(used)
             .and_then(|end| data.get(fa..end))
@@ -107,11 +107,11 @@ pub(crate) fn read_persisted_sections_source<S: crate::source::Source>(
         let fshd = src.read_exact_at(a, hdr_len.to_usize()?)?;
         let header = FreeSpaceManagerHeader::parse(widths, &fshd)?;
         blocks.push((a, hdr_len));
-        if header.fsse_addr.is_undefined(offset_size) {
+        if header.section_list_addr().is_undefined(offset_size) {
             continue;
         }
-        let fa = base.absolute(header.fsse_addr)?;
-        let used = header.fsse_used;
+        let fa = base.absolute(header.section_list_addr())?;
+        let used = header.section_list_used();
         let block = src.read_exact_at(fa, used.to_usize()?)?;
         sections.extend(hdf5_pure_format::__private::parse_section_info(
             widths, &block, &header,
@@ -427,9 +427,9 @@ mod tests {
         )
         .unwrap();
         let header = FreeSpaceManagerHeader::parse(widths(8, 8), &fshd).unwrap();
-        assert_eq!(header.total_sections, 3);
-        assert_eq!(header.total_space, 512 + 512 + 70000);
-        assert_eq!(header.fsse_addr, StoredAddress::new(1100));
+        assert_eq!(header.total_sections(), 3);
+        assert_eq!(header.total_space(), 512 + 512 + 70000);
+        assert_eq!(header.section_list_addr(), StoredAddress::new(1100));
 
         // Place both blocks in a buffer and read them back through the manager
         // indirection; the recovered sections match (order-independent).

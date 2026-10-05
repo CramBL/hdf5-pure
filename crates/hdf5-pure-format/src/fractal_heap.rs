@@ -233,36 +233,33 @@ impl FractalHeapHeader {
             return Err(FormatError::InvalidFractalHeapVersion(version));
         }
 
-        let mut fields = HeaderFields {
-            data: file_data,
-            pos: offset + 5,
-            offset_size,
-            length_size,
-        };
+        let offsets = OffsetWidth::try_from(offset_size)?;
+        let lengths = LengthWidth::try_from(length_size)?;
+        let mut fields = bytes::Fields::new(file_data, offset + 5);
         let heap_id_length = fields.u16()?;
         let io_filter_encoded_length = fields.u16()?;
         let flags = fields.u8()?;
         let max_managed_object_size = fields.u32()?;
-        let next_huge_object_id = fields.length()?;
-        let btree_huge_objects_address = fields.address()?;
-        let free_space_in_managed_blocks = fields.length()?;
-        let managed_block_free_space_manager_address = fields.address()?;
-        let managed_space = fields.length()?;
-        let allocated_managed_space = fields.length()?;
-        let direct_block_allocation_iterator_offset = fields.length()?;
-        let managed_objects_count = fields.length()?;
-        let huge_objects_size = fields.length()?;
-        let huge_objects_count = fields.length()?;
-        let tiny_objects_size = fields.length()?;
-        let tiny_objects_count = fields.length()?;
+        let next_huge_object_id = fields.length(lengths)?;
+        let btree_huge_objects_address = fields.address(offsets)?;
+        let free_space_in_managed_blocks = fields.length(lengths)?;
+        let managed_block_free_space_manager_address = fields.address(offsets)?;
+        let managed_space = fields.length(lengths)?;
+        let allocated_managed_space = fields.length(lengths)?;
+        let direct_block_allocation_iterator_offset = fields.length(lengths)?;
+        let managed_objects_count = fields.length(lengths)?;
+        let huge_objects_size = fields.length(lengths)?;
+        let huge_objects_count = fields.length(lengths)?;
+        let tiny_objects_size = fields.length(lengths)?;
+        let tiny_objects_count = fields.length(lengths)?;
         let table_width = fields.u16()?;
-        let starting_block_size = fields.length()?;
-        let max_direct_block_size = fields.length()?;
+        let starting_block_size = fields.length(lengths)?;
+        let max_direct_block_size = fields.length(lengths)?;
         let max_heap_size = fields.u16()?;
         let start_root_rows = fields.u16()?;
-        let root_block_address = fields.address()?;
+        let root_block_address = fields.address(offsets)?;
         let current_rows_in_root_indirect_block = fields.u16()?;
-        let mut pos = fields.pos;
+        let mut pos = fields.pos();
 
         // Skip the size of the filtered root direct block and its filter mask.
         if io_filter_encoded_length > 0 {
@@ -842,59 +839,6 @@ impl FractalHeapHeader {
             total = total.saturating_add(self.block_size_for_row(row).saturating_mul(tw));
         }
         total
-    }
-}
-
-/// The fields of a fractal heap header from `pos` on, read in the order the header stores them.
-struct HeaderFields<'a> {
-    data: &'a [u8],
-    pos: usize,
-    offset_size: u8,
-    length_size: u8,
-}
-
-impl HeaderFields<'_> {
-    fn u8(&mut self) -> Result<u8, FormatError> {
-        let value = *self.data.get(self.pos).ok_or(FormatError::UnexpectedEof {
-            expected: self.pos.saturating_add(1),
-            available: self.data.len(),
-        })?;
-        self.pos += 1;
-        Ok(value)
-    }
-
-    fn u16(&mut self) -> Result<u16, FormatError> {
-        Ok(u16::from_le_bytes(self.array()?))
-    }
-
-    fn u32(&mut self) -> Result<u32, FormatError> {
-        Ok(u32::from_le_bytes(self.array()?))
-    }
-
-    fn length(&mut self) -> Result<u64, FormatError> {
-        let value = bytes::read_length(self.data, self.pos, self.length_size)?;
-        self.pos += usize::from(self.length_size);
-        Ok(value)
-    }
-
-    fn address(&mut self) -> Result<StoredAddress, FormatError> {
-        let value = bytes::read_offset(self.data, self.pos, self.offset_size)?;
-        self.pos += usize::from(self.offset_size);
-        Ok(StoredAddress::new(value))
-    }
-
-    fn array<const N: usize>(&mut self) -> Result<[u8; N], FormatError> {
-        let value = self
-            .data
-            .get(self.pos..)
-            .and_then(|rest| rest.first_chunk::<N>())
-            .copied()
-            .ok_or(FormatError::UnexpectedEof {
-                expected: self.pos.saturating_add(N),
-                available: self.data.len(),
-            })?;
-        self.pos += N;
-        Ok(value)
     }
 }
 

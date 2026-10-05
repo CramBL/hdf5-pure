@@ -49,18 +49,18 @@ pub struct FreeSection {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FreeSpaceManagerHeader {
     /// The number of free bytes the manager tracks, the "Total Space Tracked" field.
-    pub total_space: u64,
+    total_space: u64,
     /// The number of sections the manager tracks, the "Total Number of Sections" field.
-    pub total_sections: u64,
+    total_sections: u64,
     /// The number of bits an address in the section list takes, the "Size of Address Space"
     /// field.
-    pub addr_space_bits: u16,
+    addr_space_bits: u16,
     /// The largest section the manager tracks, the "Maximum Section Size" field.
-    pub max_section_size: u64,
+    max_section_size: u64,
     /// The address of the section list.
-    pub fsse_addr: StoredAddress,
+    fsse_addr: StoredAddress,
     /// The length of the section list in bytes, the "Size of Serialized Section List Used" field.
-    pub fsse_used: u64,
+    fsse_used: u64,
 }
 
 /// Returns the fewest bytes that hold `value`, and at least 1, as `H5VM_limit_enc_size` computes
@@ -131,6 +131,38 @@ impl FreeSpaceManagerHeader {
             fsse_addr,
             fsse_used,
         })
+    }
+
+    /// Returns the number of free bytes the manager tracks, the "Total Space Tracked" field.
+    pub fn total_space(&self) -> u64 {
+        self.total_space
+    }
+
+    /// Returns the number of sections the manager tracks, the "Total Number of Sections" field.
+    pub fn total_sections(&self) -> u64 {
+        self.total_sections
+    }
+
+    /// Returns the number of bits an address in the section list takes, the "Size of Address
+    /// Space" field.
+    pub fn addr_space_bits(&self) -> u16 {
+        self.addr_space_bits
+    }
+
+    /// Returns the largest section size the manager tracks, the "Maximum Section Size" field.
+    pub fn max_section_size(&self) -> u64 {
+        self.max_section_size
+    }
+
+    /// Returns the address of the section list, the "Address of Serialized Section List" field.
+    pub fn section_list_addr(&self) -> StoredAddress {
+        self.fsse_addr
+    }
+
+    /// Returns the length of the section list in bytes, the "Size of Serialized Section List
+    /// Used" field.
+    pub fn section_list_used(&self) -> u64 {
+        self.fsse_used
     }
 
     /// Returns the widths of the fields of the section list this header describes, in a file with

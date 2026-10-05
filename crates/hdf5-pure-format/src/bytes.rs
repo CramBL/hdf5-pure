@@ -28,6 +28,7 @@
 
 use alloc::vec::Vec;
 
+use crate::address::StoredAddress;
 use crate::convert;
 use crate::error::FormatError;
 use crate::width::LengthWidth;
@@ -303,6 +304,70 @@ pub(crate) fn write_length(buf: &mut Vec<u8>, val: u64, width: LengthWidth) {
         LengthWidth::Two => buf.extend_from_slice(&(val as u16).to_le_bytes()),
         LengthWidth::Four => buf.extend_from_slice(&(val as u32).to_le_bytes()),
         LengthWidth::Eight => buf.extend_from_slice(&val.to_le_bytes()),
+    }
+}
+
+/// A cursor over the little-endian fields of a block.
+///
+/// Each method reads the field at the cursor and moves the cursor past it, so a parser reads a
+/// block with one call per field, in the order the block stores them. A read of a field that runs past
+/// the end of the block returns [`FormatError::UnexpectedEof`] and leaves the cursor in place.
+pub(crate) struct Fields<'a> {
+    data: &'a [u8],
+    pos: usize,
+}
+
+impl<'a> Fields<'a> {
+    /// Returns a cursor at byte `pos` of the block `data`.
+    pub(crate) fn new(data: &'a [u8], pos: usize) -> Self {
+        Self { data, pos }
+    }
+
+    /// Returns the offset in the block of the next field.
+    pub(crate) fn pos(&self) -> usize {
+        self.pos
+    }
+
+    pub(crate) fn u8(&mut self) -> Result<u8, FormatError> {
+        let [value] = self.array()?;
+        Ok(value)
+    }
+
+    pub(crate) fn u16(&mut self) -> Result<u16, FormatError> {
+        Ok(u16::from_le_bytes(self.array()?))
+    }
+
+    pub(crate) fn u32(&mut self) -> Result<u32, FormatError> {
+        Ok(u32::from_le_bytes(self.array()?))
+    }
+
+    /// Reads a length of `width` bytes.
+    pub(crate) fn length(&mut self, width: LengthWidth) -> Result<u64, FormatError> {
+        let value = read_length_width(self.data, self.pos, width)?;
+        self.pos += usize::from(width.get());
+        Ok(value)
+    }
+
+    /// Reads a file address of `width` bytes.
+    pub(crate) fn address(&mut self, width: OffsetWidth) -> Result<StoredAddress, FormatError> {
+        let value = read_offset_width(self.data, self.pos, width)?;
+        self.pos += usize::from(width.get());
+        Ok(StoredAddress::new(value))
+    }
+
+    /// Reads the next `N` bytes.
+    pub(crate) fn array<const N: usize>(&mut self) -> Result<[u8; N], FormatError> {
+        let value = self
+            .data
+            .get(self.pos..)
+            .and_then(|rest| rest.first_chunk::<N>())
+            .copied()
+            .ok_or(FormatError::UnexpectedEof {
+                expected: self.pos.saturating_add(N),
+                available: self.data.len(),
+            })?;
+        self.pos += N;
+        Ok(value)
     }
 }
 
