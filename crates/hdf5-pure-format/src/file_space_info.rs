@@ -42,7 +42,7 @@ pub fn serialize_file_space_info(
     };
     let mut buf =
         Vec::with_capacity(fixed_len(widths) + manager_addrs.len() * usize::from(offsets.get()));
-    buf.push(VERSION);
+    buf.push(VERSION_1);
     buf.push(strategy_code(info.strategy));
     buf.push(u8::from(info.persist));
     bytes::try_write_length(&mut buf, info.threshold, lengths)?;
@@ -70,6 +70,13 @@ pub fn parse_file_space_info(
     widths: FormatWidths,
     data: &[u8],
 ) -> Result<FileSpaceInfo, FormatError> {
+    match bytes::Fields::new(data, 0).u8()? {
+        VERSION_1 => parse_version_1(widths, data),
+        version => Err(FormatError::UnsupportedFileSpaceInfoVersion(version)),
+    }
+}
+
+fn parse_version_1(widths: FormatWidths, data: &[u8]) -> Result<FileSpaceInfo, FormatError> {
     let FormatWidths { offsets, lengths } = widths;
     let fixed = fixed_len(widths);
     let (head, managers) = data
@@ -78,21 +85,13 @@ pub fn parse_file_space_info(
             expected: fixed,
             available: data.len(),
         })?;
-    // `head` is `fixed_len(widths)` bytes long, so every index below is inside it.
-    let version = head[0];
-    if version != VERSION {
-        return Err(FormatError::UnsupportedFileSpaceInfoVersion(version));
-    }
-    let strategy = strategy_from_code(head[1])?;
-    let persist = head[2] != 0;
-    let mut pos = 3;
-    let threshold = bytes::read_length_width(head, pos, lengths)?;
-    pos += usize::from(lengths.get());
-    let page_size = bytes::read_length_width(head, pos, lengths)?;
-    pos += usize::from(lengths.get());
-    let page_end_meta_threshold = u16::from_le_bytes([head[pos], head[pos + 1]]);
-    pos += 2;
-    let eoa_pre_fsm = bytes::read_offset_width(head, pos, offsets)?;
+    let mut fields = bytes::Fields::new(head, 1);
+    let strategy = strategy_from_code(fields.u8()?)?;
+    let persist = fields.u8()? != 0;
+    let threshold = fields.length(lengths)?;
+    let page_size = fields.length(lengths)?;
+    let page_end_meta_threshold = fields.u16()?;
+    let eoa_pre_fsm = fields.address(offsets)?.get();
 
     let manager_addrs = if persist {
         managers
@@ -143,7 +142,7 @@ fn strategy_from_code(code: u8) -> Result<FileSpaceStrategy, FormatError> {
 }
 
 /// The version of the message that the parser reads and the writer writes.
-const VERSION: u8 = 1;
+const VERSION_1: u8 = 1;
 
 #[cfg(test)]
 mod tests {
@@ -180,6 +179,30 @@ mod tests {
         assert_eq!(
             parse_file_space_info(widths(8, 8), &bytes),
             Err(FormatError::UnsupportedFileSpaceInfoVersion(0))
+        );
+    }
+
+    #[rstest]
+    #[case::shorter_than_version_1(&[0x02, 0x00], 2)]
+    #[case::only_a_version(&[0xFF], 0xFF)]
+    fn an_unsupported_version_is_reported_whatever_the_length_of_its_body(
+        #[case] body: &[u8],
+        #[case] version: u8,
+    ) {
+        assert_eq!(
+            parse_file_space_info(widths(8, 8), body),
+            Err(FormatError::UnsupportedFileSpaceInfoVersion(version))
+        );
+    }
+
+    #[test]
+    fn an_empty_body_returns_unexpected_eof_at_the_version_byte() {
+        assert_eq!(
+            parse_file_space_info(widths(8, 8), &[]),
+            Err(FormatError::UnexpectedEof {
+                expected: 1,
+                available: 0,
+            })
         );
     }
 
