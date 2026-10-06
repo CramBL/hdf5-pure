@@ -146,11 +146,16 @@
 //! # Free-space reuse (issue #21)
 //!
 //! Each commit vacates space: the object headers it rewrites are superseded, and
-//! a deletion abandons its target's blocks. Those regions are recorded in a
-//! session-local free list and drawn on by later writes in the same session —
-//! a new object is written into a fitting freed region instead of growing the
-//! file, and when freed space forms a run reaching end-of-file the file is
-//! physically truncated. The reuse is crash-safe: it only ever overwrites space
+//! a deletion abandons its target's blocks. Under a strategy with free-space
+//! managers, `H5F_FSPACE_STRATEGY_FSM_AGGR` or `H5F_FSPACE_STRATEGY_PAGE`, the
+//! session records those regions in a free list and writes a later object into a
+//! freed region that fits it, appending only where none does. When freed space
+//! forms a run reaching end-of-file, the commit truncates the file to where the
+//! run starts.
+//! Under `H5F_FSPACE_STRATEGY_AGGR` and `H5F_FSPACE_STRATEGY_NONE`, which have no
+//! free-space managers, and in a file whose strategy the session cannot read, the
+//! session drops the regions it vacates and allocates at the end of the file.
+//! The reuse is crash-safe: it only ever overwrites space
 //! freed by an *earlier*, already-durable commit (never space the current commit
 //! is mid-way through freeing), and truncation happens only after the superblock
 //! recording the smaller end-of-file is itself durable. A commit that fails
@@ -292,7 +297,12 @@ use crate::datatype::{
 use crate::error::{Error, FormatError, OBJECT_HEADER_MESSAGE_MAX};
 use crate::file_create_properties::FileCreateProperties;
 use crate::file_lock::{self, FileLocking};
-use crate::file_space_info::{self, FileSpaceInfo, FileSpaceStrategy, NUM_FILE_FSM_MANAGERS};
+use crate::file_space_info;
+use crate::file_space_info::DEFAULT_THRESHOLD;
+use crate::file_space_info::FileSpaceInfo;
+use crate::file_space_info::FileSpaceStrategy;
+use crate::file_space_info::FreeSpaceSettings;
+use crate::file_space_info::NUM_FILE_FSM_MANAGERS;
 use crate::file_writer::{
     DenseAttrCreationOrder, LENGTH_SIZE, LENGTH_WIDTH, OFFSET_SIZE, OFFSET_WIDTH,
     build_chunked_dataset_oh, build_dataset_oh, make_link,
@@ -1062,6 +1072,10 @@ pub(crate) struct WriteEngine {
     /// Monotonic id for the next claim, so releasing one is exact even when two
     /// appenders on different datasets are live at once.
     next_appender_token: u64,
+    /// The settings of the free-space managers of the file's strategy, or `None` for a strategy
+    /// without free-space managers and for a file whose strategy the session cannot read. A session
+    /// that holds `None` reuses no freed space.
+    free_space_settings: Option<FreeSpaceSettings>,
     /// Session-local free-space tracker (issue #21). Holds regions vacated by
     /// prior commits in this session — superseded object headers and the blocks
     /// of deleted objects — so later commits reuse them instead of growing the
@@ -1069,7 +1083,9 @@ pub(crate) struct WriteEngine {
     /// starts empty on `open` for a non-persisting file: holes already present
     /// from earlier sessions or other tools are not tracked. When the file
     /// persists its free space (`persist` is `Some`), `open` instead seeds it
-    /// from the on-disk free-space managers, so reuse spans sessions.
+    /// from the on-disk free-space managers, so reuse spans sessions. It stays
+    /// empty in a session whose [`free_space_settings`](Self::free_space_settings)
+    /// is `None`.
     free: FreeList,
     /// Space this session has taken *out* of the on-disk free-space managers so
     /// that an immediate in-place append may spend it (issue #387).
@@ -2373,8 +2389,9 @@ pub struct SpaceAccounting {
     /// write and every immediate in-place append
     /// ([`append`](crate::Dataset::append)) updates both together.
     ///
-    /// It is not monotonic: [`commit`](crate::File::commit) can reclaim trailing
-    /// free space and *shrink* the file. It can also exceed the superblock's
+    /// It is not monotonic: under a file-space strategy with free-space managers,
+    /// [`commit`](crate::File::commit) can reclaim trailing free space and *shrink*
+    /// the file. It can also exceed the superblock's
     /// recorded end-of-file address when the file was opened carrying unaccounted
     /// trailing bytes (the same slack [`File::file_size`](crate::File::file_size)
     /// surfaces), since opening does not rewrite that address.
@@ -2393,7 +2410,9 @@ pub struct SpaceAccounting {
     /// is neither a lower bound on the next write's growth nor a promise of
     /// shrinkage: a region counted here may be truncated away at commit — rather
     /// than reused — if adjacent space is later freed and the coalesced run
-    /// reaches end-of-file.
+    /// reaches end-of-file. A session on a file whose strategy has no free-space
+    /// managers, [`FileSpaceStrategy::Aggr`] or [`FileSpaceStrategy::None`],
+    /// reports `0` throughout.
     ///
     /// **Which write can spend it is not uniform on a persisting file.** Such a
     /// session may write into a hole only once it has taken that hole *out* of
@@ -2853,6 +2872,12 @@ impl WriteEngine {
             staged: StagedEdits::default(),
             appender_claims: Vec::new(),
             next_appender_token: 0,
+            // A file without a File Space Info message has the library's default strategy.
+            free_space_settings: FreeSpaceSettings::of(
+                FileSpaceStrategy::FsmAggr,
+                false,
+                DEFAULT_THRESHOLD,
+            ),
             free: FreeList::new(),
             reserved: FreeList::new(),
             proved_free_of_references: false,
@@ -3041,33 +3066,30 @@ impl WriteEngine {
         })
     }
 
-    /// Seeds the free lists from the free-space managers of a file that persists its free space,
-    /// and records the blocks of the managers and of the superblock extension that the next
-    /// persisting commit frees.
+    /// Sets [`free_space_settings`](Self::free_space_settings) from the file's strategy, seeds the
+    /// free lists from the free-space managers of a file that persists its free space, and records
+    /// the blocks of the managers and of the superblock extension that the next persisting commit
+    /// frees.
     ///
-    /// Reads the managers only in a file whose base address is 0 and whose superblock extension has
-    /// a File Space Info message that requests persistence. A manager that does not parse seeds no
-    /// free sections, and in a file that is not paged the other managers seed none either.
+    /// A file without a File Space Info message is edited under the default strategy,
+    /// `H5F_FSPACE_STRATEGY_FSM_AGGR`, and a file whose message cannot be read as one without
+    /// free-space managers. Reads the managers only in a file whose base address is 0
+    /// and whose superblock extension has a File Space Info message that requests persistence
+    /// under a strategy with free-space managers. A manager that does not parse seeds no free
+    /// sections, and in a file that is not paged the other managers seed none either.
     fn load_persisted_free_space(&mut self) {
-        if self.superblock.version < 2 {
-            return; // no superblock extension exists before v2
-        }
-        let Some(ext_rel) = self.superblock.superblock_extension_address else {
-            return;
+        let (ext_addr, info) = match self.extension_fsinfo() {
+            Ok(Some(found)) => found,
+            Ok(None) => return,
+            // A writer may drop freed space under every strategy, so a file whose strategy
+            // cannot be read is edited as one without a free-space manager.
+            Err(_) => {
+                self.free_space_settings = None;
+                return;
+            }
         };
-        let ext_rel = StoredAddress::new(ext_rel);
-        if ext_rel.is_undefined(self.superblock.offset_size) {
-            return;
-        }
-        // The header is read at the extension's absolute file offset. That is the
-        // same offset on the base-0 file every path below the userblock check
-        // sees, but the check itself needs the strategy of a *userblock* file.
-        let Ok(ext_addr) = self.superblock.base_address.absolute(ext_rel) else {
-            return;
-        };
-        let Some(info) = self.extension_fsinfo(ext_addr) else {
-            return;
-        };
+        let settings = FreeSpaceSettings::of(info.strategy, info.persist, info.threshold);
+        self.free_space_settings = settings;
         // Free-space reuse and persistence are not yet base-address aware: the
         // persisted section addresses (and the extension/manager block walk below)
         // are read as absolute, so on a userblock file they would seed `self.free`
@@ -3099,9 +3121,9 @@ impl WriteEngine {
         if paged {
             self.paged = Some(PagedEdit::new(info.page_size));
         }
-        if !info.persist {
+        let Some(settings) = settings.filter(|settings| settings.persist) else {
             return;
-        }
+        };
         let os = self.superblock.offset_size;
         let Ok(widths) = FormatWidths::from_sizes(os, self.superblock.length_size) else {
             return;
@@ -3226,7 +3248,7 @@ impl WriteEngine {
 
         self.persist = Some(PersistState {
             strategy: info.strategy,
-            threshold: info.threshold,
+            threshold: settings.threshold,
             page_size: info.page_size,
             old_blocks,
         });
@@ -3245,12 +3267,33 @@ impl WriteEngine {
             .map(|_| (addr, len))
     }
 
-    /// Parses the File Space Info message out of the superblock-extension object
-    /// header at `ext_addr`, if present and readable.
-    fn extension_fsinfo(&self, ext_addr: u64) -> Option<FileSpaceInfo> {
+    /// Returns the absolute address of the superblock extension and the File Space Info message
+    /// in its object header, or `None` if the file has no extension or the extension has no such
+    /// message.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::OffsetOverflow`] if the extension's absolute address exceeds `u64`,
+    /// and the parser's error if the superblock's widths, the extension's object header, or the
+    /// message does not parse.
+    fn extension_fsinfo(&self) -> Result<Option<(u64, FileSpaceInfo)>, FormatError> {
         let os = self.superblock.offset_size;
         let ls = self.superblock.length_size;
         let base = self.superblock.base_address;
+        if self.superblock.version < 2 {
+            return Ok(None); // no superblock extension exists before v2
+        }
+        let Some(ext_rel) = self.superblock.superblock_extension_address else {
+            return Ok(None);
+        };
+        let ext_rel = StoredAddress::new(ext_rel);
+        if ext_rel.is_undefined(os) {
+            return Ok(None);
+        }
+        // The header is read at the extension's absolute file offset, which is the stored
+        // address on a file without a userblock. The caller reads the strategy of a file with a
+        // userblock as well, so the address is resolved here for both.
+        let ext_addr = base.absolute(ext_rel)?;
         let oh = ObjectHeader::parse_from_source(
             &SourceMetadata(&self.image()),
             AccessMode::ReadWrite,
@@ -3258,19 +3301,21 @@ impl WriteEngine {
             os,
             ls,
             base,
-        )
-        .ok()?;
-        let msg = oh
+        )?;
+        let Some(msg) = oh
             .messages
             .iter()
-            .find(|m| m.msg_type == MessageType::FILE_SPACE_INFO)?;
-        hdf5_pure_format::__private::parse_file_space_info(
-            FormatWidths::from_sizes(os, ls).ok()?,
+            .find(|m| m.msg_type == MessageType::FILE_SPACE_INFO)
+        else {
+            return Ok(None);
+        };
+        let info = hdf5_pure_format::__private::parse_file_space_info(
+            FormatWidths::from_sizes(os, ls)?,
             base,
             self.superblock.eof_address,
             &msg.data,
-        )
-        .ok()
+        )?;
+        Ok(Some((ext_addr, info)))
     }
 
     /// Stage a new dataset, added on the next [`commit`](Self::commit).
@@ -4141,7 +4186,7 @@ impl WriteEngine {
     ///   empty on a session that never reserved — the term declines reuse rather
     ///   than misdirecting it.
     ///
-    /// The **SWMR** writer is the one absolute bar, and it is not about
+    /// The **SWMR** writer is one absolute bar, and it is not about
     /// publication at all: its concurrent readers may still be inside a region
     /// this session freed, and the format forbids reusing one while they are,
     /// which is why the C library's own SWMR writer allocates append-only. No
@@ -4149,6 +4194,11 @@ impl WriteEngine {
     /// staged edit ([`Error::SwmrStagedUnsupported`]) and so never frees
     /// anything. It is here so that lifting that refusal cannot silently enable
     /// reuse.
+    ///
+    /// A session whose [`free_space_settings`](Self::free_space_settings) is `None`
+    /// is the other bar: its file's strategy has no free-space managers or cannot be
+    /// read, so the session drops the space a commit frees, and an append allocates
+    /// at the end of the file.
     ///
     /// One window is inherited rather than introduced. A commit whose superblock
     /// write itself fails leaves [`publish_attempted`](Self::publish_attempted)
@@ -4158,7 +4208,7 @@ impl WriteEngine {
     /// before. That is the same trade, on a larger surface: doing nothing is
     /// still the only answer that is never actively wrong.
     fn immediate_reuse_allowed(&self) -> bool {
-        !self.swmr_mode
+        !self.swmr_mode && self.free_space_settings.is_some()
     }
 
     /// Take a batch of free space out of the on-disk free-space managers so an
@@ -6970,20 +7020,8 @@ impl WriteEngine {
             return self.repoint_stored_references(&relocations);
         }
 
-        // The new tree is fully written, so the regions this commit vacated are
-        // now dead: hand them to the session free list. If the resulting free
-        // space forms a run reaching end-of-file, the file can be physically
-        // truncated to where that run starts; otherwise the end-of-file is
-        // unchanged. `take_trailing` removes the trimmed run so it is not also
-        // counted as reusable interior space.
-        // The class is not consulted: a non-persisting commit is only reached on a
-        // flat file (a paged one is refused without persistence), which has no page
-        // types to keep apart and so vacates nothing it cannot place.
-        for (a, l, _) in to_free.drain(..) {
-            self.free.free(a, l);
-        }
         let cur_eof = self.image.len();
-        let trunc_to = self.free.take_trailing(cur_eof);
+        let trunc_to = self.release_freed(to_free, cur_eof);
         let new_eof = trunc_to.unwrap_or(cur_eof);
 
         self.barrier()?;
@@ -7034,6 +7072,28 @@ impl WriteEngine {
             self.barrier()?;
         }
         self.repoint_stored_references(&relocations)
+    }
+
+    /// Hands the regions a commit vacated to the free list, and returns the address to truncate
+    /// the file to if a free run reaches `eof`.
+    ///
+    /// A session whose [`free_space_settings`](Self::free_space_settings) is `None` drops the
+    /// regions and returns `None`.
+    fn release_freed(&mut self, to_free: Vec<(u64, u64, FreeClass)>, eof: u64) -> Option<u64> {
+        // Without a free-space manager libhdf5 1.14.6 drops a freed block unless it ends the
+        // allocation or adjoins an aggregator (`H5MF_xfree` in `H5MF.c`). The session has no
+        // aggregators, and it drops a block that ends the allocation as well, where libhdf5
+        // shrinks the file.
+        self.free_space_settings?;
+        // `take_trailing` removes the trimmed run so it is not also counted as reusable interior
+        // space.
+        // The class is not consulted: a non-persisting commit is only reached on a
+        // flat file (a paged one is rejected without persistence), which has no page
+        // types to keep apart and so vacates nothing it cannot place.
+        for (addr, len, _) in to_free {
+            self.free.free(addr, len);
+        }
+        self.free.take_trailing(eof)
     }
 
     /// Repoint every object reference the file already stores at a header this
@@ -10065,8 +10125,10 @@ impl WriteEngine {
     /// metadata hole to raw data (or the reverse) would mix the two within a page,
     /// which is the single invariant the paged strategy exists to hold. A page
     /// holding nothing at all is the exception, and
-    /// [`alloc_typed`](PagedEdit::alloc_typed) is where it is spent.
+    /// [`alloc_typed`](PagedEdit::alloc_typed) is where it is spent. A session
+    /// whose [`free_space_settings`](Self::free_space_settings) is `None` draws nothing.
     fn alloc_free(&mut self, len: u64, ty: PageType) -> Option<u64> {
+        self.free_space_settings?;
         let Some(pg) = self.paged.as_mut() else {
             return self.free.alloc(len);
         };
