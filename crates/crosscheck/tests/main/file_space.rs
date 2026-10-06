@@ -34,6 +34,7 @@ use rstest::rstest;
 use tempfile::tempdir;
 
 use test_util::file_space_info;
+use test_util::range;
 use test_util::widths::Widths;
 use test_util_hdf5::absence;
 use test_util_hdf5::dataset::Unlimited;
@@ -2351,6 +2352,84 @@ fn c_library_reads_our_file_after_an_append_reused_free_space() {
             vec![2.5f64; 4096]
         );
     }
+}
+
+#[rstest]
+#[case::fsm_aggr(
+    CStrategy::FreeSpaceManager {
+        paged: false,
+        persist: false,
+        threshold: 1,
+    },
+    true
+)]
+#[case::aggr(CStrategy::PageAggregation, false)]
+#[case::none(CStrategy::None, false)]
+fn a_replacement_reuses_a_deleted_extent_where_libhdf5_does(
+    #[case] strategy: CStrategy,
+    #[case] reuses: bool,
+) {
+    let dir = tempdir().unwrap();
+    let ours = dir.path().join("ours.h5");
+    let theirs = dir.path().join("theirs.h5");
+    {
+        let file = hdf5::FileBuilder::new()
+            .with_fapl(|fapl| fapl.libver_v110())
+            .with_fcpl(|fcpl| fcpl.file_space_strategy(strategy))
+            .create(&ours)
+            .unwrap();
+        for (name, value, len) in [("a", 1, 100), ("b", 2, 400), ("c", 3, 100)] {
+            file.new_dataset::<i32>()
+                .shape((len,))
+                .create(name)
+                .unwrap()
+                .write(&vec![value; len])
+                .unwrap();
+        }
+        file.close().unwrap();
+    }
+    std::fs::copy(&ours, &theirs).unwrap();
+
+    let ours_reuse = {
+        let file = File::open_rw(&ours).unwrap();
+        let deleted = contiguous_extent(&file, "b");
+        file.root().delete("b").unwrap();
+        file.commit().unwrap();
+        file.root()
+            .create_dataset("d", |b| {
+                b.with_i32_data(&[4; 300]);
+            })
+            .unwrap();
+        file.commit().unwrap();
+        range::overlaps(&deleted, &contiguous_extent(&file, "d"))
+    };
+    let theirs_reuse = {
+        let file = hdf5::File::open_rw(&theirs).unwrap();
+        let deleted = c_contiguous_extent(&file.dataset("b").unwrap());
+        file.unlink("b").unwrap();
+        let replacement = file.new_dataset::<i32>().shape((300,)).create("d").unwrap();
+        replacement.write(&[4; 300]).unwrap();
+        range::overlaps(&deleted, &c_contiguous_extent(&replacement))
+    };
+
+    assert_eq!((ours_reuse, theirs_reuse), (reuses, reuses));
+}
+
+fn contiguous_extent(file: &File, path: &str) -> Range<u64> {
+    let layout = file.dataset(path).unwrap().layout().unwrap();
+    let Layout::Contiguous {
+        address: Some(address),
+        size,
+    } = layout
+    else {
+        panic!("expected allocated contiguous storage, got {layout:?}");
+    };
+    address..address + size
+}
+
+fn c_contiguous_extent(dataset: &hdf5::Dataset) -> Range<u64> {
+    let address = dataset.offset().unwrap();
+    address..address + dataset.storage_size()
 }
 
 /// The offset of the "Address of Serialized Section List" field in a manager header with 8-byte

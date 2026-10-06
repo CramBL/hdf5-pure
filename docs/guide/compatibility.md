@@ -50,16 +50,17 @@ Shared object-header messages are supported for datatypes, dataspaces, fill valu
 
 ## File-space management
 
-| Feature | Read | Configure |
-|---|:---:|:---:|
-| `H5F_FSPACE_STRATEGY_FSM_AGGR` | ✅ | ✅ |
-| `H5F_FSPACE_STRATEGY_PAGE` | ✅ | ✅ |
-| `H5F_FSPACE_STRATEGY_AGGR` | ✅ | ✅ |
-| `H5F_FSPACE_STRATEGY_NONE` | ✅ | ✅ |
-| Persistent free-space managers | ✅ | ✅ |
-| Free-space threshold | ✅ | ✅ |
-| File-space page size | ✅ | ✅ |
-| Persisted free-space reuse | ✅ | ✅ |
+| Feature | Read | Configure | Detail |
+|---|:---:|:---:|---|
+| `H5F_FSPACE_STRATEGY_FSM_AGGR` | ✅ | 🟡 | Edits reuse freed space through the free-space managers, without aggregators. |
+| `H5F_FSPACE_STRATEGY_PAGE` | ✅ | ✅ | |
+| `H5F_FSPACE_STRATEGY_AGGR` | ✅ | 🟡 | Recorded for other libraries. Edits allocate at the end of the file, without aggregators, and a deletion leaves the file at its length. |
+| `H5F_FSPACE_STRATEGY_NONE` | ✅ | 🟡 | Edits allocate at the end of the file, and a deletion leaves the file at its length. |
+| Aggregators | ✅ | ❌ | No strategy allocates through aggregators. |
+| Persistent free-space managers | ✅ | ✅ | |
+| Free-space threshold | ✅ | ✅ | |
+| File-space page size | ✅ | ✅ | |
+| Persisted free-space reuse | ✅ | ✅ | |
 
 ## Dataspaces
 

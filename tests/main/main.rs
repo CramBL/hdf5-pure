@@ -21,6 +21,7 @@ mod dense_attr_limits;
 mod dense_attr_vlen;
 mod edit_append_inplace;
 mod edit_dataset_attr;
+mod edit_file_space_strategy;
 mod edit_free_space;
 mod edit_in_place;
 mod edit_reference_repointing;

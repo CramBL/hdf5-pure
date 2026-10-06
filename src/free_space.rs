@@ -4,7 +4,9 @@
 //! on each commit, leaves the superseded object headers and any deleted-object
 //! blocks behind as dead bytes. This module records those freed regions so a
 //! later allocation can reuse them instead of growing the file, and so a run of
-//! free space that reaches end-of-file can be truncated away.
+//! free space that reaches end-of-file can be truncated away. A session records
+//! them only under a strategy with free-space managers,
+//! `H5F_FSPACE_STRATEGY_FSM_AGGR` or `H5F_FSPACE_STRATEGY_PAGE`.
 //!
 //! It is the in-memory half of HDF5's "free-space management". For a file opened
 //! without persistence (the default) it is purely session-local: freed-but-
