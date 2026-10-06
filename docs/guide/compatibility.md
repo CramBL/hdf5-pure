@@ -58,7 +58,7 @@ Shared object-header messages are supported for datatypes, dataspaces, fill valu
 | `H5F_FSPACE_STRATEGY_NONE` | ✅ | 🟡 | Edits allocate at the end of the file, and a deletion leaves the file at its length. |
 | Aggregators | ✅ | ❌ | No strategy allocates through aggregators. |
 | Persistent free-space managers | ✅ | ✅ | |
-| Free-space threshold | ✅ | ✅ | |
+| Free-space threshold | ✅ | 🟡 | Edits under `H5F_FSPACE_STRATEGY_FSM_AGGR` track a freed region shorter than the threshold only where it adjoins tracked free space. Under `H5F_FSPACE_STRATEGY_PAGE` the writer and the editors track every page tail and freed region whatever its value. |
 | File-space page size | ✅ | ✅ | |
 | Persisted free-space reuse | ✅ | ✅ | |
 

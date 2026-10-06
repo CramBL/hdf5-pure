@@ -58,7 +58,9 @@ This crate has no aggregators under any strategy. Under [`FsmAggr`](crate::FileS
 
 ## The threshold parameter
 
-The `threshold` argument is the smallest free-space section, in bytes, that the free-space managers track, and the C library's default is `1` (every freed section is eligible). Under [`FsmAggr`](crate::FileSpaceStrategy::FsmAggr) and [`Page`](crate::FileSpaceStrategy::Page) it is recorded in the file and round-trips through the reference C library. In this crate the value is **advisory**: the paged writer and the bounded editor track every page tail and freed section whatever the recorded threshold, so a `threshold > 1` is preserved on disk and does not change which sections this crate records.
+The `threshold` argument is the smallest free-space section, in bytes, that the free-space managers track, and the C library's default is `1` (every freed section is eligible). Under [`FsmAggr`](crate::FileSpaceStrategy::FsmAggr) and [`Page`](crate::FileSpaceStrategy::Page) it is recorded in the file and round-trips through the reference C library.
+
+Under [`FsmAggr`](crate::FileSpaceStrategy::FsmAggr) a read-write session tracks a freed region of at least the threshold. It tracks a shorter one only where the region adjoins tracked free space, which it merges into, and drops it otherwise, as the C library does. A dropped region is not reused. Under [`Page`](crate::FileSpaceStrategy::Page) the writer and the editors track every page tail and freed region whatever the threshold.
 
 ## Reading the strategy back
 
@@ -122,7 +124,7 @@ Passing `persist = true` under [`FsmAggr`](crate::FileSpaceStrategy::FsmAggr) or
 
 [`File::persisted_free_space()`](crate::File::persisted_free_space) returns the tracked free regions as `(address, length)` pairs sorted by address, and a read-write session seeds its free list from them, so reuse spans sessions.
 
-Every commit rewrites those manager blocks, and they are themselves placed in free space where any fits, so a file under delete-and-recreate churn settles at a steady size, and never gains a set of managers per commit.
+Every commit rewrites those manager blocks, and they are themselves placed in free space where any fits, so a file under delete-and-recreate churn settles at a steady size. Under [`FsmAggr`](crate::FileSpaceStrategy::FsmAggr) a threshold above the length of the blocks is the exception: the file grows by a set of blocks on each commit that appends the new set at its end, since the session drops each superseded set that is isolated from tracked free space.
 
 Freed space that reaches the end of the file is given back to the filesystem: the commit shortens the file to where the run starts, to a page boundary on a paged file, and the managers it writes cover nothing above the new length. A few blocks' worth is kept for the tails the following commits have to write, and a run that would return less than that is left alone, so what this guarantees is that the file ends just above its last live allocation, not that a delete never makes a file longer. For a guaranteed shrink that also moves live objects down, use [repack](crate::_guide::repack).
 

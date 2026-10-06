@@ -149,9 +149,15 @@
 //! a deletion abandons its target's blocks. Under a strategy with free-space
 //! managers, `H5F_FSPACE_STRATEGY_FSM_AGGR` or `H5F_FSPACE_STRATEGY_PAGE`, the
 //! session records those regions in a free list and writes a later object into a
-//! freed region that fits it, appending only where none does. When freed space
-//! forms a run reaching end-of-file, the commit truncates the file to where the
-//! run starts.
+//! freed region that fits it, appending only where none does. Under
+//! `H5F_FSPACE_STRATEGY_FSM_AGGR` it records a region shorter than the file's
+//! threshold only where the region adjoins recorded free space
+//! ([`FreeList::release_all`]), and drops it otherwise. A paged session records
+//! every region whatever the threshold. When freed space and dropped regions form
+//! a run reaching end-of-file, the commit truncates the file to where the run
+//! starts. A persisting commit keeps part of the free space for the managers of
+//! the commits after it ([`release_trailing_run`]), and one that appends its
+//! managers keeps the whole run and writes the managers past it.
 //! Under `H5F_FSPACE_STRATEGY_AGGR` and `H5F_FSPACE_STRATEGY_NONE`, which have no
 //! free-space managers, and in a file whose strategy the session cannot read, the
 //! session drops the regions it vacates and allocates at the end of the file.
@@ -1076,10 +1082,12 @@ pub(crate) struct WriteEngine {
     /// without free-space managers and for a file whose strategy the session cannot read. A session
     /// that holds `None` reuses no freed space.
     free_space_settings: Option<FreeSpaceSettings>,
-    /// Session-local free-space tracker (issue #21). Holds regions vacated by
-    /// prior commits in this session — superseded object headers and the blocks
-    /// of deleted objects — so later commits reuse them instead of growing the
-    /// file, and so a freed run reaching end-of-file can be truncated away. It
+    /// Session-local free-space tracker (issue #21). Holds the superseded object
+    /// headers and the blocks of deleted objects that prior commits in this
+    /// session vacated, each one at least as long as the file's threshold or
+    /// adjoining a held region ([`FreeList::release_all`]), so later commits
+    /// write into them and a freed run reaching end-of-file can be truncated
+    /// away. It
     /// starts empty on `open` for a non-persisting file: holes already present
     /// from earlier sessions or other tools are not tracked. When the file
     /// persists its free space (`persist` is `Some`), `open` instead seeds it
@@ -2151,8 +2159,8 @@ impl PagedPostFree {
 /// length being itself a function of a section count that varies with the file.
 const TRAILING_RESERVE_TAILS: u64 = 4;
 
-/// Release the run of free space reaching `eof` from a flat file's post-commit
-/// free list, and return the end-of-allocation the commit should publish
+/// Releases the run of free space reaching `eoa` from a flat file's post-commit
+/// free list, and returns the end-of-allocation the commit should publish
 /// (issue #418).
 ///
 /// Not the whole run: [`TRAILING_RESERVE_TAILS`] tails' worth of it stays in the
@@ -2165,15 +2173,15 @@ const TRAILING_RESERVE_TAILS: u64 = 4;
 /// that would have filled it, which then goes past end-of-file instead, so the
 /// file grows by a whole object to give back a fraction of one.
 ///
-/// So `eof` — the file's length, unchanged — when it ends in live bytes and when
-/// the run is not worth releasing; the list is then left exactly as it came in.
-fn release_trailing_run(post: &mut FreeList, eof: u64, tail_len: u64) -> u64 {
-    let run_start = trailing_run_start([&*post], eof);
+/// Returns `eoa` unchanged, and leaves the list as it came in, when the allocation
+/// ends in live bytes and when the run is not worth releasing.
+fn release_trailing_run(post: &mut FreeList, eoa: u64, tail_len: u64) -> u64 {
+    let run_start = trailing_run_start([&*post], eoa);
     let keep = TRAILING_RESERVE_TAILS * tail_len;
-    if eof - run_start < 2 * keep {
-        return eof;
+    if eoa - run_start < 2 * keep {
+        return eoa;
     }
-    post.take_range(run_start + keep, eof - run_start - keep);
+    post.take_range(run_start + keep, eoa - run_start - keep);
     run_start + keep
 }
 
@@ -2400,8 +2408,8 @@ pub struct SpaceAccounting {
     /// grow — the summed length of
     /// [`reusable_free_space`](Self::reusable_free_space).
     ///
-    /// Counts holes left inside [`logical_size`](Self::logical_size) by this
-    /// session's earlier commits (superseded object headers, the blocks of
+    /// Counts the holes this session's earlier commits left inside
+    /// [`logical_size`](Self::logical_size) and tracked (superseded object headers, the blocks of
     /// deleted objects) and, for a file created with
     /// `H5Pset_file_space_strategy(persist = true)` and no userblock, the regions
     /// seeded from the on-disk free-space managers when the session was opened (so
@@ -2412,7 +2420,9 @@ pub struct SpaceAccounting {
     /// than reused — if adjacent space is later freed and the coalesced run
     /// reaches end-of-file. A session on a file whose strategy has no free-space
     /// managers, [`FileSpaceStrategy::Aggr`] or [`FileSpaceStrategy::None`],
-    /// reports `0` throughout.
+    /// reports `0` throughout. Under [`FileSpaceStrategy::FsmAggr`] a commit tracks a
+    /// hole shorter than the file's [`threshold`](crate::FileSpaceInfo::threshold) only
+    /// where the hole adjoins a tracked one.
     ///
     /// **Which write can spend it is not uniform on a persisting file.** Such a
     /// session may write into a hole only once it has taken that hole *out* of
@@ -7074,8 +7084,8 @@ impl WriteEngine {
         self.repoint_stored_references(&relocations)
     }
 
-    /// Hands the regions a commit vacated to the free list, and returns the address to truncate
-    /// the file to if a free run reaches `eof`.
+    /// Records the regions a commit vacated through [`FreeList::release_all`], and returns the
+    /// address to truncate the file to if a run of free and dropped regions reaches `eof`.
     ///
     /// A session whose [`free_space_settings`](Self::free_space_settings) is `None` drops the
     /// regions and returns `None`.
@@ -7084,16 +7094,19 @@ impl WriteEngine {
         // allocation or adjoins an aggregator (`H5MF_xfree` in `H5MF.c`). The session has no
         // aggregators, and it drops a block that ends the allocation as well, where libhdf5
         // shrinks the file.
-        self.free_space_settings?;
-        // `take_trailing` removes the trimmed run so it is not also counted as reusable interior
-        // space.
+        let settings = self.free_space_settings?;
         // The class is not consulted: a non-persisting commit is only reached on a
         // flat file (a paged one is rejected without persistence), which has no page
         // types to keep apart and so vacates nothing it cannot place.
-        for (addr, len, _) in to_free {
-            self.free.free(addr, len);
-        }
-        self.free.take_trailing(eof)
+        let eoa = self.free.release_all(
+            settings.threshold,
+            eof,
+            to_free.into_iter().map(|(addr, len, _)| (addr, len)),
+        );
+        // `take_trailing` removes the trimmed run so it is not also counted as reusable interior
+        // space.
+        let eoa = self.free.take_trailing(eoa).unwrap_or(eoa);
+        (eoa < eof).then_some(eoa)
     }
 
     /// Repoint every object reference the file already stores at a header this
@@ -7234,7 +7247,7 @@ impl WriteEngine {
         // already unreachable from the on-disk root, which is the guarantee
         // [`reserve`](Self::reserve) rests on too.
         let (post, placed_at, tail_len, eoa) =
-            self.flat_tail_layout(&to_free, &old_blocks, ext_len, widths);
+            self.flat_tail_layout(threshold, &to_free, &old_blocks, ext_len, widths);
         if placed_at.is_none() && placement == TailPlacement::ReuseOnly {
             // The shrink pass appends nothing: growing the file by a tail is the
             // opposite of what it was called for. Nothing has been written and the
@@ -7250,10 +7263,10 @@ impl WriteEngine {
             ext_addr + ext_len + hdf5_pure_format::__private::free_space_manager_header_len(widths),
         );
         // A reused tail sits inside the file, which ends it at the end-of-allocation
-        // the layout settled on — the current end-of-file, less any run of free
-        // space reaching it, which `post` no longer records and the truncation
-        // below gives back to the filesystem (issue #418). An appended tail ends
-        // the file itself.
+        // the layout settled on: the current end-of-file less the dropped regions
+        // that reach it and what `release_trailing_run` releases of the free space
+        // below them. Neither is in `post`, and the truncation below gives both back
+        // to the filesystem (issue #418). An appended tail ends the file itself.
         let final_eof = if reused { eoa } else { ext_addr + tail_len };
         debug_assert!(
             ext_addr + tail_len <= final_eof,
@@ -7263,8 +7276,15 @@ impl WriteEngine {
         // Build the real extension and the FSM blocks. With no free space to
         // record we still refresh the extension (persist on, managers undefined).
         let (ext_oh, fsm_blocks) = if sections.is_empty() {
-            let info =
-                file_space_info::persistent_empty(offset_width, strategy, threshold, page_size);
+            // With no managers to allocate, libhdf5 records the final end of allocation
+            // (`H5MF_settle_meta_data_fsm` and `H5MF__close_aggrfs` in `H5MF.c`, HDF5 1.14.6).
+            let info = file_space_info::persistent_empty(
+                offset_width,
+                strategy,
+                threshold,
+                page_size,
+                final_eof,
+            );
             let ext_oh =
                 build_v2_object_header(&self.rewrite_extension_region(old_ext_addr, &info)?)?;
             (ext_oh, None)
@@ -7399,10 +7419,13 @@ impl WriteEngine {
         StoredAddress::new(at)
     }
 
-    /// The free space a flat persisting commit is about to record: the session's
-    /// durable list plus the regions this commit vacated and the superseded
-    /// extension and manager blocks, which are dead once the superblock is
-    /// repointed.
+    /// Returns the free space a flat persisting commit is about to record, and
+    /// `eof` less the dropped regions that end it.
+    ///
+    /// The list is the session's durable list plus each of the regions this commit
+    /// vacated and of the superseded extension and manager blocks that is at least
+    /// `threshold` bytes long or adjoins a region of the list ([`FreeList::release_all`]).
+    /// Those regions and blocks are dead once the superblock is repointed.
     ///
     /// Returned as a temporary rather than folded into the session, for the reason
     /// [`paged_post_free`](Self::paged_post_free) does the same: every region
@@ -7415,30 +7438,36 @@ impl WriteEngine {
     /// for itself ([`flat_tail_layout`](Self::flat_tail_layout)).
     fn flat_post_free(
         &self,
+        threshold: u64,
+        eof: u64,
         to_free: &[(u64, u64, FreeClass)],
         old_blocks: &[(u64, u64)],
-    ) -> FreeList {
+    ) -> (FreeList, u64) {
         let mut post = self.free.clone();
         // A flat file keeps one list for the whole of it, so the class each freed
         // region carries for the paged path is not consulted here — and a flat
         // file produces no [`FreeClass::Dead`] region to begin with, since the
         // proof that classes one short-circuits where there are no page types to
         // keep apart.
-        for &(a, l, _) in to_free {
-            post.free(a, l);
-        }
-        for &(a, l) in old_blocks {
-            post.free(a, l);
-        }
-        post
+        let eoa = post.release_all(
+            threshold,
+            eof,
+            to_free
+                .iter()
+                .map(|&(addr, len, _)| (addr, len))
+                .chain(old_blocks.iter().copied()),
+        );
+        (post, eoa)
     }
 
     /// Reserve free space for a flat persisting commit's tail, returning the free
     /// list the tail leaves behind, the address it got — `None` when nothing
     /// reusable fits, which is the caller's cue to append — its length, which the
     /// caller needs either way, and the end-of-allocation the commit should
-    /// publish, which is the current end-of-file less any run of free space that
-    /// reaches it (issue #418).
+    /// publish: where the tail is reused, the current end-of-file less the dropped
+    /// regions that reach it and what [`release_trailing_run`] releases of the free
+    /// space below them, and where it is appended, the current end-of-file
+    /// (issue #418).
     ///
     /// The reservation and the length define each other, exactly as they do for the
     /// paged tail ([`tail_layout`](Self::tail_layout)): drawing bytes out of the
@@ -7502,6 +7531,7 @@ impl WriteEngine {
     /// to not doing so once per draw.
     fn flat_tail_layout(
         &mut self,
+        threshold: u64,
         to_free: &[(u64, u64, FreeClass)],
         old_blocks: &[(u64, u64)],
         ext_len: u64,
@@ -7516,7 +7546,7 @@ impl WriteEngine {
         // A manager block's length depends only on the sections it records, never
         // on where it sits. It is also the answer for a tail that ends up appended,
         // since every round hands its reservation back before this returns.
-        let probe = self.flat_post_free(to_free, old_blocks);
+        let (probe, _) = self.flat_post_free(threshold, eof, to_free, old_blocks);
         let appended_len = ext_len
             + hdf5_pure_format::__private::free_space_manager_len(
                 widths,
@@ -7532,13 +7562,13 @@ impl WriteEngine {
                     None => break,
                 },
             };
-            let mut post = self.flat_post_free(to_free, old_blocks);
+            let (mut post, eoa) = self.flat_post_free(threshold, eof, to_free, old_blocks);
             // Free space that reaches end-of-file is released rather than
             // recorded: the file is truncated to where the run starts, so the
             // sections these blocks are sized from must already leave it out
             // (issue #418). The reservation was taken before this list was built,
             // so the run can only begin at or above the tail's own end.
-            let eoa = release_trailing_run(&mut post, eof, proposed);
+            let eoa = release_trailing_run(&mut post, eoa, proposed);
             let len = ext_len
                 + hdf5_pure_format::__private::free_space_manager_len(
                     widths,
@@ -7560,8 +7590,9 @@ impl WriteEngine {
             proposed = len;
         }
         // Nothing reusable fits, so the tail is appended past end-of-file and no
-        // trailing run is released: whatever free space reaches end-of-file was
-        // too small for the tail, and stays recorded below it.
+        // trailing run is released: whatever tracked free space reaches end-of-file
+        // was too small for the tail and stays recorded below it, and a dropped
+        // extent that ended the allocation stays below it untracked.
         (probe, None, appended_len, eof)
     }
 
@@ -7708,9 +7739,15 @@ impl WriteEngine {
         );
 
         let ext_oh = if plan.is_empty() {
-            // No free space to track: an empty persist message, page-aligned.
-            let info =
-                file_space_info::persistent_empty(offset_width, strategy, threshold, page_size);
+            // No free space to track: an empty persist message, recording the final end of
+            // allocation as libhdf5 does when it allocates no managers.
+            let info = file_space_info::persistent_empty(
+                offset_width,
+                strategy,
+                threshold,
+                page_size,
+                final_eof,
+            );
             build_v2_object_header(&self.rewrite_extension_region(old_ext_addr, &info)?)?
         } else {
             // Paged convention (matching the from-scratch writer): the managers are
@@ -16549,7 +16586,7 @@ mod tests {
             s.free = FreeList::new();
             s.free.free(HOLE_AT, hole);
             let free_before = free_total(&s);
-            let (post, at, tail_len, _) = s.flat_tail_layout(&[], &[], EXT_LEN, widths);
+            let (post, at, tail_len, _) = s.flat_tail_layout(0, &[], &[], EXT_LEN, widths);
             let free_after = free_total(&s);
             // The blocks the commit will write into the extent it was handed. A hole
             // consumed outright drops a section from the managers, so this comes out

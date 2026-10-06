@@ -1340,7 +1340,13 @@ impl FileWriter {
         let threshold = settings.map_or(DEFAULT_THRESHOLD, |settings| settings.threshold);
         let page_size = self.file_space_page_size.unwrap_or(DEFAULT_PAGE_SIZE);
         Some(if settings.is_some_and(|settings| settings.persist) {
-            file_space_info::persistent_empty(OFFSET_WIDTH, strategy, threshold, page_size)
+            file_space_info::persistent_empty(
+                OFFSET_WIDTH,
+                strategy,
+                threshold,
+                page_size,
+                StoredAddress::undefined(OFFSET_WIDTH.get()).get(),
+            )
         } else {
             file_space_info::non_persistent(OFFSET_WIDTH, strategy, threshold, page_size)
         })
@@ -3807,13 +3813,13 @@ impl FileWriter {
         // reserved layout still holds.
         let real_ext_oh = match (&ext_oh, nonpaged_persist) {
             (Some(_), Some((strategy, threshold, np_page_size))) => {
-                let mut info = file_space_info::persistent_empty(
+                let info = file_space_info::persistent_empty(
                     OFFSET_WIDTH,
                     strategy,
                     threshold,
                     np_page_size,
+                    eof_addr2 - ub as u64,
                 );
-                info.eoa_pre_fsm = eof_addr2 - ub as u64;
                 let mut oh = ObjectHeaderWriter::new();
                 oh.add_message_with_flags(
                     MessageType::FILE_SPACE_INFO,
