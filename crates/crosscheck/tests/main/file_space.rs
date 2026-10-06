@@ -759,6 +759,124 @@ fn a_libhdf5_section_list_whose_checksum_does_not_match_is_reported_and_seeds_no
     assert_eq!(reusable_free_space(&path), Vec::new());
 }
 
+#[test]
+fn an_editor_never_frees_the_live_bytes_a_libhdf5_header_points_to_as_its_section_list() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("c_header_into_live_data.h5");
+    write_c_persisted_with_a_hole(&path, Driver::Sec2, Sizeof::Bytes8, Sizeof::Bytes8);
+    let live = hdf5::File::open(&path)
+        .unwrap()
+        .dataset("a")
+        .unwrap()
+        .offset()
+        .unwrap();
+    let pointed_to = live + 16..live + 80;
+    let header = deleted_dataset_manager_block(&path, ManagerBlock::Header);
+    let mut bytes = std::fs::read(&path).unwrap();
+    for (at, value) in [
+        (SECTION_LIST_ADDR_AT, pointed_to.start),
+        (SECTION_LIST_USED_AT, pointed_to.end - pointed_to.start),
+        (SECTION_LIST_ALLOCATED_AT, pointed_to.end - pointed_to.start),
+    ] {
+        test_util::bytes::set_slice_at(&mut bytes, header.start + at, &value.to_le_bytes());
+    }
+    test_util::checksum::restamp(&mut bytes, header.start, header.len());
+    std::fs::write(&path, &bytes).unwrap();
+
+    let err = File::open(&path)
+        .unwrap()
+        .persisted_free_space()
+        .unwrap_err();
+    let Error::Format(FormatError::InvalidFreeSpaceManager(message)) = &err else {
+        panic!("expected InvalidFreeSpaceManager, got {err:?}");
+    };
+    assert_eq!(
+        *message,
+        format!(
+            "the section list signature is b\"{}\", not b\"FSSE\"",
+            1i32.to_ne_bytes().escape_ascii()
+        )
+    );
+    let session = File::open_rw(&path).unwrap();
+    session.root().delete("big").unwrap();
+    for round in 0..3 {
+        session
+            .root()
+            .create_dataset(&format!("added{round}"), |b| {
+                b.with_i32_data(&[round; 16]);
+            })
+            .unwrap();
+        session.commit().unwrap();
+        let free = session.space_accounting().unwrap().reusable_free_space;
+        assert!(
+            !free
+                .iter()
+                .any(|&(addr, len)| addr < pointed_to.end && pointed_to.start < addr + len),
+            "after commit {round}, the free regions {free:?} reach the {pointed_to:?} the header points to"
+        );
+    }
+    session.close().unwrap();
+    let file = hdf5::File::open(&path).unwrap();
+    for (name, value) in [("a", 1), ("c", 3)] {
+        assert_eq!(
+            file.dataset(name).unwrap().read_raw::<i32>().unwrap(),
+            vec![value; 400]
+        );
+    }
+}
+
+#[test]
+fn a_libhdf5_section_list_of_another_header_is_reported_and_neither_seeded_nor_reclaimed() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("c_section_list_of_another_header.h5");
+    write_c_persisted_with_a_hole(&path, Driver::Sec2, Sizeof::Bytes8, Sizeof::Bytes8);
+    let header = deleted_dataset_manager_block(&path, ManagerBlock::Header);
+    let list = deleted_dataset_manager_block(&path, ManagerBlock::SectionList);
+    let mut bytes = std::fs::read(&path).unwrap();
+    test_util::bytes::set_slice_at(
+        &mut bytes,
+        list.start + SECTION_LIST_HEADER_ADDR_AT,
+        &0u64.to_le_bytes(),
+    );
+    test_util::checksum::restamp(&mut bytes, list.start, list.len());
+    std::fs::write(&path, &bytes).unwrap();
+
+    let err = File::open(&path)
+        .unwrap()
+        .persisted_free_space()
+        .unwrap_err();
+    let Error::Format(FormatError::InvalidFreeSpaceManager(message)) = &err else {
+        panic!("expected InvalidFreeSpaceManager, got {err:?}");
+    };
+    assert_eq!(
+        *message,
+        format!(
+            "the section list belongs to the header at 0, not to the header at {}",
+            header.start
+        )
+    );
+    assert_eq!(reusable_free_space(&path), Vec::new());
+    let session = File::open_rw(&path).unwrap();
+    session
+        .root()
+        .create_dataset("added", |b| {
+            b.with_i32_data(&[7; 16]);
+        })
+        .unwrap();
+    session.commit().unwrap();
+    let free = session.space_accounting().unwrap().reusable_free_space;
+    session.close().unwrap();
+    let list_addr = u64::try_from(list.start).unwrap();
+    let list_end = u64::try_from(list.end).unwrap();
+    assert!(
+        !free
+            .iter()
+            .any(|&(addr, len)| addr < list_end && list_addr < addr + len),
+        "the free regions {free:?} reach the section list at {list:?}"
+    );
+    assert_eq!(std::fs::read(&path).unwrap()[list.clone()], bytes[list]);
+}
+
 /// A block of a free-space manager.
 #[derive(Clone, Copy, Debug)]
 enum ManagerBlock {
@@ -1958,3 +2076,16 @@ fn c_library_reads_our_file_after_an_append_reused_free_space() {
         );
     }
 }
+
+/// The offset of the "Address of Serialized Section List" field in a manager header with 8-byte
+/// addresses and lengths.
+const SECTION_LIST_ADDR_AT: usize =
+    test_util::free_space::SIGNATURE.len() + 1 + 1 + 4 * 8 + 4 * 2 + 8;
+/// The offset of the "Size of Serialized Section List Used" field in a manager header with 8-byte
+/// addresses and lengths.
+const SECTION_LIST_USED_AT: usize = SECTION_LIST_ADDR_AT + 8;
+/// The offset of the "Allocated Size of Serialized Section List" field in a manager header with
+/// 8-byte addresses and lengths.
+const SECTION_LIST_ALLOCATED_AT: usize = SECTION_LIST_USED_AT + 8;
+/// The offset of the "Free-space Manager Header Address" field in a section list.
+const SECTION_LIST_HEADER_ADDR_AT: usize = test_util::free_space::SECTIONS_SIGNATURE.len() + 1;
