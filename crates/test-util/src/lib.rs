@@ -12,6 +12,7 @@ pub mod checksum;
 pub mod dataspace;
 pub mod datatype;
 pub mod extensible_array;
+pub mod file_space_info;
 pub mod fractal_heap;
 pub mod free_space;
 pub mod global_heap;

@@ -11,8 +11,12 @@ use hdf5_pure::{
     MemoryStrategy, SyncPolicy,
 };
 
+use hdf5_pure_core::__private::FileSpaceInfoFields;
+use hdf5_pure_format::__private::NUM_FILE_FSM_MANAGERS;
+use test_util::file_space_info;
 use test_util::free_space;
 use test_util::temp;
+use test_util::widths::Widths;
 use test_util_hdf5::dataset::Unlimited;
 
 // Shared with `tests/main/paged_staged_commit.rs`, which holds the staged commit to
@@ -680,6 +684,89 @@ fn persisted_free_space_survives_reopen_and_is_reused() {
     assert_eq!(f.dataset("a").unwrap().read_i32().unwrap(), vec![1; 100]);
     assert_eq!(f.dataset("c").unwrap().read_i32().unwrap(), vec![3; 100]);
     // Persistence remains armed: the file still records its free space on disk.
+    assert!(f.file_space_info().unwrap().persist);
+}
+
+#[test]
+fn a_version_0_message_s_persisted_free_space_is_recovered_and_reused() {
+    let path = temp::temp_path("hdf5_pure_fs_persist_version_0.h5");
+    let mut b = FileBuilder::new();
+    b.create_dataset("a").with_i32_data(&[1; 100]);
+    b.create_dataset("big").with_i32_data(&[7; 400]);
+    b.create_dataset("c").with_i32_data(&[3; 100]);
+    b.with_file_space_strategy(FileSpaceStrategy::FsmAggr, true, 1);
+    b.write(&path).unwrap();
+    {
+        let s = File::open_rw(&path).unwrap();
+        s.root().delete("big").unwrap();
+        s.commit().unwrap();
+    }
+    let (extension, version_1, free) = {
+        let f = File::open(&path).unwrap();
+        (
+            f.superblock().superblock_extension_address.unwrap(),
+            f.file_space_info().unwrap().clone(),
+            f.persisted_free_space().unwrap(),
+        )
+    };
+    let (version_0_managers, unused) = version_1
+        .manager_addrs
+        .split_at(file_space_info::VERSION_0_MANAGERS);
+    assert_eq!(
+        unused,
+        [u64::MAX; NUM_FILE_FSM_MANAGERS - file_space_info::VERSION_0_MANAGERS]
+    );
+    file_space_info::replace_message(
+        &path,
+        extension,
+        &file_space_info::version_0(
+            Widths::EIGHT,
+            file_space_info::ALL_PERSIST,
+            version_1.threshold,
+            version_0_managers,
+        ),
+    );
+
+    let f = File::open(&path).unwrap();
+    assert_eq!(
+        f.file_space_info(),
+        Some(
+            &FileSpaceInfoFields {
+                strategy: FileSpaceStrategy::FsmAggr,
+                persist: true,
+                threshold: 1,
+                page_size: 4096,
+                page_end_meta_threshold: 0,
+                eoa_pre_fsm: std::fs::metadata(&path).unwrap().len(),
+                manager_addrs: version_1.manager_addrs,
+            }
+            .build()
+        )
+    );
+    assert_eq!(f.persisted_free_space().unwrap(), free);
+    drop(f);
+
+    let eof_before = std::fs::metadata(&path).unwrap().len();
+    {
+        let s = File::open_rw(&path).unwrap();
+        s.root()
+            .create_dataset("d", |b| {
+                b.with_i32_data(&[9; 300]);
+            })
+            .unwrap();
+        s.commit().unwrap();
+    }
+    assert_eof_matches_file(&path);
+    let eof_after = std::fs::metadata(&path).unwrap().len();
+    assert!(
+        eof_after < eof_before + 1200,
+        "the new dataset reuses the free space the version 0 message persists \
+         (before={eof_before} after={eof_after})"
+    );
+    let f = File::open(&path).unwrap();
+    assert_eq!(f.dataset("d").unwrap().read_i32().unwrap(), vec![9; 300]);
+    assert_eq!(f.dataset("a").unwrap().read_i32().unwrap(), vec![1; 100]);
+    assert_eq!(f.dataset("c").unwrap().read_i32().unwrap(), vec![3; 100]);
     assert!(f.file_space_info().unwrap().persist);
 }
 

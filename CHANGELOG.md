@@ -18,6 +18,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- Fixed `File::file_space_info` returning `None` for a file that stores its file space settings at version 0. An edit that persists free space writes the settings back at version 1 ([#699](https://github.com/CramBL/hdf5-pure/pull/699)).
 - Fixed `File::open_rw` reusing the free regions of a free-space manager whose version, checksum, or section counts are invalid ([#698](https://github.com/CramBL/hdf5-pure/pull/698)).
 - Fixed `File::commit` freeing live data that a damaged free-space manager header points to as its section list ([#698](https://github.com/CramBL/hdf5-pure/pull/698)).
 - Fixed `File::persisted_free_space` misreading the free regions of a file that stores 2- or 4-byte lengths ([#697](https://github.com/CramBL/hdf5-pure/pull/697)).
