@@ -4,6 +4,8 @@
 use crate::bytes;
 use crate::checksum;
 use crate::object_header::Message;
+use crate::object_header::MessageFlags;
+use crate::object_header::MessageType;
 use crate::widths::Widths;
 
 /// The bytes of a version 2 object header's chunk zero, checksum included.
@@ -119,6 +121,76 @@ pub fn message_record(message: &Message, flags: HeaderFlags) -> Vec<u8> {
     record
 }
 
+/// Replaces the body of the first `msg_type` message in chunk zero of the version 2 object header
+/// at `header_at`, and recomputes the checksum of the chunk.
+///
+/// The record keeps its flags and its creation order. A Nil message fills the bytes a shorter body
+/// leaves, so the chunk keeps its size.
+///
+/// # Panics
+///
+/// Panics if `header_at` is not the start of a version 2 object header, if chunk zero holds no
+/// `msg_type` message, or if `body` is longer than the body it replaces or shorter by less than a
+/// record prefix.
+pub fn replace_message(file: &mut [u8], header_at: usize, msg_type: MessageType, body: &[u8]) {
+    assert_eq!(bytes::slice_at(file, header_at, SIGNATURE.len()), SIGNATURE);
+    let flags = HeaderFlags(bytes::u8_at(file, header_at + FLAGS_AT));
+    let chunk_size_at = header_at + flags.prefix_len();
+    let records_at = chunk_size_at + flags.chunk_size_width();
+    let chunk_size = bytes::uint_at(file, chunk_size_at, flags.chunk_size_width());
+    let records_end = records_at + usize::try_from(chunk_size).unwrap();
+
+    let mut at = records_at;
+    let old = loop {
+        assert!(at < records_end, "chunk zero holds no {msg_type:?} message");
+        let message = read_record(file, at, flags);
+        if message.msg_type == msg_type {
+            break message;
+        }
+        at += flags.record_prefix_len() + message.data.len();
+    };
+    let record_len = flags.record_prefix_len() + old.data.len();
+    let mut records = message_record(
+        &Message {
+            data: body.to_vec(),
+            ..old
+        },
+        flags,
+    );
+    if records.len() < record_len {
+        let nil_len = (record_len - records.len())
+            .checked_sub(flags.record_prefix_len())
+            .expect("the space a shorter body leaves holds a Nil message");
+        records.extend(message_record(&Message::nil(nil_len), flags));
+    }
+    assert_eq!(
+        records.len(),
+        record_len,
+        "a body no longer than the one it replaces"
+    );
+
+    bytes::set_slice_at(file, at, &records);
+    checksum::restamp(
+        file,
+        header_at,
+        records_end + checksum::CHECKSUM - header_at,
+    );
+}
+
+fn read_record(file: &[u8], at: usize, flags: HeaderFlags) -> Message {
+    let size = bytes::u16_at(file, at + RECORD_SIZE_AT);
+    Message {
+        msg_type: MessageType(u16::from(bytes::u8_at(file, at))),
+        flags: MessageFlags(bytes::u8_at(file, at + RECORD_FLAGS_AT)),
+        creation_order: if flags.tracks_creation_order() {
+            bytes::u16_at(file, at + RECORD_PREFIX_LEN)
+        } else {
+            0
+        },
+        data: bytes::slice_at(file, at + flags.record_prefix_len(), usize::from(size)).to_vec(),
+    }
+}
+
 /// The flags byte of a version 2 object header.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct HeaderFlags(pub u8);
@@ -128,6 +200,30 @@ impl HeaderFlags {
     /// its base-two logarithm.
     pub fn chunk_size_width(self) -> usize {
         1 << (self.0 & Self::CHUNK_SIZE_WIDTH.0)
+    }
+
+    /// Returns the length of the header prefix before the chunk size field.
+    fn prefix_len(self) -> usize {
+        let times = if self.stores_times() {
+            4 * size_of::<u32>()
+        } else {
+            0
+        };
+        let phase_change = if self.stores_attribute_phase_change() {
+            2 * size_of::<u16>()
+        } else {
+            0
+        };
+        FLAGS_AT + 1 + times + phase_change
+    }
+
+    /// Returns the length of a message record before its body.
+    fn record_prefix_len(self) -> usize {
+        if self.tracks_creation_order() {
+            RECORD_PREFIX_LEN + size_of::<u16>()
+        } else {
+            RECORD_PREFIX_LEN
+        }
     }
 
     pub fn tracks_creation_order(self) -> bool {
@@ -174,6 +270,14 @@ pub const CONTINUATION_SIGNATURE: &[u8; 4] = b"OCHK";
 
 const VERSION: u8 = 2;
 
+// The signature, then the version byte.
+const FLAGS_AT: usize = SIGNATURE.len() + 1;
+
+// A record's type (1 byte), size (2) and flags (1), before its optional creation order.
+const RECORD_SIZE_AT: usize = 1;
+const RECORD_FLAGS_AT: usize = 3;
+const RECORD_PREFIX_LEN: usize = 4;
+
 /// How many attributes an object keeps in its header before they move to a
 /// fractal heap, under a default creation property list.
 const DEFAULT_MAX_COMPACT: u16 = 8;
@@ -185,6 +289,7 @@ const DEFAULT_MIN_DENSE: u16 = 6;
 mod tests {
     use crate::bytes;
     use crate::checksum;
+    use crate::object_header::MessageFlags;
     use crate::object_header::v2::{self, HeaderFlags, Timestamps};
     use crate::object_header::{Message, MessageType};
 
@@ -213,6 +318,45 @@ mod tests {
         assert_eq!(
             checksum::lookup3(&header[..header.len() - 4]).to_le_bytes(),
             header[header.len() - 4..]
+        );
+    }
+
+    #[test]
+    fn replacing_a_message_keeps_its_record_prefix_and_pads_the_rest_with_nil() {
+        let header = |messages: Vec<Message>| {
+            v2::Header::new()
+                .flags(
+                    HeaderFlags::STORES_TIMES
+                        | HeaderFlags::TRACKS_CREATION_ORDER
+                        | HeaderFlags::STORES_ATTRIBUTE_PHASE_CHANGE,
+                )
+                .timestamps(Timestamps {
+                    access: 1,
+                    modification: 2,
+                    change: 3,
+                    birth: 4,
+                })
+                .messages(messages)
+                .build()
+        };
+        let first = Message::new(MessageType::DATASPACE, &[9]).with_creation_order(1);
+        let second = Message::new(MessageType::FILE_SPACE_INFO, &[7; 10])
+            .with_flags(MessageFlags::CONSTANT)
+            .with_creation_order(5);
+        let mut file = header(vec![first.clone(), second.clone()]);
+
+        v2::replace_message(&mut file, 0, MessageType::FILE_SPACE_INFO, &[3, 4]);
+
+        assert_eq!(
+            file,
+            header(vec![
+                first,
+                Message {
+                    data: vec![3, 4],
+                    ..second
+                },
+                Message::nil(2),
+            ])
         );
     }
 }

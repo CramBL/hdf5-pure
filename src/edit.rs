@@ -3266,6 +3266,8 @@ impl WriteEngine {
             .find(|m| m.msg_type == MessageType::FILE_SPACE_INFO)?;
         hdf5_pure_format::__private::parse_file_space_info(
             FormatWidths::from_sizes(os, ls).ok()?,
+            base,
+            self.superblock.eof_address,
             &msg.data,
         )
         .ok()
@@ -8017,8 +8019,10 @@ impl WriteEngine {
 
     /// Rebuilds the superblock-extension object header's message region with its
     /// File Space Info message replaced by `info` (every other message preserved
-    /// verbatim), ready to wrap with [`build_v2_object_header`]. The persisting
-    /// message is fixed-size, so this never changes the region's length.
+    /// verbatim), ready to wrap with [`build_v2_object_header`]. Every message the
+    /// editor writes here is a persisting version 1 message of one size at the file's
+    /// widths, so every rewrite of one region has the same length, which differs from
+    /// the region's own where it holds a version 0 message.
     ///
     /// `ext_addr` is the extension header's absolute file offset, which is where
     /// the messages are read from, and not the address the superblock stores.
@@ -13856,7 +13860,9 @@ fn encode_attr_body(name: &str, value: &AttrValue) -> Result<Vec<u8>, Error> {
 /// Rebuild a superblock-extension object header's message region (as collapsed by
 /// [`WriteEngine::gather_oh_messages`]) with
 /// its File Space Info message replaced by `info`, preserving every other message
-/// verbatim. The persisting message is fixed-size, so the region length is stable.
+/// verbatim. Every message the editor writes here is a persisting version 1
+/// message of one size at the file's widths, so every rewrite of one region has the
+/// same length.
 /// Shared by the whole-file mirror commit and the bounded finalize so both write
 /// the same extension bytes.
 pub(crate) fn rewrite_extension_region_bytes(

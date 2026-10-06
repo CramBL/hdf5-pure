@@ -6,6 +6,7 @@
 //! message carries free-space-manager addresses.
 
 use std::ops::Range;
+use std::path::Path;
 
 use hdf5::plist::file_create::FileSpaceStrategy as CStrategy;
 use hdf5::plist::file_create::Sizeof;
@@ -15,18 +16,23 @@ use hdf5_pure::Error;
 use hdf5_pure::File;
 use hdf5_pure::FileAccessProperties;
 use hdf5_pure::FileBuilder;
+use hdf5_pure::FileSpaceInfo;
 use hdf5_pure::FileSpaceStrategy;
 use hdf5_pure::FormatError;
 use hdf5_pure::Layout;
 use hdf5_pure::MaxExtent;
+use hdf5_pure_core::__private::FileSpaceInfoFields;
 use hdf5_pure_core::__private::StoredAddress;
 use hdf5_pure_format::__private::FormatWidths;
 use hdf5_pure_format::__private::FreeSpaceManagerHeader;
+use hdf5_pure_format::__private::NUM_FILE_FSM_MANAGERS;
 use hdf5_pure_format::__private::SECTION_CLASS_SIMPLE;
 use rstest::rstest;
 
 use tempfile::tempdir;
 
+use test_util::file_space_info;
+use test_util::widths::Widths;
 use test_util_hdf5::absence;
 use test_util_hdf5::dataset::Unlimited;
 use test_util_hdf5::session;
@@ -448,7 +454,7 @@ fn libhdf5_truncates_the_maximum_section_size_and_writes_section_sizes_as_wide_a
 ) {
     let dir = tempdir().unwrap();
     let path = dir.path().join("c_truncated_maximum.h5");
-    let freed = write_c_persisted_with_a_hole(&path, driver, sizeof_addr, sizeof_size);
+    let freed = write_c_persisted_with_a_hole(&path, driver, sizeof_addr, sizeof_size, 0);
     let file = File::open(&path).unwrap();
     let (offset_size, length_size) = (file.superblock().offset_size, file.superblock().length_size);
     let manager_addrs = file.file_space_info().unwrap().manager_addrs.clone();
@@ -500,7 +506,7 @@ fn the_free_sections_libhdf5_persists_are_read_at_the_widths_of_its_file(
 ) {
     let dir = tempdir().unwrap();
     let path = dir.path().join("c_persisted_sections.h5");
-    let freed = write_c_persisted_with_a_hole(&path, driver, sizeof_addr, sizeof_size);
+    let freed = write_c_persisted_with_a_hole(&path, driver, sizeof_addr, sizeof_size, 0);
     let free_c = hdf5::File::open(&path).unwrap().free_space();
 
     let free = File::open(&path).unwrap().persisted_free_space().unwrap();
@@ -604,7 +610,7 @@ fn libhdf5_loads_the_managers_the_serializer_writes_at_the_widths_of_its_file(
 ) {
     let dir = tempdir().unwrap();
     let path = dir.path().join("ours_persisted_sections.h5");
-    let freed = write_c_persisted_with_a_hole(&path, Driver::Sec2, sizeof_addr, sizeof_size);
+    let freed = write_c_persisted_with_a_hole(&path, Driver::Sec2, sizeof_addr, sizeof_size, 0);
     let file = File::open(&path).unwrap();
     let superblock = file.superblock();
     let widths = FormatWidths::from_sizes(superblock.offset_size, superblock.length_size).unwrap();
@@ -712,7 +718,8 @@ fn a_libhdf5_manager_with_an_invalid_field_is_reported_and_seeds_no_free_space(
 ) {
     let dir = tempdir().unwrap();
     let path = dir.path().join("c_invalid_manager.h5");
-    let freed = write_c_persisted_with_a_hole(&path, Driver::Sec2, Sizeof::Bytes8, Sizeof::Bytes8);
+    let freed =
+        write_c_persisted_with_a_hole(&path, Driver::Sec2, Sizeof::Bytes8, Sizeof::Bytes8, 0);
     assert!(
         reusable_free_space(&path)
             .iter()
@@ -740,7 +747,7 @@ fn a_libhdf5_manager_with_an_invalid_field_is_reported_and_seeds_no_free_space(
 fn a_libhdf5_section_list_whose_checksum_does_not_match_is_reported_and_seeds_no_free_space() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("c_section_list_checksum.h5");
-    write_c_persisted_with_a_hole(&path, Driver::Sec2, Sizeof::Bytes8, Sizeof::Bytes8);
+    write_c_persisted_with_a_hole(&path, Driver::Sec2, Sizeof::Bytes8, Sizeof::Bytes8, 0);
     let range = deleted_dataset_manager_block(&path, ManagerBlock::SectionList);
     let mut bytes = std::fs::read(&path).unwrap();
     let at = range.end - 4;
@@ -763,7 +770,7 @@ fn a_libhdf5_section_list_whose_checksum_does_not_match_is_reported_and_seeds_no
 fn an_editor_never_frees_the_live_bytes_a_libhdf5_header_points_to_as_its_section_list() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("c_header_into_live_data.h5");
-    write_c_persisted_with_a_hole(&path, Driver::Sec2, Sizeof::Bytes8, Sizeof::Bytes8);
+    write_c_persisted_with_a_hole(&path, Driver::Sec2, Sizeof::Bytes8, Sizeof::Bytes8, 0);
     let live = hdf5::File::open(&path)
         .unwrap()
         .dataset("a")
@@ -829,7 +836,7 @@ fn an_editor_never_frees_the_live_bytes_a_libhdf5_header_points_to_as_its_sectio
 fn a_libhdf5_section_list_of_another_header_is_reported_and_neither_seeded_nor_reclaimed() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("c_section_list_of_another_header.h5");
-    write_c_persisted_with_a_hole(&path, Driver::Sec2, Sizeof::Bytes8, Sizeof::Bytes8);
+    write_c_persisted_with_a_hole(&path, Driver::Sec2, Sizeof::Bytes8, Sizeof::Bytes8, 0);
     let header = deleted_dataset_manager_block(&path, ManagerBlock::Header);
     let list = deleted_dataset_manager_block(&path, ManagerBlock::SectionList);
     let mut bytes = std::fs::read(&path).unwrap();
@@ -938,14 +945,15 @@ enum Driver {
     Sec2,
 }
 
-/// Creates a file at `path` with libhdf5, through `driver` and at the widths `sizeof_addr` and
-/// `sizeof_size`, that persists its free-space managers, and returns the address of the 1600 bytes
-/// the deleted dataset `b` held.
+/// Creates a file at `path` that persists its free-space managers, with libhdf5 through `driver`,
+/// at the widths `sizeof_addr` and `sizeof_size` and after a userblock of `userblock` bytes, and
+/// returns the file offset of the 1600 bytes the deleted dataset `b` held.
 fn write_c_persisted_with_a_hole(
     path: &std::path::Path,
     driver: Driver,
     sizeof_addr: Sizeof,
     sizeof_size: Sizeof,
+    userblock: u64,
 ) -> u64 {
     let file = hdf5::FileBuilder::new()
         .with_fapl(|fapl| match driver {
@@ -957,6 +965,7 @@ fn write_c_persisted_with_a_hole(
                 sizeof_addr,
                 sizeof_size,
             })
+            .userblock(userblock)
             .file_space_strategy(CStrategy::FreeSpaceManager {
                 paged: false,
                 persist: true,
@@ -1045,6 +1054,254 @@ fn we_read_c_library_strategy() {
     );
     // The data still reads correctly.
     assert_eq!(f.dataset("d").unwrap().read_i32().unwrap(), vec![1, 2, 3]);
+}
+
+// Only HDF5 1.10.0 writes a version 0 message, so the version 0 tests replace the message libhdf5
+// writes.
+#[rstest]
+#[case::all(
+    file_space_info::ALL,
+    CStrategy::FreeSpaceManager {
+        paged: false,
+        persist: false,
+        threshold: 64,
+    },
+    FileSpaceStrategy::FsmAggr,
+    64
+)]
+#[case::aggr_vfd(
+    file_space_info::AGGR_VFD,
+    CStrategy::PageAggregation,
+    FileSpaceStrategy::Aggr,
+    1
+)]
+#[case::vfd(file_space_info::VFD, CStrategy::None, FileSpaceStrategy::None, 1)]
+fn a_version_0_strategy_reads_as_libhdf5_maps_it(
+    #[case] version_0_strategy: u8,
+    #[case] c_strategy: CStrategy,
+    #[case] strategy: FileSpaceStrategy,
+    #[case] threshold: u64,
+) {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("c_version_0.h5");
+    {
+        let file = hdf5::FileBuilder::new()
+            .with_fapl(|fapl| fapl.libver_v110())
+            .with_fcpl(|fcpl| {
+                fcpl.file_space_strategy(CStrategy::FreeSpaceManager {
+                    paged: false,
+                    persist: false,
+                    threshold: 64,
+                })
+            })
+            .create(&path)
+            .unwrap();
+        file.new_dataset::<i32>()
+            .shape((3,))
+            .create("d")
+            .unwrap()
+            .write(&[1i32, 2, 3])
+            .unwrap();
+        file.close().unwrap();
+    }
+    file_space_info::replace_message(
+        &path,
+        extension_addr(&path),
+        &file_space_info::version_0(Widths::EIGHT, version_0_strategy, 64, &[]),
+    );
+
+    let f = hdf5::File::open(&path).unwrap();
+    assert_eq!(
+        f.create_plist().unwrap().get_file_space_strategy().unwrap(),
+        c_strategy
+    );
+    drop(f);
+    let f = File::open(&path).unwrap();
+    assert_eq!(
+        f.file_space_info(),
+        Some(&version_0_mapped(
+            strategy,
+            false,
+            threshold,
+            u64::MAX,
+            Vec::new()
+        ))
+    );
+    assert_eq!(f.dataset("d").unwrap().read_i32().unwrap(), vec![1, 2, 3]);
+}
+
+#[rstest]
+fn a_version_0_message_s_persisted_free_space_reads_as_libhdf5_reads_it(
+    #[values(Sizeof::Bytes2, Sizeof::Bytes4, Sizeof::Bytes8)] sizeof_size: Sizeof,
+    #[values(0, 512)] userblock: u64,
+) {
+    assert_version_0_free_space_reads_as_libhdf5_reads_it(Sizeof::Bytes8, sizeof_size, userblock);
+}
+
+// libhdf5 1.10.11 and 1.12.3 bound each address of a version 0 message by `H5_SIZEOF_HADDR_T`, so
+// they reject a message whose addresses are narrower (`H5O_fsinfo_decode` in `H5Ofsinfo.c`, HDF5
+// 1.10.11, and `H5O__fsinfo_decode`, HDF5 1.12.3).
+#[cfg(feature = "__hdf5-1.14")]
+#[rstest]
+fn a_version_0_message_s_persisted_free_space_reads_as_libhdf5_reads_it_at_a_narrow_address_width(
+    #[values(Sizeof::Bytes2, Sizeof::Bytes4)] sizeof_addr: Sizeof,
+    #[values(Sizeof::Bytes2, Sizeof::Bytes4, Sizeof::Bytes8)] sizeof_size: Sizeof,
+) {
+    assert_version_0_free_space_reads_as_libhdf5_reads_it(sizeof_addr, sizeof_size, 0);
+}
+
+fn assert_version_0_free_space_reads_as_libhdf5_reads_it(
+    sizeof_addr: Sizeof,
+    sizeof_size: Sizeof,
+    userblock: u64,
+) {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("c_persisted_version_0.h5");
+    let freed =
+        write_c_persisted_with_a_hole(&path, Driver::Sec2, sizeof_addr, sizeof_size, userblock);
+    let undefined = StoredAddress::undefined(sizeof_addr as u8).get();
+    let version_1 = rewrite_as_version_0(
+        &path,
+        Widths::new(sizeof_addr.into(), sizeof_size.into()),
+        undefined,
+    );
+
+    let f = hdf5::File::open(&path).unwrap();
+    assert_eq!(
+        f.create_plist().unwrap().get_file_space_strategy().unwrap(),
+        CStrategy::FreeSpaceManager {
+            paged: false,
+            persist: true,
+            threshold: 1,
+        }
+    );
+    let free_c = f.free_space();
+    drop(f);
+    let f = File::open(&path).unwrap();
+    assert_eq!(
+        f.file_space_info(),
+        Some(&version_0_mapped(
+            FileSpaceStrategy::FsmAggr,
+            true,
+            1,
+            std::fs::metadata(&path).unwrap().len() - userblock,
+            version_1.manager_addrs
+        ))
+    );
+    let free = f.persisted_free_space().unwrap();
+    assert!(free.contains(&(freed - userblock, 1600)), "{free:?}");
+    assert_eq!(free.iter().map(|&(_, len)| len).sum::<u64>(), free_c);
+}
+
+#[test]
+fn libhdf5_reads_a_version_0_file_after_an_edit_reuses_its_persisted_free_space() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("c_persisted_version_0_edited.h5");
+    let freed =
+        write_c_persisted_with_a_hole(&path, Driver::Sec2, Sizeof::Bytes8, Sizeof::Bytes8, 0);
+    rewrite_as_version_0(&path, Widths::EIGHT, u64::MAX);
+
+    {
+        let s = File::open_rw(&path).unwrap();
+        s.root()
+            .create_dataset("d", |b| {
+                b.with_i32_data(&[9; 300]);
+            })
+            .unwrap();
+        s.commit().unwrap();
+    }
+    let total_ours: u64 = File::open(&path)
+        .unwrap()
+        .persisted_free_space()
+        .unwrap()
+        .iter()
+        .map(|&(_, len)| len)
+        .sum();
+
+    let f = hdf5::File::open(&path).unwrap();
+    assert_eq!(
+        f.create_plist().unwrap().get_file_space_strategy().unwrap(),
+        CStrategy::FreeSpaceManager {
+            paged: false,
+            persist: true,
+            threshold: 1,
+        }
+    );
+    let d = f.dataset("d").unwrap();
+    assert!(
+        (freed..freed + 1600).contains(&d.offset().unwrap()),
+        "the new dataset's data is in the hole at {freed}, at {:?}",
+        d.offset()
+    );
+    assert_eq!(d.read_raw::<i32>().unwrap(), vec![9; 300]);
+    assert_eq!(
+        f.dataset("a").unwrap().read_raw::<i32>().unwrap(),
+        vec![1; 400]
+    );
+    assert_eq!(
+        f.dataset("c").unwrap().read_raw::<i32>().unwrap(),
+        vec![3; 400]
+    );
+    assert_eq!(
+        f.dataset("big").unwrap().read_raw::<i32>().unwrap(),
+        vec![4; 5000]
+    );
+    assert_eq!(f.free_space(), total_ours);
+}
+
+/// Rewrites the version 1 File Space Info message of the file at `path` as a version 0 message with
+/// its first six manager addresses, and returns the version 1 message.
+///
+/// # Panics
+///
+/// Panics if any of the six other manager addresses is not `undefined`.
+fn rewrite_as_version_0(path: &Path, widths: Widths, undefined: u64) -> FileSpaceInfo {
+    let version_1 = File::open(path).unwrap().file_space_info().unwrap().clone();
+    let (version_0_managers, unused) = version_1
+        .manager_addrs
+        .split_at(file_space_info::VERSION_0_MANAGERS);
+    assert_eq!(
+        unused,
+        [undefined; NUM_FILE_FSM_MANAGERS - file_space_info::VERSION_0_MANAGERS]
+    );
+    file_space_info::replace_message(
+        path,
+        extension_addr(path),
+        &file_space_info::version_0(
+            widths,
+            file_space_info::ALL_PERSIST,
+            version_1.threshold,
+            version_0_managers,
+        ),
+    );
+    version_1
+}
+
+/// Returns the absolute file position of the superblock extension of the file at `path`.
+fn extension_addr(path: &Path) -> u64 {
+    let file = File::open(path).unwrap();
+    let superblock = file.superblock();
+    superblock.base_address.get() + superblock.superblock_extension_address.unwrap()
+}
+
+/// Returns the fields of version 1 that a version 0 message maps to.
+fn version_0_mapped(
+    strategy: FileSpaceStrategy,
+    persist: bool,
+    threshold: u64,
+    eoa_pre_fsm: u64,
+    manager_addrs: Vec<u64>,
+) -> FileSpaceInfo {
+    FileSpaceInfoFields {
+        strategy,
+        persist,
+        threshold,
+        page_size: 4096,
+        page_end_meta_threshold: 0,
+        eoa_pre_fsm,
+        manager_addrs,
+    }
+    .build()
 }
 
 #[test]

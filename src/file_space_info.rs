@@ -6,6 +6,9 @@ use alloc::{vec, vec::Vec};
 use hdf5_pure_core::__private::FileSpaceInfoFields;
 pub use hdf5_pure_core::FileSpaceInfo;
 pub use hdf5_pure_core::FileSpaceStrategy;
+pub(crate) use hdf5_pure_format::__private::DEFAULT_PAGE_SIZE;
+pub(crate) use hdf5_pure_format::__private::DEFAULT_THRESHOLD;
+pub(crate) use hdf5_pure_format::__private::NUM_FILE_FSM_MANAGERS;
 
 use crate::address::StoredAddress;
 use crate::width::OffsetWidth;
@@ -114,19 +117,13 @@ pub(crate) fn persistent_managers(
     .build()
 }
 
-/// The default free-space section threshold the C library uses.
-pub(crate) const DEFAULT_THRESHOLD: u64 = 1;
-/// The default file-space page size the C library uses.
-pub(crate) const DEFAULT_PAGE_SIZE: u64 = 4096;
-/// Number of free-space-manager address slots a persisting message carries (one
-/// per file memory type); the reference C library writes twelve.
-pub(crate) const NUM_FILE_FSM_MANAGERS: usize = 12;
-
 #[cfg(test)]
 mod tests {
     use rstest::rstest;
 
     use super::*;
+    use crate::address::BaseAddress;
+    use crate::address::BaseAddressExt;
     use crate::file_writer::WIDTHS;
 
     #[test]
@@ -141,8 +138,13 @@ mod tests {
             let bytes =
                 hdf5_pure_format::__private::serialize_file_space_info(WIDTHS, &info).unwrap();
             assert_eq!(bytes.len(), 29, "non-persistent message is 29 bytes");
-            let parsed =
-                hdf5_pure_format::__private::parse_file_space_info(WIDTHS, &bytes).unwrap();
+            let parsed = hdf5_pure_format::__private::parse_file_space_info(
+                WIDTHS,
+                BaseAddress::ZERO,
+                0,
+                &bytes,
+            )
+            .unwrap();
             assert_eq!(parsed, info);
             assert_eq!(parsed.eoa_pre_fsm, u64::MAX);
             assert!(parsed.manager_addrs.is_empty());
@@ -181,7 +183,13 @@ mod tests {
         let bytes = hdf5_pure_format::__private::serialize_file_space_info(WIDTHS, &info).unwrap();
         // 29-byte head + 12 * 8 manager slots.
         assert_eq!(bytes.len(), 29 + NUM_FILE_FSM_MANAGERS * 8);
-        let parsed = hdf5_pure_format::__private::parse_file_space_info(WIDTHS, &bytes).unwrap();
+        let parsed = hdf5_pure_format::__private::parse_file_space_info(
+            WIDTHS,
+            BaseAddress::ZERO,
+            0,
+            &bytes,
+        )
+        .unwrap();
         assert_eq!(parsed, info);
         assert_eq!(parsed.manager_addrs[0], 841);
         assert_eq!(parsed.manager_addrs[2], 18384);

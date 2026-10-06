@@ -61,7 +61,7 @@ pub enum FormatError {
     InvalidReferenceType(u8),
     /// Invalid file-space management strategy code in a File Space Info message.
     InvalidFileSpaceStrategy(u8),
-    /// Unsupported File Space Info message version (only version 1 is handled).
+    /// Unsupported File Space Info message version: the parser reads versions 0 and 1.
     UnsupportedFileSpaceInfoVersion(u8),
     /// A paged file-space strategy was requested with a page size the writer
     /// cannot use: it must be a power of two of at least 512 bytes.

@@ -107,8 +107,8 @@ fn final_mix(a: &mut u32, b: &mut u32, c: &mut u32) {
 // Bytes of input one round of `mix` consumes: three four-byte words.
 const BLOCK: usize = 12;
 
-// The width of the checksum field itself.
-const CHECKSUM: usize = 4;
+/// The width in bytes of a checksum field.
+pub const CHECKSUM: usize = 4;
 
 #[cfg(test)]
 mod tests {

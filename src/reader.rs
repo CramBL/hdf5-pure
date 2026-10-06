@@ -1671,7 +1671,13 @@ impl FileInner {
         let widths =
             FormatWidths::from_sizes(self.superblock.offset_size, self.superblock.length_size)
                 .ok()?;
-        hdf5_pure_format::__private::parse_file_space_info(widths, &msg.data).ok()
+        hdf5_pure_format::__private::parse_file_space_info(
+            widths,
+            self.addr_offset,
+            self.superblock.eof_address,
+            &msg.data,
+        )
+        .ok()
     }
 
     /// Parse the Shared Message Table message from the superblock extension and
