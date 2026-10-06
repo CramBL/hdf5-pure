@@ -1,27 +1,17 @@
-//! Session-local free-space tracking for in-place editing (issue #21).
+//! The free list of a read-write session, which records the space its commits vacate.
 //!
-//! [`File::open_rw`](crate::File::open_rw) writes by appending at end-of-file and,
-//! on each commit, leaves the superseded object headers and any deleted-object
-//! blocks behind as dead bytes. This module records those freed regions so a
-//! later allocation can reuse them instead of growing the file, and so a run of
-//! free space that reaches end-of-file can be truncated away. A session records
-//! them only under a strategy with free-space managers,
-//! `H5F_FSPACE_STRATEGY_FSM_AGGR` or `H5F_FSPACE_STRATEGY_PAGE`.
+//! A commit vacates the object headers it supersedes and the blocks of the objects it deletes.
+//! Under a strategy with free-space managers, `H5F_FSPACE_STRATEGY_FSM_AGGR` or
+//! `H5F_FSPACE_STRATEGY_PAGE`, the session records the vacated extents in a [`FreeList`] and
+//! writes a later object into a free region that fits it. [`FreeList::release_all`] records an
+//! extent at least as long as the file's threshold, the smallest free-space section the managers
+//! track, or one that adjoins a recorded region.
 //!
-//! It is the in-memory half of HDF5's "free-space management". For a file opened
-//! without persistence (the default) it is purely session-local: freed-but-
-//! unreused space is invisible to other tools, exactly as the reference C
-//! library's default `FSM_AGGR` strategy with persistence off leaves it. When the
-//! file was created with `persist = true`, [`File::open_rw`](crate::File::open_rw)
-//! seeds this list from the on-disk free-space managers (the `FSHD`/`FSSE` blocks
-//! the File Space Info superblock-extension message points at) on open and writes
-//! it back on each commit, so reuse spans sessions (see
-//! [`free_space_manager`](crate::free_space_manager)).
-//!
-//! The structure is a sorted, fully coalesced list of disjoint `[addr, addr+len)`
-//! regions. Every public operation preserves both invariants (sorted by address,
-//! no two regions touching or overlapping), so the list is always in a canonical
-//! form and `trailing_free` is a single comparison against the highest region.
+//! A session on a file without persistence starts with an empty list. On a file created with
+//! `persist = true`, [`File::open_rw`](crate::File::open_rw) seeds the list from the file's
+//! free-space managers, and each commit writes the list back to them.
+
+use core::cmp::Reverse;
 
 /// A contiguous run of free bytes in the file, `[addr, addr + len)`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -117,6 +107,70 @@ impl FreeList {
             len: merged_end - merged_addr,
         };
         self.regions.splice(lo..hi, [merged]);
+    }
+
+    /// Records each of `extents` that is at least `threshold` bytes long or adjoins a recorded
+    /// region, and returns `eoa` less the dropped extents that end it.
+    ///
+    /// A shorter extent merges into the region it adjoins, which may be one this call recorded,
+    /// and is dropped where no region adjoins it. Two shorter extents that adjoin only each other
+    /// are both dropped.
+    ///
+    /// A dropped extent that ends at `eoa` lowers the end of allocation to its start, and so does
+    /// each further dropped extent that then ends it. A recorded region that ends at `eoa` stays
+    /// in the list.
+    pub(crate) fn release_all(
+        &mut self,
+        threshold: u64,
+        eoa: u64,
+        extents: impl IntoIterator<Item = (u64, u64)>,
+    ) -> u64 {
+        // The extents of at least the threshold are tracked first, and the smaller ones are offered
+        // again until none merges, so what is tracked does not depend on the order of `extents`.
+        let (mut pending, eligible): (Vec<_>, Vec<_>) =
+            extents.into_iter().partition(|&(_, len)| len < threshold);
+        for (addr, len) in eligible {
+            self.free(addr, len);
+        }
+        loop {
+            let offered = pending.len();
+            pending.retain(|&(addr, len)| self.release(threshold, addr, len) == Release::Drop);
+            if pending.len() == offered {
+                break;
+            }
+        }
+        // A dropped extent that ends the allocation shrinks it, as libhdf5 shrinks the file by a
+        // freed block that ends it (`H5MF_try_shrink` in `H5MF.c` and
+        // `H5MF__sect_simple_can_shrink` in `H5MFsection.c`, HDF5 1.14.6). libhdf5 shrinks it by a
+        // tracked section that ends it as well, which this leaves to the caller.
+        pending.sort_unstable_by_key(|&(addr, _)| Reverse(addr));
+        pending.into_iter().fold(
+            eoa,
+            |eoa, (addr, len)| if addr + len == eoa { addr } else { eoa },
+        )
+    }
+
+    /// Records `[addr, addr + len)` if it is at least `threshold` bytes long or adjoins a region,
+    /// and returns which [`Release`] applies.
+    ///
+    /// An empty extent is dropped whatever `threshold` is.
+    fn release(&mut self, threshold: u64, addr: u64, len: u64) -> Release {
+        // `H5MF_xfree` (`H5MF.c`, HDF5 1.14.6) adds a section of at least the threshold and merges a
+        // smaller one into an adjoining tracked section through `H5FS_sect_try_merge`
+        // (`H5FSsection.c`), dropping it where none adjoins.
+        let release = if len == 0 {
+            Release::Drop
+        } else if len >= threshold {
+            Release::Track
+        } else if self.adjoins(addr, len) {
+            Release::Merge
+        } else {
+            Release::Drop
+        };
+        if release != Release::Drop {
+            self.free(addr, len);
+        }
+        release
     }
 
     /// Reserve `len` bytes from a free region, returning the address handed out,
@@ -310,6 +364,25 @@ impl FreeList {
             _ => None,
         }
     }
+
+    /// Returns `true` if a region ends at `addr` or starts at `addr + len`.
+    fn adjoins(&self, addr: u64, len: u64) -> bool {
+        let end = addr + len;
+        self.regions
+            .iter()
+            .any(|r| r.end() == addr || r.addr == end)
+    }
+}
+
+/// What [`FreeList::release`] does with a freed extent.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Release {
+    /// The extent is not recorded.
+    Drop,
+    /// The extent is shorter than the threshold and is recorded with a region it adjoins.
+    Merge,
+    /// The extent is at least the threshold and is recorded.
+    Track,
 }
 
 /// The lowest address of the run of free space that reaches `eof`, across
@@ -349,6 +422,8 @@ where
 
 #[cfg(test)]
 mod tests {
+    use rstest::rstest;
+
     use super::*;
 
     /// Expose the canonical region list as `(addr, len)` pairs for assertions.
@@ -586,4 +661,98 @@ mod tests {
         fl.take_range(0, 0); // empty
         assert_eq!(regions(&fl), [(100, 40)]);
     }
+
+    #[rstest]
+    #[case::below_the_threshold(THRESHOLD - 1, Release::Drop, &[(0, 100)])]
+    #[case::at_the_threshold(THRESHOLD, Release::Track, &[(0, 100), (500, THRESHOLD)])]
+    #[case::above_the_threshold(
+        THRESHOLD + 1,
+        Release::Track,
+        &[(0, 100), (500, THRESHOLD + 1)]
+    )]
+    fn an_isolated_extent_is_tracked_from_the_threshold_up(
+        #[case] len: u64,
+        #[case] release: Release,
+        #[case] expected: &[(u64, u64)],
+    ) {
+        let mut fl = FreeList::new();
+        fl.free(0, 100);
+
+        assert_eq!(fl.release(THRESHOLD, 500, len), release);
+        assert_eq!(regions(&fl), expected);
+    }
+
+    #[rstest]
+    #[case::below_it(&[(100, 100)], (50, 50), &[(50, 150)])]
+    #[case::above_it(&[(100, 100)], (200, 50), &[(100, 150)])]
+    #[case::between_two(&[(100, 100), (250, 100)], (200, 50), &[(100, 250)])]
+    fn a_sub_threshold_extent_merges_into_an_adjoining_tracked_section(
+        #[case] tracked: &[(u64, u64)],
+        #[case] (addr, len): (u64, u64),
+        #[case] expected: &[(u64, u64)],
+    ) {
+        let mut fl = FreeList::new();
+        for &(addr, len) in tracked {
+            fl.free(addr, len);
+        }
+
+        assert_eq!(fl.release(THRESHOLD, addr, len), Release::Merge);
+        assert_eq!(regions(&fl), expected);
+    }
+
+    #[test]
+    fn adjoining_sub_threshold_extents_are_both_dropped() {
+        let mut fl = FreeList::new();
+
+        assert_eq!(
+            [
+                fl.release(THRESHOLD, 0, THRESHOLD - 1),
+                fl.release(THRESHOLD, THRESHOLD - 1, THRESHOLD - 1),
+            ],
+            [Release::Drop, Release::Drop]
+        );
+        assert!(fl.is_empty());
+    }
+
+    #[test]
+    fn an_empty_extent_is_dropped() {
+        let mut fl = FreeList::new();
+
+        assert_eq!(fl.release(0, 100, 0), Release::Drop);
+        assert!(fl.is_empty());
+    }
+
+    #[rstest]
+    #[case::a_dropped_extent_ending_it(&[], &[(900, 50)], 900, &[])]
+    #[case::dropped_extents_ending_it_in_turn(&[], &[(900, 50), (850, 50)], 850, &[])]
+    #[case::a_dropped_extent_ending_it_only_later(&[], &[(850, 50), (900, 50)], 850, &[])]
+    #[case::a_dropped_extent_below_a_tracked_one(&[], &[(800, 50), (850, 100)], 950, &[(800, 150)])]
+    #[case::a_tracked_extent_ending_it(&[], &[(850, 100)], 950, &[(850, 100)])]
+    #[case::a_merged_extent_ending_it(&[(800, 100)], &[(900, 50)], 950, &[(800, 150)])]
+    #[case::a_merged_extent_ending_it_only_later(
+        &[(800, 50)],
+        &[(900, 50), (850, 50)],
+        950,
+        &[(800, 150)]
+    )]
+    #[case::a_dropped_extent_below_it(&[], &[(800, 50)], 950, &[])]
+    fn releasing_lowers_the_end_of_allocation_by_the_dropped_extents_that_end_it(
+        #[case] tracked: &[(u64, u64)],
+        #[case] extents: &[(u64, u64)],
+        #[case] expected_eoa: u64,
+        #[case] expected_regions: &[(u64, u64)],
+    ) {
+        let mut fl = FreeList::new();
+        for &(addr, len) in tracked {
+            fl.free(addr, len);
+        }
+
+        assert_eq!(
+            fl.release_all(THRESHOLD, 950, extents.iter().copied()),
+            expected_eoa
+        );
+        assert_eq!(regions(&fl), expected_regions);
+    }
+
+    const THRESHOLD: u64 = 64;
 }

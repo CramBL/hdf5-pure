@@ -2355,14 +2355,13 @@ fn c_library_reads_our_file_after_an_append_reused_free_space() {
 }
 
 #[rstest]
-#[case::fsm_aggr(
-    CStrategy::FreeSpaceManager {
-        paged: false,
-        persist: false,
-        threshold: 1,
-    },
-    true
-)]
+#[case::fsm_aggr(fsm_aggr(false, 1), true)]
+#[case::fsm_aggr_below_the_extent(fsm_aggr(false, DELETED_LEN - 1), true)]
+#[case::fsm_aggr_at_the_extent(fsm_aggr(false, DELETED_LEN), true)]
+#[case::fsm_aggr_above_the_extent(fsm_aggr(false, DELETED_LEN + 1), false)]
+#[case::fsm_aggr_persisting_below_the_extent(fsm_aggr(true, DELETED_LEN - 1), true)]
+#[case::fsm_aggr_persisting_at_the_extent(fsm_aggr(true, DELETED_LEN), true)]
+#[case::fsm_aggr_persisting_above_the_extent(fsm_aggr(true, DELETED_LEN + 1), false)]
 #[case::aggr(CStrategy::PageAggregation, false)]
 #[case::none(CStrategy::None, false)]
 fn a_replacement_reuses_a_deleted_extent_where_libhdf5_does(
@@ -2378,7 +2377,7 @@ fn a_replacement_reuses_a_deleted_extent_where_libhdf5_does(
             .with_fcpl(|fcpl| fcpl.file_space_strategy(strategy))
             .create(&ours)
             .unwrap();
-        for (name, value, len) in [("a", 1, 100), ("b", 2, 400), ("c", 3, 100)] {
+        for (name, value, len) in [("a", 1, 100), ("b", 2, DELETED_ELEMENTS), ("c", 3, 100)] {
             file.new_dataset::<i32>()
                 .shape((len,))
                 .create(name)
@@ -2415,6 +2414,180 @@ fn a_replacement_reuses_a_deleted_extent_where_libhdf5_does(
     assert_eq!((ours_reuse, theirs_reuse), (reuses, reuses));
 }
 
+#[rstest]
+#[case::fsm_aggr_alone(false, &["c"], 0)]
+#[case::fsm_aggr_beside_a_tracked_extent(false, &["b", "c"], SUB_THRESHOLD_LEN)]
+#[case::fsm_aggr_persisting_alone(true, &["c"], 0)]
+#[case::fsm_aggr_persisting_beside_a_tracked_extent(true, &["b", "c"], SUB_THRESHOLD_LEN)]
+fn a_sub_threshold_extent_is_tracked_only_beside_a_tracked_extent_as_libhdf5_tracks_it(
+    #[case] persist: bool,
+    #[case] deletions: &[&str],
+    #[case] tracked: u64,
+) {
+    let dir = tempdir().unwrap();
+    let ours = dir.path().join("ours.h5");
+    let theirs = dir.path().join("theirs.h5");
+    {
+        let file = hdf5::FileBuilder::new()
+            .with_fapl(|fapl| fapl.libver_v110())
+            .with_fcpl(|fcpl| fcpl.file_space_strategy(fsm_aggr(persist, THRESHOLD)))
+            .create(&ours)
+            .unwrap();
+        for (name, value, len) in [
+            ("a", 1, 100),
+            ("b", 2, THRESHOLD_ELEMENTS),
+            ("c", 3, SUB_THRESHOLD_ELEMENTS),
+            ("e", 4, 100),
+        ] {
+            file.new_dataset::<i32>()
+                .shape((len,))
+                .create(name)
+                .unwrap()
+                .write(&vec![value; len])
+                .unwrap();
+        }
+        file.close().unwrap();
+    }
+    std::fs::copy(&ours, &theirs).unwrap();
+
+    let (extent, ours_session) = {
+        let file = File::open_rw(&ours).unwrap();
+        let extent = contiguous_extent(&file, "c");
+        assert_eq!(contiguous_extent(&file, "b").end, extent.start);
+        for &path in deletions {
+            file.root().delete(path).unwrap();
+            file.commit().unwrap();
+        }
+        let tracked = range::covered_len(
+            &file.space_accounting().unwrap().reusable_free_space,
+            &extent,
+        );
+        (extent, tracked)
+    };
+    let theirs_session = {
+        let file = hdf5::File::open_rw(&theirs).unwrap();
+        let (last, earlier) = deletions.split_last().unwrap();
+        for &path in earlier {
+            file.unlink(path).unwrap();
+        }
+        let before = file.free_space();
+        file.unlink(last).unwrap();
+        file.free_space() - before
+    };
+    let (ours_reopened, ours_total) = {
+        let file = File::open(&ours).unwrap();
+        let free = file.persisted_free_space().unwrap();
+        (
+            range::covered_len(&free, &extent),
+            free.iter().map(|&(_, len)| len).sum::<u64>(),
+        )
+    };
+    let c_total = hdf5::File::open(&ours).unwrap().free_space();
+
+    assert_eq!(
+        (ours_session, theirs_session, ours_reopened, c_total),
+        (
+            tracked,
+            tracked,
+            if persist { tracked } else { 0 },
+            ours_total
+        )
+    );
+}
+
+#[rstest]
+#[case::a_deletion(delete_c)]
+#[case::a_creation(create_d)]
+#[case::an_attribute(set_root_attribute)]
+#[case::an_append_at_close(append_at_close)]
+fn a_persisting_edit_that_tracks_no_free_space_records_the_end_of_allocation_for_libhdf5(
+    #[case] edit: fn(&Path),
+) {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("ours.h5");
+    let mut b = FileBuilder::new();
+    b.create_dataset("a").with_i32_data(&[1; 100]);
+    b.create_dataset("c").with_i32_data(&[3; 100]);
+    Unlimited::new("u", &[4; 64], 64).add_to(&mut b);
+    b.with_file_space_strategy(
+        FileSpaceStrategy::FsmAggr,
+        true,
+        THRESHOLD_ABOVE_EVERY_EXTENT,
+    );
+    b.write(&path).unwrap();
+
+    edit(&path);
+
+    let (eoa_pre_fsm, manager_addrs, free, eof) = {
+        let file = File::open(&path).unwrap();
+        let info = file.file_space_info().unwrap();
+        (
+            info.eoa_pre_fsm,
+            info.manager_addrs.clone(),
+            file.persisted_free_space().unwrap(),
+            file.superblock().eof_address,
+        )
+    };
+    let len = std::fs::metadata(&path).unwrap().len();
+    let c_file = hdf5::File::open(&path).unwrap();
+    assert_eq!(
+        (
+            eoa_pre_fsm,
+            eof,
+            manager_addrs,
+            free,
+            c_file.dataset("a").unwrap().read_raw::<i32>().unwrap(),
+            c_file.free_space(),
+        ),
+        (
+            len,
+            len,
+            vec![u64::MAX; NUM_FILE_FSM_MANAGERS],
+            Vec::new(),
+            vec![1; 100],
+            0
+        )
+    );
+}
+
+fn delete_c(path: &Path) {
+    let file = File::open_rw(path).unwrap();
+    file.root().delete("c").unwrap();
+    file.commit().unwrap();
+}
+
+fn create_d(path: &Path) {
+    let file = File::open_rw(path).unwrap();
+    file.root()
+        .create_dataset("d", |b| {
+            b.with_i32_data(&[5; 100]);
+        })
+        .unwrap();
+    file.commit().unwrap();
+}
+
+fn set_root_attribute(path: &Path) {
+    let file = File::open_rw(path).unwrap();
+    file.root().set_attr("n", AttrValue::I64(1)).unwrap();
+    file.commit().unwrap();
+}
+
+fn append_at_close(path: &Path) {
+    let file = File::open_rw(path).unwrap();
+    let mut dataset = file.dataset("u").unwrap();
+    dataset.append(&[6; 64]).unwrap();
+    drop(dataset);
+    file.close().unwrap();
+}
+
+fn fsm_aggr(persist: bool, threshold: u64) -> CStrategy {
+    CStrategy::FreeSpaceManager {
+        paged: false,
+        persist,
+        threshold,
+    }
+}
+
 fn contiguous_extent(file: &File, path: &str) -> Range<u64> {
     let layout = file.dataset(path).unwrap().layout().unwrap();
     let Layout::Contiguous {
@@ -2444,3 +2617,11 @@ const SECTION_LIST_USED_AT: usize = SECTION_LIST_ADDR_AT + 8;
 const SECTION_LIST_ALLOCATED_AT: usize = SECTION_LIST_USED_AT + 8;
 /// The offset of the "Free-space Manager Header Address" field in a section list.
 const SECTION_LIST_HEADER_ADDR_AT: usize = test_util::free_space::SECTIONS_SIGNATURE.len() + 1;
+
+const DELETED_ELEMENTS: usize = 400;
+const DELETED_LEN: u64 = (DELETED_ELEMENTS * size_of::<i32>()) as u64;
+const THRESHOLD_ELEMENTS: usize = 1024;
+const THRESHOLD: u64 = (THRESHOLD_ELEMENTS * size_of::<i32>()) as u64;
+const SUB_THRESHOLD_ELEMENTS: usize = 256;
+const SUB_THRESHOLD_LEN: u64 = (SUB_THRESHOLD_ELEMENTS * size_of::<i32>()) as u64;
+const THRESHOLD_ABOVE_EVERY_EXTENT: u64 = 1 << 20;

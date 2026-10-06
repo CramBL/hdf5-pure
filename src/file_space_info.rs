@@ -64,19 +64,22 @@ pub(crate) fn non_persistent(
     .build()
 }
 
-/// A persisting message for a file with no free space yet (the form
-/// [`FileBuilder`](crate::FileBuilder) emits for `persist = true`): the
-/// persist flag is set and every manager slot is undefined, all ones at
-/// `offsets`, because no FSM space has been allocated. `eoa_pre_fsm` is left
-/// undefined here as a placeholder. The writer overwrites it with the real
-/// end-of-allocation once the layout is known, because libhdf5 requires a
-/// persisting file to record a defined `eoa_fsm_fsalloc` (an assertion-enabled
-/// build aborts on the undefined address, issue #178).
+/// Returns a persisting message with no free-space managers that records `eoa_pre_fsm` as the
+/// end of allocation.
+///
+/// The persist flag is set and every manager address is undefined, all ones at `offsets`.
+/// [`FileBuilder`](crate::FileBuilder) writes this form for a new
+/// [`FsmAggr`](crate::FileSpaceStrategy::FsmAggr) file with `persist = true`, and a persisting
+/// commit with no free space to record writes it with the end of allocation it publishes. libhdf5
+/// reads `eoa_pre_fsm` into `eoa_fsm_fsalloc`, and an assertion-enabled build aborts in
+/// `H5F__super_read` (`H5Fsuper.c`, HDF5 1.14.6) on a persisting file whose `eoa_pre_fsm` is
+/// undefined (issue #178).
 pub(crate) fn persistent_empty(
     offsets: OffsetWidth,
     strategy: FileSpaceStrategy,
     threshold: u64,
     page_size: u64,
+    eoa_pre_fsm: u64,
 ) -> FileSpaceInfo {
     let undefined = StoredAddress::undefined(offsets.get()).get();
     FileSpaceInfoFields {
@@ -85,7 +88,7 @@ pub(crate) fn persistent_empty(
         threshold,
         page_size,
         page_end_meta_threshold: 0,
-        eoa_pre_fsm: undefined,
+        eoa_pre_fsm,
         manager_addrs: vec![undefined; NUM_FILE_FSM_MANAGERS],
     }
     .build()
@@ -254,7 +257,7 @@ mod tests {
     #[case::two(OffsetWidth::Two, 0xFFFF)]
     #[case::four(OffsetWidth::Four, 0xFFFF_FFFF)]
     #[case::eight(OffsetWidth::Eight, u64::MAX)]
-    fn an_empty_message_records_its_addresses_undefined_at_the_offset_width(
+    fn an_empty_message_records_its_managers_undefined_at_the_offset_width(
         #[case] offsets: OffsetWidth,
         #[case] undefined: u64,
     ) {
@@ -263,11 +266,12 @@ mod tests {
             FileSpaceStrategy::FsmAggr,
             DEFAULT_THRESHOLD,
             DEFAULT_PAGE_SIZE,
+            0x0a48,
         );
 
         assert_eq!(
             (info.eoa_pre_fsm, info.manager_addrs),
-            (undefined, vec![undefined; NUM_FILE_FSM_MANAGERS])
+            (0x0a48, vec![undefined; NUM_FILE_FSM_MANAGERS])
         );
     }
 }
