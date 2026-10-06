@@ -257,6 +257,11 @@ impl FileBuilder {
     /// closes. A brand-new file has nothing to track, so this only records the
     /// intent; freeing space in a later [`File::open_rw`](crate::File::open_rw) then
     /// writes the on-disk free-space-manager blocks that survive a reopen.
+    ///
+    /// [`FileSpaceStrategy::Aggr`] and [`FileSpaceStrategy::None`] have no free-space managers,
+    /// so for either the writer records a clear persist flag and the default threshold of 1,
+    /// whatever the caller passes for `persist` and `threshold`. `H5Pset_file_space_strategy`
+    /// ignores both for those strategies too.
     pub fn with_file_space_strategy(
         &mut self,
         strategy: FileSpaceStrategy,

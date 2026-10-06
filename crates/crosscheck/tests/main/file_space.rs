@@ -23,6 +23,8 @@ use hdf5_pure::Layout;
 use hdf5_pure::MaxExtent;
 use hdf5_pure_core::__private::FileSpaceInfoFields;
 use hdf5_pure_core::__private::StoredAddress;
+use hdf5_pure_format::__private::DEFAULT_PAGE_SIZE;
+use hdf5_pure_format::__private::DEFAULT_THRESHOLD;
 use hdf5_pure_format::__private::FormatWidths;
 use hdf5_pure_format::__private::FreeSpaceManagerHeader;
 use hdf5_pure_format::__private::NUM_FILE_FSM_MANAGERS;
@@ -1019,15 +1021,17 @@ fn we_read_c_library_strategy() {
     let p_none = dir.path().join("c_none.h5");
     write_c(&p_none, CStrategy::None);
     let f = File::open(&p_none).unwrap();
-    assert_eq!(f.file_space_strategy(), Some(FileSpaceStrategy::None));
-    assert!(!f.file_space_info().unwrap().persist);
+    assert_eq!(
+        f.file_space_info(),
+        Some(&unmanaged_file_space_info(FileSpaceStrategy::None))
+    );
     assert_eq!(f.dataset("d").unwrap().read_i32().unwrap(), vec![1, 2, 3]);
 
     let p_aggr = dir.path().join("c_aggr.h5");
     write_c(&p_aggr, CStrategy::PageAggregation);
     assert_eq!(
-        File::open(&p_aggr).unwrap().file_space_strategy(),
-        Some(FileSpaceStrategy::Aggr)
+        File::open(&p_aggr).unwrap().file_space_info(),
+        Some(&unmanaged_file_space_info(FileSpaceStrategy::Aggr))
     );
 
     // FSM_AGGR with persist=true: the message carries free-space-manager
@@ -1054,6 +1058,21 @@ fn we_read_c_library_strategy() {
     );
     // The data still reads correctly.
     assert_eq!(f.dataset("d").unwrap().read_i32().unwrap(), vec![1, 2, 3]);
+}
+
+/// The settings of a file whose `strategy` has no free-space managers: no persistence, the default
+/// threshold and page size, and no manager addresses.
+fn unmanaged_file_space_info(strategy: FileSpaceStrategy) -> FileSpaceInfo {
+    FileSpaceInfoFields {
+        strategy,
+        persist: false,
+        threshold: DEFAULT_THRESHOLD,
+        page_size: DEFAULT_PAGE_SIZE,
+        page_end_meta_threshold: 0,
+        eoa_pre_fsm: u64::MAX,
+        manager_addrs: Vec::new(),
+    }
+    .build()
 }
 
 // Only HDF5 1.10.0 writes a version 0 message, so the version 0 tests replace the message libhdf5

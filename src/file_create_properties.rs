@@ -107,9 +107,10 @@ use crate::libver::LibVer;
 /// | HDF5 property (C API) | `hdf5-pure` | Status | Behavior |
 /// |---|---|---|---|
 /// | `H5Pset_file_space_strategy(PAGE, …)` | [`with_file_space_strategy(FileSpaceStrategy::Page, …)`](Self::with_file_space_strategy) | **Genuine** | Real page-aligned allocation: metadata and raw data occupy separate pages, and each page's free tail is tracked in a per-page-type `FSHD`/`FSSE` manager. The C library reads it as paged and `H5Fget_freespace` matches the tracked total. |
-/// | `H5Pset_file_space_strategy(FSM_AGGR / AGGR / NONE, …)` | `…(FsmAggr / Aggr / None, …)` | **Recorded** | The strategy is stored in the superblock extension, and the layout stays sequential. Freed regions become tracked once a read-write session deletes an object. |
-/// | `persist` flag | 2nd argument of [`with_file_space_strategy`](Self::with_file_space_strategy) | **Genuine** (paged) / **Recorded** (non-paged) | Paged: per-page-type managers are written from creation. Non-paged: the flag records intent, and managers appear after a later delete. |
-/// | `threshold` | 3rd argument of [`with_file_space_strategy`](Self::with_file_space_strategy) | **Recorded (advisory)** | Round-trips through the C library, and the crate tracks every page tail and freed section whatever its value. |
+/// | `H5Pset_file_space_strategy(FSM_AGGR, …)` | `…(FsmAggr, …)` | **Recorded** | The strategy is stored in the superblock extension, and the layout stays sequential. Freed regions become tracked once a read-write session deletes an object. |
+/// | `H5Pset_file_space_strategy(AGGR / NONE, …)` | `…(Aggr / None, …)` | **Recorded** | The strategy is stored in the superblock extension, and the layout stays sequential. A read-write session reuses no freed region and allocates at the end of the file. |
+/// | `persist` flag | 2nd argument of [`with_file_space_strategy`](Self::with_file_space_strategy) | **Genuine** (paged) / **Recorded** (`FsmAggr`) | Paged: per-page-type managers are written from creation. `FsmAggr`: the flag records intent, and managers appear after a later delete. The writer ignores it under `Aggr` and `None`, as the C library does. |
+/// | `threshold` | 3rd argument of [`with_file_space_strategy`](Self::with_file_space_strategy) | **Recorded (advisory)** | Round-trips through the C library under `FsmAggr` and `Page`, and the crate tracks every page tail and freed section whatever its value. The writer ignores it under `Aggr` and `None`, as the C library does. |
 /// | `H5Pset_file_space_page_size` | [`with_file_space_page_size`](Self::with_file_space_page_size) | **Genuine** (paged) / **Recorded** (non-paged) | Under [`Page`](crate::FileSpaceStrategy::Page) it is the alignment quantum, 4096 by default, and a power of two `>= 512`. Under the other strategies it is recorded and inert. |
 /// | `H5Pset_userblock` | [`with_userblock`](Self::with_userblock) | **Genuine** | Reserves a zero-filled prefix, and every address is base-relative. The HDF5 rule of zero, or a power of two `>= 512`, is validated at write time ([`FormatError::InvalidUserblockSize`](crate::FormatError::InvalidUserblockSize)), since the size is the superblock's base address and a reader scans the doubling sequence alone for the signature. Under [`Page`](crate::FileSpaceStrategy::Page) the userblock must also be a whole number of pages. Its contents come from [`FileBuilder::with_userblock_content`](crate::FileBuilder::with_userblock_content), which every output path emits. |
 /// | `H5Pset_libver_bounds` (`fapl`) | [`with_libver_bounds`](Self::with_libver_bounds) | **Genuine** (1.8 / 1.10) | A format selector between the two the writer emits: `high` picks the v2 (HDF5 1.8) superblock at `Earliest..=V18` and the v3 (1.10) one at anything reaching 1.10, and a lower bound above 1.10 (`V112`, `V114`, `LATEST`) selects the 1.10 format too. As in the C library, the low bound permits newer encodings and requires none. An upper bound older than 1.8, or below the lower bound, is rejected with [`FormatError::LibverBoundsUnsatisfiable`](crate::FormatError::LibverBoundsUnsatisfiable). HDF5 classes this as a file-access property, and it sits here because this crate resolves the bound at write time. |
@@ -221,6 +222,11 @@ impl FileCreateProperties {
 
     /// Set the file-space management strategy, whether free space persists across
     /// close, and the smallest free-space section tracked.
+    ///
+    /// [`FileSpaceStrategy::Aggr`] and [`FileSpaceStrategy::None`] have no free-space managers,
+    /// so for either the writer records a clear persist flag and the default threshold of 1,
+    /// whatever the caller passes for `persist` and `threshold`. `H5Pset_file_space_strategy`
+    /// ignores both for those strategies too.
     #[doc(alias = "H5Pset_file_space_strategy")]
     pub const fn with_file_space_strategy(
         mut self,

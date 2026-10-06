@@ -10,6 +10,8 @@ $ cargo run --example file_space
 
 [`FileBuilder::with_file_space_strategy(strategy, persist, threshold)`](crate::FileBuilder::with_file_space_strategy) records the file-space management strategy, whether free space is persisted across closes, and the smallest free section the managers will track. [`with_file_space_page_size(size)`](crate::FileBuilder::with_file_space_page_size) sets the file-space page size used for paged allocation. Both are recorded in the file's superblock extension, so the reference HDF5 C library and a later reopen observe the choice.
 
+[`Aggr`](crate::FileSpaceStrategy::Aggr) and [`None`](crate::FileSpaceStrategy::None) have no free-space managers, so for either the writer records a clear persist flag and the default threshold of 1, whatever the call passes for `persist` and `threshold`. The C library's `H5Pset_file_space_strategy` ignores both for those strategies too.
+
 Both are also fields on [`FileCreateProperties`](crate::FileCreateProperties), the reusable file-creation-property value (the `fcpl` analogue). Build one in a helper, then apply it with [`FileBuilder::with_create_properties`](crate::FileBuilder::with_create_properties) or [`File::create_with_options`](crate::File::create_with_options) wherever a file is written, so the call chain is written once:
 
 ```rust
@@ -54,7 +56,7 @@ The [`FileSpaceStrategy`](crate::FileSpaceStrategy) enum mirrors HDF5's `H5F_fsp
 
 ## The threshold parameter
 
-The `threshold` argument is the smallest free-space section, in bytes, that the free-space managers track, and the C library's default is `1` (every freed section is eligible). It is recorded in the file and round-trips through the reference C library. In this crate the value is **advisory**: the paged writer and the bounded editor track every page tail and freed section whatever the recorded threshold, so a `threshold > 1` is preserved on disk and does not change which sections this crate records.
+The `threshold` argument is the smallest free-space section, in bytes, that the free-space managers track, and the C library's default is `1` (every freed section is eligible). Under [`FsmAggr`](crate::FileSpaceStrategy::FsmAggr) and [`Page`](crate::FileSpaceStrategy::Page) it is recorded in the file and round-trips through the reference C library. In this crate the value is **advisory**: the paged writer and the bounded editor track every page tail and freed section whatever the recorded threshold, so a `threshold > 1` is preserved on disk and does not change which sections this crate records.
 
 ## Reading the strategy back
 
@@ -114,7 +116,7 @@ Deleting from a paged file returns the space to the per-page-type free lists, so
 
 ## Persisting free space across sessions
 
-Passing `persist = true` records that freed space should be tracked on disk across closes. For the non-paged strategies ([`FsmAggr`](crate::FileSpaceStrategy::FsmAggr), [`Aggr`](crate::FileSpaceStrategy::Aggr), [`None`](crate::FileSpaceStrategy::None)) a brand-new file has no free space, so this initially records the intent alone. A genuine paged file (above) already tracks its page-tail free space from creation. When a later edit frees a region, by deleting a dataset for example, the freed region is recorded in on-disk free-space-manager blocks (`FSHD`/`FSSE`), and a later session, this crate's or the reference C library's, recovers and reuses it.
+Passing `persist = true` under [`FsmAggr`](crate::FileSpaceStrategy::FsmAggr) or [`Page`](crate::FileSpaceStrategy::Page) records that freed space should be tracked on disk across closes. Under [`FsmAggr`](crate::FileSpaceStrategy::FsmAggr) a brand-new file has no free space, so this initially records the intent alone. A genuine paged file (above) already tracks its page-tail free space from creation. When a later edit frees a region, by deleting a dataset for example, the freed region is recorded in on-disk free-space-manager blocks (`FSHD`/`FSSE`), and a later session, this crate's or the reference C library's, recovers and reuses it.
 
 [`File::persisted_free_space()`](crate::File::persisted_free_space) returns the tracked free regions as `(address, length)` pairs sorted by address, and a read-write session seeds its free list from them, so reuse spans sessions.
 

@@ -4,45 +4,73 @@
 //! File Space Info message, and the reader reads it back.
 
 use hdf5_pure::{File, FileBuilder, FileSpaceStrategy};
+use hdf5_pure_core::__private::FileSpaceInfoFields;
+use hdf5_pure_format::__private::DEFAULT_PAGE_SIZE;
+use hdf5_pure_format::__private::DEFAULT_THRESHOLD;
+use rstest::rstest;
 
 use test_util::temp;
 
-#[test]
-fn each_strategy_roundtrips() {
-    for (i, strategy) in [
-        FileSpaceStrategy::FsmAggr,
-        FileSpaceStrategy::Page,
-        FileSpaceStrategy::Aggr,
-        FileSpaceStrategy::None,
-    ]
-    .into_iter()
-    .enumerate()
-    {
-        let path = temp::temp_path(&format!("hdf5_pure_fss_{i}.h5"));
-        let mut b = FileBuilder::new();
-        b.create_dataset("d").with_i32_data(&[1, 2, 3, 4]);
-        b.with_file_space_strategy(strategy, false, 7)
-            .with_file_space_page_size(8192);
-        b.write(&path).unwrap();
+#[rstest]
+#[case::fsm_aggr(FileSpaceStrategy::FsmAggr, 7)]
+#[case::page(FileSpaceStrategy::Page, 7)]
+#[case::aggr(FileSpaceStrategy::Aggr, DEFAULT_THRESHOLD)]
+#[case::none(FileSpaceStrategy::None, DEFAULT_THRESHOLD)]
+fn each_strategy_roundtrips(#[case] strategy: FileSpaceStrategy, #[case] threshold: u64) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("strategy.h5");
+    let mut b = FileBuilder::new();
+    b.create_dataset("d").with_i32_data(&[1, 2, 3, 4]);
+    b.with_file_space_strategy(strategy, false, 7)
+        .with_file_space_page_size(8192);
+    b.write(&path).unwrap();
 
-        let f = File::open(&path).unwrap();
-        // The strategy and its parameters round-trip.
-        assert_eq!(f.file_space_strategy(), Some(strategy));
-        let info = f.file_space_info().expect("file records a strategy");
-        assert_eq!(info.strategy, strategy);
-        assert!(!info.persist);
-        assert_eq!(info.threshold, 7);
-        assert_eq!(info.page_size, 8192);
-        assert!(info.manager_addrs.is_empty());
-        // The superblock actually points at an extension.
-        let ext = f.superblock().superblock_extension_address;
-        assert!(matches!(ext, Some(a) if a != u64::MAX));
-        // The dataset still reads correctly alongside the extension.
-        assert_eq!(
-            f.dataset("d").unwrap().read_i32().unwrap(),
-            vec![1, 2, 3, 4]
-        );
-    }
+    let f = File::open(&path).unwrap();
+    // The strategy and the page size round-trip.
+    assert_eq!(f.file_space_strategy(), Some(strategy));
+    let info = f.file_space_info().expect("file records a strategy");
+    assert_eq!(info.strategy, strategy);
+    assert!(!info.persist);
+    assert_eq!(info.threshold, threshold);
+    assert_eq!(info.page_size, 8192);
+    assert!(info.manager_addrs.is_empty());
+    let ext = f.superblock().superblock_extension_address;
+    assert!(matches!(ext, Some(a) if a != u64::MAX));
+    assert_eq!(
+        f.dataset("d").unwrap().read_i32().unwrap(),
+        vec![1, 2, 3, 4]
+    );
+}
+
+#[rstest]
+#[case::aggr(FileSpaceStrategy::Aggr)]
+#[case::none(FileSpaceStrategy::None)]
+fn a_strategy_without_a_free_space_manager_records_neither_persistence_nor_a_threshold(
+    #[case] strategy: FileSpaceStrategy,
+) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("strategy.h5");
+    let mut b = FileBuilder::new();
+    b.create_dataset("d").with_i32_data(&[1, 2, 3, 4]);
+    b.with_file_space_strategy(strategy, true, 7);
+    b.write(&path).unwrap();
+
+    let f = File::open(&path).unwrap();
+    assert_eq!(
+        f.file_space_info(),
+        Some(
+            &FileSpaceInfoFields {
+                strategy,
+                persist: false,
+                threshold: DEFAULT_THRESHOLD,
+                page_size: DEFAULT_PAGE_SIZE,
+                page_end_meta_threshold: 0,
+                eoa_pre_fsm: u64::MAX,
+                manager_addrs: Vec::new(),
+            }
+            .build()
+        )
+    );
 }
 
 #[test]

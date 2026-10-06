@@ -54,10 +54,13 @@ use crate::data_layout::DataLayout;
 use crate::dataspace::{Dataspace, DataspaceType, Extent, MaxExtent};
 use crate::error::{FormatError, OBJECT_HEADER_MESSAGE_MAX};
 use crate::file_create_properties::FileCreateProperties;
-use crate::file_space_info::{
-    self, DEFAULT_PAGE_SIZE, DEFAULT_THRESHOLD, FileSpaceInfo, FileSpaceStrategy,
-    NUM_FILE_FSM_MANAGERS,
-};
+use crate::file_space_info;
+use crate::file_space_info::DEFAULT_PAGE_SIZE;
+use crate::file_space_info::DEFAULT_THRESHOLD;
+use crate::file_space_info::FileSpaceInfo;
+use crate::file_space_info::FileSpaceStrategy;
+use crate::file_space_info::FreeSpaceSettings;
+use crate::file_space_info::NUM_FILE_FSM_MANAGERS;
 use crate::libver::LibVer;
 use crate::link_info::LinkInfoMessage;
 use crate::link_message::{LinkMessage, LinkTarget};
@@ -1274,6 +1277,11 @@ impl FileWriter {
     /// file); a later [`File::open_rw`](crate::File::open_rw) that frees space writes
     /// the on-disk free-space-manager blocks. `threshold` is the smallest
     /// free-space section size the managers track.
+    ///
+    /// [`FileSpaceStrategy::Aggr`] and [`FileSpaceStrategy::None`] have no free-space managers,
+    /// so for them the writer ignores `persist` and `threshold` and records a clear persist flag
+    /// and the default threshold of 1. `H5Pset_file_space_strategy` ignores both for those
+    /// strategies too.
     pub fn with_file_space_strategy(
         &mut self,
         strategy: FileSpaceStrategy,
@@ -1316,29 +1324,40 @@ impl FileWriter {
             || self.groups.iter().any(group_needs)
     }
 
-    /// Reject file-space settings this writer cannot reproduce yet.
-    /// The File Space Info message to write, if any file-space option was set.
+    /// Returns the File Space Info message to write, or `None` if no file-space option was set.
     ///
-    /// A freshly built file has no free space, so `persist = true` emits the
-    /// persisting-but-empty form (persist flag set, all managers undefined, no
-    /// FSM blocks); a later [`File::open_rw`](crate::File::open_rw) that frees space
-    /// fills in the on-disk managers. `persist = false` emits the non-persistent
-    /// form.
+    /// A freshly built file has no free space, so under a strategy with free-space managers and
+    /// `persist = true` the writer writes the persisting form with no managers: the persist flag
+    /// set, every manager address undefined, and no manager blocks. A later
+    /// [`File::open_rw`](crate::File::open_rw) that frees space writes the managers. Under every
+    /// other setting the writer writes the non-persistent form, with the default threshold for a
+    /// strategy without free-space managers.
     fn file_space_info(&self) -> Option<FileSpaceInfo> {
         if self.file_space_strategy.is_none() && self.file_space_page_size.is_none() {
             return None;
         }
+        let (strategy, settings) = self.resolved_file_space_strategy();
+        let threshold = settings.map_or(DEFAULT_THRESHOLD, |settings| settings.threshold);
+        let page_size = self.file_space_page_size.unwrap_or(DEFAULT_PAGE_SIZE);
+        Some(if settings.is_some_and(|settings| settings.persist) {
+            file_space_info::persistent_empty(OFFSET_WIDTH, strategy, threshold, page_size)
+        } else {
+            file_space_info::non_persistent(OFFSET_WIDTH, strategy, threshold, page_size)
+        })
+    }
+
+    /// Returns the strategy the writer records, `H5F_FSPACE_STRATEGY_FSM_AGGR` if none was set,
+    /// and the settings of its free-space managers, or `None` if it has none.
+    fn resolved_file_space_strategy(&self) -> (FileSpaceStrategy, Option<FreeSpaceSettings>) {
         let (strategy, persist, threshold) = self.file_space_strategy.unwrap_or((
             FileSpaceStrategy::FsmAggr,
             false,
             DEFAULT_THRESHOLD,
         ));
-        let page_size = self.file_space_page_size.unwrap_or(DEFAULT_PAGE_SIZE);
-        Some(if persist {
-            file_space_info::persistent_empty(OFFSET_WIDTH, strategy, threshold, page_size)
-        } else {
-            file_space_info::non_persistent(OFFSET_WIDTH, strategy, threshold, page_size)
-        })
+        (
+            strategy,
+            FreeSpaceSettings::of(strategy, persist, threshold),
+        )
     }
 
     /// The superblock-extension object header bytes carrying the File Space Info
@@ -1529,14 +1548,19 @@ impl FileWriter {
         // end-of-allocation once the layout is known (issue #178). Capture the
         // parameters here, while `self` is intact. (The paged path has its own
         // manager-aware rewrite; a `Page` file never reaches the non-paged tail.)
-        let nonpaged_persist: Option<(FileSpaceStrategy, u64, u64)> = match self.file_space_strategy
+        let nonpaged_persist: Option<(FileSpaceStrategy, u64, u64)> = match self
+            .resolved_file_space_strategy()
         {
-            Some((strategy, true, threshold)) if strategy != FileSpaceStrategy::Page => Some((
-                strategy,
-                threshold,
-                self.file_space_page_size.unwrap_or(DEFAULT_PAGE_SIZE),
-            )),
-            _ => None,
+            (FileSpaceStrategy::Page, _) => None,
+            (strategy, settings) => settings
+                .filter(|settings| settings.persist)
+                .map(|settings| {
+                    (
+                        strategy,
+                        settings.threshold,
+                        self.file_space_page_size.unwrap_or(DEFAULT_PAGE_SIZE),
+                    )
+                }),
         };
         struct DsFlat {
             /// Link name in the owning group.

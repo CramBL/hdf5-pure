@@ -13,6 +13,36 @@ pub(crate) use hdf5_pure_format::__private::NUM_FILE_FSM_MANAGERS;
 use crate::address::StoredAddress;
 use crate::width::OffsetWidth;
 
+/// The settings of the free-space managers of a strategy that has them.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct FreeSpaceSettings {
+    /// Whether the managers persist free space across closes.
+    pub(crate) persist: bool,
+    /// The smallest free-space section the managers track, in bytes.
+    pub(crate) threshold: u64,
+}
+
+impl FreeSpaceSettings {
+    /// Returns `persist` and `threshold` as the settings of the free-space managers of `strategy`,
+    /// or `None` if `strategy` has none.
+    ///
+    /// `H5F_FSPACE_STRATEGY_FSM_AGGR` and `H5F_FSPACE_STRATEGY_PAGE` have free-space managers,
+    /// and `H5F_FSPACE_STRATEGY_AGGR` and `H5F_FSPACE_STRATEGY_NONE` have none, as defined for
+    /// version 1 of "The File Space Info Message" in the [format specification, version 4.0][spec].
+    /// `H5Pset_file_space_strategy` ignores `persist` and `threshold` for the two strategies
+    /// without managers (`H5Pfcpl.c`, HDF5 1.14.6).
+    ///
+    /// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_fsinfo
+    pub(crate) fn of(strategy: FileSpaceStrategy, persist: bool, threshold: u64) -> Option<Self> {
+        match strategy {
+            FileSpaceStrategy::FsmAggr | FileSpaceStrategy::Page => {
+                Some(Self { persist, threshold })
+            }
+            FileSpaceStrategy::Aggr | FileSpaceStrategy::None => None,
+        }
+    }
+}
+
 /// A non-persisting message recording `strategy`, `threshold` and `page_size`.
 /// This is the form the writer emits (no free-space manager blocks). The
 /// end-of-allocation address is undefined, all ones at `offsets`.
