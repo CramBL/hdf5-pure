@@ -19,6 +19,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 ### Fixed
 
 - Fixed `File::open_rw` reusing the free regions of a free-space manager whose version, checksum, or section counts are invalid ([#698](https://github.com/CramBL/hdf5-pure/pull/698)).
+- Fixed `File::commit` freeing live data that a damaged free-space manager header points to as its section list ([#698](https://github.com/CramBL/hdf5-pure/pull/698)).
 - Fixed `File::persisted_free_space` misreading the free regions of a file that stores 2- or 4-byte lengths ([#697](https://github.com/CramBL/hdf5-pure/pull/697)).
 - Fixed `File::commit` writing malformed file space settings to a file that persists its free space and stores 2- or 4-byte addresses or lengths ([#696](https://github.com/CramBL/hdf5-pure/pull/696)).
 - Fixed a panic in `Dataset::append` when a crafted Extensible Array header encodes unsupported bit geometry ([#693](https://github.com/CramBL/hdf5-pure/pull/693)).

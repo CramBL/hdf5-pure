@@ -300,6 +300,7 @@ use crate::file_writer::{
 use crate::filter_pipeline::FilterPipeline;
 use crate::filters::{ChunkContext, FilterScratch, compress_chunk_with, decompress_chunk};
 use crate::free_space::{FreeList, trailing_run_start};
+use crate::free_space_manager::PersistedSections;
 use crate::free_space_manager::{self, PageType, PagedManagerPlan, align_up, plan_paged_managers};
 use crate::group_v2::resolve_group_entries_from_source;
 use crate::image::{FileImage, HandleImage, MirrorImage, WriteBuffering};
@@ -2340,9 +2341,9 @@ struct PersistState {
     strategy: FileSpaceStrategy,
     threshold: u64,
     page_size: u64,
-    /// `(addr, len)` of the on-disk superblock-extension header and every
-    /// free-space-manager `FSHD`/`FSSE` block currently in use. Superseded — and
-    /// therefore freed — by the next persisting commit.
+    /// The address and the length of each block the next persisting commit frees, the blocks of the
+    /// superblock extension and of the free-space managers. A manager header or a section list that
+    /// does not parse is not among them.
     old_blocks: Vec<(u64, u64)>,
 }
 
@@ -3040,11 +3041,13 @@ impl WriteEngine {
         })
     }
 
-    /// Read the superblock-extension File Space Info message; if it requests
-    /// persistence, seed [`self.free`](Self::free) from the on-disk free-space
-    /// managers and record the manager/extension block extents for reclamation on
-    /// the next commit. Silent on any malformed or absent metadata — persistence
-    /// is then simply off for this session.
+    /// Seeds the free lists from the free-space managers of a file that persists its free space,
+    /// and records the blocks of the managers and of the superblock extension that the next
+    /// persisting commit frees.
+    ///
+    /// Reads the managers only in a file whose base address is 0 and whose superblock extension has
+    /// a File Space Info message that requests persistence. A manager that does not parse seeds no
+    /// free sections, and in a file that is not paged the other managers seed none either.
     fn load_persisted_free_space(&mut self) {
         if self.superblock.version < 2 {
             return; // no superblock extension exists before v2
@@ -3104,6 +3107,21 @@ impl WriteEngine {
             return;
         };
         let file_len = self.image.len();
+        let managers: Vec<(usize, u64, Result<PersistedSections, FormatError>)> = info
+            .manager_addrs
+            .iter()
+            .enumerate()
+            .filter(|&(_, &m)| !StoredAddress::new(m).is_undefined(os))
+            .map(|(slot, &m)| {
+                let read = free_space_manager::read_persisted_sections_source(
+                    &self.image(),
+                    widths,
+                    BaseAddress::ZERO,
+                    &[m],
+                );
+                (slot, m, read)
+            })
+            .collect();
 
         // Seed the free list(s) with every persisted section (addresses are stored
         // relative to the base address, which this editor requires to be 0).
@@ -3121,21 +3139,12 @@ impl WriteEngine {
             // type is recorded but never handed out.
             let page_size = info.page_size;
             let mut tagged: Vec<(FreeSection, Option<PageType>)> = Vec::new();
-            for (slot, &m) in info.manager_addrs.iter().enumerate() {
-                if StoredAddress::new(m).is_undefined(os) {
-                    continue;
-                }
-                let Ok(sections) = free_space_manager::read_persisted_sections_source(
-                    &self.image(),
-                    widths,
-                    BaseAddress::ZERO,
-                    &[m],
-                )
-                .map(|(sections, _)| sections) else {
+            for (slot, _, read) in &managers {
+                let Ok((sections, _)) = read else {
                     continue;
                 };
-                for s in sections {
-                    let ty = PagedEdit::slot_list(slot, s.addr.get(), s.size, page_size);
+                for &s in sections {
+                    let ty = PagedEdit::slot_list(*slot, s.addr.get(), s.size, page_size);
                     tagged.push((s, ty));
                 }
             }
@@ -3180,13 +3189,13 @@ impl WriteEngine {
                 .as_mut()
                 .expect("the paged state was just installed");
             PagedEdit::promote_whole_free_pages(&mut pg.meta, &mut pg.raw, &mut pg.dead, page_size);
-        } else if let Ok(mut sections) = free_space_manager::read_persisted_sections_source(
-            &self.image(),
-            widths,
-            BaseAddress::ZERO,
-            &info.manager_addrs,
-        )
-        .map(|(sections, _)| sections)
+        } else if let Ok(mut sections) =
+            managers
+                .iter()
+                .try_fold(Vec::new(), |mut all, (_, _, read)| {
+                    all.extend_from_slice(&read.as_ref()?.0);
+                    Ok::<Vec<FreeSection>, &FormatError>(all)
+                })
         {
             // Unique addresses in any well-formed file; see the paged branch
             // above for why a duplicate is harmless and unasserted here.
@@ -3204,41 +3213,14 @@ impl WriteEngine {
             }
         }
 
-        // Record the byte extents of the blocks the live file uses so the next
-        // persisting commit frees them when it writes replacements: the
-        // extension header, and each defined manager's FSHD + FSSE.
         let mut old_blocks = Vec::new();
         if let Ok(spans) = self.oh_chunk_spans(ext_addr) {
             old_blocks.extend(spans);
         }
-        for &m in &info.manager_addrs {
-            if StoredAddress::new(m).is_undefined(os) {
-                continue;
-            }
-            let Ok(hdr_len) =
-                hdf5_pure_format::__private::free_space_manager_header_len(widths).to_usize()
-            else {
-                continue;
-            };
-            let Ok(fshd) = self.image().read_metadata_at(m, hdr_len) else {
-                continue;
-            };
-            if let Ok(h) = FreeSpaceManagerHeader::parse(widths, &fshd) {
-                // The read returned the header's bytes, so the header's extent is in the file.
-                // The section list's extent is checked before it is recorded, so a malformed
-                // `section_list_used` cannot free a region past the end of the file.
-                old_blocks.push((
-                    m,
-                    hdf5_pure_format::__private::free_space_manager_header_len(widths),
-                ));
-                if !h.section_list_addr().is_undefined(os)
-                    && h.section_list_addr()
-                        .get()
-                        .checked_add(h.section_list_used())
-                        .is_some_and(|end| end <= file_len)
-                {
-                    old_blocks.push((h.section_list_addr().get(), h.section_list_used()));
-                }
+        for (_, m, read) in &managers {
+            match read {
+                Ok((_, blocks)) => old_blocks.extend(blocks),
+                Err(_) => old_blocks.extend(self.manager_header_block(widths, *m)),
             }
         }
 
@@ -3248,6 +3230,19 @@ impl WriteEngine {
             page_size: info.page_size,
             old_blocks,
         });
+    }
+
+    /// Returns the address and the length of the free-space manager header at `addr`, or `None` if
+    /// the read fails or the header does not parse.
+    fn manager_header_block(&self, widths: FormatWidths, addr: u64) -> Option<(u64, u64)> {
+        let len = hdf5_pure_format::__private::free_space_manager_header_len(widths);
+        let fshd = self
+            .image()
+            .read_metadata_at(addr, len.to_usize().ok()?)
+            .ok()?;
+        FreeSpaceManagerHeader::parse(widths, &fshd)
+            .ok()
+            .map(|_| (addr, len))
     }
 
     /// Parses the File Space Info message out of the superblock-extension object
