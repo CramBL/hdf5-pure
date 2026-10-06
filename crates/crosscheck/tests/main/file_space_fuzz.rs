@@ -19,6 +19,12 @@
 //!    yields a file whose every row, recorded strategy, and manager free-space
 //!    total the C library reads back exactly.
 //!
+//! 3. **Threshold admission.** For any threshold and any interior deletions under
+//!    `FsmAggr`, a session tracks a deleted extent whose preceding dataset is kept
+//!    exactly when the extent is at least the threshold, and neither the session nor
+//!    the file tracks a dropped extent afterwards. The C library reads every kept
+//!    dataset, and its `H5Fget_freespace` equals the persisted free space.
+//!
 //! A failing case is shrunk to its minimal reproducer and recorded under
 //! `tests/proptest-regressions/`; commit that file so the reproducer travels
 //! with the fix.
@@ -28,8 +34,11 @@ use hdf5_pure::{File, FileBuilder, FileSpaceStrategy};
 
 use proptest::prelude::*;
 use tempfile::tempdir;
+use test_util::range;
 use test_util_hdf5::dataset::Unlimited;
 use test_util_hdf5::session;
+
+use super::file_space;
 
 /// The four file-space strategies, each mapped to the name the C library reports.
 fn strategy() -> impl Strategy<Value = FileSpaceStrategy> {
@@ -208,5 +217,75 @@ proptest! {
         let free_c = f.free_space() as i64;
         prop_assert_eq!(free_c as u64, total_ours);
         drop(f);
+    }
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(32))]
+
+    #[test]
+    fn interior_deletions_under_fsm_aggr_track_what_the_threshold_admits(
+        persist in any::<bool>(),
+        threshold in 1u64..=8192,
+        datasets in prop::collection::vec((1usize..=2048usize, any::<bool>()), 3..=6),
+    ) {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("fuzz_threshold.h5");
+        let data: Vec<Vec<i32>> = datasets
+            .iter()
+            .enumerate()
+            .map(|(i, &(len, _))| vec![i32::try_from(i).unwrap(); len])
+            .collect();
+        let deleted: Vec<bool> = datasets
+            .iter()
+            .enumerate()
+            .map(|(i, &(_, delete))| delete && i > 0 && i + 1 < datasets.len())
+            .collect();
+        let mut b = FileBuilder::new();
+        for (i, values) in data.iter().enumerate() {
+            b.create_dataset(&format!("d{i}")).with_i32_data(values);
+        }
+        b.with_file_space_strategy(FileSpaceStrategy::FsmAggr, persist, threshold);
+        b.write(&path).unwrap();
+
+        let dropped = {
+            let file = File::open_rw(&path).unwrap();
+            let mut dropped = Vec::new();
+            for i in (0..data.len()).filter(|&i| deleted[i]) {
+                let extent = file_space::contiguous_extent(&file, &format!("d{i}"));
+                file.root().delete(&format!("d{i}")).unwrap();
+                file.commit().unwrap();
+                let isolated = !deleted[i - 1];
+                let len = extent.end - extent.start;
+                let tracked = range::covered_len(
+                    &file.space_accounting().unwrap().reusable_free_space,
+                    &extent,
+                );
+                if isolated {
+                    prop_assert_eq!(tracked, if len >= threshold { len } else { 0 });
+                    if len < threshold {
+                        dropped.push(extent);
+                    }
+                }
+            }
+            for extent in &dropped {
+                prop_assert_eq!(
+                    range::covered_len(&file.space_accounting().unwrap().reusable_free_space, extent),
+                    0
+                );
+            }
+            dropped
+        };
+
+        let free = File::open(&path).unwrap().persisted_free_space().unwrap();
+        for extent in &dropped {
+            prop_assert_eq!(range::covered_len(&free, extent), 0);
+        }
+        let f = hdf5::File::open(&path).unwrap();
+        for (i, values) in data.iter().enumerate().filter(|&(i, _)| !deleted[i]) {
+            let got = f.dataset(&format!("d{i}")).unwrap().read_raw::<i32>().unwrap();
+            prop_assert_eq!(&got, values);
+        }
+        prop_assert_eq!(f.free_space(), free.iter().map(|&(_, len)| len).sum::<u64>());
     }
 }

@@ -2588,7 +2588,7 @@ fn fsm_aggr(persist: bool, threshold: u64) -> CStrategy {
     }
 }
 
-fn contiguous_extent(file: &File, path: &str) -> Range<u64> {
+pub(super) fn contiguous_extent(file: &File, path: &str) -> Range<u64> {
     let layout = file.dataset(path).unwrap().layout().unwrap();
     let Layout::Contiguous {
         address: Some(address),
