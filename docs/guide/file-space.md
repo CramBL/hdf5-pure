@@ -60,7 +60,7 @@ This crate has no aggregators under any strategy. Under [`FsmAggr`](crate::FileS
 
 The `threshold` argument is the smallest free-space section, in bytes, that the free-space managers track, and the C library's default is `1` (every freed section is eligible). Under [`FsmAggr`](crate::FileSpaceStrategy::FsmAggr) and [`Page`](crate::FileSpaceStrategy::Page) it is recorded in the file and round-trips through the reference C library.
 
-Under [`FsmAggr`](crate::FileSpaceStrategy::FsmAggr) a read-write session tracks a freed region of at least the threshold. It tracks a shorter one only where the region adjoins tracked free space, which it merges into, and drops it otherwise, as the C library does. A dropped region is not reused. Under [`Page`](crate::FileSpaceStrategy::Page) the writer and the editors track every page tail and freed region whatever the threshold.
+Under [`FsmAggr`](crate::FileSpaceStrategy::FsmAggr) and [`Page`](crate::FileSpaceStrategy::Page) a read-write session tracks a freed region of at least the threshold. It tracks a shorter one only where the region adjoins tracked free space, which it merges into, and drops it otherwise, as the C library does. A dropped region is not reused. Under [`Page`](crate::FileSpaceStrategy::Page) a region shorter than a page merges only with free space in its own page. The writer and the editors track page tails whatever the threshold, and so does the C library.
 
 ## Reading the strategy back
 

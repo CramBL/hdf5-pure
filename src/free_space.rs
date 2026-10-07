@@ -3,9 +3,9 @@
 //! A commit vacates the object headers it supersedes and the blocks of the objects it deletes.
 //! Under a strategy with free-space managers, `H5F_FSPACE_STRATEGY_FSM_AGGR` or
 //! `H5F_FSPACE_STRATEGY_PAGE`, the session records the vacated extents in a [`FreeList`] and
-//! writes a later object into a free region that fits it. [`FreeList::release_all`] records an
-//! extent at least as long as the file's threshold, the smallest free-space section the managers
-//! track, or one that adjoins a recorded region.
+//! writes a later object into a free region that fits it. It records an extent at least as long as
+//! the file's threshold, the smallest free-space section the managers track, or one that merges
+//! into recorded space ([`TrackedSpace`]), which for a [`FreeList`] is one that adjoins a region.
 //!
 //! A session on a file without persistence starts with an empty list. On a file created with
 //! `persist = true`, [`File::open_rw`](crate::File::open_rw) seeds the list from the file's
@@ -125,52 +125,19 @@ impl FreeList {
         eoa: u64,
         extents: impl IntoIterator<Item = (u64, u64)>,
     ) -> u64 {
-        // The extents of at least the threshold are tracked first, and the smaller ones are offered
-        // again until none merges, so what is tracked does not depend on the order of `extents`.
-        let (mut pending, eligible): (Vec<_>, Vec<_>) =
-            extents.into_iter().partition(|&(_, len)| len < threshold);
-        for (addr, len) in eligible {
-            self.free(addr, len);
-        }
-        loop {
-            let offered = pending.len();
-            pending.retain(|&(addr, len)| self.release(threshold, addr, len) == Release::Drop);
-            if pending.len() == offered {
-                break;
-            }
-        }
+        let mut dropped = self.release_each(
+            threshold,
+            extents.into_iter().map(|(addr, len)| (addr, len, ())),
+        );
         // A dropped extent that ends the allocation shrinks it, as libhdf5 shrinks the file by a
         // freed block that ends it (`H5MF_try_shrink` in `H5MF.c` and
         // `H5MF__sect_simple_can_shrink` in `H5MFsection.c`, HDF5 1.14.6). libhdf5 shrinks it by a
         // tracked section that ends it as well, which this leaves to the caller.
-        pending.sort_unstable_by_key(|&(addr, _)| Reverse(addr));
-        pending.into_iter().fold(
+        dropped.sort_unstable_by_key(|&(addr, _, ())| Reverse(addr));
+        dropped.into_iter().fold(
             eoa,
-            |eoa, (addr, len)| if addr + len == eoa { addr } else { eoa },
+            |eoa, (addr, len, ())| if addr + len == eoa { addr } else { eoa },
         )
-    }
-
-    /// Records `[addr, addr + len)` if it is at least `threshold` bytes long or adjoins a region,
-    /// and returns which [`Release`] applies.
-    ///
-    /// An empty extent is dropped whatever `threshold` is.
-    fn release(&mut self, threshold: u64, addr: u64, len: u64) -> Release {
-        // `H5MF_xfree` (`H5MF.c`, HDF5 1.14.6) adds a section of at least the threshold and merges a
-        // smaller one into an adjoining tracked section through `H5FS_sect_try_merge`
-        // (`H5FSsection.c`), dropping it where none adjoins.
-        let release = if len == 0 {
-            Release::Drop
-        } else if len >= threshold {
-            Release::Track
-        } else if self.adjoins(addr, len) {
-            Release::Merge
-        } else {
-            Release::Drop
-        };
-        if release != Release::Drop {
-            self.free(addr, len);
-        }
-        release
     }
 
     /// Reserve `len` bytes from a free region, returning the address handed out,
@@ -366,20 +333,128 @@ impl FreeList {
     }
 
     /// Returns `true` if a region ends at `addr` or starts at `addr + len`.
-    fn adjoins(&self, addr: u64, len: u64) -> bool {
+    pub(crate) fn adjoins(&self, addr: u64, len: u64) -> bool {
         let end = addr + len;
         self.regions
             .iter()
             .any(|r| r.end() == addr || r.addr == end)
     }
+
+    /// Returns `true` if a region adjoins `[addr, addr + len)` inside one `unit`, at an address that
+    /// is not a multiple of `unit`.
+    pub(crate) fn adjoins_within(&self, addr: u64, len: u64, unit: u64) -> bool {
+        let end = addr + len;
+        self.regions.iter().any(|r| {
+            (r.end() == addr && !addr.is_multiple_of(unit))
+                || (r.addr == end && !end.is_multiple_of(unit))
+        })
+    }
+
+    /// Returns how many bytes of `[addr, addr + len)` the regions cover.
+    pub(crate) fn covered_len(&self, addr: u64, len: u64) -> u64 {
+        let end = addr + len;
+        self.regions
+            .iter()
+            .map(|r| r.end().min(end).saturating_sub(r.addr.max(addr)))
+            .sum()
+    }
+
+    /// Returns `true` if a region of at least `unit` bytes adjoins `[addr, addr + len)` at a
+    /// multiple of `unit`.
+    pub(crate) fn adjoins_whole_unit(&self, addr: u64, len: u64, unit: u64) -> bool {
+        let end = addr + len;
+        self.regions.iter().any(|r| {
+            (r.end() == addr && addr.is_multiple_of(unit) && r.len >= unit)
+                || (r.addr == end && end.is_multiple_of(unit) && r.len >= unit)
+        })
+    }
 }
 
-/// What [`FreeList::release`] does with a freed extent.
+impl TrackedSpace for FreeList {
+    type Class = ();
+
+    fn merges(&self, addr: u64, len: u64) -> bool {
+        self.adjoins(addr, len)
+    }
+
+    fn track(&mut self, addr: u64, len: u64, (): ()) {
+        self.free(addr, len);
+    }
+}
+
+/// Free space a session tracks, and the threshold rule for which freed extents join it.
+///
+/// An extent at least as long as the threshold is tracked, and a shorter one only where it merges
+/// into tracked space. Each implementation defines where an extent merges.
+pub(crate) trait TrackedSpace {
+    /// What a caller passes beside each extent to choose the list it joins.
+    type Class: Copy;
+
+    /// Returns `true` if `[addr, addr + len)` merges into tracked space.
+    fn merges(&self, addr: u64, len: u64) -> bool;
+
+    /// Tracks `[addr, addr + len)` as free in the list for `class`.
+    fn track(&mut self, addr: u64, len: u64, class: Self::Class);
+
+    /// Tracks each of `extents` that is at least `threshold` bytes long or merges into tracked
+    /// space, and returns the extents it drops.
+    ///
+    /// A shorter extent may merge into one this call tracked, whatever the order of `extents`.
+    fn release_each(
+        &mut self,
+        threshold: u64,
+        extents: impl IntoIterator<Item = (u64, u64, Self::Class)>,
+    ) -> Vec<(u64, u64, Self::Class)> {
+        // The extents of at least the threshold are tracked first, and the smaller ones are offered
+        // again until none merges.
+        let (mut pending, eligible): (Vec<_>, Vec<_>) = extents
+            .into_iter()
+            .partition(|&(_, len, _)| len < threshold);
+        for (addr, len, class) in eligible {
+            self.track(addr, len, class);
+        }
+        loop {
+            let offered = pending.len();
+            pending.retain(|&(addr, len, class)| {
+                self.release(threshold, addr, len, class) == Release::Drop
+            });
+            if pending.len() == offered {
+                break;
+            }
+        }
+        pending
+    }
+
+    /// Tracks `[addr, addr + len)` if it is at least `threshold` bytes long or merges into tracked
+    /// space, and returns which [`Release`] applies.
+    ///
+    /// An empty extent is dropped whatever `threshold` is.
+    fn release(&mut self, threshold: u64, addr: u64, len: u64, class: Self::Class) -> Release {
+        // `H5MF_xfree` (`H5MF.c`, HDF5 1.14.6) adds a section of at least the threshold and merges a
+        // smaller one into an adjoining tracked section through `H5FS_sect_try_merge`
+        // (`H5FSsection.c`), dropping it where none adjoins.
+        let release = if len == 0 {
+            Release::Drop
+        } else if len >= threshold {
+            Release::Track
+        } else if self.merges(addr, len) {
+            Release::Merge
+        } else {
+            Release::Drop
+        };
+        if release != Release::Drop {
+            self.track(addr, len, class);
+        }
+        release
+    }
+}
+
+/// What [`TrackedSpace::release`] does with a freed extent.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum Release {
+pub(crate) enum Release {
     /// The extent is not recorded.
     Drop,
-    /// The extent is shorter than the threshold and is recorded with a region it adjoins.
+    /// The extent is shorter than the threshold and merges into tracked space.
     Merge,
     /// The extent is at least the threshold and is recorded.
     Track,
@@ -678,7 +753,7 @@ mod tests {
         let mut fl = FreeList::new();
         fl.free(0, 100);
 
-        assert_eq!(fl.release(THRESHOLD, 500, len), release);
+        assert_eq!(fl.release(THRESHOLD, 500, len, ()), release);
         assert_eq!(regions(&fl), expected);
     }
 
@@ -696,7 +771,7 @@ mod tests {
             fl.free(addr, len);
         }
 
-        assert_eq!(fl.release(THRESHOLD, addr, len), Release::Merge);
+        assert_eq!(fl.release(THRESHOLD, addr, len, ()), Release::Merge);
         assert_eq!(regions(&fl), expected);
     }
 
@@ -706,8 +781,8 @@ mod tests {
 
         assert_eq!(
             [
-                fl.release(THRESHOLD, 0, THRESHOLD - 1),
-                fl.release(THRESHOLD, THRESHOLD - 1, THRESHOLD - 1),
+                fl.release(THRESHOLD, 0, THRESHOLD - 1, ()),
+                fl.release(THRESHOLD, THRESHOLD - 1, THRESHOLD - 1, ()),
             ],
             [Release::Drop, Release::Drop]
         );
@@ -718,7 +793,7 @@ mod tests {
     fn an_empty_extent_is_dropped() {
         let mut fl = FreeList::new();
 
-        assert_eq!(fl.release(0, 100, 0), Release::Drop);
+        assert_eq!(fl.release(0, 100, 0, ()), Release::Drop);
         assert!(fl.is_empty());
     }
 
