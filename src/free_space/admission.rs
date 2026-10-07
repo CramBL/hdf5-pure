@@ -1,3 +1,5 @@
+use alloc::vec::Vec;
+
 use super::extent::Extent;
 
 /// Free space a session tracks, and the threshold rule for which freed extents join it.

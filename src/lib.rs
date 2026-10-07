@@ -421,7 +421,6 @@
 #![cfg_attr(not(feature = "std"), allow(dead_code))]
 #![deny(unnameable_types)]
 
-#[cfg(not(feature = "std"))]
 extern crate alloc;
 
 #[cfg(doc)]
@@ -455,6 +454,7 @@ pub(crate) mod fill_value;
 pub(crate) mod filter_pipeline;
 pub(crate) mod filters;
 pub(crate) mod fractal_heap;
+pub(crate) mod free_space;
 pub(crate) mod free_space_manager;
 pub(crate) mod global_heap;
 pub(crate) mod group_v1;
@@ -506,8 +506,6 @@ mod crash_replay;
 pub(crate) mod edit;
 #[cfg(feature = "std")]
 pub(crate) mod file_lock;
-#[cfg(feature = "std")]
-pub(crate) mod free_space;
 #[cfg(feature = "std")]
 pub(crate) mod image;
 #[cfg(feature = "std")]
