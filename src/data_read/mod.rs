@@ -10,6 +10,7 @@ use crate::chunked_read::{
     read_chunked_data_cached, read_chunked_data_cached_from_source, read_chunked_data_from_source,
 };
 use crate::convert::slice_range;
+#[cfg(test)]
 use crate::data_layout::DataLayout;
 use crate::data_read::primitive::{
     H5Conversion, HardConversion, NoOpConversion, NumericReadTarget,
@@ -21,7 +22,9 @@ use crate::datatype::byte_order::DatatypeByteOrder;
 use crate::datatype::layout::FixedPointLayout;
 use crate::datatype::numeric::NumericDatatype;
 use crate::error::FormatError;
-use crate::read_spec::RawReadSpec;
+#[cfg(test)]
+use crate::fill_value::FillPattern;
+use crate::read_spec::{RawReadSpec, RawReadStorage};
 use crate::source::Source;
 
 mod primitive;
@@ -40,7 +43,7 @@ pub fn read_raw_data(
 ) -> Result<Vec<u8>, FormatError> {
     read_raw_data_full(
         file_data,
-        RawReadSpec::plain(layout, dataspace, datatype),
+        RawReadSpec::parse(layout, dataspace, datatype, None, FillPattern::ZERO)?,
         8,
         8,
     )
@@ -53,29 +56,18 @@ pub fn read_raw_data_full(
     offset_size: u8,
     length_size: u8,
 ) -> Result<Vec<u8>, FormatError> {
-    let RawReadSpec {
-        layout,
-        dataspace,
-        fill,
-        ..
-    } = spec;
-    // The one definition of "these bytes are the dataset the dataspace
-    // describes". The windowed readers make the same check through it.
-    let expected_size = spec.stored_byte_len()?;
+    let (dataspace, fill) = (spec.dataspace(), spec.fill());
+    let expected_size = spec.byte_len()?;
 
     // Zero-element datasets have no data to read.
     if dataspace.num_elements() == 0 {
         return Ok(Vec::new());
     }
 
-    match layout {
-        DataLayout::Compact { data } => Ok(data.clone()),
-        DataLayout::Contiguous { address, size } => {
-            // No address means the storage was never allocated.
-            let Some(addr) = *address else {
-                return fill.buffer(expected_size);
-            };
-            let r = slice_range(addr.get(), *size)?;
+    match spec.storage() {
+        RawReadStorage::Compact { data } => Ok(data.to_vec()),
+        RawReadStorage::Contiguous { address } => {
+            let r = slice_range(address.get(), spec.byte_len_u64())?;
             if r.end > file_data.len() {
                 return Err(FormatError::UnexpectedEof {
                     expected: r.end,
@@ -84,14 +76,15 @@ pub fn read_raw_data_full(
             }
             Ok(file_data[r].to_vec())
         }
-        DataLayout::Chunked { .. } => read_chunked_data_cached(
+        RawReadStorage::ContiguousUnallocated => fill.buffer(expected_size),
+        RawReadStorage::Chunked { .. } => read_chunked_data_cached(
             file_data,
             spec,
             offset_size,
             length_size,
             &ChunkCache::new(),
         ),
-        DataLayout::Virtual => Err(FormatError::UnsupportedVirtualLayout),
+        RawReadStorage::Virtual => Err(FormatError::UnsupportedVirtualLayout),
     }
 }
 
@@ -107,8 +100,8 @@ pub fn read_raw_data_cached(
     length_size: u8,
     cache: &ChunkCache,
 ) -> Result<Vec<u8>, FormatError> {
-    match spec.layout {
-        DataLayout::Chunked { .. } => {
+    match spec.storage() {
+        RawReadStorage::Chunked { .. } => {
             read_chunked_data_cached(file_data, spec, offset_size, length_size, cache)
         }
         _ => read_raw_data_full(file_data, spec, offset_size, length_size),
@@ -123,31 +116,23 @@ pub fn read_raw_data_full_from_source<S: Source + ?Sized>(
     offset_size: u8,
     length_size: u8,
 ) -> Result<Vec<u8>, FormatError> {
-    let RawReadSpec {
-        layout,
-        dataspace,
-        fill,
-        ..
-    } = spec;
-    // See the buffered reader: one definition, shared with the windowed ones.
-    let expected_size = spec.stored_byte_len()?;
+    let (dataspace, fill) = (spec.dataspace(), spec.fill());
+    let expected_size = spec.byte_len()?;
 
     if dataspace.num_elements() == 0 {
         return Ok(Vec::new());
     }
 
-    match layout {
-        DataLayout::Compact { data } => Ok(data.clone()),
-        DataLayout::Contiguous { address, .. } => {
-            let Some(addr) = *address else {
-                return fill.buffer(expected_size);
-            };
-            source.read_exact_at(addr.get(), expected_size)
+    match spec.storage() {
+        RawReadStorage::Compact { data } => Ok(data.to_vec()),
+        RawReadStorage::Contiguous { address } => {
+            source.read_exact_at(address.get(), expected_size)
         }
-        DataLayout::Chunked { .. } => {
+        RawReadStorage::ContiguousUnallocated => fill.buffer(expected_size),
+        RawReadStorage::Chunked { .. } => {
             read_chunked_data_from_source(source, spec, offset_size, length_size)
         }
-        DataLayout::Virtual => Err(FormatError::UnsupportedVirtualLayout),
+        RawReadStorage::Virtual => Err(FormatError::UnsupportedVirtualLayout),
     }
 }
 
@@ -159,8 +144,8 @@ pub fn read_raw_data_cached_from_source<S: Source + ?Sized>(
     length_size: u8,
     cache: &ChunkCache,
 ) -> Result<Vec<u8>, FormatError> {
-    match spec.layout {
-        DataLayout::Chunked { .. } => {
+    match spec.storage() {
+        RawReadStorage::Chunked { .. } => {
             read_chunked_data_cached_from_source(source, spec, offset_size, length_size, cache)
         }
         _ => read_raw_data_full_from_source(source, spec, offset_size, length_size),
@@ -1001,13 +986,14 @@ mod tests {
         let seven = 7.0f64.to_le_bytes();
         let filled = read_raw_data_full(
             &[],
-            RawReadSpec {
-                layout: &layout,
-                dataspace: &ds,
-                datatype: &dt,
-                pipeline: None,
-                fill: FillPattern::new(Some(&seven), nz(8)),
-            },
+            RawReadSpec::parse(
+                &layout,
+                &ds,
+                &dt,
+                None,
+                FillPattern::new(Some(&seven), nz(8)),
+            )
+            .unwrap(),
             8,
             8,
         )
@@ -1121,13 +1107,7 @@ mod tests {
         };
         let seven = 7.0f64.to_le_bytes();
         for fill in [FillPattern::ZERO, FillPattern::new(Some(&seven), nz(8))] {
-            let spec = RawReadSpec {
-                layout: &layout,
-                dataspace: &ds,
-                datatype: &dt,
-                pipeline: None,
-                fill,
-            };
+            let spec = RawReadSpec::parse(&layout, &ds, &dt, None, fill).unwrap();
             let buffered = read_raw_data_full(&[], spec, 8, 8).unwrap();
             let streamed =
                 read_raw_data_full_from_source(&BytesSource::new(Vec::new()), spec, 8, 8).unwrap();

@@ -40,7 +40,7 @@ use crate::libver::LibVer;
 use crate::message_type::MessageType;
 use crate::object_header::ObjectHeader;
 use crate::object_path::{LinkName, LinkNameBuf, ObjectPath, ObjectPathBuf};
-use crate::read_spec::RawReadSpec;
+use crate::read_spec::{RawReadSpec, RawReadStorage};
 use crate::shared_message::{self, BufferedResolver, SharedResolver, SourceResolver};
 use crate::signature;
 use crate::source::SourceMetadata;
@@ -2404,7 +2404,7 @@ impl FileInner {
         num_rows: u64,
     ) -> Result<Vec<u8>, FormatError> {
         let (os, ls) = (self.offset_size(), self.length_size());
-        let (dl, ds, dt) = (spec.layout, spec.dataspace, spec.datatype);
+        let (ds, dt) = (spec.dataspace(), spec.datatype());
         let elem_size = crate::datatype::element_size_usize(dt)?;
         // Elements per row (product of inner dims; 1 when 0-D or 1-D). Checked so
         // a crafted dataspace whose inner dims overflow `usize` errors instead of
@@ -2425,7 +2425,7 @@ impl FileInner {
                 })?;
 
         // Compact data is inline in the layout message — no I/O, no framing.
-        if let DataLayout::Compact { data } = dl {
+        if let RawReadStorage::Compact { data } = spec.storage() {
             return compact_rows(data, start_row, num_rows, row_bytes);
         }
 
@@ -2516,22 +2516,16 @@ fn read_rows_framed<S: Source + ?Sized>(
     num_rows: u64,
     row_bytes: usize,
 ) -> Result<Vec<u8>, FormatError> {
-    let (dl, fill) = (spec.layout, spec.fill);
+    let fill = spec.fill();
     // A zero-row window reads nothing, uniformly across the *supported* layouts.
     // A `Virtual` layout is unsupported and must still error like `read_raw`
     // does, so it is excluded here and falls through to the match.
-    if num_rows == 0 && !matches!(dl, DataLayout::Virtual) {
+    if num_rows == 0 && !matches!(spec.storage(), RawReadStorage::Virtual) {
         return Ok(Vec::new());
     }
-    match dl {
-        DataLayout::Compact { data } => compact_rows(data, start_row, num_rows, row_bytes),
-        DataLayout::Contiguous { address, size } => {
-            // Unallocated storage: the window reads as the fill value, the same
-            // answer the whole-dataset readers give for it.
-            let Some(addr) = *address else {
-                let len = num_rows.to_usize()?.saturating_mul(row_bytes);
-                return fill.buffer(len);
-            };
+    match spec.storage() {
+        RawReadStorage::Compact { data } => compact_rows(data, start_row, num_rows, row_bytes),
+        RawReadStorage::Contiguous { address } => {
             let start =
                 start_row
                     .checked_mul(row_bytes as u64)
@@ -2547,23 +2541,20 @@ fn read_rows_framed<S: Source + ?Sized>(
                         offset: num_rows,
                         length: row_bytes as u64,
                     })?;
-            // Never read past the dataset's own contiguous storage.
-            if start.saturating_add(len as u64) > *size {
-                return Err(FormatError::DataSizeMismatch {
-                    expected: start.to_usize()?.saturating_add(len),
-                    actual: (*size).to_usize()?,
-                });
-            }
-            let off = addr
+            let off = address
                 .get()
                 .checked_add(start)
                 .ok_or(FormatError::OffsetOverflow {
-                    offset: addr.get(),
+                    offset: address.get(),
                     length: start,
                 })?;
             source.read_exact_at(off, len)
         }
-        DataLayout::Chunked { .. } => {
+        RawReadStorage::ContiguousUnallocated => {
+            let len = num_rows.to_usize()?.saturating_mul(row_bytes);
+            fill.buffer(len)
+        }
+        RawReadStorage::Chunked { .. } => {
             match crate::chunked_read::read_chunked_rows_from_source(
                 source, spec, os, ls, cache, pass, start_row, num_rows,
             )? {
@@ -2584,7 +2575,7 @@ fn read_rows_framed<S: Source + ?Sized>(
                 }
             }
         }
-        DataLayout::Virtual => Err(FormatError::UnsupportedVirtualLayout),
+        RawReadStorage::Virtual => Err(FormatError::UnsupportedVirtualLayout),
     }
 }
 
@@ -6022,19 +6013,7 @@ the same commit to replace it",
             Ok(b) => FillPattern::new(b.as_deref(), elem_size),
             Err(_) => FillPattern::UNKNOWN,
         };
-        let spec = RawReadSpec {
-            layout: &dl,
-            dataspace: &ds,
-            datatype: &dt,
-            pipeline: pipeline.as_ref(),
-            fill,
-        };
-        // What a whole read checks before it reads a byte, and what a sweep would
-        // otherwise skip: a compact or contiguous layout whose declared size
-        // disagrees with the dataspace is refused. Reading in windows must not
-        // turn that into a check that fires only on datasets small enough to be
-        // read whole.
-        spec.stored_byte_len()?;
+        let spec = RawReadSpec::parse(&dl, &ds, &dt, pipeline.as_ref(), fill)?;
 
         // A window is cut by the *stored* element width, while a decoder slices
         // what it is handed by the width of the type it decodes — the base type,
@@ -6670,13 +6649,7 @@ the same commit to replace it",
             Ok(b) => FillPattern::new(b.as_deref(), crate::datatype::element_size_usize(&dt)?),
             Err(_) => FillPattern::UNKNOWN,
         };
-        let spec = RawReadSpec {
-            layout: &dl,
-            dataspace: &ds,
-            datatype: &dt,
-            pipeline: pipeline.as_ref(),
-            fill,
-        };
+        let spec = RawReadSpec::parse(&dl, &ds, &dt, pipeline.as_ref(), fill)?;
         Ok(self.file.read_dataset_raw(spec, &self.chunk_cache)?)
     }
 
@@ -6718,13 +6691,7 @@ the same commit to replace it",
         };
 
         let pipeline = self.filter_pipeline_parsed();
-        let spec = RawReadSpec {
-            layout: &dl,
-            dataspace: &ds,
-            datatype: &dt,
-            pipeline: pipeline.as_ref(),
-            fill,
-        };
+        let spec = RawReadSpec::parse(&dl, &ds, &dt, pipeline.as_ref(), fill)?;
 
         if start == 0 && count == n0 {
             return Ok(self.file.read_dataset_raw(spec, &self.chunk_cache)?);
@@ -8331,13 +8298,10 @@ mod tests {
     /// A contiguous layout whose declared size disagrees with its dataspace is
     /// refused, whatever the dataset's size and whichever read asks.
     ///
-    /// The whole-dataset readers have always refused it. A typed read now takes a
-    /// large dataset a row window at a time, and a window only ever checks that
-    /// its *own* rows are inside the declared storage — so without the shared
-    /// check this refusal would have applied to small datasets, which are still
-    /// read whole, and not to large ones. A validation that fires depending on
-    /// the size of the input is the kind that surfaces years later as an
-    /// inconsistent bug report, which is why both sizes are here.
+    /// Every read first parses the raw layout into [`RawReadSpec`]. That parse
+    /// compares the complete declared extent with the dataspace before a whole,
+    /// windowed, typed, or empty selection is chosen. The two dataset sizes cover
+    /// both sides of the typed reader's windowing threshold.
     #[cfg(feature = "checksum")]
     #[test]
     fn a_layout_size_disagreeing_with_the_dataspace_is_refused_at_every_dataset_size() {
@@ -8383,25 +8347,22 @@ mod tests {
 
             let file = File::from_bytes(bytes).unwrap();
             let ds = file.dataset("t").unwrap();
-            let expected = FormatError::DataSizeMismatch {
-                expected: n * 8,
-                actual: n * 16,
-            };
             for (what, err) in [
                 ("read_raw", ds.read_raw().unwrap_err()),
+                ("read_raw_rows", ds.read_raw_rows(0, 1).unwrap_err()),
+                (
+                    "empty read_raw_rows",
+                    ds.read_raw_rows(n as u64, 0).unwrap_err(),
+                ),
                 ("read_f64", ds.read_f64().unwrap_err()),
+                ("read_f64_rows", ds.read_f64_rows(0, 1).unwrap_err()),
                 ("read_i32", ds.read_i32().unwrap_err()),
             ] {
-                match err {
-                    Error::Format(got) => assert_eq!(
-                        format!("{got:?}"),
-                        format!("{expected:?}"),
-                        "{what} over {n} elements reported the wrong mismatch"
-                    ),
-                    other => {
-                        panic!("{what} over {n} elements: expected a format error, got {other:?}")
-                    }
-                }
+                let Error::Format(FormatError::DataSizeMismatch { expected, actual }) = &err else {
+                    panic!("{what} over {n} elements: expected DataSizeMismatch, got {err:?}");
+                };
+                assert_eq!(*expected, n * 8, "{what} reported the wrong expected size");
+                assert_eq!(*actual, n * 16, "{what} reported the wrong stored size");
             }
         }
     }
