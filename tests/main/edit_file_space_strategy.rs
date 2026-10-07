@@ -35,6 +35,9 @@ use test_util::range;
     false
 )]
 #[case::page_persisting(FileSpaceStrategy::Page, true, 1, true)]
+#[case::page_persisting_below_the_extent(FileSpaceStrategy::Page, true, DELETED_LEN - 1, true)]
+#[case::page_persisting_at_the_extent(FileSpaceStrategy::Page, true, DELETED_LEN, true)]
+#[case::page_persisting_above_the_extent(FileSpaceStrategy::Page, true, DELETED_LEN + 1, false)]
 #[case::aggr(FileSpaceStrategy::Aggr, false, 1, false)]
 #[case::aggr_above_the_extent(FileSpaceStrategy::Aggr, false, DELETED_LEN + 1, false)]
 #[case::aggr_persisting(FileSpaceStrategy::Aggr, true, 1, false)]
@@ -185,13 +188,17 @@ fn a_file_whose_strategy_cannot_be_read_reuses_no_deleted_extent() {
 }
 
 #[rstest]
+#[case::fsm_aggr(FileSpaceStrategy::FsmAggr, false)]
+#[case::fsm_aggr_persisting(FileSpaceStrategy::FsmAggr, true)]
+#[case::page_persisting(FileSpaceStrategy::Page, true)]
 fn a_deleted_extent_is_tracked_from_the_threshold_up(
-    #[values(false, true)] persist: bool,
+    #[case] strategy: FileSpaceStrategy,
+    #[case] persist: bool,
     #[values(DELETED_LEN - 1, DELETED_LEN, DELETED_LEN + 1)] threshold: u64,
 ) {
     let dir = tempdir().unwrap();
     let path = dir.path().join("strategy.h5");
-    write_three_datasets(&path, FileSpaceStrategy::FsmAggr, persist, threshold);
+    write_three_datasets(&path, strategy, persist, threshold);
 
     let (deleted, session) = {
         let file = File::open_rw(&path).unwrap();

@@ -58,7 +58,7 @@ Shared object-header messages are supported for datatypes, dataspaces, fill valu
 | `H5F_FSPACE_STRATEGY_NONE` | ✅ | 🟡 | Edits allocate at the end of the file, and a deletion leaves the file at its length. |
 | Aggregators | ✅ | ❌ | No strategy allocates through aggregators. |
 | Persistent free-space managers | ✅ | ✅ | |
-| Free-space threshold | ✅ | 🟡 | Edits under `H5F_FSPACE_STRATEGY_FSM_AGGR` track a freed region shorter than the threshold only where it adjoins tracked free space. Under `H5F_FSPACE_STRATEGY_PAGE` the writer and the editors track every page tail and freed region whatever its value. |
+| Free-space threshold | ✅ | ✅ | Edits track a freed region shorter than the threshold only where it adjoins tracked free space, which under `H5F_FSPACE_STRATEGY_PAGE` is free space in its own page for a region shorter than a page. Page tails are tracked whatever the threshold. |
 | File-space page size | ✅ | ✅ | The writer rejects a page size outside 512 bytes to 1 GiB under every strategy, as libhdf5 does. `File::open` reads a file that stores one without its file-space settings, and `File::open_rw` rejects it. |
 | Persisted free-space reuse | ✅ | ✅ | |
 

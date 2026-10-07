@@ -8,6 +8,7 @@
 use std::ops::Range;
 use std::path::Path;
 
+use hdf5::dataset::Layout as CLayout;
 use hdf5::plist::file_create::FileSpaceStrategy as CStrategy;
 use hdf5::plist::file_create::Sizeof;
 use hdf5::plist::file_create::SizeofInfo;
@@ -22,12 +23,18 @@ use hdf5_pure::FileSpaceStrategy;
 use hdf5_pure::FormatError;
 use hdf5_pure::Layout;
 use hdf5_pure::MaxExtent;
+use hdf5_pure::MessageType;
 use hdf5_pure_core::__private::FileSpaceInfoFields;
 use hdf5_pure_core::__private::StoredAddress;
+use hdf5_pure_format::__private::AccessMode;
 use hdf5_pure_format::__private::DEFAULT_THRESHOLD;
 use hdf5_pure_format::__private::FormatWidths;
 use hdf5_pure_format::__private::FreeSpaceManagerHeader;
+use hdf5_pure_format::__private::LinkMessage;
+use hdf5_pure_format::__private::LinkTarget;
 use hdf5_pure_format::__private::NUM_FILE_FSM_MANAGERS;
+use hdf5_pure_format::__private::ObjectHeader;
+use hdf5_pure_format::__private::ObjectHeaderPrefix;
 use hdf5_pure_format::__private::SECTION_CLASS_SIMPLE;
 use rstest::rstest;
 
@@ -2444,6 +2451,9 @@ fn c_library_reads_our_file_after_an_append_reused_free_space() {
 #[case::fsm_aggr_persisting_below_the_extent(fsm_aggr(true, DELETED_LEN - 1), true)]
 #[case::fsm_aggr_persisting_at_the_extent(fsm_aggr(true, DELETED_LEN), true)]
 #[case::fsm_aggr_persisting_above_the_extent(fsm_aggr(true, DELETED_LEN + 1), false)]
+#[case::page_below_the_extent(page(DELETED_LEN - 1), true)]
+#[case::page_at_the_extent(page(DELETED_LEN), true)]
+#[case::page_above_the_extent(page(DELETED_LEN + 1), false)]
 #[case::aggr(CStrategy::PageAggregation, false)]
 #[case::none(CStrategy::None, false)]
 fn a_replacement_reuses_a_deleted_extent_where_libhdf5_does(
@@ -2662,6 +2672,396 @@ fn append_at_close(path: &Path) {
     file.close().unwrap();
 }
 
+#[rstest]
+#[case::raw_short_of_the_threshold(EXTENT_LEN + 1, FOUR_EXTENTS, &["b"], "b", false)]
+#[case::raw_at_the_threshold(EXTENT_LEN, FOUR_EXTENTS, &["b"], "b", true)]
+#[case::raw_past_the_threshold(EXTENT_LEN - 1, FOUR_EXTENTS, &["b"], "b", true)]
+#[case::raw_beside_a_tracked_extent(THRESHOLD_IN_A_PAGE, ABOVE_A_TRACKED_EXTENT, &["b", "c"], "c", true)]
+#[case::raw_beside_the_page_tail(THRESHOLD_IN_A_PAGE, FOUR_EXTENTS, &["e"], "e", true)]
+#[case::raw_pages_alone(THRESHOLD_OF_THREE_PAGES, PAGE_SPANS, &["d"], "d", false)]
+#[case::raw_completing_a_page(THRESHOLD_OF_THREE_PAGES, PAGE_SPANS, &["a"], "a", false)]
+#[case::raw_pages_beside_tracked_pages(THRESHOLD_OF_THREE_PAGES, PAGE_SPANS, &["e", "d"], "d", true)]
+#[case::metadata_short_of_the_threshold(THRESHOLD_IN_A_PAGE, TWO_HEADERS, &["k2"], "k2", false)]
+#[case::metadata_past_the_threshold(THRESHOLD_IN_A_PAGE, TWO_HEADERS, &["k1"], "k1", true)]
+#[case::metadata_beside_a_tracked_extent(THRESHOLD_IN_A_PAGE, TWO_HEADERS, &["k1", "k2"], "k2", true)]
+fn a_paged_returned_extent_is_tracked_as_libhdf5_tracks_it(
+    #[case] threshold: u64,
+    #[case] datasets: &[(&str, usize, CLayout)],
+    #[case] deletions: &[&str],
+    #[case] measured: &str,
+    #[case] tracked: bool,
+) {
+    let dir = tempdir().unwrap();
+    let ours = dir.path().join("ours.h5");
+    let theirs = dir.path().join("theirs.h5");
+    write_c_paged(&ours, threshold, datasets);
+    std::fs::copy(&ours, &theirs).unwrap();
+    let extent = object_extent(&ours, measured);
+
+    let (ours_session, ours_reopened, theirs_reopened) =
+        paged_tracked_after_deletions(&ours, &theirs, deletions, &extent);
+
+    let expected = if tracked {
+        extent.end - extent.start
+    } else {
+        0
+    };
+    assert_eq!(
+        (ours_session, ours_reopened, theirs_reopened),
+        (expected, expected, expected)
+    );
+}
+
+#[test]
+fn a_dropped_extent_of_whole_pages_that_ends_the_file_is_given_back_for_libhdf5() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("ours.h5");
+    let mut b = FileBuilder::new();
+    b.create_dataset("a").with_i32_data(&[1; EXTENT_ELEMENTS]);
+    b.create_dataset("l").with_i32_data(&[2; 2 * PAGE_ELEMENTS]);
+    b.with_file_space_strategy(FileSpaceStrategy::Page, true, THRESHOLD_ABOVE_EVERY_EXTENT)
+        .with_file_space_page_size(PAGE_SIZE);
+    b.write(&path).unwrap();
+    let l = object_extent(&path, "l");
+    assert_eq!(
+        (l.start % PAGE_SIZE, l.end),
+        (0, std::fs::metadata(&path).unwrap().len())
+    );
+
+    {
+        let file = File::open_rw(&path).unwrap();
+        file.root().delete("l").unwrap();
+        file.commit().unwrap();
+    }
+
+    let c_file = hdf5::File::open(&path).unwrap();
+    assert_eq!(
+        (
+            File::open(&path).unwrap().superblock().eof_address,
+            std::fs::metadata(&path).unwrap().len(),
+            c_file.dataset("a").unwrap().read_raw::<i32>().unwrap(),
+        ),
+        (l.start, l.start, vec![1; EXTENT_ELEMENTS])
+    );
+}
+
+#[test]
+fn a_dropped_extent_of_whole_pages_below_an_appended_tail_stays_tracked_for_libhdf5() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("ours.h5");
+    let page_size = FileSpacePageSize::MIN.get();
+    let mut b = FileBuilder::new();
+    b.create_dataset("a").with_i32_data(&[1; EXTENT_ELEMENTS]);
+    b.create_dataset("l")
+        .with_i32_data(&vec![2; 2 * page_size as usize / size_of::<i32>()]);
+    b.with_file_space_strategy(FileSpaceStrategy::Page, true, THRESHOLD_ABOVE_EVERY_EXTENT)
+        .with_file_space_page_size(page_size);
+    b.write(&path).unwrap();
+    let l = object_extent(&path, "l");
+    assert_eq!(
+        (l.start % page_size, l.end),
+        (0, std::fs::metadata(&path).unwrap().len())
+    );
+
+    {
+        let file = File::open_rw(&path).unwrap();
+        file.root().delete("l").unwrap();
+        file.commit().unwrap();
+    }
+
+    let c_file = hdf5::File::open(&path).unwrap();
+    assert_eq!(
+        (
+            range::covered_len(
+                &File::open(&path).unwrap().persisted_free_space().unwrap(),
+                &l
+            ),
+            std::fs::metadata(&path).unwrap().len() > l.end,
+            c_file.dataset("a").unwrap().read_raw::<i32>().unwrap(),
+        ),
+        (l.end - l.start, true, vec![1; EXTENT_ELEMENTS])
+    );
+}
+
+#[test]
+fn a_paged_returned_extent_beside_free_space_across_a_page_boundary_is_dropped_as_in_libhdf5() {
+    let dir = tempdir().unwrap();
+    let ours = dir.path().join("ours.h5");
+    let theirs = dir.path().join("theirs.h5");
+    write_c_paged(
+        &ours,
+        THRESHOLD_ACROSS_PAGES,
+        &[
+            ("f0", 768, CLayout::Contiguous),
+            ("f1", 256, CLayout::Contiguous),
+            ("g", 300, CLayout::Contiguous),
+            ("l", 1500, CLayout::Contiguous),
+        ],
+    );
+    std::fs::copy(&ours, &theirs).unwrap();
+    let (f1, g) = (object_extent(&ours, "f1"), object_extent(&ours, "g"));
+    assert_eq!((f1.end, f1.end % PAGE_SIZE), (g.start, 0));
+
+    let tracked = [&f1, &g].map(|extent| {
+        let dir = tempdir().unwrap();
+        let (ours_copy, theirs_copy) = (dir.path().join("ours.h5"), dir.path().join("theirs.h5"));
+        std::fs::copy(&ours, &ours_copy).unwrap();
+        std::fs::copy(&theirs, &theirs_copy).unwrap();
+        paged_tracked_after_deletions(&ours_copy, &theirs_copy, &["g", "f1"], extent)
+    });
+
+    let g_len = g.end - g.start;
+    assert_eq!(tracked, [(0, 0, 0), (g_len, g_len, g_len)]);
+}
+
+#[rstest]
+#[case::a_libhdf5_tail_after_a_deletion(
+    &[("a", 900, CLayout::Contiguous), ("k", 50, CLayout::Compact)],
+    delete_k,
+    unlink_k,
+    "a"
+)]
+#[case::an_editor_tail_after_a_creation(&[("a", 900, CLayout::Contiguous)], create_n, c_create_n, "n")]
+fn a_page_tail_short_of_the_threshold_stays_tracked_as_libhdf5_tracks_it(
+    #[case] datasets: &[(&str, usize, CLayout)],
+    #[case] ours_edit: fn(&File),
+    #[case] theirs_edit: fn(&hdf5::File),
+    #[case] tail_after: &str,
+) {
+    let dir = tempdir().unwrap();
+    let ours = dir.path().join("ours.h5");
+    let theirs = dir.path().join("theirs.h5");
+    write_c_paged(&ours, THRESHOLD_IN_A_PAGE, datasets);
+    std::fs::copy(&ours, &theirs).unwrap();
+
+    let (ours_tail, ours_session) = {
+        let file = File::open_rw(&ours).unwrap();
+        ours_edit(&file);
+        file.commit().unwrap();
+        let tail = page_tail(&contiguous_extent(&file, tail_after));
+        let session =
+            range::covered_len(&file.space_accounting().unwrap().reusable_free_space, &tail);
+        (tail, session)
+    };
+    let ours_reopened = range::covered_len(
+        &File::open(&ours).unwrap().persisted_free_space().unwrap(),
+        &ours_tail,
+    );
+    let theirs_tail = {
+        let file = hdf5::File::open_rw(&theirs).unwrap();
+        theirs_edit(&file);
+        let tail = page_tail(&c_contiguous_extent(&file.dataset(tail_after).unwrap()));
+        file.close().unwrap();
+        tail
+    };
+    let theirs_reopened = range::covered_len(
+        &File::open(&theirs).unwrap().persisted_free_space().unwrap(),
+        &theirs_tail,
+    );
+
+    let len = ours_tail.end - ours_tail.start;
+    assert!(len < THRESHOLD_IN_A_PAGE, "{ours_tail:?}");
+    assert_eq!(
+        (
+            ours_session,
+            ours_reopened,
+            theirs_tail.end - theirs_tail.start,
+            theirs_reopened
+        ),
+        (len, len, len, len)
+    );
+}
+
+#[test]
+fn a_paged_persisting_edit_that_tracks_no_free_space_records_the_end_of_allocation_for_libhdf5() {
+    let dir = tempdir().unwrap();
+    let base = dir.path().join("base.h5");
+    let path = dir.path().join("ours.h5");
+    let mut b = FileBuilder::new();
+    b.create_dataset("a").with_i32_data(&[1; PAGE_ELEMENTS]);
+    b.with_file_space_strategy(FileSpaceStrategy::Page, true, THRESHOLD_ABOVE_EVERY_EXTENT);
+    b.write(&base).unwrap();
+
+    let filled = (0..PAGE_SIZE).find(|&len| {
+        std::fs::copy(&base, &path).unwrap();
+        {
+            let file = File::open_rw(&path).unwrap();
+            file.root()
+                .set_attr("fill", AttrValue::U8Array(vec![0; len as usize]))
+                .unwrap();
+            file.commit().unwrap();
+        }
+        File::open(&path)
+            .unwrap()
+            .persisted_free_space()
+            .unwrap()
+            .is_empty()
+    });
+
+    let (eoa_pre_fsm, manager_addrs, free, eof) = {
+        let file = File::open(&path).unwrap();
+        let info = file.file_space_info().unwrap();
+        (
+            info.eoa_pre_fsm,
+            info.manager_addrs.clone(),
+            file.persisted_free_space().unwrap(),
+            file.superblock().eof_address,
+        )
+    };
+    let len = std::fs::metadata(&path).unwrap().len();
+    let c_file = hdf5::File::open(&path).unwrap();
+    assert!(filled.is_some(), "no attribute fills the free space");
+    assert_eq!(
+        (
+            eoa_pre_fsm,
+            eof,
+            manager_addrs,
+            free,
+            c_file.dataset("a").unwrap().read_raw::<i32>().unwrap(),
+            c_file.free_space(),
+        ),
+        (
+            len,
+            len,
+            vec![u64::MAX; NUM_FILE_FSM_MANAGERS],
+            Vec::new(),
+            vec![1; PAGE_ELEMENTS],
+            0
+        )
+    );
+}
+
+fn paged_tracked_after_deletions(
+    ours: &Path,
+    theirs: &Path,
+    deletions: &[&str],
+    extent: &Range<u64>,
+) -> (u64, u64, u64) {
+    let ours_session = {
+        let file = File::open_rw(ours).unwrap();
+        for &object_path in deletions {
+            file.root().delete(object_path).unwrap();
+        }
+        file.commit().unwrap();
+        range::covered_len(
+            &file.space_accounting().unwrap().reusable_free_space,
+            extent,
+        )
+    };
+    {
+        let file = hdf5::File::open_rw(theirs).unwrap();
+        for &object_path in deletions {
+            file.unlink(object_path).unwrap();
+        }
+        file.close().unwrap();
+    }
+    let reopened = |path: &Path| {
+        range::covered_len(
+            &File::open(path).unwrap().persisted_free_space().unwrap(),
+            extent,
+        )
+    };
+    (ours_session, reopened(ours), reopened(theirs))
+}
+
+fn write_c_paged(path: &Path, threshold: u64, datasets: &[(&str, usize, CLayout)]) {
+    let file = hdf5::FileBuilder::new()
+        .with_fapl(|fapl| fapl.libver_v110())
+        .with_fcpl(|fcpl| {
+            fcpl.file_space_strategy(page(threshold))
+                .file_space_page_size(PAGE_SIZE)
+        })
+        .create(path)
+        .unwrap();
+    for (value, &(name, len, layout)) in (1..).zip(datasets) {
+        file.new_dataset::<i32>()
+            .layout(layout)
+            .shape((len,))
+            .create(name)
+            .unwrap()
+            .write(&vec![value; len])
+            .unwrap();
+    }
+    file.close().unwrap();
+}
+
+fn object_extent(file_path: &Path, object_path: &str) -> Range<u64> {
+    let file = File::open(file_path).unwrap();
+    match file.dataset(object_path).unwrap().layout().unwrap() {
+        Layout::Contiguous {
+            address: Some(address),
+            size,
+        } => address..address + size,
+        Layout::Compact { .. } => header_extent(file_path, &file, object_path),
+        layout => panic!("expected contiguous or compact storage, got {layout:?}"),
+    }
+}
+
+fn header_extent(path: &Path, file: &File, link_name: &str) -> Range<u64> {
+    let bytes = std::fs::read(path).unwrap();
+    let superblock = file.superblock();
+    let root = ObjectHeader::parse(
+        &bytes,
+        AccessMode::ReadOnly,
+        usize::try_from(superblock.root_group_address).unwrap(),
+        superblock.offset_size,
+        superblock.length_size,
+    )
+    .unwrap();
+    let address = root
+        .messages
+        .iter()
+        .filter(|message| message.msg_type == MessageType::LINK)
+        .map(|message| LinkMessage::parse(&message.data, superblock.offset_size).unwrap())
+        .find(|link| link.name == link_name)
+        .map(|link| match link.link_target {
+            LinkTarget::Hard {
+                object_header_address,
+            } => object_header_address.get(),
+            target => panic!("expected a hard link, got {target:?}"),
+        })
+        .unwrap();
+    let prefix = ObjectHeaderPrefix::parse(&bytes[usize::try_from(address).unwrap()..]).unwrap();
+    address..address + prefix.len as u64 + prefix.chunk0_size + CHECKSUM_LEN
+}
+
+fn page_tail(extent: &Range<u64>) -> Range<u64> {
+    extent.end..extent.end.next_multiple_of(PAGE_SIZE)
+}
+
+fn delete_k(file: &File) {
+    file.root().delete("k").unwrap();
+}
+
+fn unlink_k(file: &hdf5::File) {
+    file.unlink("k").unwrap();
+}
+
+fn create_n(file: &File) {
+    file.root()
+        .create_dataset("n", |b| {
+            b.with_i32_data(&[9; TAIL_ELEMENTS]);
+        })
+        .unwrap();
+}
+
+fn c_create_n(file: &hdf5::File) {
+    file.new_dataset::<i32>()
+        .shape((TAIL_ELEMENTS,))
+        .create("n")
+        .unwrap()
+        .write(&[9; TAIL_ELEMENTS])
+        .unwrap();
+}
+
+fn page(threshold: u64) -> CStrategy {
+    CStrategy::FreeSpaceManager {
+        paged: true,
+        persist: true,
+        threshold,
+    }
+}
+
 fn fsm_aggr(persist: bool, threshold: u64) -> CStrategy {
     CStrategy::FreeSpaceManager {
         paged: false,
@@ -2707,3 +3107,36 @@ const THRESHOLD: u64 = (THRESHOLD_ELEMENTS * size_of::<i32>()) as u64;
 const SUB_THRESHOLD_ELEMENTS: usize = 256;
 const SUB_THRESHOLD_LEN: u64 = (SUB_THRESHOLD_ELEMENTS * size_of::<i32>()) as u64;
 const THRESHOLD_ABOVE_EVERY_EXTENT: u64 = 1 << 20;
+const PAGE_SIZE: u64 = 4096;
+const PAGE_ELEMENTS: usize = PAGE_SIZE as usize / size_of::<i32>();
+const CHECKSUM_LEN: u64 = 4;
+const EXTENT_ELEMENTS: usize = 100;
+const EXTENT_LEN: u64 = (EXTENT_ELEMENTS * size_of::<i32>()) as u64;
+const THRESHOLD_IN_A_PAGE: u64 = 1000;
+const THRESHOLD_ACROSS_PAGES: u64 = 1100;
+const TAIL_ELEMENTS: usize = 950;
+const FOUR_EXTENTS: &[(&str, usize, CLayout)] = &[
+    ("a", EXTENT_ELEMENTS, CLayout::Contiguous),
+    ("b", EXTENT_ELEMENTS, CLayout::Contiguous),
+    ("c", EXTENT_ELEMENTS, CLayout::Contiguous),
+    ("e", EXTENT_ELEMENTS, CLayout::Contiguous),
+];
+const ABOVE_A_TRACKED_EXTENT: &[(&str, usize, CLayout)] = &[
+    ("a", EXTENT_ELEMENTS, CLayout::Contiguous),
+    ("b", 300, CLayout::Contiguous),
+    ("c", EXTENT_ELEMENTS, CLayout::Contiguous),
+    ("e", EXTENT_ELEMENTS, CLayout::Contiguous),
+];
+const THRESHOLD_OF_THREE_PAGES: u64 = 3 * PAGE_SIZE;
+const PAGE_SPANS: &[(&str, usize, CLayout)] = &[
+    ("a", EXTENT_ELEMENTS, CLayout::Contiguous),
+    ("d", 2 * PAGE_ELEMENTS, CLayout::Contiguous),
+    ("e", 3 * PAGE_ELEMENTS, CLayout::Contiguous),
+    ("f", PAGE_ELEMENTS, CLayout::Contiguous),
+];
+const TWO_HEADERS: &[(&str, usize, CLayout)] = &[
+    ("a", EXTENT_ELEMENTS, CLayout::Contiguous),
+    ("k1", 300, CLayout::Compact),
+    ("k2", 50, CLayout::Compact),
+    ("e", EXTENT_ELEMENTS, CLayout::Contiguous),
+];
