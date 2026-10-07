@@ -1839,63 +1839,47 @@ struct PagedEdit {
     raw_pad: Vec<FreeExtent>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PageTransition {
+    Unchanged,
+    Pad {
+        extent: FreeExtent,
+        track_as: Option<PageType>,
+    },
+}
+
 impl PagedEdit {
-    /// Ensure the next allocation on `image` begins in a page holding page type
-    /// `ty`: when the tail page holds the *other* type and is only partially
-    /// filled, pad it to a page boundary and record the padding as free space of
-    /// the outgoing type.
+    /// Returns the page transition required before appending `ty` at `eoa`.
     ///
-    /// This is the whole of the paged-append rule, and it lives here so the two
-    /// places that grow a paged file — the staged commit through
-    /// [`WriteEngine::begin_page`](WriteEngine::begin_page), and the shared
-    /// Extensible-Array append engine through [`EditStore`] — cannot drift. They
-    /// used to keep separate copies of this state, one per engine, which is what
-    /// made an in-place append to a paged file unsafe from the whole-file editor
-    /// (issue #198).
-    ///
-    /// Call it **before** reading the image's end-of-file to compute an address
-    /// that will be embedded in the bytes being built: several callers build
-    /// content whose interior addresses assume it lands at the current
-    /// end-of-file, and padding inserted after that read would shift the landing
-    /// address out from under them.
-    fn begin(&mut self, image: &mut dyn FileImage, ty: PageType) -> Result<(), Error> {
-        let len = image.len();
+    /// A partial tail page whose type matches `ty` stays open for more bytes. A partial tail page of
+    /// another known type is padded and the padding keeps that outgoing type. A partial tail page
+    /// whose type is unknown is padded without a classification. An aligned end needs no padding.
+    fn plan_transition(&self, eoa: u64, ty: PageType) -> Result<PageTransition, FormatError> {
         let page_size = self.page_size.get();
-        if len % page_size != 0 {
-            let pad_len = page_size - len % page_size;
-            // `prev` is the outgoing page type to record the padding under, or
-            // `None` for a crash-recovery pad whose tail-page type is unknown.
-            let pad = match self.last {
-                // Normal case: the tail page holds a known type; pad only on a
-                // type switch, recording the tail as free of the outgoing type.
-                Some(prev) if prev != ty => Some(Some(prev)),
-                Some(_) => None, // same type: keep packing the tail page
-                // A previous session grew this paged file and was killed before
-                // its tail was page-aligned, so the file opened non-page-aligned
-                // with no known tail type. Pad it up (extending whatever the tail
-                // page holds, so the page stays homogeneous) and leave the padding
-                // untracked, since recording it under the wrong page type could
-                // let a reader reuse it and mix the page.
-                None => Some(None),
-            };
-            if let Some(prev) = pad {
-                let pad_at = len;
-                let padding = FreeExtent::new(pad_at, pad_len).ok_or(Error::Format(
-                    FormatError::OffsetOverflow {
-                        offset: pad_at,
-                        length: pad_len,
-                    },
-                ))?;
-                image.append(&vec![0u8; pad_len.to_usize()?])?;
-                match prev {
-                    Some(PageType::Meta) => self.meta_pad.push(padding),
-                    Some(PageType::Raw) => self.raw_pad.push(padding),
-                    None => {} // crash-recovery pad: untracked (tail type unknown)
-                }
+        if eoa % page_size == 0 || self.last == Some(ty) {
+            return Ok(PageTransition::Unchanged);
+        }
+        let pad_len = page_size - eoa % page_size;
+        let extent = FreeExtent::new(eoa, pad_len).ok_or(FormatError::OffsetOverflow {
+            offset: eoa,
+            length: pad_len,
+        })?;
+        Ok(PageTransition::Pad {
+            extent,
+            track_as: self.last,
+        })
+    }
+
+    /// Records a page transition after its padding has been appended successfully.
+    fn record_transition(&mut self, ty: PageType, transition: PageTransition) {
+        if let PageTransition::Pad { extent, track_as } = transition {
+            match track_as {
+                Some(PageType::Meta) => self.meta_pad.push(extent),
+                Some(PageType::Raw) => self.raw_pad.push(extent),
+                None => {}
             }
         }
         self.last = Some(ty);
-        Ok(())
     }
 
     fn new(page_size: FileSpacePageSize) -> Self {
@@ -8115,14 +8099,9 @@ impl WriteEngine {
                     // header, but a commit that only wrote raw data ends on one.
                     Some(PageType::Meta) => pg.meta_pad.push(padding),
                     Some(PageType::Raw) => pg.raw_pad.push(padding),
-                    // No typed append this commit, so the tail page is one a
-                    // previous session left non-aligned — a crash, since a clean
-                    // close pads. Its type is unknown, and recording the padding
-                    // under a guess would advertise it for reuse of that type and
-                    // mix the page, so leave it untracked (see `PagedEdit::begin`,
-                    // which makes the same call for the same reason). Reuse made
-                    // this reachable: before it, every commit appended at least the
-                    // root group header, so `last` was always known here.
+                    // No typed append has classified the partial tail page. Keep this padding
+                    // untracked because a guessed type could make a later reuse mix page types.
+                    // `PagedEdit::plan_transition` uses the same classification for appends.
                     None => {}
                 }
             }
@@ -10350,10 +10329,15 @@ impl WriteEngine {
         // Destructure so the page state and the image are borrowed as the
         // separate fields they are.
         let Self { image, paged, .. } = self;
-        match paged.as_mut() {
-            Some(pg) => pg.begin(image.as_mut(), ty),
-            None => Ok(()),
+        let Some(pg) = paged.as_mut() else {
+            return Ok(());
+        };
+        let transition = pg.plan_transition(image.len(), ty)?;
+        if let PageTransition::Pad { extent, .. } = transition {
+            image.append(&vec![0u8; extent.len().to_usize()?])?;
         }
+        pg.record_transition(ty, transition);
+        Ok(())
     }
 
     /// Place `bytes` as page type `ty`, reusing a free region where one fits.
@@ -11875,11 +11859,8 @@ impl FlatDataset {
 /// all this adapter does; every primitive delegates, so the image's own
 /// write-ordering discipline is what applies.
 ///
-/// It carries the session's paged-file state too, so `alloc_raw` keeps a paged
-/// file's pages homogeneous through exactly the rule the staged commit uses
-/// ([`PagedEdit::begin`]). Before issue #198 there were two copies of that state —
-/// one per engine — and the whole-file editor's copy was reachable only from the
-/// commit path, so it had to refuse an in-place append to a paged file outright.
+/// It carries the session's paged-file state too, so `alloc_raw` uses
+/// [`PagedEdit::plan_transition`] before an append and keeps each page homogeneous.
 struct EditStore<'a> {
     image: &'a mut dyn FileImage,
     superblock: &'a mut Superblock,
@@ -11909,7 +11890,11 @@ impl EditStore<'_> {
     /// raw page here.
     fn append_into_raw_page(&mut self, bytes: &[u8]) -> Result<u64, Error> {
         if let Some(pg) = self.paged.as_deref_mut() {
-            pg.begin(self.image, PageType::Raw)?;
+            let transition = pg.plan_transition(self.image.len(), PageType::Raw)?;
+            if let PageTransition::Pad { extent, .. } = transition {
+                self.image.append(&vec![0u8; extent.len().to_usize()?])?;
+            }
+            pg.record_transition(PageType::Raw, transition);
         }
         self.image.append(bytes)
     }
@@ -15118,6 +15103,86 @@ mod tests {
     use crate::free_space::Release;
     use crate::object_path::ObjectPath;
 
+    #[test]
+    fn an_aligned_page_transition_needs_no_padding() {
+        let mut paged = PagedEdit::new(FileSpacePageSize::DEFAULT);
+        paged.last = Some(PageType::Meta);
+
+        assert_eq!(
+            paged
+                .plan_transition(FileSpacePageSize::DEFAULT.get(), PageType::Raw)
+                .unwrap(),
+            PageTransition::Unchanged
+        );
+    }
+
+    #[test]
+    fn a_same_type_partial_page_transition_needs_no_padding() {
+        let mut paged = PagedEdit::new(FileSpacePageSize::DEFAULT);
+        paged.last = Some(PageType::Raw);
+
+        assert_eq!(
+            paged.plan_transition(5000, PageType::Raw).unwrap(),
+            PageTransition::Unchanged
+        );
+    }
+
+    #[test]
+    fn a_metadata_to_raw_transition_tracks_metadata_padding() {
+        let mut paged = PagedEdit::new(FileSpacePageSize::DEFAULT);
+        paged.last = Some(PageType::Meta);
+
+        assert_eq!(
+            paged.plan_transition(5000, PageType::Raw).unwrap(),
+            PageTransition::Pad {
+                extent: FreeExtent::new(5000, 3192).unwrap(),
+                track_as: Some(PageType::Meta),
+            }
+        );
+    }
+
+    #[test]
+    fn a_raw_to_metadata_transition_tracks_raw_padding() {
+        let mut paged = PagedEdit::new(FileSpacePageSize::DEFAULT);
+        paged.last = Some(PageType::Raw);
+
+        assert_eq!(
+            paged.plan_transition(5000, PageType::Meta).unwrap(),
+            PageTransition::Pad {
+                extent: FreeExtent::new(5000, 3192).unwrap(),
+                track_as: Some(PageType::Raw),
+            }
+        );
+    }
+
+    #[test]
+    fn an_unknown_tail_transition_leaves_padding_unclassified() {
+        let paged = PagedEdit::new(FileSpacePageSize::DEFAULT);
+
+        assert_eq!(
+            paged.plan_transition(5000, PageType::Meta).unwrap(),
+            PageTransition::Pad {
+                extent: FreeExtent::new(5000, 3192).unwrap(),
+                track_as: None,
+            }
+        );
+    }
+
+    #[test]
+    fn a_non_power_of_two_page_size_plans_exact_padding() {
+        let page_size = FileSpacePageSize::try_from(1000).unwrap();
+        let mut paged = PagedEdit::new(page_size);
+        paged.last = Some(PageType::Meta);
+
+        assert_eq!(
+            paged.plan_transition(1500, PageType::Raw).unwrap(),
+            PageTransition::Pad {
+                extent: FreeExtent::new(1500, 500).unwrap(),
+                track_as: Some(PageType::Meta),
+            }
+        );
+    }
+
     /// The rule that places a chunk index on a paged file: some chunk-data span
     /// abuts it. Both sides count, which is what a repeatedly appended dataset
     /// needs — its blobs leave chunk data above the index as well as below it, so
@@ -16649,16 +16714,9 @@ mod tests {
     ///
     /// A commit pads the file to a page boundary before laying down its manager
     /// blocks. When this session has made no typed allocation, the tail page is
-    /// one a previous session left non-aligned — only a crash does that, since a
-    /// clean close pads — and nothing says what it holds. Recording the padding
-    /// under a guess would advertise those bytes for reuse of that type, and half
-    /// the time they sit in a page of the other one. Under-reporting is the safe
-    /// direction, and it is the call [`PagedEdit::begin`] already makes for the
-    /// same situation.
-    ///
-    /// Reuse is what made this reachable: before it, every commit appended at
-    /// least the root group's header, so the tail type was always known by the
-    /// time the padding ran.
+    /// one a previous session left non-aligned. Its type is unknown, so the padding
+    /// remains unclassified and cannot be reused under a guessed page type.
+    /// [`PagedEdit::plan_transition`] uses the same classification for an append.
     #[test]
     fn padding_a_tail_page_of_unknown_type_records_nothing() {
         use crate::writer::FileBuilder;
@@ -19387,13 +19445,8 @@ mod tests {
     /// An in-place append leaves a partially-filled **raw** page, so the next
     /// commit's metadata must pad it rather than pack into it.
     ///
-    /// This is what keeps [`PagedEdit::begin`] reachable from [`EditStore`] now
-    /// that an append allocates raw pages only: the append's job is to record that
-    /// the tail page turned raw, and the commit's job is to act on it. It is also
-    /// the interleaving that a single session-level page tracker makes possible —
-    /// with a tracker per engine, the commit path could not see what the append
-    /// path had done, which is why the whole-file editor refused an in-place append
-    /// to a paged file at all (issue #198).
+    /// [`EditStore`] records the raw tail through [`PagedEdit::plan_transition`], so the
+    /// following metadata append sees the same session-level page state.
     #[test]
     fn a_commit_after_an_append_pads_the_raw_page_the_append_left() {
         const PAGE: u64 = 4096;
