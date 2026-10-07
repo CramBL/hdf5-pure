@@ -2314,13 +2314,14 @@ mod tests {
 
         let output = read_chunked_data_cached(
             &file_data,
-            RawReadSpec {
-                layout: &layout,
-                dataspace: &dataspace,
-                datatype: &datatype,
-                pipeline: pipeline.as_ref(),
-                fill: FillPattern::ZERO,
-            },
+            RawReadSpec::parse(
+                &layout,
+                &dataspace,
+                &datatype,
+                pipeline.as_ref(),
+                FillPattern::ZERO,
+            )
+            .unwrap(),
             8,
             8,
             &ChunkCache::new(),

@@ -27,7 +27,7 @@ use crate::error::FormatError;
 use crate::fill_value::FillPattern;
 use crate::filter_pipeline::FilterPipeline;
 use crate::filters::{ChunkContext, FilterScratch, decompress_chunk_with};
-use crate::read_spec::RawReadSpec;
+use crate::read_spec::{RawReadSpec, RawReadStorage};
 use crate::source::Source;
 use crate::source::SourceMetadata;
 
@@ -547,18 +547,17 @@ pub fn read_chunked_data_from_source<S: Source + ?Sized>(
     offset_size: u8,
     length_size: u8,
 ) -> Result<Vec<u8>, FormatError> {
-    let RawReadSpec {
-        layout,
-        dataspace,
-        datatype,
-        pipeline,
-        fill,
-    } = spec;
-    let DataLayout::Chunked {
+    let (dataspace, datatype, pipeline, fill) = (
+        spec.dataspace(),
+        spec.datatype(),
+        spec.pipeline(),
+        spec.fill(),
+    );
+    let RawReadStorage::Chunked {
         flags,
         chunk_dimensions,
         index,
-    } = layout
+    } = spec.storage()
     else {
         return Err(FormatError::ChunkedReadError(
             "expected chunked layout".into(),
@@ -575,7 +574,7 @@ pub fn read_chunked_data_from_source<S: Source + ?Sized>(
 
     let chunks = collect_chunks_for_layout_from_source(
         source,
-        *index,
+        index,
         chunk_dimensions,
         dataspace,
         elem_size.get() as u64,
@@ -587,7 +586,7 @@ pub fn read_chunked_data_from_source<S: Source + ?Sized>(
     let ctx = ChunkContext::from_datatype(&chunk_dims_u64, datatype)?;
     let decoded_chunks = decode_all_chunks_from_source(
         source,
-        *flags,
+        flags,
         &chunk_dims_u64,
         &dataspace.dimensions,
         pipeline,
@@ -699,18 +698,17 @@ pub(crate) fn read_chunked_rows_from_source<S: Source + ?Sized>(
     row_start: u64,
     num_rows: u64,
 ) -> Result<Option<Vec<u8>>, FormatError> {
-    let RawReadSpec {
-        layout,
-        dataspace,
-        datatype,
-        pipeline,
-        fill,
-    } = spec;
-    let DataLayout::Chunked {
+    let (dataspace, datatype, pipeline, fill) = (
+        spec.dataspace(),
+        spec.datatype(),
+        spec.pipeline(),
+        spec.fill(),
+    );
+    let RawReadStorage::Chunked {
         flags,
         chunk_dimensions,
         index,
-    } = layout
+    } = spec.storage()
     else {
         return Err(FormatError::ChunkedReadError(
             "expected chunked layout".into(),
@@ -812,7 +810,7 @@ pub(crate) fn read_chunked_rows_from_source<S: Source + ?Sized>(
     } else {
         let chunks = collect_chunks_for_layout_from_source(
             source,
-            *index,
+            index,
             chunk_dimensions,
             dataspace,
             elem_size.get() as u64,
@@ -911,7 +909,7 @@ pub(crate) fn read_chunked_rows_from_source<S: Source + ?Sized>(
             None => Cow::Owned(source.read_exact_at(chunk.address.get(), len)?),
         };
         let filtering =
-            ChunkFiltering::for_chunk(*flags, &chunk_dims_u64, &dataspace.dimensions, chunk);
+            ChunkFiltering::for_chunk(flags, &chunk_dims_u64, &dataspace.dimensions, chunk);
         let dec = decode_chunk(&mut scratch, stored, pipeline, ctx, filtering)?;
         copy(&mut output, &dec);
         match dec {
@@ -971,18 +969,17 @@ pub fn read_chunked_data_cached_from_source<S: Source + ?Sized>(
     length_size: u8,
     cache: &ChunkCache,
 ) -> Result<Vec<u8>, FormatError> {
-    let RawReadSpec {
-        layout,
-        dataspace,
-        datatype,
-        pipeline,
-        fill,
-    } = spec;
-    let DataLayout::Chunked {
+    let (dataspace, datatype, pipeline, fill) = (
+        spec.dataspace(),
+        spec.datatype(),
+        spec.pipeline(),
+        spec.fill(),
+    );
+    let RawReadStorage::Chunked {
         flags,
         chunk_dimensions,
         index,
-    } = layout
+    } = spec.storage()
     else {
         return Err(FormatError::ChunkedReadError(
             "expected chunked layout".into(),
@@ -1002,7 +999,7 @@ pub fn read_chunked_data_cached_from_source<S: Source + ?Sized>(
     } else {
         let chunks = collect_chunks_for_layout_from_source(
             source,
-            *index,
+            index,
             chunk_dimensions,
             dataspace,
             elem_size.get() as u64,
@@ -1086,7 +1083,7 @@ pub fn read_chunked_data_cached_from_source<S: Source + ?Sized>(
         // own it moves into the cache, and borrowed from a coalesced span it is
         // copied out of the span only if the cache admits it.
         let filtering =
-            ChunkFiltering::for_chunk(*flags, &chunk_dims_u64, &dataspace.dimensions, chunk_info);
+            ChunkFiltering::for_chunk(flags, &chunk_dims_u64, &dataspace.dimensions, chunk_info);
         let dec = decode_chunk(&mut scratch, stored, pipeline, ctx, filtering)?;
         place_chunk(
             &dec,
@@ -1618,18 +1615,17 @@ pub fn read_chunked_data_cached(
     length_size: u8,
     cache: &ChunkCache,
 ) -> Result<Vec<u8>, FormatError> {
-    let RawReadSpec {
-        layout,
-        dataspace,
-        datatype,
-        pipeline,
-        fill,
-    } = spec;
-    let DataLayout::Chunked {
+    let (dataspace, datatype, pipeline, fill) = (
+        spec.dataspace(),
+        spec.datatype(),
+        spec.pipeline(),
+        spec.fill(),
+    );
+    let RawReadStorage::Chunked {
         flags,
         chunk_dimensions,
         index,
-    } = layout
+    } = spec.storage()
     else {
         return Err(FormatError::ChunkedReadError(
             "expected chunked layout".into(),
@@ -1651,7 +1647,7 @@ pub fn read_chunked_data_cached(
         chunks
     } else {
         let spatial_dims = || chunk_dimensions[..rank].to_vec();
-        let chunks = match *index {
+        let chunks = match index {
             ChunkIndexLayout::BTreeV1 { .. } => {
                 collect_chunk_info(file_data, addr, ndims, offset_size, length_size)?
             }
@@ -1801,7 +1797,7 @@ pub fn read_chunked_data_cached(
         }
         let raw_chunk = &file_data[r];
         let filtering =
-            ChunkFiltering::for_chunk(*flags, &chunk_dims_u64, &dataspace.dimensions, chunk_info);
+            ChunkFiltering::for_chunk(flags, &chunk_dims_u64, &dataspace.dimensions, chunk_info);
         // A chunk that skipped the pipeline scatters straight from the file
         // buffer, and is copied into the cache only if it would be retained.
         let dec = decode_chunk(
@@ -2040,13 +2036,14 @@ mod tests {
         let fill_bytes = fill.to_le_bytes();
         let out = read_chunked_data_from_source(
             &BytesSource::new(&file_data),
-            RawReadSpec {
-                layout: &layout,
-                dataspace: &dataspace,
-                datatype: &make_f64_type(),
-                pipeline: None,
-                fill: FillPattern::new(Some(&fill_bytes), nz(8)),
-            },
+            RawReadSpec::parse(
+                &layout,
+                &dataspace,
+                &make_f64_type(),
+                None,
+                FillPattern::new(Some(&fill_bytes), nz(8)),
+            )
+            .unwrap(),
             8,
             8,
         )
@@ -2112,13 +2109,7 @@ mod tests {
             ),
         ] {
             let ds = simple(dims.clone());
-            let spec = RawReadSpec {
-                layout: &layout,
-                dataspace: &ds,
-                datatype: &datatype,
-                pipeline: None,
-                fill,
-            };
+            let spec = RawReadSpec::parse(&layout, &ds, &datatype, None, fill).unwrap();
             let from_source =
                 read_chunked_data_from_source(&BytesSource::new(&file_data), spec, 8, 8).unwrap();
             let cached_from_source = read_chunked_data_cached_from_source(
@@ -2505,13 +2496,8 @@ mod tests {
         pipeline: Option<&FilterPipeline>,
     ) -> Vec<u8> {
         use crate::source::ReadSeekSource;
-        let spec = RawReadSpec {
-            layout,
-            dataspace,
-            datatype,
-            pipeline,
-            fill: FillPattern::ZERO,
-        };
+        let spec =
+            RawReadSpec::parse(layout, dataspace, datatype, pipeline, FillPattern::ZERO).unwrap();
         let buffered = read_chunked_data_cached(file_data, spec, 8, 8, &ChunkCache::new()).unwrap();
         let from_mem =
             read_chunked_data_from_source(&BytesSource::new(file_data), spec, 8, 8).unwrap();
@@ -2810,13 +2796,14 @@ mod tests {
 
         let raw = read_chunked_data_cached(
             &file_data,
-            RawReadSpec {
-                layout: &layout,
-                dataspace: &dataspace,
-                datatype: &datatype,
-                pipeline: Some(&pipeline),
-                fill: FillPattern::ZERO,
-            },
+            RawReadSpec::parse(
+                &layout,
+                &dataspace,
+                &datatype,
+                Some(&pipeline),
+                FillPattern::ZERO,
+            )
+            .unwrap(),
             8,
             8,
             &ChunkCache::new(),
@@ -2965,13 +2952,14 @@ mod tests {
         let (file_data, layout, dataspace, pipeline) =
             file_with_a_raw_partial_edge_chunk(&values, 4);
         let datatype = make_f64_type();
-        let spec = RawReadSpec {
-            layout: &layout,
-            dataspace: &dataspace,
-            datatype: &datatype,
-            pipeline: Some(&pipeline),
-            fill: FillPattern::ZERO,
-        };
+        let spec = RawReadSpec::parse(
+            &layout,
+            &dataspace,
+            &datatype,
+            Some(&pipeline),
+            FillPattern::ZERO,
+        )
+        .unwrap();
         let source = BytesSource::new(&file_data);
         let decoded = |bytes: Vec<u8>| -> Vec<f64> {
             bytes
@@ -3505,13 +3493,7 @@ mod tests {
         let datatype = make_f64_type();
         for fill in [FillPattern::ZERO, FillPattern::new(Some(&seven), nz(8))] {
             let cache = ChunkCache::new();
-            let spec = RawReadSpec {
-                layout: &layout,
-                dataspace: &dataspace,
-                datatype: &datatype,
-                pipeline: None,
-                fill,
-            };
+            let spec = RawReadSpec::parse(&layout, &dataspace, &datatype, None, fill).unwrap();
             let whole =
                 read_chunked_data_cached_from_source(&BytesSource::new(b""), spec, 8, 8, &cache)
                     .expect("an unallocated dataset reads as fill");

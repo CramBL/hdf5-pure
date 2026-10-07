@@ -19,8 +19,9 @@
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 
+use crate::address::StoredAddress;
 use crate::convert::Narrow;
-use crate::data_layout::DataLayout;
+use crate::data_layout::{ChunkIndexLayout, ChunkedLayoutFlags, DataLayout};
 use crate::dataspace::Dataspace;
 use crate::datatype::Datatype;
 use crate::error::FormatError;
@@ -37,63 +38,98 @@ use crate::filter_pipeline::FilterPipeline;
 /// `Copy`, so a spec is handed down the call chain the way the five borrows it
 /// replaced were, with no clone and no lifetime beyond the borrows themselves.
 #[derive(Clone, Copy)]
-pub struct RawReadSpec<'a> {
-    /// Where the dataset's bytes live: compact, contiguous, or chunked.
-    pub layout: &'a DataLayout,
+pub(crate) struct RawReadSpec<'a> {
+    /// Storage properties after dataset-level consistency has been established.
+    storage: RawReadStorage<'a>,
     /// The dataset's shape, which fixes how many elements the read produces.
-    pub dataspace: &'a Dataspace,
+    dataspace: &'a Dataspace,
     /// The stored element type, which fixes each element's width.
-    pub datatype: &'a Datatype,
+    datatype: &'a Datatype,
     /// The filter pipeline stored bytes passed through, if any.
-    pub pipeline: Option<&'a FilterPipeline>,
+    pipeline: Option<&'a FilterPipeline>,
     /// What storage that was never allocated reads as.
-    pub fill: FillPattern<'a>,
+    fill: FillPattern<'a>,
+    /// Logical dataset byte length derived from the dataspace and datatype.
+    byte_len: DatasetByteLen,
 }
 
 impl<'a> RawReadSpec<'a> {
-    /// The byte length this dataset's elements occupy, checked against what its
-    /// layout says it stores.
+    /// Parse dataset properties into the representation used by raw readers.
     ///
-    /// A compact or contiguous layout names its own size, and a disagreement
-    /// with the dataspace is a corrupt or crafted file rather than a short read.
-    /// The check lives here because two kinds of read have to make it and make
-    /// it the same way: a whole read, and a read that takes the dataset a row
-    /// window at a time. A check only one of them made would fire or not
-    /// depending on the dataset's *size* — the windowed readers read a small
-    /// dataset whole — which is worse than no check at all (issue #289).
-    ///
-    /// A zero-element dataset is exempt, as it is in the readers: it has no
-    /// bytes to disagree about, and its layout may say anything.
-    ///
-    /// Chunked storage names no total size, and a chunk the file does not hold
-    /// reads as the fill value rather than as an error, so there is nothing here
-    /// to check for it.
-    pub fn stored_byte_len(&self) -> Result<usize, FormatError> {
-        let num_elements = self.dataspace.num_elements().to_usize()?;
-        let elem_size = self.datatype.type_size() as usize;
-        let expected = num_elements
-            .checked_mul(elem_size)
-            .ok_or(FormatError::OffsetOverflow {
-                offset: num_elements as u64,
-                length: elem_size as u64,
-            })?;
-        if num_elements == 0 {
-            return Ok(expected);
+    /// For allocated compact and contiguous storage, construction compares the
+    /// storage extent with the byte length implied by the dataspace and datatype.
+    /// [`RawReadStorage`] has no field for a contiguous extent, so downstream
+    /// readers cannot use an unchecked extent after construction succeeds.
+    pub(crate) fn parse(
+        layout: &'a DataLayout,
+        dataspace: &'a Dataspace,
+        datatype: &'a Datatype,
+        pipeline: Option<&'a FilterPipeline>,
+        fill: FillPattern<'a>,
+    ) -> Result<Self, FormatError> {
+        let byte_len = DatasetByteLen::parse(dataspace, datatype)?;
+        let storage = RawReadStorage::parse(layout, byte_len, dataspace.num_elements() != 0)?;
+        Ok(Self {
+            storage,
+            dataspace,
+            datatype,
+            pipeline,
+            fill,
+            byte_len,
+        })
+    }
+
+    /// An unchecked spec for tests that need to drive malformed metadata farther
+    /// down the read stack. Live paths can only construct a spec through
+    /// [`Self::parse`].
+    #[cfg(test)]
+    pub(crate) fn plain(
+        layout: &'a DataLayout,
+        dataspace: &'a Dataspace,
+        datatype: &'a Datatype,
+    ) -> Self {
+        Self {
+            storage: RawReadStorage::plain(layout),
+            dataspace,
+            datatype,
+            pipeline: None,
+            fill: FillPattern::ZERO,
+            byte_len: DatasetByteLen(
+                dataspace
+                    .num_elements()
+                    .saturating_mul(u64::from(datatype.type_size())),
+            ),
         }
-        let actual = match self.layout {
-            DataLayout::Compact { data } => data.len(),
-            // No address means storage that was never allocated, which reads as
-            // the fill value and has no size to disagree with.
-            DataLayout::Contiguous {
-                address: Some(_),
-                size,
-            } => (*size).to_usize()?,
-            _ => return Ok(expected),
-        };
-        if actual != expected {
-            return Err(FormatError::DataSizeMismatch { expected, actual });
-        }
-        Ok(expected)
+    }
+
+    pub(crate) fn storage(&self) -> RawReadStorage<'a> {
+        self.storage
+    }
+
+    pub(crate) fn dataspace(&self) -> &'a Dataspace {
+        self.dataspace
+    }
+
+    pub(crate) fn datatype(&self) -> &'a Datatype {
+        self.datatype
+    }
+
+    pub(crate) fn pipeline(&self) -> Option<&'a FilterPipeline> {
+        self.pipeline
+    }
+
+    pub(crate) fn fill(&self) -> FillPattern<'a> {
+        self.fill
+    }
+
+    /// The logical dataset byte length, narrowed only when a concrete whole
+    /// dataset buffer is about to be materialized.
+    pub(crate) fn byte_len(&self) -> Result<usize, FormatError> {
+        self.byte_len.to_usize()
+    }
+
+    pub(crate) fn byte_len_u64(&self) -> u64 {
+        self.byte_len.0
     }
 
     /// Returns the buffer a dataset whose storage was never allocated reads as.
@@ -127,18 +163,174 @@ impl<'a> RawReadSpec<'a> {
             })?;
         self.fill.buffer(total)
     }
+}
 
-    /// A spec for an unfiltered dataset whose unallocated storage reads as
-    /// zeros — the shape a test fixture wants, and never the shape a real read
-    /// wants, which is why the live paths build the struct literally.
+/// Storage facts that remain after [`RawReadSpec::parse`] establishes the
+/// dataset-level extent invariant.
+///
+/// The raw contiguous `size` is deliberately absent. Construction returns an
+/// allocated contiguous variant only when that size equals the dataset's logical
+/// byte length. Downstream readers therefore have no unchecked storage extent.
+#[derive(Clone, Copy)]
+pub(crate) enum RawReadStorage<'a> {
+    Compact {
+        data: &'a [u8],
+    },
+    Contiguous {
+        address: StoredAddress,
+    },
+    ContiguousUnallocated,
+    Chunked {
+        flags: ChunkedLayoutFlags,
+        chunk_dimensions: &'a [u64],
+        index: ChunkIndexLayout,
+    },
+    Virtual,
+}
+
+impl<'a> RawReadStorage<'a> {
+    fn parse(
+        layout: &'a DataLayout,
+        byte_len: DatasetByteLen,
+        has_elements: bool,
+    ) -> Result<Self, FormatError> {
+        Ok(match layout {
+            DataLayout::Compact { data } => {
+                if has_elements {
+                    byte_len.require_storage_extent(data.len() as u64)?;
+                }
+                Self::Compact { data }
+            }
+            DataLayout::Contiguous {
+                address: Some(address),
+                size,
+            } => {
+                if has_elements {
+                    byte_len.require_storage_extent(*size)?;
+                }
+                Self::Contiguous { address: *address }
+            }
+            DataLayout::Contiguous { address: None, .. } => Self::ContiguousUnallocated,
+            DataLayout::Chunked {
+                flags,
+                chunk_dimensions,
+                index,
+            } => Self::Chunked {
+                flags: *flags,
+                chunk_dimensions,
+                index: *index,
+            },
+            DataLayout::Virtual => Self::Virtual,
+        })
+    }
+
     #[cfg(test)]
-    pub fn plain(layout: &'a DataLayout, dataspace: &'a Dataspace, datatype: &'a Datatype) -> Self {
-        Self {
-            layout,
-            dataspace,
-            datatype,
-            pipeline: None,
-            fill: FillPattern::ZERO,
+    fn plain(layout: &'a DataLayout) -> Self {
+        match layout {
+            DataLayout::Compact { data } => Self::Compact { data },
+            DataLayout::Contiguous {
+                address: Some(address),
+                ..
+            } => Self::Contiguous { address: *address },
+            DataLayout::Contiguous { address: None, .. } => Self::ContiguousUnallocated,
+            DataLayout::Chunked {
+                flags,
+                chunk_dimensions,
+                index,
+            } => Self::Chunked {
+                flags: *flags,
+                chunk_dimensions,
+                index: *index,
+            },
+            DataLayout::Virtual => Self::Virtual,
         }
+    }
+}
+
+/// Logical bytes implied by a dataset's dataspace and datatype.
+#[derive(Clone, Copy)]
+struct DatasetByteLen(u64);
+
+impl DatasetByteLen {
+    fn parse(dataspace: &Dataspace, datatype: &Datatype) -> Result<Self, FormatError> {
+        let num_elements = dataspace.num_elements();
+        let elem_size = u64::from(datatype.type_size());
+        Ok(Self(num_elements.checked_mul(elem_size).ok_or(
+            FormatError::OffsetOverflow {
+                offset: num_elements,
+                length: elem_size,
+            },
+        )?))
+    }
+
+    fn require_storage_extent(self, actual: u64) -> Result<(), FormatError> {
+        if actual == self.0 {
+            return Ok(());
+        }
+        Err(FormatError::DataSizeMismatch {
+            expected: self.to_usize()?,
+            actual: actual.to_usize()?,
+        })
+    }
+
+    fn to_usize(self) -> Result<usize, FormatError> {
+        self.0.to_usize()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::dataspace::DataspaceType;
+    use crate::type_builders::make_i32_type;
+
+    fn four_i32s() -> Dataspace {
+        Dataspace {
+            space_type: DataspaceType::Simple,
+            rank: 1,
+            dimensions: vec![4],
+            max_dimensions: None,
+        }
+    }
+
+    #[test]
+    fn compact_extent_mismatch_is_rejected_while_parsing_the_read_spec() {
+        let layout = DataLayout::Compact { data: vec![0; 8] };
+        let Err(err) = RawReadSpec::parse(
+            &layout,
+            &four_i32s(),
+            &make_i32_type(),
+            None,
+            FillPattern::ZERO,
+        ) else {
+            panic!("mismatched compact storage extent was accepted");
+        };
+        let FormatError::DataSizeMismatch { expected, actual } = err else {
+            panic!("expected DataSizeMismatch, got {err:?}");
+        };
+        assert_eq!(expected, 16);
+        assert_eq!(actual, 8);
+    }
+
+    #[test]
+    fn contiguous_extent_mismatch_is_rejected_while_parsing_the_read_spec() {
+        let layout = DataLayout::Contiguous {
+            address: Some(StoredAddress::new(128)),
+            size: 32,
+        };
+        let Err(err) = RawReadSpec::parse(
+            &layout,
+            &four_i32s(),
+            &make_i32_type(),
+            None,
+            FillPattern::ZERO,
+        ) else {
+            panic!("mismatched contiguous storage extent was accepted");
+        };
+        let FormatError::DataSizeMismatch { expected, actual } = err else {
+            panic!("expected DataSizeMismatch, got {err:?}");
+        };
+        assert_eq!(expected, 16);
+        assert_eq!(actual, 32);
     }
 }
