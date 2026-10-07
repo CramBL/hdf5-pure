@@ -306,6 +306,7 @@ use crate::file_lock::{self, FileLocking};
 use crate::file_space_info;
 use crate::file_space_info::DEFAULT_THRESHOLD;
 use crate::file_space_info::FileSpaceInfo;
+use crate::file_space_info::FileSpacePageSize;
 use crate::file_space_info::FileSpaceStrategy;
 use crate::file_space_info::FreeSpaceSettings;
 use crate::file_space_info::NUM_FILE_FSM_MANAGERS;
@@ -1712,7 +1713,7 @@ pub(crate) fn create_would_refuse_reopen(
         let page_size = match create.file_space_strategy() {
             Some((FileSpaceStrategy::Page, _, _)) => create
                 .file_space_page_size()
-                .unwrap_or(crate::file_space_info::DEFAULT_PAGE_SIZE),
+                .unwrap_or(FileSpacePageSize::DEFAULT.get()),
             _ => DEFAULT_GATHER_PAGE,
         };
         if (access.page_buffer_size() as u64) < page_size {
@@ -1779,7 +1780,7 @@ impl From<PageType> for FreeClass {
 /// [`commit`](WriteEngine::commit) rejects it outright, exactly as the bounded
 /// backend does.
 struct PagedEdit {
-    page_size: u64,
+    page_size: FileSpacePageSize,
     /// Free space inside metadata pages, plus whole free pages this session last
     /// saw as metadata. A page holding nothing belongs to no type, so
     /// [`alloc_typed`](Self::alloc_typed) lets raw data claim one from here.
@@ -1853,8 +1854,9 @@ impl PagedEdit {
     /// address out from under them.
     fn begin(&mut self, image: &mut dyn FileImage, ty: PageType) -> Result<(), Error> {
         let len = image.len();
-        if len % self.page_size != 0 {
-            let pad_len = self.page_size - len % self.page_size;
+        let page_size = self.page_size.get();
+        if len % page_size != 0 {
+            let pad_len = page_size - len % page_size;
             // `prev` is the outgoing page type to record the padding under, or
             // `None` for a crash-recovery pad whose tail-page type is unknown.
             let pad = match self.last {
@@ -1884,7 +1886,7 @@ impl PagedEdit {
         Ok(())
     }
 
-    fn new(page_size: u64) -> Self {
+    fn new(page_size: FileSpacePageSize) -> Self {
         PagedEdit {
             page_size,
             meta: FreeList::new(),
@@ -1910,7 +1912,13 @@ impl PagedEdit {
     /// fragment beside it. Everything else, including the per-type large managers
     /// a multi/split driver would populate, is left unclassified rather than
     /// guessed at.
-    fn slot_list(slot: usize, addr: u64, size: u64, page_size: u64) -> Option<PageType> {
+    fn slot_list(
+        slot: usize,
+        addr: u64,
+        size: u64,
+        page_size: FileSpacePageSize,
+    ) -> Option<PageType> {
+        let page_size = page_size.get();
         match slot {
             0 => Some(PageType::Meta),
             2 => Some(PageType::Raw),
@@ -1969,8 +1977,9 @@ impl PagedEdit {
         meta: &mut FreeList,
         raw: &mut FreeList,
         dead: &mut FreeList,
-        page_size: u64,
+        page_size: FileSpacePageSize,
     ) {
+        let page_size = page_size.get();
         // The lists are individually coalesced and pairwise disjoint (a byte is
         // vacated once), so their union is a plain merge: sort by address and join
         // runs that touch. A page is promotable exactly when it lies inside one of
@@ -2029,7 +2038,7 @@ impl PagedEdit {
             return Some(addr);
         }
         let span = align_up(len, self.page_size);
-        let addr = other.alloc_whole_units(span, self.page_size)?;
+        let addr = other.alloc_whole_units(span, self.page_size.get())?;
         if span > len {
             own.free(addr + len, span - len);
         }
@@ -2048,7 +2057,8 @@ impl PagedEdit {
             PageType::Meta => (&self.meta, &self.raw),
             PageType::Raw => (&self.raw, &self.meta),
         };
-        own.largest().max(other.largest_whole_units(self.page_size))
+        own.largest()
+            .max(other.largest_whole_units(self.page_size.get()))
     }
 
     /// Every free region this session could still hand out, ascending by address.
@@ -2113,7 +2123,7 @@ impl PagedPostFree {
     /// stay recorded, for the reason [`release_trailing_run`] gives on a flat
     /// file — with the same refusal to release a run that gives back less than it
     /// keeps.
-    fn release_trailing(&mut self, eof: u64, page_size: u64, tail_len: u64) -> u64 {
+    fn release_trailing(&mut self, eof: u64, page_size: FileSpacePageSize, tail_len: u64) -> u64 {
         let start =
             trailing_run_start([&self.meta, &self.raw, &self.dead, &self.unclassified], eof);
         let cut = align_up(start, page_size);
@@ -2310,7 +2320,7 @@ const WRITE_GATHER_BYTES: usize = 1 << 20;
 /// A non-paged file has no page size of its own, and this is the same figure
 /// HDF5 defaults `H5Pset_file_space_page_size` to, so the merge quantum matches
 /// what the file *would* have used had it been paged.
-const DEFAULT_GATHER_PAGE: u64 = crate::file_space_info::DEFAULT_PAGE_SIZE;
+const DEFAULT_GATHER_PAGE: u64 = FileSpacePageSize::DEFAULT.get();
 
 /// One dataset's append geometry, handed to the public append path so it can
 /// slice a large call into aligned batches without materializing the whole
@@ -2364,7 +2374,7 @@ pub(crate) struct LocatedState {
 struct PersistState {
     strategy: FileSpaceStrategy,
     threshold: u64,
-    page_size: u64,
+    page_size: FileSpacePageSize,
     /// The address and the length of each block the next persisting commit frees, the blocks of the
     /// superblock extension and of the free-space managers. A manager header or a section list that
     /// does not parse is not among them.
@@ -2792,11 +2802,10 @@ impl WriteEngine {
     /// view of the handle, and only then let `build` decide how the bytes are
     /// held.
     ///
-    /// Every refusal comes before `build`, because `build` may read the whole
-    /// file: reaching a refusal after it would spend `O(file size)` on a file
-    /// that is then rejected — a 20 GB flagged file read into memory and thrown
-    /// away. The superblock reads themselves are a few bounded windows either
-    /// way, so nothing is read twice.
+    /// Every check of the superblock and of the File Space Info page size comes before `build`,
+    /// because `build` may read the whole file, and a check after it would have the editor read a
+    /// 20 GB flagged file into memory only to reject it. The reads of the superblock and its
+    /// extension are a few bounded windows.
     ///
     /// `build` receives the file's length as well as the handle because a
     /// mirrorless image has to be told its end-of-file — it has no buffer whose
@@ -2871,8 +2880,13 @@ impl WriteEngine {
             .base_address
             .absolute(StoredAddress::new(superblock.root_group_address))?;
 
-        // Everything that can refuse this file has run; only now is it worth
-        // holding the bytes.
+        // `H5Fopen` rejects a page size outside 512 bytes to 1 GiB as well (`H5Ofsinfo.c` and
+        // `H5Fsuper.c`, HDF5 2.2.0).
+        let file_space_info = match Self::extension_fsinfo(&probe, &superblock) {
+            Err(err @ FormatError::InvalidFileSpacePageSize(_)) => return Err(err.into()),
+            other => other,
+        };
+
         let image = build(handle, len)?;
 
         let mut session = Self {
@@ -2911,10 +2925,8 @@ impl WriteEngine {
             sync_policy: SyncPolicy::Always,
         };
         // If the file persists its free space, seed the free list from the
-        // on-disk managers and arm persistence for future commits. Best-effort:
-        // an unreadable or non-persisting extension simply leaves the session in
-        // the default, non-persisting mode.
-        session.load_persisted_free_space();
+        // on-disk managers and arm persistence for future commits.
+        session.load_persisted_free_space(file_space_info);
         // Gather this session's writes, now that the page size the file was laid
         // out on is known. Only an exclusively locked session: `lock = None` is
         // the SWMR writer, whose concurrent readers observe the order its ordered
@@ -2945,7 +2957,7 @@ impl WriteEngine {
     fn gather_page_size(&self) -> u64 {
         self.paged
             .as_ref()
-            .map_or(DEFAULT_GATHER_PAGE, |pg| pg.page_size)
+            .map_or(DEFAULT_GATHER_PAGE, |pg| pg.page_size.get())
     }
 
     /// Let this session's writes span operations, up to `max_bytes` of them: the
@@ -3082,13 +3094,19 @@ impl WriteEngine {
     /// frees.
     ///
     /// A file without a File Space Info message is edited under the default strategy,
-    /// `H5F_FSPACE_STRATEGY_FSM_AGGR`, and a file whose message cannot be read as one without
-    /// free-space managers. Reads the managers only in a file whose base address is 0
-    /// and whose superblock extension has a File Space Info message that requests persistence
-    /// under a strategy with free-space managers. A manager that does not parse seeds no free
-    /// sections, and in a file that is not paged the other managers seed none either.
-    fn load_persisted_free_space(&mut self) {
-        let (ext_addr, info) = match self.extension_fsinfo() {
+    /// `H5F_FSPACE_STRATEGY_FSM_AGGR`, and a file whose message does not parse for a reason other
+    /// than its page size as one without free-space managers. Reads the managers only in a file
+    /// whose base address is 0 and whose superblock extension has a File Space Info message that
+    /// requests persistence under a strategy with free-space managers. A manager that does not
+    /// parse seeds no free sections, and in a file that is not paged the other managers seed none
+    /// either.
+    ///
+    /// `file_space_info` is what [`extension_fsinfo`](Self::extension_fsinfo) returns for the file.
+    fn load_persisted_free_space(
+        &mut self,
+        file_space_info: Result<Option<(u64, FileSpaceInfo)>, FormatError>,
+    ) {
+        let (ext_addr, info) = match file_space_info {
             Ok(Some(found)) => found,
             Ok(None) => return,
             // A writer may drop freed space under every strategy, so a file whose strategy
@@ -3114,7 +3132,7 @@ impl WriteEngine {
         // without persistence so the commit refusal below catches it, which is the
         // same rule a paged non-persisting file already takes.
         if !self.superblock.base_address.is_zero() {
-            if info.strategy == FileSpaceStrategy::Page && info.page_size > 0 {
+            if info.strategy == FileSpaceStrategy::Page {
                 self.paged = Some(PagedEdit::new(info.page_size));
             }
             return;
@@ -3122,12 +3140,7 @@ impl WriteEngine {
         // Record the paged strategy regardless of the persist flag: a paged commit
         // needs page-aware bookkeeping, and a paged file that does not persist its
         // free space is refused outright (see `PagedEdit` and the commit refusal).
-        //
-        // A zero page size is refused rather than installed: every page calculation
-        // divides by it, so a corrupt or hostile file declaring `Page` with a page
-        // size of 0 would panic the editor. Leaving `paged` unset makes the file
-        // take the ordinary flat path, which needs no page geometry.
-        let paged = info.strategy == FileSpaceStrategy::Page && info.page_size > 0;
+        let paged = info.strategy == FileSpaceStrategy::Page;
         if paged {
             self.paged = Some(PagedEdit::new(info.page_size));
         }
@@ -3277,23 +3290,26 @@ impl WriteEngine {
             .map(|_| (addr, len))
     }
 
-    /// Returns the absolute address of the superblock extension and the File Space Info message
-    /// in its object header, or `None` if the file has no extension or the extension has no such
-    /// message.
+    /// Reads the superblock extension of `superblock` from `source`, and returns its absolute
+    /// address and the File Space Info message in its object header, or `None` if the file has no
+    /// extension or the extension has no such message.
     ///
     /// # Errors
     ///
     /// Returns [`FormatError::OffsetOverflow`] if the extension's absolute address exceeds `u64`,
     /// and the parser's error if the superblock's widths, the extension's object header, or the
     /// message does not parse.
-    fn extension_fsinfo(&self) -> Result<Option<(u64, FileSpaceInfo)>, FormatError> {
-        let os = self.superblock.offset_size;
-        let ls = self.superblock.length_size;
-        let base = self.superblock.base_address;
-        if self.superblock.version < 2 {
+    fn extension_fsinfo(
+        source: &(impl Source + ?Sized),
+        superblock: &Superblock,
+    ) -> Result<Option<(u64, FileSpaceInfo)>, FormatError> {
+        let os = superblock.offset_size;
+        let ls = superblock.length_size;
+        let base = superblock.base_address;
+        if superblock.version < 2 {
             return Ok(None); // no superblock extension exists before v2
         }
-        let Some(ext_rel) = self.superblock.superblock_extension_address else {
+        let Some(ext_rel) = superblock.superblock_extension_address else {
             return Ok(None);
         };
         let ext_rel = StoredAddress::new(ext_rel);
@@ -3305,7 +3321,7 @@ impl WriteEngine {
         // userblock as well, so the address is resolved here for both.
         let ext_addr = base.absolute(ext_rel)?;
         let oh = ObjectHeader::parse_from_source(
-            &SourceMetadata(&self.image()),
+            &SourceMetadata(source),
             AccessMode::ReadWrite,
             ext_addr,
             os,
@@ -3322,7 +3338,7 @@ impl WriteEngine {
         let info = hdf5_pure_format::__private::parse_file_space_info(
             FormatWidths::from_sizes(os, ls)?,
             base,
-            self.superblock.eof_address,
+            superblock.eof_address,
             &msg.data,
         )?;
         Ok(Some((ext_addr, info)))
@@ -7870,8 +7886,8 @@ impl WriteEngine {
     fn pad_to_page(&mut self) -> Result<(), Error> {
         let len = self.image.len();
         let pad = match &self.paged {
-            Some(pg) if len % pg.page_size != 0 => {
-                Some((pg.last, pg.page_size - len % pg.page_size))
+            Some(pg) if len % pg.page_size.get() != 0 => {
+                Some((pg.last, pg.page_size.get() - len % pg.page_size.get()))
             }
             _ => None,
         };
@@ -7990,7 +8006,7 @@ impl WriteEngine {
         to_free: &[(u64, u64, FreeClass)],
         old_blocks: &[(u64, u64)],
         ext_len: u64,
-        page_size: u64,
+        page_size: FileSpacePageSize,
         widths: FormatWidths,
     ) -> Option<(PagedPostFree, PagedManagerPlan, u64, u64, u64)> {
         /// Enough rounds for the section set to settle after a reservation shrinks
@@ -11923,14 +11939,10 @@ fn index_abuts_chunk_data(data: &[(u64, u64)], index: &[(u64, u64)]) -> bool {
 /// first bytes are the superblock and which is therefore a metadata page. The
 /// screening half of [`WriteEngine::index_is_provably_raw`], where the reasoning
 /// lives.
-///
-/// A page size of zero is not a paged file's; it cannot be reasoned about, so it
-/// screens everything out.
-fn index_touches_page_zero(index: &[(u64, u64)], page_size: u64) -> bool {
-    if page_size == 0 {
-        return !index.is_empty();
-    }
-    index.iter().any(|&(addr, len)| len > 0 && addr < page_size)
+fn index_touches_page_zero(index: &[(u64, u64)], page_size: FileSpacePageSize) -> bool {
+    index
+        .iter()
+        .any(|&(addr, len)| len > 0 && addr < page_size.get())
 }
 
 /// Tag object-header chunk spans as file metadata. Every span
@@ -14916,7 +14928,7 @@ mod tests {
     /// in a metadata page however its far end lines up with chunk data.
     #[test]
     fn a_chunk_index_in_page_zero_is_never_raw() {
-        const PAGE: u64 = 512;
+        const PAGE: FileSpacePageSize = FileSpacePageSize::MIN;
         // The C-written shape this exists to refuse: the index header sits in
         // page 0 behind the superblock, its last block fills page 1 exactly, and
         // the first raw page begins where that block ends. The abutment alone
@@ -14935,8 +14947,6 @@ mod tests {
         assert!(!index_touches_page_zero(&[(0, 0)], PAGE));
         // Nothing to screen.
         assert!(!index_touches_page_zero(&[], PAGE));
-        // A page size a paged file never has cannot place anything.
-        assert!(index_touches_page_zero(&[(1024, 200)], 0));
     }
 
     /// A page every byte of which is free or dead belongs to no page type, so it
@@ -14945,7 +14955,7 @@ mod tests {
     /// since the pages they sit in may still hold something live.
     #[test]
     fn a_page_that_is_wholly_free_or_dead_is_promoted_whole() {
-        const PAGE: u64 = 4096;
+        const PAGE: u64 = FileSpacePageSize::DEFAULT.get();
         let (mut meta, mut raw, mut dead) = (FreeList::new(), FreeList::new(), FreeList::new());
         // Page 1 is half free metadata and half dead, so neither list can show it
         // empty on its own.
@@ -14956,7 +14966,12 @@ mod tests {
         // Page 3 keeps something live at each end, so only its middle is free —
         // and not adjacent to page 2, so the promotion is visible on its own.
         raw.free(3 * PAGE + 1024, 1024);
-        PagedEdit::promote_whole_free_pages(&mut meta, &mut raw, &mut dead, PAGE);
+        PagedEdit::promote_whole_free_pages(
+            &mut meta,
+            &mut raw,
+            &mut dead,
+            FileSpacePageSize::DEFAULT,
+        );
 
         assert_eq!(
             raw.sections(),
@@ -14977,11 +14992,16 @@ mod tests {
     /// and handing it out as either page type would mix the page it sits in.
     #[test]
     fn dead_space_short_of_a_whole_page_is_not_promoted() {
-        const PAGE: u64 = 4096;
+        const PAGE: u64 = FileSpacePageSize::DEFAULT.get();
         let (mut meta, mut raw, mut dead) = (FreeList::new(), FreeList::new(), FreeList::new());
         dead.free(PAGE, 512);
         raw.free(PAGE + 512, 1024);
-        PagedEdit::promote_whole_free_pages(&mut meta, &mut raw, &mut dead, PAGE);
+        PagedEdit::promote_whole_free_pages(
+            &mut meta,
+            &mut raw,
+            &mut dead,
+            FileSpacePageSize::DEFAULT,
+        );
         assert_eq!(dead.sections(), [(PAGE, 512)]);
         assert_eq!(raw.sections(), [(PAGE + 512, 1024)]);
     }
@@ -15971,7 +15991,7 @@ mod tests {
 
         let s = WriteEngine::open_with_locking(&path, FileLocking::Enabled).unwrap();
         let pg = s.paged.as_ref().expect("a paged file installs paged state");
-        assert_eq!(pg.page_size, 4096);
+        assert_eq!(pg.page_size, FileSpacePageSize::DEFAULT);
 
         // The from-scratch writer leaves a page tail free in both the metadata and
         // the raw pages, so both per-type managers are populated. If every slot
@@ -16037,7 +16057,7 @@ mod tests {
 
         let mut s = WriteEngine::open_with_locking(&path, FileLocking::Enabled).unwrap();
         let page_size = s.paged.as_ref().expect("a paged file").page_size;
-        assert_eq!(page_size, PAGE);
+        assert_eq!(page_size.get(), PAGE);
         // Where the C library put the index: every page it touches is a metadata
         // page, since the C library allocates an index as metadata.
         let victim_addr = crate::group_v2::resolve_path_any(
@@ -16200,7 +16220,7 @@ mod tests {
         let opened = crate::reader::File::open(&path).unwrap();
         let info = opened.file_space_info().expect("a persisting file").clone();
         drop(opened);
-        assert_eq!(info.page_size, PAGE);
+        assert_eq!(info.page_size.get(), PAGE);
         let bytes = std::fs::read(&path).unwrap();
         let src = crate::source::BytesSource::new(bytes.as_slice());
         let slot6 = info.manager_addrs[6];
@@ -16432,7 +16452,7 @@ mod tests {
         use crate::writer::FileBuilder;
         use tempfile::tempdir;
 
-        const PAGE: u64 = 4096;
+        const PAGE: u64 = FileSpacePageSize::DEFAULT.get();
         /// Any plausible extension length exercises the same arithmetic, and the
         /// invariant holds for every one of them; the tail's real length is settled
         /// by the commit, which is not what is under test here.
@@ -16461,7 +16481,7 @@ mod tests {
                 pg.meta.free(PAGE, hole);
             }
             let free_before = free_total(&s);
-            let layout = s.tail_layout(&[], &[], EXT_LEN, PAGE, widths);
+            let layout = s.tail_layout(&[], &[], EXT_LEN, FileSpacePageSize::DEFAULT, widths);
             let free_after = free_total(&s);
             match layout {
                 Some((_, _, at, blocks_len, _)) => {

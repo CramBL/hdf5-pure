@@ -226,22 +226,26 @@ fn create_with_default_options_matches_create() {
 /// the properties value is built — the value is inert data.
 #[test]
 fn invalid_creation_property_is_reported_at_write_time() {
-    // A page size must be a power of two >= 512.
+    // A page size must be from 512 bytes to 1 GiB.
     let properties = FileCreateProperties::new()
         .with_file_space_strategy(FileSpaceStrategy::Page, true, 1)
-        .with_file_space_page_size(700);
+        .with_file_space_page_size(100);
     assert_eq!(
         properties.file_space_page_size(),
-        Some(700),
+        Some(100),
         "the value records what it was given, without validating it"
     );
 
     let mut b = FileBuilder::new();
     b.with_create_properties(properties);
     b.create_dataset("d").with_f64_data(&[1.0]);
+    let err = b.finish().unwrap_err();
     assert!(
-        b.finish().is_err(),
-        "an illegal page size must be refused when the file is written"
+        matches!(
+            err,
+            Error::Format(FormatError::InvalidFileSpacePageSize(100))
+        ),
+        "{err:?}"
     );
 }
 

@@ -273,8 +273,16 @@ impl FileBuilder {
         self
     }
 
-    /// Set the file-space page size, mirroring HDF5's
-    /// `H5Pset_file_space_page_size`. Recorded in the superblock extension.
+    /// Sets the file space page size in bytes, which the C library sets with
+    /// `H5Pset_file_space_page_size`.
+    ///
+    /// The writer records the page size in the superblock extension under every strategy, and
+    /// under [`FileSpaceStrategy::Page`] aligns every allocation to it. For a page size set without
+    /// a strategy the writer records [`FileSpaceStrategy::FsmAggr`].
+    ///
+    /// [`finish`](Self::finish), [`finish_to`](Self::finish_to) and [`write`](Self::write) return
+    /// [`Error::Format`] with [`FormatError::InvalidFileSpacePageSize`] if `page_size` is less than
+    /// 512 bytes or more than 1 GiB.
     pub fn with_file_space_page_size(&mut self, page_size: u64) -> &mut Self {
         self.writer.with_file_space_page_size(page_size);
         self

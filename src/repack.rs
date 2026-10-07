@@ -358,10 +358,15 @@ pub fn repack<P: AsRef<Path>, Q: AsRef<Path>>(
     // compact with no free space, so the strategy and its page size/threshold
     // are preserved but `persist` is reset to false — there is nothing to
     // persist, and writing persistent free-space blocks is a separate feature.
-    if let Some(info) = file.file_space_info() {
+    let file_space_info = file.parse_file_space_info().map_err(|err| {
+        Error::RepackUnsupported(format!(
+            "the File Space Info of the source cannot be read: {err}"
+        ))
+    })?;
+    if let Some(info) = file_space_info {
         builder
             .with_file_space_strategy(info.strategy, false, info.threshold)
-            .with_file_space_page_size(info.page_size);
+            .with_file_space_page_size(info.page_size.get());
     }
     // Map every source object's (relative) header address to its path, so an
     // object-reference dataset can be rewritten to point at the same objects in

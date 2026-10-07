@@ -126,6 +126,7 @@ use crate::dataspace::MaxExtent;
 use crate::edit::{AppendBuilder, AppendTarget, MemoryStrategy, SyncPolicy, WriteEngine};
 use crate::error::{Error, FormatError};
 use crate::file_lock::FileLocking;
+use crate::file_space_info::FileSpacePageSize;
 use crate::file_space_info::FileSpaceStrategy;
 use crate::image::disk_log::{self, DiskOp};
 use crate::object_path::ObjectPathBuf;
@@ -440,7 +441,7 @@ impl Tally {
 
 /// The page a locked session merges its writes within, and the least number of
 /// them a fixture must span. See [`Recording::assert_positioned`].
-const GATHER_PAGE: u64 = crate::file_space_info::DEFAULT_PAGE_SIZE;
+const GATHER_PAGE: u64 = FileSpacePageSize::DEFAULT.get();
 const MIN_PAGES: u64 = 8;
 
 /// Elements per chunk, and per recorded round: one whole chunk per append.

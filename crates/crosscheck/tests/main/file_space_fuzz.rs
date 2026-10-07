@@ -50,8 +50,8 @@ fn strategy() -> impl Strategy<Value = FileSpaceStrategy> {
     ]
 }
 
-/// Valid file-space page sizes: powers of two `>= 512`, the range the paged
-/// writer accepts. Under a non-paged strategy the value is only recorded.
+/// Returns powers of two from 512 bytes to 16 KiB, within the page sizes from 512 bytes to 1 GiB
+/// that the writer takes. Under a strategy that is not paged the writer only records the value.
 fn page_size() -> impl Strategy<Value = u64> {
     prop_oneof![
         Just(512u64),

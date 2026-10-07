@@ -17,6 +17,7 @@ use crate::address::BaseAddressExt;
 use crate::address::{BaseAddress, StoredAddress};
 use crate::convert::Narrow;
 use crate::error::FormatError;
+use crate::file_space_info::FileSpacePageSize;
 use crate::file_space_info::NUM_FILE_FSM_MANAGERS;
 use crate::width::FormatWidths;
 
@@ -134,10 +135,9 @@ pub(crate) enum PageType {
     Raw,
 }
 
-/// Round `value` up to the next multiple of `page` (`page` is a power of two >=
-/// 512, validated at file creation).
-pub(crate) fn align_up(value: u64, page: u64) -> u64 {
-    value.div_ceil(page) * page
+/// Rounds `value` up to the next multiple of `page`.
+pub(crate) fn align_up(value: u64, page: FileSpacePageSize) -> u64 {
+    value.div_ceil(page.get()) * page.get()
 }
 
 /// Split each free section at page boundaries so no section spans a page.
@@ -147,7 +147,11 @@ pub(crate) fn align_up(value: u64, page: u64) -> u64 {
 /// intra-page fragment stay in its SMALL-class manager while a whole free page is
 /// routed to the generic-large manager, matching the reference library's
 /// small-vs-large section classes. Total free bytes are preserved.
-pub(crate) fn split_at_pages(sections: &[FreeSection], page: u64) -> Vec<FreeSection> {
+pub(crate) fn split_at_pages(
+    sections: &[FreeSection],
+    page: FileSpacePageSize,
+) -> Vec<FreeSection> {
+    let page = page.get();
     let mut out = Vec::new();
     for s in sections {
         let end = s.addr.get().saturating_add(s.size);
@@ -225,7 +229,7 @@ pub(crate) fn plan_paged_managers(
     meta: &[FreeSection],
     raw: &[FreeSection],
     unclassified: &[FreeSection],
-    page_size: u64,
+    page_size: FileSpacePageSize,
     start: StoredAddress,
     widths: FormatWidths,
 ) -> PagedManagerPlan {
@@ -233,14 +237,14 @@ pub(crate) fn plan_paged_managers(
     let mut slot2 = Vec::new();
     let mut slot6 = Vec::new();
     for s in split_at_pages(meta, page_size) {
-        if s.size < page_size {
+        if s.size < page_size.get() {
             slot0.push(s);
         } else {
             slot6.push(s);
         }
     }
     for s in split_at_pages(raw, page_size) {
-        if s.size < page_size {
+        if s.size < page_size.get() {
             slot2.push(s);
         } else {
             slot6.push(s);
@@ -483,7 +487,7 @@ mod tests {
 
     #[test]
     fn split_at_pages_splits_on_boundaries_preserving_total() {
-        let page = 4096;
+        let page = FileSpacePageSize::DEFAULT;
         // A run that crosses one boundary splits into a sub-page head and a whole
         // free page (the accounting fix routes the >= page piece to slot 6).
         assert_eq!(
@@ -512,5 +516,14 @@ mod tests {
             prev = s.addr.get() + s.size;
         }
         assert_eq!(prev, 15000);
+    }
+
+    #[rstest]
+    #[case::zero(0, 0)]
+    #[case::inside_the_first_page(1, 4096)]
+    #[case::on_a_boundary(8192, 8192)]
+    #[case::past_a_boundary(8193, 12_288)]
+    fn align_up_rounds_to_the_next_page_boundary(#[case] value: u64, #[case] expected: u64) {
+        assert_eq!(align_up(value, FileSpacePageSize::DEFAULT), expected);
     }
 }

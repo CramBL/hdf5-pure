@@ -15,9 +15,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - **Breaking:** The `flate2` Cargo feature is removed. Enable `deflate` instead. The `provenance` feature no longer exposes `sha2` as a selectable feature ([#689](https://github.com/CramBL/hdf5-pure/pull/689)).
 - **Breaking:** `FormatError::InvalidFreeSpaceManager` holds a message that describes the invalid free-space manager, and a write returns it for a free section too large to persist at the file's length width.
 - **Breaking:** `File::persisted_free_space` reports a malformed free-space manager as an error, which changes its return type ([#698](https://github.com/CramBL/hdf5-pure/pull/698)).
+- **Breaking:** `FileSpaceInfo::page_size` changes type from `u64` to `FileSpacePageSize`, which holds a page size from 512 bytes to 1 GiB ([#702](https://github.com/CramBL/hdf5-pure/pull/702)).
 
 ### Fixed
 
+- Fixed `FileBuilder::with_file_space_page_size` accepting a page size outside 512 bytes to 1 GiB. The writer takes any page size in that range under the paged strategy, a power of two or not ([#702](https://github.com/CramBL/hdf5-pure/pull/702)).
+- Fixed `File::open_rw` editing a file whose file space page size is outside 512 bytes to 1 GiB ([#702](https://github.com/CramBL/hdf5-pure/pull/702)).
+- Fixed `File::file_space_info` returning a file space page size outside 512 bytes to 1 GiB. It returns `None` for such a file ([#702](https://github.com/CramBL/hdf5-pure/pull/702)).
+- Fixed `repack` writing the default file space settings for a source whose settings do not parse. It rejects such a source ([#702](https://github.com/CramBL/hdf5-pure/pull/702)).
 - Fixed `File::open_rw` tracking an isolated freed region shorter than the free-space threshold of a file that is not paged. A file that persists its free space with a threshold above the length of its free-space managers grows by a set of managers on each commit that appends one at its end ([#701](https://github.com/CramBL/hdf5-pure/pull/701)).
 - Fixed `File::open_rw` reusing freed space in a file whose file space strategy has no free-space managers. Such a file keeps its length when a deletion frees its end ([#700](https://github.com/CramBL/hdf5-pure/pull/700)).
 - Fixed `FileBuilder::with_file_space_strategy` recording persistence and a custom threshold for a file space strategy that has no free-space managers ([#700](https://github.com/CramBL/hdf5-pure/pull/700)).

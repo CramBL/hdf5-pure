@@ -55,12 +55,13 @@ use crate::dataspace::{Dataspace, DataspaceType, Extent, MaxExtent};
 use crate::error::{FormatError, OBJECT_HEADER_MESSAGE_MAX};
 use crate::file_create_properties::FileCreateProperties;
 use crate::file_space_info;
-use crate::file_space_info::DEFAULT_PAGE_SIZE;
 use crate::file_space_info::DEFAULT_THRESHOLD;
 use crate::file_space_info::FileSpaceInfo;
+use crate::file_space_info::FileSpacePageSize;
 use crate::file_space_info::FileSpaceStrategy;
 use crate::file_space_info::FreeSpaceSettings;
 use crate::file_space_info::NUM_FILE_FSM_MANAGERS;
+use crate::free_space_manager;
 use crate::libver::LibVer;
 use crate::link_info::LinkInfoMessage;
 use crate::link_message::{LinkMessage, LinkTarget};
@@ -109,12 +110,6 @@ pub(crate) const COMPACT_LINK_INFO: LinkInfoMessage = LinkInfoMessage {
     btree_name_index_address: None,
     btree_creation_order_address: None,
 };
-
-/// Round `value` up to the next multiple of `page` (a power of two). Used by the
-/// paged file-space writer to page-align region starts and the end-of-allocation.
-fn align_up(value: u64, page: u64) -> u64 {
-    value.div_ceil(page) * page
-}
 
 // ---- OH builders ----
 
@@ -1292,8 +1287,14 @@ impl FileWriter {
         self
     }
 
-    /// Set the file-space page size, mirroring `H5Pset_file_space_page_size`.
-    /// Recorded in the superblock extension; meaningful for the paged strategy.
+    /// Sets the file space page size in bytes, which the C library sets with
+    /// `H5Pset_file_space_page_size`.
+    ///
+    /// The writer records the page size under every strategy, and under
+    /// [`FileSpaceStrategy::Page`] aligns every allocation to it.
+    ///
+    /// [`finish`](Self::finish) returns [`FormatError::InvalidFileSpacePageSize`] if `page_size` is
+    /// less than 512 bytes or more than 1 GiB.
     pub fn with_file_space_page_size(&mut self, page_size: u64) -> &mut Self {
         self.file_space_page_size = Some(page_size);
         self
@@ -1319,70 +1320,46 @@ impl FileWriter {
         fn group_needs(group: &FinishedGroup) -> bool {
             any_chunked(&group.datasets) || group.sub_groups.iter().any(group_needs)
         }
-        self.file_space_info().is_some()
+        self.records_file_space()
             || any_chunked(&self.root_datasets)
             || self.groups.iter().any(group_needs)
     }
 
-    /// Returns the File Space Info message to write, or `None` if no file-space option was set.
-    ///
-    /// A freshly built file has no free space, so under a strategy with free-space managers and
-    /// `persist = true` the writer writes the persisting form with no managers: the persist flag
-    /// set, every manager address undefined, and no manager blocks. A later
-    /// [`File::open_rw`](crate::File::open_rw) that frees space writes the managers. Under every
-    /// other setting the writer writes the non-persistent form, with the default threshold for a
-    /// strategy without free-space managers.
-    fn file_space_info(&self) -> Option<FileSpaceInfo> {
-        if self.file_space_strategy.is_none() && self.file_space_page_size.is_none() {
-            return None;
-        }
-        let (strategy, settings) = self.resolved_file_space_strategy();
-        let threshold = settings.map_or(DEFAULT_THRESHOLD, |settings| settings.threshold);
-        let page_size = self.file_space_page_size.unwrap_or(DEFAULT_PAGE_SIZE);
-        Some(if settings.is_some_and(|settings| settings.persist) {
-            file_space_info::persistent_empty(
-                OFFSET_WIDTH,
-                strategy,
-                threshold,
-                page_size,
-                StoredAddress::undefined(OFFSET_WIDTH.get()).get(),
-            )
-        } else {
-            file_space_info::non_persistent(OFFSET_WIDTH, strategy, threshold, page_size)
-        })
+    /// Returns `true` if the writer writes a File Space Info message, which it does for a file
+    /// space strategy or a page size the caller sets.
+    fn records_file_space(&self) -> bool {
+        self.file_space_strategy.is_some() || self.file_space_page_size.is_some()
     }
 
-    /// Returns the strategy the writer records, `H5F_FSPACE_STRATEGY_FSM_AGGR` if none was set,
-    /// and the settings of its free-space managers, or `None` if it has none.
-    fn resolved_file_space_strategy(&self) -> (FileSpaceStrategy, Option<FreeSpaceSettings>) {
+    /// Returns the file space settings the writer records, or `None` if the caller sets neither a
+    /// strategy nor a page size.
+    ///
+    /// For a page size set without a strategy the writer records `H5F_FSPACE_STRATEGY_FSM_AGGR`,
+    /// the default.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::InvalidFileSpacePageSize`] if the page size is less than 512 bytes
+    /// or more than 1 GiB, under every strategy.
+    fn file_space_config(&self) -> Result<Option<FileSpaceConfig>, FormatError> {
+        if !self.records_file_space() {
+            return Ok(None);
+        }
         let (strategy, persist, threshold) = self.file_space_strategy.unwrap_or((
             FileSpaceStrategy::FsmAggr,
             false,
             DEFAULT_THRESHOLD,
         ));
-        (
+        Ok(Some(FileSpaceConfig {
             strategy,
-            FreeSpaceSettings::of(strategy, persist, threshold),
-        )
-    }
-
-    /// The superblock-extension object header bytes carrying the File Space Info
-    /// message, if file-space was configured.
-    fn file_space_extension_oh(&self) -> Result<Option<Vec<u8>>, FormatError> {
-        self.file_space_info()
-            .map(|info| {
-                let mut oh = ObjectHeaderWriter::new();
-                // The flags the reference C library writes for this message (`H5Fsuper.c`,
-                // HDF5 2.2.0). Neither must-understand bit is among them, so an older reader
-                // still opens the file.
-                oh.add_message_with_flags(
-                    MessageType::FILE_SPACE_INFO,
-                    hdf5_pure_format::__private::serialize_file_space_info(WIDTHS, &info)?,
-                    MessageFlags::FORBID_SHARING | MessageFlags::MARK_IF_UNKNOWN,
-                );
-                oh.serialize()
-            })
-            .transpose()
+            persist,
+            threshold,
+            page_size: self
+                .file_space_page_size
+                .map(FileSpacePageSize::try_from)
+                .transpose()?
+                .unwrap_or_default(),
+        }))
     }
 
     pub fn create_group(&mut self, name: &str) -> GroupBuilder {
@@ -1477,17 +1454,13 @@ impl FileWriter {
     /// from its provider one chunk at a time here, never all held at once.
     pub(crate) fn finish_to_sink<S: ByteSink>(self, sink: &mut S) -> Result<(), FormatError> {
         let libver = self.resolve_libver()?;
+        let file_space = self.file_space_config()?;
 
         // File-space settings are recorded in a File Space Info message, which
         // arrived with HDF5 1.10. Refused beside the bounds themselves rather
         // than where the message is emitted, so the answer does not depend on
         // how far into the layout the writer got.
-        //
-        // Asked of `file_space_info` rather than of the strategy field, because
-        // that is the one function that decides whether the message is written:
-        // a page size with no strategy emits one too, and testing the strategy
-        // alone let exactly that case through.
-        if self.file_space_info().is_some() && libver < LibVer::V110 {
+        if file_space.is_some() && libver < LibVer::V110 {
             return Err(FormatError::LibverTooOldForContent {
                 content: "a file-space setting",
                 needs: LibVer::V110.name(),
@@ -1521,31 +1494,34 @@ impl FileWriter {
         // Genuine paged allocation: page-align every allocation and, when
         // persisting, emit per-page-type free-space managers. Gated entirely on
         // the Page strategy so every other strategy keeps its exact byte layout.
-        let (paged, persist_paged, page_size, fs_threshold) = match self.file_space_strategy {
-            Some((FileSpaceStrategy::Page, persist, threshold)) => {
-                let ps = self.file_space_page_size.unwrap_or(DEFAULT_PAGE_SIZE);
-                if ps < 512 || !ps.is_power_of_two() {
-                    return Err(FormatError::InvalidFileSpacePageSize(ps));
-                }
+        let paged = match file_space {
+            Some(FileSpaceConfig {
+                strategy: FileSpaceStrategy::Page,
+                persist,
+                threshold,
+                page_size,
+            }) => {
                 // File-space pages are measured from the file base; the layout
                 // below is base-relative, so base-relative boundaries coincide
                 // with absolute ones only when the userblock is a whole number of
                 // pages (zero trivially qualifies).
-                if self.userblock_size % ps != 0 {
+                if self.userblock_size % page_size.get() != 0 {
                     return Err(FormatError::UserblockNotPageAligned(
                         self.userblock_size,
-                        ps,
+                        page_size.get(),
                     ));
                 }
-                (true, persist, ps, threshold)
+                Some((page_size, persist, threshold))
             }
-            _ => (false, false, 0, DEFAULT_THRESHOLD),
+            _ => None,
         };
 
         // The superblock-extension header (carrying a File Space Info message)
         // is independent of the file layout, so build it up front and place it
         // after all other content below.
-        let ext_oh = self.file_space_extension_oh()?;
+        let ext_oh = file_space
+            .map(|config| file_space_extension_oh(&config.info()))
+            .transpose()?;
         // A persisting *non-paged* file's placeholder File Space Info message (built
         // just above) records `eoa_pre_fsm` = UNDEF, because a fresh file has no
         // free-space-manager blocks. libhdf5 requires `fs_persist => eoa_fsm_fsalloc
@@ -1554,20 +1530,14 @@ impl FileWriter {
         // end-of-allocation once the layout is known (issue #178). Capture the
         // parameters here, while `self` is intact. (The paged path has its own
         // manager-aware rewrite; a `Page` file never reaches the non-paged tail.)
-        let nonpaged_persist: Option<(FileSpaceStrategy, u64, u64)> = match self
-            .resolved_file_space_strategy()
-        {
-            (FileSpaceStrategy::Page, _) => None,
-            (strategy, settings) => settings
-                .filter(|settings| settings.persist)
-                .map(|settings| {
-                    (
-                        strategy,
-                        settings.threshold,
-                        self.file_space_page_size.unwrap_or(DEFAULT_PAGE_SIZE),
-                    )
-                }),
-        };
+        let nonpaged_persist: Option<(FileSpaceStrategy, u64, FileSpacePageSize)> = file_space
+            .filter(|config| config.strategy != FileSpaceStrategy::Page)
+            .and_then(|config| {
+                config
+                    .free_space()
+                    .filter(|settings| settings.persist)
+                    .map(|settings| (config.strategy, settings.threshold, config.page_size))
+            });
         struct DsFlat {
             /// Link name in the owning group.
             name: LinkNameBuf,
@@ -3062,7 +3032,7 @@ impl FileWriter {
         // metadata, DRAW for small raw, generic-large for large fragments) when
         // persisting. Emission is address-driven: gaps are zero-filled so the
         // physical file reaches the page-aligned end-of-allocation.
-        if paged {
+        if let Some((page_size, persist_paged, fs_threshold)) = paged {
             let base = BaseAddress::new(ub as u64);
             let mut meta = cursor2 as u64; // metadata cursor, base-relative
 
@@ -3129,7 +3099,7 @@ impl FileWriter {
                 let len = ds_data_lens[i];
                 if !is_chunked[i] && len == 0 {
                     empty_indices.push(i);
-                } else if len < page_size {
+                } else if len < page_size.get() {
                     small_indices.push(i);
                 } else {
                     large_indices.push(i);
@@ -3138,7 +3108,9 @@ impl FileWriter {
             let small_raw_total: u64 = small_indices.iter().map(|&i| ds_data_lens[i]).sum();
             let large_frag_sizes: Vec<u64> = large_indices
                 .iter()
-                .map(|&i| align_up(ds_data_lens[i], page_size) - ds_data_lens[i])
+                .map(|&i| {
+                    free_space_manager::align_up(ds_data_lens[i], page_size) - ds_data_lens[i]
+                })
                 .filter(|&f| f > 0)
                 .collect();
 
@@ -3146,8 +3118,8 @@ impl FileWriter {
             // FSHD/FSSE blocks in the metadata region (persisting only). Block
             // lengths depend only on section counts (fixed field widths), so the
             // page tails are computed in a single forward pass with no iteration.
-            let draw_active =
-                small_raw_total > 0 && align_up(small_raw_total, page_size) != small_raw_total;
+            let draw_active = small_raw_total > 0
+                && free_space_manager::align_up(small_raw_total, page_size) != small_raw_total;
             let large_active = !large_frag_sizes.is_empty();
             let mut slots = [u64::MAX; NUM_FILE_FSM_MANAGERS];
             let mut super_fsm: Option<(StoredAddress, StoredAddress)> = None;
@@ -3174,7 +3146,7 @@ impl FileWriter {
             // tail untracked. This decision is O(1), not a fixpoint.
             let super_active = if persist_paged {
                 let with = meta_content_end + super_block_len + draw_block_len + large_block_len;
-                align_up(with, page_size) > with
+                free_space_manager::align_up(with, page_size) > with
             } else {
                 false
             };
@@ -3209,7 +3181,7 @@ impl FileWriter {
 
             // (e) The raw-data region starts on a fresh page boundary. The
             // metadata page tail is the SUPER section (when active).
-            let raw_start = align_up(meta_end, page_size);
+            let raw_start = free_space_manager::align_up(meta_end, page_size);
             let super_section = super_fsm.map(|_| FreeSection {
                 addr: StoredAddress::new(meta_end),
                 size: raw_start - meta_end,
@@ -3257,7 +3229,7 @@ impl FileWriter {
             }
             let small_raw_end = c;
             let draw_section = if draw_active {
-                let padded = align_up(small_raw_end, page_size);
+                let padded = free_space_manager::align_up(small_raw_end, page_size);
                 c = padded;
                 Some(FreeSection {
                     addr: StoredAddress::new(small_raw_end),
@@ -3265,13 +3237,13 @@ impl FileWriter {
                 })
             } else {
                 if small_raw_total > 0 {
-                    c = align_up(small_raw_end, page_size);
+                    c = free_space_manager::align_up(small_raw_end, page_size);
                 }
                 None
             };
             let mut large_sections: Vec<FreeSection> = Vec::new();
             for &i in &large_indices {
-                c = align_up(c, page_size);
+                c = free_space_manager::align_up(c, page_size);
                 let data_addr = StoredAddress::new(c);
                 let built_len;
                 let layout = if is_chunked[i] {
@@ -3296,14 +3268,14 @@ impl FileWriter {
                 };
                 layouts[i] = Some(layout);
                 let data_end = data_addr.get() + built_len;
-                let frag = align_up(data_end, page_size) - data_end;
+                let frag = free_space_manager::align_up(data_end, page_size) - data_end;
                 if frag > 0 {
                     large_sections.push(FreeSection {
                         addr: StoredAddress::new(data_end),
                         size: frag,
                     });
                 }
-                c = align_up(data_end, page_size);
+                c = free_space_manager::align_up(data_end, page_size);
             }
             let eoa_rel = c; // already page-aligned
             let eof_addr2 = base.absolute(StoredAddress::new(eoa_rel))?;
@@ -3529,7 +3501,10 @@ impl FileWriter {
                 )?;
             }
             if small_raw_total > 0 {
-                sink.put_zeros((align_up(small_raw_end, page_size) - small_raw_end).to_usize()?)?;
+                sink.put_zeros(
+                    (free_space_manager::align_up(small_raw_end, page_size) - small_raw_end)
+                        .to_usize()?,
+                )?;
             }
             for &i in &large_indices {
                 let gap = base.absolute(ds_layouts[i].data_addr)? - sink.position();
@@ -3541,7 +3516,9 @@ impl FileWriter {
                     all_ds[i].produced.as_ref(),
                 )?;
                 let end_rel = base.relative(sink.position())?.get();
-                sink.put_zeros((align_up(end_rel, page_size) - end_rel).to_usize()?)?;
+                sink.put_zeros(
+                    (free_space_manager::align_up(end_rel, page_size) - end_rel).to_usize()?,
+                )?;
             }
             let final_pad = eof_addr2 - sink.position();
             sink.put_zeros(final_pad.to_usize()?)?;
@@ -3846,6 +3823,71 @@ impl FileWriter {
 
         Ok(())
     }
+}
+
+/// The file space settings the caller passes to the writer, with the page size checked.
+#[derive(Clone, Copy, Debug)]
+struct FileSpaceConfig {
+    strategy: FileSpaceStrategy,
+    persist: bool,
+    threshold: u64,
+    page_size: FileSpacePageSize,
+}
+
+impl FileSpaceConfig {
+    /// Returns the File Space Info message to write.
+    ///
+    /// A freshly built file has no free space, so under a strategy with free-space managers and
+    /// `persist = true` the writer writes the persisting form with no managers: the persist flag
+    /// set, every manager address undefined, and no manager blocks. A later
+    /// [`File::open_rw`](crate::File::open_rw) that frees space writes the managers. Under every
+    /// other setting the writer writes the non-persistent form, with the default threshold for a
+    /// strategy without free-space managers.
+    fn info(&self) -> FileSpaceInfo {
+        let Self {
+            strategy,
+            persist,
+            threshold,
+            page_size,
+        } = *self;
+        let free_space = FreeSpaceSettings::of(strategy, persist, threshold);
+        let threshold = free_space.map_or(DEFAULT_THRESHOLD, |settings| settings.threshold);
+        if free_space.is_some_and(|settings| settings.persist) {
+            file_space_info::persistent_empty(
+                OFFSET_WIDTH,
+                strategy,
+                threshold,
+                page_size,
+                StoredAddress::undefined(OFFSET_WIDTH.get()).get(),
+            )
+        } else {
+            file_space_info::non_persistent(OFFSET_WIDTH, strategy, threshold, page_size)
+        }
+    }
+
+    /// Returns the settings of the free-space managers, or `None` under a strategy without them.
+    fn free_space(&self) -> Option<FreeSpaceSettings> {
+        FreeSpaceSettings::of(self.strategy, self.persist, self.threshold)
+    }
+}
+
+/// Serializes the object header of the superblock extension, with `info` as its one message.
+///
+/// # Errors
+///
+/// Returns [`FormatError::LengthTooLarge`] or [`FormatError::AddressTooLarge`] if a value of
+/// `info` does not fit its field at the writer's widths.
+fn file_space_extension_oh(info: &FileSpaceInfo) -> Result<Vec<u8>, FormatError> {
+    let mut oh = ObjectHeaderWriter::new();
+    // The flags the reference C library writes for this message (`H5Fsuper.c`,
+    // HDF5 2.2.0). Neither must-understand bit is among them, so an older reader
+    // still opens the file.
+    oh.add_message_with_flags(
+        MessageType::FILE_SPACE_INFO,
+        hdf5_pure_format::__private::serialize_file_space_info(WIDTHS, info)?,
+        MessageFlags::FORBID_SHARING | MessageFlags::MARK_IF_UNKNOWN,
+    );
+    oh.serialize()
 }
 
 #[cfg(test)]

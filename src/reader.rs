@@ -1658,26 +1658,42 @@ impl FileInner {
     /// file records one and it can be read. Best-effort: any failure (no
     /// extension, unreadable object header, malformed message) yields `None`.
     fn read_file_space_info(&self) -> Option<FileSpaceInfo> {
-        let rel = self.superblock.superblock_extension_address?;
+        self.parse_file_space_info().ok().flatten()
+    }
+
+    /// Parses the File Space Info message from the superblock extension, or returns `None` if the
+    /// file has no superblock extension or the extension holds no such message.
+    ///
+    /// # Errors
+    ///
+    /// Returns the error of the extension's address, its object header, or the message that does
+    /// not parse, such as [`FormatError::InvalidFileSpacePageSize`] for a page size outside
+    /// 512 bytes to 1 GiB.
+    fn parse_file_space_info(&self) -> Result<Option<FileSpaceInfo>, FormatError> {
+        let Some(rel) = self.superblock.superblock_extension_address else {
+            return Ok(None);
+        };
         if rel == u64::MAX {
-            return None;
+            return Ok(None);
         }
-        let abs = self.addr_offset.absolute(StoredAddress::new(rel)).ok()?;
-        let header = self.parse_header(abs).ok()?;
-        let msg = header
+        let abs = self.addr_offset.absolute(StoredAddress::new(rel))?;
+        let header = self.parse_header(abs)?;
+        let Some(msg) = header
             .messages
             .iter()
-            .find(|m| m.msg_type == MessageType::FILE_SPACE_INFO)?;
+            .find(|m| m.msg_type == MessageType::FILE_SPACE_INFO)
+        else {
+            return Ok(None);
+        };
         let widths =
-            FormatWidths::from_sizes(self.superblock.offset_size, self.superblock.length_size)
-                .ok()?;
+            FormatWidths::from_sizes(self.superblock.offset_size, self.superblock.length_size)?;
         hdf5_pure_format::__private::parse_file_space_info(
             widths,
             self.addr_offset,
             self.superblock.eof_address,
             &msg.data,
         )
-        .ok()
+        .map(Some)
     }
 
     /// Parse the Shared Message Table message from the superblock extension and
@@ -3510,6 +3526,18 @@ impl File {
     /// superblock version (the *low bound* of HDF5's `H5Fget_libver_bounds`).
     pub fn libver_bound(&self) -> LibVer {
         self.inner.libver_bound()
+    }
+
+    /// Parses the File Space Info message from the superblock extension, with the error that
+    /// [`file_space_info`](Self::file_space_info) reports as `None`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::InvalidFileSpacePageSize`] if the message stores a page size outside
+    /// 512 bytes to 1 GiB, and the error of the extension's address, its object header, or the
+    /// message where one of them does not parse.
+    pub(crate) fn parse_file_space_info(&self) -> Result<Option<FileSpaceInfo>, FormatError> {
+        self.inner.parse_file_space_info()
     }
 
     /// A `Source` view over the backend, for the streaming-capable paths.

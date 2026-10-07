@@ -1,5 +1,7 @@
 use alloc::vec::Vec;
 
+use crate::FormatError;
+
 /// File-space management strategy, mirroring HDF5's `H5F_fspace_strategy_t`
 /// (set with `H5Pset_file_space_strategy`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -38,7 +40,7 @@ pub struct FileSpaceInfo {
     /// Smallest free-space section size the managers track.
     pub threshold: u64,
     /// File-space page size used for paged allocation.
-    pub page_size: u64,
+    pub page_size: FileSpacePageSize,
     /// Page-end metadata threshold (paged allocation tuning).
     pub page_end_meta_threshold: u16,
     /// End-of-allocation address recorded before free-space manager metadata
@@ -51,4 +53,80 @@ pub struct FileSpaceInfo {
     ///
     /// [`persist`]: Self::persist
     pub manager_addrs: Vec<u64>,
+}
+
+/// A file space page size in bytes, from 512 bytes to 1 GiB.
+///
+/// A version 1 File Space Info message stores a page size under every strategy, and under
+/// [`FileSpaceStrategy::Page`] every allocation is aligned to it. A version 0 message stores none.
+/// The field is defined in "The File Space Info Message" of the [format specification, version
+/// 4.0][spec].
+///
+/// The C library sets this value with `H5Pset_file_space_page_size`, which rejects a page size
+/// outside the same range (`H5Pfcpl.c`, HDF5 2.2.0).
+///
+/// # Examples
+///
+/// ```
+/// use hdf5_pure_core::FileSpacePageSize;
+/// use hdf5_pure_core::FormatError;
+///
+/// let page_size = FileSpacePageSize::try_from(8192)?;
+/// assert_eq!(page_size.get(), 8192);
+/// assert_eq!(
+///     FileSpacePageSize::try_from(256),
+///     Err(FormatError::InvalidFileSpacePageSize(256))
+/// );
+/// # Ok::<(), FormatError>(())
+/// ```
+///
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_fsinfo
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct FileSpacePageSize(u64);
+
+impl FileSpacePageSize {
+    /// Returns the page size in bytes.
+    pub const fn get(self) -> u64 {
+        self.0
+    }
+
+    /// The smallest page size, 512 bytes.
+    ///
+    /// The C library calls this value `H5F_FILE_SPACE_PAGE_SIZE_MIN`.
+    pub const MIN: Self = Self(512);
+
+    /// The largest page size, 1 GiB.
+    ///
+    /// The C library calls this value `H5F_FILE_SPACE_PAGE_SIZE_MAX`.
+    pub const MAX: Self = Self(1 << 30);
+
+    /// The default page size, 4096 bytes.
+    ///
+    /// The C library calls this value `H5F_FILE_SPACE_PAGE_SIZE_DEF`.
+    pub const DEFAULT: Self = Self(4096);
+}
+
+impl TryFrom<u64> for FileSpacePageSize {
+    type Error = FormatError;
+
+    /// Converts a page size in bytes.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::InvalidFileSpacePageSize`] if `page_size` is less than 512 bytes or
+    /// more than 1 GiB.
+    fn try_from(page_size: u64) -> Result<Self, FormatError> {
+        if (Self::MIN.get()..=Self::MAX.get()).contains(&page_size) {
+            Ok(Self(page_size))
+        } else {
+            Err(FormatError::InvalidFileSpacePageSize(page_size))
+        }
+    }
+}
+
+impl Default for FileSpacePageSize {
+    /// Returns [`FileSpacePageSize::DEFAULT`], 4096 bytes.
+    fn default() -> Self {
+        Self::DEFAULT
+    }
 }

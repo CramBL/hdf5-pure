@@ -105,6 +105,7 @@ These are reported as [`Error::RepackUnsupported`](crate::Error::RepackUnsupport
 | lossy filters: float D-scale scale-offset and ZFP | re-encoding is not guaranteed idempotent |
 | SZIP filter | this crate cannot write it |
 | an attribute whose datatype is or contains a reference | its stored address is not rewritten, and no [`AttrValue`](crate::AttrValue) can re-encode it |
+| file-space settings that do not parse | the copy would record the default strategy in their place |
 
 ## Verifying the result
 
