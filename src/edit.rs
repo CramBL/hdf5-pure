@@ -322,8 +322,7 @@ use crate::file_writer::{
 };
 use crate::filter_pipeline::FilterPipeline;
 use crate::filters::{ChunkContext, FilterScratch, compress_chunk_with, decompress_chunk};
-use crate::free_space::TrackedSpace;
-use crate::free_space::{FreeList, trailing_run_start};
+use crate::free_space::{self, Extent as FreeExtent, FreeList, TrackedSpace};
 use crate::free_space_manager::PersistedSections;
 use crate::free_space_manager::{self, PageType, PagedManagerPlan, align_up, plan_paged_managers};
 use crate::group_v2::resolve_group_entries_from_source;
@@ -1835,9 +1834,9 @@ struct PagedEdit {
     /// needs to pad regardless of this.
     last: Option<PageType>,
     /// Free tails left by padding a metadata page before a raw append.
-    meta_pad: Vec<(u64, u64)>,
+    meta_pad: Vec<FreeExtent>,
     /// Free tails left by padding a raw page before a metadata append.
-    raw_pad: Vec<(u64, u64)>,
+    raw_pad: Vec<FreeExtent>,
 }
 
 impl PagedEdit {
@@ -1881,10 +1880,16 @@ impl PagedEdit {
             };
             if let Some(prev) = pad {
                 let pad_at = len;
+                let padding = FreeExtent::new(pad_at, pad_len).ok_or(Error::Format(
+                    FormatError::OffsetOverflow {
+                        offset: pad_at,
+                        length: pad_len,
+                    },
+                ))?;
                 image.append(&vec![0u8; pad_len.to_usize()?])?;
                 match prev {
-                    Some(PageType::Meta) => self.meta_pad.push((pad_at, pad_len)),
-                    Some(PageType::Raw) => self.raw_pad.push((pad_at, pad_len)),
+                    Some(PageType::Meta) => self.meta_pad.push(padding),
+                    Some(PageType::Raw) => self.raw_pad.push(padding),
                     None => {} // crash-recovery pad: untracked (tail type unknown)
                 }
             }
@@ -1921,21 +1926,22 @@ impl PagedEdit {
     /// guessed at.
     fn slot_list(
         slot: usize,
-        addr: u64,
-        size: u64,
+        extent: FreeExtent,
         page_size: FileSpacePageSize,
     ) -> Option<PageType> {
         let page_size = page_size.get();
         match slot {
             0 => Some(PageType::Meta),
             2 => Some(PageType::Raw),
-            6 if addr % page_size == 0 && size % page_size == 0 => Some(PageType::Raw),
+            6 if extent.start() % page_size == 0 && extent.len() % page_size == 0 => {
+                Some(PageType::Raw)
+            }
             _ => None,
         }
     }
 
-    /// Record `(addr, size)` in the list its class names: the free space of one
-    /// page type, or the dead list for space whose page type is unproven.
+    /// Records `extent` in the list its class names: the free space of one page type, or the dead
+    /// list for space whose page type is unproven.
     /// [`plan_paged_managers`] splits and classes the free lists into the on-disk
     /// managers at serialization time, so this only has to route.
     ///
@@ -1946,14 +1952,13 @@ impl PagedEdit {
         meta: &mut FreeList,
         raw: &mut FreeList,
         dead: &mut FreeList,
-        addr: u64,
-        size: u64,
+        extent: FreeExtent,
         class: FreeClass,
     ) {
         match class {
-            FreeClass::Page(PageType::Meta) => meta.free(addr, size),
-            FreeClass::Page(PageType::Raw) => raw.free(addr, size),
-            FreeClass::Dead => dead.free(addr, size),
+            FreeClass::Page(PageType::Meta) => meta.free(extent),
+            FreeClass::Page(PageType::Raw) => raw.free(extent),
+            FreeClass::Dead => dead.free(extent),
         }
     }
 
@@ -1991,34 +1996,35 @@ impl PagedEdit {
         // vacated once), so their union is a plain merge: sort by address and join
         // runs that touch. A page is promotable exactly when it lies inside one of
         // those runs, which is what a page split across two of the lists needs.
-        let mut all = meta.sections();
-        all.extend(raw.sections());
-        all.extend(dead.sections());
-        all.sort_unstable_by_key(|&(addr, _)| addr);
-        let mut runs: Vec<(u64, u64)> = Vec::with_capacity(all.len());
-        for (addr, len) in all {
+        let mut all = meta.extents();
+        all.extend(raw.extents());
+        all.extend(dead.extents());
+        all.sort_unstable_by_key(|extent| extent.start());
+        let mut runs: Vec<FreeExtent> = Vec::with_capacity(all.len());
+        for extent in all {
             match runs.last_mut() {
-                Some(run) if run.0 + run.1 >= addr => {
-                    let end = (run.0 + run.1).max(addr + len);
-                    run.1 = end - run.0;
+                Some(run) if run.end() >= extent.start() => {
+                    *run = FreeExtent::new(run.start(), run.end().max(extent.end()) - run.start())
+                        .expect("merged free extents stay non-empty and in bounds");
                 }
-                _ => runs.push((addr, len)),
+                _ => runs.push(extent),
             }
         }
-        for (addr, len) in runs {
+        for extent in runs {
             // The whole pages inside the run: its aligned interior, exactly as
             // `FreeList::alloc_whole_units` takes one. The partial edges sit in
             // pages whose other bytes may be live, so they keep whatever they are.
-            let first = addr.next_multiple_of(page_size);
-            let last = (addr + len) / page_size * page_size;
-            if last <= first {
+            let Some(first) = extent.start().checked_next_multiple_of(page_size) else {
                 continue;
-            }
-            let span = last - first;
-            meta.take_range(first, span);
-            raw.take_range(first, span);
-            dead.take_range(first, span);
-            raw.free(first, span);
+            };
+            let last = (extent.end() / page_size) * page_size;
+            let Some(whole_pages) = FreeExtent::new(first, last.saturating_sub(first)) else {
+                continue;
+            };
+            meta.take_range(whole_pages);
+            raw.take_range(whole_pages);
+            dead.take_range(whole_pages);
+            raw.free(whole_pages);
         }
     }
 
@@ -2036,20 +2042,25 @@ impl PagedEdit {
     /// every one of them comes back from disk as raw ([`slot_list`](Self::slot_list));
     /// without this, metadata could never reuse a page again after a reopen, and
     /// each session's commits would append past all of them (issue #286).
-    fn alloc_typed(&mut self, len: u64, ty: PageType) -> Option<u64> {
+    fn alloc_typed(&mut self, len: u64, ty: PageType) -> Option<FreeExtent> {
         let (own, other) = match ty {
             PageType::Meta => (&mut self.meta, &mut self.raw),
             PageType::Raw => (&mut self.raw, &mut self.meta),
         };
-        if let Some(addr) = own.alloc(len) {
-            return Some(addr);
+        if let Some(extent) = own.alloc(len) {
+            return Some(extent);
         }
-        let span = align_up(len, self.page_size);
-        let addr = other.alloc_whole_units(span, self.page_size.get())?;
-        if span > len {
-            own.free(addr + len, span - len);
+        let span = len.checked_next_multiple_of(self.page_size.get())?;
+        let claimed = other.alloc_whole_units(span, self.page_size.get())?;
+        if span == len {
+            return Some(claimed);
         }
-        Some(addr)
+        let allocation = FreeExtent::new(claimed.start(), len)
+            .expect("the allocation is a non-empty prefix of the claimed extent");
+        let remainder = FreeExtent::new(allocation.end(), span - len)
+            .expect("the remainder is a non-empty suffix of the claimed extent");
+        own.free(remainder);
+        Some(allocation)
     }
 
     /// The longest contiguous run [`alloc_typed`](Self::alloc_typed) could serve
@@ -2132,8 +2143,10 @@ impl PagedPostFree {
     /// file — with the same refusal to release a run that gives back less than it
     /// keeps.
     fn release_trailing(&mut self, eoa: u64, tail_len: u64) -> u64 {
-        let start =
-            trailing_run_start([&self.meta, &self.raw, &self.dead, &self.unclassified], eoa);
+        let start = free_space::trailing_run_start(
+            [&self.meta, &self.raw, &self.dead, &self.unclassified],
+            eoa,
+        );
         let cut = align_up(start, self.page_size);
         if cut >= eoa {
             return eoa;
@@ -2148,10 +2161,12 @@ impl PagedPostFree {
         let span = eoa - published_eoa;
         // A section straddling the cut keeps the part that is still inside the
         // file, which is what `take_range` leaves of it.
-        self.meta.take_range(published_eoa, span);
-        self.raw.take_range(published_eoa, span);
-        self.dead.take_range(published_eoa, span);
-        self.unclassified.take_range(published_eoa, span);
+        let released = FreeExtent::new(published_eoa, span)
+            .expect("the released range ends at the current end of allocation");
+        self.meta.take_range(released);
+        self.raw.take_range(released);
+        self.dead.take_range(released);
+        self.unclassified.take_range(released);
         published_eoa
     }
 
@@ -2166,7 +2181,7 @@ impl PagedPostFree {
         &mut self,
         threshold: u64,
         eoa: u64,
-        extents: impl IntoIterator<Item = (u64, u64, FreeClass)>,
+        extents: impl IntoIterator<Item = (FreeExtent, FreeClass)>,
     ) -> u64 {
         let extents: Vec<_> = extents.into_iter().collect();
         let mut dropped = self.release_each(threshold, extents.iter().copied());
@@ -2177,25 +2192,26 @@ impl PagedPostFree {
         self.give_back(eoa, dropped)
     }
 
-    /// Returns the address of each page that one of `extents` shorter than a page, tracked
-    /// because it merged, leaves wholly free across the metadata, raw, and dead lists.
+    /// Returns each page that one of `extents` shorter than a page, tracked because it merged,
+    /// leaves wholly free across the metadata, raw, and dead lists.
     fn pages_completed_by_merges(
         &self,
-        extents: &[(u64, u64, FreeClass)],
-        dropped: &[(u64, u64, FreeClass)],
-    ) -> BTreeSet<u64> {
+        extents: &[(FreeExtent, FreeClass)],
+        dropped: &[(FreeExtent, FreeClass)],
+    ) -> BTreeSet<FreeExtent> {
         let page_size = self.page_size.get();
-        let dropped: BTreeSet<_> = dropped.iter().map(|&(addr, len, _)| (addr, len)).collect();
+        let dropped: BTreeSet<_> = dropped.iter().map(|&(extent, _)| extent).collect();
         extents
             .iter()
-            .map(|&(addr, len, _)| (addr, len))
-            .filter(|&(addr, len)| (1..page_size).contains(&len) && !dropped.contains(&(addr, len)))
-            .flat_map(|(addr, len)| [addr, addr + len - 1])
+            .map(|&(extent, _)| extent)
+            .filter(|extent| (1..page_size).contains(&extent.len()) && !dropped.contains(extent))
+            .flat_map(|extent| [extent.start(), extent.end() - 1])
             .map(|addr| addr / page_size * page_size)
+            .filter_map(|page| FreeExtent::new(page, page_size))
             .filter(|&page| {
                 [&self.meta, &self.raw, &self.dead]
                     .into_iter()
-                    .map(|list| list.covered_len(page, page_size))
+                    .map(|list| list.covered_len(page))
                     .sum::<u64>()
                     == page_size
             })
@@ -2207,15 +2223,15 @@ impl PagedPostFree {
     fn release_pages(
         &mut self,
         threshold: u64,
-        pages: BTreeSet<u64>,
-    ) -> Vec<(u64, u64, FreeClass)> {
+        pages: BTreeSet<FreeExtent>,
+    ) -> Vec<(FreeExtent, FreeClass)> {
         // `H5MF__sect_small_merge` (`H5MFsection.c`, HDF5 1.14.6) returns a small section that a
         // merge grows to a whole page through `H5MF_xfree`, which offers it as a large section
         // against the threshold again.
-        let page_size = self.page_size.get();
+        let pages: Vec<_> = pages.into_iter().collect();
         for &page in &pages {
             for list in [&mut self.meta, &mut self.raw, &mut self.dead] {
-                list.take_range(page, page_size);
+                list.take_range(page);
             }
         }
         // A whole free page belongs to no page type and is filed under raw, as `slot_list` files
@@ -2224,7 +2240,7 @@ impl PagedPostFree {
             threshold,
             pages
                 .into_iter()
-                .map(|page| (page, page_size, FreeClass::Page(PageType::Raw))),
+                .map(|page| (page, FreeClass::Page(PageType::Raw))),
         )
     }
 
@@ -2233,26 +2249,28 @@ impl PagedPostFree {
     ///
     /// The part of a page below that boundary is tracked, under the class of the run's lowest
     /// extent.
-    fn give_back(&mut self, eoa: u64, mut dropped: Vec<(u64, u64, FreeClass)>) -> u64 {
+    fn give_back(&mut self, eoa: u64, mut dropped: Vec<(FreeExtent, FreeClass)>) -> u64 {
         let page_size = self.page_size.get();
         // `H5MF__sect_large_can_shrink` (`H5MFsection.c`, HDF5 1.14.6) lets a section of at least a
         // page that ends the allocation shrink a paged file, and the small section class has no
         // shrink callback.
-        dropped.retain(|&(_, len, _)| len >= page_size);
-        dropped.sort_unstable_by_key(|&(addr, _, _)| Reverse(addr));
+        dropped.retain(|&(extent, _)| extent.len() >= page_size);
+        dropped.sort_unstable_by_key(|&(extent, _)| Reverse(extent.start()));
         let mut start = eoa;
         let mut head = None;
-        for (addr, len, class) in dropped {
-            if addr + len != start {
+        for (extent, class) in dropped {
+            if extent.end() != start {
                 break;
             }
-            start = addr;
+            start = extent.start();
             head = Some(class);
         }
         // `H5MF__sect_large_shrink` keeps the part of a page below the section's first whole page
         // tracked, so that the end of allocation stays on a page boundary.
         if let Some(class) = head.filter(|_| !start.is_multiple_of(page_size)) {
-            self.track(start, align_up(start, self.page_size) - start, class);
+            let head = FreeExtent::new(start, align_up(start, self.page_size) - start)
+                .expect("page alignment leaves a non-empty prefix");
+            self.track(head, class);
         }
         align_up(start, self.page_size)
     }
@@ -2261,36 +2279,29 @@ impl PagedPostFree {
 impl TrackedSpace for PagedPostFree {
     type Class = FreeClass;
 
-    fn merges(&self, addr: u64, len: u64) -> bool {
+    fn merges(&self, extent: FreeExtent) -> bool {
         let page_size = self.page_size.get();
         let typed = [&self.meta, &self.raw, &self.dead];
-        if len < page_size {
+        if extent.len() < page_size {
             // A section shorter than a page is small, and `H5MF__sect_small_can_merge`
             // (`H5MFsection.c`, HDF5 1.14.6) lets two small sections merge only within one page. A
             // page holds one page type, so the free space beside an extent inside its page is of
             // the extent's type whichever list holds it.
             return typed
                 .into_iter()
-                .any(|list| list.adjoins_within(addr, len, page_size));
+                .any(|list| list.adjoins_within(extent, page_size));
         }
         // A section of at least a page is large, and `H5MF__sect_large_can_merge` (`H5MFsection.c`,
         // HDF5 1.14.6) lets it merge with an adjoining large section: a whole free page, or a
         // section of the generic-large manager.
         typed
             .into_iter()
-            .any(|list| list.adjoins_whole_unit(addr, len, page_size))
-            || self.unclassified.adjoins(addr, len)
+            .any(|list| list.adjoins_whole_unit(extent, page_size))
+            || self.unclassified.adjoins(extent)
     }
 
-    fn track(&mut self, addr: u64, len: u64, class: FreeClass) {
-        PagedEdit::route_free(
-            &mut self.meta,
-            &mut self.raw,
-            &mut self.dead,
-            addr,
-            len,
-            class,
-        );
+    fn track(&mut self, extent: FreeExtent, class: FreeClass) {
+        PagedEdit::route_free(&mut self.meta, &mut self.raw, &mut self.dead, extent, class);
     }
 }
 
@@ -2332,13 +2343,23 @@ const TRAILING_RESERVE_TAILS: u64 = 4;
 /// Returns `eoa` unchanged, and leaves the list as it came in, when the allocation
 /// ends in live bytes and when the run is not worth releasing.
 fn release_trailing_run(post: &mut FreeList, eoa: u64, tail_len: u64) -> u64 {
-    let run_start = trailing_run_start([&*post], eoa);
-    let keep = TRAILING_RESERVE_TAILS * tail_len;
-    if eoa - run_start < 2 * keep {
+    let run_start = free_space::trailing_run_start([&*post], eoa);
+    let Some(keep) = TRAILING_RESERVE_TAILS.checked_mul(tail_len) else {
+        return eoa;
+    };
+    let Some(release_min) = keep.checked_mul(2) else {
+        return eoa;
+    };
+    if eoa - run_start < release_min {
         return eoa;
     }
-    post.take_range(run_start + keep, eoa - run_start - keep);
-    run_start + keep
+    let Some(cut) = run_start.checked_add(keep) else {
+        return eoa;
+    };
+    let released = FreeExtent::new(cut, eoa - cut)
+        .expect("the released range ends at the current end of allocation");
+    post.take_range(released);
+    cut
 }
 
 /// Whether a persisting file's tail rewrite may grow the file to place its
@@ -2521,10 +2542,9 @@ struct PersistState {
     strategy: FileSpaceStrategy,
     threshold: u64,
     page_size: FileSpacePageSize,
-    /// The address and the length of each block the next persisting commit frees, the blocks of the
-    /// superblock extension and of the free-space managers. A manager header or a section list that
-    /// does not parse is not among them.
-    old_blocks: Vec<(u64, u64)>,
+    /// Each block the next persisting commit frees: the superblock extension and free-space-manager
+    /// blocks. A manager header or section list that does not parse is not among them.
+    old_blocks: Vec<FreeExtent>,
 }
 
 /// A snapshot of a writable file's live space usage (issue #150).
@@ -3329,14 +3349,17 @@ impl WriteEngine {
             // commit has to preserve. A section whose slot does not settle its page
             // type is recorded but never handed out.
             let page_size = info.page_size;
-            let mut tagged: Vec<(FreeSection, Option<PageType>)> = Vec::new();
+            let mut tagged: Vec<(FreeExtent, Option<PageType>)> = Vec::new();
             for (slot, _, read) in &managers {
                 let Ok((sections, _)) = read else {
                     continue;
                 };
                 for &s in sections {
-                    let ty = PagedEdit::slot_list(*slot, s.addr.get(), s.size, page_size);
-                    tagged.push((s, ty));
+                    let Some(extent) = FreeExtent::new(s.addr.get(), s.size) else {
+                        continue;
+                    };
+                    let ty = PagedEdit::slot_list(*slot, extent, page_size);
+                    tagged.push((extent, ty));
                 }
             }
             // Distinct sections have distinct addresses in any well-formed file,
@@ -3344,16 +3367,13 @@ impl WriteEngine {
             // advertise one address twice, and the overlap guard below already
             // discards the second of any such pair. No `debug_assert` here: this
             // parses untrusted bytes, which must not panic a debug build.
-            tagged.sort_unstable_by_key(|(s, _)| s.addr);
+            tagged.sort_unstable_by_key(|(extent, _)| extent.start());
             let mut prev_end = 0u64;
-            for (s, ty) in tagged {
-                let Some(end) = s.addr.get().checked_add(s.size) else {
-                    continue;
-                };
-                if s.size == 0 || end > file_len || s.addr.get() < prev_end {
+            for (extent, ty) in tagged {
+                if extent.end() > file_len || extent.start() < prev_end {
                     continue;
                 }
-                prev_end = end;
+                prev_end = extent.end();
                 let pg = self
                     .paged
                     .as_mut()
@@ -3363,11 +3383,10 @@ impl WriteEngine {
                         &mut pg.meta,
                         &mut pg.raw,
                         &mut pg.dead,
-                        s.addr.get(),
-                        s.size,
+                        extent,
                         ty.into(),
                     ),
-                    None => pg.unclassified.free(s.addr.get(), s.size),
+                    None => pg.unclassified.free(extent),
                 }
             }
             // A page the seeded lists empty between them belongs to no type and
@@ -3393,24 +3412,32 @@ impl WriteEngine {
             sections.sort_unstable_by_key(|s| s.addr);
             let mut prev_end = 0u64;
             for s in sections {
-                let Some(end) = s.addr.get().checked_add(s.size) else {
+                let Some(extent) = FreeExtent::new(s.addr.get(), s.size) else {
                     continue;
                 };
-                if s.size == 0 || end > file_len || s.addr.get() < prev_end {
+                if extent.end() > file_len || extent.start() < prev_end {
                     continue;
                 }
-                prev_end = end;
-                self.free.free(s.addr.get(), s.size);
+                prev_end = extent.end();
+                self.free.free(extent);
             }
         }
 
         let mut old_blocks = Vec::new();
         if let Ok(spans) = self.oh_chunk_spans(ext_addr) {
-            old_blocks.extend(spans);
+            old_blocks.extend(
+                spans
+                    .into_iter()
+                    .filter_map(|(addr, len)| FreeExtent::new(addr, len)),
+            );
         }
         for (_, m, read) in &managers {
             match read {
-                Ok((_, blocks)) => old_blocks.extend(blocks),
+                Ok((_, blocks)) => old_blocks.extend(
+                    blocks
+                        .iter()
+                        .filter_map(|&(addr, len)| FreeExtent::new(addr, len)),
+                ),
                 Err(_) => old_blocks.extend(self.manager_header_block(widths, *m)),
             }
         }
@@ -3423,9 +3450,9 @@ impl WriteEngine {
         });
     }
 
-    /// Returns the address and the length of the free-space manager header at `addr`, or `None` if
-    /// the read fails or the header does not parse.
-    fn manager_header_block(&self, widths: FormatWidths, addr: u64) -> Option<(u64, u64)> {
+    /// Returns the extent of the free-space manager header at `addr`, or `None` if the read fails
+    /// or the header does not parse.
+    fn manager_header_block(&self, widths: FormatWidths, addr: u64) -> Option<FreeExtent> {
         let len = hdf5_pure_format::__private::free_space_manager_header_len(widths);
         let fshd = self
             .image()
@@ -3433,7 +3460,7 @@ impl WriteEngine {
             .ok()?;
         FreeSpaceManagerHeader::parse(widths, &fshd)
             .ok()
-            .map(|_| (addr, len))
+            .and_then(|_| FreeExtent::new(addr, len))
     }
 
     /// Reads the superblock extension of `superblock` from `source`, and returns its absolute
@@ -4275,8 +4302,8 @@ impl WriteEngine {
             (None, true) => self.free.sections(),
             (Some(pg), false) => {
                 let mut raw = pg.raw.clone();
-                for (addr, len) in self.reserved.sections() {
-                    raw.free(addr, len);
+                for extent in self.reserved.extents() {
+                    raw.free(extent);
                 }
                 let mut out = pg.meta.sections();
                 out.extend(raw.sections());
@@ -4290,8 +4317,8 @@ impl WriteEngine {
             }
             (None, false) => {
                 let mut free = self.free.clone();
-                for (addr, len) in self.reserved.sections() {
-                    free.free(addr, len);
+                for extent in self.reserved.extents() {
+                    free.free(extent);
                 }
                 free.sections()
             }
@@ -4504,13 +4531,13 @@ impl WriteEngine {
     /// data, so the reserve is raw-typed space and an append spending it cannot
     /// mix a page. A flat file has one list and draws from it.
     fn take_raw_span(&mut self, len: u64) -> bool {
-        let addr = match self.paged.as_mut() {
+        let extent = match self.paged.as_mut() {
             Some(pg) => pg.alloc_typed(len, PageType::Raw),
             None => self.free.alloc(len),
         };
-        match addr {
-            Some(addr) => {
-                self.reserved.free(addr, len);
+        match extent {
+            Some(extent) => {
+                self.reserved.free(extent);
                 true
             }
             None => false,
@@ -4534,16 +4561,16 @@ impl WriteEngine {
         if self.reserved.is_empty() {
             return;
         }
-        let spans = std::mem::replace(&mut self.reserved, FreeList::new()).sections();
+        let extents = std::mem::replace(&mut self.reserved, FreeList::new()).extents();
         match self.paged.as_mut() {
             Some(pg) => {
-                for (addr, len) in spans {
-                    pg.raw.free(addr, len);
+                for extent in extents {
+                    pg.raw.free(extent);
                 }
             }
             None => {
-                for (addr, len) in spans {
-                    self.free.free(addr, len);
+                for extent in extents {
+                    self.free.free(extent);
                 }
             }
         }
@@ -4599,8 +4626,8 @@ impl WriteEngine {
             return Ok(());
         };
         let (Some(tail_start), Some(tail_end)) = (
-            persist.old_blocks.iter().map(|&(a, _)| a).min(),
-            persist.old_blocks.iter().map(|&(a, l)| a + l).max(),
+            persist.old_blocks.iter().map(|extent| extent.start()).min(),
+            persist.old_blocks.iter().map(|extent| extent.end()).max(),
         ) else {
             return Ok(());
         };
@@ -4614,10 +4641,11 @@ impl WriteEngine {
         // file's length unchanged and the pass would cost a rewrite to publish
         // exactly what the commit before it did.
         let run_start = match self.paged.as_ref() {
-            Some(pg) => {
-                trailing_run_start([&pg.meta, &pg.raw, &pg.dead, &pg.unclassified], tail_start)
-            }
-            None => trailing_run_start([&self.free], tail_start),
+            Some(pg) => free_space::trailing_run_start(
+                [&pg.meta, &pg.raw, &pg.dead, &pg.unclassified],
+                tail_start,
+            ),
+            None => free_space::trailing_run_start([&self.free], tail_start),
         };
         if tail_end - run_start < 2 * TRAILING_RESERVE_TAILS * (tail_end - tail_start) {
             return Ok(());
@@ -7263,7 +7291,9 @@ impl WriteEngine {
         let eoa = self.free.release_all(
             settings.threshold,
             eof,
-            to_free.into_iter().map(|(addr, len, _)| (addr, len)),
+            to_free
+                .into_iter()
+                .filter_map(|(addr, len, _)| FreeExtent::new(addr, len)),
         );
         // `take_trailing` removes the trimmed run so it is not also counted as reusable interior
         // space.
@@ -7492,6 +7522,16 @@ impl WriteEngine {
             "extension length must be stable across the placeholder and real messages"
         );
 
+        // Exactly the reserved extent, which is what the next commit supersedes. A reused flat
+        // tail may reserve a few bytes past its manager blocks. Those bytes are deliberately part
+        // of the tail so the next commit frees them too.
+        let new_old_blocks = vec![FreeExtent::new(ext_addr, tail_len).ok_or(Error::Format(
+            FormatError::OffsetOverflow {
+                offset: ext_addr,
+                length: tail_len,
+            },
+        ))?];
+
         // Write the extension, then the FSM blocks. Both forms are safe against a
         // crash here: an appended tail is past everything live, a reused one sits
         // in space an earlier commit freed, and neither is referenced until the
@@ -7502,10 +7542,6 @@ impl WriteEngine {
             self.write_tail_block(region, base.absolute(fshd_addr)?, &fshd)?;
             self.write_tail_block(region, base.absolute(fsse_addr)?, &fsse)?;
         }
-        // Exactly the bytes written, contiguous from the extension, which is what
-        // the next commit supersedes.
-        let new_old_blocks = vec![(ext_addr, tail_len)];
-
         // Barrier, then repoint the superblock (root, eof, and the new extension)
         // — the linearization point — and sync it.
         self.barrier()?;
@@ -7603,7 +7639,7 @@ impl WriteEngine {
         threshold: u64,
         eof: u64,
         to_free: &[(u64, u64, FreeClass)],
-        old_blocks: &[(u64, u64)],
+        old_blocks: &[FreeExtent],
     ) -> (FreeList, u64) {
         let mut post = self.free.clone();
         // A flat file keeps one list for the whole of it, so the class each freed
@@ -7616,7 +7652,7 @@ impl WriteEngine {
             eof,
             to_free
                 .iter()
-                .map(|&(addr, len, _)| (addr, len))
+                .filter_map(|&(addr, len, _)| FreeExtent::new(addr, len))
                 .chain(old_blocks.iter().copied()),
         );
         (post, eoa)
@@ -7695,7 +7731,7 @@ impl WriteEngine {
         &mut self,
         threshold: u64,
         to_free: &[(u64, u64, FreeClass)],
-        old_blocks: &[(u64, u64)],
+        old_blocks: &[FreeExtent],
         ext_len: u64,
         widths: FormatWidths,
     ) -> (FreeList, Option<u64>, u64, u64) {
@@ -7717,13 +7753,14 @@ impl WriteEngine {
         let mut proposed = appended_len;
 
         for _ in 0..ROUNDS {
-            let (at, from_reserve) = match self.free.alloc(proposed) {
-                Some(at) => (at, false),
+            let (reserved, from_reserve) = match self.free.alloc(proposed) {
+                Some(extent) => (extent, false),
                 None => match self.reserved.alloc(proposed) {
-                    Some(at) => (at, true),
+                    Some(extent) => (extent, true),
                     None => break,
                 },
             };
+            let at = reserved.start();
             let (mut post, eoa) = self.flat_post_free(threshold, eof, to_free, old_blocks);
             // Free space that reaches end-of-file is released rather than
             // recorded: the file is truncated to where the run starts, so the
@@ -7745,9 +7782,9 @@ impl WriteEngine {
                 return (post, Some(at), proposed, eoa);
             }
             if from_reserve {
-                self.reserved.free(at, proposed);
+                self.reserved.free(reserved);
             } else {
-                self.free.free(at, proposed);
+                self.free.free(reserved);
             }
             proposed = len;
         }
@@ -7878,7 +7915,9 @@ impl WriteEngine {
                 let (mut post, eoa) = self.paged_post_free(threshold, at, &to_free, &old_blocks);
                 // The tail lands above the dropped whole pages that end the file, so they stay
                 // in it and are tracked as free pages.
-                post.track(eoa, at - eoa, PageType::Raw.into());
+                if let Some(extent) = FreeExtent::new(eoa, at - eoa) {
+                    post.track(extent, PageType::Raw.into());
+                }
                 let plan = plan_paged_managers(
                     &self.persisted_sections(&post.meta),
                     &self.persisted_sections(&post.raw),
@@ -7934,6 +7973,16 @@ impl WriteEngine {
             "extension length must be stable across the placeholder and real messages"
         );
 
+        // Exactly the bytes written, contiguous from the extension. A session that reopens this
+        // file records the same extents from the message and manager headers, so nothing depends
+        // on remembering this across a close.
+        let new_old_blocks = vec![FreeExtent::new(ext_addr, blocks_len).ok_or(Error::Format(
+            FormatError::OffsetOverflow {
+                offset: ext_addr,
+                length: blocks_len,
+            },
+        ))?];
+
         // Write the extension, then every manager block. Both forms are safe against
         // a crash here: an appended tail is past everything live, and a reused one
         // sits in space an earlier commit freed. Neither is referenced until the
@@ -7959,11 +8008,6 @@ impl WriteEngine {
         if !reused {
             self.pad_zeros_to(final_eof)?;
         }
-        // Exactly the bytes written, contiguous from the extension. A session that
-        // reopens this file records the same extents from the message and the
-        // manager headers, so nothing depends on remembering this across a close.
-        let new_old_blocks = vec![(ext_addr, blocks_len)];
-
         // Barrier, then repoint the superblock (root, eof, and the new extension)
         // — the linearization point — and sync it.
         self.barrier()?;
@@ -8015,8 +8059,21 @@ impl WriteEngine {
                 // it, from here. A reused tail leaves end-of-file where the data put
                 // it, so the outgoing page type stands and there is no padding.
                 pg.last = Some(PageType::Meta);
-                pg.meta
-                    .free(ext_addr + blocks_len, final_eof - (ext_addr + blocks_len));
+                let tail_end = ext_addr.checked_add(blocks_len).ok_or(Error::Format(
+                    FormatError::OffsetOverflow {
+                        offset: ext_addr,
+                        length: blocks_len,
+                    },
+                ))?;
+                let tail_len =
+                    final_eof
+                        .checked_sub(tail_end)
+                        .ok_or(Error::Format(FormatError::Internal(
+                            "free-space manager tail ends beyond the end of allocation".into(),
+                        )))?;
+                if let Some(extent) = FreeExtent::new(tail_end, tail_len) {
+                    pg.meta.free(extent);
+                }
             }
         }
         self.persist = Some(PersistState {
@@ -8044,14 +8101,20 @@ impl WriteEngine {
         };
         if let Some((last, pad_len)) = pad {
             let pad_at = len;
+            let padding = FreeExtent::new(pad_at, pad_len).ok_or(Error::Format(
+                FormatError::OffsetOverflow {
+                    offset: pad_at,
+                    length: pad_len,
+                },
+            ))?;
             self.append(&vec![0u8; pad_len.to_usize()?])?;
             if let Some(pg) = self.paged.as_mut() {
                 match last {
                     // A partially-filled tail page at commit time is a raw page:
                     // the last thing the apply loop writes for a dataset is its
                     // header, but a commit that only wrote raw data ends on one.
-                    Some(PageType::Meta) => pg.meta_pad.push((pad_at, pad_len)),
-                    Some(PageType::Raw) => pg.raw_pad.push((pad_at, pad_len)),
+                    Some(PageType::Meta) => pg.meta_pad.push(padding),
+                    Some(PageType::Raw) => pg.raw_pad.push(padding),
                     // No typed append this commit, so the tail page is one a
                     // previous session left non-aligned — a crash, since a clean
                     // close pads. Its type is unknown, and recording the padding
@@ -8100,7 +8163,7 @@ impl WriteEngine {
         threshold: u64,
         eof: u64,
         to_free: &[(u64, u64, FreeClass)],
-        old_blocks: &[(u64, u64)],
+        old_blocks: &[FreeExtent],
     ) -> (PagedPostFree, u64) {
         let pg = self
             .paged
@@ -8118,19 +8181,23 @@ impl WriteEngine {
         // A padded page tail is tracked whatever its length, as `H5MF__alloc_pagefs` (`H5MF.c`,
         // HDF5 1.14.6) adds the unused rest of a page it allocates without the threshold
         // `H5MF_xfree` applies to returned space.
-        for &(a, l) in &pg.meta_pad {
-            post.track(a, l, PageType::Meta.into());
+        for &extent in &pg.meta_pad {
+            post.track(extent, PageType::Meta.into());
         }
-        for &(a, l) in &pg.raw_pad {
-            post.track(a, l, PageType::Raw.into());
+        for &extent in &pg.raw_pad {
+            post.track(extent, PageType::Raw.into());
         }
         // The superseded extension and manager blocks, which are metadata wherever
         // they sat: the tail is placed as metadata, and a page it had to open for
         // itself was opened as metadata too.
         let old_blocks = old_blocks
             .iter()
-            .map(|&(a, l)| (a, l, FreeClass::Page(PageType::Meta)));
-        let eoa = post.release_all(threshold, eof, to_free.iter().copied().chain(old_blocks));
+            .copied()
+            .map(|extent| (extent, FreeClass::Page(PageType::Meta)));
+        let freed = to_free
+            .iter()
+            .filter_map(|&(a, l, class)| FreeExtent::new(a, l).map(|extent| (extent, class)));
+        let eoa = post.release_all(threshold, eof, freed.chain(old_blocks));
         PagedEdit::promote_whole_free_pages(
             &mut post.meta,
             &mut post.raw,
@@ -8165,7 +8232,7 @@ impl WriteEngine {
         &mut self,
         threshold: u64,
         to_free: &[(u64, u64, FreeClass)],
-        old_blocks: &[(u64, u64)],
+        old_blocks: &[FreeExtent],
         ext_len: u64,
         page_size: FileSpacePageSize,
         widths: FormatWidths,
@@ -8197,7 +8264,8 @@ impl WriteEngine {
                 .paged
                 .as_mut()
                 .expect("commit_persisting_paged is only called on a paged file");
-            let at = pg.alloc_typed(proposed, PageType::Meta)?;
+            let reserved = pg.alloc_typed(proposed, PageType::Meta)?;
+            let at = reserved.start();
             let (mut post, eoa) = self.paged_post_free(threshold, eof, to_free, old_blocks);
             // Whole free pages at the end of the file are released rather than
             // recorded, so the sections these blocks are sized from must already
@@ -8235,8 +8303,7 @@ impl WriteEngine {
                 &mut pg.meta,
                 &mut pg.raw,
                 &mut pg.dead,
-                at,
-                proposed,
+                reserved,
                 PageType::Meta.into(),
             );
             proposed = blocks_len;
@@ -10344,9 +10411,9 @@ impl WriteEngine {
     fn alloc_free(&mut self, len: u64, ty: PageType) -> Option<u64> {
         self.free_space_settings?;
         let Some(pg) = self.paged.as_mut() else {
-            return self.free.alloc(len);
+            return self.free.alloc(len).map(FreeExtent::start);
         };
-        pg.alloc_typed(len, ty)
+        pg.alloc_typed(len, ty).map(FreeExtent::start)
     }
 
     /// Hand `[addr, addr + len)`, drawn from
@@ -10362,9 +10429,12 @@ impl WriteEngine {
     /// promoted out of either list by
     /// [`promote_whole_free_pages`](PagedEdit::promote_whole_free_pages) as usual.
     fn release_raw_alloc(&mut self, addr: u64, len: u64) {
+        let Some(extent) = FreeExtent::new(addr, len) else {
+            return;
+        };
         match self.paged.as_mut() {
-            Some(pg) => pg.raw.free(addr, len),
-            None => self.free.free(addr, len),
+            Some(pg) => pg.raw.free(extent),
+            None => self.free.free(extent),
         }
     }
 
@@ -11882,9 +11952,9 @@ impl Store for EditStore<'_> {
     }
     fn alloc_raw(&mut self, bytes: &[u8]) -> Result<u64, Error> {
         if let Some(free) = self.free.as_deref_mut() {
-            if let Some(addr) = free.alloc(bytes.len() as u64) {
-                self.image.write_at(addr, bytes)?;
-                return Ok(addr);
+            if let Some(extent) = free.alloc(bytes.len() as u64) {
+                self.image.write_at(extent.start(), bytes)?;
+                return Ok(extent.start());
             }
         }
         self.append_into_raw_page(bytes)
@@ -15121,13 +15191,13 @@ mod tests {
         let (mut meta, mut raw, mut dead) = (FreeList::new(), FreeList::new(), FreeList::new());
         // Page 1 is half free metadata and half dead, so neither list can show it
         // empty on its own.
-        meta.free(PAGE, 2048);
-        dead.free(PAGE + 2048, 2048);
+        meta.free(FreeExtent::new(PAGE, 2048).unwrap());
+        dead.free(FreeExtent::new(PAGE + 2048, 2048).unwrap());
         // Page 2 is wholly dead.
-        dead.free(2 * PAGE, PAGE);
+        dead.free(FreeExtent::new(2 * PAGE, PAGE).unwrap());
         // Page 3 keeps something live at each end, so only its middle is free —
         // and not adjacent to page 2, so the promotion is visible on its own.
-        raw.free(3 * PAGE + 1024, 1024);
+        raw.free(FreeExtent::new(3 * PAGE + 1024, 1024).unwrap());
         PagedEdit::promote_whole_free_pages(
             &mut meta,
             &mut raw,
@@ -15156,8 +15226,8 @@ mod tests {
     fn dead_space_short_of_a_whole_page_is_not_promoted() {
         const PAGE: u64 = FileSpacePageSize::DEFAULT.get();
         let (mut meta, mut raw, mut dead) = (FreeList::new(), FreeList::new(), FreeList::new());
-        dead.free(PAGE, 512);
-        raw.free(PAGE + 512, 1024);
+        dead.free(FreeExtent::new(PAGE, 512).unwrap());
+        raw.free(FreeExtent::new(PAGE + 512, 1024).unwrap());
         PagedEdit::promote_whole_free_pages(
             &mut meta,
             &mut raw,
@@ -15205,7 +15275,11 @@ mod tests {
         let mut post = paged_free_space(&[vec![], vec![], vec![]]);
 
         assert_eq!(
-            post.release(THRESHOLD_IN_A_PAGE, EXTENT_AT, len, class),
+            post.release(
+                THRESHOLD_IN_A_PAGE,
+                FreeExtent::new(EXTENT_AT, len).unwrap(),
+                class
+            ),
             release
         );
         assert_eq!(paged_sections(&post), expected);
@@ -15240,7 +15314,11 @@ mod tests {
         let mut post = paged_free_space(&tracked);
 
         assert_eq!(
-            post.release(THRESHOLD_IN_A_PAGE, EXTENT_AT, SHORT_OF_THRESHOLD, class),
+            post.release(
+                THRESHOLD_IN_A_PAGE,
+                FreeExtent::new(EXTENT_AT, SHORT_OF_THRESHOLD).unwrap(),
+                class
+            ),
             Release::Merge
         );
         assert_eq!(paged_sections(&post), expected);
@@ -15263,7 +15341,11 @@ mod tests {
         let mut post = paged_free_space(&tracked);
 
         assert_eq!(
-            post.release(THRESHOLD_IN_A_PAGE, at, SHORT_OF_THRESHOLD, class),
+            post.release(
+                THRESHOLD_IN_A_PAGE,
+                FreeExtent::new(at, SHORT_OF_THRESHOLD).unwrap(),
+                class
+            ),
             Release::Drop
         );
         assert_eq!(paged_sections(&post), tracked);
@@ -15293,7 +15375,11 @@ mod tests {
         let mut post = paged_free_space(&tracked);
 
         assert_eq!(
-            post.release(THRESHOLD_OF_THREE_PAGES, 2 * PAGE, 2 * PAGE, class),
+            post.release(
+                THRESHOLD_OF_THREE_PAGES,
+                FreeExtent::new(2 * PAGE, 2 * PAGE).unwrap(),
+                class
+            ),
             Release::Merge
         );
         assert_eq!(paged_sections(&post), expected);
@@ -15309,7 +15395,11 @@ mod tests {
         let mut post = paged_free_space(&tracked);
 
         assert_eq!(
-            post.release(THRESHOLD_OF_THREE_PAGES, at, 2 * PAGE, RAW),
+            post.release(
+                THRESHOLD_OF_THREE_PAGES,
+                FreeExtent::new(at, 2 * PAGE).unwrap(),
+                RAW
+            ),
             Release::Drop
         );
         assert_eq!(paged_sections(&post), tracked);
@@ -15318,10 +15408,15 @@ mod tests {
     #[test]
     fn a_paged_extent_of_pages_below_the_threshold_merges_beside_an_unclassified_section() {
         let mut post = paged_free_space(&[vec![], vec![], vec![]]);
-        post.unclassified.free(4 * PAGE, 100);
+        post.unclassified
+            .free(FreeExtent::new(4 * PAGE, 100).unwrap());
 
         assert_eq!(
-            post.release(THRESHOLD_OF_THREE_PAGES, 2 * PAGE, 2 * PAGE, RAW),
+            post.release(
+                THRESHOLD_OF_THREE_PAGES,
+                FreeExtent::new(2 * PAGE, 2 * PAGE).unwrap(),
+                RAW
+            ),
             Release::Merge
         );
         assert_eq!(
@@ -15358,7 +15453,9 @@ mod tests {
             post.release_all(
                 THRESHOLD_OF_THREE_PAGES,
                 10 * PAGE,
-                extents.iter().map(|&(addr, len)| (addr, len, RAW))
+                extents
+                    .iter()
+                    .map(|&(addr, len)| (FreeExtent::new(addr, len).unwrap(), RAW))
             ),
             expected
         );
@@ -15400,7 +15497,11 @@ mod tests {
 
         assert_eq!(
             (
-                post.release_all(THRESHOLD_OF_THREE_PAGES, eoa, [(2 * PAGE - 100, 100, RAW)]),
+                post.release_all(
+                    THRESHOLD_OF_THREE_PAGES,
+                    eoa,
+                    [(FreeExtent::new(2 * PAGE - 100, 100).unwrap(), RAW)],
+                ),
                 paged_sections(&post)
             ),
             (released, expected)
@@ -15411,7 +15512,7 @@ mod tests {
         let list = |regions: &[(u64, u64)]| {
             let mut list = FreeList::new();
             for &(addr, len) in regions {
-                list.free(addr, len);
+                list.free(FreeExtent::new(addr, len).unwrap());
             }
             list
         };
@@ -16726,10 +16827,10 @@ mod tests {
             pg.meta = FreeList::new();
             pg.raw = FreeList::new();
             if let Some((addr, len)) = meta {
-                pg.meta.free(addr, len);
+                pg.meta.free(FreeExtent::new(addr, len).unwrap());
             }
             if let Some((addr, len)) = raw {
-                pg.raw.free(addr, len);
+                pg.raw.free(FreeExtent::new(addr, len).unwrap());
             }
             s
         }
@@ -16900,7 +17001,7 @@ mod tests {
                 pg.meta = FreeList::new();
                 pg.raw = FreeList::new();
                 pg.unclassified = FreeList::new();
-                pg.meta.free(PAGE, hole);
+                pg.meta.free(FreeExtent::new(PAGE, hole).unwrap());
             }
             let free_before = free_total(&s);
             let layout = s.tail_layout(0, &[], &[], EXT_LEN, FileSpacePageSize::DEFAULT, widths);
@@ -17026,7 +17127,7 @@ mod tests {
         let (mut placed, mut declined, mut with_slack) = (0usize, 0usize, 0usize);
         for hole in 120..420u64 {
             s.free = FreeList::new();
-            s.free.free(HOLE_AT, hole);
+            s.free.free(FreeExtent::new(HOLE_AT, hole).unwrap());
             let free_before = free_total(&s);
             let (post, at, tail_len, _) = s.flat_tail_layout(0, &[], &[], EXT_LEN, widths);
             let free_after = free_total(&s);
