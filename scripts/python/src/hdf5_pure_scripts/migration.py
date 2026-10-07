@@ -203,10 +203,15 @@ def migration_shapes(baseline: dict, candidate: dict, core: dict) -> list[str]:
     # The FormatError variants whose fields differ from 0.47.0's, which the comparison removes from
     # both shapes.
     allowed_changed_variants = {"FormatError": {"InvalidFreeSpaceManager"}}
+    # The core root items that 0.47.0 does not define.
+    allowed_new_items = {"FileSpacePageSize"}
+    # The struct fields whose type differs from 0.47.0's, which the comparison removes from both
+    # shapes.
+    allowed_changed_fields = {"FileSpaceInfo": {"page_size"}}
     for path, kind in sorted(moved):
         name = path.rsplit("::", 1)[-1]
         if name not in baseline_items:
-            if name in candidate_items:
+            if name in candidate_items and name not in allowed_new_items:
                 failures.append(f"{name}: new core root item")
             continue
         if name not in candidate_items:
@@ -227,6 +232,9 @@ def migration_shapes(baseline: dict, candidate: dict, core: dict) -> list[str]:
         for variant in allowed_changed_variants.get(name, set()):
             old["variants"].pop(variant, None)
             new["variants"].pop(variant, None)
+        for field in allowed_changed_fields.get(name, set()):
+            old["fields"].pop(field, None)
+            new["fields"].pop(field, None)
         for part in old:
             if old[part] != new[part]:
                 failures.append(f"{name}: {part} changed")

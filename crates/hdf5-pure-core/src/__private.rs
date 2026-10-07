@@ -16,6 +16,7 @@ use crate::CompoundMember;
 use crate::Datatype;
 use crate::EnumMember;
 use crate::FileSpaceInfo;
+use crate::FileSpacePageSize;
 use crate::FileSpaceStrategy;
 use crate::Superblock;
 
@@ -34,7 +35,7 @@ pub struct FileSpaceInfoFields {
     pub strategy: FileSpaceStrategy,
     pub persist: bool,
     pub threshold: u64,
-    pub page_size: u64,
+    pub page_size: FileSpacePageSize,
     pub page_end_meta_threshold: u16,
     pub eoa_pre_fsm: u64,
     pub manager_addrs: Vec<u64>,

@@ -81,9 +81,9 @@ if let Some(info) = file.file_space_info() {
     println!("strategy: {:?}", info.strategy);
     println!("persist:  {}", info.persist);
     println!("threshold: {}", info.threshold);
-    println!("page size: {}", info.page_size);
+    println!("page size: {}", info.page_size.get());
 }
-# assert_eq!(file.file_space_info().map(|i| i.page_size), Some(8192));
+# assert_eq!(file.file_space_info().map(|i| i.page_size.get()), Some(8192));
 # Ok::<(), hdf5_pure::Error>(())
 ```
 
@@ -91,7 +91,7 @@ if let Some(info) = file.file_space_info() {
 
 ## Paged files (`FileSpaceStrategy::Page`)
 
-[`FileSpaceStrategy::Page`](crate::FileSpaceStrategy::Page) writes a **genuine paged file**, not just a recorded label. Every allocation is aligned to the page size set by [`with_file_space_page_size`](crate::FileBuilder::with_file_space_page_size), which defaults to 4096 and must be a power of two `>= 512`, with any userblock a whole number of pages. Each page is kept homogeneous (defined precisely below), and each page's free tail is tracked in a per-page-type free-space manager. The reference HDF5 C library reads the result as a paged file, parses the managers (`H5Fget_freespace` matches the tracked total), reads every dataset, and re-paginates the file when it writes to it.
+[`FileSpaceStrategy::Page`](crate::FileSpaceStrategy::Page) writes a **genuine paged file**, not just a recorded label. Every allocation is aligned to the page size set by [`with_file_space_page_size`](crate::FileBuilder::with_file_space_page_size), which defaults to 4096 and must be from 512 bytes to 1 GiB, with any userblock a whole number of pages. Each page is kept homogeneous (defined precisely below), and each page's free tail is tracked in a per-page-type free-space manager. The reference HDF5 C library reads the result as a paged file, parses the managers (`H5Fget_freespace` matches the tracked total), reads every dataset, and re-paginates the file when it writes to it.
 
 ```rust
 # let dir = tempfile::tempdir()?;

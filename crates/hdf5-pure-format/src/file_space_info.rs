@@ -12,6 +12,7 @@ use alloc::vec::Vec;
 
 use hdf5_pure_core::__private::FileSpaceInfoFields;
 pub(crate) use hdf5_pure_core::FileSpaceInfo;
+pub(crate) use hdf5_pure_core::FileSpacePageSize;
 pub(crate) use hdf5_pure_core::FileSpaceStrategy;
 
 use crate::address::BaseAddress;
@@ -50,7 +51,7 @@ pub fn serialize_file_space_info(
     buf.push(strategy_code(info.strategy));
     buf.push(u8::from(info.persist));
     bytes::try_write_length(&mut buf, info.threshold, lengths)?;
-    bytes::try_write_length(&mut buf, info.page_size, lengths)?;
+    bytes::try_write_length(&mut buf, info.page_size.get(), lengths)?;
     buf.extend_from_slice(&info.page_end_meta_threshold.to_le_bytes());
     bytes::try_write_offset(&mut buf, info.eoa_pre_fsm, offsets)?;
     for &addr in manager_addrs {
@@ -114,7 +115,7 @@ fn parse_version_0(
         strategy: FileSpaceStrategy::FsmAggr,
         persist: false,
         threshold: DEFAULT_THRESHOLD,
-        page_size: DEFAULT_PAGE_SIZE,
+        page_size: FileSpacePageSize::DEFAULT,
         page_end_meta_threshold: DEFAULT_PAGE_END_META_THRESHOLD,
         eoa_pre_fsm: undefined,
         manager_addrs: Vec::new(),
@@ -168,7 +169,7 @@ fn parse_version_1(widths: FormatWidths, data: &[u8]) -> Result<FileSpaceInfo, F
     let strategy = strategy_from_code(fields.u8()?)?;
     let persist = fields.u8()? != 0;
     let threshold = fields.length(lengths)?;
-    let page_size = fields.length(lengths)?;
+    let page_size = FileSpacePageSize::try_from(fields.length(lengths)?)?;
     let page_end_meta_threshold = fields.u16()?;
     let eoa_pre_fsm = fields.address(offsets)?.get();
 
@@ -247,11 +248,6 @@ const DEFAULT_PAGE_END_META_THRESHOLD: u16 = 0;
 /// The C library calls this value `H5F_FREE_SPACE_THRESHOLD_DEF`.
 pub const DEFAULT_THRESHOLD: u64 = 1;
 
-/// The default file space page size.
-///
-/// The C library calls this value `H5F_FILE_SPACE_PAGE_SIZE_DEF`.
-pub const DEFAULT_PAGE_SIZE: u64 = 4096;
-
 /// The number of free-space manager addresses a persisting version 1 message stores, the addresses
 /// of a small-sized and a large-sized manager for each of six allocation types.
 pub const NUM_FILE_FSM_MANAGERS: usize = 12;
@@ -272,7 +268,7 @@ mod tests {
                 strategy: FileSpaceStrategy::FsmAggr,
                 persist: true,
                 threshold: 1,
-                page_size: 4096,
+                page_size: FileSpacePageSize::DEFAULT,
                 page_end_meta_threshold: 0,
                 eoa_pre_fsm: 2072,
                 manager_addrs: vec![619, u64::MAX, u64::MAX],
@@ -370,7 +366,7 @@ mod tests {
                 strategy: FileSpaceStrategy::FsmAggr,
                 persist: true,
                 threshold: 64,
-                page_size: 4096,
+                page_size: FileSpacePageSize::DEFAULT,
                 page_end_meta_threshold: 0,
                 eoa_pre_fsm: 0x4000,
                 manager_addrs: [vec![0x0841], vec![0xFFFF; 11]].concat(),
@@ -462,6 +458,38 @@ mod tests {
     }
 
     #[rstest]
+    #[case::minimum(512)]
+    #[case::maximum(1 << 30)]
+    fn a_page_size_at_a_bound_round_trips(#[case] page_size: u64) {
+        let mut info = non_persistent(FileSpaceStrategy::FsmAggr);
+        info.page_size = FileSpacePageSize::try_from(page_size).unwrap();
+
+        let bytes = serialize_file_space_info(widths(8, 8), &info).unwrap();
+
+        assert_eq!(
+            (bytes[11..19].to_vec(), parse(widths(8, 8), &bytes)),
+            (page_size.to_le_bytes().to_vec(), Ok(info))
+        );
+    }
+
+    #[rstest]
+    #[case::zero(0)]
+    #[case::below_the_minimum(511)]
+    #[case::above_the_maximum((1 << 30) + 1)]
+    #[case::two_gib(2 << 30)]
+    fn a_page_size_outside_512_bytes_to_1_gib_fails_the_parse(#[case] page_size: u64) {
+        let mut bytes =
+            serialize_file_space_info(widths(8, 8), &non_persistent(FileSpaceStrategy::FsmAggr))
+                .unwrap();
+        bytes[11..19].copy_from_slice(&page_size.to_le_bytes());
+
+        assert_eq!(
+            parse(widths(8, 8), &bytes),
+            Err(FormatError::InvalidFileSpacePageSize(page_size))
+        );
+    }
+
+    #[rstest]
     fn a_message_round_trips_at_the_widths_of_its_file(
         #[values(2, 4, 8)] offset_size: u8,
         #[values(2, 4, 8)] length_size: u8,
@@ -471,7 +499,7 @@ mod tests {
             strategy: FileSpaceStrategy::Page,
             persist: true,
             threshold: 1,
-            page_size: 4096,
+            page_size: FileSpacePageSize::DEFAULT,
             page_end_meta_threshold: 0,
             eoa_pre_fsm: 0x2000,
             manager_addrs: vec![0x0841, undefined, 0x1806],
@@ -496,7 +524,7 @@ mod tests {
             strategy: FileSpaceStrategy::Page,
             persist: true,
             threshold: 1,
-            page_size: 4096,
+            page_size: FileSpacePageSize::DEFAULT,
             page_end_meta_threshold: 0,
             eoa_pre_fsm: 0x2000,
             manager_addrs: vec![0x0841, 0xFFFF_FFFF, 0x1806],
@@ -551,7 +579,7 @@ mod tests {
         FormatError::AddressTooLarge { address: 0x1_0000_0000, offset_size: 4 },
     )]
     #[case::page_size(
-        |info: &mut FileSpaceInfo| info.page_size = 0x1_0000,
+        |info: &mut FileSpaceInfo| info.page_size = FileSpacePageSize::try_from(0x1_0000).unwrap(),
         FormatError::LengthTooLarge { length: 0x1_0000, length_size: 2 },
     )]
     fn a_value_wider_than_its_field_returns_an_error(
@@ -562,7 +590,7 @@ mod tests {
             strategy: FileSpaceStrategy::FsmAggr,
             persist: true,
             threshold: 1,
-            page_size: 4096,
+            page_size: FileSpacePageSize::DEFAULT,
             page_end_meta_threshold: 0,
             eoa_pre_fsm: 0x2000,
             manager_addrs: vec![0x0841, 0x1806],
@@ -592,7 +620,7 @@ mod tests {
             strategy,
             persist,
             threshold,
-            page_size: 4096,
+            page_size: FileSpacePageSize::DEFAULT,
             page_end_meta_threshold: 0,
             eoa_pre_fsm,
             manager_addrs,
@@ -605,7 +633,7 @@ mod tests {
             strategy,
             persist: false,
             threshold: 1,
-            page_size: 4096,
+            page_size: FileSpacePageSize::DEFAULT,
             page_end_meta_threshold: 0,
             eoa_pre_fsm: u64::MAX,
             manager_addrs: Vec::new(),

@@ -3,9 +3,13 @@
 //! issue #21): the writer records the chosen strategy in a superblock-extension
 //! File Space Info message, and the reader reads it back.
 
-use hdf5_pure::{File, FileBuilder, FileSpaceStrategy};
+use hdf5_pure::Error;
+use hdf5_pure::File;
+use hdf5_pure::FileBuilder;
+use hdf5_pure::FileSpacePageSize;
+use hdf5_pure::FileSpaceStrategy;
+use hdf5_pure::FormatError;
 use hdf5_pure_core::__private::FileSpaceInfoFields;
-use hdf5_pure_format::__private::DEFAULT_PAGE_SIZE;
 use hdf5_pure_format::__private::DEFAULT_THRESHOLD;
 use rstest::rstest;
 
@@ -32,7 +36,7 @@ fn each_strategy_roundtrips(#[case] strategy: FileSpaceStrategy, #[case] thresho
     assert_eq!(info.strategy, strategy);
     assert!(!info.persist);
     assert_eq!(info.threshold, threshold);
-    assert_eq!(info.page_size, 8192);
+    assert_eq!(info.page_size.get(), 8192);
     assert!(info.manager_addrs.is_empty());
     let ext = f.superblock().superblock_extension_address;
     assert!(matches!(ext, Some(a) if a != u64::MAX));
@@ -63,7 +67,7 @@ fn a_strategy_without_a_free_space_manager_records_neither_persistence_nor_a_thr
                 strategy,
                 persist: false,
                 threshold: DEFAULT_THRESHOLD,
-                page_size: DEFAULT_PAGE_SIZE,
+                page_size: FileSpacePageSize::DEFAULT,
                 page_end_meta_threshold: 0,
                 eoa_pre_fsm: u64::MAX,
                 manager_addrs: Vec::new(),
@@ -104,8 +108,33 @@ fn page_size_only_defaults_strategy() {
         .file_space_info()
         .expect("page size implies a strategy record");
     assert_eq!(info.strategy, FileSpaceStrategy::FsmAggr);
-    assert_eq!(info.page_size, 2048);
+    assert_eq!(info.page_size.get(), 2048);
     assert_eq!(info.threshold, 1); // default
+}
+
+#[rstest]
+fn a_page_size_outside_512_bytes_to_1_gib_fails_the_writer_under_a_strategy_that_only_records_it(
+    #[values(
+        None,
+        Some(FileSpaceStrategy::FsmAggr),
+        Some(FileSpaceStrategy::Aggr),
+        Some(FileSpaceStrategy::None)
+    )]
+    strategy: Option<FileSpaceStrategy>,
+    #[values(64, (1 << 30) + 1, 2 << 30)] page_size: u64,
+) {
+    let mut b = FileBuilder::new();
+    b.create_dataset("data").with_i32_data(&[1, 2, 3]);
+    if let Some(strategy) = strategy {
+        b.with_file_space_strategy(strategy, false, 1);
+    }
+    b.with_file_space_page_size(page_size);
+
+    let err = b.finish().unwrap_err();
+    let Error::Format(FormatError::InvalidFileSpacePageSize(rejected)) = err else {
+        panic!("expected InvalidFileSpacePageSize, got {err:?}");
+    };
+    assert_eq!(rejected, page_size);
 }
 
 #[test]

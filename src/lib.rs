@@ -602,6 +602,8 @@ pub use file_create_properties::FileCreateProperties;
 #[doc(inline)]
 pub use hdf5_pure_core::FileSpaceInfo;
 #[doc(inline)]
+pub use hdf5_pure_core::FileSpacePageSize;
+#[doc(inline)]
 pub use hdf5_pure_core::FileSpaceStrategy;
 
 pub use compound::{CompoundField, CompoundType};

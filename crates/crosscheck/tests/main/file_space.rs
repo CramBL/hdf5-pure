@@ -17,13 +17,13 @@ use hdf5_pure::File;
 use hdf5_pure::FileAccessProperties;
 use hdf5_pure::FileBuilder;
 use hdf5_pure::FileSpaceInfo;
+use hdf5_pure::FileSpacePageSize;
 use hdf5_pure::FileSpaceStrategy;
 use hdf5_pure::FormatError;
 use hdf5_pure::Layout;
 use hdf5_pure::MaxExtent;
 use hdf5_pure_core::__private::FileSpaceInfoFields;
 use hdf5_pure_core::__private::StoredAddress;
-use hdf5_pure_format::__private::DEFAULT_PAGE_SIZE;
 use hdf5_pure_format::__private::DEFAULT_THRESHOLD;
 use hdf5_pure_format::__private::FormatWidths;
 use hdf5_pure_format::__private::FreeSpaceManagerHeader;
@@ -87,6 +87,71 @@ fn c_library_reads_our_strategy() {
             "strategy {ours:?} read back by the C library"
         );
     }
+}
+
+#[rstest]
+#[case::fsm_aggr_at_the_minimum(FileSpaceStrategy::FsmAggr, FileSpacePageSize::MIN)]
+#[case::fsm_aggr_at_the_maximum(FileSpaceStrategy::FsmAggr, FileSpacePageSize::MAX)]
+#[case::page_at_the_minimum(FileSpaceStrategy::Page, FileSpacePageSize::MIN)]
+#[case::aggr_at_the_maximum(FileSpaceStrategy::Aggr, FileSpacePageSize::MAX)]
+#[case::none_at_the_maximum(FileSpaceStrategy::None, FileSpacePageSize::MAX)]
+fn libhdf5_reads_a_page_size_at_either_bound(
+    #[case] strategy: FileSpaceStrategy,
+    #[case] page_size: FileSpacePageSize,
+) {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("bound.h5");
+    let mut b = FileBuilder::new();
+    b.create_dataset("d").with_i32_data(&[10, 20, 30]);
+    b.with_file_space_strategy(strategy, false, 1)
+        .with_file_space_page_size(page_size.get());
+    b.write(&path).unwrap();
+
+    let f = hdf5::File::open(&path).unwrap();
+    assert_eq!(
+        (
+            f.dataset("d").unwrap().read_raw::<i32>().unwrap(),
+            f.create_plist()
+                .unwrap()
+                .get_file_space_page_size()
+                .unwrap(),
+        ),
+        (vec![10, 20, 30], page_size.get())
+    );
+}
+
+#[rstest]
+#[case::fsm_aggr_at_the_minimum(false, FileSpacePageSize::MIN)]
+#[case::fsm_aggr_at_the_maximum(false, FileSpacePageSize::MAX)]
+#[case::page_at_the_minimum(true, FileSpacePageSize::MIN)]
+fn the_reader_reads_a_page_size_libhdf5_writes_at_either_bound(
+    #[case] paged: bool,
+    #[case] page_size: FileSpacePageSize,
+) {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("bound.h5");
+    hdf5::FileBuilder::new()
+        .with_fapl(|fapl| fapl.libver_v110())
+        .with_fcpl(|fcpl| {
+            fcpl.file_space_strategy(CStrategy::FreeSpaceManager {
+                paged,
+                persist: false,
+                threshold: 1,
+            })
+            .file_space_page_size(page_size.get())
+        })
+        .create(&path)
+        .unwrap()
+        .close()
+        .unwrap();
+
+    assert_eq!(
+        File::open(&path)
+            .unwrap()
+            .file_space_info()
+            .map(|info| info.page_size),
+        Some(page_size)
+    );
 }
 
 #[test]
@@ -402,7 +467,14 @@ fn the_serializer_writes_the_message_libhdf5_writes_at_the_widths_of_its_file(
             info.page_end_meta_threshold,
             info.manager_addrs.len(),
         ),
-        (FileSpaceStrategy::FsmAggr, true, 1, 4096, 0, 12)
+        (
+            FileSpaceStrategy::FsmAggr,
+            true,
+            1,
+            FileSpacePageSize::DEFAULT,
+            0,
+            12
+        )
     );
     assert!(
         info.manager_addrs
@@ -1068,7 +1140,7 @@ fn unmanaged_file_space_info(strategy: FileSpaceStrategy) -> FileSpaceInfo {
         strategy,
         persist: false,
         threshold: DEFAULT_THRESHOLD,
-        page_size: DEFAULT_PAGE_SIZE,
+        page_size: FileSpacePageSize::DEFAULT,
         page_end_meta_threshold: 0,
         eoa_pre_fsm: u64::MAX,
         manager_addrs: Vec::new(),
@@ -1316,7 +1388,7 @@ fn version_0_mapped(
         strategy,
         persist,
         threshold,
-        page_size: 4096,
+        page_size: FileSpacePageSize::DEFAULT,
         page_end_meta_threshold: 0,
         eoa_pre_fsm,
         manager_addrs,
@@ -1370,8 +1442,10 @@ fn c_library_reads_our_fresh_persisting_file() {
     assert_eq!(free_c as u64, total_ours);
 }
 
-#[test]
-fn c_library_reads_our_paged_file() {
+#[rstest]
+#[case::a_power_of_two(16384)]
+#[case::not_a_power_of_two(3000)]
+fn c_library_reads_our_paged_file(#[case] page_size: u64) {
     // hdf5-pure writes a genuine paged (H5F_FSPACE_STRATEGY_PAGE) persisting file
     // with small and large datasets. The reference C library must recover the
     // paged strategy, read every dataset, load the per-page-type free-space
@@ -1389,8 +1463,9 @@ fn c_library_reads_our_paged_file() {
     b.create_dataset("b").with_i32_data(&small_b);
     b.create_dataset("big").with_i32_data(&big);
     b.with_file_space_strategy(FileSpaceStrategy::Page, true, 0)
-        .with_file_space_page_size(16384);
+        .with_file_space_page_size(page_size);
     b.write(&path).unwrap();
+    assert_eq!(std::fs::metadata(&path).unwrap().len() % page_size, 0);
 
     // hdf5-pure's own view of the tracked free space (SUPER + DRAW + LARGE tails).
     let ours = File::open(&path).unwrap();
@@ -1414,6 +1489,13 @@ fn c_library_reads_our_paged_file() {
             threshold: 0,
         },
         "C library recovers our paged strategy"
+    );
+    assert_eq!(
+        f.create_plist()
+            .unwrap()
+            .get_file_space_page_size()
+            .unwrap(),
+        page_size
     );
     assert_eq!(f.dataset("a").unwrap().read_raw::<i32>().unwrap(), small_a);
     assert_eq!(f.dataset("b").unwrap().read_raw::<i32>().unwrap(), small_b);

@@ -1,11 +1,15 @@
 //! Whole-file repack (issue #21): compaction, object dropping, fidelity of
 //! survivors, and fail-loud refusal of features that cannot be reproduced.
 
+use hdf5_pure::Error;
+use hdf5_pure::File;
 use hdf5_pure::{
     AttrValue, Datatype, DatatypeByteOrder, FileBuilder, FileSpaceStrategy, LibVer, MaxExtent,
     RepackOptions, ScaleOffset, repack,
 };
 use rstest::rstest;
+use test_util::file_space_info;
+use test_util::widths::Widths;
 use test_util::{superblock, temp};
 use test_util_hdf5::dataset::{Filter, Unlimited};
 
@@ -381,6 +385,44 @@ fn roundtrips_opaque_and_bitfield_datatypes() {
 }
 
 #[test]
+fn repack_rejects_a_source_whose_file_space_info_message_does_not_parse() {
+    let dir = tempfile::tempdir().unwrap();
+    let (src, dst) = (dir.path().join("src.h5"), dir.path().join("dst.h5"));
+    let mut b = FileBuilder::new();
+    b.create_dataset("keep").with_i32_data(&[1, 2, 3]);
+    b.with_file_space_strategy(FileSpaceStrategy::Page, false, 1);
+    b.write(&src).unwrap();
+    let extension = File::open(&src)
+        .unwrap()
+        .superblock()
+        .superblock_extension_address
+        .unwrap();
+    file_space_info::replace_message(
+        &src,
+        extension,
+        &file_space_info::non_persistent_version_1(
+            Widths::EIGHT,
+            file_space_info::PAGE,
+            1,
+            2 << 30,
+        ),
+    );
+
+    let err = repack(&src, &dst, &RepackOptions::new()).unwrap_err();
+    let Error::RepackUnsupported(reason) = &err else {
+        panic!("expected RepackUnsupported, got {err:?}");
+    };
+    assert_eq!(
+        (reason.as_str(), dst.exists()),
+        (
+            "the File Space Info of the source cannot be read: invalid file-space page size \
+             2147483648: must be from 512 to 1073741824 bytes",
+            false
+        )
+    );
+}
+
+#[test]
 fn preserves_file_space_strategy() {
     let src = temp::temp_path("hdf5_pure_repack_fss_src.h5");
     let dst = temp::temp_path("hdf5_pure_repack_fss_dst.h5");
@@ -398,7 +440,7 @@ fn preserves_file_space_strategy() {
     // reset to false since the compact output has no free space to persist.
     assert_eq!(f.file_space_strategy(), Some(FileSpaceStrategy::Page));
     let info = f.file_space_info().unwrap();
-    assert_eq!(info.page_size, 8192);
+    assert_eq!(info.page_size.get(), 8192);
     assert_eq!(info.threshold, 4);
     assert!(!info.persist);
     assert_eq!(

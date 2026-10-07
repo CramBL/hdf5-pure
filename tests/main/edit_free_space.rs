@@ -6,10 +6,18 @@
 //! run reaches end-of-file. These tests pin down both the size behavior and that
 //! survivors stay byte-exact and the file stays valid.
 
-use hdf5_pure::{
-    AttrValue, EditBacking, File, FileAccessProperties, FileBuilder, FileSpaceStrategy, MaxExtent,
-    MemoryStrategy, SyncPolicy,
-};
+use hdf5_pure::AttrValue;
+use hdf5_pure::EditBacking;
+use hdf5_pure::Error;
+use hdf5_pure::File;
+use hdf5_pure::FileAccessProperties;
+use hdf5_pure::FileBuilder;
+use hdf5_pure::FileSpacePageSize;
+use hdf5_pure::FileSpaceStrategy;
+use hdf5_pure::FormatError;
+use hdf5_pure::MaxExtent;
+use hdf5_pure::MemoryStrategy;
+use hdf5_pure::SyncPolicy;
 
 use hdf5_pure_core::__private::FileSpaceInfoFields;
 use hdf5_pure_format::__private::NUM_FILE_FSM_MANAGERS;
@@ -688,6 +696,37 @@ fn persisted_free_space_survives_reopen_and_is_reused() {
 }
 
 #[test]
+fn open_rw_rejects_a_paged_file_whose_page_size_is_out_of_range() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("out_of_range.h5");
+    let mut b = FileBuilder::new();
+    b.create_dataset("d").with_i32_data(&[1, 2, 3]);
+    b.with_file_space_strategy(FileSpaceStrategy::Page, true, 1);
+    b.write(&path).unwrap();
+    let extension = File::open(&path)
+        .unwrap()
+        .superblock()
+        .superblock_extension_address
+        .unwrap();
+    file_space_info::replace_message(
+        &path,
+        extension,
+        &file_space_info::non_persistent_version_1(
+            Widths::EIGHT,
+            file_space_info::PAGE,
+            1,
+            2 << 30,
+        ),
+    );
+
+    let err = File::open_rw(&path).unwrap_err();
+    let Error::Format(FormatError::InvalidFileSpacePageSize(page_size)) = err else {
+        panic!("expected InvalidFileSpacePageSize, got {err:?}");
+    };
+    assert_eq!(page_size, 2 << 30);
+}
+
+#[test]
 fn a_version_0_message_s_persisted_free_space_is_recovered_and_reused() {
     let path = temp::temp_path("hdf5_pure_fs_persist_version_0.h5");
     let mut b = FileBuilder::new();
@@ -735,7 +774,7 @@ fn a_version_0_message_s_persisted_free_space_is_recovered_and_reused() {
                 strategy: FileSpaceStrategy::FsmAggr,
                 persist: true,
                 threshold: 1,
-                page_size: 4096,
+                page_size: FileSpacePageSize::DEFAULT,
                 page_end_meta_threshold: 0,
                 eoa_pre_fsm: std::fs::metadata(&path).unwrap().len(),
                 manager_addrs: version_1.manager_addrs,

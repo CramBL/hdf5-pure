@@ -3,7 +3,14 @@
 //! free-space managers, and reads them back. C-library interop lives in
 //! `crates/crosscheck/tests/main/file_space.rs`.
 
-use hdf5_pure::{AttrValue, File, FileBuilder, FileSpaceStrategy, VlenStringReadOptions};
+use hdf5_pure::AttrValue;
+use hdf5_pure::Error;
+use hdf5_pure::File;
+use hdf5_pure::FileBuilder;
+use hdf5_pure::FileSpaceStrategy;
+use hdf5_pure::FormatError;
+use hdf5_pure::VlenStringReadOptions;
+use rstest::rstest;
 
 const PAGE: u64 = 16384;
 
@@ -38,7 +45,7 @@ fn paged_persist_roundtrip() {
     assert_eq!(f.file_space_strategy(), Some(FileSpaceStrategy::Page));
     let info = f.file_space_info().expect("records a strategy");
     assert!(info.persist);
-    assert_eq!(info.page_size, PAGE);
+    assert_eq!(info.page_size.get(), PAGE);
     assert_eq!(info.eoa_pre_fsm % PAGE, 0, "EOA recorded page-aligned");
     assert_eq!(info.eoa_pre_fsm, bytes.len() as u64, "EOA == file size");
 
@@ -206,12 +213,19 @@ fn paged_groups_attrs_vlen() {
     assert_eq!(labels, vec!["alpha", "beta", "gamma", "delta"]);
 }
 
-/// A page size that is not a power of two >= 512 is rejected at build time.
-#[test]
-fn invalid_page_size_rejected() {
+#[rstest]
+#[case::below_the_minimum(64)]
+#[case::above_the_maximum((1 << 30) + 1)]
+#[case::a_power_of_two_above_the_maximum(2 << 30)]
+fn the_writer_rejects_a_paged_page_size_outside_512_bytes_to_1_gib(#[case] page_size: u64) {
     let mut b = FileBuilder::new();
     b.create_dataset("d").with_i32_data(&[1, 2, 3]);
     b.with_file_space_strategy(FileSpaceStrategy::Page, true, 0)
-        .with_file_space_page_size(3000); // not a power of two
-    assert!(b.finish().is_err());
+        .with_file_space_page_size(page_size);
+
+    let err = b.finish().unwrap_err();
+    let Error::Format(FormatError::InvalidFileSpacePageSize(rejected)) = err else {
+        panic!("expected InvalidFileSpacePageSize, got {err:?}");
+    };
+    assert_eq!(rejected, page_size);
 }

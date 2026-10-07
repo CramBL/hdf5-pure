@@ -43,6 +43,26 @@ pub fn version_0(widths: Widths, strategy: u8, threshold: u64, manager_addrs: &[
     body
 }
 
+/// Returns the body of a version 1 message that does not persist free space: the version,
+/// `strategy`, a clear persist flag, `threshold` and `page_size` at the length width of `widths`,
+/// a page-end metadata threshold of 0, and the undefined end of allocation at the offset width.
+pub fn non_persistent_version_1(
+    widths: Widths,
+    strategy: u8,
+    threshold: u64,
+    page_size: u64,
+) -> Vec<u8> {
+    let mut body = vec![VERSION_1, strategy, 0];
+    bytes::push_uint(&mut body, threshold, widths.length);
+    bytes::push_uint(&mut body, page_size, widths.length);
+    body.extend_from_slice(&[0, 0]);
+    bytes::push_address(&mut body, None, widths.offset);
+    body
+}
+
+/// The version 1 strategy code for paged allocation, `H5F_FSPACE_STRATEGY_PAGE`.
+pub const PAGE: u8 = 1;
+
 /// The version 0 strategy code for free-space managers that persist free space,
 /// `H5F_FILE_SPACE_ALL_PERSIST`.
 pub const ALL_PERSIST: u8 = 1;
@@ -61,3 +81,5 @@ pub const VFD: u8 = 4;
 pub const VERSION_0_MANAGERS: usize = 6;
 
 const VERSION_0: u8 = 0;
+
+const VERSION_1: u8 = 1;

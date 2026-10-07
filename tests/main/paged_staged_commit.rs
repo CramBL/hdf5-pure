@@ -40,7 +40,7 @@ fn assert_paged_ok(path: &std::path::Path) {
     assert_eq!(f.file_space_strategy(), Some(FileSpaceStrategy::Page));
     let info = f.file_space_info().expect("records a strategy");
     assert!(info.persist, "still persisting");
-    assert_eq!(info.page_size, PAGE);
+    assert_eq!(info.page_size.get(), PAGE);
     assert_eq!(info.eoa_pre_fsm % PAGE, 0, "EOA page-aligned");
     assert_eq!(info.eoa_pre_fsm, bytes.len() as u64, "EOA == file size");
     let mut free = f.persisted_free_space().unwrap();

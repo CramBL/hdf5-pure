@@ -4,6 +4,8 @@ use core::fmt;
 use core::num::NonZeroUsize;
 use core::str::Utf8Error;
 
+use crate::FileSpacePageSize;
+
 /// Reports format, filter, and runtime failures through the `hdf5-pure` API.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
@@ -63,8 +65,7 @@ pub enum FormatError {
     InvalidFileSpaceStrategy(u8),
     /// Unsupported File Space Info message version: the parser reads versions 0 and 1.
     UnsupportedFileSpaceInfoVersion(u8),
-    /// A paged file-space strategy was requested with a page size the writer
-    /// cannot use: it must be a power of two of at least 512 bytes.
+    /// A file space page size is outside 512 bytes to 1 GiB, the range of [`FileSpacePageSize`].
     InvalidFileSpacePageSize(u64),
     /// A paged file-space strategy was requested alongside a userblock that is
     /// not a whole number of pages. File-space pages are measured from the file
@@ -638,7 +639,9 @@ impl fmt::Display for FormatError {
             Self::InvalidFileSpacePageSize(p) => {
                 write!(
                     f,
-                    "invalid file-space page size {p}: must be a power of two >= 512"
+                    "invalid file-space page size {p}: must be from {} to {} bytes",
+                    FileSpacePageSize::MIN.get(),
+                    FileSpacePageSize::MAX.get(),
                 )
             }
             Self::UserblockNotPageAligned(userblock, page_size) => {
