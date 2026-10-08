@@ -13,11 +13,14 @@
 //!
 //! [`SessionSpace`] owns the active runtime allocation strategy. Its PAGE state keeps typed free
 //! lists, page transitions, threshold admission, whole-page promotion, and post-release EOA policy.
+//! [`ManagerSections`] describes the manager contents persistence should write without assigning
+//! wire slots, section classes, block addresses, or encoded lengths.
 
 mod admission;
 mod extent;
 mod list;
 mod paged;
+mod persistence;
 mod session;
 
 #[cfg(test)]
@@ -25,7 +28,10 @@ pub(crate) use admission::Release;
 pub(crate) use admission::TrackedSpace;
 pub(crate) use extent::Extent;
 pub(crate) use list::{FreeList, trailing_run_start};
-pub(crate) use paged::{FreeClass, PageTransition, PageType, PagedPostFree, PagedSections};
+#[cfg(test)]
+pub(crate) use paged::PagedEdit;
+pub(crate) use paged::{FreeClass, PageTransition, PageType, PagedPostFree};
+pub(crate) use persistence::{ManagerKind, ManagerSections};
 pub(crate) use session::{SessionSpace, SessionSpaceSnapshot};
 
 /// Specifies the manager-tail lengths retained when releasing trailing free space.

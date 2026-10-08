@@ -273,7 +273,6 @@ use core::num::NonZeroUsize;
 use hdf5_pure_format::__private::ChunkIndexInfo;
 use hdf5_pure_format::__private::ChunkRecord;
 use hdf5_pure_format::__private::ExtensibleArrayHeader;
-use hdf5_pure_format::__private::FreeSection;
 use hdf5_pure_format::__private::FreeSpaceManagerHeader;
 use hdf5_pure_format::__private::IndexSlots;
 use hdf5_pure_format::__private::LayoutVersion;
@@ -281,7 +280,6 @@ use hdf5_pure_format::__private::MessageRecordLayout;
 use hdf5_pure_format::__private::OBJECT_HEADER_PREFIX_MAX_LEN;
 use hdf5_pure_format::__private::ObjectHeaderContinuation;
 use hdf5_pure_format::__private::ObjectHeaderPrefix;
-use hdf5_pure_format::__private::SECTION_CLASS_SIMPLE;
 
 use crate::access_mode::AccessMode;
 use crate::address::BaseAddressExt;
@@ -320,11 +318,11 @@ use crate::file_writer::{
 use crate::filter_pipeline::FilterPipeline;
 use crate::filters::{ChunkContext, FilterScratch, compress_chunk_with, decompress_chunk};
 use crate::free_space::{
-    self, Extent as FreeExtent, FreeClass, FreeList, PageTransition, PageType, PagedPostFree,
-    PagedSections, SessionSpace, SessionSpaceSnapshot, TrackedSpace,
+    self, Extent as FreeExtent, FreeClass, FreeList, ManagerKind, ManagerSections, PageTransition,
+    PageType, PagedPostFree, SessionSpace, SessionSpaceSnapshot, TrackedSpace,
 };
 use crate::free_space_manager::PersistedSections;
-use crate::free_space_manager::{self, PagedManagerPlan, align_up, plan_paged_managers};
+use crate::free_space_manager::{self, ManagerPlan, align_up};
 use crate::group_v2::resolve_group_entries_from_source;
 use crate::image::{FileImage, HandleImage, MirrorImage, WriteBuffering};
 use crate::libver::LibVer;
@@ -2680,7 +2678,11 @@ impl WriteEngine {
             return;
         };
         let file_len = self.image.len();
-        let managers: Vec<(usize, u64, Result<PersistedSections, FormatError>)> = info
+        let managers: Vec<(
+            Option<ManagerKind>,
+            u64,
+            Result<PersistedSections, FormatError>,
+        )> = info
             .manager_addrs
             .iter()
             .enumerate()
@@ -2692,44 +2694,50 @@ impl WriteEngine {
                     BaseAddress::ZERO,
                     &[m],
                 );
-                (slot, m, read)
+                (
+                    free_space_manager::manager_kind(info.strategy, slot),
+                    m,
+                    read,
+                )
             })
             .collect();
 
-        // PAGE manager slots carry page typing, while flat space retains the existing
-        // all-managers-or-none parse rule. Invalid, overlapping, or out-of-bounds sections are
-        // skipped before they enter the runtime strategy.
+        // Translate storage manager identity before the sections enter free-space policy. A parse
+        // failure seeds nothing, so reusable state never describes only part of the persisted
+        // manager set. Invalid, overlapping, or out-of-bounds section extents are skipped before
+        // they enter the runtime strategy.
         if paged {
-            let mut tagged: Vec<(usize, FreeExtent)> = Vec::new();
-            for (slot, _, read) in &managers {
-                let Ok((sections, _)) = read else {
-                    continue;
-                };
-                for &section in sections {
-                    let Some(extent) = FreeExtent::new(section.addr.get(), section.size) else {
+            if managers.iter().all(|(_, _, read)| read.is_ok()) {
+                let mut tagged: Vec<(Option<ManagerKind>, FreeExtent)> = Vec::new();
+                for (kind, _, read) in &managers {
+                    let Ok((sections, _)) = read else {
                         continue;
                     };
-                    tagged.push((*slot, extent));
+                    for &section in sections {
+                        let Some(extent) = FreeExtent::new(section.addr.get(), section.size) else {
+                            continue;
+                        };
+                        tagged.push((*kind, extent));
+                    }
                 }
-            }
-            tagged.sort_unstable_by_key(|&(_, extent)| extent.start());
-            let mut prev_end = 0u64;
-            for (slot, extent) in tagged {
-                if extent.end() > file_len || extent.start() < prev_end {
-                    continue;
+                tagged.sort_unstable_by_key(|&(_, extent)| extent.start());
+                let mut prev_end = 0u64;
+                for (kind, extent) in tagged {
+                    if extent.end() > file_len || extent.start() < prev_end {
+                        continue;
+                    }
+                    prev_end = extent.end();
+                    self.space.seed_persisted(kind, extent);
                 }
-                prev_end = extent.end();
-                self.space.seed_persisted(slot, extent);
+                self.space.finish_seed();
             }
-            self.space.finish_seed();
-        } else if let Ok(mut sections) =
-            managers
-                .iter()
-                .try_fold(Vec::new(), |mut all, (_, _, read)| {
-                    all.extend_from_slice(&read.as_ref()?.0);
-                    Ok::<Vec<FreeSection>, &FormatError>(all)
-                })
-        {
+        } else if let Ok(mut sections) = managers.iter().try_fold(
+            Vec::new(),
+            |mut all, (_, _, read)| -> Result<_, &FormatError> {
+                all.extend_from_slice(&read.as_ref()?.0);
+                Ok(all)
+            },
+        ) {
             sections.sort_unstable_by_key(|section| section.addr);
             let mut prev_end = 0u64;
             for section in sections {
@@ -2740,7 +2748,7 @@ impl WriteEngine {
                     continue;
                 }
                 prev_end = extent.end();
-                self.space.seed_persisted(0, extent);
+                self.space.seed_persisted(Some(ManagerKind::Flat), extent);
             }
         }
 
@@ -6696,10 +6704,11 @@ impl WriteEngine {
         }
         let reused = placed_at.is_some();
         let ext_addr = placed_at.unwrap_or_else(|| self.image.len());
-        let sections = self.persisted_sections(&post.sections());
-        let fshd_addr = self.persisted_address(ext_addr + ext_len);
-        let fsse_addr = self.persisted_address(
-            ext_addr + ext_len + hdf5_pure_format::__private::free_space_manager_header_len(widths),
+        let managers = ManagerSections::flat(post.extents());
+        let plan = free_space_manager::plan_managers(
+            &managers,
+            self.persisted_address(ext_addr + ext_len),
+            widths,
         );
         // A reused tail sits inside the file, which ends it at the end-of-allocation
         // the layout settled on: the current end-of-file less the dropped regions
@@ -6714,7 +6723,7 @@ impl WriteEngine {
 
         // Build the real extension and the FSM blocks. With no free space to
         // record we still refresh the extension (persist on, managers undefined).
-        let (ext_oh, fsm_blocks) = if sections.is_empty() {
+        let ext_oh = if plan.is_empty() {
             // With no managers to allocate, libhdf5 records the final end of allocation
             // (`H5MF_settle_meta_data_fsm` and `H5MF__close_aggrfs` in `H5MF.c`, HDF5 1.14.6).
             let info = file_space_info::persistent_empty(
@@ -6724,9 +6733,7 @@ impl WriteEngine {
                 page_size,
                 final_eof,
             );
-            let ext_oh =
-                build_v2_object_header(&self.rewrite_extension_region(old_ext_addr, &info)?)?;
-            (ext_oh, None)
+            build_v2_object_header(&self.rewrite_extension_region(old_ext_addr, &info)?)?
         } else {
             // `eoa_pre_fsm` is the end-of-allocation before the free-space-manager
             // section blocks (`FSHD`/`FSSE`) were allocated: a consumer may shrink
@@ -6740,25 +6747,22 @@ impl WriteEngine {
             // assertion-enabled libhdf5 aborts on open (issue #178), and is the
             // value `H5Fget_freespace` accounts for correctly (verified in the
             // crosscheck).
-            let eoa_pre_fsm = if reused { final_eof } else { fshd_addr.get() };
+            let block = &plan.blocks[0];
+            debug_assert_eq!(block.kind, ManagerKind::Flat);
+            let eoa_pre_fsm = if reused {
+                final_eof
+            } else {
+                block.fshd_addr.get()
+            };
             let info = file_space_info::persistent_single_manager(
                 offset_width,
                 strategy,
                 threshold,
                 page_size,
-                fshd_addr.get(),
+                block.fshd_addr.get(),
                 eoa_pre_fsm,
             );
-            let ext_oh =
-                build_v2_object_header(&self.rewrite_extension_region(old_ext_addr, &info)?)?;
-            let (fshd, fsse) = hdf5_pure_format::__private::serialize_free_space_manager(
-                widths,
-                &sections,
-                fshd_addr,
-                fsse_addr,
-                SECTION_CLASS_SIMPLE,
-            )?;
-            (ext_oh, Some((fshd, fsse)))
+            build_v2_object_header(&self.rewrite_extension_region(old_ext_addr, &info)?)?
         };
         // Both forms of the message carry the same twelve manager slots, so either
         // one measures what the placeholder did. The tail was reserved for that
@@ -6785,9 +6789,16 @@ impl WriteEngine {
         // repoint below.
         let region = (ext_addr, tail_len);
         self.write_tail_block(region, ext_addr, &ext_oh)?;
-        if let Some((fshd, fsse)) = fsm_blocks {
-            self.write_tail_block(region, base.absolute(fshd_addr)?, &fshd)?;
-            self.write_tail_block(region, base.absolute(fsse_addr)?, &fsse)?;
+        for block in &plan.blocks {
+            let (fshd, fsse) = hdf5_pure_format::__private::serialize_free_space_manager(
+                widths,
+                &block.sections,
+                block.fshd_addr,
+                block.fsse_addr,
+                block.class,
+            )?;
+            self.write_tail_block(region, base.absolute(block.fshd_addr)?, &fshd)?;
+            self.write_tail_block(region, base.absolute(block.fsse_addr)?, &fsse)?;
         }
         // Barrier, then repoint the superblock (root, eof, and the new extension)
         // — the linearization point — and sync it.
@@ -6830,17 +6841,6 @@ impl WriteEngine {
         // it grows past them again.
         self.fsm_len = self.image.len();
         Ok(())
-    }
-
-    /// Returns `sections` in the address frame stored by a free-space manager.
-    fn persisted_sections(&self, sections: &[(u64, u64)]) -> Vec<FreeSection> {
-        sections
-            .iter()
-            .map(|&(addr, size)| FreeSection {
-                addr: self.persisted_address(addr),
-                size,
-            })
-            .collect()
     }
 
     /// The address a persisting commit records for the image position `at`.
@@ -6982,11 +6982,8 @@ impl WriteEngine {
         // on where it sits. It is also the answer for a tail that ends up appended,
         // since every round hands its reservation back before this returns.
         let (probe, _) = self.flat_post_free(eof, to_free, old_blocks);
-        let appended_len = ext_len
-            + hdf5_pure_format::__private::free_space_manager_len(
-                widths,
-                &self.persisted_sections(&probe.sections()),
-            );
+        let managers = ManagerSections::flat(probe.extents());
+        let appended_len = ext_len + free_space_manager::manager_blocks_len(&managers, widths);
         let mut proposed = appended_len;
 
         for _ in 0..ROUNDS {
@@ -7005,11 +7002,8 @@ impl WriteEngine {
             // (issue #418). The reservation was taken before this list was built,
             // so the run can only begin at or above the tail's own end.
             let eoa = release_trailing_run(&mut post, eoa, proposed);
-            let len = ext_len
-                + hdf5_pure_format::__private::free_space_manager_len(
-                    widths,
-                    &self.persisted_sections(&post.sections()),
-                );
+            let managers = ManagerSections::flat(post.extents());
+            let len = ext_len + free_space_manager::manager_blocks_len(&managers, widths);
             if len <= proposed {
                 debug_assert!(
                     at + proposed <= eoa,
@@ -7155,12 +7149,10 @@ impl WriteEngine {
                 if let Some(extent) = FreeExtent::new(eoa, at - eoa) {
                     post.track(extent, PageType::Raw.into());
                 }
-                let sections: PagedSections = post.sections();
-                let plan = plan_paged_managers(
-                    &self.persisted_sections(sections.metadata()),
-                    &self.persisted_sections(sections.raw()),
-                    &self.persisted_sections(sections.unclassified()),
-                    page_size,
+                let sections = post.sections();
+                let managers = ManagerSections::paged(&sections, page_size);
+                let plan = free_space_manager::plan_managers(
+                    &managers,
                     self.persisted_address(at + ext_len),
                     widths,
                 );
@@ -7392,7 +7384,7 @@ impl WriteEngine {
         ext_len: u64,
         page_size: FileSpacePageSize,
         widths: FormatWidths,
-    ) -> Option<(PagedPostFree, PagedManagerPlan, u64, u64, u64)> {
+    ) -> Option<(PagedPostFree, ManagerPlan, u64, u64, u64)> {
         /// Enough rounds for the section set to settle after a reservation shrinks
         /// it, without letting an oscillating proposal spin.
         const ROUNDS: usize = 4;
@@ -7403,18 +7395,9 @@ impl WriteEngine {
         // A manager block's length depends only on the sections it records, never
         // on its address, so a start of 0 measures the blocks alone.
         let (probe, _) = self.paged_post_free(eof, to_free, old_blocks);
-        let probe_sections: PagedSections = probe.sections();
-        let mut proposed = ext_len
-            + plan_paged_managers(
-                &self.persisted_sections(probe_sections.metadata()),
-                &self.persisted_sections(probe_sections.raw()),
-                &self.persisted_sections(probe_sections.unclassified()),
-                page_size,
-                StoredAddress::new(0),
-                widths,
-            )
-            .end_of_managers
-            .get();
+        let probe_sections = probe.sections();
+        let managers = ManagerSections::paged(&probe_sections, page_size);
+        let mut proposed = ext_len + free_space_manager::manager_blocks_len(&managers, widths);
 
         for _ in 0..ROUNDS {
             let reserved = self.space.allocate(proposed, PageType::Meta)?;
@@ -7429,12 +7412,10 @@ impl WriteEngine {
             // Class the free space into its managers and place their blocks after
             // the extension. Shared with the bounded backend so both lay out
             // identically.
-            let sections: PagedSections = post.sections();
-            let plan = plan_paged_managers(
-                &self.persisted_sections(sections.metadata()),
-                &self.persisted_sections(sections.raw()),
-                &self.persisted_sections(sections.unclassified()),
-                page_size,
+            let sections = post.sections();
+            let managers = ManagerSections::paged(&sections, page_size);
+            let plan = free_space_manager::plan_managers(
+                &managers,
                 self.persisted_address(at + ext_len),
                 widths,
             );
@@ -15639,12 +15620,16 @@ mod tests {
                 FileSpacePageSize::DEFAULT,
             );
             if let Some((addr, len)) = meta {
-                s.space
-                    .seed_persisted(0, FreeExtent::new(addr, len).unwrap());
+                s.space.seed_persisted(
+                    Some(ManagerKind::PagedSmallMetadata),
+                    FreeExtent::new(addr, len).unwrap(),
+                );
             }
             if let Some((addr, len)) = raw {
-                s.space
-                    .seed_persisted(2, FreeExtent::new(addr, len).unwrap());
+                s.space.seed_persisted(
+                    Some(ManagerKind::PagedSmallRaw),
+                    FreeExtent::new(addr, len).unwrap(),
+                );
             }
             s
         }
@@ -15813,8 +15798,10 @@ mod tests {
                 0,
                 FileSpacePageSize::DEFAULT,
             );
-            s.space
-                .seed_persisted(0, FreeExtent::new(PAGE, hole).unwrap());
+            s.space.seed_persisted(
+                Some(ManagerKind::PagedSmallMetadata),
+                FreeExtent::new(PAGE, hole).unwrap(),
+            );
             let free_before = free_total(&s);
             let layout = s.tail_layout(&[], &[], EXT_LEN, FileSpacePageSize::DEFAULT, widths);
             let free_after = free_total(&s);
@@ -15952,8 +15939,10 @@ mod tests {
                 0,
                 FileSpacePageSize::DEFAULT,
             );
-            s.space
-                .seed_persisted(0, FreeExtent::new(HOLE_AT, hole).unwrap());
+            s.space.seed_persisted(
+                Some(ManagerKind::Flat),
+                FreeExtent::new(HOLE_AT, hole).unwrap(),
+            );
             let free_before = free_total(&s);
             let (post, at, tail_len, _) = s.flat_tail_layout(&[], &[], EXT_LEN, widths);
             let free_after = free_total(&s);
@@ -15961,11 +15950,8 @@ mod tests {
             // consumed outright drops a section from the managers, so this comes out
             // shorter than the extent for some hole sizes and the difference is what
             // the extent has to cover.
-            let written = EXT_LEN
-                + hdf5_pure_format::__private::free_space_manager_len(
-                    widths,
-                    &s.persisted_sections(&post.sections()),
-                );
+            let managers = ManagerSections::flat(post.extents());
+            let written = EXT_LEN + free_space_manager::manager_blocks_len(&managers, widths);
             match at {
                 Some(at) => {
                     placed += 1;

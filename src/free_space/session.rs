@@ -10,6 +10,7 @@ use super::paged::PagedSections;
 use super::paged::{
     FreeClass, PageTransition, PageType, PagedAllocationSnapshot, PagedEdit, PagedPostFree,
 };
+use super::persistence::ManagerKind;
 
 /// The reusable-space strategy active for one editing session.
 pub(crate) enum SessionSpace {
@@ -83,13 +84,13 @@ impl SessionSpace {
 
     /// Seeds one persisted free-space section under the active strategy.
     ///
-    /// `slot` carries PAGE manager typing. A flat strategy ignores it because all manager sections
-    /// share one allocation class.
-    pub(crate) fn seed_persisted(&mut self, slot: usize, extent: Extent) {
+    /// `kind` carries PAGE manager semantics. A flat strategy ignores it because all manager
+    /// sections share one allocation class.
+    pub(crate) fn seed_persisted(&mut self, kind: Option<ManagerKind>, extent: Extent) {
         match self {
             Self::Disabled => {}
             Self::Flat(space) => space.free.free(extent),
-            Self::Paged(space) => space.paged.seed_persisted(slot, extent),
+            Self::Paged(space) => space.paged.seed_persisted(kind, extent),
         }
     }
 
