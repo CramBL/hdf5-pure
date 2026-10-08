@@ -9,6 +9,7 @@ use super::TRAILING_RESERVE_TAILS;
 use super::admission::TrackedSpace;
 use super::extent::Extent;
 use super::list::{self, FreeList};
+use super::persistence::ManagerKind;
 
 /// Identifies whether an allocation belongs to metadata or raw-data pages.
 ///
@@ -192,20 +193,23 @@ impl PagedEdit {
         }
     }
 
-    /// Seeds one extent from persistent PAGE manager slot `slot`.
+    /// Seeds one extent from a persistent PAGE manager.
     ///
-    /// Slots 0 and 2 establish metadata and raw-data pages. Slot 6 establishes raw reuse only for
-    /// whole aligned pages because the generic-large manager does not record a page type. Other
-    /// sections remain unclassified and are never allocated independently.
-    pub(crate) fn seed_persisted(&mut self, slot: usize, extent: Extent) {
+    /// Small managers establish their page type. A generic-large section establishes reusable raw
+    /// space only when it is a whole aligned page, because that manager does not record a page
+    /// type. Sections from an unrecognized manager remain unclassified and are never allocated
+    /// independently.
+    pub(crate) fn seed_persisted(&mut self, kind: Option<ManagerKind>, extent: Extent) {
         let page_size = self.page_size.get();
-        let ty = match slot {
-            0 => Some(PageType::Meta),
-            2 => Some(PageType::Raw),
-            6 if extent.start() % page_size == 0 && extent.len() % page_size == 0 => {
+        let ty = match kind {
+            Some(ManagerKind::PagedSmallMetadata) => Some(PageType::Meta),
+            Some(ManagerKind::PagedSmallRaw) => Some(PageType::Raw),
+            Some(ManagerKind::PagedLargeGeneric)
+                if extent.start() % page_size == 0 && extent.len() % page_size == 0 =>
+            {
                 Some(PageType::Raw)
             }
-            _ => None,
+            Some(ManagerKind::PagedLargeGeneric) | Some(ManagerKind::Flat) | None => None,
         };
         self.seed(extent, ty);
     }

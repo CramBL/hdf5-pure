@@ -1,5 +1,5 @@
-//! The free sections the writer reads back from a file's persistent free-space managers, and the
-//! layout of the managers of a paged file.
+//! Adapts persistent free-space managers between storage, semantic manager sets, and the wire
+//! codec.
 
 #[cfg(not(feature = "std"))]
 extern crate alloc;
@@ -11,6 +11,7 @@ use alloc::vec::Vec;
 use hdf5_pure_format::__private::FreeSection;
 use hdf5_pure_format::__private::FreeSpaceManagerHeader;
 use hdf5_pure_format::__private::SECTION_CLASS_LARGE;
+use hdf5_pure_format::__private::SECTION_CLASS_SIMPLE;
 use hdf5_pure_format::__private::SECTION_CLASS_SMALL;
 
 use crate::address::BaseAddressExt;
@@ -18,7 +19,9 @@ use crate::address::{BaseAddress, StoredAddress};
 use crate::convert::Narrow;
 use crate::error::FormatError;
 use crate::file_space_info::FileSpacePageSize;
+use crate::file_space_info::FileSpaceStrategy;
 use crate::file_space_info::NUM_FILE_FSM_MANAGERS;
+use crate::free_space::{ManagerKind, ManagerSections};
 use crate::width::FormatWidths;
 
 /// Reads the free sections of the managers at `manager_addrs` from the file `data`.
@@ -122,171 +125,135 @@ pub(crate) fn read_persisted_sections_source<S: crate::source::Source>(
     Ok((sections, blocks))
 }
 
+/// Returns the semantic kind represented by File Space Info manager `slot` for `strategy`.
+pub(crate) fn manager_kind(strategy: FileSpaceStrategy, slot: usize) -> Option<ManagerKind> {
+    match strategy {
+        FileSpaceStrategy::FsmAggr => Some(ManagerKind::Flat),
+        FileSpaceStrategy::Page => match slot {
+            0 => Some(ManagerKind::PagedSmallMetadata),
+            2 => Some(ManagerKind::PagedSmallRaw),
+            6 => Some(ManagerKind::PagedLargeGeneric),
+            _ => None,
+        },
+        FileSpaceStrategy::Aggr | FileSpaceStrategy::None => None,
+    }
+}
+
 /// Rounds `value` up to the next multiple of `page`.
 pub(crate) fn align_up(value: u64, page: FileSpacePageSize) -> u64 {
     value.div_ceil(page.get()) * page.get()
 }
 
-/// Split each free section at page boundaries so no section spans a page.
-///
-/// Coalescing a page-tail free section with freed blocks below it can produce a
-/// run that crosses a page boundary or reaches `page`; splitting lets each
-/// intra-page fragment stay in its SMALL-class manager while a whole free page is
-/// routed to the generic-large manager, matching the reference library's
-/// small-vs-large section classes. Total free bytes are preserved.
-pub(crate) fn split_at_pages(
-    sections: &[FreeSection],
-    page: FileSpacePageSize,
-) -> Vec<FreeSection> {
-    let page = page.get();
-    let mut out = Vec::new();
-    for s in sections {
-        let end = s.addr.get().saturating_add(s.size);
-        let mut start = s.addr.get();
-        while start < end {
-            let boundary = (start / page + 1) * page;
-            let piece_end = end.min(boundary);
-            out.push(FreeSection {
-                addr: StoredAddress::new(start),
-                size: piece_end - start,
-            });
-            start = piece_end;
-        }
-    }
-    out
-}
-
-/// One per-page-type manager's placement in a paged persist tail: where its
-/// `FSHD`/`FSSE` blocks go, the section class its entries carry, and the sections
-/// themselves. The slot that names it is recorded in
-/// [`PagedManagerPlan::slots`].
-pub(crate) struct PagedManagerBlock {
+/// Places one semantic manager in a persistent tail and records its wire representation.
+pub(crate) struct ManagerBlock {
+    pub(crate) kind: ManagerKind,
     pub(crate) fshd_addr: StoredAddress,
     pub(crate) fsse_addr: StoredAddress,
     pub(crate) class: u8,
     pub(crate) sections: Vec<FreeSection>,
 }
 
-/// The closed-form layout of a paged file's per-page-type free-space managers.
-pub(crate) struct PagedManagerPlan {
-    /// Manager address per File Space Info slot, the undefined address at the
-    /// file's offset width where inactive.
+/// Holds the wire layout of a semantic manager set.
+pub(crate) struct ManagerPlan {
+    /// Manager address per File Space Info slot, the undefined address at the file's offset width
+    /// where inactive.
     pub(crate) slots: [StoredAddress; NUM_FILE_FSM_MANAGERS],
-    /// The active managers, in ascending address order. Empty when the file has
-    /// no free space to record.
-    pub(crate) blocks: Vec<PagedManagerBlock>,
-    /// The first address past the last manager block (`start` when none).
+    /// The active managers in ascending File Space Info slot order.
+    pub(crate) blocks: Vec<ManagerBlock>,
+    /// The first address past the last manager block, or `start` when none are active.
     pub(crate) end_of_managers: StoredAddress,
 }
 
-impl PagedManagerPlan {
-    /// True when there is no free space to record, so the caller should emit an
-    /// empty-manager persist message rather than any manager blocks.
+impl ManagerPlan {
+    /// Returns `true` when there is no free space to record.
     pub(crate) fn is_empty(&self) -> bool {
         self.blocks.is_empty()
     }
 }
 
-/// Classes a paged file's free space into its per-page-type managers and places
-/// their blocks contiguously from `start`.
+/// Places `managers` contiguously from `start` using their HDF5 wire slots and section classes.
 ///
-/// Each section is first split at page boundaries, then classed by size: an
-/// intra-page (`< page_size`) fragment stays in its SMALL-class per-type manager
-/// — SUPER (slot 0) for metadata, DRAW (slot 2) for raw — while a whole free page
-/// goes to the single generic-large manager (slot 6). This keeps a SMALL section
-/// from ever spanning a page or reaching `page_size`, matching the reference
-/// library.
-///
-/// Size is the only thing that decides between a SMALL manager and the large one,
-/// which is why the caller tracks placeable free space by page *type* alone: the
-/// split is recomputed here on every commit, so nothing upstream has to maintain
-/// it (and maintaining it upstream would keep neighboring holes of different
-/// classes from coalescing — issue #261).
-///
-/// `unclassified` is free space the caller could not assign a page type to,
-/// because the generic-large manager it came from holds both kinds. It is written
-/// back to that manager exactly as it was found: splitting or re-classing it would
-/// state a page type the caller deliberately did not claim to know.
-///
-/// `FSSE` byte length depends only on section count and sizes (fixed field
-/// widths), never on the addresses, so a single forward pass fixes every address
-/// with no fixpoint iteration. Shared by the whole-file editor's and the bounded
-/// backend's persist tails so the two produce identical layouts.
-pub(crate) fn plan_paged_managers(
-    meta: &[FreeSection],
-    raw: &[FreeSection],
-    unclassified: &[FreeSection],
-    page_size: FileSpacePageSize,
+/// The semantic manager set decides which extents belong together. This adapter alone translates
+/// those kinds to File Space Info slots, `FSSE` section classes, stored addresses, and encoded
+/// lengths.
+pub(crate) fn plan_managers(
+    managers: &[ManagerSections],
     start: StoredAddress,
     widths: FormatWidths,
-) -> PagedManagerPlan {
-    let mut slot0 = Vec::new();
-    let mut slot2 = Vec::new();
-    let mut slot6 = Vec::new();
-    for s in split_at_pages(meta, page_size) {
-        if s.size < page_size.get() {
-            slot0.push(s);
-        } else {
-            slot6.push(s);
-        }
-    }
-    for s in split_at_pages(raw, page_size) {
-        if s.size < page_size.get() {
-            slot2.push(s);
-        } else {
-            slot6.push(s);
-        }
-    }
-    slot6.extend(unclassified.iter().copied());
-    slot6.sort_unstable_by_key(|s| s.addr);
+) -> ManagerPlan {
+    let mut managers: Vec<_> = managers
+        .iter()
+        .map(|manager| {
+            let (slot, class) = manager_wire(manager.kind());
+            (slot, class, manager)
+        })
+        .collect();
+    managers.sort_unstable_by_key(|&(slot, _, _)| slot);
     debug_assert!(
-        slot6.windows(2).all(|w| w[0].addr < w[1].addr),
-        "one address is free in more than one of the metadata, raw, and \
-         unclassified lists, so they have stopped being disjoint"
+        managers.windows(2).all(|w| w[0].0 != w[1].0),
+        "two semantic free-space managers map to the same File Space Info slot"
     );
 
     let mut slots = [StoredAddress::undefined(widths.offsets.get()); NUM_FILE_FSM_MANAGERS];
-    let mut blocks = Vec::new();
+    let mut blocks = Vec::with_capacity(managers.len());
     let mut cursor = start;
-    for (slot, class, sections) in [
-        (0usize, SECTION_CLASS_SMALL, slot0),
-        (2usize, SECTION_CLASS_SMALL, slot2),
-        (6usize, SECTION_CLASS_LARGE, slot6),
-    ] {
-        if sections.is_empty() {
-            continue;
-        }
+    for (slot, class, manager) in managers {
         let fshd_addr = cursor;
         let fsse_addr = fshd_addr.offset(
             hdf5_pure_format::__private::free_space_manager_header_len(widths),
         );
-        let section_sizes: Vec<u64> = sections.iter().map(|s| s.size).collect();
+        let sections: Vec<_> = manager
+            .sections()
+            .iter()
+            .map(|extent| FreeSection {
+                addr: StoredAddress::new(extent.start()),
+                size: extent.len(),
+            })
+            .collect();
+        let section_sizes: Vec<_> = sections.iter().map(|section| section.size).collect();
         cursor = fsse_addr.offset(hdf5_pure_format::__private::section_info_len(
             widths,
             &section_sizes,
         ));
         slots[slot] = fshd_addr;
-        blocks.push(PagedManagerBlock {
+        blocks.push(ManagerBlock {
+            kind: manager.kind(),
             fshd_addr,
             fsse_addr,
             class,
             sections,
         });
     }
-    PagedManagerPlan {
+    ManagerPlan {
         slots,
         blocks,
         end_of_managers: cursor,
     }
 }
 
+/// Returns the encoded length of `managers` without assigning them file positions.
+pub(crate) fn manager_blocks_len(managers: &[ManagerSections], widths: FormatWidths) -> u64 {
+    plan_managers(managers, StoredAddress::new(0), widths)
+        .end_of_managers
+        .get()
+}
+
+fn manager_wire(kind: ManagerKind) -> (usize, u8) {
+    match kind {
+        ManagerKind::Flat => (0, SECTION_CLASS_SIMPLE),
+        ManagerKind::PagedLargeGeneric => (6, SECTION_CLASS_LARGE),
+        ManagerKind::PagedSmallMetadata => (0, SECTION_CLASS_SMALL),
+        ManagerKind::PagedSmallRaw => (2, SECTION_CLASS_SMALL),
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use hdf5_pure_format::__private::SECTION_CLASS_SIMPLE;
     use rstest::rstest;
     use test_util::free_space;
 
     use super::*;
+    use crate::free_space::{Extent, PageType, PagedEdit};
 
     /// A free section at `addr` spanning `size` bytes.
     fn section(addr: u64, size: u64) -> FreeSection {
@@ -473,36 +440,90 @@ mod tests {
     }
 
     #[test]
-    fn split_at_pages_splits_on_boundaries_preserving_total() {
-        let page = FileSpacePageSize::DEFAULT;
-        // A run that crosses one boundary splits into a sub-page head and a whole
-        // free page (the accounting fix routes the >= page piece to slot 6).
-        assert_eq!(
-            split_at_pages(&[section(3740, 4452)], page),
-            vec![
-                section(3740, 356),  // [3740, 4096)
-                section(4096, 4096), // [4096, 8192)
-            ]
+    fn semantic_paged_managers_keep_the_existing_wire_slots_and_classes() {
+        let page_size = FileSpacePageSize::DEFAULT;
+        let mut paged = PagedEdit::new(page_size);
+        paged.seed(Extent::new(100, 200).unwrap(), Some(PageType::Meta));
+        paged.seed(Extent::new(5000, 200).unwrap(), Some(PageType::Raw));
+        paged.seed(
+            Extent::new(8192, page_size.get()).unwrap(),
+            Some(PageType::Raw),
         );
-        // A sub-page section is returned unchanged (the common case is a no-op).
+        let managers = ManagerSections::paged(&paged.sections(), page_size);
+        let plan = plan_managers(&managers, StoredAddress::new(1000), widths(8, 8));
+
+        assert_eq!(plan.blocks.len(), 3);
+        assert_eq!(plan.slots[0], plan.blocks[0].fshd_addr);
+        assert_eq!(plan.slots[2], plan.blocks[1].fshd_addr);
+        assert_eq!(plan.slots[6], plan.blocks[2].fshd_addr);
+        assert_eq!(plan.blocks[0].kind, ManagerKind::PagedSmallMetadata);
+        assert_eq!(plan.blocks[1].kind, ManagerKind::PagedSmallRaw);
+        assert_eq!(plan.blocks[2].kind, ManagerKind::PagedLargeGeneric);
+        assert_eq!(plan.blocks[0].class, SECTION_CLASS_SMALL);
+        assert_eq!(plan.blocks[1].class, SECTION_CLASS_SMALL);
+        assert_eq!(plan.blocks[2].class, SECTION_CLASS_LARGE);
+        assert_eq!(plan.blocks[0].sections, vec![section(100, 200)]);
+        assert_eq!(plan.blocks[1].sections, vec![section(5000, 200)]);
         assert_eq!(
-            split_at_pages(&[section(100, 200)], page),
-            vec![section(100, 200)]
+            plan.blocks[2].sections,
+            vec![section(8192, page_size.get())]
         );
-        // A page-aligned multi-page run splits into whole pages.
-        let whole = split_at_pages(&[section(0, 3 * 4096)], page);
-        assert_eq!(whole.len(), 3);
-        assert!(whole.iter().all(|s| s.size == 4096));
-        // Splitting never loses or overlaps space: pieces are contiguous and sum
-        // to the original size.
-        let pieces = split_at_pages(&[section(5000, 10000)], page);
-        assert_eq!(pieces.iter().map(|s| s.size).sum::<u64>(), 10000);
-        let mut prev = pieces[0].addr.get();
-        for s in &pieces {
-            assert_eq!(s.addr.get(), prev);
-            prev = s.addr.get() + s.size;
+        assert!(
+            plan.slots
+                .iter()
+                .enumerate()
+                .all(|(slot, addr)| [0, 2, 6].contains(&slot) || addr.is_undefined(8))
+        );
+
+        for block in &plan.blocks {
+            let (fshd, fsse) = hdf5_pure_format::__private::serialize_free_space_manager(
+                widths(8, 8),
+                &block.sections,
+                block.fshd_addr,
+                block.fsse_addr,
+                block.class,
+            )
+            .unwrap();
+            assert_eq!(
+                block.fsse_addr,
+                block.fshd_addr.offset(fshd.len() as u64),
+                "FSSE follows its FSHD"
+            );
+            assert_eq!(
+                block.fsse_addr.offset(fsse.len() as u64),
+                if block.kind == ManagerKind::PagedLargeGeneric {
+                    plan.end_of_managers
+                } else {
+                    plan.blocks
+                        .iter()
+                        .find(|candidate| candidate.fshd_addr > block.fshd_addr)
+                        .unwrap()
+                        .fshd_addr
+                },
+                "manager blocks remain contiguous"
+            );
         }
-        assert_eq!(prev, 15000);
+    }
+
+    #[test]
+    fn manager_slots_translate_to_semantic_kinds_only_at_the_storage_boundary() {
+        assert_eq!(
+            manager_kind(FileSpaceStrategy::FsmAggr, 7),
+            Some(ManagerKind::Flat)
+        );
+        assert_eq!(
+            manager_kind(FileSpaceStrategy::Page, 0),
+            Some(ManagerKind::PagedSmallMetadata)
+        );
+        assert_eq!(
+            manager_kind(FileSpaceStrategy::Page, 2),
+            Some(ManagerKind::PagedSmallRaw)
+        );
+        assert_eq!(
+            manager_kind(FileSpaceStrategy::Page, 6),
+            Some(ManagerKind::PagedLargeGeneric)
+        );
+        assert_eq!(manager_kind(FileSpaceStrategy::Page, 7), None);
     }
 
     #[rstest]
