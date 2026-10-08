@@ -69,24 +69,6 @@ pub struct BTreeV2Image {
     pub nodes: Vec<u8>,
 }
 
-/// Returns the size in bytes of a version 2 B-tree header at these widths.
-pub const fn btree_v2_header_size(offset_width: OffsetWidth, length_width: LengthWidth) -> usize {
-    // signature(4) + version(1) + type(1) + node size(4) + record size(2) +
-    // depth(2) + split %(1) + merge %(1) + root address + records in root(2) +
-    // total records + checksum(4)
-    4 + 1
-        + 1
-        + 4
-        + 2
-        + 2
-        + 1
-        + 1
-        + offset_width.get() as usize
-        + 2
-        + length_width.get() as usize
-        + 4
-}
-
 /// Spreads `total` items over `parts` groups, the first `total % parts` groups one larger than the
 /// rest.
 ///
@@ -229,7 +211,10 @@ impl BTreeV2Plan {
         }
 
         let root = self.nodes.last().expect("a plan always has a root");
-        let mut header = Vec::with_capacity(btree_v2_header_size(offset_width, length_width));
+        let mut header = Vec::with_capacity(crate::btree_v2::btree_v2_header_size(
+            offset_width,
+            length_width,
+        ));
         header.extend_from_slice(b"BTHD");
         header.push(0); // version
         header.push(self.tree_type);
@@ -253,7 +238,7 @@ impl BTreeV2Plan {
         header.extend_from_slice(&checksum.to_le_bytes());
         debug_assert_eq!(
             header.len(),
-            btree_v2_header_size(offset_width, length_width)
+            crate::btree_v2::btree_v2_header_size(offset_width, length_width)
         );
 
         BTreeV2Image { header, nodes }
@@ -428,8 +413,10 @@ mod tests {
     #[test]
     fn a_planned_tree_parses_back_to_its_header_and_records() {
         let records: Vec<u8> = (0..34).collect();
-        let nodes_address =
-            StoredAddress::new(btree_v2_header_size(OFFSET_WIDTH, LENGTH_WIDTH) as u64);
+        let nodes_address = StoredAddress::new(crate::btree_v2::btree_v2_header_size(
+            OFFSET_WIDTH,
+            LENGTH_WIDTH,
+        ) as u64);
         let plan = BTreeV2Plan::new(8, 2, 17, BTREE_V2_NODE_SIZE, OFFSET_WIDTH).unwrap();
         let image = plan.serialize(&records, nodes_address, OFFSET_WIDTH, LENGTH_WIDTH);
 
