@@ -193,8 +193,7 @@ impl FreeList {
     /// A partially free or fully allocated range is valid because the caller has already decided
     /// its fate and uses this method to update the list. The paged editor uses it to lift a whole
     /// free page out of the per-page-type lists before
-    /// re-filing it as one free page without a page-type classification
-    /// (`PagedEdit::promote_whole_free_pages`).
+    /// re-filing it as one free page without a page-type classification.
     pub(crate) fn take_range(&mut self, extent: Extent) {
         let mut out = Vec::with_capacity(self.regions.len() + 1);
         for region in self.regions.drain(..) {

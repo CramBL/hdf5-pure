@@ -122,19 +122,6 @@ pub(crate) fn read_persisted_sections_source<S: crate::source::Source>(
     Ok((sections, blocks))
 }
 
-/// Page type of an allocation in a paged file (`H5F_FSPACE_STRATEGY_PAGE`). Such
-/// a file never mixes metadata and raw data within one page, so the two kinds of
-/// allocation are kept in separate pages and their free space is tracked by
-/// separate managers.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub(crate) enum PageType {
-    /// File metadata: object headers, extensible-array blocks, heaps, and the
-    /// free-space blocks themselves.
-    Meta,
-    /// Raw dataset data: contiguous data blocks and chunk contents.
-    Raw,
-}
-
 /// Rounds `value` up to the next multiple of `page`.
 pub(crate) fn align_up(value: u64, page: FileSpacePageSize) -> u64 {
     value.div_ceil(page.get()) * page.get()
