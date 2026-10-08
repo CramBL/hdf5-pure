@@ -154,7 +154,7 @@
 //! space ([`FreeList::release_all`]), and drops it otherwise. A paged session
 //! merges a region shorter than a page only with free space in the same page, and
 //! a region of a page or more only with whole free pages or with the space it
-//! cannot place ([`PagedEdit::unclassified`]). It records the free tail of a page it pads
+//! cannot place (unclassified PAGE space). It records the free tail of a page it pads
 //! whatever the threshold. When freed space and dropped regions form
 //! a run reaching end-of-file, the commit truncates the file to where the run
 //! starts, rounded up to a page boundary in a paged file. A paged session counts
@@ -196,8 +196,8 @@
 //! (issue #261). A paged file (`H5F_FSPACE_STRATEGY_PAGE`) draws only from free
 //! space of the page type it is placing, so reuse cannot make metadata and raw
 //! data share a page — except from pages that are *wholly* free, which hold
-//! nothing of either type to be mixed with and so may be opened for whichever
-//! type asks ([`PagedEdit::alloc_typed`]). The free-space rewrite a commit
+//! nothing of either type to be mixed with and so may be opened for either page
+//! type ([`PagedEdit::allocate`]). The free-space rewrite a commit
 //! performs is placed through the same allocator where anything fits, rather than
 //! at end-of-file (which on a paged file costs a page of its own), and that is
 //! what keeps a delete-and-recreate workload from growing by a tail per commit
@@ -217,14 +217,14 @@
 //! alike, and it puts a chunk index among its metadata where this crate puts one
 //! beside the chunk data. Such space is kept and written back where it was found,
 //! but never handed to an allocation
-//! ([`PagedEdit::unclassified`], [`WriteEngine::index_is_provably_raw`]), because
+//! (unclassified PAGE space, [`WriteEngine::index_is_provably_raw`]), because
 //! placing a byte of the wrong kind in a page is the one thing paging exists to
 //! prevent and no reader would report it.
 //!
 //! Space this editor vacates and cannot place is *dead* rather than lost
-//! ([`PagedEdit::dead`]): out of use, not yet reusable. A page whose every byte is
+//! (dead PAGE space): out of use, not yet reusable. A page whose every byte is
 //! free or dead holds nothing of either type, so it is promoted whole into the
-//! free lists ([`PagedEdit::promote_whole_free_pages`]) — the same rule that lets
+//! free lists (whole-page promotion) - the same rule that lets
 //! one page type claim a wholly free page from the other. That is what bounds a
 //! paged file under delete-and-recreate churn: reclaim lands at page granularity
 //! where the page type cannot be shown, rather than not at all (issue #388).
@@ -263,8 +263,6 @@
 //! is still the separate repack path.
 
 use std::borrow::Cow;
-use std::cmp::Reverse;
-use std::collections::BTreeSet;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::io::{Read, Seek, SeekFrom};
@@ -322,9 +320,12 @@ use crate::file_writer::{
 };
 use crate::filter_pipeline::FilterPipeline;
 use crate::filters::{ChunkContext, FilterScratch, compress_chunk_with, decompress_chunk};
-use crate::free_space::{self, Extent as FreeExtent, FreeList, TrackedSpace};
+use crate::free_space::{
+    self, Extent as FreeExtent, FreeClass, FreeList, PageTransition, PageType,
+    PagedAllocationSnapshot, PagedEdit, PagedPostFree, PagedSections, TrackedSpace,
+};
 use crate::free_space_manager::PersistedSections;
-use crate::free_space_manager::{self, PageType, PagedManagerPlan, align_up, plan_paged_managers};
+use crate::free_space_manager::{self, PagedManagerPlan, align_up, plan_paged_managers};
 use crate::group_v2::resolve_group_entries_from_source;
 use crate::image::{FileImage, HandleImage, MirrorImage, WriteBuffering};
 use crate::libver::LibVer;
@@ -1418,7 +1419,7 @@ struct FreeSnapshot {
     /// the reserve — so restoring it is what keeps the session's picture of the
     /// disk exact (issue #387).
     reserved: FreeList,
-    paged: Option<(FreeList, FreeList)>,
+    paged: Option<PagedAllocationSnapshot>,
     /// The heap-collection provenance, rolled back with the free lists.
     ///
     /// [`resolve_overwrite_bytes`](WriteEngine::resolve_overwrite_bytes) records
@@ -1733,588 +1734,11 @@ pub(crate) fn create_would_refuse_reopen(
     None
 }
 
-/// What a commit knows about a region it is vacating, which is what decides
-/// where the region may be recorded.
-///
-/// A flat file ignores the distinction — every vacated region is simply free —
-/// and a paged one cannot, because a byte handed out for the wrong page type
-/// mixes the page it lands in.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum FreeClass {
-    /// The region sits in pages of this type, so it becomes free space of that
-    /// type and may serve the next allocation of it.
-    Page(PageType),
-    /// The region provably holds nothing live, but which page type surrounds it
-    /// is not provable — a chunk index this crate cannot place
-    /// ([`WriteEngine::index_is_provably_raw`]) is the case that arises.
-    ///
-    /// It may not be handed out as either type, so it is recorded as *dead*
-    /// rather than free: bytes that are no longer in use and are not yet
-    /// reusable. Once every other byte of the page around it is free or dead
-    /// too, the page holds nothing of either type and
-    /// [`PagedEdit::promote_whole_free_pages`] turns the whole page into free
-    /// space, which is the same rule that lets one page type claim a wholly free
-    /// page from the other ([`PagedEdit::alloc_typed`]).
-    Dead,
-}
-
-impl From<PageType> for FreeClass {
-    fn from(ty: PageType) -> Self {
-        FreeClass::Page(ty)
-    }
-}
-
-/// Paged-file bookkeeping for the whole-file editor (issue #198, step 1).
-///
-/// A paged file never mixes metadata and raw data within one page, so this tracks
-/// free space per page *type* — the one distinction that governs where a byte may
-/// be placed — and keeps the commit's appends homogeneous by padding a tail page
-/// whenever the page type changes.
-///
-/// One list per type, not one per on-disk manager. A paged file records its free
-/// space in three managers (metadata-small, raw-small, and a generic-large one for
-/// whole free pages), but for space this session can place, that split is a size
-/// classification of the same raw or metadata space, and [`plan_paged_managers`]
-/// recomputes it from scratch at every commit. Tracking it here as well would only
-/// stop a freed chunk-data run and the freed index that abuts it from coalescing —
-/// leaving two neighboring holes neither of which fits the dataset that just
-/// vacated both (issue #261).
-///
-/// The free lists are seeded only when the file *persists* its free space. A paged
-/// non-persisting file has no on-disk record of which pages hold metadata and
-/// which hold raw data, so there is nothing to seed and no way to stay segregated;
-/// [`commit`](WriteEngine::commit) rejects it outright, exactly as the bounded
-/// backend does.
-struct PagedEdit {
-    page_size: FileSpacePageSize,
-    /// Free space inside metadata pages, plus whole free pages this session last
-    /// saw as metadata. A page holding nothing belongs to no type, so
-    /// [`alloc_typed`](Self::alloc_typed) lets raw data claim one from here.
-    meta: FreeList,
-    /// Free space inside raw-data pages, plus whole free pages this session last
-    /// saw as raw — including every one seeded from the generic-large manager,
-    /// which records no type. Metadata claims from here on the same terms.
-    raw: FreeList,
-    /// Free space this session may record but must never hand out, because the
-    /// page it sits in is of unknown type. Seeded at open — nothing this engine
-    /// frees is ever of unknown type, so it only ever shrinks, and only where a
-    /// commit released the end of the file over it (issue #418) — and written
-    /// back to the generic-large manager verbatim, so the space stays available
-    /// to the writer that recorded it.
-    ///
-    /// It exists because the reference C library's generic-large manager is
-    /// exactly that: `H5F_MEM_PAGE_GENERIC` is *"large-sized generic: meta and
-    /// raw"*, and under paged aggregation on a contiguous-address driver every
-    /// allocation of a page or more lands there whatever its type. Its
-    /// page-alignment tail (`H5MF__alloc_pagefs`) is then recorded as a free
-    /// section in the same manager — a sub-page fragment sitting in a page whose
-    /// earlier bytes are live. Handing such a fragment to raw data would put raw
-    /// bytes in a metadata page, so a section that is not a whole run of aligned
-    /// pages is kept here rather than guessed at.
-    unclassified: FreeList,
-    /// Space this session has vacated whose page type it could not prove
-    /// ([`FreeClass::Dead`]): no longer in use, and not reusable as either type.
-    ///
-    /// It is held rather than discarded so that the page around it can still be
-    /// reclaimed: a page every one of whose bytes is free or dead holds nothing
-    /// of either type, and [`promote_whole_free_pages`](Self::promote_whole_free_pages)
-    /// moves it into the typed lists whole. Without this list those bytes would
-    /// simply be lost, and the page they sit in could never be shown to be empty
-    /// — which is what made a paged file leak a chunk index per deleted empty
-    /// resizable dataset (issue #388).
-    ///
-    /// Unlike the free lists this one is not written to disk: a dead sub-page
-    /// fragment is not free space by the file's account, and recording it in the
-    /// only manager that takes untyped space would offer it to the reference
-    /// library for either type. A fragment that never completes a page is
-    /// therefore forgotten at close, which wastes its bytes and nothing more.
-    dead: FreeList,
-    /// Page type of the current tail page. `None` until this session's first
-    /// typed append; the file is page-aligned at open, so the first append never
-    /// needs to pad regardless of this.
-    last: Option<PageType>,
-    /// Free tails left by padding a metadata page before a raw append.
-    meta_pad: Vec<FreeExtent>,
-    /// Free tails left by padding a raw page before a metadata append.
-    raw_pad: Vec<FreeExtent>,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum PageTransition {
-    Unchanged,
-    Pad {
-        extent: FreeExtent,
-        track_as: Option<PageType>,
-    },
-}
-
-impl PagedEdit {
-    /// Returns the page transition required before appending `ty` at `eoa`.
-    ///
-    /// A partial tail page whose type matches `ty` stays open for more bytes. A partial tail page of
-    /// another known type is padded and the padding keeps that outgoing type. A partial tail page
-    /// whose type is unknown is padded without a classification. An aligned end needs no padding.
-    fn plan_transition(&self, eoa: u64, ty: PageType) -> Result<PageTransition, FormatError> {
-        let page_size = self.page_size.get();
-        if eoa % page_size == 0 || self.last == Some(ty) {
-            return Ok(PageTransition::Unchanged);
-        }
-        let pad_len = page_size - eoa % page_size;
-        let extent = FreeExtent::new(eoa, pad_len).ok_or(FormatError::OffsetOverflow {
-            offset: eoa,
-            length: pad_len,
-        })?;
-        Ok(PageTransition::Pad {
-            extent,
-            track_as: self.last,
-        })
-    }
-
-    /// Records a page transition after its padding has been appended successfully.
-    fn record_transition(&mut self, ty: PageType, transition: PageTransition) {
-        if let PageTransition::Pad { extent, track_as } = transition {
-            match track_as {
-                Some(PageType::Meta) => self.meta_pad.push(extent),
-                Some(PageType::Raw) => self.raw_pad.push(extent),
-                None => {}
-            }
-        }
-        self.last = Some(ty);
-    }
-
-    fn new(page_size: FileSpacePageSize) -> Self {
-        PagedEdit {
-            page_size,
-            meta: FreeList::new(),
-            raw: FreeList::new(),
-            unclassified: FreeList::new(),
-            dead: FreeList::new(),
-            last: None,
-            meta_pad: Vec::new(),
-            raw_pad: Vec::new(),
-        }
-    }
-
-    /// Which list a persisted section from File Space Info `slot` belongs in.
-    ///
-    /// Slot 0 (SUPER) is small metadata and slot 2 (DRAW) is small raw: both name
-    /// a page type outright. Slot 6 is the generic-large manager, which holds
-    /// space of *either* type (see [`unclassified`](Self::unclassified)), so a
-    /// section from it is only safe to reuse when it covers whole aligned pages —
-    /// and such a section belongs to no type at all, since nothing lives in those
-    /// pages to be mixed with. It is filed under raw and reached from either side
-    /// through [`alloc_typed`](Self::alloc_typed), rather than kept in a third
-    /// list, so that a run of free pages still coalesces with the sub-page
-    /// fragment beside it. Everything else, including the per-type large managers
-    /// a multi/split driver would populate, is left unclassified rather than
-    /// guessed at.
-    fn slot_list(
-        slot: usize,
-        extent: FreeExtent,
-        page_size: FileSpacePageSize,
-    ) -> Option<PageType> {
-        let page_size = page_size.get();
-        match slot {
-            0 => Some(PageType::Meta),
-            2 => Some(PageType::Raw),
-            6 if extent.start() % page_size == 0 && extent.len() % page_size == 0 => {
-                Some(PageType::Raw)
-            }
-            _ => None,
-        }
-    }
-
-    /// Records `extent` in the list its class names: the free space of one page type, or the dead
-    /// list for space whose page type is unproven.
-    /// [`plan_paged_managers`] splits and classes the free lists into the on-disk
-    /// managers at serialization time, so this only has to route.
-    ///
-    /// Takes the lists rather than `&mut self` because a commit routes into
-    /// *copies* of them — nothing is free until the superblock repoint — and the
-    /// rule must not be restated at that call site.
-    fn route_free(
-        meta: &mut FreeList,
-        raw: &mut FreeList,
-        dead: &mut FreeList,
-        extent: FreeExtent,
-        class: FreeClass,
-    ) {
-        match class {
-            FreeClass::Page(PageType::Meta) => meta.free(extent),
-            FreeClass::Page(PageType::Raw) => raw.free(extent),
-            FreeClass::Dead => dead.free(extent),
-        }
-    }
-
-    /// Move every page that is *wholly* free or dead out of the three lists and
-    /// into the raw list as one whole free page.
-    ///
-    /// A paged file may only place a byte in a page of its own type, which is why
-    /// free space is tracked per type at all. A page holding nothing belongs to no
-    /// type, so it may be opened for whichever type asks — the rule
-    /// [`alloc_typed`](Self::alloc_typed) already applies to a whole page inside
-    /// the other type's list, and [`slot_list`](Self::slot_list) to a whole page
-    /// read back from the untyped manager. This applies the same rule one level
-    /// up, to a page whose emptiness only the three lists *together* establish:
-    /// part free metadata, part free raw data, part space vacated by an object
-    /// whose page type could not be proven ([`FreeClass::Dead`]).
-    ///
-    /// That last part is what makes it necessary rather than a tidy-up. Dead
-    /// space is never handed out on its own, so without this step a deleted chunk
-    /// index this crate cannot place is lost for good, and a paged file under
-    /// delete-and-recreate churn spends a page every few cycles that it can never
-    /// take back (issue #388). Promoting the page is not a guess about what once
-    /// sat in it: nothing live is left there to be mixed with.
-    ///
-    /// Filed under raw, which is where a whole free page belongs by the same
-    /// convention [`slot_list`](Self::slot_list) reads them back under, and
-    /// reachable from either side through `alloc_typed`.
-    fn promote_whole_free_pages(
-        meta: &mut FreeList,
-        raw: &mut FreeList,
-        dead: &mut FreeList,
-        page_size: FileSpacePageSize,
-    ) {
-        let page_size = page_size.get();
-        // The lists are individually coalesced and pairwise disjoint (a byte is
-        // vacated once), so their union is a plain merge: sort by address and join
-        // runs that touch. A page is promotable exactly when it lies inside one of
-        // those runs, which is what a page split across two of the lists needs.
-        let mut all = meta.extents();
-        all.extend(raw.extents());
-        all.extend(dead.extents());
-        all.sort_unstable_by_key(|extent| extent.start());
-        let mut runs: Vec<FreeExtent> = Vec::with_capacity(all.len());
-        for extent in all {
-            match runs.last_mut() {
-                Some(run) if run.end() >= extent.start() => {
-                    *run = FreeExtent::new(run.start(), run.end().max(extent.end()) - run.start())
-                        .expect("merged free extents stay non-empty and in bounds");
-                }
-                _ => runs.push(extent),
-            }
-        }
-        for extent in runs {
-            // The whole pages inside the run: its aligned interior, exactly as
-            // `FreeList::alloc_whole_units` takes one. The partial edges sit in
-            // pages whose other bytes may be live, so they keep whatever they are.
-            let Some(first) = extent.start().checked_next_multiple_of(page_size) else {
-                continue;
-            };
-            let last = (extent.end() / page_size) * page_size;
-            let Some(whole_pages) = FreeExtent::new(first, last.saturating_sub(first)) else {
-                continue;
-            };
-            meta.take_range(whole_pages);
-            raw.take_range(whole_pages);
-            dead.take_range(whole_pages);
-            raw.free(whole_pages);
-        }
-    }
-
-    /// Draw `len` bytes of page type `ty` from this file's free space, or `None`
-    /// when nothing can serve it.
-    ///
-    /// Its own list first, which is the only place a *partly* free page can serve
-    /// it. Failing that, whole pages inside the other type's free space: a page
-    /// with nothing in it belongs to neither type, so opening it for `ty` cannot
-    /// mix it. Enough whole pages to cover `len` are claimed, and the remainder
-    /// joins `ty`'s list, since those pages now hold `ty`.
-    ///
-    /// The cross-type claim is what lets space survive a close. A whole free page
-    /// is written to the generic-large manager, which records no page type, so
-    /// every one of them comes back from disk as raw ([`slot_list`](Self::slot_list));
-    /// without this, metadata could never reuse a page again after a reopen, and
-    /// each session's commits would append past all of them (issue #286).
-    fn alloc_typed(&mut self, len: u64, ty: PageType) -> Option<FreeExtent> {
-        let (own, other) = match ty {
-            PageType::Meta => (&mut self.meta, &mut self.raw),
-            PageType::Raw => (&mut self.raw, &mut self.meta),
-        };
-        if let Some(extent) = own.alloc(len) {
-            return Some(extent);
-        }
-        let span = len.checked_next_multiple_of(self.page_size.get())?;
-        let claimed = other.alloc_whole_units(span, self.page_size.get())?;
-        if span == len {
-            return Some(claimed);
-        }
-        let allocation = FreeExtent::new(claimed.start(), len)
-            .expect("the allocation is a non-empty prefix of the claimed extent");
-        let remainder = FreeExtent::new(allocation.end(), span - len)
-            .expect("the remainder is a non-empty suffix of the claimed extent");
-        own.free(remainder);
-        Some(allocation)
-    }
-
-    /// The longest contiguous run [`alloc_typed`](Self::alloc_typed) could serve
-    /// `ty` from in one call, or `0` when nothing could: the larger of its own
-    /// list's longest region and the longest run of whole free pages in the
-    /// other's.
-    ///
-    /// The same two sources in the same terms, so a caller sizing a draw on this
-    /// figure gets exactly the run `alloc_typed` then hands it.
-    fn largest_typed(&self, ty: PageType) -> u64 {
-        let (own, other) = match ty {
-            PageType::Meta => (&self.meta, &self.raw),
-            PageType::Raw => (&self.raw, &self.meta),
-        };
-        own.largest()
-            .max(other.largest_whole_units(self.page_size.get()))
-    }
-
-    /// Every free region this session could still hand out, ascending by address.
-    /// Used for space accounting, where the caller wants one total rather than a
-    /// per-page-type breakdown.
-    ///
-    /// [`unclassified`](Self::unclassified) is excluded: it is free space, and
-    /// [`File::persisted_free_space`](crate::File::persisted_free_space) reports
-    /// it as such, but this session will never place anything in it, which is
-    /// what the accounting field it feeds is about.
-    fn reusable_sections(&self) -> Vec<(u64, u64)> {
-        let mut out = self.meta.sections();
-        out.extend(self.raw.sections());
-        out.sort_unstable_by_key(|&(addr, _)| addr);
-        debug_assert!(
-            out.windows(2)
-                .all(|w| w[0].0.saturating_add(w[0].1) <= w[1].0),
-            "a region is free in both the metadata and the raw list, so the two \
-             page-type lists have stopped being disjoint"
-        );
-        out
-    }
-}
-
-/// The free space a paged commit is about to write to disk, as
-/// [`WriteEngine::paged_post_free`] computes it: the session's lists with this
-/// commit's frees folded in, held apart from the session until the repoint makes
-/// them true.
-struct PagedPostFree {
-    page_size: FileSpacePageSize,
-    meta: FreeList,
-    raw: FreeList,
-    /// The session's dead space plus this commit's, with every page the three
-    /// lists together empty already promoted out of it
-    /// ([`PagedEdit::promote_whole_free_pages`]).
-    dead: FreeList,
-    /// Nothing in a commit adds to or draws from this one.
-    unclassified: FreeList,
-}
-
-impl PagedPostFree {
-    /// Gives the run of unreferenced space that reaches `eoa` back to the
-    /// filesystem: drops it from every list here and returns the end-of-allocation
-    /// the commit publishes, which the caller truncates the file to. Returns `eoa`
-    /// itself when nothing at the end of the file is free.
-    ///
-    /// The cut is rounded **up** to a page boundary, so a paged file's
-    /// end-of-allocation stays a whole number of pages: a run that begins
-    /// mid-page begins in a page whose earlier bytes are live, and only the whole
-    /// pages above it can go. That is the same granularity the reference C
-    /// library shrinks a paged file at — its `H5MF__sect_large_can_shrink` sees
-    /// only the large (whole-page) sections, the small per-type managers having
-    /// no shrink at all — so a partial page at the end is kept and recorded,
-    /// exactly as it is there.
-    ///
-    /// Every list is cut, including the space this session may record but never
-    /// place ([`PagedEdit::unclassified`]) and the space it has vacated but
-    /// cannot type ([`PagedEdit::dead`]). Bytes past the end-of-allocation are
-    /// not in the file at all, so a section describing them would point outside
-    /// it — the one thing the persisted managers must never do.
-    ///
-    /// Whole pages holding [`TRAILING_RESERVE_TAILS`] tails stay in the file, and
-    /// stay recorded, for the reason [`release_trailing_run`] gives on a flat
-    /// file — with the same refusal to release a run that gives back less than it
-    /// keeps.
-    fn release_trailing(&mut self, eoa: u64, tail_len: u64) -> u64 {
-        let start = free_space::trailing_run_start(
-            [&self.meta, &self.raw, &self.dead, &self.unclassified],
-            eoa,
-        );
-        let cut = align_up(start, self.page_size);
-        if cut >= eoa {
-            return eoa;
-        }
-        // Whole pages are this file's unit, so the reserve is one too, and the
-        // same "give back more than you keep" condition applies.
-        let keep = align_up(TRAILING_RESERVE_TAILS * tail_len, self.page_size);
-        if eoa - cut < 2 * keep {
-            return eoa;
-        }
-        let published_eoa = cut + keep;
-        let span = eoa - published_eoa;
-        // A section straddling the cut keeps the part that is still inside the
-        // file, which is what `take_range` leaves of it.
-        let released = FreeExtent::new(published_eoa, span)
-            .expect("the released range ends at the current end of allocation");
-        self.meta.take_range(released);
-        self.raw.take_range(released);
-        self.dead.take_range(released);
-        self.unclassified.take_range(released);
-        published_eoa
-    }
-
-    /// Tracks each of `extents` that is at least `threshold` bytes long or merges into free space
-    /// ([`TrackedSpace`]), and returns `eoa` less the dropped pages that end it.
-    ///
-    /// An extent shorter than a page merges only with free space in its own page, and one of a
-    /// page or more only with a whole free page or with [`unclassified`](Self::unclassified)
-    /// space. Where `threshold` is longer than a page, a page that a merge leaves wholly free is
-    /// offered again as one whole free page, and is dropped unless it merges in turn.
-    fn release_all(
-        &mut self,
-        threshold: u64,
-        eoa: u64,
-        extents: impl IntoIterator<Item = (FreeExtent, FreeClass)>,
-    ) -> u64 {
-        let extents: Vec<_> = extents.into_iter().collect();
-        let mut dropped = self.release_each(threshold, extents.iter().copied());
-        if threshold > self.page_size.get() {
-            let completed = self.pages_completed_by_merges(&extents, &dropped);
-            dropped.extend(self.release_pages(threshold, completed));
-        }
-        self.give_back(eoa, dropped)
-    }
-
-    /// Returns each page that one of `extents` shorter than a page, tracked because it merged,
-    /// leaves wholly free across the metadata, raw, and dead lists.
-    fn pages_completed_by_merges(
-        &self,
-        extents: &[(FreeExtent, FreeClass)],
-        dropped: &[(FreeExtent, FreeClass)],
-    ) -> BTreeSet<FreeExtent> {
-        let page_size = self.page_size.get();
-        let dropped: BTreeSet<_> = dropped.iter().map(|&(extent, _)| extent).collect();
-        extents
-            .iter()
-            .map(|&(extent, _)| extent)
-            .filter(|extent| (1..page_size).contains(&extent.len()) && !dropped.contains(extent))
-            .flat_map(|extent| [extent.start(), extent.end() - 1])
-            .map(|addr| addr / page_size * page_size)
-            .filter_map(|page| FreeExtent::new(page, page_size))
-            .filter(|&page| {
-                [&self.meta, &self.raw, &self.dead]
-                    .into_iter()
-                    .map(|list| list.covered_len(page))
-                    .sum::<u64>()
-                    == page_size
-            })
-            .collect()
-    }
-
-    /// Takes each page at the addresses in `pages` out of the lists, offers it again as a whole
-    /// free page against `threshold`, and returns the pages it drops.
-    fn release_pages(
-        &mut self,
-        threshold: u64,
-        pages: BTreeSet<FreeExtent>,
-    ) -> Vec<(FreeExtent, FreeClass)> {
-        // `H5MF__sect_small_merge` (`H5MFsection.c`, HDF5 1.14.6) returns a small section that a
-        // merge grows to a whole page through `H5MF_xfree`, which offers it as a large section
-        // against the threshold again.
-        let pages: Vec<_> = pages.into_iter().collect();
-        for &page in &pages {
-            for list in [&mut self.meta, &mut self.raw, &mut self.dead] {
-                list.take_range(page);
-            }
-        }
-        // A whole free page belongs to no page type and is filed under raw, as `slot_list` files
-        // one read back from the generic-large manager.
-        self.release_each(
-            threshold,
-            pages
-                .into_iter()
-                .map(|page| (page, FreeClass::Page(PageType::Raw))),
-        )
-    }
-
-    /// Returns `eoa` lowered to the start of the run of `dropped` extents of at least a page that
-    /// ends at it, rounded up to a page boundary.
-    ///
-    /// The part of a page below that boundary is tracked, under the class of the run's lowest
-    /// extent.
-    fn give_back(&mut self, eoa: u64, mut dropped: Vec<(FreeExtent, FreeClass)>) -> u64 {
-        let page_size = self.page_size.get();
-        // `H5MF__sect_large_can_shrink` (`H5MFsection.c`, HDF5 1.14.6) lets a section of at least a
-        // page that ends the allocation shrink a paged file, and the small section class has no
-        // shrink callback.
-        dropped.retain(|&(extent, _)| extent.len() >= page_size);
-        dropped.sort_unstable_by_key(|&(extent, _)| Reverse(extent.start()));
-        let mut start = eoa;
-        let mut head = None;
-        for (extent, class) in dropped {
-            if extent.end() != start {
-                break;
-            }
-            start = extent.start();
-            head = Some(class);
-        }
-        // `H5MF__sect_large_shrink` keeps the part of a page below the section's first whole page
-        // tracked, so that the end of allocation stays on a page boundary.
-        if let Some(class) = head.filter(|_| !start.is_multiple_of(page_size)) {
-            let head = FreeExtent::new(start, align_up(start, self.page_size) - start)
-                .expect("page alignment leaves a non-empty prefix");
-            self.track(head, class);
-        }
-        align_up(start, self.page_size)
-    }
-}
-
-impl TrackedSpace for PagedPostFree {
-    type Class = FreeClass;
-
-    fn merges(&self, extent: FreeExtent) -> bool {
-        let page_size = self.page_size.get();
-        let typed = [&self.meta, &self.raw, &self.dead];
-        if extent.len() < page_size {
-            // A section shorter than a page is small, and `H5MF__sect_small_can_merge`
-            // (`H5MFsection.c`, HDF5 1.14.6) lets two small sections merge only within one page. A
-            // page holds one page type, so the free space beside an extent inside its page is of
-            // the extent's type whichever list holds it.
-            return typed
-                .into_iter()
-                .any(|list| list.adjoins_within(extent, page_size));
-        }
-        // A section of at least a page is large, and `H5MF__sect_large_can_merge` (`H5MFsection.c`,
-        // HDF5 1.14.6) lets it merge with an adjoining large section: a whole free page, or a
-        // section of the generic-large manager.
-        typed
-            .into_iter()
-            .any(|list| list.adjoins_whole_unit(extent, page_size))
-            || self.unclassified.adjoins(extent)
-    }
-
-    fn track(&mut self, extent: FreeExtent, class: FreeClass) {
-        PagedEdit::route_free(&mut self.meta, &mut self.raw, &mut self.dead, extent, class);
-    }
-}
-
-/// How much free space a released trailing run leaves behind, as a multiple of
-/// the manager tail a persisting commit writes.
-///
-/// A persisting file rewrites those blocks on *every* commit, and a rewrite can
-/// never land in its own predecessor's extent — the on-disk superblock still
-/// points at it until the repoint, so overwriting it would destroy the file a
-/// crash there falls back on. The end of the file therefore has to keep room for
-/// the tails that follow this one, and a tail is not a fixed size: every
-/// abandoned one adds a section to the managers, which makes the *next* tail
-/// longer again.
-///
-/// Measured rather than chosen, on the shipped rule. At one,
-/// `a_released_file_holds_its_length_across_many_tail_rewrites` leaves the flat
-/// file alternating between 5,992 and 6,303 bytes instead of holding one length,
-/// because a tail a section longer than the one that sized the reserve does not
-/// fit it. At two, `persisting_churn_reaches_a_steady_size` has not settled by
-/// its sixteenth round — 15,095 bytes after a middle third that held 14,685.
-/// Three is the smallest value both accept; four is one tail of margin, the tail
-/// length being itself a function of a section count that varies with the file.
-const TRAILING_RESERVE_TAILS: u64 = 4;
-
 /// Releases the run of free space reaching `eoa` from a flat file's post-commit
 /// free list, and returns the end-of-allocation the commit should publish
 /// (issue #418).
 ///
-/// Not the whole run: [`TRAILING_RESERVE_TAILS`] tails' worth of it stays in the
+/// Not the whole run: [`free_space::TRAILING_RESERVE_TAILS`] tails' worth of it stays in the
 /// file, and stays recorded, so the commits after this one still have somewhere
 /// to write their own manager blocks.
 ///
@@ -2328,7 +1752,7 @@ const TRAILING_RESERVE_TAILS: u64 = 4;
 /// ends in live bytes and when the run is not worth releasing.
 fn release_trailing_run(post: &mut FreeList, eoa: u64, tail_len: u64) -> u64 {
     let run_start = free_space::trailing_run_start([&*post], eoa);
-    let Some(keep) = TRAILING_RESERVE_TAILS.checked_mul(tail_len) else {
+    let Some(keep) = free_space::TRAILING_RESERVE_TAILS.checked_mul(tail_len) else {
         return eoa;
     };
     let Some(release_min) = keep.checked_mul(2) else {
@@ -3107,7 +2531,7 @@ impl WriteEngine {
     fn gather_page_size(&self) -> u64 {
         self.paged
             .as_ref()
-            .map_or(DEFAULT_GATHER_PAGE, |pg| pg.page_size.get())
+            .map_or(DEFAULT_GATHER_PAGE, |pg| pg.page_size().get())
     }
 
     /// Let this session's writes span operations, up to `max_bytes` of them: the
@@ -3327,13 +2751,12 @@ impl WriteEngine {
         // free region that a later commit would hand out into live data.
         if paged {
             // A paged file's free space is segregated across per-page-type
-            // managers, so read each slot on its own and keep the page type its
-            // slot implies ([`PagedEdit::slot_list`]). Flattening them (as the
-            // non-paged path below does) would lose exactly the distinction the
+            // managers, so read each slot separately. The PAGE model keeps the
+            // page type implied by that slot. Flattening them (as the non-paged
+            // path below does) would lose exactly the distinction the
             // commit has to preserve. A section whose slot does not settle its page
             // type is recorded but never handed out.
-            let page_size = info.page_size;
-            let mut tagged: Vec<(FreeExtent, Option<PageType>)> = Vec::new();
+            let mut tagged: Vec<(usize, FreeExtent)> = Vec::new();
             for (slot, _, read) in &managers {
                 let Ok((sections, _)) = read else {
                     continue;
@@ -3342,8 +2765,7 @@ impl WriteEngine {
                     let Some(extent) = FreeExtent::new(s.addr.get(), s.size) else {
                         continue;
                     };
-                    let ty = PagedEdit::slot_list(*slot, extent, page_size);
-                    tagged.push((extent, ty));
+                    tagged.push((*slot, extent));
                 }
             }
             // Distinct sections have distinct addresses in any well-formed file,
@@ -3351,38 +2773,27 @@ impl WriteEngine {
             // advertise one address twice, and the overlap guard below already
             // discards the second of any such pair. No `debug_assert` here: this
             // parses untrusted bytes, which must not panic a debug build.
-            tagged.sort_unstable_by_key(|(extent, _)| extent.start());
+            tagged.sort_unstable_by_key(|&(_, extent)| extent.start());
             let mut prev_end = 0u64;
-            for (extent, ty) in tagged {
+            for (slot, extent) in tagged {
                 if extent.end() > file_len || extent.start() < prev_end {
                     continue;
                 }
                 prev_end = extent.end();
-                let pg = self
-                    .paged
+                self.paged
                     .as_mut()
-                    .expect("the paged state was just installed");
-                match ty {
-                    Some(ty) => PagedEdit::route_free(
-                        &mut pg.meta,
-                        &mut pg.raw,
-                        &mut pg.dead,
-                        extent,
-                        ty.into(),
-                    ),
-                    None => pg.unclassified.free(extent),
-                }
+                    .expect("the paged state was just installed")
+                    .seed_persisted(slot, extent);
             }
             // A page the seeded lists empty between them belongs to no type and
             // may serve either, so fold it in now rather than leaving it to the
             // first commit. Nothing this crate writes produces one — it files a
             // whole free page under a single manager — but a file another writer
             // laid out can, and the rule is the same wherever the page came from.
-            let pg = self
-                .paged
+            self.paged
                 .as_mut()
-                .expect("the paged state was just installed");
-            PagedEdit::promote_whole_free_pages(&mut pg.meta, &mut pg.raw, &mut pg.dead, page_size);
+                .expect("the paged state was just installed")
+                .finish_seed();
         } else if let Ok(mut sections) =
             managers
                 .iter()
@@ -4284,21 +3695,7 @@ impl WriteEngine {
             // fold, so nothing is cloned.
             (Some(pg), true) => pg.reusable_sections(),
             (None, true) => self.free.sections(),
-            (Some(pg), false) => {
-                let mut raw = pg.raw.clone();
-                for extent in self.reserved.extents() {
-                    raw.free(extent);
-                }
-                let mut out = pg.meta.sections();
-                out.extend(raw.sections());
-                out.sort_unstable_by_key(|&(addr, _)| addr);
-                debug_assert!(
-                    out.windows(2).all(|w| w[0].0 < w[1].0),
-                    "the same address is free in both the metadata and the raw \
-                     list, so the two page-type lists have stopped being disjoint"
-                );
-                out
-            }
+            (Some(pg), false) => pg.reusable_sections_with_raw(self.reserved.extents()),
             (None, false) => {
                 let mut free = self.free.clone();
                 for extent in self.reserved.extents() {
@@ -4359,7 +3756,7 @@ impl WriteEngine {
     /// - A **paged** file keeps its free space per page type in [`PagedEdit`]
     ///   rather than in [`free`](Self::free), so drawing from that list would be
     ///   drawing from the wrong one and would put a byte of one kind in a page of
-    ///   the other. It draws its reserve through [`PagedEdit::alloc_typed`] with
+    ///   the other. It draws its reserve through [`PagedEdit::allocate`] with
     ///   [`PageType::Raw`] instead, which is what keeps a page holding one kind.
     ///   Named as its own term at the call site rather than left to the argument
     ///   that the persist term already covers it (`append_prepare` refuses a
@@ -4501,7 +3898,7 @@ impl WriteEngine {
     /// move into the reserve right now, or `0` when nothing could.
     fn largest_raw_run(&self) -> u64 {
         match self.paged.as_ref() {
-            Some(pg) => pg.largest_typed(PageType::Raw),
+            Some(pg) => pg.largest(PageType::Raw),
             None => self.free.largest(),
         }
     }
@@ -4510,13 +3907,13 @@ impl WriteEngine {
     /// [`reserved`](Self::reserved), reporting whether a contiguous run that
     /// large was available.
     ///
-    /// A paged file draws through [`PagedEdit::alloc_typed`] with
+    /// A paged file draws through [`PagedEdit::allocate`] with
     /// [`PageType::Raw`], the same call the staged commit makes for a dataset's
     /// data, so the reserve is raw-typed space and an append spending it cannot
     /// mix a page. A flat file has one list and draws from it.
     fn take_raw_span(&mut self, len: u64) -> bool {
         let extent = match self.paged.as_mut() {
-            Some(pg) => pg.alloc_typed(len, PageType::Raw),
+            Some(pg) => pg.allocate(len, PageType::Raw),
             None => self.free.alloc(len),
         };
         match extent {
@@ -4540,7 +3937,7 @@ impl WriteEngine {
     /// The reserve is raw-typed on a paged file, so it goes back to the raw list.
     /// A run that was claimed whole from the metadata list is raw space now, and
     /// a page of it that is wholly free can be claimed back by either type
-    /// through [`PagedEdit::alloc_typed`], exactly as any other free page can.
+    /// through [`PagedEdit::allocate`], exactly as any other free page can.
     fn release_reserve(&mut self) {
         if self.reserved.is_empty() {
             return;
@@ -4549,7 +3946,7 @@ impl WriteEngine {
         match self.paged.as_mut() {
             Some(pg) => {
                 for extent in extents {
-                    pg.raw.free(extent);
+                    pg.return_allocation(extent, PageType::Raw);
                 }
             }
             None => {
@@ -4625,13 +4022,10 @@ impl WriteEngine {
         // file's length unchanged and the pass would cost a rewrite to publish
         // exactly what the commit before it did.
         let run_start = match self.paged.as_ref() {
-            Some(pg) => free_space::trailing_run_start(
-                [&pg.meta, &pg.raw, &pg.dead, &pg.unclassified],
-                tail_start,
-            ),
+            Some(pg) => pg.trailing_run_start(tail_start),
             None => free_space::trailing_run_start([&self.free], tail_start),
         };
-        if tail_end - run_start < 2 * TRAILING_RESERVE_TAILS * (tail_end - tail_start) {
+        if tail_end - run_start < 2 * free_space::TRAILING_RESERVE_TAILS * (tail_end - tail_start) {
             return Ok(());
         }
         self.commit_persisting(new_root, Vec::new(), TailPlacement::ReuseOnly)
@@ -5832,10 +5226,7 @@ impl WriteEngine {
         FreeSnapshot {
             free: self.free.clone(),
             reserved: self.reserved.clone(),
-            paged: self
-                .paged
-                .as_ref()
-                .map(|pg| (pg.meta.clone(), pg.raw.clone())),
+            paged: self.paged.as_ref().map(PagedEdit::allocation_snapshot),
             vl_overwrite_heaps: self.vl_overwrite_heaps.clone(),
         }
     }
@@ -5860,9 +5251,8 @@ impl WriteEngine {
         self.vl_overwrite_heaps = snapshot.vl_overwrite_heaps;
         self.free = snapshot.free;
         self.reserved = snapshot.reserved;
-        if let (Some(pg), Some((meta, raw))) = (self.paged.as_mut(), snapshot.paged) {
-            pg.meta = meta;
-            pg.raw = raw;
+        if let (Some(pg), Some(paged)) = (self.paged.as_mut(), snapshot.paged) {
+            pg.restore_allocation(paged);
         }
     }
 
@@ -7433,7 +6823,7 @@ impl WriteEngine {
         }
         let reused = placed_at.is_some();
         let ext_addr = placed_at.unwrap_or_else(|| self.image.len());
-        let sections = self.persisted_sections(&post);
+        let sections = self.persisted_sections(&post.sections());
         let fshd_addr = self.persisted_address(ext_addr + ext_len);
         let fsse_addr = self.persisted_address(
             ext_addr + ext_len + hdf5_pure_format::__private::free_space_manager_header_len(widths),
@@ -7569,11 +6959,11 @@ impl WriteEngine {
         Ok(())
     }
 
-    /// The free regions of `free` as the sections a free-space manager records.
-    fn persisted_sections(&self, free: &FreeList) -> Vec<FreeSection> {
-        free.sections()
-            .into_iter()
-            .map(|(addr, size)| FreeSection {
+    /// Returns `sections` in the address frame stored by a free-space manager.
+    fn persisted_sections(&self, sections: &[(u64, u64)]) -> Vec<FreeSection> {
+        sections
+            .iter()
+            .map(|&(addr, size)| FreeSection {
                 addr: self.persisted_address(addr),
                 size,
             })
@@ -7732,7 +7122,7 @@ impl WriteEngine {
         let appended_len = ext_len
             + hdf5_pure_format::__private::free_space_manager_len(
                 widths,
-                &self.persisted_sections(&probe),
+                &self.persisted_sections(&probe.sections()),
             );
         let mut proposed = appended_len;
 
@@ -7755,7 +7145,7 @@ impl WriteEngine {
             let len = ext_len
                 + hdf5_pure_format::__private::free_space_manager_len(
                     widths,
-                    &self.persisted_sections(&post),
+                    &self.persisted_sections(&post.sections()),
                 );
             if len <= proposed {
                 debug_assert!(
@@ -7902,10 +7292,11 @@ impl WriteEngine {
                 if let Some(extent) = FreeExtent::new(eoa, at - eoa) {
                     post.track(extent, PageType::Raw.into());
                 }
+                let sections: PagedSections = post.sections();
                 let plan = plan_paged_managers(
-                    &self.persisted_sections(&post.meta),
-                    &self.persisted_sections(&post.raw),
-                    &self.persisted_sections(&post.unclassified),
+                    &self.persisted_sections(sections.metadata()),
+                    &self.persisted_sections(sections.raw()),
+                    &self.persisted_sections(sections.unclassified()),
                     page_size,
                     self.persisted_address(at + ext_len),
                     widths,
@@ -8024,25 +7415,9 @@ impl WriteEngine {
         // they already account for. The blocks just written become the ones the next
         // commit supersedes.
         if let Some(pg) = self.paged.as_mut() {
-            pg.meta = post.meta;
-            pg.raw = post.raw;
-            pg.dead = post.dead;
-            // This list is otherwise constant for the session, but a released
-            // trailing run may have cut into it, and a section naming bytes the
-            // file no longer has would be written back to the managers by the
-            // next commit.
-            pg.unclassified = post.unclassified;
-            pg.meta_pad.clear();
-            pg.raw_pad.clear();
-            if !reused {
-                // The tail page is fresh metadata: the managers sit in it, so a
-                // following append of metadata may keep packing that page, and the
-                // rest of it is free metadata this session can spend. The managers
-                // just written cannot say so — they would have to describe space
-                // whose size their own length decides — so the next commit records
-                // it, from here. A reused tail leaves end-of-file where the data put
-                // it, so the outgoing page type stands and there is no padding.
-                pg.last = Some(PageType::Meta);
+            let appended_tail = if reused {
+                None
+            } else {
                 let tail_end = ext_addr.checked_add(blocks_len).ok_or(Error::Format(
                     FormatError::OffsetOverflow {
                         offset: ext_addr,
@@ -8055,10 +7430,9 @@ impl WriteEngine {
                         .ok_or(Error::Format(FormatError::Internal(
                             "free-space manager tail ends beyond the end of allocation".into(),
                         )))?;
-                if let Some(extent) = FreeExtent::new(tail_end, tail_len) {
-                    pg.meta.free(extent);
-                }
-            }
+                FreeExtent::new(tail_end, tail_len)
+            };
+            pg.adopt_post_free(post, !reused, appended_tail);
         }
         self.persist = Some(PersistState {
             strategy,
@@ -8077,34 +7451,16 @@ impl WriteEngine {
     /// non-paged file or an already-aligned one.
     fn pad_to_page(&mut self) -> Result<(), Error> {
         let len = self.image.len();
-        let pad = match &self.paged {
-            Some(pg) if len % pg.page_size.get() != 0 => {
-                Some((pg.last, pg.page_size.get() - len % pg.page_size.get()))
-            }
-            _ => None,
+        let transition = match self.paged.as_ref() {
+            Some(pg) => pg.page_padding(len)?,
+            None => None,
         };
-        if let Some((last, pad_len)) = pad {
-            let pad_at = len;
-            let padding = FreeExtent::new(pad_at, pad_len).ok_or(Error::Format(
-                FormatError::OffsetOverflow {
-                    offset: pad_at,
-                    length: pad_len,
-                },
-            ))?;
-            self.append(&vec![0u8; pad_len.to_usize()?])?;
-            if let Some(pg) = self.paged.as_mut() {
-                match last {
-                    // A partially-filled tail page at commit time is a raw page:
-                    // the last thing the apply loop writes for a dataset is its
-                    // header, but a commit that only wrote raw data ends on one.
-                    Some(PageType::Meta) => pg.meta_pad.push(padding),
-                    Some(PageType::Raw) => pg.raw_pad.push(padding),
-                    // No typed append has classified the partial tail page. Keep this padding
-                    // untracked because a guessed type could make a later reuse mix page types.
-                    // `PagedEdit::plan_transition` uses the same classification for appends.
-                    None => {}
-                }
-            }
+        if let Some(transition @ PageTransition::Pad { extent, .. }) = transition {
+            self.append(&vec![0u8; extent.len().to_usize()?])?;
+            self.paged
+                .as_mut()
+                .expect("the paged state was present when padding was planned")
+                .record_page_padding(transition);
         }
         Ok(())
     }
@@ -8115,11 +7471,11 @@ impl WriteEngine {
     /// The lists are the session's durable lists plus the page-padding tails this
     /// commit's appends left behind, whatever their length, and each of the regions
     /// this commit vacated and of the superseded extension and manager blocks that
-    /// [`PagedPostFree::release_all`] tracks against `threshold`. The blocks are
+    /// [`PagedEdit::post_free`] tracks against `threshold`. The blocks are
     /// metadata, and they and the regions are dead once the superblock is repointed.
     ///
     /// Every page the result leaves wholly empty is promoted to a free page before
-    /// it is returned ([`PagedEdit::promote_whole_free_pages`]), so the managers
+    /// it is returned (whole-page promotion), so the managers
     /// this commit writes already describe it. Deferring the promotion to the
     /// repoint would leave the session holding free space its own on-disk record
     /// does not name.
@@ -8144,46 +7500,13 @@ impl WriteEngine {
         to_free: &[(u64, u64, FreeClass)],
         old_blocks: &[FreeExtent],
     ) -> (PagedPostFree, u64) {
-        let pg = self
-            .paged
+        let freed = to_free.iter().filter_map(|&(addr, len, class)| {
+            FreeExtent::new(addr, len).map(|extent| (extent, class))
+        });
+        self.paged
             .as_ref()
-            .expect("commit_persisting_paged is only called on a paged file");
-        let mut post = PagedPostFree {
-            page_size: pg.page_size,
-            meta: pg.meta.clone(),
-            raw: pg.raw.clone(),
-            dead: pg.dead.clone(),
-            // This engine never frees into that list, and nothing it places comes out
-            // of it.
-            unclassified: pg.unclassified.clone(),
-        };
-        // A padded page tail is tracked whatever its length, as `H5MF__alloc_pagefs` (`H5MF.c`,
-        // HDF5 1.14.6) adds the unused rest of a page it allocates without the threshold
-        // `H5MF_xfree` applies to returned space.
-        for &extent in &pg.meta_pad {
-            post.track(extent, PageType::Meta.into());
-        }
-        for &extent in &pg.raw_pad {
-            post.track(extent, PageType::Raw.into());
-        }
-        // The superseded extension and manager blocks, which are metadata wherever
-        // they sat: the tail is placed as metadata, and a page it had to open for
-        // itself was opened as metadata too.
-        let old_blocks = old_blocks
-            .iter()
-            .copied()
-            .map(|extent| (extent, FreeClass::Page(PageType::Meta)));
-        let freed = to_free
-            .iter()
-            .filter_map(|&(a, l, class)| FreeExtent::new(a, l).map(|extent| (extent, class)));
-        let eoa = post.release_all(threshold, eof, freed.chain(old_blocks));
-        PagedEdit::promote_whole_free_pages(
-            &mut post.meta,
-            &mut post.raw,
-            &mut post.dead,
-            post.page_size,
-        );
-        (post, eoa)
+            .expect("commit_persisting_paged is only called on a paged file")
+            .post_free(threshold, eof, freed, old_blocks.iter().copied())
     }
 
     /// Reserve free metadata space for a paged commit's tail and plan the manager
@@ -8226,11 +7549,12 @@ impl WriteEngine {
         // A manager block's length depends only on the sections it records, never
         // on its address, so a start of 0 measures the blocks alone.
         let (probe, _) = self.paged_post_free(threshold, eof, to_free, old_blocks);
+        let probe_sections: PagedSections = probe.sections();
         let mut proposed = ext_len
             + plan_paged_managers(
-                &self.persisted_sections(&probe.meta),
-                &self.persisted_sections(&probe.raw),
-                &self.persisted_sections(&probe.unclassified),
+                &self.persisted_sections(probe_sections.metadata()),
+                &self.persisted_sections(probe_sections.raw()),
+                &self.persisted_sections(probe_sections.unclassified()),
                 page_size,
                 StoredAddress::new(0),
                 widths,
@@ -8243,7 +7567,7 @@ impl WriteEngine {
                 .paged
                 .as_mut()
                 .expect("commit_persisting_paged is only called on a paged file");
-            let reserved = pg.alloc_typed(proposed, PageType::Meta)?;
+            let reserved = pg.allocate(proposed, PageType::Meta)?;
             let at = reserved.start();
             let (mut post, eoa) = self.paged_post_free(threshold, eof, to_free, old_blocks);
             // Whole free pages at the end of the file are released rather than
@@ -8255,10 +7579,11 @@ impl WriteEngine {
             // Class the free space into its managers and place their blocks after
             // the extension. Shared with the bounded backend so both lay out
             // identically.
+            let sections: PagedSections = post.sections();
             let plan = plan_paged_managers(
-                &self.persisted_sections(&post.meta),
-                &self.persisted_sections(&post.raw),
-                &self.persisted_sections(&post.unclassified),
+                &self.persisted_sections(sections.metadata()),
+                &self.persisted_sections(sections.raw()),
+                &self.persisted_sections(sections.unclassified()),
                 page_size,
                 self.persisted_address(at + ext_len),
                 widths,
@@ -8274,17 +7599,10 @@ impl WriteEngine {
                 );
                 return Some((post, plan, at, blocks_len, eoa));
             }
-            let pg = self
-                .paged
+            self.paged
                 .as_mut()
-                .expect("the paged state outlives this loop");
-            PagedEdit::route_free(
-                &mut pg.meta,
-                &mut pg.raw,
-                &mut pg.dead,
-                reserved,
-                PageType::Meta.into(),
-            );
+                .expect("the paged state outlives this loop")
+                .return_allocation(reserved, PageType::Meta);
             proposed = blocks_len;
         }
         None
@@ -10368,7 +9686,7 @@ impl WriteEngine {
     /// live tree: the superblock still points at the prior, intact root.
     ///
     /// A paged file reuses within the matching page type, or out of a page holding
-    /// nothing at all, which belongs to no type ([`PagedEdit::alloc_typed`]); every
+    /// nothing at all, which belongs to no type ([`PagedEdit::allocate`]). Every
     /// page stays homogeneous either way. It never opens a page for a reused region
     /// — the tail page is untouched by a write into the middle of the file.
     fn reserve(&mut self, len: u64, ty: PageType) -> Result<Placement, Error> {
@@ -10390,14 +9708,14 @@ impl WriteEngine {
     /// metadata hole to raw data (or the reverse) would mix the two within a page,
     /// which is the single invariant the paged strategy exists to hold. A page
     /// holding nothing at all is the exception, and
-    /// [`alloc_typed`](PagedEdit::alloc_typed) is where it is spent. A session
+    /// [`allocate`](PagedEdit::allocate) is where it is spent. A session
     /// whose [`free_space_settings`](Self::free_space_settings) is `None` draws nothing.
     fn alloc_free(&mut self, len: u64, ty: PageType) -> Option<u64> {
         self.free_space_settings?;
         let Some(pg) = self.paged.as_mut() else {
             return self.free.alloc(len).map(FreeExtent::start);
         };
-        pg.alloc_typed(len, ty).map(FreeExtent::start)
+        pg.allocate(len, ty).map(FreeExtent::start)
     }
 
     /// Hand `[addr, addr + len)`, drawn from
@@ -10407,17 +9725,17 @@ impl WriteEngine {
     /// anything into it.
     ///
     /// A paged file takes it back into the raw list whichever list served it: a
-    /// whole page [`PagedEdit::alloc_typed`] claimed from the metadata side for
+    /// whole page [`PagedEdit::allocate`] claimed from the metadata side for
     /// raw data is raw from the moment it is claimed, and that call already
     /// returns its alignment tail there. A page that ends up wholly free is
     /// promoted out of either list by
-    /// [`promote_whole_free_pages`](PagedEdit::promote_whole_free_pages) as usual.
+    /// whole-page promotion as usual.
     fn release_raw_alloc(&mut self, addr: u64, len: u64) {
         let Some(extent) = FreeExtent::new(addr, len) else {
             return;
         };
         match self.paged.as_mut() {
-            Some(pg) => pg.raw.free(extent),
+            Some(pg) => pg.return_allocation(extent, PageType::Raw),
             None => self.free.free(extent),
         }
     }
@@ -11257,7 +10575,7 @@ impl WriteEngine {
             None => true,
             Some(paged) => {
                 index_abuts_chunk_data(data, index)
-                    && !index_touches_page_zero(index, paged.page_size)
+                    && !index_touches_page_zero(index, paged.page_size())
             }
         }
     }
@@ -15100,88 +14418,7 @@ mod tests {
     use super::*;
     use crate::checksum;
     use crate::datatype::layout::FloatingPointLayout;
-    use crate::free_space::Release;
     use crate::object_path::ObjectPath;
-
-    #[test]
-    fn an_aligned_page_transition_needs_no_padding() {
-        let mut paged = PagedEdit::new(FileSpacePageSize::DEFAULT);
-        paged.last = Some(PageType::Meta);
-
-        assert_eq!(
-            paged
-                .plan_transition(FileSpacePageSize::DEFAULT.get(), PageType::Raw)
-                .unwrap(),
-            PageTransition::Unchanged
-        );
-    }
-
-    #[test]
-    fn a_same_type_partial_page_transition_needs_no_padding() {
-        let mut paged = PagedEdit::new(FileSpacePageSize::DEFAULT);
-        paged.last = Some(PageType::Raw);
-
-        assert_eq!(
-            paged.plan_transition(5000, PageType::Raw).unwrap(),
-            PageTransition::Unchanged
-        );
-    }
-
-    #[test]
-    fn a_metadata_to_raw_transition_tracks_metadata_padding() {
-        let mut paged = PagedEdit::new(FileSpacePageSize::DEFAULT);
-        paged.last = Some(PageType::Meta);
-
-        assert_eq!(
-            paged.plan_transition(5000, PageType::Raw).unwrap(),
-            PageTransition::Pad {
-                extent: FreeExtent::new(5000, 3192).unwrap(),
-                track_as: Some(PageType::Meta),
-            }
-        );
-    }
-
-    #[test]
-    fn a_raw_to_metadata_transition_tracks_raw_padding() {
-        let mut paged = PagedEdit::new(FileSpacePageSize::DEFAULT);
-        paged.last = Some(PageType::Raw);
-
-        assert_eq!(
-            paged.plan_transition(5000, PageType::Meta).unwrap(),
-            PageTransition::Pad {
-                extent: FreeExtent::new(5000, 3192).unwrap(),
-                track_as: Some(PageType::Raw),
-            }
-        );
-    }
-
-    #[test]
-    fn an_unknown_tail_transition_leaves_padding_unclassified() {
-        let paged = PagedEdit::new(FileSpacePageSize::DEFAULT);
-
-        assert_eq!(
-            paged.plan_transition(5000, PageType::Meta).unwrap(),
-            PageTransition::Pad {
-                extent: FreeExtent::new(5000, 3192).unwrap(),
-                track_as: None,
-            }
-        );
-    }
-
-    #[test]
-    fn a_non_power_of_two_page_size_plans_exact_padding() {
-        let page_size = FileSpacePageSize::try_from(1000).unwrap();
-        let mut paged = PagedEdit::new(page_size);
-        paged.last = Some(PageType::Meta);
-
-        assert_eq!(
-            paged.plan_transition(1500, PageType::Raw).unwrap(),
-            PageTransition::Pad {
-                extent: FreeExtent::new(1500, 500).unwrap(),
-                track_as: Some(PageType::Meta),
-            }
-        );
-    }
 
     /// The rule that places a chunk index on a paged file: some chunk-data span
     /// abuts it. Both sides count, which is what a repeatedly appended dataset
@@ -15244,354 +14481,6 @@ mod tests {
         assert!(!index_touches_page_zero(&[(0, 0)], PAGE));
         // Nothing to screen.
         assert!(!index_touches_page_zero(&[], PAGE));
-    }
-
-    /// A page every byte of which is free or dead belongs to no page type, so it
-    /// is promoted whole into the raw list — the free-page convention the rest of
-    /// the paged allocator already follows. The partial edges keep their type,
-    /// since the pages they sit in may still hold something live.
-    #[test]
-    fn a_page_that_is_wholly_free_or_dead_is_promoted_whole() {
-        const PAGE: u64 = FileSpacePageSize::DEFAULT.get();
-        let (mut meta, mut raw, mut dead) = (FreeList::new(), FreeList::new(), FreeList::new());
-        // Page 1 is half free metadata and half dead, so neither list can show it
-        // empty on its own.
-        meta.free(FreeExtent::new(PAGE, 2048).unwrap());
-        dead.free(FreeExtent::new(PAGE + 2048, 2048).unwrap());
-        // Page 2 is wholly dead.
-        dead.free(FreeExtent::new(2 * PAGE, PAGE).unwrap());
-        // Page 3 keeps something live at each end, so only its middle is free —
-        // and not adjacent to page 2, so the promotion is visible on its own.
-        raw.free(FreeExtent::new(3 * PAGE + 1024, 1024).unwrap());
-        PagedEdit::promote_whole_free_pages(
-            &mut meta,
-            &mut raw,
-            &mut dead,
-            FileSpacePageSize::DEFAULT,
-        );
-
-        assert_eq!(
-            raw.sections(),
-            [(PAGE, 2 * PAGE), (3 * PAGE + 1024, 1024)],
-            "the two empty pages join the raw list as one run; the partial page stays"
-        );
-        assert!(
-            meta.sections().is_empty(),
-            "the promoted page left the metadata list"
-        );
-        assert!(
-            dead.sections().is_empty(),
-            "every dead byte was inside a promoted page"
-        );
-    }
-
-    /// Dead space that does not complete a page stays dead: it is not free space,
-    /// and handing it out as either page type would mix the page it sits in.
-    #[test]
-    fn dead_space_short_of_a_whole_page_is_not_promoted() {
-        const PAGE: u64 = FileSpacePageSize::DEFAULT.get();
-        let (mut meta, mut raw, mut dead) = (FreeList::new(), FreeList::new(), FreeList::new());
-        dead.free(FreeExtent::new(PAGE, 512).unwrap());
-        raw.free(FreeExtent::new(PAGE + 512, 1024).unwrap());
-        PagedEdit::promote_whole_free_pages(
-            &mut meta,
-            &mut raw,
-            &mut dead,
-            FileSpacePageSize::DEFAULT,
-        );
-        assert_eq!(dead.sections(), [(PAGE, 512)]);
-        assert_eq!(raw.sections(), [(PAGE + 512, 1024)]);
-    }
-
-    #[rstest]
-    #[case::metadata_short_of_it(META, THRESHOLD_IN_A_PAGE - 1, Release::Drop, [vec![], vec![], vec![]])]
-    #[case::metadata_at_it(
-        META,
-        THRESHOLD_IN_A_PAGE,
-        Release::Track,
-        [vec![(EXTENT_AT, THRESHOLD_IN_A_PAGE)], vec![], vec![]]
-    )]
-    #[case::metadata_past_it(
-        META,
-        THRESHOLD_IN_A_PAGE + 1,
-        Release::Track,
-        [vec![(EXTENT_AT, THRESHOLD_IN_A_PAGE + 1)], vec![], vec![]]
-    )]
-    #[case::raw_short_of_it(RAW, THRESHOLD_IN_A_PAGE - 1, Release::Drop, [vec![], vec![], vec![]])]
-    #[case::raw_at_it(
-        RAW,
-        THRESHOLD_IN_A_PAGE,
-        Release::Track,
-        [vec![], vec![(EXTENT_AT, THRESHOLD_IN_A_PAGE)], vec![]]
-    )]
-    #[case::dead_short_of_it(FreeClass::Dead, THRESHOLD_IN_A_PAGE - 1, Release::Drop, [vec![], vec![], vec![]])]
-    #[case::dead_at_it(
-        FreeClass::Dead,
-        THRESHOLD_IN_A_PAGE,
-        Release::Track,
-        [vec![], vec![], vec![(EXTENT_AT, THRESHOLD_IN_A_PAGE)]]
-    )]
-    fn an_isolated_paged_extent_is_tracked_from_the_threshold_up(
-        #[case] class: FreeClass,
-        #[case] len: u64,
-        #[case] release: Release,
-        #[case] expected: [Vec<(u64, u64)>; 3],
-    ) {
-        let mut post = paged_free_space(&[vec![], vec![], vec![]]);
-
-        assert_eq!(
-            post.release(
-                THRESHOLD_IN_A_PAGE,
-                FreeExtent::new(EXTENT_AT, len).unwrap(),
-                class
-            ),
-            release
-        );
-        assert_eq!(paged_sections(&post), expected);
-    }
-
-    #[rstest]
-    #[case::metadata_above_metadata(
-        META,
-        [vec![(EXTENT_AT - 100, 100)], vec![], vec![]],
-        [vec![(EXTENT_AT - 100, 100 + SHORT_OF_THRESHOLD)], vec![], vec![]]
-    )]
-    #[case::raw_below_raw(
-        RAW,
-        [vec![], vec![(EXTENT_AT + SHORT_OF_THRESHOLD, 100)], vec![]],
-        [vec![], vec![(EXTENT_AT, SHORT_OF_THRESHOLD + 100)], vec![]]
-    )]
-    #[case::dead_above_raw(
-        FreeClass::Dead,
-        [vec![], vec![(EXTENT_AT - 100, 100)], vec![]],
-        [vec![], vec![(EXTENT_AT - 100, 100)], vec![(EXTENT_AT, SHORT_OF_THRESHOLD)]]
-    )]
-    #[case::raw_below_dead(
-        RAW,
-        [vec![], vec![], vec![(EXTENT_AT + SHORT_OF_THRESHOLD, 100)]],
-        [vec![], vec![(EXTENT_AT, SHORT_OF_THRESHOLD)], vec![(EXTENT_AT + SHORT_OF_THRESHOLD, 100)]]
-    )]
-    fn a_sub_threshold_paged_extent_merges_beside_free_space_in_its_page(
-        #[case] class: FreeClass,
-        #[case] tracked: [Vec<(u64, u64)>; 3],
-        #[case] expected: [Vec<(u64, u64)>; 3],
-    ) {
-        let mut post = paged_free_space(&tracked);
-
-        assert_eq!(
-            post.release(
-                THRESHOLD_IN_A_PAGE,
-                FreeExtent::new(EXTENT_AT, SHORT_OF_THRESHOLD).unwrap(),
-                class
-            ),
-            Release::Merge
-        );
-        assert_eq!(paged_sections(&post), expected);
-    }
-
-    #[rstest]
-    #[case::metadata_above_metadata(META, PAGE, [vec![(PAGE - 100, 100)], vec![], vec![]])]
-    #[case::raw_below_metadata(RAW, 2 * PAGE - SHORT_OF_THRESHOLD, [vec![(2 * PAGE, 100)], vec![], vec![]])]
-    #[case::raw_below_a_free_page(
-        RAW,
-        2 * PAGE - SHORT_OF_THRESHOLD,
-        [vec![], vec![(2 * PAGE, PAGE)], vec![]]
-    )]
-    #[case::dead_above_dead(FreeClass::Dead, PAGE, [vec![], vec![], vec![(PAGE - 100, 100)]])]
-    fn a_sub_threshold_paged_extent_beside_free_space_across_a_page_boundary_is_dropped(
-        #[case] class: FreeClass,
-        #[case] at: u64,
-        #[case] tracked: [Vec<(u64, u64)>; 3],
-    ) {
-        let mut post = paged_free_space(&tracked);
-
-        assert_eq!(
-            post.release(
-                THRESHOLD_IN_A_PAGE,
-                FreeExtent::new(at, SHORT_OF_THRESHOLD).unwrap(),
-                class
-            ),
-            Release::Drop
-        );
-        assert_eq!(paged_sections(&post), tracked);
-    }
-
-    #[rstest]
-    #[case::metadata_above_a_metadata_page(
-        META,
-        [vec![(PAGE, PAGE)], vec![], vec![]],
-        [vec![(PAGE, 3 * PAGE)], vec![], vec![]]
-    )]
-    #[case::raw_below_raw_pages(
-        RAW,
-        [vec![], vec![(4 * PAGE, 2 * PAGE)], vec![]],
-        [vec![], vec![(2 * PAGE, 4 * PAGE)], vec![]]
-    )]
-    #[case::metadata_below_a_raw_page(
-        META,
-        [vec![], vec![(4 * PAGE, PAGE)], vec![]],
-        [vec![(2 * PAGE, 2 * PAGE)], vec![(4 * PAGE, PAGE)], vec![]]
-    )]
-    fn a_paged_extent_of_pages_below_the_threshold_merges_beside_a_whole_free_page(
-        #[case] class: FreeClass,
-        #[case] tracked: [Vec<(u64, u64)>; 3],
-        #[case] expected: [Vec<(u64, u64)>; 3],
-    ) {
-        let mut post = paged_free_space(&tracked);
-
-        assert_eq!(
-            post.release(
-                THRESHOLD_OF_THREE_PAGES,
-                FreeExtent::new(2 * PAGE, 2 * PAGE).unwrap(),
-                class
-            ),
-            Release::Merge
-        );
-        assert_eq!(paged_sections(&post), expected);
-    }
-
-    #[rstest]
-    #[case::above_part_of_a_page(2 * PAGE, [vec![], vec![(2 * PAGE - 100, 100)], vec![]])]
-    #[case::inside_a_page(2 * PAGE + 100, [vec![], vec![(2 * PAGE, 100)], vec![]])]
-    fn a_paged_extent_of_pages_below_the_threshold_beside_part_of_a_page_is_dropped(
-        #[case] at: u64,
-        #[case] tracked: [Vec<(u64, u64)>; 3],
-    ) {
-        let mut post = paged_free_space(&tracked);
-
-        assert_eq!(
-            post.release(
-                THRESHOLD_OF_THREE_PAGES,
-                FreeExtent::new(at, 2 * PAGE).unwrap(),
-                RAW
-            ),
-            Release::Drop
-        );
-        assert_eq!(paged_sections(&post), tracked);
-    }
-
-    #[test]
-    fn a_paged_extent_of_pages_below_the_threshold_merges_beside_an_unclassified_section() {
-        let mut post = paged_free_space(&[vec![], vec![], vec![]]);
-        post.unclassified
-            .free(FreeExtent::new(4 * PAGE, 100).unwrap());
-
-        assert_eq!(
-            post.release(
-                THRESHOLD_OF_THREE_PAGES,
-                FreeExtent::new(2 * PAGE, 2 * PAGE).unwrap(),
-                RAW
-            ),
-            Release::Merge
-        );
-        assert_eq!(
-            (paged_sections(&post), post.unclassified.sections()),
-            (
-                [vec![], vec![(2 * PAGE, 2 * PAGE)], vec![]],
-                vec![(4 * PAGE, 100)]
-            )
-        );
-    }
-
-    #[rstest]
-    #[case::pages_ending_it(&[(8 * PAGE, 2 * PAGE)], 8 * PAGE, vec![])]
-    #[case::pages_ending_it_in_turn(
-        &[(6 * PAGE, 2 * PAGE), (8 * PAGE, 2 * PAGE)],
-        6 * PAGE,
-        vec![]
-    )]
-    #[case::pages_from_inside_a_page(
-        &[(7 * PAGE + 100, 3 * PAGE - 100)],
-        8 * PAGE,
-        vec![(7 * PAGE + 100, PAGE - 100)]
-    )]
-    #[case::part_of_a_page_ending_it(&[(10 * PAGE - 100, 100)], 10 * PAGE, vec![])]
-    #[case::pages_below_it(&[(6 * PAGE, 2 * PAGE)], 10 * PAGE, vec![])]
-    fn releasing_paged_extents_lowers_the_end_of_allocation_by_dropped_pages_that_end_it(
-        #[case] extents: &[(u64, u64)],
-        #[case] expected: u64,
-        #[case] raw: Vec<(u64, u64)>,
-    ) {
-        let mut post = paged_free_space(&[vec![], vec![], vec![]]);
-
-        assert_eq!(
-            post.release_all(
-                THRESHOLD_OF_THREE_PAGES,
-                10 * PAGE,
-                extents
-                    .iter()
-                    .map(|&(addr, len)| (FreeExtent::new(addr, len).unwrap(), RAW))
-            ),
-            expected
-        );
-        assert_eq!(paged_sections(&post), [vec![], raw, vec![]]);
-    }
-
-    #[rstest]
-    #[case::alone(
-        [vec![], vec![(PAGE, PAGE - 100)], vec![]],
-        10 * PAGE,
-        10 * PAGE,
-        [vec![], vec![], vec![]]
-    )]
-    #[case::beside_a_whole_free_page(
-        [vec![], vec![(PAGE, PAGE - 100), (2 * PAGE, PAGE)], vec![]],
-        10 * PAGE,
-        10 * PAGE,
-        [vec![], vec![(PAGE, 2 * PAGE)], vec![]]
-    )]
-    #[case::beside_part_of_a_page(
-        [vec![(PAGE - 100, 100)], vec![(PAGE, PAGE - 100)], vec![]],
-        10 * PAGE,
-        10 * PAGE,
-        [vec![(PAGE - 100, 100)], vec![], vec![]]
-    )]
-    #[case::ending_the_allocation(
-        [vec![], vec![(PAGE, PAGE - 100)], vec![]],
-        2 * PAGE,
-        PAGE,
-        [vec![], vec![], vec![]]
-    )]
-    fn a_page_a_merge_completes_below_the_threshold_is_offered_as_a_whole_free_page(
-        #[case] tracked: [Vec<(u64, u64)>; 3],
-        #[case] eoa: u64,
-        #[case] released: u64,
-        #[case] expected: [Vec<(u64, u64)>; 3],
-    ) {
-        let mut post = paged_free_space(&tracked);
-
-        assert_eq!(
-            (
-                post.release_all(
-                    THRESHOLD_OF_THREE_PAGES,
-                    eoa,
-                    [(FreeExtent::new(2 * PAGE - 100, 100).unwrap(), RAW)],
-                ),
-                paged_sections(&post)
-            ),
-            (released, expected)
-        );
-    }
-
-    fn paged_free_space([meta, raw, dead]: &[Vec<(u64, u64)>; 3]) -> PagedPostFree {
-        let list = |regions: &[(u64, u64)]| {
-            let mut list = FreeList::new();
-            for &(addr, len) in regions {
-                list.free(FreeExtent::new(addr, len).unwrap());
-            }
-            list
-        };
-        PagedPostFree {
-            page_size: FileSpacePageSize::DEFAULT,
-            meta: list(meta),
-            raw: list(raw),
-            dead: list(dead),
-            unclassified: FreeList::new(),
-        }
-    }
-
-    fn paged_sections(post: &PagedPostFree) -> [Vec<(u64, u64)>; 3] {
-        [&post.meta, &post.raw, &post.dead].map(FreeList::sections)
     }
 
     /// The shared-message flag is read from the message header's fourth byte, and
@@ -16579,17 +15468,17 @@ mod tests {
 
         let s = WriteEngine::open_with_locking(&path, FileLocking::Enabled).unwrap();
         let pg = s.paged.as_ref().expect("a paged file installs paged state");
-        assert_eq!(pg.page_size, FileSpacePageSize::DEFAULT);
+        assert_eq!(pg.page_size(), FileSpacePageSize::DEFAULT);
 
         // The from-scratch writer leaves a page tail free in both the metadata and
         // the raw pages, so both per-type managers are populated. If every slot
         // were funnelled into one list, one of these would be empty.
         assert!(
-            !pg.meta.sections().is_empty(),
+            !pg.sections().metadata().is_empty(),
             "SUPER (slot 0) sections seed the metadata list"
         );
         assert!(
-            !pg.raw.sections().is_empty(),
+            !pg.sections().raw().is_empty(),
             "DRAW (slot 2) sections seed the raw list, not the metadata list"
         );
 
@@ -16598,10 +15487,11 @@ mod tests {
         // crate wrote has nothing unclassified — it only ever files a whole
         // aligned page under the generic-large manager — so summing it in is a
         // statement about that too.
+        let sections = pg.sections();
         let mut all = pg.reusable_sections();
-        all.extend(pg.unclassified.sections());
+        all.extend_from_slice(sections.unclassified());
         assert!(
-            pg.unclassified.sections().is_empty(),
+            sections.unclassified().is_empty(),
             "our own paged writer files nothing whose page type is unknown"
         );
         let flat: u64 = all.iter().map(|&(_, l)| l).sum();
@@ -16644,7 +15534,7 @@ mod tests {
         let path = crate::test_data::copy("c/paged_index.h5", dir.path());
 
         let mut s = WriteEngine::open_with_locking(&path, FileLocking::Enabled).unwrap();
-        let page_size = s.paged.as_ref().expect("a paged file").page_size;
+        let page_size = s.paged.as_ref().expect("a paged file").page_size();
         assert_eq!(page_size.get(), PAGE);
         // Where the C library put the index: every page it touches is a metadata
         // page, since the C library allocates an index as metadata.
@@ -16740,12 +15630,13 @@ mod tests {
         build(&unknown);
         let mut s = WriteEngine::open_with_locking(&unknown, FileLocking::Enabled).unwrap();
         s.append(&[0u8; 100]).unwrap(); // leaves the image non-page-aligned
-        assert!(s.paged.as_ref().unwrap().last.is_none());
+        assert!(s.paged.as_ref().unwrap().tail_type().is_none());
         s.pad_to_page().unwrap();
         let pg = s.paged.as_ref().unwrap();
         assert_eq!(s.image.len() % PAGE, 0, "the file is padded to a page");
         assert!(
-            pg.meta_pad.is_empty() && pg.raw_pad.is_empty(),
+            pg.pending_padding(PageType::Meta).is_empty()
+                && pg.pending_padding(PageType::Raw).is_empty(),
             "padding a tail page of unknown type must claim no page type"
         );
         drop(s);
@@ -16760,11 +15651,11 @@ mod tests {
         s.pad_to_page().unwrap();
         let pg = s.paged.as_ref().unwrap();
         assert_eq!(
-            pg.meta_pad.len(),
+            pg.pending_padding(PageType::Meta).len(),
             1,
             "a known metadata tail records its padding as metadata free space"
         );
-        assert!(pg.raw_pad.is_empty());
+        assert!(pg.pending_padding(PageType::Raw).is_empty());
     }
 
     /// The reference C library's generic-large manager holds free space of *both*
@@ -16828,7 +15719,7 @@ mod tests {
         // whole aligned pages from that manager are placeable.
         let s = WriteEngine::open_with_locking(&path, FileLocking::Enabled).unwrap();
         let pg = s.paged.as_ref().expect("a paged file installs paged state");
-        let unclassified = pg.unclassified.sections();
+        let unclassified = pg.sections().unclassified().to_vec();
         let reusable = pg.reusable_sections();
         for &(addr, size) in &fragments {
             assert!(
@@ -16881,14 +15772,16 @@ mod tests {
                 .with_file_space_page_size(PAGE);
             b.write(path).unwrap();
             let mut s = WriteEngine::open_with_locking(path, FileLocking::Enabled).unwrap();
-            let pg = s.paged.as_mut().expect("a paged file installs paged state");
-            pg.meta = FreeList::new();
-            pg.raw = FreeList::new();
+            s.paged = Some(PagedEdit::new(FileSpacePageSize::DEFAULT));
+            let pg = s
+                .paged
+                .as_mut()
+                .expect("the paged state was just installed");
             if let Some((addr, len)) = meta {
-                pg.meta.free(FreeExtent::new(addr, len).unwrap());
+                pg.seed(FreeExtent::new(addr, len).unwrap(), Some(PageType::Meta));
             }
             if let Some((addr, len)) = raw {
-                pg.raw.free(FreeExtent::new(addr, len).unwrap());
+                pg.seed(FreeExtent::new(addr, len).unwrap(), Some(PageType::Raw));
             }
             s
         }
@@ -16958,12 +15851,12 @@ mod tests {
         );
         let pg = s.paged.as_ref().expect("still paged");
         assert_eq!(
-            pg.raw.sections(),
+            pg.sections().raw(),
             [(PAGE + 1024, PAGE - 1024)],
             "the rest of the claimed page is free space of the claiming type"
         );
         assert!(
-            pg.meta.sections().is_empty(),
+            pg.sections().metadata().is_empty(),
             "the page left the list it was claimed from"
         );
         drop(s);
@@ -16989,12 +15882,12 @@ mod tests {
         // silent leak this change exists to remove.
         let pg = s.paged.as_ref().expect("still paged");
         assert_eq!(
-            pg.raw.sections(),
+            pg.sections().raw(),
             [(PAGE + 512, PAGE - 512), (3 * PAGE, PAGE)],
             "the fragment below the claimed page and the page above it both stay free"
         );
         assert_eq!(
-            pg.meta.sections(),
+            pg.sections().metadata(),
             [(2 * PAGE + 1024, PAGE - 1024)],
             "the rest of the claimed page is free space of the claiming type"
         );
@@ -17002,12 +15895,12 @@ mod tests {
 
     /// Every byte a paged session could still hand out, across both page types.
     fn free_total(s: &WriteEngine) -> u64 {
-        let pg = s.paged.as_ref().expect("a paged session");
-        pg.meta
-            .sections()
-            .into_iter()
-            .chain(pg.raw.sections())
-            .map(|(_, len)| len)
+        s.paged
+            .as_ref()
+            .expect("a paged session")
+            .reusable_sections()
+            .iter()
+            .map(|&(_, len)| len)
             .sum()
     }
 
@@ -17054,13 +15947,11 @@ mod tests {
 
         let mut placed = 0usize;
         for hole in 120..420u64 {
-            {
-                let pg = s.paged.as_mut().expect("a paged file installs paged state");
-                pg.meta = FreeList::new();
-                pg.raw = FreeList::new();
-                pg.unclassified = FreeList::new();
-                pg.meta.free(FreeExtent::new(PAGE, hole).unwrap());
-            }
+            s.paged = Some(PagedEdit::new(FileSpacePageSize::DEFAULT));
+            s.paged
+                .as_mut()
+                .expect("the paged state was just installed")
+                .seed(FreeExtent::new(PAGE, hole).unwrap(), Some(PageType::Meta));
             let free_before = free_total(&s);
             let layout = s.tail_layout(0, &[], &[], EXT_LEN, FileSpacePageSize::DEFAULT, widths);
             let free_after = free_total(&s);
@@ -17196,7 +16087,7 @@ mod tests {
             let written = EXT_LEN
                 + hdf5_pure_format::__private::free_space_manager_len(
                     widths,
-                    &s.persisted_sections(&post),
+                    &s.persisted_sections(&post.sections()),
                 );
             match at {
                 Some(at) => {
@@ -17270,12 +16161,7 @@ mod tests {
         let before = std::fs::metadata(&path).unwrap().len();
 
         let mut s = WriteEngine::open_with_locking(&path, FileLocking::Enabled).unwrap();
-        {
-            let pg = s.paged.as_mut().expect("a paged file installs paged state");
-            pg.meta = FreeList::new();
-            pg.raw = FreeList::new();
-            pg.unclassified = FreeList::new();
-        }
+        s.paged = Some(PagedEdit::new(FileSpacePageSize::DEFAULT));
         // A commit with nothing staged returns without writing, so give it one
         // small metadata object to place. It appends for want of anywhere else,
         // and the tail follows it into the same page.
@@ -17293,9 +16179,10 @@ mod tests {
         // session carries it to the next commit.
         let pg = s.paged.as_ref().expect("still paged");
         let (addr, len) = pg
-            .meta
             .sections()
-            .into_iter()
+            .metadata()
+            .iter()
+            .copied()
             .find(|&(addr, len)| addr + len == after)
             .expect("the page the tail opened leaves a free remainder at end-of-file");
         assert!(
@@ -17361,7 +16248,7 @@ mod tests {
 
         let s = WriteEngine::open_with_locking(&path, FileLocking::Enabled).unwrap();
         let pg = s.paged.as_ref().expect("a paged file installs paged state");
-        for (addr, len) in pg.meta.sections() {
+        for &(addr, len) in pg.sections().metadata() {
             for p in (addr / page)..=((addr + len - 1) / page) {
                 assert!(
                     !live_raw_pages.contains(&p),
@@ -19470,7 +18357,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            engine.paged.as_ref().unwrap().last,
+            engine.paged.as_ref().unwrap().tail_type(),
             Some(PageType::Raw),
             "the append must record that the tail page now holds raw data"
         );
@@ -19487,7 +18374,7 @@ mod tests {
         // that padding into the raw list (`meta_pad`/`raw_pad` are cleared into the
         // free lists as part of the paged tail).
         let pg = engine.paged.as_ref().expect("the file is paged");
-        let raw_free = pg.raw.sections();
+        let raw_free = pg.sections().raw().to_vec();
         assert!(
             !raw_free.is_empty(),
             "the commit packed metadata into the raw page the append left open"
@@ -19551,15 +18438,16 @@ mod tests {
 
         let pg = engine.paged.as_ref().expect("the file is paged");
         assert_eq!(
-            pg.last,
+            pg.tail_type(),
             Some(PageType::Raw),
             "the append left the tail page holding something other than raw data"
         );
         assert!(
-            pg.meta_pad.is_empty() && pg.raw_pad.is_empty(),
+            pg.pending_padding(PageType::Meta).is_empty()
+                && pg.pending_padding(PageType::Raw).is_empty(),
             "an in-place append switched page type: meta_pad={:?} raw_pad={:?}",
-            pg.meta_pad,
-            pg.raw_pad
+            pg.pending_padding(PageType::Meta),
+            pg.pending_padding(PageType::Raw)
         );
 
         // Not vacuous: the append really did allocate index structure above the
@@ -21466,14 +20354,6 @@ mod tests {
             "and not much more than it: {read} against {payload}"
         );
     }
-
-    const PAGE: u64 = FileSpacePageSize::DEFAULT.get();
-    const META: FreeClass = FreeClass::Page(PageType::Meta);
-    const RAW: FreeClass = FreeClass::Page(PageType::Raw);
-    const THRESHOLD_IN_A_PAGE: u64 = 64;
-    const SHORT_OF_THRESHOLD: u64 = THRESHOLD_IN_A_PAGE - 1;
-    const EXTENT_AT: u64 = PAGE + 1024;
-    const THRESHOLD_OF_THREE_PAGES: u64 = 3 * PAGE;
 }
 
 #[cfg(test)]
