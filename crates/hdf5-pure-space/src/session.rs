@@ -1,4 +1,5 @@
 use alloc::vec::Vec;
+use core::iter::Peekable;
 
 use hdf5_pure_core::FileSpacePageSize;
 use hdf5_pure_core::FileSpaceStrategy;
@@ -11,6 +12,8 @@ use super::paged::{
     PagedSections,
 };
 use super::persistence::ManagerKind;
+
+const EMPTY_EXTENTS: &[Extent] = &[];
 
 /// The reusable-space strategy active for one editing session.
 pub enum SessionSpace {
@@ -39,6 +42,61 @@ pub enum SessionSpaceSnapshot {
     Disabled,
     Flat(FreeList),
     Paged(PagedAllocationSnapshot),
+}
+
+/// Merges two address-sorted extent iterators without allocating another snapshot.
+struct MergeExtents<I, J>
+where
+    I: Iterator<Item = Extent>,
+    J: Iterator<Item = Extent>,
+{
+    first: Peekable<I>,
+    second: Peekable<J>,
+}
+
+impl<I, J> MergeExtents<I, J>
+where
+    I: Iterator<Item = Extent>,
+    J: Iterator<Item = Extent>,
+{
+    fn new(first: I, second: J) -> Self {
+        Self {
+            first: first.peekable(),
+            second: second.peekable(),
+        }
+    }
+}
+
+impl<I, J> Iterator for MergeExtents<I, J>
+where
+    I: Iterator<Item = Extent>,
+    J: Iterator<Item = Extent>,
+{
+    type Item = Extent;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let first = self.first.peek().copied();
+        let second = self.second.peek().copied();
+        match (first, second) {
+            (Some(first), Some(second)) if first.start() <= second.start() => {
+                debug_assert!(
+                    first.end() <= second.start(),
+                    "reusable extent lists must be mutually disjoint"
+                );
+                self.first.next()
+            }
+            (Some(first), Some(second)) => {
+                debug_assert!(
+                    second.end() <= first.start(),
+                    "reusable extent lists must be mutually disjoint"
+                );
+                self.second.next()
+            }
+            (Some(_), None) => self.first.next(),
+            (None, Some(_)) => self.second.next(),
+            (None, None) => None,
+        }
+    }
 }
 
 impl SessionSpace {
@@ -128,31 +186,36 @@ impl SessionSpace {
         }
     }
 
-    /// Returns reusable sections in ascending address order.
-    pub fn reusable_sections(&self) -> Vec<(u64, u64)> {
-        match self {
-            Self::Disabled => Vec::new(),
-            Self::Flat(space) => space.free.sections(),
-            Self::Paged(space) => space.paged.reusable_sections(),
-        }
+    /// Returns reusable extents in ascending address order.
+    pub fn reusable_sections(&self) -> impl Iterator<Item = Extent> + '_ {
+        let (first, second) = match self {
+            Self::Disabled => (EMPTY_EXTENTS, EMPTY_EXTENTS),
+            Self::Flat(space) => (space.free.extents(), EMPTY_EXTENTS),
+            Self::Paged(space) => space.paged.reusable_extents(),
+        };
+        MergeExtents::new(first.iter().copied(), second.iter().copied())
     }
 
-    /// Returns reusable sections with extra raw allocations folded back into the snapshot.
+    /// Returns reusable extents with extra raw allocations folded back into the snapshot.
     pub fn reusable_sections_with_raw(
         &self,
         raw_extents: impl IntoIterator<Item = Extent>,
-    ) -> Vec<(u64, u64)> {
-        match self {
-            Self::Disabled => Vec::new(),
+    ) -> impl Iterator<Item = Extent> + '_ {
+        let (first, second) = match self {
+            Self::Disabled => (EMPTY_EXTENTS, Vec::new()),
             Self::Flat(space) => {
                 let mut free = space.free.clone();
                 for extent in raw_extents {
                     free.free(extent);
                 }
-                free.sections()
+                (EMPTY_EXTENTS, free.into_extents())
             }
-            Self::Paged(space) => space.paged.reusable_sections_with_raw(raw_extents),
-        }
+            Self::Paged(space) => {
+                let (metadata, _) = space.paged.reusable_extents();
+                (metadata, space.paged.reusable_raw_with(raw_extents))
+            }
+        };
+        MergeExtents::new(first.iter().copied(), second.into_iter())
     }
 
     /// Returns the start of the free run reaching `eoa` under this strategy.

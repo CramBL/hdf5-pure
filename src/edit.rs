@@ -3625,11 +3625,16 @@ impl WriteEngine {
         // A paged file tracks its free space per page type; report the union of
         // the two, since the caller wants one total rather than a per-manager
         // breakdown.
-        let reusable_free_space = if self.reserved.is_empty() {
-            self.space.reusable_sections()
+        let reusable_free_space: Vec<_> = if self.reserved.is_empty() {
+            self.space
+                .reusable_sections()
+                .map(|extent| (extent.start(), extent.len()))
+                .collect()
         } else {
             self.space
-                .reusable_sections_with_raw(self.reserved.extents())
+                .reusable_sections_with_raw(self.reserved.extents().iter().copied())
+                .map(|extent| (extent.start(), extent.len()))
+                .collect()
         };
         let reusable_free_bytes = reusable_free_space.iter().map(|(_, len)| len).sum();
         SpaceAccounting {
@@ -3856,8 +3861,8 @@ impl WriteEngine {
         if self.reserved.is_empty() {
             return;
         }
-        let extents = std::mem::replace(&mut self.reserved, FreeList::new()).extents();
-        for extent in extents {
+        let reserved = std::mem::replace(&mut self.reserved, FreeList::new());
+        for &extent in reserved.extents() {
             self.space.return_allocation(extent, PageType::Raw);
         }
     }
@@ -6705,7 +6710,7 @@ impl WriteEngine {
         }
         let reused = placed_at.is_some();
         let ext_addr = placed_at.unwrap_or_else(|| self.image.len());
-        let managers = ManagerSections::flat(post.extents());
+        let managers = ManagerSections::flat(post.extents().iter().copied());
         let plan = free_space_manager::plan_managers(
             &managers,
             self.persisted_address(ext_addr + ext_len),
@@ -6983,7 +6988,7 @@ impl WriteEngine {
         // on where it sits. It is also the answer for a tail that ends up appended,
         // since every round hands its reservation back before this returns.
         let (probe, _) = self.flat_post_free(eof, to_free, old_blocks);
-        let managers = ManagerSections::flat(probe.extents());
+        let managers = ManagerSections::flat(probe.extents().iter().copied());
         let appended_len = ext_len + free_space_manager::manager_blocks_len(&managers, widths);
         let mut proposed = appended_len;
 
@@ -7003,7 +7008,7 @@ impl WriteEngine {
             // (issue #418). The reservation was taken before this list was built,
             // so the run can only begin at or above the tail's own end.
             let eoa = release_trailing_run(&mut post, eoa, proposed);
-            let managers = ManagerSections::flat(post.extents());
+            let managers = ManagerSections::flat(post.extents().iter().copied());
             let len = ext_len + free_space_manager::manager_blocks_len(&managers, widths);
             if len <= proposed {
                 debug_assert!(
@@ -15315,22 +15320,25 @@ mod tests {
         // crate wrote has nothing unclassified — it only ever files a whole
         // aligned page under the generic-large manager — so summing it in is a
         // statement about that too.
-        let mut all = s.space.reusable_sections();
+        let mut all: Vec<_> = s.space.reusable_sections().collect();
         all.extend_from_slice(sections.unclassified());
         assert!(
             sections.unclassified().is_empty(),
             "our own paged writer files nothing whose page type is unknown"
         );
-        let flat: u64 = all.iter().map(|&(_, l)| l).sum();
+        let flat: u64 = all.iter().map(|extent| extent.len()).sum();
         assert_eq!(
             flat, on_disk,
             "the split lists hold exactly the file's free space"
         );
-        all.sort_by_key(|&(a, _)| a);
+        all.sort_by_key(|extent| extent.start());
         let mut prev_end = 0u64;
-        for (addr, len) in all {
-            assert!(addr >= prev_end, "the per-type lists do not overlap");
-            prev_end = addr + len;
+        for extent in all {
+            assert!(
+                extent.start() >= prev_end,
+                "the per-type lists do not overlap"
+            );
+            prev_end = extent.end();
         }
     }
 
@@ -15563,16 +15571,17 @@ mod tests {
             .expect("a paged file installs paged state")
             .unclassified()
             .to_vec();
-        let reusable = s.space.reusable_sections();
+        let reusable: Vec<_> = s.space.reusable_sections().collect();
         for &(addr, size) in &fragments {
+            let fragment = FreeExtent::new(addr, size).expect("wire sections are non-empty");
             assert!(
-                unclassified.contains(&(addr, size)),
+                unclassified.contains(&fragment),
                 "fragment ({addr}, {size}) must be recorded as unclassified, not lost"
             );
             assert!(
-                !reusable
-                    .iter()
-                    .any(|&(a, l)| a < addr + size && addr < a + l),
+                !reusable.iter().any(|extent| {
+                    extent.start() < fragment.end() && fragment.start() < extent.end()
+                }),
                 "fragment ({addr}, {size}) must not be offered to any allocation: {reusable:?}"
             );
         }
@@ -15701,7 +15710,7 @@ mod tests {
         let sections = s.space.paged_sections().expect("still paged");
         assert_eq!(
             sections.raw(),
-            [(PAGE + 1024, PAGE - 1024)],
+            [FreeExtent::new(PAGE + 1024, PAGE - 1024).unwrap()],
             "the rest of the claimed page is free space of the claiming type"
         );
         assert!(
@@ -15732,23 +15741,22 @@ mod tests {
         let sections = s.space.paged_sections().expect("still paged");
         assert_eq!(
             sections.raw(),
-            [(PAGE + 512, PAGE - 512), (3 * PAGE, PAGE)],
+            [
+                FreeExtent::new(PAGE + 512, PAGE - 512).unwrap(),
+                FreeExtent::new(3 * PAGE, PAGE).unwrap(),
+            ],
             "the fragment below the claimed page and the page above it both stay free"
         );
         assert_eq!(
             sections.metadata(),
-            [(2 * PAGE + 1024, PAGE - 1024)],
+            [FreeExtent::new(2 * PAGE + 1024, PAGE - 1024).unwrap()],
             "the rest of the claimed page is free space of the claiming type"
         );
     }
 
     /// Every byte a paged session could still hand out, across both page types.
     fn free_total(s: &WriteEngine) -> u64 {
-        s.space
-            .reusable_sections()
-            .iter()
-            .map(|&(_, len)| len)
-            .sum()
+        s.space.reusable_sections().map(|extent| extent.len()).sum()
     }
 
     /// A paged commit's tail removes from the free lists exactly the bytes it goes
@@ -15926,11 +15934,7 @@ mod tests {
             FormatWidths::from_sizes(s.superblock.offset_size, s.superblock.length_size).unwrap();
 
         let free_total = |s: &WriteEngine| -> u64 {
-            s.space
-                .reusable_sections()
-                .into_iter()
-                .map(|(_, len)| len)
-                .sum()
+            s.space.reusable_sections().map(|extent| extent.len()).sum()
         };
 
         let (mut placed, mut declined, mut with_slack) = (0usize, 0usize, 0usize);
@@ -15951,7 +15955,7 @@ mod tests {
             // consumed outright drops a section from the managers, so this comes out
             // shorter than the extent for some hole sizes and the difference is what
             // the extent has to cover.
-            let managers = ManagerSections::flat(post.extents());
+            let managers = ManagerSections::flat(post.extents().iter().copied());
             let written = EXT_LEN + free_space_manager::manager_blocks_len(&managers, widths);
             match at {
                 Some(at) => {
@@ -16046,16 +16050,18 @@ mod tests {
         // on every commit; the managers just written cannot record it, so the
         // session carries it to the next commit.
         let sections = s.space.paged_sections().expect("still paged");
-        let (addr, len) = sections
+        let extent = sections
             .metadata()
             .iter()
             .copied()
-            .find(|&(addr, len)| addr + len == after)
+            .find(|extent| extent.end() == after)
             .expect("the page the tail opened leaves a free remainder at end-of-file");
         assert!(
-            len > 0 && len < PAGE && addr >= before,
-            "the tail's blocks take the front of the page it opened and the rest is \
-             free ({len} of {PAGE} at {addr}, file {before} -> {after})"
+            extent.len() < PAGE && extent.start() >= before,
+            "the tail's blocks take the front of the page it opened and the rest is free ({} of \
+             {PAGE} at {}, file {before} -> {after})",
+            extent.len(),
+            extent.start()
         );
     }
 
@@ -16118,17 +16124,19 @@ mod tests {
             .space
             .paged_sections()
             .expect("a paged file installs paged state");
-        for &(addr, len) in sections.metadata() {
-            for p in (addr / page)..=((addr + len - 1) / page) {
+        for &extent in sections.metadata() {
+            for p in (extent.start() / page)..=((extent.end() - 1) / page) {
                 assert!(
                     !live_raw_pages.contains(&p),
-                    "metadata free section ({addr}, {len}) sits in page {p}, which still \
-                     holds live raw chunk data"
+                    "metadata free section ({}, {}) sits in page {p}, which still holds live raw \
+                     chunk data",
+                    extent.start(),
+                    extent.len()
                 );
             }
         }
         // The index really was reclaimed somewhere, so this is not vacuous.
-        let reclaimed: u64 = s.space.reusable_sections().iter().map(|&(_, l)| l).sum();
+        let reclaimed: u64 = s.space.reusable_sections().map(|extent| extent.len()).sum();
         assert!(reclaimed > 0, "the delete reclaimed nothing");
     }
 
@@ -18253,11 +18261,13 @@ mod tests {
             !raw_free.is_empty(),
             "the commit packed metadata into the raw page the append left open"
         );
-        for (addr, len) in raw_free {
+        for extent in raw_free {
             assert_eq!(
-                (addr + len) % PAGE,
+                extent.end() % PAGE,
                 0,
-                "padding {addr}+{len} does not reach a page boundary"
+                "padding {}+{} does not reach a page boundary",
+                extent.start(),
+                extent.len()
             );
         }
 
@@ -19503,7 +19513,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let path = dir.path().join("draw_gathers.h5");
         let mut s = fragmented_persisting_fixture(&path, 3, 4 * 64);
-        let before = s.space.reusable_sections();
+        let before: Vec<_> = s.space.reusable_sections().collect();
         assert!(
             before.len() >= 3,
             "the fixture must leave three separate holes, not {before:?}"
@@ -19511,7 +19521,12 @@ mod tests {
 
         s.append_inplace_i32_phased("t0", &[1i32; 64], 4).unwrap();
 
-        let held = s.reserved.sections();
+        let held: Vec<_> = s
+            .reserved
+            .extents()
+            .iter()
+            .map(|extent| (extent.start(), extent.len()))
+            .collect();
         // A run per hole, less what the chunk and the rewrite's tail took out of
         // them: the chunk out of one, the tail out of at most one more.
         assert!(
@@ -19521,7 +19536,7 @@ mod tests {
         );
         let drawn: u64 = held.iter().map(|&(_, len)| len).sum();
         assert!(
-            drawn > before.iter().map(|&(_, len)| len).max().unwrap(),
+            drawn > before.iter().map(|extent| extent.len()).max().unwrap(),
             "the reserve holds {drawn} bytes, no more than the largest hole alone"
         );
     }
