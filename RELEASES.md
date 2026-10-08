@@ -24,7 +24,8 @@ Re-running the workflow's job resumes after a failure.
 
 ## A crate's first publication
 
-Trusted Publishing cannot create a crate on crates.io, so the Release workflow fails on a crate name that has not been published yet. The first release with `hdf5-pure-core`, `hdf5-pure-format` and `hdf5-pure-filter` publishes by hand:
+Trusted Publishing cannot create a crate on crates.io, so the Release workflow fails on a crate name that has not been published yet. The first release with `hdf5-pure-core`, `hdf5-pure-format`, `hdf5-pure-filter` and
+`hdf5-pure-space` publishes by hand:
 
 1. Prepare and merge the release as usual.
 2. Check out the merged release commit.

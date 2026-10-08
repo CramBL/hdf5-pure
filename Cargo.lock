@@ -457,6 +457,7 @@ dependencies = [
  "hdf5-pure-core",
  "hdf5-pure-filter",
  "hdf5-pure-format",
+ "hdf5-pure-space",
  "heapscope",
  "ndarray",
  "num-complex",
@@ -511,6 +512,14 @@ dependencies = [
  "hdf5-pure-core",
  "rstest",
  "test-util",
+]
+
+[[package]]
+name = "hdf5-pure-space"
+version = "0.47.0"
+dependencies = [
+ "hdf5-pure-core",
+ "rstest",
 ]
 
 [[package]]

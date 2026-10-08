@@ -1,19 +1,19 @@
 use alloc::vec::Vec;
 
-use crate::error::FormatError;
-use crate::file_space_info::{FileSpacePageSize, FileSpaceStrategy};
+use hdf5_pure_core::FileSpacePageSize;
+use hdf5_pure_core::FileSpaceStrategy;
+use hdf5_pure_core::FormatError;
 
 use super::extent::Extent;
 use super::list::{self, FreeList};
-#[cfg(test)]
-use super::paged::PagedSections;
 use super::paged::{
     FreeClass, PageTransition, PageType, PagedAllocationSnapshot, PagedEdit, PagedPostFree,
+    PagedSections,
 };
 use super::persistence::ManagerKind;
 
 /// The reusable-space strategy active for one editing session.
-pub(crate) enum SessionSpace {
+pub enum SessionSpace {
     /// Reusable allocation is disabled.
     Disabled,
     /// One generic free list, as used by the implemented part of `FSM_AGGR`.
@@ -23,19 +23,19 @@ pub(crate) enum SessionSpace {
 }
 
 /// Reusable-space state for an unpaged manager strategy.
-pub(crate) struct FlatSpace {
+pub struct FlatSpace {
     free: FreeList,
     threshold: u64,
 }
 
 /// Reusable-space state for the PAGE strategy.
-pub(crate) struct PagedSpace {
+pub struct PagedSpace {
     paged: PagedEdit,
     threshold: u64,
 }
 
 /// The allocation state a failed commit may restore without undoing written PAGE padding.
-pub(crate) enum SessionSpaceSnapshot {
+pub enum SessionSpaceSnapshot {
     Disabled,
     Flat(FreeList),
     Paged(PagedAllocationSnapshot),
@@ -46,7 +46,7 @@ impl SessionSpace {
     ///
     /// `None` represents a strategy that could not be read safely. A missing File Space Info
     /// message is normalized by the caller to the default `FSM_AGGR` strategy before this call.
-    pub(crate) fn from_strategy(
+    pub fn from_strategy(
         strategy: Option<FileSpaceStrategy>,
         threshold: u64,
         page_size: FileSpacePageSize,
@@ -65,17 +65,17 @@ impl SessionSpace {
     }
 
     /// Returns whether this strategy maintains reusable free space.
-    pub(crate) fn is_enabled(&self) -> bool {
+    pub fn is_enabled(&self) -> bool {
         !matches!(self, Self::Disabled)
     }
 
     /// Returns whether this session uses the PAGE strategy.
-    pub(crate) fn is_paged(&self) -> bool {
+    pub fn is_paged(&self) -> bool {
         matches!(self, Self::Paged(_))
     }
 
     /// Returns the PAGE size when this session is paged.
-    pub(crate) fn page_size(&self) -> Option<FileSpacePageSize> {
+    pub fn page_size(&self) -> Option<FileSpacePageSize> {
         match self {
             Self::Paged(space) => Some(space.paged.page_size()),
             Self::Disabled | Self::Flat(_) => None,
@@ -86,7 +86,7 @@ impl SessionSpace {
     ///
     /// `kind` carries PAGE manager semantics. A flat strategy ignores it because all manager
     /// sections share one allocation class.
-    pub(crate) fn seed_persisted(&mut self, kind: Option<ManagerKind>, extent: Extent) {
+    pub fn seed_persisted(&mut self, kind: Option<ManagerKind>, extent: Extent) {
         match self {
             Self::Disabled => {}
             Self::Flat(space) => space.free.free(extent),
@@ -95,14 +95,14 @@ impl SessionSpace {
     }
 
     /// Finishes strategy-specific normalization after persisted sections are seeded.
-    pub(crate) fn finish_seed(&mut self) {
+    pub fn finish_seed(&mut self) {
         if let Self::Paged(space) = self {
             space.paged.finish_seed();
         }
     }
 
     /// Allocates `len` reusable bytes for `ty`.
-    pub(crate) fn allocate(&mut self, len: u64, ty: PageType) -> Option<Extent> {
+    pub fn allocate(&mut self, len: u64, ty: PageType) -> Option<Extent> {
         match self {
             Self::Disabled => None,
             Self::Flat(space) => space.free.alloc(len),
@@ -111,7 +111,7 @@ impl SessionSpace {
     }
 
     /// Returns an allocation to the strategy it came from.
-    pub(crate) fn return_allocation(&mut self, extent: Extent, ty: PageType) {
+    pub fn return_allocation(&mut self, extent: Extent, ty: PageType) {
         match self {
             Self::Disabled => {}
             Self::Flat(space) => space.free.free(extent),
@@ -120,7 +120,7 @@ impl SessionSpace {
     }
 
     /// Returns the largest reusable run available for `ty`.
-    pub(crate) fn largest(&self, ty: PageType) -> u64 {
+    pub fn largest(&self, ty: PageType) -> u64 {
         match self {
             Self::Disabled => 0,
             Self::Flat(space) => space.free.largest(),
@@ -129,7 +129,7 @@ impl SessionSpace {
     }
 
     /// Returns reusable sections in ascending address order.
-    pub(crate) fn reusable_sections(&self) -> Vec<(u64, u64)> {
+    pub fn reusable_sections(&self) -> Vec<(u64, u64)> {
         match self {
             Self::Disabled => Vec::new(),
             Self::Flat(space) => space.free.sections(),
@@ -138,7 +138,7 @@ impl SessionSpace {
     }
 
     /// Returns reusable sections with extra raw allocations folded back into the snapshot.
-    pub(crate) fn reusable_sections_with_raw(
+    pub fn reusable_sections_with_raw(
         &self,
         raw_extents: impl IntoIterator<Item = Extent>,
     ) -> Vec<(u64, u64)> {
@@ -156,7 +156,7 @@ impl SessionSpace {
     }
 
     /// Returns the start of the free run reaching `eoa` under this strategy.
-    pub(crate) fn trailing_run_start(&self, eoa: u64) -> u64 {
+    pub fn trailing_run_start(&self, eoa: u64) -> u64 {
         match self {
             Self::Disabled => eoa,
             Self::Flat(space) => list::trailing_run_start([&space.free], eoa),
@@ -166,7 +166,7 @@ impl SessionSpace {
 
     /// Records extents returned by a non-persisting commit and returns a smaller EOA when one is
     /// released from the file tail.
-    pub(crate) fn release_freed(
+    pub fn release_freed(
         &mut self,
         eof: u64,
         extents: impl IntoIterator<Item = Extent>,
@@ -180,7 +180,7 @@ impl SessionSpace {
     }
 
     /// Builds the flat free-space state that a persisting commit would publish.
-    pub(crate) fn flat_post_free(
+    pub fn flat_post_free(
         &self,
         eof: u64,
         extents: impl IntoIterator<Item = Extent>,
@@ -194,7 +194,7 @@ impl SessionSpace {
     }
 
     /// Adopts the flat free list after its publication succeeds.
-    pub(crate) fn adopt_flat_post_free(&mut self, post: FreeList) {
+    pub fn adopt_flat_post_free(&mut self, post: FreeList) {
         if let Self::Flat(space) = self {
             space.free = post;
         } else {
@@ -206,7 +206,7 @@ impl SessionSpace {
     }
 
     /// Builds the PAGE free-space state that a persisting commit would publish.
-    pub(crate) fn paged_post_free(
+    pub fn paged_post_free(
         &self,
         eoa: u64,
         freed: impl IntoIterator<Item = (Extent, FreeClass)>,
@@ -223,7 +223,7 @@ impl SessionSpace {
     }
 
     /// Adopts PAGE post-free state after its publication succeeds.
-    pub(crate) fn adopt_paged_post_free(
+    pub fn adopt_paged_post_free(
         &mut self,
         post: PagedPostFree,
         appended_metadata: bool,
@@ -242,7 +242,7 @@ impl SessionSpace {
     }
 
     /// Returns the transition required before appending `ty`, or `None` for an unpaged strategy.
-    pub(crate) fn plan_transition(
+    pub fn plan_transition(
         &self,
         eoa: u64,
         ty: PageType,
@@ -254,14 +254,14 @@ impl SessionSpace {
     }
 
     /// Records a PAGE transition after its padding has been written.
-    pub(crate) fn record_transition(&mut self, ty: PageType, transition: PageTransition) {
+    pub fn record_transition(&mut self, ty: PageType, transition: PageTransition) {
         if let Self::Paged(space) = self {
             space.paged.record_transition(ty, transition);
         }
     }
 
     /// Returns PAGE-boundary padding, or `None` for an unpaged or aligned file.
-    pub(crate) fn page_padding(&self, eoa: u64) -> Result<Option<PageTransition>, FormatError> {
+    pub fn page_padding(&self, eoa: u64) -> Result<Option<PageTransition>, FormatError> {
         match self {
             Self::Paged(space) => space.paged.page_padding(eoa),
             Self::Disabled | Self::Flat(_) => Ok(None),
@@ -269,14 +269,14 @@ impl SessionSpace {
     }
 
     /// Records PAGE-boundary padding after it has been written.
-    pub(crate) fn record_page_padding(&mut self, transition: PageTransition) {
+    pub fn record_page_padding(&mut self, transition: PageTransition) {
         if let Self::Paged(space) = self {
             space.paged.record_page_padding(transition);
         }
     }
 
     /// Snapshots the allocation state that rollback may restore safely.
-    pub(crate) fn allocation_snapshot(&self) -> SessionSpaceSnapshot {
+    pub fn allocation_snapshot(&self) -> SessionSpaceSnapshot {
         match self {
             Self::Disabled => SessionSpaceSnapshot::Disabled,
             Self::Flat(space) => SessionSpaceSnapshot::Flat(space.free.clone()),
@@ -285,7 +285,7 @@ impl SessionSpace {
     }
 
     /// Restores a prior allocation snapshot without rewinding PAGE tail/padding state.
-    pub(crate) fn restore_allocation(&mut self, snapshot: SessionSpaceSnapshot) {
+    pub fn restore_allocation(&mut self, snapshot: SessionSpaceSnapshot) {
         match (self, snapshot) {
             (Self::Disabled, SessionSpaceSnapshot::Disabled) => {}
             (Self::Flat(space), SessionSpaceSnapshot::Flat(free)) => space.free = free,
@@ -296,24 +296,27 @@ impl SessionSpace {
         }
     }
 
-    #[cfg(test)]
-    pub(crate) fn paged_sections(&self) -> Option<PagedSections> {
+    /// Returns PAGE section state when this session is paged.
+    pub fn paged_sections(&self) -> Option<PagedSections> {
         match self {
             Self::Paged(space) => Some(space.paged.sections()),
             Self::Disabled | Self::Flat(_) => None,
         }
     }
 
-    #[cfg(test)]
-    pub(crate) fn paged_tail_type(&self) -> Option<Option<PageType>> {
+    /// Returns the established PAGE tail type when this session is paged.
+    ///
+    /// The outer `Option` distinguishes a non-PAGE strategy. The inner value is `None` until the
+    /// session establishes a tail page type.
+    pub fn paged_tail_type(&self) -> Option<Option<PageType>> {
         match self {
             Self::Paged(space) => Some(space.paged.tail_type()),
             Self::Disabled | Self::Flat(_) => None,
         }
     }
 
-    #[cfg(test)]
-    pub(crate) fn pending_padding(&self, ty: PageType) -> Option<&[Extent]> {
+    /// Returns pending PAGE padding for `ty` when this session is paged.
+    pub fn pending_padding(&self, ty: PageType) -> Option<&[Extent]> {
         match self {
             Self::Paged(space) => Some(space.paged.pending_padding(ty)),
             Self::Disabled | Self::Flat(_) => None,

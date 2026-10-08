@@ -10,14 +10,14 @@ use super::extent::Extent;
 /// never touch or overlap (any two that would are merged on insertion). Allocation is best-fit to
 /// fragmentation.
 #[derive(Clone, Debug, Default)]
-pub(crate) struct FreeList {
+pub struct FreeList {
     /// Disjoint regions, sorted ascending by address and never adjacent.
     regions: Vec<Extent>,
 }
 
 impl FreeList {
     /// An empty free list.
-    pub(crate) fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             regions: Vec::new(),
         }
@@ -28,7 +28,7 @@ impl FreeList {
     ///
     /// Overlapping an already-free region is a caller bug (a double-free). Debug builds panic.
     /// Release builds absorb the overlap into the merge and keep the list canonical.
-    pub(crate) fn free(&mut self, extent: Extent) {
+    pub fn free(&mut self, extent: Extent) {
         // Find the first region that ends at or after `extent.start()`. This is the leftmost one
         // that could touch or overlap the freed range. Everything before it is strictly to the
         // left with a gap and stays untouched.
@@ -72,7 +72,7 @@ impl FreeList {
     /// A dropped extent that ends at `eoa` lowers the end of allocation to its start, and so does
     /// each further dropped extent that then ends it. A recorded region that ends at `eoa` stays
     /// in the list.
-    pub(crate) fn release_all(
+    pub fn release_all(
         &mut self,
         threshold: u64,
         eoa: u64,
@@ -100,7 +100,7 @@ impl FreeList {
     /// Best-fit uses the smallest region that fits to keep large runs intact. The allocation is
     /// taken from the low end of the chosen region. Any remainder stays free. `len` of 0 returns
     /// `None` (nothing to allocate).
-    pub(crate) fn alloc(&mut self, len: u64) -> Option<Extent> {
+    pub fn alloc(&mut self, len: u64) -> Option<Extent> {
         if len == 0 {
             return None;
         }
@@ -140,7 +140,7 @@ impl FreeList {
     /// coalesce into the single hole the dataset that vacated both needs (issue #261).
     ///
     /// `len` or `align` of 0 returns `None`.
-    pub(crate) fn alloc_whole_units(&mut self, len: u64, align: u64) -> Option<Extent> {
+    pub fn alloc_whole_units(&mut self, len: u64, align: u64) -> Option<Extent> {
         if len == 0 || align == 0 {
             return None;
         }
@@ -194,7 +194,7 @@ impl FreeList {
     /// its fate and uses this method to update the list. The paged editor uses it to lift a whole
     /// free page out of the per-page-type lists before
     /// re-filing it as one free page without a page-type classification.
-    pub(crate) fn take_range(&mut self, extent: Extent) {
+    pub fn take_range(&mut self, extent: Extent) {
         let mut out = Vec::with_capacity(self.regions.len() + 1);
         for region in self.regions.drain(..) {
             // Disjoint from the range: keep the region whole.
@@ -221,7 +221,7 @@ impl FreeList {
     }
 
     /// Returns the free extents, sorted ascending by address and fully coalesced.
-    pub(crate) fn extents(&self) -> Vec<Extent> {
+    pub fn extents(&self) -> Vec<Extent> {
         self.regions.clone()
     }
 
@@ -230,7 +230,7 @@ impl FreeList {
     ///
     /// Used to persist the free list to disk (issue #21) and to report the session's live reusable
     /// free space (issue #150).
-    pub(crate) fn sections(&self) -> Vec<(u64, u64)> {
+    pub fn sections(&self) -> Vec<(u64, u64)> {
         self.regions
             .iter()
             .map(|extent| (extent.start(), extent.len()))
@@ -238,7 +238,7 @@ impl FreeList {
     }
 
     /// Returns whether the list is empty.
-    pub(crate) fn is_empty(&self) -> bool {
+    pub fn is_empty(&self) -> bool {
         self.regions.is_empty()
     }
 
@@ -247,7 +247,7 @@ impl FreeList {
     /// Allocation is best-fit over *contiguous* regions, so a list holding plenty of bytes in small
     /// pieces may not satisfy a large request. An in-place append's reserve uses this value to
     /// determine whether it must draw more (issue #387).
-    pub(crate) fn largest(&self) -> u64 {
+    pub fn largest(&self) -> u64 {
         self.regions
             .iter()
             .map(|extent| extent.len())
@@ -264,7 +264,7 @@ impl FreeList {
     /// The whole-page counterpart of [`largest`](Self::largest), for the same caller: on a paged
     /// file an append's reserve may claim whole free pages out of the other page type's list, so
     /// how much it can draw is the larger of this and its own list's `largest`.
-    pub(crate) fn largest_whole_units(&self, align: u64) -> u64 {
+    pub fn largest_whole_units(&self, align: u64) -> u64 {
         self.regions
             .iter()
             .filter_map(|extent| extent.aligned_interior(align).map(Extent::len))
@@ -277,7 +277,7 @@ impl FreeList {
     /// the highest free region does not reach end-of-file.
     ///
     /// Because the list is coalesced, at most one region can end at `eof`, and it is the last one.
-    pub(crate) fn take_trailing(&mut self, eof: u64) -> Option<u64> {
+    pub fn take_trailing(&mut self, eof: u64) -> Option<u64> {
         match self.regions.last() {
             Some(last) if last.end() == eof => {
                 let start = last.start();
@@ -289,13 +289,13 @@ impl FreeList {
     }
 
     /// Returns `true` if a region adjoins `extent`.
-    pub(crate) fn adjoins(&self, extent: Extent) -> bool {
+    pub fn adjoins(&self, extent: Extent) -> bool {
         self.regions.iter().any(|region| region.adjoins(extent))
     }
 
     /// Returns `true` if a region adjoins `extent` inside one `unit`, at an address that is not a
     /// multiple of `unit`.
-    pub(crate) fn adjoins_within(&self, extent: Extent, unit: u64) -> bool {
+    pub fn adjoins_within(&self, extent: Extent, unit: u64) -> bool {
         self.regions.iter().any(|region| {
             (region.end() == extent.start() && !extent.start().is_multiple_of(unit))
                 || (region.start() == extent.end() && !extent.end().is_multiple_of(unit))
@@ -303,7 +303,7 @@ impl FreeList {
     }
 
     /// Returns how many bytes of `extent` the regions cover.
-    pub(crate) fn covered_len(&self, extent: Extent) -> u64 {
+    pub fn covered_len(&self, extent: Extent) -> u64 {
         self.regions
             .iter()
             .filter_map(|region| region.intersection(extent))
@@ -313,7 +313,7 @@ impl FreeList {
 
     /// Returns `true` if a region of at least `unit` bytes adjoins `extent` at a multiple of
     /// `unit`.
-    pub(crate) fn adjoins_whole_unit(&self, extent: Extent, unit: u64) -> bool {
+    pub fn adjoins_whole_unit(&self, extent: Extent, unit: u64) -> bool {
         self.regions.iter().any(|region| {
             (region.end() == extent.start()
                 && extent.start().is_multiple_of(unit)
@@ -342,8 +342,8 @@ impl TrackedSpace for FreeList {
 /// is free.
 ///
 /// The paged counterpart of [`FreeList::take_trailing`]. A paged file keeps free space in one list
-/// per page type, plus space whose page type is unproven and space it may record but never hand out
-/// ([`crate::edit`]). The run at the end of the file can therefore be split across those lists. For
+/// per page type, plus unclassified space and dead space it may record but never hand out. The run
+/// at the end of the file can therefore be split across those lists. For
 /// example, free metadata may be followed by free raw data and then a dead fragment, with no single
 /// list containing the whole run. The union reports whether the file's last bytes are all
 /// unreferenced, which determines whether the file can shrink.
@@ -351,7 +351,7 @@ impl TrackedSpace for FreeList {
 /// The regions are walked from the top, joining those that touch: because each list is coalesced
 /// and the lists do not overlap, a region can only extend the run when its end meets the run's
 /// start, so one descending pass is exact.
-pub(crate) fn trailing_run_start<'a, I>(lists: I, eof: u64) -> u64
+pub fn trailing_run_start<'a, I>(lists: I, eof: u64) -> u64
 where
     I: IntoIterator<Item = &'a FreeList>,
 {

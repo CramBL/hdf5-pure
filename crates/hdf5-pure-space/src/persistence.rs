@@ -1,14 +1,14 @@
 use alloc::vec;
 use alloc::vec::Vec;
 
-use crate::file_space_info::FileSpacePageSize;
+use hdf5_pure_core::FileSpacePageSize;
 
 use super::extent::Extent;
 use super::paged::PagedSections;
 
 /// Identifies the free-space manager semantics the writer persists.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum ManagerKind {
+pub enum ManagerKind {
     /// The generic manager of an unpaged `FSM_AGGR` file.
     Flat,
     /// The generic-large manager of a paged file.
@@ -20,14 +20,14 @@ pub(crate) enum ManagerKind {
 }
 
 /// Holds the semantic sections one free-space manager should persist.
-pub(crate) struct ManagerSections {
+pub struct ManagerSections {
     kind: ManagerKind,
     sections: Vec<Extent>,
 }
 
 impl ManagerSections {
     /// Returns one flat manager when `sections` is non-empty.
-    pub(crate) fn flat(sections: Vec<Extent>) -> Vec<Self> {
+    pub fn flat(sections: Vec<Extent>) -> Vec<Self> {
         if sections.is_empty() {
             Vec::new()
         } else {
@@ -44,7 +44,7 @@ impl ManagerSections {
     /// page remain in their typed small manager, while whole pages enter the generic-large
     /// manager. Unclassified sections stay in the generic-large manager without splitting because
     /// their page type is deliberately unknown.
-    pub(crate) fn paged(sections: &PagedSections, page_size: FileSpacePageSize) -> Vec<Self> {
+    pub fn paged(sections: &PagedSections, page_size: FileSpacePageSize) -> Vec<Self> {
         let mut metadata = Vec::new();
         let mut raw = Vec::new();
         let mut generic = Vec::new();
@@ -74,12 +74,12 @@ impl ManagerSections {
     }
 
     /// Returns the semantic kind of this manager.
-    pub(crate) fn kind(&self) -> ManagerKind {
+    pub fn kind(&self) -> ManagerKind {
         self.kind
     }
 
     /// Returns the sections this manager should persist.
-    pub(crate) fn sections(&self) -> &[Extent] {
+    pub fn sections(&self) -> &[Extent] {
         &self.sections
     }
 
@@ -114,10 +114,13 @@ impl ManagerSections {
     }
 }
 
+/// Specifies the manager-tail lengths retained when releasing trailing free space.
+pub const TRAILING_RESERVE_TAILS: u64 = 4;
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::free_space::{PageType, PagedEdit};
+    use crate::paged::{PageType, PagedEdit};
 
     fn extent(addr: u64, len: u64) -> Extent {
         Extent::new(addr, len).unwrap()

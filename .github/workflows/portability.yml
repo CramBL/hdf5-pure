@@ -50,6 +50,7 @@ jobs:
               - crates/hdf5-pure-core/**
               - crates/hdf5-pure-filter/**
               - crates/hdf5-pure-format/**
+              - crates/hdf5-pure-space/**
               - crates/test-util/**
               - crates/test-util-hdf5/**
               - crates/crosscheck/**

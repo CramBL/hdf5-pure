@@ -6,7 +6,7 @@ use super::extent::Extent;
 ///
 /// An extent at least as long as the threshold is tracked, and a shorter one only where it merges
 /// into tracked space. Each implementation defines where an extent merges.
-pub(crate) trait TrackedSpace {
+pub trait TrackedSpace {
     /// What a caller passes beside each extent to choose the list it joins.
     type Class: Copy;
 
@@ -66,7 +66,7 @@ pub(crate) trait TrackedSpace {
 
 /// What [`TrackedSpace::release`] does with a freed extent.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum Release {
+pub enum Release {
     /// The extent is not recorded.
     Drop,
     /// The extent is shorter than the threshold and merges into tracked space.
@@ -77,10 +77,13 @@ pub(crate) enum Release {
 
 #[cfg(test)]
 mod tests {
+    use alloc::vec::Vec;
+
     use rstest::rstest;
 
     use super::{Release, TrackedSpace};
-    use crate::free_space::{Extent, FreeList};
+    use crate::extent::Extent;
+    use crate::list::FreeList;
 
     /// Exposes the canonical region list as `(addr, len)` pairs for assertions.
     fn regions(fl: &FreeList) -> Vec<(u64, u64)> {

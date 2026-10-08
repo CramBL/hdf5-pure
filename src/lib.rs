@@ -454,7 +454,6 @@ pub(crate) mod fill_value;
 pub(crate) mod filter_pipeline;
 pub(crate) mod filters;
 pub(crate) mod fractal_heap;
-pub(crate) mod free_space;
 pub(crate) mod free_space_manager;
 pub(crate) mod global_heap;
 pub(crate) mod group_v1;

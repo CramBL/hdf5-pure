@@ -13,6 +13,7 @@ use hdf5_pure_format::__private::FreeSpaceManagerHeader;
 use hdf5_pure_format::__private::SECTION_CLASS_LARGE;
 use hdf5_pure_format::__private::SECTION_CLASS_SIMPLE;
 use hdf5_pure_format::__private::SECTION_CLASS_SMALL;
+use hdf5_pure_space::__private::{ManagerKind, ManagerSections};
 
 use crate::address::BaseAddressExt;
 use crate::address::{BaseAddress, StoredAddress};
@@ -21,7 +22,6 @@ use crate::error::FormatError;
 use crate::file_space_info::FileSpacePageSize;
 use crate::file_space_info::FileSpaceStrategy;
 use crate::file_space_info::NUM_FILE_FSM_MANAGERS;
-use crate::free_space::{ManagerKind, ManagerSections};
 use crate::width::FormatWidths;
 
 /// Reads the free sections of the managers at `manager_addrs` from the file `data`.
@@ -249,11 +249,11 @@ fn manager_wire(kind: ManagerKind) -> (usize, u8) {
 
 #[cfg(test)]
 mod tests {
+    use hdf5_pure_space::__private::{Extent, SessionSpace};
     use rstest::rstest;
     use test_util::free_space;
 
     use super::*;
-    use crate::free_space::{Extent, PageType, PagedEdit};
 
     /// A free section at `addr` spanning `size` bytes.
     fn section(addr: u64, size: u64) -> FreeSection {
@@ -442,14 +442,23 @@ mod tests {
     #[test]
     fn semantic_paged_managers_keep_the_existing_wire_slots_and_classes() {
         let page_size = FileSpacePageSize::DEFAULT;
-        let mut paged = PagedEdit::new(page_size);
-        paged.seed(Extent::new(100, 200).unwrap(), Some(PageType::Meta));
-        paged.seed(Extent::new(5000, 200).unwrap(), Some(PageType::Raw));
-        paged.seed(
-            Extent::new(8192, page_size.get()).unwrap(),
-            Some(PageType::Raw),
+        let mut space = SessionSpace::from_strategy(Some(FileSpaceStrategy::Page), 0, page_size);
+        space.seed_persisted(
+            Some(ManagerKind::PagedSmallMetadata),
+            Extent::new(100, 200).unwrap(),
         );
-        let managers = ManagerSections::paged(&paged.sections(), page_size);
+        space.seed_persisted(
+            Some(ManagerKind::PagedSmallRaw),
+            Extent::new(5000, 200).unwrap(),
+        );
+        space.seed_persisted(
+            Some(ManagerKind::PagedLargeGeneric),
+            Extent::new(8192, page_size.get()).unwrap(),
+        );
+        let managers = ManagerSections::paged(
+            &space.paged_sections().expect("the strategy is PAGE"),
+            page_size,
+        );
         let plan = plan_managers(&managers, StoredAddress::new(1000), widths(8, 8));
 
         assert_eq!(plan.blocks.len(), 3);
