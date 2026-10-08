@@ -11,23 +11,22 @@
 //! `persist = true`, [`File::open_rw`](crate::File::open_rw) seeds the list from the file's
 //! free-space managers, and each commit writes the list back to them.
 //!
-//! [`PagedEdit`] owns the PAGE strategy's typed free lists, page transitions, threshold admission,
-//! whole-page promotion, and post-release end-of-allocation policy.
+//! [`SessionSpace`] owns the active runtime allocation strategy. Its PAGE state keeps typed free
+//! lists, page transitions, threshold admission, whole-page promotion, and post-release EOA policy.
 
 mod admission;
 mod extent;
 mod list;
 mod paged;
+mod session;
 
 #[cfg(test)]
 pub(crate) use admission::Release;
 pub(crate) use admission::TrackedSpace;
 pub(crate) use extent::Extent;
 pub(crate) use list::{FreeList, trailing_run_start};
-pub(crate) use paged::{
-    FreeClass, PageTransition, PageType, PagedAllocationSnapshot, PagedEdit, PagedPostFree,
-    PagedSections,
-};
+pub(crate) use paged::{FreeClass, PageTransition, PageType, PagedPostFree, PagedSections};
+pub(crate) use session::{SessionSpace, SessionSpaceSnapshot};
 
 /// Specifies the manager-tail lengths retained when releasing trailing free space.
 pub(crate) const TRAILING_RESERVE_TAILS: u64 = 4;
