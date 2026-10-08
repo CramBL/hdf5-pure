@@ -7,7 +7,7 @@
 //! internal node. Record walks preserve tree order. [`collect_btree_v2_storage_extents`] returns
 //! the header allocation and every reachable full "Node Size" allocation in file-address order.
 //!
-//! [spec]: https://support.hdfgroup.org/releases/hdf5/2.1.0/documentation/hdf5-2.1.0.doxygen/_f_m_t4.html#subsubsec_fmt4_infra_btrees_v2
+//! [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_infra_btrees_v2
 
 use core::num::NonZeroU16;
 
@@ -50,9 +50,10 @@ use crate::width::{LengthWidth, OffsetWidth};
 ///
 /// Returns [`FormatError::InvalidOffsetSize`] or [`FormatError::InvalidLengthSize`] if a file width
 /// is not 2, 4, or 8, [`FormatError::InvalidBTreeV2Signature`] if a required `BTHD`, `BTIN`, or
-/// `BTLF` signature is absent, and [`FormatError::InvalidBTreeV2Version`] if the header version is
-/// not 0. With the `checksum` feature, returns [`FormatError::ChecksumMismatch`] for an invalid
-/// header checksum.
+/// `BTLF` signature is absent, [`FormatError::InvalidBTreeV2Version`] if a header or node version
+/// is not 0, and [`FormatError::InvalidBTreeNodeType`] if a node's type differs from the header.
+/// With the `checksum` feature, returns [`FormatError::ChecksumMismatch`] for an invalid header
+/// checksum.
 ///
 /// Returns [`FormatError::UnexpectedEof`] if a complete header or node allocation, or the declared
 /// contents of a node, exceeds the bytes available, and [`FormatError::OffsetOverflow`] if an
@@ -60,7 +61,7 @@ use crate::width::{LengthWidth, OffsetWidth};
 /// allocations also return [`FormatError::InvalidBTreeV2Signature`]. The error from `source` is
 /// returned if a metadata read fails.
 ///
-/// [spec]: https://support.hdfgroup.org/releases/hdf5/2.1.0/documentation/hdf5-2.1.0.doxygen/_f_m_t4.html#subsubsec_fmt4_infra_btrees_v2
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_infra_btrees_v2
 #[allow(
     dead_code,
     reason = "storage ownership is an internal structural capability without a production caller"
@@ -127,7 +128,7 @@ pub(crate) fn collect_btree_v2_storage_extents<S: Source + ?Sized>(
 /// is also an internal node additionally contains "Total Number of Records in Child Node". "Depth"
 /// 0 is a leaf, so recursion stops there after validating the leaf layout.
 ///
-/// [spec]: https://support.hdfgroup.org/releases/hdf5/2.1.0/documentation/hdf5-2.1.0.doxygen/_f_m_t4.html#subsubsec_fmt4_infra_btrees_v2
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_infra_btrees_v2
 #[allow(clippy::too_many_arguments)]
 fn collect_storage_node<S: Source + ?Sized>(
     source: &S,
@@ -148,6 +149,8 @@ fn collect_storage_node<S: Source + ?Sized>(
     let node = source.read_metadata_at(address.get(), u64::from(header.node_size).to_usize()?)?;
     extents.push(extent);
 
+    let signature = if depth == 0 { b"BTLF" } else { b"BTIN" };
+    validate_storage_node_prefix(&node, signature, header.tree_type)?;
     let Some(depth) = NonZeroU16::new(depth) else {
         return validate_storage_leaf(&node, num_records, header.record_size);
     };
@@ -175,22 +178,44 @@ fn collect_storage_node<S: Source + ?Sized>(
     Ok(())
 }
 
+/// Proves a node has the version and type required by its B-tree header.
+///
+/// "Version 2 B-trees" defines version 0 for both internal and leaf nodes, and requires each
+/// node's "Type" field to equal the tree type stored in `BTHD`.
+///
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_infra_btrees_v2
+fn validate_storage_node_prefix(
+    node: &[u8],
+    signature: &[u8; 4],
+    tree_type: u8,
+) -> Result<(), FormatError> {
+    bytes::ensure_len(node, 0, 6)?;
+    if &node[..4] != signature {
+        return Err(FormatError::InvalidBTreeV2Signature);
+    }
+    let version = node[4];
+    if version != 0 {
+        return Err(FormatError::InvalidBTreeV2Version(version));
+    }
+    let node_type = node[5];
+    if node_type != tree_type {
+        return Err(FormatError::InvalidBTreeNodeType(node_type));
+    }
+    Ok(())
+}
+
 /// Proves the declared leaf contents fit inside the node allocation.
 ///
 /// "Version 2 B-trees" lays out a leaf as the `BTLF` signature, version and type, R records of the
 /// header's "Record Size", and the checksum. This check requires the records and checksum of that
 /// declared layout to fit inside the already bounded "Node Size" allocation.
 ///
-/// [spec]: https://support.hdfgroup.org/releases/hdf5/2.1.0/documentation/hdf5-2.1.0.doxygen/_f_m_t4.html#subsubsec_fmt4_infra_btrees_v2
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_infra_btrees_v2
 fn validate_storage_leaf(
     node: &[u8],
     num_records: u16,
     record_size: u16,
 ) -> Result<(), FormatError> {
-    bytes::ensure_len(node, 0, 6)?;
-    if &node[..4] != b"BTLF" {
-        return Err(FormatError::InvalidBTreeV2Signature);
-    }
     let record_bytes = u64::from(num_records) * u64::from(record_size);
     bytes::ensure_len(node, 6, (record_bytes + 4).to_usize()?)
 }
@@ -727,6 +752,36 @@ mod tests {
                 available: file.len(),
             }
         );
+    }
+
+    #[test]
+    fn storage_walk_rejects_a_node_with_the_wrong_version() {
+        let (mut file, root) = single_leaf_tree(WIDTHS);
+        file[root.to_usize().unwrap() + 4] = 1;
+        let source = BytesSource::new(file);
+        let err = collect_btree_v2_storage_extents(
+            &source,
+            StoredAddress::new(0),
+            OFFSET_SIZE,
+            LENGTH_SIZE,
+        )
+        .unwrap_err();
+        assert_eq!(err, FormatError::InvalidBTreeV2Version(1));
+    }
+
+    #[test]
+    fn storage_walk_rejects_a_node_with_a_different_tree_type() {
+        let (mut file, root) = single_leaf_tree(WIDTHS);
+        file[root.to_usize().unwrap() + 5] = 6;
+        let source = BytesSource::new(file);
+        let err = collect_btree_v2_storage_extents(
+            &source,
+            StoredAddress::new(0),
+            OFFSET_SIZE,
+            LENGTH_SIZE,
+        )
+        .unwrap_err();
+        assert_eq!(err, FormatError::InvalidBTreeNodeType(6));
     }
 
     #[test]
