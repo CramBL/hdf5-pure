@@ -11,7 +11,7 @@
 //! record with [`BTreeV2Record::huge_object`], and reads the heap ID and the creation order of the
 //! other records with the other methods of [`BTreeV2Record`].
 //!
-//! [spec]: https://support.hdfgroup.org/releases/hdf5/2.1.0/documentation/hdf5-2.1.0.doxygen/_f_m_t4.html#subsubsec_fmt4_infra_btrees_v2
+//! [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_infra_btrees_v2
 
 use core::num::NonZeroU16;
 
@@ -40,7 +40,7 @@ use crate::width::OffsetWidth;
 ///
 /// The header is defined in "Version 2 B-trees" of the [format specification, version 4.0][spec].
 ///
-/// [spec]: https://support.hdfgroup.org/releases/hdf5/2.1.0/documentation/hdf5-2.1.0.doxygen/_f_m_t4.html#subsubsec_fmt4_infra_btrees_v2
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_infra_btrees_v2
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BTreeV2Header {
     /// The type of the tree, such as 5 for the name index of a group's links or 8 for the name
@@ -103,7 +103,7 @@ fn read_var_uint(data: &[u8], pos: usize, width: usize) -> Result<u64, FormatErr
 /// The encoded length is `16 + offset_width + 2 + length_width + 4`. The header's "Node Size" field
 /// does not contribute another variable-sized region: it describes `BTIN` and `BTLF` nodes.
 ///
-/// [spec]: https://support.hdfgroup.org/releases/hdf5/2.1.0/documentation/hdf5-2.1.0.doxygen/_f_m_t4.html#subsubsec_fmt4_infra_btrees_v2
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_infra_btrees_v2
 pub const fn btree_v2_header_size(offset_width: OffsetWidth, length_width: LengthWidth) -> usize {
     // signature(4) + version(1) + type(1) + node size(4) + record size(2) +
     // depth(2) + split %(1) + merge %(1) + root address + records in root(2) +
@@ -288,7 +288,7 @@ impl BTreeV2Record {
 /// The record is defined in "Version 2 B-trees" of the [format specification, version
 /// 4.0][spec], which calls the key the Huge Object ID.
 ///
-/// [spec]: https://support.hdfgroup.org/releases/hdf5/2.1.0/documentation/hdf5-2.1.0.doxygen/_f_m_t4.html#subsubsec_fmt4_infra_btrees_v2
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_infra_btrees_v2
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct HugeObjectRecord {
     /// The address of the object.
@@ -327,7 +327,7 @@ impl HugeObjectRecord {
 /// name. Both are defined in "Version 2 B-trees" of the [format specification, version
 /// 4.0][spec].
 ///
-/// [spec]: https://support.hdfgroup.org/releases/hdf5/2.1.0/documentation/hdf5-2.1.0.doxygen/_f_m_t4.html#subsubsec_fmt4_infra_btrees_v2
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_infra_btrees_v2
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct AttributeRecord<'a> {
     /// The heap ID of the Attribute message in the attribute heap of the object.
@@ -394,7 +394,7 @@ fn max_records_leaf(node_size: u32, record_size: u16) -> u64 {
 /// The child pointers are defined in "Version 2 B-trees" of the [format specification, version
 /// 4.0][spec].
 ///
-/// [spec]: https://support.hdfgroup.org/releases/hdf5/2.1.0/documentation/hdf5-2.1.0.doxygen/_f_m_t4.html#subsubsec_fmt4_infra_btrees_v2
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_infra_btrees_v2
 pub struct BTreeV2NodeInfo {
     /// The width in bytes of the "Number of Records in Child Node" field of a child pointer. The C
     /// library sizes it for the leaf capacity, the largest of any depth, and uses the one width at
@@ -533,7 +533,7 @@ impl BTreeV2NodeInfo {
 /// `checksum` feature, [`FormatError::ChecksumMismatch`] if the stored checksum differs from the
 /// computed one.
 ///
-/// [spec]: https://support.hdfgroup.org/releases/hdf5/2.1.0/documentation/hdf5-2.1.0.doxygen/_f_m_t4.html#subsubsec_fmt4_infra_btrees_v2
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_infra_btrees_v2
 pub fn parse_btree_v2_leaf_records(
     file_data: &[u8],
     offset: usize,
@@ -592,7 +592,7 @@ pub fn parse_btree_v2_leaf_records(
 /// [`FormatError::UnexpectedEof`] if the records or the child pointers run past the end of `node`,
 /// and [`FormatError::InvalidOffsetSize`] if `offset_size` is not 2, 4, or 8.
 ///
-/// [spec]: https://support.hdfgroup.org/releases/hdf5/2.1.0/documentation/hdf5-2.1.0.doxygen/_f_m_t4.html#subsubsec_fmt4_infra_btrees_v2
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_infra_btrees_v2
 pub fn parse_btree_v2_internal_child_pointers(
     node: &[u8],
     num_records: u16,
@@ -645,7 +645,7 @@ pub fn parse_btree_v2_internal_child_pointers(
 /// The type is defined in the Type table of "Version 2 B-trees" of the [format specification,
 /// version 4.0][spec].
 ///
-/// [spec]: https://support.hdfgroup.org/releases/hdf5/2.1.0/documentation/hdf5-2.1.0.doxygen/_f_m_t4.html#subsubsec_fmt4_infra_btrees_v2
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_infra_btrees_v2
 pub const BTREE_V2_HUGE_OBJECT: u8 = 1;
 
 /// The type of a version 2 B-tree that indexes the link names of a group, from the same table as
