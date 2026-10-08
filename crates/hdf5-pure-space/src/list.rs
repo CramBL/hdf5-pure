@@ -221,20 +221,22 @@ impl FreeList {
     }
 
     /// Returns the free extents, sorted ascending by address and fully coalesced.
-    pub fn extents(&self) -> Vec<Extent> {
-        self.regions.clone()
+    pub fn extents(&self) -> &[Extent] {
+        &self.regions
     }
 
-    /// Returns the free regions as `(addr, len)` pairs, sorted ascending by address and fully
-    /// coalesced.
-    ///
-    /// Used to persist the free list to disk (issue #21) and to report the session's live reusable
-    /// free space (issue #150).
-    pub fn sections(&self) -> Vec<(u64, u64)> {
+    /// Returns the free regions as `(addr, len)` pairs for test assertions.
+    #[cfg(test)]
+    pub(crate) fn sections(&self) -> Vec<(u64, u64)> {
         self.regions
             .iter()
             .map(|extent| (extent.start(), extent.len()))
             .collect()
+    }
+
+    /// Consumes the list and returns its checked extents.
+    pub(crate) fn into_extents(self) -> Vec<Extent> {
+        self.regions
     }
 
     /// Returns whether the list is empty.

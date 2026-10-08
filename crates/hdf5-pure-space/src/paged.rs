@@ -49,26 +49,26 @@ pub enum PageTransition {
     Unchanged,
 }
 
-/// Snapshots the free sections that map to PAGE managers.
+/// Snapshots the checked free extents that map to PAGE managers.
 pub struct PagedSections {
-    metadata: Vec<(u64, u64)>,
-    raw: Vec<(u64, u64)>,
-    unclassified: Vec<(u64, u64)>,
+    metadata: Vec<Extent>,
+    raw: Vec<Extent>,
+    unclassified: Vec<Extent>,
 }
 
 impl PagedSections {
     /// Returns free sections whose pages are metadata pages.
-    pub fn metadata(&self) -> &[(u64, u64)] {
+    pub fn metadata(&self) -> &[Extent] {
         &self.metadata
     }
 
     /// Returns free sections whose pages are raw-data pages.
-    pub fn raw(&self) -> &[(u64, u64)] {
+    pub fn raw(&self) -> &[Extent] {
         &self.raw
     }
 
     /// Returns free sections whose page type is not established.
-    pub fn unclassified(&self) -> &[(u64, u64)] {
+    pub fn unclassified(&self) -> &[Extent] {
         &self.unclassified
     }
 }
@@ -112,9 +112,9 @@ impl PagedEdit {
     /// Returns a read-only snapshot of PAGE sections.
     pub(crate) fn sections(&self) -> PagedSections {
         PagedSections {
-            metadata: self.meta.sections(),
-            raw: self.raw.sections(),
-            unclassified: self.unclassified.sections(),
+            metadata: self.meta.extents().to_vec(),
+            raw: self.raw.extents().to_vec(),
+            unclassified: self.unclassified.extents().to_vec(),
         }
     }
 
@@ -268,38 +268,21 @@ impl PagedEdit {
         self.track(extent, ty.into());
     }
 
-    /// Returns reusable sections in ascending address order.
-    pub(crate) fn reusable_sections(&self) -> Vec<(u64, u64)> {
-        let mut out = self.meta.sections();
-        out.extend(self.raw.sections());
-        out.sort_unstable_by_key(|&(addr, _)| addr);
-        debug_assert!(
-            out.windows(2)
-                .all(|w| w[0].0.saturating_add(w[0].1) <= w[1].0),
-            "a region is free in both the metadata and the raw list, so the two \
-             page-type lists have stopped being disjoint"
-        );
-        out
+    /// Returns the reusable metadata and raw-data extents.
+    pub(crate) fn reusable_extents(&self) -> (&[Extent], &[Extent]) {
+        (self.meta.extents(), self.raw.extents())
     }
 
-    /// Returns reusable sections with additional raw extents folded into the snapshot.
-    pub(crate) fn reusable_sections_with_raw(
+    /// Returns raw-data free space with additional raw extents folded into it.
+    pub(crate) fn reusable_raw_with(
         &self,
         raw_extents: impl IntoIterator<Item = Extent>,
-    ) -> Vec<(u64, u64)> {
+    ) -> Vec<Extent> {
         let mut raw = self.raw.clone();
         for extent in raw_extents {
             raw.free(extent);
         }
-        let mut out = self.meta.sections();
-        out.extend(raw.sections());
-        out.sort_unstable_by_key(|&(addr, _)| addr);
-        debug_assert!(
-            out.windows(2).all(|w| w[0].0 < w[1].0),
-            "the same address is free in both the metadata and the raw list, so the two \
-             page-type lists have stopped being disjoint"
-        );
-        out
+        raw.into_extents()
     }
 
     /// Returns the start of the free run that reaches `eoa` across all PAGE lists.
@@ -401,9 +384,9 @@ impl PagedEdit {
         page_size: FileSpacePageSize,
     ) {
         let page_size = page_size.get();
-        let mut all = meta.extents();
-        all.extend(raw.extents());
-        all.extend(dead.extents());
+        let mut all = meta.extents().to_vec();
+        all.extend_from_slice(raw.extents());
+        all.extend_from_slice(dead.extents());
         all.sort_unstable_by_key(|extent| extent.start());
         let mut runs: Vec<Extent> = Vec::with_capacity(all.len());
         for extent in all {
@@ -444,9 +427,9 @@ impl PagedPostFree {
     /// Returns read-only sections for persistence planning.
     pub fn sections(&self) -> PagedSections {
         PagedSections {
-            metadata: self.meta.sections(),
-            raw: self.raw.sections(),
-            unclassified: self.unclassified.sections(),
+            metadata: self.meta.extents().to_vec(),
+            raw: self.raw.extents().to_vec(),
+            unclassified: self.unclassified.extents().to_vec(),
         }
     }
 
