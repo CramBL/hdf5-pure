@@ -280,6 +280,11 @@ use hdf5_pure_format::__private::MessageRecordLayout;
 use hdf5_pure_format::__private::OBJECT_HEADER_PREFIX_MAX_LEN;
 use hdf5_pure_format::__private::ObjectHeaderContinuation;
 use hdf5_pure_format::__private::ObjectHeaderPrefix;
+use hdf5_pure_space::__private as free_space;
+use hdf5_pure_space::__private::{
+    Extent as FreeExtent, FreeClass, FreeList, ManagerKind, ManagerSections, PageTransition,
+    PageType, PagedPostFree, SessionSpace, SessionSpaceSnapshot, TrackedSpace,
+};
 
 use crate::access_mode::AccessMode;
 use crate::address::BaseAddressExt;
@@ -317,10 +322,6 @@ use crate::file_writer::{
 };
 use crate::filter_pipeline::FilterPipeline;
 use crate::filters::{ChunkContext, FilterScratch, compress_chunk_with, decompress_chunk};
-use crate::free_space::{
-    self, Extent as FreeExtent, FreeClass, FreeList, ManagerKind, ManagerSections, PageTransition,
-    PageType, PagedPostFree, SessionSpace, SessionSpaceSnapshot, TrackedSpace,
-};
 use crate::free_space_manager::PersistedSections;
 use crate::free_space_manager::{self, ManagerPlan, align_up};
 use crate::group_v2::resolve_group_entries_from_source;

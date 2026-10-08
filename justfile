@@ -77,7 +77,7 @@ doc *ARGS:
 # The facade's documentation with its `[package.metadata.docs.rs]` settings, then the other published crates' with their defaults.
 docs-rs *ARGS:
     RUSTDOCFLAGS="--cfg docsrs -D warnings" cargo +{{ NIGHTLY }} doc --locked -p hdf5-pure --no-deps --features provenance,zfp,ndarray,serde,num-complex {{ ARGS }}
-    RUSTDOCFLAGS="-D warnings" cargo +{{ NIGHTLY }} doc --locked -p hdf5-pure-core -p hdf5-pure-filter -p hdf5-pure-format --no-deps {{ ARGS }}
+    RUSTDOCFLAGS="-D warnings" cargo +{{ NIGHTLY }} doc --locked -p hdf5-pure-core -p hdf5-pure-filter -p hdf5-pure-format -p hdf5-pure-space --no-deps {{ ARGS }}
 
 # Cargo check over every workspace crate but the crosschecks, with the default features.
 check *ARGS:

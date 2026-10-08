@@ -3,35 +3,42 @@
 /// The end is exclusive and always greater than the start, so a constructed extent cannot wrap the
 /// `u64` address space.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
-pub(crate) struct Extent {
+pub struct Extent {
     start: u64,
     end: u64,
 }
 
 impl Extent {
     /// Constructs `[start, start + len)`, or returns `None` for an empty or overflowing range.
-    pub(crate) fn new(start: u64, len: u64) -> Option<Self> {
+    pub fn new(start: u64, len: u64) -> Option<Self> {
         let end = start.checked_add(len)?;
         (end > start).then_some(Self { start, end })
     }
 
     /// Returns the first byte of the extent.
-    pub(crate) fn start(self) -> u64 {
+    pub fn start(self) -> u64 {
         self.start
     }
 
     /// Returns one past the last byte of the extent.
-    pub(crate) fn end(self) -> u64 {
+    pub fn end(self) -> u64 {
         self.end
     }
 
     /// Returns the number of bytes in the extent.
-    pub(crate) fn len(self) -> u64 {
+    pub fn len(self) -> u64 {
         self.end - self.start
     }
 
+    /// Returns whether the extent contains no bytes.
+    ///
+    /// Construction rejects empty ranges, so this always returns `false`.
+    pub fn is_empty(self) -> bool {
+        false
+    }
+
     /// Returns `true` if this extent touches `other` without overlapping it.
-    pub(crate) fn adjoins(self, other: Self) -> bool {
+    pub fn adjoins(self, other: Self) -> bool {
         self.end == other.start || self.start == other.end
     }
 
@@ -46,9 +53,9 @@ impl Extent {
     ///
     /// This is the part of an extent that is provably in no unit shared with anything live: the
     /// partial edges sit in units whose other bytes may be occupied, so they are left out. Both the
-    /// allocation over such interiors ([`crate::free_space::FreeList::alloc_whole_units`]) and the question of how
-    /// large one is ([`crate::free_space::FreeList::largest_whole_units`]) are defined by this one function, so the
-    /// two cannot disagree about what counts.
+    /// allocation over such interiors ([`crate::__private::FreeList::alloc_whole_units`]) and the
+    /// question of how large one is ([`crate::__private::FreeList::largest_whole_units`]) are
+    /// defined by this one function, so the two cannot disagree about what counts.
     pub(super) fn aligned_interior(self, align: u64) -> Option<Self> {
         if align == 0 {
             return None;

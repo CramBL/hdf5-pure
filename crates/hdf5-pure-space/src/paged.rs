@@ -2,21 +2,20 @@ use alloc::collections::BTreeSet;
 use alloc::vec::Vec;
 use core::cmp::Reverse;
 
-use crate::error::FormatError;
-use crate::file_space_info::FileSpacePageSize;
+use hdf5_pure_core::FileSpacePageSize;
+use hdf5_pure_core::FormatError;
 
-use super::TRAILING_RESERVE_TAILS;
 use super::admission::TrackedSpace;
 use super::extent::Extent;
 use super::list::{self, FreeList};
-use super::persistence::ManagerKind;
+use super::persistence::{ManagerKind, TRAILING_RESERVE_TAILS};
 
 /// Identifies whether an allocation belongs to metadata or raw-data pages.
 ///
 /// A paged file keeps the two kinds of allocation in separate pages and tracks their reusable
 /// space independently.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum PageType {
+pub enum PageType {
     /// File metadata.
     Meta,
     /// Raw dataset data.
@@ -25,7 +24,7 @@ pub(crate) enum PageType {
 
 /// Classifies a vacated extent by the PAGE reuse policy.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum FreeClass {
+pub enum FreeClass {
     /// The extent is dead but its page type is not known.
     Dead,
     /// The extent belongs to pages of this type.
@@ -40,7 +39,7 @@ impl From<PageType> for FreeClass {
 
 /// Describes the padding required before an append changes the tail page type.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum PageTransition {
+pub enum PageTransition {
     /// Padding is required before the append.
     Pad {
         extent: Extent,
@@ -51,28 +50,31 @@ pub(crate) enum PageTransition {
 }
 
 /// Snapshots the free sections that map to PAGE managers.
-pub(crate) struct PagedSections {
+pub struct PagedSections {
     metadata: Vec<(u64, u64)>,
     raw: Vec<(u64, u64)>,
     unclassified: Vec<(u64, u64)>,
 }
 
 impl PagedSections {
-    pub(crate) fn metadata(&self) -> &[(u64, u64)] {
+    /// Returns free sections whose pages are metadata pages.
+    pub fn metadata(&self) -> &[(u64, u64)] {
         &self.metadata
     }
 
-    pub(crate) fn raw(&self) -> &[(u64, u64)] {
+    /// Returns free sections whose pages are raw-data pages.
+    pub fn raw(&self) -> &[(u64, u64)] {
         &self.raw
     }
 
-    pub(crate) fn unclassified(&self) -> &[(u64, u64)] {
+    /// Returns free sections whose page type is not established.
+    pub fn unclassified(&self) -> &[(u64, u64)] {
         &self.unclassified
     }
 }
 
 /// Stores reusable allocation state for rollback after a failed commit attempt.
-pub(crate) struct PagedAllocationSnapshot {
+pub struct PagedAllocationSnapshot {
     meta: FreeList,
     raw: FreeList,
 }
@@ -107,8 +109,7 @@ impl PagedEdit {
         self.page_size
     }
 
-    /// Returns read-only PAGE sections for assertions.
-    #[cfg(test)]
+    /// Returns a read-only snapshot of PAGE sections.
     pub(crate) fn sections(&self) -> PagedSections {
         PagedSections {
             metadata: self.meta.sections(),
@@ -118,13 +119,11 @@ impl PagedEdit {
     }
 
     /// Returns the type of the current tail page when this session established it.
-    #[cfg(test)]
     pub(crate) fn tail_type(&self) -> Option<PageType> {
         self.last
     }
 
     /// Returns pending page-tail padding for `ty`.
-    #[cfg(test)]
     pub(crate) fn pending_padding(&self, ty: PageType) -> &[Extent] {
         match ty {
             PageType::Meta => &self.meta_pad,
@@ -433,7 +432,7 @@ impl PagedEdit {
 }
 
 /// Holds the free-space state a paged commit is preparing to publish.
-pub(crate) struct PagedPostFree {
+pub struct PagedPostFree {
     page_size: FileSpacePageSize,
     meta: FreeList,
     raw: FreeList,
@@ -443,7 +442,7 @@ pub(crate) struct PagedPostFree {
 
 impl PagedPostFree {
     /// Returns read-only sections for persistence planning.
-    pub(crate) fn sections(&self) -> PagedSections {
+    pub fn sections(&self) -> PagedSections {
         PagedSections {
             metadata: self.meta.sections(),
             raw: self.raw.sections(),
@@ -452,7 +451,7 @@ impl PagedPostFree {
     }
 
     /// Releases the trailing whole-page run while retaining manager-tail reserve space.
-    pub(crate) fn release_trailing(&mut self, eoa: u64, tail_len: u64) -> u64 {
+    pub fn release_trailing(&mut self, eoa: u64, tail_len: u64) -> u64 {
         let start =
             list::trailing_run_start([&self.meta, &self.raw, &self.dead, &self.unclassified], eoa);
         let page_size = self.page_size.get();
@@ -580,10 +579,12 @@ impl TrackedSpace for PagedPostFree {
 
 #[cfg(test)]
 mod tests {
+    use alloc::vec;
+
     use rstest::rstest;
 
     use super::*;
-    use crate::free_space::Release;
+    use crate::admission::Release;
 
     const PAGE: u64 = FileSpacePageSize::DEFAULT.get();
     const META: FreeClass = FreeClass::Page(PageType::Meta);
