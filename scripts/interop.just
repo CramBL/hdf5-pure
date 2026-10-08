@@ -40,6 +40,12 @@ test-hdf5 VERSION FEATURES="serde,ndarray" *ARGS: (hdf5-build VERSION)
     eval "$({{ quote(just_executable()) }} interop::hdf5-env {{ VERSION }})" && \
     cargo nextest run --locked -p {{ CROSSCHECK }} --features "hdf5,{{ FEATURES }}${release_feature:+,$release_feature}" {{ ARGS }}
 
+# Run one configured nextest group against libhdf5 `VERSION`.
+test-hdf5-group VERSION GROUP FEATURES="serde,ndarray": (hdf5-build VERSION)
+    release_feature="$({{ quote(just_executable()) }} interop::hdf5-release-feature {{ VERSION }})" && \
+    eval "$({{ quote(just_executable()) }} interop::hdf5-env {{ VERSION }})" && \
+    cargo nextest run --locked -p {{ CROSSCHECK }} --features "hdf5,{{ FEATURES }}${release_feature:+,$release_feature}" -E 'group({{ GROUP }})'
+
 # Clippy over the crosschecks, linking libhdf5 VERSION.
 lint-hdf5 VERSION FEATURES="serde,ndarray":
     release_feature="$({{ quote(just_executable()) }} interop::hdf5-release-feature {{ VERSION }})" && \

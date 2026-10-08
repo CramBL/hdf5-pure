@@ -24,7 +24,7 @@
 
 # Require a version that understands this file's schema, so an older nextest
 # fails loudly instead of ignoring settings the gate depends on.
-nextest-version = "0.9.90"
+nextest-version = "0.9.145"
 
 [profile.default]
 # A test that takes 30s is reported; one that takes 90s fails the run.
@@ -45,3 +45,138 @@ nextest-version = "0.9.90"
 # byte-identical files (`tests/main/sync_policy.rs` asserts that) and still barriers
 # at `close`. Rule that out before reaching for a per-test override.
 slow-timeout = { period = "30s", terminate-after = 3 }
+
+# This PAGE free-space crosscheck can be substantially slower on loaded CI
+# runners, especially with older libhdf5 releases. Give only this test more
+# room while keeping the suite-wide timeout strict.
+[[profile.default.overrides]]
+filter = '''
+package(hdf5-pure-crosscheck) &
+test(/^file_space::a_paged_persisting_edit_that_tracks_no_free_space_records_the_end_of_allocation_for_libhdf5$/)
+'''
+slow-timeout = { period = "60s", terminate-after = 3 }
+
+[profile.ci]
+# Keep running tests within a selected domain after one fails. The workflow also
+# continues to later domains, so one matrix cell reports every failing subsystem.
+fail-fast = false
+
+[test-groups]
+# Semantic labels for the HDF5 crosschecks. They all retain nextest's normal
+# concurrency. CI selects them one at a time to make subsystem failures visible.
+# Any crosscheck test not matched below stays in `@global`, which CI runs as
+# `other` so a newly added module is never omitted by default.
+file-space = { max-threads = "num-cpus" }
+append = { max-threads = "num-cpus" }
+attributes = { max-threads = "num-cpus" }
+storage = { max-threads = "num-cpus" }
+editing = { max-threads = "num-cpus" }
+types = { max-threads = "num-cpus" }
+compat = { max-threads = "num-cpus" }
+
+[[profile.default.overrides]]
+filter = '''
+package(hdf5-pure-crosscheck) & (
+    test(/^file_space::/) |
+    test(/^file_space_fuzz::/) |
+    test(/^page_buffer::/)
+)
+'''
+test-group = "file-space"
+
+[[profile.default.overrides]]
+filter = '''
+package(hdf5-pure-crosscheck) & (
+    test(/^append::/) |
+    test(/^append_writer::/) |
+    test(/^bounded_append::/) |
+    test(/^buffered_append::/) |
+    test(/^owned_append::/) |
+    test(/^owned_swmr::/) |
+    test(/^swmr_append::/) |
+    test(/^swmr_refresh::/)
+)
+'''
+test-group = "append"
+
+[[profile.default.overrides]]
+filter = '''
+package(hdf5-pure-crosscheck) & (
+    test(/^attr_count::/) |
+    test(/^attr_message_size::/) |
+    test(/^attr_width::/) |
+    test(/^dense_attr_limits::/) |
+    test(/^enum_attr::/) |
+    test(/^null_attr_padding::/) |
+    test(/^vlen_string_attrs::/)
+)
+'''
+test-group = "attributes"
+
+[[profile.default.overrides]]
+filter = '''
+package(hdf5-pure-crosscheck) & (
+    test(/^chunk_btree_offset_width::/) |
+    test(/^chunk_index_grid::/) |
+    test(/^dense_huge_objects::/) |
+    test(/^empty_chunked::/) |
+    test(/^extensible_array::/) |
+    test(/^external_storage::/) |
+    test(/^fill_value::/) |
+    test(/^fractal_heap_dense_links::/) |
+    test(/^global_heap_length_width::/) |
+    test(/^layout_introspection::/) |
+    test(/^partial_edge_chunk_filters::/) |
+    test(/^scaleoffset_fill::/) |
+    test(/^sohm::/) |
+    test(/^vlen_chunked::/)
+)
+'''
+test-group = "storage"
+
+[[profile.default.overrides]]
+filter = '''
+package(hdf5-pure-crosscheck) & (
+    test(/^edit::/) |
+    test(/^edit_append_inplace::/) |
+    test(/^edit_creation_order::/) |
+    test(/^edit_dense_attr::/) |
+    test(/^edit_dense_attr_copy::/) |
+    test(/^edit_header_times::/) |
+    test(/^edit_reference_repointing::/) |
+    test(/^edit_userblock::/)
+)
+'''
+test-group = "editing"
+
+[[profile.default.overrides]]
+filter = '''
+package(hdf5-pure-crosscheck) & (
+    test(/^cell_array::/) |
+    test(/^committed_datatype::/) |
+    test(/^compound_offset_width::/) |
+    test(/^conversions::/) |
+    test(/^enum_base::/) |
+    test(/^fixed_string::/) |
+    test(/^mat_streaming::/) |
+    test(/^ndarray_roundtrip::/) |
+    test(/^serde::/)
+)
+'''
+test-group = "types"
+
+[[profile.default.overrides]]
+filter = '''
+package(hdf5-pure-crosscheck) & (
+    test(/^c_absence_predicate::/) |
+    test(/^c_write_compat::/) |
+    test(/^hdf5::/) |
+    test(/^libver_matrix::/) |
+    test(/^libver_output::/) |
+    test(/^matio_crosscheck::/) |
+    test(/^object_header_v1_malformed::/) |
+    test(/^repack::/) |
+    test(/^userblock_base_address::/)
+)
+'''
+test-group = "compat"
