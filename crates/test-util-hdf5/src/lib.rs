@@ -11,6 +11,7 @@ pub mod dense_attr;
 #[cfg(feature = "hdf5")]
 pub mod file;
 pub mod file_builder;
+pub mod fixtures;
 pub mod lock;
 pub mod mat_file;
 pub mod paged;
