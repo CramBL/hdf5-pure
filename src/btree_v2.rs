@@ -50,10 +50,12 @@ use crate::width::{LengthWidth, OffsetWidth};
 ///
 /// Returns [`FormatError::InvalidOffsetSize`] or [`FormatError::InvalidLengthSize`] if a file width
 /// is not 2, 4, or 8, [`FormatError::InvalidBTreeV2Signature`] if a required `BTHD`, `BTIN`, or
-/// `BTLF` signature is absent, [`FormatError::InvalidBTreeV2Version`] if a header or node version
-/// is not 0, and [`FormatError::InvalidBTreeNodeType`] if a node's type differs from the header.
+/// `BTLF` signature is absent or the header's root fields contradict whether the tree is empty,
+/// [`FormatError::InvalidBTreeV2Version`] if a header or node version is not 0, and
+/// [`FormatError::InvalidBTreeNodeType`] if a node's type differs from the header. An undefined
+/// address for a required child node also returns [`FormatError::InvalidBTreeV2Signature`].
 /// With the `checksum` feature, returns [`FormatError::ChecksumMismatch`] for an invalid header
-/// checksum.
+/// or node checksum.
 ///
 /// Returns [`FormatError::UnexpectedEof`] if a complete header or node allocation, or the declared
 /// contents of a node, exceeds the bytes available, and [`FormatError::OffsetOverflow`] if an
@@ -85,7 +87,7 @@ pub(crate) fn collect_btree_v2_storage_extents<S: Source + ?Sized>(
 
     let mut extents = Vec::with_capacity(1);
     extents.push(header_extent);
-    if header.total_records == 0 {
+    if !storage_header_has_root(&header, offset_size)? {
         return Ok(extents);
     }
 
@@ -115,6 +117,27 @@ pub(crate) fn collect_btree_v2_storage_extents<S: Source + ?Sized>(
         }
     }
     Ok(extents)
+}
+
+/// Proves the root fields agree with whether a B-tree has records.
+///
+/// "Version 2 B-trees" requires the root address to be undefined for a tree with no records. A
+/// non-empty tree must name the root allocation the structural walk starts from. Requiring the
+/// root's record count to be zero for an empty tree also prevents contradictory header state from
+/// being accepted merely because there is no node to visit.
+///
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_infra_btrees_v2
+fn storage_header_has_root(header: &BTreeV2Header, offset_size: u8) -> Result<bool, FormatError> {
+    let root_is_undefined = header.root_node_address.is_undefined(offset_size);
+    let valid = if header.total_records == 0 {
+        root_is_undefined && header.num_records_in_root == 0
+    } else {
+        !root_is_undefined
+    };
+    if !valid {
+        return Err(FormatError::InvalidBTreeV2Signature);
+    }
+    Ok(!root_is_undefined)
 }
 
 /// Adds one complete node allocation and recursively follows the children its depth permits.
@@ -159,6 +182,9 @@ fn collect_storage_node<S: Source + ?Sized>(
         node_info,
     )?;
     for (child_address, child_records) in children {
+        if child_address.is_undefined(offset_size) {
+            return Err(FormatError::InvalidBTreeV2Signature);
+        }
         collect_storage_node(
             source,
             child_address,
@@ -213,7 +239,13 @@ fn validate_storage_leaf(
     record_size: u16,
 ) -> Result<(), FormatError> {
     let record_bytes = u64::from(num_records) * u64::from(record_size);
-    bytes::ensure_len(node, 6, (record_bytes + 4).to_usize()?)
+    let encoded_len = 6u64
+        .checked_add(record_bytes)
+        .and_then(|length| length.checked_add(4))
+        .ok_or(FormatError::InvalidBTreeV2Signature)?
+        .to_usize()?;
+    bytes::ensure_len(node, 0, encoded_len)?;
+    hdf5_pure_format::__private::verify_trailing(&node[..encoded_len])
 }
 
 /// Returns a checked extent after proving its complete byte range lies within `source`.
@@ -722,6 +754,58 @@ mod tests {
     }
 
     #[test]
+    fn storage_walk_rejects_an_empty_tree_with_a_defined_root() {
+        let header = btree_v2::Header::new(5, 11, 0x100, 0).build(WIDTHS);
+        let source = BytesSource::new(header);
+
+        let err = collect_btree_v2_storage_extents(
+            &source,
+            StoredAddress::new(0),
+            OFFSET_SIZE,
+            LENGTH_SIZE,
+        )
+        .unwrap_err();
+
+        assert_eq!(err, FormatError::InvalidBTreeV2Signature);
+    }
+
+    #[test]
+    fn storage_walk_rejects_an_empty_tree_with_root_records() {
+        let root = StoredAddress::undefined(OFFSET_SIZE).get();
+        let header = btree_v2::Header::new(5, 11, root, 1)
+            .total_records(0)
+            .build(WIDTHS);
+        let source = BytesSource::new(header);
+
+        let err = collect_btree_v2_storage_extents(
+            &source,
+            StoredAddress::new(0),
+            OFFSET_SIZE,
+            LENGTH_SIZE,
+        )
+        .unwrap_err();
+
+        assert_eq!(err, FormatError::InvalidBTreeV2Signature);
+    }
+
+    #[test]
+    fn storage_walk_rejects_a_nonempty_tree_without_a_root() {
+        let root = StoredAddress::undefined(OFFSET_SIZE).get();
+        let header = btree_v2::Header::new(5, 11, root, 1).build(WIDTHS);
+        let source = BytesSource::new(header);
+
+        let err = collect_btree_v2_storage_extents(
+            &source,
+            StoredAddress::new(0),
+            OFFSET_SIZE,
+            LENGTH_SIZE,
+        )
+        .unwrap_err();
+
+        assert_eq!(err, FormatError::InvalidBTreeV2Signature);
+    }
+
+    #[test]
     fn storage_walk_rejects_a_truncated_header() {
         let mut header = btree_v2::Header::new(5, 11, 0, 0).build(WIDTHS);
         header.pop();
@@ -763,6 +847,31 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "checksum")]
+    #[test]
+    fn storage_walk_rejects_a_leaf_with_a_bad_checksum() {
+        let (mut file, root) = single_leaf_tree(WIDTHS);
+        let checksum = root.to_usize().unwrap() + 6 + 11;
+        let stored = u32::from_le_bytes(file[checksum..checksum + 4].try_into().unwrap());
+        file[checksum] ^= 1;
+        let source = BytesSource::new(file);
+
+        let err = collect_btree_v2_storage_extents(
+            &source,
+            StoredAddress::new(0),
+            OFFSET_SIZE,
+            LENGTH_SIZE,
+        )
+        .unwrap_err();
+        assert_eq!(
+            err,
+            FormatError::ChecksumMismatch {
+                expected: stored ^ 1,
+                computed: stored,
+            }
+        );
+    }
+
     #[test]
     fn storage_walk_rejects_a_node_with_the_wrong_version() {
         let (mut file, root) = single_leaf_tree(WIDTHS);
@@ -791,6 +900,48 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(err, FormatError::InvalidBTreeNodeType(6));
+    }
+
+    #[cfg(feature = "checksum")]
+    #[test]
+    fn storage_walk_rejects_an_internal_node_with_a_bad_checksum() {
+        let mut image = Image::new();
+        image.place(0, &[0u8; 64]);
+        let left = put_leaf(&mut image, 5, &[rec(0)]);
+        let right = put_leaf(&mut image, 5, &[rec(2)]);
+        let root = put_internal(
+            &mut image,
+            5,
+            &[rec(1)],
+            &[(left, 1, 1), (right, 1, 1)],
+            1,
+            None,
+        );
+        let header = btree_v2::Header::new(5, 11, root, 1)
+            .depth(1)
+            .total_records(3)
+            .build(WIDTHS);
+        image.place(0, &header);
+        let mut file = image.build();
+        let checksum = root.to_usize().unwrap() + 6 + 11 + 2 * (8 + 1);
+        let stored = u32::from_le_bytes(file[checksum..checksum + 4].try_into().unwrap());
+        file[checksum] ^= 1;
+        let source = BytesSource::new(file);
+
+        let err = collect_btree_v2_storage_extents(
+            &source,
+            StoredAddress::new(0),
+            OFFSET_SIZE,
+            LENGTH_SIZE,
+        )
+        .unwrap_err();
+        assert_eq!(
+            err,
+            FormatError::ChecksumMismatch {
+                expected: stored ^ 1,
+                computed: stored,
+            }
+        );
     }
 
     #[test]
