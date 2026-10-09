@@ -14,6 +14,7 @@
 
 use hdf5_pure::{AttrValue, File, FileBuilder, FileSpaceStrategy};
 use test_util::fractal_heap;
+use test_util_hdf5::attr;
 
 /// A builder whose root carries one variable-length string attribute alongside
 /// `others` small ones — enough of them to select dense storage by count, not by
@@ -32,17 +33,6 @@ fn vlen(labels: &[&str]) -> AttrValue {
     AttrValue::VarLenAsciiCharArray(labels.iter().map(|s| (*s).to_string()).collect())
 }
 
-/// The strings of an array-of-strings attribute, whichever variant the reader
-/// chose for it. Which one it picks is a datatype question; the content is what
-/// these tests are about.
-#[track_caller]
-fn labels(attrs: &std::collections::HashMap<String, AttrValue>, name: &str) -> Vec<String> {
-    match attrs.get(name) {
-        Some(AttrValue::VarLenAsciiCharArray(v) | AttrValue::StringArray(v)) => v.clone(),
-        other => panic!("expected an array-of-strings attribute {name:?}, got {other:?}"),
-    }
-}
-
 #[test]
 fn a_variable_length_attribute_survives_dense_storage() {
     let expected = ["alpha", "beta", "gamma"];
@@ -52,7 +42,7 @@ fn a_variable_length_attribute_survives_dense_storage() {
     let file = File::from_bytes(bytes).unwrap();
     let attrs = file.root().attrs().unwrap();
     assert_eq!(attrs.len(), 13, "the whole set must read back");
-    assert_eq!(labels(&attrs, "labels"), expected);
+    assert_eq!(attr::string_array(&attrs, "labels"), expected);
 }
 
 /// The paged layout places its global-heap collections in the metadata region
@@ -72,7 +62,7 @@ fn a_paged_file_stores_variable_length_attributes_densely_too() {
     let file = File::from_bytes(bytes).unwrap();
     let attrs = file.root().attrs().unwrap();
     assert_eq!(attrs.len(), 13);
-    assert_eq!(labels(&attrs, "labels"), expected);
+    assert_eq!(attr::string_array(&attrs, "labels"), expected);
 }
 
 /// Groups and datasets reach the writer's storage choice by their own routes, and
@@ -100,7 +90,7 @@ fn group_and_dataset_variable_length_attributes_survive_too() {
         file.group("g").unwrap().attrs().unwrap(),
     ] {
         assert_eq!(attrs.len(), 13);
-        assert_eq!(labels(&attrs, "labels"), expected);
+        assert_eq!(attr::string_array(&attrs, "labels"), expected);
     }
 }
 
@@ -123,7 +113,10 @@ fn a_huge_variable_length_attribute_keeps_its_values() {
     );
 
     let file = File::from_bytes(bytes).unwrap();
-    assert_eq!(labels(&file.root().attrs().unwrap(), "labels"), expected);
+    assert_eq!(
+        attr::string_array(&file.root().attrs().unwrap(), "labels"),
+        expected
+    );
 }
 
 /// Several variable-length attributes on one object, with distinct values, so a
@@ -150,7 +143,7 @@ fn several_variable_length_attributes_keep_their_own_values() {
     let attrs = file.root().attrs().unwrap();
     assert_eq!(attrs.len(), 16);
     for (i, set) in sets.iter().enumerate() {
-        assert_eq!(labels(&attrs, &format!("l{i}")), *set);
+        assert_eq!(attr::string_array(&attrs, &format!("l{i}")), *set);
     }
 }
 
@@ -180,7 +173,7 @@ fn chunked_variable_length_elements_coexist_with_dense_attributes() {
         assert!(fractal_heap::has_fractal_heap(&bytes), "paged={paged}");
         let file = File::from_bytes(bytes).unwrap();
         assert_eq!(
-            labels(&file.root().attrs().unwrap(), "labels"),
+            attr::string_array(&file.root().attrs().unwrap(), "labels"),
             expected,
             "paged={paged}"
         );
@@ -206,7 +199,10 @@ fn dataset_elements_and_dense_attributes_share_the_heap_correctly() {
         .with_vlen_strings(&elements.iter().map(String::as_str).collect::<Vec<_>>());
 
     let file = File::from_bytes(builder.finish().unwrap()).unwrap();
-    assert_eq!(labels(&file.root().attrs().unwrap(), "labels"), expected);
+    assert_eq!(
+        attr::string_array(&file.root().attrs().unwrap(), "labels"),
+        expected
+    );
     assert_eq!(
         file.dataset("strings").unwrap().read_string().unwrap(),
         elements
