@@ -16,6 +16,7 @@ use hdf5::dataset::Layout as CLayout;
 use hdf5::file::LibraryVersion;
 use hdf5_pure::{Chunk, ChunkIndex, File, Layout};
 use tempfile::tempdir;
+use test_util_hdf5::dataset;
 
 /// A reference-library file whose datasets are created under the given libver
 /// bounds. `V18/V18` forces the classic (v1 B-tree) chunked format; `V110/latest`
@@ -40,13 +41,6 @@ fn chunk_i32_at(path: &std::path::Path, chunk: &Chunk) -> Vec<i32> {
         .iter()
         .map(|b| i32::from_le_bytes(*b))
         .collect()
-}
-
-fn read_c_i32(path: &std::path::Path, name: &str) -> Vec<i32> {
-    let f = hdf5::File::open(path).unwrap();
-    let v = f.dataset(name).unwrap().read_raw::<i32>().unwrap();
-    f.close().unwrap();
-    v
 }
 
 // ---- storage classes --------------------------------------------------------
@@ -220,7 +214,10 @@ fn c_legacy_btree_v1_classifies_and_reads() {
     assert_eq!(chunk_i32_at(&path, &chunks[0]), vec![0, 1, 2, 3]);
     assert_eq!(chunk_i32_at(&path, &chunks[1]), vec![4, 5, 6, 7]);
     // Pure whole-dataset read agrees with the reference library.
-    assert_eq!(ds.read_i32().unwrap(), read_c_i32(&path, "d"));
+    assert_eq!(
+        ds.read_i32().unwrap(),
+        dataset::read_libhdf5::<i32>(&path, "d")
+    );
 }
 
 // ---- filters ----------------------------------------------------------------
@@ -317,7 +314,10 @@ fn c_btree_v2_unfiltered_enumerates_multi_level_tree() {
     assert_eq!(chunk_i32_at(&path, &chunks[0]), vec![0, 1, 24, 25]);
     assert_eq!(chunks[143].offset, vec![22, 22]);
     assert_eq!(chunk_i32_at(&path, &chunks[143]), vec![550, 551, 574, 575]);
-    assert_eq!(ds.read_i32().unwrap(), read_c_i32(&path, "d"));
+    assert_eq!(
+        ds.read_i32().unwrap(),
+        dataset::read_libhdf5::<i32>(&path, "d")
+    );
 }
 
 #[test]
@@ -352,5 +352,8 @@ fn c_btree_v2_filtered_reads_type_11_records() {
             .all(|chunk| chunk.storage_size > 0 && chunk.storage_size < 4 * 4 * 4)
     );
     assert_eq!(ds.read_i32().unwrap(), values);
-    assert_eq!(ds.read_i32().unwrap(), read_c_i32(&path, "d"));
+    assert_eq!(
+        ds.read_i32().unwrap(),
+        dataset::read_libhdf5::<i32>(&path, "d")
+    );
 }

@@ -16,7 +16,7 @@ use hdf5::dataset::AllocTime;
 use hdf5_pure::{ChunkIndex, File, FileBuilder, MaxExtent};
 use tempfile::tempdir;
 use test_util::extensible_array;
-use test_util_hdf5::file;
+use test_util_hdf5::{dataset, file};
 
 /// One swept combination: a label for the assertion messages, then the shape,
 /// the chunk dimensions and the maximum shape.
@@ -237,17 +237,6 @@ fn c_library_accepts(shape: &[u64], chunks: &[u64]) -> bool {
     chunks.iter().zip(shape).all(|(&c, &s)| c <= s)
 }
 
-fn c_read(path: &std::path::Path) -> Vec<u32> {
-    c_read_named(path, "d")
-}
-
-fn c_read_named(path: &std::path::Path, name: &str) -> Vec<u32> {
-    let file = hdf5::File::open(path).unwrap();
-    let v = file.dataset(name).unwrap().read_raw::<u32>().unwrap();
-    file.close().unwrap();
-    v
-}
-
 fn pure_read(path: &std::path::Path) -> Vec<u32> {
     let file = File::open(path).unwrap();
     file.dataset("d").unwrap().read_u32().unwrap()
@@ -264,7 +253,11 @@ fn c_reads_every_maxshape_this_crate_writes() {
         let path = dir.path().join("pure.h5");
         pure_write(&path, &shape, &chunks, &maxshape);
         assert_eq!(pure_read(&path), values(&shape), "pure read: {label}");
-        assert_eq!(c_read(&path), values(&shape), "C read: {label}");
+        assert_eq!(
+            dataset::read_libhdf5::<u32>(&path, "d"),
+            values(&shape),
+            "C read: {label}"
+        );
         std::fs::remove_file(&path).unwrap();
     }
 }
@@ -324,7 +317,11 @@ fn pure_reads_an_implicit_index_numbered_over_the_maximum_grid() {
 
     hdf5_pure::repack(&src, &dst, &hdf5_pure::RepackOptions::new()).unwrap();
     assert_eq!(pure_read(&dst), expected, "pure read of the repacked file");
-    assert_eq!(c_read(&dst), expected, "C read of the repacked file");
+    assert_eq!(
+        dataset::read_libhdf5::<u32>(&dst, "d"),
+        expected,
+        "C read of the repacked file"
+    );
 }
 
 /// The index *kind* has to match the reference library's choice too, and it is
@@ -400,7 +397,10 @@ fn one_stored_chunk_with_room_for_more_is_not_the_single_chunk_layout() {
     };
     assert_eq!(kind(&fixed), Some(ChunkIndex::SingleChunk));
     assert_eq!(kind(&growable), Some(ChunkIndex::FixedArray));
-    assert_eq!(c_read(&growable), values(&[3, 3]));
+    assert_eq!(
+        dataset::read_libhdf5::<u32>(&growable, "d"),
+        values(&[3, 3])
+    );
 }
 
 /// Two unlimited dimensions are refused at write time.
@@ -460,7 +460,7 @@ fn two_unlimited_dimensions_are_refused_in_a_session_too() {
     // Nothing was written: the file still holds what it did, and not a
     // half-written dataset the reference library would choke on.
     assert_eq!(
-        c_read_named(&path, "seed"),
+        dataset::read_libhdf5::<u32>(&path, "seed"),
         vec![1, 2, 3],
         "a refused commit must leave the file as it was"
     );
@@ -501,7 +501,7 @@ fn a_maximum_shape_needing_a_mostly_empty_index_is_refused() {
         .with_maxshape(&[MaxExtent::Unlimited, MaxExtent::Fixed(3)])
         .with_chunks(&[2, 2]);
     b.write(&path).unwrap();
-    assert_eq!(c_read(&path), values(&[3, 3]));
+    assert_eq!(dataset::read_libhdf5::<u32>(&path, "d"), values(&[3, 3]));
 
     // And an unlimited dimension paired with a wide fixed one is accepted, since
     // an Extensible Array allocates only the blocks its chunks land in: the
@@ -514,7 +514,7 @@ fn a_maximum_shape_needing_a_mostly_empty_index_is_refused() {
         .with_maxshape(&[MaxExtent::Unlimited, MaxExtent::Fixed(131_072)])
         .with_chunks(&[1, 1]);
     b.write(&path).unwrap();
-    assert_eq!(c_read(&path), values(&[8, 8]));
+    assert_eq!(dataset::read_libhdf5::<u32>(&path, "d"), values(&[8, 8]));
 }
 
 /// `repack` of a sparse chunked dataset the reference library wrote produces a
@@ -548,7 +548,7 @@ fn repack_of_a_c_written_sparse_dataset_stays_the_same_order_of_size() {
             "an unlimited maximum beside {wide}: repack wrote {dst_len} bytes for a {src_len}-byte source"
         );
         assert_eq!(pure_read(&dst), values(&shape));
-        assert_eq!(c_read(&dst), values(&shape));
+        assert_eq!(dataset::read_libhdf5::<u32>(&dst, "d"), values(&shape));
 
         std::fs::remove_file(&src).unwrap();
         std::fs::remove_file(&dst).unwrap();
@@ -610,7 +610,11 @@ fn repack_preserves_a_resizable_multidimensional_dataset() {
     hdf5_pure::repack(&src, &dst, &hdf5_pure::RepackOptions::new()).unwrap();
 
     assert_eq!(pure_read(&dst), data, "pure read of the repacked file");
-    assert_eq!(c_read(&dst), data, "C read of the repacked file");
+    assert_eq!(
+        dataset::read_libhdf5::<u32>(&dst, "d"),
+        data,
+        "C read of the repacked file"
+    );
 }
 
 /// An in-place overwrite whose re-encoded chunks shrink rebuilds the index where
@@ -660,7 +664,7 @@ fn a_shrinking_inplace_overwrite_keeps_each_chunk_in_its_slot() {
     );
 
     assert_eq!(pure_read(&path), tidy);
-    assert_eq!(c_read(&path), tidy);
+    assert_eq!(dataset::read_libhdf5::<u32>(&path, "d"), tidy);
 }
 
 /// A gap in an Extensible Array can leave a *paged* data block whose first page
@@ -691,7 +695,7 @@ fn a_paged_data_block_with_an_empty_first_page_keeps_its_chunks() {
     b.write(&path).unwrap();
 
     assert_eq!(pure_read(&path), data, "pure read");
-    assert_eq!(c_read(&path), data, "C read");
+    assert_eq!(dataset::read_libhdf5::<u32>(&path, "d"), data, "C read");
 }
 
 /// The reading half of the same fact: the reference library populates the pages
@@ -785,7 +789,7 @@ fn a_shrinking_inplace_overwrite_keeps_ea_chunks_in_their_slots() {
         "the overwrite must fit its slots, or it relocates and tests a different path"
     );
     assert_eq!(pure_read(&path), tidy);
-    assert_eq!(c_read(&path), tidy);
+    assert_eq!(dataset::read_libhdf5::<u32>(&path, "d"), tidy);
 }
 
 /// An Extensible Array allocates a data block when a chunk lands in it, so a
@@ -822,7 +826,10 @@ fn a_sparse_extensible_array_matches_the_c_library_block_statistics() {
             "EAHD statistics differ for shape {shape:?} maxshape {maxshape:?}"
         );
         assert_eq!(pure_read(&pure_path), values(&shape));
-        assert_eq!(c_read(&pure_path), values(&shape));
+        assert_eq!(
+            dataset::read_libhdf5::<u32>(&pure_path, "d"),
+            values(&shape)
+        );
 
         std::fs::remove_file(&pure_path).unwrap();
         std::fs::remove_file(&c_path).unwrap();

@@ -12,7 +12,7 @@
 use hdf5::file::LibraryVersion;
 use hdf5_pure::{File, FileBuilder, MaxExtent, ScaleOffset};
 use tempfile::tempdir;
-use test_util_hdf5::dataset::{Filter, Unlimited};
+use test_util_hdf5::dataset::{self, Filter, Unlimited};
 use test_util_hdf5::file;
 
 /// Read a dataset's typed fill value back through the reference C library.
@@ -216,10 +216,7 @@ fn c_extend_and_read(path: &std::path::Path, to: usize) -> Vec<u32> {
         f.dataset("col").unwrap().resize((to,)).unwrap();
         f.close().unwrap();
     }
-    let f = hdf5::File::open(path).unwrap();
-    let v = f.dataset("col").unwrap().read_raw::<u32>().unwrap();
-    f.close().unwrap();
-    v
+    dataset::read_libhdf5(path, "col")
 }
 
 /// The whole point, stated as agreement with the reference: extend a dataset
