@@ -19,7 +19,7 @@
 use hdf5_pure::{AttrValue, File, FileBuilder, MaxExtent, Object};
 
 use test_util::temp;
-use test_util::userblock::Userblock;
+use test_util_hdf5::userblock::{self, Userblock};
 
 const UB: usize = 512;
 
@@ -37,10 +37,7 @@ fn build_userblock_file(path: &std::path::Path) -> Userblock {
     let mut g = b.create_group("grp");
     g.create_dataset("inner").with_f64_data(&[7.5, 8.5]);
     b.add_group(g.finish());
-    let mut bytes = b.finish().unwrap();
-    let userblock = Userblock::stamp(&mut bytes, UB, MARKER);
-    std::fs::write(path, &bytes).unwrap();
-    userblock
+    userblock::write(path, b, UB, MARKER)
 }
 
 #[test]

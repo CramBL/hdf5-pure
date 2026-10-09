@@ -14,7 +14,7 @@
 use hdf5_pure::{AttrValue, File, FileBuilder};
 
 use test_util::temp;
-use test_util::userblock::Userblock;
+use test_util_hdf5::userblock::{self, Userblock};
 
 const UB: usize = 512;
 
@@ -30,10 +30,7 @@ fn build_userblock_file(path: &std::path::Path) -> Userblock {
     let mut g = b.create_group("grp");
     g.create_dataset("inner").with_f64_data(&[7.5, 8.5]);
     b.add_group(g.finish());
-    let mut bytes = b.finish().unwrap();
-    let userblock = Userblock::stamp(&mut bytes, UB, MARKER);
-    std::fs::write(path, &bytes).unwrap();
-    userblock
+    userblock::write(path, b, UB, MARKER)
 }
 
 // ---- delete ----
@@ -105,9 +102,7 @@ fn userblock_delete_chunked_dataset_roundtrip() {
         .with_shape(&[800])
         .with_chunks(&[50])
         .with_deflate(6);
-    let mut bytes = b.finish().unwrap();
-    let userblock = Userblock::stamp(&mut bytes, UB, MARKER);
-    std::fs::write(&path, &bytes).unwrap();
+    let userblock = userblock::write(&path, b, UB, MARKER);
 
     {
         let s = File::open_rw(&path).unwrap();
@@ -137,9 +132,7 @@ fn userblock_delete_then_reuse_freed_space() {
     let big: Vec<f64> = (0..256).map(|i| i as f64).collect();
     b.create_dataset("big").with_f64_data(&big);
     b.create_dataset("keep").with_i32_data(&[7, 8, 9]);
-    let mut bytes = b.finish().unwrap();
-    let userblock = Userblock::stamp(&mut bytes, UB, MARKER);
-    std::fs::write(&path, &bytes).unwrap();
+    let userblock = userblock::write(&path, b, UB, MARKER);
 
     let reuse: Vec<f64> = (0..64).map(|i| (i as f64) * -1.5).collect();
     {
@@ -183,9 +176,7 @@ fn userblock_delete_one_of_several_then_read_attr() {
     let mut g = b.create_group("grp");
     g.set_attr("tag", AttrValue::AsciiString("kept".into()));
     b.add_group(g.finish());
-    let mut bytes = b.finish().unwrap();
-    let userblock = Userblock::stamp(&mut bytes, UB, MARKER);
-    std::fs::write(&path, &bytes).unwrap();
+    let userblock = userblock::write(&path, b, UB, MARKER);
 
     {
         let s = File::open_rw(&path).unwrap();
@@ -283,9 +274,7 @@ fn userblock_copy_chunked_dataset_roundtrip() {
         .with_shape(&[600])
         .with_chunks(&[40])
         .with_deflate(6);
-    let mut bytes = b.finish().unwrap();
-    let userblock = Userblock::stamp(&mut bytes, UB, MARKER);
-    std::fs::write(&path, &bytes).unwrap();
+    let userblock = userblock::write(&path, b, UB, MARKER);
 
     {
         let s = File::open_rw(&path).unwrap();
@@ -370,9 +359,7 @@ fn userblock_reference_into_deleted_space_is_refused() {
     b.add_group(g.finish());
     b.create_dataset("refs")
         .with_path_references(&["grp/inner"]);
-    let mut bytes = b.finish().unwrap();
-    let userblock = Userblock::stamp(&mut bytes, UB, MARKER);
-    std::fs::write(&path, &bytes).unwrap();
+    let userblock = userblock::write(&path, b, UB, MARKER);
 
     let stored = {
         let file = File::open(&path).unwrap();
@@ -420,9 +407,7 @@ fn userblock_reference_to_an_object_the_same_commit_places() {
     let mut b = FileBuilder::new();
     b.with_userblock(UB as u64);
     b.create_dataset("alpha").with_f64_data(&[1.0, 2.0]);
-    let mut bytes = b.finish().unwrap();
-    let userblock = Userblock::stamp(&mut bytes, UB, MARKER);
-    std::fs::write(&path, &bytes).unwrap();
+    let userblock = userblock::write(&path, b, UB, MARKER);
 
     {
         let s = File::open_rw(&path).unwrap();
