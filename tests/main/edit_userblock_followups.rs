@@ -14,34 +14,18 @@
 use hdf5_pure::{AttrValue, File, FileBuilder};
 
 use test_util::temp;
-use test_util::userblock::Userblock;
+use test_util_hdf5::userblock;
 
 const UB: usize = 512;
 
 const MARKER: &[u8] = b"USERBLOCK-FOLLOWUP-104";
-
-/// Build a userblock file with two root datasets and a nested group+dataset.
-fn build_userblock_file(path: &std::path::Path) -> Userblock {
-    let mut b = FileBuilder::new();
-    b.with_userblock(UB as u64);
-    b.create_dataset("alpha")
-        .with_f64_data(&[1.0, 2.0, 3.0, 4.0]);
-    b.create_dataset("beta").with_i32_data(&[10, 20, 30]);
-    let mut g = b.create_group("grp");
-    g.create_dataset("inner").with_f64_data(&[7.5, 8.5]);
-    b.add_group(g.finish());
-    let mut bytes = b.finish().unwrap();
-    let userblock = Userblock::stamp(&mut bytes, UB, MARKER);
-    std::fs::write(path, &bytes).unwrap();
-    userblock
-}
 
 // ---- delete ----
 
 #[test]
 fn userblock_delete_dataset_roundtrip() {
     let path = temp::temp_path("hdf5_pure_ub_fu_delete_ds.h5");
-    let userblock = build_userblock_file(&path);
+    let userblock = userblock::write_edit_fixture(&path, UB, MARKER);
 
     {
         let s = File::open_rw(&path).unwrap();
@@ -72,7 +56,7 @@ fn userblock_delete_group_subtree_roundtrip() {
     // dataset's header and data). On a userblock file every child link and data
     // address is base-relative, so the subtree walk must re-absolutize them.
     let path = temp::temp_path("hdf5_pure_ub_fu_delete_grp.h5");
-    let userblock = build_userblock_file(&path);
+    let userblock = userblock::write_edit_fixture(&path, UB, MARKER);
 
     {
         let s = File::open_rw(&path).unwrap();
@@ -105,9 +89,7 @@ fn userblock_delete_chunked_dataset_roundtrip() {
         .with_shape(&[800])
         .with_chunks(&[50])
         .with_deflate(6);
-    let mut bytes = b.finish().unwrap();
-    let userblock = Userblock::stamp(&mut bytes, UB, MARKER);
-    std::fs::write(&path, &bytes).unwrap();
+    let userblock = userblock::write(&path, b, UB, MARKER);
 
     {
         let s = File::open_rw(&path).unwrap();
@@ -137,9 +119,7 @@ fn userblock_delete_then_reuse_freed_space() {
     let big: Vec<f64> = (0..256).map(|i| i as f64).collect();
     b.create_dataset("big").with_f64_data(&big);
     b.create_dataset("keep").with_i32_data(&[7, 8, 9]);
-    let mut bytes = b.finish().unwrap();
-    let userblock = Userblock::stamp(&mut bytes, UB, MARKER);
-    std::fs::write(&path, &bytes).unwrap();
+    let userblock = userblock::write(&path, b, UB, MARKER);
 
     let reuse: Vec<f64> = (0..64).map(|i| (i as f64) * -1.5).collect();
     {
@@ -183,9 +163,7 @@ fn userblock_delete_one_of_several_then_read_attr() {
     let mut g = b.create_group("grp");
     g.set_attr("tag", AttrValue::AsciiString("kept".into()));
     b.add_group(g.finish());
-    let mut bytes = b.finish().unwrap();
-    let userblock = Userblock::stamp(&mut bytes, UB, MARKER);
-    std::fs::write(&path, &bytes).unwrap();
+    let userblock = userblock::write(&path, b, UB, MARKER);
 
     {
         let s = File::open_rw(&path).unwrap();
@@ -215,7 +193,7 @@ fn userblock_copy_dataset_roundtrip() {
     // userblock file the new data address and the parent link to the copy must both
     // be stored base-relative.
     let path = temp::temp_path("hdf5_pure_ub_fu_copy_ds.h5");
-    let userblock = build_userblock_file(&path);
+    let userblock = userblock::write_edit_fixture(&path, UB, MARKER);
 
     {
         let s = File::open_rw(&path).unwrap();
@@ -246,7 +224,7 @@ fn userblock_copy_group_subtree_roundtrip() {
     // Copying a whole group deep-copies its nested dataset too; every child link
     // and data address in the copy is written base-relative.
     let path = temp::temp_path("hdf5_pure_ub_fu_copy_grp.h5");
-    let userblock = build_userblock_file(&path);
+    let userblock = userblock::write_edit_fixture(&path, UB, MARKER);
 
     {
         let s = File::open_rw(&path).unwrap();
@@ -283,9 +261,7 @@ fn userblock_copy_chunked_dataset_roundtrip() {
         .with_shape(&[600])
         .with_chunks(&[40])
         .with_deflate(6);
-    let mut bytes = b.finish().unwrap();
-    let userblock = Userblock::stamp(&mut bytes, UB, MARKER);
-    std::fs::write(&path, &bytes).unwrap();
+    let userblock = userblock::write(&path, b, UB, MARKER);
 
     {
         let s = File::open_rw(&path).unwrap();
@@ -307,7 +283,7 @@ fn userblock_cross_file_copy_into_userblock_dest() {
     // writes the copy base-relative even though the source was read base-0.
     let dst_path = temp::temp_path("hdf5_pure_ub_fu_xcopy_dst.h5");
     let src_path = temp::temp_path("hdf5_pure_ub_fu_xcopy_src.h5");
-    let userblock = build_userblock_file(&dst_path);
+    let userblock = userblock::write_edit_fixture(&dst_path, UB, MARKER);
 
     // A plain (no-userblock) source file.
     {
@@ -370,9 +346,7 @@ fn userblock_reference_into_deleted_space_is_refused() {
     b.add_group(g.finish());
     b.create_dataset("refs")
         .with_path_references(&["grp/inner"]);
-    let mut bytes = b.finish().unwrap();
-    let userblock = Userblock::stamp(&mut bytes, UB, MARKER);
-    std::fs::write(&path, &bytes).unwrap();
+    let userblock = userblock::write(&path, b, UB, MARKER);
 
     let stored = {
         let file = File::open(&path).unwrap();
@@ -420,9 +394,7 @@ fn userblock_reference_to_an_object_the_same_commit_places() {
     let mut b = FileBuilder::new();
     b.with_userblock(UB as u64);
     b.create_dataset("alpha").with_f64_data(&[1.0, 2.0]);
-    let mut bytes = b.finish().unwrap();
-    let userblock = Userblock::stamp(&mut bytes, UB, MARKER);
-    std::fs::write(&path, &bytes).unwrap();
+    let userblock = userblock::write(&path, b, UB, MARKER);
 
     {
         let s = File::open_rw(&path).unwrap();

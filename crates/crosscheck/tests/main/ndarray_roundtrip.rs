@@ -4,13 +4,11 @@ use hdf5_pure::{Error, File, FileBuilder};
 use ndarray::{Array1, Array2, Array3, ArrayD, ShapeBuilder, array};
 #[cfg(feature = "__hdf5-1.10")]
 use tempfile::tempdir;
+use test_util_hdf5::file_builder;
 
 /// Build a one-dataset file from an ndarray and reopen it in memory.
 fn write_then_open(name: &str, build: impl FnOnce(&mut FileBuilder)) -> File {
-    let mut fb = FileBuilder::new();
-    build(&mut fb);
-    let bytes = fb.finish().unwrap();
-    let file = File::from_bytes(bytes).unwrap();
+    let file = file_builder::build_and_open(build);
     // Sanity: the dataset exists.
     file.dataset(name).unwrap();
     file
@@ -61,10 +59,10 @@ fn roundtrip_3d_i32() {
 fn roundtrip_2d_i64_and_u32() {
     let a: Array2<i64> = array![[-1, -2], [-3, -4], [-5, -6]];
     let b: Array2<u32> = array![[10, 20, 30], [40, 50, 60]];
-    let mut fb = FileBuilder::new();
-    fb.create_dataset("a").with_ndarray(&a);
-    fb.create_dataset("b").with_ndarray(&b);
-    let file = File::from_bytes(fb.finish().unwrap()).unwrap();
+    let file = file_builder::build_and_open(|fb| {
+        fb.create_dataset("a").with_ndarray(&a);
+        fb.create_dataset("b").with_ndarray(&b);
+    });
     assert_eq!(
         file.dataset("a").unwrap().read_array::<i64, _>().unwrap(),
         a

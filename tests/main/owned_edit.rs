@@ -3,22 +3,15 @@
 //! `File::open_rw` file, applied by `File::commit`. Immediate appends are covered
 //! in `owned_append.rs`.
 
-use hdf5_pure::{AttrValue, Error, File, FileBuilder};
+use hdf5_pure::{AttrValue, Error, File};
 use tempfile::tempdir;
-
-fn create_i32(path: &std::path::Path, data: &[i32]) {
-    let mut b = FileBuilder::new();
-    b.create_dataset("d")
-        .with_i32_data(data)
-        .with_shape(&[data.len() as u64]);
-    b.write(path).unwrap();
-}
+use test_util_hdf5::file_builder;
 
 #[test]
 fn write_overwrites_values_after_commit() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("d.h5");
-    create_i32(&path, &[1, 2, 3]);
+    file_builder::write_i32_dataset(&path, "d", &[1, 2, 3]);
     let file = File::open_rw(&path).unwrap();
     {
         let mut ds = file.dataset("d").unwrap();
@@ -40,7 +33,7 @@ fn write_overwrites_values_after_commit() {
 fn set_and_remove_attr() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("d.h5");
-    create_i32(&path, &[1, 2, 3]);
+    file_builder::write_i32_dataset(&path, "d", &[1, 2, 3]);
     let file = File::open_rw(&path).unwrap();
     {
         let mut ds = file.dataset("d").unwrap();
@@ -72,7 +65,7 @@ fn set_and_remove_attr() {
 fn create_group_and_delete_object() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("d.h5");
-    create_i32(&path, &[1, 2, 3]);
+    file_builder::write_i32_dataset(&path, "d", &[1, 2, 3]);
     let file = File::open_rw(&path).unwrap();
 
     file.root().create_group("newgrp").unwrap();
@@ -88,7 +81,7 @@ fn create_group_and_delete_object() {
 fn writes_on_readonly_file_are_refused() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("d.h5");
-    create_i32(&path, &[1, 2, 3]);
+    file_builder::write_i32_dataset(&path, "d", &[1, 2, 3]);
     let bytes = std::fs::read(&path).unwrap();
     let file = File::from_bytes(bytes).unwrap();
     let mut ds = file.dataset("d").unwrap();
@@ -108,7 +101,7 @@ fn writes_on_readonly_file_are_refused() {
 fn create_dataset_and_read_back() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("d.h5");
-    create_i32(&path, &[1, 2, 3]);
+    file_builder::write_i32_dataset(&path, "d", &[1, 2, 3]);
     let file = File::open_rw(&path).unwrap();
     file.root()
         .create_dataset("new", |b| {
@@ -149,7 +142,7 @@ fn create_file_and_build_through_handles() {
 fn copy_dataset_within_file() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("d.h5");
-    create_i32(&path, &[1, 2, 3]);
+    file_builder::write_i32_dataset(&path, "d", &[1, 2, 3]);
     let file = File::open_rw(&path).unwrap();
     file.copy("d", "d_copy").unwrap();
     file.commit().unwrap();

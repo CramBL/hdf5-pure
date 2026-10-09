@@ -6,6 +6,30 @@ use std::path::Path;
 
 use hdf5_pure::{AttrValue, DatasetBuilder, File, FileBuilder};
 
+/// Reads the MAT fixture at `path` and passes its bytes to `decode`.
+///
+/// # Panics
+///
+/// Panics if the fixture cannot be read or `decode` rejects it.
+#[track_caller]
+pub fn decode_fixture<T, E>(path: &str, decode: impl FnOnce(&[u8]) -> Result<T, E>) -> T
+where
+    E: std::fmt::Display,
+{
+    let bytes = read_fixture(path);
+    decode(&bytes).unwrap_or_else(|e| panic!("decode {path:?}: {e}"))
+}
+
+/// Reads the MAT fixture at `path`.
+///
+/// # Panics
+///
+/// Panics if the fixture cannot be read.
+#[track_caller]
+pub fn read_fixture(path: &str) -> Vec<u8> {
+    std::fs::read(path).unwrap_or_else(|e| panic!("read {path:?}: {e}"))
+}
+
 /// Opens the MAT file at `path`, first checking that it carries the MATLAB v7.3 userblock.
 ///
 /// `File::open` skips the userblock without reading it, so a file that lost its MATLAB

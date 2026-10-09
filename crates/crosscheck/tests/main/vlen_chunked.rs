@@ -19,14 +19,11 @@ use hdf5::types::VarLenUnicode;
 use hdf5_pure::{File, FileBuilder, FileSpaceStrategy, MaxExtent};
 use tempfile::tempdir;
 
-use test_util_hdf5::{file, lock};
+use test_util_hdf5::{dataset, file, lock};
 
 /// Read a VL-string dataset with the reference C library.
 fn read_c(path: &std::path::Path, name: &str) -> Vec<String> {
-    let f = hdf5::File::open(path).unwrap();
-    let ds = f.dataset(name).unwrap();
-    ds.read_raw::<VarLenUnicode>()
-        .unwrap()
+    dataset::read_libhdf5::<VarLenUnicode>(path, name)
         .into_iter()
         .map(|s| s.as_str().to_owned())
         .collect()

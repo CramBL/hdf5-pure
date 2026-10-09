@@ -16,7 +16,7 @@
 use hdf5_pure::{File, FileBuilder, MaxExtent};
 
 use test_util::temp;
-use test_util::userblock::Userblock;
+use test_util_hdf5::userblock;
 
 const UB: usize = 512;
 
@@ -31,9 +31,7 @@ fn userblock_chunked_add_roundtrip() {
     b.with_userblock(UB as u64);
     b.create_dataset("contig")
         .with_f64_data(&[1.0, 2.0, 3.0, 4.0]);
-    let mut bytes = b.finish().unwrap();
-    let userblock = Userblock::stamp(&mut bytes, UB, MARKER);
-    std::fs::write(&path, &bytes).unwrap();
+    let userblock = userblock::write(&path, b, UB, MARKER);
 
     let added: Vec<f64> = (0..1000).map(|i| (i % 13) as f64 * 0.25).collect();
     {
@@ -71,9 +69,7 @@ fn userblock_chunked_unfiltered_inplace_overwrite() {
         .with_f64_data(&original)
         .with_shape(&[200])
         .with_chunks(&[32]);
-    let mut bytes = b.finish().unwrap();
-    let userblock = Userblock::stamp(&mut bytes, UB, MARKER);
-    std::fs::write(&path, &bytes).unwrap();
+    let userblock = userblock::write(&path, b, UB, MARKER);
     let len_before = std::fs::metadata(&path).unwrap().len();
 
     let updated: Vec<f64> = (0..200).map(|i| (i as f64) * -2.0 + 1.0).collect();
@@ -123,9 +119,7 @@ fn userblock_chunked_shrinking_inplace_overwrite() {
         .with_shape(&[400])
         .with_chunks(&[40])
         .with_deflate(6);
-    let mut bytes = b.finish().unwrap();
-    let userblock = Userblock::stamp(&mut bytes, UB, MARKER);
-    std::fs::write(&path, &bytes).unwrap();
+    let userblock = userblock::write(&path, b, UB, MARKER);
     let len_before = std::fs::metadata(&path).unwrap().len();
 
     let updated = vec![1.5f64; 400];
@@ -218,9 +212,7 @@ fn userblock_extensible_array_add_and_overwrite_roundtrip() {
     let mut b = FileBuilder::new();
     b.with_userblock(UB as u64);
     b.create_dataset("keep").with_i32_data(&[7, 8, 9]);
-    let mut bytes = b.finish().unwrap();
-    let userblock = Userblock::stamp(&mut bytes, UB, MARKER);
-    std::fs::write(&path, &bytes).unwrap();
+    let userblock = userblock::write(&path, b, UB, MARKER);
 
     let added: Vec<f64> = (0..500).map(|i| (i as f64).sin() * 1e3).collect();
     {
@@ -277,9 +269,7 @@ fn userblock_single_chunk_index_add_and_overwrite() {
     let path = temp::temp_path("hdf5_pure_ub_single_chunk.h5");
     let mut b = FileBuilder::new();
     b.with_userblock(UB as u64);
-    let mut bytes = b.finish().unwrap();
-    let userblock = Userblock::stamp(&mut bytes, UB, MARKER);
-    std::fs::write(&path, &bytes).unwrap();
+    let userblock = userblock::write(&path, b, UB, MARKER);
 
     let added: Vec<f64> = (0..50).map(|i| i as f64 * 0.5).collect();
     {
@@ -337,9 +327,7 @@ fn userblock_chunked_relocating_overwrite_roundtrip() {
         .with_shape(&[500])
         .with_chunks(&[50])
         .with_deflate(6);
-    let mut bytes = b.finish().unwrap();
-    let userblock = Userblock::stamp(&mut bytes, UB, MARKER);
-    std::fs::write(&path, &bytes).unwrap();
+    let userblock = userblock::write(&path, b, UB, MARKER);
 
     let updated: Vec<f64> = (0..500).map(|i| (i as f64).sin()).collect();
     {
@@ -382,9 +370,7 @@ fn userblock_chunked_add_reuses_a_freed_chunk_hole() {
     // Above the victim, so the delete leaves an interior hole rather than a
     // trailing run the commit would truncate away.
     b.create_dataset("ceiling").with_i32_data(&[11, 22, 33]);
-    let mut bytes = b.finish().unwrap();
-    let userblock = Userblock::stamp(&mut bytes, UB, MARKER);
-    std::fs::write(&path, &bytes).unwrap();
+    let userblock = userblock::write(&path, b, UB, MARKER);
     let len_start = std::fs::metadata(&path).unwrap().len();
 
     let replacement: Vec<f64> = (0..2048).map(|i| (i as f64) * 0.25 - 3.0).collect();
@@ -446,9 +432,7 @@ fn userblock_chunked_overwrite_reuses_reclaimed_space() {
         .with_shape(&[1200])
         .with_chunks(&[60])
         .with_deflate(6);
-    let mut bytes = b.finish().unwrap();
-    let userblock = Userblock::stamp(&mut bytes, UB, MARKER);
-    std::fs::write(&path, &bytes).unwrap();
+    let userblock = userblock::write(&path, b, UB, MARKER);
 
     let updated: Vec<f64> = (0..1200).map(|i| (i as f64).sin() * 1e9).collect();
     let reuse: Vec<f64> = (0..32).map(|i| (i as f64) - 7.0).collect();

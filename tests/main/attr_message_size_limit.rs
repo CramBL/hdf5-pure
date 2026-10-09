@@ -12,6 +12,7 @@
 
 use hdf5_pure::{AttrValue, Error, File, FileBuilder, FormatError, OBJECT_HEADER_MESSAGE_MAX};
 use test_util::fractal_heap;
+use test_util_hdf5::attr;
 
 /// A `VarLenAsciiCharArray` past the message-size limit: each element contributes a
 /// 16-byte global-heap reference, so ~4,100 elements cross it. This is the shape
@@ -26,16 +27,6 @@ fn oversized_vlen() -> AttrValue {
 /// a message header.
 fn oversized_fixed() -> AttrValue {
     AttrValue::StringArray(vec!["x".repeat(200); 400])
-}
-
-/// The strings of an array-of-strings attribute, whichever variant the reader
-/// chose for it.
-#[track_caller]
-fn strings(attrs: &std::collections::HashMap<String, AttrValue>, name: &str) -> Vec<String> {
-    match attrs.get(name) {
-        Some(AttrValue::VarLenAsciiCharArray(v) | AttrValue::StringArray(v)) => v.clone(),
-        other => panic!("expected an array-of-strings attribute {name:?}, got {other:?}"),
-    }
 }
 
 /// The shape from the issue report, which is variable-length and so was the last
@@ -57,7 +48,10 @@ fn root_vlen_attr_past_the_limit_moves_to_heap_storage() {
     assert!(fractal_heap::has_fractal_heap(&bytes));
 
     let file = File::from_bytes(bytes).unwrap();
-    assert_eq!(strings(&file.root().attrs().unwrap(), "labels"), expected);
+    assert_eq!(
+        attr::string_array(&file.root().attrs().unwrap(), "labels"),
+        expected
+    );
 }
 
 /// A fixed-width attribute past the limit is no longer refused: it selects heap
@@ -150,7 +144,7 @@ fn a_small_vlen_attribute_swept_into_the_heap_keeps_its_values() {
     let file = File::from_bytes(bytes).unwrap();
     let attrs = file.root().attrs().unwrap();
     assert_eq!(attrs.len(), 2);
-    assert_eq!(strings(&attrs, "labels"), ["a", "b"]);
+    assert_eq!(attr::string_array(&attrs, "labels"), ["a", "b"]);
 }
 
 /// An oversized attribute is not the only way to overflow the message-size
@@ -202,6 +196,6 @@ fn large_but_fitting_attrs_still_round_trip() {
         file.group("g").unwrap().attrs().unwrap(),
     ] {
         assert_eq!(attrs.len(), 1);
-        assert_eq!(strings(&attrs, "labels"), expected);
+        assert_eq!(attr::string_array(&attrs, "labels"), expected);
     }
 }

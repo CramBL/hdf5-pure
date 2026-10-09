@@ -15,6 +15,7 @@ use rstest::rstest;
 const PAGE: u64 = 16384;
 
 use test_util::temp;
+use test_util_hdf5::paged;
 
 /// A persisting paged file with small and large datasets round-trips through
 /// hdf5-pure: the EOA is page-aligned, the free space is tracked in managers,
@@ -34,35 +35,13 @@ fn paged_persist_roundtrip() {
         .with_file_space_page_size(PAGE);
     b.write(&path).unwrap();
 
-    let bytes = std::fs::read(&path).unwrap();
-    assert_eq!(
-        bytes.len() as u64 % PAGE,
-        0,
-        "file is a whole number of pages"
-    );
+    paged::assert_consistent(&path, PAGE);
 
     let f = File::open(&path).unwrap();
-    assert_eq!(f.file_space_strategy(), Some(FileSpaceStrategy::Page));
-    let info = f.file_space_info().expect("records a strategy");
-    assert!(info.persist);
-    assert_eq!(info.page_size.get(), PAGE);
-    assert_eq!(info.eoa_pre_fsm % PAGE, 0, "EOA recorded page-aligned");
-    assert_eq!(info.eoa_pre_fsm, bytes.len() as u64, "EOA == file size");
-
-    // Free space is tracked (page tails), non-overlapping and within the file.
-    let free = f.persisted_free_space().unwrap();
     assert!(
-        !free.is_empty(),
+        !f.persisted_free_space().unwrap().is_empty(),
         "paged persist tracks page-tail free space"
     );
-    let mut sorted = free.clone();
-    sorted.sort_by_key(|&(a, _)| a);
-    let mut prev_end = 0u64;
-    for (addr, len) in &sorted {
-        assert!(*addr >= prev_end, "sections do not overlap");
-        assert!(addr + len <= bytes.len() as u64, "section within the file");
-        prev_end = addr + len;
-    }
 
     // Every dataset reads back.
     assert_eq!(f.dataset("a").unwrap().read_i32().unwrap(), small_a);
