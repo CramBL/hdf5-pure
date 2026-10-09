@@ -9,6 +9,9 @@
 
 use hdf5_pure::mat;
 use serde::Deserialize;
+use test_util_hdf5::mat_file;
+
+const FIXTURE: &str = "tests/data/h5py/mat/struct_array_v73.mat";
 
 #[derive(Deserialize, Debug, PartialEq)]
 #[allow(non_snake_case)]
@@ -36,12 +39,6 @@ struct Nested {
     inner: Inner,
 }
 
-fn read<T: serde::de::DeserializeOwned>() -> T {
-    let bytes = std::fs::read("tests/data/h5py/mat/struct_array_v73.mat")
-        .expect("read struct_array_v73.mat fixture");
-    mat::from_bytes(&bytes).expect("decode fixture")
-}
-
 fn expected_data(n: u64) -> Data {
     Data {
         fieldA: n,
@@ -57,7 +54,7 @@ fn row_struct_array_reads_as_vec() {
     struct File {
         row: Vec<Data>,
     }
-    let row = read::<File>().row;
+    let row = mat_file::decode_fixture(FIXTURE, mat::from_bytes::<File>).row;
     let expected: Vec<Data> = (1..=6).map(expected_data).collect();
     assert_eq!(row, expected);
 }
@@ -70,7 +67,7 @@ fn col_struct_array_reads_as_vec() {
     struct File {
         col: Vec<Data>,
     }
-    let col = read::<File>().col;
+    let col = mat_file::decode_fixture(FIXTURE, mat::from_bytes::<File>).col;
     let expected: Vec<Data> = (1..=6).map(expected_data).collect();
     assert_eq!(col, expected);
 }
@@ -83,7 +80,7 @@ fn grid_struct_array_reads_as_rows() {
     struct File {
         grid: Vec<Vec<GridElem>>,
     }
-    let grid = read::<File>().grid;
+    let grid = mat_file::decode_fixture(FIXTURE, mat::from_bytes::<File>).grid;
     assert_eq!(grid.len(), 2);
     assert_eq!(
         grid[0],
@@ -129,7 +126,7 @@ fn nested_scalar_struct_in_array_decodes() {
     struct File {
         nested: Vec<Nested>,
     }
-    let nested = read::<File>().nested;
+    let nested = mat_file::decode_fixture(FIXTURE, mat::from_bytes::<File>).nested;
     assert_eq!(
         nested,
         vec![
@@ -153,7 +150,10 @@ fn scalar_struct_is_not_treated_as_array() {
     struct File {
         scalar: Data,
     }
-    assert_eq!(read::<File>().scalar, expected_data(1));
+    assert_eq!(
+        mat_file::decode_fixture(FIXTURE, mat::from_bytes::<File>).scalar,
+        expected_data(1)
+    );
 }
 
 /// Deserializing a multi-element struct array into a single struct fails with a
@@ -165,7 +165,7 @@ fn struct_array_into_single_struct_errors() {
         #[allow(dead_code)]
         row: Data,
     }
-    let bytes = std::fs::read("tests/data/h5py/mat/struct_array_v73.mat").unwrap();
+    let bytes = mat_file::read_fixture(FIXTURE);
     let err = mat::from_bytes::<File>(&bytes).unwrap_err();
     let msg = err.to_string();
     assert!(

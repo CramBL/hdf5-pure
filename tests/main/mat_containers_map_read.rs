@@ -7,12 +7,9 @@
 use hdf5_pure::mat;
 use serde::Deserialize;
 use std::collections::{BTreeMap, HashMap};
+use test_util_hdf5::mat_file;
 
-fn read<T: serde::de::DeserializeOwned>() -> T {
-    let bytes = std::fs::read("tests/data/matlab/test_maps_v73.mat")
-        .expect("read test_maps_v73.mat fixture");
-    mat::from_bytes(&bytes).expect("decode fixture")
-}
+const FIXTURE: &str = "tests/data/matlab/test_maps_v73.mat";
 
 #[test]
 fn char_keyed_map_decodes_to_string_keyed_map() {
@@ -21,7 +18,7 @@ fn char_keyed_map_decodes_to_string_keyed_map() {
     struct File {
         map_char_keys: HashMap<String, f64>,
     }
-    let m = read::<File>().map_char_keys;
+    let m = mat_file::decode_fixture(FIXTURE, mat::from_bytes::<File>).map_char_keys;
     assert_eq!(m.len(), 2);
     assert_eq!(m["a"], 1.0);
     assert_eq!(m["b"], 2.0);
@@ -35,7 +32,7 @@ fn string_keyed_map_matches_char_keyed_map() {
     struct File {
         map_string_keys: BTreeMap<String, f64>,
     }
-    let m = read::<File>().map_string_keys;
+    let m = mat_file::decode_fixture(FIXTURE, mat::from_bytes::<File>).map_string_keys;
     assert_eq!(
         m.into_iter().collect::<Vec<_>>(),
         [("a".to_owned(), 1.0), ("b".to_owned(), 2.0)]
@@ -50,7 +47,7 @@ fn numeric_keyed_map_stringifies_keys() {
     struct File {
         map_numeric_keys: BTreeMap<String, String>,
     }
-    let m = read::<File>().map_numeric_keys;
+    let m = mat_file::decode_fixture(FIXTURE, mat::from_bytes::<File>).map_numeric_keys;
     assert_eq!(
         m.into_iter().collect::<Vec<_>>(),
         [
@@ -66,7 +63,11 @@ fn empty_map_decodes_to_empty_map() {
     struct File {
         map_empty: HashMap<String, f64>,
     }
-    assert!(read::<File>().map_empty.is_empty());
+    assert!(
+        mat_file::decode_fixture(FIXTURE, mat::from_bytes::<File>)
+            .map_empty
+            .is_empty()
+    );
 }
 
 #[test]
@@ -84,7 +85,7 @@ fn map_deserializes_into_a_struct_keyed_by_field_name() {
     struct File {
         map_char_keys: Lookup,
     }
-    let l = read::<File>().map_char_keys;
+    let l = mat_file::decode_fixture(FIXTURE, mat::from_bytes::<File>).map_char_keys;
     assert_eq!((l.a, l.b), (1.0, 2.0));
 }
 
@@ -108,7 +109,7 @@ fn dictionary_still_reads_losslessly_for_now() {
     struct File {
         dict_numeric_keys: Dict,
     }
-    let d = read::<File>().dict_numeric_keys;
+    let d = mat_file::decode_fixture(FIXTURE, mat::from_bytes::<File>).dict_numeric_keys;
     assert_eq!(d.data.key, [1.0, 2.0, 3.0]);
     assert_eq!(d.data.value, ["apple", "banana", "cherry"]);
 }

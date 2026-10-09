@@ -13,12 +13,9 @@
 
 use hdf5_pure::mat::{self, MatDatetime, MatDuration};
 use serde::Deserialize;
+use test_util_hdf5::mat_file;
 
-fn read<T: serde::de::DeserializeOwned>() -> T {
-    let bytes = std::fs::read("tests/data/matlab/test_tables_v73.mat")
-        .expect("read test_tables_v73.mat fixture");
-    mat::from_bytes(&bytes).expect("decode fixture")
-}
+const FIXTURE: &str = "tests/data/matlab/test_tables_v73.mat";
 
 #[test]
 fn table_numeric_columns_decode() {
@@ -34,7 +31,7 @@ fn table_numeric_columns_decode() {
         #[serde(rename = "Var2")]
         var2: Vec<f64>,
     }
-    let f: File = read();
+    let f = mat_file::decode_fixture(FIXTURE, mat::from_bytes::<File>);
     assert_eq!(f.table_numeric.var1, vec![1.1, 2.2, 3.3]);
     assert_eq!(f.table_numeric.var2, vec![4.4, 5.5, 6.6]);
 }
@@ -51,7 +48,7 @@ fn table_string_column_decodes() {
         #[serde(rename = "Var1")]
         var1: Vec<String>,
     }
-    let f: File = read();
+    let f = mat_file::decode_fixture(FIXTURE, mat::from_bytes::<File>);
     assert_eq!(f.table_strings.var1, vec!["apple", "banana", "cherry"]);
 }
 
@@ -69,7 +66,7 @@ fn table_datetime_and_duration_columns_decode() {
         #[serde(rename = "Duration")]
         duration: MatDuration,
     }
-    let f: File = read();
+    let f = mat_file::decode_fixture(FIXTURE, mat::from_bytes::<File>);
     assert_eq!(
         f.table_time.time.millis_utc,
         vec![
@@ -99,7 +96,7 @@ fn table_nan_and_missing_string_columns_decode() {
         #[serde(rename = "Var2")]
         var2: Vec<String>,
     }
-    let f: File = read();
+    let f = mat_file::decode_fixture(FIXTURE, mat::from_bytes::<File>);
     assert_eq!(f.table_nan.var1[0], 1.1);
     assert!(f.table_nan.var1[1].is_nan());
     assert_eq!(f.table_nan.var1[2], 3.3);
@@ -119,7 +116,7 @@ fn table_heterogeneous_cell_column_decodes() {
         #[serde(rename = "Var1")]
         var1: (f64, String, MatDatetime),
     }
-    let f: File = read();
+    let f = mat_file::decode_fixture(FIXTURE, mat::from_bytes::<File>);
     let (num, text, dt) = f.table_from_cell.var1;
     assert_eq!(num, 1.0);
     assert_eq!(text, "text");
@@ -150,7 +147,7 @@ fn table_struct_and_user_object_columns_decode() {
     struct BasicClass {
         a: f64,
     }
-    let f: File = read();
+    let f = mat_file::decode_fixture(FIXTURE, mat::from_bytes::<File>);
     assert_eq!(f.table_with_objects.c.len(), 3);
     assert_eq!(f.table_with_objects.c[0].field1, 123.0);
     assert_eq!(f.table_with_objects.c[0].field2, "abc");
