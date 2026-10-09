@@ -196,6 +196,7 @@ def migration_shapes(baseline: dict, candidate: dict, core: dict) -> list[str]:
         "FormatError": {
             "AddressTooLarge",
             "Internal",
+            "InvalidFractalHeapIdLength",
             "InvalidObjectHeaderMessageSize",
             "LengthTooLarge",
         }

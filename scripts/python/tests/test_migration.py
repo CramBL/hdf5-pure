@@ -239,6 +239,35 @@ def test_migration_shape_ignores_only_the_allowed_variant_changes(variant, expec
     assert migration_shapes(baseline, baseline, core) == expected
 
 
+@pytest.mark.parametrize(
+    ("variant", "expected"),
+    [
+        ("InvalidFractalHeapIdLength", []),
+        (
+            "UnrecognizedHeapError",
+            ["FormatError: variants changed", "FormatError: variant_order changed"],
+        ),
+    ],
+)
+def test_migration_shape_admits_the_heap_id_length_error_addition(variant, expected):
+    baseline = core_shape_fixture()
+    baseline["index"]["1"]["name"] = "FormatError"
+    baseline["index"]["1"]["inner"] = {
+        "enum": {
+            "generics": {"params": [], "where_predicates": []},
+            "variants": [],
+            "impls": [],
+        }
+    }
+    core = deepcopy(baseline)
+    core["index"]["1"]["inner"]["enum"]["variants"].append(6)
+    core["index"]["6"] = {
+        "name": variant,
+        "inner": {"variant": {"kind": "unit", "discriminant": None}},
+    }
+    assert migration.migration_shapes(baseline, baseline, core) == expected
+
+
 def test_migration_shape_detects_variant_order_change():
     baseline = core_shape_fixture()
     baseline["index"]["1"]["inner"] = {
