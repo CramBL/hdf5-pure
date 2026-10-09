@@ -12,6 +12,7 @@ pub mod dense_attr;
 pub mod file;
 pub mod file_builder;
 pub mod file_space;
+pub mod fixed_string;
 pub mod fixtures;
 pub mod lock;
 pub mod mat_file;
