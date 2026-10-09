@@ -10,11 +10,10 @@
 //! These are the other half — that skipping them costs durability and *nothing
 //! else*: the same file, the same content, the same refusals.
 
-use hdf5_pure::{
-    AttrValue, Error, File, FileAccessProperties, FileBuilder, FileSpaceStrategy, SyncPolicy,
-};
+use hdf5_pure::{AttrValue, Error, File, FileAccessProperties, SyncPolicy};
 use tempfile::tempdir;
 use test_util_hdf5::dataset::Unlimited;
+use test_util_hdf5::file_space;
 
 /// A file with one unlimited chunked dataset, so a session can reach it by both
 /// an immediate append and a staged commit.
@@ -116,10 +115,7 @@ fn a_closed_file_refuses_sync_and_does_not_need_one() {
     // A file that persists its free space, so `close` has manager re-homing to
     // do after the last barrier the caller could have asked for.
     let path = dir.path().join("persist.h5");
-    let mut b = FileBuilder::new();
-    Unlimited::new("d", &(0..8).collect::<Vec<i32>>(), 4).add_to(&mut b);
-    b.with_file_space_strategy(FileSpaceStrategy::FsmAggr, true, 1);
-    b.write(&path).unwrap();
+    file_space::write_persisting_unlimited_i32(&path, 8, 4, 1);
 
     let file = File::open_rw_with_options(
         &path,

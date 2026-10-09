@@ -8,9 +8,12 @@
 //! its reusable free from disk on open, and the total always equals the summed
 //! region lengths.
 
-use hdf5_pure::{File, FileBuilder, FileSpaceStrategy};
+use hdf5_pure::{File, FileBuilder};
 use tempfile::tempdir;
-use test_util_hdf5::dataset::{Filter, Unlimited};
+use test_util_hdf5::{
+    dataset::{Filter, Unlimited},
+    file_space,
+};
 
 /// The scalar total must always equal the summed lengths of the reported regions,
 /// which must be sorted, disjoint, and contained within the logical size.
@@ -36,20 +39,6 @@ fn assert_internally_consistent(acct: &hdf5_pure::SpaceAccounting) {
             acct.logical_size
         );
     }
-}
-
-/// Build a plain (non-persisting) file with three i32 datasets `a`, `big`, `c` in
-/// that order, so deleting `big` leaves an interior hole (not a trailing run that
-/// would be truncated away).
-fn build_a_big_c(path: &std::path::Path, persist: bool) {
-    let mut b = FileBuilder::new();
-    b.create_dataset("a").with_i32_data(&[1; 100]);
-    b.create_dataset("big").with_i32_data(&[7; 400]); // 1600 bytes of raw data
-    b.create_dataset("c").with_i32_data(&[3; 100]);
-    if persist {
-        b.with_file_space_strategy(FileSpaceStrategy::FsmAggr, true, 1);
-    }
-    b.write(path).unwrap();
 }
 
 #[test]
@@ -115,7 +104,7 @@ fn logical_size_grows_with_immediate_append() {
 fn staged_delete_is_not_counted_until_commit() {
     let dir = tempdir().unwrap();
     let p = dir.path().join("staged.h5");
-    build_a_big_c(&p, false);
+    file_space::write_interior_hole_source(&p, false);
 
     let s = File::open_rw(&p).unwrap();
     assert!(!s.has_staged_edits());
@@ -147,7 +136,7 @@ fn staged_delete_is_not_counted_until_commit() {
 fn reused_free_shrinks_the_reusable_total() {
     let dir = tempdir().unwrap();
     let p = dir.path().join("reuse.h5");
-    build_a_big_c(&p, false);
+    file_space::write_interior_hole_source(&p, false);
 
     {
         let s = File::open_rw(&p).unwrap();
@@ -184,7 +173,7 @@ fn reused_free_shrinks_the_reusable_total() {
 fn fresh_nonpersisting_session_ignores_existing_holes() {
     let dir = tempdir().unwrap();
     let p = dir.path().join("holes.h5");
-    build_a_big_c(&p, false);
+    file_space::write_interior_hole_source(&p, false);
 
     // Session 1 leaves an interior hole on disk (untracked, since not persisting).
     {
@@ -209,7 +198,7 @@ fn fresh_nonpersisting_session_ignores_existing_holes() {
 fn persisting_session_seeds_reusable_free_on_open() {
     let dir = tempdir().unwrap();
     let p = dir.path().join("persist.h5");
-    build_a_big_c(&p, true);
+    file_space::write_interior_hole_source(&p, true);
 
     // Session 1: delete `big`; with persistence on, its storage is recorded on disk.
     {

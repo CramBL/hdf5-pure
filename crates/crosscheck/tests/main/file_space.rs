@@ -46,6 +46,7 @@ use test_util::range;
 use test_util::widths::Widths;
 use test_util_hdf5::absence;
 use test_util_hdf5::dataset::Unlimited;
+use test_util_hdf5::file_space;
 use test_util_hdf5::paged;
 use test_util_hdf5::session;
 
@@ -236,18 +237,8 @@ fn c_library_reads_our_persisted_free_space() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("ours_persisted.h5");
 
-    // Create a persisted file, then free a dataset's storage in place.
-    let mut b = FileBuilder::new();
-    b.create_dataset("a").with_i32_data(&[1; 100]);
-    b.create_dataset("big").with_i32_data(&[7; 400]); // 1600 bytes of raw data
-    b.create_dataset("c").with_i32_data(&[3; 100]);
-    b.with_file_space_strategy(FileSpaceStrategy::FsmAggr, true, 1);
-    b.write(&path).unwrap();
-    {
-        let s = File::open_rw(&path).unwrap();
-        s.root().delete("big").unwrap();
-        s.commit().unwrap();
-    }
+    // Create a persisted file, then free the interior dataset's storage in place.
+    file_space::write_persisted_interior_hole(&path);
 
     // hdf5-pure's own reader recovers the persisted sections (covering "big").
     let ours = File::open(&path).unwrap();

@@ -7,12 +7,10 @@
 use hdf5::Extent;
 use hdf5::file::LibraryVersion;
 use hdf5::plist::file_create::FileSpaceStrategy as CStrategy;
-use hdf5_pure::{File, FileBuilder, FileSpaceStrategy};
+use hdf5_pure::File;
 use tempfile::tempdir;
 use test_util_hdf5::dataset::{self, Filter, Unlimited};
-use test_util_hdf5::file;
-use test_util_hdf5::paged;
-use test_util_hdf5::session;
+use test_util_hdf5::{file, file_space, paged, session};
 
 #[test]
 #[cfg(target_endian = "little")]
@@ -84,10 +82,7 @@ fn bounded_persist_finalize_reads_back_in_c() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("pure_persist.h5");
 
-    let mut b = FileBuilder::new();
-    b.with_file_space_strategy(FileSpaceStrategy::FsmAggr, true, 1);
-    Unlimited::new("d", &(0..10).collect::<Vec<i32>>(), 4).add_to(&mut b);
-    b.write(&path).unwrap();
+    file_space::write_persisting_unlimited_i32(&path, 10, 4, 1);
 
     {
         let file = session::open_bounded(&path).unwrap();
@@ -294,10 +289,7 @@ fn mirror_inplace_append_to_a_persisting_file_reads_back_in_c() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("persist_mirror.h5");
 
-    let mut b = FileBuilder::new();
-    b.with_file_space_strategy(FileSpaceStrategy::FsmAggr, true, 1);
-    Unlimited::new("d", &(0..8).collect::<Vec<i32>>(), 4).add_to(&mut b);
-    b.write(&path).unwrap();
+    file_space::write_persisting_unlimited_i32(&path, 8, 4, 1);
 
     {
         let file = File::open_rw(&path).unwrap();

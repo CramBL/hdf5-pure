@@ -11,14 +11,15 @@ use std::panic;
 use std::panic::AssertUnwindSafe;
 
 use hdf5_pure::{
-    AttrValue, Error, File, FileAccessProperties, FileBuilder, FileSpaceStrategy, FormatError,
-    MaxExtent, ScaleOffset, SyncPolicy,
+    AttrValue, Error, File, FileAccessProperties, FileBuilder, FormatError, MaxExtent, ScaleOffset,
+    SyncPolicy,
 };
 use hdf5_pure_format::__private::ExtensibleArrayHeader;
 use rstest::rstest;
 use tempfile::tempdir;
 use test_util::checksum;
 use test_util_hdf5::dataset::{self, Filter, Unlimited};
+use test_util_hdf5::file_space;
 
 // ---- functional -------------------------------------------------------------
 
@@ -453,12 +454,7 @@ fn refusal_leaves_session_usable() {
 fn persisting_file_takes_both_inplace_and_staged_appends() {
     let dir = tempdir().unwrap();
     let p = dir.path().join("persist.h5");
-    {
-        let mut b = FileBuilder::new();
-        b.with_file_space_strategy(FileSpaceStrategy::FsmAggr, true, 1);
-        Unlimited::new("d", &(0..8).collect::<Vec<i32>>(), 4).add_to(&mut b);
-        b.write(&p).unwrap();
-    }
+    file_space::write_persisting_unlimited_i32(&p, 8, 4, 1);
 
     {
         let s = File::open_rw(&p).unwrap();
