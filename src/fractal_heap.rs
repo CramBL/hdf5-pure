@@ -7,7 +7,8 @@ use alloc::vec::Vec;
 use hdf5_pure_format::__private::BTREE_V2_HUGE_OBJECT;
 use hdf5_pure_format::__private::FractalHeapChild;
 pub use hdf5_pure_format::__private::FractalHeapHeader;
-use hdf5_pure_format::__private::FractalHeapIdType;
+use hdf5_pure_format::__private::FractalHeapIdKind;
+use hdf5_pure_format::__private::FractalHeapIdView;
 use hdf5_pure_format::__private::HugeObjectRecord;
 use hdf5_pure_format::__private::HugeObjectReference;
 
@@ -48,16 +49,13 @@ fn read_object_at_source<S: Source + ?Sized>(
     source.read_metadata_at(addr, len)
 }
 
-/// Confirm a heap's huge-objects B-tree is the one [`HugeObjectIndex::decode`]
-/// knows how to read, before its records are read as that layout.
+/// Checks the B-tree header against the indexed, unfiltered huge-object record layout.
 ///
-/// The other huge-object record types are unreachable by construction — the
-/// directly accessed ones (3 and 4) resolve out of the heap ID without
-/// consulting any tree, and the filtered ones (2 and 4) belong to heaps refused
-/// at [`FractalHeapHeader::decode_huge_id`], but that is a fact about the heap
-/// header, and this is the tree's own declaration. A file whose two disagree
-/// would otherwise have its records decoded as a layout they are not, reading
-/// an id out of another field's bytes.
+/// # Errors
+///
+/// Returns [`FormatError::UnexpectedHugeObjectBTree`] if the record type differs or the
+/// records are too short, and [`FormatError::InvalidOffsetSize`] or
+/// [`FormatError::InvalidLengthSize`] if a field width is not 2, 4, or 8.
 fn check_huge_object_btree(
     header: &BTreeV2Header,
     offset_size: u8,
@@ -157,16 +155,12 @@ impl HugeObjectIndex {
     }
 }
 
-/// Reads objects out of one fractal heap, holding the indexes that resolving
-/// them needs.
+/// Reads objects from one fractal heap using parsed heap IDs.
 ///
-/// A managed or tiny object is resolved against the heap header alone, but a
-/// huge one needs the heap's huge-objects B-tree, which costs the same to
-/// consult for one object as for all of them. Every caller here walks a whole
-/// heap rather than reading a single object, so parsing that index per object
-/// made the walk quadratic in the number of huge objects. This type is where the
-/// index lives instead: parsed on the first huge object, reused for the rest,
-/// and never parsed at all by a heap that has none.
+/// The caller parses each [`FractalHeapIdView`] using the decoding parameters of the heap passed
+/// to [`new`](Self::new). The reader caches the huge-object B-tree records after the first indexed
+/// huge-object lookup. Inline huge objects and tiny objects are read directly from their parsed
+/// fields.
 pub struct HeapObjectReader<'h> {
     header: &'h FractalHeapHeader,
     offset_size: u8,
@@ -202,28 +196,63 @@ impl<'h> HeapObjectReader<'h> {
         }
     }
 
-    /// Read the object `id_bytes` names from an in-memory file image,
-    /// dispatching on the heap-ID type. Managed objects live in the doubling
-    /// table's blocks; huge objects are stored directly in the file (resolved
-    /// through the huge-objects v2 B-tree); tiny objects are encoded in the ID.
-    pub fn read(&mut self, file_data: &[u8], id_bytes: &[u8]) -> Result<Vec<u8>, FormatError> {
-        match FractalHeapIdType::from_heap_id(id_bytes)? {
-            FractalHeapIdType::Managed => self.read_managed_object(file_data, id_bytes),
-            FractalHeapIdType::Huge => self.read_huge(file_data, id_bytes),
-            FractalHeapIdType::Tiny => self.header.decode_tiny_id(id_bytes),
+    /// Reads the object identified by a parsed ID from a file image.
+    ///
+    /// Managed objects are read through the heap's doubling table. Indexed huge objects are
+    /// looked up in the cached huge-object index. Tiny-object bytes are copied from `id`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::UnsupportedFilteredHeapObject`] for a managed object in a filtered
+    /// heap, [`FormatError::HugeObjectNotFound`] if an indexed huge object is absent, and
+    /// [`FormatError::UnexpectedEof`] if a managed object has no allocated block or a required
+    /// file region is truncated. Returns [`FormatError::ChunkedReadError`] if indirect-block
+    /// traversal exceeds 64 levels, [`FormatError::ValueTooLargeForPlatform`] if a value does not
+    /// fit the platform's address width, and [`FormatError::OffsetOverflow`] if a file offset
+    /// overflows. Returns errors from parsing heap blocks and huge-object index metadata.
+    ///
+    /// # Panics
+    ///
+    /// Panics in debug builds if indexed huge objects are read through both this method and
+    /// [`read_from_source`](Self::read_from_source) on the same reader.
+    pub fn read(
+        &mut self,
+        file_data: &[u8],
+        id: FractalHeapIdView<'_>,
+    ) -> Result<Vec<u8>, FormatError> {
+        match id.kind() {
+            FractalHeapIdKind::Managed {
+                heap_offset,
+                object_length,
+            } => self.read_managed_object(file_data, heap_offset, object_length),
+            FractalHeapIdKind::Huge(reference) => self.read_huge(file_data, reference),
+            FractalHeapIdKind::Tiny { bytes } => Ok(bytes.to_vec()),
         }
     }
 
-    /// Streaming counterpart to [`HeapObjectReader::read`].
+    /// Reads the object identified by a parsed ID through a [`Source`].
+    ///
+    /// # Errors
+    ///
+    /// Returns the resolution errors of [`read`](Self::read), and the error `source` returns if
+    /// a read fails.
+    ///
+    /// # Panics
+    ///
+    /// Panics in debug builds if indexed huge objects are read through both this method and
+    /// [`read`](Self::read) on the same reader.
     pub fn read_from_source<S: Source + ?Sized>(
         &mut self,
         source: &S,
-        id_bytes: &[u8],
+        id: FractalHeapIdView<'_>,
     ) -> Result<Vec<u8>, FormatError> {
-        match FractalHeapIdType::from_heap_id(id_bytes)? {
-            FractalHeapIdType::Managed => self.read_managed_object_from_source(source, id_bytes),
-            FractalHeapIdType::Huge => self.read_huge_from_source(source, id_bytes),
-            FractalHeapIdType::Tiny => self.header.decode_tiny_id(id_bytes),
+        match id.kind() {
+            FractalHeapIdKind::Managed {
+                heap_offset,
+                object_length,
+            } => self.read_managed_object_from_source(source, heap_offset, object_length),
+            FractalHeapIdKind::Huge(reference) => self.read_huge_from_source(source, reference),
+            FractalHeapIdKind::Tiny { bytes } => Ok(bytes.to_vec()),
         }
     }
 
@@ -263,75 +292,78 @@ impl<'h> HeapObjectReader<'h> {
             .locate(huge_id)
     }
 
-    /// Resolve and read a "huge" object given its heap ID.
-    fn read_huge(&mut self, file_data: &[u8], id_bytes: &[u8]) -> Result<Vec<u8>, FormatError> {
-        let (addr, len) =
-            match self
-                .header
-                .decode_huge_id(id_bytes, self.offset_size, self.length_size)?
-            {
-                HugeObjectReference::Inline { addr, len } => (addr, len),
-                HugeObjectReference::Indexed(huge_id) => {
-                    let (offset_size, length_size) = (self.offset_size, self.length_size);
-                    let btree_addr = self.header.btree_huge_objects_address.get().to_usize()?;
-                    self.locate_huge(huge_id, Backend::Buffered, || {
-                        let header =
-                            BTreeV2Header::parse(file_data, btree_addr, offset_size, length_size)?;
-                        check_huge_object_btree(&header, offset_size, length_size)?;
-                        collect_btree_v2_records(file_data, &header, offset_size, length_size)
-                    })?
-                }
-            };
+    /// Reads a huge object at its inline location or through the cached index.
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors of [`read`](Self::read) for a huge object.
+    fn read_huge(
+        &mut self,
+        file_data: &[u8],
+        reference: HugeObjectReference,
+    ) -> Result<Vec<u8>, FormatError> {
+        let (addr, len) = match reference {
+            HugeObjectReference::Inline { addr, len } => (addr, len),
+            HugeObjectReference::Indexed(huge_id) => {
+                let (offset_size, length_size) = (self.offset_size, self.length_size);
+                let btree_addr = self.header.btree_huge_objects_address.get().to_usize()?;
+                self.locate_huge(huge_id, Backend::Buffered, || {
+                    let header =
+                        BTreeV2Header::parse(file_data, btree_addr, offset_size, length_size)?;
+                    check_huge_object_btree(&header, offset_size, length_size)?;
+                    collect_btree_v2_records(file_data, &header, offset_size, length_size)
+                })?
+            }
+        };
         slice_object(file_data, addr.get(), len.to_usize()?)
     }
 
-    /// Resolve and read a "huge" object via a [`Source`].
+    /// Reads a huge object through a [`Source`] at its inline location or through the cached index.
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors of [`read_from_source`](Self::read_from_source) for a huge object.
     fn read_huge_from_source<S: Source + ?Sized>(
         &mut self,
         source: &S,
-        id_bytes: &[u8],
+        reference: HugeObjectReference,
     ) -> Result<Vec<u8>, FormatError> {
-        let (addr, len) =
-            match self
-                .header
-                .decode_huge_id(id_bytes, self.offset_size, self.length_size)?
-            {
-                HugeObjectReference::Inline { addr, len } => (addr, len),
-                HugeObjectReference::Indexed(huge_id) => {
-                    let (offset_size, length_size) = (self.offset_size, self.length_size);
-                    let btree_addr = self.header.btree_huge_objects_address.get();
-                    self.locate_huge(huge_id, Backend::Streaming, || {
-                        let header = BTreeV2Header::parse_from_source(
-                            &SourceMetadata(source),
-                            btree_addr,
-                            offset_size,
-                            length_size,
-                        )?;
-                        check_huge_object_btree(&header, offset_size, length_size)?;
-                        collect_btree_v2_records_from_source(
-                            source,
-                            &header,
-                            offset_size,
-                            length_size,
-                        )
-                    })?
-                }
-            };
+        let (addr, len) = match reference {
+            HugeObjectReference::Inline { addr, len } => (addr, len),
+            HugeObjectReference::Indexed(huge_id) => {
+                let (offset_size, length_size) = (self.offset_size, self.length_size);
+                let btree_addr = self.header.btree_huge_objects_address.get();
+                self.locate_huge(huge_id, Backend::Streaming, || {
+                    let header = BTreeV2Header::parse_from_source(
+                        &SourceMetadata(source),
+                        btree_addr,
+                        offset_size,
+                        length_size,
+                    )?;
+                    check_huge_object_btree(&header, offset_size, length_size)?;
+                    collect_btree_v2_records_from_source(source, &header, offset_size, length_size)
+                })?
+            }
+        };
         read_object_at_source(source, addr.get(), len.to_usize()?)
     }
 
-    /// Reads the managed object the heap ID `id_bytes` refers to from `file_data`.
+    /// Reads a managed object through the heap's doubling table in `file_data`.
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors of [`read`](Self::read) for a managed object.
     fn read_managed_object(
         &self,
         file_data: &[u8],
-        id_bytes: &[u8],
+        heap_offset: u64,
+        object_length: u64,
     ) -> Result<Vec<u8>, FormatError> {
         // A filtered heap stores its direct blocks filter-encoded, and the reader has no decoder
         // for them, so it returns an error.
         if self.header.io_filter_encoded_length > 0 {
             return Err(FormatError::UnsupportedFilteredHeapObject);
         }
-        let (heap_offset, obj_len) = self.header.decode_managed_id(id_bytes)?;
 
         if is_undefined_addr(self.header.root_block_address.get(), self.offset_size) {
             return Err(FormatError::UnexpectedEof {
@@ -348,7 +380,7 @@ impl<'h> HeapObjectReader<'h> {
                 self.header.starting_block_size,
                 0, // block offset in heap = 0 for root
                 heap_offset,
-                obj_len.to_usize()?,
+                object_length.to_usize()?,
             )
         } else {
             // The root is an indirect block, and the walk descends 64 levels at most.
@@ -358,7 +390,7 @@ impl<'h> HeapObjectReader<'h> {
                 self.header.current_rows_in_root_indirect_block,
                 0, // block offset
                 heap_offset,
-                obj_len.to_usize()?,
+                object_length.to_usize()?,
                 64, // max recursion depth
             )
         }
@@ -449,16 +481,20 @@ impl<'h> HeapObjectReader<'h> {
         }
     }
 
-    /// Reads the managed object the heap ID `id_bytes` refers to from `source`.
+    /// Reads a managed object through the heap's doubling table in `source`.
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors of [`read_from_source`](Self::read_from_source) for a managed object.
     fn read_managed_object_from_source<S: Source + ?Sized>(
         &self,
         source: &S,
-        id_bytes: &[u8],
+        heap_offset: u64,
+        object_length: u64,
     ) -> Result<Vec<u8>, FormatError> {
         if self.header.io_filter_encoded_length > 0 {
             return Err(FormatError::UnsupportedFilteredHeapObject);
         }
-        let (heap_offset, obj_len) = self.header.decode_managed_id(id_bytes)?;
         if is_undefined_addr(self.header.root_block_address.get(), self.offset_size) {
             return Err(FormatError::UnexpectedEof {
                 expected: 1,
@@ -471,7 +507,7 @@ impl<'h> HeapObjectReader<'h> {
                 self.header.root_block_address.get(),
                 0, // root direct block starts at heap offset 0
                 heap_offset,
-                obj_len.to_usize()?,
+                object_length.to_usize()?,
             )
         } else {
             self.read_from_indirect_block_from_source(
@@ -480,7 +516,7 @@ impl<'h> HeapObjectReader<'h> {
                 self.header.current_rows_in_root_indirect_block,
                 0,
                 heap_offset,
-                obj_len.to_usize()?,
+                object_length.to_usize()?,
                 64,
             )
         }
@@ -569,10 +605,44 @@ impl<'h> HeapObjectReader<'h> {
 
 #[cfg(test)]
 mod tests {
+    use hdf5_pure_format::__private::FractalHeapIdLayout;
+
+    use rstest::rstest;
+
     use test_util::fractal_heap;
     use test_util::widths::Widths;
 
+    use crate::source::BytesSource;
+
     use super::*;
+
+    #[rstest]
+    #[case::tiny(vec![TINY_ID_FIRST_BYTE | 2, b'a', b'b', b'c', 0, 0, 0, 0])]
+    #[case::inline_huge(vec![HUGE_ID_FIRST_BYTE, 0x20, 0, 0, 0, 0, 0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 0])]
+    fn a_parsed_inline_id_resolves_its_object(
+        #[case] bytes: Vec<u8>,
+        #[values(false, true)] streaming: bool,
+    ) {
+        let mut header = FractalHeapHeader::parse(
+            &fractal_heap::Header::new(256).build(Widths::EIGHT),
+            0,
+            8,
+            8,
+        )
+        .unwrap();
+        header.heap_id_length = u16::try_from(bytes.len()).unwrap();
+        let id = parse_id(&header, &bytes);
+        let mut image = vec![0; 64];
+        image[0x20..0x23].copy_from_slice(b"abc");
+        let mut reader = HeapObjectReader::new(&header, 8, 8);
+        let object = if streaming {
+            reader.read_from_source(&BytesSource::new(image), id)
+        } else {
+            reader.read(&image, id)
+        }
+        .unwrap();
+        assert_eq!(object, b"abc");
+    }
 
     #[test]
     fn read_managed_object_from_direct_block() {
@@ -596,7 +666,7 @@ mod tests {
         }
 
         let obj = HeapObjectReader::new(&hdr, 8, 8)
-            .read(&file_data, &id)
+            .read(&file_data, parse_id(&hdr, &id))
             .unwrap();
         assert_eq!(&obj, b"Hello, World!");
     }
@@ -617,21 +687,21 @@ mod tests {
         }
 
         let buffered = HeapObjectReader::new(&hdr, 8, 8)
-            .read(&file_data, &id)
+            .read(&file_data, parse_id(&hdr, &id))
             .unwrap();
 
         // Header parsed from a source, then the object fetched from a source.
         let mem = BytesSource::new(&file_data);
         let hdr_mem = FractalHeapHeader::parse_from_source(&SourceMetadata(&mem), 0, 8, 8).unwrap();
         let from_mem = HeapObjectReader::new(&hdr_mem, 8, 8)
-            .read_from_source(&mem, &id)
+            .read_from_source(&mem, parse_id(&hdr_mem, &id))
             .unwrap();
 
         let seek = ReadSeekSource::new(std::io::Cursor::new(file_data)).unwrap();
         let hdr_seek =
             FractalHeapHeader::parse_from_source(&SourceMetadata(&seek), 0, 8, 8).unwrap();
         let from_seek = HeapObjectReader::new(&hdr_seek, 8, 8)
-            .read_from_source(&seek, &id)
+            .read_from_source(&seek, parse_id(&hdr_seek, &id))
             .unwrap();
 
         assert_eq!(buffered, from_mem);
@@ -676,14 +746,14 @@ mod tests {
         };
         let file = vec![0u8; 0x400];
         assert_eq!(
-            HeapObjectReader::new(&h, 8, 8).read(&file, &managed_id),
+            HeapObjectReader::new(&h, 8, 8).read(&file, parse_id(&h, &managed_id)),
             Err(FormatError::UnsupportedFilteredHeapObject)
         );
 
         // Root is an indirect block: the refusal happens before any child walk.
         h.current_rows_in_root_indirect_block = 2;
         assert_eq!(
-            HeapObjectReader::new(&h, 8, 8).read(&file, &managed_id),
+            HeapObjectReader::new(&h, 8, 8).read(&file, parse_id(&h, &managed_id)),
             Err(FormatError::UnsupportedFilteredHeapObject)
         );
     }
@@ -833,7 +903,7 @@ mod tests {
         let mut reader = HeapObjectReader::new(&heap, 8, 8);
         let buffered: Vec<Vec<u8>> = ids
             .iter()
-            .map(|id| reader.read(&bytes, id).unwrap())
+            .map(|id| reader.read(&bytes, parse_id(&heap, id)).unwrap())
             .collect();
         assert_eq!(
             huge_index_decodes(),
@@ -846,7 +916,11 @@ mod tests {
         let mut reader = HeapObjectReader::new(&heap, 8, 8);
         let streamed: Vec<Vec<u8>> = ids
             .iter()
-            .map(|id| reader.read_from_source(&source, id).unwrap())
+            .map(|id| {
+                reader
+                    .read_from_source(&source, parse_id(&heap, id))
+                    .unwrap()
+            })
             .collect();
         assert_eq!(
             huge_index_decodes(),
@@ -863,4 +937,15 @@ mod tests {
             );
         }
     }
+
+    fn parse_id<'a>(header: &FractalHeapHeader, bytes: &'a [u8]) -> FractalHeapIdView<'a> {
+        FractalHeapIdLayout::new(header, OffsetWidth::Eight, LengthWidth::Eight)
+            .parse(bytes)
+            .unwrap()
+    }
+
+    // A version 0 huge ID has type 1 in bits 4 and 5 ("Fractal Heap", specification 4.0).
+    const HUGE_ID_FIRST_BYTE: u8 = 0x10;
+    // A version 0 tiny ID has type 2 in bits 4 and 5 ("Fractal Heap", specification 4.0).
+    const TINY_ID_FIRST_BYTE: u8 = 0x20;
 }

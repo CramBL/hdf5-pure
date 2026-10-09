@@ -4,6 +4,7 @@
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 
+use hdf5_pure_format::__private::FractalHeapIdLayout;
 pub use hdf5_pure_format::__private::SharedMessageTableMessage;
 pub use hdf5_pure_format::__private::SohmIndexHeader;
 use hdf5_pure_format::__private::SohmIndexKind;
@@ -21,6 +22,8 @@ use crate::message_type::MessageType;
 use crate::shared_message::FHEAP_ID_LEN;
 use crate::source::Source;
 use crate::source::SourceMetadata;
+use crate::width::LengthWidth;
+use crate::width::OffsetWidth;
 
 /// B-tree v2 type of a shared-message index (`H5B2_SOHM_INDEX_ID`).
 const BTREE_SOHM_INDEX_TYPE: u8 = 7;
@@ -94,12 +97,16 @@ fn index_for_read(
     Ok((index, heap))
 }
 
-/// Read the body of the `message_type` message stored in the shared-message heap
-/// under `heap_id`.
+/// Reads the body of a message identified by an eight-byte shared-message heap ID.
 ///
-/// The bytes in the heap are the message exactly as an object header would carry
-/// it, which is what lets the caller decode them with the ordinary parser for
-/// that type.
+/// The caller can parse the returned bytes as an object header message of `message_type`.
+///
+/// # Errors
+///
+/// Returns [`FormatError::SohmIndexMissing`] if `table` has no allocated heap for `message_type`,
+/// [`FormatError::InvalidFractalHeapIdLength`] if the heap's declared ID length differs from
+/// [`FHEAP_ID_LEN`], and the errors of [`FractalHeapHeader::parse`],
+/// [`FractalHeapIdLayout::parse`], and [`HeapObjectReader::read`] if parsing or resolution fails.
 pub fn read_heap_message(
     file_data: &[u8],
     table: &SohmTable,
@@ -115,11 +122,21 @@ pub fn read_heap_message(
         offset_size,
         length_size,
     )?;
-    HeapObjectReader::new(&heap, offset_size, length_size)
-        .read(file_data, &heap_id[..heap.heap_id_length as usize])
+    let layout = FractalHeapIdLayout::new(
+        &heap,
+        OffsetWidth::try_from(offset_size)?,
+        LengthWidth::try_from(length_size)?,
+    );
+    let id = layout.parse(heap_id)?;
+    HeapObjectReader::new(&heap, offset_size, length_size).read(file_data, id)
 }
 
-/// Streaming counterpart of [`read_heap_message`].
+/// Reads the body of a message identified by an eight-byte shared-message heap ID through a
+/// [`Source`].
+///
+/// # Errors
+///
+/// Returns the errors of [`read_heap_message`], and the error `source` returns if a read fails.
 pub fn read_heap_message_from_source<S: Source + ?Sized>(
     source: &S,
     table: &SohmTable,
@@ -135,16 +152,50 @@ pub fn read_heap_message_from_source<S: Source + ?Sized>(
         offset_size,
         length_size,
     )?;
-    HeapObjectReader::new(&heap, offset_size, length_size)
-        .read_from_source(source, &heap_id[..heap.heap_id_length as usize])
+    let layout = FractalHeapIdLayout::new(
+        &heap,
+        OffsetWidth::try_from(offset_size)?,
+        LengthWidth::try_from(length_size)?,
+    );
+    let id = layout.parse(heap_id)?;
+    HeapObjectReader::new(&heap, offset_size, length_size).read_from_source(source, id)
 }
 
 #[cfg(test)]
 mod tests {
+    use rstest::rstest;
+    use test_util::fractal_heap;
     use test_util::sohm;
     use test_util::widths::Widths;
 
+    use crate::source::BytesSource;
+
     use super::*;
+
+    #[rstest]
+    #[case::buffered_long(false, 9)]
+    #[case::source_long(true, 9)]
+    #[case::buffered_short(false, 7)]
+    #[case::source_short(true, 7)]
+    fn a_shared_heap_declaring_a_different_id_length_is_rejected(
+        #[case] streaming: bool,
+        #[case] declared: u16,
+    ) {
+        assert_eq!(
+            shared_message(streaming, declared),
+            Err(FormatError::InvalidFractalHeapIdLength {
+                expected: usize::from(declared),
+                actual: FHEAP_ID_LEN,
+            })
+        );
+    }
+
+    #[rstest]
+    #[case::buffered(false)]
+    #[case::source(true)]
+    fn a_shared_heap_with_eight_byte_ids_resolves_a_tiny_message(#[case] streaming: bool) {
+        assert_eq!(shared_message(streaming, 8).unwrap(), b"a");
+    }
 
     /// An index that was never used has no address, so reading it returns an empty list.
     #[test]
@@ -241,4 +292,46 @@ mod tests {
             FormatError::SohmIndexMissing(MessageType::DATATYPE.to_u16())
         );
     }
+
+    fn shared_message(streaming: bool, declared: u16) -> Result<Vec<u8>, FormatError> {
+        let mut header = FractalHeapHeader::parse(
+            &fractal_heap::Header::new(256).build(Widths::EIGHT),
+            0,
+            8,
+            8,
+        )
+        .unwrap();
+        header.heap_id_length = declared;
+        let image = header
+            .serialize(OffsetWidth::Eight, LengthWidth::Eight)
+            .unwrap();
+        let table = SohmTable {
+            indexes: vec![SohmIndexHeader {
+                message_type_flags: 1 << MessageType::DATATYPE.to_u16(),
+                min_message_size: 0,
+                list_max: 0,
+                btree_min: 0,
+                message_count: 0,
+                kind: SohmIndexKind::List,
+                index_address: None,
+                heap_address: Some(StoredAddress::new(0)),
+            }],
+        };
+        let id = [TINY_ID_FIRST_BYTE, b'a', 0, 0, 0, 0, 0, 0];
+        if streaming {
+            read_heap_message_from_source(
+                &BytesSource::new(image),
+                &table,
+                MessageType::DATATYPE,
+                &id,
+                8,
+                8,
+            )
+        } else {
+            read_heap_message(&image, &table, MessageType::DATATYPE, &id, 8, 8)
+        }
+    }
+
+    // A version 0 tiny ID has type 2 in bits 4 and 5 ("Fractal Heap", specification 4.0).
+    const TINY_ID_FIRST_BYTE: u8 = 0x20;
 }
