@@ -42,7 +42,7 @@ Shared object-header messages are supported for datatypes, dataspaces, fill valu
 | Feature | Read | Create | Modify | Detail |
 |---|:---:|:---:|:---:|---|
 | Compact storage | ✅ | ✅ | ✅ | |
-| Dense storage | ✅ | ✅ | ✅ | |
+| Dense storage | ✅ | ✅ | ✅ | Dead dense sets reclaim their v2 B-tree indexes. Fractal-heap storage remains allocated. |
 | Attribute creation-order tracking | ✅ | ❌ | ✅ | |
 | Attribute phase-change thresholds | ✅ | ❌ | ✅ | Existing thresholds are preserved. |
 | Null dataspace | ✅ | ❌ | ❌ | Reading returns an empty value. |
