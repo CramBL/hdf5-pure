@@ -1,11 +1,10 @@
 //! HDF5 fixture topologies shared by pure-reader and interoperability tests.
 
-#[cfg(feature = "hdf5")]
 use std::path::Path;
 
 #[cfg(feature = "hdf5")]
 use hdf5::file::LibraryVersion;
-use hdf5_pure::{AttrValue, FileBuilder};
+use hdf5_pure::{AttrValue, File, FileBuilder};
 
 /// Adds a `#refs#` group and two-dimensional row and column reference datasets.
 pub fn path_references_2d(builder: &mut FileBuilder) {
@@ -85,6 +84,54 @@ pub fn group_only_matlab_struct(builder: &mut FileBuilder) {
     outer.add_group(child_b.finish());
 
     builder.add_group(outer.finish());
+}
+
+/// Adds the common object-reference target group `g/inner` to a pure-Rust builder.
+pub fn reference_target_group(builder: &mut FileBuilder) {
+    let mut group = builder.create_group("g");
+    group.create_dataset("inner").with_i32_data(&[1, 2, 3]);
+    builder.add_group(group.finish());
+}
+
+/// Adds the common object-reference target group `g/inner` to an open libhdf5 file.
+#[cfg(feature = "hdf5")]
+pub fn populate_libhdf5_reference_target(file: &hdf5::File) {
+    let group = file.create_group("g").unwrap();
+    group
+        .new_dataset::<i32>()
+        .shape((3,))
+        .create("inner")
+        .unwrap()
+        .write(&[1i32, 2, 3])
+        .unwrap();
+}
+
+/// Commits unrelated small datasets so recently freed object-header space is reused.
+pub fn churn_commits(path: &Path, count: i32) {
+    for i in 0..count {
+        let session = File::open_rw(path).unwrap();
+        session
+            .root()
+            .create_dataset(&format!("churn{i}"), |builder| {
+                builder.with_i32_data(&[i]);
+            })
+            .unwrap();
+        session.commit().unwrap();
+    }
+}
+
+/// Moves `g` by adding `g/extra`, then churns the freed header space.
+pub fn move_reference_target_and_churn(path: &Path, count: i32) {
+    let session = File::open_rw(path).unwrap();
+    session
+        .root()
+        .create_dataset("g/extra", |builder| {
+            builder.with_i32_data(&[9]);
+        })
+        .unwrap();
+    session.commit().unwrap();
+    drop(session);
+    churn_commits(path, count);
 }
 
 /// Adds the common edit/repack starter topology to a pure-Rust file builder.
