@@ -16,7 +16,7 @@
 //! userblock-specific operation still refused — cross-file copy from a userblock
 //! *source* — is covered below; a refusal never corrupts the file.
 
-use hdf5_pure::{AttrValue, File, FileBuilder, MaxExtent, Object};
+use hdf5_pure::{AttrValue, File, MaxExtent, Object};
 
 use test_util::temp;
 use test_util_hdf5::userblock::{self, Userblock};
@@ -25,25 +25,10 @@ const UB: usize = 512;
 
 const MARKER: &[u8] = b"USERBLOCK-MARKER-0104";
 
-/// Build a userblock file with two root datasets and a nested group+dataset,
-/// stamping a recognizable marker across the userblock region. Returns the
-/// 512-byte userblock as written, for later byte-for-byte comparison.
-fn build_userblock_file(path: &std::path::Path) -> Userblock {
-    let mut b = FileBuilder::new();
-    b.with_userblock(UB as u64);
-    b.create_dataset("alpha")
-        .with_f64_data(&[1.0, 2.0, 3.0, 4.0]);
-    b.create_dataset("beta").with_i32_data(&[10, 20, 30]);
-    let mut g = b.create_group("grp");
-    g.create_dataset("inner").with_f64_data(&[7.5, 8.5]);
-    b.add_group(g.finish());
-    userblock::write(path, b, UB, MARKER)
-}
-
 #[test]
 fn synthetic_userblock_file_roundtrip() {
     let path = temp::temp_path("hdf5_pure_ub_roundtrip.h5");
-    let userblock = build_userblock_file(&path);
+    let userblock = userblock::write_edit_fixture(&path, UB, MARKER);
 
     {
         let s = File::open_rw(&path).unwrap();
@@ -118,7 +103,7 @@ fn userblock_inplace_overwrite_only_takes_fast_path() {
     // rewrite, no superblock flip); it must work on a userblock file and leave
     // the userblock untouched.
     let path = temp::temp_path("hdf5_pure_ub_inplace_only.h5");
-    let userblock = build_userblock_file(&path);
+    let userblock = userblock::write_edit_fixture(&path, UB, MARKER);
 
     {
         let s = File::open_rw(&path).unwrap();
@@ -152,8 +137,8 @@ fn userblock_inplace_overwrite_only_takes_fast_path() {
 fn userblock_cross_file_copy_from_userblock_source_is_refused() {
     let src_path = temp::temp_path("hdf5_pure_ub_xcopy_src_refuse.h5");
     let dst_path = temp::temp_path("hdf5_pure_ub_xcopy_dst_refuse.h5");
-    build_userblock_file(&src_path);
-    build_userblock_file(&dst_path);
+    userblock::write_edit_fixture(&src_path, UB, MARKER);
+    userblock::write_edit_fixture(&dst_path, UB, MARKER);
     let dst_before = std::fs::read(&dst_path).unwrap();
 
     let source = File::open(&src_path).unwrap();
@@ -182,7 +167,7 @@ fn userblock_cross_file_copy_from_userblock_source_is_refused() {
 #[test]
 fn userblock_add_empty_dataset_roundtrip() {
     let path = temp::temp_path("hdf5_pure_ub_add_empty.h5");
-    let userblock = build_userblock_file(&path);
+    let userblock = userblock::write_edit_fixture(&path, UB, MARKER);
 
     {
         let s = File::open_rw(&path).unwrap();
@@ -219,7 +204,7 @@ fn userblock_add_empty_dataset_roundtrip() {
 #[test]
 fn userblock_add_empty_chunked_dataset_and_grow_it() {
     let path = temp::temp_path("hdf5_pure_ub_add_empty_chunked.h5");
-    let userblock = build_userblock_file(&path);
+    let userblock = userblock::write_edit_fixture(&path, UB, MARKER);
 
     {
         let s = File::open_rw(&path).unwrap();
@@ -290,7 +275,7 @@ fn userblock_add_provenance_dataset_roundtrip() {
     use hdf5_pure::VerifyResult;
 
     let path = temp::temp_path("hdf5_pure_ub_add_provenance.h5");
-    let userblock = build_userblock_file(&path);
+    let userblock = userblock::write_edit_fixture(&path, UB, MARKER);
 
     {
         let s = File::open_rw(&path).unwrap();
@@ -324,7 +309,7 @@ fn userblock_add_provenance_dataset_roundtrip() {
 #[test]
 fn userblock_add_dataset_with_vlen_attribute_roundtrip() {
     let path = temp::temp_path("hdf5_pure_ub_add_vlen_attr.h5");
-    let userblock = build_userblock_file(&path);
+    let userblock = userblock::write_edit_fixture(&path, UB, MARKER);
 
     {
         let s = File::open_rw(&path).unwrap();
@@ -359,7 +344,7 @@ fn userblock_add_dataset_with_vlen_attribute_roundtrip() {
 #[test]
 fn userblock_add_vlen_string_dataset_roundtrip() {
     let path = temp::temp_path("hdf5_pure_ub_add_vlen_string_ds.h5");
-    let userblock = build_userblock_file(&path);
+    let userblock = userblock::write_edit_fixture(&path, UB, MARKER);
 
     {
         let s = File::open_rw(&path).unwrap();
@@ -386,7 +371,7 @@ fn userblock_add_vlen_string_dataset_roundtrip() {
 #[test]
 fn userblock_add_reference_dataset_roundtrip() {
     let path = temp::temp_path("hdf5_pure_ub_add_ref.h5");
-    let userblock = build_userblock_file(&path);
+    let userblock = userblock::write_edit_fixture(&path, UB, MARKER);
 
     {
         let s = File::open_rw(&path).unwrap();
