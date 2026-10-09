@@ -65,9 +65,9 @@ const FIRST_ROW_BITS: u32 = START_BITS + WIDTH_BITS;
 
 /// The number of rows that hold direct blocks, the rows before the first row of indirect blocks.
 ///
-/// The count is `(max_direct_bits - start_bits) + 2`, as `H5HF__dtable_init` and
-/// [`FractalHeapHeader::find_child_for_offset`](crate::fractal_heap::FractalHeapHeader::find_child_for_offset)
-/// compute it.
+/// The count is `(max_direct_bits - start_bits) + 2`, as `H5HF__dtable_init` computes it.
+/// [`FractalHeapLayout`](crate::fractal_heap::FractalHeapLayout) derives the same value for
+/// readers.
 const MAX_DIRECT_ROWS: usize = (MAX_DIRECT_BITS - START_BITS + 2) as usize;
 
 /// The most rows a root indirect block has with its blocks inside the heap's space,
