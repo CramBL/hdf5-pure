@@ -205,11 +205,11 @@
 //!
 //! Reclaim is best-effort and conservative. Contiguous and chunked datasets
 //! (chunk index plus chunk data) and whole group subtrees are reclaimed. A
-//! deleted object whose blocks cannot be enumerated exhaustively (variable-length
-//! global-heap storage, dense attribute/link heaps, or an object header other than
-//! version 2) is left as dead bytes. This avoids freeing a region that may still be
-//! in use. Under-reclaiming only wastes space. Over-reclaiming could corrupt the
-//! file.
+//! Dense attribute version 2 B-tree indexes are reclaimed when their owning dense set becomes
+//! dead. The associated fractal heap remains dead storage. A deleted object whose other blocks
+//! cannot be enumerated exhaustively (variable-length global-heap storage, dense link storage, or
+//! an object header other than version 2) is left as dead bytes. This avoids freeing a region that
+//! may still be in use. Under-reclaiming only wastes space. Over-reclaiming could corrupt the file.
 //!
 //! On a paged file that conservatism extends to anything whose *page type* is not
 //! established. A file another writer produced records free space this one cannot
@@ -4812,10 +4812,10 @@ impl WriteEngine {
     /// objects instead of growing the file, and if a freed run reaches
     /// end-of-file the file is truncated. Contiguous and chunked datasets (their
     /// chunk index and chunk data blocks) and whole group subtrees are all
-    /// reclaimed. Reclaim is best-effort. An object whose blocks this engine
-    /// cannot enumerate exhaustively (variable-length global-heap storage or dense
-    /// attribute/link heaps) is left as dead bytes to avoid freeing a region that may still be
-    /// in use.
+    /// reclaimed. Dense attribute version 2 B-tree indexes are reclaimed with the object. Their
+    /// fractal heap remains dead storage. Reclaim is best-effort. An object whose other blocks this
+    /// engine cannot enumerate exhaustively (variable-length global-heap storage or dense link
+    /// storage) is left as dead bytes to avoid freeing a region that may still be in use.
     /// Freed space is reused within the open session. For a file created with
     /// `H5Pset_file_space_strategy(persist = true)` it is also recorded on disk so
     /// it survives reopen, otherwise it is forgotten
@@ -5463,6 +5463,7 @@ impl WriteEngine {
                     MovingWrite::AttrEdit {
                         region: edits.region,
                         attrs: edits.attrs,
+                        replaces_dense_storage: edits.replaces_dense_storage,
                     },
                 ));
                 write_targets.push(full);
@@ -5862,6 +5863,7 @@ impl WriteEngine {
                 let node = nodes.get_mut(key).unwrap();
                 node.base_region = edits.region;
                 node.attrs = edits.attrs;
+                node.replaces_dense_storage = edits.replaces_dense_storage;
             }
         }
 
@@ -6133,8 +6135,14 @@ impl WriteEngine {
         // addresses by the userblock base and returns absolute file offsets), as is
         // the delete path (`collect_free_spans`), so all of this reclamation works
         // on userblock files too.
-        for &(_, a) in &superseded_addrs {
+        for (key, a) in &superseded_addrs {
+            let a = *a;
             if let Ok(spans) = self.oh_chunk_spans(a) {
+                if nodes[key].replaces_dense_storage
+                    && let Some(index_spans) = self.dense_attribute_index_spans(a, &spans)
+                {
+                    to_free.extend(meta_spans(index_spans));
+                }
                 to_free.extend(meta_spans(spans));
             }
         }
@@ -6206,8 +6214,21 @@ impl WriteEngine {
                     }
                     _ => {}
                 }
-                // The relocated dataset's old header chunks are dead too.
+                // The relocated dataset's old header chunks are dead too. An attribute edit of
+                // an already-dense set also replaces its private v2 B-tree indexes. The index set
+                // is proven as a whole before any of it joins `to_free`.
                 if let Ok(spans) = self.oh_chunk_spans(*old_oh) {
+                    if matches!(
+                        mw,
+                        MovingWrite::AttrEdit {
+                            replaces_dense_storage: true,
+                            ..
+                        }
+                    ) && let Some(index_spans) =
+                        self.dense_attribute_index_spans(*old_oh, &spans)
+                    {
+                        to_free.extend(meta_spans(index_spans));
+                    }
                     to_free.extend(meta_spans(spans));
                 }
             }
@@ -9252,7 +9273,7 @@ impl WriteEngine {
                 kept_chunks,
                 new_chunk_bytes,
             ),
-            MovingWrite::AttrEdit { region, attrs } => {
+            MovingWrite::AttrEdit { region, attrs, .. } => {
                 // `region` already carries what the commit preflight could resolve;
                 // `place_edited_attrs` places the rest, exactly as the
                 // group-attribute apply loop does. Then build and place the
@@ -10031,6 +10052,63 @@ impl WriteEngine {
         )
     }
 
+    /// Returns the dense-attribute v2 B-tree allocations named by an object's old header.
+    ///
+    /// The Attribute Info message separates the fractal heap from its name and optional
+    /// creation-order indexes. This returns only the index allocations and leaves the heap in
+    /// place. Both indexes are proven together, then checked against the old object-header
+    /// allocations before any span is returned. Replacement headers cannot overlap these extents:
+    /// the commit gathers old storage in `to_free`, places every replacement, and only then admits
+    /// `to_free` to [`SessionSpace`]. `None` leaves the index set unreclaimed.
+    fn dense_attribute_index_spans(
+        &self,
+        addr: u64,
+        header_spans: &[(u64, u64)],
+    ) -> Option<Vec<(u64, u64)>> {
+        let base = self.superblock.base_address;
+        let region = Self::gather_oh_messages(&self.image(), addr, base).ok()?;
+        let mut attr_info = None;
+        let mut p = 0;
+        while let Some((msg_type, body, body_end)) = region.next_message(p).ok()? {
+            if msg_type == MessageType::ATTRIBUTE_INFO {
+                if attr_info.is_some() {
+                    return None;
+                }
+                attr_info =
+                    Some(AttributeInfoMessage::parse(&region[body..body_end], OFFSET_SIZE).ok()?);
+            }
+            p = body_end;
+        }
+        let Some(attr_info) = attr_info else {
+            return Some(Vec::new());
+        };
+        if attr_info.fractal_heap_address.is_none() {
+            return Some(Vec::new());
+        }
+
+        let extents = crate::attribute::collect_dense_attribute_index_storage_extents(
+            &BaseOffsetSource {
+                inner: &self.image(),
+                base,
+            },
+            &attr_info,
+            OFFSET_SIZE,
+            LENGTH_SIZE,
+        )
+        .ok()?;
+        let mut index_spans = Vec::with_capacity(extents.len());
+        for extent in extents {
+            index_spans.push((
+                base.absolute(StoredAddress::new(extent.start())).ok()?,
+                extent.len(),
+            ));
+        }
+
+        let mut owned = header_spans.to_vec();
+        owned.extend(index_spans.iter().copied());
+        spans_disjoint_in_bounds(&mut owned, self.image.len()).then_some(index_spans)
+    }
+
     /// Count, for every object-header address reachable from the root, how many
     /// hard links in the *pre-commit* file point to it. The result drives the
     /// last-hard-link reclaim guard in [`collect_free_spans`](Self::collect_free_spans):
@@ -10101,10 +10179,11 @@ impl WriteEngine {
     /// chunk index + chunk data, via [`chunked_storage_spans`](Self::chunked_storage_spans)),
     /// and whole group subtrees are reclaimed. Deliberately conservative: any
     /// object whose layout it cannot fully account for — a non-v2 header, an
-    /// unsupported or only-partially-enumerable chunk index, a group holding a
-    /// soft/external link, dense attribute storage — contributes nothing and is
-    /// not descended into, so `out` never names a region that might still be in
-    /// use. Bounded by [`MAX_COPY_DEPTH`] against a hard-link cycle.
+    /// unsupported or only-partially-enumerable chunk index, or a group holding a soft/external
+    /// link contributes nothing and is not descended into, so `out` never includes a region that
+    /// might still be in use. Dense attribute indexes are added only after their complete index
+    /// set is proven. Their fractal heap is left in place. Bounded by [`MAX_COPY_DEPTH`] against a
+    /// hard-link cycle.
     /// Variable-length data in global-heap collections is never reclaimed here (a
     /// collection can be shared between objects), so it is simply left behind.
     ///
@@ -10148,19 +10227,22 @@ impl WriteEngine {
             Ok(s) => s,
             Err(_) => return,
         };
+        let dense_index_spans = self.dense_attribute_index_spans(addr, &spans);
         match Self::read_object(
             &self.image(),
             AccessMode::ReadWrite,
             addr,
             self.superblock.base_address,
         ) {
-            Ok(ObjModel::DatasetVerbatim { .. }) => out.extend(meta_spans(spans)),
+            Ok(ObjModel::DatasetVerbatim { .. }) => {
+                append_object_metadata_spans(out, &spans, dense_index_spans.as_deref());
+            }
             Ok(ObjModel::DatasetContiguous {
                 data_addr,
                 data_size,
                 ..
             }) => {
-                out.extend(meta_spans(spans));
+                append_object_metadata_spans(out, &spans, dense_index_spans.as_deref());
                 // A defined, in-bounds contiguous data block is owned outright;
                 // an empty dataset stores the undefined address and owns none. Its
                 // absolute file offset is what this bounds-checks and records.
@@ -10174,7 +10256,7 @@ impl WriteEngine {
                 }
             }
             Ok(ObjModel::Group { children, .. }) => {
-                out.extend(meta_spans(spans));
+                append_object_metadata_spans(out, &spans, dense_index_spans.as_deref());
                 // The recursion works in absolute offsets, matching `incoming`'s
                 // keys and `oh_chunk_spans`.
                 for (_, _, child) in children {
@@ -10191,7 +10273,7 @@ impl WriteEngine {
             // rather than freeing a region that might still be in use.
             Ok(ObjModel::DatasetChunked { .. }) => {
                 if let Some(storage) = self.chunked_storage_spans(addr) {
-                    out.extend(meta_spans(spans));
+                    append_object_metadata_spans(out, &spans, dense_index_spans.as_deref());
                     // Already page-typed: chunk data is raw, and the index class follows its
                     // format allocation type or proven physical placement.
                     out.extend(storage);
@@ -10493,6 +10575,8 @@ struct Node {
     /// right before this node's header is built. Default (an empty compact set)
     /// for a group with no attribute edits.
     attrs: EditedAttrs,
+    /// Whether this group's attribute edit replaces a pre-commit dense attribute set.
+    replaces_dense_storage: bool,
 }
 
 /// A staged compact attribute edit for a group or dataset (shared by
@@ -10870,6 +10954,8 @@ enum MovingWrite {
     AttrEdit {
         region: OhRegion,
         attrs: EditedAttrs,
+        /// Whether the old header names dense attribute indexes made dead by this edit.
+        replaces_dense_storage: bool,
     },
 }
 
@@ -11320,9 +11406,24 @@ fn index_touches_page_zero(index: &[(u64, u64)], page_size: FileSpacePageSize) -
         .any(|&(addr, len)| len > 0 && addr < page_size.get())
 }
 
-/// Tag object-header chunk spans as file metadata. Every span
-/// [`oh_chunk_spans`](WriteEngine::oh_chunk_spans) returns is part of an object
-/// header, so the page type is the same for all of them.
+/// Adds object-header metadata and any independently proven dense-attribute indexes.
+fn append_object_metadata_spans(
+    out: &mut Vec<(u64, u64, FreeClass)>,
+    header_spans: &[(u64, u64)],
+    dense_index_spans: Option<&[(u64, u64)]>,
+) {
+    out.extend(
+        header_spans
+            .iter()
+            .chain(dense_index_spans.into_iter().flatten())
+            .map(|&(addr, len)| (addr, len, FreeClass::Page(PageType::Meta))),
+    );
+}
+
+/// Tags object-header chunk spans as file metadata.
+///
+/// Every span [`WriteEngine::oh_chunk_spans`] returns is part of an object header, so the page type
+/// is the same for all of them.
 fn meta_spans(spans: Vec<(u64, u64)>) -> impl Iterator<Item = (u64, u64, FreeClass)> {
     spans
         .into_iter()
@@ -12589,6 +12690,8 @@ struct AttrEdits {
     region: OhRegion,
     /// What the apply phase still has to place, and where the result is stored.
     attrs: EditedAttrs,
+    /// Whether the edit replaces dense storage named by the pre-commit header.
+    replaces_dense_storage: bool,
 }
 
 /// What an attribute edit leaves for the apply phase, in the storage the result
@@ -12724,6 +12827,7 @@ fn plan_attr_ops<S: Source + ?Sized>(
                 return Ok(AttrEdits {
                     region: out,
                     attrs: EditedAttrs::Compact(pending_vl),
+                    replaces_dense_storage: false,
                 });
             }
         }
@@ -12819,6 +12923,7 @@ fn plan_attr_ops<S: Source + ?Sized>(
         return Ok(AttrEdits {
             region,
             attrs: EditedAttrs::default(),
+            replaces_dense_storage: dense_now,
         });
     }
     let mut attrs = Vec::with_capacity(set.len());
@@ -12872,6 +12977,7 @@ fn plan_attr_ops<S: Source + ?Sized>(
             set: DenseAttrSet { attrs, creation },
             vl,
         }),
+        replaces_dense_storage: dense_now,
     })
 }
 
@@ -14260,6 +14366,186 @@ mod tests {
     use crate::checksum;
     use crate::datatype::layout::FloatingPointLayout;
     use crate::object_path::ObjectPath;
+
+    fn section_covers(sections: &[FreeExtent], addr: u64, len: u64) -> bool {
+        let Some(end) = addr.checked_add(len) else {
+            return false;
+        };
+        sections
+            .iter()
+            .any(|extent| extent.start() <= addr && extent.end() >= end)
+    }
+
+    #[test]
+    fn deleted_dense_attribute_indexes_persist_as_metadata_and_leave_the_heap_dead() {
+        use crate::writer::FileBuilder;
+        use tempfile::tempdir;
+
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("dense_attribute_index_reclaim.h5");
+        let mut builder = FileBuilder::new();
+        let mut group = builder.create_group("drop");
+        for i in 0..12 {
+            group.set_attr(&format!("a{i}"), AttrValue::I64(i));
+        }
+        builder.add_group(group.finish());
+        builder
+            .create_dataset("keep")
+            .with_i32_data(&(0..1024).collect::<Vec<_>>());
+        builder
+            .with_file_space_strategy(FileSpaceStrategy::Page, true, 0)
+            .with_file_space_page_size(4096);
+        builder.write(&path).unwrap();
+
+        let object = ObjectPathBuf::parse("/drop");
+        let (index_spans, heap_address) = {
+            let mut session = WriteEngine::open_with_locking(&path, FileLocking::Enabled).unwrap();
+            let addr = crate::group_v2::resolve_path_any_from_source(
+                &session.image(),
+                AccessMode::ReadWrite,
+                session.superblock(),
+                &object.as_path(),
+            )
+            .unwrap();
+            let header_spans = session.oh_chunk_spans(addr).unwrap();
+            let index_spans = session
+                .dense_attribute_index_spans(addr, &header_spans)
+                .expect("the dense index set is structurally complete");
+            assert!(
+                index_spans.len() >= 2,
+                "the name index has at least a header and root node"
+            );
+            let region = WriteEngine::gather_oh_messages(
+                &session.image(),
+                addr,
+                session.superblock.base_address,
+            )
+            .unwrap();
+            let info = find_attribute_info(&region)
+                .unwrap()
+                .expect("a dense object has Attribute Info")
+                .2;
+            let heap_address = session
+                .superblock
+                .base_address
+                .absolute(
+                    info.fractal_heap_address
+                        .expect("the heap address is defined"),
+                )
+                .unwrap();
+
+            let incoming = session.count_incoming_hard_links().unwrap();
+            let mut planned = Vec::new();
+            session.collect_free_spans(addr, 0, &incoming, &mut planned);
+            for &(index_addr, index_len) in &index_spans {
+                assert!(planned.contains(&(
+                    index_addr,
+                    index_len,
+                    FreeClass::Page(PageType::Meta),
+                )));
+            }
+            assert!(planned.iter().all(|&(free_addr, free_len, _)| {
+                !(free_addr <= heap_address && heap_address < free_addr.saturating_add(free_len))
+            }));
+
+            session.delete(&object).unwrap();
+            session.commit().unwrap();
+            (index_spans, heap_address)
+        };
+
+        let reopened = WriteEngine::open_with_locking(&path, FileLocking::Enabled).unwrap();
+        let sections = reopened
+            .space
+            .paged_sections()
+            .expect("the PAGE strategy installs per-type free lists");
+        for &(addr, len) in &index_spans {
+            assert!(
+                section_covers(sections.metadata(), addr, len),
+                "dense attribute index ({addr}, {len}) must persist as metadata free space"
+            );
+            assert!(
+                !section_covers(sections.raw(), addr, len),
+                "dense attribute index ({addr}, {len}) must not enter raw free space"
+            );
+        }
+        assert!(
+            reopened
+                .space
+                .reusable_sections()
+                .all(|extent| !(extent.start() <= heap_address && heap_address < extent.end())),
+            "the dense attribute fractal-heap header remains allocated"
+        );
+    }
+
+    #[test]
+    fn rebuilding_dense_group_attributes_reclaims_the_old_indexes_in_flat_space() {
+        use crate::writer::FileBuilder;
+        use tempfile::tempdir;
+
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("dense_attribute_index_replace.h5");
+        let mut builder = FileBuilder::new();
+        let mut group = builder.create_group("g");
+        for i in 0..12 {
+            group.set_attr(&format!("a{i}"), AttrValue::I64(i));
+        }
+        builder.add_group(group.finish());
+        builder
+            .create_dataset("keep")
+            .with_i32_data(&(0..1024).collect::<Vec<_>>());
+        builder.with_file_space_strategy(FileSpaceStrategy::FsmAggr, true, 0);
+        builder.write(&path).unwrap();
+
+        let object = ObjectPathBuf::parse("/g");
+        let old_index_spans = {
+            let mut session = WriteEngine::open_with_locking(&path, FileLocking::Enabled).unwrap();
+            let addr = crate::group_v2::resolve_path_any_from_source(
+                &session.image(),
+                AccessMode::ReadWrite,
+                session.superblock(),
+                &object.as_path(),
+            )
+            .unwrap();
+            let header_spans = session.oh_chunk_spans(addr).unwrap();
+            let index_spans = session
+                .dense_attribute_index_spans(addr, &header_spans)
+                .expect("the old dense index set is structurally complete");
+
+            session
+                .set_group_attr(&object, "a0", AttrValue::I64(99))
+                .unwrap();
+            for &(index_addr, index_len) in &index_spans {
+                assert!(
+                    !session
+                        .space
+                        .reusable_sections()
+                        .any(|extent| extent.start() <= index_addr
+                            && extent.end() >= index_addr + index_len),
+                    "the old dense index stays live until the replacement commits"
+                );
+            }
+            session.commit().unwrap();
+            for &(index_addr, index_len) in &index_spans {
+                assert!(
+                    session
+                        .space
+                        .reusable_sections()
+                        .any(|extent| extent.start() <= index_addr
+                            && extent.end() >= index_addr + index_len),
+                    "the replaced dense index ({index_addr}, {index_len}) must be reusable"
+                );
+            }
+            index_spans
+        };
+        assert!(!old_index_spans.is_empty());
+        let attrs = crate::reader::File::open(&path)
+            .unwrap()
+            .group("g")
+            .unwrap()
+            .attrs()
+            .unwrap();
+        assert_eq!(attrs.get("a0"), Some(&AttrValue::I64(99)));
+    }
 
     #[test]
     fn a_v2_btree_chunk_index_is_metadata_when_reclaimed() {

@@ -24,12 +24,14 @@
 use std::path::Path;
 
 use hdf5::file::LibraryVersion;
+use hdf5::plist::file_create::FileSpaceStrategy as CStrategy;
 use hdf5::plist::group_create::{
     AttrCreationOrder, GroupCreate, GroupCreateBuilder, LinkCreationOrder,
 };
 use hdf5::{IndexType, IterationOrder, LinkInfo};
-use hdf5_pure::{AttrValue, Error, File};
+use hdf5_pure::{AttrValue, Error, File, FormatError};
 use tempfile::tempdir;
+use test_util_hdf5::absence;
 
 /// Whether the object creation property list should also index creation order,
 /// which is what adds the creation-order B-tree once attributes go dense.
@@ -77,9 +79,32 @@ fn tracking_gcpl(indexed: Indexed, links: bool) -> GroupCreate {
 /// The file creation property list carries the same setting so the root group
 /// tracks it too, which is what h5py's `File(..., track_order=True)` does.
 fn write_tracked(path: &Path, names: &[String], indexed: Indexed) {
+    write_tracked_with_persistence(path, names, indexed, false);
+}
+
+/// Writes the [`write_tracked`] fixture with an optional persistent free-space manager.
+fn write_tracked_with_persistence(path: &Path, names: &[String], indexed: Indexed, persist: bool) {
     let file = hdf5::File::with_options()
-        .with_fapl(|p| p.libver_bounds(LibraryVersion::V18, LibraryVersion::latest()))
-        .with_fcpl(|p| p.attr_creation_order(indexed.attr_order()))
+        .with_fapl(|p| {
+            let lower = if persist {
+                LibraryVersion::V110
+            } else {
+                LibraryVersion::V18
+            };
+            p.libver_bounds(lower, LibraryVersion::latest())
+        })
+        .with_fcpl(|p| {
+            p.attr_creation_order(indexed.attr_order());
+            if persist {
+                p.file_space_strategy(CStrategy::FreeSpaceManager {
+                    paged: false,
+                    persist: true,
+                    threshold: 1,
+                })
+            } else {
+                p
+            }
+        })
         .create(path)
         .unwrap_or_else(|e| panic!("create {}: {e}", path.display()));
     let group = file
@@ -106,6 +131,92 @@ fn write_tracked(path: &Path, names: &[String], indexed: Indexed) {
         }
     }
     file.close().unwrap();
+}
+
+#[test]
+fn c_library_accepts_persisted_reclaimed_dense_attribute_indexes() {
+    let dir = tempdir().unwrap();
+    let attribute_names = names(12);
+
+    for indexed in [Indexed::No, Indexed::Yes] {
+        let suffix = if indexed == Indexed::Yes {
+            "indexed"
+        } else {
+            "name_only"
+        };
+        let path = dir
+            .path()
+            .join(format!("dense_attribute_reclaim_{suffix}.h5"));
+        write_tracked_with_persistence(&path, &attribute_names, indexed, true);
+
+        if indexed == Indexed::Yes {
+            assert_eq!(
+                Owner::open(&path, "d").name_by_creation_index(0),
+                attribute_names[0]
+            );
+        }
+        let free_before: u64 = File::open(&path)
+            .unwrap()
+            .persisted_free_space()
+            .unwrap()
+            .iter()
+            .map(|&(_, len)| len)
+            .sum();
+
+        {
+            let session = File::open_rw(&path).unwrap();
+            session.root().delete("d").unwrap();
+            session.commit().unwrap();
+        }
+
+        let pure = File::open(&path).unwrap();
+        let err = pure.dataset("d").unwrap_err();
+        let Error::Format(FormatError::PathNotFound(missing)) = &err else {
+            panic!("expected PathNotFound for d, got {err:?}");
+        };
+        assert_eq!(missing, "d");
+        assert_eq!(pure.group("g").unwrap().attrs().unwrap().len(), 12);
+        let free_after: u64 = pure
+            .persisted_free_space()
+            .unwrap()
+            .iter()
+            .map(|&(_, len)| len)
+            .sum();
+        assert!(
+            free_after > free_before,
+            "deleting the dense dataset must add its proven storage to persisted free space"
+        );
+        drop(pure);
+
+        let c = hdf5::File::open(&path).unwrap();
+        absence::assert_libhdf5_absent(&c.dataset("d").unwrap_err(), "d");
+        assert_eq!(Owner::open(&path, "g").names(IndexType::Name).len(), 12);
+        assert!(
+            c.free_space() >= free_after,
+            "libhdf5 must accept the free-space managers written after dense-index reclamation"
+        );
+        drop(c);
+
+        {
+            let c = hdf5::File::open_rw(&path).unwrap();
+            c.new_dataset::<i32>()
+                .shape([4])
+                .create("after")
+                .unwrap()
+                .write(&[4, 3, 2, 1])
+                .unwrap();
+            c.close().unwrap();
+        }
+        assert_eq!(
+            File::open(&path)
+                .unwrap()
+                .dataset("after")
+                .unwrap()
+                .read_i32()
+                .unwrap(),
+            vec![4, 3, 2, 1]
+        );
+    }
 }
 
 /// A file whose group `/g` tracks *link* creation order, as netCDF-4 writes,
