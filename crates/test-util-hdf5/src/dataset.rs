@@ -17,6 +17,9 @@ pub enum Filter {
     Lzf,
 }
 
+/// Shuffle followed by deflate at level 6, the common append interoperability pipeline.
+pub const SHUFFLE_DEFLATE_6: &[Filter] = &[Filter::Shuffle, Filter::Deflate(6)];
+
 /// A malformed dataset geometry request shared by writer and editor validation tests.
 #[derive(Clone, Copy)]
 pub struct InvalidGeometryCase {
@@ -175,6 +178,90 @@ impl AppendRefusalFixture {
             Self::Rank2 => (0..12).collect(),
             Self::UnlimitedI32 => (0..4).collect(),
         }
+    }
+}
+
+/// A reusable rank-1 `i32` append interoperability fixture.
+#[derive(Clone, Copy, Debug)]
+pub struct AppendInteropFixture {
+    source: AppendInteropSource,
+    len: usize,
+    chunk: u64,
+    filters: &'static [Filter],
+    incompressible_seed: Option<u32>,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum AppendInteropSource {
+    Pure,
+    #[cfg(feature = "__hdf5-1.10")]
+    Libhdf5,
+}
+
+impl AppendInteropFixture {
+    /// Returns a pure-written filtered fixture seeded with `0..len`.
+    pub const fn filtered_pure(len: usize, chunk: u64) -> Self {
+        Self {
+            source: AppendInteropSource::Pure,
+            len,
+            chunk,
+            filters: SHUFFLE_DEFLATE_6,
+            incompressible_seed: None,
+        }
+    }
+
+    /// Returns a pure-written unfiltered fixture seeded with `0..len`.
+    pub const fn unfiltered_pure(len: usize, chunk: u64) -> Self {
+        Self {
+            source: AppendInteropSource::Pure,
+            len,
+            chunk,
+            filters: &[],
+            incompressible_seed: None,
+        }
+    }
+
+    /// Returns a C-library-written filtered fixture seeded with `0..len`.
+    #[cfg(feature = "__hdf5-1.10")]
+    pub const fn filtered_libhdf5(len: usize, chunk: u64) -> Self {
+        Self {
+            source: AppendInteropSource::Libhdf5,
+            len,
+            chunk,
+            filters: SHUFFLE_DEFLATE_6,
+            incompressible_seed: None,
+        }
+    }
+
+    /// Returns a C-library-written filtered fixture with deterministic incompressible values.
+    #[cfg(feature = "__hdf5-1.10")]
+    pub const fn incompressible_libhdf5(seed: u32, len: usize, chunk: u64) -> Self {
+        Self {
+            source: AppendInteropSource::Libhdf5,
+            len,
+            chunk,
+            filters: SHUFFLE_DEFLATE_6,
+            incompressible_seed: Some(seed),
+        }
+    }
+
+    /// Writes the fixture and returns its initial values.
+    #[track_caller]
+    pub fn write(self, path: &Path) -> Vec<i32> {
+        let values = match self.incompressible_seed {
+            Some(seed) => incompressible(seed, self.len),
+            None => {
+                let end = i32::try_from(self.len).expect("an append fixture length that fits i32");
+                (0..end).collect()
+            }
+        };
+        let fixture = Unlimited::new("d", &values, self.chunk).filters(self.filters);
+        match self.source {
+            AppendInteropSource::Pure => fixture.pure_create(path),
+            #[cfg(feature = "__hdf5-1.10")]
+            AppendInteropSource::Libhdf5 => fixture.libhdf5_create(path),
+        }
+        values
     }
 }
 
