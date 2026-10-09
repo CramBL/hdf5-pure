@@ -25,6 +25,7 @@ mod edit_append_inplace;
 mod edit_creation_order;
 mod edit_dense_attr;
 mod edit_dense_attr_copy;
+mod edit_dense_reclaim;
 mod edit_header_times;
 mod edit_reference_repointing;
 mod edit_userblock;
