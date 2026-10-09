@@ -1,5 +1,10 @@
 //! HDF5 fixture topologies shared by pure-reader and interoperability tests.
 
+#[cfg(feature = "hdf5")]
+use std::path::Path;
+
+#[cfg(feature = "hdf5")]
+use hdf5::file::LibraryVersion;
 use hdf5_pure::{AttrValue, FileBuilder};
 
 /// Adds a `#refs#` group and two-dimensional row and column reference datasets.
@@ -80,4 +85,63 @@ pub fn group_only_matlab_struct(builder: &mut FileBuilder) {
     outer.add_group(child_b.finish());
 
     builder.add_group(outer.finish());
+}
+
+/// Adds the common edit/repack starter topology to a pure-Rust file builder.
+///
+/// The fixture contains `alpha`, `doomed`, and `grp/beta`; callers choose the
+/// payload of `doomed` so tests can distinguish edit and repack scenarios.
+pub fn edit_repack_starter(builder: &mut FileBuilder, doomed: &[i32]) {
+    builder
+        .create_dataset("alpha")
+        .with_f64_data(&[1.0, 2.0, 3.0]);
+    builder.create_dataset("doomed").with_i32_data(doomed);
+    let mut group = builder.create_group("grp");
+    group
+        .create_dataset("beta")
+        .with_i32_data(&[10, 20, 30, 40]);
+    builder.add_group(group.finish());
+}
+
+/// Populates an open libhdf5 file with the common edit/repack starter topology.
+#[cfg(feature = "hdf5")]
+pub fn populate_libhdf5_edit_repack_starter(file: &hdf5::File, doomed: &[i32]) {
+    file.new_dataset::<f64>()
+        .shape((3,))
+        .create("alpha")
+        .unwrap()
+        .write(&[1.0f64, 2.0, 3.0])
+        .unwrap();
+    file.new_dataset::<i32>()
+        .shape((doomed.len(),))
+        .create("doomed")
+        .unwrap()
+        .write(doomed)
+        .unwrap();
+    let group = file.create_group("grp").unwrap();
+    group
+        .new_dataset::<i32>()
+        .shape((4,))
+        .create("beta")
+        .unwrap()
+        .write(&[10i32, 20, 30, 40])
+        .unwrap();
+}
+
+/// Creates a bounded libhdf5 file containing the common edit/repack starter topology.
+///
+/// The returned file remains open so a specialized fixture can add metadata before closing it.
+#[cfg(feature = "hdf5")]
+pub fn libhdf5_edit_repack_starter(
+    path: &Path,
+    low: LibraryVersion,
+    high: LibraryVersion,
+    doomed: &[i32],
+) -> hdf5::File {
+    let file = hdf5::File::with_options()
+        .with_fapl(|properties| properties.libver_bounds(low, high))
+        .create(path)
+        .unwrap();
+    populate_libhdf5_edit_repack_starter(&file, doomed);
+    file
 }
