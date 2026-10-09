@@ -1,5 +1,8 @@
 //! Page-homogeneity checking for genuine paged files (`FileSpaceStrategy::Page`).
 
+use std::path::Path;
+
+use hdf5_pure::{File, FileSpaceStrategy, Layout};
 use test_util::{
     btree_v2, bytes, fractal_heap, free_space, global_heap, local_heap, object_header, symbol_table,
 };
@@ -33,6 +36,39 @@ pub const METADATA_SIGNATURES: &[&[u8; 4]] = &[
     local_heap::SIGNATURE,
 ];
 
+/// Asserts the on-disk invariants of a paged file with persisted free-space managers.
+///
+/// The file length and end-of-allocation are whole pages, the recorded page size matches
+/// `page_size`, and persisted free sections are non-overlapping and within the file.
+pub fn assert_consistent(path: &Path, page_size: u64) {
+    let bytes = std::fs::read(path).unwrap();
+    assert_eq!(
+        bytes.len() as u64 % page_size,
+        0,
+        "file is a whole number of pages"
+    );
+
+    let file = File::open(path).unwrap();
+    assert_eq!(file.file_space_strategy(), Some(FileSpaceStrategy::Page));
+    let info = file.file_space_info().expect("records a strategy");
+    assert!(info.persist, "still persisting");
+    assert_eq!(info.page_size.get(), page_size);
+    assert_eq!(info.eoa_pre_fsm % page_size, 0, "EOA page-aligned");
+    assert_eq!(info.eoa_pre_fsm, bytes.len() as u64, "EOA == file size");
+
+    let mut free = file.persisted_free_space().unwrap();
+    free.sort_by_key(|&(address, _)| address);
+    let mut previous_end = 0u64;
+    for (address, length) in free {
+        assert!(address >= previous_end, "sections do not overlap");
+        assert!(
+            address + length <= bytes.len() as u64,
+            "section within the file"
+        );
+        previous_end = address + length;
+    }
+}
+
 /// Every page of `path` holding raw bytes of any of `datasets` must hold *only*
 /// raw bytes.
 ///
@@ -41,18 +77,18 @@ pub const METADATA_SIGNATURES: &[&[u8; 4]] = &[
 /// library cannot report on, since it reads such a file happily either way. Raw
 /// extents come from the public layout introspection; a page that overlaps one
 /// must contain none of [`METADATA_SIGNATURES`].
-pub fn assert_pages_homogeneous(path: &std::path::Path, page: u64, datasets: &[&str]) {
+pub fn assert_pages_homogeneous(path: &Path, page: u64, datasets: &[&str]) {
     let bytes = std::fs::read(path).unwrap();
-    let f = hdf5_pure::File::open(path).unwrap();
+    let f = File::open(path).unwrap();
     let mut raw: Vec<(u64, u64)> = Vec::new();
     for name in datasets {
         let ds = f.dataset(name).unwrap();
         match ds.layout().unwrap() {
-            hdf5_pure::Layout::Contiguous {
+            Layout::Contiguous {
                 address: Some(addr),
                 size,
             } => raw.push((addr, size)),
-            hdf5_pure::Layout::Chunked { .. } => {
+            Layout::Chunked { .. } => {
                 for c in ds.chunks().unwrap() {
                     raw.push((c.address, c.storage_size));
                 }

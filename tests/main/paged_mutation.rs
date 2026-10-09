@@ -8,7 +8,7 @@ use hdf5_pure::{
 };
 use test_util::temp;
 use test_util_hdf5::dataset::Unlimited;
-use test_util_hdf5::session;
+use test_util_hdf5::{paged, session};
 
 /// Build a persisting paged file with an unlimited rank-1 chunked i32 dataset `d`
 /// seeded with `0..n`.
@@ -19,33 +19,6 @@ fn build_paged(path: &std::path::Path, n: i32, chunk: u64) {
     b.with_file_space_strategy(FileSpaceStrategy::Page, true, 0)
         .with_file_space_page_size(PAGE);
     b.write(path).unwrap();
-}
-
-/// Assert the on-disk paged invariants after a mutation: page-aligned file and
-/// EOA, and free sections that are non-overlapping and within the file.
-fn assert_paged_ok(path: &std::path::Path) {
-    let bytes = std::fs::read(path).unwrap();
-    assert_eq!(
-        bytes.len() as u64 % PAGE,
-        0,
-        "file is a whole number of pages"
-    );
-    let f = File::open(path).unwrap();
-    assert_eq!(f.file_space_strategy(), Some(FileSpaceStrategy::Page));
-    let info = f.file_space_info().expect("records a strategy");
-    assert!(info.persist, "still persisting");
-    assert_eq!(info.page_size.get(), PAGE);
-    assert_eq!(info.eoa_pre_fsm % PAGE, 0, "EOA page-aligned");
-    assert_eq!(info.eoa_pre_fsm, bytes.len() as u64, "EOA == file size");
-    let free = f.persisted_free_space().unwrap();
-    let mut sorted = free.clone();
-    sorted.sort_by_key(|&(a, _)| a);
-    let mut prev_end = 0u64;
-    for (addr, len) in &sorted {
-        assert!(*addr >= prev_end, "sections do not overlap");
-        assert!(addr + len <= bytes.len() as u64, "section within the file");
-        prev_end = addr + len;
-    }
 }
 
 /// A persisting paged file grows through the bounded engine: appending enough rows
@@ -68,7 +41,7 @@ fn paged_persist_append_roundtrip() {
         // (mandatory-lock reads on Windows fail otherwise).
     }
 
-    assert_paged_ok(&path);
+    paged::assert_consistent(&path, PAGE);
     let f = File::open(&path).unwrap();
     let got = f.dataset("d").unwrap().read_i32().unwrap();
     let want: Vec<i32> = (0..5000).collect();
@@ -97,7 +70,7 @@ fn paged_persist_many_appends_one_finalize() {
         // Drop `ds` (an `Arc` clone holding the OS lock) before reading back.
     }
 
-    assert_paged_ok(&path);
+    paged::assert_consistent(&path, PAGE);
     let f = File::open(&path).unwrap();
     let got = f.dataset("d").unwrap().read_i32().unwrap();
     let want: Vec<i32> = (0..next).collect();
@@ -122,7 +95,7 @@ fn paged_persist_large_append_multi_batch() {
         // Drop `ds` (an `Arc` clone holding the OS lock) before reading back.
     }
 
-    assert_paged_ok(&path);
+    paged::assert_consistent(&path, PAGE);
     let f = File::open(&path).unwrap();
     let got = f.dataset("d").unwrap().read_i32().unwrap();
     assert_eq!(got.len(), 400_000);
@@ -151,7 +124,7 @@ fn paged_mirror_commit_appends() {
         // Drop `file` and its `ds` clone (holding the OS lock) before reading back.
     }
 
-    assert_paged_ok(&path);
+    paged::assert_consistent(&path, PAGE);
     let f = File::open(&path).unwrap();
     assert_eq!(
         f.dataset("d").unwrap().read_i32().unwrap(),
@@ -172,7 +145,7 @@ fn paged_persist_drop_finalizes() {
         ds.append(&(64..3000).collect::<Vec<i32>>()).unwrap();
         // Drop without close: the Drop guard runs finalize_persist best-effort.
     }
-    assert_paged_ok(&path);
+    paged::assert_consistent(&path, PAGE);
     let f = File::open(&path).unwrap();
     assert_eq!(
         f.dataset("d").unwrap().read_i32().unwrap(),
@@ -255,7 +228,7 @@ fn paged_persist_noop_close_does_not_grow() {
         before,
         "a no-append close must not grow a paged file"
     );
-    assert_paged_ok(&path);
+    paged::assert_consistent(&path, PAGE);
 }
 
 const PAGE: u64 = 4096;

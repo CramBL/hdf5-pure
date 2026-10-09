@@ -10,8 +10,6 @@ use hdf5_pure::{
 };
 use test_util::temp;
 use test_util_hdf5::dataset::Unlimited;
-// The page-homogeneity check is shared with the free-space tests, which exercise
-// the same invariant from the in-place append side (issue #387).
 use test_util_hdf5::paged;
 
 /// Build a paged file with one contiguous i32 dataset `d` seeded with `0..n`.
@@ -24,33 +22,6 @@ fn build_paged(path: &std::path::Path, n: i32, persist: bool) {
     b.with_file_space_strategy(FileSpaceStrategy::Page, persist, 0)
         .with_file_space_page_size(PAGE);
     b.write(path).unwrap();
-}
-
-/// The on-disk paged invariants: a whole number of pages, a page-aligned EOA
-/// that matches the file length, and free sections that neither overlap nor run
-/// past end-of-file.
-fn assert_paged_ok(path: &std::path::Path) {
-    let bytes = std::fs::read(path).unwrap();
-    assert_eq!(
-        bytes.len() as u64 % PAGE,
-        0,
-        "file is a whole number of pages"
-    );
-    let f = File::open(path).unwrap();
-    assert_eq!(f.file_space_strategy(), Some(FileSpaceStrategy::Page));
-    let info = f.file_space_info().expect("records a strategy");
-    assert!(info.persist, "still persisting");
-    assert_eq!(info.page_size.get(), PAGE);
-    assert_eq!(info.eoa_pre_fsm % PAGE, 0, "EOA page-aligned");
-    assert_eq!(info.eoa_pre_fsm, bytes.len() as u64, "EOA == file size");
-    let mut free = f.persisted_free_space().unwrap();
-    free.sort_by_key(|&(a, _)| a);
-    let mut prev_end = 0u64;
-    for (addr, len) in &free {
-        assert!(*addr >= prev_end, "sections do not overlap");
-        assert!(addr + len <= bytes.len() as u64, "section within the file");
-        prev_end = addr + len;
-    }
 }
 
 /// A persisting paged file accepts a staged dataset addition through
@@ -81,7 +52,7 @@ fn paged_persist_staged_create_dataset() {
         (1000..1100).collect::<Vec<i32>>()
     );
     drop(f);
-    assert_paged_ok(&path);
+    paged::assert_consistent(&path, PAGE);
 }
 
 /// A staged commit that allocates both page types keeps them in separate pages.
@@ -120,7 +91,7 @@ fn paged_staged_commit_keeps_pages_homogeneous() {
         (0..4000).collect::<Vec<i32>>()
     );
     drop(f);
-    assert_paged_ok(&path);
+    paged::assert_consistent(&path, PAGE);
     paged::assert_pages_homogeneous(&path, PAGE, &["d", "added"]);
 }
 
