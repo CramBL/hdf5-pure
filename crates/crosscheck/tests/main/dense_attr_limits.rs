@@ -16,6 +16,7 @@ use hdf5_pure::{AttrValue, FileBuilder};
 use tempfile::tempdir;
 use test_util::btree_v2;
 use test_util::fractal_heap;
+use test_util_hdf5::dense_attr::{largest_managed_payload, nine_attrs};
 
 /// Set on the child process to make it open `$DENSE_XCHECK_FILE` with libhdf5
 /// and report what it found on stdout.
@@ -302,33 +303,6 @@ fn c_inserts_managed_then_reads(path: &std::path::Path) -> CDetail {
         path,
         "dense_attr_limits::child_inserts_managed_with_libhdf5",
     )
-}
-
-/// Nine attributes — enough to select dense storage — the first sized to
-/// `payload` bytes of text and the rest small.
-fn nine_attrs(payload: usize) -> FileBuilder {
-    let mut builder = FileBuilder::new();
-    builder.set_attr("big", AttrValue::AsciiString("y".repeat(payload)));
-    for i in 0..8 {
-        builder.set_attr(&format!("a{i}"), AttrValue::I64(i));
-    }
-    builder.create_dataset("x").with_f64_data(&[1.0]);
-    builder
-}
-
-/// The largest text payload still stored as a managed heap object. Probed rather
-/// than assumed: the threshold applies to the serialized attribute, whose
-/// overhead is internal.
-fn largest_managed_payload() -> usize {
-    for payload in (1..=70_000).rev() {
-        let bytes = nine_attrs(payload)
-            .finish()
-            .expect("every size is writable");
-        if fractal_heap::huge_object_count(&bytes) == 0 {
-            return payload;
-        }
-    }
-    panic!("no payload was stored as a managed object");
 }
 
 /// Both sides of the managed/huge threshold, against the library that has to read

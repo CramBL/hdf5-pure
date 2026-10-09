@@ -14,18 +14,7 @@
 use hdf5_pure::{AttrValue, Error, File, FileBuilder, FormatError};
 use test_util::btree_v2;
 use test_util::fractal_heap;
-
-/// Nine attributes, the first sized to `payload` bytes of text and the rest
-/// small, which is enough to select dense storage.
-fn nine_attrs(payload: usize) -> FileBuilder {
-    let mut builder = FileBuilder::new();
-    builder.set_attr("big", AttrValue::AsciiString("y".repeat(payload)));
-    for i in 0..8 {
-        builder.set_attr(&format!("a{i}"), AttrValue::I64(i));
-    }
-    builder.create_dataset("x").with_f64_data(&[1.0]);
-    builder
-}
+use test_util_hdf5::dense_attr::{largest_managed_payload, nine_attrs};
 
 /// The text of a string attribute, whichever string variant the reader chose for
 /// it. Which one it picks is a datatype question and not what these tests are
@@ -36,21 +25,6 @@ fn text<'a>(attrs: &'a std::collections::HashMap<String, AttrValue>, name: &str)
         Some(AttrValue::AsciiString(s) | AttrValue::String(s)) => s,
         other => panic!("expected string attribute {name:?}, got {other:?}"),
     }
-}
-
-/// The largest text payload that still fits a managed heap object, found by
-/// probing down. The threshold is on the *serialized* attribute, whose overhead
-/// is not visible from outside the crate, so it is measured rather than assumed.
-fn largest_managed_payload() -> usize {
-    for payload in (1..=70_000).rev() {
-        let bytes = nine_attrs(payload)
-            .finish()
-            .expect("every size is writable");
-        if fractal_heap::huge_object_count(&bytes) == 0 {
-            return payload;
-        }
-    }
-    panic!("no payload was stored as a managed object");
 }
 
 #[test]
