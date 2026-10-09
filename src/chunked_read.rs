@@ -18,6 +18,8 @@ use hdf5_pure_format::__private::ChunkRecord;
 use hdf5_pure_format::__private::ExtensibleArrayHeader;
 use hdf5_pure_format::__private::FixedArrayHeader;
 use hdf5_pure_format::__private::LayoutVersion;
+#[cfg(feature = "std")]
+use hdf5_pure_space::__private::Extent;
 
 use crate::address::StoredAddress;
 use crate::chunk_cache::{CachePass, ChunkCache};
@@ -1470,9 +1472,9 @@ pub(crate) fn plan_dense_grid(
 /// `layout` must be a [`DataLayout::Chunked`] (anything else is an error).
 /// Returns both halves empty when the index address is undefined (an empty or
 /// never-written dataset owns no storage). Errors propagated from the index walkers mean the
-/// layout's complete storage footprint could not be proven. For example, a version 2 B-tree
-/// index structure has no reclaim walker, or a structure is malformed. The caller then leaves
-/// the dataset's bytes in place because it cannot prove the full region is free. The spans are
+/// layout's complete storage footprint could not be proven. For example, a structure may be
+/// malformed. The caller then leaves the dataset's bytes in place because it cannot prove the
+/// full region is free. The spans are
 /// not pre-checked for mutual overlap or file bounds. The editor validates that before handing
 /// them to the free list.
 ///
@@ -1519,7 +1521,8 @@ pub(crate) fn collect_chunked_storage_spans<S: Source + ?Sized>(
 
     let mut data: Vec<(u64, u64)> = Vec::new();
 
-    // Chunk data blocks (the walkers omit unallocated chunks).
+    // Chunk data blocks (the walkers omit unallocated chunks). Build checked extents before the
+    // caller can admit any of them to returned-space state.
     for ci in collect_chunks_for_layout_from_source(
         source,
         *chunk_index,
@@ -1529,9 +1532,16 @@ pub(crate) fn collect_chunked_storage_spans<S: Source + ?Sized>(
         offset_size,
         length_size,
     )? {
-        if !ci.chunk_size.is_zero() {
-            data.push((ci.address.get(), ci.chunk_size.get()));
+        if ci.chunk_size.is_zero() {
+            continue;
         }
+        let extent = Extent::new(ci.address.get(), ci.chunk_size.get()).ok_or(
+            FormatError::OffsetOverflow {
+                offset: ci.address.get(),
+                length: ci.chunk_size.get(),
+            },
+        )?;
+        data.push((extent.start(), extent.len()));
     }
 
     // The chunk index's own structure blocks.
@@ -1550,11 +1560,9 @@ pub(crate) fn collect_chunked_storage_spans<S: Source + ?Sized>(
 /// index's own structure blocks. Callers that only need the whole footprint can
 /// concatenate the two.
 ///
-/// The split is *structural*, not a page-type classification. On a paged file
-/// (`H5F_FSPACE_STRATEGY_PAGE`) both halves normally sit in raw pages, because
-/// every writer in this crate emits the index in the same run as the chunk data;
-/// a caller reclaiming this space must route by where the bytes actually are, not
-/// by which half they came from. See `WriteEngine::chunked_storage_spans`.
+/// The split is structural, not a page-type classification. The editor places the array indexes
+/// it writes beside raw chunks, while a version 2 B-tree remains metadata. A caller reclaiming
+/// these spans assigns the page type appropriate to the index kind and its proven placement.
 #[cfg(feature = "std")]
 pub(crate) struct ChunkedStorageSpans {
     pub(crate) data: Vec<(u64, u64)>,
@@ -1565,8 +1573,8 @@ pub(crate) struct ChunkedStorageSpans {
 /// (not its chunk data): the B-tree v1 nodes, fixed-array header and data block,
 /// or extensible-array header, index, super, and data blocks, by index type.
 /// Single-chunk and implicit indexes have no separate structure (their footprint is the chunk
-/// data alone), so they return an empty vector. Version 2 B-tree chunk data can be read, but its
-/// index structure has no reclaim walker yet, so index type 5 is an error here.
+/// data alone), so they return an empty vector. Version 2 B-trees use the generic storage walker,
+/// which returns the exact `BTHD`, `BTIN`, and `BTLF` allocations.
 ///
 /// `ndims` is `chunk_dimensions.len()` (rank + 1), as [`collect_chunk_info`]
 /// takes. Shared by [`collect_chunked_storage_spans`]; kept separate so the
@@ -1605,9 +1613,18 @@ fn collect_chunk_index_spans<S: Source + ?Sized>(
                 length_size,
             )
         }
-        ChunkIndexLayout::BTreeV2 { .. } => Err(FormatError::ChunkedReadError(
-            "a version 2 B-tree chunk index has no reclaim walker".into(),
-        )),
+        ChunkIndexLayout::BTreeV2 { .. } => crate::btree_v2::collect_btree_v2_storage_extents(
+            source,
+            index_addr,
+            offset_size,
+            length_size,
+        )
+        .map(|extents| {
+            extents
+                .into_iter()
+                .map(|extent| (extent.start(), extent.len()))
+                .collect()
+        }),
     }
 }
 
@@ -1616,9 +1633,7 @@ fn collect_chunk_index_spans<S: Source + ?Sized>(
 /// buffered convenience wrapper over [`collect_chunk_index_spans`], used by the
 /// in-place editor to test whether a chunked dataset's index occupies a single
 /// contiguous region it can rebuild in place. Returns an empty vector for an
-/// undefined index address or a single-chunk / implicit index (no separate
-/// structure). Returns an error for an index structure with no reclaim walker (a version 2
-/// B-tree).
+/// undefined index address or a single-chunk / implicit index (no separate structure).
 #[cfg(feature = "std")]
 pub(crate) fn chunk_index_spans_from_source<S: Source + ?Sized>(
     source: &S,
@@ -2401,6 +2416,134 @@ mod tests {
     }
 
     #[test]
+    fn btree_v2_storage_spans_include_exact_multi_level_index_allocations() {
+        let widths = Widths::FOUR;
+        let tree_type = hdf5_pure_format::__private::BTREE_V2_CHUNK;
+        let chunk_dims = [2, 2];
+        let fixed_chunk_size = 16;
+        let records = (0..27u64)
+            .map(|index| {
+                btree_v2_chunk_record(
+                    tree_type,
+                    0x1000 + index * 0x20,
+                    &[index / 8, index % 8],
+                    None,
+                    fixed_chunk_size,
+                    widths,
+                )
+            })
+            .collect::<Vec<_>>();
+        let (leaf0_at, leaf1_at, root_at) = (0x100usize, 0x300usize, 0x500usize);
+        let leaf0 = btree_v2::leaf(tree_type, &records[..13]);
+        let leaf1 = btree_v2::leaf(tree_type, &records[14..]);
+        let root = btree_v2::internal(
+            tree_type,
+            &records[13..14],
+            &[
+                btree_v2::Child {
+                    address: u64::try_from(leaf0_at).unwrap(),
+                    records: 13,
+                    records_width: 1,
+                    subtree: None,
+                },
+                btree_v2::Child {
+                    address: u64::try_from(leaf1_at).unwrap(),
+                    records: 13,
+                    records_width: 1,
+                    subtree: None,
+                },
+            ],
+            widths,
+        );
+        let header = btree_v2::Header::new(
+            tree_type,
+            u16::try_from(records[0].len()).unwrap(),
+            u64::try_from(root_at).unwrap(),
+            1,
+        )
+        .depth(1)
+        .total_records(27)
+        .build(widths);
+        let mut file = vec![0u8; 0x1400];
+        file[..header.len()].copy_from_slice(&header);
+        file[leaf0_at..leaf0_at + leaf0.len()].copy_from_slice(&leaf0);
+        file[leaf1_at..leaf1_at + leaf1.len()].copy_from_slice(&leaf1);
+        file[root_at..root_at + root.len()].copy_from_slice(&root);
+        let layout = DataLayout::Chunked {
+            flags: ChunkedLayoutFlags::NONE,
+            chunk_dimensions: vec![chunk_dims[0], chunk_dims[1], 4],
+            index: ChunkIndexLayout::BTreeV2 {
+                address: Some(StoredAddress::new(0)),
+            },
+        };
+
+        let spans = collect_chunked_storage_spans(
+            &BytesSource::new(&file),
+            &layout,
+            &btree_v2_dataspace(&[16, 16]),
+            u8::try_from(widths.offset).unwrap(),
+            u8::try_from(widths.length).unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            spans.index,
+            vec![
+                (0, u64::try_from(header.len()).unwrap()),
+                (u64::try_from(leaf0_at).unwrap(), 512),
+                (u64::try_from(leaf1_at).unwrap(), 512),
+                (u64::try_from(root_at).unwrap(), 512),
+            ]
+        );
+        assert_eq!(spans.data.len(), 27);
+        assert_eq!(spans.data[0], (0x1000, fixed_chunk_size));
+        assert_eq!(spans.data[26], (0x1340, fixed_chunk_size));
+        assert!(spans.data.iter().all(|&(_, len)| len == fixed_chunk_size));
+    }
+
+    #[test]
+    fn btree_v2_storage_spans_reject_a_truncated_node_as_a_whole() {
+        let widths = Widths::FOUR;
+        let tree_type = hdf5_pure_format::__private::BTREE_V2_CHUNK;
+        let fixed_chunk_size = 16;
+        let record =
+            btree_v2_chunk_record(tree_type, 0x80, &[0, 0], None, fixed_chunk_size, widths);
+        let record_size = u16::try_from(record.len()).unwrap();
+        let root_at = 0x100usize;
+        let leaf = btree_v2::leaf(tree_type, &[record]);
+        let header =
+            btree_v2::Header::new(tree_type, record_size, u64::try_from(root_at).unwrap(), 1)
+                .build(widths);
+        let mut file = vec![0u8; root_at + leaf.len()];
+        file[..header.len()].copy_from_slice(&header);
+        file[root_at..].copy_from_slice(&leaf);
+        let layout = DataLayout::Chunked {
+            flags: ChunkedLayoutFlags::NONE,
+            chunk_dimensions: vec![2, 2, 4],
+            index: ChunkIndexLayout::BTreeV2 {
+                address: Some(StoredAddress::new(0)),
+            },
+        };
+
+        let Err(err) = collect_chunked_storage_spans(
+            &BytesSource::new(&file),
+            &layout,
+            &btree_v2_dataspace(&[2, 2]),
+            u8::try_from(widths.offset).unwrap(),
+            u8::try_from(widths.length).unwrap(),
+        ) else {
+            panic!("expected a truncated version 2 B-tree node to fail");
+        };
+        assert_eq!(
+            err,
+            FormatError::UnexpectedEof {
+                expected: root_at + 512,
+                available: file.len(),
+            }
+        );
+    }
+
+    #[test]
     fn btree_v2_type_11_preserves_stored_sizes_and_filter_masks() {
         let widths = Widths::EIGHT;
         let tree_type = hdf5_pure_format::__private::BTREE_V2_FILTERED_CHUNK;
@@ -2456,6 +2599,68 @@ mod tests {
         assert_eq!(chunks[1].offsets, vec![4, 2]);
         assert_eq!(chunks[1].chunk_size, StoredChunkSize::v4(13));
         assert_eq!(chunks[1].filter_mask, 4);
+    }
+
+    #[test]
+    fn btree_v2_filtered_storage_spans_use_encoded_chunk_sizes() {
+        let widths = Widths::EIGHT;
+        let tree_type = hdf5_pure_format::__private::BTREE_V2_FILTERED_CHUNK;
+        let fixed_chunk_size = 16;
+        let records = [
+            btree_v2_chunk_record(
+                tree_type,
+                0x500,
+                &[0, 0],
+                Some((9, 1)),
+                fixed_chunk_size,
+                widths,
+            ),
+            btree_v2_chunk_record(
+                tree_type,
+                0x520,
+                &[2, 1],
+                Some((13, 4)),
+                fixed_chunk_size,
+                widths,
+            ),
+        ];
+        let root_at = 0x100usize;
+        let leaf = btree_v2::leaf(tree_type, &records);
+        let header = btree_v2::Header::new(
+            tree_type,
+            u16::try_from(records[0].len()).unwrap(),
+            u64::try_from(root_at).unwrap(),
+            2,
+        )
+        .build(widths);
+        let mut file = vec![0u8; 0x600];
+        file[..header.len()].copy_from_slice(&header);
+        file[root_at..root_at + leaf.len()].copy_from_slice(&leaf);
+        let layout = DataLayout::Chunked {
+            flags: ChunkedLayoutFlags::NONE,
+            chunk_dimensions: vec![2, 2, 4],
+            index: ChunkIndexLayout::BTreeV2 {
+                address: Some(StoredAddress::new(0)),
+            },
+        };
+
+        let spans = collect_chunked_storage_spans(
+            &BytesSource::new(&file),
+            &layout,
+            &btree_v2_dataspace(&[6, 4]),
+            8,
+            8,
+        )
+        .unwrap();
+
+        assert_eq!(spans.data, vec![(0x500, 9), (0x520, 13)]);
+        assert_eq!(
+            spans.index,
+            vec![
+                (0, u64::try_from(header.len()).unwrap()),
+                (u64::try_from(root_at).unwrap(), 512),
+            ]
+        );
     }
 
     #[test]

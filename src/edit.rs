@@ -206,9 +206,8 @@
 //! Reclaim is best-effort and conservative. Contiguous and chunked datasets
 //! (chunk index plus chunk data) and whole group subtrees are reclaimed. A
 //! deleted object whose blocks cannot be enumerated exhaustively (variable-length
-//! global-heap storage, dense attribute/link heaps, an object header other than
-//! version 2, or a version 2 B-tree chunk index whose structure has no reclaim
-//! walker) is left as dead bytes. This avoids freeing a region that may still be
+//! global-heap storage, dense attribute/link heaps, or an object header other than
+//! version 2) is left as dead bytes. This avoids freeing a region that may still be
 //! in use. Under-reclaiming only wastes space. Over-reclaiming could corrupt the
 //! file.
 //!
@@ -4814,9 +4813,9 @@ impl WriteEngine {
     /// end-of-file the file is truncated. Contiguous and chunked datasets (their
     /// chunk index and chunk data blocks) and whole group subtrees are all
     /// reclaimed. Reclaim is best-effort. An object whose blocks this engine
-    /// cannot enumerate exhaustively (variable-length global-heap storage, dense
-    /// attribute/link heaps, or a version 2 B-tree chunk index whose structure has no
-    /// reclaim walker) is left as dead bytes to avoid freeing a region that may still be in use.
+    /// cannot enumerate exhaustively (variable-length global-heap storage or dense
+    /// attribute/link heaps) is left as dead bytes to avoid freeing a region that may still be
+    /// in use.
     /// Freed space is reused within the open session. For a file created with
     /// `H5Pset_file_space_strategy(persist = true)` it is also recorded on disk so
     /// it survives reopen, otherwise it is forgotten
@@ -10193,7 +10192,8 @@ impl WriteEngine {
             Ok(ObjModel::DatasetChunked { .. }) => {
                 if let Some(storage) = self.chunked_storage_spans(addr) {
                     out.extend(meta_spans(spans));
-                    // Already page-typed: chunk data raw, index structure metadata.
+                    // Already page-typed: chunk data is raw, and the index class follows its
+                    // format allocation type or proven physical placement.
                     out.extend(storage);
                 }
             }
@@ -10226,9 +10226,8 @@ impl WriteEngine {
     ///
     /// Returns `None` — contribute nothing, leave the object as dead bytes —
     /// whenever the dataset cannot be enumerated *exhaustively* and safely: a
-    /// header that does not parse or is not a chunked dataset, a chunk index
-    /// whose structure has no reclaim walker (a version 2 B-tree, index type 5), an
-    /// undefined index address (an empty, never-written dataset), or any resulting span that
+    /// header that does not parse or is not a chunked dataset, an undefined index address (an
+    /// empty, never-written dataset), or any resulting span that
     /// falls outside the file image or overlaps another. This upholds the
     /// editor's invariant that reclaimed space is never a region still in use:
     /// under-reclaiming only wastes space, while over-reclaiming would corrupt.
@@ -10295,10 +10294,10 @@ impl WriteEngine {
             LENGTH_SIZE,
         )
         .ok()?;
-        // Chunk data is raw under every writer, so its spans are raw outright. The
-        // index is only raw where this crate placed it — see
-        // [`index_is_provably_raw`](Self::index_is_provably_raw) — and is recorded
-        // as dead rather than free otherwise.
+        // Chunk data is raw under every writer, so its spans are raw outright. A version 2
+        // B-tree is metadata by the format's allocation taxonomy. Other index structures are raw
+        // only where this crate provably placed them beside their chunk data. An index with an
+        // unproven PAGE type is recorded as dead.
         let mut data: Vec<(u64, u64)> = Vec::with_capacity(split.data.len());
         for (addr, len) in split.data {
             data.push((base.absolute(StoredAddress::new(addr)).ok()?, len));
@@ -10313,11 +10312,12 @@ impl WriteEngine {
         if !spans_disjoint_in_bounds(&mut plain, self.image.len()) {
             return None;
         }
-        let index_class = if self.index_is_provably_raw(&data, &index) {
-            FreeClass::Page(PageType::Raw)
-        } else {
-            FreeClass::Dead
+        let chunk_index = match layout {
+            DataLayout::Chunked { index, .. } => index,
+            _ => return None,
         };
+        let index_class =
+            chunk_index_free_class(chunk_index, self.index_is_provably_raw(&data, &index));
         let mut spans: Vec<(u64, u64, FreeClass)> = data
             .iter()
             .map(|&(a, l)| (a, l, FreeClass::Page(PageType::Raw)))
@@ -10412,7 +10412,7 @@ impl WriteEngine {
     /// This is the index-only counterpart of
     /// [`chunked_storage_spans`](Self::chunked_storage_spans), delegating to
     /// [`chunk_index_spans_from_source`], which enumerates the index structure's
-    /// own blocks (B-tree v1 nodes, or fixed- / extensible-array header, index,
+    /// own blocks (B-tree v1/v2 nodes, or fixed- / extensible-array header, index,
     /// super, and data blocks) and never a chunk-data address, so the shared
     /// kept chunk data is never freed. Base-aware and validated
     /// disjoint/in-bounds. Returns `None` (leave unreclaimed) on any error or
@@ -11270,6 +11270,19 @@ fn retain_disjoint_in_bounds(spans: &mut Vec<(u64, u64, FreeClass)>, eof: u64) {
             false // overlaps a span already kept; leak it rather than double-free
         }
     });
+}
+
+/// Returns the PAGE free-space class of a chunk index after its physical placement is known.
+///
+/// Version 2 B-tree headers and nodes are metadata allocations. The other index structures this
+/// editor emits share raw pages with their chunks where `provably_raw` establishes that placement.
+/// An index with no established page type remains dead until its whole page becomes free.
+fn chunk_index_free_class(index: ChunkIndexLayout, provably_raw: bool) -> FreeClass {
+    match index {
+        ChunkIndexLayout::BTreeV2 { .. } => FreeClass::Page(PageType::Meta),
+        _ if provably_raw => FreeClass::Page(PageType::Raw),
+        _ => FreeClass::Dead,
+    }
 }
 
 /// Whether some `data` span abuts the run of `index` blocks — ends exactly where
@@ -14247,6 +14260,30 @@ mod tests {
     use crate::checksum;
     use crate::datatype::layout::FloatingPointLayout;
     use crate::object_path::ObjectPath;
+
+    #[test]
+    fn a_v2_btree_chunk_index_is_metadata_when_reclaimed() {
+        let btree = ChunkIndexLayout::BTreeV2 {
+            address: Some(StoredAddress::new(4096)),
+        };
+        assert_eq!(
+            chunk_index_free_class(btree, false),
+            FreeClass::Page(PageType::Meta)
+        );
+        assert_eq!(
+            chunk_index_free_class(btree, true),
+            FreeClass::Page(PageType::Meta)
+        );
+
+        let fixed = ChunkIndexLayout::FixedArray {
+            address: Some(StoredAddress::new(4096)),
+        };
+        assert_eq!(
+            chunk_index_free_class(fixed, true),
+            FreeClass::Page(PageType::Raw)
+        );
+        assert_eq!(chunk_index_free_class(fixed, false), FreeClass::Dead);
+    }
 
     /// The rule that places a chunk index on a paged file: some chunk-data span
     /// abuts it. Both sides count, which is what a repeatedly appended dataset

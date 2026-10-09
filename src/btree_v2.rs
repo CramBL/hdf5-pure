@@ -62,10 +62,6 @@ use crate::width::{LengthWidth, OffsetWidth};
 /// returned if a metadata read fails.
 ///
 /// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_infra_btrees_v2
-#[allow(
-    dead_code,
-    reason = "storage ownership is an internal structural capability without a production caller"
-)]
 pub(crate) fn collect_btree_v2_storage_extents<S: Source + ?Sized>(
     source: &S,
     header_address: StoredAddress,
