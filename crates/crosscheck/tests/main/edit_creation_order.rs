@@ -24,51 +24,10 @@
 use std::path::Path;
 
 use hdf5::file::LibraryVersion;
-use hdf5::plist::group_create::{
-    AttrCreationOrder, GroupCreate, GroupCreateBuilder, LinkCreationOrder,
-};
 use hdf5::{IndexType, IterationOrder, LinkInfo};
 use hdf5_pure::{AttrValue, Error, File};
 use tempfile::tempdir;
-
-/// Whether the object creation property list should also index creation order,
-/// which is what adds the creation-order B-tree once attributes go dense.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Indexed {
-    No,
-    Yes,
-}
-
-impl Indexed {
-    /// The attribute creation-order property: tracked under either variant, and
-    /// indexed under [`Indexed::Yes`].
-    fn attr_order(self) -> AttrCreationOrder {
-        match self {
-            Self::No => AttrCreationOrder::Tracked,
-            Self::Yes => AttrCreationOrder::Indexed,
-        }
-    }
-
-    /// The link creation-order property: tracked under either variant, and
-    /// indexed under [`Indexed::Yes`].
-    fn link_order(self) -> LinkCreationOrder {
-        match self {
-            Self::No => LinkCreationOrder::Tracked,
-            Self::Yes => LinkCreationOrder::Indexed,
-        }
-    }
-}
-
-/// A group creation property list tracking attribute creation order, and link
-/// creation order too when `links`.
-fn tracking_gcpl(indexed: Indexed, links: bool) -> GroupCreate {
-    let mut builder = GroupCreateBuilder::new();
-    builder.attr_creation_order(indexed.attr_order());
-    if links {
-        builder.link_creation_order(indexed.link_order());
-    }
-    builder.finish().expect("a group creation property list")
-}
+use test_util_hdf5::creation_order::{self, Indexing};
 
 /// Write a file whose group `/g` and dataset `/d` both track attribute creation
 /// order, each carrying one integer attribute per name in `names`, created in
@@ -76,7 +35,7 @@ fn tracking_gcpl(indexed: Indexed, links: bool) -> GroupCreate {
 ///
 /// The file creation property list carries the same setting so the root group
 /// tracks it too, which is what h5py's `File(..., track_order=True)` does.
-fn write_tracked(path: &Path, names: &[String], indexed: Indexed) {
+fn write_tracked(path: &Path, names: &[String], indexed: Indexing) {
     let file = hdf5::File::with_options()
         .with_fapl(|p| p.libver_bounds(LibraryVersion::V18, LibraryVersion::latest()))
         .with_fcpl(|p| p.attr_creation_order(indexed.attr_order()))
@@ -84,7 +43,7 @@ fn write_tracked(path: &Path, names: &[String], indexed: Indexed) {
         .unwrap_or_else(|e| panic!("create {}: {e}", path.display()));
     let group = file
         .create_group_builder()
-        .set_gcpl(&tracking_gcpl(indexed, false))
+        .set_gcpl(&creation_order::group_properties(indexed, false))
         .create("g")
         .expect("create group");
     let dataset = file
@@ -114,14 +73,14 @@ fn write_link_tracked(path: &Path, links: &[&str]) {
     let file = hdf5::File::with_options()
         .with_fapl(|p| p.libver_bounds(LibraryVersion::V18, LibraryVersion::latest()))
         .with_fcpl(|p| {
-            p.attr_creation_order(Indexed::Yes.attr_order())
-                .link_creation_order(Indexed::Yes.link_order())
+            p.attr_creation_order(Indexing::Yes.attr_order())
+                .link_creation_order(Indexing::Yes.link_order())
         })
         .create(path)
         .unwrap_or_else(|e| panic!("create {}: {e}", path.display()));
     let group = file
         .create_group_builder()
-        .set_gcpl(&tracking_gcpl(Indexed::Yes, true))
+        .set_gcpl(&creation_order::group_properties(Indexing::Yes, true))
         .create("g")
         .expect("create group");
     for link in links {
@@ -286,7 +245,7 @@ fn set_on_both(path: &Path, name: &str, value: i64) {
 fn an_object_tracking_creation_order_can_be_edited_at_all() {
     let dir = tempdir().unwrap();
     let p = dir.path().join("t.h5");
-    write_tracked(&p, &names(3), Indexed::Yes);
+    write_tracked(&p, &names(3), Indexing::Yes);
 
     set_on_both(&p, "added", 99);
 
@@ -314,7 +273,7 @@ fn an_object_tracking_creation_order_can_be_edited_at_all() {
 fn the_editor_reads_a_tracked_object_back_itself() {
     let dir = tempdir().unwrap();
     let p = dir.path().join("t.h5");
-    write_tracked(&p, &names(3), Indexed::Yes);
+    write_tracked(&p, &names(3), Indexing::Yes);
     set_on_both(&p, "added", 7);
 
     let f = File::open(&p).unwrap();
@@ -328,7 +287,7 @@ fn the_editor_reads_a_tracked_object_back_itself() {
 fn overwriting_an_attribute_keeps_the_creation_index_it_had() {
     let dir = tempdir().unwrap();
     let p = dir.path().join("t.h5");
-    write_tracked(&p, &names(3), Indexed::Yes);
+    write_tracked(&p, &names(3), Indexing::Yes);
 
     set_on_both(&p, "a00", -1);
 
@@ -348,7 +307,7 @@ fn overwriting_an_attribute_keeps_the_creation_index_it_had() {
 fn deleting_an_attribute_leaves_a_gap_rather_than_renumbering() {
     let dir = tempdir().unwrap();
     let p = dir.path().join("t.h5");
-    write_tracked(&p, &names(4), Indexed::Yes);
+    write_tracked(&p, &names(4), Indexing::Yes);
 
     // One from the middle and one from the end: the middle deletion is what
     // leaves a gap in the surviving indexes, and the end one is what separates
@@ -398,7 +357,7 @@ fn a_compact_set_crossing_the_threshold_carries_its_creation_order_into_the_heap
     // rebuilt into a fractal heap — and the deletion is what makes each
     // attribute's creation index differ from its position in the rebuilt set,
     // so an index taken from the position would show up here.
-    write_tracked(&p, &names(8), Indexed::Yes);
+    write_tracked(&p, &names(8), Indexing::Yes);
 
     {
         let s = File::open_rw(&p).unwrap();
@@ -451,7 +410,7 @@ fn a_tracked_set_goes_dense_without_a_creation_order_index_when_the_object_has_n
     let p = dir.path().join("t.h5");
     // Tracked but not *indexed*: the heap gets a name index only, and the
     // creation index each attribute carries lives in that index's records.
-    write_tracked(&p, &names(8), Indexed::No);
+    write_tracked(&p, &names(8), Indexing::No);
 
     {
         let s = File::open_rw(&p).unwrap();
@@ -476,7 +435,7 @@ fn an_object_already_dense_keeps_its_creation_order_across_an_edit() {
     let p = dir.path().join("t.h5");
     // Twelve attributes is past the C library's own compact threshold, so both
     // objects already store their attributes in a fractal heap.
-    write_tracked(&p, &names(12), Indexed::Yes);
+    write_tracked(&p, &names(12), Indexing::Yes);
 
     set_on_both(&p, "added", 42);
 

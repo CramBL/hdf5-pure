@@ -9,46 +9,14 @@ use std::path::Path;
 
 use hdf5::file::LibraryVersion;
 use hdf5::plist::file_create::FileSpaceStrategy as CStrategy;
-use hdf5::plist::group_create::{
-    AttrCreationOrder, GroupCreate, GroupCreateBuilder, LinkCreationOrder,
-};
+use hdf5::plist::group_create::{GroupCreate, GroupCreateBuilder};
 use hdf5::{IndexType, IterationOrder};
 use hdf5_pure::{Error, File, FormatError};
 use tempfile::tempdir;
 use test_util_hdf5::absence;
+use test_util_hdf5::creation_order::{self, Indexing};
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Indexed {
-    No,
-    Yes,
-}
-
-impl Indexed {
-    fn attr_order(self) -> AttrCreationOrder {
-        match self {
-            Self::No => AttrCreationOrder::Tracked,
-            Self::Yes => AttrCreationOrder::Indexed,
-        }
-    }
-
-    fn link_order(self) -> LinkCreationOrder {
-        match self {
-            Self::No => LinkCreationOrder::Tracked,
-            Self::Yes => LinkCreationOrder::Indexed,
-        }
-    }
-}
-
-fn tracking_gcpl(indexed: Indexed, links: bool) -> GroupCreate {
-    let mut builder = GroupCreateBuilder::new();
-    builder.attr_creation_order(indexed.attr_order());
-    if links {
-        builder.link_creation_order(indexed.link_order());
-    }
-    builder.finish().expect("a group creation property list")
-}
-
-fn write_tracked_with_persistence(path: &Path, names: &[String], indexed: Indexed, persist: bool) {
+fn write_tracked_with_persistence(path: &Path, names: &[String], indexed: Indexing, persist: bool) {
     let file = hdf5::File::with_options()
         .with_fapl(|p| {
             let lower = if persist {
@@ -74,7 +42,7 @@ fn write_tracked_with_persistence(path: &Path, names: &[String], indexed: Indexe
         .unwrap_or_else(|e| panic!("create {}: {e}", path.display()));
     let group = file
         .create_group_builder()
-        .set_gcpl(&tracking_gcpl(indexed, false))
+        .set_gcpl(&creation_order::group_properties(indexed, false))
         .create("g")
         .expect("create group");
     let dataset = file
@@ -139,8 +107,8 @@ fn c_library_accepts_persisted_reclaimed_dense_attribute_indexes() {
     let dir = tempdir().unwrap();
     let attribute_names = names(12);
 
-    for indexed in [Indexed::No, Indexed::Yes] {
-        let suffix = if indexed == Indexed::Yes {
+    for indexed in [Indexing::No, Indexing::Yes] {
+        let suffix = if indexed == Indexing::Yes {
             "indexed"
         } else {
             "name_only"
@@ -150,7 +118,7 @@ fn c_library_accepts_persisted_reclaimed_dense_attribute_indexes() {
             .join(format!("dense_attribute_reclaim_{suffix}.h5"));
         write_tracked_with_persistence(&path, &attribute_names, indexed, true);
 
-        if indexed == Indexed::Yes {
+        if indexed == Indexing::Yes {
             assert_eq!(
                 attribute_name_by_creation_index(&path, "d", 0),
                 attribute_names[0]
@@ -222,20 +190,25 @@ fn c_library_accepts_persisted_reclaimed_dense_attribute_indexes() {
 
 /// Writes a persistent file whose `/g` and `/g/nested` groups both use dense link storage.
 ///
-/// `Indexed::No` uses ordinary name indexing, while `Indexed::Yes` also tracks and indexes link
+/// `Indexing::No` uses ordinary name indexing, while `Indexing::Yes` also tracks and indexes link
 /// creation order. `/g/shared` has a root hard link so deleting the group exercises child lifetime
 /// independently of link-index ownership.
-fn dense_link_gcpl(indexed: Indexed) -> GroupCreate {
+fn dense_link_gcpl(indexed: Indexing) -> GroupCreate {
     let mut builder = GroupCreateBuilder::new();
-    if indexed == Indexed::Yes {
-        builder.link_creation_order(Indexed::Yes.link_order());
+    if indexed == Indexing::Yes {
+        builder.link_creation_order(Indexing::Yes.link_order());
     }
     builder
         .finish()
         .expect("a dense-link group creation property list")
 }
 
-fn write_dense_link_reclaim_fixture(path: &Path, indexed: Indexed, paged: bool, alias_group: bool) {
+fn write_dense_link_reclaim_fixture(
+    path: &Path,
+    indexed: Indexing,
+    paged: bool,
+    alias_group: bool,
+) {
     let file = hdf5::File::with_options()
         .with_fapl(|p| p.libver_bounds(LibraryVersion::V110, LibraryVersion::latest()))
         .with_fcpl(|p| {
@@ -362,14 +335,14 @@ fn fractal_heap_headers(path: &Path) -> Vec<u64> {
 fn c_library_accepts_reclaimed_dense_group_indexes() {
     let dir = tempdir().unwrap();
     for (indexed, paged) in [
-        (Indexed::No, false),
-        (Indexed::Yes, false),
-        (Indexed::No, true),
-        (Indexed::Yes, true),
+        (Indexing::No, false),
+        (Indexing::Yes, false),
+        (Indexing::No, true),
+        (Indexing::Yes, true),
     ] {
         let path = dir.path().join(format!(
             "dense_group_reclaim_{}_{}.h5",
-            if indexed == Indexed::Yes {
+            if indexed == Indexing::Yes {
                 "indexed"
             } else {
                 "name_only"
@@ -381,7 +354,7 @@ fn c_library_accepts_reclaimed_dense_group_indexes() {
         assert!(tree_anchors.iter().any(|&(tree_type, _, _)| tree_type == 5));
         assert_eq!(
             tree_anchors.iter().any(|&(tree_type, _, _)| tree_type == 6),
-            indexed == Indexed::Yes
+            indexed == Indexing::Yes
         );
         let heap_headers = fractal_heap_headers(&path);
         assert!(
@@ -446,7 +419,7 @@ fn c_library_accepts_reclaimed_dense_group_indexes() {
 fn a_surviving_dense_group_hard_link_keeps_its_indexes_live() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("dense_group_surviving_alias.h5");
-    write_dense_link_reclaim_fixture(&path, Indexed::Yes, false, true);
+    write_dense_link_reclaim_fixture(&path, Indexing::Yes, false, true);
     let index_anchors = dense_link_tree_anchor_spans(&path);
     let heap_headers = fractal_heap_headers(&path);
 

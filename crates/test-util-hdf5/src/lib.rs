@@ -3,6 +3,8 @@
 
 #[cfg(feature = "hdf5")]
 pub mod absence;
+#[cfg(feature = "__hdf5-1.10")]
+pub mod creation_order;
 pub mod dataset;
 pub mod dense_attr;
 #[cfg(feature = "hdf5")]
