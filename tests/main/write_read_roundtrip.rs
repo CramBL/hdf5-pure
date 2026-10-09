@@ -2,7 +2,7 @@ use hdf5_pure::{
     AttrValue, CompoundTypeBuilder, DType, Datatype, Error, File, FileBuilder, FormatError,
     MaxExtent, make_f64_type, make_i32_type,
 };
-use test_util_hdf5::fixtures;
+use test_util_hdf5::{dataset, fixtures};
 
 #[test]
 fn roundtrip_f64_dataset() {
@@ -317,100 +317,30 @@ fn nested_compound_tuple_roundtrip() {
 fn chunked_builder_rejects_invalid_geometry() {
     // Each malformed chunk-geometry request must be refused with
     // `InvalidChunkGeometry` rather than panicking in the chunk splitter or
-    // producing an unreadable dataset.
-    type Configure = fn(&mut hdf5_pure::DatasetBuilder);
-    let bad: &[(&str, Configure, &str)] = &[
-        (
-            "chunk rank mismatch",
-            |b| {
-                b.with_i32_data(&[1, 2, 3, 4, 5, 6])
-                    .with_shape(&[2, 3])
-                    .with_chunks(&[2]);
-            },
-            "chunk dimensions must have the same rank",
-        ),
-        (
-            "zero chunk dim",
-            |b| {
-                b.with_i32_data(&[1, 2, 3, 4])
-                    .with_shape(&[4])
-                    .with_chunks(&[0]);
-            },
-            "chunk dimensions must all be non-zero",
-        ),
-        (
-            "maxshape rank mismatch",
-            |b| {
-                b.with_i32_data(&[1, 2, 3, 4])
-                    .with_shape(&[4])
-                    .with_maxshape(&[MaxExtent::Unlimited, MaxExtent::Unlimited])
-                    .with_chunks(&[2]);
-            },
-            "maxshape must have the same rank",
-        ),
-        (
-            "maxshape below shape",
-            |b| {
-                b.with_i32_data(&[1, 2, 3, 4])
-                    .with_shape(&[4])
-                    .with_maxshape(&[MaxExtent::Fixed(2)]);
-            },
-            "maxshape must be at least the current shape",
-        ),
-        (
-            "scalar with chunks",
-            |b| {
-                b.with_f64_data(&[1.0]).with_shape(&[]).with_chunks(&[1]);
-            },
-            "a scalar dataset cannot be chunked",
-        ),
-        // Auto-chunking makes the shape one chunk, so a zero-element shape
-        // resolves to a zero chunk dimension — the "zero chunk dim" case above,
-        // reached without the caller naming one. It divided by zero in the
-        // splitter until the guard learned to check the *resolved* dimensions.
-        (
-            "auto-chunked empty shape",
-            |b| {
-                b.with_i32_data(&[])
-                    .with_shape(&[0])
-                    .with_maxshape(&[MaxExtent::Unlimited]);
-            },
-            "explicit chunk dimensions",
-        ),
-        (
-            "auto-chunked empty inner dim",
-            |b| {
-                b.with_i32_data(&[])
-                    .with_shape(&[4, 0])
-                    .with_maxshape(&[MaxExtent::Unlimited, MaxExtent::Unlimited]);
-            },
-            "explicit chunk dimensions",
-        ),
-        (
-            "a fixed maximum at the unlimited marker",
-            |b| {
-                b.with_i32_data(&[1, 2, 3, 4])
-                    .with_shape(&[4])
-                    .with_maxshape(&[MaxExtent::Fixed(u64::MAX)])
-                    .with_chunks(&[2]);
-            },
-            "the format's unlimited marker",
-        ),
-    ];
+    // producing an unreadable dataset. The editor exercises the shared cases
+    // independently; the writer adds two format-only edge cases.
+    let bad = dataset::INVALID_GEOMETRY_CASES
+        .iter()
+        .chain(dataset::WRITER_ONLY_INVALID_GEOMETRY_CASES);
 
-    for (label, configure, expected) in bad {
+    for case in bad {
         let mut builder = FileBuilder::new();
-        configure(builder.create_dataset("bad"));
+        (case.configure)(builder.create_dataset("bad"));
         let err = builder.finish().unwrap_err();
         let Error::Format(FormatError::InvalidChunkGeometry(reason)) = &err else {
-            panic!("[{label}] expected InvalidChunkGeometry, got {err:?}");
+            panic!(
+                "[{}] expected InvalidChunkGeometry, got {err:?}",
+                case.label
+            );
         };
         // Each case names its own reason: a wildcard payload passes on a refusal
         // from any *other* geometry guard, which makes the case under test
         // unreachable without anything going red.
         assert!(
-            reason.contains(expected),
-            "[{label}] refusal must name {expected:?}, got {reason:?}"
+            reason.contains(case.expected),
+            "[{}] refusal must name {:?}, got {reason:?}",
+            case.label,
+            case.expected
         );
     }
 }
