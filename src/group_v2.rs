@@ -8,11 +8,14 @@ use alloc::string::{String, ToString};
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 
+use hdf5_pure_space::__private::Extent;
+
 use crate::access_mode::AccessMode;
 use crate::address::BaseAddressExt;
 use crate::address::{BaseAddress, StoredAddress};
 use crate::btree_v2::{
     BTreeV2Header, collect_btree_v2_records, collect_btree_v2_records_from_source,
+    collect_btree_v2_storage_extents,
 };
 use crate::convert::Narrow;
 use crate::error::{FormatError, ResolveError};
@@ -28,6 +31,96 @@ use crate::source::SourceMetadata;
 use crate::source::{BaseOffsetSource, Source, frame};
 use crate::superblock::Superblock;
 use crate::symbol_table::SymbolTableMessage;
+
+/// Returns the version 2 B-tree allocations owned by a dense group's link set.
+///
+/// "The Link Info Message" and "Version 2 B-trees" of the [format specification, version
+/// 4.0][spec] identify the dense-link fractal heap, the type 5 name index, and the optional type 6
+/// creation-order index. Only the two index allocations participate in this ownership proof. The
+/// fractal heap remains outside it.
+///
+/// The complete index set is proven before any extent is returned. A creation-order tree is
+/// followed only when the Link Info message states that the index exists and supplies a defined
+/// address. Tracking creation order alone does not add that tree. `H5G__dense_delete` deletes the
+/// two B-trees separately before deleting the heap (`H5Gdense.c`, HDF5 2.2.0).
+///
+/// # Errors
+///
+/// Returns [`FormatError::InvalidBTreeNodeType`] if either index has the wrong client type. Returns
+/// the structural error from the version 2 B-tree storage walker if an index cannot be enumerated
+/// completely. Returns [`FormatError::InvalidBTreeV2Signature`] if the two indexes overlap or an
+/// index allocation contains the fractal-heap header address.
+///
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_linkinfo
+pub(crate) fn collect_dense_group_index_storage_extents<S: Source + ?Sized>(
+    source: &S,
+    link_info: &LinkInfoMessage,
+    offset_size: u8,
+    length_size: u8,
+) -> Result<Vec<Extent>, FormatError> {
+    let Some(fractal_heap_address) = link_info.fractal_heap_address else {
+        return Ok(Vec::new());
+    };
+    let Some(name_address) = link_info.btree_name_index_address else {
+        return Ok(Vec::new());
+    };
+
+    let mut extents = collect_link_index_tree(
+        source,
+        name_address,
+        DENSE_LINK_NAME_INDEX_TYPE,
+        offset_size,
+        length_size,
+    )?;
+    if let Some(Some(address)) = link_info.btree_creation_order_address {
+        extents.extend(collect_link_index_tree(
+            source,
+            address,
+            DENSE_LINK_CREATION_ORDER_INDEX_TYPE,
+            offset_size,
+            length_size,
+        )?);
+    }
+
+    extents.sort_unstable();
+    if extents
+        .windows(2)
+        .any(|pair| pair[0].end() > pair[1].start())
+        || extents.iter().any(|extent| {
+            extent.start() <= fractal_heap_address.get()
+                && fractal_heap_address.get() < extent.end()
+        })
+    {
+        return Err(FormatError::InvalidBTreeV2Signature);
+    }
+    Ok(extents)
+}
+
+/// Returns one dense-link index tree after proving its client type.
+fn collect_link_index_tree<S: Source + ?Sized>(
+    source: &S,
+    address: StoredAddress,
+    expected_type: u8,
+    offset_size: u8,
+    length_size: u8,
+) -> Result<Vec<Extent>, FormatError> {
+    let header = BTreeV2Header::parse_from_source(
+        &SourceMetadata(source),
+        address.get(),
+        offset_size,
+        length_size,
+    )?;
+    if header.tree_type != expected_type {
+        return Err(FormatError::InvalidBTreeNodeType(header.tree_type));
+    }
+    collect_btree_v2_storage_extents(source, address, offset_size, length_size)
+}
+
+/// Version 2 B-tree client type for a dense group's link-name index.
+const DENSE_LINK_NAME_INDEX_TYPE: u8 = 5;
+
+/// Version 2 B-tree client type for a dense group's link creation-order index.
+const DENSE_LINK_CREATION_ORDER_INDEX_TYPE: u8 = 6;
 
 /// Returns one entry per hard link of the version 2 group `object_header` describes.
 ///
@@ -694,6 +787,9 @@ fn resolve_dense_entries_from_source<S: Source + ?Sized>(
 
 #[cfg(test)]
 mod tests {
+    use test_util::btree_v2;
+    use test_util::widths::Widths;
+
     use super::*;
     use crate::data_layout::DataLayout;
     use crate::data_read;
@@ -701,6 +797,154 @@ mod tests {
     use crate::datatype::Datatype;
     use crate::message_flags::MessageFlags;
     use crate::signature;
+    use crate::source::BytesSource;
+
+    const WIDTHS: Widths = Widths::EIGHT;
+    const NODE_SIZE: u64 = 512;
+    const RECORD_SIZE: u16 = 16;
+
+    fn place_link_index_tree(
+        file: &mut [u8],
+        header_at: usize,
+        root_at: usize,
+        tree_type: u8,
+    ) -> Vec<Extent> {
+        let record = vec![0; usize::from(RECORD_SIZE)];
+        let leaf = btree_v2::leaf(tree_type, &[record]);
+        let header =
+            btree_v2::Header::new(tree_type, RECORD_SIZE, u64::try_from(root_at).unwrap(), 1)
+                .build(WIDTHS);
+        file[header_at..header_at + header.len()].copy_from_slice(&header);
+        file[root_at..root_at + leaf.len()].copy_from_slice(&leaf);
+        vec![
+            Extent::new(
+                u64::try_from(header_at).unwrap(),
+                u64::try_from(header.len()).unwrap(),
+            )
+            .unwrap(),
+            Extent::new(u64::try_from(root_at).unwrap(), NODE_SIZE).unwrap(),
+        ]
+    }
+
+    #[test]
+    fn dense_group_storage_walk_collects_name_and_creation_order_indexes() {
+        let mut file = vec![0; 0x1000];
+        let mut expected =
+            place_link_index_tree(&mut file, 0x100, 0x200, DENSE_LINK_NAME_INDEX_TYPE);
+        expected.extend(place_link_index_tree(
+            &mut file,
+            0x500,
+            0x600,
+            DENSE_LINK_CREATION_ORDER_INDEX_TYPE,
+        ));
+        expected.sort_unstable();
+        let info = LinkInfoMessage {
+            max_creation_order: Some(2),
+            fractal_heap_address: Some(StoredAddress::new(0x80)),
+            btree_name_index_address: Some(StoredAddress::new(0x100)),
+            btree_creation_order_address: Some(Some(StoredAddress::new(0x500))),
+        };
+
+        let extents =
+            collect_dense_group_index_storage_extents(&BytesSource::new(file), &info, 8, 8)
+                .unwrap();
+
+        assert_eq!(extents, expected);
+    }
+
+    #[test]
+    fn dense_group_storage_walk_does_not_infer_an_index_from_tracking() {
+        let mut file = vec![0; 0x800];
+        let expected = place_link_index_tree(&mut file, 0x100, 0x200, DENSE_LINK_NAME_INDEX_TYPE);
+        let info = LinkInfoMessage {
+            max_creation_order: Some(2),
+            fractal_heap_address: Some(StoredAddress::new(0x80)),
+            btree_name_index_address: Some(StoredAddress::new(0x100)),
+            btree_creation_order_address: None,
+        };
+
+        let extents =
+            collect_dense_group_index_storage_extents(&BytesSource::new(file), &info, 8, 8)
+                .unwrap();
+
+        assert_eq!(extents, expected);
+    }
+
+    #[test]
+    fn dense_group_storage_walk_omits_an_undefined_indexed_creation_order_tree() {
+        let mut file = vec![0; 0x800];
+        let expected = place_link_index_tree(&mut file, 0x100, 0x200, DENSE_LINK_NAME_INDEX_TYPE);
+        let info = LinkInfoMessage {
+            max_creation_order: Some(2),
+            fractal_heap_address: Some(StoredAddress::new(0x80)),
+            btree_name_index_address: Some(StoredAddress::new(0x100)),
+            btree_creation_order_address: Some(None),
+        };
+
+        let extents =
+            collect_dense_group_index_storage_extents(&BytesSource::new(file), &info, 8, 8)
+                .unwrap();
+
+        assert_eq!(extents, expected);
+    }
+
+    #[test]
+    fn dense_group_storage_walk_rejects_wrong_name_index_type() {
+        let mut file = vec![0; 0x800];
+        place_link_index_tree(
+            &mut file,
+            0x100,
+            0x200,
+            DENSE_LINK_CREATION_ORDER_INDEX_TYPE,
+        );
+        let info = LinkInfoMessage {
+            max_creation_order: None,
+            fractal_heap_address: Some(StoredAddress::new(0x80)),
+            btree_name_index_address: Some(StoredAddress::new(0x100)),
+            btree_creation_order_address: None,
+        };
+
+        let err = collect_dense_group_index_storage_extents(&BytesSource::new(file), &info, 8, 8)
+            .unwrap_err();
+
+        assert_eq!(
+            err,
+            FormatError::InvalidBTreeNodeType(DENSE_LINK_CREATION_ORDER_INDEX_TYPE)
+        );
+    }
+
+    #[test]
+    fn dense_group_storage_walk_rejects_a_truncated_second_index_atomically() {
+        let mut file = vec![0; 0x900];
+        place_link_index_tree(&mut file, 0x100, 0x200, DENSE_LINK_NAME_INDEX_TYPE);
+        let root_at = 0x880usize;
+        let header = btree_v2::Header::new(
+            DENSE_LINK_CREATION_ORDER_INDEX_TYPE,
+            RECORD_SIZE,
+            u64::try_from(root_at).unwrap(),
+            1,
+        )
+        .build(WIDTHS);
+        file[0x500..0x500 + header.len()].copy_from_slice(&header);
+        let info = LinkInfoMessage {
+            max_creation_order: Some(2),
+            fractal_heap_address: Some(StoredAddress::new(0x80)),
+            btree_name_index_address: Some(StoredAddress::new(0x100)),
+            btree_creation_order_address: Some(Some(StoredAddress::new(0x500))),
+        };
+
+        let available = file.len();
+        let err = collect_dense_group_index_storage_extents(&BytesSource::new(file), &info, 8, 8)
+            .unwrap_err();
+
+        assert_eq!(
+            err,
+            FormatError::UnexpectedEof {
+                expected: root_at + usize::try_from(NODE_SIZE).unwrap(),
+                available,
+            }
+        );
+    }
 
     fn extract_dataset(
         _file_data: &[u8],
