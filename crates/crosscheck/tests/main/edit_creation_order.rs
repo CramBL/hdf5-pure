@@ -29,44 +29,6 @@ use hdf5_pure::{AttrValue, Error, File};
 use tempfile::tempdir;
 use test_util_hdf5::creation_order::{self, Indexing};
 
-/// Write a file whose group `/g` and dataset `/d` both track attribute creation
-/// order, each carrying one integer attribute per name in `names`, created in
-/// that order and valued by its position.
-///
-/// The file creation property list carries the same setting so the root group
-/// tracks it too, which is what h5py's `File(..., track_order=True)` does.
-fn write_tracked(path: &Path, names: &[String], indexed: Indexing) {
-    let file = hdf5::File::with_options()
-        .with_fapl(|p| p.libver_bounds(LibraryVersion::V18, LibraryVersion::latest()))
-        .with_fcpl(|p| p.attr_creation_order(indexed.attr_order()))
-        .create(path)
-        .unwrap_or_else(|e| panic!("create {}: {e}", path.display()));
-    let group = file
-        .create_group_builder()
-        .set_gcpl(&creation_order::group_properties(indexed, false))
-        .create("g")
-        .expect("create group");
-    let dataset = file
-        .new_dataset::<i32>()
-        .with_dcpl(|p| p.attr_creation_order(indexed.attr_order()))
-        .shape([4])
-        .create("d")
-        .expect("create dataset");
-    let owners: [&hdf5::Location; 2] = [&group, &dataset];
-    for owner in owners {
-        for (i, name) in names.iter().enumerate() {
-            owner
-                .new_attr::<i32>()
-                .shape(())
-                .create(name.as_str())
-                .unwrap_or_else(|e| panic!("create attribute {name}: {e}"))
-                .write_scalar(&(i as i32))
-                .unwrap_or_else(|e| panic!("write attribute {name}: {e}"));
-        }
-    }
-    file.close().unwrap();
-}
-
 /// A file whose group `/g` tracks *link* creation order, as netCDF-4 writes,
 /// holding one dataset per name in `links`, created in that order.
 fn write_link_tracked(path: &Path, links: &[&str]) {
@@ -241,7 +203,7 @@ fn set_on_both(path: &Path, name: &str, value: i64) {
 fn an_object_tracking_creation_order_can_be_edited_at_all() {
     let dir = tempdir().unwrap();
     let p = dir.path().join("t.h5");
-    write_tracked(&p, &creation_order::names(3), Indexing::Yes);
+    creation_order::write_attribute_fixture(&p, &creation_order::names(3), Indexing::Yes, false);
 
     set_on_both(&p, "added", 99);
 
@@ -269,7 +231,7 @@ fn an_object_tracking_creation_order_can_be_edited_at_all() {
 fn the_editor_reads_a_tracked_object_back_itself() {
     let dir = tempdir().unwrap();
     let p = dir.path().join("t.h5");
-    write_tracked(&p, &creation_order::names(3), Indexing::Yes);
+    creation_order::write_attribute_fixture(&p, &creation_order::names(3), Indexing::Yes, false);
     set_on_both(&p, "added", 7);
 
     let f = File::open(&p).unwrap();
@@ -283,7 +245,7 @@ fn the_editor_reads_a_tracked_object_back_itself() {
 fn overwriting_an_attribute_keeps_the_creation_index_it_had() {
     let dir = tempdir().unwrap();
     let p = dir.path().join("t.h5");
-    write_tracked(&p, &creation_order::names(3), Indexing::Yes);
+    creation_order::write_attribute_fixture(&p, &creation_order::names(3), Indexing::Yes, false);
 
     set_on_both(&p, "a00", -1);
 
@@ -303,7 +265,7 @@ fn overwriting_an_attribute_keeps_the_creation_index_it_had() {
 fn deleting_an_attribute_leaves_a_gap_rather_than_renumbering() {
     let dir = tempdir().unwrap();
     let p = dir.path().join("t.h5");
-    write_tracked(&p, &creation_order::names(4), Indexing::Yes);
+    creation_order::write_attribute_fixture(&p, &creation_order::names(4), Indexing::Yes, false);
 
     // One from the middle and one from the end: the middle deletion is what
     // leaves a gap in the surviving indexes, and the end one is what separates
@@ -353,7 +315,7 @@ fn a_compact_set_crossing_the_threshold_carries_its_creation_order_into_the_heap
     // rebuilt into a fractal heap — and the deletion is what makes each
     // attribute's creation index differ from its position in the rebuilt set,
     // so an index taken from the position would show up here.
-    write_tracked(&p, &creation_order::names(8), Indexing::Yes);
+    creation_order::write_attribute_fixture(&p, &creation_order::names(8), Indexing::Yes, false);
 
     {
         let s = File::open_rw(&p).unwrap();
@@ -409,7 +371,7 @@ fn a_tracked_set_goes_dense_without_a_creation_order_index_when_the_object_has_n
     let p = dir.path().join("t.h5");
     // Tracked but not *indexed*: the heap gets a name index only, and the
     // creation index each attribute carries lives in that index's records.
-    write_tracked(&p, &creation_order::names(8), Indexing::No);
+    creation_order::write_attribute_fixture(&p, &creation_order::names(8), Indexing::No, false);
 
     {
         let s = File::open_rw(&p).unwrap();
@@ -434,7 +396,7 @@ fn an_object_already_dense_keeps_its_creation_order_across_an_edit() {
     let p = dir.path().join("t.h5");
     // Twelve attributes is past the C library's own compact threshold, so both
     // objects already store their attributes in a fractal heap.
-    write_tracked(&p, &creation_order::names(12), Indexing::Yes);
+    creation_order::write_attribute_fixture(&p, &creation_order::names(12), Indexing::Yes, false);
 
     set_on_both(&p, "added", 42);
 

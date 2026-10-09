@@ -16,56 +16,6 @@ use tempfile::tempdir;
 use test_util_hdf5::absence;
 use test_util_hdf5::creation_order::{self, Indexing};
 
-fn write_tracked_with_persistence(path: &Path, names: &[String], indexed: Indexing, persist: bool) {
-    let file = hdf5::File::with_options()
-        .with_fapl(|p| {
-            let lower = if persist {
-                LibraryVersion::V110
-            } else {
-                LibraryVersion::V18
-            };
-            p.libver_bounds(lower, LibraryVersion::latest())
-        })
-        .with_fcpl(|p| {
-            p.attr_creation_order(indexed.attr_order());
-            if persist {
-                p.file_space_strategy(CStrategy::FreeSpaceManager {
-                    paged: false,
-                    persist: true,
-                    threshold: 1,
-                })
-            } else {
-                p
-            }
-        })
-        .create(path)
-        .unwrap_or_else(|e| panic!("create {}: {e}", path.display()));
-    let group = file
-        .create_group_builder()
-        .set_gcpl(&creation_order::group_properties(indexed, false))
-        .create("g")
-        .expect("create group");
-    let dataset = file
-        .new_dataset::<i32>()
-        .with_dcpl(|p| p.attr_creation_order(indexed.attr_order()))
-        .shape([4])
-        .create("d")
-        .expect("create dataset");
-    let owners: [&hdf5::Location; 2] = [&group, &dataset];
-    for owner in owners {
-        for (i, name) in names.iter().enumerate() {
-            owner
-                .new_attr::<i32>()
-                .shape(())
-                .create(name.as_str())
-                .unwrap_or_else(|e| panic!("create attribute {name}: {e}"))
-                .write_scalar(&(i as i32))
-                .unwrap_or_else(|e| panic!("write attribute {name}: {e}"));
-        }
-    }
-    file.close().unwrap();
-}
-
 fn object_location(path: &Path, object: &str) -> (hdf5::File, hdf5::Location) {
     let file = hdf5::File::open(path)
         .unwrap_or_else(|e| panic!("the C library opens {}: {e}", path.display()));
@@ -112,7 +62,7 @@ fn c_library_accepts_persisted_reclaimed_dense_attribute_indexes() {
         let path = dir
             .path()
             .join(format!("dense_attribute_reclaim_{suffix}.h5"));
-        write_tracked_with_persistence(&path, &attribute_names, indexed, true);
+        creation_order::write_attribute_fixture(&path, &attribute_names, indexed, true);
 
         if indexed == Indexing::Yes {
             assert_eq!(

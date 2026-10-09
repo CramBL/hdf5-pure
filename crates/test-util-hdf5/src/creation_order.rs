@@ -1,5 +1,9 @@
 //! Helpers for C-library fixtures that track creation order.
 
+use std::path::Path;
+
+use hdf5::file::LibraryVersion;
+use hdf5::plist::file_create::FileSpaceStrategy;
 use hdf5::plist::group_create::{
     AttrCreationOrder, GroupCreate, GroupCreateBuilder, LinkCreationOrder,
 };
@@ -29,6 +33,67 @@ impl Indexing {
             Self::Yes => LinkCreationOrder::Indexed,
         }
     }
+}
+
+/// Writes a file whose `/g` group and `/d` dataset track attribute creation order.
+///
+/// Each object receives one scalar `i32` attribute per entry in `names`, in the
+/// supplied order, with values equal to their positions. The root group tracks the
+/// same order. When `persist_free_space` is true, the file also uses the persistent
+/// free-space manager required by reclamation tests.
+pub fn write_attribute_fixture(
+    path: &Path,
+    names: &[String],
+    indexing: Indexing,
+    persist_free_space: bool,
+) {
+    let file = hdf5::File::with_options()
+        .with_fapl(|properties| {
+            let lower = if persist_free_space {
+                LibraryVersion::V110
+            } else {
+                LibraryVersion::V18
+            };
+            properties.libver_bounds(lower, LibraryVersion::latest())
+        })
+        .with_fcpl(|properties| {
+            properties.attr_creation_order(indexing.attr_order());
+            if persist_free_space {
+                properties.file_space_strategy(FileSpaceStrategy::FreeSpaceManager {
+                    paged: false,
+                    persist: true,
+                    threshold: 1,
+                })
+            } else {
+                properties
+            }
+        })
+        .create(path)
+        .unwrap_or_else(|error| panic!("create {}: {error}", path.display()));
+    let group = file
+        .create_group_builder()
+        .set_gcpl(&group_properties(indexing, false))
+        .create("g")
+        .expect("create group");
+    let dataset = file
+        .new_dataset::<i32>()
+        .with_dcpl(|properties| properties.attr_creation_order(indexing.attr_order()))
+        .shape([4])
+        .create("d")
+        .expect("create dataset");
+    let owners: [&hdf5::Location; 2] = [&group, &dataset];
+    for owner in owners {
+        for (index, name) in names.iter().enumerate() {
+            owner
+                .new_attr::<i32>()
+                .shape(())
+                .create(name.as_str())
+                .unwrap_or_else(|error| panic!("create attribute {name}: {error}"))
+                .write_scalar(&(index as i32))
+                .unwrap_or_else(|error| panic!("write attribute {name}: {error}"));
+        }
+    }
+    file.close().unwrap();
 }
 
 /// Builds group creation properties that track attribute creation order.
