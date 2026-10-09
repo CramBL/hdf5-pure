@@ -2545,27 +2545,12 @@ fn a_replacement_reuses_a_deleted_extent_where_libhdf5_does(
     let dir = tempdir().unwrap();
     let ours = dir.path().join("ours.h5");
     let theirs = dir.path().join("theirs.h5");
-    {
-        let file = hdf5::FileBuilder::new()
-            .with_fapl(|fapl| fapl.libver_v110())
-            .with_fcpl(|fcpl| fcpl.file_space_strategy(strategy))
-            .create(&ours)
-            .unwrap();
-        for (name, value, len) in [("a", 1, 100), ("b", 2, DELETED_ELEMENTS), ("c", 3, 100)] {
-            file.new_dataset::<i32>()
-                .shape((len,))
-                .create(name)
-                .unwrap()
-                .write(&vec![value; len])
-                .unwrap();
-        }
-        file.close().unwrap();
-    }
+    file_space::libhdf5_write_strategy_triplet(&ours, strategy);
     std::fs::copy(&ours, &theirs).unwrap();
 
     let ours_reuse = {
         let file = File::open_rw(&ours).unwrap();
-        let deleted = contiguous_extent(&file, "b");
+        let deleted = file_space::contiguous_extent(&file, "b");
         file.root().delete("b").unwrap();
         file.commit().unwrap();
         file.root()
@@ -2574,15 +2559,18 @@ fn a_replacement_reuses_a_deleted_extent_where_libhdf5_does(
             })
             .unwrap();
         file.commit().unwrap();
-        range::overlaps(&deleted, &contiguous_extent(&file, "d"))
+        range::overlaps(&deleted, &file_space::contiguous_extent(&file, "d"))
     };
     let theirs_reuse = {
         let file = hdf5::File::open_rw(&theirs).unwrap();
-        let deleted = c_contiguous_extent(&file.dataset("b").unwrap());
+        let deleted = file_space::libhdf5_contiguous_extent(&file.dataset("b").unwrap());
         file.unlink("b").unwrap();
         let replacement = file.new_dataset::<i32>().shape((300,)).create("d").unwrap();
         replacement.write(&[4; 300]).unwrap();
-        range::overlaps(&deleted, &c_contiguous_extent(&replacement))
+        range::overlaps(
+            &deleted,
+            &file_space::libhdf5_contiguous_extent(&replacement),
+        )
     };
 
     assert_eq!((ours_reuse, theirs_reuse), (reuses, reuses));
@@ -2626,8 +2614,8 @@ fn a_sub_threshold_extent_is_tracked_only_beside_a_tracked_extent_as_libhdf5_tra
 
     let (extent, ours_session) = {
         let file = File::open_rw(&ours).unwrap();
-        let extent = contiguous_extent(&file, "c");
-        assert_eq!(contiguous_extent(&file, "b").end, extent.start);
+        let extent = file_space::contiguous_extent(&file, "c");
+        assert_eq!(file_space::contiguous_extent(&file, "b").end, extent.start);
         for &path in deletions {
             file.root().delete(path).unwrap();
             file.commit().unwrap();
@@ -2920,7 +2908,7 @@ fn a_page_tail_short_of_the_threshold_stays_tracked_as_libhdf5_tracks_it(
         let file = File::open_rw(&ours).unwrap();
         ours_edit(&file);
         file.commit().unwrap();
-        let tail = page_tail(&contiguous_extent(&file, tail_after));
+        let tail = page_tail(&file_space::contiguous_extent(&file, tail_after));
         let session =
             range::covered_len(&file.space_accounting().unwrap().reusable_free_space, &tail);
         (tail, session)
@@ -2932,7 +2920,9 @@ fn a_page_tail_short_of_the_threshold_stays_tracked_as_libhdf5_tracks_it(
     let theirs_tail = {
         let file = hdf5::File::open_rw(&theirs).unwrap();
         theirs_edit(&file);
-        let tail = page_tail(&c_contiguous_extent(&file.dataset(tail_after).unwrap()));
+        let tail = page_tail(&file_space::libhdf5_contiguous_extent(
+            &file.dataset(tail_after).unwrap(),
+        ));
         file.close().unwrap();
         tail
     };
@@ -3152,23 +3142,6 @@ fn fsm_aggr(persist: bool, threshold: u64) -> CStrategy {
     }
 }
 
-pub(super) fn contiguous_extent(file: &File, path: &str) -> Range<u64> {
-    let layout = file.dataset(path).unwrap().layout().unwrap();
-    let Layout::Contiguous {
-        address: Some(address),
-        size,
-    } = layout
-    else {
-        panic!("expected allocated contiguous storage, got {layout:?}");
-    };
-    address..address + size
-}
-
-fn c_contiguous_extent(dataset: &hdf5::Dataset) -> Range<u64> {
-    let address = dataset.offset().unwrap();
-    address..address + dataset.storage_size()
-}
-
 /// The offset of the "Address of Serialized Section List" field in a manager header with 8-byte
 /// addresses and lengths.
 const SECTION_LIST_ADDR_AT: usize =
@@ -3182,8 +3155,7 @@ const SECTION_LIST_ALLOCATED_AT: usize = SECTION_LIST_USED_AT + 8;
 /// The offset of the "Free-space Manager Header Address" field in a section list.
 const SECTION_LIST_HEADER_ADDR_AT: usize = test_util::free_space::SECTIONS_SIGNATURE.len() + 1;
 
-const DELETED_ELEMENTS: usize = 400;
-const DELETED_LEN: u64 = (DELETED_ELEMENTS * size_of::<i32>()) as u64;
+const DELETED_LEN: u64 = file_space::STRATEGY_DELETED_LEN;
 const THRESHOLD_ELEMENTS: usize = 1024;
 const THRESHOLD: u64 = (THRESHOLD_ELEMENTS * size_of::<i32>()) as u64;
 const SUB_THRESHOLD_ELEMENTS: usize = 256;

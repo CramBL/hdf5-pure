@@ -1,12 +1,8 @@
 //! Free-space reuse in an edit under each file-space strategy.
 
-use std::ops::Range;
-use std::path::Path;
-
 use hdf5_pure::File;
 use hdf5_pure::FileBuilder;
 use hdf5_pure::FileSpaceStrategy;
-use hdf5_pure::Layout;
 use hdf5_pure_core::__private::FileSpaceInfoFields;
 use hdf5_pure_format::__private::FormatWidths;
 use rstest::rstest;
@@ -14,6 +10,7 @@ use tempfile::tempdir;
 
 use test_util::file_space_info;
 use test_util::range;
+use test_util_hdf5::file_space;
 
 #[rstest]
 #[case::fsm_aggr(FileSpaceStrategy::FsmAggr, false, 1, true)]
@@ -52,10 +49,10 @@ fn a_replacement_reuses_a_deleted_extent_only_where_a_free_space_manager_tracks_
 ) {
     let dir = tempdir().unwrap();
     let path = dir.path().join("strategy.h5");
-    write_three_datasets(&path, strategy, persist, threshold);
+    file_space::write_strategy_triplet(&path, strategy, persist, threshold);
 
     let file = File::open_rw(&path).unwrap();
-    let deleted = contiguous_extent(&file, "b");
+    let deleted = file_space::contiguous_extent(&file, "b");
     file.root().delete("b").unwrap();
     file.commit().unwrap();
     file.root()
@@ -64,7 +61,7 @@ fn a_replacement_reuses_a_deleted_extent_only_where_a_free_space_manager_tracks_
         })
         .unwrap();
     file.commit().unwrap();
-    let placed = contiguous_extent(&file, "d");
+    let placed = file_space::contiguous_extent(&file, "d");
 
     assert_eq!(
         range::overlaps(&deleted, &placed),
@@ -81,7 +78,7 @@ fn a_deletion_leaves_no_reusable_free_space_without_a_free_space_manager(
 ) {
     let dir = tempdir().unwrap();
     let path = dir.path().join("strategy.h5");
-    write_three_datasets(&path, strategy, false, 1);
+    file_space::write_strategy_triplet(&path, strategy, false, 1);
 
     let file = File::open_rw(&path).unwrap();
     file.root().delete("b").unwrap();
@@ -99,10 +96,10 @@ fn persisted_free_space_is_not_reused_under_a_strategy_without_a_free_space_mana
     let dir = tempdir().unwrap();
     let path = dir.path().join("strategy.h5");
     // An FsmAggr file's persisted free space, relabeled with `strategy` below.
-    write_three_datasets(&path, FileSpaceStrategy::FsmAggr, true, 1);
+    file_space::write_strategy_triplet(&path, FileSpaceStrategy::FsmAggr, true, 1);
     let deleted = {
         let file = File::open_rw(&path).unwrap();
-        let deleted = contiguous_extent(&file, "b");
+        let deleted = file_space::contiguous_extent(&file, "b");
         file.root().delete("b").unwrap();
         file.commit().unwrap();
         deleted
@@ -143,7 +140,7 @@ fn persisted_free_space_is_not_reused_under_a_strategy_without_a_free_space_mana
             })
             .unwrap();
         file.commit().unwrap();
-        contiguous_extent(&file, "d")
+        file_space::contiguous_extent(&file, "d")
     };
 
     assert!(
@@ -161,7 +158,7 @@ fn persisted_free_space_is_not_reused_under_a_strategy_without_a_free_space_mana
 fn a_file_whose_strategy_cannot_be_read_reuses_no_deleted_extent() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("strategy.h5");
-    write_three_datasets(&path, FileSpaceStrategy::FsmAggr, false, 1);
+    file_space::write_strategy_triplet(&path, FileSpaceStrategy::FsmAggr, false, 1);
     let extension = File::open(&path)
         .unwrap()
         .superblock()
@@ -170,7 +167,7 @@ fn a_file_whose_strategy_cannot_be_read_reuses_no_deleted_extent() {
     file_space_info::replace_message(&path, extension, &[UNKNOWN_VERSION]);
 
     let file = File::open_rw(&path).unwrap();
-    let deleted = contiguous_extent(&file, "b");
+    let deleted = file_space::contiguous_extent(&file, "b");
     file.root().delete("b").unwrap();
     file.commit().unwrap();
     file.root()
@@ -179,7 +176,7 @@ fn a_file_whose_strategy_cannot_be_read_reuses_no_deleted_extent() {
         })
         .unwrap();
     file.commit().unwrap();
-    let placed = contiguous_extent(&file, "d");
+    let placed = file_space::contiguous_extent(&file, "d");
 
     assert!(
         !range::overlaps(&deleted, &placed),
@@ -198,11 +195,11 @@ fn a_deleted_extent_is_tracked_from_the_threshold_up(
 ) {
     let dir = tempdir().unwrap();
     let path = dir.path().join("strategy.h5");
-    write_three_datasets(&path, strategy, persist, threshold);
+    file_space::write_strategy_triplet(&path, strategy, persist, threshold);
 
     let (deleted, session) = {
         let file = File::open_rw(&path).unwrap();
-        let deleted = contiguous_extent(&file, "b");
+        let deleted = file_space::contiguous_extent(&file, "b");
         file.root().delete("b").unwrap();
         file.commit().unwrap();
         (
@@ -256,7 +253,7 @@ fn a_sub_threshold_extent_is_tracked_only_beside_a_tracked_extent(
 
     let (extents, session) = {
         let file = File::open_rw(&path).unwrap();
-        let extents = ["b", "c", "e", "g"].map(|path| contiguous_extent(&file, path));
+        let extents = ["b", "c", "e", "g"].map(|path| file_space::contiguous_extent(&file, path));
         for paths in commits {
             for path in paths {
                 file.root().delete(path).unwrap();
@@ -313,7 +310,10 @@ fn sub_threshold_extents_that_end_the_file_are_given_back_in_one_commit() {
             .unwrap();
     }
     file.commit().unwrap();
-    let (x, y) = (contiguous_extent(&file, "x"), contiguous_extent(&file, "y"));
+    let (x, y) = (
+        file_space::contiguous_extent(&file, "x"),
+        file_space::contiguous_extent(&file, "y"),
+    );
     let len = file.space_accounting().unwrap().logical_size;
     file.root().delete("x").unwrap();
     file.root().delete("y").unwrap();
@@ -325,30 +325,8 @@ fn sub_threshold_extents_that_end_the_file_are_given_back_in_one_commit() {
     );
 }
 
-fn write_three_datasets(path: &Path, strategy: FileSpaceStrategy, persist: bool, threshold: u64) {
-    let mut b = FileBuilder::new();
-    b.create_dataset("a").with_i32_data(&[1; 100]);
-    b.create_dataset("b").with_i32_data(&[2; DELETED_ELEMENTS]);
-    b.create_dataset("c").with_i32_data(&[3; 100]);
-    b.with_file_space_strategy(strategy, persist, threshold);
-    b.write(path).unwrap();
-}
-
-fn contiguous_extent(file: &File, path: &str) -> Range<u64> {
-    let layout = file.dataset(path).unwrap().layout().unwrap();
-    let Layout::Contiguous {
-        address: Some(address),
-        size,
-    } = layout
-    else {
-        panic!("expected allocated contiguous storage, got {layout:?}");
-    };
-    address..address + size
-}
-
 const UNKNOWN_VERSION: u8 = 0xff;
-const DELETED_ELEMENTS: usize = 400;
-const DELETED_LEN: u64 = (DELETED_ELEMENTS * size_of::<i32>()) as u64;
+const DELETED_LEN: u64 = file_space::STRATEGY_DELETED_LEN;
 const THRESHOLD_ELEMENTS: usize = 1024;
 const THRESHOLD: u64 = (THRESHOLD_ELEMENTS * size_of::<i32>()) as u64;
 const SUB_THRESHOLD_ELEMENTS: usize = 256;
