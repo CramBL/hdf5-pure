@@ -23,6 +23,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- Fixed a panic in `Dataset::shape` and related metadata reads on files whose shared-message heap declares IDs longer than eight bytes (#[724](https://github.com/CramBL/hdf5-pure/pull/724)).
 - Fixed `Dataset::chunks` and related windowed reads failing on sparse Extensible Arrays with logical element indexes above `u32::MAX` on 32-bit platforms, provided each required metadata read fits the platform's address space ([#717](https://github.com/CramBL/hdf5-pure/pull/717))
 - Fixed `File::open_rw` tracking a freed region of a paged file that is shorter than the free-space threshold and does not merge into free space. Page tails stay tracked whatever the threshold ([#705](https://github.com/CramBL/hdf5-pure/pull/705)).
 - Fixed `Dataset::read_raw_rows` and typed row reads accepting compact or allocated contiguous datasets whose declared storage extent conflicts with the byte length implied by the dataspace and datatype, including empty selections ([#704](https://github.com/CramBL/hdf5-pure/pull/704)).

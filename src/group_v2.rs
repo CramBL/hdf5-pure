@@ -8,6 +8,7 @@ use alloc::string::{String, ToString};
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 
+use hdf5_pure_format::__private::FractalHeapIdLayout;
 use hdf5_pure_format::__private::{BTREE_V2_LINK_CREATION_ORDER, BTREE_V2_LINK_NAME};
 use hdf5_pure_space::__private::Extent;
 
@@ -32,6 +33,8 @@ use crate::source::SourceMetadata;
 use crate::source::{BaseOffsetSource, Source, frame};
 use crate::superblock::Superblock;
 use crate::symbol_table::SymbolTableMessage;
+use crate::width::LengthWidth;
+use crate::width::OffsetWidth;
 
 /// Returns the version 2 B-tree allocations owned by a dense group's link set.
 ///
@@ -415,6 +418,11 @@ fn resolve_dense_entries(
     )?;
     let records = collect_btree_v2_records(file_data, &btree_hdr, offset_size, length_size)?;
 
+    let layout = FractalHeapIdLayout::new(
+        &fh,
+        OffsetWidth::try_from(offset_size)?,
+        LengthWidth::try_from(length_size)?,
+    );
     let mut heap = HeapObjectReader::new(&fh, offset_size, length_size);
     let mut entries = Vec::new();
     for record in &records {
@@ -423,7 +431,7 @@ fn resolve_dense_entries(
         };
 
         // Read the link message from the fractal heap (managed or huge object).
-        let link_data = heap.read(file_data, id_bytes)?;
+        let link_data = heap.read(file_data, layout.parse(id_bytes)?)?;
 
         // Parse as Link message
         let link = LinkMessage::parse(&link_data, offset_size)?;
@@ -720,13 +728,18 @@ fn resolve_dense_entries_from_source<S: Source + ?Sized>(
     let records =
         collect_btree_v2_records_from_source(source, &btree_hdr, offset_size, length_size)?;
 
+    let layout = FractalHeapIdLayout::new(
+        &fh,
+        OffsetWidth::try_from(offset_size)?,
+        LengthWidth::try_from(length_size)?,
+    );
     let mut heap = HeapObjectReader::new(&fh, offset_size, length_size);
     let mut entries = Vec::new();
     for record in &records {
         let Some(id_bytes) = record.link_heap_id(btree_hdr.tree_type, fh.heap_id_length) else {
             continue;
         };
-        let link_data = heap.read_from_source(source, id_bytes)?;
+        let link_data = heap.read_from_source(source, layout.parse(id_bytes)?)?;
         let link = LinkMessage::parse(&link_data, offset_size)?;
         if let LinkTarget::Hard {
             object_header_address,

@@ -5,7 +5,37 @@
 //! exercises and asserts the library refuses it with an error instead of
 //! aborting the process.
 
-use hdf5_pure::{Error, File, FormatError, Group};
+use std::io::Cursor;
+
+use hdf5_pure::{Error, File, FormatError, Group, ReadSeekSource};
+use rstest::rstest;
+
+#[rstest]
+#[case::buffered(false)]
+#[case::source(true)]
+fn shared_message_heap_ids_have_the_reference_length(#[case] streaming: bool) {
+    let bytes = std::fs::read("tests/data/fuzz/sohm_heap_id_length.h5").unwrap();
+    let file = if streaming {
+        File::from_source(ReadSeekSource::new(Cursor::new(bytes)).unwrap()).unwrap()
+    } else {
+        File::from_bytes(bytes).unwrap()
+    };
+    let dataset = file.dataset("d1").unwrap();
+    let expected = FormatError::InvalidFractalHeapIdLength {
+        expected: 96,
+        actual: 8,
+    };
+    let error = dataset.shape().unwrap_err();
+    let Error::Format(shape_error) = error else {
+        panic!("expected format error, got {error:?}")
+    };
+    assert_eq!(shape_error, expected);
+    let error = dataset.dtype().unwrap_err();
+    let Error::Format(type_error) = error else {
+        panic!("expected format error, got {error:?}")
+    };
+    assert_eq!(type_error, expected);
+}
 
 /// A chunked fixed-length **string** dataset whose datatype declares a per-element
 /// size of ~2.86 GB (`0xAAAAAAAA` bytes). The shape is only `[50]`, so the element

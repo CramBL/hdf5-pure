@@ -11,6 +11,7 @@
 use alloc::vec::Vec;
 
 pub use hdf5_pure_format::__private::AttributeMessage;
+use hdf5_pure_format::__private::FractalHeapIdLayout;
 use hdf5_pure_format::__private::{BTREE_V2_ATTRIBUTE_CREATION_ORDER, BTREE_V2_ATTRIBUTE_NAME};
 use hdf5_pure_space::__private::Extent;
 
@@ -33,6 +34,8 @@ use crate::shared_message::SourceResolver;
 use crate::sohm::SohmTable;
 use crate::source::Source;
 use crate::source::SourceMetadata;
+use crate::width::LengthWidth;
+use crate::width::OffsetWidth;
 
 /// Returns the v2 B-tree allocations owned by a dense attribute set.
 ///
@@ -303,6 +306,11 @@ fn extract_dense_attributes(
     let records = collect_btree_v2_records(file_data, &btree_hdr, offset_size, length_size)?;
 
     let resolver = BufferedResolver::new(file_data, access_mode, offset_size, length_size, sohm);
+    let layout = FractalHeapIdLayout::new(
+        &fh,
+        OffsetWidth::try_from(offset_size)?,
+        LengthWidth::try_from(length_size)?,
+    );
     let mut heap = HeapObjectReader::new(&fh, offset_size, length_size);
     let mut attrs = Vec::new();
     for record in &records {
@@ -311,7 +319,7 @@ fn extract_dense_attributes(
         };
 
         // Read the attribute message from the fractal heap (managed or huge object).
-        let attr_data = heap.read(file_data, id_bytes)?;
+        let attr_data = heap.read(file_data, layout.parse(id_bytes)?)?;
 
         // The data in the heap is a complete attribute message, and it names a
         // committed datatype the same way a compact one does.
@@ -356,13 +364,18 @@ fn extract_dense_attributes_from_source<S: Source + ?Sized>(
         collect_btree_v2_records_from_source(source, &btree_hdr, offset_size, length_size)?;
 
     let resolver = SourceResolver::new(source, access_mode, offset_size, length_size, sohm);
+    let layout = FractalHeapIdLayout::new(
+        &fh,
+        OffsetWidth::try_from(offset_size)?,
+        LengthWidth::try_from(length_size)?,
+    );
     let mut heap = HeapObjectReader::new(&fh, offset_size, length_size);
     let mut attrs = Vec::new();
     for record in &records {
         let Some(id_bytes) = record.attribute_heap_id(fh.heap_id_length) else {
             continue;
         };
-        let attr_data = heap.read_from_source(source, id_bytes)?;
+        let attr_data = heap.read_from_source(source, layout.parse(id_bytes)?)?;
         attrs.push(StoredAttribute {
             message: AttributeMessage::parse_resolving(&attr_data, length_size, &resolver)?,
             creation_index: record_creation_index(record, &fh, attr_info),

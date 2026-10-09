@@ -112,7 +112,6 @@ pub use crate::fractal_heap::FractalHeapChild;
 pub use crate::fractal_heap::FractalHeapHeader;
 pub use crate::fractal_heap::FractalHeapIdKind;
 pub use crate::fractal_heap::FractalHeapIdLayout;
-pub use crate::fractal_heap::FractalHeapIdType;
 pub use crate::fractal_heap::FractalHeapIdView;
 pub use crate::fractal_heap::HugeObjectReference;
 pub use crate::fractal_heap_write::ATTRIBUTE_HEAP_BLOCK_OFFSET_BYTES;
