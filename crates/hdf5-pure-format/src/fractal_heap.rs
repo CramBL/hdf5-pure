@@ -95,25 +95,6 @@ pub enum FractalHeapChild {
     },
 }
 
-/// Describes a failure to prove complete ownership of a fractal heap's file storage.
-///
-/// This type is part of the workspace-private structural API exposed through `__private`.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum FractalHeapStorageError {
-    /// A lower-level HDF5 parser or source read failed.
-    Format(FormatError),
-    /// The heap's ownership graph or doubling-table geometry is inconsistent.
-    InvalidStorage,
-    /// The named heap feature prevents a complete ownership proof.
-    UnsupportedOwnership(&'static str),
-}
-
-impl From<FormatError> for FractalHeapStorageError {
-    fn from(error: FormatError) -> Self {
-        Self::Format(error)
-    }
-}
-
 /// A fractal heap header, signature `FRHP`: the parameters of the heap's doubling table, the
 /// address of its root block, and the count of its managed objects.
 ///
@@ -188,13 +169,6 @@ pub struct FractalHeapHeader {
     pub root_block_address: StoredAddress,
     /// The number of rows in the root indirect block, 0 where the root is a direct block.
     pub current_rows_in_root_indirect_block: u16,
-}
-
-/// Returns the base-2 logarithm of `v` rounded down, and 0 for 0, as `H5VM_log2_gen` does.
-///
-/// The block sizes of a doubling table are powers of two, so the logarithm of one is exact.
-fn log2_floor(v: u64) -> u32 {
-    if v == 0 { 0 } else { 63 - v.leading_zeros() }
 }
 
 /// Reads the little-endian integer in the first 8 bytes of `payload`, or in all of it where it is
@@ -523,324 +497,6 @@ impl FractalHeapHeader {
         }
     }
 
-    /// Returns the child of an indirect block whose space holds heap offset `target_offset`, or
-    /// `None` if no allocated child holds it.
-    ///
-    /// `block` holds the indirect block from its signature on, `nrows` is its number of rows, and
-    /// `iblock_heap_offset` the heap offset its space begins at. The heap offset of each child
-    /// follows from the doubling table, so the function reads the child addresses alone.
-    /// `offset_size` is the superblock's "Size of Offsets" byte.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`FormatError::InvalidFractalHeapSignature`] if `block` does not begin with `FHIB`,
-    /// [`FormatError::UnsupportedFilteredHeapObject`] if the heap filters its objects,
-    /// [`FormatError::UnexpectedEof`] if an entry the function reads runs past the end of `block`,
-    /// and [`FormatError::InvalidOffsetSize`] if `offset_size` is not 2, 4, or 8.
-    pub fn find_child_for_offset(
-        &self,
-        block: &[u8],
-        nrows: u16,
-        iblock_heap_offset: u64,
-        target_offset: u64,
-        offset_size: u8,
-    ) -> Result<Option<FractalHeapChild>, FormatError> {
-        bytes::ensure_len(block, 0, 4)?;
-        if &block[0..4] != b"FHIB" {
-            return Err(FormatError::InvalidFractalHeapSignature);
-        }
-
-        // A filtered heap follows each direct block address with the filtered size of the block
-        // (`length_size` bytes) and its filter mask (4 bytes), and encodes the contents of the
-        // block. At the stride of an unfiltered heap, every later child address would be read at
-        // the wrong offset, so the function rejects the heap.
-        if self.io_filter_encoded_length > 0 {
-            return Err(FormatError::UnsupportedFilteredHeapObject);
-        }
-
-        let block_offset_bytes = (self.max_heap_size as usize).div_ceil(8);
-        let iblock_header = 5 + offset_size as usize + block_offset_bytes;
-        let mut pos = iblock_header;
-        let tw = self.table_width as u64;
-        let nrows_usize = nrows as usize;
-        let direct_rows = nrows_usize.min(self.max_direct_rows());
-        let mut current_heap_offset = iblock_heap_offset;
-
-        // Direct-block rows.
-        for row in 0..direct_rows {
-            let block_size = self.block_size_for_row(row);
-            for _col in 0..tw {
-                let child_addr = bytes::read_offset(block, pos, offset_size)?;
-                pos += offset_size as usize;
-                if !convert::is_undefined_addr(child_addr, offset_size) {
-                    let block_end = current_heap_offset.saturating_add(block_size);
-                    if target_offset >= current_heap_offset && target_offset < block_end {
-                        return Ok(Some(FractalHeapChild::Direct {
-                            addr: StoredAddress::new(child_addr),
-                            block_size,
-                            heap_offset: current_heap_offset,
-                        }));
-                    }
-                }
-                current_heap_offset = current_heap_offset.saturating_add(block_size);
-            }
-        }
-
-        // Indirect-block rows. A child indirect block in row `row` has the block size of that
-        // row, and its own row count and the heap space it spans follow from that size.
-        for row in direct_rows..nrows_usize {
-            let child_nrows = self.size_to_rows(self.block_size_for_row(row));
-            let total_child_space = self.indirect_block_heap_size(child_nrows);
-            for _col in 0..tw {
-                let child_addr = bytes::read_offset(block, pos, offset_size)?;
-                pos += offset_size as usize;
-                if !convert::is_undefined_addr(child_addr, offset_size) {
-                    let block_end = current_heap_offset.saturating_add(total_child_space);
-                    if target_offset >= current_heap_offset && target_offset < block_end {
-                        #[expect(
-                            clippy::cast_possible_truncation,
-                            reason = "fractal-heap row count is log-scale (bounded by \
-                                      max_heap_size bits), so it fits u16"
-                        )]
-                        return Ok(Some(FractalHeapChild::Indirect {
-                            addr: StoredAddress::new(child_addr),
-                            nrows: child_nrows as u16,
-                            heap_offset: current_heap_offset,
-                        }));
-                    }
-                }
-                current_heap_offset = current_heap_offset.saturating_add(total_child_space);
-            }
-        }
-
-        Ok(None)
-    }
-
-    /// Returns the size in bytes of an indirect block of `nrows` rows up to the end of its child
-    /// entries, the bytes [`find_child_for_offset`](Self::find_child_for_offset) reads.
-    ///
-    /// `offset_size` is the superblock's "Size of Offsets" byte.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`FormatError::UnsupportedFilteredHeapObject`] if the heap filters its objects.
-    pub fn indirect_block_entries_len(
-        &self,
-        nrows: u16,
-        offset_size: u8,
-    ) -> Result<u64, FormatError> {
-        if self.io_filter_encoded_length > 0 {
-            return Err(FormatError::UnsupportedFilteredHeapObject);
-        }
-        let block_offset_bytes = u64::from(self.max_heap_size).div_ceil(8);
-        let iblock_header = 5 + u64::from(offset_size) + block_offset_bytes;
-        // In an unfiltered heap every entry, direct or indirect, is one child address.
-        let entries = u64::from(nrows) * u64::from(self.table_width) * u64::from(offset_size);
-        Ok(iblock_header + entries)
-    }
-
-    /// Returns the width in bytes of the "Block Offset" field in a managed block header.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`FractalHeapStorageError::InvalidStorage`] if the doubling-table fields do not
-    /// define representable geometry.
-    pub fn storage_block_offset_size(&self) -> Result<usize, FractalHeapStorageError> {
-        self.storage_geometry()?;
-        Ok(usize::from(self.max_heap_size).div_ceil(8))
-    }
-
-    /// Returns the exact allocated size of a managed direct block in doubling-table `row`.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`FractalHeapStorageError::InvalidStorage`] for impossible geometry or arithmetic
-    /// overflow.
-    pub fn storage_block_size_for_row(&self, row: usize) -> Result<u64, FractalHeapStorageError> {
-        self.storage_geometry()?;
-        if row <= 1 {
-            return Ok(self.starting_block_size);
-        }
-        let shift = u32::try_from(row - 1)
-            .map_err(|_conversion_error| FractalHeapStorageError::InvalidStorage)?;
-        let multiplier = 1u64
-            .checked_shl(shift)
-            .ok_or(FractalHeapStorageError::InvalidStorage)?;
-        self.starting_block_size
-            .checked_mul(multiplier)
-            .ok_or(FractalHeapStorageError::InvalidStorage)
-    }
-
-    /// Returns the number of doubling-table rows whose entries address direct blocks.
-    ///
-    /// The configured maximum direct-block size can describe more direct rows than the maximum
-    /// root can contain. A caller limits this count to the rows represented by the indirect block
-    /// it traverses.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`FractalHeapStorageError::InvalidStorage`] for impossible doubling-table geometry.
-    pub fn storage_direct_rows(&self) -> Result<usize, FractalHeapStorageError> {
-        let (start_bits, max_direct_bits, _) = self.storage_geometry()?;
-        usize::try_from(max_direct_bits - start_bits + 2)
-            .map_err(|_conversion_error| FractalHeapStorageError::InvalidStorage)
-    }
-
-    /// Returns the maximum legal number of rows in the root indirect block.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`FractalHeapStorageError::InvalidStorage`] for impossible doubling-table geometry.
-    pub fn storage_max_root_rows(&self) -> Result<u16, FractalHeapStorageError> {
-        let (_, _, rows) = self.storage_geometry()?;
-        Ok(rows)
-    }
-
-    /// Returns the row count of the child indirect blocks addressed by doubling-table `row`.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`FractalHeapStorageError::InvalidStorage`] if `row` does not identify an indirect
-    /// row, or if the declared geometry is impossible.
-    pub fn storage_child_indirect_rows(&self, row: usize) -> Result<u16, FractalHeapStorageError> {
-        if row < self.storage_direct_rows()? {
-            return Err(FractalHeapStorageError::InvalidStorage);
-        }
-        let size = self.storage_block_size_for_row(row)?;
-        let start_bits = self.starting_block_size.trailing_zeros();
-        let width_bits = u64::from(self.table_width).trailing_zeros();
-        let first_row_bits = start_bits
-            .checked_add(width_bits)
-            .ok_or(FractalHeapStorageError::InvalidStorage)?;
-        let size_bits = size.trailing_zeros();
-        if !size.is_power_of_two() || size_bits < first_row_bits {
-            return Err(FractalHeapStorageError::InvalidStorage);
-        }
-        u16::try_from(size_bits - first_row_bits + 1)
-            .map_err(|_conversion_error| FractalHeapStorageError::InvalidStorage)
-    }
-
-    /// Returns the managed heap-address space represented by an indirect block of `nrows` rows.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`FractalHeapStorageError::InvalidStorage`] for an impossible row count or arithmetic
-    /// overflow.
-    pub fn storage_indirect_heap_size(&self, nrows: u16) -> Result<u64, FractalHeapStorageError> {
-        if nrows == 0 || nrows > self.storage_max_root_rows()? {
-            return Err(FractalHeapStorageError::InvalidStorage);
-        }
-        let width = u64::from(self.table_width);
-        let mut total = 0u64;
-        for row in 0..usize::from(nrows) {
-            total = total
-                .checked_add(
-                    self.storage_block_size_for_row(row)?
-                        .checked_mul(width)
-                        .ok_or(FractalHeapStorageError::InvalidStorage)?,
-                )
-                .ok_or(FractalHeapStorageError::InvalidStorage)?;
-        }
-        Ok(total)
-    }
-
-    /// Returns the exact encoded allocation size of an unfiltered indirect block.
-    ///
-    /// The size includes the `FHIB` signature, version, heap-header address, block heap offset,
-    /// every child address, and the trailing checksum.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`FractalHeapStorageError::UnsupportedOwnership`] for a filtered heap,
-    /// [`FractalHeapStorageError::Format`] for an unsupported address width, and
-    /// [`FractalHeapStorageError::InvalidStorage`] for impossible geometry or arithmetic overflow.
-    pub fn storage_indirect_block_size(
-        &self,
-        nrows: u16,
-        offset_size: u8,
-    ) -> Result<u64, FractalHeapStorageError> {
-        if self.io_filter_encoded_length > 0 {
-            return Err(FractalHeapStorageError::UnsupportedOwnership(
-                "filtered managed blocks",
-            ));
-        }
-        OffsetWidth::try_from(offset_size)?;
-        if nrows == 0 || nrows > self.storage_max_root_rows()? {
-            return Err(FractalHeapStorageError::InvalidStorage);
-        }
-        let block_offset_size = u64::try_from(self.storage_block_offset_size()?)
-            .map_err(|_conversion_error| FractalHeapStorageError::InvalidStorage)?;
-        let prefix = 5u64
-            .checked_add(u64::from(offset_size))
-            .and_then(|n| n.checked_add(block_offset_size))
-            .ok_or(FractalHeapStorageError::InvalidStorage)?;
-        let entries = u64::from(nrows)
-            .checked_mul(u64::from(self.table_width))
-            .and_then(|n| n.checked_mul(u64::from(offset_size)))
-            .ok_or(FractalHeapStorageError::InvalidStorage)?;
-        prefix
-            .checked_add(entries)
-            .and_then(|n| n.checked_add(4))
-            .ok_or(FractalHeapStorageError::InvalidStorage)
-    }
-
-    /// Returns the heap offset of the first slot in `row` of an indirect block.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`FractalHeapStorageError::InvalidStorage`] for impossible geometry or arithmetic
-    /// overflow.
-    pub fn storage_row_offset(&self, row: usize) -> Result<u64, FractalHeapStorageError> {
-        self.storage_geometry()?;
-        let width = u64::from(self.table_width);
-        let mut offset = 0u64;
-        for previous in 0..row {
-            offset = offset
-                .checked_add(
-                    self.storage_block_size_for_row(previous)?
-                        .checked_mul(width)
-                        .ok_or(FractalHeapStorageError::InvalidStorage)?,
-                )
-                .ok_or(FractalHeapStorageError::InvalidStorage)?;
-        }
-        Ok(offset)
-    }
-
-    /// Returns the derived bit widths and maximum root-row count of valid doubling-table geometry.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`FractalHeapStorageError::InvalidStorage`] if the table fields contradict the
-    /// fractal-heap doubling-table constraints or cannot be represented without overflow.
-    fn storage_geometry(&self) -> Result<(u32, u32, u16), FractalHeapStorageError> {
-        if self.table_width == 0
-            || !self.table_width.is_power_of_two()
-            || self.starting_block_size == 0
-            || !self.starting_block_size.is_power_of_two()
-            || self.max_direct_block_size < self.starting_block_size
-            || !self.max_direct_block_size.is_power_of_two()
-            || self.max_heap_size == 0
-            || self.max_heap_size > 64
-        {
-            return Err(FractalHeapStorageError::InvalidStorage);
-        }
-        let start_bits = self.starting_block_size.trailing_zeros();
-        let max_direct_bits = self.max_direct_block_size.trailing_zeros();
-        let first_row_bits = start_bits
-            .checked_add(u64::from(self.table_width).trailing_zeros())
-            .ok_or(FractalHeapStorageError::InvalidStorage)?;
-        let heap_bits = u32::from(self.max_heap_size);
-        if heap_bits < first_row_bits {
-            return Err(FractalHeapStorageError::InvalidStorage);
-        }
-        let max_root_rows = u16::try_from(heap_bits - first_row_bits + 1)
-            .map_err(|_conversion_error| FractalHeapStorageError::InvalidStorage)?;
-        if self.start_root_rows > max_root_rows {
-            return Err(FractalHeapStorageError::InvalidStorage);
-        }
-        Ok((start_bits, max_direct_bits, max_root_rows))
-    }
-
     /// Parses the fractal heap header at `address` in `source`.
     ///
     /// Reads at most 256 bytes, which hold the header of an unfiltered heap at every width the
@@ -864,55 +520,438 @@ impl FractalHeapHeader {
         let buf = source.read_metadata_at(address, window)?;
         Self::parse(&buf, 0, offset_size, length_size)
     }
+}
 
-    /// Returns the size of the blocks in row `row` of the doubling table, saturated at `u64::MAX`.
+/// Describes invalid fractal-heap doubling-table geometry or geometry outside representable bounds.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FractalHeapLayoutError {
+    /// The header fields or a requested row describe invalid doubling-table geometry.
+    InvalidGeometry,
+}
+
+/// Represents validated doubling-table geometry and file-width layout for one fractal heap.
+///
+/// The layout derives the managed-block geometry from a [`FractalHeapHeader`] once and provides
+/// the same checked row, span, and encoded-size calculations to object lookup and storage
+/// ownership traversal. Callers perform file I/O and traversal. The doubling table is defined in
+/// "Fractal Heap" of the [format specification, version 4.0][spec].
+///
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsec_fmt4_infra_fractalheap
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FractalHeapLayout {
+    offset_width: OffsetWidth,
+    length_width: LengthWidth,
+    block_offset_size: usize,
+    table_width: usize,
+    direct_rows: usize,
+    max_root_rows: u16,
+    first_row_bits: u32,
+    filtered: bool,
+    row_block_sizes: Vec<u64>,
+    row_offsets: Vec<u64>,
+    indirect_block_sizes: Vec<u64>,
+}
+
+impl FractalHeapLayout {
+    /// Derives and validates the doubling-table geometry declared by `header`.
     ///
-    /// A damaged header can declare any number of rows, and the function saturates where the shift
-    /// or the product would overflow.
-    fn block_size_for_row(&self, row: usize) -> u64 {
-        let sbs = self.starting_block_size;
-        if row <= 1 {
-            sbs
-        } else {
-            match u32::try_from(row - 1)
-                .ok()
-                .and_then(|s| 1u64.checked_shl(s))
-            {
-                Some(mult) => sbs.saturating_mul(mult),
-                None => u64::MAX,
+    /// `offset_width` and `length_width` are the file's address and length field widths.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FractalHeapLayoutError::InvalidGeometry`] if the header fields contradict the
+    /// fractal-heap doubling-table constraints or any legal row calculation overflows.
+    pub fn new(
+        header: &FractalHeapHeader,
+        offset_width: OffsetWidth,
+        length_width: LengthWidth,
+    ) -> Result<Self, FractalHeapLayoutError> {
+        if header.table_width == 0
+            || !header.table_width.is_power_of_two()
+            || header.starting_block_size == 0
+            || !header.starting_block_size.is_power_of_two()
+            || header.max_direct_block_size < header.starting_block_size
+            || !header.max_direct_block_size.is_power_of_two()
+            || header.max_heap_size == 0
+            || header.max_heap_size > 64
+        {
+            return Err(FractalHeapLayoutError::InvalidGeometry);
+        }
+
+        let start_bits = header.starting_block_size.trailing_zeros();
+        let max_direct_bits = header.max_direct_block_size.trailing_zeros();
+        let first_row_bits = start_bits
+            .checked_add(u64::from(header.table_width).trailing_zeros())
+            .ok_or(FractalHeapLayoutError::InvalidGeometry)?;
+        let heap_bits = u32::from(header.max_heap_size);
+        if heap_bits < first_row_bits {
+            return Err(FractalHeapLayoutError::InvalidGeometry);
+        }
+        let max_root_rows = u16::try_from(heap_bits - first_row_bits + 1)
+            .map_err(|_conversion_error| FractalHeapLayoutError::InvalidGeometry)?;
+        if header.start_root_rows > max_root_rows {
+            return Err(FractalHeapLayoutError::InvalidGeometry);
+        }
+        let direct_rows = usize::try_from(max_direct_bits - start_bits + 2)
+            .map_err(|_conversion_error| FractalHeapLayoutError::InvalidGeometry)?;
+        let block_offset_size = usize::from(header.max_heap_size).div_ceil(8);
+        let table_width = usize::from(header.table_width);
+        let table_width_u64 = u64::from(header.table_width);
+
+        let max_root_rows_usize = usize::from(max_root_rows);
+        let mut row_block_sizes = Vec::with_capacity(max_root_rows_usize);
+        let mut row_offsets = Vec::with_capacity(max_root_rows_usize);
+        let mut row_offset = 0u64;
+        for row in 0..max_root_rows_usize {
+            row_offsets.push(row_offset);
+            let block_size = if row <= 1 {
+                header.starting_block_size
+            } else {
+                let shift = u32::try_from(row - 1)
+                    .map_err(|_conversion_error| FractalHeapLayoutError::InvalidGeometry)?;
+                let multiplier = 1u64
+                    .checked_shl(shift)
+                    .ok_or(FractalHeapLayoutError::InvalidGeometry)?;
+                header
+                    .starting_block_size
+                    .checked_mul(multiplier)
+                    .ok_or(FractalHeapLayoutError::InvalidGeometry)?
+            };
+            let row_span = block_size
+                .checked_mul(table_width_u64)
+                .ok_or(FractalHeapLayoutError::InvalidGeometry)?;
+            row_block_sizes.push(block_size);
+            if row + 1 < max_root_rows_usize {
+                row_offset = row_offset
+                    .checked_add(row_span)
+                    .ok_or(FractalHeapLayoutError::InvalidGeometry)?;
             }
         }
-    }
 
-    /// Returns the number of rows of the doubling table that hold direct blocks, the rows before
-    /// the first row of indirect blocks.
-    ///
-    /// The count is `(max_direct_bits - start_bits) + 2`, as `H5HF__dtable_init` in
-    /// `H5HFdtable.c` (HDF5 2.2.0) computes it.
-    fn max_direct_rows(&self) -> usize {
-        let start_bits = log2_floor(self.starting_block_size);
-        let max_direct_bits = log2_floor(self.max_direct_block_size);
-        (max_direct_bits.saturating_sub(start_bits) + 2) as usize
-    }
-
-    /// Returns the number of rows of an indirect block that spans `size` bytes of heap space.
-    ///
-    /// The count is `(log2(size) - first_row_bits) + 1`, where `first_row_bits` is
-    /// `log2(starting_block_size) + log2(table_width)`, as `H5HF__dtable_size_to_rows` computes it.
-    fn size_to_rows(&self, size: u64) -> usize {
-        let first_row_bits =
-            log2_floor(self.starting_block_size) + log2_floor(self.table_width as u64);
-        (log2_floor(size).saturating_sub(first_row_bits) + 1) as usize
-    }
-
-    /// Returns the heap space an indirect block of `nrows` rows spans, saturated at `u64::MAX`.
-    fn indirect_block_heap_size(&self, nrows: usize) -> u64 {
-        let tw = self.table_width as u64;
-        let mut total = 0u64;
-        for row in 0..nrows {
-            total = total.saturating_add(self.block_size_for_row(row).saturating_mul(tw));
+        for (row, &block_size) in row_block_sizes
+            .iter()
+            .enumerate()
+            .take(max_root_rows_usize)
+            .skip(direct_rows)
+        {
+            let size_bits = block_size.trailing_zeros();
+            if size_bits < first_row_bits {
+                return Err(FractalHeapLayoutError::InvalidGeometry);
+            }
+            let child_rows = usize::try_from(size_bits - first_row_bits + 1)
+                .map_err(|_conversion_error| FractalHeapLayoutError::InvalidGeometry)?;
+            if child_rows == 0
+                || child_rows > row
+                || row_offsets.get(child_rows).copied() != Some(block_size)
+            {
+                return Err(FractalHeapLayoutError::InvalidGeometry);
+            }
         }
-        total
+
+        let prefix = 5u64
+            .checked_add(u64::from(offset_width.get()))
+            .and_then(|n| n.checked_add(u64::try_from(block_offset_size).ok()?))
+            .ok_or(FractalHeapLayoutError::InvalidGeometry)?;
+        let direct_entry_size = u64::from(offset_width.get())
+            .checked_add(if header.io_filter_encoded_length == 0 {
+                0
+            } else {
+                u64::from(length_width.get()) + 4
+            })
+            .ok_or(FractalHeapLayoutError::InvalidGeometry)?;
+        let indirect_entry_size = u64::from(offset_width.get());
+        let mut indirect_block_sizes = Vec::with_capacity(usize::from(max_root_rows));
+        for nrows in 1..=usize::from(max_root_rows) {
+            let direct = nrows.min(direct_rows);
+            let indirect = nrows - direct;
+            let entry_row_bytes = u64::try_from(direct)
+                .ok()
+                .and_then(|rows| rows.checked_mul(direct_entry_size))
+                .and_then(|bytes| {
+                    u64::try_from(indirect)
+                        .ok()
+                        .and_then(|rows| rows.checked_mul(indirect_entry_size))
+                        .and_then(|more| bytes.checked_add(more))
+                })
+                .ok_or(FractalHeapLayoutError::InvalidGeometry)?;
+            let entries = entry_row_bytes
+                .checked_mul(table_width_u64)
+                .ok_or(FractalHeapLayoutError::InvalidGeometry)?;
+            let size = prefix
+                .checked_add(entries)
+                .and_then(|n| n.checked_add(4))
+                .ok_or(FractalHeapLayoutError::InvalidGeometry)?;
+            indirect_block_sizes.push(size);
+        }
+
+        Ok(Self {
+            offset_width,
+            length_width,
+            block_offset_size,
+            table_width,
+            direct_rows,
+            max_root_rows,
+            first_row_bits,
+            filtered: header.io_filter_encoded_length != 0,
+            row_block_sizes,
+            row_offsets,
+            indirect_block_sizes,
+        })
+    }
+
+    /// Returns the file's address field width.
+    pub const fn offset_width(&self) -> OffsetWidth {
+        self.offset_width
+    }
+
+    /// Returns the file's length field width.
+    pub const fn length_width(&self) -> LengthWidth {
+        self.length_width
+    }
+
+    /// Returns the width in bytes of a managed block's "Block Offset" field.
+    pub const fn block_offset_size(&self) -> usize {
+        self.block_offset_size
+    }
+
+    /// Returns the number of child slots in each doubling-table row.
+    pub const fn table_width(&self) -> usize {
+        self.table_width
+    }
+
+    /// Returns the number of doubling-table rows whose entries address direct blocks.
+    pub const fn direct_rows(&self) -> usize {
+        self.direct_rows
+    }
+
+    /// Returns the maximum legal number of rows in the root indirect block.
+    pub const fn max_root_rows(&self) -> u16 {
+        self.max_root_rows
+    }
+
+    /// Returns the exact allocated size of a block in doubling-table `row`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FractalHeapLayoutError::InvalidGeometry`] if `row` is outside the managed heap's
+    /// legal doubling-table rows.
+    pub fn block_size_for_row(&self, row: usize) -> Result<u64, FractalHeapLayoutError> {
+        self.row_block_sizes
+            .get(row)
+            .copied()
+            .ok_or(FractalHeapLayoutError::InvalidGeometry)
+    }
+
+    /// Returns the row count of the child indirect blocks addressed by doubling-table `row`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FractalHeapLayoutError::InvalidGeometry`] if `row` is a direct row or lies outside
+    /// the managed heap's legal doubling-table rows.
+    pub fn child_indirect_rows(&self, row: usize) -> Result<u16, FractalHeapLayoutError> {
+        if row < self.direct_rows {
+            return Err(FractalHeapLayoutError::InvalidGeometry);
+        }
+        let size = self.block_size_for_row(row)?;
+        let size_bits = size.trailing_zeros();
+        if size_bits < self.first_row_bits {
+            return Err(FractalHeapLayoutError::InvalidGeometry);
+        }
+        u16::try_from(size_bits - self.first_row_bits + 1)
+            .map_err(|_conversion_error| FractalHeapLayoutError::InvalidGeometry)
+    }
+
+    /// Returns the managed heap-address space represented by an indirect block of `nrows` rows.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FractalHeapLayoutError::InvalidGeometry`] if `nrows` is zero or exceeds the
+    /// maximum root row count.
+    pub fn indirect_heap_size(&self, nrows: u16) -> Result<u64, FractalHeapLayoutError> {
+        if nrows == 0 || nrows > self.max_root_rows {
+            return Err(FractalHeapLayoutError::InvalidGeometry);
+        }
+        let last_row = usize::from(nrows - 1);
+        let start = self.row_offset(last_row)?;
+        let span = self
+            .block_size_for_row(last_row)?
+            .checked_mul(
+                u64::try_from(self.table_width)
+                    .map_err(|_conversion_error| FractalHeapLayoutError::InvalidGeometry)?,
+            )
+            .ok_or(FractalHeapLayoutError::InvalidGeometry)?;
+        start
+            .checked_add(span)
+            .ok_or(FractalHeapLayoutError::InvalidGeometry)
+    }
+
+    /// Returns the exact encoded allocation size of an indirect block of `nrows` rows.
+    ///
+    /// The size includes the `FHIB` signature, version, heap-header address, block heap offset,
+    /// child entries, and trailing checksum. Filtered heaps use their wider direct-child entries.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FractalHeapLayoutError::InvalidGeometry`] if `nrows` is zero or exceeds the
+    /// maximum root row count.
+    pub fn indirect_block_size(&self, nrows: u16) -> Result<u64, FractalHeapLayoutError> {
+        let index = usize::from(nrows)
+            .checked_sub(1)
+            .ok_or(FractalHeapLayoutError::InvalidGeometry)?;
+        self.indirect_block_sizes
+            .get(index)
+            .copied()
+            .ok_or(FractalHeapLayoutError::InvalidGeometry)
+    }
+
+    /// Returns the encoded indirect-block length through the end of its child entries.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FractalHeapLayoutError::InvalidGeometry`] if `nrows` is zero or exceeds the
+    /// maximum root row count.
+    pub fn indirect_block_entries_len(&self, nrows: u16) -> Result<u64, FractalHeapLayoutError> {
+        self.indirect_block_size(nrows)?
+            .checked_sub(4)
+            .ok_or(FractalHeapLayoutError::InvalidGeometry)
+    }
+
+    /// Returns the heap offset of the first child slot in doubling-table `row`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FractalHeapLayoutError::InvalidGeometry`] if `row` lies outside the managed
+    /// heap's legal doubling-table rows.
+    pub fn row_offset(&self, row: usize) -> Result<u64, FractalHeapLayoutError> {
+        self.row_offsets
+            .get(row)
+            .copied()
+            .ok_or(FractalHeapLayoutError::InvalidGeometry)
+    }
+
+    /// Returns the heap offset of child slot `column` in doubling-table `row`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FractalHeapLayoutError::InvalidGeometry`] if the row or column lies outside the
+    /// doubling table.
+    pub fn slot_offset(&self, row: usize, column: usize) -> Result<u64, FractalHeapLayoutError> {
+        if column >= self.table_width {
+            return Err(FractalHeapLayoutError::InvalidGeometry);
+        }
+        let row_offset = self.row_offset(row)?;
+        let block_size = self.block_size_for_row(row)?;
+        let column = u64::try_from(column)
+            .map_err(|_conversion_error| FractalHeapLayoutError::InvalidGeometry)?;
+        row_offset
+            .checked_add(
+                column
+                    .checked_mul(block_size)
+                    .ok_or(FractalHeapLayoutError::InvalidGeometry)?,
+            )
+            .ok_or(FractalHeapLayoutError::InvalidGeometry)
+    }
+
+    /// Returns the allocated child whose managed heap space contains `target_offset`.
+    ///
+    /// `block` begins at the `FHIB` signature, and `iblock_heap_offset` is the managed heap offset
+    /// represented by the indirect block itself.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::InvalidFractalHeapSignature`] if `block` lacks the `FHIB` signature,
+    /// [`FormatError::UnsupportedFilteredHeapObject`] if the heap filters managed blocks, and
+    /// [`FormatError::UnexpectedEof`] if a required child address lies beyond `block`.
+    pub fn find_child_for_offset(
+        &self,
+        block: &[u8],
+        nrows: u16,
+        iblock_heap_offset: u64,
+        target_offset: u64,
+    ) -> Result<Option<FractalHeapChild>, FormatError> {
+        bytes::ensure_len(block, 0, 4)?;
+        if &block[..4] != b"FHIB" {
+            return Err(FormatError::InvalidFractalHeapSignature);
+        }
+        if self.filtered {
+            return Err(FormatError::UnsupportedFilteredHeapObject);
+        }
+        if nrows == 0 || nrows > self.max_root_rows {
+            return Err(Self::geometry_format_error());
+        }
+
+        let entries_at = 5usize
+            .checked_add(usize::from(self.offset_width.get()))
+            .and_then(|n| n.checked_add(self.block_offset_size))
+            .ok_or_else(Self::geometry_format_error)?;
+        let direct_rows = usize::from(nrows).min(self.direct_rows);
+        let offset_size = usize::from(self.offset_width.get());
+
+        for row in 0..usize::from(nrows) {
+            let slot_size = self
+                .block_size_for_row(row)
+                .map_err(|_error| Self::geometry_format_error())?;
+            let child_rows = if row < direct_rows {
+                None
+            } else {
+                Some(
+                    self.child_indirect_rows(row)
+                        .map_err(|_error| Self::geometry_format_error())?,
+                )
+            };
+            for column in 0..self.table_width {
+                let entry = row
+                    .checked_mul(self.table_width)
+                    .and_then(|n| n.checked_add(column))
+                    .ok_or_else(Self::geometry_format_error)?;
+                let pos = entries_at
+                    .checked_add(
+                        entry
+                            .checked_mul(offset_size)
+                            .ok_or_else(Self::geometry_format_error)?,
+                    )
+                    .ok_or_else(Self::geometry_format_error)?;
+                let child_addr = bytes::read_offset(block, pos, self.offset_width.get())?;
+                if convert::is_undefined_addr(child_addr, self.offset_width.get()) {
+                    continue;
+                }
+                let child_heap_offset = iblock_heap_offset
+                    .checked_add(
+                        self.slot_offset(row, column)
+                            .map_err(|_error| Self::geometry_format_error())?,
+                    )
+                    .ok_or_else(Self::geometry_format_error)?;
+                let span = match child_rows {
+                    Some(rows) => self
+                        .indirect_heap_size(rows)
+                        .map_err(|_error| Self::geometry_format_error())?,
+                    None => slot_size,
+                };
+                let child_end = child_heap_offset
+                    .checked_add(span)
+                    .ok_or_else(Self::geometry_format_error)?;
+                if target_offset < child_heap_offset || target_offset >= child_end {
+                    continue;
+                }
+                return Ok(Some(match child_rows {
+                    Some(nrows) => FractalHeapChild::Indirect {
+                        addr: StoredAddress::new(child_addr),
+                        nrows,
+                        heap_offset: child_heap_offset,
+                    },
+                    None => FractalHeapChild::Direct {
+                        addr: StoredAddress::new(child_addr),
+                        block_size: slot_size,
+                        heap_offset: child_heap_offset,
+                    },
+                }));
+            }
+        }
+        Ok(None)
+    }
+
+    fn geometry_format_error() -> FormatError {
+        FormatError::ChunkedReadError("fractal heap: invalid doubling-table geometry".into())
     }
 }
 
@@ -1562,22 +1601,25 @@ mod tests {
 
     #[test]
     fn the_indirect_block_walk_of_a_filtered_heap_is_unsupported() {
-        let mut h = dtable_header(512, 65536, 4);
-        h.io_filter_encoded_length = 8;
+        let mut header = dtable_header(512, 65536, 4);
+        header.io_filter_encoded_length = 8;
+        let layout =
+            FractalHeapLayout::new(&header, OffsetWidth::Eight, LengthWidth::Eight).unwrap();
         let mut block = b"FHIB".to_vec();
         block.resize(256, 0);
         assert_eq!(
-            h.indirect_block_entries_len(2, 8),
-            Err(FormatError::UnsupportedFilteredHeapObject)
-        );
-        assert_eq!(
-            h.find_child_for_offset(&block, 2, 0, 0, 8),
+            layout.find_child_for_offset(&block, 2, 0, 0),
             Err(FormatError::UnsupportedFilteredHeapObject)
         );
 
         // In an unfiltered heap, the function returns `None` for an offset past the block's space.
-        h.io_filter_encoded_length = 0;
-        assert_eq!(h.find_child_for_offset(&block, 2, 0, u64::MAX, 8), Ok(None));
+        header.io_filter_encoded_length = 0;
+        let layout =
+            FractalHeapLayout::new(&header, OffsetWidth::Eight, LengthWidth::Eight).unwrap();
+        assert_eq!(
+            layout.find_child_for_offset(&block, 2, 0, u64::MAX),
+            Ok(None)
+        );
     }
 
     #[rstest]
@@ -1635,20 +1677,7 @@ mod tests {
         );
     }
 
-    #[test]
-    fn log2_floor_rounds_down_and_maps_0_to_0() {
-        assert_eq!(log2_floor(0), 0);
-        assert_eq!(log2_floor(1), 0);
-        assert_eq!(log2_floor(512), 9);
-        assert_eq!(log2_floor(65536), 16);
-        assert_eq!(log2_floor(131072), 17);
-        // Rounded down, as `H5VM_log2_gen` rounds.
-        assert_eq!(log2_floor(1023), 9);
-        assert_eq!(log2_floor(1024), 10);
-    }
-
-    /// Returns a header with these doubling-table parameters, the fields `max_direct_rows` and
-    /// `size_to_rows` read.
+    /// Returns a header with the supplied doubling-table parameters.
     fn dtable_header(
         start_block_size: u64,
         max_direct_block_size: u64,
@@ -1674,32 +1703,39 @@ mod tests {
             table_width,
             starting_block_size: start_block_size,
             max_direct_block_size,
-            max_heap_size: 64,
+            max_heap_size: 40,
             start_root_rows: 1,
             root_block_address: StoredAddress::new(0),
             current_rows_in_root_indirect_block: 0,
         }
     }
 
-    #[test]
-    fn max_direct_rows_matches_hdf5_formula() {
-        // `(log2(max_direct) - log2(start)) + 2`, as `H5HF__dtable_init` computes it.
-        assert_eq!(dtable_header(512, 65536, 4).max_direct_rows(), 9); // (16-9)+2
-        assert_eq!(dtable_header(4096, 65536, 4).max_direct_rows(), 6); // (16-12)+2
-        // A largest direct block of the starting size gives the fewest direct rows, 2.
-        assert_eq!(dtable_header(512, 512, 4).max_direct_rows(), 2);
+    fn dtable_layout(header: &FractalHeapHeader) -> FractalHeapLayout {
+        FractalHeapLayout::new(header, OffsetWidth::Eight, LengthWidth::Eight).unwrap()
     }
 
     #[test]
-    fn size_to_rows_matches_hdf5_formula() {
-        // `first_row_bits = log2(start) + log2(width)`. For start=512, width=4:
-        // `first_row_bits = 9 + 2 = 11`, rows = (log2(size) - 11) + 1.
-        let h = dtable_header(512, 65536, 4);
-        assert_eq!(h.size_to_rows(131072), 7); // 2^17: (17-11)+1
-        assert_eq!(h.size_to_rows(4096), 2); // 2^12: (12-11)+1
-        // A size below `first_row_bits` saturates to one row.
-        assert_eq!(h.size_to_rows(512), 1);
-        assert_eq!(h.size_to_rows(1), 1);
+    fn layout_derives_direct_rows_from_the_doubling_table() {
+        assert_eq!(
+            dtable_layout(&dtable_header(512, 65536, 4)).direct_rows(),
+            9
+        );
+        assert_eq!(
+            dtable_layout(&dtable_header(4096, 65536, 4)).direct_rows(),
+            6
+        );
+        let smallest = FractalHeapHeader {
+            max_heap_size: 12,
+            ..dtable_header(512, 512, 4)
+        };
+        assert_eq!(dtable_layout(&smallest).direct_rows(), 2);
+    }
+
+    #[test]
+    fn layout_derives_child_indirect_rows_from_the_slot_size() {
+        let layout = dtable_layout(&dtable_header(512, 65536, 4));
+        assert_eq!(layout.block_size_for_row(9), Ok(131072));
+        assert_eq!(layout.child_indirect_rows(9), Ok(7));
     }
 
     #[test]
@@ -1719,19 +1755,18 @@ mod tests {
             block.extend_from_slice(&address.to_le_bytes());
         }
 
+        let layout =
+            FractalHeapLayout::new(&header, OffsetWidth::Eight, LengthWidth::Eight).unwrap();
+        assert_eq!(layout.indirect_block_entries_len(1), Ok(block.len() as u64));
         assert_eq!(
-            header.indirect_block_entries_len(1, 8),
-            Ok(block.len() as u64)
-        );
-        assert_eq!(
-            header.find_child_for_offset(&block, 1, 0, 300, 8),
+            layout.find_child_for_offset(&block, 1, 0, 300),
             Ok(Some(FractalHeapChild::Direct {
                 addr: StoredAddress::new(0x2000),
                 block_size: 128,
                 heap_offset: 256,
             }))
         );
-        assert_eq!(header.find_child_for_offset(&block, 1, 0, 200, 8), Ok(None));
+        assert_eq!(layout.find_child_for_offset(&block, 1, 0, 200), Ok(None));
     }
 
     #[rstest]
