@@ -204,12 +204,13 @@
 //! (issue #286 for the paged tail, issue #358 for the flat one).
 //!
 //! Reclaim is best-effort and conservative. Contiguous and chunked datasets
-//! (chunk index plus chunk data) and whole group subtrees are reclaimed. A
-//! Dense attribute version 2 B-tree indexes are reclaimed when their owning dense set becomes
-//! dead. The associated fractal heap remains dead storage. A deleted object whose other blocks
-//! cannot be enumerated exhaustively (variable-length global-heap storage, dense link storage, or
-//! an object header other than version 2) is left as dead bytes. This avoids freeing a region that
-//! may still be in use. Under-reclaiming only wastes space. Over-reclaiming could corrupt the file.
+//! (chunk index plus chunk data) and whole group subtrees are reclaimed. Dense attribute and dense
+//! group version 2 B-tree indexes are reclaimed when their owning storage becomes dead. Their
+//! associated fractal heaps remain dead storage. A deleted object whose other blocks cannot be
+//! enumerated exhaustively (variable-length global-heap storage, dense attribute or link fractal
+//! heaps, or an object header other than version 2) is left as dead bytes. This avoids freeing a
+//! region that may still be in use. Under-reclaiming only wastes space. Over-reclaiming could
+//! corrupt the file.
 //!
 //! On a paged file that conservatism extends to anything whose *page type* is not
 //! established. A file another writer produced records free space this one cannot
@@ -10109,6 +10110,61 @@ impl WriteEngine {
         spans_disjoint_in_bounds(&mut owned, self.image.len()).then_some(index_spans)
     }
 
+    /// Returns the dense-group version 2 B-tree allocations identified by an old group header.
+    ///
+    /// The Link Info message separates the fractal heap from its type 5 name index and optional
+    /// type 6 creation-order index. Only the indexes are returned. The complete index set is
+    /// proven together and checked against the old object-header allocations before any span
+    /// joins the deferred reclamation plan. `None` leaves the index set unreclaimed.
+    fn dense_group_index_spans(
+        &self,
+        addr: u64,
+        header_spans: &[(u64, u64)],
+    ) -> Option<Vec<(u64, u64)>> {
+        let base = self.superblock.base_address;
+        let region = Self::gather_oh_messages(&self.image(), addr, base).ok()?;
+        let mut link_info = None;
+        let mut p = 0;
+        while let Some((msg_type, body, body_end)) = region.next_message(p).ok()? {
+            if msg_type == MessageType::LINK_INFO {
+                if link_info.is_some() {
+                    return None;
+                }
+                link_info =
+                    Some(LinkInfoMessage::parse(&region[body..body_end], OFFSET_SIZE).ok()?);
+            }
+            p = body_end;
+        }
+        let Some(link_info) = link_info else {
+            return Some(Vec::new());
+        };
+        if link_info.fractal_heap_address.is_none() {
+            return Some(Vec::new());
+        }
+
+        let extents = crate::group_v2::collect_dense_group_index_storage_extents(
+            &BaseOffsetSource {
+                inner: &self.image(),
+                base,
+            },
+            &link_info,
+            OFFSET_SIZE,
+            LENGTH_SIZE,
+        )
+        .ok()?;
+        let mut index_spans = Vec::with_capacity(extents.len());
+        for extent in extents {
+            index_spans.push((
+                base.absolute(StoredAddress::new(extent.start())).ok()?,
+                extent.len(),
+            ));
+        }
+
+        let mut owned = header_spans.to_vec();
+        owned.extend(index_spans.iter().copied());
+        spans_disjoint_in_bounds(&mut owned, self.image.len()).then_some(index_spans)
+    }
+
     /// Count, for every object-header address reachable from the root, how many
     /// hard links in the *pre-commit* file point to it. The result drives the
     /// last-hard-link reclaim guard in [`collect_free_spans`](Self::collect_free_spans):
@@ -10180,10 +10236,11 @@ impl WriteEngine {
     /// and whole group subtrees are reclaimed. Deliberately conservative: any
     /// object whose layout it cannot fully account for — a non-v2 header, an
     /// unsupported or only-partially-enumerable chunk index, or a group holding a soft/external
-    /// link contributes nothing and is not descended into, so `out` never includes a region that
-    /// might still be in use. Dense attribute indexes are added only after their complete index
-    /// set is proven. Their fractal heap is left in place. Bounded by [`MAX_COPY_DEPTH`] against a
-    /// hard-link cycle.
+    /// link contributes nothing and is not descended into, so `out` never contains a region that
+    /// might still be in use. Dense attribute and dense group indexes are added only after each
+    /// complete index set is proven. Dense group index ownership is separate from ownership of the
+    /// child objects its links reach. The associated fractal heaps stay in place. Bounded by
+    /// [`MAX_COPY_DEPTH`] against a hard-link cycle.
     /// Variable-length data in global-heap collections is never reclaimed here (a
     /// collection can be shared between objects), so it is simply left behind.
     ///
@@ -10256,7 +10313,12 @@ impl WriteEngine {
                 }
             }
             Ok(ObjModel::Group { children, .. }) => {
+                let dense_group_index_spans = self.dense_group_index_spans(addr, &spans);
                 append_object_metadata_spans(out, &spans, dense_index_spans.as_deref());
+                if let Some(index_spans) = dense_group_index_spans {
+                    // Dense-link B-tree headers and nodes are file metadata under PAGE.
+                    out.extend(meta_spans(index_spans));
+                }
                 // The recursion works in absolute offsets, matching `incoming`'s
                 // keys and `oh_chunk_spans`.
                 for (_, _, child) in children {

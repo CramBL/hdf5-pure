@@ -34,7 +34,7 @@ Shared object-header messages are supported for datatypes, dataspaces, fill valu
 |---|:---:|:---:|:---:|---|
 | Version 1 symbol table | ✅ | ⬆️ | ✅ | Modified groups use compact link storage. |
 | Compact link storage | ✅ | ✅ | ✅ | |
-| Dense link storage | ✅ | ❌ | ❌ | |
+| Dense link storage | ✅ | ❌ | ❌ | Deleting a dead group reclaims its v2 B-tree indexes. Its fractal heap remains allocated. |
 | Link creation-order tracking | ✅ | ❌ | 🟡 | New links can be added while compact storage remains valid. |
 
 ## Attributes
