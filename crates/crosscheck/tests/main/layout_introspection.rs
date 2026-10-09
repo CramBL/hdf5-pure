@@ -8,8 +8,8 @@
 //!
 //! Covers the classes the pure writer cannot itself emit: `Compact` (the pure
 //! writer always uses contiguous) and the legacy `BTreeV1` index (the pure
-//! writer only emits the v4 indices), plus a v2-B-tree (`BTreeV2`) dataset, whose
-//! chunks are classified but not yet enumerable.
+//! writer only emits the v4 array indices), plus unfiltered and filtered v2-B-tree (`BTreeV2`)
+//! datasets whose chunks the pure reader enumerates and reads.
 
 use hdf5::Extent;
 use hdf5::dataset::Layout as CLayout;
@@ -272,30 +272,30 @@ fn c_shuffle_then_deflate_pipeline() {
     }
 }
 
-// ---- v2 B-tree (classified, not yet enumerable) -----------------------------
+// ---- v2 B-tree ---------------------------------------------------------------
 
 #[test]
-fn c_btree_v2_classifies_but_chunks_unsupported() {
+#[cfg(target_endian = "little")]
+fn c_btree_v2_unfiltered_enumerates_multi_level_tree() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("btree_v2.h5");
+    let values = (0..24 * 24).collect::<Vec<i32>>();
     {
-        // Two unlimited dimensions select a v2 B-tree chunk index. Write data so
-        // the index is actually allocated (an unallocated index would report zero
-        // chunks rather than exercise the missing walker).
+        // Two unlimited dimensions select a v2 B-tree chunk index. The 144 chunks exceed one
+        // 2-KiB type-10 leaf, so the reference library writes internal nodes as well.
         let file = c_file(&path, LibraryVersion::V110, LibraryVersion::latest());
         let ds = file
             .new_dataset::<i32>()
             .chunk((2, 2))
-            .shape((Extent::resizable(4), Extent::resizable(4)))
+            .shape((Extent::resizable(24), Extent::resizable(24)))
             .create("d")
             .unwrap();
-        ds.write_raw(&(0..16).collect::<Vec<i32>>()).unwrap();
+        ds.write_raw(&values).unwrap();
         file.close().unwrap();
     }
 
     let f = File::open(&path).unwrap();
     let ds = f.dataset("d").unwrap();
-    // Classified from the layout message alone.
     assert_eq!(ds.chunk_index().unwrap(), Some(ChunkIndex::BTreeV2));
     assert!(matches!(
         ds.layout().unwrap(),
@@ -304,7 +304,53 @@ fn c_btree_v2_classifies_but_chunks_unsupported() {
             ..
         }
     ));
-    // Enumerating a v2-B-tree index is not supported yet: a clear error, not a
-    // silent empty list.
-    assert!(ds.chunks().is_err());
+
+    let mut chunks = ds.chunks().unwrap();
+    assert_eq!(chunks.len(), 144);
+    chunks.sort_by_key(|chunk| chunk.offset.clone());
+    assert!(
+        chunks
+            .iter()
+            .all(|chunk| chunk.storage_size == 16 && chunk.filter_mask == 0)
+    );
+    assert_eq!(chunks[0].offset, vec![0, 0]);
+    assert_eq!(chunk_i32_at(&path, &chunks[0]), vec![0, 1, 24, 25]);
+    assert_eq!(chunks[143].offset, vec![22, 22]);
+    assert_eq!(chunk_i32_at(&path, &chunks[143]), vec![550, 551, 574, 575]);
+    assert_eq!(ds.read_i32().unwrap(), read_c_i32(&path, "d"));
+}
+
+#[test]
+fn c_btree_v2_filtered_reads_type_11_records() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("btree_v2_filtered.h5");
+    let values = vec![7i32; 40 * 40];
+    {
+        // The filtered v2 B-tree uses client type 11. One hundred records are enough to force
+        // internal nodes with the reference library's 2-KiB B-tree node size.
+        let file = c_file(&path, LibraryVersion::V110, LibraryVersion::latest());
+        let ds = file
+            .new_dataset::<i32>()
+            .chunk((4, 4))
+            .deflate(6)
+            .shape((Extent::resizable(40), Extent::resizable(40)))
+            .create("d")
+            .unwrap();
+        ds.write_raw(&values).unwrap();
+        file.close().unwrap();
+    }
+
+    let f = File::open(&path).unwrap();
+    let ds = f.dataset("d").unwrap();
+    assert_eq!(ds.chunk_index().unwrap(), Some(ChunkIndex::BTreeV2));
+    let chunks = ds.chunks().unwrap();
+    assert_eq!(chunks.len(), 100);
+    assert!(chunks.iter().all(|chunk| chunk.filter_mask == 0));
+    assert!(
+        chunks
+            .iter()
+            .all(|chunk| chunk.storage_size > 0 && chunk.storage_size < 4 * 4 * 4)
+    );
+    assert_eq!(ds.read_i32().unwrap(), values);
+    assert_eq!(ds.read_i32().unwrap(), read_c_i32(&path, "d"));
 }

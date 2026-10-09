@@ -9,11 +9,12 @@
 //! [`HugeObjectRecord`] and [`AttributeRecord`] are the records of the huge-object index of a
 //! fractal heap and of the attribute indexes, with their encoders. A reader parses a huge-object
 //! record with [`BTreeV2Record::huge_object`], and reads the heap ID and the creation order of the
-//! other records with the other methods of [`BTreeV2Record`].
+//! other records with the other methods of [`BTreeV2Record`]. [`BTreeV2ChunkRecordContext`]
+//! decodes dataset chunk-index client types 10 and 11 into [`BTreeV2ChunkRecord`] values.
 //!
 //! [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_infra_btrees_v2
 
-use core::num::NonZeroU16;
+use core::num::{NonZeroU16, NonZeroU64};
 
 use alloc::vec;
 use alloc::vec::Vec;
@@ -25,7 +26,9 @@ use byteorder::LittleEndian;
 
 use crate::address::StoredAddress;
 use crate::bytes;
+use crate::chunk_record;
 use crate::convert::Narrow;
+use crate::data_layout::LayoutVersion;
 use crate::error::FormatError;
 use crate::message_flags::MessageFlags;
 use crate::metadata_source::MetadataSource;
@@ -228,6 +231,181 @@ impl BTreeV2Header {
         let buf = source.read_metadata_at(address, window)?;
         Self::parse(&buf, 0, offset_size, length_size)
     }
+}
+
+/// The dataset context needed to decode a version 2 B-tree chunk record.
+///
+/// Types 10 and 11 store scaled chunk coordinates for the dataset dimensions. Type 10 omits
+/// chunk size and filter-mask fields because its chunks are unfiltered and have the fixed logical
+/// chunk size. Type 11 stores both. For version 4 layout messages, the stored-size field is one
+/// byte wider than the fewest bytes needed for the logical chunk size, capped at 8 bytes.
+/// `H5D_BT2_COMPUTE_CHUNK_SIZE_LEN` in `H5Dbtree2.c` (HDF5 2.2.0) applies that rule.
+///
+/// The two record layouts are defined in "Version 2 B-trees" of the [format specification,
+/// version 4.0][spec].
+///
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_infra_btrees_v2
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct BTreeV2ChunkRecordContext {
+    tree_type: u8,
+    offset_width: OffsetWidth,
+    rank: usize,
+    fixed_chunk_size: NonZeroU64,
+    stored_size_width: usize,
+    record_size: usize,
+}
+
+impl BTreeV2ChunkRecordContext {
+    /// Creates a context for a type 10 or type 11 chunk index.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::InvalidBTreeNodeType`] if `tree_type` is not 10 or 11,
+    /// [`FormatError::InvalidLayoutVersion`] if `layout_version` is not 4, and
+    /// [`FormatError::InvalidChunkGeometry`] if the record size cannot be represented.
+    pub fn new(
+        tree_type: u8,
+        offset_width: OffsetWidth,
+        rank: usize,
+        fixed_chunk_size: NonZeroU64,
+        layout_version: LayoutVersion,
+    ) -> Result<Self, FormatError> {
+        if !matches!(tree_type, BTREE_V2_CHUNK | BTREE_V2_FILTERED_CHUNK) {
+            return Err(FormatError::InvalidBTreeNodeType(tree_type));
+        }
+        if layout_version != LayoutVersion::Four {
+            return Err(FormatError::InvalidLayoutVersion(layout_version.get()));
+        }
+
+        let stored_size_width = if tree_type == BTREE_V2_FILTERED_CHUNK {
+            chunk_record::chunk_element_encoding(fixed_chunk_size.get(), offset_width, true)
+                .chunk_size_bytes
+        } else {
+            0
+        };
+        let coordinate_bytes =
+            rank.checked_mul(CHUNK_COORDINATE_LEN)
+                .ok_or(FormatError::InvalidChunkGeometry(
+                    "version 2 B-tree chunk record size overflows",
+                ))?;
+        let record_size = usize::from(offset_width.get())
+            .checked_add(stored_size_width)
+            .and_then(|size| {
+                size.checked_add(if tree_type == BTREE_V2_FILTERED_CHUNK {
+                    FILTER_MASK_LEN
+                } else {
+                    0
+                })
+            })
+            .and_then(|size| size.checked_add(coordinate_bytes))
+            .ok_or(FormatError::InvalidChunkGeometry(
+                "version 2 B-tree chunk record size overflows",
+            ))?;
+        if record_size > usize::from(u16::MAX) {
+            return Err(FormatError::InvalidChunkGeometry(
+                "version 2 B-tree chunk record is too large",
+            ));
+        }
+
+        Ok(Self {
+            tree_type,
+            offset_width,
+            rank,
+            fixed_chunk_size,
+            stored_size_width,
+            record_size,
+        })
+    }
+
+    /// Returns the exact encoded size of one record.
+    pub fn record_size(self) -> usize {
+        self.record_size
+    }
+
+    /// Requires the B-tree header's declared record size to match this record layout.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::DataSizeMismatch`] if `actual` differs from the exact record size.
+    pub fn require_record_size(self, actual: u16) -> Result<(), FormatError> {
+        let actual = usize::from(actual);
+        if actual != self.record_size {
+            return Err(FormatError::DataSizeMismatch {
+                expected: self.record_size,
+                actual,
+            });
+        }
+        Ok(())
+    }
+
+    /// Decodes a raw record as the chunk-index client type this context describes.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::DataSizeMismatch`] unless the record has exactly the expected
+    /// length, [`FormatError::ChunkedReadError`] for an undefined chunk address, and
+    /// [`FormatError::InvalidChunkGeometry`] for a zero stored size in a filtered record.
+    pub fn decode(self, record: &BTreeV2Record) -> Result<BTreeV2ChunkRecord, FormatError> {
+        if record.data.len() != self.record_size {
+            return Err(FormatError::DataSizeMismatch {
+                expected: self.record_size,
+                actual: record.data.len(),
+            });
+        }
+
+        let address = bytes::read_optional_offset_width(&record.data, 0, self.offset_width)?
+            .ok_or_else(|| {
+                FormatError::ChunkedReadError(
+                    "version 2 B-tree chunk record has an undefined chunk address".into(),
+                )
+            })?;
+        let mut pos = usize::from(self.offset_width.get());
+        let (stored_size, filter_mask) = if self.tree_type == BTREE_V2_FILTERED_CHUNK {
+            let stored_size = read_var_uint(&record.data, pos, self.stored_size_width)?;
+            if stored_size == 0 {
+                return Err(FormatError::InvalidChunkGeometry(
+                    "filtered version 2 B-tree chunk record has zero stored size",
+                ));
+            }
+            pos += self.stored_size_width;
+            let mut fields = bytes::Fields::new(&record.data, pos);
+            let filter_mask = fields.u32()?;
+            pos = fields.pos();
+            (stored_size, filter_mask)
+        } else {
+            (self.fixed_chunk_size.get(), 0)
+        };
+
+        let mut scaled_offsets = Vec::with_capacity(self.rank);
+        for _ in 0..self.rank {
+            scaled_offsets.push(read_var_uint(&record.data, pos, CHUNK_COORDINATE_LEN)?);
+            pos += CHUNK_COORDINATE_LEN;
+        }
+
+        Ok(BTreeV2ChunkRecord {
+            address: StoredAddress::new(address),
+            stored_size,
+            filter_mask,
+            scaled_offsets,
+        })
+    }
+}
+
+/// A decoded type 10 or type 11 record of a version 2 B-tree chunk index.
+///
+/// The B-tree stores chunk coordinates scaled by the dataset's chunk dimensions. The reader
+/// converts [`scaled_offsets`](Self::scaled_offsets) to ordinary element offsets before exposing
+/// the chunk.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BTreeV2ChunkRecord {
+    /// The address of the chunk in the file.
+    pub address: StoredAddress,
+    /// The size of the chunk in the file in bytes, after its filters.
+    pub stored_size: u64,
+    /// The filters skipped for the chunk: bit `i` is set where filter `i` was not applied.
+    pub filter_mask: u32,
+    /// The chunk coordinates, in units of whole chunks, for each dataset dimension.
+    pub scaled_offsets: Vec<u64>,
 }
 
 impl BTreeV2Record {
@@ -660,6 +838,20 @@ pub const BTREE_V2_ATTRIBUTE_NAME: u8 = 8;
 /// the same table as [`BTREE_V2_HUGE_OBJECT`].
 pub const BTREE_V2_ATTRIBUTE_CREATION_ORDER: u8 = 9;
 
+/// The type of a version 2 B-tree that indexes unfiltered dataset chunks, from the same table as
+/// [`BTREE_V2_HUGE_OBJECT`].
+pub const BTREE_V2_CHUNK: u8 = 10;
+
+/// The type of a version 2 B-tree that indexes filtered dataset chunks, from the same table as
+/// [`BTREE_V2_HUGE_OBJECT`].
+pub const BTREE_V2_FILTERED_CHUNK: u8 = 11;
+
+/// The width of one scaled chunk coordinate in a type 10 or type 11 record.
+const CHUNK_COORDINATE_LEN: usize = 8;
+
+/// The width of the filter mask in a type 11 record.
+const FILTER_MASK_LEN: usize = 4;
+
 /// The width of the creation order that opens a type 6 record, from the same section as
 /// [`BTREE_V2_HUGE_OBJECT`].
 const LINK_CREATION_ORDER_LEN: usize = 8;
@@ -677,6 +869,7 @@ const NAME_HASH_LEN: u16 = 4;
 mod tests {
     use rstest::rstest;
     use test_util::btree_v2;
+    use test_util::bytes as test_bytes;
     use test_util::widths::Widths;
 
     use super::*;
@@ -708,6 +901,166 @@ mod tests {
         assert_eq!(hdr.root_node_address, StoredAddress::new(0x1000));
         assert_eq!(hdr.num_records_in_root, 3);
         assert_eq!(hdr.total_records, 3);
+    }
+
+    #[test]
+    fn type_10_chunk_records_decode_scaled_offsets() {
+        let context = BTreeV2ChunkRecordContext::new(
+            BTREE_V2_CHUNK,
+            OffsetWidth::Four,
+            3,
+            NonZeroU64::new(80).unwrap(),
+            LayoutVersion::Four,
+        )
+        .unwrap();
+        assert_eq!(context.record_size(), 4 + 3 * 8);
+
+        let mut data = Vec::new();
+        test_bytes::push_address(&mut data, Some(0x1020_3040), 4);
+        test_bytes::push_uint(&mut data, 2, 8);
+        test_bytes::push_uint(&mut data, 7, 8);
+        test_bytes::push_uint(&mut data, 11, 8);
+        let record = context.decode(&BTreeV2Record { data }).unwrap();
+
+        assert_eq!(record.address, StoredAddress::new(0x1020_3040));
+        assert_eq!(record.stored_size, 80);
+        assert_eq!(record.filter_mask, 0);
+        assert_eq!(record.scaled_offsets, vec![2, 7, 11]);
+    }
+
+    #[test]
+    fn type_10_chunk_records_support_8_byte_offsets_and_rank_1() {
+        let context = BTreeV2ChunkRecordContext::new(
+            BTREE_V2_CHUNK,
+            OffsetWidth::Eight,
+            1,
+            NonZeroU64::new(32).unwrap(),
+            LayoutVersion::Four,
+        )
+        .unwrap();
+        assert_eq!(context.record_size(), 16);
+
+        let mut data = Vec::new();
+        test_bytes::push_address(&mut data, Some(0x1020_3040_5060_7080), 8);
+        test_bytes::push_uint(&mut data, 9, 8);
+        let record = context.decode(&BTreeV2Record { data }).unwrap();
+
+        assert_eq!(record.address, StoredAddress::new(0x1020_3040_5060_7080));
+        assert_eq!(record.scaled_offsets, vec![9]);
+    }
+
+    #[test]
+    fn type_11_chunk_records_decode_size_mask_and_scaled_offsets() {
+        // An 80-byte logical chunk uses a 2-byte stored-size field in a version 4 layout.
+        let context = BTreeV2ChunkRecordContext::new(
+            BTREE_V2_FILTERED_CHUNK,
+            OffsetWidth::Eight,
+            2,
+            NonZeroU64::new(80).unwrap(),
+            LayoutVersion::Four,
+        )
+        .unwrap();
+        assert_eq!(context.record_size(), 8 + 2 + 4 + 2 * 8);
+
+        let mut data = Vec::new();
+        test_bytes::push_address(&mut data, Some(0x1234), 8);
+        test_bytes::push_uint(&mut data, 57, 2);
+        data.extend_from_slice(&0x0000_0005u32.to_le_bytes());
+        test_bytes::push_uint(&mut data, 3, 8);
+        test_bytes::push_uint(&mut data, 4, 8);
+        let record = context.decode(&BTreeV2Record { data }).unwrap();
+
+        assert_eq!(record.address, StoredAddress::new(0x1234));
+        assert_eq!(record.stored_size, 57);
+        assert_eq!(record.filter_mask, 5);
+        assert_eq!(record.scaled_offsets, vec![3, 4]);
+    }
+
+    #[test]
+    fn chunk_record_context_rejects_declared_record_size_mismatches() {
+        let context = BTreeV2ChunkRecordContext::new(
+            BTREE_V2_CHUNK,
+            OffsetWidth::Eight,
+            2,
+            NonZeroU64::new(64).unwrap(),
+            LayoutVersion::Four,
+        )
+        .unwrap();
+        let expected = context.record_size();
+
+        assert_eq!(
+            context
+                .require_record_size(u16::try_from(expected - 1).unwrap())
+                .unwrap_err(),
+            FormatError::DataSizeMismatch {
+                expected,
+                actual: expected - 1,
+            }
+        );
+        assert_eq!(
+            context
+                .require_record_size(u16::try_from(expected + 1).unwrap())
+                .unwrap_err(),
+            FormatError::DataSizeMismatch {
+                expected,
+                actual: expected + 1,
+            }
+        );
+    }
+
+    #[test]
+    fn filtered_chunk_records_reject_zero_size_and_undefined_address() {
+        let context = BTreeV2ChunkRecordContext::new(
+            BTREE_V2_FILTERED_CHUNK,
+            OffsetWidth::Four,
+            1,
+            NonZeroU64::new(32).unwrap(),
+            LayoutVersion::Four,
+        )
+        .unwrap();
+
+        let mut zero_size = Vec::new();
+        test_bytes::push_address(&mut zero_size, Some(0x100), 4);
+        test_bytes::push_uint(&mut zero_size, 0, 2);
+        zero_size.extend_from_slice(&0u32.to_le_bytes());
+        test_bytes::push_uint(&mut zero_size, 0, 8);
+        assert_eq!(
+            context
+                .decode(&BTreeV2Record { data: zero_size })
+                .unwrap_err(),
+            FormatError::InvalidChunkGeometry(
+                "filtered version 2 B-tree chunk record has zero stored size"
+            )
+        );
+
+        let mut undefined = Vec::new();
+        test_bytes::push_undefined_address(&mut undefined, 4);
+        test_bytes::push_uint(&mut undefined, 1, 2);
+        undefined.extend_from_slice(&0u32.to_le_bytes());
+        test_bytes::push_uint(&mut undefined, 0, 8);
+        assert_eq!(
+            context
+                .decode(&BTreeV2Record { data: undefined })
+                .unwrap_err(),
+            FormatError::ChunkedReadError(
+                "version 2 B-tree chunk record has an undefined chunk address".into()
+            )
+        );
+    }
+
+    #[test]
+    fn chunk_record_context_rejects_non_chunk_tree_types() {
+        assert_eq!(
+            BTreeV2ChunkRecordContext::new(
+                BTREE_V2_ATTRIBUTE_NAME,
+                OffsetWidth::Eight,
+                1,
+                NonZeroU64::new(32).unwrap(),
+                LayoutVersion::Four,
+            )
+            .unwrap_err(),
+            FormatError::InvalidBTreeNodeType(BTREE_V2_ATTRIBUTE_NAME)
+        );
     }
 
     #[test]

@@ -100,9 +100,9 @@ pub enum ChunkIndex {
     /// [`Dataset::append_staged`](crate::Dataset::append_staged) grow
     /// in place.
     ExtensibleArray,
-    /// A version-2 B-tree indexes the chunks (several unlimited dimensions). A
-    /// dataset with this index is classified here, but enumerating its chunks
-    /// with [`Dataset::chunks`](crate::Dataset::chunks) is not yet supported.
+    /// A version-2 B-tree indexes the chunks (several unlimited dimensions). The reader can
+    /// enumerate and read this index, but the editor does not create or mutate it, and deletion
+    /// does not yet reclaim its index structure.
     BTreeV2,
 }
 
