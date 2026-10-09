@@ -8,6 +8,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- `Dataset::chunks` and dataset reads support version 2 B-tree chunk indexes with client types 10 and 11. Creating or mutating those indexes remains unsupported ([#718](https://github.com/CramBL/hdf5-pure/pull/718)).
+- `File::open_rw` reclaims version 2 B-tree index metadata and raw chunks when deleting a dataset's final hard link. Paged files keep B-tree metadata and raw chunks in their respective page classes ([#719](https://github.com/CramBL/hdf5-pure/pull/719)).
 - `FormatError::Internal` reports a condition that only a bug in this crate can produce, such as a superblock value too wide for its field ([#675](https://github.com/CramBL/hdf5-pure/pull/675)).
 
 ### Changed

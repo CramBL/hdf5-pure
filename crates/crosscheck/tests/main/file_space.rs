@@ -13,6 +13,7 @@ use hdf5::plist::file_create::FileSpaceStrategy as CStrategy;
 use hdf5::plist::file_create::Sizeof;
 use hdf5::plist::file_create::SizeofInfo;
 use hdf5_pure::AttrValue;
+use hdf5_pure::ChunkIndex;
 use hdf5_pure::Error;
 use hdf5_pure::File;
 use hdf5_pure::FileAccessProperties;
@@ -294,14 +295,138 @@ fn c_library_reads_our_persisted_free_space() {
 }
 
 #[test]
+fn c_library_accepts_reclaimed_v2_btree_chunk_storage_and_allocates_afterward() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("v2_btree_reclaim.h5");
+    let raw_values = (0..40 * 40).collect::<Vec<i32>>();
+    let filtered_values = vec![7i32; 40 * 40];
+    {
+        let file = hdf5::FileBuilder::new()
+            .with_fapl(|fapl| fapl.libver_v110())
+            .with_fcpl(|fcpl| {
+                fcpl.file_space_strategy(CStrategy::FreeSpaceManager {
+                    paged: false,
+                    persist: true,
+                    threshold: 1,
+                })
+            })
+            .create(&path)
+            .unwrap();
+        file.new_dataset::<i32>()
+            .shape((hdf5::Extent::resizable(40), hdf5::Extent::resizable(40)))
+            .chunk((4, 4))
+            .create("raw")
+            .unwrap()
+            .write_raw(&raw_values)
+            .unwrap();
+        file.new_dataset::<i32>()
+            .shape((hdf5::Extent::resizable(40), hdf5::Extent::resizable(40)))
+            .chunk((4, 4))
+            .deflate(6)
+            .create("filtered")
+            .unwrap()
+            .write_raw(&filtered_values)
+            .unwrap();
+        file.new_dataset::<i32>()
+            .shape((4,))
+            .create("keep")
+            .unwrap()
+            .write(&[1, 2, 3, 4])
+            .unwrap();
+        file.close().unwrap();
+    }
+
+    let (raw_bytes, filtered_bytes) = {
+        let before = File::open(&path).unwrap();
+        let raw = before.dataset("raw").unwrap();
+        let filtered = before.dataset("filtered").unwrap();
+        assert_eq!(raw.chunk_index().unwrap(), Some(ChunkIndex::BTreeV2));
+        assert_eq!(filtered.chunk_index().unwrap(), Some(ChunkIndex::BTreeV2));
+        let raw_bytes: u64 = raw
+            .chunks()
+            .unwrap()
+            .iter()
+            .map(|chunk| chunk.storage_size)
+            .sum();
+        let filtered_bytes: u64 = filtered
+            .chunks()
+            .unwrap()
+            .iter()
+            .map(|chunk| chunk.storage_size)
+            .sum();
+        (raw_bytes, filtered_bytes)
+    };
+    assert!(filtered_bytes < raw_bytes);
+
+    {
+        let session = File::open_rw(&path).unwrap();
+        session.root().delete("raw").unwrap();
+        session.root().delete("filtered").unwrap();
+        session.commit().unwrap();
+    }
+
+    let ours = File::open(&path).unwrap();
+    for name in ["raw", "filtered"] {
+        let err = ours.dataset(name).unwrap_err();
+        let Error::Format(FormatError::PathNotFound(missing)) = &err else {
+            panic!("expected PathNotFound for {name}, got {err:?}");
+        };
+        assert_eq!(missing, name);
+    }
+    assert_eq!(
+        ours.dataset("keep").unwrap().read_i32().unwrap(),
+        vec![1, 2, 3, 4]
+    );
+    let free_after_delete = ours.persisted_free_space().unwrap();
+    let free_ours: u64 = free_after_delete.iter().map(|(_, len)| *len).sum();
+    assert!(
+        free_ours >= raw_bytes + filtered_bytes,
+        "persisted free space {free_ours} must include every raw v2 B-tree chunk"
+    );
+    drop(ours);
+
+    let c = hdf5::File::open(&path).unwrap();
+    absence::assert_libhdf5_absent(&c.dataset("raw").unwrap_err(), "raw");
+    absence::assert_libhdf5_absent(&c.dataset("filtered").unwrap_err(), "filtered");
+    assert_eq!(
+        c.dataset("keep").unwrap().read_raw::<i32>().unwrap(),
+        vec![1, 2, 3, 4]
+    );
+    assert!(
+        c.free_space() as u64 >= raw_bytes + filtered_bytes,
+        "the C library must accept the persisted managers containing the reclaimed chunks"
+    );
+    drop(c);
+
+    // libhdf5 allocates after it has loaded hdf5-pure's persisted managers.
+    // The allocator may choose a reusable section or newly extended file space. This
+    // crosscheck verifies that both libraries accept the resulting file.
+    let reused = vec![11i32; 40 * 40];
+    {
+        let c = hdf5::File::open_rw(&path).unwrap();
+        c.new_dataset::<i32>()
+            .shape((hdf5::Extent::resizable(40), hdf5::Extent::resizable(40)))
+            .chunk((4, 4))
+            .create("reused")
+            .unwrap()
+            .write_raw(&reused)
+            .unwrap();
+        c.close().unwrap();
+    }
+
+    let after_reuse = File::open(&path).unwrap();
+    let reused_dataset = after_reuse.dataset("reused").unwrap();
+    assert_eq!(reused_dataset.chunks().unwrap().len(), 100);
+    assert_eq!(reused_dataset.read_i32().unwrap(), reused);
+}
+
+#[test]
 fn c_library_reads_managers_we_placed_mid_file() {
-    // The test above makes free space and stops, so its managers are written at
-    // end-of-file — the only place they could go on a file that had no free space
-    // yet. Once a file *has* free space, a commit places them in it (issue #358),
-    // and the C library has to find the extension and the managers at addresses
-    // below live data, and to accept an `eoa_fsm_fsalloc` that is the whole file
-    // rather than the start of the manager blocks. Several commits, so the last
-    // set of managers is one that moved into space a previous set vacated.
+    // A file's first persisted free-space managers have no earlier free region to occupy,
+    // which places them at end-of-file. Once a file has free space, later commits can place
+    // managers in it (issue #358). The C library then has to find the extension and managers
+    // below live data and accept an `eoa_fsm_fsalloc` that spans the whole file. Several commits
+    // ensure the final managers moved into space an earlier set vacated.
     let dir = tempdir().unwrap();
     let path = dir.path().join("ours_persisted_mid_file.h5");
 
