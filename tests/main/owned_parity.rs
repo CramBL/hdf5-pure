@@ -8,15 +8,10 @@
 
 use hdf5_pure::{AttrValue, Error, File, FileAccessProperties, FileBuilder, FileLocking};
 use tempfile::tempdir;
-use test_util_hdf5::dataset::{Filter, Unlimited};
-
-fn build_simple(path: &std::path::Path, data: &[i32]) {
-    let mut b = FileBuilder::new();
-    b.create_dataset("d")
-        .with_i32_data(data)
-        .with_shape(&[data.len() as u64]);
-    b.write(path).unwrap();
-}
+use test_util_hdf5::{
+    dataset::{Filter, Unlimited},
+    file_builder,
+};
 
 /// Growing a **filtered** dataset that sits on a partial trailing chunk, both
 /// ways: the immediate `Dataset::append` (fast in-place path, which re-encodes
@@ -69,7 +64,7 @@ fn copy_from_another_file() {
             .with_shape(&[3]);
         b.write(&src_path).unwrap();
     }
-    build_simple(&dst_path, &[1, 2, 3]);
+    file_builder::write_i32_dataset(&dst_path, "d", &[1, 2, 3]);
 
     // Source is a separate, buffered read-only file (no lock conflict).
     let source = File::open(&src_path).unwrap();
@@ -93,7 +88,7 @@ fn copy_from_another_file() {
 fn group_attrs_on_subgroup_and_root() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("g.h5");
-    build_simple(&path, &[1]);
+    file_builder::write_i32_dataset(&path, "d", &[1]);
 
     let file = File::open_rw(&path).unwrap();
     file.root().create_group("grp").unwrap();
@@ -131,7 +126,7 @@ fn group_attrs_on_subgroup_and_root() {
 fn space_accounting_and_read_only_refusal() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("s.h5");
-    build_simple(&path, &[1, 2, 3, 4, 5]);
+    file_builder::write_i32_dataset(&path, "d", &[1, 2, 3, 4, 5]);
 
     let file = File::open_rw(&path).unwrap();
     let acct = file.space_accounting().unwrap();
@@ -148,7 +143,7 @@ fn space_accounting_and_read_only_refusal() {
 fn open_rw_with_locking_disabled_edits() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("l.h5");
-    build_simple(&path, &[1, 2, 3]);
+    file_builder::write_i32_dataset(&path, "d", &[1, 2, 3]);
 
     let file = File::open_rw_with_options(
         &path,
@@ -166,7 +161,7 @@ fn open_rw_with_locking_disabled_edits() {
 fn writes_after_close_are_sealed() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("c.h5");
-    build_simple(&path, &[1, 2, 3]);
+    file_builder::write_i32_dataset(&path, "d", &[1, 2, 3]);
 
     let file = File::open_rw(&path).unwrap();
     let mut ds = file.dataset("d").unwrap();
