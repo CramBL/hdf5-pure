@@ -9,20 +9,7 @@ use hdf5_pure::{
     Error, File, FileAccessProperties, FileBuilder, FileSpaceStrategy, MemoryStrategy,
 };
 use test_util::temp;
-use test_util_hdf5::dataset::Unlimited;
 use test_util_hdf5::paged;
-
-/// Build a paged file with one contiguous i32 dataset `d` seeded with `0..n`.
-fn build_paged(path: &std::path::Path, n: i32, persist: bool) {
-    let data: Vec<i32> = (0..n).collect();
-    let mut b = FileBuilder::new();
-    b.create_dataset("d")
-        .with_i32_data(&data)
-        .with_shape(&[n as u64]);
-    b.with_file_space_strategy(FileSpaceStrategy::Page, persist, 0)
-        .with_file_space_page_size(PAGE);
-    b.write(path).unwrap();
-}
 
 /// A persisting paged file accepts a staged dataset addition through
 /// `File::open_rw`: both the old and the new dataset read back, and the file
@@ -30,7 +17,7 @@ fn build_paged(path: &std::path::Path, n: i32, persist: bool) {
 #[test]
 fn paged_persist_staged_create_dataset() {
     let path = temp::repo_temp_path("pure_paged_staged_create.h5");
-    build_paged(&path, 64, true);
+    paged::write_contiguous_i32(&path, PAGE, true, 64);
 
     {
         let s = File::open_rw(&path).unwrap();
@@ -63,13 +50,7 @@ fn paged_persist_staged_create_dataset() {
 fn paged_staged_commit_keeps_pages_homogeneous() {
     let path = temp::repo_temp_path("pure_paged_staged_homogeneous.h5");
     // A chunked, unlimited dataset so the staged append rebuilds an index.
-    {
-        let mut b = FileBuilder::new();
-        Unlimited::new("d", &(0..64).collect::<Vec<i32>>(), 64).add_to(&mut b);
-        b.with_file_space_strategy(FileSpaceStrategy::Page, true, 0)
-            .with_file_space_page_size(PAGE);
-        b.write(&path).unwrap();
-    }
+    paged::write_unlimited_i32(&path, PAGE, true, 64, 64);
     {
         let s = File::open_rw(&path).unwrap();
         let mut ds = s.dataset("d").unwrap();
@@ -167,7 +148,7 @@ fn paged_with_userblock_is_refused() {
 #[test]
 fn paged_without_persist_is_refused() {
     let path = temp::repo_temp_path("pure_paged_staged_nopersist.h5");
-    build_paged(&path, 64, false);
+    paged::write_contiguous_i32(&path, PAGE, false, 64);
 
     let err = File::open_rw(&path).unwrap_err();
     assert!(

@@ -3,23 +3,9 @@
 //! metadata into separate pages, and rewrites its per-page-type managers at
 //! close. libhdf5 interop lives in `crates/crosscheck/tests/main/file_space.rs`.
 
-use hdf5_pure::{
-    Error, File, FileAccessProperties, FileBuilder, FileSpaceStrategy, MemoryStrategy,
-};
+use hdf5_pure::{Error, File, FileAccessProperties, MemoryStrategy};
 use test_util::temp;
-use test_util_hdf5::dataset::Unlimited;
 use test_util_hdf5::{paged, session};
-
-/// Build a persisting paged file with an unlimited rank-1 chunked i32 dataset `d`
-/// seeded with `0..n`.
-fn build_paged(path: &std::path::Path, n: i32, chunk: u64) {
-    let data: Vec<i32> = (0..n).collect();
-    let mut b = FileBuilder::new();
-    Unlimited::new("d", &data, chunk).add_to(&mut b);
-    b.with_file_space_strategy(FileSpaceStrategy::Page, true, 0)
-        .with_file_space_page_size(PAGE);
-    b.write(path).unwrap();
-}
 
 /// A persisting paged file grows through the bounded engine: appending enough rows
 /// to force extensible-array index growth allocates metadata (new EA blocks) as
@@ -28,7 +14,7 @@ fn build_paged(path: &std::path::Path, n: i32, chunk: u64) {
 #[test]
 fn paged_persist_append_roundtrip() {
     let path = temp::repo_temp_path("pure_paged_mut_roundtrip.h5");
-    build_paged(&path, 64, 64); // 1 chunk, ~one raw page
+    paged::write_unlimited_i32(&path, PAGE, true, 64, 64); // 1 chunk, ~one raw page
 
     {
         let file = session::open_bounded(&path).unwrap();
@@ -55,7 +41,7 @@ fn paged_persist_append_roundtrip() {
 #[test]
 fn paged_persist_many_appends_one_finalize() {
     let path = temp::repo_temp_path("pure_paged_mut_many.h5");
-    build_paged(&path, 100, 32);
+    paged::write_unlimited_i32(&path, PAGE, true, 100, 32);
 
     let mut next = 100i32;
     {
@@ -83,7 +69,7 @@ fn paged_persist_many_appends_one_finalize() {
 #[test]
 fn paged_persist_large_append_multi_batch() {
     let path = temp::repo_temp_path("pure_paged_mut_large.h5");
-    build_paged(&path, 256, 256);
+    paged::write_unlimited_i32(&path, PAGE, true, 256, 256);
 
     {
         let file = session::open_bounded(&path).unwrap();
@@ -111,7 +97,7 @@ fn paged_persist_large_append_multi_batch() {
 #[test]
 fn paged_mirror_commit_appends() {
     let path = temp::repo_temp_path("pure_paged_mirror_commit.h5");
-    build_paged(&path, 100, 32);
+    paged::write_unlimited_i32(&path, PAGE, true, 100, 32);
 
     {
         let file = File::open_rw(&path).unwrap();
@@ -138,7 +124,7 @@ fn paged_mirror_commit_appends() {
 #[test]
 fn paged_persist_drop_finalizes() {
     let path = temp::repo_temp_path("pure_paged_mut_drop.h5");
-    build_paged(&path, 64, 64);
+    paged::write_unlimited_i32(&path, PAGE, true, 64, 64);
     {
         let file = session::open_bounded(&path).unwrap();
         let mut ds = file.dataset("d").unwrap();
@@ -164,11 +150,7 @@ fn paged_persist_drop_finalizes() {
 #[test]
 fn paged_non_persist_mirror_is_refused() {
     let path = temp::repo_temp_path("pure_paged_nonpersist_mirror.h5");
-    let mut b = FileBuilder::new();
-    Unlimited::new("d", &(0..100).collect::<Vec<i32>>(), 32).add_to(&mut b);
-    b.with_file_space_strategy(FileSpaceStrategy::Page, false, 0)
-        .with_file_space_page_size(PAGE);
-    b.write(&path).unwrap();
+    paged::write_unlimited_i32(&path, PAGE, false, 100, 32);
 
     // `File::open_rw` refuses this file outright: neither backing can edit it, so
     // there is nothing to gain by letting an edit be staged against it first.
@@ -220,7 +202,7 @@ fn paged_non_persist_mirror_is_refused() {
 #[test]
 fn paged_persist_noop_close_does_not_grow() {
     let path = temp::repo_temp_path("pure_paged_mut_noop.h5");
-    build_paged(&path, 200, 50);
+    paged::write_unlimited_i32(&path, PAGE, true, 200, 50);
     let before = std::fs::metadata(&path).unwrap().len();
     session::open_bounded(&path).unwrap().close().unwrap();
     assert_eq!(

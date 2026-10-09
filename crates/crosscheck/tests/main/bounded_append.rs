@@ -11,6 +11,7 @@ use hdf5_pure::{File, FileBuilder, FileSpaceStrategy};
 use tempfile::tempdir;
 use test_util_hdf5::dataset::{self, Filter, Unlimited};
 use test_util_hdf5::file;
+use test_util_hdf5::paged;
 use test_util_hdf5::session;
 
 #[test]
@@ -328,11 +329,7 @@ fn mirror_inplace_append_to_a_paged_file_stays_page_aligned() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("persist_paged.h5");
 
-    let mut b = FileBuilder::new();
-    b.with_file_space_strategy(FileSpaceStrategy::Page, true, 0)
-        .with_file_space_page_size(4096);
-    Unlimited::new("d", &(0..64).collect::<Vec<i32>>(), 64).add_to(&mut b);
-    b.write(&path).unwrap();
+    paged::write_unlimited_i32(&path, 4096, true, 64, 64);
 
     {
         let file = File::open_rw(&path).unwrap();

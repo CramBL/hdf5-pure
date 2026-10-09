@@ -46,6 +46,7 @@ use test_util::range;
 use test_util::widths::Widths;
 use test_util_hdf5::absence;
 use test_util_hdf5::dataset::Unlimited;
+use test_util_hdf5::paged;
 use test_util_hdf5::session;
 
 #[test]
@@ -1586,17 +1587,10 @@ fn c_library_reads_our_paged_file(#[case] page_size: u64) {
     let dir = tempdir().unwrap();
     let path = dir.path().join("ours_paged.h5");
 
+    paged::write_small_large_i32(&path, page_size);
     let small_a: Vec<i32> = (0..100).collect();
     let small_b: Vec<i32> = (0..400).collect();
-    let big: Vec<i32> = (0..5000).collect(); // 20000 bytes >= page: its own run
-
-    let mut b = FileBuilder::new();
-    b.create_dataset("a").with_i32_data(&small_a);
-    b.create_dataset("b").with_i32_data(&small_b);
-    b.create_dataset("big").with_i32_data(&big);
-    b.with_file_space_strategy(FileSpaceStrategy::Page, true, 0)
-        .with_file_space_page_size(page_size);
-    b.write(&path).unwrap();
+    let big: Vec<i32> = (0..5000).collect();
     assert_eq!(std::fs::metadata(&path).unwrap().len() % page_size, 0);
 
     // hdf5-pure's own view of the tracked free space (SUPER + DRAW + LARGE tails).
@@ -1672,25 +1666,9 @@ fn c_library_reads_our_paged_chunked_file() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("ours_paged_chunked.h5");
 
+    paged::write_chunked_f64(&path, 16384);
     let small: Vec<f64> = (0..64).map(|i| i as f64).collect();
     let big: Vec<f64> = (0..8000).map(|i| i as f64 * 0.5).collect();
-
-    let mut b = FileBuilder::new();
-    b.create_dataset("s")
-        .with_f64_data(&small)
-        .with_shape(&[64])
-        .with_chunks(&[16]);
-    {
-        let ds = b
-            .create_dataset("big")
-            .with_f64_data(&big)
-            .with_shape(&[8000])
-            .with_chunks(&[1000]);
-        ds.with_shuffle().with_deflate(6);
-    }
-    b.with_file_space_strategy(FileSpaceStrategy::Page, true, 0)
-        .with_file_space_page_size(16384);
-    b.write(&path).unwrap();
 
     let ours = File::open(&path).unwrap();
     let total_ours: u64 = ours
@@ -1750,13 +1728,7 @@ fn c_library_reads_our_bounded_mutated_paged_file() {
     let path = dir.path().join("ours_paged_mutated.h5");
 
     // Create with one chunk, then bounded-append to 5000 rows.
-    {
-        let mut b = FileBuilder::new();
-        Unlimited::new("d", &(0..64).collect::<Vec<i32>>(), 64).add_to(&mut b);
-        b.with_file_space_strategy(FileSpaceStrategy::Page, true, 0)
-            .with_file_space_page_size(4096);
-        b.write(&path).unwrap();
-    }
+    paged::write_unlimited_i32(&path, 4096, true, 64, 64);
     {
         let file = session::open_bounded(&path).unwrap();
         let mut ds = file.dataset("d").unwrap();
@@ -1826,13 +1798,7 @@ fn c_library_reads_our_staged_mutated_paged_file() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("ours_paged_staged.h5");
 
-    {
-        let mut b = FileBuilder::new();
-        Unlimited::new("d", &(0..64).collect::<Vec<i32>>(), 64).add_to(&mut b);
-        b.with_file_space_strategy(FileSpaceStrategy::Page, true, 0)
-            .with_file_space_page_size(4096);
-        b.write(&path).unwrap();
-    }
+    paged::write_unlimited_i32(&path, 4096, true, 64, 64);
     {
         let file = File::open_rw(&path).unwrap();
         // A staged append (raw chunks + a rebuilt extensible-array index) and a
