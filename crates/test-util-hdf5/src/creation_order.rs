@@ -42,3 +42,8 @@ pub fn group_properties(indexing: Indexing, links: bool) -> GroupCreate {
     }
     builder.finish().expect("a group creation property list")
 }
+
+/// Returns deterministic attribute names for creation-order fixtures.
+pub fn names(count: usize) -> Vec<String> {
+    (0..count).map(|i| format!("a{i:02}")).collect()
+}

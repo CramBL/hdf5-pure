@@ -66,10 +66,6 @@ fn write_tracked_with_persistence(path: &Path, names: &[String], indexed: Indexi
     file.close().unwrap();
 }
 
-fn names(count: usize) -> Vec<String> {
-    (0..count).map(|i| format!("a{i:02}")).collect()
-}
-
 fn object_location(path: &Path, object: &str) -> (hdf5::File, hdf5::Location) {
     let file = hdf5::File::open(path)
         .unwrap_or_else(|e| panic!("the C library opens {}: {e}", path.display()));
@@ -105,7 +101,7 @@ fn attribute_names_by_name(path: &Path, object: &str) -> Vec<String> {
 #[test]
 fn c_library_accepts_persisted_reclaimed_dense_attribute_indexes() {
     let dir = tempdir().unwrap();
-    let attribute_names = names(12);
+    let attribute_names = creation_order::names(12);
 
     for indexed in [Indexing::No, Indexing::Yes] {
         let suffix = if indexed == Indexing::Yes {

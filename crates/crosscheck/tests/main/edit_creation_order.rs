@@ -219,10 +219,6 @@ fn link_creation_index_of(path: &Path, group: &str, link: &str) -> i64 {
     })
 }
 
-fn names(count: usize) -> Vec<String> {
-    (0..count).map(|i| format!("a{i:02}")).collect()
-}
-
 /// Both objects of a fixture, so every test covers a group and a dataset — the
 /// two headers the editor rebuilds by different routes.
 const OBJECTS: [&str; 2] = ["g", "d"];
@@ -245,7 +241,7 @@ fn set_on_both(path: &Path, name: &str, value: i64) {
 fn an_object_tracking_creation_order_can_be_edited_at_all() {
     let dir = tempdir().unwrap();
     let p = dir.path().join("t.h5");
-    write_tracked(&p, &names(3), Indexing::Yes);
+    write_tracked(&p, &creation_order::names(3), Indexing::Yes);
 
     set_on_both(&p, "added", 99);
 
@@ -273,7 +269,7 @@ fn an_object_tracking_creation_order_can_be_edited_at_all() {
 fn the_editor_reads_a_tracked_object_back_itself() {
     let dir = tempdir().unwrap();
     let p = dir.path().join("t.h5");
-    write_tracked(&p, &names(3), Indexing::Yes);
+    write_tracked(&p, &creation_order::names(3), Indexing::Yes);
     set_on_both(&p, "added", 7);
 
     let f = File::open(&p).unwrap();
@@ -287,7 +283,7 @@ fn the_editor_reads_a_tracked_object_back_itself() {
 fn overwriting_an_attribute_keeps_the_creation_index_it_had() {
     let dir = tempdir().unwrap();
     let p = dir.path().join("t.h5");
-    write_tracked(&p, &names(3), Indexing::Yes);
+    write_tracked(&p, &creation_order::names(3), Indexing::Yes);
 
     set_on_both(&p, "a00", -1);
 
@@ -307,7 +303,7 @@ fn overwriting_an_attribute_keeps_the_creation_index_it_had() {
 fn deleting_an_attribute_leaves_a_gap_rather_than_renumbering() {
     let dir = tempdir().unwrap();
     let p = dir.path().join("t.h5");
-    write_tracked(&p, &names(4), Indexing::Yes);
+    write_tracked(&p, &creation_order::names(4), Indexing::Yes);
 
     // One from the middle and one from the end: the middle deletion is what
     // leaves a gap in the surviving indexes, and the end one is what separates
@@ -357,7 +353,7 @@ fn a_compact_set_crossing_the_threshold_carries_its_creation_order_into_the_heap
     // rebuilt into a fractal heap — and the deletion is what makes each
     // attribute's creation index differ from its position in the rebuilt set,
     // so an index taken from the position would show up here.
-    write_tracked(&p, &names(8), Indexing::Yes);
+    write_tracked(&p, &creation_order::names(8), Indexing::Yes);
 
     {
         let s = File::open_rw(&p).unwrap();
@@ -374,7 +370,10 @@ fn a_compact_set_crossing_the_threshold_carries_its_creation_order_into_the_heap
         s.commit().unwrap();
     }
 
-    let expected: Vec<String> = names(14).into_iter().filter(|n| n != "a01").collect();
+    let expected: Vec<String> = creation_order::names(14)
+        .into_iter()
+        .filter(|n| n != "a01")
+        .collect();
     for object in OBJECTS {
         let owner = Owner::open(&p, object);
         assert_eq!(
@@ -410,7 +409,7 @@ fn a_tracked_set_goes_dense_without_a_creation_order_index_when_the_object_has_n
     let p = dir.path().join("t.h5");
     // Tracked but not *indexed*: the heap gets a name index only, and the
     // creation index each attribute carries lives in that index's records.
-    write_tracked(&p, &names(8), Indexing::No);
+    write_tracked(&p, &creation_order::names(8), Indexing::No);
 
     {
         let s = File::open_rw(&p).unwrap();
@@ -423,8 +422,8 @@ fn a_tracked_set_goes_dense_without_a_creation_order_index_when_the_object_has_n
     }
 
     let owner = Owner::open(&p, "d");
-    assert_eq!(owner.names(IndexType::Name), names(13));
-    for (i, name) in names(13).iter().enumerate() {
+    assert_eq!(owner.names(IndexType::Name), creation_order::names(13));
+    for (i, name) in creation_order::names(13).iter().enumerate() {
         assert_eq!(owner.creation_index(name), i as u32);
     }
 }
@@ -435,11 +434,11 @@ fn an_object_already_dense_keeps_its_creation_order_across_an_edit() {
     let p = dir.path().join("t.h5");
     // Twelve attributes is past the C library's own compact threshold, so both
     // objects already store their attributes in a fractal heap.
-    write_tracked(&p, &names(12), Indexing::Yes);
+    write_tracked(&p, &creation_order::names(12), Indexing::Yes);
 
     set_on_both(&p, "added", 42);
 
-    let mut expected: Vec<String> = names(12);
+    let mut expected: Vec<String> = creation_order::names(12);
     expected.push("added".to_string());
     for object in OBJECTS {
         let owner = Owner::open(&p, object);
@@ -456,7 +455,7 @@ fn an_object_already_dense_keeps_its_creation_order_across_an_edit() {
                 "/{object} does not carry the creation-order index it declares",
             );
         }
-        for (i, name) in names(12).iter().enumerate() {
+        for (i, name) in creation_order::names(12).iter().enumerate() {
             assert_eq!(owner.creation_index(name), i as u32);
         }
         assert_eq!(owner.creation_index("added"), 12);
