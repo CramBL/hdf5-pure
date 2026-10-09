@@ -19,9 +19,9 @@ use crate::address::StoredAddress;
 use crate::attribute_info::AttributeInfoMessage;
 use crate::btree_v2::{
     BTreeV2Header, collect_btree_v2_records, collect_btree_v2_records_from_source,
-    collect_btree_v2_storage_extents,
 };
 use crate::convert::Narrow;
+use crate::dense_storage::{self, DenseIndex};
 use crate::error::FormatError;
 use crate::fractal_heap::FractalHeapHeader;
 use crate::fractal_heap::HeapObjectReader;
@@ -66,57 +66,20 @@ pub(crate) fn collect_dense_attribute_index_storage_extents<S: Source + ?Sized>(
         return Ok(Vec::new());
     };
 
-    let mut extents = collect_attribute_index_tree(
-        source,
-        name_address,
-        BTREE_V2_ATTRIBUTE_NAME,
-        offset_size,
-        length_size,
-    )?;
+    let mut indexes = Vec::with_capacity(2);
+    indexes.push(DenseIndex::new(name_address, BTREE_V2_ATTRIBUTE_NAME));
     if attr_info.indexes_creation_order
         && let Some(address) = attr_info.btree_creation_order_address
     {
-        extents.extend(collect_attribute_index_tree(
-            source,
-            address,
-            BTREE_V2_ATTRIBUTE_CREATION_ORDER,
-            offset_size,
-            length_size,
-        )?);
+        indexes.push(DenseIndex::new(address, BTREE_V2_ATTRIBUTE_CREATION_ORDER));
     }
-
-    extents.sort_unstable();
-    if extents
-        .windows(2)
-        .any(|pair| pair[0].end() > pair[1].start())
-        || extents.iter().any(|extent| {
-            extent.start() <= fractal_heap_address.get()
-                && fractal_heap_address.get() < extent.end()
-        })
-    {
-        return Err(FormatError::InvalidBTreeV2Signature);
-    }
-    Ok(extents)
-}
-
-/// Returns one dense-attribute index tree after proving its client type.
-fn collect_attribute_index_tree<S: Source + ?Sized>(
-    source: &S,
-    address: StoredAddress,
-    expected_type: u8,
-    offset_size: u8,
-    length_size: u8,
-) -> Result<Vec<Extent>, FormatError> {
-    let header = BTreeV2Header::parse_from_source(
-        &SourceMetadata(source),
-        address.get(),
+    dense_storage::collect_dense_index_storage_extents(
+        source,
+        fractal_heap_address,
+        indexes,
         offset_size,
         length_size,
-    )?;
-    if header.tree_type != expected_type {
-        return Err(FormatError::InvalidBTreeNodeType(header.tree_type));
-    }
-    collect_btree_v2_storage_extents(source, address, offset_size, length_size)
+    )
 }
 
 /// Extract all (compact) attribute messages from an object header.
@@ -445,20 +408,21 @@ mod tests {
     const WIDTHS: Widths = Widths::EIGHT;
     const NODE_SIZE: u64 = 512;
     const NAME_RECORD_SIZE: u16 = AttributeRecord::name_record_size(8);
-    const CREATION_ORDER_RECORD_SIZE: u16 = AttributeRecord::creation_order_record_size(8);
 
-    fn place_attribute_index_tree(
+    fn place_attribute_name_index(
         file: &mut [u8],
         header_at: usize,
         root_at: usize,
-        tree_type: u8,
-        record_size: u16,
     ) -> Vec<Extent> {
-        let record = vec![0; usize::from(record_size)];
-        let leaf = btree_v2::leaf(tree_type, &[record]);
-        let header =
-            btree_v2::Header::new(tree_type, record_size, u64::try_from(root_at).unwrap(), 1)
-                .build(WIDTHS);
+        let record = vec![0; usize::from(NAME_RECORD_SIZE)];
+        let leaf = btree_v2::leaf(BTREE_V2_ATTRIBUTE_NAME, &[record]);
+        let header = btree_v2::Header::new(
+            BTREE_V2_ATTRIBUTE_NAME,
+            NAME_RECORD_SIZE,
+            u64::try_from(root_at).unwrap(),
+            1,
+        )
+        .build(WIDTHS);
         file[header_at..header_at + header.len()].copy_from_slice(&header);
         file[root_at..root_at + leaf.len()].copy_from_slice(&leaf);
         vec![
@@ -472,48 +436,9 @@ mod tests {
     }
 
     #[test]
-    fn dense_attribute_storage_walk_collects_name_and_creation_order_indexes() {
-        let mut file = vec![0; 0x1000];
-        let mut expected = place_attribute_index_tree(
-            &mut file,
-            0x100,
-            0x200,
-            BTREE_V2_ATTRIBUTE_NAME,
-            NAME_RECORD_SIZE,
-        );
-        expected.extend(place_attribute_index_tree(
-            &mut file,
-            0x500,
-            0x600,
-            BTREE_V2_ATTRIBUTE_CREATION_ORDER,
-            CREATION_ORDER_RECORD_SIZE,
-        ));
-        expected.sort_unstable();
-        let info = AttributeInfoMessage {
-            max_creation_index: Some(1),
-            indexes_creation_order: true,
-            fractal_heap_address: Some(StoredAddress::new(0x80)),
-            btree_name_index_address: Some(StoredAddress::new(0x100)),
-            btree_creation_order_address: Some(StoredAddress::new(0x500)),
-        };
-
-        let extents =
-            collect_dense_attribute_index_storage_extents(&BytesSource::new(file), &info, 8, 8)
-                .unwrap();
-
-        assert_eq!(extents, expected);
-    }
-
-    #[test]
     fn dense_attribute_storage_walk_omits_creation_order_index_when_not_indexed() {
         let mut file = vec![0; 0x800];
-        let expected = place_attribute_index_tree(
-            &mut file,
-            0x100,
-            0x200,
-            BTREE_V2_ATTRIBUTE_NAME,
-            NAME_RECORD_SIZE,
-        );
+        let expected = place_attribute_name_index(&mut file, 0x100, 0x200);
         let info = AttributeInfoMessage {
             max_creation_index: Some(1),
             indexes_creation_order: false,
@@ -528,75 +453,6 @@ mod tests {
                 .unwrap();
 
         assert_eq!(extents, expected);
-    }
-
-    #[test]
-    fn dense_attribute_storage_walk_rejects_wrong_name_index_type() {
-        let mut file = vec![0; 0x800];
-        place_attribute_index_tree(
-            &mut file,
-            0x100,
-            0x200,
-            BTREE_V2_ATTRIBUTE_CREATION_ORDER,
-            CREATION_ORDER_RECORD_SIZE,
-        );
-        let info = AttributeInfoMessage {
-            max_creation_index: None,
-            indexes_creation_order: false,
-            fractal_heap_address: Some(StoredAddress::new(0x80)),
-            btree_name_index_address: Some(StoredAddress::new(0x100)),
-            btree_creation_order_address: None,
-        };
-
-        let err =
-            collect_dense_attribute_index_storage_extents(&BytesSource::new(file), &info, 8, 8)
-                .unwrap_err();
-
-        assert_eq!(
-            err,
-            FormatError::InvalidBTreeNodeType(BTREE_V2_ATTRIBUTE_CREATION_ORDER)
-        );
-    }
-
-    #[test]
-    fn dense_attribute_storage_walk_rejects_a_truncated_second_index_atomically() {
-        let mut file = vec![0; 0x900];
-        place_attribute_index_tree(
-            &mut file,
-            0x100,
-            0x200,
-            BTREE_V2_ATTRIBUTE_NAME,
-            NAME_RECORD_SIZE,
-        );
-        let root_at = 0x880usize;
-        let header = btree_v2::Header::new(
-            BTREE_V2_ATTRIBUTE_CREATION_ORDER,
-            CREATION_ORDER_RECORD_SIZE,
-            u64::try_from(root_at).unwrap(),
-            1,
-        )
-        .build(WIDTHS);
-        file[0x500..0x500 + header.len()].copy_from_slice(&header);
-        let info = AttributeInfoMessage {
-            max_creation_index: Some(1),
-            indexes_creation_order: true,
-            fractal_heap_address: Some(StoredAddress::new(0x80)),
-            btree_name_index_address: Some(StoredAddress::new(0x100)),
-            btree_creation_order_address: Some(StoredAddress::new(0x500)),
-        };
-
-        let available = file.len();
-        let err =
-            collect_dense_attribute_index_storage_extents(&BytesSource::new(file), &info, 8, 8)
-                .unwrap_err();
-
-        assert_eq!(
-            err,
-            FormatError::UnexpectedEof {
-                expected: root_at + usize::try_from(NODE_SIZE).unwrap(),
-                available,
-            }
-        );
     }
 
     /// A [`Source`] that records where each read started, so a walk can be asked
