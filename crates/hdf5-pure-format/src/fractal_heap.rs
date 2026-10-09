@@ -694,6 +694,87 @@ impl FractalHeapHeader {
     }
 }
 
+/// The complete encoded length of a version 0 fractal heap header.
+///
+/// The length includes the checksum and, for a filtered heap, the root block's filtered size
+/// and filter mask, and the encoded filter pipeline. [`parse`](Self::parse) derives it from the
+/// fixed prefix after checking the signature and version.
+///
+/// The header is defined in "Fractal Heap" of the [format specification, version 4.0][spec].
+///
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsec_fmt4_infra_fractalheap
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct FractalHeapHeaderFrame {
+    encoded_len: usize,
+}
+
+impl FractalHeapHeaderFrame {
+    /// Parses the fixed prefix at the start of `bytes` to compute the complete header length.
+    ///
+    /// `offsets` and `lengths` are the superblock's "Size of Offsets" and "Size of Lengths"
+    /// fields. Bytes after [`PREFIX_LEN`](Self::PREFIX_LEN) are ignored.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::InvalidFractalHeapSignature`] if the prefix does not begin with
+    /// `FRHP`, [`FormatError::InvalidFractalHeapVersion`] if its version is not 0, and
+    /// [`FormatError::UnexpectedEof`] if a prefix field is incomplete.
+    ///
+    /// Returns [`FormatError::Internal`] if the length arithmetic overflows, and
+    /// [`FormatError::ValueTooLargeForPlatform`] if the length exceeds [`usize::MAX`].
+    pub fn parse(
+        bytes: &[u8],
+        offsets: OffsetWidth,
+        lengths: LengthWidth,
+    ) -> Result<Self, FormatError> {
+        let mut fields = bytes::Fields::new(bytes, 0);
+        if fields.array::<{ FRACTAL_HEAP_SIGNATURE.len() }>()? != FRACTAL_HEAP_SIGNATURE {
+            return Err(FormatError::InvalidFractalHeapSignature);
+        }
+        let version = fields.u8()?;
+        if version != FRACTAL_HEAP_VERSION {
+            return Err(FormatError::InvalidFractalHeapVersion(version));
+        }
+        fields.u16()?;
+        let filter_encoded_len = fields.u16()?;
+        let overflow = || FormatError::Internal("fractal heap header length exceeds u64".into());
+        let length_fields_len = FRACTAL_HEAP_HEADER_LENGTH_FIELDS
+            .checked_mul(u64::from(lengths.get()))
+            .ok_or_else(overflow)?;
+        let address_fields_len = FRACTAL_HEAP_HEADER_ADDRESS_FIELDS
+            .checked_mul(u64::from(offsets.get()))
+            .ok_or_else(overflow)?;
+        let mut encoded_len = FRACTAL_HEAP_HEADER_FIXED_LEN
+            .checked_add(length_fields_len)
+            .and_then(|len| len.checked_add(address_fields_len))
+            .ok_or_else(overflow)?;
+        if filter_encoded_len > 0 {
+            encoded_len = encoded_len
+                .checked_add(u64::from(lengths.get()))
+                .and_then(|len| len.checked_add(FRACTAL_HEAP_FILTER_MASK_LEN))
+                .and_then(|len| len.checked_add(u64::from(filter_encoded_len)))
+                .ok_or_else(overflow)?;
+        }
+        Ok(Self {
+            encoded_len: encoded_len.to_usize()?,
+        })
+    }
+
+    /// Returns the header length in bytes, including the checksum and any filter fields.
+    pub const fn encoded_len(&self) -> usize {
+        self.encoded_len
+    }
+
+    /// The prefix length in bytes: the signature (4), version (1), heap ID length (2), and
+    /// encoded filter pipeline length (2).
+    ///
+    /// The prefix ends after the "I/O Filters' Encoded Length" field in "Fractal Heap" of the
+    /// [format specification, version 4.0][spec].
+    ///
+    /// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsec_fmt4_infra_fractalheap
+    pub const PREFIX_LEN: usize = 9;
+}
+
 /// The immutable decoding parameters for the IDs of a fractal heap.
 ///
 /// The parameters are derived from a [`FractalHeapHeader`] and the file's address and length
@@ -928,13 +1009,111 @@ const TINY_LEN_SHORT: u16 = 16;
 // extended form ("Fractal Heap", specification 4.0).
 const TINY_LENGTH_MASK: u8 = 0x0F;
 
+// The unfiltered version 0 header stores 26 fixed bytes, twelve length fields, and three addresses
+// ("Fractal Heap", format specification version 4.0).
+const FRACTAL_HEAP_HEADER_FIXED_LEN: u64 = 26;
+const FRACTAL_HEAP_HEADER_LENGTH_FIELDS: u64 = 12;
+const FRACTAL_HEAP_HEADER_ADDRESS_FIELDS: u64 = 3;
+
+// The filtered-header extension stores a four-byte mask after the root size
+// ("Fractal Heap", format specification version 4.0).
+const FRACTAL_HEAP_FILTER_MASK_LEN: u64 = 4;
+
 #[cfg(test)]
 mod tests {
+    use core::mem;
+
     use rstest::rstest;
     use test_util::fractal_heap;
     use test_util::widths::Widths;
 
     use super::*;
+
+    #[rstest]
+    #[case::two_two(OffsetWidth::Two, LengthWidth::Two, 56, 62)]
+    #[case::two_four(OffsetWidth::Two, LengthWidth::Four, 80, 88)]
+    #[case::two_eight(OffsetWidth::Two, LengthWidth::Eight, 128, 140)]
+    #[case::four_two(OffsetWidth::Four, LengthWidth::Two, 62, 68)]
+    #[case::four_four(OffsetWidth::Four, LengthWidth::Four, 86, 94)]
+    #[case::four_eight(OffsetWidth::Four, LengthWidth::Eight, 134, 146)]
+    #[case::eight_two(OffsetWidth::Eight, LengthWidth::Two, 74, 80)]
+    #[case::eight_four(OffsetWidth::Eight, LengthWidth::Four, 98, 106)]
+    #[case::eight_eight(OffsetWidth::Eight, LengthWidth::Eight, 146, 158)]
+    fn a_header_frame_sizes_all_fields_at_their_declared_widths(
+        #[case] offsets: OffsetWidth,
+        #[case] lengths: LengthWidth,
+        #[case] plain_len: usize,
+        #[case] filtered_len: usize,
+        #[values(0, 1, 512, u16::MAX)] filter_encoded_len: u16,
+    ) {
+        let prefix = header_prefix(filter_encoded_len);
+        assert_eq!(prefix.len(), FractalHeapHeaderFrame::PREFIX_LEN);
+        let frame = FractalHeapHeaderFrame::parse(&prefix, offsets, lengths).unwrap();
+        assert_eq!(
+            frame.encoded_len(),
+            if filter_encoded_len == 0 {
+                plain_len
+            } else {
+                filtered_len + usize::from(filter_encoded_len)
+            }
+        );
+    }
+
+    #[rstest]
+    #[case::empty(0, FRACTAL_HEAP_SIGNATURE.len())]
+    #[case::partial_signature(FRACTAL_HEAP_SIGNATURE.len() - 1, FRACTAL_HEAP_SIGNATURE.len())]
+    #[case::signature(FRACTAL_HEAP_SIGNATURE.len(), HEADER_VERSION_END)]
+    #[case::version(HEADER_VERSION_END, HEADER_ID_LENGTH_END)]
+    #[case::partial_id_length(HEADER_VERSION_END + 1, HEADER_ID_LENGTH_END)]
+    #[case::id_length(HEADER_ID_LENGTH_END, FractalHeapHeaderFrame::PREFIX_LEN)]
+    #[case::partial_filter_length(FractalHeapHeaderFrame::PREFIX_LEN - 1, FractalHeapHeaderFrame::PREFIX_LEN)]
+    fn an_incomplete_header_prefix_reports_the_missing_field(
+        #[case] available: usize,
+        #[case] expected: usize,
+    ) {
+        let mut prefix = header_prefix(0);
+        prefix.truncate(available);
+        assert_eq!(
+            FractalHeapHeaderFrame::parse(&prefix, OffsetWidth::Eight, LengthWidth::Eight),
+            Err(FormatError::UnexpectedEof {
+                expected,
+                available,
+            })
+        );
+    }
+
+    #[rstest]
+    #[case::signature(true, FRACTAL_HEAP_VERSION, FormatError::InvalidFractalHeapSignature)]
+    #[case::version(false, FRACTAL_HEAP_VERSION + 1, FormatError::InvalidFractalHeapVersion(FRACTAL_HEAP_VERSION + 1))]
+    fn a_header_frame_rejects_an_invalid_signature_or_version(
+        #[case] corrupt_signature: bool,
+        #[case] version: u8,
+        #[case] error: FormatError,
+    ) {
+        let mut prefix = header_prefix(0);
+        if corrupt_signature {
+            prefix[..FRACTAL_HEAP_SIGNATURE.len()].fill(0);
+        }
+        prefix[FRACTAL_HEAP_SIGNATURE.len()] = version;
+        assert_eq!(
+            FractalHeapHeaderFrame::parse(&prefix, OffsetWidth::Eight, LengthWidth::Eight),
+            Err(error)
+        );
+    }
+
+    #[rstest]
+    #[case::prefix(0)]
+    #[case::trailing_bytes(1024)]
+    fn a_header_frame_only_interprets_the_prefix(#[case] trailing_len: usize) {
+        let mut bytes = header_prefix(512);
+        bytes.resize(FractalHeapHeaderFrame::PREFIX_LEN + trailing_len, 0xFF);
+        assert_eq!(
+            FractalHeapHeaderFrame::parse(&bytes, OffsetWidth::Eight, LengthWidth::Eight)
+                .unwrap()
+                .encoded_len(),
+            670
+        );
+    }
 
     #[test]
     fn a_header_parses_to_its_fields() {
@@ -1478,4 +1657,15 @@ mod tests {
             ..dtable_header(1024, 65536, 4)
         }
     }
+
+    fn header_prefix(filter_encoded_len: u16) -> Vec<u8> {
+        let mut prefix = FRACTAL_HEAP_SIGNATURE.to_vec();
+        prefix.push(FRACTAL_HEAP_VERSION);
+        prefix.extend_from_slice(&8u16.to_le_bytes());
+        prefix.extend_from_slice(&filter_encoded_len.to_le_bytes());
+        prefix
+    }
+
+    const HEADER_VERSION_END: usize = FRACTAL_HEAP_SIGNATURE.len() + mem::size_of::<u8>();
+    const HEADER_ID_LENGTH_END: usize = HEADER_VERSION_END + mem::size_of::<u16>();
 }
