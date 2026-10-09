@@ -10,11 +10,11 @@
 
 use hdf5_pure::{
     Error, File, FileAccessProperties, FileBuilder, FileLocking, FileSpaceStrategy, MemoryStrategy,
-    SyncPolicy, WriteMarkPolicy,
+    WriteMarkPolicy,
 };
 use tempfile::tempdir;
 use test_util::superblock;
-use test_util_hdf5::dataset::Unlimited;
+use test_util_hdf5::{dataset::Unlimited, session};
 
 /// An appendable file: rank-1, unlimited, Extensible-Array indexed, unfiltered —
 /// what the SWMR writer accepts.
@@ -195,19 +195,6 @@ fn build_paged(path: &std::path::Path) {
     b.write(path).unwrap();
 }
 
-/// Access properties for a page-buffered session.
-///
-/// Locking is disabled deliberately, and it is not incidental to the tests: OS
-/// locks are **mandatory** on Windows, so a held `open_rw` lock blocks the very
-/// `std::fs::read` these tests use to observe the byte mid-session. What is under
-/// test is the superblock flag, not the lock.
-fn page_buffered() -> FileAccessProperties {
-    FileAccessProperties::new()
-        .with_sync_policy(SyncPolicy::OnClose)
-        .with_locking(FileLocking::Disabled)
-        .with_page_buffer_size(1 << 20)
-}
-
 /// The mark stands from the moment the buffer is installed until the session
 /// closes, and a clean close takes it back down.
 ///
@@ -226,7 +213,7 @@ fn a_page_buffered_session_marks_the_file_for_its_lifetime() {
         "a fresh file carries no mark"
     );
 
-    let file = File::open_rw_with_options(&path, page_buffered()).unwrap();
+    let file = File::open_rw_with_options(&path, session::page_buffered()).unwrap();
     assert_eq!(
         superblock::consistency_flags(&path),
         0x01,
@@ -281,7 +268,7 @@ fn a_commit_in_a_page_buffered_session_leaves_the_mark_standing() {
     let path = dir.path().join("committed.h5");
     build_paged(&path);
 
-    let file = File::open_rw_with_options(&path, page_buffered()).unwrap();
+    let file = File::open_rw_with_options(&path, session::page_buffered()).unwrap();
     file.root()
         .create_dataset("added", |b| {
             b.with_f64_data(&[2.5f64; 32]).with_shape(&[32]);
@@ -329,7 +316,7 @@ fn a_crashed_page_buffered_session_leaves_a_file_every_open_refuses() {
     let path = dir.path().join("crashed.h5");
     build_paged(&path);
 
-    let file = File::open_rw_with_options(&path, page_buffered()).unwrap();
+    let file = File::open_rw_with_options(&path, session::page_buffered()).unwrap();
     let mut ds = file.dataset("d").unwrap();
     ds.append(&[7i32; 64]).unwrap();
     std::mem::forget(ds);
@@ -376,7 +363,7 @@ fn snapshot() -> FileAccessProperties {
 /// a consistent one, and is the assertion the opt-in's contract asks for.
 fn live_page_buffered_writer(path: &std::path::Path) {
     build_paged(path);
-    let file = File::open_rw_with_options(path, page_buffered()).unwrap();
+    let file = File::open_rw_with_options(path, session::page_buffered()).unwrap();
     let mut ds = file.dataset("d").unwrap();
     ds.append(&[7i32; 64]).unwrap();
     file.sync().unwrap();
@@ -557,7 +544,7 @@ fn dropping_a_page_buffered_session_takes_the_mark_down() {
     build_paged(&path);
 
     {
-        let file = File::open_rw_with_options(&path, page_buffered()).unwrap();
+        let file = File::open_rw_with_options(&path, session::page_buffered()).unwrap();
         let mut ds = file.dataset("d").unwrap();
         ds.append(&[4i32; 64]).unwrap();
         assert_eq!(

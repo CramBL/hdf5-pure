@@ -11,11 +11,9 @@
 //! mark down, paged layout intact, data where the C library looks for it.
 
 use hdf5::plist::file_create::FileSpaceStrategy as CStrategy;
-use hdf5_pure::{
-    File, FileAccessProperties, FileBuilder, FileLocking, FileSpaceStrategy, SyncPolicy,
-};
+use hdf5_pure::{File, FileBuilder, FileSpaceStrategy};
 use tempfile::tempdir;
-use test_util_hdf5::dataset::Unlimited;
+use test_util_hdf5::{dataset::Unlimited, session};
 
 /// An appendable file, paged or not. A page buffer requires neither (issue
 /// #357), which is why the reading crosscheck below runs on both.
@@ -27,13 +25,6 @@ fn build(path: &std::path::Path, paged: bool) {
     }
     Unlimited::new("d", &(0..64).collect::<Vec<i32>>(), 64).add_to(&mut b);
     b.write(path).unwrap();
-}
-
-fn page_buffered() -> FileAccessProperties {
-    FileAccessProperties::new()
-        .with_sync_policy(SyncPolicy::OnClose)
-        .with_locking(FileLocking::Disabled)
-        .with_page_buffer_size(1 << 20)
 }
 
 /// The mark's whole justification: a page-buffered session that dies is refused
@@ -52,7 +43,7 @@ fn the_c_library_refuses_a_file_a_crashed_page_buffered_session_left_marked() {
     // the mark it raised.
     #[expect(clippy::mem_forget, reason = "the test models a session that crashed")]
     {
-        let file = File::open_rw_with_options(&path, page_buffered()).unwrap();
+        let file = File::open_rw_with_options(&path, session::page_buffered()).unwrap();
         let mut ds = file.dataset("d").unwrap();
         ds.append(&[7i32; 64]).unwrap();
         std::mem::forget(ds);
@@ -101,7 +92,7 @@ fn the_c_library_reads_a_file_written_through_a_page_buffer() {
         build(&path, paged);
 
         {
-            let file = File::open_rw_with_options(&path, page_buffered()).unwrap();
+            let file = File::open_rw_with_options(&path, session::page_buffered()).unwrap();
             for round in 0..4i32 {
                 let mut ds = file.dataset("d").unwrap();
                 ds.append(&vec![round; 64]).unwrap();
