@@ -1,5 +1,5 @@
-//! The fractal heap header and the heap IDs, each with its parser and its encoder, and the lookup
-//! of a child in an indirect block.
+//! Parses and encodes fractal heap headers and heap IDs, derives doubling-table geometry, and
+//! locates children of indirect blocks.
 
 use alloc::format;
 use alloc::vec;
@@ -93,6 +93,25 @@ pub enum FractalHeapChild {
         /// The heap offset the space of the block begins at.
         heap_offset: u64,
     },
+}
+
+/// Describes a failure to prove complete ownership of a fractal heap's file storage.
+///
+/// This type is part of the workspace-private structural API exposed through `__private`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum FractalHeapStorageError {
+    /// A lower-level HDF5 parser or source read failed.
+    Format(FormatError),
+    /// The heap's ownership graph or doubling-table geometry is inconsistent.
+    InvalidStorage,
+    /// The named heap feature prevents a complete ownership proof.
+    UnsupportedOwnership(&'static str),
+}
+
+impl From<FormatError> for FractalHeapStorageError {
+    fn from(error: FormatError) -> Self {
+        Self::Format(error)
+    }
 }
 
 /// A fractal heap header, signature `FRHP`: the parameters of the heap's doubling table, the
@@ -308,8 +327,9 @@ impl FractalHeapHeader {
         })
     }
 
-    /// Returns the length in bytes of the header of a heap that does not filter its objects, from
-    /// its signature to its checksum.
+    /// Returns the exact encoded size of an unfiltered fractal heap header in bytes.
+    ///
+    /// The size runs from the `FRHP` signature through the trailing checksum.
     pub const fn serialized_size(offset_width: OffsetWidth, length_width: LengthWidth) -> usize {
         let os = offset_width.get() as usize;
         let ls = length_width.get() as usize;
@@ -494,7 +514,7 @@ impl FractalHeapHeader {
     /// The file does not store the choice. A reader computes it from the heap ID length and the
     /// widths of an address and a length, as `H5HF__huge_init` in `H5HFhuge.c` (HDF5 2.2.0) sets
     /// `huge_ids_direct`.
-    fn huge_ids_direct(&self, offset_size: u8, length_size: u8) -> bool {
+    pub fn huge_ids_direct(&self, offset_size: u8, length_size: u8) -> bool {
         let avail = (self.heap_id_length as usize).saturating_sub(1);
         if self.io_filter_encoded_length > 0 {
             avail >= offset_size as usize + length_size as usize + 4 + length_size as usize
@@ -617,6 +637,208 @@ impl FractalHeapHeader {
         // In an unfiltered heap every entry, direct or indirect, is one child address.
         let entries = u64::from(nrows) * u64::from(self.table_width) * u64::from(offset_size);
         Ok(iblock_header + entries)
+    }
+
+    /// Returns the width in bytes of the "Block Offset" field in a managed block header.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FractalHeapStorageError::InvalidStorage`] if the doubling-table fields do not
+    /// define representable geometry.
+    pub fn storage_block_offset_size(&self) -> Result<usize, FractalHeapStorageError> {
+        self.storage_geometry()?;
+        Ok(usize::from(self.max_heap_size).div_ceil(8))
+    }
+
+    /// Returns the exact allocated size of a managed direct block in doubling-table `row`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FractalHeapStorageError::InvalidStorage`] for impossible geometry or arithmetic
+    /// overflow.
+    pub fn storage_block_size_for_row(&self, row: usize) -> Result<u64, FractalHeapStorageError> {
+        self.storage_geometry()?;
+        if row <= 1 {
+            return Ok(self.starting_block_size);
+        }
+        let shift = u32::try_from(row - 1)
+            .map_err(|_conversion_error| FractalHeapStorageError::InvalidStorage)?;
+        let multiplier = 1u64
+            .checked_shl(shift)
+            .ok_or(FractalHeapStorageError::InvalidStorage)?;
+        self.starting_block_size
+            .checked_mul(multiplier)
+            .ok_or(FractalHeapStorageError::InvalidStorage)
+    }
+
+    /// Returns the number of doubling-table rows whose entries address direct blocks.
+    ///
+    /// The configured maximum direct-block size can describe more direct rows than the maximum
+    /// root can contain. A caller limits this count to the rows represented by the indirect block
+    /// it traverses.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FractalHeapStorageError::InvalidStorage`] for impossible doubling-table geometry.
+    pub fn storage_direct_rows(&self) -> Result<usize, FractalHeapStorageError> {
+        let (start_bits, max_direct_bits, _) = self.storage_geometry()?;
+        usize::try_from(max_direct_bits - start_bits + 2)
+            .map_err(|_conversion_error| FractalHeapStorageError::InvalidStorage)
+    }
+
+    /// Returns the maximum legal number of rows in the root indirect block.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FractalHeapStorageError::InvalidStorage`] for impossible doubling-table geometry.
+    pub fn storage_max_root_rows(&self) -> Result<u16, FractalHeapStorageError> {
+        let (_, _, rows) = self.storage_geometry()?;
+        Ok(rows)
+    }
+
+    /// Returns the row count of the child indirect blocks addressed by doubling-table `row`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FractalHeapStorageError::InvalidStorage`] if `row` does not identify an indirect
+    /// row, or if the declared geometry is impossible.
+    pub fn storage_child_indirect_rows(&self, row: usize) -> Result<u16, FractalHeapStorageError> {
+        if row < self.storage_direct_rows()? {
+            return Err(FractalHeapStorageError::InvalidStorage);
+        }
+        let size = self.storage_block_size_for_row(row)?;
+        let start_bits = self.starting_block_size.trailing_zeros();
+        let width_bits = u64::from(self.table_width).trailing_zeros();
+        let first_row_bits = start_bits
+            .checked_add(width_bits)
+            .ok_or(FractalHeapStorageError::InvalidStorage)?;
+        let size_bits = size.trailing_zeros();
+        if !size.is_power_of_two() || size_bits < first_row_bits {
+            return Err(FractalHeapStorageError::InvalidStorage);
+        }
+        u16::try_from(size_bits - first_row_bits + 1)
+            .map_err(|_conversion_error| FractalHeapStorageError::InvalidStorage)
+    }
+
+    /// Returns the managed heap-address space represented by an indirect block of `nrows` rows.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FractalHeapStorageError::InvalidStorage`] for an impossible row count or arithmetic
+    /// overflow.
+    pub fn storage_indirect_heap_size(&self, nrows: u16) -> Result<u64, FractalHeapStorageError> {
+        if nrows == 0 || nrows > self.storage_max_root_rows()? {
+            return Err(FractalHeapStorageError::InvalidStorage);
+        }
+        let width = u64::from(self.table_width);
+        let mut total = 0u64;
+        for row in 0..usize::from(nrows) {
+            total = total
+                .checked_add(
+                    self.storage_block_size_for_row(row)?
+                        .checked_mul(width)
+                        .ok_or(FractalHeapStorageError::InvalidStorage)?,
+                )
+                .ok_or(FractalHeapStorageError::InvalidStorage)?;
+        }
+        Ok(total)
+    }
+
+    /// Returns the exact encoded allocation size of an unfiltered indirect block.
+    ///
+    /// The size includes the `FHIB` signature, version, heap-header address, block heap offset,
+    /// every child address, and the trailing checksum.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FractalHeapStorageError::UnsupportedOwnership`] for a filtered heap,
+    /// [`FractalHeapStorageError::Format`] for an unsupported address width, and
+    /// [`FractalHeapStorageError::InvalidStorage`] for impossible geometry or arithmetic overflow.
+    pub fn storage_indirect_block_size(
+        &self,
+        nrows: u16,
+        offset_size: u8,
+    ) -> Result<u64, FractalHeapStorageError> {
+        if self.io_filter_encoded_length > 0 {
+            return Err(FractalHeapStorageError::UnsupportedOwnership(
+                "filtered managed blocks",
+            ));
+        }
+        OffsetWidth::try_from(offset_size)?;
+        if nrows == 0 || nrows > self.storage_max_root_rows()? {
+            return Err(FractalHeapStorageError::InvalidStorage);
+        }
+        let block_offset_size = u64::try_from(self.storage_block_offset_size()?)
+            .map_err(|_conversion_error| FractalHeapStorageError::InvalidStorage)?;
+        let prefix = 5u64
+            .checked_add(u64::from(offset_size))
+            .and_then(|n| n.checked_add(block_offset_size))
+            .ok_or(FractalHeapStorageError::InvalidStorage)?;
+        let entries = u64::from(nrows)
+            .checked_mul(u64::from(self.table_width))
+            .and_then(|n| n.checked_mul(u64::from(offset_size)))
+            .ok_or(FractalHeapStorageError::InvalidStorage)?;
+        prefix
+            .checked_add(entries)
+            .and_then(|n| n.checked_add(4))
+            .ok_or(FractalHeapStorageError::InvalidStorage)
+    }
+
+    /// Returns the heap offset of the first slot in `row` of an indirect block.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FractalHeapStorageError::InvalidStorage`] for impossible geometry or arithmetic
+    /// overflow.
+    pub fn storage_row_offset(&self, row: usize) -> Result<u64, FractalHeapStorageError> {
+        self.storage_geometry()?;
+        let width = u64::from(self.table_width);
+        let mut offset = 0u64;
+        for previous in 0..row {
+            offset = offset
+                .checked_add(
+                    self.storage_block_size_for_row(previous)?
+                        .checked_mul(width)
+                        .ok_or(FractalHeapStorageError::InvalidStorage)?,
+                )
+                .ok_or(FractalHeapStorageError::InvalidStorage)?;
+        }
+        Ok(offset)
+    }
+
+    /// Returns the derived bit widths and maximum root-row count of valid doubling-table geometry.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FractalHeapStorageError::InvalidStorage`] if the table fields contradict the
+    /// fractal-heap doubling-table constraints or cannot be represented without overflow.
+    fn storage_geometry(&self) -> Result<(u32, u32, u16), FractalHeapStorageError> {
+        if self.table_width == 0
+            || !self.table_width.is_power_of_two()
+            || self.starting_block_size == 0
+            || !self.starting_block_size.is_power_of_two()
+            || self.max_direct_block_size < self.starting_block_size
+            || !self.max_direct_block_size.is_power_of_two()
+            || self.max_heap_size == 0
+            || self.max_heap_size > 64
+        {
+            return Err(FractalHeapStorageError::InvalidStorage);
+        }
+        let start_bits = self.starting_block_size.trailing_zeros();
+        let max_direct_bits = self.max_direct_block_size.trailing_zeros();
+        let first_row_bits = start_bits
+            .checked_add(u64::from(self.table_width).trailing_zeros())
+            .ok_or(FractalHeapStorageError::InvalidStorage)?;
+        let heap_bits = u32::from(self.max_heap_size);
+        if heap_bits < first_row_bits {
+            return Err(FractalHeapStorageError::InvalidStorage);
+        }
+        let max_root_rows = u16::try_from(heap_bits - first_row_bits + 1)
+            .map_err(|_conversion_error| FractalHeapStorageError::InvalidStorage)?;
+        if self.start_root_rows > max_root_rows {
+            return Err(FractalHeapStorageError::InvalidStorage);
+        }
+        Ok((start_bits, max_direct_bits, max_root_rows))
     }
 
     /// Parses the fractal heap header at `address` in `source`.

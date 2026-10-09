@@ -428,6 +428,27 @@ impl BTreeV2Record {
         })
     }
 
+    /// Parses the record as a record of the huge-object index of a fractal heap, type 3.
+    ///
+    /// Type 3 is the non-filtered layout used when heap IDs hold the huge object's address and
+    /// length directly. The B-tree still tracks every huge object so the heap can enumerate and
+    /// delete all of them.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::UnexpectedEof`] if the record ends before its two fields.
+    pub fn huge_object_direct(
+        &self,
+        offset_width: OffsetWidth,
+        length_width: LengthWidth,
+    ) -> Result<HugeObjectDirectRecord, FormatError> {
+        let os = usize::from(offset_width.get());
+        Ok(HugeObjectDirectRecord {
+            address: StoredAddress::new(bytes::read_offset_width(&self.data, 0, offset_width)?),
+            length: bytes::read_length_width(&self.data, os, length_width)?,
+        })
+    }
+
     /// Returns the heap ID in the record of a link index of `tree_type`, or `None` if the record
     /// ends before an ID of `heap_id_length` bytes.
     ///
@@ -475,6 +496,22 @@ pub struct HugeObjectRecord {
     pub length: u64,
     /// The key of the object, which its heap ID stores.
     pub id: u64,
+}
+
+/// A record of a fractal heap huge-object B-tree, type 3: the object address and length.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct HugeObjectDirectRecord {
+    /// The address of the object.
+    pub address: StoredAddress,
+    /// The length of the object in bytes.
+    pub length: u64,
+}
+
+impl HugeObjectDirectRecord {
+    /// Returns the encoded length of a type-3 huge-object record.
+    pub const fn size(offset_width: OffsetWidth, length_width: LengthWidth) -> u16 {
+        offset_width.get() as u16 + length_width.get() as u16
+    }
 }
 
 impl HugeObjectRecord {
@@ -767,8 +804,10 @@ pub fn parse_btree_v2_leaf_records(
 /// # Errors
 ///
 /// Returns [`FormatError::InvalidBTreeV2Signature`] if the node does not begin with `BTIN`,
-/// [`FormatError::UnexpectedEof`] if the records or the child pointers run past the end of `node`,
-/// and [`FormatError::InvalidOffsetSize`] if `offset_size` is not 2, 4, or 8.
+/// [`FormatError::UnexpectedEof`] if the records, child pointers, or checksum run past the end of
+/// `node`, [`FormatError::InvalidOffsetSize`] if `offset_size` is not 2, 4, or 8, and, with the
+/// `checksum` feature, [`FormatError::ChecksumMismatch`] if the stored checksum differs from the
+/// computed one.
 ///
 /// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_infra_btrees_v2
 pub fn parse_btree_v2_internal_child_pointers(
@@ -814,6 +853,12 @@ pub fn parse_btree_v2_internal_child_pointers(
         children.push((addr, child_nrec));
     }
 
+    let checksum_end = pos
+        .checked_add(4)
+        .ok_or(FormatError::InvalidBTreeV2Signature)?;
+    bytes::ensure_len(node, pos, 4)?;
+    crate::checksum::verify_trailing(&node[..checksum_end])?;
+
     Ok(children)
 }
 
@@ -825,6 +870,10 @@ pub fn parse_btree_v2_internal_child_pointers(
 ///
 /// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_infra_btrees_v2
 pub const BTREE_V2_HUGE_OBJECT: u8 = 1;
+
+/// The type of a version 2 B-tree that indexes non-filtered huge objects whose heap IDs carry the
+/// object address and length directly.
+pub const BTREE_V2_HUGE_OBJECT_DIRECT: u8 = 3;
 
 /// The type of a version 2 B-tree that indexes the link names of a group, from the same table as
 /// [`BTREE_V2_HUGE_OBJECT`].
@@ -1185,6 +1234,28 @@ mod tests {
         assert_eq!(
             BTreeV2Record { data }.huge_object(offset_width, length_width),
             Ok(record)
+        );
+    }
+
+    #[rstest]
+    fn a_direct_huge_object_record_decodes_to_its_fields(
+        #[values(OffsetWidth::Four, OffsetWidth::Eight)] offset_width: OffsetWidth,
+        #[values(LengthWidth::Four, LengthWidth::Eight)] length_width: LengthWidth,
+    ) {
+        let [os, ls] = [offset_width.get(), length_width.get()].map(usize::from);
+        let mut data = 0x1234u64.to_le_bytes()[..os].to_vec();
+        data.extend_from_slice(&700u64.to_le_bytes()[..ls]);
+
+        assert_eq!(
+            data.len(),
+            usize::from(HugeObjectDirectRecord::size(offset_width, length_width))
+        );
+        assert_eq!(
+            BTreeV2Record { data }.huge_object_direct(offset_width, length_width),
+            Ok(HugeObjectDirectRecord {
+                address: StoredAddress::new(0x1234),
+                length: 700,
+            })
         );
     }
 

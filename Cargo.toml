@@ -385,6 +385,8 @@ num-complex = ["dep:num-complex", "serde"]
 # `tests/allocation_bounds.rs` hold everywhere and run in every configuration,
 # while an exact count is a property of one target and one toolchain.
 __heap-baseline = []
+# Exposes crate-private fractal-heap ownership results to crosscheck tests.
+__fractal-heap-storage-crosscheck = []
 
 [dependencies]
 hdf5-pure-core.workspace = true
