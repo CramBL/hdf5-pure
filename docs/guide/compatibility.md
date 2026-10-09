@@ -94,7 +94,7 @@ Shared object-header messages are supported for datatypes, dataspaces, fill valu
 | Implicit | ✅ | ⬆️ | ✅ | Rewritten with another version 4 chunk index. |
 | Fixed array | ✅ | ✅ | ✅ | |
 | Extensible array | ✅ | ✅ | ✅ | |
-| Version 2 B-tree | ✅ | ❌ | ❌ | |
+| Version 2 B-tree | ✅ | ❌ | ✅ | Read/enumerate only. The editor does not create or mutate the index, and deletion does not reclaim its index structure. |
 
 `Enumerate` refers to `Dataset::chunks()`.
 

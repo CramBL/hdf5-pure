@@ -204,12 +204,13 @@
 //! (issue #286 for the paged tail, issue #358 for the flat one).
 //!
 //! Reclaim is best-effort and conservative. Contiguous and chunked datasets
-//! (chunk index plus chunk data) and whole group subtrees are reclaimed; a
-//! deleted object whose blocks cannot be enumerated exhaustively —
-//! variable-length global-heap storage, dense attribute/link heaps, a
-//! non–version-2 header, a version 2 B-tree chunk index — is left as dead bytes
-//! rather than risk freeing a region that is still in use; under-reclaiming only
-//! wastes space, while over-reclaiming would corrupt.
+//! (chunk index plus chunk data) and whole group subtrees are reclaimed. A
+//! deleted object whose blocks cannot be enumerated exhaustively (variable-length
+//! global-heap storage, dense attribute/link heaps, an object header other than
+//! version 2, or a version 2 B-tree chunk index whose structure has no reclaim
+//! walker) is left as dead bytes. This avoids freeing a region that may still be
+//! in use. Under-reclaiming only wastes space. Over-reclaiming could corrupt the
+//! file.
 //!
 //! On a paged file that conservatism extends to anything whose *page type* is not
 //! established. A file another writer produced records free space this one cannot
@@ -4812,11 +4813,11 @@ impl WriteEngine {
     /// objects instead of growing the file, and if a freed run reaches
     /// end-of-file the file is truncated. Contiguous and chunked datasets (their
     /// chunk index and chunk data blocks) and whole group subtrees are all
-    /// reclaimed. Reclaim is best-effort — an object whose blocks this engine
+    /// reclaimed. Reclaim is best-effort. An object whose blocks this engine
     /// cannot enumerate exhaustively (variable-length global-heap storage, dense
-    /// attribute/link heaps, a version 2 B-tree chunk index) is left as dead
-    /// bytes rather than risk freeing a region that is still in use. Freed space is
-    /// reused within the open session; for a file created with
+    /// attribute/link heaps, or a version 2 B-tree chunk index whose structure has no
+    /// reclaim walker) is left as dead bytes to avoid freeing a region that may still be in use.
+    /// Freed space is reused within the open session. For a file created with
     /// `H5Pset_file_space_strategy(persist = true)` it is also recorded on disk so
     /// it survives reopen, otherwise it is forgotten
     /// on close. After reuse, an object reference to a deleted object may resolve
@@ -4903,8 +4904,8 @@ impl WriteEngine {
     /// source using a B-tree-v1 or implicit index is reproduced with an equivalent
     /// v4 index). The source subtree must otherwise be copyable in place: compact
     /// links and attributes, single-chunk headers, and a chunk index this engine
-    /// can enumerate (a version-2 B-tree, or a sparse/unallocated chunk grid, is
-    /// refused) — otherwise `commit` reports [`Error::EditUnsupported`].
+    /// can rebuild. A version 2 B-tree or a sparse/unallocated chunk grid is unsupported, so
+    /// `commit` reports [`Error::EditUnsupported`].
     ///
     /// A *contiguous* dataset whose storage was never allocated is copied as the
     /// storage it has — none — rather than as the fill value a read answers with,
@@ -10226,8 +10227,8 @@ impl WriteEngine {
     /// Returns `None` — contribute nothing, leave the object as dead bytes —
     /// whenever the dataset cannot be enumerated *exhaustively* and safely: a
     /// header that does not parse or is not a chunked dataset, a chunk index
-    /// with no walker (a version 2 B-tree, index type 5), an undefined index
-    /// address (an empty, never-written dataset), or any resulting span that
+    /// whose structure has no reclaim walker (a version 2 B-tree, index type 5), an
+    /// undefined index address (an empty, never-written dataset), or any resulting span that
     /// falls outside the file image or overlaps another. This upholds the
     /// editor's invariant that reclaimed space is never a region still in use:
     /// under-reclaiming only wastes space, while over-reclaiming would corrupt.

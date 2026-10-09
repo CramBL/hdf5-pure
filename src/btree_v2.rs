@@ -150,7 +150,7 @@ fn collect_storage_node<S: Source + ?Sized>(
     extents.push(extent);
 
     let signature = if depth == 0 { b"BTLF" } else { b"BTIN" };
-    validate_storage_node_prefix(&node, signature, header.tree_type)?;
+    validate_node_prefix(&node, signature, header.tree_type)?;
     let Some(depth) = NonZeroU16::new(depth) else {
         return validate_storage_leaf(&node, num_records, header.record_size);
     };
@@ -184,7 +184,7 @@ fn collect_storage_node<S: Source + ?Sized>(
 /// node's "Type" field to equal the tree type stored in `BTHD`.
 ///
 /// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_infra_btrees_v2
-fn validate_storage_node_prefix(
+fn validate_node_prefix(
     node: &[u8],
     signature: &[u8; 4],
     tree_type: u8,
@@ -365,16 +365,19 @@ pub fn collect_btree_v2_records_from_source<S: Source + ?Sized>(
         offset_size,
         header.depth,
     );
+    let mut visited = BTreeSet::new();
     let mut records = Vec::new();
     collect_node_from_source(
         source,
         header.root_node_address.get(),
         header.num_records_in_root,
         header.depth,
+        header.tree_type,
         header.record_size,
         header.node_size,
         offset_size,
         &node_info,
+        &mut visited,
         &mut records,
     )?;
     Ok(records)
@@ -389,12 +392,18 @@ fn collect_node_from_source<S: Source + ?Sized>(
     address: u64,
     num_records: u16,
     depth: u16,
+    tree_type: u8,
     record_size: u16,
     node_size: u32,
     offset_size: u8,
     node_info: &BTreeV2NodeInfo,
+    visited: &mut BTreeSet<StoredAddress>,
     out: &mut Vec<BTreeV2Record>,
 ) -> Result<(), FormatError> {
+    if !visited.insert(StoredAddress::new(address)) {
+        return Err(FormatError::InvalidBTreeV2Signature);
+    }
+
     // Every node occupies `node_size` bytes; read that window (clamped to the
     // bytes available, in case the final node abuts EOF).
     let node_len = u64::from(node_size)
@@ -403,6 +412,7 @@ fn collect_node_from_source<S: Source + ?Sized>(
     let node = source.read_metadata_at(address, node_len)?;
 
     let Some(depth) = NonZeroU16::new(depth) else {
+        validate_node_prefix(&node, b"BTLF", tree_type)?;
         out.extend(hdf5_pure_format::__private::parse_btree_v2_leaf_records(
             &node,
             0,
@@ -412,6 +422,7 @@ fn collect_node_from_source<S: Source + ?Sized>(
         return Ok(());
     };
 
+    validate_node_prefix(&node, b"BTIN", tree_type)?;
     let children = hdf5_pure_format::__private::parse_btree_v2_internal_child_pointers(
         &node,
         num_records,
@@ -430,10 +441,12 @@ fn collect_node_from_source<S: Source + ?Sized>(
             child_addr.get(),
             child_nrec,
             child_depth,
+            tree_type,
             record_size,
             node_size,
             offset_size,
             node_info,
+            visited,
             out,
         )?;
         if i < nr {
@@ -1021,6 +1034,27 @@ mod tests {
         let hdr = BTreeV2Header::parse(&header, 0, 8, 8).unwrap();
         let records = collect_btree_v2_records(&header, &hdr, 8, 8).unwrap();
         assert!(records.is_empty());
+    }
+
+    #[test]
+    fn source_walk_rejects_node_type_mismatching_header() {
+        use crate::source::SourceMetadata;
+
+        let record = rec(1);
+        let leaf = btree_v2::leaf(11, &[record]);
+        let leaf_offset = 256usize;
+        let header =
+            btree_v2::Header::new(10, 11, u64::try_from(leaf_offset).unwrap(), 1).build(WIDTHS);
+        let mut file_data = vec![0u8; 512];
+        file_data[..header.len()].copy_from_slice(&header);
+        file_data[leaf_offset..leaf_offset + leaf.len()].copy_from_slice(&leaf);
+
+        let source = BytesSource::new(&file_data);
+        let header = BTreeV2Header::parse_from_source(&SourceMetadata(&source), 0, 8, 8).unwrap();
+        assert_eq!(
+            collect_btree_v2_records_from_source(&source, &header, 8, 8).unwrap_err(),
+            FormatError::InvalidBTreeNodeType(11)
+        );
     }
 
     #[cfg(feature = "std")]

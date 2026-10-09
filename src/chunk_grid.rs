@@ -101,6 +101,40 @@ pub(crate) struct ChunkGridSlot {
     pub(crate) offsets: Vec<u64>,
 }
 
+/// Returns the logical byte size of one chunk in the dataset grid.
+pub(crate) fn chunk_byte_size(chunk_dims: &[u64], element_size: u64) -> Result<u64, FormatError> {
+    chunk_dims.iter().try_fold(element_size, |acc, chunk_dim| {
+        acc.checked_mul(*chunk_dim).ok_or_else(|| {
+            FormatError::ChunkedReadError(
+                "chunk logical byte size exceeds the addressable range".into(),
+            )
+        })
+    })
+}
+
+/// Converts scaled chunk coordinates to the chunk's logical element offsets.
+pub(crate) fn offsets_from_scaled(
+    chunk_dims: &[u64],
+    scaled_offsets: &[u64],
+) -> Result<Vec<u64>, FormatError> {
+    if scaled_offsets.len() != chunk_dims.len() {
+        return Err(FormatError::ChunkedReadError(
+            "chunk coordinates do not match the grid's rank".into(),
+        ));
+    }
+    scaled_offsets
+        .iter()
+        .zip(chunk_dims)
+        .map(|(coord, chunk_dim)| {
+            coord.checked_mul(*chunk_dim).ok_or_else(|| {
+                FormatError::ChunkedReadError(
+                    "chunk coordinates resolve past the addressable dataspace".into(),
+                )
+            })
+        })
+        .collect()
+}
+
 impl ChunkGrid {
     /// Builds the grid for a dataset of `dims` (its current shape) with
     /// `max_dims` (its maximum shape, absent when the dataspace records none)
@@ -145,9 +179,9 @@ impl ChunkGrid {
         }
 
         // The reference library swizzles on the *first* unlimited dimension. A
-        // second one is a dataspace it indexes with a version-2 B-tree instead,
-        // which this crate neither writes nor reads; it falls out below as an
-        // unbounded multiplier rather than needing its own test here.
+        // second unlimited dimension uses a version 2 B-tree. This positional grid does not
+        // number that index. It falls out below as an unbounded multiplier and needs no separate
+        // test here.
         let rotated = match order {
             GridOrder::RowMajor => None,
             GridOrder::UnlimitedFirst => {
@@ -291,15 +325,7 @@ impl ChunkGrid {
 
     /// Returns the logical byte size of one chunk.
     pub(crate) fn chunk_byte_size(&self, element_size: u64) -> Result<u64, FormatError> {
-        self.chunk_dims
-            .iter()
-            .try_fold(element_size, |acc, chunk_dim| {
-                acc.checked_mul(*chunk_dim).ok_or_else(|| {
-                    FormatError::ChunkedReadError(
-                        "chunk logical byte size exceeds the addressable range".into(),
-                    )
-                })
-            })
+        chunk_byte_size(&self.chunk_dims, element_size)
     }
 
     /// Refuse a grid that cannot number a slot; see
@@ -324,17 +350,7 @@ impl ChunkGrid {
     }
 
     fn offsets_of(&self, coords: &[u64]) -> Result<Vec<u64>, FormatError> {
-        coords
-            .iter()
-            .zip(&self.chunk_dims)
-            .map(|(coord, chunk_dim)| {
-                coord.checked_mul(*chunk_dim).ok_or_else(|| {
-                    FormatError::ChunkedReadError(
-                        "chunk coordinates resolve past the addressable dataspace".into(),
-                    )
-                })
-            })
-            .collect()
+        offsets_from_scaled(&self.chunk_dims, coords)
     }
 
     /// The logical offsets — the first element's coordinate in each dimension,

@@ -428,10 +428,10 @@ impl ChunkIndexLayout {
         }
     }
 
-    /// Returns `true` if `hdf5-pure` can walk the index chunk by chunk, which an
-    /// in-place overwrite and an in-place copy both need.
+    /// Returns `true` if the in-place editor can rebuild this index after enumerating its chunks.
     ///
-    /// Every index but the version 2 B-tree has a chunk walker in `hdf5-pure`.
+    /// The reader can enumerate a version 2 B-tree, but the editor does not create or mutate one,
+    /// so that index remains `false`.
     pub fn enumerable(self) -> bool {
         !matches!(self, ChunkIndexLayout::BTreeV2 { .. })
     }
@@ -533,7 +533,8 @@ fn parse_chunk_index(
     // of indexing information precede it. Only the Single Chunk index's
     // information is kept: a Fixed Array and an Extensible Array repeat their
     // creation parameters in their own header, which is where the walkers read
-    // them, and no walker reads a version 2 B-tree.
+    // them. A version 2 B-tree carries no extra indexing information here. Its reader gets the
+    // record geometry from the B-tree header itself.
     let address = |info_len: usize| {
         Ok::<_, FormatError>(
             bytes::read_optional_offset(data, info + info_len, offset_size)?

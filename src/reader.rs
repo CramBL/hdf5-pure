@@ -5806,12 +5806,9 @@ the same commit to replace it",
     /// dataset. The curated analogue of `H5Dget_num_chunks` + `H5Dget_chunk_info`
     /// (`chunks()?.len()` is the chunk count).
     ///
-    /// Returns `Ok(vec![])` for a chunked dataset whose storage has not been
-    /// allocated yet (including a not-yet-written dataset that will use a
-    /// [`ChunkIndex::BTreeV2`] index). Returns `Err` if the dataset is not chunked
-    /// (check [`layout`](Self::layout) or [`is_chunked`](Self::is_chunked) first),
-    /// or if its allocated storage is indexed by a [`ChunkIndex::BTreeV2`] index,
-    /// which has no enumerator yet.
+    /// Returns `Ok(vec![])` for a chunked dataset whose storage has not been allocated yet.
+    /// Returns `Err` if the dataset is not chunked (check [`layout`](Self::layout) or
+    /// [`is_chunked`](Self::is_chunked) first), or if its chunk index is malformed.
     pub fn chunks(&self) -> Result<Vec<Chunk>, Error> {
         let rank = self.dataspace()?.dimensions.len();
         let base = self.file.addr_offset;
@@ -6549,8 +6546,8 @@ the same commit to replace it",
     ///
     /// Returns `Err` if the layout is not chunked. Returns `Ok(vec![])` for an
     /// empty / never-allocated chunked dataset (no index address). Covers every
-    /// index type the reader supports (v3 B-tree and v4 single-chunk, implicit,
-    /// fixed-array, and extensible-array).
+    /// index type the reader supports (v3 B-tree and all five v4 index types, including the
+    /// version 2 B-tree).
     pub(crate) fn raw_chunks(&self) -> Result<Vec<crate::chunked_read::ChunkInfo>, Error> {
         let DataLayout::Chunked {
             chunk_dimensions,
