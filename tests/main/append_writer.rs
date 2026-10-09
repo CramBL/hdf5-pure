@@ -4,9 +4,7 @@
 //! unfiltered, chunk-aligned and not, across one or many calls and sessions —
 //! read back with this crate. C-library interop lives in
 //! `crates/crosscheck/tests/main/append_writer.rs`.
-use hdf5_pure::{
-    Error, File, FileAccessProperties, FileBuilder, MaxExtent, ScaleOffset, SyncPolicy,
-};
+use hdf5_pure::{Error, File, FileAccessProperties, FileBuilder, ScaleOffset, SyncPolicy};
 use tempfile::tempdir;
 use test_util_hdf5::dataset::{self, Filter, Unlimited};
 
@@ -304,7 +302,8 @@ fn multiple_datasets_one_writer() {
 fn generic_and_raw_append() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("d.h5");
-    Unlimited::new("d", &(0..4).collect::<Vec<i32>>(), 4).pure_create(&path);
+    let fixture = dataset::AppendRefusalFixture::UnlimitedI32;
+    fixture.write(&path);
     with_writer(&path, |w| {
         w.dataset("d").unwrap().append(&[4i32, 5, 6, 7]).unwrap();
         let mut bytes = Vec::new();
@@ -339,69 +338,79 @@ fn assert_unsupported(r: Result<(), Error>) {
 fn refuse_contiguous() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("d.h5");
-    let mut b = FileBuilder::new();
-    b.create_dataset("d")
-        .with_i32_data(&[1, 2, 3])
-        .with_shape(&[3]);
-    b.write(&path).unwrap();
+    let fixture = dataset::AppendRefusalFixture::Contiguous;
+    fixture.write(&path);
     with_writer(&path, |w| {
         assert_unsupported(w.dataset("d").unwrap().append(&[4, 5]))
     });
-    assert_eq!(dataset::read_pure::<i32>(&path, "d"), vec![1, 2, 3]);
+    assert_eq!(
+        dataset::read_pure::<i32>(&path, "d"),
+        fixture.expected_i32()
+    );
 }
 
 #[test]
 fn refuse_fixed_not_unlimited() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("d.h5");
-    let mut b = FileBuilder::new();
-    b.create_dataset("d")
-        .with_i32_data(&[1, 2, 3])
-        .with_shape(&[3])
-        .with_maxshape(&[MaxExtent::Fixed(100)])
-        .with_chunks(&[2]);
-    b.write(&path).unwrap();
+    let fixture = dataset::AppendRefusalFixture::FixedChunked;
+    fixture.write(&path);
     with_writer(&path, |w| {
-        assert_unsupported(w.dataset("d").unwrap().append(&[4, 5]))
+        assert_unsupported(w.dataset("d").unwrap().append(&[6, 7]))
     });
-    assert_eq!(dataset::read_pure::<i32>(&path, "d"), vec![1, 2, 3]);
+    assert_eq!(
+        dataset::read_pure::<i32>(&path, "d"),
+        fixture.expected_i32()
+    );
 }
 
 #[test]
 fn refuse_datatype_mismatch() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("d.h5");
-    Unlimited::new("d", &(0..4).collect::<Vec<i32>>(), 4).pure_create(&path);
+    let fixture = dataset::AppendRefusalFixture::UnlimitedI32;
+    fixture.write(&path);
     with_writer(&path, |w| {
         assert_unsupported(w.dataset("d").unwrap().append(&[4.0, 5.0]))
     });
-    assert_eq!(dataset::read_pure::<i32>(&path, "d"), vec![0, 1, 2, 3]);
+    assert_eq!(
+        dataset::read_pure::<i32>(&path, "d"),
+        fixture.expected_i32()
+    );
 }
 
 #[test]
 fn refuse_mixed_element_types() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("d.h5");
-    Unlimited::new("d", &(0..4).collect::<Vec<i32>>(), 4).pure_create(&path);
+    let fixture = dataset::AppendRefusalFixture::UnlimitedI32;
+    fixture.write(&path);
     // append() with a single call cannot mix types; drive the conflict through
     // append_raw of a wrong-length buffer instead: 3 bytes is not a whole i32.
     with_writer(&path, |w| {
         assert_unsupported(w.dataset("d").unwrap().append_raw(&[1, 2, 3]))
     });
-    assert_eq!(dataset::read_pure::<i32>(&path, "d"), vec![0, 1, 2, 3]);
+    assert_eq!(
+        dataset::read_pure::<i32>(&path, "d"),
+        fixture.expected_i32()
+    );
 }
 
 #[test]
 fn refuse_nonexistent_dataset() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("d.h5");
-    Unlimited::new("d", &(0..4).collect::<Vec<i32>>(), 4).pure_create(&path);
+    let fixture = dataset::AppendRefusalFixture::UnlimitedI32;
+    fixture.write(&path);
     // Resolving the handle is where a missing dataset is reported now, rather
     // than at open time.
     with_writer(&path, |w| {
         assert!(w.dataset("missing").is_err());
     });
-    assert_eq!(dataset::read_pure::<i32>(&path, "d"), vec![0, 1, 2, 3]);
+    assert_eq!(
+        dataset::read_pure::<i32>(&path, "d"),
+        fixture.expected_i32()
+    );
 }
 
 #[test]
@@ -430,9 +439,13 @@ fn append_to_pure_empty_dataset() {
 fn zero_length_append_is_noop() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("d.h5");
-    Unlimited::new("d", &(0..4).collect::<Vec<i32>>(), 4).pure_create(&path);
+    let fixture = dataset::AppendRefusalFixture::UnlimitedI32;
+    fixture.write(&path);
     with_writer(&path, |w| {
         w.dataset("d").unwrap().append::<i32>(&[]).unwrap();
     });
-    assert_eq!(dataset::read_pure::<i32>(&path, "d"), vec![0, 1, 2, 3]);
+    assert_eq!(
+        dataset::read_pure::<i32>(&path, "d"),
+        fixture.expected_i32()
+    );
 }

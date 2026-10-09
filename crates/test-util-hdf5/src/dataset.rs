@@ -115,6 +115,69 @@ pub const WRITER_ONLY_INVALID_GEOMETRY_CASES: &[InvalidGeometryCase] = &[
     },
 ];
 
+/// Dataset shapes used by both staged and immediate append refusal tests.
+#[derive(Clone, Copy, Debug)]
+pub enum AppendRefusalFixture {
+    /// A contiguous dataset, which has no chunk index to extend.
+    Contiguous,
+    /// A chunked dataset with a finite maximum extent.
+    FixedChunked,
+    /// A rank-2 chunked dataset with one unlimited dimension.
+    Rank2,
+    /// A rank-1 unlimited `i32` dataset with a deflate filter.
+    UnlimitedI32,
+}
+
+impl AppendRefusalFixture {
+    /// Writes this refusal fixture to `path`.
+    #[track_caller]
+    pub fn write(self, path: &Path) {
+        let mut builder = FileBuilder::new();
+        match self {
+            Self::Contiguous => {
+                builder
+                    .create_dataset("d")
+                    .with_i32_data(&[1, 2, 3])
+                    .with_shape(&[3]);
+            }
+            Self::FixedChunked => {
+                builder
+                    .create_dataset("d")
+                    .with_i32_data(&(0..6).collect::<Vec<_>>())
+                    .with_shape(&[6])
+                    .with_maxshape(&[MaxExtent::Fixed(100)])
+                    .with_chunks(&[3]);
+            }
+            Self::Rank2 => {
+                builder
+                    .create_dataset("d")
+                    .with_i32_data(&(0..12).collect::<Vec<_>>())
+                    .with_shape(&[3, 4])
+                    .with_maxshape(&[MaxExtent::Unlimited, MaxExtent::Fixed(4)])
+                    .with_chunks(&[1, 4]);
+            }
+            Self::UnlimitedI32 => {
+                Unlimited::new("d", &(0..4).collect::<Vec<i32>>(), 4)
+                    .filters(&[Filter::Deflate(6)])
+                    .add_to(&mut builder);
+            }
+        }
+        builder
+            .write(path)
+            .unwrap_or_else(|e| panic!("write {path:?}: {e}"));
+    }
+
+    /// Returns the initial `i32` values stored in `d`.
+    pub fn expected_i32(self) -> Vec<i32> {
+        match self {
+            Self::Contiguous => vec![1, 2, 3],
+            Self::FixedChunked => (0..6).collect(),
+            Self::Rank2 => (0..12).collect(),
+            Self::UnlimitedI32 => (0..4).collect(),
+        }
+    }
+}
+
 /// A chunked dataset of one dimension whose maximum is unlimited, seeded with `data`.
 ///
 /// Under the 1.10 format or newer both libraries index its chunks with an Extensible Array, the

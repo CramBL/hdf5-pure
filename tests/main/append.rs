@@ -235,9 +235,8 @@ fn a_staged_append_onto_a_lossy_partial_tail_is_refused() {
 fn append_generic_and_raw() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("d.h5");
-    Unlimited::new("d", &(0..4).collect::<Vec<i32>>(), 4)
-        .filters(&[Filter::Deflate(6)])
-        .pure_create(&path);
+    let fixture = dataset::AppendRefusalFixture::UnlimitedI32;
+    fixture.write(&path);
     // Generic append<T>.
     {
         let s = File::open_rw(&path).unwrap();
@@ -383,11 +382,8 @@ fn introspection_reports_eligibility() {
 fn introspection_on_contiguous_dataset() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("d.h5");
-    let mut b = FileBuilder::new();
-    b.create_dataset("d")
-        .with_i32_data(&[1, 2, 3])
-        .with_shape(&[3]);
-    b.write(&path).unwrap();
+    let fixture = dataset::AppendRefusalFixture::Contiguous;
+    fixture.write(&path);
     let f = File::open(&path).unwrap();
     let ds = f.dataset("d").unwrap();
     assert!(!ds.is_chunked());
@@ -426,15 +422,15 @@ fn assert_append_unsupported(res: Result<(), Error>) {
 fn refuse_contiguous() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("d.h5");
-    let mut b = FileBuilder::new();
-    b.create_dataset("d")
-        .with_i32_data(&[1, 2, 3])
-        .with_shape(&[3]);
-    b.write(&path).unwrap();
+    let fixture = dataset::AppendRefusalFixture::Contiguous;
+    fixture.write(&path);
     assert_append_unsupported(commit_append(&path, "d", |a| {
         a.append_i32(&[4, 5]);
     }));
-    assert_eq!(dataset::read_pure::<i32>(&path, "d"), vec![1, 2, 3]);
+    assert_eq!(
+        dataset::read_pure::<i32>(&path, "d"),
+        fixture.expected_i32()
+    );
 }
 
 #[test]
@@ -442,19 +438,14 @@ fn refuse_fixed_chunked_not_unlimited() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("d.h5");
     // Chunked but a finite maximum (not unlimited) => fixed-array index, refused.
-    let mut b = FileBuilder::new();
-    b.create_dataset("d")
-        .with_i32_data(&(0..6).collect::<Vec<_>>())
-        .with_shape(&[6])
-        .with_maxshape(&[MaxExtent::Fixed(100)])
-        .with_chunks(&[3]);
-    b.write(&path).unwrap();
+    let fixture = dataset::AppendRefusalFixture::FixedChunked;
+    fixture.write(&path);
     assert_append_unsupported(commit_append(&path, "d", |a| {
         a.append_i32(&[6, 7, 8]);
     }));
     assert_eq!(
         dataset::read_pure::<i32>(&path, "d"),
-        (0..6).collect::<Vec<_>>()
+        fixture.expected_i32()
     );
 }
 
@@ -463,13 +454,7 @@ fn refuse_rank2() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("d.h5");
     // 2-D dataset with one unlimited axis (EA index) — refused as rank > 1.
-    let mut b = FileBuilder::new();
-    b.create_dataset("d")
-        .with_i32_data(&(0..12).collect::<Vec<_>>())
-        .with_shape(&[3, 4])
-        .with_maxshape(&[MaxExtent::Unlimited, MaxExtent::Fixed(4)])
-        .with_chunks(&[1, 4]);
-    b.write(&path).unwrap();
+    dataset::AppendRefusalFixture::Rank2.write(&path);
     assert_append_unsupported(commit_append(&path, "d", |a| {
         a.append_i32(&[0, 0, 0, 0]);
     }));
@@ -479,15 +464,14 @@ fn refuse_rank2() {
 fn refuse_datatype_mismatch() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("d.h5");
-    Unlimited::new("d", &(0..4).collect::<Vec<i32>>(), 4)
-        .filters(&[Filter::Deflate(6)])
-        .pure_create(&path);
+    let fixture = dataset::AppendRefusalFixture::UnlimitedI32;
+    fixture.write(&path);
     assert_append_unsupported(commit_append(&path, "d", |a| {
         a.append_f64(&[1.0, 2.0]); // f64 onto i32
     }));
     assert_eq!(
         dataset::read_pure::<i32>(&path, "d"),
-        (0..4).collect::<Vec<_>>()
+        fixture.expected_i32()
     );
 }
 
@@ -495,15 +479,14 @@ fn refuse_datatype_mismatch() {
 fn refuse_raw_wrong_length() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("d.h5");
-    Unlimited::new("d", &(0..4).collect::<Vec<i32>>(), 4)
-        .filters(&[Filter::Deflate(6)])
-        .pure_create(&path);
+    let fixture = dataset::AppendRefusalFixture::UnlimitedI32;
+    fixture.write(&path);
     assert_append_unsupported(commit_append(&path, "d", |a| {
         a.append_raw(&[1, 2, 3]); // 3 bytes, elem size 4
     }));
     assert_eq!(
         dataset::read_pure::<i32>(&path, "d"),
-        (0..4).collect::<Vec<_>>()
+        fixture.expected_i32()
     );
 }
 
@@ -511,15 +494,14 @@ fn refuse_raw_wrong_length() {
 fn refuse_mixed_element_types() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("d.h5");
-    Unlimited::new("d", &(0..4).collect::<Vec<i32>>(), 4)
-        .filters(&[Filter::Deflate(6)])
-        .pure_create(&path);
+    let fixture = dataset::AppendRefusalFixture::UnlimitedI32;
+    fixture.write(&path);
     assert_append_unsupported(commit_append(&path, "d", |a| {
         a.append_i32(&[4, 5]).append_i64(&[6]);
     }));
     assert_eq!(
         dataset::read_pure::<i32>(&path, "d"),
-        (0..4).collect::<Vec<_>>()
+        fixture.expected_i32()
     );
 }
 
@@ -527,9 +509,8 @@ fn refuse_mixed_element_types() {
 fn refuse_nonexistent_dataset() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("d.h5");
-    Unlimited::new("d", &(0..4).collect::<Vec<i32>>(), 4)
-        .filters(&[Filter::Deflate(6)])
-        .pure_create(&path);
+    let fixture = dataset::AppendRefusalFixture::UnlimitedI32;
+    fixture.write(&path);
     // A missing dataset is now caught when the handle is resolved, before an
     // append can be staged at all, rather than at commit.
     let err = commit_append(&path, "missing", |a| {
