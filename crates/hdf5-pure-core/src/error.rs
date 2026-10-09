@@ -26,9 +26,19 @@ pub enum FormatError {
     /// Invalid length size (must be 2, 4, or 8).
     InvalidLengthSize(u8),
     /// An address is too large for an address field of `offset_size` bytes.
-    AddressTooLarge { address: u64, offset_size: u8 },
+    AddressTooLarge {
+        /// The address that does not fit the field.
+        address: u64,
+        /// The address field's width in bytes.
+        offset_size: u8,
+    },
     /// A length is too large for a length field of `length_size` bytes.
-    LengthTooLarge { length: u64, length_size: u8 },
+    LengthTooLarge {
+        /// The length that does not fit the field.
+        length: u64,
+        /// The length field's width in bytes.
+        length_size: u8,
+    },
     /// Invalid object header signature.
     InvalidObjectHeaderSignature,
     /// Invalid object header version.
@@ -202,6 +212,13 @@ pub enum FormatError {
     InvalidFractalHeapSignature,
     /// Invalid fractal heap version.
     InvalidFractalHeapVersion(u8),
+    /// A supplied heap ID has a different length from the heap header's declared ID length.
+    InvalidFractalHeapIdLength {
+        /// The declared heap ID length in bytes.
+        expected: usize,
+        /// The supplied heap ID length in bytes.
+        actual: usize,
+    },
     /// Invalid heap ID type.
     InvalidHeapIdType(u8),
     /// A fractal-heap "huge" object's heap ID referenced a B-tree key that is
@@ -788,6 +805,12 @@ impl fmt::Display for FormatError {
             }
             Self::InvalidBTreeV2Version(v) => {
                 write!(f, "invalid B-tree v2 version: {v}")
+            }
+            Self::InvalidFractalHeapIdLength { expected, actual } => {
+                write!(
+                    f,
+                    "invalid fractal heap ID length: expected {expected} bytes, got {actual}"
+                )
             }
             Self::InvalidFractalHeapSignature => {
                 write!(f, "invalid fractal heap signature")

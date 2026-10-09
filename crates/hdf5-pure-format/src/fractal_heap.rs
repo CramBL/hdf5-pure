@@ -404,56 +404,33 @@ impl FractalHeapHeader {
     ///
     /// # Errors
     ///
-    /// Returns [`FormatError::UnexpectedEof`] if `id_bytes` is empty, and
+    /// Returns [`FormatError::InvalidFractalHeapIdLength`] if `id_bytes` has a different length
+    /// from [`heap_id_length`](Self::heap_id_length), [`FormatError::UnexpectedEof`] if
+    /// `id_bytes` is empty, and
     /// [`FormatError::InvalidHeapIdType`] if its type is not managed.
     pub fn decode_managed_id(&self, id_bytes: &[u8]) -> Result<(u64, u64), FormatError> {
-        if id_bytes.is_empty() {
-            return Err(FormatError::UnexpectedEof {
-                expected: 1,
-                available: 0,
-            });
-        }
-
-        let id_type = (id_bytes[0] >> 4) & 0x03;
-        if id_type != 0 {
-            return Err(FormatError::InvalidHeapIdType(id_type));
-        }
-
-        let payload = &id_bytes[1..];
-        let mut combined: u64 = 0;
-        for (i, &b) in payload.iter().enumerate() {
-            if i >= 8 {
-                break;
+        match FractalHeapIdType::from_heap_id(id_bytes)? {
+            FractalHeapIdType::Managed => {}
+            FractalHeapIdType::Huge => {
+                return Err(FormatError::InvalidHeapIdType(HEAP_ID_TYPE_HUGE));
             }
-            combined |= (b as u64) << (i * 8);
+            FractalHeapIdType::Tiny => {
+                return Err(FormatError::InvalidHeapIdType(HEAP_ID_TYPE_TINY));
+            }
         }
-
-        let offset_bits = self.max_heap_size as u32;
-        let offset_mask = if offset_bits >= 64 {
-            u64::MAX
-        } else {
-            (1u64 << offset_bits) - 1
-        };
-        let heap_offset = combined & offset_mask;
-
-        #[expect(
-            clippy::cast_possible_truncation,
-            reason = "payload is a single managed-object heap entry; its bit length fits u32"
-        )]
-        let total_payload_bits = (payload.len() as u32) * 8;
-        let length_bits = total_payload_bits.saturating_sub(offset_bits);
-        let length_val = if length_bits == 0 {
-            0
-        } else {
-            let length_mask = if length_bits >= 64 {
-                u64::MAX
-            } else {
-                (1u64 << length_bits) - 1
-            };
-            (combined >> offset_bits) & length_mask
-        };
-
-        Ok((heap_offset, length_val))
+        match FractalHeapIdLayout::new(self, OffsetWidth::Eight, LengthWidth::Eight)
+            .parse(id_bytes)?
+            .kind()
+        {
+            FractalHeapIdKind::Managed {
+                heap_offset,
+                object_length,
+            } => Ok((heap_offset, object_length)),
+            FractalHeapIdKind::Huge(_) => Err(FormatError::InvalidHeapIdType(HEAP_ID_TYPE_HUGE)),
+            FractalHeapIdKind::Tiny { .. } => {
+                Err(FormatError::InvalidHeapIdType(HEAP_ID_TYPE_TINY))
+            }
+        }
     }
 
     /// Returns the heap ID of the managed object of `length` bytes at heap offset `heap_offset`.
@@ -498,37 +475,19 @@ impl FractalHeapHeader {
     ///
     /// # Errors
     ///
-    /// Returns [`FormatError::UnexpectedEof`] if `id_bytes` ends before the length or the object.
+    /// Returns [`FormatError::InvalidHeapIdType`] if the parsed ID is not tiny, and the errors
+    /// [`FractalHeapIdLayout::parse`] returns if parsing fails.
     pub fn decode_tiny_id(&self, id_bytes: &[u8]) -> Result<Vec<u8>, FormatError> {
-        const TINY_LEN_SHORT: u16 = 16;
-        let Some((&first, _)) = id_bytes.split_first() else {
-            return Err(FormatError::UnexpectedEof {
-                expected: 1,
-                available: 0,
-            });
-        };
-        let extended = self.heap_id_length.saturating_sub(1) > TINY_LEN_SHORT;
-        let (len, data_start) = if extended {
-            if id_bytes.len() < 2 {
-                return Err(FormatError::UnexpectedEof {
-                    expected: 2,
-                    available: id_bytes.len(),
-                });
+        match FractalHeapIdLayout::new(self, OffsetWidth::Eight, LengthWidth::Eight)
+            .parse(id_bytes)?
+            .kind()
+        {
+            FractalHeapIdKind::Tiny { bytes } => Ok(bytes.to_vec()),
+            FractalHeapIdKind::Managed { .. } => {
+                Err(FormatError::InvalidHeapIdType(HEAP_ID_TYPE_MANAGED))
             }
-            let len = ((((first & 0x0F) as usize) << 8) | id_bytes[1] as usize) + 1;
-            (len, 2)
-        } else {
-            let len = (first & 0x0F) as usize + 1;
-            (len, 1)
-        };
-        let end = data_start + len;
-        if end > id_bytes.len() {
-            return Err(FormatError::UnexpectedEof {
-                expected: end,
-                available: id_bytes.len(),
-            });
+            FractalHeapIdKind::Huge(_) => Err(FormatError::InvalidHeapIdType(HEAP_ID_TYPE_HUGE)),
         }
-        Ok(id_bytes[data_start..end].to_vec())
     }
 
     /// Returns the location of the huge object the heap ID `id_bytes` refers to: its address and
@@ -541,38 +500,31 @@ impl FractalHeapHeader {
     ///
     /// # Errors
     ///
-    /// Returns [`FormatError::UnsupportedFilteredHeapObject`] if the heap filters its objects,
-    /// [`FormatError::UnexpectedEof`] if `id_bytes` ends before the fields it holds,
+    /// Returns [`FormatError::InvalidHeapIdType`] if the parsed ID is not huge,
     /// [`FormatError::InvalidOffsetSize`] or [`FormatError::InvalidLengthSize`] if a width is not
-    /// 2, 4, or 8, and [`FormatError::HugeObjectNotFound`] if the heap ID holds a key and the heap
-    /// has no huge-object B-tree.
+    /// 2, 4, or 8, and the errors [`FractalHeapIdLayout::parse`] returns if parsing fails.
     pub fn decode_huge_id(
         &self,
         id_bytes: &[u8],
         offset_size: u8,
         length_size: u8,
     ) -> Result<HugeObjectReference, FormatError> {
-        if self.io_filter_encoded_length > 0 {
-            return Err(FormatError::UnsupportedFilteredHeapObject);
+        match FractalHeapIdLayout::new(
+            self,
+            OffsetWidth::try_from(offset_size)?,
+            LengthWidth::try_from(length_size)?,
+        )
+        .parse(id_bytes)?
+        .kind()
+        {
+            FractalHeapIdKind::Huge(reference) => Ok(reference),
+            FractalHeapIdKind::Managed { .. } => {
+                Err(FormatError::InvalidHeapIdType(HEAP_ID_TYPE_MANAGED))
+            }
+            FractalHeapIdKind::Tiny { .. } => {
+                Err(FormatError::InvalidHeapIdType(HEAP_ID_TYPE_TINY))
+            }
         }
-        let Some((_, payload)) = id_bytes.split_first() else {
-            return Err(FormatError::UnexpectedEof {
-                expected: 1,
-                available: 0,
-            });
-        };
-
-        if self.huge_ids_direct(offset_size, length_size) {
-            let addr = StoredAddress::new(bytes::read_offset(payload, 0, offset_size)?);
-            let len = bytes::read_length(payload, offset_size as usize, length_size)?;
-            return Ok(HugeObjectReference::Inline { addr, len });
-        }
-
-        let huge_id = read_var_le(payload);
-        if convert::is_undefined_addr(self.btree_huge_objects_address.get(), offset_size) {
-            return Err(FormatError::HugeObjectNotFound(huge_id));
-        }
-        Ok(HugeObjectReference::Indexed(huge_id))
     }
 
     /// Returns the heap ID of the huge object whose key in the huge-object B-tree is `huge_id`.
@@ -842,6 +794,194 @@ impl FractalHeapHeader {
     }
 }
 
+/// The immutable decoding parameters for the IDs of a fractal heap.
+///
+/// The parameters are derived from a [`FractalHeapHeader`] and the file's address and length
+/// widths. [`parse`](Self::parse) decodes supplied bytes without reading heap blocks or the
+/// huge-object B-tree. The heap IDs are defined in "Fractal Heap" of the
+/// [format specification, version 4.0][spec].
+///
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsec_fmt4_infra_fractalheap
+#[derive(Clone, Debug)]
+pub struct FractalHeapIdLayout {
+    encoded_len: usize,
+    offset_bits: u32,
+    offset_mask: u64,
+    length_mask: u64,
+    tiny_extended: bool,
+    huge: HugeIdLayout,
+}
+
+impl FractalHeapIdLayout {
+    /// Derives the heap ID decoding parameters from `header` and the file's field widths.
+    pub fn new(header: &FractalHeapHeader, offsets: OffsetWidth, lengths: LengthWidth) -> Self {
+        let encoded_len = usize::from(header.heap_id_length);
+        let offset_bits = u32::from(header.max_heap_size);
+        let payload_bits = u32::from(header.heap_id_length.saturating_sub(1)) * 8;
+        let huge = if header.io_filter_encoded_length > 0 {
+            HugeIdLayout::Filtered
+        } else if header.huge_ids_direct(offsets.get(), lengths.get()) {
+            HugeIdLayout::Inline { offsets, lengths }
+        } else {
+            HugeIdLayout::Indexed {
+                has_btree: !convert::is_undefined_addr(
+                    header.btree_huge_objects_address.get(),
+                    offsets.get(),
+                ),
+            }
+        };
+        Self {
+            encoded_len,
+            offset_bits,
+            offset_mask: Self::mask(offset_bits),
+            length_mask: Self::mask(payload_bits.saturating_sub(offset_bits)),
+            tiny_extended: header.heap_id_length.saturating_sub(1) > TINY_LEN_SHORT,
+            huge,
+        }
+    }
+
+    /// Parses a complete heap ID using this heap's decoding parameters.
+    ///
+    /// Reads the managed object's heap offset and length, the huge object's location, or the
+    /// tiny object's bytes. For a tiny object, the caller receives a slice borrowed from `bytes`.
+    /// The parser reads the type independently of the version bits.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::InvalidFractalHeapIdLength`] if `bytes` has a different length
+    /// from [`encoded_len`](Self::encoded_len), [`FormatError::InvalidHeapIdType`] if its type
+    /// bits hold 3, and [`FormatError::UnexpectedEof`] if the declared ID length is zero or a tiny
+    /// object's declared length exceeds the available bytes.
+    ///
+    /// Returns [`FormatError::UnsupportedFilteredHeapObject`] for a huge ID in a filtered
+    /// heap, and [`FormatError::HugeObjectNotFound`] for an indexed huge ID in a heap without
+    /// a huge-object B-tree.
+    pub fn parse<'a>(&self, bytes: &'a [u8]) -> Result<FractalHeapIdView<'a>, FormatError> {
+        if bytes.len() != self.encoded_len {
+            return Err(FormatError::InvalidFractalHeapIdLength {
+                expected: self.encoded_len,
+                actual: bytes.len(),
+            });
+        }
+        let kind = FractalHeapIdType::from_heap_id(bytes)?;
+        let (&first, payload) = bytes.split_first().ok_or(FormatError::UnexpectedEof {
+            expected: 1,
+            available: bytes.len(),
+        })?;
+        Ok(FractalHeapIdView {
+            kind: match kind {
+                FractalHeapIdType::Managed => self.parse_managed(payload),
+                FractalHeapIdType::Huge => FractalHeapIdKind::Huge(self.parse_huge(payload)?),
+                FractalHeapIdType::Tiny => FractalHeapIdKind::Tiny {
+                    bytes: self.parse_tiny(first, bytes)?,
+                },
+            },
+        })
+    }
+
+    /// Returns the exact ID length in bytes declared by the heap header.
+    pub const fn encoded_len(&self) -> usize {
+        self.encoded_len
+    }
+
+    fn parse_managed(&self, payload: &[u8]) -> FractalHeapIdKind<'static> {
+        let combined = read_var_le(payload);
+        FractalHeapIdKind::Managed {
+            heap_offset: combined & self.offset_mask,
+            object_length: combined.checked_shr(self.offset_bits).unwrap_or(0) & self.length_mask,
+        }
+    }
+
+    fn parse_huge(&self, payload: &[u8]) -> Result<HugeObjectReference, FormatError> {
+        Ok(match self.huge {
+            HugeIdLayout::Filtered => return Err(FormatError::UnsupportedFilteredHeapObject),
+            HugeIdLayout::Inline { offsets, lengths } => HugeObjectReference::Inline {
+                addr: StoredAddress::new(bytes::read_offset(payload, 0, offsets.get())?),
+                len: bytes::read_length(payload, usize::from(offsets.get()), lengths.get())?,
+            },
+            HugeIdLayout::Indexed { has_btree } => {
+                let key = read_var_le(payload);
+                if !has_btree {
+                    return Err(FormatError::HugeObjectNotFound(key));
+                }
+                HugeObjectReference::Indexed(key)
+            }
+        })
+    }
+
+    fn parse_tiny<'a>(&self, first: u8, bytes: &'a [u8]) -> Result<&'a [u8], FormatError> {
+        let (len, start) = if self.tiny_extended {
+            let second = bytes.get(1).ok_or(FormatError::UnexpectedEof {
+                expected: 2,
+                available: bytes.len(),
+            })?;
+            (
+                (((usize::from(first & TINY_LENGTH_MASK)) << 8) | usize::from(*second)) + 1,
+                2,
+            )
+        } else {
+            (usize::from(first & TINY_LENGTH_MASK) + 1, 1)
+        };
+        bytes
+            .get(start..start + len)
+            .ok_or(FormatError::UnexpectedEof {
+                expected: start + len,
+                available: bytes.len(),
+            })
+    }
+
+    fn mask(bits: u32) -> u64 {
+        1u64.checked_shl(bits).map_or(u64::MAX, |limit| limit - 1)
+    }
+}
+
+/// A heap ID parsed against the decoding parameters of a fractal heap.
+///
+/// Obtained through [`FractalHeapIdLayout::parse`], which checks the encoded length and decodes
+/// the type-specific fields. Only a tiny object's bytes are borrowed from the encoded ID.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct FractalHeapIdView<'a> {
+    kind: FractalHeapIdKind<'a>,
+}
+
+impl<'a> FractalHeapIdView<'a> {
+    /// Returns the decoded object location or the borrowed bytes of a tiny object.
+    pub const fn kind(self) -> FractalHeapIdKind<'a> {
+        self.kind
+    }
+}
+
+/// The decoded fields of a heap ID, returned by [`FractalHeapIdView::kind`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FractalHeapIdKind<'a> {
+    /// The object is stored in the heap's managed blocks.
+    Managed {
+        /// The object's offset in the heap's address space.
+        heap_offset: u64,
+        /// The object's length in bytes.
+        object_length: u64,
+    },
+    /// The object is stored outside the heap's managed blocks.
+    Huge(HugeObjectReference),
+    /// The encoded ID holds the object itself.
+    Tiny {
+        /// The object's bytes, borrowed from the encoded ID.
+        bytes: &'a [u8],
+    },
+}
+
+#[derive(Clone, Copy, Debug)]
+enum HugeIdLayout {
+    Filtered,
+    Indexed {
+        has_btree: bool,
+    },
+    Inline {
+        offsets: OffsetWidth,
+        lengths: LengthWidth,
+    },
+}
+
 fn fits_bits(value: u64, bits: u32) -> bool {
     value.checked_shr(bits).is_none_or(|high| high == 0)
 }
@@ -880,6 +1020,13 @@ const HEAP_ID_TYPE_HUGE: u8 = 1;
 
 /// The type of the heap ID of a tiny object, from the same section as [`FRACTAL_HEAP_SIGNATURE`].
 const HEAP_ID_TYPE_TINY: u8 = 2;
+
+// `H5HF__tiny_init` in `H5HFtiny.c`, HDF5 2.2.0, uses the short form for up to 16 payload bytes.
+const TINY_LEN_SHORT: u16 = 16;
+
+// The low four bits hold the length less one in the normal form and its high four bits in the
+// extended form ("Fractal Heap", specification 4.0).
+const TINY_LENGTH_MASK: u8 = 0x0F;
 
 #[cfg(test)]
 mod tests {
@@ -944,9 +1091,117 @@ mod tests {
             id[1 + i] = ((payload >> (i * 8)) & 0xFF) as u8;
         }
 
-        let (off, len) = hdr.decode_managed_id(&id).unwrap();
-        assert_eq!(off, 0);
-        assert_eq!(len, 13);
+        assert_eq!(
+            FractalHeapIdLayout::new(&hdr, OffsetWidth::Eight, LengthWidth::Eight)
+                .parse(&id)
+                .unwrap()
+                .kind(),
+            FractalHeapIdKind::Managed {
+                heap_offset: 0,
+                object_length: 13
+            },
+        );
+    }
+
+    #[rstest]
+    #[case::too_short(9, vec![0; 8])]
+    #[case::too_long(7, vec![0; 8])]
+    #[case::empty(8, vec![])]
+    fn an_id_must_have_the_declared_length(#[case] declared: u16, #[case] bytes: Vec<u8>) {
+        let header = FractalHeapHeader {
+            heap_id_length: declared,
+            ..attribute_heap_header()
+        };
+        let layout = FractalHeapIdLayout::new(&header, OffsetWidth::Eight, LengthWidth::Eight);
+        assert_eq!(layout.encoded_len(), usize::from(declared));
+        assert_eq!(
+            layout.parse(&bytes),
+            Err(FormatError::InvalidFractalHeapIdLength {
+                expected: usize::from(declared),
+                actual: bytes.len(),
+            })
+        );
+    }
+
+    #[rstest]
+    #[case::zero_offset_bits(0, 0, 0x1234)]
+    #[case::whole_integer_offset(64, 0x1234, 0)]
+    #[case::offset_above_integer(65, 0x1234, 0)]
+    fn managed_fields_decode_at_integer_width_boundaries(
+        #[case] bits: u16,
+        #[case] offset: u64,
+        #[case] length: u64,
+    ) {
+        let header = FractalHeapHeader {
+            heap_id_length: 9,
+            max_heap_size: bits,
+            ..attribute_heap_header()
+        };
+        let bytes = [0, 0x34, 0x12, 0, 0, 0, 0, 0, 0];
+        assert_eq!(
+            FractalHeapIdLayout::new(&header, OffsetWidth::Eight, LengthWidth::Eight)
+                .parse(&bytes)
+                .unwrap()
+                .kind(),
+            FractalHeapIdKind::Managed {
+                heap_offset: offset,
+                object_length: length
+            }
+        );
+    }
+
+    #[rstest]
+    #[case::reserved_type(vec![0x30, 0, 0, 0, 0, 0, 0, 0], FormatError::InvalidHeapIdType(3))]
+    #[case::tiny_past_id(vec![0x2F, 0, 0, 0, 0, 0, 0, 0], FormatError::UnexpectedEof { expected: 17, available: 8 })]
+    fn a_complete_id_with_invalid_fields_is_an_error(
+        #[case] bytes: Vec<u8>,
+        #[case] error: FormatError,
+    ) {
+        assert_eq!(
+            FractalHeapIdLayout::new(
+                &attribute_heap_header(),
+                OffsetWidth::Eight,
+                LengthWidth::Eight
+            )
+            .parse(&bytes),
+            Err(error)
+        );
+    }
+
+    #[rstest]
+    #[case::filtered(true, FormatError::UnsupportedFilteredHeapObject)]
+    #[case::missing_tree(false, FormatError::HugeObjectNotFound(5))]
+    fn filtered_huge_ids_and_missing_huge_object_trees_are_errors(
+        #[case] filtered: bool,
+        #[case] error: FormatError,
+    ) {
+        let header = FractalHeapHeader {
+            io_filter_encoded_length: u16::from(filtered),
+            btree_huge_objects_address: StoredAddress::new(u64::MAX),
+            ..attribute_heap_header()
+        };
+        assert_eq!(
+            FractalHeapIdLayout::new(&header, OffsetWidth::Eight, LengthWidth::Eight)
+                .parse(&[0x10, 5, 0, 0, 0, 0, 0, 0]),
+            Err(error)
+        );
+    }
+
+    #[test]
+    fn a_tiny_id_borrows_its_payload() {
+        let bytes = [0x22, b'a', b'b', b'c', 0, 0, 0, 0];
+        let FractalHeapIdKind::Tiny { bytes: object } = FractalHeapIdLayout::new(
+            &attribute_heap_header(),
+            OffsetWidth::Eight,
+            LengthWidth::Eight,
+        )
+        .parse(&bytes)
+        .unwrap()
+        .kind() else {
+            panic!("expected tiny ID")
+        };
+        assert_eq!(object, b"abc");
+        assert_eq!(object.as_ptr(), bytes[1..].as_ptr());
     }
 
     #[test]
@@ -976,29 +1231,27 @@ mod tests {
         assert_eq!(err, FormatError::InvalidHeapIdType(1));
     }
 
-    #[test]
-    fn heap_id_type_reads_bits_4_5() {
+    #[rstest]
+    #[case::managed(0x00, FractalHeapIdKind::Managed { heap_offset: 0, object_length: 0 })]
+    #[case::huge(0x10, FractalHeapIdKind::Huge(HugeObjectReference::Indexed(0)))]
+    #[case::tiny(0x20, FractalHeapIdKind::Tiny { bytes: &[0] })]
+    #[case::version_bits(0xD0, FractalHeapIdKind::Huge(HugeObjectReference::Indexed(0)))]
+    fn the_parser_reads_type_bits_independently_of_version_bits(
+        #[case] first: u8,
+        #[case] expected: FractalHeapIdKind<'_>,
+    ) {
+        let mut bytes = [0; 8];
+        bytes[0] = first;
         assert_eq!(
-            FractalHeapIdType::from_heap_id(&[0x00]).unwrap(),
-            FractalHeapIdType::Managed
-        );
-        assert_eq!(
-            FractalHeapIdType::from_heap_id(&[0x10]).unwrap(),
-            FractalHeapIdType::Huge
-        );
-        assert_eq!(
-            FractalHeapIdType::from_heap_id(&[0x20]).unwrap(),
-            FractalHeapIdType::Tiny
-        );
-        // Reserved type 3.
-        assert_eq!(
-            FractalHeapIdType::from_heap_id(&[0x30]),
-            Err(FormatError::InvalidHeapIdType(3))
-        );
-        // With the version bits (0xC0) set, the type is huge.
-        assert_eq!(
-            FractalHeapIdType::from_heap_id(&[0xC0 | 0x10]).unwrap(),
-            FractalHeapIdType::Huge
+            FractalHeapIdLayout::new(
+                &attribute_heap_header(),
+                OffsetWidth::Eight,
+                LengthWidth::Eight
+            )
+            .parse(&bytes)
+            .unwrap()
+            .kind(),
+            expected
         );
     }
 
@@ -1036,33 +1289,27 @@ mod tests {
         assert_eq!(h.find_child_for_offset(&block, 2, 0, u64::MAX, 8), Ok(None));
     }
 
-    #[test]
-    fn read_tiny_object_short_and_extended() {
-        let header = |heap_id_length| FractalHeapHeader {
-            heap_id_length,
-            ..dtable_header(512, 65536, 4)
+    #[rstest]
+    #[case::short(7, vec![0x23], b"abcd".as_slice())]
+    #[case::extended(20, vec![0x20, 0x04], b"hello".as_slice())]
+    #[case::longest_short(17, vec![0x24], b"world".as_slice())]
+    fn a_tiny_id_parses_its_short_or_extended_length(
+        #[case] declared: u16,
+        #[case] mut bytes: Vec<u8>,
+        #[case] object: &[u8],
+    ) {
+        let header = FractalHeapHeader {
+            heap_id_length: declared,
+            ..attribute_heap_header()
         };
-        // The normal form: the low four bits of byte 0 hold the length less one.
-        let id = [0x20 | 0x03, b'a', b'b', b'c', b'd', 0, 0];
-        assert_eq!(header(7).decode_tiny_id(&id).unwrap(), b"abcd");
-        // The extended form: a 12-bit length less one across bytes 0 and 1, 0x004 for 5 bytes.
-        let mut id = vec![0x20, 0x04];
-        id.extend_from_slice(b"hello");
-        id.resize(20, 0);
-        assert_eq!(header(20).decode_tiny_id(&id).unwrap(), b"hello");
-
-        // `H5HF__tiny_init` in `H5HFtiny.c` (HDF5 2.2.0) gives a 17-byte heap ID the normal form.
-        let mut id = vec![0x20 | 0x04]; // normal form, length 5
-        id.extend_from_slice(b"world");
-        id.resize(17, 0);
-        assert_eq!(header(17).decode_tiny_id(&id).unwrap(), b"world");
-
+        bytes.extend_from_slice(object);
+        bytes.resize(usize::from(declared), 0);
         assert_eq!(
-            header(7).decode_tiny_id(&[]),
-            Err(FormatError::UnexpectedEof {
-                expected: 1,
-                available: 0,
-            })
+            FractalHeapIdLayout::new(&header, OffsetWidth::Eight, LengthWidth::Eight)
+                .parse(&bytes)
+                .unwrap()
+                .kind(),
+            FractalHeapIdKind::Tiny { bytes: object }
         );
     }
 
@@ -1081,31 +1328,19 @@ mod tests {
         inline_huge.extend_from_slice(&40u64.to_le_bytes());
 
         assert_eq!(
-            indexed.decode_huge_id(&[0x10, 5, 0, 0, 0, 0, 0], 8, 8),
-            Ok(HugeObjectReference::Indexed(5))
+            FractalHeapIdLayout::new(&indexed, OffsetWidth::Eight, LengthWidth::Eight)
+                .parse(&[0x10, 5, 0, 0, 0, 0, 0])
+                .map(FractalHeapIdView::kind),
+            Ok(FractalHeapIdKind::Huge(HugeObjectReference::Indexed(5)))
         );
         assert_eq!(
-            wide.decode_huge_id(&inline_huge, 8, 8),
-            Ok(HugeObjectReference::Inline {
+            FractalHeapIdLayout::new(&wide, OffsetWidth::Eight, LengthWidth::Eight)
+                .parse(&inline_huge)
+                .map(FractalHeapIdView::kind),
+            Ok(FractalHeapIdKind::Huge(HugeObjectReference::Inline {
                 addr: StoredAddress::new(0x900),
                 len: 40,
-            })
-        );
-    }
-
-    #[test]
-    fn an_empty_huge_id_is_an_unexpected_eof() {
-        let indexed = FractalHeapHeader {
-            btree_huge_objects_address: StoredAddress::new(0x800),
-            ..dtable_header(512, 65536, 4)
-        };
-
-        assert_eq!(
-            indexed.decode_huge_id(&[], 8, 8),
-            Err(FormatError::UnexpectedEof {
-                expected: 1,
-                available: 0,
-            })
+            }))
         );
     }
 
@@ -1264,7 +1499,16 @@ mod tests {
             FractalHeapIdType::from_heap_id(&id),
             Ok(FractalHeapIdType::Managed)
         );
-        assert_eq!(header.decode_managed_id(&id), Ok((heap_offset, length)));
+        assert_eq!(
+            FractalHeapIdLayout::new(&header, OffsetWidth::Eight, LengthWidth::Eight)
+                .parse(&id)
+                .unwrap()
+                .kind(),
+            FractalHeapIdKind::Managed {
+                heap_offset,
+                object_length: length
+            },
+        );
     }
 
     #[rstest]
@@ -1309,8 +1553,10 @@ mod tests {
             .unwrap();
         assert_eq!(id, [0x10, 5, 0, 0, 0, 0, 0, 0]);
         assert_eq!(
-            header.decode_huge_id(&id, 8, 8),
-            Ok(HugeObjectReference::Indexed(5))
+            FractalHeapIdLayout::new(&header, OffsetWidth::Eight, LengthWidth::Eight)
+                .parse(&id)
+                .map(FractalHeapIdView::kind),
+            Ok(FractalHeapIdKind::Huge(HugeObjectReference::Indexed(5)))
         );
     }
 
