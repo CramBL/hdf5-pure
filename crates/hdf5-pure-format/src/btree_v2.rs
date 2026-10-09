@@ -828,7 +828,11 @@ pub const BTREE_V2_HUGE_OBJECT: u8 = 1;
 
 /// The type of a version 2 B-tree that indexes the link names of a group, from the same table as
 /// [`BTREE_V2_HUGE_OBJECT`].
-const BTREE_V2_LINK_NAME: u8 = 5;
+pub const BTREE_V2_LINK_NAME: u8 = 5;
+
+/// The type of a version 2 B-tree that indexes the link creation order of a group, from the same
+/// table as [`BTREE_V2_HUGE_OBJECT`].
+pub const BTREE_V2_LINK_CREATION_ORDER: u8 = 6;
 
 /// The type of a version 2 B-tree that indexes the attribute names of an object, from the same
 /// table as [`BTREE_V2_HUGE_OBJECT`].

@@ -16,6 +16,8 @@ pub use crate::btree_v2::BTREE_V2_ATTRIBUTE_NAME;
 pub use crate::btree_v2::BTREE_V2_CHUNK;
 pub use crate::btree_v2::BTREE_V2_FILTERED_CHUNK;
 pub use crate::btree_v2::BTREE_V2_HUGE_OBJECT;
+pub use crate::btree_v2::BTREE_V2_LINK_CREATION_ORDER;
+pub use crate::btree_v2::BTREE_V2_LINK_NAME;
 pub use crate::btree_v2::BTreeV2ChunkRecord;
 pub use crate::btree_v2::BTreeV2ChunkRecordContext;
 pub use crate::btree_v2::BTreeV2Header;
