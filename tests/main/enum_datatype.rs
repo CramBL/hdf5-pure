@@ -9,14 +9,7 @@
 use hdf5_pure::{
     DType, Datatype, EnumTypeBuilder, File, FileBuilder, FixedPointLayout, FormatError,
 };
-
-/// Build a file holding a single dataset `name`, serialize it, and reopen it.
-fn write_then_open(build: impl FnOnce(&mut FileBuilder)) -> File {
-    let mut builder = FileBuilder::new();
-    build(&mut builder);
-    let bytes = builder.finish().expect("finish");
-    File::from_bytes(bytes).expect("from_bytes")
-}
+use test_util_hdf5::file_builder;
 
 #[test]
 fn i32_enum_dataset_preserves_members_and_values() {
@@ -26,7 +19,7 @@ fn i32_enum_dataset_preserves_members_and_values() {
         .value("BLUE", 2)
         .build()
         .unwrap();
-    let file = write_then_open(|b| {
+    let file = file_builder::build_and_open(|b| {
         b.create_dataset("color")
             .with_enum_i32_data(dt, &[0, 1, 2, 1]);
     });
@@ -79,7 +72,7 @@ fn i32_enum_dataset_reads_back_through_base_type() {
         .value("BLUE", 2)
         .build()
         .unwrap();
-    let file = write_then_open(|b| {
+    let file = file_builder::build_and_open(|b| {
         b.create_dataset("color")
             .with_enum_i32_data(dt, &[0, 1, 2, 1]);
     });
@@ -99,7 +92,7 @@ fn enum_dataset_classifies_as_dtype_enum_of_member_names() {
         .value("BLUE", 2)
         .build()
         .unwrap();
-    let file = write_then_open(|b| {
+    let file = file_builder::build_and_open(|b| {
         b.create_dataset("color").with_enum_i32_data(dt, &[0, 1, 2]);
     });
     let ds = file.dataset("color").unwrap();
@@ -120,7 +113,7 @@ fn u8_enum_dataset_roundtrips() {
         .u8_value("ON", 1)
         .build()
         .unwrap();
-    let file = write_then_open(|b| {
+    let file = file_builder::build_and_open(|b| {
         b.create_dataset("switch")
             .with_enum_u8_data(dt, &[0, 1, 1, 0]);
     });
@@ -148,7 +141,7 @@ fn u8_enum_reads_identically_to_a_plain_u8_dataset() {
         .u8_value("HI", 255)
         .build()
         .unwrap();
-    let file = write_then_open(|b| {
+    let file = file_builder::build_and_open(|b| {
         b.create_dataset("level").with_enum_u8_data(dt, &[0, 255]);
         b.create_dataset("plain").with_u8_data(&[0, 255]);
     });
@@ -193,7 +186,7 @@ fn enum_i32_data_into_u8_enum_type_is_rejected() {
 fn non_enum_reads_are_unaffected_by_the_enum_unwrap() {
     // The enum-unwrap on the read path must be a no-op for ordinary datatypes,
     // and a genuinely non-numeric datatype must still be rejected.
-    let file = write_then_open(|b| {
+    let file = file_builder::build_and_open(|b| {
         b.create_dataset("ints").with_i32_data(&[10, 20, 30]);
         b.create_dataset("text").with_vlen_strings(&["a", "bc"]);
     });

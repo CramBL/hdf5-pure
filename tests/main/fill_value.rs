@@ -8,19 +8,11 @@
 
 use hdf5_pure::{Dataset, Error, File, FileBuilder, FormatError, H5Element, MaxExtent};
 use tempfile::tempdir;
-
-/// Build a file with `build`, serialize it, and return it parsed back, ready for
-/// asserting on the round-tripped fill value.
-fn round_trip_fill(build: impl FnOnce(&mut FileBuilder)) -> File {
-    let mut fb = FileBuilder::new();
-    build(&mut fb);
-    let bytes = fb.finish().unwrap();
-    File::from_bytes(bytes).unwrap()
-}
+use test_util_hdf5::file_builder;
 
 #[test]
 fn contiguous_fill_round_trips_and_keeps_data() {
-    let file = round_trip_fill(|fb| {
+    let file = file_builder::build_and_open(|fb| {
         fb.create_dataset("d")
             .with_i32_data(&[10, 20, 30])
             .with_fill_value(-7_i32);
@@ -33,7 +25,7 @@ fn contiguous_fill_round_trips_and_keeps_data() {
 
 #[test]
 fn chunked_extensible_fill_round_trips() {
-    let file = round_trip_fill(|fb| {
+    let file = file_builder::build_and_open(|fb| {
         fb.create_dataset("d")
             .with_f64_data(&[1.0, 2.0, 3.0, 4.0])
             .with_shape(&[4])
@@ -48,7 +40,7 @@ fn chunked_extensible_fill_round_trips() {
 
 #[test]
 fn no_fill_value_reports_none() {
-    let file = round_trip_fill(|fb| {
+    let file = file_builder::build_and_open(|fb| {
         fb.create_dataset("d").with_i32_data(&[1, 2, 3]);
     });
     // The crate's library-default fill message carries no user-defined value.
@@ -66,9 +58,9 @@ fn fill_value_across_datatypes() {
         write: impl Fn(&mut hdf5_pure::DatasetBuilder),
         expect: T,
     ) {
-        let mut fb = FileBuilder::new();
-        write(fb.create_dataset("d"));
-        let file = File::from_bytes(fb.finish().unwrap()).unwrap();
+        let file = file_builder::build_and_open(|fb| {
+            write(fb.create_dataset("d"));
+        });
         assert_eq!(
             file.dataset("d").unwrap().fill_value::<T>().unwrap(),
             Some(expect)
@@ -167,9 +159,9 @@ fn generic_fill_value_over_element_type() {
             .with_data(values)
             .with_fill_value(fill);
     }
-    let mut fb = FileBuilder::new();
-    store(&mut fb, &[1i64, 2, 3], 42i64);
-    let file = File::from_bytes(fb.finish().unwrap()).unwrap();
+    let file = file_builder::build_and_open(|fb| {
+        store(fb, &[1i64, 2, 3], 42i64);
+    });
     assert_eq!(
         file.dataset("d").unwrap().fill_value::<i64>().unwrap(),
         Some(42)
@@ -180,7 +172,7 @@ fn generic_fill_value_over_element_type() {
 fn fill_value_coerces_like_a_read() {
     // `fill_value::<T>` decodes with the same coercion rules as `read::<T>`:
     // an i32 fill value read as f64 widens.
-    let file = round_trip_fill(|fb| {
+    let file = file_builder::build_and_open(|fb| {
         fb.create_dataset("d")
             .with_i32_data(&[1])
             .with_fill_value(-3_i32);
@@ -193,7 +185,7 @@ fn fill_value_coerces_like_a_read() {
 #[test]
 fn empty_dataset_carries_a_fill_value() {
     // A zero-element dataset owns no data block but still records its fill value.
-    let file = round_trip_fill(|fb| {
+    let file = file_builder::build_and_open(|fb| {
         fb.create_dataset("d")
             .with_i32_data(&[])
             .with_shape(&[0])
