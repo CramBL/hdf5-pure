@@ -14015,6 +14015,79 @@ mod tests {
     }
 
     #[test]
+    fn deleting_a_c_written_dense_link_group_reclaims_its_whole_subtree() {
+        let dir = tempdir().unwrap();
+        let path = crate::test_data::copy("c/huge_links_12.h5", dir.path());
+        let reader = crate::reader::File::open(&path).unwrap();
+        let link_names = reader.group("g").unwrap().datasets().unwrap();
+        assert_eq!(link_names.len(), 12);
+        let data_blocks: Vec<(u64, u64, FreeClass)> = link_names
+            .iter()
+            .map(|link_name| {
+                let crate::Layout::Contiguous {
+                    address: Some(data_addr),
+                    size,
+                } = reader
+                    .dataset(&format!("g/{link_name}"))
+                    .unwrap()
+                    .layout()
+                    .unwrap()
+                else {
+                    panic!("the child {link_name:?} stores its data contiguously");
+                };
+                (data_addr, size, FreeClass::Page(PageType::Raw))
+            })
+            .collect();
+        drop(reader);
+
+        let object = ObjectPathBuf::parse("/g");
+        let mut session = WriteEngine::open_with_locking(&path, FileLocking::Enabled).unwrap();
+        let resolve = |object_path: &ObjectPathBuf| {
+            crate::group_v2::resolve_path_any_from_source(
+                &session.image(),
+                AccessMode::ReadWrite,
+                session.superblock(),
+                session.addresses(),
+                &object_path.as_path(),
+            )
+            .unwrap()
+        };
+        let addr = resolve(&object);
+        let header_spans = session.oh_chunk_spans(addr).unwrap();
+        let link_index = session
+            .dense_group_index_spans(addr, &header_spans)
+            .expect("the dense link index set is structurally complete");
+        assert!(!link_index.is_empty());
+
+        let mut expected: Vec<(u64, u64, FreeClass)> = meta_spans(header_spans)
+            .chain(meta_spans(link_index))
+            .chain(data_blocks)
+            .chain(link_names.iter().flat_map(|link_name| {
+                let child = resolve(&ObjectPathBuf::parse(&format!("/g/{link_name}")));
+                meta_spans(session.oh_chunk_spans(child).unwrap())
+            }))
+            .collect();
+        expected.sort_unstable_by_key(|&(span_addr, _, _)| span_addr);
+        let incoming = session.count_incoming_hard_links().unwrap();
+        let mut planned = Vec::new();
+        session.collect_free_spans(addr, 0, &incoming, &mut planned);
+        planned.sort_unstable_by_key(|&(span_addr, _, _)| span_addr);
+        assert_eq!(planned, expected);
+
+        session.delete(&object).unwrap();
+        session.commit().unwrap();
+        drop(session);
+        let err = crate::reader::File::open(&path)
+            .unwrap()
+            .group("g")
+            .unwrap_err();
+        let Error::Format(FormatError::PathNotFound(missing)) = &err else {
+            panic!("expected PathNotFound for g, got {err:?}");
+        };
+        assert_eq!(missing, "g");
+    }
+
+    #[test]
     fn a_v2_btree_chunk_index_is_metadata_when_reclaimed() {
         let btree = ChunkIndexLayout::BTreeV2 {
             address: Some(StoredAddress::new(4096)),

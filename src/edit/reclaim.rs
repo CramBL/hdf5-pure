@@ -107,7 +107,7 @@ impl WriteEngine {
     /// type 6 creation-order index. Only the indexes are returned. The complete index set is
     /// proven together and checked against the old object-header allocations before any span
     /// joins the deferred reclamation plan. `None` leaves the index set unreclaimed.
-    fn dense_group_index_spans(
+    pub(super) fn dense_group_index_spans(
         &self,
         addr: u64,
         header_spans: &[(u64, u64)],
@@ -280,6 +280,18 @@ impl WriteEngine {
             Err(_) => return,
         };
         let dense_index_spans = self.dense_attribute_index_spans(addr, &spans);
+        if let Some(children) = self.dense_group_children(addr) {
+            self.collect_group_spans(
+                addr,
+                depth,
+                incoming,
+                &spans,
+                dense_index_spans.as_deref(),
+                children,
+                out,
+            );
+            return;
+        }
         match Self::read_object(&self.image(), AccessMode::ReadWrite, addr, self.addresses) {
             Ok(ObjModel::DatasetVerbatim { .. }) => {
                 append_object_metadata_spans(out, &spans, dense_index_spans.as_deref());
@@ -303,19 +315,15 @@ impl WriteEngine {
                 }
             }
             Ok(ObjModel::Group { children, .. }) => {
-                let dense_group_index_spans = self.dense_group_index_spans(addr, &spans);
-                append_object_metadata_spans(out, &spans, dense_index_spans.as_deref());
-                if let Some(index_spans) = dense_group_index_spans {
-                    // Dense-link B-tree headers and nodes are file metadata under PAGE.
-                    out.extend(meta_spans(index_spans));
-                }
-                // The recursion works in absolute offsets, matching `incoming`'s
-                // keys and `oh_chunk_spans`.
-                for (_, _, child) in children {
-                    if let Ok(c) = base.absolute(child) {
-                        self.collect_free_spans(c, depth + 1, incoming, out);
-                    }
-                }
+                self.collect_group_spans(
+                    addr,
+                    depth,
+                    incoming,
+                    &spans,
+                    dense_index_spans.as_deref(),
+                    children.into_iter().map(|(_, _, child)| child),
+                    out,
+                );
             }
             // A chunked dataset: reclaim its chunk index and chunk data blocks
             // alongside its header. `chunked_storage_spans` returns `None` for
@@ -347,6 +355,70 @@ impl WriteEngine {
             // copy planner and this walk read objects through.
             Err(_) => {}
         }
+    }
+
+    /// Appends the storage a group owns to `out`, then collects the storage of each child in
+    /// `children` one level deeper.
+    fn collect_group_spans(
+        &self,
+        addr: u64,
+        depth: u32,
+        incoming: &HashMap<u64, u32>,
+        header_spans: &[(u64, u64)],
+        attribute_index_spans: Option<&[(u64, u64)]>,
+        children: impl IntoIterator<Item = StoredAddress>,
+        out: &mut Vec<(u64, u64, FreeClass)>,
+    ) {
+        let link_index_spans = self.dense_group_index_spans(addr, header_spans);
+        append_object_metadata_spans(out, header_spans, attribute_index_spans);
+        if let Some(index_spans) = link_index_spans {
+            // Dense-link B-tree headers and nodes are file metadata under PAGE.
+            out.extend(meta_spans(index_spans));
+        }
+        // The recursion works in absolute offsets, matching `incoming`'s
+        // keys and `oh_chunk_spans`.
+        let base = self.addresses;
+        for child in children {
+            if let Ok(c) = base.absolute(child) {
+                self.collect_free_spans(c, depth + 1, incoming, out);
+            }
+        }
+    }
+
+    fn dense_group_children(&self, addr: u64) -> Option<Vec<StoredAddress>> {
+        let base = self.addresses;
+        let region = Self::gather_oh_messages(&self.image(), addr, base).ok()?;
+        let mut link_info = None;
+        let mut p = 0;
+        while let Some((msg_type, body, body_end)) = region.next_message(p).ok()? {
+            if msg_type == MessageType::LINK_INFO {
+                if link_info.is_some() {
+                    return None;
+                }
+                link_info =
+                    Some(LinkInfoMessage::parse(&region[body..body_end], OFFSET_SIZE).ok()?);
+            }
+            p = body_end;
+        }
+        let link_info = link_info?;
+        let heap_address = link_info.fractal_heap_address?;
+        let entries = crate::group_v2::resolve_dense_entries_from_source(
+            &BaseOffsetSource {
+                inner: &self.image(),
+                base: base.effective_base(),
+            },
+            &link_info,
+            heap_address,
+            OFFSET_SIZE,
+            LENGTH_SIZE,
+        )
+        .ok()?;
+        Some(
+            entries
+                .into_iter()
+                .map(|entry| entry.object_header_address)
+                .collect(),
+        )
     }
 
     /// Returns every on-disk block a *chunked* dataset at `addr` owns: its
