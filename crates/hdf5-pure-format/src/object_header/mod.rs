@@ -209,7 +209,7 @@ impl ObjectHeader {
         };
         ensure_len(data, offset, 4)?;
         if data[offset..offset + 4] == OHDR_SIGNATURE {
-            Self::parse_v2(data, context, offset, &mut filter)
+            Self::parse_v2(data, context, offset, filter)
         } else {
             Self::parse_v1(data, context, offset, &mut filter)
         }
@@ -272,7 +272,7 @@ impl ObjectHeader {
         let mut sig = [0u8; 4];
         source.read_at(address, &mut sig)?;
         if sig == OHDR_SIGNATURE {
-            Self::parse_v2_from_source(source, context, address, &mut filter)
+            Self::parse_v2_from_source(source, context, address, filter)
         } else {
             Self::parse_v1_from_source(source, context, address, &mut filter)
         }
@@ -789,14 +789,13 @@ mod tests {
         }
     }
 
-    #[test]
-    fn a_filtered_version_1_parse_checks_must_understand_before_filtering() {
-        let data = v1_bytes::Header::new()
-            .message(
-                Message::new(RecordType::UNKNOWN, &UNKNOWN_BODY)
-                    .with_flags(RecordFlags::FAIL_IF_UNKNOWN_ALWAYS),
-            )
-            .build();
+    #[rstest]
+    #[case::v1_header(UnknownMessageLocation::V1Header)]
+    #[case::v2_header(UnknownMessageLocation::V2Header)]
+    fn a_filtered_parse_checks_must_understand_before_filtering(
+        #[case] location: UnknownMessageLocation,
+    ) {
+        let data = unknown_message_data(location, RecordFlags::FAIL_IF_UNKNOWN_ALWAYS);
 
         let mut buffered_filter_called = false;
         let buffered_error = {

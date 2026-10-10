@@ -55,7 +55,7 @@ impl MetadataSource for [u8] {
     }
 }
 
-fn region(bytes: &[u8], offset: u64, len: usize) -> Result<&[u8], FormatError> {
+pub(crate) fn region(bytes: &[u8], offset: u64, len: usize) -> Result<&[u8], FormatError> {
     let start = offset.to_usize()?;
     start
         .checked_add(len)
