@@ -3,12 +3,6 @@
 use alloc::vec::Vec;
 use core::ops::Range;
 
-#[cfg(feature = "checksum")]
-use byteorder::ByteOrder;
-#[cfg(feature = "checksum")]
-use byteorder::LittleEndian;
-
-use crate::address::BaseAddressExt;
 use crate::address::StoredAddress;
 use crate::bytes;
 use crate::checksum;
@@ -17,305 +11,59 @@ use crate::error::FormatError;
 use crate::error::OBJECT_HEADER_MESSAGE_MAX;
 use crate::message_flags::MessageFlags;
 use crate::message_type::MessageType;
+use crate::metadata_source;
 use crate::metadata_source::MetadataSource;
 use crate::object_header::HeaderMessage;
 use crate::object_header::MessageFilter;
 use crate::object_header::OHDR_SIGNATURE;
 use crate::object_header::ObjectHeader;
 use crate::object_header::ParseContext;
+use crate::object_header::v2::chunk::RootChunk;
+use crate::object_header::v2::collector::HeaderCollector;
 use crate::width::FormatWidths;
 use crate::width::UintWidth;
+
+mod chunk;
+mod collector;
 
 impl ObjectHeader {
     pub(super) fn parse_v2(
         data: &[u8],
         context: ParseContext,
         offset: usize,
-        filter: &mut MessageFilter<'_>,
+        filter: MessageFilter<'_>,
     ) -> Result<ObjectHeader, FormatError> {
         bytes::ensure_len(data, offset, 6)?;
         let prefix = ObjectHeaderPrefix::parse(&data[offset..])?;
-
-        let chunk0_msg_start =
-            offset
-                .checked_add(prefix.len)
-                .ok_or(FormatError::UnexpectedEof {
-                    expected: usize::MAX,
-                    available: data.len(),
-                })?;
-        let chunk0_msg_end = chunk0_msg_start
-            .checked_add(prefix.chunk0_size.to_usize()?)
-            .ok_or(FormatError::UnexpectedEof {
-                expected: usize::MAX,
-                available: data.len(),
-            })?;
-
-        // Validate checksum: from OHDR signature through all messages (before checksum)
-        bytes::ensure_len(data, chunk0_msg_end, 4)?;
-        #[cfg(feature = "checksum")]
-        {
-            let stored = LittleEndian::read_u32(&data[chunk0_msg_end..chunk0_msg_end + 4]);
-            let computed = crate::checksum::jenkins_lookup3(&data[offset..chunk0_msg_end]);
-            if computed != stored {
-                return Err(FormatError::ChecksumMismatch {
-                    expected: stored,
-                    computed,
-                });
-            }
+        let image = metadata_source::region(data, offset.to_u64(), prefix.chunk0_len()?)?;
+        let mut collector =
+            HeaderCollector::new(context, filter, RootChunk::parse(prefix, image)?)?;
+        while let Some(block) = collector.next_continuation()? {
+            let bytes = metadata_source::region(data, block.address, block.length.to_usize()?)?;
+            collector.ingest(block.parse(bytes)?)?;
         }
-
-        let layout = prefix.prefix.layout;
-
-        // Parse messages from chunk0
-        let mut messages = Vec::new();
-        let mut continuations = Vec::new();
-        Self::parse_v2_messages(
-            data,
-            context,
-            chunk0_msg_start,
-            chunk0_msg_end,
-            layout,
-            &mut messages,
-            &mut continuations,
-            filter,
-        )?;
-
-        // Follow continuations (limit to prevent cycles in malformed data). In
-        // this buffered path the absolute position indexes the in-memory image,
-        // so each address is narrowed (checked) to usize here.
-        let mut cont_remaining = MAX_CONTINUATIONS;
-        while let Some(continuation) = continuations.pop() {
-            if cont_remaining == 0 {
-                return Err(FormatError::NestingDepthExceeded);
-            }
-
-            cont_remaining -= 1;
-            let cont_offset = context.base_address.absolute(continuation.address())?;
-
-            Self::parse_v2_continuation(
-                data,
-                context,
-                cont_offset.to_usize()?,
-                continuation.length().to_usize()?,
-                layout,
-                &mut messages,
-                &mut continuations,
-                filter,
-            )?;
-        }
-
-        Ok(prefix.object_header(messages))
-    }
-
-    fn parse_v2_continuation(
-        data: &[u8],
-        context: ParseContext,
-        offset: usize,
-        length: usize,
-        layout: MessageRecordLayout,
-        messages: &mut Vec<HeaderMessage>,
-        continuations: &mut Vec<ObjectHeaderContinuation>,
-        filter: &mut MessageFilter<'_>,
-    ) -> Result<(), FormatError> {
-        bytes::ensure_len(data, offset, length)?;
-        let block = &data[offset..offset + length];
-        let block_messages = continuation_block_messages(block)?;
-
-        #[cfg(feature = "checksum")]
-        {
-            let stored = LittleEndian::read_u32(&block[block_messages.end..]);
-            let computed = crate::checksum::jenkins_lookup3(&block[..block_messages.end]);
-            if computed != stored {
-                return Err(FormatError::ChecksumMismatch {
-                    expected: stored,
-                    computed,
-                });
-            }
-        }
-
-        Self::parse_v2_messages(
-            data,
-            context,
-            offset + block_messages.start,
-            offset + block_messages.end,
-            layout,
-            messages,
-            continuations,
-            filter,
-        )
-    }
-
-    /// Counting first allows one capacity reservation for the messages retained
-    /// by an unfiltered parse. A group stores one Link message per child, so this
-    /// avoids repeated vector growth during path resolution (issue #228).
-    ///
-    /// Nil and continuation messages are excluded because the message vector
-    /// stores neither. A `HeaderMessage` is much wider than the four-byte message
-    /// prefix, so counting skipped padding could reserve substantially more memory
-    /// than the parser retains. Both loops stop when the remaining chunk tail
-    /// cannot contain a complete message.
-    ///
-    /// Filtered parsing does not use this count because the filter determines how
-    /// many messages are retained.
-    fn count_v2_messages(region: &[u8], start: usize, layout: MessageRecordLayout) -> usize {
-        let mut pos = start;
-        let mut count = 0;
-        while let Some(record) = layout.next_message(region, pos).ok().flatten() {
-            if record.msg_type != MessageType::NIL
-                && record.msg_type != MessageType::OBJECT_HEADER_CONTINUATION
-            {
-                count += 1;
-            }
-            pos = record.body_range.end;
-        }
-        count
-    }
-
-    fn parse_v2_messages(
-        data: &[u8],
-        context: ParseContext,
-        start: usize,
-        end: usize,
-        layout: MessageRecordLayout,
-        messages: &mut Vec<HeaderMessage>,
-        continuations: &mut Vec<ObjectHeaderContinuation>,
-        filter: &mut MessageFilter<'_>,
-    ) -> Result<(), FormatError> {
-        let region = data.get(..end).ok_or(FormatError::UnexpectedEof {
-            expected: end,
-            available: data.len(),
-        })?;
-        if filter.keeps_all() {
-            messages.reserve(Self::count_v2_messages(region, start, layout));
-        }
-        let mut pos = start;
-
-        // A record whose body runs past the region ends the walk.
-        while let Some(record) = layout.next_message(region, pos).ok().flatten() {
-            let MessageRecord {
-                msg_type,
-                flags: msg_flags,
-                creation_index: creation_order,
-                body: msg_data,
-                body_range,
-            } = record;
-
-            if let Some(id) = msg_type.unknown_id()
-                && msg_flags.must_be_understood(context.access_mode)
-            {
-                return Err(FormatError::UnsupportedMessage(id));
-            }
-
-            if msg_type == MessageType::OBJECT_HEADER_CONTINUATION {
-                // Neither the offset nor the length is narrowed here, so that
-                // the driver, buffered or streaming, can fetch a region a
-                // 32-bit `usize` does not reach: a streaming reader follows a
-                // continuation past 4 GiB on a 32-bit host.
-                continuations.push(ObjectHeaderContinuation::parse(
-                    msg_data,
-                    context.offset_size,
-                    context.length_size,
-                )?);
-            } else if msg_type != MessageType::NIL && filter.keeps(msg_type, msg_data) {
-                messages.push(HeaderMessage {
-                    msg_type,
-                    size: msg_data.len(),
-                    flags: msg_flags,
-                    creation_order,
-                    data: msg_data.to_vec(),
-                });
-            }
-
-            pos = body_range.end;
-        }
-
-        Ok(())
+        Ok(collector.finish())
     }
 
     pub(super) fn parse_v2_from_source<S: MetadataSource + ?Sized>(
         source: &S,
         context: ParseContext,
         address: u64,
-        filter: &mut MessageFilter<'_>,
+        filter: MessageFilter<'_>,
     ) -> Result<ObjectHeader, FormatError> {
         let head_len = OBJECT_HEADER_PREFIX_MAX_LEN
             .to_u64()
             .min(source.len().saturating_sub(address))
             .to_usize()?;
-        let head = source.read_metadata_at(address, head_len)?;
-        let prefix = ObjectHeaderPrefix::parse(&head)?;
-        let prefix_len = prefix.len;
-
-        // The chunk 0 body, including the prefix, messages, and checksum, is
-        // contiguous from `address`. Reading the complete region gives the checksum
-        // the same byte range as the buffered parser.
-        let chunk0_end = prefix_len
-            .checked_add(prefix.chunk0_size.to_usize()?)
-            .ok_or(FormatError::UnexpectedEof {
-                expected: usize::MAX,
-                available: head.len(),
-            })?;
-        let chunk0_total =
-            (chunk0_end as u64)
-                .checked_add(4)
-                .ok_or(FormatError::OffsetOverflow {
-                    offset: chunk0_end as u64,
-                    length: 4,
-                })?;
-        let chunk0 = source.read_metadata_at(address, chunk0_total.to_usize()?)?;
-
-        #[cfg(feature = "checksum")]
-        {
-            let stored = LittleEndian::read_u32(&chunk0[chunk0_end..chunk0_end + 4]);
-            let computed = crate::checksum::jenkins_lookup3(&chunk0[..chunk0_end]);
-            if computed != stored {
-                return Err(FormatError::ChecksumMismatch {
-                    expected: stored,
-                    computed,
-                });
-            }
+        let prefix = ObjectHeaderPrefix::parse(&source.read_metadata_at(address, head_len)?)?;
+        let image = source.read_metadata_at(address, prefix.chunk0_len()?)?;
+        let mut collector =
+            HeaderCollector::new(context, filter, RootChunk::parse(prefix, &image)?)?;
+        while let Some(block) = collector.next_continuation()? {
+            let bytes = source.read_metadata_at(block.address, block.length.to_usize()?)?;
+            collector.ingest(block.parse(&bytes)?)?;
         }
-
-        let layout = prefix.prefix.layout;
-        let mut messages = Vec::new();
-        let mut continuations = Vec::new();
-        Self::parse_v2_messages(
-            &chunk0,
-            context,
-            prefix_len,
-            chunk0_end,
-            layout,
-            &mut messages,
-            &mut continuations,
-            filter,
-        )?;
-
-        // Follow continuations by reading each (bounded) chunk from the source.
-        let mut cont_remaining = MAX_CONTINUATIONS;
-        while let Some(continuation) = continuations.pop() {
-            if cont_remaining == 0 {
-                return Err(FormatError::NestingDepthExceeded);
-            }
-
-            cont_remaining -= 1;
-            let length = continuation.length().to_usize()?;
-            let address = context.base_address.absolute(continuation.address())?;
-
-            let region = source.read_metadata_at(address, length)?;
-
-            Self::parse_v2_continuation(
-                &region,
-                context,
-                0,
-                length,
-                layout,
-                &mut messages,
-                &mut continuations,
-                filter,
-            )?;
-        }
-
-        Ok(prefix.object_header(messages))
+        Ok(collector.finish())
     }
 }
 
@@ -346,6 +94,24 @@ pub struct ParsedObjectHeaderPrefix {
 }
 
 impl ParsedObjectHeaderPrefix {
+    /// Returns the length in bytes of chunk 0, from the signature to the end of its checksum.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::OffsetOverflow`] if the length exceeds `u64`, and
+    /// [`FormatError::ValueTooLargeForPlatform`] if it exceeds `usize` on this host.
+    fn chunk0_len(&self) -> Result<usize, FormatError> {
+        self.len
+            .to_u64()
+            .checked_add(self.chunk0_size)
+            .and_then(|len| len.checked_add(CHECKSUM_LEN.to_u64()))
+            .ok_or(FormatError::OffsetOverflow {
+                offset: self.len.to_u64(),
+                length: self.chunk0_size,
+            })?
+            .to_usize()
+    }
+
     fn object_header(&self, messages: Vec<HeaderMessage>) -> ObjectHeader {
         let times = self.prefix.times;
         ObjectHeader {
@@ -925,9 +691,6 @@ pub fn continuation_block_messages(block: &[u8]) -> Result<Range<usize>, FormatE
     }
     Ok(OCHK_SIGNATURE.len()..end)
 }
-
-/// Limits continuation traversal to protect the parser from cycles.
-const MAX_CONTINUATIONS: u16 = 256;
 
 /// OCHK signature for v2 continuation chunks.
 const OCHK_SIGNATURE: [u8; 4] = *b"OCHK";

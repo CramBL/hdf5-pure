@@ -8225,7 +8225,8 @@ mod tests {
         // The v2 object header is checksum-protected, so a real crafted file would
         // carry a matching checksum; recompute the root header's over the edited
         // bytes so parsing reaches the address normalization rather than failing on
-        // the checksum first. Mirrors the chunk-0 extent from `parse_v2`.
+        // the checksum first. The extent of chunk 0 is the one
+        // `ParsedObjectHeaderPrefix::chunk0_len` computes, without the checksum.
         #[cfg(feature = "checksum")]
         {
             let root_addr = file.root().header_address().unwrap() as usize;
