@@ -24,6 +24,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- Fixed reads of a version 2 object header whose continuation message is too short for its fields or stores the undefined address. Such a header is now rejected on read ([#729](https://github.com/CramBL/hdf5-pure/pull/729)).
 - Fixed a panic in `Dataset::shape` and related metadata reads on files whose shared-message heap declares IDs longer than eight bytes (#[724](https://github.com/CramBL/hdf5-pure/pull/724)).
 - Fixed `Dataset::chunks` and related windowed reads failing on sparse Extensible Arrays with logical element indexes above `u32::MAX` on 32-bit platforms, provided each required metadata read fits the platform's address space ([#717](https://github.com/CramBL/hdf5-pure/pull/717))
 - Fixed `File::open_rw` tracking a freed region of a paged file that is shorter than the free-space threshold and does not merge into free space. Page tails stay tracked whatever the threshold ([#705](https://github.com/CramBL/hdf5-pure/pull/705)).

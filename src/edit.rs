@@ -13019,13 +13019,21 @@ fn read_oh_chunk0<S: Source + ?Sized>(src: &S, addr: u64) -> Result<OhChunk, Err
     })
 }
 
-/// Read every chunk of the version 2 object header at `addr`, chunk 0 first,
+/// Reads every chunk of the version 2 object header at `addr`, chunk 0 first,
 /// following each `Continuation` message to its `OCHK` block.
 ///
 /// This is the one traversal of a header's chunk chain: [`WriteEngine::gather_oh_messages`]
 /// collects the messages out of the result and
 /// [`oh_chunk_spans`](WriteEngine::oh_chunk_spans) collects the extents, so the
 /// two cannot disagree about what a header occupies.
+///
+/// # Errors
+///
+/// Returns [`Error::EditUnsupported`] if the object does not use a version 2 object header, if
+/// its prefix or chunk 0 runs past the end of `src`, if a message record runs past the end of its
+/// chunk, or if the header has more than [`MAX_OH_CHUNKS`] chunks. Returns the errors
+/// [`read_oh_continuation`] returns for each continuation message, which include
+/// [`Error::Format`] for one that stores the undefined address.
 pub(crate) fn read_oh_chunks<S: Source + ?Sized>(
     src: &S,
     addr: u64,
@@ -13059,10 +13067,17 @@ pub(crate) fn read_oh_chunks<S: Source + ?Sized>(
     Ok(chunks)
 }
 
-/// Read the `OCHK` continuation block a continuation message points at.
+/// Reads the `OCHK` continuation block a continuation message points at.
 ///
 /// `region[body..body_end]` is the continuation message's body: the block's
 /// base-relative address followed by its length.
+///
+/// # Errors
+///
+/// Returns [`Error::EditUnsupported`] if the message ends inside its fields, if the block runs
+/// past the end of `src` or is shorter than its signature and checksum, or if the block does not
+/// begin with `OCHK`. Returns [`Error::Format`] if the message stores the undefined address, if
+/// adding `base` to the address overflows, or if a read of `src` fails.
 fn read_oh_continuation<S: Source + ?Sized>(
     src: &S,
     region: &[u8],
@@ -13079,10 +13094,10 @@ fn read_oh_continuation<S: Source + ?Sized>(
             }
             Err(err) => return Err(Error::Format(err)),
         };
-    let len = continuation.length;
+    let len = continuation.length();
     // The block address is stored relative to the base address; shift it to an
     // absolute file offset before reading.
-    let off = base.absolute(continuation.address)?;
+    let off = base.absolute(continuation.address())?;
     // An OCHK block is signature(4) + messages + checksum(4).
     let end = off
         .checked_add(len)
@@ -13789,12 +13804,34 @@ mod tests {
     use hdf5_pure_format::__private::AttributePhaseChange;
     use hdf5_pure_format::__private::ObjectTimes;
     use rstest::rstest;
+    use test_util::object_header::Message;
+    use test_util::object_header::v2 as v2_bytes;
     use test_util::object_header::v2::HeaderFlags;
+    use test_util::widths::Widths;
 
     use super::*;
     use crate::checksum;
     use crate::datatype::layout::FloatingPointLayout;
     use crate::object_path::ObjectPath;
+
+    #[test]
+    fn a_continuation_to_the_undefined_address_fails_the_chunk_walk() {
+        let header = v2_bytes::Header::new()
+            .message(Message::undefined_continuation(64, Widths::EIGHT))
+            .build();
+
+        let Err(err) = read_oh_chunks(&BytesSource::new(header.as_slice()), 0, BaseAddress::ZERO)
+        else {
+            panic!("expected the chunk walk to fail");
+        };
+        assert!(
+            matches!(
+                err,
+                Error::Format(FormatError::UndefinedContinuationAddress)
+            ),
+            "{err:?}"
+        );
+    }
 
     fn section_covers(sections: &[FreeExtent], addr: u64, len: u64) -> bool {
         let Some(end) = addr.checked_add(len) else {

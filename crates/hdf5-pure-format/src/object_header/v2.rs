@@ -23,6 +23,7 @@ use crate::object_header::MessageFilter;
 use crate::object_header::OHDR_SIGNATURE;
 use crate::object_header::ObjectHeader;
 use crate::object_header::ParseContext;
+use crate::width::FormatWidths;
 use crate::width::UintWidth;
 
 impl ObjectHeader {
@@ -89,13 +90,13 @@ impl ObjectHeader {
             }
 
             cont_remaining -= 1;
-            let cont_offset = context.base_address.absolute(continuation.address)?;
+            let cont_offset = context.base_address.absolute(continuation.address())?;
 
             Self::parse_v2_continuation(
                 data,
                 context,
                 cont_offset.to_usize()?,
-                continuation.length.to_usize()?,
+                continuation.length().to_usize()?,
                 layout,
                 &mut messages,
                 &mut continuations,
@@ -210,13 +211,11 @@ impl ObjectHeader {
                 // the driver, buffered or streaming, can fetch a region a
                 // 32-bit `usize` does not reach: a streaming reader follows a
                 // continuation past 4 GiB on a 32-bit host.
-                if msg_data.len() >= (context.offset_size as usize + context.length_size as usize) {
-                    continuations.push(ObjectHeaderContinuation::parse(
-                        msg_data,
-                        context.offset_size,
-                        context.length_size,
-                    )?);
-                }
+                continuations.push(ObjectHeaderContinuation::parse(
+                    msg_data,
+                    context.offset_size,
+                    context.length_size,
+                )?);
             } else if msg_type != MessageType::NIL && filter.keeps(msg_type, msg_data) {
                 messages.push(HeaderMessage {
                     msg_type,
@@ -299,8 +298,8 @@ impl ObjectHeader {
             }
 
             cont_remaining -= 1;
-            let length = continuation.length.to_usize()?;
-            let address = context.base_address.absolute(continuation.address)?;
+            let length = continuation.length().to_usize()?;
+            let address = context.base_address.absolute(continuation.address())?;
 
             let region = source.read_metadata_at(address, length)?;
 
@@ -863,15 +862,16 @@ fn optional_block<const N: usize>(
 /// Header Continuation message.
 ///
 /// The fields are defined in "The Object Header Continuation Message" of the [format
-/// specification, version 4.0][spec].
+/// specification, version 4.0][spec]. The address is never the undefined address, which
+/// [`parse`](Self::parse) rejects.
 ///
 /// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_continuation
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ObjectHeaderContinuation {
     /// The address of the continuation block.
-    pub address: StoredAddress,
+    address: StoredAddress,
     /// The length of the continuation block in bytes.
-    pub length: u64,
+    length: u64,
 }
 
 impl ObjectHeaderContinuation {
@@ -879,14 +879,28 @@ impl ObjectHeaderContinuation {
     ///
     /// # Errors
     ///
-    /// Returns [`FormatError::UnexpectedEof`] if `body` ends inside a field, and
+    /// Returns [`FormatError::UnexpectedEof`] if `body` ends inside a field,
+    /// [`FormatError::UndefinedContinuationAddress`] if the address is the undefined address, and
     /// [`FormatError::InvalidOffsetSize`] or [`FormatError::InvalidLengthSize`] if a width is not
     /// 2, 4, or 8.
     pub fn parse(body: &[u8], offset_size: u8, length_size: u8) -> Result<Self, FormatError> {
+        let FormatWidths { offsets, lengths } = FormatWidths::from_sizes(offset_size, length_size)?;
         Ok(Self {
-            address: StoredAddress::new(bytes::read_offset(body, 0, offset_size)?),
-            length: bytes::read_length(body, usize::from(offset_size), length_size)?,
+            address: bytes::read_optional_offset_width(body, 0, offsets)?
+                .map(StoredAddress::new)
+                .ok_or(FormatError::UndefinedContinuationAddress)?,
+            length: bytes::read_length_width(body, usize::from(offsets.get()), lengths)?,
         })
+    }
+
+    /// Returns the address of the continuation block, relative to the base address.
+    pub fn address(&self) -> StoredAddress {
+        self.address
+    }
+
+    /// Returns the length of the continuation block in bytes.
+    pub fn length(&self) -> u64 {
+        self.length
     }
 }
 

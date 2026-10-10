@@ -126,6 +126,10 @@ impl ObjectHeader {
     /// Returns [`FormatError::UnsupportedMessage`] if a message record holds a type
     /// this parser cannot name and [`MessageFlags::must_be_understood`] returns
     /// `true` for `access_mode`.
+    ///
+    /// Returns [`FormatError::UnexpectedEof`] if a continuation message of a version 2 header
+    /// ends inside its fields, and [`FormatError::UndefinedContinuationAddress`] if one stores
+    /// the undefined address.
     pub fn parse(
         data: &[u8],
         access_mode: AccessMode,
@@ -595,6 +599,54 @@ mod tests {
         assert_eq!(header.messages.len(), 2);
         assert_eq!(header.messages[0].msg_type, MessageType::DATASPACE);
         assert_message(&header.messages[1], MessageType::DATATYPE, &[0xDE, 0xAD]);
+    }
+
+    #[rstest]
+    #[case::empty(&[], FormatError::UnexpectedEof { expected: 8, available: 0 })]
+    #[case::the_address_alone(&[0; 8], FormatError::UnexpectedEof { expected: 16, available: 8 })]
+    #[case::one_byte_short(&[0; 15], FormatError::UnexpectedEof { expected: 16, available: 15 })]
+    fn a_v2_continuation_message_too_short_for_its_fields_is_rejected(
+        #[case] body: &[u8],
+        #[case] expected: FormatError,
+    ) {
+        let data = v2_bytes::Header::new()
+            .message(Message::new(RecordType::OBJECT_HEADER_CONTINUATION, body))
+            .build();
+
+        assert_eq!(parse(&data).unwrap_err(), expected);
+        assert_eq!(
+            parse_from_source_for_mode(&data, AccessMode::ReadOnly).unwrap_err(),
+            expected
+        );
+    }
+
+    #[rstest]
+    #[case::two_byte_addresses(2)]
+    #[case::four_byte_addresses(4)]
+    #[case::eight_byte_addresses(8)]
+    fn a_v2_continuation_to_the_undefined_address_is_rejected(#[case] offset_size: u8) {
+        let widths = Widths::new(usize::from(offset_size), usize::from(LENGTH_SIZE));
+        let data = v2_bytes::Header::new()
+            .message(Message::undefined_continuation(64, widths))
+            .build();
+
+        assert_eq!(
+            ObjectHeader::parse(&data, AccessMode::ReadOnly, 0, offset_size, LENGTH_SIZE)
+                .unwrap_err(),
+            FormatError::UndefinedContinuationAddress
+        );
+        assert_eq!(
+            ObjectHeader::parse_from_source(
+                &data[..],
+                AccessMode::ReadOnly,
+                0,
+                offset_size,
+                LENGTH_SIZE,
+                BaseAddress::ZERO,
+            )
+            .unwrap_err(),
+            FormatError::UndefinedContinuationAddress
+        );
     }
 
     #[test]

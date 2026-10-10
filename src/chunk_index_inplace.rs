@@ -1460,8 +1460,8 @@ struct Walk {
 /// begin with its signature, if the version is not 2, if a continuation block
 /// lacks its signature or is too short for it and its checksum, if a chunk runs
 /// past the end of `source`, if the body of a message record runs past the end
-/// of its chunk, if a continuation message ends inside its fields, or if the
-/// header has more than 255 continuation blocks.
+/// of its chunk, if a continuation message ends inside its fields or stores the
+/// undefined address, or if the header has more than 255 continuation blocks.
 fn walk_v2_object_header<S: Source + ?Sized>(
     source: &S,
     offset: u64,
@@ -1535,7 +1535,8 @@ fn walk_v2_object_header<S: Source + ?Sized>(
 /// # Errors
 ///
 /// Returns [`Error::Format`] if the body of a record runs past the end of
-/// `chunk`, or if a continuation message ends inside its fields.
+/// `chunk`, or if a continuation message ends inside its fields or stores the
+/// undefined address.
 #[allow(clippy::too_many_arguments)]
 fn walk_messages(
     chunk: &[u8],
@@ -1559,7 +1560,10 @@ fn walk_messages(
         } = record;
         if msg_type == MessageType::OBJECT_HEADER_CONTINUATION {
             let continuation = ObjectHeaderContinuation::parse(body, offset_size, length_size)?;
-            continuations.push((continuation.address.get(), continuation.length.to_usize()?));
+            continuations.push((
+                continuation.address().get(),
+                continuation.length().to_usize()?,
+            ));
         } else {
             messages.push(WalkedMessage {
                 msg_type,
@@ -1871,6 +1875,7 @@ mod tests {
     #[case::a_chunk_0_past_the_end_of_the_file(chunk_0_past_the_end_of_the_file())]
     #[case::a_record_past_the_end_of_chunk_0(record_past_the_end_of_chunk_0())]
     #[case::a_short_continuation_message(continuation_message_shorter_than_its_fields())]
+    #[case::a_continuation_to_the_undefined_address(continuation_message_to_the_undefined_address())]
     #[case::a_short_continuation_block(continuation_block_shorter_than_its_signature_and_checksum())]
     #[case::a_continuation_block_without_its_signature(continuation_block_without_its_signature())]
     fn a_damaged_header_fails_the_walk(#[case] (bytes, expected): (Vec<u8>, FormatError)) {
@@ -1941,6 +1946,13 @@ mod tests {
                 available: 4,
             },
         )
+    }
+
+    fn continuation_message_to_the_undefined_address() -> (Vec<u8>, FormatError) {
+        let header = v2_bytes::Header::new()
+            .message(Message::undefined_continuation(64, Widths::EIGHT))
+            .build();
+        (header, FormatError::UndefinedContinuationAddress)
     }
 
     fn continuation_block_shorter_than_its_signature_and_checksum() -> (Vec<u8>, FormatError) {

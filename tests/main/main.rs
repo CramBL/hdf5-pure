@@ -57,6 +57,7 @@ mod mat_struct_array_read;
 mod mat_table_read;
 mod memory_strategy;
 mod named_datatypes;
+mod object_header_continuation;
 mod object_path;
 mod owned_append;
 mod owned_edit;
