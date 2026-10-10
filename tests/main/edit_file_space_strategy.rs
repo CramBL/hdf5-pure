@@ -3,6 +3,7 @@
 use hdf5_pure::File;
 use hdf5_pure::FileBuilder;
 use hdf5_pure::FileSpaceStrategy;
+use hdf5_pure_core::__private::BaseAddressExt;
 use hdf5_pure_core::__private::FileSpaceInfoFields;
 use hdf5_pure_format::__private::FormatWidths;
 use rstest::rstest;
@@ -107,7 +108,10 @@ fn persisted_free_space_is_not_reused_under_a_strategy_without_a_free_space_mana
     let (extension, info, free) = {
         let file = File::open(&path).unwrap();
         (
-            file.superblock().superblock_extension_address.unwrap(),
+            file.superblock()
+                .base_address
+                .absolute(file.superblock().superblock_extension_address.unwrap())
+                .unwrap(),
             file.file_space_info().unwrap().clone(),
             file.persisted_free_space().unwrap(),
         )
@@ -159,11 +163,14 @@ fn a_file_whose_strategy_cannot_be_read_reuses_no_deleted_extent() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("strategy.h5");
     file_space::write_strategy_triplet(&path, FileSpaceStrategy::FsmAggr, false, 1);
-    let extension = File::open(&path)
-        .unwrap()
-        .superblock()
-        .superblock_extension_address
-        .unwrap();
+    let extension = {
+        let file = File::open(&path).unwrap();
+        let superblock = file.superblock();
+        superblock
+            .base_address
+            .absolute(superblock.superblock_extension_address.unwrap())
+            .unwrap()
+    };
     file_space_info::replace_message(&path, extension, &[UNKNOWN_VERSION]);
 
     let file = File::open_rw(&path).unwrap();

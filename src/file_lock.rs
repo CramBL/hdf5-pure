@@ -429,6 +429,8 @@ mod tests {
 
     use super::*;
     use crate::address::BaseAddressExt;
+    use crate::address::StoredAddress;
+    use crate::address::StoredAddressExt;
     use crate::width::LengthWidth;
     use crate::width::OffsetWidth;
 
@@ -469,7 +471,7 @@ mod tests {
             length_size: LengthWidth::Eight.get(),
             base_address: crate::address::BaseAddress::ZERO,
             eof_address: 0,
-            root_group_address: 0,
+            root_group_address: StoredAddress::ZERO,
             group_leaf_node_k: None,
             group_internal_node_k: None,
             indexed_storage_internal_node_k: None,

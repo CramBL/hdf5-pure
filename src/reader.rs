@@ -1190,8 +1190,7 @@ impl FileInner {
         // `SyncPolicy::Always` one — which is why `set_sync_policy` must precede
         // this call rather than merely happening to.
         session.set_page_buffer_size(properties.page_buffer_size)?;
-        // The engine parsed and normalized this at open; take it rather than
-        // re-parsing, so the image need not be able to hand out a slice.
+        // Reuse the parsed superblock so the image need not provide a whole-file slice.
         let superblock = session.superblock().clone();
         let addresses = session.addresses();
         Ok(Self::from_parts(
@@ -1388,9 +1387,8 @@ impl FileInner {
         memo: Option<Resolution>,
     ) -> Result<Resolution, Error> {
         let revisions = self.revisions();
-        // A handle with no memo has never resolved — it names an object this
-        // session staged — so there is nothing to short-circuit on, and its path
-        // is walked afresh every time until a commit gives it a header.
+        // A handle with no memo has never resolved, so its path is walked until it has a physical
+        // address to memoize.
         Ok(revisions.at(match (path, memo) {
             (_, Some(memo)) if revisions.address == memo.address_revision => memo.address,
             (Some(path), _) => self.resolve_path(&path.as_path())?,
@@ -1599,41 +1597,37 @@ impl FileInner {
 
     /// Parses the superblock and constructs the opened image's address context.
     ///
-    /// The root group address in the returned superblock is a physical position.
+    /// The returned superblock holds the encoded addresses. The effective base of the address
+    /// context is the superblock's base address.
     ///
     /// # Errors
     ///
-    /// Returns [`Error::Format`] if the signature is absent, the superblock does not parse, or the
-    /// root group address overflows when added to the effective base.
+    /// Returns [`Error::Format`] if the signature is absent or the superblock does not parse.
     fn parse_superblock(data: &[u8]) -> Result<(Superblock, AddressContext), Error> {
         let sig_offset = signature::find_signature(data)?;
-        let mut superblock = hdf5_pure_format::__private::parse_superblock(data, sig_offset)?;
+        let superblock = hdf5_pure_format::__private::parse_superblock(data, sig_offset)?;
         let addresses = AddressContext::new(superblock.base_address);
-        // Normalize root_group_address to absolute so resolve_path_any works.
-        superblock.root_group_address =
-            addresses.absolute(StoredAddress::new(superblock.root_group_address))?;
         Ok((superblock, addresses))
     }
 
     /// Parses the superblock and constructs the address context through metadata reads.
     ///
-    /// The root group address in the returned superblock is a physical position.
+    /// The returned superblock and address context have the same semantics as
+    /// [`parse_superblock`](Self::parse_superblock).
     ///
     /// # Errors
     ///
-    /// Returns the errors of [`parse_superblock`](Self::parse_superblock), and the error `source`
-    /// reports for a read that fails.
+    /// Returns [`Error::Format`] if the signature is absent or the superblock does not parse,
+    /// or the error `source` reports if a read fails.
     fn parse_superblock_source<S: Source + ?Sized>(
         source: &S,
     ) -> Result<(Superblock, AddressContext), Error> {
         let sig_offset = signature::find_signature_in(source)?;
-        let mut superblock = hdf5_pure_format::__private::parse_superblock_from_source(
+        let superblock = hdf5_pure_format::__private::parse_superblock_from_source(
             &SourceMetadata(source),
             sig_offset,
         )?;
         let addresses = AddressContext::new(superblock.base_address);
-        superblock.root_group_address =
-            addresses.absolute(StoredAddress::new(superblock.root_group_address))?;
         Ok((superblock, addresses))
     }
 
@@ -1686,10 +1680,10 @@ impl FileInner {
         let Some(rel) = self.superblock.superblock_extension_address else {
             return Ok(None);
         };
-        if rel == u64::MAX {
+        if rel.is_undefined(self.superblock.offset_size) {
             return Ok(None);
         }
-        let abs = self.addresses.absolute(StoredAddress::new(rel))?;
+        let abs = self.addresses.absolute(rel)?;
         let header = self.parse_header(abs)?;
         let Some(msg) = header
             .messages
@@ -1718,10 +1712,10 @@ impl FileInner {
     /// still reads.
     fn read_sohm_table(&self) -> Option<Box<crate::sohm::SohmTable>> {
         let rel = self.superblock.superblock_extension_address?;
-        if rel == u64::MAX {
+        if rel.is_undefined(self.superblock.offset_size) {
             return None;
         }
-        let abs = self.addresses.absolute(StoredAddress::new(rel)).ok()?;
+        let abs = self.addresses.absolute(rel).ok()?;
         let header = self.parse_header(abs).ok()?;
         let msg = header
             .messages
@@ -1880,16 +1874,23 @@ impl FileInner {
         })
     }
 
-    /// The current root-group address (base-adjusted, absolute). For a read-write
-    /// [`Backend::Edit`] file a prior relocating commit can have moved the
-    /// root, so take the session's own superblock, which the commit updates;
-    /// other backends use this file's cached one.
-    fn mirror_root_address(&self) -> u64 {
+    /// Returns the current root's physical file position.
+    ///
+    /// Reads the editing session's superblock for [`Backend::Edit`], since a commit can relocate
+    /// the root. Other backends use this file's cached superblock.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::OffsetOverflow`] if the root address plus the effective base exceeds
+    /// [`u64::MAX`].
+    fn mirror_root_address(&self) -> Result<u64, FormatError> {
         if let Backend::Edit(m) = &self.backend {
             let core = m.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-            return core.superblock().root_group_address;
+            return core
+                .addresses()
+                .absolute(core.superblock().root_group_address);
         }
-        self.superblock.root_group_address
+        self.addresses.absolute(self.superblock.root_group_address)
     }
 
     /// Returns the raw file bytes for an in-memory file, or an empty slice for a
@@ -1951,6 +1952,7 @@ impl FileInner {
         self.addresses.effective_base()
     }
 
+    /// Returns the mapping between stored addresses and physical positions in this image.
     pub(crate) const fn addresses(&self) -> AddressContext {
         self.addresses
     }
@@ -3317,15 +3319,15 @@ impl File {
     }
 
     /// Returns an owned handle to the root group.
+    ///
+    /// The physical root address is resolved when the handle is used.
     pub fn root(&self) -> Group {
-        let revisions = self.inner.revisions();
-        Group::new(
-            self.inner.clone(),
-            // A relocating commit on a read-write file can move the root, so
-            // resolve it from the live mirror rather than the cached superblock.
-            revisions.at(self.inner.mirror_root_address()),
-            Some(ObjectPathBuf::root()),
-        )
+        Group {
+            file: self.inner.clone(),
+            state: RwLock::new(None),
+            path: Some(ObjectPathBuf::root()),
+            staged_birth: None,
+        }
     }
 
     /// Resolve a path and return an owned [`Dataset`] handle.
@@ -3507,6 +3509,10 @@ impl File {
     }
 
     /// Returns a reference to the parsed superblock.
+    ///
+    /// The address fields hold the encoded values. The base and end-of-file
+    /// addresses are absolute. The other metadata addresses are base-relative [`StoredAddress`]
+    /// values, interpreted through the opened image's address context during navigation.
     pub fn superblock(&self) -> &Superblock {
         self.inner.superblock()
     }
@@ -3583,12 +3589,12 @@ impl File {
         self.inner.access_mode()
     }
 
-    /// The base address (superblock base address) added to every stored relative
-    /// address. Zero for a file with no userblock.
+    /// Returns the effective base used to interpret stored metadata addresses in this image.
     pub(crate) fn base_address(&self) -> BaseAddress {
         self.inner.base_address()
     }
 
+    /// Returns the mapping between stored addresses and physical positions in this image.
     pub(crate) fn addresses(&self) -> AddressContext {
         self.inner.addresses()
     }
@@ -3815,7 +3821,7 @@ impl std::fmt::Debug for Group {
         let state = self.state.read().unwrap_or_else(PoisonError::into_inner);
         f.debug_struct("Group")
             .field("path", &self.path)
-            .field("staged", &state.is_none())
+            .field("staged", &(self.staged_birth.is_some() && state.is_none()))
             .finish()
     }
 }
@@ -3876,10 +3882,11 @@ impl Group {
         let at = self
             .file
             .locate_staged(self.path.as_ref(), memo, self.staged_birth)?;
-        // Checked before it is memoized. The short-circuit above does not
-        // re-check, so an address installed and then refused would be the
-        // answer every later call returns without looking at it again.
-        if !is_group(&self.file.parse_header(at.address)?) {
+        // An initial root handle takes its address from the superblock without reading a header.
+        // Every other resolution is classified before it is memoized.
+        let initial_root =
+            memo.is_none() && self.path.as_ref().is_some_and(ObjectPathBuf::is_empty);
+        if !initial_root && !is_group(&self.file.parse_header(at.address)?) {
             // A path-less handle never reaches here: it failed the short-circuit
             // above, and `locate` answers `StaleHandle` for one whose address
             // memo it cannot reuse.
@@ -4410,7 +4417,7 @@ impl Group {
         // An absolute path starts at the root group, as `H5G__traverse_real`
         // starts one there (`H5Gtraverse.c`, HDF5 1.14.6).
         let mut address = if path.is_absolute() {
-            self.file.mirror_root_address()
+            self.file.mirror_root_address()?
         } else {
             own
         };
@@ -7988,28 +7995,25 @@ mod tests {
         drop(file);
     }
 
-    /// The root is the one group handle nothing classifies: `File::root` takes
-    /// the address from the superblock, and no open validates that it names a
-    /// group. So a file whose superblock points the root at a dataset reaches
-    /// the refusal in `Group::child_address` that every other handle is kept
-    /// away from — and names the root by the empty path it carries.
     #[test]
     fn a_root_that_is_not_a_group_refuses_rather_than_being_searched() {
         let mut bytes = nested_dataset_bytes();
         let sig = crate::signature::find_signature(&bytes).unwrap();
         let mut sb = hdf5_pure_format::__private::parse_superblock(&bytes, sig).unwrap();
-        // The fixture has no userblock, so its base address is zero and the
-        // absolute address a walk returns is also the stored one the superblock
-        // field wants.
         assert_eq!(sb.base_address, BaseAddress::ZERO);
-        sb.root_group_address = group_v2::resolve_path_any(
-            &bytes,
-            AccessMode::ReadOnly,
-            &sb,
-            AddressContext::new(sb.base_address),
-            &ObjectPath::parse("plain"),
-        )
-        .unwrap();
+        let addresses = AddressContext::new(sb.base_address);
+        sb.root_group_address = addresses
+            .relative(
+                group_v2::resolve_path_any(
+                    &bytes,
+                    AccessMode::ReadOnly,
+                    &sb,
+                    AddressContext::new(sb.base_address),
+                    &ObjectPath::parse("plain"),
+                )
+                .unwrap(),
+            )
+            .unwrap();
         let rewritten = hdf5_pure_format::__private::serialize_superblock(&sb).unwrap();
         bytes[sig..sig + rewritten.len()].copy_from_slice(&rewritten);
 
@@ -8264,8 +8268,7 @@ mod tests {
 
         // The v2 object header is checksum-protected, so a real crafted file would
         // carry a matching checksum; recompute the root header's over the edited
-        // bytes so parsing reaches the address normalization rather than failing on
-        // the checksum first. The extent of chunk 0 is the one
+        // bytes before converting the child address. The extent of chunk 0 is the one
         // `ParsedObjectHeaderPrefix::chunk0_len` computes, without the checksum.
         #[cfg(feature = "checksum")]
         {
@@ -8293,8 +8296,6 @@ mod tests {
             bytes[chunk0_end..chunk0_end + 4].copy_from_slice(&cs.to_le_bytes());
         }
 
-        // Iterating the root now normalizes `u64::MAX + base` and must surface the
-        // overflow as a format error rather than panicking or wrapping.
         let file = File::from_bytes(bytes).unwrap();
         match file.root().groups() {
             Err(Error::Format(FormatError::OffsetOverflow { offset, length })) => {

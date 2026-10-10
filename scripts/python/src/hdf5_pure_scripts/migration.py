@@ -211,7 +211,15 @@ def migration_shapes(baseline: dict, candidate: dict, core: dict) -> list[str]:
     allowed_new_items = {"FileSpacePageSize", "StoredAddress"}
     # The struct fields whose type differs from 0.47.0's, which the comparison removes from both
     # shapes.
-    allowed_changed_fields = {"FileSpaceInfo": {"page_size"}}
+    allowed_changed_fields = {
+        "FileSpaceInfo": {"page_size"},
+        "Superblock": {
+            "driver_info_address",
+            "free_space_address",
+            "root_group_address",
+            "superblock_extension_address",
+        },
+    }
     for path, kind in sorted(moved):
         name = path.rsplit("::", 1)[-1]
         if name not in baseline_items:

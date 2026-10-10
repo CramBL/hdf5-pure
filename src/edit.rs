@@ -1072,11 +1072,7 @@ pub(crate) struct WriteEngine {
     image: Box<dyn FileImage>,
     /// Absolute offset of the superblock signature in the file.
     sb_sig_off: u64,
-    /// Parsed superblock. On-disk addresses are stored relative to `base_address`;
-    /// the in-memory `root_group_address` is normalized to an absolute file offset
-    /// on open and converted back to a base-relative address when serialized on
-    /// commit. `base_address` equals the superblock's file location (`sb_sig_off`):
-    /// 0 for a plain file, the userblock size for one with a userblock.
+    /// The committed superblock with addresses in their encoded coordinate systems.
     superblock: Superblock,
     /// The mapping from stored metadata addresses to physical positions in this image.
     addresses: AddressContext,
@@ -2234,39 +2230,19 @@ impl WriteEngine {
         Ok(session)
     }
 
-    /// Set the superblock's consistency flags in the mirror and on disk, then
-    /// flush. The one place this crate writes that byte: the SWMR-write flag on
-    /// open and off on close, and the page buffer's crash mark
-    /// ([`raise_crash_mark`](Self::raise_crash_mark)).
+    /// Writes the consistency flags in the session's superblock and physical image.
     ///
-    /// Requires a version 2 or 3 superblock, since
-    /// [`hdf5_pure_format::__private::serialize_superblock`] writes that layout.
-    /// `open_swmr_writer` and [`set_page_buffer_size`](Self::set_page_buffer_size) each check it.
+    /// Serializes the version 2 or 3 superblock with its encoded address values, then applies
+    /// the session's data durability barrier.
     ///
-    /// The root address is stored on disk *relative to the base address* while
-    /// the session holds it absolute (see the normalization in `open_imaged`), so
-    /// the serialized clone converts it back — as the commit tail does at the
-    /// only other place this crate serializes a superblock. Without it, writing
-    /// the absolute address here repoints the root past the end of the file while
-    /// claiming only to have touched a flag, and the file stops reading.
+    /// # Errors
     ///
-    /// `open_swmr_writer` happens to hold a base of zero, since it turns a
-    /// userblock away outright. Its sibling no longer does:
-    /// [`set_page_buffer_size`](Self::set_page_buffer_size) once required
-    /// persisted free space, which is declined for a non-zero base, and issue
-    /// #357 scoped that refusal to paged files — so an unpaged userblock file
-    /// now reaches here with a base to convert. It was never a property to build
-    /// on, which is why `a_status_flag_write_leaves_a_userblock_files_root_alone`
-    /// pins the conversion directly rather than through a caller.
+    /// Returns [`Error::Format`] if the superblock cannot be serialized, or [`Error::Io`] if
+    /// writing or syncing the image fails.
     fn set_consistency_flags(&mut self, flags: u32) -> Result<(), Error> {
         self.superblock.consistency_flags = flags;
         self.held_status_flags = flags;
-        let mut on_disk = self.superblock.clone();
-        // `open_imaged` built the in-memory address by adding the base to the
-        // stored one, so this cannot be below the base — but it is a subtraction
-        // over two file-derived numbers, and `relative` reports rather than wraps.
-        on_disk.root_group_address = self.addresses.relative(on_disk.root_group_address)?.get();
-        let bytes = hdf5_pure_format::__private::serialize_superblock(&on_disk)?;
+        let bytes = hdf5_pure_format::__private::serialize_superblock(&self.superblock)?;
         self.write_at(self.sb_sig_off, &bytes)?;
         self.barrier_data()?;
         Ok(())
@@ -2396,7 +2372,7 @@ impl WriteEngine {
         // which is why the mirror positions the handle before reading it whole.
         let probe = crate::image::BorrowedHandle::new(&handle, len);
         let sb_sig_off = signature::find_signature_in(&probe)?;
-        let mut superblock = hdf5_pure_format::__private::parse_superblock_from_source(
+        let superblock = hdf5_pure_format::__private::parse_superblock_from_source(
             &SourceMetadata(&probe),
             sb_sig_off,
         )?;
@@ -2430,14 +2406,7 @@ impl WriteEngine {
                 "a file whose superblock is not located at its base address is not editable in place",
             ));
         }
-        // Normalize the root group address to an absolute file offset, exactly as
-        // the reader does (`reader::parse_superblock`), so `resolve_path_any` and
-        // the link-graph walk index the image correctly. It is converted back to a
-        // stored (base-relative) address only when the superblock is serialized on
-        // commit.
         let addresses = AddressContext::new(superblock.base_address);
-        superblock.root_group_address =
-            addresses.absolute(StoredAddress::new(superblock.root_group_address))?;
 
         // `H5Fopen` rejects a page size outside 512 bytes to 1 GiB as well (`H5Ofsinfo.c` and
         // `H5Fsuper.c`, HDF5 2.2.0).
@@ -2824,7 +2793,6 @@ impl WriteEngine {
         let Some(ext_rel) = superblock.superblock_extension_address else {
             return Ok(None);
         };
-        let ext_rel = StoredAddress::new(ext_rel);
         if ext_rel.is_undefined(os) {
             return Ok(None);
         }
@@ -3393,14 +3361,15 @@ impl WriteEngine {
         self.image.as_ref()
     }
 
-    /// This session's parsed superblock, with `root_group_address` normalized to
-    /// an absolute file offset (the open-time convention) and `base_address` the
-    /// userblock size. A relocating commit updates it, so a caller holding a
-    /// clone from an earlier moment may be reading a stale root.
+    /// Returns this session's committed superblock with addresses in their encoded coordinates.
+    ///
+    /// A relocating commit updates the stored root address. A clone taken before that commit
+    /// holds the previous root address.
     pub(crate) fn superblock(&self) -> &Superblock {
         &self.superblock
     }
 
+    /// Returns the mapping between stored addresses and physical positions in this session.
     pub(crate) const fn addresses(&self) -> AddressContext {
         self.addresses
     }
@@ -3413,11 +3382,7 @@ impl WriteEngine {
     /// superblock extension at all, and nothing on one that does not.
     fn shared_message_table(&self) -> Result<Option<crate::sohm::SohmTable>, Error> {
         let os = self.superblock.offset_size;
-        let rel = match self
-            .superblock
-            .superblock_extension_address
-            .map(StoredAddress::new)
-        {
+        let rel = match self.superblock.superblock_extension_address {
             Some(rel) if !rel.is_undefined(os) => rel,
             _ => return Ok(None),
         };
@@ -3775,7 +3740,8 @@ impl WriteEngine {
         }
         self.publish_attempted = false;
         match self.commit_persisting(
-            self.superblock.root_group_address,
+            self.addresses
+                .absolute(self.superblock.root_group_address)?,
             Vec::new(),
             TailPlacement::Anywhere,
         ) {
@@ -4086,7 +4052,11 @@ impl WriteEngine {
         {
             return Ok(());
         }
-        self.commit_persisting_releasing_reserve(self.superblock.root_group_address, Vec::new())
+        self.commit_persisting_releasing_reserve(
+            self.addresses
+                .absolute(self.superblock.root_group_address)?,
+            Vec::new(),
+        )
     }
 
     /// Resolve and locate an in-place append target, applying every rule that
@@ -6543,15 +6513,12 @@ impl WriteEngine {
         let new_eof = trunc_to.unwrap_or(cur_eof);
 
         self.barrier()?;
-        // The root address is stored relative to the base address; the end-of-file
-        // address is absolute. After writing the relative root to disk, keep the
-        // in-memory `root_group_address` absolute (the open-time convention).
         if self.superblock.version >= 2 {
             // Build the new superblock off a clone and adopt it only once the
             // write succeeds, so a failed write does not desync the in-memory
             // state. The v2/v3 superblock carries its own checksum.
             let mut new_sb = self.superblock.clone();
-            new_sb.root_group_address = base.relative(new_root)?.get();
+            new_sb.root_group_address = base.relative(new_root)?;
             new_sb.eof_address = new_eof;
             // Publish the flags this session *raised*, so a flag the source file
             // arrived carrying (left set by a crashed SWMR writer, say) is
@@ -6570,13 +6537,12 @@ impl WriteEngine {
             self.publish_attempted = true;
             self.write_at(self.sb_sig_off, &sb_bytes)?;
             self.barrier()?;
-            new_sb.root_group_address = new_root;
             self.superblock = new_sb;
         } else {
             self.publish_attempted = true;
-            self.repoint_v0v1_root(base.relative(new_root)?.get(), new_eof)?;
+            self.repoint_v0v1_root(base.relative(new_root)?, new_eof)?;
             self.barrier()?;
-            self.superblock.root_group_address = new_root;
+            self.superblock.root_group_address = self.addresses.relative(new_root)?;
             self.superblock.eof_address = new_eof;
         }
 
@@ -6717,7 +6683,6 @@ impl WriteEngine {
         let old_ext_addr = base.absolute(
             self.superblock
                 .superblock_extension_address
-                .map(StoredAddress::new)
                 .filter(|a| !a.is_undefined(os))
                 .ok_or(Error::EditUnsupported(
                     "a persisting file has no superblock extension to update",
@@ -6856,9 +6821,9 @@ impl WriteEngine {
         // — the linearization point — and sync it.
         self.barrier()?;
         let mut new_sb = self.superblock.clone();
-        new_sb.root_group_address = new_root;
+        new_sb.root_group_address = self.addresses.relative(new_root)?;
         new_sb.eof_address = final_eof;
-        new_sb.superblock_extension_address = Some(ext_addr);
+        new_sb.superblock_extension_address = Some(self.addresses.relative(ext_addr)?);
         // As above, and zero for the same reason: this is the *unpaged* persisting
         // tail, which no page-buffered session reaches (issue #73, issue #308).
         new_sb.consistency_flags = self.held_status_flags;
@@ -7135,7 +7100,6 @@ impl WriteEngine {
         let old_ext_addr = base.absolute(
             self.superblock
                 .superblock_extension_address
-                .map(StoredAddress::new)
                 .filter(|a| !a.is_undefined(os))
                 .ok_or(Error::EditUnsupported(
                     "a persisting file has no superblock extension to update",
@@ -7294,9 +7258,9 @@ impl WriteEngine {
         // — the linearization point — and sync it.
         self.barrier()?;
         let mut new_sb = self.superblock.clone();
-        new_sb.root_group_address = new_root;
+        new_sb.root_group_address = self.addresses.relative(new_root)?;
         new_sb.eof_address = final_eof;
-        new_sb.superblock_extension_address = Some(ext_addr);
+        new_sb.superblock_extension_address = Some(self.addresses.relative(ext_addr)?);
         // The one publish site a page-buffered session actually reaches, and so
         // the one where this must not be a literal zero: a crash mark has to
         // outlive every commit the session makes (issue #308).
@@ -7561,7 +7525,7 @@ impl WriteEngine {
     /// cache type 0 (its scratch-pad B-tree / local-heap addresses, which
     /// describe the old symbol-table group, no longer apply). The
     /// object-header-address write is done last so it is the linearization point.
-    fn repoint_v0v1_root(&mut self, new_root: u64, new_eof: u64) -> Result<(), Error> {
+    fn repoint_v0v1_root(&mut self, new_root: StoredAddress, new_eof: u64) -> Result<(), Error> {
         let os = self.superblock.offset_size;
         let addr_width = u64::from(os);
         // Field layout after the fixed prefix: base / free-space / EOF / driver
@@ -7577,7 +7541,10 @@ impl WriteEngine {
         self.write_at(eof_off, &new_eof.to_le_bytes()[..usize::from(os)])?;
         self.write_at(cache_off, &[0u8; 4])?; // cache type = none
         self.write_at(cache_off + 8, &[0u8; 16])?; // clear scratch-pad
-        self.write_at(oh_addr_off, &new_root.to_le_bytes()[..usize::from(os)])?;
+        self.write_at(
+            oh_addr_off,
+            &new_root.get().to_le_bytes()[..usize::from(os)],
+        )?;
         Ok(())
     }
 
@@ -10710,10 +10677,8 @@ impl Store for EditStore<'_> {
     }
     fn patch_superblock_eof(&mut self) -> Result<(), Error> {
         // Advance only the recorded end-of-file and re-serialize the superblock in
-        // place. Unlike `WriteEngine::commit`, this deliberately does NOT clear the
-        // consistency flags and does NOT repoint the root group: base_address is 0
-        // for every in-place-append-eligible file, so the normalized-absolute root
-        // address serializes back to the same stored value.
+        // place. Unlike `WriteEngine::commit`, this leaves the consistency flags and stored root
+        // group address unchanged.
         let eof = self.image.len();
         self.superblock.eof_address = eof;
         let bytes = hdf5_pure_format::__private::serialize_superblock(self.superblock)?;
@@ -15697,7 +15662,10 @@ mod tests {
             0,
             FileSpacePageSize::DEFAULT,
         );
-        let root = s.superblock.root_group_address;
+        let root = s
+            .addresses
+            .absolute(s.superblock.root_group_address)
+            .unwrap();
         let len_before = s.image.len();
         let ext_before = s.superblock.superblock_extension_address;
 
@@ -16006,7 +15974,7 @@ mod tests {
         // Break the extension so the commit fails *after* it has gathered the
         // regions `drop` vacates and *before* the superblock repoint.
         let good_ext = s.superblock.superblock_extension_address;
-        s.superblock.superblock_extension_address = Some(0);
+        s.superblock.superblock_extension_address = Some(StoredAddress::ZERO);
         s.delete(&ObjectPathBuf::parse("/drop")).unwrap();
         assert!(
             s.commit().is_err(),
@@ -16091,7 +16059,7 @@ mod tests {
 
         // Break the extension so the next commit fails after the apply phase.
         let good_ext = s.superblock.superblock_extension_address;
-        s.superblock.superblock_extension_address = Some(0);
+        s.superblock.superblock_extension_address = Some(StoredAddress::ZERO);
         s.stage_dataset_write(&ObjectPathBuf::parse("/labels"), {
             let mut db = crate::type_builders::DatasetBuilder::new("");
             db.with_vlen_strings(&["round-two-aaaa", "round-two-bbbb"]);
@@ -16179,7 +16147,7 @@ mod tests {
 
         // Fail a second overwrite after its apply phase has placed a collection.
         let good_ext = s.superblock.superblock_extension_address;
-        s.superblock.superblock_extension_address = Some(0);
+        s.superblock.superblock_extension_address = Some(StoredAddress::ZERO);
         s.stage_dataset_write(&ObjectPathBuf::parse("/labels"), {
             let mut db = crate::type_builders::DatasetBuilder::new("");
             db.with_vlen_strings(&["round-two-aaaa", "round-two-bbbb"]);
@@ -16267,7 +16235,7 @@ mod tests {
 
         // Break the extension so the commit fails in its persisting tail, after
         // the apply loop has written the new dataset into that hole.
-        s.superblock.superblock_extension_address = Some(0);
+        s.superblock.superblock_extension_address = Some(StoredAddress::ZERO);
         let mut db = crate::type_builders::DatasetBuilder::new("fresh");
         db.with_f64_data(&vec![7.5f64; 4096])
             .with_shape(&[4096])
@@ -16340,7 +16308,7 @@ mod tests {
         let mut s = WriteEngine::open_with_locking(&path, FileLocking::Enabled).unwrap();
 
         let good_ext = s.superblock.superblock_extension_address;
-        s.superblock.superblock_extension_address = Some(0);
+        s.superblock.superblock_extension_address = Some(StoredAddress::ZERO);
         s.stage_dataset_write(&ObjectPathBuf::parse("/nums"), {
             let mut db = crate::type_builders::DatasetBuilder::new("");
             db.with_i32_data(&[9, 9, 9]);
@@ -17699,11 +17667,7 @@ mod tests {
     }
 
     #[test]
-    fn edit_session_root_group_base_address_overflow_is_rejected() {
-        // The edit-path sibling of issue #137. A userblock file has a nonzero base
-        // address that `WriteEngine::open` adds to the stored root-group address.
-        // A crafted address of HADDR_UNDEF must be rejected rather than overflow
-        // (panicking in debug, wrapping in release).
+    fn edit_session_reports_root_address_overflow_when_resolving_a_path() {
         use crate::writer::FileBuilder;
 
         let dir = tempfile::tempdir().unwrap();
@@ -17715,10 +17679,6 @@ mod tests {
         b.create_dataset("d").with_i32_data(&[1, 2, 3]);
         b.write(&path).unwrap();
 
-        // Rewrite the stored (base-relative) root-group address to HADDR_UNDEF,
-        // recomputing the superblock checksum via `serialize`. The base address
-        // still equals the superblock offset, so the file stays editable and the
-        // editor reaches the `root_group_address + base` normalization.
         let mut data = std::fs::read(&path).unwrap();
         let off = signature::find_signature(&data).unwrap();
         let mut sb = hdf5_pure_format::__private::parse_superblock(&data, off).unwrap();
@@ -17727,14 +17687,25 @@ mod tests {
             BaseAddress::new(UB),
             "userblock file must have base == UB"
         );
-        sb.root_group_address = u64::MAX;
+        sb.root_group_address = StoredAddress::UNDEFINED_64;
         let bytes = hdf5_pure_format::__private::serialize_superblock(&sb).unwrap();
         data[off..off + bytes.len()].copy_from_slice(&bytes);
         std::fs::write(&path, &data).unwrap();
 
-        let err = WriteEngine::open_with_locking(&path, FileLocking::Enabled)
-            .err()
-            .expect("open must fail");
+        let session = WriteEngine::open_with_locking(&path, FileLocking::Enabled).unwrap();
+        assert_eq!(
+            session.superblock.root_group_address,
+            StoredAddress::UNDEFINED_64
+        );
+        let err = crate::group_v2::resolve_path_any_from_source(
+            session.image(),
+            AccessMode::ReadWrite,
+            &session.superblock,
+            session.addresses,
+            &ObjectPath::parse("d"),
+        )
+        .map_err(Error::from)
+        .unwrap_err();
         match err {
             Error::Format(FormatError::OffsetOverflow { offset, length }) => {
                 assert_eq!(offset, u64::MAX);
@@ -18362,24 +18333,6 @@ mod tests {
         );
     }
 
-    /// Writing the status-flags byte on a file with a userblock changes that byte
-    /// and nothing else.
-    ///
-    /// `set_consistency_flags` serializes the whole superblock to rewrite one
-    /// byte of it, and the root address it carries is held absolute in memory but
-    /// stored relative to the base address. Getting that wrong repoints the root
-    /// past the end of the file, so a call that promised to touch a flag silently
-    /// makes the file unreadable.
-    ///
-    /// Driven directly rather than through a caller, because for a long time
-    /// neither caller could reach a non-zero base: SWMR refuses a userblock
-    /// outright, and a page buffer required persisted free space, which is
-    /// declined for a non-zero base. Both were refusals about something else that
-    /// settled this as a side effect — and the day one of them moved is the day a
-    /// test routed through it would have gone quiet. Issue #357 moved the second,
-    /// so `a_page_buffer_marks_a_userblock_file_without_repointing_its_root`
-    /// exercises the same conversion through a real session; this one stays as
-    /// the direct statement of the rule.
     #[test]
     fn a_status_flag_write_leaves_a_userblock_files_root_alone() {
         use crate::writer::FileBuilder;
@@ -19404,7 +19357,10 @@ mod tests {
             !s.reserved.is_empty(),
             "no reserve was drawn, so this measured an ordinary end-of-file append"
         );
-        let ext = s.superblock.superblock_extension_address.unwrap();
+        let ext = s
+            .addresses
+            .absolute(s.superblock.superblock_extension_address.unwrap())
+            .unwrap();
         assert!(
             ext < len_before,
             "the rewrite appended its tail at {ext}, the pre-append end-of-file \
@@ -19823,7 +19779,7 @@ mod tests {
 
         let mut s = WriteEngine::open_with_locking(&path, FileLocking::Enabled).unwrap();
         // Fail the commit in its tail, after both writes have landed.
-        s.superblock.superblock_extension_address = Some(0);
+        s.superblock.superblock_extension_address = Some(StoredAddress::ZERO);
         for (name, data) in [("/aa", [9, 9, 9]), ("/bb", [8, 8, 8])] {
             s.stage_dataset_write(&ObjectPathBuf::parse(name), {
                 let mut db = crate::type_builders::DatasetBuilder::new("");
@@ -19881,7 +19837,7 @@ mod tests {
         b.write(&path).unwrap();
 
         let mut s = WriteEngine::open_with_locking(&path, FileLocking::Enabled).unwrap();
-        s.superblock.superblock_extension_address = Some(0);
+        s.superblock.superblock_extension_address = Some(StoredAddress::ZERO);
         s.stage_dataset_write(&ObjectPathBuf::parse("/grid"), {
             // Values only: an overwrite that restated the chunking or the
             // filter would be refused as asking for more than an overwrite
@@ -19949,7 +19905,7 @@ mod tests {
         s.inplace_undo.push((nums_block, stale));
 
         // An unrelated commit, failed in its tail so that it rolls back at all.
-        s.superblock.superblock_extension_address = Some(0);
+        s.superblock.superblock_extension_address = Some(StoredAddress::ZERO);
         s.stage_created_dataset(&ObjectPathBuf::parse("/extra"), {
             let mut db = crate::type_builders::DatasetBuilder::new("");
             db.with_i32_data(&[42]);
@@ -19998,7 +19954,7 @@ mod tests {
                 WriteEngine::open_sync_counting(&path, SyncPolicy::Always, Arc::clone(&syncs))
                     .unwrap();
             // Fail the commit in its tail, after the apply phase has written.
-            s.superblock.superblock_extension_address = Some(0);
+            s.superblock.superblock_extension_address = Some(StoredAddress::ZERO);
             if with_overwrite {
                 s.stage_dataset_write(&ObjectPathBuf::parse("/nums"), {
                     let mut db = crate::type_builders::DatasetBuilder::new("");

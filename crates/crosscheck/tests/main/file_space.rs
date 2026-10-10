@@ -25,6 +25,7 @@ use hdf5_pure::FormatError;
 use hdf5_pure::Layout;
 use hdf5_pure::MaxExtent;
 use hdf5_pure::MessageType;
+use hdf5_pure_core::__private::BaseAddressExt;
 use hdf5_pure_core::__private::FileSpaceInfoFields;
 use hdf5_pure_core::__private::StoredAddressExt;
 use hdf5_pure_core::StoredAddress;
@@ -1498,7 +1499,10 @@ fn rewrite_as_version_0(path: &Path, widths: Widths, undefined: u64) -> FileSpac
 fn extension_addr(path: &Path) -> u64 {
     let file = File::open(path).unwrap();
     let superblock = file.superblock();
-    superblock.base_address.get() + superblock.superblock_extension_address.unwrap()
+    superblock
+        .base_address
+        .absolute(superblock.superblock_extension_address.unwrap())
+        .unwrap()
 }
 
 /// Returns the fields of version 1 that a version 0 message maps to.
@@ -3076,7 +3080,13 @@ fn header_extent(path: &Path, file: &File, link_name: &str) -> Range<u64> {
     let root = ObjectHeader::parse(
         &bytes,
         AccessMode::ReadOnly,
-        usize::try_from(superblock.root_group_address).unwrap(),
+        usize::try_from(
+            superblock
+                .base_address
+                .absolute(superblock.root_group_address)
+                .unwrap(),
+        )
+        .unwrap(),
         superblock.offset_size,
         superblock.length_size,
     )

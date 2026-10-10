@@ -76,6 +76,7 @@ mod seals;
 mod serde_roundtrip;
 mod serde_with_options;
 mod streaming_reader;
+mod superblock_addresses;
 mod superblock_overflow;
 mod superblock_status_flags;
 mod swmr_concurrent;

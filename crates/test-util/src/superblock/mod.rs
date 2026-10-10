@@ -35,6 +35,32 @@ pub fn consistency_flags(path: impl AsRef<Path>) -> u32 {
     }
 }
 
+/// Returns the encoded base-relative root address from the superblock at `at`.
+///
+/// Reads the root address from superblock versions 0 through 3, defined in "Format Signature and
+/// Superblock" of the [format specification, version 4.0][spec].
+///
+/// # Panics
+///
+/// Panics if the superblock version is above 3, the encoded offset width is outside 1 to 8,
+/// or `file` ends inside the fields read.
+///
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsec_fmt4_boot_super
+pub fn root_header_address(file: &[u8], at: usize) -> u64 {
+    match version_at(file, at) {
+        VERSION_0 | VERSION_1 => v0::Fields::read(file, at).root_header_address,
+        VERSION_2 | VERSION_3 => {
+            let width = usize::from(bytes::u8_at(file, at + SIGNATURE.len() + VERSION_FIELD_LEN));
+            bytes::uint_at(
+                file,
+                at + SIGNATURE.len() + DIRECT_PREFIX_LEN + DIRECT_ROOT_ADDRESS_INDEX * width,
+                width,
+            )
+        }
+        version => panic!("unexpected superblock version {version}"),
+    }
+}
+
 /// The version of the superblock beginning at `at` in `file`, for a caller
 /// that has already located it.
 #[track_caller]
@@ -74,6 +100,22 @@ pub(crate) fn width_byte(width: usize) -> u8 {
 }
 
 pub const SIGNATURE: &[u8; 8] = b"\x89HDF\r\n\x1a\n";
+
+/// Superblock version 0.
+pub const VERSION_0: u8 = 0;
+/// Superblock version 1.
+pub const VERSION_1: u8 = 1;
+/// Superblock version 2.
+pub const VERSION_2: u8 = 2;
+/// Superblock version 3.
+pub const VERSION_3: u8 = 3;
+
+// The version field occupies one byte: section `subsec_fmt4_boot_super`, version 4.0.
+const VERSION_FIELD_LEN: usize = 1;
+// Version, widths and flags precede addresses: section `subsec_fmt4_boot_super`, version 4.0.
+const DIRECT_PREFIX_LEN: usize = 4;
+// The root follows base, extension and EOF: section `subsec_fmt4_boot_super`, version 4.0.
+const DIRECT_ROOT_ADDRESS_INDEX: usize = 3;
 
 #[cfg(test)]
 mod tests {

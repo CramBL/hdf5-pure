@@ -14,6 +14,8 @@ pub(crate) use hdf5_pure_core::Superblock;
 
 use crate::address::BaseAddress;
 use crate::address::BaseAddressExt;
+use crate::address::StoredAddress;
+use crate::address::StoredAddressExt;
 use crate::bytes;
 use crate::convert::Narrow;
 use crate::error::FormatError;
@@ -27,6 +29,8 @@ use crate::width::OffsetWidth;
 /// Writes the two width bytes, the consistency flags, the four addresses at the width
 /// `offset_size` gives, and the Jenkins lookup3 checksum over the bytes before it. An absent
 /// superblock extension address is written as the undefined address.
+/// Writes base and end-of-file addresses as absolute values, and root and extension addresses
+/// as encoded base-relative values.
 ///
 /// # Errors
 ///
@@ -61,7 +65,10 @@ pub fn serialize_superblock(superblock: &Superblock) -> Result<Vec<u8>, FormatEr
         &mut buf,
         offset_width,
         "superblock extension",
-        superblock.superblock_extension_address.unwrap_or(u64::MAX),
+        superblock
+            .superblock_extension_address
+            .unwrap_or(StoredAddress::undefined(superblock.offset_size))
+            .get(),
     )?;
     write_address(
         &mut buf,
@@ -73,7 +80,7 @@ pub fn serialize_superblock(superblock: &Superblock) -> Result<Vec<u8>, FormatEr
         &mut buf,
         offset_width,
         "root group object header",
-        superblock.root_group_address,
+        superblock.root_group_address.get(),
     )?;
     // checksum
     let checksum = crate::checksum::jenkins_lookup3(&buf);
@@ -102,7 +109,8 @@ pub fn parse_superblock_from_source<S: MetadataSource + ?Sized>(
 
 /// Parses the superblock whose signature starts at `signature_offset` in `data`.
 ///
-/// Reads superblock versions 0 to 3.
+/// Reads superblock versions 0 to 3. The base and end-of-file addresses are absolute values.
+/// The other address fields are parsed as base-relative [`StoredAddress`] values.
 ///
 /// # Errors
 ///
@@ -160,17 +168,17 @@ fn parse_v0(d: &[u8]) -> Result<Superblock, FormatError> {
     let mut pos = var_start;
     let base_address = BaseAddress::new(bytes::read_offset_width(d, pos, offset_width)?);
     pos += os;
-    let free_space_address = bytes::read_offset_width(d, pos, offset_width)?;
+    let free_space_address = StoredAddress::new(bytes::read_offset_width(d, pos, offset_width)?);
     pos += os;
     let eof_address = bytes::read_offset_width(d, pos, offset_width)?;
     pos += os;
-    let driver_info_address = bytes::read_offset_width(d, pos, offset_width)?;
+    let driver_info_address = StoredAddress::new(bytes::read_offset_width(d, pos, offset_width)?);
     pos += os;
 
     // Root symbol table entry
     let _link_name_offset = bytes::read_length_width(d, pos, length_width)?;
     pos += ls;
-    let object_header_addr = bytes::read_offset_width(d, pos, offset_width)?;
+    let object_header_addr = StoredAddress::new(bytes::read_offset_width(d, pos, offset_width)?);
 
     Ok(SuperblockFields {
         version: 0,
@@ -221,17 +229,17 @@ fn parse_v1(d: &[u8]) -> Result<Superblock, FormatError> {
     let mut pos = var_start;
     let base_address = BaseAddress::new(bytes::read_offset_width(d, pos, offset_width)?);
     pos += os;
-    let free_space_address = bytes::read_offset_width(d, pos, offset_width)?;
+    let free_space_address = StoredAddress::new(bytes::read_offset_width(d, pos, offset_width)?);
     pos += os;
     let eof_address = bytes::read_offset_width(d, pos, offset_width)?;
     pos += os;
-    let driver_info_address = bytes::read_offset_width(d, pos, offset_width)?;
+    let driver_info_address = StoredAddress::new(bytes::read_offset_width(d, pos, offset_width)?);
     pos += os;
 
     // Root symbol table entry
     let _link_name_offset = bytes::read_length_width(d, pos, length_width)?;
     pos += ls;
-    let object_header_addr = bytes::read_offset_width(d, pos, offset_width)?;
+    let object_header_addr = StoredAddress::new(bytes::read_offset_width(d, pos, offset_width)?);
 
     Ok(SuperblockFields {
         version: 1,
@@ -268,11 +276,12 @@ fn parse_v2v3(d: &[u8], version: u8) -> Result<Superblock, FormatError> {
     let mut pos = 12;
     let base_address = BaseAddress::new(bytes::read_offset_width(d, pos, offset_width)?);
     pos += os;
-    let superblock_extension_address = bytes::read_offset_width(d, pos, offset_width)?;
+    let superblock_extension_address =
+        StoredAddress::new(bytes::read_offset_width(d, pos, offset_width)?);
     pos += os;
     let eof_address = bytes::read_offset_width(d, pos, offset_width)?;
     pos += os;
-    let root_group_address = bytes::read_offset_width(d, pos, offset_width)?;
+    let root_group_address = StoredAddress::new(bytes::read_offset_width(d, pos, offset_width)?);
     pos += os;
 
     let stored_checksum = LittleEndian::read_u32(&d[pos..pos + 4]);
@@ -335,8 +344,126 @@ mod tests {
     use rstest::rstest;
 
     use super::*;
+    use test_util::superblock::VERSION_0;
+    use test_util::superblock::VERSION_1;
+    use test_util::superblock::VERSION_2;
+    use test_util::superblock::VERSION_3;
     use test_util::superblock::{v0, v2};
     use test_util::widths::Widths;
+
+    #[rstest]
+    #[case(VERSION_0, false)]
+    #[case(VERSION_0, true)]
+    #[case(VERSION_1, false)]
+    #[case(VERSION_1, true)]
+    fn legacy_address_fields_reencode_in_stored_coordinates(
+        #[case] version: u8,
+        #[case] defined: bool,
+        #[values(OffsetWidth::Two, OffsetWidth::Four, OffsetWidth::Eight)] width: OffsetWidth,
+    ) {
+        let widths = Widths::new(usize::from(width.get()), usize::from(width.get()));
+        let builder = v0::Superblock::new(widths)
+            .base_address(512)
+            .eof_address(2048)
+            .root_group(0, 96);
+        let mut data = if version == VERSION_1 {
+            builder.version_1()
+        } else {
+            builder
+        }
+        .build();
+        let fields = v0::Fields::read(&data, 0);
+        let width_bytes = usize::from(width.get());
+        if defined {
+            let free_space_at = fields.eof_address_at - width_bytes;
+            data[free_space_at..free_space_at + width_bytes]
+                .copy_from_slice(&64u64.to_le_bytes()[..width_bytes]);
+            let driver_at = fields.eof_address_at + width_bytes;
+            data[driver_at..driver_at + width_bytes]
+                .copy_from_slice(&128u64.to_le_bytes()[..width_bytes]);
+        }
+        let parsed = parse_superblock(&data, 0).unwrap();
+        assert_eq!(parsed.base_address.get(), 512);
+        assert_eq!(parsed.eof_address, 2048);
+        assert_eq!(parsed.root_group_address.get(), 96);
+        assert_eq!(
+            parsed.free_space_address,
+            Some(if defined {
+                StoredAddress::new(64)
+            } else {
+                StoredAddress::undefined(width.get())
+            })
+        );
+        assert_eq!(
+            parsed.driver_info_address,
+            Some(if defined {
+                StoredAddress::new(128)
+            } else {
+                StoredAddress::undefined(width.get())
+            })
+        );
+        assert_eq!(parsed.superblock_extension_address, None);
+        let root_at = fields.eof_address_at + LEGACY_ROOT_FIELDS_AFTER_EOF * width_bytes;
+        let mut encoded = Vec::new();
+        write_address(
+            &mut encoded,
+            width,
+            "root group object header",
+            parsed.root_group_address.get(),
+        )
+        .unwrap();
+        assert_eq!(encoded, data[root_at..root_at + width_bytes]);
+        encoded.clear();
+        write_address(&mut encoded, width, "end-of-file", parsed.eof_address).unwrap();
+        assert_eq!(
+            encoded,
+            data[fields.eof_address_at..fields.eof_address_at + width_bytes]
+        );
+    }
+
+    #[rstest]
+    #[case(VERSION_2, false)]
+    #[case(VERSION_2, true)]
+    #[case(VERSION_3, false)]
+    #[case(VERSION_3, true)]
+    fn direct_address_fields_roundtrip_in_stored_coordinates(
+        #[case] version: u8,
+        #[case] defined: bool,
+        #[values(OffsetWidth::Two, OffsetWidth::Four, OffsetWidth::Eight)] width: OffsetWidth,
+    ) {
+        let mut data = v2::Superblock::new(Widths::new(
+            usize::from(width.get()),
+            usize::from(width.get()),
+        ))
+        .version(version)
+        .base_address(512)
+        .eof_address(2048)
+        .root_header_address(96)
+        .build();
+        if defined {
+            let width_bytes = usize::from(width.get());
+            let extension_at = HDF5_SIGNATURE.len() + DIRECT_PREFIX_LEN + width_bytes;
+            data[extension_at..extension_at + width_bytes]
+                .copy_from_slice(&64u64.to_le_bytes()[..width_bytes]);
+            data.truncate(data.len() - SUPERBLOCK_CHECKSUM_LEN);
+            test_util::checksum::append(&mut data);
+        }
+        let parsed = parse_superblock(&data, 0).unwrap();
+        assert_eq!(parsed.base_address.get(), 512);
+        assert_eq!(parsed.eof_address, 2048);
+        assert_eq!(parsed.root_group_address.get(), 96);
+        assert_eq!(parsed.free_space_address, None);
+        assert_eq!(parsed.driver_info_address, None);
+        assert_eq!(
+            parsed.superblock_extension_address,
+            Some(if defined {
+                StoredAddress::new(64)
+            } else {
+                StoredAddress::undefined(width.get())
+            })
+        );
+        assert_eq!(serialize_superblock(&parsed).unwrap(), data);
+    }
 
     /// A version 0 superblock whose end-of-file and root header addresses
     /// differ, so a read taken from the neighbouring field is visible.
@@ -385,12 +512,18 @@ mod tests {
         assert_eq!(sb.offset_size, 8);
         assert_eq!(sb.base_address, BaseAddress::ZERO);
         assert_eq!(sb.eof_address, 4096);
-        assert_eq!(sb.root_group_address, 96);
+        assert_eq!(sb.root_group_address.get(), 96);
         assert_eq!(sb.group_leaf_node_k, Some(4));
         assert_eq!(sb.group_internal_node_k, Some(16));
         assert_eq!(sb.indexed_storage_internal_node_k, None);
-        assert_eq!(sb.free_space_address, Some(0xFFFFFFFFFFFFFFFF));
-        assert_eq!(sb.driver_info_address, Some(0xFFFFFFFFFFFFFFFF));
+        assert_eq!(
+            sb.free_space_address.map(StoredAddress::get),
+            Some(u64::MAX)
+        );
+        assert_eq!(
+            sb.driver_info_address.map(StoredAddress::get),
+            Some(u64::MAX)
+        );
         assert_eq!(sb.checksum, None);
     }
 
@@ -401,7 +534,7 @@ mod tests {
         assert_eq!(sb.version, 0);
         assert_eq!(sb.offset_size, 4);
         assert_eq!(sb.eof_address, 4096);
-        assert_eq!(sb.root_group_address, 96);
+        assert_eq!(sb.root_group_address.get(), 96);
     }
 
     #[test]
@@ -411,7 +544,7 @@ mod tests {
         assert_eq!(sb.version, 1);
         assert_eq!(sb.offset_size, 8);
         assert_eq!(sb.eof_address, 8192);
-        assert_eq!(sb.root_group_address, 200);
+        assert_eq!(sb.root_group_address.get(), 200);
         assert_eq!(sb.indexed_storage_internal_node_k, Some(32));
         assert_eq!(sb.group_leaf_node_k, Some(4));
         assert_eq!(sb.consistency_flags, 1);
@@ -482,7 +615,7 @@ mod tests {
         assert_eq!(sb.version, 2);
         assert_eq!(sb.offset_size, 8);
         assert_eq!(sb.eof_address, 2048);
-        assert_eq!(sb.root_group_address, 48);
+        assert_eq!(sb.root_group_address.get(), 48);
         assert!(sb.checksum.is_some());
         assert_eq!(sb.group_leaf_node_k, None);
     }
@@ -582,7 +715,7 @@ mod tests {
         data[512..512 + v0.len()].copy_from_slice(&v0);
         let sb = parse_superblock(&data, 512).unwrap();
         assert_eq!(sb.version, 0);
-        assert_eq!(sb.root_group_address, 96);
+        assert_eq!(sb.root_group_address.get(), 96);
     }
 
     #[test]
@@ -601,7 +734,7 @@ mod tests {
         assert_eq!(sb.offset_size, 2);
         assert_eq!(sb.length_size, 4);
         assert_eq!(sb.eof_address, 2048);
-        assert_eq!(sb.root_group_address, 48);
+        assert_eq!(sb.root_group_address.get(), 48);
 
         assert_eq!(serialize_superblock(&sb).unwrap(), data);
     }
@@ -625,7 +758,7 @@ mod tests {
         let from_source = parse_superblock_from_source(data.as_slice(), 512).unwrap();
 
         assert_eq!(buffered, from_source);
-        assert_eq!(from_source.root_group_address, 48);
+        assert_eq!(from_source.root_group_address.get(), 48);
     }
 
     #[test]
@@ -705,4 +838,12 @@ mod tests {
             Err(FormatError::Internal(detail.into()))
         );
     }
+
+    // EOF, driver information and link name precede the root header: sections
+    // `subsec_fmt4_boot_super` and `subsec_fmt4_infra_symboltableentry`, version 4.0.
+    const LEGACY_ROOT_FIELDS_AFTER_EOF: usize = 3;
+    // Version, widths and flags precede addresses: section `subsec_fmt4_boot_super`, version 4.0.
+    const DIRECT_PREFIX_LEN: usize = 4;
+    // The checksum occupies four bytes: section `subsec_fmt4_boot_super`, version 4.0.
+    const SUPERBLOCK_CHECKSUM_LEN: usize = 4;
 }

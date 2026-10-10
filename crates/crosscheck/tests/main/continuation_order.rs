@@ -6,6 +6,7 @@ use hdf5::IndexType;
 use hdf5::IterationOrder;
 use hdf5_pure::File;
 use hdf5_pure::MessageType;
+use hdf5_pure_core::__private::BaseAddressExt;
 use hdf5_pure_format::__private;
 use hdf5_pure_format::__private::MessageRecordLayout;
 use hdf5_pure_format::__private::ObjectHeaderContinuation;
@@ -42,7 +43,13 @@ fn write_links(path: &Path) {
 fn assert_root_refers_to_nested_continuation_blocks(path: &Path, file: &File) {
     let bytes = std::fs::read(path).unwrap();
     let superblock = file.superblock();
-    let root_at = usize::try_from(superblock.root_group_address).unwrap();
+    let root_at = usize::try_from(
+        superblock
+            .base_address
+            .absolute(superblock.root_group_address)
+            .unwrap(),
+    )
+    .unwrap();
     let prefix = ObjectHeaderPrefix::parse(&bytes[root_at..]).unwrap();
     let layout = prefix.prefix.layout;
     let chunk0_end = root_at + prefix.len + usize::try_from(prefix.chunk0_size).unwrap();

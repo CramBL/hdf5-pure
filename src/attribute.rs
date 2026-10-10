@@ -416,6 +416,7 @@ mod tests {
     use test_util::widths::Widths;
 
     use super::*;
+    use crate::address::AddressContext;
     use crate::data_read;
     use crate::message_flags::MessageFlags;
     use crate::source::BytesSource;
@@ -536,7 +537,11 @@ mod tests {
         let root = ObjectHeader::parse(
             bytes,
             AccessMode::ReadOnly,
-            superblock.root_group_address.to_usize().unwrap(),
+            AddressContext::new(superblock.base_address)
+                .absolute(superblock.root_group_address)
+                .unwrap()
+                .to_usize()
+                .unwrap(),
             offset_size,
             length_size,
         )

@@ -148,6 +148,7 @@ pub fn resolve_v1_group_entries_from_source<S: Source + ?Sized>(
 mod tests {
     use super::*;
     use crate::access_mode::AccessMode;
+    use crate::address::AddressContext;
     use crate::message_type::MessageType;
     use crate::object_header::ObjectHeader;
     use test_util::image::Image;
@@ -272,7 +273,11 @@ mod tests {
         let root_header = ObjectHeader::parse(
             file_data,
             AccessMode::ReadOnly,
-            sb.root_group_address as usize,
+            AddressContext::new(sb.base_address)
+                .absolute(sb.root_group_address)
+                .unwrap()
+                .to_usize()
+                .unwrap(),
             sb.offset_size,
             sb.length_size,
         )
