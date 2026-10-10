@@ -243,13 +243,15 @@ def test_migration_shape_ignores_only_the_allowed_variant_changes(variant, expec
     ("variant", "expected"),
     [
         ("InvalidFractalHeapIdLength", []),
+        ("InvalidFilterName", []),
+        ("InvalidFilterPipelineField", []),
         (
             "UnrecognizedHeapError",
             ["FormatError: variants changed", "FormatError: variant_order changed"],
         ),
     ],
 )
-def test_migration_shape_admits_the_heap_id_length_error_addition(variant, expected):
+def test_migration_shape_admits_only_the_allowed_heap_and_filter_error_additions(variant, expected):
     baseline = core_shape_fixture()
     baseline["index"]["1"]["name"] = "FormatError"
     baseline["index"]["1"]["inner"] = {

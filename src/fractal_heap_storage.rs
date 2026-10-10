@@ -127,13 +127,17 @@ pub(crate) fn collect_fractal_heap_storage_from_source<S: Source + ?Sized>(
 ) -> Result<FractalHeapStorage, FractalHeapStorageError> {
     let offset_width = OffsetWidth::try_from(offset_size)?;
     let length_width = LengthWidth::try_from(length_size)?;
-    reject_filtered_ownership(source, heap_header_address)?;
     let header = FractalHeapHeader::parse_from_source(
         &SourceMetadata(source),
         heap_header_address.get(),
         offset_size,
         length_size,
     )?;
+    if header.filtering.is_filtered() {
+        return Err(FractalHeapStorageError::UnsupportedOwnership(
+            "filtered managed blocks",
+        ));
+    }
     let layout = FractalHeapLayout::new(&header, offset_width, length_width)?;
     if !is_undefined_addr(
         header.managed_block_free_space_manager_address.get(),
@@ -144,8 +148,6 @@ pub(crate) fn collect_fractal_heap_storage_from_source<S: Source + ?Sized>(
         ));
     }
 
-    // The parser reads through a bounded prefix window. The allocation itself has the exact
-    // encoded header size.
     let header_len = u64::try_from(FractalHeapHeader::serialized_size(
         offset_width,
         length_width,
@@ -185,29 +187,6 @@ pub(crate) fn collect_fractal_heap_storage_from_source<S: Source + ?Sized>(
         return Err(FractalHeapStorageError::InvalidStorage);
     }
     Ok(FractalHeapStorage { extents })
-}
-
-#[allow(
-    dead_code,
-    reason = "crate-private ownership infrastructure is exercised by tests and crosschecks"
-)]
-fn reject_filtered_ownership<S: Source + ?Sized>(
-    source: &S,
-    heap_header_address: StoredAddress,
-) -> Result<(), FractalHeapStorageError> {
-    let prefix = source.read_metadata_at(heap_header_address.get(), 9)?;
-    if &prefix[..4] != b"FRHP" {
-        return Err(FormatError::InvalidFractalHeapSignature.into());
-    }
-    if prefix[4] != 0 {
-        return Err(FormatError::InvalidFractalHeapVersion(prefix[4]).into());
-    }
-    if u16::from_le_bytes([prefix[7], prefix[8]]) != 0 {
-        return Err(FractalHeapStorageError::UnsupportedOwnership(
-            "filtered managed blocks",
-        ));
-    }
-    Ok(())
 }
 
 /// Buffered convenience counterpart to [`collect_fractal_heap_storage_from_source`].
@@ -643,8 +622,12 @@ fn extent_in_source<S: Source + ?Sized>(
 /// has none.
 #[cfg(test)]
 mod tests {
+    use hdf5_pure_format::__private::FilterDescription;
+    use hdf5_pure_format::__private::FilterPipeline;
+    use hdf5_pure_format::__private::FractalHeapFiltering;
     use hdf5_pure_format::__private::btree_v2_header_size;
     use test_util::btree_v2;
+    use test_util::fractal_heap;
     use test_util::widths::Widths;
 
     use super::*;
@@ -652,11 +635,14 @@ mod tests {
     const STORAGE_HEAP_AT: u64 = 0x100;
     const STORAGE_ROOT_AT: u64 = 0x400;
     const STORAGE_WIDTH: u8 = 8;
+    // Section `subsubsec_fmt4_dataobject_hdr_msg_filter`, version 4.0, defines pipeline version 2
+    // and deflate ID 1.
+    const PIPELINE_VERSION_TWO: u8 = 2;
+    const FILTER_DEFLATE: u16 = 1;
 
     fn storage_header() -> FractalHeapHeader {
         FractalHeapHeader {
             heap_id_length: 7,
-            io_filter_encoded_length: 0,
             flags: 0,
             max_managed_object_size: 64,
             next_huge_object_id: 0,
@@ -678,6 +664,7 @@ mod tests {
             start_root_rows: 2,
             root_block_address: StoredAddress::new(u64::MAX),
             current_rows_in_root_indirect_block: 0,
+            filtering: FractalHeapFiltering::Unfiltered,
         }
     }
 
@@ -993,11 +980,20 @@ mod tests {
 
     #[test]
     fn a_filtered_heap_is_an_explicitly_unsupported_owner() {
-        let header = storage_header();
+        let pipeline = FilterPipeline {
+            version: PIPELINE_VERSION_TWO,
+            filters: vec![FilterDescription {
+                filter_id: FILTER_DEFLATE,
+                name: None,
+                flags: 0,
+                client_data: vec![6],
+            }],
+        };
+        let header = fractal_heap::Header::new(u64::MAX)
+            .filtering(0, 0, pipeline.serialize().unwrap())
+            .build(Widths::EIGHT);
         let mut file = vec![0; 0x800];
-        place_storage_header(&mut file, &header);
-        let at = usize::try_from(STORAGE_HEAP_AT).unwrap();
-        file[at + 7..at + 9].copy_from_slice(&1u16.to_le_bytes());
+        place(&mut file, STORAGE_HEAP_AT, &header);
 
         assert_eq!(
             collect_storage(&file),
