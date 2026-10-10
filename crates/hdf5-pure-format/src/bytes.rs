@@ -29,6 +29,7 @@
 use alloc::vec::Vec;
 
 use crate::address::StoredAddress;
+use crate::address::StoredAddressExt;
 use crate::convert;
 use crate::error::FormatError;
 use crate::width::LengthWidth;

@@ -13,6 +13,7 @@ use std::collections::BTreeMap;
 use hdf5_pure_format::__private::MetadataSource;
 
 use crate::address::BaseAddressExt;
+use crate::address::StoredAddressExt;
 use crate::address::{BaseAddress, StoredAddress};
 use crate::convert::Narrow;
 use crate::error::FormatError;

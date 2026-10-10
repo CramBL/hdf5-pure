@@ -44,6 +44,7 @@ use hdf5_pure_format::__private::SECTION_CLASS_SMALL;
 #[cfg(test)]
 use crate::address::AddressContext;
 use crate::address::BaseAddressExt;
+use crate::address::StoredAddressExt;
 use crate::address::{BaseAddress, StoredAddress};
 use crate::attribute::AttributeMessage;
 use crate::attribute_info::AttributeInfoMessage;
@@ -1060,7 +1061,7 @@ impl DenseAttrPlan {
 /// Attribute Info message at, before the heap's real address is known. The
 /// message's *length* is what that pass needs, and that does not depend on the
 /// address; pass 2 emits the real message at the address it reserves.
-const DUMMY_DENSE_BASE: StoredAddress = StoredAddress::new(0);
+const DUMMY_DENSE_BASE: StoredAddress = StoredAddress::ZERO;
 
 /// Builds dense attribute storage for a set of attributes, at a known address.
 ///
@@ -1120,7 +1121,7 @@ pub(crate) fn compact_attribute_info_message() -> Vec<u8> {
 /// specification, version 4.0][spec].
 ///
 /// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#sec_fmt4_appendixa
-pub(crate) const UNDEF_ADDRESS: StoredAddress = StoredAddress::undefined(OFFSET_SIZE);
+pub(crate) const UNDEF_ADDRESS: StoredAddress = StoredAddress::UNDEFINED_64;
 
 // ---- FileWriter ----
 

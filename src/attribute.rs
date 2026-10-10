@@ -17,6 +17,8 @@ use hdf5_pure_space::__private::Extent;
 
 use crate::access_mode::AccessMode;
 use crate::address::StoredAddress;
+#[cfg(test)]
+use crate::address::StoredAddressExt;
 use crate::attribute_info::AttributeInfoMessage;
 use crate::btree_v2::{
     BTreeV2Header, collect_btree_v2_records, collect_btree_v2_records_from_source,

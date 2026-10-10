@@ -542,6 +542,7 @@ mod tests {
 
     use super::*;
     use crate::address::StoredAddress;
+    use crate::address::StoredAddressExt;
     use crate::dataspace::DataspaceType;
     use crate::datatype::byte_order::DatatypeByteOrder;
     use crate::shared_message;

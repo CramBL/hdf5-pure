@@ -21,6 +21,7 @@ pub use hdf5_pure_format::__private::BTreeV2Record;
 use hdf5_pure_space::__private::Extent;
 
 use crate::address::StoredAddress;
+use crate::address::StoredAddressExt;
 use crate::bytes;
 use crate::convert::Narrow;
 use crate::error::FormatError;

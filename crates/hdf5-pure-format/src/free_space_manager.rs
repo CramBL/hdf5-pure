@@ -24,6 +24,7 @@ use alloc::vec::Vec;
 use core::num::NonZeroU64;
 
 use crate::address::StoredAddress;
+use crate::address::StoredAddressExt;
 use crate::bytes;
 use crate::checksum;
 use crate::convert::Narrow;

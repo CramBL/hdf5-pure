@@ -16,6 +16,8 @@ use hdf5_pure_format::__private::HugeObjectRecord;
 use hdf5_pure_format::__private::HugeObjectReference;
 
 use crate::address::StoredAddress;
+#[cfg(test)]
+use crate::address::StoredAddressExt;
 use crate::btree_v2::{
     BTreeV2Header, BTreeV2Record, collect_btree_v2_records, collect_btree_v2_records_from_source,
 };

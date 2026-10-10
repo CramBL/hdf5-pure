@@ -23,6 +23,7 @@ mod superblock;
 pub mod __private;
 
 pub use address::BaseAddress;
+pub use address::StoredAddress;
 pub use dataspace::MaxExtent;
 pub use datatype::CharacterSet;
 pub use datatype::CompoundMember;

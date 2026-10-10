@@ -2,7 +2,7 @@
 //!
 //! The non-exhaustive types of this crate cannot be built with a struct literal outside it, so the
 //! other workspace crates build them through the functions and the field structs here. The module
-//! also exports [`StoredAddress`], the [`BaseAddressExt`] conversions of a [`BaseAddress`], and the
+//! also exports [`StoredAddressExt`], the [`BaseAddressExt`] conversions of a [`BaseAddress`], and the
 //! display helpers.
 //!
 //! This module serves the workspace crates only. It is outside the crate's compatibility
@@ -21,7 +21,7 @@ use crate::FileSpaceStrategy;
 use crate::Superblock;
 
 pub use crate::address::BaseAddressExt;
-pub use crate::address::StoredAddress;
+pub use crate::address::StoredAddressExt;
 pub use crate::display::DISPLAY_MAX_MEMBERS;
 pub use crate::display::Dims;
 pub use crate::display::EscapedName;

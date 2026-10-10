@@ -4,6 +4,7 @@ use alloc::vec::Vec;
 use core::ops::Range;
 
 use crate::address::StoredAddress;
+use crate::address::StoredAddressExt;
 use crate::bytes;
 use crate::checksum;
 use crate::convert::Narrow;

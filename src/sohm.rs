@@ -13,6 +13,8 @@ pub use hdf5_pure_format::__private::SohmRecord;
 pub use hdf5_pure_format::__private::SohmTable;
 
 use crate::address::StoredAddress;
+#[cfg(test)]
+use crate::address::StoredAddressExt;
 use crate::btree_v2::{BTreeV2Header, collect_btree_v2_records_from_source};
 use crate::convert::Narrow;
 use crate::error::FormatError;

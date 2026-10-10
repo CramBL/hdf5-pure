@@ -19,6 +19,7 @@ use hdf5_pure_format::__private::IndexSlots;
 use hdf5_pure_format::__private::SlotOccupancy;
 
 use crate::address::StoredAddress;
+use crate::address::StoredAddressExt;
 use crate::chunk_grid::{ChunkGrid, GridOrder};
 use crate::convert::Narrow;
 use crate::data_layout::DataLayout;

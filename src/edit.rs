@@ -291,6 +291,7 @@ use hdf5_pure_space::__private::{
 
 use crate::access_mode::AccessMode;
 use crate::address::BaseAddressExt;
+use crate::address::StoredAddressExt;
 use crate::address::{AddressContext, BaseAddress, StoredAddress};
 use crate::attribute_info::AttributeInfoMessage;
 use crate::chunk_index_inplace::{Located, Store, apply_ea_append, plan_ea_append};

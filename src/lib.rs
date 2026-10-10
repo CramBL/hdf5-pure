@@ -423,6 +423,9 @@
 
 extern crate alloc;
 
+#[cfg(feature = "__fractal-heap-storage-crosscheck")]
+use crate::address::StoredAddressExt;
+
 #[cfg(doc)]
 pub mod _guide;
 
@@ -540,6 +543,9 @@ pub use hdf5_pure_core::OBJECT_HEADER_MESSAGE_MAX;
 #[cfg(feature = "std")]
 #[doc(inline)]
 pub use hdf5_pure_core::BaseAddress;
+#[doc(inline)]
+pub use hdf5_pure_core::StoredAddress;
+
 #[cfg(feature = "std")]
 #[doc(inline)]
 pub use hdf5_pure_core::MessageType;

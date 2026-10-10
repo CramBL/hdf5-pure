@@ -18,6 +18,7 @@ pub(crate) use hdf5_pure_core::FileSpaceStrategy;
 use crate::address::BaseAddress;
 use crate::address::BaseAddressExt;
 use crate::address::StoredAddress;
+use crate::address::StoredAddressExt;
 use crate::bytes;
 use crate::error::FormatError;
 use crate::width::FormatWidths;
@@ -258,6 +259,7 @@ mod tests {
 
     use super::*;
     use crate::address::StoredAddress;
+    use crate::address::StoredAddressExt;
 
     #[test]
     fn parses_persistent_manager_addresses() {

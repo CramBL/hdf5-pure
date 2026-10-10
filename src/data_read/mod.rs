@@ -741,6 +741,7 @@ mod tests {
 
     use super::*;
     use crate::address::StoredAddress;
+    use crate::address::StoredAddressExt;
     use crate::convert::nz;
     use crate::dataspace::{Dataspace, DataspaceType};
     use crate::datatype::layout::FloatingPointLayout;

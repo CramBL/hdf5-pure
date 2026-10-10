@@ -13,6 +13,8 @@ use alloc::format;
 use alloc::vec::Vec;
 
 use crate::address::StoredAddress;
+#[cfg(test)]
+use crate::address::StoredAddressExt;
 use crate::bytes;
 use crate::convert::Narrow;
 use crate::error::FormatError;

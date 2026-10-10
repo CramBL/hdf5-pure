@@ -20,6 +20,7 @@ use hdf5_pure_format::__private::HugeObjectRecord;
 use hdf5_pure_space::__private::Extent;
 
 use crate::address::StoredAddress;
+use crate::address::StoredAddressExt;
 use crate::btree_v2::{BTreeV2Header, collect_btree_v2_records_from_source};
 use crate::bytes;
 use crate::convert::{Narrow, is_undefined_addr};

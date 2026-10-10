@@ -10,6 +10,7 @@ use hdf5_pure_space::__private::{FreeClass, PageType};
 
 use crate::access_mode::AccessMode;
 use crate::address::StoredAddress;
+use crate::address::StoredAddressExt;
 use crate::attribute_info::AttributeInfoMessage;
 use crate::chunked_read::chunk_index_spans_from_source;
 use crate::data_layout::{ChunkIndexLayout, DataLayout};

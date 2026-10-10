@@ -68,6 +68,7 @@ const MAX_CONTINUATIONS: usize = 256;
 mod tests {
     use super::*;
     use crate::address::StoredAddress;
+    use crate::address::StoredAddressExt;
     use crate::convert::Narrow;
 
     #[test]

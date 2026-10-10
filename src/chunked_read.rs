@@ -22,6 +22,7 @@ use hdf5_pure_format::__private::LayoutVersion;
 use hdf5_pure_space::__private::Extent;
 
 use crate::address::StoredAddress;
+use crate::address::StoredAddressExt;
 use crate::chunk_cache::{CachePass, ChunkCache};
 use crate::chunk_grid::{self, ChunkGrid, GridOrder};
 use crate::chunk_span::ChunkSpanReader;

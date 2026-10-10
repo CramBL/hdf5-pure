@@ -20,6 +20,8 @@
 use alloc::vec::Vec;
 
 use crate::address::StoredAddress;
+#[cfg(test)]
+use crate::address::StoredAddressExt;
 use crate::convert::Narrow;
 use crate::data_layout::{ChunkIndexLayout, ChunkedLayoutFlags, DataLayout};
 use crate::dataspace::Dataspace;

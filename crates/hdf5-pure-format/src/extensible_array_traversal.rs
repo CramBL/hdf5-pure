@@ -9,6 +9,7 @@ use core::num::NonZeroU64;
 
 use super::ExtensibleArrayHeader;
 use crate::address::StoredAddress;
+use crate::address::StoredAddressExt;
 use crate::bytes;
 use crate::checksum;
 use crate::chunk_record::ChunkRecord;
