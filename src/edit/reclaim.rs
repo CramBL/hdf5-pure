@@ -9,7 +9,7 @@ use std::collections::{HashMap, HashSet};
 use hdf5_pure_space::__private::{FreeClass, PageType};
 
 use crate::access_mode::AccessMode;
-use crate::address::{BaseAddressExt, StoredAddress};
+use crate::address::StoredAddress;
 use crate::attribute_info::AttributeInfoMessage;
 use crate::chunked_read::chunk_index_spans_from_source;
 use crate::data_layout::{ChunkIndexLayout, DataLayout};
@@ -37,12 +37,10 @@ impl WriteEngine {
     /// header is not a plain v2 header this engine can fully account for, and
     /// the caller leaves it as dead bytes of unknown extent.
     pub(super) fn oh_chunk_spans(&self, addr: u64) -> Result<Vec<(u64, u64)>, Error> {
-        Ok(
-            read_oh_chunks(&self.image(), addr, self.superblock.base_address)?
-                .into_iter()
-                .map(|chunk| chunk.span)
-                .collect(),
-        )
+        Ok(read_oh_chunks(&self.image(), addr, self.addresses)?
+            .into_iter()
+            .map(|chunk| chunk.span)
+            .collect())
     }
 
     /// Returns the dense-attribute v2 B-tree allocations named by an object's old header.
@@ -58,7 +56,7 @@ impl WriteEngine {
         addr: u64,
         header_spans: &[(u64, u64)],
     ) -> Option<Vec<(u64, u64)>> {
-        let base = self.superblock.base_address;
+        let base = self.addresses;
         let region = Self::gather_oh_messages(&self.image(), addr, base).ok()?;
         let mut attr_info = None;
         let mut p = 0;
@@ -82,7 +80,7 @@ impl WriteEngine {
         let extents = crate::attribute::collect_dense_attribute_index_storage_extents(
             &BaseOffsetSource {
                 inner: &self.image(),
-                base,
+                base: base.effective_base(),
             },
             &attr_info,
             OFFSET_SIZE,
@@ -113,7 +111,7 @@ impl WriteEngine {
         addr: u64,
         header_spans: &[(u64, u64)],
     ) -> Option<Vec<(u64, u64)>> {
-        let base = self.superblock.base_address;
+        let base = self.addresses;
         let region = Self::gather_oh_messages(&self.image(), addr, base).ok()?;
         let mut link_info = None;
         let mut p = 0;
@@ -137,7 +135,7 @@ impl WriteEngine {
         let extents = crate::group_v2::collect_dense_group_index_storage_extents(
             &BaseOffsetSource {
                 inner: &self.image(),
-                base,
+                base: base.effective_base(),
             },
             &link_info,
             OFFSET_SIZE,
@@ -173,7 +171,7 @@ impl WriteEngine {
     pub(super) fn count_incoming_hard_links(&self) -> Option<HashMap<u64, u32>> {
         let os = self.superblock.offset_size;
         let ls = self.superblock.length_size;
-        let base = self.superblock.base_address;
+        let base = self.addresses;
         let mut counts: HashMap<u64, u32> = HashMap::new();
         let mut visited: HashSet<u64> = HashSet::new();
         let mut stack: Vec<u64> = vec![self.superblock.root_group_address];
@@ -192,7 +190,7 @@ impl WriteEngine {
                 addr,
                 os,
                 ls,
-                base,
+                base.effective_base(),
             )
             .ok()?;
             // Datasets and other leaves are not groups and own no links.
@@ -208,7 +206,8 @@ impl WriteEngine {
             // A group we cannot enumerate fully would undercount incoming links
             // and risk over-reclaim. Return the safe-leak fallback.
             let entries =
-                resolve_group_entries_from_source(&self.image(), &header, os, ls, base).ok()?;
+                resolve_group_entries_from_source(&self.image(), &header, os, ls, self.addresses)
+                    .ok()?;
             for e in entries {
                 let child = base.absolute(e.object_header_address).ok()?;
                 *counts.entry(child).or_insert(0) += 1;
@@ -258,7 +257,7 @@ impl WriteEngine {
         // data block and a group's child links: each is converted to an absolute
         // offset (a no-op on a base-0 file) before it is bounds-checked, recorded,
         // or descended into.
-        let base = self.superblock.base_address;
+        let base = self.addresses;
         let file_len = self.image().len();
         if depth >= MAX_COPY_DEPTH {
             return;
@@ -276,12 +275,7 @@ impl WriteEngine {
             Err(_) => return,
         };
         let dense_index_spans = self.dense_attribute_index_spans(addr, &spans);
-        match Self::read_object(
-            &self.image(),
-            AccessMode::ReadWrite,
-            addr,
-            self.superblock.base_address,
-        ) {
+        match Self::read_object(&self.image(), AccessMode::ReadWrite, addr, self.addresses) {
             Ok(ObjModel::DatasetVerbatim { .. }) => {
                 append_object_metadata_spans(out, &spans, dense_index_spans.as_deref());
             }
@@ -377,8 +371,7 @@ impl WriteEngine {
     /// [module docs](self).
     pub(super) fn chunked_storage_spans(&self, addr: u64) -> Option<Vec<(u64, u64, FreeClass)>> {
         // Locate the data-layout and dataspace messages in the object header.
-        let region =
-            Self::gather_oh_messages(&self.image(), addr, self.superblock.base_address).ok()?;
+        let region = Self::gather_oh_messages(&self.image(), addr, self.addresses).ok()?;
         let mut layout_msg: Option<(usize, usize)> = None;
         let mut dataspace_msg: Option<(usize, usize)> = None;
         let mut p = 0;
@@ -417,11 +410,11 @@ impl WriteEngine {
         // span address is shifted back to an absolute file offset by adding `base`
         // (a no-op on a base-0 file). The free list and the bounds check below both
         // work in absolute file offsets.
-        let base = self.superblock.base_address;
+        let base = self.addresses;
         let split = crate::chunked_read::collect_chunked_storage_spans(
             &BaseOffsetSource {
                 inner: &self.image(),
-                base,
+                base: base.effective_base(),
             },
             &layout,
             &dataspace,
@@ -553,8 +546,7 @@ impl WriteEngine {
     /// disjoint/in-bounds. Returns `None` (leave unreclaimed) on any error or
     /// violation.
     pub(super) fn chunked_index_spans(&self, addr: u64) -> Option<Vec<(u64, u64)>> {
-        let region =
-            Self::gather_oh_messages(&self.image(), addr, self.superblock.base_address).ok()?;
+        let region = Self::gather_oh_messages(&self.image(), addr, self.addresses).ok()?;
         let mut layout_msg: Option<(usize, usize)> = None;
         let mut p = 0;
         loop {
@@ -574,11 +566,11 @@ impl WriteEngine {
         if !matches!(layout, DataLayout::Chunked { .. }) {
             return None;
         }
-        let base = self.superblock.base_address;
+        let base = self.addresses;
         let mut spans = chunk_index_spans_from_source(
             &BaseOffsetSource {
                 inner: &self.image(),
-                base,
+                base: base.effective_base(),
             },
             &layout,
             OFFSET_SIZE,

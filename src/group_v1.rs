@@ -3,8 +3,9 @@
 #[cfg(not(feature = "std"))]
 use alloc::{string::String, vec::Vec};
 
-use crate::address::BaseAddressExt;
-use crate::address::{BaseAddress, StoredAddress};
+use crate::address::{AddressContext, StoredAddress};
+#[cfg(test)]
+use crate::address::{BaseAddress, BaseAddressExt};
 use crate::btree_v1::{collect_symbol_table_nodes, collect_symbol_table_nodes_from_source};
 use crate::convert::Narrow;
 use crate::error::FormatError;
@@ -40,11 +41,11 @@ pub fn resolve_v1_group_entries(
     sym_table_msg: &SymbolTableMessage,
     offset_size: u8,
     length_size: u8,
-    base_address: BaseAddress,
+    addresses: AddressContext,
 ) -> Result<Vec<GroupEntry>, FormatError> {
     let heap = LocalHeap::parse(
         file_data,
-        base_address
+        addresses
             .absolute(sym_table_msg.local_heap_address)?
             .to_usize()?,
         offset_size,
@@ -56,19 +57,23 @@ pub fn resolve_v1_group_entries(
         sym_table_msg.btree_address,
         offset_size,
         length_size,
-        base_address,
+        addresses,
     )?;
 
     let mut entries = Vec::new();
     for snod_addr in snod_addrs {
         let snod = SymbolTableNode::parse(
             file_data,
-            base_address.absolute(snod_addr)?.to_usize()?,
+            addresses.absolute(snod_addr)?.to_usize()?,
             offset_size,
             length_size,
         )?;
         for entry in &snod.entries {
-            let name = heap.read_string(file_data, base_address, entry.link_name_offset)?;
+            let name = heap.read_string(
+                file_data,
+                addresses.effective_base(),
+                entry.link_name_offset,
+            )?;
             entries.push(GroupEntry {
                 name,
                 object_header_address: entry.object_header_address,
@@ -95,15 +100,15 @@ pub fn resolve_v1_group_entries_from_source<S: Source + ?Sized>(
     sym_table_msg: &SymbolTableMessage,
     offset_size: u8,
     length_size: u8,
-    base_address: BaseAddress,
+    addresses: AddressContext,
 ) -> Result<Vec<GroupEntry>, FormatError> {
-    let heap_addr = base_address.absolute(sym_table_msg.local_heap_address)?;
+    let heap_addr = addresses.absolute(sym_table_msg.local_heap_address)?;
     let heap =
         LocalHeap::parse_from_source(&SourceMetadata(source), heap_addr, offset_size, length_size)?;
 
     // Read the heap data segment once; every link name is sliced from it.
     let segment = source.read_metadata_at(
-        base_address.absolute(heap.data_segment_address)?,
+        addresses.absolute(heap.data_segment_address)?,
         heap.data_segment_size.to_usize()?,
     )?;
 
@@ -112,12 +117,12 @@ pub fn resolve_v1_group_entries_from_source<S: Source + ?Sized>(
         sym_table_msg.btree_address,
         offset_size,
         length_size,
-        base_address,
+        addresses,
     )?;
 
     let mut entries = Vec::new();
     for snod_addr in snod_addrs {
-        let snod_offset = base_address.absolute(snod_addr)?;
+        let snod_offset = addresses.absolute(snod_addr)?;
         let snod = SymbolTableNode::parse_from_source(
             &SourceMetadata(source),
             snod_offset,
@@ -213,7 +218,9 @@ mod tests {
     fn resolve_entries_two_children() {
         let (file, msg) =
             build_synthetic_group(&[("alpha", 0x1000, 0), ("beta", 0x2000, 0)], Widths::EIGHT);
-        let entries = resolve_v1_group_entries(&file, &msg, 8, 8, BaseAddress::ZERO).unwrap();
+        let entries =
+            resolve_v1_group_entries(&file, &msg, 8, 8, AddressContext::new(BaseAddress::ZERO))
+                .unwrap();
         assert_eq!(entries.len(), 2);
         assert_eq!(entries[0].name, "alpha");
         assert_eq!(entries[0].object_header_address, StoredAddress::new(0x1000));
@@ -290,7 +297,7 @@ mod tests {
             &root_sym,
             sb.offset_size,
             sb.length_size,
-            BaseAddress::ZERO,
+            AddressContext::new(BaseAddress::ZERO),
         )
         .unwrap();
         let data_entry = entries

@@ -5,8 +5,9 @@ use alloc::vec::Vec;
 
 use hdf5_pure_format::__private::BTreeV1Node;
 
-use crate::address::BaseAddressExt;
-use crate::address::{BaseAddress, StoredAddress};
+use crate::address::{AddressContext, StoredAddress};
+#[cfg(test)]
+use crate::address::{BaseAddress, BaseAddressExt};
 use crate::convert::Narrow;
 use crate::error::FormatError;
 use crate::source::Source;
@@ -34,14 +35,14 @@ pub fn collect_symbol_table_nodes(
     btree_address: StoredAddress,
     offset_size: u8,
     length_size: u8,
-    base_address: BaseAddress,
+    addresses: AddressContext,
 ) -> Result<Vec<StoredAddress>, FormatError> {
     collect_symbol_table_nodes_inner(
         file_data,
         btree_address,
         offset_size,
         length_size,
-        base_address,
+        addresses,
         0,
     )
 }
@@ -54,13 +55,13 @@ fn collect_symbol_table_nodes_inner(
     btree_address: StoredAddress,
     offset_size: u8,
     length_size: u8,
-    base_address: BaseAddress,
+    addresses: AddressContext,
     depth: u32,
 ) -> Result<Vec<StoredAddress>, FormatError> {
     if depth > MAX_SYMBOL_TABLE_BTREE_DEPTH {
         return Err(FormatError::NestingDepthExceeded);
     }
-    let node_offset = base_address.absolute(btree_address)?.to_usize()?;
+    let node_offset = addresses.absolute(btree_address)?.to_usize()?;
     let node = BTreeV1Node::parse(file_data, node_offset, offset_size, length_size)?;
 
     if node.node_type != 0 {
@@ -79,7 +80,7 @@ fn collect_symbol_table_nodes_inner(
                 child_addr,
                 offset_size,
                 length_size,
-                base_address,
+                addresses,
                 depth + 1,
             )?;
             result.extend(child_snods);
@@ -100,14 +101,14 @@ pub fn collect_symbol_table_nodes_from_source<S: Source + ?Sized>(
     btree_address: StoredAddress,
     offset_size: u8,
     length_size: u8,
-    base_address: BaseAddress,
+    addresses: AddressContext,
 ) -> Result<Vec<StoredAddress>, FormatError> {
     collect_symbol_table_nodes_from_source_inner(
         source,
         btree_address,
         offset_size,
         length_size,
-        base_address,
+        addresses,
         0,
     )
 }
@@ -119,13 +120,13 @@ fn collect_symbol_table_nodes_from_source_inner<S: Source + ?Sized>(
     btree_address: StoredAddress,
     offset_size: u8,
     length_size: u8,
-    base_address: BaseAddress,
+    addresses: AddressContext,
     depth: u32,
 ) -> Result<Vec<StoredAddress>, FormatError> {
     if depth > MAX_SYMBOL_TABLE_BTREE_DEPTH {
         return Err(FormatError::NestingDepthExceeded);
     }
-    let node_offset = base_address.absolute(btree_address)?;
+    let node_offset = addresses.absolute(btree_address)?;
     let node = BTreeV1Node::parse_from_source(
         &SourceMetadata(source),
         node_offset,
@@ -147,7 +148,7 @@ fn collect_symbol_table_nodes_from_source_inner<S: Source + ?Sized>(
                 child_addr,
                 offset_size,
                 length_size,
-                base_address,
+                addresses,
                 depth + 1,
             )?;
             result.extend(child_snods);
@@ -199,7 +200,7 @@ mod tests {
             StoredAddress::new(internal_offset as u64),
             os,
             ls,
-            BaseAddress::ZERO,
+            AddressContext::new(BaseAddress::ZERO),
         )
         .unwrap();
         assert_eq!(
@@ -214,8 +215,14 @@ mod tests {
             btree_v1::node_with_group_keys(btree_v1::NodeType::CHUNK, 0, &[0, 1], &[0x100], WIDTHS);
         let mut file = vec![0u8; 512];
         file[..data.len()].copy_from_slice(&data);
-        let err = collect_symbol_table_nodes(&file, StoredAddress::new(0), 8, 8, BaseAddress::ZERO)
-            .unwrap_err();
+        let err = collect_symbol_table_nodes(
+            &file,
+            StoredAddress::new(0),
+            8,
+            8,
+            AddressContext::new(BaseAddress::ZERO),
+        )
+        .unwrap_err();
         assert_eq!(err, FormatError::InvalidBTreeNodeType(1));
     }
 
@@ -231,9 +238,14 @@ mod tests {
         let mut file = vec![0u8; 1024];
         file[..node.len()].copy_from_slice(&node);
 
-        let err =
-            collect_symbol_table_nodes(&file, StoredAddress::new(0), os, ls, BaseAddress::ZERO)
-                .unwrap_err();
+        let err = collect_symbol_table_nodes(
+            &file,
+            StoredAddress::new(0),
+            os,
+            ls,
+            AddressContext::new(BaseAddress::ZERO),
+        )
+        .unwrap_err();
         assert_eq!(err, FormatError::NestingDepthExceeded);
     }
 

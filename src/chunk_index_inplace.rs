@@ -44,6 +44,8 @@ use hdf5_pure_format::__private::ObjectHeaderPrefix;
 use hdf5_pure_format::__private::SlotOccupancy;
 use hdf5_pure_format::__private::SuperBlockGeometry;
 
+#[cfg(test)]
+use crate::address::AddressContext;
 use crate::address::StoredAddress;
 use crate::checksum::jenkins_lookup3;
 use crate::chunked_write::split_into_chunks;
@@ -1759,6 +1761,7 @@ mod tests {
             &store.data,
             AccessMode::ReadOnly,
             &store.superblock,
+            AddressContext::new(store.superblock.base_address),
             &ObjectPath::parse("d"),
         )
         .unwrap();
@@ -1840,6 +1843,7 @@ mod tests {
             &store.data,
             AccessMode::ReadOnly,
             &store.superblock,
+            AddressContext::new(store.superblock.base_address),
             &ObjectPath::parse("d"),
         )
         .unwrap();
@@ -2003,6 +2007,7 @@ mod tests {
             &store.data,
             AccessMode::ReadOnly,
             &store.superblock,
+            AddressContext::new(store.superblock.base_address),
             &ObjectPath::parse("d"),
         )
         .unwrap();

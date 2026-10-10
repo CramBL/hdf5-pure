@@ -74,8 +74,11 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::access_mode::AccessMode;
+#[cfg(test)]
+use crate::address::BaseAddress;
+#[cfg(test)]
 use crate::address::BaseAddressExt;
-use crate::address::{BaseAddress, StoredAddress};
+use crate::address::{AddressContext, StoredAddress};
 use crate::attribute::AttributeMessage;
 use crate::checksum::jenkins_lookup3;
 use crate::convert::Narrow;
@@ -266,6 +269,7 @@ pub(crate) fn walks() -> usize {
 pub(crate) fn plan<S: Source + ?Sized>(
     src: &S,
     superblock: &Superblock,
+    addresses: AddressContext,
     relocations: &BTreeMap<u64, u64>,
     budget: u32,
 ) -> Result<Plan, Error> {
@@ -276,7 +280,7 @@ pub(crate) fn plan<S: Source + ?Sized>(
     WALKS.with(|count| count.set(count.get() + 1));
     let os = superblock.offset_size;
     let ls = superblock.length_size;
-    let base = superblock.base_address;
+    let base = addresses;
 
     let mut visited: BTreeSet<u64> = BTreeSet::new();
     let mut stack: Vec<u64> = vec![superblock.root_group_address];
@@ -331,7 +335,7 @@ pub(crate) fn plan<S: Source + ?Sized>(
             addr,
             os,
             ls,
-            base,
+            base.effective_base(),
         ) else {
             complete = false;
             continue;
@@ -344,7 +348,7 @@ pub(crate) fn plan<S: Source + ?Sized>(
         if !outcome.header_located {
             saw_reference |= scan_parsed_header(src, &header, base, relocations, &mut plan);
         }
-        let Ok(entries) = resolve_group_entries_from_source(src, &header, os, ls, base) else {
+        let Ok(entries) = resolve_group_entries_from_source(src, &header, os, ls, addresses) else {
             complete = false;
             continue;
         };
@@ -379,7 +383,7 @@ pub(crate) fn plan<S: Source + ?Sized>(
 fn scan_parsed_header<S: Source + ?Sized>(
     src: &S,
     header: &ObjectHeader,
-    base: BaseAddress,
+    base: AddressContext,
     relocations: &BTreeMap<u64, u64>,
     plan: &mut Plan,
 ) -> bool {
@@ -397,7 +401,10 @@ fn scan_parsed_header<S: Source + ?Sized>(
             MessageType::DATATYPE => {
                 let resolved;
                 let encoded = if message.flags.is_shared() {
-                    let framed = crate::source::BaseOffsetSource { inner: src, base };
+                    let framed = crate::source::BaseOffsetSource {
+                        inner: src,
+                        base: base.effective_base(),
+                    };
                     let resolver = crate::shared_message::SourceResolver::new(
                         &framed,
                         AccessMode::ReadWrite,
@@ -505,7 +512,7 @@ struct Scanned {
 fn scan_object<S: Source + ?Sized>(
     src: &S,
     addr: u64,
-    base: BaseAddress,
+    base: AddressContext,
     relocations: &BTreeMap<u64, u64>,
     plan: &mut Plan,
 ) -> Result<Scanned, Error> {
@@ -529,7 +536,10 @@ fn scan_object<S: Source + ?Sized>(
     // the wrong offset, fails to parse, and takes the object's references with
     // it — silently, since a datatype that will not parse is treated as one this
     // walk cannot read. Every other resolver in the crate is framed this way.
-    let framed = crate::source::BaseOffsetSource { inner: src, base };
+    let framed = crate::source::BaseOffsetSource {
+        inner: src,
+        base: base.effective_base(),
+    };
     let resolver = crate::shared_message::SourceResolver::new(
         &framed,
         AccessMode::ReadWrite,
@@ -804,7 +814,7 @@ fn collect_slots(
     slots: &[usize],
     raw: &[u8],
     raw_at: u64,
-    base: BaseAddress,
+    base: AddressContext,
     relocations: &BTreeMap<u64, u64>,
     out: &mut Vec<(u64, StoredAddress)>,
 ) {
@@ -928,7 +938,14 @@ mod tests {
     fn scan(src: &BytesSource<Vec<u8>>, relocations: &[(u64, u64)]) -> (Plan, Scanned) {
         let mut plan = Plan::default();
         let map: BTreeMap<u64, u64> = relocations.iter().copied().collect();
-        let scanned = scan_object(src, HEADER_AT, BaseAddress::ZERO, &map, &mut plan).unwrap();
+        let scanned = scan_object(
+            src,
+            HEADER_AT,
+            AddressContext::new(BaseAddress::ZERO),
+            &map,
+            &mut plan,
+        )
+        .unwrap();
         (plan, scanned)
     }
 
@@ -1179,7 +1196,10 @@ mod tests {
     /// is exactly why the bug survived one.
     #[test]
     fn a_committed_datatype_is_resolved_through_the_base_address() {
-        for base in [BaseAddress::ZERO, BaseAddress::new(1024)] {
+        for base in [
+            AddressContext::new(BaseAddress::ZERO),
+            AddressContext::new(BaseAddress::new(1024)),
+        ] {
             const TYPE_AT: u64 = 2048;
             let committed = build_v2_object_header(&plain_region(message_record(
                 MessageType::DATATYPE,
@@ -1209,7 +1229,10 @@ mod tests {
             bytes.extend_from_slice(&dataset);
 
             let mut plan = Plan::default();
-            let map = BTreeMap::from([(300 + base.get(), 900 + base.get())]);
+            let map = BTreeMap::from([(
+                300 + base.effective_base().get(),
+                900 + base.effective_base().get(),
+            )]);
             let scanned =
                 scan_object(&BytesSource::new(bytes), HEADER_AT, base, &map, &mut plan).unwrap();
             assert!(
@@ -1260,7 +1283,14 @@ mod tests {
         // The control: `d` has moved, the root has not, so the walk descends
         // through the root and repoints the one element in `refs`.
         let moved = BTreeMap::from([(stored, stored + 4096)]);
-        let reached = super::plan(&source, &superblock, &moved, 1 << 20).unwrap();
+        let reached = super::plan(
+            &source,
+            &superblock,
+            AddressContext::new(superblock.base_address),
+            &moved,
+            1 << 20,
+        )
+        .unwrap();
         assert_eq!(reached.len(), 1, "the walk must reach `refs` at all");
 
         // The same file and the same target, with the root itself vacated. The
@@ -1269,7 +1299,14 @@ mod tests {
         // reaching it meant walking a header that is no longer part of any tree.
         let mut vacated = moved.clone();
         vacated.insert(root, root + 8192);
-        let skipped = super::plan(&source, &superblock, &vacated, 1 << 20).unwrap();
+        let skipped = super::plan(
+            &source,
+            &superblock,
+            AddressContext::new(superblock.base_address),
+            &vacated,
+            1 << 20,
+        )
+        .unwrap();
         assert!(
             skipped.is_empty(),
             "a vacated header must not be scanned, nor descended through"
