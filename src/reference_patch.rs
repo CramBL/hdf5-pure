@@ -78,6 +78,7 @@ use crate::access_mode::AccessMode;
 use crate::address::BaseAddress;
 #[cfg(test)]
 use crate::address::BaseAddressExt;
+use crate::address::StoredAddressExt;
 use crate::address::{AddressContext, StoredAddress};
 use crate::attribute::AttributeMessage;
 use crate::checksum::jenkins_lookup3;

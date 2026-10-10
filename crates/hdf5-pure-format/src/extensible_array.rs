@@ -17,6 +17,7 @@ use core::num::NonZeroU8;
 use core::num::NonZeroU64;
 
 use crate::address::StoredAddress;
+use crate::address::StoredAddressExt;
 use crate::bytes;
 use crate::checksum;
 use crate::chunk_record;

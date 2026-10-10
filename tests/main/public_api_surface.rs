@@ -17,6 +17,7 @@
 //! with no finding and no changelog line, leaving callers a value they could
 //! compare and print but not use as a number.
 
+use hdf5_pure::StoredAddress;
 use hdf5_pure::{BaseAddress, Error, File, FileBuilder, LibVer, MessageType, Superblock};
 
 use test_util::temp;
@@ -42,6 +43,8 @@ fn format_of(sb: &Superblock) -> LibVer {
 /// compile is the assertion — and it is called below only to keep `dead_code`
 /// quiet under `clippy --all-targets -D warnings`.
 fn field_types(sb: &Superblock) {
+    let _: fn(StoredAddress) -> u64 = StoredAddress::get;
+    let _: fn(hdf5_pure_core::StoredAddress) -> u64 = StoredAddress::get;
     let _: u8 = sb.version;
     let _: u8 = sb.offset_size;
     let _: u8 = sb.length_size;

@@ -786,6 +786,7 @@ impl Default for ChunkCache {
 mod tests {
     use super::*;
     use crate::address::StoredAddress;
+    use crate::address::StoredAddressExt;
     use crate::chunked_read::StoredChunkSize;
 
     fn make_chunk(offsets: Vec<u64>, address: u64, size: u32) -> ChunkInfo {

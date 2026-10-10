@@ -5,6 +5,7 @@ use alloc::vec::Vec;
 use core::ops::Range;
 
 use crate::address::StoredAddress;
+use crate::address::StoredAddressExt;
 use crate::bytes;
 use crate::bytes::{ensure_len, read_offset, read_uint_width};
 use crate::convert::Narrow;

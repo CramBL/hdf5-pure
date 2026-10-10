@@ -25,6 +25,7 @@ use byteorder::ByteOrder;
 use byteorder::LittleEndian;
 
 use crate::address::StoredAddress;
+use crate::address::StoredAddressExt;
 use crate::bytes;
 use crate::chunk_record;
 use crate::convert::Narrow;

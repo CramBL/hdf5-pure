@@ -295,6 +295,7 @@ mod tests {
 
     use super::*;
     use crate::address::StoredAddress;
+    use crate::address::StoredAddressExt;
 
     #[rstest]
     #[case(ChunkIndexLayout::BTreeV1 { address: None }, ChunkIndex::BTreeV1)]

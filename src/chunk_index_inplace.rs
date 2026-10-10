@@ -47,6 +47,7 @@ use hdf5_pure_format::__private::SuperBlockGeometry;
 #[cfg(test)]
 use crate::address::AddressContext;
 use crate::address::StoredAddress;
+use crate::address::StoredAddressExt;
 use crate::checksum::jenkins_lookup3;
 use crate::chunked_write::split_into_chunks;
 use crate::convert::Narrow;

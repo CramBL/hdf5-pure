@@ -13,6 +13,8 @@ use hdf5_pure_format::__private::{BTREE_V2_LINK_CREATION_ORDER, BTREE_V2_LINK_NA
 use hdf5_pure_space::__private::Extent;
 
 use crate::access_mode::AccessMode;
+#[cfg(test)]
+use crate::address::StoredAddressExt;
 use crate::address::{AddressContext, StoredAddress};
 #[cfg(test)]
 use crate::address::{BaseAddress, BaseAddressExt};

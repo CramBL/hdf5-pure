@@ -9,6 +9,7 @@ use std::sync::{Arc, Mutex, PoisonError, RwLock};
 
 use crate::access_mode::AccessMode;
 use crate::address::BaseAddressExt;
+use crate::address::StoredAddressExt;
 use crate::address::{AddressContext, BaseAddress, StoredAddress};
 use crate::edit::{
     AppendBuilder, AppendGeometry, AppendTarget, EditBacking, MemoryStrategy, SpaceAccounting,

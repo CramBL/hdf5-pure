@@ -100,44 +100,24 @@ impl BaseAddressExt for BaseAddress {
     }
 }
 
-/// An address stored in file metadata relative to the file base.
+/// An HDF5 metadata address relative to the file's address base.
 ///
-/// The caller adds the superblock's base address to obtain an absolute byte
-/// position. A parser reading bytes framed at the base uses this value directly.
+/// The numeric value returned by [`get`](Self::get) is the encoded address. The reader adds the
+/// opened image's effective base when locating metadata in a physical source. A stored address may
+/// contain the undefined address, which [`is_undefined`](Self::is_undefined) recognizes
+/// at the file's offset width.
+///
+/// File addresses are defined in "Format Signature and Superblock" of the [format specification,
+/// version 4.0][spec].
+///
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsec_fmt4_boot_super
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct StoredAddress(u64);
 
 impl StoredAddress {
-    /// Creates a stored address from a base-relative value.
-    pub const fn new(stored: u64) -> Self {
-        Self(stored)
-    }
-
-    /// Creates the undefined address of a file whose addresses are `offset_size` bytes wide, the
-    /// value [`is_undefined`](Self::is_undefined) recognizes at that width.
-    ///
-    /// An `offset_size` other than 2, 4, or 8 gives `u64::MAX`, for which
-    /// [`is_undefined`](Self::is_undefined) returns `false` at that width.
-    pub const fn undefined(offset_size: u8) -> Self {
-        Self(match offset_size {
-            2 => 0xFFFF,
-            4 => 0xFFFF_FFFF,
-            _ => 0xFFFF_FFFF_FFFF_FFFF,
-        })
-    }
-
-    /// Returns the address as a plain integer.
+    /// Returns the encoded base-relative value.
     pub const fn get(self) -> u64 {
         self.0
-    }
-
-    /// Returns the address `delta` bytes past this one.
-    ///
-    /// # Panics
-    ///
-    /// Panics in debug builds if the sum exceeds `u64::MAX`.
-    pub const fn offset(self, delta: u64) -> Self {
-        Self(self.0 + delta)
     }
 
     /// Returns `true` if this is the undefined address of a file whose addresses are
@@ -160,6 +140,56 @@ impl StoredAddress {
             8 => self.0 == u64::MAX,
             _ => false,
         }
+    }
+}
+
+/// The constructors and address arithmetic shared by the workspace crates.
+///
+/// The trait's items are outside the supported API of [`StoredAddress`]. The workspace crates
+/// import the trait from the hidden `__private` module.
+pub trait StoredAddressExt {
+    /// The stored address at the file's address base.
+    const ZERO: Self;
+
+    /// The undefined address for an 8-byte address field.
+    const UNDEFINED_64: Self;
+
+    /// Creates a stored address from an encoded base-relative value.
+    fn new(stored: u64) -> Self;
+
+    /// Creates the undefined address for an `offset_size`-byte address field.
+    ///
+    /// Uses [`u64::MAX`] as the stored value for an `offset_size` other than 2, 4, or 8. At those widths,
+    /// [`StoredAddress::is_undefined`] returns `false`.
+    fn undefined(offset_size: u8) -> Self;
+
+    /// Returns the address `delta` bytes past this one.
+    ///
+    /// # Panics
+    ///
+    /// Panics in debug builds if the sum exceeds [`u64::MAX`].
+    fn offset(self, delta: u64) -> Self;
+}
+
+#[doc(hidden)]
+impl StoredAddressExt for StoredAddress {
+    const ZERO: Self = Self(0);
+    const UNDEFINED_64: Self = Self(u64::MAX);
+
+    fn new(stored: u64) -> Self {
+        Self(stored)
+    }
+
+    fn undefined(offset_size: u8) -> Self {
+        Self(match offset_size {
+            2 => 0xFFFF,
+            4 => 0xFFFF_FFFF,
+            _ => 0xFFFF_FFFF_FFFF_FFFF,
+        })
+    }
+
+    fn offset(self, delta: u64) -> Self {
+        Self(self.0 + delta)
     }
 }
 

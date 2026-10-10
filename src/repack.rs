@@ -117,6 +117,7 @@ use std::sync::Arc;
 use crate::access_mode::AccessMode;
 use crate::address::BaseAddressExt;
 use crate::address::StoredAddress;
+use crate::address::StoredAddressExt;
 use crate::attribute::AttributeMessage;
 use crate::chunked_read::ChunkInfo;
 use crate::chunked_write::{ChunkMeta, ChunkProvider, FilterKind, FilterSpec};
@@ -1906,6 +1907,7 @@ mod tests {
     use super::*;
     use crate::DatatypeByteOrder;
     use crate::address::StoredAddress;
+    use crate::address::StoredAddressExt;
     use crate::data_layout::{ChunkIndexLayout, ChunkedLayoutFlags};
     use crate::filter_pipeline::FilterDescription;
     use crate::scaleoffset::{FillAvailability, ScaleOffsetFill};

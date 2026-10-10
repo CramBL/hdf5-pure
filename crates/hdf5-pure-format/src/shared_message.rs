@@ -8,6 +8,7 @@
 use alloc::vec::Vec;
 
 use crate::address::StoredAddress;
+use crate::address::StoredAddressExt;
 use crate::bytes;
 use crate::bytes::{ensure_len, read_offset};
 use crate::error::FormatError;

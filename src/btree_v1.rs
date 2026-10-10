@@ -5,6 +5,8 @@ use alloc::vec::Vec;
 
 use hdf5_pure_format::__private::BTreeV1Node;
 
+#[cfg(test)]
+use crate::address::StoredAddressExt;
 use crate::address::{AddressContext, StoredAddress};
 #[cfg(test)]
 use crate::address::{BaseAddress, BaseAddressExt};

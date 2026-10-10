@@ -1,8 +1,9 @@
 //! Address interpretation for an opened HDF5 image.
 
 pub(crate) use hdf5_pure_core::__private::BaseAddressExt;
-pub(crate) use hdf5_pure_core::__private::StoredAddress;
+pub(crate) use hdf5_pure_core::__private::StoredAddressExt;
 pub use hdf5_pure_core::BaseAddress;
+pub use hdf5_pure_core::StoredAddress;
 
 use crate::error::FormatError;
 

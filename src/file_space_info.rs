@@ -11,6 +11,7 @@ pub(crate) use hdf5_pure_format::__private::DEFAULT_THRESHOLD;
 pub(crate) use hdf5_pure_format::__private::NUM_FILE_FSM_MANAGERS;
 
 use crate::address::StoredAddress;
+use crate::address::StoredAddressExt;
 use crate::width::OffsetWidth;
 
 /// The settings of the free-space managers of a strategy that has them.

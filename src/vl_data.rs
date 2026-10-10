@@ -8,6 +8,7 @@
 use alloc::{format, string::String, vec::Vec};
 
 use crate::address::BaseAddressExt;
+use crate::address::StoredAddressExt;
 use crate::address::{BaseAddress, StoredAddress};
 use crate::bytes::read_offset;
 use crate::convert::{Narrow, is_undefined_addr};

@@ -6,6 +6,7 @@ use core::ops::Range;
 use alloc::vec::Vec;
 
 use crate::address::StoredAddress;
+use crate::address::StoredAddressExt;
 use crate::bytes;
 use crate::convert::Narrow;
 use crate::error::FormatError;
