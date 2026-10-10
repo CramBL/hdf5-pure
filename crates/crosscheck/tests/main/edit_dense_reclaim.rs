@@ -1,9 +1,9 @@
 #![cfg(feature = "__hdf5-1.10")]
-//! Interoperability tests for dense-storage reclamation.
+//! Interoperability tests for the reclamation of dense attribute and dense link storage.
 //!
-//! Dense attribute and dense group version 2 B-tree indexes become reusable when their owner
-//! dies. Their fractal heaps stay allocated. These cases also cover surviving group hard links
-//! and persistent FSM/PAGE files accepted by libhdf5.
+//! libhdf5 writes each file, [`File::open_rw`] edits it, and libhdf5 reads the result. The cases
+//! cover the version 2 B-tree indexes and the fractal heap of a dead dense set, a hard link that
+//! keeps a dense set alive, and files that persist their free space with and without pages.
 
 use std::path::Path;
 
@@ -11,10 +11,26 @@ use hdf5::file::LibraryVersion;
 use hdf5::plist::file_create::FileSpaceStrategy as CStrategy;
 use hdf5::plist::group_create::{GroupCreate, GroupCreateBuilder};
 use hdf5::{IndexType, IterationOrder};
-use hdf5_pure::{Error, File, FormatError};
+use hdf5_pure::AttrValue;
+use hdf5_pure::Error;
+use hdf5_pure::File;
+use hdf5_pure::FormatError;
+use hdf5_pure::MessageType;
+use hdf5_pure_core::__private::StoredAddressExt;
+use hdf5_pure_core::StoredAddress;
+use hdf5_pure_format::__private::AccessMode;
+use hdf5_pure_format::__private::AttributeInfoMessage;
 use hdf5_pure_format::__private::FormatWidths;
+use hdf5_pure_format::__private::FractalHeapHeader;
 use hdf5_pure_format::__private::FreeSpaceManagerHeader;
+use hdf5_pure_format::__private::LinkInfoMessage;
+use hdf5_pure_format::__private::LinkMessage;
+use hdf5_pure_format::__private::LinkTarget;
+use hdf5_pure_format::__private::ObjectHeader;
+use rstest::rstest;
 use tempfile::tempdir;
+use test_util::btree_v2;
+use test_util::fractal_heap;
 use test_util::range;
 use test_util_hdf5::absence;
 use test_util_hdf5::creation_order::{self, Indexing};
@@ -310,6 +326,15 @@ fn c_library_accepts_reclaimed_dense_group_indexes() {
             heap_headers.len() >= 2,
             "the parent and nested group must both use dense storage"
         );
+        let bytes = std::fs::read(&path).unwrap();
+        for &heap in &heap_headers {
+            assert_eq!(
+                hdf5_pure::__fractal_heap_storage_extents(&bytes, heap, 8, 8),
+                Err(String::from(
+                    "UnsupportedOwnership(\"managed-space free-space manager metadata\")"
+                ))
+            );
+        }
         let free_before = persistent_free(&path);
 
         {
@@ -440,8 +465,295 @@ fn a_surviving_dense_group_hard_link_keeps_its_indexes_live() {
     );
 }
 
+struct DenseNames {
+    links: Vec<String>,
+    attributes: Vec<String>,
+}
+
+impl DenseNames {
+    fn new() -> Self {
+        Self {
+            links: (0..10)
+                .map(|i| format!("link_{i:02}_{}", "x".repeat(20)))
+                .collect(),
+            attributes: (0..10)
+                .map(|i| format!("attr_{i:02}_{}", "x".repeat(40)))
+                .collect(),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum FileSpace {
+    Managers,
+    ManagersAfterUserblock,
+    Pages(u64),
+}
+
+impl FileSpace {
+    fn page_size(self) -> Option<u64> {
+        match self {
+            Self::Managers | Self::ManagersAfterUserblock => None,
+            Self::Pages(page_size) => Some(page_size),
+        }
+    }
+}
+
+fn huge_name(prefix: &str, i: usize) -> String {
+    format!("{prefix}{i}_{}", "z".repeat(5000))
+}
+
+fn create_dense_file(path: &Path, file_space: FileSpace) -> hdf5::File {
+    hdf5::File::with_options()
+        .with_fapl(|p| p.libver_bounds(LibraryVersion::V110, LibraryVersion::latest()))
+        .with_fcpl(|p| match file_space {
+            FileSpace::Managers | FileSpace::ManagersAfterUserblock => {
+                if file_space == FileSpace::ManagersAfterUserblock {
+                    p.userblock(USERBLOCK);
+                }
+                p.file_space_strategy(CStrategy::FreeSpaceManager {
+                    paged: false,
+                    persist: true,
+                    threshold: 1,
+                })
+            }
+            FileSpace::Pages(page_size) => p
+                .file_space_strategy(CStrategy::FreeSpaceManager {
+                    paged: true,
+                    persist: true,
+                    threshold: 0,
+                })
+                .file_space_page_size(page_size),
+        })
+        .create(path)
+        .unwrap_or_else(|e| panic!("create {}: {e}", path.display()))
+}
+
+fn add_dense_objects(file: &hdf5::File, names: &DenseNames, huge_objects: usize) {
+    let group = file.create_group("g").expect("create dense group");
+    for (i, link_name) in (0i32..).zip(&names.links) {
+        group
+            .new_dataset::<i32>()
+            .shape([1])
+            .create(link_name.as_str())
+            .unwrap_or_else(|e| panic!("create dense-group child {link_name}: {e}"))
+            .write(&[i])
+            .unwrap_or_else(|e| panic!("write dense-group child {link_name}: {e}"));
+    }
+    for i in 0..huge_objects {
+        group
+            .new_dataset::<i32>()
+            .shape([1])
+            .create(huge_name("huge_link_", i).as_str())
+            .unwrap_or_else(|e| panic!("create huge link {i}: {e}"));
+    }
+    add_dense_attributes(&group, names, huge_objects);
+    add_dense_attribute_dataset(file, names, huge_objects);
+}
+
+fn add_dense_attribute_dataset(file: &hdf5::File, names: &DenseNames, huge_objects: usize) {
+    let dataset = file
+        .new_dataset::<i32>()
+        .shape([4])
+        .create("d")
+        .expect("create dataset with dense attributes");
+    add_dense_attributes(&dataset, names, huge_objects);
+}
+
+fn add_dense_attributes(owner: &hdf5::Location, names: &DenseNames, huge_objects: usize) {
+    for (i, attr_name) in (0i64..).zip(&names.attributes) {
+        owner
+            .new_attr::<i64>()
+            .shape(())
+            .create(attr_name.as_str())
+            .unwrap_or_else(|e| panic!("create attribute {attr_name}: {e}"))
+            .write_scalar(&i)
+            .unwrap_or_else(|e| panic!("write attribute {attr_name}: {e}"));
+    }
+    for i in 0..huge_objects {
+        owner
+            .new_attr::<i64>()
+            .shape(())
+            .create(huge_name("huge_attr_", i).as_str())
+            .unwrap_or_else(|e| panic!("create huge attribute {i}: {e}"))
+            .write_scalar(&0)
+            .unwrap_or_else(|e| panic!("write huge attribute {i}: {e}"));
+    }
+}
+
+// libhdf5 deletes the managed free-space manager of a heap that closes with no free section
+// (`H5HF__space_close` in `H5HFspace.c`, 2.2.0), so a heap whose managed objects fill its root
+// direct block exactly has none.
+fn exactly_filling_names(dir: &Path, huge_objects: usize) -> DenseNames {
+    let probe = dir.join("dense_probe.h5");
+    let file = create_dense_file(&probe, FileSpace::Managers);
+    add_dense_objects(&file, &DenseNames::new(), huge_objects);
+    file.close().unwrap();
+    let heaps = dense_heaps(&probe);
+    let free_space = |start_block_size: u64| {
+        let mut free: Vec<u64> = heaps
+            .iter()
+            .filter(|heap| heap.header.starting_block_size == start_block_size)
+            .map(|heap| heap.header.free_space_in_managed_blocks)
+            .collect();
+        free.dedup();
+        assert_eq!(free.len(), 1, "{start_block_size}-byte heaps: {free:?}");
+        usize::try_from(free[0]).unwrap()
+    };
+    let mut names = DenseNames::new();
+    let link_free = free_space(LINK_HEAP_START_BLOCK_SIZE);
+    let attribute_free = free_space(ATTRIBUTE_HEAP_START_BLOCK_SIZE);
+    names
+        .links
+        .last_mut()
+        .unwrap()
+        .push_str(&"y".repeat(link_free));
+    names
+        .attributes
+        .last_mut()
+        .unwrap()
+        .push_str(&"y".repeat(attribute_free));
+    names
+}
+
+fn write_dense_fixture(
+    path: &Path,
+    file_space: FileSpace,
+    names: &DenseNames,
+    huge_objects: usize,
+    alias: bool,
+) {
+    let file = create_dense_file(path, file_space);
+    add_dense_objects(&file, names, huge_objects);
+    if alias {
+        file.link_hard("/g", "/alias").unwrap();
+    }
+    file.new_dataset::<i32>()
+        .shape([4])
+        .create("keep")
+        .unwrap()
+        .write(&[1, 2, 3, 4])
+        .unwrap();
+    file.close().unwrap();
+}
+
+fn framed_bytes(path: &Path) -> Vec<u8> {
+    let base = File::open(path).unwrap().superblock().base_address.get();
+    let mut bytes = std::fs::read(path).unwrap();
+    bytes.drain(..usize::try_from(base).unwrap());
+    bytes
+}
+
+struct DenseHeap {
+    owner: String,
+    address: u64,
+    header: FractalHeapHeader,
+}
+
+fn dense_heaps(path: &Path) -> Vec<DenseHeap> {
+    let bytes = framed_bytes(path);
+    let object_header = |addr: u64| {
+        ObjectHeader::parse(
+            &bytes,
+            AccessMode::ReadOnly,
+            usize::try_from(addr).unwrap(),
+            8,
+            8,
+        )
+        .unwrap()
+    };
+    let file = File::open(path).unwrap();
+    let root = object_header(file.superblock().root_group_address.get());
+    let mut heaps: Vec<DenseHeap> = root
+        .messages
+        .iter()
+        .filter(|message| message.msg_type == MessageType::LINK)
+        .map(|message| LinkMessage::parse(&message.data, 8).unwrap())
+        .filter_map(|link| match link.link_target {
+            LinkTarget::Hard {
+                object_header_address,
+            } => Some((link.name, object_header_address.get())),
+            LinkTarget::Soft { .. } | LinkTarget::External { .. } => None,
+        })
+        .flat_map(|(owner, address)| {
+            object_header(address)
+                .messages
+                .into_iter()
+                .map(move |message| (owner.clone(), message))
+        })
+        .filter_map(|(owner, message)| match message.msg_type {
+            MessageType::LINK_INFO => LinkInfoMessage::parse(&message.data, 8)
+                .unwrap()
+                .fractal_heap_address
+                .map(|address| (owner, address)),
+            MessageType::ATTRIBUTE_INFO => AttributeInfoMessage::parse(&message.data, 8)
+                .unwrap()
+                .fractal_heap_address
+                .map(|address| (owner, address)),
+            _ => None,
+        })
+        .map(|(owner, address)| DenseHeap {
+            owner,
+            address: address.get(),
+            header: FractalHeapHeader::parse(&bytes, usize::try_from(address.get()).unwrap(), 8, 8)
+                .unwrap(),
+        })
+        .collect();
+    heaps.sort_unstable_by_key(|heap| heap.address);
+    heaps.dedup_by_key(|heap| heap.address);
+    heaps
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PageClass {
+    Metadata,
+    RawData,
+}
+
+fn heap_allocations(
+    path: &Path,
+    huge_objects: usize,
+    heaps: impl IntoIterator<Item = DenseHeap>,
+) -> Vec<(u64, u64, PageClass)> {
+    let bytes = framed_bytes(path);
+    heaps
+        .into_iter()
+        .flat_map(|heap| {
+            assert_eq!(
+                (
+                    heap.header.free_space_in_managed_blocks,
+                    heap.header
+                        .managed_block_free_space_manager_address
+                        .is_undefined(8),
+                    heap.header.huge_objects_count,
+                ),
+                (0, true, u64::try_from(huge_objects).unwrap())
+            );
+            hdf5_pure::__fractal_heap_storage_extents(&bytes, heap.address, 8, 8).unwrap()
+        })
+        .map(|(addr, len)| {
+            let at = usize::try_from(addr).unwrap();
+            let class = if HEAP_METADATA_SIGNATURES
+                .iter()
+                .any(|signature| &bytes[at..at + 4] == *signature)
+            {
+                PageClass::Metadata
+            } else {
+                PageClass::RawData
+            };
+            (addr, len, class)
+        })
+        .collect()
+}
+
+fn owned_heap_allocations(path: &Path, huge_objects: usize) -> Vec<(u64, u64, PageClass)> {
+    let heaps = dense_heaps(path);
+    assert_eq!(heaps.len(), 3, "the fixture holds three dense heaps");
+    heap_allocations(path, huge_objects, heaps)
+}
+
 fn free_space_manager_blocks(path: &Path) -> Vec<(u64, u64)> {
-    let bytes = std::fs::read(path).unwrap();
+    let bytes = framed_bytes(path);
     let widths = FormatWidths::from_sizes(8, 8).unwrap();
     File::open(path)
         .unwrap()
@@ -467,9 +779,354 @@ fn free_space_manager_blocks(path: &Path) -> Vec<(u64, u64)> {
 }
 
 fn released_regions(path: &Path) -> Vec<(u64, u64)> {
-    let file_len = std::fs::metadata(path).unwrap().len();
+    let file_len = u64::try_from(framed_bytes(path).len()).unwrap();
     let mut released = persistent_free(path);
     released.extend(free_space_manager_blocks(path));
     released.push((file_len, u64::MAX - file_len));
     released
 }
+
+fn assert_released(
+    page_size: Option<u64>,
+    released: &[(u64, u64)],
+    allocations: &[(u64, u64, PageClass)],
+) {
+    for &(addr, len, _) in allocations {
+        let reclaimed = match page_size {
+            Some(page_size) if is_page_aligned_large(page_size, addr, len) => {
+                addr..addr + len / page_size * page_size
+            }
+            _ => addr..addr + len,
+        };
+        assert_eq!(
+            range::covered_len(released, &reclaimed),
+            reclaimed.end - reclaimed.start,
+            "the heap allocation ({addr}, {len}) must be reclaimed over {reclaimed:?}"
+        );
+    }
+}
+
+// An allocation libhdf5 makes through the generic large manager is a page or more and begins on a
+// page boundary (`H5MF__alloc_to_fs_type` and `H5MF__alloc_pagefs`, `H5MF.c`, libhdf5 2.2.0).
+fn is_page_aligned_large(page_size: u64, addr: u64, len: u64) -> bool {
+    len >= page_size && addr % page_size == 0
+}
+
+fn manager_sections(path: &Path, manager: usize) -> Vec<(u64, u64)> {
+    let bytes = framed_bytes(path);
+    let widths = FormatWidths::from_sizes(8, 8).unwrap();
+    let addr = File::open(path)
+        .unwrap()
+        .file_space_info()
+        .unwrap()
+        .manager_addrs[manager];
+    if hdf5_pure_format::__private::is_undefined_addr(addr, 8) {
+        return Vec::new();
+    }
+    let header =
+        FreeSpaceManagerHeader::parse(widths, &bytes[usize::try_from(addr).unwrap()..]).unwrap();
+    if header.section_list_addr().is_undefined(8) {
+        return Vec::new();
+    }
+    let at = usize::try_from(header.section_list_addr().get()).unwrap();
+    hdf5_pure_format::__private::parse_section_info(
+        widths,
+        &bytes[at..],
+        StoredAddress::new(addr),
+        &header,
+    )
+    .unwrap()
+    .into_iter()
+    .map(|section| (section.addr.get(), section.size))
+    .collect()
+}
+
+fn assert_page_classes(path: &Path, page_size: u64, allocations: &[(u64, u64, PageClass)]) {
+    let metadata = manager_sections(path, SMALL_METADATA_MANAGER);
+    let raw_data = manager_sections(path, SMALL_RAW_MANAGER);
+    for &(addr, len, class) in allocations {
+        let excluded: &[(&str, &[(u64, u64)])] = if is_page_aligned_large(page_size, addr, len) {
+            &[("metadata", &metadata), ("raw-data", &raw_data)]
+        } else {
+            match class {
+                PageClass::Metadata => &[("raw-data", &raw_data)],
+                PageClass::RawData => &[("metadata", &metadata)],
+            }
+        };
+        for &(manager, sections) in excluded {
+            assert_eq!(
+                range::covered_len(sections, &(addr..addr + len)),
+                0,
+                "the {class:?} heap allocation ({addr}, {len}) must not return to the small \
+                 {manager} manager"
+            );
+        }
+    }
+}
+
+fn assert_c_reads_after_reclaim(path: &Path) {
+    let c = hdf5::File::open(path).unwrap();
+    absence::assert_libhdf5_absent(&c.group("g").unwrap_err(), "g");
+    absence::assert_libhdf5_absent(&c.dataset("d").unwrap_err(), "d");
+    assert_eq!(
+        c.dataset("keep").unwrap().read_raw::<i32>().unwrap(),
+        vec![1, 2, 3, 4]
+    );
+    assert_eq!(c.free_space(), free_bytes(&persistent_free(path)));
+}
+
+#[rstest]
+fn c_written_dense_heaps_are_reclaimed_with_their_owners(
+    #[values(0, 2)] huge_objects: usize,
+    #[values(
+        FileSpace::Managers,
+        FileSpace::ManagersAfterUserblock,
+        FileSpace::Pages(DENSE_PAGE_SIZE),
+        FileSpace::Pages(SMALL_PAGE_SIZE)
+    )]
+    file_space: FileSpace,
+) {
+    let dir = tempdir().unwrap();
+    let names = exactly_filling_names(dir.path(), huge_objects);
+    let path = dir.path().join("dense_heap_reclaim.h5");
+    write_dense_fixture(&path, file_space, &names, huge_objects, false);
+    let allocations = owned_heap_allocations(&path, huge_objects);
+    if file_space == FileSpace::Pages(SMALL_PAGE_SIZE) {
+        assert!(
+            allocations
+                .iter()
+                .any(|&(addr, len, _)| is_page_aligned_large(SMALL_PAGE_SIZE, addr, len)),
+            "the fixture holds a heap allocation of a page or more: {allocations:?}"
+        );
+    }
+    assert_eq!(
+        allocations
+            .iter()
+            .filter(|&&(_, _, class)| class == PageClass::RawData)
+            .count(),
+        3 * huge_objects
+    );
+
+    let session = File::open_rw(&path).unwrap();
+    session.root().delete("g").unwrap();
+    session.root().delete("d").unwrap();
+    session.commit().unwrap();
+    let released = match file_space {
+        FileSpace::Managers | FileSpace::Pages(_) => {
+            drop(session);
+            released_regions(&path)
+        }
+        FileSpace::ManagersAfterUserblock => {
+            let released = session
+                .space_accounting()
+                .unwrap()
+                .reusable_free_space
+                .into_iter()
+                .map(|(addr, len)| (addr - USERBLOCK, len))
+                .collect();
+            drop(session);
+            released
+        }
+    };
+
+    assert_released(file_space.page_size(), &released, &allocations);
+    if let Some(page_size) = file_space.page_size() {
+        assert_page_classes(&path, page_size, &allocations);
+    }
+    assert_c_reads_after_reclaim(&path);
+}
+
+#[rstest]
+fn rewriting_a_c_written_dense_attribute_set_reclaims_its_old_heap(
+    #[values("a", "d")] owner: &str,
+    #[values(FileSpace::Managers, FileSpace::Pages(DENSE_PAGE_SIZE))] file_space: FileSpace,
+) {
+    let dir = tempdir().unwrap();
+    let names = exactly_filling_names(dir.path(), 1);
+    let path = dir.path().join("dense_attribute_rewrite.h5");
+    {
+        let file = create_dense_file(&path, file_space);
+        let group = file
+            .create_group("a")
+            .expect("create group with dense attributes");
+        add_dense_attributes(&group, &names, 1);
+        add_dense_attribute_dataset(&file, &names, 1);
+        file.close().unwrap();
+    }
+    let old = heap_allocations(
+        &path,
+        1,
+        dense_heaps(&path)
+            .into_iter()
+            .filter(|heap| heap.owner == owner),
+    );
+    assert_eq!(
+        old.iter()
+            .filter(|&&(_, _, class)| class == PageClass::RawData)
+            .count(),
+        1
+    );
+
+    {
+        let session = File::open_rw(&path).unwrap();
+        if owner == "a" {
+            session
+                .group("a")
+                .unwrap()
+                .set_attr(&names.attributes[0], AttrValue::I64(99))
+                .unwrap();
+        } else {
+            session
+                .dataset("d")
+                .unwrap()
+                .set_attr(&names.attributes[0], AttrValue::I64(99))
+                .unwrap();
+        }
+        session.commit().unwrap();
+    }
+
+    assert_released(file_space.page_size(), &released_regions(&path), &old);
+    if let Some(page_size) = file_space.page_size() {
+        assert_page_classes(&path, page_size, &old);
+    }
+    let c = hdf5::File::open(&path).unwrap();
+    let location: hdf5::Location = if owner == "a" {
+        (*c.group("a").unwrap()).clone()
+    } else {
+        (**c.dataset("d").unwrap()).clone()
+    };
+    let mut attr_names = location.attr_names().unwrap();
+    attr_names.sort();
+    let mut expected: Vec<String> = names
+        .attributes
+        .iter()
+        .cloned()
+        .chain([huge_name("huge_attr_", 0)])
+        .collect();
+    expected.sort();
+    assert_eq!(attr_names, expected);
+    let values: Vec<i64> = names
+        .attributes
+        .iter()
+        .map(|attr_name| {
+            location
+                .attr(attr_name)
+                .unwrap()
+                .read_scalar::<i64>()
+                .unwrap()
+        })
+        .collect();
+    assert_eq!(values, [99, 1, 2, 3, 4, 5, 6, 7, 8, 9]);
+    assert_eq!(c.free_space(), free_bytes(&persistent_free(&path)));
+}
+
+#[test]
+fn a_surviving_hard_link_keeps_a_dense_heap_live() {
+    let dir = tempdir().unwrap();
+    let names = exactly_filling_names(dir.path(), 1);
+    let path = dir.path().join("dense_heap_surviving_alias.h5");
+    write_dense_fixture(&path, FileSpace::Managers, &names, 1, true);
+    let allocations = owned_heap_allocations(&path, 1);
+
+    {
+        let session = File::open_rw(&path).unwrap();
+        session.root().delete("g").unwrap();
+        session.commit().unwrap();
+    }
+    let free = persistent_free(&path);
+    for &(addr, len, _) in &allocations {
+        assert!(
+            !overlaps_free(&free, addr, len),
+            "a surviving hard link keeps the heap allocation ({addr}, {len}) live"
+        );
+    }
+    assert_eq!(
+        File::open(&path)
+            .unwrap()
+            .dataset(&format!("alias/{}", names.links[0]))
+            .unwrap()
+            .read_i32()
+            .unwrap(),
+        vec![0]
+    );
+
+    {
+        let session = File::open_rw(&path).unwrap();
+        session.root().delete("alias").unwrap();
+        session.root().delete("d").unwrap();
+        session.commit().unwrap();
+    }
+    assert_released(None, &released_regions(&path), &allocations);
+    assert_c_reads_after_reclaim(&path);
+}
+
+// libhdf5 1.10.11 allocates the persisted free-space managers of a paged file from the end of the
+// file at every close (`H5MF_settle_meta_data_fsm` in `H5MF.c`), and the rest of their pages stays
+// untracked, so each of its sessions grows the file.
+#[cfg(feature = "__hdf5-1.12")]
+#[test]
+fn repeated_dense_storage_create_and_delete_on_a_paged_file_settles_at_a_steady_size() {
+    let dir = tempdir().unwrap();
+    let names = exactly_filling_names(dir.path(), 1);
+    let path = dir.path().join("dense_churn.h5");
+    {
+        let file = create_dense_file(&path, FileSpace::Pages(DENSE_PAGE_SIZE));
+        file.new_dataset::<i32>()
+            .shape([4])
+            .create("keep")
+            .unwrap()
+            .write(&[1, 2, 3, 4])
+            .unwrap();
+        file.close().unwrap();
+    }
+
+    let sizes: Vec<(u64, u64)> = (0..8)
+        .map(|_| {
+            {
+                let file = hdf5::File::open_rw(&path).unwrap();
+                add_dense_objects(&file, &names, 1);
+                file.close().unwrap();
+            }
+            let written = std::fs::metadata(&path).unwrap().len();
+            let allocations = owned_heap_allocations(&path, 1);
+            {
+                let session = File::open_rw(&path).unwrap();
+                session.root().delete("g").unwrap();
+                session.root().delete("d").unwrap();
+                session.commit().unwrap();
+            }
+            assert_released(
+                Some(DENSE_PAGE_SIZE),
+                &released_regions(&path),
+                &allocations,
+            );
+            assert_page_classes(&path, DENSE_PAGE_SIZE, &allocations);
+            (written, std::fs::metadata(&path).unwrap().len())
+        })
+        .collect();
+
+    assert_eq!(sizes, vec![sizes[0]; sizes.len()]);
+    assert_c_reads_after_reclaim(&path);
+}
+
+const DENSE_PAGE_SIZE: u64 = 16 * 1024;
+// `H5F_FILE_SPACE_PAGE_SIZE_MIN` in `H5Fprivate.h`, libhdf5 2.2.0.
+const SMALL_PAGE_SIZE: u64 = 512;
+const USERBLOCK: u64 = 512;
+// `H5G_FHEAP_MAN_START_BLOCK_SIZE` in `H5Gdense.c` and `H5O_FHEAP_MAN_START_BLOCK_SIZE` in
+// `H5Oprivate.h`, libhdf5 2.2.0.
+const LINK_HEAP_START_BLOCK_SIZE: u64 = 512;
+const ATTRIBUTE_HEAP_START_BLOCK_SIZE: u64 = 1024;
+const HEAP_METADATA_SIGNATURES: [&[u8; 4]; 6] = [
+    fractal_heap::SIGNATURE,
+    fractal_heap::DIRECT_BLOCK_SIGNATURE,
+    fractal_heap::INDIRECT_BLOCK_SIGNATURE,
+    btree_v2::SIGNATURE,
+    btree_v2::INTERNAL_SIGNATURE,
+    btree_v2::LEAF_SIGNATURE,
+];
+// The small-sized managers for `H5FD_MEM_SUPER` and `H5FD_MEM_DRAW`, first and third in a version
+// 1 File Space Info message, defined in "The File Space Info Message" of the format
+// specification, version 4.0.
+const SMALL_METADATA_MANAGER: usize = 0;
+const SMALL_RAW_MANAGER: usize = 2;

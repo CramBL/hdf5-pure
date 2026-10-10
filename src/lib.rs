@@ -585,9 +585,9 @@ pub fn __fractal_heap_storage_extents(
     )
     .map_err(|error| alloc::format!("{error:?}"))?;
     Ok(storage
-        .extents()
+        .allocations()
         .iter()
-        .map(|extent| (extent.start(), extent.len()))
+        .map(|(extent, _)| (extent.start(), extent.len()))
         .collect())
 }
 

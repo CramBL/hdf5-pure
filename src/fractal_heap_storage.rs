@@ -18,6 +18,7 @@ use hdf5_pure_format::__private::HugeObjectDirectRecord;
 use hdf5_pure_format::__private::HugeObjectRecord;
 
 use hdf5_pure_space::__private::Extent;
+use hdf5_pure_space::__private::PageType;
 
 use crate::address::StoredAddress;
 use crate::address::StoredAddressExt;
@@ -59,31 +60,62 @@ impl From<FractalHeapLayoutError> for FractalHeapStorageError {
 ///
 /// The set contains the `FRHP` header, every allocated managed direct and indirect block, the
 /// huge-object version 2 B-tree when present, and every separately allocated huge-object payload.
-/// Tiny objects are stored entirely in heap IDs, so the extent set omits them.
+/// Tiny objects are stored entirely in heap IDs, so the set omits them.
 ///
 /// The walker returns this type only after it has accounted for every supported allocation and
-/// proven the returned extents pairwise disjoint. Unsupported heap features prevent construction.
+/// proven the allocations pairwise disjoint. Unsupported heap features prevent construction.
 /// The allocation classes are defined in "Fractal Heap" of the [format specification, version
 /// 4.0][spec].
 ///
 /// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsec_fmt4_infra_fractalheap
-#[allow(
-    dead_code,
-    reason = "crate-private ownership infrastructure is exercised by tests and crosschecks"
-)]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct FractalHeapStorage {
-    extents: Vec<Extent>,
+    allocations: Vec<(Extent, FractalHeapAllocation)>,
 }
 
-#[allow(
-    dead_code,
-    reason = "crate-private ownership infrastructure is exercised by tests and crosschecks"
-)]
 impl FractalHeapStorage {
-    /// Returns the proven owned allocations in file-address order.
-    pub(crate) fn extents(&self) -> &[Extent] {
-        &self.extents
+    /// Returns the proven owned allocations, each with its kind, in file-address order.
+    pub(crate) fn allocations(&self) -> &[(Extent, FractalHeapAllocation)] {
+        &self.allocations
+    }
+}
+
+/// The structure a fractal heap allocation holds.
+///
+/// The structures are defined in "Fractal Heap" of the [format specification, version 4.0][spec].
+///
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsec_fmt4_infra_fractalheap
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum FractalHeapAllocation {
+    /// The `FRHP` heap header.
+    Header,
+    /// A managed direct block, `FHDB`.
+    DirectBlock,
+    /// A managed indirect block, `FHIB`.
+    IndirectBlock,
+    /// The header or a node of the version 2 B-tree that indexes the huge objects.
+    HugeObjectIndex,
+    /// The separately allocated payload of a huge object.
+    HugeObject,
+}
+
+impl FractalHeapAllocation {
+    /// Returns the type of the page the C library allocates this structure in on a paged file, for
+    /// a structure smaller than a page.
+    // libhdf5 2.2.0 allocates the header and indirect blocks as `H5FD_MEM_OHDR`, direct blocks
+    // as `H5FD_MEM_LHEAP` and huge objects as `H5FD_MEM_DRAW` (the `H5FD_MEM_FHEAP_*` aliases in
+    // `H5FDdevelop.h`), and the huge-object B-tree as `H5FD_MEM_BTREE` (`H5B2hdr.c`,
+    // `H5B2internal.c`, `H5B2leaf.c`). The sec2 driver's `H5FD_FLMAP_DICHOTOMY` map
+    // (`H5FDsec2.c`) puts an `H5FD_MEM_DRAW` allocation smaller than a page in raw-data pages and
+    // the other types in metadata pages. `H5MF__alloc_to_fs_type` (`H5MF.c`) gives a larger
+    // allocation the generic large-page type.
+    pub(crate) fn page_type(self) -> PageType {
+        match self {
+            Self::Header | Self::DirectBlock | Self::IndirectBlock | Self::HugeObjectIndex => {
+                PageType::Meta
+            }
+            Self::HugeObject => PageType::Raw,
+        }
     }
 }
 
@@ -116,10 +148,6 @@ impl FractalHeapStorage {
 /// lower-level parser errors are wrapped in [`FractalHeapStorageError::Format`].
 ///
 /// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsec_fmt4_infra_fractalheap
-#[allow(
-    dead_code,
-    reason = "crate-private ownership infrastructure is exercised by tests and crosschecks"
-)]
 pub(crate) fn collect_fractal_heap_storage_from_source<S: Source + ?Sized>(
     source: &S,
     heap_header_address: StoredAddress,
@@ -154,11 +182,10 @@ pub(crate) fn collect_fractal_heap_storage_from_source<S: Source + ?Sized>(
         length_width,
     ))
     .map_err(|_conversion_error| FractalHeapStorageError::InvalidStorage)?;
-    let mut extents = vec![extent_in_source(
-        source,
-        heap_header_address.get(),
-        header_len,
-    )?];
+    let mut allocations = vec![(
+        extent_in_source(source, heap_header_address.get(), header_len)?,
+        FractalHeapAllocation::Header,
+    )];
 
     let mut managed = ManagedStorageWalk::new(
         source,
@@ -166,7 +193,7 @@ pub(crate) fn collect_fractal_heap_storage_from_source<S: Source + ?Sized>(
         &layout,
         heap_header_address,
         offset_size,
-        &mut extents,
+        &mut allocations,
     );
     managed.collect()?;
 
@@ -177,17 +204,17 @@ pub(crate) fn collect_fractal_heap_storage_from_source<S: Source + ?Sized>(
         length_size,
         offset_width,
         length_width,
-        &mut extents,
+        &mut allocations,
     )?;
 
-    extents.sort_unstable();
-    if extents
+    allocations.sort_unstable_by_key(|&(extent, _)| extent);
+    if allocations
         .windows(2)
-        .any(|pair| pair[0].end() > pair[1].start())
+        .any(|pair| pair[0].0.end() > pair[1].0.start())
     {
         return Err(FractalHeapStorageError::InvalidStorage);
     }
-    Ok(FractalHeapStorage { extents })
+    Ok(FractalHeapStorage { allocations })
 }
 
 /// Buffered convenience counterpart to [`collect_fractal_heap_storage_from_source`].
@@ -206,10 +233,6 @@ fn collect_fractal_heap_storage(
     )
 }
 
-#[allow(
-    dead_code,
-    reason = "crate-private ownership infrastructure is exercised by tests and crosschecks"
-)]
 #[derive(Clone, Copy)]
 enum ManagedBlock {
     Direct {
@@ -224,10 +247,6 @@ enum ManagedBlock {
     },
 }
 
-#[allow(
-    dead_code,
-    reason = "crate-private ownership infrastructure is exercised by tests and crosschecks"
-)]
 struct ManagedStorageWalk<'a, 'e, S: Source + ?Sized> {
     source: &'a S,
     header: &'a FractalHeapHeader,
@@ -235,14 +254,10 @@ struct ManagedStorageWalk<'a, 'e, S: Source + ?Sized> {
     heap_header_address: StoredAddress,
     offset_size: u8,
     visited: BTreeSet<StoredAddress>,
-    extents: &'e mut Vec<Extent>,
+    allocations: &'e mut Vec<(Extent, FractalHeapAllocation)>,
     allocated_direct_space: u64,
 }
 
-#[allow(
-    dead_code,
-    reason = "crate-private ownership infrastructure is exercised by tests and crosschecks"
-)]
 impl<'a, 'e, S: Source + ?Sized> ManagedStorageWalk<'a, 'e, S> {
     fn new(
         source: &'a S,
@@ -250,7 +265,7 @@ impl<'a, 'e, S: Source + ?Sized> ManagedStorageWalk<'a, 'e, S> {
         layout: &'a FractalHeapLayout,
         heap_header_address: StoredAddress,
         offset_size: u8,
-        extents: &'e mut Vec<Extent>,
+        allocations: &'e mut Vec<(Extent, FractalHeapAllocation)>,
     ) -> Self {
         Self {
             source,
@@ -259,7 +274,7 @@ impl<'a, 'e, S: Source + ?Sized> ManagedStorageWalk<'a, 'e, S> {
             heap_header_address,
             offset_size,
             visited: BTreeSet::new(),
-            extents,
+            allocations,
             allocated_direct_space: 0,
         }
     }
@@ -370,7 +385,8 @@ impl<'a, 'e, S: Source + ?Sized> ManagedStorageWalk<'a, 'e, S> {
             self.offset_size,
             block_offset_size,
         )?;
-        self.extents.push(extent);
+        self.allocations
+            .push((extent, FractalHeapAllocation::DirectBlock));
         self.allocated_direct_space = self
             .allocated_direct_space
             .checked_add(block_size)
@@ -400,7 +416,8 @@ impl<'a, 'e, S: Source + ?Sized> ManagedStorageWalk<'a, 'e, S> {
             block_offset_size,
         )?;
         hdf5_pure_format::__private::verify_trailing(&block)?;
-        self.extents.push(extent);
+        self.allocations
+            .push((extent, FractalHeapAllocation::IndirectBlock));
 
         let width = self.layout.table_width();
         let direct_rows = usize::from(nrows).min(self.layout.direct_rows());
@@ -467,10 +484,6 @@ impl<'a, 'e, S: Source + ?Sized> ManagedStorageWalk<'a, 'e, S> {
     }
 }
 
-#[allow(
-    dead_code,
-    reason = "crate-private ownership infrastructure is exercised by tests and crosschecks"
-)]
 fn validate_managed_block_prefix(
     block: &[u8],
     signature: &[u8; 4],
@@ -507,10 +520,6 @@ fn validate_managed_block_prefix(
 }
 
 #[allow(clippy::too_many_arguments)]
-#[allow(
-    dead_code,
-    reason = "crate-private ownership infrastructure is exercised by tests and crosschecks"
-)]
 fn collect_huge_storage<S: Source + ?Sized>(
     source: &S,
     heap: &FractalHeapHeader,
@@ -518,7 +527,7 @@ fn collect_huge_storage<S: Source + ?Sized>(
     length_size: u8,
     offset_width: OffsetWidth,
     length_width: LengthWidth,
-    extents: &mut Vec<Extent>,
+    allocations: &mut Vec<(Extent, FractalHeapAllocation)>,
 ) -> Result<(), FractalHeapStorageError> {
     let tree_address = heap.btree_huge_objects_address;
     if is_undefined_addr(tree_address.get(), offset_size) {
@@ -564,7 +573,7 @@ fn collect_huge_storage<S: Source + ?Sized>(
     }
 
     let mut payload_bytes = 0u64;
-    let mut payload_extents = Vec::with_capacity(records.len());
+    let mut payloads = Vec::with_capacity(records.len());
     for record in records {
         let (address, length) = if direct {
             let record = record.huge_object_direct(offset_width, length_width)?;
@@ -579,22 +588,25 @@ fn collect_huge_storage<S: Source + ?Sized>(
         payload_bytes = payload_bytes
             .checked_add(length)
             .ok_or(FractalHeapStorageError::InvalidStorage)?;
-        payload_extents.push(extent_in_source(source, address.get(), length)?);
+        payloads.push((
+            extent_in_source(source, address.get(), length)?,
+            FractalHeapAllocation::HugeObject,
+        ));
     }
     if payload_bytes != heap.huge_objects_size {
         return Err(FractalHeapStorageError::InvalidStorage);
     }
 
-    extents.extend(tree_extents);
-    extents.extend(payload_extents);
+    allocations.extend(
+        tree_extents
+            .into_iter()
+            .map(|extent| (extent, FractalHeapAllocation::HugeObjectIndex)),
+    );
+    allocations.extend(payloads);
     Ok(())
 }
 
 /// Returns a checked non-empty extent after proving its whole range lies in `source`.
-#[allow(
-    dead_code,
-    reason = "crate-private ownership infrastructure is exercised by tests and crosschecks"
-)]
 fn extent_in_source<S: Source + ?Sized>(
     source: &S,
     address: u64,
@@ -722,8 +734,12 @@ mod tests {
         block
     }
 
-    fn extent(start: u64, len: u64) -> Extent {
-        Extent::new(start, len).unwrap()
+    fn allocation(
+        start: u64,
+        len: u64,
+        kind: FractalHeapAllocation,
+    ) -> (Extent, FractalHeapAllocation) {
+        (Extent::new(start, len).unwrap(), kind)
     }
 
     fn collect_storage(file: &[u8]) -> Result<FractalHeapStorage, FractalHeapStorageError> {
@@ -748,7 +764,14 @@ mod tests {
 
         let storage = collect_storage(&file).unwrap();
 
-        assert_eq!(storage.extents(), &[extent(STORAGE_HEAP_AT, header_len)]);
+        assert_eq!(
+            storage.allocations(),
+            &[allocation(
+                STORAGE_HEAP_AT,
+                header_len,
+                FractalHeapAllocation::Header
+            )]
+        );
     }
 
     #[test]
@@ -768,7 +791,14 @@ mod tests {
 
         let storage = collect_storage(&file).unwrap();
 
-        assert_eq!(storage.extents(), &[extent(STORAGE_HEAP_AT, header_len)]);
+        assert_eq!(
+            storage.allocations(),
+            &[allocation(
+                STORAGE_HEAP_AT,
+                header_len,
+                FractalHeapAllocation::Header
+            )]
+        );
     }
 
     #[test]
@@ -806,10 +836,10 @@ mod tests {
 
         assert_eq!(buffered, streamed);
         assert_eq!(
-            buffered.extents(),
+            buffered.allocations(),
             &[
-                extent(STORAGE_HEAP_AT, header_len),
-                extent(STORAGE_ROOT_AT, 128),
+                allocation(STORAGE_HEAP_AT, header_len, FractalHeapAllocation::Header),
+                allocation(STORAGE_ROOT_AT, 128, FractalHeapAllocation::DirectBlock),
             ]
         );
     }
@@ -849,30 +879,33 @@ mod tests {
 
         let storage = collect_storage(&file).unwrap();
         let mut expected = vec![
-            extent(
+            allocation(
                 STORAGE_HEAP_AT,
                 u64::try_from(FractalHeapHeader::serialized_size(
                     OffsetWidth::Eight,
                     LengthWidth::Eight,
                 ))
                 .unwrap(),
+                FractalHeapAllocation::Header,
             ),
-            extent(
+            allocation(
                 STORAGE_ROOT_AT,
                 storage_layout(&header).indirect_block_size(6).unwrap(),
+                FractalHeapAllocation::IndirectBlock,
             ),
-            extent(DIRECT_A, 128),
-            extent(
+            allocation(DIRECT_A, 128, FractalHeapAllocation::DirectBlock),
+            allocation(
                 CHILD_INDIRECT,
                 storage_layout(&header)
                     .indirect_block_size(child_rows)
                     .unwrap(),
+                FractalHeapAllocation::IndirectBlock,
             ),
-            extent(DIRECT_B, 128),
+            allocation(DIRECT_B, 128, FractalHeapAllocation::DirectBlock),
         ];
-        expected.sort_unstable();
+        expected.sort_unstable_by_key(|&(extent, _)| extent);
 
-        assert_eq!(storage.extents(), expected);
+        assert_eq!(storage.allocations(), expected);
     }
 
     #[cfg(feature = "checksum")]
@@ -1098,26 +1131,32 @@ mod tests {
         let storage = collect_storage(&file).unwrap();
         let tree_header_len =
             u64::try_from(btree_v2_header_size(OffsetWidth::Eight, LengthWidth::Eight)).unwrap();
+        let node_len = u64::try_from(NODE_SIZE).unwrap();
         let mut expected = vec![
-            extent(
+            allocation(
                 STORAGE_HEAP_AT,
                 u64::try_from(FractalHeapHeader::serialized_size(
                     OffsetWidth::Eight,
                     LengthWidth::Eight,
                 ))
                 .unwrap(),
+                FractalHeapAllocation::Header,
             ),
-            extent(TREE, tree_header_len),
-            extent(ROOT, u64::try_from(NODE_SIZE).unwrap()),
-            extent(LEFT, u64::try_from(NODE_SIZE).unwrap()),
-            extent(RIGHT, u64::try_from(NODE_SIZE).unwrap()),
-            extent(PAYLOAD_A, 31),
-            extent(PAYLOAD_B, 37),
-            extent(PAYLOAD_C, 41),
+            allocation(
+                TREE,
+                tree_header_len,
+                FractalHeapAllocation::HugeObjectIndex,
+            ),
+            allocation(ROOT, node_len, FractalHeapAllocation::HugeObjectIndex),
+            allocation(LEFT, node_len, FractalHeapAllocation::HugeObjectIndex),
+            allocation(RIGHT, node_len, FractalHeapAllocation::HugeObjectIndex),
+            allocation(PAYLOAD_A, 31, FractalHeapAllocation::HugeObject),
+            allocation(PAYLOAD_B, 37, FractalHeapAllocation::HugeObject),
+            allocation(PAYLOAD_C, 41, FractalHeapAllocation::HugeObject),
         ];
-        expected.sort_unstable();
+        expected.sort_unstable_by_key(|&(extent, _)| extent);
 
-        assert_eq!(storage.extents(), expected);
+        assert_eq!(storage.allocations(), expected);
     }
 
     #[test]
@@ -1148,11 +1187,31 @@ mod tests {
 
         let storage = collect_storage(&file).unwrap();
 
-        assert!(storage.extents().contains(&extent(PAYLOAD, 29)));
-        assert!(
-            storage
-                .extents()
-                .contains(&extent(LEAF, u64::try_from(NODE_SIZE).unwrap()))
+        assert_eq!(
+            storage.allocations(),
+            &[
+                allocation(
+                    STORAGE_HEAP_AT,
+                    u64::try_from(FractalHeapHeader::serialized_size(
+                        OffsetWidth::Eight,
+                        LengthWidth::Eight,
+                    ))
+                    .unwrap(),
+                    FractalHeapAllocation::Header,
+                ),
+                allocation(
+                    TREE,
+                    u64::try_from(btree_v2_header_size(OffsetWidth::Eight, LengthWidth::Eight))
+                        .unwrap(),
+                    FractalHeapAllocation::HugeObjectIndex,
+                ),
+                allocation(
+                    LEAF,
+                    u64::try_from(NODE_SIZE).unwrap(),
+                    FractalHeapAllocation::HugeObjectIndex,
+                ),
+                allocation(PAYLOAD, 29, FractalHeapAllocation::HugeObject),
+            ]
         );
     }
 
