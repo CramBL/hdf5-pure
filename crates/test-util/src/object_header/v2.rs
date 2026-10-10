@@ -133,6 +133,38 @@ pub fn message_record(message: &Message, flags: HeaderFlags) -> Vec<u8> {
 /// `msg_type` message, or if `body` is longer than the body it replaces or shorter by less than a
 /// record prefix.
 pub fn replace_message(file: &mut [u8], header_at: usize, msg_type: MessageType, body: &[u8]) {
+    replace_first_record(file, header_at, msg_type, |old| Message {
+        data: body.to_vec(),
+        ..old
+    });
+}
+
+/// Replaces the first `msg_type` record in chunk zero of the version 2 object header at
+/// `header_at` with the record of `replacement`, and recomputes the checksum of the chunk.
+///
+/// The new record has the type, the flags, and the creation order of `replacement`. A Nil message
+/// fills the bytes a shorter record leaves, so the chunk keeps its size.
+///
+/// # Panics
+///
+/// Panics if `header_at` is not the start of a version 2 object header, if chunk zero holds no
+/// `msg_type` message, or if the new record is longer than the record it replaces or shorter by
+/// less than a record prefix.
+pub fn replace_record(
+    file: &mut [u8],
+    header_at: usize,
+    msg_type: MessageType,
+    replacement: Message,
+) {
+    replace_first_record(file, header_at, msg_type, |_| replacement);
+}
+
+fn replace_first_record(
+    file: &mut [u8],
+    header_at: usize,
+    msg_type: MessageType,
+    replace: impl FnOnce(Message) -> Message,
+) {
     assert_eq!(bytes::slice_at(file, header_at, SIGNATURE.len()), SIGNATURE);
     let flags = HeaderFlags(bytes::u8_at(file, header_at + FLAGS_AT));
     let chunk_size_at = header_at + flags.prefix_len();
@@ -150,13 +182,7 @@ pub fn replace_message(file: &mut [u8], header_at: usize, msg_type: MessageType,
         at += flags.record_prefix_len() + message.data.len();
     };
     let record_len = flags.record_prefix_len() + old.data.len();
-    let mut records = message_record(
-        &Message {
-            data: body.to_vec(),
-            ..old
-        },
-        flags,
-    );
+    let mut records = message_record(&replace(old), flags);
     if records.len() < record_len {
         let nil_len = (record_len - records.len())
             .checked_sub(flags.record_prefix_len())

@@ -44,6 +44,15 @@ impl Message {
         Self::new(MessageType::OBJECT_HEADER_CONTINUATION, &pointer)
     }
 
+    /// Returns an Object Header Continuation message that stores the undefined address and a
+    /// length of `length` bytes.
+    pub fn undefined_continuation(length: u64, widths: Widths) -> Self {
+        let mut pointer = Vec::new();
+        bytes::push_undefined_address(&mut pointer, widths.offset);
+        bytes::push_uint(&mut pointer, length, widths.length);
+        Self::new(MessageType::OBJECT_HEADER_CONTINUATION, &pointer)
+    }
+
     pub fn with_flags(mut self, flags: MessageFlags) -> Self {
         self.flags = flags;
         self

@@ -47,6 +47,9 @@ pub enum FormatError {
     ///
     /// Contains the declared message data size.
     InvalidObjectHeaderMessageSize(u16),
+    /// An Object Header Continuation message stores the undefined address, all bits set, as the
+    /// address of its continuation block.
+    UndefinedContinuationAddress,
     /// Unknown message type that is marked as must-understand.
     UnsupportedMessage(u16),
     /// Invalid datatype class.
@@ -615,6 +618,12 @@ impl fmt::Display for FormatError {
                 write!(
                     f,
                     "invalid version 1 object-header message size {size}: size must be a multiple of eight"
+                )
+            }
+            Self::UndefinedContinuationAddress => {
+                write!(
+                    f,
+                    "object header continuation message stores the undefined address"
                 )
             }
             Self::UnsupportedMessage(id) => {
