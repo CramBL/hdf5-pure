@@ -8,7 +8,7 @@ use hdf5_pure::{
 
 use test_util::fractal_heap;
 use test_util::temp;
-use test_util_hdf5::dataset::{Filter, Unlimited};
+use test_util_hdf5::dataset::{self, Filter, Unlimited};
 
 /// Write a starter file with one dataset, returning its path.
 fn write_starter(path: &std::path::Path) {
@@ -2087,83 +2087,30 @@ fn add_zfp_dataset() {
 /// is never reached.
 #[test]
 fn malformed_chunked_requests_are_rejected_without_writing() {
-    // A no-capture configurator per malformed case; `fn` pointers keep the case
-    // table a simple type.
-    type Configure = fn(&mut hdf5_pure::DatasetBuilder);
-    let bad: &[(&str, Configure, &str)] = &[
-        (
-            "auto-chunked empty shape",
-            |b| {
-                b.with_f64_data(&[])
-                    .with_shape(&[0])
-                    .with_maxshape(&[MaxExtent::Unlimited]);
-            },
-            "explicit chunk dimensions",
-        ),
-        (
-            "chunk rank mismatch",
-            |b| {
-                b.with_i32_data(&[1, 2, 3, 4, 5, 6])
-                    .with_shape(&[2, 3])
-                    .with_chunks(&[2]);
-            },
-            "chunk dimensions must have the same rank",
-        ),
-        (
-            "zero chunk dim",
-            |b| {
-                b.with_i32_data(&[1, 2, 3, 4])
-                    .with_shape(&[4])
-                    .with_chunks(&[0]);
-            },
-            "chunk dimensions must all be non-zero",
-        ),
-        (
-            "maxshape rank mismatch",
-            |b| {
-                b.with_i32_data(&[1, 2, 3, 4])
-                    .with_shape(&[4])
-                    .with_maxshape(&[MaxExtent::Unlimited, MaxExtent::Unlimited])
-                    .with_chunks(&[2]);
-            },
-            "maxshape must have the same rank",
-        ),
-        (
-            "scalar with chunks",
-            |b| {
-                b.with_f64_data(&[1.0]).with_shape(&[]).with_chunks(&[1]);
-            },
-            "a scalar dataset cannot be chunked",
-        ),
-        (
-            "maxshape below shape",
-            |b| {
-                b.with_i32_data(&[1, 2, 3, 4])
-                    .with_shape(&[4])
-                    .with_maxshape(&[MaxExtent::Fixed(2)]);
-            },
-            "maxshape must be at least the current shape",
-        ),
-    ];
-
-    for (label, configure, expected) in bad {
+    for case in dataset::INVALID_GEOMETRY_CASES {
         let path = temp::temp_path(&format!(
             "hdf5_pure_edit_reject_{}.h5",
-            label.replace(' ', "_")
+            case.label.replace(' ', "_")
         ));
         write_starter(&path);
         let before = std::fs::read(&path).unwrap();
         {
             let session = File::open_rw(&path).unwrap();
-            let err = session.root().create_dataset("bad", configure).unwrap_err();
+            let err = session
+                .root()
+                .create_dataset("bad", case.configure)
+                .unwrap_err();
             let text = err.to_string();
             assert!(
                 text.contains("in-place edit"),
-                "[{label}] expected an EditUnsupported refusal, got: {err}"
+                "[{}] expected an EditUnsupported refusal, got: {err}",
+                case.label
             );
             assert!(
-                text.contains(expected),
-                "[{label}] refusal must name {expected:?}, got: {err}"
+                text.contains(case.expected),
+                "[{}] refusal must name {:?}, got: {err}",
+                case.label,
+                case.expected
             );
             session.commit().unwrap();
         }
@@ -2171,7 +2118,8 @@ fn malformed_chunked_requests_are_rejected_without_writing() {
         assert_eq!(
             std::fs::read(&path).unwrap(),
             before,
-            "[{label}] file modified"
+            "[{}] file modified",
+            case.label
         );
     }
 }

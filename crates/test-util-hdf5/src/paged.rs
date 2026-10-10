@@ -2,10 +2,12 @@
 
 use std::path::Path;
 
-use hdf5_pure::{File, FileSpaceStrategy, Layout};
+use hdf5_pure::{File, FileBuilder, FileSpaceStrategy, Layout};
 use test_util::{
     btree_v2, bytes, fractal_heap, free_space, global_heap, local_heap, object_header, symbol_table,
 };
+
+use crate::dataset::Unlimited;
 
 /// Signatures that must never appear in a page holding raw dataset bytes: object
 /// headers and their continuations, the global heap, the free-space managers, the
@@ -35,6 +37,69 @@ pub const METADATA_SIGNATURES: &[&[u8; 4]] = &[
     symbol_table::SIGNATURE,
     local_heap::SIGNATURE,
 ];
+
+/// Writes a persisting paged fixture with small and large contiguous `i32` datasets.
+///
+/// The file contains `a = 0..100`, `b = 0..400`, and `big = 0..5000`. The `big` dataset
+/// is large enough to exercise a dedicated raw run for the page sizes used by the tests.
+pub fn write_small_large_i32(path: &Path, page_size: u64) {
+    let small_a: Vec<i32> = (0..100).collect();
+    let small_b: Vec<i32> = (0..400).collect();
+    let big: Vec<i32> = (0..5000).collect();
+
+    let mut builder = FileBuilder::new();
+    builder.create_dataset("a").with_i32_data(&small_a);
+    builder.create_dataset("b").with_i32_data(&small_b);
+    builder.create_dataset("big").with_i32_data(&big);
+    configure(&mut builder, page_size, true);
+    builder.write(path).unwrap();
+}
+
+/// Writes a persisting paged fixture with small and large chunked `f64` datasets.
+///
+/// `s` uses 16-element chunks. `big` uses 1000-element chunks with shuffle and deflate,
+/// so the fixture exercises compressed raw pages and their chunk index together.
+pub fn write_chunked_f64(path: &Path, page_size: u64) {
+    let small: Vec<f64> = (0..64).map(|i| i as f64).collect();
+    let big: Vec<f64> = (0..8000).map(|i| i as f64 * 0.5).collect();
+
+    let mut builder = FileBuilder::new();
+    builder
+        .create_dataset("s")
+        .with_f64_data(&small)
+        .with_shape(&[64])
+        .with_chunks(&[16]);
+    builder
+        .create_dataset("big")
+        .with_f64_data(&big)
+        .with_shape(&[8000])
+        .with_chunks(&[1000])
+        .with_shuffle()
+        .with_deflate(6);
+    configure(&mut builder, page_size, true);
+    builder.write(path).unwrap();
+}
+
+/// Writes a paged unlimited rank-1 `i32` dataset `d` seeded with `0..len`.
+pub fn write_unlimited_i32(path: &Path, page_size: u64, persist: bool, len: i32, chunk: u64) {
+    let data: Vec<i32> = (0..len).collect();
+    let mut builder = FileBuilder::new();
+    Unlimited::new("d", &data, chunk).add_to(&mut builder);
+    configure(&mut builder, page_size, persist);
+    builder.write(path).unwrap();
+}
+
+/// Writes a paged contiguous rank-1 `i32` dataset `d` seeded with `0..len`.
+pub fn write_contiguous_i32(path: &Path, page_size: u64, persist: bool, len: i32) {
+    let data: Vec<i32> = (0..len).collect();
+    let mut builder = FileBuilder::new();
+    builder
+        .create_dataset("d")
+        .with_i32_data(&data)
+        .with_shape(&[len as u64]);
+    configure(&mut builder, page_size, persist);
+    builder.write(path).unwrap();
+}
 
 /// Asserts the on-disk invariants of a paged file with persisted free-space managers.
 ///
@@ -128,4 +193,10 @@ pub fn assert_pages_homogeneous(path: &Path, page: u64, datasets: &[&str]) {
             );
         }
     }
+}
+
+fn configure(builder: &mut FileBuilder, page_size: u64, persist: bool) {
+    builder
+        .with_file_space_strategy(FileSpaceStrategy::Page, persist, 0)
+        .with_file_space_page_size(page_size);
 }

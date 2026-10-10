@@ -2,6 +2,7 @@ use hdf5_pure::{
     AttrValue, CompoundTypeBuilder, DType, Datatype, Error, File, FileBuilder, FormatError,
     MaxExtent, make_f64_type, make_i32_type,
 };
+use test_util_hdf5::{dataset, fixtures};
 
 #[test]
 fn roundtrip_f64_dataset() {
@@ -316,100 +317,30 @@ fn nested_compound_tuple_roundtrip() {
 fn chunked_builder_rejects_invalid_geometry() {
     // Each malformed chunk-geometry request must be refused with
     // `InvalidChunkGeometry` rather than panicking in the chunk splitter or
-    // producing an unreadable dataset.
-    type Configure = fn(&mut hdf5_pure::DatasetBuilder);
-    let bad: &[(&str, Configure, &str)] = &[
-        (
-            "chunk rank mismatch",
-            |b| {
-                b.with_i32_data(&[1, 2, 3, 4, 5, 6])
-                    .with_shape(&[2, 3])
-                    .with_chunks(&[2]);
-            },
-            "chunk dimensions must have the same rank",
-        ),
-        (
-            "zero chunk dim",
-            |b| {
-                b.with_i32_data(&[1, 2, 3, 4])
-                    .with_shape(&[4])
-                    .with_chunks(&[0]);
-            },
-            "chunk dimensions must all be non-zero",
-        ),
-        (
-            "maxshape rank mismatch",
-            |b| {
-                b.with_i32_data(&[1, 2, 3, 4])
-                    .with_shape(&[4])
-                    .with_maxshape(&[MaxExtent::Unlimited, MaxExtent::Unlimited])
-                    .with_chunks(&[2]);
-            },
-            "maxshape must have the same rank",
-        ),
-        (
-            "maxshape below shape",
-            |b| {
-                b.with_i32_data(&[1, 2, 3, 4])
-                    .with_shape(&[4])
-                    .with_maxshape(&[MaxExtent::Fixed(2)]);
-            },
-            "maxshape must be at least the current shape",
-        ),
-        (
-            "scalar with chunks",
-            |b| {
-                b.with_f64_data(&[1.0]).with_shape(&[]).with_chunks(&[1]);
-            },
-            "a scalar dataset cannot be chunked",
-        ),
-        // Auto-chunking makes the shape one chunk, so a zero-element shape
-        // resolves to a zero chunk dimension — the "zero chunk dim" case above,
-        // reached without the caller naming one. It divided by zero in the
-        // splitter until the guard learned to check the *resolved* dimensions.
-        (
-            "auto-chunked empty shape",
-            |b| {
-                b.with_i32_data(&[])
-                    .with_shape(&[0])
-                    .with_maxshape(&[MaxExtent::Unlimited]);
-            },
-            "explicit chunk dimensions",
-        ),
-        (
-            "auto-chunked empty inner dim",
-            |b| {
-                b.with_i32_data(&[])
-                    .with_shape(&[4, 0])
-                    .with_maxshape(&[MaxExtent::Unlimited, MaxExtent::Unlimited]);
-            },
-            "explicit chunk dimensions",
-        ),
-        (
-            "a fixed maximum at the unlimited marker",
-            |b| {
-                b.with_i32_data(&[1, 2, 3, 4])
-                    .with_shape(&[4])
-                    .with_maxshape(&[MaxExtent::Fixed(u64::MAX)])
-                    .with_chunks(&[2]);
-            },
-            "the format's unlimited marker",
-        ),
-    ];
+    // producing an unreadable dataset. The editor exercises the shared cases
+    // independently. The writer adds two format-only edge cases.
+    let bad = dataset::INVALID_GEOMETRY_CASES
+        .iter()
+        .chain(dataset::WRITER_ONLY_INVALID_GEOMETRY_CASES);
 
-    for (label, configure, expected) in bad {
+    for case in bad {
         let mut builder = FileBuilder::new();
-        configure(builder.create_dataset("bad"));
+        (case.configure)(builder.create_dataset("bad"));
         let err = builder.finish().unwrap_err();
         let Error::Format(FormatError::InvalidChunkGeometry(reason)) = &err else {
-            panic!("[{label}] expected InvalidChunkGeometry, got {err:?}");
+            panic!(
+                "[{}] expected InvalidChunkGeometry, got {err:?}",
+                case.label
+            );
         };
         // Each case names its own reason: a wildcard payload passes on a refusal
         // from any *other* geometry guard, which makes the case under test
         // unreachable without anything going red.
         assert!(
-            reason.contains(expected),
-            "[{label}] refusal must name {expected:?}, got {reason:?}"
+            reason.contains(case.expected),
+            "[{}] refusal must name {:?}, got {reason:?}",
+            case.label,
+            case.expected
         );
     }
 }
@@ -768,28 +699,8 @@ fn roundtrip_path_references() {
 
 #[test]
 fn roundtrip_path_references_2d_shape() {
-    // MATLAB pattern: reference datasets with 2D shapes like [1, n] or [2, 1]
     let mut builder = FileBuilder::new();
-
-    let mut refs_grp = builder.create_group("#refs#");
-    refs_grp.create_dataset("a").with_f64_data(&[1.0]);
-    refs_grp.create_dataset("b").with_f64_data(&[2.0]);
-    refs_grp.create_dataset("c").with_f64_data(&[3.0]);
-    refs_grp.create_dataset("d").with_f64_data(&[4.0]);
-    builder.add_group(refs_grp.finish());
-
-    // Shape [1, 4] — row vector of references
-    builder
-        .create_dataset("row_refs")
-        .with_path_references(&["#refs#/a", "#refs#/b", "#refs#/c", "#refs#/d"])
-        .with_shape(&[1, 4]);
-
-    // Shape [2, 1] — column vector of references
-    builder
-        .create_dataset("col_refs")
-        .with_path_references(&["#refs#/a", "#refs#/b"])
-        .with_shape(&[2, 1]);
-
+    fixtures::path_references_2d(&mut builder);
     let bytes = builder.finish().unwrap();
 
     let file = File::from_bytes(bytes).unwrap();
@@ -874,57 +785,8 @@ fn roundtrip_matlab_empty_shape_marker() {
 
 #[test]
 fn roundtrip_matlab_refs_subsystem_pattern() {
-    // Exercises the MATLAB v7.3 string/cell subsystem pattern:
-    //   #refs# group   — holds the actual data as child datasets
-    //   #subsystem#     — holds an MCOS dataset with path references into #refs#
-    //   Some #refs# children themselves contain references to siblings
-
     let mut builder = FileBuilder::new();
-
-    // --- #refs# group with several child datasets ---
-    let mut refs_grp = builder.create_group("#refs#");
-
-    // String-value datasets (simulating MATLAB string objects)
-    refs_grp
-        .create_dataset("a")
-        .with_u16_data(&[72, 101, 108, 108, 111]); // "Hello" UTF-16
-    refs_grp
-        .create_dataset("b")
-        .with_u16_data(&[87, 111, 114, 108, 100]); // "World"
-    refs_grp.create_dataset("c").with_u16_data(&[70, 111, 111]); // "Foo"
-
-    // A child dataset that itself references siblings (cross-references within #refs#)
-    refs_grp
-        .create_dataset("cell_data")
-        .with_path_references(&["#refs#/a", "#refs#/b", "#refs#/c"])
-        .with_shape(&[1, 3]);
-
-    // Metadata dataset with attributes
-    refs_grp
-        .create_dataset("type_info")
-        .with_u8_data(&[0, 0, 0, 0, 0, 0, 1, 0])
-        .set_attr("MATLAB_class", AttrValue::AsciiString("string".into()));
-
-    builder.add_group(refs_grp.finish());
-
-    // --- #subsystem# group with MCOS dataset ---
-    let mut subsys_grp = builder.create_group("#subsystem#");
-
-    // MCOS dataset: array of references to objects in #refs#, shape [2, 1]
-    subsys_grp
-        .create_dataset("MCOS")
-        .with_path_references(&["#refs#/cell_data", "#refs#/type_info"])
-        .with_shape(&[2, 1]);
-
-    builder.add_group(subsys_grp.finish());
-
-    // --- Root-level dataset referencing into #refs# ---
-    builder
-        .create_dataset("data")
-        .with_path_references(&["#refs#/a"])
-        .with_shape(&[1, 1])
-        .set_attr("MATLAB_class", AttrValue::AsciiString("string".into()));
-
+    fixtures::matlab_refs_subsystem(&mut builder);
     let bytes = builder.finish().unwrap();
 
     // --- Verify the file structure ---
@@ -962,19 +824,8 @@ fn roundtrip_matlab_refs_subsystem_pattern() {
 
 #[test]
 fn roundtrip_varlen_ascii_on_nested_group() {
-    // MATLAB pattern: MATLAB_fields on a struct group (not root)
     let mut builder = FileBuilder::new();
-
-    let mut grp = builder.create_group("my_struct");
-    grp.create_dataset("x").with_f64_data(&[1.0, 2.0]);
-    grp.create_dataset("y").with_f64_data(&[3.0, 4.0]);
-    grp.set_attr("MATLAB_class", AttrValue::AsciiString("struct".into()));
-    grp.set_attr(
-        "MATLAB_fields",
-        AttrValue::VarLenAsciiCharArray(vec!["x".into(), "y".into()]),
-    );
-    builder.add_group(grp.finish());
-
+    fixtures::nested_matlab_struct(&mut builder);
     let bytes = builder.finish().unwrap();
     let file = File::from_bytes(bytes).unwrap();
 
@@ -997,25 +848,8 @@ fn roundtrip_varlen_ascii_on_nested_group() {
 
 #[test]
 fn roundtrip_group_only_no_datasets() {
-    // MATLAB pattern: nested structs where a group has only sub-groups and attrs
     let mut builder = FileBuilder::new();
-
-    let mut outer = builder.create_group("outer");
-    outer.set_attr("MATLAB_class", AttrValue::AsciiString("struct".into()));
-
-    let mut child_a = outer.create_group("a");
-    child_a.create_dataset("val").with_f64_data(&[1.0]);
-    child_a.set_attr("MATLAB_class", AttrValue::AsciiString("double".into()));
-    outer.add_group(child_a.finish());
-
-    let mut child_b = outer.create_group("b");
-    child_b.create_dataset("val").with_i32_data(&[42]);
-    child_b.set_attr("MATLAB_class", AttrValue::AsciiString("int32".into()));
-    outer.add_group(child_b.finish());
-
-    // outer has zero datasets, only sub-groups + attrs
-    builder.add_group(outer.finish());
-
+    fixtures::group_only_matlab_struct(&mut builder);
     let bytes = builder.finish().unwrap();
     let file = File::from_bytes(bytes).unwrap();
 

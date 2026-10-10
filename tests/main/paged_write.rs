@@ -23,17 +23,10 @@ use test_util_hdf5::paged;
 #[test]
 fn paged_persist_roundtrip() {
     let path = temp::repo_temp_path("pure_paged_b1.h5");
-    let small_a: Vec<i32> = (0..100).collect(); // 400 bytes
-    let small_b: Vec<i32> = (0..400).collect(); // 1600 bytes
-    let big: Vec<i32> = (0..5000).collect(); // 20000 bytes >= page -> large run
-
-    let mut b = FileBuilder::new();
-    b.create_dataset("a").with_i32_data(&small_a);
-    b.create_dataset("b").with_i32_data(&small_b);
-    b.create_dataset("big").with_i32_data(&big);
-    b.with_file_space_strategy(FileSpaceStrategy::Page, true, 0)
-        .with_file_space_page_size(PAGE);
-    b.write(&path).unwrap();
+    paged::write_small_large_i32(&path, PAGE);
+    let small_a: Vec<i32> = (0..100).collect();
+    let small_b: Vec<i32> = (0..400).collect();
+    let big: Vec<i32> = (0..5000).collect();
 
     paged::assert_consistent(&path, PAGE);
 
@@ -97,25 +90,9 @@ fn paged_metadata_only() {
 #[test]
 fn paged_chunked_roundtrip() {
     let path = temp::repo_temp_path("pure_paged_b1_chunked.h5");
-    let small: Vec<f64> = (0..64).map(|i| i as f64).collect(); // 512 bytes
-    let big: Vec<f64> = (0..8000).map(|i| i as f64 * 0.5).collect(); // 64000 bytes >= page
-
-    let mut b = FileBuilder::new();
-    b.create_dataset("s")
-        .with_f64_data(&small)
-        .with_shape(&[64])
-        .with_chunks(&[16]);
-    {
-        let ds = b
-            .create_dataset("big")
-            .with_f64_data(&big)
-            .with_shape(&[8000])
-            .with_chunks(&[1000]);
-        ds.with_shuffle().with_deflate(6);
-    }
-    b.with_file_space_strategy(FileSpaceStrategy::Page, true, 0)
-        .with_file_space_page_size(PAGE);
-    b.write(&path).unwrap();
+    paged::write_chunked_f64(&path, PAGE);
+    let small: Vec<f64> = (0..64).map(|i| i as f64).collect();
+    let big: Vec<f64> = (0..8000).map(|i| i as f64 * 0.5).collect();
 
     let bytes = std::fs::read(&path).unwrap();
     assert_eq!(bytes.len() as u64 % PAGE, 0);

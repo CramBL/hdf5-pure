@@ -14,7 +14,7 @@ use hdf5_pure::{
     FileSpaceStrategy, FixedPointLayout, Group, Object, ReferenceType,
 };
 use tempfile::tempdir;
-use test_util_hdf5::dataset::Unlimited;
+use test_util_hdf5::{dataset::Unlimited, fixtures};
 
 /// The names of the datasets the file's first stored reference resolves to,
 /// dereferenced through the reference rather than looked up by path.
@@ -38,29 +38,10 @@ fn sorted_datasets(g: &Group) -> Vec<String> {
 
 /// A file holding `g` (with one dataset) and a `refs` dataset naming `g`.
 fn build_file_referencing_a_group(path: &std::path::Path) {
-    let mut b = FileBuilder::new();
-    let mut g = b.create_group("g");
-    g.create_dataset("inner").with_i32_data(&[1, 2, 3]);
-    b.add_group(g.finish());
-    b.create_dataset("refs").with_path_references(&["g"]);
-    b.write(path).unwrap();
-}
-
-/// Commit `count` unrelated small datasets, one per commit, so the space the
-/// earlier commits vacated is reused. A stale reference reads plausible bytes
-/// until that happens, which is why every test that wants to show the reference
-/// is *sound* rather than merely lucky runs this first.
-fn churn(path: &std::path::Path, count: i32) {
-    for i in 0..count {
-        let session = File::open_rw(path).unwrap();
-        session
-            .root()
-            .create_dataset(&format!("churn{i}"), |b| {
-                b.with_i32_data(&[i]);
-            })
-            .unwrap();
-        session.commit().unwrap();
-    }
+    let mut builder = FileBuilder::new();
+    fixtures::reference_target_group(&mut builder);
+    builder.create_dataset("refs").with_path_references(&["g"]);
+    builder.write(path).unwrap();
 }
 
 #[test]
@@ -88,7 +69,7 @@ fn a_reference_to_a_group_follows_it_when_the_group_gains_a_child() {
     );
 
     // And it stays right once later commits have spent the freed space.
-    churn(&path, 10);
+    fixtures::churn_commits(&path, 10);
     assert_eq!(
         referenced_group_members(&path, "refs"),
         vec!["extra".to_string(), "inner".to_string()],
@@ -114,7 +95,7 @@ fn a_reference_to_a_dataset_follows_its_relocating_attribute_edit() {
         .unwrap();
     session.commit().unwrap();
     drop(session);
-    churn(&path, 10);
+    fixtures::churn_commits(&path, 10);
 
     let file = File::open(&path).unwrap();
     let objects = file.dataset("refs").unwrap().dereference().unwrap();
@@ -143,7 +124,7 @@ fn a_reference_to_the_root_group_follows_the_rebuilt_root() {
     b.create_dataset("refs").with_path_references(&[""]);
     b.write(&path).unwrap();
 
-    churn(&path, 5);
+    fixtures::churn_commits(&path, 5);
 
     let file = File::open(&path).unwrap();
     let objects = file.dataset("refs").unwrap().dereference().unwrap();
@@ -187,7 +168,7 @@ fn every_element_of_a_multi_reference_dataset_is_repointed() {
     }
     session.commit().unwrap();
     drop(session);
-    churn(&path, 10);
+    fixtures::churn_commits(&path, 10);
 
     let file = File::open(&path).unwrap();
     let objects = file.dataset("refs").unwrap().dereference().unwrap();
@@ -213,9 +194,7 @@ fn a_reference_inside_a_compound_element_is_repointed() {
     // walk addresses a reference *inside* an element rather than only an element
     // that is one.
     let mut b = FileBuilder::new();
-    let mut g = b.create_group("g");
-    g.create_dataset("inner").with_i32_data(&[1, 2, 3]);
-    b.add_group(g.finish());
+    fixtures::reference_target_group(&mut b);
     b.create_dataset("plain").with_path_references(&["g"]);
     b.write(&path).unwrap();
 
@@ -262,16 +241,7 @@ fn a_reference_inside_a_compound_element_is_repointed() {
         session.commit().unwrap();
     }
 
-    let session = File::open_rw(&path).unwrap();
-    session
-        .root()
-        .create_dataset("g/extra", |b| {
-            b.with_i32_data(&[9]);
-        })
-        .unwrap();
-    session.commit().unwrap();
-    drop(session);
-    churn(&path, 10);
+    fixtures::move_reference_target_and_churn(&path, 10);
 
     // `dereference` reads a dataset whose *element* is a reference, so the
     // compound is checked against the plain reference dataset beside it: both
@@ -334,22 +304,11 @@ fn references_are_repointed_on_a_userblock_file() {
     // where an off-by-`base` in either direction shows up.
     let mut b = FileBuilder::new();
     b.with_userblock(1024);
-    let mut g = b.create_group("g");
-    g.create_dataset("inner").with_i32_data(&[1, 2, 3]);
-    b.add_group(g.finish());
+    fixtures::reference_target_group(&mut b);
     b.create_dataset("refs").with_path_references(&["g"]);
     b.write(&path).unwrap();
 
-    let session = File::open_rw(&path).unwrap();
-    session
-        .root()
-        .create_dataset("g/extra", |b| {
-            b.with_i32_data(&[9]);
-        })
-        .unwrap();
-    session.commit().unwrap();
-    drop(session);
-    churn(&path, 10);
+    fixtures::move_reference_target_and_churn(&path, 10);
 
     assert_eq!(
         referenced_group_members(&path, "refs"),
@@ -365,22 +324,11 @@ fn reference_survives_on(path: &std::path::Path, strategy: Option<FileSpaceStrat
     if let Some(strategy) = strategy {
         b.with_file_space_strategy(strategy, true, 1);
     }
-    let mut g = b.create_group("g");
-    g.create_dataset("inner").with_i32_data(&[1, 2, 3]);
-    b.add_group(g.finish());
+    fixtures::reference_target_group(&mut b);
     b.create_dataset("refs").with_path_references(&["g"]);
     b.write(path).unwrap();
 
-    let session = File::open_rw(path).unwrap();
-    session
-        .root()
-        .create_dataset("g/extra", |b| {
-            b.with_i32_data(&[9]);
-        })
-        .unwrap();
-    session.commit().unwrap();
-    drop(session);
-    churn(path, 10);
+    fixtures::move_reference_target_and_churn(path, 10);
 
     assert_eq!(
         referenced_group_members(path, "refs"),
@@ -423,7 +371,7 @@ fn repeated_commits_in_one_session_each_repoint() {
         session.commit().unwrap();
     }
     drop(session);
-    churn(&path, 10);
+    fixtures::churn_commits(&path, 10);
 
     let mut expected: Vec<String> = (0..5).map(|i| format!("d{i}")).collect();
     expected.push("inner".to_string());
@@ -440,9 +388,7 @@ fn a_reference_dataset_added_after_a_reference_free_walk_is_still_repointed() {
     // commit's walk proves it reference-free and licenses every later commit to
     // skip the walk. Adding a reference dataset has to retire that proof.
     let mut b = FileBuilder::new();
-    let mut g = b.create_group("g");
-    g.create_dataset("inner").with_i32_data(&[1, 2, 3]);
-    b.add_group(g.finish());
+    fixtures::reference_target_group(&mut b);
     b.write(&path).unwrap();
 
     let session = File::open_rw(&path).unwrap();
@@ -468,7 +414,7 @@ fn a_reference_dataset_added_after_a_reference_free_walk_is_still_repointed() {
         .unwrap();
     session.commit().unwrap(); // and this one must walk
     drop(session);
-    churn(&path, 10);
+    fixtures::churn_commits(&path, 10);
 
     assert_eq!(
         referenced_group_members(&path, "refs"),
@@ -497,7 +443,7 @@ fn a_copy_made_in_the_same_commit_that_moves_its_target_is_repointed() {
         .unwrap();
     session.commit().unwrap();
     drop(session);
-    churn(&path, 10);
+    fixtures::churn_commits(&path, 10);
 
     for dataset in ["refs", "refs_copy"] {
         assert_eq!(
@@ -531,7 +477,7 @@ fn a_reference_to_an_appended_dataset_follows_its_relocating_append() {
         .unwrap();
     session.commit().unwrap();
     drop(session);
-    churn(&path, 10);
+    fixtures::churn_commits(&path, 10);
 
     let file = File::open(&path).unwrap();
     let objects = file.dataset("refs").unwrap().dereference().unwrap();

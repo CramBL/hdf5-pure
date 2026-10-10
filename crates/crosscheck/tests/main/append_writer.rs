@@ -10,9 +10,7 @@
 
 use hdf5_pure::{File, FileAccessProperties, SyncPolicy};
 use tempfile::tempdir;
-use test_util_hdf5::dataset::{self, Filter, Unlimited};
-
-const SHUFFLE_DEFLATE: &[Filter] = &[Filter::Shuffle, Filter::Deflate(6)];
+use test_util_hdf5::dataset::{self, AppendInteropFixture, Unlimited};
 
 /// Append `values` one element per call in a single session.
 ///
@@ -40,10 +38,7 @@ fn writer_append_each(path: &std::path::Path, values: &[i32]) {
 fn pure_creates_writer_appends_c_reads() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("d.h5");
-    let base: Vec<i32> = (0..12).collect();
-    Unlimited::new("d", &base, 4)
-        .filters(SHUFFLE_DEFLATE)
-        .pure_create(&path);
+    AppendInteropFixture::filtered_pure(12, 4).write(&path);
     dataset::pure_append(&path, "d", &(12..20).collect::<Vec<_>>()); // two chunks
     dataset::pure_append(&path, "d", &(20..28).collect::<Vec<_>>()); // two chunks
     let expected: Vec<i32> = (0..28).collect();
@@ -56,10 +51,7 @@ fn pure_creates_writer_appends_c_reads() {
 fn c_creates_writer_appends_both_read() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("d.h5");
-    let base: Vec<i32> = (0..20).collect();
-    Unlimited::new("d", &base, 5)
-        .filters(SHUFFLE_DEFLATE)
-        .libhdf5_create(&path);
+    AppendInteropFixture::filtered_libhdf5(20, 5).write(&path);
     dataset::pure_append(&path, "d", &(20..30).collect::<Vec<_>>()); // two chunks, 20 -> 30
     let expected: Vec<i32> = (0..30).collect();
     assert_eq!(dataset::read_pure::<i32>(&path, "d"), expected);
@@ -74,10 +66,8 @@ fn c_incompressible_kept_chunks_untouched() {
     // so their masks must survive verbatim and C must still read them.
     let dir = tempdir().unwrap();
     let path = dir.path().join("d.h5");
-    let base = dataset::incompressible(0xABCD_1234, 40); // 8 chunks of 5
-    Unlimited::new("d", &base, 5)
-        .filters(SHUFFLE_DEFLATE)
-        .libhdf5_create(&path);
+    // 8 chunks of 5, all incompressible.
+    let base = AppendInteropFixture::incompressible_libhdf5(0xABCD_1234, 40, 5).write(&path);
     let extra = dataset::incompressible(0x5555_AAAA, 15); // three chunks (40 -> 55)
     dataset::pure_append(&path, "d", &extra);
     let mut expected = base.clone();
@@ -99,7 +89,7 @@ fn c_empty_unallocated_index_is_refused() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("d.h5");
     Unlimited::<i32>::new("d", &[], 4)
-        .filters(SHUFFLE_DEFLATE)
+        .filters(dataset::SHUFFLE_DEFLATE_6)
         .libhdf5_create(&path);
     let file = File::open_rw(&path).unwrap();
     let r = file
@@ -119,7 +109,7 @@ fn c_empty_unallocated_index_is_refused() {
 fn unfiltered_writer_append_c_reads() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("d.h5");
-    Unlimited::new("d", &(0..10).collect::<Vec<i32>>(), 4).pure_create(&path);
+    AppendInteropFixture::unfiltered_pure(10, 4).write(&path);
     dataset::pure_append(&path, "d", &(10..23).collect::<Vec<_>>()); // unaligned
     let expected: Vec<i32> = (0..23).collect();
     assert_eq!(dataset::read_pure::<i32>(&path, "d"), expected);
@@ -133,10 +123,7 @@ fn streaming_many_appends_c_reads() {
     // confirm the C library reads the whole thing back.
     let dir = tempdir().unwrap();
     let path = dir.path().join("d.h5");
-    let base: Vec<i32> = (0..64).collect();
-    Unlimited::new("d", &base, 1)
-        .filters(SHUFFLE_DEFLATE)
-        .pure_create(&path);
+    AppendInteropFixture::filtered_pure(64, 1).write(&path);
     writer_append_each(&path, &(64..4096).collect::<Vec<_>>());
     let expected: Vec<i32> = (0..4096).collect();
     assert_eq!(dataset::read_pure::<i32>(&path, "d"), expected);
@@ -148,10 +135,7 @@ fn reopen_across_sessions_c_reads() {
     // Filtered appends are chunk-aligned; reopen a fresh writer each session.
     let dir = tempdir().unwrap();
     let path = dir.path().join("d.h5");
-    let base: Vec<i32> = (0..8).collect();
-    Unlimited::new("d", &base, 4)
-        .filters(SHUFFLE_DEFLATE)
-        .pure_create(&path);
+    AppendInteropFixture::filtered_pure(8, 4).write(&path);
     dataset::pure_append(&path, "d", &(8..16).collect::<Vec<_>>()); // two chunks, session 1
     dataset::pure_append(&path, "d", &(16..24).collect::<Vec<_>>()); // two chunks, session 2
     let expected: Vec<i32> = (0..24).collect();
@@ -168,10 +152,7 @@ fn c_creates_writer_grows_an_unaligned_filtered_tail() {
     // one index element — and the C library reads the result (issue #393).
     let dir = tempdir().unwrap();
     let path = dir.path().join("d.h5");
-    let base: Vec<i32> = (0..7).collect(); // 7 of chunk 5 => a partial tail
-    Unlimited::new("d", &base, 5)
-        .filters(SHUFFLE_DEFLATE)
-        .libhdf5_create(&path);
+    AppendInteropFixture::filtered_libhdf5(7, 5).write(&path); // 7 of chunk 5 => a partial tail
     dataset::pure_append(&path, "d", &[7, 8, 9]);
     let expected: Vec<i32> = (0..10).collect();
     assert_eq!(dataset::read_pure::<i32>(&path, "d"), expected);

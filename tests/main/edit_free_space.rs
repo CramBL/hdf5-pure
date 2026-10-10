@@ -26,6 +26,7 @@ use test_util::free_space;
 use test_util::temp;
 use test_util::widths::Widths;
 use test_util_hdf5::dataset::Unlimited;
+use test_util_hdf5::file_space;
 
 // Shared with `tests/main/paged_staged_commit.rs`, which holds the staged commit to
 // the same invariant this holds the in-place append's reserve to (issue #387).
@@ -636,19 +637,9 @@ fn persisted_free_space_survives_reopen_and_is_reused() {
     // later session reuses it instead of growing the file. This is the cross-
     // session counterpart to the within-session reuse above.
     let path = temp::temp_path("hdf5_pure_fs_persist_roundtrip.h5");
-    let mut b = FileBuilder::new();
-    b.create_dataset("a").with_i32_data(&[1; 100]);
-    b.create_dataset("big").with_i32_data(&[7; 400]); // 1600 bytes of raw data
-    b.create_dataset("c").with_i32_data(&[3; 100]);
-    b.with_file_space_strategy(FileSpaceStrategy::FsmAggr, true, 1);
-    b.write(&path).unwrap();
+    file_space::write_persisted_interior_hole(&path);
 
-    // Session 1: delete "big"; its storage is persisted as free space.
-    {
-        let s = File::open_rw(&path).unwrap();
-        s.root().delete("big").unwrap();
-        s.commit().unwrap();
-    }
+    // Session 1 deleted "big" and persisted its storage as free space.
     assert_eof_matches_file(&path);
 
     // A fresh reader recovers the persisted free space across the reopen, and the
@@ -729,17 +720,7 @@ fn open_rw_rejects_a_paged_file_whose_page_size_is_out_of_range() {
 #[test]
 fn a_version_0_message_s_persisted_free_space_is_recovered_and_reused() {
     let path = temp::temp_path("hdf5_pure_fs_persist_version_0.h5");
-    let mut b = FileBuilder::new();
-    b.create_dataset("a").with_i32_data(&[1; 100]);
-    b.create_dataset("big").with_i32_data(&[7; 400]);
-    b.create_dataset("c").with_i32_data(&[3; 100]);
-    b.with_file_space_strategy(FileSpaceStrategy::FsmAggr, true, 1);
-    b.write(&path).unwrap();
-    {
-        let s = File::open_rw(&path).unwrap();
-        s.root().delete("big").unwrap();
-        s.commit().unwrap();
-    }
+    file_space::write_persisted_interior_hole(&path);
     let (extension, version_1, free) = {
         let f = File::open(&path).unwrap();
         (

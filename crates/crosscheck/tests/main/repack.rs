@@ -10,8 +10,7 @@ use hdf5_pure::{
 use rstest::rstest;
 use tempfile::tempdir;
 
-use test_util_hdf5::absence;
-use test_util_hdf5::file;
+use test_util_hdf5::{absence, file, fixtures};
 
 #[test]
 fn c_file_repacked_then_read_by_c_library() {
@@ -23,25 +22,7 @@ fn c_file_repacked_then_read_by_c_library() {
     // grp/beta (i32), using the 1.10+ format.
     {
         let file = hdf5::File::create(&src).unwrap();
-        file.new_dataset::<f64>()
-            .shape((3,))
-            .create("alpha")
-            .unwrap()
-            .write(&[1.0f64, 2.0, 3.0])
-            .unwrap();
-        file.new_dataset::<i32>()
-            .shape((4,))
-            .create("doomed")
-            .unwrap()
-            .write(&[7i32, 8, 9, 10])
-            .unwrap();
-        let grp = file.create_group("grp").unwrap();
-        grp.new_dataset::<i32>()
-            .shape((4,))
-            .create("beta")
-            .unwrap()
-            .write(&[10i32, 20, 30, 40])
-            .unwrap();
+        fixtures::populate_libhdf5_edit_repack_starter(&file, &[7, 8, 9, 10]);
         file.close().unwrap();
     }
 

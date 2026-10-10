@@ -16,8 +16,7 @@ use hdf5::file::LibraryVersion;
 use hdf5_pure::{AttrValue, File, FileBuilder, MaxExtent, ScaleOffset};
 use tempfile::tempdir;
 
-use test_util_hdf5::absence;
-use test_util_hdf5::file;
+use test_util_hdf5::{absence, file, fixtures};
 
 /// Stage an add, an add-into-a-group, a delete, and a copy — the full op set.
 fn stage_edits(session: &File) {
@@ -88,45 +87,12 @@ fn assert_edits_applied(path: &std::path::Path) {
     absence::assert_libhdf5_absent(&c.dataset("doomed").unwrap_err(), "doomed");
 }
 
-/// Write the starter file (two root datasets + a group with a dataset) with the
-/// C library at the given library-version bounds.
-fn write_c_starter(path: &std::path::Path, low: LibraryVersion, high: LibraryVersion) {
-    let file = hdf5::File::with_options()
-        .with_fapl(|p| p.libver_bounds(low, high))
-        .create(path)
-        .unwrap();
-    file.new_dataset::<f64>()
-        .shape((3,))
-        .create("alpha")
-        .unwrap()
-        .write(&[1.0f64, 2.0, 3.0])
-        .unwrap();
-    file.new_dataset::<i32>()
-        .shape((2,))
-        .create("doomed")
-        .unwrap()
-        .write(&[7i32, 8])
-        .unwrap();
-    let grp = file.create_group("grp").unwrap();
-    grp.new_dataset::<i32>()
-        .shape((4,))
-        .create("beta")
-        .unwrap()
-        .write(&[10i32, 20, 30, 40])
-        .unwrap();
-    file.close().unwrap();
-}
-
 #[test]
 fn pure_written_file_edited_then_read_by_c_library() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("pure.h5");
     let mut b = FileBuilder::new();
-    b.create_dataset("alpha").with_f64_data(&[1.0, 2.0, 3.0]);
-    b.create_dataset("doomed").with_i32_data(&[7, 8]);
-    let mut g = b.create_group("grp");
-    g.create_dataset("beta").with_i32_data(&[10, 20, 30, 40]);
-    b.add_group(g.finish());
+    fixtures::edit_repack_starter(&mut b, &[7, 8]);
     b.write(&path).unwrap();
 
     {
@@ -142,7 +108,9 @@ fn pure_written_file_edited_then_read_by_c_library() {
 fn c_written_v2_file_edited_in_place() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("c_v2.h5");
-    write_c_starter(&path, LibraryVersion::V18, LibraryVersion::V18);
+    fixtures::libhdf5_edit_repack_starter(&path, LibraryVersion::V18, LibraryVersion::V18, &[7, 8])
+        .close()
+        .unwrap();
     assert_eq!(File::open(&path).unwrap().superblock().version, 2);
 
     {
@@ -158,7 +126,14 @@ fn c_written_v2_file_edited_in_place() {
 fn c_written_v3_file_edited_in_place() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("c_v3.h5");
-    write_c_starter(&path, LibraryVersion::V110, LibraryVersion::latest());
+    fixtures::libhdf5_edit_repack_starter(
+        &path,
+        LibraryVersion::V110,
+        LibraryVersion::latest(),
+        &[7, 8],
+    )
+    .close()
+    .unwrap();
     assert_eq!(File::open(&path).unwrap().superblock().version, 3);
 
     {
@@ -179,26 +154,12 @@ fn c_multichunk_group_header_is_collapsed_and_edited() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("c_multichunk.h5");
     {
-        let file = file::libhdf5_create_v110(&path);
-        file.new_dataset::<f64>()
-            .shape((3,))
-            .create("alpha")
-            .unwrap()
-            .write(&[1.0f64, 2.0, 3.0])
-            .unwrap();
-        file.new_dataset::<i32>()
-            .shape((2,))
-            .create("doomed")
-            .unwrap()
-            .write(&[7i32, 8])
-            .unwrap();
-        let grp = file.create_group("grp").unwrap();
-        grp.new_dataset::<i32>()
-            .shape((4,))
-            .create("beta")
-            .unwrap()
-            .write(&[10i32, 20, 30, 40])
-            .unwrap();
+        let file = fixtures::libhdf5_edit_repack_starter(
+            &path,
+            LibraryVersion::V110,
+            LibraryVersion::latest(),
+            &[7, 8],
+        );
         // Several root-group attributes push the root header past one chunk.
         for i in 0..6 {
             let a = file
@@ -237,7 +198,14 @@ fn c_v0_symboltable_file_edited_then_read_by_c_library() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("c_v0.h5");
     // Earliest low bound yields a version 0 superblock with symbol-table groups.
-    write_c_starter(&path, LibraryVersion::Earliest, LibraryVersion::V18);
+    fixtures::libhdf5_edit_repack_starter(
+        &path,
+        LibraryVersion::Earliest,
+        LibraryVersion::V18,
+        &[7, 8],
+    )
+    .close()
+    .unwrap();
     assert!(
         File::open(&path).unwrap().superblock().version <= 1,
         "expected a v0/v1 superblock from the earliest libver bound"
@@ -415,7 +383,14 @@ fn free_space_reuse_and_truncation_stay_c_readable() {
     // correctly from the shrunken file, and its end-of-file must be consistent.
     let dir = tempdir().unwrap();
     let path = dir.path().join("c_freespace.h5");
-    write_c_starter(&path, LibraryVersion::V110, LibraryVersion::latest());
+    fixtures::libhdf5_edit_repack_starter(
+        &path,
+        LibraryVersion::V110,
+        LibraryVersion::latest(),
+        &[7, 8],
+    )
+    .close()
+    .unwrap();
     let size_start = std::fs::metadata(&path).unwrap().len();
 
     {
@@ -469,7 +444,14 @@ fn a_chunked_dataset_written_into_a_freed_hole_stays_c_readable() {
     // above and below the hole, from a file it wrote itself.
     let dir = tempdir().unwrap();
     let path = dir.path().join("c_chunked_hole.h5");
-    write_c_starter(&path, LibraryVersion::V110, LibraryVersion::latest());
+    fixtures::libhdf5_edit_repack_starter(
+        &path,
+        LibraryVersion::V110,
+        LibraryVersion::latest(),
+        &[7, 8],
+    )
+    .close()
+    .unwrap();
 
     let filtered: Vec<f64> = (0..4096).map(|i| (i % 37) as f64).collect();
     let size_before;
@@ -538,7 +520,14 @@ fn chunked_and_filtered_datasets_added_in_place_are_c_readable() {
     // and filter pipeline are emitted correctly.
     let dir = tempdir().unwrap();
     let path = dir.path().join("c_chunked_edit.h5");
-    write_c_starter(&path, LibraryVersion::V110, LibraryVersion::latest());
+    fixtures::libhdf5_edit_repack_starter(
+        &path,
+        LibraryVersion::V110,
+        LibraryVersion::latest(),
+        &[7, 8],
+    )
+    .close()
+    .unwrap();
 
     let f64_data: Vec<f64> = (0..400).map(|i| i as f64 * 0.25).collect();
     let i32_data: Vec<i32> = (0..256).map(|i| 1000 + (i % 11)).collect();
@@ -872,7 +861,14 @@ fn fits_with_slack_filtered_overwrite_stays_c_readable() {
     // reference C library must still read the rebuilt index and the new values.
     let dir = tempdir().unwrap();
     let path = dir.path().join("c_fits_with_slack.h5");
-    write_c_starter(&path, LibraryVersion::V110, LibraryVersion::latest());
+    fixtures::libhdf5_edit_repack_starter(
+        &path,
+        LibraryVersion::V110,
+        LibraryVersion::latest(),
+        &[7, 8],
+    )
+    .close()
+    .unwrap();
 
     // Editor writes an incompressible deflate dataset (large chunk slots, v4
     // Fixed-Array index).
@@ -1232,7 +1228,14 @@ fn cross_file_copy_from_read_by_c_library() {
     }
 
     // Destination: a C-written starter (alpha, doomed, grp/beta).
-    write_c_starter(&dst_path, LibraryVersion::V110, LibraryVersion::latest());
+    fixtures::libhdf5_edit_repack_starter(
+        &dst_path,
+        LibraryVersion::V110,
+        LibraryVersion::latest(),
+        &[7, 8],
+    )
+    .close()
+    .unwrap();
 
     {
         let source = File::open(&src_path).unwrap();
@@ -1314,7 +1317,14 @@ fn cross_file_copy_from_c_written_attributed_dataset() {
             .unwrap();
         file.close().unwrap();
     }
-    write_c_starter(&dst_path, LibraryVersion::V110, LibraryVersion::latest());
+    fixtures::libhdf5_edit_repack_starter(
+        &dst_path,
+        LibraryVersion::V110,
+        LibraryVersion::latest(),
+        &[7, 8],
+    )
+    .close()
+    .unwrap();
 
     {
         let source = File::open(&src_path).unwrap();
@@ -1413,7 +1423,14 @@ fn cross_file_copy_from_reproduces_c_written_dense_attributes() {
         }
         file.close().unwrap();
     }
-    write_c_starter(&dst_path, LibraryVersion::V110, LibraryVersion::latest());
+    fixtures::libhdf5_edit_repack_starter(
+        &dst_path,
+        LibraryVersion::V110,
+        LibraryVersion::latest(),
+        &[7, 8],
+    )
+    .close()
+    .unwrap();
 
     {
         let source = File::open(&src_path).unwrap();
@@ -1659,7 +1676,9 @@ fn a_replaced_object_is_read_by_the_c_library() {
     ] {
         let dir = tempdir().unwrap();
         let path = dir.path().join(name);
-        write_c_starter(&path, low, high);
+        fixtures::libhdf5_edit_repack_starter(&path, low, high, &[7, 8])
+            .close()
+            .unwrap();
         assert_eq!(File::open(&path).unwrap().superblock().version, want_sb);
 
         {

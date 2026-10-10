@@ -12,32 +12,7 @@
 use hdf5_pure::File;
 use tempfile::tempdir;
 
-use test_util_hdf5::file;
-
-/// Dirty `g` so its object header is rebuilt at a fresh address, then spend the
-/// freed space, so a reference left behind resolves to reused bytes rather than
-/// to a stale copy that still happens to read.
-fn move_the_group_and_churn(path: &std::path::Path) {
-    let session = File::open_rw(path).unwrap();
-    session
-        .root()
-        .create_dataset("g/extra", |b| {
-            b.with_i32_data(&[9]);
-        })
-        .unwrap();
-    session.commit().unwrap();
-    drop(session);
-    for i in 0..10 {
-        let session = File::open_rw(path).unwrap();
-        session
-            .root()
-            .create_dataset(&format!("churn{i}"), |b| {
-                b.with_i32_data(&[i]);
-            })
-            .unwrap();
-        session.commit().unwrap();
-    }
-}
+use test_util_hdf5::{file, fixtures};
 
 fn assert_resolves_to_the_moved_group(group: &hdf5::Group) {
     let mut names = group.member_names().unwrap();
@@ -58,13 +33,7 @@ fn a_c_written_reference_attribute_is_repointed_and_the_header_resealed() {
 
     {
         let file = file::libhdf5_create_v18(&path);
-        let g = file.create_group("g").unwrap();
-        g.new_dataset::<i32>()
-            .shape((3,))
-            .create("inner")
-            .unwrap()
-            .write(&[1i32, 2, 3])
-            .unwrap();
+        fixtures::populate_libhdf5_reference_target(&file);
         let holder = file
             .new_dataset::<i32>()
             .shape((1,))
@@ -81,7 +50,7 @@ fn a_c_written_reference_attribute_is_repointed_and_the_header_resealed() {
         file.close().unwrap();
     }
 
-    move_the_group_and_churn(&path);
+    fixtures::move_reference_target_and_churn(&path, 10);
 
     // Opening the dataset and reading the attribute makes the C library verify
     // the object header's checksum: the repointed bytes live inside that header,
@@ -110,13 +79,7 @@ fn a_c_written_reference_dataset_is_repointed() {
 
     {
         let file = hdf5::File::create(&path).unwrap();
-        let g = file.create_group("g").unwrap();
-        g.new_dataset::<i32>()
-            .shape((3,))
-            .create("inner")
-            .unwrap()
-            .write(&[1i32, 2, 3])
-            .unwrap();
+        fixtures::populate_libhdf5_reference_target(&file);
         file.new_dataset::<ObjectReference1>()
             .shape((1,))
             .create("refs")
@@ -126,7 +89,7 @@ fn a_c_written_reference_dataset_is_repointed() {
         file.close().unwrap();
     }
 
-    move_the_group_and_churn(&path);
+    fixtures::move_reference_target_and_churn(&path, 10);
 
     let c = hdf5::File::open(&path).unwrap();
     let values = c
@@ -164,13 +127,7 @@ fn a_chunked_reference_dataset_is_left_unrepointed() {
 
     {
         let file = hdf5::File::create(&path).unwrap();
-        let g = file.create_group("g").unwrap();
-        g.new_dataset::<i32>()
-            .shape((3,))
-            .create("inner")
-            .unwrap()
-            .write(&[1i32, 2, 3])
-            .unwrap();
+        fixtures::populate_libhdf5_reference_target(&file);
         let reference = ObjectReference1::create(&file, "g").unwrap();
         file.new_dataset::<ObjectReference1>()
             .shape((4,))
@@ -202,7 +159,7 @@ fn a_chunked_reference_dataset_is_left_unrepointed() {
     let chunked_before = read("chunked");
     let contiguous_before = read("contiguous");
 
-    move_the_group_and_churn(&path);
+    fixtures::move_reference_target_and_churn(&path, 10);
 
     assert_ne!(
         read("contiguous"),
@@ -237,13 +194,7 @@ fn a_reference_on_a_rebuilt_header_is_repointed_in_the_header_the_commit_publish
 
     {
         let file = hdf5::File::create(&path).unwrap();
-        let g = file.create_group("g").unwrap();
-        g.new_dataset::<i32>()
-            .shape((3,))
-            .create("inner")
-            .unwrap()
-            .write(&[1i32, 2, 3])
-            .unwrap();
+        fixtures::populate_libhdf5_reference_target(&file);
         file.new_attr::<ObjectReference1>()
             .shape((1,))
             .create("target")
@@ -253,7 +204,7 @@ fn a_reference_on_a_rebuilt_header_is_repointed_in_the_header_the_commit_publish
         file.close().unwrap();
     }
 
-    move_the_group_and_churn(&path);
+    fixtures::move_reference_target_and_churn(&path, 10);
 
     let c = hdf5::File::open(&path).unwrap();
     let values = c
@@ -285,13 +236,7 @@ fn a_reference_dataset_through_a_committed_datatype_is_repointed() {
 
     {
         let file = hdf5::File::create(&path).unwrap();
-        let g = file.create_group("g").unwrap();
-        g.new_dataset::<i32>()
-            .shape((3,))
-            .create("inner")
-            .unwrap()
-            .write(&[1i32, 2, 3])
-            .unwrap();
+        fixtures::populate_libhdf5_reference_target(&file);
         let reference = ObjectReference1::create(&file, "g").unwrap();
 
         // `H5T_STD_REF_OBJ` is one of the library's immutable predefined types,
@@ -308,7 +253,7 @@ fn a_reference_dataset_through_a_committed_datatype_is_repointed() {
         file.close().unwrap();
     }
 
-    move_the_group_and_churn(&path);
+    fixtures::move_reference_target_and_churn(&path, 10);
 
     let c = hdf5::File::open(&path).unwrap();
     let values = c
@@ -343,13 +288,7 @@ fn an_earliest_format_reference_dataset_is_repointed() {
     let path = dir.path().join("earliest.h5");
     {
         let file = file::libhdf5_create_earliest(&path);
-        let g = file.create_group("g").unwrap();
-        g.new_dataset::<i32>()
-            .shape((3,))
-            .create("inner")
-            .unwrap()
-            .write(&[1i32, 2, 3])
-            .unwrap();
+        fixtures::populate_libhdf5_reference_target(&file);
         file.new_dataset::<ObjectReference1>()
             .shape((1,))
             .create("refs")
@@ -369,7 +308,7 @@ fn an_earliest_format_reference_dataset_is_repointed() {
          about nothing"
     );
 
-    move_the_group_and_churn(&path);
+    fixtures::move_reference_target_and_churn(&path, 10);
 
     let c = hdf5::File::open(&path).unwrap();
     let values = c

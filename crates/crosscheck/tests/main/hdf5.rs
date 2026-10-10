@@ -9,7 +9,7 @@ use hdf5_pure::{
     make_f64_type,
 };
 use tempfile::tempdir;
-use test_util_hdf5::file;
+use test_util_hdf5::{file, fixtures};
 
 /// Read a MATLAB-style variable-length ASCII attribute from an `hdf5::Attribute`.
 /// Our serializer emits the same `H5T_VLEN { H5T_STRING { STRSIZE 1 } }` shape
@@ -1109,26 +1109,7 @@ fn crosscheck_path_references_2d_shape() {
     let path = dir.path().join("refs_2d.h5");
 
     let mut builder = FileBuilder::new();
-
-    let mut refs_grp = builder.create_group("#refs#");
-    refs_grp.create_dataset("a").with_f64_data(&[1.0]);
-    refs_grp.create_dataset("b").with_f64_data(&[2.0]);
-    refs_grp.create_dataset("c").with_f64_data(&[3.0]);
-    refs_grp.create_dataset("d").with_f64_data(&[4.0]);
-    builder.add_group(refs_grp.finish());
-
-    // Shape [1, 4] — row vector of references
-    builder
-        .create_dataset("row_refs")
-        .with_path_references(&["#refs#/a", "#refs#/b", "#refs#/c", "#refs#/d"])
-        .with_shape(&[1, 4]);
-
-    // Shape [2, 1] — column vector of references
-    builder
-        .create_dataset("col_refs")
-        .with_path_references(&["#refs#/a", "#refs#/b"])
-        .with_shape(&[2, 1]);
-
+    fixtures::path_references_2d(&mut builder);
     builder.write(&path).unwrap();
 
     let file = hdf5::File::open(&path).unwrap();
@@ -1146,45 +1127,7 @@ fn crosscheck_matlab_refs_subsystem_pattern() {
     let path = dir.path().join("refs_subsystem.h5");
 
     let mut builder = FileBuilder::new();
-
-    // --- #refs# group ---
-    let mut refs_grp = builder.create_group("#refs#");
-    refs_grp
-        .create_dataset("a")
-        .with_u16_data(&[72, 101, 108, 108, 111]);
-    refs_grp
-        .create_dataset("b")
-        .with_u16_data(&[87, 111, 114, 108, 100]);
-    refs_grp.create_dataset("c").with_u16_data(&[70, 111, 111]);
-
-    // Cross-references within #refs#
-    refs_grp
-        .create_dataset("cell_data")
-        .with_path_references(&["#refs#/a", "#refs#/b", "#refs#/c"])
-        .with_shape(&[1, 3]);
-
-    refs_grp
-        .create_dataset("type_info")
-        .with_u8_data(&[0, 0, 0, 0, 0, 0, 1, 0])
-        .set_attr("MATLAB_class", AttrValue::AsciiString("string".into()));
-
-    builder.add_group(refs_grp.finish());
-
-    // --- #subsystem# group ---
-    let mut subsys_grp = builder.create_group("#subsystem#");
-    subsys_grp
-        .create_dataset("MCOS")
-        .with_path_references(&["#refs#/cell_data", "#refs#/type_info"])
-        .with_shape(&[2, 1]);
-    builder.add_group(subsys_grp.finish());
-
-    // --- Root dataset with reference ---
-    builder
-        .create_dataset("data")
-        .with_path_references(&["#refs#/a"])
-        .with_shape(&[1, 1])
-        .set_attr("MATLAB_class", AttrValue::AsciiString("string".into()));
-
+    fixtures::matlab_refs_subsystem(&mut builder);
     builder.write(&path).unwrap();
 
     // --- Verify with C HDF5 ---
@@ -1292,15 +1235,7 @@ fn crosscheck_varlen_ascii_on_nested_group() {
     let path = dir.path().join("grp_vl.h5");
 
     let mut builder = FileBuilder::new();
-    let mut grp = builder.create_group("my_struct");
-    grp.create_dataset("x").with_f64_data(&[1.0, 2.0]);
-    grp.create_dataset("y").with_f64_data(&[3.0, 4.0]);
-    grp.set_attr("MATLAB_class", AttrValue::AsciiString("struct".into()));
-    grp.set_attr(
-        "MATLAB_fields",
-        AttrValue::VarLenAsciiCharArray(vec!["x".into(), "y".into()]),
-    );
-    builder.add_group(grp.finish());
+    fixtures::nested_matlab_struct(&mut builder);
     builder.write(&path).unwrap();
 
     let file = hdf5::File::open(&path).unwrap();
@@ -1429,21 +1364,7 @@ fn crosscheck_group_only_no_datasets() {
     let path = dir.path().join("grp_only.h5");
 
     let mut builder = FileBuilder::new();
-
-    let mut outer = builder.create_group("outer");
-    outer.set_attr("MATLAB_class", AttrValue::AsciiString("struct".into()));
-
-    let mut child_a = outer.create_group("a");
-    child_a.create_dataset("val").with_f64_data(&[1.0]);
-    child_a.set_attr("MATLAB_class", AttrValue::AsciiString("double".into()));
-    outer.add_group(child_a.finish());
-
-    let mut child_b = outer.create_group("b");
-    child_b.create_dataset("val").with_i32_data(&[42]);
-    child_b.set_attr("MATLAB_class", AttrValue::AsciiString("int32".into()));
-    outer.add_group(child_b.finish());
-
-    builder.add_group(outer.finish());
+    fixtures::group_only_matlab_struct(&mut builder);
     builder.write(&path).unwrap();
 
     let file = hdf5::File::open(&path).unwrap();

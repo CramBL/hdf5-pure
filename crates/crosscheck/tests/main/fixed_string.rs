@@ -18,8 +18,9 @@
 //! own C calls through an internal lock, so these tests need no extra guard.
 
 use hdf5::types::{FixedAscii, FixedUnicode, TypeDescriptor};
-use hdf5_pure::{FileBuilder, MaxExtent};
+use hdf5_pure::FileBuilder;
 use tempfile::tempdir;
+use test_util_hdf5::fixed_string;
 
 /// The width the C library reports comes from the datatype message, so a writer
 /// that padded to a different stride than it declared fails here even though
@@ -29,22 +30,15 @@ fn the_c_library_reports_the_width_this_crate_declared() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("strings.h5");
 
-    let values = ["north", "s", "", "east"];
     let mut b = FileBuilder::new();
-    b.create_dataset("derived")
-        .with_ascii_strings(&values)
-        .unwrap();
-    b.create_dataset("sized")
-        .with_ascii_strings_sized(&values, 16)
-        .unwrap();
-    b.create_dataset("utf8").with_strings(&values).unwrap();
+    fixed_string::matrix(&mut b);
     b.write(&path).unwrap();
 
     let file = hdf5::File::open(&path).unwrap();
     for (name, expected) in [
-        ("derived", TypeDescriptor::FixedAscii(5)),
-        ("sized", TypeDescriptor::FixedAscii(16)),
-        ("utf8", TypeDescriptor::FixedUnicode(5)),
+        ("derived_ascii", TypeDescriptor::FixedAscii(5)),
+        ("sized_ascii", TypeDescriptor::FixedAscii(16)),
+        ("derived_utf8", TypeDescriptor::FixedUnicode(5)),
     ] {
         assert_eq!(
             file.dataset(name)
@@ -69,45 +63,44 @@ fn the_c_library_reads_back_every_value() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("strings.h5");
 
-    let values = ["north", "s", "", "east"];
     let mut b = FileBuilder::new();
-    b.create_dataset("derived")
-        .with_ascii_strings(&values)
-        .unwrap();
-    b.create_dataset("sized")
-        .with_ascii_strings_sized(&values, 16)
-        .unwrap();
-    b.create_dataset("utf8").with_strings(&values).unwrap();
+    fixed_string::matrix(&mut b);
     b.write(&path).unwrap();
 
     let file = hdf5::File::open(&path).unwrap();
 
     let derived: Vec<FixedAscii<5>> = file
-        .dataset("derived")
+        .dataset("derived_ascii")
         .unwrap()
         .read_1d::<FixedAscii<5>>()
         .unwrap()
         .to_vec();
     assert_eq!(
         derived.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
-        values
+        fixed_string::MATRIX_VALUES
     );
 
     let sized: Vec<FixedAscii<16>> = file
-        .dataset("sized")
+        .dataset("sized_ascii")
         .unwrap()
         .read_1d::<FixedAscii<16>>()
         .unwrap()
         .to_vec();
-    assert_eq!(sized.iter().map(|s| s.as_str()).collect::<Vec<_>>(), values);
+    assert_eq!(
+        sized.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
+        fixed_string::MATRIX_VALUES
+    );
 
     let utf8: Vec<FixedUnicode<5>> = file
-        .dataset("utf8")
+        .dataset("derived_utf8")
         .unwrap()
         .read_1d::<FixedUnicode<5>>()
         .unwrap()
         .to_vec();
-    assert_eq!(utf8.iter().map(|s| s.as_str()).collect::<Vec<_>>(), values);
+    assert_eq!(
+        utf8.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
+        fixed_string::MATRIX_VALUES
+    );
 }
 
 /// The charset bit is load-bearing on the C side, not decoration: `FixedAscii`
@@ -151,9 +144,7 @@ fn the_c_library_reads_a_multi_byte_value_whole() {
     let path = dir.path().join("units.h5");
 
     let mut b = FileBuilder::new();
-    b.create_dataset("units")
-        .with_strings(&["mètre", "K", "°C"])
-        .unwrap();
+    fixed_string::utf8_units(&mut b);
     b.write(&path).unwrap();
 
     let file = hdf5::File::open(&path).unwrap();
@@ -165,7 +156,7 @@ fn the_c_library_reads_a_multi_byte_value_whole() {
     let read: Vec<FixedUnicode<6>> = ds.read_1d::<FixedUnicode<6>>().unwrap().to_vec();
     assert_eq!(
         read.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
-        ["mètre", "K", "°C"]
+        fixed_string::UTF8_VALUES
     );
 }
 
@@ -178,9 +169,7 @@ fn the_c_library_opens_an_all_empty_fixed_string_dataset() {
     let path = dir.path().join("blank.h5");
 
     let mut b = FileBuilder::new();
-    b.create_dataset("blank")
-        .with_ascii_strings(&["", "", ""])
-        .unwrap();
+    fixed_string::empty_ascii(&mut b);
     b.write(&path).unwrap();
 
     let file = hdf5::File::open(&path).unwrap();
@@ -206,11 +195,7 @@ fn the_c_library_extends_a_declared_width_dataset() {
     let path = dir.path().join("stations.h5");
 
     let mut b = FileBuilder::new();
-    b.create_dataset("station")
-        .with_ascii_strings_sized(&["north", "s"], 16)
-        .unwrap()
-        .with_maxshape(&[MaxExtent::Unlimited])
-        .with_chunks(&[4]);
+    fixed_string::extensible_ascii(&mut b);
     b.write(&path).unwrap();
 
     {

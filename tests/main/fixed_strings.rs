@@ -12,28 +12,17 @@
 //! in `crates/crosscheck/tests/main/attr_width.rs` for the attributes.
 
 use hdf5_pure::{
-    AttrValue, CharacterSet, Datatype, Error, File, FileBuilder, FormatError, MaxExtent,
-    StringPadding, VlenStringReadOptions,
+    AttrValue, CharacterSet, Datatype, Error, File, FileBuilder, FormatError, StringPadding,
+    VlenStringReadOptions,
 };
 use tempfile::tempdir;
+use test_util_hdf5::fixed_string;
 
 /// Every fixed-width string entry point, through a file and back.
 #[test]
 fn fixed_width_strings_round_trip_through_a_file() {
-    let values = ["north", "s", "", "east"];
     let mut b = FileBuilder::new();
-    b.create_dataset("derived_ascii")
-        .with_ascii_strings(&values)
-        .unwrap();
-    b.create_dataset("sized_ascii")
-        .with_ascii_strings_sized(&values, 16)
-        .unwrap();
-    b.create_dataset("derived_utf8")
-        .with_strings(&values)
-        .unwrap();
-    b.create_dataset("sized_utf8")
-        .with_strings_sized(&values, 16)
-        .unwrap();
+    fixed_string::matrix(&mut b);
     let file = File::from_bytes(b.finish().unwrap()).unwrap();
 
     for (name, width, charset) in [
@@ -53,7 +42,11 @@ fn fixed_width_strings_round_trip_through_a_file() {
             "{name}"
         );
         assert_eq!(ds.shape().unwrap(), vec![4], "{name}");
-        assert_eq!(ds.read_string().unwrap(), values, "{name}");
+        assert_eq!(
+            ds.read_string().unwrap(),
+            fixed_string::MATRIX_VALUES,
+            "{name}"
+        );
         // The windowed reader decodes straight from the raw window, a separate
         // path from the whole-dataset one.
         assert_eq!(ds.read_string_rows(1, 2).unwrap(), ["s", ""], "{name}");
@@ -65,9 +58,8 @@ fn fixed_width_strings_round_trip_through_a_file() {
 /// charset bit is what tells a reader the bytes are not one character each.
 #[test]
 fn a_utf8_value_is_measured_in_bytes_and_read_back_whole() {
-    let values = ["mètre", "K", "°C"];
     let mut b = FileBuilder::new();
-    b.create_dataset("units").with_strings(&values).unwrap();
+    fixed_string::utf8_units(&mut b);
     let file = File::from_bytes(b.finish().unwrap()).unwrap();
 
     let ds = file.dataset("units").unwrap();
@@ -80,7 +72,7 @@ fn a_utf8_value_is_measured_in_bytes_and_read_back_whole() {
             charset: CharacterSet::Utf8,
         }
     );
-    assert_eq!(ds.read_string().unwrap(), values);
+    assert_eq!(ds.read_string().unwrap(), fixed_string::UTF8_VALUES);
 }
 
 /// The reason [`DatasetBuilder::with_ascii_strings_sized`] exists: a dataset can
@@ -95,15 +87,11 @@ fn a_declared_width_leaves_room_for_a_later_longer_value() {
     let path = dir.path().join("stations.h5");
 
     let mut b = FileBuilder::new();
-    b.create_dataset("station")
-        .with_ascii_strings_sized(&["north", "s"], 16)
-        .unwrap()
-        .with_maxshape(&[MaxExtent::Unlimited])
-        .with_chunks(&[4]);
+    fixed_string::extensible_ascii(&mut b);
     b.write(&path).unwrap();
 
     // Longer than the derived width of 5 would have been, and it fits.
-    let appended = ["north-northeast", "e"];
+    let appended = fixed_string::EXTENDED_VALUES;
     {
         let session = File::open_rw(&path).unwrap();
         let mut raw = Vec::new();
@@ -187,9 +175,7 @@ fn a_fixed_width_dataset_is_refused_by_the_vlen_reader() {
 #[test]
 fn all_empty_values_take_a_one_byte_datatype() {
     let mut b = FileBuilder::new();
-    b.create_dataset("blank")
-        .with_ascii_strings(&["", "", ""])
-        .unwrap();
+    fixed_string::empty_ascii(&mut b);
     let file = File::from_bytes(b.finish().unwrap()).unwrap();
 
     let ds = file.dataset("blank").unwrap();

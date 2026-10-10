@@ -35,10 +35,7 @@ use hdf5_pure::{File, FileBuilder, FileSpaceStrategy};
 use proptest::prelude::*;
 use tempfile::tempdir;
 use test_util::range;
-use test_util_hdf5::dataset::Unlimited;
-use test_util_hdf5::session;
-
-use super::file_space;
+use test_util_hdf5::{dataset::Unlimited, file_space, session};
 
 /// The four file-space strategies, each mapped to the name the C library reports.
 fn strategy() -> impl Strategy<Value = FileSpaceStrategy> {

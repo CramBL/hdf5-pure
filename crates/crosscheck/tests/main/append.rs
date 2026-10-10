@@ -7,18 +7,13 @@
 
 use hdf5_pure::FileBuilder;
 use tempfile::tempdir;
-use test_util_hdf5::dataset::{self, Filter, Unlimited};
-
-const SHUFFLE_DEFLATE: &[Filter] = &[Filter::Shuffle, Filter::Deflate(6)];
+use test_util_hdf5::dataset::{self, AppendInteropFixture, Unlimited};
 
 #[test]
 fn pure_creates_pure_appends_c_reads() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("d.h5");
-    let base: Vec<i32> = (0..12).collect();
-    Unlimited::new("d", &base, 4)
-        .filters(SHUFFLE_DEFLATE)
-        .pure_create(&path);
+    AppendInteropFixture::filtered_pure(12, 4).write(&path);
     // Aligned append (12 -> 20) then unaligned (20 -> 27).
     dataset::pure_append_staged(&path, "d", &(12..20).collect::<Vec<_>>());
     dataset::pure_append_staged(&path, "d", &(20..27).collect::<Vec<_>>());
@@ -32,10 +27,7 @@ fn pure_creates_pure_appends_c_reads() {
 fn c_creates_pure_appends_both_read() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("d.h5");
-    let base: Vec<i32> = (0..20).collect();
-    Unlimited::new("d", &base, 5)
-        .filters(SHUFFLE_DEFLATE)
-        .libhdf5_create(&path);
+    AppendInteropFixture::filtered_libhdf5(20, 5).write(&path);
     dataset::pure_append_staged(&path, "d", &(20..33).collect::<Vec<_>>()); // unaligned 20 -> 33
     let expected: Vec<i32> = (0..33).collect();
     assert_eq!(dataset::read_pure::<i32>(&path, "d"), expected);
@@ -52,10 +44,8 @@ fn c_incompressible_kept_chunks_filter_mask_preserved() {
     // garbage.
     let dir = tempdir().unwrap();
     let path = dir.path().join("d.h5");
-    let base = dataset::incompressible(0xABCD_1234, 40); // 8 chunks of 5, all incompressible
-    Unlimited::new("d", &base, 5)
-        .filters(SHUFFLE_DEFLATE)
-        .libhdf5_create(&path);
+    // 8 chunks of 5, all incompressible.
+    let base = AppendInteropFixture::incompressible_libhdf5(0xABCD_1234, 40, 5).write(&path);
 
     let extra = dataset::incompressible(0x5555_AAAA, 17); // unaligned append (40 -> 57)
     dataset::pure_append_staged(&path, "d", &extra);
@@ -77,7 +67,7 @@ fn append_to_c_empty_extensible() {
     let path = dir.path().join("d.h5");
     // C creates an empty (0-length) resizable filtered dataset.
     Unlimited::<i32>::new("d", &[], 4)
-        .filters(SHUFFLE_DEFLATE)
+        .filters(dataset::SHUFFLE_DEFLATE_6)
         .libhdf5_create(&path);
     dataset::pure_append_staged(&path, "d", &(0..10).collect::<Vec<_>>());
     let expected: Vec<i32> = (0..10).collect();
@@ -89,7 +79,7 @@ fn append_to_c_empty_extensible() {
 fn pure_unfiltered_append_c_reads() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("d.h5");
-    Unlimited::new("d", &(0..10).collect::<Vec<i32>>(), 4).pure_create(&path);
+    AppendInteropFixture::unfiltered_pure(10, 4).write(&path);
     dataset::pure_append_staged(&path, "d", &(10..23).collect::<Vec<_>>());
     let expected: Vec<i32> = (0..23).collect();
     assert_eq!(dataset::read_pure::<i32>(&path, "d"), expected);
@@ -103,7 +93,7 @@ fn userblock_append_c_reads() {
     let mut b = FileBuilder::new();
     b.with_userblock(512);
     Unlimited::new("d", &(0..10).collect::<Vec<i32>>(), 4)
-        .filters(SHUFFLE_DEFLATE)
+        .filters(dataset::SHUFFLE_DEFLATE_6)
         .add_to(&mut b);
     b.write(&path).unwrap();
     dataset::pure_append_staged(&path, "d", &(10..21).collect::<Vec<_>>()); // unaligned
@@ -118,10 +108,7 @@ fn large_paged_ea_append_c_reads() {
     // super blocks / paged data blocks, then confirm the C library reads it back.
     let dir = tempdir().unwrap();
     let path = dir.path().join("d.h5");
-    let base: Vec<i32> = (0..64).collect();
-    Unlimited::new("d", &base, 1)
-        .filters(SHUFFLE_DEFLATE)
-        .pure_create(&path);
+    AppendInteropFixture::filtered_pure(64, 1).write(&path);
     dataset::pure_append_staged(&path, "d", &(64..4096).collect::<Vec<_>>());
     let expected: Vec<i32> = (0..4096).collect();
     assert_eq!(dataset::read_pure::<i32>(&path, "d"), expected);

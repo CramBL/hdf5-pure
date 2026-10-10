@@ -9,7 +9,7 @@ use hdf5_pure::{
 use tempfile::tempdir;
 use test_util_hdf5::{
     dataset::{self, Filter, Unlimited},
-    session,
+    file_space, session,
 };
 
 #[test]
@@ -240,10 +240,7 @@ fn userblock_file_is_refused_at_open() {
 fn persisted_free_space_file_appends_and_finalizes() {
     let dir = tempdir().unwrap();
     let p = dir.path().join("persist.h5");
-    let mut b = FileBuilder::new();
-    b.with_file_space_strategy(FileSpaceStrategy::FsmAggr, true, 1);
-    Unlimited::new("d", &(0..10).collect::<Vec<i32>>(), 4).add_to(&mut b);
-    b.write(&p).unwrap();
+    file_space::write_persisting_unlimited_i32(&p, 10, 4, 1);
 
     {
         let file = session::open_bounded_on_close(&p).unwrap();
@@ -278,10 +275,7 @@ fn persisted_free_space_file_appends_and_finalizes() {
 fn persisted_free_space_many_appends_one_finalize() {
     let dir = tempdir().unwrap();
     let p = dir.path().join("persist_many.h5");
-    let mut b = FileBuilder::new();
-    b.with_file_space_strategy(FileSpaceStrategy::FsmAggr, true, 3);
-    Unlimited::new("d", &[0], 16).add_to(&mut b);
-    b.write(&p).unwrap();
+    file_space::write_persisting_unlimited_i32(&p, 1, 16, 3);
 
     {
         let file = session::open_bounded_on_close(&p).unwrap();
@@ -306,10 +300,7 @@ fn persisted_free_space_many_appends_one_finalize() {
 fn persisted_free_space_drop_finalizes() {
     let dir = tempdir().unwrap();
     let p = dir.path().join("persist_drop.h5");
-    let mut b = FileBuilder::new();
-    b.with_file_space_strategy(FileSpaceStrategy::FsmAggr, true, 1);
-    Unlimited::new("d", &(0..8).collect::<Vec<i32>>(), 4).add_to(&mut b);
-    b.write(&p).unwrap();
+    file_space::write_persisting_unlimited_i32(&p, 8, 4, 1);
 
     {
         let file = session::open_bounded_on_close(&p).unwrap();
@@ -337,10 +328,7 @@ fn persisted_free_space_drop_finalizes() {
 fn persisted_free_space_noop_close_does_not_grow() {
     let dir = tempdir().unwrap();
     let p = dir.path().join("persist_noop.h5");
-    let mut b = FileBuilder::new();
-    b.with_file_space_strategy(FileSpaceStrategy::FsmAggr, true, 1);
-    Unlimited::new("d", &(0..8).collect::<Vec<i32>>(), 4).add_to(&mut b);
-    b.write(&p).unwrap();
+    file_space::write_persisting_unlimited_i32(&p, 8, 4, 1);
     let before = std::fs::metadata(&p).unwrap().len();
 
     session::open_bounded_on_close(&p).unwrap().close().unwrap();
