@@ -375,6 +375,22 @@ pub enum FormatError {
     /// The writer rejects malformed geometry before splitting chunks. The payload
     /// is a human-readable reason.
     InvalidChunkGeometry(&'static str),
+    /// A stored filter name violates the pipeline's name encoding.
+    InvalidFilterName {
+        /// The identifier of the filter with the malformed name.
+        filter_id: u16,
+        /// The name constraint that failed.
+        reason: &'static str,
+    },
+    /// A filter pipeline field exceeds its format limit.
+    InvalidFilterPipelineField {
+        /// The field whose value exceeds the limit.
+        field: &'static str,
+        /// The value read from the field.
+        value: usize,
+        /// The largest value the format permits for the field.
+        maximum: usize,
+    },
     /// Invalid filter pipeline version.
     InvalidFilterPipelineVersion(u8),
     /// Unsupported filter ID.
@@ -988,6 +1004,19 @@ impl fmt::Display for FormatError {
             }
             Self::InvalidChunkGeometry(reason) => {
                 write!(f, "invalid chunk geometry: {reason}")
+            }
+            Self::InvalidFilterName { filter_id, reason } => {
+                write!(f, "invalid name for filter {filter_id}: {reason:?}")
+            }
+            Self::InvalidFilterPipelineField {
+                field,
+                value,
+                maximum,
+            } => {
+                write!(
+                    f,
+                    "filter pipeline {field:?} is {value}, above maximum {maximum}"
+                )
             }
             Self::InvalidFilterPipelineVersion(v) => {
                 write!(f, "invalid filter pipeline version: {v}")

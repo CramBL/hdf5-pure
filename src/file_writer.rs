@@ -33,6 +33,7 @@ use hdf5_pure_format::__private::BTREE_V2_HUGE_OBJECT;
 use hdf5_pure_format::__private::BTREE_V2_NODE_SIZE;
 use hdf5_pure_format::__private::BTreeV2Plan;
 use hdf5_pure_format::__private::FRACTAL_HEAP_DIRECT_BLOCKS_CHECKSUMMED;
+use hdf5_pure_format::__private::FractalHeapFiltering;
 use hdf5_pure_format::__private::FractalHeapHeader;
 use hdf5_pure_format::__private::FreeSection;
 use hdf5_pure_format::__private::HugeObjectRecord;
@@ -898,7 +899,7 @@ impl DenseAttrPlan {
         let max_managed = DENSE_ATTR_MAX_MANAGED_OBJECT as u32;
         let header = FractalHeapHeader {
             heap_id_length,
-            io_filter_encoded_length: 0,
+            filtering: FractalHeapFiltering::Unfiltered,
             flags: FRACTAL_HEAP_DIRECT_BLOCKS_CHECKSUMMED,
             max_managed_object_size: max_managed,
             next_huge_object_id: huge_count as u64,

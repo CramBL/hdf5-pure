@@ -11,10 +11,9 @@ use crate::widths::Widths;
 /// The counts and sizes the header keeps of its own contents are what a reader
 /// reports about how the heap stored an object, so each is settable and every
 /// one defaults to an empty heap.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct Header {
     heap_id_len: u16,
-    filter_encoded_len: u16,
     flags: u8,
     max_managed_object_size: u32,
     next_huge_object_id: u64,
@@ -36,6 +35,9 @@ pub struct Header {
     starting_root_rows: u16,
     root_block_address: u64,
     root_indirect_rows: u16,
+    filtered_root_size: u64,
+    root_filter_mask: u32,
+    filter_pipeline: Vec<u8>,
 }
 
 impl Header {
@@ -43,7 +45,6 @@ impl Header {
     pub fn new(root_block_address: u64) -> Self {
         Self {
             heap_id_len: 7,
-            filter_encoded_len: 0,
             flags: 0,
             max_managed_object_size: 64,
             next_huge_object_id: 0,
@@ -65,6 +66,9 @@ impl Header {
             starting_root_rows: 2,
             root_block_address,
             root_indirect_rows: 0,
+            filtered_root_size: 0,
+            root_filter_mask: 0,
+            filter_pipeline: Vec::new(),
         }
     }
 
@@ -73,11 +77,38 @@ impl Header {
         self
     }
 
+    /// Sets the optional root filter fields and encoded pipeline bytes.
+    ///
+    /// `root_size` is the size in bytes of the root direct block after filtering, and `mask`
+    /// identifies the skipped filters. An empty `pipeline` produces an unfiltered header.
+    pub fn filtering(mut self, root_size: u64, mask: u32, pipeline: Vec<u8>) -> Self {
+        self.filtered_root_size = root_size;
+        self.root_filter_mask = mask;
+        self.filter_pipeline = pipeline;
+        self
+    }
+
+    /// Returns the encoded header, including its checksum.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the encoded filter pipeline exceeds [`u16::MAX`] bytes, a field width is
+    /// outside `1..=8`, or a value does not fit its field.
     pub fn build(&self, widths: Widths) -> Vec<u8> {
         let mut header = SIGNATURE.to_vec();
         header.push(VERSION);
         header.extend_from_slice(&self.heap_id_len.to_le_bytes());
-        header.extend_from_slice(&self.filter_encoded_len.to_le_bytes());
+        // "Fractal Heap", format specification version 4.0, defines a two-byte pipeline length.
+        assert!(
+            self.filter_pipeline.len() <= usize::from(u16::MAX),
+            "fixture pipeline fits u16"
+        );
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "the assertion bounds the pipeline length by u16::MAX"
+        )]
+        let encoded_len = self.filter_pipeline.len() as u16;
+        header.extend_from_slice(&encoded_len.to_le_bytes());
         header.push(self.flags);
         header.extend_from_slice(&self.max_managed_object_size.to_le_bytes());
         bytes::push_uint(&mut header, self.next_huge_object_id, widths.length);
@@ -103,6 +134,11 @@ impl Header {
         header.extend_from_slice(&self.starting_root_rows.to_le_bytes());
         bytes::push_uint(&mut header, self.root_block_address, widths.offset);
         header.extend_from_slice(&self.root_indirect_rows.to_le_bytes());
+        if !self.filter_pipeline.is_empty() {
+            bytes::push_uint(&mut header, self.filtered_root_size, widths.length);
+            header.extend_from_slice(&self.root_filter_mask.to_le_bytes());
+            header.extend_from_slice(&self.filter_pipeline);
+        }
         checksum::append(&mut header);
         header
     }

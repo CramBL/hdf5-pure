@@ -387,7 +387,7 @@ impl<'h> HeapObjectReader<'h> {
     ) -> Result<Vec<u8>, FormatError> {
         // A filtered heap stores its direct blocks filter-encoded, and the reader has no decoder
         // for them, so it returns an error.
-        if self.header.io_filter_encoded_length > 0 {
+        if self.header.filtering.is_filtered() {
             return Err(FormatError::UnsupportedFilteredHeapObject);
         }
         self.managed_layout()?;
@@ -526,7 +526,7 @@ impl<'h> HeapObjectReader<'h> {
         heap_offset: u64,
         object_length: u64,
     ) -> Result<Vec<u8>, FormatError> {
-        if self.header.io_filter_encoded_length > 0 {
+        if self.header.filtering.is_filtered() {
             return Err(FormatError::UnsupportedFilteredHeapObject);
         }
         self.managed_layout()?;
@@ -644,16 +644,20 @@ impl<'h> HeapObjectReader<'h> {
 
 #[cfg(test)]
 mod tests {
+    use hdf5_pure_format::__private::FilterPipeline;
+    use hdf5_pure_format::__private::FractalHeapFiltering;
     use hdf5_pure_format::__private::FractalHeapIdLayout;
-
     use rstest::rstest;
-
     use test_util::fractal_heap;
     use test_util::widths::Widths;
 
     use crate::source::BytesSource;
 
     use super::*;
+
+    // "The Data Storage - Filter Pipeline Message", format specification version 4.0, defines
+    // pipeline version 2.
+    const PIPELINE_VERSION_TWO: u8 = 2;
 
     #[rstest]
     #[case::tiny(vec![TINY_ID_FIRST_BYTE | 2, b'a', b'b', b'c', 0, 0, 0, 0])]
@@ -760,7 +764,14 @@ mod tests {
         // Root is a direct block.
         let mut h = FractalHeapHeader {
             heap_id_length: 7,
-            io_filter_encoded_length: 8,
+            filtering: FractalHeapFiltering::Filtered {
+                root_direct_block_size: 91,
+                root_filter_mask: 1,
+                pipeline: FilterPipeline {
+                    version: PIPELINE_VERSION_TWO,
+                    filters: vec![],
+                },
+            },
             flags: 0,
             max_managed_object_size: 0,
             next_huge_object_id: 0,

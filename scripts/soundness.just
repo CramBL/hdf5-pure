@@ -5,7 +5,7 @@ set working-directory := ".."
 
 default: miri heap-baseline
 
-# Miri over the tests of selected unsafe and high-risk paths: the MAT complex and transpose buffers, and the single-threaded mutex.
+# Miri over the MAT buffers and the single-threaded mutex.
 miri $MIRIFLAGS="-Zmiri-strict-provenance": miri-toolchain
     # Miri artifacts contain compiler-specific metadata. Store them under the pinned nightly so
     # artifacts from another Miri toolchain cannot share this target directory. cargo-miri adds its

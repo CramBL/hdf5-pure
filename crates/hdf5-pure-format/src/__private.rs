@@ -111,6 +111,7 @@ pub use crate::fixed_array::read_fixed_array_chunks;
 pub use crate::fixed_array::read_fixed_array_chunks_from_source;
 pub use crate::fractal_heap::FRACTAL_HEAP_DIRECT_BLOCKS_CHECKSUMMED;
 pub use crate::fractal_heap::FractalHeapChild;
+pub use crate::fractal_heap::FractalHeapFiltering;
 pub use crate::fractal_heap::FractalHeapHeader;
 pub use crate::fractal_heap::FractalHeapHeaderFrame;
 pub use crate::fractal_heap::FractalHeapIdKind;

@@ -28,7 +28,7 @@ const FILTER_COUNT_MAX: usize = 32;
 const FIELD_LENGTH_MAX: usize = u16::MAX as usize;
 
 /// Description of a single filter in a pipeline.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FilterDescription {
     /// Filter identification value.
     pub filter_id: u16,
@@ -51,7 +51,7 @@ impl FilterDescription {
 const FILTER_FLAG_OPTIONAL: u16 = 0x0001;
 
 /// A versioned filter pipeline message and its ordered filter descriptions.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FilterPipeline {
     /// Pipeline version (1 or 2).
     pub version: u8,

@@ -5,16 +5,13 @@ use alloc::format;
 use alloc::vec;
 use alloc::vec::Vec;
 
-#[cfg(feature = "checksum")]
-use byteorder::ByteOrder;
-#[cfg(feature = "checksum")]
-use byteorder::LittleEndian;
-
 use crate::address::StoredAddress;
 use crate::bytes;
 use crate::convert;
 use crate::convert::Narrow;
 use crate::error::FormatError;
+use crate::filter_pipeline::FilterPipeline;
+use crate::filter_pipeline::FilterPipelineError;
 use crate::metadata_source::MetadataSource;
 use crate::width::LengthWidth;
 use crate::width::OffsetWidth;
@@ -100,9 +97,9 @@ pub enum FractalHeapChild {
 ///
 /// A group in dense storage keeps its links in a fractal heap, an object in dense storage keeps
 /// its attributes in one, and a file that shares messages keeps the messages of each index in one.
-/// [`parse`](Self::parse) accepts version 0, the one version the specification defines, and keeps
-/// every field of the header of a heap that does not filter its objects, which
-/// [`serialize`](Self::serialize) writes back.
+/// [`parse`](Self::parse) accepts version 0 and retains the optional root filter fields and filter
+/// pipeline. [`serialize`](Self::serialize) writes headers with
+/// [`FractalHeapFiltering::Unfiltered`].
 ///
 /// The header is defined in "Fractal Heap" of the [format specification, version 4.0][spec].
 ///
@@ -111,9 +108,6 @@ pub enum FractalHeapChild {
 pub struct FractalHeapHeader {
     /// The length in bytes of the heap's IDs.
     pub heap_id_length: u16,
-    /// The size in bytes of the encoded I/O filter pipeline, 0 for a heap that does not filter its
-    /// objects.
-    pub io_filter_encoded_length: u16,
     /// The heap status flags: bit 0 is set once the huge object IDs have wrapped around, and bit
     /// 1, [`FRACTAL_HEAP_DIRECT_BLOCKS_CHECKSUMMED`], where the direct blocks store a checksum.
     pub flags: u8,
@@ -169,6 +163,8 @@ pub struct FractalHeapHeader {
     pub root_block_address: StoredAddress,
     /// The number of rows in the root indirect block, 0 where the root is a direct block.
     pub current_rows_in_root_indirect_block: u16,
+    /// The optional root filter fields and decoded filter pipeline.
+    pub filtering: FractalHeapFiltering,
 }
 
 /// Reads the little-endian integer in the first 8 bytes of `payload`, or in all of it where it is
@@ -200,37 +196,63 @@ impl FractalHeapHeader {
     /// Parses the fractal heap header at `offset` in `file_data`.
     ///
     /// `offset_size` and `length_size` are the superblock's "Size of Offsets" and "Size of
-    /// Lengths" bytes. With the `checksum` feature, `parse` also verifies the header's checksum.
+    /// Lengths" bytes. Parses the complete header using [`parse_bytes`](Self::parse_bytes).
     ///
     /// # Errors
     ///
-    /// Returns [`FormatError::InvalidFractalHeapSignature`] if the header does not begin with
-    /// `FRHP`, [`FormatError::InvalidFractalHeapVersion`] if its version is not 0,
-    /// [`FormatError::UnexpectedEof`] if it runs past the end of `file_data`,
-    /// [`FormatError::InvalidOffsetSize`] or [`FormatError::InvalidLengthSize`] if a width is not
-    /// 2, 4, or 8, and, with the `checksum` feature, [`FormatError::ChecksumMismatch`] if the
-    /// stored checksum differs from the computed one.
+    /// Returns [`FormatError::InvalidOffsetSize`] or [`FormatError::InvalidLengthSize`] if a width
+    /// is not 2, 4, or 8, [`FormatError::UnexpectedEof`] if `offset` is beyond the end of
+    /// `file_data`, and the errors [`parse_bytes`](Self::parse_bytes) returns.
     pub fn parse(
         file_data: &[u8],
         offset: usize,
         offset_size: u8,
         length_size: u8,
     ) -> Result<FractalHeapHeader, FormatError> {
-        bytes::ensure_len(file_data, offset, 5)?;
-        if file_data[offset..offset + 4] != FRACTAL_HEAP_SIGNATURE {
-            return Err(FormatError::InvalidFractalHeapSignature);
-        }
-
-        let version = file_data[offset + 4];
-        if version != FRACTAL_HEAP_VERSION {
-            return Err(FormatError::InvalidFractalHeapVersion(version));
-        }
-
         let offsets = OffsetWidth::try_from(offset_size)?;
         let lengths = LengthWidth::try_from(length_size)?;
-        let mut fields = bytes::Fields::new(file_data, offset + 5);
+        let bytes = file_data.get(offset..).ok_or(FormatError::UnexpectedEof {
+            expected: offset,
+            available: file_data.len(),
+        })?;
+        Self::parse_bytes(bytes, offsets, lengths)
+    }
+
+    /// Parses the complete version 0 header at the start of `data`.
+    ///
+    /// `offsets` and `lengths` are the file's address and length widths. The parser retains the
+    /// optional root filter fields and decoded filter pipeline, and ignores bytes after the
+    /// header's checksum. With the `checksum` feature, it verifies the checksum over all preceding
+    /// header bytes, including the encoded filter pipeline.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::UnexpectedEof`] if the header is incomplete, and the other errors
+    /// [`FractalHeapHeaderFrame::parse`] returns for its prefix.
+    ///
+    /// Returns [`FormatError::InvalidFilterPipelineVersion`] if the filter pipeline version is
+    /// not 1 or 2, [`FormatError::InvalidFilterPipelineField`] if a pipeline field exceeds its
+    /// format limit, and [`FormatError::InvalidFilterName`] if a stored filter name is malformed.
+    ///
+    /// With the `checksum` feature, returns [`FormatError::ChecksumMismatch`] if the stored
+    /// checksum differs from the computed one.
+    pub fn parse_bytes(
+        data: &[u8],
+        offsets: OffsetWidth,
+        lengths: LengthWidth,
+    ) -> Result<Self, FormatError> {
+        let frame = FractalHeapHeaderFrame::parse(data, offsets, lengths)?;
+        let data = data
+            .get(..frame.encoded_len())
+            .ok_or(FormatError::UnexpectedEof {
+                expected: frame.encoded_len(),
+                available: data.len(),
+            })?;
+        let mut fields = bytes::Fields::new(data, 0);
+        fields.array::<{ FRACTAL_HEAP_SIGNATURE.len() }>()?;
+        fields.u8()?;
         let heap_id_length = fields.u16()?;
-        let io_filter_encoded_length = fields.u16()?;
+        let filter_encoded_len = fields.u16()?;
         let flags = fields.u8()?;
         let max_managed_object_size = fields.u32()?;
         let next_huge_object_id = fields.length(lengths)?;
@@ -252,18 +274,18 @@ impl FractalHeapHeader {
         let start_root_rows = fields.u16()?;
         let root_block_address = fields.address(offsets)?;
         let current_rows_in_root_indirect_block = fields.u16()?;
-        let mut pos = fields.pos();
-
-        // Skip the size of the filtered root direct block and its filter mask.
-        if io_filter_encoded_length > 0 {
-            pos += usize::from(length_size) + 4;
-        }
-
+        let filtering =
+            FractalHeapFiltering::parse(data, lengths, fields.pos(), filter_encoded_len)?;
+        let (payload, checksum) = data.split_last_chunk::<FRACTAL_HEAP_CHECKSUM_LEN>().ok_or(
+            FormatError::UnexpectedEof {
+                expected: FRACTAL_HEAP_CHECKSUM_LEN,
+                available: data.len(),
+            },
+        )?;
+        let stored = u32::from_le_bytes(*checksum);
         #[cfg(feature = "checksum")]
         {
-            bytes::ensure_len(file_data, pos, 4)?;
-            let stored = LittleEndian::read_u32(&file_data[pos..pos + 4]);
-            let computed = crate::checksum::jenkins_lookup3(&file_data[offset..pos]);
+            let computed = crate::checksum::jenkins_lookup3(payload);
             if computed != stored {
                 return Err(FormatError::ChecksumMismatch {
                     expected: stored,
@@ -272,11 +294,10 @@ impl FractalHeapHeader {
             }
         }
         #[cfg(not(feature = "checksum"))]
-        let _ = pos;
+        let _ = (payload, stored);
 
         Ok(FractalHeapHeader {
             heap_id_length,
-            io_filter_encoded_length,
             flags,
             max_managed_object_size,
             next_huge_object_id,
@@ -298,6 +319,7 @@ impl FractalHeapHeader {
             start_root_rows,
             root_block_address,
             current_rows_in_root_indirect_block,
+            filtering,
         })
     }
 
@@ -310,13 +332,12 @@ impl FractalHeapHeader {
         FRACTAL_HEAP_SIGNATURE.len() + 1 + 2 + 2 + 1 + 4 + 12 * ls + 3 * os + 2 + 2 + 2 + 2 + 4
     }
 
-    /// Returns the bytes of the header from its signature to its checksum, the inverse of
-    /// [`parse`](Self::parse).
+    /// Serializes an unfiltered header from its signature through its checksum.
     ///
     /// # Errors
     ///
-    /// Returns [`FormatError::UnsupportedFilteredHeapObject`] if the heap filters its objects,
-    /// whose header stores the filter fields this type does not hold.
+    /// Returns [`FormatError::UnsupportedFilteredHeapObject`] if
+    /// [`filtering`](Self::filtering) is [`FractalHeapFiltering::Filtered`].
     pub fn serialize(
         &self,
         offset_width: OffsetWidth,
@@ -324,7 +345,7 @@ impl FractalHeapHeader {
     ) -> Result<Vec<u8>, FormatError> {
         let Self {
             heap_id_length,
-            io_filter_encoded_length,
+            ref filtering,
             flags,
             max_managed_object_size,
             next_huge_object_id,
@@ -347,14 +368,14 @@ impl FractalHeapHeader {
             root_block_address,
             current_rows_in_root_indirect_block,
         } = *self;
-        if io_filter_encoded_length > 0 {
+        if filtering.is_filtered() {
             return Err(FormatError::UnsupportedFilteredHeapObject);
         }
         let mut buf = Vec::with_capacity(Self::serialized_size(offset_width, length_width));
         buf.extend_from_slice(&FRACTAL_HEAP_SIGNATURE);
         buf.push(FRACTAL_HEAP_VERSION);
         buf.extend_from_slice(&heap_id_length.to_le_bytes());
-        buf.extend_from_slice(&io_filter_encoded_length.to_le_bytes());
+        buf.extend_from_slice(&0u16.to_le_bytes());
         buf.push(flags);
         buf.extend_from_slice(&max_managed_object_size.to_le_bytes());
         bytes::write_length(&mut buf, next_huge_object_id, length_width);
@@ -438,7 +459,7 @@ impl FractalHeapHeader {
         offset_width: OffsetWidth,
         length_width: LengthWidth,
     ) -> Result<Vec<u8>, FormatError> {
-        if self.io_filter_encoded_length > 0 {
+        if self.filtering.is_filtered() {
             return Err(FormatError::UnsupportedFilteredHeapObject);
         }
         if self.huge_ids_direct(offset_width.get(), length_width.get()) {
@@ -490,7 +511,7 @@ impl FractalHeapHeader {
     /// `huge_ids_direct`.
     pub fn huge_ids_direct(&self, offset_size: u8, length_size: u8) -> bool {
         let avail = (self.heap_id_length as usize).saturating_sub(1);
-        if self.io_filter_encoded_length > 0 {
+        if self.filtering.is_filtered() {
             avail >= offset_size as usize + length_size as usize + 4 + length_size as usize
         } else {
             avail >= offset_size as usize + length_size as usize
@@ -499,9 +520,8 @@ impl FractalHeapHeader {
 
     /// Parses the fractal heap header at `address` in `source`.
     ///
-    /// Reads at most 256 bytes, which hold the header of an unfiltered heap at every width the
-    /// format allows, and fewer where the file ends first, then parses them as
-    /// [`parse`](Self::parse) does.
+    /// Reads the fixed prefix to compute the header length, then reads and parses the complete
+    /// header using [`parse_bytes`](Self::parse_bytes). Both reads begin at `address`.
     ///
     /// # Errors
     ///
@@ -513,12 +533,12 @@ impl FractalHeapHeader {
         offset_size: u8,
         length_size: u8,
     ) -> Result<FractalHeapHeader, FormatError> {
-        const MAX_HEADER: u64 = 256;
-        let window = MAX_HEADER
-            .min(source.len().saturating_sub(address))
-            .to_usize()?;
-        let buf = source.read_metadata_at(address, window)?;
-        Self::parse(&buf, 0, offset_size, length_size)
+        let offsets = OffsetWidth::try_from(offset_size)?;
+        let lengths = LengthWidth::try_from(length_size)?;
+        let prefix = source.read_metadata_at(address, FractalHeapHeaderFrame::PREFIX_LEN)?;
+        let frame = FractalHeapHeaderFrame::parse(&prefix, offsets, lengths)?;
+        let bytes = source.read_metadata_at(address, frame.encoded_len())?;
+        Self::parse_bytes(&bytes, offsets, lengths)
     }
 }
 
@@ -653,7 +673,7 @@ impl FractalHeapLayout {
             .and_then(|n| n.checked_add(u64::try_from(block_offset_size).ok()?))
             .ok_or(FractalHeapLayoutError::InvalidGeometry)?;
         let direct_entry_size = u64::from(offset_width.get())
-            .checked_add(if header.io_filter_encoded_length == 0 {
+            .checked_add(if !header.filtering.is_filtered() {
                 0
             } else {
                 u64::from(length_width.get()) + 4
@@ -692,7 +712,7 @@ impl FractalHeapLayout {
             direct_rows,
             max_root_rows,
             first_row_bits,
-            filtered: header.io_filter_encoded_length != 0,
+            filtered: header.filtering.is_filtered(),
             row_block_sizes,
             row_offsets,
             indirect_block_sizes,
@@ -955,6 +975,88 @@ impl FractalHeapLayout {
     }
 }
 
+/// The optional filter information of a fractal heap header.
+///
+/// A [`FractalHeapHeader`] stores [`Filtered`](Self::Filtered) when its encoded filter information
+/// has a nonzero length, and [`Unfiltered`](Self::Unfiltered) otherwise. The fields are defined in
+/// "Fractal Heap" of the [format specification, version 4.0][spec].
+///
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsec_fmt4_infra_fractalheap
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum FractalHeapFiltering {
+    /// The header stores the root filter fields and an encoded filter pipeline.
+    Filtered {
+        /// The size in bytes of the root direct block after filtering.
+        root_direct_block_size: u64,
+        /// Filters in `pipeline` whose index bits are set are skipped for the root direct block.
+        root_filter_mask: u32,
+        /// The ordered filter descriptions for direct blocks and huge objects.
+        pipeline: FilterPipeline,
+    },
+    /// The header omits the optional root filter fields and filter pipeline.
+    Unfiltered,
+}
+
+impl FractalHeapFiltering {
+    /// Parses optional root filter fields and `encoded_len` bytes of filter information at `offset`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::UnexpectedEof`] if a field or the pipeline is incomplete,
+    /// [`FormatError::InvalidFilterPipelineVersion`] if its version is not 1 or 2,
+    /// [`FormatError::InvalidFilterPipelineField`] if a pipeline field exceeds its format limit,
+    /// and [`FormatError::InvalidFilterName`] if a stored name is malformed.
+    fn parse(
+        data: &[u8],
+        lengths: LengthWidth,
+        offset: usize,
+        encoded_len: u16,
+    ) -> Result<Self, FormatError> {
+        if encoded_len == 0 {
+            return Ok(Self::Unfiltered);
+        }
+        let mut fields = bytes::Fields::new(data, offset);
+        let root_direct_block_size = fields.length(lengths)?;
+        let root_filter_mask = fields.u32()?;
+        let end = fields.pos().checked_add(usize::from(encoded_len)).ok_or(
+            FormatError::UnexpectedEof {
+                expected: usize::MAX,
+                available: data.len(),
+            },
+        )?;
+        let pipeline_bytes = data
+            .get(fields.pos()..end)
+            .ok_or(FormatError::UnexpectedEof {
+                expected: end,
+                available: data.len(),
+            })?;
+        Ok(Self::Filtered {
+            root_direct_block_size,
+            root_filter_mask,
+            pipeline: FilterPipeline::parse(pipeline_bytes).map_err(|error| match error {
+                FilterPipelineError::Format(error) => error,
+                FilterPipelineError::FieldTooLarge {
+                    field,
+                    value,
+                    maximum,
+                } => FormatError::InvalidFilterPipelineField {
+                    field,
+                    value,
+                    maximum,
+                },
+                FilterPipelineError::InvalidName { filter_id, reason } => {
+                    FormatError::InvalidFilterName { filter_id, reason }
+                }
+            })?,
+        })
+    }
+
+    /// Returns `true` if the header contains encoded filter information.
+    pub const fn is_filtered(&self) -> bool {
+        matches!(self, Self::Filtered { .. })
+    }
+}
+
 /// The complete encoded length of a version 0 fractal heap header.
 ///
 /// The length includes the checksum and, for a filtered heap, the root block's filtered size
@@ -1060,7 +1162,7 @@ impl FractalHeapIdLayout {
         let encoded_len = usize::from(header.heap_id_length);
         let offset_bits = u32::from(header.max_heap_size);
         let payload_bits = u32::from(header.heap_id_length.saturating_sub(1)) * 8;
-        let huge = if header.io_filter_encoded_length > 0 {
+        let huge = if header.filtering.is_filtered() {
             HugeIdLayout::Filtered
         } else if header.huge_ids_direct(offsets.get(), lengths.get()) {
             HugeIdLayout::Inline { offsets, lengths }
@@ -1280,13 +1382,20 @@ const FRACTAL_HEAP_HEADER_ADDRESS_FIELDS: u64 = 3;
 // ("Fractal Heap", format specification version 4.0).
 const FRACTAL_HEAP_FILTER_MASK_LEN: u64 = 4;
 
+// "Fractal Heap", format specification version 4.0, defines a four-byte checksum after the
+// optional filter information.
+const FRACTAL_HEAP_CHECKSUM_LEN: usize = 4;
+
 #[cfg(test)]
 mod tests {
+    use core::cell::RefCell;
     use core::mem;
 
     use rstest::rstest;
     use test_util::fractal_heap;
     use test_util::widths::Widths;
+
+    use crate::filter_pipeline::FilterDescription;
 
     use super::*;
 
@@ -1376,12 +1485,234 @@ mod tests {
         );
     }
 
+    #[rstest]
+    #[case::two_two(Widths { offset: 2, length: 2 }, OffsetWidth::Two, LengthWidth::Two)]
+    #[case::two_eight(Widths { offset: 2, length: 8 }, OffsetWidth::Two, LengthWidth::Eight)]
+    #[case::eight_two(Widths { offset: 8, length: 2 }, OffsetWidth::Eight, LengthWidth::Two)]
+    #[case::eight_eight(Widths::EIGHT, OffsetWidth::Eight, LengthWidth::Eight)]
+    fn complete_headers_retain_filter_metadata_with_two_and_eight_byte_fields(
+        #[case] widths: Widths,
+        #[case] offsets: OffsetWidth,
+        #[case] lengths: LengthWidth,
+        #[values(0, 1, 80)] client_count: usize,
+        #[values(PIPELINE_VERSION_ONE, PIPELINE_VERSION_TWO)] pipeline_version: u8,
+    ) {
+        let pipeline = filter_pipeline(pipeline_version, client_count);
+        let filtering = if client_count == 0 {
+            FractalHeapFiltering::Unfiltered
+        } else {
+            FractalHeapFiltering::Filtered {
+                root_direct_block_size: 91,
+                root_filter_mask: 1,
+                pipeline: pipeline.clone(),
+            }
+        };
+        let mut builder = fractal_heap::Header::new(0x100).managed_object_count(3);
+        if filtering.is_filtered() {
+            builder = builder.filtering(91, 1, pipeline.serialize().unwrap());
+        }
+        let bytes = builder.build(widths);
+        let frame = FractalHeapHeaderFrame::parse(&bytes, offsets, lengths).unwrap();
+        let extension_len = if filtering.is_filtered() {
+            usize::from(lengths.get())
+                + FRACTAL_HEAP_FILTER_MASK_LEN.to_usize().unwrap()
+                + pipeline.serialize().unwrap().len()
+        } else {
+            0
+        };
+        assert_eq!(
+            frame.encoded_len(),
+            FRACTAL_HEAP_HEADER_FIXED_LEN.to_usize().unwrap()
+                + FRACTAL_HEAP_HEADER_LENGTH_FIELDS.to_usize().unwrap() * widths.length
+                + FRACTAL_HEAP_HEADER_ADDRESS_FIELDS.to_usize().unwrap() * widths.offset
+                + extension_len
+        );
+        assert_eq!(bytes.len(), frame.encoded_len());
+        if client_count == 80 {
+            assert!(bytes.len() > 256);
+        }
+        let parsed = FractalHeapHeader::parse_bytes(&bytes, offsets, lengths).unwrap();
+        assert_eq!(parsed.filtering, filtering);
+        assert_eq!(parsed.managed_objects_count, 3);
+        let source = HeaderSource {
+            bytes: &bytes,
+            prefix: None,
+            reads: RefCell::new(Vec::new()),
+        };
+        assert_eq!(
+            FractalHeapHeader::parse_from_source(&source, 0, offsets.get(), lengths.get()),
+            Ok(parsed.clone())
+        );
+        assert_eq!(
+            *source.reads.borrow(),
+            vec![(0, FractalHeapHeaderFrame::PREFIX_LEN), (0, bytes.len())]
+        );
+        let mut file = vec![0xFF; 13];
+        file.extend_from_slice(&bytes);
+        file.extend_from_slice(&[0xFF; 7]);
+        assert_eq!(
+            FractalHeapHeader::parse(&file, 13, offsets.get(), lengths.get()),
+            Ok(parsed.clone())
+        );
+        assert_eq!(
+            FractalHeapHeader::parse_from_source(file.as_slice(), 13, offsets.get(), lengths.get()),
+            Ok(parsed)
+        );
+    }
+
+    #[rstest]
+    #[case::unfiltered(false, false)]
+    #[case::unfiltered_after_filtered_prefix(false, true)]
+    #[case::filtered_after_unfiltered_prefix(true, false)]
+    #[case::filtered(true, true)]
+    fn source_parsing_reads_the_prefix_fields_from_the_complete_header(
+        #[case] filtered_header: bool,
+        #[case] filtered_prefix: bool,
+    ) {
+        let pipeline = filter_pipeline(PIPELINE_VERSION_TWO, 1)
+            .serialize()
+            .unwrap();
+        let mut builder = fractal_heap::Header::new(0x100);
+        if filtered_header {
+            builder = builder.filtering(91, 1, pipeline.clone());
+        }
+        let mut bytes = builder.build(Widths::EIGHT);
+        let parsed = FractalHeapHeader::parse(&bytes, 0, 8, 8).unwrap();
+        let mut prefix = header_prefix(if filtered_prefix {
+            u16::try_from(pipeline.len()).unwrap()
+        } else {
+            0
+        });
+        prefix[HEADER_VERSION_END..HEADER_ID_LENGTH_END].copy_from_slice(&u16::MAX.to_le_bytes());
+        let framed_len =
+            FractalHeapHeaderFrame::parse(&prefix, OffsetWidth::Eight, LengthWidth::Eight)
+                .unwrap()
+                .encoded_len();
+        bytes.resize(bytes.len().max(framed_len), 0xFF);
+        let source = HeaderSource {
+            bytes: &bytes,
+            prefix: Some(prefix.try_into().unwrap()),
+            reads: RefCell::new(Vec::new()),
+        };
+        let result = FractalHeapHeader::parse_from_source(&source, 0, 8, 8);
+        if filtered_header && !filtered_prefix {
+            assert_eq!(
+                result,
+                Err(FormatError::UnexpectedEof {
+                    expected: bytes.len(),
+                    available: framed_len,
+                })
+            );
+        } else {
+            assert_eq!(result, Ok(parsed));
+        }
+        assert_eq!(
+            *source.reads.borrow(),
+            vec![(0, FractalHeapHeaderFrame::PREFIX_LEN), (0, framed_len)]
+        );
+    }
+
+    #[rstest]
+    #[case::unfiltered_checksum(0, 145, 146)]
+    #[case::root_size_start(1, 142, 170)]
+    #[case::partial_root_size(1, 149, 170)]
+    #[case::mask_start(1, 150, 170)]
+    #[case::partial_mask(1, 153, 170)]
+    #[case::pipeline_start(1, 154, 170)]
+    #[case::partial_pipeline(1, 165, 170)]
+    #[case::checksum_start(1, 166, 170)]
+    #[case::partial_checksum(1, 169, 170)]
+    fn an_incomplete_header_requires_its_complete_framed_extent(
+        #[case] client_count: usize,
+        #[case] available: usize,
+        #[case] expected: usize,
+    ) {
+        let mut builder = fractal_heap::Header::new(0x100);
+        if client_count > 0 {
+            builder = builder.filtering(
+                91,
+                1,
+                filter_pipeline(PIPELINE_VERSION_TWO, client_count)
+                    .serialize()
+                    .unwrap(),
+            );
+        }
+        let mut bytes = builder.build(Widths::EIGHT);
+        assert_eq!(bytes.len(), expected);
+        bytes.truncate(available);
+        let error = FormatError::UnexpectedEof {
+            expected,
+            available,
+        };
+        assert_eq!(
+            FractalHeapHeader::parse(&bytes, 0, 8, 8),
+            Err(error.clone())
+        );
+        assert_eq!(
+            FractalHeapHeader::parse_from_source(bytes.as_slice(), 0, 8, 8),
+            Err(error)
+        );
+    }
+
+    #[rstest]
+    #[case::truncated_client_data(vec![PIPELINE_VERSION_TWO, 1, FILTER_DEFLATE.to_le_bytes()[0], FILTER_DEFLATE.to_le_bytes()[1], 0, 0, 1, 0], FormatError::UnexpectedEof { expected: 12, available: 8 })]
+    #[case::invalid_version(vec![0xFF, 0], FormatError::InvalidFilterPipelineVersion(0xFF))]
+    #[case::too_many_filters(vec![PIPELINE_VERSION_TWO, FILTER_COUNT_MAXIMUM + 1], FormatError::InvalidFilterPipelineField { field: "filter count", value: usize::from(FILTER_COUNT_MAXIMUM) + 1, maximum: usize::from(FILTER_COUNT_MAXIMUM) })]
+    #[case::invalid_name(vec![PIPELINE_VERSION_TWO, 1, 0x2C, 1, 1, 0, 0, 0, 0, 0, b'a'], FormatError::InvalidFilterName { filter_id: 300, reason: "missing null terminator" })]
+    fn malformed_filter_information_returns_its_pipeline_error(
+        #[case] pipeline: Vec<u8>,
+        #[case] error: FormatError,
+    ) {
+        let bytes = fractal_heap::Header::new(0x100)
+            .filtering(91, 1, pipeline)
+            .build(Widths::EIGHT);
+        assert_eq!(
+            FractalHeapHeader::parse(&bytes, 0, 8, 8),
+            Err(error.clone())
+        );
+        assert_eq!(
+            FractalHeapHeader::parse_from_source(bytes.as_slice(), 0, 8, 8),
+            Err(error)
+        );
+    }
+
+    #[cfg(feature = "checksum")]
+    #[rstest]
+    #[case::unfiltered(false)]
+    #[case::filtered(true)]
+    fn a_header_checksum_error_reports_the_final_checksum(#[case] filtered: bool) {
+        let mut builder = fractal_heap::Header::new(0x100);
+        if filtered {
+            builder = builder.filtering(
+                91,
+                1,
+                filter_pipeline(PIPELINE_VERSION_TWO, 1)
+                    .serialize()
+                    .unwrap(),
+            );
+        }
+        let mut bytes = builder.build(Widths::EIGHT);
+        let checksum_pos = bytes.len() - FRACTAL_HEAP_CHECKSUM_LEN;
+        let computed = crate::checksum::jenkins_lookup3(&bytes[..checksum_pos]);
+        let expected = computed ^ 1;
+        bytes[checksum_pos..].copy_from_slice(&expected.to_le_bytes());
+        let error = FormatError::ChecksumMismatch { expected, computed };
+        assert_eq!(
+            FractalHeapHeader::parse(&bytes, 0, 8, 8),
+            Err(error.clone())
+        );
+        assert_eq!(
+            FractalHeapHeader::parse_from_source(bytes.as_slice(), 0, 8, 8),
+            Err(error)
+        );
+    }
+
     #[test]
     fn a_header_parses_to_its_fields() {
         let file_data = fractal_heap::heap_with_one_object(b"Hello, World!", Widths::EIGHT);
         let expected = FractalHeapHeader {
             heap_id_length: 7,
-            io_filter_encoded_length: 0,
+            filtering: FractalHeapFiltering::Unfiltered,
             flags: 0,
             max_managed_object_size: 64,
             next_huge_object_id: 0,
@@ -1516,7 +1847,11 @@ mod tests {
         #[case] error: FormatError,
     ) {
         let header = FractalHeapHeader {
-            io_filter_encoded_length: u16::from(filtered),
+            filtering: if filtered {
+                filtered_heap()
+            } else {
+                FractalHeapFiltering::Unfiltered
+            },
             btree_huge_objects_address: StoredAddress::new(u64::MAX),
             ..attribute_heap_header()
         };
@@ -1595,14 +1930,14 @@ mod tests {
         assert!(h.huge_ids_direct(8, 8));
         // A filtered heap needs room for the address, the length, the filter mask (4), and the
         // filtered length, so 17 bytes are too few.
-        h.io_filter_encoded_length = 4;
+        h.filtering = filtered_heap();
         assert!(!h.huge_ids_direct(8, 8));
     }
 
     #[test]
     fn the_indirect_block_walk_of_a_filtered_heap_is_unsupported() {
         let mut header = dtable_header(512, 65536, 4);
-        header.io_filter_encoded_length = 8;
+        header.filtering = filtered_heap();
         let layout =
             FractalHeapLayout::new(&header, OffsetWidth::Eight, LengthWidth::Eight).unwrap();
         let mut block = b"FHIB".to_vec();
@@ -1613,7 +1948,7 @@ mod tests {
         );
 
         // In an unfiltered heap, the function returns `None` for an offset past the block's space.
-        header.io_filter_encoded_length = 0;
+        header.filtering = FractalHeapFiltering::Unfiltered;
         let layout =
             FractalHeapLayout::new(&header, OffsetWidth::Eight, LengthWidth::Eight).unwrap();
         assert_eq!(
@@ -1685,7 +2020,7 @@ mod tests {
     ) -> FractalHeapHeader {
         FractalHeapHeader {
             heap_id_length: 7,
-            io_filter_encoded_length: 0,
+            filtering: FractalHeapFiltering::Unfiltered,
             flags: 0,
             max_managed_object_size: 0,
             next_huge_object_id: 0,
@@ -1796,7 +2131,7 @@ mod tests {
     #[test]
     fn serializing_a_filtered_header_is_an_error() {
         let header = FractalHeapHeader {
-            io_filter_encoded_length: 8,
+            filtering: filtered_heap(),
             ..dtable_header(512, 65536, 4)
         };
         assert_eq!(
@@ -1904,6 +2239,62 @@ mod tests {
         );
     }
 
+    struct HeaderSource<'a> {
+        bytes: &'a [u8],
+        prefix: Option<[u8; FractalHeapHeaderFrame::PREFIX_LEN]>,
+        reads: RefCell<Vec<(u64, usize)>>,
+    }
+
+    impl MetadataSource for HeaderSource<'_> {
+        fn len(&self) -> u64 {
+            self.bytes.len().to_u64()
+        }
+        fn read_at(&self, address: u64, bytes: &mut [u8]) -> Result<(), FormatError> {
+            self.bytes.read_at(address, bytes)
+        }
+        fn read_metadata_at(&self, address: u64, len: usize) -> Result<Vec<u8>, FormatError> {
+            self.reads.borrow_mut().push((address, len));
+            if len == FractalHeapHeaderFrame::PREFIX_LEN {
+                if let Some(prefix) = self.prefix {
+                    return Ok(prefix.to_vec());
+                }
+            }
+            self.bytes.read_metadata_at(address, len)
+        }
+    }
+
+    fn filter_pipeline(version: u8, client_count: usize) -> FilterPipeline {
+        FilterPipeline {
+            version,
+            filters: vec![FilterDescription {
+                filter_id: FILTER_DEFLATE,
+                name: if version == PIPELINE_VERSION_ONE {
+                    Some("deflate".into())
+                } else {
+                    None
+                },
+                flags: 0,
+                client_data: vec![6; client_count],
+            }],
+        }
+    }
+
+    fn filtered_heap() -> FractalHeapFiltering {
+        FractalHeapFiltering::Filtered {
+            root_direct_block_size: 91,
+            root_filter_mask: 1,
+            pipeline: FilterPipeline {
+                version: PIPELINE_VERSION_TWO,
+                filters: vec![FilterDescription {
+                    filter_id: FILTER_DEFLATE,
+                    name: None,
+                    flags: 0,
+                    client_data: vec![6],
+                }],
+            },
+        }
+    }
+
     /// Returns a header with the heap ID layout of the attribute heaps `hdf5-pure` writes: 8-byte
     /// IDs over a 40-bit heap, with a huge-object B-tree.
     fn attribute_heap_header() -> FractalHeapHeader {
@@ -1925,4 +2316,12 @@ mod tests {
 
     const HEADER_VERSION_END: usize = FRACTAL_HEAP_SIGNATURE.len() + mem::size_of::<u8>();
     const HEADER_ID_LENGTH_END: usize = HEADER_VERSION_END + mem::size_of::<u16>();
+    // "The Data Storage - Filter Pipeline Message", format specification version 4.0, defines
+    // versions 1 and 2 and deflate ID 1.
+    const PIPELINE_VERSION_ONE: u8 = 1;
+    const PIPELINE_VERSION_TWO: u8 = 2;
+    const FILTER_DEFLATE: u16 = 1;
+    // "The Data Storage - Filter Pipeline Message", format specification version 4.0, limits
+    // pipelines to 32 filters.
+    const FILTER_COUNT_MAXIMUM: u8 = 32;
 }
