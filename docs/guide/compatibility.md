@@ -34,7 +34,7 @@ Shared object-header messages are supported for datatypes, dataspaces, fill valu
 |---|:---:|:---:|:---:|---|
 | Version 1 symbol table | ✅ | ⬆️ | ✅ | Modified groups use compact link storage. |
 | Compact link storage | ✅ | ✅ | ✅ | |
-| Dense link storage | ✅ | ❌ | ❌ | Deleting a dead group reclaims its v2 B-tree indexes. Its fractal heap remains allocated. |
+| Dense link storage | ✅ | ❌ | ❌ | Deleting a group's last hard link reclaims its v2 B-tree indexes, its fractal heap, and its subtree. A group whose link heap is filtered stays allocated with its subtree, and a heap with its own free-space manager stays allocated. libhdf5 keeps that manager for a heap with free space left in its blocks. |
 | Link creation-order tracking | ✅ | ❌ | 🟡 | New links can be added while compact storage remains valid. |
 
 ## Attributes
@@ -42,7 +42,7 @@ Shared object-header messages are supported for datatypes, dataspaces, fill valu
 | Feature | Read | Create | Modify | Detail |
 |---|:---:|:---:|:---:|---|
 | Compact storage | ✅ | ✅ | ✅ | |
-| Dense storage | ✅ | ✅ | ✅ | Dead dense sets reclaim their v2 B-tree indexes. Fractal-heap storage remains allocated. |
+| Dense storage | ✅ | ✅ | ✅ | Deleting an object's last hard link, or editing its dense attributes, reclaims the set's v2 B-tree indexes and its fractal heap. A filtered attribute heap stays allocated, and so does its owner unless the owner is a group with dense link storage. A heap with its own free-space manager stays allocated. libhdf5 keeps that manager for a heap with free space left in its blocks. |
 | Attribute creation-order tracking | ✅ | ❌ | ✅ | |
 | Attribute phase-change thresholds | ✅ | ❌ | ✅ | Existing thresholds are preserved. |
 | Null dataspace | ✅ | ❌ | ❌ | Reading returns an empty value. |

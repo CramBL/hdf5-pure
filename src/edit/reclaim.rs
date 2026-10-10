@@ -1,12 +1,15 @@
-//! Plans storage reclamation for objects that lose their final owning hard link.
+//! Collects the storage a commit frees, with the [`FreeClass`] of each span.
 //!
-//! This module proves object-header, dataset, dense-index, and subtree ownership before returning
-//! physical spans to the editor. It also assigns PAGE metadata/raw classes where the on-disk
-//! placement proves them. Any incomplete ownership proof leaks conservatively.
+//! A commit frees an object's storage when it deletes the object's last hard link, and the storage
+//! of a dense attribute set or a chunk index when it replaces one. The walk returns a span only
+//! once it accounts for every allocation of the structure the span belongs to, and leaves a
+//! structure it cannot account for in full allocated.
 
 use std::collections::{HashMap, HashSet};
 
-use hdf5_pure_space::__private::{FreeClass, PageType};
+use hdf5_pure_space::__private::Extent;
+use hdf5_pure_space::__private::FreeClass;
+use hdf5_pure_space::__private::PageType;
 
 use crate::access_mode::AccessMode;
 use crate::address::StoredAddress;
@@ -17,6 +20,8 @@ use crate::data_layout::{ChunkIndexLayout, DataLayout};
 use crate::dataspace::Dataspace;
 use crate::error::Error;
 use crate::file_space_info::FileSpacePageSize;
+use crate::fractal_heap_storage;
+use crate::fractal_heap_storage::FractalHeapAllocation;
 use crate::group_v2::resolve_group_entries_from_source;
 use crate::link_info::LinkInfoMessage;
 use crate::message_type::MessageType;
@@ -24,8 +29,8 @@ use crate::object_header::ObjectHeader;
 use crate::source::{BaseOffsetSource, Source, SourceMetadata};
 
 use super::{
-    LENGTH_SIZE, MAX_COPY_DEPTH, MAX_LINK_GRAPH_NODES, OFFSET_SIZE, ObjModel, WriteEngine,
-    read_oh_chunks, spans_disjoint_in_bounds,
+    LENGTH_SIZE, MAX_COPY_DEPTH, MAX_LINK_GRAPH_NODES, OFFSET_SIZE, ObjModel, OhRegion,
+    WriteEngine, read_oh_chunks, spans_disjoint_in_bounds,
 };
 
 impl WriteEngine {
@@ -44,21 +49,23 @@ impl WriteEngine {
             .collect())
     }
 
-    /// Returns the dense-attribute v2 B-tree allocations named by an object's old header.
+    /// Returns the storage of the dense attribute set that the Attribute Info message in `region`
+    /// names: its version 2 B-tree indexes, and its fractal heap where the heap's ownership is
+    /// proven.
     ///
-    /// The Attribute Info message separates the fractal heap from its name and optional
-    /// creation-order indexes. This returns only the index allocations and leaves the heap in
-    /// place. Both indexes are proven together, then checked against the old object-header
-    /// allocations before any span is returned. Replacement headers cannot overlap these extents:
-    /// the commit gathers old storage in `to_free`, places every replacement, and only then admits
-    /// `to_free` to the session space. `None` leaves the index set unreclaimed.
-    pub(super) fn dense_attribute_index_spans(
+    /// The set is checked against the object header chunks in `header_spans`, as
+    /// [`dense_storage_spans`](Self::dense_storage_spans) describes. An object without dense
+    /// attributes has an empty set. A replacement header cannot overlap the returned spans: the
+    /// commit gathers them in `to_free`, places every replacement, and only then adds `to_free` to
+    /// the session's free space.
+    ///
+    /// Returns `None`, and leaves the whole set allocated, if `region` cannot be read, holds more
+    /// than one Attribute Info message, or the indexes cannot be accounted for.
+    pub(super) fn dense_attribute_storage_spans(
         &self,
-        addr: u64,
+        region: &OhRegion,
         header_spans: &[(u64, u64)],
-    ) -> Option<Vec<(u64, u64)>> {
-        let base = self.addresses;
-        let region = Self::gather_oh_messages(&self.image(), addr, base).ok()?;
+    ) -> Option<Vec<(u64, u64, FreeClass)>> {
         let mut attr_info = None;
         let mut p = 0;
         while let Some((msg_type, body, body_end)) = region.next_message(p).ok()? {
@@ -74,86 +81,143 @@ impl WriteEngine {
         let Some(attr_info) = attr_info else {
             return Some(Vec::new());
         };
-        if attr_info.fractal_heap_address.is_none() {
+        let Some(heap_address) = attr_info.fractal_heap_address else {
             return Some(Vec::new());
-        }
+        };
 
-        let extents = crate::attribute::collect_dense_attribute_index_storage_extents(
+        let index = crate::attribute::collect_dense_attribute_index_storage_extents(
             &BaseOffsetSource {
                 inner: &self.image(),
-                base: base.effective_base(),
+                base: self.addresses.effective_base(),
             },
             &attr_info,
             OFFSET_SIZE,
             LENGTH_SIZE,
         )
         .ok()?;
-        let mut index_spans = Vec::with_capacity(extents.len());
-        for extent in extents {
-            index_spans.push((
-                base.absolute(StoredAddress::new(extent.start())).ok()?,
-                extent.len(),
-            ));
-        }
-
-        let mut owned = header_spans.to_vec();
-        owned.extend(index_spans.iter().copied());
-        spans_disjoint_in_bounds(&mut owned, self.image.len()).then_some(index_spans)
+        self.dense_storage_spans(header_spans, heap_address, &index)
     }
 
-    /// Returns the dense-group version 2 B-tree allocations identified by an old group header.
+    /// Returns the storage of the dense link set that `link_info` names: its type 5 name index, its
+    /// optional type 6 creation-order index, and its fractal heap where the heap's ownership is
+    /// proven.
     ///
-    /// The Link Info message separates the fractal heap from its type 5 name index and optional
-    /// type 6 creation-order index. Only the indexes are returned. The complete index set is
-    /// proven together and checked against the old object-header allocations before any span
-    /// joins the deferred reclamation plan. `None` leaves the index set unreclaimed.
-    pub(super) fn dense_group_index_spans(
+    /// The set is checked against the group's header chunks in `header_spans` and its dense
+    /// attribute storage in `attribute_storage`, as
+    /// [`dense_storage_spans`](Self::dense_storage_spans) describes. A group with compact link
+    /// storage has an empty set.
+    ///
+    /// Returns `None`, and leaves the whole set allocated, if the indexes cannot be accounted for.
+    pub(super) fn dense_group_storage_spans(
         &self,
-        addr: u64,
         header_spans: &[(u64, u64)],
-    ) -> Option<Vec<(u64, u64)>> {
-        let base = self.addresses;
-        let region = Self::gather_oh_messages(&self.image(), addr, base).ok()?;
-        let mut link_info = None;
-        let mut p = 0;
-        while let Some((msg_type, body, body_end)) = region.next_message(p).ok()? {
-            if msg_type == MessageType::LINK_INFO {
-                if link_info.is_some() {
-                    return None;
-                }
-                link_info =
-                    Some(LinkInfoMessage::parse(&region[body..body_end], OFFSET_SIZE).ok()?);
-            }
-            p = body_end;
-        }
-        let Some(link_info) = link_info else {
+        attribute_storage: Option<&[(u64, u64, FreeClass)]>,
+        link_info: &LinkInfoMessage,
+    ) -> Option<Vec<(u64, u64, FreeClass)>> {
+        let Some(heap_address) = link_info.fractal_heap_address else {
             return Some(Vec::new());
         };
-        if link_info.fractal_heap_address.is_none() {
-            return Some(Vec::new());
-        }
-
-        let extents = crate::group_v2::collect_dense_group_index_storage_extents(
+        let index = crate::group_v2::collect_dense_group_index_storage_extents(
             &BaseOffsetSource {
                 inner: &self.image(),
-                base: base.effective_base(),
+                base: self.addresses.effective_base(),
             },
-            &link_info,
+            link_info,
             OFFSET_SIZE,
             LENGTH_SIZE,
         )
         .ok()?;
-        let mut index_spans = Vec::with_capacity(extents.len());
-        for extent in extents {
-            index_spans.push((
-                base.absolute(StoredAddress::new(extent.start())).ok()?,
-                extent.len(),
-            ));
+        let owned: Vec<(u64, u64)> = header_spans
+            .iter()
+            .copied()
+            .chain(
+                attribute_storage
+                    .into_iter()
+                    .flatten()
+                    .map(|&(addr, len, _)| (addr, len)),
+            )
+            .collect();
+        self.dense_storage_spans(&owned, heap_address, &index)
+    }
+
+    /// Returns the `index` blocks of a dense set as metadata, followed by the allocations of the
+    /// fractal heap at `heap_address` where the heap's ownership is proven.
+    ///
+    /// The heap joins the set only if every allocation of it lies in the file and overlaps neither
+    /// `owned` nor the index, and is left allocated otherwise.
+    ///
+    /// Returns `None` if an index block lies outside the file or overlaps another index block or a
+    /// span in `owned`.
+    fn dense_storage_spans(
+        &self,
+        owned: &[(u64, u64)],
+        heap_address: StoredAddress,
+        index: &[Extent],
+    ) -> Option<Vec<(u64, u64, FreeClass)>> {
+        let base = self.addresses;
+        let eof = self.image.len();
+        let index_spans = index
+            .iter()
+            .map(|extent| {
+                Some((
+                    base.absolute(StoredAddress::new(extent.start())).ok()?,
+                    extent.len(),
+                ))
+            })
+            .collect::<Option<Vec<_>>>()?;
+        let mut proven = owned.to_vec();
+        proven.extend(index_spans.iter().copied());
+        if !spans_disjoint_in_bounds(&mut proven, eof) {
+            return None;
         }
 
-        let mut owned = header_spans.to_vec();
-        owned.extend(index_spans.iter().copied());
-        spans_disjoint_in_bounds(&mut owned, self.image.len()).then_some(index_spans)
+        let mut storage: Vec<(u64, u64, FreeClass)> = meta_spans(index_spans).collect();
+        if let Some(heap_spans) = self.fractal_heap_spans(heap_address) {
+            proven.extend(heap_spans.iter().map(|&(addr, len, _)| (addr, len)));
+            if spans_disjoint_in_bounds(&mut proven, eof) {
+                storage.extend(heap_spans);
+            }
+        }
+        Some(storage)
+    }
+
+    /// Returns every allocation of the fractal heap at `heap_address` as an absolute span, with
+    /// the free class [`fractal_heap_free_spans`] gives it.
+    ///
+    /// Returns `None` if
+    /// [`collect_fractal_heap_storage_from_source`](fractal_heap_storage::collect_fractal_heap_storage_from_source)
+    /// cannot prove the heap's ownership, as for a filtered heap or a heap with a free-space manager
+    /// of its own.
+    fn fractal_heap_spans(
+        &self,
+        heap_address: StoredAddress,
+    ) -> Option<Vec<(u64, u64, FreeClass)>> {
+        let base = self.addresses;
+        let storage = fractal_heap_storage::collect_fractal_heap_storage_from_source(
+            &BaseOffsetSource {
+                inner: &self.image(),
+                base: base.effective_base(),
+            },
+            heap_address,
+            OFFSET_SIZE,
+            LENGTH_SIZE,
+        )
+        .ok()?;
+        let allocations = storage
+            .allocations()
+            .iter()
+            .map(|&(extent, kind)| {
+                Some((
+                    base.absolute(StoredAddress::new(extent.start())).ok()?,
+                    extent.len(),
+                    kind,
+                ))
+            })
+            .collect::<Option<Vec<_>>>()?;
+        Some(fractal_heap_free_spans(
+            self.space.page_size(),
+            &allocations,
+        ))
     }
 
     /// Count, for every object-header address reachable from the root, how many
@@ -222,30 +286,25 @@ impl WriteEngine {
         Some(counts)
     }
 
-    /// Collects, as far as it can account for them, the span and free class of
-    /// every on-disk block the object at `addr` owns, and for a group its whole
-    /// subtree, into `out` for reclamation after a delete.
+    /// Appends to `out` the span and free class of every block the object at `addr` owns, and for
+    /// a group those of its whole subtree, for reclamation after a delete.
     ///
-    /// Contiguous datasets (header + data block), chunked datasets (header +
-    /// chunk index + chunk data, via [`chunked_storage_spans`](Self::chunked_storage_spans)),
-    /// and whole group subtrees are reclaimed. Deliberately conservative: any
-    /// object whose layout it cannot fully account for, such as a non-v2 header, an
-    /// unsupported or only-partially-enumerable chunk index, or a group holding a soft/external
-    /// link contributes nothing and is not descended into, so `out` never contains a region that
-    /// might still be in use. Dense attribute and dense group indexes are added only after each
-    /// complete index set is proven. Dense group index ownership is separate from ownership of the
-    /// child objects its links reach. The associated fractal heaps stay in place. Bounded by
-    /// [`MAX_COPY_DEPTH`] against a hard-link cycle.
-    /// Variable-length data in global-heap collections is never reclaimed here (a
-    /// collection can be shared between objects), so it is simply left behind.
+    /// The walk accounts for an object header, a contiguous dataset's data block, a chunked
+    /// dataset's chunk index and chunks through
+    /// [`chunked_storage_spans`](Self::chunked_storage_spans), a dense attribute set, and a group's
+    /// links and subtree, compact or dense. An object it cannot account for in full, such as one
+    /// with a header that is not version 2, a chunk index that cannot be walked in full, or a
+    /// compact group with a soft or external link, contributes nothing and is not descended into,
+    /// so `out` never holds a region still in use. A dense set's indexes join `out` only once the whole index set is
+    /// accounted for, and its fractal heap only once the heap's ownership is proven. A group's link
+    /// storage and the objects its links reach are separate: either can be reclaimed without the
+    /// other. Variable-length data in global heap collections stays allocated, since objects can
+    /// share a collection. The walk stops at [`MAX_COPY_DEPTH`] against a hard-link cycle.
     ///
-    /// `incoming` is the file-wide hard-link count per object-header address
-    /// (from [`count_incoming_hard_links`](Self::count_incoming_hard_links)). An
-    /// object is reclaimed, and a group is descended into, only when its
-    /// count is exactly 1, i.e. the link being removed is its last: an object
-    /// still reachable through another hard link is live and is left untouched
-    /// (so is everything below a surviving group), which is what keeps deleting
-    /// one of several hard links from corrupting the survivor.
+    /// `incoming` holds the file-wide hard-link count of each object header address, from
+    /// [`count_incoming_hard_links`](Self::count_incoming_hard_links). An object is reclaimed, and
+    /// a group descended into, only when its count is 1, so deleting one of several hard links
+    /// leaves the object and everything below it allocated.
     pub(super) fn collect_free_spans(
         &self,
         addr: u64,
@@ -279,14 +338,22 @@ impl WriteEngine {
             Ok(s) => s,
             Err(_) => return,
         };
-        let dense_index_spans = self.dense_attribute_index_spans(addr, &spans);
-        if let Some(children) = self.dense_group_children(addr) {
+        let region = Self::gather_oh_messages(&self.image(), addr, self.addresses).ok();
+        let attribute_storage = region
+            .as_ref()
+            .and_then(|region| self.dense_attribute_storage_spans(region, &spans));
+        if let Some((link_info, children)) = region
+            .as_ref()
+            .and_then(|region| self.dense_group_children(region))
+        {
+            let link_storage =
+                self.dense_group_storage_spans(&spans, attribute_storage.as_deref(), &link_info);
             self.collect_group_spans(
-                addr,
                 depth,
                 incoming,
                 &spans,
-                dense_index_spans.as_deref(),
+                attribute_storage.as_deref(),
+                link_storage.as_deref(),
                 children,
                 out,
             );
@@ -294,14 +361,14 @@ impl WriteEngine {
         }
         match Self::read_object(&self.image(), AccessMode::ReadWrite, addr, self.addresses) {
             Ok(ObjModel::DatasetVerbatim { .. }) => {
-                append_object_metadata_spans(out, &spans, dense_index_spans.as_deref());
+                append_object_metadata_spans(out, &spans, attribute_storage.as_deref());
             }
             Ok(ObjModel::DatasetContiguous {
                 data_addr,
                 data_size,
                 ..
             }) => {
-                append_object_metadata_spans(out, &spans, dense_index_spans.as_deref());
+                append_object_metadata_spans(out, &spans, attribute_storage.as_deref());
                 // A defined, in-bounds contiguous data block is owned outright.
                 // An empty dataset stores the undefined address and owns none. Its
                 // absolute file offset is what this bounds-checks and records.
@@ -316,11 +383,11 @@ impl WriteEngine {
             }
             Ok(ObjModel::Group { children, .. }) => {
                 self.collect_group_spans(
-                    addr,
                     depth,
                     incoming,
                     &spans,
-                    dense_index_spans.as_deref(),
+                    attribute_storage.as_deref(),
+                    None,
                     children.into_iter().map(|(_, _, child)| child),
                     out,
                 );
@@ -333,7 +400,7 @@ impl WriteEngine {
             // region that might still be in use.
             Ok(ObjModel::DatasetChunked { .. }) => {
                 if let Some(storage) = self.chunked_storage_spans(addr) {
-                    append_object_metadata_spans(out, &spans, dense_index_spans.as_deref());
+                    append_object_metadata_spans(out, &spans, attribute_storage.as_deref());
                     // Already page-typed: chunk data is raw, and the index class follows its
                     // format allocation type or proven physical placement.
                     out.extend(storage);
@@ -361,20 +428,16 @@ impl WriteEngine {
     /// `children` one level deeper.
     fn collect_group_spans(
         &self,
-        addr: u64,
         depth: u32,
         incoming: &HashMap<u64, u32>,
         header_spans: &[(u64, u64)],
-        attribute_index_spans: Option<&[(u64, u64)]>,
+        attribute_storage: Option<&[(u64, u64, FreeClass)]>,
+        link_storage: Option<&[(u64, u64, FreeClass)]>,
         children: impl IntoIterator<Item = StoredAddress>,
         out: &mut Vec<(u64, u64, FreeClass)>,
     ) {
-        let link_index_spans = self.dense_group_index_spans(addr, header_spans);
-        append_object_metadata_spans(out, header_spans, attribute_index_spans);
-        if let Some(index_spans) = link_index_spans {
-            // Dense-link B-tree headers and nodes are file metadata under PAGE.
-            out.extend(meta_spans(index_spans));
-        }
+        append_object_metadata_spans(out, header_spans, attribute_storage);
+        out.extend(link_storage.into_iter().flatten().copied());
         // The recursion works in absolute offsets, matching `incoming`'s
         // keys and `oh_chunk_spans`.
         let base = self.addresses;
@@ -385,9 +448,15 @@ impl WriteEngine {
         }
     }
 
-    fn dense_group_children(&self, addr: u64) -> Option<Vec<StoredAddress>> {
-        let base = self.addresses;
-        let region = Self::gather_oh_messages(&self.image(), addr, base).ok()?;
+    /// Returns the Link Info message in `region` and the object header address of each hard link
+    /// it indexes, for a group with dense link storage.
+    ///
+    /// Returns `None` if `region` lacks a Link Info message or holds more than one, if the group
+    /// stores its links compactly, or if the links cannot be read.
+    fn dense_group_children(
+        &self,
+        region: &OhRegion,
+    ) -> Option<(LinkInfoMessage, Vec<StoredAddress>)> {
         let mut link_info = None;
         let mut p = 0;
         while let Some((msg_type, body, body_end)) = region.next_message(p).ok()? {
@@ -405,7 +474,7 @@ impl WriteEngine {
         let entries = crate::group_v2::resolve_dense_entries_from_source(
             &BaseOffsetSource {
                 inner: &self.image(),
-                base: base.effective_base(),
+                base: self.addresses.effective_base(),
             },
             &link_info,
             heap_address,
@@ -413,12 +482,13 @@ impl WriteEngine {
             LENGTH_SIZE,
         )
         .ok()?;
-        Some(
+        Some((
+            link_info,
             entries
                 .into_iter()
                 .map(|entry| entry.object_header_address)
                 .collect(),
-        )
+        ))
     }
 
     /// Returns every on-disk block a *chunked* dataset at `addr` owns: its
@@ -604,7 +674,8 @@ impl WriteEngine {
         match self.space.page_size() {
             None => true,
             Some(page_size) => {
-                index_abuts_chunk_data(data, index) && !index_touches_page_zero(index, page_size)
+                index_abuts_chunk_data(data, index)
+                    && !touches_page_zero(page_size, index.iter().copied())
             }
         }
     }
@@ -702,27 +773,111 @@ pub(super) fn index_abuts_chunk_data(data: &[(u64, u64)], index: &[(u64, u64)]) 
     })
 }
 
-/// Whether any byte of the `index` run lies in page 0 of a paged file, whose
-/// first bytes are the superblock and which is therefore a metadata page. The
-/// screening half of [`WriteEngine::index_is_provably_raw`], where the reasoning
-/// lives.
-pub(super) fn index_touches_page_zero(index: &[(u64, u64)], page_size: FileSpacePageSize) -> bool {
-    index
-        .iter()
-        .any(|&(addr, len)| len > 0 && addr < page_size.get())
+/// Returns whether any byte of `spans` lies in page 0 of a paged file, whose first bytes are the
+/// superblock, so page 0 is a metadata page.
+///
+/// [`WriteEngine::index_is_provably_raw`], whose doc gives the reasoning, screens a chunk index
+/// with it. [`huge_object_free_class`] screens a run of huge objects with it.
+pub(super) fn touches_page_zero(
+    page_size: FileSpacePageSize,
+    spans: impl IntoIterator<Item = (u64, u64)>,
+) -> bool {
+    spans
+        .into_iter()
+        .any(|(addr, len)| len > 0 && addr < page_size.get())
 }
 
-/// Adds object-header metadata and any independently proven dense-attribute indexes.
+/// Tags each fractal heap allocation with the free class of the page it occupies.
+///
+/// `allocations` is sorted by address, as [`FractalHeapStorage::allocations`] returns it. Without
+/// `page_size`, each allocation takes [`FractalHeapAllocation::page_type`]. On a paged file an
+/// allocation of a page or more that begins on a page boundary is dead, since the C library
+/// allocates it as whole pages of neither type. Of the rest, the header, the managed blocks, and
+/// the huge-object index are metadata, and a huge object takes the class
+/// [`huge_object_free_class`] gives the run of adjoining allocations around it.
+///
+/// [`FractalHeapStorage::allocations`]: crate::fractal_heap_storage::FractalHeapStorage::allocations
+fn fractal_heap_free_spans(
+    page_size: Option<FileSpacePageSize>,
+    allocations: &[(u64, u64, FractalHeapAllocation)],
+) -> Vec<(u64, u64, FreeClass)> {
+    let Some(page_size) = page_size else {
+        return allocations
+            .iter()
+            .map(|&(addr, len, kind)| (addr, len, FreeClass::Page(kind.page_type())))
+            .collect();
+    };
+    allocations
+        .chunk_by(|&(addr, len, _), &(next, _, _)| addr.checked_add(len) == Some(next))
+        .flat_map(|run| {
+            let huge_object_class = huge_object_free_class(page_size, run);
+            run.iter().map(move |&(addr, len, kind)| {
+                let class = match kind {
+                    // `H5MF__alloc_to_fs_type` (`H5MF.c`, libhdf5 2.2.0) gives an allocation of a
+                    // page or more to the generic large manager whatever its type, and
+                    // `H5MF__alloc_pagefs` starts it on a page boundary and files the rest of its
+                    // last page in that manager, so no small allocation belongs in that page.
+                    _ if len >= page_size.get() && addr % page_size.get() == 0 => FreeClass::Dead,
+                    FractalHeapAllocation::Header
+                    | FractalHeapAllocation::DirectBlock
+                    | FractalHeapAllocation::IndirectBlock
+                    | FractalHeapAllocation::HugeObjectIndex => FreeClass::Page(kind.page_type()),
+                    FractalHeapAllocation::HugeObject => huge_object_class,
+                };
+                (addr, len, class)
+            })
+        })
+        .collect()
+}
+
+/// Returns the free class of the huge objects in `run`, fractal heap allocations that each begin
+/// where the one before ends.
+///
+/// A run of huge objects alone is raw data, or dead if a byte of it lies in page 0, which holds
+/// the superblock. A huge object that adjoins heap metadata inside a page shares that
+/// metadata page, and every huge object of its run is metadata. A run whose huge objects adjoin
+/// heap metadata only on page boundaries is dead, as the page type of those huge objects is
+/// unproven.
+fn huge_object_free_class(
+    page_size: FileSpacePageSize,
+    run: &[(u64, u64, FractalHeapAllocation)],
+) -> FreeClass {
+    let is_huge_object = |&(_, _, kind): &(u64, u64, FractalHeapAllocation)| {
+        kind == FractalHeapAllocation::HugeObject
+    };
+    if run.iter().all(is_huge_object) {
+        return if touches_page_zero(page_size, run.iter().map(|&(addr, len, _)| (addr, len))) {
+            FreeClass::Dead
+        } else {
+            FreeClass::Page(FractalHeapAllocation::HugeObject.page_type())
+        };
+    }
+    // `H5MF__alloc_pagefs` (`H5MF.c`, libhdf5 2.2.0) keeps small raw-data and metadata
+    // allocations in separate pages and starts each large allocation on a page boundary, so a
+    // huge object joined to heap metadata inside a page shares an allocation with that metadata,
+    // as in the blob `place_dense_attrs` writes.
+    let joined_inside_a_page = run.windows(2).any(|pair| {
+        is_huge_object(&pair[0]) != is_huge_object(&pair[1]) && pair[1].0 % page_size.get() != 0
+    });
+    if joined_inside_a_page {
+        FreeClass::Page(PageType::Meta)
+    } else {
+        FreeClass::Dead
+    }
+}
+
+/// Appends `header_spans` to `out` as metadata, followed by the dense attribute storage in
+/// `attribute_storage`, each span with its own free class.
 fn append_object_metadata_spans(
     out: &mut Vec<(u64, u64, FreeClass)>,
     header_spans: &[(u64, u64)],
-    dense_index_spans: Option<&[(u64, u64)]>,
+    attribute_storage: Option<&[(u64, u64, FreeClass)]>,
 ) {
     out.extend(
         header_spans
             .iter()
-            .chain(dense_index_spans.into_iter().flatten())
-            .map(|&(addr, len)| (addr, len, FreeClass::Page(PageType::Meta))),
+            .map(|&(addr, len)| (addr, len, FreeClass::Page(PageType::Meta)))
+            .chain(attribute_storage.into_iter().flatten().copied()),
     );
 }
 
@@ -734,4 +889,77 @@ pub(super) fn meta_spans(spans: Vec<(u64, u64)>) -> impl Iterator<Item = (u64, u
     spans
         .into_iter()
         .map(|(a, l)| (a, l, FreeClass::Page(PageType::Meta)))
+}
+
+#[cfg(test)]
+mod tests {
+    use rstest::rstest;
+
+    use super::*;
+
+    #[rstest]
+    #[case::huge_objects_apart_from_metadata_are_raw(
+        &[(0x1000, 0x100, HEADER), (0x1200, 0x200, DIRECT), (0x3000, 0x80, HUGE), (0x3080, 0x40, HUGE)],
+        &[(0x1000, 0x100, META), (0x1200, 0x200, META), (0x3000, 0x80, RAW), (0x3080, 0x40, RAW)],
+    )]
+    #[case::a_huge_object_in_page_zero_is_dead(
+        &[(0x0f80, 0x100, HUGE), (0x1000, 0x100, HEADER)],
+        &[(0x0f80, 0x100, FreeClass::Dead), (0x1000, 0x100, META)],
+    )]
+    #[case::huge_objects_joined_to_metadata_inside_a_page_are_metadata(
+        &[(0x1000, 0x100, HEADER), (0x1100, 0x200, INDEX), (0x1300, 0x80, HUGE), (0x1380, 0x2000, HUGE)],
+        &[(0x1000, 0x100, META), (0x1100, 0x200, META), (0x1300, 0x80, META), (0x1380, 0x2000, META)],
+    )]
+    #[case::a_huge_object_joined_to_metadata_on_a_page_boundary_is_dead(
+        &[(0x1000, 0x100, HEADER), (0x1e00, 0x200, INDEX), (0x2000, 0x80, HUGE)],
+        &[(0x1000, 0x100, META), (0x1e00, 0x200, META), (0x2000, 0x80, FreeClass::Dead)],
+    )]
+    #[case::page_aligned_allocations_of_a_page_or_more_are_dead(
+        &[(0x1000, 0x100, HEADER), (0x2000, 0x1000, DIRECT), (0x4000, 0x1800, HUGE), (0x6000, 0x1000, INDEX)],
+        &[(0x1000, 0x100, META), (0x2000, 0x1000, FreeClass::Dead), (0x4000, 0x1800, FreeClass::Dead), (0x6000, 0x1000, FreeClass::Dead)],
+    )]
+    #[case::allocations_of_a_page_or_more_joined_to_metadata_off_a_page_boundary_are_metadata(
+        &[(0x1000, 0x100, HEADER), (0x1100, 0x1000, DIRECT), (0x2100, 0x1800, HUGE)],
+        &[(0x1000, 0x100, META), (0x1100, 0x1000, META), (0x2100, 0x1800, META)],
+    )]
+    #[case::a_huge_object_of_a_page_or_more_apart_from_metadata_off_a_page_boundary_is_raw(
+        &[(0x1000, 0x100, HEADER), (0x3100, 0x1800, HUGE)],
+        &[(0x1000, 0x100, META), (0x3100, 0x1800, RAW)],
+    )]
+    fn fractal_heap_allocations_return_to_the_pages_they_occupy(
+        #[case] allocations: &[(u64, u64, FractalHeapAllocation)],
+        #[case] expected: &[(u64, u64, FreeClass)],
+    ) {
+        let page_size = FileSpacePageSize::try_from(0x1000).unwrap();
+
+        assert_eq!(
+            fractal_heap_free_spans(Some(page_size), allocations),
+            expected
+        );
+    }
+
+    #[test]
+    fn without_pages_each_fractal_heap_allocation_takes_its_libhdf5_page_type() {
+        let allocations = [
+            (0x0f80, 0x80, HUGE),
+            (0x1000, 0x100, HEADER),
+            (0x1100, 0x80, HUGE),
+        ];
+
+        assert_eq!(
+            fractal_heap_free_spans(None, &allocations),
+            [
+                (0x0f80, 0x80, RAW),
+                (0x1000, 0x100, META),
+                (0x1100, 0x80, RAW)
+            ]
+        );
+    }
+
+    const HEADER: FractalHeapAllocation = FractalHeapAllocation::Header;
+    const DIRECT: FractalHeapAllocation = FractalHeapAllocation::DirectBlock;
+    const INDEX: FractalHeapAllocation = FractalHeapAllocation::HugeObjectIndex;
+    const HUGE: FractalHeapAllocation = FractalHeapAllocation::HugeObject;
+    const META: FreeClass = FreeClass::Page(PageType::Meta);
+    const RAW: FreeClass = FreeClass::Page(PageType::Raw);
 }
