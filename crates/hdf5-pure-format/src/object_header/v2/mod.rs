@@ -25,6 +25,7 @@ use crate::width::UintWidth;
 
 mod chunk;
 mod collector;
+mod worklist;
 
 impl ObjectHeader {
     pub(super) fn parse_v2(

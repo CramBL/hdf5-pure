@@ -10,25 +10,25 @@ use crate::object_header::ObjectHeader;
 use crate::object_header::ParseContext;
 use crate::object_header::v2::MessageRecord;
 use crate::object_header::v2::MessageRecordLayout;
-use crate::object_header::v2::ObjectHeaderContinuation;
 use crate::object_header::v2::ParsedObjectHeaderPrefix;
 use crate::object_header::v2::chunk::ChunkRecord;
 use crate::object_header::v2::chunk::HeaderChunk;
 use crate::object_header::v2::chunk::RootChunk;
+use crate::object_header::v2::worklist::ContinuationWorklist;
 
 /// The messages of a version 2 object header that a parse keeps, chunk by chunk.
 ///
 /// The caller reads chunk 0 and passes it to [`new`](Self::new), then reads each block
 /// [`next_continuation`](Self::next_continuation) returns and passes it to
 /// [`ingest`](Self::ingest), until `next_continuation` returns `None`. [`finish`](Self::finish)
-/// returns the header.
+/// returns the header, with the messages in the order the chunks store them and the chunks in the
+/// order the parse finds them.
 pub(super) struct HeaderCollector<'f> {
     context: ParseContext,
     filter: MessageFilter<'f>,
     prefix: ParsedObjectHeaderPrefix,
     messages: Vec<HeaderMessage>,
-    continuations: Vec<ObjectHeaderContinuation>,
-    continuations_left: u16,
+    worklist: ContinuationWorklist,
 }
 
 impl<'f> HeaderCollector<'f> {
@@ -47,8 +47,7 @@ impl<'f> HeaderCollector<'f> {
             filter,
             prefix,
             messages: Vec::new(),
-            continuations: Vec::new(),
-            continuations_left: MAX_CONTINUATIONS,
+            worklist: ContinuationWorklist::new(),
         };
         collector.ingest(chunk)?;
         Ok(collector)
@@ -59,37 +58,32 @@ impl<'f> HeaderCollector<'f> {
     ///
     /// # Errors
     ///
-    /// Returns the errors [`ChunkRecord::classify`] returns for a record of `chunk`.
+    /// Returns the errors [`ChunkRecord::classify`] returns for a record of `chunk`, and the errors
+    /// [`ContinuationWorklist::discover`] returns.
     pub(super) fn ingest(&mut self, chunk: HeaderChunk<'_>) -> Result<(), FormatError> {
         if self.filter.keeps_all() {
             self.messages.reserve(chunk.message_count());
         }
         for record in chunk.records(self.context) {
             match record? {
+                ChunkRecord::Continuation(continuation) => self.worklist.discover(continuation)?,
+                ChunkRecord::Message(message) => self.keep_if_the_filter_keeps(message),
                 ChunkRecord::Nil => {}
-                ChunkRecord::Message(message) => self.keep_if_filtered(message),
-                ChunkRecord::Continuation(continuation) => self.continuations.push(continuation),
             }
         }
         Ok(())
     }
 
-    /// Returns the next continuation block to read, or `None` once the collector has returned every
-    /// block the ingested chunks refer to.
+    /// Returns the next continuation block to read, in the order the parse finds them, or `None`
+    /// once the collector has returned every block the ingested chunks refer to.
     ///
     /// # Errors
     ///
-    /// Returns [`FormatError::NestingDepthExceeded`] if the collector has returned
-    /// [`MAX_CONTINUATIONS`] blocks already, and [`FormatError::OffsetOverflow`] if the absolute
-    /// address of the block exceeds `u64`.
+    /// Returns [`FormatError::OffsetOverflow`] if the absolute address of the block exceeds `u64`.
     pub(super) fn next_continuation(&mut self) -> Result<Option<ContinuationBlock>, FormatError> {
-        let Some(continuation) = self.continuations.pop() else {
+        let Some(continuation) = self.worklist.next_unvisited() else {
             return Ok(None);
         };
-        self.continuations_left = self
-            .continuations_left
-            .checked_sub(1)
-            .ok_or(FormatError::NestingDepthExceeded)?;
         Ok(Some(ContinuationBlock {
             address: self.context.base_address.absolute(continuation.address())?,
             length: continuation.length(),
@@ -102,7 +96,7 @@ impl<'f> HeaderCollector<'f> {
         self.prefix.object_header(self.messages)
     }
 
-    fn keep_if_filtered(
+    fn keep_if_the_filter_keeps(
         &mut self,
         MessageRecord {
             msg_type,
@@ -141,6 +135,3 @@ impl ContinuationBlock {
         HeaderChunk::continuation(self.layout, block)
     }
 }
-
-/// Limits continuation traversal to protect the parser from cycles.
-const MAX_CONTINUATIONS: u16 = 256;
