@@ -291,7 +291,7 @@ use hdf5_pure_space::__private::{
 
 use crate::access_mode::AccessMode;
 use crate::address::BaseAddressExt;
-use crate::address::{BaseAddress, StoredAddress};
+use crate::address::{AddressContext, BaseAddress, StoredAddress};
 use crate::attribute_info::AttributeInfoMessage;
 use crate::chunk_index_inplace::{Located, Store, apply_ea_append, plan_ea_append};
 use crate::chunked_read::{enumerate_chunks_from_source, plan_dense_grid};
@@ -1077,6 +1077,8 @@ pub(crate) struct WriteEngine {
     /// commit. `base_address` equals the superblock's file location (`sb_sig_off`):
     /// 0 for a plain file, the userblock size for one with a userblock.
     superblock: Superblock,
+    /// The mapping from stored metadata addresses to physical positions in this image.
+    addresses: AddressContext,
     /// Every edit this session has staged and not yet applied. Held as one
     /// value so that [`commit`](WriteEngine::commit) can take the whole set out
     /// for the duration of an attempt and put it back when that attempt
@@ -2262,10 +2264,7 @@ impl WriteEngine {
         // `open_imaged` built the in-memory address by adding the base to the
         // stored one, so this cannot be below the base — but it is a subtraction
         // over two file-derived numbers, and `relative` reports rather than wraps.
-        on_disk.root_group_address = on_disk
-            .base_address
-            .relative(on_disk.root_group_address)?
-            .get();
+        on_disk.root_group_address = self.addresses.relative(on_disk.root_group_address)?.get();
         let bytes = hdf5_pure_format::__private::serialize_superblock(&on_disk)?;
         self.write_at(self.sb_sig_off, &bytes)?;
         self.barrier_data()?;
@@ -2435,13 +2434,13 @@ impl WriteEngine {
         // the link-graph walk index the image correctly. It is converted back to a
         // stored (base-relative) address only when the superblock is serialized on
         // commit.
-        superblock.root_group_address = superblock
-            .base_address
-            .absolute(StoredAddress::new(superblock.root_group_address))?;
+        let addresses = AddressContext::new(superblock.base_address);
+        superblock.root_group_address =
+            addresses.absolute(StoredAddress::new(superblock.root_group_address))?;
 
         // `H5Fopen` rejects a page size outside 512 bytes to 1 GiB as well (`H5Ofsinfo.c` and
         // `H5Fsuper.c`, HDF5 2.2.0).
-        let file_space_info = match Self::extension_fsinfo(&probe, &superblock) {
+        let file_space_info = match Self::extension_fsinfo(&probe, &superblock, addresses) {
             Err(err @ FormatError::InvalidFileSpacePageSize(_)) => return Err(err.into()),
             other => other,
         };
@@ -2451,6 +2450,7 @@ impl WriteEngine {
         let mut session = Self {
             image,
             sb_sig_off,
+            addresses,
             superblock,
             staged: StagedEdits::default(),
             appender_claims: Vec::new(),
@@ -2812,10 +2812,11 @@ impl WriteEngine {
     fn extension_fsinfo(
         source: &(impl Source + ?Sized),
         superblock: &Superblock,
+        addresses: AddressContext,
     ) -> Result<Option<(u64, FileSpaceInfo)>, FormatError> {
         let os = superblock.offset_size;
         let ls = superblock.length_size;
-        let base = superblock.base_address;
+        let base = addresses;
         if superblock.version < 2 {
             return Ok(None); // no superblock extension exists before v2
         }
@@ -2836,7 +2837,7 @@ impl WriteEngine {
             ext_addr,
             os,
             ls,
-            base,
+            base.effective_base(),
         )?;
         let Some(msg) = oh
             .messages
@@ -2847,7 +2848,7 @@ impl WriteEngine {
         };
         let info = hdf5_pure_format::__private::parse_file_space_info(
             FormatWidths::from_sizes(os, ls)?,
-            base,
+            base.effective_base(),
             superblock.eof_address,
             &msg.data,
         )?;
@@ -3053,13 +3054,12 @@ impl WriteEngine {
             &self.image(),
             AccessMode::ReadWrite,
             &self.superblock,
+            self.addresses,
             &path.as_path(),
         ) else {
             return false;
         };
-        let Ok(region) =
-            Self::gather_oh_messages(&self.image(), addr, self.superblock.base_address)
-        else {
+        let Ok(region) = Self::gather_oh_messages(&self.image(), addr, self.addresses) else {
             return false;
         };
         let mut datatype: Option<(usize, usize)> = None;
@@ -3400,6 +3400,10 @@ impl WriteEngine {
         &self.superblock
     }
 
+    pub(crate) const fn addresses(&self) -> AddressContext {
+        self.addresses
+    }
+
     /// The file's shared-message (SOHM) master table, or `None` for a file that
     /// shares no messages — which is every file this crate writes and nearly
     /// every file it is handed.
@@ -3416,7 +3420,7 @@ impl WriteEngine {
             Some(rel) if !rel.is_undefined(os) => rel,
             _ => return Ok(None),
         };
-        let base = self.superblock.base_address;
+        let base = self.addresses;
         let ls = self.superblock.length_size;
         // Best-effort down to here, and strict past it. A superblock extension
         // this engine cannot parse is one nothing in this crate reads a shared
@@ -3433,7 +3437,7 @@ impl WriteEngine {
             abs,
             os,
             ls,
-            base,
+            base.effective_base(),
         ) else {
             return Ok(None);
         };
@@ -3447,7 +3451,7 @@ impl WriteEngine {
         let message = crate::sohm::SharedMessageTableMessage::parse(&msg.data, os)?;
         let framed = BaseOffsetSource {
             inner: self.image(),
-            base,
+            base: base.effective_base(),
         };
         Ok(Some(crate::sohm::SohmTable::read_from_source(
             &SourceMetadata(&framed),
@@ -3465,12 +3469,12 @@ impl WriteEngine {
         let Some(table) = self.shared_message_table()? else {
             return Ok(());
         };
-        let base = self.superblock.base_address;
+        let base = self.addresses;
         let os = self.superblock.offset_size;
         let ls = self.superblock.length_size;
         let framed = BaseOffsetSource {
             inner: self.image(),
-            base,
+            base: base.effective_base(),
         };
         for index in &table.indexes {
             let records = crate::sohm::read_index_records_from_source(&framed, index, os, ls)?;
@@ -4166,6 +4170,7 @@ impl WriteEngine {
                         &self.image(),
                         AccessMode::ReadWrite,
                         &self.superblock,
+                        self.addresses,
                         &dataset.as_path(),
                     )?;
                     self.resolved.insert(dataset.clone(), addr);
@@ -4581,6 +4586,7 @@ impl WriteEngine {
                 data,
                 AccessMode::ReadWrite,
                 &self.superblock,
+                self.addresses,
                 &path.as_path(),
             )
             .is_ok(),
@@ -4588,6 +4594,7 @@ impl WriteEngine {
                 &self.image(),
                 AccessMode::ReadWrite,
                 &self.superblock,
+                self.addresses,
                 &path.as_path(),
             )
             .is_ok(),
@@ -5009,6 +5016,7 @@ impl WriteEngine {
             src_data,
             source.access_mode(),
             src_sb,
+            source.addresses(),
             &src.as_path(),
         )?;
         // Read (and foreign-address-screen) the whole subtree now, while `source`
@@ -5020,7 +5028,7 @@ impl WriteEngine {
             src_addr,
             0,
             true,
-            BaseAddress::ZERO,
+            source.addresses(),
         )?;
         self.refuse_if_claimed(dst)?;
         self.staged.cross_copies.push((dst.clone(), tree));
@@ -5275,7 +5283,7 @@ impl WriteEngine {
         // (in-file, and cross-file into a userblock destination), group creation,
         // and compact group attributes. Cross-file copy still requires a base-0
         // *source* (see [`copy_from`](Self::copy_from)).
-        let base = self.superblock.base_address;
+        let base = self.addresses;
 
         // --- Preflight value overwrites (`write_dataset`) before any write, under
         // the same all-or-nothing contract as additions. Each is resolved,
@@ -5312,6 +5320,7 @@ impl WriteEngine {
                 &self.image(),
                 AccessMode::ReadWrite,
                 &self.superblock,
+                self.addresses,
                 &full.as_path(),
             )?;
             match Self::prepare_write(&self.image(), addr, fd, base, full)? {
@@ -5384,6 +5393,7 @@ impl WriteEngine {
                 &self.image(),
                 AccessMode::ReadWrite,
                 &self.superblock,
+                self.addresses,
                 &full.as_path(),
             )?;
             let mw = Self::prepare_append(&self.image(), addr, ab, base)?;
@@ -5443,6 +5453,7 @@ impl WriteEngine {
                     &self.image(),
                     AccessMode::ReadWrite,
                     &self.superblock,
+                    self.addresses,
                     &full.as_path(),
                 )?;
                 // An attribute edit relocates the dataset's object header and patches
@@ -5618,6 +5629,7 @@ impl WriteEngine {
                 &self.image(),
                 AccessMode::ReadWrite,
                 &self.superblock,
+                self.addresses,
                 &src.as_path(),
             )?;
             // Read the source subtree from this file's own mirror (`cross_file`
@@ -5666,6 +5678,7 @@ impl WriteEngine {
                 &self.image(),
                 AccessMode::ReadWrite,
                 &self.superblock,
+                self.addresses,
                 &d.as_path(),
             )?;
             deleted_addrs.push(del_addr);
@@ -5789,6 +5802,7 @@ impl WriteEngine {
                     &self.image(),
                     AccessMode::ReadWrite,
                     &self.superblock,
+                    self.addresses,
                     &key.as_path(),
                 )?;
                 // Rebuilding this group moves its header and patches only the
@@ -6014,7 +6028,7 @@ impl WriteEngine {
                 .map(|&(off, len, _)| (off, len))
                 .collect(),
             moved: Vec::new(),
-            base: self.superblock.base_address,
+            base: self.addresses,
         };
         {
             // Framed at the base address: a shared-message address is stored
@@ -6023,7 +6037,7 @@ impl WriteEngine {
             let image = self.image();
             let framed = BaseOffsetSource {
                 inner: image,
-                base: self.superblock.base_address,
+                base: self.addresses.effective_base(),
             };
             for key in &keys {
                 for (_, tree) in &nodes[key].copies {
@@ -6097,6 +6111,7 @@ impl WriteEngine {
             &for_supplied,
             &self.image(),
             &self.superblock,
+            self.addresses,
         )?;
 
         // --- The point of no return. Every refusal is behind us, so the staged
@@ -6356,6 +6371,7 @@ impl WriteEngine {
                             &for_supplied,
                             &self.image(),
                             &self.superblock,
+                            self.addresses,
                         )?;
                         write_reference_address(&mut fd.raw, patch.byte_offset, addr);
                     }
@@ -6624,6 +6640,7 @@ impl WriteEngine {
         let plan = crate::reference_patch::plan(
             &self.image(),
             &self.superblock,
+            self.addresses,
             relocations,
             MAX_LINK_GRAPH_NODES,
         )?;
@@ -6691,7 +6708,7 @@ impl WriteEngine {
                 ps.old_blocks.clone(),
             )
         };
-        let base = self.superblock.base_address;
+        let base = self.addresses;
 
         // The extension address is stored relative to the base address, and every
         // reader of the extension below indexes the image, so it is shifted once
@@ -7105,7 +7122,7 @@ impl WriteEngine {
             )
         };
 
-        let base = self.superblock.base_address;
+        let base = self.addresses;
 
         // Page-align the file before anything else, so the rewritten extension and
         // the manager blocks begin on a page boundary and stay in metadata pages.
@@ -7533,8 +7550,7 @@ impl WriteEngine {
     ) -> Result<OhRegion, Error> {
         let widths =
             FormatWidths::from_sizes(self.superblock.offset_size, self.superblock.length_size)?;
-        let region =
-            Self::gather_oh_messages(&self.image(), ext_addr, self.superblock.base_address)?;
+        let region = Self::gather_oh_messages(&self.image(), ext_addr, self.addresses)?;
         rewrite_extension_region_bytes(&region, widths, info)
     }
 
@@ -7579,7 +7595,7 @@ impl WriteEngine {
     fn gather_oh_messages<S: Source + ?Sized>(
         src: &S,
         addr: u64,
-        base: BaseAddress,
+        base: AddressContext,
     ) -> Result<OhRegion, Error> {
         let chunks = read_oh_chunks(src, addr, base)?;
         // Every chunk of one header shares what chunk 0's prefix declared, which
@@ -7609,14 +7625,14 @@ impl WriteEngine {
     fn reconstruct_v1_group(&self, addr: u64) -> Result<GroupInfo, Error> {
         let os = self.superblock.offset_size;
         let ls = self.superblock.length_size;
-        let base = self.superblock.base_address;
+        let base = self.addresses;
         let oh = ObjectHeader::parse_from_source(
             &SourceMetadata(&self.image()),
             AccessMode::ReadWrite,
             addr,
             os,
             ls,
-            base,
+            base.effective_base(),
         )?;
         if oh
             .messages
@@ -7627,7 +7643,8 @@ impl WriteEngine {
                 "a target path names a dataset, not a group",
             ));
         }
-        let entries = resolve_group_entries_from_source(&self.image(), &oh, os, ls, base)?;
+        let entries =
+            resolve_group_entries_from_source(&self.image(), &oh, os, ls, self.addresses)?;
 
         let mut region = fresh_group_region();
         let mut link_names = Vec::with_capacity(entries.len());
@@ -7691,8 +7708,7 @@ impl WriteEngine {
         if sig.as_deref() != Ok(&b"OHDR"[..]) {
             return self.reconstruct_v1_group(addr);
         }
-        let mut region =
-            Self::gather_oh_messages(&self.image(), addr, self.superblock.base_address)?;
+        let mut region = Self::gather_oh_messages(&self.image(), addr, self.addresses)?;
         let mut p = 0;
         let mut has_link_info = false;
         let mut link_names = Vec::new();
@@ -7829,7 +7845,7 @@ impl WriteEngine {
         src: &S,
         addr: u64,
         fd: &FlatDataset,
-        base: BaseAddress,
+        base: AddressContext,
         path: &ObjectPathBuf,
     ) -> Result<WritePlan, Error> {
         // Enforced by construction: `staged.writes` has one producer, and it
@@ -8096,7 +8112,10 @@ impl WriteEngine {
                 // the returned write offsets are shifted back to absolute file
                 // offsets by adding `base` (a no-op on a base-0 file).
                 if let Some(writes) = try_inplace_chunk_writes(
-                    &BaseOffsetSource { inner: src, base },
+                    &BaseOffsetSource {
+                        inner: src,
+                        base: base.effective_base(),
+                    },
                     &dl,
                     &disk_ds,
                     &spatial,
@@ -8147,7 +8166,7 @@ impl WriteEngine {
         src: &S,
         addr: u64,
         ab: &AppendBuilder,
-        base: BaseAddress,
+        base: AddressContext,
     ) -> Result<MovingWrite, Error> {
         if ab.dt_conflict {
             return Err(Error::AppendUnsupported(
@@ -8309,12 +8328,15 @@ impl WriteEngine {
             None => None,
         };
 
-        if base.get() > src.len() {
+        if base.effective_base().get() > src.len() {
             return Err(Error::AppendUnsupported(
                 "userblock base address past end-of-file",
             ));
         }
-        let view = BaseOffsetSource { inner: src, base };
+        let view = BaseOffsetSource {
+            inner: src,
+            base: base.effective_base(),
+        };
 
         // The rebuilt index's element format (bare address vs address+size+mask) is
         // chosen by `has_filters`; it must agree with the source index's client id,
@@ -8479,7 +8501,7 @@ impl WriteEngine {
         src: &S,
         access_mode: AccessMode,
         addr: u64,
-        base: BaseAddress,
+        base: AddressContext,
     ) -> Result<ObjModel, Error> {
         let region = Self::gather_oh_messages(src, addr, base)?;
 
@@ -8695,7 +8717,7 @@ impl WriteEngine {
         addr: u64,
         depth: u32,
         cross_file: bool,
-        base: BaseAddress,
+        base: AddressContext,
     ) -> Result<CopyTree, Error> {
         if depth >= MAX_COPY_DEPTH {
             return Err(Error::EditUnsupported(
@@ -8805,7 +8827,10 @@ impl WriteEngine {
                 // to are stored base-relative, so enumerate and read on a
                 // base-relative view of the source image (the identity on a base-0
                 // file). The returned addresses are then offsets into `dview`.
-                let dview = BaseOffsetSource { inner: src, base };
+                let dview = BaseOffsetSource {
+                    inner: src,
+                    base: base.effective_base(),
+                };
 
                 // Enumerate the source chunks and map them onto a dense grid; a
                 // sparse (holed/unallocated) dataset cannot be reproduced by the
@@ -8900,7 +8925,7 @@ impl WriteEngine {
     /// userblock base (`- base`, a no-op on a base-0 file); the chunked storage and
     /// dense attribute heaps are laid out base-relative by their own builders.
     fn write_copy_subtree(&mut self, node: &CopyTree) -> Result<u64, Error> {
-        let base = self.superblock.base_address;
+        let base = self.addresses;
         match node {
             CopyTree::DatasetVerbatim {
                 region,
@@ -9181,7 +9206,7 @@ impl WriteEngine {
     /// extent (for a resized contiguous dataset) is freed separately, after the
     /// commit's superblock repoint, so it is never reused mid-commit.
     fn write_moving(&mut self, mw: &MovingWrite) -> Result<u64, Error> {
-        let base = self.superblock.base_address;
+        let base = self.addresses;
         match mw {
             MovingWrite::Contiguous {
                 region,
@@ -9322,7 +9347,7 @@ impl WriteEngine {
         kept_chunks: &[ChunkRecord],
         new_chunk_bytes: &[Vec<u8>],
     ) -> Result<u64, Error> {
-        let base = self.superblock.base_address;
+        let base = self.addresses;
         // Where the appended chunks and the rebuilt index go, and whether they go
         // together.
         //
@@ -9649,7 +9674,7 @@ impl WriteEngine {
         build: impl FnOnce(StoredAddress) -> Result<(Vec<u8>, T), Error>,
     ) -> Result<(u64, T), Error> {
         let at = self.reserve(len, ty)?;
-        let (bytes, extra) = build(self.superblock.base_address.relative(at.address())?)?;
+        let (bytes, extra) = build(self.addresses.relative(at.address())?)?;
         let addr = self.place(at, &bytes)?;
         Ok((addr, extra))
     }
@@ -9669,7 +9694,7 @@ impl WriteEngine {
             .iter()
             .map(|collection| {
                 let addr = self.alloc_or_append_typed(collection, PageType::Meta)?;
-                Ok(self.superblock.base_address.relative(addr)?.get())
+                Ok(self.addresses.relative(addr)?.get())
             })
             .collect()
     }
@@ -9712,7 +9737,7 @@ impl WriteEngine {
             .cloned()
             .unwrap_or_default();
         let mut raw = bytes.raw.clone();
-        let base = self.superblock.base_address;
+        let base = self.addresses;
         // A staging with no collections patches nothing, which is the right
         // answer for it: an element with no heap object keeps the zero address
         // that reads back as null. It falls out of the general path rather than
@@ -9852,6 +9877,7 @@ impl WriteEngine {
         invalidated: &InvalidatedAddresses,
         src: &(impl Source + ?Sized),
         superblock: &Superblock,
+        addresses: AddressContext,
     ) -> Result<StoredAddress, Error> {
         let path = match target {
             // An address carries no name to test, so the delete check the path
@@ -9872,7 +9898,7 @@ impl WriteEngine {
             }
             ObjectRefTarget::Path(path) => path,
         };
-        let base = superblock.base_address;
+        let base = addresses;
         if let Some(&addr) = path_addr.get(path) {
             return Ok(base.relative(addr)?);
         }
@@ -9899,6 +9925,7 @@ impl WriteEngine {
                 src,
                 AccessMode::ReadWrite,
                 superblock,
+                addresses,
                 &path.as_path(),
             ) {
                 Ok(addr) => base.relative(addr)?,
@@ -9941,6 +9968,7 @@ impl WriteEngine {
         invalidated: &InvalidatedAddresses,
         src: &(impl Source + ?Sized),
         superblock: &Superblock,
+        addresses: AddressContext,
     ) -> Result<(), Error> {
         let mut by_depth = keys.to_vec();
         // Stable on purpose, for the same reason as the apply loop's copy: this
@@ -9969,13 +9997,14 @@ impl WriteEngine {
                                 invalidated,
                                 src,
                                 superblock,
+                                addresses,
                             )?;
                         }
                     }
-                    sim_addr.insert(key.join(&fd.name), superblock.base_address.get());
+                    sim_addr.insert(key.join(&fd.name), addresses.effective_base().get());
                 }
             }
-            sim_addr.insert(key.clone(), superblock.base_address.get());
+            sim_addr.insert(key.clone(), addresses.effective_base().get());
         }
         Ok(())
     }
@@ -10231,10 +10260,8 @@ struct InvalidatedAddresses {
     /// records that a dataset is written, not which plan it got — while this list
     /// is filled from the plans themselves.
     moved: Vec<u64>,
-    /// The superblock base address. A stored object reference is *base-relative*
-    /// and both lists above are absolute, so the comparison needs it; it is zero
-    /// for every file without a userblock.
-    base: BaseAddress,
+    /// The address context used to compare stored object references with physical positions.
+    base: AddressContext,
 }
 
 impl InvalidatedAddresses {
@@ -12225,7 +12252,7 @@ struct DenseAttrEdit {
 /// members buys nothing.
 fn plan_attr_ops<S: Source + ?Sized>(
     src: &S,
-    base: BaseAddress,
+    base: AddressContext,
     addr: Option<u64>,
     region: &OhRegion,
     ops: &[&AttrOp],
@@ -12488,7 +12515,7 @@ fn read_object_attrs<S: Source + ?Sized>(
     src: &S,
     access_mode: AccessMode,
     addr: u64,
-    base: BaseAddress,
+    base: AddressContext,
 ) -> Result<Vec<crate::attribute::StoredAttribute>, Error> {
     let header = ObjectHeader::parse_from_source(
         &SourceMetadata(src),
@@ -12496,9 +12523,9 @@ fn read_object_attrs<S: Source + ?Sized>(
         addr,
         OFFSET_SIZE,
         LENGTH_SIZE,
-        base,
+        base.effective_base(),
     )?;
-    if base.get() > src.len() {
+    if base.effective_base().get() > src.len() {
         return Err(Error::EditUnsupported(
             "this file's userblock is larger than the file itself",
         ));
@@ -12507,7 +12534,10 @@ fn read_object_attrs<S: Source + ?Sized>(
     // base address, so the walk gets the file framed past its userblock — the
     // same view the reader uses. `base` is 0 for a plain file, where this is
     // `src` itself.
-    let framed = BaseOffsetSource { inner: src, base };
+    let framed = BaseOffsetSource {
+        inner: src,
+        base: base.effective_base(),
+    };
     crate::attribute::extract_stored_attributes_from_source(
         &framed,
         access_mode,
@@ -13037,7 +13067,7 @@ fn read_oh_chunk0<S: Source + ?Sized>(src: &S, addr: u64) -> Result<OhChunk, Err
 pub(crate) fn read_oh_chunks<S: Source + ?Sized>(
     src: &S,
     addr: u64,
-    base: BaseAddress,
+    base: AddressContext,
 ) -> Result<Vec<OhChunk>, Error> {
     let mut chunks = vec![read_oh_chunk0(src, addr)?];
     let mut i = 0;
@@ -13077,13 +13107,13 @@ pub(crate) fn read_oh_chunks<S: Source + ?Sized>(
 /// Returns [`Error::EditUnsupported`] if the message ends inside its fields, if the block runs
 /// past the end of `src` or is shorter than its signature and checksum, or if the block does not
 /// begin with `OCHK`. Returns [`Error::Format`] if the message stores the undefined address, if
-/// adding `base` to the address overflows, or if a read of `src` fails.
+/// adding the effective base to the address overflows, or if a read of `src` fails.
 fn read_oh_continuation<S: Source + ?Sized>(
     src: &S,
     region: &[u8],
     body: usize,
     body_end: usize,
-    base: BaseAddress,
+    base: AddressContext,
     props: ObjectHeaderPrefix,
 ) -> Result<OhChunk, Error> {
     let continuation =
@@ -13820,8 +13850,11 @@ mod tests {
             .message(Message::undefined_continuation(64, Widths::EIGHT))
             .build();
 
-        let Err(err) = read_oh_chunks(&BytesSource::new(header.as_slice()), 0, BaseAddress::ZERO)
-        else {
+        let Err(err) = read_oh_chunks(
+            &BytesSource::new(header.as_slice()),
+            0,
+            AddressContext::new(BaseAddress::ZERO),
+        ) else {
             panic!("expected the chunk walk to fail");
         };
         assert!(
@@ -13870,6 +13903,7 @@ mod tests {
                 &session.image(),
                 AccessMode::ReadWrite,
                 session.superblock(),
+                session.addresses(),
                 &object.as_path(),
             )
             .unwrap();
@@ -13884,7 +13918,7 @@ mod tests {
             let region = WriteEngine::gather_oh_messages(
                 &session.image(),
                 addr,
-                session.superblock.base_address,
+                AddressContext::new(session.superblock.base_address),
             )
             .unwrap();
             let info = find_attribute_info(&region)
@@ -13969,6 +14003,7 @@ mod tests {
                 &session.image(),
                 AccessMode::ReadWrite,
                 session.superblock(),
+                session.addresses(),
                 &object.as_path(),
             )
             .unwrap();
@@ -14231,7 +14266,7 @@ mod tests {
         let invalidated = InvalidatedAddresses {
             removed: vec![(248, 71)],
             moved: Vec::new(),
-            base: BaseAddress::ZERO,
+            base: AddressContext::new(BaseAddress::ZERO),
         };
         for (address, refused) in [(248u64, true), (318, true), (319, false)] {
             let tree = CopyTree::DatasetVerbatim {
@@ -14271,7 +14306,7 @@ mod tests {
         let invalidated = InvalidatedAddresses {
             removed: vec![(248, 71)],
             moved: Vec::new(),
-            base: BaseAddress::ZERO,
+            base: AddressContext::new(BaseAddress::ZERO),
         };
         let mut bytes = message_record(
             MessageType::DATATYPE,
@@ -14332,7 +14367,7 @@ mod tests {
         let invalidated = InvalidatedAddresses {
             removed: vec![(248, 71)],
             moved: Vec::new(),
-            base: BaseAddress::ZERO,
+            base: AddressContext::new(BaseAddress::ZERO),
         };
         let err = screen_resolved_references(&dt, &raw, &invalidated).unwrap_err();
         assert!(
@@ -14347,7 +14382,7 @@ mod tests {
         let nothing = InvalidatedAddresses {
             removed: Vec::new(),
             moved: Vec::new(),
-            base: BaseAddress::ZERO,
+            base: AddressContext::new(BaseAddress::ZERO),
         };
         assert!(screen_resolved_references(&dt, &raw, &nothing).is_err());
     }
@@ -14378,7 +14413,7 @@ mod tests {
         let invalidated = InvalidatedAddresses {
             removed: vec![(248, 71)],
             moved: Vec::new(),
-            base: BaseAddress::ZERO,
+            base: AddressContext::new(BaseAddress::ZERO),
         };
 
         let err = screen_resolved_references(&of_references, &raw, &invalidated).unwrap_err();
@@ -14418,7 +14453,7 @@ mod tests {
         let invalidated = InvalidatedAddresses {
             removed: vec![(248, 71)],
             moved: Vec::new(),
-            base: BaseAddress::ZERO,
+            base: AddressContext::new(BaseAddress::ZERO),
         };
         let err = screen_resolved_references(&dt, &raw, &invalidated).unwrap_err();
         assert!(
@@ -14431,7 +14466,7 @@ mod tests {
         let nothing = InvalidatedAddresses {
             removed: Vec::new(),
             moved: Vec::new(),
-            base: BaseAddress::ZERO,
+            base: AddressContext::new(BaseAddress::ZERO),
         };
         assert!(screen_resolved_references(&dt, &raw, &nothing).is_err());
     }
@@ -14525,10 +14560,11 @@ mod tests {
                 &InvalidatedAddresses {
                     removed,
                     moved,
-                    base: BaseAddress::ZERO,
+                    base: AddressContext::new(BaseAddress::ZERO),
                 },
                 &engine.image(),
                 engine.superblock(),
+                AddressContext::new(engine.superblock().base_address),
             )
         };
 
@@ -14588,10 +14624,11 @@ mod tests {
                 &InvalidatedAddresses {
                     removed: Vec::new(),
                     moved: Vec::new(),
-                    base: BaseAddress::ZERO,
+                    base: AddressContext::new(BaseAddress::ZERO),
                 },
                 &engine.image(),
                 engine.superblock(),
+                AddressContext::new(engine.superblock().base_address),
             )
         };
 
@@ -14620,7 +14657,7 @@ mod tests {
         let invalidated = InvalidatedAddresses {
             removed: vec![(248, 71)],
             moved: Vec::new(),
-            base: BaseAddress::ZERO,
+            base: AddressContext::new(BaseAddress::ZERO),
         };
         // 248 is the first byte of the reclaimed span, 318 its last, 319 the
         // byte after it.
@@ -15167,6 +15204,7 @@ mod tests {
             s.image.as_slice().unwrap(),
             AccessMode::ReadWrite,
             &s.superblock,
+            AddressContext::new(s.superblock.base_address),
             &ObjectPath::parse("victim"),
         )
         .unwrap();
@@ -16927,7 +16965,7 @@ mod tests {
         let moved = InvalidatedAddresses {
             removed: Vec::new(),
             moved: vec![0x400],
-            base: BaseAddress::ZERO,
+            base: AddressContext::new(BaseAddress::ZERO),
         };
         let err = screen_shared_message_records(std::slice::from_ref(&named), &moved).unwrap_err();
         assert_eq!(
@@ -16938,7 +16976,7 @@ mod tests {
         let elsewhere = InvalidatedAddresses {
             removed: Vec::new(),
             moved: vec![0x800],
-            base: BaseAddress::ZERO,
+            base: AddressContext::new(BaseAddress::ZERO),
         };
         screen_shared_message_records(std::slice::from_ref(&named), &elsewhere).unwrap();
     }
@@ -16960,7 +16998,7 @@ mod tests {
         let moved = InvalidatedAddresses {
             removed: Vec::new(),
             moved: vec![0x400],
-            base: BaseAddress::ZERO,
+            base: AddressContext::new(BaseAddress::ZERO),
         };
         screen_shared_message_records(&[heap], &moved).unwrap();
     }
@@ -17741,6 +17779,7 @@ mod tests {
             &engine.image(),
             AccessMode::ReadWrite,
             engine.superblock(),
+            engine.addresses(),
             &ObjectPath::parse("d"),
         )
         .unwrap()
@@ -18134,6 +18173,7 @@ mod tests {
             &engine.image(),
             AccessMode::ReadWrite,
             engine.superblock(),
+            engine.addresses(),
             &ObjectPath::parse("d"),
         )
         .unwrap();
@@ -20473,6 +20513,7 @@ mod staged_query_tests {
             &e.image(),
             AccessMode::ReadWrite,
             e.superblock(),
+            e.addresses(),
             &ObjectPath::parse("col"),
         )
         .unwrap();
@@ -20630,7 +20671,8 @@ mod staged_query_tests {
                 &e.image(),
                 AccessMode::ReadWrite,
                 e.superblock(),
-                &ObjectPath::parse("existing"),
+                e.addresses(),
+                &ObjectPath::parse("existing")
             )
             .is_err()
         );

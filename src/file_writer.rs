@@ -41,6 +41,8 @@ use hdf5_pure_format::__private::LayoutVersion;
 use hdf5_pure_format::__private::SECTION_CLASS_LARGE;
 use hdf5_pure_format::__private::SECTION_CLASS_SMALL;
 
+#[cfg(test)]
+use crate::address::AddressContext;
 use crate::address::BaseAddressExt;
 use crate::address::{BaseAddress, StoredAddress};
 use crate::attribute::AttributeMessage;
@@ -3987,9 +3989,14 @@ mod tests {
     fn committed_reference_count(bytes: &[u8], path: &str) -> Option<u32> {
         let sig = signature::find_signature(bytes).unwrap();
         let sb = hdf5_pure_format::__private::parse_superblock(bytes, sig).unwrap();
-        let addr =
-            group_v2::resolve_path_any(bytes, AccessMode::ReadOnly, &sb, &ObjectPath::parse(path))
-                .unwrap();
+        let addr = group_v2::resolve_path_any(
+            bytes,
+            AccessMode::ReadOnly,
+            &sb,
+            AddressContext::new(sb.base_address),
+            &ObjectPath::parse(path),
+        )
+        .unwrap();
         let hdr = ObjectHeader::parse(
             bytes,
             AccessMode::ReadOnly,
@@ -4026,6 +4033,7 @@ mod tests {
             &bytes,
             AccessMode::ReadOnly,
             &sb,
+            AddressContext::new(sb.base_address),
             &ObjectPath::parse("mytype"),
         )
         .unwrap();
@@ -4033,6 +4041,7 @@ mod tests {
             &bytes,
             AccessMode::ReadOnly,
             &sb,
+            AddressContext::new(sb.base_address),
             &ObjectPath::parse("typed"),
         )
         .unwrap();
@@ -4081,9 +4090,14 @@ mod tests {
     fn read_dataset_f64(bytes: &[u8], path: &str) -> Vec<f64> {
         let sig = signature::find_signature(bytes).unwrap();
         let sb = hdf5_pure_format::__private::parse_superblock(bytes, sig).unwrap();
-        let addr =
-            group_v2::resolve_path_any(bytes, AccessMode::ReadOnly, &sb, &ObjectPath::parse(path))
-                .unwrap();
+        let addr = group_v2::resolve_path_any(
+            bytes,
+            AccessMode::ReadOnly,
+            &sb,
+            AddressContext::new(sb.base_address),
+            &ObjectPath::parse(path),
+        )
+        .unwrap();
         let hdr = ObjectHeader::parse(
             bytes,
             AccessMode::ReadOnly,
@@ -4149,6 +4163,7 @@ mod tests {
             &bytes,
             AccessMode::ReadOnly,
             &sb,
+            AddressContext::new(sb.base_address),
             &ObjectPath::parse("data"),
         )
         .unwrap();
@@ -4205,6 +4220,7 @@ mod tests {
             &bytes,
             AccessMode::ReadOnly,
             &sb,
+            AddressContext::new(sb.base_address),
             &ObjectPath::parse("grp"),
         )
         .unwrap();
@@ -4240,6 +4256,7 @@ mod tests {
             &bytes,
             AccessMode::ReadOnly,
             &sb,
+            AddressContext::new(sb.base_address),
             &ObjectPath::parse("grp"),
         )
         .unwrap();
@@ -4303,6 +4320,7 @@ mod tests {
             &bytes,
             AccessMode::ReadOnly,
             &sb,
+            AddressContext::new(sb.base_address),
             &ObjectPath::parse("data"),
         )
         .unwrap();
@@ -4380,6 +4398,7 @@ mod tests {
             &bytes,
             AccessMode::ReadOnly,
             &sb,
+            AddressContext::new(sb.base_address),
             &ObjectPath::parse("data"),
         )
         .unwrap();
@@ -4952,6 +4971,7 @@ mod tests {
             &bytes,
             AccessMode::ReadOnly,
             &sb,
+            AddressContext::new(sb.base_address),
             &ObjectPath::parse("data"),
         )
         .unwrap();
@@ -5420,9 +5440,14 @@ mod tests {
     fn layout_message_version(bytes: &[u8], path: &str) -> u8 {
         let sig = signature::find_signature(bytes).unwrap();
         let sb = hdf5_pure_format::__private::parse_superblock(bytes, sig).unwrap();
-        let addr =
-            group_v2::resolve_path_any(bytes, AccessMode::ReadOnly, &sb, &ObjectPath::parse(path))
-                .unwrap();
+        let addr = group_v2::resolve_path_any(
+            bytes,
+            AccessMode::ReadOnly,
+            &sb,
+            AddressContext::new(sb.base_address),
+            &ObjectPath::parse(path),
+        )
+        .unwrap();
         let oh = ObjectHeader::parse(
             bytes,
             AccessMode::ReadOnly,

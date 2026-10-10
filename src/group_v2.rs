@@ -13,8 +13,9 @@ use hdf5_pure_format::__private::{BTREE_V2_LINK_CREATION_ORDER, BTREE_V2_LINK_NA
 use hdf5_pure_space::__private::Extent;
 
 use crate::access_mode::AccessMode;
-use crate::address::BaseAddressExt;
-use crate::address::{BaseAddress, StoredAddress};
+use crate::address::{AddressContext, StoredAddress};
+#[cfg(test)]
+use crate::address::{BaseAddress, BaseAddressExt};
 use crate::btree_v2::{
     BTreeV2Header, collect_btree_v2_records, collect_btree_v2_records_from_source,
 };
@@ -88,8 +89,8 @@ pub(crate) fn collect_dense_group_index_storage_extents<S: Source + ?Sized>(
 /// A compact group holds its links as Link messages in the header itself, and a dense one holds
 /// them in a fractal heap indexed by a version 2 B-tree. A soft or external link is passed over:
 /// it identifies no object header in this file. The dense walk reads through a view of `file_data`
-/// framed at `base_address`, so the heap and index addresses of the Link Info message index that
-/// view directly.
+/// framed at the effective base in `addresses`, so the heap and index addresses of the Link Info
+/// message index that view directly.
 ///
 /// # Errors
 ///
@@ -100,14 +101,14 @@ pub fn resolve_v2_group_entries(
     object_header: &ObjectHeader,
     offset_size: u8,
     length_size: u8,
-    base_address: BaseAddress,
+    addresses: AddressContext,
 ) -> Result<Vec<GroupEntry>, FormatError> {
     // Look for Link Info message to determine storage type
     let link_info = find_link_info(object_header, offset_size)?;
 
     if let Some(fh_addr) = link_info.fractal_heap_address {
         // Dense storage
-        let framed = frame(file_data, base_address)?;
+        let framed = frame(file_data, addresses.effective_base())?;
         resolve_dense_entries(framed, &link_info, fh_addr, offset_size, length_size)
     } else {
         // Compact storage: links are stored directly as Link messages
@@ -154,13 +155,7 @@ fn resolve_compact_entries(
 /// deep knows an address and nothing else.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ChildLookup {
-    /// The group holds a child of that name, at this *absolute* file address.
-    ///
-    /// Absolute rather than stored: every consumer wants it that way, and
-    /// [`of`](Self::of) — the one thing in the crate that builds this variant —
-    /// already takes the base address the search itself needed. Back when each
-    /// consumer converted for itself, one of the three did so with an unchecked
-    /// `+`.
+    /// The physical position of the named child's object header.
     Found(u64),
     /// The group holds no child of that name.
     Absent,
@@ -169,16 +164,17 @@ pub(crate) enum ChildLookup {
 }
 
 impl ChildLookup {
-    /// Returns [`ChildLookup::Found`] at the absolute file address of `address`, or
-    /// [`ChildLookup::Absent`] where the search of a group found no such child.
+    /// Returns the lookup result with a stored child address converted to a physical position.
+    ///
+    /// Returns [`ChildLookup::Absent`] if `address` is [`None`].
     ///
     /// # Errors
     ///
-    /// Returns [`FormatError::OffsetOverflow`] if the base cannot be added to it, which a crafted
-    /// link naming `HADDR_UNDEF` in a file with a userblock arranges.
-    fn of(base: BaseAddress, address: Option<StoredAddress>) -> Result<Self, FormatError> {
+    /// Returns [`FormatError::OffsetOverflow`] if the sum of the stored address and effective base
+    /// exceeds [`u64::MAX`].
+    fn of(addresses: AddressContext, address: Option<StoredAddress>) -> Result<Self, FormatError> {
         Ok(match address {
-            Some(address) => ChildLookup::Found(base.absolute(address)?),
+            Some(address) => ChildLookup::Found(addresses.absolute(address)?),
             None => ChildLookup::Absent,
         })
     }
@@ -211,7 +207,7 @@ pub(crate) fn find_child_address(
     group_address: u64,
     offset_size: u8,
     length_size: u8,
-    base_address: BaseAddress,
+    addresses: AddressContext,
     name: LinkName<'_>,
 ) -> Result<ChildLookup, FormatError> {
     let mut saw_link = false;
@@ -223,7 +219,7 @@ pub(crate) fn find_child_address(
             group_address.to_usize()?,
             offset_size,
             length_size,
-            base_address,
+            addresses.effective_base(),
             MessageFilter::Only(&mut wanted),
         )?
     };
@@ -231,14 +227,11 @@ pub(crate) fn find_child_address(
         return Ok(ChildLookup::NotAGroup);
     }
     if holds_compact_links(&header, offset_size)? {
-        return ChildLookup::of(
-            base_address,
-            scan_compact_links(&header, offset_size, name)?,
-        );
+        return ChildLookup::of(addresses, scan_compact_links(&header, offset_size, name)?);
     }
     ChildLookup::of(
-        base_address,
-        resolve_group_entries(file_data, &header, offset_size, length_size, base_address)?
+        addresses,
+        resolve_group_entries(file_data, &header, offset_size, length_size, addresses)?
             .into_iter()
             .find(|e| e.name == name.as_str())
             .map(|e| e.object_header_address),
@@ -252,7 +245,7 @@ pub(crate) fn find_child_address_from_source<S: Source + ?Sized>(
     group_address: u64,
     offset_size: u8,
     length_size: u8,
-    base_address: BaseAddress,
+    addresses: AddressContext,
     name: LinkName<'_>,
 ) -> Result<ChildLookup, FormatError> {
     let mut saw_link = false;
@@ -264,7 +257,7 @@ pub(crate) fn find_child_address_from_source<S: Source + ?Sized>(
             group_address,
             offset_size,
             length_size,
-            base_address,
+            addresses.effective_base(),
             MessageFilter::Only(&mut wanted),
         )?
     };
@@ -272,14 +265,11 @@ pub(crate) fn find_child_address_from_source<S: Source + ?Sized>(
         return Ok(ChildLookup::NotAGroup);
     }
     if holds_compact_links(&header, offset_size)? {
-        return ChildLookup::of(
-            base_address,
-            scan_compact_links(&header, offset_size, name)?,
-        );
+        return ChildLookup::of(addresses, scan_compact_links(&header, offset_size, name)?);
     }
     ChildLookup::of(
-        base_address,
-        resolve_group_entries_from_source(source, &header, offset_size, length_size, base_address)?
+        addresses,
+        resolve_group_entries_from_source(source, &header, offset_size, length_size, addresses)?
             .into_iter()
             .find(|e| e.name == name.as_str())
             .map(|e| e.object_header_address),
@@ -502,6 +492,8 @@ pub(crate) fn is_group(object_header: &ObjectHeader) -> bool {
 /// Each component is looked up through [`find_child_address`], which reads a v1 symbol-table
 /// group, a compact v2 group and a dense one alike. The caller parses the spelling it holds,
 /// through [`ObjectPath::parse`], and a `path` with no components identifies the root group.
+/// The caller supplies a superblock whose root group address is a physical position. Child
+/// addresses are interpreted through `addresses`.
 ///
 /// # Errors
 ///
@@ -512,16 +504,24 @@ pub fn resolve_path_any(
     file_data: &[u8],
     access_mode: AccessMode,
     superblock: &Superblock,
+    addresses: AddressContext,
     path: &ObjectPath<'_>,
 ) -> Result<u64, ResolveError> {
     let os = superblock.offset_size;
     let ls = superblock.length_size;
-    let base = superblock.base_address;
 
     let mut current_addr = superblock.root_group_address;
 
     for (walked, &name) in path.components().iter().enumerate() {
-        match find_child_address(file_data, access_mode, current_addr, os, ls, base, name)? {
+        match find_child_address(
+            file_data,
+            access_mode,
+            current_addr,
+            os,
+            ls,
+            addresses,
+            name,
+        )? {
             ChildLookup::Found(abs_addr) => current_addr = abs_addr,
             ChildLookup::Absent => {
                 return Err(FormatError::PathNotFound(path.prefix(walked + 1).to_string()).into());
@@ -550,7 +550,7 @@ pub fn resolve_group_entries(
     object_header: &ObjectHeader,
     offset_size: u8,
     length_size: u8,
-    base_address: BaseAddress,
+    addresses: AddressContext,
 ) -> Result<Vec<GroupEntry>, FormatError> {
     if is_v1_group(object_header) {
         // v1: find SymbolTableMessage and use existing v1 code
@@ -560,14 +560,14 @@ pub fn resolve_group_entries(
             .find(|m| m.msg_type == MessageType::SYMBOL_TABLE)
             .ok_or_else(|| FormatError::PathNotFound(String::from("no symbol table message")))?;
         let stm = SymbolTableMessage::parse(&sym_msg.data, offset_size)?;
-        group_v1::resolve_v1_group_entries(file_data, &stm, offset_size, length_size, base_address)
+        group_v1::resolve_v1_group_entries(file_data, &stm, offset_size, length_size, addresses)
     } else if is_v2_group(object_header) {
         resolve_v2_group_entries(
             file_data,
             object_header,
             offset_size,
             length_size,
-            base_address,
+            addresses,
         )
     } else {
         // Names no object, and cannot: an enumeration is handed a header and
@@ -602,17 +602,24 @@ pub fn resolve_path_any_from_source<S: Source + ?Sized>(
     source: &S,
     access_mode: AccessMode,
     superblock: &Superblock,
+    addresses: AddressContext,
     path: &ObjectPath<'_>,
 ) -> Result<u64, ResolveError> {
     let os = superblock.offset_size;
     let ls = superblock.length_size;
-    let base = superblock.base_address;
 
     let mut current_addr = superblock.root_group_address;
 
     for (walked, &name) in path.components().iter().enumerate() {
-        match find_child_address_from_source(source, access_mode, current_addr, os, ls, base, name)?
-        {
+        match find_child_address_from_source(
+            source,
+            access_mode,
+            current_addr,
+            os,
+            ls,
+            addresses,
+            name,
+        )? {
             ChildLookup::Found(abs_addr) => current_addr = abs_addr,
             ChildLookup::Absent => {
                 return Err(FormatError::PathNotFound(path.prefix(walked + 1).to_string()).into());
@@ -638,7 +645,7 @@ pub fn resolve_group_entries_from_source<S: Source + ?Sized>(
     object_header: &ObjectHeader,
     offset_size: u8,
     length_size: u8,
-    base_address: BaseAddress,
+    addresses: AddressContext,
 ) -> Result<Vec<GroupEntry>, FormatError> {
     if is_v1_group(object_header) {
         let sym_msg = object_header
@@ -652,7 +659,7 @@ pub fn resolve_group_entries_from_source<S: Source + ?Sized>(
             &stm,
             offset_size,
             length_size,
-            base_address,
+            addresses,
         )
     } else if is_v2_group(object_header) {
         resolve_v2_group_entries_from_source(
@@ -660,7 +667,7 @@ pub fn resolve_group_entries_from_source<S: Source + ?Sized>(
             object_header,
             offset_size,
             length_size,
-            base_address,
+            addresses,
         )
     } else {
         Err(FormatError::PathNotFound(String::from(
@@ -680,13 +687,13 @@ fn resolve_v2_group_entries_from_source<S: Source + ?Sized>(
     object_header: &ObjectHeader,
     offset_size: u8,
     length_size: u8,
-    base_address: BaseAddress,
+    addresses: AddressContext,
 ) -> Result<Vec<GroupEntry>, FormatError> {
     let link_info = find_link_info(object_header, offset_size)?;
     if let Some(fh_addr) = link_info.fractal_heap_address {
         let framed = BaseOffsetSource {
             inner: source,
-            base: base_address,
+            base: addresses.effective_base(),
         };
         resolve_dense_entries_from_source(&framed, &link_info, fh_addr, offset_size, length_size)
     } else {
@@ -767,8 +774,67 @@ mod tests {
     use crate::dataspace::Dataspace;
     use crate::datatype::Datatype;
     use crate::message_flags::MessageFlags;
+    #[cfg(feature = "std")]
+    use crate::reader::File;
     use crate::signature;
     use crate::source::BytesSource;
+    #[cfg(feature = "std")]
+    use crate::writer::FileBuilder;
+
+    #[cfg(feature = "std")]
+    #[rstest::rstest]
+    #[case::buffered(false)]
+    #[case::source(true)]
+    fn path_navigation_uses_the_opened_image_context(#[case] source_backed: bool) {
+        let mut builder = FileBuilder::new();
+        builder.with_userblock(512);
+        let mut group = builder.create_group("group");
+        group.create_dataset("data").with_i32_data(&[1, 2, 3]);
+        builder.add_group(group.finish());
+        let bytes = builder.finish().unwrap();
+        let file = File::from_bytes(bytes.clone()).unwrap();
+        let mut superblock = file.superblock().clone();
+        let addresses = AddressContext::new(superblock.base_address);
+        superblock.base_address = BaseAddress::new(2048);
+        let path = ObjectPath::parse("group/data");
+
+        let object_at = if source_backed {
+            resolve_path_any_from_source(
+                &BytesSource::new(&bytes[..]),
+                AccessMode::ReadOnly,
+                &superblock,
+                addresses,
+                &path,
+            )
+        } else {
+            resolve_path_any(&bytes, AccessMode::ReadOnly, &superblock, addresses, &path)
+        }
+        .unwrap();
+
+        let header = ObjectHeader::parse_with_base(
+            &bytes,
+            AccessMode::ReadOnly,
+            object_at.to_usize().unwrap(),
+            superblock.offset_size,
+            superblock.length_size,
+            addresses.effective_base(),
+        )
+        .unwrap();
+        let (datatype, dataspace, layout) = extract_dataset(
+            &bytes,
+            &header,
+            superblock.offset_size,
+            superblock.length_size,
+        );
+        let raw = data_read::read_raw_data(
+            frame(&bytes, addresses.effective_base()).unwrap(),
+            &layout,
+            &dataspace,
+            &datatype,
+        )
+        .unwrap();
+        assert_eq!(data_read::read_as_i32(&raw, &datatype).unwrap(), [1, 2, 3]);
+    }
 
     const WIDTHS: Widths = Widths::EIGHT;
     const NODE_SIZE: u64 = 512;
@@ -913,7 +979,9 @@ mod tests {
             birth_time: None,
         };
 
-        let entries = resolve_v2_group_entries(&[], &oh, 8, 8, BaseAddress::ZERO).unwrap();
+        let entries =
+            resolve_v2_group_entries(&[], &oh, 8, 8, AddressContext::new(BaseAddress::ZERO))
+                .unwrap();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].name, "test");
         assert_eq!(entries[0].object_header_address, StoredAddress::new(0x1000));
@@ -1044,6 +1112,7 @@ mod tests {
             file_data,
             AccessMode::ReadOnly,
             &sb,
+            AddressContext::new(sb.base_address),
             &ObjectPath::parse("sensors/temperature"),
         )
         .unwrap();
@@ -1071,6 +1140,7 @@ mod tests {
             file_data,
             AccessMode::ReadOnly,
             &sb,
+            AddressContext::new(sb.base_address),
             &ObjectPath::parse("sensors/humidity"),
         )
         .unwrap();
@@ -1098,6 +1168,7 @@ mod tests {
             file_data,
             AccessMode::ReadOnly,
             &sb,
+            AddressContext::new(sb.base_address),
             &ObjectPath::parse("dataset_015"),
         )
         .unwrap();
@@ -1126,6 +1197,7 @@ mod tests {
             file_data,
             AccessMode::ReadOnly,
             &sb,
+            AddressContext::new(sb.base_address),
             &ObjectPath::parse("group1/values"),
         )
         .unwrap();
@@ -1153,6 +1225,7 @@ mod tests {
             file_data,
             AccessMode::ReadOnly,
             &sb,
+            AddressContext::new(sb.base_address),
             &ObjectPath::parse("sensors/temperature"),
         )
         .unwrap();
@@ -1180,6 +1253,7 @@ mod tests {
             file_data,
             AccessMode::ReadOnly,
             &sb,
+            AddressContext::new(sb.base_address),
             &ObjectPath::parse("nonexistent"),
         )
         .unwrap_err();
@@ -1260,7 +1334,7 @@ mod tests {
         let (chunk_at, chunk_len) = crate::edit::read_oh_chunks(
             &crate::source::BytesSource::new(&bytes[..]),
             root_oh as u64,
-            BaseAddress::ZERO,
+            AddressContext::new(BaseAddress::ZERO),
         )
         .expect("the root header is readable")[0]
             .span;
@@ -1323,6 +1397,7 @@ mod huge_link_tests {
             bytes,
             AccessMode::ReadOnly,
             &superblock,
+            AddressContext::new(superblock.base_address),
             &ObjectPath::parse("g"),
         )
         .unwrap();
