@@ -713,7 +713,7 @@ fn resolve_v2_group_entries_from_source<S: Source + ?Sized>(
 ///
 /// Returns the errors of [`resolve_dense_entries`], and the error `source` reports for a structure
 /// it cannot read.
-fn resolve_dense_entries_from_source<S: Source + ?Sized>(
+pub(crate) fn resolve_dense_entries_from_source<S: Source + ?Sized>(
     source: &S,
     link_info: &LinkInfoMessage,
     fh_addr: StoredAddress,

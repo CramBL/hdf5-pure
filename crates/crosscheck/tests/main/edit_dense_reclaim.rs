@@ -12,7 +12,10 @@ use hdf5::plist::file_create::FileSpaceStrategy as CStrategy;
 use hdf5::plist::group_create::{GroupCreate, GroupCreateBuilder};
 use hdf5::{IndexType, IterationOrder};
 use hdf5_pure::{Error, File, FormatError};
+use hdf5_pure_format::__private::FormatWidths;
+use hdf5_pure_format::__private::FreeSpaceManagerHeader;
 use tempfile::tempdir;
+use test_util::range;
 use test_util_hdf5::absence;
 use test_util_hdf5::creation_order::{self, Indexing};
 
@@ -315,6 +318,14 @@ fn c_library_accepts_reclaimed_dense_group_indexes() {
             session.commit().unwrap();
         }
 
+        let released = released_regions(&path);
+        for &(_, addr, len) in &tree_anchors {
+            assert_eq!(
+                range::covered_len(&released, &(addr..addr + len)),
+                len,
+                "the dense-link index block ({addr}, {len}) must be reclaimed"
+            );
+        }
         let free_after = persistent_free(&path);
         assert!(
             free_bytes(&free_after) > free_bytes(&free_before),
@@ -401,6 +412,14 @@ fn a_surviving_dense_group_hard_link_keeps_its_indexes_live() {
         free_bytes(&free_without_alias) > free_bytes(&free_with_alias),
         "the final hard link makes the dense group's owned storage reclaimable"
     );
+    let released = released_regions(&path);
+    for &(_, addr, len) in &index_anchors {
+        assert_eq!(
+            range::covered_len(&released, &(addr..addr + len)),
+            len,
+            "the dense-link index block ({addr}, {len}) must be reclaimed"
+        );
+    }
     // The commit may place its rewritten free-space-manager metadata into one of the
     // index extents it just reclaimed, so the physical index addresses need not remain
     // listed as free after the commit. The increase above is the persisted-space invariant.
@@ -419,4 +438,38 @@ fn a_surviving_dense_group_hard_link_keeps_its_indexes_live() {
             .unwrap(),
         vec![4, 3, 2, 1]
     );
+}
+
+fn free_space_manager_blocks(path: &Path) -> Vec<(u64, u64)> {
+    let bytes = std::fs::read(path).unwrap();
+    let widths = FormatWidths::from_sizes(8, 8).unwrap();
+    File::open(path)
+        .unwrap()
+        .file_space_info()
+        .unwrap()
+        .manager_addrs
+        .iter()
+        .filter(|&&addr| !hdf5_pure_format::__private::is_undefined_addr(addr, 8))
+        .flat_map(|&addr| {
+            let header =
+                FreeSpaceManagerHeader::parse(widths, &bytes[usize::try_from(addr).unwrap()..])
+                    .unwrap();
+            let mut blocks = vec![(
+                addr,
+                hdf5_pure_format::__private::free_space_manager_header_len(widths),
+            )];
+            if !header.section_list_addr().is_undefined(8) {
+                blocks.push((header.section_list_addr().get(), header.section_list_used()));
+            }
+            blocks
+        })
+        .collect()
+}
+
+fn released_regions(path: &Path) -> Vec<(u64, u64)> {
+    let file_len = std::fs::metadata(path).unwrap().len();
+    let mut released = persistent_free(path);
+    released.extend(free_space_manager_blocks(path));
+    released.push((file_len, u64::MAX - file_len));
+    released
 }
