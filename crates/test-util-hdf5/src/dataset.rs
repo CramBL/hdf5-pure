@@ -23,8 +23,11 @@ pub const SHUFFLE_DEFLATE_6: &[Filter] = &[Filter::Shuffle, Filter::Deflate(6)];
 /// A malformed dataset geometry request shared by writer and editor validation tests.
 #[derive(Clone, Copy)]
 pub struct InvalidGeometryCase {
+    /// Describes the invalid geometry in assertion failures.
     pub label: &'static str,
+    /// Applies the invalid geometry to a dataset builder.
     pub configure: fn(&mut DatasetBuilder),
+    /// Identifies the expected [`hdf5_pure::FormatError::InvalidChunkGeometry`] reason.
     pub expected: &'static str,
 }
 
@@ -118,7 +121,7 @@ pub const WRITER_ONLY_INVALID_GEOMETRY_CASES: &[InvalidGeometryCase] = &[
     },
 ];
 
-/// Dataset shapes used by both staged and immediate append refusal tests.
+/// Dataset shapes that staged and immediate append tests reject.
 #[derive(Clone, Copy, Debug)]
 pub enum AppendRefusalFixture {
     /// A contiguous dataset, which has no chunk index to extend.
@@ -132,7 +135,7 @@ pub enum AppendRefusalFixture {
 }
 
 impl AppendRefusalFixture {
-    /// Writes this refusal fixture to `path`.
+    /// Writes this fixture to `path`.
     #[track_caller]
     pub fn write(self, path: &Path) {
         let mut builder = FileBuilder::new();
@@ -189,13 +192,6 @@ pub struct AppendInteropFixture {
     chunk: u64,
     filters: &'static [Filter],
     incompressible_seed: Option<u32>,
-}
-
-#[derive(Clone, Copy, Debug)]
-enum AppendInteropSource {
-    Pure,
-    #[cfg(feature = "__hdf5-1.10")]
-    Libhdf5,
 }
 
 impl AppendInteropFixture {
@@ -263,6 +259,13 @@ impl AppendInteropFixture {
         }
         values
     }
+}
+
+#[derive(Clone, Copy, Debug)]
+enum AppendInteropSource {
+    #[cfg(feature = "__hdf5-1.10")]
+    Libhdf5,
+    Pure,
 }
 
 /// A chunked dataset of one dimension whose maximum is unlimited, seeded with `data`.

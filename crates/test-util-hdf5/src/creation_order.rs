@@ -7,6 +7,7 @@ use hdf5::plist::file_create::FileSpaceStrategy;
 use hdf5::plist::group_create::{
     AttrCreationOrder, GroupCreate, GroupCreateBuilder, LinkCreationOrder,
 };
+use hdf5::{File, Location};
 
 /// Controls whether tracked creation order is also indexed.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -47,7 +48,7 @@ pub fn write_attribute_fixture(
     indexing: Indexing,
     persist_free_space: bool,
 ) {
-    let file = hdf5::File::with_options()
+    let file = File::with_options()
         .with_fapl(|properties| {
             let lower = if persist_free_space {
                 LibraryVersion::V110
@@ -81,7 +82,7 @@ pub fn write_attribute_fixture(
         .shape([4])
         .create("d")
         .expect("create dataset");
-    let owners: [&hdf5::Location; 2] = [&group, &dataset];
+    let owners: [&Location; 2] = [&group, &dataset];
     for owner in owners {
         for (index, name) in names.iter().enumerate() {
             owner

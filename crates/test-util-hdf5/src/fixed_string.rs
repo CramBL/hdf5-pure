@@ -1,15 +1,6 @@
-//! Fixed-width string fixture scenarios shared by pure and interoperability tests.
+//! Provides fixed-width string fixtures shared by pure and interoperability tests.
 
 use hdf5_pure::{FileBuilder, MaxExtent};
-
-/// Values used by the fixed-width matrix, including an empty interior element.
-pub const MATRIX_VALUES: [&str; 4] = ["north", "s", "", "east"];
-
-/// Values whose longest UTF-8 spelling occupies six bytes.
-pub const UTF8_VALUES: [&str; 3] = ["mètre", "K", "°C"];
-
-/// Values appended to the extensible fixed-width fixture.
-pub const EXTENDED_VALUES: [&str; 2] = ["north-northeast", "e"];
 
 /// Adds derived and explicit-width ASCII and UTF-8 datasets.
 pub fn matrix(builder: &mut FileBuilder) {
@@ -31,6 +22,9 @@ pub fn matrix(builder: &mut FileBuilder) {
         .unwrap();
 }
 
+/// Values used by the fixed-width matrix, including an empty interior element.
+pub const MATRIX_VALUES: [&str; 4] = ["north", "s", "", "east"];
+
 /// Adds a UTF-8 dataset whose longest value is wider in bytes than in characters.
 pub fn utf8_units(builder: &mut FileBuilder) {
     builder
@@ -38,6 +32,9 @@ pub fn utf8_units(builder: &mut FileBuilder) {
         .with_strings(&UTF8_VALUES)
         .unwrap();
 }
+
+/// Values whose longest UTF-8 spelling occupies six bytes.
+pub const UTF8_VALUES: [&str; 3] = ["mètre", "K", "°C"];
 
 /// Adds an ASCII dataset whose values are all empty strings.
 pub fn empty_ascii(builder: &mut FileBuilder) {
@@ -56,3 +53,6 @@ pub fn extensible_ascii(builder: &mut FileBuilder) {
         .with_maxshape(&[MaxExtent::Unlimited])
         .with_chunks(&[4]);
 }
+
+/// Values appended to the extensible fixed-width fixture.
+pub const EXTENDED_VALUES: [&str; 2] = ["north-northeast", "e"];

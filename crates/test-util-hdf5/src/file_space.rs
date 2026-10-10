@@ -1,18 +1,17 @@
-//! File-space fixture builders shared across edit and interoperability tests.
+//! Provides file-space fixture builders shared across edit and interoperability tests.
 
 use std::ops::Range;
 use std::path::Path;
 
+#[cfg(feature = "hdf5")]
+use hdf5::Dataset as Hdf5Dataset;
+#[cfg(feature = "__hdf5-1.10")]
+use hdf5::FileBuilder as Hdf5FileBuilder;
+#[cfg(feature = "__hdf5-1.10")]
+use hdf5::plist::file_create::FileSpaceStrategy as Hdf5FileSpaceStrategy;
 use hdf5_pure::{File, FileBuilder, FileSpaceStrategy, Layout};
 
 use crate::dataset::Unlimited;
-
-/// Number of `i32` elements in the middle dataset of the strategy-reuse fixture.
-pub const STRATEGY_DELETED_ELEMENTS: usize = 400;
-
-/// Byte length of the middle dataset in the strategy-reuse fixture.
-pub const STRATEGY_DELETED_LEN: u64 =
-    (STRATEGY_DELETED_ELEMENTS * std::mem::size_of::<i32>()) as u64;
 
 /// Writes the `a`, `b`, `c` fixture used by file-space strategy reuse tests.
 ///
@@ -34,26 +33,10 @@ pub fn write_strategy_triplet(
     builder.write(path).unwrap();
 }
 
-/// Returns the allocated byte range of a contiguous dataset.
-pub fn contiguous_extent(file: &File, path: &str) -> Range<u64> {
-    let layout = file.dataset(path).unwrap().layout().unwrap();
-    let Layout::Contiguous {
-        address: Some(address),
-        size,
-    } = layout
-    else {
-        panic!("expected allocated contiguous storage, got {layout:?}");
-    };
-    address..address + size
-}
-
+/// Writes the same `a`, `b`, `c` strategy-reuse fixture with the C library.
 #[cfg(feature = "__hdf5-1.10")]
-/// Has libhdf5 write the same `a`, `b`, `c` strategy-reuse fixture.
-pub fn libhdf5_write_strategy_triplet(
-    path: &Path,
-    strategy: hdf5::plist::file_create::FileSpaceStrategy,
-) {
-    let file = hdf5::FileBuilder::new()
+pub fn libhdf5_write_strategy_triplet(path: &Path, strategy: Hdf5FileSpaceStrategy) {
+    let file = Hdf5FileBuilder::new()
         .with_fapl(|fapl| fapl.libver_v110())
         .with_fcpl(|fcpl| fcpl.file_space_strategy(strategy))
         .create(path)
@@ -73,19 +56,46 @@ pub fn libhdf5_write_strategy_triplet(
     file.close().unwrap();
 }
 
+/// Number of `i32` elements in the middle dataset of the strategy-reuse fixture.
+pub const STRATEGY_DELETED_ELEMENTS: usize = 400;
+
+/// Byte length of the middle dataset in the strategy-reuse fixture.
+pub const STRATEGY_DELETED_LEN: u64 =
+    (STRATEGY_DELETED_ELEMENTS * std::mem::size_of::<i32>()) as u64;
+
+/// Returns the allocated byte range of a contiguous dataset.
+pub fn contiguous_extent(file: &File, path: &str) -> Range<u64> {
+    let layout = file.dataset(path).unwrap().layout().unwrap();
+    let Layout::Contiguous {
+        address: Some(address),
+        size,
+    } = layout
+    else {
+        panic!("expected allocated contiguous storage, got {layout:?}");
+    };
+    address..address + size
+}
+
+/// Returns the allocated byte range of a contiguous dataset opened by the C library.
 #[cfg(feature = "hdf5")]
-/// Returns the allocated byte range of a contiguous libhdf5 dataset.
-pub fn libhdf5_contiguous_extent(dataset: &hdf5::Dataset) -> Range<u64> {
+pub fn libhdf5_contiguous_extent(dataset: &Hdf5Dataset) -> Range<u64> {
     let address = dataset.offset().unwrap();
     address..address + dataset.storage_size()
+}
+
+/// Writes a persisting interior-hole fixture and deletes `big` in a committed edit.
+pub fn write_persisted_interior_hole(path: &Path) {
+    write_interior_hole_source(path, true);
+    let file = File::open_rw(path).unwrap();
+    file.root().delete("big").unwrap();
+    file.commit().unwrap();
 }
 
 /// Writes the `a`, `big`, `c` fixture used to leave an interior hole.
 ///
 /// When `persist` is true, the file uses a persisting `FsmAggr` strategy with a
 /// threshold of one byte. Dataset `big` occupies 1600 raw bytes between two live
-/// datasets, so deleting it leaves reusable interior space rather than a trailing
-/// extent that can be truncated.
+/// datasets, so deleting it leaves reusable interior space between live allocations.
 pub fn write_interior_hole_source(path: &Path, persist: bool) {
     let mut builder = FileBuilder::new();
     builder.create_dataset("a").with_i32_data(&[1; 100]);
@@ -95,14 +105,6 @@ pub fn write_interior_hole_source(path: &Path, persist: bool) {
         builder.with_file_space_strategy(FileSpaceStrategy::FsmAggr, true, 1);
     }
     builder.write(path).unwrap();
-}
-
-/// Writes a persisting interior-hole fixture and deletes `big` in a committed edit.
-pub fn write_persisted_interior_hole(path: &Path) {
-    write_interior_hole_source(path, true);
-    let file = File::open_rw(path).unwrap();
-    file.root().delete("big").unwrap();
-    file.commit().unwrap();
 }
 
 /// Writes a persisting `FsmAggr` file with an unlimited rank-1 `i32` dataset `d`.

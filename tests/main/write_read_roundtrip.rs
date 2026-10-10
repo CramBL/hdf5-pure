@@ -318,7 +318,7 @@ fn chunked_builder_rejects_invalid_geometry() {
     // Each malformed chunk-geometry request must be refused with
     // `InvalidChunkGeometry` rather than panicking in the chunk splitter or
     // producing an unreadable dataset. The editor exercises the shared cases
-    // independently; the writer adds two format-only edge cases.
+    // independently. The writer adds two format-only edge cases.
     let bad = dataset::INVALID_GEOMETRY_CASES
         .iter()
         .chain(dataset::WRITER_ONLY_INVALID_GEOMETRY_CASES);
