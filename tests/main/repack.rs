@@ -7,6 +7,7 @@ use hdf5_pure::{
     AttrValue, Datatype, DatatypeByteOrder, FileBuilder, FileSpaceStrategy, LibVer, MaxExtent,
     RepackOptions, ScaleOffset, repack,
 };
+use hdf5_pure_core::__private::BaseAddressExt;
 use rstest::rstest;
 use test_util::file_space_info;
 use test_util::widths::Widths;
@@ -392,11 +393,14 @@ fn repack_rejects_a_source_whose_file_space_info_message_does_not_parse() {
     b.create_dataset("keep").with_i32_data(&[1, 2, 3]);
     b.with_file_space_strategy(FileSpaceStrategy::Page, false, 1);
     b.write(&src).unwrap();
-    let extension = File::open(&src)
-        .unwrap()
-        .superblock()
-        .superblock_extension_address
-        .unwrap();
+    let extension = {
+        let file = File::open(&src).unwrap();
+        let superblock = file.superblock();
+        superblock
+            .base_address
+            .absolute(superblock.superblock_extension_address.unwrap())
+            .unwrap()
+    };
     file_space_info::replace_message(
         &src,
         extension,

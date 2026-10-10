@@ -284,7 +284,7 @@ pub(crate) fn plan<S: Source + ?Sized>(
     let base = addresses;
 
     let mut visited: BTreeSet<u64> = BTreeSet::new();
-    let mut stack: Vec<u64> = vec![superblock.root_group_address];
+    let mut stack: Vec<u64> = vec![addresses.absolute(superblock.root_group_address)?];
     let mut budget = budget;
     let mut saw_reference = false;
     let mut complete = true;
@@ -1270,7 +1270,9 @@ mod tests {
 
         let file = crate::File::open(&path).unwrap();
         let superblock = file.superblock().clone();
-        let root = superblock.root_group_address;
+        let root = AddressContext::new(superblock.base_address)
+            .absolute(superblock.root_group_address)
+            .unwrap();
         // What `refs` stores, which is `d`'s header address. The file has no
         // userblock, so the stored base-relative address is the absolute one.
         let stored = u64::from_le_bytes(

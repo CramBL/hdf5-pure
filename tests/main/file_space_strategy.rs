@@ -9,6 +9,7 @@ use hdf5_pure::FileBuilder;
 use hdf5_pure::FileSpacePageSize;
 use hdf5_pure::FileSpaceStrategy;
 use hdf5_pure::FormatError;
+use hdf5_pure::StoredAddress;
 use hdf5_pure_core::__private::FileSpaceInfoFields;
 use hdf5_pure_format::__private::DEFAULT_THRESHOLD;
 use rstest::rstest;
@@ -39,7 +40,7 @@ fn each_strategy_roundtrips(#[case] strategy: FileSpaceStrategy, #[case] thresho
     assert_eq!(info.page_size.get(), 8192);
     assert!(info.manager_addrs.is_empty());
     let ext = f.superblock().superblock_extension_address;
-    assert!(matches!(ext, Some(a) if a != u64::MAX));
+    assert!(matches!(ext, Some(a) if !a.is_undefined(f.superblock().offset_size)));
     assert_eq!(
         f.dataset("d").unwrap().read_i32().unwrap(),
         vec![1, 2, 3, 4]
@@ -89,7 +90,9 @@ fn no_config_writes_no_extension() {
     assert_eq!(f.file_space_strategy(), None);
     assert!(f.file_space_info().is_none());
     assert_eq!(
-        f.superblock().superblock_extension_address,
+        f.superblock()
+            .superblock_extension_address
+            .map(StoredAddress::get),
         Some(u64::MAX),
         "no extension is written when file space is unconfigured"
     );

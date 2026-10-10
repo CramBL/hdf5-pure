@@ -175,7 +175,11 @@ impl WriteEngine {
         let base = self.addresses;
         let mut counts: HashMap<u64, u32> = HashMap::new();
         let mut visited: HashSet<u64> = HashSet::new();
-        let mut stack: Vec<u64> = vec![self.superblock.root_group_address];
+        let mut stack: Vec<u64> = vec![
+            self.addresses
+                .absolute(self.superblock.root_group_address)
+                .ok()?,
+        ];
         let mut budget = MAX_LINK_GRAPH_NODES;
         while let Some(addr) = stack.pop() {
             if !visited.insert(addr) {

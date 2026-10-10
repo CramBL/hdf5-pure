@@ -494,14 +494,16 @@ pub(crate) fn is_group(object_header: &ObjectHeader) -> bool {
 /// Each component is looked up through [`find_child_address`], which reads a v1 symbol-table
 /// group, a compact v2 group and a dense one alike. The caller parses the spelling it holds,
 /// through [`ObjectPath::parse`], and a `path` with no components identifies the root group.
-/// The caller supplies a superblock whose root group address is a physical position. Child
-/// addresses are interpreted through `addresses`.
+/// The root and child addresses are interpreted through the same `addresses` context.
 ///
 /// # Errors
 ///
 /// Returns [`FormatError::PathNotFound`] if a component reaches nothing and
 /// [`ResolveError::NotAGroup`] if an object along the way is not a group. Both report that object
 /// by the prefix of `path` walked to reach it.
+///
+/// Returns [`FormatError::OffsetOverflow`] if a stored root or child address plus the effective
+/// base exceeds [`u64::MAX`].
 pub fn resolve_path_any(
     file_data: &[u8],
     access_mode: AccessMode,
@@ -512,7 +514,7 @@ pub fn resolve_path_any(
     let os = superblock.offset_size;
     let ls = superblock.length_size;
 
-    let mut current_addr = superblock.root_group_address;
+    let mut current_addr = addresses.absolute(superblock.root_group_address)?;
 
     for (walked, &name) in path.components().iter().enumerate() {
         match find_child_address(
@@ -610,7 +612,7 @@ pub fn resolve_path_any_from_source<S: Source + ?Sized>(
     let os = superblock.offset_size;
     let ls = superblock.length_size;
 
-    let mut current_addr = superblock.root_group_address;
+    let mut current_addr = addresses.absolute(superblock.root_group_address)?;
 
     for (walked, &name) in path.components().iter().enumerate() {
         match find_child_address_from_source(

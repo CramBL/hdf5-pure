@@ -50,14 +50,14 @@ fn field_types(sb: &Superblock) {
     let _: u8 = sb.length_size;
     let _: BaseAddress = sb.base_address;
     let _: u64 = sb.eof_address;
-    let _: u64 = sb.root_group_address;
+    let _: StoredAddress = sb.root_group_address;
     let _: Option<u16> = sb.group_leaf_node_k;
     let _: Option<u16> = sb.group_internal_node_k;
     let _: Option<u16> = sb.indexed_storage_internal_node_k;
-    let _: Option<u64> = sb.free_space_address;
-    let _: Option<u64> = sb.driver_info_address;
+    let _: Option<StoredAddress> = sb.free_space_address;
+    let _: Option<StoredAddress> = sb.driver_info_address;
     let _: u32 = sb.consistency_flags;
-    let _: Option<u64> = sb.superblock_extension_address;
+    let _: Option<StoredAddress> = sb.superblock_extension_address;
     let _: Option<u32> = sb.checksum;
 }
 

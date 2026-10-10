@@ -25,7 +25,7 @@ mod tests {
 
         assert_eq!(memory, buffered);
         assert_eq!(seek, buffered);
-        assert_eq!(seek.root_group_address, 48);
+        assert_eq!(seek.root_group_address.get(), 48);
     }
 
     #[test]

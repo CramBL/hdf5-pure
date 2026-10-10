@@ -1,4 +1,8 @@
-use hdf5_pure::{Error, File, FormatError};
+use hdf5_pure::Error;
+use hdf5_pure::FormatError;
+use rstest::rstest;
+
+use super::superblock_addresses::ReadBackend;
 
 fn overflowing_base_address_file() -> Vec<u8> {
     vec![
@@ -19,18 +23,19 @@ fn assert_root_address_overflow(err: Error) {
     }
 }
 
-#[test]
-fn superblock_root_group_base_address_overflow_is_rejected() {
-    let err = File::from_bytes(overflowing_base_address_file()).unwrap_err();
-    assert_root_address_overflow(err);
-}
-
-#[test]
-fn streaming_superblock_root_group_base_address_overflow_is_rejected() {
+#[rstest]
+#[case(ReadBackend::Buffered)]
+#[case(ReadBackend::Streaming)]
+#[case(ReadBackend::Bytes)]
+#[case(ReadBackend::Source)]
+fn root_address_overflow_is_reported_when_navigation_resolves_it(#[case] backend: ReadBackend) {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("overflowing-base-address.h5");
     std::fs::write(&path, overflowing_base_address_file()).unwrap();
-
-    let err = File::open_streaming(&path).unwrap_err();
-    assert_root_address_overflow(err);
+    let file = backend.open(&path).unwrap();
+    assert_eq!(file.superblock().base_address.get(), u64::MAX);
+    assert_eq!(file.superblock().root_group_address.get(), 0x53d9_b640_0000);
+    assert_root_address_overflow(file.group("/").unwrap_err());
+    assert_root_address_overflow(file.root().groups().unwrap_err());
+    assert_root_address_overflow(file.dataset("child").unwrap_err());
 }

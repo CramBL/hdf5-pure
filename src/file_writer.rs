@@ -2782,8 +2782,7 @@ impl FileWriter {
         }
 
         // Pass 2: compute real addresses.
-        // All addresses stored in the file are relative to base_address.
-        // base_address = userblock_size. cursor2 tracks relative positions.
+        // Metadata addresses are relative to the userblock base. cursor2 tracks stored positions.
         #[expect(
             clippy::cast_possible_truncation,
             reason = "userblock_size is a small power-of-two header size used as an in-memory \
@@ -3381,14 +3380,14 @@ impl FileWriter {
                 length_size: LENGTH_SIZE,
                 base_address: base,
                 eof_address: eof_addr2,
-                root_group_address: root_group_addr.get(),
+                root_group_address: root_group_addr,
                 group_leaf_node_k: None,
                 group_internal_node_k: None,
                 indexed_storage_internal_node_k: None,
                 free_space_address: None,
                 driver_info_address: None,
                 consistency_flags: 0,
-                superblock_extension_address: Some(ext_addr),
+                superblock_extension_address: Some(StoredAddress::new(ext_addr)),
                 checksum: None,
             }
             .build();
@@ -3662,14 +3661,18 @@ impl FileWriter {
             length_size: LENGTH_SIZE,
             base_address: BaseAddress::new(ub as u64),
             eof_address: eof_addr2,
-            root_group_address: root_group_addr.get(),
+            root_group_address: root_group_addr,
             group_leaf_node_k: None,
             group_internal_node_k: None,
             indexed_storage_internal_node_k: None,
             free_space_address: None,
             driver_info_address: None,
             consistency_flags: 0,
-            superblock_extension_address: Some(ext_addr.unwrap_or(u64::MAX)),
+            superblock_extension_address: Some(
+                ext_addr
+                    .map(StoredAddress::new)
+                    .unwrap_or(StoredAddress::UNDEFINED_64),
+            ),
             checksum: None,
         }
         .build();
@@ -4080,7 +4083,11 @@ mod tests {
         let oh = ObjectHeader::parse(
             bytes,
             AccessMode::ReadOnly,
-            sb.root_group_address as usize,
+            AddressContext::new(sb.base_address)
+                .absolute(sb.root_group_address)
+                .unwrap()
+                .to_usize()
+                .unwrap(),
             sb.offset_size,
             sb.length_size,
         )
@@ -4367,7 +4374,11 @@ mod tests {
         let oh = ObjectHeader::parse(
             &bytes,
             AccessMode::ReadOnly,
-            sb.root_group_address as usize,
+            AddressContext::new(sb.base_address)
+                .absolute(sb.root_group_address)
+                .unwrap()
+                .to_usize()
+                .unwrap(),
             sb.offset_size,
             sb.length_size,
         )

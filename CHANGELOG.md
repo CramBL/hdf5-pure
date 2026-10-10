@@ -18,6 +18,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- **Breaking:** The base-relative address fields of `Superblock` change type from integers to stored addresses. Base and end-of-file addresses retain their absolute coordinates ([#733](https://github.com/CramBL/hdf5-pure/pull/733)).
 - **Breaking:** The `flate2` Cargo feature is removed. Enable `deflate` instead. The `provenance` feature no longer exposes `sha2` as a selectable feature ([#689](https://github.com/CramBL/hdf5-pure/pull/689)).
 - **Breaking:** `FormatError::InvalidFreeSpaceManager` holds a message that describes the invalid free-space manager, and a write returns it for a free section too large to persist at the file's length width.
 - **Breaking:** `File::persisted_free_space` reports a malformed free-space manager as an error, which changes its return type ([#698](https://github.com/CramBL/hdf5-pure/pull/698)).
@@ -25,6 +26,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- Fixed `File::superblock` reporting the root address in physical coordinates after opening a file with a userblock.
 - Fixed `Group::groups` and related listings returning the members of a group out of order when a chunk of its version 2 object header refers to more than one continuation block ([#730](https://github.com/CramBL/hdf5-pure/pull/730)).
 - Fixed reads of a version 2 object header whose continuation message is too short for its fields or stores the undefined address. Such a header is now rejected on read ([#729](https://github.com/CramBL/hdf5-pure/pull/729)).
 - Fixed a panic in `Dataset::shape` and related metadata reads on files whose shared-message heap declares IDs longer than eight bytes (#[724](https://github.com/CramBL/hdf5-pure/pull/724)).

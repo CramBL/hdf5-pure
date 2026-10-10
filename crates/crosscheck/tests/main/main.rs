@@ -61,6 +61,7 @@ mod repack;
 mod scaleoffset_fill;
 mod serde;
 mod sohm;
+mod superblock_addresses;
 mod swmr_append;
 mod swmr_refresh;
 mod userblock_base_address;

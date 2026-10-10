@@ -18,6 +18,7 @@ use crate::EnumMember;
 use crate::FileSpaceInfo;
 use crate::FileSpacePageSize;
 use crate::FileSpaceStrategy;
+use crate::StoredAddress;
 use crate::Superblock;
 
 pub use crate::address::BaseAddressExt;
@@ -88,14 +89,14 @@ pub struct SuperblockFields {
     pub length_size: u8,
     pub base_address: BaseAddress,
     pub eof_address: u64,
-    pub root_group_address: u64,
+    pub root_group_address: StoredAddress,
     pub group_leaf_node_k: Option<u16>,
     pub group_internal_node_k: Option<u16>,
     pub indexed_storage_internal_node_k: Option<u16>,
-    pub free_space_address: Option<u64>,
-    pub driver_info_address: Option<u64>,
+    pub free_space_address: Option<StoredAddress>,
+    pub driver_info_address: Option<StoredAddress>,
     pub consistency_flags: u32,
-    pub superblock_extension_address: Option<u64>,
+    pub superblock_extension_address: Option<StoredAddress>,
     pub checksum: Option<u32>,
 }
 

@@ -18,6 +18,7 @@ use hdf5_pure::FormatError;
 use hdf5_pure::MaxExtent;
 use hdf5_pure::MemoryStrategy;
 use hdf5_pure::SyncPolicy;
+use hdf5_pure_core::__private::BaseAddressExt;
 
 use hdf5_pure_core::__private::FileSpaceInfoFields;
 use hdf5_pure_format::__private::NUM_FILE_FSM_MANAGERS;
@@ -694,11 +695,14 @@ fn open_rw_rejects_a_paged_file_whose_page_size_is_out_of_range() {
     b.create_dataset("d").with_i32_data(&[1, 2, 3]);
     b.with_file_space_strategy(FileSpaceStrategy::Page, true, 1);
     b.write(&path).unwrap();
-    let extension = File::open(&path)
-        .unwrap()
-        .superblock()
-        .superblock_extension_address
-        .unwrap();
+    let extension = {
+        let file = File::open(&path).unwrap();
+        let superblock = file.superblock();
+        superblock
+            .base_address
+            .absolute(superblock.superblock_extension_address.unwrap())
+            .unwrap()
+    };
     file_space_info::replace_message(
         &path,
         extension,
@@ -724,7 +728,10 @@ fn a_version_0_message_s_persisted_free_space_is_recovered_and_reused() {
     let (extension, version_1, free) = {
         let f = File::open(&path).unwrap();
         (
-            f.superblock().superblock_extension_address.unwrap(),
+            f.superblock()
+                .base_address
+                .absolute(f.superblock().superblock_extension_address.unwrap())
+                .unwrap(),
             f.file_space_info().unwrap().clone(),
             f.persisted_free_space().unwrap(),
         )
