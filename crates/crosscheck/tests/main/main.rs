@@ -17,6 +17,7 @@ mod chunk_btree_offset_width;
 mod chunk_index_grid;
 mod committed_datatype;
 mod compound_offset_width;
+mod continuation_order;
 mod conversions;
 mod dense_attr_limits;
 mod dense_huge_objects;

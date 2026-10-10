@@ -24,6 +24,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- Fixed `Group::groups` and related listings returning the members of a group out of order when a chunk of its version 2 object header refers to more than one continuation block ([#730](https://github.com/CramBL/hdf5-pure/pull/730)).
 - Fixed reads of a version 2 object header whose continuation message is too short for its fields or stores the undefined address. Such a header is now rejected on read ([#729](https://github.com/CramBL/hdf5-pure/pull/729)).
 - Fixed a panic in `Dataset::shape` and related metadata reads on files whose shared-message heap declares IDs longer than eight bytes (#[724](https://github.com/CramBL/hdf5-pure/pull/724)).
 - Fixed `Dataset::chunks` and related windowed reads failing on sparse Extensible Arrays with logical element indexes above `u32::MAX` on 32-bit platforms, provided each required metadata read fits the platform's address space ([#717](https://github.com/CramBL/hdf5-pure/pull/717))

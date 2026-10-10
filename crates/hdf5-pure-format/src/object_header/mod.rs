@@ -649,6 +649,84 @@ mod tests {
         );
     }
 
+    #[rstest]
+    #[case::siblings(ContinuationTree::Siblings, &[b"a".as_slice(), b"b"])]
+    #[case::a_block_found_while_visiting(ContinuationTree::Nested, &[b"a".as_slice(), b"b", b"a1"])]
+    fn version_2_continuation_blocks_are_visited_in_the_order_they_are_found(
+        #[values(Driver::Buffered, Driver::Source)] driver: Driver,
+        #[case] tree: ContinuationTree,
+        #[case] expected: &[&[u8]],
+    ) {
+        let header = driver.parse(&tree.image(), MessageFilter::All).unwrap();
+
+        assert_eq!(bodies(&header), expected);
+    }
+
+    #[rstest]
+    fn a_filter_that_drops_a_blocks_messages_visits_the_blocks_it_refers_to(
+        #[values(Driver::Buffered, Driver::Source)] driver: Driver,
+    ) {
+        let mut drop_a = |_: MessageType, body: &[u8]| body != b"a";
+        let header = driver
+            .parse(
+                &ContinuationTree::BothNested.image(),
+                MessageFilter::Only(&mut drop_a),
+            )
+            .unwrap();
+
+        assert_eq!(bodies(&header), [b"b".as_slice(), b"a1", b"b1"]);
+    }
+
+    #[rstest]
+    fn a_short_version_2_continuation_is_rejected_under_a_filter_that_keeps_nothing(
+        #[values(Driver::Buffered, Driver::Source)] driver: Driver,
+    ) {
+        // The body of a continuation message is 16 bytes at 8-byte offsets and lengths.
+        let data = v2_bytes::Header::new()
+            .message(named(b"a"))
+            .message(Message::new(
+                RecordType::OBJECT_HEADER_CONTINUATION,
+                &[0; 15],
+            ))
+            .build();
+        let mut keep_nothing = |_: MessageType, _: &[u8]| false;
+
+        assert_eq!(
+            driver
+                .parse(&data, MessageFilter::Only(&mut keep_nothing))
+                .unwrap_err(),
+            FormatError::UnexpectedEof {
+                expected: 16,
+                available: 15
+            }
+        );
+    }
+
+    #[rstest]
+    #[case::at_the_limit(256, Ok(256))]
+    #[case::past_the_limit(257, Err(FormatError::NestingDepthExceeded))]
+    fn a_version_2_header_parse_accepts_at_most_256_continuation_messages(
+        #[values(Driver::Buffered, Driver::Source)] driver: Driver,
+        #[case] count: usize,
+        #[case] expected: Result<usize, FormatError>,
+    ) {
+        // Every continuation message refers to the same block, which the parse reads once per message.
+        let block = continuation_block(&[named(b"a")]);
+        let data = continuation_image(
+            v2_bytes::Header::new()
+                .flags(v2_bytes::HeaderFlags(0x01))
+                .messages((0..count).map(|_| continuation_to(BLOCK_PAST_THE_HEADER, &block))),
+            &[(BLOCK_PAST_THE_HEADER, &block)],
+        );
+
+        assert_eq!(
+            driver
+                .parse(&data, MessageFilter::All)
+                .map(|header| header.messages.len()),
+            expected
+        );
+    }
+
     #[test]
     fn truncated_headers_are_rejected() {
         for (version, data) in [("v1", vec![1, 0]), ("v2", vec![b'O', b'H', b'D', b'R', 2])] {
@@ -887,6 +965,118 @@ mod tests {
         )
     }
 
+    /// The two entry points of the parser: a buffer that holds the whole file, and a
+    /// [`MetadataSource`].
+    #[derive(Clone, Copy, Debug)]
+    enum Driver {
+        Buffered,
+        Source,
+    }
+
+    impl Driver {
+        fn parse(
+            self,
+            data: &[u8],
+            filter: MessageFilter<'_>,
+        ) -> Result<ObjectHeader, FormatError> {
+            match self {
+                Driver::Buffered => ObjectHeader::parse_filtered(
+                    data,
+                    AccessMode::ReadOnly,
+                    0,
+                    OFFSET_SIZE,
+                    LENGTH_SIZE,
+                    BaseAddress::ZERO,
+                    filter,
+                ),
+                Driver::Source => ObjectHeader::parse_from_source_filtered(
+                    data,
+                    AccessMode::ReadOnly,
+                    0,
+                    OFFSET_SIZE,
+                    LENGTH_SIZE,
+                    BaseAddress::ZERO,
+                    filter,
+                ),
+            }
+        }
+    }
+
+    /// A version 2 header whose chunk 0 refers to two continuation blocks, `a` and then `b`.
+    ///
+    /// Each block stores one Datatype message whose body is the name of the block.
+    #[derive(Clone, Copy, Debug)]
+    enum ContinuationTree {
+        /// Block `a` refers to block `a1`, and block `b` to block `b1`.
+        BothNested,
+        /// Block `a` refers to block `a1`.
+        Nested,
+        /// Neither block refers to a further block.
+        Siblings,
+    }
+
+    impl ContinuationTree {
+        fn image(self) -> Vec<u8> {
+            let a1 = continuation_block(&[named(b"a1")]);
+            let b1 = continuation_block(&[named(b"b1")]);
+            let (a, b) = match self {
+                ContinuationTree::BothNested => (
+                    continuation_block(&[named(b"a"), continuation_to(BLOCK_A1, &a1)]),
+                    continuation_block(&[named(b"b"), continuation_to(BLOCK_B1, &b1)]),
+                ),
+                ContinuationTree::Nested => (
+                    continuation_block(&[named(b"a"), continuation_to(BLOCK_A1, &a1)]),
+                    continuation_block(&[named(b"b")]),
+                ),
+                ContinuationTree::Siblings => (
+                    continuation_block(&[named(b"a")]),
+                    continuation_block(&[named(b"b")]),
+                ),
+            };
+            continuation_image(
+                v2_bytes::Header::new()
+                    .continuation(BLOCK_A, &a, WIDTHS)
+                    .continuation(BLOCK_B, &b, WIDTHS),
+                &[
+                    (BLOCK_A, &a),
+                    (BLOCK_B, &b),
+                    (BLOCK_A1, &a1),
+                    (BLOCK_B1, &b1),
+                ],
+            )
+        }
+    }
+
+    /// Returns the bytes of `header`, with each block of `blocks` placed at its offset.
+    fn continuation_image(header: v2_bytes::Header, blocks: &[(usize, &[u8])]) -> Vec<u8> {
+        let mut image = Image::starting_with(&header.build());
+        for &(at, block) in blocks {
+            image.place(at, block);
+        }
+        image.build()
+    }
+
+    fn continuation_block(messages: &[Message]) -> Vec<u8> {
+        v2_bytes::continuation_chunk(messages, v2_bytes::HeaderFlags::default())
+    }
+
+    fn continuation_to(at: usize, block: &[u8]) -> Message {
+        Message::continuation(at as u64, block.len() as u64, WIDTHS)
+    }
+
+    /// Returns a Datatype message whose body is `body`, the name [`bodies`] lists it by.
+    fn named(body: &[u8]) -> Message {
+        Message::new(RecordType::DATATYPE, body)
+    }
+
+    fn bodies(header: &ObjectHeader) -> Vec<&[u8]> {
+        header
+            .messages
+            .iter()
+            .map(|message| message.data.as_slice())
+            .collect()
+    }
+
     fn assert_message(message: &HeaderMessage, msg_type: MessageType, data: &[u8]) {
         assert_eq!(message.msg_type, msg_type);
         assert_eq!(message.data.as_slice(), data);
@@ -997,4 +1187,9 @@ mod tests {
     const LENGTH_SIZE: u8 = 8;
     const CONTINUATION_OFFSET: usize = 256;
     const UNKNOWN_BODY: [u8; 8] = [0xAA, 0, 0, 0, 0, 0, 0, 0];
+    const BLOCK_A: usize = 256;
+    const BLOCK_B: usize = 320;
+    const BLOCK_A1: usize = 384;
+    const BLOCK_B1: usize = 448;
+    const BLOCK_PAST_THE_HEADER: usize = 8192;
 }

@@ -7,7 +7,6 @@ use hdf5::file::LibraryVersion;
 /// A file the C library creates in the 1.8 format or newer: version 2 object
 /// headers and link-message groups. HDF5 2.0 made that the default, and every
 /// earlier release writes version 1 headers by default.
-#[cfg(feature = "__hdf5-1.10")]
 pub fn libhdf5_create_v18(path: &Path) -> hdf5::File {
     create_bounded(path, LibraryVersion::V18)
 }

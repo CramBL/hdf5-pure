@@ -64,16 +64,8 @@ mod tests {
         #[case] expected: usize,
         #[case] available: usize,
     ) {
-        let data = truncated_header(truncation);
-        let result = match backend {
-            Backend::Memory => parse_through(&BytesSource::new(&data)),
-            Backend::Seek => {
-                parse_through(&ReadSeekSource::new(std::io::Cursor::new(data)).unwrap())
-            }
-        };
-
         assert_eq!(
-            result.unwrap_err(),
+            backend.parse(truncated_header(truncation)).unwrap_err(),
             FormatError::UnexpectedEof {
                 expected,
                 available
@@ -81,10 +73,57 @@ mod tests {
         );
     }
 
+    #[rstest]
+    fn version_2_sibling_continuation_blocks_are_read_in_the_order_the_header_refers_to_them(
+        #[values(Backend::Buffered, Backend::Memory, Backend::Seek)] backend: Backend,
+    ) {
+        let first = v2_bytes::continuation_chunk(
+            &[Message::new(RecordType::DATATYPE, b"first")],
+            v2_bytes::HeaderFlags::default(),
+        );
+        let second = v2_bytes::continuation_chunk(
+            &[Message::new(RecordType::DATATYPE, b"second")],
+            v2_bytes::HeaderFlags::default(),
+        );
+        let mut image = Image::starting_with(
+            &v2_bytes::Header::new()
+                .continuation(CONTINUATION_OFFSET, &first, Widths::EIGHT)
+                .continuation(SECOND_CONTINUATION_OFFSET, &second, Widths::EIGHT)
+                .build(),
+        );
+        image.place(CONTINUATION_OFFSET, &first);
+        image.place(SECOND_CONTINUATION_OFFSET, &second);
+
+        let bodies = backend
+            .parse(image.build())
+            .unwrap()
+            .messages
+            .into_iter()
+            .map(|message| message.data)
+            .collect::<Vec<_>>();
+        assert_eq!(bodies, [b"first".to_vec(), b"second".to_vec()]);
+    }
+
     #[derive(Clone, Copy, Debug)]
     enum Backend {
+        /// [`ObjectHeader::parse`] over the whole file in a slice.
+        Buffered,
+        /// [`parse_through`] a [`BytesSource`].
         Memory,
+        /// [`parse_through`] a [`ReadSeekSource`].
         Seek,
+    }
+
+    impl Backend {
+        fn parse(self, data: Vec<u8>) -> Result<ObjectHeader, FormatError> {
+            match self {
+                Backend::Buffered => ObjectHeader::parse(&data, AccessMode::ReadOnly, 0, 8, 8),
+                Backend::Memory => parse_through(&BytesSource::new(&data)),
+                Backend::Seek => {
+                    parse_through(&ReadSeekSource::new(std::io::Cursor::new(data)).unwrap())
+                }
+            }
+        }
     }
 
     #[derive(Clone, Copy, Debug)]
@@ -149,6 +188,7 @@ mod tests {
     }
 
     const CONTINUATION_OFFSET: usize = 256;
+    const SECOND_CONTINUATION_OFFSET: usize = 384;
     const DATASPACE_BODY: [u8; 8] = [42, 0, 0, 0, 0, 0, 0, 0];
     const DATATYPE_BODY: [u8; 8] = [0xBE, 0xEF, 0, 0, 0, 0, 0, 0];
 }
