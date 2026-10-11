@@ -4,16 +4,28 @@ use core::cell::BorrowMutError;
 use core::cell::RefCell;
 use core::cell::RefMut;
 
-/// A lock for one thread, with the `new` and `lock` methods of `std::sync::Mutex`.
+use crate::chunk_cache::CacheLock;
+
+/// A lock for one thread, which holds the state of a [`ChunkCache`] in a `no_std` build.
 ///
-/// The chunk cache calls these methods with or without `std`. A [`RefCell`] holds the value, so
-/// [`Mutex::lock`] returns an error while a guard is live, and a `Mutex` is not `Sync`.
+/// A [`RefCell`] holds the value, so a `Mutex` is not `Sync`.
+///
+/// [`ChunkCache`]: crate::chunk_cache::ChunkCache
 pub struct Mutex<T> {
     data: RefCell<T>,
 }
 
-impl<T> Mutex<T> {
-    pub const fn new(value: T) -> Self {
+impl<T> CacheLock<T> for Mutex<T> {
+    type Guard<'a>
+        = RefMut<'a, T>
+    where
+        T: 'a;
+    type Error<'a>
+        = BorrowMutError
+    where
+        T: 'a;
+
+    fn new(value: T) -> Self {
         Self {
             data: RefCell::new(value),
         }
@@ -24,7 +36,7 @@ impl<T> Mutex<T> {
     /// # Errors
     ///
     /// Returns [`BorrowMutError`] if a guard is live.
-    pub fn lock(&self) -> Result<RefMut<'_, T>, BorrowMutError> {
+    fn lock(&self) -> Result<RefMut<'_, T>, BorrowMutError> {
         self.data.try_borrow_mut()
     }
 }
@@ -32,6 +44,7 @@ impl<T> Mutex<T> {
 #[cfg(test)]
 mod tests {
     use super::Mutex;
+    use crate::chunk_cache::CacheLock;
 
     #[test]
     fn a_second_guard_is_rejected_while_the_first_is_live() {

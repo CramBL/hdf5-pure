@@ -5,7 +5,7 @@ set working-directory := ".."
 
 default: miri heap-baseline
 
-# Miri over the MAT buffers and the single-threaded mutex.
+# Miri over the MAT buffers and the tests whose names contain `nosync`: the single-threaded mutex and the chunk cache over it.
 miri $MIRIFLAGS="-Zmiri-strict-provenance": miri-toolchain
     # Miri artifacts contain compiler-specific metadata. Store them under the pinned nightly so
     # artifacts from another Miri toolchain cannot share this target directory. cargo-miri adds its
