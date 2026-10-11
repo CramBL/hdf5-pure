@@ -33,18 +33,6 @@ use test_util_hdf5::file_space;
 // the same invariant this holds the in-place append's reserve to (issue #387).
 use test_util_hdf5::paged;
 
-/// The superblock's end-of-file must equal the actual file length after every
-/// commit, including ones that truncate.
-fn assert_eof_matches_file(path: &std::path::Path) {
-    let file = File::open(path).unwrap();
-    let eof = file.file_size();
-    let actual = std::fs::metadata(path).unwrap().len();
-    assert_eq!(
-        eof, actual,
-        "superblock EOF must match the physical file size"
-    );
-}
-
 #[test]
 fn delete_then_truncate_shrinks_within_session() {
     let path = temp::temp_path("hdf5_pure_fs_shrink.h5");
@@ -77,7 +65,7 @@ fn delete_then_truncate_shrinks_within_session() {
         );
     }
 
-    assert_eof_matches_file(&path);
+    file_space::assert_eof_matches_physical_size(&path);
     let file = File::open(&path).unwrap();
     assert_eq!(file.root().datasets().unwrap(), vec!["keep".to_string()]);
     assert_eq!(
@@ -121,7 +109,7 @@ fn churn_within_session_stays_bounded() {
         "churn should reclaim space (peak {high_water}, final {final_size})"
     );
 
-    assert_eof_matches_file(&path);
+    file_space::assert_eof_matches_physical_size(&path);
     let file = File::open(&path).unwrap();
     assert_eq!(file.root().datasets().unwrap(), vec!["keep".to_string()]);
     assert_eq!(
@@ -152,7 +140,7 @@ fn reuse_keeps_survivors_byte_exact() {
         s.commit().unwrap();
     }
 
-    assert_eof_matches_file(&path);
+    file_space::assert_eof_matches_physical_size(&path);
     let file = File::open(&path).unwrap();
     let mut names = file.root().datasets().unwrap();
     names.sort();
@@ -202,7 +190,7 @@ fn delete_subtree_reclaims_all_members() {
         );
     }
 
-    assert_eof_matches_file(&path);
+    file_space::assert_eof_matches_physical_size(&path);
     let file = File::open(&path).unwrap();
     assert!(file.group("grp").is_err());
     assert_eq!(file.dataset("keep").unwrap().read_i32().unwrap(), vec![1]);
@@ -322,7 +310,7 @@ fn deleting_filtered_chunked_dataset_reclaims_storage() {
         );
     }
 
-    assert_eof_matches_file(&path);
+    file_space::assert_eof_matches_physical_size(&path);
     let file = File::open(&path).unwrap();
     assert_eq!(file.root().datasets().unwrap(), vec!["keep".to_string()]);
     assert_eq!(
@@ -369,7 +357,7 @@ fn deleting_unfiltered_chunked_dataset_truncates_fully() {
         );
     }
 
-    assert_eof_matches_file(&path);
+    file_space::assert_eof_matches_physical_size(&path);
     let file = File::open(&path).unwrap();
     assert_eq!(file.root().datasets().unwrap(), vec!["keep".to_string()]);
     assert_eq!(
@@ -414,7 +402,7 @@ fn deleting_paged_fixed_array_dataset_reclaims_storage() {
         assert!(size_after_delete < size_start + 4096);
     }
 
-    assert_eof_matches_file(&path);
+    file_space::assert_eof_matches_physical_size(&path);
     let file = File::open(&path).unwrap();
     assert_eq!(file.root().datasets().unwrap(), vec!["keep".to_string()]);
     assert_eq!(file.dataset("keep").unwrap().read_i32().unwrap(), vec![7]);
@@ -457,7 +445,7 @@ fn deleting_extensible_dataset_reclaims_storage() {
         );
     }
 
-    assert_eof_matches_file(&path);
+    file_space::assert_eof_matches_physical_size(&path);
     let file = File::open(&path).unwrap();
     assert_eq!(file.root().datasets().unwrap(), vec!["keep".to_string()]);
     assert_eq!(file.dataset("keep").unwrap().read_i32().unwrap(), vec![9]);
@@ -501,7 +489,7 @@ fn deleting_single_chunk_dataset_reclaims_storage() {
         assert!(size_after_delete < size_start + 4096);
     }
 
-    assert_eof_matches_file(&path);
+    file_space::assert_eof_matches_physical_size(&path);
     let file = File::open(&path).unwrap();
     assert_eq!(file.root().datasets().unwrap(), vec!["keep".to_string()]);
     assert_eq!(
@@ -544,7 +532,7 @@ fn chunked_churn_within_session_stays_bounded() {
         "chunked churn should reclaim space (peak {high_water}, final {final_size})"
     );
 
-    assert_eof_matches_file(&path);
+    file_space::assert_eof_matches_physical_size(&path);
     let file = File::open(&path).unwrap();
     assert_eq!(file.root().datasets().unwrap(), vec!["keep".to_string()]);
     assert_eq!(
@@ -590,7 +578,7 @@ fn deleting_subtree_with_chunked_members_reclaims() {
         );
     }
 
-    assert_eof_matches_file(&path);
+    file_space::assert_eof_matches_physical_size(&path);
     let file = File::open(&path).unwrap();
     assert!(file.group("grp").is_err());
     assert_eq!(file.dataset("keep").unwrap().read_i32().unwrap(), vec![1]);
@@ -615,7 +603,7 @@ fn persisted_chunked_reclaim_is_disjoint_and_reusable() {
         s.root().delete("comp").unwrap();
         s.commit().unwrap();
     }
-    assert_eof_matches_file(&path);
+    file_space::assert_eof_matches_physical_size(&path);
 
     let f = File::open(&path).unwrap();
     assert!(f.file_space_info().unwrap().persist);
@@ -641,7 +629,7 @@ fn persisted_free_space_survives_reopen_and_is_reused() {
     file_space::write_persisted_interior_hole(&path);
 
     // Session 1 deleted "big" and persisted its storage as free space.
-    assert_eof_matches_file(&path);
+    file_space::assert_eof_matches_physical_size(&path);
 
     // A fresh reader recovers the persisted free space across the reopen, and the
     // surviving datasets stay byte-exact alongside the on-disk managers.
@@ -671,7 +659,7 @@ fn persisted_free_space_survives_reopen_and_is_reused() {
             .unwrap(); // 1200 bytes, fits the hole
         s.commit().unwrap();
     }
-    assert_eof_matches_file(&path);
+    file_space::assert_eof_matches_physical_size(&path);
     let eof_after = std::fs::metadata(&path).unwrap().len();
     assert!(
         eof_after < eof_before + 1200,
@@ -783,7 +771,7 @@ fn a_version_0_message_s_persisted_free_space_is_recovered_and_reused() {
             .unwrap();
         s.commit().unwrap();
     }
-    assert_eof_matches_file(&path);
+    file_space::assert_eof_matches_physical_size(&path);
     let eof_after = std::fs::metadata(&path).unwrap().len();
     assert!(
         eof_after < eof_before + 1200,
@@ -825,7 +813,7 @@ fn persisted_managers_stay_consistent_across_many_commits() {
             s.commit().unwrap();
         } // release the editor's lock before reading the file back
         // Free regions never overlap and the file remains valid after each round.
-        assert_eof_matches_file(&path);
+        file_space::assert_eof_matches_physical_size(&path);
         let f = File::open(&path).unwrap();
         assert!(f.file_space_info().unwrap().persist);
         let mut free = f.persisted_free_space().unwrap();
@@ -901,7 +889,7 @@ fn chunked_dataset_reuses_the_hole_a_chunked_delete_left() {
          not past it (start={start}, end={end})"
     );
 
-    assert_eof_matches_file(&path);
+    file_space::assert_eof_matches_physical_size(&path);
     let f = File::open(&path).unwrap();
     assert_eq!(
         f.dataset("big2").unwrap().read_f64().unwrap(),
@@ -954,7 +942,7 @@ fn filtered_chunked_dataset_reuses_freed_space() {
         );
     }
 
-    assert_eof_matches_file(&path);
+    file_space::assert_eof_matches_physical_size(&path);
     let f = File::open(&path).unwrap();
     assert_eq!(
         f.dataset("big2").unwrap().read_f64().unwrap(),
@@ -994,7 +982,7 @@ fn reusing_a_chunked_hole_keeps_its_neighbors_byte_exact() {
         s.commit().unwrap();
     }
 
-    assert_eof_matches_file(&path);
+    file_space::assert_eof_matches_physical_size(&path);
     let f = File::open(&path).unwrap();
     assert_eq!(f.dataset("below").unwrap().read_f64().unwrap(), below);
     assert_eq!(f.dataset("above").unwrap().read_i32().unwrap(), above);
@@ -1041,7 +1029,7 @@ fn paged_commit_reuses_freed_space_within_its_page_type() {
          them (start={start}, end={end})"
     );
 
-    assert_eof_matches_file(&path);
+    file_space::assert_eof_matches_physical_size(&path);
     let f = File::open(&path).unwrap();
     assert_eq!(
         f.dataset("big2").unwrap().read_f64().unwrap(),
@@ -1094,7 +1082,7 @@ fn persisted_chunked_free_space_is_reused_after_a_reopen() {
          (start={start}, end={end})"
     );
 
-    assert_eof_matches_file(&path);
+    file_space::assert_eof_matches_physical_size(&path);
     let f = File::open(&path).unwrap();
     assert_eq!(
         f.dataset("big2").unwrap().read_f64().unwrap(),
@@ -1157,7 +1145,7 @@ fn both_read_write_backings_reuse_a_freed_hole_alike() {
             "{name}: the replacement should reuse the freed hole \
              (start={start}, end={end})"
         );
-        assert_eof_matches_file(&path);
+        file_space::assert_eof_matches_physical_size(&path);
         let f = File::open(&path).unwrap();
         assert_eq!(
             f.dataset("big2").unwrap().read_f64().unwrap(),
@@ -1251,7 +1239,7 @@ fn churn_of_groups_attributes_and_datasets_stays_bounded() {
          frees, not accumulate it (baseline={baseline}, peak={peak}, final={end})"
     );
 
-    assert_eof_matches_file(&path);
+    file_space::assert_eof_matches_physical_size(&path);
     let f = File::open(&path).unwrap();
     assert_eq!(
         f.dataset("anchor").unwrap().read_i32().unwrap(),
@@ -1341,7 +1329,7 @@ fn corrupt_persisted_section_is_skipped_not_fatal() {
             .unwrap(); // 1000 bytes
         s.commit().unwrap();
     }
-    assert_eof_matches_file(&path);
+    file_space::assert_eof_matches_physical_size(&path);
     let f = File::open(&path).unwrap();
     assert_eq!(f.dataset("keep").unwrap().read_i32().unwrap(), vec![5; 50]);
     assert_eq!(
@@ -1447,7 +1435,7 @@ fn paged_churn_reaches_a_steady_size() {
         }
     }
     drop(f);
-    assert_eof_matches_file(&path);
+    file_space::assert_eof_matches_physical_size(&path);
 }
 
 /// A paged commit's tail — the rewritten extension and manager blocks — is
@@ -1525,7 +1513,7 @@ fn a_paged_commit_tail_is_placed_in_free_space() {
             );
         }
     }
-    assert_eof_matches_file(&path);
+    file_space::assert_eof_matches_physical_size(&path);
 }
 
 /// Across a sweep of layouts, a paged commit that rewrites only its tail
@@ -1657,7 +1645,7 @@ fn a_persisting_commit_tail_is_placed_in_free_space() {
         );
     }
 
-    assert_eof_matches_file(&path);
+    file_space::assert_eof_matches_physical_size(&path);
     let f = File::open(&path).unwrap();
     assert_eq!(f.dataset("seed").unwrap().read_i32().unwrap(), [0; 4]);
     assert_eq!(f.dataset("ceiling").unwrap().read_i32().unwrap(), [9; 4]);
@@ -1726,7 +1714,7 @@ fn persisting_churn_reaches_a_steady_size() {
         }
     }
     drop(f);
-    assert_eof_matches_file(&path);
+    file_space::assert_eof_matches_physical_size(&path);
 }
 
 /// Across a sweep of layouts, a non-paged persisting file whose commits rewrite
@@ -1799,7 +1787,7 @@ fn a_persisting_tail_holds_its_size_across_layouts() {
             *sizes.last().unwrap(),
             "filler {filler}: rewriting the tail must not grow the file (sizes {sizes:?})"
         );
-        assert_eof_matches_file(&path);
+        file_space::assert_eof_matches_physical_size(&path);
     }
 }
 
@@ -1857,7 +1845,7 @@ fn paged_free_space_is_reused_after_a_reopen() {
          (start={start}, end={end})"
     );
 
-    assert_eof_matches_file(&path);
+    file_space::assert_eof_matches_physical_size(&path);
     let f = File::open(&path).unwrap();
     assert_eq!(
         f.dataset("big2").unwrap().read_f64().unwrap(),
@@ -1880,7 +1868,7 @@ fn paged_free_space_is_reused_after_a_reopen() {
 /// the filesystem has to leave the record as well as the file — a section past
 /// the end of the file is one the reference C library would hand a writer.
 fn assert_released_file_is_self_consistent(path: &std::path::Path) {
-    assert_eof_matches_file(path);
+    file_space::assert_eof_matches_physical_size(path);
     let len = std::fs::metadata(path).unwrap().len();
     let f = File::open(path).unwrap();
     for (addr, size) in f.persisted_free_space().unwrap() {
@@ -2234,7 +2222,7 @@ fn immediate_append_reuses_a_freed_hole() {
         "the second append should have moved into the {freed}-byte hole, not \
          extended the file (was {after_first}, now {after_second})"
     );
-    assert_eof_matches_file(&path);
+    file_space::assert_eof_matches_physical_size(&path);
     let file = File::open(&path).unwrap();
     assert_eq!(file.dataset("log2").unwrap().read_i32().unwrap(), payload);
     // Reuse must not have written over either survivor.
@@ -2428,7 +2416,7 @@ fn append_churn_on_a_persisting_file(
     session.close().unwrap();
     let after_second = std::fs::metadata(&path).unwrap().len();
 
-    assert_eof_matches_file(&path);
+    file_space::assert_eof_matches_physical_size(&path);
     let file = File::open(&path).unwrap();
     assert_eq!(file.dataset("log2").unwrap().read_i32().unwrap(), payload);
     assert_eq!(file.dataset("keep").unwrap().read_i32().unwrap(), [1, 2, 3]);
@@ -2745,7 +2733,7 @@ fn paged_delete_of_an_empty_extensible_dataset_reclaims_its_index() {
         "the raw page the index had to itself must come back whole"
     );
     f.close().unwrap();
-    assert_eof_matches_file(&path);
+    file_space::assert_eof_matches_physical_size(&path);
 }
 
 /// The reporter's loop (issue #388): a paged persisting file that creates a
@@ -2885,7 +2873,7 @@ fn assert_churn_survivors(path: &std::path::Path) {
     );
     assert!(f.group("scratch_0").is_err(), "every scratch group is gone");
     drop(f);
-    assert_eof_matches_file(path);
+    file_space::assert_eof_matches_physical_size(path);
 }
 
 /// The populated group [`populated_group_churn`] leaves behind reads back in
@@ -2987,7 +2975,7 @@ fn paged_staged_append_churn_does_not_leak_the_old_index() {
         .collect();
     assert_eq!(f.dataset("d").unwrap().read_i32().unwrap(), want);
     drop(f);
-    assert_eof_matches_file(&path);
+    file_space::assert_eof_matches_physical_size(&path);
     // Reclaiming the superseded index is only worth doing if it is reclaimed
     // under the page type it actually sits in: filing a metadata region as raw
     // mixes a page (issue #261), and offering a live chunk as free hands the next
@@ -3107,6 +3095,6 @@ fn a_multi_chunk_staged_append_fills_chunk_sized_holes() {
             );
         }
         drop(f);
-        assert_eof_matches_file(&path);
+        file_space::assert_eof_matches_physical_size(&path);
     }
 }

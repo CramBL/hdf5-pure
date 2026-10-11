@@ -15,32 +15,6 @@ use test_util_hdf5::{
     file_space,
 };
 
-/// The scalar total must always equal the summed lengths of the reported regions,
-/// which must be sorted, disjoint, and contained within the logical size.
-fn assert_internally_consistent(acct: &hdf5_pure::SpaceAccounting) {
-    let summed: u64 = acct.reusable_free_space.iter().map(|(_, len)| len).sum();
-    assert_eq!(
-        summed, acct.reusable_free_bytes,
-        "reusable_free_bytes must equal the summed region lengths: {:?}",
-        acct.reusable_free_space
-    );
-    for w in acct.reusable_free_space.windows(2) {
-        assert!(
-            w[0].0 + w[0].1 <= w[1].0,
-            "reusable free regions must be sorted and disjoint: {:?}",
-            acct.reusable_free_space
-        );
-    }
-    for &(addr, len) in &acct.reusable_free_space {
-        assert!(
-            addr + len <= acct.logical_size,
-            "a free region [{addr}, {}) must lie within logical_size {}",
-            addr + len,
-            acct.logical_size
-        );
-    }
-}
-
 #[test]
 fn fresh_session_reports_file_size_and_no_reusable_free() {
     let dir = tempdir().unwrap();
@@ -62,7 +36,7 @@ fn fresh_session_reports_file_size_and_no_reusable_free() {
         "a freshly opened non-persisting session tracks no reusable free space"
     );
     assert!(acct.reusable_free_space.is_empty());
-    assert_internally_consistent(&acct);
+    file_space::assert_space_accounting_consistent(&acct);
 }
 
 #[test]
@@ -97,7 +71,7 @@ fn logical_size_grows_with_immediate_append() {
         "an in-place append feeds no reusable free space (any abandoned index block \
          is untracked, never reused)"
     );
-    assert_internally_consistent(&acct);
+    file_space::assert_space_accounting_consistent(&acct);
 }
 
 #[test]
@@ -129,7 +103,7 @@ fn staged_delete_is_not_counted_until_commit() {
          (got {})",
         acct.reusable_free_bytes
     );
-    assert_internally_consistent(&acct);
+    file_space::assert_space_accounting_consistent(&acct);
 }
 
 #[test]
@@ -159,7 +133,7 @@ fn reused_free_shrinks_the_reusable_total() {
             "reusing the hole must shrink the reusable total ({free_before} -> {})",
             acct.reusable_free_bytes
         );
-        assert_internally_consistent(&acct);
+        file_space::assert_space_accounting_consistent(&acct);
     }
 
     // Reopen only after the session (and its exclusive file lock) is dropped —
@@ -191,7 +165,7 @@ fn fresh_nonpersisting_session_ignores_existing_holes() {
     );
     assert!(acct.reusable_free_space.is_empty());
     assert_eq!(acct.logical_size, std::fs::metadata(&p).unwrap().len());
-    assert_internally_consistent(&acct);
+    file_space::assert_space_accounting_consistent(&acct);
 }
 
 #[test]
@@ -229,7 +203,7 @@ fn persisting_session_seeds_reusable_free_on_open() {
         "a persisting session seeds its reusable free from disk to match the reader"
     );
     assert!(!acct.reusable_free_space.is_empty());
-    assert_internally_consistent(&acct);
+    file_space::assert_space_accounting_consistent(&acct);
 }
 
 /// A relocating overwrite leaves three adjacent things free — the superseded
@@ -268,7 +242,7 @@ fn a_relocating_overwrite_reclaims_the_old_header_with_its_storage() {
     session.commit().unwrap();
 
     let acct = session.space_accounting().unwrap();
-    assert_internally_consistent(&acct);
+    file_space::assert_space_accounting_consistent(&acct);
     assert_eq!(
         acct.reusable_free_space.len(),
         1,
