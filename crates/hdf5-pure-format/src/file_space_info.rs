@@ -15,8 +15,6 @@ pub(crate) use hdf5_pure_core::FileSpaceInfo;
 pub(crate) use hdf5_pure_core::FileSpacePageSize;
 pub(crate) use hdf5_pure_core::FileSpaceStrategy;
 
-use crate::address::BaseAddress;
-use crate::address::BaseAddressExt;
 use crate::address::StoredAddress;
 use crate::address::StoredAddressExt;
 use crate::bytes;
@@ -69,10 +67,11 @@ pub fn serialize_file_space_info(
 ///
 /// A version 0 message stores a strategy, a threshold, and, if it persists free space, six
 /// free-space manager addresses. The parser maps the strategy code to a strategy and the persist
-/// flag, keeps the threshold only for a strategy that uses free-space managers, and takes the end of
-/// allocation of a persisting message from `eof_address`, the absolute end-of-file address the
-/// superblock stores, less `base`. It sets every other field to its default and the six other
-/// manager addresses to the undefined address.
+/// flag, keeps the threshold only for a strategy that uses free-space managers, and calls
+/// `end_of_allocation` for a persisting message after reading its manager addresses. The caller
+/// returns the opened image's end of allocation as a base-relative [`StoredAddress`]. The parser
+/// sets every other field to its default and the six other manager addresses to the undefined
+/// address.
 ///
 /// # Errors
 ///
@@ -80,16 +79,16 @@ pub fn serialize_file_space_info(
 /// message, or ends inside the fields before the manager addresses of a version 1 message,
 /// [`FormatError::UnsupportedFileSpaceInfoVersion`] if the version is not 0 or 1,
 /// [`FormatError::InvalidFileSpaceStrategy`] if the version does not define the strategy code, and
-/// [`FormatError::AddressBelowBase`] if a persisting version 0 message is parsed with an
-/// `eof_address` below `base`.
+/// [`FormatError::InvalidFileSpacePageSize`] if a version 1 page size is outside 512 bytes to 1 GiB.
+/// Returns the error from `end_of_allocation` if the caller cannot provide the end of allocation
+/// for a persisting version 0 message.
 pub fn parse_file_space_info(
     widths: FormatWidths,
-    base: BaseAddress,
-    eof_address: u64,
+    end_of_allocation: impl FnOnce() -> Result<StoredAddress, FormatError>,
     data: &[u8],
 ) -> Result<FileSpaceInfo, FormatError> {
     match bytes::Fields::new(data, 0).u8()? {
-        VERSION_0 => parse_version_0(widths, base, eof_address, data),
+        VERSION_0 => parse_version_0(widths, end_of_allocation, data),
         VERSION_1 => parse_version_1(widths, data),
         version => Err(FormatError::UnsupportedFileSpaceInfoVersion(version)),
     }
@@ -101,8 +100,7 @@ pub fn parse_file_space_info(
 /// persisting message from the open file with `H5F_get_eoa` (`H5Ofsinfo.c`, HDF5 2.2.0).
 fn parse_version_0(
     widths: FormatWidths,
-    base: BaseAddress,
-    eof_address: u64,
+    end_of_allocation: impl FnOnce() -> Result<StoredAddress, FormatError>,
     data: &[u8],
 ) -> Result<FileSpaceInfo, FormatError> {
     let FormatWidths { offsets, lengths } = widths;
@@ -135,7 +133,7 @@ fn parse_version_0(
             FileSpaceInfoFields {
                 persist: true,
                 threshold,
-                eoa_pre_fsm: base.relative(eof_address)?.get(),
+                eoa_pre_fsm: end_of_allocation()?.get(),
                 manager_addrs,
                 ..defaults
             }
@@ -258,6 +256,8 @@ mod tests {
     use rstest::rstest;
 
     use super::*;
+    use crate::address::BaseAddress;
+    use crate::address::BaseAddressExt;
     use crate::address::StoredAddress;
     use crate::address::StoredAddressExt;
 
@@ -420,7 +420,11 @@ mod tests {
             serialize_file_space_info(widths(8, 8), &non_persistent(FileSpaceStrategy::FsmAggr))
                 .unwrap();
         let below_base = |data: &[u8]| {
-            parse_file_space_info(widths(8, 8), BaseAddress::new(BASE), BASE - 1, data)
+            parse_file_space_info(
+                widths(8, 8),
+                || BaseAddress::new(BASE).relative(BASE - 1),
+                data,
+            )
         };
 
         assert_eq!(
@@ -606,6 +610,29 @@ mod tests {
         );
     }
 
+    #[rstest]
+    #[case::zero_base(0, 4096)]
+    #[case::nonzero_base(512, 4608)]
+    fn version_0_end_of_allocation_uses_relative_image_coordinates(
+        #[case] effective_base: u64,
+        #[case] effective_eof: u64,
+    ) {
+        let body = [
+            [VERSION_0, FILE_SPACE_ALL_PERSIST].as_slice(),
+            &[0x40; 8],
+            &[0xFF; 48],
+        ]
+        .concat();
+        let parsed = parse_file_space_info(
+            widths(8, 8),
+            || BaseAddress::new(effective_base).relative(effective_eof),
+            &body,
+        )
+        .unwrap();
+
+        assert_eq!(parsed.eoa_pre_fsm, 4096);
+    }
+
     fn widths(offset_size: u8, length_size: u8) -> FormatWidths {
         FormatWidths::from_sizes(offset_size, length_size).unwrap()
     }
@@ -644,12 +671,7 @@ mod tests {
     }
 
     fn parse(widths: FormatWidths, data: &[u8]) -> Result<FileSpaceInfo, FormatError> {
-        parse_file_space_info(
-            widths,
-            BaseAddress::new(BASE),
-            BASE + END_OF_ALLOCATION,
-            data,
-        )
+        parse_file_space_info(widths, || Ok(StoredAddress::new(END_OF_ALLOCATION)), data)
     }
 
     const BASE: u64 = 0x200;
