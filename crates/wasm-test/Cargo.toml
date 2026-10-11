@@ -1,0 +1,17 @@
+# The in-memory API's round trips, compiled for wasm32-unknown-unknown and run
+# by the wasm-bindgen test runner under Node.
+[package]
+name = "hdf5-pure-wasm-test"
+version = "0.0.0"
+publish = false
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[target.'cfg(target_arch = "wasm32")'.dev-dependencies]
+hdf5-pure.workspace = true
+wasm-bindgen-test = "0.3"
+
+[lints]
+workspace = true

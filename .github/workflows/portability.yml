@@ -54,14 +54,16 @@ jobs:
               - crates/test-util/**
               - crates/test-util-hdf5/**
               - crates/crosscheck/**
+              - crates/wasm-test/**
               - Cross.toml
               - justfile
               - scripts/constants.just
               - scripts/portability.just
               - .github/workflows/portability.yml
 
-  # The targets the crate must build for without running (wasm, bare metal, a
-  # std host with no default features), then two lints on i686. The library
+  # The builds this job checks without running them (WASM, bare metal, a std
+  # host with no default features), Clippy over the wasm32 tests, then two
+  # lints on i686. The library
   # indexes its in-memory image with `usize`, so a 64-bit offset narrowed on a
   # 32-bit target would read the wrong bytes (issue #27). And each narrowing
   # cast is either routed through `crate::convert` or annotated with an
@@ -140,10 +142,52 @@ jobs:
       - name: Tests
         run: just ${{ matrix.recipe }}
 
+  # The wasm32 tests under Node, with the `wasm-bindgen-test-runner` of the
+  # wasm-bindgen release `Cargo.lock` pins.
+  wasm:
+    name: test / wasm32 (node)
+    runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.run == 'true'
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install Rust
+        run: |
+          rustup toolchain install
+          rustup target add wasm32-unknown-unknown
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: portability-wasm
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Install just
+        uses: taiki-e/install-action@920ab1831fbf4fb3ef75c8ead83556c918bb7290 # v2.79.8
+        with:
+          tool: just
+
+      - name: Read the pinned wasm-bindgen release
+        id: wasm-bindgen
+        run: echo "version=$(just portability::wasm-bindgen-version)" >> "$GITHUB_OUTPUT"
+
+      - name: Install the wasm-bindgen test runner
+        uses: taiki-e/install-action@920ab1831fbf4fb3ef75c8ead83556c918bb7290 # v2.79.8
+        with:
+          tool: wasm-bindgen@${{ steps.wasm-bindgen.outputs.version }}
+
+      - name: Tests
+        run: just portability::test-wasm
+
   ci-portability-guard:
     name: ci-portability-guard
     runs-on: ubuntu-latest
-    needs: [changes, checks, qemu]
+    needs: [changes, checks, qemu, wasm]
     permissions:
       contents: none
     if: always()

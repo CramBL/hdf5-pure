@@ -8,18 +8,29 @@ set working-directory := ".."
 FULL_PUBLIC_WITHOUT_ZLIB_NG := "--features checksum,ndarray,num-complex,provenance,serde,zfp"
 # The features the 32-bit and big-endian tests build the portable crates with, in place of their defaults.
 PORTABILITY_FEATURES := "checksum,fast-deflate,ndarray,num-complex,provenance,serde,zfp"
+# The package whose tests run the in-memory API on wasm32.
+WASM_TEST := "hdf5-pure-wasm-test"
 
-# The cross-target tests need `cross` and Docker, so they are not run here.
+# The cross-target tests need `cross` and Docker, and the wasm32 tests a `wasm-bindgen-test-runner`, so they are not run here.
 default: check-no-std check-wasm check-bare-metal clippy-32bit cast-gate
 
 # The portable crates on the host without their default features.
 check-no-std:
     cargo check --locked {{ PORTABLE }} --no-default-features
 
-# The portable crates without their default features for wasm32, then the facade with its defaults.
+# The portable crates without their default features for wasm32, the facade with its defaults, then Clippy over the wasm32 tests.
 check-wasm:
     cargo check --locked {{ PORTABLE }} --target wasm32-unknown-unknown --no-default-features
     cargo check --locked -p hdf5-pure --target wasm32-unknown-unknown
+    cargo clippy --locked -p {{ WASM_TEST }} --target wasm32-unknown-unknown --all-targets -- -D warnings
+
+# The wasm32 tests under Node, which need the `wasm-bindgen-test-runner` of the wasm-bindgen release `Cargo.lock` pins.
+test-wasm:
+    CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER=wasm-bindgen-test-runner cargo test --locked -p {{ WASM_TEST }} --target wasm32-unknown-unknown
+
+# The wasm-bindgen release `Cargo.lock` pins, which the runner that `test-wasm` calls must match.
+wasm-bindgen-version:
+    @cargo pkgid --locked wasm-bindgen | sed 's/.*@//'
 
 # The portable crates without their default features, then the facade with `checksum` alone, without `std`.
 check-bare-metal:
