@@ -71,7 +71,7 @@ fn element_size_of_vlen_string_is_the_descriptor_width() {
 #[test]
 fn element_size_exposes_a_hostile_declared_size() {
     let bytes =
-        std::fs::read("tests/data/fuzz/oom_chunked_string_huge_elem.h5").expect("read fixture");
+        super::fuzz_regressions::fixture_with_recorded_extent("oom_chunked_string_huge_elem.h5");
     let file = File::from_bytes(bytes).unwrap();
     let (name, ds) = file.root().iter_datasets().unwrap().next().unwrap();
     assert_eq!(name, "", "the fixture's one link has an empty name");

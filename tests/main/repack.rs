@@ -877,12 +877,13 @@ fn a_drop_of_the_root_group_is_rejected(#[case] spelling: &str) {
 fn a_source_link_whose_name_is_not_a_path_component_is_rejected() {
     let dst = temp::temp_path("hdf5_pure_repack_nameless_link_dst.h5");
 
-    let err = repack(
-        "tests/data/fuzz/oom_chunked_string_huge_elem.h5",
-        &dst,
-        &RepackOptions::new(),
+    let src = temp::temp_path("hdf5_pure_repack_nameless_link_src.h5");
+    std::fs::write(
+        &src,
+        super::fuzz_regressions::fixture_with_recorded_extent("oom_chunked_string_huge_elem.h5"),
     )
-    .unwrap_err();
+    .unwrap();
+    let err = repack(&src, &dst, &RepackOptions::new()).unwrap_err();
     let hdf5_pure::Error::RepackUnsupported(reason) = &err else {
         panic!("expected RepackUnsupported, got {err:?}");
     };

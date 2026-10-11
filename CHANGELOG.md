@@ -26,6 +26,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- Fixed `File::open` and related snapshot reads accepting files shorter than their recorded end-of-file position after relocation. Version-3 SWMR opens accept files shorter than that position ([#739](https://github.com/CramBL/hdf5-pure/pull/739)).
 - Fixed `File::open` and related read entry points locating metadata and data at incorrect positions after the HDF5 image is moved within a file. Editing a relocated image remains unsupported.
 - Fixed `File::superblock` reporting the root address in physical coordinates after opening a file with a userblock.
 - Fixed `Group::groups` and related listings returning the members of a group out of order when a chunk of its version 2 object header refers to more than one continuation block ([#730](https://github.com/CramBL/hdf5-pure/pull/730)).

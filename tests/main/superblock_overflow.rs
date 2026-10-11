@@ -1,5 +1,7 @@
 use hdf5_pure::Error;
+use hdf5_pure::File;
 use hdf5_pure::FormatError;
+use hdf5_pure::Source;
 use rstest::rstest;
 use test_util::superblock::v2::Superblock;
 use test_util::widths::Widths;
@@ -83,4 +85,77 @@ fn opening_reports_eof_relocation_arithmetic_failure(
         panic!("expected a format error, got {error:?}");
     };
     assert_eq!(format_error, expected);
+}
+
+#[rstest]
+#[case::short((1_u64 << 40) - 1)]
+#[case::complete(1_u64 << 40)]
+#[case::trailing((1_u64 << 40) + 1)]
+fn source_completeness_preserves_lengths_above_u32(#[case] actual_len: u64) {
+    let expected_eof = 1_u64 << 40;
+    let source = SparseImage {
+        prefix: Superblock::new(Widths::EIGHT)
+            .eof_address(expected_eof)
+            .build(),
+        len: actual_len,
+    };
+    let result = File::from_source(source);
+    if actual_len < expected_eof {
+        let error = result.unwrap_err();
+        let Error::Format(error) = error else {
+            panic!("expected a format error, got {error:?}");
+        };
+        assert_eq!(
+            error,
+            FormatError::TruncatedFile {
+                expected_eof,
+                actual_len
+            }
+        );
+    } else {
+        let file = result.unwrap();
+        assert_eq!(file.file_size(), actual_len);
+        assert_eq!(file.superblock().eof_address, expected_eof);
+    }
+}
+
+struct SparseImage {
+    prefix: Vec<u8>,
+    len: u64,
+}
+
+impl Source for SparseImage {
+    fn len(&self) -> u64 {
+        self.len
+    }
+
+    fn read_at(&self, offset: u64, buf: &mut [u8]) -> Result<(), FormatError> {
+        let Self { prefix, len } = self;
+        let end = offset
+            .checked_add(buf.len() as u64)
+            .ok_or(FormatError::OffsetOverflow {
+                offset,
+                length: buf.len() as u64,
+            })?;
+        if end > *len {
+            return Err(FormatError::UnexpectedEof {
+                expected: buf.len(),
+                available: usize::try_from(len.saturating_sub(offset)).unwrap(),
+            });
+        }
+        for (index, byte) in buf.iter_mut().enumerate() {
+            let position = offset
+                .checked_add(index as u64)
+                .ok_or(FormatError::OffsetOverflow {
+                    offset,
+                    length: index as u64,
+                })?;
+            *byte = usize::try_from(position)
+                .ok()
+                .and_then(|position| prefix.get(position))
+                .copied()
+                .unwrap_or(0);
+        }
+        Ok(())
+    }
 }

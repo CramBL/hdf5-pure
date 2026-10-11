@@ -54,6 +54,24 @@ impl OpenedImageContext {
         })
     }
 
+    /// Requires the physical source to extend through the relocated end-of-file position.
+    ///
+    /// Bytes after that position are permitted. `H5F__super_read` applies the same EOF check at
+    /// ordinary file open (`H5Fsuper.c`, HDF5 2.2.0).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::TruncatedFile`] if `actual_len` is less than the effective EOF.
+    pub(crate) fn require_complete(self, actual_len: u64) -> Result<(), FormatError> {
+        if actual_len < self.effective_eof {
+            return Err(FormatError::TruncatedFile {
+                expected_eof: self.effective_eof,
+                actual_len,
+            });
+        }
+        Ok(())
+    }
+
     /// Returns the stored-address mapping for the reconciled physical base.
     pub(crate) const fn addresses(self) -> AddressContext {
         self.addresses
@@ -126,6 +144,27 @@ mod tests {
     use super::OpenedImageContext;
     use super::StoredAddress;
     use super::StoredAddressExt;
+
+    #[rstest]
+    #[case::short(4_096, 4_095)]
+    #[case::equal(4_096, 4_096)]
+    #[case::trailing(4_096, 4_608)]
+    #[case::large_short(u64::MAX, u64::MAX - 1)]
+    #[case::large_equal(u64::MAX, u64::MAX)]
+    fn completeness_uses_physical_u64_length(#[case] expected_eof: u64, #[case] actual_len: u64) {
+        let opened = OpenedImageContext::reconcile(BaseAddress::ZERO, expected_eof, 0).unwrap();
+        if actual_len < expected_eof {
+            assert_eq!(
+                opened.require_complete(actual_len).unwrap_err(),
+                FormatError::TruncatedFile {
+                    expected_eof,
+                    actual_len
+                }
+            );
+        } else {
+            opened.require_complete(actual_len).unwrap();
+        }
+    }
 
     #[rstest]
     #[case::plain(0, 0, 4096, 4096)]

@@ -455,6 +455,13 @@ pub enum FormatError {
     ///
     /// The string describes the backend-specific failure.
     Source(String),
+    /// The physical file is shorter than its recorded end-of-file position after relocation.
+    TruncatedFile {
+        /// The physical end-of-file position derived from the superblock and signature location.
+        expected_eof: u64,
+        /// The physical backing-store length in bytes.
+        actual_len: u64,
+    },
     /// Type mismatch when reading data.
     TypeMismatch {
         /// Expected type description.
@@ -596,6 +603,13 @@ impl fmt::Display for FormatError {
             Self::UnsupportedVersion(v) => {
                 write!(f, "unsupported superblock version: {v}")
             }
+            Self::TruncatedFile {
+                expected_eof,
+                actual_len,
+            } => write!(
+                f,
+                "truncated file: recorded EOF is {expected_eof}, physical length is {actual_len}"
+            ),
             Self::UnexpectedEof {
                 expected,
                 available,
