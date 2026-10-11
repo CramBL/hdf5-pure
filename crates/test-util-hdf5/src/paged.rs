@@ -2,12 +2,12 @@
 
 use std::path::Path;
 
-use hdf5_pure::{File, FileBuilder, FileSpaceStrategy, Layout};
+use hdf5_pure::{File, FileBuilder, FileSpaceStrategy};
 use test_util::{
     btree_v2, bytes, fractal_heap, free_space, global_heap, local_heap, object_header, symbol_table,
 };
 
-use crate::dataset::Unlimited;
+use crate::{dataset::Unlimited, file_space};
 
 /// Signatures that must never appear in a page holding raw dataset bytes: object
 /// headers and their continuations, the global heap, the free-space managers, the
@@ -145,34 +145,20 @@ pub fn assert_consistent(path: &Path, page_size: u64) {
 pub fn assert_pages_homogeneous(path: &Path, page: u64, datasets: &[&str]) {
     let bytes = std::fs::read(path).unwrap();
     let f = File::open(path).unwrap();
-    let mut raw: Vec<(u64, u64)> = Vec::new();
+    let mut raw = Vec::new();
     for name in datasets {
-        let ds = f.dataset(name).unwrap();
-        match ds.layout().unwrap() {
-            Layout::Contiguous {
-                address: Some(addr),
-                size,
-            } => raw.push((addr, size)),
-            Layout::Chunked { .. } => {
-                for c in ds.chunks().unwrap() {
-                    raw.push((c.address, c.storage_size));
-                }
-            }
-            // Compact data lives inside the object header (metadata), and an
-            // unallocated contiguous dataset owns no bytes at all.
-            _ => {}
-        }
+        raw.extend(file_space::raw_extents(&f, name));
     }
     assert!(!raw.is_empty(), "expected at least one raw extent to check");
     drop(f);
 
     let mut raw_pages: Vec<u64> = Vec::new();
-    for (addr, size) in raw {
-        if size == 0 {
+    for extent in raw {
+        if extent.is_empty() {
             continue;
         }
-        let first = addr / page;
-        let last = (addr + size - 1) / page;
+        let first = extent.start / page;
+        let last = (extent.end - 1) / page;
         for p in first..=last {
             raw_pages.push(p);
         }

@@ -144,6 +144,8 @@ def build(entry: dict) -> Path:
             f"-DZLIB_LIBRARY={vcpkg_zlib_import_library(installed)}",
         ]
     else:
+        if platform.system() == "Linux":
+            configure.append("-DCMAKE_IGNORE_PREFIX_PATH=/home/linuxbrew/.linuxbrew")
         configure.append(f"-DCMAKE_C_FLAGS={os.environ.get('CFLAGS', '')} {RELAXED_C_FLAGS}")
 
     jobs = str(os.cpu_count() or 4)

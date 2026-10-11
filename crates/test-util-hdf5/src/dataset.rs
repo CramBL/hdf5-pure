@@ -20,6 +20,19 @@ pub enum Filter {
 /// Shuffle followed by deflate at level 6, the common append interoperability pipeline.
 pub const SHUFFLE_DEFLATE_6: &[Filter] = &[Filter::Shuffle, Filter::Deflate(6)];
 
+/// Applies `filters` to a dataset builder in the order they are listed.
+pub fn apply_filters(builder: &mut DatasetBuilder, filters: &[Filter]) {
+    for filter in filters {
+        match *filter {
+            Filter::Deflate(level) => builder.with_deflate(u32::from(level)),
+            Filter::Shuffle => builder.with_shuffle(),
+            Filter::Fletcher32 => builder.with_fletcher32(),
+            Filter::ScaleOffset(mode) => builder.with_scale_offset(mode),
+            Filter::Lzf => builder.with_lzf(),
+        };
+    }
+}
+
 /// A malformed dataset geometry request shared by writer and editor validation tests.
 #[derive(Clone, Copy)]
 pub struct InvalidGeometryCase {
@@ -329,15 +342,7 @@ impl<T: H5Element> Unlimited<'_, T> {
             .with_shape(&[data.len() as u64])
             .with_maxshape(&[MaxExtent::Unlimited])
             .with_chunks(&[chunk]);
-        for filter in filters {
-            match *filter {
-                Filter::Deflate(level) => dataset.with_deflate(u32::from(level)),
-                Filter::Shuffle => dataset.with_shuffle(),
-                Filter::Fletcher32 => dataset.with_fletcher32(),
-                Filter::ScaleOffset(mode) => dataset.with_scale_offset(mode),
-                Filter::Lzf => dataset.with_lzf(),
-            };
-        }
+        apply_filters(dataset, filters);
         if let Some(fill) = fill {
             dataset.with_fill_value(fill);
         }

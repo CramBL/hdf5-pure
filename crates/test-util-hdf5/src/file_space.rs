@@ -9,7 +9,7 @@ use hdf5::Dataset as Hdf5Dataset;
 use hdf5::FileBuilder as Hdf5FileBuilder;
 #[cfg(feature = "__hdf5-1.10")]
 use hdf5::plist::file_create::FileSpaceStrategy as Hdf5FileSpaceStrategy;
-use hdf5_pure::{File, FileBuilder, FileSpaceStrategy, Layout};
+use hdf5_pure::{File, FileBuilder, FileSpaceStrategy, Layout, SpaceAccounting};
 
 use crate::dataset::Unlimited;
 
@@ -59,9 +59,69 @@ pub fn libhdf5_write_strategy_triplet(path: &Path, strategy: Hdf5FileSpaceStrate
 /// Number of `i32` elements in the middle dataset of the strategy-reuse fixture.
 pub const STRATEGY_DELETED_ELEMENTS: usize = 400;
 
+/// Asserts that live file-space accounting is internally consistent.
+#[track_caller]
+pub fn assert_space_accounting_consistent(acct: &SpaceAccounting) {
+    let summed: u64 = acct.reusable_free_space.iter().map(|(_, len)| len).sum();
+    assert_eq!(
+        summed, acct.reusable_free_bytes,
+        "reusable_free_bytes must equal the summed region lengths: {:?}",
+        acct.reusable_free_space
+    );
+    for w in acct.reusable_free_space.windows(2) {
+        assert!(
+            w[0].0 + w[0].1 <= w[1].0,
+            "reusable free regions must be sorted and disjoint: {:?}",
+            acct.reusable_free_space
+        );
+    }
+    for &(addr, len) in &acct.reusable_free_space {
+        assert!(
+            addr + len <= acct.logical_size,
+            "a free region [{addr}, {}) must lie within logical_size {}",
+            addr + len,
+            acct.logical_size
+        );
+    }
+}
+
+/// Asserts that the HDF5 logical end-of-file equals the physical file length.
+#[track_caller]
+pub fn assert_eof_matches_physical_size(path: &Path) {
+    let file = File::open(path).unwrap();
+    let eof = file.file_size();
+    let actual = std::fs::metadata(path).unwrap().len();
+    assert_eq!(
+        eof, actual,
+        "superblock EOF must match the physical file size"
+    );
+}
+
 /// Byte length of the middle dataset in the strategy-reuse fixture.
 pub const STRATEGY_DELETED_LEN: u64 =
     (STRATEGY_DELETED_ELEMENTS * std::mem::size_of::<i32>()) as u64;
+
+/// Returns the external raw-data extents physically stored for a dataset.
+///
+/// Compact and unallocated datasets own no external raw extents. Contiguous
+/// storage contributes one extent, while chunked storage contributes one extent
+/// per stored chunk using each chunk's physical stored size.
+pub fn raw_extents(file: &File, dataset: &str) -> Vec<Range<u64>> {
+    let dataset = file.dataset(dataset).unwrap();
+    match dataset.layout().unwrap() {
+        Layout::Contiguous {
+            address: Some(address),
+            size,
+        } => std::iter::once(address..address + size).collect(),
+        Layout::Chunked { .. } => dataset
+            .chunks()
+            .unwrap()
+            .into_iter()
+            .map(|chunk| chunk.address..chunk.address + chunk.storage_size)
+            .collect(),
+        _ => Vec::new(),
+    }
+}
 
 /// Returns the allocated byte range of a contiguous dataset.
 pub fn contiguous_extent(file: &File, path: &str) -> Range<u64> {
