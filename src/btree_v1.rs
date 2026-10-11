@@ -202,7 +202,7 @@ mod tests {
             StoredAddress::new(internal_offset as u64),
             os,
             ls,
-            AddressContext::new(BaseAddress::ZERO),
+            AddressContext::from_effective_base(BaseAddress::ZERO),
         )
         .unwrap();
         assert_eq!(
@@ -222,7 +222,7 @@ mod tests {
             StoredAddress::new(0),
             8,
             8,
-            AddressContext::new(BaseAddress::ZERO),
+            AddressContext::from_effective_base(BaseAddress::ZERO),
         )
         .unwrap_err();
         assert_eq!(err, FormatError::InvalidBTreeNodeType(1));
@@ -245,7 +245,7 @@ mod tests {
             StoredAddress::new(0),
             os,
             ls,
-            AddressContext::new(BaseAddress::ZERO),
+            AddressContext::from_effective_base(BaseAddress::ZERO),
         )
         .unwrap_err();
         assert_eq!(err, FormatError::NestingDepthExceeded);

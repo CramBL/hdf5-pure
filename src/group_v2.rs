@@ -798,7 +798,7 @@ mod tests {
         let bytes = builder.finish().unwrap();
         let file = File::from_bytes(bytes.clone()).unwrap();
         let mut superblock = file.superblock().clone();
-        let addresses = AddressContext::new(superblock.base_address);
+        let addresses = AddressContext::from_effective_base(superblock.base_address);
         superblock.base_address = BaseAddress::new(2048);
         let path = ObjectPath::parse("group/data");
 
@@ -983,9 +983,14 @@ mod tests {
             birth_time: None,
         };
 
-        let entries =
-            resolve_v2_group_entries(&[], &oh, 8, 8, AddressContext::new(BaseAddress::ZERO))
-                .unwrap();
+        let entries = resolve_v2_group_entries(
+            &[],
+            &oh,
+            8,
+            8,
+            AddressContext::from_effective_base(BaseAddress::ZERO),
+        )
+        .unwrap();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].name, "test");
         assert_eq!(entries[0].object_header_address, StoredAddress::new(0x1000));
@@ -1116,7 +1121,7 @@ mod tests {
             file_data,
             AccessMode::ReadOnly,
             &sb,
-            AddressContext::new(sb.base_address),
+            AddressContext::from_effective_base(sb.base_address),
             &ObjectPath::parse("sensors/temperature"),
         )
         .unwrap();
@@ -1144,7 +1149,7 @@ mod tests {
             file_data,
             AccessMode::ReadOnly,
             &sb,
-            AddressContext::new(sb.base_address),
+            AddressContext::from_effective_base(sb.base_address),
             &ObjectPath::parse("sensors/humidity"),
         )
         .unwrap();
@@ -1172,7 +1177,7 @@ mod tests {
             file_data,
             AccessMode::ReadOnly,
             &sb,
-            AddressContext::new(sb.base_address),
+            AddressContext::from_effective_base(sb.base_address),
             &ObjectPath::parse("dataset_015"),
         )
         .unwrap();
@@ -1201,7 +1206,7 @@ mod tests {
             file_data,
             AccessMode::ReadOnly,
             &sb,
-            AddressContext::new(sb.base_address),
+            AddressContext::from_effective_base(sb.base_address),
             &ObjectPath::parse("group1/values"),
         )
         .unwrap();
@@ -1229,7 +1234,7 @@ mod tests {
             file_data,
             AccessMode::ReadOnly,
             &sb,
-            AddressContext::new(sb.base_address),
+            AddressContext::from_effective_base(sb.base_address),
             &ObjectPath::parse("sensors/temperature"),
         )
         .unwrap();
@@ -1257,7 +1262,7 @@ mod tests {
             file_data,
             AccessMode::ReadOnly,
             &sb,
-            AddressContext::new(sb.base_address),
+            AddressContext::from_effective_base(sb.base_address),
             &ObjectPath::parse("nonexistent"),
         )
         .unwrap_err();
@@ -1338,7 +1343,7 @@ mod tests {
         let (chunk_at, chunk_len) = crate::edit::read_oh_chunks(
             &crate::source::BytesSource::new(&bytes[..]),
             root_oh as u64,
-            AddressContext::new(BaseAddress::ZERO),
+            AddressContext::from_effective_base(BaseAddress::ZERO),
         )
         .expect("the root header is readable")[0]
             .span;
@@ -1401,7 +1406,7 @@ mod huge_link_tests {
             bytes,
             AccessMode::ReadOnly,
             &superblock,
-            AddressContext::new(superblock.base_address),
+            AddressContext::from_effective_base(superblock.base_address),
             &ObjectPath::parse("g"),
         )
         .unwrap();

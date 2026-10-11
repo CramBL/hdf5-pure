@@ -51,8 +51,155 @@
 //! and an unchecked assumption would not have. Continuations stay covered by the
 //! two tests that provoke them directly.
 
-use hdf5_pure::{File, FileBuilder};
+use std::path::Path;
+
+use hdf5_pure::Error;
+use hdf5_pure::File;
+use hdf5_pure::FileBuilder;
+use hdf5_pure::ReadSeekSource;
+use rstest::rstest;
 use tempfile::tempdir;
+
+#[rstest]
+#[case::plain(0, 0)]
+#[case::userblock(512, 512)]
+#[case::jammed(0, 512)]
+#[case::unjammed(512, 0)]
+fn relocated_c_image_preserves_encoded_superblock_and_reads_data(
+    #[case] stored_base: usize,
+    #[case] signature_offset: usize,
+    #[values(false, true)] latest_format: bool,
+    #[values(
+        ReadBackend::Buffered,
+        ReadBackend::Streaming,
+        ReadBackend::Bytes,
+        ReadBackend::Source
+    )]
+    backend: ReadBackend,
+) {
+    let dir = tempfile::tempdir().unwrap();
+    let original_path = dir.path().join("original.h5");
+    let relocated_path = dir.path().join("relocated.h5");
+    let original = hdf5::File::with_options()
+        .with_fcpl(|properties| properties.userblock(stored_base as u64))
+        .with_fapl(|properties| {
+            if latest_format {
+                properties.libver_v110()
+            } else {
+                properties
+            }
+        })
+        .create(&original_path)
+        .unwrap();
+    original
+        .new_dataset::<i32>()
+        .shape([3])
+        .create("child")
+        .unwrap()
+        .write(&[1, 2, 3])
+        .unwrap();
+    {
+        let inner = original
+            .create_group("outer")
+            .unwrap()
+            .create_group("inner")
+            .unwrap();
+        inner
+            .new_dataset::<i32>()
+            .shape([4])
+            .chunk([2])
+            .deflate(1)
+            .create("data")
+            .unwrap()
+            .write(&[4, 5, 6, 7])
+            .unwrap();
+    }
+    original.close().unwrap();
+    let original_bytes = std::fs::read(&original_path).unwrap();
+    let stored_eof = original_bytes.len() as u64;
+    let mut relocated_bytes = vec![0; signature_offset];
+    relocated_bytes.extend_from_slice(&original_bytes[stored_base..]);
+    std::fs::write(&relocated_path, relocated_bytes).unwrap();
+    {
+        let oracle = hdf5::File::open(&relocated_path).unwrap();
+        assert_eq!(
+            oracle.dataset("child").unwrap().read_raw::<i32>().unwrap(),
+            [1, 2, 3]
+        );
+        assert_eq!(
+            oracle
+                .dataset("outer/inner/data")
+                .unwrap()
+                .read_raw::<i32>()
+                .unwrap(),
+            [4, 5, 6, 7]
+        );
+    }
+    let file = backend.open(&relocated_path);
+    assert_eq!(file.superblock().base_address.get(), stored_base as u64);
+    assert_eq!(file.superblock().eof_address, stored_eof);
+    assert_eq!(file.root().groups().unwrap(), ["outer"]);
+    assert_eq!(
+        file.root().dataset("child").unwrap().read_i32().unwrap(),
+        [1, 2, 3]
+    );
+    assert_eq!(file.group("outer").unwrap().groups().unwrap(), ["inner"]);
+    assert_eq!(
+        file.dataset("outer/inner/data")
+            .unwrap()
+            .read_i32()
+            .unwrap(),
+        [4, 5, 6, 7]
+    );
+}
+
+#[rstest]
+#[case::jammed(0, 512)]
+#[case::unjammed(512, 0)]
+fn editor_rejects_relocated_image(#[case] stored_base: usize, #[case] signature_offset: usize) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("relocated-edit.h5");
+    let mut builder = FileBuilder::new();
+    builder.with_userblock(stored_base as u64);
+    builder.create_dataset("data").with_i32_data(&[1, 2, 3]);
+    let original = builder.finish().unwrap();
+    let mut relocated = vec![0; signature_offset];
+    relocated.extend_from_slice(&original[stored_base..]);
+    std::fs::write(&path, &relocated).unwrap();
+    let error = File::open_rw(&path).unwrap_err();
+    assert!(
+        matches!(
+            error,
+            Error::EditUnsupported(
+                "a file whose superblock is not located at its base address is not editable in place"
+            )
+        ),
+        "{error:?}"
+    );
+    assert_eq!(std::fs::read(&path).unwrap(), relocated);
+}
+
+#[derive(Clone, Copy, Debug)]
+enum ReadBackend {
+    Buffered,
+    Bytes,
+    Source,
+    Streaming,
+}
+
+impl ReadBackend {
+    fn open(self, path: &Path) -> File {
+        match self {
+            Self::Buffered => File::open(path).unwrap(),
+            Self::Bytes => File::from_bytes(std::fs::read(path).unwrap()).unwrap(),
+            Self::Source => {
+                File::from_source(ReadSeekSource::new(std::fs::File::open(path).unwrap()).unwrap())
+                    .unwrap()
+            }
+            Self::Streaming => File::open_streaming(path).unwrap(),
+        }
+    }
+}
 
 /// The size MATLAB uses, and the one every `.mat` this crate writes carries.
 const UB: u64 = 512;

@@ -537,7 +537,7 @@ mod tests {
         let root = ObjectHeader::parse(
             bytes,
             AccessMode::ReadOnly,
-            AddressContext::new(superblock.base_address)
+            AddressContext::from_effective_base(superblock.base_address)
                 .absolute(superblock.root_group_address)
                 .unwrap()
                 .to_usize()

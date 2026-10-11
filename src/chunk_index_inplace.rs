@@ -1762,7 +1762,7 @@ mod tests {
             &store.data,
             AccessMode::ReadOnly,
             &store.superblock,
-            AddressContext::new(store.superblock.base_address),
+            AddressContext::from_effective_base(store.superblock.base_address),
             &ObjectPath::parse("d"),
         )
         .unwrap();
@@ -1844,7 +1844,7 @@ mod tests {
             &store.data,
             AccessMode::ReadOnly,
             &store.superblock,
-            AddressContext::new(store.superblock.base_address),
+            AddressContext::from_effective_base(store.superblock.base_address),
             &ObjectPath::parse("d"),
         )
         .unwrap();
@@ -2008,7 +2008,7 @@ mod tests {
             &store.data,
             AccessMode::ReadOnly,
             &store.superblock,
-            AddressContext::new(store.superblock.base_address),
+            AddressContext::from_effective_base(store.superblock.base_address),
             &ObjectPath::parse("d"),
         )
         .unwrap();

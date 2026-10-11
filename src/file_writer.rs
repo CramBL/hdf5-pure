@@ -3997,7 +3997,7 @@ mod tests {
             bytes,
             AccessMode::ReadOnly,
             &sb,
-            AddressContext::new(sb.base_address),
+            AddressContext::from_effective_base(sb.base_address),
             &ObjectPath::parse(path),
         )
         .unwrap();
@@ -4037,7 +4037,7 @@ mod tests {
             &bytes,
             AccessMode::ReadOnly,
             &sb,
-            AddressContext::new(sb.base_address),
+            AddressContext::from_effective_base(sb.base_address),
             &ObjectPath::parse("mytype"),
         )
         .unwrap();
@@ -4045,7 +4045,7 @@ mod tests {
             &bytes,
             AccessMode::ReadOnly,
             &sb,
-            AddressContext::new(sb.base_address),
+            AddressContext::from_effective_base(sb.base_address),
             &ObjectPath::parse("typed"),
         )
         .unwrap();
@@ -4083,7 +4083,7 @@ mod tests {
         let oh = ObjectHeader::parse(
             bytes,
             AccessMode::ReadOnly,
-            AddressContext::new(sb.base_address)
+            AddressContext::from_effective_base(sb.base_address)
                 .absolute(sb.root_group_address)
                 .unwrap()
                 .to_usize()
@@ -4102,7 +4102,7 @@ mod tests {
             bytes,
             AccessMode::ReadOnly,
             &sb,
-            AddressContext::new(sb.base_address),
+            AddressContext::from_effective_base(sb.base_address),
             &ObjectPath::parse(path),
         )
         .unwrap();
@@ -4171,7 +4171,7 @@ mod tests {
             &bytes,
             AccessMode::ReadOnly,
             &sb,
-            AddressContext::new(sb.base_address),
+            AddressContext::from_effective_base(sb.base_address),
             &ObjectPath::parse("data"),
         )
         .unwrap();
@@ -4228,7 +4228,7 @@ mod tests {
             &bytes,
             AccessMode::ReadOnly,
             &sb,
-            AddressContext::new(sb.base_address),
+            AddressContext::from_effective_base(sb.base_address),
             &ObjectPath::parse("grp"),
         )
         .unwrap();
@@ -4264,7 +4264,7 @@ mod tests {
             &bytes,
             AccessMode::ReadOnly,
             &sb,
-            AddressContext::new(sb.base_address),
+            AddressContext::from_effective_base(sb.base_address),
             &ObjectPath::parse("grp"),
         )
         .unwrap();
@@ -4328,7 +4328,7 @@ mod tests {
             &bytes,
             AccessMode::ReadOnly,
             &sb,
-            AddressContext::new(sb.base_address),
+            AddressContext::from_effective_base(sb.base_address),
             &ObjectPath::parse("data"),
         )
         .unwrap();
@@ -4374,7 +4374,7 @@ mod tests {
         let oh = ObjectHeader::parse(
             &bytes,
             AccessMode::ReadOnly,
-            AddressContext::new(sb.base_address)
+            AddressContext::from_effective_base(sb.base_address)
                 .absolute(sb.root_group_address)
                 .unwrap()
                 .to_usize()
@@ -4410,7 +4410,7 @@ mod tests {
             &bytes,
             AccessMode::ReadOnly,
             &sb,
-            AddressContext::new(sb.base_address),
+            AddressContext::from_effective_base(sb.base_address),
             &ObjectPath::parse("data"),
         )
         .unwrap();
@@ -4983,7 +4983,7 @@ mod tests {
             &bytes,
             AccessMode::ReadOnly,
             &sb,
-            AddressContext::new(sb.base_address),
+            AddressContext::from_effective_base(sb.base_address),
             &ObjectPath::parse("data"),
         )
         .unwrap();
@@ -5456,7 +5456,7 @@ mod tests {
             bytes,
             AccessMode::ReadOnly,
             &sb,
-            AddressContext::new(sb.base_address),
+            AddressContext::from_effective_base(sb.base_address),
             &ObjectPath::parse(path),
         )
         .unwrap();

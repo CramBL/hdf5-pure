@@ -7,6 +7,8 @@ use crate::address::StoredAddress;
 /// absolute file addresses. The other address fields hold base-relative [`StoredAddress`]
 /// values. The reader interprets those values in the opened image's address context when
 /// locating metadata in the physical source.
+/// For a relocated image, the reader derives the effective base and end-of-file position by
+/// applying the displacement from the encoded base to the physical signature position.
 ///
 /// A field absent from this superblock version is `None`. An optional address field present
 /// in the layout is `Some`, including when it contains the undefined address.
@@ -25,8 +27,13 @@ pub struct Superblock {
     /// Size of lengths in bytes (2, 4, or 8).
     pub length_size: u8,
     /// Absolute file address of the first byte of HDF5 data, as encoded in the superblock.
+    ///
+    /// The reader uses the physical signature position as the effective base when opening a
+    /// relocated image. This field retains the encoded value.
     pub base_address: BaseAddress,
-    /// Absolute file address of the first byte past the HDF5 data.
+    /// Absolute file address of the first byte past the HDF5 data, as encoded in the superblock.
+    ///
+    /// The reader applies the base relocation to derive its effective physical position.
     pub eof_address: u64,
     /// Root group object-header address relative to the HDF5 base address.
     ///

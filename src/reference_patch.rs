@@ -942,7 +942,7 @@ mod tests {
         let scanned = scan_object(
             src,
             HEADER_AT,
-            AddressContext::new(BaseAddress::ZERO),
+            AddressContext::from_effective_base(BaseAddress::ZERO),
             &map,
             &mut plan,
         )
@@ -1198,8 +1198,8 @@ mod tests {
     #[test]
     fn a_committed_datatype_is_resolved_through_the_base_address() {
         for base in [
-            AddressContext::new(BaseAddress::ZERO),
-            AddressContext::new(BaseAddress::new(1024)),
+            AddressContext::from_effective_base(BaseAddress::ZERO),
+            AddressContext::from_effective_base(BaseAddress::new(1024)),
         ] {
             const TYPE_AT: u64 = 2048;
             let committed = build_v2_object_header(&plain_region(message_record(
@@ -1270,7 +1270,7 @@ mod tests {
 
         let file = crate::File::open(&path).unwrap();
         let superblock = file.superblock().clone();
-        let root = AddressContext::new(superblock.base_address)
+        let root = AddressContext::from_effective_base(superblock.base_address)
             .absolute(superblock.root_group_address)
             .unwrap();
         // What `refs` stores, which is `d`'s header address. The file has no
@@ -1289,7 +1289,7 @@ mod tests {
         let reached = super::plan(
             &source,
             &superblock,
-            AddressContext::new(superblock.base_address),
+            AddressContext::from_effective_base(superblock.base_address),
             &moved,
             1 << 20,
         )
@@ -1305,7 +1305,7 @@ mod tests {
         let skipped = super::plan(
             &source,
             &superblock,
-            AddressContext::new(superblock.base_address),
+            AddressContext::from_effective_base(superblock.base_address),
             &vacated,
             1 << 20,
         )
