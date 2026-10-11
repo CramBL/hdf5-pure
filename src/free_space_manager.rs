@@ -83,16 +83,24 @@ pub(crate) fn read_persisted_sections(
     Ok(sections)
 }
 
-/// The free sections recovered from the on-disk managers, paired with the
-/// `(addr, len)` extents of every `FSHD`/`FSSE` block that was read (so a caller
-/// rewriting the managers can reclaim those blocks).
+/// The recovered free sections and the complete physical `(addr, len)` allocations of their
+/// `FSHD` and `FSSE` blocks.
 pub(crate) type PersistedSections = (Vec<FreeSection>, Vec<(u64, u64)>);
 
-/// The bounded-memory counterpart of [`read_persisted_sections`]: read every
-/// persisted free section from the managers named in `manager_addrs` over a
-/// random-access [`Source`](crate::Source), so the bounded backend can seed its
-/// free list without a mirror. Only the small manager
-/// blocks are read; nothing scales with file size.
+/// Recovers free sections and complete manager allocations through a random-access
+/// [`Source`](crate::Source).
+///
+/// Adds `base` to stored addresses and skips undefined manager or section list addresses at the
+/// offset width of `widths`. Reads each section list's used bytes and records its allocated
+/// length for reclamation.
+///
+/// # Errors
+///
+/// Returns [`FormatError::OffsetOverflow`] if an address conversion or allocation end overflows,
+/// [`FormatError::InvalidFreeSpaceManager`] if a section list allocation exceeds the source
+/// length, and [`FormatError::ValueTooLargeForPlatform`] if a required read length exceeds
+/// [`usize::MAX`]. Returns source read errors and the errors of [`FreeSpaceManagerHeader::parse`]
+/// and [`parse_section_info`](hdf5_pure_format::__private::parse_section_info) for each block.
 pub(crate) fn read_persisted_sections_source<S: crate::source::Source>(
     src: &S,
     widths: FormatWidths,
@@ -117,11 +125,25 @@ pub(crate) fn read_persisted_sections_source<S: crate::source::Source>(
         }
         let fa = base.absolute(header.section_list_addr())?;
         let used = header.section_list_used();
+        let allocated = header.section_list_allocated();
+        let end = fa
+            .checked_add(allocated)
+            .ok_or(FormatError::OffsetOverflow {
+                offset: fa,
+                length: allocated,
+            })?;
+        if end > src.len() {
+            return Err(FormatError::InvalidFreeSpaceManager(format!(
+                "the section list allocation at {fa}, {allocated} bytes long, runs past the end of \
+                 the file, {} bytes long",
+                src.len()
+            )));
+        }
         let block = src.read_exact_at(fa, used.to_usize()?)?;
         sections.extend(hdf5_pure_format::__private::parse_section_info(
             widths, &block, addr, &header,
         )?);
-        blocks.push((fa, used));
+        blocks.push((fa, allocated));
     }
     Ok((sections, blocks))
 }
@@ -250,9 +272,13 @@ fn manager_wire(kind: ManagerKind) -> (usize, u8) {
 
 #[cfg(test)]
 mod tests {
+    use core::cell::RefCell;
+
     use hdf5_pure_space::__private::{Extent, SessionSpace};
     use rstest::rstest;
     use test_util::free_space;
+
+    use crate::source::Source;
 
     use super::*;
 
@@ -296,6 +322,58 @@ mod tests {
             read_persisted_sections(&buf, widths(8, 8), BaseAddress::ZERO, &[manager_addr]),
             Err(FormatError::InvalidFreeSpaceManager(reason.to_owned()))
         );
+    }
+
+    #[rstest]
+    #[case::tight(0, 35)]
+    #[case::spare_capacity(0, 51)]
+    #[case::userblock(512, 51)]
+    #[case::large_capacity(0, 1 << 33)]
+    fn source_recovery_reads_used_bytes_and_records_allocated_bytes(
+        #[case] base: u64,
+        #[case] allocated: u64,
+    ) {
+        let source = manager_source(base, allocated, base + 701 + allocated);
+        let (sections, blocks) =
+            read_persisted_sections_source(&source, widths(8, 8), BaseAddress::new(base), &[619])
+                .unwrap();
+
+        assert_eq!(sections, vec![section(2848, 1600)]);
+        assert_eq!(blocks, vec![(base + 619, 82), (base + 701, allocated)]);
+        assert_eq!(
+            *source.reads.borrow(),
+            vec![(base + 619, 82), (base + 701, 35)]
+        );
+    }
+
+    #[rstest]
+    #[case::past_source(
+        0,
+        51,
+        751,
+        FormatError::InvalidFreeSpaceManager(
+            "the section list allocation at 701, 51 bytes long, runs past the end of the file, 751 bytes long".to_owned()
+        )
+    )]
+    #[case::allocation_overflow(
+        u64::MAX - 1000,
+        300,
+        u64::MAX,
+        FormatError::OffsetOverflow { offset: u64::MAX - 299, length: 300 }
+    )]
+    fn source_recovery_rejects_invalid_allocation_geometry(
+        #[case] base: u64,
+        #[case] allocated: u64,
+        #[case] file_len: u64,
+        #[case] expected: FormatError,
+    ) {
+        let source = manager_source(base, allocated, file_len);
+        assert_eq!(
+            read_persisted_sections_source(&source, widths(8, 8), BaseAddress::new(base), &[619],)
+                .unwrap_err(),
+            expected
+        );
+        assert_eq!(*source.reads.borrow(), vec![(base + 619, 82)]);
     }
 
     #[test]
@@ -543,5 +621,52 @@ mod tests {
     #[case::past_a_boundary(8193, 12_288)]
     fn align_up_rounds_to_the_next_page_boundary(#[case] value: u64, #[case] expected: u64) {
         assert_eq!(align_up(value, FileSpacePageSize::DEFAULT), expected);
+    }
+
+    struct ManagerSource {
+        base: u64,
+        file_len: u64,
+        header: Vec<u8>,
+        sections: Vec<u8>,
+        reads: RefCell<Vec<(u64, usize)>>,
+    }
+
+    impl Source for ManagerSource {
+        fn len(&self) -> u64 {
+            self.file_len
+        }
+
+        fn read_at(&self, offset: u64, buf: &mut [u8]) -> Result<(), FormatError> {
+            self.reads.borrow_mut().push((offset, buf.len()));
+            let data = match offset.checked_sub(self.base) {
+                Some(619) => &self.header,
+                Some(701) => &self.sections,
+                _ => {
+                    return Err(FormatError::UnexpectedEof {
+                        expected: buf.len(),
+                        available: 0,
+                    });
+                }
+            };
+            buf.copy_from_slice(data.get(..buf.len()).ok_or(FormatError::UnexpectedEof {
+                expected: buf.len(),
+                available: data.len(),
+            })?);
+            Ok(())
+        }
+    }
+
+    fn manager_source(base: u64, allocated: u64, file_len: u64) -> ManagerSource {
+        let mut header = free_space::single_section_header();
+        header[70..78].copy_from_slice(&allocated.to_le_bytes());
+        let len = header.len();
+        test_util::checksum::restamp(&mut header, 0, len);
+        ManagerSource {
+            base,
+            file_len,
+            header,
+            sections: free_space::single_section_info(),
+            reads: RefCell::new(Vec::new()),
+        }
     }
 }
