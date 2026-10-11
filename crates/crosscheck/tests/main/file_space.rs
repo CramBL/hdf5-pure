@@ -897,6 +897,127 @@ fn libhdf5_loads_the_managers_the_serializer_writes_at_the_widths_of_its_file(
 }
 
 #[rstest]
+#[case::plain(0)]
+#[case::userblock(512)]
+fn libhdf5_reads_a_section_list_whose_allocation_the_test_enlarges(#[case] userblock: u64) {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("enlarged_section_list.h5");
+    let (free, _) = enlarged_section_list_file(&path, userblock);
+    let file = hdf5::File::open(&path).unwrap();
+    assert_eq!(
+        file.free_space(),
+        free.iter().map(|&(_, len)| len).sum::<u64>()
+    );
+    assert_eq!(
+        file.dataset("a").unwrap().read_raw::<i32>().unwrap(),
+        vec![1; 400]
+    );
+    file.close().unwrap();
+    assert_eq!(
+        File::open(&path).unwrap().persisted_free_space().unwrap(),
+        free
+    );
+}
+
+#[test]
+fn an_editor_reclaims_the_complete_section_list_allocation_the_test_enlarges() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("reclaimed_section_list.h5");
+    let (_, allocation) = enlarged_section_list_file(&path, 0);
+    let session = File::open_rw(&path).unwrap();
+    session
+        .root()
+        .set_attr("changed", AttrValue::I64(7))
+        .unwrap();
+    session.commit().unwrap();
+    let mut free = session.space_accounting().unwrap().reusable_free_space;
+    session.close().unwrap();
+    let file_len = std::fs::metadata(&path).unwrap().len();
+    free.push((file_len, u64::MAX - file_len));
+    assert_eq!(
+        range::covered_len(&free, &allocation),
+        allocation.end - allocation.start
+    );
+    let file = hdf5::File::open(&path).unwrap();
+    assert_eq!(
+        file.dataset("a").unwrap().read_raw::<i32>().unwrap(),
+        vec![1; 400]
+    );
+    assert_eq!(
+        file.attr("changed").unwrap().read_scalar::<i64>().unwrap(),
+        7
+    );
+}
+
+fn enlarged_section_list_file(path: &Path, userblock: u64) -> (Vec<(u64, u64)>, Range<u64>) {
+    write_c_persisted_with_a_hole(
+        path,
+        Driver::Sec2,
+        Sizeof::Bytes8,
+        Sizeof::Bytes8,
+        userblock,
+    );
+    let file = File::open(path).unwrap();
+    let mut superblock = file.superblock().clone();
+    let free = file.persisted_free_space().unwrap();
+    let widths = FormatWidths::from_sizes(8, 8).unwrap();
+    let base = superblock.base_address;
+    let mut bytes = std::fs::read(path).unwrap();
+    let (header_at, header) = file
+        .file_space_info()
+        .unwrap()
+        .manager_addrs
+        .iter()
+        .copied()
+        .filter(|&addr| !hdf5_pure_format::__private::is_undefined_addr(addr, 8))
+        .map(|addr| {
+            let at = usize::try_from(base.absolute(StoredAddress::new(addr)).unwrap()).unwrap();
+            (
+                at,
+                FreeSpaceManagerHeader::parse(widths, &bytes[at..]).unwrap(),
+            )
+        })
+        .find(|(_, header)| (header.total_space(), header.total_sections()) == (1600, 1))
+        .unwrap();
+    drop(file);
+    let used = usize::try_from(header.section_list_used()).unwrap();
+    let list_at = usize::try_from(base.absolute(header.section_list_addr()).unwrap()).unwrap();
+    let list = bytes[list_at..list_at + used].to_vec();
+    let new_addr = base.relative(u64::try_from(bytes.len()).unwrap()).unwrap();
+    bytes.extend_from_slice(&list);
+    bytes.extend_from_slice(&[0xA5; 16]);
+    let allocated = header.section_list_used() + 16;
+    test_util::bytes::set_slice_at(
+        &mut bytes,
+        header_at + SECTION_LIST_ADDR_AT,
+        &new_addr.get().to_le_bytes(),
+    );
+    test_util::bytes::set_slice_at(
+        &mut bytes,
+        header_at + SECTION_LIST_ALLOCATED_AT,
+        &allocated.to_le_bytes(),
+    );
+    let header_len = usize::try_from(hdf5_pure_format::__private::free_space_manager_header_len(
+        widths,
+    ))
+    .unwrap();
+    test_util::checksum::restamp(&mut bytes, header_at, header_len);
+    superblock.eof_address = u64::try_from(bytes.len()).unwrap();
+    let encoded = hdf5_pure_format::__private::serialize_superblock(&superblock).unwrap();
+    let at = usize::try_from(userblock).unwrap();
+    bytes[at..at + encoded.len()].copy_from_slice(&encoded);
+    std::fs::write(path, &bytes).unwrap();
+
+    let header = FreeSpaceManagerHeader::parse(widths, &bytes[header_at..]).unwrap();
+    assert_eq!(
+        (header.section_list_used(), header.section_list_allocated()),
+        (u64::try_from(list.len()).unwrap(), allocated)
+    );
+    let start = base.absolute(new_addr).unwrap();
+    (free, start..start + allocated)
+}
+
+#[rstest]
 #[case::header_version(ManagerBlock::Header, 4, vec![1], "the header version is 1, not 0")]
 #[case::header_section_count(
     ManagerBlock::Header,

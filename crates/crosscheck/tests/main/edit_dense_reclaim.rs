@@ -771,7 +771,10 @@ fn free_space_manager_blocks(path: &Path) -> Vec<(u64, u64)> {
                 hdf5_pure_format::__private::free_space_manager_header_len(widths),
             )];
             if !header.section_list_addr().is_undefined(8) {
-                blocks.push((header.section_list_addr().get(), header.section_list_used()));
+                blocks.push((
+                    header.section_list_addr().get(),
+                    header.section_list_allocated(),
+                ));
             }
             blocks
         })
