@@ -8,6 +8,8 @@
 #[cfg(not(feature = "std"))]
 extern crate alloc;
 
+use core::ops::DerefMut;
+
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 
@@ -382,8 +384,10 @@ impl CachePass {
 /// // Pass &cache to read_chunked_data — it will populate the index lazily.
 /// ```
 ///
-/// The cache is wrapped in `Mutex` internally so it can be mutated through
-/// shared references (thread-safe).
+/// A mutex holds the cache state, so the methods that change it take `&self`.
+/// With `std` the mutex is `std::sync::Mutex` and the cache is `Sync`. Without
+/// `std` it is a single-threaded mutex over a `RefCell`, and the cache is not
+/// `Sync`.
 pub struct ChunkCache {
     inner: Mutex<CacheInner>,
 }
@@ -471,7 +475,7 @@ impl ChunkCache {
     /// configuration is taking effect. It locks the cache briefly to read a
     /// consistent snapshot.
     pub fn stats(&self) -> ChunkCacheStats {
-        let inner = self.inner.lock().unwrap();
+        let inner = self.lock();
         ChunkCacheStats {
             index_loaded: inner.index.is_some(),
             cached_chunks: inner.slots.len(),
@@ -487,7 +491,7 @@ impl ChunkCache {
     /// it is holding, so a caller can measure one read without the reads that
     /// warmed the cache for it.
     pub fn reset_stats(&self) {
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self.lock();
         inner.counters = Counters::default();
     }
 
@@ -498,7 +502,7 @@ impl ChunkCache {
     /// The `rank` parameter is used to truncate offsets to spatial dims only
     /// (B-tree v1 stores rank+1 offsets).
     pub fn populate_index(&self, chunks: &[ChunkInfo], rank: usize) {
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self.lock();
         if !inner.cache_index {
             return;
         }
@@ -536,7 +540,7 @@ impl ChunkCache {
         &self,
         keep: impl Fn(&ChunkInfo) -> bool,
     ) -> Option<Vec<ChunkInfo>> {
-        let inner = self.inner.lock().unwrap();
+        let inner = self.lock();
         inner
             .index
             .as_ref()
@@ -550,15 +554,15 @@ impl ChunkCache {
     ///
     /// The closure runs while the cache lock is held, which lets the caller copy
     /// the chunk straight into its output buffer with no intermediate `Vec`
-    /// allocation or clone. The closure must not touch this cache (it would
-    /// deadlock); the chunk-assembly scatter it is used for does not.
+    /// allocation or clone. A closure that calls into this cache deadlocks or
+    /// panics, and the chunk-assembly scatter it is used for does not call into it.
     pub fn with_decompressed<R>(
         &self,
         pass: CachePass,
         coord: &[u64],
         f: impl FnOnce(&[u8]) -> R,
     ) -> Option<R> {
-        let mut guard = self.inner.lock().unwrap();
+        let mut guard = self.lock();
         // Reborrowed once so the loop below borrows `slots` and `counters`
         // separately; through the guard itself each is a borrow of the whole.
         let inner = &mut *guard;
@@ -588,7 +592,7 @@ impl ChunkCache {
 
     /// Opens a read pass. See [`CachePass`] for what one is and why it exists.
     pub fn begin_pass(&self) -> CachePass {
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self.lock();
         inner.pass += 1;
         CachePass(inner.pass)
     }
@@ -703,7 +707,7 @@ impl ChunkCache {
     /// `coord` is borrowed and copied only on the path that stores it, so a
     /// caller in a loop needs no owned coordinate per chunk.
     pub fn put_decompressed(&self, pass: CachePass, coord: &[u64], data: Vec<u8>) {
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self.lock();
         if !Self::reserve(&mut inner, pass, coord, data.len()) {
             return;
         }
@@ -730,7 +734,7 @@ impl ChunkCache {
     /// costs the coalescing for that chunk and nothing else: a chunk in no span
     /// is read directly.
     pub fn decompressed_coords(&self) -> Vec<ChunkCoord> {
-        let inner = self.inner.lock().unwrap();
+        let inner = self.lock();
         inner.slots.iter().map(|s| s.coord.clone()).collect()
     }
 
@@ -740,7 +744,7 @@ impl ChunkCache {
     /// — no copy at all when caching is off, when the chunk is over the budget,
     /// or when this pass has already filled the cache.
     pub fn put_decompressed_slice(&self, pass: CachePass, coord: &[u64], data: &[u8]) {
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self.lock();
         if !Self::reserve(&mut inner, pass, coord, data.len()) {
             return;
         }
@@ -760,7 +764,7 @@ impl ChunkCache {
     /// entries, so both the cached chunk index and any retained decompressed
     /// chunks may be stale.
     pub fn clear(&self) {
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self.lock();
         inner.index = None;
         // Counted before the drop, and as chunks rather than as one event: what a
         // caller wants to compare against its miss count is how much retained
@@ -769,6 +773,23 @@ impl ChunkCache {
         inner.slots.clear();
         inner.current_bytes = 0;
         inner.tick = 0;
+    }
+
+    /// Locks the cache state until the returned guard drops.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a panic under a guard poisoned the lock, with `std`, or if a
+    /// guard is live, without `std`.
+    fn lock(&self) -> impl DerefMut<Target = CacheInner> {
+        // No method of the cache locks it while holding a guard, and the closures
+        // that `with_decompressed` and `indexed_chunks_matching` run under their
+        // guards only copy bytes out or test a chunk's offsets, so the lock is free
+        // here. With `std`, only a panic under a guard poisons the lock,
+        // and such a panic is a bug in the crate.
+        self.inner
+            .lock()
+            .expect("the chunk cache is locked by one guard at a time")
     }
 }
 

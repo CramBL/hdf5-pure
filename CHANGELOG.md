@@ -26,6 +26,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- Fixed a `no_std` build compiling an internal lock that lets two live guards borrow the chunk cache mutably at once ([#743](https://github.com/CramBL/hdf5-pure/pull/743)).
 - Fixed `File::open_rw` leaving spare capacity allocated when replacing persistent free-space section lists. Recovery reads only the used bytes of each list ([#741](https://github.com/CramBL/hdf5-pure/pull/741)).
 - Fixed `File::open` and related snapshot reads accepting files shorter than their recorded end-of-file position after relocation. Version-3 SWMR opens accept files shorter than that position ([#739](https://github.com/CramBL/hdf5-pure/pull/739)).
 - Fixed `File::open` and related read entry points locating metadata and data at incorrect positions after the HDF5 image is moved within a file. Editing a relocated image remains unsupported.
