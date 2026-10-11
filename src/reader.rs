@@ -1696,8 +1696,7 @@ impl FileInner {
             FormatWidths::from_sizes(self.superblock.offset_size, self.superblock.length_size)?;
         hdf5_pure_format::__private::parse_file_space_info(
             widths,
-            self.addresses.effective_base(),
-            self.superblock.eof_address,
+            || self.addresses.relative(self.superblock.eof_address),
             &msg.data,
         )
         .map(Some)

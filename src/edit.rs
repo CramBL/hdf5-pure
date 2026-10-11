@@ -2815,8 +2815,7 @@ impl WriteEngine {
         };
         let info = hdf5_pure_format::__private::parse_file_space_info(
             FormatWidths::from_sizes(os, ls)?,
-            base.effective_base(),
-            superblock.eof_address,
+            || addresses.relative(superblock.eof_address),
             &msg.data,
         )?;
         Ok(Some((ext_addr, info)))

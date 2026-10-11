@@ -156,33 +156,26 @@ mod tests {
     use rstest::rstest;
 
     use super::*;
-    use crate::address::BaseAddress;
-    use crate::address::BaseAddressExt;
     use crate::file_writer::WIDTHS;
 
-    #[test]
-    fn non_persistent_roundtrip_29_bytes() {
-        for strategy in [
-            FileSpaceStrategy::FsmAggr,
-            FileSpaceStrategy::Page,
-            FileSpaceStrategy::Aggr,
-            FileSpaceStrategy::None,
-        ] {
-            let info = non_persistent(OffsetWidth::Eight, strategy, 1, FileSpacePageSize::DEFAULT);
-            let bytes =
-                hdf5_pure_format::__private::serialize_file_space_info(WIDTHS, &info).unwrap();
-            assert_eq!(bytes.len(), 29, "non-persistent message is 29 bytes");
-            let parsed = hdf5_pure_format::__private::parse_file_space_info(
-                WIDTHS,
-                BaseAddress::ZERO,
-                0,
-                &bytes,
-            )
-            .unwrap();
-            assert_eq!(parsed, info);
-            assert_eq!(parsed.eoa_pre_fsm, u64::MAX);
-            assert!(parsed.manager_addrs.is_empty());
-        }
+    #[rstest]
+    #[case::free_space_manager(FileSpaceStrategy::FsmAggr)]
+    #[case::page(FileSpaceStrategy::Page)]
+    #[case::aggregators(FileSpaceStrategy::Aggr)]
+    #[case::none(FileSpaceStrategy::None)]
+    fn non_persistent_roundtrip_29_bytes(#[case] strategy: FileSpaceStrategy) {
+        let info = non_persistent(OffsetWidth::Eight, strategy, 1, FileSpacePageSize::DEFAULT);
+        let bytes = hdf5_pure_format::__private::serialize_file_space_info(WIDTHS, &info).unwrap();
+        assert_eq!(bytes.len(), 29, "non-persistent message is 29 bytes");
+        let parsed = hdf5_pure_format::__private::parse_file_space_info(
+            WIDTHS,
+            || Ok(StoredAddress::new(0)),
+            &bytes,
+        )
+        .unwrap();
+        assert_eq!(parsed, info);
+        assert_eq!(parsed.eoa_pre_fsm, u64::MAX);
+        assert!(parsed.manager_addrs.is_empty());
     }
 
     #[test]
@@ -230,8 +223,7 @@ mod tests {
         assert_eq!(bytes.len(), 29 + NUM_FILE_FSM_MANAGERS * 8);
         let parsed = hdf5_pure_format::__private::parse_file_space_info(
             WIDTHS,
-            BaseAddress::ZERO,
-            0,
+            || Ok(StoredAddress::new(0)),
             &bytes,
         )
         .unwrap();
