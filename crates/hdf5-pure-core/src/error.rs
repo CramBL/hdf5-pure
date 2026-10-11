@@ -10,21 +10,13 @@ use crate::FileSpacePageSize;
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum FormatError {
-    /// The HDF5 magic signature was not found at any valid offset.
-    SignatureNotFound,
-    /// The superblock version is not supported.
-    UnsupportedVersion(u8),
-    /// Unexpected end of data.
-    UnexpectedEof {
-        /// Number of bytes expected.
-        expected: usize,
-        /// Number of bytes actually available.
-        available: usize,
+    /// An absolute file position lies below the base used for address conversion.
+    AddressBelowBase {
+        /// The absolute file position that could not be made base-relative.
+        address: u64,
+        /// The address base used for the conversion.
+        base: u64,
     },
-    /// Invalid offset size (must be 2, 4, or 8).
-    InvalidOffsetSize(u8),
-    /// Invalid length size (must be 2, 4, or 8).
-    InvalidLengthSize(u8),
     /// An address is too large for an address field of `offset_size` bytes.
     AddressTooLarge {
         /// The address that does not fit the field.
@@ -32,92 +24,59 @@ pub enum FormatError {
         /// The address field's width in bytes.
         offset_size: u8,
     },
-    /// A length is too large for a length field of `length_size` bytes.
-    LengthTooLarge {
-        /// The length that does not fit the field.
-        length: u64,
-        /// The length field's width in bytes.
-        length_size: u8,
+    /// An allocation sized from the file failed. A typed whole-dataset read
+    /// reserves its output buffer once with `try_reserve`, for as many values as
+    /// the read produces, and reports the allocator's failure here.
+    AllocationFailed {
+        /// The number of values the reservation requested.
+        values: usize,
+        /// The allocator's reason for the failure.
+        source: TryReserveError,
     },
-    /// Invalid object header signature.
-    InvalidObjectHeaderSignature,
-    /// Invalid object header version.
-    InvalidObjectHeaderVersion(u8),
-    /// A version 1 object-header message has a data size that is not a multiple of eight.
-    ///
-    /// Contains the declared message data size.
-    InvalidObjectHeaderMessageSize(u16),
-    /// An Object Header Continuation message stores the undefined address, all bits set, as the
-    /// address of its continuation block.
-    UndefinedContinuationAddress,
-    /// Unknown message type that is marked as must-understand.
-    UnsupportedMessage(u16),
-    /// Invalid datatype class.
-    InvalidDatatypeClass(u8),
-    /// Invalid datatype version for a given class.
-    InvalidDatatypeVersion {
-        /// The type class.
-        class: u8,
-        /// The version found.
-        version: u8,
+    /// An attribute's name, datatype, or dataspace exceeds its 2-byte length
+    /// field in the attribute message. The bound applies to the attribute's
+    /// description. Attribute data may be stored in dense storage as a
+    /// fractal-heap huge object. The `field` value identifies the length field.
+    AttributeFieldTooLong {
+        /// The attribute's name.
+        name: String,
+        /// Which 2-byte length field overflowed: `"name"`, `"datatype"`, or
+        /// `"dataspace"`.
+        field: &'static str,
+        /// That field's encoded length in bytes.
+        size: usize,
+        /// The largest length the message can describe, in bytes.
+        limit: usize,
     },
-    /// A parsed datatype occupies zero bytes per element.
-    ZeroSizedDatatype {
-        /// The type class that declared it.
-        class: u8,
+    /// An attribute's serialized message exceeds the version 2 object header's
+    /// 2-byte message-size field. The writer rejects an attribute that cannot
+    /// fit in compact storage. The fields hold the attribute name and its
+    /// serialized message size. The limit is [`OBJECT_HEADER_MESSAGE_MAX`].
+    AttributeMessageTooLarge {
+        /// The attribute's name.
+        name: String,
+        /// The attribute message's serialized size in bytes.
+        size: usize,
     },
-    /// Invalid string padding type.
-    InvalidStringPadding(u8),
-    /// Invalid character set.
-    InvalidCharacterSet(u8),
-    /// Invalid byte order.
-    InvalidByteOrder(u8),
-    /// Invalid reference type.
-    InvalidReferenceType(u8),
-    /// Invalid file-space management strategy code in a File Space Info message.
-    InvalidFileSpaceStrategy(u8),
-    /// Unsupported File Space Info message version: the parser reads versions 0 and 1.
-    UnsupportedFileSpaceInfoVersion(u8),
-    /// A file space page size is outside 512 bytes to 1 GiB, the range of [`FileSpacePageSize`].
-    InvalidFileSpacePageSize(u64),
-    /// A paged file-space strategy was requested alongside a userblock that is
-    /// not a whole number of pages. File-space pages are measured from the file
-    /// base, so the two boundaries coincide only when the userblock divides by
-    /// the page size: `(userblock bytes, page size)`.
-    UserblockNotPageAligned(u64, u64),
-    /// A userblock size the format does not define: it must be zero, or a power
-    /// of two of at least 512 bytes. A reader looks for the superblock at 0, 512,
-    /// 1024, and so on doubling, so any other size produces a file nothing can
-    /// open.
-    InvalidUserblockSize(u64),
-    /// More userblock content was supplied than the userblock region holds. The
-    /// overflow would displace the superblock, so the writer rejects the content.
-    UserblockContentTooLarge {
-        /// Bytes supplied.
-        content: u64,
-        /// Bytes the userblock region holds.
-        userblock: u64,
+    /// Jenkins lookup3 metadata checksum mismatch.
+    ChecksumMismatch {
+        /// The checksum stored in the file.
+        expected: u32,
+        /// The checksum we computed.
+        computed: u32,
     },
-    /// A free-space manager block (`FSHD` or `FSSE`) is malformed or past the end of the file, or a
-    /// free section is too large for a manager at the file's length width.
-    ///
-    /// The string describes the condition.
-    InvalidFreeSpaceManager(String),
-    /// An enumeration datatype was built over a base type that is not an
-    /// integer. HDF5 enumerations must have a fixed-point base.
-    EnumBaseNotInteger,
-    /// An enumeration member's value does not occupy exactly the base type's
-    /// size: `(member name, expected bytes, actual bytes)`.
-    EnumMemberValueSize(String, u32, usize),
-    /// An enumeration member's integer value does not fit in the base type:
-    /// `(member name, value, base size in bytes)`.
-    EnumMemberValueRange(String, i64, u32),
-    /// A compound datatype has a zero total size.
-    InvalidCompoundSize,
-    /// A compound datatype contains no fields.
-    EmptyCompoundType,
-    /// A compound datatype contains the same field name more than once.
-    DuplicateCompoundField(String),
+    /// Chunked dataset read error.
+    ChunkedReadError(String),
+    /// A dataset or attribute refers to a committed datatype whose encoding differs
+    /// from its own.
+    CommittedDatatypeMismatch {
+        /// Path of the referenced committed datatype object.
+        path: String,
+        /// Name of the dataset or attribute that named it.
+        user: String,
+    },
+    /// A named compound field was not present.
+    CompoundFieldMissing(String),
     /// A compound field extends past the declared compound size.
     CompoundFieldOutOfBounds {
         /// Field name.
@@ -136,18 +95,122 @@ pub enum FormatError {
         /// Later field in byte order.
         second: String,
     },
-    /// A named compound field was not present.
-    CompoundFieldMissing(String),
     /// A compound field has an incompatible datatype.
     CompoundFieldTypeMismatch(String),
-    /// Invalid dataspace version.
-    InvalidDataspaceVersion(u8),
-    /// Invalid dataspace type.
-    InvalidDataspaceType(u8),
-    /// Invalid data layout version.
-    InvalidLayoutVersion(u8),
-    /// Invalid data layout class.
-    InvalidLayoutClass(u8),
+    /// Data size mismatch.
+    DataSizeMismatch {
+        /// Expected size in bytes.
+        expected: usize,
+        /// Actual size in bytes.
+        actual: usize,
+    },
+    /// Dataset is missing data.
+    DatasetMissingData,
+    /// Dataset is missing shape.
+    DatasetMissingShape,
+    /// An object's attributes need more space than a dense attribute heap can
+    /// address: its offsets are 40 bits wide, so the blocks holding the
+    /// attributes cannot span more than `limit` bytes between them. Reaching this
+    /// takes about a terabyte of attributes on a single object.
+    ///
+    /// A set that exceeds the host's address range reports
+    /// [`FormatError::ValueTooLargeForPlatform`].
+    DenseAttributeHeapTooLarge {
+        /// The heap address space, in bytes.
+        limit: u64,
+    },
+    /// A compound datatype contains the same field name more than once.
+    DuplicateCompoundField(String),
+    /// A compound datatype contains no fields.
+    EmptyCompoundType,
+    /// An enumeration datatype was built over a base type that is not an
+    /// integer. HDF5 enumerations must have a fixed-point base.
+    EnumBaseNotInteger,
+    /// An enumeration member's integer value does not fit in the base type:
+    /// `(member name, value, base size in bytes)`.
+    EnumMemberValueRange(String, i64, u32),
+    /// An enumeration member's value does not occupy exactly the base type's
+    /// size: `(member name, expected bytes, actual bytes)`.
+    EnumMemberValueSize(String, u32, usize),
+    /// Relocating the encoded end-of-file address would place it below zero.
+    EofRelocationUnderflow {
+        /// The end-of-file address encoded in the superblock.
+        stored_eof: u64,
+        /// The number of bytes by which the HDF5 image moved earlier in the file.
+        shift: u64,
+    },
+    /// A user-supplied fill value's byte width does not match the dataset's
+    /// datatype element size (for example a `u8` fill value on an `i32`
+    /// dataset).
+    FillValueSizeMismatch {
+        /// The dataset datatype's element size in bytes.
+        expected: usize,
+        /// The supplied fill value's size in bytes.
+        actual: usize,
+    },
+    /// Filter processing failed.
+    ///
+    /// The string describes the filter and the failure.
+    FilterError(String),
+    /// An element passed to a fixed-width string dataset or attribute exceeds
+    /// its declared width. The writer rejects the element.
+    FixedStringTooLong {
+        /// Position of the offending element among the values passed. Zero for
+        /// a scalar attribute, which holds one value.
+        index: usize,
+        /// That element's length in bytes.
+        len: usize,
+        /// The declared width, in bytes.
+        width: u32,
+    },
+    /// Fletcher32 checksum mismatch.
+    Fletcher32Mismatch {
+        /// Expected checksum.
+        expected: u32,
+        /// Computed checksum.
+        computed: u32,
+    },
+    /// Global heap object not found.
+    GlobalHeapObjectNotFound {
+        /// Address of the collection.
+        collection_address: u64,
+        /// Index that was not found.
+        index: u16,
+    },
+    /// A fractal-heap "huge" object's heap ID referenced a B-tree key that is
+    /// not present in the heap's huge-objects v2 B-tree.
+    HugeObjectNotFound(u64),
+    /// An internal error, a condition that only a bug in `hdf5-pure` can produce.
+    ///
+    /// The string describes the condition.
+    Internal(String),
+    /// An attribute message's flags byte set a bit the format does not define.
+    /// Only bit 0 (shared datatype) and bit 1 (shared dataspace) exist, so any
+    /// other bit means the message is not what it claims to be.
+    InvalidAttributeFlags(u8),
+    /// Invalid Attribute Info message version.
+    InvalidAttributeInfoVersion(u8),
+    /// Invalid attribute message version.
+    InvalidAttributeVersion(u8),
+    /// Invalid B-tree node type.
+    InvalidBTreeNodeType(u8),
+    /// Invalid B-tree v1 signature.
+    InvalidBTreeSignature,
+    /// Invalid B-tree v2 signature.
+    InvalidBTreeV2Signature,
+    /// Invalid B-tree v2 version.
+    InvalidBTreeV2Version(u8),
+    /// Invalid byte order.
+    InvalidByteOrder(u8),
+    /// Invalid character set.
+    InvalidCharacterSet(u8),
+    /// A chunked, filtered, or extensible dataset's chunk geometry is invalid: for
+    /// example chunk dimensions whose rank disagrees with the shape, a zero chunk
+    /// dimension, a maximum shape whose rank disagrees with the shape or that is
+    /// smaller than the current shape, or chunking requested on a scalar dataset.
+    /// The writer rejects malformed geometry before splitting chunks. The payload
+    /// is a human-readable reason.
+    InvalidChunkGeometry(&'static str),
     /// A chunked layout's chunk indexing type is outside the five the Chunk
     /// Indexing Type table of "The Data Layout Message" defines, in the [format
     /// specification, version 4.0][spec]: Single Chunk (1), Implicit (2), Fixed
@@ -157,224 +220,25 @@ pub enum FormatError {
     ///
     /// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_layout
     InvalidChunkIndexType(u8),
-    /// The dataset's Fill Value message could not be parsed, and a read needed
-    /// it: part of the dataset's storage was never allocated, so what those
-    /// elements read as is undetermined. A dataset whose storage is fully
-    /// allocated reads normally regardless of this message.
-    UnreadableFillValue,
-    /// Type mismatch when reading data.
-    TypeMismatch {
-        /// Expected type description.
-        expected: &'static str,
-        /// Actual type description.
-        actual: &'static str,
+    /// A compound datatype has a zero total size.
+    InvalidCompoundSize,
+    /// Invalid dataspace type.
+    InvalidDataspaceType(u8),
+    /// Invalid dataspace version.
+    InvalidDataspaceVersion(u8),
+    /// Invalid datatype class.
+    InvalidDatatypeClass(u8),
+    /// Invalid datatype version for a given class.
+    InvalidDatatypeVersion {
+        /// The type class.
+        class: u8,
+        /// The version found.
+        version: u8,
     },
-    /// Data size mismatch.
-    DataSizeMismatch {
-        /// Expected size in bytes.
-        expected: usize,
-        /// Actual size in bytes.
-        actual: usize,
-    },
-    /// Invalid local heap signature.
-    InvalidLocalHeapSignature,
-    /// Invalid local heap version.
-    InvalidLocalHeapVersion(u8),
-    /// A link name in a group's local heap is not UTF-8. A version 1 group
-    /// stores the names of its links in a local heap, defined in "Local Heaps"
-    /// of the [format specification, version 4.0][spec].
-    ///
-    /// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsec_fmt4_infra_localheap
-    InvalidLocalHeapName {
-        /// The name's offset within the heap's data segment.
-        offset: u64,
-        /// The decode failure.
-        source: Utf8Error,
-    },
-    /// Invalid B-tree v1 signature.
-    InvalidBTreeSignature,
-    /// Invalid B-tree node type.
-    InvalidBTreeNodeType(u8),
-    /// Invalid symbol table node signature.
-    InvalidSymbolTableNodeSignature,
-    /// Invalid symbol table node version.
-    InvalidSymbolTableNodeVersion(u8),
-    /// Path not found during group traversal.
-    PathNotFound(String),
-    /// Invalid Link message version.
-    InvalidLinkVersion(u8),
-    /// Invalid link type code.
-    InvalidLinkType(u8),
-    /// Invalid Link Info message version.
-    InvalidLinkInfoVersion(u8),
-    /// Invalid B-tree v2 signature.
-    InvalidBTreeV2Signature,
-    /// Invalid B-tree v2 version.
-    InvalidBTreeV2Version(u8),
-    /// Invalid fractal heap signature.
-    InvalidFractalHeapSignature,
-    /// Invalid fractal heap version.
-    InvalidFractalHeapVersion(u8),
-    /// A supplied heap ID has a different length from the heap header's declared ID length.
-    InvalidFractalHeapIdLength {
-        /// The declared heap ID length in bytes.
-        expected: usize,
-        /// The supplied heap ID length in bytes.
-        actual: usize,
-    },
-    /// Invalid heap ID type.
-    InvalidHeapIdType(u8),
-    /// A fractal-heap "huge" object's heap ID referenced a B-tree key that is
-    /// not present in the heap's huge-objects v2 B-tree.
-    HugeObjectNotFound(u64),
-    /// A fractal heap's huge-objects v2 B-tree is not the indirectly accessed,
-    /// non-filtered layout (record type 1) this reader decodes: either the tree
-    /// declares a different record type, or its records are too short to hold
-    /// that one. Reading its records as that layout would decode an object ID
-    /// out of another field's bytes.
-    UnexpectedHugeObjectBTree {
-        /// The record type the B-tree declares.
-        tree_type: u8,
-        /// The record size the B-tree declares, in bytes.
-        record_size: usize,
-        /// The bytes a type-1 record needs: address + length + object ID.
-        required: usize,
-    },
-    /// A fractal-heap object lives in an I/O-filter-encoded heap (filtered
-    /// managed or huge storage), whose filtered bytes this reader does not
-    /// decode. Link and attribute heaps are never filtered, so this does not
-    /// arise for them.
-    UnsupportedFilteredHeapObject,
-    /// A dataset uses the Virtual (VDS) data layout, which maps its elements to
-    /// regions of other datasets, possibly in other files. The reader rejects a
-    /// dataset whose virtual mappings it cannot resolve.
-    UnsupportedVirtualLayout,
-    /// A dataset's element bytes live in files outside this one
-    /// (`H5Pset_external`, the External Data Files header message). Its layout
-    /// message is contiguous with an undefined data address, the same encoding
-    /// used by an unwritten dataset. The reader rejects external storage because
-    /// it cannot follow the external files.
-    UnsupportedExternalStorage,
-    /// Invalid attribute message version.
-    InvalidAttributeVersion(u8),
-    /// Invalid Attribute Info message version.
-    InvalidAttributeInfoVersion(u8),
-    /// Invalid shared message version.
-    InvalidSharedMessageVersion(u8),
-    /// An attribute message's flags byte set a bit the format does not define.
-    /// Only bit 0 (shared datatype) and bit 1 (shared dataspace) exist, so any
-    /// other bit means the message is not what it claims to be.
-    InvalidAttributeFlags(u8),
-    /// A message body references the shared object header message (SOHM) heap,
-    /// but parsing lacks a shared-message table. The superblock extension may
-    /// omit the table, the table may be unreadable, or the caller may parse a
-    /// message body without its file. A committed (`H5Tcommit`) datatype
-    /// references another object header and is resolved separately.
-    UnsupportedSohmReference,
-    /// A file's shared-message table, or a Shared Message Table message identifying
-    /// it, declares a version this format does not define.
-    InvalidSohmTableVersion(u8),
-    /// A Shared Message Table message declares no indexes, or more than the
-    /// eight the format allows. The count sizes the table's own read, so a
-    /// wrong one reads neighbouring bytes as index headers.
-    InvalidSohmIndexCount(u8),
-    /// The shared-message table does not start with its `SMTB` signature.
-    InvalidSohmTableSignature,
-    /// A shared-message list index does not start with its `SMLI` signature.
-    InvalidSohmListSignature,
-    /// A shared-message index header declares a storage kind that is neither a
-    /// list (0) nor a version 2 B-tree (1).
-    InvalidSohmIndexKind(u8),
-    /// A shared-message index refers to a version 2 B-tree with a type other
-    /// than shared-message index (type 7). Contains the B-tree type.
-    InvalidSohmBTreeType(u8),
-    /// A shared-message index record identifies a storage location that is neither
-    /// the heap (0) nor an object header (1).
-    InvalidSohmRecordLocation(u8),
-    /// A message body references the shared-message heap without a matching
-    /// index that covers its type and has an allocated heap. Contains the raw
-    /// type ID of the referenced message.
-    SohmIndexMissing(u16),
-    /// A shared message reference identifies an object header without a message
-    /// of the referenced type.
-    SharedMessageMissing {
-        /// Address of the object header identified by the reference.
-        object_header_address: u64,
-        /// Raw type ID of the message the reference stood in for.
-        message_type: u16,
-    },
-    /// A message body holds a reference to a shared message, and the parse that
-    /// met it had no access to the file the reference addresses. Carries the raw
-    /// type ID of the referenced message.
-    UnresolvedSharedMessage(u16),
-    /// A dataset or attribute refers to a committed datatype at a path where the file
-    /// being written places no such object.
-    UnknownCommittedDatatype(String),
-    /// A dataset or attribute refers to a committed datatype whose encoding differs
-    /// from its own. The two would disagree about how to read the element bytes,
-    /// and the committed one is what every reader would believe.
-    CommittedDatatypeMismatch {
-        /// Path of the referenced committed datatype object.
-        path: String,
-        /// Name of the dataset or attribute that named it.
-        user: String,
-    },
-    /// Invalid global heap collection signature.
-    InvalidGlobalHeapSignature,
-    /// Invalid global heap version.
-    InvalidGlobalHeapVersion(u8),
-    /// Global heap object not found.
-    GlobalHeapObjectNotFound {
-        /// Address of the collection.
-        collection_address: u64,
-        /// Index that was not found.
-        index: u16,
-    },
-    /// Variable-length data error.
-    VlDataError(String),
-    /// A variable-length read exceeded its configured element limit.
-    VariableLengthElementLimitExceeded {
-        /// Maximum number of elements permitted by the caller.
-        limit: usize,
-        /// Number of elements present in the selected data.
-        actual: u64,
-    },
-    /// A variable-length read exceeded its configured payload-byte limit.
-    VariableLengthByteLimitExceeded {
-        /// Maximum number of payload bytes permitted by the caller.
-        limit: usize,
-        /// Number of payload bytes required by the selected data.
-        required: u64,
-    },
-    /// Serialization error.
-    SerializationError(String),
-    /// A name a builder was given for a dataset, a group, or a committed datatype is not a
-    /// component of an object path: the empty name, `.`, or a name holding `/`. The object
-    /// under such a link has no path, and the write reports the name it rejects.
-    InvalidLinkName(String),
-    /// Dataset is missing data.
-    DatasetMissingData,
-    /// Dataset is missing shape.
-    DatasetMissingShape,
-    /// The dataset's element count implied by its shape does not match the
-    /// amount of data supplied (`shape.product() * element_size != data.len()`).
-    ShapeDataMismatch {
-        /// Number of data bytes the shape requires (`product(shape) * element_size`).
-        expected: usize,
-        /// Number of data bytes actually supplied.
-        actual: usize,
-        /// Size in bytes of one element (the dataset's datatype size), used to
-        /// report the mismatch in elements as well as bytes. Non-zero by type,
-        /// so the division in the message is well defined.
-        element_size: NonZeroUsize,
-    },
-    /// A chunked, filtered, or extensible dataset's chunk geometry is invalid: for
-    /// example chunk dimensions whose rank disagrees with the shape, a zero chunk
-    /// dimension, a maximum shape whose rank disagrees with the shape or that is
-    /// smaller than the current shape, or chunking requested on a scalar dataset.
-    /// The writer rejects malformed geometry before splitting chunks. The payload
-    /// is a human-readable reason.
-    InvalidChunkGeometry(&'static str),
+    /// A file space page size is outside 512 bytes to 1 GiB, the range of [`FileSpacePageSize`].
+    InvalidFileSpacePageSize(u64),
+    /// Invalid file-space management strategy code in a File Space Info message.
+    InvalidFileSpaceStrategy(u8),
     /// A stored filter name violates the pipeline's name encoding.
     InvalidFilterName {
         /// The identifier of the filter with the malformed name.
@@ -393,74 +257,116 @@ pub enum FormatError {
     },
     /// Invalid filter pipeline version.
     InvalidFilterPipelineVersion(u8),
-    /// Unsupported filter ID.
-    UnsupportedFilter(u16),
-    /// Filter processing error, including a stream that failed to decode. Every
-    /// filter in the pipeline, including shuffle, scale-offset, LZF, and deflate,
-    /// reports a bad chunk with this variant. The payload identifies the filter.
-    FilterError(String),
-    /// Fletcher32 checksum mismatch.
-    Fletcher32Mismatch {
-        /// Expected checksum.
-        expected: u32,
-        /// Computed checksum.
-        computed: u32,
+    /// A supplied heap ID has a different length from the heap header's declared ID length.
+    InvalidFractalHeapIdLength {
+        /// The declared heap ID length in bytes.
+        expected: usize,
+        /// The supplied heap ID length in bytes.
+        actual: usize,
     },
-    /// Chunked dataset read error.
-    ChunkedReadError(String),
-    /// CRC32C checksum mismatch.
-    ChecksumMismatch {
-        /// The checksum stored in the file.
-        expected: u32,
-        /// The checksum we computed.
-        computed: u32,
-    },
-    /// Maximum nesting/continuation depth exceeded (malformed data protection).
-    NestingDepthExceeded,
-    /// ZFP filter configuration is invalid (e.g. missing element type, rank out of range).
-    UnsupportedZfp(String),
-    /// A file-derived 64-bit value (an offset, length, size, or element count)
-    /// does not fit in the target integer type on this platform. This is the
-    /// checked conversion for file-derived values. On a 32-bit host, `usize` is
-    /// 32 bits, so an HDF5 offset or length above `usize::MAX` exceeds its range.
-    /// The error retains the original value, and `target` identifies the integer
-    /// type (for example, `"usize"` or `"u32"`).
-    ValueTooLargeForPlatform {
-        /// The original 64-bit value read from the file.
-        value: u64,
-        /// The platform integer type the value could not fit into.
-        target: &'static str,
-    },
-    /// Two file-derived values (typically an offset and a length) overflow `u64`
-    /// when added to form a slice bound. The reader reports the overflow.
-    OffsetOverflow {
-        /// First operand (typically the base offset/address).
+    /// Invalid fractal heap signature.
+    InvalidFractalHeapSignature,
+    /// Invalid fractal heap version.
+    InvalidFractalHeapVersion(u8),
+    /// A free-space manager block (`FSHD` or `FSSE`) is malformed or past the end of the file, or a
+    /// free section is too large for a manager at the file's length width.
+    ///
+    /// The string describes the condition.
+    InvalidFreeSpaceManager(String),
+    /// Invalid global heap collection signature.
+    InvalidGlobalHeapSignature,
+    /// Invalid global heap version.
+    InvalidGlobalHeapVersion(u8),
+    /// Invalid heap ID type.
+    InvalidHeapIdType(u8),
+    /// Invalid data layout class.
+    InvalidLayoutClass(u8),
+    /// Invalid data layout version.
+    InvalidLayoutVersion(u8),
+    /// Invalid length size (must be 2, 4, or 8).
+    InvalidLengthSize(u8),
+    /// Invalid Link Info message version.
+    InvalidLinkInfoVersion(u8),
+    /// A name a builder was given for a dataset, a group, or a committed datatype is not a
+    /// component of an object path: the empty name, `.`, or a name holding `/`. The object
+    /// under such a link has no path, and the write reports the name it rejects.
+    InvalidLinkName(String),
+    /// Invalid link type code.
+    InvalidLinkType(u8),
+    /// Invalid Link message version.
+    InvalidLinkVersion(u8),
+    /// A link name in a group's local heap is not UTF-8. A version 1 group
+    /// stores the names of its links in a local heap, defined in "Local Heaps"
+    /// of the [format specification, version 4.0][spec].
+    ///
+    /// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsec_fmt4_infra_localheap
+    InvalidLocalHeapName {
+        /// The name's offset within the heap's data segment.
         offset: u64,
-        /// Second operand (typically the length/size).
+        /// The decode failure.
+        source: Utf8Error,
+    },
+    /// Invalid local heap signature.
+    InvalidLocalHeapSignature,
+    /// Invalid local heap version.
+    InvalidLocalHeapVersion(u8),
+    /// A version 1 object-header message has a data size that is not a multiple of eight.
+    ///
+    /// Contains the declared message data size.
+    InvalidObjectHeaderMessageSize(u16),
+    /// Invalid object header signature.
+    InvalidObjectHeaderSignature,
+    /// Invalid object header version.
+    InvalidObjectHeaderVersion(u8),
+    /// An HDF5 object reference (`H5R_OBJECT`) could not be resolved to an
+    /// object: the stored address is null or undefined (`HADDR_UNDEF`), or it
+    /// does not point at a group or dataset object header. The payload is the
+    /// stored (base-relative) address, preserved for diagnostics.
+    InvalidObjectReference(u64),
+    /// Invalid offset size (must be 2, 4, or 8).
+    InvalidOffsetSize(u8),
+    /// Invalid reference type.
+    InvalidReferenceType(u8),
+    /// Invalid shared message version.
+    InvalidSharedMessageVersion(u8),
+    /// A shared-message index refers to a version 2 B-tree with a type other
+    /// than shared-message index (type 7). Contains the B-tree type.
+    InvalidSohmBTreeType(u8),
+    /// A Shared Message Table message declares no indexes, or more than the
+    /// eight the format allows. The count sizes the table's own read, so a
+    /// wrong one reads neighbouring bytes as index headers.
+    InvalidSohmIndexCount(u8),
+    /// A shared-message index header declares a storage kind that is neither a
+    /// list (0) nor a version 2 B-tree (1).
+    InvalidSohmIndexKind(u8),
+    /// A shared-message list index does not start with its `SMLI` signature.
+    InvalidSohmListSignature,
+    /// A shared-message index record identifies a storage location that is neither
+    /// the heap (0) nor an object header (1).
+    InvalidSohmRecordLocation(u8),
+    /// The shared-message table does not start with its `SMTB` signature.
+    InvalidSohmTableSignature,
+    /// A file's shared-message table, or a Shared Message Table message identifying
+    /// it, declares a version this format does not define.
+    InvalidSohmTableVersion(u8),
+    /// Invalid string padding type.
+    InvalidStringPadding(u8),
+    /// Invalid symbol table node signature.
+    InvalidSymbolTableNodeSignature,
+    /// Invalid symbol table node version.
+    InvalidSymbolTableNodeVersion(u8),
+    /// A userblock size the format does not define: it must be zero, or a power
+    /// of two of at least 512 bytes. A reader looks for the superblock at 0, 512,
+    /// 1024, and so on doubling, so any other size produces a file nothing can
+    /// open.
+    InvalidUserblockSize(u64),
+    /// A length is too large for a length field of `length_size` bytes.
+    LengthTooLarge {
+        /// The length that does not fit the field.
         length: u64,
+        /// The length field's width in bytes.
+        length_size: u8,
     },
-    /// An absolute file position lies below the superblock's base address, so it
-    /// lies in the userblock, where HDF5 structures cannot live. The reader
-    /// reports the position and the base address.
-    AddressBelowBase {
-        /// The absolute file position that could not be made base-relative.
-        address: u64,
-        /// The superblock base address it was below.
-        base: u64,
-    },
-    /// An allocation sized from the file failed. A typed whole-dataset read
-    /// reserves its output buffer once with `try_reserve`, for as many values as
-    /// the read produces, and reports the allocator's failure here.
-    AllocationFailed {
-        /// The number of values the reservation requested.
-        values: usize,
-        /// The allocator's reason for the failure.
-        source: TryReserveError,
-    },
-    /// A random-access byte source failed to supply bytes. The string carries a backend-specific reason
-    /// (e.g. an underlying `std::io::Error` rendered to text), so this stays
-    /// `no_std`/`alloc`-friendly and free of an `std::io` dependency.
-    Source(String),
     /// The library-version bounds passed to `FileBuilder::with_libver_bounds`
     /// admit no format the writer produces. The writer supports the 1.8 and 1.10
     /// formats, so an upper bound older than 1.8, or one below the lower bound,
@@ -485,33 +391,17 @@ pub enum FormatError {
         /// The library-version label of the format the bounds resolved to.
         writing: &'static str,
     },
-    /// An HDF5 object reference (`H5R_OBJECT`) could not be resolved to an
-    /// object: the stored address is null or undefined (`HADDR_UNDEF`), or it
-    /// does not point at a group or dataset object header. The payload is the
-    /// stored (base-relative) address, preserved for diagnostics.
-    InvalidObjectReference(u64),
-    /// A Fill Value message (`0x0005`) has an on-disk version this crate does
-    /// not recognize (only 1, 2, and 3 are defined). The payload is the version
-    /// byte found.
-    UnsupportedFillValueVersion(u8),
-    /// A user-supplied fill value's byte width does not match the dataset's
-    /// datatype element size (for example a `u8` fill value on an `i32`
-    /// dataset). The fields carry the datatype element size and the fill value
-    /// size, both in bytes.
-    FillValueSizeMismatch {
-        /// The dataset datatype's element size in bytes.
-        expected: usize,
-        /// The supplied fill value's size in bytes.
-        actual: usize,
-    },
-    /// An attribute's serialized message exceeds the version 2 object header's
-    /// 2-byte message-size field. The writer rejects an attribute that cannot
-    /// fit in compact storage. The fields hold the attribute name and its
-    /// serialized message size. The limit is [`OBJECT_HEADER_MESSAGE_MAX`].
-    AttributeMessageTooLarge {
-        /// The attribute's name.
-        name: String,
-        /// The attribute message's serialized size in bytes.
+    /// Maximum nesting/continuation depth exceeded (malformed data protection).
+    NestingDepthExceeded,
+    /// A numeric element in a file is wider than the 64-bit word the typed
+    /// numeric readers model an element as.
+    ///
+    /// Typed numeric readers assemble an element from its leading eight bytes.
+    /// They reject wider elements because those bytes hold only part of a value.
+    /// Raw dataset reads remain available, and attribute datatype reads report
+    /// the stored type.
+    NumericElementTooWide {
+        /// Storage width of one element, in bytes.
         size: usize,
     },
     /// An object-header message exceeds the version 2 object header's 2-byte
@@ -524,63 +414,175 @@ pub enum FormatError {
         /// The message's serialized size in bytes.
         size: usize,
     },
-    /// An attribute's name, datatype, or dataspace exceeds its 2-byte length
-    /// field in the attribute message. The bound applies to the attribute's
-    /// description. Attribute data may be stored in dense storage as a
-    /// fractal-heap huge object. The `field` value identifies the length field.
-    AttributeFieldTooLong {
-        /// The attribute's name.
-        name: String,
-        /// Which 2-byte length field overflowed: `"name"`, `"datatype"`, or
-        /// `"dataspace"`.
-        field: &'static str,
-        /// That field's encoded length in bytes.
-        size: usize,
-        /// The largest length the message can describe, in bytes.
-        limit: usize,
+    /// Address or size arithmetic exceeded the range of its integer type.
+    OffsetOverflow {
+        /// First operand (typically the base offset/address).
+        offset: u64,
+        /// Second operand (typically the length/size).
+        length: u64,
     },
-    /// An object's attributes need more space than a dense attribute heap can
-    /// address: its offsets are 40 bits wide, so the blocks holding the
-    /// attributes cannot span more than `limit` bytes between them. Reaching this
-    /// takes about a terabyte of attributes on a single object.
+    /// Path not found during group traversal.
+    PathNotFound(String),
+    /// Serialization error.
+    SerializationError(String),
+    /// The dataset's element count implied by its shape does not match the
+    /// amount of data supplied (`shape.product() * element_size != data.len()`).
+    ShapeDataMismatch {
+        /// Number of data bytes the shape requires (`product(shape) * element_size`).
+        expected: usize,
+        /// Number of data bytes actually supplied.
+        actual: usize,
+        /// Size in bytes of one element (the dataset's datatype size), used to
+        /// report the mismatch in elements as well as bytes. Non-zero by type,
+        /// so the division in the message is well defined.
+        element_size: NonZeroUsize,
+    },
+    /// A shared message reference identifies an object header without a message
+    /// of the referenced type.
+    SharedMessageMissing {
+        /// Address of the object header identified by the reference.
+        object_header_address: u64,
+        /// Raw type ID of the message the reference stood in for.
+        message_type: u16,
+    },
+    /// The HDF5 magic signature was not found at any valid offset.
+    SignatureNotFound,
+    /// A message body references the shared-message heap without a matching
+    /// index that covers its type and has an allocated heap. Contains the raw
+    /// type ID of the referenced message.
+    SohmIndexMissing(u16),
+    /// A random-access byte source failed to supply bytes.
     ///
-    /// A set that exceeds the host's address range reports
-    /// [`FormatError::ValueTooLargeForPlatform`].
-    DenseAttributeHeapTooLarge {
-        /// The heap address space, in bytes.
-        limit: u64,
+    /// The string describes the backend-specific failure.
+    Source(String),
+    /// Type mismatch when reading data.
+    TypeMismatch {
+        /// Expected type description.
+        expected: &'static str,
+        /// Actual type description.
+        actual: &'static str,
     },
+    /// An Object Header Continuation message stores the undefined address, all bits set, as the
+    /// address of its continuation block.
+    UndefinedContinuationAddress,
+    /// Unexpected end of data.
+    UnexpectedEof {
+        /// Number of bytes expected.
+        expected: usize,
+        /// Number of bytes actually available.
+        available: usize,
+    },
+    /// A fractal heap's huge-objects v2 B-tree is not the indirectly accessed,
+    /// non-filtered layout (record type 1) this reader decodes: either the tree
+    /// declares a different record type, or its records are too short to hold
+    /// that one. Reading its records as that layout would decode an object ID
+    /// out of another field's bytes.
+    UnexpectedHugeObjectBTree {
+        /// The record type the B-tree declares.
+        tree_type: u8,
+        /// The record size the B-tree declares, in bytes.
+        record_size: usize,
+        /// The bytes a type-1 record needs: address + length + object ID.
+        required: usize,
+    },
+    /// A dataset or attribute refers to a committed datatype at a path where the file
+    /// being written places no such object.
+    UnknownCommittedDatatype(String),
+    /// The dataset's Fill Value message could not be parsed, and a read needed
+    /// it: part of the dataset's storage was never allocated, so what those
+    /// elements read as is undetermined. A dataset whose storage is fully
+    /// allocated reads normally regardless of this message.
+    UnreadableFillValue,
+    /// A shared-message reference could not be resolved without access to its source file.
+    ///
+    /// Contains the raw type ID of the referenced message.
+    UnresolvedSharedMessage(u16),
+    /// A dataset's element bytes live in files outside this one
+    /// (`H5Pset_external`, the External Data Files header message). Its layout
+    /// message is contiguous with an undefined data address, the same encoding
+    /// used by an unwritten dataset. The reader rejects external storage because
+    /// it cannot follow the external files.
+    UnsupportedExternalStorage,
+    /// Unsupported File Space Info message version: the parser reads versions 0 and 1.
+    UnsupportedFileSpaceInfoVersion(u8),
+    /// A Fill Value message (`0x0005`) has an on-disk version this crate does
+    /// not recognize (only 1, 2, and 3 are defined). The payload is the version
+    /// byte found.
+    UnsupportedFillValueVersion(u8),
+    /// Unsupported filter ID.
+    UnsupportedFilter(u16),
+    /// A fractal-heap object lives in an I/O-filter-encoded heap (filtered
+    /// managed or huge storage), whose filtered bytes this reader does not
+    /// decode. Link and attribute heaps are never filtered, so this does not
+    /// arise for them.
+    UnsupportedFilteredHeapObject,
+    /// Unknown message type that is marked as must-understand.
+    UnsupportedMessage(u16),
+    /// A message body references the shared object header message (SOHM) heap,
+    /// but parsing lacks a shared-message table. The superblock extension may
+    /// omit the table, the table may be unreadable, or the caller may parse a
+    /// message body without its file. A committed (`H5Tcommit`) datatype
+    /// references another object header and is resolved separately.
+    UnsupportedSohmReference,
+    /// The superblock version is not supported.
+    UnsupportedVersion(u8),
+    /// A dataset uses the Virtual (VDS) data layout, which maps its elements to
+    /// regions of other datasets, possibly in other files. The reader rejects a
+    /// dataset whose virtual mappings it cannot resolve.
+    UnsupportedVirtualLayout,
+    /// ZFP filter configuration is invalid (e.g. missing element type, rank out of range).
+    UnsupportedZfp(String),
+    /// More userblock content was supplied than the userblock region holds. The
+    /// overflow would displace the superblock, so the writer rejects the content.
+    UserblockContentTooLarge {
+        /// Bytes supplied.
+        content: u64,
+        /// Bytes the userblock region holds.
+        userblock: u64,
+    },
+    /// A paged file-space strategy was requested alongside a userblock that is
+    /// not a whole number of pages. File-space pages are measured from the file
+    /// base, so the two boundaries coincide only when the userblock divides by
+    /// the page size: `(userblock bytes, page size)`.
+    UserblockNotPageAligned(u64, u64),
+    /// A file-derived 64-bit value (an offset, length, size, or element count)
+    /// does not fit in the target integer type on this platform. This is the
+    /// checked conversion for file-derived values. On a 32-bit host, `usize` is
+    /// 32 bits, so an HDF5 offset or length above `usize::MAX` exceeds its range.
+    /// The error retains the original value, and `target` identifies the integer
+    /// type (for example, `"usize"` or `"u32"`).
+    ValueTooLargeForPlatform {
+        /// The original 64-bit value read from the file.
+        value: u64,
+        /// The platform integer type the value could not fit into.
+        target: &'static str,
+    },
+    /// A variable-length read exceeded its configured payload-byte limit.
+    VariableLengthByteLimitExceeded {
+        /// Maximum number of payload bytes permitted by the caller.
+        limit: usize,
+        /// Number of payload bytes required by the selected data.
+        required: u64,
+    },
+    /// A variable-length read exceeded its configured element limit.
+    VariableLengthElementLimitExceeded {
+        /// Maximum number of elements permitted by the caller.
+        limit: usize,
+        /// Number of elements present in the selected data.
+        actual: u64,
+    },
+    /// Variable-length data error.
+    VlDataError(String),
     /// A caller passed zero as the declared width of a fixed-width string.
     /// HDF5 string datatypes require a positive width. Explicitly sized dataset
     /// and attribute strings can report this error. A width derived from empty
     /// values is one byte.
     ZeroFixedStringWidth,
-    /// An element passed to a fixed-width string dataset or attribute exceeds
-    /// its declared width. The writer rejects the element.
-    FixedStringTooLong {
-        /// Position of the offending element among the values passed. Zero for
-        /// a scalar attribute, which holds one value.
-        index: usize,
-        /// That element's length in bytes.
-        len: usize,
-        /// The declared width, in bytes.
-        width: u32,
+    /// A parsed datatype occupies zero bytes per element.
+    ZeroSizedDatatype {
+        /// The type class that declared it.
+        class: u8,
     },
-    /// A numeric element in a file is wider than the 64-bit word the typed
-    /// numeric readers model an element as.
-    ///
-    /// Typed numeric readers assemble an element from its leading eight bytes.
-    /// They reject wider elements because those bytes hold only part of a value.
-    /// Raw dataset reads remain available, and attribute datatype reads report
-    /// the stored type.
-    NumericElementTooWide {
-        /// Storage width of one element, in bytes.
-        size: usize,
-    },
-    /// An internal error, a condition that only a bug in `hdf5-pure` can produce.
-    ///
-    /// The string describes the condition.
-    Internal(String),
 }
 
 pub const OBJECT_HEADER_MESSAGE_MAX: usize = u16::MAX as usize;
@@ -1050,6 +1052,12 @@ impl fmt::Display for FormatError {
             }
             Self::ValueTooLargeForPlatform { value, target } => {
                 write!(f, "value {value} does not fit in {target} on this platform")
+            }
+            Self::EofRelocationUnderflow { stored_eof, shift } => {
+                write!(
+                    f,
+                    "EOF relocation underflow: {stored_eof} - {shift} is below zero"
+                )
             }
             Self::OffsetOverflow { offset, length } => {
                 write!(

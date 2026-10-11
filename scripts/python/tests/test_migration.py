@@ -242,6 +242,7 @@ def test_migration_shape_ignores_only_the_allowed_variant_changes(variant, expec
 @pytest.mark.parametrize(
     ("variant", "expected"),
     [
+        ("EofRelocationUnderflow", []),
         ("InvalidFractalHeapIdLength", []),
         ("InvalidFilterName", []),
         ("InvalidFilterPipelineField", []),
@@ -251,7 +252,7 @@ def test_migration_shape_ignores_only_the_allowed_variant_changes(variant, expec
         ),
     ],
 )
-def test_migration_shape_admits_only_the_allowed_heap_and_filter_error_additions(variant, expected):
+def test_migration_shape_admits_only_the_allowed_error_additions(variant, expected):
     baseline = core_shape_fixture()
     baseline["index"]["1"]["name"] = "FormatError"
     baseline["index"]["1"]["inner"] = {
@@ -270,12 +271,21 @@ def test_migration_shape_admits_only_the_allowed_heap_and_filter_error_additions
     assert migration.migration_shapes(baseline, baseline, core) == expected
 
 
-def test_migration_shape_detects_variant_order_change():
+@pytest.mark.parametrize(
+    ("type_name", "alphabetical", "expected"),
+    [
+        ("Thing", True, ["Thing: variant_order changed"]),
+        ("FormatError", True, []),
+        ("FormatError", False, ["FormatError: variant_order changed"]),
+    ],
+)
+def test_migration_shape_requires_the_declared_variant_order(type_name, alphabetical, expected):
     baseline = core_shape_fixture()
+    baseline["index"]["1"]["name"] = type_name
     baseline["index"]["1"]["inner"] = {
         "enum": {
             "generics": {"params": [], "where_predicates": []},
-            "variants": [6, 7],
+            "variants": [7, 6],
             "impls": [],
         }
     }
@@ -285,8 +295,9 @@ def test_migration_shape_detects_variant_order_change():
             "inner": {"variant": {"kind": "unit", "discriminant": None}},
         }
     core = deepcopy(baseline)
-    core["index"]["1"]["inner"]["enum"]["variants"].reverse()
-    assert migration_shapes(baseline, baseline, core) == ["Thing: variant_order changed"]
+    if alphabetical:
+        core["index"]["1"]["inner"]["enum"]["variants"].reverse()
+    assert migration_shapes(baseline, baseline, core) == expected
 
 
 def test_migration_shape_detects_changed_constant_value():

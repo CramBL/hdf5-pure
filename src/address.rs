@@ -7,10 +7,77 @@ pub use hdf5_pure_core::StoredAddress;
 
 use crate::error::FormatError;
 
+/// The effective base and end-of-file position of an opened HDF5 image.
+///
+/// The reader derives both positions by applying the displacement from the encoded base to the
+/// physical superblock signature position. The parsed superblock stores the encoded values.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct OpenedImageContext {
+    addresses: AddressContext,
+    /// The physical position of the encoded end-of-file address after relocation.
+    effective_eof: u64,
+}
+
+impl OpenedImageContext {
+    /// Derives the effective base and end-of-file position from the physical signature position.
+    ///
+    /// The reader applies the same displacement to both encoded positions, as defined in
+    /// "Format Signature and Superblock" of the [format specification, version 4.0][spec].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::OffsetOverflow`] if forward relocation exceeds [`u64::MAX`], or
+    /// [`FormatError::EofRelocationUnderflow`] if backward relocation places EOF below zero.
+    ///
+    /// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsec_fmt4_boot_super
+    pub(crate) fn reconcile(
+        stored_base: BaseAddress,
+        stored_eof: u64,
+        signature_offset: u64,
+    ) -> Result<Self, FormatError> {
+        let shift = signature_offset.abs_diff(stored_base.get());
+        let effective_eof = if signature_offset >= stored_base.get() {
+            stored_eof
+                .checked_add(shift)
+                .ok_or(FormatError::OffsetOverflow {
+                    offset: stored_eof,
+                    length: shift,
+                })?
+        } else {
+            stored_eof
+                .checked_sub(shift)
+                .ok_or(FormatError::EofRelocationUnderflow { stored_eof, shift })?
+        };
+        Ok(Self {
+            addresses: AddressContext::from_effective_base(BaseAddress::new(signature_offset)),
+            effective_eof,
+        })
+    }
+
+    /// Returns the stored-address mapping for the reconciled physical base.
+    pub(crate) const fn addresses(self) -> AddressContext {
+        self.addresses
+    }
+
+    /// Returns the recorded end of allocation relative to the effective base.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::AddressBelowBase`] if the effective EOF is below the effective base.
+    pub(crate) fn end_of_allocation(self) -> Result<StoredAddress, FormatError> {
+        let Self {
+            addresses,
+            effective_eof,
+        } = self;
+        addresses.relative(effective_eof)
+    }
+}
+
 /// The mapping between stored addresses and physical positions in an opened image.
 ///
 /// The reader adds the effective base to a [`StoredAddress`] to locate metadata in the source.
 /// The editor subtracts it when encoding a physical position in metadata.
+/// For a relocated image, the effective base differs from the encoded superblock base.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct AddressContext {
     /// The physical position corresponding to stored address zero.
@@ -19,7 +86,7 @@ pub(crate) struct AddressContext {
 
 impl AddressContext {
     /// Creates an address context with the supplied effective base.
-    pub(crate) const fn new(effective_base: BaseAddress) -> Self {
+    pub(crate) const fn from_effective_base(effective_base: BaseAddress) -> Self {
         Self { effective_base }
     }
 
@@ -46,5 +113,70 @@ impl AddressContext {
     /// Returns the base used to interpret metadata addresses in this image.
     pub(crate) const fn effective_base(self) -> BaseAddress {
         self.effective_base
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use rstest::rstest;
+
+    use super::BaseAddress;
+    use super::BaseAddressExt;
+    use super::FormatError;
+    use super::OpenedImageContext;
+    use super::StoredAddress;
+    use super::StoredAddressExt;
+
+    #[rstest]
+    #[case::plain(0, 0, 4096, 4096)]
+    #[case::userblock(512, 512, 4096, 4096)]
+    #[case::jammed(0, 512, 4096, 4608)]
+    #[case::unjammed(512, 0, 4096, 3584)]
+    #[case::large_shift(0, 1 << 63, 0, 1 << 63)]
+    #[case::large_backward_shift(1 << 63, 0, u64::MAX, u64::MAX / 2)]
+    fn reconciliation_moves_base_and_eof_together(
+        #[case] stored_base: u64,
+        #[case] signature_offset: u64,
+        #[case] stored_eof: u64,
+        #[case] effective_eof: u64,
+    ) {
+        let opened = OpenedImageContext::reconcile(
+            BaseAddress::new(stored_base),
+            stored_eof,
+            signature_offset,
+        )
+        .unwrap();
+        assert_eq!(opened.addresses().effective_base().get(), signature_offset);
+        assert_eq!(opened.effective_eof, effective_eof);
+        assert_eq!(
+            opened.addresses().absolute(StoredAddress::new(16)).unwrap(),
+            signature_offset + 16
+        );
+    }
+
+    #[rstest]
+    #[case::overflow(
+        0, u64::MAX, 512,
+        FormatError::OffsetOverflow { offset: u64::MAX, length: 512 }
+    )]
+    #[case::underflow(
+        512, 511, 0,
+        FormatError::EofRelocationUnderflow { stored_eof: 511, shift: 512 }
+    )]
+    fn reconciliation_rejects_eof_arithmetic_outside_u64(
+        #[case] stored_base: u64,
+        #[case] stored_eof: u64,
+        #[case] signature_offset: u64,
+        #[case] expected: FormatError,
+    ) {
+        assert_eq!(
+            OpenedImageContext::reconcile(
+                BaseAddress::new(stored_base),
+                stored_eof,
+                signature_offset,
+            )
+            .unwrap_err(),
+            expected
+        );
     }
 }

@@ -195,6 +195,7 @@ def migration_shapes(baseline: dict, candidate: dict, core: dict) -> list[str]:
     allowed_added_variants = {
         "FormatError": {
             "AddressTooLarge",
+            "EofRelocationUnderflow",
             "Internal",
             "InvalidFilterName",
             "InvalidFilterPipelineField",
@@ -247,6 +248,9 @@ def migration_shapes(baseline: dict, candidate: dict, core: dict) -> list[str]:
         for field in allowed_changed_fields.get(name, set()):
             old["fields"].pop(field, None)
             new["fields"].pop(field, None)
+        # The comparison uses alphabetical order for the release's FormatError declarations.
+        if name == "FormatError":
+            old["variant_order"].sort()
         for part in old:
             if old[part] != new[part]:
                 failures.append(f"{name}: {part} changed")

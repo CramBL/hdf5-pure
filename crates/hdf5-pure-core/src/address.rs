@@ -1,8 +1,8 @@
 //! Base addresses for translating stored HDF5 addresses into file positions.
 //!
-//! The superblock stores the byte offset where the HDF5 image begins. A stored
-//! address is relative to that base, and the workspace crates convert it to an absolute file
-//! position through [`BaseAddressExt`]. The base is zero when the file has no userblock.
+//! A [`StoredAddress`] is relative to an address base. The superblock stores the encoded base,
+//! and the reader selects an effective base from the physical signature position when opening
+//! the image. The workspace crates use [`BaseAddressExt`] for checked address conversions.
 //!
 //! The base address is defined in "Format Signature and Superblock" of the [format specification,
 //! version 4.0][spec].
@@ -11,11 +11,12 @@
 
 use crate::error::FormatError;
 
-/// The byte offset at which a file's HDF5 image begins, the superblock's "Base Address" field.
+/// An absolute address used as the base for stored HDF5 addresses.
 ///
-/// Zero for a plain file, and the userblock size for a file that has one. An address a file stores
-/// in its metadata is relative to it, so an absolute file position is a stored address plus this
-/// value, and [`get`](Self::get) is the number itself.
+/// [`Superblock::base_address`](crate::Superblock::base_address) holds the encoded Base Address.
+/// In a newly created file, this is the physical superblock position: zero for a plain file and
+/// the userblock size for a file with a userblock. For a relocated image, the reader uses the
+/// physical signature position as the effective base when interpreting [`StoredAddress`] values.
 ///
 /// The C library sets the size of the userblock with `H5Pset_userblock`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -40,7 +41,7 @@ pub trait BaseAddressExt {
     /// established to have no userblock, or a view of the file already framed at the base.
     const ZERO: Self;
 
-    /// Creates a base address from the value a superblock stores.
+    /// Creates a base address from an encoded or effective absolute address.
     fn new(base: u64) -> Self;
 
     /// Returns `true` if a stored address and an absolute file position are the same number.

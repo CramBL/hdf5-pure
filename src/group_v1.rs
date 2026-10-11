@@ -221,9 +221,14 @@ mod tests {
     fn resolve_entries_two_children() {
         let (file, msg) =
             build_synthetic_group(&[("alpha", 0x1000, 0), ("beta", 0x2000, 0)], Widths::EIGHT);
-        let entries =
-            resolve_v1_group_entries(&file, &msg, 8, 8, AddressContext::new(BaseAddress::ZERO))
-                .unwrap();
+        let entries = resolve_v1_group_entries(
+            &file,
+            &msg,
+            8,
+            8,
+            AddressContext::from_effective_base(BaseAddress::ZERO),
+        )
+        .unwrap();
         assert_eq!(entries.len(), 2);
         assert_eq!(entries[0].name, "alpha");
         assert_eq!(entries[0].object_header_address, StoredAddress::new(0x1000));
@@ -273,7 +278,7 @@ mod tests {
         let root_header = ObjectHeader::parse(
             file_data,
             AccessMode::ReadOnly,
-            AddressContext::new(sb.base_address)
+            AddressContext::from_effective_base(sb.base_address)
                 .absolute(sb.root_group_address)
                 .unwrap()
                 .to_usize()
@@ -304,7 +309,7 @@ mod tests {
             &root_sym,
             sb.offset_size,
             sb.length_size,
-            AddressContext::new(BaseAddress::ZERO),
+            AddressContext::from_effective_base(BaseAddress::ZERO),
         )
         .unwrap();
         let data_entry = entries

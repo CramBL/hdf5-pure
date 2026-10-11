@@ -8,9 +8,12 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError, RwLock};
 
 use crate::access_mode::AccessMode;
+use crate::address::AddressContext;
+use crate::address::BaseAddress;
 use crate::address::BaseAddressExt;
+use crate::address::OpenedImageContext;
+use crate::address::StoredAddress;
 use crate::address::StoredAddressExt;
-use crate::address::{AddressContext, BaseAddress, StoredAddress};
 use crate::edit::{
     AppendBuilder, AppendGeometry, AppendTarget, EditBacking, MemoryStrategy, SpaceAccounting,
     StagedChild, StagedKind, StagedMeta, StagedObject, SyncPolicy, WriteEngine,
@@ -838,8 +841,8 @@ struct FileInner {
     /// change it.
     access_mode: AccessMode,
     superblock: Superblock,
-    /// The mapping from stored metadata addresses to physical positions in this image.
-    addresses: AddressContext,
+    /// The effective address base and EOF derived from the physical signature position.
+    opened: OpenedImageContext,
     /// Live file handle, retained only when the file was opened with
     /// [`File::open_swmr`] so [`File::refresh`] can re-read appended data.
     handle: Option<std::fs::File>,
@@ -1068,7 +1071,7 @@ impl FileInner {
         } else {
             Box::new(source)
         };
-        let (superblock, addresses) = Self::parse_superblock_source(source.as_ref())?;
+        let (superblock, opened) = Self::parse_superblock_source(source.as_ref())?;
         file_lock::check_status_flags(
             &superblock,
             OpenIntent::Read(properties.write_mark_policy),
@@ -1078,7 +1081,7 @@ impl FileInner {
             Backend::Streaming(source),
             access_mode,
             superblock,
-            addresses,
+            opened,
             None,
             properties,
         ))
@@ -1109,7 +1112,7 @@ impl FileInner {
         let mut handle = std::fs::File::open(path.as_ref()).map_err(Error::Io)?;
         let mut data = Vec::new();
         handle.read_to_end(&mut data).map_err(Error::Io)?;
-        let (superblock, addresses) = Self::parse_superblock(&data)?;
+        let (superblock, opened) = Self::parse_superblock(&data)?;
         file_lock::check_status_flags(
             &superblock,
             OpenIntent::SwmrRead,
@@ -1119,7 +1122,7 @@ impl FileInner {
             Backend::InMemory(data),
             AccessMode::ReadOnly,
             superblock,
-            addresses,
+            opened,
             Some(handle),
             properties,
         ))
@@ -1135,12 +1138,12 @@ impl FileInner {
         data: Vec<u8>,
         properties: FileAccessProperties,
     ) -> Result<Self, Error> {
-        let (superblock, addresses) = Self::parse_superblock(&data)?;
+        let (superblock, opened) = Self::parse_superblock(&data)?;
         Ok(Self::from_parts(
             Backend::InMemory(data),
             AccessMode::ReadOnly,
             superblock,
-            addresses,
+            opened,
             None,
             properties,
         ))
@@ -1192,12 +1195,16 @@ impl FileInner {
         session.set_page_buffer_size(properties.page_buffer_size)?;
         // Reuse the parsed superblock so the image need not provide a whole-file slice.
         let superblock = session.superblock().clone();
-        let addresses = session.addresses();
+        let opened = OpenedImageContext::reconcile(
+            superblock.base_address,
+            superblock.eof_address,
+            session.addresses().effective_base().get(),
+        )?;
         Ok(Self::from_parts(
             Backend::Edit(Box::new(Mutex::new(session))),
             AccessMode::ReadWrite,
             superblock,
-            addresses,
+            opened,
             None,
             properties,
         ))
@@ -1595,19 +1602,24 @@ impl FileInner {
         }
     }
 
-    /// Parses the superblock and constructs the opened image's address context.
+    /// Parses encoded superblock values and reconciles the opened image's physical positions.
     ///
-    /// The returned superblock holds the encoded addresses. The effective base of the address
-    /// context is the superblock's base address.
+    /// The returned superblock holds the encoded addresses. The effective base is the physical
+    /// signature position, and the reader applies the same relocation to the encoded EOF.
     ///
     /// # Errors
     ///
-    /// Returns [`Error::Format`] if the signature is absent or the superblock does not parse.
-    fn parse_superblock(data: &[u8]) -> Result<(Superblock, AddressContext), Error> {
-        let sig_offset = signature::find_signature(data)?;
-        let superblock = hdf5_pure_format::__private::parse_superblock(data, sig_offset)?;
-        let addresses = AddressContext::new(superblock.base_address);
-        Ok((superblock, addresses))
+    /// Returns [`Error::Format`] if the signature is absent, the superblock does not parse, or
+    /// the relocated EOF is outside the [`u64`] range.
+    fn parse_superblock(data: &[u8]) -> Result<(Superblock, OpenedImageContext), Error> {
+        let signature_offset = signature::find_signature(data)?;
+        let superblock = hdf5_pure_format::__private::parse_superblock(data, signature_offset)?;
+        let opened = OpenedImageContext::reconcile(
+            superblock.base_address,
+            superblock.eof_address,
+            signature_offset as u64,
+        )?;
+        Ok((superblock, opened))
     }
 
     /// Parses the superblock and constructs the address context through metadata reads.
@@ -1617,18 +1629,22 @@ impl FileInner {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::Format`] if the signature is absent or the superblock does not parse,
-    /// or the error `source` reports if a read fails.
+    /// Returns [`Error::Format`] if the signature is absent, the superblock does not parse, or
+    /// the relocated EOF is outside the [`u64`] range. Returns the source's error if a read fails.
     fn parse_superblock_source<S: Source + ?Sized>(
         source: &S,
-    ) -> Result<(Superblock, AddressContext), Error> {
-        let sig_offset = signature::find_signature_in(source)?;
+    ) -> Result<(Superblock, OpenedImageContext), Error> {
+        let signature_offset = signature::find_signature_in(source)?;
         let superblock = hdf5_pure_format::__private::parse_superblock_from_source(
             &SourceMetadata(source),
-            sig_offset,
+            signature_offset,
         )?;
-        let addresses = AddressContext::new(superblock.base_address);
-        Ok((superblock, addresses))
+        let opened = OpenedImageContext::reconcile(
+            superblock.base_address,
+            superblock.eof_address,
+            signature_offset,
+        )?;
+        Ok((superblock, opened))
     }
 
     /// Assemble a [`File`] from parsed parts, then load the File Space Info from
@@ -1638,7 +1654,7 @@ impl FileInner {
         backend: Backend,
         access_mode: AccessMode,
         superblock: Superblock,
-        addresses: AddressContext,
+        opened: OpenedImageContext,
         handle: Option<std::fs::File>,
         access_properties: FileAccessProperties,
     ) -> Self {
@@ -1646,7 +1662,7 @@ impl FileInner {
             backend,
             access_mode,
             superblock,
-            addresses,
+            opened,
             handle,
             file_space_info: None,
             sohm_table: None,
@@ -1683,7 +1699,7 @@ impl FileInner {
         if rel.is_undefined(self.superblock.offset_size) {
             return Ok(None);
         }
-        let abs = self.addresses.absolute(rel)?;
+        let abs = self.addresses().absolute(rel)?;
         let header = self.parse_header(abs)?;
         let Some(msg) = header
             .messages
@@ -1696,7 +1712,7 @@ impl FileInner {
             FormatWidths::from_sizes(self.superblock.offset_size, self.superblock.length_size)?;
         hdf5_pure_format::__private::parse_file_space_info(
             widths,
-            || self.addresses.relative(self.superblock.eof_address),
+            || self.opened.end_of_allocation(),
             &msg.data,
         )
         .map(Some)
@@ -1714,7 +1730,7 @@ impl FileInner {
         if rel.is_undefined(self.superblock.offset_size) {
             return None;
         }
-        let abs = self.addresses.absolute(rel).ok()?;
+        let abs = self.addresses().absolute(rel).ok()?;
         let header = self.parse_header(abs).ok()?;
         let msg = header
             .messages
@@ -1726,7 +1742,7 @@ impl FileInner {
         // The table's address, like every address in a header message, is stored
         // relative to the file's base address, so the read is framed the same way
         // every other metadata walk here is.
-        let base = self.addresses.effective_base();
+        let base = self.addresses().effective_base();
         let os = self.superblock.offset_size;
         match &self.backend {
             Backend::InMemory(v) => {
@@ -1804,10 +1820,10 @@ impl FileInner {
             handle.seek(SeekFrom::Start(0)).map_err(Error::Io)?;
             handle.read_to_end(&mut data).map_err(Error::Io)?;
             match Self::parse_superblock(&data) {
-                Ok((superblock, addresses)) => {
+                Ok((superblock, opened)) => {
                     self.backend = Backend::InMemory(data);
                     self.superblock = superblock;
-                    self.addresses = addresses;
+                    self.opened = opened;
                     self.file_space_info = self.read_file_space_info();
                     self.sohm_table = self.read_sohm_table();
                     // Every byte just moved. `File::refresh` takes `&mut self`
@@ -1842,13 +1858,13 @@ impl FileInner {
         let access = self.access_mode();
         Ok(match &self.backend {
             Backend::InMemory(v) => {
-                group_v2::resolve_path_any(v, access, &self.superblock, self.addresses, path)?
+                group_v2::resolve_path_any(v, access, &self.superblock, self.addresses(), path)?
             }
             Backend::Streaming(s) => group_v2::resolve_path_any_from_source(
                 s.as_ref(),
                 access,
                 &self.superblock,
-                self.addresses,
+                self.addresses(),
                 path,
             )?,
             // A staged commit can relocate the object tree's root, so this
@@ -1889,7 +1905,8 @@ impl FileInner {
                 .addresses()
                 .absolute(core.superblock().root_group_address);
         }
-        self.addresses.absolute(self.superblock.root_group_address)
+        self.addresses()
+            .absolute(self.superblock.root_group_address)
     }
 
     /// Returns the raw file bytes for an in-memory file, or an empty slice for a
@@ -1948,12 +1965,12 @@ impl FileInner {
 
     /// Returns the effective base used to interpret stored addresses in this image.
     pub(crate) fn base_address(&self) -> BaseAddress {
-        self.addresses.effective_base()
+        self.addresses().effective_base()
     }
 
     /// Returns the mapping between stored addresses and physical positions in this image.
     pub(crate) const fn addresses(&self) -> AddressContext {
-        self.addresses
+        self.opened.addresses()
     }
 
     /// Returns the mode this file reads under.
@@ -1996,7 +2013,7 @@ impl FileInner {
         let mut sections = free_space_manager::read_persisted_sections(
             data,
             FormatWidths::from_sizes(self.superblock.offset_size, self.superblock.length_size)?,
-            self.addresses.effective_base(),
+            self.addresses().effective_base(),
             &info.manager_addrs,
         )?;
         // Distinct sections have distinct addresses in any well-formed file, so
@@ -2011,14 +2028,11 @@ impl FileInner {
             .collect())
     }
 
-    /// The size of the underlying file in bytes (the HDF5 `H5Fget_filesize`).
+    /// Returns the physical byte length of the backing store.
     ///
-    /// This is the total byte length of the backing store — for a streaming
-    /// file the length reported by its source, for an in-memory file the length
-    /// of its buffer. It includes any userblock prefix and trailing bytes, so it
-    /// may exceed the superblock's logical end-of-file address; compare against
-    /// `Superblock::eof_address` (reachable via
-    /// [`File::superblock`]) to detect appended or unaccounted tail bytes.
+    /// This includes any userblock prefix and trailing bytes. For a streaming file, the source
+    /// reports the length. For an in-memory file, it is the buffer length. The encoded
+    /// [`Superblock::eof_address`] may use a different coordinate frame if the image was relocated.
     pub fn file_size(&self) -> u64 {
         match &self.backend {
             Backend::Edit(m) => {
@@ -2049,7 +2063,7 @@ impl FileInner {
                 address.to_usize()?,
                 os,
                 ls,
-                self.addresses.effective_base(),
+                self.addresses().effective_base(),
             ),
             Backend::Streaming(s) => ObjectHeader::parse_from_source(
                 &SourceMetadata(s.as_ref()),
@@ -2057,7 +2071,7 @@ impl FileInner {
                 address,
                 os,
                 ls,
-                self.addresses.effective_base(),
+                self.addresses().effective_base(),
             ),
             Backend::Edit(m) => Self::with_engine(
                 m,
@@ -2068,7 +2082,7 @@ impl FileInner {
                         address.to_usize()?,
                         os,
                         ls,
-                        self.addresses.effective_base(),
+                        self.addresses().effective_base(),
                     )
                 },
                 |s| {
@@ -2078,7 +2092,7 @@ impl FileInner {
                         address,
                         os,
                         ls,
-                        self.addresses.effective_base(),
+                        self.addresses().effective_base(),
                     )
                 },
             ),
@@ -2088,10 +2102,9 @@ impl FileInner {
     /// Resolve a base-relative object-header address (the value stored in an
     /// HDF5 `H5R_OBJECT` reference element) to the [`Object`] it points at.
     ///
-    /// The stored address is relative to the superblock base address, so any
-    /// MAT-file userblock is accounted for here. A null (`0`) or undefined
-    /// (`HADDR_UNDEF`) address, or one whose object header is neither a dataset
-    /// nor a group, yields [`FormatError::InvalidObjectReference`].
+    /// The reader applies the opened image's effective base to the stored address.
+    /// A null (`0`) or undefined (`HADDR_UNDEF`) address, or one whose object header is neither
+    /// a dataset nor a group, yields [`FormatError::InvalidObjectReference`].
     fn object_at_relative(
         file: &Arc<FileInner>,
         revisions: Revisions,
@@ -2102,7 +2115,7 @@ impl FileInner {
         if rel_addr == u64::MAX || rel_addr == 0 {
             return Err(FormatError::InvalidObjectReference(rel_addr).into());
         }
-        let abs = file.addresses.absolute(StoredAddress::new(rel_addr))?;
+        let abs = file.addresses().absolute(StoredAddress::new(rel_addr))?;
         let at = revisions.at(abs);
         let hdr = file.parse_header(abs)?;
         if has_message(&hdr, MessageType::DATA_LAYOUT) {
@@ -2140,7 +2153,7 @@ impl FileInner {
     /// Returns [`Error::Format`] if the group's own structures do not parse, or if `hdr` describes
     /// no group at all.
     fn group_children(&self, hdr: &ObjectHeader) -> Result<Vec<GroupEntry>, Error> {
-        let (os, ls, base) = (self.offset_size(), self.length_size(), self.addresses);
+        let (os, ls, base) = (self.offset_size(), self.length_size(), self.addresses());
         match &self.backend {
             Backend::InMemory(v) => group_v2::resolve_group_entries(v, hdr, os, ls, base),
             Backend::Streaming(s) => {
@@ -2162,7 +2175,7 @@ impl FileInner {
     /// Returns [`FormatError::OffsetOverflow`] if the base address cannot be added to it, which a
     /// crafted entry naming `HADDR_UNDEF` in a file with a userblock arranges.
     fn entry_address(&self, entry: &GroupEntry) -> Result<u64, FormatError> {
-        self.addresses.absolute(entry.object_header_address)
+        self.addresses().absolute(entry.object_header_address)
     }
 
     /// The child named `name`, at the absolute file address
@@ -2173,7 +2186,7 @@ impl FileInner {
     /// rather than building an entry, and an owned name, for every other child
     /// of the group (issue #228).
     fn group_child(&self, group_address: u64, name: LinkName<'_>) -> Result<ChildLookup, Error> {
-        let (os, ls, base) = (self.offset_size(), self.length_size(), self.addresses);
+        let (os, ls, base) = (self.offset_size(), self.length_size(), self.addresses());
         let access = self.access_mode();
         let addr = group_address;
         match &self.backend {
@@ -2204,7 +2217,7 @@ impl FileInner {
         let (os, ls, base) = (
             self.offset_size(),
             self.length_size(),
-            self.addresses.effective_base(),
+            self.addresses().effective_base(),
         );
         let attr_msgs = self.attr_messages_of(hdr)?;
         match &self.backend {
@@ -2237,7 +2250,7 @@ impl FileInner {
         let (os, ls, base) = (
             self.offset_size(),
             self.length_size(),
-            self.addresses.effective_base(),
+            self.addresses().effective_base(),
         );
         let access = self.access_mode();
         let sohm = self.sohm_table.as_deref();
@@ -2326,7 +2339,7 @@ impl FileInner {
         // [`Self::read_dataset_raw`] does, so both index it directly. For a plain
         // file (`base == 0`) this is the identity; without it, a userblock file's
         // dense attributes are looked for one userblock too early.
-        let base = self.addresses.effective_base();
+        let base = self.addresses().effective_base();
         let access = self.access_mode();
         let sohm = self.sohm_table.as_deref();
         match &self.backend {
@@ -2397,7 +2410,7 @@ impl FileInner {
         // view of the file so all of them index it directly: slice the in-memory
         // buffer at `base`, or wrap the streaming source to add `base` to each
         // read. For a plain file (`base == 0`) this is the identity.
-        let base = self.addresses.effective_base();
+        let base = self.addresses().effective_base();
         match &self.backend {
             Backend::InMemory(v) => {
                 data_read::read_raw_data_cached(frame(v, base)?, spec, os, ls, cache)
@@ -2465,7 +2478,7 @@ impl FileInner {
             return compact_rows(data, start_row, num_rows, row_bytes);
         }
 
-        let base = self.addresses.effective_base();
+        let base = self.addresses().effective_base();
         match &self.backend {
             Backend::InMemory(v) => {
                 let framed = frame(v, base)?;
@@ -3512,6 +3525,7 @@ impl File {
     /// The address fields hold the encoded values. The base and end-of-file
     /// addresses are absolute. The other metadata addresses are base-relative [`StoredAddress`]
     /// values, interpreted through the opened image's address context during navigation.
+    /// For a relocated image, the effective base and EOF differ from the encoded values.
     pub fn superblock(&self) -> &Superblock {
         self.inner.superblock()
     }
@@ -3548,7 +3562,10 @@ impl File {
         Ok(self.inner.persisted_free_space()?)
     }
 
-    /// The size of the underlying file in bytes (the HDF5 `H5Fget_filesize`).
+    /// Returns the physical byte length of the backing store.
+    ///
+    /// This includes any userblock prefix and trailing bytes. The encoded
+    /// [`Superblock::eof_address`] may use a different coordinate frame if the image was relocated.
     pub fn file_size(&self) -> u64 {
         self.inner.file_size()
     }
@@ -5856,7 +5873,7 @@ the same commit to replace it",
     /// [`is_chunked`](Self::is_chunked) first), or if its chunk index is malformed.
     pub fn chunks(&self) -> Result<Vec<Chunk>, Error> {
         let rank = self.dataspace()?.dimensions.len();
-        let addresses = self.file.addresses;
+        let addresses = self.file.addresses();
         self.raw_chunks()?
             .into_iter()
             .map(|c| {
@@ -5920,7 +5937,7 @@ the same commit to replace it",
     /// Returns [`FormatError::OffsetOverflow`] if the sum exceeds `u64`.
     fn absolute_address(&self, address: Option<StoredAddress>) -> Result<Option<u64>, Error> {
         match address {
-            Some(stored) => Ok(Some(self.file.addresses.absolute(stored)?)),
+            Some(stored) => Ok(Some(self.file.addresses().absolute(stored)?)),
             None => Ok(None),
         }
     }
@@ -6254,7 +6271,7 @@ the same commit to replace it",
                 dataspace.num_elements(),
                 self.file.offset_size(),
                 self.file.length_size(),
-                self.file.addresses.effective_base(),
+                self.file.addresses().effective_base(),
                 options,
                 visitor,
             )?)
@@ -6298,7 +6315,7 @@ the same commit to replace it",
                 dataspace.num_elements(),
                 self.file.offset_size(),
                 self.file.length_size(),
-                self.file.addresses.effective_base(),
+                self.file.addresses().effective_base(),
                 1, // a VL string's base type is a single byte
                 options,
             )?)
@@ -6358,7 +6375,7 @@ the same commit to replace it",
                 dataspace.num_elements(),
                 self.file.offset_size(),
                 self.file.length_size(),
-                self.file.addresses.effective_base(),
+                self.file.addresses().effective_base(),
                 element_size,
                 options,
             )
@@ -6433,7 +6450,7 @@ the same commit to replace it",
                     n,
                     self.file.offset_size(),
                     self.file.length_size(),
-                    self.file.addresses.effective_base(),
+                    self.file.addresses().effective_base(),
                     slot.element_size,
                     options,
                 )
@@ -6610,7 +6627,7 @@ the same commit to replace it",
         }
         let dataspace = self.dataspace()?;
         let elem_size = crate::datatype::element_size_usize(&self.datatype()?)?;
-        let base = self.file.addresses.effective_base();
+        let base = self.file.addresses().effective_base();
         // The chunk index stores base-relative addresses, in its root and in every internal
         // node, so the walk runs over a view of the file framed at the base. Every address it
         // reports stays in that frame.
@@ -6835,7 +6852,7 @@ the same commit to replace it",
                     num_elements,
                     self.file.offset_size(),
                     self.file.length_size(),
-                    self.file.addresses.effective_base(),
+                    self.file.addresses().effective_base(),
                     VlenStringReadOptions::default(),
                     |string| strings.push(String::from(string)),
                 )?)
@@ -7032,13 +7049,68 @@ const NO_LINK_TO_WRITE: &str = "a write needs a link name, and this path holds n
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::AtomicUsize;
+
+    use rstest::rstest;
+    use test_util::file_space_info;
+    use test_util::object_header;
+    use test_util::widths::Widths;
+
     use super::*;
     use crate::data_layout::{ChunkIndexLayout, ChunkedLayoutFlags};
     use crate::dataspace::DataspaceType;
     use crate::datatype::layout::FixedPointLayout;
     use crate::message_flags::MessageFlags;
     use crate::{DatatypeByteOrder, FileBuilder};
-    use std::sync::atomic::AtomicUsize;
+
+    #[rstest]
+    #[case::plain(0, 0)]
+    #[case::userblock(512, 512)]
+    #[case::jammed(0, 512)]
+    #[case::unjammed(512, 0)]
+    fn version_zero_file_space_eoa_is_invariant_under_relocation(
+        #[case] stored_base: usize,
+        #[case] signature_offset: usize,
+        #[values(false, true)] source_backed: bool,
+    ) {
+        let mut builder = FileBuilder::new();
+        builder
+            .with_userblock(stored_base as u64)
+            .with_file_space_strategy(FileSpaceStrategy::FsmAggr, true, 64);
+        builder.create_dataset("data").with_i32_data(&[1, 2, 3]);
+        let mut original = builder.finish().unwrap();
+        let canonical = File::from_bytes(original.clone()).unwrap();
+        let extension_at = canonical
+            .addresses()
+            .absolute(canonical.superblock().superblock_extension_address.unwrap())
+            .unwrap();
+        let body = file_space_info::version_0(
+            Widths::EIGHT,
+            file_space_info::ALL_PERSIST,
+            64,
+            &[u64::MAX; file_space_info::VERSION_0_MANAGERS],
+        );
+        object_header::v2::replace_message(
+            &mut original,
+            usize::try_from(extension_at).unwrap(),
+            object_header::MessageType::FILE_SPACE_INFO,
+            &body,
+        );
+        let expected_eoa = (original.len() - stored_base) as u64;
+        let mut relocated = vec![0; signature_offset];
+        relocated.extend_from_slice(&original[stored_base..]);
+        let file = if source_backed {
+            File::from_source(BytesSource::new(relocated)).unwrap()
+        } else {
+            File::from_bytes(relocated).unwrap()
+        };
+        let info = file.parse_file_space_info().unwrap().unwrap();
+        assert_eq!(info.eoa_pre_fsm, expected_eoa);
+        assert_eq!(info.strategy, FileSpaceStrategy::FsmAggr);
+        assert!(info.persist);
+        assert_eq!(info.threshold, 64);
+        assert_eq!(file.dataset("data").unwrap().read_i32().unwrap(), [1, 2, 3]);
+    }
 
     // -----------------------------------------------------------------------
     // Reporting the metadata cache (issue #353)
@@ -8000,14 +8072,14 @@ mod tests {
         let sig = crate::signature::find_signature(&bytes).unwrap();
         let mut sb = hdf5_pure_format::__private::parse_superblock(&bytes, sig).unwrap();
         assert_eq!(sb.base_address, BaseAddress::ZERO);
-        let addresses = AddressContext::new(sb.base_address);
+        let addresses = AddressContext::from_effective_base(sb.base_address);
         sb.root_group_address = addresses
             .relative(
                 group_v2::resolve_path_any(
                     &bytes,
                     AccessMode::ReadOnly,
                     &sb,
-                    AddressContext::new(sb.base_address),
+                    AddressContext::from_effective_base(sb.base_address),
                     &ObjectPath::parse("plain"),
                 )
                 .unwrap(),

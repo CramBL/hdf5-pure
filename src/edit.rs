@@ -2404,7 +2404,7 @@ impl WriteEngine {
                 "a file whose superblock is not located at its base address is not editable in place",
             ));
         }
-        let addresses = AddressContext::new(superblock.base_address);
+        let addresses = AddressContext::from_effective_base(superblock.base_address);
 
         // `H5Fopen` rejects a page size outside 512 bytes to 1 GiB as well (`H5Ofsinfo.c` and
         // `H5Fsuper.c`, HDF5 2.2.0).
@@ -13826,7 +13826,7 @@ mod tests {
         let Err(err) = read_oh_chunks(
             &BytesSource::new(header.as_slice()),
             0,
-            AddressContext::new(BaseAddress::ZERO),
+            AddressContext::from_effective_base(BaseAddress::ZERO),
         ) else {
             panic!("expected the chunk walk to fail");
         };
@@ -14589,7 +14589,7 @@ mod tests {
         let invalidated = InvalidatedAddresses {
             removed: vec![(248, 71)],
             moved: Vec::new(),
-            base: AddressContext::new(BaseAddress::ZERO),
+            base: AddressContext::from_effective_base(BaseAddress::ZERO),
         };
         for (address, refused) in [(248u64, true), (318, true), (319, false)] {
             let tree = CopyTree::DatasetVerbatim {
@@ -14629,7 +14629,7 @@ mod tests {
         let invalidated = InvalidatedAddresses {
             removed: vec![(248, 71)],
             moved: Vec::new(),
-            base: AddressContext::new(BaseAddress::ZERO),
+            base: AddressContext::from_effective_base(BaseAddress::ZERO),
         };
         let mut bytes = message_record(
             MessageType::DATATYPE,
@@ -14690,7 +14690,7 @@ mod tests {
         let invalidated = InvalidatedAddresses {
             removed: vec![(248, 71)],
             moved: Vec::new(),
-            base: AddressContext::new(BaseAddress::ZERO),
+            base: AddressContext::from_effective_base(BaseAddress::ZERO),
         };
         let err = screen_resolved_references(&dt, &raw, &invalidated).unwrap_err();
         assert!(
@@ -14705,7 +14705,7 @@ mod tests {
         let nothing = InvalidatedAddresses {
             removed: Vec::new(),
             moved: Vec::new(),
-            base: AddressContext::new(BaseAddress::ZERO),
+            base: AddressContext::from_effective_base(BaseAddress::ZERO),
         };
         assert!(screen_resolved_references(&dt, &raw, &nothing).is_err());
     }
@@ -14736,7 +14736,7 @@ mod tests {
         let invalidated = InvalidatedAddresses {
             removed: vec![(248, 71)],
             moved: Vec::new(),
-            base: AddressContext::new(BaseAddress::ZERO),
+            base: AddressContext::from_effective_base(BaseAddress::ZERO),
         };
 
         let err = screen_resolved_references(&of_references, &raw, &invalidated).unwrap_err();
@@ -14776,7 +14776,7 @@ mod tests {
         let invalidated = InvalidatedAddresses {
             removed: vec![(248, 71)],
             moved: Vec::new(),
-            base: AddressContext::new(BaseAddress::ZERO),
+            base: AddressContext::from_effective_base(BaseAddress::ZERO),
         };
         let err = screen_resolved_references(&dt, &raw, &invalidated).unwrap_err();
         assert!(
@@ -14789,7 +14789,7 @@ mod tests {
         let nothing = InvalidatedAddresses {
             removed: Vec::new(),
             moved: Vec::new(),
-            base: AddressContext::new(BaseAddress::ZERO),
+            base: AddressContext::from_effective_base(BaseAddress::ZERO),
         };
         assert!(screen_resolved_references(&dt, &raw, &nothing).is_err());
     }
@@ -14883,11 +14883,11 @@ mod tests {
                 &InvalidatedAddresses {
                     removed,
                     moved,
-                    base: AddressContext::new(BaseAddress::ZERO),
+                    base: AddressContext::from_effective_base(BaseAddress::ZERO),
                 },
                 &engine.image(),
                 engine.superblock(),
-                AddressContext::new(engine.superblock().base_address),
+                AddressContext::from_effective_base(engine.superblock().base_address),
             )
         };
 
@@ -14947,11 +14947,11 @@ mod tests {
                 &InvalidatedAddresses {
                     removed: Vec::new(),
                     moved: Vec::new(),
-                    base: AddressContext::new(BaseAddress::ZERO),
+                    base: AddressContext::from_effective_base(BaseAddress::ZERO),
                 },
                 &engine.image(),
                 engine.superblock(),
-                AddressContext::new(engine.superblock().base_address),
+                AddressContext::from_effective_base(engine.superblock().base_address),
             )
         };
 
@@ -14980,7 +14980,7 @@ mod tests {
         let invalidated = InvalidatedAddresses {
             removed: vec![(248, 71)],
             moved: Vec::new(),
-            base: AddressContext::new(BaseAddress::ZERO),
+            base: AddressContext::from_effective_base(BaseAddress::ZERO),
         };
         // 248 is the first byte of the reclaimed span, 318 its last, 319 the
         // byte after it.
@@ -15527,7 +15527,7 @@ mod tests {
             s.image.as_slice().unwrap(),
             AccessMode::ReadWrite,
             &s.superblock,
-            AddressContext::new(s.superblock.base_address),
+            AddressContext::from_effective_base(s.superblock.base_address),
             &ObjectPath::parse("victim"),
         )
         .unwrap();
@@ -17291,7 +17291,7 @@ mod tests {
         let moved = InvalidatedAddresses {
             removed: Vec::new(),
             moved: vec![0x400],
-            base: AddressContext::new(BaseAddress::ZERO),
+            base: AddressContext::from_effective_base(BaseAddress::ZERO),
         };
         let err = screen_shared_message_records(std::slice::from_ref(&named), &moved).unwrap_err();
         assert_eq!(
@@ -17302,7 +17302,7 @@ mod tests {
         let elsewhere = InvalidatedAddresses {
             removed: Vec::new(),
             moved: vec![0x800],
-            base: AddressContext::new(BaseAddress::ZERO),
+            base: AddressContext::from_effective_base(BaseAddress::ZERO),
         };
         screen_shared_message_records(std::slice::from_ref(&named), &elsewhere).unwrap();
     }
@@ -17324,7 +17324,7 @@ mod tests {
         let moved = InvalidatedAddresses {
             removed: Vec::new(),
             moved: vec![0x400],
-            base: AddressContext::new(BaseAddress::ZERO),
+            base: AddressContext::from_effective_base(BaseAddress::ZERO),
         };
         screen_shared_message_records(&[heap], &moved).unwrap();
     }
