@@ -8,15 +8,18 @@
 #[cfg(not(feature = "std"))]
 extern crate alloc;
 
+use core::fmt::Debug;
 use core::ops::DerefMut;
 
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 
-#[cfg(not(feature = "std"))]
-use crate::nosync::Mutex;
 #[cfg(feature = "std")]
 use std::sync::Mutex;
+#[cfg(feature = "std")]
+use std::sync::MutexGuard;
+#[cfg(feature = "std")]
+use std::sync::PoisonError;
 
 #[cfg(not(feature = "std"))]
 use alloc::collections::BTreeMap;
@@ -24,6 +27,8 @@ use alloc::collections::BTreeMap;
 use std::collections::HashMap;
 
 use crate::chunked_read::ChunkInfo;
+#[cfg(not(feature = "std"))]
+use crate::nosync::Mutex;
 
 /// Coordinate key for a chunk — the N-dimensional offset vector.
 pub type ChunkCoord = Vec<u64>;
@@ -384,15 +389,15 @@ impl CachePass {
 /// // Pass &cache to read_chunked_data — it will populate the index lazily.
 /// ```
 ///
-/// A mutex holds the cache state, so the methods that change it take `&self`.
-/// With `std` the mutex is `std::sync::Mutex` and the cache is `Sync`. Without
-/// `std` it is a single-threaded mutex over a `RefCell`, and the cache is not
-/// `Sync`.
-pub struct ChunkCache {
-    inner: Mutex<CacheInner>,
+/// A lock of type `L`, a [`CacheLock`], holds the cache state, so the methods that change it take
+/// `&self`. With `std` the default lock is `std::sync::Mutex`, and the cache is `Sync`. Without
+/// `std` it is a single-threaded mutex over a `RefCell`, and the cache is not `Sync`.
+pub struct ChunkCache<L = Mutex<CacheInner>> {
+    inner: L,
 }
 
-struct CacheInner {
+/// The state of a [`ChunkCache`], which its lock holds.
+pub(crate) struct CacheInner {
     /// Hash index: chunk coordinate → ChunkInfo (offset + size in file).
     /// Populated once per dataset on first access.
     #[cfg(feature = "std")]
@@ -437,7 +442,7 @@ struct Counters {
     invalidations: u64,
 }
 
-impl ChunkCache {
+impl<L: CacheLock<CacheInner>> ChunkCache<L> {
     /// Create a new chunk cache with default limits (1 MiB, 16 slots).
     pub fn new() -> Self {
         Self::with_capacity(DEFAULT_CACHE_BYTES, DEFAULT_MAX_SLOTS)
@@ -455,7 +460,7 @@ impl ChunkCache {
     /// Create a new chunk cache from a full configuration.
     pub fn with_config(config: ChunkCacheConfig) -> Self {
         Self {
-            inner: Mutex::new(CacheInner {
+            inner: L::new(CacheInner {
                 index: None,
                 slots: Vec::with_capacity(config.max_slots.min(64)),
                 current_bytes: 0,
@@ -779,13 +784,12 @@ impl ChunkCache {
     ///
     /// # Panics
     ///
-    /// Panics if a panic under a guard poisoned the lock, with `std`, or if a
-    /// guard is live, without `std`.
-    fn lock(&self) -> impl DerefMut<Target = CacheInner> {
+    /// Panics if [`CacheLock::lock`] returns an error.
+    fn lock(&self) -> L::Guard<'_> {
         // No method of the cache locks it while holding a guard, and the closures
         // that `with_decompressed` and `indexed_chunks_matching` run under their
         // guards only copy bytes out or test a chunk's offsets, so the lock is free
-        // here. With `std`, only a panic under a guard poisons the lock,
+        // here. With `std::sync::Mutex`, only a panic under a guard poisons the lock,
         // and such a panic is a bug in the crate.
         self.inner
             .lock()
@@ -793,9 +797,57 @@ impl ChunkCache {
     }
 }
 
-impl Default for ChunkCache {
+impl<L: CacheLock<CacheInner>> Default for ChunkCache<L> {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// A lock that holds the state of a [`ChunkCache`].
+///
+/// The tests run a cache over each implementation.
+pub(crate) trait CacheLock<T> {
+    /// The guard [`lock`](CacheLock::lock) returns, which gives access to the value until it
+    /// drops.
+    type Guard<'a>: DerefMut<Target = T>
+    where
+        Self: 'a;
+
+    /// The error [`lock`](CacheLock::lock) returns, which a [`ChunkCache`] formats into its panic
+    /// message.
+    type Error<'a>: Debug
+    where
+        Self: 'a;
+
+    /// Creates an unlocked lock that holds `value`.
+    fn new(value: T) -> Self;
+
+    /// Locks the value until the returned guard drops.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Self::Error`] if the value cannot be locked: for `std::sync::Mutex` if a panic
+    /// under a guard poisoned the lock, and for the single-threaded mutex if a guard is live.
+    fn lock(&self) -> Result<Self::Guard<'_>, Self::Error<'_>>;
+}
+
+#[cfg(feature = "std")]
+impl<T> CacheLock<T> for Mutex<T> {
+    type Guard<'a>
+        = MutexGuard<'a, T>
+    where
+        T: 'a;
+    type Error<'a>
+        = PoisonError<MutexGuard<'a, T>>
+    where
+        T: 'a;
+
+    fn new(value: T) -> Self {
+        Self::new(value)
+    }
+
+    fn lock(&self) -> Result<MutexGuard<'_, T>, PoisonError<MutexGuard<'_, T>>> {
+        Self::lock(self)
     }
 }
 
@@ -805,10 +857,15 @@ impl Default for ChunkCache {
 
 #[cfg(test)]
 mod tests {
+    use core::marker::PhantomData;
+
+    use rstest::rstest;
+
     use super::*;
     use crate::address::StoredAddress;
     use crate::address::StoredAddressExt;
     use crate::chunked_read::StoredChunkSize;
+    use crate::nosync;
 
     fn make_chunk(offsets: Vec<u64>, address: u64, size: u32) -> ChunkInfo {
         ChunkInfo {
@@ -819,9 +876,11 @@ mod tests {
         }
     }
 
-    #[test]
-    fn index_populate_and_lookup() {
-        let cache = ChunkCache::new();
+    #[rstest]
+    #[case::std_mutex(STD_MUTEX)]
+    #[case::nosync_mutex(NOSYNC_MUTEX)]
+    fn index_populate_and_lookup<L: CacheLock<CacheInner>>(#[case] _lock: PhantomData<L>) {
+        let cache = ChunkCache::<L>::new();
         let chunks = vec![
             make_chunk(vec![0, 0, 0], 0x1000, 80),
             make_chunk(vec![10, 0, 0], 0x2000, 80),
@@ -844,21 +903,28 @@ mod tests {
 
     /// Test helper: clone a cached chunk's bytes if present (the production
     /// path uses `with_decompressed` to avoid this copy).
-    fn get_decompressed(cache: &ChunkCache, coord: &[u64]) -> Option<Vec<u8>> {
+    fn get_decompressed(
+        cache: &ChunkCache<impl CacheLock<CacheInner>>,
+        coord: &[u64],
+    ) -> Option<Vec<u8>> {
         cache.with_decompressed(CachePass::LRU, coord, <[u8]>::to_vec)
     }
 
-    #[test]
-    fn decompressed_cache_hit() {
-        let cache = ChunkCache::new();
+    #[rstest]
+    #[case::std_mutex(STD_MUTEX)]
+    #[case::nosync_mutex(NOSYNC_MUTEX)]
+    fn decompressed_cache_hit<L: CacheLock<CacheInner>>(#[case] _lock: PhantomData<L>) {
+        let cache = ChunkCache::<L>::new();
         cache.put_decompressed(cache.begin_pass(), &[0, 0], vec![1, 2, 3, 4]);
         let got = get_decompressed(&cache, &[0, 0]).unwrap();
         assert_eq!(got, vec![1, 2, 3, 4]);
     }
 
-    #[test]
-    fn lru_eviction_by_slots() {
-        let cache = ChunkCache::with_capacity(1024 * 1024, 2); // max 2 slots
+    #[rstest]
+    #[case::std_mutex(STD_MUTEX)]
+    #[case::nosync_mutex(NOSYNC_MUTEX)]
+    fn lru_eviction_by_slots<L: CacheLock<CacheInner>>(#[case] _lock: PhantomData<L>) {
+        let cache = ChunkCache::<L>::with_capacity(1024 * 1024, 2); // max 2 slots
 
         cache.put_decompressed(cache.begin_pass(), &[0], vec![1; 10]);
         cache.put_decompressed(cache.begin_pass(), &[1], vec![2; 10]);
@@ -876,9 +942,11 @@ mod tests {
         assert!(get_decompressed(&cache, &[2]).is_some());
     }
 
-    #[test]
-    fn lru_eviction_by_bytes() {
-        let cache = ChunkCache::with_capacity(50, 100); // 50 bytes max
+    #[rstest]
+    #[case::std_mutex(STD_MUTEX)]
+    #[case::nosync_mutex(NOSYNC_MUTEX)]
+    fn lru_eviction_by_bytes<L: CacheLock<CacheInner>>(#[case] _lock: PhantomData<L>) {
+        let cache = ChunkCache::<L>::with_capacity(50, 100); // 50 bytes max
 
         cache.put_decompressed(cache.begin_pass(), &[0], vec![0; 20]);
         cache.put_decompressed(cache.begin_pass(), &[1], vec![0; 20]);
@@ -890,20 +958,24 @@ mod tests {
         assert!(get_decompressed(&cache, &[0]).is_none()); // evicted (LRU)
     }
 
-    #[test]
-    fn put_decompressed_slice_only_copies_when_admitted() {
+    #[rstest]
+    #[case::std_mutex(STD_MUTEX)]
+    #[case::nosync_mutex(NOSYNC_MUTEX)]
+    fn put_decompressed_slice_only_copies_when_admitted<L: CacheLock<CacheInner>>(
+        #[case] _lock: PhantomData<L>,
+    ) {
         // Disabled cache: the slice is not copied or stored.
-        let cache = ChunkCache::with_config(ChunkCacheConfig::disabled());
+        let cache = ChunkCache::<L>::with_config(ChunkCacheConfig::disabled());
         cache.put_decompressed_slice(cache.begin_pass(), &[0], &[1, 2, 3]);
         assert_eq!(cache.stats().cached_chunks(), 0);
 
         // Enabled cache within budget: stored.
-        let cache = ChunkCache::with_capacity(1024, 16);
+        let cache = ChunkCache::<L>::with_capacity(1024, 16);
         cache.put_decompressed_slice(cache.begin_pass(), &[0], &[1, 2, 3, 4]);
         assert_eq!(get_decompressed(&cache, &[0]).unwrap(), vec![1, 2, 3, 4]);
 
         // Over the per-chunk budget: not stored.
-        let cache = ChunkCache::with_capacity(2, 16);
+        let cache = ChunkCache::<L>::with_capacity(2, 16);
         cache.put_decompressed_slice(cache.begin_pass(), &[0], &[1, 2, 3, 4]);
         assert_eq!(cache.stats().cached_chunks(), 0);
     }
@@ -911,9 +983,13 @@ mod tests {
     /// The rule [`CachePass`] exists for: one pass fills the cache and then
     /// stops, rather than spending a copy per chunk to evict what it just
     /// stored. A later pass is free to replace all of it.
-    #[test]
-    fn a_pass_fills_the_cache_and_then_stops_evicting_itself() {
-        let cache = ChunkCache::with_capacity(1024 * 1024, 2);
+    #[rstest]
+    #[case::std_mutex(STD_MUTEX)]
+    #[case::nosync_mutex(NOSYNC_MUTEX)]
+    fn a_pass_fills_the_cache_and_then_stops_evicting_itself<L: CacheLock<CacheInner>>(
+        #[case] _lock: PhantomData<L>,
+    ) {
+        let cache = ChunkCache::<L>::with_capacity(1024 * 1024, 2);
 
         // One pass over four chunks, as a read of a four-chunk dataset makes.
         let pass = cache.begin_pass();
@@ -946,9 +1022,13 @@ mod tests {
     /// and only when chunks differ in size — which a real dataset's do not, since
     /// every chunk decompresses to the same length. So this exercises the cache
     /// directly: two small chunks, then one that needs the room of both.
-    #[test]
-    fn evictions_count_chunks_dropped_not_admissions_that_dropped_them() {
-        let cache = ChunkCache::with_capacity(250, 8);
+    #[rstest]
+    #[case::std_mutex(STD_MUTEX)]
+    #[case::nosync_mutex(NOSYNC_MUTEX)]
+    fn evictions_count_chunks_dropped_not_admissions_that_dropped_them<L: CacheLock<CacheInner>>(
+        #[case] _lock: PhantomData<L>,
+    ) {
+        let cache = ChunkCache::<L>::with_capacity(250, 8);
         let first = cache.begin_pass();
         cache.put_decompressed(first, &[0], vec![0u8; 100]);
         cache.put_decompressed(first, &[1], vec![0u8; 100]);
@@ -972,9 +1052,13 @@ mod tests {
     /// chunk back to the very pass that is relying on keeping it. Two live passes
     /// are what it takes to see this, which no single read produces; the cache
     /// API hands them out directly, so this needs no threads.
-    #[test]
-    fn an_lru_hit_does_not_release_a_chunk_of_another_pass_to_it() {
-        let cache = ChunkCache::with_capacity(1024 * 1024, 2);
+    #[rstest]
+    #[case::std_mutex(STD_MUTEX)]
+    #[case::nosync_mutex(NOSYNC_MUTEX)]
+    fn an_lru_hit_does_not_release_a_chunk_of_another_pass_to_it<L: CacheLock<CacheInner>>(
+        #[case] _lock: PhantomData<L>,
+    ) {
+        let cache = ChunkCache::<L>::with_capacity(1024 * 1024, 2);
         let reader = cache.begin_pass();
         cache.put_decompressed(reader, &[0], vec![0u8; 100]);
         cache.put_decompressed(reader, &[1], vec![0u8; 100]);
@@ -999,9 +1083,13 @@ mod tests {
     /// never numbered zero. A `begin_pass` that started counting at zero would
     /// silently turn the windowed reader's plain-LRU admission into fill-once and
     /// lose it the boundary chunk its successor window needs.
-    #[test]
-    fn a_pass_marked_lru_evicts_its_own_chunks() {
-        let cache = ChunkCache::with_capacity(1024 * 1024, 2);
+    #[rstest]
+    #[case::std_mutex(STD_MUTEX)]
+    #[case::nosync_mutex(NOSYNC_MUTEX)]
+    fn a_pass_marked_lru_evicts_its_own_chunks<L: CacheLock<CacheInner>>(
+        #[case] _lock: PhantomData<L>,
+    ) {
+        let cache = ChunkCache::<L>::with_capacity(1024 * 1024, 2);
 
         for c in 0..4u64 {
             cache.put_decompressed(CachePass::LRU, &[c], vec![c as u8; 10]);
@@ -1021,10 +1109,14 @@ mod tests {
     /// A pass that gives up must not have taken anything with it. Reclaiming some
     /// slots and then finding the rest untouchable would leave the cache holding
     /// less and storing nothing — a chunk dropped for no one.
-    #[test]
-    fn a_pass_that_cannot_make_room_evicts_nothing() {
+    #[rstest]
+    #[case::std_mutex(STD_MUTEX)]
+    #[case::nosync_mutex(NOSYNC_MUTEX)]
+    fn a_pass_that_cannot_make_room_evicts_nothing<L: CacheLock<CacheInner>>(
+        #[case] _lock: PhantomData<L>,
+    ) {
         // 100 bytes, plenty of slots: only the byte budget can bite.
-        let cache = ChunkCache::with_capacity(100, 16);
+        let cache = ChunkCache::<L>::with_capacity(100, 16);
 
         let first = cache.begin_pass();
         cache.put_decompressed(first, &[0], vec![0; 10]);
@@ -1044,9 +1136,13 @@ mod tests {
 
     /// The same rule on the borrowed entry point, where it also decides whether
     /// the chunk is copied at all.
-    #[test]
-    fn a_full_pass_does_not_copy_the_chunk_it_cannot_store() {
-        let cache = ChunkCache::with_capacity(1024 * 1024, 1);
+    #[rstest]
+    #[case::std_mutex(STD_MUTEX)]
+    #[case::nosync_mutex(NOSYNC_MUTEX)]
+    fn a_full_pass_does_not_copy_the_chunk_it_cannot_store<L: CacheLock<CacheInner>>(
+        #[case] _lock: PhantomData<L>,
+    ) {
+        let cache = ChunkCache::<L>::with_capacity(1024 * 1024, 1);
         let pass = cache.begin_pass();
 
         cache.put_decompressed_slice(pass, &[0], &[1; 10]);
@@ -1057,16 +1153,22 @@ mod tests {
         assert!(get_decompressed(&cache, &[0]).is_some());
     }
 
-    #[test]
-    fn oversized_chunk_not_cached() {
-        let cache = ChunkCache::with_capacity(10, 16);
+    #[rstest]
+    #[case::std_mutex(STD_MUTEX)]
+    #[case::nosync_mutex(NOSYNC_MUTEX)]
+    fn oversized_chunk_not_cached<L: CacheLock<CacheInner>>(#[case] _lock: PhantomData<L>) {
+        let cache = ChunkCache::<L>::with_capacity(10, 16);
         cache.put_decompressed(cache.begin_pass(), &[0], vec![0; 100]); // too big
         assert_eq!(cache.stats().cached_chunks(), 0);
     }
 
-    #[test]
-    fn disabled_cache_retains_no_index_or_chunks() {
-        let cache = ChunkCache::with_config(ChunkCacheConfig::disabled());
+    #[rstest]
+    #[case::std_mutex(STD_MUTEX)]
+    #[case::nosync_mutex(NOSYNC_MUTEX)]
+    fn disabled_cache_retains_no_index_or_chunks<L: CacheLock<CacheInner>>(
+        #[case] _lock: PhantomData<L>,
+    ) {
+        let cache = ChunkCache::<L>::with_config(ChunkCacheConfig::disabled());
         let chunks = vec![make_chunk(vec![0, 0], 0x1000, 80)];
         cache.populate_index(&chunks, 1);
         assert!(!cache.stats().index_loaded());
@@ -1084,9 +1186,11 @@ mod tests {
         assert!(config.index_cache_enabled());
     }
 
-    #[test]
-    fn clear_resets_everything() {
-        let cache = ChunkCache::new();
+    #[rstest]
+    #[case::std_mutex(STD_MUTEX)]
+    #[case::nosync_mutex(NOSYNC_MUTEX)]
+    fn clear_resets_everything<L: CacheLock<CacheInner>>(#[case] _lock: PhantomData<L>) {
+        let cache = ChunkCache::<L>::new();
         let chunks = vec![make_chunk(vec![0, 0], 0x1000, 80)];
         cache.populate_index(&chunks, 1);
         cache.put_decompressed(cache.begin_pass(), &[0], vec![1, 2, 3]);
@@ -1097,12 +1201,39 @@ mod tests {
         assert_eq!(cache.stats().cached_bytes(), 0);
     }
 
-    #[test]
-    fn duplicate_insert_is_noop() {
-        let cache = ChunkCache::new();
+    #[rstest]
+    #[case::std_mutex(STD_MUTEX)]
+    #[case::nosync_mutex(NOSYNC_MUTEX)]
+    fn duplicate_insert_is_noop<L: CacheLock<CacheInner>>(#[case] _lock: PhantomData<L>) {
+        let cache = ChunkCache::<L>::new();
         cache.put_decompressed(cache.begin_pass(), &[0], vec![1, 2, 3]);
         cache.put_decompressed(cache.begin_pass(), &[0], vec![1, 2, 3]); // duplicate
         assert_eq!(cache.stats().cached_chunks(), 1);
         assert_eq!(cache.stats().cached_bytes(), 3);
     }
+
+    #[test]
+    fn the_cache_over_the_std_mutex_is_send_and_sync() {
+        fn assert_send_sync<T: Send + Sync>() {}
+
+        assert_send_sync::<ChunkCache<std::sync::Mutex<CacheInner>>>();
+    }
+
+    #[test]
+    fn the_cache_over_the_nosync_mutex_is_send_and_not_sync() {
+        trait AmbiguousIfSync<Marker> {
+            fn check() {}
+        }
+        impl<T: ?Sized> AmbiguousIfSync<()> for T {}
+        struct IsSync;
+        impl<T: ?Sized + Sync> AmbiguousIfSync<IsSync> for T {}
+        fn assert_send<T: Send>() {}
+
+        assert_send::<ChunkCache<nosync::Mutex<CacheInner>>>();
+        // The call is ambiguous, and fails to compile, if the cache implements `Sync`.
+        <ChunkCache<nosync::Mutex<CacheInner>> as AmbiguousIfSync<_>>::check();
+    }
+
+    const STD_MUTEX: PhantomData<std::sync::Mutex<CacheInner>> = PhantomData;
+    const NOSYNC_MUTEX: PhantomData<nosync::Mutex<CacheInner>> = PhantomData;
 }
