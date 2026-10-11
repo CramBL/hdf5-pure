@@ -491,13 +491,6 @@ mod zfp_crosscheck;
 pub(crate) mod provenance;
 
 #[cfg(any(not(feature = "std"), test))]
-#[cfg_attr(
-    all(feature = "std", test),
-    expect(
-        dead_code,
-        reason = "with `std` the chunk cache takes std's mutex, and only the tests use this one"
-    )
-)]
 pub(crate) mod nosync;
 
 #[cfg(feature = "std")]

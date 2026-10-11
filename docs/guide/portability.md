@@ -198,17 +198,14 @@ QEMU.
 
 ### Memory safety
 
-The crate is almost entirely safe Rust, and the default feature set contains no
-non-trivial `unsafe`. Two feature sets introduce some, and a build has one of
-them or the other:
-
-- `std` with `serde` compiles the tiled row-major to column-major transpose the
-  MATLAB writer uses, which writes through a raw pointer into uninitialized
-  `Vec` capacity. CI exercises it under Miri with `-Zmiri-strict-provenance`.
-- A `no_std` build compiles a single-threaded `Mutex` replacement whose `Send`
-  and `Sync` rest on the target being single-threaded. `no_std` excludes the
-  [`mat`](crate::mat) module, so such a build has the replacement and none of
-  the transpose.
+The crate is almost entirely safe Rust, and with the default features it
+compiles no `unsafe` code of its own. `std` with `serde` introduces some in the
+[`mat`](crate::mat) module: the tiled row-major to column-major transpose the
+MATLAB writer uses writes through a raw pointer into uninitialized `Vec`
+capacity, and the [`mat::complex`](crate::mat::complex) array helpers read a
+slice of complex values as bytes. CI exercises both under Miri with
+`-Zmiri-strict-provenance`. A `no_std` build excludes the `mat` module and with
+it all of the crate's `unsafe` code.
 
 The [crate documentation](crate#safety-and-robustness) covers the safety and
 robustness guarantees in more detail.

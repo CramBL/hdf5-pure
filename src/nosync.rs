@@ -1,47 +1,31 @@
-//! Single-threaded Mutex replacement for no_std environments.
-//!
-//! WASM is single-threaded, so a simple `UnsafeCell` wrapper suffices.
+//! The mutex the chunk cache locks in a `no_std` build.
 
-use core::cell::UnsafeCell;
+use core::cell::BorrowMutError;
+use core::cell::RefCell;
+use core::cell::RefMut;
 
+/// A lock for one thread, with the `new` and `lock` methods of `std::sync::Mutex`.
+///
+/// The chunk cache calls these methods with or without `std`. A [`RefCell`] holds the value, so
+/// [`Mutex::lock`] returns an error while a guard is live, and a `Mutex` is not `Sync`.
 pub struct Mutex<T> {
-    data: UnsafeCell<T>,
+    data: RefCell<T>,
 }
 
-// SAFETY: a `no_std` build runs single-threaded (WASM without threads, or bare metal), so no
-// two threads hold the value at once.
-unsafe impl<T> Send for Mutex<T> {}
-// SAFETY: as above.
-unsafe impl<T> Sync for Mutex<T> {}
-
 impl<T> Mutex<T> {
-    pub fn new(val: T) -> Self {
+    pub const fn new(value: T) -> Self {
         Self {
-            data: UnsafeCell::new(val),
+            data: RefCell::new(value),
         }
     }
 
-    pub fn lock(&self) -> Result<MutexGuard<'_, T>, ()> {
-        Ok(MutexGuard { mutex: self })
-    }
-}
-
-pub struct MutexGuard<'a, T> {
-    mutex: &'a Mutex<T>,
-}
-
-impl<T> core::ops::Deref for MutexGuard<'_, T> {
-    type Target = T;
-    fn deref(&self) -> &T {
-        // SAFETY: Single-threaded environment (no_std/WASM).
-        unsafe { &*self.mutex.data.get() }
-    }
-}
-
-impl<T> core::ops::DerefMut for MutexGuard<'_, T> {
-    fn deref_mut(&mut self) -> &mut T {
-        // SAFETY: Single-threaded environment (no_std/WASM).
-        unsafe { &mut *self.mutex.data.get() }
+    /// Borrows the value mutably until the returned guard drops.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BorrowMutError`] if a guard is live.
+    pub fn lock(&self) -> Result<RefMut<'_, T>, BorrowMutError> {
+        self.data.try_borrow_mut()
     }
 }
 
@@ -50,9 +34,24 @@ mod tests {
     use super::Mutex;
 
     #[test]
+    fn a_second_guard_is_rejected_while_the_first_is_live() {
+        let mutex = Mutex::new(0u32);
+
+        let mut first = mutex.lock().unwrap();
+        mutex.lock().unwrap_err();
+        *first = 1;
+
+        assert_eq!(*first, 1);
+    }
+
+    #[test]
     fn a_guard_writes_the_value_the_next_guard_reads() {
         let mutex = Mutex::new(1);
-        *mutex.lock().unwrap() += 1;
+
+        let mut first = mutex.lock().unwrap();
+        *first += 1;
+        drop(first);
+
         assert_eq!(*mutex.lock().unwrap(), 2);
     }
 }
