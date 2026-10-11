@@ -53,12 +53,19 @@
 
 use std::path::Path;
 
+use hdf5::MajorErrorCode;
+use hdf5::MinorErrorCode;
+use hdf5::dataset::Layout as CLayout;
+use hdf5::file::LibraryVersion;
 use hdf5_pure::Error;
 use hdf5_pure::File;
+use hdf5_pure::FileAccessProperties;
 use hdf5_pure::FileBuilder;
+use hdf5_pure::FormatError;
 use hdf5_pure::ReadSeekSource;
 use rstest::rstest;
 use tempfile::tempdir;
+use test_util::superblock;
 
 #[rstest]
 #[case::plain(0, 0)]
@@ -154,6 +161,248 @@ fn relocated_c_image_preserves_encoded_superblock_and_reads_data(
 }
 
 #[rstest]
+#[case::plain(0, 0)]
+#[case::userblock(512, 512)]
+#[case::jammed(0, 512)]
+#[case::unjammed(512, 0)]
+fn snapshot_open_requires_effective_eof(
+    #[case] stored_base: usize,
+    #[case] signature_offset: usize,
+    #[values(false, true)] latest_format: bool,
+    #[values(-1, 0, 512)] length_delta: i32,
+    #[values(
+        ReadBackend::Buffered,
+        ReadBackend::Bytes,
+        ReadBackend::Source,
+        ReadBackend::Streaming
+    )]
+    backend: ReadBackend,
+) {
+    let dir = tempfile::tempdir().unwrap();
+    let original_path = dir.path().join("complete.h5");
+    let path = dir.path().join("snapshot.h5");
+    completeness_fixture(
+        &original_path,
+        stored_base as u64,
+        if latest_format {
+            LibraryVersion::V110
+        } else {
+            LibraryVersion::Earliest
+        },
+        32,
+    );
+    let original = std::fs::read(&original_path).unwrap();
+    let mut image = vec![0; signature_offset];
+    image.extend_from_slice(&original[stored_base..]);
+    let effective_eof = image.len() as u64;
+    if length_delta < 0 {
+        image.pop().unwrap();
+    } else {
+        image.resize(image.len() + length_delta as usize, 0xa5);
+    }
+    let actual_len = image.len() as u64;
+    std::fs::write(&path, image).unwrap();
+    if length_delta < 0 {
+        let error = hdf5::File::open(&path).unwrap_err();
+        assert!(error.contains_major(MajorErrorCode::File), "{error}");
+        assert!(error.contains_minor(MinorErrorCode::Truncated), "{error}");
+        let error = backend.try_open(&path).unwrap_err();
+        let Error::Format(error) = error else {
+            panic!("expected a format error, got {error:?}");
+        };
+        assert_eq!(
+            error,
+            FormatError::TruncatedFile {
+                expected_eof: effective_eof,
+                actual_len
+            }
+        );
+        if latest_format {
+            let lazy = File::open_swmr(&path).unwrap();
+            assert_eq!(lazy.dataset("early").unwrap().read_i32().unwrap(), [42]);
+        }
+        return;
+    }
+    let oracle = hdf5::File::open(&path).unwrap();
+    assert_eq!(
+        oracle.dataset("early").unwrap().read_raw::<i32>().unwrap(),
+        [42]
+    );
+    assert_eq!(
+        oracle.dataset("tail").unwrap().read_raw::<i32>().unwrap(),
+        vec![7; 4096]
+    );
+    let file = backend.try_open(&path).unwrap();
+    assert_eq!(file.superblock().base_address.get(), stored_base as u64);
+    assert_eq!(file.superblock().eof_address, original.len() as u64);
+    assert_eq!(file.file_size(), actual_len);
+    assert_eq!(file.dataset("early").unwrap().read_i32().unwrap(), [42]);
+    assert_eq!(
+        file.dataset("tail").unwrap().read_i32().unwrap(),
+        vec![7; 4096]
+    );
+}
+
+#[rstest]
+#[case::v0(LibraryVersion::Earliest, 32, superblock::VERSION_0)]
+#[case::v1(LibraryVersion::Earliest, 33, superblock::VERSION_1)]
+#[case::v2(LibraryVersion::V18, 32, superblock::VERSION_2)]
+fn initial_legacy_swmr_open_requires_effective_eof(
+    #[case] low: LibraryVersion,
+    #[case] indexed_storage_k: u32,
+    #[case] version: u8,
+    #[values((0, 0), (512, 512), (0, 512), (512, 0))] placement: (usize, usize),
+    #[values(-1, 0, 512)] length_delta: i32,
+    #[values(false, true)] explicit_options: bool,
+) {
+    let (stored_base, signature_offset) = placement;
+    let dir = tempfile::tempdir().unwrap();
+    let original_path = dir.path().join("legacy-complete.h5");
+    let path = dir.path().join("legacy-swmr.h5");
+    completeness_fixture(&original_path, stored_base as u64, low, indexed_storage_k);
+    let original = std::fs::read(&original_path).unwrap();
+    assert_eq!(superblock::version_at(&original, stored_base), version);
+    let mut image = vec![0; signature_offset];
+    image.extend_from_slice(&original[stored_base..]);
+    let effective_eof = image.len() as u64;
+    if length_delta < 0 {
+        image.pop().unwrap();
+    } else {
+        image.resize(image.len() + length_delta as usize, 0xa5);
+    }
+    let actual_len = image.len() as u64;
+    std::fs::write(&path, &image).unwrap();
+    let ours = if explicit_options {
+        File::open_swmr_with_options(&path, FileAccessProperties::new())
+    } else {
+        File::open_swmr(&path)
+    };
+    if length_delta < 0 {
+        let error = hdf5::File::open_as(&path, hdf5::OpenMode::ReadSWMR).unwrap_err();
+        assert!(error.contains_major(MajorErrorCode::File), "{error}");
+        assert!(error.contains_minor(MinorErrorCode::Truncated), "{error}");
+        let error = ours.unwrap_err();
+        let Error::Format(error) = error else {
+            panic!("expected a format error, got {error:?}");
+        };
+        assert_eq!(
+            error,
+            FormatError::TruncatedFile {
+                expected_eof: effective_eof,
+                actual_len
+            }
+        );
+        return;
+    }
+    {
+        let oracle = hdf5::File::open_as(&path, hdf5::OpenMode::ReadSWMR).unwrap();
+        assert_eq!(
+            oracle.dataset("early").unwrap().read_raw::<i32>().unwrap(),
+            [42]
+        );
+        assert_eq!(
+            oracle.dataset("tail").unwrap().read_raw::<i32>().unwrap(),
+            vec![7; 4096]
+        );
+    }
+    let mut file = ours.unwrap();
+    assert_eq!(file.superblock().version, version);
+    assert_eq!(file.superblock().base_address.get(), stored_base as u64);
+    assert_eq!(file.superblock().eof_address, original.len() as u64);
+    assert_eq!(file.dataset("early").unwrap().read_i32().unwrap(), [42]);
+    assert_eq!(
+        file.dataset("tail").unwrap().read_i32().unwrap(),
+        vec![7; 4096]
+    );
+    image.truncate(usize::try_from(effective_eof - 1).unwrap());
+    std::fs::write(&path, image).unwrap();
+    file.refresh().unwrap();
+    assert_eq!(file.dataset("early").unwrap().read_i32().unwrap(), [42]);
+}
+
+#[rstest]
+#[case::plain(0, 0)]
+#[case::userblock(512, 512)]
+#[case::jammed(0, 512)]
+#[case::unjammed(512, 0)]
+fn swmr_open_and_refresh_accept_partially_extended_image(
+    #[case] stored_base: usize,
+    #[case] signature_offset: usize,
+) {
+    let dir = tempfile::tempdir().unwrap();
+    let original_path = dir.path().join("complete.h5");
+    let path = dir.path().join("live.h5");
+    completeness_fixture(&original_path, stored_base as u64, LibraryVersion::V110, 32);
+    let writer = hdf5::File::with_options()
+        .with_fapl(|properties| properties.libver_v110())
+        .open_rw(&original_path)
+        .unwrap();
+    writer.start_swmr().unwrap();
+    writer.flush().unwrap();
+    let original = std::fs::read(&original_path).unwrap();
+    writer.close().unwrap();
+    let mut image = vec![0; signature_offset];
+    image.extend_from_slice(&original[stored_base..]);
+    image.pop().unwrap();
+    std::fs::write(&path, &image).unwrap();
+    {
+        let oracle = hdf5::File::open_as(&path, hdf5::OpenMode::ReadSWMR).unwrap();
+        assert_eq!(
+            oracle.dataset("early").unwrap().read_raw::<i32>().unwrap(),
+            [42]
+        );
+    }
+    let mut file = File::open_swmr(&path).unwrap();
+    assert_eq!(file.superblock().version, superblock::VERSION_3);
+    assert_eq!(file.dataset("early").unwrap().read_i32().unwrap(), [42]);
+    image.pop().unwrap();
+    std::fs::write(&path, image).unwrap();
+    file.refresh().unwrap();
+    assert_eq!(file.dataset("early").unwrap().read_i32().unwrap(), [42]);
+    assert_eq!(file.superblock().base_address.get(), stored_base as u64);
+    assert_eq!(file.superblock().eof_address, original.len() as u64);
+}
+
+fn completeness_fixture(
+    path: &Path,
+    stored_base: u64,
+    low: LibraryVersion,
+    indexed_storage_k: u32,
+) {
+    let file = hdf5::File::with_options()
+        .with_fcpl(|properties| {
+            properties
+                .userblock(stored_base)
+                .istore_k(indexed_storage_k)
+        })
+        .with_fapl(|properties| {
+            properties.libver_bounds(
+                low,
+                match low {
+                    LibraryVersion::Earliest | LibraryVersion::V18 => LibraryVersion::V18,
+                    _ => low,
+                },
+            )
+        })
+        .create(path)
+        .unwrap();
+    file.new_dataset::<i32>()
+        .shape([1])
+        .layout(CLayout::Compact)
+        .create("early")
+        .unwrap()
+        .write(&[42])
+        .unwrap();
+    file.new_dataset::<i32>()
+        .shape([4096])
+        .create("tail")
+        .unwrap()
+        .write(&vec![7; 4096])
+        .unwrap();
+    file.close().unwrap();
+}
+
+#[rstest]
 #[case::jammed(0, 512)]
 #[case::unjammed(512, 0)]
 fn editor_rejects_relocated_image(#[case] stored_base: usize, #[case] signature_offset: usize) {
@@ -189,14 +438,17 @@ enum ReadBackend {
 
 impl ReadBackend {
     fn open(self, path: &Path) -> File {
+        self.try_open(path).unwrap()
+    }
+
+    fn try_open(self, path: &Path) -> Result<File, Error> {
         match self {
-            Self::Buffered => File::open(path).unwrap(),
-            Self::Bytes => File::from_bytes(std::fs::read(path).unwrap()).unwrap(),
+            Self::Buffered => File::open(path),
+            Self::Bytes => File::from_bytes(std::fs::read(path).unwrap()),
             Self::Source => {
                 File::from_source(ReadSeekSource::new(std::fs::File::open(path).unwrap()).unwrap())
-                    .unwrap()
             }
-            Self::Streaming => File::open_streaming(path).unwrap(),
+            Self::Streaming => File::open_streaming(path),
         }
     }
 }

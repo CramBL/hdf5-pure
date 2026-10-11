@@ -271,7 +271,7 @@ fn a_group_rejected_as_a_dataset_is_reported_the_same_way_before_and_after_a_com
 #[test]
 fn a_link_whose_name_is_no_path_component_is_listed_and_not_opened() {
     let bytes =
-        std::fs::read("tests/data/fuzz/oom_chunked_string_huge_elem.h5").expect("read fixture");
+        super::fuzz_regressions::fixture_with_recorded_extent("oom_chunked_string_huge_elem.h5");
     let file = File::from_bytes(bytes).unwrap();
     let root = file.root();
 

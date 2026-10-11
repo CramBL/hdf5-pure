@@ -202,6 +202,7 @@ def migration_shapes(baseline: dict, candidate: dict, core: dict) -> list[str]:
             "InvalidFractalHeapIdLength",
             "InvalidObjectHeaderMessageSize",
             "LengthTooLarge",
+            "TruncatedFile",
             "UndefinedContinuationAddress",
         }
     }

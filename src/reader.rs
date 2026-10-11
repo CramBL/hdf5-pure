@@ -1072,6 +1072,7 @@ impl FileInner {
             Box::new(source)
         };
         let (superblock, opened) = Self::parse_superblock_source(source.as_ref())?;
+        opened.require_complete(source.len())?;
         file_lock::check_status_flags(
             &superblock,
             OpenIntent::Read(properties.write_mark_policy),
@@ -1113,6 +1114,9 @@ impl FileInner {
         let mut data = Vec::new();
         handle.read_to_end(&mut data).map_err(Error::Io)?;
         let (superblock, opened) = Self::parse_superblock(&data)?;
+        if superblock.version < SWMR_SUPERBLOCK_VERSION {
+            opened.require_complete(data.len() as u64)?;
+        }
         file_lock::check_status_flags(
             &superblock,
             OpenIntent::SwmrRead,
@@ -1139,6 +1143,7 @@ impl FileInner {
         properties: FileAccessProperties,
     ) -> Result<Self, Error> {
         let (superblock, opened) = Self::parse_superblock(&data)?;
+        opened.require_complete(data.len() as u64)?;
         Ok(Self::from_parts(
             Backend::InMemory(data),
             AccessMode::ReadOnly,
@@ -2705,7 +2710,10 @@ impl File {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::FileMarkedInUse`] if the status flags mark
+    /// Returns [`FormatError::TruncatedFile`] through [`Error::Format`] if the physical file is
+    /// shorter than the recorded EOF after relocation. Bytes after that position are permitted.
+    ///
+    /// Returns [`Error::FileMarkedInUse`] if the version-3 superblock's status flags mark
     /// the file as open for writing. `H5Fopen` makes the same check. The flag marks a live writer
     /// or one that exited without closing the file.
     /// [`clear_swmr_flag`](Self::clear_swmr_flag) clears a stale flag,
@@ -2718,7 +2726,11 @@ impl File {
         })
     }
 
-    /// Open an HDF5 file from a filesystem path with explicit access properties.
+    /// Opens the HDF5 file at `path` with explicit access properties.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same errors as [`File::open`], subject to `properties`.
     pub fn open_with_options<P: AsRef<std::path::Path>>(
         path: P,
         properties: FileAccessProperties,
@@ -2728,26 +2740,29 @@ impl File {
         })
     }
 
-    /// Open an HDF5 file for **streaming** reads, fetching regions on demand from
-    /// the file instead of buffering it whole.
+    /// Opens the HDF5 file at `path`, fetching metadata and data on demand.
     ///
-    /// This lets a host read a file larger than its address space. Metadata and
-    /// dataset chunks are read through a `ReadSeekSource`, so peak memory stays
-    /// close to one chunk plus the metadata being parsed; chunks adjacent on
-    /// disk are fetched together, in reads of at most 256 KiB, and a chunk
-    /// larger than that is read on its own. Attribute reading and v1
-    /// symbol-table groups on the resolved path are not yet supported on this
-    /// backend.
+    /// Metadata and dataset chunks are read through [`ReadSeekSource`], so memory use depends on
+    /// the metadata being parsed and the chunks being read. The file may be larger than the
+    /// process address space.
     ///
-    /// Like [`open`](Self::open), this refuses a file whose superblock marks it
-    /// as held by a writer.
+    /// # Errors
+    ///
+    /// Returns [`FormatError::TruncatedFile`] through [`Error::Format`] if the physical file is
+    /// shorter than the recorded EOF after relocation. Bytes after that position are permitted.
+    /// Returns [`Error::FileMarkedInUse`] if the version-3 superblock's status flags mark the file
+    /// as open for writing.
     pub fn open_streaming<P: AsRef<std::path::Path>>(path: P) -> Result<Self, Error> {
         Ok(File {
             inner: Arc::new(FileInner::open_streaming(path)?),
         })
     }
 
-    /// Open an HDF5 file for streaming reads with explicit access properties.
+    /// Opens the HDF5 file at `path` for on-demand reads with explicit access properties.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same errors as [`File::open_streaming`], subject to `properties`.
     pub fn open_streaming_with_options<P: AsRef<std::path::Path>>(
         path: P,
         properties: FileAccessProperties,
@@ -2772,8 +2787,7 @@ impl File {
         })
     }
 
-    /// Open an HDF5 file from any [`Source`], reading metadata and chunks on
-    /// demand exactly as [`open_streaming`](Self::open_streaming) does.
+    /// Opens an HDF5 image from a [`Source`], fetching metadata and data on demand.
     ///
     /// This is the streaming open for a caller whose bytes are not a path: an
     /// object store addressed by HTTP range request, a sandboxed guest that
@@ -2783,7 +2797,7 @@ impl File {
     /// plus the chunks a read touches — not the file. Wrap a `Read + Seek` in
     /// [`ReadSeekSource`] rather than writing that impl again.
     ///
-    /// A file marked as held by a writer is refused here as it is by
+    /// A file marked as held by a writer is rejected here as it is by
     /// [`open_streaming`](Self::open_streaming); with no path to report, the
     /// error names the source instead. Recovering such a file in place needs a
     /// path, through [`File::clear_swmr_flag`], so a caller that has none is
@@ -2795,6 +2809,15 @@ impl File {
     /// on, which matters more here than it does for a local file: without one,
     /// every read a parser makes is a round trip. See
     /// [`MetadataCacheConfig`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::TruncatedFile`] through [`Error::Format`] if [`Source::len`] is less
+    /// than the recorded EOF after relocation. Bytes after that position are permitted.
+    /// Returns [`Error::FileMarkedInUse`] if the version-3 superblock's status flags mark the image
+    /// as open for writing.
+    ///
+    /// # Examples
     ///
     /// ```no_run
     /// use hdf5_pure::{File, FormatError, Source};
@@ -2834,10 +2857,13 @@ impl File {
         })
     }
 
-    /// Open an HDF5 file from any [`Source`] with explicit access properties.
+    /// Opens an HDF5 image from a [`Source`] with explicit access properties.
     ///
-    /// The metadata cache is what a remote source wants tuned: every parser
-    /// read becomes a round trip without one. See [`MetadataCacheConfig`].
+    /// [`MetadataCacheConfig`] controls caching of metadata reads.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same errors as [`File::from_source`], subject to `properties`.
     pub fn from_source_with_options<S: Source + Send + Sync + 'static>(
         source: S,
         properties: FileAccessProperties,
@@ -2847,19 +2873,19 @@ impl File {
         })
     }
 
-    /// Open an HDF5 file for SWMR (single-writer/multiple-reader) reading.
+    /// Opens the HDF5 file at `path` for single-writer/multiple-reader access.
     ///
-    /// Like [`File::open`], but retains a live handle to the file so that
-    /// [`File::refresh`] can re-read data appended by a concurrent writer.
+    /// Retains a live file handle so [`File::refresh`] can read data appended by a concurrent
+    /// writer. With a version-3 superblock, the physical file may be shorter than the recorded
+    /// EOF while the writer extends it. Each metadata or data read must have its requested bytes
+    /// available.
     ///
-    /// This is the open that *follows* a file marked as held by a SWMR writer,
-    /// where [`open`](Self::open) refuses one. Only a half-set mark is refused
-    /// here, with [`Error::FileMarkedInUse`]:
-    /// either bit without the other. Write access alone is what a plain
-    /// (non-SWMR) writer leaves, and there is no protocol for following a writer
-    /// that is not publishing consistent prefixes; the SWMR bit alone is a state
-    /// no writer produces. Both bits is the live SWMR writer this exists to
-    /// follow, and neither is a quiescent file.
+    /// # Errors
+    ///
+    /// Returns [`FormatError::TruncatedFile`] through [`Error::Format`] if the superblock version
+    /// is 0, 1, or 2 and the physical file is shorter than the recorded EOF after relocation.
+    /// Returns [`Error::FileMarkedInUse`] if exactly one of the version-3 superblock's write-access
+    /// and SWMR-write flags is set. A file with both flags set can be read alongside its SWMR writer.
     #[doc(alias = "H5F_ACC_SWMR_READ")]
     pub fn open_swmr<P: AsRef<std::path::Path>>(path: P) -> Result<Self, Error> {
         Ok(File {
@@ -2867,7 +2893,11 @@ impl File {
         })
     }
 
-    /// Open an HDF5 file for SWMR reading with explicit access properties.
+    /// Opens the HDF5 file at `path` for SWMR reading with explicit access properties.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same errors as [`File::open_swmr`].
     pub fn open_swmr_with_options<P: AsRef<std::path::Path>>(
         path: P,
         properties: FileAccessProperties,
@@ -2877,14 +2907,23 @@ impl File {
         })
     }
 
-    /// Open an HDF5 file from an in-memory byte vector.
+    /// Opens an HDF5 image from an in-memory byte vector.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::TruncatedFile`] through [`Error::Format`] if `data` is shorter than
+    /// the recorded EOF after relocation. Bytes after that position are permitted.
     pub fn from_bytes(data: Vec<u8>) -> Result<Self, Error> {
         Ok(File {
             inner: Arc::new(FileInner::from_bytes(data)?),
         })
     }
 
-    /// Open an HDF5 file from an in-memory byte vector with explicit access properties.
+    /// Opens an HDF5 image from an in-memory byte vector with explicit access properties.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same errors as [`File::from_bytes`].
     pub fn from_bytes_with_options(
         data: Vec<u8>,
         properties: FileAccessProperties,
@@ -3426,15 +3465,16 @@ impl File {
         ))
     }
 
-    /// Re-read the file from disk to pick up data appended by a concurrent
-    /// writer, then re-parse the superblock.
+    /// Reads the file again to observe data appended by a concurrent writer.
     ///
-    /// This is the SWMR reader's refresh primitive. Returns
-    /// [`Error::SwmrUnsupported`] if the file was not opened with
-    /// [`File::open_swmr`], and [`Error::HandlesOutstanding`] if any owned
-    /// [`Dataset`]/[`Group`] handle (or a clone of this `File`) is still alive —
-    /// drop them before refreshing, then re-fetch them afterward, since they
-    /// observe the new bytes only when re-derived from the refreshed file.
+    /// The physical file may be shorter than the recorded EOF while the writer extends it.
+    /// Obtain new [`Dataset`] and [`Group`] handles after refreshing.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::SwmrUnsupported`] if the file was opened without [`File::open_swmr`].
+    /// Returns [`Error::HandlesOutstanding`] if an owned object handle or a clone of this file
+    /// is alive.
     pub fn refresh(&mut self) -> Result<(), Error> {
         let inner = Arc::get_mut(&mut self.inner).ok_or(Error::HandlesOutstanding)?;
         inner.refresh()
@@ -7046,6 +7086,10 @@ fn reported_path(path: Option<&ObjectPathBuf>) -> String {
 
 /// The reason [`Group::child_edit_path`] gives for a path that spells no link.
 const NO_LINK_TO_WRITE: &str = "a write needs a link name, and this path holds none";
+
+// H5F__super_read in src/H5Fsuper.c, HDF5 1.14.6, exempts initial SWMR reads from the EOF
+// completeness check for superblock version 3 and later.
+const SWMR_SUPERBLOCK_VERSION: u8 = 3;
 
 #[cfg(test)]
 mod tests {
