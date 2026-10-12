@@ -16,7 +16,7 @@ use crate::address::StoredAddress;
 use crate::address::StoredAddressExt;
 use crate::edit::{
     AppendBuilder, AppendGeometry, AppendTarget, EditBacking, MemoryStrategy, SpaceAccounting,
-    StagedChild, StagedKind, StagedMeta, StagedObject, SyncPolicy, WriteEngine,
+    SpaceOwnership, StagedChild, StagedKind, StagedMeta, StagedObject, SyncPolicy, WriteEngine,
 };
 use crate::element::H5Element;
 use crate::type_builders::{DatasetBuilder, VL_REF_SIZE};
@@ -3278,6 +3278,32 @@ impl File {
             Backend::Edit(m) => {
                 let session = m.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                 Ok(session.space_accounting())
+            }
+            _ => Err(Error::ReadOnly),
+        }
+    }
+
+    /// Returns the byte ownership the editor can identify for a writable file.
+    ///
+    /// Unclassified bytes can include live storage when
+    /// [`SpaceOwnership::analysis_complete`] is false. A controlled fixture can require complete
+    /// analysis and zero unclassified bytes. The editor reads committed storage for this
+    /// diagnostic, which is available through a surviving clone after [`close`](Self::close).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::ReadOnly`] if the file was opened without the editor. Returns
+    /// [`Error::Format`] if supported reachable metadata cannot be parsed. Returns
+    /// [`Error::MissingMessage`] if a chunked dataset lacks its dataspace. Returns
+    /// [`Error::InvalidFractalHeapStorage`] if a heap has inconsistent allocation geometry.
+    /// Returns [`Error::InvalidSpaceOwnershipExtent`] if identified extents overlap or exceed
+    /// the logical end of file.
+    #[doc(hidden)]
+    pub fn __space_ownership(&self) -> Result<SpaceOwnership, Error> {
+        match &self.inner.backend {
+            Backend::Edit(m) => {
+                let session = m.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                session.space_ownership()
             }
             _ => Err(Error::ReadOnly),
         }

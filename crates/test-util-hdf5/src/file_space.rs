@@ -9,6 +9,7 @@ use hdf5::Dataset as Hdf5Dataset;
 use hdf5::FileBuilder as Hdf5FileBuilder;
 #[cfg(feature = "__hdf5-1.10")]
 use hdf5::plist::file_create::FileSpaceStrategy as Hdf5FileSpaceStrategy;
+use hdf5_pure::SpaceOwnership;
 use hdf5_pure::{File, FileBuilder, FileSpaceStrategy, Layout, SpaceAccounting};
 
 use crate::dataset::Unlimited;
@@ -83,6 +84,144 @@ pub fn assert_space_accounting_consistent(acct: &SpaceAccounting) {
             acct.logical_size
         );
     }
+}
+
+/// Summarizes byte totals and extent counts from the storage diagnostic.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SpaceOwnershipSummary {
+    /// The physical file length in bytes.
+    pub physical_size: u64,
+    /// The end-of-file position stored in the superblock.
+    pub logical_size: u64,
+    /// The total length of dataset payload allocations stored outside object headers.
+    pub live_raw_bytes: u64,
+    /// The total length of identified object headers, indexes, heaps, and file metadata.
+    pub live_metadata_bytes: u64,
+    /// The total length of persisted free-space-manager allocations.
+    pub free_space_manager_bytes: u64,
+    /// The total length of reusable free extents.
+    pub reusable_free_bytes: u64,
+    /// The number of unclassified bytes below the logical end of file.
+    pub unclassified_bytes: u64,
+    /// The number of bytes beyond the logical end of file.
+    pub trailing_slack_bytes: u64,
+    /// The number of dataset payload allocations stored outside object headers.
+    pub live_raw_extents: usize,
+    /// The number of identified object headers, index blocks, heap blocks, and file metadata blocks.
+    pub live_metadata_extents: usize,
+    /// The number of persisted free-space-manager allocations.
+    pub free_space_manager_extents: usize,
+    /// The number of reusable free extents.
+    pub reusable_free_extents: usize,
+    /// The number of unclassified extents below the logical end of file.
+    pub unclassified_extents: usize,
+    /// The number of extents beyond the logical end of file.
+    pub trailing_slack_extents: usize,
+}
+
+/// Asserts complete byte accounting for a controlled fixture.
+///
+/// Requires complete analysis, disjoint extents, and zero unclassified bytes or trailing slack.
+/// The fixture must use storage classes the diagnostic supports.
+///
+/// # Panics
+///
+/// Panics if the diagnostic returns an error or any accounting requirement is unmet.
+#[track_caller]
+pub fn assert_exact_space_ownership(file: &File) -> SpaceOwnershipSummary {
+    let ownership = file.__space_ownership().unwrap();
+    assert_ownership_extents_disjoint(&ownership);
+    let SpaceOwnership {
+        physical_size,
+        logical_size,
+        live_raw_space,
+        live_metadata_space,
+        free_space_manager_space,
+        reusable_free_space,
+        unclassified_space,
+        analysis_complete,
+        trailing_slack_space,
+    } = ownership;
+    assert!(analysis_complete, "ownership analysis must be complete");
+
+    let summary = SpaceOwnershipSummary {
+        physical_size,
+        logical_size,
+        live_raw_bytes: extent_bytes(&live_raw_space),
+        live_metadata_bytes: extent_bytes(&live_metadata_space),
+        free_space_manager_bytes: extent_bytes(&free_space_manager_space),
+        reusable_free_bytes: extent_bytes(&reusable_free_space),
+        unclassified_bytes: extent_bytes(&unclassified_space),
+        trailing_slack_bytes: extent_bytes(&trailing_slack_space),
+        live_raw_extents: live_raw_space.len(),
+        live_metadata_extents: live_metadata_space.len(),
+        free_space_manager_extents: free_space_manager_space.len(),
+        reusable_free_extents: reusable_free_space.len(),
+        unclassified_extents: unclassified_space.len(),
+        trailing_slack_extents: trailing_slack_space.len(),
+    };
+    assert_eq!(
+        summary.unclassified_bytes, 0,
+        "all committed bytes below logical EOF must be live storage or reusable free space: {unclassified_space:?}"
+    );
+    assert_eq!(
+        summary.trailing_slack_bytes, 0,
+        "the controlled churn fixture must not leave bytes past logical EOF: {trailing_slack_space:?}"
+    );
+    assert_eq!(summary.logical_size, summary.physical_size);
+    assert_eq!(
+        summary.live_raw_bytes
+            + summary.live_metadata_bytes
+            + summary.free_space_manager_bytes
+            + summary.reusable_free_bytes
+            + summary.unclassified_bytes
+            + summary.trailing_slack_bytes,
+        summary.physical_size,
+        "ownership categories must add exactly to the physical file size"
+    );
+    summary
+}
+
+fn assert_ownership_extents_disjoint(ownership: &SpaceOwnership) {
+    let SpaceOwnership {
+        physical_size,
+        logical_size: _,
+        live_raw_space,
+        live_metadata_space,
+        free_space_manager_space,
+        reusable_free_space,
+        unclassified_space,
+        analysis_complete: _,
+        trailing_slack_space,
+    } = ownership;
+    let mut extents = live_raw_space
+        .iter()
+        .chain(live_metadata_space)
+        .chain(free_space_manager_space)
+        .chain(reusable_free_space)
+        .chain(unclassified_space)
+        .chain(trailing_slack_space)
+        .copied()
+        .collect::<Vec<_>>();
+    extents.sort_unstable_by_key(|&(addr, _)| addr);
+    let mut end = 0u64;
+    for &(addr, len) in &extents {
+        assert!(len > 0, "ownership extents must be non-empty");
+        assert!(
+            addr >= end,
+            "ownership extents must not overlap: previous end {end}, next [{addr}, {})",
+            addr + len
+        );
+        end = addr + len;
+        assert!(
+            end <= *physical_size,
+            "ownership extent [{addr}, {end}) exceeds physical size {physical_size}"
+        );
+    }
+}
+
+fn extent_bytes(extents: &[(u64, u64)]) -> u64 {
+    extents.iter().map(|&(_, len)| len).sum()
 }
 
 /// Asserts that the HDF5 logical end-of-file equals the physical file length.
