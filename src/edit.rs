@@ -6772,20 +6772,25 @@ impl WriteEngine {
             "the tail must end at or below the end-of-allocation it was placed under"
         );
 
+        let flat_block = match plan.blocks.as_slice() {
+            [] => None,
+            [block] if block.kind == ManagerKind::Flat => Some(block),
+            [block] => {
+                return Err(Error::Format(FormatError::Internal(format!(
+                    "flat free-space plan produced a {:?} manager",
+                    block.kind
+                ))));
+            }
+            _ => {
+                return Err(Error::Format(FormatError::Internal(
+                    "flat free-space plan produced more than one manager".into(),
+                )));
+            }
+        };
+
         // Build the real extension and the FSM blocks. With no free space to
         // record we still refresh the extension (persist on, managers undefined).
-        let ext_oh = if plan.is_empty() {
-            // With no managers to allocate, libhdf5 records the final end of allocation
-            // (`H5MF_settle_meta_data_fsm` and `H5MF__close_aggrfs` in `H5MF.c`, HDF5 1.14.6).
-            let info = file_space_info::persistent_empty(
-                offset_width,
-                strategy,
-                threshold,
-                page_size,
-                final_eof,
-            );
-            build_v2_object_header(&self.rewrite_extension_region(old_ext_addr, &info)?)?
-        } else {
+        let ext_oh = if let Some(block) = flat_block {
             // `eoa_pre_fsm` is the end-of-allocation before the free-space-manager
             // section blocks (`FSHD`/`FSSE`) were allocated: a consumer may shrink
             // back to here and rebuild them. For an appended tail that is the FSHD,
@@ -6798,8 +6803,6 @@ impl WriteEngine {
             // assertion-enabled libhdf5 aborts on open (issue #178), and is the
             // value `H5Fget_freespace` accounts for correctly (verified in the
             // crosscheck).
-            let block = &plan.blocks[0];
-            debug_assert_eq!(block.kind, ManagerKind::Flat);
             let eoa_pre_fsm = if reused {
                 final_eof
             } else {
@@ -6814,6 +6817,17 @@ impl WriteEngine {
                 eoa_pre_fsm,
             );
             build_v2_object_header(&self.rewrite_extension_region(old_ext_addr, &info)?)?
+        } else {
+            // With no managers to allocate, libhdf5 records the final end of allocation
+            // (`H5MF_settle_meta_data_fsm` and `H5MF__close_aggrfs` in `H5MF.c`, HDF5 1.14.6).
+            let info = file_space_info::persistent_empty(
+                offset_width,
+                strategy,
+                threshold,
+                page_size,
+                final_eof,
+            );
+            build_v2_object_header(&self.rewrite_extension_region(old_ext_addr, &info)?)?
         };
         // Both forms of the message carry the same twelve manager slots, so either
         // one measures what the placeholder did. The tail was reserved for that
@@ -6824,9 +6838,6 @@ impl WriteEngine {
             "extension length must be stable across the placeholder and real messages"
         );
 
-        // Exactly the reserved extent, which is what the next commit supersedes. A reused flat
-        // tail may reserve a few bytes past its manager blocks. Those bytes are deliberately part
-        // of the tail so the next commit frees them too.
         let new_old_blocks = vec![FreeExtent::new(ext_addr, tail_len).ok_or(Error::Format(
             FormatError::OffsetOverflow {
                 offset: ext_addr,
@@ -6840,16 +6851,26 @@ impl WriteEngine {
         // repoint below.
         let region = (ext_addr, tail_len);
         self.write_tail_block(region, ext_addr, &ext_oh)?;
-        for block in &plan.blocks {
-            let (fshd, fsse) = hdf5_pure_format::__private::serialize_free_space_manager(
-                widths,
-                &block.sections,
-                block.fshd_addr,
-                block.fsse_addr,
-                block.class,
-            )?;
+        if let Some(block) = flat_block {
+            let fshd_len = hdf5_pure_format::__private::free_space_manager_header_len(widths);
+            let fsse_allocated = tail_len
+                .checked_sub(ext_len)
+                .and_then(|manager_len| manager_len.checked_sub(fshd_len))
+                .ok_or(Error::Format(FormatError::Internal(
+                    "flat free-space tail is shorter than its extension and manager header".into(),
+                )))?;
+            let (fshd, fsse) =
+                hdf5_pure_format::__private::serialize_free_space_manager_with_allocation(
+                    widths,
+                    &block.sections,
+                    block.fshd_addr,
+                    block.fsse_addr,
+                    block.class,
+                    Some(fsse_allocated),
+                )?;
             self.write_tail_block(region, base.absolute(block.fshd_addr)?, &fshd)?;
-            self.write_tail_block(region, base.absolute(block.fsse_addr)?, &fsse)?;
+            let fsse_addr = base.absolute(block.fsse_addr)?;
+            self.write_tail_block(region, fsse_addr, &fsse)?;
         }
         // Barrier, then repoint the superblock (root, eof, and the new extension)
         // — the linearization point — and sync it.
@@ -6977,14 +6998,9 @@ impl WriteEngine {
     /// about one commit in eight to end-of-file, which is the growth this exists to
     /// stop.
     ///
-    /// What that costs is bounded and small: a commit that takes spare bytes and is
-    /// then the last of its session leaves them behind, since a reopened session
-    /// reconstructs the tail extent from the blocks themselves
-    /// ([`load_persisted_free_space`](Self::load_persisted_free_space)) and cannot
-    /// see a reservation that outlived the process. The spare is a section record
-    /// and, where the reservation emptied a size group, that group's own header
-    /// too — tens of bytes, once per session, against a whole tail on one commit in
-    /// eight.
+    /// The writer records spare reservation bytes in the section list's allocated length and
+    /// fills them with zeros. On reopen, the reader recovers the complete allocation for
+    /// reclamation.
     ///
     /// Iteration is capped rather than trusted to converge: the length is a step
     /// function of the section set, so a proposal can in principle keep growing.

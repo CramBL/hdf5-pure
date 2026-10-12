@@ -27,6 +27,8 @@ __matio = []
 [dependencies]
 hdf5 = { workspace = true, optional = true }
 hdf5-pure.workspace = true
+hdf5-pure-core.workspace = true
+hdf5-pure-format.workspace = true
 test-util.workspace = true
 
 [dev-dependencies]

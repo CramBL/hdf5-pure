@@ -25,6 +25,7 @@ use hdf5_pure::FormatError;
 use hdf5_pure::Layout;
 use hdf5_pure::MaxExtent;
 use hdf5_pure::MessageType;
+use hdf5_pure::SyncPolicy;
 use hdf5_pure_core::__private::BaseAddressExt;
 use hdf5_pure_core::__private::FileSpaceInfoFields;
 use hdf5_pure_core::__private::StoredAddressExt;
@@ -542,6 +543,137 @@ fn c_library_reads_managers_we_placed_mid_file() {
     assert_eq!(
         ours.dataset("above").unwrap().read_i32().unwrap(),
         vec![5; 8000]
+    );
+}
+
+#[test]
+fn libhdf5_reads_and_edits_a_reused_manager_with_spare_allocation() {
+    const FILLER: usize = 18;
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("reused_manager_spare_allocation.h5");
+    let seed = (0..100 + FILLER as i32).collect::<Vec<i32>>();
+    let mut builder = FileBuilder::new();
+    builder.create_dataset("seed").with_i32_data(&seed);
+    for (index, len) in [256usize, 37, 91].into_iter().enumerate() {
+        builder
+            .create_dataset(&format!("scratch{index}"))
+            .with_i32_data(&vec![7; len + FILLER]);
+        builder
+            .create_dataset(&format!("keep{index}"))
+            .with_i32_data(&[9; 4]);
+    }
+    builder.with_file_space_strategy(FileSpaceStrategy::FsmAggr, true, 1);
+    builder.write(&path).unwrap();
+
+    let open = || {
+        File::open_rw_with_options(
+            &path,
+            FileAccessProperties::new().with_sync_policy(SyncPolicy::OnClose),
+        )
+        .unwrap()
+    };
+    for index in 0..3 {
+        let file = open();
+        file.root().delete(&format!("scratch{index}")).unwrap();
+        file.commit().unwrap();
+        file.close().unwrap();
+    }
+
+    let mut spare = 0;
+    for generation in 0..6 {
+        let file = open();
+        file.root()
+            .set_attr("n", AttrValue::I64(generation))
+            .unwrap();
+        file.commit().unwrap();
+        file.close().unwrap();
+        spare = file_space::serialized_manager_padding(&path);
+        if spare > 0 {
+            break;
+        }
+    }
+    assert!(spare > 0, "the fixture must write an oversized allocation");
+    let reader = File::open(&path).unwrap();
+    let persisted_free = reader
+        .persisted_free_space()
+        .unwrap()
+        .iter()
+        .map(|&(_, len)| len)
+        .sum::<u64>();
+    drop(reader);
+
+    let native = hdf5::File::open(&path).unwrap();
+    assert_eq!(native.free_space(), persisted_free);
+    assert_eq!(
+        native.dataset("seed").unwrap().read_raw::<i32>().unwrap(),
+        seed
+    );
+    for index in 0..3 {
+        assert_eq!(
+            native
+                .dataset(&format!("keep{index}"))
+                .unwrap()
+                .read_raw::<i32>()
+                .unwrap(),
+            vec![9; 4]
+        );
+        absence::assert_libhdf5_absent(
+            &native.dataset(&format!("scratch{index}")).unwrap_err(),
+            &format!("scratch{index}"),
+        );
+    }
+    native.close().unwrap();
+
+    let added = (0..30).collect::<Vec<i32>>();
+    let native = hdf5::File::open_rw(&path).unwrap();
+    native
+        .new_dataset::<i32>()
+        .shape((30,))
+        .create("added")
+        .unwrap()
+        .write(&added)
+        .unwrap();
+    native.close().unwrap();
+
+    let reader = File::open(&path).unwrap();
+    let native = hdf5::File::open(&path).unwrap();
+    assert_eq!(reader.dataset("seed").unwrap().read_i32().unwrap(), seed);
+    assert_eq!(
+        native.dataset("seed").unwrap().read_raw::<i32>().unwrap(),
+        seed
+    );
+    assert_eq!(reader.dataset("added").unwrap().read_i32().unwrap(), added);
+    assert_eq!(
+        native.dataset("added").unwrap().read_raw::<i32>().unwrap(),
+        added
+    );
+    for index in 0..3 {
+        assert_eq!(
+            reader
+                .dataset(&format!("keep{index}"))
+                .unwrap()
+                .read_i32()
+                .unwrap(),
+            vec![9; 4]
+        );
+        assert_eq!(
+            native
+                .dataset(&format!("keep{index}"))
+                .unwrap()
+                .read_raw::<i32>()
+                .unwrap(),
+            vec![9; 4]
+        );
+    }
+    assert_eq!(
+        native.free_space(),
+        reader
+            .persisted_free_space()
+            .unwrap()
+            .iter()
+            .map(|&(_, len)| len)
+            .sum::<u64>()
     );
 }
 

@@ -35,8 +35,9 @@ use crate::width::FormatWidths;
 ///
 /// Returns [`FormatError::OffsetOverflow`] if `base` and a stored address sum past `u64::MAX`,
 /// [`FormatError::ValueTooLargeForPlatform`] if a position in the file or the length of a section
-/// list does not fit a `usize`, [`FormatError::InvalidFreeSpaceManager`] if a header or a section
-/// list is past the end of `data`, and the errors of [`FreeSpaceManagerHeader::parse`] and
+/// list does not fit a `usize`, [`FormatError::InvalidFreeSpaceManager`] if a header or any part
+/// of a section list's allocation is past the end of `data`, and the errors of
+/// [`FreeSpaceManagerHeader::parse`] and
 /// [`parse_section_info`](hdf5_pure_format::__private::parse_section_info) for each block it reads.
 pub(crate) fn read_persisted_sections(
     data: &[u8],
@@ -66,6 +67,16 @@ pub(crate) fn read_persisted_sections(
         }
         let fa = base.absolute(header.section_list_addr())?.to_usize()?;
         let used = header.section_list_used().to_usize()?;
+        let allocated = header.section_list_allocated().to_usize()?;
+        fa.checked_add(allocated)
+            .filter(|&end| end <= data.len())
+            .ok_or_else(|| {
+                FormatError::InvalidFreeSpaceManager(format!(
+                    "the section list allocation at {fa}, {allocated} bytes long, runs past the \
+                     end of the file, {} bytes long",
+                    data.len()
+                ))
+            })?;
         let block = fa
             .checked_add(used)
             .and_then(|end| data.get(fa..end))
@@ -303,7 +314,7 @@ mod tests {
     #[case::section_list(
         735,
         619,
-        "the section list at 701, 35 bytes long, runs past the end of the file, 735 bytes long"
+        "the section list allocation at 701, 35 bytes long, runs past the end of the file, 735 bytes long"
     )]
     fn a_manager_past_the_end_of_the_file_fails_to_read(
         #[case] file_len: usize,
@@ -487,6 +498,30 @@ mod tests {
         let mut want = sections.to_vec();
         want.sort_by_key(|s| s.addr);
         assert_eq!(got, want);
+    }
+
+    #[test]
+    fn an_allocated_section_list_past_eof_is_rejected_by_both_read_paths() {
+        let allocated = 44;
+        let source = manager_source(0, allocated, 736);
+        let mut buf = vec![0u8; 736];
+        buf[619..701].copy_from_slice(&source.header);
+        buf[701..].copy_from_slice(&source.sections);
+        let expected = FormatError::InvalidFreeSpaceManager(format!(
+            "the section list allocation at 701, {allocated} bytes long, runs past the \
+             end of the file, {} bytes long",
+            buf.len()
+        ));
+
+        assert_eq!(
+            read_persisted_sections(&buf, widths(8, 8), BaseAddress::ZERO, &[619]).unwrap_err(),
+            expected
+        );
+        assert_eq!(
+            read_persisted_sections_source(&source, widths(8, 8), BaseAddress::ZERO, &[619])
+                .unwrap_err(),
+            expected
+        );
     }
 
     #[test]

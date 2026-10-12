@@ -140,6 +140,7 @@ pub use crate::free_space_manager::free_space_manager_len;
 pub use crate::free_space_manager::parse_section_info;
 pub use crate::free_space_manager::section_info_len;
 pub use crate::free_space_manager::serialize_free_space_manager;
+pub use crate::free_space_manager::serialize_free_space_manager_with_allocation;
 pub use crate::global_heap::GLOBAL_HEAP_MAX_OBJECTS;
 pub use crate::global_heap::GlobalHeapCollectionError;
 pub use crate::global_heap::GlobalHeapIndex;

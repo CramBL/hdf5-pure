@@ -10,9 +10,72 @@ use hdf5::FileBuilder as Hdf5FileBuilder;
 #[cfg(feature = "__hdf5-1.10")]
 use hdf5::plist::file_create::FileSpaceStrategy as Hdf5FileSpaceStrategy;
 use hdf5_pure::SpaceOwnership;
+use hdf5_pure::StoredAddress;
 use hdf5_pure::{File, FileBuilder, FileSpaceStrategy, Layout, SpaceAccounting};
+use hdf5_pure_core::__private::BaseAddressExt;
+use hdf5_pure_core::__private::StoredAddressExt;
+use hdf5_pure_format::__private as format;
+use hdf5_pure_format::__private::FormatWidths;
+use hdf5_pure_format::__private::FreeSpaceManagerHeader;
 
 use crate::dataset::Unlimited;
+
+/// Returns the total zero-padding length of the persisted free-space section lists.
+///
+/// Requires a file without a userblock and equal used and allocated lengths for each list.
+/// Compares the section records with their shortest serialization and checks the padding bytes.
+///
+/// # Panics
+///
+/// Panics if reading or parsing fails, a requirement is unmet, or padding contains a nonzero byte.
+pub fn serialized_manager_padding(path: &Path) -> u64 {
+    let bytes = std::fs::read(path).unwrap();
+    let file = File::open(path).unwrap();
+    let superblock = file.superblock();
+    assert!(superblock.base_address.is_zero());
+    let widths = FormatWidths::from_sizes(superblock.offset_size, superblock.length_size).unwrap();
+    file.file_space_info()
+        .unwrap()
+        .manager_addrs
+        .iter()
+        .copied()
+        .filter(|&addr| addr != u64::MAX)
+        .map(|addr| {
+            let at = usize::try_from(addr).unwrap();
+            let header = FreeSpaceManagerHeader::parse(widths, &bytes[at..]).unwrap();
+            let list_addr = header.section_list_addr();
+            let start = usize::try_from(list_addr.get()).unwrap();
+            let used = usize::try_from(header.section_list_used()).unwrap();
+            let list = &bytes[start..start + used];
+            let sections =
+                format::parse_section_info(widths, list, StoredAddress::new(addr), &header)
+                    .unwrap();
+            let (_, minimal) = format::serialize_free_space_manager(
+                widths,
+                &sections,
+                StoredAddress::new(addr),
+                list_addr,
+                format::SECTION_CLASS_SIMPLE,
+            )
+            .unwrap();
+            assert_eq!(header.section_list_used(), header.section_list_allocated());
+            let records_end = minimal.len() - SECTION_LIST_CHECKSUM_LEN;
+            assert_eq!(&list[..records_end], &minimal[..records_end]);
+            assert!(
+                list[records_end..used - SECTION_LIST_CHECKSUM_LEN]
+                    .iter()
+                    .all(|&byte| byte == 0)
+            );
+            u64::try_from(list.len() - minimal.len()).unwrap()
+        })
+        .sum()
+}
+
+/// The checksum length of a version 0 section list, defined in "Free-space Index" of the
+/// [format specification, version 4.0][spec].
+///
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsec_fmt4_infra_freespaceindex
+const SECTION_LIST_CHECKSUM_LEN: usize = 4;
 
 /// Writes the `a`, `b`, `c` fixture used by file-space strategy reuse tests.
 ///
