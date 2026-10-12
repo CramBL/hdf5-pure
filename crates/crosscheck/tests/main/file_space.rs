@@ -1867,6 +1867,184 @@ fn libhdf5_reads_relocated_persisted_free_space_and_writes_to_the_file(
     stamped.assert_unchanged(&path);
 }
 
+#[rstest]
+fn libhdf5_reads_its_paged_file_after_an_edit_reuses_the_free_space_it_persisted(
+    #[values(0, PAGE_SIZE)] userblock: u64,
+) {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("c_paged_persisted_edited.h5");
+    write_c_paged(&path, userblock, 1, C_PAGED_DATASETS);
+    let file = hdf5::File::open_rw(&path).unwrap();
+    let freed = file.dataset("b").unwrap().offset().unwrap();
+    file.unlink("b").unwrap();
+    file.close().unwrap();
+    let stamped = Userblock::read(&path, usize::try_from(userblock).unwrap());
+    let file = File::open(&path).unwrap();
+    let persisted = file.persisted_free_space().unwrap();
+    let big = file_space::contiguous_extent(&file, "big");
+    drop(file);
+    let last_page_of_big = (
+        big.end - userblock,
+        PAGE_SIZE - (big.end - userblock) % PAGE_SIZE,
+    );
+    assert_eq!(
+        persisted.contains(&last_page_of_big),
+        hdf5::library_version() < (1, 12, 0),
+        "{persisted:?}"
+    );
+
+    let session = File::open_rw(&path).unwrap();
+    assert_eq!(
+        session.space_accounting().unwrap().reusable_free_space,
+        persisted
+            .iter()
+            .filter(|&&section| section != last_page_of_big)
+            .map(|&(at, len)| (at + userblock, len))
+            .collect::<Vec<_>>()
+    );
+    session
+        .root()
+        .create_dataset("d", |builder| {
+            builder.with_i32_data(&[9; 300]);
+        })
+        .unwrap();
+    session.commit().unwrap();
+    session.close().unwrap();
+    let ours = File::open(&path).unwrap().persisted_free_space().unwrap();
+
+    let f = hdf5::File::open(&path).unwrap();
+    let d = f.dataset("d").unwrap();
+    assert_eq!(
+        file_space::libhdf5_contiguous_extent(&d),
+        freed..freed + 1200
+    );
+    assert_eq!(d.read_raw::<i32>().unwrap(), vec![9; 300]);
+    for (value, &(name, len, _)) in (1..)
+        .zip(C_PAGED_DATASETS)
+        .filter(|&(_, &(name, ..))| name != "b")
+    {
+        assert_eq!(
+            f.dataset(name).unwrap().read_raw::<i32>().unwrap(),
+            vec![value; len],
+            "{name}"
+        );
+    }
+    assert_eq!(
+        f.free_space(),
+        ours.iter().map(|&(_, len)| len).sum::<u64>()
+    );
+    let mut sections = file_space::libhdf5_free_sections(&f);
+    sections.sort_unstable();
+    assert_eq!(sections, ours);
+    drop(d);
+    f.close().unwrap();
+
+    let f = hdf5::File::open_rw(&path).unwrap();
+    f.new_dataset::<i32>()
+        .shape((50,))
+        .create("e")
+        .unwrap()
+        .write(&[5; 50])
+        .unwrap();
+    f.close().unwrap();
+    let reader = File::open(&path).unwrap();
+    assert_eq!(
+        reader.dataset("e").unwrap().read_i32().unwrap(),
+        vec![5; 50]
+    );
+    assert_eq!(
+        reader.dataset("d").unwrap().read_i32().unwrap(),
+        vec![9; 300]
+    );
+    stamped.assert_unchanged(&path);
+}
+
+#[rstest]
+fn libhdf5_reads_and_writes_our_edited_paged_file(#[values(0, PAGE_SIZE)] userblock: u64) {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("ours_paged_edited.h5");
+    let mut builder = FileBuilder::new();
+    if userblock > 0 {
+        builder.with_userblock(userblock);
+        builder.with_userblock_content(b"paged managers");
+    }
+    builder.create_dataset("a").with_i32_data(&[1; 100]);
+    builder.create_dataset("b").with_i32_data(&[2; 400]);
+    builder.create_dataset("c").with_i32_data(&[3; 100]);
+    builder
+        .with_file_space_strategy(FileSpaceStrategy::Page, true, 1)
+        .with_file_space_page_size(PAGE_SIZE);
+    builder.write(&path).unwrap();
+    let stamped = Userblock::read(&path, usize::try_from(userblock).unwrap());
+
+    let first = File::open_rw(&path).unwrap();
+    first.root().delete("b").unwrap();
+    first.commit().unwrap();
+    first.close().unwrap();
+    let second = File::open_rw(&path).unwrap();
+    second
+        .root()
+        .create_dataset("d", |builder| {
+            builder.with_i32_data(&[9; 300]);
+        })
+        .unwrap();
+    second.commit().unwrap();
+    second.root().delete("c").unwrap();
+    second.commit().unwrap();
+    second.close().unwrap();
+    paged::assert_consistent(&path, PAGE_SIZE);
+    let ours = File::open(&path).unwrap().persisted_free_space().unwrap();
+    assert!(!ours.is_empty());
+
+    let f = hdf5::File::open_rw(&path).unwrap();
+    assert_eq!(
+        f.create_plist().unwrap().get_file_space_strategy().unwrap(),
+        page(1)
+    );
+    assert_eq!(f.create_plist().unwrap().userblock(), userblock);
+    assert_eq!(
+        f.dataset("a").unwrap().read_raw::<i32>().unwrap(),
+        vec![1; 100]
+    );
+    assert_eq!(
+        f.dataset("d").unwrap().read_raw::<i32>().unwrap(),
+        vec![9; 300]
+    );
+    absence::assert_libhdf5_absent(&f.dataset("c").unwrap_err(), "c");
+    assert_eq!(
+        f.free_space(),
+        ours.iter().map(|&(_, len)| len).sum::<u64>()
+    );
+    let mut sections = file_space::libhdf5_free_sections(&f);
+    sections.sort_unstable();
+    assert_eq!(sections, ours);
+    f.new_dataset::<i32>()
+        .shape((50,))
+        .create("e")
+        .unwrap()
+        .write(&[5; 50])
+        .unwrap();
+    f.close().unwrap();
+
+    let reader = File::open(&path).unwrap();
+    assert_eq!(
+        reader.dataset("e").unwrap().read_i32().unwrap(),
+        vec![5; 50]
+    );
+    assert_eq!(
+        reader.dataset("d").unwrap().read_i32().unwrap(),
+        vec![9; 300]
+    );
+    stamped.assert_unchanged(&path);
+}
+
+const C_PAGED_DATASETS: &[(&str, usize, CLayout)] = &[
+    ("a", 400, CLayout::Contiguous),
+    ("b", 400, CLayout::Contiguous),
+    ("c", 400, CLayout::Contiguous),
+    ("big", 5000, CLayout::Contiguous),
+];
+
 /// Rewrites the version 1 File Space Info message of the file at `path` as a version 0 message with
 /// its first six manager addresses, and returns the version 1 message.
 ///
@@ -3169,7 +3347,7 @@ fn a_paged_returned_extent_is_tracked_as_libhdf5_tracks_it(
     let dir = tempdir().unwrap();
     let ours = dir.path().join("ours.h5");
     let theirs = dir.path().join("theirs.h5");
-    write_c_paged(&ours, threshold, datasets);
+    write_c_paged(&ours, 0, threshold, datasets);
     std::fs::copy(&ours, &theirs).unwrap();
     let extent = object_extent(&ours, measured);
 
@@ -3265,6 +3443,7 @@ fn a_paged_returned_extent_beside_free_space_across_a_page_boundary_is_dropped_a
     let theirs = dir.path().join("theirs.h5");
     write_c_paged(
         &ours,
+        0,
         THRESHOLD_ACROSS_PAGES,
         &[
             ("f0", 768, CLayout::Contiguous),
@@ -3306,7 +3485,7 @@ fn a_page_tail_short_of_the_threshold_stays_tracked_as_libhdf5_tracks_it(
     let dir = tempdir().unwrap();
     let ours = dir.path().join("ours.h5");
     let theirs = dir.path().join("theirs.h5");
-    write_c_paged(&ours, THRESHOLD_IN_A_PAGE, datasets);
+    write_c_paged(&ours, 0, THRESHOLD_IN_A_PAGE, datasets);
     std::fs::copy(&ours, &theirs).unwrap();
 
     let (ours_tail, ours_session) = {
@@ -3441,11 +3620,12 @@ fn paged_tracked_after_deletions(
     (ours_session, reopened(ours), reopened(theirs))
 }
 
-fn write_c_paged(path: &Path, threshold: u64, datasets: &[(&str, usize, CLayout)]) {
+fn write_c_paged(path: &Path, userblock: u64, threshold: u64, datasets: &[(&str, usize, CLayout)]) {
     let file = hdf5::FileBuilder::new()
         .with_fapl(|fapl| fapl.libver_v110())
         .with_fcpl(|fcpl| {
-            fcpl.file_space_strategy(page(threshold))
+            fcpl.userblock(userblock)
+                .file_space_strategy(page(threshold))
                 .file_space_page_size(PAGE_SIZE)
         })
         .create(path)

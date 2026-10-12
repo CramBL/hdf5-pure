@@ -5,9 +5,10 @@
 //! A paged file *without* persisted managers is still refused, because nothing
 //! on disk records which pages hold metadata and which hold raw data.
 
-use hdf5_pure::{
-    Error, File, FileAccessProperties, FileBuilder, FileSpaceStrategy, MemoryStrategy,
-};
+use hdf5_pure::Error;
+use hdf5_pure::File;
+use hdf5_pure::FileAccessProperties;
+use hdf5_pure::MemoryStrategy;
 use test_util::temp;
 use test_util_hdf5::paged;
 
@@ -74,61 +75,6 @@ fn paged_staged_commit_keeps_pages_homogeneous() {
     drop(f);
     paged::assert_consistent(&path, PAGE);
     paged::assert_pages_homogeneous(&path, PAGE, &["d", "added"]);
-}
-
-/// A paged file with a userblock is rejected at open, and at commit on a session that demands the
-/// mirror, before any byte of the file changes.
-///
-/// A userblock is a bounded-only limitation, so an open under `MemoryStrategy::Auto` would fall
-/// back to the mirror for it and skip the open-time check, unless the checks both backings share
-/// run first.
-#[test]
-fn paged_with_userblock_is_rejected() {
-    let path = temp::repo_temp_path("pure_paged_staged_userblock.h5");
-    {
-        let mut b = FileBuilder::new();
-        b.create_dataset("d")
-            .with_i32_data(&(0..64).collect::<Vec<i32>>())
-            .with_shape(&[64]);
-        // A paged file's userblock must be a whole number of pages, so page
-        // boundaries measured from the base coincide with absolute ones.
-        b.with_userblock(PAGE);
-        b.with_file_space_strategy(FileSpaceStrategy::Page, true, 0)
-            .with_file_space_page_size(PAGE);
-        b.write(&path).unwrap();
-    }
-
-    let err = File::open_rw(&path).unwrap_err();
-    assert!(
-        matches!(&err, Error::EditUnsupported(m) if *m == "read-write access to a paged file (H5F_FSPACE_STRATEGY_PAGE) with a userblock (non-zero base address) is not supported"),
-        "expected a paged refusal for a userblock file, got {err:?}"
-    );
-
-    // Demanding the mirror still opens it, and the commit-time guard behind the
-    // open-time one still fires.
-    let s = File::open_rw_with_options(
-        &path,
-        FileAccessProperties::new().with_memory_strategy(MemoryStrategy::Mirrored),
-    )
-    .unwrap();
-    s.root()
-        .create_dataset("added", |b| {
-            b.with_i32_data(&[1i32, 2, 3]);
-        })
-        .unwrap();
-    let err = s.commit().unwrap_err();
-    assert!(
-        matches!(&err, Error::EditUnsupported(m) if *m == "committing an edit to a paged file (H5F_FSPACE_STRATEGY_PAGE) with a userblock (non-zero base address) is not supported"),
-        "expected a paged refusal for a userblock file, got {err:?}"
-    );
-    drop(s);
-
-    // The refusal happened before any byte moved: the file still reads.
-    let f = File::open(&path).unwrap();
-    assert_eq!(
-        f.dataset("d").unwrap().read_i32().unwrap(),
-        (0..64).collect::<Vec<i32>>()
-    );
 }
 
 /// A paged file that does not persist its free space is still refused: without

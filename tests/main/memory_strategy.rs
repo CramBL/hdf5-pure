@@ -15,10 +15,18 @@
 //! pins it as a biconditional over the creation properties rather than as a list
 //! of examples: `Auto` mirrors a file if and only if `Bounded` refuses it.
 
-use hdf5_pure::{
-    EditBacking, File, FileAccessProperties, FileBuilder, FileCreateProperties, FileSpaceStrategy,
-    LibVer, MaxExtent, MemoryStrategy, SyncPolicy,
-};
+use hdf5_pure::EditBacking;
+use hdf5_pure::Error;
+use hdf5_pure::File;
+use hdf5_pure::FileAccessProperties;
+use hdf5_pure::FileBuilder;
+use hdf5_pure::FileCreateProperties;
+use hdf5_pure::FileSpaceStrategy;
+use hdf5_pure::FormatError;
+use hdf5_pure::LibVer;
+use hdf5_pure::MaxExtent;
+use hdf5_pure::MemoryStrategy;
+use hdf5_pure::SyncPolicy;
 use test_util_hdf5::dataset::Unlimited;
 
 fn with_strategy(strategy: MemoryStrategy) -> FileAccessProperties {
@@ -360,28 +368,6 @@ fn create_refuses_a_pair_it_could_not_reopen_before_writing_anything() {
     );
     assert!(!ub.exists(), "nothing may be written for a refused pair");
 
-    // A read-write open rejects a paged file with a userblock even when the
-    // creation properties request `persist = true`, so the pair is rejected
-    // before the write.
-    let ub_paged = dir.path().join("ub_paged.h5");
-    let err = File::create_with_options(
-        &ub_paged,
-        FileCreateProperties::new()
-            .with_userblock(4096)
-            .with_file_space_strategy(FileSpaceStrategy::Page, true, 1)
-            .with_file_space_page_size(4096),
-        FileAccessProperties::new(),
-    )
-    .expect_err("a userblock and a paged file cannot both hold");
-    assert!(
-        err.to_string().contains("userblock") && err.to_string().contains("Page"),
-        "the refusal must name both halves of the contradiction: {err}"
-    );
-    assert!(
-        !ub_paged.exists(),
-        "nothing may be written for a refused pair"
-    );
-
     // And the same userblock creates fine when nothing demands the bounded
     // engine, so the check is on the pair and not on the userblock alone.
     let ok = dir.path().join("ok.h5");
@@ -392,6 +378,83 @@ fn create_refuses_a_pair_it_could_not_reopen_before_writing_anything() {
     )
     .unwrap();
     assert_eq!(file.edit_backing(), Some(EditBacking::Mirrored));
+}
+
+#[test]
+fn create_with_options_writes_a_paged_file_with_a_userblock_that_reopens_read_write() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("paged_userblock.h5");
+    let file = File::create_with_options(
+        &path,
+        paged_userblock_properties(4096),
+        FileAccessProperties::new(),
+    )
+    .unwrap();
+    assert_eq!(file.edit_backing(), Some(EditBacking::Mirrored));
+    file.root()
+        .create_dataset("d", |b| {
+            b.with_i32_data(&[1, 2, 3]);
+        })
+        .unwrap();
+    file.commit().unwrap();
+    file.close().unwrap();
+
+    let err =
+        File::open_rw_with_options(&path, with_strategy(MemoryStrategy::Bounded)).unwrap_err();
+    assert!(
+        matches!(
+            err,
+            Error::EditUnsupported(
+                "bounded read-write access does not support a file with a userblock (non-zero \
+                 base address); leave MemoryStrategy unset, or pass MemoryStrategy::Auto, to \
+                 fall back to the whole-file mirror here"
+            )
+        ),
+        "{err:?}"
+    );
+    let file = File::open_rw(&path).unwrap();
+    assert_eq!(file.edit_backing(), Some(EditBacking::Mirrored));
+    file.root()
+        .create_dataset("e", |b| {
+            b.with_i32_data(&[4, 5]);
+        })
+        .unwrap();
+    file.commit().unwrap();
+    file.close().unwrap();
+
+    let file = File::open(&path).unwrap();
+    assert_eq!(
+        file.dataset("d").unwrap().read_i32().unwrap(),
+        vec![1, 2, 3]
+    );
+    assert_eq!(file.dataset("e").unwrap().read_i32().unwrap(), vec![4, 5]);
+}
+
+#[test]
+fn create_with_options_rejects_a_paged_userblock_that_is_not_a_whole_number_of_pages() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("paged_partial_userblock.h5");
+    let err = File::create_with_options(
+        &path,
+        paged_userblock_properties(512),
+        FileAccessProperties::new(),
+    )
+    .unwrap_err();
+    assert!(
+        matches!(
+            err,
+            Error::Format(FormatError::UserblockNotPageAligned(512, 4096))
+        ),
+        "{err:?}"
+    );
+    assert!(!path.exists());
+}
+
+fn paged_userblock_properties(userblock: u64) -> FileCreateProperties {
+    FileCreateProperties::new()
+        .with_userblock(userblock)
+        .with_file_space_strategy(FileSpaceStrategy::Page, true, 1)
+        .with_file_space_page_size(4096)
 }
 
 /// A file that persists its free-space managers under the default `FsmAggr`
@@ -570,6 +633,13 @@ fn auto_matches_bounded_on_every_pair_bounded_accepts() {
         ),
         ("userblock", FileCreateProperties::new().with_userblock(512)),
         (
+            "page-persisting-userblock",
+            FileCreateProperties::new()
+                .with_userblock(4096)
+                .with_file_space_strategy(FileSpaceStrategy::Page, true, 0)
+                .with_file_space_page_size(4096),
+        ),
+        (
             "libver-1.8",
             FileCreateProperties::new().with_libver_bounds(LibVer::Earliest, LibVer::V18),
         ),
@@ -632,12 +702,12 @@ fn auto_matches_bounded_on_every_pair_bounded_accepts() {
     }
 
     assert_eq!(
-        mirrored, 1,
+        mirrored, 2,
         "the userblock is the only creatable property here the bounded engine \
-         refuses; another row reaching the mirror is a fallback set that grew"
+         rejects; another row reaching the mirror is a fallback set that grew"
     );
     assert!(
-        checked >= 9,
+        checked >= 10,
         "only {checked} of the property rows were creatable at all, so this \
          matrix is no longer covering the space it names"
     );

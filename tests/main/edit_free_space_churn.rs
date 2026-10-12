@@ -30,37 +30,47 @@ use test_util_hdf5::session;
 use test_util_hdf5::userblock;
 
 #[rstest]
-fn free_space_churn_continuous_open(#[values(Base::Zero, Base::Userblock)] base: Base) {
-    let report = run_churn(Lifecycle::ContinuousOpen, base);
-    insta::assert_snapshot!("free_space_churn_continuous_open", report.render());
+fn free_space_churn_continuous_open(
+    #[values(Strategy::FsmAggr, Strategy::Page)] strategy: Strategy,
+    #[values(Base::Zero, Base::Userblock)] base: Base,
+) {
+    let report = run_churn(Lifecycle::ContinuousOpen, strategy, base);
+    insta::assert_snapshot!(
+        strategy.snapshot("free_space_churn_continuous_open"),
+        report.render()
+    );
 }
 
 #[rstest]
-fn free_space_churn_reopen_before_final_check(#[values(Base::Zero, Base::Userblock)] base: Base) {
-    let report = run_churn(Lifecycle::ReopenBeforeFinalCheck, base);
+fn free_space_churn_reopen_before_final_check(
+    #[values(Strategy::FsmAggr, Strategy::Page)] strategy: Strategy,
+    #[values(Base::Zero, Base::Userblock)] base: Base,
+) {
+    let report = run_churn(Lifecycle::ReopenBeforeFinalCheck, strategy, base);
     insta::assert_snapshot!(
-        "free_space_churn_reopen_before_final_check",
+        strategy.snapshot("free_space_churn_reopen_before_final_check"),
         report.render()
     );
 }
 
 #[rstest]
 fn free_space_churn_reopen_frequently(#[values(Base::Zero, Base::Userblock)] base: Base) {
-    let report = run_churn(Lifecycle::ReopenFrequently, base);
+    let report = run_churn(Lifecycle::ReopenFrequently, Strategy::FsmAggr, base);
     insta::assert_snapshot!("free_space_churn_reopen_frequently", report.render());
 }
 
-fn run_churn(lifecycle: Lifecycle, base: Base) -> ChurnReport {
+fn run_churn(lifecycle: Lifecycle, strategy: Strategy, base: Base) -> ChurnReport {
     let path = temp::temp_path(&format!(
-        "hdf5_pure_free_space_churn_{}_{}.h5",
+        "hdf5_pure_free_space_churn_{}_{}_{}.h5",
         lifecycle.label(),
+        strategy.label(),
         base.label()
     ));
     let mut builder = FileBuilder::new();
     builder
         .create_dataset("sentinel")
         .with_i32_data(&[7, 11, 13, 17]);
-    builder.with_file_space_strategy(FileSpaceStrategy::FsmAggr, true, 1);
+    strategy.configure(&mut builder);
     let stamped = base.write(&path, builder);
     assert!(base.image_size(&path) <= MAX_FILE_BYTES);
 
@@ -1575,6 +1585,41 @@ impl Base {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Strategy {
+    FsmAggr,
+    Page,
+}
+
+impl Strategy {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::FsmAggr => "fsm-aggr",
+            Self::Page => "page",
+        }
+    }
+
+    fn snapshot(self, name: &str) -> String {
+        match self {
+            Self::FsmAggr => name.to_owned(),
+            Self::Page => format!("{name}_page"),
+        }
+    }
+
+    fn configure(self, builder: &mut FileBuilder) {
+        match self {
+            Self::FsmAggr => {
+                builder.with_file_space_strategy(FileSpaceStrategy::FsmAggr, true, 1);
+            }
+            Self::Page => {
+                builder
+                    .with_file_space_strategy(FileSpaceStrategy::Page, true, 1)
+                    .with_file_space_page_size(PAGE_BYTES);
+            }
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Lifecycle {
     ContinuousOpen,
@@ -1769,7 +1814,8 @@ impl Coverage {
 }
 
 const MAX_FILE_BYTES: u64 = 32 * 1024 * 1024;
-const USERBLOCK_BYTES: u64 = 4096;
+const USERBLOCK_BYTES: u64 = PAGE_BYTES;
+const PAGE_BYTES: u64 = 4096;
 const HEADROOM_BYTES: u64 = MAX_FILE_BYTES / 8;
 const HIGH_WATER_BYTES: u64 = MAX_FILE_BYTES - HEADROOM_BYTES;
 const LOW_WATER_BYTES: u64 = 24 * 1024 * 1024;

@@ -103,33 +103,26 @@ pub fn write_contiguous_i32(path: &Path, page_size: u64, persist: bool, len: i32
 
 /// Asserts the on-disk invariants of a paged file with persisted free-space managers.
 ///
-/// The file length and end-of-allocation are whole pages, the recorded page size matches
-/// `page_size`, and persisted free sections are non-overlapping and within the file.
+/// The file length less the userblock is a whole number of pages and equals the end-of-allocation,
+/// the recorded page size matches `page_size`, and persisted free sections do not overlap and end
+/// at or before the end-of-allocation.
 pub fn assert_consistent(path: &Path, page_size: u64) {
-    let bytes = std::fs::read(path).unwrap();
-    assert_eq!(
-        bytes.len() as u64 % page_size,
-        0,
-        "file is a whole number of pages"
-    );
-
     let file = File::open(path).unwrap();
+    let eoa = std::fs::metadata(path).unwrap().len() - file.superblock().base_address.get();
+    assert_eq!(eoa % page_size, 0, "file is a whole number of pages");
+
     assert_eq!(file.file_space_strategy(), Some(FileSpaceStrategy::Page));
     let info = file.file_space_info().expect("records a strategy");
     assert!(info.persist, "still persisting");
     assert_eq!(info.page_size.get(), page_size);
-    assert_eq!(info.eoa_pre_fsm % page_size, 0, "EOA page-aligned");
-    assert_eq!(info.eoa_pre_fsm, bytes.len() as u64, "EOA == file size");
+    assert_eq!(info.eoa_pre_fsm, eoa, "EOA == file size less the userblock");
 
     let mut free = file.persisted_free_space().unwrap();
     free.sort_by_key(|&(address, _)| address);
     let mut previous_end = 0u64;
     for (address, length) in free {
         assert!(address >= previous_end, "sections do not overlap");
-        assert!(
-            address + length <= bytes.len() as u64,
-            "section within the file"
-        );
+        assert!(address + length <= eoa, "section within the file");
         previous_end = address + length;
     }
 }
@@ -145,6 +138,7 @@ pub fn assert_consistent(path: &Path, page_size: u64) {
 pub fn assert_pages_homogeneous(path: &Path, page: u64, datasets: &[&str]) {
     let bytes = std::fs::read(path).unwrap();
     let f = File::open(path).unwrap();
+    let base = f.superblock().base_address.get();
     let mut raw = Vec::new();
     for name in datasets {
         raw.extend(file_space::raw_extents(&f, name));
@@ -157,8 +151,8 @@ pub fn assert_pages_homogeneous(path: &Path, page: u64, datasets: &[&str]) {
         if extent.is_empty() {
             continue;
         }
-        let first = extent.start / page;
-        let last = (extent.end - 1) / page;
+        let first = (extent.start - base) / page;
+        let last = (extent.end - 1 - base) / page;
         for p in first..=last {
             raw_pages.push(p);
         }
@@ -167,8 +161,8 @@ pub fn assert_pages_homogeneous(path: &Path, page: u64, datasets: &[&str]) {
     raw_pages.dedup();
 
     for p in raw_pages {
-        let start = (p * page) as usize;
-        let end = ((p + 1) * page).min(bytes.len() as u64) as usize;
+        let start = (base + p * page) as usize;
+        let end = (base + (p + 1) * page).min(bytes.len() as u64) as usize;
         let window = &bytes[start..end];
         for sig in METADATA_SIGNATURES {
             assert!(

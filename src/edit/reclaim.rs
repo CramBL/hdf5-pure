@@ -347,21 +347,17 @@ impl WriteEngine {
             LENGTH_SIZE,
         )
         .ok()?;
-        let allocations = storage
+        let allocations: Vec<_> = storage
             .allocations()
             .iter()
-            .map(|&(extent, kind)| {
-                Some((
-                    base.absolute(StoredAddress::new(extent.start())).ok()?,
-                    extent.len(),
-                    kind,
-                ))
+            .map(|&(extent, kind)| (extent.start(), extent.len(), kind))
+            .collect();
+        fractal_heap_free_spans(self.space.page_size(), &allocations)
+            .into_iter()
+            .map(|(addr, len, class)| {
+                Some((base.absolute(StoredAddress::new(addr)).ok()?, len, class))
             })
-            .collect::<Option<Vec<_>>>()?;
-        Some(fractal_heap_free_spans(
-            self.space.page_size(),
-            &allocations,
-        ))
+            .collect()
     }
 
     /// Count, for every object-header address reachable from the root, how many
@@ -840,7 +836,11 @@ impl WriteEngine {
             None => true,
             Some(page_size) => {
                 index_abuts_chunk_data(data, index)
-                    && !touches_page_zero(page_size, index.iter().copied())
+                    && index.iter().all(|&(at, len)| {
+                        self.addresses.relative(at).is_ok_and(|stored| {
+                            !touches_page_zero(page_size, [(stored.get(), len)])
+                        })
+                    })
             }
         }
     }
@@ -1282,8 +1282,9 @@ pub(super) fn index_abuts_chunk_data(data: &[(u64, u64)], index: &[(u64, u64)]) 
     })
 }
 
-/// Returns whether any byte of `spans` lies in page 0 of a paged file, whose first bytes are the
-/// superblock, so page 0 is a metadata page.
+/// Returns whether any byte of `spans`, in stored addresses, lies in page 0 of a paged file.
+///
+/// Page 0 begins at the base address with the superblock, so it is a metadata page.
 ///
 /// [`WriteEngine::index_is_provably_raw`], whose doc gives the reasoning, screens a chunk index
 /// with it. [`huge_object_free_class`] screens a run of huge objects with it.
@@ -1298,12 +1299,13 @@ pub(super) fn touches_page_zero(
 
 /// Tags each fractal heap allocation with the free class of the page it occupies.
 ///
-/// `allocations` is sorted by address, as [`FractalHeapStorage::allocations`] returns it. Without
-/// `page_size`, each allocation takes [`FractalHeapAllocation::page_type`]. On a paged file an
-/// allocation of a page or more that begins on a page boundary is dead, since the C library
-/// allocates it as whole pages of neither type. Of the rest, the header, the managed blocks, and
-/// the huge-object index are metadata, and a huge object takes the class
-/// [`huge_object_free_class`] gives the run of adjoining allocations around it.
+/// `allocations` holds stored addresses sorted by address, as [`FractalHeapStorage::allocations`]
+/// returns them. Without `page_size`, each allocation takes
+/// [`FractalHeapAllocation::page_type`]. On a paged file an allocation of a page or more that
+/// begins on a page boundary is dead, since the C library allocates it as whole pages of neither
+/// type. Of the rest, the header, the managed blocks, and the huge-object index are metadata, and
+/// a huge object takes the class [`huge_object_free_class`] gives the run of adjoining allocations
+/// around it.
 ///
 /// [`FractalHeapStorage::allocations`]: crate::fractal_heap_storage::FractalHeapStorage::allocations
 fn fractal_heap_free_spans(
