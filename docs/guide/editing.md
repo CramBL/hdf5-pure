@@ -674,6 +674,12 @@ Everything a commit writes can go into freed space: object headers, contiguous d
 
 Contiguous and chunked datasets (chunk index plus chunk data) and whole group subtrees, with compact or dense link storage, are reclaimed. Version 2 B-tree chunk indexes are reclaimed with their raw chunk allocations. Dense attribute and link storage that becomes dead is reclaimed: its name index, its optional creation-order index, and its fractal heap. On a paged file all of these B-tree blocks remain metadata, while dataset chunks remain raw data. Reclaim is best-effort: storage whose blocks cannot be enumerated exhaustively, such as a variable-length global heap collection or a fractal heap that is filtered or has its own free-space manager, is left as dead bytes, which never risks freeing a region still in use.
 
+Before editing or reclaiming a checksummed fractal-heap direct block, the editor validates the
+complete block's checksum, including when the `checksum` feature is disabled. Read-only heap
+object lookups may read only a block prefix and the object bytes. Those bounded reads
+validate structural fields and object bounds without establishing the complete block's checksum
+integrity.
+
 On a paged file ([`FileSpaceStrategy::Page`](crate::FileSpaceStrategy::Page)) an allocation is served from free space of the page type it is writing, or from a page that is wholly free, since a page with nothing in it has no type to contradict, so reuse cannot make metadata and raw data share a page. Freed space whose page type cannot be established, a whole-file-generic free section recorded by another writer, or a chunk index that writer placed among its metadata, is recorded and never handed out, which costs some space and keeps the page separation.
 
 On any file that persists its free space, the blocks a commit rewrites to record it, the superblock extension and the free-space managers themselves, are placed in free space where any fits, and appended only when none does. Each commit supersedes the previous set, so in the steady state a commit's blocks land in space an earlier commit's vacated, and a delete-and-recreate workload holds the file at its size, where each commit would otherwise add a set (paged: a page). When a commit had to append those blocks *above* the run it just freed, the shape a delete leaves, it moves them down into that run in a second, tail-only rewrite and truncates to them, which is how the delete-then-commit case gives its space back within the same session.

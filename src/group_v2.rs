@@ -14,17 +14,18 @@ use hdf5_pure_space::__private::Extent;
 
 use crate::access_mode::AccessMode;
 #[cfg(test)]
+use crate::address::BaseAddress;
+#[cfg(test)]
+use crate::address::BaseAddressExt;
+#[cfg(test)]
 use crate::address::StoredAddressExt;
 use crate::address::{AddressContext, StoredAddress};
-#[cfg(test)]
-use crate::address::{BaseAddress, BaseAddressExt};
 use crate::btree_v2::{
     BTreeV2Header, collect_btree_v2_records, collect_btree_v2_records_from_source,
 };
 use crate::convert::Narrow;
 use crate::dense_storage::{self, DenseIndex};
 use crate::error::{FormatError, ResolveError};
-use crate::fractal_heap::FractalHeapHeader;
 use crate::fractal_heap::HeapObjectReader;
 use crate::group_v1::{self, GroupEntry};
 use crate::link_info::LinkInfoMessage;
@@ -92,7 +93,8 @@ pub(crate) fn collect_dense_group_index_storage_extents<S: Source + ?Sized>(
 /// them in a fractal heap indexed by a version 2 B-tree. A soft or external link is passed over:
 /// it identifies no object header in this file. The dense walk reads through a view of `file_data`
 /// framed at the effective base in `addresses`, so the heap and index addresses of the Link Info
-/// message index that view directly.
+/// message index that view directly. Read-write access requires complete checksum validation
+/// before reading a checksummed direct block's objects.
 ///
 /// # Errors
 ///
@@ -100,6 +102,7 @@ pub(crate) fn collect_dense_group_index_storage_extents<S: Source + ?Sized>(
 /// name index address, and the [`FormatError`] of the first structure that does not parse.
 pub fn resolve_v2_group_entries(
     file_data: &[u8],
+    access_mode: AccessMode,
     object_header: &ObjectHeader,
     offset_size: u8,
     length_size: u8,
@@ -111,7 +114,15 @@ pub fn resolve_v2_group_entries(
     if let Some(fh_addr) = link_info.fractal_heap_address {
         // Dense storage
         let framed = frame(file_data, addresses.effective_base())?;
-        resolve_dense_entries(framed, &link_info, fh_addr, offset_size, length_size)
+        resolve_dense_entries(
+            framed,
+            access_mode,
+            addresses,
+            &link_info,
+            fh_addr,
+            offset_size,
+            length_size,
+        )
     } else {
         // Compact storage: links are stored directly as Link messages
         resolve_compact_entries(object_header, offset_size)
@@ -233,10 +244,17 @@ pub(crate) fn find_child_address(
     }
     ChildLookup::of(
         addresses,
-        resolve_group_entries(file_data, &header, offset_size, length_size, addresses)?
-            .into_iter()
-            .find(|e| e.name == name.as_str())
-            .map(|e| e.object_header_address),
+        resolve_group_entries(
+            file_data,
+            access_mode,
+            &header,
+            offset_size,
+            length_size,
+            addresses,
+        )?
+        .into_iter()
+        .find(|e| e.name == name.as_str())
+        .map(|e| e.object_header_address),
     )
 }
 
@@ -271,10 +289,17 @@ pub(crate) fn find_child_address_from_source<S: Source + ?Sized>(
     }
     ChildLookup::of(
         addresses,
-        resolve_group_entries_from_source(source, &header, offset_size, length_size, addresses)?
-            .into_iter()
-            .find(|e| e.name == name.as_str())
-            .map(|e| e.object_header_address),
+        resolve_group_entries_from_source(
+            source,
+            access_mode,
+            &header,
+            offset_size,
+            length_size,
+            addresses,
+        )?
+        .into_iter()
+        .find(|e| e.name == name.as_str())
+        .map(|e| e.object_header_address),
     )
 }
 
@@ -377,7 +402,8 @@ fn scan_compact_links(
 /// Returns one entry per hard link of a group's dense storage: the fractal heap at `fh_addr`, read
 /// through the name index in `link_info`.
 ///
-/// `file_data` is framed at the file's base address, so both addresses index it directly.
+/// `file_data` is framed at the effective base in `addresses`. Read-write access requires
+/// complete checksum validation before reading a checksummed direct block's objects.
 ///
 /// # Errors
 ///
@@ -385,18 +411,16 @@ fn scan_compact_links(
 /// and the [`FormatError`] of the first structure that does not parse.
 fn resolve_dense_entries(
     file_data: &[u8],
+    access_mode: AccessMode,
+    addresses: AddressContext,
     link_info: &LinkInfoMessage,
     fh_addr: StoredAddress,
     offset_size: u8,
     length_size: u8,
 ) -> Result<Vec<GroupEntry>, FormatError> {
     // Parse fractal heap
-    let fh = FractalHeapHeader::parse(
-        file_data,
-        fh_addr.get().to_usize()?,
-        offset_size,
-        length_size,
-    )?;
+    let fh =
+        crate::fractal_heap::parse_header(file_data, addresses, fh_addr, offset_size, length_size)?;
 
     // Parse B-tree v2 for name index
     let btree_addr = link_info
@@ -415,7 +439,14 @@ fn resolve_dense_entries(
         OffsetWidth::try_from(offset_size)?,
         LengthWidth::try_from(length_size)?,
     );
-    let mut heap = HeapObjectReader::new(&fh, offset_size, length_size);
+    let mut heap = HeapObjectReader::new(
+        &fh,
+        addresses,
+        fh_addr,
+        access_mode,
+        offset_size,
+        length_size,
+    );
     let mut entries = Vec::new();
     for record in &records {
         let Some(id_bytes) = record.link_heap_id(btree_hdr.tree_type, fh.heap_id_length) else {
@@ -551,6 +582,7 @@ pub fn resolve_path_any(
 /// [`FormatError`] of the first structure of the group that does not parse.
 pub fn resolve_group_entries(
     file_data: &[u8],
+    access_mode: AccessMode,
     object_header: &ObjectHeader,
     offset_size: u8,
     length_size: u8,
@@ -568,6 +600,7 @@ pub fn resolve_group_entries(
     } else if is_v2_group(object_header) {
         resolve_v2_group_entries(
             file_data,
+            access_mode,
             object_header,
             offset_size,
             length_size,
@@ -646,6 +679,7 @@ pub fn resolve_path_any_from_source<S: Source + ?Sized>(
 /// it cannot read.
 pub fn resolve_group_entries_from_source<S: Source + ?Sized>(
     source: &S,
+    access_mode: AccessMode,
     object_header: &ObjectHeader,
     offset_size: u8,
     length_size: u8,
@@ -668,6 +702,7 @@ pub fn resolve_group_entries_from_source<S: Source + ?Sized>(
     } else if is_v2_group(object_header) {
         resolve_v2_group_entries_from_source(
             source,
+            access_mode,
             object_header,
             offset_size,
             length_size,
@@ -688,6 +723,7 @@ pub fn resolve_group_entries_from_source<S: Source + ?Sized>(
 /// structure it cannot read.
 fn resolve_v2_group_entries_from_source<S: Source + ?Sized>(
     source: &S,
+    access_mode: AccessMode,
     object_header: &ObjectHeader,
     offset_size: u8,
     length_size: u8,
@@ -701,6 +737,7 @@ fn resolve_v2_group_entries_from_source<S: Source + ?Sized>(
         };
         resolve_dense_entries_from_source(
             &framed,
+            access_mode,
             addresses,
             &link_info,
             fh_addr,
@@ -724,6 +761,7 @@ fn resolve_v2_group_entries_from_source<S: Source + ?Sized>(
 /// it cannot read.
 pub(crate) fn resolve_dense_entries_from_source<S: Source + ?Sized>(
     source: &S,
+    access_mode: AccessMode,
     addresses: AddressContext,
     link_info: &LinkInfoMessage,
     fh_addr: StoredAddress,
@@ -755,7 +793,14 @@ pub(crate) fn resolve_dense_entries_from_source<S: Source + ?Sized>(
         OffsetWidth::try_from(offset_size)?,
         LengthWidth::try_from(length_size)?,
     );
-    let mut heap = HeapObjectReader::new(&fh, offset_size, length_size);
+    let mut heap = HeapObjectReader::new(
+        &fh,
+        addresses,
+        fh_addr,
+        access_mode,
+        offset_size,
+        length_size,
+    );
     let mut entries = Vec::new();
     for record in &records {
         let Some(id_bytes) = record.link_heap_id(btree_hdr.tree_type, fh.heap_id_length) else {
@@ -996,10 +1041,11 @@ mod tests {
 
         let entries = resolve_v2_group_entries(
             &[],
+            AccessMode::ReadOnly,
             &oh,
             8,
             8,
-            AddressContext::from_effective_base(BaseAddress::ZERO),
+            AddressContext::from_effective_base(BaseAddress::new(0)),
         )
         .unwrap();
         assert_eq!(entries.len(), 1);
@@ -1354,7 +1400,7 @@ mod tests {
         let (chunk_at, chunk_len) = crate::edit::read_oh_chunks(
             &crate::source::BytesSource::new(&bytes[..]),
             root_oh as u64,
-            AddressContext::from_effective_base(BaseAddress::ZERO),
+            AddressContext::from_effective_base(BaseAddress::new(0)),
         )
         .expect("the root header is readable")[0]
             .span;
@@ -1450,8 +1496,16 @@ mod huge_link_tests {
         let (link_info, fh_addr, offset_size, length_size) = dense_link_info(&bytes);
 
         reset_huge_index_decodes();
-        let buffered =
-            resolve_dense_entries(&bytes, &link_info, fh_addr, offset_size, length_size).unwrap();
+        let buffered = resolve_dense_entries(
+            &bytes,
+            AccessMode::ReadOnly,
+            AddressContext::from_effective_base(BaseAddress::new(0)),
+            &link_info,
+            fh_addr,
+            offset_size,
+            length_size,
+        )
+        .unwrap();
         assert_eq!(buffered.len(), COUNT, "the walk must still read every link");
         assert_eq!(
             huge_index_decodes(),
@@ -1463,7 +1517,8 @@ mod huge_link_tests {
         let source = BytesSource::new(bytes);
         let streamed = resolve_dense_entries_from_source(
             &source,
-            AddressContext::from_effective_base(BaseAddress::ZERO),
+            AccessMode::ReadOnly,
+            AddressContext::from_effective_base(BaseAddress::new(0)),
             &link_info,
             fh_addr,
             offset_size,

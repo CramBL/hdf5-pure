@@ -1,17 +1,20 @@
 //! Proves the complete set of file allocations owned by supported fractal heaps.
 //!
 //! The ownership walk is read-only and operates through [`Source`]. It uses the validated
-//! [`FractalHeapLayout`] from `hdf5-pure-format` for managed-block geometry while keeping I/O and
-//! ownership policy in this crate.
+//! [`FractalHeapBlockLayout`] for managed-block references. Checksummed direct blocks require
+//! complete checksum validation before the walker records their ownership.
 
 use alloc::collections::BTreeSet;
 use alloc::vec;
 use alloc::vec::Vec;
 
+use hdf5_pure_core::__private::FileRegion;
 use hdf5_pure_format::__private::BTREE_V2_HUGE_OBJECT;
 use hdf5_pure_format::__private::BTREE_V2_HUGE_OBJECT_DIRECT;
-use hdf5_pure_format::__private::FRACTAL_HEAP_DIRECT_BLOCKS_CHECKSUMMED;
+use hdf5_pure_format::__private::FractalHeapBlock;
+use hdf5_pure_format::__private::FractalHeapBlockLayout;
 use hdf5_pure_format::__private::FractalHeapHeader;
+#[cfg(any(test, doc))]
 use hdf5_pure_format::__private::FractalHeapLayout;
 use hdf5_pure_format::__private::FractalHeapLayoutError;
 use hdf5_pure_format::__private::HugeObjectDirectRecord;
@@ -22,11 +25,11 @@ use hdf5_pure_space::__private::PageType;
 
 use crate::address::AddressContext;
 use crate::address::StoredAddress;
+#[cfg(test)]
 use crate::address::StoredAddressExt;
 #[cfg(test)]
 use crate::address::{BaseAddress, BaseAddressExt};
 use crate::btree_v2::{BTreeV2Header, collect_btree_v2_records_from_source};
-use crate::bytes;
 use crate::convert::{Narrow, is_undefined_addr};
 use crate::error::FormatError;
 #[cfg(test)]
@@ -122,38 +125,23 @@ impl FractalHeapAllocation {
     }
 }
 
-/// Builds the complete ownership proof for the fractal heap at `heap_header_address`.
+/// Proves the complete allocation set for the heap at `heap_header_address`.
 ///
 /// `source` is framed at the effective base in `addresses`. Owned extents use base-relative
-/// coordinates.
-///
-/// The read-only walk operates directly on [`Source`]. It bounds each complete allocation before
-/// reading its structural bytes and does not read managed-object or huge-object payload contents to
-/// establish ownership. Success accounts for the heap header, every allocated managed block, and
-/// the complete huge-object index and payload set.
-///
-/// Filtered heaps are outside the supported ownership set because their managed-space
-/// indirect-block entries use the filtered layout. A heap with a defined managed-space free-space
-/// manager is also unsupported because this walker does not enumerate that manager's
-/// client-specific metadata. Tiny objects require no allocation walk because their bytes are stored
-/// in heap IDs.
-///
-/// The owned structures are defined in "Fractal Heap" of the [format specification, version
-/// 4.0][spec]. This ownership boundary follows `H5HF_delete` and `H5HF__hdr_delete`, which treat
-/// the managed blocks, managed-space free-space manager, huge-object tracker and payloads, and heap
-/// header as one heap's storage (`H5HFhdr.c`, HDF5 2.2.0).
+/// coordinates. The walker bounds every allocation and parses managed blocks through
+/// [`FractalHeapBlockLayout`]. Checksummed direct blocks are read and validated in full,
+/// regardless of the `checksum` feature. Direct blocks without checksums require only their prefix.
+/// Huge-object payload contents are omitted from the reads.
 ///
 /// # Errors
 ///
-/// Returns [`FractalHeapStorageError::UnsupportedOwnership`] for a filtered heap or a defined
-/// managed-space free-space manager. Malformed doubling-table geometry returns
-/// [`FractalHeapStorageError::Layout`]. Duplicate managed-block addresses, inconsistent block
-/// prefixes, contradictory empty-heap bookkeeping, an unexpected huge-object index layout,
-/// invalid huge-object payload addresses, huge-object accounting mismatches, and overlapping owned
-/// allocations return [`FractalHeapStorageError::InvalidStorage`]. Truncated allocations and
-/// lower-level parser errors are wrapped in [`FractalHeapStorageError::Format`].
-///
-/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsec_fmt4_infra_fractalheap
+/// Returns [`FractalHeapStorageError::UnsupportedOwnership`] for filtered managed blocks or a
+/// defined managed-space free-space manager. Returns [`FractalHeapStorageError::InvalidStorage`]
+/// for duplicate blocks, contradictory allocation accounting, an unexpected huge-object index
+/// layout, or overlapping allocations. Returns [`FractalHeapStorageError::Layout`] for invalid
+/// layout calculations and [`FractalHeapStorageError::Format`] for parser or source errors,
+/// including malformed block geometry, incorrect heap-header owner addresses, truncated
+/// allocations, and invalid checksums.
 pub(crate) fn collect_fractal_heap_storage_from_source<S: Source + ?Sized>(
     source: &S,
     addresses: AddressContext,
@@ -175,7 +163,8 @@ pub(crate) fn collect_fractal_heap_storage_from_source<S: Source + ?Sized>(
             "filtered managed blocks",
         ));
     }
-    let layout = FractalHeapLayout::new(&header, offset_width, length_width)?;
+    let blocks =
+        FractalHeapBlockLayout::new(&header, offset_width, length_width, heap_header_address)?;
     if !is_undefined_addr(
         header.managed_block_free_space_manager_address.get(),
         offset_size,
@@ -195,14 +184,8 @@ pub(crate) fn collect_fractal_heap_storage_from_source<S: Source + ?Sized>(
         FractalHeapAllocation::Header,
     )];
 
-    let mut managed = ManagedStorageWalk::new(
-        source,
-        &header,
-        &layout,
-        heap_header_address,
-        offset_size,
-        &mut allocations,
-    );
+    let mut managed =
+        ManagedStorageWalk::new(source, addresses, &header, &blocks, &mut allocations);
     managed.collect()?;
 
     collect_huge_storage(
@@ -242,26 +225,11 @@ fn collect_fractal_heap_storage(
     )
 }
 
-#[derive(Clone, Copy)]
-enum ManagedBlock {
-    Direct {
-        address: StoredAddress,
-        block_size: u64,
-        heap_offset: u64,
-    },
-    Indirect {
-        address: StoredAddress,
-        nrows: u16,
-        heap_offset: u64,
-    },
-}
-
 struct ManagedStorageWalk<'a, 'e, S: Source + ?Sized> {
     source: &'a S,
+    addresses: AddressContext,
     header: &'a FractalHeapHeader,
-    layout: &'a FractalHeapLayout,
-    heap_header_address: StoredAddress,
-    offset_size: u8,
+    blocks: &'a FractalHeapBlockLayout,
     visited: BTreeSet<StoredAddress>,
     allocations: &'e mut Vec<(Extent, FractalHeapAllocation)>,
     allocated_direct_space: u64,
@@ -270,27 +238,24 @@ struct ManagedStorageWalk<'a, 'e, S: Source + ?Sized> {
 impl<'a, 'e, S: Source + ?Sized> ManagedStorageWalk<'a, 'e, S> {
     fn new(
         source: &'a S,
+        addresses: AddressContext,
         header: &'a FractalHeapHeader,
-        layout: &'a FractalHeapLayout,
-        heap_header_address: StoredAddress,
-        offset_size: u8,
+        blocks: &'a FractalHeapBlockLayout,
         allocations: &'e mut Vec<(Extent, FractalHeapAllocation)>,
     ) -> Self {
         Self {
             source,
+            addresses,
             header,
-            layout,
-            heap_header_address,
-            offset_size,
-            visited: BTreeSet::new(),
+            blocks,
             allocations,
+            visited: BTreeSet::new(),
             allocated_direct_space: 0,
         }
     }
 
     fn collect(&mut self) -> Result<(), FractalHeapStorageError> {
-        let root = self.header.root_block_address;
-        if is_undefined_addr(root.get(), self.offset_size) {
+        let Some(first) = self.blocks.root()? else {
             if self.header.current_rows_in_root_indirect_block != 0
                 || self.header.free_space_in_managed_blocks != 0
                 || self.header.managed_space != 0
@@ -301,231 +266,76 @@ impl<'a, 'e, S: Source + ?Sized> ManagedStorageWalk<'a, 'e, S> {
                 return Err(FractalHeapStorageError::InvalidStorage);
             }
             return Ok(());
-        }
-
-        let first = if self.header.current_rows_in_root_indirect_block == 0 {
-            let block_size = self.layout.block_size_for_row(0)?;
-            if self.header.managed_space != block_size {
-                return Err(FractalHeapStorageError::InvalidStorage);
-            }
-            ManagedBlock::Direct {
-                address: root,
-                block_size,
-                heap_offset: 0,
-            }
-        } else {
-            if self.header.current_rows_in_root_indirect_block > self.layout.max_root_rows()
-                || self.header.managed_space
-                    != self
-                        .layout
-                        .indirect_heap_size(self.header.current_rows_in_root_indirect_block)?
-            {
-                return Err(FractalHeapStorageError::InvalidStorage);
-            }
-            ManagedBlock::Indirect {
-                address: root,
-                nrows: self.header.current_rows_in_root_indirect_block,
-                heap_offset: 0,
+        };
+        let span = match first {
+            FractalHeapBlock::Direct(block) => block.decoded_size(),
+            FractalHeapBlock::Indirect(block) => {
+                self.blocks.layout().indirect_heap_size(block.rows())?
             }
         };
-
+        if self.header.managed_space != span {
+            return Err(FractalHeapStorageError::InvalidStorage);
+        }
         let mut pending = vec![first];
         while let Some(block) = pending.pop() {
             let address = match block {
-                ManagedBlock::Direct { address, .. } | ManagedBlock::Indirect { address, .. } => {
-                    address
-                }
+                FractalHeapBlock::Direct(block) => block.address(),
+                FractalHeapBlock::Indirect(block) => block.address(),
             };
             if !self.visited.insert(address) {
                 return Err(FractalHeapStorageError::InvalidStorage);
             }
-
             match block {
-                ManagedBlock::Direct {
-                    address,
-                    block_size,
-                    heap_offset,
-                } => self.collect_direct(address, block_size, heap_offset)?,
-                ManagedBlock::Indirect {
-                    address,
-                    nrows,
-                    heap_offset,
-                } => self.collect_indirect(address, nrows, heap_offset, &mut pending)?,
+                FractalHeapBlock::Direct(block) => {
+                    let reference = block.at(self.addresses.resolve(address)?)?;
+                    let extent =
+                        extent_in_source(self.source, address.get(), reference.range().length())?;
+                    let range = if self.header.flags
+                        & hdf5_pure_format::__private::FRACTAL_HEAP_DIRECT_BLOCKS_CHECKSUMMED
+                        != 0
+                    {
+                        reference.parse_range()
+                    } else {
+                        reference.prefix_range()?
+                    };
+                    let bytes =
+                        crate::fractal_heap::read_header_range(self.source, self.addresses, range)?;
+                    let region = FileRegion::new(range, &bytes)?;
+                    if self.header.flags
+                        & hdf5_pure_format::__private::FRACTAL_HEAP_DIRECT_BLOCKS_CHECKSUMMED
+                        != 0
+                    {
+                        reference.parse_checked(region)?;
+                    } else {
+                        reference.parse_prefix(region)?;
+                    }
+                    self.allocations
+                        .push((extent, FractalHeapAllocation::DirectBlock));
+                    self.allocated_direct_space = self
+                        .allocated_direct_space
+                        .checked_add(block.decoded_size())
+                        .ok_or(FractalHeapStorageError::InvalidStorage)?;
+                }
+                FractalHeapBlock::Indirect(block) => {
+                    let reference = block.at(self.addresses.resolve(address)?)?;
+                    let range = reference.parse_range();
+                    let extent = extent_in_source(self.source, address.get(), range.length())?;
+                    let bytes =
+                        crate::fractal_heap::read_header_range(self.source, self.addresses, range)?;
+                    let view = reference.parse(FileRegion::new(range, &bytes)?)?;
+                    self.allocations
+                        .push((extent, FractalHeapAllocation::IndirectBlock));
+                    for child in view.children() {
+                        pending.push(child?);
+                    }
+                }
             }
         }
-
         if self.allocated_direct_space != self.header.allocated_managed_space {
             return Err(FractalHeapStorageError::InvalidStorage);
         }
         Ok(())
     }
-
-    fn collect_direct(
-        &mut self,
-        address: StoredAddress,
-        block_size: u64,
-        heap_offset: u64,
-    ) -> Result<(), FractalHeapStorageError> {
-        let block_offset_size = self.layout.block_offset_size();
-        let prefix_len = 5usize
-            .checked_add(usize::from(self.offset_size))
-            .and_then(|n| n.checked_add(block_offset_size))
-            .ok_or(FractalHeapStorageError::InvalidStorage)?;
-        let encoded_prefix_len = prefix_len
-            + if self.header.flags & FRACTAL_HEAP_DIRECT_BLOCKS_CHECKSUMMED != 0 {
-                4
-            } else {
-                0
-            };
-        if block_size
-            < u64::try_from(encoded_prefix_len)
-                .map_err(|_conversion_error| FractalHeapStorageError::InvalidStorage)?
-        {
-            return Err(FractalHeapStorageError::InvalidStorage);
-        }
-
-        let extent = extent_in_source(self.source, address.get(), block_size)?;
-        let prefix = self.source.read_metadata_at(address.get(), prefix_len)?;
-        validate_managed_block_prefix(
-            &prefix,
-            b"FHDB",
-            self.heap_header_address,
-            heap_offset,
-            self.offset_size,
-            block_offset_size,
-        )?;
-        self.allocations
-            .push((extent, FractalHeapAllocation::DirectBlock));
-        self.allocated_direct_space = self
-            .allocated_direct_space
-            .checked_add(block_size)
-            .ok_or(FractalHeapStorageError::InvalidStorage)?;
-        Ok(())
-    }
-
-    fn collect_indirect(
-        &mut self,
-        address: StoredAddress,
-        nrows: u16,
-        heap_offset: u64,
-        pending: &mut Vec<ManagedBlock>,
-    ) -> Result<(), FractalHeapStorageError> {
-        let block_size = self.layout.indirect_block_size(nrows)?;
-        let extent = extent_in_source(self.source, address.get(), block_size)?;
-        let block = self
-            .source
-            .read_metadata_at(address.get(), block_size.to_usize()?)?;
-        let block_offset_size = self.layout.block_offset_size();
-        validate_managed_block_prefix(
-            &block,
-            b"FHIB",
-            self.heap_header_address,
-            heap_offset,
-            self.offset_size,
-            block_offset_size,
-        )?;
-        hdf5_pure_format::__private::verify_trailing(&block)?;
-        self.allocations
-            .push((extent, FractalHeapAllocation::IndirectBlock));
-
-        let width = self.layout.table_width();
-        let direct_rows = usize::from(nrows).min(self.layout.direct_rows());
-        let entries_at = 5usize
-            .checked_add(usize::from(self.offset_size))
-            .and_then(|n| n.checked_add(block_offset_size))
-            .ok_or(FractalHeapStorageError::InvalidStorage)?;
-        let heap_limit =
-            (self.header.max_heap_size < 64).then(|| 1u64 << u32::from(self.header.max_heap_size));
-
-        for row in 0..usize::from(nrows) {
-            let slot_size = self.layout.block_size_for_row(row)?;
-            let child_rows = if row < direct_rows {
-                None
-            } else {
-                let child_rows = self.layout.child_indirect_rows(row)?;
-                if child_rows >= nrows || self.layout.indirect_heap_size(child_rows)? != slot_size {
-                    return Err(FractalHeapStorageError::InvalidStorage);
-                }
-                Some(child_rows)
-            };
-            for col in 0..width {
-                let entry = row
-                    .checked_mul(width)
-                    .and_then(|n| n.checked_add(col))
-                    .ok_or(FractalHeapStorageError::InvalidStorage)?;
-                let pos = entries_at
-                    .checked_add(
-                        entry
-                            .checked_mul(usize::from(self.offset_size))
-                            .ok_or(FractalHeapStorageError::InvalidStorage)?,
-                    )
-                    .ok_or(FractalHeapStorageError::InvalidStorage)?;
-                let child_address = bytes::read_offset(&block, pos, self.offset_size)?;
-                if is_undefined_addr(child_address, self.offset_size) {
-                    continue;
-                }
-
-                let child_offset = heap_offset
-                    .checked_add(self.layout.slot_offset(row, col)?)
-                    .ok_or(FractalHeapStorageError::InvalidStorage)?;
-                let child_end = child_offset
-                    .checked_add(slot_size)
-                    .ok_or(FractalHeapStorageError::InvalidStorage)?;
-                if heap_limit.is_some_and(|limit| child_end > limit) {
-                    return Err(FractalHeapStorageError::InvalidStorage);
-                }
-
-                pending.push(match child_rows {
-                    Some(child_rows) => ManagedBlock::Indirect {
-                        address: StoredAddress::new(child_address),
-                        nrows: child_rows,
-                        heap_offset: child_offset,
-                    },
-                    None => ManagedBlock::Direct {
-                        address: StoredAddress::new(child_address),
-                        block_size: slot_size,
-                        heap_offset: child_offset,
-                    },
-                });
-            }
-        }
-        Ok(())
-    }
-}
-
-fn validate_managed_block_prefix(
-    block: &[u8],
-    signature: &[u8; 4],
-    heap_header_address: StoredAddress,
-    heap_offset: u64,
-    offset_size: u8,
-    block_offset_size: usize,
-) -> Result<(), FractalHeapStorageError> {
-    bytes::ensure_len(block, 0, 5)?;
-    if &block[..4] != signature {
-        return Err(FormatError::InvalidFractalHeapSignature.into());
-    }
-    if block[4] != 0 {
-        return Err(FormatError::InvalidFractalHeapVersion(block[4]).into());
-    }
-    let stored_header = bytes::read_offset(block, 5, offset_size)?;
-    if stored_header != heap_header_address.get() {
-        return Err(FractalHeapStorageError::InvalidStorage);
-    }
-    let offset_at = 5 + usize::from(offset_size);
-    bytes::ensure_len(block, offset_at, block_offset_size)?;
-    let mut stored_offset = 0u64;
-    for (shift, byte) in block[offset_at..offset_at + block_offset_size]
-        .iter()
-        .copied()
-        .enumerate()
-    {
-        stored_offset |= u64::from(byte) << (shift * 8);
-    }
-    if stored_offset != heap_offset {
-        return Err(FractalHeapStorageError::InvalidStorage);
-    }
-    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -635,15 +445,10 @@ fn extent_in_source<S: Source + ?Sized>(
     Ok(extent)
 }
 
-/// Reads objects out of one fractal heap, holding the indexes that resolving
-/// them needs.
-///
-/// A managed or tiny object is resolved against the heap header alone. Huge objects use the heap's
-/// huge-objects B-tree. Every caller here walks a whole heap, so this type parses that index on the
-/// first huge object, reuses it for the remaining huge objects, and leaves it absent when the heap
-/// has none.
 #[cfg(test)]
 mod tests {
+    use core::cell::RefCell;
+
     use hdf5_pure_format::__private::FilterDescription;
     use hdf5_pure_format::__private::FilterPipeline;
     use hdf5_pure_format::__private::FractalHeapFiltering;
@@ -651,6 +456,11 @@ mod tests {
     use test_util::btree_v2;
     use test_util::fractal_heap;
     use test_util::widths::Widths;
+
+    use crate::access_mode::AccessMode;
+    use crate::address::OpenedImageContext;
+    use crate::fractal_heap::HeapObjectReader;
+    use crate::source::BaseOffsetSource;
 
     use super::*;
 
@@ -758,6 +568,250 @@ mod tests {
             STORAGE_WIDTH,
             STORAGE_WIDTH,
         )
+    }
+
+    #[rstest::rstest]
+    #[case::valid(false)]
+    #[case::corrupt(true)]
+    fn checksummed_direct_ownership_requires_complete_checksum_validation(#[case] corrupt: bool) {
+        let header = FractalHeapHeader {
+            flags: hdf5_pure_format::__private::FRACTAL_HEAP_DIRECT_BLOCKS_CHECKSUMMED,
+            root_block_address: StoredAddress::new(STORAGE_ROOT_AT),
+            managed_space: 128,
+            allocated_managed_space: 128,
+            ..storage_header()
+        };
+        let mut block = direct_block(0, 128);
+        block[19..].fill(0x5A);
+        let stored = crate::checksum::jenkins_lookup3(&block);
+        block[15..19].copy_from_slice(&stored.to_le_bytes());
+        if corrupt {
+            block[127] ^= 1;
+        }
+        let mut file = vec![0; 0x800];
+        place_storage_header(&mut file, &header);
+        place(&mut file, STORAGE_ROOT_AT, &block);
+        let source = PrefixSource {
+            bytes: &file,
+            reads: RefCell::new(Vec::new()),
+        };
+        let result = collect_fractal_heap_storage_from_source(
+            &source,
+            AddressContext::from_effective_base(BaseAddress::ZERO),
+            StoredAddress::new(STORAGE_HEAP_AT),
+            8,
+            8,
+        );
+        if corrupt {
+            block[15..19].fill(0);
+            assert_eq!(
+                result.unwrap_err(),
+                FractalHeapStorageError::Format(FormatError::ChecksumMismatch {
+                    expected: stored,
+                    computed: crate::checksum::jenkins_lookup3(&block),
+                })
+            );
+        } else {
+            assert_eq!(
+                result.unwrap().allocations()[1],
+                allocation(STORAGE_ROOT_AT, 128, FractalHeapAllocation::DirectBlock)
+            );
+        }
+        assert_eq!(
+            source.reads.borrow().last().copied(),
+            Some((STORAGE_ROOT_AT, 128))
+        );
+    }
+
+    #[test]
+    fn ownership_reads_only_prefixes_of_unchecksummed_direct_blocks() {
+        let header = FractalHeapHeader {
+            root_block_address: StoredAddress::new(STORAGE_ROOT_AT),
+            starting_block_size: 1 << 20,
+            max_direct_block_size: 4 << 20,
+            max_heap_size: 32,
+            managed_space: 1 << 20,
+            allocated_managed_space: 1 << 20,
+            ..storage_header()
+        };
+        let mut file = vec![0; STORAGE_ROOT_AT as usize + (1 << 20)];
+        place_storage_header(&mut file, &header);
+        let mut prefix = b"FHDB".to_vec();
+        prefix.push(0);
+        prefix.extend_from_slice(&STORAGE_HEAP_AT.to_le_bytes());
+        prefix.extend_from_slice(&0u32.to_le_bytes());
+        place(&mut file, STORAGE_ROOT_AT, &prefix);
+        let source = PrefixSource {
+            bytes: &file,
+            reads: RefCell::new(Vec::new()),
+        };
+        let storage = collect_fractal_heap_storage_from_source(
+            &source,
+            AddressContext::from_effective_base(BaseAddress::ZERO),
+            StoredAddress::new(STORAGE_HEAP_AT),
+            8,
+            8,
+        )
+        .unwrap();
+        assert_eq!(
+            storage.allocations()[1],
+            allocation(STORAGE_ROOT_AT, 1 << 20, FractalHeapAllocation::DirectBlock,)
+        );
+        assert_eq!(
+            *source.reads.borrow(),
+            vec![
+                (
+                    STORAGE_HEAP_AT,
+                    hdf5_pure_format::__private::FractalHeapHeaderFrame::PREFIX_LEN
+                ),
+                (
+                    STORAGE_HEAP_AT,
+                    FractalHeapHeader::serialized_size(OffsetWidth::Eight, LengthWidth::Eight)
+                ),
+                (STORAGE_ROOT_AT, prefix.len()),
+            ]
+        );
+    }
+
+    struct PrefixSource<'a> {
+        bytes: &'a [u8],
+        reads: RefCell<Vec<(u64, usize)>>,
+    }
+
+    impl Source for PrefixSource<'_> {
+        fn len(&self) -> u64 {
+            self.bytes.len() as u64
+        }
+        fn read_at(&self, offset: u64, bytes: &mut [u8]) -> Result<(), FormatError> {
+            BytesSource::new(self.bytes).read_at(offset, bytes)
+        }
+        fn read_metadata_at(&self, offset: u64, length: usize) -> Result<Vec<u8>, FormatError> {
+            self.reads.borrow_mut().push((offset, length));
+            BytesSource::new(self.bytes).read_metadata_at(offset, length)
+        }
+    }
+
+    #[rstest::rstest]
+    #[case::direct(0)]
+    #[case::indirect(2)]
+    #[case::nested(6)]
+    fn region_traversal_reads_managed_objects_at_the_effective_base(
+        #[case] rows: u16,
+        #[values(0, 512, 1024)] effective_base: usize,
+    ) {
+        const DIRECT: u64 = 0x1400;
+        const NESTED: u64 = 0x1000;
+        let mut header = storage_header();
+        header.root_block_address = StoredAddress::new(STORAGE_ROOT_AT);
+        header.current_rows_in_root_indirect_block = rows;
+        let offset = if rows == 6 {
+            storage_layout(&header).row_offset(5).unwrap()
+        } else {
+            0
+        };
+        let mut image = vec![0; 0x1800];
+        if rows != 0 {
+            place(
+                &mut image,
+                STORAGE_ROOT_AT,
+                &indirect_block(
+                    &header,
+                    0,
+                    rows,
+                    &[(
+                        if rows == 6 { 20 } else { 0 },
+                        if rows == 6 { NESTED } else { DIRECT },
+                    )],
+                ),
+            );
+        }
+        if rows == 6 {
+            place(
+                &mut image,
+                NESTED,
+                &indirect_block(&header, offset, 3, &[(0, DIRECT)]),
+            );
+        }
+        let direct_at = if rows == 0 { STORAGE_ROOT_AT } else { DIRECT };
+        let mut direct = direct_block(offset, 128);
+        direct[15..18].copy_from_slice(b"abc");
+        place(&mut image, direct_at, &direct);
+        let mut id = vec![0];
+        id.extend_from_slice(&u16::try_from(offset + 15).unwrap().to_le_bytes());
+        id.extend_from_slice(&3u32.to_le_bytes());
+        let ids = hdf5_pure_format::__private::FractalHeapIdLayout::new(
+            &header,
+            OffsetWidth::Eight,
+            LengthWidth::Eight,
+        );
+        let parsed = ids.parse(&id).unwrap();
+        let addresses = OpenedImageContext::reconcile(
+            BaseAddress::new(512),
+            image.len() as u64 + 512,
+            effective_base as u64,
+        )
+        .unwrap()
+        .addresses();
+        let buffered = HeapObjectReader::new(
+            &header,
+            addresses,
+            StoredAddress::new(STORAGE_HEAP_AT),
+            AccessMode::ReadOnly,
+            8,
+            8,
+        )
+        .read(&image, parsed)
+        .unwrap();
+        let mut physical = vec![0xFF; effective_base];
+        physical.extend_from_slice(&image);
+        let source = BytesSource::new(&physical);
+        let framed = BaseOffsetSource {
+            inner: &source,
+            base: addresses.effective_base(),
+        };
+        let streamed = HeapObjectReader::new(
+            &header,
+            addresses,
+            StoredAddress::new(STORAGE_HEAP_AT),
+            AccessMode::ReadOnly,
+            8,
+            8,
+        )
+        .read_from_source(&framed, parsed)
+        .unwrap();
+        assert_eq!(buffered, b"abc");
+        assert_eq!(streamed, buffered);
+    }
+
+    #[rstest::rstest]
+    #[case::direct(false)]
+    #[case::indirect(true)]
+    fn ownership_regions_reject_a_wrong_heap_backlink(#[case] indirect: bool) {
+        let header = FractalHeapHeader {
+            root_block_address: StoredAddress::new(STORAGE_ROOT_AT),
+            current_rows_in_root_indirect_block: if indirect { 2 } else { 0 },
+            managed_space: if indirect { 1024 } else { 128 },
+            allocated_managed_space: 128,
+            ..storage_header()
+        };
+        let mut block = if indirect {
+            indirect_block(&header, 0, 2, &[])
+        } else {
+            direct_block(0, 128)
+        };
+        block[5..13].copy_from_slice(&0x200u64.to_le_bytes());
+        let mut file = vec![0; 0x800];
+        place_storage_header(&mut file, &header);
+        place(&mut file, STORAGE_ROOT_AT, &block);
+        assert_eq!(
+            collect_storage(&file),
+            Err(FractalHeapStorageError::Format(
+                FormatError::InvalidFractalHeapBlockOwner {
+                    expected: STORAGE_HEAP_AT,
+                    actual: 0x200
+                },
+            ))
+        );
     }
 
     #[test]

@@ -14,7 +14,9 @@
 
 use std::collections::BTreeSet;
 
+use hdf5_pure::Error;
 use hdf5_pure::File;
+use hdf5_pure::FormatError;
 use hdf5_pure_core::__private::{BaseAddressExt, FileRange, FileRegion, PhysicalAddress};
 use hdf5_pure_core::{BaseAddress, StoredAddress};
 use hdf5_pure_format::__private::{
@@ -91,6 +93,7 @@ fn caller_supplied_regions_parse_c_written_heap_blocks(
     #[case] attributes: bool,
     #[case] minimum_indirect: usize,
     #[case] huge_only: bool,
+    #[values(false, true)] streaming: bool,
 ) {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("blocks.h5");
@@ -208,6 +211,28 @@ fn caller_supplied_regions_parse_c_written_heap_blocks(
         assert!(!direct.is_empty());
         assert_eq!(header.managed_objects_count, count as u64);
     }
+    let reader = if streaming {
+        File::open_streaming(&path)
+    } else {
+        File::open(&path)
+    }
+    .unwrap();
+    let group = reader.group("g").unwrap();
+    if attributes {
+        assert_eq!(group.attrs().unwrap().len(), count);
+    } else {
+        assert_eq!(group.datasets().unwrap().len(), count);
+        let index = count - 1;
+        let prefix = format!("d{index}_");
+        let name = format!(
+            "{prefix}{}",
+            "x".repeat(name_len.saturating_sub(prefix.len()))
+        );
+        assert_eq!(
+            group.dataset(&name).unwrap().read_i32().unwrap(),
+            vec![i32::try_from(index).unwrap()]
+        );
+    }
     let reopened = hdf5::File::open(&path).unwrap();
     let group = reopened.group("g").unwrap();
     assert_eq!(
@@ -219,3 +244,94 @@ fn caller_supplied_regions_parse_c_written_heap_blocks(
         count
     );
 }
+
+#[test]
+fn edits_reject_corrupt_checksummed_direct_blocks() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("corrupt_direct.h5");
+    write_dense_group(&path, 16);
+    let mut bytes = std::fs::read(&path).unwrap();
+    let positions = test_util::fractal_heap::header_offsets(&bytes);
+    assert_eq!(positions.len(), 1);
+    let at = positions[0];
+    let locator = FractalHeapHeaderLocator::new(
+        PhysicalAddress::new(at as u64),
+        OffsetWidth::Eight,
+        LengthWidth::Eight,
+    );
+    let image = FileRegion::new(
+        FileRange::new(PhysicalAddress::new(0), bytes.len() as u64).unwrap(),
+        &bytes,
+    )
+    .unwrap();
+    let reference = locator.parse(image).unwrap();
+    let header = reference.parse(image).unwrap();
+    let heap = FractalHeapBlockLayout::new(
+        &header,
+        OffsetWidth::Eight,
+        LengthWidth::Eight,
+        BaseAddress::ZERO.relative(at as u64).unwrap(),
+    )
+    .unwrap();
+    let Some(FractalHeapBlock::Direct(block)) = heap.root().unwrap() else {
+        panic!("expected direct root")
+    };
+    let reference = block
+        .at(PhysicalAddress::new(block.address().get()))
+        .unwrap();
+    let view = reference.parse_checked(image).unwrap();
+    let block_at = reference.range().start().get() as usize;
+    let block_end = reference.range().end().get() as usize;
+    let checksum_at = view.bytes().len() - view.data().len() - DIRECT_BLOCK_CHECKSUM_LEN;
+    let stored = u32::from_le_bytes(
+        view.bytes()[checksum_at..checksum_at + DIRECT_BLOCK_CHECKSUM_LEN]
+            .try_into()
+            .unwrap(),
+    );
+    bytes[block_end - 1] ^= 1;
+    let mut zeroed = bytes[block_at..block_end].to_vec();
+    zeroed[checksum_at..checksum_at + DIRECT_BLOCK_CHECKSUM_LEN].fill(0);
+    let computed = hdf5_pure_format::__private::jenkins_lookup3(&zeroed);
+    std::fs::write(&path, &bytes).unwrap();
+    assert_eq!(
+        File::open(&path)
+            .unwrap()
+            .dataset("g/d0")
+            .unwrap()
+            .read_i32()
+            .unwrap(),
+        vec![0]
+    );
+    assert_eq!(
+        File::open_streaming(&path)
+            .unwrap()
+            .dataset("g/d0")
+            .unwrap()
+            .read_i32()
+            .unwrap(),
+        vec![0]
+    );
+    {
+        let session = File::open_rw(&path).unwrap();
+        session.root().delete("g/d0").unwrap();
+        let error = session.commit().unwrap_err();
+        let Error::Format(error) = error else {
+            panic!("expected format error, got {error:?}")
+        };
+        assert_eq!(
+            error,
+            FormatError::ChecksumMismatch {
+                expected: stored,
+                computed
+            }
+        );
+    }
+    assert_eq!(
+        &std::fs::read(&path).unwrap()[block_at..block_end],
+        &bytes[block_at..block_end]
+    );
+}
+
+// "Fractal Heap" in the format specification, version 4.0, defines the four-byte
+// direct-block checksum.
+const DIRECT_BLOCK_CHECKSUM_LEN: usize = 4;

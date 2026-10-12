@@ -349,7 +349,14 @@ pub(crate) fn plan<S: Source + ?Sized>(
         if !outcome.header_located {
             saw_reference |= scan_parsed_header(src, &header, base, relocations, &mut plan);
         }
-        let Ok(entries) = resolve_group_entries_from_source(src, &header, os, ls, addresses) else {
+        let Ok(entries) = resolve_group_entries_from_source(
+            src,
+            AccessMode::ReadWrite,
+            &header,
+            os,
+            ls,
+            addresses,
+        ) else {
             complete = false;
             continue;
         };

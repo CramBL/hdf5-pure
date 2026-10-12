@@ -44,6 +44,7 @@ use crate::source::SourceMetadata;
 /// base address (shared-message addresses are stored relative to it).
 pub struct BufferedResolver<'a> {
     file_data: &'a [u8],
+    addresses: AddressContext,
     access_mode: AccessMode,
     offset_size: u8,
     length_size: u8,
@@ -51,13 +52,13 @@ pub struct BufferedResolver<'a> {
 }
 
 impl<'a> BufferedResolver<'a> {
-    /// `sohm` is the file's shared-message table, which only a file created with
-    /// `H5Pset_shared_mesg_index` has. It is a parameter rather than a default
-    /// because a resolver without it refuses every heap-stored message, and a
-    /// caller that has the table and forgets to pass it would turn a readable
-    /// file into an unreadable one silently.
+    /// Creates a resolver for an image framed at the effective base in `addresses`.
+    ///
+    /// `sohm` is the file's shared-message table. A heap reference requires this table.
+    /// Read-write access requires complete direct-block checksum validation for heap messages.
     pub fn new(
         file_data: &'a [u8],
+        addresses: AddressContext,
         access_mode: AccessMode,
         offset_size: u8,
         length_size: u8,
@@ -65,6 +66,7 @@ impl<'a> BufferedResolver<'a> {
     ) -> Self {
         Self {
             file_data,
+            addresses,
             access_mode,
             offset_size,
             length_size,
@@ -81,6 +83,8 @@ impl SharedResolver for BufferedResolver<'_> {
                 let table = self.sohm.ok_or(FormatError::UnsupportedSohmReference)?;
                 return crate::sohm::read_heap_message(
                     self.file_data,
+                    self.access_mode,
+                    self.addresses,
                     table,
                     target,
                     &id,
@@ -121,6 +125,7 @@ impl<'a, S: Source + ?Sized> SourceResolver<'a, S> {
     /// Creates a resolver for a source framed at the effective base in `addresses`.
     ///
     /// `sohm` is the file's shared-message table. A heap reference requires this table.
+    /// Read-write access requires complete direct-block checksum validation for heap messages.
     pub fn new(
         source: &'a S,
         addresses: AddressContext,
@@ -148,6 +153,7 @@ impl<S: Source + ?Sized> SharedResolver for SourceResolver<'_, S> {
                 let table = self.sohm.ok_or(FormatError::UnsupportedSohmReference)?;
                 return crate::sohm::read_heap_message_from_source(
                     self.source,
+                    self.access_mode,
                     self.addresses,
                     table,
                     target,
@@ -232,7 +238,14 @@ mod tests {
     #[test]
     fn a_sohm_reference_without_a_table_is_refused_rather_than_followed() {
         let reference = encode_sohm_ref(&[0xFF; 8]);
-        let resolver = BufferedResolver::new(&[], AccessMode::ReadOnly, 8, 8, None);
+        let resolver = BufferedResolver::new(
+            &[],
+            AddressContext::from_effective_base(BaseAddress::new(0)),
+            AccessMode::ReadOnly,
+            8,
+            8,
+            None,
+        );
 
         let err = resolver
             .resolve(&reference, MessageType::DATATYPE)

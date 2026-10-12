@@ -26,6 +26,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - **Breaking:** `FormatError::InvalidFreeSpaceManager` holds a message that describes the invalid free-space manager, and a write returns it for a free section too large to persist at the file's length width.
 - **Breaking:** `File::persisted_free_space` reports a malformed free-space manager as an error, which changes its return type ([#698](https://github.com/CramBL/hdf5-pure/pull/698)).
 - **Breaking:** `FileSpaceInfo::page_size` changes type from `u64` to `FileSpacePageSize`, which holds a page size from 512 bytes to 1 GiB ([#702](https://github.com/CramBL/hdf5-pure/pull/702)).
+- `File::open_rw` validates complete checksummed fractal-heap direct blocks before editing or proving storage ownership. Read-only object lookups validate block prefixes and object bounds without reading the complete block ([#750](https://github.com/CramBL/hdf5-pure/pull/750)).
 
 ### Fixed
 

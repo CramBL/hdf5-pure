@@ -4343,6 +4343,7 @@ mod tests {
         let attrs = crate::attribute::extract_attributes_full(
             &bytes,
             AccessMode::ReadOnly,
+            AddressContext::from_effective_base(BaseAddress::new(0)),
             &hdr,
             sb.offset_size,
             sb.length_size,
@@ -4386,6 +4387,7 @@ mod tests {
         let attrs = crate::attribute::extract_attributes_full(
             &bytes,
             AccessMode::ReadOnly,
+            AddressContext::from_effective_base(BaseAddress::new(0)),
             &oh,
             sb.offset_size,
             sb.length_size,
@@ -4998,6 +5000,7 @@ mod tests {
         let attrs = crate::attribute::extract_attributes_full(
             &bytes,
             AccessMode::ReadOnly,
+            AddressContext::from_effective_base(BaseAddress::new(0)),
             &hdr,
             sb.offset_size,
             sb.length_size,
