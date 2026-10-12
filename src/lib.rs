@@ -644,6 +644,8 @@ pub use hdf5_pure_core::DatatypeByteOrder;
 #[doc(inline)]
 pub use hdf5_pure_core::EnumMember;
 #[doc(inline)]
+pub use hdf5_pure_core::FillTime;
+#[doc(inline)]
 pub use hdf5_pure_core::FixedPointLayout;
 #[doc(inline)]
 pub use hdf5_pure_core::FloatingPointLayout;
