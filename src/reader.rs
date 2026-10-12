@@ -2160,14 +2160,30 @@ impl FileInner {
     fn group_children(&self, hdr: &ObjectHeader) -> Result<Vec<GroupEntry>, Error> {
         let (os, ls, base) = (self.offset_size(), self.length_size(), self.addresses());
         match &self.backend {
-            Backend::InMemory(v) => group_v2::resolve_group_entries(v, hdr, os, ls, base),
-            Backend::Streaming(s) => {
-                group_v2::resolve_group_entries_from_source(s.as_ref(), hdr, os, ls, base)
+            Backend::InMemory(v) => {
+                group_v2::resolve_group_entries(v, self.access_mode, hdr, os, ls, base)
             }
+            Backend::Streaming(s) => group_v2::resolve_group_entries_from_source(
+                s.as_ref(),
+                self.access_mode,
+                hdr,
+                os,
+                ls,
+                base,
+            ),
             Backend::Edit(m) => Self::with_engine(
                 m,
-                |d| group_v2::resolve_group_entries(d, hdr, os, ls, base),
-                |s| group_v2::resolve_group_entries_from_source(s, hdr, os, ls, base),
+                |d| group_v2::resolve_group_entries(d, self.access_mode, hdr, os, ls, base),
+                |s| {
+                    group_v2::resolve_group_entries_from_source(
+                        s,
+                        self.access_mode,
+                        hdr,
+                        os,
+                        ls,
+                        base,
+                    )
+                },
             ),
         }
         .map_err(Error::Format)
@@ -2262,8 +2278,10 @@ impl FileInner {
         // A shared reference stores its address relative to the base address, so
         // frame the file at `base` exactly as [`Self::attr_messages_of`] does.
         let resolved = match &self.backend {
-            Backend::InMemory(v) => BufferedResolver::new(frame(v, base)?, access, os, ls, sohm)
-                .resolve(&msg.data, msg.msg_type),
+            Backend::InMemory(v) => {
+                BufferedResolver::new(frame(v, base)?, self.addresses(), access, os, ls, sohm)
+                    .resolve(&msg.data, msg.msg_type)
+            }
             Backend::Streaming(s) if base.is_zero() => {
                 SourceResolver::new(s.as_ref(), self.addresses(), access, os, ls, sohm)
                     .resolve(&msg.data, msg.msg_type)
@@ -2283,7 +2301,7 @@ impl FileInner {
             Backend::Edit(m) => Self::with_engine(
                 m,
                 |d| {
-                    BufferedResolver::new(frame(d, base)?, access, os, ls, sohm)
+                    BufferedResolver::new(frame(d, base)?, self.addresses(), access, os, ls, sohm)
                         .resolve(&msg.data, msg.msg_type)
                 },
                 |s| {
@@ -2353,6 +2371,7 @@ impl FileInner {
             Backend::InMemory(v) => Ok(extract_attributes_full(
                 frame(v, base)?,
                 access,
+                self.addresses(),
                 hdr,
                 os,
                 ls,
@@ -2388,6 +2407,7 @@ impl FileInner {
                     Ok(extract_attributes_full(
                         frame(d, base)?,
                         access,
+                        self.addresses(),
                         hdr,
                         os,
                         ls,

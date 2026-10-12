@@ -418,9 +418,15 @@ impl WriteEngine {
             }
             // A group we cannot enumerate fully would undercount incoming links
             // and risk over-reclaim. Return the safe-leak fallback.
-            let entries =
-                resolve_group_entries_from_source(&self.image(), &header, os, ls, self.addresses)
-                    .ok()?;
+            let entries = resolve_group_entries_from_source(
+                &self.image(),
+                AccessMode::ReadWrite,
+                &header,
+                os,
+                ls,
+                self.addresses,
+            )
+            .ok()?;
             for e in entries {
                 let child = base.absolute(e.object_header_address).ok()?;
                 *counts.entry(child).or_insert(0) += 1;
@@ -620,6 +626,7 @@ impl WriteEngine {
                 inner: &self.image(),
                 base: self.addresses.effective_base(),
             },
+            AccessMode::ReadWrite,
             self.addresses,
             &link_info,
             heap_address,
@@ -1104,6 +1111,7 @@ impl WriteEngine {
             }
             let entries = crate::group_v2::resolve_dense_entries_from_source(
                 &source,
+                AccessMode::ReadWrite,
                 self.addresses,
                 &info,
                 heap,
@@ -1156,6 +1164,7 @@ impl WriteEngine {
             let mut shared_records = false;
             crate::attribute::visit_dense_attribute_messages_from_source(
                 &source,
+                AccessMode::ReadWrite,
                 self.addresses,
                 &info,
                 heap,

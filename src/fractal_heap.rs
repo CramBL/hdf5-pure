@@ -2,35 +2,83 @@
 //!
 //! [`HeapObjectReader`] reads from either an in-memory file image or a [`Source`].
 
+use alloc::borrow::Cow;
+use alloc::collections::BTreeSet;
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 
 use hdf5_pure_core::__private::{FileRange, FileRegion};
 use hdf5_pure_format::__private::BTREE_V2_HUGE_OBJECT;
-use hdf5_pure_format::__private::FractalHeapChild;
+use hdf5_pure_format::__private::FractalHeapBlock;
+use hdf5_pure_format::__private::FractalHeapBlockLayout;
 pub use hdf5_pure_format::__private::FractalHeapHeader;
 use hdf5_pure_format::__private::FractalHeapHeaderLocator;
 use hdf5_pure_format::__private::FractalHeapIdKind;
 use hdf5_pure_format::__private::FractalHeapIdView;
-use hdf5_pure_format::__private::FractalHeapLayout;
-use hdf5_pure_format::__private::FractalHeapLayoutError;
 use hdf5_pure_format::__private::HugeObjectRecord;
 use hdf5_pure_format::__private::HugeObjectReference;
 
+use crate::access_mode::AccessMode;
 use crate::address::AddressContext;
 use crate::address::StoredAddress;
-#[cfg(test)]
 use crate::address::StoredAddressExt;
 use crate::btree_v2::{
     BTreeV2Header, BTreeV2Record, collect_btree_v2_records, collect_btree_v2_records_from_source,
 };
-use crate::bytes;
-use crate::convert::{Narrow, is_undefined_addr};
+use crate::convert::Narrow;
 use crate::error::FormatError;
 use crate::source::Source;
 use crate::source::SourceMetadata;
 use crate::width::LengthWidth;
 use crate::width::OffsetWidth;
+
+/// Parses a heap header from an image framed at the effective base in `addresses`.
+///
+/// # Errors
+///
+/// Returns [`FormatError::UnexpectedEof`] if the image is truncated, and the address, width,
+/// and header parsing errors of [`read_header_from_source`].
+pub(crate) fn parse_header(
+    bytes: &[u8],
+    addresses: AddressContext,
+    address: StoredAddress,
+    offset_size: u8,
+    length_size: u8,
+) -> Result<FractalHeapHeader, FormatError> {
+    let image = FileRegion::new(
+        FileRange::new(
+            addresses.resolve(StoredAddress::new(0))?,
+            bytes.len() as u64,
+        )?,
+        bytes,
+    )?;
+    let locator = FractalHeapHeaderLocator::new(
+        addresses.resolve(address)?,
+        OffsetWidth::try_from(offset_size)?,
+        LengthWidth::try_from(length_size)?,
+    );
+    let prefix = buffered_region(image, locator.parse_range()?)?;
+    let reference = locator.parse(prefix)?;
+    reference.parse(buffered_region(image, reference.parse_range())?)
+}
+
+fn buffered_region<'a>(
+    image: FileRegion<'a>,
+    range: FileRange,
+) -> Result<FileRegion<'a>, FormatError> {
+    if !image.range().contains(range) {
+        return Err(FormatError::UnexpectedEof {
+            expected: range
+                .end()
+                .get()
+                .saturating_sub(image.range().start().get())
+                .to_usize()
+                .unwrap_or(usize::MAX),
+            available: image.bytes().len(),
+        });
+    }
+    image.subregion(range)
+}
 
 /// Reads a fractal heap header using its prefix and complete header ranges.
 ///
@@ -71,7 +119,7 @@ pub(crate) fn read_header_from_source(
 /// Returns [`FormatError::AddressBelowBase`] if the range starts below the effective base,
 /// [`FormatError::ValueTooLargeForPlatform`] if the read length exceeds [`usize::MAX`], and the
 /// source error if a read fails.
-fn read_header_range(
+pub(crate) fn read_header_range(
     source: &(impl Source + ?Sized),
     addresses: AddressContext,
     range: FileRange,
@@ -219,11 +267,22 @@ impl HugeObjectIndex {
 /// to [`new`](Self::new). The reader caches the huge-object B-tree records after the first indexed
 /// huge-object lookup. Inline huge objects and tiny objects are read directly from their parsed
 /// fields.
+///
+/// For read-only managed-object lookups, the reader validates the direct block's prefix and
+/// object bounds and reads only the object bytes. With read-write access, the reader
+/// validates a checksummed direct block in full before reading an object and caches successful
+/// validation for subsequent objects in that block. Validation caches require an unchanged image
+/// and one backend for the lifetime of the reader.
 pub struct HeapObjectReader<'h> {
     header: &'h FractalHeapHeader,
     offset_size: u8,
     length_size: u8,
-    layout: Result<FractalHeapLayout, FractalHeapLayoutError>,
+    addresses: AddressContext,
+    access_mode: AccessMode,
+    /// Direct blocks whose complete checksums were validated against this reader's image.
+    validated_direct: BTreeSet<StoredAddress>,
+    validated_backend: Option<Backend>,
+    layout: Result<FractalHeapBlockLayout, FormatError>,
     /// Parsed on demand, since most heaps hold no huge object at all.
     huge: Option<HugeObjectIndex>,
     /// Which backend the cached index was decoded from, once one has been.
@@ -243,38 +302,43 @@ enum Backend {
 impl<'h> HeapObjectReader<'h> {
     /// Returns a reader of the objects of the heap `header` describes.
     ///
-    /// `offset_size` and `length_size` are the superblock's "Size of Offsets" and "Size of
-    /// Lengths" bytes.
-    pub fn new(header: &'h FractalHeapHeader, offset_size: u8, length_size: u8) -> Self {
-        HeapObjectReader {
+    /// `owner` is the header's stored address. `addresses` resolves addresses against the image's
+    /// effective base. The image or source must be framed at that base and stay unchanged for
+    /// the reader's lifetime. `access_mode` selects bounded read-only lookup or mandatory
+    /// read-write checksum validation. The widths are the superblock's "Size of Offsets" and
+    /// "Size of Lengths" bytes.
+    pub(crate) fn new(
+        header: &'h FractalHeapHeader,
+        addresses: AddressContext,
+        owner: StoredAddress,
+        access_mode: AccessMode,
+        offset_size: u8,
+        length_size: u8,
+    ) -> Self {
+        Self {
             header,
+            addresses,
+            access_mode,
+            validated_direct: BTreeSet::new(),
+            validated_backend: None,
             offset_size,
             length_size,
-            layout: OffsetWidth::try_from(offset_size)
-                .and_then(|offset_width| {
-                    LengthWidth::try_from(length_size)
-                        .map(|length_width| (offset_width, length_width))
+            layout: if header.filtering.is_filtered() {
+                Err(FormatError::UnsupportedFilteredHeapObject)
+            } else {
+                OffsetWidth::try_from(offset_size).and_then(|offsets| {
+                    LengthWidth::try_from(length_size).and_then(|lengths| {
+                        FractalHeapBlockLayout::new(header, offsets, lengths, owner)
+                    })
                 })
-                .map_err(|_width_error| FractalHeapLayoutError::InvalidGeometry)
-                .and_then(|(offset_width, length_width)| {
-                    FractalHeapLayout::new(header, offset_width, length_width)
-                }),
+            },
             huge: None,
             huge_backend: None,
         }
     }
 
-    fn managed_layout(&self) -> Result<&FractalHeapLayout, FormatError> {
-        match &self.layout {
-            Ok(layout) => Ok(layout),
-            Err(_layout_error) => {
-                OffsetWidth::try_from(self.offset_size)?;
-                LengthWidth::try_from(self.length_size)?;
-                Err(FormatError::ChunkedReadError(
-                    "fractal heap: invalid doubling-table geometry".into(),
-                ))
-            }
-        }
+    fn managed_layout(&self) -> Result<&FractalHeapBlockLayout, FormatError> {
+        self.layout.as_ref().map_err(Clone::clone)
     }
 
     /// Reads the object identified by a parsed ID from a file image.
@@ -294,8 +358,8 @@ impl<'h> HeapObjectReader<'h> {
     ///
     /// # Panics
     ///
-    /// Panics in debug builds if indexed huge objects are read through both this method and
-    /// [`read_from_source`](Self::read_from_source) on the same reader.
+    /// Panics in debug builds if cached checksum validation or a cached huge-object index is reused
+    /// through both this method and [`read_from_source`](Self::read_from_source).
     pub fn read(
         &mut self,
         file_data: &[u8],
@@ -320,8 +384,8 @@ impl<'h> HeapObjectReader<'h> {
     ///
     /// # Panics
     ///
-    /// Panics in debug builds if indexed huge objects are read through both this method and
-    /// [`read`](Self::read) on the same reader.
+    /// Panics in debug builds if cached checksum validation or a cached huge-object index is reused
+    /// through both this method and [`read`](Self::read).
     pub fn read_from_source<S: Source + ?Sized>(
         &mut self,
         source: &S,
@@ -429,277 +493,136 @@ impl<'h> HeapObjectReader<'h> {
         read_object_at_source(source, addr.get(), len.to_usize()?)
     }
 
-    /// Reads a managed object through the heap's doubling table in `file_data`.
-    ///
-    /// # Errors
-    ///
-    /// Returns the errors of [`read`](Self::read) for a managed object.
     fn read_managed_object(
-        &self,
+        &mut self,
         file_data: &[u8],
         heap_offset: u64,
         object_length: u64,
     ) -> Result<Vec<u8>, FormatError> {
-        // A filtered heap stores its direct blocks filter-encoded, and the reader has no decoder
-        // for them, so it returns an error.
+        let image = FileRegion::new(
+            FileRange::new(
+                self.addresses.resolve(StoredAddress::ZERO)?,
+                file_data.len() as u64,
+            )?,
+            file_data,
+        )?;
+        self.read_managed_object_with(
+            |range| buffered_region(image, range).map(|region| Cow::Borrowed(region.bytes())),
+            file_data.len() as u64,
+            Backend::Buffered,
+            heap_offset,
+            object_length,
+        )
+    }
+
+    fn read_managed_object_from_source(
+        &mut self,
+        source: &(impl Source + ?Sized),
+        heap_offset: u64,
+        object_length: u64,
+    ) -> Result<Vec<u8>, FormatError> {
+        let addresses = self.addresses;
+        self.read_managed_object_with(
+            |range| read_header_range(source, addresses, range).map(Cow::Owned),
+            source.len(),
+            Backend::Streaming,
+            heap_offset,
+            object_length,
+        )
+    }
+
+    fn read_managed_object_with<'bytes>(
+        &mut self,
+        read: impl Fn(FileRange) -> Result<Cow<'bytes, [u8]>, FormatError>,
+        source_len: u64,
+        backend: Backend,
+        heap_offset: u64,
+        object_length: u64,
+    ) -> Result<Vec<u8>, FormatError> {
         if self.header.filtering.is_filtered() {
             return Err(FormatError::UnsupportedFilteredHeapObject);
         }
-        self.managed_layout()?;
-
-        if is_undefined_addr(self.header.root_block_address.get(), self.offset_size) {
-            return Err(FormatError::UnexpectedEof {
-                expected: 1,
-                available: 0,
-            });
+        if self.validated_direct.is_empty() {
+            self.validated_backend = Some(backend);
         }
-
-        if self.header.current_rows_in_root_indirect_block == 0 {
-            // Root is a direct block.
-            let block_size =
-                self.managed_layout()?
-                    .block_size_for_row(0)
-                    .map_err(|_layout_error| {
-                        FormatError::ChunkedReadError(
-                            "fractal heap: invalid doubling-table geometry".into(),
-                        )
+        debug_assert_eq!(
+            self.validated_backend,
+            Some(backend),
+            "validated direct blocks belong to the backend that supplied their bytes"
+        );
+        let blocks = self.managed_layout()?;
+        let mut block = blocks.root()?.ok_or(FormatError::UnexpectedEof {
+            expected: 1,
+            available: 0,
+        })?;
+        for _depth in 0..64 {
+            match block {
+                FractalHeapBlock::Direct(direct) => {
+                    let reference = direct.at(self.addresses.resolve(direct.address())?)?;
+                    let require_checksum = self.access_mode == AccessMode::ReadWrite
+                        && self.header.flags
+                            & hdf5_pure_format::__private::FRACTAL_HEAP_DIRECT_BLOCKS_CHECKSUMMED
+                            != 0
+                        && !self.validated_direct.contains(&direct.address());
+                    let range = if require_checksum {
+                        reference.parse_range()
+                    } else {
+                        reference.object_prefix_range()?
+                    };
+                    let bytes = read(range)?;
+                    let region = FileRegion::new(range, &bytes)?;
+                    let object = reference.parse_object(region, heap_offset, object_length)?;
+                    if require_checksum {
+                        reference.parse_checked(region)?;
+                        self.validated_direct.insert(direct.address());
+                        return Ok(object.parse(region)?.to_vec());
+                    }
+                    return Ok(read(object.range())?.into_owned());
+                }
+                FractalHeapBlock::Indirect(indirect) => {
+                    let reference = indirect.at(self.addresses.resolve(indirect.address())?)?;
+                    let range = reference.parse_range();
+                    let bytes = read(range)?;
+                    let view = reference.parse(FileRegion::new(range, &bytes)?)?;
+                    let mut selected = None;
+                    for child in view.children() {
+                        let child = child?;
+                        let (start, length) = match child {
+                            FractalHeapBlock::Direct(direct) => {
+                                (direct.heap_offset(), direct.decoded_size())
+                            }
+                            FractalHeapBlock::Indirect(indirect) => (
+                                indirect.heap_offset(),
+                                blocks
+                                    .layout()
+                                    .indirect_heap_size(indirect.rows())
+                                    .map_err(|_error| FormatError::InvalidFractalHeapGeometry)?,
+                            ),
+                        };
+                        if heap_offset >= start && heap_offset - start < length {
+                            selected = Some(child);
+                            break;
+                        }
+                    }
+                    block = selected.ok_or(FormatError::UnexpectedEof {
+                        expected: heap_offset
+                            .to_usize()?
+                            .saturating_add(object_length.to_usize()?),
+                        available: source_len.to_usize().unwrap_or(usize::MAX),
                     })?;
-            self.read_from_direct_block(
-                file_data,
-                self.header.root_block_address.get().to_usize()?,
-                block_size,
-                0, // block offset in heap = 0 for root
-                heap_offset,
-                object_length.to_usize()?,
-            )
-        } else {
-            // The root is an indirect block, and the walk descends 64 levels at most.
-            self.read_from_indirect_block(
-                file_data,
-                self.header.root_block_address.get().to_usize()?,
-                self.header.current_rows_in_root_indirect_block,
-                0, // block offset
-                heap_offset,
-                object_length.to_usize()?,
-                64, // max recursion depth
-            )
+                }
+            }
         }
-    }
-
-    /// Reads `length` bytes at heap offset `target_offset` from the direct block at `block_addr`,
-    /// whose space begins at heap offset `block_heap_offset`.
-    ///
-    /// The prefix of the block is inside its heap space, so the object is at
-    /// `block_addr + target_offset - block_heap_offset`.
-    #[allow(clippy::too_many_arguments)]
-    fn read_from_direct_block(
-        &self,
-        file_data: &[u8],
-        block_addr: usize,
-        _block_size: u64,
-        block_heap_offset: u64,
-        target_offset: u64,
-        length: usize,
-    ) -> Result<Vec<u8>, FormatError> {
-        let local_offset = (target_offset - block_heap_offset).to_usize()?;
-        let pos = block_addr
-            .checked_add(local_offset)
-            .ok_or(FormatError::OffsetOverflow {
-                offset: block_addr as u64,
-                length: target_offset - block_heap_offset,
-            })?;
-        bytes::ensure_len(file_data, pos, length)?;
-        Ok(file_data[pos..pos + length].to_vec())
-    }
-
-    /// Reads `length` bytes at heap offset `target_offset` from a direct block below the indirect
-    /// block at `iblock_addr`, descending `depth_remaining` levels at most.
-    #[allow(clippy::too_many_arguments)]
-    fn read_from_indirect_block(
-        &self,
-        file_data: &[u8],
-        iblock_addr: usize,
-        nrows: u16,
-        iblock_heap_offset: u64,
-        target_offset: u64,
-        length: usize,
-        depth_remaining: u16,
-    ) -> Result<Vec<u8>, FormatError> {
-        if depth_remaining == 0 {
-            return Err(FormatError::ChunkedReadError(
-                "fractal heap: maximum recursion depth exceeded".into(),
-            ));
-        }
-        bytes::ensure_len(file_data, iblock_addr, 4)?;
-        let block = &file_data[iblock_addr..];
-        match self.managed_layout()?.find_child_for_offset(
-            block,
-            nrows,
-            iblock_heap_offset,
-            target_offset,
-        )? {
-            Some(FractalHeapChild::Direct {
-                addr,
-                block_size,
-                heap_offset,
-            }) => self.read_from_direct_block(
-                file_data,
-                addr.get().to_usize()?,
-                block_size,
-                heap_offset,
-                target_offset,
-                length,
-            ),
-            Some(FractalHeapChild::Indirect {
-                addr,
-                nrows: child_nrows,
-                heap_offset,
-            }) => self.read_from_indirect_block(
-                file_data,
-                addr.get().to_usize()?,
-                child_nrows,
-                heap_offset,
-                target_offset,
-                length,
-                depth_remaining - 1,
-            ),
-            None => Err(FormatError::UnexpectedEof {
-                expected: target_offset.to_usize()?.saturating_add(length),
-                available: file_data.len(),
-            }),
-        }
-    }
-
-    /// Reads a managed object through the heap's doubling table in `source`.
-    ///
-    /// # Errors
-    ///
-    /// Returns the errors of [`read_from_source`](Self::read_from_source) for a managed object.
-    fn read_managed_object_from_source<S: Source + ?Sized>(
-        &self,
-        source: &S,
-        heap_offset: u64,
-        object_length: u64,
-    ) -> Result<Vec<u8>, FormatError> {
-        if self.header.filtering.is_filtered() {
-            return Err(FormatError::UnsupportedFilteredHeapObject);
-        }
-        self.managed_layout()?;
-        if is_undefined_addr(self.header.root_block_address.get(), self.offset_size) {
-            return Err(FormatError::UnexpectedEof {
-                expected: 1,
-                available: 0,
-            });
-        }
-        if self.header.current_rows_in_root_indirect_block == 0 {
-            self.read_from_direct_block_from_source(
-                source,
-                self.header.root_block_address.get(),
-                0, // root direct block starts at heap offset 0
-                heap_offset,
-                object_length.to_usize()?,
-            )
-        } else {
-            self.read_from_indirect_block_from_source(
-                source,
-                self.header.root_block_address.get(),
-                self.header.current_rows_in_root_indirect_block,
-                0,
-                heap_offset,
-                object_length.to_usize()?,
-                64,
-            )
-        }
-    }
-
-    /// Reads `length` bytes at heap offset `target_offset` from the direct block at `block_addr`
-    /// in `source`, whose space begins at heap offset `block_heap_offset`.
-    fn read_from_direct_block_from_source<S: Source + ?Sized>(
-        &self,
-        source: &S,
-        block_addr: u64,
-        block_heap_offset: u64,
-        target_offset: u64,
-        length: usize,
-    ) -> Result<Vec<u8>, FormatError> {
-        let local_offset = target_offset - block_heap_offset;
-        let pos = block_addr
-            .checked_add(local_offset)
-            .ok_or(FormatError::OffsetOverflow {
-                offset: block_addr,
-                length: local_offset,
-            })?;
-        source.read_metadata_at(pos, length)
-    }
-
-    /// Reads `length` bytes at heap offset `target_offset` from a direct block below the indirect
-    /// block at `iblock_addr` in `source`, descending `depth_remaining` levels at most.
-    #[allow(clippy::too_many_arguments)]
-    fn read_from_indirect_block_from_source<S: Source + ?Sized>(
-        &self,
-        source: &S,
-        iblock_addr: u64,
-        nrows: u16,
-        iblock_heap_offset: u64,
-        target_offset: u64,
-        length: usize,
-        depth_remaining: u16,
-    ) -> Result<Vec<u8>, FormatError> {
-        if depth_remaining == 0 {
-            return Err(FormatError::ChunkedReadError(
-                "fractal heap: maximum recursion depth exceeded".into(),
-            ));
-        }
-        let region_len = self
-            .managed_layout()?
-            .indirect_block_entries_len(nrows)
-            .map_err(|_layout_error| {
-                FormatError::ChunkedReadError(
-                    "fractal heap: invalid doubling-table geometry".into(),
-                )
-            })?
-            .min(source.len().saturating_sub(iblock_addr))
-            .to_usize()?;
-        let block = source.read_metadata_at(iblock_addr, region_len)?;
-        match self.managed_layout()?.find_child_for_offset(
-            &block,
-            nrows,
-            iblock_heap_offset,
-            target_offset,
-        )? {
-            Some(FractalHeapChild::Direct {
-                addr, heap_offset, ..
-            }) => self.read_from_direct_block_from_source(
-                source,
-                addr.get(),
-                heap_offset,
-                target_offset,
-                length,
-            ),
-            Some(FractalHeapChild::Indirect {
-                addr,
-                nrows: child_nrows,
-                heap_offset,
-            }) => self.read_from_indirect_block_from_source(
-                source,
-                addr.get(),
-                child_nrows,
-                heap_offset,
-                target_offset,
-                length,
-                depth_remaining - 1,
-            ),
-            None => Err(FormatError::UnexpectedEof {
-                expected: target_offset.to_usize()?.saturating_add(length),
-                available: source.len().to_usize().unwrap_or(usize::MAX),
-            }),
-        }
+        Err(FormatError::ChunkedReadError(
+            "fractal heap: maximum recursion depth exceeded".into(),
+        ))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use core::cell::RefCell;
+    use hdf5_pure_format::__private::FilterDescription;
     use hdf5_pure_format::__private::FilterPipeline;
     use hdf5_pure_format::__private::FractalHeapFiltering;
     use hdf5_pure_format::__private::FractalHeapHeaderFrame;
@@ -821,10 +744,118 @@ mod tests {
     }
 
     #[rstest]
-    #[case::tiny(vec![TINY_ID_FIRST_BYTE | 2, b'a', b'b', b'c', 0, 0, 0, 0])]
-    #[case::inline_huge(vec![HUGE_ID_FIRST_BYTE, 0x20, 0, 0, 0, 0, 0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 0])]
+    #[case::read_only(AccessMode::ReadOnly)]
+    #[case::read_write(AccessMode::ReadWrite)]
+    fn checksummed_object_reads_follow_the_access_mode(#[case] mode: AccessMode) {
+        let mut image = fractal_heap::heap_with_one_object(b"abc", Widths::EIGHT);
+        let mut header = FractalHeapHeader::parse(&image, 0, 8, 8).unwrap();
+        header.flags = hdf5_pure_format::__private::FRACTAL_HEAP_DIRECT_BLOCKS_CHECKSUMMED;
+        let at = header.root_block_address.get() as usize;
+        image.resize(at + 128, 0);
+        image[at + 15..at + 19].fill(0);
+        image[at + 19..at + 22].copy_from_slice(b"abc");
+        let checksum = crate::checksum::jenkins_lookup3(&image[at..at + 128]);
+        image[at + 15..at + 19].copy_from_slice(&checksum.to_le_bytes());
+        let source = HeaderSource {
+            bytes: &image,
+            reads: RefCell::new(Vec::new()),
+        };
+        let id = [0, 19, 0, 3, 0, 0, 0];
+        let mut reader = HeapObjectReader::new(
+            &header,
+            AddressContext::from_effective_base(BaseAddress::ZERO),
+            StoredAddress::ZERO,
+            mode,
+            8,
+            8,
+        );
+        assert_eq!(
+            reader
+                .read_from_source(&source, parse_id(&header, &id))
+                .unwrap(),
+            b"abc"
+        );
+        assert_eq!(
+            reader
+                .read_from_source(&source, parse_id(&header, &id))
+                .unwrap(),
+            b"abc"
+        );
+        assert_eq!(
+            *source.reads.borrow(),
+            if mode == AccessMode::ReadWrite {
+                vec![(at as u64, 128), (at as u64, 19), (at as u64 + 19, 3)]
+            } else {
+                vec![
+                    (at as u64, 19),
+                    (at as u64 + 19, 3),
+                    (at as u64, 19),
+                    (at as u64 + 19, 3),
+                ]
+            }
+        );
+    }
+
+    #[test]
+    fn short_source_reads_and_short_supplied_object_prefixes_are_distinct() {
+        let image = fractal_heap::heap_with_one_object(b"abc", Widths::EIGHT);
+        let header = FractalHeapHeader::parse(&image, 0, 8, 8).unwrap();
+        let blocks = FractalHeapBlockLayout::new(
+            &header,
+            OffsetWidth::Eight,
+            LengthWidth::Eight,
+            StoredAddress::ZERO,
+        )
+        .unwrap();
+        let FractalHeapBlock::Direct(block) = blocks.root().unwrap().unwrap() else {
+            panic!("expected direct root")
+        };
+        let reference = block
+            .at(AddressContext::from_effective_base(BaseAddress::ZERO)
+                .resolve(block.address())
+                .unwrap())
+            .unwrap();
+        let range = reference.object_prefix_range().unwrap();
+        let supplied = FileRange::new(range.start(), range.length() - 1).unwrap();
+        let bytes = &image[range.start().get() as usize..supplied.end().get() as usize];
+        assert_eq!(
+            reference
+                .parse_object(FileRegion::new(supplied, bytes).unwrap(), 15, 3)
+                .unwrap_err(),
+            FormatError::InsufficientRegion {
+                required_start: range.start().get(),
+                required_length: range.length(),
+                provided_start: supplied.start().get(),
+                provided_length: supplied.length()
+            }
+        );
+        let source = BytesSource::new(&image[..supplied.end().get() as usize]);
+        let id = [0, 15, 0, 3, 0, 0, 0];
+        assert_eq!(
+            HeapObjectReader::new(
+                &header,
+                AddressContext::from_effective_base(BaseAddress::ZERO),
+                StoredAddress::ZERO,
+                AccessMode::ReadOnly,
+                8,
+                8
+            )
+            .read_from_source(&source, parse_id(&header, &id))
+            .unwrap_err(),
+            FormatError::UnexpectedEof {
+                expected: range.end().get() as usize,
+                available: supplied.end().get() as usize
+            }
+        );
+    }
+
+    #[rstest]
+    #[case::tiny(vec![TINY_ID_FIRST_BYTE | 2, b'a', b'b', b'c', 0, 0, 0, 0], false)]
+    #[case::filtered_tiny(vec![TINY_ID_FIRST_BYTE | 2, b'a', b'b', b'c', 0, 0, 0, 0], true)]
+    #[case::inline_huge(vec![HUGE_ID_FIRST_BYTE, 0x20, 0, 0, 0, 0, 0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 0], false)]
     fn a_parsed_inline_id_resolves_its_object(
         #[case] bytes: Vec<u8>,
+        #[case] filtered: bool,
         #[values(false, true)] streaming: bool,
     ) {
         let mut header = FractalHeapHeader::parse(
@@ -835,10 +866,32 @@ mod tests {
         )
         .unwrap();
         header.heap_id_length = u16::try_from(bytes.len()).unwrap();
+        if filtered {
+            header.filtering = FractalHeapFiltering::Filtered {
+                root_direct_block_size: 91,
+                root_filter_mask: 0,
+                pipeline: FilterPipeline {
+                    version: PIPELINE_VERSION_TWO,
+                    filters: vec![FilterDescription {
+                        filter_id: crate::filter_pipeline::FILTER_DEFLATE,
+                        name: None,
+                        flags: 0,
+                        client_data: vec![6],
+                    }],
+                },
+            };
+        }
         let id = parse_id(&header, &bytes);
         let mut image = vec![0; 64];
         image[0x20..0x23].copy_from_slice(b"abc");
-        let mut reader = HeapObjectReader::new(&header, 8, 8);
+        let mut reader = HeapObjectReader::new(
+            &header,
+            AddressContext::from_effective_base(BaseAddress::ZERO),
+            StoredAddress::ZERO,
+            AccessMode::ReadOnly,
+            8,
+            8,
+        );
         let object = if streaming {
             reader.read_from_source(&BytesSource::new(image), id)
         } else {
@@ -869,9 +922,16 @@ mod tests {
             id[1 + i] = ((payload >> (i * 8)) & 0xFF) as u8;
         }
 
-        let obj = HeapObjectReader::new(&hdr, 8, 8)
-            .read(&file_data, parse_id(&hdr, &id))
-            .unwrap();
+        let obj = HeapObjectReader::new(
+            &hdr,
+            AddressContext::from_effective_base(BaseAddress::ZERO),
+            StoredAddress::ZERO,
+            AccessMode::ReadOnly,
+            8,
+            8,
+        )
+        .read(&file_data, parse_id(&hdr, &id))
+        .unwrap();
         assert_eq!(&obj, b"Hello, World!");
     }
 
@@ -890,9 +950,16 @@ mod tests {
             id[1 + i] = ((payload >> (i * 8)) & 0xFF) as u8;
         }
 
-        let buffered = HeapObjectReader::new(&hdr, 8, 8)
-            .read(&file_data, parse_id(&hdr, &id))
-            .unwrap();
+        let buffered = HeapObjectReader::new(
+            &hdr,
+            AddressContext::from_effective_base(BaseAddress::ZERO),
+            StoredAddress::ZERO,
+            AccessMode::ReadOnly,
+            8,
+            8,
+        )
+        .read(&file_data, parse_id(&hdr, &id))
+        .unwrap();
 
         // Header parsed from a source, then the object fetched from a source.
         let mem = BytesSource::new(&file_data);
@@ -904,9 +971,16 @@ mod tests {
             8,
         )
         .unwrap();
-        let from_mem = HeapObjectReader::new(&hdr_mem, 8, 8)
-            .read_from_source(&mem, parse_id(&hdr_mem, &id))
-            .unwrap();
+        let from_mem = HeapObjectReader::new(
+            &hdr_mem,
+            AddressContext::from_effective_base(BaseAddress::ZERO),
+            StoredAddress::ZERO,
+            AccessMode::ReadOnly,
+            8,
+            8,
+        )
+        .read_from_source(&mem, parse_id(&hdr_mem, &id))
+        .unwrap();
 
         let seek = ReadSeekSource::new(std::io::Cursor::new(file_data)).unwrap();
         let hdr_seek = read_header_from_source(
@@ -917,9 +991,16 @@ mod tests {
             8,
         )
         .unwrap();
-        let from_seek = HeapObjectReader::new(&hdr_seek, 8, 8)
-            .read_from_source(&seek, parse_id(&hdr_seek, &id))
-            .unwrap();
+        let from_seek = HeapObjectReader::new(
+            &hdr_seek,
+            AddressContext::from_effective_base(BaseAddress::ZERO),
+            StoredAddress::ZERO,
+            AccessMode::ReadOnly,
+            8,
+            8,
+        )
+        .read_from_source(&seek, parse_id(&hdr_seek, &id))
+        .unwrap();
 
         assert_eq!(buffered, from_mem);
         assert_eq!(buffered, from_seek);
@@ -970,14 +1051,30 @@ mod tests {
         };
         let file = vec![0u8; 0x400];
         assert_eq!(
-            HeapObjectReader::new(&h, 8, 8).read(&file, parse_id(&h, &managed_id)),
+            HeapObjectReader::new(
+                &h,
+                AddressContext::from_effective_base(BaseAddress::ZERO),
+                StoredAddress::ZERO,
+                AccessMode::ReadOnly,
+                8,
+                8
+            )
+            .read(&file, parse_id(&h, &managed_id)),
             Err(FormatError::UnsupportedFilteredHeapObject)
         );
 
         // Root is an indirect block: the refusal happens before any child walk.
         h.current_rows_in_root_indirect_block = 2;
         assert_eq!(
-            HeapObjectReader::new(&h, 8, 8).read(&file, parse_id(&h, &managed_id)),
+            HeapObjectReader::new(
+                &h,
+                AddressContext::from_effective_base(BaseAddress::ZERO),
+                StoredAddress::ZERO,
+                AccessMode::ReadOnly,
+                8,
+                8
+            )
+            .read(&file, parse_id(&h, &managed_id)),
             Err(FormatError::UnsupportedFilteredHeapObject)
         );
     }
@@ -1089,7 +1186,6 @@ mod tests {
     /// count separates the two.
     #[test]
     fn a_reader_parses_the_huge_object_index_once() {
-        use crate::source::BytesSource;
         const COUNT: u64 = 5;
 
         // Attributes too large for a managed heap object, so the heap holds
@@ -1124,7 +1220,14 @@ mod tests {
         let ids: Vec<Vec<u8>> = (1..=COUNT).map(heap_id).collect();
 
         reset_huge_index_decodes();
-        let mut reader = HeapObjectReader::new(&heap, 8, 8);
+        let mut reader = HeapObjectReader::new(
+            &heap,
+            AddressContext::from_effective_base(BaseAddress::ZERO),
+            StoredAddress::new(frhp as u64),
+            AccessMode::ReadOnly,
+            8,
+            8,
+        );
         let buffered: Vec<Vec<u8>> = ids
             .iter()
             .map(|id| reader.read(&bytes, parse_id(&heap, id)).unwrap())
@@ -1137,7 +1240,14 @@ mod tests {
 
         reset_huge_index_decodes();
         let source = BytesSource::new(bytes.clone());
-        let mut reader = HeapObjectReader::new(&heap, 8, 8);
+        let mut reader = HeapObjectReader::new(
+            &heap,
+            AddressContext::from_effective_base(BaseAddress::ZERO),
+            StoredAddress::new(frhp as u64),
+            AccessMode::ReadOnly,
+            8,
+            8,
+        );
         let streamed: Vec<Vec<u8>> = ids
             .iter()
             .map(|id| {

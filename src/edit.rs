@@ -7759,8 +7759,14 @@ impl WriteEngine {
                 "a target path names a dataset, not a group",
             ));
         }
-        let entries =
-            resolve_group_entries_from_source(&self.image(), &oh, os, ls, self.addresses)?;
+        let entries = resolve_group_entries_from_source(
+            &self.image(),
+            AccessMode::ReadWrite,
+            &oh,
+            os,
+            ls,
+            self.addresses,
+        )?;
 
         let mut region = fresh_group_region();
         let mut link_names = Vec::with_capacity(entries.len());
@@ -14266,7 +14272,10 @@ mod tests {
                     + DIRECT_BLOCK_HEAP_ADDRESS_AT;
                 bytes[owner_at..owner_at + usize::from(OFFSET_SIZE)]
                     .copy_from_slice(&(heap_address + 1).to_le_bytes());
-                FractalHeapStorageError::InvalidStorage
+                FractalHeapStorageError::Format(FormatError::InvalidFractalHeapBlockOwner {
+                    expected: heap_address,
+                    actual: heap_address + 1,
+                })
             }
             HeapDamage::Filters => {
                 let pipeline = FilterPipeline {
@@ -14336,10 +14345,11 @@ mod tests {
         test_util::fractal_heap::DIRECT_BLOCK_SIGNATURE.len() + 1;
 
     #[rstest]
-    #[case::a_direct_block_of_another_heap(HeapDamage::DirectBlockOwner)]
-    #[case::a_managed_free_space_manager(HeapDamage::FreeSpaceManager)]
-    fn a_rejected_attribute_heap_stays_allocated_while_the_rest_is_reclaimed(
+    #[case::wrong_block_owner(HeapDamage::DirectBlockOwner, false)]
+    #[case::managed_free_space_manager(HeapDamage::FreeSpaceManager, true)]
+    fn reclamation_retains_storage_after_heap_validation_fails(
         #[case] damage: HeapDamage,
+        #[case] reclaim_other: bool,
     ) {
         let dir = tempdir().unwrap();
         let path = dir.path().join("dense_attribute_rejected_heap.h5");
@@ -14355,16 +14365,30 @@ mod tests {
         session.commit().unwrap();
 
         for &(addr, len) in &header_spans {
-            assert!(
-                reusable_covers(&session, addr, len),
-                "the object header chunk ({addr}, {len}) must be reusable"
-            );
+            if reclaim_other {
+                assert!(
+                    reusable_covers(&session, addr, len),
+                    "header ({addr}, {len}) is reusable"
+                );
+            } else {
+                assert!(
+                    !reusable_overlaps(&session, addr, len),
+                    "header ({addr}, {len}) stays unavailable"
+                );
+            }
         }
         for &(addr, len, _) in &index {
-            assert!(
-                reusable_covers(&session, addr, len),
-                "the dense attribute index ({addr}, {len}) must be reusable"
-            );
+            if reclaim_other {
+                assert!(
+                    reusable_covers(&session, addr, len),
+                    "index ({addr}, {len}) is reusable"
+                );
+            } else {
+                assert!(
+                    !reusable_overlaps(&session, addr, len),
+                    "index ({addr}, {len}) stays unavailable"
+                );
+            }
         }
         for (extent, _) in heap.allocations() {
             assert!(
