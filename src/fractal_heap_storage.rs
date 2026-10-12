@@ -20,8 +20,11 @@ use hdf5_pure_format::__private::HugeObjectRecord;
 use hdf5_pure_space::__private::Extent;
 use hdf5_pure_space::__private::PageType;
 
+use crate::address::AddressContext;
 use crate::address::StoredAddress;
 use crate::address::StoredAddressExt;
+#[cfg(test)]
+use crate::address::{BaseAddress, BaseAddressExt};
 use crate::btree_v2::{BTreeV2Header, collect_btree_v2_records_from_source};
 use crate::bytes;
 use crate::convert::{Narrow, is_undefined_addr};
@@ -121,6 +124,9 @@ impl FractalHeapAllocation {
 
 /// Builds the complete ownership proof for the fractal heap at `heap_header_address`.
 ///
+/// `source` is framed at the effective base in `addresses`. Owned extents use base-relative
+/// coordinates.
+///
 /// The read-only walk operates directly on [`Source`]. It bounds each complete allocation before
 /// reading its structural bytes and does not read managed-object or huge-object payload contents to
 /// establish ownership. Success accounts for the heap header, every allocated managed block, and
@@ -150,15 +156,17 @@ impl FractalHeapAllocation {
 /// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsec_fmt4_infra_fractalheap
 pub(crate) fn collect_fractal_heap_storage_from_source<S: Source + ?Sized>(
     source: &S,
+    addresses: AddressContext,
     heap_header_address: StoredAddress,
     offset_size: u8,
     length_size: u8,
 ) -> Result<FractalHeapStorage, FractalHeapStorageError> {
     let offset_width = OffsetWidth::try_from(offset_size)?;
     let length_width = LengthWidth::try_from(length_size)?;
-    let header = FractalHeapHeader::parse_from_source(
-        &SourceMetadata(source),
-        heap_header_address.get(),
+    let header = crate::fractal_heap::read_header_from_source(
+        source,
+        addresses,
+        heap_header_address,
         offset_size,
         length_size,
     )?;
@@ -227,6 +235,7 @@ fn collect_fractal_heap_storage(
 ) -> Result<FractalHeapStorage, FractalHeapStorageError> {
     collect_fractal_heap_storage_from_source(
         &BytesSource::new(file_data),
+        AddressContext::from_effective_base(BaseAddress::ZERO),
         heap_header_address,
         offset_size,
         length_size,
@@ -823,6 +832,7 @@ mod tests {
         let buffered = collect_storage(&file).unwrap();
         let streamed = collect_fractal_heap_storage_from_source(
             &BytesSource::new(&file),
+            AddressContext::from_effective_base(BaseAddress::ZERO),
             StoredAddress::new(STORAGE_HEAP_AT),
             STORAGE_WIDTH,
             STORAGE_WIDTH,

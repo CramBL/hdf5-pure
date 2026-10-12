@@ -408,6 +408,7 @@ fn scan_parsed_header<S: Source + ?Sized>(
                     };
                     let resolver = crate::shared_message::SourceResolver::new(
                         &framed,
+                        base,
                         AccessMode::ReadWrite,
                         crate::file_writer::OFFSET_SIZE,
                         crate::file_writer::LENGTH_SIZE,
@@ -543,6 +544,7 @@ fn scan_object<S: Source + ?Sized>(
     };
     let resolver = crate::shared_message::SourceResolver::new(
         &framed,
+        base,
         AccessMode::ReadWrite,
         crate::file_writer::OFFSET_SIZE,
         crate::file_writer::LENGTH_SIZE,

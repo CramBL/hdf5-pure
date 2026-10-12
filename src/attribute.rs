@@ -16,6 +16,7 @@ use hdf5_pure_format::__private::{BTREE_V2_ATTRIBUTE_CREATION_ORDER, BTREE_V2_AT
 use hdf5_pure_space::__private::Extent;
 
 use crate::access_mode::AccessMode;
+use crate::address::AddressContext;
 use crate::address::StoredAddress;
 #[cfg(test)]
 use crate::address::StoredAddressExt;
@@ -162,14 +163,17 @@ pub fn extract_attributes_full(
     Ok(attrs)
 }
 
-/// Streaming counterpart of [`extract_attributes_full`].
+/// Reads compact and dense attributes through a source framed at the effective base.
 ///
-/// Reads compact attribute messages from the (already-parsed) object header,
-/// resolves shared attribute references, and walks dense storage (fractal heap +
-/// B-tree v2) through a [`Source`] on demand instead of indexing a whole-file
-/// slice. Used by the streaming reader backend.
+/// `addresses` holds the effective base used to frame `source`. Shared attribute references
+/// are resolved through the same source.
+///
+/// # Errors
+///
+/// Returns the errors of [`extract_stored_attributes_from_source`].
 pub fn extract_attributes_full_from_source<S: Source + ?Sized>(
     source: &S,
+    addresses: AddressContext,
     access_mode: AccessMode,
     header: &ObjectHeader,
     offset_size: u8,
@@ -178,6 +182,7 @@ pub fn extract_attributes_full_from_source<S: Source + ?Sized>(
 ) -> Result<Vec<AttributeMessage>, FormatError> {
     Ok(extract_stored_attributes_from_source(
         source,
+        addresses,
         access_mode,
         header,
         offset_size,
@@ -202,21 +207,32 @@ pub struct StoredAttribute {
     pub creation_index: Option<u16>,
 }
 
-/// [`extract_attributes_full_from_source`], keeping each attribute's stored
-/// creation index.
+/// Reads attributes and their stored creation indexes through a base-framed source.
 ///
-/// The in-place editor needs it: an object that tracks attribute creation order
-/// has to keep every attribute's index across an edit that rebuilds its storage,
-/// and the index is the one thing an attribute message itself does not carry.
+/// `addresses` holds the effective base used to frame `source`. Compact attributes store
+/// their creation indexes in object-header records, and dense attributes in B-tree records.
+///
+/// # Errors
+///
+/// Returns the parser error if an attribute message, a shared reference, or dense storage is
+/// malformed, and the source error if a read fails.
 pub fn extract_stored_attributes_from_source<S: Source + ?Sized>(
     source: &S,
+    addresses: AddressContext,
     access_mode: AccessMode,
     header: &ObjectHeader,
     offset_size: u8,
     length_size: u8,
     sohm: Option<&SohmTable>,
 ) -> Result<Vec<StoredAttribute>, FormatError> {
-    let resolver = SourceResolver::new(source, access_mode, offset_size, length_size, sohm);
+    let resolver = SourceResolver::new(
+        source,
+        addresses,
+        access_mode,
+        offset_size,
+        length_size,
+        sohm,
+    );
     let mut attrs = Vec::new();
 
     // Collect compact attributes (inline in OH)
@@ -242,6 +258,7 @@ pub fn extract_stored_attributes_from_source<S: Source + ?Sized>(
     {
         let dense_attrs = extract_dense_attributes_from_source(
             source,
+            addresses,
             access_mode,
             &info,
             fh_addr,
@@ -337,6 +354,7 @@ fn extract_dense_attributes(
 /// and B-tree v2 through a [`Source`] on demand.
 fn extract_dense_attributes_from_source<S: Source + ?Sized>(
     source: &S,
+    addresses: AddressContext,
     access_mode: AccessMode,
     attr_info: &AttributeInfoMessage,
     fh_addr: StoredAddress,
@@ -344,10 +362,18 @@ fn extract_dense_attributes_from_source<S: Source + ?Sized>(
     length_size: u8,
     sohm: Option<&SohmTable>,
 ) -> Result<Vec<StoredAttribute>, FormatError> {
-    let resolver = SourceResolver::new(source, access_mode, offset_size, length_size, sohm);
+    let resolver = SourceResolver::new(
+        source,
+        addresses,
+        access_mode,
+        offset_size,
+        length_size,
+        sohm,
+    );
     let mut attrs = Vec::new();
     visit_dense_attribute_messages_from_source(
         source,
+        addresses,
         attr_info,
         fh_addr,
         offset_size,
@@ -373,6 +399,8 @@ fn extract_dense_attributes_from_source<S: Source + ?Sized>(
 /// `visit` with each selected message's bytes and optional creation index. The caller resolves
 /// shared messages when selecting them.
 ///
+/// `source` is framed at the effective base in `addresses`.
+///
 /// # Errors
 ///
 /// Returns [`FormatError::UnexpectedEof`] if the name index is missing or a record is truncated.
@@ -381,6 +409,7 @@ fn extract_dense_attributes_from_source<S: Source + ?Sized>(
 /// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_infra_btrees_v2
 pub(crate) fn visit_dense_attribute_messages_from_source(
     source: &(impl Source + ?Sized),
+    addresses: AddressContext,
     attr_info: &AttributeInfoMessage,
     fh_addr: StoredAddress,
     offset_size: u8,
@@ -388,9 +417,10 @@ pub(crate) fn visit_dense_attribute_messages_from_source(
     mut select: impl FnMut(MessageFlags) -> bool,
     mut visit: impl FnMut(&[u8], Option<u16>) -> Result<(), FormatError>,
 ) -> Result<(), FormatError> {
-    let fh = FractalHeapHeader::parse_from_source(
-        &SourceMetadata(source),
-        fh_addr.get(),
+    let fh = crate::fractal_heap::read_header_from_source(
+        source,
+        addresses,
+        fh_addr,
         offset_size,
         length_size,
     )?;
@@ -472,6 +502,7 @@ mod tests {
 
     use super::*;
     use crate::address::AddressContext;
+    use crate::address::{BaseAddress, BaseAddressExt};
     use crate::data_read;
     use crate::message_flags::MessageFlags;
     use crate::source::BytesSource;
@@ -635,6 +666,7 @@ mod tests {
         let source = CountingSource::new(bytes);
         let attrs = extract_dense_attributes_from_source(
             &source,
+            AddressContext::from_effective_base(BaseAddress::ZERO),
             AccessMode::ReadOnly,
             &info,
             fh_addr,
@@ -717,6 +749,7 @@ mod tests {
         let source = BytesSource::new(bytes);
         let streamed = extract_dense_attributes_from_source(
             &source,
+            AddressContext::from_effective_base(BaseAddress::ZERO),
             AccessMode::ReadOnly,
             &info,
             fh_addr,

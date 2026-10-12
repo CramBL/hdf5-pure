@@ -699,7 +699,14 @@ fn resolve_v2_group_entries_from_source<S: Source + ?Sized>(
             inner: source,
             base: addresses.effective_base(),
         };
-        resolve_dense_entries_from_source(&framed, &link_info, fh_addr, offset_size, length_size)
+        resolve_dense_entries_from_source(
+            &framed,
+            addresses,
+            &link_info,
+            fh_addr,
+            offset_size,
+            length_size,
+        )
     } else {
         // Compact storage: links live in the (already-parsed) object header.
         resolve_compact_entries(object_header, offset_size)
@@ -709,20 +716,24 @@ fn resolve_v2_group_entries_from_source<S: Source + ?Sized>(
 /// Streaming counterpart of [`resolve_dense_entries`], reading `source` framed at the file's base
 /// address.
 ///
+/// `addresses` holds the effective base used to frame `source`.
+///
 /// # Errors
 ///
 /// Returns the errors of [`resolve_dense_entries`], and the error `source` reports for a structure
 /// it cannot read.
 pub(crate) fn resolve_dense_entries_from_source<S: Source + ?Sized>(
     source: &S,
+    addresses: AddressContext,
     link_info: &LinkInfoMessage,
     fh_addr: StoredAddress,
     offset_size: u8,
     length_size: u8,
 ) -> Result<Vec<GroupEntry>, FormatError> {
-    let fh = FractalHeapHeader::parse_from_source(
-        &SourceMetadata(source),
-        fh_addr.get(),
+    let fh = crate::fractal_heap::read_header_from_source(
+        source,
+        addresses,
+        fh_addr,
         offset_size,
         length_size,
     )?;
@@ -1452,6 +1463,7 @@ mod huge_link_tests {
         let source = BytesSource::new(bytes);
         let streamed = resolve_dense_entries_from_source(
             &source,
+            AddressContext::from_effective_base(BaseAddress::ZERO),
             &link_info,
             fh_addr,
             offset_size,

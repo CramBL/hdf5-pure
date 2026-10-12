@@ -29,6 +29,7 @@ pub use hdf5_pure_format::__private::encode_sohm_ref;
 pub use hdf5_pure_format::__private::parse_shared_ref;
 
 use crate::access_mode::AccessMode;
+use crate::address::AddressContext;
 use crate::address::BaseAddressExt;
 use crate::address::{BaseAddress, StoredAddress};
 use crate::convert::Narrow;
@@ -104,10 +105,12 @@ impl SharedResolver for BufferedResolver<'_> {
     }
 }
 
-/// Resolves references by reading the target object header from a [`Source`] on
-/// demand instead of indexing a whole-file slice.
+/// Resolves shared messages by reading object headers and heap objects through a [`Source`].
+///
+/// The source is framed at the effective base in [`AddressContext`].
 pub struct SourceResolver<'a, S: Source + ?Sized> {
     source: &'a S,
+    addresses: AddressContext,
     access_mode: AccessMode,
     offset_size: u8,
     length_size: u8,
@@ -115,10 +118,12 @@ pub struct SourceResolver<'a, S: Source + ?Sized> {
 }
 
 impl<'a, S: Source + ?Sized> SourceResolver<'a, S> {
-    /// See [`BufferedResolver::new`] for why the shared-message table is a
-    /// parameter here rather than something the resolver finds for itself.
+    /// Creates a resolver for a source framed at the effective base in `addresses`.
+    ///
+    /// `sohm` is the file's shared-message table. A heap reference requires this table.
     pub fn new(
         source: &'a S,
+        addresses: AddressContext,
         access_mode: AccessMode,
         offset_size: u8,
         length_size: u8,
@@ -126,6 +131,7 @@ impl<'a, S: Source + ?Sized> SourceResolver<'a, S> {
     ) -> Self {
         Self {
             source,
+            addresses,
             access_mode,
             offset_size,
             length_size,
@@ -142,6 +148,7 @@ impl<S: Source + ?Sized> SharedResolver for SourceResolver<'_, S> {
                 let table = self.sohm.ok_or(FormatError::UnsupportedSohmReference)?;
                 return crate::sohm::read_heap_message_from_source(
                     self.source,
+                    self.addresses,
                     table,
                     target,
                     &id,

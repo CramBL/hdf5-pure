@@ -424,7 +424,7 @@
 extern crate alloc;
 
 #[cfg(feature = "__fractal-heap-storage-crosscheck")]
-use crate::address::StoredAddressExt;
+use crate::address::{BaseAddressExt, StoredAddressExt};
 
 #[cfg(doc)]
 pub mod _guide;
@@ -572,6 +572,7 @@ pub fn __fractal_heap_storage_extents(
 ) -> Result<alloc::vec::Vec<(u64, u64)>, alloc::string::String> {
     let storage = fractal_heap_storage::collect_fractal_heap_storage_from_source(
         &source::BytesSource::new(file_data),
+        address::AddressContext::from_effective_base(address::BaseAddress::ZERO),
         address::StoredAddress::new(heap_header_address),
         offset_size,
         length_size,

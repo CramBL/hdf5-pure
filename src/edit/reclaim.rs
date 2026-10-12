@@ -342,6 +342,7 @@ impl WriteEngine {
                 inner: &self.image(),
                 base: base.effective_base(),
             },
+            self.addresses,
             heap_address,
             OFFSET_SIZE,
             LENGTH_SIZE,
@@ -620,6 +621,7 @@ impl WriteEngine {
                 inner: &self.image(),
                 base: self.addresses.effective_base(),
             },
+            self.addresses,
             &link_info,
             heap_address,
             OFFSET_SIZE,
@@ -1103,6 +1105,7 @@ impl WriteEngine {
             }
             let entries = crate::group_v2::resolve_dense_entries_from_source(
                 &source,
+                self.addresses,
                 &info,
                 heap,
                 OFFSET_SIZE,
@@ -1154,6 +1157,7 @@ impl WriteEngine {
             let mut shared_records = false;
             crate::attribute::visit_dense_attribute_messages_from_source(
                 &source,
+                self.addresses,
                 &info,
                 heap,
                 OFFSET_SIZE,
@@ -1207,6 +1211,7 @@ impl WriteEngine {
                 inner: &self.image(),
                 base: self.addresses.effective_base(),
             },
+            self.addresses,
             heap,
             OFFSET_SIZE,
             LENGTH_SIZE,
