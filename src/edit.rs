@@ -273,6 +273,8 @@ use std::path::Path;
 
 use core::num::NonZeroUsize;
 
+use hdf5_pure_core::__private::FileRange;
+use hdf5_pure_core::__private::PhysicalAddress;
 use hdf5_pure_format::__private::ChunkIndexInfo;
 use hdf5_pure_format::__private::ChunkRecord;
 use hdf5_pure_format::__private::ExtensibleArrayHeader;
@@ -1093,6 +1095,9 @@ pub(crate) struct WriteEngine {
     ///
     /// It owns the flat or PAGE free-space state and its threshold. Strategies without reusable
     /// free-space managers, and an unreadable strategy, use [`SessionSpace::Disabled`].
+    ///
+    /// Its extents are stored addresses, relative to the base address, as a free-space manager
+    /// records them.
     space: SessionSpace,
     /// Space this session has taken *out* of the on-disk free-space managers so
     /// that an immediate in-place append may spend it (issue #387).
@@ -1123,6 +1128,8 @@ pub(crate) struct WriteEngine {
     /// Empty for a non-persisting session, which reuses from [`space`](Self::space) directly.
     /// Its allocator state is in memory alone, so nothing on the disk claims those bytes
     /// are free and nothing has to be published before they are spent.
+    ///
+    /// Its extents are stored addresses, as in [`space`](Self::space).
     reserved: FreeList,
     /// Whether this file has been *proved* to hold no object reference at all —
     /// the one thing that lets a commit skip the walk that repoints them
@@ -2688,7 +2695,9 @@ impl WriteEngine {
         let Ok(widths) = FormatWidths::from_sizes(os, self.superblock.length_size) else {
             return;
         };
-        let file_len = self.image.len();
+        let Ok(eoa) = self.end_of_allocation() else {
+            return;
+        };
         let managers: Vec<(
             Option<ManagerKind>,
             u64,
@@ -2702,7 +2711,7 @@ impl WriteEngine {
                 let read = free_space_manager::read_persisted_sections_source(
                     &self.image(),
                     widths,
-                    BaseAddress::ZERO,
+                    self.addresses.effective_base(),
                     &[m],
                 );
                 (
@@ -2734,7 +2743,7 @@ impl WriteEngine {
                 tagged.sort_unstable_by_key(|&(_, extent)| extent.start());
                 let mut prev_end = 0u64;
                 for (kind, extent) in tagged {
-                    if extent.end() > file_len || extent.start() < prev_end {
+                    if extent.end() > eoa.get() || extent.start() < prev_end {
                         continue;
                     }
                     prev_end = extent.end();
@@ -2755,7 +2764,7 @@ impl WriteEngine {
                 let Some(extent) = FreeExtent::new(section.addr.get(), section.size) else {
                     continue;
                 };
-                if extent.end() > file_len || extent.start() < prev_end {
+                if extent.end() > eoa.get() || extent.start() < prev_end {
                     continue;
                 }
                 prev_end = extent.end();
@@ -2768,7 +2777,7 @@ impl WriteEngine {
             old_blocks.extend(
                 spans
                     .into_iter()
-                    .filter_map(|(addr, len)| FreeExtent::new(addr, len)),
+                    .filter_map(|(at, len)| self.stored_extent(at, len)),
             );
         }
         for (_, manager, read) in &managers {
@@ -2776,9 +2785,10 @@ impl WriteEngine {
                 Ok((_, blocks)) => old_blocks.extend(
                     blocks
                         .iter()
-                        .filter_map(|&(addr, len)| FreeExtent::new(addr, len)),
+                        .filter_map(|&(at, len)| self.stored_extent(at, len)),
                 ),
-                Err(_) => old_blocks.extend(self.manager_header_block(widths, *manager)),
+                Err(_) => old_blocks
+                    .extend(self.manager_header_block(widths, StoredAddress::new(*manager))),
             }
         }
 
@@ -2790,17 +2800,35 @@ impl WriteEngine {
         });
     }
 
-    /// Returns the extent of the free-space manager header at `addr`, or `None` if the read fails
-    /// or the header does not parse.
-    fn manager_header_block(&self, widths: FormatWidths, addr: u64) -> Option<FreeExtent> {
+    /// Returns the extent of the free-space manager header at the stored address `addr`, in stored
+    /// addresses, or `None` if the read fails or the header does not parse.
+    fn manager_header_block(
+        &self,
+        widths: FormatWidths,
+        addr: StoredAddress,
+    ) -> Option<FreeExtent> {
         let len = hdf5_pure_format::__private::free_space_manager_header_len(widths);
+        let at = self.addresses.resolve(addr).ok()?;
         let fshd = self
             .image()
-            .read_metadata_at(addr, len.to_usize().ok()?)
+            .read_metadata_at(at.get(), len.to_usize().ok()?)
             .ok()?;
         FreeSpaceManagerHeader::parse(widths, &fshd)
             .ok()
-            .and_then(|_| FreeExtent::new(addr, len))
+            .and_then(|_| FreeExtent::new(addr.get(), len))
+    }
+
+    fn stored_extent(&self, at: u64, len: u64) -> Option<FreeExtent> {
+        FreeExtent::new(self.addresses.relative(at).ok()?.get(), len)
+    }
+
+    /// Returns the end of the image as a stored address.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::AddressBelowBase`] if the image ends below the base address.
+    fn end_of_allocation(&self) -> Result<StoredAddress, FormatError> {
+        self.addresses.relative(self.image.len())
     }
 
     /// Reads the superblock extension of `superblock` from `source`, and returns its absolute
@@ -3571,8 +3599,8 @@ impl WriteEngine {
         }
     }
 
-    /// A snapshot of this session's live space usage — the current file size and
-    /// the free space it can reuse — as a [`SpaceAccounting`].
+    /// Returns a snapshot of this session's live space usage, the current file size and the free
+    /// space it can reuse.
     ///
     /// This is the mutating-session analogue of the read-only accounting on
     /// [`File`](crate::File): it answers "how big is the file right now, and how
@@ -3591,6 +3619,16 @@ impl WriteEngine {
     /// and handed back to the reference library but never spent, and is excluded
     /// from the reusable figure.
     ///
+    /// The free lists hold stored addresses, and this function reports each region at its file
+    /// position, the stored address plus the base address.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::OffsetOverflow`] if a region ends past [`u64::MAX`] once the base
+    /// address is added.
+    ///
+    /// # Examples
+    ///
     /// ```no_run
     /// use hdf5_pure::File;
     ///
@@ -3608,8 +3646,7 @@ impl WriteEngine {
         rustdoc::private_doc_tests,
         reason = "rustdoc's test mode collects a private item, so this example is compiled and run by `cargo test --doc`"
     )]
-    #[must_use]
-    pub fn space_accounting(&self) -> SpaceAccounting {
+    pub fn space_accounting(&self) -> Result<SpaceAccounting, FormatError> {
         // The append reserve is free space this session can still spend — it is
         // out of the on-disk managers, not out of the file — so leaving it out
         // would make an in-place append look like it had consumed bytes it has
@@ -3634,23 +3671,30 @@ impl WriteEngine {
         // A paged file tracks its free space per page type; report the union of
         // the two, since the caller wants one total rather than a per-manager
         // breakdown.
-        let reusable_free_space: Vec<_> = if self.reserved.is_empty() {
+        let physical = |extent: FreeExtent| {
+            let range = FileRange::new(
+                self.addresses.resolve(StoredAddress::new(extent.start()))?,
+                extent.len(),
+            )?;
+            Ok((range.start().get(), range.length()))
+        };
+        let reusable_free_space = if self.reserved.is_empty() {
             self.space
                 .reusable_sections()
-                .map(|extent| (extent.start(), extent.len()))
-                .collect()
+                .map(physical)
+                .collect::<Result<Vec<_>, FormatError>>()?
         } else {
             self.space
                 .reusable_sections_with_raw(self.reserved.extents().iter().copied())
-                .map(|extent| (extent.start(), extent.len()))
-                .collect()
+                .map(physical)
+                .collect::<Result<Vec<_>, FormatError>>()?
         };
         let reusable_free_bytes = reusable_free_space.iter().map(|(_, len)| len).sum();
-        SpaceAccounting {
+        Ok(SpaceAccounting {
             logical_size: self.image.len(),
             reusable_free_bytes,
             reusable_free_space,
-        }
+        })
     }
 
     /// The shared Extensible-Array append engine's view of this session: the
@@ -3664,6 +3708,7 @@ impl WriteEngine {
             image: self.image.as_mut(),
             superblock: &mut self.superblock,
             sb_sig_off: self.sb_sig_off,
+            addresses: self.addresses,
             space: &mut self.space,
             reserve: None,
             reuse_session_space: false,
@@ -3888,7 +3933,7 @@ impl WriteEngine {
     fn commit_persisting_releasing_reserve(
         &mut self,
         new_root: u64,
-        to_free: Vec<(u64, u64, FreeClass)>,
+        to_free: Vec<(StoredAddress, u64, FreeClass)>,
     ) -> Result<(), Error> {
         self.release_reserve();
         self.commit_persisting(new_root, to_free, TailPlacement::Anywhere)?;
@@ -3933,7 +3978,7 @@ impl WriteEngine {
             return Ok(());
         };
         // Only a tail at the very end of the file is standing in the way of one.
-        if tail_end != self.image.len() {
+        if tail_end != self.end_of_allocation()?.get() {
             return Ok(());
         }
         // The free run reaching up to it, plus the tail the rewrite frees, is what
@@ -4326,6 +4371,7 @@ impl WriteEngine {
                     image,
                     superblock,
                     sb_sig_off,
+                    addresses,
                     space,
                     located,
                     sync_policy,
@@ -4336,6 +4382,7 @@ impl WriteEngine {
                     image: image.as_mut(),
                     superblock,
                     sb_sig_off: *sb_sig_off,
+                    addresses: *addresses,
                     space,
                     reserve: None,
                     reuse_session_space: false,
@@ -4389,6 +4436,7 @@ impl WriteEngine {
                     image,
                     superblock,
                     sb_sig_off,
+                    addresses,
                     space,
                     located,
                     reserved,
@@ -4400,6 +4448,7 @@ impl WriteEngine {
                     image: image.as_mut(),
                     superblock,
                     sb_sig_off: *sb_sig_off,
+                    addresses: *addresses,
                     space,
                     reserve: (reuse && from_reserve).then_some(reserved),
                     reuse_session_space: reuse && !from_reserve,
@@ -6533,6 +6582,7 @@ impl WriteEngine {
         // rather than of a structure read back out of the file, which is the one
         // span where a stale answer would not be caught by anything else.
         retain_disjoint_in_bounds(&mut to_free, self.image.len());
+        let to_free = self.stored_spans(to_free)?;
 
         // A persisting file keeps its freed space recorded on disk rather than
         // truncating it away, so its commit takes a different tail: one that
@@ -6542,9 +6592,8 @@ impl WriteEngine {
             return self.repoint_stored_references(&relocations);
         }
 
-        let cur_eof = self.image.len();
-        let trunc_to = self.release_freed(to_free, cur_eof);
-        let new_eof = trunc_to.unwrap_or(cur_eof);
+        let trunc_to = self.release_freed(to_free)?;
+        let new_eof = trunc_to.map_or(self.image.len(), PhysicalAddress::get);
 
         self.barrier()?;
         if self.superblock.version >= 2 {
@@ -6586,25 +6635,53 @@ impl WriteEngine {
         // mere unreferenced slack, which the next open ignores; the reverse order
         // could advertise an end-of-file past the actual file length.
         if let Some(cut) = trunc_to {
-            self.image.truncate(cut)?;
+            self.image.truncate(cut.get())?;
             self.barrier()?;
         }
         self.repoint_stored_references(&relocations)
     }
 
     /// Records the regions a non-persisting commit vacated under the active reusable-space
-    /// strategy, and returns the address to truncate the file to when the flat free run reaches
-    /// `eof`.
+    /// strategy, and returns the file position to truncate the file to when the flat free run
+    /// reaches the end of allocation.
     ///
     /// Disabled strategies drop the regions. A non-persisting PAGE commit is rejected before this
     /// point because recovering page typing across sessions requires persisted state.
-    fn release_freed(&mut self, to_free: Vec<(u64, u64, FreeClass)>, eof: u64) -> Option<u64> {
-        self.space.release_freed(
-            eof,
-            to_free
-                .into_iter()
-                .filter_map(|(addr, len, _)| FreeExtent::new(addr, len)),
-        )
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::AddressBelowBase`] if the image ends below the base address, and
+    /// [`FormatError::OffsetOverflow`] if the truncation point plus the base address exceeds
+    /// [`u64::MAX`].
+    fn release_freed(
+        &mut self,
+        to_free: Vec<(StoredAddress, u64, FreeClass)>,
+    ) -> Result<Option<PhysicalAddress>, FormatError> {
+        let eoa = self.end_of_allocation()?;
+        self.space
+            .release_freed(
+                eoa.get(),
+                to_free
+                    .into_iter()
+                    .filter_map(|(addr, len, _)| FreeExtent::new(addr.get(), len)),
+            )
+            .map(|cut| self.addresses.resolve(StoredAddress::new(cut)))
+            .transpose()
+    }
+
+    /// Returns `spans` with each file position converted to a stored address.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::AddressBelowBase`] if a span starts below the base address.
+    fn stored_spans(
+        &self,
+        spans: Vec<(u64, u64, FreeClass)>,
+    ) -> Result<Vec<(StoredAddress, u64, FreeClass)>, FormatError> {
+        spans
+            .into_iter()
+            .map(|(at, len, class)| Ok((self.addresses.relative(at)?, len, class)))
+            .collect()
     }
 
     /// Repoint every object reference the file already stores at a header this
@@ -6683,7 +6760,7 @@ impl WriteEngine {
     fn commit_persisting(
         &mut self,
         new_root: u64,
-        to_free: Vec<(u64, u64, FreeClass)>,
+        to_free: Vec<(StoredAddress, u64, FreeClass)>,
         placement: TailPlacement,
     ) -> Result<(), Error> {
         // A paged file records its free space in per-page-type managers and keeps
@@ -6744,8 +6821,9 @@ impl WriteEngine {
         // in `to_free` until the repoint, so a reused span holds bytes
         // already unreachable from the on-disk root, which is the guarantee
         // [`reserve`](Self::reserve) rests on too.
+        let current_eoa = self.end_of_allocation()?.get();
         let (post, placed_at, tail_len, eoa) =
-            self.flat_tail_layout(&to_free, &old_blocks, ext_len, widths);
+            self.flat_tail_layout(current_eoa, &to_free, &old_blocks, ext_len, widths);
         if placed_at.is_none() && placement == TailPlacement::ReuseOnly {
             // The shrink pass appends nothing: growing the file by a tail is the
             // opposite of what it was called for. Nothing has been written and the
@@ -6754,11 +6832,11 @@ impl WriteEngine {
             return Ok(());
         }
         let reused = placed_at.is_some();
-        let ext_addr = placed_at.unwrap_or_else(|| self.image.len());
+        let ext_addr = placed_at.unwrap_or(current_eoa);
         let managers = ManagerSections::flat(post.extents().iter().copied());
         let plan = free_space_manager::plan_managers(
             &managers,
-            self.persisted_address(ext_addr + ext_len),
+            StoredAddress::new(ext_addr).offset(ext_len),
             widths,
         );
         // A reused tail sits inside the file, which ends it at the end-of-allocation
@@ -6766,11 +6844,12 @@ impl WriteEngine {
         // that reach it and what `release_trailing_run` releases of the free space
         // below them. Neither is in `post`, and the truncation below gives both back
         // to the filesystem (issue #418). An appended tail ends the file itself.
-        let final_eof = if reused { eoa } else { ext_addr + tail_len };
+        let final_eoa = if reused { eoa } else { ext_addr + tail_len };
         debug_assert!(
-            ext_addr + tail_len <= final_eof,
+            ext_addr + tail_len <= final_eoa,
             "the tail must end at or below the end-of-allocation it was placed under"
         );
+        let final_eof = self.addresses.resolve(StoredAddress::new(final_eoa))?;
 
         let flat_block = match plan.blocks.as_slice() {
             [] => None,
@@ -6804,7 +6883,7 @@ impl WriteEngine {
             // value `H5Fget_freespace` accounts for correctly (verified in the
             // crosscheck).
             let eoa_pre_fsm = if reused {
-                final_eof
+                final_eoa
             } else {
                 block.fshd_addr.get()
             };
@@ -6825,7 +6904,7 @@ impl WriteEngine {
                 strategy,
                 threshold,
                 page_size,
-                final_eof,
+                final_eoa,
             );
             build_v2_object_header(&self.rewrite_extension_region(old_ext_addr, &info)?)?
         };
@@ -6850,7 +6929,7 @@ impl WriteEngine {
         // in space an earlier commit freed, and neither is referenced until the
         // repoint below.
         let region = (ext_addr, tail_len);
-        self.write_tail_block(region, ext_addr, &ext_oh)?;
+        self.write_tail_block(region, StoredAddress::new(ext_addr), &ext_oh)?;
         if let Some(block) = flat_block {
             let fshd_len = hdf5_pure_format::__private::free_space_manager_header_len(widths);
             let fsse_allocated = tail_len
@@ -6868,17 +6947,16 @@ impl WriteEngine {
                     block.class,
                     Some(fsse_allocated),
                 )?;
-            self.write_tail_block(region, base.absolute(block.fshd_addr)?, &fshd)?;
-            let fsse_addr = base.absolute(block.fsse_addr)?;
-            self.write_tail_block(region, fsse_addr, &fsse)?;
+            self.write_tail_block(region, block.fshd_addr, &fshd)?;
+            self.write_tail_block(region, block.fsse_addr, &fsse)?;
         }
         // Barrier, then repoint the superblock (root, eof, and the new extension)
         // — the linearization point — and sync it.
         self.barrier()?;
         let mut new_sb = self.superblock.clone();
         new_sb.root_group_address = self.addresses.relative(new_root)?;
-        new_sb.eof_address = final_eof;
-        new_sb.superblock_extension_address = Some(self.addresses.relative(ext_addr)?);
+        new_sb.eof_address = final_eof.get();
+        new_sb.superblock_extension_address = Some(StoredAddress::new(ext_addr));
         // As above, and zero for the same reason: this is the *unpaged* persisting
         // tail, which no page-buffered session reaches (issue #73, issue #308).
         new_sb.consistency_flags = self.held_status_flags;
@@ -6894,8 +6972,8 @@ impl WriteEngine {
         // ignores, where the reverse order would advertise an end-of-file past
         // the file's actual length. The managers just written describe `post`,
         // which no longer names anything above this cut.
-        if final_eof < self.image.len() {
-            self.image.truncate(final_eof)?;
+        if final_eof < PhysicalAddress::new(self.image.len()) {
+            self.image.truncate(final_eof.get())?;
             self.barrier()?;
         }
 
@@ -6913,27 +6991,6 @@ impl WriteEngine {
         // it grows past them again.
         self.fsm_len = self.image.len();
         Ok(())
-    }
-
-    /// The address a persisting commit records for the image position `at`.
-    ///
-    /// The free lists hold positions in this session's image, and a manager block
-    /// records the addresses the file stores. The two are the same number here,
-    /// since [`load_persisted_free_space`](Self::load_persisted_free_space) arms
-    /// persistence for a file whose image begins at byte zero alone, so this
-    /// changes the frame and not the value.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the file has a userblock, where the two frames differ and a
-    /// manager block would record every free region a userblock's length below
-    /// where it lies.
-    fn persisted_address(&self, at: u64) -> StoredAddress {
-        assert!(
-            self.superblock.base_address.is_zero(),
-            "a persisting commit requires a file whose image begins at byte zero"
-        );
-        StoredAddress::new(at)
     }
 
     /// Returns the free space a flat persisting commit is about to record, and
@@ -6956,26 +7013,26 @@ impl WriteEngine {
     fn flat_post_free(
         &self,
         eof: u64,
-        to_free: &[(u64, u64, FreeClass)],
+        to_free: &[(StoredAddress, u64, FreeClass)],
         old_blocks: &[FreeExtent],
     ) -> (FreeList, u64) {
         let extents = to_free
             .iter()
-            .filter_map(|&(addr, len, _)| FreeExtent::new(addr, len))
+            .filter_map(|&(addr, len, _)| FreeExtent::new(addr.get(), len))
             .chain(old_blocks.iter().copied());
         self.space
             .flat_post_free(eof, extents)
             .expect("the flat commit tail requires a flat session strategy")
     }
 
-    /// Reserve free space for a flat persisting commit's tail, returning the free
-    /// list the tail leaves behind, the address it got — `None` when nothing
-    /// reusable fits, which is the caller's cue to append — its length, which the
-    /// caller needs either way, and the end-of-allocation the commit should
-    /// publish: where the tail is reused, the current end-of-file less the dropped
-    /// regions that reach it and what [`release_trailing_run`] releases of the free
-    /// space below them, and where it is appended, the current end-of-file
-    /// (issue #418).
+    /// Reserves free space for a flat persisting commit's tail, and returns the free list the tail
+    /// leaves behind, its address, its length, and the end-of-allocation the commit publishes.
+    ///
+    /// `current_eoa` and every address in the result are stored addresses. The address is `None`
+    /// when nothing reusable fits, and the caller then appends the tail at `current_eoa`. The
+    /// length is the tail's in either case. The end-of-allocation of a reused tail is `current_eoa`
+    /// less the dropped regions that reach it and what [`release_trailing_run`] releases of the
+    /// free space below them, and that of an appended tail is `current_eoa`.
     ///
     /// The reservation and the length define each other, exactly as they do for the
     /// paged tail ([`tail_layout`](Self::tail_layout)): drawing bytes out of the
@@ -7034,7 +7091,8 @@ impl WriteEngine {
     /// to not doing so once per draw.
     fn flat_tail_layout(
         &mut self,
-        to_free: &[(u64, u64, FreeClass)],
+        current_eoa: u64,
+        to_free: &[(StoredAddress, u64, FreeClass)],
         old_blocks: &[FreeExtent],
         ext_len: u64,
         widths: FormatWidths,
@@ -7043,12 +7101,11 @@ impl WriteEngine {
         /// it, without letting a proposal that keeps growing spin.
         const ROUNDS: usize = 4;
 
-        let eof = self.image.len();
         // The first proposal: what the tail would measure with nothing reserved.
         // A manager block's length depends only on the sections it records, never
         // on where it sits. It is also the answer for a tail that ends up appended,
         // since every round hands its reservation back before this returns.
-        let (probe, _) = self.flat_post_free(eof, to_free, old_blocks);
+        let (probe, _) = self.flat_post_free(current_eoa, to_free, old_blocks);
         let managers = ManagerSections::flat(probe.extents().iter().copied());
         let appended_len = ext_len + free_space_manager::manager_blocks_len(&managers, widths);
         let mut proposed = appended_len;
@@ -7062,7 +7119,7 @@ impl WriteEngine {
                 },
             };
             let at = reserved.start();
-            let (mut post, eoa) = self.flat_post_free(eof, to_free, old_blocks);
+            let (mut post, eoa) = self.flat_post_free(current_eoa, to_free, old_blocks);
             // Free space that reaches end-of-file is released rather than
             // recorded: the file is truncated to where the run starts, so the
             // sections these blocks are sized from must already leave it out
@@ -7090,7 +7147,7 @@ impl WriteEngine {
         // trailing run is released: whatever tracked free space reaches end-of-file
         // was too small for the tail and stays recorded below it, and a dropped
         // extent that ended the allocation stays below it untracked.
-        (probe, None, appended_len, eof)
+        (probe, None, appended_len, current_eoa)
     }
 
     /// Commit tail for a genuine paged file (`H5F_FSPACE_STRATEGY_PAGE`, issue
@@ -7119,7 +7176,7 @@ impl WriteEngine {
     fn commit_persisting_paged(
         &mut self,
         new_root: u64,
-        to_free: Vec<(u64, u64, FreeClass)>,
+        to_free: Vec<(StoredAddress, u64, FreeClass)>,
         placement: TailPlacement,
     ) -> Result<(), Error> {
         let os = self.superblock.offset_size;
@@ -7193,7 +7250,15 @@ impl WriteEngine {
         // past it into whatever lives next. A few rounds settle it; a proposal that
         // will not converge falls through to the append below, which has no length
         // to satisfy.
-        let placed = self.tail_layout(&to_free, &old_blocks, ext_len, page_size, widths);
+        let current_eoa = self.end_of_allocation()?.get();
+        let placed = self.tail_layout(
+            current_eoa,
+            &to_free,
+            &old_blocks,
+            ext_len,
+            page_size,
+            widths,
+        );
         if placed.is_none() && placement == TailPlacement::ReuseOnly {
             // As on the flat path: the shrink pass opens no page of its own.
             return Ok(());
@@ -7208,7 +7273,7 @@ impl WriteEngine {
                 // free space reaches end-of-file was too small for the tail, and
                 // stays recorded below it.
                 self.begin_page(PageType::Meta)?;
-                let at = self.image.len();
+                let at = self.end_of_allocation()?.get();
                 let (mut post, eoa) = self.paged_post_free(at, &to_free, &old_blocks);
                 // The tail lands above the dropped whole pages that end the file, so they stay
                 // in it and are tracked as free pages.
@@ -7219,14 +7284,14 @@ impl WriteEngine {
                 let managers = ManagerSections::paged(&sections, page_size);
                 let plan = free_space_manager::plan_managers(
                     &managers,
-                    self.persisted_address(at + ext_len),
+                    StoredAddress::new(at).offset(ext_len),
                     widths,
                 );
                 let blocks_len = plan.end_of_managers.get().max(at + ext_len) - at;
                 (post, plan, at, blocks_len, at)
             }
         };
-        let final_eof = if reused {
+        let final_eoa = if reused {
             // The tail landed inside the file; the end-of-allocation is where this
             // commit's appends left it — page-aligned by `pad_to_page`, less the
             // whole pages of free space reaching it, which `post` no longer
@@ -7236,9 +7301,10 @@ impl WriteEngine {
             align_up(ext_addr + blocks_len, page_size)
         };
         debug_assert!(
-            ext_addr + blocks_len <= final_eof,
+            ext_addr + blocks_len <= final_eoa,
             "the tail must end at or below the end-of-allocation it was placed under"
         );
+        let final_eof = self.addresses.resolve(StoredAddress::new(final_eoa))?;
 
         let ext_oh = if plan.is_empty() {
             // No free space to track: an empty persist message, recording the final end of
@@ -7248,7 +7314,7 @@ impl WriteEngine {
                 strategy,
                 threshold,
                 page_size,
-                final_eof,
+                final_eoa,
             );
             build_v2_object_header(&self.rewrite_extension_region(old_ext_addr, &info)?)?
         } else {
@@ -7259,7 +7325,7 @@ impl WriteEngine {
                 threshold,
                 page_size,
                 plan.slots.map(StoredAddress::get),
-                final_eof,
+                final_eoa,
             );
             build_v2_object_header(&self.rewrite_extension_region(old_ext_addr, &info)?)?
         };
@@ -7284,7 +7350,7 @@ impl WriteEngine {
         // sits in space an earlier commit freed. Neither is referenced until the
         // repoint below.
         let region = (ext_addr, blocks_len);
-        self.write_tail_block(region, ext_addr, &ext_oh)?;
+        self.write_tail_block(region, StoredAddress::new(ext_addr), &ext_oh)?;
         for b in &plan.blocks {
             let (fshd, fsse) = hdf5_pure_format::__private::serialize_free_space_manager(
                 widths,
@@ -7293,8 +7359,8 @@ impl WriteEngine {
                 b.fsse_addr,
                 b.class,
             )?;
-            self.write_tail_block(region, base.absolute(b.fshd_addr)?, &fshd)?;
-            self.write_tail_block(region, base.absolute(b.fsse_addr)?, &fsse)?;
+            self.write_tail_block(region, b.fshd_addr, &fshd)?;
+            self.write_tail_block(region, b.fsse_addr, &fsse)?;
         }
         // An appended tail ends mid-page; pad it out, so the end-of-allocation stays
         // a whole number of pages. A reused tail is already inside the file, and
@@ -7302,15 +7368,15 @@ impl WriteEngine {
         // it released a trailing run its end-of-allocation is *below* the current
         // end-of-file, which the truncation after the repoint gives back.
         if !reused {
-            self.pad_zeros_to(final_eof)?;
+            self.pad_zeros_to(final_eof.get())?;
         }
         // Barrier, then repoint the superblock (root, eof, and the new extension)
         // — the linearization point — and sync it.
         self.barrier()?;
         let mut new_sb = self.superblock.clone();
         new_sb.root_group_address = self.addresses.relative(new_root)?;
-        new_sb.eof_address = final_eof;
-        new_sb.superblock_extension_address = Some(self.addresses.relative(ext_addr)?);
+        new_sb.eof_address = final_eof.get();
+        new_sb.superblock_extension_address = Some(StoredAddress::new(ext_addr));
         // The one publish site a page-buffered session actually reaches, and so
         // the one where this must not be a literal zero: a crash mark has to
         // outlive every commit the session makes (issue #308).
@@ -7326,8 +7392,8 @@ impl WriteEngine {
         // a crash between the two leaves trailing bytes the next open ignores,
         // where the reverse order would advertise an end-of-file past the file's
         // actual length.
-        if final_eof < self.image.len() {
-            self.image.truncate(final_eof)?;
+        if final_eof < PhysicalAddress::new(self.image.len()) {
+            self.image.truncate(final_eof.get())?;
             self.barrier()?;
         }
 
@@ -7345,7 +7411,7 @@ impl WriteEngine {
                 },
             ))?;
             let tail_len =
-                final_eof
+                final_eoa
                     .checked_sub(tail_end)
                     .ok_or(Error::Format(FormatError::Internal(
                         "free-space manager tail ends beyond the end of allocation".into(),
@@ -7370,9 +7436,9 @@ impl WriteEngine {
     /// recording the padding as free space of the tail page's type. A no-op on a
     /// non-paged file or an already-aligned one.
     fn pad_to_page(&mut self) -> Result<(), Error> {
-        let len = self.image.len();
+        let eoa = self.end_of_allocation()?;
         if let Some(transition @ PageTransition::Pad { extent, .. }) =
-            self.space.page_padding(len)?
+            self.space.page_padding(eoa.get())?
         {
             self.append(&vec![0u8; extent.len().to_usize()?])?;
             self.space.record_page_padding(transition);
@@ -7411,20 +7477,21 @@ impl WriteEngine {
     fn paged_post_free(
         &self,
         eof: u64,
-        to_free: &[(u64, u64, FreeClass)],
+        to_free: &[(StoredAddress, u64, FreeClass)],
         old_blocks: &[FreeExtent],
     ) -> (PagedPostFree, u64) {
         let freed = to_free.iter().filter_map(|&(addr, len, class)| {
-            FreeExtent::new(addr, len).map(|extent| (extent, class))
+            FreeExtent::new(addr.get(), len).map(|extent| (extent, class))
         });
         self.space
             .paged_post_free(eof, freed, old_blocks.iter().copied())
             .expect("the PAGE commit tail requires a paged session strategy")
     }
 
-    /// Reserve free metadata space for a paged commit's tail and plan the manager
-    /// blocks for the address it got, or `None` when nothing reusable fits — the
-    /// caller then appends instead.
+    /// Reserves free metadata space for a paged commit's tail and plans the manager blocks for its
+    /// address, or returns `None` when nothing reusable fits, and the caller then appends.
+    ///
+    /// `current_eoa` and every address in the result are stored addresses.
     ///
     /// The reservation and the plan are mutually dependent: drawing `len` bytes out
     /// of the free lists changes the sections those very blocks record, and a
@@ -7445,7 +7512,8 @@ impl WriteEngine {
     /// and always correct, so giving up costs a page rather than a guarantee.
     fn tail_layout(
         &mut self,
-        to_free: &[(u64, u64, FreeClass)],
+        current_eoa: u64,
+        to_free: &[(StoredAddress, u64, FreeClass)],
         old_blocks: &[FreeExtent],
         ext_len: u64,
         page_size: FileSpacePageSize,
@@ -7455,12 +7523,10 @@ impl WriteEngine {
         /// it, without letting an oscillating proposal spin.
         const ROUNDS: usize = 4;
 
-        let eof = self.image.len();
-
         // The first proposal: what the blocks would measure with nothing reserved.
         // A manager block's length depends only on the sections it records, never
         // on its address, so a start of 0 measures the blocks alone.
-        let (probe, _) = self.paged_post_free(eof, to_free, old_blocks);
+        let (probe, _) = self.paged_post_free(current_eoa, to_free, old_blocks);
         let probe_sections = probe.sections();
         let managers = ManagerSections::paged(&probe_sections, page_size);
         let mut proposed = ext_len + free_space_manager::manager_blocks_len(&managers, widths);
@@ -7468,7 +7534,7 @@ impl WriteEngine {
         for _ in 0..ROUNDS {
             let reserved = self.space.allocate(proposed, PageType::Meta)?;
             let at = reserved.start();
-            let (mut post, eoa) = self.paged_post_free(eof, to_free, old_blocks);
+            let (mut post, eoa) = self.paged_post_free(current_eoa, to_free, old_blocks);
             // Whole free pages at the end of the file are released rather than
             // recorded, so the sections these blocks are sized from must already
             // leave them out (issue #418). The reservation was taken before this
@@ -7482,7 +7548,7 @@ impl WriteEngine {
             let managers = ManagerSections::paged(&sections, page_size);
             let plan = free_space_manager::plan_managers(
                 &managers,
-                self.persisted_address(at + ext_len),
+                StoredAddress::new(at).offset(ext_len),
                 widths,
             );
             // An empty plan writes no blocks at all, leaving the tail the extension
@@ -7502,10 +7568,12 @@ impl WriteEngine {
         None
     }
 
-    /// Write one block of a persisting commit's tail — paged or flat — at the
-    /// address its layout gave it, which is either the current end-of-file (the
-    /// tail is being appended) or inside `region`, the span reserved from the free
-    /// lists, when the tail is being reused into space an earlier commit left.
+    /// Writes one block of a persisting commit's tail, paged or flat, at the stored address `addr`
+    /// its layout gave it.
+    ///
+    /// `region` is the tail's span of stored addresses, at the end of the file when the tail is
+    /// appended and in space an earlier commit left when the tail reuses it. An appended block's
+    /// `addr` resolves to the current end-of-file.
     ///
     /// The region is checked rather than asserted, for the reason
     /// [`place`](Self::place) checks its own reservation: a reused span is followed
@@ -7515,26 +7583,38 @@ impl WriteEngine {
     /// that placed these blocks, so the two cannot disagree today; the comparison
     /// is what keeps that true if a layout ever learns a length this sizing does
     /// not model.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::SerializationError`] if the block extends outside `region`,
+    /// [`FormatError::OffsetOverflow`] if `addr` plus the base address exceeds [`u64::MAX`], and
+    /// the write's error if the write fails.
     fn write_tail_block(
         &mut self,
         region: (u64, u64),
-        addr: u64,
+        addr: StoredAddress,
         bytes: &[u8],
     ) -> Result<(), Error> {
         let (start, len) = region;
-        if addr < start || addr + bytes.len() as u64 > start + len {
+        let stored = addr.get();
+        if stored < start || stored + bytes.len() as u64 > start + len {
             return Err(Error::Format(FormatError::SerializationError(format!(
-                "a commit's tail reserved [{start}, {}) but placed {} bytes at {addr}",
+                "a commit's tail reserved [{start}, {}) but placed {} bytes at {stored}",
                 start + len,
                 bytes.len()
             ))));
         }
-        if addr == self.image.len() {
+        let at = self.addresses.resolve(addr)?;
+        if at == PhysicalAddress::new(self.image.len()) {
             let written = self.append(bytes)?;
-            debug_assert_eq!(written, addr, "an appended block must land at end-of-file");
+            debug_assert_eq!(
+                written,
+                at.get(),
+                "an appended block must land at end-of-file"
+            );
             return Ok(());
         }
-        self.write_at(addr, bytes)
+        self.write_at(at.get(), bytes)
     }
 
     /// Extend the file with zeros up to `target` (>= the current length), used by
@@ -9450,13 +9530,12 @@ impl WriteEngine {
             None
         };
         let ea_stored = match blob {
-            Some(addr) => {
+            Some(blob_stored) => {
                 // The region is out of the free lists from here, so every way the
                 // build can fail has to put it back: a `?` straight out of this arm
                 // would leave it neither free nor written for the rest of the
                 // session. Collected into a `Result` and handed back on the way out.
                 let placed = (|| -> Result<StoredAddress, Error> {
-                    let blob_stored = base.relative(addr)?;
                     let combined = placed_chunks(blob_stored);
                     let mut buf =
                         Vec::with_capacity(usize::try_from(chunk_total + ea_len).unwrap_or(0));
@@ -9469,7 +9548,7 @@ impl WriteEngine {
                     )?);
                     self.place(
                         Placement::Reused {
-                            addr,
+                            addr: base.resolve(blob_stored)?.get(),
                             len: chunk_total + ea_len,
                         },
                         &buf,
@@ -9479,7 +9558,7 @@ impl WriteEngine {
                 match placed {
                     Ok(ea_stored) => ea_stored,
                     Err(e) => {
-                        self.release_raw_alloc(addr, chunk_total + ea_len);
+                        self.release_raw_alloc(blob_stored, chunk_total + ea_len);
                         return Err(e);
                     }
                 }
@@ -9550,8 +9629,9 @@ impl WriteEngine {
     /// end-of-file, and padding inserted after that read would shift the landing
     /// address out from under them.
     fn begin_page(&mut self, ty: PageType) -> Result<(), Error> {
+        let eoa = self.end_of_allocation()?;
         let Self { image, space, .. } = self;
-        let Some(transition) = space.plan_transition(image.len(), ty)? else {
+        let Some(transition) = space.plan_transition(eoa.get(), ty)? else {
             return Ok(());
         };
         if let PageTransition::Pad { extent, .. } = transition {
@@ -9593,8 +9673,11 @@ impl WriteEngine {
     /// page stays homogeneous either way. It never opens a page for a reused region
     /// — the tail page is untouched by a write into the middle of the file.
     fn reserve(&mut self, len: u64, ty: PageType) -> Result<Placement, Error> {
-        if let Some(addr) = self.alloc_free(len, ty) {
-            return Ok(Placement::Reused { addr, len });
+        if let Some(at) = self.alloc_free(len, ty) {
+            return Ok(Placement::Reused {
+                addr: self.addresses.resolve(at)?.get(),
+                len,
+            });
         }
         self.begin_page(ty)?;
         Ok(Placement::Appended {
@@ -9603,8 +9686,8 @@ impl WriteEngine {
         })
     }
 
-    /// Draw `len` bytes from the free space of page type `ty`, or `None` when no
-    /// single region is large enough.
+    /// Draws `len` bytes from the free space of page type `ty`, and returns their stored address,
+    /// or `None` when no single region is large enough.
     ///
     /// A non-paged file keeps one list for the whole file. A paged file keeps one
     /// per page type and must be served from the list matching `ty`: handing a
@@ -9612,15 +9695,18 @@ impl WriteEngine {
     /// which is the single invariant the paged strategy exists to hold. A page
     /// holding nothing at all is the exception, and [`SessionSpace::allocate`] is where it is
     /// spent. [`SessionSpace::Disabled`] draws nothing.
-    fn alloc_free(&mut self, len: u64, ty: PageType) -> Option<u64> {
-        self.space.allocate(len, ty).map(FreeExtent::start)
+    fn alloc_free(&mut self, len: u64, ty: PageType) -> Option<StoredAddress> {
+        self.space
+            .allocate(len, ty)
+            .map(|extent| StoredAddress::new(extent.start()))
     }
 
-    /// Hand `[addr, addr + len)`, drawn from
-    /// [`alloc_free`](Self::alloc_free) with [`PageType::Raw`], back to the list
-    /// it came from — for a placement refused *after* the draw, which would
-    /// otherwise hold the region for the rest of the session without writing
-    /// anything into it.
+    /// Hands the stored range `[addr, addr + len)`, drawn from [`alloc_free`](Self::alloc_free)
+    /// with [`PageType::Raw`], back to the list it came from.
+    ///
+    /// A caller that rejects a placement after the draw calls this, since the region would
+    /// otherwise stay out of the free lists for the rest of the session with nothing written into
+    /// it.
     ///
     /// A paged file takes it back into the raw list whichever list served it: a
     /// whole page [`SessionSpace::allocate`] claimed from the metadata side for
@@ -9628,8 +9714,8 @@ impl WriteEngine {
     /// returns its alignment tail there. A page that ends up wholly free is
     /// promoted out of either list by
     /// whole-page promotion as usual.
-    fn release_raw_alloc(&mut self, addr: u64, len: u64) {
-        let Some(extent) = FreeExtent::new(addr, len) else {
+    fn release_raw_alloc(&mut self, addr: StoredAddress, len: u64) {
+        let Some(extent) = FreeExtent::new(addr.get(), len) else {
             return;
         };
         self.space.return_allocation(extent, PageType::Raw);
@@ -10639,6 +10725,8 @@ struct EditStore<'a> {
     image: &'a mut dyn FileImage,
     superblock: &'a mut Superblock,
     sb_sig_off: u64,
+    /// The mapping between the stored addresses in `space` and the positions in `image`.
+    addresses: AddressContext,
     /// The session allocation strategy. PAGE transition state recorded here reaches the manager
     /// rewrite at the next commit or close.
     space: &'a mut SessionSpace,
@@ -10660,10 +10748,8 @@ impl EditStore<'_> {
     /// [`Store::alloc_raw`] for why an extensible-array index block belongs in a
     /// raw page here.
     fn append_into_raw_page(&mut self, bytes: &[u8]) -> Result<u64, Error> {
-        if let Some(transition) = self
-            .space
-            .plan_transition(self.image.len(), PageType::Raw)?
-        {
+        let eoa = self.addresses.relative(self.image.len())?.get();
+        if let Some(transition) = self.space.plan_transition(eoa, PageType::Raw)? {
             if let PageTransition::Pad { extent, .. } = transition {
                 self.image.append(&vec![0u8; extent.len().to_usize()?])?;
             }
@@ -10717,8 +10803,9 @@ impl Store for EditStore<'_> {
             None
         };
         if let Some(extent) = extent {
-            self.image.write_at(extent.start(), bytes)?;
-            return Ok(extent.start());
+            let at = self.addresses.resolve(StoredAddress::new(extent.start()))?;
+            self.image.write_at(at.get(), bytes)?;
+            return Ok(at.get());
         }
         self.append_into_raw_page(bytes)
     }
@@ -16046,7 +16133,8 @@ mod tests {
                 FreeExtent::new(PAGE, hole).unwrap(),
             );
             let free_before = free_total(&s);
-            let layout = s.tail_layout(&[], &[], EXT_LEN, FileSpacePageSize::DEFAULT, widths);
+            let eoa = s.end_of_allocation().unwrap().get();
+            let layout = s.tail_layout(eoa, &[], &[], EXT_LEN, FileSpacePageSize::DEFAULT, widths);
             let free_after = free_total(&s);
             match layout {
                 Some((_, _, at, blocks_len, _)) => {
@@ -16186,7 +16274,8 @@ mod tests {
                 FreeExtent::new(HOLE_AT, hole).unwrap(),
             );
             let free_before = free_total(&s);
-            let (post, at, tail_len, _) = s.flat_tail_layout(&[], &[], EXT_LEN, widths);
+            let eoa = s.end_of_allocation().unwrap().get();
+            let (post, at, tail_len, _) = s.flat_tail_layout(eoa, &[], &[], EXT_LEN, widths);
             let free_after = free_total(&s);
             // The blocks the commit will write into the extent it was handed. A hole
             // consumed outright drops a section from the managers, so this comes out
@@ -16409,7 +16498,7 @@ mod tests {
         b.write(&path).unwrap();
 
         let mut s = WriteEngine::open_with_locking(&path, FileLocking::Enabled).unwrap();
-        let before = s.space_accounting().reusable_free_space;
+        let before = s.space_accounting().unwrap().reusable_free_space;
 
         // Break the extension so the commit fails *after* it has gathered the
         // regions `drop` vacates and *before* the superblock repoint.
@@ -16422,7 +16511,7 @@ mod tests {
         );
 
         assert_eq!(
-            s.space_accounting().reusable_free_space,
+            s.space_accounting().unwrap().reusable_free_space,
             before,
             "a failed commit must not record still-live regions as free"
         );
@@ -16666,7 +16755,7 @@ mod tests {
         let mut s = WriteEngine::open_with_locking(&path, FileLocking::Enabled).unwrap();
         s.delete(&ObjectPathBuf::parse("/victim")).unwrap();
         s.commit().unwrap();
-        let free_before = s.space_accounting().reusable_free_space;
+        let free_before = s.space_accounting().unwrap().reusable_free_space;
         let len_before = std::fs::metadata(&path).unwrap().len();
         assert!(
             free_before.iter().any(|&(_, l)| l > 4096 * 8 / 2),
@@ -16687,7 +16776,7 @@ mod tests {
             "a commit with an unreadable extension must fail"
         );
         assert_eq!(
-            s.space_accounting().reusable_free_space,
+            s.space_accounting().unwrap().reusable_free_space,
             free_before,
             "the failed commit gives back the region it drew from"
         );
@@ -19568,7 +19657,7 @@ mod tests {
         for round in 0..16 {
             s.append_inplace_i32_phased("t0", &batch, 4).unwrap();
             reserved_ever |= !s.reserved.is_empty();
-            let acct = s.space_accounting();
+            let acct = s.space_accounting().unwrap();
             let regions = &acct.reusable_free_space;
             for w in regions.windows(2) {
                 let ((a_addr, a_len), (b_addr, _)) = (w[0], w[1]);
