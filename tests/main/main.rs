@@ -23,6 +23,8 @@ mod edit_append_inplace;
 mod edit_dataset_attr;
 mod edit_file_space_strategy;
 mod edit_free_space;
+#[cfg(not(feature = "fast-deflate"))]
+mod edit_free_space_churn;
 mod edit_in_place;
 mod edit_reference_repointing;
 mod edit_space_accounting;
