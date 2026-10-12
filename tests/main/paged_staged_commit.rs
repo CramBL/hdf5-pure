@@ -76,21 +76,14 @@ fn paged_staged_commit_keeps_pages_homogeneous() {
     paged::assert_pages_homogeneous(&path, PAGE, &["d", "added"]);
 }
 
-/// A paged file with a userblock is refused rather than silently un-paged.
+/// A paged file with a userblock is rejected at open, and at commit on a session that demands the
+/// mirror, before any byte of the file changes.
 ///
-/// The session's free-space bookkeeping is not base-address aware, so it declines
-/// to seed persistence on a userblock file. Committing anyway would append without
-/// page awareness — mixing metadata and raw data in the file's pages and leaving
-/// the end of allocation unaligned — producing a file that still advertises the
-/// paged strategy but no longer satisfies it. The refusal is the same one a paged
-/// non-persisting file gets, since in both cases the page bookkeeping is missing.
-///
-/// It is refused at *open*, and the ordering that makes it so is the point of this
-/// test: a userblock is a bounded-only limitation, so `MemoryStrategy::Auto` would
-/// fall back to the mirror for it — skipping this refusal on the way past — unless
-/// the refusals both backings share are checked first.
+/// A userblock is a bounded-only limitation, so an open under `MemoryStrategy::Auto` would fall
+/// back to the mirror for it and skip the open-time check, unless the checks both backings share
+/// run first.
 #[test]
-fn paged_with_userblock_is_refused() {
+fn paged_with_userblock_is_rejected() {
     let path = temp::repo_temp_path("pure_paged_staged_userblock.h5");
     {
         let mut b = FileBuilder::new();
@@ -107,7 +100,7 @@ fn paged_with_userblock_is_refused() {
 
     let err = File::open_rw(&path).unwrap_err();
     assert!(
-        matches!(&err, Error::EditUnsupported(m) if m.contains("persisted free space")),
+        matches!(&err, Error::EditUnsupported(m) if *m == "read-write access to a paged file (H5F_FSPACE_STRATEGY_PAGE) with a userblock (non-zero base address) is not supported"),
         "expected a paged refusal for a userblock file, got {err:?}"
     );
 
@@ -125,7 +118,7 @@ fn paged_with_userblock_is_refused() {
         .unwrap();
     let err = s.commit().unwrap_err();
     assert!(
-        matches!(&err, Error::EditUnsupported(m) if m.contains("persisted free space")),
+        matches!(&err, Error::EditUnsupported(m) if *m == "committing an edit to a paged file (H5F_FSPACE_STRATEGY_PAGE) with a userblock (non-zero base address) is not supported"),
         "expected a paged refusal for a userblock file, got {err:?}"
     );
     drop(s);

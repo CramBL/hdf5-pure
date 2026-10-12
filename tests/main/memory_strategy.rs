@@ -203,11 +203,10 @@ fn a_paged_file_without_persisted_free_space_is_refused_unless_the_mirror_is_dem
 /// The shared refusals must be checked *before* the bounded-only ones, or falling
 /// back for a userblock skips them and hands back a session that cannot commit.
 ///
-/// A userblock is the case that makes the ordering observable: persisted free space
-/// is declined for a non-zero base address, so this file reaches the engine looking
-/// exactly like a paged non-persisting one, while also being bounded-ineligible. If
-/// the fallback ran first it would mirror the file, accept staged work, and only
-/// refuse at `commit` — the late refusal this dispatch exists to eliminate.
+/// A paged file that does not persist its free space and has a userblock makes the ordering
+/// observable: both backings reject the paged file, and the bounded backing also rejects the
+/// userblock. If the fallback ran first, it would mirror the file, accept staged edits, and reject
+/// them only at `commit`.
 #[test]
 fn a_shared_refusal_beats_a_fallback_the_same_file_qualifies_for() {
     let dir = tempfile::tempdir().unwrap();
@@ -361,11 +360,9 @@ fn create_refuses_a_pair_it_could_not_reopen_before_writing_anything() {
     );
     assert!(!ub.exists(), "nothing may be written for a refused pair");
 
-    // A userblock on a *paged* file reaches the first refusal by a different
-    // route, and it was the one pair this function did not screen: free space is
-    // never persisted for a non-zero base address, so the creation properties can
-    // ask for `persist = true` and still produce a file no read-write open
-    // accepts. The pair is the defect, not either half.
+    // A read-write open rejects a paged file with a userblock even when the
+    // creation properties request `persist = true`, so the pair is rejected
+    // before the write.
     let ub_paged = dir.path().join("ub_paged.h5");
     let err = File::create_with_options(
         &ub_paged,

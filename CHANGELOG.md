@@ -27,6 +27,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- Fixed `File::open_rw` neither reusing nor updating the free space a file with a userblock persists. Read-write access to a paged file with a userblock remains unsupported ([#747](https://github.com/CramBL/hdf5-pure/pull/747)).
 - Fixed a `no_std` build compiling an internal lock that lets two live guards borrow the chunk cache mutably at once ([#743](https://github.com/CramBL/hdf5-pure/pull/743)).
 - Fixed `File::commit` losing ownership of spare free-space section-list capacity after reopening a file that is not paged and reuses a persistent manager allocation ([#740](https://github.com/CramBL/hdf5-pure/pull/740)).
 - Fixed `File::open_rw` leaving spare capacity allocated when replacing persistent free-space section lists. Recovery reads only the used bytes of each list ([#741](https://github.com/CramBL/hdf5-pure/pull/741)).

@@ -914,23 +914,8 @@ fn c_written_dense_heaps_are_reclaimed_with_their_owners(
     session.root().delete("g").unwrap();
     session.root().delete("d").unwrap();
     session.commit().unwrap();
-    let released = match file_space {
-        FileSpace::Managers | FileSpace::Pages(_) => {
-            drop(session);
-            released_regions(&path)
-        }
-        FileSpace::ManagersAfterUserblock => {
-            let released = session
-                .space_accounting()
-                .unwrap()
-                .reusable_free_space
-                .into_iter()
-                .map(|(addr, len)| (addr - USERBLOCK, len))
-                .collect();
-            drop(session);
-            released
-        }
-    };
+    drop(session);
+    let released = released_regions(&path);
 
     assert_released(file_space.page_size(), &released, &allocations);
     if let Some(page_size) = file_space.page_size() {

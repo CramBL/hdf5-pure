@@ -8,51 +8,63 @@ use std::collections::{BTreeSet, VecDeque};
 use std::fmt::Write as _;
 use std::path::Path;
 
-use hdf5_pure::{
-    AttrValue, ChunkIndex, Error, File, FileBuilder, FileSpaceStrategy, FormatError, Layout,
-    MaxExtent, ScaleOffset, SpaceAccounting,
-};
+use hdf5_pure::AttrValue;
+use hdf5_pure::ChunkIndex;
+use hdf5_pure::Error;
+use hdf5_pure::File;
+use hdf5_pure::FileAccessProperties;
+use hdf5_pure::FileBuilder;
+use hdf5_pure::FileSpaceStrategy;
+use hdf5_pure::FormatError;
+use hdf5_pure::Layout;
+use hdf5_pure::MaxExtent;
+use hdf5_pure::MemoryStrategy;
+use hdf5_pure::ScaleOffset;
+use hdf5_pure::SpaceAccounting;
+use rstest::rstest;
 use test_util::temp;
 use test_util_hdf5::dataset::{self, Filter};
 use test_util_hdf5::file_space;
 use test_util_hdf5::file_space::SpaceOwnershipSummary;
 use test_util_hdf5::session;
+use test_util_hdf5::userblock;
 
-#[test]
-fn free_space_churn_continuous_open() {
-    let report = run_churn(Lifecycle::ContinuousOpen);
+#[rstest]
+fn free_space_churn_continuous_open(#[values(Base::Zero, Base::Userblock)] base: Base) {
+    let report = run_churn(Lifecycle::ContinuousOpen, base);
     insta::assert_snapshot!("free_space_churn_continuous_open", report.render());
 }
 
-#[test]
-fn free_space_churn_reopen_before_final_check() {
-    let report = run_churn(Lifecycle::ReopenBeforeFinalCheck);
+#[rstest]
+fn free_space_churn_reopen_before_final_check(#[values(Base::Zero, Base::Userblock)] base: Base) {
+    let report = run_churn(Lifecycle::ReopenBeforeFinalCheck, base);
     insta::assert_snapshot!(
         "free_space_churn_reopen_before_final_check",
         report.render()
     );
 }
 
-#[test]
-fn free_space_churn_reopen_frequently() {
-    let report = run_churn(Lifecycle::ReopenFrequently);
+#[rstest]
+fn free_space_churn_reopen_frequently(#[values(Base::Zero, Base::Userblock)] base: Base) {
+    let report = run_churn(Lifecycle::ReopenFrequently, base);
     insta::assert_snapshot!("free_space_churn_reopen_frequently", report.render());
 }
 
-fn run_churn(lifecycle: Lifecycle) -> ChurnReport {
+fn run_churn(lifecycle: Lifecycle, base: Base) -> ChurnReport {
     let path = temp::temp_path(&format!(
-        "hdf5_pure_free_space_churn_{}.h5",
-        lifecycle.label()
+        "hdf5_pure_free_space_churn_{}_{}.h5",
+        lifecycle.label(),
+        base.label()
     ));
     let mut builder = FileBuilder::new();
     builder
         .create_dataset("sentinel")
         .with_i32_data(&[7, 11, 13, 17]);
     builder.with_file_space_strategy(FileSpaceStrategy::FsmAggr, true, 1);
-    builder.write(&path).unwrap();
-    assert!(std::fs::metadata(&path).unwrap().len() <= MAX_FILE_BYTES);
+    let stamped = base.write(&path, builder);
+    assert!(base.image_size(&path) <= MAX_FILE_BYTES);
 
-    let mut session = Some(session::open_bounded(&path).unwrap());
+    let mut session = Some(base.open(&path));
     let mut writable_opens = 1usize;
     let mut closes = 0usize;
     let mut reopens = 0usize;
@@ -65,7 +77,7 @@ fn run_churn(lifecycle: Lifecycle) -> ChurnReport {
     let mut first_delete_after = None;
     let mut churn_epochs_after_first_delete = 0usize;
     let mut stats = RunStats {
-        peak_physical_size: std::fs::metadata(&path).unwrap().len(),
+        peak_physical_size: base.image_size(&path),
         peak_logical_size: 0,
         peak_pressure: 0,
         peak_reusable_free: 0,
@@ -88,8 +100,8 @@ fn run_churn(lifecycle: Lifecycle) -> ChurnReport {
 
         let file = session.as_ref().unwrap();
         let before_acct = file.space_accounting().unwrap();
-        let before_pressure = pressure(&before_acct);
-        let before_physical = std::fs::metadata(&path).unwrap().len();
+        let before_pressure = pressure(base, &before_acct);
+        let before_physical = base.image_size(&path);
 
         write_epoch(file, spec);
         file.commit().unwrap();
@@ -101,6 +113,7 @@ fn run_churn(lifecycle: Lifecycle) -> ChurnReport {
 
         let mut sample = collect_sample(
             &path,
+            base,
             file,
             sequence,
             live.len(),
@@ -143,6 +156,7 @@ fn run_churn(lifecycle: Lifecycle) -> ChurnReport {
                 }
                 sample = collect_sample(
                     &path,
+                    base,
                     file,
                     sequence,
                     live.len(),
@@ -163,7 +177,7 @@ fn run_churn(lifecycle: Lifecycle) -> ChurnReport {
                 "an interior deletion wave must create reusable space or reduce pressure"
             );
             stats.deletion_reduced_pressure_or_created_free = true;
-            let ownership = file_space::assert_exact_space_ownership(file);
+            let ownership = base.exact_ownership(file);
             deletion_waves.push(DeletionWave {
                 index: deletion_waves.len() + 1,
                 after_epoch: sequence,
@@ -180,6 +194,7 @@ fn run_churn(lifecycle: Lifecycle) -> ChurnReport {
             if lifecycle == Lifecycle::ReopenFrequently {
                 reopen_session(
                     &path,
+                    base,
                     &mut session,
                     ReopenReason::DeletionWave,
                     sequence,
@@ -198,6 +213,7 @@ fn run_churn(lifecycle: Lifecycle) -> ChurnReport {
         {
             reopen_session(
                 &path,
+                base,
                 &mut session,
                 ReopenReason::InitialFill,
                 sequence,
@@ -231,6 +247,7 @@ fn run_churn(lifecycle: Lifecycle) -> ChurnReport {
     if lifecycle == Lifecycle::ReopenBeforeFinalCheck {
         reopen_session(
             &path,
+            base,
             &mut session,
             ReopenReason::FinalCheck,
             epochs_written - 1,
@@ -251,7 +268,7 @@ fn run_churn(lifecycle: Lifecycle) -> ChurnReport {
         file.dataset("sentinel").unwrap().read_i32().unwrap(),
         vec![7, 11, 13, 17]
     );
-    let final_state = final_state(file, &path, &live);
+    let final_state = final_state(&path, base, file, &live);
     stats.observe_state(
         final_state.physical_size,
         final_state.logical_size,
@@ -263,9 +280,12 @@ fn run_churn(lifecycle: Lifecycle) -> ChurnReport {
     let after_close = closing.clone();
     closing.close().unwrap();
     closes += 1;
-    let after_close_ownership = file_space::assert_exact_space_ownership(&after_close);
+    let after_close_ownership = base.exact_ownership(&after_close);
     drop(after_close);
-    let released_physical_size = std::fs::metadata(&path).unwrap().len();
+    if let Some(stamped) = stamped {
+        stamped.assert_unchanged(&path);
+    }
+    let released_physical_size = base.image_size(&path);
     assert!(released_physical_size <= MAX_FILE_BYTES);
     stats.peak_physical_size = stats.peak_physical_size.max(released_physical_size);
     file_space::assert_eof_matches_physical_size(&path);
@@ -912,6 +932,7 @@ fn create_i32_dataset(
 
 fn collect_sample(
     path: &Path,
+    base: Base,
     file: &File,
     sequence: usize,
     active_epochs: usize,
@@ -919,8 +940,8 @@ fn collect_sample(
     cumulative_epochs_deleted: usize,
 ) -> ChurnSample {
     let acct = file.space_accounting().unwrap();
-    let pressure = pressure(&acct);
-    let physical_size = std::fs::metadata(path).unwrap().len();
+    let pressure = pressure(base, &acct);
+    let physical_size = base.image_size(path);
     assert!(
         physical_size <= MAX_FILE_BYTES,
         "physical file length {physical_size} exceeded {MAX_FILE_BYTES}"
@@ -929,7 +950,7 @@ fn collect_sample(
         sequence,
         active_epochs,
         physical_size,
-        logical_size: acct.logical_size,
+        logical_size: base.logical_size(&acct),
         reusable_free: acct.reusable_free_bytes,
         pressure,
         cumulative_epochs_written,
@@ -939,6 +960,7 @@ fn collect_sample(
 
 fn reopen_session(
     path: &Path,
+    base: Base,
     session: &mut Option<File>,
     reason: ReopenReason,
     after_epoch: usize,
@@ -956,22 +978,22 @@ fn reopen_session(
         .close()
         .unwrap();
     *closes += 1;
-    let physical_size = std::fs::metadata(path).unwrap().len();
+    let physical_size = base.image_size(path);
     assert!(physical_size <= MAX_FILE_BYTES);
     let persisted_free = persisted_free_bytes(path);
-    let reopened = session::open_bounded(path).unwrap();
+    let reopened = base.open(path);
     let acct = reopened.space_accounting().unwrap();
-    let reopened_pressure = pressure(&acct);
+    let reopened_pressure = pressure(base, &acct);
     assert_eq!(
         acct.reusable_free_bytes, persisted_free,
         "a reopened bounded session must recover all persisted reusable free space"
     );
     validate_reopen_live_data(&reopened, live, epochs_written);
-    let ownership = file_space::assert_exact_space_ownership(&reopened);
+    let ownership = base.exact_ownership(&reopened);
     let recovered_free = acct.reusable_free_bytes;
     stats.observe_state(
         physical_size,
-        acct.logical_size,
+        base.logical_size(&acct),
         recovered_free,
         reopened_pressure,
     );
@@ -1044,26 +1066,26 @@ fn assert_deleted_epoch(file: &File, sequence: usize) {
     assert_eq!(missing, &path);
 }
 
-fn final_state(file: &File, path: &Path, live: &VecDeque<usize>) -> FinalState {
+fn final_state(path: &Path, base: Base, file: &File, live: &VecDeque<usize>) -> FinalState {
     let acct = file.space_accounting().unwrap();
-    let pressure = pressure(&acct);
-    let physical_size = std::fs::metadata(path).unwrap().len();
+    let pressure = pressure(base, &acct);
+    let physical_size = base.image_size(path);
     assert!(physical_size <= MAX_FILE_BYTES);
 
     FinalState {
         physical_size,
-        logical_size: acct.logical_size,
+        logical_size: base.logical_size(&acct),
         reusable_free: acct.reusable_free_bytes,
         reusable_free_regions: acct.reusable_free_space.len(),
         pressure,
         live_epochs: live.len(),
-        ownership: file_space::assert_exact_space_ownership(file),
+        ownership: base.exact_ownership(file),
     }
 }
 
-fn pressure(acct: &SpaceAccounting) -> u64 {
+fn pressure(base: Base, acct: &SpaceAccounting) -> u64 {
     file_space::assert_space_accounting_consistent(acct);
-    acct.logical_size
+    base.logical_size(acct)
         .checked_sub(acct.reusable_free_bytes)
         .expect("reusable free cannot exceed logical size")
 }
@@ -1478,6 +1500,81 @@ impl EpochFlavor {
     }
 }
 
+/// The base address of a churn file: zero, or the end of a userblock.
+///
+/// [`Base::image_size`], [`Base::logical_size`] and [`Base::exact_ownership`] subtract the
+/// userblock, so the report matches one snapshot for either base. [`Base::open`] opens a file with
+/// a userblock with the whole-file mirror, since the bounded backing rejects a userblock.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Base {
+    Userblock,
+    Zero,
+}
+
+impl Base {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Userblock => "userblock",
+            Self::Zero => "zero",
+        }
+    }
+
+    const fn userblock(self) -> u64 {
+        match self {
+            Self::Userblock => USERBLOCK_BYTES,
+            Self::Zero => 0,
+        }
+    }
+
+    fn write(self, path: &Path, mut builder: FileBuilder) -> Option<userblock::Userblock> {
+        match self {
+            Self::Userblock => {
+                builder.with_userblock(USERBLOCK_BYTES);
+                Some(userblock::write(
+                    path,
+                    builder,
+                    usize::try_from(USERBLOCK_BYTES).unwrap(),
+                    b"churn",
+                ))
+            }
+            Self::Zero => {
+                builder.write(path).unwrap();
+                None
+            }
+        }
+    }
+
+    fn open(self, path: &Path) -> File {
+        match self {
+            Self::Userblock => File::open_rw_with_options(
+                path,
+                FileAccessProperties::new().with_memory_strategy(MemoryStrategy::Mirrored),
+            )
+            .unwrap(),
+            Self::Zero => session::open_bounded(path).unwrap(),
+        }
+    }
+
+    fn image_size(self, path: &Path) -> u64 {
+        std::fs::metadata(path).unwrap().len() - self.userblock()
+    }
+
+    fn logical_size(self, acct: &SpaceAccounting) -> u64 {
+        acct.logical_size - self.userblock()
+    }
+
+    #[track_caller]
+    fn exact_ownership(self, file: &File) -> SpaceOwnershipSummary {
+        let ownership = file_space::assert_exact_space_ownership(file);
+        assert_eq!(ownership.userblock_bytes, self.userblock());
+        SpaceOwnershipSummary {
+            physical_size: ownership.physical_size - self.userblock(),
+            logical_size: ownership.logical_size - self.userblock(),
+            ..ownership
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Lifecycle {
     ContinuousOpen,
@@ -1672,6 +1769,7 @@ impl Coverage {
 }
 
 const MAX_FILE_BYTES: u64 = 32 * 1024 * 1024;
+const USERBLOCK_BYTES: u64 = 4096;
 const HEADROOM_BYTES: u64 = MAX_FILE_BYTES / 8;
 const HIGH_WATER_BYTES: u64 = MAX_FILE_BYTES - HEADROOM_BYTES;
 const LOW_WATER_BYTES: u64 = 24 * 1024 * 1024;
