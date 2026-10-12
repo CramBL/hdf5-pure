@@ -9886,14 +9886,28 @@ mod tests {
         );
         untouched("version-2 superblock", &old_format, &before);
 
-        // A paged file whose free space is not persisted, reached two ways: asked
-        // for outright, and produced by a userblock, for which persistence is
-        // declined however the creation properties were written. Such a session
-        // can neither commit nor append, so the buffer would hold nothing while
-        // its mark blocked every reader.
-        for (label, name, userblock) in [
-            ("paged, not persisting", "no_persist.h5", 0u64),
-            ("paged with a userblock", "ub_paged.h5", 4096),
+        // Two paged files a session can neither commit to nor append to: one that
+        // does not persist its free space, and one with a userblock. A page buffer
+        // on either would hold nothing while its mark blocked every reader.
+        for (label, name, userblock, reason) in [
+            (
+                "paged, not persisting",
+                "no_persist.h5",
+                0u64,
+                "a page buffer on a paged file needs its free space persisted: without it this \
+                 session can neither commit nor append, so the buffer would hold nothing while \
+                 marking the file against every reader; recreate the file with \
+                 with_file_space_strategy(FileSpaceStrategy::Page, true, ..), or drop the page \
+                 buffer",
+            ),
+            (
+                "paged with a userblock",
+                "ub_paged.h5",
+                4096,
+                "a page buffer on a paged file with a userblock (non-zero base address) is not \
+                 supported: this session can neither commit nor append, so the buffer would hold \
+                 nothing while marking the file against every reader",
+            ),
         ] {
             let path = dir.path().join(name);
             let mut b = FileBuilder::new();
@@ -9912,7 +9926,7 @@ mod tests {
                 buffered(1 << 20).with_memory_strategy(MemoryStrategy::Mirrored),
             );
             assert!(
-                matches!(&refused, Err(Error::EditUnsupported(m)) if m.contains("persisted")),
+                matches!(&refused, Err(Error::EditUnsupported(m)) if *m == reason),
                 "{label}: a page buffer on a session that cannot write must be refused, \
                  got {refused:?}"
             );

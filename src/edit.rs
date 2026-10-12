@@ -70,16 +70,16 @@
 //! refuses with [`Error::EditUnsupported`] any case it cannot reproduce
 //! faithfully. Requirements:
 //!
-//! - The file uses 8-byte offsets/lengths. A **userblock** (non-zero base
-//!   address, as every MATLAB v7.3 `.mat` file has) is supported: addresses are
-//!   read and written relative to the base and the userblock bytes are preserved
-//!   verbatim. Every edit works on a userblock file — value overwrites, additions
-//!   of contiguous and chunked/filtered datasets, in-place and relocating
-//!   overwrites of every layout (with the old storage reclaimed), object deletion
-//!   (with base-aware subtree reclaim), in-file copy, cross-file copy into a
-//!   userblock destination, group creation, compact attributes, and free-space
-//!   reuse. The one userblock-specific limitation left is cross-file copy *from* a
-//!   userblock source (the source must have base 0; see [`copy_from`](crate::File::copy_from)).
+//! - The file uses 8-byte offsets/lengths. A **userblock** (non-zero base address, as every MATLAB
+//!   v7.3 `.mat` file has) is supported: addresses are read and written relative to the base and
+//!   the userblock bytes are preserved verbatim. Every staged edit works on an unpaged file with a
+//!   userblock: value overwrites, additions of contiguous and chunked/filtered datasets, in-place
+//!   and relocating overwrites of every layout (with the old storage reclaimed), object deletion
+//!   (with base-aware subtree reclaim), in-file copy, cross-file copy into a userblock
+//!   destination, group creation, compact attributes, and free-space reuse. A paged file with a
+//!   userblock is rejected, as is any file with a userblock under [`MemoryStrategy::Bounded`], and
+//!   a cross-file copy requires a source without a userblock (see
+//!   [`copy_from`](crate::File::copy_from)).
 //!   Any superblock version (0–3) is accepted: a version 0/1
 //!   (symbol-table) file is edited by converting each group on the edited path
 //!   to the latest format and repointing the superblock's root symbol-table
@@ -1619,12 +1619,11 @@ fn bounded_only_limitation(session: &WriteEngine) -> Option<&'static str> {
 /// the call leaves a file on disk and returns `Err`, which reads like a failed
 /// create but is not one.
 ///
-/// This mirrors the open-time refusals above and must be kept in step with them:
-/// [`bounded_only_limitation`] for the userblock, and the shared paged check in
-/// [`open_rw_with_strategy`](WriteEngine::open_rw_with_strategy) for a paged file
-/// with no persisted free space. Both are stated here in terms of the properties
-/// that *cause* them, because the open-time wording tells the caller to recreate
-/// the file — advice that is circular when the caller is creating it.
+/// The open-time rejections this function restates are [`bounded_only_limitation`] for the
+/// userblock, and the shared paged checks in
+/// [`open_rw_with_strategy`](WriteEngine::open_rw_with_strategy) for a paged file with no persisted
+/// free space or with a userblock. Keep this function in step with them. Each is phrased here in
+/// terms of the properties that cause it, since the file does not exist yet.
 pub(crate) fn create_would_refuse_reopen(
     create: &FileCreateProperties,
     access: &FileAccessProperties,
@@ -1645,10 +1644,7 @@ pub(crate) fn create_would_refuse_reopen(
              MemoryStrategy unset to mirror this file",
         );
     }
-    // A userblock on a *paged* file reaches the same open-time refusal as
-    // `persist = false` above, by a different route: persisted free space is
-    // declined for a non-zero base address, which leaves a paged file with no
-    // seeded managers however its creation properties were written.
+    // A read-write open rejects a paged file with a userblock whatever its persistence.
     if create.userblock() != 0
         && matches!(
             create.file_space_strategy(),
@@ -1656,10 +1652,10 @@ pub(crate) fn create_would_refuse_reopen(
         )
     {
         return Some(
-            "a userblock cannot be combined with FileSpaceStrategy::Page: free space is not \
-             persisted for a file with a non-zero base address, and a paged file without it \
-             cannot be opened read-write — so creating one this way would write the file and \
-             then fail to open it; drop the userblock, or choose another file-space strategy",
+            "a userblock cannot be combined with FileSpaceStrategy::Page: a paged file with a \
+             non-zero base address cannot be opened read-write, so creating one this way would \
+             write the file and then fail to open it; drop the userblock, or choose another \
+             file-space strategy",
         );
     }
     // The page-buffer refusals `set_page_buffer_size` makes at open, restated as
@@ -1985,7 +1981,7 @@ pub struct SpaceAccounting {
     /// Counts the holes this session's earlier commits left inside
     /// [`logical_size`](Self::logical_size) and tracked (superseded object headers, the blocks of
     /// deleted objects) and, for a file created with
-    /// `H5Pset_file_space_strategy(persist = true)` and no userblock, the regions
+    /// `H5Pset_file_space_strategy(persist = true)`, the regions
     /// seeded from the on-disk free-space managers when the session was opened (so
     /// reuse spans sessions). A fresh non-persisting session reports `0` even if
     /// the file contains holes left by other tools — those are never tracked. It
@@ -2021,9 +2017,8 @@ pub struct SpaceAccounting {
     /// The offsets are **absolute** file offsets (from byte 0, including any
     /// userblock prefix), matching [`logical_size`](Self::logical_size). This
     /// differs from [`File::persisted_free_space`](crate::File::persisted_free_space),
-    /// whose pairs are relative to the superblock base address; the two coincide
-    /// for a file with no userblock (base address 0), which is the only kind whose
-    /// persisted free space a session seeds. Empty when nothing is reusable.
+    /// whose pairs are relative to the superblock's base address. The two coincide
+    /// for a file with no userblock (base address 0). Empty when nothing is reusable.
     pub reusable_free_space: Vec<(u64, u64)>,
 }
 
@@ -2182,10 +2177,9 @@ impl WriteEngine {
     /// falling back to the mirror instead (issue #198, steps 3 and 4).
     ///
     /// Only a *bounded-only* limitation is worth falling back for — see
-    /// [`bounded_only_limitation`]. Non-8-byte offsets or lengths are refused by
-    /// [`open_imaged`](Self::open_imaged) for both engines, and so is an
-    /// unsupported superblock version; a paged file without persisted free space
-    /// is refused below for both.
+    /// [`bounded_only_limitation`]. [`open_imaged`](Self::open_imaged) rejects non-8-byte offsets
+    /// or lengths and an unsupported superblock version for both engines, and this function
+    /// rejects a paged file without persisted free space or with a userblock for both.
     pub(crate) fn open_rw_with_strategy(
         path: &Path,
         cache: MetadataCacheConfig,
@@ -2206,14 +2200,19 @@ impl WriteEngine {
         // record of which pages hold metadata and which hold raw data, so nothing
         // can keep the pages segregated; the staged commit refuses it too, so
         // deferring would only trade this error for the same one later, with work
-        // already staged. A userblock is one way to reach this state without the
-        // file saying `persist = false`: persisted free space is declined for a
-        // non-zero base address, which leaves the managers unseeded all the same.
+        // already staged. The staged commit also rejects a paged file with a userblock,
+        // so the open rejects it here for the same reason.
         if session.space.is_paged() && session.persist.is_none() {
             return Err(Error::EditUnsupported(
                 "read-write access to a paged file (H5F_FSPACE_STRATEGY_PAGE) requires \
                  persisted free space; recreate the file with \
                  with_file_space_strategy(FileSpaceStrategy::Page, true, ..) to grow it in place",
+            ));
+        }
+        if session.paged_with_userblock() {
+            return Err(Error::EditUnsupported(
+                "read-write access to a paged file (H5F_FSPACE_STRATEGY_PAGE) with a userblock \
+                 (non-zero base address) is not supported",
             ));
         }
         if let Some(reason) = bounded_only_limitation(&session) {
@@ -2628,6 +2627,13 @@ impl WriteEngine {
                  page buffer",
             ));
         }
+        if self.paged_with_userblock() {
+            return Err(Error::EditUnsupported(
+                "a page buffer on a paged file with a userblock (non-zero base address) is not \
+                 supported: this session can neither commit nor append, so the buffer would hold \
+                 nothing while marking the file against every reader",
+            ));
+        }
         // The crash mark below is the whole reason this property is offered at
         // all, and only a version-3 superblock carries one that anybody reads:
         // `check_status_flags` is gated there, matching where the C library gates
@@ -2663,8 +2669,9 @@ impl WriteEngine {
     ///
     /// A file without a File Space Info message keeps the default `FSM_AGGR` strategy installed by
     /// [`open_imaged`](Self::open_imaged). A message that fails safe parsing disables reusable
-    /// space for the session. Persisted manager sections are read only for a zero-base-address file
-    /// whose strategy has free-space managers and whose message requests persistence.
+    /// space for the session. Persisted manager sections are read only for a file whose strategy
+    /// has free-space managers and whose message requests persistence. The session adds each
+    /// section to the free lists at the stored address its manager records.
     fn load_persisted_free_space(
         &mut self,
         file_space_info: Result<Option<(u64, FileSpaceInfo)>, FormatError>,
@@ -2683,12 +2690,6 @@ impl WriteEngine {
         };
         self.space =
             SessionSpace::from_strategy(Some(info.strategy), info.threshold, info.page_size);
-        // Persisted section addresses and manager blocks are not yet base-address aware. Keep the
-        // runtime strategy so a paged userblock is still recognized by the existing PAGE checks.
-        // Persisted managers stay untouched for a userblock file.
-        if !self.superblock.base_address.is_zero() {
-            return;
-        }
         let paged = self.space.is_paged();
         if !info.persist || !self.space.is_enabled() {
             return;
@@ -2820,6 +2821,15 @@ impl WriteEngine {
             .and_then(|_| FreeExtent::new(addr.get(), len))
     }
 
+    /// Returns `true` if the file is paged and its superblock stores a non-zero base address.
+    fn paged_with_userblock(&self) -> bool {
+        self.space.is_paged() && !self.superblock.base_address.is_zero()
+    }
+
+    /// Returns the extent of `len` bytes at the file position `at`, in stored addresses.
+    ///
+    /// Returns `None` if `at` lies below the base address, or if the extent is empty or ends past
+    /// [`u64::MAX`].
     fn stored_extent(&self, at: u64, len: u64) -> Option<FreeExtent> {
         FreeExtent::new(self.addresses.relative(at).ok()?.get(), len)
     }
@@ -5310,6 +5320,12 @@ impl WriteEngine {
                 "committing an edit to a paged file (H5F_FSPACE_STRATEGY_PAGE) requires \
                  persisted free space; recreate the file with \
                  with_file_space_strategy(FileSpaceStrategy::Page, true, ..) to edit it in place",
+            ));
+        }
+        if self.paged_with_userblock() {
+            return Err(Error::EditUnsupported(
+                "committing an edit to a paged file (H5F_FSPACE_STRATEGY_PAGE) with a userblock \
+                 (non-zero base address) is not supported",
             ));
         }
 
@@ -16545,6 +16561,66 @@ mod tests {
             freed < live_end,
             "the recorded free space cannot cover the whole file"
         );
+    }
+
+    #[rstest]
+    fn a_failed_persisting_commit_leaves_the_file_and_its_free_space_unchanged(
+        #[values(0, 512)] userblock: u64,
+    ) {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("failed_persisting_commit.h5");
+        let mut b = FileBuilder::new();
+        b.with_userblock(userblock);
+        b.create_dataset("a").with_i32_data(&[1; 100]);
+        b.create_dataset("b").with_i32_data(&[2; 400]);
+        b.create_dataset("c").with_i32_data(&[3; 100]);
+        b.with_file_space_strategy(FileSpaceStrategy::FsmAggr, true, 1);
+        b.write(&path).unwrap();
+
+        let mut s = WriteEngine::open_with_locking(&path, FileLocking::Enabled).unwrap();
+        s.delete(&ObjectPathBuf::parse("/b")).unwrap();
+        s.commit().unwrap();
+        let eof = s.superblock.eof_address;
+        let free = s.space_accounting().unwrap().reusable_free_space;
+        let live_bytes = |s: &WriteEngine| {
+            let mut bytes = s
+                .image()
+                .read_exact_at(0, usize::try_from(eof).unwrap())
+                .unwrap();
+            for &(at, len) in &free {
+                let at = usize::try_from(at).unwrap();
+                bytes[at..at + usize::try_from(len).unwrap()].fill(0);
+            }
+            bytes
+        };
+        let before = live_bytes(&s);
+
+        let good_ext = s.superblock.superblock_extension_address;
+        s.superblock.superblock_extension_address = Some(StoredAddress::ZERO);
+        s.delete(&ObjectPathBuf::parse("/c")).unwrap();
+        let err = s.commit().unwrap_err();
+        assert!(
+            matches!(
+                err,
+                Error::EditUnsupported("an object does not use a version 2 object header")
+            ),
+            "{err:?}"
+        );
+
+        assert_eq!(s.superblock.eof_address, eof);
+        assert_eq!(s.space_accounting().unwrap().reusable_free_space, free);
+        assert!(
+            live_bytes(&s) == before,
+            "the failed commit changed live bytes"
+        );
+
+        s.superblock.superblock_extension_address = good_ext;
+        s.delete(&ObjectPathBuf::parse("/c")).unwrap();
+        s.commit().unwrap();
+        drop(s);
+        let f = crate::reader::File::open(&path).unwrap();
+        assert_eq!(f.dataset("a").unwrap().read_i32().unwrap(), vec![1; 100]);
+        assert_eq!(f.file_size(), std::fs::metadata(&path).unwrap().len());
     }
 
     /// A commit that fails partway must roll back the heap-collection

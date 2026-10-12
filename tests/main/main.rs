@@ -26,6 +26,7 @@ mod edit_free_space;
 #[cfg(not(feature = "fast-deflate"))]
 mod edit_free_space_churn;
 mod edit_in_place;
+mod edit_persisted_free_space;
 mod edit_reference_repointing;
 mod edit_space_accounting;
 mod edit_space_ownership;

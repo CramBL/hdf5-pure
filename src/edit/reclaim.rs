@@ -12,7 +12,6 @@ use hdf5_pure_space::__private::FreeClass;
 use hdf5_pure_space::__private::PageType;
 
 use crate::access_mode::AccessMode;
-use crate::address::BaseAddressExt;
 use crate::address::StoredAddress;
 use crate::address::StoredAddressExt;
 use crate::attribute_info::AttributeInfoMessage;
@@ -114,7 +113,7 @@ impl WriteEngine {
         if let Some((_, info)) =
             Self::extension_fsinfo(&self.image(), &self.superblock, self.addresses)?
         {
-            if info.persist && self.superblock.base_address.is_zero() {
+            if info.persist {
                 let widths = crate::width::FormatWidths::from_sizes(
                     self.superblock.offset_size,
                     self.superblock.length_size,
@@ -122,12 +121,10 @@ impl WriteEngine {
                 let (_, blocks) = crate::free_space_manager::read_persisted_sections_source(
                     &self.image(),
                     widths,
-                    crate::address::BaseAddress::ZERO,
+                    self.addresses.effective_base(),
                     &info.manager_addrs,
                 )?;
                 free_space_manager_space.extend(blocks);
-            } else if info.persist {
-                analysis_complete = false;
             }
         }
 

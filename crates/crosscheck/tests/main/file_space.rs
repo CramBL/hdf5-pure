@@ -46,6 +46,7 @@ use tempfile::tempdir;
 
 use test_util::file_space_info;
 use test_util::range;
+use test_util::userblock::Userblock;
 use test_util::widths::Widths;
 use test_util_hdf5::absence;
 use test_util_hdf5::dataset::Unlimited;
@@ -1718,6 +1719,152 @@ fn libhdf5_reads_a_version_0_file_after_an_edit_reuses_its_persisted_free_space(
         vec![4; 5000]
     );
     assert_eq!(f.free_space(), total_ours);
+}
+
+#[rstest]
+fn libhdf5_reads_its_file_after_an_edit_reuses_the_free_space_it_persisted(
+    #[values(0, 512)] userblock: u64,
+) {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("c_persisted_edited.h5");
+    let freed = write_c_persisted_with_a_hole(
+        &path,
+        Driver::Sec2,
+        Sizeof::Bytes8,
+        Sizeof::Bytes8,
+        userblock,
+    );
+    let stamped = Userblock::read(&path, usize::try_from(userblock).unwrap());
+    let persisted = File::open(&path).unwrap().persisted_free_space().unwrap();
+    assert!(
+        persisted.contains(&(freed - userblock, 1600)),
+        "{persisted:?}"
+    );
+
+    let session = File::open_rw(&path).unwrap();
+    assert_eq!(
+        session.space_accounting().unwrap().reusable_free_space,
+        persisted
+            .iter()
+            .map(|&(at, len)| (at + userblock, len))
+            .collect::<Vec<_>>()
+    );
+    session
+        .root()
+        .create_dataset("d", |builder| {
+            builder.with_i32_data(&[9; 300]);
+        })
+        .unwrap();
+    session.commit().unwrap();
+    session.close().unwrap();
+    let ours = File::open(&path).unwrap().persisted_free_space().unwrap();
+
+    let f = hdf5::File::open(&path).unwrap();
+    let d = f.dataset("d").unwrap();
+    assert_eq!(
+        file_space::libhdf5_contiguous_extent(&d),
+        freed..freed + 1200
+    );
+    assert_eq!(d.read_raw::<i32>().unwrap(), vec![9; 300]);
+    assert_eq!(
+        f.dataset("a").unwrap().read_raw::<i32>().unwrap(),
+        vec![1; 400]
+    );
+    assert_eq!(
+        f.dataset("big").unwrap().read_raw::<i32>().unwrap(),
+        vec![4; 5000]
+    );
+    assert_eq!(
+        f.free_space(),
+        ours.iter().map(|&(_, len)| len).sum::<u64>()
+    );
+    let mut sections = file_space::libhdf5_free_sections(&f);
+    sections.sort_unstable();
+    assert_eq!(sections, ours);
+    drop(d);
+    f.close().unwrap();
+    stamped.assert_unchanged(&path);
+}
+
+#[rstest]
+fn libhdf5_reads_relocated_persisted_free_space_and_writes_to_the_file(
+    #[values(0, 512)] userblock: u64,
+) {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("ours_persisted_relocated.h5");
+    let mut builder = FileBuilder::new();
+    if userblock > 0 {
+        builder.with_userblock(userblock);
+        builder.with_userblock_content(b"relocated managers");
+    }
+    builder.create_dataset("a").with_i32_data(&[1; 100]);
+    builder.create_dataset("b").with_i32_data(&[2; 400]);
+    builder.create_dataset("c").with_i32_data(&[3; 100]);
+    builder.with_file_space_strategy(FileSpaceStrategy::FsmAggr, true, 1);
+    builder.write(&path).unwrap();
+    let stamped = Userblock::read(&path, usize::try_from(userblock).unwrap());
+
+    let first = File::open_rw(&path).unwrap();
+    first.root().delete("b").unwrap();
+    first.commit().unwrap();
+    first.close().unwrap();
+    let second = File::open_rw(&path).unwrap();
+    second
+        .root()
+        .create_dataset("d", |builder| {
+            builder.with_i32_data(&[9; 300]);
+        })
+        .unwrap();
+    second.commit().unwrap();
+    second.root().delete("c").unwrap();
+    second.commit().unwrap();
+    second.close().unwrap();
+    let ours = File::open(&path).unwrap().persisted_free_space().unwrap();
+    assert!(!ours.is_empty());
+
+    let f = hdf5::File::open_rw(&path).unwrap();
+    assert_eq!(
+        f.create_plist().unwrap().get_file_space_strategy().unwrap(),
+        CStrategy::FreeSpaceManager {
+            paged: false,
+            persist: true,
+            threshold: 1,
+        }
+    );
+    assert_eq!(
+        f.dataset("a").unwrap().read_raw::<i32>().unwrap(),
+        vec![1; 100]
+    );
+    assert_eq!(
+        f.dataset("d").unwrap().read_raw::<i32>().unwrap(),
+        vec![9; 300]
+    );
+    absence::assert_libhdf5_absent(&f.dataset("c").unwrap_err(), "c");
+    assert_eq!(
+        f.free_space(),
+        ours.iter().map(|&(_, len)| len).sum::<u64>()
+    );
+    let mut sections = file_space::libhdf5_free_sections(&f);
+    sections.sort_unstable();
+    assert_eq!(sections, ours);
+    f.new_dataset::<i32>()
+        .shape((50,))
+        .create("e")
+        .unwrap()
+        .write(&[5; 50])
+        .unwrap();
+    f.close().unwrap();
+
+    let reader = File::open(&path).unwrap();
+    assert_eq!(
+        reader.dataset("e").unwrap().read_i32().unwrap(),
+        vec![5; 50]
+    );
+    assert_eq!(
+        reader.dataset("d").unwrap().read_i32().unwrap(),
+        vec![9; 300]
+    );
+    stamped.assert_unchanged(&path);
 }
 
 /// Rewrites the version 1 File Space Info message of the file at `path` as a version 0 message with

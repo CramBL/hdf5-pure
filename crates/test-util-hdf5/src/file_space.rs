@@ -1,10 +1,14 @@
 //! Provides file-space fixture builders shared across edit and interoperability tests.
 
+#[cfg(feature = "__hdf5-1.10")]
+use core::ffi::c_int;
 use std::ops::Range;
 use std::path::Path;
 
 #[cfg(feature = "hdf5")]
 use hdf5::Dataset as Hdf5Dataset;
+#[cfg(feature = "__hdf5-1.10")]
+use hdf5::File as Hdf5File;
 #[cfg(feature = "__hdf5-1.10")]
 use hdf5::FileBuilder as Hdf5FileBuilder;
 #[cfg(feature = "__hdf5-1.10")]
@@ -352,6 +356,33 @@ pub fn libhdf5_contiguous_extent(dataset: &Hdf5Dataset) -> Range<u64> {
     address..address + dataset.storage_size()
 }
 
+/// Returns the free sections libhdf5 tracks in `file`, as `(address, size)` pairs whose addresses
+/// are relative to the base address.
+#[cfg(feature = "__hdf5-1.10")]
+pub fn libhdf5_free_sections(file: &Hdf5File) -> Vec<(u64, u64)> {
+    hdf5::sync::sync(|| {
+        // SAFETY: The library lock serializes access and `file` keeps the file open. With a null
+        // buffer and a count of zero the call writes nothing and returns the number of sections.
+        let count =
+            unsafe { H5Fget_free_sections(file.id(), H5FD_MEM_DEFAULT, 0, std::ptr::null_mut()) };
+        let count = usize::try_from(count).unwrap();
+        if count == 0 {
+            return Vec::new();
+        }
+        let mut sections = vec![SectionInfo { addr: 0, size: 0 }; count];
+        // SAFETY: The library lock serializes access, `file` keeps the file open, and
+        // `sections` holds `count` writable records of the layout `H5F_sect_info_t` has.
+        let written = unsafe {
+            H5Fget_free_sections(file.id(), H5FD_MEM_DEFAULT, count, sections.as_mut_ptr())
+        };
+        assert_eq!(usize::try_from(written).unwrap(), count);
+        sections
+            .into_iter()
+            .map(|section| (section.addr, section.size))
+            .collect()
+    })
+}
+
 /// Writes a persisting interior-hole fixture and deletes `big` in a committed edit.
 pub fn write_persisted_interior_hole(path: &Path) {
     write_interior_hole_source(path, true);
@@ -383,4 +414,31 @@ pub fn write_persisting_unlimited_i32(path: &Path, len: i32, chunk: u64, thresho
     builder.with_file_space_strategy(FileSpaceStrategy::FsmAggr, true, threshold);
     Unlimited::new("d", &data, chunk).add_to(&mut builder);
     builder.write(path).unwrap();
+}
+
+// `H5F_sect_info_t` in `H5Fpublic.h`, HDF5 1.14.6: a `haddr_t` address and an `hsize_t` size,
+// both 64-bit.
+#[cfg(feature = "__hdf5-1.10")]
+#[derive(Clone, Copy)]
+#[repr(C)]
+struct SectionInfo {
+    addr: u64,
+    size: u64,
+}
+
+// `H5FD_MEM_DEFAULT` of the `H5F_mem_t` enumeration in `H5Fpublic.h`, HDF5 1.14.6, which selects
+// the sections of every allocation type.
+#[cfg(feature = "__hdf5-1.10")]
+const H5FD_MEM_DEFAULT: c_int = 0;
+
+// `H5Fget_free_sections` in `H5F.c`, HDF5 1.14.6, takes a 64-bit file ID, an `H5F_mem_t`
+// enumeration, a `size_t` count and a section buffer, and returns an `ssize_t`.
+#[cfg(feature = "__hdf5-1.10")]
+unsafe extern "C" {
+    fn H5Fget_free_sections(
+        file_id: i64,
+        mem_type: c_int,
+        nsects: usize,
+        sect_info: *mut SectionInfo,
+    ) -> isize;
 }

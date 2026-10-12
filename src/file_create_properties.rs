@@ -133,9 +133,9 @@ use crate::libver::LibVer;
 ///
 /// - A paged file must persist its free space to be mutated. Both editors grow a paged `persist =
 ///   true` file, keeping pages homogeneous and the end of allocation page-aligned. A paged file
-///   created without `persist = true`, or one carrying a userblock, has no usable record of which
-///   pages hold metadata and which hold raw data, so it cannot be grown at all. Recreate it with
-///   `persist = true` and no userblock.
+///   created without `persist = true` has no record of which pages hold metadata and which hold
+///   raw data, so it cannot be grown at all. Neither can a paged file with a userblock.
+///   Recreate it with `persist = true` and no userblock.
 /// - Free space is under-reported and never over-reported. A final metadata-page tail and the old
 ///   bytes of a relocated partial chunk are left untracked, so `H5Fget_freespace` can read slightly
 ///   low. The file stays valid.
