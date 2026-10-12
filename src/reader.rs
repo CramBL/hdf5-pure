@@ -21,6 +21,7 @@ use crate::edit::{
 use crate::element::H5Element;
 use crate::type_builders::{DatasetBuilder, VL_REF_SIZE};
 
+use crate::FillTime;
 use crate::appender::BufferedAppender;
 use crate::attribute::{extract_attributes_full, extract_attributes_full_from_source};
 use crate::chunk_cache::{CachePass, ChunkCache, ChunkCacheConfig, ChunkCacheStats};
@@ -34,7 +35,7 @@ use crate::error::{Error, FormatError};
 use crate::file_create_properties::FileCreateProperties;
 use crate::file_lock::{self, FileLocking, OpenIntent, OpenTarget, WriteMarkPolicy};
 use crate::file_space_info::{FileSpaceInfo, FileSpaceStrategy};
-use crate::fill_value::FillPattern;
+use crate::fill_value::{FillPattern, FillValueMessage, FillValueView};
 use crate::filter_pipeline::FilterPipeline;
 use crate::free_space_manager;
 use crate::group_v1::GroupEntry;
@@ -53,10 +54,9 @@ use crate::source::{
     ReadSeekSource, Source, ValidatedSource, frame,
 };
 use crate::superblock::Superblock;
+use crate::types::{AttrValue, DType, attrs_to_map, classify_datatype};
 use crate::vl_data::{self, VlenStringReadOptions};
 use crate::width::FormatWidths;
-
-use crate::types::{AttrValue, DType, attrs_to_map, classify_datatype};
 
 // ---------------------------------------------------------------------------
 // File
@@ -6079,13 +6079,34 @@ the same commit to replace it",
         Ok(u64::from(self.datatype()?.type_size()))
     }
 
-    /// The raw bytes of this dataset's user-defined fill value, encoded in its
-    /// datatype, or `None` when no user-defined fill value is set (the library
-    /// default or an explicitly undefined fill). Reads whichever Fill Value
-    /// message the header carries — the current `0x0005` (versions 1/2/3) or the
-    /// legacy `0x0004` — so files from this crate, the reference C library, and
-    /// h5py are all handled.
-    pub(crate) fn defined_fill_bytes(&self) -> Result<Option<Vec<u8>>, Error> {
+    /// Returns the dataset's fill time policy.
+    ///
+    /// A dataset without a Fill Value message defaults to [`FillTime::IfSet`].
+    /// The policy is defined in "The Data Storage - Fill Value Message" of the
+    /// [format specification, version 4.0][spec].
+    ///
+    /// The C library calls this property `H5D_fill_time_t` and sets it with
+    /// `H5Pset_fill_time`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Format`] if the Fill Value message is malformed.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use hdf5_pure::{File, FileBuilder, FillTime};
+    ///
+    /// let mut fb = FileBuilder::new();
+    /// fb.create_dataset("data").with_i32_data(&[1, 2, 3]);
+    /// let file = File::from_bytes(fb.finish().unwrap()).unwrap();
+    ///
+    /// let dataset = file.dataset("data").unwrap();
+    /// assert_eq!(dataset.fill_time().unwrap(), FillTime::IfSet);
+    /// ```
+    ///
+    /// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_fvmessage
+    pub fn fill_time(&self) -> Result<FillTime, Error> {
         let state = self.resolved()?;
         let msg = state
             .header
@@ -6099,28 +6120,20 @@ the same commit to replace it",
                     .iter()
                     .find(|m| m.msg_type == MessageType::FILL_VALUE_OLD)
             });
-        match msg {
-            Some(m) => Ok(crate::fill_value::parse_defined_fill_value(
-                m.msg_type,
-                &self.file.message_body(m)?,
-            )?),
-            None => Ok(None),
-        }
+        let Some(m) = msg else {
+            return Ok(FillTime::IfSet);
+        };
+        let body = self.file.message_body(m)?;
+        let view = FillValueView::parse(m.msg_type, &body)?;
+        Ok(view.fill_time())
     }
 
-    /// The fill bytes that *unallocated storage reads as* — which is not the
-    /// same question [`defined_fill_bytes`](Self::defined_fill_bytes) answers.
+    /// Returns the dataset's parsed Fill Value message, or `None` when absent.
     ///
-    /// A dataset may declare a fill value and also declare, through the Fill
-    /// Value Write Time, that the library never writes it
-    /// (`H5D_FILL_TIME_NEVER`). Its unallocated storage then has no defined
-    /// contents — the C library leaves the read buffer untouched — so this
-    /// returns `None` and the region reads as deterministic zeros rather than as
-    /// a value nothing ever put there. `fill_value` still reports the declared
-    /// value, because it *is* declared; see [`fill_value_is_written`].
+    /// # Errors
     ///
-    /// [`fill_value_is_written`]: crate::fill_value::fill_value_is_written
-    fn fill_bytes(&self) -> Result<Option<Vec<u8>>, Error> {
+    /// Returns [`Error::Format`] if the Fill Value message is malformed.
+    pub(crate) fn fill_value_message(&self) -> Result<Option<FillValueMessage>, Error> {
         let state = self.resolved()?;
         let msg = state
             .header
@@ -6138,12 +6151,24 @@ the same commit to replace it",
             return Ok(None);
         };
         let body = self.file.message_body(m)?;
-        if !crate::fill_value::fill_value_is_written(m.msg_type, &body)? {
+        let view = FillValueView::parse(m.msg_type, &body)?;
+        Ok(Some(view.to_owned()))
+    }
+
+    /// Returns the raw bytes of the dataset's user-defined fill value, or `None`
+    /// if no user-defined fill value is set.
+    ///
+    /// Reads either the current Fill Value message (`0x0005`, versions 1, 2, or
+    /// 3) or the legacy Fill Value message (`0x0004`).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Format`] if the Fill Value message is malformed.
+    pub(crate) fn defined_fill_bytes(&self) -> Result<Option<Vec<u8>>, Error> {
+        let Some(msg) = self.fill_value_message()? else {
             return Ok(None);
-        }
-        Ok(crate::fill_value::parse_defined_fill_value(
-            m.msg_type, &body,
-        )?)
+        };
+        Ok(msg.into_value())
     }
 
     /// Read the whole dataset with `decode`, sweeping it a row window at a time.
@@ -6176,10 +6201,11 @@ the same commit to replace it",
         let pipeline = self.filter_pipeline_parsed();
         // See `read_raw`: an unparseable fill value message is carried into the
         // read rather than failing it up front.
-        let fill_bytes = self.fill_bytes();
         let elem_size = crate::datatype::element_size_usize(&dt)?;
-        let fill = match &fill_bytes {
-            Ok(b) => FillPattern::new(b.as_deref(), elem_size),
+        let fill_msg = self.fill_value_message();
+        let fill = match &fill_msg {
+            Ok(Some(m)) => FillPattern::from_message(m, elem_size),
+            Ok(None) => FillPattern::new(FillTime::IfSet, None, elem_size),
             Err(_) => FillPattern::UNKNOWN,
         };
         let spec = RawReadSpec::parse(&dl, &ds, &dt, pipeline.as_ref(), fill)?;
@@ -6813,9 +6839,11 @@ the same commit to replace it",
         // storage looks like. Carry the uncertainty into the read and let it
         // fail there, and only there. `Dataset::fill_value` still reports the
         // parse error to a caller asking about the value.
-        let fill_bytes = self.fill_bytes();
-        let fill = match &fill_bytes {
-            Ok(b) => FillPattern::new(b.as_deref(), crate::datatype::element_size_usize(&dt)?),
+        let elem_size = crate::datatype::element_size_usize(&dt)?;
+        let fill_msg = self.fill_value_message();
+        let fill = match &fill_msg {
+            Ok(Some(m)) => FillPattern::from_message(m, elem_size),
+            Ok(None) => FillPattern::new(FillTime::IfSet, None, elem_size),
             Err(_) => FillPattern::UNKNOWN,
         };
         let spec = RawReadSpec::parse(&dl, &ds, &dt, pipeline.as_ref(), fill)?;
@@ -6853,9 +6881,11 @@ the same commit to replace it",
         // never costs a window-shaped copy on top of one.
         // See `read_raw`: an unparseable fill value message is carried into the
         // read rather than failing it up front.
-        let parsed_fill = self.fill_bytes();
-        let fill = match &parsed_fill {
-            Ok(b) => FillPattern::new(b.as_deref(), crate::datatype::element_size_usize(&dt)?),
+        let elem_size = crate::datatype::element_size_usize(&dt)?;
+        let fill_msg = self.fill_value_message();
+        let fill = match &fill_msg {
+            Ok(Some(m)) => FillPattern::from_message(m, elem_size),
+            Ok(None) => FillPattern::new(FillTime::IfSet, None, elem_size),
             Err(_) => FillPattern::UNKNOWN,
         };
 

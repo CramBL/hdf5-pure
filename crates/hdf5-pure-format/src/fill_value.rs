@@ -242,6 +242,12 @@ impl FillValueMessage {
         self.value.as_deref()
     }
 
+    /// Consumes the message and returns the fill value bytes, or `None` if no
+    /// fill value is defined.
+    pub fn into_value(self) -> Option<Vec<u8>> {
+        self.value
+    }
+
     /// Returns a borrowed view of this message.
     pub fn as_view(&self) -> FillValueView<'_> {
         FillValueView {

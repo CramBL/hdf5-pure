@@ -10,7 +10,8 @@
 //!   message) — and the pure reader must recover it.
 
 use hdf5::file::LibraryVersion;
-use hdf5_pure::{File, FileBuilder, MaxExtent, ScaleOffset};
+use hdf5_pure::{File, FileBuilder, FillTime, MaxExtent, ScaleOffset};
+use rstest::rstest;
 use tempfile::tempdir;
 use test_util_hdf5::dataset::{self, Filter, Unlimited};
 use test_util_hdf5::file;
@@ -111,6 +112,86 @@ fn pure_reads_c_written_v3_fill() {
     let ds = file.dataset("d").unwrap();
     assert_eq!(ds.fill_value::<i32>().unwrap(), Some(-7));
     assert_eq!(ds.read_i32().unwrap(), vec![10, 20, 30]);
+}
+
+#[rstest]
+#[case::v2(LibraryVersion::Earliest, LibraryVersion::V18)]
+#[case::v3(LibraryVersion::V110, LibraryVersion::latest())]
+fn pure_reads_c_written_fill_time_never(#[case] low: LibraryVersion, #[case] high: LibraryVersion) {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("c_never.h5");
+    {
+        let file = hdf5::File::with_options()
+            .with_fapl(|p| p.libver_bounds(low, high))
+            .create(&path)
+            .unwrap();
+        file.new_dataset::<i32>()
+            .fill_value(-7_i32)
+            .fill_time(hdf5::dataset::FillTime::Never)
+            .shape((3,))
+            .create("d")
+            .unwrap();
+        file.close().unwrap();
+    }
+
+    let file = File::open(&path).unwrap();
+    let ds = file.dataset("d").unwrap();
+    assert_eq!(ds.fill_time().unwrap(), FillTime::Never);
+    assert_eq!(ds.fill_value::<i32>().unwrap(), Some(-7));
+}
+
+#[rstest]
+#[case::v2(LibraryVersion::Earliest, LibraryVersion::V18)]
+#[case::v3(LibraryVersion::V110, LibraryVersion::latest())]
+fn pure_reads_c_written_fill_time_alloc(#[case] low: LibraryVersion, #[case] high: LibraryVersion) {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("c_alloc.h5");
+    {
+        let file = hdf5::File::with_options()
+            .with_fapl(|p| p.libver_bounds(low, high))
+            .create(&path)
+            .unwrap();
+        file.new_dataset::<i32>()
+            .fill_value(42_i32)
+            .fill_time(hdf5::dataset::FillTime::Alloc)
+            .shape((3,))
+            .create("d")
+            .unwrap();
+        file.close().unwrap();
+    }
+
+    let file = File::open(&path).unwrap();
+    let ds = file.dataset("d").unwrap();
+    assert_eq!(ds.fill_time().unwrap(), FillTime::Alloc);
+    assert_eq!(ds.fill_value::<i32>().unwrap(), Some(42));
+}
+
+#[rstest]
+#[case::v2(LibraryVersion::Earliest, LibraryVersion::V18)]
+#[case::v3(LibraryVersion::V110, LibraryVersion::latest())]
+fn pure_reads_c_written_default_fill_time_as_if_set(
+    #[case] low: LibraryVersion,
+    #[case] high: LibraryVersion,
+) {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("c_default.h5");
+    {
+        let file = hdf5::File::with_options()
+            .with_fapl(|p| p.libver_bounds(low, high))
+            .create(&path)
+            .unwrap();
+        file.new_dataset::<i32>()
+            .fill_value(10_i32)
+            .shape((3,))
+            .create("d")
+            .unwrap();
+        file.close().unwrap();
+    }
+
+    let file = File::open(&path).unwrap();
+    let ds = file.dataset("d").unwrap();
+    assert_eq!(ds.fill_time().unwrap(), FillTime::IfSet);
+    assert_eq!(ds.fill_value::<i32>().unwrap(), Some(10));
 }
 
 /// Create a chunked f64 dataset with a fill value using the reference C library.

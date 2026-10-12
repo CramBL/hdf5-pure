@@ -41,6 +41,7 @@ use hdf5_pure_format::__private::LayoutVersion;
 use hdf5_pure_format::__private::SECTION_CLASS_LARGE;
 use hdf5_pure_format::__private::SECTION_CLASS_SMALL;
 
+use crate::FillTime;
 #[cfg(test)]
 use crate::address::AddressContext;
 use crate::address::BaseAddressExt;
@@ -65,6 +66,7 @@ use crate::file_space_info::FileSpacePageSize;
 use crate::file_space_info::FileSpaceStrategy;
 use crate::file_space_info::FreeSpaceSettings;
 use crate::file_space_info::NUM_FILE_FSM_MANAGERS;
+use crate::fill_value::FillPattern;
 use crate::free_space_manager;
 use crate::libver::LibVer;
 use crate::link_info::LinkInfoMessage;
@@ -2553,7 +2555,7 @@ impl FileWriter {
                     // wherever nothing was written, so the edge overhang of a
                     // partial chunk is filled rather than zeroed (issue #296).
                     let elem = ctx.element_size.narrow::<NonZeroUsize>()?;
-                    let fill = crate::fill_value::FillPattern::new(d.fill.as_deref(), elem);
+                    let fill = FillPattern::new(FillTime::IfSet, d.fill.as_deref(), elem);
                     Ok(Some(compress_chunks(
                         &d.raw,
                         &d.ds.dimensions,

@@ -740,6 +740,7 @@ mod tests {
     use alloc::vec;
 
     use super::*;
+    use crate::FillTime;
     use crate::address::StoredAddress;
     use crate::address::StoredAddressExt;
     use crate::convert::nz;
@@ -992,7 +993,7 @@ mod tests {
                 &ds,
                 &dt,
                 None,
-                FillPattern::new(Some(&seven), nz(8)),
+                FillPattern::new(FillTime::IfSet, Some(&seven), nz(8)),
             )
             .unwrap(),
             8,
@@ -1107,7 +1108,10 @@ mod tests {
             size: 24,
         };
         let seven = 7.0f64.to_le_bytes();
-        for fill in [FillPattern::ZERO, FillPattern::new(Some(&seven), nz(8))] {
+        for fill in [
+            FillPattern::ZERO,
+            FillPattern::new(FillTime::IfSet, Some(&seven), nz(8)),
+        ] {
             let spec = RawReadSpec::parse(&layout, &ds, &dt, None, fill).unwrap();
             let buffered = read_raw_data_full(&[], spec, 8, 8).unwrap();
             let streamed =

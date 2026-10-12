@@ -2078,6 +2078,7 @@ mod tests {
     use test_util::widths::Widths;
 
     use super::*;
+    use crate::FillTime;
     use crate::chunked_write::ChunkArrayKind;
     use crate::convert::nz;
     use crate::dataspace::MaxExtent;
@@ -2166,7 +2167,7 @@ mod tests {
                 &dataspace,
                 &make_f64_type(),
                 None,
-                FillPattern::new(Some(&fill_bytes), nz(8)),
+                FillPattern::new(FillTime::IfSet, Some(&fill_bytes), nz(8)),
             )
             .unwrap(),
             8,
@@ -2225,11 +2226,15 @@ mod tests {
         // value", through all three readers.
         for (dims, fill, expected) in [
             (vec![0u64], FillPattern::ZERO, Vec::new()),
-            (vec![0], FillPattern::new(Some(&seven), nz(8)), Vec::new()),
+            (
+                vec![0],
+                FillPattern::new(FillTime::IfSet, Some(&seven), nz(8)),
+                Vec::new(),
+            ),
             (vec![3], FillPattern::ZERO, vec![0u8; 24]),
             (
                 vec![3],
-                FillPattern::new(Some(&seven), nz(8)),
+                FillPattern::new(FillTime::IfSet, Some(&seven), nz(8)),
                 seven.repeat(3),
             ),
         ] {
@@ -4223,7 +4228,10 @@ mod tests {
         };
         let seven = 7.0f64.to_le_bytes();
         let datatype = make_f64_type();
-        for fill in [FillPattern::ZERO, FillPattern::new(Some(&seven), nz(8))] {
+        for fill in [
+            FillPattern::ZERO,
+            FillPattern::new(FillTime::IfSet, Some(&seven), nz(8)),
+        ] {
             let cache = ChunkCache::new();
             let spec = RawReadSpec::parse(&layout, &dataspace, &datatype, None, fill).unwrap();
             let whole =

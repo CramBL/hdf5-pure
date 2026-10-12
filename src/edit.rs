@@ -291,6 +291,8 @@ use hdf5_pure_space::__private::{
     PageType, PagedPostFree, SessionSpace, SessionSpaceSnapshot, TrackedSpace,
 };
 
+use crate::DatatypeByteOrder;
+use crate::FillTime;
 use crate::access_mode::AccessMode;
 use crate::address::BaseAddressExt;
 use crate::address::StoredAddressExt;
@@ -325,6 +327,7 @@ use crate::file_writer::{
     DenseAttrCreationOrder, LENGTH_SIZE, LENGTH_WIDTH, OFFSET_SIZE, OFFSET_WIDTH,
     build_chunked_dataset_oh, build_dataset_oh, make_link,
 };
+use crate::fill_value::FillPattern;
 use crate::filter_pipeline::FilterPipeline;
 use crate::filters::{ChunkContext, FilterScratch, compress_chunk_with, decompress_chunk};
 use crate::free_space_manager::PersistedSections;
@@ -340,6 +343,7 @@ use crate::object_header::ObjectHeader;
 use crate::object_path::{LinkNameBuf, ObjectPathBuf};
 use crate::reader::FileAccessProperties;
 use crate::shared_message::DatatypeLocation;
+use crate::signature;
 use crate::source::SourceMetadata;
 use crate::source::{BaseOffsetSource, BytesSource, MetadataCacheConfig, Source};
 use crate::superblock::Superblock;
@@ -351,7 +355,6 @@ use crate::type_builders::{
 };
 use crate::width::FormatWidths;
 use crate::width::OffsetWidth;
-use crate::{DatatypeByteOrder, signature};
 
 mod reclaim;
 
@@ -8000,7 +8003,7 @@ impl WriteEngine {
                 MessageType::DATA_LAYOUT => layout = Some((body, body_end)),
                 MessageType::FILTER_PIPELINE => filter = Some((body, body_end)),
                 // Versioned beats legacy, and within a type the first wins —
-                // the same rule `Dataset::fill_bytes` and `Located::from_walk`
+                // the same rule `Dataset::fill_value_message` and `Located::from_walk`
                 // apply, so all three agree on a header carrying more than one.
                 MessageType::FILL_VALUE
                     if !matches!(fill_msg, Some((MessageType::FILL_VALUE, ..))) =>
@@ -8317,7 +8320,7 @@ impl WriteEngine {
                 MessageType::DATA_LAYOUT => layout = Some((body, body_end)),
                 MessageType::FILTER_PIPELINE => filter = Some((body, body_end)),
                 // Versioned beats legacy, and within a type the first wins —
-                // the same rule `Dataset::fill_bytes` and `Located::from_walk`
+                // the same rule `Dataset::fill_value_message` and `Located::from_walk`
                 // apply, so all three agree on a header carrying more than one.
                 MessageType::FILL_VALUE
                     if !matches!(fill_msg, Some((MessageType::FILL_VALUE, ..))) =>
@@ -10162,7 +10165,7 @@ impl WriteEngine {
         // The overhang of a partial edge chunk holds the staged fill value
         // (issue #296).
         let elem = ctx.element_size.narrow::<NonZeroUsize>()?;
-        let fill = crate::fill_value::FillPattern::new(fd.fill.as_deref(), elem);
+        let fill = FillPattern::new(FillTime::IfSet, fd.fill.as_deref(), elem);
         let set = compress_chunks(
             &fd.raw,
             &fd.ds.dimensions,
@@ -11156,7 +11159,8 @@ fn flatten_dataset(db: DatasetBuilder, name: LinkNameBuf) -> Result<FlatDataset,
         let ctx = ChunkContext::from_datatype(&chunk_dims, &dt)?;
         db.chunk_options.build_pipeline(
             &ctx,
-            crate::fill_value::FillPattern::new(
+            FillPattern::new(
+                FillTime::IfSet,
                 db.fill.as_deref(),
                 ctx.element_size.narrow::<NonZeroUsize>()?,
             ),

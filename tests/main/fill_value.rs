@@ -6,7 +6,7 @@
 //! value" default, the datatype/size validation, and that a fill value set on an
 //! `File::open_rw`-created dataset is honored.
 
-use hdf5_pure::{Dataset, Error, File, FileBuilder, FormatError, H5Element, MaxExtent};
+use hdf5_pure::{Dataset, Error, File, FileBuilder, FillTime, FormatError, H5Element, MaxExtent};
 use tempfile::tempdir;
 use test_util_hdf5::file_builder;
 
@@ -321,4 +321,87 @@ fn repack_preserves_fill_value() {
     let file = File::open(&dst).unwrap();
     assert_fill(&file.dataset("contig").unwrap(), Some(-7_i32));
     assert_fill(&file.dataset("chunked").unwrap(), Some(2.5_f64));
+}
+
+#[test]
+fn fill_time_defaults_to_if_set() {
+    let file = file_builder::build_and_open(|fb| {
+        fb.create_dataset("without").with_i32_data(&[1, 2, 3]);
+        fb.create_dataset("with")
+            .with_i32_data(&[1, 2, 3])
+            .with_fill_value(42_i32);
+    });
+    assert_eq!(
+        file.dataset("without").unwrap().fill_time().unwrap(),
+        FillTime::IfSet
+    );
+    assert_eq!(
+        file.dataset("with").unwrap().fill_time().unwrap(),
+        FillTime::IfSet
+    );
+}
+
+#[test]
+fn fill_time_never_with_defined_fill_retains_metadata() {
+    let mut fb = FileBuilder::new();
+    fb.create_dataset("d")
+        .with_f64_data(&[1.0, 2.0, 3.0, 4.0])
+        .with_shape(&[4])
+        .with_maxshape(&[MaxExtent::Unlimited])
+        .with_chunks(&[2])
+        .with_fill_value(3.5_f64);
+    let mut bytes = fb.finish().unwrap();
+
+    let header_at = bytes
+        .windows(4)
+        .rposition(|w| w == b"OHDR")
+        .expect("dataset object header");
+    let mut body = vec![3u8, 0x26, 8, 0, 0, 0];
+    body.extend_from_slice(&3.5_f64.to_le_bytes());
+    test_util::object_header::v2::replace_message(
+        &mut bytes,
+        header_at,
+        test_util::object_header::MessageType::FILL_VALUE,
+        &body,
+    );
+
+    let file = File::from_bytes(bytes).unwrap();
+    let ds = file.dataset("d").unwrap();
+    assert_eq!(ds.fill_time().unwrap(), FillTime::Never);
+    assert_eq!(ds.fill_value::<f64>().unwrap(), Some(3.5));
+}
+
+#[test]
+fn fill_time_invalid_flag_is_rejected() {
+    let mut fb = FileBuilder::new();
+    fb.create_dataset("d")
+        .with_f64_data(&[1.0, 2.0])
+        .with_fill_value(3.5_f64);
+    let mut bytes = fb.finish().unwrap();
+
+    let header_at = bytes
+        .windows(4)
+        .rposition(|w| w == b"OHDR")
+        .expect("dataset object header");
+    let mut body = vec![3u8, 0x2e, 8, 0, 0, 0];
+    body.extend_from_slice(&3.5_f64.to_le_bytes());
+    test_util::object_header::v2::replace_message(
+        &mut bytes,
+        header_at,
+        test_util::object_header::MessageType::FILL_VALUE,
+        &body,
+    );
+
+    let file = File::from_bytes(bytes).unwrap();
+    let ds = file.dataset("d").unwrap();
+    let err = ds.fill_time().unwrap_err();
+    let Error::Format(FormatError::InvalidFillTime(code)) = err else {
+        panic!("expected InvalidFillTime, got {err:?}");
+    };
+    assert_eq!(code, 3);
+    let err_val = ds.fill_value::<f64>().unwrap_err();
+    let Error::Format(FormatError::InvalidFillTime(code)) = err_val else {
+        panic!("expected InvalidFillTime, got {err_val:?}");
+    };
+    assert_eq!(code, 3);
 }
