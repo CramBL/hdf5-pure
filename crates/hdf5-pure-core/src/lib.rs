@@ -17,6 +17,7 @@ mod display;
 mod error;
 mod file_space_info;
 mod message_type;
+mod region;
 mod superblock;
 
 #[doc(hidden)]

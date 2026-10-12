@@ -22,12 +22,16 @@ use crate::StoredAddress;
 use crate::Superblock;
 
 pub use crate::address::BaseAddressExt;
+pub use crate::address::DecodedStoredAddress;
+pub use crate::address::PhysicalAddress;
 pub use crate::address::StoredAddressExt;
 pub use crate::display::DISPLAY_MAX_MEMBERS;
 pub use crate::display::Dims;
 pub use crate::display::EscapedName;
 pub use crate::display::QuotedBytes;
 pub use crate::display::write_elided;
+pub use crate::region::FileRange;
+pub use crate::region::FileRegion;
 
 /// The fields of a [`FileSpaceInfo`], for the other workspace crates to build one.
 ///

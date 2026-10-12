@@ -19,6 +19,11 @@
 
 use alloc::vec::Vec;
 
+use hdf5_pure_core::__private::DecodedStoredAddress;
+use hdf5_pure_core::__private::StoredAddressExt;
+use hdf5_pure_core::StoredAddress;
+
+use crate::bytes;
 use crate::convert::Narrow;
 use crate::error::FormatError;
 
@@ -64,6 +69,30 @@ pub enum OffsetWidth {
 }
 
 impl OffsetWidth {
+    /// Reads a little-endian address and classifies it as defined or undefined at this width.
+    ///
+    /// The undefined address has every bit of its field set, as defined in "Appendix A:
+    /// Definitions" of the [format specification, version 4.0][spec]. Defined addresses remain
+    /// relative to the file's address base.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::UnexpectedEof`] if `data` does not contain a complete field at `pos`.
+    ///
+    /// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#sec_fmt4_appendixa
+    pub fn decode_address(
+        self,
+        data: &[u8],
+        pos: usize,
+    ) -> Result<DecodedStoredAddress, FormatError> {
+        let stored = StoredAddress::new(bytes::read_offset_width(data, pos, self)?);
+        Ok(if stored.is_undefined(self.get()) {
+            DecodedStoredAddress::Undefined
+        } else {
+            DecodedStoredAddress::Defined(stored)
+        })
+    }
+
     /// Returns the width in bytes, as the superblock stores it.
     pub const fn get(self) -> u8 {
         match self {
@@ -257,6 +286,61 @@ mod tests {
     use rstest::rstest;
 
     use super::*;
+
+    #[rstest]
+    #[case::two(OffsetWidth::Two, &[0xFF, 0xFF])]
+    #[case::four(OffsetWidth::Four, &[0xFF, 0xFF, 0xFF, 0xFF])]
+    #[case::eight(OffsetWidth::Eight, &[0xFF; 8])]
+    fn address_decoding_classifies_the_undefined_field(
+        #[case] width: OffsetWidth,
+        #[case] bytes: &[u8],
+    ) {
+        assert_eq!(
+            width.decode_address(bytes, 0).unwrap(),
+            DecodedStoredAddress::Undefined
+        );
+    }
+
+    #[rstest]
+    #[case::zero(OffsetWidth::Two, &[0, 0], 0, 0)]
+    #[case::two(OffsetWidth::Two, &[0xFE, 0xFF], 0, 0xFFFE)]
+    #[case::four(OffsetWidth::Four, &[0xFE, 0xFF, 0xFF, 0xFF], 0, 0xFFFF_FFFE)]
+    #[case::eight(OffsetWidth::Eight, &[0xFE, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF], 0, u64::MAX - 1)]
+    #[case::two_in_four(OffsetWidth::Four, &[0xFF, 0xFF, 0, 0], 0, 0xFFFF)]
+    #[case::four_in_eight(OffsetWidth::Eight, &[0xFF, 0xFF, 0xFF, 0xFF, 0, 0, 0, 0], 0, 0xFFFF_FFFF)]
+    #[case::prefix(OffsetWidth::Two, &[0, 0x34, 0x12, 0xFF], 1, 0x1234)]
+    fn address_decoding_preserves_defined_fields(
+        #[case] width: OffsetWidth,
+        #[case] bytes: &[u8],
+        #[case] pos: usize,
+        #[case] expected: u64,
+    ) {
+        assert_eq!(
+            width.decode_address(bytes, pos).unwrap(),
+            DecodedStoredAddress::Defined(StoredAddress::new(expected))
+        );
+    }
+
+    #[rstest]
+    #[case::two(OffsetWidth::Two, &[0xFF], 0, 2)]
+    #[case::four(OffsetWidth::Four, &[0xFF; 3], 0, 4)]
+    #[case::eight(OffsetWidth::Eight, &[0xFF; 7], 0, 8)]
+    #[case::prefix(OffsetWidth::Two, &[0xFF; 2], 1, 3)]
+    #[case::overflow(OffsetWidth::Two, &[], usize::MAX, usize::MAX)]
+    fn address_decoding_reports_incomplete_local_fields(
+        #[case] width: OffsetWidth,
+        #[case] bytes: &[u8],
+        #[case] pos: usize,
+        #[case] expected: usize,
+    ) {
+        assert_eq!(
+            width.decode_address(bytes, pos).unwrap_err(),
+            FormatError::UnexpectedEof {
+                expected,
+                available: bytes.len()
+            }
+        );
+    }
 
     #[test]
     fn each_legal_width_parses_to_its_variant() {

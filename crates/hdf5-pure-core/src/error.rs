@@ -139,6 +139,13 @@ pub enum FormatError {
         /// The number of bytes by which the HDF5 image moved earlier in the file.
         shift: u64,
     },
+    /// The supplied byte count differs from the declared physical range length.
+    FileRegionLengthMismatch {
+        /// The declared range length in bytes.
+        range_length: u64,
+        /// The supplied buffer length in bytes.
+        bytes_length: u64,
+    },
     /// A user-supplied fill value's byte width does not match the dataset's
     /// datatype element size (for example a `u8` fill value on an `i32`
     /// dataset).
@@ -180,6 +187,20 @@ pub enum FormatError {
     /// A fractal-heap "huge" object's heap ID referenced a B-tree key that is
     /// not present in the heap's huge-objects v2 B-tree.
     HugeObjectNotFound(u64),
+    /// The supplied physical region does not contain the required range.
+    ///
+    /// This reports insufficient caller-supplied bytes for a valid range. A short storage read
+    /// is reported by the source layer.
+    InsufficientRegion {
+        /// The required range's absolute start position.
+        required_start: u64,
+        /// The required range length in bytes.
+        required_length: u64,
+        /// The supplied region's absolute start position.
+        provided_start: u64,
+        /// The supplied region length in bytes.
+        provided_length: u64,
+    },
     /// An internal error, a condition that only a bug in `hdf5-pure` can produce.
     ///
     /// The string describes the condition.
@@ -597,6 +618,23 @@ pub const OBJECT_HEADER_MESSAGE_MAX: usize = u16::MAX as usize;
 impl fmt::Display for FormatError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::FileRegionLengthMismatch {
+                range_length,
+                bytes_length,
+            } => write!(
+                f,
+                "file region length is {range_length} bytes, supplied buffer has {bytes_length} bytes"
+            ),
+            Self::InsufficientRegion {
+                required_start,
+                required_length,
+                provided_start,
+                provided_length,
+            } => write!(
+                f,
+                "required file range at {required_start} with length {required_length} is outside \
+                 supplied region at {provided_start} with length {provided_length}"
+            ),
             Self::SignatureNotFound => {
                 write!(f, "HDF5 signature not found at any valid offset")
             }

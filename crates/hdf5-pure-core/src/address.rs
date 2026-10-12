@@ -11,6 +11,49 @@
 
 use crate::error::FormatError;
 
+/// A byte position in a physical source.
+///
+/// The reader resolves a [`StoredAddress`] using the opened image's effective base before
+/// constructing this value. Physical positions are represented as [`u64`] on every platform.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub struct PhysicalAddress(u64);
+
+impl PhysicalAddress {
+    /// Creates a position from an absolute byte offset.
+    pub const fn new(address: u64) -> Self {
+        Self(address)
+    }
+
+    /// Returns the absolute byte offset.
+    pub const fn get(self) -> u64 {
+        self.0
+    }
+
+    /// Returns the position `length` bytes after this one.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::OffsetOverflow`] if the sum exceeds [`u64::MAX`].
+    pub fn checked_add(self, length: u64) -> Result<Self, FormatError> {
+        self.0
+            .checked_add(length)
+            .map(Self)
+            .ok_or(FormatError::OffsetOverflow {
+                offset: self.0,
+                length,
+            })
+    }
+}
+
+/// An encoded address classified at the width of its field.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DecodedStoredAddress {
+    /// A base-relative address whose encoded bits are not all set.
+    Defined(StoredAddress),
+    /// The undefined address encoded with every bit of its field set.
+    Undefined,
+}
+
 /// An absolute address used as the base for stored HDF5 addresses.
 ///
 /// [`Superblock::base_address`](crate::Superblock::base_address) holds the encoded Base Address.
@@ -199,6 +242,36 @@ mod tests {
     use rstest::rstest;
 
     use super::*;
+
+    #[rstest]
+    #[case::zero(0, 0, 0)]
+    #[case::ordinary(512, 96, 608)]
+    #[case::end(u64::MAX - 1, 1, u64::MAX)]
+    fn physical_address_addition_preserves_u64_positions(
+        #[case] address: u64,
+        #[case] length: u64,
+        #[case] expected: u64,
+    ) {
+        assert_eq!(
+            PhysicalAddress::new(address).checked_add(length).unwrap(),
+            PhysicalAddress::new(expected)
+        );
+    }
+
+    #[rstest]
+    #[case::one(u64::MAX, 1)]
+    #[case::many(u64::MAX - 1, 512)]
+    fn physical_address_addition_rejects_overflow(#[case] address: u64, #[case] length: u64) {
+        assert_eq!(
+            PhysicalAddress::new(address)
+                .checked_add(length)
+                .unwrap_err(),
+            FormatError::OffsetOverflow {
+                offset: address,
+                length
+            }
+        );
+    }
 
     #[test]
     fn the_two_conversions_invert_each_other() {
