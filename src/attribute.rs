@@ -28,6 +28,7 @@ use crate::dense_storage::{self, DenseIndex};
 use crate::error::FormatError;
 use crate::fractal_heap::FractalHeapHeader;
 use crate::fractal_heap::HeapObjectReader;
+use crate::message_flags::MessageFlags;
 use crate::message_type::MessageType;
 use crate::object_header::ObjectHeader;
 use crate::shared_message::BufferedResolver;
@@ -343,6 +344,50 @@ fn extract_dense_attributes_from_source<S: Source + ?Sized>(
     length_size: u8,
     sohm: Option<&SohmTable>,
 ) -> Result<Vec<StoredAttribute>, FormatError> {
+    let resolver = SourceResolver::new(source, access_mode, offset_size, length_size, sohm);
+    let mut attrs = Vec::new();
+    visit_dense_attribute_messages_from_source(
+        source,
+        attr_info,
+        fh_addr,
+        offset_size,
+        length_size,
+        |_flags| true,
+        |data, creation_index| {
+            attrs.push(StoredAttribute {
+                message: AttributeMessage::parse_resolving(data, length_size, &resolver)?,
+                creation_index,
+            });
+            Ok(())
+        },
+    )?;
+    Ok(attrs)
+}
+
+/// Reads selected dense attribute messages through the name index.
+///
+/// A type 8 record of a version 2 B-tree stores message flags after the heap ID, as defined
+/// in "Version 2 B-trees" of the [format specification, version 4.0][spec].
+///
+/// Calls `select` with each record's message flags before reading its heap object. Calls
+/// `visit` with each selected message's bytes and optional creation index. The caller resolves
+/// shared messages when selecting them.
+///
+/// # Errors
+///
+/// Returns [`FormatError::UnexpectedEof`] if the name index is missing or a record is truncated.
+/// Returns the parser error if the index or heap cannot be read, or the error from `visit`.
+///
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_infra_btrees_v2
+pub(crate) fn visit_dense_attribute_messages_from_source(
+    source: &(impl Source + ?Sized),
+    attr_info: &AttributeInfoMessage,
+    fh_addr: StoredAddress,
+    offset_size: u8,
+    length_size: u8,
+    mut select: impl FnMut(MessageFlags) -> bool,
+    mut visit: impl FnMut(&[u8], Option<u16>) -> Result<(), FormatError>,
+) -> Result<(), FormatError> {
     let fh = FractalHeapHeader::parse_from_source(
         &SourceMetadata(source),
         fh_addr.get(),
@@ -365,26 +410,36 @@ fn extract_dense_attributes_from_source<S: Source + ?Sized>(
     let records =
         collect_btree_v2_records_from_source(source, &btree_hdr, offset_size, length_size)?;
 
-    let resolver = SourceResolver::new(source, access_mode, offset_size, length_size, sohm);
     let layout = FractalHeapIdLayout::new(
         &fh,
         OffsetWidth::try_from(offset_size)?,
         LengthWidth::try_from(length_size)?,
     );
     let mut heap = HeapObjectReader::new(&fh, offset_size, length_size);
-    let mut attrs = Vec::new();
     for record in &records {
-        let Some(id_bytes) = record.attribute_heap_id(fh.heap_id_length) else {
+        let flags_at = usize::from(fh.heap_id_length);
+        let flags = record
+            .data
+            .get(flags_at)
+            .copied()
+            .ok_or(FormatError::UnexpectedEof {
+                expected: flags_at + 1,
+                available: record.data.len(),
+            })?;
+        if !select(MessageFlags::new(flags)) {
             continue;
-        };
+        }
+        let id_bytes =
+            record
+                .attribute_heap_id(fh.heap_id_length)
+                .ok_or(FormatError::UnexpectedEof {
+                    expected: flags_at,
+                    available: record.data.len(),
+                })?;
         let attr_data = heap.read_from_source(source, layout.parse(id_bytes)?)?;
-        attrs.push(StoredAttribute {
-            message: AttributeMessage::parse_resolving(&attr_data, length_size, &resolver)?,
-            creation_index: record_creation_index(record, &fh, attr_info),
-        });
+        visit(&attr_data, record_creation_index(record, &fh, attr_info))?;
     }
-
-    Ok(attrs)
+    Ok(())
 }
 
 /// The creation index a name-index (type 8) record carries, for an object that

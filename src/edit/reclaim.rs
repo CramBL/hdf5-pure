@@ -12,28 +12,172 @@ use hdf5_pure_space::__private::FreeClass;
 use hdf5_pure_space::__private::PageType;
 
 use crate::access_mode::AccessMode;
+use crate::address::BaseAddressExt;
 use crate::address::StoredAddress;
 use crate::address::StoredAddressExt;
 use crate::attribute_info::AttributeInfoMessage;
 use crate::chunked_read::chunk_index_spans_from_source;
 use crate::data_layout::{ChunkIndexLayout, DataLayout};
 use crate::dataspace::Dataspace;
-use crate::error::Error;
+use crate::error::{Error, FormatError};
 use crate::file_space_info::FileSpacePageSize;
 use crate::fractal_heap_storage;
 use crate::fractal_heap_storage::FractalHeapAllocation;
+use crate::fractal_heap_storage::FractalHeapStorageError;
 use crate::group_v2::resolve_group_entries_from_source;
 use crate::link_info::LinkInfoMessage;
+use crate::link_message::LinkMessage;
+use crate::link_message::LinkTarget;
 use crate::message_type::MessageType;
+use crate::object_header::HeaderMessage;
 use crate::object_header::ObjectHeader;
 use crate::source::{BaseOffsetSource, Source, SourceMetadata};
 
 use super::{
     LENGTH_SIZE, MAX_COPY_DEPTH, MAX_LINK_GRAPH_NODES, OFFSET_SIZE, ObjModel, OhRegion,
-    WriteEngine, read_oh_chunks, spans_disjoint_in_bounds,
+    SpaceOwnership, WriteEngine, read_oh_chunks, spans_disjoint_in_bounds,
 };
 
+struct ChunkedStorageParts {
+    data: Vec<(u64, u64)>,
+    index: Vec<(u64, u64)>,
+    index_layout: ChunkIndexLayout,
+}
+
 impl WriteEngine {
+    /// Returns the byte ownership this editor can identify for a committed file.
+    ///
+    /// The editor visits each reachable object once, including objects with several hard
+    /// links or cycles. The identified storage includes the superblock, its extension, persisted
+    /// free-space managers, and reusable free extents. Unsupported storage or a traversal limit
+    /// makes the analysis incomplete.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Format`] if supported reachable metadata cannot be parsed. Returns
+    /// [`Error::MissingMessage`] if a chunked dataset lacks its dataspace. Returns
+    /// [`Error::InvalidFractalHeapStorage`] if a heap has inconsistent allocation geometry.
+    /// Returns [`Error::InvalidSpaceOwnershipExtent`] if identified extents overlap or exceed
+    /// the logical end of file.
+    pub(crate) fn space_ownership(&self) -> Result<SpaceOwnership, Error> {
+        let physical_size = self.image.len();
+        let logical_size = self.superblock.eof_address;
+        if logical_size > physical_size {
+            return Err(FormatError::TruncatedFile {
+                expected_eof: logical_size,
+                actual_len: physical_size,
+            }
+            .into());
+        }
+
+        let mut live_raw_space = Vec::new();
+        let mut live_metadata_space = Vec::new();
+        let root = self
+            .addresses
+            .absolute(self.superblock.root_group_address)?;
+        let mut analysis_complete =
+            self.collect_owned_spans(root, &mut live_raw_space, &mut live_metadata_space)?;
+        analysis_complete &= self.sb_sig_off == 0;
+
+        let superblock_len = u64::try_from(
+            hdf5_pure_format::__private::serialize_superblock(&self.superblock)?.len(),
+        )
+        .map_err(|_err| FormatError::Internal("superblock length does not fit u64".into()))?;
+        live_metadata_space.push((self.sb_sig_off, superblock_len));
+
+        if let Some(extension) = self.superblock.superblock_extension_address
+            && !extension.is_undefined(OFFSET_SIZE)
+        {
+            let extension = self.addresses.absolute(extension)?;
+            let header = ObjectHeader::parse_from_source(
+                &SourceMetadata(&self.image()),
+                AccessMode::ReadWrite,
+                extension,
+                OFFSET_SIZE,
+                LENGTH_SIZE,
+                self.addresses.effective_base(),
+            )?;
+            live_metadata_space.extend(self.oh_chunk_spans(extension)?);
+            analysis_complete &= header.messages.iter().all(|message| {
+                !message.flags.is_shared()
+                    && matches!(
+                        message.msg_type,
+                        MessageType::NIL
+                            | MessageType::OBJECT_HEADER_CONTINUATION
+                            | MessageType::FILE_SPACE_INFO
+                            | MessageType::B_TREE_K_VALUES
+                    )
+            });
+        }
+
+        let mut free_space_manager_space = Vec::new();
+        if let Some((_, info)) =
+            Self::extension_fsinfo(&self.image(), &self.superblock, self.addresses)?
+        {
+            if info.persist && self.superblock.base_address.is_zero() {
+                let widths = crate::width::FormatWidths::from_sizes(
+                    self.superblock.offset_size,
+                    self.superblock.length_size,
+                )?;
+                let (_, blocks) = crate::free_space_manager::read_persisted_sections_source(
+                    &self.image(),
+                    widths,
+                    crate::address::BaseAddress::ZERO,
+                    &info.manager_addrs,
+                )?;
+                free_space_manager_space.extend(blocks);
+            } else if info.persist {
+                analysis_complete = false;
+            }
+        }
+
+        let reusable_free_space = self.space_accounting().reusable_free_space;
+        let mut claimed = live_raw_space
+            .iter()
+            .chain(&live_metadata_space)
+            .chain(&free_space_manager_space)
+            .chain(&reusable_free_space)
+            .copied()
+            .collect::<Vec<_>>();
+        claimed.sort_unstable_by_key(|&(addr, _)| addr);
+        let mut previous_end = 0;
+        for &(address, length) in &claimed {
+            let end = address
+                .checked_add(length)
+                .ok_or(FormatError::OffsetOverflow {
+                    offset: address,
+                    length,
+                })?;
+            if address < previous_end || end > logical_size {
+                return Err(Error::InvalidSpaceOwnershipExtent {
+                    address,
+                    length,
+                    previous_end,
+                    logical_size,
+                });
+            }
+            previous_end = end;
+        }
+
+        let unclassified_space = complement_spans(logical_size, &claimed);
+        let trailing_slack_space = (physical_size > logical_size)
+            .then_some((logical_size, physical_size - logical_size))
+            .into_iter()
+            .collect();
+
+        Ok(SpaceOwnership {
+            physical_size,
+            logical_size,
+            live_raw_space,
+            live_metadata_space,
+            free_space_manager_space,
+            reusable_free_space,
+            unclassified_space,
+            analysis_complete,
+            trailing_slack_space,
+        })
+    }
+
     /// Returns the on-disk byte spans `(addr, len)` of every chunk of the
     /// version 2 object header at `addr`: chunk 0 (signature, prefix, messages,
     /// checksum) plus each continuation (`OCHK`) block.
@@ -517,6 +661,22 @@ impl WriteEngine {
     /// never reclaimed (a collection can be shared between objects). See the
     /// [module docs](self).
     pub(super) fn chunked_storage_spans(&self, addr: u64) -> Option<Vec<(u64, u64, FreeClass)>> {
+        let split = self.chunked_storage_parts(addr)?;
+        let index_class = chunk_index_free_class(
+            split.index_layout,
+            self.index_is_provably_raw(&split.data, &split.index),
+        );
+        let mut spans: Vec<(u64, u64, FreeClass)> = split
+            .data
+            .iter()
+            .map(|&(a, l)| (a, l, FreeClass::Page(PageType::Raw)))
+            .collect();
+        spans.extend(split.index.into_iter().map(|(a, l)| (a, l, index_class)));
+        Some(spans)
+    }
+
+    /// Returns the raw chunk data and metadata index blocks of a chunked dataset separately.
+    fn chunked_storage_parts(&self, addr: u64) -> Option<ChunkedStorageParts> {
         // Locate the data-layout and dataspace messages in the object header.
         let region = Self::gather_oh_messages(&self.image(), addr, self.addresses).ok()?;
         let mut layout_msg: Option<(usize, usize)> = None;
@@ -587,18 +747,15 @@ impl WriteEngine {
         if !spans_disjoint_in_bounds(&mut plain, self.image.len()) {
             return None;
         }
-        let chunk_index = match layout {
+        let index_layout = match layout {
             DataLayout::Chunked { index, .. } => index,
             _ => return None,
         };
-        let index_class =
-            chunk_index_free_class(chunk_index, self.index_is_provably_raw(&data, &index));
-        let mut spans: Vec<(u64, u64, FreeClass)> = data
-            .iter()
-            .map(|&(a, l)| (a, l, FreeClass::Page(PageType::Raw)))
-            .collect();
-        spans.extend(index.into_iter().map(|(a, l)| (a, l, index_class)));
-        Some(spans)
+        Some(ChunkedStorageParts {
+            data,
+            index,
+            index_layout,
+        })
     }
 
     /// Whether a chunked dataset's `index` provably occupies raw pages, given the
@@ -732,6 +889,345 @@ impl WriteEngine {
             return None;
         }
         Some(spans)
+    }
+    /// Appends reachable raw and metadata extents, returning whether traversal is complete.
+    ///
+    /// Each object is visited once. Unsupported storage and traversal limits are reported
+    /// through the return value, and parser failures are returned as errors.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Format`] if supported metadata cannot be parsed. Returns
+    /// [`Error::MissingMessage`] if a chunked dataset lacks its dataspace. Returns
+    /// [`Error::InvalidFractalHeapStorage`] if a heap has inconsistent allocation geometry.
+    fn collect_owned_spans(
+        &self,
+        root: u64,
+        raw: &mut Vec<(u64, u64)>,
+        metadata: &mut Vec<(u64, u64)>,
+    ) -> Result<bool, Error> {
+        let mut complete = true;
+        let mut visited = HashSet::new();
+        let mut pending = vec![(root, 0)];
+        while let Some((addr, depth)) = pending.pop() {
+            if visited.contains(&addr) {
+                continue;
+            }
+            if depth >= MAX_COPY_DEPTH || visited.len() >= MAX_LINK_GRAPH_NODES as usize {
+                complete = false;
+                continue;
+            }
+            visited.insert(addr);
+            let header = ObjectHeader::parse_from_source(
+                &SourceMetadata(&self.image()),
+                AccessMode::ReadWrite,
+                addr,
+                OFFSET_SIZE,
+                LENGTH_SIZE,
+                self.addresses.effective_base(),
+            )?;
+            if header.version != OWNED_HEADER_VERSION {
+                complete = false;
+                continue;
+            }
+            metadata.extend(self.oh_chunk_spans(addr)?);
+            complete &= self.collect_object_owned_spans(&header, raw, metadata, |child| {
+                pending.push((child, depth + 1));
+            })?;
+        }
+        Ok(complete)
+    }
+
+    /// Appends storage identified in the header and passes hard-link targets to `child`.
+    ///
+    /// Returns `false` for shared or unrecognized messages, data that embeds file addresses, or
+    /// storage the layout, link, or attribute collectors cannot classify.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Format`] if supported metadata cannot be parsed. Returns
+    /// [`Error::MissingMessage`] if a chunked dataset lacks its dataspace. Returns
+    /// [`Error::InvalidFractalHeapStorage`] if a heap has inconsistent allocation geometry.
+    fn collect_object_owned_spans(
+        &self,
+        header: &ObjectHeader,
+        raw: &mut Vec<(u64, u64)>,
+        metadata: &mut Vec<(u64, u64)>,
+        mut child: impl FnMut(u64),
+    ) -> Result<bool, Error> {
+        let mut complete = true;
+        let messages = &header.messages;
+        for HeaderMessage {
+            msg_type,
+            flags,
+            data,
+            ..
+        } in messages
+        {
+            if flags.is_shared() {
+                complete = false;
+                continue;
+            }
+            match *msg_type {
+                MessageType::DATA_LAYOUT => {
+                    complete &= self.collect_layout_owned_spans(messages, data, raw, metadata)?
+                }
+                MessageType::LINK => {
+                    let link = LinkMessage::parse(data, OFFSET_SIZE)?;
+                    if let LinkTarget::Hard {
+                        object_header_address,
+                    } = link.link_target
+                    {
+                        child(self.addresses.absolute(object_header_address)?);
+                    }
+                }
+                MessageType::LINK_INFO => {
+                    complete &= self.collect_group_owned_spans(data, metadata, &mut child)?
+                }
+                MessageType::ATTRIBUTE_INFO => {
+                    complete &= self.collect_attribute_owned_spans(data, metadata)?
+                }
+                MessageType::DATATYPE => {
+                    let (datatype, _) = hdf5_pure_format::__private::parse_datatype(data)?;
+                    complete &= !super::datatype_holds_file_address(&datatype);
+                }
+                MessageType::ATTRIBUTE => {
+                    match crate::attribute::AttributeMessage::parse(data, LENGTH_SIZE) {
+                        Ok(attr) => complete &= !super::datatype_holds_file_address(&attr.datatype),
+                        Err(FormatError::UnresolvedSharedMessage(_)) => complete = false,
+                        Err(error) => return Err(error.into()),
+                    }
+                }
+                MessageType::NIL
+                | MessageType::DATASPACE
+                | MessageType::FILL_VALUE_OLD
+                | MessageType::FILL_VALUE
+                | MessageType::GROUP_INFO
+                | MessageType::FILTER_PIPELINE
+                | MessageType::OBJECT_HEADER_CONTINUATION
+                | MessageType::OBJECT_MODIFICATION_TIME
+                | MessageType::OBJECT_REFERENCE_COUNT => {}
+                _ => complete = false,
+            }
+        }
+        Ok(complete)
+    }
+
+    /// Appends dataset payload and chunk-index extents identified by the layout.
+    ///
+    /// Returns `false` for virtual storage or a chunked dataset with a shared dataspace.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Format`] if the layout, dataspace, or chunk storage cannot be parsed.
+    /// Returns [`Error::MissingMessage`] if a chunked dataset lacks its dataspace.
+    fn collect_layout_owned_spans(
+        &self,
+        messages: &[HeaderMessage],
+        data: &[u8],
+        raw: &mut Vec<(u64, u64)>,
+        metadata: &mut Vec<(u64, u64)>,
+    ) -> Result<bool, Error> {
+        let mut complete = true;
+        let layout = DataLayout::parse(data, OFFSET_SIZE, LENGTH_SIZE)?;
+        match &layout {
+            DataLayout::Compact { .. } => {}
+            DataLayout::Contiguous { address, size } => {
+                if let Some(address) = address
+                    && *size > 0
+                {
+                    raw.push((self.addresses.absolute(*address)?, *size));
+                }
+            }
+            DataLayout::Chunked { .. } => {
+                let space = messages
+                    .iter()
+                    .find(|m| m.msg_type == MessageType::DATASPACE)
+                    .ok_or(Error::MissingMessage(MessageType::DATASPACE))?;
+                if space.flags.is_shared() {
+                    return Ok(false);
+                }
+                let dataspace = Dataspace::parse(&space.data, LENGTH_SIZE)?;
+                let storage = crate::chunked_read::collect_chunked_storage_spans(
+                    &BaseOffsetSource {
+                        inner: &self.image(),
+                        base: self.addresses.effective_base(),
+                    },
+                    &layout,
+                    &dataspace,
+                    OFFSET_SIZE,
+                    LENGTH_SIZE,
+                )?;
+                raw.extend(self.absolute_owned_spans(storage.data)?);
+                metadata.extend(self.absolute_owned_spans(storage.index)?);
+            }
+            DataLayout::Virtual => complete = false,
+        }
+
+        Ok(complete)
+    }
+
+    /// Appends dense link storage and passes absolute hard-link targets to `child`.
+    ///
+    /// Returns `false` when the group's heap ownership is unsupported.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Format`] if the link information, index, heap, or entries cannot be parsed.
+    /// Returns [`Error::InvalidFractalHeapStorage`] if the heap has inconsistent allocation geometry.
+    fn collect_group_owned_spans(
+        &self,
+        data: &[u8],
+        metadata: &mut Vec<(u64, u64)>,
+        mut child: impl FnMut(u64),
+    ) -> Result<bool, Error> {
+        let info = LinkInfoMessage::parse(data, OFFSET_SIZE)?;
+        if let Some(heap) = info.fractal_heap_address {
+            let source = BaseOffsetSource {
+                inner: &self.image(),
+                base: self.addresses.effective_base(),
+            };
+            let index = crate::group_v2::collect_dense_group_index_storage_extents(
+                &source,
+                &info,
+                OFFSET_SIZE,
+                LENGTH_SIZE,
+            )?;
+            metadata.extend(
+                self.absolute_owned_spans(
+                    index.iter().map(|extent| (extent.start(), extent.len())),
+                )?,
+            );
+            if !self.collect_owned_heap(heap, metadata)? {
+                return Ok(false);
+            }
+            let entries = crate::group_v2::resolve_dense_entries_from_source(
+                &source,
+                &info,
+                heap,
+                OFFSET_SIZE,
+                LENGTH_SIZE,
+            )?;
+            for entry in entries {
+                child(self.addresses.absolute(entry.object_header_address)?);
+            }
+        }
+
+        Ok(true)
+    }
+
+    /// Appends dense-attribute storage and returns whether it can be classified completely.
+    ///
+    /// Returns `false` for unsupported heaps, shared messages or fields, or attribute data that
+    /// embeds file addresses.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Format`] if supported attribute metadata cannot be parsed. Returns
+    /// [`Error::InvalidFractalHeapStorage`] if the heap has inconsistent allocation geometry.
+    fn collect_attribute_owned_spans(
+        &self,
+        data: &[u8],
+        metadata: &mut Vec<(u64, u64)>,
+    ) -> Result<bool, Error> {
+        let mut complete = true;
+        let info = AttributeInfoMessage::parse(data, OFFSET_SIZE)?;
+        if let Some(heap) = info.fractal_heap_address {
+            let source = BaseOffsetSource {
+                inner: &self.image(),
+                base: self.addresses.effective_base(),
+            };
+            let index = crate::attribute::collect_dense_attribute_index_storage_extents(
+                &source,
+                &info,
+                OFFSET_SIZE,
+                LENGTH_SIZE,
+            )?;
+            metadata.extend(
+                self.absolute_owned_spans(
+                    index.iter().map(|extent| (extent.start(), extent.len())),
+                )?,
+            );
+            if !self.collect_owned_heap(heap, metadata)? {
+                return Ok(false);
+            }
+            let mut shared_records = false;
+            crate::attribute::visit_dense_attribute_messages_from_source(
+                &source,
+                &info,
+                heap,
+                OFFSET_SIZE,
+                LENGTH_SIZE,
+                |flags| {
+                    shared_records |= flags.is_shared();
+                    !flags.is_shared()
+                },
+                |data, _creation_index| {
+                    match crate::attribute::AttributeMessage::parse(data, LENGTH_SIZE) {
+                        Ok(attribute) => {
+                            complete &= !super::datatype_holds_file_address(&attribute.datatype)
+                        }
+                        Err(FormatError::UnresolvedSharedMessage(_)) => complete = false,
+                        Err(error) => return Err(error),
+                    }
+                    Ok(())
+                },
+            )?;
+            complete &= !shared_records;
+        }
+
+        Ok(complete)
+    }
+
+    fn absolute_owned_spans(
+        &self,
+        spans: impl IntoIterator<Item = (u64, u64)>,
+    ) -> Result<Vec<(u64, u64)>, Error> {
+        spans
+            .into_iter()
+            .map(|(addr, len)| Ok((self.addresses.absolute(StoredAddress::new(addr))?, len)))
+            .collect()
+    }
+
+    /// Appends every heap allocation, returning whether ownership is supported.
+    ///
+    /// Returns `false` for a filtered heap or a heap with a managed-space free-space manager.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Format`] if the heap cannot be parsed. Returns
+    /// [`Error::InvalidFractalHeapStorage`] if the heap has inconsistent allocation geometry.
+    fn collect_owned_heap(
+        &self,
+        heap: StoredAddress,
+        metadata: &mut Vec<(u64, u64)>,
+    ) -> Result<bool, Error> {
+        let storage = match fractal_heap_storage::collect_fractal_heap_storage_from_source(
+            &BaseOffsetSource {
+                inner: &self.image(),
+                base: self.addresses.effective_base(),
+            },
+            heap,
+            OFFSET_SIZE,
+            LENGTH_SIZE,
+        ) {
+            Ok(storage) => storage,
+            Err(FractalHeapStorageError::UnsupportedOwnership(_)) => return Ok(false),
+            Err(FractalHeapStorageError::Format(error)) => return Err(error.into()),
+            Err(FractalHeapStorageError::Layout(_) | FractalHeapStorageError::InvalidStorage) => {
+                return Err(Error::InvalidFractalHeapStorage {
+                    address: heap.get(),
+                });
+            }
+        };
+        for &(extent, _) in storage.allocations() {
+            metadata.push((
+                self.addresses
+                    .absolute(StoredAddress::new(extent.start()))?,
+                extent.len(),
+            ));
+        }
+        Ok(true)
     }
 }
 
@@ -881,6 +1377,22 @@ fn append_object_metadata_spans(
     );
 }
 
+/// Returns the gaps in `0..limit` left by sorted, disjoint `claimed` spans.
+fn complement_spans(limit: u64, claimed: &[(u64, u64)]) -> Vec<(u64, u64)> {
+    let mut out = Vec::new();
+    let mut cursor = 0u64;
+    for &(addr, len) in claimed {
+        if cursor < addr {
+            out.push((cursor, addr - cursor));
+        }
+        cursor = addr + len;
+    }
+    if cursor < limit {
+        out.push((cursor, limit - cursor));
+    }
+    out
+}
+
 /// Tags object-header chunk spans as file metadata.
 ///
 /// Every span [`WriteEngine::oh_chunk_spans`] returns is part of an object header, so the page type
@@ -890,6 +1402,8 @@ pub(super) fn meta_spans(spans: Vec<(u64, u64)>) -> impl Iterator<Item = (u64, u
         .into_iter()
         .map(|(a, l)| (a, l, FreeClass::Page(PageType::Meta)))
 }
+
+const OWNED_HEADER_VERSION: u8 = 2;
 
 #[cfg(test)]
 mod tests {

@@ -20,4 +20,6 @@ pub mod lock;
 pub mod mat_file;
 pub mod paged;
 pub mod session;
+#[cfg(feature = "__hdf5-1.10")]
+pub mod space_ownership;
 pub mod userblock;

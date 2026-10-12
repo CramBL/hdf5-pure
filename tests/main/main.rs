@@ -26,6 +26,7 @@ mod edit_free_space;
 mod edit_in_place;
 mod edit_reference_repointing;
 mod edit_space_accounting;
+mod edit_space_ownership;
 mod edit_userblock;
 mod edit_userblock_chunked;
 mod edit_userblock_followups;

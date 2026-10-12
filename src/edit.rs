@@ -293,6 +293,7 @@ use crate::access_mode::AccessMode;
 use crate::address::BaseAddressExt;
 use crate::address::StoredAddressExt;
 use crate::address::{AddressContext, BaseAddress, StoredAddress};
+use crate::attribute::StoredAttribute;
 use crate::attribute_info::AttributeInfoMessage;
 use crate::chunk_index_inplace::{Located, Store, apply_ea_append, plan_ea_append};
 use crate::chunked_read::{enumerate_chunks_from_source, plan_dense_grid};
@@ -2017,6 +2018,40 @@ pub struct SpaceAccounting {
     /// for a file with no userblock (base address 0), which is the only kind whose
     /// persisted free space a session seeds. Empty when nothing is reusable.
     pub reusable_free_space: Vec<(u64, u64)>,
+}
+
+/// Describes file storage identified by the editor for regression tests.
+///
+/// Extents are absolute `(offset, length)` pairs. The editor reads reachable storage with
+/// the parsers used for reclamation and reports unsupported structures through
+/// [`analysis_complete`](Self::analysis_complete). Unclassified extents can include live
+/// storage when the analysis is incomplete.
+///
+/// This type is outside the supported API.
+#[doc(hidden)]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SpaceOwnership {
+    /// The physical file length in bytes.
+    pub physical_size: u64,
+    /// The end-of-file position stored in the superblock.
+    pub logical_size: u64,
+    /// The dataset payload allocations stored outside object headers in this file.
+    pub live_raw_space: Vec<(u64, u64)>,
+    /// The identified object headers, indexes, heaps, and file metadata.
+    pub live_metadata_space: Vec<(u64, u64)>,
+    /// The complete allocations of persisted free-space managers.
+    pub free_space_manager_space: Vec<(u64, u64)>,
+    /// The free extents available to the editor.
+    pub reusable_free_space: Vec<(u64, u64)>,
+    /// The bytes below the logical end of file outside the identified allocations and free space.
+    pub unclassified_space: Vec<(u64, u64)>,
+    /// Whether every reachable storage structure is supported and the traversal finished.
+    ///
+    /// Shared messages, variable-length data, unsupported headers or heaps, and traversal limits
+    /// make the analysis incomplete, even when every byte has been classified.
+    pub analysis_complete: bool,
+    /// The bytes between the logical end of file and the physical file length.
+    pub trailing_slack_space: Vec<(u64, u64)>,
 }
 
 impl WriteEngine {
@@ -12545,8 +12580,12 @@ fn dense_attr_set(
     let mut next = next_attr_creation_index(region)?;
     let mut attrs = Vec::with_capacity(stored.len());
     let mut indices = Vec::with_capacity(stored.len());
-    for attr in stored {
-        let index = match attr.creation_index {
+    for StoredAttribute {
+        message,
+        creation_index,
+    } in stored
+    {
+        let index = match creation_index {
             Some(index) => index,
             None => {
                 let index = next;
@@ -12555,7 +12594,7 @@ fn dense_attr_set(
             }
         };
         next = next.max(bump_creation_index(index)?);
-        attrs.push(attr.message);
+        attrs.push(message);
         indices.push(index);
     }
     Ok(DenseAttrSet {
