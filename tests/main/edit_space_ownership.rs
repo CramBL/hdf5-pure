@@ -26,16 +26,23 @@ use test_util::temp;
 use test_util::widths::Widths;
 use test_util_hdf5::file_space;
 
-#[test]
-fn a_contiguous_i32_dataset_has_complete_ownership() {
+#[rstest]
+#[case::plain(0, &[])]
+#[case::userblock(USERBLOCK_SIZE, &[(0, USERBLOCK_SIZE)])]
+fn a_contiguous_i32_dataset_has_complete_ownership(
+    #[case] userblock: u64,
+    #[case] userblock_space: &[(u64, u64)],
+) {
     let path = temp::temp_path("supported_ownership.h5");
     let mut builder = FileBuilder::new();
+    builder.with_userblock(userblock);
     builder.create_dataset("d").with_i32_data(&[1, 2, 3]);
     builder.write(&path).unwrap();
     let file = File::open_rw(&path).unwrap();
     let ownership: SpaceOwnership = file.__space_ownership().unwrap();
     assert!(ownership.analysis_complete);
     assert!(ownership.unclassified_space.is_empty());
+    assert_eq!(ownership.userblock_space, userblock_space);
     let summary = file_space::assert_exact_space_ownership(&file);
     assert_eq!(summary.live_raw_bytes, 12);
     file.close().unwrap();
@@ -243,20 +250,6 @@ fn a_version_one_header_has_incomplete_ownership() {
     let ownership = file.__space_ownership().unwrap();
     assert!(!ownership.analysis_complete);
     assert!(!ownership.unclassified_space.is_empty());
-    file.close().unwrap();
-}
-
-#[test]
-fn a_userblock_has_incomplete_ownership() {
-    let path = temp::temp_path("userblock_ownership.h5");
-    let mut builder = FileBuilder::new();
-    builder.with_userblock(USERBLOCK_SIZE);
-    builder.create_dataset("d").with_i32_data(&[1, 2, 3]);
-    builder.write(&path).unwrap();
-    let file = File::open_rw(&path).unwrap();
-    let ownership = file.__space_ownership().unwrap();
-    assert!(!ownership.analysis_complete);
-    assert_eq!(ownership.unclassified_space, [(0, USERBLOCK_SIZE)]);
     file.close().unwrap();
 }
 

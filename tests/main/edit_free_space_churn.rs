@@ -654,6 +654,7 @@ fn render_ownership(out: &mut String, heading: &str, ownership: SpaceOwnershipSu
     let SpaceOwnershipSummary {
         physical_size,
         logical_size,
+        userblock_bytes: _,
         live_raw_bytes,
         live_metadata_bytes,
         free_space_manager_bytes,

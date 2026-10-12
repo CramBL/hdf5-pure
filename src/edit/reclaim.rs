@@ -48,9 +48,9 @@ impl WriteEngine {
     /// Returns the byte ownership this editor can identify for a committed file.
     ///
     /// The editor visits each reachable object once, including objects with several hard
-    /// links or cycles. The identified storage includes the superblock, its extension, persisted
-    /// free-space managers, and reusable free extents. Unsupported storage or a traversal limit
-    /// makes the analysis incomplete.
+    /// links or cycles. The identified storage includes the userblock, the superblock, its
+    /// extension, persisted free-space managers, and reusable free extents. Unsupported storage or
+    /// a traversal limit makes the analysis incomplete.
     ///
     /// # Errors
     ///
@@ -77,7 +77,7 @@ impl WriteEngine {
             .absolute(self.superblock.root_group_address)?;
         let mut analysis_complete =
             self.collect_owned_spans(root, &mut live_raw_space, &mut live_metadata_space)?;
-        analysis_complete &= self.sb_sig_off == 0;
+        let userblock_space = Vec::from_iter((self.sb_sig_off > 0).then_some((0, self.sb_sig_off)));
 
         let superblock_len = u64::try_from(
             hdf5_pure_format::__private::serialize_superblock(&self.superblock)?.len(),
@@ -132,8 +132,9 @@ impl WriteEngine {
         }
 
         let reusable_free_space = self.space_accounting()?.reusable_free_space;
-        let mut claimed = live_raw_space
+        let mut claimed = userblock_space
             .iter()
+            .chain(&live_raw_space)
             .chain(&live_metadata_space)
             .chain(&free_space_manager_space)
             .chain(&reusable_free_space)
@@ -168,6 +169,7 @@ impl WriteEngine {
         Ok(SpaceOwnership {
             physical_size,
             logical_size,
+            userblock_space,
             live_raw_space,
             live_metadata_space,
             free_space_manager_space,
