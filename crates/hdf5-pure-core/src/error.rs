@@ -260,6 +260,14 @@ pub enum FormatError {
     InvalidFileSpacePageSize(u64),
     /// Invalid file-space management strategy code in a File Space Info message.
     InvalidFileSpaceStrategy(u8),
+    /// A fill value write time code that the format does not define.
+    InvalidFillTime(u8),
+    /// A fill value defined indicator byte that the format does not define.
+    InvalidFillValueDefined(u8),
+    /// A version 3 fill value flags byte with reserved bits set or conflicting defined flags.
+    InvalidFillValueFlags(u8),
+    /// An object header message type that is not a fill value message type.
+    InvalidFillValueMessageType(u16),
     /// A stored filter name violates the pipeline's name encoding.
     InvalidFilterName {
         /// The identifier of the filter with the malformed name.
@@ -370,6 +378,8 @@ pub enum FormatError {
     /// A file's shared-message table, or a Shared Message Table message identifying
     /// it, declares a version this format does not define.
     InvalidSohmTableVersion(u8),
+    /// A space allocation time code that the format does not define.
+    InvalidSpaceAllocationTime(u8),
     /// Invalid string padding type.
     InvalidStringPadding(u8),
     /// Invalid symbol table node signature.
@@ -740,6 +750,18 @@ impl fmt::Display for FormatError {
                     FileSpacePageSize::MAX.get(),
                 )
             }
+            Self::InvalidFillTime(t) => {
+                write!(f, "invalid fill value write time: {t}")
+            }
+            Self::InvalidFillValueDefined(d) => {
+                write!(f, "invalid fill value defined indicator: {d}")
+            }
+            Self::InvalidFillValueFlags(flags) => {
+                write!(f, "invalid fill value flags: {flags:#04x}")
+            }
+            Self::InvalidFillValueMessageType(t) => {
+                write!(f, "invalid message type for fill value: {t:#06x}")
+            }
             Self::UserblockNotPageAligned(userblock, page_size) => {
                 write!(
                     f,
@@ -947,6 +969,9 @@ impl fmt::Display for FormatError {
             }
             Self::InvalidSohmTableVersion(v) => {
                 write!(f, "invalid shared message table version: {v}")
+            }
+            Self::InvalidSpaceAllocationTime(t) => {
+                write!(f, "invalid space allocation time: {t}")
             }
             Self::InvalidSohmIndexCount(n) => {
                 write!(f, "invalid shared message index count: {n}")

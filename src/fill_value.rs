@@ -11,6 +11,7 @@ use alloc::{vec, vec::Vec};
 use core::num::NonZeroUsize;
 
 use hdf5_pure_format::__private::FillValueError;
+use hdf5_pure_format::__private::FillValueView;
 
 use crate::error::FormatError;
 use crate::message_type::MessageType;
@@ -170,13 +171,17 @@ impl PaddingFill {
     /// takes for reads — with the write-time question asked first, since a
     /// value the file says is never written is not written here either.
     pub(crate) fn from_message(msg_type: MessageType, body: &[u8]) -> Self {
-        match fill_value_is_written(msg_type, body) {
-            Ok(false) => Self::Zero,
-            Ok(true) => match parse_defined_fill_value(msg_type, body) {
-                Ok(Some(bytes)) => Self::Value(bytes),
-                Ok(None) => Self::Zero,
-                Err(_) => Self::Unknown,
-            },
+        match FillValueView::parse(msg_type, body) {
+            Ok(view) => {
+                if view.fill_time().is_never() {
+                    Self::Zero
+                } else {
+                    match view.value() {
+                        Some(bytes) => Self::Value(bytes.to_vec()),
+                        None => Self::Zero,
+                    }
+                }
+            }
             Err(_) => Self::Unknown,
         }
     }
@@ -191,7 +196,9 @@ impl PaddingFill {
     }
 }
 
+#[cfg(feature = "std")]
 pub use hdf5_pure_format::__private::fill_value_is_written;
+#[cfg(feature = "std")]
 pub use hdf5_pure_format::__private::parse_defined_fill_value;
 
 pub(crate) fn fill_value_message_v3(fill: Option<&[u8]>) -> Result<Vec<u8>, FormatError> {

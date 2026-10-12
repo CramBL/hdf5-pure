@@ -71,6 +71,7 @@ pub use hdf5_pure_core::CompoundMember;
 pub use hdf5_pure_core::Datatype;
 pub use hdf5_pure_core::DatatypeByteOrder;
 pub use hdf5_pure_core::EnumMember;
+pub use hdf5_pure_core::FillTime;
 pub use hdf5_pure_core::FixedPointLayout;
 pub use hdf5_pure_core::FloatingPointLayout;
 pub use hdf5_pure_core::ReferenceType;

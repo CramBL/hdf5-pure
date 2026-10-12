@@ -2,6 +2,7 @@ use core::num::NonZeroU32;
 
 use hdf5_pure::CompoundMember;
 use hdf5_pure::Datatype;
+use hdf5_pure::FillTime;
 use hdf5_pure::FormatError;
 use hdf5_pure::MaxExtent;
 
@@ -50,6 +51,8 @@ fn core_types_keep_their_original_paths() {
     let _: Option<FormatError> = None::<hdf5_pure_core::FormatError>;
     let _: Option<FormatError> = None::<hdf5_pure_format::FormatError>;
     let _: Option<CompoundMember> = None::<hdf5_pure_core::CompoundMember>;
+    let _: Option<FillTime> = None::<hdf5_pure_core::FillTime>;
+    let _: Option<FillTime> = None::<hdf5_pure_format::FillTime>;
     let _: Option<hdf5_pure::EnumMember> = None::<hdf5_pure_core::EnumMember>;
     let _: Option<hdf5_pure::FixedPointLayout> = None::<hdf5_pure_core::FixedPointLayout>;
     let _: Option<hdf5_pure::FloatingPointLayout> = None::<hdf5_pure_core::FloatingPointLayout>;
@@ -65,6 +68,18 @@ fn core_types_keep_their_original_paths() {
         hdf5_pure::OBJECT_HEADER_MESSAGE_MAX,
         hdf5_pure_core::OBJECT_HEADER_MESSAGE_MAX
     );
+}
+
+#[test]
+fn fill_time_api_is_public() {
+    assert_eq!(FillTime::default(), FillTime::IfSet);
+    assert_eq!(FillTime::Alloc.to_u8(), 0);
+    assert_eq!(FillTime::Never.to_u8(), 1);
+    assert_eq!(FillTime::IfSet.to_u8(), 2);
+    assert!(FillTime::Alloc.is_alloc());
+    assert!(FillTime::Never.is_never());
+    assert!(FillTime::IfSet.is_if_set());
+    assert_eq!(FillTime::try_from(0), Ok(FillTime::Alloc));
 }
 
 #[cfg(feature = "std")]
