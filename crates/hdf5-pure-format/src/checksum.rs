@@ -87,6 +87,30 @@ pub(crate) fn verify_zeroed(
     Ok(())
 }
 
+/// Validates an embedded checksum regardless of the `checksum` feature.
+///
+/// Hashes the complete block with the checksum field zeroed.
+///
+/// # Errors
+///
+/// Returns [`FormatError::UnexpectedEof`](crate::FormatError::UnexpectedEof) if the checksum
+/// field is incomplete, or [`FormatError::ChecksumMismatch`](crate::FormatError::ChecksumMismatch)
+/// if the stored checksum differs from the computed one.
+pub(crate) fn verify_zeroed_required(
+    block: &[u8],
+    checksum_at: usize,
+) -> Result<(), crate::error::FormatError> {
+    let stored = crate::bytes::Fields::new(block, checksum_at).u32()?;
+    let computed = hashlittle_zeroed::<true>(block, 0, checksum_at);
+    if stored != computed {
+        return Err(crate::error::FormatError::ChecksumMismatch {
+            expected: stored,
+            computed,
+        });
+    }
+    Ok(())
+}
+
 fn rot(x: u32, k: u32) -> u32 {
     x.rotate_left(k)
 }
