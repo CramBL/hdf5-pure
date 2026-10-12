@@ -1,6 +1,7 @@
 //! Address interpretation for an opened HDF5 image.
 
 pub(crate) use hdf5_pure_core::__private::BaseAddressExt;
+use hdf5_pure_core::__private::PhysicalAddress;
 pub(crate) use hdf5_pure_core::__private::StoredAddressExt;
 pub use hdf5_pure_core::BaseAddress;
 pub use hdf5_pure_core::StoredAddress;
@@ -115,7 +116,18 @@ impl AddressContext {
     /// Returns [`FormatError::OffsetOverflow`] if the sum of the stored address and effective base
     /// exceeds [`u64::MAX`].
     pub(crate) fn absolute(self, stored: StoredAddress) -> Result<u64, FormatError> {
-        self.effective_base.absolute(stored)
+        Ok(self.resolve(stored)?.get())
+    }
+
+    /// Resolves a stored address using the opened image's effective base.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::OffsetOverflow`] if the sum exceeds [`u64::MAX`].
+    pub(crate) fn resolve(self, stored: StoredAddress) -> Result<PhysicalAddress, FormatError> {
+        self.effective_base
+            .absolute(stored)
+            .map(PhysicalAddress::new)
     }
 
     /// Returns the stored address corresponding to a physical position in this image.
@@ -138,12 +150,45 @@ impl AddressContext {
 mod tests {
     use rstest::rstest;
 
+    use super::AddressContext;
     use super::BaseAddress;
     use super::BaseAddressExt;
     use super::FormatError;
     use super::OpenedImageContext;
     use super::StoredAddress;
     use super::StoredAddressExt;
+
+    #[rstest]
+    #[case::plain(0, 0, 96, 96)]
+    #[case::userblock(512, 512, 96, 608)]
+    #[case::forward_relocation(512, 1024, 96, 1120)]
+    #[case::backward_relocation(512, 0, 96, 96)]
+    fn resolution_uses_the_effective_base_once(
+        #[case] encoded_base: u64,
+        #[case] signature: u64,
+        #[case] stored: u64,
+        #[case] expected: u64,
+    ) {
+        let context =
+            OpenedImageContext::reconcile(BaseAddress::new(encoded_base), 4096, signature)
+                .unwrap()
+                .addresses();
+        let physical = context.resolve(StoredAddress::new(stored)).unwrap();
+        assert_eq!(physical.get(), expected);
+        assert_eq!(context.relative(physical.get()).unwrap().get(), stored);
+    }
+
+    #[test]
+    fn resolution_rejects_physical_address_overflow() {
+        let context = AddressContext::from_effective_base(BaseAddress::new(512));
+        assert_eq!(
+            context.resolve(StoredAddress::new(u64::MAX)).unwrap_err(),
+            FormatError::OffsetOverflow {
+                offset: u64::MAX,
+                length: 512
+            }
+        );
+    }
 
     #[rstest]
     #[case::short(4_096, 4_095)]

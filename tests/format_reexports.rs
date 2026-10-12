@@ -5,6 +5,44 @@ use hdf5_pure::Datatype;
 use hdf5_pure::FormatError;
 use hdf5_pure::MaxExtent;
 
+use hdf5_pure_core::__private::FileRange;
+use hdf5_pure_core::__private::FileRegion;
+use hdf5_pure_core::__private::PhysicalAddress;
+
+#[test]
+fn file_region_failures_use_the_public_error() {
+    let range = FileRange::new(PhysicalAddress::new(u64::MAX - 4), 4).unwrap();
+    let mismatch: FormatError = FileRegion::new(range, &[1, 2]).unwrap_err();
+    assert_eq!(
+        mismatch,
+        FormatError::FileRegionLengthMismatch {
+            range_length: 4,
+            bytes_length: 2,
+        }
+    );
+    assert_eq!(
+        mismatch.to_string(),
+        "file region length is 4 bytes, supplied buffer has 2 bytes"
+    );
+    let region = FileRegion::new(range, &[1, 2, 3, 4]).unwrap();
+    let required = FileRange::new(PhysicalAddress::new(u64::MAX - 5), 2).unwrap();
+    let insufficient: FormatError = region.subregion(required).unwrap_err();
+    assert_eq!(
+        insufficient,
+        FormatError::InsufficientRegion {
+            required_start: u64::MAX - 5,
+            required_length: 2,
+            provided_start: u64::MAX - 4,
+            provided_length: 4,
+        }
+    );
+    assert_eq!(
+        insufficient.to_string(),
+        "required file range at 18446744073709551610 with length 2 is outside supplied region \
+         at 18446744073709551611 with length 4"
+    );
+}
+
 #[test]
 fn core_types_keep_their_original_paths() {
     let _: Option<Datatype> = None::<hdf5_pure_core::Datatype>;

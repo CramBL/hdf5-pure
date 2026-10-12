@@ -8,6 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- `FormatError` distinguishes a supplied region whose byte count differs from its declared length from one that does not contain a required physical range. These diagnostics apply to internal metadata region operations ([#745](https://github.com/CramBL/hdf5-pure/pull/745)).
 - `StoredAddress` is a supported public type for inspecting base-relative metadata addresses. Its constructors are outside the supported API ([#732](https://github.com/CramBL/hdf5-pure/pull/732)).
 - Fractal-heap storage ownership enumeration accounts for heap headers, managed direct and indirect blocks, huge-object version 2 B-tree metadata, and separately allocated huge-object payloads. Filtered heaps and heaps with managed free-space-manager metadata are rejected when complete ownership cannot be proven.
 - `Dataset::chunks` and dataset reads support version 2 B-tree chunk indexes with client types 10 and 11. Creating or mutating those indexes remains unsupported ([#718](https://github.com/CramBL/hdf5-pure/pull/718)).
