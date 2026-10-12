@@ -1576,6 +1576,125 @@ fn a_paged_tail_conserves_free_space_across_layouts() {
     }
 }
 
+#[test]
+fn a_reused_flat_manager_tail_preserves_its_spare_allocation_across_reopen() {
+    const FILLER: usize = 18;
+
+    let path = temp::temp_path("hdf5_pure_fs_flat_tail_allocated_suffix.h5");
+    let mut builder = FileBuilder::new();
+    builder
+        .create_dataset("seed")
+        .with_i32_data(&(0..100 + FILLER as i32).collect::<Vec<i32>>());
+    for (index, len) in [256usize, 37, 91].into_iter().enumerate() {
+        builder
+            .create_dataset(&format!("scratch{index}"))
+            .with_i32_data(&vec![7i32; len + FILLER]);
+        builder
+            .create_dataset(&format!("keep{index}"))
+            .with_i32_data(&[9i32; 4]);
+    }
+    builder.with_file_space_strategy(FileSpaceStrategy::FsmAggr, true, 1);
+    builder.write(&path).unwrap();
+
+    let open = || {
+        File::open_rw_with_options(
+            &path,
+            FileAccessProperties::new().with_sync_policy(SyncPolicy::OnClose),
+        )
+        .unwrap()
+    };
+
+    // With filler 18, the writer reserves spare section-list capacity during attribute edits.
+    for index in 0..3 {
+        let file = open();
+        file.root().delete(&format!("scratch{index}")).unwrap();
+        file.commit().unwrap();
+        file.close().unwrap();
+    }
+
+    let mut spare_tail = None;
+    for generation in 0..6 {
+        let file = open();
+        file.root()
+            .set_attr("n", AttrValue::I64(generation))
+            .unwrap();
+        file.commit().unwrap();
+        let ownership = file_space::assert_exact_space_ownership(&file);
+        let physical_size = std::fs::metadata(&path).unwrap().len();
+        file.close().unwrap();
+        let spare = file_space::serialized_manager_padding(&path);
+        if spare > 0 {
+            assert!(
+                ownership.free_space_manager_bytes > spare,
+                "the padding must be part of a larger manager allocation"
+            );
+            spare_tail = Some((spare, physical_size));
+            break;
+        }
+    }
+    let (_, size_with_spare_tail) = spare_tail
+        .expect("filler 18 must produce a reused flat tail with serialized section-list padding");
+
+    assert_eq!(
+        std::fs::metadata(&path).unwrap().len(),
+        size_with_spare_tail,
+        "closing the writer must preserve the complete tail allocation"
+    );
+    let reader = File::open(&path).unwrap();
+    let persisted_free: u64 = reader
+        .persisted_free_space()
+        .unwrap()
+        .iter()
+        .map(|&(_, len)| len)
+        .sum();
+    drop(reader);
+
+    let reopened = open();
+    let recovered = reopened.space_accounting().unwrap();
+    assert_eq!(
+        recovered.reusable_free_bytes, persisted_free,
+        "reopen must recover the same reusable free-space total"
+    );
+    let ownership = file_space::assert_exact_space_ownership(&reopened);
+    assert_eq!(ownership.unclassified_bytes, 0);
+
+    reopened
+        .root()
+        .set_attr("n", AttrValue::I64(10_000))
+        .unwrap();
+    reopened.commit().unwrap();
+    let ownership = file_space::assert_exact_space_ownership(&reopened);
+    assert_eq!(ownership.unclassified_bytes, 0);
+    assert!(
+        std::fs::metadata(&path).unwrap().len() <= size_with_spare_tail,
+        "rewriting the recovered manager tail should reuse its complete previous allocation"
+    );
+    reopened.close().unwrap();
+
+    file_space::assert_eof_matches_physical_size(&path);
+    let final_reader = File::open(&path).unwrap();
+    assert_eq!(
+        final_reader.dataset("seed").unwrap().read_i32().unwrap(),
+        (0..100 + FILLER as i32).collect::<Vec<i32>>()
+    );
+    for index in 0..3 {
+        assert_eq!(
+            final_reader
+                .dataset(&format!("keep{index}"))
+                .unwrap()
+                .read_i32()
+                .unwrap(),
+            vec![9, 9, 9, 9]
+        );
+        let path = format!("scratch{index}");
+        let err = final_reader.dataset(&path).unwrap_err();
+        let Error::Format(FormatError::PathNotFound(missing)) = &err else {
+            panic!("expected PathNotFound, got {err:?}");
+        };
+        assert_eq!(missing, &path);
+    }
+}
+
 /// A **non-paged** persisting file's commit tail — the rewritten extension and
 /// its one `FSHD`/`FSSE` pair — is placed in space an earlier commit freed, the
 /// same way the paged tail above is (issue #358).

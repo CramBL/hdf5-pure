@@ -381,6 +381,68 @@ pub fn serialize_free_space_manager(
     fsse_addr: StoredAddress,
     class_id: u8,
 ) -> Result<(Vec<u8>, Vec<u8>), FormatError> {
+    serialize_free_space_manager_with_allocation(
+        widths, sections, fshd_addr, fsse_addr, class_id, None,
+    )
+}
+
+/// Serializes a free-space manager with a separately specified section-list allocation.
+///
+/// Passing `None` serializes the shortest section list for `sections`. Passing `Some` reserves
+/// that many bytes in the returned section list, with zero padding between the section records
+/// and its trailing checksum. The header stores the complete returned length in both its used
+/// and allocated length fields.
+///
+/// The version 0 header and section list are defined in "Free-space Index" of the [format
+/// specification, version 4.0][spec].
+///
+/// # Examples
+///
+/// ```
+/// use hdf5_pure_core::StoredAddress;
+/// use hdf5_pure_core::__private::StoredAddressExt;
+/// use hdf5_pure_format::__private as format;
+/// use hdf5_pure_format::__private::FormatWidths;
+/// use hdf5_pure_format::__private::FreeSection;
+/// use hdf5_pure_format::__private::FreeSpaceManagerHeader;
+///
+/// let widths = FormatWidths::from_sizes(8, 8)?;
+/// let sections = [FreeSection { addr: StoredAddress::new(256), size: 32 }];
+/// let fshd_addr = StoredAddress::new(512);
+/// let fsse_addr = StoredAddress::new(594);
+/// let (header_bytes, section_list) = format::serialize_free_space_manager_with_allocation(
+///     widths, &sections, fshd_addr, fsse_addr, format::SECTION_CLASS_SIMPLE, None,
+/// )?;
+/// let used = FreeSpaceManagerHeader::parse(widths, &header_bytes)?.section_list_used();
+/// let allocated = used + 64;
+/// let (header_bytes, allocated_section_list) =
+///     format::serialize_free_space_manager_with_allocation(
+///         widths, &sections, fshd_addr, fsse_addr, format::SECTION_CLASS_SIMPLE, Some(allocated),
+///     )?;
+/// let header = FreeSpaceManagerHeader::parse(widths, &header_bytes)?;
+/// assert_eq!(allocated_section_list.len() as u64, allocated);
+/// assert!(allocated_section_list.len() > section_list.len());
+/// assert_eq!(header.section_list_used(), allocated);
+/// assert_eq!(header.section_list_allocated(), allocated);
+/// # Ok::<(), hdf5_pure_format::FormatError>(())
+/// ```
+///
+/// # Errors
+///
+/// Returns [`FormatError::InvalidFreeSpaceManager`] if `section_list_allocated` is shorter than
+/// the shortest serialized section list, [`FormatError::LengthTooLarge`] if it exceeds the length
+/// width of `widths`, and [`FormatError::ValueTooLargeForPlatform`] if the allocation length does
+/// not fit a [`usize`]. Other failures are the errors of [`serialize_free_space_manager`].
+///
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsec_fmt4_infra_freespaceindex
+pub fn serialize_free_space_manager_with_allocation(
+    widths: FormatWidths,
+    sections: &[FreeSection],
+    fshd_addr: StoredAddress,
+    fsse_addr: StoredAddress,
+    class_id: u8,
+    section_list_allocated: Option<u64>,
+) -> Result<(Vec<u8>, Vec<u8>), FormatError> {
     let max_section_size = written_max_section_size(widths.lengths);
     let limit = 1 << max_section_size.ilog2();
     if let Some(section) = sections.iter().find(|s| s.size >= limit) {
@@ -391,12 +453,34 @@ pub fn serialize_free_space_manager(
             widths.lengths.get()
         )));
     }
-    let fsse = SectionFields::written(widths, sections.len()).encode_list(
+    let mut fsse = SectionFields::written(widths, sections.len()).encode_list(
         widths.offsets,
         fshd_addr,
         &size_sets(sections),
         class_id,
     )?;
+    let section_list_used = fsse.len().to_u64();
+    let section_list_allocated = section_list_allocated.unwrap_or(section_list_used);
+    if section_list_allocated < section_list_used {
+        return Err(FormatError::InvalidFreeSpaceManager(format!(
+            "the section list uses {section_list_used} bytes, more than the \
+             {section_list_allocated} bytes allocated to it"
+        )));
+    }
+    if !widths.lengths.holds(section_list_allocated) {
+        return Err(FormatError::LengthTooLarge {
+            length: section_list_allocated,
+            length_size: widths.lengths.get(),
+        });
+    }
+    if section_list_allocated > section_list_used {
+        // H5FS__sinfo_unlock in H5FSsection.c, HDF5 2.2.0, requires equal used and allocated
+        // lengths. H5FS__cache_sinfo_serialize in H5FScache.c puts padding before the checksum.
+        fsse.truncate(fsse.len() - CHECKSUM_LEN);
+        fsse.resize(section_list_allocated.to_usize()? - CHECKSUM_LEN, 0);
+        let checksum = checksum::jenkins_lookup3(&fsse);
+        fsse.extend_from_slice(&checksum.to_le_bytes());
+    }
     let header = FreeSpaceManagerHeader {
         total_space: sections
             .iter()
@@ -411,8 +495,8 @@ pub fn serialize_free_space_manager(
         addr_space_bits: AddressSpaceBits::written(widths.offsets),
         max_section_size: max_section_size.get(),
         section_list_addr: fsse_addr,
-        section_list_used: fsse.len().to_u64(),
-        section_list_allocated: fsse.len().to_u64(),
+        section_list_used: section_list_allocated,
+        section_list_allocated,
     };
     Ok((header.encode(widths)?, fsse))
 }
@@ -1465,6 +1549,114 @@ mod tests {
                 section_list_used: 17,
                 section_list_allocated: 17,
             })
+        );
+    }
+
+    #[rstest]
+    #[case::default_allocation(None, 0)]
+    #[case::exact_allocation(Some(0), 0)]
+    #[case::spare_allocation(Some(9), 9)]
+    fn serialization_records_the_requested_allocation(
+        #[case] extra: Option<u64>,
+        #[case] expected_extra: u64,
+    ) {
+        let widths = widths(8, 8);
+        let sections = [FreeSection {
+            addr: StoredAddress::new(4096),
+            size: 512,
+        }];
+        let (_, prefix) = serialize_free_space_manager(
+            widths,
+            &sections,
+            StoredAddress::new(1000),
+            StoredAddress::new(1100),
+            SECTION_CLASS_SIMPLE,
+        )
+        .unwrap();
+        let used = prefix.len() as u64;
+        let (header, list) = serialize_free_space_manager_with_allocation(
+            widths,
+            &sections,
+            StoredAddress::new(1000),
+            StoredAddress::new(1100),
+            SECTION_CLASS_SIMPLE,
+            extra.map(|extra| used + extra),
+        )
+        .unwrap();
+        let header = FreeSpaceManagerHeader::parse(widths, &header).unwrap();
+        assert_eq!(header.section_list_used(), used + expected_extra);
+        assert_eq!(header.section_list_allocated(), used + expected_extra);
+        assert_eq!(list.len() as u64, used + expected_extra);
+        let records_end = prefix.len() - CHECKSUM_LEN;
+        assert_eq!(&list[..records_end], &prefix[..records_end]);
+        assert!(
+            list[records_end..list.len() - CHECKSUM_LEN]
+                .iter()
+                .all(|&byte| byte == 0)
+        );
+        assert_eq!(
+            parse_section_info(widths, &list, StoredAddress::new(1000), &header).unwrap(),
+            sections
+        );
+    }
+
+    #[test]
+    fn serialization_rejects_an_allocation_shorter_than_the_section_list() {
+        let widths = widths(8, 8);
+        let sections = [FreeSection {
+            addr: StoredAddress::new(4096),
+            size: 512,
+        }];
+        let (_, list) = serialize_free_space_manager(
+            widths,
+            &sections,
+            StoredAddress::new(1000),
+            StoredAddress::new(1100),
+            SECTION_CLASS_SIMPLE,
+        )
+        .unwrap();
+        let used = list.len() as u64;
+        let allocated = used - 1;
+        assert_eq!(
+            serialize_free_space_manager_with_allocation(
+                widths,
+                &sections,
+                StoredAddress::new(1000),
+                StoredAddress::new(1100),
+                SECTION_CLASS_SIMPLE,
+                Some(allocated),
+            )
+            .unwrap_err(),
+            FormatError::InvalidFreeSpaceManager(format!(
+                "the section list uses {used} bytes, more than the {allocated} bytes allocated to it"
+            ))
+        );
+    }
+
+    #[rstest]
+    #[case::two_byte_lengths(2, 1 << 16)]
+    #[case::four_byte_lengths(4, 1 << 32)]
+    fn serialization_rejects_an_allocation_outside_the_length_width(
+        #[case] length_size: u8,
+        #[case] allocated: u64,
+    ) {
+        assert_eq!(
+            serialize_free_space_manager_with_allocation(
+                widths(8, length_size),
+                &[FreeSection {
+                    addr: StoredAddress::new(4096),
+                    size: 512,
+                }],
+                StoredAddress::new(1000),
+                StoredAddress::new(1100),
+                SECTION_CLASS_SIMPLE,
+                Some(allocated),
+            )
+            .unwrap_err(),
+            FormatError::LengthTooLarge {
+                length: allocated,
+                length_size,
+            }
         );
     }
 
