@@ -2042,6 +2042,8 @@ pub struct SpaceOwnership {
     pub physical_size: u64,
     /// The end-of-file position stored in the superblock.
     pub logical_size: u64,
+    /// The userblock, from byte 0 to the superblock, or empty for a file without one.
+    pub userblock_space: Vec<(u64, u64)>,
     /// The dataset payload allocations stored outside object headers in this file.
     pub live_raw_space: Vec<(u64, u64)>,
     /// The identified object headers, indexes, heaps, and file metadata.

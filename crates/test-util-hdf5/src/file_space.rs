@@ -156,6 +156,8 @@ pub struct SpaceOwnershipSummary {
     pub physical_size: u64,
     /// The end-of-file position stored in the superblock.
     pub logical_size: u64,
+    /// The length of the userblock, or zero for a file without one.
+    pub userblock_bytes: u64,
     /// The total length of dataset payload allocations stored outside object headers.
     pub live_raw_bytes: u64,
     /// The total length of identified object headers, indexes, heaps, and file metadata.
@@ -197,6 +199,7 @@ pub fn assert_exact_space_ownership(file: &File) -> SpaceOwnershipSummary {
     let SpaceOwnership {
         physical_size,
         logical_size,
+        userblock_space,
         live_raw_space,
         live_metadata_space,
         free_space_manager_space,
@@ -210,6 +213,7 @@ pub fn assert_exact_space_ownership(file: &File) -> SpaceOwnershipSummary {
     let summary = SpaceOwnershipSummary {
         physical_size,
         logical_size,
+        userblock_bytes: extent_bytes(&userblock_space),
         live_raw_bytes: extent_bytes(&live_raw_space),
         live_metadata_bytes: extent_bytes(&live_metadata_space),
         free_space_manager_bytes: extent_bytes(&free_space_manager_space),
@@ -233,7 +237,8 @@ pub fn assert_exact_space_ownership(file: &File) -> SpaceOwnershipSummary {
     );
     assert_eq!(summary.logical_size, summary.physical_size);
     assert_eq!(
-        summary.live_raw_bytes
+        summary.userblock_bytes
+            + summary.live_raw_bytes
             + summary.live_metadata_bytes
             + summary.free_space_manager_bytes
             + summary.reusable_free_bytes
@@ -249,6 +254,7 @@ fn assert_ownership_extents_disjoint(ownership: &SpaceOwnership) {
     let SpaceOwnership {
         physical_size,
         logical_size: _,
+        userblock_space,
         live_raw_space,
         live_metadata_space,
         free_space_manager_space,
@@ -257,8 +263,9 @@ fn assert_ownership_extents_disjoint(ownership: &SpaceOwnership) {
         analysis_complete: _,
         trailing_slack_space,
     } = ownership;
-    let mut extents = live_raw_space
+    let mut extents = userblock_space
         .iter()
+        .chain(live_raw_space)
         .chain(live_metadata_space)
         .chain(free_space_manager_space)
         .chain(reusable_free_space)
