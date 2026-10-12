@@ -12,7 +12,15 @@
 //! signature, failing with `InvalidFractalHeapSignature`. These groups are read
 //! through both the buffered and the streaming reader.
 
+use std::collections::BTreeSet;
+
 use hdf5_pure::File;
+use hdf5_pure_core::__private::{BaseAddressExt, FileRange, FileRegion, PhysicalAddress};
+use hdf5_pure_core::{BaseAddress, StoredAddress};
+use hdf5_pure_format::__private::{
+    FractalHeapBlock, FractalHeapBlockLayout, FractalHeapHeaderLocator, LengthWidth, OffsetWidth,
+};
+use rstest::rstest;
 use tempfile::tempdir;
 
 /// Write a group of `n` single-i32 datasets `g/d{i}` with the latest format, so
@@ -68,4 +76,146 @@ fn reads_c_written_dense_link_groups_across_sizes() {
             assert_eq!(v, vec![i as i32], "streaming n={n} d{i}");
         }
     }
+}
+
+#[rstest]
+#[case::direct(16, 8, 0, false, 0, false)]
+#[case::indirect(150, 8, 512, false, 1, false)]
+#[case::nested(800, 1024, 0, false, 2, false)]
+#[case::attributes(32, 8, 512, true, 0, false)]
+#[case::huge_only(16, 70_000, 0, false, 0, true)]
+fn caller_supplied_regions_parse_c_written_heap_blocks(
+    #[case] count: usize,
+    #[case] name_len: usize,
+    #[case] userblock: u64,
+    #[case] attributes: bool,
+    #[case] minimum_indirect: usize,
+    #[case] huge_only: bool,
+) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("blocks.h5");
+    let file = hdf5::FileBuilder::new()
+        .with_fapl(|properties| properties.libver_latest())
+        .with_fcpl(|properties| properties.userblock(userblock))
+        .create(&path)
+        .unwrap();
+    let group = file.create_group("g").unwrap();
+    for index in 0..count {
+        let prefix = format!("d{index}_");
+        let name = format!(
+            "{prefix}{}",
+            "x".repeat(name_len.saturating_sub(prefix.len()))
+        );
+        if attributes {
+            group
+                .new_attr::<i32>()
+                .shape(())
+                .create(name.as_str())
+                .unwrap()
+                .write_scalar(&i32::try_from(index).unwrap())
+                .unwrap();
+        } else {
+            group
+                .new_dataset::<i32>()
+                .shape(())
+                .create(name.as_str())
+                .unwrap()
+                .write_scalar(&i32::try_from(index).unwrap())
+                .unwrap();
+        }
+    }
+    drop(group);
+    file.close().unwrap();
+    let bytes = std::fs::read(&path).unwrap();
+    let image = FileRegion::new(
+        FileRange::new(PhysicalAddress::new(0), bytes.len() as u64).unwrap(),
+        &bytes,
+    )
+    .unwrap();
+    let positions = test_util::fractal_heap::header_offsets(&bytes);
+    assert_eq!(positions.len(), 1);
+    let header_at = positions[0] as u64;
+    let base = BaseAddress::new(userblock);
+    let locator = FractalHeapHeaderLocator::new(
+        PhysicalAddress::new(header_at),
+        OffsetWidth::Eight,
+        LengthWidth::Eight,
+    );
+    let header_ref = locator
+        .parse(image.subregion(locator.parse_range().unwrap()).unwrap())
+        .unwrap();
+    let header = header_ref
+        .parse(image.subregion(header_ref.parse_range()).unwrap())
+        .unwrap();
+    let heap = FractalHeapBlockLayout::new(
+        &header,
+        OffsetWidth::Eight,
+        LengthWidth::Eight,
+        base.relative(header_at).unwrap(),
+    )
+    .unwrap();
+    let mut pending = heap.root().unwrap().into_iter().collect::<Vec<_>>();
+    let mut direct = Vec::new();
+    let mut indirect = Vec::new();
+    let mut visited = BTreeSet::new();
+    while let Some(block) = pending.pop() {
+        match block {
+            FractalHeapBlock::Direct(block) => {
+                assert!(visited.insert(block.address()), "duplicate managed block");
+                let reference = block
+                    .at(PhysicalAddress::new(
+                        base.absolute(block.address()).unwrap(),
+                    ))
+                    .unwrap();
+                let region = image.subregion(reference.parse_range()).unwrap();
+                let view = reference.parse(region).unwrap();
+                assert_eq!(view.bytes().len() as u64, block.decoded_size());
+                assert!(!view.data().is_empty());
+                reference
+                    .parse_prefix(image.subregion(reference.prefix_range().unwrap()).unwrap())
+                    .unwrap();
+                direct.push((block.address(), reference.range().length()));
+            }
+            FractalHeapBlock::Indirect(block) => {
+                assert!(visited.insert(block.address()), "duplicate managed block");
+                let reference = block
+                    .at(PhysicalAddress::new(
+                        base.absolute(block.address()).unwrap(),
+                    ))
+                    .unwrap();
+                let view = reference
+                    .parse(image.subregion(reference.parse_range()).unwrap())
+                    .unwrap();
+                pending.extend(view.children().collect::<Result<Vec<_>, _>>().unwrap());
+                indirect.push(block.address());
+            }
+        }
+    }
+    assert_eq!(
+        direct.iter().map(|(_, length)| length).sum::<u64>(),
+        header.allocated_managed_space
+    );
+    assert!(
+        indirect.len() >= minimum_indirect,
+        "indirect count: {}",
+        indirect.len()
+    );
+    if huge_only {
+        assert_eq!(heap.root().unwrap(), None);
+        assert_eq!(header.huge_objects_count, count as u64);
+        assert_eq!(direct, Vec::<(StoredAddress, u64)>::new());
+    } else {
+        assert!(!direct.is_empty());
+        assert_eq!(header.managed_objects_count, count as u64);
+    }
+    let reopened = hdf5::File::open(&path).unwrap();
+    let group = reopened.group("g").unwrap();
+    assert_eq!(
+        if attributes {
+            group.attr_names().unwrap().len()
+        } else {
+            group.member_names().unwrap().len()
+        },
+        count
+    );
 }

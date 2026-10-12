@@ -286,6 +286,22 @@ pub enum FormatError {
     },
     /// Invalid filter pipeline version.
     InvalidFilterPipelineVersion(u8),
+    /// A fractal-heap block's stored offset differs from its position in the doubling table.
+    InvalidFractalHeapBlockOffset {
+        /// The block's expected offset in the heap's managed address space, in bytes.
+        expected: u64,
+        /// The block offset read from its prefix, in bytes.
+        actual: u64,
+    },
+    /// A fractal-heap block's header address differs from the expected heap owner.
+    InvalidFractalHeapBlockOwner {
+        /// The owning heap header's base-relative address.
+        expected: u64,
+        /// The heap header's base-relative address read from the block prefix.
+        actual: u64,
+    },
+    /// A fractal heap's doubling table, block extent, or filter metadata is invalid.
+    InvalidFractalHeapGeometry,
     /// A supplied heap ID has a different length from the heap header's declared ID length.
     InvalidFractalHeapIdLength {
         /// The declared heap ID length in bytes.
@@ -906,6 +922,21 @@ impl fmt::Display for FormatError {
             }
             Self::InvalidBTreeV2Version(v) => {
                 write!(f, "invalid B-tree v2 version: {v}")
+            }
+            Self::InvalidFractalHeapBlockOffset { expected, actual } => {
+                write!(
+                    f,
+                    "invalid fractal heap block offset: expected {expected}, got {actual}"
+                )
+            }
+            Self::InvalidFractalHeapBlockOwner { expected, actual } => {
+                write!(
+                    f,
+                    "invalid fractal heap block owner: expected {expected}, got {actual}"
+                )
+            }
+            Self::InvalidFractalHeapGeometry => {
+                write!(f, "invalid fractal heap geometry")
             }
             Self::InvalidFractalHeapIdLength { expected, actual } => {
                 write!(
