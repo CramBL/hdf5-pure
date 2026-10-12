@@ -53,6 +53,40 @@ pub fn verify_trailing(block: &[u8]) -> Result<(), crate::error::FormatError> {
     }
 }
 
+/// Checks an embedded checksum field.
+///
+/// With the `checksum` feature, hashes the whole block with the checksum bytes zeroed and
+/// compares the result with the stored checksum.
+///
+/// The stored checksum field is required even when the `checksum` feature is disabled.
+///
+/// # Errors
+///
+/// Returns [`FormatError::UnexpectedEof`](crate::FormatError::UnexpectedEof) if the checksum
+/// field is incomplete, or [`FormatError::ChecksumMismatch`](crate::FormatError::ChecksumMismatch)
+/// if checksum validation is enabled and the stored checksum differs from the computed one.
+pub(crate) fn verify_zeroed(
+    block: &[u8],
+    checksum_at: usize,
+) -> Result<(), crate::error::FormatError> {
+    let stored = crate::bytes::Fields::new(block, checksum_at).u32()?;
+    #[cfg(feature = "checksum")]
+    {
+        let computed = hashlittle_zeroed::<true>(block, 0, checksum_at);
+        if stored != computed {
+            return Err(crate::error::FormatError::ChecksumMismatch {
+                expected: stored,
+                computed,
+            });
+        }
+    }
+    #[cfg(not(feature = "checksum"))]
+    {
+        let _ = stored;
+    }
+    Ok(())
+}
+
 fn rot(x: u32, k: u32) -> u32 {
     x.rotate_left(k)
 }
@@ -95,16 +129,30 @@ fn final_mix(a: &mut u32, b: &mut u32, c: &mut u32) {
     *c = c.wrapping_sub(rot(*b, 24));
 }
 
-fn read_u32_le(data: &[u8], offset: usize) -> u32 {
+fn read_u32_le<const ZERO: bool>(data: &[u8], offset: usize, zero_at: usize) -> u32 {
     u32::from_le_bytes([
-        data[offset],
-        data[offset + 1],
-        data[offset + 2],
-        data[offset + 3],
+        byte_at::<ZERO>(data, offset, zero_at),
+        byte_at::<ZERO>(data, offset + 1, zero_at),
+        byte_at::<ZERO>(data, offset + 2, zero_at),
+        byte_at::<ZERO>(data, offset + 3, zero_at),
     ])
 }
 
+fn byte_at<const ZERO: bool>(data: &[u8], offset: usize, zero_at: usize) -> u8 {
+    if ZERO && offset >= zero_at && offset - zero_at < 4 {
+        0
+    } else {
+        data[offset]
+    }
+}
+
 fn hashlittle(data: &[u8], initval: u32) -> u32 {
+    hashlittle_zeroed::<false>(data, initval, 0)
+}
+
+// `H5HF__cache_dblock_verify_chksum` in H5HFcache.c, HDF5 2.2.0, zeros the embedded
+// checksum field while hashing the entire decoded direct block.
+fn hashlittle_zeroed<const ZERO: bool>(data: &[u8], initval: u32, zero_at: usize) -> u32 {
     let length = data.len();
     #[expect(
         clippy::cast_possible_truncation,
@@ -121,9 +169,9 @@ fn hashlittle(data: &[u8], initval: u32) -> u32 {
 
     // Process 12-byte blocks
     while data.len() - offset > 12 {
-        a = a.wrapping_add(read_u32_le(data, offset));
-        b = b.wrapping_add(read_u32_le(data, offset + 4));
-        c = c.wrapping_add(read_u32_le(data, offset + 8));
+        a = a.wrapping_add(read_u32_le::<ZERO>(data, offset, zero_at));
+        b = b.wrapping_add(read_u32_le::<ZERO>(data, offset + 4, zero_at));
+        c = c.wrapping_add(read_u32_le::<ZERO>(data, offset + 8, zero_at));
         mix(&mut a, &mut b, &mut c);
         offset += 12;
     }
@@ -136,9 +184,10 @@ fn hashlittle(data: &[u8], initval: u32) -> u32 {
         return c;
     }
     let mut words = [0u32; 3];
-    for (word, chunk) in words.iter_mut().zip(tail.chunks(4)) {
-        for (i, &byte) in chunk.iter().enumerate() {
-            *word |= u32::from(byte) << (8 * i);
+    for (word_index, (word, chunk)) in words.iter_mut().zip(tail.chunks(4)).enumerate() {
+        for i in 0..chunk.len() {
+            *word |=
+                u32::from(byte_at::<ZERO>(data, offset + word_index * 4 + i, zero_at)) << (8 * i);
         }
     }
     a = a.wrapping_add(words[0]);
