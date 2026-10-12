@@ -1,4 +1,4 @@
-/// Represents a non-empty byte range in the writable file image.
+/// Represents a non-empty range of file addresses.
 ///
 /// The end is exclusive and always greater than the start, so a constructed extent cannot wrap the
 /// `u64` address space.

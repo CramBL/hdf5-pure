@@ -3292,13 +3292,16 @@ impl File {
     /// regions. It reflects committed state plus immediate in-place appends, not
     /// edits still staged for [`commit`](Self::commit).
     ///
-    /// Requires a read-write file ([`File::open_rw`]); a read-only file returns
-    /// [`Error::ReadOnly`].
+    /// # Errors
+    ///
+    /// Returns [`Error::ReadOnly`] if the file was opened read-only, such as with [`File::open`],
+    /// and [`Error::Format`] if a free region ends past [`u64::MAX`] once the base address is
+    /// added.
     pub fn space_accounting(&self) -> Result<SpaceAccounting, Error> {
         match &self.inner.backend {
             Backend::Edit(m) => {
                 let session = m.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-                Ok(session.space_accounting())
+                Ok(session.space_accounting()?)
             }
             _ => Err(Error::ReadOnly),
         }

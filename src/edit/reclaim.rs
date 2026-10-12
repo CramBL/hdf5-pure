@@ -131,7 +131,7 @@ impl WriteEngine {
             }
         }
 
-        let reusable_free_space = self.space_accounting().reusable_free_space;
+        let reusable_free_space = self.space_accounting()?.reusable_free_space;
         let mut claimed = live_raw_space
             .iter()
             .chain(&live_metadata_space)
