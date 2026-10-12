@@ -2265,7 +2265,7 @@ impl FileInner {
             Backend::InMemory(v) => BufferedResolver::new(frame(v, base)?, access, os, ls, sohm)
                 .resolve(&msg.data, msg.msg_type),
             Backend::Streaming(s) if base.is_zero() => {
-                SourceResolver::new(s.as_ref(), access, os, ls, sohm)
+                SourceResolver::new(s.as_ref(), self.addresses(), access, os, ls, sohm)
                     .resolve(&msg.data, msg.msg_type)
             }
             Backend::Streaming(s) => SourceResolver::new(
@@ -2273,6 +2273,7 @@ impl FileInner {
                     inner: s.as_ref(),
                     base,
                 },
+                self.addresses(),
                 access,
                 os,
                 ls,
@@ -2287,11 +2288,12 @@ impl FileInner {
                 },
                 |s| {
                     if base.is_zero() {
-                        SourceResolver::new(s, access, os, ls, sohm)
+                        SourceResolver::new(s, self.addresses(), access, os, ls, sohm)
                             .resolve(&msg.data, msg.msg_type)
                     } else {
                         SourceResolver::new(
                             &BaseOffsetSource { inner: s, base },
+                            self.addresses(),
                             access,
                             os,
                             ls,
@@ -2358,6 +2360,7 @@ impl FileInner {
             )?),
             Backend::Streaming(s) if base.is_zero() => Ok(extract_attributes_full_from_source(
                 s.as_ref(),
+                self.addresses(),
                 access,
                 hdr,
                 os,
@@ -2370,7 +2373,13 @@ impl FileInner {
                     base,
                 };
                 Ok(extract_attributes_full_from_source(
-                    &framed, access, hdr, os, ls, sohm,
+                    &framed,
+                    self.addresses(),
+                    access,
+                    hdr,
+                    os,
+                    ls,
+                    sohm,
                 )?)
             }
             Backend::Edit(m) => Self::with_engine(
@@ -2388,12 +2397,24 @@ impl FileInner {
                 |s| {
                     if base.is_zero() {
                         Ok(extract_attributes_full_from_source(
-                            s, access, hdr, os, ls, sohm,
+                            s,
+                            self.addresses(),
+                            access,
+                            hdr,
+                            os,
+                            ls,
+                            sohm,
                         )?)
                     } else {
                         let framed = BaseOffsetSource { inner: s, base };
                         Ok(extract_attributes_full_from_source(
-                            &framed, access, hdr, os, ls, sohm,
+                            &framed,
+                            self.addresses(),
+                            access,
+                            hdr,
+                            os,
+                            ls,
+                            sohm,
                         )?)
                     }
                 },

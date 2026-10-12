@@ -12,9 +12,12 @@ pub use hdf5_pure_format::__private::SohmLocation;
 pub use hdf5_pure_format::__private::SohmRecord;
 pub use hdf5_pure_format::__private::SohmTable;
 
+use crate::address::AddressContext;
 use crate::address::StoredAddress;
 #[cfg(test)]
 use crate::address::StoredAddressExt;
+#[cfg(test)]
+use crate::address::{BaseAddress, BaseAddressExt};
 use crate::btree_v2::{BTreeV2Header, collect_btree_v2_records_from_source};
 use crate::convert::Narrow;
 use crate::error::FormatError;
@@ -136,11 +139,14 @@ pub fn read_heap_message(
 /// Reads the body of a message identified by an eight-byte shared-message heap ID through a
 /// [`Source`].
 ///
+/// `source` is framed at the effective base in `addresses`.
+///
 /// # Errors
 ///
 /// Returns the errors of [`read_heap_message`], and the error `source` returns if a read fails.
 pub fn read_heap_message_from_source<S: Source + ?Sized>(
     source: &S,
+    addresses: AddressContext,
     table: &SohmTable,
     message_type: MessageType,
     heap_id: &[u8; FHEAP_ID_LEN],
@@ -148,9 +154,10 @@ pub fn read_heap_message_from_source<S: Source + ?Sized>(
     length_size: u8,
 ) -> Result<Vec<u8>, FormatError> {
     let (_, heap_address) = index_for_read(table, message_type)?;
-    let heap = FractalHeapHeader::parse_from_source(
-        &SourceMetadata(source),
-        heap_address.get(),
+    let heap = crate::fractal_heap::read_header_from_source(
+        source,
+        addresses,
+        heap_address,
         offset_size,
         length_size,
     )?;
@@ -323,6 +330,7 @@ mod tests {
         if streaming {
             read_heap_message_from_source(
                 &BytesSource::new(image),
+                AddressContext::from_effective_base(BaseAddress::ZERO),
                 &table,
                 MessageType::DATATYPE,
                 &id,

@@ -5,6 +5,8 @@ use alloc::format;
 use alloc::vec;
 use alloc::vec::Vec;
 
+use hdf5_pure_core::__private::{FileRange, FileRegion, PhysicalAddress};
+
 use crate::address::StoredAddress;
 use crate::address::StoredAddressExt;
 use crate::bytes;
@@ -13,7 +15,6 @@ use crate::convert::Narrow;
 use crate::error::FormatError;
 use crate::filter_pipeline::FilterPipeline;
 use crate::filter_pipeline::FilterPipelineError;
-use crate::metadata_source::MetadataSource;
 use crate::width::LengthWidth;
 use crate::width::OffsetWidth;
 
@@ -517,29 +518,6 @@ impl FractalHeapHeader {
         } else {
             avail >= offset_size as usize + length_size as usize
         }
-    }
-
-    /// Parses the fractal heap header at `address` in `source`.
-    ///
-    /// Reads the fixed prefix to compute the header length, then reads and parses the complete
-    /// header using [`parse_bytes`](Self::parse_bytes). Both reads begin at `address`.
-    ///
-    /// # Errors
-    ///
-    /// Returns the errors [`parse`](Self::parse) returns, and the error `source` returns if a read
-    /// fails.
-    pub fn parse_from_source(
-        source: &(impl MetadataSource + ?Sized),
-        address: u64,
-        offset_size: u8,
-        length_size: u8,
-    ) -> Result<FractalHeapHeader, FormatError> {
-        let offsets = OffsetWidth::try_from(offset_size)?;
-        let lengths = LengthWidth::try_from(length_size)?;
-        let prefix = source.read_metadata_at(address, FractalHeapHeaderFrame::PREFIX_LEN)?;
-        let frame = FractalHeapHeaderFrame::parse(&prefix, offsets, lengths)?;
-        let bytes = source.read_metadata_at(address, frame.encoded_len())?;
-        Self::parse_bytes(&bytes, offsets, lengths)
     }
 }
 
@@ -1058,6 +1036,157 @@ impl FractalHeapFiltering {
     }
 }
 
+/// The physical position and field widths needed to frame a version 0 fractal heap header.
+///
+/// The caller supplies the fixed prefix in a [`FileRegion`] to [`parse`](Self::parse), then
+/// supplies the complete header to the returned [`FractalHeapHeaderRef`].
+///
+/// The header is defined in "Fractal Heap" of the [format specification, version 4.0][spec].
+///
+/// # Examples
+///
+/// The caller reads each requested range before constructing its [`FileRegion`]. Here,
+/// `bytes_in_range` borrows those bytes from an in-memory image.
+///
+/// ```
+/// # use hdf5_pure_core::__private::{FileRange, FileRegion, PhysicalAddress};
+/// # use hdf5_pure_format::__private::{FractalHeapHeaderLocator, LengthWidth, OffsetWidth};
+/// # use hdf5_pure_format::FormatError;
+/// # use test_util::fractal_heap;
+/// # use test_util::widths::Widths;
+/// # let encoded = fractal_heap::Header::new(256).build(Widths::EIGHT);
+/// # let image = FileRegion::new(
+/// #     FileRange::new(PhysicalAddress::new(512), encoded.len() as u64)?,
+/// #     &encoded,
+/// # )?;
+/// # let bytes_in_range = |range| image.subregion(range).map(FileRegion::bytes);
+/// let locator = FractalHeapHeaderLocator::new(
+///     PhysicalAddress::new(512),
+///     OffsetWidth::Eight,
+///     LengthWidth::Eight,
+/// );
+/// let prefix_range = locator.parse_range()?;
+/// let prefix_bytes = bytes_in_range(prefix_range)?;
+/// let header_ref = locator.parse(FileRegion::new(prefix_range, prefix_bytes)?)?;
+///
+/// let header_range = header_ref.parse_range();
+/// let header_bytes = bytes_in_range(header_range)?;
+/// let header = header_ref.parse(FileRegion::new(header_range, header_bytes)?)?;
+/// assert_eq!(header.heap_id_length, 7);
+/// # Ok::<(), FormatError>(())
+/// ```
+///
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsec_fmt4_infra_fractalheap
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct FractalHeapHeaderLocator {
+    address: PhysicalAddress,
+    offsets: OffsetWidth,
+    lengths: LengthWidth,
+}
+
+impl FractalHeapHeaderLocator {
+    /// Creates a locator at an address resolved against the opened image's effective base.
+    ///
+    /// `offsets` and `lengths` are the superblock's "Size of Offsets" and "Size of Lengths" fields.
+    pub fn new(address: PhysicalAddress, offsets: OffsetWidth, lengths: LengthWidth) -> Self {
+        Self {
+            address,
+            offsets,
+            lengths,
+        }
+    }
+
+    /// Parses the fixed prefix to derive the complete header range.
+    ///
+    /// Bytes in `region` outside [`parse_range`](Self::parse_range) are ignored.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::InsufficientRegion`] if `region` does not contain the prefix, and
+    /// [`FormatError::OffsetOverflow`] if the prefix or complete header range exceeds [`u64::MAX`].
+    /// Returns the framing errors of [`FractalHeapHeaderFrame::parse`].
+    pub fn parse(&self, region: FileRegion<'_>) -> Result<FractalHeapHeaderRef, FormatError> {
+        let Self {
+            address,
+            offsets,
+            lengths,
+        } = *self;
+        let frame = FractalHeapHeaderFrame::parse(
+            region.subregion(self.parse_range()?)?.bytes(),
+            offsets,
+            lengths,
+        )?;
+        Ok(FractalHeapHeaderRef {
+            range: FileRange::new(address, frame.encoded_len() as u64)?,
+            offsets,
+            lengths,
+        })
+    }
+
+    /// Returns the physical range of the fixed prefix needed to frame the header.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::OffsetOverflow`] if the range end exceeds [`u64::MAX`].
+    pub fn parse_range(&self) -> Result<FileRange, FormatError> {
+        FileRange::new(self.address, FractalHeapHeaderFrame::PREFIX_LEN as u64)
+    }
+}
+
+/// The complete header range derived from a fractal heap's fixed prefix.
+///
+/// The range includes the checksum and any optional filter fields. The complete header is
+/// validated by [`parse`](Self::parse), which reads its framing fields again from the supplied
+/// [`FileRegion`].
+///
+/// See [`FractalHeapHeaderLocator`] for an example of parsing the prefix and complete header.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct FractalHeapHeaderRef {
+    range: FileRange,
+    offsets: OffsetWidth,
+    lengths: LengthWidth,
+}
+
+impl FractalHeapHeaderRef {
+    /// Parses the complete header in the reference's physical range.
+    ///
+    /// The parser reads the framing fields from the complete header and ignores bytes after
+    /// its checksum. With the `checksum` feature, it verifies the header checksum.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::InsufficientRegion`] if `region` does not contain
+    /// [`parse_range`](Self::parse_range), or if the complete header's framing fields require
+    /// more bytes than that range contains. Returns [`FormatError::OffsetOverflow`] if the
+    /// derived range end exceeds [`u64::MAX`], and the parsing errors of
+    /// [`FractalHeapHeader::parse_bytes`].
+    pub fn parse(&self, region: FileRegion<'_>) -> Result<FractalHeapHeader, FormatError> {
+        let Self {
+            range,
+            offsets,
+            lengths,
+        } = *self;
+        let bytes = region.subregion(range)?.bytes();
+        let frame = FractalHeapHeaderFrame::parse(bytes, offsets, lengths)?;
+        let required = FileRange::new(range.start(), frame.encoded_len() as u64)?;
+        FractalHeapHeader::parse_bytes(
+            FileRegion::new(range, bytes)?.subregion(required)?.bytes(),
+            offsets,
+            lengths,
+        )
+    }
+
+    /// Returns the complete physical header range derived from the prefix.
+    pub const fn range(&self) -> FileRange {
+        self.range
+    }
+
+    /// Returns the physical range required to parse the header, equal to [`range`](Self::range).
+    pub const fn parse_range(&self) -> FileRange {
+        self.range
+    }
+}
+
 /// The complete encoded length of a version 0 fractal heap header.
 ///
 /// The length includes the checksum and, for a filtered heap, the root block's filtered size
@@ -1389,7 +1518,6 @@ const FRACTAL_HEAP_CHECKSUM_LEN: usize = 4;
 
 #[cfg(test)]
 mod tests {
-    use core::cell::RefCell;
     use core::mem;
 
     use rstest::rstest;
@@ -1399,6 +1527,105 @@ mod tests {
     use crate::filter_pipeline::FilterDescription;
 
     use super::*;
+
+    #[rstest]
+    #[case::zero(0)]
+    #[case::nonzero(512)]
+    #[case::large(u64::MAX - 1024)]
+    fn header_regions_preserve_physical_positions(#[case] address: u64) {
+        let bytes = fractal_heap::Header::new(256).build(Widths::EIGHT);
+        let region = FileRegion::new(
+            FileRange::new(PhysicalAddress::new(address), bytes.len() as u64).unwrap(),
+            &bytes,
+        )
+        .unwrap();
+        let locator = FractalHeapHeaderLocator::new(
+            PhysicalAddress::new(address),
+            OffsetWidth::Eight,
+            LengthWidth::Eight,
+        );
+        assert_eq!(
+            locator.parse_range().unwrap(),
+            FileRange::new(
+                PhysicalAddress::new(address),
+                FractalHeapHeaderFrame::PREFIX_LEN as u64
+            )
+            .unwrap()
+        );
+        let header_ref = locator.parse(region).unwrap();
+        assert_eq!(header_ref.range(), region.range());
+        assert_eq!(header_ref.parse_range(), region.range());
+        assert_eq!(header_ref.parse(region).unwrap(), unfiltered_header());
+    }
+
+    #[rstest]
+    #[case::short(512, 8)]
+    #[case::before(511, 9)]
+    #[case::after(513, 9)]
+    fn a_header_locator_requires_its_physical_prefix(
+        #[case] provided_start: u64,
+        #[case] provided_length: u64,
+    ) {
+        let bytes = header_prefix(0);
+        let region = FileRegion::new(
+            FileRange::new(PhysicalAddress::new(provided_start), provided_length).unwrap(),
+            &bytes[..usize::try_from(provided_length).unwrap()],
+        )
+        .unwrap();
+        let locator = FractalHeapHeaderLocator::new(
+            PhysicalAddress::new(512),
+            OffsetWidth::Eight,
+            LengthWidth::Eight,
+        );
+        assert_eq!(
+            locator.parse(region).unwrap_err(),
+            FormatError::InsufficientRegion {
+                required_start: 512,
+                required_length: FractalHeapHeaderFrame::PREFIX_LEN as u64,
+                provided_start,
+                provided_length,
+            }
+        );
+    }
+
+    #[test]
+    fn a_header_locator_rejects_an_overflowing_prefix_range() {
+        let locator = FractalHeapHeaderLocator::new(
+            PhysicalAddress::new(u64::MAX),
+            OffsetWidth::Eight,
+            LengthWidth::Eight,
+        );
+        assert_eq!(
+            locator.parse_range().unwrap_err(),
+            FormatError::OffsetOverflow {
+                offset: u64::MAX,
+                length: FractalHeapHeaderFrame::PREFIX_LEN as u64,
+            }
+        );
+    }
+
+    #[test]
+    fn a_header_locator_rejects_an_overflowing_complete_range() {
+        let bytes = header_prefix(0);
+        let address = u64::MAX - FractalHeapHeaderFrame::PREFIX_LEN as u64;
+        let region = FileRegion::new(
+            FileRange::new(PhysicalAddress::new(address), bytes.len() as u64).unwrap(),
+            &bytes,
+        )
+        .unwrap();
+        let locator = FractalHeapHeaderLocator::new(
+            PhysicalAddress::new(address),
+            OffsetWidth::Eight,
+            LengthWidth::Eight,
+        );
+        assert_eq!(
+            locator.parse(region).unwrap_err(),
+            FormatError::OffsetOverflow {
+                offset: address,
+                length: 146
+            }
+        );
+    }
 
     #[rstest]
     #[case::two_two(OffsetWidth::Two, LengthWidth::Two, 56, 62)]
@@ -1535,19 +1762,15 @@ mod tests {
         let parsed = FractalHeapHeader::parse_bytes(&bytes, offsets, lengths).unwrap();
         assert_eq!(parsed.filtering, filtering);
         assert_eq!(parsed.managed_objects_count, 3);
-        let source = HeaderSource {
-            bytes: &bytes,
-            prefix: None,
-            reads: RefCell::new(Vec::new()),
-        };
-        assert_eq!(
-            FractalHeapHeader::parse_from_source(&source, 0, offsets.get(), lengths.get()),
-            Ok(parsed.clone())
-        );
-        assert_eq!(
-            *source.reads.borrow(),
-            vec![(0, FractalHeapHeaderFrame::PREFIX_LEN), (0, bytes.len())]
-        );
+        let locator = FractalHeapHeaderLocator::new(PhysicalAddress::new(0), offsets, lengths);
+        let region = FileRegion::new(
+            FileRange::new(PhysicalAddress::new(0), bytes.len() as u64).unwrap(),
+            &bytes,
+        )
+        .unwrap();
+        let header_ref = locator.parse(region).unwrap();
+        assert_eq!(header_ref.range().length(), bytes.len() as u64);
+        assert_eq!(header_ref.parse(region), Ok(parsed.clone()));
         let mut file = vec![0xFF; 13];
         file.extend_from_slice(&bytes);
         file.extend_from_slice(&[0xFF; 7]);
@@ -1556,7 +1779,22 @@ mod tests {
             Ok(parsed.clone())
         );
         assert_eq!(
-            FractalHeapHeader::parse_from_source(file.as_slice(), 13, offsets.get(), lengths.get()),
+            FractalHeapHeaderLocator::new(PhysicalAddress::new(13), offsets, lengths)
+                .parse(
+                    FileRegion::new(
+                        FileRange::new(PhysicalAddress::new(0), file.len() as u64).unwrap(),
+                        &file
+                    )
+                    .unwrap()
+                )
+                .unwrap()
+                .parse(
+                    FileRegion::new(
+                        FileRange::new(PhysicalAddress::new(0), file.len() as u64).unwrap(),
+                        &file
+                    )
+                    .unwrap()
+                ),
             Ok(parsed)
         );
     }
@@ -1566,51 +1804,52 @@ mod tests {
     #[case::unfiltered_after_filtered_prefix(false, true)]
     #[case::filtered_after_unfiltered_prefix(true, false)]
     #[case::filtered(true, true)]
-    fn source_parsing_reads_the_prefix_fields_from_the_complete_header(
+    fn header_regions_parse_prefix_fields_from_the_complete_header(
         #[case] filtered_header: bool,
         #[case] filtered_prefix: bool,
     ) {
-        let pipeline = filter_pipeline(PIPELINE_VERSION_TWO, 1)
-            .serialize()
-            .unwrap();
-        let mut builder = fractal_heap::Header::new(0x100);
+        let pipeline = filter_pipeline(PIPELINE_VERSION_TWO, 1);
+        let encoded_pipeline = pipeline.serialize().unwrap();
+        let mut builder = fractal_heap::Header::new(256);
+        let mut expected = unfiltered_header();
         if filtered_header {
-            builder = builder.filtering(91, 1, pipeline.clone());
+            builder = builder.filtering(91, 1, encoded_pipeline.clone());
+            expected.filtering = FractalHeapFiltering::Filtered {
+                root_direct_block_size: 91,
+                root_filter_mask: 1,
+                pipeline,
+            };
         }
         let mut bytes = builder.build(Widths::EIGHT);
-        let parsed = FractalHeapHeader::parse(&bytes, 0, 8, 8).unwrap();
+        let complete_length = bytes.len() as u64;
         let mut prefix = header_prefix(if filtered_prefix {
-            u16::try_from(pipeline.len()).unwrap()
+            u16::try_from(encoded_pipeline.len()).unwrap()
         } else {
             0
         });
         prefix[HEADER_VERSION_END..HEADER_ID_LENGTH_END].copy_from_slice(&u16::MAX.to_le_bytes());
-        let framed_len =
-            FractalHeapHeaderFrame::parse(&prefix, OffsetWidth::Eight, LengthWidth::Eight)
-                .unwrap()
-                .encoded_len();
-        bytes.resize(bytes.len().max(framed_len), 0xFF);
-        let source = HeaderSource {
-            bytes: &bytes,
-            prefix: Some(prefix.try_into().unwrap()),
-            reads: RefCell::new(Vec::new()),
-        };
-        let result = FractalHeapHeader::parse_from_source(&source, 0, 8, 8);
+        let address = PhysicalAddress::new(512);
+        let locator =
+            FractalHeapHeaderLocator::new(address, OffsetWidth::Eight, LengthWidth::Eight);
+        let prefix_region = FileRegion::new(locator.parse_range().unwrap(), &prefix).unwrap();
+        let header_ref = locator.parse(prefix_region).unwrap();
+        let framed_length = usize::try_from(header_ref.parse_range().length()).unwrap();
+        bytes.resize(bytes.len().max(framed_length), 0xFF);
+        let region = FileRegion::new(header_ref.parse_range(), &bytes[..framed_length]).unwrap();
+        let result = header_ref.parse(region);
         if filtered_header && !filtered_prefix {
             assert_eq!(
-                result,
-                Err(FormatError::UnexpectedEof {
-                    expected: bytes.len(),
-                    available: framed_len,
-                })
+                result.unwrap_err(),
+                FormatError::InsufficientRegion {
+                    required_start: address.get(),
+                    required_length: complete_length,
+                    provided_start: address.get(),
+                    provided_length: framed_length as u64,
+                }
             );
         } else {
-            assert_eq!(result, Ok(parsed));
+            assert_eq!(result.unwrap(), expected);
         }
-        assert_eq!(
-            *source.reads.borrow(),
-            vec![(0, FractalHeapHeaderFrame::PREFIX_LEN), (0, framed_len)]
-        );
     }
 
     #[rstest]
@@ -1650,8 +1889,13 @@ mod tests {
             Err(error.clone())
         );
         assert_eq!(
-            FractalHeapHeader::parse_from_source(bytes.as_slice(), 0, 8, 8),
-            Err(error)
+            parse_header_region(&bytes),
+            Err(FormatError::InsufficientRegion {
+                required_start: 0,
+                required_length: expected as u64,
+                provided_start: 0,
+                provided_length: available as u64,
+            })
         );
     }
 
@@ -1671,10 +1915,7 @@ mod tests {
             FractalHeapHeader::parse(&bytes, 0, 8, 8),
             Err(error.clone())
         );
-        assert_eq!(
-            FractalHeapHeader::parse_from_source(bytes.as_slice(), 0, 8, 8),
-            Err(error)
-        );
+        assert_eq!(parse_header_region(&bytes), Err(error));
     }
 
     #[cfg(feature = "checksum")]
@@ -1702,10 +1943,7 @@ mod tests {
             FractalHeapHeader::parse(&bytes, 0, 8, 8),
             Err(error.clone())
         );
-        assert_eq!(
-            FractalHeapHeader::parse_from_source(bytes.as_slice(), 0, 8, 8),
-            Err(error)
-        );
+        assert_eq!(parse_header_region(&bytes), Err(error));
     }
 
     #[test]
@@ -1741,10 +1979,7 @@ mod tests {
             FractalHeapHeader::parse(&file_data, 0, 8, 8),
             Ok(expected.clone())
         );
-        assert_eq!(
-            FractalHeapHeader::parse_from_source(file_data.as_slice(), 0, 8, 8),
-            Ok(expected)
-        );
+        assert_eq!(parse_header_region(&file_data), Ok(expected));
     }
 
     #[test]
@@ -2240,28 +2475,46 @@ mod tests {
         );
     }
 
-    struct HeaderSource<'a> {
-        bytes: &'a [u8],
-        prefix: Option<[u8; FractalHeapHeaderFrame::PREFIX_LEN]>,
-        reads: RefCell<Vec<(u64, usize)>>,
+    fn unfiltered_header() -> FractalHeapHeader {
+        FractalHeapHeader {
+            heap_id_length: 7,
+            filtering: FractalHeapFiltering::Unfiltered,
+            flags: 0,
+            max_managed_object_size: 64,
+            next_huge_object_id: 0,
+            btree_huge_objects_address: StoredAddress::new(u64::MAX),
+            free_space_in_managed_blocks: 0,
+            managed_block_free_space_manager_address: StoredAddress::new(u64::MAX),
+            managed_space: 0,
+            allocated_managed_space: 0,
+            direct_block_allocation_iterator_offset: 0,
+            managed_objects_count: 0,
+            huge_objects_size: 0,
+            huge_objects_count: 0,
+            tiny_objects_size: 0,
+            tiny_objects_count: 0,
+            table_width: 4,
+            starting_block_size: 128,
+            max_direct_block_size: 1024,
+            max_heap_size: 16,
+            start_root_rows: 2,
+            root_block_address: StoredAddress::new(256),
+            current_rows_in_root_indirect_block: 0,
+        }
     }
 
-    impl MetadataSource for HeaderSource<'_> {
-        fn len(&self) -> u64 {
-            self.bytes.len().to_u64()
-        }
-        fn read_at(&self, address: u64, bytes: &mut [u8]) -> Result<(), FormatError> {
-            self.bytes.read_at(address, bytes)
-        }
-        fn read_metadata_at(&self, address: u64, len: usize) -> Result<Vec<u8>, FormatError> {
-            self.reads.borrow_mut().push((address, len));
-            if len == FractalHeapHeaderFrame::PREFIX_LEN {
-                if let Some(prefix) = self.prefix {
-                    return Ok(prefix.to_vec());
-                }
-            }
-            self.bytes.read_metadata_at(address, len)
-        }
+    fn parse_header_region(bytes: &[u8]) -> Result<FractalHeapHeader, FormatError> {
+        let region = FileRegion::new(
+            FileRange::new(PhysicalAddress::new(0), bytes.len() as u64)?,
+            bytes,
+        )?;
+        FractalHeapHeaderLocator::new(
+            PhysicalAddress::new(0),
+            OffsetWidth::Eight,
+            LengthWidth::Eight,
+        )
+        .parse(region)?
+        .parse(region)
     }
 
     fn filter_pipeline(version: u8, client_count: usize) -> FilterPipeline {

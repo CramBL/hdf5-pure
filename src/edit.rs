@@ -205,11 +205,11 @@
 //!
 //! Reclaim is best-effort and conservative. Contiguous and chunked datasets
 //! (chunk index plus chunk data) and whole group subtrees are reclaimed. Dense attribute and dense
-//! group version 2 B-tree indexes are reclaimed when their owning storage becomes dead. Their
-//! associated fractal heaps remain dead storage. A deleted object whose other blocks cannot be
-//! enumerated exhaustively (variable-length global-heap storage, dense attribute or link fractal
-//! heaps, or an object header other than version 2) is left as dead bytes. This avoids freeing a
-//! region that may still be in use. Under-reclaiming only wastes space. Over-reclaiming could
+//! group version 2 B-tree indexes are reclaimed when their owning storage becomes dead. The editor
+//! also reclaims their fractal heaps where complete ownership is proven. Storage whose allocations
+//! cannot be enumerated exhaustively, such as a variable-length global heap collection, a filtered
+//! fractal heap, or a heap with its own free-space manager, is left as dead bytes. This avoids freeing
+//! a region that may still be in use. Under-reclaiming only wastes space. Over-reclaiming could
 //! corrupt the file.
 //!
 //! On a paged file that conservatism extends to anything whose *page type* is not
@@ -6044,7 +6044,7 @@ impl WriteEngine {
             };
             for key in &keys {
                 for (_, tree) in &nodes[key].copies {
-                    screen_copied_references(tree, &for_copied, &framed)?;
+                    screen_copied_references(tree, self.addresses, &for_copied, &framed)?;
                 }
             }
         }
@@ -12556,6 +12556,7 @@ fn read_object_attrs<S: Source + ?Sized>(
     };
     crate::attribute::extract_stored_attributes_from_source(
         &framed,
+        base,
         access_mode,
         &header,
         OFFSET_SIZE,
@@ -13584,6 +13585,7 @@ fn screen_resolved_references(
 /// (base-relative) shared-message address indexes directly.
 fn screen_copied_references(
     tree: &CopyTree,
+    addresses: AddressContext,
     invalidated: &InvalidatedAddresses,
     src: &(impl Source + ?Sized),
 ) -> Result<(), Error> {
@@ -13596,6 +13598,7 @@ fn screen_copied_references(
     // cannot clear, which is the conservative answer.
     let resolver = crate::shared_message::SourceResolver::new(
         src,
+        addresses,
         AccessMode::ReadWrite,
         OFFSET_SIZE,
         LENGTH_SIZE,
@@ -13743,7 +13746,7 @@ fn screen_copied_references(
         }
         CopyTree::Group { children, .. } => {
             for (_, _, child) in children {
-                screen_copied_references(child, invalidated, src)?;
+                screen_copied_references(child, addresses, invalidated, src)?;
             }
         }
     }
@@ -14138,6 +14141,7 @@ mod tests {
             let heap_address = attribute_heap_address(&session, addr);
             let heap = crate::fractal_heap_storage::collect_fractal_heap_storage_from_source(
                 &session.image(),
+                AddressContext::from_effective_base(BaseAddress::ZERO),
                 StoredAddress::new(heap_address),
                 OFFSET_SIZE,
                 LENGTH_SIZE,
@@ -14189,6 +14193,7 @@ mod tests {
         assert_eq!(
             crate::fractal_heap_storage::collect_fractal_heap_storage_from_source(
                 &BytesSource::new(bytes.as_slice()),
+                AddressContext::from_effective_base(BaseAddress::ZERO),
                 StoredAddress::new(heap_address),
                 OFFSET_SIZE,
                 LENGTH_SIZE,
@@ -14368,6 +14373,7 @@ mod tests {
             .expect("the dense link storage is structurally complete");
         let heap = crate::fractal_heap_storage::collect_fractal_heap_storage_from_source(
             &session.image(),
+            AddressContext::from_effective_base(BaseAddress::ZERO),
             heap_address,
             OFFSET_SIZE,
             LENGTH_SIZE,
@@ -14651,7 +14657,12 @@ mod tests {
                 region: compact_reference_region(address),
                 dense_attrs: DenseAttrSet::default(),
             };
-            let got = screen_copied_references(&tree, &invalidated, &empty);
+            let got = screen_copied_references(
+                &tree,
+                AddressContext::from_effective_base(BaseAddress::ZERO),
+                &invalidated,
+                &empty,
+            );
             assert_eq!(got.is_err(), refused, "compact element {address}: {got:?}");
         }
 
@@ -14669,7 +14680,13 @@ mod tests {
             )),
             dense_attrs: DenseAttrSet::default(),
         };
-        let err = screen_copied_references(&no_layout, &invalidated, &empty).unwrap_err();
+        let err = screen_copied_references(
+            &no_layout,
+            AddressContext::from_effective_base(BaseAddress::ZERO),
+            &invalidated,
+            &empty,
+        )
+        .unwrap_err();
         assert!(
             err.to_string().contains("could not be read to screen"),
             "got: {err}"
@@ -14699,7 +14716,13 @@ mod tests {
             dense_attrs: DenseAttrSet::default(),
         };
 
-        let err = screen_copied_references(&tree, &invalidated, &empty).unwrap_err();
+        let err = screen_copied_references(
+            &tree,
+            AddressContext::from_effective_base(BaseAddress::ZERO),
+            &invalidated,
+            &empty,
+        )
+        .unwrap_err();
         let Error::CopyScreenUnreadable { message, source } = &err else {
             panic!("expected CopyScreenUnreadable, got {err:?}");
         };
@@ -15053,7 +15076,12 @@ mod tests {
                 dense_attrs: DenseAttrSet::default(),
             };
             for (storage, tree) in [("dense", &dense), ("inline", &inline)] {
-                let got = screen_copied_references(tree, &invalidated, &empty);
+                let got = screen_copied_references(
+                    tree,
+                    AddressContext::from_effective_base(BaseAddress::ZERO),
+                    &invalidated,
+                    &empty,
+                );
                 assert_eq!(
                     got.is_err(),
                     refused,

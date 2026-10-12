@@ -8,10 +8,12 @@ use hdf5::plist::file_access::LibraryVersion;
 use hdf5_pure::Error;
 use hdf5_pure::File;
 use hdf5_pure::FormatError;
+use hdf5_pure_core::__private::{FileRange, FileRegion, PhysicalAddress};
 use hdf5_pure_format::__private::FilterDescription;
 use hdf5_pure_format::__private::FilterPipeline;
 use hdf5_pure_format::__private::FractalHeapFiltering;
 use hdf5_pure_format::__private::FractalHeapHeader;
+use hdf5_pure_format::__private::{FractalHeapHeaderLocator, LengthWidth, OffsetWidth};
 use rstest::rstest;
 use tempfile::TempDir;
 use test_util_hdf5::group_filter;
@@ -21,6 +23,7 @@ use test_util_hdf5::group_filter;
 #[case::latest(LibraryVersion::latest())]
 fn a_c_written_filtered_header_retains_the_root_fields_and_pipeline(
     #[case] bounds: LibraryVersion,
+    #[values(0, 512)] userblock: u64,
 ) {
     let dir = TempDir::new().unwrap();
     let path = dir.path().join("filtered.h5");
@@ -31,6 +34,7 @@ fn a_c_written_filtered_header_retains_the_root_fields_and_pipeline(
     assert_eq!(group_filter::set_deflate(&gcpl, 6), 0);
     let file = CFile::with_options()
         .with_fapl(|p| p.libver_bounds(bounds, bounds))
+        .with_fcpl(|p| p.userblock(userblock))
         .create(&path)
         .unwrap();
     let group = file
@@ -73,15 +77,17 @@ fn a_c_written_filtered_header_retains_the_root_fields_and_pipeline(
             }],
         }
     );
-    assert_eq!(
-        FractalHeapHeader::parse_from_source(
-            bytes.as_slice(),
-            u64::try_from(header_offset).unwrap(),
-            8,
-            8
-        ),
-        Ok(header)
+    let region = FileRegion::new(
+        FileRange::new(PhysicalAddress::new(0), bytes.len() as u64).unwrap(),
+        &bytes,
+    )
+    .unwrap();
+    let locator = FractalHeapHeaderLocator::new(
+        PhysicalAddress::new(header_offset as u64),
+        OffsetWidth::Eight,
+        LengthWidth::Eight,
     );
+    assert_eq!(locator.parse(region).unwrap().parse(region), Ok(header));
     let c_file = CFile::open(&path).unwrap();
     let mut names = c_file.group("g").unwrap().member_names().unwrap();
     names.sort();

@@ -114,6 +114,8 @@ pub use crate::fractal_heap::FractalHeapChild;
 pub use crate::fractal_heap::FractalHeapFiltering;
 pub use crate::fractal_heap::FractalHeapHeader;
 pub use crate::fractal_heap::FractalHeapHeaderFrame;
+pub use crate::fractal_heap::FractalHeapHeaderLocator;
+pub use crate::fractal_heap::FractalHeapHeaderRef;
 pub use crate::fractal_heap::FractalHeapIdKind;
 pub use crate::fractal_heap::FractalHeapIdLayout;
 pub use crate::fractal_heap::FractalHeapIdView;

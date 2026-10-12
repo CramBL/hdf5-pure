@@ -5,9 +5,11 @@
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 
+use hdf5_pure_core::__private::{FileRange, FileRegion};
 use hdf5_pure_format::__private::BTREE_V2_HUGE_OBJECT;
 use hdf5_pure_format::__private::FractalHeapChild;
 pub use hdf5_pure_format::__private::FractalHeapHeader;
+use hdf5_pure_format::__private::FractalHeapHeaderLocator;
 use hdf5_pure_format::__private::FractalHeapIdKind;
 use hdf5_pure_format::__private::FractalHeapIdView;
 use hdf5_pure_format::__private::FractalHeapLayout;
@@ -15,6 +17,7 @@ use hdf5_pure_format::__private::FractalHeapLayoutError;
 use hdf5_pure_format::__private::HugeObjectRecord;
 use hdf5_pure_format::__private::HugeObjectReference;
 
+use crate::address::AddressContext;
 use crate::address::StoredAddress;
 #[cfg(test)]
 use crate::address::StoredAddressExt;
@@ -28,6 +31,56 @@ use crate::source::Source;
 use crate::source::SourceMetadata;
 use crate::width::LengthWidth;
 use crate::width::OffsetWidth;
+
+/// Reads a fractal heap header using its prefix and complete header ranges.
+///
+/// `source` is framed at the effective base in `addresses`. The parser receives physical
+/// [`FileRegion`] coordinates, and each source read uses a base-relative offset.
+///
+/// # Errors
+///
+/// Returns [`FormatError::InvalidOffsetSize`] or [`FormatError::InvalidLengthSize`] if a field
+/// width is not 2, 4, or 8, [`FormatError::OffsetOverflow`] if an address or range end exceeds
+/// [`u64::MAX`], and the parsing errors of [`FractalHeapHeaderLocator::parse`] and
+/// [`FractalHeapHeaderRef::parse`](hdf5_pure_format::__private::FractalHeapHeaderRef::parse).
+/// Returns the source error if a read fails.
+pub(crate) fn read_header_from_source(
+    source: &(impl Source + ?Sized),
+    addresses: AddressContext,
+    address: StoredAddress,
+    offset_size: u8,
+    length_size: u8,
+) -> Result<FractalHeapHeader, FormatError> {
+    let locator = FractalHeapHeaderLocator::new(
+        addresses.resolve(address)?,
+        OffsetWidth::try_from(offset_size)?,
+        LengthWidth::try_from(length_size)?,
+    );
+    let prefix_range = locator.parse_range()?;
+    let prefix = read_header_range(source, addresses, prefix_range)?;
+    let header_ref = locator.parse(FileRegion::new(prefix_range, &prefix)?)?;
+    let range = header_ref.parse_range();
+    let bytes = read_header_range(source, addresses, range)?;
+    header_ref.parse(FileRegion::new(range, &bytes)?)
+}
+
+/// Reads a physical header range through a source framed at `addresses`' effective base.
+///
+/// # Errors
+///
+/// Returns [`FormatError::AddressBelowBase`] if the range starts below the effective base,
+/// [`FormatError::ValueTooLargeForPlatform`] if the read length exceeds [`usize::MAX`], and the
+/// source error if a read fails.
+fn read_header_range(
+    source: &(impl Source + ?Sized),
+    addresses: AddressContext,
+    range: FileRange,
+) -> Result<Vec<u8>, FormatError> {
+    source.read_metadata_at(
+        addresses.relative(range.start().get())?.get(),
+        range.length().to_usize()?,
+    )
+}
 
 /// Copy `len` bytes at `addr` out of an in-memory file image, bounds-checked.
 fn slice_object(file_data: &[u8], addr: u64, len: usize) -> Result<Vec<u8>, FormatError> {
@@ -646,20 +699,126 @@ impl<'h> HeapObjectReader<'h> {
 
 #[cfg(test)]
 mod tests {
+    use core::cell::RefCell;
     use hdf5_pure_format::__private::FilterPipeline;
     use hdf5_pure_format::__private::FractalHeapFiltering;
+    use hdf5_pure_format::__private::FractalHeapHeaderFrame;
     use hdf5_pure_format::__private::FractalHeapIdLayout;
     use rstest::rstest;
     use test_util::fractal_heap;
     use test_util::widths::Widths;
 
-    use crate::source::BytesSource;
+    use crate::address::{BaseAddress, BaseAddressExt, OpenedImageContext};
+    use crate::source::{BaseOffsetSource, BytesSource};
 
     use super::*;
 
     // "The Data Storage - Filter Pipeline Message", format specification version 4.0, defines
     // pipeline version 2.
     const PIPELINE_VERSION_TWO: u8 = 2;
+
+    #[rstest]
+    #[case::plain(0, 0)]
+    #[case::userblock(512, 512)]
+    #[case::relocated(512, 1024)]
+    #[case::relocated_back(512, 0)]
+    fn source_header_reads_use_the_effective_physical_base(
+        #[case] encoded_base: u64,
+        #[case] effective_base: u64,
+        #[values(0, 3)] root_rows: u16,
+        #[values(0, 2)] huge_objects: u64,
+    ) {
+        let mut header = FractalHeapHeader::parse_bytes(
+            &fractal_heap::Header::new(256).build(Widths::EIGHT),
+            OffsetWidth::Eight,
+            LengthWidth::Eight,
+        )
+        .unwrap();
+        header.current_rows_in_root_indirect_block = root_rows;
+        header.huge_objects_count = huge_objects;
+        header.huge_objects_size = huge_objects * 1024;
+        let bytes = header
+            .serialize(OffsetWidth::Eight, LengthWidth::Eight)
+            .unwrap();
+        let header_address = 13;
+        let mut image = vec![0xFF; usize::try_from(effective_base + header_address).unwrap()];
+        image.extend_from_slice(&bytes);
+        let source = HeaderSource {
+            bytes: &image,
+            reads: RefCell::new(Vec::new()),
+        };
+        let addresses = OpenedImageContext::reconcile(
+            BaseAddress::new(encoded_base),
+            encoded_base + header_address + bytes.len() as u64,
+            effective_base,
+        )
+        .unwrap()
+        .addresses();
+        let framed = BaseOffsetSource {
+            inner: &source,
+            base: addresses.effective_base(),
+        };
+        assert_eq!(
+            read_header_from_source(&framed, addresses, StoredAddress::new(header_address), 8, 8)
+                .unwrap(),
+            header
+        );
+        assert_eq!(
+            *source.reads.borrow(),
+            vec![
+                (
+                    effective_base + header_address,
+                    FractalHeapHeaderFrame::PREFIX_LEN
+                ),
+                (effective_base + header_address, bytes.len())
+            ]
+        );
+    }
+
+    #[rstest]
+    #[case::prefix(8, 9)]
+    #[case::header(145, 146)]
+    fn a_source_short_read_remains_a_source_error(
+        #[case] available: usize,
+        #[case] expected: usize,
+    ) {
+        let mut bytes = fractal_heap::Header::new(256).build(Widths::EIGHT);
+        bytes.truncate(available);
+        assert_eq!(
+            read_header_from_source(
+                &BytesSource::new(&bytes),
+                AddressContext::from_effective_base(BaseAddress::ZERO),
+                StoredAddress::ZERO,
+                8,
+                8
+            )
+            .unwrap_err(),
+            FormatError::UnexpectedEof {
+                expected,
+                available
+            }
+        );
+    }
+
+    struct HeaderSource<'a> {
+        bytes: &'a [u8],
+        reads: RefCell<Vec<(u64, usize)>>,
+    }
+
+    impl Source for HeaderSource<'_> {
+        fn len(&self) -> u64 {
+            self.bytes.len() as u64
+        }
+
+        fn read_at(&self, offset: u64, bytes: &mut [u8]) -> Result<(), FormatError> {
+            BytesSource::new(self.bytes).read_at(offset, bytes)
+        }
+
+        fn read_metadata_at(&self, offset: u64, length: usize) -> Result<Vec<u8>, FormatError> {
+            self.reads.borrow_mut().push((offset, length));
+            BytesSource::new(self.bytes).read_metadata_at(offset, length)
+        }
+    }
 
     #[rstest]
     #[case::tiny(vec![TINY_ID_FIRST_BYTE | 2, b'a', b'b', b'c', 0, 0, 0, 0])]
@@ -737,14 +896,27 @@ mod tests {
 
         // Header parsed from a source, then the object fetched from a source.
         let mem = BytesSource::new(&file_data);
-        let hdr_mem = FractalHeapHeader::parse_from_source(&SourceMetadata(&mem), 0, 8, 8).unwrap();
+        let hdr_mem = read_header_from_source(
+            &mem,
+            AddressContext::from_effective_base(BaseAddress::ZERO),
+            StoredAddress::ZERO,
+            8,
+            8,
+        )
+        .unwrap();
         let from_mem = HeapObjectReader::new(&hdr_mem, 8, 8)
             .read_from_source(&mem, parse_id(&hdr_mem, &id))
             .unwrap();
 
         let seek = ReadSeekSource::new(std::io::Cursor::new(file_data)).unwrap();
-        let hdr_seek =
-            FractalHeapHeader::parse_from_source(&SourceMetadata(&seek), 0, 8, 8).unwrap();
+        let hdr_seek = read_header_from_source(
+            &seek,
+            AddressContext::from_effective_base(BaseAddress::ZERO),
+            StoredAddress::ZERO,
+            8,
+            8,
+        )
+        .unwrap();
         let from_seek = HeapObjectReader::new(&hdr_seek, 8, 8)
             .read_from_source(&seek, parse_id(&hdr_seek, &id))
             .unwrap();
