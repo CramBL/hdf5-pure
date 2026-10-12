@@ -133,6 +133,7 @@ pub use crate::fractal_heap_block::FractalHeapDirectBlockView;
 pub use crate::fractal_heap_block::FractalHeapIndirectBlock;
 pub use crate::fractal_heap_block::FractalHeapIndirectBlockRef;
 pub use crate::fractal_heap_block::FractalHeapIndirectBlockView;
+pub use crate::fractal_heap_block::FractalHeapObjectRef;
 pub use crate::fractal_heap_write::ATTRIBUTE_HEAP_BLOCK_OFFSET_BYTES;
 pub use crate::fractal_heap_write::ATTRIBUTE_HEAP_MAX_DIRECT_BLOCK_SIZE;
 pub use crate::fractal_heap_write::ATTRIBUTE_HEAP_MAX_HEAP_SIZE_BITS;

@@ -361,30 +361,157 @@ impl FractalHeapDirectBlockRef<'_> {
         &self,
         region: FileRegion<'bytes>,
     ) -> Result<FractalHeapDirectBlockView<'bytes>, FormatError> {
-        if self.block.filter_mask.is_some() {
-            return Err(FormatError::UnsupportedFilteredHeapObject);
-        }
-        let block = region.subregion(self.range)?.bytes();
-        self.block
-            .heap
-            .parse_prefix(block, &DIRECT_SIGNATURE, self.block.heap_offset)?;
-        let prefix_len = self.block.heap.prefix_len();
-        let data_at = if self.block.heap.checksummed {
-            checksum::verify_zeroed(block, prefix_len)?;
-            prefix_len + CHECKSUM_LEN
+        self.parse_block(region, false)
+    }
+
+    /// Parses a complete unfiltered block with mandatory checksum validation.
+    ///
+    /// Validates the signature, version, owner, and heap offset. If the heap header requires a
+    /// checksum, validates it regardless of the `checksum` feature. Ownership and edit callers
+    /// use this operation before accepting a checksummed block.
+    ///
+    /// # Errors
+    ///
+    /// Returns the structural errors of [`Self::parse`] and [`FormatError::ChecksumMismatch`]
+    /// if the complete block's checksum differs from its stored value.
+    ///
+    /// # Examples
+    ///
+    /// See the bounded object example on [`Self::parse_object`].
+    pub fn parse_checked<'bytes>(
+        &self,
+        region: FileRegion<'bytes>,
+    ) -> Result<FractalHeapDirectBlockView<'bytes>, FormatError> {
+        self.parse_block(region, true)
+    }
+
+    /// Validates a managed object's bounds from an unfiltered block prefix.
+    ///
+    /// `heap_offset` is in the heap's managed address space. `region` must contain
+    /// [`Self::object_prefix_range`], including the checksum field when present. Validates the
+    /// signature, version, owner, and block offset, then checks that the object lies within the
+    /// block's data area. The stored checksum is available through
+    /// [`FractalHeapObjectRef::stored_checksum`]. Use [`Self::parse_checked`] with the complete
+    /// region to validate that checksum.
+    ///
+    /// # Errors
+    ///
+    /// Returns the structural errors of [`Self::parse_prefix`], [`FormatError::InsufficientRegion`]
+    /// if the checksum field is outside `region`, or [`FormatError::InvalidFractalHeapGeometry`]
+    /// if the object bounds overflow, overlap the prefix, or exceed the block.
+    ///
+    /// # Examples
+    ///
+    /// The caller can read an object's bytes after validating its block prefix and bounds.
+    /// Full-block checksum validation is a separate operation on the complete region.
+    ///
+    /// ```
+    /// # use hdf5_pure_core::__private::BaseAddressExt;
+    /// # use hdf5_pure_core::__private::FileRegion;
+    /// # use hdf5_pure_core::__private::PhysicalAddress;
+    /// # use hdf5_pure_core::BaseAddress;
+    /// # use hdf5_pure_format::__private::FRACTAL_HEAP_DIRECT_BLOCKS_CHECKSUMMED;
+    /// # use hdf5_pure_format::__private::FractalHeapBlock;
+    /// # use hdf5_pure_format::__private::FractalHeapBlockLayout;
+    /// # use hdf5_pure_format::__private::FractalHeapHeader;
+    /// # use hdf5_pure_format::__private::FractalHeapObjectRef;
+    /// # use hdf5_pure_format::__private::LengthWidth;
+    /// # use hdf5_pure_format::__private::OffsetWidth;
+    /// # use hdf5_pure_format::__private;
+    /// # use hdf5_pure_format::FormatError;
+    /// # use test_util::fractal_heap;
+    /// # use test_util::widths::Widths;
+    /// # let fixture = fractal_heap::Header::new(256);
+    /// # let encoded = fixture.build(Widths::EIGHT);
+    /// # let mut header = FractalHeapHeader::parse_bytes(&encoded, OffsetWidth::Eight, LengthWidth::Eight)?;
+    /// # header.flags = FRACTAL_HEAP_DIRECT_BLOCKS_CHECKSUMMED;
+    /// # let base = BaseAddress::new(512);
+    /// # let blocks = FractalHeapBlockLayout::new(&header, OffsetWidth::Eight, LengthWidth::Eight, base.relative(608)?)?;
+    /// # let Some(FractalHeapBlock::Direct(block)) = blocks.root()? else { panic!("expected direct fixture root") };
+    /// # let reference = block.at(PhysicalAddress::new(base.absolute(block.address())?))?;
+    /// # let mut bytes = fixture.direct_block(96, &[0; 113], Widths::EIGHT);
+    /// # let checksum_at = usize::try_from(reference.prefix_range()?.length()).unwrap();
+    /// # let checksum_width = 0u32.to_le_bytes().len();
+    /// # let object_at = checksum_at + checksum_width;
+    /// # bytes[object_at..object_at + 3].copy_from_slice(b"abc");
+    /// # let stored_checksum = __private::jenkins_lookup3(&bytes);
+    /// # let encoded_checksum = stored_checksum.to_le_bytes();
+    /// # bytes[checksum_at..checksum_at + encoded_checksum.len()].copy_from_slice(&encoded_checksum);
+    /// # let image = FileRegion::new(reference.range(), &bytes)?;
+    /// let prefix = image.subregion(reference.object_prefix_range()?)?;
+    /// let heap_offset = prefix.range().length();
+    /// let object: FractalHeapObjectRef = reference.parse_object(prefix, heap_offset, 3)?;
+    /// assert_eq!(object.block_range(), reference.range());
+    /// assert_eq!(object.stored_checksum(), Some(stored_checksum));
+    /// assert_eq!(object.parse(image.subregion(object.range())?)?, b"abc");
+    ///
+    /// let checked = reference.parse_checked(image.subregion(reference.parse_range())?)?;
+    /// assert_eq!(checked.data().get(..3), Some(&b"abc"[..]));
+    /// # let mut damaged = bytes.clone();
+    /// # *damaged.last_mut().unwrap() ^= 1;
+    /// # let damaged = FileRegion::new(reference.range(), &damaged)?;
+    /// let object = reference.parse_object(damaged.subregion(reference.object_prefix_range()?)?, heap_offset, 3)?;
+    /// assert_eq!(object.stored_checksum(), Some(stored_checksum));
+    /// let error = reference.parse_checked(damaged).unwrap_err();
+    /// let FormatError::ChecksumMismatch { expected, computed } = error else { panic!("expected checksum mismatch, got {error:?}") };
+    /// assert_eq!(expected, stored_checksum);
+    /// assert_ne!(computed, stored_checksum);
+    /// # Ok::<(), FormatError>(())
+    /// ```
+    pub fn parse_object(
+        &self,
+        region: FileRegion<'_>,
+        heap_offset: u64,
+        length: u64,
+    ) -> Result<FractalHeapObjectRef, FormatError> {
+        self.parse_prefix(region)?;
+        let prefix = region.subregion(self.object_prefix_range()?)?.bytes();
+        let stored_checksum = if self.block.heap.checksummed {
+            Some(bytes::Fields::new(prefix, self.block.heap.prefix_len()).u32()?)
         } else {
-            prefix_len
+            None
         };
-        let data = block
-            .get(data_at..)
+        let local = heap_offset
+            .checked_sub(self.block.heap_offset)
             .ok_or(FormatError::InvalidFractalHeapGeometry)?;
-        Ok(FractalHeapDirectBlockView { bytes: block, data })
+        let end = local
+            .checked_add(length)
+            .ok_or(FormatError::InvalidFractalHeapGeometry)?;
+        if local < prefix.len() as u64 || end > self.block.decoded_size {
+            return Err(FormatError::InvalidFractalHeapGeometry);
+        }
+        Ok(FractalHeapObjectRef {
+            range: FileRange::new(self.range.start().checked_add(local)?, length)?,
+            block_range: self.range,
+            stored_checksum,
+        })
+    }
+
+    /// Returns the unfiltered prefix and the checksum field when present.
+    ///
+    /// This range is sufficient for [`Self::parse_object`]. Complete checksum validation requires
+    /// [`Self::parse_range`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::UnsupportedFilteredHeapObject`] if the heap has filters.
+    pub fn object_prefix_range(&self) -> Result<FileRange, FormatError> {
+        let prefix = self.prefix_range()?;
+        FileRange::new(
+            prefix.start(),
+            prefix.length()
+                + if self.block.heap.checksummed {
+                    CHECKSUM_LEN as u64
+                } else {
+                    0
+                },
+        )
     }
 
     /// Validates the unfiltered block's signature, version, owner, and heap offset.
     ///
     /// A region containing [`Self::prefix_range`] is sufficient. Checksum validation requires
-    /// [`Self::parse`] with the complete block.
+    /// [`Self::parse_checked`] with the complete block.
     ///
     /// # Errors
     ///
@@ -425,6 +552,81 @@ impl FractalHeapDirectBlockRef<'_> {
             return Err(FormatError::UnsupportedFilteredHeapObject);
         }
         FileRange::new(self.range.start(), self.block.heap.prefix_len() as u64)
+    }
+    fn parse_block<'bytes>(
+        &self,
+        region: FileRegion<'bytes>,
+        require_checksum: bool,
+    ) -> Result<FractalHeapDirectBlockView<'bytes>, FormatError> {
+        if self.block.filter_mask.is_some() {
+            return Err(FormatError::UnsupportedFilteredHeapObject);
+        }
+        let block = region.subregion(self.range)?.bytes();
+        self.block
+            .heap
+            .parse_prefix(block, &DIRECT_SIGNATURE, self.block.heap_offset)?;
+        let prefix_len = self.block.heap.prefix_len();
+        let data_at = if self.block.heap.checksummed {
+            if require_checksum {
+                checksum::verify_zeroed_required(block, prefix_len)?;
+            } else {
+                checksum::verify_zeroed(block, prefix_len)?;
+            }
+            prefix_len + CHECKSUM_LEN
+        } else {
+            prefix_len
+        };
+        let data = block
+            .get(data_at..)
+            .ok_or(FormatError::InvalidFractalHeapGeometry)?;
+        Ok(FractalHeapDirectBlockView { bytes: block, data })
+    }
+}
+
+/// Describes a managed object's physical range after prefix and bounds validation.
+///
+/// A stored checksum, when present, records the owning block's checksum field. Construction
+/// through [`FractalHeapDirectBlockRef::parse_object`] does not validate that checksum.
+///
+/// # Examples
+///
+/// See the bounded object example on [`FractalHeapDirectBlockRef::parse_object`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct FractalHeapObjectRef {
+    range: FileRange,
+    block_range: FileRange,
+    stored_checksum: Option<u32>,
+}
+
+impl FractalHeapObjectRef {
+    /// Borrows the object bytes from a region containing the object's range.
+    ///
+    /// This operation checks region containment. It does not validate the owning block's checksum.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::InsufficientRegion`] if `region` does not contain [`Self::range`].
+    ///
+    /// # Examples
+    ///
+    /// See the bounded object example on [`FractalHeapDirectBlockRef::parse_object`].
+    pub fn parse<'bytes>(&self, region: FileRegion<'bytes>) -> Result<&'bytes [u8], FormatError> {
+        Ok(region.subregion(self.range)?.bytes())
+    }
+
+    /// Returns the physical bytes occupied by the object.
+    pub const fn range(&self) -> FileRange {
+        self.range
+    }
+    /// Returns the owning direct block's complete physical allocation.
+    pub const fn block_range(&self) -> FileRange {
+        self.block_range
+    }
+    /// Returns the owning block's stored checksum, or [`None`] if absent.
+    ///
+    /// Call [`FractalHeapDirectBlockRef::parse_checked`] for full-block checksum validation.
+    pub const fn stored_checksum(&self) -> Option<u32> {
+        self.stored_checksum
     }
 }
 
@@ -825,6 +1027,80 @@ mod tests {
         assert_eq!(view.data(), vec![0x5A; 128 - data_at]);
         assert_eq!(reference.range(), reference.parse_range());
         assert_eq!(reference.range().start().get(), base + 256);
+    }
+
+    #[rstest]
+    #[case::unchecksummed(false)]
+    #[case::checksummed(true)]
+    fn bounded_object_refs_retain_unvalidated_checksum_metadata(
+        #[case] checksummed: bool,
+        #[values(OffsetWidth::Two, OffsetWidth::Four, OffsetWidth::Eight)] offsets: OffsetWidth,
+    ) {
+        let heap = heap(offsets, 0, checksummed, false);
+        let bytes = direct_bytes(&heap);
+        let reference = direct_root(&heap).at(PhysicalAddress::new(768)).unwrap();
+        let prefix = reference.object_prefix_range().unwrap();
+        let data_at = prefix.length();
+        let object = reference
+            .parse_object(region(768, &bytes[..data_at as usize]), data_at, 3)
+            .unwrap();
+        assert_eq!(
+            object.range(),
+            FileRange::new(PhysicalAddress::new(768 + data_at), 3).unwrap()
+        );
+        assert_eq!(object.block_range(), reference.range());
+        assert_eq!(
+            object.stored_checksum(),
+            checksummed.then(|| {
+                u32::from_le_bytes(
+                    bytes[heap.prefix_len()..heap.prefix_len() + CHECKSUM_LEN]
+                        .try_into()
+                        .unwrap(),
+                )
+            })
+        );
+        assert_eq!(object.parse(region(768, &bytes)).unwrap(), &[0x5A; 3]);
+    }
+
+    #[rstest]
+    #[case::prefix(0, 3)]
+    #[case::overrun(127, 2)]
+    #[case::overflow(u64::MAX, 1)]
+    fn bounded_object_refs_reject_invalid_object_bounds(#[case] offset: u64, #[case] length: u64) {
+        let heap = heap(OffsetWidth::Eight, 0, true, false);
+        let bytes = direct_bytes(&heap);
+        let reference = direct_root(&heap).at(PhysicalAddress::new(256)).unwrap();
+        assert_eq!(
+            reference
+                .parse_object(region(256, &bytes), offset, length)
+                .unwrap_err(),
+            FormatError::InvalidFractalHeapGeometry
+        );
+    }
+
+    #[test]
+    fn required_checksum_validation_rejects_corruption_with_every_feature_set() {
+        let heap = heap(OffsetWidth::Eight, 0, true, false);
+        let mut bytes = direct_bytes(&heap);
+        let checksum_at = heap.prefix_len();
+        let stored = u32::from_le_bytes(
+            bytes[checksum_at..checksum_at + CHECKSUM_LEN]
+                .try_into()
+                .unwrap(),
+        );
+        bytes[127] ^= 1;
+        let reference = direct_root(&heap).at(PhysicalAddress::new(256)).unwrap();
+        let object = reference.parse_object(region(256, &bytes), 19, 3).unwrap();
+        assert_eq!(object.stored_checksum(), Some(stored));
+        let mut zeroed = bytes.clone();
+        zeroed[checksum_at..checksum_at + CHECKSUM_LEN].fill(0);
+        assert_eq!(
+            reference.parse_checked(region(256, &bytes)).unwrap_err(),
+            FormatError::ChecksumMismatch {
+                expected: stored,
+                computed: checksum::jenkins_lookup3(&zeroed)
+            }
+        );
     }
 
     #[rstest]
