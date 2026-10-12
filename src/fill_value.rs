@@ -10,8 +10,10 @@ use alloc::format;
 use alloc::{vec, vec::Vec};
 use core::num::NonZeroUsize;
 
+use hdf5_pure_core::FillTime;
 use hdf5_pure_format::__private::FillValueError;
-use hdf5_pure_format::__private::FillValueView;
+pub(crate) use hdf5_pure_format::__private::FillValueMessage;
+pub(crate) use hdf5_pure_format::__private::FillValueView;
 
 use crate::error::FormatError;
 use crate::message_type::MessageType;
@@ -25,10 +27,9 @@ use crate::message_type::MessageType;
 /// those regions with the dataset's fill value, and this is the pattern that
 /// answers them here.
 ///
-/// `None` means the library default, which is the type's implicit zero — the
-/// same thing [`parse_defined_fill_value`] returns `Ok(None)` for. Keeping that
-/// case as `None` rather than as a buffer of zero bytes is what lets the common
-/// path stay a plain zeroed allocation with nothing to tile.
+/// `None` means the library default, which is the type's implicit zero. Keeping
+/// that case as `None` lets the common path stay a plain zeroed allocation with
+/// nothing to tile.
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct FillPattern<'a> {
     /// Exactly one element's worth of fill bytes, or `None` for zeros.
@@ -75,7 +76,14 @@ impl<'a> FillPattern<'a> {
     /// is consulted only where there is no data, so falling back there cannot
     /// corrupt a value that was actually written, and it leaves a dataset whose
     /// storage *is* allocated reading exactly as it did before.
-    pub(crate) fn new(bytes: Option<&'a [u8]>, elem_size: NonZeroUsize) -> Self {
+    pub(crate) fn new(
+        fill_time: FillTime,
+        bytes: Option<&'a [u8]>,
+        elem_size: NonZeroUsize,
+    ) -> Self {
+        if fill_time.is_never() {
+            return Self::ZERO;
+        }
         match bytes {
             Some(b) if b.len() == elem_size.get() && b.iter().any(|&x| x != 0) => Self {
                 element: Some(b),
@@ -85,6 +93,11 @@ impl<'a> FillPattern<'a> {
             // every buffer that would tile zeros on the plain allocation path.
             _ => Self::ZERO,
         }
+    }
+
+    /// Creates a fill pattern from a Fill Value message.
+    pub(crate) fn from_message(msg: &'a FillValueMessage, elem_size: NonZeroUsize) -> Self {
+        Self::new(msg.fill_time(), msg.value(), elem_size)
     }
 
     /// One element's fill bytes, or `None` for the implicit zero — for a caller
@@ -172,17 +185,20 @@ impl PaddingFill {
     /// value the file says is never written is not written here either.
     pub(crate) fn from_message(msg_type: MessageType, body: &[u8]) -> Self {
         match FillValueView::parse(msg_type, body) {
-            Ok(view) => {
-                if view.fill_time().is_never() {
-                    Self::Zero
-                } else {
-                    match view.value() {
-                        Some(bytes) => Self::Value(bytes.to_vec()),
-                        None => Self::Zero,
-                    }
-                }
-            }
+            Ok(view) => Self::from_view(&view),
             Err(_) => Self::Unknown,
+        }
+    }
+
+    /// Inspects a borrowed fill value view to choose the padding fill behavior.
+    pub(crate) fn from_view(view: &FillValueView<'_>) -> Self {
+        if view.fill_time().is_never() {
+            Self::Zero
+        } else {
+            match view.value() {
+                Some(bytes) => Self::Value(bytes.to_vec()),
+                None => Self::Zero,
+            }
         }
     }
 
@@ -190,16 +206,11 @@ impl PaddingFill {
     pub(crate) fn pattern(&self, elem_size: NonZeroUsize) -> FillPattern<'_> {
         match self {
             Self::Zero => FillPattern::ZERO,
-            Self::Value(bytes) => FillPattern::new(Some(bytes), elem_size),
+            Self::Value(bytes) => FillPattern::new(FillTime::IfSet, Some(bytes), elem_size),
             Self::Unknown => FillPattern::UNKNOWN,
         }
     }
 }
-
-#[cfg(feature = "std")]
-pub use hdf5_pure_format::__private::fill_value_is_written;
-#[cfg(feature = "std")]
-pub use hdf5_pure_format::__private::parse_defined_fill_value;
 
 pub(crate) fn fill_value_message_v3(fill: Option<&[u8]>) -> Result<Vec<u8>, FormatError> {
     hdf5_pure_format::__private::fill_value_message_v3(fill).map_err(|error| match error {
@@ -215,6 +226,7 @@ mod fill_pattern_tests {
 
     use super::*;
     use crate::convert;
+    use hdf5_pure_format::__private::fill_value_is_written;
 
     /// `PaddingFill::from_message` keeps the three answers apart. Folding the
     /// unreadable case onto `Zero` would write a fabricated fill value into a
@@ -262,7 +274,7 @@ mod fill_pattern_tests {
     #[test]
     fn a_defined_fill_tiles_across_the_buffer() {
         let seven = 7.0f64.to_le_bytes();
-        let p = FillPattern::new(Some(&seven), convert::nz(8));
+        let p = FillPattern::new(FillTime::IfSet, Some(&seven), convert::nz(8));
         assert_eq!(p.buffer(24).unwrap(), seven.repeat(3));
         // A pattern with interior zero bytes must not be mistaken for the zero
         // pattern: only an *all*-zero value is.
@@ -275,7 +287,7 @@ mod fill_pattern_tests {
     #[test]
     fn a_fill_value_of_the_wrong_width_is_dropped() {
         for bytes in [vec![1u8], vec![1, 2, 3], vec![1; 9], Vec::new()] {
-            let p = FillPattern::new(Some(&bytes), convert::nz(8));
+            let p = FillPattern::new(FillTime::IfSet, Some(&bytes), convert::nz(8));
             assert_eq!(
                 p.buffer(16).unwrap(),
                 vec![0u8; 16],
@@ -290,13 +302,15 @@ mod fill_pattern_tests {
     #[test]
     fn an_all_zero_fill_is_the_zero_pattern() {
         assert_eq!(
-            FillPattern::new(Some(&[0u8; 8]), convert::nz(8))
+            FillPattern::new(FillTime::IfSet, Some(&[0u8; 8]), convert::nz(8))
                 .buffer(16)
                 .unwrap(),
             vec![0u8; 16]
         );
         assert_eq!(
-            FillPattern::new(None, convert::nz(8)).buffer(16).unwrap(),
+            FillPattern::new(FillTime::IfSet, None, convert::nz(8))
+                .buffer(16)
+                .unwrap(),
             vec![0u8; 16]
         );
         assert_eq!(FillPattern::ZERO.buffer(16).unwrap(), vec![0u8; 16]);
@@ -306,9 +320,25 @@ mod fill_pattern_tests {
     /// buffer must not panic.
     #[test]
     fn single_byte_elements_and_empty_buffers() {
-        let p = FillPattern::new(Some(&[0xAB]), convert::nz(1));
+        let p = FillPattern::new(FillTime::IfSet, Some(&[0xAB]), convert::nz(1));
         assert_eq!(p.buffer(5).unwrap(), vec![0xAB; 5]);
         assert_eq!(p.buffer(0).unwrap(), Vec::<u8>::new());
+    }
+
+    #[test]
+    fn fill_time_never_reads_as_zeros_despite_defined_fill() {
+        let seven = 7.0f64.to_le_bytes();
+        let p = FillPattern::new(FillTime::Never, Some(&seven), convert::nz(8));
+        assert_eq!(p.buffer(24).unwrap(), vec![0u8; 24]);
+        assert_eq!(p.element().unwrap(), None);
+    }
+
+    #[test]
+    fn fill_time_alloc_tiles_defined_fill() {
+        let seven = 7.0f64.to_le_bytes();
+        let p = FillPattern::new(FillTime::Alloc, Some(&seven), convert::nz(8));
+        assert_eq!(p.buffer(24).unwrap(), seven.repeat(3));
+        assert_eq!(p.element().unwrap(), Some(&seven[..]));
     }
 
     /// An unreadable fill value message is not the zero pattern: materializing

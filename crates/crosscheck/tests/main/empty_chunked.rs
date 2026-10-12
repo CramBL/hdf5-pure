@@ -14,7 +14,7 @@
 
 use hdf5::Extent;
 use hdf5::file::LibraryVersion;
-use hdf5_pure::{File, FileBuilder, MaxExtent};
+use hdf5_pure::{File, FileBuilder, FillTime, MaxExtent};
 use tempfile::tempdir;
 use test_util_hdf5::dataset::{Filter, Unlimited};
 
@@ -531,6 +531,7 @@ fn a_fill_value_the_file_says_is_never_written_reads_as_zeros() {
             // what the write time changes is only what unallocated storage
             // reads as.
             assert_eq!(ds.fill_value::<i32>().unwrap(), Some(7));
+            assert_eq!(ds.fill_time().unwrap(), FillTime::Never);
         }
     }
 }

@@ -1773,6 +1773,7 @@ mod tests {
     use super::*;
     use crate::chunk_cache::ChunkCache;
 
+    use crate::FillTime;
     use crate::chunked_read::read_chunked_data_cached;
     use crate::convert::nz;
     use crate::data_layout::ChunkIndexLayout;
@@ -1854,7 +1855,10 @@ mod tests {
         ));
 
         // The known patterns are unaffected either way.
-        for pattern in [FillPattern::ZERO, FillPattern::new(Some(&[7u8; 4]), elem)] {
+        for pattern in [
+            FillPattern::ZERO,
+            FillPattern::new(FillTime::IfSet, Some(&[7u8; 4]), elem),
+        ] {
             assert!(split_into_chunks(&data[..5 * 4], &[5], &[4], elem, pattern).is_ok());
         }
     }
@@ -1980,7 +1984,7 @@ mod tests {
             ChunkContext::basic(&chunk, 4),
             &ChunkOptions::default(),
             None,
-            FillPattern::new(Some(&fill), elem),
+            FillPattern::new(FillTime::IfSet, Some(&fill), elem),
             StorageAllocation::Unallocated,
         )
         .expect("an unallocated set");
@@ -2013,7 +2017,7 @@ mod tests {
             ChunkContext::basic(&chunk, 4),
             &ChunkOptions::default(),
             None,
-            FillPattern::new(Some(&fill), elem),
+            FillPattern::new(FillTime::IfSet, Some(&fill), elem),
             StorageAllocation::Allocated,
         )
         .expect("a dense set");
@@ -2674,7 +2678,7 @@ mod tests {
         assert_eq!(
             parms(
                 FillAvailability::Defined,
-                FillPattern::new(Some(&fill), elem)
+                FillPattern::new(FillTime::IfSet, Some(&fill), elem)
             ),
             (1, bits as u32, (bits >> 32) as u32)
         );
@@ -2687,7 +2691,7 @@ mod tests {
         assert_eq!(
             parms(
                 FillAvailability::Undefined,
-                FillPattern::new(Some(&fill), elem)
+                FillPattern::new(FillTime::IfSet, Some(&fill), elem)
             ),
             (0, 0, 0)
         );
