@@ -84,6 +84,7 @@ test-util-hdf5 = { path = "crates/test-util-hdf5" }
 byteorder = { version = "1", default-features = false }
 hdf5 = { package = "hdf5-metno", git = "https://github.com/metno/hdf5-rust", rev = "605a2e28c17f2209bf2a6d0a8be11ef0b6546034", features = ["zlib"] }
 heapscope = "0.1"
+insta = { version = "1.49", default-features = false }
 ndarray = ">=0.16, <0.18"
 proptest = "1"
 rstest = "0.27"
@@ -401,6 +402,7 @@ sha2 = { version = "0.11", optional = true, default-features = false }
 [dev-dependencies]
 criterion = { version = "0.5", default-features = false }
 heapscope.workspace = true
+insta.workspace = true
 proptest.workspace = true
 rstest.workspace = true
 serde = { version = "1", features = ["derive"] }
