@@ -72,13 +72,14 @@
 //!
 //! - The file uses 8-byte offsets/lengths. A **userblock** (non-zero base address, as every MATLAB
 //!   v7.3 `.mat` file has) is supported: addresses are read and written relative to the base and
-//!   the userblock bytes are preserved verbatim. Every staged edit works on an unpaged file with a
-//!   userblock: value overwrites, additions of contiguous and chunked/filtered datasets, in-place
-//!   and relocating overwrites of every layout (with the old storage reclaimed), object deletion
-//!   (with base-aware subtree reclaim), in-file copy, cross-file copy into a userblock
-//!   destination, group creation, compact attributes, and free-space reuse. A paged file with a
-//!   userblock is rejected, as is any file with a userblock under [`MemoryStrategy::Bounded`], and
-//!   a cross-file copy requires a source without a userblock (see
+//!   the userblock bytes are preserved verbatim. The engine applies every staged edit to a file
+//!   with a userblock, paged or not: value overwrites, additions of contiguous and
+//!   chunked/filtered datasets, in-place and relocating overwrites of every layout (with the old
+//!   storage reclaimed), object deletion (with base-aware subtree reclaim), in-file copy,
+//!   cross-file copy into a userblock destination, group creation, compact attributes, and
+//!   free-space reuse. The engine counts a paged file's pages from the base address, so page 0
+//!   holds the superblock. An open under [`MemoryStrategy::Bounded`] rejects a file with a
+//!   userblock, and a cross-file copy requires a source without a userblock (see
 //!   [`copy_from`](crate::File::copy_from)).
 //!   Any superblock version (0–3) is accepted: a version 0/1
 //!   (symbol-table) file is edited by converting each group on the edited path
@@ -1623,10 +1624,12 @@ fn bounded_only_limitation(session: &WriteEngine) -> Option<&'static str> {
 /// create but is not one.
 ///
 /// The open-time rejections this function restates are [`bounded_only_limitation`] for the
-/// userblock, and the shared paged checks in
+/// userblock, the shared paged check in
 /// [`open_rw_with_strategy`](WriteEngine::open_rw_with_strategy) for a paged file with no persisted
-/// free space or with a userblock. Keep this function in step with them. Each is phrased here in
-/// terms of the properties that cause it, since the file does not exist yet.
+/// free space, and the page-buffer checks in
+/// [`set_page_buffer_size`](WriteEngine::set_page_buffer_size). Keep this function in step with
+/// them. Each is phrased here in terms of the
+/// properties that cause it, since the file does not exist yet.
 pub(crate) fn create_would_refuse_reopen(
     create: &FileCreateProperties,
     access: &FileAccessProperties,
@@ -1645,20 +1648,6 @@ pub(crate) fn create_would_refuse_reopen(
              cannot edit a file with a non-zero base address, so creating one this way would \
              write the file and then refuse to open it; drop the userblock, or leave \
              MemoryStrategy unset to mirror this file",
-        );
-    }
-    // A read-write open rejects a paged file with a userblock whatever its persistence.
-    if create.userblock() != 0
-        && matches!(
-            create.file_space_strategy(),
-            Some((FileSpaceStrategy::Page, _, _))
-        )
-    {
-        return Some(
-            "a userblock cannot be combined with FileSpaceStrategy::Page: a paged file with a \
-             non-zero base address cannot be opened read-write, so creating one this way would \
-             write the file and then fail to open it; drop the userblock, or choose another \
-             file-space strategy",
         );
     }
     // The page-buffer refusals `set_page_buffer_size` makes at open, restated as
@@ -2182,7 +2171,8 @@ impl WriteEngine {
     /// Only a *bounded-only* limitation is worth falling back for — see
     /// [`bounded_only_limitation`]. [`open_imaged`](Self::open_imaged) rejects non-8-byte offsets
     /// or lengths and an unsupported superblock version for both engines, and this function
-    /// rejects a paged file without persisted free space or with a userblock for both.
+    /// rejects a paged file without persisted free space under [`MemoryStrategy::Bounded`] and
+    /// [`MemoryStrategy::Auto`] alike, before `Auto` falls back to the mirror.
     pub(crate) fn open_rw_with_strategy(
         path: &Path,
         cache: MetadataCacheConfig,
@@ -2203,19 +2193,12 @@ impl WriteEngine {
         // record of which pages hold metadata and which hold raw data, so nothing
         // can keep the pages segregated; the staged commit refuses it too, so
         // deferring would only trade this error for the same one later, with work
-        // already staged. The staged commit also rejects a paged file with a userblock,
-        // so the open rejects it here for the same reason.
+        // already staged.
         if session.space.is_paged() && session.persist.is_none() {
             return Err(Error::EditUnsupported(
                 "read-write access to a paged file (H5F_FSPACE_STRATEGY_PAGE) requires \
                  persisted free space; recreate the file with \
                  with_file_space_strategy(FileSpaceStrategy::Page, true, ..) to grow it in place",
-            ));
-        }
-        if session.paged_with_userblock() {
-            return Err(Error::EditUnsupported(
-                "read-write access to a paged file (H5F_FSPACE_STRATEGY_PAGE) with a userblock \
-                 (non-zero base address) is not supported",
             ));
         }
         if let Some(reason) = bounded_only_limitation(&session) {
@@ -2630,13 +2613,6 @@ impl WriteEngine {
                  page buffer",
             ));
         }
-        if self.paged_with_userblock() {
-            return Err(Error::EditUnsupported(
-                "a page buffer on a paged file with a userblock (non-zero base address) is not \
-                 supported: this session can neither commit nor append, so the buffer would hold \
-                 nothing while marking the file against every reader",
-            ));
-        }
         // The crash mark below is the whole reason this property is offered at
         // all, and only a version-3 superblock carries one that anybody reads:
         // `check_status_flags` is gated there, matching where the C library gates
@@ -2822,11 +2798,6 @@ impl WriteEngine {
         FreeSpaceManagerHeader::parse(widths, &fshd)
             .ok()
             .and_then(|_| FreeExtent::new(addr.get(), len))
-    }
-
-    /// Returns `true` if the file is paged and its superblock stores a non-zero base address.
-    fn paged_with_userblock(&self) -> bool {
-        self.space.is_paged() && !self.superblock.base_address.is_zero()
     }
 
     /// Returns the extent of `len` bytes at the file position `at`, in stored addresses.
@@ -5323,12 +5294,6 @@ impl WriteEngine {
                 "committing an edit to a paged file (H5F_FSPACE_STRATEGY_PAGE) requires \
                  persisted free space; recreate the file with \
                  with_file_space_strategy(FileSpaceStrategy::Page, true, ..) to edit it in place",
-            ));
-        }
-        if self.paged_with_userblock() {
-            return Err(Error::EditUnsupported(
-                "committing an edit to a paged file (H5F_FSPACE_STRATEGY_PAGE) with a userblock \
-                 (non-zero base address) is not supported",
             ));
         }
 
@@ -14178,6 +14143,59 @@ mod tests {
         }
     }
 
+    #[rstest]
+    fn dense_attribute_storage_is_classified_by_its_stored_pages(#[values(0, 512)] userblock: u64) {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("dense_attribute_pages.h5");
+        let mut builder = FileBuilder::new();
+        let mut group = builder.create_group("g");
+        for i in 0..12 {
+            group.set_attr(&format!("a{i}"), AttrValue::I64(i));
+        }
+        group.set_attr("huge0", AttrValue::AsciiString("y".repeat(71_267)));
+        group.set_attr("huge1", AttrValue::AsciiString("y".repeat(70_000)));
+        builder.add_group(group.finish());
+        builder
+            .with_file_space_strategy(FileSpaceStrategy::Page, true, 0)
+            .with_file_space_page_size(DENSE_ATTRIBUTE_PAGE_SIZE);
+        builder.write(&path).unwrap();
+        prepend_userblock(&path, userblock);
+
+        let session = WriteEngine::open_with_locking(&path, FileLocking::Enabled).unwrap();
+        let DenseAttributeOwner { storage, .. } =
+            dense_attribute_owner(&session, &ObjectPathBuf::parse("/g"));
+        let meta = FreeClass::Page(PageType::Meta);
+        assert_eq!(
+            storage,
+            [
+                (164, 146, meta),
+                (310, 1024, meta),
+                (1334, 38, meta),
+                (1372, 512, meta),
+                (1884, 38, meta),
+                (1922, 512, meta),
+                (2434, 71_294, meta),
+                (18 * DENSE_ATTRIBUTE_PAGE_SIZE, 70_027, FreeClass::Dead),
+            ]
+            .map(|(addr, len, class)| (addr + userblock, len, class))
+        );
+    }
+
+    /// Moves the file at `path` behind a zero-filled userblock of `len` bytes and rewrites its
+    /// superblock's base and end-of-file addresses to match.
+    fn prepend_userblock(path: &Path, len: u64) {
+        let original = std::fs::read(path).unwrap();
+        let mut superblock = hdf5_pure_format::__private::parse_superblock(&original, 0).unwrap();
+        superblock.base_address = BaseAddress::new(len);
+        superblock.eof_address += len;
+        let rewritten = hdf5_pure_format::__private::serialize_superblock(&superblock).unwrap();
+        let prefix = usize::try_from(len).unwrap();
+        let mut bytes = vec![0; prefix];
+        bytes.extend_from_slice(&original);
+        bytes[prefix..prefix + rewritten.len()].copy_from_slice(&rewritten);
+        std::fs::write(path, bytes).unwrap();
+    }
+
     #[test]
     fn rebuilding_dense_group_attributes_reclaims_the_old_storage_in_flat_space() {
         let dir = tempdir().unwrap();
@@ -14650,6 +14668,23 @@ mod tests {
         assert!(!reclaim::touches_page_zero(PAGE, [(0, 0)]));
         // Nothing to screen.
         assert!(!reclaim::touches_page_zero(PAGE, []));
+    }
+
+    #[rstest]
+    fn the_page_zero_screen_measures_pages_from_the_base_address(#[values(0, 512)] userblock: u64) {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("paged_index.h5");
+        let mut b = FileBuilder::new();
+        b.with_userblock(userblock);
+        b.create_dataset("d").with_i32_data(&[1; 100]);
+        b.with_file_space_strategy(FileSpaceStrategy::Page, true, 1)
+            .with_file_space_page_size(FileSpacePageSize::MIN.get());
+        b.write(&path).unwrap();
+        let s = WriteEngine::open_with_locking(&path, FileLocking::Enabled).unwrap();
+
+        let data = [(userblock + 1024, 512)];
+        assert!(!s.index_is_provably_raw(&data, &[(userblock + 48, 80), (userblock + 512, 512)]));
+        assert!(s.index_is_provably_raw(&data, &[(userblock + 512, 512)]));
     }
 
     /// The shared-message flag is read from the message header's fourth byte, and
@@ -16592,8 +16627,13 @@ mod tests {
     }
 
     #[rstest]
+    #[case::fsm_aggr(FileSpaceStrategy::FsmAggr, 0)]
+    #[case::fsm_aggr_userblock(FileSpaceStrategy::FsmAggr, 512)]
+    #[case::page(FileSpaceStrategy::Page, 0)]
+    #[case::page_userblock(FileSpaceStrategy::Page, 4096)]
     fn a_failed_persisting_commit_leaves_the_file_and_its_free_space_unchanged(
-        #[values(0, 512)] userblock: u64,
+        #[case] strategy: FileSpaceStrategy,
+        #[case] userblock: u64,
     ) {
         let dir = tempdir().unwrap();
         let path = dir.path().join("failed_persisting_commit.h5");
@@ -16602,7 +16642,8 @@ mod tests {
         b.create_dataset("a").with_i32_data(&[1; 100]);
         b.create_dataset("b").with_i32_data(&[2; 400]);
         b.create_dataset("c").with_i32_data(&[3; 100]);
-        b.with_file_space_strategy(FileSpaceStrategy::FsmAggr, true, 1);
+        b.with_file_space_strategy(strategy, true, 1)
+            .with_file_space_page_size(4096);
         b.write(&path).unwrap();
 
         let mut s = WriteEngine::open_with_locking(&path, FileLocking::Enabled).unwrap();
@@ -19173,18 +19214,12 @@ mod tests {
         }
     }
 
-    /// A page-buffered session on a file with a userblock raises and clears its
-    /// crash mark without disturbing the root address that mark's superblock
-    /// rewrite carries — and the userblock's own bytes stay put.
-    ///
-    /// The caller-side half of
-    /// `a_status_flag_write_leaves_a_userblock_files_root_alone`, reachable only
-    /// since issue #357 scoped the persisted-free-space refusal to paged files.
-    /// A userblock file persists no free space whatever its creation properties
-    /// asked for, so before that the mark could not be raised on one at all, and
-    /// `set_consistency_flags`'s base conversion had no caller that needed it.
-    #[test]
-    fn a_page_buffer_marks_a_userblock_file_without_repointing_its_root() {
+    /// Repeats `a_status_flag_write_leaves_a_userblock_files_root_alone` through
+    /// `set_page_buffer_size` and a commit, on a paged and an unpaged file.
+    #[rstest]
+    fn a_page_buffer_marks_a_userblock_file_without_repointing_its_root(
+        #[values(false, true)] paged: bool,
+    ) {
         use crate::writer::FileBuilder;
         use tempfile::tempdir;
 
@@ -19192,6 +19227,10 @@ mod tests {
         let path = dir.path().join("ub_buffered.h5");
         let mut b = FileBuilder::new();
         b.with_userblock(4096);
+        if paged {
+            b.with_file_space_strategy(FileSpaceStrategy::Page, true, 1)
+                .with_file_space_page_size(4096);
+        }
         b.create_dataset("t0")
             .with_i32_data(&(0..256).collect::<Vec<_>>())
             .with_shape(&[256]);
@@ -19207,7 +19246,7 @@ mod tests {
         );
         s.set_sync_policy(SyncPolicy::OnClose);
         s.set_page_buffer_size(1 << 20)
-            .expect("an unpaged userblock file must accept a page buffer");
+            .expect("a userblock file must accept a page buffer");
         // The mark is the point: a session that accepted the property and raised
         // nothing would pass every assertion below, since the conversion under
         // test runs only when the flags byte is written, and `raise_crash_mark`

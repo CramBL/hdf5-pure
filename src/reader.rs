@@ -9814,12 +9814,14 @@ mod tests {
     /// observe the order its writes become visible in. The first is where the C
     /// library refuses `H5Pset_page_buffer_size` too; the rest are this crate's.
     ///
-    /// Two shapes are **not** among them, and the accepted cases here are what
+    /// Three shapes are **not** among them, and the accepted cases here are what
     /// pin that. An unpaged file: `H5PB_create` requires the paged allocator
     /// because the C page buffer is a page cache with per-kind reservations, and
-    /// this gatherer has neither (issue #357). And a budget below the 1 MiB a
+    /// this gatherer has neither (issue #357). A budget below the 1 MiB a
     /// session already gathers under, which is a request for less resident
     /// memory paid for in writes rather than an unhonorable pair (issue #391).
+    /// And a persisting paged file with a userblock, which a session commits to
+    /// like one without.
     ///
     /// Every refusal also asserts the file is left byte-identical. Each one
     /// fires with a read-write session already open, and the version-3 one fires
@@ -9827,7 +9829,7 @@ mod tests {
     /// the raise would leave a file marked in use by a session that never
     /// existed, which is a file nothing can open until `clear_swmr_flag`.
     #[test]
-    fn a_page_buffer_is_refused_where_it_cannot_be_honored() {
+    fn a_page_buffer_is_rejected_where_it_cannot_be_honored() {
         use tempfile::tempdir;
 
         let dir = tempdir().unwrap();
@@ -9936,52 +9938,46 @@ mod tests {
         );
         untouched("version-2 superblock", &old_format, &before);
 
-        // Two paged files a session can neither commit to nor append to: one that
-        // does not persist its free space, and one with a userblock. A page buffer
-        // on either would hold nothing while its mark blocked every reader.
-        for (label, name, userblock, reason) in [
-            (
-                "paged, not persisting",
-                "no_persist.h5",
-                0u64,
-                "a page buffer on a paged file needs its free space persisted: without it this \
-                 session can neither commit nor append, so the buffer would hold nothing while \
-                 marking the file against every reader; recreate the file with \
-                 with_file_space_strategy(FileSpaceStrategy::Page, true, ..), or drop the page \
-                 buffer",
+        let no_persist = dir.path().join("no_persist.h5");
+        let mut b = FileBuilder::new();
+        b.with_file_space_strategy(crate::FileSpaceStrategy::Page, false, 1)
+            .with_file_space_page_size(4096);
+        b.create_dataset("d")
+            .with_i32_data(&[1, 2, 3, 4])
+            .with_shape(&[4]);
+        b.write(&no_persist).unwrap();
+        let before = std::fs::read(&no_persist).unwrap();
+        let refused = File::open_rw_with_options(
+            &no_persist,
+            buffered(1 << 20).with_memory_strategy(MemoryStrategy::Mirrored),
+        );
+        assert!(
+            matches!(
+                &refused,
+                Err(Error::EditUnsupported(
+                    "a page buffer on a paged file needs its free space persisted: without it \
+                     this session can neither commit nor append, so the buffer would hold \
+                     nothing while marking the file against every reader; recreate the file \
+                     with with_file_space_strategy(FileSpaceStrategy::Page, true, ..), or drop \
+                     the page buffer"
+                ))
             ),
-            (
-                "paged with a userblock",
-                "ub_paged.h5",
-                4096,
-                "a page buffer on a paged file with a userblock (non-zero base address) is not \
-                 supported: this session can neither commit nor append, so the buffer would hold \
-                 nothing while marking the file against every reader",
-            ),
-        ] {
-            let path = dir.path().join(name);
-            let mut b = FileBuilder::new();
-            if userblock != 0 {
-                b.with_userblock(userblock);
-            }
-            b.with_file_space_strategy(crate::FileSpaceStrategy::Page, userblock != 0, 1)
-                .with_file_space_page_size(4096);
-            b.create_dataset("d")
-                .with_i32_data(&[1, 2, 3, 4])
-                .with_shape(&[4]);
-            b.write(&path).unwrap();
-            let before = std::fs::read(&path).unwrap();
-            let refused = File::open_rw_with_options(
-                &path,
-                buffered(1 << 20).with_memory_strategy(MemoryStrategy::Mirrored),
-            );
-            assert!(
-                matches!(&refused, Err(Error::EditUnsupported(m)) if *m == reason),
-                "{label}: a page buffer on a session that cannot write must be refused, \
-                 got {refused:?}"
-            );
-            untouched(label, &path, &before);
-        }
+            "a page buffer on a session that cannot write must be refused, got {refused:?}"
+        );
+        untouched("paged, not persisting", &no_persist, &before);
+
+        let paged_userblock = dir.path().join("paged_userblock.h5");
+        let mut b = FileBuilder::new();
+        b.with_userblock(16 * 1024);
+        b.with_file_space_strategy(crate::FileSpaceStrategy::Page, true, 1)
+            .with_file_space_page_size(16 * 1024);
+        b.create_dataset("d")
+            .with_i32_data(&[1, 2, 3, 4])
+            .with_shape(&[4]);
+        b.write(&paged_userblock).unwrap();
+        let accepted = File::open_rw_with_options(&paged_userblock, buffered(1 << 20)).unwrap();
+        assert_eq!(accepted.edit_backing(), Some(EditBacking::Mirrored));
+        accepted.close().unwrap();
 
         let swmr = fixture("swmr.h5", false);
         let before = std::fs::read(&swmr).unwrap();

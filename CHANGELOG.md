@@ -17,6 +17,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - `File::open_rw` reclaims dense-attribute version 2 B-tree name and creation-order indexes when their dense attribute set becomes dead ([#720](https://github.com/CramBL/hdf5-pure/pull/720)).
 - `File::open_rw` reclaims a deleted group that stores its links densely, with its subtree, and the fractal heap of dense attribute or link storage that becomes dead ([#721](https://github.com/CramBL/hdf5-pure/pull/721)).
 - `FormatError::Internal` reports a condition that only a bug in this crate can produce, such as a superblock value too wide for its field ([#675](https://github.com/CramBL/hdf5-pure/pull/675)).
+- `File::open_rw` edits a paged file with a userblock, with a page buffer or without, and read-write file creation writes one. The editor holds such a file in a whole-file mirror ([#751](https://github.com/CramBL/hdf5-pure/pull/751)).
 
 ### Changed
 
@@ -29,7 +30,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
-- Fixed `File::open_rw` neither reusing nor updating the free space a file with a userblock persists. Read-write access to a paged file with a userblock remains unsupported ([#747](https://github.com/CramBL/hdf5-pure/pull/747)).
+- Fixed `File::open_rw` neither reusing nor updating the free space a file with a userblock persists ([#747](https://github.com/CramBL/hdf5-pure/pull/747)).
 - Fixed a `no_std` build compiling an internal lock that lets two live guards borrow the chunk cache mutably at once ([#743](https://github.com/CramBL/hdf5-pure/pull/743)).
 - Fixed `File::commit` losing ownership of spare free-space section-list capacity after reopening a file that is not paged and reuses a persistent manager allocation ([#740](https://github.com/CramBL/hdf5-pure/pull/740)).
 - Fixed `File::open_rw` leaving spare capacity allocated when replacing persistent free-space section lists. Recovery reads only the used bytes of each list ([#741](https://github.com/CramBL/hdf5-pure/pull/741)).

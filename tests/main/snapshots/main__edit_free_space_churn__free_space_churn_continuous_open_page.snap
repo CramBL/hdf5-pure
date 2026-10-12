@@ -1,0 +1,131 @@
+---
+source: tests/main/edit_free_space_churn.rs
+expression: report.render()
+---
+free-space churn
+================
+
+scenario: continuous-open
+
+limits
+  maximum file size : 33554432
+  high-water        : 29360128
+  low-water         : 25165824
+  headroom          : 4194304
+
+workload
+  epochs written             : 91
+  epochs deleted             : 66
+  epochs still live          : 25
+  epochs before first delete : 27
+  churn epochs               : 64
+  deletion waves             : 16
+  max deleted in one wave    : 5
+
+lifecycle
+  writable opens : 1
+  closes         : 1
+  reopens        : 0
+
+high water
+  physical file : 30818304
+  logical file  : 30818304
+  pressure      : 30486875
+  reusable free : 5908336
+
+reuse
+  epoch writes growing physical file   : 28
+  epoch writes without physical growth : 63
+  post-churn writes without growth      : 63
+
+deletion waves
+  wave  after-epoch  live-before  deleted  live-after  physical  logical  reusable live-raw  live-meta  unclassified  pressure
+     1           26           27        5          22  30384128  30384128   5615143  24570890     184099         0  24768985
+     2           31           27        5          22  30818304  30818304   5907597  24715841     180276         0  24910707
+     3           35           26        4          22  30818304  30818304   5906670  24716786     180276         0  24911634
+     4           39           26        4          22  30818304  30818304   5906708  24716802     180276         0  24911596
+     5           43           26        4          22  30818304  30818304   5907744  24715712     180276         0  24910560
+     6           47           26        4          22  30818304  30818304   5908336  24715039     180276         0  24909968
+     7           51           26        4          22  30818304  30818304   5907660  24715481     180276         0  24910644
+     8           55           26        4          22  30425088  30425088   5514221  24716604     180276         0  24910867
+     9           59           26        4          22  30404608  30404608   5491601  24718762     180276         0  24913007
+    10           63           26        4          22  30404608  30404608   5490035  24720301     180276         0  24914573
+    11           67           26        4          22  30404608  30404608   5488434  24721866     180276         0  24916174
+    12           71           26        4          22  30404608  30404608   5487487  24722867     180276         0  24917121
+    13           75           26        4          22  30404608  30404608   5486391  24723918     180276         0  24918217
+    14           79           26        4          22  30404608  30404608   5485914  24724404     180276         0  24918694
+    15           83           26        4          22  30404608  30404608   5485997  24724384     180276         0  24918611
+    16           87           26        4          22  30404608  30404608   5485856  24724516     180276         0  24918752
+
+reopen checkpoints
+  #  reason          after-epoch  physical  persisted-free  recovered-free  unclassified
+  none
+
+final
+  physical file size         : 30404608
+  logical size               : 30404608
+  reusable free              : 2211396
+  reusable free regions      : 102
+  pressure                   : 28193212
+  live epochs                : 25
+
+coverage
+  object/group layout
+    nested epoch groups              : 12
+    compact attribute objects        : 44
+    dense attribute objects          : 12
+    compact-link groups              : 37
+    high-fanout compact-link groups  : 6
+    dense-link groups                : 0 (writer unsupported)
+  chunk indices
+    single chunk                     : 6
+    fixed array                      : 106
+    extensible array                 : 7
+  ranks
+    rank 1 datasets                  : 144
+    rank 2 datasets                  : 6
+  chunk grids
+    aligned                          : 58
+    partial-edge                     : 61
+  filters
+    none                             : 69
+    deflate                          : 25
+    shuffle + deflate                : 25
+    integer scale-offset             : 31
+  filtered contents
+    compressible                     : 25
+    incompressible                   : 25
+
+ownership while writer open
+  physical file size       : 30404608
+  logical EOF              : 30404608
+  live raw bytes           : 27980619
+  live metadata bytes      : 205815
+  free-space-manager bytes : 6778
+  reusable free bytes      : 2211396
+  unclassified bytes       : 0
+  trailing slack bytes     : 0
+  live raw extents         : 8461
+  live metadata extents    : 569
+  manager metadata extents : 6
+  reusable free extents    : 102
+  unclassified extents     : 0
+  trailing slack extents   : 0
+  exact partition          : yes
+
+ownership after writer close
+  physical file size       : 30404608
+  logical EOF              : 30404608
+  live raw bytes           : 27980619
+  live metadata bytes      : 205815
+  free-space-manager bytes : 6778
+  reusable free bytes      : 2211396
+  unclassified bytes       : 0
+  trailing slack bytes     : 0
+  live raw extents         : 8461
+  live metadata extents    : 569
+  manager metadata extents : 6
+  reusable free extents    : 102
+  unclassified extents     : 0
+  trailing slack extents   : 0
+  exact partition          : yes
