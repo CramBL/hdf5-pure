@@ -1,0 +1,337 @@
+#![cfg(feature = "__hdf5-1.10")]
+
+use std::ffi::CString;
+use std::path::Path;
+
+use hdf5::plist::file_create::FileSpaceStrategy as CStrategy;
+use hdf5::types::VarLenUnicode;
+use hdf5_pure::File;
+use hdf5_pure::FileSpaceStrategy;
+use hdf5_sys::h5o::H5O_INFO_BASIC;
+use hdf5_sys::h5o::H5O_info1_t;
+use hdf5_sys::h5p::H5P_DEFAULT;
+use rstest::rstest;
+use tempfile::tempdir;
+
+use test_util_hdf5::aggregation;
+use test_util_hdf5::aggregation::Object;
+use test_util_hdf5::aggregation::Step;
+use test_util_hdf5::aggregation::Workload;
+use test_util_hdf5::file_space;
+
+#[rstest]
+#[case::metadata_heavy_aggr(aggregation::METADATA_HEAVY, AGGR, METADATA_HEAVY_AGGR)]
+#[case::metadata_heavy_none(aggregation::METADATA_HEAVY, CStrategy::None, METADATA_HEAVY_NONE)]
+#[case::small_raw_aggr(aggregation::SMALL_RAW, AGGR, SMALL_RAW_AGGR)]
+#[case::small_raw_none(aggregation::SMALL_RAW, CStrategy::None, SMALL_RAW_NONE)]
+#[case::small_raw_page(aggregation::SMALL_RAW, PAGE, SMALL_RAW_PAGE)]
+#[case::alternating_aggr(aggregation::ALTERNATING, AGGR, ALTERNATING_AGGR)]
+#[case::alternating_none(aggregation::ALTERNATING, CStrategy::None, ALTERNATING_NONE)]
+#[case::global_heap_aggr(aggregation::GLOBAL_HEAP, AGGR, GLOBAL_HEAP_AGGR)]
+#[case::global_heap_none(aggregation::GLOBAL_HEAP, CStrategy::None, GLOBAL_HEAP_NONE)]
+#[case::freed_extent_aggr(aggregation::FREED_EXTENT, AGGR, FREED_EXTENT_AGGR)]
+#[case::freed_extent_fsm_aggr(aggregation::FREED_EXTENT, FSM_AGGR, FREED_EXTENT_FSM_AGGR)]
+#[case::block_edges_aggr(aggregation::BLOCK_EDGES, AGGR, BLOCK_EDGES_AGGR)]
+#[case::block_edges_none(aggregation::BLOCK_EDGES, CStrategy::None, BLOCK_EDGES_NONE)]
+fn libhdf5_places_a_workload_as_recorded(
+    #[case] workload: Workload,
+    #[case] strategy: CStrategy,
+    #[case] expected: Placements<&[u64]>,
+) {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("workload.h5");
+
+    let observed = Placements::observe(&path, workload, strategy);
+
+    assert_eq!(observed.as_slices(), expected);
+}
+
+#[test]
+fn libhdf5_persists_no_free_space_manager_under_aggr() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("aggr.h5");
+    Placements::observe(&path, aggregation::FREED_EXTENT, AGGR);
+
+    let file = File::open(&path).unwrap();
+    let info = file.file_space_info().unwrap();
+    assert_eq!(
+        (info.strategy, info.persist, info.manager_addrs.as_slice()),
+        (FileSpaceStrategy::Aggr, false, [].as_slice())
+    );
+    assert_eq!(file.persisted_free_space().unwrap(), []);
+    let reopened = hdf5::File::open(&path).unwrap();
+    assert_eq!(reopened.free_space(), 0);
+    assert_eq!(file_space::libhdf5_free_sections(&reopened), []);
+}
+
+#[derive(Debug, Default, Eq, PartialEq)]
+struct Placements<T> {
+    /// The object header address of each object the workload creates, in step order.
+    headers: T,
+    /// The raw data address of each dataset the workload creates, in step order.
+    raw: T,
+    /// The address of the global heap collection of each dataset of strings, in step order.
+    collections: T,
+    /// The file size `H5Fget_filesize` returns after each step, the larger of the end of
+    /// allocation and the end of file.
+    file_sizes: T,
+    /// The bytes left in the aggregators after each step.
+    aggregator_bytes: T,
+    /// The length of the file after the C library closes it.
+    closed_len: u64,
+}
+
+impl Placements<Vec<u64>> {
+    /// Runs `workload` through the C library on a new file at `path` under `strategy`, with 1.10 as
+    /// the low bound on the library version.
+    fn observe(path: &Path, workload: Workload, strategy: CStrategy) -> Self {
+        let file = hdf5::FileBuilder::new()
+            .with_fapl(|fapl| fapl.libver_v110())
+            .with_fcpl(|fcpl| fcpl.file_space_strategy(strategy))
+            .create(path)
+            .unwrap();
+        let mut placements = Self::default();
+        let mut strings = Vec::new();
+        for &step in workload.steps {
+            match step {
+                Step::Create(object) => {
+                    let raw = create(&file, object).map(|dataset| dataset.offset().unwrap());
+                    placements
+                        .headers
+                        .push(header_address(&file, object.link_name()));
+                    placements.raw.extend(raw);
+                    if let Object::Strings(_) = object {
+                        strings.extend(raw);
+                    }
+                }
+                Step::Delete(name) => file.unlink(name).unwrap(),
+            }
+            placements.file_sizes.push(file.size());
+            placements.aggregator_bytes.push(aggregator_bytes(&file));
+        }
+        file.close().unwrap();
+
+        let bytes = std::fs::read(path).unwrap();
+        placements.collections = strings
+            .into_iter()
+            .map(|offset| aggregation::collection_address(&bytes, offset))
+            .collect();
+        placements.closed_len = std::fs::metadata(path).unwrap().len();
+        placements
+    }
+
+    fn as_slices(&self) -> Placements<&[u64]> {
+        let Self {
+            headers,
+            raw,
+            collections,
+            file_sizes,
+            aggregator_bytes,
+            closed_len,
+        } = self;
+        Placements {
+            headers,
+            raw,
+            collections,
+            file_sizes,
+            aggregator_bytes,
+            closed_len: *closed_len,
+        }
+    }
+}
+
+/// Creates `object` in the root group of `file`, and returns the dataset if `object` is one.
+fn create(file: &hdf5::File, object: Object) -> Option<hdf5::Dataset> {
+    match object {
+        Object::Dataset(name, len) => {
+            let dataset = file.new_dataset::<i32>().shape(len).create(name).unwrap();
+            dataset
+                .write(&vec![aggregation::DATASET_VALUE; len])
+                .unwrap();
+            Some(dataset)
+        }
+        Object::Group(name) => {
+            file.create_group(name).unwrap();
+            None
+        }
+        Object::Strings(name) => {
+            let values = aggregation::STRINGS
+                .iter()
+                .map(|value| value.parse::<VarLenUnicode>().unwrap())
+                .collect::<Vec<_>>();
+            let dataset = file
+                .new_dataset::<VarLenUnicode>()
+                .shape(values.len())
+                .create(name)
+                .unwrap();
+            dataset.write(&values).unwrap();
+            Some(dataset)
+        }
+    }
+}
+
+/// Returns the address of the object header of the object at `name`.
+///
+/// `H5Oget_info_by_name2` reports the address, and its successor in 1.12, `H5Oget_info_by_name3`,
+/// reports an object token in its place.
+fn header_address(file: &hdf5::File, name: &str) -> u64 {
+    let name = CString::new(name).unwrap();
+    let mut info = H5O_info1_t::default();
+    let status = hdf5::sync::sync(|| {
+        // SAFETY: The library lock serializes access, `file` keeps the file open, `name` is a
+        // NUL-terminated string that outlives the call, and `info` is a writable `H5O_info1_t`.
+        unsafe {
+            hdf5_sys::h5o::H5Oget_info_by_name2(
+                file.id(),
+                name.as_ptr(),
+                &raw mut info,
+                H5O_INFO_BASIC,
+                H5P_DEFAULT,
+            )
+        }
+    });
+    assert!(status >= 0, "H5Oget_info_by_name2 failed for {name:?}");
+    info.addr
+}
+
+/// Returns the bytes left in the metadata and small-data aggregators of `file`.
+///
+/// `H5Fget_freespace` counts these bytes together with the sections the free-space managers track
+/// (`H5MF_get_freespace` in `H5MF.c`, HDF5 2.2.0).
+fn aggregator_bytes(file: &hdf5::File) -> u64 {
+    let tracked: u64 = file_space::libhdf5_free_sections(file)
+        .iter()
+        .map(|&(_, size)| size)
+        .sum();
+    file.free_space() - tracked
+}
+
+/// `H5F_FSPACE_STRATEGY_AGGR`, which hdf5-metno names `PageAggregation`.
+const AGGR: CStrategy = CStrategy::PageAggregation;
+const FSM_AGGR: CStrategy = CStrategy::FreeSpaceManager {
+    paged: false,
+    persist: false,
+    threshold: 1,
+};
+const PAGE: CStrategy = CStrategy::FreeSpaceManager {
+    paged: true,
+    persist: false,
+    threshold: 1,
+};
+
+const METADATA_HEAVY_AGGR: Placements<&[u64]> = Placements {
+    headers: &[255, 402, 549, 696, 843, 990],
+    raw: &[],
+    collections: &[],
+    file_sizes: &[2048, 2048, 2048, 2048, 2048, 2048],
+    aggregator_bytes: &[1646, 1499, 1352, 1205, 1058, 864],
+    closed_len: 1184,
+};
+
+const METADATA_HEAVY_NONE: Placements<&[u64]> = Placements {
+    headers: &[255, 402, 549, 696, 843, 990],
+    raw: &[],
+    collections: &[],
+    file_sizes: &[402, 549, 696, 843, 990, 1184],
+    aggregator_bytes: &[0, 0, 0, 0, 0, 0],
+    closed_len: 1184,
+};
+
+const SMALL_RAW_AGGR: Placements<&[u64]> = Placements {
+    headers: &[255, 523, 791, 1059, 1327, 1595],
+    raw: &[2048, 2112, 2176, 2240, 2304, 2368],
+    collections: &[],
+    file_sizes: &[4096, 4096, 4096, 4096, 4096, 4096],
+    aggregator_bytes: &[3509, 3177, 2845, 2513, 2181, 1802],
+    closed_len: 2432,
+};
+
+const SMALL_RAW_NONE: Placements<&[u64]> = Placements {
+    headers: &[255, 587, 919, 1251, 1583, 1915],
+    raw: &[523, 855, 1187, 1519, 1851, 2230],
+    collections: &[],
+    file_sizes: &[587, 919, 1251, 1583, 1915, 2294],
+    aggregator_bytes: &[0, 0, 0, 0, 0, 0],
+    closed_len: 2294,
+};
+
+const SMALL_RAW_PAGE: Placements<&[u64]> = Placements {
+    headers: &[255, 523, 791, 1059, 1327, 1595],
+    raw: &[4096, 4160, 4224, 4288, 4352, 4416],
+    collections: &[],
+    file_sizes: &[8192, 8192, 8192, 8192, 8192, 8192],
+    aggregator_bytes: &[0, 0, 0, 0, 0, 0],
+    closed_len: 8192,
+};
+
+const ALTERNATING_AGGR: Placements<&[u64]> = Placements {
+    headers: &[255, 402, 670, 817, 1085, 1232],
+    raw: &[2048, 2112, 2176],
+    collections: &[],
+    file_sizes: &[2048, 4096, 4096, 4096, 4096, 4096],
+    aggregator_bytes: &[1646, 3362, 3215, 2883, 2736, 2357],
+    closed_len: 2240,
+};
+
+const ALTERNATING_NONE: Placements<&[u64]> = Placements {
+    headers: &[255, 402, 734, 881, 1213, 1360],
+    raw: &[670, 1149, 1675],
+    collections: &[],
+    file_sizes: &[402, 734, 881, 1213, 1360, 1739],
+    aggregator_bytes: &[0, 0, 0, 0, 0, 0],
+    closed_len: 1739,
+};
+
+const GLOBAL_HEAP_AGGR: Placements<&[u64]> = Placements {
+    headers: &[255, 523, 791, 1059],
+    raw: &[2048, 2112, 6240],
+    collections: &[2144],
+    file_sizes: &[4096, 8192, 8192, 8192],
+    aggregator_bytes: &[3509, 3209, 2877, 2730],
+    closed_len: 6304,
+};
+
+const GLOBAL_HEAP_NONE: Placements<&[u64]> = Placements {
+    headers: &[255, 587, 4983, 5315],
+    raw: &[523, 855, 5251],
+    collections: &[887],
+    file_sizes: &[587, 4983, 5315, 5462],
+    aggregator_bytes: &[0, 0, 0, 0],
+    closed_len: 5462,
+};
+
+const FREED_EXTENT_AGGR: Placements<&[u64]> = Placements {
+    headers: &[255, 523, 791],
+    raw: &[2048, 3648, 3712],
+    collections: &[],
+    file_sizes: &[4096, 4096, 4096, 4096],
+    aggregator_bytes: &[1973, 1641, 1641, 1309],
+    closed_len: 3776,
+};
+
+const FREED_EXTENT_FSM_AGGR: Placements<&[u64]> = Placements {
+    headers: &[195, 463, 195],
+    raw: &[2048, 3648, 2048],
+    collections: &[],
+    file_sizes: &[4096, 4096, 4096, 4096],
+    aggregator_bytes: &[2033, 1701, 1701, 1701],
+    closed_len: 3712,
+};
+
+const BLOCK_EDGES_AGGR: Placements<&[u64]> = Placements {
+    headers: &[255, 523, 791, 1059, 1327, 1595, 7376, 7691],
+    raw: &[2048, 2112, 6112, 6176, 6576, 6976, 9424, 9824],
+    collections: &[],
+    file_sizes: &[4096, 8096, 8096, 8096, 8096, 8096, 11472, 11472],
+    aggregator_bytes: &[3509, 3241, 2909, 2241, 1573, 858, 3381, 2666],
+    closed_len: 10224,
+};
+
+const BLOCK_EDGES_NONE: Placements<&[u64]> = Placements {
+    headers: &[255, 587, 4855, 5187, 5855, 6523, 7238, 7953],
+    raw: &[523, 855, 5123, 5455, 6123, 6838, 7553, 8268],
+    collections: &[],
+    file_sizes: &[587, 4855, 5187, 5855, 6523, 7238, 7953, 8668],
+    aggregator_bytes: &[0, 0, 0, 0, 0, 0, 0, 0],
+    closed_len: 8668,
+};

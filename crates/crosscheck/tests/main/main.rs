@@ -15,6 +15,7 @@ mod c_write_compat;
 mod cell_array;
 mod chunk_btree_offset_width;
 mod chunk_index_grid;
+mod classic_aggregation;
 mod committed_datatype;
 mod compound_offset_width;
 mod continuation_order;
