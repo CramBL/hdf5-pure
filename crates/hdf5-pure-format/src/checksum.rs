@@ -33,24 +33,35 @@ pub fn verify_trailing(block: &[u8]) -> Result<(), crate::error::FormatError> {
     }
     #[cfg(feature = "checksum")]
     {
-        // A structure shorter than its own checksum field is truncated, not
-        // merely wrong: report the shortfall without indexing past the end.
-        let Some((body, stored)) = block.split_last_chunk::<4>() else {
-            return Err(crate::error::FormatError::UnexpectedEof {
-                expected: 4,
-                available: block.len(),
-            });
-        };
-        let stored = u32::from_le_bytes(*stored);
-        let computed = jenkins_lookup3(body);
-        if computed != stored {
-            return Err(crate::error::FormatError::ChecksumMismatch {
-                expected: stored,
-                computed,
-            });
-        }
-        Ok(())
+        verify_trailing_required(block)
     }
+}
+
+/// Validates a trailing checksum regardless of the `checksum` feature.
+///
+/// Hashes every byte before the four-byte checksum field.
+///
+/// # Errors
+///
+/// Returns [`FormatError::UnexpectedEof`](crate::FormatError::UnexpectedEof) if `block` is
+/// shorter than four bytes, or [`FormatError::ChecksumMismatch`](crate::FormatError::ChecksumMismatch)
+/// if the stored checksum differs from the computed one.
+pub(crate) fn verify_trailing_required(block: &[u8]) -> Result<(), crate::error::FormatError> {
+    let Some((body, stored)) = block.split_last_chunk::<4>() else {
+        return Err(crate::error::FormatError::UnexpectedEof {
+            expected: 4,
+            available: block.len(),
+        });
+    };
+    let stored = u32::from_le_bytes(*stored);
+    let computed = jenkins_lookup3(body);
+    if computed != stored {
+        return Err(crate::error::FormatError::ChecksumMismatch {
+            expected: stored,
+            computed,
+        });
+    }
+    Ok(())
 }
 
 /// Checks an embedded checksum field.
