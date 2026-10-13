@@ -329,8 +329,7 @@ impl WriteEngine {
     ///
     /// Returns `None` if
     /// [`collect_fractal_heap_storage_from_source`](fractal_heap_storage::collect_fractal_heap_storage_from_source)
-    /// cannot prove the heap's ownership, as for a filtered heap or a heap with a free-space manager
-    /// of its own.
+    /// cannot prove the heap's ownership, as for a filtered heap or invalid manager metadata.
     fn fractal_heap_spans(
         &self,
         heap_address: StoredAddress,
@@ -1203,7 +1202,7 @@ impl WriteEngine {
 
     /// Appends every heap allocation, returning whether ownership is supported.
     ///
-    /// Returns `false` for a filtered heap or a heap with a managed-space free-space manager.
+    /// Returns `false` for a filtered heap.
     ///
     /// # Errors
     ///
@@ -1332,7 +1331,11 @@ fn fractal_heap_free_spans(
                     FractalHeapAllocation::Header
                     | FractalHeapAllocation::DirectBlock
                     | FractalHeapAllocation::IndirectBlock
-                    | FractalHeapAllocation::HugeObjectIndex => FreeClass::Page(kind.page_type()),
+                    | FractalHeapAllocation::HugeObjectIndex
+                    | FractalHeapAllocation::ManagedFsmHeader
+                    | FractalHeapAllocation::ManagedFsmSectionList => {
+                        FreeClass::Page(kind.page_type())
+                    }
                     FractalHeapAllocation::HugeObject => huge_object_class,
                 };
                 (addr, len, class)

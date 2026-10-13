@@ -671,7 +671,13 @@ Two things stay behind. A file that persists its free space rewrites its free-sp
 
 Everything a commit writes can go into freed space: object headers, contiguous data, a chunked dataset's chunk data and index, and a dense attribute heap. Each needs a region large enough to hold it whole, so a dataset larger than every free region is written past the end of the file, never split across two holes.
 
-Contiguous and chunked datasets (chunk index plus chunk data) and whole group subtrees, with compact or dense link storage, are reclaimed. Version 2 B-tree chunk indexes are reclaimed with their raw chunk allocations. Dense attribute and link storage that becomes dead is reclaimed: its name index, its optional creation-order index, and its fractal heap. On a paged file all of these B-tree blocks remain metadata, while dataset chunks remain raw data. Reclaim is best-effort: storage whose blocks cannot be enumerated exhaustively, such as a variable-length global heap collection or a fractal heap that is filtered or has its own free-space manager, is left as dead bytes, which never risks freeing a region still in use.
+Contiguous and chunked datasets (chunk index plus chunk data) and whole group subtrees, with compact or dense link storage, are reclaimed. Version 2 B-tree chunk indexes are reclaimed with their raw chunk allocations. Dense attribute and link storage that becomes dead is reclaimed: its name index, its optional creation-order index, and its fractal heap. On a paged file all of these B-tree blocks remain metadata, while dataset chunks remain raw data. Reclaim is best-effort: storage whose blocks cannot be enumerated exhaustively, such as a variable-length global heap collection or a filtered fractal heap, is left as dead bytes, which never risks freeing a region still in use.
+
+For an unfiltered fractal heap with a managed-space free-space manager, reclamation includes the
+manager header and the complete allocated section list, including reserved capacity. The editor
+validates the header and the used section-list bytes, with mandatory checksum checks. The sections
+recorded within that manager describe logical heap space and are excluded from file-space
+reclamation. Invalid or unsupported manager metadata prevents reclamation of the heap.
 
 Before editing or reclaiming a checksummed fractal-heap direct block, the editor validates the
 complete block's checksum, including when the `checksum` feature is disabled. Read-only heap

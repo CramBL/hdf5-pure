@@ -8,12 +8,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- `File::open_rw` reclaims managed-space free-space manager headers and complete allocated section lists with their dead fractal heaps, including reserved capacity. Invalid or unsupported manager metadata prevents heap reclamation ([#758](https://github.com/CramBL/hdf5-pure/pull/758)).
 - `DatasetBuilder::with_fill_time` selects when a dataset writes its fill value, with the policy preserved across repacking and reported by dataset reads. Modifying the fill time of an existing dataset remains unsupported ([#755](https://github.com/CramBL/hdf5-pure/pull/755)).
 - `FormatError` reports unsupported serialized free-space section classes with their client and class identifiers. These diagnostics apply to internal fractal-heap manager parsing ([#757](https://github.com/CramBL/hdf5-pure/pull/757)).
 - `FormatError` distinguishes invalid fractal-heap geometry from block prefixes with an incorrect owner or heap offset. These diagnostics apply to internal parsing of block regions ([#749](https://github.com/CramBL/hdf5-pure/pull/749)).
 - `FormatError` distinguishes a supplied region whose byte count differs from its declared length from one that does not contain a required physical range. These diagnostics apply to internal metadata region operations ([#745](https://github.com/CramBL/hdf5-pure/pull/745)).
 - `StoredAddress` is a supported public type for inspecting base-relative metadata addresses. Its constructors are outside the supported API ([#732](https://github.com/CramBL/hdf5-pure/pull/732)).
-- Fractal-heap storage ownership enumeration accounts for heap headers, managed direct and indirect blocks, huge-object version 2 B-tree metadata, and separately allocated huge-object payloads. Filtered heaps and heaps with managed free-space-manager metadata are rejected when complete ownership cannot be proven.
+- Fractal-heap storage ownership enumeration accounts for heap headers, managed direct and indirect blocks, huge-object version 2 B-tree metadata, and separately allocated huge-object payloads. Filtered heaps are rejected when complete ownership cannot be proven.
 - `Dataset::chunks` and dataset reads support version 2 B-tree chunk indexes with client types 10 and 11. Creating or mutating those indexes remains unsupported ([#718](https://github.com/CramBL/hdf5-pure/pull/718)).
 - `File::open_rw` reclaims version 2 B-tree index metadata and raw chunks when deleting a dataset's final hard link. Paged files keep B-tree metadata and raw chunks in their respective page classes ([#719](https://github.com/CramBL/hdf5-pure/pull/719)).
 - `File::open_rw` reclaims dense-attribute version 2 B-tree name and creation-order indexes when their dense attribute set becomes dead ([#720](https://github.com/CramBL/hdf5-pure/pull/720)).
