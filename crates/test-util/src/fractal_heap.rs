@@ -159,6 +159,43 @@ impl Header {
     }
 }
 
+/// Returns the fractal-heap header from a dense-link deletion fixture.
+///
+/// The fixture uses 8-byte offsets and lengths. The crosscheck generates the metadata with
+/// each supported HDF5 release and compares the complete bytes.
+pub fn dense_link_free_space_header() -> Vec<u8> {
+    decode_hex(
+        "46524850000700000002001000000000000000000000ffffffffffffffffd2b80300000000007b050000000000000000040000000000006000000000000000a000000000000096000000000000000000000000000000000000000000000000000000000000000000000000000000040000020000000000000000010000000000200001001b14000000000000080099fa2d63",
+    )
+}
+
+/// Returns the free-space manager header from a dense-link deletion fixture.
+///
+/// The fixture uses 8-byte offsets and lengths. The crosscheck generates the metadata with
+/// each supported HDF5 release and compares the complete bytes.
+pub fn dense_link_free_space_manager() -> Vec<u8> {
+    decode_hex(
+        "465348440000b52a0000000000000a000000000000000700000000000000030000000000000004005000780020000000010000000000cd130000000000004e000000000000004e00000000000000e9a83146",
+    )
+}
+
+/// Returns the used free-space section-list bytes from a dense-link deletion fixture.
+///
+/// The fixture uses 8-byte offsets and lengths. The crosscheck generates the metadata with
+/// each supported HDF5 release and compares the complete bytes.
+pub fn dense_link_free_space_sections() -> Vec<u8> {
+    decode_hex(
+        "46535345007b05000000000000046100009f4f0000009f5f0000009f6f0000009f7f00000001eb0100000000000100000000000000001000013a08001540000000014b1100b58e000000bf37b83d",
+    )
+}
+
+fn decode_hex(digits: &str) -> Vec<u8> {
+    (0..digits.len())
+        .step_by(2)
+        .map(|at| u8::from_str_radix(&digits[at..at + 2], 16).unwrap())
+        .collect()
+}
+
 /// Returns a file image with a fractal heap of one managed object: the header at offset 0, and
 /// the root direct block at offset 256, with `object` after the prefix of the block.
 ///

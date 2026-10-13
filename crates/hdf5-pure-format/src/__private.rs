@@ -134,6 +134,14 @@ pub use crate::fractal_heap_block::FractalHeapIndirectBlock;
 pub use crate::fractal_heap_block::FractalHeapIndirectBlockRef;
 pub use crate::fractal_heap_block::FractalHeapIndirectBlockView;
 pub use crate::fractal_heap_block::FractalHeapObjectRef;
+
+pub use crate::fractal_heap_free_space::FractalHeapFreeSection;
+pub use crate::fractal_heap_free_space::FractalHeapFreeSpace;
+pub use crate::fractal_heap_free_space::FractalHeapFreeSpaceManager;
+pub use crate::fractal_heap_free_space::FractalHeapFreeSpaceSectionListRef;
+pub use crate::fractal_heap_free_space::FractalHeapIndirectSection;
+pub use crate::fractal_heap_free_space::FractalHeapRowSection;
+pub use crate::fractal_heap_free_space::FractalHeapSectionClass;
 pub use crate::fractal_heap_write::ATTRIBUTE_HEAP_BLOCK_OFFSET_BYTES;
 pub use crate::fractal_heap_write::ATTRIBUTE_HEAP_MAX_DIRECT_BLOCK_SIZE;
 pub use crate::fractal_heap_write::ATTRIBUTE_HEAP_MAX_HEAP_SIZE_BITS;

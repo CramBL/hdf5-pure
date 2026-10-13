@@ -252,6 +252,7 @@ def test_migration_shape_ignores_only_the_allowed_variant_changes(variant, expec
         ("InvalidFractalHeapIdLength", []),
         ("InvalidFilterName", []),
         ("InvalidFilterPipelineField", []),
+        ("UnsupportedSerializedSectionClass", []),
         (
             "UnrecognizedHeapError",
             ["FormatError: variants changed", "FormatError: variant_order changed"],
