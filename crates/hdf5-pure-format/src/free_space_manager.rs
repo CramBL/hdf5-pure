@@ -1,19 +1,12 @@
-//! The blocks of a persistent free-space manager: the free-space manager header (`FSHD`) and
-//! its section list (`FSSE`).
+//! Free-space manager headers (`FSHD`), section lists (`FSSE`), and file-client records.
 //!
-//! A file created with `H5Pset_file_space_strategy` and `persist` set stores the free space of
-//! each of its free-space managers in these blocks, and the [File Space Info
-//! message](crate::file_space_info) in its superblock extension holds the address of each header.
-//! This module parses and serializes the blocks of the file client, client ID 1, at the offset
-//! and length widths of the file. The blocks are defined in "Free-space Index" of the [format
+//! The common framing APIs parse caller-supplied bytes and retain the client ID for
+//! client-specific validation. [`FreeSpaceManagerHeader`] and [`parse_section_info`] validate
+//! file-client metadata. The complete allocation and used bytes required for parsing are
+//! recorded separately in a section-list reference.
+//!
+//! Version 0 headers and section lists are defined in "Free-space Index" of the [format
 //! specification, version 4.0][spec].
-//!
-//! The section list stores each set of sections as a count, a size, and an offset and a class per
-//! section, in the fewest bytes that hold the header's section count, its maximum section size,
-//! and an address in its address space. Below 8-byte lengths, the C library writes into "Maximum
-//! Section Size" the maximum address of its file driver truncated to the length width, which is all
-//! ones or all ones less one, and writes each section size as wide as a section offset. A section
-//! list the C library writes may hold zeros between its last section and its checksum.
 //!
 //! [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsec_fmt4_infra_freespaceindex
 
@@ -22,6 +15,11 @@ use alloc::collections::BTreeSet;
 use alloc::format;
 use alloc::vec::Vec;
 use core::num::NonZeroU64;
+
+use hdf5_pure_core::__private::DecodedStoredAddress;
+use hdf5_pure_core::__private::FileRange;
+use hdf5_pure_core::__private::FileRegion;
+use hdf5_pure_core::__private::PhysicalAddress;
 
 use crate::address::StoredAddress;
 use crate::address::StoredAddressExt;
@@ -35,6 +33,468 @@ use crate::width::OffsetWidth;
 
 const FSHD_SIGNATURE: &[u8; 4] = b"FSHD";
 const FSSE_SIGNATURE: &[u8; 4] = b"FSSE";
+
+/// A physical reference to a version 0 free-space manager header.
+///
+/// The caller resolves the stored header address before constructing this reference. Parsing
+/// validates common framing. Client-specific header validation is a separate operation.
+///
+/// # Examples
+///
+/// The caller supplies header bytes, resolves the section-list address, and supplies the used
+/// section-list bytes. The borrowed record bytes require client-specific validation.
+///
+/// ```
+/// use hdf5_pure_core::{BaseAddress, StoredAddress};
+/// use hdf5_pure_core::__private::{BaseAddressExt, DecodedStoredAddress, FileRegion,
+///     PhysicalAddress, StoredAddressExt};
+/// use hdf5_pure_format::__private as format;
+/// use hdf5_pure_format::__private::FormatWidths;
+/// use hdf5_pure_format::__private::FreeSection;
+/// use hdf5_pure_format::__private::FreeSpaceManagerHeaderRef;
+///
+/// let widths = FormatWidths::from_sizes(8, 8)?;
+/// let header_addr = StoredAddress::new(64);
+/// # let list_addr = StoredAddress::new(146);
+/// # let (header_bytes, list_bytes) = format::serialize_free_space_manager(
+/// #     widths, &[FreeSection { addr: StoredAddress::new(256), size: 32 }],
+/// #     header_addr, list_addr, format::SECTION_CLASS_SIMPLE,
+/// # )?;
+/// let base = BaseAddress::new(512);
+/// let header_ref = FreeSpaceManagerHeaderRef::new(
+///     widths, PhysicalAddress::new(base.absolute(header_addr)?),
+/// )?;
+/// let header_region = FileRegion::new(header_ref.parse_range(), &header_bytes)?;
+/// let frame = header_ref.parse(header_region)?;
+/// let header = frame.file_header()?;
+/// let DecodedStoredAddress::Defined(list_addr) = frame.section_list_addr() else {
+///     panic!("expected a defined section list address")
+/// };
+/// let list_ref = frame.section_list_ref(
+///     header_addr, PhysicalAddress::new(base.absolute(list_addr)?),
+/// )?;
+/// let list_region = FileRegion::new(list_ref.parse_range(), &list_bytes)?;
+/// let view = list_ref.parse(list_region)?;
+/// assert_eq!(header.total_sections(), 1);
+/// assert_eq!(view.records().len(), 18);
+/// # Ok::<(), hdf5_pure_format::FormatError>(())
+/// ```
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct FreeSpaceManagerHeaderRef {
+    range: FileRange,
+    widths: FormatWidths,
+}
+
+impl FreeSpaceManagerHeaderRef {
+    /// Creates a header reference at the resolved physical address.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::OffsetOverflow`] if the header range ends past [`u64::MAX`].
+    pub fn new(widths: FormatWidths, address: PhysicalAddress) -> Result<Self, FormatError> {
+        Ok(Self {
+            range: FileRange::new(address, free_space_manager_header_len(widths))?,
+            widths,
+        })
+    }
+
+    /// Parses common header framing from the referenced bytes.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::InsufficientRegion`] if `region` does not contain
+    /// [`parse_range`](Self::parse_range). Other failures are the errors of
+    /// [`FreeSpaceManagerHeaderFrame::parse`].
+    pub fn parse(
+        &self,
+        region: FileRegion<'_>,
+    ) -> Result<FreeSpaceManagerHeaderFrame, FormatError> {
+        let Self { range, widths } = *self;
+        FreeSpaceManagerHeaderFrame::parse(widths, region.subregion(range)?.bytes())
+    }
+
+    /// Returns the complete physical header allocation.
+    pub const fn range(&self) -> FileRange {
+        self.range
+    }
+
+    /// Returns the physical bytes required to parse the header.
+    ///
+    /// This range equals [`range`](Self::range).
+    pub const fn parse_range(&self) -> FileRange {
+        self.range
+    }
+}
+
+/// The common fields of a version 0 free-space manager header.
+///
+/// Parsing checks the signature, version, address-space width, and section-list lengths. With
+/// the `checksum` feature, parsing also verifies the header checksum. Client-specific section
+/// counts, classes, and records require separate validation. The stored section-list address
+/// is classified as defined or undefined at the file's offset width.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FreeSpaceManagerHeaderFrame {
+    client_id: u8,
+    total_space: u64,
+    total_sections: u64,
+    serialized_sections: u64,
+    unserialized_sections: u64,
+    section_classes: u16,
+    shrink_percent: u16,
+    expand_percent: u16,
+    addr_space_bits: AddressSpaceBits,
+    max_section_size: u64,
+    section_list_addr: DecodedStoredAddress,
+    section_list_used: u64,
+    section_list_allocated: u64,
+    widths: FormatWidths,
+}
+
+impl FreeSpaceManagerHeaderFrame {
+    /// Parses common framing at the start of `data`.
+    ///
+    /// The caller passes the file's offset and length widths. Trailing bytes are ignored. The
+    /// client ID and section counts are retained for client-specific validation.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::UnexpectedEof`] if `data` is shorter than the header,
+    /// [`FormatError::ChecksumMismatch`] if the checksum differs with the `checksum` feature
+    /// enabled, or [`FormatError::InvalidFreeSpaceManager`] if the signature or version is
+    /// invalid, the address space is outside 1 to 64 bits, or the used section-list length
+    /// exceeds its allocated length.
+    pub fn parse(widths: FormatWidths, data: &[u8]) -> Result<Self, FormatError> {
+        let FormatWidths { offsets, lengths } = widths;
+        let block = data
+            .get(..header_len(widths))
+            .ok_or(FormatError::UnexpectedEof {
+                expected: header_len(widths),
+                available: data.len(),
+            })?;
+        let mut fields = bytes::Fields::new(block, 0);
+        let signature = fields.array::<{ FSHD_SIGNATURE.len() }>()?;
+        if &signature != FSHD_SIGNATURE {
+            return Err(FormatError::InvalidFreeSpaceManager(format!(
+                "the header signature is b\"{}\", not b\"{}\"",
+                signature.escape_ascii(),
+                FSHD_SIGNATURE.escape_ascii()
+            )));
+        }
+        checksum::verify_trailing(block)?;
+        let version = fields.u8()?;
+        if version != FSHD_VERSION {
+            return Err(FormatError::InvalidFreeSpaceManager(format!(
+                "the header version is {version}, not {FSHD_VERSION}"
+            )));
+        }
+        let client_id = fields.u8()?;
+        let total_space = fields.length(lengths)?;
+        let total_sections = fields.length(lengths)?;
+        let serialized_sections = fields.length(lengths)?;
+        let unserialized_sections = fields.length(lengths)?;
+        let section_classes = fields.u16()?;
+        let (shrink_percent, expand_percent) = (fields.u16()?, fields.u16()?);
+        let bits = fields.u16()?;
+        let addr_space_bits = AddressSpaceBits::new(bits).ok_or_else(|| {
+            FormatError::InvalidFreeSpaceManager(format!(
+                "an address space of {bits} bits is not 1 to 64 bits wide"
+            ))
+        })?;
+        let max_section_size = fields.length(lengths)?;
+        let section_list_addr = offsets.decode_address(block, fields.pos())?;
+        fields.address(offsets)?;
+        let section_list_used = fields.length(lengths)?;
+        let section_list_allocated = fields.length(lengths)?;
+        if section_list_used > section_list_allocated {
+            return Err(FormatError::InvalidFreeSpaceManager(format!(
+                "the section list uses {section_list_used} bytes, more than the {section_list_allocated} bytes \
+                 allocated to it"
+            )));
+        }
+        Ok(Self {
+            client_id,
+            total_space,
+            total_sections,
+            serialized_sections,
+            unserialized_sections,
+            section_classes,
+            shrink_percent,
+            expand_percent,
+            addr_space_bits,
+            max_section_size,
+            section_list_addr,
+            section_list_used,
+            section_list_allocated,
+            widths,
+        })
+    }
+
+    /// Validates the header fields for the file client, client ID 1.
+    ///
+    /// For a nonempty manager, checks that the section list has a defined address and enough
+    /// used bytes for the declared sections. Section records require [`parse_section_info`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::InvalidFreeSpaceManager`] if the client ID is not 1, the section
+    /// counts do not describe fully serialized sections, the class count exceeds 3, or a
+    /// nonempty manager has an undefined section-list address or insufficient used bytes.
+    pub fn file_header(&self) -> Result<FreeSpaceManagerHeader, FormatError> {
+        let Self {
+            client_id,
+            total_space,
+            total_sections,
+            serialized_sections,
+            unserialized_sections,
+            section_classes,
+            shrink_percent: _,
+            expand_percent: _,
+            addr_space_bits,
+            max_section_size,
+            section_list_addr,
+            section_list_used,
+            section_list_allocated,
+            widths,
+        } = *self;
+        let FormatWidths { offsets, lengths } = widths;
+        if client_id != FILE_FSM_CLIENT_ID {
+            return Err(FormatError::InvalidFreeSpaceManager(format!(
+                "the client ID is {client_id}, not {FILE_FSM_CLIENT_ID}, the ID of the file client"
+            )));
+        }
+        if (serialized_sections, unserialized_sections) != (total_sections, 0) {
+            return Err(FormatError::InvalidFreeSpaceManager(format!(
+                "the header's section count is {total_sections}, its serialized section count \
+                 {serialized_sections} and its unserialized section count {unserialized_sections}, \
+                 and the file client serializes every section"
+            )));
+        }
+        if section_classes > FILE_FSM_NUM_CLASSES {
+            return Err(FormatError::InvalidFreeSpaceManager(format!(
+                "the header registers {section_classes} section classes, more than the \
+                 {FILE_FSM_NUM_CLASSES} of the file client"
+            )));
+        }
+        let header = FreeSpaceManagerHeader {
+            total_space,
+            total_sections,
+            addr_space_bits,
+            max_section_size,
+            section_list_addr: match section_list_addr {
+                DecodedStoredAddress::Defined(addr) => addr,
+                DecodedStoredAddress::Undefined => StoredAddress::undefined(offsets.get()),
+            },
+            section_list_used,
+            section_list_allocated,
+        };
+        if total_sections == 0 {
+            return Ok(header);
+        }
+        if section_list_addr == DecodedStoredAddress::Undefined {
+            return Err(FormatError::InvalidFreeSpaceManager(format!(
+                "the header's section count is {total_sections}, and it stores no section list"
+            )));
+        }
+        let max_sections = header
+            .section_fields(lengths)
+            .max_sections(offsets, section_list_used);
+        if total_sections > max_sections {
+            return Err(FormatError::InvalidFreeSpaceManager(format!(
+                "the header's section count is {total_sections}, and a section list of {section_list_used} \
+                 bytes holds at most {max_sections}"
+            )));
+        }
+        Ok(header)
+    }
+
+    /// Creates a section-list reference at the resolved physical address.
+    ///
+    /// The caller resolves [`section_list_addr`](Self::section_list_addr) to `address` and
+    /// passes this header's stored address as `header_addr` to check the address in the section list.
+    /// The complete allocation and the used range are recorded separately.
+    /// Construction checks range arithmetic without checking source bounds or ownership.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::InvalidFreeSpaceManager`] if the section-list address or
+    /// `header_addr` is undefined, or the used length is shorter than the prefix and checksum.
+    /// Returns [`FormatError::AddressTooLarge`] if `header_addr` exceeds the offset width, or
+    /// [`FormatError::OffsetOverflow`] if either physical range ends past [`u64::MAX`].
+    pub fn section_list_ref(
+        &self,
+        header_addr: StoredAddress,
+        address: PhysicalAddress,
+    ) -> Result<FreeSpaceManagerSectionListRef, FormatError> {
+        if self.section_list_addr == DecodedStoredAddress::Undefined {
+            return Err(FormatError::InvalidFreeSpaceManager(
+                "the header stores no section list address".into(),
+            ));
+        }
+        if header_addr.get() > StoredAddress::undefined(self.widths.offsets.get()).get() {
+            return Err(FormatError::AddressTooLarge {
+                address: header_addr.get(),
+                offset_size: self.widths.offsets.get(),
+            });
+        }
+        if header_addr.is_undefined(self.widths.offsets.get()) {
+            return Err(FormatError::InvalidFreeSpaceManager(
+                "the section list's expected header address is undefined".into(),
+            ));
+        }
+        let minimum = (section_list_prefix_len(self.widths.offsets) + CHECKSUM_LEN).to_u64();
+        if self.section_list_used < minimum {
+            return Err(FormatError::InvalidFreeSpaceManager(format!(
+                "the section list uses {} bytes, fewer than its {minimum}-byte prefix and checksum",
+                self.section_list_used
+            )));
+        }
+        Ok(FreeSpaceManagerSectionListRef {
+            range: FileRange::new(address, self.section_list_allocated)?,
+            parse_range: FileRange::new(address, self.section_list_used)?,
+            offsets: self.widths.offsets,
+            header_addr,
+        })
+    }
+
+    /// Returns the client ID for client-specific validation.
+    pub fn client_id(&self) -> u8 {
+        self.client_id
+    }
+
+    /// Returns the number of free bytes recorded in "Total Space Tracked".
+    pub fn total_space(&self) -> u64 {
+        self.total_space
+    }
+
+    /// Returns the count recorded in "Total Number of Sections".
+    pub fn total_sections(&self) -> u64 {
+        self.total_sections
+    }
+
+    /// Returns the count recorded in "Number of Serialized Sections".
+    pub fn serialized_sections(&self) -> u64 {
+        self.serialized_sections
+    }
+
+    /// Returns the count recorded in "Number of Un-Serialized Sections".
+    pub fn unserialized_sections(&self) -> u64 {
+        self.unserialized_sections
+    }
+
+    /// Returns the count recorded in "Number of Section Classes".
+    pub fn section_classes(&self) -> u16 {
+        self.section_classes
+    }
+
+    /// Returns the percentage recorded in "Shrink Percent".
+    pub fn shrink_percent(&self) -> u16 {
+        self.shrink_percent
+    }
+
+    /// Returns the percentage recorded in "Expand Percent".
+    pub fn expand_percent(&self) -> u16 {
+        self.expand_percent
+    }
+
+    /// Returns the bit count recorded in "Size of Address Space".
+    pub fn addr_space_bits(&self) -> u16 {
+        self.addr_space_bits.get()
+    }
+
+    /// Returns the size limit recorded in "Maximum Section Size".
+    pub fn max_section_size(&self) -> u64 {
+        self.max_section_size
+    }
+
+    /// Returns the stored section-list address with its undefined value classified.
+    pub fn section_list_addr(&self) -> DecodedStoredAddress {
+        self.section_list_addr
+    }
+
+    /// Returns the used section-list length in bytes, including its checksum.
+    pub fn section_list_used(&self) -> u64 {
+        self.section_list_used
+    }
+
+    /// Returns the complete section-list allocation length in bytes.
+    pub fn section_list_allocated(&self) -> u64 {
+        self.section_list_allocated
+    }
+}
+
+/// A physical reference to a version 0 free-space section list.
+///
+/// The complete allocation may be longer than the used bytes required for parsing. A
+/// successful parse validates common framing and the header address. Client-specific record
+/// validation and storage ownership are separate checks.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct FreeSpaceManagerSectionListRef {
+    range: FileRange,
+    parse_range: FileRange,
+    offsets: OffsetWidth,
+    header_addr: StoredAddress,
+}
+
+impl FreeSpaceManagerSectionListRef {
+    /// Borrows the record bytes after validating common section-list framing.
+    ///
+    /// Checks the signature, version, and stored header address. With the `checksum` feature,
+    /// verifies the checksum at the end of [`parse_range`](Self::parse_range). Bytes in the
+    /// allocation after that range are ignored. Client-specific records are not decoded.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::InsufficientRegion`] if `region` does not contain
+    /// [`parse_range`](Self::parse_range), [`FormatError::ChecksumMismatch`] if the checksum
+    /// differs with the `checksum` feature enabled, or [`FormatError::InvalidFreeSpaceManager`]
+    /// if the signature, version, or header address is invalid.
+    pub fn parse<'a>(
+        &self,
+        region: FileRegion<'a>,
+    ) -> Result<FreeSpaceManagerSectionListView<'a>, FormatError> {
+        let Self {
+            range: _,
+            parse_range,
+            offsets,
+            header_addr,
+        } = *self;
+        let bytes = region.subregion(parse_range)?.bytes();
+        parse_section_list_prefix(offsets, bytes, header_addr)?;
+        Ok(FreeSpaceManagerSectionListView {
+            records: bytes
+                .get(section_list_prefix_len(offsets)..bytes.len() - CHECKSUM_LEN)
+                .ok_or_else(|| {
+                    FormatError::Internal("a parsed section list has no record range".into())
+                })?,
+        })
+    }
+
+    /// Returns the complete physical allocation, including unused capacity.
+    pub const fn range(&self) -> FileRange {
+        self.range
+    }
+
+    /// Returns the used physical bytes, including the prefix and trailing checksum.
+    pub const fn parse_range(&self) -> FileRange {
+        self.parse_range
+    }
+}
+
+/// Borrowed section-record bytes with validated common framing.
+///
+/// The prefix and checksum are excluded. The bytes may include padding and require
+/// client-specific decoding before their section offsets or sizes are used.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct FreeSpaceManagerSectionListView<'a> {
+    records: &'a [u8],
+}
+
+impl<'a> FreeSpaceManagerSectionListView<'a> {
+    /// Returns the borrowed bytes between the prefix and checksum.
+    pub const fn records(&self) -> &'a [u8] {
+        self.records
+    }
+}
 
 /// One free region of a file: the address the file stores for it and its length.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -105,97 +565,7 @@ impl FreeSpaceManagerHeader {
     /// allocated length, or a header of one or more sections stores the undefined address for
     /// its section list or a used length too short for its sections.
     pub fn parse(widths: FormatWidths, data: &[u8]) -> Result<FreeSpaceManagerHeader, FormatError> {
-        let FormatWidths { offsets, lengths } = widths;
-        let block = data
-            .get(..header_len(widths))
-            .ok_or(FormatError::UnexpectedEof {
-                expected: header_len(widths),
-                available: data.len(),
-            })?;
-        let mut fields = bytes::Fields::new(block, 0);
-        let signature = fields.array::<{ FSHD_SIGNATURE.len() }>()?;
-        if &signature != FSHD_SIGNATURE {
-            return Err(FormatError::InvalidFreeSpaceManager(format!(
-                "the header signature is b\"{}\", not b\"{}\"",
-                signature.escape_ascii(),
-                FSHD_SIGNATURE.escape_ascii()
-            )));
-        }
-        checksum::verify_trailing(block)?;
-        let version = fields.u8()?;
-        if version != FSHD_VERSION {
-            return Err(FormatError::InvalidFreeSpaceManager(format!(
-                "the header version is {version}, not {FSHD_VERSION}"
-            )));
-        }
-        let client_id = fields.u8()?;
-        if client_id != FILE_FSM_CLIENT_ID {
-            return Err(FormatError::InvalidFreeSpaceManager(format!(
-                "the client ID is {client_id}, not {FILE_FSM_CLIENT_ID}, the ID of the file client"
-            )));
-        }
-        let total_space = fields.length(lengths)?;
-        let total_sections = fields.length(lengths)?;
-        let serialized_sections = fields.length(lengths)?;
-        let unserialized_sections = fields.length(lengths)?;
-        if (serialized_sections, unserialized_sections) != (total_sections, 0) {
-            return Err(FormatError::InvalidFreeSpaceManager(format!(
-                "the header's section count is {total_sections}, its serialized section count \
-                 {serialized_sections} and its unserialized section count {unserialized_sections}, \
-                 and the file client serializes every section"
-            )));
-        }
-        let section_classes = fields.u16()?;
-        if section_classes > FILE_FSM_NUM_CLASSES {
-            return Err(FormatError::InvalidFreeSpaceManager(format!(
-                "the header registers {section_classes} section classes, more than the \
-                 {FILE_FSM_NUM_CLASSES} of the file client"
-            )));
-        }
-        let (_shrink_percent, _expand_percent) = (fields.u16()?, fields.u16()?);
-        let bits = fields.u16()?;
-        let addr_space_bits = AddressSpaceBits::new(bits).ok_or_else(|| {
-            FormatError::InvalidFreeSpaceManager(format!(
-                "an address space of {bits} bits is not 1 to 64 bits wide"
-            ))
-        })?;
-        let max_section_size = fields.length(lengths)?;
-        let section_list_addr = fields.address(offsets)?;
-        let section_list_used = fields.length(lengths)?;
-        let section_list_allocated = fields.length(lengths)?;
-        let header = FreeSpaceManagerHeader {
-            total_space,
-            total_sections,
-            addr_space_bits,
-            max_section_size,
-            section_list_addr,
-            section_list_used,
-            section_list_allocated,
-        };
-        if section_list_used > section_list_allocated {
-            return Err(FormatError::InvalidFreeSpaceManager(format!(
-                "the section list uses {section_list_used} bytes, more than the {section_list_allocated} bytes \
-                 allocated to it"
-            )));
-        }
-        if total_sections == 0 {
-            return Ok(header);
-        }
-        if section_list_addr.is_undefined(offsets.get()) {
-            return Err(FormatError::InvalidFreeSpaceManager(format!(
-                "the header's section count is {total_sections}, and it stores no section list"
-            )));
-        }
-        let max_sections = header
-            .section_fields(lengths)
-            .max_sections(offsets, section_list_used);
-        if total_sections > max_sections {
-            return Err(FormatError::InvalidFreeSpaceManager(format!(
-                "the header's section count is {total_sections}, and a section list of {section_list_used} \
-                 bytes holds at most {max_sections}"
-            )));
-        }
-        Ok(header)
+        FreeSpaceManagerHeaderFrame::parse(widths, data)?.file_header()
     }
 
     /// Returns the number of free bytes the manager tracks, the "Total Space Tracked" field.
@@ -569,36 +939,7 @@ pub fn parse_section_info(
         available: data.len(),
     })?;
     let prefix_len = section_list_prefix_len(widths.offsets);
-    if list.len() < prefix_len + CHECKSUM_LEN {
-        return Err(FormatError::UnexpectedEof {
-            expected: prefix_len + CHECKSUM_LEN,
-            available: list.len(),
-        });
-    }
-    let mut fields = bytes::Fields::new(list, 0);
-    let signature = fields.array::<{ FSSE_SIGNATURE.len() }>()?;
-    if &signature != FSSE_SIGNATURE {
-        return Err(FormatError::InvalidFreeSpaceManager(format!(
-            "the section list signature is b\"{}\", not b\"{}\"",
-            signature.escape_ascii(),
-            FSSE_SIGNATURE.escape_ascii()
-        )));
-    }
-    checksum::verify_trailing(list)?;
-    let version = fields.u8()?;
-    if version != FSSE_VERSION {
-        return Err(FormatError::InvalidFreeSpaceManager(format!(
-            "the section list version is {version}, not {FSSE_VERSION}"
-        )));
-    }
-    let owner_addr = fields.address(widths.offsets)?;
-    if owner_addr != header_addr {
-        return Err(FormatError::InvalidFreeSpaceManager(format!(
-            "the section list belongs to the header at {}, not to the header at {}",
-            owner_addr.get(),
-            header_addr.get()
-        )));
-    }
+    parse_section_list_prefix(widths.offsets, list, header_addr)?;
     let body = &list[..list.len() - CHECKSUM_LEN];
     let (sections, sets_end) = header.section_fields(widths.lengths).decode_sets(
         body,
@@ -818,6 +1159,58 @@ fn header_len(widths: FormatWidths) -> usize {
     4 + 1 + 1 + 4 * ls + 2 * 4 + ls + os + ls + ls + CHECKSUM_LEN
 }
 
+/// Checks the section-list signature, version, and stored header address.
+///
+/// With the `checksum` feature, verifies the checksum over the used section-list bytes.
+///
+/// # Errors
+///
+/// Returns [`FormatError::UnexpectedEof`] if `list` is shorter than the prefix and checksum,
+/// [`FormatError::ChecksumMismatch`] if the checksum differs with the `checksum` feature
+/// enabled, or [`FormatError::InvalidFreeSpaceManager`] if the signature, version, or header address
+/// is invalid.
+fn parse_section_list_prefix(
+    offsets: OffsetWidth,
+    list: &[u8],
+    header_addr: StoredAddress,
+) -> Result<(), FormatError> {
+    let prefix_len = section_list_prefix_len(offsets);
+    if list.len() < prefix_len + CHECKSUM_LEN {
+        return Err(FormatError::UnexpectedEof {
+            expected: prefix_len + CHECKSUM_LEN,
+            available: list.len(),
+        });
+    }
+    let mut fields = bytes::Fields::new(list, 0);
+    let signature = fields.array::<{ FSSE_SIGNATURE.len() }>()?;
+    if &signature != FSSE_SIGNATURE {
+        return Err(FormatError::InvalidFreeSpaceManager(format!(
+            "the section list signature is b\"{}\", not b\"{}\"",
+            signature.escape_ascii(),
+            FSSE_SIGNATURE.escape_ascii()
+        )));
+    }
+    checksum::verify_trailing(list)?;
+    let version = fields.u8()?;
+    if version != FSSE_VERSION {
+        return Err(FormatError::InvalidFreeSpaceManager(format!(
+            "the section list version is {version}, not {FSSE_VERSION}"
+        )));
+    }
+    let owner_addr = match offsets.decode_address(list, fields.pos())? {
+        DecodedStoredAddress::Defined(addr) => addr,
+        DecodedStoredAddress::Undefined => StoredAddress::undefined(offsets.get()),
+    };
+    if owner_addr != header_addr {
+        return Err(FormatError::InvalidFreeSpaceManager(format!(
+            "the section list belongs to the header at {}, not to the header at {}",
+            owner_addr.get(),
+            header_addr.get()
+        )));
+    }
+    Ok(())
+}
+
 /// Returns the length in bytes of the fields of a section list before its first set: the
 /// signature, the version, and the header address.
 fn section_list_prefix_len(offsets: OffsetWidth) -> usize {
@@ -867,6 +1260,467 @@ mod tests {
     use test_util::free_space;
 
     use super::*;
+
+    #[rstest]
+    #[case::two(
+        widths(2, 2),
+        free_space::two_byte_widths_header(),
+        free_space::two_byte_widths_section_info(),
+        0x01E5,
+        0x0207
+    )]
+    #[case::four(
+        widths(4, 4),
+        free_space::four_byte_widths_header(),
+        free_space::four_byte_widths_section_info(),
+        0x0217,
+        0x0249
+    )]
+    #[case::mixed(
+        widths(8, 4),
+        free_space::four_byte_lengths_header(),
+        free_space::four_byte_lengths_section_info(),
+        0x0273,
+        0x02A9
+    )]
+    #[case::eight(
+        widths(8, 8),
+        free_space::single_section_header(),
+        free_space::single_section_info(),
+        619,
+        701
+    )]
+    fn region_sequence_parses_c_library_manager(
+        #[case] widths: FormatWidths,
+        #[case] header_bytes: Vec<u8>,
+        #[case] list_bytes: Vec<u8>,
+        #[case] header_at: u64,
+        #[case] list_at: u64,
+    ) {
+        use hdf5_pure_core::__private::BaseAddressExt;
+        use hdf5_pure_core::BaseAddress;
+
+        use crate::__private::FreeSpaceManagerHeaderRef;
+
+        let base = BaseAddress::new(512);
+        let header_addr = StoredAddress::new(header_at);
+        let header_ref = FreeSpaceManagerHeaderRef::new(
+            widths,
+            PhysicalAddress::new(base.absolute(header_addr).unwrap()),
+        )
+        .unwrap();
+        assert_eq!(header_ref.range(), header_ref.parse_range());
+        let frame = header_ref
+            .parse(FileRegion::new(header_ref.parse_range(), &header_bytes).unwrap())
+            .unwrap();
+        let max_section_size = if widths.lengths == LengthWidth::Eight {
+            FILE_FSM_MAX_SECTION_SIZE
+        } else {
+            widths.lengths.max()
+        };
+        assert_eq!(
+            frame.file_header().unwrap(),
+            FreeSpaceManagerHeader {
+                total_space: 1600,
+                total_sections: 1,
+                addr_space_bits: AddressSpaceBits(63),
+                max_section_size,
+                section_list_addr: StoredAddress::new(list_at),
+                section_list_used: list_bytes.len() as u64,
+                section_list_allocated: list_bytes.len() as u64,
+            }
+        );
+        assert_eq!(frame.client_id(), FILE_FSM_CLIENT_ID);
+        assert_eq!(frame.total_space(), 1600);
+        assert_eq!(frame.total_sections(), 1);
+        assert_eq!(frame.serialized_sections(), 1);
+        assert_eq!(frame.unserialized_sections(), 0);
+        assert_eq!(frame.section_classes(), FILE_FSM_NUM_CLASSES);
+        assert_eq!(frame.shrink_percent(), FILE_FSM_SHRINK_PCT);
+        assert_eq!(frame.expand_percent(), FILE_FSM_EXPAND_PCT);
+        assert_eq!(frame.addr_space_bits(), 63);
+        assert_eq!(frame.max_section_size(), max_section_size);
+        let DecodedStoredAddress::Defined(list_addr) = frame.section_list_addr() else {
+            panic!("expected a defined section list")
+        };
+        assert_eq!(list_addr.get(), list_at);
+        assert_eq!(frame.section_list_used(), list_bytes.len() as u64);
+        assert_eq!(frame.section_list_allocated(), list_bytes.len() as u64);
+        let list_ref = frame
+            .section_list_ref(
+                header_addr,
+                PhysicalAddress::new(base.absolute(list_addr).unwrap()),
+            )
+            .unwrap();
+        let view = list_ref
+            .parse(FileRegion::new(list_ref.parse_range(), &list_bytes).unwrap())
+            .unwrap();
+        assert_eq!(list_ref.range(), list_ref.parse_range());
+        assert_eq!(
+            view.records(),
+            &list_bytes[section_list_prefix_len(widths.offsets)..list_bytes.len() - CHECKSUM_LEN]
+        );
+        assert_eq!(
+            view.records().as_ptr(),
+            list_bytes[section_list_prefix_len(widths.offsets)..].as_ptr()
+        );
+    }
+
+    #[rstest]
+    #[case::two(widths(2, 2))]
+    #[case::four(widths(4, 4))]
+    #[case::eight(widths(8, 8))]
+    fn framing_classifies_undefined_section_list_at_its_width(#[case] widths: FormatWidths) {
+        let (header_bytes, _) = serialize_free_space_manager(
+            widths,
+            &[],
+            StoredAddress::new(32),
+            StoredAddress::undefined(widths.offsets.get()),
+            SECTION_CLASS_SIMPLE,
+        )
+        .unwrap();
+        let frame = FreeSpaceManagerHeaderFrame::parse(widths, &header_bytes).unwrap();
+        assert_eq!(frame.section_list_addr(), DecodedStoredAddress::Undefined);
+        assert_eq!(
+            frame.file_header().unwrap().section_list_addr(),
+            StoredAddress::undefined(widths.offsets.get())
+        );
+        assert_eq!(
+            frame
+                .section_list_ref(StoredAddress::new(32), PhysicalAddress::new(64))
+                .unwrap_err(),
+            FormatError::InvalidFreeSpaceManager(
+                "the header stores no section list address".into()
+            )
+        );
+    }
+
+    #[rstest]
+    #[case::heap(FRACTAL_HEAP_FSM_CLIENT_ID)]
+    #[case::reserved(2)]
+    fn file_semantics_reject_another_client_after_framing(#[case] client: u8) {
+        let mut bytes = free_space::single_section_header();
+        bytes[5] = client;
+        let len = bytes.len();
+        test_util::checksum::restamp(&mut bytes, 0, len);
+        let frame = FreeSpaceManagerHeaderFrame::parse(widths(8, 8), &bytes).unwrap();
+        assert_eq!(frame.client_id(), client);
+        assert_eq!(
+            frame.file_header().unwrap_err(),
+            FormatError::InvalidFreeSpaceManager(format!(
+                "the client ID is {client}, not 1, the ID of the file client"
+            ))
+        );
+    }
+
+    #[test]
+    fn common_framing_retains_client_specific_counts() {
+        let mut bytes = free_space::single_section_header();
+        bytes[5] = FRACTAL_HEAP_FSM_CLIENT_ID;
+        test_util::bytes::set_slice_at(&mut bytes, 14, &4u64.to_le_bytes());
+        test_util::bytes::set_slice_at(&mut bytes, 30, &3u64.to_le_bytes());
+        test_util::bytes::set_slice_at(&mut bytes, 38, &FRACTAL_HEAP_FSM_NUM_CLASSES.to_le_bytes());
+        let len = bytes.len();
+        test_util::checksum::restamp(&mut bytes, 0, len);
+        let frame = FreeSpaceManagerHeaderFrame::parse(widths(8, 8), &bytes).unwrap();
+        assert_eq!(frame.total_sections(), 4);
+        assert_eq!(frame.serialized_sections(), 1);
+        assert_eq!(frame.unserialized_sections(), 3);
+        assert_eq!(frame.section_classes(), FRACTAL_HEAP_FSM_NUM_CLASSES);
+    }
+
+    #[test]
+    fn common_framing_preserves_record_class_rejected_by_file_client() {
+        let mut bytes = free_space::single_section_info();
+        bytes[30] = 0xFF;
+        let len = bytes.len();
+        test_util::checksum::restamp(&mut bytes, 0, len);
+        let reference = single_frame()
+            .section_list_ref(StoredAddress::new(619), PhysicalAddress::new(701))
+            .unwrap();
+        assert_eq!(
+            reference.parse(region(701, &bytes)).unwrap().records(),
+            &bytes[13..31]
+        );
+        assert_eq!(parse_section_info(widths(8, 8), &bytes, StoredAddress::new(619), &single_frame().file_header().unwrap()).unwrap_err(),
+            FormatError::InvalidFreeSpaceManager("the class of the section at byte 22 of the section list is 255, not one of the 3 classes of the file client".into()));
+    }
+
+    #[test]
+    fn section_list_region_ignores_bytes_after_used_range() {
+        let mut bytes = free_space::single_section_info();
+        bytes.extend([0xFF; 64]);
+        let frame = FreeSpaceManagerHeaderFrame {
+            section_list_allocated: bytes.len() as u64,
+            ..single_frame()
+        };
+        let reference = frame
+            .section_list_ref(StoredAddress::new(619), PhysicalAddress::new(701))
+            .unwrap();
+        assert_eq!(
+            reference.parse(region(701, &bytes)).unwrap().records(),
+            &bytes[13..31]
+        );
+    }
+
+    #[rstest]
+    #[case::short(619, 81)]
+    #[case::shifted(620, 82)]
+    fn header_region_rejects_insufficient_bytes(#[case] start: u64, #[case] length: usize) {
+        let reference =
+            FreeSpaceManagerHeaderRef::new(widths(8, 8), PhysicalAddress::new(619)).unwrap();
+        let bytes = vec![0; length];
+        assert_eq!(
+            reference.parse(region(start, &bytes)).unwrap_err(),
+            FormatError::InsufficientRegion {
+                required_start: 619,
+                required_length: 82,
+                provided_start: start,
+                provided_length: length as u64,
+            }
+        );
+    }
+
+    #[test]
+    fn header_region_accepts_enclosing_bytes() {
+        let mut bytes = vec![0; 3];
+        bytes.extend(free_space::single_section_header());
+        bytes.extend([0; 7]);
+        let reference =
+            FreeSpaceManagerHeaderRef::new(widths(8, 8), PhysicalAddress::new(619)).unwrap();
+        assert_eq!(
+            reference.parse(region(616, &bytes)).unwrap(),
+            FreeSpaceManagerHeaderFrame {
+                client_id: FILE_FSM_CLIENT_ID,
+                total_space: 1600,
+                total_sections: 1,
+                serialized_sections: 1,
+                unserialized_sections: 0,
+                section_classes: FILE_FSM_NUM_CLASSES,
+                shrink_percent: FILE_FSM_SHRINK_PCT,
+                expand_percent: FILE_FSM_EXPAND_PCT,
+                addr_space_bits: AddressSpaceBits(63),
+                max_section_size: FILE_FSM_MAX_SECTION_SIZE,
+                section_list_addr: DecodedStoredAddress::Defined(StoredAddress::new(701)),
+                section_list_used: 35,
+                section_list_allocated: 35,
+                widths: widths(8, 8),
+            }
+        );
+    }
+
+    #[test]
+    fn header_reference_rejects_range_overflow() {
+        assert_eq!(
+            FreeSpaceManagerHeaderRef::new(widths(8, 8), PhysicalAddress::new(u64::MAX - 81))
+                .unwrap_err(),
+            FormatError::OffsetOverflow {
+                offset: u64::MAX - 81,
+                length: 82
+            }
+        );
+    }
+
+    #[rstest]
+    #[case::spare(64)]
+    #[case::large(u64::MAX - 35)]
+    fn section_list_region_requires_only_used_bytes(#[case] spare: u64) {
+        let bytes = free_space::single_section_info();
+        let frame = FreeSpaceManagerHeaderFrame {
+            section_list_allocated: bytes.len() as u64 + spare,
+            ..single_frame()
+        };
+        let reference = frame
+            .section_list_ref(StoredAddress::new(619), PhysicalAddress::new(0))
+            .unwrap();
+        assert_eq!(reference.range().length(), bytes.len() as u64 + spare);
+        assert_eq!(reference.parse_range().length(), bytes.len() as u64);
+        assert_eq!(
+            reference.parse(region(0, &bytes)).unwrap().records(),
+            &bytes[13..31]
+        );
+    }
+
+    #[test]
+    fn section_list_reference_checks_complete_allocation_overflow() {
+        let frame = FreeSpaceManagerHeaderFrame {
+            section_list_allocated: 64,
+            ..single_frame()
+        };
+        assert_eq!(
+            frame
+                .section_list_ref(StoredAddress::new(619), PhysicalAddress::new(u64::MAX - 35))
+                .unwrap_err(),
+            FormatError::OffsetOverflow {
+                offset: u64::MAX - 35,
+                length: 64
+            }
+        );
+    }
+
+    #[test]
+    fn section_list_reference_rejects_missing_prefix_geometry() {
+        let frame = FreeSpaceManagerHeaderFrame {
+            section_list_used: 16,
+            ..single_frame()
+        };
+        assert_eq!(
+            frame
+                .section_list_ref(StoredAddress::new(619), PhysicalAddress::new(701))
+                .unwrap_err(),
+            FormatError::InvalidFreeSpaceManager(
+                "the section list uses 16 bytes, fewer than its 17-byte prefix and checksum".into()
+            )
+        );
+    }
+
+    #[rstest]
+    #[case::two_undefined(
+        widths(2, 2),
+        0xFFFF,
+        "the section list's expected header address is undefined"
+    )]
+    #[case::four_undefined(
+        widths(4, 4),
+        0xFFFF_FFFF,
+        "the section list's expected header address is undefined"
+    )]
+    #[case::eight_undefined(
+        widths(8, 8),
+        u64::MAX,
+        "the section list's expected header address is undefined"
+    )]
+    fn section_list_reference_rejects_undefined_header_address(
+        #[case] widths: FormatWidths,
+        #[case] address: u64,
+        #[case] reason: &str,
+    ) {
+        let frame = FreeSpaceManagerHeaderFrame {
+            widths,
+            ..single_frame()
+        };
+        assert_eq!(
+            frame
+                .section_list_ref(StoredAddress::new(address), PhysicalAddress::new(701))
+                .unwrap_err(),
+            FormatError::InvalidFreeSpaceManager(reason.into())
+        );
+    }
+
+    #[rstest]
+    #[case::two(widths(2, 2), 0x1_0000)]
+    #[case::four(widths(4, 4), 0x1_0000_0000)]
+    #[case::two_wide_sentinel(widths(2, 2), u64::MAX)]
+    #[case::four_wide_sentinel(widths(4, 4), u64::MAX)]
+    fn section_list_reference_rejects_header_address_outside_width(
+        #[case] widths: FormatWidths,
+        #[case] address: u64,
+    ) {
+        let frame = FreeSpaceManagerHeaderFrame {
+            widths,
+            ..single_frame()
+        };
+        assert_eq!(
+            frame
+                .section_list_ref(StoredAddress::new(address), PhysicalAddress::new(701))
+                .unwrap_err(),
+            FormatError::AddressTooLarge {
+                address,
+                offset_size: widths.offsets.get()
+            }
+        );
+    }
+
+    #[rstest]
+    #[case::short(701, 34)]
+    #[case::shifted(702, 35)]
+    fn section_list_region_rejects_insufficient_bytes(#[case] start: u64, #[case] length: usize) {
+        let reference = single_frame()
+            .section_list_ref(StoredAddress::new(619), PhysicalAddress::new(701))
+            .unwrap();
+        assert_eq!(
+            reference
+                .parse(region(start, &vec![0; length]))
+                .unwrap_err(),
+            FormatError::InsufficientRegion {
+                required_start: 701,
+                required_length: 35,
+                provided_start: start,
+                provided_length: length as u64,
+            }
+        );
+    }
+
+    #[rstest]
+    #[case::signature(0, vec![b'X'], "the section list signature is b\"XSSE\", not b\"FSSE\"")]
+    #[case::version(4, vec![1], "the section list version is 1, not 0")]
+    #[case::backlink(5, 736u64.to_le_bytes().to_vec(), "the section list belongs to the header at 736, not to the header at 619")]
+    #[case::undefined_backlink(5, u64::MAX.to_le_bytes().to_vec(), "the section list belongs to the header at 18446744073709551615, not to the header at 619")]
+    fn section_list_region_rejects_invalid_framing(
+        #[case] at: usize,
+        #[case] value: Vec<u8>,
+        #[case] reason: &str,
+    ) {
+        let mut bytes = free_space::single_section_info();
+        test_util::bytes::set_slice_at(&mut bytes, at, &value);
+        let len = bytes.len();
+        test_util::checksum::restamp(&mut bytes, 0, len);
+        let reference = single_frame()
+            .section_list_ref(StoredAddress::new(619), PhysicalAddress::new(701))
+            .unwrap();
+        assert_eq!(
+            reference.parse(region(701, &bytes)).unwrap_err(),
+            FormatError::InvalidFreeSpaceManager(reason.into())
+        );
+    }
+
+    #[cfg(feature = "checksum")]
+    #[rstest]
+    #[case::header(true)]
+    #[case::section_list(false)]
+    fn region_parsing_rejects_invalid_checksum(#[case] header: bool) {
+        if header {
+            let mut bytes = free_space::single_section_header();
+            let computed = checksum::jenkins_lookup3(&bytes[..78]);
+            bytes[78] ^= 0xFF;
+            let reference =
+                FreeSpaceManagerHeaderRef::new(widths(8, 8), PhysicalAddress::new(619)).unwrap();
+            assert_eq!(
+                reference.parse(region(619, &bytes)).unwrap_err(),
+                FormatError::ChecksumMismatch {
+                    expected: computed ^ 0xFF,
+                    computed
+                }
+            );
+        } else {
+            let mut bytes = free_space::single_section_info();
+            let expected = checksum::jenkins_lookup3(&bytes[..31]);
+            bytes[31] ^= 0xFF;
+            let reference = single_frame()
+                .section_list_ref(StoredAddress::new(619), PhysicalAddress::new(701))
+                .unwrap();
+            assert_eq!(
+                reference.parse(region(701, &bytes)).unwrap_err(),
+                FormatError::ChecksumMismatch {
+                    expected: expected ^ 0xFF,
+                    computed: expected
+                }
+            );
+        }
+    }
+
+    fn single_frame() -> FreeSpaceManagerHeaderFrame {
+        FreeSpaceManagerHeaderFrame::parse(widths(8, 8), &free_space::single_section_header())
+            .unwrap()
+    }
+
+    fn region(start: u64, bytes: &[u8]) -> FileRegion<'_> {
+        FileRegion::new(
+            FileRange::new(PhysicalAddress::new(start), bytes.len() as u64).unwrap(),
+            bytes,
+        )
+        .unwrap()
+    }
 
     /// A free section at `addr` spanning `size` bytes.
     fn section(addr: u64, size: u64) -> FreeSection {
@@ -1785,4 +2639,6 @@ mod tests {
             section_list_allocated: list.len() as u64,
         }
     }
+    const FRACTAL_HEAP_FSM_CLIENT_ID: u8 = 0;
+    const FRACTAL_HEAP_FSM_NUM_CLASSES: u16 = 4;
 }
