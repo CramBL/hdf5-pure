@@ -207,10 +207,11 @@
 //! Reclaim is best-effort and conservative. Contiguous and chunked datasets
 //! (chunk index plus chunk data) and whole group subtrees are reclaimed. Dense attribute and dense
 //! group version 2 B-tree indexes are reclaimed when their owning storage becomes dead. The editor
-//! also reclaims their fractal heaps where complete ownership is proven. Storage whose allocations
-//! cannot be enumerated exhaustively, such as a variable-length global heap collection, a filtered
-//! fractal heap, or a heap with its own free-space manager, is left as dead bytes. This avoids freeing
-//! a region that may still be in use. Under-reclaiming only wastes space. Over-reclaiming could
+//! also reclaims their fractal heaps where complete ownership is proven, including managed-space
+//! manager headers and complete allocated section lists. Logical sections within the heap are
+//! excluded from file-space reclamation. Storage whose allocations cannot be enumerated
+//! exhaustively, such as a variable-length global heap collection or a filtered fractal heap, is
+//! left as dead bytes. This avoids freeing a region that may still be in use. Under-reclaiming only wastes space. Over-reclaiming could
 //! corrupt the file.
 //!
 //! On a paged file that conservatism extends to anything whose *page type* is not
@@ -14328,14 +14329,22 @@ mod tests {
                 FractalHeapStorageError::UnsupportedOwnership("filtered managed blocks")
             }
             HeapDamage::FreeSpaceManager => {
-                header.managed_block_free_space_manager_address = StoredAddress::new(heap_address);
+                header.managed_block_free_space_manager_address =
+                    StoredAddress::new(u64::try_from(bytes.len()).unwrap());
                 let encoded = header
                     .serialize(OffsetWidth::Eight, LengthWidth::Eight)
                     .unwrap();
                 bytes[heap_at..heap_at + encoded.len()].copy_from_slice(&encoded);
-                FractalHeapStorageError::UnsupportedOwnership(
-                    "managed-space free-space manager metadata",
-                )
+                FractalHeapStorageError::Format(FormatError::UnexpectedEof {
+                    expected: bytes.len()
+                        + usize::try_from(
+                            hdf5_pure_format::__private::free_space_manager_header_len(
+                                FormatWidths::from_sizes(OFFSET_SIZE, LENGTH_SIZE).unwrap(),
+                            ),
+                        )
+                        .unwrap(),
+                    available: bytes.len(),
+                })
             }
         };
         assert_eq!(

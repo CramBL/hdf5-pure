@@ -7,6 +7,9 @@
 //! extent set from the serialized structures and compares it with the ownership result.
 
 use hdf5_pure::{AttrValue, File, FileBuilder};
+use hdf5_pure_core::__private::DecodedStoredAddress;
+use hdf5_pure_format::__private::FormatWidths;
+use hdf5_pure_format::__private::FreeSpaceManagerHeaderFrame;
 use hdf5_pure_format::__private::{
     BTREE_V2_HUGE_OBJECT, BTREE_V2_HUGE_OBJECT_DIRECT, BTreeV2Header, BTreeV2NodeInfo,
     BTreeV2Record, FractalHeapHeader, LengthWidth, OffsetWidth, btree_v2_header_size,
@@ -521,7 +524,7 @@ fn owned_storage_exactly_matches_c_written_dense_attribute_huge_objects() {
 }
 
 #[test]
-fn owned_storage_refuses_c_written_managed_heap_with_internal_fsm() {
+fn owned_storage_includes_c_written_managed_heap_with_internal_fsm() {
     let dir = tempdir().unwrap();
     let names: Vec<String> = (0..16).map(|i| format!("short_{i}")).collect();
     let path = dir.path().join("owned_managed_links.h5");
@@ -536,12 +539,54 @@ fn owned_storage_refuses_c_written_managed_heap_with_internal_fsm() {
     assert_ne!(
         heap.managed_block_free_space_manager_address.get(),
         u64::MAX,
-        "fixture should exercise the explicitly unsupported internal manager"
+        "fixture must have an internal manager"
     );
 
-    assert_eq!(
-        hdf5_pure::__fractal_heap_storage_extents(&bytes, u64::try_from(heap_at).unwrap(), 8, 8,)
-            .unwrap_err(),
-        "UnsupportedOwnership(\"managed-space free-space manager metadata\")"
-    );
+    let allocations =
+        hdf5_pure::__fractal_heap_storage_extents(&bytes, u64::try_from(heap_at).unwrap(), 8, 8)
+            .unwrap();
+    let manager_address = heap.managed_block_free_space_manager_address;
+    let manager = FreeSpaceManagerHeaderFrame::parse(
+        FormatWidths::from_sizes(8, 8).unwrap(),
+        &bytes[usize::try_from(manager_address.get()).unwrap()..],
+    )
+    .unwrap();
+    let DecodedStoredAddress::Defined(list_address) = manager.section_list_addr() else {
+        panic!("expected an allocated section list")
+    };
+    assert_eq!(heap.huge_objects_count, 0);
+    let mut expected = vec![
+        (
+            u64::try_from(heap_at).unwrap(),
+            u64::try_from(FractalHeapHeader::serialized_size(
+                OffsetWidth::Eight,
+                LengthWidth::Eight,
+            ))
+            .unwrap(),
+        ),
+        (
+            manager_address.get(),
+            hdf5_pure_format::__private::free_space_manager_header_len(
+                FormatWidths::from_sizes(8, 8).unwrap(),
+            ),
+        ),
+        (list_address.get(), manager.section_list_allocated()),
+    ];
+    if heap.current_rows_in_root_indirect_block == 0 {
+        expected.push((heap.root_block_address.get(), heap.starting_block_size));
+    } else {
+        let mut indirect_count = 0;
+        inspect_managed_indirect(
+            &bytes,
+            &heap,
+            u64::try_from(heap_at).unwrap(),
+            heap.root_block_address.get(),
+            heap.current_rows_in_root_indirect_block,
+            0,
+            &mut expected,
+            &mut indirect_count,
+        );
+    }
+    expected.sort_unstable();
+    assert_eq!(allocations, expected);
 }

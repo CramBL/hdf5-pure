@@ -23,6 +23,7 @@ use hdf5_pure_format::__private::AttributeInfoMessage;
 use hdf5_pure_format::__private::FormatWidths;
 use hdf5_pure_format::__private::FractalHeapHeader;
 use hdf5_pure_format::__private::FreeSpaceManagerHeader;
+use hdf5_pure_format::__private::FreeSpaceManagerHeaderFrame;
 use hdf5_pure_format::__private::LinkInfoMessage;
 use hdf5_pure_format::__private::LinkMessage;
 use hdf5_pure_format::__private::LinkTarget;
@@ -31,6 +32,7 @@ use rstest::rstest;
 use tempfile::tempdir;
 use test_util::btree_v2;
 use test_util::fractal_heap;
+use test_util::free_space;
 use test_util::range;
 use test_util_hdf5::absence;
 use test_util_hdf5::creation_order::{self, Indexing};
@@ -327,14 +329,20 @@ fn c_library_accepts_reclaimed_dense_group_indexes() {
             "the parent and nested group must both use dense storage"
         );
         let bytes = std::fs::read(&path).unwrap();
-        for &heap in &heap_headers {
-            assert_eq!(
-                hdf5_pure::__fractal_heap_storage_extents(&bytes, heap, 8, 8),
-                Err(String::from(
-                    "UnsupportedOwnership(\"managed-space free-space manager metadata\")"
-                ))
-            );
-        }
+        let heap_allocations = heap_headers
+            .iter()
+            .flat_map(|&heap| {
+                hdf5_pure::__fractal_heap_storage_extents(&bytes, heap, 8, 8).unwrap()
+            })
+            .collect::<Vec<_>>();
+        assert!(heap_allocations.iter().any(|&(address, _)| {
+            bytes.get(usize::try_from(address).unwrap()..usize::try_from(address).unwrap() + 4)
+                == Some(free_space::SIGNATURE)
+        }));
+        assert!(heap_allocations.iter().any(|&(address, _)| {
+            bytes.get(usize::try_from(address).unwrap()..usize::try_from(address).unwrap() + 4)
+                == Some(free_space::SECTIONS_SIGNATURE)
+        }));
         let free_before = persistent_free(&path);
 
         {
@@ -356,12 +364,15 @@ fn c_library_accepts_reclaimed_dense_group_indexes() {
             free_bytes(&free_after) > free_bytes(&free_before),
             "deleting the dense subtree must return proven storage"
         );
-        // Rewriting the persisted free-space managers may consume a reclaimed index extent in
-        // this same commit, so the original B-tree addresses need not remain listed as free.
-        for heap in heap_headers {
-            assert!(
-                !overlaps_free(&free_after, heap, 4),
-                "dense-link fractal-heap storage remains allocated"
+        for &(address, len) in &heap_allocations {
+            let reclaim = if paged && len >= 4096 && address % 4096 == 0 {
+                len / 4096 * 4096
+            } else {
+                len
+            };
+            assert_eq!(
+                range::covered_len(&released, &(address..address + reclaim)),
+                reclaim
             );
         }
 
@@ -404,6 +415,11 @@ fn a_surviving_dense_group_hard_link_keeps_its_indexes_live() {
     write_dense_link_reclaim_fixture(&path, Indexing::Yes, false, true);
     let index_anchors = dense_link_tree_anchor_spans(&path);
     let heap_headers = fractal_heap_headers(&path);
+    let bytes = std::fs::read(&path).unwrap();
+    let owned_heaps = heap_headers
+        .iter()
+        .flat_map(|&heap| hdf5_pure::__fractal_heap_storage_extents(&bytes, heap, 8, 8).unwrap())
+        .collect::<Vec<_>>();
 
     {
         let session = File::open_rw(&path).unwrap();
@@ -445,13 +461,10 @@ fn a_surviving_dense_group_hard_link_keeps_its_indexes_live() {
             "the dense-link index block ({addr}, {len}) must be reclaimed"
         );
     }
-    // The commit may place its rewritten free-space-manager metadata into one of the
-    // index extents it just reclaimed, so the physical index addresses need not remain
-    // listed as free after the commit. The increase above is the persisted-space invariant.
-    for heap in heap_headers {
-        assert!(
-            !overlaps_free(&free_without_alias, heap, 4),
-            "the dense-link fractal heap stays allocated after the group dies"
+    for &(address, len) in &owned_heaps {
+        assert_eq!(
+            range::covered_len(&released, &(address..address + len)),
+            len
         );
     }
     assert_eq!(
@@ -720,14 +733,8 @@ fn heap_allocations(
         .into_iter()
         .flat_map(|heap| {
             assert_eq!(
-                (
-                    heap.header.free_space_in_managed_blocks,
-                    heap.header
-                        .managed_block_free_space_manager_address
-                        .is_undefined(8),
-                    heap.header.huge_objects_count,
-                ),
-                (0, true, u64::try_from(huge_objects).unwrap())
+                heap.header.huge_objects_count,
+                u64::try_from(huge_objects).unwrap()
             );
             hdf5_pure::__fractal_heap_storage_extents(&bytes, heap.address, 8, 8).unwrap()
         })
@@ -746,9 +753,24 @@ fn heap_allocations(
         .collect()
 }
 
-fn owned_heap_allocations(path: &Path, huge_objects: usize) -> Vec<(u64, u64, PageClass)> {
+fn owned_heap_allocations(
+    path: &Path,
+    huge_objects: usize,
+    managed_fsm: bool,
+) -> Vec<(u64, u64, PageClass)> {
     let heaps = dense_heaps(path);
     assert_eq!(heaps.len(), 3, "the fixture holds three dense heaps");
+    for heap in &heaps {
+        assert_eq!(
+            heap.header
+                .managed_block_free_space_manager_address
+                .is_undefined(8),
+            !managed_fsm
+        );
+        if !managed_fsm {
+            assert_eq!(heap.header.free_space_in_managed_blocks, 0);
+        }
+    }
     heap_allocations(path, huge_objects, heaps)
 }
 
@@ -888,12 +910,17 @@ fn c_written_dense_heaps_are_reclaimed_with_their_owners(
         FileSpace::Pages(SMALL_PAGE_SIZE)
     )]
     file_space: FileSpace,
+    #[values(false, true)] managed_fsm: bool,
 ) {
     let dir = tempdir().unwrap();
-    let names = exactly_filling_names(dir.path(), huge_objects);
+    let names = if managed_fsm {
+        DenseNames::new()
+    } else {
+        exactly_filling_names(dir.path(), huge_objects)
+    };
     let path = dir.path().join("dense_heap_reclaim.h5");
     write_dense_fixture(&path, file_space, &names, huge_objects, false);
-    let allocations = owned_heap_allocations(&path, huge_objects);
+    let allocations = owned_heap_allocations(&path, huge_objects, managed_fsm);
     if file_space == FileSpace::Pages(SMALL_PAGE_SIZE) {
         assert!(
             allocations
@@ -911,12 +938,96 @@ fn c_written_dense_heaps_are_reclaimed_with_their_owners(
     );
 
     let session = File::open_rw(&path).unwrap();
+    let ownership = session.__space_ownership().unwrap();
+    assert!(ownership.analysis_complete);
+    let base = session.superblock().base_address.get();
+    for &(address, len, _) in &allocations {
+        assert_eq!(
+            range::covered_len(
+                &ownership.live_metadata_space,
+                &(base + address..base + address + len)
+            ) + range::covered_len(
+                &ownership.live_raw_space,
+                &(base + address..base + address + len)
+            ),
+            len
+        );
+    }
     session.root().delete("g").unwrap();
     session.root().delete("d").unwrap();
     session.commit().unwrap();
+    let ownership = session.__space_ownership().unwrap();
+    assert!(ownership.analysis_complete);
     drop(session);
     let released = released_regions(&path);
 
+    assert_released(file_space.page_size(), &released, &allocations);
+    if let Some(page_size) = file_space.page_size() {
+        assert_page_classes(&path, page_size, &allocations);
+    }
+    assert_c_reads_after_reclaim(&path);
+}
+
+#[rstest]
+fn c_written_heap_ghost_sections_have_only_physical_manager_ownership(
+    #[values(
+        FileSpace::Managers,
+        FileSpace::ManagersAfterUserblock,
+        FileSpace::Pages(DENSE_PAGE_SIZE)
+    )]
+    file_space: FileSpace,
+) {
+    let dir = tempdir().unwrap();
+    let names = DenseNames {
+        links: (0..300)
+            .map(|index| format!("link_{index:03}_{}", "x".repeat(100)))
+            .collect(),
+        attributes: (0..300)
+            .map(|index| format!("attr_{index:03}_{}", "x".repeat(100)))
+            .collect(),
+    };
+    let path = dir.path().join("dense_heap_ghost_sections.h5");
+    write_dense_fixture(&path, file_space, &names, 0, false);
+    {
+        let file = hdf5::File::open_rw(&path).unwrap();
+        let group = file.group("g").unwrap();
+        for link in &names.links[..150] {
+            group.unlink(link).unwrap();
+        }
+        drop(group);
+        file.close().unwrap();
+    }
+    let bytes = framed_bytes(&path);
+    let heaps = dense_heaps(&path);
+    assert_eq!(heaps.len(), 3);
+    let widths = FormatWidths::from_sizes(8, 8).unwrap();
+    let managers = heaps
+        .iter()
+        .map(|heap| {
+            FreeSpaceManagerHeaderFrame::parse(
+                widths,
+                &bytes[usize::try_from(
+                    heap.header.managed_block_free_space_manager_address.get(),
+                )
+                .unwrap()..],
+            )
+            .unwrap()
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        managers
+            .iter()
+            .any(|manager| manager.unserialized_sections() > 0)
+    );
+    let allocations = heap_allocations(&path, 0, heaps);
+    let session = File::open_rw(&path).unwrap();
+    assert!(session.__space_ownership().unwrap().analysis_complete);
+    session.root().delete("g").unwrap();
+    session.root().delete("d").unwrap();
+    session.commit().unwrap();
+    assert!(session.__space_ownership().unwrap().analysis_complete);
+    drop(session);
+    let released = released_regions(&path);
     assert_released(file_space.page_size(), &released, &allocations);
     if let Some(page_size) = file_space.page_size() {
         assert_page_classes(&path, page_size, &allocations);
@@ -1008,13 +1119,17 @@ fn rewriting_a_c_written_dense_attribute_set_reclaims_its_old_heap(
     assert_eq!(c.free_space(), free_bytes(&persistent_free(&path)));
 }
 
-#[test]
-fn a_surviving_hard_link_keeps_a_dense_heap_live() {
+#[rstest]
+fn a_surviving_hard_link_keeps_a_dense_heap_live(#[values(false, true)] managed_fsm: bool) {
     let dir = tempdir().unwrap();
-    let names = exactly_filling_names(dir.path(), 1);
+    let names = if managed_fsm {
+        DenseNames::new()
+    } else {
+        exactly_filling_names(dir.path(), 1)
+    };
     let path = dir.path().join("dense_heap_surviving_alias.h5");
     write_dense_fixture(&path, FileSpace::Managers, &names, 1, true);
-    let allocations = owned_heap_allocations(&path, 1);
+    let allocations = owned_heap_allocations(&path, 1, managed_fsm);
 
     {
         let session = File::open_rw(&path).unwrap();
@@ -1052,10 +1167,16 @@ fn a_surviving_hard_link_keeps_a_dense_heap_live() {
 // file at every close (`H5MF_settle_meta_data_fsm` in `H5MF.c`), and the rest of their pages stays
 // untracked, so each of its sessions grows the file.
 #[cfg(feature = "__hdf5-1.12")]
-#[test]
-fn repeated_dense_storage_create_and_delete_on_a_paged_file_settles_at_a_steady_size() {
+#[rstest]
+fn repeated_dense_storage_create_and_delete_on_a_paged_file_settles_at_a_steady_size(
+    #[values(false, true)] managed_fsm: bool,
+) {
     let dir = tempdir().unwrap();
-    let names = exactly_filling_names(dir.path(), 1);
+    let names = if managed_fsm {
+        DenseNames::new()
+    } else {
+        exactly_filling_names(dir.path(), 1)
+    };
     let path = dir.path().join("dense_churn.h5");
     {
         let file = create_dense_file(&path, FileSpace::Pages(DENSE_PAGE_SIZE));
@@ -1076,7 +1197,7 @@ fn repeated_dense_storage_create_and_delete_on_a_paged_file_settles_at_a_steady_
                 file.close().unwrap();
             }
             let written = std::fs::metadata(&path).unwrap().len();
-            let allocations = owned_heap_allocations(&path, 1);
+            let allocations = owned_heap_allocations(&path, 1, managed_fsm);
             {
                 let session = File::open_rw(&path).unwrap();
                 session.root().delete("g").unwrap();
@@ -1105,13 +1226,15 @@ const USERBLOCK: u64 = 512;
 // `H5Oprivate.h`, libhdf5 2.2.0.
 const LINK_HEAP_START_BLOCK_SIZE: u64 = 512;
 const ATTRIBUTE_HEAP_START_BLOCK_SIZE: u64 = 1024;
-const HEAP_METADATA_SIGNATURES: [&[u8; 4]; 6] = [
+const HEAP_METADATA_SIGNATURES: [&[u8; 4]; 8] = [
     fractal_heap::SIGNATURE,
     fractal_heap::DIRECT_BLOCK_SIGNATURE,
     fractal_heap::INDIRECT_BLOCK_SIGNATURE,
     btree_v2::SIGNATURE,
     btree_v2::INTERNAL_SIGNATURE,
     btree_v2::LEAF_SIGNATURE,
+    free_space::SIGNATURE,
+    free_space::SECTIONS_SIGNATURE,
 ];
 // The small-sized managers for `H5FD_MEM_SUPER` and `H5FD_MEM_DRAW`, first and third in a version
 // 1 File Space Info message, defined in "The File Space Info Message" of the format

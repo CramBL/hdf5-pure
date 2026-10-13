@@ -8,15 +8,18 @@ use alloc::collections::BTreeSet;
 use alloc::vec;
 use alloc::vec::Vec;
 
+use hdf5_pure_core::__private::DecodedStoredAddress;
 use hdf5_pure_core::__private::FileRegion;
 use hdf5_pure_format::__private::BTREE_V2_HUGE_OBJECT;
 use hdf5_pure_format::__private::BTREE_V2_HUGE_OBJECT_DIRECT;
+use hdf5_pure_format::__private::FormatWidths;
 use hdf5_pure_format::__private::FractalHeapBlock;
 use hdf5_pure_format::__private::FractalHeapBlockLayout;
 use hdf5_pure_format::__private::FractalHeapHeader;
 #[cfg(any(test, doc))]
 use hdf5_pure_format::__private::FractalHeapLayout;
 use hdf5_pure_format::__private::FractalHeapLayoutError;
+use hdf5_pure_format::__private::FreeSpaceManagerHeaderRef;
 use hdf5_pure_format::__private::HugeObjectDirectRecord;
 use hdf5_pure_format::__private::HugeObjectRecord;
 
@@ -66,14 +69,18 @@ impl From<FractalHeapLayoutError> for FractalHeapStorageError {
 ///
 /// The set contains the `FRHP` header, every allocated managed direct and indirect block, the
 /// huge-object version 2 B-tree when present, and every separately allocated huge-object payload.
+/// When a managed-space manager is present, the set contains its header and any allocated section
+/// list, including reserved capacity. Logical heap sections are excluded from the allocation set.
 /// Tiny objects are stored entirely in heap IDs, so the set omits them.
 ///
 /// The walker returns this type only after it has accounted for every supported allocation and
 /// proven the allocations pairwise disjoint. Unsupported heap features prevent construction.
-/// The allocation classes are defined in "Fractal Heap" of the [format specification, version
-/// 4.0][spec].
+/// The heap structures are defined in "Fractal Heap" of the [format specification, version
+/// 4.0][heap]. The manager structures are defined in "Free-space Index" of the same
+/// [specification][manager].
 ///
-/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsec_fmt4_infra_fractalheap
+/// [heap]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsec_fmt4_infra_fractalheap
+/// [manager]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsec_fmt4_infra_freespaceindex
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct FractalHeapStorage {
     allocations: Vec<(Extent, FractalHeapAllocation)>,
@@ -88,21 +95,28 @@ impl FractalHeapStorage {
 
 /// The structure a fractal heap allocation holds.
 ///
-/// The structures are defined in "Fractal Heap" of the [format specification, version 4.0][spec].
+/// The heap structures are defined in "Fractal Heap" of the [format specification, version
+/// 4.0][heap]. The manager structures are defined in "Free-space Index" of the same
+/// [specification][manager].
 ///
-/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsec_fmt4_infra_fractalheap
+/// [heap]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsec_fmt4_infra_fractalheap
+/// [manager]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsec_fmt4_infra_freespaceindex
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum FractalHeapAllocation {
-    /// The `FRHP` heap header.
-    Header,
     /// A managed direct block, `FHDB`.
     DirectBlock,
-    /// A managed indirect block, `FHIB`.
-    IndirectBlock,
-    /// The header or a node of the version 2 B-tree that indexes the huge objects.
-    HugeObjectIndex,
+    /// The `FRHP` heap header.
+    Header,
     /// The separately allocated payload of a huge object.
     HugeObject,
+    /// The header or a node of the version 2 B-tree that indexes the huge objects.
+    HugeObjectIndex,
+    /// A managed indirect block, `FHIB`.
+    IndirectBlock,
+    /// The `FSHD` header of the managed-space free-space manager.
+    ManagedFsmHeader,
+    /// The complete `FSSE` allocation, including reserved capacity.
+    ManagedFsmSectionList,
 }
 
 impl FractalHeapAllocation {
@@ -115,11 +129,16 @@ impl FractalHeapAllocation {
     // (`H5FDsec2.c`) puts an `H5FD_MEM_DRAW` allocation smaller than a page in raw-data pages and
     // the other types in metadata pages. `H5MF__alloc_to_fs_type` (`H5MF.c`) gives a larger
     // allocation the generic large-page type.
+    // `H5FS_create` and `H5FS_alloc_sect` in H5FS.c, HDF5 2.2.0, allocate FSHD and FSSE
+    // with the metadata aliases `H5FD_MEM_FSPACE_HDR` and `H5FD_MEM_FSPACE_SINFO`.
     pub(crate) fn page_type(self) -> PageType {
         match self {
-            Self::Header | Self::DirectBlock | Self::IndirectBlock | Self::HugeObjectIndex => {
-                PageType::Meta
-            }
+            Self::Header
+            | Self::DirectBlock
+            | Self::IndirectBlock
+            | Self::HugeObjectIndex
+            | Self::ManagedFsmHeader
+            | Self::ManagedFsmSectionList => PageType::Meta,
             Self::HugeObject => PageType::Raw,
         }
     }
@@ -131,17 +150,19 @@ impl FractalHeapAllocation {
 /// coordinates. The walker bounds every allocation and parses managed blocks through
 /// [`FractalHeapBlockLayout`]. Checksummed direct blocks are read and validated in full,
 /// regardless of the `checksum` feature. Direct blocks without checksums require only their prefix.
-/// Huge-object payload contents are omitted from the reads.
+/// Managed-space manager headers and section lists also require checksum validation, regardless
+/// of the `checksum` feature. The walker reads only the used section-list bytes and accounts for
+/// the complete allocation. Huge-object payload contents are omitted from the reads.
 ///
 /// # Errors
 ///
-/// Returns [`FractalHeapStorageError::UnsupportedOwnership`] for filtered managed blocks or a
-/// defined managed-space free-space manager. Returns [`FractalHeapStorageError::InvalidStorage`]
+/// Returns [`FractalHeapStorageError::UnsupportedOwnership`] for filtered managed blocks.
+/// Returns [`FractalHeapStorageError::InvalidStorage`]
 /// for duplicate blocks, contradictory allocation accounting, an unexpected huge-object index
 /// layout, or overlapping allocations. Returns [`FractalHeapStorageError::Layout`] for invalid
 /// layout calculations and [`FractalHeapStorageError::Format`] for parser or source errors,
 /// including malformed block geometry, incorrect heap-header owner addresses, truncated
-/// allocations, and invalid checksums.
+/// allocations, invalid checksums, and unsupported serialized manager section classes.
 pub(crate) fn collect_fractal_heap_storage_from_source<S: Source + ?Sized>(
     source: &S,
     addresses: AddressContext,
@@ -165,14 +186,6 @@ pub(crate) fn collect_fractal_heap_storage_from_source<S: Source + ?Sized>(
     }
     let blocks =
         FractalHeapBlockLayout::new(&header, offset_width, length_width, heap_header_address)?;
-    if !is_undefined_addr(
-        header.managed_block_free_space_manager_address.get(),
-        offset_size,
-    ) {
-        return Err(FractalHeapStorageError::UnsupportedOwnership(
-            "managed-space free-space manager metadata",
-        ));
-    }
 
     let header_len = u64::try_from(FractalHeapHeader::serialized_size(
         offset_width,
@@ -195,6 +208,17 @@ pub(crate) fn collect_fractal_heap_storage_from_source<S: Source + ?Sized>(
         length_size,
         offset_width,
         length_width,
+        &mut allocations,
+    )?;
+
+    collect_managed_fsm_storage(
+        source,
+        addresses,
+        &header,
+        FormatWidths {
+            offsets: offset_width,
+            lengths: length_width,
+        },
         &mut allocations,
     )?;
 
@@ -338,6 +362,55 @@ impl<'a, 'e, S: Source + ?Sized> ManagedStorageWalk<'a, 'e, S> {
     }
 }
 
+/// Records the manager header and complete section-list allocation after client-0 validation.
+///
+/// Section records describe logical heap space and are excluded from the owned file extents.
+///
+/// # Errors
+///
+/// Returns [`FractalHeapStorageError::InvalidStorage`] if the section-list address is undefined
+/// with nonzero size or space totals. Returns [`FractalHeapStorageError::Format`] for parser,
+/// source, or range failures, including unsupported serialized section classes.
+fn collect_managed_fsm_storage(
+    source: &(impl Source + ?Sized),
+    addresses: AddressContext,
+    heap: &FractalHeapHeader,
+    widths: FormatWidths,
+    allocations: &mut Vec<(Extent, FractalHeapAllocation)>,
+) -> Result<(), FractalHeapStorageError> {
+    let address = heap.managed_block_free_space_manager_address;
+    if widths
+        .offsets
+        .decode_address(&address.get().to_le_bytes(), 0)?
+        == DecodedStoredAddress::Undefined
+    {
+        return Ok(());
+    }
+    let reference = FreeSpaceManagerHeaderRef::new(widths, addresses.resolve(address)?)?;
+    let extent = extent_in_source(source, address.get(), reference.range().length())?;
+    let range = reference.parse_range();
+    let bytes = crate::fractal_heap::read_header_range(source, addresses, range)?;
+    let frame = reference.parse_checked(FileRegion::new(range, &bytes)?)?;
+    let manager = frame.fractal_heap_header(heap)?;
+    allocations.push((extent, FractalHeapAllocation::ManagedFsmHeader));
+    let DecodedStoredAddress::Defined(list_address) = frame.section_list_addr() else {
+        if frame.section_list_used() != 0
+            || frame.section_list_allocated() != 0
+            || frame.total_space() != 0
+        {
+            return Err(FractalHeapStorageError::InvalidStorage);
+        }
+        return Ok(());
+    };
+    let reference = manager.section_list_ref(address, addresses.resolve(list_address)?)?;
+    let extent = extent_in_source(source, list_address.get(), reference.range().length())?;
+    let range = reference.parse_range();
+    let bytes = crate::fractal_heap::read_header_range(source, addresses, range)?;
+    reference.parse_checked(FileRegion::new(range, &bytes)?)?;
+    allocations.push((extent, FractalHeapAllocation::ManagedFsmSectionList));
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 fn collect_huge_storage<S: Source + ?Sized>(
     source: &S,
@@ -452,9 +525,11 @@ mod tests {
     use hdf5_pure_format::__private::FilterDescription;
     use hdf5_pure_format::__private::FilterPipeline;
     use hdf5_pure_format::__private::FractalHeapFiltering;
+    use hdf5_pure_format::__private::FractalHeapSectionClass;
     use hdf5_pure_format::__private::btree_v2_header_size;
     use test_util::btree_v2;
     use test_util::fractal_heap;
+    use test_util::free_space;
     use test_util::widths::Widths;
 
     use crate::access_mode::AccessMode;
@@ -1101,22 +1176,270 @@ mod tests {
         );
     }
 
-    #[test]
-    fn a_managed_space_free_space_manager_is_an_explicitly_unsupported_owner() {
-        let header = FractalHeapHeader {
-            managed_block_free_space_manager_address: StoredAddress::new(0x600),
-            ..storage_header()
+    #[rstest::rstest]
+    #[case::exact(0, 0)]
+    #[case::reserved(64, 0)]
+    #[case::userblock(64, 512)]
+    fn managed_fsm_ownership_includes_reserved_capacity(#[case] spare: u64, #[case] base: usize) {
+        let (file, used) = managed_fsm_image(spare);
+        let mut physical = vec![0xFF; base];
+        physical.extend_from_slice(&file);
+        let inner = BytesSource::new(&physical);
+        let addresses =
+            AddressContext::from_effective_base(BaseAddress::new(u64::try_from(base).unwrap()));
+        let source = BaseOffsetSource {
+            inner: &inner,
+            base: addresses.effective_base(),
         };
-        let mut file = vec![0; 0x800];
-        place_storage_header(&mut file, &header);
+        let result = collect_fractal_heap_storage_from_source(
+            &source,
+            addresses,
+            StoredAddress::new(STORAGE_HEAP_AT),
+            8,
+            8,
+        )
+        .unwrap();
+        assert_eq!(
+            result.allocations(),
+            &[
+                allocation(
+                    STORAGE_HEAP_AT,
+                    u64::try_from(FractalHeapHeader::serialized_size(
+                        OffsetWidth::Eight,
+                        LengthWidth::Eight
+                    ))
+                    .unwrap(),
+                    FractalHeapAllocation::Header
+                ),
+                allocation(STORAGE_ROOT_AT, 128, FractalHeapAllocation::DirectBlock),
+                allocation(MANAGED_FSM_AT, 82, FractalHeapAllocation::ManagedFsmHeader),
+                allocation(
+                    MANAGED_FSSE_AT,
+                    used + spare,
+                    FractalHeapAllocation::ManagedFsmSectionList
+                ),
+            ]
+        );
+        assert_eq!(
+            FractalHeapAllocation::ManagedFsmHeader.page_type(),
+            PageType::Meta
+        );
+        assert_eq!(
+            FractalHeapAllocation::ManagedFsmSectionList.page_type(),
+            PageType::Meta
+        );
+    }
 
+    #[test]
+    fn managed_fsm_ownership_reads_only_used_section_list_bytes() {
+        let (file, used) = managed_fsm_image(512);
+        let source = PrefixSource {
+            bytes: &file,
+            reads: RefCell::new(Vec::new()),
+        };
+        let storage = collect_fractal_heap_storage_from_source(
+            &source,
+            AddressContext::from_effective_base(BaseAddress::ZERO),
+            StoredAddress::new(STORAGE_HEAP_AT),
+            8,
+            8,
+        )
+        .unwrap();
+        assert_eq!(
+            storage.allocations().last().unwrap(),
+            &allocation(
+                MANAGED_FSSE_AT,
+                used + 512,
+                FractalHeapAllocation::ManagedFsmSectionList
+            )
+        );
+        assert_eq!(
+            *source.reads.borrow(),
+            vec![
+                (
+                    STORAGE_HEAP_AT,
+                    hdf5_pure_format::__private::FractalHeapHeaderFrame::PREFIX_LEN
+                ),
+                (
+                    STORAGE_HEAP_AT,
+                    FractalHeapHeader::serialized_size(OffsetWidth::Eight, LengthWidth::Eight)
+                ),
+                (STORAGE_ROOT_AT, managed_prefix(b"FHDB", 0).len()),
+                (MANAGED_FSM_AT, 82),
+                (MANAGED_FSSE_AT, usize::try_from(used).unwrap()),
+            ]
+        );
+    }
+
+    #[rstest::rstest]
+    #[case::header(MANAGED_FSM_AT, 82)]
+    #[case::section_list(MANAGED_FSSE_AT, 23)]
+    fn managed_fsm_ownership_requires_valid_checksums(#[case] at: u64, #[case] len: usize) {
+        let (mut file, _) = managed_fsm_image(64);
+        let at = usize::try_from(at).unwrap();
+        let checksum_at = at + len - 4;
+        let computed = crate::checksum::jenkins_lookup3(&file[at..checksum_at]);
+        file[checksum_at] ^= 1;
         assert_eq!(
             collect_storage(&file),
-            Err(FractalHeapStorageError::UnsupportedOwnership(
-                "managed-space free-space manager metadata"
+            Err(FractalHeapStorageError::Format(
+                FormatError::ChecksumMismatch {
+                    expected: computed ^ 1,
+                    computed
+                }
             ))
         );
     }
+
+    #[test]
+    fn managed_fsm_ownership_rejects_an_incorrect_backlink() {
+        let field = 5;
+        let value = 0x123u64;
+        let reason = "the section list belongs to the header at 291, not to the header at 1536";
+        let (mut file, used) = managed_fsm_image(64);
+        let at = usize::try_from(MANAGED_FSSE_AT).unwrap();
+        file[at + field..at + field + 8].copy_from_slice(&value.to_le_bytes());
+        crate::checksum::stamp_trailing(&mut file, at, usize::try_from(used).unwrap());
+        assert_eq!(
+            collect_storage(&file),
+            Err(FractalHeapStorageError::Format(
+                FormatError::InvalidFreeSpaceManager(reason.into())
+            ))
+        );
+    }
+
+    #[rstest::rstest]
+    #[case::used_bytes(20)]
+    #[case::reserved_bytes(30)]
+    fn managed_fsm_ownership_requires_the_complete_allocated_section_list(#[case] present: usize) {
+        let (mut file, used) = managed_fsm_image(64);
+        file.truncate(usize::try_from(MANAGED_FSSE_AT).unwrap() + present);
+        assert_eq!(
+            collect_storage(&file),
+            Err(FractalHeapStorageError::Format(
+                FormatError::UnexpectedEof {
+                    expected: usize::try_from(MANAGED_FSSE_AT + used + 64).unwrap(),
+                    available: file.len(),
+                }
+            ))
+        );
+    }
+
+    #[rstest::rstest]
+    #[case::direct_block(false)]
+    #[case::manager_header(true)]
+    fn managed_fsm_ownership_rejects_overlapping_reserved_capacity(#[case] manager_header: bool) {
+        let (mut file, used) = managed_fsm_image(64);
+        if manager_header {
+            let list = file[usize::try_from(MANAGED_FSSE_AT).unwrap()
+                ..usize::try_from(MANAGED_FSSE_AT + used).unwrap()]
+                .to_vec();
+            place(&mut file, 0x500, &list);
+            let at = usize::try_from(MANAGED_FSM_AT).unwrap();
+            file[at + 54..at + 62].copy_from_slice(&0x500u64.to_le_bytes());
+            file[at + 70..at + 78].copy_from_slice(&512u64.to_le_bytes());
+            crate::checksum::stamp_trailing(&mut file, at, 82);
+            assert_eq!(
+                collect_storage(&file),
+                Err(FractalHeapStorageError::InvalidStorage)
+            );
+            return;
+        }
+        let mut header = FractalHeapHeader::parse_bytes(
+            &file[usize::try_from(STORAGE_HEAP_AT).unwrap()..],
+            OffsetWidth::Eight,
+            LengthWidth::Eight,
+        )
+        .unwrap();
+        header.root_block_address = StoredAddress::new(MANAGED_FSSE_AT + used);
+        place_storage_header(&mut file, &header);
+        place(
+            &mut file,
+            header.root_block_address.get(),
+            &direct_block(0, 128),
+        );
+        assert_eq!(
+            collect_storage(&file),
+            Err(FractalHeapStorageError::InvalidStorage)
+        );
+    }
+
+    #[rstest::rstest]
+    #[case::file_client(5, 1, "the client ID is 1, not 0, the ID of the fractal heap client")]
+    #[case::wrong_heap_width(44, 15, "the heap geometry and manager header fields disagree")]
+    #[case::section_count(14, 2, "the heap geometry and manager header fields disagree")]
+    fn managed_fsm_ownership_rejects_inconsistent_header_fields(
+        #[case] field: usize,
+        #[case] value: u8,
+        #[case] reason: &str,
+    ) {
+        let (mut file, _) = managed_fsm_image(0);
+        let at = usize::try_from(MANAGED_FSM_AT).unwrap();
+        file[at + field] = value;
+        crate::checksum::stamp_trailing(&mut file, at, 82);
+        assert_eq!(
+            collect_storage(&file),
+            Err(FractalHeapStorageError::Format(
+                FormatError::InvalidFreeSpaceManager(reason.into())
+            ))
+        );
+    }
+
+    fn managed_fsm_image(spare: u64) -> (Vec<u8>, u64) {
+        let header = FractalHeapHeader {
+            managed_block_free_space_manager_address: StoredAddress::new(MANAGED_FSM_AT),
+            root_block_address: StoredAddress::new(STORAGE_ROOT_AT),
+            managed_space: 128,
+            allocated_managed_space: 128,
+            free_space_in_managed_blocks: 16,
+            managed_objects_count: 1,
+            ..storage_header()
+        };
+        let mut list = free_space::SECTIONS_SIGNATURE.to_vec();
+        list.push(FSM_VERSION);
+        list.extend_from_slice(&MANAGED_FSM_AT.to_le_bytes());
+        list.push(1);
+        list.extend_from_slice(&16u16.to_le_bytes());
+        list.extend_from_slice(&18u16.to_le_bytes());
+        list.push(FractalHeapSectionClass::Single as u8);
+        list.extend_from_slice(&crate::checksum::jenkins_lookup3(&list).to_le_bytes());
+        let used = u64::try_from(list.len()).unwrap();
+        let mut manager = free_space::SIGNATURE.to_vec();
+        manager.extend_from_slice(&[FSM_VERSION, FRACTAL_HEAP_FSM_CLIENT_ID]);
+        for value in [16u64, 1, 1, 0] {
+            manager.extend_from_slice(&value.to_le_bytes());
+        }
+        for value in [
+            FRACTAL_HEAP_SECTION_CLASSES,
+            FSM_SHRINK_PERCENT,
+            FSM_EXPAND_PERCENT,
+            16,
+        ] {
+            manager.extend_from_slice(&value.to_le_bytes());
+        }
+        manager.extend_from_slice(&1024u64.to_le_bytes());
+        manager.extend_from_slice(&MANAGED_FSSE_AT.to_le_bytes());
+        manager.extend_from_slice(&used.to_le_bytes());
+        manager.extend_from_slice(&(used + spare).to_le_bytes());
+        manager.extend_from_slice(&crate::checksum::jenkins_lookup3(&manager).to_le_bytes());
+        let mut file = vec![0; 0x1000];
+        place_storage_header(&mut file, &header);
+        place(&mut file, STORAGE_ROOT_AT, &direct_block(0, 128));
+        place(&mut file, MANAGED_FSM_AT, &manager);
+        place(&mut file, MANAGED_FSSE_AT, &list);
+        (file, used)
+    }
+
+    const MANAGED_FSM_AT: u64 = 0x600;
+    const MANAGED_FSSE_AT: u64 = 0x700;
+    // "Free-space Index" of the format specification, version 4.0, defines version 0 and client 0.
+    const FSM_VERSION: u8 = 0;
+    const FRACTAL_HEAP_FSM_CLIENT_ID: u8 = 0;
+    // `H5HF__space_start` in H5HFspace.c, HDF5 2.2.0, registers four semantic section classes.
+    const FRACTAL_HEAP_SECTION_CLASSES: u16 = 4;
+    // `H5HF_FSPACE_SHRINK` and `H5HF_FSPACE_EXPAND` in H5HFspace.c, HDF5 2.2.0, define the defaults.
+    const FSM_SHRINK_PERCENT: u16 = 80;
+    const FSM_EXPAND_PERCENT: u16 = 120;
 
     fn encoded_huge_record(address: u64, length: u64, id: u64) -> Vec<u8> {
         let mut bytes = Vec::new();
