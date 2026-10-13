@@ -115,6 +115,21 @@ impl FreeSpaceManagerHeaderRef {
         FreeSpaceManagerHeaderFrame::parse(widths, region.subregion(range)?.bytes())
     }
 
+    /// Parses common header framing and verifies the checksum regardless of the `checksum` feature.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::ChecksumMismatch`] if the stored checksum differs from the
+    /// computed one. Other failures are the errors of [`parse`](Self::parse).
+    pub fn parse_checked(
+        &self,
+        region: FileRegion<'_>,
+    ) -> Result<FreeSpaceManagerHeaderFrame, FormatError> {
+        #[cfg(not(feature = "checksum"))]
+        checksum::verify_trailing_required(region.subregion(self.parse_range())?.bytes())?;
+        self.parse(region)
+    }
+
     /// Returns the complete physical header allocation.
     pub const fn range(&self) -> FileRange {
         self.range
@@ -561,6 +576,24 @@ impl FreeSpaceManagerSectionListRef {
                     FormatError::Internal("a parsed section list has no record range".into())
                 })?,
         })
+    }
+
+    /// Borrows the record bytes after validating framing and the trailing checksum.
+    ///
+    /// Checksum verification is required regardless of the `checksum` feature. Bytes after
+    /// [`parse_range`](Self::parse_range) are excluded from the checksum.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::ChecksumMismatch`] if the stored checksum differs from the
+    /// computed one. Other failures are the errors of [`parse`](Self::parse).
+    pub fn parse_checked<'a>(
+        &self,
+        region: FileRegion<'a>,
+    ) -> Result<FreeSpaceManagerSectionListView<'a>, FormatError> {
+        #[cfg(not(feature = "checksum"))]
+        checksum::verify_trailing_required(region.subregion(self.parse_range())?.bytes())?;
+        self.parse(region)
     }
 
     /// Returns the complete physical allocation, including unused capacity.
@@ -1354,6 +1387,54 @@ mod tests {
     use test_util::free_space;
 
     use super::*;
+
+    #[rstest]
+    #[case::header(true)]
+    #[case::section_list(false)]
+    fn checked_regions_require_checksums(#[case] header_corrupt: bool) {
+        let widths = widths(8, 8);
+        let header_address = StoredAddress::new(619);
+        let header_ref = FreeSpaceManagerHeaderRef::new(widths, PhysicalAddress::new(619)).unwrap();
+        let mut header_bytes = free_space::single_section_header();
+        let mut list_bytes = free_space::single_section_info();
+        let frame = header_ref
+            .parse_checked(FileRegion::new(header_ref.parse_range(), &header_bytes).unwrap())
+            .unwrap();
+        let list_ref = frame
+            .section_list_ref(header_address, PhysicalAddress::new(701))
+            .unwrap();
+        assert_eq!(
+            list_ref
+                .parse_checked(FileRegion::new(list_ref.parse_range(), &list_bytes).unwrap())
+                .unwrap()
+                .records(),
+            &list_bytes[13..list_bytes.len() - 4]
+        );
+        let bytes = if header_corrupt {
+            &mut header_bytes
+        } else {
+            &mut list_bytes
+        };
+        let last = bytes.len() - 4;
+        let computed = checksum::jenkins_lookup3(&bytes[..last]);
+        bytes[last] ^= 1;
+        let error = if header_corrupt {
+            header_ref
+                .parse_checked(FileRegion::new(header_ref.parse_range(), &header_bytes).unwrap())
+                .unwrap_err()
+        } else {
+            list_ref
+                .parse_checked(FileRegion::new(list_ref.parse_range(), &list_bytes).unwrap())
+                .unwrap_err()
+        };
+        assert_eq!(
+            error,
+            FormatError::ChecksumMismatch {
+                expected: computed ^ 1,
+                computed
+            }
+        );
+    }
 
     #[rstest]
     #[case::two(

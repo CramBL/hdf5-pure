@@ -644,6 +644,23 @@ impl FractalHeapFreeSpaceSectionListRef<'_, '_> {
         self.manager.decode(self.reference.parse(region)?.records())
     }
 
+    /// Parses sections with reconstructed geometry and mandatory checksum validation.
+    ///
+    /// Verifies the trailing checksum within [`parse_range`](Self::parse_range), regardless of the
+    /// `checksum` feature. Reserved allocation capacity is excluded from parsing.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::ChecksumMismatch`] if the stored checksum differs from the
+    /// computed one. Other failures are the errors of [`parse`](Self::parse).
+    pub fn parse_checked(
+        &self,
+        region: FileRegion<'_>,
+    ) -> Result<FractalHeapFreeSpace, FormatError> {
+        self.manager
+            .decode(self.reference.parse_checked(region)?.records())
+    }
+
     /// Returns the complete physical allocation, including reserved capacity.
     pub const fn range(&self) -> FileRange {
         self.reference.range()
