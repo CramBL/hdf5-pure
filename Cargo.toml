@@ -83,6 +83,8 @@ test-util = { path = "crates/test-util" }
 test-util-hdf5 = { path = "crates/test-util-hdf5" }
 byteorder = { version = "1", default-features = false }
 hdf5 = { package = "hdf5-metno", git = "https://github.com/metno/hdf5-rust", rev = "605a2e28c17f2209bf2a6d0a8be11ef0b6546034", features = ["zlib"] }
+# The raw libhdf5 bindings `hdf5-metno` builds on, at the same revision.
+hdf5-sys = { package = "hdf5-metno-sys", git = "https://github.com/metno/hdf5-rust", rev = "605a2e28c17f2209bf2a6d0a8be11ef0b6546034" }
 heapscope = "0.1"
 insta = { version = "1.49", default-features = false }
 ndarray = ">=0.16, <0.18"

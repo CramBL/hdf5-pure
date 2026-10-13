@@ -77,6 +77,7 @@ compat = { max-threads = "num-cpus" }
 [[profile.default.overrides]]
 filter = '''
 package(hdf5-pure-crosscheck) & (
+    test(/^classic_aggregation::/) |
     test(/^file_space::/) |
     test(/^file_space_fuzz::/) |
     test(/^page_buffer::/)
