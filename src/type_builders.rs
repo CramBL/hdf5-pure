@@ -9,6 +9,7 @@ use core::fmt;
 
 use core::num::{NonZeroU32, NonZeroUsize};
 
+use hdf5_pure_core::FillTime;
 use hdf5_pure_format::__private::GLOBAL_HEAP_MAX_OBJECTS;
 
 use crate::address::StoredAddress;
@@ -2364,6 +2365,8 @@ pub struct DatasetBuilder {
     /// value message untouched. Its byte width is checked against the datatype's
     /// element size when the dataset is serialized.
     pub(crate) fill: Option<Vec<u8>>,
+    /// The fill time policy for the dataset. `None` defaults to [`FillTime::IfSet`].
+    pub(crate) fill_time: Option<FillTime>,
     /// Whether this dataset allocates storage at all. `Unallocated` declares the
     /// shape, datatype and fill value and writes no data region, which is what
     /// preserves a never-written dataset through a rewrite rather than
@@ -2391,6 +2394,7 @@ impl DatasetBuilder {
             reference_targets: None,
             vl_string_staging: None,
             fill: None,
+            fill_time: None,
             allocation: StorageAllocation::Allocated,
             committed_datatype_path: None,
             #[cfg(feature = "provenance")]
@@ -2421,6 +2425,38 @@ impl DatasetBuilder {
     /// A repack resolves a source's committed type to a path of the output and passes it here.
     pub(crate) fn with_committed_datatype_path(&mut self, path: ObjectPathBuf) -> &mut Self {
         self.committed_datatype_path = Some(path);
+        self
+    }
+
+    /// Sets the dataset's fill time policy.
+    ///
+    /// The caller chooses when the writer writes the fill value to storage: on
+    /// allocation ([`FillTime::Alloc`]), never ([`FillTime::Never`]), or only
+    /// when an explicit fill value is set ([`FillTime::IfSet`]). A dataset
+    /// created without this call uses [`FillTime::IfSet`]. The field is defined
+    /// in version 3 of "The Data Storage - Fill Value Message" of the [format
+    /// specification, version 4.0][spec].
+    ///
+    /// The C library sets this property with `H5Pset_fill_time`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use hdf5_pure::{File, FileBuilder, FillTime};
+    ///
+    /// let mut fb = FileBuilder::new();
+    /// fb.create_dataset("data")
+    ///     .with_i32_data(&[1, 2, 3])
+    ///     .with_fill_time(FillTime::Never);
+    /// let file = File::from_bytes(fb.finish().unwrap()).unwrap();
+    ///
+    /// let dataset = file.dataset("data").unwrap();
+    /// assert_eq!(dataset.fill_time().unwrap(), FillTime::Never);
+    /// ```
+    ///
+    /// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_fvmessage
+    pub fn with_fill_time(&mut self, fill_time: FillTime) -> &mut Self {
+        self.fill_time = Some(fill_time);
         self
     }
 

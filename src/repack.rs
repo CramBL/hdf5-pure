@@ -710,12 +710,14 @@ fn emit_dataset(
     // or address bytes; refuse rather than copy it, matching the crate's
     // never-degrade-on-rewrite contract.
     let fill = ds.defined_fill_bytes()?;
+    let fill_time = ds.fill_time()?;
     if fill.is_some() && !(vlen_slots.is_empty() && reference_slots.is_empty()) {
         return Err(Error::RepackUnsupported(format!(
             "dataset {path}: a fill value on a variable-length or object-reference \
              dataset cannot be repacked faithfully"
         )));
     }
+    db.with_fill_time(fill_time);
 
     // Storage the source never allocated is reproduced as storage, not as the
     // values reading it answers with. By default the reference library does not

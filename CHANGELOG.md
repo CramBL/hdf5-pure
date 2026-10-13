@@ -8,6 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- `DatasetBuilder::with_fill_time` selects when a dataset writes its fill value, with the policy preserved across repacking and reported by dataset reads. Modifying the fill time of an existing dataset remains unsupported ([#755](https://github.com/CramBL/hdf5-pure/pull/755)).
 - `FormatError` distinguishes invalid fractal-heap geometry from block prefixes with an incorrect owner or heap offset. These diagnostics apply to internal parsing of block regions ([#749](https://github.com/CramBL/hdf5-pure/pull/749)).
 - `FormatError` distinguishes a supplied region whose byte count differs from its declared length from one that does not contain a required physical range. These diagnostics apply to internal metadata region operations ([#745](https://github.com/CramBL/hdf5-pure/pull/745)).
 - `StoredAddress` is a supported public type for inspecting base-relative metadata addresses. Its constructors are outside the supported API ([#732](https://github.com/CramBL/hdf5-pure/pull/732)).

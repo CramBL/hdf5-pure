@@ -6,7 +6,10 @@
 //! value" default, the datatype/size validation, and that a fill value set on an
 //! `File::open_rw`-created dataset is honored.
 
-use hdf5_pure::{Dataset, Error, File, FileBuilder, FillTime, FormatError, H5Element, MaxExtent};
+use hdf5_pure::{
+    Dataset, Error, File, FileBuilder, FillTime, FormatError, H5Element, MaxExtent, RepackOptions,
+};
+use rstest::rstest;
 use tempfile::tempdir;
 use test_util_hdf5::file_builder;
 
@@ -404,4 +407,213 @@ fn fill_time_invalid_flag_is_rejected() {
         panic!("expected InvalidFillTime, got {err_val:?}");
     };
     assert_eq!(code, 3);
+}
+
+#[rstest]
+#[case(FillTime::Alloc)]
+#[case(FillTime::Never)]
+#[case(FillTime::IfSet)]
+fn fill_time_selection_round_trips(#[case] fill_time: FillTime) {
+    let file = file_builder::build_and_open(|fb| {
+        fb.create_dataset("contig")
+            .with_i32_data(&[1, 2, 3])
+            .with_fill_time(fill_time);
+        fb.create_dataset("chunked")
+            .with_i32_data(&[4, 5, 6, 7])
+            .with_shape(&[4])
+            .with_chunks(&[2])
+            .with_fill_time(fill_time);
+    });
+    assert_eq!(
+        file.dataset("contig").unwrap().fill_time().unwrap(),
+        fill_time
+    );
+    assert_eq!(
+        file.dataset("chunked").unwrap().fill_time().unwrap(),
+        fill_time
+    );
+    assert_eq!(
+        file.dataset("contig").unwrap().read_i32().unwrap(),
+        vec![1, 2, 3]
+    );
+    assert_eq!(
+        file.dataset("chunked").unwrap().read_i32().unwrap(),
+        vec![4, 5, 6, 7]
+    );
+}
+
+#[test]
+fn fill_time_never_with_defined_fill_round_trips_through_builder() {
+    let file = file_builder::build_and_open(|fb| {
+        fb.create_dataset("d")
+            .with_f64_data(&[1.0, 2.0, 3.0, 4.0])
+            .with_shape(&[4])
+            .with_maxshape(&[MaxExtent::Unlimited])
+            .with_chunks(&[2])
+            .with_fill_value(3.5_f64)
+            .with_fill_time(FillTime::Never);
+    });
+    let ds = file.dataset("d").unwrap();
+    assert_eq!(ds.fill_time().unwrap(), FillTime::Never);
+    assert_eq!(ds.fill_value::<f64>().unwrap(), Some(3.5));
+    assert_eq!(ds.read_f64().unwrap(), vec![1.0, 2.0, 3.0, 4.0]);
+}
+
+#[test]
+fn chunk_edge_padding_is_zeroed_under_fill_time_never() {
+    let mut b = FileBuilder::new();
+    b.create_dataset("default_fill")
+        .with_i32_data(&[1, 2, 3, 4, 5])
+        .with_shape(&[5])
+        .with_chunks(&[4])
+        .with_fill_value(99_i32);
+    b.create_dataset("never_fill")
+        .with_i32_data(&[1, 2, 3, 4, 5])
+        .with_shape(&[5])
+        .with_chunks(&[4])
+        .with_fill_value(99_i32)
+        .with_fill_time(FillTime::Never);
+    let bytes = b.finish().unwrap();
+
+    let file = File::from_bytes(bytes.clone()).unwrap();
+    let default_ds = file.dataset("default_fill").unwrap();
+    let never_ds = file.dataset("never_fill").unwrap();
+
+    assert_eq!(default_ds.fill_time().unwrap(), FillTime::IfSet);
+    assert_eq!(default_ds.fill_value::<i32>().unwrap(), Some(99));
+    let default_chunks = default_ds.chunks().unwrap();
+    let default_c1 = &default_chunks[1];
+    let default_raw = &bytes
+        [default_c1.address as usize..(default_c1.address + default_c1.storage_size) as usize];
+    assert_eq!(
+        default_raw,
+        &[5, 0, 0, 0, 99, 0, 0, 0, 99, 0, 0, 0, 99, 0, 0, 0]
+    );
+
+    assert_eq!(never_ds.fill_time().unwrap(), FillTime::Never);
+    assert_eq!(never_ds.fill_value::<i32>().unwrap(), Some(99));
+    let never_chunks = never_ds.chunks().unwrap();
+    let never_c1 = &never_chunks[1];
+    let never_raw =
+        &bytes[never_c1.address as usize..(never_c1.address + never_c1.storage_size) as usize];
+    assert_eq!(never_raw, &[5, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+}
+
+#[test]
+fn edit_session_created_dataset_preserves_fill_time() {
+    let dir = tempdir().unwrap();
+    let p = dir.path().join("edit_fill_time.h5");
+
+    {
+        let mut fb = FileBuilder::new();
+        fb.create_dataset("seed").with_i32_data(&[0]);
+        fb.write(&p).unwrap();
+    }
+
+    {
+        let s = File::open_rw(&p).unwrap();
+        s.root()
+            .create_dataset("never", |b| {
+                b.with_f64_data(&[1.0, 2.0])
+                    .with_fill_value(-9.5_f64)
+                    .with_fill_time(FillTime::Never);
+            })
+            .unwrap();
+        s.root()
+            .create_dataset("alloc", |b| {
+                b.with_i32_data(&[10, 20]).with_fill_time(FillTime::Alloc);
+            })
+            .unwrap();
+        s.commit().unwrap();
+    }
+
+    let file = File::open(&p).unwrap();
+    let never_ds = file.dataset("never").unwrap();
+    assert_eq!(never_ds.fill_time().unwrap(), FillTime::Never);
+    assert_eq!(never_ds.fill_value::<f64>().unwrap(), Some(-9.5));
+    assert_eq!(never_ds.read_f64().unwrap(), vec![1.0, 2.0]);
+
+    let alloc_ds = file.dataset("alloc").unwrap();
+    assert_eq!(alloc_ds.fill_time().unwrap(), FillTime::Alloc);
+    assert_eq!(alloc_ds.read_i32().unwrap(), vec![10, 20]);
+}
+
+#[test]
+fn write_dataset_rejects_a_fill_time_change() {
+    let dir = tempdir().unwrap();
+    let p = dir.path().join("overwrite_fill_time.h5");
+    {
+        let mut fb = FileBuilder::new();
+        fb.create_dataset("d").with_i32_data(&[1, 2, 3]);
+        fb.write(&p).unwrap();
+    }
+    let s = File::open_rw(&p).unwrap();
+    let err = s
+        .dataset("d")
+        .unwrap()
+        .write_staged(|b| {
+            b.with_i32_data(&[4, 5, 6]).with_fill_time(FillTime::Never);
+        })
+        .unwrap_err();
+    let Error::EditUnsupported(reason) = err else {
+        panic!("expected EditUnsupported, got {err:?}");
+    };
+    assert_eq!(
+        reason,
+        "write_dataset overwrites values only; it cannot change the fill time (set it when the dataset is created)"
+    );
+    assert!(
+        !s.has_staged_edits(),
+        "a rejected overwrite must not be left staged"
+    );
+}
+
+#[test]
+fn repack_preserves_fill_time_policies() {
+    let dir = tempdir().unwrap();
+    let src = dir.path().join("src_policies.h5");
+    let dst = dir.path().join("dst_policies.h5");
+
+    {
+        let mut fb = FileBuilder::new();
+        fb.create_dataset("never")
+            .with_i32_data(&[1, 2, 3])
+            .with_fill_time(FillTime::Never);
+        fb.create_dataset("never_with_value")
+            .with_i32_data(&[4, 5, 6])
+            .with_fill_value(-7_i32)
+            .with_fill_time(FillTime::Never);
+        fb.create_dataset("alloc")
+            .with_f64_data(&[1.0, 2.0])
+            .with_fill_time(FillTime::Alloc);
+        fb.create_dataset("if_set")
+            .with_f64_data(&[3.0, 4.0])
+            .with_fill_value(9.5_f64)
+            .with_fill_time(FillTime::IfSet);
+        fb.create_dataset("default_policy")
+            .with_i32_data(&[7, 8, 9]);
+        fb.write(&src).unwrap();
+    }
+
+    hdf5_pure::repack(&src, &dst, &RepackOptions::default()).unwrap();
+
+    let file = File::open(&dst).unwrap();
+    let never_ds = file.dataset("never").unwrap();
+    assert_eq!(never_ds.fill_time().unwrap(), FillTime::Never);
+    assert_eq!(never_ds.fill_value::<i32>().unwrap(), None);
+
+    let never_val_ds = file.dataset("never_with_value").unwrap();
+    assert_eq!(never_val_ds.fill_time().unwrap(), FillTime::Never);
+    assert_eq!(never_val_ds.fill_value::<i32>().unwrap(), Some(-7));
+
+    let alloc_ds = file.dataset("alloc").unwrap();
+    assert_eq!(alloc_ds.fill_time().unwrap(), FillTime::Alloc);
+
+    let if_set_ds = file.dataset("if_set").unwrap();
+    assert_eq!(if_set_ds.fill_time().unwrap(), FillTime::IfSet);
+    assert_eq!(if_set_ds.fill_value::<f64>().unwrap(), Some(9.5));
+
+    let default_ds = file.dataset("default_policy").unwrap();
+    assert_eq!(default_ds.fill_time().unwrap(), FillTime::IfSet);
+    assert_eq!(default_ds.fill_value::<i32>().unwrap(), None);
 }
