@@ -656,3 +656,85 @@ fn a_partial_chunk_of_single_byte_elements_is_filled() {
         .unwrap();
     assert_eq!(got, vec![1, 2, 3, 4, 5, 9, 9, 9]);
 }
+
+#[test]
+fn c_reads_pure_written_fill_time_never() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("pure_never.h5");
+    let mut fb = FileBuilder::new();
+    fb.create_dataset("contig")
+        .with_i32_data(&[10, 20, 30])
+        .with_fill_time(FillTime::Never);
+    fb.create_dataset("chunked")
+        .with_i32_data(&[1, 2, 3, 4])
+        .with_shape(&[4])
+        .with_chunks(&[2])
+        .with_fill_time(FillTime::Never);
+    fb.write(&path).unwrap();
+
+    let f = hdf5::File::open(&path).unwrap();
+    let contig_dcpl = f.dataset("contig").unwrap().dcpl().unwrap();
+    assert_eq!(contig_dcpl.fill_time(), hdf5::dataset::FillTime::Never);
+    let chunked_dcpl = f.dataset("chunked").unwrap().dcpl().unwrap();
+    assert_eq!(chunked_dcpl.fill_time(), hdf5::dataset::FillTime::Never);
+    f.close().unwrap();
+}
+
+#[test]
+fn c_reads_pure_written_fill_time_alloc() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("pure_alloc.h5");
+    let mut fb = FileBuilder::new();
+    fb.create_dataset("d")
+        .with_f64_data(&[1.5, 2.5])
+        .with_fill_time(FillTime::Alloc);
+    fb.write(&path).unwrap();
+
+    let f = hdf5::File::open(&path).unwrap();
+    let dcpl = f.dataset("d").unwrap().dcpl().unwrap();
+    assert_eq!(dcpl.fill_time(), hdf5::dataset::FillTime::Alloc);
+    f.close().unwrap();
+}
+
+#[test]
+fn c_reads_pure_written_fill_time_never_with_defined_fill() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("pure_never_def.h5");
+    let mut fb = FileBuilder::new();
+    fb.create_dataset("d")
+        .with_i32_data(&[1, 2, 3])
+        .with_fill_value(-7_i32)
+        .with_fill_time(FillTime::Never);
+    fb.write(&path).unwrap();
+
+    let f = hdf5::File::open(&path).unwrap();
+    let dcpl = f.dataset("d").unwrap().dcpl().unwrap();
+    assert_eq!(dcpl.fill_time(), hdf5::dataset::FillTime::Never);
+    assert_eq!(dcpl.get_fill_value_as::<i32>().unwrap(), Some(-7));
+    assert_eq!(
+        f.dataset("d").unwrap().read_raw::<i32>().unwrap(),
+        vec![1, 2, 3]
+    );
+    f.close().unwrap();
+}
+
+#[test]
+#[cfg(target_endian = "little")]
+fn c_reads_pure_written_chunk_padding_under_fill_time_never() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("pure_never_pad.h5");
+    let fill = 77u32;
+    let data = [1u32, 2, 3, 4, 5];
+
+    let mut b = FileBuilder::new();
+    b.create_dataset("col")
+        .with_u32_data(&data)
+        .with_shape(&[5])
+        .with_maxshape(&[MaxExtent::Unlimited])
+        .with_chunks(&[4])
+        .with_fill_value(fill)
+        .with_fill_time(FillTime::Never);
+    b.write(&path).unwrap();
+
+    assert_eq!(c_extend_and_read(&path, 8), vec![1, 2, 3, 4, 5, 0, 0, 0]);
+}

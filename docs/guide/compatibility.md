@@ -108,7 +108,7 @@ Shared object-header messages are supported for datatypes, dataspaces, fill valu
 | Per-chunk filter masks | ✅ | ✅ | |
 | `H5D_CHUNK_DONT_FILTER_PARTIAL_CHUNKS` | ✅ | ❌ | |
 | Fill value | ✅ | ✅ | |
-| `H5D_FILL_TIME_NEVER` | ✅ | ❌ | |
+| `H5D_FILL_TIME_NEVER` | ✅ | ✅ | |
 
 ## Filters
 

@@ -6455,6 +6455,7 @@ impl WriteEngine {
                         fd.raw.len() as u64,
                         &fd.attrs,
                         attr_info.as_deref(),
+                        fd.fill_time.unwrap_or_default(),
                         fd.fill.as_deref(),
                         self.libver(),
                     )?
@@ -7890,6 +7891,12 @@ impl WriteEngine {
             return Err(Error::EditUnsupported(
                 "write_dataset overwrites values only; it cannot change the fill \
                  value (set it when the dataset is created)",
+            ));
+        }
+        if fd.fill_time.is_some() {
+            return Err(Error::EditUnsupported(
+                "write_dataset overwrites values only; it cannot change the fill \
+                 time (set it when the dataset is created)",
             ));
         }
 
@@ -10130,7 +10137,8 @@ impl WriteEngine {
         // The overhang of a partial edge chunk holds the staged fill value
         // (issue #296).
         let elem = ctx.element_size.narrow::<NonZeroUsize>()?;
-        let fill = FillPattern::new(FillTime::IfSet, fd.fill.as_deref(), elem);
+        let fill_time = fd.fill_time.unwrap_or_default();
+        let fill = FillPattern::new(fill_time, fd.fill.as_deref(), elem);
         let set = compress_chunks(
             &fd.raw,
             &fd.ds.dimensions,
@@ -10163,6 +10171,7 @@ impl WriteEngine {
             pipeline_message.as_deref(),
             &fd.attrs,
             attr_info.as_deref(),
+            fill_time,
             fd.fill.as_deref(),
         )?)
     }
@@ -10654,6 +10663,8 @@ struct FlatDataset {
     /// for the library default. Validated against the datatype element size in
     /// [`flatten_dataset`].
     fill: Option<Vec<u8>>,
+    /// The fill time policy for the dataset, or `None` for the library default.
+    fill_time: Option<FillTime>,
     /// The provenance attributes' own inputs, kept so they can be rebuilt when
     /// `raw` changes before the commit writes it. `None` for a dataset staged
     /// without [`DatasetBuilder::with_provenance`](crate::DatasetBuilder::with_provenance).
@@ -11125,7 +11136,7 @@ fn flatten_dataset(db: DatasetBuilder, name: LinkNameBuf) -> Result<FlatDataset,
         db.chunk_options.build_pipeline(
             &ctx,
             FillPattern::new(
-                FillTime::IfSet,
+                db.fill_time.unwrap_or_default(),
                 db.fill.as_deref(),
                 ctx.element_size.narrow::<NonZeroUsize>()?,
             ),
@@ -11242,6 +11253,7 @@ fn flatten_dataset(db: DatasetBuilder, name: LinkNameBuf) -> Result<FlatDataset,
         vl_string_staging: db.vl_string_staging,
         reference_targets: db.reference_targets,
         fill: db.fill,
+        fill_time: db.fill_time,
         #[cfg(feature = "provenance")]
         provenance,
     })

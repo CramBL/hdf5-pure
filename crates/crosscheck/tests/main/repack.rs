@@ -5,7 +5,7 @@
 //! contract on a real variable-length string dataset the C library produces.
 
 use hdf5_pure::{
-    Error, File, FormatError, MaxExtent, RepackOptions, VlenStringReadOptions, repack,
+    Error, File, FillTime, FormatError, MaxExtent, RepackOptions, VlenStringReadOptions, repack,
 };
 use rstest::rstest;
 use tempfile::tempdir;
@@ -532,6 +532,70 @@ fn repack_roundtrips_filtered_and_resizable_vlen_string_datasets() {
             .collect();
         assert_eq!(read, words, "C library disagreed on {name}");
     }
+}
+
+#[test]
+fn c_file_with_fill_times_repacked_then_read_by_c_library() {
+    let dir = tempdir().unwrap();
+    let src = dir.path().join("c_fill_src.h5");
+    let dst = dir.path().join("c_fill_repacked.h5");
+
+    {
+        let file = hdf5::File::create(&src).unwrap();
+        file.new_dataset::<i32>()
+            .shape((3,))
+            .fill_time(hdf5::dataset::FillTime::Never)
+            .create("never")
+            .unwrap()
+            .write(&[1, 2, 3])
+            .unwrap();
+        file.new_dataset::<f64>()
+            .shape((2,))
+            .fill_time(hdf5::dataset::FillTime::Alloc)
+            .create("alloc")
+            .unwrap()
+            .write(&[1.5, 2.5])
+            .unwrap();
+        file.new_dataset::<i32>()
+            .shape((4,))
+            .fill_value(42_i32)
+            .fill_time(hdf5::dataset::FillTime::IfSet)
+            .create("if_set")
+            .unwrap()
+            .write(&[10, 20, 30, 40])
+            .unwrap();
+        file.close().unwrap();
+    }
+
+    repack(&src, &dst, &RepackOptions::new()).unwrap();
+
+    let f = File::open(&dst).unwrap();
+    assert_eq!(
+        f.dataset("never").unwrap().fill_time().unwrap(),
+        FillTime::Never
+    );
+    assert_eq!(
+        f.dataset("alloc").unwrap().fill_time().unwrap(),
+        FillTime::Alloc
+    );
+    assert_eq!(
+        f.dataset("if_set").unwrap().fill_time().unwrap(),
+        FillTime::IfSet
+    );
+    assert_eq!(
+        f.dataset("if_set").unwrap().fill_value::<i32>().unwrap(),
+        Some(42)
+    );
+
+    let c = hdf5::File::open(&dst).unwrap();
+    let never_dcpl = c.dataset("never").unwrap().dcpl().unwrap();
+    assert_eq!(never_dcpl.fill_time(), hdf5::dataset::FillTime::Never);
+    let alloc_dcpl = c.dataset("alloc").unwrap().dcpl().unwrap();
+    assert_eq!(alloc_dcpl.fill_time(), hdf5::dataset::FillTime::Alloc);
+    let if_set_dcpl = c.dataset("if_set").unwrap().dcpl().unwrap();
+    assert_eq!(if_set_dcpl.fill_time(), hdf5::dataset::FillTime::IfSet);
+    assert_eq!(if_set_dcpl.get_fill_value_as::<i32>().unwrap(), Some(42));
+    c.close().unwrap();
 }
 
 /// A boolean attribute is an HDF5 enumeration, which [`AttrValue`] cannot carry

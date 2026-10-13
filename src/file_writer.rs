@@ -127,6 +127,7 @@ pub(crate) fn build_chunked_dataset_oh(
     pipeline_message: Option<&[u8]>,
     attrs: &[AttributeMessage],
     attr_info: Option<&[u8]>,
+    fill_time: FillTime,
     fill: Option<&[u8]>,
 ) -> Result<Vec<u8>, FormatError> {
     let mut w = ObjectHeaderWriter::new();
@@ -134,7 +135,7 @@ pub(crate) fn build_chunked_dataset_oh(
     w.add_message(MessageType::DATASPACE, ds.serialize(LENGTH_SIZE));
     w.add_message_with_flags(
         MessageType::FILL_VALUE,
-        crate::fill_value::fill_value_message_v3(fill)?,
+        crate::fill_value::serialize_fill_value_message_v3(fill_time, fill)?,
         MessageFlags::CONSTANT,
     );
     w.add_message(MessageType::DATA_LAYOUT, layout_message.to_vec());
@@ -182,6 +183,7 @@ pub(crate) fn build_dataset_oh(
     data_size: u64,
     attrs: &[AttributeMessage],
     attr_info: Option<&[u8]>,
+    fill_time: FillTime,
     fill: Option<&[u8]>,
     libver: LibVer,
 ) -> Result<Vec<u8>, FormatError> {
@@ -190,7 +192,7 @@ pub(crate) fn build_dataset_oh(
     w.add_message(MessageType::DATASPACE, ds.serialize(LENGTH_SIZE));
     w.add_message_with_flags(
         MessageType::FILL_VALUE,
-        crate::fill_value::fill_value_message_v3(fill)?,
+        crate::fill_value::serialize_fill_value_message_v3(fill_time, fill)?,
         MessageFlags::CONSTANT,
     );
     w.add_message(
@@ -1573,6 +1575,8 @@ impl FileWriter {
             /// `None` for the library default. Validated against the datatype
             /// element size in `flatten_dataset`.
             fill: Option<Vec<u8>>,
+            /// The fill time policy for the dataset.
+            fill_time: FillTime,
             /// When set, this contiguous dataset's element bytes are produced at
             /// write time rather than held in `raw`, which stays empty.
             produced: Option<crate::type_builders::ProducedPayload>,
@@ -2088,6 +2092,7 @@ impl FileWriter {
                 reference_targets: db.reference_targets,
                 vl_string_staging: db.vl_string_staging,
                 fill: db.fill,
+                fill_time: db.fill_time.unwrap_or_default(),
                 allocation,
                 declared_contiguous_len,
             });
@@ -2555,7 +2560,7 @@ impl FileWriter {
                     // wherever nothing was written, so the edge overhang of a
                     // partial chunk is filled rather than zeroed (issue #296).
                     let elem = ctx.element_size.narrow::<NonZeroUsize>()?;
-                    let fill = FillPattern::new(FillTime::IfSet, d.fill.as_deref(), elem);
+                    let fill = FillPattern::new(d.fill_time, d.fill.as_deref(), elem);
                     Ok(Some(compress_chunks(
                         &d.raw,
                         &d.ds.dimensions,
@@ -2764,6 +2769,7 @@ impl FileWriter {
                     measured.pipeline_message.as_deref(),
                     &d.attrs,
                     dense_attr_info.as_deref(),
+                    d.fill_time,
                     d.fill.as_deref(),
                 )?
             } else {
@@ -2776,6 +2782,7 @@ impl FileWriter {
                     d.declared_contiguous_len,
                     &d.attrs,
                     dense_attr_info.as_deref(),
+                    d.fill_time,
                     d.fill.as_deref(),
                     libver,
                 )?
@@ -3005,6 +3012,7 @@ impl FileWriter {
                         ds_dense_blobs[i]
                             .as_ref()
                             .map(|b| b.attr_info_message.as_slice()),
+                        d.fill_time,
                         d.fill.as_deref(),
                     )?
                 } else {
@@ -3018,6 +3026,7 @@ impl FileWriter {
                         ds_dense_blobs[i]
                             .as_ref()
                             .map(|b| b.attr_info_message.as_slice()),
+                        d.fill_time,
                         d.fill.as_deref(),
                         libver,
                     )?

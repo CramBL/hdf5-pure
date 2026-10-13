@@ -212,11 +212,16 @@ impl PaddingFill {
     }
 }
 
-pub(crate) fn fill_value_message_v3(fill: Option<&[u8]>) -> Result<Vec<u8>, FormatError> {
-    hdf5_pure_format::__private::fill_value_message_v3(fill).map_err(|error| match error {
-        FillValueError::TooLarge { length } => FormatError::SerializationError(format!(
-            "fill value length {length} exceeds the u32 message field"
-        )),
+pub(crate) fn serialize_fill_value_message_v3(
+    fill_time: FillTime,
+    fill: Option<&[u8]>,
+) -> Result<Vec<u8>, FormatError> {
+    hdf5_pure_format::__private::serialize_fill_value_message_v3(fill_time, fill).map_err(|error| {
+        match error {
+            FillValueError::TooLarge { length } => FormatError::SerializationError(format!(
+                "fill value length {length} exceeds the u32 message field"
+            )),
+        }
     })
 }
 
