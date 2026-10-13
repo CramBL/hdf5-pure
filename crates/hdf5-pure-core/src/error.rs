@@ -121,6 +121,13 @@ pub enum FormatError {
     },
     /// A compound datatype contains the same field name more than once.
     DuplicateCompoundField(String),
+    /// A global heap collection holds two objects at the same index.
+    DuplicateGlobalHeapObjectIndex {
+        /// The physical address of the collection.
+        collection_address: u64,
+        /// The index of the second object.
+        index: u16,
+    },
     /// A compound datatype contains no fields.
     EmptyCompoundType,
     /// An enumeration datatype was built over a base type that is not an
@@ -177,12 +184,28 @@ pub enum FormatError {
         /// Computed checksum.
         computed: u32,
     },
+    /// A global heap collection is smaller than 4096 bytes, the minimum collection size.
+    GlobalHeapCollectionTooSmall {
+        /// The physical address of the collection.
+        collection_address: u64,
+        /// The collection size its header stores, in bytes.
+        size: u64,
+    },
     /// Global heap object not found.
     GlobalHeapObjectNotFound {
         /// Address of the collection.
         collection_address: u64,
         /// Index that was not found.
         index: u16,
+    },
+    /// A global heap object, or the object header of one, runs past the end of its collection.
+    GlobalHeapObjectOutsideCollection {
+        /// The physical address of the object header.
+        address: u64,
+        /// The index the object header stores.
+        index: u16,
+        /// The physical address of the first byte past the collection.
+        collection_end: u64,
     },
     /// A fractal-heap "huge" object's heap ID referenced a B-tree key that is
     /// not present in the heap's huge-objects v2 B-tree.
@@ -438,6 +461,16 @@ pub enum FormatError {
         /// The library-version label of the format the bounds resolved to.
         writing: &'static str,
     },
+    /// The free space object of a global heap collection does not span the rest of the
+    /// collection.
+    MisplacedGlobalHeapFreeSpace {
+        /// The physical address of the free space object's header.
+        address: u64,
+        /// The size the free space object stores, its header included, in bytes.
+        size: u64,
+        /// The physical address of the first byte past the collection.
+        collection_end: u64,
+    },
     /// Maximum nesting/continuation depth exceeded (malformed data protection).
     NestingDepthExceeded,
     /// A numeric element in a file is wider than the 64-bit word the typed
@@ -515,6 +548,13 @@ pub enum FormatError {
         expected: &'static str,
         /// Actual type description.
         actual: &'static str,
+    },
+    /// The size of a global heap collection is not a multiple of 8 bytes.
+    UnalignedGlobalHeapCollection {
+        /// The physical address of the collection.
+        collection_address: u64,
+        /// The collection size its header stores, in bytes.
+        size: u64,
     },
     /// An Object Header Continuation message stores the undefined address, all bits set, as the
     /// address of its continuation block.
@@ -1087,6 +1127,57 @@ impl fmt::Display for FormatError {
                 write!(
                     f,
                     "global heap object not found: collection {collection_address:#x}, index {index}"
+                )
+            }
+            Self::DuplicateGlobalHeapObjectIndex {
+                collection_address,
+                index,
+            } => {
+                write!(
+                    f,
+                    "global heap collection {collection_address:#x} holds index {index} more than once"
+                )
+            }
+            Self::GlobalHeapCollectionTooSmall {
+                collection_address,
+                size,
+            } => {
+                write!(
+                    f,
+                    "global heap collection {collection_address:#x} is {size} bytes, below the \
+                     minimum"
+                )
+            }
+            Self::UnalignedGlobalHeapCollection {
+                collection_address,
+                size,
+            } => {
+                write!(
+                    f,
+                    "global heap collection {collection_address:#x} is {size} bytes, which \
+                     breaks the collection's alignment"
+                )
+            }
+            Self::GlobalHeapObjectOutsideCollection {
+                address,
+                index,
+                collection_end,
+            } => {
+                write!(
+                    f,
+                    "global heap object {index} at {address:#x} runs past the collection end \
+                     {collection_end:#x}"
+                )
+            }
+            Self::MisplacedGlobalHeapFreeSpace {
+                address,
+                size,
+                collection_end,
+            } => {
+                write!(
+                    f,
+                    "global heap free space at {address:#x} spans {size} bytes and does not end \
+                     at the collection end {collection_end:#x}"
                 )
             }
             Self::VlDataError(msg) => {

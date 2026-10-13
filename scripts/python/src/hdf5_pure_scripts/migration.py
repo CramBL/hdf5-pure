@@ -195,8 +195,11 @@ def migration_shapes(baseline: dict, candidate: dict, core: dict) -> list[str]:
     allowed_added_variants = {
         "FormatError": {
             "AddressTooLarge",
+            "DuplicateGlobalHeapObjectIndex",
             "EofRelocationUnderflow",
             "FileRegionLengthMismatch",
+            "GlobalHeapCollectionTooSmall",
+            "GlobalHeapObjectOutsideCollection",
             "InsufficientRegion",
             "Internal",
             "InvalidFillTime",
@@ -212,7 +215,9 @@ def migration_shapes(baseline: dict, candidate: dict, core: dict) -> list[str]:
             "InvalidObjectHeaderMessageSize",
             "InvalidSpaceAllocationTime",
             "LengthTooLarge",
+            "MisplacedGlobalHeapFreeSpace",
             "TruncatedFile",
+            "UnalignedGlobalHeapCollection",
             "UndefinedContinuationAddress",
             "UnsupportedSerializedSectionClass",
         }

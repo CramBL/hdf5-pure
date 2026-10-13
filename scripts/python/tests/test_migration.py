@@ -253,6 +253,11 @@ def test_migration_shape_ignores_only_the_allowed_variant_changes(variant, expec
         ("InvalidFilterName", []),
         ("InvalidFilterPipelineField", []),
         ("UnsupportedSerializedSectionClass", []),
+        ("DuplicateGlobalHeapObjectIndex", []),
+        ("GlobalHeapCollectionTooSmall", []),
+        ("GlobalHeapObjectOutsideCollection", []),
+        ("MisplacedGlobalHeapFreeSpace", []),
+        ("UnalignedGlobalHeapCollection", []),
         (
             "UnrecognizedHeapError",
             ["FormatError: variants changed", "FormatError: variant_order changed"],
