@@ -1,0 +1,10 @@
+---
+source: tests/main/classic_aggregation.rs
+expression: report
+---
+Create(Group("g0")): physical size 4096, logical size 4096, userblock [], metadata [(0, 48), (344, 39), (383, 56), (439, 140)], raw [], managers [(579, 82), (661, 53)], free [(48, 296), (714, 3382)], unclassified [], trailing slack [], complete true
+Create(Dataset("d0", 16)): physical size 8192, logical size 8192, userblock [], metadata [(0, 48), (48, 71), (119, 73), (344, 39), (714, 140)], raw [(4096, 64)], managers [(854, 82), (936, 71), (1007, 82), (1089, 35)], free [(192, 152), (383, 331), (1124, 2972), (4160, 4032)], unclassified [], trailing slack [], complete true
+Create(Group("g1")): physical size 8192, logical size 8192, userblock [], metadata [(0, 48), (48, 71), (192, 39), (231, 90), (344, 39), (1124, 140)], raw [(4096, 64)], managers [(1264, 82), (1346, 89), (1435, 82), (1517, 35)], free [(119, 73), (321, 23), (383, 741), (1552, 2544), (4160, 4032)], unclassified [], trailing slack [], complete true
+Create(Dataset("d1", 16)): physical size 8192, logical size 8192, userblock [], metadata [(0, 48), (48, 71), (119, 71), (192, 39), (344, 39), (383, 107), (490, 140)], raw [(4096, 64), (4160, 64)], managers [(630, 82), (712, 71), (783, 82), (865, 35)], free [(190, 2), (231, 113), (900, 3196), (4224, 3968)], unclassified [], trailing slack [], complete true
+Create(Group("g2")): physical size 8192, logical size 8192, userblock [], metadata [(0, 48), (48, 71), (119, 71), (192, 39), (231, 39), (344, 39), (900, 124), (1024, 140)], raw [(4096, 64), (4160, 64)], managers [(1164, 82), (1246, 89), (1335, 82), (1417, 35)], free [(190, 2), (270, 74), (383, 517), (1452, 2644), (4224, 3968)], unclassified [], trailing slack [], complete true
+Create(Dataset("d2", 16)): physical size 8192, logical size 8192, userblock [], metadata [(0, 48), (48, 71), (119, 71), (192, 39), (231, 39), (270, 71), (344, 39), (383, 141), (1452, 140)], raw [(4096, 64), (4160, 64), (4224, 64)], managers [(1592, 82), (1674, 89), (1763, 82), (1845, 35)], free [(190, 2), (341, 3), (524, 928), (1880, 2216), (4288, 3904)], unclassified [], trailing slack [], complete true

@@ -1,0 +1,8 @@
+---
+source: tests/main/classic_aggregation.rs
+expression: report
+---
+Create(Dataset("r0", 16)): physical size 8192, logical size 8192, userblock [], metadata [(0, 48), (344, 71), (415, 56), (471, 140)], raw [(4096, 64)], managers [(611, 82), (693, 53), (746, 82), (828, 35)], free [(48, 296), (863, 3233), (4160, 4032)], unclassified [], trailing slack [], complete true
+Create(Strings("v")): physical size 12288, logical size 12288, userblock [], metadata [(0, 48), (48, 79), (127, 72), (344, 71), (863, 140)], raw [(4096, 64), (4160, 32)], managers [(1003, 82), (1085, 71), (1156, 82), (1238, 35)], free [(199, 145), (415, 448), (1273, 2823), (4192, 4000)], unclassified [(8192, 4096)], trailing slack [], complete false
+Create(Dataset("r1", 16)): physical size 12288, logical size 12288, userblock [], metadata [(0, 48), (48, 79), (199, 71), (344, 71), (415, 89), (1273, 140)], raw [(4096, 64), (4160, 32), (4192, 64)], managers [(1413, 82), (1495, 89), (1584, 82), (1666, 35)], free [(127, 72), (270, 74), (504, 769), (1701, 2395), (4256, 3936)], unclassified [(8192, 4096)], trailing slack [], complete false
+Create(Group("g")): physical size 12288, logical size 12288, userblock [], metadata [(0, 48), (48, 79), (127, 39), (199, 71), (344, 71), (504, 105), (609, 140)], raw [(4096, 64), (4160, 32), (4192, 64)], managers [(749, 82), (831, 89), (920, 82), (1002, 35)], free [(166, 33), (270, 74), (415, 89), (1037, 3059), (4256, 3936)], unclassified [(8192, 4096)], trailing slack [], complete false

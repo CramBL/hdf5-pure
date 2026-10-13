@@ -64,6 +64,62 @@ fn libhdf5_persists_no_free_space_manager_under_aggr() {
     assert_eq!(file_space::libhdf5_free_sections(&reopened), []);
 }
 
+#[rstest]
+fn libhdf5_reads_the_workload_hdf5_pure_writes(
+    #[values(
+        aggregation::METADATA_HEAVY,
+        aggregation::SMALL_RAW,
+        aggregation::ALTERNATING,
+        aggregation::GLOBAL_HEAP,
+        aggregation::FREED_EXTENT,
+        aggregation::BLOCK_EDGES
+    )]
+    workload: Workload,
+    #[values(
+        FileSpaceStrategy::Aggr,
+        FileSpaceStrategy::None,
+        FileSpaceStrategy::FsmAggr,
+        FileSpaceStrategy::Page
+    )]
+    strategy: FileSpaceStrategy,
+) {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("workload.h5");
+    workload.write(&path, strategy, true);
+
+    let file = hdf5::File::open(&path).unwrap();
+    let mut members = file.member_names().unwrap();
+    members.sort_unstable();
+    let mut expected = workload
+        .surviving_objects()
+        .map(Object::link_name)
+        .collect::<Vec<_>>();
+    expected.sort_unstable();
+    assert_eq!(members, expected);
+    for object in workload.surviving_objects() {
+        match object {
+            Object::Dataset(name, len) => assert_eq!(
+                file.dataset(name).unwrap().read_raw::<i32>().unwrap(),
+                vec![aggregation::DATASET_VALUE; len]
+            ),
+            Object::Group(name) => {
+                file.group(name).unwrap();
+            }
+            Object::Strings(name) => assert_eq!(
+                file.dataset(name)
+                    .unwrap()
+                    .read_raw::<VarLenUnicode>()
+                    .unwrap()
+                    .iter()
+                    .map(VarLenUnicode::as_str)
+                    .collect::<Vec<_>>(),
+                aggregation::STRINGS
+            ),
+        }
+    }
+}
+
+/// Where the C library places the allocations of a workload, and the file size after each step.
 #[derive(Debug, Default, Eq, PartialEq)]
 struct Placements<T> {
     /// The object header address of each object the workload creates, in step order.
