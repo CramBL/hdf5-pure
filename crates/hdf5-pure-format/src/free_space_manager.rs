@@ -27,6 +27,8 @@ use crate::bytes;
 use crate::checksum;
 use crate::convert::Narrow;
 use crate::error::FormatError;
+use crate::fractal_heap::FractalHeapHeader;
+use crate::fractal_heap_free_space::FractalHeapFreeSpaceManager;
 use crate::width::FormatWidths;
 use crate::width::LengthWidth;
 use crate::width::OffsetWidth;
@@ -305,6 +307,98 @@ impl FreeSpaceManagerHeaderFrame {
             )));
         }
         Ok(header)
+    }
+
+    /// Validates the header fields against the fractal heap's doubling table.
+    ///
+    /// Checks client ID 0, the four semantic section classes, the heap address width and
+    /// maximum direct-block size, and the sum of serialized and ghost section counts.
+    /// The returned manager provides client-specific section-list parsing.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::InvalidFreeSpaceManager`] if the client, section counts, or heap
+    /// geometry disagree, a nonempty manager has no serialized proxy, or serialized records
+    /// have an undefined section-list address. Returns [`FormatError::InvalidFractalHeapGeometry`]
+    /// for invalid doubling-table geometry, and [`FormatError::OffsetOverflow`] if derived heap
+    /// offsets overflow.
+    ///
+    /// # Examples
+    ///
+    /// The caller supplies header and used section-list bytes. The reconstructed section
+    /// count includes normal rows represented by serialized first-row records. The caller
+    /// reconstructs a normal row and an indirect child from a parsed first-row record.
+    ///
+    /// ```
+    /// use hdf5_pure_core::__private::BaseAddressExt;
+    /// use hdf5_pure_core::__private::DecodedStoredAddress;
+    /// use hdf5_pure_core::__private::FileRegion;
+    /// use hdf5_pure_core::__private::PhysicalAddress;
+    /// use hdf5_pure_core::__private::StoredAddressExt;
+    /// use hdf5_pure_core::BaseAddress;
+    /// use hdf5_pure_core::StoredAddress;
+    /// use hdf5_pure_format::__private::FormatWidths;
+    /// use hdf5_pure_format::__private::FreeSpaceManagerHeaderRef;
+    /// use hdf5_pure_format::__private::FractalHeapFreeSection;
+    /// use hdf5_pure_format::__private::FractalHeapSectionClass;
+    /// # use hdf5_pure_format::__private::FractalHeapHeader;
+    /// # use hdf5_pure_format::FormatError;
+    /// # use test_util::fractal_heap;
+    /// # let widths = FormatWidths::from_sizes(8, 8)?;
+    /// # let heap_bytes = fractal_heap::Header::new(256).build(test_util::widths::Widths::EIGHT);
+    /// # let mut heap = FractalHeapHeader::parse_bytes(&heap_bytes, widths.offsets, widths.lengths)?;
+    /// # heap.current_rows_in_root_indirect_block = 6;
+    /// # heap.managed_space = 16384;
+    /// # let header_bytes = [
+    /// #     0x46, 0x53, 0x48, 0x44, 0x00, 0x00, 0x01, 0x0f, 0x00, 0x00, 0x00, 0x00,
+    /// #     0x00, 0x00, 0x11, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00,
+    /// #     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00,
+    /// #     0x00, 0x00, 0x04, 0x00, 0x50, 0x00, 0x78, 0x00, 0x10, 0x00, 0x00, 0x04,
+    /// #     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10, 0x00, 0x00, 0x00, 0x00,
+    /// #     0x00, 0x00, 0x1f, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x1f, 0x00,
+    /// #     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x4e, 0x6e, 0x78, 0x88,
+    /// # ];
+    /// # let list_bytes = [
+    /// #     0x46, 0x53, 0x53, 0x45, 0x00, 0x20, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    /// #     0x00, 0x01, 0x71, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00,
+    /// #     0x00, 0x18, 0x00, 0x82, 0x46, 0x8a, 0xb2,
+    /// # ];
+    /// let widths = FormatWidths::from_sizes(8, 8)?;
+    /// let base = BaseAddress::new(512);
+    /// let header_addr = StoredAddress::new(32);
+    /// let header_ref = FreeSpaceManagerHeaderRef::new(
+    ///     widths, PhysicalAddress::new(base.absolute(header_addr)?),
+    /// )?;
+    /// let frame = header_ref.parse(FileRegion::new(header_ref.parse_range(), &header_bytes)?)?;
+    /// let manager = frame.fractal_heap_header(&heap)?;
+    /// let DecodedStoredAddress::Defined(list_addr) = frame.section_list_addr() else {
+    ///     return Ok(());
+    /// };
+    /// let list_ref = manager.section_list_ref(
+    ///     header_addr, PhysicalAddress::new(base.absolute(list_addr)?),
+    /// )?;
+    /// let space = list_ref.parse(FileRegion::new(list_ref.parse_range(), &list_bytes)?)?;
+    /// assert_eq!(space.sections().len(), 1);
+    /// assert_eq!(space.total_sections(), 17);
+    /// let Some(FractalHeapFreeSection::FirstRow { indirect, .. }) = space.sections().first() else {
+    ///     panic!("expected first-row section");
+    /// };
+    /// let row = manager.row_section(*indirect, 3)?;
+    /// assert_eq!(row.class(), FractalHeapSectionClass::NormalRow);
+    /// assert_eq!((row.offset(), row.size(), row.blocks()), (2048, 497, 4));
+    /// let child = manager.child_section(*indirect, 5, 0)?;
+    /// assert_eq!(child.class(), FractalHeapSectionClass::Indirect);
+    /// assert_eq!((child.block_offset(), child.rows(), child.blocks()), (8192, 3, 12));
+    /// let child_row = manager.row_section(child, 0)?;
+    /// assert_eq!(child_row.class(), FractalHeapSectionClass::NormalRow);
+    /// assert_eq!((child_row.offset(), child_row.size()), (8192, 113));
+    /// # Ok::<(), FormatError>(())
+    /// ```
+    pub fn fractal_heap_header<'a>(
+        &self,
+        heap: &'a FractalHeapHeader,
+    ) -> Result<FractalHeapFreeSpaceManager<'a>, FormatError> {
+        FractalHeapFreeSpaceManager::new(self.widths, self.clone(), heap)
     }
 
     /// Creates a section-list reference at the resolved physical address.

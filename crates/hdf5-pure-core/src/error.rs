@@ -572,6 +572,19 @@ pub enum FormatError {
     UnsupportedFilteredHeapObject,
     /// Unknown message type that is marked as must-understand.
     UnsupportedMessage(u16),
+    /// A serialized free-space section class is unsupported for its manager client.
+    ///
+    /// Fractal-heap classes 2 and 3 are defined in "Free-space Index" of the [format
+    /// specification, version 4.0][spec]. Parsing supports their reconstructed geometry.
+    /// Serialized records of these classes and reserved classes report this error.
+    ///
+    /// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsec_fmt4_infra_freespaceindex
+    UnsupportedSerializedSectionClass {
+        /// The client identifier read from the free-space manager header.
+        client_id: u8,
+        /// The unsupported class identifier read from the serialized section record.
+        class_id: u8,
+    },
     /// A message body references the shared object header message (SOHM) heap,
     /// but parsing lacks a shared-message table. The superblock extension may
     /// omit the table, the table may be unreadable, or the caller may parse a
@@ -797,6 +810,15 @@ impl fmt::Display for FormatError {
                     f,
                     "{content} bytes of userblock content do not fit a userblock of {userblock} \
                      bytes"
+                )
+            }
+            Self::UnsupportedSerializedSectionClass {
+                client_id,
+                class_id,
+            } => {
+                write!(
+                    f,
+                    "unsupported serialized free-space section class {class_id} for client {client_id}"
                 )
             }
             Self::InvalidFreeSpaceManager(reason) => {

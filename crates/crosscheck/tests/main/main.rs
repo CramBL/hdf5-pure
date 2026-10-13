@@ -42,6 +42,7 @@ mod fill_value;
 mod fixed_string;
 mod fractal_heap_dense_links;
 mod fractal_heap_filtered_header;
+mod fractal_heap_free_space;
 mod global_heap_length_width;
 mod hdf5;
 mod hdf5_release_feature;
