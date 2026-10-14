@@ -216,6 +216,8 @@ pub use crate::sohm::parse_sohm_list;
 pub use crate::sohm::sohm_list_len;
 pub use crate::superblock::parse_superblock;
 pub use crate::superblock::parse_superblock_from_source;
+pub use crate::superblock::parse_superblock_from_source_with_widths;
+pub use crate::superblock::parse_superblock_with_widths;
 pub use crate::superblock::serialize_superblock;
 pub use crate::symbol_table::SymbolTableEntry;
 pub use crate::symbol_table::SymbolTableMessage;

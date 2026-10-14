@@ -22,6 +22,7 @@ use crate::error::FormatError;
 use crate::metadata_source::MetadataSource;
 use crate::signature::HDF5_SIGNATURE;
 use crate::width;
+use crate::width::FormatWidths;
 use crate::width::LengthWidth;
 use crate::width::OffsetWidth;
 
@@ -101,11 +102,28 @@ pub fn parse_superblock_from_source<S: MetadataSource + ?Sized>(
     source: &S,
     signature_offset: u64,
 ) -> Result<Superblock, FormatError> {
+    parse_superblock_from_source_with_widths(source, signature_offset)
+        .map(|(superblock, _)| superblock)
+}
+
+/// Returns the decoded superblock at `signature_offset` and its validated format widths.
+///
+/// The returned [`FormatWidths`] stores the superblock's "Size of Offsets" field as an
+/// [`OffsetWidth`] and its "Size of Lengths" field as a [`LengthWidth`].
+///
+/// # Errors
+///
+/// Returns the error `source` returns if the read fails, and otherwise the errors
+/// [`parse_superblock_with_widths`] returns.
+pub fn parse_superblock_from_source_with_widths<S: MetadataSource + ?Sized>(
+    source: &S,
+    signature_offset: u64,
+) -> Result<(Superblock, FormatWidths), FormatError> {
     let available = source.len().saturating_sub(signature_offset);
     let window = available.min(MAX_SUPERBLOCK_LEN).to_usize()?;
     let buf = source.read_metadata_at(signature_offset, window)?;
     // The window begins at the signature, so within `buf` it sits at 0.
-    parse_superblock(&buf, 0)
+    parse_superblock_with_widths(&buf, 0)
 }
 
 /// Parses the superblock whose signature starts at `signature_offset` in `data`.
@@ -122,6 +140,26 @@ pub fn parse_superblock_from_source<S: MetadataSource + ?Sized>(
 /// or 8, and, under the `checksum` feature, [`FormatError::ChecksumMismatch`] if the checksum of a
 /// version 2 or 3 superblock does not match its bytes.
 pub fn parse_superblock(data: &[u8], signature_offset: usize) -> Result<Superblock, FormatError> {
+    parse_superblock_with_widths(data, signature_offset).map(|(superblock, _)| superblock)
+}
+
+/// Returns the decoded superblock and its validated format widths.
+///
+/// The returned [`FormatWidths`] stores the superblock's "Size of Offsets" field as an
+/// [`OffsetWidth`] and its "Size of Lengths" field as a [`LengthWidth`].
+///
+/// # Errors
+///
+/// Returns [`FormatError::UnexpectedEof`] if `data` ends inside the superblock,
+/// [`FormatError::SignatureNotFound`] if the signature is not at `signature_offset`,
+/// [`FormatError::UnsupportedVersion`] if the version is above 3,
+/// [`FormatError::InvalidOffsetSize`] or [`FormatError::InvalidLengthSize`] if a width is not 2, 4,
+/// or 8, and, under the `checksum` feature, [`FormatError::ChecksumMismatch`] if the checksum of a
+/// version 2 or 3 superblock does not match its bytes.
+pub fn parse_superblock_with_widths(
+    data: &[u8],
+    signature_offset: usize,
+) -> Result<(Superblock, FormatWidths), FormatError> {
     let d = data
         .get(signature_offset..)
         .ok_or(FormatError::UnexpectedEof {
@@ -144,7 +182,7 @@ pub fn parse_superblock(data: &[u8], signature_offset: usize) -> Result<Superblo
     }
 }
 
-fn parse_v0(d: &[u8]) -> Result<Superblock, FormatError> {
+fn parse_v0(d: &[u8]) -> Result<(Superblock, FormatWidths), FormatError> {
     // sig(8) + version(1) + free_space_ver(1) + root_grp_ver(1) + reserved(1)
     // + shared_hdr_ver(1) + offset_size(1) + length_size(1) + reserved(1)
     // + group_leaf_k(2) + group_internal_k(2) + consistency_flags(4)
@@ -181,10 +219,10 @@ fn parse_v0(d: &[u8]) -> Result<Superblock, FormatError> {
     pos += ls;
     let object_header_addr = StoredAddress::new(bytes::read_offset_width(d, pos, offset_width)?);
 
-    Ok(SuperblockFields {
+    let superblock = SuperblockFields {
         version: 0,
-        offset_size: offset_width.get(),
-        length_size: length_width.get(),
+        offset_size: d[13],
+        length_size: d[14],
         base_address,
         eof_address,
         root_group_address: object_header_addr,
@@ -197,10 +235,15 @@ fn parse_v0(d: &[u8]) -> Result<Superblock, FormatError> {
         superblock_extension_address: None,
         checksum: None,
     }
-    .build())
+    .build();
+    let widths = FormatWidths {
+        offsets: offset_width,
+        lengths: length_width,
+    };
+    Ok((superblock, widths))
 }
 
-fn parse_v1(d: &[u8]) -> Result<Superblock, FormatError> {
+fn parse_v1(d: &[u8]) -> Result<(Superblock, FormatWidths), FormatError> {
     // Same as v0 but adds indexed_storage_internal_node_k(2) + reserved(2)
     // *after* the consistency flags, not before them, the order the C
     // library decodes (`H5F__sblock_deserialize`: symbol-table leaf K,
@@ -242,10 +285,10 @@ fn parse_v1(d: &[u8]) -> Result<Superblock, FormatError> {
     pos += ls;
     let object_header_addr = StoredAddress::new(bytes::read_offset_width(d, pos, offset_width)?);
 
-    Ok(SuperblockFields {
+    let superblock = SuperblockFields {
         version: 1,
-        offset_size: offset_width.get(),
-        length_size: length_width.get(),
+        offset_size: d[13],
+        length_size: d[14],
         base_address,
         eof_address,
         root_group_address: object_header_addr,
@@ -258,10 +301,15 @@ fn parse_v1(d: &[u8]) -> Result<Superblock, FormatError> {
         superblock_extension_address: None,
         checksum: None,
     }
-    .build())
+    .build();
+    let widths = FormatWidths {
+        offsets: offset_width,
+        lengths: length_width,
+    };
+    Ok((superblock, widths))
 }
 
-fn parse_v2v3(d: &[u8], version: u8) -> Result<Superblock, FormatError> {
+fn parse_v2v3(d: &[u8], version: u8) -> Result<(Superblock, FormatWidths), FormatError> {
     // sig(8) + version(1) + offset_size(1) + length_size(1) + consistency_flags(1) = 12
     bytes::ensure_len(d, 0, 12)?;
 
@@ -299,10 +347,10 @@ fn parse_v2v3(d: &[u8], version: u8) -> Result<Superblock, FormatError> {
         }
     }
 
-    Ok(SuperblockFields {
+    let superblock = SuperblockFields {
         version,
-        offset_size: offset_width.get(),
-        length_size: length_width.get(),
+        offset_size: d[9],
+        length_size: d[10],
         base_address,
         eof_address,
         root_group_address,
@@ -315,7 +363,12 @@ fn parse_v2v3(d: &[u8], version: u8) -> Result<Superblock, FormatError> {
         superblock_extension_address: Some(superblock_extension_address),
         checksum: Some(stored_checksum),
     }
-    .build())
+    .build();
+    let widths = FormatWidths {
+        offsets: offset_width,
+        lengths: length_width,
+    };
+    Ok((superblock, widths))
 }
 
 fn write_address(
@@ -738,6 +791,22 @@ mod tests {
         assert_eq!(sb.root_group_address.get(), 48);
 
         assert_eq!(serialize_superblock(&sb).unwrap(), data);
+    }
+
+    #[test]
+    fn parsing_retains_mixed_widths_as_distinct_types() {
+        fn takes_offset_width(_: OffsetWidth) {}
+        fn takes_length_width(_: LengthWidth) {}
+
+        let data = build_v2_bytes(OffsetWidth::Two, LengthWidth::Four, 2);
+        let (sb, widths) = parse_superblock_with_widths(&data, 0).unwrap();
+
+        takes_offset_width(widths.offsets);
+        takes_length_width(widths.lengths);
+        assert_eq!(widths.offsets, OffsetWidth::Two);
+        assert_eq!(widths.lengths, LengthWidth::Four);
+        assert_eq!(sb.offset_size, 2);
+        assert_eq!(sb.length_size, 4);
     }
 
     #[test]
