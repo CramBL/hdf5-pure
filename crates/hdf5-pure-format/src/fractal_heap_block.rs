@@ -19,6 +19,7 @@ use crate::fractal_heap::FractalHeapHeader;
 use crate::fractal_heap::FractalHeapLayout;
 use crate::width::LengthWidth;
 use crate::width::OffsetWidth;
+use crate::width::OffsetWidthExt;
 
 /// Describes managed blocks using a heap header's doubling table and filter metadata.
 ///

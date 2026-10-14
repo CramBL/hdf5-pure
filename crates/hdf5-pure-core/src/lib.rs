@@ -20,6 +20,7 @@ mod fill_time;
 mod message_type;
 mod region;
 mod superblock;
+mod width;
 
 #[doc(hidden)]
 pub mod __private;
@@ -44,3 +45,5 @@ pub use file_space_info::FileSpaceStrategy;
 pub use fill_time::FillTime;
 pub use message_type::MessageType;
 pub use superblock::Superblock;
+pub use width::LengthWidth;
+pub use width::OffsetWidth;

@@ -351,6 +351,8 @@ def test_migration_builds_core_with_the_profile_core_features():
     ("name", "expected"),
     [
         ("FileSpacePageSize", []),
+        ("LengthWidth", []),
+        ("OffsetWidth", []),
         ("StoredAddress", []),
         ("Unlisted", ["Unlisted: new core root item"]),
     ],

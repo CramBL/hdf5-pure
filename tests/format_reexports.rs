@@ -64,6 +64,10 @@ fn core_types_keep_their_original_paths() {
     let _: Option<hdf5_pure::FileSpaceInfo> = None::<hdf5_pure_core::FileSpaceInfo>;
     let _: Option<hdf5_pure::FileSpaceInfo> = None::<hdf5_pure_format::FileSpaceInfo>;
     let _: Option<hdf5_pure::FileSpaceStrategy> = None::<hdf5_pure_core::FileSpaceStrategy>;
+    let _: Option<hdf5_pure::OffsetWidth> = None::<hdf5_pure_core::OffsetWidth>;
+    let _: Option<hdf5_pure::OffsetWidth> = None::<hdf5_pure_format::OffsetWidth>;
+    let _: Option<hdf5_pure::LengthWidth> = None::<hdf5_pure_core::LengthWidth>;
+    let _: Option<hdf5_pure::LengthWidth> = None::<hdf5_pure_format::LengthWidth>;
     assert_eq!(
         hdf5_pure::OBJECT_HEADER_MESSAGE_MAX,
         hdf5_pure_core::OBJECT_HEADER_MESSAGE_MAX

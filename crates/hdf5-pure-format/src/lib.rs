@@ -76,7 +76,8 @@ pub use hdf5_pure_core::EnumMember;
 pub use hdf5_pure_core::FillTime;
 pub use hdf5_pure_core::FixedPointLayout;
 pub use hdf5_pure_core::FloatingPointLayout;
+pub use hdf5_pure_core::LengthWidth;
+pub use hdf5_pure_core::MaxExtent;
+pub use hdf5_pure_core::OffsetWidth;
 pub use hdf5_pure_core::ReferenceType;
 pub use hdf5_pure_core::StringPadding;
-
-pub use hdf5_pure_core::MaxExtent;

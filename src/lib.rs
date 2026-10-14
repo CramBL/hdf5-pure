@@ -537,6 +537,10 @@ pub use hdf5_pure_core::OBJECT_HEADER_MESSAGE_MAX;
 #[doc(inline)]
 pub use hdf5_pure_core::BaseAddress;
 #[doc(inline)]
+pub use hdf5_pure_core::LengthWidth;
+#[doc(inline)]
+pub use hdf5_pure_core::OffsetWidth;
+#[doc(inline)]
 pub use hdf5_pure_core::StoredAddress;
 
 #[cfg(feature = "std")]

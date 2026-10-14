@@ -226,7 +226,13 @@ def migration_shapes(baseline: dict, candidate: dict, core: dict) -> list[str]:
     # both shapes.
     allowed_changed_variants = {"FormatError": {"InvalidFreeSpaceManager"}}
     # The core root items that 0.47.0 does not define.
-    allowed_new_items = {"FileSpacePageSize", "FillTime", "StoredAddress"}
+    allowed_new_items = {
+        "FileSpacePageSize",
+        "FillTime",
+        "LengthWidth",
+        "OffsetWidth",
+        "StoredAddress",
+    }
     # The struct fields whose type differs from 0.47.0's, which the comparison removes from both
     # shapes.
     allowed_changed_fields = {
