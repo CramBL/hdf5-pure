@@ -32,6 +32,7 @@ use crate::fractal_heap_free_space::FractalHeapFreeSpaceManager;
 use crate::width::FormatWidths;
 use crate::width::LengthWidth;
 use crate::width::OffsetWidth;
+use crate::width::OffsetWidthExt;
 
 const FSHD_SIGNATURE: &[u8; 4] = b"FSHD";
 const FSSE_SIGNATURE: &[u8; 4] = b"FSSE";

@@ -38,7 +38,7 @@ use crate::error::FormatError;
 #[cfg(test)]
 use crate::source::BytesSource;
 use crate::source::{Source, SourceMetadata};
-use crate::width::{LengthWidth, OffsetWidth};
+use crate::width::{LengthWidth, OffsetWidth, OffsetWidthExt};
 
 /// Describes a failure to prove complete ownership of a fractal heap's file storage.
 #[derive(Clone, Debug, Eq, PartialEq)]

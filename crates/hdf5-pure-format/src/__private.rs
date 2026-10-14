@@ -223,4 +223,5 @@ pub use crate::symbol_table::SymbolTableNode;
 pub use crate::width::FormatWidths;
 pub use crate::width::LengthWidth;
 pub use crate::width::OffsetWidth;
+pub use crate::width::OffsetWidthExt;
 pub use crate::width::UintWidth;

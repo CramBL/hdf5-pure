@@ -49,145 +49,21 @@ impl FormatWidths {
     }
 }
 
-/// The width of a file address in bytes, the superblock's "Size of Offsets" field.
-///
-/// Every file address has this width:
-///
-/// - the addresses in the superblock, such as the root group address
-/// - the addresses in object header messages
-/// - the child and sibling addresses in B-tree nodes
-/// - the chunk addresses in a chunk index
-///
-/// The C library calls this value `H5F_SIZEOF_ADDR` and sets it with `H5Pset_sizes`.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum OffsetWidth {
-    Two,
-    Four,
-    /// Eight bytes per address, the width the C library writes under its default file creation
-    /// property list.
-    Eight,
+pub use hdf5_pure_core::LengthWidth;
+pub use hdf5_pure_core::OffsetWidth;
+
+pub trait OffsetWidthExt {
+    fn decode_address(self, data: &[u8], pos: usize) -> Result<DecodedStoredAddress, FormatError>;
 }
 
-impl OffsetWidth {
-    /// Reads a little-endian address and classifies it as defined or undefined at this width.
-    ///
-    /// The undefined address has every bit of its field set, as defined in "Appendix A:
-    /// Definitions" of the [format specification, version 4.0][spec]. Defined addresses remain
-    /// relative to the file's address base.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`FormatError::UnexpectedEof`] if `data` does not contain a complete field at `pos`.
-    ///
-    /// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#sec_fmt4_appendixa
-    pub fn decode_address(
-        self,
-        data: &[u8],
-        pos: usize,
-    ) -> Result<DecodedStoredAddress, FormatError> {
+impl OffsetWidthExt for OffsetWidth {
+    fn decode_address(self, data: &[u8], pos: usize) -> Result<DecodedStoredAddress, FormatError> {
         let stored = StoredAddress::new(bytes::read_offset_width(data, pos, self)?);
         Ok(if stored.is_undefined(self.get()) {
             DecodedStoredAddress::Undefined
         } else {
             DecodedStoredAddress::Defined(stored)
         })
-    }
-
-    /// Returns the width in bytes, as the superblock stores it.
-    pub const fn get(self) -> u8 {
-        match self {
-            Self::Two => 2,
-            Self::Four => 4,
-            Self::Eight => 8,
-        }
-    }
-
-    /// Returns `true` if an address field of this width can store `address`.
-    ///
-    /// `u64::MAX` fits every width, as the undefined address, which a writer writes as all ones.
-    pub(crate) fn holds(self, address: u64) -> bool {
-        address == u64::MAX
-            || address
-                .checked_shr(8 * u32::from(self.get()))
-                .is_none_or(|high| high == 0)
-    }
-}
-
-impl TryFrom<u8> for OffsetWidth {
-    type Error = FormatError;
-
-    /// Parses the superblock's "Size of Offsets" byte.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`FormatError::InvalidOffsetSize`] if `size` is not 2, 4, or 8.
-    fn try_from(size: u8) -> Result<Self, FormatError> {
-        match size {
-            2 => Ok(Self::Two),
-            4 => Ok(Self::Four),
-            8 => Ok(Self::Eight),
-            other => Err(FormatError::InvalidOffsetSize(other)),
-        }
-    }
-}
-
-/// The width of a length in bytes, the superblock's "Size of Lengths" field.
-///
-/// Every length has this width:
-///
-/// - the dimension sizes in a dataspace message
-/// - the data segment size of a local heap
-/// - the collection size of a global heap
-/// - the space and object counts in a fractal heap header
-///
-/// The C library calls this value `H5F_SIZEOF_SIZE` and sets it with `H5Pset_sizes`.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum LengthWidth {
-    Two,
-    Four,
-    /// Eight bytes per length, the width the C library writes under its default file creation
-    /// property list.
-    Eight,
-}
-
-impl LengthWidth {
-    /// Returns the width in bytes, as the superblock stores it.
-    pub const fn get(self) -> u8 {
-        match self {
-            Self::Two => 2,
-            Self::Four => 4,
-            Self::Eight => 8,
-        }
-    }
-
-    /// Returns the largest length a field of this width can store.
-    pub(crate) const fn max(self) -> u64 {
-        u64::MAX >> (64 - 8 * self.get())
-    }
-
-    /// Returns `true` if a length field of this width can store `length`.
-    pub(crate) fn holds(self, length: u64) -> bool {
-        length
-            .checked_shr(8 * u32::from(self.get()))
-            .is_none_or(|high| high == 0)
-    }
-}
-
-impl TryFrom<u8> for LengthWidth {
-    type Error = FormatError;
-
-    /// Parses the superblock's "Size of Lengths" byte.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`FormatError::InvalidLengthSize`] if `size` is not 2, 4, or 8.
-    fn try_from(size: u8) -> Result<Self, FormatError> {
-        match size {
-            2 => Ok(Self::Two),
-            4 => Ok(Self::Four),
-            8 => Ok(Self::Eight),
-            other => Err(FormatError::InvalidLengthSize(other)),
-        }
     }
 }
 
