@@ -110,7 +110,7 @@ impl BTreeV2Plan {
         let (info, depth) = BTreeV2NodeInfo::for_record_count(
             node_size,
             record_size,
-            offset_width.get(),
+            offset_width,
             record_count as u64,
         )?;
         u16::try_from(info.max_nrec(0)).ok()?;

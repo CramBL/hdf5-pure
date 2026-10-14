@@ -6,11 +6,11 @@ use crate::address::BaseAddress;
 use crate::address::BaseAddressExt;
 use crate::address::StoredAddress;
 use crate::address::StoredAddressExt;
-use crate::bytes::read_length;
-use crate::bytes::read_offset;
+use crate::bytes;
 use crate::convert::Narrow;
 use crate::error::FormatError;
 use crate::metadata_source::MetadataSource;
+use crate::width::FormatWidths;
 
 /// A local heap header: the size and the address of the heap's data segment.
 ///
@@ -51,9 +51,28 @@ impl LocalHeap {
         offset_size: u8,
         length_size: u8,
     ) -> Result<LocalHeap, FormatError> {
-        // signature(4) + version(1) + reserved(3) = 8, then `length_size * 2 + offset_size`
-        let ls = length_size as usize;
-        let os = offset_size as usize;
+        Self::parse_with_widths(
+            file_data,
+            offset,
+            FormatWidths::from_sizes(offset_size, length_size)?,
+        )
+    }
+
+    /// Returns the local heap header at `offset` using validated file widths.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::UnexpectedEof`] if the header runs past the end of `file_data`,
+    /// [`FormatError::InvalidLocalHeapSignature`] if it does not begin with `HEAP`, or
+    /// [`FormatError::InvalidLocalHeapVersion`] if its version is not 0.
+    pub fn parse_with_widths(
+        file_data: &[u8],
+        offset: usize,
+        widths: FormatWidths,
+    ) -> Result<LocalHeap, FormatError> {
+        // signature(4) + version(1) + reserved(3) = 8, then two lengths and one address.
+        let ls = usize::from(widths.lengths.get());
+        let os = usize::from(widths.offsets.get());
         let total = 8 + ls * 2 + os;
         // `offset` comes from the file, so the sum is checked before the bounds check.
         let end = offset
@@ -79,11 +98,12 @@ impl LocalHeap {
         }
 
         let mut pos = offset + 8;
-        let data_segment_size = read_length(file_data, pos, length_size)?;
+        let data_segment_size = bytes::read_length_width(file_data, pos, widths.lengths)?;
         pos += ls;
-        let free_list_head_offset = read_length(file_data, pos, length_size)?;
+        let free_list_head_offset = bytes::read_length_width(file_data, pos, widths.lengths)?;
         pos += ls;
-        let data_segment_address = StoredAddress::new(read_offset(file_data, pos, offset_size)?);
+        let data_segment_address =
+            StoredAddress::new(bytes::read_offset_width(file_data, pos, widths.offsets)?);
 
         Ok(LocalHeap {
             data_segment_size,
@@ -173,10 +193,27 @@ impl LocalHeap {
         offset_size: u8,
         length_size: u8,
     ) -> Result<LocalHeap, FormatError> {
-        // signature(4) + version(1) + reserved(3) + `length_size * 2 + offset_size`
-        let total = 8 + (length_size as usize) * 2 + offset_size as usize;
+        Self::parse_from_source_with_widths(
+            source,
+            address,
+            FormatWidths::from_sizes(offset_size, length_size)?,
+        )
+    }
+
+    /// Returns the local heap header at `address` using validated file widths.
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors [`parse_with_widths`](Self::parse_with_widths) returns, and the error
+    /// `source` returns if a read fails.
+    pub fn parse_from_source_with_widths(
+        source: &(impl MetadataSource + ?Sized),
+        address: u64,
+        widths: FormatWidths,
+    ) -> Result<LocalHeap, FormatError> {
+        let total = 8 + usize::from(widths.lengths.get()) * 2 + usize::from(widths.offsets.get());
         let buf = source.read_metadata_at(address, total)?;
-        Self::parse(&buf, 0, offset_size, length_size)
+        Self::parse_with_widths(&buf, 0, widths)
     }
 
     /// Returns the null-terminated string at `string_offset` in `segment`, the bytes of the heap's

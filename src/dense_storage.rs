@@ -11,6 +11,7 @@ use crate::address::StoredAddressExt;
 use crate::btree_v2::{self, BTreeV2Header};
 use crate::error::FormatError;
 use crate::source::{Source, SourceMetadata};
+use crate::width::FormatWidths;
 
 /// One version 2 B-tree identified as part of a dense-storage owner's index set.
 #[derive(Clone, Copy)]
@@ -49,22 +50,40 @@ pub(crate) fn collect_dense_index_storage_extents<S: Source + ?Sized>(
     offset_size: u8,
     length_size: u8,
 ) -> Result<Vec<Extent>, FormatError> {
+    collect_dense_index_storage_extents_with_widths(
+        source,
+        heap_header,
+        indexes,
+        FormatWidths::from_sizes(offset_size, length_size)?,
+    )
+}
+
+/// Returns all allocations of a proven dense-storage index set using validated file widths.
+///
+/// # Errors
+///
+/// Returns the structural error from the version 2 B-tree storage walker or
+/// [`FormatError::InvalidBTreeV2Signature`] when the proven allocations overlap the heap header.
+pub(crate) fn collect_dense_index_storage_extents_with_widths<S: Source + ?Sized>(
+    source: &S,
+    heap_header: StoredAddress,
+    indexes: impl IntoIterator<Item = DenseIndex>,
+    widths: FormatWidths,
+) -> Result<Vec<Extent>, FormatError> {
     let mut extents = Vec::new();
     for index in indexes {
-        let header = BTreeV2Header::parse_from_source(
+        let header = BTreeV2Header::parse_from_source_with_widths(
             &SourceMetadata(source),
             index.address.get(),
-            offset_size,
-            length_size,
+            widths,
         )?;
         if header.tree_type != index.expected_tree_type {
             return Err(FormatError::InvalidBTreeNodeType(header.tree_type));
         }
-        extents.extend(btree_v2::collect_btree_v2_storage_extents(
+        extents.extend(btree_v2::collect_btree_v2_storage_extents_with_widths(
             source,
             index.address,
-            offset_size,
-            length_size,
+            widths,
         )?);
     }
 

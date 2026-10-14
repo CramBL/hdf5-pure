@@ -110,7 +110,12 @@ fn assert_huge_only_heap_ownership(path: &Path) -> u16 {
         u64::try_from(btree_v2_header_size(OffsetWidth::Eight, LengthWidth::Eight)).unwrap(),
     ));
 
-    let node_info = BTreeV2NodeInfo::compute(tree.node_size, tree.record_size, 8, tree.depth);
+    let node_info = BTreeV2NodeInfo::compute(
+        tree.node_size,
+        tree.record_size,
+        OffsetWidth::Eight,
+        tree.depth,
+    );
     let mut records = Vec::new();
     inspect_huge_index_node(
         &bytes,
@@ -184,7 +189,7 @@ fn inspect_huge_index_node(
         records_in_node,
         depth,
         tree.record_size,
-        8,
+        OffsetWidth::Eight,
         node_info,
     )
     .unwrap();

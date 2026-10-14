@@ -28,7 +28,6 @@ use crate::vl_data::VlElement;
 
 use super::LENGTH_SIZE;
 use super::OFFSET_SIZE;
-use super::OFFSET_WIDTH;
 use super::WriteEngine;
 
 /// The global heap collections that the objects reachable from the root group refer to.
@@ -93,15 +92,17 @@ impl WriteEngine {
         referenced: &mut BTreeSet<u64>,
     ) -> Result<bool, Error> {
         if crate::group_v2::is_group(header) {
-            for entry in crate::group_v2::resolve_group_entries_from_source(
+            for entry in crate::group_v2::resolve_group_entries_from_source_with_widths(
                 &self.image(),
                 AccessMode::ReadWrite,
                 header,
-                OFFSET_SIZE,
-                LENGTH_SIZE,
+                self.widths(),
                 self.addresses,
             )? {
-                if !entry.object_header_address.is_undefined(OFFSET_WIDTH) {
+                if !entry
+                    .object_header_address
+                    .is_undefined(self.widths().offsets)
+                {
                     child(self.addresses.absolute(entry.object_header_address)?);
                 }
             }

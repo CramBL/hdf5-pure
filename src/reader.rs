@@ -1870,13 +1870,19 @@ impl FileInner {
     fn resolve_path(&self, path: &ObjectPath<'_>) -> Result<u64, Error> {
         let access = self.access_mode();
         Ok(match &self.backend {
-            Backend::InMemory(v) => {
-                group_v2::resolve_path_any(v, access, &self.superblock, self.addresses(), path)?
-            }
-            Backend::Streaming(s) => group_v2::resolve_path_any_from_source(
+            Backend::InMemory(v) => group_v2::resolve_path_any_with_widths(
+                v,
+                access,
+                &self.superblock,
+                self.widths,
+                self.addresses(),
+                path,
+            )?,
+            Backend::Streaming(s) => group_v2::resolve_path_any_from_source_with_widths(
                 s.as_ref(),
                 access,
                 &self.superblock,
+                self.widths,
                 self.addresses(),
                 path,
             )?,
@@ -1887,13 +1893,19 @@ impl FileInner {
                 let core = m.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                 let sb = core.superblock().clone();
                 match core.image_slice() {
-                    Some(data) => {
-                        group_v2::resolve_path_any(data, access, &sb, core.addresses(), path)?
-                    }
-                    None => group_v2::resolve_path_any_from_source(
+                    Some(data) => group_v2::resolve_path_any_with_widths(
+                        data,
+                        access,
+                        &sb,
+                        core.widths(),
+                        core.addresses(),
+                        path,
+                    )?,
+                    None => group_v2::resolve_path_any_from_source_with_widths(
                         core.image(),
                         access,
                         &sb,
+                        core.widths(),
                         core.addresses(),
                         path,
                     )?,
@@ -2160,29 +2172,35 @@ impl FileInner {
     /// Returns [`Error::Format`] if the group's own structures do not parse, or if `hdr` describes
     /// no group at all.
     fn group_children(&self, hdr: &ObjectHeader) -> Result<Vec<GroupEntry>, Error> {
-        let (os, ls, base) = (self.offset_size(), self.length_size(), self.addresses());
+        let (widths, base) = (self.widths, self.addresses());
         match &self.backend {
             Backend::InMemory(v) => {
-                group_v2::resolve_group_entries(v, self.access_mode, hdr, os, ls, base)
+                group_v2::resolve_group_entries_with_widths(v, self.access_mode, hdr, widths, base)
             }
-            Backend::Streaming(s) => group_v2::resolve_group_entries_from_source(
+            Backend::Streaming(s) => group_v2::resolve_group_entries_from_source_with_widths(
                 s.as_ref(),
                 self.access_mode,
                 hdr,
-                os,
-                ls,
+                widths,
                 base,
             ),
             Backend::Edit(m) => Self::with_engine(
                 m,
-                |d| group_v2::resolve_group_entries(d, self.access_mode, hdr, os, ls, base),
+                |d| {
+                    group_v2::resolve_group_entries_with_widths(
+                        d,
+                        self.access_mode,
+                        hdr,
+                        widths,
+                        base,
+                    )
+                },
                 |s| {
-                    group_v2::resolve_group_entries_from_source(
+                    group_v2::resolve_group_entries_from_source_with_widths(
                         s,
                         self.access_mode,
                         hdr,
-                        os,
-                        ls,
+                        widths,
                         base,
                     )
                 },
@@ -2209,26 +2227,29 @@ impl FileInner {
     /// rather than building an entry, and an owned name, for every other child
     /// of the group (issue #228).
     fn group_child(&self, group_address: u64, name: LinkName<'_>) -> Result<ChildLookup, Error> {
-        let (os, ls, base) = (self.offset_size(), self.length_size(), self.addresses());
+        let (widths, base) = (self.widths, self.addresses());
         let access = self.access_mode();
         let addr = group_address;
         match &self.backend {
             Backend::InMemory(v) => {
-                group_v2::find_child_address(v, access, addr, os, ls, base, name)
+                group_v2::find_child_address_with_widths(v, access, addr, widths, base, name)
             }
-            Backend::Streaming(s) => group_v2::find_child_address_from_source(
+            Backend::Streaming(s) => group_v2::find_child_address_from_source_with_widths(
                 s.as_ref(),
                 access,
                 addr,
-                os,
-                ls,
+                widths,
                 base,
                 name,
             ),
             Backend::Edit(m) => Self::with_engine(
                 m,
-                |d| group_v2::find_child_address(d, access, addr, os, ls, base, name),
-                |s| group_v2::find_child_address_from_source(s, access, addr, os, ls, base, name),
+                |d| group_v2::find_child_address_with_widths(d, access, addr, widths, base, name),
+                |s| {
+                    group_v2::find_child_address_from_source_with_widths(
+                        s, access, addr, widths, base, name,
+                    )
+                },
             ),
         }
         .map_err(Error::Format)

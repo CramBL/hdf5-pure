@@ -9,10 +9,10 @@ use alloc::vec::Vec;
 
 use crate::address::StoredAddress;
 use crate::address::StoredAddressExt;
-use crate::bytes::read_length;
-use crate::bytes::read_offset;
+use crate::bytes;
 use crate::error::FormatError;
 use crate::metadata_source::MetadataSource;
+use crate::width::{FormatWidths, OffsetWidth};
 
 /// A symbol table message (type 0x0011), which locates the B-tree and the local heap of a group
 /// that stores its links in a symbol table.
@@ -37,15 +37,28 @@ impl SymbolTableMessage {
     /// Returns [`FormatError::UnexpectedEof`] if `data` is shorter than two addresses, and
     /// [`FormatError::InvalidOffsetSize`] if `offset_size` is not 2, 4, or 8.
     pub fn parse(data: &[u8], offset_size: u8) -> Result<SymbolTableMessage, FormatError> {
-        let os = offset_size as usize;
+        Self::parse_with_offset_width(data, OffsetWidth::try_from(offset_size)?)
+    }
+
+    /// Returns the symbol table message in `data` using a validated address width.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::UnexpectedEof`] if `data` is shorter than two addresses.
+    pub fn parse_with_offset_width(
+        data: &[u8],
+        offset_width: OffsetWidth,
+    ) -> Result<SymbolTableMessage, FormatError> {
+        let os = usize::from(offset_width.get());
         if data.len() < os * 2 {
             return Err(FormatError::UnexpectedEof {
                 expected: os * 2,
                 available: data.len(),
             });
         }
-        let btree_address = StoredAddress::new(read_offset(data, 0, offset_size)?);
-        let local_heap_address = StoredAddress::new(read_offset(data, os, offset_size)?);
+        let btree_address = StoredAddress::new(bytes::read_offset_width(data, 0, offset_width)?);
+        let local_heap_address =
+            StoredAddress::new(bytes::read_offset_width(data, os, offset_width)?);
         Ok(SymbolTableMessage {
             btree_address,
             local_heap_address,
@@ -106,6 +119,26 @@ impl SymbolTableNode {
         offset_size: u8,
         length_size: u8,
     ) -> Result<SymbolTableNode, FormatError> {
+        Self::parse_with_widths(
+            file_data,
+            offset,
+            FormatWidths::from_sizes(offset_size, length_size)?,
+        )
+    }
+
+    /// Returns the symbol table node at `offset` using validated file widths.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::UnexpectedEof`] if the node header or the entries in use run past
+    /// the end of `file_data`, [`FormatError::InvalidSymbolTableNodeSignature`] if the node does
+    /// not begin with `SNOD`, or [`FormatError::InvalidSymbolTableNodeVersion`] if its version is
+    /// not 1.
+    pub fn parse_with_widths(
+        file_data: &[u8],
+        offset: usize,
+        widths: FormatWidths,
+    ) -> Result<SymbolTableNode, FormatError> {
         // signature(4) + version(1) + reserved(1) + number_of_symbols(2) = 8
         if 8 > file_data.len() || offset > file_data.len() - 8 {
             return Err(FormatError::UnexpectedEof {
@@ -126,8 +159,8 @@ impl SymbolTableNode {
         let num_symbols =
             u16::from_le_bytes([file_data[offset + 6], file_data[offset + 7]]) as usize;
 
-        let os = offset_size as usize;
-        let ls = length_size as usize;
+        let os = usize::from(widths.offsets.get());
+        let ls = usize::from(widths.lengths.get());
         // Each entry: link_name_offset(ls) + obj_hdr_addr(os) + cache_type(4) + reserved(4) + scratch(16)
         let entry_size = ls + os + 4 + 4 + 16;
         let entries_start = offset + 8;
@@ -142,10 +175,10 @@ impl SymbolTableNode {
         let mut entries = Vec::with_capacity(num_symbols);
         let mut pos = entries_start;
         for _ in 0..num_symbols {
-            let link_name_offset = read_length(file_data, pos, length_size)?;
+            let link_name_offset = bytes::read_length_width(file_data, pos, widths.lengths)?;
             pos += ls;
             let object_header_address =
-                StoredAddress::new(read_offset(file_data, pos, offset_size)?);
+                StoredAddress::new(bytes::read_offset_width(file_data, pos, widths.offsets)?);
             pos += os;
             let cache_type = u32::from_le_bytes([
                 file_data[pos],
@@ -186,6 +219,24 @@ impl SymbolTableNode {
         offset_size: u8,
         length_size: u8,
     ) -> Result<SymbolTableNode, FormatError> {
+        Self::parse_from_source_with_widths(
+            source,
+            address,
+            FormatWidths::from_sizes(offset_size, length_size)?,
+        )
+    }
+
+    /// Returns the symbol table node at `address` using validated file widths.
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors [`parse_with_widths`](Self::parse_with_widths) returns, and the error
+    /// `source` returns if a read fails.
+    pub fn parse_from_source_with_widths(
+        source: &(impl MetadataSource + ?Sized),
+        address: u64,
+        widths: FormatWidths,
+    ) -> Result<SymbolTableNode, FormatError> {
         let header = source.read_metadata_at(address, 8)?;
         if &header[0..4] != b"SNOD" {
             return Err(FormatError::InvalidSymbolTableNodeSignature);
@@ -196,13 +247,13 @@ impl SymbolTableNode {
         }
         let num_symbols = u16::from_le_bytes([header[6], header[7]]) as usize;
 
-        let os = offset_size as usize;
-        let ls = length_size as usize;
+        let os = usize::from(widths.offsets.get());
+        let ls = usize::from(widths.lengths.get());
         // link_name_offset(ls) + obj_hdr_addr(os) + cache_type(4) + reserved(4) + scratch(16)
         let entry_size = ls + os + 4 + 4 + 16;
         let total = 8 + num_symbols * entry_size;
         let buf = source.read_metadata_at(address, total)?;
-        Self::parse(&buf, 0, offset_size, length_size)
+        Self::parse_with_widths(&buf, 0, widths)
     }
 }
 

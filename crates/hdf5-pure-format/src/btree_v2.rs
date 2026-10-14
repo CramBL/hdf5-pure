@@ -33,8 +33,7 @@ use crate::data_layout::LayoutVersion;
 use crate::error::FormatError;
 use crate::message_flags::MessageFlags;
 use crate::metadata_source::MetadataSource;
-use crate::width::LengthWidth;
-use crate::width::OffsetWidth;
+use crate::width::{FormatWidths, LengthWidth, OffsetWidth};
 
 /// A version 2 B-tree header, signature `BTHD`: the geometry every node of the tree shares, and
 /// the address of the root node.
@@ -145,6 +144,27 @@ impl BTreeV2Header {
         offset_size: u8,
         length_size: u8,
     ) -> Result<BTreeV2Header, FormatError> {
+        Self::parse_with_widths(
+            file_data,
+            offset,
+            FormatWidths::from_sizes(offset_size, length_size)?,
+        )
+    }
+
+    /// Returns the version 2 B-tree header at `offset` using validated file widths.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::InvalidBTreeV2Signature`] if the header does not begin with `BTHD`,
+    /// [`FormatError::InvalidBTreeV2Version`] if its version is not 0,
+    /// [`FormatError::UnexpectedEof`] if it runs past the end of `file_data`, and, with the
+    /// `checksum` feature, [`FormatError::ChecksumMismatch`] if the stored checksum differs from
+    /// the computed one.
+    pub fn parse_with_widths(
+        file_data: &[u8],
+        offset: usize,
+        widths: FormatWidths,
+    ) -> Result<BTreeV2Header, FormatError> {
         bytes::ensure_len(file_data, offset, 4)?;
         if &file_data[offset..offset + 4] != b"BTHD" {
             return Err(FormatError::InvalidBTreeV2Signature);
@@ -170,17 +190,17 @@ impl BTreeV2Header {
 
         let mut pos = offset + 16;
         let root_node_address =
-            StoredAddress::new(bytes::read_offset(file_data, pos, offset_size)?);
-        pos += offset_size as usize;
+            StoredAddress::new(bytes::read_offset_width(file_data, pos, widths.offsets)?);
+        pos += usize::from(widths.offsets.get());
 
         bytes::ensure_len(file_data, pos, 2)?;
         let num_records_in_root = u16::from_le_bytes([file_data[pos], file_data[pos + 1]]);
         pos += 2;
 
-        let total_records = bytes::read_length(file_data, pos, length_size)?;
+        let total_records = bytes::read_length_width(file_data, pos, widths.lengths)?;
         #[allow(unused_assignments)]
         {
-            pos += length_size as usize;
+            pos += usize::from(widths.lengths.get());
         }
 
         // Validate header checksum
@@ -223,6 +243,24 @@ impl BTreeV2Header {
         offset_size: u8,
         length_size: u8,
     ) -> Result<BTreeV2Header, FormatError> {
+        Self::parse_from_source_with_widths(
+            source,
+            address,
+            FormatWidths::from_sizes(offset_size, length_size)?,
+        )
+    }
+
+    /// Returns the version 2 B-tree header at `address` using validated file widths.
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors [`parse_with_widths`](Self::parse_with_widths) returns, and the error
+    /// `source` returns if a read fails.
+    pub fn parse_from_source_with_widths(
+        source: &(impl MetadataSource + ?Sized),
+        address: u64,
+        widths: FormatWidths,
+    ) -> Result<BTreeV2Header, FormatError> {
         // 16 fixed prefix bytes + root address + 2 (records in the root) + total-records
         // field + 4 checksum: <= 64 with 8-byte offsets/lengths.
         const MAX_HEADER: u64 = 64;
@@ -230,7 +268,7 @@ impl BTreeV2Header {
             .min(source.len().saturating_sub(address))
             .to_usize()?;
         let buf = source.read_metadata_at(address, window)?;
-        Self::parse(&buf, 0, offset_size, length_size)
+        Self::parse_with_widths(&buf, 0, widths)
     }
 }
 
@@ -639,11 +677,12 @@ impl BTreeV2NodeInfo {
     }
 
     /// Adds the capacities and the widths of one internal depth above the deepest in the table.
-    fn push_level(&mut self, node_size: u32, record_size: u16, offset_size: u8) {
+    fn push_level(&mut self, node_size: u32, record_size: u16, offset_width: OffsetWidth) {
         let u = self.max_nrec.len();
         // Internal-pointer size at this level uses the *previous* level's
         // subtree-total width (H5B2_INT_POINTER_SIZE).
-        let int_ptr = offset_size as usize + self.max_nrec_size + self.cum_max_nrec_size[u - 1];
+        let int_ptr =
+            usize::from(offset_width.get()) + self.max_nrec_size + self.cum_max_nrec_size[u - 1];
         // Records that fit an internal node at this level (H5B2_NUM_INT_REC).
         let avail = (node_size as usize).saturating_sub(10 + int_ptr);
         let denom = record_size as usize + int_ptr;
@@ -660,16 +699,16 @@ impl BTreeV2NodeInfo {
     /// Computes the table for a tree of `depth`, with nodes of `node_size` bytes and records of
     /// `record_size` bytes.
     ///
-    /// `offset_size` is the superblock's "Size of Offsets" byte.
+    /// `offset_width` is the validated width of an address in the file.
     pub fn compute(
         node_size: u32,
         record_size: u16,
-        offset_size: u8,
+        offset_width: OffsetWidth,
         depth: u16,
     ) -> BTreeV2NodeInfo {
         let mut info = BTreeV2NodeInfo::leaf_only(node_size, record_size);
         for _ in 1..=depth {
-            info.push_level(node_size, record_size, offset_size);
+            info.push_level(node_size, record_size, offset_width);
         }
         info
     }
@@ -682,13 +721,13 @@ impl BTreeV2NodeInfo {
     pub fn for_record_count(
         node_size: u32,
         record_size: u16,
-        offset_size: u8,
+        offset_width: OffsetWidth,
         records: u64,
     ) -> Option<(BTreeV2NodeInfo, u16)> {
         let mut info = BTreeV2NodeInfo::leaf_only(node_size, record_size);
         let mut depth = 0u16;
         while *info.cum_max_nrec.last().expect("table is never empty") < records {
-            info.push_level(node_size, record_size, offset_size);
+            info.push_level(node_size, record_size, offset_width);
             depth += 1;
             if *info.max_nrec.last().expect("just pushed") == 0 {
                 return None;
@@ -730,8 +769,8 @@ impl BTreeV2NodeInfo {
     }
 
     /// Returns the width in bytes of one child pointer in a node at `depth`.
-    fn child_ptr_size(&self, depth: u16, offset_size: u8) -> usize {
-        offset_size as usize + self.max_nrec_size + self.total_nrec_size(depth)
+    fn child_ptr_size(&self, depth: u16, offset_width: OffsetWidth) -> usize {
+        usize::from(offset_width.get()) + self.max_nrec_size + self.total_nrec_size(depth)
     }
 }
 
@@ -797,8 +836,8 @@ pub fn parse_btree_v2_leaf_records(
 ///
 /// The node holds `num_records` records of `record_size` bytes and one more child pointer than
 /// records. `depth` is the depth of the node, and `node_info` the table of its tree, which gives
-/// the widths of the counts in each pointer. `offset_size` is the superblock's "Size of Offsets"
-/// byte. The records sit at `node[6 + i * record_size..]`, where a caller reads them.
+/// the widths of the counts in each pointer. `offset_width` is the validated width of an address
+/// in the file. The records sit at `node[6 + i * record_size..]`, where a caller reads them.
 ///
 /// The node is defined in "Version 2 B-trees" of the [format specification, version 4.0][spec].
 ///
@@ -806,9 +845,8 @@ pub fn parse_btree_v2_leaf_records(
 ///
 /// Returns [`FormatError::InvalidBTreeV2Signature`] if the node does not begin with `BTIN`,
 /// [`FormatError::UnexpectedEof`] if the records, child pointers, or checksum run past the end of
-/// `node`, [`FormatError::InvalidOffsetSize`] if `offset_size` is not 2, 4, or 8, and, with the
-/// `checksum` feature, [`FormatError::ChecksumMismatch`] if the stored checksum differs from the
-/// computed one.
+/// `node`, and, with the `checksum` feature, [`FormatError::ChecksumMismatch`] if the stored
+/// checksum differs from the computed one.
 ///
 /// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_infra_btrees_v2
 pub fn parse_btree_v2_internal_child_pointers(
@@ -816,7 +854,7 @@ pub fn parse_btree_v2_internal_child_pointers(
     num_records: u16,
     depth: NonZeroU16,
     record_size: u16,
-    offset_size: u8,
+    offset_width: OffsetWidth,
     node_info: &BTreeV2NodeInfo,
 ) -> Result<Vec<(StoredAddress, u16)>, FormatError> {
     // signature(4) + version(1) + type(1) = 6
@@ -836,13 +874,13 @@ pub fn parse_btree_v2_internal_child_pointers(
     let total_nrec_width = node_info.total_nrec_size(depth.get());
 
     let num_children = nr + 1;
-    let child_ptr_size = node_info.child_ptr_size(depth.get(), offset_size);
+    let child_ptr_size = node_info.child_ptr_size(depth.get(), offset_width);
     bytes::ensure_len(node, pos, num_children * child_ptr_size)?;
 
     let mut children = Vec::with_capacity(num_children);
     for _ in 0..num_children {
-        let addr = StoredAddress::new(bytes::read_offset(node, pos, offset_size)?);
-        pos += offset_size as usize;
+        let addr = StoredAddress::new(bytes::read_offset_width(node, pos, offset_width)?);
+        pos += usize::from(offset_width.get());
         #[expect(
             clippy::cast_possible_truncation,
             reason = "`H5B2__hdr_init` in `H5B2hdr.c` (HDF5 2.2.0) asserts that `max_nrec_size` is at \
@@ -1123,18 +1161,19 @@ mod tests {
         // with the widths computed by hand from `H5B2__hdr_init`. A child pointer of a depth-3
         // root is 11 bytes: the address (8), `max_nrec_size` (1), and `cum_max_nrec_size[2]` (2),
         // since `cum_max_nrec[2]` is 26449.
-        let ni = BTreeV2NodeInfo::compute(512, 11, 8, 3);
+        let ni = BTreeV2NodeInfo::compute(512, 11, OffsetWidth::Eight, 3);
         assert_eq!(ni.max_nrec_size, 1);
         assert_eq!(ni.cum_max_nrec_size, vec![0, 2, 2, 3]);
-        assert_eq!(ni.child_ptr_size(1, 8), 9); // depth-1 children are leaves
-        assert_eq!(ni.child_ptr_size(2, 8), 11);
-        assert_eq!(ni.child_ptr_size(3, 8), 11);
+        assert_eq!(ni.child_ptr_size(1, OffsetWidth::Eight), 9); // depth-1 children are leaves
+        assert_eq!(ni.child_ptr_size(2, OffsetWidth::Eight), 11);
+        assert_eq!(ni.child_ptr_size(3, OffsetWidth::Eight), 11);
 
         // A leaf of (4096 - 10) / 8 = 510 records needs a 2-byte record count.
-        let big = BTreeV2NodeInfo::compute(4096, 8, 8, 1);
+        let big = BTreeV2NodeInfo::compute(4096, 8, OffsetWidth::Eight, 1);
         assert_eq!(big.max_nrec_size, 2);
 
-        let (node_info, depth) = BTreeV2NodeInfo::for_record_count(512, 17, 8, 30).unwrap();
+        let (node_info, depth) =
+            BTreeV2NodeInfo::for_record_count(512, 17, OffsetWidth::Eight, 30).unwrap();
         assert_eq!(depth, 1);
         assert_eq!(node_info.max_nrec(0), 29);
     }
@@ -1198,8 +1237,8 @@ mod tests {
                 1,
                 NonZeroU16::MIN,
                 11,
-                4,
-                &BTreeV2NodeInfo::compute(512, 11, 4, 1),
+                OffsetWidth::Four,
+                &BTreeV2NodeInfo::compute(512, 11, OffsetWidth::Four, 1),
             ),
             Ok(vec![
                 (StoredAddress::new(0x300), 1),
