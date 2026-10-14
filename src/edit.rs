@@ -1087,6 +1087,8 @@ pub(crate) struct WriteEngine {
     sb_sig_off: u64,
     /// The committed superblock with addresses in their encoded coordinate systems.
     superblock: Superblock,
+    /// The address and length widths validated while parsing the superblock.
+    widths: FormatWidths,
     /// The mapping from stored metadata addresses to physical positions in this image.
     addresses: AddressContext,
     /// Every edit this session has staged and not yet applied. Held as one
@@ -2407,10 +2409,11 @@ impl WriteEngine {
         // which is why the mirror positions the handle before reading it whole.
         let probe = crate::image::BorrowedHandle::new(&handle, len);
         let sb_sig_off = signature::find_signature_in(&probe)?;
-        let superblock = hdf5_pure_format::__private::parse_superblock_from_source(
-            &SourceMetadata(&probe),
-            sb_sig_off,
-        )?;
+        let (superblock, widths) =
+            hdf5_pure_format::__private::parse_superblock_from_source_with_widths(
+                &SourceMetadata(&probe),
+                sb_sig_off,
+            )?;
 
         if superblock.version > 3 {
             return Err(Error::EditUnsupported("unsupported superblock version"));
@@ -2423,7 +2426,7 @@ impl WriteEngine {
             file_lock::OpenIntent::Write,
             file_lock::OpenTarget::Path(path),
         )?;
-        if superblock.offset_size != OFFSET_SIZE || superblock.length_size != LENGTH_SIZE {
+        if widths.offsets != OFFSET_WIDTH || widths.lengths != LENGTH_WIDTH {
             return Err(Error::EditUnsupported(
                 "only 8-byte offsets and lengths are supported for in-place editing",
             ));
@@ -2457,6 +2460,7 @@ impl WriteEngine {
             sb_sig_off,
             addresses,
             superblock,
+            widths,
             staged: StagedEdits::default(),
             appender_claims: Vec::new(),
             next_appender_token: 0,
@@ -3423,6 +3427,11 @@ impl WriteEngine {
     /// holds the previous root address.
     pub(crate) fn superblock(&self) -> &Superblock {
         &self.superblock
+    }
+
+    /// Returns the address and length widths validated when this session opened the file.
+    pub(crate) const fn widths(&self) -> FormatWidths {
+        self.widths
     }
 
     /// Returns the mapping between stored addresses and physical positions in this session.

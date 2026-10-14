@@ -58,7 +58,6 @@ use crate::superblock::Superblock;
 use crate::types::{AttrValue, DType, attrs_to_map, classify_datatype};
 use crate::vl_data::{self, VlenStringReadOptions};
 use crate::width::FormatWidths;
-use crate::width::OffsetWidth;
 
 // ---------------------------------------------------------------------------
 // File
@@ -843,6 +842,8 @@ struct FileInner {
     /// change it.
     access_mode: AccessMode,
     superblock: Superblock,
+    /// The address and length widths validated while parsing the superblock.
+    widths: FormatWidths,
     /// The effective address base and EOF derived from the physical signature position.
     opened: OpenedImageContext,
     /// Live file handle, retained only when the file was opened with
@@ -1073,7 +1074,7 @@ impl FileInner {
         } else {
             Box::new(source)
         };
-        let (superblock, opened) = Self::parse_superblock_source(source.as_ref())?;
+        let (superblock, widths, opened) = Self::parse_superblock_source(source.as_ref())?;
         opened.require_complete(source.len())?;
         file_lock::check_status_flags(
             &superblock,
@@ -1084,6 +1085,7 @@ impl FileInner {
             Backend::Streaming(source),
             access_mode,
             superblock,
+            widths,
             opened,
             None,
             properties,
@@ -1115,7 +1117,7 @@ impl FileInner {
         let mut handle = std::fs::File::open(path.as_ref()).map_err(Error::Io)?;
         let mut data = Vec::new();
         handle.read_to_end(&mut data).map_err(Error::Io)?;
-        let (superblock, opened) = Self::parse_superblock(&data)?;
+        let (superblock, widths, opened) = Self::parse_superblock(&data)?;
         if superblock.version < SWMR_SUPERBLOCK_VERSION {
             opened.require_complete(data.len() as u64)?;
         }
@@ -1128,6 +1130,7 @@ impl FileInner {
             Backend::InMemory(data),
             AccessMode::ReadOnly,
             superblock,
+            widths,
             opened,
             Some(handle),
             properties,
@@ -1144,12 +1147,13 @@ impl FileInner {
         data: Vec<u8>,
         properties: FileAccessProperties,
     ) -> Result<Self, Error> {
-        let (superblock, opened) = Self::parse_superblock(&data)?;
+        let (superblock, widths, opened) = Self::parse_superblock(&data)?;
         opened.require_complete(data.len() as u64)?;
         Ok(Self::from_parts(
             Backend::InMemory(data),
             AccessMode::ReadOnly,
             superblock,
+            widths,
             opened,
             None,
             properties,
@@ -1202,6 +1206,7 @@ impl FileInner {
         session.set_page_buffer_size(properties.page_buffer_size)?;
         // Reuse the parsed superblock so the image need not provide a whole-file slice.
         let superblock = session.superblock().clone();
+        let widths = session.widths();
         let opened = OpenedImageContext::reconcile(
             superblock.base_address,
             superblock.eof_address,
@@ -1211,6 +1216,7 @@ impl FileInner {
             Backend::Edit(Box::new(Mutex::new(session))),
             AccessMode::ReadWrite,
             superblock,
+            widths,
             opened,
             None,
             properties,
@@ -1618,15 +1624,18 @@ impl FileInner {
     ///
     /// Returns [`Error::Format`] if the signature is absent, the superblock does not parse, or
     /// the relocated EOF is outside the [`u64`] range.
-    fn parse_superblock(data: &[u8]) -> Result<(Superblock, OpenedImageContext), Error> {
+    fn parse_superblock(
+        data: &[u8],
+    ) -> Result<(Superblock, FormatWidths, OpenedImageContext), Error> {
         let signature_offset = signature::find_signature(data)?;
-        let superblock = hdf5_pure_format::__private::parse_superblock(data, signature_offset)?;
+        let (superblock, widths) =
+            hdf5_pure_format::__private::parse_superblock_with_widths(data, signature_offset)?;
         let opened = OpenedImageContext::reconcile(
             superblock.base_address,
             superblock.eof_address,
             signature_offset as u64,
         )?;
-        Ok((superblock, opened))
+        Ok((superblock, widths, opened))
     }
 
     /// Parses the superblock and constructs the address context through metadata reads.
@@ -1640,18 +1649,19 @@ impl FileInner {
     /// the relocated EOF is outside the [`u64`] range. Returns the source's error if a read fails.
     fn parse_superblock_source<S: Source + ?Sized>(
         source: &S,
-    ) -> Result<(Superblock, OpenedImageContext), Error> {
+    ) -> Result<(Superblock, FormatWidths, OpenedImageContext), Error> {
         let signature_offset = signature::find_signature_in(source)?;
-        let superblock = hdf5_pure_format::__private::parse_superblock_from_source(
-            &SourceMetadata(source),
-            signature_offset,
-        )?;
+        let (superblock, widths) =
+            hdf5_pure_format::__private::parse_superblock_from_source_with_widths(
+                &SourceMetadata(source),
+                signature_offset,
+            )?;
         let opened = OpenedImageContext::reconcile(
             superblock.base_address,
             superblock.eof_address,
             signature_offset,
         )?;
-        Ok((superblock, opened))
+        Ok((superblock, widths, opened))
     }
 
     /// Assemble a [`File`] from parsed parts, then load the File Space Info from
@@ -1661,6 +1671,7 @@ impl FileInner {
         backend: Backend,
         access_mode: AccessMode,
         superblock: Superblock,
+        widths: FormatWidths,
         opened: OpenedImageContext,
         handle: Option<std::fs::File>,
         access_properties: FileAccessProperties,
@@ -1669,6 +1680,7 @@ impl FileInner {
             backend,
             access_mode,
             superblock,
+            widths,
             opened,
             handle,
             file_space_info: None,
@@ -1703,8 +1715,7 @@ impl FileInner {
         let Some(rel) = self.superblock.superblock_extension_address else {
             return Ok(None);
         };
-        let offset_width = OffsetWidth::try_from(self.superblock.offset_size)?;
-        if rel.is_undefined(offset_width) {
+        if rel.is_undefined(self.widths.offsets) {
             return Ok(None);
         }
         let abs = self.addresses().absolute(rel)?;
@@ -1716,9 +1727,7 @@ impl FileInner {
         else {
             return Ok(None);
         };
-        let widths =
-            FormatWidths::from_sizes(self.superblock.offset_size, self.superblock.length_size)?;
-        hdf5_pure_format::__private::parse_file_space_info(widths, &msg.data).map(Some)
+        hdf5_pure_format::__private::parse_file_space_info(self.widths, &msg.data).map(Some)
     }
 
     /// Parse the Shared Message Table message from the superblock extension and
@@ -1730,8 +1739,7 @@ impl FileInner {
     /// still reads.
     fn read_sohm_table(&self) -> Option<Box<crate::sohm::SohmTable>> {
         let rel = self.superblock.superblock_extension_address?;
-        let offset_width = OffsetWidth::try_from(self.superblock.offset_size).ok()?;
-        if rel.is_undefined(offset_width) {
+        if rel.is_undefined(self.widths.offsets) {
             return None;
         }
         let abs = self.addresses().absolute(rel).ok()?;
@@ -1741,13 +1749,13 @@ impl FileInner {
             .iter()
             .find(|m| m.msg_type == MessageType::SHARED_MESSAGE_TABLE)?;
         let message =
-            crate::sohm::SharedMessageTableMessage::parse(&msg.data, self.superblock.offset_size)
+            crate::sohm::SharedMessageTableMessage::parse(&msg.data, self.widths.offsets.get())
                 .ok()?;
         // The table's address, like every address in a header message, is stored
         // relative to the file's base address, so the read is framed the same way
         // every other metadata walk here is.
         let base = self.addresses().effective_base();
-        let os = self.superblock.offset_size;
+        let os = self.widths.offsets.get();
         match &self.backend {
             Backend::InMemory(v) => {
                 crate::sohm::SohmTable::read(frame(v, base).ok()?, &message, os).ok()
@@ -1824,9 +1832,10 @@ impl FileInner {
             handle.seek(SeekFrom::Start(0)).map_err(Error::Io)?;
             handle.read_to_end(&mut data).map_err(Error::Io)?;
             match Self::parse_superblock(&data) {
-                Ok((superblock, opened)) => {
+                Ok((superblock, widths, opened)) => {
                     self.backend = Backend::InMemory(data);
                     self.superblock = superblock;
+                    self.widths = widths;
                     self.opened = opened;
                     self.file_space_info = self.read_file_space_info();
                     self.sohm_table = self.read_sohm_table();
@@ -2016,7 +2025,7 @@ impl FileInner {
         };
         let mut sections = free_space_manager::read_persisted_sections(
             data,
-            FormatWidths::from_sizes(self.superblock.offset_size, self.superblock.length_size)?,
+            self.widths,
             self.addresses().effective_base(),
             &info.manager_addrs,
         )?;
@@ -2057,8 +2066,8 @@ impl FileInner {
     }
 
     fn parse_header(&self, address: u64) -> Result<ObjectHeader, FormatError> {
-        let os = self.superblock.offset_size;
-        let ls = self.superblock.length_size;
+        let os = self.widths.offsets.get();
+        let ls = self.widths.lengths.get();
         let access = self.access_mode();
         match &self.backend {
             Backend::InMemory(v) => ObjectHeader::parse_with_base(
@@ -2140,11 +2149,11 @@ impl FileInner {
     }
 
     fn offset_size(&self) -> u8 {
-        self.superblock.offset_size
+        self.widths.offsets.get()
     }
 
     fn length_size(&self) -> u8 {
-        self.superblock.length_size
+        self.widths.lengths.get()
     }
 
     /// Returns the entries of the group `hdr` describes, dispatching on the backend.
