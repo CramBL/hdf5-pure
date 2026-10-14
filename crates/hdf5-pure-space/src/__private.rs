@@ -4,6 +4,7 @@
 
 pub use crate::admission::Release;
 pub use crate::admission::TrackedSpace;
+pub use crate::allocation::AllocationClass;
 pub use crate::extent::Extent;
 pub use crate::list::FreeList;
 pub use crate::list::trailing_run_start;

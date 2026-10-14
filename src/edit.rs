@@ -288,6 +288,7 @@ use hdf5_pure_format::__private::OBJECT_HEADER_PREFIX_MAX_LEN;
 use hdf5_pure_format::__private::ObjectHeaderContinuation;
 use hdf5_pure_format::__private::ObjectHeaderPrefix;
 use hdf5_pure_space::__private as free_space;
+use hdf5_pure_space::__private::AllocationClass;
 use hdf5_pure_space::__private::{
     Extent as FreeExtent, FreeClass, FreeList, ManagerKind, ManagerSections, PageTransition,
     PageType, PagedPostFree, SessionSpace, SessionSpaceSnapshot, TrackedSpace,
@@ -3727,7 +3728,7 @@ impl WriteEngine {
     ///   space [`reserve_for_immediate_append`](Self::reserve_for_immediate_append)
     ///   has already taken *out* of the published managers.
     /// - A **paged** file keeps its free space per page type in [`SessionSpace`]. It draws its
-    ///   reserve through [`SessionSpace::allocate`] with [`PageType::Raw`], which keeps each page
+    ///   reserve through [`SessionSpace::allocate`] with [`AllocationClass::Raw`], which keeps each page
     ///   homogeneous.
     ///   Named as its own term at the call site rather than left to the argument
     ///   that the persist term already covers it (`append_prepare` refuses a
@@ -3867,17 +3868,17 @@ impl WriteEngine {
     /// The longest contiguous run [`take_raw_span`](Self::take_raw_span) could
     /// move into the reserve right now, or `0` when nothing could.
     fn largest_raw_run(&self) -> u64 {
-        self.space.largest(PageType::Raw)
+        self.space.largest(AllocationClass::Raw)
     }
 
     /// Move `len` bytes of raw-appendable free space into
     /// [`reserved`](Self::reserved), reporting whether a contiguous run that
     /// large was available.
     ///
-    /// A paged file draws through [`SessionSpace::allocate`] with [`PageType::Raw`], the same
-    /// operation the staged commit uses for dataset data. A flat strategy ignores the type.
+    /// A paged file draws through [`SessionSpace::allocate`] with [`AllocationClass::Raw`], the same
+    /// operation the staged commit uses for dataset data. A flat strategy ignores the allocation class.
     fn take_raw_span(&mut self, len: u64) -> bool {
-        match self.space.allocate(len, PageType::Raw) {
+        match self.space.allocate(len, AllocationClass::Raw) {
             Some(extent) => {
                 self.reserved.free(extent);
                 true
@@ -3905,7 +3906,7 @@ impl WriteEngine {
         }
         let reserved = std::mem::replace(&mut self.reserved, FreeList::new());
         for &extent in reserved.extents() {
-            self.space.return_allocation(extent, PageType::Raw);
+            self.space.return_allocation(extent, AllocationClass::Raw);
         }
     }
 
@@ -6438,7 +6439,7 @@ impl WriteEngine {
                     let data_addr = if fd.raw.is_empty() {
                         StoredAddress::new(UNDEF)
                     } else {
-                        base.relative(self.alloc_or_append_typed(&fd.raw, PageType::Raw)?)?
+                        base.relative(self.alloc_or_append_typed(&fd.raw, AllocationClass::Raw)?)?
                     };
                     // Attributes this dataset keeps in a fractal heap are placed
                     // now — after the variable-length patching above, so the heap
@@ -6461,7 +6462,7 @@ impl WriteEngine {
                         self.libver(),
                     )?
                 };
-                let oh_addr = self.alloc_or_append_typed(&oh, PageType::Meta)?;
+                let oh_addr = self.alloc_or_append_typed(&oh, AllocationClass::Metadata)?;
                 region.push_link(
                     fd.name.as_str(),
                     base.relative(oh_addr)?,
@@ -6503,7 +6504,7 @@ impl WriteEngine {
             self.place_edited_attrs(&mut region, attrs)?;
 
             let oh = build_v2_object_header(&region)?;
-            let addr = self.alloc_or_append_typed(&oh, PageType::Meta)?;
+            let addr = self.alloc_or_append_typed(&oh, AllocationClass::Metadata)?;
             path_addr.insert(key.clone(), addr);
         }
 
@@ -7099,13 +7100,14 @@ impl WriteEngine {
         let mut proposed = appended_len;
 
         for _ in 0..ROUNDS {
-            let (reserved, from_reserve) = match self.space.allocate(proposed, PageType::Meta) {
-                Some(extent) => (extent, false),
-                None => match self.reserved.alloc(proposed) {
-                    Some(extent) => (extent, true),
-                    None => break,
-                },
-            };
+            let (reserved, from_reserve) =
+                match self.space.allocate(proposed, AllocationClass::Metadata) {
+                    Some(extent) => (extent, false),
+                    None => match self.reserved.alloc(proposed) {
+                        Some(extent) => (extent, true),
+                        None => break,
+                    },
+                };
             let at = reserved.start();
             let (mut post, eoa) = self.flat_post_free(current_eoa, to_free, old_blocks);
             // Free space that reaches end-of-file is released rather than
@@ -7127,7 +7129,8 @@ impl WriteEngine {
             if from_reserve {
                 self.reserved.free(reserved);
             } else {
-                self.space.return_allocation(reserved, PageType::Meta);
+                self.space
+                    .return_allocation(reserved, AllocationClass::Metadata);
             }
             proposed = len;
         }
@@ -7520,7 +7523,7 @@ impl WriteEngine {
         let mut proposed = ext_len + free_space_manager::manager_blocks_len(&managers, widths);
 
         for _ in 0..ROUNDS {
-            let reserved = self.space.allocate(proposed, PageType::Meta)?;
+            let reserved = self.space.allocate(proposed, AllocationClass::Metadata)?;
             let at = reserved.start();
             let (mut post, eoa) = self.paged_post_free(current_eoa, to_free, old_blocks);
             // Whole free pages at the end of the file are released rather than
@@ -7550,7 +7553,8 @@ impl WriteEngine {
                 );
                 return Some((post, plan, at, blocks_len, eoa));
             }
-            self.space.return_allocation(reserved, PageType::Meta);
+            self.space
+                .return_allocation(reserved, AllocationClass::Metadata);
             proposed = blocks_len;
         }
         None
@@ -9032,7 +9036,7 @@ impl WriteEngine {
                 let mut region = region.clone();
                 self.append_dense_attrs(&mut region, dense_attrs.clone())?;
                 let oh = build_v2_object_header(&region)?;
-                self.alloc_or_append_typed(&oh, PageType::Meta)
+                self.alloc_or_append_typed(&oh, AllocationClass::Metadata)
             }
             CopyTree::DatasetContiguous {
                 region,
@@ -9046,7 +9050,7 @@ impl WriteEngine {
                 // undefined address the source stored, so the copy declares the
                 // same empty storage (issue #336).
                 if let Some(data) = data {
-                    let new_data_addr = self.alloc_or_append_typed(data, PageType::Raw)?;
+                    let new_data_addr = self.alloc_or_append_typed(data, AllocationClass::Raw)?;
                     // The placement is an absolute offset; the data-layout
                     // address field stores it relative to the userblock base.
                     let relative = base.relative(new_data_addr)?.get();
@@ -9058,7 +9062,7 @@ impl WriteEngine {
                 // so no ordering between the two is owed.
                 self.append_dense_attrs(&mut region, dense_attrs.clone())?;
                 let oh = build_v2_object_header(&region)?;
-                self.alloc_or_append_typed(&oh, PageType::Meta)
+                self.alloc_or_append_typed(&oh, AllocationClass::Metadata)
             }
             CopyTree::DatasetChunked {
                 region,
@@ -9101,7 +9105,7 @@ impl WriteEngine {
                 // children's headers and data.
                 self.append_dense_attrs(&mut region, dense_attrs.clone())?;
                 let oh = build_v2_object_header(&region)?;
-                self.alloc_or_append_typed(&oh, PageType::Meta)
+                self.alloc_or_append_typed(&oh, AllocationClass::Metadata)
             }
         }
     }
@@ -9156,7 +9160,7 @@ impl WriteEngine {
             maxshape,
         )?;
         let (_addr, layout_message) =
-            self.place_relocatable(sizing.plan.total_len, PageType::Raw, |stored_base| {
+            self.place_relocatable(sizing.plan.total_len, AllocationClass::Raw, |stored_base| {
                 // Re-plan at the address the blob really occupies, so its embedded
                 // addresses resolve to their real file offsets once the reader adds
                 // the userblock base back (see `build_chunked_dataset`).
@@ -9186,7 +9190,7 @@ impl WriteEngine {
         let mut new_region = replace_layout_message(region, &layout_message)?;
         self.append_dense_attrs(&mut new_region, dense_attrs)?;
         let oh = build_v2_object_header(&new_region)?;
-        self.alloc_or_append_typed(&oh, PageType::Meta)
+        self.alloc_or_append_typed(&oh, AllocationClass::Metadata)
     }
 
     /// When `attrs` is non-empty, build a fresh dense (fractal-heap) attribute
@@ -9241,7 +9245,7 @@ impl WriteEngine {
     ) -> Result<Vec<u8>, Error> {
         let plan = crate::file_writer::dense_attrs_plan(attrs, creation)?;
         let (_addr, attr_info_message) =
-            self.place_relocatable(plan.blob_len(), PageType::Meta, |stored_base| {
+            self.place_relocatable(plan.blob_len(), AllocationClass::Metadata, |stored_base| {
                 let blob = plan.build(stored_base)?;
                 Ok((blob.blob, blob.attr_info_message))
             })?;
@@ -9313,7 +9317,7 @@ impl WriteEngine {
                 ..
             } => {
                 let raw = self.resolve_overwrite_bytes(bytes)?;
-                let new_data_addr = self.alloc_or_append_typed(&raw, PageType::Raw)?;
+                let new_data_addr = self.alloc_or_append_typed(&raw, AllocationClass::Raw)?;
                 let mut region = region.clone();
                 // The placement is an absolute file offset; the contiguous
                 // data-layout field stores it relative to the userblock base (`-
@@ -9327,13 +9331,13 @@ impl WriteEngine {
                 let raw_len = raw.len() as u64;
                 region.bytes_mut()[size_off..size_off + 8].copy_from_slice(&raw_len.to_le_bytes());
                 let oh = build_v2_object_header(&region)?;
-                self.alloc_or_append_typed(&oh, PageType::Meta)
+                self.alloc_or_append_typed(&oh, AllocationClass::Metadata)
             }
             MovingWrite::Compact { region, bytes } => {
                 let raw = self.resolve_overwrite_bytes(bytes)?;
                 let region = rebuild_compact_layout_region(region, &raw)?;
                 let oh = build_v2_object_header(&region)?;
-                self.alloc_or_append_typed(&oh, PageType::Meta)
+                self.alloc_or_append_typed(&oh, AllocationClass::Metadata)
             }
             MovingWrite::Chunked {
                 region,
@@ -9413,7 +9417,7 @@ impl WriteEngine {
                 let mut region = region.clone();
                 self.place_edited_attrs(&mut region, attrs.clone())?;
                 let oh = build_v2_object_header(&region)?;
-                self.alloc_or_append_typed(&oh, PageType::Meta)
+                self.alloc_or_append_typed(&oh, AllocationClass::Metadata)
             }
         }
     }
@@ -9525,7 +9529,7 @@ impl WriteEngine {
         // end-of-file: this asks only whether a freed region holds the whole blob,
         // and takes the per-chunk path when none does.
         let blob = if self.space.is_paged() {
-            self.alloc_free(chunk_total + ea_len, PageType::Raw)
+            self.alloc_free(chunk_total + ea_len, AllocationClass::Raw)
         } else {
             None
         };
@@ -9568,16 +9572,17 @@ impl WriteEngine {
                 // the index below simply records where it went.
                 let mut combined: Vec<ChunkRecord> = kept_chunks.to_vec();
                 for cb in new_chunk_bytes {
-                    let abs = self.alloc_or_append_typed(cb, PageType::Raw)?;
+                    let abs = self.alloc_or_append_typed(cb, AllocationClass::Raw)?;
                     combined.push(ChunkRecord {
                         address: base.relative(abs)?,
                         stored_size: cb.len() as u64,
                         filter_mask: 0,
                     });
                 }
-                let (ea_addr, ()) = self.place_relocatable(ea_len, PageType::Raw, |at| {
-                    Ok((ea(&IndexSlots::dense(&combined), at)?, ()))
-                })?;
+                let at =
+                    self.reserve_with_page_type(ea_len, AllocationClass::Metadata, PageType::Raw)?;
+                let bytes = ea(&IndexSlots::dense(&combined), base.relative(at.address())?)?;
+                let ea_addr = self.place(at, &bytes)?;
                 base.relative(ea_addr)?
             }
         };
@@ -9599,7 +9604,7 @@ impl WriteEngine {
         let region = replace_dataspace_message(region, new_dataspace_body)?;
         let region = replace_layout_message(&region, &layout_body)?;
         let oh = build_v2_object_header(&region)?;
-        self.alloc_or_append_typed(&oh, PageType::Meta)
+        self.alloc_or_append_typed(&oh, AllocationClass::Metadata)
     }
 
     /// Append `bytes` at end-of-file, returning the absolute address they were
@@ -9641,16 +9646,26 @@ impl WriteEngine {
         Ok(())
     }
 
-    /// Place `bytes` as page type `ty`, reusing a free region where one fits.
+    /// Writes `bytes` for `class`, reusing a free region where one fits.
+    ///
     /// Equivalent to [`reserve`](Self::reserve) followed by [`place`](Self::place),
     /// for the callers whose bytes are already built.
-    fn alloc_or_append_typed(&mut self, bytes: &[u8], ty: PageType) -> Result<u64, Error> {
-        let at = self.reserve(bytes.len() as u64, ty)?;
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Format`] if placement is invalid. Returns the write error if writing fails.
+    fn alloc_or_append_typed(
+        &mut self,
+        bytes: &[u8],
+        class: AllocationClass,
+    ) -> Result<u64, Error> {
+        let at = self.reserve(bytes.len() as u64, class)?;
         self.place(at, bytes)
     }
 
-    /// Choose where `len` bytes of page type `ty` will go: a reusable free region
-    /// left by a prior commit, or the current end-of-file. The returned
+    /// Reserves `len` bytes for `class` in reusable space or at the end of the file.
+    ///
+    /// The returned
     /// [`Placement`] must be handed to [`place`](Self::place) with exactly `len`
     /// bytes.
     ///
@@ -9672,37 +9687,62 @@ impl WriteEngine {
     /// nothing at all, which belongs to no type ([`SessionSpace::allocate`]). Every
     /// page stays homogeneous either way. It never opens a page for a reused region
     /// — the tail page is untouched by a write into the middle of the file.
-    fn reserve(&mut self, len: u64, ty: PageType) -> Result<Placement, Error> {
-        if let Some(at) = self.alloc_free(len, ty) {
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Format`] if address resolution or PAGE transition planning fails. Returns
+    /// the write error if writing PAGE padding fails.
+    fn reserve(&mut self, len: u64, class: AllocationClass) -> Result<Placement, Error> {
+        self.reserve_with_page_type(len, class, class.into())
+    }
+
+    /// Reserves a physical allocation with an explicit PAGE placement type.
+    ///
+    /// Array chunk indexes retain metadata intent while sharing raw-data pages.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Format`] if address resolution or PAGE transition planning fails. Returns
+    /// the write error if writing PAGE padding fails.
+    fn reserve_with_page_type(
+        &mut self,
+        len: u64,
+        class: AllocationClass,
+        page_type: PageType,
+    ) -> Result<Placement, Error> {
+        if let Some(extent) = self.space.allocate_with_page_type(len, class, page_type) {
             return Ok(Placement::Reused {
-                addr: self.addresses.resolve(at)?.get(),
+                addr: self
+                    .addresses
+                    .resolve(StoredAddress::new(extent.start()))?
+                    .get(),
                 len,
             });
         }
-        self.begin_page(ty)?;
+        self.begin_page(page_type)?;
         Ok(Placement::Appended {
             addr: self.image.len(),
             len,
         })
     }
 
-    /// Draws `len` bytes from the free space of page type `ty`, and returns their stored address,
+    /// Reserves `len` reusable bytes for `class` and returns their stored address,
     /// or `None` when no single region is large enough.
     ///
     /// A non-paged file keeps one list for the whole file. A paged file keeps one
-    /// per page type and must be served from the list matching `ty`: handing a
+    /// per page type and uses the list matching `class`: handing a
     /// metadata hole to raw data (or the reverse) would mix the two within a page,
     /// which is the single invariant the paged strategy exists to hold. A page
     /// holding nothing at all is the exception, and [`SessionSpace::allocate`] is where it is
     /// spent. [`SessionSpace::Disabled`] draws nothing.
-    fn alloc_free(&mut self, len: u64, ty: PageType) -> Option<StoredAddress> {
+    fn alloc_free(&mut self, len: u64, class: AllocationClass) -> Option<StoredAddress> {
         self.space
-            .allocate(len, ty)
+            .allocate(len, class)
             .map(|extent| StoredAddress::new(extent.start()))
     }
 
     /// Hands the stored range `[addr, addr + len)`, drawn from [`alloc_free`](Self::alloc_free)
-    /// with [`PageType::Raw`], back to the list it came from.
+    /// with [`AllocationClass::Raw`], back to the list it came from.
     ///
     /// A caller that rejects a placement after the draw calls this, since the region would
     /// otherwise stay out of the free lists for the rest of the session with nothing written into
@@ -9718,7 +9758,7 @@ impl WriteEngine {
         let Some(extent) = FreeExtent::new(addr.get(), len) else {
             return;
         };
-        self.space.return_allocation(extent, PageType::Raw);
+        self.space.return_allocation(extent, AllocationClass::Raw);
     }
 
     /// Write `bytes` at the address [`reserve`](Self::reserve) handed out,
@@ -9752,9 +9792,10 @@ impl WriteEngine {
         }
     }
 
-    /// Place a *relocatable* blob of `len` bytes as page type `ty`: pick its
-    /// address first, then build it for that address with `build`, then write it
-    /// there. Returns the address and whatever else `build` produced (typically the
+    /// Writes a relocatable blob of `len` bytes for `class`.
+    ///
+    /// Reserves its address, builds its bytes with `build`, and writes them at that address.
+    /// Returns the address and whatever else `build` produced (typically the
     /// object-header message naming the blob, which embeds the same address).
     ///
     /// `build` receives the address the blob will occupy. Every address the blob
@@ -9766,18 +9807,21 @@ impl WriteEngine {
     /// of the content alone — the addresses sit in fixed-width fields — so every
     /// caller derives it, and none builds the blob to measure it:
     /// [`DenseAttrPlan::blob_len`](crate::file_writer::DenseAttrPlan::blob_len)
-    /// for a dense attribute heap,
-    /// [`extensible_array_len`](hdf5_pure_format::__private::extensible_array_len) for an appended
-    /// chunk index, and [`chunked_data_len`] / [`plan_chunked_data_verbatim`]
+    /// for a dense attribute heap, and [`chunked_data_len`] / [`plan_chunked_data_verbatim`]
     /// for a whole chunked data region, both of which size their index through
     /// [`chunk_index_len`](crate::chunked_write::chunk_index_len).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Format`] if address resolution or placement is invalid. Returns any error
+    /// from reserving space, `build`, or writing the bytes.
     fn place_relocatable<T>(
         &mut self,
         len: u64,
-        ty: PageType,
+        class: AllocationClass,
         build: impl FnOnce(StoredAddress) -> Result<(Vec<u8>, T), Error>,
     ) -> Result<(u64, T), Error> {
-        let at = self.reserve(len, ty)?;
+        let at = self.reserve(len, class)?;
         let (bytes, extra) = build(self.addresses.relative(at.address())?)?;
         let addr = self.place(at, &bytes)?;
         Ok((addr, extra))
@@ -9797,7 +9841,7 @@ impl WriteEngine {
         collections
             .iter()
             .map(|collection| {
-                let addr = self.alloc_or_append_typed(collection, PageType::Meta)?;
+                let addr = self.alloc_or_append_typed(collection, AllocationClass::Metadata)?;
                 Ok(self.addresses.relative(addr)?.get())
             })
             .collect()
@@ -10153,14 +10197,17 @@ impl WriteEngine {
         )?;
         // Chunk data and the index beside it are raw (see `chunked_storage_spans`,
         // which reclaims both as raw).
-        let (_addr, (layout_message, pipeline_message)) =
-            self.place_relocatable(chunked_data_len(&set)?, PageType::Raw, |stored_base| {
+        let (_addr, (layout_message, pipeline_message)) = self.place_relocatable(
+            chunked_data_len(&set)?,
+            AllocationClass::Raw,
+            |stored_base| {
                 let result = assemble_chunked_at(&set, stored_base)?;
                 Ok((
                     result.data_bytes,
                     (result.layout_message, result.pipeline_message),
                 ))
-            })?;
+            },
+        )?;
         // As in the contiguous branch: a set too large for the header goes to a
         // fractal heap, which the header then names instead of carrying it.
         let attr_info = self.place_dense_attrs_if_needed(fd)?;
@@ -10802,7 +10849,8 @@ impl Store for EditStore<'_> {
         let extent = if let Some(reserve) = self.reserve.as_deref_mut() {
             reserve.alloc(bytes.len() as u64)
         } else if self.reuse_session_space {
-            self.space.allocate(bytes.len() as u64, PageType::Raw)
+            self.space
+                .allocate(bytes.len() as u64, AllocationClass::Raw)
         } else {
             None
         };
@@ -14562,7 +14610,7 @@ mod tests {
             let span = (
                 extent.start(),
                 extent.len(),
-                FreeClass::Page(kind.page_type()),
+                FreeClass::Page(kind.allocation_class().into()),
             );
             assert!(
                 link_storage.contains(&span),
@@ -16081,7 +16129,7 @@ mod tests {
         let mut s = session(&dir.path().join("a.h5"), Some(hole_a), None);
         assert!(
             matches!(
-                s.reserve(1024, PageType::Raw).unwrap(),
+                s.reserve(1024, AllocationClass::Raw).unwrap(),
                 Placement::Appended { .. }
             ),
             "a raw allocation must not be served out of a live metadata page"
@@ -16092,7 +16140,7 @@ mod tests {
         let mut s = session(&dir.path().join("b.h5"), None, Some(hole_b));
         assert!(
             matches!(
-                s.reserve(1024, PageType::Meta).unwrap(),
+                s.reserve(1024, AllocationClass::Metadata).unwrap(),
                 Placement::Appended { .. }
             ),
             "a metadata allocation must not be served out of a live raw page"
@@ -16104,14 +16152,14 @@ mod tests {
         let mut s = session(&dir.path().join("c.h5"), Some(hole_a), Some(hole_b));
         assert!(
             matches!(
-                s.reserve(1024, PageType::Raw).unwrap(),
+                s.reserve(1024, AllocationClass::Raw).unwrap(),
                 Placement::Reused { addr, .. } if addr == hole_b.0
             ),
             "a raw allocation takes the raw hole"
         );
         assert!(
             matches!(
-                s.reserve(1024, PageType::Meta).unwrap(),
+                s.reserve(1024, AllocationClass::Metadata).unwrap(),
                 Placement::Reused { addr, .. } if addr == hole_a.0
             ),
             "a metadata allocation takes the metadata hole"
@@ -16125,7 +16173,7 @@ mod tests {
         let mut s = session(&dir.path().join("d.h5"), Some((PAGE, PAGE)), None);
         assert!(
             matches!(
-                s.reserve(1024, PageType::Raw).unwrap(),
+                s.reserve(1024, AllocationClass::Raw).unwrap(),
                 Placement::Reused { addr, .. } if addr == PAGE
             ),
             "a raw allocation may open an empty metadata page"
@@ -16153,7 +16201,7 @@ mod tests {
         );
         assert!(
             matches!(
-                s.reserve(1024, PageType::Meta).unwrap(),
+                s.reserve(1024, AllocationClass::Metadata).unwrap(),
                 Placement::Reused { addr, .. } if addr == 2 * PAGE
             ),
             "the claim must begin at the empty page, not at the run's start"
