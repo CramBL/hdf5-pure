@@ -83,6 +83,33 @@ pub struct VlElement {
 }
 
 impl VlElement {
+    /// Parses the variable-length element at the start of `raw`: a 4-byte length, then the global
+    /// heap ID of its data, an `offset_size`-byte collection address and a 4-byte object index.
+    ///
+    /// The global heap ID is defined in "Global Heap" of the [format specification, version
+    /// 4.0][spec].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::UnexpectedEof`] if `raw` is shorter than `offset_size` + 8 bytes, and
+    /// [`FormatError::InvalidOffsetSize`] if `offset_size` is not 2, 4, or 8.
+    ///
+    /// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsec_fmt4_infra_globalheap
+    pub(crate) fn parse(raw: &[u8], offset_size: u8) -> Result<Self, FormatError> {
+        let index_at = 4 + usize::from(offset_size);
+        crate::bytes::ensure_len(raw, 0, index_at + 4)?;
+        Ok(Self {
+            length: u32::from_le_bytes([raw[0], raw[1], raw[2], raw[3]]),
+            collection_address: StoredAddress::new(read_offset(raw, 4, offset_size)?),
+            object_index: u32::from_le_bytes([
+                raw[index_at],
+                raw[index_at + 1],
+                raw[index_at + 2],
+                raw[index_at + 3],
+            ]),
+        })
+    }
+
     /// Returns the ID of the global heap object the element refers to, or `None` for a null
     /// element, one of length 0 whose collection address is undefined or 0.
     ///
@@ -159,35 +186,9 @@ pub fn parse_vl_references(
     }
 
     let mut elements = Vec::with_capacity(num_elements.to_usize()?);
-    let mut pos = 0;
-
-    for _ in 0..num_elements {
-        let length = u32::from_le_bytes([
-            raw_data[pos],
-            raw_data[pos + 1],
-            raw_data[pos + 2],
-            raw_data[pos + 3],
-        ]);
-        pos += 4;
-
-        let collection_address = StoredAddress::new(read_offset(raw_data, pos, offset_size)?);
-        pos += offset_size as usize;
-
-        let object_index = u32::from_le_bytes([
-            raw_data[pos],
-            raw_data[pos + 1],
-            raw_data[pos + 2],
-            raw_data[pos + 3],
-        ]);
-        pos += 4;
-
-        elements.push(VlElement {
-            length,
-            collection_address,
-            object_index,
-        });
+    for raw in raw_data[..total].chunks_exact(elem_size.to_usize()?) {
+        elements.push(VlElement::parse(raw, offset_size)?);
     }
-
     Ok(elements)
 }
 

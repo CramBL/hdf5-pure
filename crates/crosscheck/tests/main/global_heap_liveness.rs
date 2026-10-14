@@ -29,21 +29,28 @@ fn libhdf5_collections_are_each_referenced(
         Form::FillValue
     )]
     form: Form,
-    #[values(Payload::Strings, Payload::Sequences)] payload: Payload,
+    #[values(
+        Payload::Strings,
+        Payload::Sequences,
+        Payload::Compounds,
+        Payload::ArraysOfStrings,
+        Payload::ArraysOfCompounds
+    )]
+    payload: Payload,
 ) {
     let directory = TempDir::new().unwrap();
     let path = directory.path().join("liveness.h5");
     let file = libhdf5_file(&path, low);
     let group = file.create_group("g").unwrap();
     match payload {
-        Payload::Strings => form.write(
-            &group,
-            &["alpha", "", "beta"].map(|s| s.parse::<VarLenUnicode>().unwrap()),
-        ),
-        Payload::Sequences => form.write(
-            &group,
-            &[&[1, 2, 3][..], &[], &[4]].map(VarLenArray::<i32>::from_slice),
-        ),
+        Payload::Strings => form.write(&group, &strings()),
+        Payload::Sequences => form.write(&group, &sequences()),
+        Payload::Compounds => form.write(&group, &records()),
+        Payload::ArraysOfStrings => form.write(&group, &[strings(), strings()]),
+        Payload::ArraysOfCompounds => {
+            let [first, second, third] = records();
+            form.write(&group, &[[first, second], [third.clone(), third]]);
+        }
     }
     drop(group);
     file.close().unwrap();
@@ -158,8 +165,37 @@ enum Linking {
 
 #[derive(Clone, Copy, Debug)]
 enum Payload {
+    ArraysOfCompounds,
+    ArraysOfStrings,
+    Compounds,
     Sequences,
     Strings,
+}
+
+#[repr(C)]
+#[derive(Clone, Debug, hdf5::H5Type)]
+struct Record {
+    n: i32,
+    s: VarLenUnicode,
+    v: VarLenArray<i32>,
+}
+
+fn strings() -> [VarLenUnicode; 3] {
+    ["alpha", "", "beta"].map(|s| s.parse().unwrap())
+}
+
+fn sequences() -> [VarLenArray<i32>; 3] {
+    [&[1, 2, 3][..], &[], &[4]].map(VarLenArray::from_slice)
+}
+
+fn records() -> [Record; 3] {
+    let [s0, s1, s2] = strings();
+    let [v0, v1, v2] = sequences();
+    [
+        Record { n: 1, s: s0, v: v0 },
+        Record { n: 2, s: s1, v: v1 },
+        Record { n: 3, s: s2, v: v2 },
+    ]
 }
 
 fn write_attribute<T: H5Type>(location: &Location, values: &[T]) {
