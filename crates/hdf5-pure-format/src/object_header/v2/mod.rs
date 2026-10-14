@@ -647,12 +647,21 @@ impl ObjectHeaderContinuation {
     ///
     /// # Errors
     ///
-    /// Returns [`FormatError::UnexpectedEof`] if `body` ends inside a field,
-    /// [`FormatError::UndefinedContinuationAddress`] if the address is the undefined address, and
-    /// [`FormatError::InvalidOffsetSize`] or [`FormatError::InvalidLengthSize`] if a width is not
-    /// 2, 4, or 8.
+    /// Returns [`FormatError::InvalidOffsetSize`] or [`FormatError::InvalidLengthSize`] if a
+    /// width is not 2, 4, or 8, and otherwise the errors
+    /// [`parse_with_widths`](Self::parse_with_widths) returns.
     pub fn parse(body: &[u8], offset_size: u8, length_size: u8) -> Result<Self, FormatError> {
-        let FormatWidths { offsets, lengths } = FormatWidths::from_sizes(offset_size, length_size)?;
+        Self::parse_with_widths(body, FormatWidths::from_sizes(offset_size, length_size)?)
+    }
+
+    /// Reads the continuation address and length using validated file-format widths.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::UnexpectedEof`] if `body` ends inside a field, and
+    /// [`FormatError::UndefinedContinuationAddress`] if the address is the undefined address.
+    pub fn parse_with_widths(body: &[u8], widths: FormatWidths) -> Result<Self, FormatError> {
+        let FormatWidths { offsets, lengths } = widths;
         Ok(Self {
             address: bytes::read_optional_offset_width(body, 0, offsets)?
                 .map(StoredAddress::new)

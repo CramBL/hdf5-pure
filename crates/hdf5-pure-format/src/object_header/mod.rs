@@ -11,6 +11,7 @@ use crate::error::FormatError;
 use crate::message_flags::MessageFlags;
 use crate::message_type::MessageType;
 use crate::metadata_source::MetadataSource;
+use crate::width::FormatWidths;
 
 mod v1;
 mod v2;
@@ -28,8 +29,7 @@ pub use v2::continuation_block_messages;
 #[derive(Clone, Copy)]
 struct ParseContext {
     access_mode: AccessMode,
-    offset_size: u8,
-    length_size: u8,
+    widths: FormatWidths,
     base_address: BaseAddress,
 }
 
@@ -123,13 +123,9 @@ impl ObjectHeader {
     ///
     /// # Errors
     ///
-    /// Returns [`FormatError::UnsupportedMessage`] if a message record holds a type
-    /// this parser cannot name and [`MessageFlags::must_be_understood`] returns
-    /// `true` for `access_mode`.
-    ///
-    /// Returns [`FormatError::UnexpectedEof`] if a continuation message of a version 2 header
-    /// ends inside its fields, and [`FormatError::UndefinedContinuationAddress`] if one stores
-    /// the undefined address.
+    /// Returns [`FormatError::InvalidOffsetSize`] or [`FormatError::InvalidLengthSize`] if a
+    /// width is not 2, 4, or 8, and otherwise the errors
+    /// [`parse_with_widths`](Self::parse_with_widths) returns.
     pub fn parse(
         data: &[u8],
         access_mode: AccessMode,
@@ -137,14 +133,32 @@ impl ObjectHeader {
         offset_size: u8,
         length_size: u8,
     ) -> Result<ObjectHeader, FormatError> {
-        Self::parse_with_base(
+        Self::parse_with_widths(
             data,
             access_mode,
             offset,
-            offset_size,
-            length_size,
-            BaseAddress::ZERO,
+            FormatWidths::from_sizes(offset_size, length_size)?,
         )
+    }
+
+    /// Uses file-format widths validated by the superblock parser.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::UnsupportedMessage`] if a message record holds a type
+    /// this parser cannot name and [`MessageFlags::must_be_understood`] returns
+    /// `true` for `access_mode`.
+    ///
+    /// Returns [`FormatError::UnexpectedEof`] if a continuation message of a version 2 header
+    /// ends inside its fields, and [`FormatError::UndefinedContinuationAddress`] if one stores
+    /// the undefined address.
+    pub fn parse_with_widths(
+        data: &[u8],
+        access_mode: AccessMode,
+        offset: usize,
+        widths: FormatWidths,
+    ) -> Result<ObjectHeader, FormatError> {
+        Self::parse_with_base_and_widths(data, access_mode, offset, widths, BaseAddress::ZERO)
     }
 
     /// Parses an object header, applying `base_address` to continuation offsets.
@@ -162,7 +176,8 @@ impl ObjectHeader {
     ///
     /// # Errors
     ///
-    /// Returns the errors [`parse`](Self::parse) returns.
+    /// Returns [`FormatError::InvalidOffsetSize`] or [`FormatError::InvalidLengthSize`] if a
+    /// width is not 2, 4, or 8, and otherwise the errors [`parse`](Self::parse) returns.
     pub fn parse_with_base(
         data: &[u8],
         access_mode: AccessMode,
@@ -171,12 +186,32 @@ impl ObjectHeader {
         length_size: u8,
         base_address: BaseAddress,
     ) -> Result<ObjectHeader, FormatError> {
-        Self::parse_filtered(
+        Self::parse_with_base_and_widths(
             data,
             access_mode,
             offset,
-            offset_size,
-            length_size,
+            FormatWidths::from_sizes(offset_size, length_size)?,
+            base_address,
+        )
+    }
+
+    /// Applies `base_address` to continuation offsets using validated file-format widths.
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors [`parse_with_widths`](Self::parse_with_widths) returns.
+    pub fn parse_with_base_and_widths(
+        data: &[u8],
+        access_mode: AccessMode,
+        offset: usize,
+        widths: FormatWidths,
+        base_address: BaseAddress,
+    ) -> Result<ObjectHeader, FormatError> {
+        Self::parse_filtered_with_widths(
+            data,
+            access_mode,
+            offset,
+            widths,
             base_address,
             MessageFilter::All,
         )
@@ -191,7 +226,8 @@ impl ObjectHeader {
     ///
     /// # Errors
     ///
-    /// Returns the errors [`parse`](Self::parse) returns.
+    /// Returns [`FormatError::InvalidOffsetSize`] or [`FormatError::InvalidLengthSize`] if a
+    /// width is not 2, 4, or 8, and otherwise the errors [`parse`](Self::parse) returns.
     pub fn parse_filtered(
         data: &[u8],
         access_mode: AccessMode,
@@ -199,12 +235,34 @@ impl ObjectHeader {
         offset_size: u8,
         length_size: u8,
         base_address: BaseAddress,
+        filter: MessageFilter<'_>,
+    ) -> Result<ObjectHeader, FormatError> {
+        Self::parse_filtered_with_widths(
+            data,
+            access_mode,
+            offset,
+            FormatWidths::from_sizes(offset_size, length_size)?,
+            base_address,
+            filter,
+        )
+    }
+
+    /// Keeps only the messages `filter` names while using validated file-format widths.
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors [`parse_with_widths`](Self::parse_with_widths) returns.
+    pub fn parse_filtered_with_widths(
+        data: &[u8],
+        access_mode: AccessMode,
+        offset: usize,
+        widths: FormatWidths,
+        base_address: BaseAddress,
         mut filter: MessageFilter<'_>,
     ) -> Result<ObjectHeader, FormatError> {
         let context = ParseContext {
             access_mode,
-            offset_size,
-            length_size,
+            widths,
             base_address,
         };
         ensure_len(data, offset, 4)?;
@@ -225,8 +283,9 @@ impl ObjectHeader {
     ///
     /// # Errors
     ///
-    /// Returns the errors [`parse`](Self::parse) returns, and the error `source` returns if a read
-    /// fails.
+    /// Returns [`FormatError::InvalidOffsetSize`] or [`FormatError::InvalidLengthSize`] if a
+    /// width is not 2, 4, or 8, and otherwise the errors [`parse`](Self::parse) returns and the
+    /// error `source` returns if a read fails.
     pub fn parse_from_source<S: MetadataSource + ?Sized>(
         source: &S,
         access_mode: AccessMode,
@@ -235,12 +294,33 @@ impl ObjectHeader {
         length_size: u8,
         base_address: BaseAddress,
     ) -> Result<ObjectHeader, FormatError> {
-        Self::parse_from_source_filtered(
+        Self::parse_from_source_with_widths(
             source,
             access_mode,
             address,
-            offset_size,
-            length_size,
+            FormatWidths::from_sizes(offset_size, length_size)?,
+            base_address,
+        )
+    }
+
+    /// Reads an object header through a [`MetadataSource`] using validated file-format widths.
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors [`parse_with_widths`](Self::parse_with_widths) returns and the error
+    /// `source` returns if a read fails.
+    pub fn parse_from_source_with_widths<S: MetadataSource + ?Sized>(
+        source: &S,
+        access_mode: AccessMode,
+        address: u64,
+        widths: FormatWidths,
+        base_address: BaseAddress,
+    ) -> Result<ObjectHeader, FormatError> {
+        Self::parse_from_source_filtered_with_widths(
+            source,
+            access_mode,
+            address,
+            widths,
             base_address,
             MessageFilter::All,
         )
@@ -252,8 +332,9 @@ impl ObjectHeader {
     ///
     /// # Errors
     ///
-    /// Returns the errors [`parse`](Self::parse) returns, and the error `source` returns if a read
-    /// fails.
+    /// Returns [`FormatError::InvalidOffsetSize`] or [`FormatError::InvalidLengthSize`] if a
+    /// width is not 2, 4, or 8, and otherwise the errors [`parse`](Self::parse) returns and the
+    /// error `source` returns if a read fails.
     pub fn parse_from_source_filtered<S: MetadataSource + ?Sized>(
         source: &S,
         access_mode: AccessMode,
@@ -261,12 +342,35 @@ impl ObjectHeader {
         offset_size: u8,
         length_size: u8,
         base_address: BaseAddress,
+        filter: MessageFilter<'_>,
+    ) -> Result<ObjectHeader, FormatError> {
+        Self::parse_from_source_filtered_with_widths(
+            source,
+            access_mode,
+            address,
+            FormatWidths::from_sizes(offset_size, length_size)?,
+            base_address,
+            filter,
+        )
+    }
+
+    /// Filters an object header read through a [`MetadataSource`] using validated format widths.
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors [`parse_with_widths`](Self::parse_with_widths) returns and the error
+    /// `source` returns if a read fails.
+    pub fn parse_from_source_filtered_with_widths<S: MetadataSource + ?Sized>(
+        source: &S,
+        access_mode: AccessMode,
+        address: u64,
+        widths: FormatWidths,
+        base_address: BaseAddress,
         mut filter: MessageFilter<'_>,
     ) -> Result<ObjectHeader, FormatError> {
         let context = ParseContext {
             access_mode,
-            offset_size,
-            length_size,
+            widths,
             base_address,
         };
         let mut sig = [0u8; 4];
@@ -290,6 +394,9 @@ mod tests {
         Message, MessageFlags as RecordFlags, MessageType as RecordType,
     };
     use test_util::widths::Widths;
+
+    use crate::width::LengthWidth;
+    use crate::width::OffsetWidth;
 
     /// A chunk of only Nil padding reserves nothing.
     ///
@@ -583,22 +690,45 @@ mod tests {
         assert_eq!(parse(&data).unwrap().messages.len(), 1);
     }
 
-    #[test]
-    fn parse_v2_continuation() {
+    #[rstest]
+    #[case::eight_byte_widths(OffsetWidth::Eight, LengthWidth::Eight)]
+    #[case::mixed_widths(OffsetWidth::Two, LengthWidth::Four)]
+    fn parse_v2_continuation(#[case] offset_width: OffsetWidth, #[case] length_width: LengthWidth) {
+        let widths = FormatWidths {
+            offsets: offset_width,
+            lengths: length_width,
+        };
+        let encoded_widths = Widths::new(
+            usize::from(offset_width.get()),
+            usize::from(length_width.get()),
+        );
         let continuation = v2_continuation(&[0xDE, 0xAD]);
         let mut image = Image::starting_with(
             &v2_bytes::Header::new()
                 .message(Message::new(RecordType::DATASPACE, &[42]))
-                .continuation(CONTINUATION_OFFSET, &continuation, WIDTHS)
+                .continuation(CONTINUATION_OFFSET, &continuation, encoded_widths)
                 .build(),
         );
         image.place(CONTINUATION_OFFSET, &continuation);
         let data = image.build();
-        let header = parse(&data).unwrap();
+        let header =
+            ObjectHeader::parse_with_widths(&data, AccessMode::ReadOnly, 0, widths).unwrap();
+
+        let streamed = ObjectHeader::parse_from_source_with_widths(
+            data.as_slice(),
+            AccessMode::ReadOnly,
+            0,
+            widths,
+            BaseAddress::ZERO,
+        )
+        .unwrap();
 
         assert_eq!(header.messages.len(), 2);
         assert_eq!(header.messages[0].msg_type, MessageType::DATASPACE);
         assert_message(&header.messages[1], MessageType::DATATYPE, &[0xDE, 0xAD]);
+        assert_eq!(streamed.messages.len(), 2);
+        assert_eq!(streamed.messages[0].msg_type, MessageType::DATASPACE);
+        assert_message(&streamed.messages[1], MessageType::DATATYPE, &[0xDE, 0xAD]);
     }
 
     #[rstest]

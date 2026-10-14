@@ -153,10 +153,9 @@ impl<'a> ChunkRecord<'a> {
                 // The address is not narrowed here, so that a parse through a
                 // `MetadataSource` can read a continuation block past 4 GiB on a
                 // 32-bit host.
-                Self::Continuation(ObjectHeaderContinuation::parse(
+                Self::Continuation(ObjectHeaderContinuation::parse_with_widths(
                     record.body,
-                    context.offset_size,
-                    context.length_size,
+                    context.widths,
                 )?)
             }
             _ => Self::Message(record),
