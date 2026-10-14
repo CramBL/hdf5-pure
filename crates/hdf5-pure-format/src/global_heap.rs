@@ -610,6 +610,8 @@ const MIN_COLLECTION_SIZE: usize = 4096;
 #[cfg(test)]
 mod tests {
     use rstest::rstest;
+    use test_util::global_heap;
+    use test_util::widths::Widths;
 
     use super::*;
 
@@ -732,26 +734,11 @@ mod tests {
     /// Returns a collection of `size` bytes that holds `objects`, each at its index with a
     /// reference count of 1, and a free space object where the tail has room for its header.
     fn padded_collection(lengths: LengthWidth, size: usize, objects: &[(u16, &[u8])]) -> Vec<u8> {
-        let mut bytes = GCOL_SIGNATURE.to_vec();
-        bytes.extend_from_slice(&[GCOL_VERSION, 0, 0, 0]);
-        bytes::write_length(&mut bytes, size as u64, lengths);
-        bytes.resize(16, 0);
-        for &(index, data) in objects {
-            let start = bytes.len();
-            bytes.extend_from_slice(&index.to_le_bytes());
-            bytes.extend_from_slice(&[1, 0, 0, 0, 0, 0]);
-            bytes::write_length(&mut bytes, data.len() as u64, lengths);
-            bytes.resize(start + 16, 0);
-            bytes.extend_from_slice(data);
-            bytes.resize(bytes.len().next_multiple_of(ALIGNMENT), 0);
-        }
-        if size - bytes.len() >= 16 {
-            let free_space = (size - bytes.len()) as u64;
-            bytes.extend_from_slice(&[0; 8]);
-            bytes::write_length(&mut bytes, free_space, lengths);
-        }
-        bytes.resize(size, 0);
-        bytes
+        let objects: Vec<_> = objects
+            .iter()
+            .map(|&(index, data)| global_heap::Object::new(index, data))
+            .collect();
+        global_heap::collection_of_size(&objects, Widths::new(8, usize::from(lengths.get())), size)
     }
 
     #[rstest]
