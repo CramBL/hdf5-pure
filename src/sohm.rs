@@ -5,9 +5,11 @@
 use alloc::vec::Vec;
 
 use hdf5_pure_format::__private::FractalHeapIdLayout;
+#[cfg(any(feature = "std", test))]
 pub use hdf5_pure_format::__private::SharedMessageTableMessage;
 pub use hdf5_pure_format::__private::SohmIndexHeader;
 use hdf5_pure_format::__private::SohmIndexKind;
+#[cfg(any(feature = "std", test))]
 pub use hdf5_pure_format::__private::SohmLocation;
 pub use hdf5_pure_format::__private::SohmRecord;
 pub use hdf5_pure_format::__private::SohmTable;

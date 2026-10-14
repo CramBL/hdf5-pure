@@ -28,7 +28,7 @@ _default:
 ci-essentials: fmt-check clippy-full doc test-full doctest-full
 
 # Broad local validation gate. GitHub Actions additionally runs CI-specific matrix and cross-target checks.
-ci-local: nightly ci-essentials docs-rs check-release examples portability::default hygiene::default python::default prose::default api::default soundness::default interop::default test doctest
+ci-local: nightly ci-essentials clippy-feature-powerset clippy-no-std-feature-powerset docs-rs check-release examples portability::default hygiene::default python::default prose::default api::default soundness::default interop::default test doctest
 
 # Nextest over every workspace crate but the crosschecks, with `ARGS`.
 test *ARGS:
@@ -68,6 +68,14 @@ clippy *ARGS:
 # The same with the facade's full-public features, as CI and the agent gates run it.
 clippy-full *ARGS:
     cargo clippy --locked {{ WORKSPACE }} {{ FULL_PUBLIC }} --all-targets {{ ARGS }} -- -D warnings
+
+# Pairwise Clippy over the facade's public features with defaults and dev-dependencies disabled.
+clippy-feature-powerset *ARGS:
+    cargo hack clippy -p hdf5-pure --feature-powerset --depth 2 --include-features {{ PUBLIC_FEATURES }} --exclude-features default --no-dev-deps --lib {{ ARGS }} -- -D warnings
+
+# Full Clippy coverage of public feature combinations that remain `no_std` on bare metal.
+clippy-no-std-feature-powerset *ARGS:
+    cargo hack clippy -p hdf5-pure --target thumbv7em-none-eabi --feature-powerset --include-features {{ NO_STD_PUBLIC_FEATURES }} --exclude-features default --no-dev-deps --lib {{ ARGS }} -- -D warnings
 
 # The published crates' documentation, then the same with the private items contributors read.
 doc *ARGS:
