@@ -234,8 +234,7 @@ impl WriteEngine {
                 base: self.addresses.effective_base(),
             },
             &attr_info,
-            OFFSET_SIZE,
-            LENGTH_SIZE,
+            crate::file_writer::WIDTHS,
         )
         .ok()?;
         self.dense_storage_spans(header_spans, heap_address, &index)
@@ -328,22 +327,23 @@ impl WriteEngine {
     /// the free class [`fractal_heap_free_spans`] gives it.
     ///
     /// Returns `None` if
-    /// [`collect_fractal_heap_storage_from_source`](fractal_heap_storage::collect_fractal_heap_storage_from_source)
+    /// [`collect_fractal_heap_storage_from_source_with_widths`](
+    ///     fractal_heap_storage::collect_fractal_heap_storage_from_source_with_widths
+    /// )
     /// cannot prove the heap's ownership, as for a filtered heap or invalid manager metadata.
     fn fractal_heap_spans(
         &self,
         heap_address: StoredAddress,
     ) -> Option<Vec<(u64, u64, FreeClass)>> {
         let base = self.addresses;
-        let storage = fractal_heap_storage::collect_fractal_heap_storage_from_source(
+        let storage = fractal_heap_storage::collect_fractal_heap_storage_from_source_with_widths(
             &BaseOffsetSource {
                 inner: &self.image(),
                 base: base.effective_base(),
             },
             self.addresses,
             heap_address,
-            OFFSET_SIZE,
-            LENGTH_SIZE,
+            crate::file_writer::WIDTHS,
         )
         .ok()?;
         let allocations: Vec<_> = storage
@@ -616,7 +616,7 @@ impl WriteEngine {
         }
         let link_info = link_info?;
         let heap_address = link_info.fractal_heap_address?;
-        let entries = crate::group_v2::resolve_dense_entries_from_source(
+        let entries = crate::group_v2::resolve_dense_entries_from_source_with_widths(
             &BaseOffsetSource {
                 inner: &self.image(),
                 base: self.addresses.effective_base(),
@@ -625,8 +625,7 @@ impl WriteEngine {
             self.addresses,
             &link_info,
             heap_address,
-            OFFSET_SIZE,
-            LENGTH_SIZE,
+            crate::file_writer::WIDTHS,
         )
         .ok()?;
         Some((
@@ -1112,11 +1111,10 @@ impl WriteEngine {
                 inner: &self.image(),
                 base: self.addresses.effective_base(),
             };
-            let index = crate::group_v2::collect_dense_group_index_storage_extents(
+            let index = crate::group_v2::collect_dense_group_index_storage_extents_with_widths(
                 &source,
                 &info,
-                OFFSET_SIZE,
-                LENGTH_SIZE,
+                crate::file_writer::WIDTHS,
             )?;
             metadata.extend(
                 self.absolute_owned_spans(
@@ -1126,14 +1124,13 @@ impl WriteEngine {
             if !self.collect_owned_heap(heap, metadata)? {
                 return Ok(false);
             }
-            let entries = crate::group_v2::resolve_dense_entries_from_source(
+            let entries = crate::group_v2::resolve_dense_entries_from_source_with_widths(
                 &source,
                 AccessMode::ReadWrite,
                 self.addresses,
                 &info,
                 heap,
-                OFFSET_SIZE,
-                LENGTH_SIZE,
+                crate::file_writer::WIDTHS,
             )?;
             for entry in entries {
                 child(self.addresses.absolute(entry.object_header_address)?);
@@ -1167,8 +1164,7 @@ impl WriteEngine {
             let index = crate::attribute::collect_dense_attribute_index_storage_extents(
                 &source,
                 &info,
-                OFFSET_SIZE,
-                LENGTH_SIZE,
+                crate::file_writer::WIDTHS,
             )?;
             metadata.extend(
                 self.absolute_owned_spans(
@@ -1185,8 +1181,7 @@ impl WriteEngine {
                 self.addresses,
                 &info,
                 heap,
-                OFFSET_SIZE,
-                LENGTH_SIZE,
+                crate::file_writer::WIDTHS,
                 |flags| {
                     shared_records |= flags.is_shared();
                     !flags.is_shared()
@@ -1231,25 +1226,27 @@ impl WriteEngine {
         heap: StoredAddress,
         metadata: &mut Vec<(u64, u64)>,
     ) -> Result<bool, Error> {
-        let storage = match fractal_heap_storage::collect_fractal_heap_storage_from_source(
-            &BaseOffsetSource {
-                inner: &self.image(),
-                base: self.addresses.effective_base(),
-            },
-            self.addresses,
-            heap,
-            OFFSET_SIZE,
-            LENGTH_SIZE,
-        ) {
-            Ok(storage) => storage,
-            Err(FractalHeapStorageError::UnsupportedOwnership(_)) => return Ok(false),
-            Err(FractalHeapStorageError::Format(error)) => return Err(error.into()),
-            Err(FractalHeapStorageError::Layout(_) | FractalHeapStorageError::InvalidStorage) => {
-                return Err(Error::InvalidFractalHeapStorage {
-                    address: heap.get(),
-                });
-            }
-        };
+        let storage =
+            match fractal_heap_storage::collect_fractal_heap_storage_from_source_with_widths(
+                &BaseOffsetSource {
+                    inner: &self.image(),
+                    base: self.addresses.effective_base(),
+                },
+                self.addresses,
+                heap,
+                crate::file_writer::WIDTHS,
+            ) {
+                Ok(storage) => storage,
+                Err(FractalHeapStorageError::UnsupportedOwnership(_)) => return Ok(false),
+                Err(FractalHeapStorageError::Format(error)) => return Err(error.into()),
+                Err(
+                    FractalHeapStorageError::Layout(_) | FractalHeapStorageError::InvalidStorage,
+                ) => {
+                    return Err(Error::InvalidFractalHeapStorage {
+                        address: heap.get(),
+                    });
+                }
+            };
         for &(extent, _) in storage.allocations() {
             metadata.push((
                 self.addresses

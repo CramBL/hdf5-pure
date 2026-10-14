@@ -31,6 +31,7 @@ use crate::error::FormatError;
 use crate::message_type::MessageType;
 use crate::metadata_source::MetadataSource;
 use crate::shared_message::FHEAP_ID_LEN;
+use crate::width::OffsetWidth;
 
 /// The signature of the master table, `H5SM_TABLE_MAGIC`.
 const TABLE_SIGNATURE: &[u8; 4] = b"SMTB";
@@ -102,13 +103,27 @@ impl SharedMessageTableMessage {
     /// [`FormatError::InvalidOffsetSize`] if `offset_size` is not 2, 4, or 8, and
     /// [`FormatError::InvalidSohmIndexCount`] if the number of indexes is 0 or above 8.
     pub fn parse(data: &[u8], offset_size: u8) -> Result<Self, FormatError> {
+        Self::parse_with_offset_width(data, OffsetWidth::try_from(offset_size)?)
+    }
+
+    /// Parses the body of a Shared Message Table message using a validated address width.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::InvalidSohmTableVersion`] if the version is not 0,
+    /// [`FormatError::UnexpectedEof`] if the body ends before the number of indexes, and
+    /// [`FormatError::InvalidSohmIndexCount`] if the number of indexes is 0 or above 8.
+    pub fn parse_with_offset_width(
+        data: &[u8],
+        offset_width: OffsetWidth,
+    ) -> Result<Self, FormatError> {
         bytes::ensure_len(data, 0, 1)?;
         let version = data[0];
         if version != SOHM_VERSION {
             return Err(FormatError::InvalidSohmTableVersion(version));
         }
-        let table_address = StoredAddress::new(bytes::read_offset(data, 1, offset_size)?);
-        let pos = 1 + offset_size as usize;
+        let table_address = StoredAddress::new(bytes::read_offset_width(data, 1, offset_width)?);
+        let pos = 1 + usize::from(offset_width.get());
         bytes::ensure_len(data, pos, 1)?;
         let index_count = data[pos];
         if index_count == 0 || index_count > MAX_INDEXES {
@@ -192,13 +207,13 @@ pub struct SohmTable {
 }
 
 /// Returns the size in bytes of one index header.
-fn index_header_len(offset_size: u8) -> usize {
-    INDEX_HEADER_FIXED_LEN + 2 * offset_size as usize
+fn index_header_len(offset_width: OffsetWidth) -> usize {
+    INDEX_HEADER_FIXED_LEN + 2 * usize::from(offset_width.get())
 }
 
 /// Returns the size in bytes of a master table of `index_count` indexes.
-fn table_len(index_count: u8, offset_size: u8) -> usize {
-    TABLE_FIXED_LEN + index_count as usize * index_header_len(offset_size)
+fn table_len(index_count: u8, offset_width: OffsetWidth) -> usize {
+    TABLE_FIXED_LEN + index_count as usize * index_header_len(offset_width)
 }
 
 /// Returns the size in bytes of one record of a shared message index.
@@ -206,7 +221,18 @@ fn table_len(index_count: u8, offset_size: u8) -> usize {
 /// A record has one of two shapes, and a list gives every record the size of the wider shape,
 /// `H5SM_SOHM_ENTRY_SIZE`.
 pub(crate) fn sohm_record_len(offset_size: u8) -> usize {
-    let object_header_location = 1 + 1 + 2 + offset_size as usize;
+    match OffsetWidth::try_from(offset_size) {
+        Ok(offset_width) => sohm_record_len_with_offset_width(offset_width),
+        Err(_) => {
+            let object_header_location = 1 + 1 + 2 + offset_size as usize;
+            RECORD_PREFIX_LEN + HEAP_LOCATION_LEN.max(object_header_location)
+        }
+    }
+}
+
+/// Returns the size in bytes of one shared-message index record using a validated address width.
+pub(crate) fn sohm_record_len_with_offset_width(offset_width: OffsetWidth) -> usize {
+    let object_header_location = 1 + 1 + 2 + usize::from(offset_width.get());
     RECORD_PREFIX_LEN + HEAP_LOCATION_LEN.max(object_header_location)
 }
 
@@ -228,10 +254,23 @@ impl SohmTable {
     /// `checksum` feature, [`FormatError::ChecksumMismatch`] if the stored checksum differs from
     /// the computed one.
     pub fn parse(image: &[u8], index_count: u8, offset_size: u8) -> Result<Self, FormatError> {
+        Self::parse_with_offset_width(image, index_count, OffsetWidth::try_from(offset_size)?)
+    }
+
+    /// Parses the master table using a validated address width.
+    ///
+    /// # Errors
+    ///
+    /// Returns the structural and checksum errors of [`Self::parse`].
+    pub fn parse_with_offset_width(
+        image: &[u8],
+        index_count: u8,
+        offset_width: OffsetWidth,
+    ) -> Result<Self, FormatError> {
         if index_count == 0 || index_count > MAX_INDEXES {
             return Err(FormatError::InvalidSohmIndexCount(index_count));
         }
-        let expected = table_len(index_count, offset_size);
+        let expected = table_len(index_count, offset_width);
         bytes::ensure_len(image, 0, expected)?;
         let image = &image[..expected];
         if &image[..4] != TABLE_SIGNATURE {
@@ -263,11 +302,11 @@ impl SohmTable {
             let message_count = u16::from_le_bytes([image[pos + 12], image[pos + 13]]);
             let mut at = pos + INDEX_HEADER_FIXED_LEN;
             let index_address =
-                bytes::read_optional_offset(image, at, offset_size)?.map(StoredAddress::new);
-            at += offset_size as usize;
+                bytes::read_optional_offset_width(image, at, offset_width)?.map(StoredAddress::new);
+            at += usize::from(offset_width.get());
             let heap_address =
-                bytes::read_optional_offset(image, at, offset_size)?.map(StoredAddress::new);
-            pos = at + offset_size as usize;
+                bytes::read_optional_offset_width(image, at, offset_width)?.map(StoredAddress::new);
+            pos = at + usize::from(offset_width.get());
 
             indexes.push(SohmIndexHeader {
                 message_type_flags,
@@ -296,10 +335,24 @@ impl SohmTable {
         message: &SharedMessageTableMessage,
         offset_size: u8,
     ) -> Result<Self, FormatError> {
+        Self::read_with_offset_width(file_data, message, OffsetWidth::try_from(offset_size)?)
+    }
+
+    /// Parses the master table at `message` using a validated address width.
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors [`Self::parse_with_offset_width`] returns, and
+    /// [`FormatError::ValueTooLargeForPlatform`] if the address exceeds `usize::MAX`.
+    pub fn read_with_offset_width(
+        file_data: &[u8],
+        message: &SharedMessageTableMessage,
+        offset_width: OffsetWidth,
+    ) -> Result<Self, FormatError> {
         let at = message.table_address.get().to_usize()?;
-        let len = table_len(message.index_count, offset_size);
+        let len = table_len(message.index_count, offset_width);
         bytes::ensure_len(file_data, at, len)?;
-        Self::parse(&file_data[at..at + len], message.index_count, offset_size)
+        Self::parse_with_offset_width(&file_data[at..at + len], message.index_count, offset_width)
     }
 
     /// Parses the master table at the address `message` holds, in `source`.
@@ -313,9 +366,27 @@ impl SohmTable {
         message: &SharedMessageTableMessage,
         offset_size: u8,
     ) -> Result<Self, FormatError> {
-        let len = table_len(message.index_count, offset_size);
+        Self::read_from_source_with_offset_width(
+            source,
+            message,
+            OffsetWidth::try_from(offset_size)?,
+        )
+    }
+
+    /// Parses the master table from `source` using a validated address width.
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors [`Self::parse_with_offset_width`] returns, and the error `source`
+    /// returns if a read fails.
+    pub fn read_from_source_with_offset_width(
+        source: &(impl MetadataSource + ?Sized),
+        message: &SharedMessageTableMessage,
+        offset_width: OffsetWidth,
+    ) -> Result<Self, FormatError> {
+        let len = table_len(message.index_count, offset_width);
         let image = source.read_metadata_at(message.table_address.get(), len)?;
-        Self::parse(&image, message.index_count, offset_size)
+        Self::parse_with_offset_width(&image, message.index_count, offset_width)
     }
 
     /// Returns the index that covers `message_type`, or `None` if no index covers it.
@@ -377,6 +448,19 @@ impl SohmRecord {
     /// [`FormatError::InvalidSohmRecordLocation`] if the location byte is not 0 or 1, and
     /// [`FormatError::InvalidOffsetSize`] if `offset_size` is not 2, 4, or 8.
     pub fn parse(data: &[u8], offset_size: u8) -> Result<Self, FormatError> {
+        Self::parse_with_offset_width(data, OffsetWidth::try_from(offset_size)?)
+    }
+
+    /// Parses a shared-message index record using a validated address width.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::UnexpectedEof`] if `data` ends before the fields of the record, or
+    /// [`FormatError::InvalidSohmRecordLocation`] if the location byte is not 0 or 1.
+    pub fn parse_with_offset_width(
+        data: &[u8],
+        offset_width: OffsetWidth,
+    ) -> Result<Self, FormatError> {
         bytes::ensure_len(data, 0, RECORD_PREFIX_LEN)?;
         let hash = u32::from_le_bytes([data[1], data[2], data[3], data[4]]);
         let location = match data[0] {
@@ -397,7 +481,8 @@ impl SohmRecord {
                 bytes::ensure_len(data, at, 4)?;
                 let message_type = data[at + 1];
                 let creation_index = u16::from_le_bytes([data[at + 2], data[at + 3]]);
-                let address = StoredAddress::new(bytes::read_offset(data, at + 4, offset_size)?);
+                let address =
+                    StoredAddress::new(bytes::read_offset_width(data, at + 4, offset_width)?);
                 SohmLocation::ObjectHeader {
                     message_type,
                     creation_index,
@@ -432,7 +517,20 @@ pub fn parse_sohm_list(
     message_count: u16,
     offset_size: u8,
 ) -> Result<Vec<SohmRecord>, FormatError> {
-    let stride = sohm_record_len(offset_size);
+    parse_sohm_list_with_offset_width(image, message_count, OffsetWidth::try_from(offset_size)?)
+}
+
+/// Parses a shared-message list index using a validated address width.
+///
+/// # Errors
+///
+/// Returns the list, record, and checksum errors of [`parse_sohm_list`].
+pub fn parse_sohm_list_with_offset_width(
+    image: &[u8],
+    message_count: u16,
+    offset_width: OffsetWidth,
+) -> Result<Vec<SohmRecord>, FormatError> {
+    let stride = sohm_record_len_with_offset_width(offset_width);
     let expected = LIST_FIXED_LEN + message_count as usize * stride;
     bytes::ensure_len(image, 0, expected)?;
     let image = &image[..expected];
@@ -444,7 +542,10 @@ pub fn parse_sohm_list(
     let mut records = Vec::with_capacity(message_count as usize);
     for i in 0..message_count as usize {
         let at = 4 + i * stride;
-        records.push(SohmRecord::parse(&image[at..at + stride], offset_size)?);
+        records.push(SohmRecord::parse_with_offset_width(
+            &image[at..at + stride],
+            offset_width,
+        )?);
     }
     Ok(records)
 }
@@ -453,6 +554,11 @@ pub fn parse_sohm_list(
 /// checksum included.
 pub fn sohm_list_len(message_count: u16, offset_size: u8) -> usize {
     LIST_FIXED_LEN + message_count as usize * sohm_record_len(offset_size)
+}
+
+/// Returns the size in bytes of a list index using a validated address width.
+pub fn sohm_list_len_with_offset_width(message_count: u16, offset_width: OffsetWidth) -> usize {
+    LIST_FIXED_LEN + message_count as usize * sohm_record_len_with_offset_width(offset_width)
 }
 
 #[cfg(test)]

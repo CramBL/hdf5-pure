@@ -355,8 +355,7 @@ impl WriteEngine {
             self.addresses,
             &info,
             heap,
-            OFFSET_SIZE,
-            LENGTH_SIZE,
+            self.widths(),
             |flags| {
                 shared_records |= flags.is_shared();
                 !flags.is_shared()

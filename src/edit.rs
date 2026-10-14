@@ -3446,14 +3446,12 @@ impl WriteEngine {
     /// Costs one small object-header parse per commit on a file that has a
     /// superblock extension at all, and nothing on one that does not.
     fn shared_message_table(&self) -> Result<Option<crate::sohm::SohmTable>, Error> {
-        let os = self.superblock.offset_size;
-        let offset_width = OffsetWidth::try_from(os)?;
+        let widths = self.widths;
         let rel = match self.superblock.superblock_extension_address {
-            Some(rel) if !rel.is_undefined(offset_width) => rel,
+            Some(rel) if !rel.is_undefined(widths.offsets) => rel,
             _ => return Ok(None),
         };
         let base = self.addresses;
-        let ls = self.superblock.length_size;
         // Best-effort down to here, and strict past it. A superblock extension
         // this engine cannot parse is one nothing in this crate reads a shared
         // message through either, so it is treated as a file that shares none;
@@ -3463,12 +3461,11 @@ impl WriteEngine {
         let Ok(abs) = base.absolute(rel) else {
             return Ok(None);
         };
-        let Ok(header) = ObjectHeader::parse_from_source(
+        let Ok(header) = ObjectHeader::parse_from_source_with_widths(
             &SourceMetadata(&self.image()),
             AccessMode::ReadWrite,
             abs,
-            os,
-            ls,
+            widths,
             base.effective_base(),
         ) else {
             return Ok(None);
@@ -3480,16 +3477,21 @@ impl WriteEngine {
         else {
             return Ok(None);
         };
-        let message = crate::sohm::SharedMessageTableMessage::parse(&msg.data, os)?;
+        let message = crate::sohm::SharedMessageTableMessage::parse_with_offset_width(
+            &msg.data,
+            widths.offsets,
+        )?;
         let framed = BaseOffsetSource {
             inner: self.image(),
             base: base.effective_base(),
         };
-        Ok(Some(crate::sohm::SohmTable::read_from_source(
-            &SourceMetadata(&framed),
-            &message,
-            os,
-        )?))
+        Ok(Some(
+            crate::sohm::SohmTable::read_from_source_with_offset_width(
+                &SourceMetadata(&framed),
+                &message,
+                widths.offsets,
+            )?,
+        ))
     }
 
     /// Refuse a commit that would strand a shared-message index record naming an
@@ -3502,14 +3504,12 @@ impl WriteEngine {
             return Ok(());
         };
         let base = self.addresses;
-        let os = self.superblock.offset_size;
-        let ls = self.superblock.length_size;
         let framed = BaseOffsetSource {
             inner: self.image(),
             base: base.effective_base(),
         };
         for index in &table.indexes {
-            let records = crate::sohm::read_index_records_from_source(&framed, index, os, ls)?;
+            let records = crate::sohm::read_index_records_from_source(&framed, index, self.widths)?;
             screen_shared_message_records(&records, invalidated)?;
         }
         Ok(())
@@ -7789,7 +7789,7 @@ impl WriteEngine {
                     // sharing anything on it.
                     region.push_shared(
                         MessageType::ATTRIBUTE,
-                        &modernize_shared_reference(&m.data, os, ls)?,
+                        &modernize_shared_reference(&m.data, self.widths)?,
                     );
                     continue;
                 }
@@ -12764,12 +12764,11 @@ fn read_object_attrs<S: Source + ?Sized>(
     addr: u64,
     base: AddressContext,
 ) -> Result<Vec<crate::attribute::StoredAttribute>, Error> {
-    let header = ObjectHeader::parse_from_source(
+    let header = ObjectHeader::parse_from_source_with_widths(
         &SourceMetadata(src),
         access_mode,
         addr,
-        OFFSET_SIZE,
-        LENGTH_SIZE,
+        crate::file_writer::WIDTHS,
         base.effective_base(),
     )?;
     if base.effective_base().get() > src.len() {
@@ -12790,8 +12789,7 @@ fn read_object_attrs<S: Source + ?Sized>(
         base,
         access_mode,
         &header,
-        OFFSET_SIZE,
-        LENGTH_SIZE,
+        crate::file_writer::WIDTHS,
         // No shared-message table: this engine refuses an object carrying a
         // shared attribute message before it gets here ([`SHARED_ATTRIBUTE_MESSAGE`]),
         // and resolving one silently is exactly what that refusal prevents — the
@@ -13683,15 +13681,11 @@ fn reject_foreign_dense_attrs(attrs: &[crate::attribute::AttributeMessage]) -> R
 /// datatype. The shared-message heap has no encoding before version 3, so a heap
 /// reference gets that one. Both name exactly what the version 1 reference named,
 /// so the message keeps its single copy and its reference count is unchanged.
-fn modernize_shared_reference(
-    body: &[u8],
-    offset_size: u8,
-    length_size: u8,
-) -> Result<Vec<u8>, Error> {
-    let reference = crate::shared_message::parse_shared_ref(body, offset_size, length_size)?;
+fn modernize_shared_reference(body: &[u8], widths: FormatWidths) -> Result<Vec<u8>, Error> {
+    let reference = crate::shared_message::parse_shared_ref_with_widths(body, widths)?;
     Ok(match reference.location {
         crate::shared_message::SharedLocation::ObjectHeader(addr) => {
-            crate::shared_message::encode_committed_ref(addr, OffsetWidth::try_from(offset_size)?)
+            crate::shared_message::encode_committed_ref(addr, widths.offsets)
         }
         crate::shared_message::SharedLocation::SohmHeap(id) => {
             crate::shared_message::encode_sohm_ref(&id)
@@ -13831,8 +13825,7 @@ fn screen_copied_references(
         src,
         addresses,
         AccessMode::ReadWrite,
-        OFFSET_SIZE,
-        LENGTH_SIZE,
+        crate::file_writer::WIDTHS,
         None,
     );
     let (region, dense_attrs) = match tree {
@@ -14106,6 +14099,7 @@ mod tests {
     use crate::fractal_heap_storage::FractalHeapStorageError;
     use crate::object_path::ObjectPath;
     use crate::width::LengthWidth;
+    use crate::width::OffsetWidth;
     use crate::writer::FileBuilder;
 
     #[rstest]
@@ -14719,14 +14713,14 @@ mod tests {
                 storage,
             } = dense_attribute_owner(&session, object);
             let heap_address = attribute_heap_address(&session, addr);
-            let heap = crate::fractal_heap_storage::collect_fractal_heap_storage_from_source(
-                &session.image(),
-                AddressContext::from_effective_base(BaseAddress::ZERO),
-                StoredAddress::new(heap_address),
-                OFFSET_SIZE,
-                LENGTH_SIZE,
-            )
-            .unwrap();
+            let heap =
+                crate::fractal_heap_storage::collect_fractal_heap_storage_from_source_with_widths(
+                    &session.image(),
+                    AddressContext::from_effective_base(BaseAddress::ZERO),
+                    StoredAddress::new(heap_address),
+                    crate::file_writer::WIDTHS,
+                )
+                .unwrap();
             (addr, header_spans, storage, heap_address, heap)
         };
 
@@ -14782,12 +14776,11 @@ mod tests {
             }
         };
         assert_eq!(
-            crate::fractal_heap_storage::collect_fractal_heap_storage_from_source(
+            crate::fractal_heap_storage::collect_fractal_heap_storage_from_source_with_widths(
                 &BytesSource::new(bytes.as_slice()),
                 AddressContext::from_effective_base(BaseAddress::ZERO),
                 StoredAddress::new(heap_address),
-                OFFSET_SIZE,
-                LENGTH_SIZE,
+                crate::file_writer::WIDTHS,
             ),
             Err(rejection)
         );
@@ -14977,14 +14970,14 @@ mod tests {
         let link_storage = session
             .dense_group_storage_spans(&header_spans, None, &link_info)
             .expect("the dense link storage is structurally complete");
-        let heap = crate::fractal_heap_storage::collect_fractal_heap_storage_from_source(
-            &session.image(),
-            AddressContext::from_effective_base(BaseAddress::ZERO),
-            heap_address,
-            OFFSET_SIZE,
-            LENGTH_SIZE,
-        )
-        .unwrap();
+        let heap =
+            crate::fractal_heap_storage::collect_fractal_heap_storage_from_source_with_widths(
+                &session.image(),
+                AddressContext::from_effective_base(BaseAddress::ZERO),
+                heap_address,
+                crate::file_writer::WIDTHS,
+            )
+            .unwrap();
         assert_eq!(
             heap.allocations()
                 .iter()
@@ -18117,12 +18110,15 @@ mod tests {
         v1.extend_from_slice(&0x1111u64.to_le_bytes()); // local heap address
         v1.extend_from_slice(&0x5678u64.to_le_bytes()); // object header address
 
-        let modern = modernize_shared_reference(&v1, OFFSET_SIZE, LENGTH_SIZE).unwrap();
+        let modern = modernize_shared_reference(&v1, crate::file_writer::WIDTHS).unwrap();
         assert_eq!(modern[0], 2, "the version this crate writes");
         assert_eq!(
-            crate::shared_message::parse_shared_ref(&modern, OFFSET_SIZE, LENGTH_SIZE)
-                .unwrap()
-                .location,
+            crate::shared_message::parse_shared_ref_with_widths(
+                &modern,
+                crate::file_writer::WIDTHS,
+            )
+            .unwrap()
+            .location,
             crate::shared_message::SharedLocation::ObjectHeader(StoredAddress::new(0x5678))
         );
     }
@@ -18135,7 +18131,7 @@ mod tests {
         let mut v3 = vec![3u8, 1];
         v3.extend_from_slice(&[9, 8, 7, 6, 5, 4, 3, 2]);
 
-        let modern = modernize_shared_reference(&v3, OFFSET_SIZE, LENGTH_SIZE).unwrap();
+        let modern = modernize_shared_reference(&v3, crate::file_writer::WIDTHS).unwrap();
         assert_eq!(modern, v3);
     }
 

@@ -417,8 +417,7 @@ fn scan_parsed_header<S: Source + ?Sized>(
                         &framed,
                         base,
                         AccessMode::ReadWrite,
-                        crate::file_writer::OFFSET_SIZE,
-                        crate::file_writer::LENGTH_SIZE,
+                        crate::file_writer::WIDTHS,
                         // No shared-message table: a heap-stored datatype is not
                         // followed here, and the arm below treats an unresolved
                         // one as a datatype this walk cannot read.
@@ -553,8 +552,7 @@ fn scan_object<S: Source + ?Sized>(
         &framed,
         base,
         AccessMode::ReadWrite,
-        crate::file_writer::OFFSET_SIZE,
-        crate::file_writer::LENGTH_SIZE,
+        crate::file_writer::WIDTHS,
         // No shared-message table; see the note on the other resolver in this
         // module.
         None,

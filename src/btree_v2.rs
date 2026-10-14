@@ -290,20 +290,6 @@ fn extent_in_source<S: Source + ?Sized>(
     Ok(extent)
 }
 
-/// Collects all records from a version 2 B-tree by traversing from the root.
-pub fn collect_btree_v2_records(
-    file_data: &[u8],
-    header: &BTreeV2Header,
-    offset_size: u8,
-    _length_size: u8,
-) -> Result<Vec<BTreeV2Record>, FormatError> {
-    collect_btree_v2_records_with_offset_width(
-        file_data,
-        header,
-        OffsetWidth::try_from(offset_size)?,
-    )
-}
-
 /// Returns all records from a version 2 B-tree using a validated address width.
 ///
 /// # Errors
@@ -704,11 +690,12 @@ mod tests {
     fn reads_depth_3_btree() {
         let tree = depth_3_tree();
         let header = BTreeV2Header::parse(&tree.file, 0, OFFSET_SIZE, LENGTH_SIZE).unwrap();
-        let ids: Vec<u8> = collect_btree_v2_records(&tree.file, &header, OFFSET_SIZE, LENGTH_SIZE)
-            .unwrap()
-            .iter()
-            .map(|record| record.data[0])
-            .collect();
+        let ids: Vec<u8> =
+            collect_btree_v2_records_with_offset_width(&tree.file, &header, OffsetWidth::Eight)
+                .unwrap()
+                .iter()
+                .map(|record| record.data[0])
+                .collect();
         assert_eq!(ids, (0u8..15).collect::<Vec<_>>());
 
         #[cfg(feature = "std")]
@@ -1223,7 +1210,9 @@ mod tests {
         file_data[leaf_offset..leaf_offset + leaf.len()].copy_from_slice(&leaf);
 
         let hdr = BTreeV2Header::parse(&file_data, 0, 8, 8).unwrap();
-        let records = collect_btree_v2_records(&file_data, &hdr, 8, 8).unwrap();
+        let records =
+            collect_btree_v2_records_with_offset_width(&file_data, &hdr, OffsetWidth::Eight)
+                .unwrap();
         assert_eq!(records.len(), 2);
         assert_eq!(records[0].data, rec1.to_vec());
         assert_eq!(records[1].data, rec2.to_vec());
@@ -1233,7 +1222,8 @@ mod tests {
     fn empty_tree() {
         let header = btree_v2::Header::new(5, 11, 0, 0).build(WIDTHS);
         let hdr = BTreeV2Header::parse(&header, 0, 8, 8).unwrap();
-        let records = collect_btree_v2_records(&header, &hdr, 8, 8).unwrap();
+        let records =
+            collect_btree_v2_records_with_offset_width(&header, &hdr, OffsetWidth::Eight).unwrap();
         assert!(records.is_empty());
     }
 
@@ -1272,11 +1262,12 @@ mod tests {
         file_data[leaf_offset..leaf_offset + leaf.len()].copy_from_slice(&leaf);
 
         let hdr = BTreeV2Header::parse(&file_data, 0, 8, 8).unwrap();
-        let buffered: Vec<_> = collect_btree_v2_records(&file_data, &hdr, 8, 8)
-            .unwrap()
-            .into_iter()
-            .map(|r| r.data)
-            .collect();
+        let buffered: Vec<_> =
+            collect_btree_v2_records_with_offset_width(&file_data, &hdr, OffsetWidth::Eight)
+                .unwrap()
+                .into_iter()
+                .map(|r| r.data)
+                .collect();
 
         let mem = BytesSource::new(&file_data);
         let hdr_mem = BTreeV2Header::parse_from_source(&SourceMetadata(&mem), 0, 8, 8).unwrap();
@@ -1343,8 +1334,8 @@ mod tests {
         let header = BTreeV2Header::parse(&file, 0, OFFSET_SIZE, LENGTH_SIZE).expect("header");
         assert_eq!(header.node_size, BTREE_V2_NODE_SIZE);
         assert_eq!(header.total_records, count as u64);
-        let read =
-            collect_btree_v2_records(&file, &header, OFFSET_SIZE, LENGTH_SIZE).expect("read");
+        let read = collect_btree_v2_records_with_offset_width(&file, &header, OffsetWidth::Eight)
+            .expect("read");
         let ids = read
             .iter()
             .map(|r| u64::from_le_bytes(r.data[..8].try_into().expect("8 bytes")))

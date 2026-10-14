@@ -23,7 +23,7 @@ use crate::address::BaseAddressExt;
 use crate::address::StoredAddress;
 #[cfg(test)]
 use crate::address::StoredAddressExt;
-use crate::btree_v2::{BTreeV2Header, collect_btree_v2_records_from_source};
+use crate::btree_v2::BTreeV2Header;
 use crate::error::FormatError;
 #[cfg(any(test, doc))]
 use crate::fractal_heap::FractalHeapHeader;
@@ -32,8 +32,7 @@ use crate::message_type::MessageType;
 use crate::shared_message::FHEAP_ID_LEN;
 use crate::source::Source;
 use crate::source::SourceMetadata;
-use crate::width::LengthWidth;
-use crate::width::OffsetWidth;
+use crate::width::FormatWidths;
 
 /// B-tree v2 type of a shared-message index (`H5B2_SOHM_INDEX_ID`).
 const BTREE_SOHM_INDEX_TYPE: u8 = 7;
@@ -50,31 +49,39 @@ const BTREE_SOHM_INDEX_TYPE: u8 = 7;
 pub fn read_index_records_from_source<S: Source + ?Sized>(
     source: &S,
     index: &SohmIndexHeader,
-    offset_size: u8,
-    length_size: u8,
+    widths: FormatWidths,
 ) -> Result<Vec<SohmRecord>, FormatError> {
     let Some(address) = index.index_address else {
         return Ok(Vec::new());
     };
     match index.kind {
         SohmIndexKind::List => {
-            let len = hdf5_pure_format::__private::sohm_list_len(index.message_count, offset_size);
+            let len = hdf5_pure_format::__private::sohm_list_len_with_offset_width(
+                index.message_count,
+                widths.offsets,
+            );
             let image = source.read_metadata_at(address.get(), len)?;
-            hdf5_pure_format::__private::parse_sohm_list(&image, index.message_count, offset_size)
+            hdf5_pure_format::__private::parse_sohm_list_with_offset_width(
+                &image,
+                index.message_count,
+                widths.offsets,
+            )
         }
         SohmIndexKind::BTree => {
-            let header = BTreeV2Header::parse_from_source(
+            let header = BTreeV2Header::parse_from_source_with_widths(
                 &SourceMetadata(source),
                 address.get(),
-                offset_size,
-                length_size,
+                widths,
             )?;
             check_btree_type(&header)?;
-            let records =
-                collect_btree_v2_records_from_source(source, &header, offset_size, length_size)?;
+            let records = crate::btree_v2::collect_btree_v2_records_from_source_with_offset_width(
+                source,
+                &header,
+                widths.offsets,
+            )?;
             records
                 .iter()
-                .map(|record| SohmRecord::parse(&record.data, offset_size))
+                .map(|record| SohmRecord::parse_with_offset_width(&record.data, widths.offsets))
                 .collect()
         }
     }
@@ -117,7 +124,8 @@ fn index_for_read(
 ///
 /// Returns [`FormatError::SohmIndexMissing`] if `table` has no allocated heap for `message_type`,
 /// [`FormatError::InvalidFractalHeapIdLength`] if the heap's declared ID length differs from
-/// [`FHEAP_ID_LEN`], and the errors of [`parse_header`](crate::fractal_heap::parse_header),
+/// [`FHEAP_ID_LEN`], and the errors of
+/// [`parse_header_with_widths`](crate::fractal_heap::parse_header_with_widths),
 /// [`FractalHeapIdLayout::parse`], and [`HeapObjectReader::read`] if parsing or resolution fails.
 pub fn read_heap_message(
     file_data: &[u8],
@@ -126,32 +134,14 @@ pub fn read_heap_message(
     table: &SohmTable,
     message_type: MessageType,
     heap_id: &[u8; FHEAP_ID_LEN],
-    offset_size: u8,
-    length_size: u8,
+    widths: FormatWidths,
 ) -> Result<Vec<u8>, FormatError> {
     let (_, heap_address) = index_for_read(table, message_type)?;
-    let heap = crate::fractal_heap::parse_header(
-        file_data,
-        addresses,
-        heap_address,
-        offset_size,
-        length_size,
-    )?;
-    let layout = FractalHeapIdLayout::new(
-        &heap,
-        OffsetWidth::try_from(offset_size)?,
-        LengthWidth::try_from(length_size)?,
-    );
+    let heap =
+        crate::fractal_heap::parse_header_with_widths(file_data, addresses, heap_address, widths)?;
+    let layout = FractalHeapIdLayout::new(&heap, widths.offsets, widths.lengths);
     let id = layout.parse(heap_id)?;
-    HeapObjectReader::new(
-        &heap,
-        addresses,
-        heap_address,
-        access_mode,
-        offset_size,
-        length_size,
-    )
-    .read(file_data, id)
+    HeapObjectReader::new(&heap, addresses, heap_address, access_mode, widths).read(file_data, id)
 }
 
 /// Reads the body of a message identified by an eight-byte shared-message heap ID through a
@@ -170,32 +160,19 @@ pub fn read_heap_message_from_source<S: Source + ?Sized>(
     table: &SohmTable,
     message_type: MessageType,
     heap_id: &[u8; FHEAP_ID_LEN],
-    offset_size: u8,
-    length_size: u8,
+    widths: FormatWidths,
 ) -> Result<Vec<u8>, FormatError> {
     let (_, heap_address) = index_for_read(table, message_type)?;
-    let heap = crate::fractal_heap::read_header_from_source(
+    let heap = crate::fractal_heap::read_header_from_source_with_widths(
         source,
         addresses,
         heap_address,
-        offset_size,
-        length_size,
+        widths,
     )?;
-    let layout = FractalHeapIdLayout::new(
-        &heap,
-        OffsetWidth::try_from(offset_size)?,
-        LengthWidth::try_from(length_size)?,
-    );
+    let layout = FractalHeapIdLayout::new(&heap, widths.offsets, widths.lengths);
     let id = layout.parse(heap_id)?;
-    HeapObjectReader::new(
-        &heap,
-        addresses,
-        heap_address,
-        access_mode,
-        offset_size,
-        length_size,
-    )
-    .read_from_source(source, id)
+    HeapObjectReader::new(&heap, addresses, heap_address, access_mode, widths)
+        .read_from_source(source, id)
 }
 
 #[cfg(test)]
@@ -206,8 +183,14 @@ mod tests {
     use test_util::widths::Widths;
 
     use crate::source::BytesSource;
+    use crate::width::{LengthWidth, OffsetWidth};
 
     use super::*;
+
+    const FORMAT_WIDTHS: FormatWidths = FormatWidths {
+        offsets: OffsetWidth::Eight,
+        lengths: LengthWidth::Eight,
+    };
 
     #[rstest]
     #[case::buffered_long(false, 9)]
@@ -249,7 +232,7 @@ mod tests {
         };
         let empty = crate::source::BytesSource::new(Vec::new());
         assert!(
-            read_index_records_from_source(&empty, &index, 8, 8)
+            read_index_records_from_source(&empty, &index, FORMAT_WIDTHS)
                 .unwrap()
                 .is_empty()
         );
@@ -277,7 +260,7 @@ mod tests {
         };
 
         let source = crate::source::BytesSource::new(image);
-        let records = read_index_records_from_source(&source, &index, 8, 8).unwrap();
+        let records = read_index_records_from_source(&source, &index, FORMAT_WIDTHS).unwrap();
         assert_eq!(
             records[0].location,
             SohmLocation::Heap {
@@ -363,8 +346,7 @@ mod tests {
                 &table,
                 MessageType::DATATYPE,
                 &id,
-                8,
-                8,
+                FORMAT_WIDTHS,
             )
         } else {
             read_heap_message(
@@ -374,8 +356,7 @@ mod tests {
                 &table,
                 MessageType::DATATYPE,
                 &id,
-                8,
-                8,
+                FORMAT_WIDTHS,
             )
         }
     }

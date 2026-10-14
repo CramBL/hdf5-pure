@@ -66,6 +66,27 @@ pub(crate) fn collect_dense_group_index_storage_extents<S: Source + ?Sized>(
     offset_size: u8,
     length_size: u8,
 ) -> Result<Vec<Extent>, FormatError> {
+    collect_dense_group_index_storage_extents_with_widths(
+        source,
+        link_info,
+        FormatWidths::from_sizes(offset_size, length_size)?,
+    )
+}
+
+/// Returns the version 2 B-tree allocations owned by a dense group's link set using validated
+/// file widths.
+///
+/// # Errors
+///
+/// Returns [`FormatError::InvalidBTreeNodeType`] if either index has the wrong client type. Returns
+/// the structural error from the version 2 B-tree storage walker if an index cannot be enumerated
+/// completely. Returns [`FormatError::InvalidBTreeV2Signature`] if the two indexes overlap or an
+/// index allocation contains the fractal-heap header address.
+pub(crate) fn collect_dense_group_index_storage_extents_with_widths<S: Source + ?Sized>(
+    source: &S,
+    link_info: &LinkInfoMessage,
+    widths: FormatWidths,
+) -> Result<Vec<Extent>, FormatError> {
     let Some(fractal_heap_address) = link_info.fractal_heap_address else {
         return Ok(Vec::new());
     };
@@ -78,12 +99,11 @@ pub(crate) fn collect_dense_group_index_storage_extents<S: Source + ?Sized>(
     if let Some(Some(address)) = link_info.btree_creation_order_address {
         indexes.push(DenseIndex::new(address, BTREE_V2_LINK_CREATION_ORDER));
     }
-    dense_storage::collect_dense_index_storage_extents(
+    dense_storage::collect_dense_index_storage_extents_with_widths(
         source,
         fractal_heap_address,
         indexes,
-        offset_size,
-        length_size,
+        widths,
     )
 }
 
@@ -388,13 +408,7 @@ fn resolve_dense_entries_with_widths(
     widths: FormatWidths,
 ) -> Result<Vec<GroupEntry>, FormatError> {
     // Parse fractal heap
-    let fh = crate::fractal_heap::parse_header(
-        file_data,
-        addresses,
-        fh_addr,
-        widths.offsets.get(),
-        widths.lengths.get(),
-    )?;
+    let fh = crate::fractal_heap::parse_header_with_widths(file_data, addresses, fh_addr, widths)?;
 
     // Parse B-tree v2 for name index
     let btree_addr = link_info
@@ -406,14 +420,7 @@ fn resolve_dense_entries_with_widths(
         collect_btree_v2_records_with_offset_width(file_data, &btree_hdr, widths.offsets)?;
 
     let layout = FractalHeapIdLayout::new(&fh, widths.offsets, widths.lengths);
-    let mut heap = HeapObjectReader::new(
-        &fh,
-        addresses,
-        fh_addr,
-        access_mode,
-        widths.offsets.get(),
-        widths.lengths.get(),
-    );
+    let mut heap = HeapObjectReader::new(&fh, addresses, fh_addr, access_mode, widths);
     let mut entries = Vec::new();
     for record in &records {
         let Some(id_bytes) = record.link_heap_id(btree_hdr.tree_type, fh.heap_id_length) else {
@@ -756,34 +763,6 @@ fn resolve_v2_group_entries_from_source<S: Source + ?Sized>(
     }
 }
 
-/// Returns one entry per hard link in dense group storage read from `source`.
-///
-/// `source` is framed at the effective file base in `addresses`.
-///
-/// # Errors
-///
-/// Returns [`FormatError::InvalidOffsetSize`] or [`FormatError::InvalidLengthSize`] if a width is
-/// invalid, [`FormatError::PathNotFound`] if the group has no B-tree name index address, and the
-/// [`FormatError`] of the first structure that does not parse or cannot be read from `source`.
-pub(crate) fn resolve_dense_entries_from_source<S: Source + ?Sized>(
-    source: &S,
-    access_mode: AccessMode,
-    addresses: AddressContext,
-    link_info: &LinkInfoMessage,
-    fh_addr: StoredAddress,
-    offset_size: u8,
-    length_size: u8,
-) -> Result<Vec<GroupEntry>, FormatError> {
-    resolve_dense_entries_from_source_with_widths(
-        source,
-        access_mode,
-        addresses,
-        link_info,
-        fh_addr,
-        FormatWidths::from_sizes(offset_size, length_size)?,
-    )
-}
-
 /// Returns dense group entries from `source` using validated file widths.
 ///
 /// # Errors
@@ -798,12 +777,8 @@ pub(crate) fn resolve_dense_entries_from_source_with_widths<S: Source + ?Sized>(
     fh_addr: StoredAddress,
     widths: FormatWidths,
 ) -> Result<Vec<GroupEntry>, FormatError> {
-    let fh = crate::fractal_heap::read_header_from_source(
-        source,
-        addresses,
-        fh_addr,
-        widths.offsets.get(),
-        widths.lengths.get(),
+    let fh = crate::fractal_heap::read_header_from_source_with_widths(
+        source, addresses, fh_addr, widths,
     )?;
 
     let btree_addr = link_info
@@ -818,14 +793,7 @@ pub(crate) fn resolve_dense_entries_from_source_with_widths<S: Source + ?Sized>(
         collect_btree_v2_records_from_source_with_offset_width(source, &btree_hdr, widths.offsets)?;
 
     let layout = FractalHeapIdLayout::new(&fh, widths.offsets, widths.lengths);
-    let mut heap = HeapObjectReader::new(
-        &fh,
-        addresses,
-        fh_addr,
-        access_mode,
-        widths.offsets.get(),
-        widths.lengths.get(),
-    );
+    let mut heap = HeapObjectReader::new(&fh, addresses, fh_addr, access_mode, widths);
     let mut entries = Vec::new();
     for record in &records {
         let Some(id_bytes) = record.link_heap_id(btree_hdr.tree_type, fh.heap_id_length) else {
@@ -1538,14 +1506,13 @@ mod huge_link_tests {
 
         reset_huge_index_decodes();
         let source = BytesSource::new(bytes);
-        let streamed = resolve_dense_entries_from_source(
+        let streamed = resolve_dense_entries_from_source_with_widths(
             &source,
             AccessMode::ReadOnly,
             AddressContext::from_effective_base(BaseAddress::new(0)),
             &link_info,
             fh_addr,
-            offset_size,
-            length_size,
+            FormatWidths::from_sizes(offset_size, length_size).unwrap(),
         )
         .unwrap();
         assert_eq!(streamed.len(), COUNT);
