@@ -5593,8 +5593,10 @@ impl Dataset {
     /// [`with_shape`](DatasetBuilder::with_shape) and so comes through here, as
     /// do compound, complex, and raw bytes under an explicit datatype.
     ///
-    /// The replacement must match the on-disk datatype and shape exactly; a
-    /// reshape or retype is refused on [`File::commit`].
+    /// The replacement shape and datatype must match the on-disk dataset, except
+    /// that byte order is ignored for one-byte fixed-point types, including nested
+    /// base and member types. [`File::commit`] returns [`Error::EditUnsupported`]
+    /// if the datatype is incompatible or the shape differs.
     ///
     /// This overwrites element bytes and nothing else, so a builder asking for
     /// more than that is refused by **this call**, before anything is staged:

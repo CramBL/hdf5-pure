@@ -702,8 +702,8 @@ struct StagedEdits {
     datasets: Vec<(ObjectPathBuf, FlatDataset)>,
     /// Value overwrites staged by `write_dataset`, as (full dataset path,
     /// dataset). Each replaces an existing dataset's values in place; the new
-    /// datatype and shape must match the on-disk ones byte-exactly (this is a
-    /// value overwrite, not a reshape/retype). Applied on the next `commit`.
+    /// shape must match the on-disk shape, and the datatype must be compatible
+    /// under [`overwrite_datatypes_match`]. Applied on the next `commit`.
     /// Flattened at staging, for the reason given on [`datasets`](Self::datasets);
     /// the match against the on-disk dataset is a commit-time check and stays
     /// one, since it reads the file.
@@ -1157,8 +1157,8 @@ pub(crate) struct WriteEngine {
     /// load-bearing — recorded here because a reason that does not hold is worse
     /// than no reason:
     ///
-    /// - `writes` is a *value* overwrite, whose datatype must match the on-disk
-    ///   dataset's exactly. A reference-typed one therefore overwrites a dataset
+    /// - `writes` is a value overwrite, whose datatype must be compatible with
+    ///   the on-disk datatype. A reference-typed one therefore overwrites a dataset
     ///   that already held references, which a file proved free of them does not
     ///   have. Checked anyway, because that match is a commit-time check running
     ///   after this one, so `fd.dt` here is still whatever the caller supplied.
@@ -2919,11 +2919,11 @@ impl WriteEngine {
     /// supplies the replacement data and is named from `path`, as in
     /// [`stage_created_dataset`](Self::stage_created_dataset).
     ///
-    /// This is a *value* overwrite, not a reshape or retype: the new data's
-    /// datatype and shape must match the on-disk dataset's exactly (byte-for-byte
-    /// after serialization, so endianness and compound layout must agree), or
-    /// `commit` reports [`Error::EditUnsupported`]. Contiguous, compact, and
-    /// chunked (including filtered) datasets are all supported; the dataset's
+    /// The replacement shape must match the on-disk shape, and the datatype must
+    /// be compatible under [`overwrite_datatypes_match`], or [`Self::commit`]
+    /// returns [`Error::EditUnsupported`]. Byte order is ignored for one-byte
+    /// fixed-point types, including nested base and member types. Contiguous, compact,
+    /// and chunked (including filtered) datasets are all supported. The dataset's
     /// existing chunk geometry, filter pipeline, and chunk index are taken from the
     /// on-disk header. A chunk index this engine cannot enumerate (a version-2
     /// B-tree) is refused. Partial / sub-region writes are out of scope — the
@@ -5327,7 +5327,7 @@ impl WriteEngine {
 
         // --- Preflight value overwrites (`write_dataset`) before any write, under
         // the same all-or-nothing contract as additions. Each is resolved,
-        // validated (datatype and shape must match the on-disk dataset exactly),
+        // validated (compatible datatype and matching on-disk shape),
         // and classified: a same-length contiguous overwrite is applied straight
         // in place (no header rewrite, no superblock flip), while a resize or
         // compact rewrite relocates the header and is staged against its parent
@@ -7921,21 +7921,23 @@ impl WriteEngine {
         Ok(())
     }
 
-    /// Preflight a staged value overwrite (`write_dataset`): resolve the dataset
-    /// at `addr`, validate that the staged `fd` matches it byte-exactly in
-    /// datatype and shape, and classify how the bytes will be applied. No file
-    /// bytes are written here — this is part of the all-or-nothing preflight, so a
-    /// rejected write leaves the commit unapplied.
+    /// Checks overwrite compatibility and plans storage for the replacement values.
+    ///
+    /// The staged datatype must be compatible under [`overwrite_datatypes_match`],
+    /// and the shape must match the on-disk shape. A rejected write leaves the
+    /// commit unapplied.
     ///
     /// Contiguous, compact, and chunked (including filtered) datasets are all
-    /// supported; the chunk geometry, filter pipeline, and chunk index come from
-    /// the on-disk header (a chunk index this engine cannot enumerate — a
-    /// version-2 B-tree — is refused). A datatype or shape that differs from the
-    /// on-disk dataset's is likewise refused — this is a value overwrite, not a
-    /// reshape or retype.
+    /// supported. The chunk geometry, filter pipeline, and chunk index are read
+    /// from the on-disk header.
     ///
     /// Every refusal `fd` can decide on its own has been made by then, where the
     /// write is staged.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::EditUnsupported`] if the dataset cannot be overwritten,
+    /// the datatype is incompatible, or the shape differs.
     fn prepare_write<S: Source + ?Sized>(
         src: &S,
         addr: u64,
@@ -8002,18 +8004,10 @@ impl WriteEngine {
             dataspace.ok_or(Error::EditUnsupported("dataset header has no dataspace"))?;
         let (lb, le) = layout.ok_or(Error::EditUnsupported("dataset header has no data layout"))?;
 
-        // Compare datatype and shape structurally against the staged data. A
-        // value overwrite must keep both exactly: the datatype (including its
-        // class, size, endianness, and any compound/array/enumeration layout) so
-        // the bytes are interpreted the same, and the *current* dimensions so the
-        // byte count is unchanged. Parsing both sides and comparing the decoded
-        // values — rather than the raw message bytes — tolerates the harmless
-        // encoding differences between this crate's writer and the reference C
-        // library (e.g. the C library records a maximum-dimensions array equal to
-        // the current dimensions, which this crate omits) while still refusing any
-        // real retype or reshape.
+        // Require a compatible datatype and matching current dimensions. One-byte
+        // fixed-point types may differ in byte order, including nested types.
         let (disk_dt, _) = hdf5_pure_format::__private::parse_datatype(&region[dt_b..dt_e])?;
-        if disk_dt != fd.dt {
+        if !overwrite_datatypes_match(&disk_dt, &fd.dt) {
             return Err(Error::EditUnsupported(
                 "write_dataset datatype does not match the on-disk dataset (overwrite, not retype)",
             ));
@@ -11405,6 +11399,96 @@ fn replace_dataspace_message(
     Ok(region.with_bytes(out))
 }
 
+/// Compares datatype structure while ignoring byte order for one-byte fixed-point types.
+///
+/// Compound members and base types are compared recursively. All other fields must match.
+fn overwrite_datatypes_match(disk: &Datatype, staged: &Datatype) -> bool {
+    match (disk, staged) {
+        (
+            Datatype::FixedPoint {
+                size: 1,
+                layout: disk_layout,
+                ..
+            },
+            Datatype::FixedPoint {
+                size: 1,
+                layout: staged_layout,
+                ..
+            },
+        ) => disk_layout == staged_layout,
+        (
+            Datatype::Compound {
+                size: disk_size,
+                members: disk_members,
+            },
+            Datatype::Compound {
+                size: staged_size,
+                members: staged_members,
+            },
+        ) => {
+            disk_size == staged_size
+                && disk_members.len() == staged_members.len()
+                && disk_members
+                    .iter()
+                    .zip(staged_members)
+                    .all(|(disk, staged)| {
+                        disk.name == staged.name
+                            && disk.byte_offset == staged.byte_offset
+                            && overwrite_datatypes_match(&disk.datatype, &staged.datatype)
+                    })
+        }
+        (
+            Datatype::Enumeration {
+                size: disk_size,
+                base_type: disk_base,
+                members: disk_members,
+            },
+            Datatype::Enumeration {
+                size: staged_size,
+                base_type: staged_base,
+                members: staged_members,
+            },
+        ) => {
+            disk_size == staged_size
+                && disk_members == staged_members
+                && overwrite_datatypes_match(disk_base, staged_base)
+        }
+        (
+            Datatype::VariableLength {
+                is_string: disk_string,
+                padding: disk_padding,
+                charset: disk_charset,
+                base_type: disk_base,
+            },
+            Datatype::VariableLength {
+                is_string: staged_string,
+                padding: staged_padding,
+                charset: staged_charset,
+                base_type: staged_base,
+            },
+        ) => {
+            disk_string == staged_string
+                && disk_padding == staged_padding
+                && disk_charset == staged_charset
+                && overwrite_datatypes_match(disk_base, staged_base)
+        }
+        (
+            Datatype::Array {
+                base_type: disk_base,
+                dimensions: disk_dimensions,
+            },
+            Datatype::Array {
+                base_type: staged_base,
+                dimensions: staged_dimensions,
+            },
+        ) => {
+            disk_dimensions == staged_dimensions
+                && overwrite_datatypes_match(disk_base, staged_base)
+        }
+        _ => disk == staged,
+    }
+}
+
 /// Whether a datatype's raw on-disk bytes can be appended verbatim from a caller
 /// via [`AppendBuilder::append_raw`]. True only when every scalar leaf is safe to
 /// write as flat little-endian bytes:
@@ -14002,7 +14086,9 @@ mod tests {
 
     use super::*;
     use crate::checksum;
+    use crate::datatype::layout::FixedPointLayout;
     use crate::datatype::layout::FloatingPointLayout;
+    use crate::datatype::{CharacterSet, StringPadding};
     use crate::filter_pipeline::FilterDescription;
     use crate::fractal_heap_storage::FractalHeapAllocation;
     use crate::fractal_heap_storage::FractalHeapStorage;
@@ -14010,6 +14096,272 @@ mod tests {
     use crate::object_path::ObjectPath;
     use crate::width::LengthWidth;
     use crate::writer::FileBuilder;
+
+    #[rstest]
+    #[case::unsigned_byte(1, false, 0, 8, false, 0, 8, true)]
+    #[case::signed_byte(1, true, 0, 8, true, 0, 8, true)]
+    #[case::narrow_byte(1, false, 1, 7, false, 1, 7, true)]
+    #[case::two_bytes(2, false, 0, 16, false, 0, 16, false)]
+    #[case::four_bytes(4, false, 0, 32, false, 0, 32, false)]
+    #[case::signedness(1, false, 0, 8, true, 0, 8, false)]
+    #[case::offset(1, false, 0, 7, false, 1, 7, false)]
+    #[case::precision(1, false, 0, 8, false, 0, 7, false)]
+    fn overwrite_ignores_one_byte_order_and_requires_matching_layout(
+        #[case] size: u32,
+        #[case] disk_signed: bool,
+        #[case] disk_offset: u16,
+        #[case] disk_precision: u16,
+        #[case] staged_signed: bool,
+        #[case] staged_offset: u16,
+        #[case] staged_precision: u16,
+        #[case] compatible: bool,
+    ) {
+        let disk = Datatype::FixedPoint {
+            size,
+            byte_order: DatatypeByteOrder::BigEndian,
+            layout: FixedPointLayout {
+                signed: disk_signed,
+                bit_offset: disk_offset,
+                bit_precision: disk_precision,
+            },
+        };
+        let staged = Datatype::FixedPoint {
+            size,
+            byte_order: DatatypeByteOrder::LittleEndian,
+            layout: FixedPointLayout {
+                signed: staged_signed,
+                bit_offset: staged_offset,
+                bit_precision: staged_precision,
+            },
+        };
+        assert_ne!(disk, staged);
+        assert_eq!(overwrite_datatypes_match(&disk, &staged), compatible);
+        assert_eq!(overwrite_datatypes_match(&staged, &disk), compatible);
+    }
+
+    #[rstest]
+    #[case::array(array_type(big_endian_u8_type(), vec![2]), array_type(make_u8_type(), vec![2]), true)]
+    #[case::array_shape(array_type(big_endian_u8_type(), vec![2]), array_type(make_u8_type(), vec![1, 2]), false)]
+    #[case::compound(
+        single_member_compound_type(big_endian_u8_type(), 1, "x", 0),
+        single_member_compound_type(make_u8_type(), 1, "x", 0),
+        true
+    )]
+    #[case::compound_size(
+        single_member_compound_type(big_endian_u8_type(), 2, "x", 0),
+        single_member_compound_type(make_u8_type(), 1, "x", 0),
+        false
+    )]
+    #[case::compound_name(
+        single_member_compound_type(big_endian_u8_type(), 1, "x", 0),
+        single_member_compound_type(make_u8_type(), 1, "y", 0),
+        false
+    )]
+    #[case::compound_offset(
+        single_member_compound_type(big_endian_u8_type(), 2, "x", 1),
+        single_member_compound_type(make_u8_type(), 2, "x", 0),
+        false
+    )]
+    #[case::enum_base(
+        single_member_enumeration_type(big_endian_u8_type(), 1),
+        single_member_enumeration_type(make_u8_type(), 1),
+        true
+    )]
+    #[case::enum_value(
+        single_member_enumeration_type(big_endian_u8_type(), 1),
+        single_member_enumeration_type(make_u8_type(), 2),
+        false
+    )]
+    #[case::vlen_string(
+        variable_length_type(
+            big_endian_u8_type(),
+            true,
+            CharacterSet::Utf8,
+            StringPadding::NullTerminate
+        ),
+        variable_length_type(
+            make_u8_type(),
+            true,
+            CharacterSet::Utf8,
+            StringPadding::NullTerminate
+        ),
+        true
+    )]
+    #[case::vlen_sequence(
+        variable_length_type(
+            big_endian_u8_type(),
+            false,
+            CharacterSet::Utf8,
+            StringPadding::NullTerminate
+        ),
+        variable_length_type(
+            make_u8_type(),
+            false,
+            CharacterSet::Utf8,
+            StringPadding::NullTerminate
+        ),
+        true
+    )]
+    #[case::vlen_kind(
+        variable_length_type(
+            big_endian_u8_type(),
+            false,
+            CharacterSet::Utf8,
+            StringPadding::NullTerminate
+        ),
+        variable_length_type(
+            make_u8_type(),
+            true,
+            CharacterSet::Utf8,
+            StringPadding::NullTerminate
+        ),
+        false
+    )]
+    #[case::vlen_charset(
+        variable_length_type(
+            big_endian_u8_type(),
+            true,
+            CharacterSet::Ascii,
+            StringPadding::NullTerminate
+        ),
+        variable_length_type(
+            make_u8_type(),
+            true,
+            CharacterSet::Utf8,
+            StringPadding::NullTerminate
+        ),
+        false
+    )]
+    #[case::vlen_padding(
+        variable_length_type(
+            big_endian_u8_type(),
+            true,
+            CharacterSet::Utf8,
+            StringPadding::SpacePad
+        ),
+        variable_length_type(
+            make_u8_type(),
+            true,
+            CharacterSet::Utf8,
+            StringPadding::NullTerminate
+        ),
+        false
+    )]
+    #[case::nested(array_type(single_member_compound_type(variable_length_type(big_endian_u8_type(), true, CharacterSet::Utf8, StringPadding::NullTerminate), 16, "x", 0), vec![2]), array_type(single_member_compound_type(variable_length_type(make_u8_type(), true, CharacterSet::Utf8, StringPadding::NullTerminate), 16, "x", 0), vec![2]), true)]
+    fn overwrite_requires_matching_nested_fields_except_one_byte_order(
+        #[case] disk: Datatype,
+        #[case] staged: Datatype,
+        #[case] compatible: bool,
+    ) {
+        assert_ne!(disk, staged);
+        assert_eq!(overwrite_datatypes_match(&disk, &staged), compatible);
+        assert_eq!(overwrite_datatypes_match(&staged, &disk), compatible);
+    }
+
+    #[rstest]
+    #[case::scalar(false, false)]
+    #[case::chunked_scalar(false, true)]
+    #[case::vlen(true, false)]
+    #[case::chunked_vlen(true, true)]
+    fn overwrite_preserves_the_on_disk_one_byte_order(#[case] vlen: bool, #[case] chunked: bool) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("byte_order.h5");
+        let datatype = if vlen {
+            variable_length_type(
+                big_endian_u8_type(),
+                true,
+                CharacterSet::Utf8,
+                StringPadding::NullTerminate,
+            )
+        } else {
+            big_endian_u8_type()
+        };
+        let mut builder = FileBuilder::new();
+        let dataset = builder.create_dataset("data");
+        if vlen {
+            dataset.with_vlen_strings(&["before", "original"]);
+        } else {
+            dataset.with_u8_data(&[1, 2]);
+        }
+        dataset.with_dtype(datatype.clone());
+        if chunked {
+            dataset.with_chunks(&[1]).with_deflate(6);
+        }
+        builder.write(&path).unwrap();
+        {
+            let file = crate::File::open_rw(&path).unwrap();
+            file.dataset("data")
+                .unwrap()
+                .write_staged(|dataset| {
+                    if vlen {
+                        dataset.with_vlen_strings(&["after", "replacement"]);
+                    } else {
+                        dataset.with_u8_data(&[3, 4]);
+                    }
+                })
+                .unwrap();
+            file.commit().unwrap();
+        }
+        let file = crate::File::open(&path).unwrap();
+        let dataset = file.dataset("data").unwrap();
+        assert_eq!(dataset.datatype().unwrap(), datatype);
+        if vlen {
+            assert_eq!(dataset.read_string().unwrap(), ["after", "replacement"]);
+        } else {
+            assert_eq!(dataset.read_u8().unwrap(), [3, 4]);
+        }
+    }
+
+    fn big_endian_u8_type() -> Datatype {
+        Datatype::FixedPoint {
+            size: 1,
+            byte_order: DatatypeByteOrder::BigEndian,
+            layout: FixedPointLayout {
+                signed: false,
+                bit_offset: 0,
+                bit_precision: 8,
+            },
+        }
+    }
+
+    fn array_type(base: Datatype, dimensions: Vec<u32>) -> Datatype {
+        Datatype::Array {
+            base_type: Box::new(base),
+            dimensions,
+        }
+    }
+
+    fn single_member_compound_type(base: Datatype, size: u32, name: &str, offset: u64) -> Datatype {
+        Datatype::Compound {
+            size,
+            members: vec![crate::datatype::__private::compound_member(
+                name.into(),
+                offset,
+                base,
+            )],
+        }
+    }
+
+    fn single_member_enumeration_type(base: Datatype, value: u8) -> Datatype {
+        crate::EnumTypeBuilder::with_base(base)
+            .u8_value("x", value)
+            .build()
+            .unwrap()
+    }
+
+    fn variable_length_type(
+        base: Datatype,
+        is_string: bool,
+        charset: CharacterSet,
+        padding: StringPadding,
+    ) -> Datatype {
+        Datatype::VariableLength {
+            is_string,
+            padding: is_string.then_some(padding),
+            charset: is_string.then_some(charset),
+            base_type: Box::new(base),
+        }
+    }
 
     #[test]
     fn a_continuation_to_the_undefined_address_fails_the_chunk_walk() {
