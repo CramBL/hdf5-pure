@@ -6548,19 +6548,12 @@ impl WriteEngine {
         // (the barrier), then flip the pointer, then sync the flip.
         let new_root = path_addr[&ObjectPathBuf::root()];
 
-        // The heap collections this commit's value overwrites superseded. They
-        // join `to_free` rather than being handed to the free list here, which
-        // is what keeps them out of reach of this commit's own allocations:
-        // nothing draws on `to_free` until the commit has finished placing, so
-        // the elements naming them are still readable from the prior root for
-        // as long as that root is the live one.
-        // Freed as metadata because that is the page type they were placed as
-        // (`place_vl_collections`), which is the only claim about them this
-        // session can make from its own record.
+        // Keep superseded collections unavailable until the new root is durable. These collections
+        // were placed as raw allocations by this session, so their PAGE free-space type is known.
         to_free.extend(
             self.superseded_heaps
                 .drain(..)
-                .map(|(addr, len)| (addr, len, FreeClass::Page(PageType::Meta))),
+                .map(|(addr, len)| (addr, len, FreeClass::Page(PageType::Raw))),
         );
         // Re-run the whole-commit invariant over the set these just joined, since
         // the pass above ran before the in-place writes resolved and so never saw
@@ -9837,11 +9830,13 @@ impl WriteEngine {
     /// unlike a group or dataset header, which must be built last so it can name
     /// its children's real addresses. Each collection is placed independently,
     /// so they need not land contiguously.
+    // `H5MF_aggr_vfd_alloc` in `H5MFaggr.c`, HDF5 2.2.0, assigns `H5FD_MEM_GHEAP`
+    // to the raw-data aggregator.
     fn place_vl_collections(&mut self, collections: &[Vec<u8>]) -> Result<Vec<u64>, Error> {
         collections
             .iter()
             .map(|collection| {
-                let addr = self.alloc_or_append_typed(collection, AllocationClass::Metadata)?;
+                let addr = self.alloc_or_append_typed(collection, AllocationClass::Raw)?;
                 Ok(self.addresses.relative(addr)?.get())
             })
             .collect()
