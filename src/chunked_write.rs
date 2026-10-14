@@ -1461,11 +1461,21 @@ pub(crate) trait ByteSink {
     /// Total bytes written so far (used to assert layout addresses on a
     /// non-seekable sink).
     fn position(&self) -> u64;
-    /// Hint that `additional` more bytes are about to be written. Lets a buffered
-    /// (`Vec`) sink preallocate the whole file in one shot, as the writer did
-    /// before streaming. A no-op for sinks that do not benefit (e.g. a streaming
-    /// `Write`).
-    fn reserve(&mut self, _additional: usize) {}
+    /// Reserves capacity for additional output bytes when supported by the sink.
+    ///
+    /// Buffered sinks narrow the count when reserving memory. Streaming sinks may ignore it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::ValueTooLargeForPlatform`] if a buffered sink cannot represent the
+    /// capacity as [`usize`].
+    ///
+    /// # Panics
+    ///
+    /// A buffered sink may panic if its capacity would exceed [`isize::MAX`].
+    fn reserve(&mut self, _additional: u64) -> Result<(), FormatError> {
+        Ok(())
+    }
 }
 
 impl ByteSink for Vec<u8> {
@@ -1480,8 +1490,9 @@ impl ByteSink for Vec<u8> {
     fn position(&self) -> u64 {
         self.len() as u64
     }
-    fn reserve(&mut self, additional: usize) {
-        Vec::reserve(self, additional);
+    fn reserve(&mut self, additional: u64) -> Result<(), FormatError> {
+        Vec::reserve(self, additional.to_usize()?);
+        Ok(())
     }
 }
 
