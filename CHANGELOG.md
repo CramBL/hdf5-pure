@@ -34,6 +34,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 ### Fixed
 
 - Fixed `Dataset::read_string` and related reads of variable-length data failing on a file that stores 2- or 4-byte lengths. Reads reject a global heap collection that is smaller than 4096 bytes or malformed after the object they read ([#760](https://github.com/CramBL/hdf5-pure/pull/760)).
+- Fixed global heap collections sharing metadata pages in files created through `FileBuilder::with_file_space_strategy`. Paged edits also place replacement collections in raw pages ([763](https://github.com/CramBL/hdf5-pure/pull/763)).
 - Fixed `File::open_rw` neither reusing nor updating the free space a file with a userblock persists ([#747](https://github.com/CramBL/hdf5-pure/pull/747)).
 - Fixed a `no_std` build compiling an internal lock that lets two live guards borrow the chunk cache mutably at once ([#743](https://github.com/CramBL/hdf5-pure/pull/743)).
 - Fixed `File::commit` losing ownership of spare free-space section-list capacity after reopening a file that is not paged and reuses a persistent manager allocation ([#740](https://github.com/CramBL/hdf5-pure/pull/740)).

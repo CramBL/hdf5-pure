@@ -2515,27 +2515,106 @@ impl FileWriter {
             });
         }
 
-        // A chunked/filtered/resizable variable-length dataset's element
-        // references are split into chunks (and compressed) below, before the
-        // file layout that would normally fix its global-heap addresses. Placing
-        // those collections *first* — immediately after the superblock, at an
-        // address that depends on nothing but the userblock — makes the addresses
-        // known up front, so the references can be patched into `raw` before a
-        // single chunk is encoded. Everything else shifts down by the collections'
-        // total size, which is known here because staging serialized them
-        // already.
-        //
-        // Only a chunked dataset takes this path. A contiguous one keeps the
-        // established late placement (its element bytes stay patchable in place
-        // until emission), so a file without a chunked VL dataset is laid out
-        // byte-for-byte as before.
+        // Resolve global-heap references before encoding chunks. PAGE collections occupy raw
+        // pages between the superblock and the object headers. In an unpaged file, chunked
+        // datasets' collections follow the superblock, and other collections follow dataset data.
         let mut early_gcol: Vec<usize> = Vec::new();
-        let early_gcol_size = {
+        let mut paged_collection_addresses = Vec::new();
+        let mut collection_meta_sections = Vec::new();
+        let mut collection_raw_sections = Vec::new();
+        let mut collection_large_sections = Vec::new();
+        let early_gcol_size = if let Some((page_size, _, _)) = paged {
+            let has_collections = vl_root.iter().any(|patch| !patch.collections.is_empty())
+                || grp_vl
+                    .iter()
+                    .flatten()
+                    .any(|patch| !patch.collections.is_empty())
+                || ds_vl
+                    .iter()
+                    .flatten()
+                    .any(|patch| !patch.collections.is_empty())
+                || all_ds.iter().any(|dataset| {
+                    dataset.raw_chunks.is_none()
+                        && dataset
+                            .vl_string_staging
+                            .as_ref()
+                            .is_some_and(|staging| !staging.collections.is_empty())
+                });
+            let mut cursor = SUPERBLOCK_SIZE as u64;
+            if has_collections {
+                let start = free_space_manager::align_up(cursor, page_size);
+                if start > cursor {
+                    collection_meta_sections.push(FreeSection {
+                        addr: StoredAddress::new(cursor),
+                        size: start - cursor,
+                    });
+                }
+                cursor = start;
+            }
+            let mut place = |collections: &[Vec<u8>]| -> Result<Vec<u64>, FormatError> {
+                collections.iter().try_fold(
+                    Vec::with_capacity(collections.len()),
+                    |mut addrs, collection| {
+                        let addr = cursor;
+                        let len = collection.len() as u64;
+                        let end = cursor.checked_add(len).ok_or(FormatError::OffsetOverflow {
+                            offset: cursor,
+                            length: len,
+                        })?;
+                        let padding = (page_size.get() - end % page_size.get()) % page_size.get();
+                        cursor = end
+                            .checked_add(padding)
+                            .ok_or(FormatError::OffsetOverflow {
+                                offset: end,
+                                length: padding,
+                            })?;
+                        paged_collection_addresses.push(addr);
+                        if cursor > end {
+                            let section = FreeSection {
+                                addr: StoredAddress::new(end),
+                                size: cursor - end,
+                            };
+                            if len >= page_size.get() {
+                                collection_large_sections.push(section);
+                            } else {
+                                collection_raw_sections.push(section);
+                            }
+                        }
+                        addrs.push(addr);
+                        Ok(addrs)
+                    },
+                )
+            };
+            for patch in &vl_root {
+                let addrs = place(&patch.collections)?;
+                patch_vl_refs(&mut root_attrs[patch.attr_index].raw_data, &addrs);
+            }
+            for (gi, patches) in grp_vl.iter().enumerate() {
+                for patch in patches {
+                    let addrs = place(&patch.collections)?;
+                    patch_vl_refs(&mut groups[gi].attrs[patch.attr_index].raw_data, &addrs);
+                }
+            }
+            for (di, patches) in ds_vl.iter().enumerate() {
+                for patch in patches {
+                    let addrs = place(&patch.collections)?;
+                    patch_vl_refs(&mut all_ds[di].attrs[patch.attr_index].raw_data, &addrs);
+                }
+            }
+            for (i, dataset) in all_ds.iter_mut().enumerate() {
+                if dataset.raw_chunks.is_some() {
+                    continue;
+                }
+                if let Some(staging) = &dataset.vl_string_staging {
+                    let addrs = place(&staging.collections)?;
+                    patch_vl_refs_masked(&mut dataset.raw, &staging.patch_offsets, &addrs);
+                    early_gcol.push(i);
+                }
+            }
+            cursor - SUPERBLOCK_SIZE as u64
+        } else {
             let mut cursor = SUPERBLOCK_SIZE as u64;
             for i in 0..all_ds.len() {
-                // `raw_chunks` is excluded for the same reason the `chunk_sets`
-                // loop below excludes it: a verbatim chunk payload is emitted
-                // as-is and its `raw` is empty, so there is nothing to patch.
                 if !is_chunked[i] || all_ds[i].raw_chunks.is_some() {
                     continue;
                 }
@@ -2807,10 +2886,8 @@ impl FileWriter {
                       buffer offset; it fits usize on every supported target"
         )]
         let ub = self.userblock_size as usize;
-        // Early-placed VL collections (if any) occupy the span immediately after
-        // the superblock, so the root object header — and everything after it —
-        // starts past them. `early_gcol_size` is 0 for a file without a chunked
-        // VL dataset, leaving every other file's addresses unchanged.
+        // The root header follows the collections placed before chunk encoding, including their
+        // PAGE padding. A file without those collections places the root after the superblock.
         let advance = |cursor: &mut u64, len: u64| -> Result<StoredAddress, FormatError> {
             let addr = *cursor;
             *cursor = cursor.checked_add(len).ok_or(FormatError::OffsetOverflow {
@@ -2823,14 +2900,8 @@ impl FileWriter {
         advance(&mut cursor2, early_gcol_size)?;
         let root_group_addr = advance(&mut cursor2, root_oh_size as u64)?;
 
-        // Space set aside for a dense-attribute heap, and the heaps themselves
-        // once the attribute bytes they copy are final. The two are separate
-        // steps on purpose: a heap embeds a *copy* of each attribute's serialized
-        // bytes, and a variable-length attribute's bytes hold global-heap
-        // references that only get real addresses after every heap's span is
-        // fixed — the collections sit past the heaps in the layout. Building the
-        // bytes here would freeze the placeholder references into the heap, and a
-        // reader that cannot resolve them drops the attribute entirely.
+        // Reserve dense-attribute spans before building their bytes. The heap contains copies of
+        // the attributes, so every global-heap reference must be resolved before serialization.
         let reserve = |cursor: &mut u64, len: Option<usize>| {
             len.map(|len| advance(cursor, len as u64).map(|addr| (addr, len)))
                 .transpose()
@@ -3062,47 +3133,6 @@ impl FileWriter {
             let base = BaseAddress::new(ub as u64);
             let mut meta = cursor2; // metadata cursor, base-relative
 
-            // (a) Global-heap collections live in the metadata region. Assign
-            // their addresses and patch attribute VL references now; dataset
-            // element references are patched after their data is built below.
-            let gcol_start = meta;
-            let mut gcol_cursor = meta;
-            let mut elem_gcol: Vec<(usize, Vec<u64>)> = Vec::new();
-            {
-                for patch in &vl_root {
-                    let addrs = place_collections(&patch.collections, &mut gcol_cursor)?;
-                    patch_vl_refs(&mut root_attrs[patch.attr_index].raw_data, &addrs);
-                }
-                for (gi, patches) in grp_vl.iter().enumerate() {
-                    for patch in patches {
-                        let addrs = place_collections(&patch.collections, &mut gcol_cursor)?;
-                        patch_vl_refs(&mut groups[gi].attrs[patch.attr_index].raw_data, &addrs);
-                    }
-                }
-                for (di, patches) in ds_vl.iter().enumerate() {
-                    for patch in patches {
-                        let addrs = place_collections(&patch.collections, &mut gcol_cursor)?;
-                        patch_vl_refs(&mut all_ds[di].attrs[patch.attr_index].raw_data, &addrs);
-                    }
-                }
-                for (i, d) in all_ds.iter().enumerate() {
-                    // A chunked VL dataset's collections were placed and patched
-                    // before its chunks were encoded; only the contiguous ones
-                    // are still awaiting an address here.
-                    if early_gcol.contains(&i) {
-                        continue;
-                    }
-                    if let Some(staging) = &d.vl_string_staging {
-                        elem_gcol.push((
-                            i,
-                            place_collections(&staging.collections, &mut gcol_cursor)?,
-                        ));
-                    }
-                }
-            }
-            let gcol_total_size = gcol_cursor - gcol_start;
-            meta += gcol_total_size;
-
             // The attributes are final now, so the dense heaps that copy them can
             // be built into the spans reserved above.
             let DenseBlobs {
@@ -3134,7 +3164,7 @@ impl FileWriter {
                 }
             }
             let small_raw_total: u64 = small_indices.iter().map(|&i| ds_data_lens[i]).sum();
-            let large_frag_sizes: Vec<u64> = large_indices
+            let mut large_frag_sizes: Vec<u64> = large_indices
                 .iter()
                 .map(|&i| {
                     free_space_manager::align_up(ds_data_lens[i], page_size) - ds_data_lens[i]
@@ -3142,23 +3172,36 @@ impl FileWriter {
                 .filter(|&f| f > 0)
                 .collect();
 
+            large_frag_sizes.extend(collection_large_sections.iter().map(|section| section.size));
+
             // (d) Which per-page-type managers are active, and place their
             // FSHD/FSSE blocks in the metadata region (persisting only). Block
             // lengths depend only on section counts (fixed field widths), so the
             // page tails are computed in a single forward pass with no iteration.
-            let draw_active = small_raw_total > 0
-                && free_space_manager::align_up(small_raw_total, page_size) != small_raw_total;
+            let draw_active = !collection_raw_sections.is_empty()
+                || (small_raw_total > 0
+                    && free_space_manager::align_up(small_raw_total, page_size) != small_raw_total);
             let large_active = !large_frag_sizes.is_empty();
             let mut slots = [u64::MAX; NUM_FILE_FSM_MANAGERS];
             let mut super_fsm: Option<(StoredAddress, StoredAddress)> = None;
             let mut draw_fsm: Option<(StoredAddress, StoredAddress)> = None;
             let mut large_fsm: Option<(StoredAddress, StoredAddress)> = None;
+            let mut super_sizes: Vec<_> = collection_meta_sections
+                .iter()
+                .map(|section| section.size)
+                .collect();
+            super_sizes.push(0);
+            let mut draw_sizes: Vec<_> = collection_raw_sections
+                .iter()
+                .map(|section| section.size)
+                .collect();
+            draw_sizes.push(0);
             let super_block_len =
                 hdf5_pure_format::__private::free_space_manager_header_len(WIDTHS)
-                    + hdf5_pure_format::__private::section_info_len(WIDTHS, &[0]);
+                    + hdf5_pure_format::__private::section_info_len(WIDTHS, &super_sizes);
             let draw_block_len = if draw_active {
                 hdf5_pure_format::__private::free_space_manager_header_len(WIDTHS)
-                    + hdf5_pure_format::__private::section_info_len(WIDTHS, &[0])
+                    + hdf5_pure_format::__private::section_info_len(WIDTHS, &draw_sizes)
             } else {
                 0
             };
@@ -3174,7 +3217,8 @@ impl FileWriter {
             // tail untracked. This decision is O(1), not a fixpoint.
             let super_active = if persist_paged {
                 let with = meta_content_end + super_block_len + draw_block_len + large_block_len;
-                free_space_manager::align_up(with, page_size) > with
+                !collection_meta_sections.is_empty()
+                    || free_space_manager::align_up(with, page_size) > with
             } else {
                 false
             };
@@ -3183,7 +3227,7 @@ impl FileWriter {
                     let fshd_addr = StoredAddress::new(meta);
                     meta += hdf5_pure_format::__private::free_space_manager_header_len(WIDTHS);
                     let fsse_addr = StoredAddress::new(meta);
-                    meta += hdf5_pure_format::__private::section_info_len(WIDTHS, &[0]);
+                    meta += hdf5_pure_format::__private::section_info_len(WIDTHS, &super_sizes);
                     slots[0] = fshd_addr.get();
                     super_fsm = Some((fshd_addr, fsse_addr));
                 }
@@ -3191,7 +3235,7 @@ impl FileWriter {
                     let fshd_addr = StoredAddress::new(meta);
                     meta += hdf5_pure_format::__private::free_space_manager_header_len(WIDTHS);
                     let fsse_addr = StoredAddress::new(meta);
-                    meta += hdf5_pure_format::__private::section_info_len(WIDTHS, &[0]);
+                    meta += hdf5_pure_format::__private::section_info_len(WIDTHS, &draw_sizes);
                     slots[2] = fshd_addr.get();
                     draw_fsm = Some((fshd_addr, fsse_addr));
                 }
@@ -3210,10 +3254,12 @@ impl FileWriter {
             // (e) The raw-data region starts on a fresh page boundary. The
             // metadata page tail is the SUPER section (when active).
             let raw_start = free_space_manager::align_up(meta_end, page_size);
-            let super_section = super_fsm.map(|_| FreeSection {
-                addr: StoredAddress::new(meta_end),
-                size: raw_start - meta_end,
-            });
+            if raw_start > meta_end {
+                collection_meta_sections.push(FreeSection {
+                    addr: StoredAddress::new(meta_end),
+                    size: raw_start - meta_end,
+                });
+            }
 
             // (f) Build the raw data. Small blocks pack; the region is padded to
             // a page boundary (DRAW tail). Each large block starts a fresh page
@@ -3256,7 +3302,9 @@ impl FileWriter {
                 layouts[i] = Some(layout);
             }
             let small_raw_end = c;
-            let draw_section = if draw_active {
+            let draw_section = if small_raw_total > 0
+                && free_space_manager::align_up(small_raw_total, page_size) != small_raw_total
+            {
                 let padded = free_space_manager::align_up(small_raw_end, page_size);
                 c = padded;
                 Some(FreeSection {
@@ -3269,7 +3317,7 @@ impl FileWriter {
                 }
                 None
             };
-            let mut large_sections: Vec<FreeSection> = Vec::new();
+            let mut large_sections = collection_large_sections;
             for &i in &large_indices {
                 c = free_space_manager::align_up(c, page_size);
                 let data_addr = StoredAddress::new(c);
@@ -3309,24 +3357,9 @@ impl FileWriter {
             let eof_addr2 = base.absolute(StoredAddress::new(eoa_rel))?;
             let eoa_pre_fsm = eoa_rel;
 
-            // (g) Now that the element bytes exist, patch dataset-element VL refs.
-            for (i, gaddrs) in &elem_gcol {
-                let staging = all_ds[*i]
-                    .vl_string_staging
-                    .as_ref()
-                    .expect("elem_gcol only holds datasets with VL staging");
-                let Some(bytes) = layouts[*i]
-                    .as_mut()
-                    .and_then(|layout| layout.data.in_memory_mut())
-                else {
-                    return Err(vl_element_bytes_absent(all_ds[*i].name.as_str()));
-                };
-                patch_vl_refs_masked(bytes, &staging.patch_offsets, gaddrs);
-            }
-
             let ds_layouts: Vec<DsLayout> = layouts
                 .into_iter()
-                .map(|o| o.expect("every dataset placed"))
+                .map(|layout| layout.expect("every dataset placed"))
                 .collect();
 
             // (h) Build dataset OHs from the final data addresses.
@@ -3361,26 +3394,36 @@ impl FileWriter {
             };
             debug_assert_eq!(real_ext_oh.len() as u64, ext_len);
 
+            collection_raw_sections.extend(draw_section);
+
             // (j) Serialize the free-space-manager blocks.
             let super_blocks = super_fsm
                 .map(|(fshd_addr, fsse_addr)| {
-                    hdf5_pure_format::__private::serialize_free_space_manager(
+                    hdf5_pure_format::__private::serialize_free_space_manager_with_allocation(
                         WIDTHS,
-                        &[super_section.expect("SUPER active implies a section")],
+                        &collection_meta_sections,
                         fshd_addr,
                         fsse_addr,
                         SECTION_CLASS_SMALL,
+                        Some(hdf5_pure_format::__private::section_info_len(
+                            WIDTHS,
+                            &super_sizes,
+                        )),
                     )
                 })
                 .transpose()?;
             let draw_blocks = draw_fsm
                 .map(|(fshd_addr, fsse_addr)| {
-                    hdf5_pure_format::__private::serialize_free_space_manager(
+                    hdf5_pure_format::__private::serialize_free_space_manager_with_allocation(
                         WIDTHS,
-                        &[draw_section.expect("DRAW active implies a section")],
+                        &collection_raw_sections,
                         fshd_addr,
                         fsse_addr,
                         SECTION_CLASS_SMALL,
+                        Some(hdf5_pure_format::__private::section_info_len(
+                            WIDTHS,
+                            &draw_sizes,
+                        )),
                     )
                 })
                 .transpose()?;
@@ -3418,15 +3461,25 @@ impl FileWriter {
             .build();
             sink.put(&hdf5_pure_format::__private::serialize_superblock(&sb)?)?;
 
-            // Early-placed VL collections, at the addresses patched into the
-            // chunked datasets' references before their chunks were encoded.
-            for &i in &early_gcol {
-                let staging = all_ds[i]
-                    .vl_string_staging
-                    .as_ref()
-                    .expect("early_gcol only holds datasets with VL staging");
-                emit_collections(sink, &staging.collections)?;
+            let collections = vl_root
+                .iter()
+                .map(|patch| &patch.collections)
+                .chain(grp_vl.iter().flatten().map(|patch| &patch.collections))
+                .chain(ds_vl.iter().flatten().map(|patch| &patch.collections))
+                .chain(early_gcol.iter().filter_map(|&i| {
+                    all_ds[i]
+                        .vl_string_staging
+                        .as_ref()
+                        .map(|staging| &staging.collections)
+                }))
+                .flatten();
+            for (address, collection) in paged_collection_addresses.iter().zip(collections) {
+                let physical = base.absolute(StoredAddress::new(*address))?;
+                sink.put_zeros((physical - sink.position()).to_usize()?)?;
+                sink.put(collection)?;
             }
+            let root_physical = base.absolute(root_group_addr)?;
+            sink.put_zeros((root_physical - sink.position()).to_usize()?)?;
 
             // Root group OH + dense blob.
             let tables = LinkTables {
@@ -3479,28 +3532,6 @@ impl FileWriter {
                 sink.put(oh)?;
                 if let Some(ref dense) = ds_dense_blobs[i] {
                     sink.put(&dense.blob)?;
-                }
-            }
-            // Global heap collections.
-            for patch in &vl_root {
-                emit_collections(sink, &patch.collections)?;
-            }
-            for patches in &grp_vl {
-                for patch in patches {
-                    emit_collections(sink, &patch.collections)?;
-                }
-            }
-            for patches in &ds_vl {
-                for patch in patches {
-                    emit_collections(sink, &patch.collections)?;
-                }
-            }
-            for (i, d) in all_ds.iter().enumerate() {
-                if early_gcol.contains(&i) {
-                    continue; // emitted right after the superblock
-                }
-                if let Some(staging) = &d.vl_string_staging {
-                    emit_collections(sink, &staging.collections)?;
                 }
             }
             debug_assert_eq!(sink.position(), base.get() + ext_addr);
@@ -3674,8 +3705,7 @@ impl FileWriter {
                 length: cursor2,
             })?;
 
-        // Let a buffered (Vec) sink preallocate the whole file up front, as the
-        // writer did before streaming; a streaming sink ignores this.
+        // Buffered sinks reserve the complete output capacity. Streaming sinks ignore the hint.
         sink.reserve(eof_addr2)?;
 
         // Userblock: the caller's header bytes, then zeros.
@@ -3934,6 +3964,137 @@ mod tests {
     use crate::signature;
     use crate::superblock::Superblock;
     use crate::type_builders::{build_attr_message, make_i32_type};
+
+    #[test]
+    fn small_paged_collections_can_place_metadata_above_four_gibibytes() {
+        let mut writer = FileWriter::new();
+        writer.with_file_space_strategy(FileSpaceStrategy::Page, true, 1);
+        writer.with_file_space_page_size(FileSpacePageSize::MAX.get());
+        writer.root_attrs.extend([
+            (
+                "first".into(),
+                AttrSpec::Value(AttrValue::VarLenString("first-value".into())),
+            ),
+            (
+                "second".into(),
+                AttrSpec::Value(AttrValue::VarLenString("second-value".into())),
+            ),
+            (
+                "third".into(),
+                AttrSpec::Value(AttrValue::VarLenString("third-value".into())),
+            ),
+        ]);
+        let mut sink = SparseSink {
+            position: 0,
+            chunks: Vec::new(),
+        };
+        writer.finish_to_sink(&mut sink).unwrap();
+        let superblock =
+            hdf5_pure_format::__private::parse_superblock(&sink.chunks[0].1, 0).unwrap();
+        assert_eq!(superblock.root_group_address.get(), 1u64 << 32);
+        assert_eq!(superblock.eof_address, sink.position);
+        let collections: Vec<u64> = sink
+            .chunks
+            .iter()
+            .filter(|(_, bytes)| {
+                bytes.get(..GLOBAL_HEAP_COLLECTION_SIGNATURE.len())
+                    == Some(GLOBAL_HEAP_COLLECTION_SIGNATURE)
+            })
+            .map(|(position, _)| *position)
+            .collect();
+        assert_eq!(collections, [1u64 << 30, 2u64 << 30, 3u64 << 30]);
+        let root = sink
+            .chunks
+            .iter()
+            .find(|(position, _)| *position == 1u64 << 32)
+            .unwrap();
+        assert_eq!(
+            root.1.get(..OBJECT_HEADER_V2_SIGNATURE.len()),
+            Some(OBJECT_HEADER_V2_SIGNATURE)
+        );
+        assert!(
+            sink.chunks
+                .iter()
+                .map(|(_, bytes)| bytes.len())
+                .sum::<usize>()
+                < 20_000
+        );
+    }
+
+    #[rstest::rstest]
+    #[case::large(1_024, 0)]
+    #[case::whole(4_096, 4_096)]
+    #[case::small(8_192, 8_192)]
+    fn paged_global_heaps_use_pages_disjoint_from_object_headers(
+        #[case] page_size: u64,
+        #[case] userblock: u64,
+    ) {
+        let mut writer = FileWriter::new();
+        writer.with_file_space_strategy(FileSpaceStrategy::Page, true, 1);
+        writer.with_file_space_page_size(page_size);
+        writer.with_userblock(userblock);
+        writer.root_attrs.push((
+            "root_label".into(),
+            AttrSpec::Value(AttrValue::VarLenString("root-value".into())),
+        ));
+        writer
+            .create_dataset("contiguous")
+            .with_vlen_strings(&["first", "second"]);
+        writer
+            .create_dataset("chunked")
+            .with_vlen_strings(&["third", "fourth"])
+            .with_chunks(&[1])
+            .with_deflate(6);
+        let bytes = writer.finish().unwrap();
+        let heap_addresses: Vec<u64> = bytes
+            .windows(GLOBAL_HEAP_COLLECTION_SIGNATURE.len())
+            .enumerate()
+            .filter(|(_, signature)| *signature == GLOBAL_HEAP_COLLECTION_SIGNATURE)
+            .map(|(offset, _)| offset as u64 - userblock)
+            .collect();
+        assert_eq!(heap_addresses.len(), 3);
+        let metadata_addresses: Vec<u64> = bytes
+            .windows(OBJECT_HEADER_V2_SIGNATURE.len())
+            .enumerate()
+            .filter(|(_, signature)| *signature == OBJECT_HEADER_V2_SIGNATURE)
+            .map(|(offset, _)| offset as u64 - userblock)
+            .collect();
+        assert_eq!(metadata_addresses.len(), 4);
+        for address in heap_addresses {
+            assert_eq!(address % page_size, 0);
+            let index = (userblock + address + 8).to_usize().unwrap();
+            let size = u64::from_le_bytes(bytes[index..index + 8].try_into().unwrap());
+            let end = address + size;
+            for metadata in &metadata_addresses {
+                assert!(
+                    *metadata / page_size < address / page_size
+                        || *metadata / page_size > (end - 1) / page_size
+                );
+            }
+        }
+    }
+
+    struct SparseSink {
+        position: u64,
+        chunks: Vec<(u64, Vec<u8>)>,
+    }
+
+    impl ByteSink for SparseSink {
+        fn put(&mut self, bytes: &[u8]) -> Result<(), FormatError> {
+            self.chunks.push((self.position, bytes.to_vec()));
+            self.position += bytes.len() as u64;
+            Ok(())
+        }
+
+        fn put_zeros(&mut self, len: usize) -> Result<(), FormatError> {
+            self.position += len as u64;
+            Ok(())
+        }
+
+        fn position(&self) -> u64 {
+            self.position
+        }
+    }
 
     /// A committed datatype object is a header holding the type and nothing else,
     /// which is what makes the C library call it a named datatype rather than a
@@ -5647,4 +5808,6 @@ mod tests {
             FormatError::LibverTooOldForContent { .. }
         ));
     }
+    const GLOBAL_HEAP_COLLECTION_SIGNATURE: &[u8] = b"GCOL";
+    const OBJECT_HEADER_V2_SIGNATURE: &[u8] = b"OHDR";
 }

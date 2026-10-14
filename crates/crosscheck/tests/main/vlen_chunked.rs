@@ -15,8 +15,12 @@
 //! library independently validates that the addresses name real collections at
 //! offsets it computes itself, in a file it did not write.
 
+use core::str::FromStr;
+
+use hdf5::plist::file_create::FileSpaceStrategy as CStrategy;
 use hdf5::types::VarLenUnicode;
-use hdf5_pure::{File, FileBuilder, FileSpaceStrategy, MaxExtent};
+use hdf5_pure::{AttrValue, File, FileBuilder, FileSpaceStrategy, MaxExtent};
+use rstest::rstest;
 use tempfile::tempdir;
 
 use test_util_hdf5::{dataset, file, lock};
@@ -486,4 +490,190 @@ fn c_library_reads_an_overwritten_compact_vlen_string_dataset() {
     }
 
     assert_both_read(&path, "labels", &after);
+}
+
+#[rstest]
+#[case::large_collections(1_024, 0, true)]
+#[case::whole_page_collections(4_096, 4_096, true)]
+#[case::small_collections(8_192, 8_192, true)]
+#[case::nonpersistent_collections(8_192, 0, false)]
+fn paged_global_heap_references_survive_creation_edit_and_reopen(
+    #[case] page_size: u64,
+    #[case] userblock: u64,
+    #[case] persist: bool,
+) {
+    let _c = lock::libhdf5_guard();
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("paged_global_heaps.h5");
+    let mut builder = FileBuilder::new();
+    builder.with_file_space_strategy(FileSpaceStrategy::Page, persist, 1);
+    builder.with_file_space_page_size(page_size);
+    builder.with_userblock(userblock);
+    builder.set_attr("root_label", AttrValue::VarLenString("root-value".into()));
+    let mut group = builder.create_group("group");
+    group.set_attr("group_label", AttrValue::VarLenString("group-value".into()));
+    builder.add_group(group.finish());
+    builder
+        .create_dataset("contiguous")
+        .with_vlen_strings(&["first", "second"])
+        .set_attr(
+            "dataset_label",
+            AttrValue::VarLenString("dataset-value".into()),
+        );
+    builder
+        .create_dataset("filtered")
+        .with_vlen_strings(&["compressed-first", "compressed-second"])
+        .with_chunks(&[1])
+        .with_deflate(6);
+    builder.write(&path).unwrap();
+    assert_eq!(read_c(&path, "contiguous"), ["first", "second"]);
+    assert_eq!(
+        read_c(&path, "filtered"),
+        ["compressed-first", "compressed-second"]
+    );
+    {
+        let reference = hdf5::File::open(&path).unwrap();
+        assert_eq!(
+            reference
+                .attr("root_label")
+                .unwrap()
+                .read_scalar::<VarLenUnicode>()
+                .unwrap()
+                .as_str(),
+            "root-value"
+        );
+        assert_eq!(
+            reference
+                .group("group")
+                .unwrap()
+                .attr("group_label")
+                .unwrap()
+                .read_scalar::<VarLenUnicode>()
+                .unwrap()
+                .as_str(),
+            "group-value"
+        );
+        assert_eq!(
+            reference
+                .dataset("contiguous")
+                .unwrap()
+                .attr("dataset_label")
+                .unwrap()
+                .read_scalar::<VarLenUnicode>()
+                .unwrap()
+                .as_str(),
+            "dataset-value"
+        );
+    }
+    if persist {
+        let editable = File::open_rw(&path).unwrap();
+        editable
+            .dataset("contiguous")
+            .unwrap()
+            .write_staged(|dataset| {
+                dataset.with_vlen_strings(&["replacement-first", "replacement-second"]);
+            })
+            .unwrap();
+        editable.commit().unwrap();
+        editable
+            .dataset("contiguous")
+            .unwrap()
+            .write_staged(|dataset| {
+                dataset.with_vlen_strings(&["final-first", "final-second"]);
+            })
+            .unwrap();
+        editable.commit().unwrap();
+    } else {
+        let err = File::open_rw(&path).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                hdf5_pure::Error::EditUnsupported(
+                    "read-write access to a paged file (H5F_FSPACE_STRATEGY_PAGE) requires persisted free space; recreate the file with with_file_space_strategy(FileSpaceStrategy::Page, true, ..) to grow it in place"
+                )
+            ),
+            "{err:?}"
+        );
+    }
+    let expected = if persist {
+        ["final-first", "final-second"]
+    } else {
+        ["first", "second"]
+    };
+    assert_eq!(read_c(&path, "contiguous"), expected);
+    assert_eq!(read_pure(&path, "contiguous"), expected);
+    assert_eq!(
+        read_c(&path, "filtered"),
+        ["compressed-first", "compressed-second"]
+    );
+    {
+        let reference = hdf5::File::open_rw(&path).unwrap();
+        reference
+            .new_dataset_builder()
+            .with_data(&[12i32, 34])
+            .create("c_added")
+            .unwrap();
+    }
+    assert_eq!(
+        File::open(&path)
+            .unwrap()
+            .dataset("c_added")
+            .unwrap()
+            .read_i32()
+            .unwrap(),
+        [12, 34]
+    );
+}
+
+#[rstest]
+#[case::whole_page(4_096, 0)]
+#[case::small_collection(8_192, 8_192)]
+fn libhdf5_reads_its_paged_vlen_dataset_after_a_raw_collection_replacement(
+    #[case] page_size: u64,
+    #[case] userblock: u64,
+) {
+    let _c = lock::libhdf5_guard();
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("reference_paged_vlen.h5");
+    {
+        let reference = hdf5::FileBuilder::new()
+            .with_fapl(|fapl| fapl.libver_v110())
+            .with_fcpl(|fcpl| {
+                fcpl.userblock(userblock)
+                    .file_space_strategy(CStrategy::FreeSpaceManager {
+                        persist: true,
+                        threshold: 1,
+                        paged: true,
+                    })
+                    .file_space_page_size(page_size)
+            })
+            .create(&path)
+            .unwrap();
+        let words = [
+            VarLenUnicode::from_str("reference-first").unwrap(),
+            VarLenUnicode::from_str("reference-second").unwrap(),
+        ];
+        reference
+            .new_dataset_builder()
+            .with_data(&words)
+            .create("labels")
+            .unwrap();
+    }
+    assert_eq!(
+        read_pure(&path, "labels"),
+        ["reference-first", "reference-second"]
+    );
+    {
+        let editable = File::open_rw(&path).unwrap();
+        editable
+            .dataset("labels")
+            .unwrap()
+            .write_staged(|dataset| {
+                dataset.with_vlen_strings(&["pure-first", "pure-second"]);
+            })
+            .unwrap();
+        editable.commit().unwrap();
+    }
+    assert_eq!(read_c(&path, "labels"), ["pure-first", "pure-second"]);
+    assert_eq!(read_pure(&path, "labels"), ["pure-first", "pure-second"]);
 }
