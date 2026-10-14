@@ -2235,11 +2235,7 @@ impl FileInner {
     /// Read all attributes attached to an object header, dispatching on the
     /// backend.
     fn attrs_of(&self, hdr: &ObjectHeader) -> Result<HashMap<String, AttrValue>, Error> {
-        let (os, ls, base) = (
-            self.offset_size(),
-            self.length_size(),
-            self.addresses().effective_base(),
-        );
+        let (os, ls, base) = (self.offset_size(), self.length_size(), self.addresses());
         let attr_msgs = self.attr_messages_of(hdr)?;
         match &self.backend {
             Backend::Edit(m) => Ok(Self::with_engine(
@@ -6407,7 +6403,7 @@ the same commit to replace it",
                 dataspace.num_elements(),
                 self.file.offset_size(),
                 self.file.length_size(),
-                self.file.addresses().effective_base(),
+                self.file.addresses(),
                 options,
                 visitor,
             )?)
@@ -6451,7 +6447,7 @@ the same commit to replace it",
                 dataspace.num_elements(),
                 self.file.offset_size(),
                 self.file.length_size(),
-                self.file.addresses().effective_base(),
+                self.file.addresses(),
                 1, // a VL string's base type is a single byte
                 options,
             )?)
@@ -6511,7 +6507,7 @@ the same commit to replace it",
                 dataspace.num_elements(),
                 self.file.offset_size(),
                 self.file.length_size(),
-                self.file.addresses().effective_base(),
+                self.file.addresses(),
                 element_size,
                 options,
             )
@@ -6586,7 +6582,7 @@ the same commit to replace it",
                     n,
                     self.file.offset_size(),
                     self.file.length_size(),
-                    self.file.addresses().effective_base(),
+                    self.file.addresses(),
                     slot.element_size,
                     options,
                 )
@@ -6992,7 +6988,7 @@ the same commit to replace it",
                     num_elements,
                     self.file.offset_size(),
                     self.file.length_size(),
-                    self.file.addresses().effective_base(),
+                    self.file.addresses(),
                     VlenStringReadOptions::default(),
                     |string| strings.push(String::from(string)),
                 )?)

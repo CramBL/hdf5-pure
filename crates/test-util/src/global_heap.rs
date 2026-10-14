@@ -1,39 +1,76 @@
-//! Global heap collections, which hold variable-length data: section
-//! `subsec_fmt4_infra_globalheap`, version 4.0.
+//! Global heap collections, which hold variable-length data.
+//!
+//! A collection is defined in "Global Heap" of the [format specification, version 4.0][spec].
+//!
+//! [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsec_fmt4_infra_globalheap
 
 use crate::bytes;
 use crate::widths::Widths;
 
-/// The bytes of one collection holding `objects`, in the order given.
+/// Returns a collection that holds `objects` in the order given, and a free space object after
+/// them.
 ///
-/// The collection declares its own total size, so a caller that means to give
-/// it free space past its objects grows that declaration and leaves the bytes
-/// alone.
+/// The collection is 4096 bytes, the minimum collection size, or the size its objects and the free
+/// space object header need where that is larger.
 pub fn collection(objects: &[Object<'_>], widths: Widths) -> Vec<u8> {
-    let declared = PREFIX
-        + widths.length
-        + objects
-            .iter()
-            .map(|object| object.len(widths))
-            .sum::<usize>()
-        + FREE_SPACE_MARKER;
+    let used = HEADER + objects.iter().map(Object::len).sum::<usize>() + HEADER;
+    collection_of_size(objects, widths, used.max(MIN_COLLECTION_SIZE))
+}
 
+/// Returns a collection of `size` bytes that holds `objects` in the order given.
+///
+/// A free space object spans the rest of the collection where the rest has room for an object
+/// header, and a shorter rest is zero bytes.
+///
+/// # Panics
+///
+/// Panics if the objects do not fit in `size` bytes, or if `size` or the size of an object does
+/// not fit a field `widths.length` bytes wide.
+pub fn collection_of_size(objects: &[Object<'_>], widths: Widths, size: usize) -> Vec<u8> {
     let mut heap = SIGNATURE.to_vec();
     heap.push(VERSION);
-    heap.extend_from_slice(&[0; 3]);
-    bytes::push_uint(&mut heap, declared as u64, widths.length);
+    heap.extend_from_slice(&[0; COLLECTION_RESERVED]);
+    bytes::push_uint(&mut heap, size as u64, widths.length);
+    heap.resize(HEADER, 0);
     for object in objects {
-        heap.extend_from_slice(&object.index.to_le_bytes());
-        heap.extend_from_slice(&object.reference_count.to_le_bytes());
-        heap.extend_from_slice(&[0; 4]);
-        bytes::push_uint(&mut heap, object.data.len() as u64, widths.length);
+        push_object_header(
+            &mut heap,
+            object.index,
+            object.reference_count,
+            object.data.len() as u64,
+            widths,
+        );
         heap.extend_from_slice(object.data);
         heap.resize(heap.len().next_multiple_of(ALIGNMENT), 0);
     }
-    // Object zero's own size field holds the free space left, and is zero once
-    // the collection is full.
-    heap.extend_from_slice(&0u16.to_le_bytes());
+    assert!(
+        heap.len() <= size,
+        "{} bytes of objects do not fit a {size}-byte collection",
+        heap.len()
+    );
+    let free_space = size - heap.len();
+    if free_space >= HEADER {
+        push_object_header(&mut heap, FREE_SPACE_INDEX, 0, free_space as u64, widths);
+    }
+    heap.resize(size, 0);
     heap
+}
+
+/// Appends an object header to `heap`, padded to 16 bytes, with a size field `widths.length` bytes
+/// wide.
+fn push_object_header(
+    heap: &mut Vec<u8>,
+    index: u16,
+    reference_count: u16,
+    size: u64,
+    widths: Widths,
+) {
+    let start = heap.len();
+    heap.extend_from_slice(&index.to_le_bytes());
+    heap.extend_from_slice(&reference_count.to_le_bytes());
+    heap.extend_from_slice(&[0; OBJECT_RESERVED]);
+    bytes::push_uint(heap, size, widths.length);
+    heap.resize(start + HEADER, 0);
 }
 
 /// One object in a collection, addressed by the collection's address and this
@@ -55,9 +92,10 @@ impl<'d> Object<'d> {
         }
     }
 
-    /// The bytes this object occupies, its prefix and its padding included.
-    pub fn len(&self, widths: Widths) -> usize {
-        PREFIX + widths.length + self.data.len().next_multiple_of(ALIGNMENT)
+    /// Returns the number of bytes the object spans, its header and the padding of its data
+    /// included.
+    fn len(&self) -> usize {
+        HEADER + self.data.len().next_multiple_of(ALIGNMENT)
     }
 }
 
@@ -72,14 +110,26 @@ pub fn reference(len: u32, collection_address: u64, index: u32, widths: Widths) 
 
 pub const SIGNATURE: &[u8; 4] = b"GCOL";
 
-/// signature(4) + version(1) + reserved(3) for the collection, and
-/// index(2) + reference count(2) + reserved(4) for an object.
-const PREFIX: usize = 8;
+// The C library pads the collection header and each object header to 16 bytes at every length
+// width, in `H5HG_SIZEOF_HDR` and `H5HG_SIZEOF_OBJHDR` (`H5HGpkg.h`, HDF5 1.8.23 to 2.2.0).
+const HEADER: usize = 16;
 
 /// Every object begins on an eight-byte boundary within its collection.
 const ALIGNMENT: usize = 8;
 
-/// The two bytes a full collection ends with, which are object zero's size.
-const FREE_SPACE_MARKER: usize = 2;
+/// The number of reserved bytes between the version and the collection size of a collection
+/// header.
+const COLLECTION_RESERVED: usize = 3;
+
+/// The number of reserved bytes between the reference count and the object size of an object
+/// header.
+const OBJECT_RESERVED: usize = 4;
+
+/// The index of the free space object.
+const FREE_SPACE_INDEX: u16 = 0;
+
+// The minimum collection size, defined in "Global Heap" of the format specification, version
+// 4.0. The C library calls it `H5HG_MINSIZE` (`H5HGpkg.h`, HDF5 2.2.0).
+const MIN_COLLECTION_SIZE: usize = 4096;
 
 const VERSION: u8 = 1;

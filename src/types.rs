@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::fmt;
 
-use crate::address::BaseAddress;
+use crate::address::AddressContext;
 use crate::datatype::Datatype;
 use crate::datatype::layout::FixedPointLayout;
 use crate::display::{DISPLAY_MAX_MEMBERS, Dims, EscapedName, write_elided};
@@ -187,19 +187,18 @@ pub(crate) fn classify_datatype(dt: &Datatype) -> DType {
 /// Read attribute messages into a `HashMap<String, AttrValue>`.
 ///
 /// Best-effort: attributes that can't be decoded are silently skipped.
-/// `base_address` is the file-level userblock offset — needed so that
-/// variable-length attribute data (stored in global heap collections with
-/// addresses relative to the base) can be located correctly.
+/// `addresses` resolves the stored collection addresses of variable-length
+/// attribute data to physical positions in `source`.
 pub(crate) fn attrs_to_map<S: crate::source::Source + ?Sized>(
     attrs: &[crate::attribute::AttributeMessage],
     source: &S,
     offset_size: u8,
     length_size: u8,
-    base_address: BaseAddress,
+    addresses: AddressContext,
 ) -> HashMap<std::string::String, AttrValue> {
     let mut map = HashMap::new();
     for attr in attrs {
-        if let Some(val) = decode_attr_value(attr, source, offset_size, length_size, base_address) {
+        if let Some(val) = decode_attr_value(attr, source, offset_size, length_size, addresses) {
             map.insert(attr.name.clone(), val);
         }
     }
@@ -266,7 +265,7 @@ fn decode_attr_value<S: crate::source::Source + ?Sized>(
     source: &S,
     offset_size: u8,
     length_size: u8,
-    base_address: BaseAddress,
+    addresses: AddressContext,
 ) -> Option<AttrValue> {
     use crate::dataspace::DataspaceType;
     use crate::datatype::Datatype;
@@ -348,15 +347,15 @@ fn decode_attr_value<S: crate::source::Source + ?Sized>(
             //   - is_string: true             — H5T_STRING{STRSIZE=VAR}
             //   - VLEN of H5T_STRING{SIZE=1}  — what matio / MATLAB emit
             //
-            // The reader resolves each element from the global heap, adding
-            // `base_address` to the (relative) collection addresses.
+            // The reader reads each element from the global heap, at the
+            // physical position `addresses` resolves its collection address to.
             let strings = crate::vl_data::read_vl_strings_from_source(
                 source,
                 &attr.raw_data,
                 attr.dataspace.num_elements(),
                 offset_size,
                 length_size,
-                base_address,
+                addresses,
                 crate::vl_data::VlenStringReadOptions::default(),
             )
             .ok()?;
@@ -548,6 +547,7 @@ fn is_ascii_char_vlen_base(base: &crate::datatype::Datatype) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::address::BaseAddress;
     use crate::address::BaseAddressExt;
     use crate::{
         CharacterSet, DatatypeByteOrder, StringPadding,
@@ -784,7 +784,7 @@ mod tests {
             &crate::source::BytesSource::new(Vec::new()),
             8,
             8,
-            BaseAddress::ZERO,
+            AddressContext::from_effective_base(BaseAddress::ZERO),
         )
     }
 
