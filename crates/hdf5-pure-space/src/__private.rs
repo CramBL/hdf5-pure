@@ -4,6 +4,11 @@
 
 pub use crate::admission::Release;
 pub use crate::admission::TrackedSpace;
+pub use crate::aggregator::AGGREGATE_BLOCK_SIZE;
+pub use crate::aggregator::AggregationAllocation;
+pub use crate::aggregator::AggregationError;
+pub use crate::aggregator::AggregationRelease;
+pub use crate::aggregator::ClassicAggregators;
 pub use crate::allocation::AllocationClass;
 pub use crate::extent::Extent;
 pub use crate::list::FreeList;

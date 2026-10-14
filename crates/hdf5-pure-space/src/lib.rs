@@ -18,6 +18,7 @@ extern crate alloc;
 pub mod __private;
 
 mod admission;
+mod aggregator;
 mod allocation;
 mod extent;
 mod list;
