@@ -4,7 +4,6 @@
 //! 1-based index. A global heap ID in the file holds the address of a collection and the index of
 //! an object in it.
 //!
-//! [`GlobalHeapIndex`] reads a collection through a [`MetadataSource`].
 //! [`GlobalHeapCollectionLocator`] parses one from the regions of the file the caller reads, one
 //! header at a time.
 
@@ -17,335 +16,8 @@ use hdf5_pure_core::__private::FileRegion;
 use hdf5_pure_core::__private::PhysicalAddress;
 
 use crate::bytes;
-use crate::convert::Narrow;
 use crate::error::FormatError;
-use crate::metadata_source::MetadataSource;
 use crate::width::LengthWidth;
-
-/// The directory of a global heap collection: where each of its objects sits and how large it is.
-///
-/// The directory holds none of the object data, so a caller parses a collection once and reads
-/// only the objects it looks up. The collection is defined in "Global Heap" of the [format
-/// specification, version 4.0][spec].
-///
-/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsec_fmt4_infra_globalheap
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct GlobalHeapIndex {
-    /// The objects, in the order the collection stores them.
-    pub objects: Vec<GlobalHeapObjectInfo>,
-}
-
-/// The position and the size of one object in a global heap collection.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct GlobalHeapObjectInfo {
-    /// The index of the object in the collection, from 1. Index 0 is the free space, which
-    /// [`GlobalHeapIndex`] leaves out.
-    pub index: u16,
-    /// The position of the object's data in the source, past its object header.
-    pub data_address: u64,
-    /// The size in bytes of the object's data, before the padding to a multiple of 8.
-    pub size: u64,
-}
-
-/// Rounds `x` up to a multiple of 8, or returns [`FormatError::OffsetOverflow`] if that overflows.
-fn pad8_u64(x: u64) -> Result<u64, FormatError> {
-    x.checked_add(7)
-        .map(|value| value & !7)
-        .ok_or(FormatError::OffsetOverflow {
-            offset: x,
-            length: 7,
-        })
-}
-
-/// The most bytes of a collection one refill of the directory walk reads, one 4 KiB page.
-///
-/// [`DirectoryWindow::get`] reads less where the headers sit close together, and one header alone
-/// where they sit too far apart for one window to hold two of them.
-const DIRECTORY_WINDOW: usize = 4096;
-
-/// The number of recent strides a refill takes the widest of.
-///
-/// A stride is the distance between two object headers the walk requests. After an object larger
-/// than a window, the walk reads one header at a time for this many objects.
-const DIRECTORY_STRIDE_HISTORY: usize = 8;
-
-/// The number of strides a refill reads past the header it needs, at the widest recent stride.
-///
-/// The bytes a refill reads ahead are proportional to the spacing of the headers, up to
-/// [`DIRECTORY_WINDOW`].
-const DIRECTORY_LOOKAHEAD: u64 = 32;
-
-/// Consecutive bytes of one collection, which the directory walk reads its object headers from.
-///
-/// The window serves several headers from one read of the source. A refill reads through
-/// [`MetadataSource::read_metadata_at`], so a source with a metadata cache may serve it from the
-/// cache.
-struct DirectoryWindow {
-    /// The position in the source of the first byte of `bytes`.
-    start: u64,
-    /// The bytes the last refill read.
-    bytes: Vec<u8>,
-    /// The position of the previous request, `None` before the first.
-    last: Option<u64>,
-    /// The last [`DIRECTORY_STRIDE_HISTORY`] strides between requests, the most recent last. A zero
-    /// is a stride not yet recorded, since the position the walk requests increases with every
-    /// request.
-    strides: [u64; DIRECTORY_STRIDE_HISTORY],
-}
-
-impl DirectoryWindow {
-    const fn new() -> Self {
-        Self {
-            start: 0,
-            bytes: Vec::new(),
-            last: None,
-            strides: [0; DIRECTORY_STRIDE_HISTORY],
-        }
-    }
-
-    /// Returns the `need` bytes at `pos`, and refills from `source` where the window does not hold
-    /// them.
-    ///
-    /// A refill reads `need` bytes and [`DIRECTORY_LOOKAHEAD`] strides past them, at the widest of
-    /// the last [`DIRECTORY_STRIDE_HISTORY`] strides, up to [`DIRECTORY_WINDOW`] bytes. Where the
-    /// widest stride and `need` exceed a window, a window cannot hold a second header, and the
-    /// refill reads `need` bytes alone. Before the first stride the widest is zero, and the refill
-    /// reads `need` bytes.
-    ///
-    /// The widest stride sets the span and the last one does not: in a collection whose object
-    /// sizes alternate, the stride into a header is smallest where the stride out of it is
-    /// largest, and a span set by the last stride reads a window at every change of size and
-    /// discards most of it.
-    ///
-    /// The caller checks that `limit`, the end of the collection, lies within `source` and that
-    /// `need` bytes fit before it, and a refill reads no further than `limit`.
-    ///
-    /// # Errors
-    ///
-    /// Returns the error `source` returns if a refill fails.
-    fn get<'a>(
-        &'a mut self,
-        source: &(impl MetadataSource + ?Sized),
-        pos: u64,
-        need: usize,
-        limit: u64,
-    ) -> Result<&'a [u8], FormatError> {
-        let held = pos
-            .checked_sub(self.start)
-            .and_then(|d| usize::try_from(d).ok())
-            .filter(|at| {
-                at.checked_add(need)
-                    .is_some_and(|end| end <= self.bytes.len())
-            });
-
-        if let Some(last) = self.last {
-            self.strides.rotate_left(1);
-            self.strides[DIRECTORY_STRIDE_HISTORY - 1] = pos.saturating_sub(last);
-        }
-        self.last = Some(pos);
-
-        let at = match held {
-            Some(at) => at,
-            None => {
-                let widest = self.strides.iter().copied().max().unwrap_or(0);
-                let ahead = if widest.saturating_add(need as u64) > DIRECTORY_WINDOW as u64 {
-                    need
-                } else {
-                    widest
-                        .saturating_mul(DIRECTORY_LOOKAHEAD)
-                        .saturating_add(need as u64)
-                        .min(DIRECTORY_WINDOW as u64)
-                        .to_usize()
-                        .unwrap_or(need)
-                        .max(need)
-                };
-                // The span is at most `ahead`, a `usize`, so the narrowing cannot fail on a 32-bit
-                // target and the fallback is unreachable.
-                let span = limit
-                    .saturating_sub(pos)
-                    .min(ahead as u64)
-                    .to_usize()
-                    .unwrap_or(ahead)
-                    .max(need);
-                self.bytes = source.read_metadata_at(pos, span)?;
-                self.start = pos;
-                0
-            }
-        };
-
-        Ok(&self.bytes[at..at + need])
-    }
-}
-
-impl GlobalHeapIndex {
-    /// Parses the directory of the global heap collection at `offset` in `source`.
-    ///
-    /// `length_size` is the superblock's "Size of Lengths" byte.
-    ///
-    /// # Errors
-    ///
-    /// Returns the errors [`parse_filtered`](Self::parse_filtered) returns.
-    pub fn parse(
-        source: &(impl MetadataSource + ?Sized),
-        offset: u64,
-        length_size: u8,
-    ) -> Result<Self, FormatError> {
-        Self::parse_filtered(source, offset, length_size, |_| true)
-    }
-
-    /// Parses the directory of the global heap collection at `offset` in `source`, and keeps the
-    /// objects whose index `keep` accepts.
-    ///
-    /// The walk reads every object header, since each object's size gives the position of the
-    /// next, and the directory holds only the objects `keep` accepts. A caller that looks up a few
-    /// objects of a large collection, such as the strings of a few rows of a variable-length
-    /// string dataset, keeps a directory of those objects alone in memory.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`FormatError::InvalidGlobalHeapSignature`] if the collection does not begin with
-    /// `GCOL`, [`FormatError::InvalidGlobalHeapVersion`] if its version is not 1,
-    /// [`FormatError::InvalidLengthSize`] if `length_size` is not 2, 4, or 8,
-    /// [`FormatError::VlDataError`] if the collection size is smaller than the collection header,
-    /// [`FormatError::UnexpectedEof`] if the collection runs past the end of `source` or an object
-    /// runs past the end of the collection, [`FormatError::OffsetOverflow`] if a position
-    /// overflows a `u64`, and the error `source` returns if a read fails.
-    pub fn parse_filtered(
-        source: &(impl MetadataSource + ?Sized),
-        offset: u64,
-        length_size: u8,
-        keep: impl Fn(u16) -> bool,
-    ) -> Result<Self, FormatError> {
-        let header_size = 8 + length_size as usize;
-        let header = source.read_metadata_at(offset, header_size)?;
-
-        if header[..4] != GCOL_SIGNATURE {
-            return Err(FormatError::InvalidGlobalHeapSignature);
-        }
-        let version = header[4];
-        if version != GCOL_VERSION {
-            return Err(FormatError::InvalidGlobalHeapVersion(version));
-        }
-
-        let collection_size = bytes::read_length(&header, 8, length_size)?;
-        if collection_size < header_size as u64 {
-            return Err(FormatError::VlDataError(
-                "global heap collection is smaller than its header".into(),
-            ));
-        }
-        let collection_end =
-            offset
-                .checked_add(collection_size)
-                .ok_or(FormatError::OffsetOverflow {
-                    offset,
-                    length: collection_size,
-                })?;
-        if collection_end > source.len() {
-            return Err(FormatError::UnexpectedEof {
-                expected: collection_end.to_usize().unwrap_or(usize::MAX),
-                available: source.len().to_usize().unwrap_or(usize::MAX),
-            });
-        }
-
-        let object_header_size = 8 + length_size as usize;
-        let mut pos =
-            offset
-                .checked_add(header_size as u64)
-                .ok_or(FormatError::OffsetOverflow {
-                    offset,
-                    length: header_size as u64,
-                })?;
-        let mut objects = Vec::new();
-        let mut window = DirectoryWindow::new();
-
-        while pos
-            .checked_add(2)
-            .is_some_and(|index_end| index_end <= collection_end)
-        {
-            // One request per object: the whole object header where the collection has room
-            // for one, and the 2-byte index alone in a tail too short for a header.
-            let room_for_header = pos
-                .checked_add(object_header_size as u64)
-                .is_some_and(|end| end <= collection_end);
-            let need = if room_for_header {
-                object_header_size
-            } else {
-                2
-            };
-            let object_header = window.get(source, pos, need, collection_end)?;
-            let object_index = u16::from_le_bytes([object_header[0], object_header[1]]);
-            if object_index == 0 {
-                break;
-            }
-
-            // The specification leaves a tail too short for a header unwritten, and
-            // `H5HG__cache_heap_deserialize` reads it as free space (`H5HGcache.c`, HDF5 2.2.0).
-            // This parser rejects a nonzero index there. Past these checks `object_header` is a
-            // whole header.
-            let object_header_end =
-                pos.checked_add(object_header_size as u64)
-                    .ok_or(FormatError::OffsetOverflow {
-                        offset: pos,
-                        length: object_header_size as u64,
-                    })?;
-            if object_header_end > collection_end {
-                return Err(FormatError::UnexpectedEof {
-                    expected: object_header_end.to_usize().unwrap_or(usize::MAX),
-                    available: collection_end.to_usize().unwrap_or(usize::MAX),
-                });
-            }
-            let object_size = bytes::read_length(object_header, 8, length_size)?;
-            let data_address = object_header_end;
-            let data_end =
-                data_address
-                    .checked_add(object_size)
-                    .ok_or(FormatError::OffsetOverflow {
-                        offset: data_address,
-                        length: object_size,
-                    })?;
-            if data_end > collection_end {
-                return Err(FormatError::UnexpectedEof {
-                    expected: data_end.to_usize().unwrap_or(usize::MAX),
-                    available: collection_end.to_usize().unwrap_or(usize::MAX),
-                });
-            }
-
-            if keep(object_index) {
-                objects.push(GlobalHeapObjectInfo {
-                    index: object_index,
-                    data_address,
-                    size: object_size,
-                });
-            }
-
-            let padded_size = pad8_u64(object_size)?;
-            pos = data_address
-                .checked_add(padded_size)
-                .ok_or(FormatError::OffsetOverflow {
-                    offset: data_address,
-                    length: padded_size,
-                })?;
-        }
-
-        Ok(Self { objects })
-    }
-
-    /// Returns the object at `index` in the collection, or `None` if the directory does not hold
-    /// it.
-    ///
-    /// # Performance
-    ///
-    /// A binary search finds the object in a directory in ascending index order, the order the
-    /// encoder writes and the order the C library writes while it only appends to a collection.
-    /// The specification allows any order, and where the binary search misses, a linear search
-    /// finds the object in a directory of any order.
-    pub fn object(&self, index: u16) -> Option<&GlobalHeapObjectInfo> {
-        match self.objects.binary_search_by_key(&index, |o| o.index) {
-            Ok(pos) => Some(&self.objects[pos]),
-            Err(_) => self.objects.iter().find(|object| object.index == index),
-        }
-    }
-}
 
 /// The position of a global heap collection and the width of its length fields.
 ///
@@ -938,250 +610,8 @@ const MIN_COLLECTION_SIZE: usize = 4096;
 #[cfg(test)]
 mod tests {
     use rstest::rstest;
-    use test_util::global_heap;
-    use test_util::widths::Widths;
 
     use super::*;
-
-    /// A collection of `(index, reference count, data)` objects.
-    fn build_collection(objects: &[(u16, u16, &[u8])], length_size: usize) -> Vec<u8> {
-        let objects: Vec<_> = objects
-            .iter()
-            .map(|&(index, reference_count, data)| global_heap::Object {
-                index,
-                reference_count,
-                data,
-            })
-            .collect();
-        global_heap::collection(&objects, Widths::new(8, length_size))
-    }
-
-    #[test]
-    fn parse_collection_two_objects() {
-        let data = build_collection(&[(1, 1, b"hello"), (2, 1, b"world!!!")], 8);
-        let source = data.as_slice();
-        let coll = GlobalHeapIndex::parse(source, 0, 8).unwrap();
-        assert_eq!(coll.objects.len(), 2);
-        assert_eq!(coll.objects[0].index, 1);
-        assert_eq!(
-            source
-                .read_metadata_at(coll.objects[0].data_address, coll.objects[0].size as usize)
-                .unwrap(),
-            b"hello"
-        );
-        assert_eq!(coll.objects[1].index, 2);
-        assert_eq!(
-            source
-                .read_metadata_at(coll.objects[1].data_address, coll.objects[1].size as usize)
-                .unwrap(),
-            b"world!!!"
-        );
-    }
-
-    #[test]
-    fn parse_reads_collection_headers_as_metadata() {
-        use core::cell::Cell;
-
-        struct TrackingSource {
-            data: Vec<u8>,
-            metadata_reads: Cell<usize>,
-            raw_reads: Cell<usize>,
-        }
-
-        impl MetadataSource for TrackingSource {
-            fn len(&self) -> u64 {
-                self.data.len() as u64
-            }
-
-            fn read_at(&self, offset: u64, buf: &mut [u8]) -> Result<(), FormatError> {
-                self.raw_reads.set(self.raw_reads.get() + 1);
-                self.data.read_at(offset, buf)
-            }
-
-            fn read_metadata_at(&self, offset: u64, len: usize) -> Result<Vec<u8>, FormatError> {
-                self.metadata_reads.set(self.metadata_reads.get() + 1);
-                self.data.read_metadata_at(offset, len)
-            }
-        }
-
-        let source = TrackingSource {
-            data: build_collection(&[(1, 1, b"hello"), (2, 1, b"world")], 8),
-            metadata_reads: Cell::new(0),
-            raw_reads: Cell::new(0),
-        };
-
-        let coll = GlobalHeapIndex::parse(&source, 0, 8).unwrap();
-
-        assert_eq!(coll.objects.len(), 2);
-        assert!(source.metadata_reads.get() > 0);
-        assert_eq!(source.raw_reads.get(), 0);
-    }
-
-    #[test]
-    fn the_directory_walk_reads_by_collection_size_not_by_object_count() {
-        use core::cell::Cell;
-
-        struct CountingSource {
-            data: Vec<u8>,
-            reads: Cell<usize>,
-        }
-
-        impl MetadataSource for CountingSource {
-            fn len(&self) -> u64 {
-                self.data.len() as u64
-            }
-
-            fn read_at(&self, offset: u64, buf: &mut [u8]) -> Result<(), FormatError> {
-                self.data.read_at(offset, buf)
-            }
-
-            fn read_metadata_at(&self, offset: u64, len: usize) -> Result<Vec<u8>, FormatError> {
-                self.reads.set(self.reads.get() + 1);
-                self.data.read_metadata_at(offset, len)
-            }
-        }
-
-        // 512 objects of 8 bytes each: 512 * (16 + 8) = 12,288 bytes of
-        // directory, three windows' worth.
-        const OBJECTS: u16 = 512;
-        let payload = [0u8; 8];
-        let objects: Vec<(u16, u16, &[u8])> = (1..=OBJECTS).map(|i| (i, 1, &payload[..])).collect();
-        let source = CountingSource {
-            data: build_collection(&objects, 8),
-            reads: Cell::new(0),
-        };
-
-        let coll = GlobalHeapIndex::parse(&source, 0, 8).unwrap();
-        assert_eq!(coll.objects.len(), OBJECTS as usize);
-
-        // A refill reads `DIRECTORY_LOOKAHEAD` strides of 24 bytes ahead, the headers of about 32
-        // objects, and a walk that reads per object takes 512 reads.
-        let reads = source.reads.get();
-        assert!(
-            reads <= OBJECTS as usize / 16,
-            "walking {OBJECTS} objects took {reads} reads, which scales with the \
-             object count rather than the {} bytes of collection it covers",
-            source.data.len()
-        );
-    }
-
-    #[test]
-    fn the_directory_walk_does_not_read_a_window_per_large_object() {
-        use core::cell::Cell;
-
-        struct VolumeSource {
-            data: Vec<u8>,
-            bytes_read: Cell<usize>,
-        }
-
-        impl MetadataSource for VolumeSource {
-            fn len(&self) -> u64 {
-                self.data.len() as u64
-            }
-
-            fn read_at(&self, offset: u64, buf: &mut [u8]) -> Result<(), FormatError> {
-                self.data.read_at(offset, buf)
-            }
-
-            fn read_metadata_at(&self, offset: u64, len: usize) -> Result<Vec<u8>, FormatError> {
-                self.bytes_read.set(self.bytes_read.get() + len);
-                self.data.read_metadata_at(offset, len)
-            }
-        }
-
-        // 64 objects of 5,000 bytes, each stride wider than a window.
-        const OBJECTS: u16 = 64;
-        let payload = vec![0u8; 5000];
-        let objects: Vec<(u16, u16, &[u8])> = (1..=OBJECTS).map(|i| (i, 1, &payload[..])).collect();
-        let source = VolumeSource {
-            data: build_collection(&objects, 8),
-            bytes_read: Cell::new(0),
-        };
-
-        let coll = GlobalHeapIndex::parse(&source, 0, 8).unwrap();
-        assert_eq!(coll.objects.len(), OBJECTS as usize);
-
-        // Reading a window per object takes 64 * 4096 bytes, and the ceiling allows 32 bytes per
-        // header and one window.
-        let read = source.bytes_read.get();
-        let ceiling = DIRECTORY_WINDOW + (OBJECTS as usize + 2) * 32;
-        assert!(
-            read <= ceiling,
-            "walking {OBJECTS} objects of 5,000 bytes read {read} bytes of a \
-             {}-byte collection; a window per object rather than a header per \
-             object is the failure this bounds",
-            source.data.len()
-        );
-    }
-
-    #[test]
-    fn the_directory_walk_does_not_read_a_window_per_alternating_object() {
-        use core::cell::Cell;
-
-        struct VolumeSource {
-            data: Vec<u8>,
-            bytes_read: Cell<usize>,
-        }
-
-        impl MetadataSource for VolumeSource {
-            fn len(&self) -> u64 {
-                self.data.len() as u64
-            }
-
-            fn read_at(&self, offset: u64, buf: &mut [u8]) -> Result<(), FormatError> {
-                self.data.read_at(offset, buf)
-            }
-
-            fn read_metadata_at(&self, offset: u64, len: usize) -> Result<Vec<u8>, FormatError> {
-                self.bytes_read.set(self.bytes_read.get() + len);
-                self.data.read_metadata_at(offset, len)
-            }
-        }
-
-        // Alternating 8-byte and 5,000-byte objects, so half the strides fit in a window.
-        const OBJECTS: u16 = 256;
-        let small = [0u8; 8];
-        let large = vec![0u8; 5000];
-        let objects: Vec<(u16, u16, &[u8])> = (1..=OBJECTS)
-            .map(|i| {
-                let payload: &[u8] = if i % 2 == 0 { &large[..] } else { &small[..] };
-                (i, 1, payload)
-            })
-            .collect();
-        let source = VolumeSource {
-            data: build_collection(&objects, 8),
-            bytes_read: Cell::new(0),
-        };
-
-        let coll = GlobalHeapIndex::parse(&source, 0, 8).unwrap();
-        assert_eq!(coll.objects.len(), OBJECTS as usize);
-
-        // Reading a window after each small object takes about 128 * 4096 bytes, and the ceiling
-        // allows 32 bytes per header and one window.
-        let read = source.bytes_read.get();
-        let ceiling = DIRECTORY_WINDOW + (OBJECTS as usize + 2) * 32;
-        assert!(
-            read <= ceiling,
-            "walking {OBJECTS} alternating objects read {read} bytes of a \
-             {}-byte collection, above the {ceiling} a header apiece costs",
-            source.data.len()
-        );
-    }
-
-    #[test]
-    fn object_finds_an_object_by_its_index() {
-        let data = build_collection(&[(1, 1, b"aaa"), (3, 2, b"bbb")], 8);
-        let source = data.as_slice();
-        let coll = GlobalHeapIndex::parse(source, 0, 8).unwrap();
-        let obj = coll.object(3).unwrap();
-        assert_eq!(
-            source
-                .read_metadata_at(obj.data_address, obj.size as usize)
-                .unwrap(),
-            b"bbb"
-        );
-        assert!(coll.object(99).is_none());
-    }
 
     #[rstest]
     #[case::padded_to_the_minimum(&[b"alpha".as_slice(), b"".as_slice()], MIN_COLLECTION_SIZE)]
@@ -1191,20 +621,14 @@ mod tests {
         #[case] size: usize,
     ) {
         let encoded = encode_global_heap_collection(LengthWidth::Eight, objects).unwrap();
-        let collection = GlobalHeapIndex::parse(encoded.as_slice(), 0, 8).unwrap();
 
         assert_eq!(encoded.len(), size);
         assert_eq!(bytes::read_length(&encoded, 8, 8), Ok(size as u64));
-        let read_back: Vec<(u16, &[u8])> = collection
-            .objects
-            .iter()
-            .map(|object| {
-                let start = object.data_address as usize;
-                (object.index, &encoded[start..start + object.size as usize])
-            })
-            .collect();
         let expected: Vec<(u16, &[u8])> = (1..).zip(objects.iter().copied()).collect();
-        assert_eq!(read_back, expected);
+        assert_eq!(
+            walk_objects(region(0, &encoded), LengthWidth::Eight).unwrap(),
+            expected
+        );
 
         let free_space = objects
             .iter()
@@ -1238,93 +662,6 @@ mod tests {
         expected.extend_from_slice(&(4096u64 - 40).to_le_bytes()[..length]);
         expected.resize(4096, 0);
         assert_eq!(bytes, expected);
-    }
-
-    #[test]
-    fn free_space_terminates_parsing() {
-        // Build collection with free space marker immediately
-        let mut data = Vec::new();
-        data.extend_from_slice(&GCOL_SIGNATURE);
-        data.push(1);
-        data.extend_from_slice(&[0u8; 3]);
-        let size = 8u64 + 8 + 2; // header + `length_size` + free space marker
-        data.extend_from_slice(&size.to_le_bytes());
-        data.extend_from_slice(&0u16.to_le_bytes()); // free space
-
-        let coll = GlobalHeapIndex::parse(data.as_slice(), 0, 8).unwrap();
-        assert_eq!(coll.objects.len(), 0);
-    }
-
-    #[test]
-    fn invalid_signature_error() {
-        let mut data = build_collection(&[(1, 1, b"x")], 8);
-        data[0] = b'X'; // corrupt
-        let err = GlobalHeapIndex::parse(data.as_slice(), 0, 8).unwrap_err();
-        assert_eq!(err, FormatError::InvalidGlobalHeapSignature);
-    }
-
-    #[test]
-    fn invalid_version_error() {
-        let mut data = build_collection(&[(1, 1, b"x")], 8);
-        data[4] = 2; // wrong version
-        let err = GlobalHeapIndex::parse(data.as_slice(), 0, 8).unwrap_err();
-        assert_eq!(err, FormatError::InvalidGlobalHeapVersion(2));
-    }
-
-    #[test]
-    fn object_header_cannot_cross_collection_boundary() {
-        let mut data = build_collection(&[(1, 1, b"x")], 8);
-        let truncated_collection_size = 8u64 + 8 + 2;
-        data[8..16].copy_from_slice(&truncated_collection_size.to_le_bytes());
-
-        let err = GlobalHeapIndex::parse(data.as_slice(), 0, 8).unwrap_err();
-        assert!(matches!(err, FormatError::UnexpectedEof { .. }));
-    }
-
-    #[test]
-    fn parse_with_4byte_length() {
-        let data = build_collection(&[(1, 1, b"test")], 4);
-        let source = data.as_slice();
-        let coll = GlobalHeapIndex::parse(source, 0, 4).unwrap();
-        assert_eq!(coll.objects.len(), 1);
-        let object = &coll.objects[0];
-        assert_eq!(
-            source
-                .read_metadata_at(object.data_address, object.size as usize)
-                .unwrap(),
-            b"test"
-        );
-    }
-
-    #[test]
-    fn an_encoded_collection_parses_whole_and_filtered() {
-        let objects: [&[u8]; 2] = [b"alpha", b"beta"];
-        let bytes = encode_global_heap_collection(LengthWidth::Eight, &objects).unwrap();
-
-        let collection = GlobalHeapIndex::parse(bytes.as_slice(), 0, 8).unwrap();
-        let filtered =
-            GlobalHeapIndex::parse_filtered(bytes.as_slice(), 0, 8, |index| index == 2).unwrap();
-
-        let beta = GlobalHeapObjectInfo {
-            index: 2,
-            data_address: 56,
-            size: 4,
-        };
-        assert_eq!(
-            collection.objects,
-            vec![
-                GlobalHeapObjectInfo {
-                    index: 1,
-                    data_address: 32,
-                    size: 5,
-                },
-                beta.clone(),
-            ]
-        );
-        assert_eq!(filtered.objects, vec![beta.clone()]);
-        assert_eq!(collection.object(2), Some(&beta));
-        assert_eq!(&bytes[56..60], b"beta");
-        assert_eq!(GLOBAL_HEAP_MAX_OBJECTS, usize::from(u16::MAX));
     }
 
     // 16 + 16 + 65,480 + 16 bytes fit the 65,535 of a 2-byte length, and 65,481 bytes of data pad
@@ -1450,11 +787,16 @@ mod tests {
     }
 
     #[rstest]
-    #[case::empty(&[])]
-    #[case::two(&[b"alpha".as_slice(), b"beta".as_slice()])]
-    #[case::many(&[b"x".as_slice(); 300])]
-    #[case::large(&[b"head".as_slice(), [7u8; 5000].as_slice(), b"tail".as_slice()])]
-    fn a_walk_agrees_with_the_directory_parse_at_eight_byte_lengths(#[case] objects: &[&[u8]]) {
+    #[case::empty(&[], &[])]
+    #[case::two(&[b"alpha".as_slice(), b"beta".as_slice()], &[(1, 32, 5), (2, 56, 4)])]
+    #[case::large(
+        &[b"head".as_slice(), [7u8; 5000].as_slice(), b"tail".as_slice()],
+        &[(1, 32, 4), (2, 56, 5000), (3, 5072, 4)]
+    )]
+    fn a_walk_frames_each_payload_after_its_object_header(
+        #[case] objects: &[&[u8]],
+        #[case] expected: &[(u16, u64, u64)],
+    ) {
         let encoded = encode_global_heap_collection(LengthWidth::Eight, objects).unwrap();
         let image = region(0, &encoded);
         let mut walk = collection_at(image, LengthWidth::Eight).walk();
@@ -1462,20 +804,18 @@ mod tests {
         while let Some(range) = walk.parse_range() {
             walked.extend(walk.parse(image.subregion(range).unwrap()).unwrap());
         }
-        let walked: Vec<GlobalHeapObjectInfo> = walked
+        let framed: Vec<(u16, u64, u64)> = walked
             .iter()
-            .map(|object| GlobalHeapObjectInfo {
-                index: object.index().get(),
-                data_address: object.payload().range().start().get(),
-                size: object.payload().range().length(),
+            .map(|object| {
+                let payload = object.payload().range();
+                (
+                    object.index().get(),
+                    payload.start().get(),
+                    payload.length(),
+                )
             })
             .collect();
-        assert_eq!(
-            walked,
-            GlobalHeapIndex::parse(encoded.as_slice(), 0, 8)
-                .unwrap()
-                .objects
-        );
+        assert_eq!(framed, expected);
     }
 
     #[test]

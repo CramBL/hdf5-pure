@@ -1,11 +1,13 @@
 #![cfg(feature = "hdf5")]
 use std::ops::Range;
+use std::path::Path;
 
 use hdf5::plist::file_create::Sizeof;
-use hdf5::plist::file_create::SizeofInfo;
 use hdf5::types::VarLenUnicode;
 use hdf5_pure_format::__private::LengthWidth;
 use rstest::rstest;
+
+use super::global_heap_framing;
 
 #[rstest]
 #[case::two_byte_lengths(Sizeof::Bytes2, LengthWidth::Two)]
@@ -16,27 +18,11 @@ fn a_narrow_length_collection_matches_the_one_libhdf5_writes(
 ) {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("vlen.h5");
-    let file = hdf5::File::with_options()
-        .with_create_plist(|p| {
-            p.sizes(SizeofInfo {
-                sizeof_addr: Sizeof::Bytes8,
-                sizeof_size,
-            })
-        })
-        .create(&path)
-        .unwrap();
-    file.new_dataset::<VarLenUnicode>()
-        .shape(())
-        .create("string")
-        .unwrap()
-        .write_scalar(&PAYLOAD.parse::<VarLenUnicode>().unwrap())
-        .unwrap();
-    file.close().unwrap();
-
-    let bytes = std::fs::read(&path).unwrap();
-    let start = bytes
-        .windows(4)
-        .position(|window| window == b"GCOL")
+    let bytes = libhdf5_file(&path, sizeof_size);
+    let start = global_heap_framing::collection_starts(&bytes)
+        .first()
+        .copied()
+        .map(|start| usize::try_from(start).unwrap())
         .expect("libhdf5 writes the string into a global heap collection");
     let written = &bytes[start..start + COLLECTION_SIZE];
     let encoded =
@@ -49,6 +35,52 @@ fn a_narrow_length_collection_matches_the_one_libhdf5_writes(
         fields.clone().map(|range| &written[range]),
         fields.map(|range| &encoded[range])
     );
+}
+
+#[rstest]
+#[case::two_byte_lengths(Sizeof::Bytes2, LengthWidth::Two)]
+#[case::four_byte_lengths(Sizeof::Bytes4, LengthWidth::Four)]
+#[case::eight_byte_lengths(Sizeof::Bytes8, LengthWidth::Eight)]
+fn hdf5_pure_reads_the_string_from_an_encoded_collection_in_a_libhdf5_file(
+    #[case] sizeof_size: Sizeof,
+    #[case] width: LengthWidth,
+) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("vlen.h5");
+    let mut bytes = libhdf5_file(&path, sizeof_size);
+    let start = global_heap_framing::collection_starts(&bytes)
+        .first()
+        .copied()
+        .map(|start| usize::try_from(start).unwrap())
+        .expect("libhdf5 writes the string into a global heap collection");
+    let encoded =
+        hdf5_pure_format::__private::encode_global_heap_collection(width, &[PAYLOAD.as_bytes()])
+            .unwrap();
+    bytes[start..start + COLLECTION_SIZE].copy_from_slice(&encoded);
+
+    assert_eq!(
+        hdf5_pure::File::from_bytes(bytes)
+            .unwrap()
+            .dataset("string")
+            .unwrap()
+            .read_string()
+            .unwrap(),
+        [PAYLOAD]
+    );
+}
+
+/// Returns a file in which libhdf5 writes [`PAYLOAD`] to a scalar variable-length string dataset,
+/// with lengths `sizeof_size` wide.
+fn libhdf5_file(path: &Path, sizeof_size: Sizeof) -> Vec<u8> {
+    let file = global_heap_framing::create_libhdf5_file(path, sizeof_size, 0);
+    file.new_dataset::<VarLenUnicode>()
+        .shape(())
+        .create("string")
+        .unwrap()
+        .write_scalar(&PAYLOAD.parse::<VarLenUnicode>().unwrap())
+        .unwrap();
+    file.close().unwrap();
+    std::fs::read(path).unwrap()
 }
 
 fn written_fields(width: LengthWidth) -> [Range<usize>; 5] {
