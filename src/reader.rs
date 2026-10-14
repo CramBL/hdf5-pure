@@ -1748,46 +1748,61 @@ impl FileInner {
             .messages
             .iter()
             .find(|m| m.msg_type == MessageType::SHARED_MESSAGE_TABLE)?;
-        let message =
-            crate::sohm::SharedMessageTableMessage::parse(&msg.data, self.widths.offsets.get())
-                .ok()?;
+        let message = crate::sohm::SharedMessageTableMessage::parse_with_offset_width(
+            &msg.data,
+            self.widths.offsets,
+        )
+        .ok()?;
         // The table's address, like every address in a header message, is stored
         // relative to the file's base address, so the read is framed the same way
         // every other metadata walk here is.
         let base = self.addresses().effective_base();
-        let os = self.widths.offsets.get();
+        let offset_width = self.widths.offsets;
         match &self.backend {
-            Backend::InMemory(v) => {
-                crate::sohm::SohmTable::read(frame(v, base).ok()?, &message, os).ok()
-            }
+            Backend::InMemory(v) => crate::sohm::SohmTable::read_with_offset_width(
+                frame(v, base).ok()?,
+                &message,
+                offset_width,
+            )
+            .ok(),
             Backend::Streaming(s) if base.is_zero() => {
-                crate::sohm::SohmTable::read_from_source(&SourceMetadata(s.as_ref()), &message, os)
-                    .ok()
+                crate::sohm::SohmTable::read_from_source_with_offset_width(
+                    &SourceMetadata(s.as_ref()),
+                    &message,
+                    offset_width,
+                )
+                .ok()
             }
-            Backend::Streaming(s) => crate::sohm::SohmTable::read_from_source(
+            Backend::Streaming(s) => crate::sohm::SohmTable::read_from_source_with_offset_width(
                 &SourceMetadata(&BaseOffsetSource {
                     inner: s.as_ref(),
                     base,
                 }),
                 &message,
-                os,
+                offset_width,
             )
             .ok(),
             Backend::Edit(m) => Self::with_engine(
                 m,
-                |d| Ok::<_, Error>(crate::sohm::SohmTable::read(frame(d, base)?, &message, os)?),
+                |d| {
+                    Ok::<_, Error>(crate::sohm::SohmTable::read_with_offset_width(
+                        frame(d, base)?,
+                        &message,
+                        offset_width,
+                    )?)
+                },
                 |s| {
                     if base.is_zero() {
-                        Ok(crate::sohm::SohmTable::read_from_source(
+                        Ok(crate::sohm::SohmTable::read_from_source_with_offset_width(
                             &SourceMetadata(s),
                             &message,
-                            os,
+                            offset_width,
                         )?)
                     } else {
-                        Ok(crate::sohm::SohmTable::read_from_source(
+                        Ok(crate::sohm::SohmTable::read_from_source_with_offset_width(
                             &SourceMetadata(&BaseOffsetSource { inner: s, base }),
                             &message,
-                            os,
+                            offset_width,
                         )?)
                     }
                 },
@@ -2287,22 +2302,18 @@ impl FileInner {
         if !msg.flags.is_shared() {
             return Ok(Cow::Borrowed(&msg.data));
         }
-        let (os, ls, base) = (
-            self.offset_size(),
-            self.length_size(),
-            self.addresses().effective_base(),
-        );
+        let (widths, base) = (self.widths, self.addresses().effective_base());
         let access = self.access_mode();
         let sohm = self.sohm_table.as_deref();
         // A shared reference stores its address relative to the base address, so
         // frame the file at `base` exactly as [`Self::attr_messages_of`] does.
         let resolved = match &self.backend {
             Backend::InMemory(v) => {
-                BufferedResolver::new(frame(v, base)?, self.addresses(), access, os, ls, sohm)
+                BufferedResolver::new(frame(v, base)?, self.addresses(), access, widths, sohm)
                     .resolve(&msg.data, msg.msg_type)
             }
             Backend::Streaming(s) if base.is_zero() => {
-                SourceResolver::new(s.as_ref(), self.addresses(), access, os, ls, sohm)
+                SourceResolver::new(s.as_ref(), self.addresses(), access, widths, sohm)
                     .resolve(&msg.data, msg.msg_type)
             }
             Backend::Streaming(s) => SourceResolver::new(
@@ -2312,28 +2323,26 @@ impl FileInner {
                 },
                 self.addresses(),
                 access,
-                os,
-                ls,
+                widths,
                 sohm,
             )
             .resolve(&msg.data, msg.msg_type),
             Backend::Edit(m) => Self::with_engine(
                 m,
                 |d| {
-                    BufferedResolver::new(frame(d, base)?, self.addresses(), access, os, ls, sohm)
+                    BufferedResolver::new(frame(d, base)?, self.addresses(), access, widths, sohm)
                         .resolve(&msg.data, msg.msg_type)
                 },
                 |s| {
                     if base.is_zero() {
-                        SourceResolver::new(s, self.addresses(), access, os, ls, sohm)
+                        SourceResolver::new(s, self.addresses(), access, widths, sohm)
                             .resolve(&msg.data, msg.msg_type)
                     } else {
                         SourceResolver::new(
                             &BaseOffsetSource { inner: s, base },
                             self.addresses(),
                             access,
-                            os,
-                            ls,
+                            widths,
                             sohm,
                         )
                         .resolve(&msg.data, msg.msg_type)
@@ -2361,8 +2370,7 @@ impl FileInner {
         if !msg.flags.is_shared() {
             return Ok(None);
         }
-        let reference =
-            shared_message::parse_shared_ref(&msg.data, self.offset_size(), self.length_size())?;
+        let reference = shared_message::parse_shared_ref_with_widths(&msg.data, self.widths)?;
         match reference.location {
             shared_message::SharedLocation::ObjectHeader(addr) => Ok(Some(addr.get())),
             shared_message::SharedLocation::SohmHeap(_) => Ok(None),
@@ -2375,7 +2383,7 @@ impl FileInner {
         &self,
         hdr: &ObjectHeader,
     ) -> Result<Vec<crate::attribute::AttributeMessage>, Error> {
-        let (os, ls) = (self.offset_size(), self.length_size());
+        let widths = self.widths;
         // Compact attributes come out of `hdr`, but the two addresses this walk
         // follows are read from message bodies and so are stored relative to the
         // base address: the Attribute Info message's fractal-heap address, and a
@@ -2392,8 +2400,7 @@ impl FileInner {
                 access,
                 self.addresses(),
                 hdr,
-                os,
-                ls,
+                widths,
                 sohm,
             )?),
             Backend::Streaming(s) if base.is_zero() => Ok(extract_attributes_full_from_source(
@@ -2401,8 +2408,7 @@ impl FileInner {
                 self.addresses(),
                 access,
                 hdr,
-                os,
-                ls,
+                widths,
                 sohm,
             )?),
             Backend::Streaming(s) => {
@@ -2415,8 +2421,7 @@ impl FileInner {
                     self.addresses(),
                     access,
                     hdr,
-                    os,
-                    ls,
+                    widths,
                     sohm,
                 )?)
             }
@@ -2428,8 +2433,7 @@ impl FileInner {
                         access,
                         self.addresses(),
                         hdr,
-                        os,
-                        ls,
+                        widths,
                         sohm,
                     )?)
                 },
@@ -2440,8 +2444,7 @@ impl FileInner {
                             self.addresses(),
                             access,
                             hdr,
-                            os,
-                            ls,
+                            widths,
                             sohm,
                         )?)
                     } else {
@@ -2451,8 +2454,7 @@ impl FileInner {
                             self.addresses(),
                             access,
                             hdr,
-                            os,
-                            ls,
+                            widths,
                             sohm,
                         )?)
                     }

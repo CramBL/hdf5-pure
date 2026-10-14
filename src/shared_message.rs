@@ -21,12 +21,12 @@ pub use hdf5_pure_format::__private::DatatypeLocation;
 pub use hdf5_pure_format::__private::FHEAP_ID_LEN;
 pub use hdf5_pure_format::__private::SharedLocation;
 pub use hdf5_pure_format::__private::SharedResolver;
-pub use hdf5_pure_format::__private::committed_address_in;
+pub use hdf5_pure_format::__private::committed_address_in_with_widths;
 #[cfg(any(feature = "std", test))]
 pub use hdf5_pure_format::__private::encode_committed_ref;
 #[cfg(any(feature = "std", test))]
 pub use hdf5_pure_format::__private::encode_sohm_ref;
-pub use hdf5_pure_format::__private::parse_shared_ref;
+pub use hdf5_pure_format::__private::parse_shared_ref_with_widths;
 
 use crate::access_mode::AccessMode;
 use crate::address::AddressContext;
@@ -39,6 +39,7 @@ use crate::object_header::ObjectHeader;
 use crate::sohm::SohmTable;
 use crate::source::Source;
 use crate::source::SourceMetadata;
+use crate::width::FormatWidths;
 
 /// Resolves references against a whole-file slice, already framed at the file's
 /// base address (shared-message addresses are stored relative to it).
@@ -46,8 +47,7 @@ pub struct BufferedResolver<'a> {
     file_data: &'a [u8],
     addresses: AddressContext,
     access_mode: AccessMode,
-    offset_size: u8,
-    length_size: u8,
+    widths: FormatWidths,
     sohm: Option<&'a SohmTable>,
 }
 
@@ -60,16 +60,14 @@ impl<'a> BufferedResolver<'a> {
         file_data: &'a [u8],
         addresses: AddressContext,
         access_mode: AccessMode,
-        offset_size: u8,
-        length_size: u8,
+        widths: FormatWidths,
         sohm: Option<&'a SohmTable>,
     ) -> Self {
         Self {
             file_data,
             addresses,
             access_mode,
-            offset_size,
-            length_size,
+            widths,
             sohm,
         }
     }
@@ -77,7 +75,7 @@ impl<'a> BufferedResolver<'a> {
 
 impl SharedResolver for BufferedResolver<'_> {
     fn resolve(&self, reference: &[u8], target: MessageType) -> Result<Vec<u8>, FormatError> {
-        let parsed = parse_shared_ref(reference, self.offset_size, self.length_size)?;
+        let parsed = parse_shared_ref_with_widths(reference, self.widths)?;
         let addr = match parsed.location {
             SharedLocation::SohmHeap(id) => {
                 let table = self.sohm.ok_or(FormatError::UnsupportedSohmReference)?;
@@ -88,24 +86,22 @@ impl SharedResolver for BufferedResolver<'_> {
                     table,
                     target,
                     &id,
-                    self.offset_size,
-                    self.length_size,
+                    self.widths,
                 );
             }
             SharedLocation::ObjectHeader(addr) => addr,
         };
-        let header = ObjectHeader::parse(
+        let header = ObjectHeader::parse_with_widths(
             self.file_data,
             self.access_mode,
             addr.get().to_usize()?,
-            self.offset_size,
-            self.length_size,
+            self.widths,
         )?;
         select_shared_message(&header, target, addr.get())
     }
 
     fn committed_address(&self, reference: &[u8]) -> Result<Option<StoredAddress>, FormatError> {
-        committed_address_in(reference, self.offset_size, self.length_size)
+        committed_address_in_with_widths(reference, self.widths)
     }
 }
 
@@ -116,8 +112,7 @@ pub struct SourceResolver<'a, S: Source + ?Sized> {
     source: &'a S,
     addresses: AddressContext,
     access_mode: AccessMode,
-    offset_size: u8,
-    length_size: u8,
+    widths: FormatWidths,
     sohm: Option<&'a SohmTable>,
 }
 
@@ -130,16 +125,14 @@ impl<'a, S: Source + ?Sized> SourceResolver<'a, S> {
         source: &'a S,
         addresses: AddressContext,
         access_mode: AccessMode,
-        offset_size: u8,
-        length_size: u8,
+        widths: FormatWidths,
         sohm: Option<&'a SohmTable>,
     ) -> Self {
         Self {
             source,
             addresses,
             access_mode,
-            offset_size,
-            length_size,
+            widths,
             sohm,
         }
     }
@@ -147,7 +140,7 @@ impl<'a, S: Source + ?Sized> SourceResolver<'a, S> {
 
 impl<S: Source + ?Sized> SharedResolver for SourceResolver<'_, S> {
     fn resolve(&self, reference: &[u8], target: MessageType) -> Result<Vec<u8>, FormatError> {
-        let parsed = parse_shared_ref(reference, self.offset_size, self.length_size)?;
+        let parsed = parse_shared_ref_with_widths(reference, self.widths)?;
         let addr = match parsed.location {
             SharedLocation::SohmHeap(id) => {
                 let table = self.sohm.ok_or(FormatError::UnsupportedSohmReference)?;
@@ -158,27 +151,25 @@ impl<S: Source + ?Sized> SharedResolver for SourceResolver<'_, S> {
                     table,
                     target,
                     &id,
-                    self.offset_size,
-                    self.length_size,
+                    self.widths,
                 );
             }
             SharedLocation::ObjectHeader(addr) => addr,
         };
         // base_address 0 matches the buffered path, whose slice is already framed
         // at the base address, so both treat the reference as absolute within it.
-        let header = ObjectHeader::parse_from_source(
+        let header = ObjectHeader::parse_from_source_with_widths(
             &SourceMetadata(self.source),
             self.access_mode,
             addr.get(),
-            self.offset_size,
-            self.length_size,
+            self.widths,
             BaseAddress::ZERO,
         )?;
         select_shared_message(&header, target, addr.get())
     }
 
     fn committed_address(&self, reference: &[u8]) -> Result<Option<StoredAddress>, FormatError> {
-        committed_address_in(reference, self.offset_size, self.length_size)
+        committed_address_in_with_widths(reference, self.widths)
     }
 }
 
@@ -242,8 +233,10 @@ mod tests {
             &[],
             AddressContext::from_effective_base(BaseAddress::new(0)),
             AccessMode::ReadOnly,
-            8,
-            8,
+            FormatWidths {
+                offsets: crate::width::OffsetWidth::Eight,
+                lengths: crate::width::LengthWidth::Eight,
+            },
             None,
         );
 

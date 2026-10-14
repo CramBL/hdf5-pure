@@ -4526,8 +4526,7 @@ mod tests {
             AccessMode::ReadOnly,
             AddressContext::from_effective_base(BaseAddress::new(0)),
             &hdr,
-            sb.offset_size,
-            sb.length_size,
+            WIDTHS,
             None,
         )
         .unwrap();
@@ -4570,8 +4569,7 @@ mod tests {
             AccessMode::ReadOnly,
             AddressContext::from_effective_base(BaseAddress::new(0)),
             &oh,
-            sb.offset_size,
-            sb.length_size,
+            WIDTHS,
             None,
         )
         .unwrap();
@@ -5183,8 +5181,7 @@ mod tests {
             AccessMode::ReadOnly,
             AddressContext::from_effective_base(BaseAddress::new(0)),
             &hdr,
-            sb.offset_size,
-            sb.length_size,
+            WIDTHS,
             None,
         )
         .unwrap();

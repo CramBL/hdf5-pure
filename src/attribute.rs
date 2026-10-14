@@ -21,9 +21,7 @@ use crate::address::StoredAddress;
 #[cfg(test)]
 use crate::address::StoredAddressExt;
 use crate::attribute_info::AttributeInfoMessage;
-use crate::btree_v2::{
-    BTreeV2Header, collect_btree_v2_records, collect_btree_v2_records_from_source,
-};
+use crate::btree_v2::BTreeV2Header;
 use crate::convert::Narrow;
 use crate::dense_storage::{self, DenseIndex};
 use crate::error::FormatError;
@@ -38,8 +36,7 @@ use crate::shared_message::SourceResolver;
 use crate::sohm::SohmTable;
 use crate::source::Source;
 use crate::source::SourceMetadata;
-use crate::width::LengthWidth;
-use crate::width::OffsetWidth;
+use crate::width::{FormatWidths, OffsetWidth};
 
 /// Returns the v2 B-tree allocations owned by a dense attribute set.
 ///
@@ -63,8 +60,7 @@ use crate::width::OffsetWidth;
 pub(crate) fn collect_dense_attribute_index_storage_extents<S: Source + ?Sized>(
     source: &S,
     attr_info: &AttributeInfoMessage,
-    offset_size: u8,
-    length_size: u8,
+    widths: FormatWidths,
 ) -> Result<Vec<Extent>, FormatError> {
     let Some(fractal_heap_address) = attr_info.fractal_heap_address else {
         return Ok(Vec::new());
@@ -80,12 +76,11 @@ pub(crate) fn collect_dense_attribute_index_storage_extents<S: Source + ?Sized>(
     {
         indexes.push(DenseIndex::new(address, BTREE_V2_ATTRIBUTE_CREATION_ORDER));
     }
-    dense_storage::collect_dense_index_storage_extents(
+    dense_storage::collect_dense_index_storage_extents_with_widths(
         source,
         fractal_heap_address,
         indexes,
-        offset_size,
-        length_size,
+        widths,
     )
 }
 
@@ -121,18 +116,10 @@ pub fn extract_attributes_full(
     access_mode: AccessMode,
     addresses: AddressContext,
     header: &ObjectHeader,
-    offset_size: u8,
-    length_size: u8,
+    widths: FormatWidths,
     sohm: Option<&SohmTable>,
 ) -> Result<Vec<AttributeMessage>, FormatError> {
-    let resolver = BufferedResolver::new(
-        file_data,
-        addresses,
-        access_mode,
-        offset_size,
-        length_size,
-        sohm,
-    );
+    let resolver = BufferedResolver::new(file_data, addresses, access_mode, widths, sohm);
     let mut attrs = Vec::new();
 
     // Collect compact attributes (inline in OH)
@@ -142,16 +129,16 @@ pub fn extract_attributes_full(
                 // The whole attribute message is shared: resolve the reference to
                 // get the message, which may itself name a committed datatype.
                 let resolved = resolver.resolve(&msg.data, MessageType::ATTRIBUTE)?;
-                AttributeMessage::parse_resolving(&resolved, length_size, &resolver)?
+                AttributeMessage::parse_resolving(&resolved, widths.lengths.get(), &resolver)?
             } else {
-                AttributeMessage::parse_resolving(&msg.data, length_size, &resolver)?
+                AttributeMessage::parse_resolving(&msg.data, widths.lengths.get(), &resolver)?
             };
             attrs.push(attr);
         }
     }
 
     // Check for dense attributes via AttributeInfo message
-    let attr_info = find_attribute_info(header, offset_size)?;
+    let attr_info = find_attribute_info(header, widths.offsets)?;
     if let Some(info) = attr_info
         && let Some(fh_addr) = info.fractal_heap_address
     {
@@ -161,8 +148,7 @@ pub fn extract_attributes_full(
             addresses,
             &info,
             fh_addr,
-            offset_size,
-            length_size,
+            widths,
             sohm,
         )?;
         attrs.extend(dense_attrs);
@@ -184,22 +170,22 @@ pub fn extract_attributes_full_from_source<S: Source + ?Sized>(
     addresses: AddressContext,
     access_mode: AccessMode,
     header: &ObjectHeader,
-    offset_size: u8,
-    length_size: u8,
+    widths: FormatWidths,
     sohm: Option<&SohmTable>,
 ) -> Result<Vec<AttributeMessage>, FormatError> {
-    Ok(extract_stored_attributes_from_source(
-        source,
-        addresses,
-        access_mode,
-        header,
-        offset_size,
-        length_size,
-        sohm,
-    )?
-    .into_iter()
-    .map(|a| a.message)
-    .collect())
+    Ok(
+        extract_stored_attributes_from_source(
+            source,
+            addresses,
+            access_mode,
+            header,
+            widths,
+            sohm,
+        )?
+        .into_iter()
+        .map(|a| a.message)
+        .collect(),
+    )
 }
 
 /// An attribute as its object stores it, with the creation index the storage
@@ -229,18 +215,10 @@ pub fn extract_stored_attributes_from_source<S: Source + ?Sized>(
     addresses: AddressContext,
     access_mode: AccessMode,
     header: &ObjectHeader,
-    offset_size: u8,
-    length_size: u8,
+    widths: FormatWidths,
     sohm: Option<&SohmTable>,
 ) -> Result<Vec<StoredAttribute>, FormatError> {
-    let resolver = SourceResolver::new(
-        source,
-        addresses,
-        access_mode,
-        offset_size,
-        length_size,
-        sohm,
-    );
+    let resolver = SourceResolver::new(source, addresses, access_mode, widths, sohm);
     let mut attrs = Vec::new();
 
     // Collect compact attributes (inline in OH)
@@ -248,9 +226,9 @@ pub fn extract_stored_attributes_from_source<S: Source + ?Sized>(
         if msg.msg_type == MessageType::ATTRIBUTE {
             let attr = if msg.flags.is_shared() {
                 let resolved = resolver.resolve(&msg.data, MessageType::ATTRIBUTE)?;
-                AttributeMessage::parse_resolving(&resolved, length_size, &resolver)?
+                AttributeMessage::parse_resolving(&resolved, widths.lengths.get(), &resolver)?
             } else {
-                AttributeMessage::parse_resolving(&msg.data, length_size, &resolver)?
+                AttributeMessage::parse_resolving(&msg.data, widths.lengths.get(), &resolver)?
             };
             attrs.push(StoredAttribute {
                 message: attr,
@@ -260,7 +238,7 @@ pub fn extract_stored_attributes_from_source<S: Source + ?Sized>(
     }
 
     // Check for dense attributes via AttributeInfo message
-    let attr_info = find_attribute_info(header, offset_size)?;
+    let attr_info = find_attribute_info(header, widths.offsets)?;
     if let Some(info) = attr_info
         && let Some(fh_addr) = info.fractal_heap_address
     {
@@ -270,8 +248,7 @@ pub fn extract_stored_attributes_from_source<S: Source + ?Sized>(
             access_mode,
             &info,
             fh_addr,
-            offset_size,
-            length_size,
+            widths,
             sohm,
         )?;
         attrs.extend(dense_attrs);
@@ -283,11 +260,11 @@ pub fn extract_stored_attributes_from_source<S: Source + ?Sized>(
 /// Find and parse the Attribute Info message from an object header.
 fn find_attribute_info(
     header: &ObjectHeader,
-    offset_size: u8,
+    offset_width: OffsetWidth,
 ) -> Result<Option<AttributeInfoMessage>, FormatError> {
     for msg in &header.messages {
         if msg.msg_type == MessageType::ATTRIBUTE_INFO {
-            let info = AttributeInfoMessage::parse(&msg.data, offset_size)?;
+            let info = AttributeInfoMessage::parse(&msg.data, offset_width.get())?;
             return Ok(Some(info));
         }
     }
@@ -307,13 +284,11 @@ fn extract_dense_attributes(
     addresses: AddressContext,
     attr_info: &AttributeInfoMessage,
     fh_addr: StoredAddress,
-    offset_size: u8,
-    length_size: u8,
+    widths: FormatWidths,
     sohm: Option<&SohmTable>,
 ) -> Result<Vec<AttributeMessage>, FormatError> {
     // Parse fractal heap
-    let fh =
-        crate::fractal_heap::parse_header(file_data, addresses, fh_addr, offset_size, length_size)?;
+    let fh = crate::fractal_heap::parse_header_with_widths(file_data, addresses, fh_addr, widths)?;
 
     // Parse B-tree v2 for name index (type 8)
     let btree_addr = attr_info
@@ -322,35 +297,17 @@ fn extract_dense_attributes(
             expected: 1,
             available: 0,
         })?;
-    let btree_hdr = BTreeV2Header::parse(
+    let btree_hdr =
+        BTreeV2Header::parse_with_widths(file_data, btree_addr.get().to_usize()?, widths)?;
+    let records = crate::btree_v2::collect_btree_v2_records_with_offset_width(
         file_data,
-        btree_addr.get().to_usize()?,
-        offset_size,
-        length_size,
+        &btree_hdr,
+        widths.offsets,
     )?;
-    let records = collect_btree_v2_records(file_data, &btree_hdr, offset_size, length_size)?;
 
-    let resolver = BufferedResolver::new(
-        file_data,
-        addresses,
-        access_mode,
-        offset_size,
-        length_size,
-        sohm,
-    );
-    let layout = FractalHeapIdLayout::new(
-        &fh,
-        OffsetWidth::try_from(offset_size)?,
-        LengthWidth::try_from(length_size)?,
-    );
-    let mut heap = HeapObjectReader::new(
-        &fh,
-        addresses,
-        fh_addr,
-        access_mode,
-        offset_size,
-        length_size,
-    );
+    let resolver = BufferedResolver::new(file_data, addresses, access_mode, widths, sohm);
+    let layout = FractalHeapIdLayout::new(&fh, widths.offsets, widths.lengths);
+    let mut heap = HeapObjectReader::new(&fh, addresses, fh_addr, access_mode, widths);
     let mut attrs = Vec::new();
     for record in &records {
         let Some(id_bytes) = record.attribute_heap_id(fh.heap_id_length) else {
@@ -362,7 +319,7 @@ fn extract_dense_attributes(
 
         // The data in the heap is a complete attribute message, and it names a
         // committed datatype the same way a compact one does.
-        let attr = AttributeMessage::parse_resolving(&attr_data, length_size, &resolver)?;
+        let attr = AttributeMessage::parse_resolving(&attr_data, widths.lengths.get(), &resolver)?;
         attrs.push(attr);
     }
 
@@ -377,18 +334,10 @@ fn extract_dense_attributes_from_source<S: Source + ?Sized>(
     access_mode: AccessMode,
     attr_info: &AttributeInfoMessage,
     fh_addr: StoredAddress,
-    offset_size: u8,
-    length_size: u8,
+    widths: FormatWidths,
     sohm: Option<&SohmTable>,
 ) -> Result<Vec<StoredAttribute>, FormatError> {
-    let resolver = SourceResolver::new(
-        source,
-        addresses,
-        access_mode,
-        offset_size,
-        length_size,
-        sohm,
-    );
+    let resolver = SourceResolver::new(source, addresses, access_mode, widths, sohm);
     let mut attrs = Vec::new();
     visit_dense_attribute_messages_from_source(
         source,
@@ -396,12 +345,11 @@ fn extract_dense_attributes_from_source<S: Source + ?Sized>(
         addresses,
         attr_info,
         fh_addr,
-        offset_size,
-        length_size,
+        widths,
         |_flags| true,
         |data, creation_index| {
             attrs.push(StoredAttribute {
-                message: AttributeMessage::parse_resolving(data, length_size, &resolver)?,
+                message: AttributeMessage::parse_resolving(data, widths.lengths.get(), &resolver)?,
                 creation_index,
             });
             Ok(())
@@ -433,17 +381,12 @@ pub(crate) fn visit_dense_attribute_messages_from_source(
     addresses: AddressContext,
     attr_info: &AttributeInfoMessage,
     fh_addr: StoredAddress,
-    offset_size: u8,
-    length_size: u8,
+    widths: FormatWidths,
     mut select: impl FnMut(MessageFlags) -> bool,
     mut visit: impl FnMut(&[u8], Option<u16>) -> Result<(), FormatError>,
 ) -> Result<(), FormatError> {
-    let fh = crate::fractal_heap::read_header_from_source(
-        source,
-        addresses,
-        fh_addr,
-        offset_size,
-        length_size,
+    let fh = crate::fractal_heap::read_header_from_source_with_widths(
+        source, addresses, fh_addr, widths,
     )?;
 
     let btree_addr = attr_info
@@ -452,28 +395,19 @@ pub(crate) fn visit_dense_attribute_messages_from_source(
             expected: 1,
             available: 0,
         })?;
-    let btree_hdr = BTreeV2Header::parse_from_source(
+    let btree_hdr = BTreeV2Header::parse_from_source_with_widths(
         &SourceMetadata(source),
         btree_addr.get(),
-        offset_size,
-        length_size,
+        widths,
     )?;
-    let records =
-        collect_btree_v2_records_from_source(source, &btree_hdr, offset_size, length_size)?;
+    let records = crate::btree_v2::collect_btree_v2_records_from_source_with_offset_width(
+        source,
+        &btree_hdr,
+        widths.offsets,
+    )?;
 
-    let layout = FractalHeapIdLayout::new(
-        &fh,
-        OffsetWidth::try_from(offset_size)?,
-        LengthWidth::try_from(length_size)?,
-    );
-    let mut heap = HeapObjectReader::new(
-        &fh,
-        addresses,
-        fh_addr,
-        access_mode,
-        offset_size,
-        length_size,
-    );
+    let layout = FractalHeapIdLayout::new(&fh, widths.offsets, widths.lengths);
+    let mut heap = HeapObjectReader::new(&fh, addresses, fh_addr, access_mode, widths);
     for record in &records {
         let flags_at = usize::from(fh.heap_id_length);
         let flags = record
@@ -578,9 +512,12 @@ mod tests {
             btree_creation_order_address: Some(StoredAddress::new(0x500)),
         };
 
-        let extents =
-            collect_dense_attribute_index_storage_extents(&BytesSource::new(file), &info, 8, 8)
-                .unwrap();
+        let extents = collect_dense_attribute_index_storage_extents(
+            &BytesSource::new(file),
+            &info,
+            FormatWidths::from_sizes(8, 8).unwrap(),
+        )
+        .unwrap();
 
         assert_eq!(extents, expected);
     }
@@ -643,12 +580,12 @@ mod tests {
     }
 
     /// The root group's dense-attribute storage: its info message, its heap
-    /// address, and the file's offset and length sizes.
-    fn dense_attribute_info(bytes: &[u8]) -> (AttributeInfoMessage, StoredAddress, u8, u8) {
+    /// address, and the file's format widths.
+    fn dense_attribute_info(bytes: &[u8]) -> (AttributeInfoMessage, StoredAddress, FormatWidths) {
         let sig = crate::signature::find_signature(bytes).unwrap();
-        let superblock = hdf5_pure_format::__private::parse_superblock(bytes, sig).unwrap();
-        let (offset_size, length_size) = (superblock.offset_size, superblock.length_size);
-        let root = ObjectHeader::parse(
+        let (superblock, widths) =
+            hdf5_pure_format::__private::parse_superblock_with_widths(bytes, sig).unwrap();
+        let root = ObjectHeader::parse_with_widths(
             bytes,
             AccessMode::ReadOnly,
             AddressContext::from_effective_base(superblock.base_address)
@@ -656,17 +593,16 @@ mod tests {
                 .unwrap()
                 .to_usize()
                 .unwrap(),
-            offset_size,
-            length_size,
+            widths,
         )
         .unwrap();
-        let info = find_attribute_info(&root, offset_size)
+        let info = find_attribute_info(&root, widths.offsets)
             .unwrap()
             .expect("this many attributes are stored densely");
         let fh_addr = info
             .fractal_heap_address
             .expect("dense storage names its heap");
-        (info, fh_addr, offset_size, length_size)
+        (info, fh_addr, widths)
     }
 
     /// The streaming dense walk resolves every huge object against one parse of
@@ -681,12 +617,11 @@ mod tests {
     fn a_dense_walk_parses_its_huge_object_index_once() {
         const COUNT: usize = 6;
         let bytes = file_with_huge_attributes(COUNT);
-        let (info, fh_addr, offset_size, length_size) = dense_attribute_info(&bytes);
-        let heap = FractalHeapHeader::parse(
-            &bytes,
-            fh_addr.get().to_usize().unwrap(),
-            offset_size,
-            length_size,
+        let (info, fh_addr, widths) = dense_attribute_info(&bytes);
+        let heap = FractalHeapHeader::parse_bytes(
+            &bytes[fh_addr.get().to_usize().unwrap()..],
+            widths.offsets,
+            widths.lengths,
         )
         .unwrap();
         let btree_addr = heap.btree_huge_objects_address;
@@ -698,8 +633,7 @@ mod tests {
             AccessMode::ReadOnly,
             &info,
             fh_addr,
-            offset_size,
-            length_size,
+            widths,
             None,
         )
         .unwrap();
@@ -726,7 +660,7 @@ mod tests {
     fn a_buffered_dense_walk_parses_its_huge_object_index_once() {
         const COUNT: usize = 6;
         let bytes = file_with_huge_attributes(COUNT);
-        let (info, fh_addr, offset_size, length_size) = dense_attribute_info(&bytes);
+        let (info, fh_addr, widths) = dense_attribute_info(&bytes);
 
         crate::fractal_heap::reset_huge_index_decodes();
         let attrs = extract_dense_attributes(
@@ -735,8 +669,7 @@ mod tests {
             AddressContext::from_effective_base(BaseAddress::ZERO),
             &info,
             fh_addr,
-            offset_size,
-            length_size,
+            widths,
             None,
         )
         .unwrap();
@@ -762,7 +695,7 @@ mod tests {
         // exceed the heap's managed-object limit.
         const COUNT: usize = 40;
         let bytes = file_with_managed_attributes(COUNT);
-        let (info, fh_addr, offset_size, length_size) = dense_attribute_info(&bytes);
+        let (info, fh_addr, widths) = dense_attribute_info(&bytes);
 
         crate::fractal_heap::reset_huge_index_decodes();
         let buffered = extract_dense_attributes(
@@ -771,8 +704,7 @@ mod tests {
             AddressContext::from_effective_base(BaseAddress::ZERO),
             &info,
             fh_addr,
-            offset_size,
-            length_size,
+            widths,
             None,
         )
         .unwrap();
@@ -783,8 +715,7 @@ mod tests {
             AccessMode::ReadOnly,
             &info,
             fh_addr,
-            offset_size,
-            length_size,
+            widths,
             None,
         )
         .unwrap();

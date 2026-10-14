@@ -10,9 +10,10 @@ use alloc::vec::Vec;
 use crate::address::StoredAddress;
 use crate::address::StoredAddressExt;
 use crate::bytes;
-use crate::bytes::{ensure_len, read_offset};
+use crate::bytes::ensure_len;
 use crate::error::FormatError;
 use crate::message_type::MessageType;
+use crate::width::FormatWidths;
 use crate::width::OffsetWidth;
 
 /// Fractal heap ID length for SOHM entries (fixed at 8 bytes).
@@ -101,6 +102,23 @@ pub fn parse_shared_ref(
     offset_size: u8,
     length_size: u8,
 ) -> Result<SharedMessageRef, FormatError> {
+    parse_shared_ref_with_widths(data, FormatWidths::from_sizes(offset_size, length_size)?)
+}
+
+/// Parses a shared message reference using validated file widths.
+///
+/// Version 1 stores a symbol-table entry, so its object-header address follows a local-heap
+/// address with the file's length width. Versions 2 and 3 store an address with the file's offset
+/// width or an eight-byte shared-message heap ID.
+///
+/// # Errors
+///
+/// Returns [`FormatError::InvalidSharedMessageVersion`] if the version is not 1, 2, or 3, and
+/// [`FormatError::UnexpectedEof`] if `data` ends inside the reference.
+pub fn parse_shared_ref_with_widths(
+    data: &[u8],
+    widths: FormatWidths,
+) -> Result<SharedMessageRef, FormatError> {
     ensure_len(data, 0, 2)?;
     let version = data[0];
 
@@ -111,8 +129,8 @@ pub fn parse_shared_ref(
             // address follows. Version 1 predates the SOHM table, so the type
             // byte holds nothing and the destination is always an object
             // header.
-            let pos = 2 + 6 + length_size as usize;
-            let addr = StoredAddress::new(read_offset(data, pos, offset_size)?);
+            let pos = 2 + 6 + usize::from(widths.lengths.get());
+            let addr = StoredAddress::new(bytes::read_offset_width(data, pos, widths.offsets)?);
             Ok(SharedMessageRef {
                 version,
                 ref_type: REF_TYPE_COMMITTED,
@@ -130,7 +148,11 @@ pub fn parse_shared_ref(
                 id.copy_from_slice(&data[2..2 + FHEAP_ID_LEN]);
                 SharedLocation::SohmHeap(id)
             } else {
-                SharedLocation::ObjectHeader(StoredAddress::new(read_offset(data, 2, offset_size)?))
+                SharedLocation::ObjectHeader(StoredAddress::new(bytes::read_offset_width(
+                    data,
+                    2,
+                    widths.offsets,
+                )?))
             };
             Ok(SharedMessageRef {
                 version,
@@ -250,7 +272,24 @@ pub fn committed_address_in(
     offset_size: u8,
     length_size: u8,
 ) -> Result<Option<StoredAddress>, FormatError> {
-    match parse_shared_ref(reference, offset_size, length_size)?.location {
+    committed_address_in_with_widths(
+        reference,
+        FormatWidths::from_sizes(offset_size, length_size)?,
+    )
+}
+
+/// Returns the object header address in `reference` using validated file widths.
+///
+/// A reference into the shared-message heap returns `None`.
+///
+/// # Errors
+///
+/// Returns the error [`parse_shared_ref_with_widths`] returns if `reference` is malformed.
+pub fn committed_address_in_with_widths(
+    reference: &[u8],
+    widths: FormatWidths,
+) -> Result<Option<StoredAddress>, FormatError> {
+    match parse_shared_ref_with_widths(reference, widths)?.location {
         SharedLocation::ObjectHeader(addr) => Ok(Some(addr)),
         SharedLocation::SohmHeap(_) => Ok(None),
     }

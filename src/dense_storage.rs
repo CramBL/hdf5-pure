@@ -12,6 +12,8 @@ use crate::btree_v2::{self, BTreeV2Header};
 use crate::error::FormatError;
 use crate::source::{Source, SourceMetadata};
 use crate::width::FormatWidths;
+#[cfg(test)]
+use crate::width::{LengthWidth, OffsetWidth};
 
 /// One version 2 B-tree identified as part of a dense-storage owner's index set.
 #[derive(Clone, Copy)]
@@ -28,34 +30,6 @@ impl DenseIndex {
             expected_tree_type,
         }
     }
-}
-
-/// Returns all allocations of a proven dense-storage index set.
-///
-/// Every index header must have the client type its owner requires, every tree must be enumerable
-/// completely, the resulting allocations must be mutually disjoint, and no allocation may contain
-/// the associated fractal-heap header. The caller decides which indexes exist from its own metadata
-/// format and passes exactly that set here.
-///
-/// # Errors
-///
-/// Returns [`FormatError::InvalidBTreeNodeType`] for an unexpected client type, the structural
-/// error from the version 2 B-tree storage walker for an incomplete tree, and
-/// [`FormatError::InvalidBTreeV2Signature`] if the proven allocations overlap or contain
-/// `heap_header`.
-pub(crate) fn collect_dense_index_storage_extents<S: Source + ?Sized>(
-    source: &S,
-    heap_header: StoredAddress,
-    indexes: impl IntoIterator<Item = DenseIndex>,
-    offset_size: u8,
-    length_size: u8,
-) -> Result<Vec<Extent>, FormatError> {
-    collect_dense_index_storage_extents_with_widths(
-        source,
-        heap_header,
-        indexes,
-        FormatWidths::from_sizes(offset_size, length_size)?,
-    )
 }
 
 /// Returns all allocations of a proven dense-storage index set using validated file widths.
@@ -110,6 +84,10 @@ mod tests {
     use crate::source::BytesSource;
 
     const WIDTHS: Widths = Widths::EIGHT;
+    const FORMAT_WIDTHS: FormatWidths = FormatWidths {
+        offsets: OffsetWidth::Eight,
+        lengths: LengthWidth::Eight,
+    };
     const NODE_SIZE: u64 = 512;
     const RECORD_SIZE: u16 = 16;
 
@@ -148,15 +126,14 @@ mod tests {
         ));
         expected.sort_unstable();
 
-        let extents = collect_dense_index_storage_extents(
+        let extents = collect_dense_index_storage_extents_with_widths(
             &BytesSource::new(file),
             StoredAddress::new(0x80),
             [
                 DenseIndex::new(StoredAddress::new(0x100), BTREE_V2_LINK_NAME),
                 DenseIndex::new(StoredAddress::new(0x500), BTREE_V2_LINK_CREATION_ORDER),
             ],
-            8,
-            8,
+            FORMAT_WIDTHS,
         )
         .unwrap();
 
@@ -168,15 +145,14 @@ mod tests {
         let mut file = vec![0; 0x800];
         place_index_tree(&mut file, 0x100, 0x200, BTREE_V2_LINK_CREATION_ORDER);
 
-        let err = collect_dense_index_storage_extents(
+        let err = collect_dense_index_storage_extents_with_widths(
             &BytesSource::new(file),
             StoredAddress::new(0x80),
             [DenseIndex::new(
                 StoredAddress::new(0x100),
                 BTREE_V2_LINK_NAME,
             )],
-            8,
-            8,
+            FORMAT_WIDTHS,
         )
         .unwrap_err();
 
@@ -192,12 +168,11 @@ mod tests {
         place_index_tree(&mut file, 0x100, 0x200, BTREE_V2_LINK_NAME);
         let index = DenseIndex::new(StoredAddress::new(0x100), BTREE_V2_LINK_NAME);
 
-        let err = collect_dense_index_storage_extents(
+        let err = collect_dense_index_storage_extents_with_widths(
             &BytesSource::new(file),
             StoredAddress::new(0x80),
             [index, index],
-            8,
-            8,
+            FORMAT_WIDTHS,
         )
         .unwrap_err();
 
@@ -209,15 +184,14 @@ mod tests {
         let mut file = vec![0; 0x800];
         place_index_tree(&mut file, 0x100, 0x200, BTREE_V2_LINK_NAME);
 
-        let err = collect_dense_index_storage_extents(
+        let err = collect_dense_index_storage_extents_with_widths(
             &BytesSource::new(file),
             StoredAddress::new(0x100),
             [DenseIndex::new(
                 StoredAddress::new(0x100),
                 BTREE_V2_LINK_NAME,
             )],
-            8,
-            8,
+            FORMAT_WIDTHS,
         )
         .unwrap_err();
 
@@ -239,15 +213,14 @@ mod tests {
         file[0x500..0x500 + header.len()].copy_from_slice(&header);
         let available = file.len();
 
-        let err = collect_dense_index_storage_extents(
+        let err = collect_dense_index_storage_extents_with_widths(
             &BytesSource::new(file),
             StoredAddress::new(0x80),
             [
                 DenseIndex::new(StoredAddress::new(0x100), BTREE_V2_LINK_NAME),
                 DenseIndex::new(StoredAddress::new(0x500), BTREE_V2_LINK_CREATION_ORDER),
             ],
-            8,
-            8,
+            FORMAT_WIDTHS,
         )
         .unwrap_err();
 

@@ -23,27 +23,28 @@ use crate::address::AddressContext;
 use crate::address::StoredAddress;
 use crate::address::StoredAddressExt;
 use crate::btree_v2::{
-    BTreeV2Header, BTreeV2Record, collect_btree_v2_records, collect_btree_v2_records_from_source,
+    BTreeV2Header, BTreeV2Record, collect_btree_v2_records_from_source_with_offset_width,
+    collect_btree_v2_records_with_offset_width,
 };
 use crate::convert::Narrow;
 use crate::error::FormatError;
 use crate::source::Source;
 use crate::source::SourceMetadata;
-use crate::width::LengthWidth;
-use crate::width::OffsetWidth;
+use crate::width::FormatWidths;
+#[cfg(test)]
+use crate::width::{LengthWidth, OffsetWidth};
 
-/// Parses a heap header from an image framed at the effective base in `addresses`.
+/// Parses a heap header using validated file widths.
 ///
 /// # Errors
 ///
-/// Returns [`FormatError::UnexpectedEof`] if the image is truncated, and the address, width,
-/// and header parsing errors of [`read_header_from_source`].
-pub(crate) fn parse_header(
+/// Returns [`FormatError::UnexpectedEof`] if the image is truncated, and the address and header
+/// parsing errors of [`read_header_from_source_with_widths`].
+pub(crate) fn parse_header_with_widths(
     bytes: &[u8],
     addresses: AddressContext,
     address: StoredAddress,
-    offset_size: u8,
-    length_size: u8,
+    widths: FormatWidths,
 ) -> Result<FractalHeapHeader, FormatError> {
     let image = FileRegion::new(
         FileRange::new(
@@ -52,11 +53,8 @@ pub(crate) fn parse_header(
         )?,
         bytes,
     )?;
-    let locator = FractalHeapHeaderLocator::new(
-        addresses.resolve(address)?,
-        OffsetWidth::try_from(offset_size)?,
-        LengthWidth::try_from(length_size)?,
-    );
+    let locator =
+        FractalHeapHeaderLocator::new(addresses.resolve(address)?, widths.offsets, widths.lengths);
     let prefix = buffered_region(image, locator.parse_range()?)?;
     let reference = locator.parse(prefix)?;
     reference.parse(buffered_region(image, reference.parse_range())?)
@@ -80,30 +78,25 @@ fn buffered_region<'a>(
     image.subregion(range)
 }
 
-/// Reads a fractal heap header using its prefix and complete header ranges.
+/// Reads a fractal heap header from a source using validated file widths.
 ///
 /// `source` is framed at the effective base in `addresses`. The parser receives physical
 /// [`FileRegion`] coordinates, and each source read uses a base-relative offset.
 ///
 /// # Errors
 ///
-/// Returns [`FormatError::InvalidOffsetSize`] or [`FormatError::InvalidLengthSize`] if a field
-/// width is not 2, 4, or 8, [`FormatError::OffsetOverflow`] if an address or range end exceeds
-/// [`u64::MAX`], and the parsing errors of [`FractalHeapHeaderLocator::parse`] and
+/// Returns [`FormatError::OffsetOverflow`] if an address or range end exceeds [`u64::MAX`], and
+/// the parsing errors of [`FractalHeapHeaderLocator::parse`] and
 /// [`FractalHeapHeaderRef::parse`](hdf5_pure_format::__private::FractalHeapHeaderRef::parse).
 /// Returns the source error if a read fails.
-pub(crate) fn read_header_from_source(
+pub(crate) fn read_header_from_source_with_widths(
     source: &(impl Source + ?Sized),
     addresses: AddressContext,
     address: StoredAddress,
-    offset_size: u8,
-    length_size: u8,
+    widths: FormatWidths,
 ) -> Result<FractalHeapHeader, FormatError> {
-    let locator = FractalHeapHeaderLocator::new(
-        addresses.resolve(address)?,
-        OffsetWidth::try_from(offset_size)?,
-        LengthWidth::try_from(length_size)?,
-    );
+    let locator =
+        FractalHeapHeaderLocator::new(addresses.resolve(address)?, widths.offsets, widths.lengths);
     let prefix_range = locator.parse_range()?;
     let prefix = read_header_range(source, addresses, prefix_range)?;
     let header_ref = locator.parse(FileRegion::new(prefix_range, &prefix)?)?;
@@ -164,13 +157,9 @@ fn read_object_at_source<S: Source + ?Sized>(
 /// [`FormatError::InvalidLengthSize`] if a field width is not 2, 4, or 8.
 fn check_huge_object_btree(
     header: &BTreeV2Header,
-    offset_size: u8,
-    length_size: u8,
+    widths: FormatWidths,
 ) -> Result<(), FormatError> {
-    let required = HugeObjectRecord::size(
-        OffsetWidth::try_from(offset_size)?,
-        LengthWidth::try_from(length_size)?,
-    );
+    let required = HugeObjectRecord::size(widths.offsets, widths.lengths);
     if header.tree_type != BTREE_V2_HUGE_OBJECT || header.record_size < required {
         return Err(FormatError::UnexpectedHugeObjectBTree {
             tree_type: header.tree_type,
@@ -223,23 +212,17 @@ pub(crate) fn huge_index_decodes() -> usize {
 }
 
 impl HugeObjectIndex {
-    fn decode(
-        records: &[BTreeV2Record],
-        offset_size: u8,
-        length_size: u8,
-    ) -> Result<Self, FormatError> {
+    fn decode(records: &[BTreeV2Record], widths: FormatWidths) -> Result<Self, FormatError> {
         #[cfg(test)]
         HUGE_INDEX_DECODES.with(|count| count.set(count.get() + 1));
 
-        let offset_width = OffsetWidth::try_from(offset_size)?;
-        let length_width = LengthWidth::try_from(length_size)?;
         let mut entries = Vec::with_capacity(records.len());
         for record in records {
             let HugeObjectRecord {
                 address,
                 length,
                 id,
-            } = record.huge_object(offset_width, length_width)?;
+            } = record.huge_object(widths.offsets, widths.lengths)?;
             entries.push((id, address, length));
         }
         entries.sort_unstable();
@@ -275,8 +258,7 @@ impl HugeObjectIndex {
 /// and one backend for the lifetime of the reader.
 pub struct HeapObjectReader<'h> {
     header: &'h FractalHeapHeader,
-    offset_size: u8,
-    length_size: u8,
+    widths: FormatWidths,
     addresses: AddressContext,
     access_mode: AccessMode,
     /// Direct blocks whose complete checksums were validated against this reader's image.
@@ -305,32 +287,26 @@ impl<'h> HeapObjectReader<'h> {
     /// `owner` is the header's stored address. `addresses` resolves addresses against the image's
     /// effective base. The image or source must be framed at that base and stay unchanged for
     /// the reader's lifetime. `access_mode` selects bounded read-only lookup or mandatory
-    /// read-write checksum validation. The widths are the superblock's "Size of Offsets" and
-    /// "Size of Lengths" bytes.
+    /// read-write checksum validation. `widths` contains the validated address and length widths
+    /// of the file.
     pub(crate) fn new(
         header: &'h FractalHeapHeader,
         addresses: AddressContext,
         owner: StoredAddress,
         access_mode: AccessMode,
-        offset_size: u8,
-        length_size: u8,
+        widths: FormatWidths,
     ) -> Self {
         Self {
             header,
+            widths,
             addresses,
             access_mode,
             validated_direct: BTreeSet::new(),
             validated_backend: None,
-            offset_size,
-            length_size,
             layout: if header.filtering.is_filtered() {
                 Err(FormatError::UnsupportedFilteredHeapObject)
             } else {
-                OffsetWidth::try_from(offset_size).and_then(|offsets| {
-                    LengthWidth::try_from(length_size).and_then(|lengths| {
-                        FractalHeapBlockLayout::new(header, offsets, lengths, owner)
-                    })
-                })
+                FractalHeapBlockLayout::new(header, widths.offsets, widths.lengths, owner)
             },
             huge: None,
             huge_backend: None,
@@ -419,11 +395,7 @@ impl<'h> HeapObjectReader<'h> {
         F: FnOnce() -> Result<Vec<BTreeV2Record>, FormatError>,
     {
         if self.huge.is_none() {
-            self.huge = Some(HugeObjectIndex::decode(
-                &records()?,
-                self.offset_size,
-                self.length_size,
-            )?);
+            self.huge = Some(HugeObjectIndex::decode(&records()?, self.widths)?);
             self.huge_backend = Some(backend);
         }
         debug_assert_eq!(
@@ -450,13 +422,12 @@ impl<'h> HeapObjectReader<'h> {
         let (addr, len) = match reference {
             HugeObjectReference::Inline { addr, len } => (addr, len),
             HugeObjectReference::Indexed(huge_id) => {
-                let (offset_size, length_size) = (self.offset_size, self.length_size);
+                let widths = self.widths;
                 let btree_addr = self.header.btree_huge_objects_address.get().to_usize()?;
                 self.locate_huge(huge_id, Backend::Buffered, || {
-                    let header =
-                        BTreeV2Header::parse(file_data, btree_addr, offset_size, length_size)?;
-                    check_huge_object_btree(&header, offset_size, length_size)?;
-                    collect_btree_v2_records(file_data, &header, offset_size, length_size)
+                    let header = BTreeV2Header::parse_with_widths(file_data, btree_addr, widths)?;
+                    check_huge_object_btree(&header, widths)?;
+                    collect_btree_v2_records_with_offset_width(file_data, &header, widths.offsets)
                 })?
             }
         };
@@ -476,17 +447,20 @@ impl<'h> HeapObjectReader<'h> {
         let (addr, len) = match reference {
             HugeObjectReference::Inline { addr, len } => (addr, len),
             HugeObjectReference::Indexed(huge_id) => {
-                let (offset_size, length_size) = (self.offset_size, self.length_size);
+                let widths = self.widths;
                 let btree_addr = self.header.btree_huge_objects_address.get();
                 self.locate_huge(huge_id, Backend::Streaming, || {
-                    let header = BTreeV2Header::parse_from_source(
+                    let header = BTreeV2Header::parse_from_source_with_widths(
                         &SourceMetadata(source),
                         btree_addr,
-                        offset_size,
-                        length_size,
+                        widths,
                     )?;
-                    check_huge_object_btree(&header, offset_size, length_size)?;
-                    collect_btree_v2_records_from_source(source, &header, offset_size, length_size)
+                    check_huge_object_btree(&header, widths)?;
+                    collect_btree_v2_records_from_source_with_offset_width(
+                        source,
+                        &header,
+                        widths.offsets,
+                    )
                 })?
             }
         };
@@ -639,6 +613,10 @@ mod tests {
     // "The Data Storage - Filter Pipeline Message", format specification version 4.0, defines
     // pipeline version 2.
     const PIPELINE_VERSION_TWO: u8 = 2;
+    const FORMAT_WIDTHS: FormatWidths = FormatWidths {
+        offsets: OffsetWidth::Eight,
+        lengths: LengthWidth::Eight,
+    };
 
     #[rstest]
     #[case::plain(0, 0)]
@@ -682,8 +660,13 @@ mod tests {
             base: addresses.effective_base(),
         };
         assert_eq!(
-            read_header_from_source(&framed, addresses, StoredAddress::new(header_address), 8, 8)
-                .unwrap(),
+            read_header_from_source_with_widths(
+                &framed,
+                addresses,
+                StoredAddress::new(header_address),
+                FORMAT_WIDTHS,
+            )
+            .unwrap(),
             header
         );
         assert_eq!(
@@ -708,12 +691,11 @@ mod tests {
         let mut bytes = fractal_heap::Header::new(256).build(Widths::EIGHT);
         bytes.truncate(available);
         assert_eq!(
-            read_header_from_source(
+            read_header_from_source_with_widths(
                 &BytesSource::new(&bytes),
                 AddressContext::from_effective_base(BaseAddress::ZERO),
                 StoredAddress::ZERO,
-                8,
-                8
+                FORMAT_WIDTHS,
             )
             .unwrap_err(),
             FormatError::UnexpectedEof {
@@ -766,8 +748,7 @@ mod tests {
             AddressContext::from_effective_base(BaseAddress::ZERO),
             StoredAddress::ZERO,
             mode,
-            8,
-            8,
+            FORMAT_WIDTHS,
         );
         assert_eq!(
             reader
@@ -837,8 +818,7 @@ mod tests {
                 AddressContext::from_effective_base(BaseAddress::ZERO),
                 StoredAddress::ZERO,
                 AccessMode::ReadOnly,
-                8,
-                8
+                FORMAT_WIDTHS
             )
             .read_from_source(&source, parse_id(&header, &id))
             .unwrap_err(),
@@ -889,8 +869,7 @@ mod tests {
             AddressContext::from_effective_base(BaseAddress::ZERO),
             StoredAddress::ZERO,
             AccessMode::ReadOnly,
-            8,
-            8,
+            FORMAT_WIDTHS,
         );
         let object = if streaming {
             reader.read_from_source(&BytesSource::new(image), id)
@@ -927,8 +906,7 @@ mod tests {
             AddressContext::from_effective_base(BaseAddress::ZERO),
             StoredAddress::ZERO,
             AccessMode::ReadOnly,
-            8,
-            8,
+            FORMAT_WIDTHS,
         )
         .read(&file_data, parse_id(&hdr, &id))
         .unwrap();
@@ -955,20 +933,18 @@ mod tests {
             AddressContext::from_effective_base(BaseAddress::ZERO),
             StoredAddress::ZERO,
             AccessMode::ReadOnly,
-            8,
-            8,
+            FORMAT_WIDTHS,
         )
         .read(&file_data, parse_id(&hdr, &id))
         .unwrap();
 
         // Header parsed from a source, then the object fetched from a source.
         let mem = BytesSource::new(&file_data);
-        let hdr_mem = read_header_from_source(
+        let hdr_mem = read_header_from_source_with_widths(
             &mem,
             AddressContext::from_effective_base(BaseAddress::ZERO),
             StoredAddress::ZERO,
-            8,
-            8,
+            FORMAT_WIDTHS,
         )
         .unwrap();
         let from_mem = HeapObjectReader::new(
@@ -976,19 +952,17 @@ mod tests {
             AddressContext::from_effective_base(BaseAddress::ZERO),
             StoredAddress::ZERO,
             AccessMode::ReadOnly,
-            8,
-            8,
+            FORMAT_WIDTHS,
         )
         .read_from_source(&mem, parse_id(&hdr_mem, &id))
         .unwrap();
 
         let seek = ReadSeekSource::new(std::io::Cursor::new(file_data)).unwrap();
-        let hdr_seek = read_header_from_source(
+        let hdr_seek = read_header_from_source_with_widths(
             &seek,
             AddressContext::from_effective_base(BaseAddress::ZERO),
             StoredAddress::ZERO,
-            8,
-            8,
+            FORMAT_WIDTHS,
         )
         .unwrap();
         let from_seek = HeapObjectReader::new(
@@ -996,8 +970,7 @@ mod tests {
             AddressContext::from_effective_base(BaseAddress::ZERO),
             StoredAddress::ZERO,
             AccessMode::ReadOnly,
-            8,
-            8,
+            FORMAT_WIDTHS,
         )
         .read_from_source(&seek, parse_id(&hdr_seek, &id))
         .unwrap();
@@ -1056,8 +1029,7 @@ mod tests {
                 AddressContext::from_effective_base(BaseAddress::ZERO),
                 StoredAddress::ZERO,
                 AccessMode::ReadOnly,
-                8,
-                8
+                FORMAT_WIDTHS
             )
             .read(&file, parse_id(&h, &managed_id)),
             Err(FormatError::UnsupportedFilteredHeapObject)
@@ -1071,8 +1043,7 @@ mod tests {
                 AddressContext::from_effective_base(BaseAddress::ZERO),
                 StoredAddress::ZERO,
                 AccessMode::ReadOnly,
-                8,
-                8
+                FORMAT_WIDTHS
             )
             .read(&file, parse_id(&h, &managed_id)),
             Err(FormatError::UnsupportedFilteredHeapObject)
@@ -1095,7 +1066,7 @@ mod tests {
             huge_record(0x2000, 6000, 2),
             huge_record(0x3000, 7000, 5),
         ];
-        let index = HugeObjectIndex::decode(&records, 8, 8).unwrap();
+        let index = HugeObjectIndex::decode(&records, FORMAT_WIDTHS).unwrap();
         assert_eq!(index.locate(2).unwrap(), (StoredAddress::new(0x2000), 6000));
         assert_eq!(index.locate(5).unwrap(), (StoredAddress::new(0x3000), 7000));
         assert_eq!(
@@ -1114,7 +1085,7 @@ mod tests {
             huge_record(0x1000, 5000, 1),
             huge_record(0x2000, 6000, 2),
         ];
-        let index = HugeObjectIndex::decode(&records, 8, 8).unwrap();
+        let index = HugeObjectIndex::decode(&records, FORMAT_WIDTHS).unwrap();
         for (id, want) in [
             (1, (StoredAddress::new(0x1000), 5000)),
             (2, (StoredAddress::new(0x2000), 6000)),
@@ -1143,7 +1114,7 @@ mod tests {
         };
 
         assert_eq!(
-            check_huge_object_btree(&btree(2, 36), 8, 8),
+            check_huge_object_btree(&btree(2, 36), FORMAT_WIDTHS),
             Err(FormatError::UnexpectedHugeObjectBTree {
                 tree_type: 2,
                 record_size: 36,
@@ -1152,7 +1123,7 @@ mod tests {
             "a filtered huge-object tree is long enough to pass a length check alone"
         );
         assert_eq!(
-            check_huge_object_btree(&btree(1, 16), 8, 8),
+            check_huge_object_btree(&btree(1, 16), FORMAT_WIDTHS),
             Err(FormatError::UnexpectedHugeObjectBTree {
                 tree_type: 1,
                 record_size: 16,
@@ -1160,7 +1131,10 @@ mod tests {
             }),
             "records too short for the layout the type claims"
         );
-        assert_eq!(check_huge_object_btree(&btree(1, 24), 8, 8), Ok(()));
+        assert_eq!(
+            check_huge_object_btree(&btree(1, 24), FORMAT_WIDTHS),
+            Ok(())
+        );
     }
 
     /// A record too short for the type-1 layout is a heap this reader has
@@ -1173,7 +1147,7 @@ mod tests {
             data: vec![0u8; 20],
         }];
         assert!(matches!(
-            HugeObjectIndex::decode(&records, 8, 8),
+            HugeObjectIndex::decode(&records, FORMAT_WIDTHS),
             Err(FormatError::UnexpectedEof { .. })
         ));
     }
@@ -1225,8 +1199,7 @@ mod tests {
             AddressContext::from_effective_base(BaseAddress::ZERO),
             StoredAddress::new(frhp as u64),
             AccessMode::ReadOnly,
-            8,
-            8,
+            FORMAT_WIDTHS,
         );
         let buffered: Vec<Vec<u8>> = ids
             .iter()
@@ -1245,8 +1218,7 @@ mod tests {
             AddressContext::from_effective_base(BaseAddress::ZERO),
             StoredAddress::new(frhp as u64),
             AccessMode::ReadOnly,
-            8,
-            8,
+            FORMAT_WIDTHS,
         );
         let streamed: Vec<Vec<u8>> = ids
             .iter()

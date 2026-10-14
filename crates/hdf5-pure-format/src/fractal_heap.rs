@@ -14,6 +14,7 @@ use crate::convert::Narrow;
 use crate::error::FormatError;
 use crate::filter_pipeline::FilterPipeline;
 use crate::filter_pipeline::FilterPipelineError;
+use crate::width::FormatWidths;
 use crate::width::LengthWidth;
 use crate::width::OffsetWidth;
 
@@ -516,6 +517,18 @@ impl FractalHeapHeader {
             avail >= offset_size as usize + length_size as usize + 4 + length_size as usize
         } else {
             avail >= offset_size as usize + length_size as usize
+        }
+    }
+
+    /// Returns whether huge heap IDs store object addresses and lengths at `widths`.
+    pub fn huge_ids_direct_with_widths(&self, widths: FormatWidths) -> bool {
+        let avail = usize::from(self.heap_id_length).saturating_sub(1);
+        let offset_size = usize::from(widths.offsets.get());
+        let length_size = usize::from(widths.lengths.get());
+        if self.filtering.is_filtered() {
+            avail >= offset_size + length_size + 4 + length_size
+        } else {
+            avail >= offset_size + length_size
         }
     }
 }
