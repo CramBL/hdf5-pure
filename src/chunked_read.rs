@@ -27,7 +27,9 @@ use crate::chunk_cache::{CachePass, ChunkCache};
 use crate::chunk_grid::{self, ChunkGrid, GridOrder};
 use crate::chunk_span::ChunkSpanReader;
 use crate::convert::{Narrow, slice_range};
-use crate::data_layout::{ChunkIndexLayout, ChunkedLayoutFlags, DataLayout};
+#[cfg(any(feature = "std", test))]
+use crate::data_layout::DataLayout;
+use crate::data_layout::{ChunkIndexLayout, ChunkedLayoutFlags};
 use crate::dataspace::Dataspace;
 use crate::error::FormatError;
 use crate::fill_value::FillPattern;
