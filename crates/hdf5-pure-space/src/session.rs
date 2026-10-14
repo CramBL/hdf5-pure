@@ -5,6 +5,7 @@ use hdf5_pure_core::FileSpacePageSize;
 use hdf5_pure_core::FileSpaceStrategy;
 use hdf5_pure_core::FormatError;
 
+use super::allocation::AllocationClass;
 use super::extent::Extent;
 use super::list::{self, FreeList};
 use super::paged::{
@@ -159,30 +160,89 @@ impl SessionSpace {
         }
     }
 
-    /// Allocates `len` reusable bytes for `ty`.
-    pub fn allocate(&mut self, len: u64, ty: PageType) -> Option<Extent> {
+    /// Reserves `len` reusable bytes for `class`, or returns `None` if no matching space is available.
+    ///
+    /// PAGE requests use the corresponding [`PageType`]. Flat allocation uses one free list for
+    /// both classes.
+    pub fn allocate(&mut self, len: u64, class: AllocationClass) -> Option<Extent> {
+        self.allocate_with_page_type(len, class, class.into())
+    }
+
+    /// Reserves reusable bytes with an explicit PAGE type.
+    ///
+    /// `page_type` determines PAGE placement independently of the request's `class`. Array chunk
+    /// indexes use this operation to retain metadata intent while sharing raw-data pages. Flat
+    /// allocation uses one free list for both classes. Returns `None` if no matching space is
+    /// available.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use hdf5_pure_core::{FileSpacePageSize, FileSpaceStrategy};
+    /// use hdf5_pure_space::__private::{AllocationClass, Extent, ManagerKind, PageType, SessionSpace};
+    ///
+    /// let mut space = SessionSpace::from_strategy(
+    ///     Some(FileSpaceStrategy::Page), 1, FileSpacePageSize::DEFAULT,
+    /// );
+    /// space.seed_persisted(
+    ///     Some(ManagerKind::PagedSmallRaw), Extent::new(8_208, 256).unwrap(),
+    /// );
+    /// space.finish_seed();
+    /// let raw = space.allocate(64, AllocationClass::Raw).unwrap();
+    /// space.return_allocation(raw, AllocationClass::Raw);
+    /// let index = space.allocate_with_page_type(
+    ///     64, AllocationClass::Metadata, PageType::Raw,
+    /// ).unwrap();
+    /// assert_eq!(index, Extent::new(8_208, 64).unwrap());
+    /// space.return_allocation_with_page_type(index, AllocationClass::Metadata, PageType::Raw);
+    /// assert_eq!(space.allocate(64, AllocationClass::Raw), Some(index));
+    /// ```
+    pub fn allocate_with_page_type(
+        &mut self,
+        len: u64,
+        _class: AllocationClass,
+        page_type: PageType,
+    ) -> Option<Extent> {
         match self {
             Self::Disabled => None,
             Self::Flat(space) => space.free.alloc(len),
-            Self::Paged(space) => space.paged.allocate(len, ty),
+            Self::Paged(space) => space.paged.allocate(len, page_type),
         }
     }
 
-    /// Returns an allocation to the strategy it came from.
-    pub fn return_allocation(&mut self, extent: Extent, ty: PageType) {
+    /// Returns a reservation to reusable space for `class`.
+    ///
+    /// The caller passes the same class used to reserve `extent`. For an explicit PAGE type, use
+    /// [`Self::return_allocation_with_page_type`].
+    pub fn return_allocation(&mut self, extent: Extent, class: AllocationClass) {
+        self.return_allocation_with_page_type(extent, class, class.into());
+    }
+
+    /// Returns a reservation using its explicit PAGE type.
+    ///
+    /// The caller passes the same `class` and `page_type` used with
+    /// [`Self::allocate_with_page_type`].
+    pub fn return_allocation_with_page_type(
+        &mut self,
+        extent: Extent,
+        _class: AllocationClass,
+        page_type: PageType,
+    ) {
         match self {
             Self::Disabled => {}
             Self::Flat(space) => space.free.free(extent),
-            Self::Paged(space) => space.paged.return_allocation(extent, ty),
+            Self::Paged(space) => space.paged.return_allocation(extent, page_type),
         }
     }
 
-    /// Returns the largest reusable run available for `ty`.
-    pub fn largest(&self, ty: PageType) -> u64 {
+    /// Returns the largest reusable run available for `class`.
+    ///
+    /// Returns zero when reusable allocation is disabled.
+    pub fn largest(&self, class: AllocationClass) -> u64 {
         match self {
             Self::Disabled => 0,
             Self::Flat(space) => space.free.largest(),
-            Self::Paged(space) => space.paged.largest(ty),
+            Self::Paged(space) => space.paged.largest(class.into()),
         }
     }
 
@@ -389,7 +449,76 @@ impl SessionSpace {
 
 #[cfg(test)]
 mod tests {
+    use rstest::rstest;
+
     use super::*;
+
+    #[rstest]
+    #[case::metadata(AllocationClass::Metadata, ManagerKind::PagedSmallMetadata, 4_112)]
+    #[case::raw(AllocationClass::Raw, ManagerKind::PagedSmallRaw, 8_208)]
+    fn allocation_intent_selects_the_matching_persisted_page(
+        #[case] class: AllocationClass,
+        #[case] manager: ManagerKind,
+        #[case] address: u64,
+    ) {
+        let mut space = SessionSpace::from_strategy(
+            Some(FileSpaceStrategy::Page),
+            1,
+            FileSpacePageSize::DEFAULT,
+        );
+        space.seed_persisted(
+            Some(ManagerKind::PagedSmallMetadata),
+            Extent::new(4_112, 128).unwrap(),
+        );
+        space.seed_persisted(
+            Some(ManagerKind::PagedSmallRaw),
+            Extent::new(8_208, 256).unwrap(),
+        );
+        space.finish_seed();
+        let expected = Extent::new(address, 64).unwrap();
+        assert_eq!(space.allocate(64, class), Some(expected));
+        space.return_allocation(expected, class);
+        assert_eq!(
+            space.largest(class),
+            if manager == ManagerKind::PagedSmallMetadata {
+                128
+            } else {
+                256
+            }
+        );
+        assert_eq!(space.allocate(64, class), Some(expected));
+    }
+
+    #[test]
+    fn metadata_array_index_retains_metadata_intent_on_a_raw_page() {
+        let mut space = SessionSpace::from_strategy(
+            Some(FileSpaceStrategy::Page),
+            1,
+            FileSpacePageSize::DEFAULT,
+        );
+        space.seed_persisted(
+            Some(ManagerKind::PagedSmallMetadata),
+            Extent::new(4_112, 128).unwrap(),
+        );
+        space.seed_persisted(
+            Some(ManagerKind::PagedSmallRaw),
+            Extent::new(8_208, 256).unwrap(),
+        );
+        space.finish_seed();
+        let snapshot = space.allocation_snapshot();
+        let index = space
+            .allocate_with_page_type(64, AllocationClass::Metadata, PageType::Raw)
+            .unwrap();
+        assert_eq!(index, Extent::new(8_208, 64).unwrap());
+        space.return_allocation_with_page_type(index, AllocationClass::Metadata, PageType::Raw);
+        assert_eq!(space.allocate(64, AllocationClass::Raw), Some(index));
+        space.restore_allocation(snapshot);
+        assert_eq!(space.allocate(64, AllocationClass::Raw), Some(index));
+        assert_eq!(
+            space.allocate(64, AllocationClass::Metadata),
+            Some(Extent::new(4_112, 64).unwrap())
+        );
+    }
 
     const THRESHOLD: u64 = 17;
 

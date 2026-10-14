@@ -23,8 +23,8 @@ use hdf5_pure_format::__private::FreeSpaceManagerHeaderRef;
 use hdf5_pure_format::__private::HugeObjectDirectRecord;
 use hdf5_pure_format::__private::HugeObjectRecord;
 
+use hdf5_pure_space::__private::AllocationClass;
 use hdf5_pure_space::__private::Extent;
-use hdf5_pure_space::__private::PageType;
 
 use crate::address::AddressContext;
 use crate::address::StoredAddress;
@@ -120,8 +120,10 @@ pub(crate) enum FractalHeapAllocation {
 }
 
 impl FractalHeapAllocation {
-    /// Returns the type of the page the C library allocates this structure in on a paged file, for
-    /// a structure smaller than a page.
+    /// Returns the allocation class for a separately allocated heap structure.
+    ///
+    /// PAGE reclamation also considers the surrounding allocations when a huge payload occupies
+    /// a metadata page.
     // libhdf5 2.2.0 allocates the header and indirect blocks as `H5FD_MEM_OHDR`, direct blocks
     // as `H5FD_MEM_LHEAP` and huge objects as `H5FD_MEM_DRAW` (the `H5FD_MEM_FHEAP_*` aliases in
     // `H5FDdevelop.h`), and the huge-object B-tree as `H5FD_MEM_BTREE` (`H5B2hdr.c`,
@@ -131,15 +133,15 @@ impl FractalHeapAllocation {
     // allocation the generic large-page type.
     // `H5FS_create` and `H5FS_alloc_sect` in H5FS.c, HDF5 2.2.0, allocate FSHD and FSSE
     // with the metadata aliases `H5FD_MEM_FSPACE_HDR` and `H5FD_MEM_FSPACE_SINFO`.
-    pub(crate) fn page_type(self) -> PageType {
+    pub(crate) fn allocation_class(self) -> AllocationClass {
         match self {
             Self::Header
             | Self::DirectBlock
             | Self::IndirectBlock
             | Self::HugeObjectIndex
             | Self::ManagedFsmHeader
-            | Self::ManagedFsmSectionList => PageType::Meta,
-            Self::HugeObject => PageType::Raw,
+            | Self::ManagedFsmSectionList => AllocationClass::Metadata,
+            Self::HugeObject => AllocationClass::Raw,
         }
     }
 }
@@ -643,6 +645,24 @@ mod tests {
             STORAGE_WIDTH,
             STORAGE_WIDTH,
         )
+    }
+
+    #[rstest::rstest]
+    #[case::header(FractalHeapAllocation::Header, AllocationClass::Metadata)]
+    #[case::direct(FractalHeapAllocation::DirectBlock, AllocationClass::Metadata)]
+    #[case::indirect(FractalHeapAllocation::IndirectBlock, AllocationClass::Metadata)]
+    #[case::huge_index(FractalHeapAllocation::HugeObjectIndex, AllocationClass::Metadata)]
+    #[case::manager_header(FractalHeapAllocation::ManagedFsmHeader, AllocationClass::Metadata)]
+    #[case::manager_sections(
+        FractalHeapAllocation::ManagedFsmSectionList,
+        AllocationClass::Metadata
+    )]
+    #[case::huge_payload(FractalHeapAllocation::HugeObject, AllocationClass::Raw)]
+    fn heap_metadata_and_huge_payloads_have_distinct_allocation_classes(
+        #[case] kind: FractalHeapAllocation,
+        #[case] class: AllocationClass,
+    ) {
+        assert_eq!(kind.allocation_class(), class);
     }
 
     #[rstest::rstest]
@@ -1221,12 +1241,12 @@ mod tests {
             ]
         );
         assert_eq!(
-            FractalHeapAllocation::ManagedFsmHeader.page_type(),
-            PageType::Meta
+            FractalHeapAllocation::ManagedFsmHeader.allocation_class(),
+            AllocationClass::Metadata
         );
         assert_eq!(
-            FractalHeapAllocation::ManagedFsmSectionList.page_type(),
-            PageType::Meta
+            FractalHeapAllocation::ManagedFsmSectionList.allocation_class(),
+            AllocationClass::Metadata
         );
     }
 

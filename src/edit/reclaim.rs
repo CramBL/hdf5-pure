@@ -1300,7 +1300,7 @@ pub(super) fn touches_page_zero(
 ///
 /// `allocations` holds stored addresses sorted by address, as [`FractalHeapStorage::allocations`]
 /// returns them. Without `page_size`, each allocation takes
-/// [`FractalHeapAllocation::page_type`]. On a paged file an allocation of a page or more that
+/// [`FractalHeapAllocation::allocation_class`]. On a paged file an allocation of a page or more that
 /// begins on a page boundary is dead, since the C library allocates it as whole pages of neither
 /// type. Of the rest, the header, the managed blocks, and the huge-object index are metadata, and
 /// a huge object takes the class [`huge_object_free_class`] gives the run of adjoining allocations
@@ -1314,7 +1314,7 @@ fn fractal_heap_free_spans(
     let Some(page_size) = page_size else {
         return allocations
             .iter()
-            .map(|&(addr, len, kind)| (addr, len, FreeClass::Page(kind.page_type())))
+            .map(|&(addr, len, kind)| (addr, len, FreeClass::Page(kind.allocation_class().into())))
             .collect();
     };
     allocations
@@ -1334,7 +1334,7 @@ fn fractal_heap_free_spans(
                     | FractalHeapAllocation::HugeObjectIndex
                     | FractalHeapAllocation::ManagedFsmHeader
                     | FractalHeapAllocation::ManagedFsmSectionList => {
-                        FreeClass::Page(kind.page_type())
+                        FreeClass::Page(kind.allocation_class().into())
                     }
                     FractalHeapAllocation::HugeObject => huge_object_class,
                 };
@@ -1363,7 +1363,7 @@ fn huge_object_free_class(
         return if touches_page_zero(page_size, run.iter().map(|&(addr, len, _)| (addr, len))) {
             FreeClass::Dead
         } else {
-            FreeClass::Page(FractalHeapAllocation::HugeObject.page_type())
+            FreeClass::Page(FractalHeapAllocation::HugeObject.allocation_class().into())
         };
     }
     // `H5MF__alloc_pagefs` (`H5MF.c`, libhdf5 2.2.0) keeps small raw-data and metadata
