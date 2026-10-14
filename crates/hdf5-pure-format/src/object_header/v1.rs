@@ -391,14 +391,19 @@ fn parse_continuation(
     data: &[u8],
     context: ParseContext,
 ) -> Result<Option<Continuation>, FormatError> {
-    let required_len = usize::from(context.offset_size) + usize::from(context.length_size);
+    let required_len =
+        usize::from(context.widths.offsets.get()) + usize::from(context.widths.lengths.get());
 
     if data.len() < required_len {
         return Ok(None);
     }
 
-    let address = StoredAddress::new(bytes::read_offset(data, 0, context.offset_size)?);
-    let length = bytes::read_length(data, usize::from(context.offset_size), context.length_size)?;
+    let address = StoredAddress::new(bytes::read_offset_width(data, 0, context.widths.offsets)?);
+    let length = bytes::read_length_width(
+        data,
+        usize::from(context.widths.offsets.get()),
+        context.widths.lengths,
+    )?;
 
     Ok(Some(Continuation { address, length }))
 }

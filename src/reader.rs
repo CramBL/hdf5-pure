@@ -2066,45 +2066,39 @@ impl FileInner {
     }
 
     fn parse_header(&self, address: u64) -> Result<ObjectHeader, FormatError> {
-        let os = self.widths.offsets.get();
-        let ls = self.widths.lengths.get();
         let access = self.access_mode();
         match &self.backend {
-            Backend::InMemory(v) => ObjectHeader::parse_with_base(
+            Backend::InMemory(v) => ObjectHeader::parse_with_base_and_widths(
                 v,
                 access,
                 address.to_usize()?,
-                os,
-                ls,
+                self.widths,
                 self.addresses().effective_base(),
             ),
-            Backend::Streaming(s) => ObjectHeader::parse_from_source(
+            Backend::Streaming(s) => ObjectHeader::parse_from_source_with_widths(
                 &SourceMetadata(s.as_ref()),
                 access,
                 address,
-                os,
-                ls,
+                self.widths,
                 self.addresses().effective_base(),
             ),
             Backend::Edit(m) => Self::with_engine(
                 m,
                 |d| {
-                    ObjectHeader::parse_with_base(
+                    ObjectHeader::parse_with_base_and_widths(
                         d,
                         access,
                         address.to_usize()?,
-                        os,
-                        ls,
+                        self.widths,
                         self.addresses().effective_base(),
                     )
                 },
                 |s| {
-                    ObjectHeader::parse_from_source(
+                    ObjectHeader::parse_from_source_with_widths(
                         &SourceMetadata(s),
                         access,
                         address,
-                        os,
-                        ls,
+                        self.widths,
                         self.addresses().effective_base(),
                     )
                 },
