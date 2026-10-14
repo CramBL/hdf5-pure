@@ -2,67 +2,38 @@
 
 This page lists HDF5 features supported by `hdf5-pure`.
 
-The tables cover file-format compatibility and HDF5 behavior. Features not listed here have not been audited for this page.
+The tables cover file-format compatibility and HDF5 behavior. Features not listed here have not been audited for this page. Section placement reflects typical reader relevance.
 
 | Status | Meaning |
 |:---:|---|
 | ✅ | Supported |
-| 🟡 | Partially supported. The detail column states the restriction. |
+| 🟡 | Partially supported. See the detail column. |
 | ❌ | Unsupported |
 | ⬆️ | Not emitted. Output uses another supported encoding. |
 
-## File structure
+## Core HDF5 compatibility
 
-| Feature | Read | Emit | Detail |
-|---|:---:|:---:|---|
-| User block | ✅ | ✅ | |
-| Superblock v0 | ✅ | ⬆️ | New files use v2 or v3. |
-| Superblock v1 | ✅ | ⬆️ | New files use v2 or v3. |
-| Superblock v2 | ✅ | ✅ | |
-| Superblock v3 | ✅ | ✅ | |
-| Object header v1 | ✅ | ⬆️ | New object headers use v2. |
-| Object header v2 | ✅ | ✅ | |
-| Object-header continuation blocks | ✅ | ✅ | |
-| Shared object-header messages | ✅ | ⬆️ | Repack writes messages inline. Edits that invalidate shared-message tables are rejected. |
-| Metadata checksums | ✅ | ✅ | Validation requires the `checksum` feature. |
-
-Shared object-header messages are supported for datatypes, dataspaces, fill values, filter pipelines, and attributes.
-
-## Groups
+### Groups
 
 | Storage | Read | Create | Modify | Detail |
 |---|:---:|:---:|:---:|---|
 | Version 1 symbol table | ✅ | ⬆️ | ✅ | Modified groups use compact link storage. |
 | Compact link storage | ✅ | ✅ | ✅ | |
-| Dense link storage | ✅ | ❌ | ❌ | Deleting a group's last hard link reclaims its v2 B-tree indexes, its fractal heap, and its subtree. A group whose link heap is filtered stays allocated with its subtree, and a heap with its own free-space manager stays allocated. libhdf5 keeps that manager for a heap with free space left in its blocks. |
+| Dense link storage | ✅ | ❌ | ❌ | Deleting a group's last hard link reclaims its v2 B-tree indexes, its fractal heap, and its subtree. A group whose link heap is filtered stays allocated with its subtree. Managed-space free-space-manager metadata is reclaimed with the heap when that metadata is valid and supported. Invalid or unsupported manager metadata leaves the heap allocated. |
 | Link creation-order tracking | ✅ | ❌ | 🟡 | New links can be added while compact storage remains valid. |
 
-## Attributes
+### Attributes
 
 | Feature | Read | Create | Modify | Detail |
 |---|:---:|:---:|:---:|---|
 | Compact storage | ✅ | ✅ | ✅ | |
-| Dense storage | ✅ | ✅ | ✅ | Deleting an object's last hard link, or editing its dense attributes, reclaims the set's v2 B-tree indexes and its fractal heap. A filtered attribute heap stays allocated, and so does its owner unless the owner is a group with dense link storage. A heap with its own free-space manager stays allocated. libhdf5 keeps that manager for a heap with free space left in its blocks. |
+| Dense storage | ✅ | ✅ | ✅ | Deleting an object's last hard link, or editing its dense attributes, reclaims the set's v2 B-tree indexes and its fractal heap. A filtered attribute heap stays allocated, and so does its owner unless the owner is a group with dense link storage. Managed-space free-space-manager metadata is reclaimed with the heap when that metadata is valid and supported. Invalid or unsupported manager metadata leaves the heap allocated. |
 | Attribute creation-order tracking | ✅ | ❌ | ✅ | |
 | Attribute phase-change thresholds | ✅ | ❌ | ✅ | Existing thresholds are preserved. |
 | Null dataspace | ✅ | ❌ | ❌ | Reading returns an empty value. |
 | Variable-length strings | ✅ | ✅ | ✅ | |
 
-## File-space management
-
-| Feature | Read | Configure | Detail |
-|---|:---:|:---:|---|
-| `H5F_FSPACE_STRATEGY_FSM_AGGR` | ✅ | 🟡 | Edits reuse freed space through the free-space managers, without aggregators. |
-| `H5F_FSPACE_STRATEGY_PAGE` | ✅ | ✅ | |
-| `H5F_FSPACE_STRATEGY_AGGR` | ✅ | 🟡 | Recorded for other libraries. Edits allocate at the end of the file, without aggregators, and a deletion leaves the file at its length. |
-| `H5F_FSPACE_STRATEGY_NONE` | ✅ | 🟡 | Edits allocate at the end of the file, and a deletion leaves the file at its length. |
-| Aggregators | ✅ | ❌ | No strategy allocates through aggregators. |
-| Persistent free-space managers | ✅ | ✅ | |
-| Free-space threshold | ✅ | ✅ | Edits track a freed region shorter than the threshold only where it adjoins tracked free space, which under `H5F_FSPACE_STRATEGY_PAGE` is free space in its own page for a region shorter than a page. Page tails are tracked whatever the threshold. |
-| File-space page size | ✅ | ✅ | The writer rejects a page size outside 512 bytes to 1 GiB under every strategy, as libhdf5 does. `File::open` reads a file that stores one without its file-space settings, and `File::open_rw` rejects it. |
-| Persisted free-space reuse | ✅ | ✅ | |
-
-## Dataspaces
+### Dataspaces
 
 | Feature | Read | Write | Detail |
 |---|:---:|:---:|---|
@@ -73,7 +44,7 @@ Shared object-header messages are supported for datatypes, dataspaces, fill valu
 | Unlimited dimension | ✅ | ✅ | |
 | Multiple unlimited dimensions | ✅ | ❌ | Writing requires a version 2 B-tree chunk index. |
 
-## Dataset layouts
+### Dataset layouts
 
 `Inspect` means that the layout metadata can be read without reading dataset values.
 
@@ -85,20 +56,18 @@ Shared object-header messages are supported for datatypes, dataspaces, fill valu
 | Virtual | ✅ | ❌ | ❌ |
 | External raw storage | ✅ | ❌ | ❌ |
 
-## Chunk indexes
+### Dataset extension
 
-| Index | Read data | Emit | Enumerate | Detail |
-|---|:---:|:---:|:---:|---|
-| Version 1 B-tree | ✅ | ⬆️ | ✅ | Rewritten with a version 4 chunk index. |
-| Single chunk | ✅ | ✅ | ✅ | |
-| Implicit | ✅ | ⬆️ | ✅ | Rewritten with another version 4 chunk index. |
-| Fixed array | ✅ | ✅ | ✅ | |
-| Extensible array | ✅ | ✅ | ✅ | |
-| Version 2 B-tree | ✅ | ❌ | ✅ | Read/enumerate and deletion reclaim are supported. The editor does not create or mutate the index. |
+| Feature | Status | Detail |
+|---|:---:|---|
+| Staged append | ✅ | |
+| In-place append | 🟡 | Requires an Extensible Array chunk index. |
+| Filtered append | ✅ | |
+| Non-chunk-aligned filtered append | ✅ | |
+| Lossy filtered partial-chunk append | ❌ | Existing values would require re-encoding. |
+| Multiple unlimited dimensions | ❌ | Requires version 2 B-tree chunk-index writing. |
 
-`Enumerate` refers to `Dataset::chunks()`.
-
-## Chunk semantics
+### Chunk semantics
 
 | Feature | Read | Configure | Detail |
 |---|:---:|:---:|---|
@@ -110,7 +79,7 @@ Shared object-header messages are supported for datatypes, dataspaces, fill valu
 | Fill value | ✅ | ✅ | |
 | `H5D_FILL_TIME_NEVER` | ✅ | ✅ | |
 
-## Filters
+### Filters
 
 `Verbatim repack` means that encoded chunk bytes can be copied without decoding the filter.
 
@@ -128,7 +97,7 @@ Shared object-header messages are supported for datatypes, dataspaces, fill valu
 
 Verbatim repack requires a fully allocated chunk grid.
 
-## Datatypes
+### Datatypes
 
 | Datatype class | Read | Write | Detail |
 |---|:---:|:---:|---|
@@ -147,7 +116,7 @@ Verbatim repack requires a fully allocated chunk grid.
 | Dataset-region reference | ❌ | ❌ | |
 | Complex class | ❌ | ❌ | HDF5 2.0 complex datatypes are unsupported. Complex helpers use compound `{real, imag}` values. |
 
-### Fixed-point layouts
+#### Fixed-point layouts
 
 | Feature | Read | Write |
 |---|:---:|:---:|
@@ -158,7 +127,7 @@ Verbatim repack requires a fully allocated chunk grid.
 | Sub-byte precision | ✅ | ✅ |
 | Nonzero bit offset | ✅ | ✅ |
 
-### Floating-point layouts
+#### Floating-point layouts
 
 | Feature | Read | Write |
 |---|:---:|:---:|
@@ -168,7 +137,18 @@ Verbatim repack requires a fully allocated chunk grid.
 | Big-endian byte order | ✅ | ✅ |
 | Arbitrary HDF5 floating-point layouts | ❌ | ❌ |
 
-## Strings
+### Compound datatypes
+
+| Feature | Read | Write | Detail |
+|---|:---:|:---:|---|
+| Explicit member offsets | ✅ | ✅ | |
+| Padding between members | ✅ | ✅ | |
+| Nested compound types | ✅ | ✅ | |
+| Array members | ✅ | ✅ | |
+| Variable-length members | ✅ | 🟡 | Repack rewrites embedded heap addresses. |
+| Object-reference members | ✅ | 🟡 | Repack rewrites embedded object addresses. |
+
+### Strings
 
 | Feature | Read | Write | Detail |
 |---|:---:|:---:|---|
@@ -180,18 +160,9 @@ Verbatim repack requires a fully allocated chunk grid.
 | Null-terminated fixed strings | ✅ | 🟡 | Writing requires raw datatype and data APIs. |
 | Space-padded fixed strings | ✅ | 🟡 | Writing requires raw datatype and data APIs. |
 
-## Compound datatypes
+## Extended HDF5 compatibility
 
-| Feature | Read | Write | Detail |
-|---|:---:|:---:|---|
-| Explicit member offsets | ✅ | ✅ | |
-| Padding between members | ✅ | ✅ | |
-| Nested compound types | ✅ | ✅ | |
-| Array members | ✅ | ✅ | |
-| Variable-length members | ✅ | 🟡 | Repack rewrites embedded heap addresses. |
-| Object-reference members | ✅ | 🟡 | Repack rewrites embedded object addresses. |
-
-## Enumeration datatypes
+### Enumeration datatypes
 
 | Feature | Read | Write |
 |---|:---:|:---:|
@@ -199,7 +170,7 @@ Verbatim repack requires a fully allocated chunk grid.
 | Unsigned integer base | ✅ | ✅ |
 | Arbitrary integer base width up to 64 bits | ✅ | ✅ |
 
-## Committed datatypes
+### Committed datatypes
 
 | Feature | Read | Create | Repack |
 |---|:---:|:---:|:---:|
@@ -207,7 +178,7 @@ Verbatim repack requires a fully allocated chunk grid.
 | Dataset using a committed datatype | ✅ | ✅ | ✅ |
 | Attribute using a committed datatype | ✅ | ✅ | ✅ |
 
-## References
+### References
 
 | Feature | Read | Write | Dereference |
 |---|:---:|:---:|:---:|
@@ -215,7 +186,7 @@ Verbatim repack requires a fully allocated chunk grid.
 | Dataset-region reference | ❌ | ❌ | ❌ |
 | Object reference wider than 8 bytes | ❌ | ❌ | ❌ |
 
-## Variable-length data
+### Variable-length data
 
 | Feature | Read | Write | Detail |
 |---|:---:|:---:|---|
@@ -227,25 +198,7 @@ Verbatim repack requires a fully allocated chunk grid.
 | Variable-length sequence | ✅ | 🟡 | Repack supports sequence values. |
 | Variable-length member in a compound type | ✅ | 🟡 | Repack rewrites embedded heap addresses. |
 
-## Dataset extension
-
-| Feature | Status | Detail |
-|---|:---:|---|
-| Staged append | ✅ | |
-| In-place append | 🟡 | Requires an Extensible Array chunk index. |
-| Filtered append | ✅ | |
-| Non-chunk-aligned filtered append | ✅ | |
-| Lossy filtered partial-chunk append | ❌ | Existing values would require re-encoding. |
-| Multiple unlimited dimensions | ❌ | Requires version 2 B-tree chunk-index writing. |
-
-## SWMR
-
-| Feature | Status | Detail |
-|---|:---:|---|
-| SWMR reader | 🟡 | Supports refreshing reads for the append-oriented subset. |
-| SWMR writer | 🟡 | Requires an unfiltered chunked dataset with one unlimited dimension and chunk-aligned appends. |
-
-## Datatype conversion
+### Datatype conversion
 
 | Feature | Status | Detail |
 |---|:---:|---|
@@ -260,7 +213,62 @@ Verbatim repack requires a fully allocated chunk grid.
 | Hard conversion registration | ❌ | |
 | Soft conversion registration | ❌ | |
 
-## Unknown metadata
+## Advanced HDF5 compatibility
+
+### SWMR
+
+| Feature | Status | Detail |
+|---|:---:|---|
+| SWMR reader | 🟡 | Supports refreshing reads for the append-oriented subset. |
+| SWMR writer | 🟡 | Requires an unfiltered chunked dataset with one unlimited dimension and chunk-aligned appends. |
+
+### File-space management
+
+| Feature | Read | Configure | Detail |
+|---|:---:|:---:|---|
+| `H5F_FSPACE_STRATEGY_FSM_AGGR` | ✅ | 🟡 | Edits reuse freed space through the free-space managers, without aggregators. |
+| `H5F_FSPACE_STRATEGY_PAGE` | ✅ | ✅ | |
+| `H5F_FSPACE_STRATEGY_AGGR` | ✅ | 🟡 | Recorded for other libraries. Edits allocate at the end of the file, without aggregators, and a deletion leaves the file at its length. |
+| `H5F_FSPACE_STRATEGY_NONE` | ✅ | 🟡 | Edits allocate at the end of the file, and a deletion leaves the file at its length. |
+| Aggregators | ✅ | ❌ | No strategy allocates through aggregators. |
+| Persistent free-space managers | ✅ | ✅ | |
+| Free-space threshold | ✅ | ✅ | Edits track a freed region shorter than the threshold only where it adjoins tracked free space, which under `H5F_FSPACE_STRATEGY_PAGE` is free space in its own page for a region shorter than a page. Page tails are tracked whatever the threshold. |
+| File-space page size | ✅ | ✅ | The writer rejects a page size outside 512 bytes to 1 GiB under every strategy, as libhdf5 does. `File::open` reads a file that stores one without its file-space settings, and `File::open_rw` rejects it. |
+| Persisted free-space reuse | ✅ | ✅ | |
+
+## HDF5 file-format compatibility
+
+### File structure
+
+| Feature | Read | Emit | Detail |
+|---|:---:|:---:|---|
+| User block | ✅ | ✅ | |
+| Superblock v0 | ✅ | ⬆️ | New files use v2 or v3. |
+| Superblock v1 | ✅ | ⬆️ | New files use v2 or v3. |
+| Superblock v2 | ✅ | ✅ | |
+| Superblock v3 | ✅ | ✅ | |
+| Object header v1 | ✅ | ⬆️ | New object headers use v2. |
+| Object header v2 | ✅ | ✅ | |
+| Object-header continuation blocks | ✅ | ✅ | |
+| Shared object-header messages | ✅ | ⬆️ | Repack writes messages inline. Edits that invalidate shared-message tables are rejected. |
+| Metadata checksums | ✅ | ✅ | General metadata checksum validation requires the `checksum` feature. Ownership-sensitive free-space-manager parsing validates the free-space-manager header and section-list checksums even when that feature is disabled. |
+
+Shared object-header messages are supported for datatypes, dataspaces, fill values, filter pipelines, and attributes.
+
+### Chunk indexes
+
+| Index | Read data | Emit | Enumerate | Detail |
+|---|:---:|:---:|:---:|---|
+| Version 1 B-tree | ✅ | ⬆️ | ✅ | Rewritten with a version 4 chunk index. |
+| Single chunk | ✅ | ✅ | ✅ | |
+| Implicit | ✅ | ⬆️ | ✅ | Rewritten with another version 4 chunk index. |
+| Fixed array | ✅ | ✅ | ✅ | |
+| Extensible array | ✅ | ✅ | ✅ | |
+| Version 2 B-tree | ✅ | ❌ | ✅ | Read/enumerate and deletion reclaim are supported. The editor does not create or mutate the index. |
+
+`Enumerate` refers to `Dataset::chunks()`.
+
+### Unknown metadata
 
 | Feature | Read-only | Read-write | Repack | Detail |
 |---|:---:|:---:|:---:|---|
