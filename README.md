@@ -28,7 +28,7 @@ Pure-Rust HDF5 reader, writer, and in-place editor. No C dependencies, no build 
 
 ## Examples
 
-Runnable, self-checking examples live in [`examples/`](examples). Run any with `cargo run --example <name>`:
+Runnable, self-checking examples live in [`examples/`](examples). The table highlights common workflows. See the directory for the complete set. Run any with `cargo run --example <name>`:
 
 | Example                 | What it shows                                                            |
 | ----------------------- | ------------------------------------------------------------------------ |
@@ -55,10 +55,10 @@ Or add it to `Cargo.toml` by hand:
 
 ```toml
 [dependencies]
-hdf5-pure = "0.46"
+hdf5-pure = "0.47.0"
 ```
 
-That pulls the default feature set (`std`, `checksum`, and `deflate`), which covers file I/O, the high-level reader and writer API, and deflate compression. The [Cargo features](#cargo-features) table below lists the rest.
+That pulls the default feature set (`std`, `checksum`, and `deflate`), which covers file I/O, the high-level reader and writer API, and deflate compression. The [Cargo features](#cargo-features) section below points to the canonical feature documentation.
 
 For WebAssembly, keep the default features and add the target:
 
@@ -111,36 +111,18 @@ println!("version: {:?}", attrs.get("version"));  // Some(I64(2))
 
 ### Generic over the element type
 
-The typed `with_f64_data` / `read_f64` family has a generic counterpart so you
-can write code that works for any supported scalar: `with_data(&[T])` to write
-and `read::<T>()` to read, bounded by the sealed `H5Element` trait (implemented
-for `f32`/`f64` and the 8/16/32/64-bit signed and unsigned integers).
+`DatasetBuilder::with_data(&[T])` and `Dataset::read::<T>()` let code work over the
+supported scalar types through the sealed `H5Element` trait. `read::<T>()` requests
+a delivery type and may coerce the stored datatype.
 
-```rust
-use hdf5_pure::{File, FileBuilder, H5Element, Error};
-
-fn store<T: H5Element>(fb: &mut FileBuilder, name: &str, values: &[T]) {
-    fb.create_dataset(name).with_data(values);
-}
-
-fn load<T: H5Element>(file: &File, name: &str) -> Result<Vec<T>, Error> {
-    file.dataset(name)?.read::<T>()
-}
-
-let mut fb = FileBuilder::new();
-store(&mut fb, "counts", &[1u32, 2, 3]);
-let file = File::from_bytes(fb.finish().unwrap()).unwrap();
-
-let counts: Vec<u32> = load(&file, "counts").unwrap();  // [1, 2, 3]
-```
-
-`read::<T>()` requests delivery as `T` (coercing like `read_f64`). it is not an
-assertion about the stored datatype, so pick `T` to match the stored type for a
-lossless read. For N-dimensional arrays see the `ndarray` feature below.
+See the [generic element I/O guide](https://docs.rs/hdf5-pure/latest/hdf5_pure/_guide/generic_io/index.html)
+for supported element types, coercion behavior, and examples.
 
 ### Editing in place
 
-`File::open_rw` opens an existing file and adds, deletes, or copies objects, appends to chunked unlimited datasets in place (including filtered/compressed ones, via `Dataset::append_staged`), or edits compact group attributes without rewriting the file from scratch. New data and the rebuilt object headers are appended at the end of the file and the superblock is repointed last, so the cost is proportional to what changes and a failed commit leaves the file valid. For many repeated appends to a single 1-D unlimited dataset, opening with `File::open_rw` and appending through a `Dataset` handle grows the index in place at amortized `O(1)` cost instead of re-reading and rebuilding it on every `append_staged` commit; appends may start and end anywhere under a lossless pipeline, with a partial trailing chunk re-encoded into a fresh allocation; a lossy pipeline (ZFP, float D-scale scale-offset) takes whole-chunk appends from a chunk-aligned length there, since re-encoding its trailing chunk would change committed values. `Dataset::buffered_appender` holds appended elements in memory and writes them a whole chunk at a time, so a caller appending less than a chunk per call writes once per chunk rather than once per call.
+`File::open_rw` opens an existing file for staged object edits and dataset appends without
+rewriting the file from scratch. It selects a bounded or mirrored backing according to the file
+and access properties.
 
 ```rust,no_run
 use hdf5_pure::File;
@@ -148,156 +130,63 @@ use hdf5_pure::File;
 let file = File::open_rw("output.h5").unwrap();
 let root = file.root();
 
-let run2 = root.create_group("run2").unwrap();   // a handle to the staged group
+let run2 = root.create_group("run2").unwrap();
 run2.create_dataset("signal", |b| { b.with_f64_data(&[1.0, 2.0, 3.0]); }).unwrap();
-file.copy("temperature", "temperature_backup").unwrap();  // H5Ocopy
-root.delete("sensors/pressure").unwrap();                 // H5Ldelete
+file.copy("temperature", "temperature_backup").unwrap();
+root.delete("sensors/pressure").unwrap();
 
-file.commit().unwrap();  // apply staged edits in place
+file.commit().unwrap();
 ```
 
-Contiguous and chunked datasets — the latter with any supported filter (deflate, shuffle, fletcher32, scale-offset, lzf) and optionally extensible (unlimited) dimensions — and compact-link groups are supported, and the editor edits files across every on-disk format the reference C library and h5py produce — version 0/1/2/3 superblocks, single- and multi-chunk object headers (a multi-chunk header is collapsed into one chunk on rewrite, and a version 0/1 symbol-table group on the edited path is converted to the latest compact-link format). It refuses, rather than silently degrade the file, anything it cannot reproduce faithfully — a chunked or extensible variable-length addition, dense-storage headers on the edited path, or copying a version-1 object. Within a session the space a deletion frees — for contiguous and chunked datasets alike, including the chunk index — is reused for later writes and the file is truncated when the freed bytes reach the end, so add/delete churn stays bounded instead of only ever growing; for guaranteed compaction across a reopen, see `repack` below.
-
-By default, every commit and immediate append operation concludes with an `fsync`. `FileAccessProperties::with_sync_policy(SyncPolicy::OnClose)` doesn't call `fsync` during the session - delegating that control to the application via `File::sync` - and performs a single `fsync` upon closure. This is consistent with `libhdf5`, whose default `sec2` driver omits flush callbacks entirely.
-
-Under either policy, the library executes `write` system calls before the commit or append operation returns. Therefore, `SyncPolicy::OnClose` sacrifices durability against power loss during the active session, but maintains write visibility to concurrent processes on the same machine through the OS page cache.
-
-(`FileAccessProperties::with_page_buffer_size`, which is off by default, alters this behavior. It retains dirty pages in user space across operation boundaries and marks the superblock for the duration of the write session. If the writer terminates abnormally, it leaves the file in an inconsistent state that subsequent readers reject.)
-
-The closing synchronization barrier is mandatory. Both `close` and `drop` flush terminal metadata and subsequently destroy the OS file handle required to synchronize those modifications.
-
-`File::open_rw` takes an exclusive OS advisory lock (the analogue of `H5Pset_file_locking`), so a second editor or any concurrent writer gets `Error::FileLocked` rather than racing on the file. The kernel releases the lock on any process exit, including a crash, so a crashed editor never leaves a stale lock behind. Override the policy with `FileAccessProperties::with_locking` and the `FileLocking` enum, passed to `File::open_rw_with_options`, or set `HDF5_USE_FILE_LOCKING=FALSE` for filesystems (such as some network mounts) where locking is unavailable. `File::open_swmr_writer` and the readers intentionally take no lock: SWMR is single-writer by contract and built for concurrent reads. What guards the SWMR writer instead is the superblock's status-flags byte, which outlives the process that set it: while a SWMR writer holds the file, every other open is refused with `Error::FileMarkedInUse` (as `H5Fopen` refuses it), and `File::clear_swmr_flag` clears a mark a crashed writer left. An `open_rw` editor is guarded only by the OS lock — it reads that byte but, unlike the C library, does not raise it. The one exception is a session given `FileAccessProperties::with_page_buffer_size`, which raises the write-access bit for its lifetime precisely so that a writer that dies holding dirty pages leaves a file every reader refuses.
+The [editing guide](https://docs.rs/hdf5-pure/latest/hdf5_pure/_guide/editing/index.html)
+covers the backing choice, append modes, durability, locking, space reuse, and format-specific
+rules. See the [compatibility matrix](docs/guide/compatibility.md) for the exact support status of
+on-disk structures such as dense storage and chunk indexes.
 
 ### Reclaiming space (`repack`)
 
-Deleting objects through `File::open_rw` makes their space available for reuse, but closing the file does not guarantee that the file shrinks. `repack` writes the surviving objects into a new compact file. `RepackOptions::drop_path` can omit individual objects or whole group subtrees.
+Deleting objects can make their storage reusable without making the file itself smaller.
+`repack` writes the surviving objects into a fresh compact file, optionally dropping paths.
 
 ```rust,no_run
 use hdf5_pure::{repack, RepackOptions};
 
-// Drop a dataset and a whole group subtree, then write a compact file.
 let options = RepackOptions::new()
     .drop_path("scratch")
     .drop_path("runs/aborted");
-
 repack("input.h5", "compact.h5", &options).unwrap();
 ```
 
-`repack` preserves datatype, shape, maximum shape, chunking, filters, element data, attributes, group hierarchy, committed datatypes, variable-length values, and supported object references. Content that cannot be reproduced faithfully returns `Error::RepackUnsupported` before output bytes are written.
-
-Fully allocated chunked datasets copy their encoded chunks verbatim. The filter pipeline is preserved without decoding or re-encoding the chunk data. This supports deflate, shuffle, Fletcher32, integer and floating-point scale-offset, ZFP, SZIP, and filters that `hdf5-pure` cannot decode.
-
-Contiguous and compact filtered datasets require re-encoding. Sparse chunked datasets also require re-encoding because their chunk grid contains unallocated entries. These paths require a lossless filter pipeline.
-
-Variable-length strings and sequences are rebuilt with new global-heap entries. Object references are rewritten to the referenced object's address in the output file. The same address rewriting applies to supported compound and array datatypes that contain variable-length values or object references.
-
-`repack` rejects region references, non-8-byte object references, unsupported reference layouts, virtual datasets, external raw-data storage, lossy filters on a path that requires re-encoding, unsupported reference attributes, and references to objects omitted from the output.
+The [repack guide](https://docs.rs/hdf5-pure/latest/hdf5_pure/_guide/repack/index.html)
+documents the fidelity guarantee, verbatim chunk-copy path, re-encoding fallbacks, reference
+handling, and the cases that are rejected.
 
 ### File-space strategy
 
-Mirroring `H5Pset_file_space_strategy` and `H5Pset_file_space_page_size`, a written file can record how it manages free space. The strategy is stored in a superblock-extension message, so the reference HDF5 C library and a later reopen observe it; `File::file_space_strategy()` reads it back.
+`FileBuilder::with_file_space_strategy` records the allocation strategy, persistence choice, and
+free-space threshold. `with_file_space_page_size` configures paged allocation. Paged files that
+will later be edited normally need persisted page information: a `FileSpaceStrategy::Page` file
+created with `persist = false` is normally rejected by `File::open_rw` because the editor cannot
+preserve metadata/raw-data page segregation.
 
-```rust,no_run
-use hdf5_pure::{File, FileBuilder, FileSpaceStrategy};
-
-let mut b = FileBuilder::new();
-b.create_dataset("d").with_i32_data(&[1, 2, 3]);
-b.with_file_space_strategy(FileSpaceStrategy::Page, false, 1)  // strategy, persist, threshold
-    .with_file_space_page_size(8192);
-b.write("out.h5").unwrap();
-
-assert_eq!(File::open("out.h5").unwrap().file_space_strategy(), Some(FileSpaceStrategy::Page));
-```
-
-Passing `persist = true` persists free space across reopen: the regions a later read-write session frees (`File::open_rw`, then `Group::delete` + `File::commit`) are recorded in on-disk free-space-manager blocks (`FSHD`/`FSSE`), so later sessions — this crate's and the reference C library's — recover and reuse them. `File::persisted_free_space()` returns the tracked free regions. `FileSpaceStrategy::Page` goes further and writes a genuine paged file — page-aligned allocations with metadata and raw data in separate pages — that the reference C library reads as paged and that this crate grows in place through `File::open_rw`, whichever backing it picks.
+See the [file-space guide](https://docs.rs/hdf5-pure/latest/hdf5_pure/_guide/file_space/index.html)
+for strategy semantics, persisted free-space reuse, paged files, and editing behavior.
 
 ### Streaming large files
 
-`File::open(path)` reads the whole file into memory. To read a file too large to buffer (for example a multi-gigabyte file produced on a 32-bit host, where it exceeds the address space), open it with `File::open_streaming(path)` instead. It fetches metadata and dataset chunks from the file on demand rather than buffering it whole, so it never holds the entire file in memory at once: peak memory tracks the data you actually read (one dataset, decompressed, with its chunks fetched on demand) plus the metadata being parsed, not the whole file.
+`File::open_streaming` reads metadata and dataset storage on demand while keeping the same
+dataset-reading API as `File::open`.
 
 ```rust
 use hdf5_pure::File;
 
 let file = File::open_streaming("huge.h5").unwrap();
-let ds = file.dataset("signal").unwrap();
-let values = ds.read_f64().unwrap();  // only this dataset's chunks are read
+let values = file.dataset("signal").unwrap().read_f64().unwrap();
 ```
 
-The reading API is identical to `File::open`: only the backing store differs. Dataset reads are fully supported: contiguous, compact, and chunked with version 1 B-tree, single-chunk, implicit, fixed-array, Extensible Array, and version 2 B-tree indexes. Both group forms (v2 and v1 symbol-table) resolve along a path and attributes read the same as `File::open`, the differences are that `File::as_bytes` returns an empty slice, a streaming file cannot be the source of a cross-file copy, and chunk decompression is sequential. `open_streaming` requires the `std` filesystem.
-
-To read a single dataset that is itself too large to hold decompressed, read it in **row windows** rather than whole: `read_raw_rows(start, count)` and the typed `read_f64_rows` … `read_string_rows` decode only the leading-dimension rows `[start, start + count)`, touching only the chunks that window overlaps, so peak memory scales with the window rather than the dataset — for variable-length strings included, whose window resolves only its own heap references.
-
-```rust
-use hdf5_pure::File;
-
-let file = File::open_streaming("huge.h5").unwrap();
-let ds = file.dataset("signal").unwrap();
-let rows = ds.shape().unwrap()[0];
-for start in (0..rows).step_by(1_000_000) {
-    let window = ds.read_f64_rows(start, 1_000_000).unwrap(); // clamped at the end
-    let _ = window; // ... process it ...
-}
-```
-
-Use `File::open_streaming_with_options` to bound retained metadata and dataset chunk cache memory. `MetadataCacheConfig` mirrors the memory-budget role of `H5Pset_mdc_config`; `ChunkCacheConfig` mirrors the raw-data chunk-cache settings from `H5Pset_cache`, controlling decompressed chunk data and whether parsed chunk indexes are retained between repeated reads of the same dataset.
-
-```rust
-use hdf5_pure::{ChunkCacheConfig, File, FileAccessProperties, MetadataCacheConfig};
-
-let access = FileAccessProperties::new()
-    .with_metadata_cache(MetadataCacheConfig::new(8 * 1024 * 1024).with_max_entry_bytes(64 * 1024))
-    .with_chunk_cache(ChunkCacheConfig::from_h5p_cache(521, 256 * 1024));
-let file = File::open_streaming_with_options("huge.h5", access).unwrap();
-```
-
-When the bytes are not a file at all — an object store addressed by range request, a WebAssembly guest handed byte ranges by its host — implement the `Source` trait over them and open with `File::from_source`. It is the same lazy backing store; only where the bytes come from differs. `Source` asks for a total length and the bytes at an absolute offset, and `ReadSeekSource` already implements it for any `Read + Seek`. Turn the metadata cache on through `File::from_source_with_options` for a remote source: without one, every read a parser makes is a round trip.
-
-```rust
-use hdf5_pure::{File, FormatError, Source};
-
-struct Remote {
-    len: u64,
-}
-
-impl Source for Remote {
-    fn len(&self) -> u64 {
-        self.len
-    }
-
-    fn read_at(&self, offset: u64, buf: &mut [u8]) -> Result<(), FormatError> {
-        // Fill the whole request or fail: a short read is an error.
-        let bytes = fetch(offset, buf.len()).map_err(FormatError::Source)?;
-        buf.copy_from_slice(&bytes);
-        Ok(())
-    }
-}
-
-let file = File::from_source(Remote { len: 1 << 30 }).unwrap();
-```
-
-To override the chunk cache for a single dataset (HDF5's per-dataset access property list, `H5Pset_chunk_cache`), open it with `dataset_with_options`. The override replaces the file-wide default for that one dataset; other datasets keep the default. `Dataset::chunk_cache_config()` reports the effective setting (`H5Pget_chunk_cache`).
-
-```rust
-use hdf5_pure::{ChunkCacheConfig, DatasetAccessProperties, File};
-
-let file = File::open("data.h5").unwrap();
-// This dataset is read once front-to-back: skip caching its decompressed chunks.
-let dapl = DatasetAccessProperties::new().with_chunk_cache(ChunkCacheConfig::disabled());
-let ds = file.dataset_with_options("scan", dapl).unwrap();
-let values = ds.read_f64().unwrap();
-```
-
-To confirm the cache is behaving as configured, `Dataset::chunk_cache_stats()` reports a read-only snapshot (index loaded, retained chunks, retained bytes) after a read.
-
-```rust
-use hdf5_pure::File;
-
-let file = File::open("data.h5").unwrap();
-let ds = file.dataset("signal").unwrap();
-let _ = ds.read_f64().unwrap();
-let stats = ds.chunk_cache_stats();
-assert!(stats.cached_chunks() > 0); // chunks were retained for reuse
-```
+The [streaming guide](https://docs.rs/hdf5-pure/latest/hdf5_pure/_guide/streaming/index.html)
+covers row-window reads, cache budgets, caller-supplied `Source` implementations, and the
+bounded-memory read/write paths.
 
 ### In-memory (WASM)
 
@@ -312,76 +201,31 @@ let bytes: Vec<u8> = builder.finish().unwrap(); // no filesystem needed
 
 ### N-dimensional arrays (`ndarray` feature)
 
-Enable the `ndarray` feature to write and read datasets of any rank as
-[`ndarray`](https://docs.rs/ndarray) arrays. Shape and datatype are taken from
-the array, and data is stored row-major (C order), matching HDF5:
+The `ndarray` feature adds rank-generic dataset I/O through the `ndarray` crate:
 
 ```rust
 use hdf5_pure::{File, FileBuilder};
 use ndarray::{array, Array2};
 
-let a: Array2<f64> = array![[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]];
-
-let mut fb = FileBuilder::new();
-fb.create_dataset("m").with_ndarray(&a);          // shape [2, 3], f64
-let bytes = fb.finish().unwrap();
-
-let file = File::from_bytes(bytes).unwrap();
+let a: Array2<f64> = array![[1.0, 2.0], [3.0, 4.0]];
+let mut builder = FileBuilder::new();
+builder.create_dataset("m").with_ndarray(&a);
+let file = File::from_bytes(builder.finish().unwrap()).unwrap();
 let back: Array2<f64> = file.dataset("m").unwrap().read_array().unwrap();
 assert_eq!(a, back);
-
-// When the rank is only known at runtime:
-let dynamic = file.dataset("m").unwrap().read_array_dyn::<f64>().unwrap(); // ArrayD<f64>
 ```
 
-`with_ndarray` accepts owned arrays or views; non-standard layouts (transposed,
-Fortran-order, or strided) are repacked to row-major on write, and chunking and
-compression chain as usual (`.with_ndarray(&a).with_chunks(&[64, 64]).with_deflate(6)`).
+See the [N-dimensional array guide](https://docs.rs/hdf5-pure/latest/hdf5_pure/_guide/ndarray/index.html)
+for feature setup, memory order, dynamic-rank reads, and compression.
 
 ## SWMR (single writer, multiple readers)
 
-A single process can append to an unlimited dataset in place while other processes read it concurrently. The writer appends chunks and flushes in dependency order so readers only ever observe a consistent prefix; readers re-read to pick up new data. This interoperates with the reference HDF5 C library and h5py in both directions.
+SWMR lets one process append to an unlimited dataset while other processes follow it with
+refreshing reads. It works with the reference HDF5 C library and h5py.
 
-The dataset must have one unlimited dimension and be chunked (it is indexed by an Extensible Array, which the latest format selects automatically). Create it the usual way:
-
-```rust
-use hdf5_pure::{FileBuilder, MaxExtent};
-
-let mut builder = FileBuilder::new();
-builder.create_dataset("log")
-    .with_i32_data(&[0, 1, 2])   // initial rows
-    .with_shape(&[3])
-    .with_maxshape(&[MaxExtent::Unlimited])  // one unlimited dimension
-    .with_chunks(&[1]);
-builder.write("stream.h5").unwrap();
-```
-
-Append in place (each call flushes durably; the file stays valid for concurrent readers throughout):
-
-```rust,no_run
-use hdf5_pure::File;
-
-let file = File::open_swmr_writer("stream.h5").unwrap();
-let mut log = file.dataset("log").unwrap();
-log.append(&[3i32, 4, 5]).unwrap();
-log.append(&[6, 7]).unwrap();
-file.close().unwrap(); // clears the SWMR flag; or just drop the file
-```
-
-Follow a growing file from another process (or the reference C library / h5py writing in SWMR mode):
-
-```rust
-use hdf5_pure::File;
-
-let mut file = File::open_swmr("stream.h5").unwrap();
-let n = file.dataset("log").unwrap().shape().unwrap()[0];
-// ... later, after the writer appends ...
-file.refresh().unwrap();                 // re-read appended data
-let ds = file.dataset("log").unwrap();
-println!("now {} rows", ds.shape().unwrap()[0]);
-```
-
-Supported subset: one unlimited dimension, chunked, unfiltered (no compression on the appended dataset), chunk-aligned appends, no userblock, v3 superblock. Growth is unbounded. SWMR requires the `std` filesystem (not the in-memory/WASM path). If a writer process exits without `close()`, the file is left marked as having an active SWMR writer: every other open then fails with `Error::FileMarkedInUse`, exactly as `H5Fopen` does, and `File::open_swmr` is the one open that follows the mark instead. Recover the file with `File::clear_swmr_flag(path)` (the equivalent of `h5clear`).
+See the [SWMR guide](https://docs.rs/hdf5-pure/latest/hdf5_pure/_guide/swmr/index.html) for dataset
+layout requirements, writer and reader usage, durability, crash recovery, and the exact supported
+subset. The [compatibility matrix](docs/guide/compatibility.md) records the support status.
 
 ## Supported data types
 
@@ -405,50 +249,18 @@ Supported subset: one unlimited dimension, chunked, unfiltered (no compression o
 
 ### Compound types
 
-Numeric tuples are encoded field by field, without relying on Rust tuple layout:
-
-```rust
-use hdf5_pure::{File, FileBuilder};
-
-let values = [(1i8, 20u64, 3.5f32), (2, 30, 4.5)];
-let mut builder = FileBuilder::new();
-builder.create_dataset("records")
-    .with_compound_values(&values)
-    .unwrap();
-let bytes = builder.finish().unwrap();
-
-let file = File::from_bytes(bytes).unwrap();
-let records = file.dataset("records").unwrap()
-    .read_compound::<(i8, u64, f32)>()
-    .unwrap();
-assert_eq!(records, values);
-```
-
-Use `CompoundTypeBuilder::with_size` for an `H5Tinsert`-style layout with explicit offsets and padding. `Dataset::datatype` exposes the exact field offsets from existing files, while `Dataset::read_raw` returns their complete unfiltered record bytes.
+Compound records, complex-number helpers, enumerations, fixed-size arrays, and object references
+have dedicated builders and readers. See the [compound types guide](https://docs.rs/hdf5-pure/latest/hdf5_pure/_guide/compound_types/index.html)
+for layouts, tuple helpers, complex values, enumerations, arrays, and references.
 
 ### Variable-length string reads
 
-`Dataset::read_string` reads both fixed-length and variable-length HDF5 string datasets. VL reads can be bounded before payload allocation, or consumed one string at a time:
+`Dataset::read_string` reads fixed- and variable-length HDF5 string datasets. For large
+variable-length datasets, the API also supports measuring payload size, applying allocation
+limits, and visiting values one at a time.
 
-```rust
-use hdf5_pure::{File, VlenStringReadOptions};
-
-let file = File::open_streaming("strings.h5").unwrap();
-let dataset = file.dataset("names").unwrap();
-
-let payload_bytes = dataset.vlen_string_payload_size().unwrap();
-let options = VlenStringReadOptions::new()
-    .with_max_elements(100_000)
-    .with_max_payload_bytes(64 * 1024 * 1024);
-
-dataset.visit_vlen_strings(options, |value| {
-    println!("{value}");
-}).unwrap();
-
-println!("{payload_bytes} bytes of string payload");
-```
-
-The payload limit covers bytes referenced by VL elements and excludes Rust container metadata. Shared global heap collections are indexed once per read, and only the referenced object payloads are fetched. This works with both `File::open` and `File::open_streaming`.
+See the [variable-length string guide](https://docs.rs/hdf5-pure/latest/hdf5_pure/_guide/vlen_strings/index.html)
+for the bounded and streaming read APIs.
 
 ### Attributes
 
@@ -465,94 +277,20 @@ The payload limit covers bytes referenced by VL elements and excludes Rust conta
 
 ## Compression
 
+Dataset filters include deflate, shuffle, Fletcher32, LZF, scale-offset, and optional ZFP.
+Filters operate on chunked storage. Reads decode the configured pipeline automatically.
+
 ```rust
-// Deflate (zlib)
 builder.create_dataset("compressed")
     .with_f64_data(&data)
     .with_chunks(&[100])
-    .with_deflate(6);
-
-// Shuffle + deflate
-builder.create_dataset("shuffled")
-    .with_f64_data(&data)
-    .with_chunks(&[100])
     .with_shuffle()
     .with_deflate(6);
 ```
 
-### Scale-offset (HDF5 filter id 6)
-
-Scale-offset stores each chunk's values as offsets from the chunk minimum,
-packed into the fewest bits the chunk's range needs. It is a built-in HDF5
-filter, so files we write are readable by the reference C library, h5py, and
-MATLAB, and files those tools produce are readable by us.
-
-```rust
-use hdf5_pure::ScaleOffset;
-
-// Integer mode is lossless. `0` lets the encoder pick the bit width per chunk.
-builder.create_dataset("counts")
-    .with_i32_data(&counts)
-    .with_chunks(&[1000])
-    .with_scale_offset(ScaleOffset::Integer(0));
-
-// Float D-scale is lossy: values are rounded to N decimal digits before packing.
-builder.create_dataset("readings")
-    .with_f64_data(&readings)
-    .with_chunks(&[1000])
-    .with_scale_offset(ScaleOffset::FloatDScale(3))  // keep 3 decimal digits
-    .with_deflate(6);                                // may be followed by deflate
-```
-
-| Mode                                 | Datatype                 | Loss                       |
-| ------------------------------------ | ------------------------ | -------------------------- |
-| `ScaleOffset::Integer(minbits)`      | signed/unsigned integers | lossless                   |
-| `ScaleOffset::FloatDScale(decimals)` | `f32` / `f64`            | lossy to `decimals` digits |
-
-### LZF (h5py filter id 32000)
-
-LZF is the fast lossless compressor h5py registers and ships with — the
-natural filter for files exchanged with h5py, which reads it with no plugin
-(the plain C library and MATLAB need h5py's filter plugin). Pairs with
-shuffle; combining it with deflate is refused.
-
-```rust
-builder.create_dataset("fast")
-    .with_f64_data(&data)
-    .with_chunks(&[1000])
-    .with_shuffle()
-    .with_lzf();
-```
-
-`src/lzf_crosscheck.rs` decodes h5py's own LZF streams and checks the filter
-pipeline this crate writes against the one h5py records. Our compressed stream
-is not byte-compared — LZF has many valid encodings of the same data — so that
-h5py can read what we write is verified by the read-back phase of
-`tests/data/h5py/lzf/regen.py`, which needs a live h5py.
-
-### ZFP (optional, `zfp` feature)
-
-Pure-Rust fixed-rate port of the LLNL/zfp codec, registered HDF5 filter
-ID 32013. Byte-for-byte interoperable with the reference H5Z-ZFP plugin:
-files we write are readable by `h5py` + `hdf5plugin`, and files those tools
-produce are readable by us. Supported slice:
-
-- Scalar types: `f32`, `f64`, `i32`, `i64`
-- Ranks: 1D, 2D, 3D, 4D (per-block sizes 4, 16, 64, 256)
-- Mode: fixed-rate (`rate` bits per value)
-
-```rust
-// Compile with `--features zfp`
-builder.create_dataset("temperature")
-    .with_f32_data(&data)
-    .with_shape(&[ny, nx])
-    .with_chunks(&[ny, nx])
-    .with_zfp(16.0);  // 16 bits per value
-```
-
-Interop is enforced by `src/zfp_crosscheck.rs`, which compares against
-fixtures produced by `h5py` + `hdf5plugin`. See `tests/data/h5py/zfp/regen.py`
-for the generator — run it after any codec change.
+See the [compression guide](https://docs.rs/hdf5-pure/latest/hdf5_pure/_guide/compression/index.html)
+for filter semantics, chaining rules, scale-offset and ZFP behavior, feature flags, and
+interoperability.
 
 ## Userblock (MATLAB v7.3)
 
@@ -679,25 +417,21 @@ Reading decodes the MATLAB opaque value classes `datetime`, `duration`, and `cat
 
 ## Cargo features
 
-| Feature        | Default | Description                                                                |
-| -------------- | ------- | -------------------------------------------------------------------------- |
-| `std`          | yes     | File I/O, high-level reader API                                            |
-| `checksum`     | yes     | Jenkins hash validating checksummed metadata                               |
-| `deflate`      | yes     | Deflate compression (pure Rust backend)                                    |
-| `serde`        | no      | Serialize/deserialize MATLAB v7.3 `.mat` files via serde                   |
-| `fast-deflate` | no      | zlib-ng backend for deflate                                                |
-| `ndarray`      | no      | N-dimensional array I/O via the [`ndarray`](https://docs.rs/ndarray) crate |
-| `provenance`   | no      | SHA-256 data provenance tracking                                           |
-| `zfp`          | no      | ZFP fixed-rate compression (HDF5 filter 32013), f32/f64/i32/i64 × 1D–4D    |
+The default feature set is `std`, `checksum`, and `deflate`. Optional features are
+`fast-deflate`, `provenance`, `zfp`, `ndarray`, `serde`, and `num-complex`. The
+[Cargo features section of the crate documentation](https://docs.rs/hdf5-pure/latest/hdf5_pure/#cargo-features)
+is the canonical description of what each feature enables and which dependencies or other
+features it implies.
 
-For bare-metal `no_std`, disable default features (keep `checksum` for metadata validation):
+For bare-metal `no_std`, disable default features and keep `checksum` for metadata validation:
 
 ```toml
 [dependencies]
-hdf5-pure = { version = "0.46", default-features = false, features = ["checksum"] }
+hdf5-pure = { version = "0.47.0", default-features = false, features = ["checksum"] }
 ```
 
-The high-level `File` / `FileBuilder` API is `std`-gated, so a `no_std` build exposes only the lower-level primitives. The Cargo features section of the crate documentation covers each feature: what it enables, what it pulls in, and which other features it implies.
+The high-level `File` / `FileBuilder` API is `std`-gated, so a `no_std` build exposes only the
+lower-level primitives.
 
 ## Limitations
 
@@ -730,5 +464,5 @@ Unless you explicitly state otherwise, any contribution intentionally submitted 
 - The ZFP codec in `crates/hdf5-pure-filter/src/zfp.rs` is a port of the reference implementation by
   Lawrence Livermore National Security, LLC, under the BSD 3-Clause license in
   [LICENSE-ZFP](LICENSE-ZFP).
-- The metadata checksum in `src/checksum.rs` is Bob Jenkins' public-domain lookup3 hash.
+- The metadata checksum in `crates/hdf5-pure-format/src/checksum.rs` is Bob Jenkins' public-domain lookup3 hash.
 - The HDF5 format parsing and low-level I/O modules are derived from rustyhdf5 by the RustyStack project, MIT licensed.

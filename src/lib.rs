@@ -346,7 +346,7 @@
 //!
 //! ```toml
 //! [dependencies]
-//! hdf5-pure = { version = "0.46", default-features = false, features = ["checksum"] }
+//! hdf5-pure = { version = "0.47.0", default-features = false, features = ["checksum"] }
 //! ```
 //!
 //! The crate then compiles as `#![no_std]` with `alloc` alone, and the `std`-gated [`File`] and

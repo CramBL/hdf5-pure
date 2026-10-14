@@ -66,9 +66,11 @@ Leading and trailing slashes in a drop path are ignored, so `"grp/old"` and `"/g
 
 ## The fidelity guarantee
 
-[`repack`](crate::repack()) never silently degrades data. Every surviving object is reproduced byte-for-byte, datatype, shape, max-shape, chunking, supported filters, raw element data, and attributes alike, or the whole operation fails with [`Error::RepackUnsupported`](crate::Error::RepackUnsupported), which states the object and the reason. An object it cannot reproduce exactly is rejected.
+[`repack`](crate::repack()) never silently degrades data it understands. Every surviving object is reproduced faithfully: datatype, shape, max-shape, chunking, filters, element data, and attributes. Otherwise, the operation fails with [`Error::RepackUnsupported`](crate::Error::RepackUnsupported), which states the object and the reason. An object it cannot reproduce faithfully is rejected.
 
-The operation is all-or-nothing: the entire source is validated and staged in memory before the first byte is committed, so on any failure nothing is written to `dst` and no partial output file is left behind.
+Unknown optional object-header messages follow the source's read-only semantics. A message flagged only as mandatory for a decoder with write access may be omitted when the object is rebuilt. [`RepackOptions::reject_unknown_messages_only_a_writer_must_understand`](crate::RepackOptions::reject_unknown_messages_only_a_writer_must_understand) turns that case into an error instead. Messages mandatory for every decoder are rejected. See the [compatibility guide](crate::_guide::compatibility#unknown-metadata) for the support matrix.
+
+Fidelity checks and drop-path validation run before output bytes are written. Dataset chunk bytes are streamed from the source during the final write, so an I/O error while reading a chunk or writing the destination can leave a partial `dst`. Remove it before retrying.
 
 ### What it reproduces
 
@@ -78,7 +80,7 @@ The operation is all-or-nothing: the entire source is validated and staged in me
 | Embedded addresses | a compound with a variable-length member, an object-reference member, or both, an array of such compounds, and nesting of either. The embedded addresses are rewritten, the surrounding bytes carried through untouched |
 | Layout | contiguous / compact or chunked |
 | Unallocated storage | a dataset created and never written stores nothing in the copy, though a read of it still returns the fill value |
-| Filters | deflate, shuffle, fletcher32, LZF, and/or lossless integer scale-offset |
+| Filters | eligible fully allocated chunked datasets preserve any filter pipeline verbatim. Re-encoded paths support deflate, shuffle, Fletcher32, LZF, and lossless integer scale-offset |
 | Structure | group hierarchy of arbitrary depth |
 | Attributes | every datatype above, carried across with the source's own encoding (width, charset, string padding, and rank included) on datasets, groups, and root |
 | File-space strategy | the source's strategy, page size, and threshold (carried forward as non-persistent) |
@@ -89,7 +91,9 @@ Attributes keep their own encoding. An attribute is copied as the source encoded
 
 One deviation from byte-for-byte. A dataset that was never written stores nothing in the destination as it did in the source. A **resizable** one is the exception: it is given the eagerly built Extensible Array this crate gives every empty resizable dataset, because an in-place append needs the index to exist before the first chunk arrives. Its chunks stay absent either way, and the index costs a few hundred bytes the source did not spend. A dataset that stores only *some* of its chunks is a separate case and is unaffected: a sparse grid cannot take the verbatim path, so the destination re-encodes and stores every slot.
 
-Lossless filters only. [`repack`](crate::repack()) reads each dataset's *decompressed* bytes and re-applies its filters. It can therefore reproduce only **lossless** filters, where the re-encoded chunks decompress to the exact same bytes. This includes deflate, shuffle, fletcher32, LZF, and lossless integer scale-offset. See [Compression](crate::_guide::compression) for the full filter list.
+Fully allocated chunked datasets whose element bytes contain no variable-length or object-reference addresses take a **verbatim chunk-copy path**: each encoded chunk is copied without decoding or re-encoding it. That preserves lossy filters such as floating-point D-scale scale-offset and ZFP, filters this crate cannot decode or encode such as SZIP, and unknown filters byte-for-byte. The destination rebuilds the chunk index around those encoded chunks.
+
+Two paths still re-encode data: contiguous or compact filtered datasets, and sparse chunked datasets whose chunk grid contains unallocated entries. Those paths require a filter pipeline this crate can reproduce losslessly: deflate, shuffle, Fletcher32, LZF, and lossless integer scale-offset. See [Compression](crate::_guide::compression) for filter behavior and the [compatibility guide](crate::_guide::compatibility#filters) for the support matrix.
 
 ### What it rejects (by name)
 
@@ -102,10 +106,10 @@ These are reported as [`Error::RepackUnsupported`](crate::Error::RepackUnsupport
 | region references, and object references other than 8 bytes wide | their stored selections and addresses are not rewritten |
 | object references in a file with a userblock, or to an object being dropped | the new target address cannot be resolved safely, or will not exist |
 | a virtual data layout, and external data storage (`H5Pset_external`) | the element bytes live outside the file, and this crate does not read them |
-| lossy filters: float D-scale scale-offset and ZFP | re-encoding is not guaranteed idempotent |
-| SZIP filter | this crate cannot write it |
+| a lossy filter on a path that requires re-encoding | re-encoding is not guaranteed idempotent. Fully allocated chunked datasets preserve it verbatim |
+| SZIP or an unknown filter on a path that requires re-encoding | this crate cannot encode it. Fully allocated chunked datasets preserve it verbatim |
 | an attribute whose datatype is or contains a reference | its stored address is not rewritten, and no [`AttrValue`](crate::AttrValue) can re-encode it |
-| file-space settings that do not parse | the copy would record the default strategy in their place |
+| file-space settings that do not parse | the source strategy cannot be reproduced faithfully |
 
 ## Verifying the result
 
