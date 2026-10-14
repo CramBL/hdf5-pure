@@ -175,7 +175,7 @@
 //!
 //! Both write paths draw on that list, through allocators of their own. The
 //! immediate [`Dataset::append`](crate::Dataset::append) allocates its chunks and
-//! index blocks through [`Store::alloc_raw`], which
+//! index blocks through [`Store::allocate`], which
 //! [`WriteEngine::immediate_reuse_allowed`] gates: an append has no superblock
 //! repoint to publish its allocations with, so it reuses only where the space it
 //! overwrites is dead on the disk as it stands (issue #349). On a file that
@@ -10747,20 +10747,11 @@ impl FlatDataset {
     }
 }
 
-/// A borrow adapter that drives the shared Extensible-Array append engine
-/// ([`crate::chunk_index_inplace`]) against the engine's *own* image and
-/// superblock, so a session runs an immediate O(1) in-place append without
-/// constructing a second writable handle (which would take a second exclusive
-/// lock and keep a divergent view of the file). It borrows only those two
-/// fields, leaving [`WriteEngine::located`] independently borrowable.
+/// Provides the extensible-array append engine with the session's image and superblock.
 ///
-/// [`Store`] is the append engine's view of a file — an image *plus* the
-/// superblock, which the image itself knows nothing about. Pairing them here is
-/// all this adapter does; every primitive delegates, so the image's own
-/// write-ordering discipline is what applies.
-///
-/// It carries the session allocation strategy too, so `alloc_raw` uses
-/// [`SessionSpace::plan_transition`] before an append and keeps each PAGE region homogeneous.
+/// The engine borrows its image through [`Store`] and maintains its dataset geometry separately
+/// in [`WriteEngine::located`]. The adapter allocates both chunk payloads and index blocks in raw
+/// PAGE space, using [`SessionSpace::plan_transition`] before extending the image.
 struct EditStore<'a> {
     image: &'a mut dyn FileImage,
     superblock: &'a mut Superblock,
@@ -10781,12 +10772,14 @@ struct EditStore<'a> {
 }
 
 impl EditStore<'_> {
-    /// Append `bytes` into a raw page, padding the tail page first when a paged
-    /// file's tail holds metadata. A plain append on the common non-paged file.
+    /// Appends `bytes`, padding a metadata tail page before writing into raw PAGE space.
     ///
-    /// Raw is the only page type this adapter allocates: see
-    /// [`Store::alloc_raw`] for why an extensible-array index block belongs in a
-    /// raw page here.
+    /// Extensible-array index blocks use the same raw-page placement as chunk payloads.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Format`] if address conversion, PAGE geometry, or padding size is invalid.
+    /// Returns [`Error::Io`] if appending the padding or bytes fails.
     fn append_into_raw_page(&mut self, bytes: &[u8]) -> Result<u64, Error> {
         let eoa = self.addresses.relative(self.image.len())?.get();
         if let Some(transition) = self.space.plan_transition(eoa, PageType::Raw)? {
@@ -10834,12 +10827,12 @@ impl Store for EditStore<'_> {
     fn length_size(&self) -> u8 {
         self.superblock.length_size
     }
-    fn alloc_raw(&mut self, bytes: &[u8]) -> Result<u64, Error> {
+    fn allocate(&mut self, bytes: &[u8], class: AllocationClass) -> Result<u64, Error> {
         let extent = if let Some(reserve) = self.reserve.as_deref_mut() {
             reserve.alloc(bytes.len() as u64)
         } else if self.reuse_session_space {
             self.space
-                .allocate(bytes.len() as u64, AllocationClass::Raw)
+                .allocate_with_page_type(bytes.len() as u64, class, PageType::Raw)
         } else {
             None
         };
@@ -14096,6 +14089,34 @@ mod tests {
     use crate::object_path::ObjectPath;
     use crate::width::LengthWidth;
     use crate::writer::FileBuilder;
+
+    #[rstest]
+    #[case::index(AllocationClass::Metadata)]
+    #[case::chunk(AllocationClass::Raw)]
+    fn array_append_preserves_raw_page_reuse(#[case] class: AllocationClass) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("page_reuse.h5");
+        let mut builder = FileBuilder::new();
+        builder.create_dataset("keep").with_i32_data(&[1, 2, 3, 4]);
+        builder.with_file_space_strategy(FileSpaceStrategy::Page, true, 1);
+        builder.write(&path).unwrap();
+        let mut engine = WriteEngine::open_with_locking(&path, FileLocking::Enabled).unwrap();
+        let before = engine.space.paged_sections().unwrap();
+        let raw = *before.raw().first().unwrap();
+        assert!(before.metadata().iter().any(|extent| extent.len() >= 8));
+        let at = {
+            let mut store = engine.store();
+            store.reuse_session_space = true;
+            store.allocate(&[0; 8], class).unwrap()
+        };
+        assert_eq!(at, raw.start());
+        let after = engine.space.paged_sections().unwrap();
+        assert_eq!(after.metadata(), before.metadata());
+        assert_eq!(
+            after.raw(),
+            [FreeExtent::new(raw.start() + 8, raw.len() - 8).unwrap()]
+        );
+    }
 
     #[rstest]
     #[case::unsigned_byte(1, false, 0, 8, false, 0, 8, true)]

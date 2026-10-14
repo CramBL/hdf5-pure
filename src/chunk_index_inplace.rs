@@ -43,6 +43,7 @@ use hdf5_pure_format::__private::ObjectHeaderContinuation;
 use hdf5_pure_format::__private::ObjectHeaderPrefix;
 use hdf5_pure_format::__private::SlotOccupancy;
 use hdf5_pure_format::__private::SuperBlockGeometry;
+use hdf5_pure_space::__private::AllocationClass;
 
 #[cfg(test)]
 use crate::address::AddressContext;
@@ -138,54 +139,25 @@ pub(crate) trait Store: Source {
     /// This file's length field width in bytes.
     fn length_size(&self) -> u8;
 
-    /// Allocate space for `bytes` as *raw* data and write them there, returning
-    /// the position they occupy in the image. **Every allocation this engine
-    /// makes goes through here**, chunk data and the extensible-array blocks
-    /// indexing it alike. It is the trait's only allocation primitive.
+    /// Writes `bytes` into an allocation of `class` and returns its physical position.
     ///
-    /// A store may serve the allocation out of a region an earlier commit freed
-    /// rather than growing the file (issue #349), or append at end-of-file. The
-    /// address is below the file's *logical* length either way once this returns,
-    /// so a later in-place patch of the region addresses bytes the store already
-    /// accounts for.
+    /// Chunk payloads use [`AllocationClass::Raw`]. Extensible-array data and super blocks use
+    /// [`AllocationClass::Metadata`]. On PAGE files, the editor places both in raw pages.
+    /// During reclamation, the editor returns index storage to raw-page free space only where
+    /// its PAGE placement is proven.
     ///
-    /// What [`apply_ea_append`]'s phase 1 needs is stronger — a chunk an index
-    /// element points at must lie inside the *recorded* end-of-file, which the
-    /// superblock holds and this trait exposes no accessor for. Phase 1 gets
-    /// there in two steps rather than from this contract: an appended region is
-    /// covered by the patch it then issues, and a reused region is covered
-    /// because a list this may draw from is populated only by a commit — a
-    /// staged one, or the manager rewrite a persisting session makes before an
-    /// append may reuse at all (`WriteEngine::reserve_for_immediate_append`,
-    /// issue #387) — and every commit leaves the recorded end-of-file at the
-    /// file's length.
+    /// The store may reuse committed free space or append at end-of-file. The allocation lies
+    /// within the image's logical length on return. Before publishing a chunk address,
+    /// [`apply_ea_append`] records any increase in that length in the superblock.
     ///
-    /// The bytes do **not** necessarily reach the disk here: a session gathers
-    /// its writes and issues them at the next ordering barrier (issue #288).
-    /// Anything that publishes an address into this region to a *lower* address —
-    /// a pointer, an element count, the superblock's end-of-file — must
-    /// [`sync`](Self::sync) between the two, because gathered writes go out in
-    /// address order and would otherwise publish first; `ea_insert` and the two
-    /// data-block allocators do exactly that. Those barriers are unchanged by
-    /// which address comes back. They exist for the *appended* case, where the
-    /// region sits above the pointer naming it; a reused region below its pointer
-    /// is already written first by that same address order, so the barrier is
-    /// then redundant rather than wrong — and which case applies is not knowable
-    /// at the call site.
+    /// The caller must issue [`sync`](Self::sync) before publishing a reference to the allocation.
+    /// A store may gather writes and flush them in address order at that barrier.
     ///
-    /// On a paged file an append keeps pages homogeneous by never letting raw and
-    /// metadata bytes share a page (issue #173), padding the tail page first when
-    /// the page type changes. An index block is metadata by the format's taxonomy,
-    /// but on a paged file this crate places a chunked dataset's index in raw pages
-    /// beside its chunk data, and the reclaim path
-    /// (`WriteEngine::chunked_storage_spans`) frees both halves as raw on that
-    /// basis. Allocating an index block into a metadata page here would put a span
-    /// the reclaim reports as raw inside a metadata page, so a later delete would
-    /// advertise metadata-page bytes for raw reuse — the one thing the paged
-    /// strategy exists to prevent, and invisible to the reference library, which
-    /// reads a mixed-page file without complaint (issue #198). That is the same
-    /// reason a reuse must draw from the raw list and no other.
-    fn alloc_raw(&mut self, bytes: &[u8]) -> Result<u64, Error>;
+    /// # Errors
+    ///
+    /// Returns [`Error::Format`] if address conversion or PAGE allocation geometry is invalid.
+    /// Returns [`Error::Io`] if writing the allocation fails.
+    fn allocate(&mut self, bytes: &[u8], class: AllocationClass) -> Result<u64, Error>;
     /// Overwrite `[offset, offset + bytes.len())` in place.
     fn write_at(&mut self, offset: u64, bytes: &[u8]) -> Result<(), Error>;
     /// Advance the superblock's recorded end-of-file to the store's current
@@ -827,9 +799,9 @@ impl Located {
         );
         // Every path into this engine rejects a file with a userblock
         // (`WriteEngine::append_prepare` and `File::open_swmr_writer`), so the base address
-        // is zero and the position `alloc_raw` returns is the address the file stores. The
+        // is zero and the position `allocate` returns is the address the file stores. The
         // three further allocations below rest on the same invariant.
-        let new_addr = StoredAddress::new(file.alloc_raw(&super_block)?);
+        let new_addr = StoredAddress::new(file.allocate(&super_block, AllocationClass::Metadata)?);
         #[cfg(test)]
         alloc_probe::note_super_block();
         // The block exists before anything names it. When its bytes were appended
@@ -838,7 +810,7 @@ impl Located {
         // gathering image issues them in *address* order — the pointer first
         // (issue #288). A block drawn from freed space may land either side of
         // the slot, and which it is is not knowable here, so the barrier stands
-        // unconditionally; see `Store::alloc_raw`.
+        // unconditionally. See `Store::allocate`.
         file.sync()?;
 
         let slot_off = self.index_block_addr.get()
@@ -872,7 +844,9 @@ impl Located {
             self.client_id,
             self.ea_bits,
         )?;
-        Ok(StoredAddress::new(file.alloc_raw(&block)?))
+        Ok(StoredAddress::new(
+            file.allocate(&block, AllocationClass::Metadata)?,
+        ))
     }
 
     /// Width of a filtered element's stored-size field. Zero for an unfiltered
@@ -1249,7 +1223,10 @@ pub(crate) fn apply_ea_append<F: Store>(
     let mut recorded_eof = file.len();
     let mut chunk_addrs = Vec::with_capacity(plan.new_chunk_bytes.len());
     for blob in &plan.new_chunk_bytes {
-        chunk_addrs.push((StoredAddress::new(file.alloc_raw(blob)?), blob.len() as u64));
+        chunk_addrs.push((
+            StoredAddress::new(file.allocate(blob, AllocationClass::Raw)?),
+            blob.len() as u64,
+        ));
     }
     file.sync()?;
     if file.len() != recorded_eof {
@@ -1587,6 +1564,7 @@ mod tests {
     use std::cell::Cell;
     use std::cell::RefCell;
 
+    use rstest::rstest;
     use test_util::image::Image;
     use test_util::object_header::Message;
     use test_util::object_header::MessageType as RecordType;
@@ -1602,6 +1580,37 @@ mod tests {
     use crate::superblock::Superblock;
     use crate::writer::FileBuilder;
 
+    #[rstest]
+    #[case::inline(1, 2, false, false)]
+    #[case::direct_data_block(4, 5, true, false)]
+    #[case::super_block(4, 324, true, true)]
+    fn append_distinguishes_chunk_and_index_allocation_intent(
+        #[case] start: i32,
+        #[case] end: i32,
+        #[case] data_block: bool,
+        #[case] super_block: bool,
+    ) {
+        let mut store = WindowProbeStore::open(build_unlimited(start, 1));
+        let (mut loc, datatype) = locate(&store);
+        store.reset_counters();
+        alloc_probe::take();
+        append_i32s(&mut store, &mut loc, &datatype, start..end);
+        let (data_blocks, super_blocks) = alloc_probe::take();
+        assert_eq!(
+            (data_blocks > 0, super_blocks > 0),
+            (data_block, super_block)
+        );
+        let mut expected = vec![AllocationClass::Raw; (end - start) as usize];
+        expected.extend(core::iter::repeat_n(
+            AllocationClass::Metadata,
+            data_blocks + super_blocks,
+        ));
+        assert_eq!(*store.allocations.borrow(), expected);
+        assert_eq!(read_i32s(&store, &loc), (0..end).collect::<Vec<_>>());
+        store.reset_counters();
+        assert_eq!(*store.allocations.borrow(), []);
+    }
+
     /// An in-test [`Store`] over a `Vec<u8>` that records every read window, so
     /// the tests below can assert the engine's bounded-memory contract: the
     /// append path never reads more than a bounded window at once, no matter how
@@ -1614,6 +1623,7 @@ mod tests {
         max_read: Cell<usize>,
         total_read: Cell<usize>,
         reads: RefCell<Vec<(u64, usize)>>,
+        allocations: RefCell<Vec<AllocationClass>>,
         /// How many times the append sequence rewrote the superblock to advance
         /// its recorded end-of-file. Two of the four durability phases can, and
         /// only one of them always must.
@@ -1624,13 +1634,10 @@ mod tests {
         /// Blobs appended at end-of-file: the chunk, plus one per fresh index
         /// block. Each fresh block owes a barrier before the pointer naming it.
         appends: Cell<usize>,
-        /// A single below-end-of-file region nothing points at, stood up by
-        /// [`with_free_tail`](Self::with_free_tail), which `alloc_raw` hands out
-        /// before it will append (issue #349). Stands in for a session's free
-        /// list; the engine sees only the address that comes back.
+        /// A free region within the recorded file length, created by
+        /// [`with_free_tail`](Self::with_free_tail). The store allocates from it before appending.
         free: Option<(u64, u64)>,
-        /// Allocations `alloc_raw` served from that region rather than by
-        /// extending the file.
+        /// The number of allocations the store served from `free`.
         reuses: Cell<usize>,
     }
 
@@ -1646,6 +1653,7 @@ mod tests {
                 max_read: Cell::new(0),
                 total_read: Cell::new(0),
                 reads: RefCell::new(Vec::new()),
+                allocations: RefCell::new(Vec::new()),
                 superblock_patches: Cell::new(0),
                 syncs: Cell::new(0),
                 appends: Cell::new(0),
@@ -1672,8 +1680,7 @@ mod tests {
             self
         }
 
-        /// Extend the image, the fallback `alloc_raw` takes once the free region
-        /// (if any) cannot serve an allocation.
+        /// Extends the image when the free region cannot fit an allocation.
         fn append_bytes(&mut self, bytes: &[u8]) -> Result<u64, Error> {
             self.appends.set(self.appends.get() + 1);
             let addr = self.data.len() as u64;
@@ -1685,6 +1692,7 @@ mod tests {
             self.max_read.set(0);
             self.total_read.set(0);
             self.reads.borrow_mut().clear();
+            self.allocations.borrow_mut().clear();
             self.superblock_patches.set(0);
             self.syncs.set(0);
             self.appends.set(0);
@@ -1711,7 +1719,8 @@ mod tests {
         fn length_size(&self) -> u8 {
             self.superblock.length_size
         }
-        fn alloc_raw(&mut self, bytes: &[u8]) -> Result<u64, Error> {
+        fn allocate(&mut self, bytes: &[u8], class: AllocationClass) -> Result<u64, Error> {
+            self.allocations.get_mut().push(class);
             let len = bytes.len() as u64;
             if let Some((addr, avail)) = self.free.filter(|&(_, avail)| avail >= len) {
                 self.reuses.set(self.reuses.get() + 1);
@@ -2207,10 +2216,8 @@ mod tests {
     /// when a region fits — the extensible-array blocks that index the chunks as
     /// much as the chunk bytes themselves (issue #349).
     ///
-    /// Both are raw by this crate's placement convention, which is what lets one
-    /// pool serve them: see [`Store::alloc_raw`]. A run given a hole larger than
-    /// everything it will allocate must therefore extend the file by nothing at
-    /// all, across a sequence long enough to grow the index.
+    /// The test store uses one free region for both allocation classes. The fixture's region
+    /// is large enough for the chunks and index blocks throughout the append sequence.
     #[test]
     fn a_hole_serves_the_index_blocks_as_well_as_the_chunks() {
         let mut store = WindowProbeStore::open(build_unlimited(4, 1)).with_free_tail(16 * 1024);

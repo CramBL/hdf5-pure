@@ -11,12 +11,98 @@
 //! storage.
 
 use hdf5::Extent;
+use hdf5::plist::file_create::FileSpaceStrategy as CStrategy;
+use hdf5::types::FixedAscii;
 use hdf5_pure::{AttrValue, Error, File};
+use rstest::rstest;
 use tempfile::tempdir;
 
 use test_util_hdf5::absence;
 use test_util_hdf5::dataset::{self, Filter, Unlimited};
 use test_util_hdf5::file;
+use test_util_hdf5::session;
+
+#[rstest]
+#[case::flat_mirror(false, false)]
+#[case::flat_bounded(false, true)]
+#[case::paged_mirror(true, false)]
+#[case::paged_bounded(true, true)]
+fn libhdf5_reads_appends_across_new_array_blocks(#[case] paged: bool, #[case] bounded: bool) {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("array_blocks.h5");
+    let expected: Vec<String> = (0..340).map(|value| format!("{value:03}")).collect();
+    {
+        let reference = hdf5::File::with_options()
+            .with_fapl(|fapl| fapl.libver_v110())
+            .with_fcpl(|fcpl| {
+                fcpl.file_space_strategy(CStrategy::FreeSpaceManager {
+                    paged,
+                    persist: true,
+                    threshold: 1,
+                })
+            })
+            .create(&path)
+            .unwrap();
+        let dataset = reference
+            .new_dataset::<FixedAscii<3>>()
+            .chunk((1,))
+            .shape((Extent::resizable(4),))
+            .create("d")
+            .unwrap();
+        dataset
+            .write(
+                &expected[..4]
+                    .iter()
+                    .map(|value| FixedAscii::<3>::from_ascii(value.as_bytes()).unwrap())
+                    .collect::<Vec<_>>(),
+            )
+            .unwrap();
+    }
+    {
+        let editable = if bounded {
+            session::open_bounded(&path).unwrap()
+        } else {
+            File::open_rw(&path).unwrap()
+        };
+        {
+            let mut dataset = editable.dataset("d").unwrap();
+            dataset
+                .append_raw(expected[4..180].concat().as_bytes())
+                .unwrap();
+        }
+        editable.close().unwrap();
+    }
+    {
+        let editable = if bounded {
+            session::open_bounded(&path).unwrap()
+        } else {
+            File::open_rw(&path).unwrap()
+        };
+        {
+            let mut dataset = editable.dataset("d").unwrap();
+            dataset
+                .append_raw(expected[180..].concat().as_bytes())
+                .unwrap();
+        }
+        editable.close().unwrap();
+    }
+    assert_eq!(
+        File::open(&path)
+            .unwrap()
+            .dataset("d")
+            .unwrap()
+            .read_string()
+            .unwrap(),
+        expected
+    );
+    assert_eq!(
+        dataset::read_libhdf5::<FixedAscii<3>>(&path, "d")
+            .into_iter()
+            .map(|value| value.as_str().to_owned())
+            .collect::<Vec<_>>(),
+        expected,
+    );
+}
 
 // ---- in-place append against C-written files --------------------------------
 
