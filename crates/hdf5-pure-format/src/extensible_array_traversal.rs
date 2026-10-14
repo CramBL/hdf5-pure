@@ -100,7 +100,7 @@ impl<'a> Reader<'a> {
             for _ in 0..geometry.blocks.get() {
                 let address = self.address(addresses.next())?;
                 let elements = remaining.take(geometry.elements.get());
-                if !address.is_undefined(offset_width.get()) && !elements.is_empty() {
+                if !address.is_undefined(*offset_width) && !elements.is_empty() {
                     self.data_block(
                         source,
                         address,
@@ -117,7 +117,7 @@ impl<'a> Reader<'a> {
         for geometry in geometry.indirect() {
             let address = self.address(addresses.next())?;
             let elements = remaining.take_wide(geometry.elements());
-            if !address.is_undefined(offset_width.get()) && !elements.is_empty() {
+            if !address.is_undefined(*offset_width) && !elements.is_empty() {
                 self.super_block(source, address, *geometry, elements, visit)?;
             }
             if remaining.is_empty() {
@@ -157,7 +157,7 @@ impl<'a> Reader<'a> {
             }
             let address = self.address(Some(bytes))?;
             let range = elements.take(geometry.data.elements());
-            if address.is_undefined(self.offset_width.get()) {
+            if address.is_undefined(self.offset_width) {
                 continue;
             }
             let block = match geometry.data {

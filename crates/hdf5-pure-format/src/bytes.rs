@@ -30,8 +30,8 @@ use alloc::vec::Vec;
 
 use crate::address::StoredAddress;
 use crate::address::StoredAddressExt;
-use crate::convert;
 use crate::error::FormatError;
+use crate::width;
 use crate::width::LengthWidth;
 use crate::width::OffsetWidth;
 use crate::width::UintWidth;
@@ -210,7 +210,7 @@ pub(crate) fn read_optional_offset_width(
     width: OffsetWidth,
 ) -> Result<Option<u64>, FormatError> {
     let addr = read_offset_width(data, pos, width)?;
-    if convert::is_undefined_addr(addr, width.get()) {
+    if StoredAddress::new(addr).is_undefined(width) {
         Ok(None)
     } else {
         Ok(Some(addr))
@@ -229,7 +229,7 @@ pub(crate) fn try_write_offset(
     val: u64,
     width: OffsetWidth,
 ) -> Result<(), FormatError> {
-    if !width.holds(val) {
+    if !width::offset_width_holds(width, val) {
         return Err(FormatError::AddressTooLarge {
             address: val,
             offset_size: width.get(),
@@ -251,7 +251,7 @@ pub(crate) fn try_write_length(
     val: u64,
     width: LengthWidth,
 ) -> Result<(), FormatError> {
-    if !width.holds(val) {
+    if !width::length_width_holds(width, val) {
         return Err(FormatError::LengthTooLarge {
             length: val,
             length_size: width.get(),
@@ -270,7 +270,7 @@ pub(crate) fn try_write_length(
 /// Panics if `val` does not fit `width` and is not `u64::MAX`.
 pub(crate) fn write_offset(buf: &mut Vec<u8>, val: u64, width: OffsetWidth) {
     assert!(
-        width.holds(val),
+        width::offset_width_holds(width, val),
         "address {val:#x} does not fit a {}-byte address field",
         width.get()
     );
@@ -293,7 +293,7 @@ pub(crate) fn write_offset(buf: &mut Vec<u8>, val: u64, width: OffsetWidth) {
 /// Panics if `val` does not fit in `width` bytes.
 pub(crate) fn write_length(buf: &mut Vec<u8>, val: u64, width: LengthWidth) {
     assert!(
-        width.holds(val),
+        width::length_width_holds(width, val),
         "length {val} does not fit a {}-byte length field",
         width.get()
     );

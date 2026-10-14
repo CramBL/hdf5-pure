@@ -1212,7 +1212,7 @@ mod tests {
     fn an_undefined_contiguous_address_parses_back_as_none() {
         let message = DataLayout::encode_contiguous(
             LayoutVersion::Four,
-            StoredAddress::undefined(4),
+            StoredAddress::undefined(OffsetWidth::Four),
             0,
             OffsetWidth::Four,
             LengthWidth::Eight,

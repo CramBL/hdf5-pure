@@ -10,7 +10,6 @@ use hdf5_pure_core::__private::{FileRange, FileRegion, PhysicalAddress};
 use crate::address::StoredAddress;
 use crate::address::StoredAddressExt;
 use crate::bytes;
-use crate::convert;
 use crate::convert::Narrow;
 use crate::error::FormatError;
 use crate::filter_pipeline::FilterPipeline;
@@ -911,7 +910,7 @@ impl FractalHeapLayout {
                     )
                     .ok_or_else(Self::geometry_format_error)?;
                 let child_addr = bytes::read_offset(block, pos, self.offset_width.get())?;
-                if convert::is_undefined_addr(child_addr, self.offset_width.get()) {
+                if StoredAddress::new(child_addr).is_undefined(self.offset_width) {
                     continue;
                 }
                 let child_heap_offset = iblock_heap_offset
@@ -1298,10 +1297,7 @@ impl FractalHeapIdLayout {
             HugeIdLayout::Inline { offsets, lengths }
         } else {
             HugeIdLayout::Indexed {
-                has_btree: !convert::is_undefined_addr(
-                    header.btree_huge_objects_address.get(),
-                    offsets.get(),
-                ),
+                has_btree: !header.btree_huge_objects_address.is_undefined(offsets),
             }
         };
         Self {

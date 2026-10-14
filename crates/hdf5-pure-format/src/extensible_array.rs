@@ -673,6 +673,7 @@ pub fn extensible_array_index_spans(
     offset_size: u8,
     length_size: u8,
 ) -> Result<Vec<(u64, u64)>, FormatError> {
+    let offset_width = OffsetWidth::try_from(offset_size)?;
     let header =
         ExtensibleArrayHeader::parse_from_source(source, ea_base, offset_size, length_size)?;
     let os = offset_size as usize;
@@ -684,7 +685,7 @@ pub fn extensible_array_index_spans(
     let header_len = ExtensibleArrayHeader::serialized_size(offset_size, length_size) as u64;
     let mut spans = vec![(ea_base.get(), header_len)];
 
-    if header.index_block_address.is_undefined(offset_size) {
+    if header.index_block_address.is_undefined(offset_width) {
         return Ok(spans);
     }
 
@@ -715,7 +716,7 @@ pub fn extensible_array_index_spans(
     for &dblk_nelmts in &geom.direct_dblk_nelmts {
         let addr = StoredAddress::new(bytes::read_offset(&ib, pos, offset_size)?);
         pos += os;
-        if addr.is_undefined(offset_size) {
+        if addr.is_undefined(offset_width) {
             continue;
         }
         spans.push((
@@ -734,7 +735,7 @@ pub fn extensible_array_index_spans(
     for j in 0..nsblk_addrs {
         let addr = StoredAddress::new(bytes::read_offset(&ib, pos, offset_size)?);
         pos += os;
-        if addr.is_undefined(offset_size) {
+        if addr.is_undefined(offset_width) {
             continue;
         }
         let sb = geom.super_block_at(j, page_nelmts);
@@ -743,7 +744,7 @@ pub fn extensible_array_index_spans(
             source,
             addr,
             sb,
-            offset_size,
+            offset_width,
             blk_off_size,
             elem_size,
             &mut spans,
@@ -765,11 +766,12 @@ fn easb_data_block_spans(
     source: &(impl MetadataSource + ?Sized),
     sb_addr: StoredAddress,
     sb: SuperBlockGeometry,
-    offset_size: u8,
+    offset_width: OffsetWidth,
     blk_off_size: BlockOffsetWidth,
     elem_size: usize,
     spans: &mut Vec<(u64, u64)>,
 ) -> Result<(), FormatError> {
+    let offset_size = offset_width.get();
     let os = offset_size as usize;
     // The signature, the version, the client ID, the header address, and the block offset.
     let sb_header = 4 + 1 + 1 + os + blk_off_size.bytes();
@@ -788,7 +790,7 @@ fn easb_data_block_spans(
     for _ in 0..sb.ndblks {
         let addr = StoredAddress::new(bytes::read_offset(&block, pos, offset_size)?);
         pos += os;
-        if addr.is_undefined(offset_size) {
+        if addr.is_undefined(offset_width) {
             continue;
         }
         spans.push((
@@ -1293,7 +1295,7 @@ pub fn build_extensible_array_at(
     let index_block_address = ea_address.offset(header_len as u64);
     let body_base = index_block_address.offset(index_block_len as u64);
 
-    let undef_addr = StoredAddress::undefined(offset_size.get());
+    let undef_addr = StoredAddress::undefined(offset_size);
 
     // ---- Build the body (direct data blocks, then super blocks) -----------
     // Each block's address is computed from `body_base`, so the body can be

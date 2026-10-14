@@ -26,7 +26,8 @@ use crate::bytes;
 use crate::convert::Narrow;
 use crate::error::FormatError;
 use crate::source::Source;
-use crate::width::{LengthWidth, OffsetWidth};
+use crate::width::LengthWidth;
+use crate::width::OffsetWidth;
 
 /// Returns the allocations reachable from a version 2 B-tree header in file-address order.
 ///
@@ -129,7 +130,8 @@ pub(crate) fn collect_btree_v2_storage_extents<S: Source + ?Sized>(
 ///
 /// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_infra_btrees_v2
 fn storage_header_has_root(header: &BTreeV2Header, offset_size: u8) -> Result<bool, FormatError> {
-    let root_is_undefined = header.root_node_address.is_undefined(offset_size);
+    let offset_width = OffsetWidth::try_from(offset_size)?;
+    let root_is_undefined = header.root_node_address.is_undefined(offset_width);
     let valid = if header.total_records == 0 {
         root_is_undefined && header.num_records_in_root == 0
     } else {
@@ -182,8 +184,9 @@ fn collect_storage_node<S: Source + ?Sized>(
         offset_size,
         node_info,
     )?;
+    let offset_width = OffsetWidth::try_from(offset_size)?;
     for (child_address, child_records) in children {
-        if child_address.is_undefined(offset_size) {
+        if child_address.is_undefined(offset_width) {
             return Err(FormatError::InvalidBTreeV2Signature);
         }
         collect_storage_node(
@@ -741,7 +744,7 @@ mod tests {
 
     #[test]
     fn storage_walk_of_an_empty_tree_returns_only_the_header() {
-        let root = StoredAddress::undefined(OFFSET_SIZE).get();
+        let root = StoredAddress::undefined(OFFSET_WIDTH).get();
         let header = btree_v2::Header::new(5, 11, root, 0).build(WIDTHS);
         let source = BytesSource::new(&header);
         let extents = collect_btree_v2_storage_extents(
@@ -772,7 +775,7 @@ mod tests {
 
     #[test]
     fn storage_walk_rejects_an_empty_tree_with_root_records() {
-        let root = StoredAddress::undefined(OFFSET_SIZE).get();
+        let root = StoredAddress::undefined(OFFSET_WIDTH).get();
         let header = btree_v2::Header::new(5, 11, root, 1)
             .total_records(0)
             .build(WIDTHS);
@@ -791,7 +794,7 @@ mod tests {
 
     #[test]
     fn storage_walk_rejects_a_nonempty_tree_without_a_root() {
-        let root = StoredAddress::undefined(OFFSET_SIZE).get();
+        let root = StoredAddress::undefined(OFFSET_WIDTH).get();
         let header = btree_v2::Header::new(5, 11, root, 1).build(WIDTHS);
         let source = BytesSource::new(header);
 
@@ -1334,5 +1337,6 @@ mod tests {
 
     const WIDTHS: Widths = Widths::EIGHT;
     const OFFSET_SIZE: u8 = 8;
+    const OFFSET_WIDTH: OffsetWidth = OffsetWidth::Eight;
     const LENGTH_SIZE: u8 = 8;
 }

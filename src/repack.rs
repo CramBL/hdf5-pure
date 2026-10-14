@@ -144,6 +144,7 @@ use crate::vl_data::{
     EmbeddedVlSlot, VlByteObject, VlenStringReadOptions, embedded_vlen_slots,
     is_vlen_string_datatype,
 };
+use crate::width::OffsetWidth;
 use crate::writer::FileBuilder;
 
 /// Options controlling a [`repack`].
@@ -1787,7 +1788,7 @@ fn resolve_reference_address(
 /// whatever address width the file declares, and [`embedded_reference_slots`]
 /// locates no other form: an undefined reference has all eight of those bytes
 /// set.
-const OBJECT_REFERENCE_WIDTH: u8 = 8;
+const OBJECT_REFERENCE_WIDTH: OffsetWidth = OffsetWidth::Eight;
 
 /// Whether the source stores nothing at all: no chunk, no contiguous data
 /// region.

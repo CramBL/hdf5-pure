@@ -45,11 +45,10 @@ pub(crate) fn read_persisted_sections(
     base: BaseAddress,
     manager_addrs: &[u64],
 ) -> Result<Vec<FreeSection>, FormatError> {
-    let offset_size = widths.offsets.get();
     let mut sections = Vec::new();
     for &addr in manager_addrs {
         let addr = StoredAddress::new(addr);
-        if addr.is_undefined(offset_size) {
+        if addr.is_undefined(widths.offsets) {
             continue;
         }
         let a = base.absolute(addr)?.to_usize()?;
@@ -62,7 +61,7 @@ pub(crate) fn read_persisted_sections(
                 ))
             })?,
         )?;
-        if header.section_list_addr().is_undefined(offset_size) {
+        if header.section_list_addr().is_undefined(widths.offsets) {
             continue;
         }
         let fa = base.absolute(header.section_list_addr())?.to_usize()?;
@@ -118,20 +117,19 @@ pub(crate) fn read_persisted_sections_source<S: crate::source::Source>(
     base: BaseAddress,
     manager_addrs: &[u64],
 ) -> Result<PersistedSections, FormatError> {
-    let offset_size = widths.offsets.get();
     let mut sections = Vec::new();
     let mut blocks = Vec::new();
     let hdr_len = hdf5_pure_format::__private::free_space_manager_header_len(widths);
     for &addr in manager_addrs {
         let addr = StoredAddress::new(addr);
-        if addr.is_undefined(offset_size) {
+        if addr.is_undefined(widths.offsets) {
             continue;
         }
         let a = base.absolute(addr)?;
         let fshd = src.read_exact_at(a, hdr_len.to_usize()?)?;
         let header = FreeSpaceManagerHeader::parse(widths, &fshd)?;
         blocks.push((a, hdr_len));
-        if header.section_list_addr().is_undefined(offset_size) {
+        if header.section_list_addr().is_undefined(widths.offsets) {
             continue;
         }
         let fa = base.absolute(header.section_list_addr())?;
@@ -228,7 +226,7 @@ pub(crate) fn plan_managers(
         "two semantic free-space managers map to the same File Space Info slot"
     );
 
-    let mut slots = [StoredAddress::undefined(widths.offsets.get()); NUM_FILE_FSM_MANAGERS];
+    let mut slots = [StoredAddress::undefined(widths.offsets); NUM_FILE_FSM_MANAGERS];
     let mut blocks = Vec::with_capacity(managers.len());
     let mut cursor = start;
     for (slot, class, manager) in managers {
@@ -290,6 +288,7 @@ mod tests {
     use test_util::free_space;
 
     use crate::source::Source;
+    use crate::width::OffsetWidth;
 
     use super::*;
 
@@ -595,7 +594,8 @@ mod tests {
             plan.slots
                 .iter()
                 .enumerate()
-                .all(|(slot, addr)| [0, 2, 6].contains(&slot) || addr.is_undefined(8))
+                .all(|(slot, addr)| [0, 2, 6].contains(&slot)
+                    || addr.is_undefined(OffsetWidth::Eight))
         );
 
         for block in &plan.blocks {

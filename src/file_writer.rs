@@ -1125,7 +1125,7 @@ pub(crate) fn compact_attribute_info_message() -> Vec<u8> {
 /// specification, version 4.0][spec].
 ///
 /// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#sec_fmt4_appendixa
-pub(crate) const UNDEF_ADDRESS: StoredAddress = StoredAddress::UNDEFINED_64;
+pub(crate) const UNDEF_ADDRESS: StoredAddress = StoredAddress::undefined(OffsetWidth::Eight);
 
 // ---- FileWriter ----
 
@@ -3727,7 +3727,7 @@ impl FileWriter {
             superblock_extension_address: Some(
                 ext_addr
                     .map(StoredAddress::new)
-                    .unwrap_or(StoredAddress::UNDEFINED_64),
+                    .unwrap_or(StoredAddress::undefined(OffsetWidth::Eight)),
             ),
             checksum: None,
         }
@@ -3921,7 +3921,7 @@ impl FileSpaceConfig {
                 strategy,
                 threshold,
                 page_size,
-                StoredAddress::undefined(OFFSET_WIDTH.get()).get(),
+                StoredAddress::undefined(OFFSET_WIDTH).get(),
             )
         } else {
             file_space_info::non_persistent(OFFSET_WIDTH, strategy, threshold, page_size)

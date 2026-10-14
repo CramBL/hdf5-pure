@@ -33,8 +33,8 @@ use crate::object_header::ObjectHeader;
 use crate::source::{BaseOffsetSource, Source, SourceMetadata};
 
 use super::{
-    LENGTH_SIZE, MAX_COPY_DEPTH, MAX_LINK_GRAPH_NODES, OFFSET_SIZE, ObjModel, OhRegion,
-    SpaceOwnership, WriteEngine, read_oh_chunks, spans_disjoint_in_bounds,
+    LENGTH_SIZE, MAX_COPY_DEPTH, MAX_LINK_GRAPH_NODES, OFFSET_SIZE, OFFSET_WIDTH, ObjModel,
+    OhRegion, SpaceOwnership, WriteEngine, read_oh_chunks, spans_disjoint_in_bounds,
 };
 
 struct ChunkedStorageParts {
@@ -85,7 +85,7 @@ impl WriteEngine {
         live_metadata_space.push((self.sb_sig_off, superblock_len));
 
         if let Some(extension) = self.superblock.superblock_extension_address
-            && !extension.is_undefined(OFFSET_SIZE)
+            && !extension.is_undefined(OFFSET_WIDTH)
         {
             let extension = self.addresses.absolute(extension)?;
             let header = ObjectHeader::parse_from_source(
@@ -517,7 +517,7 @@ impl WriteEngine {
                 // A defined, in-bounds contiguous data block is owned outright.
                 // An empty dataset stores the undefined address and owns none. Its
                 // absolute file offset is what this bounds-checks and records.
-                if !data_addr.is_undefined(OFFSET_SIZE) && data_size > 0 {
+                if !data_addr.is_undefined(OFFSET_WIDTH) && data_size > 0 {
                     if let Ok(abs) = base.absolute(data_addr) {
                         if abs.checked_add(data_size).is_some_and(|e| e <= file_len) {
                             // A contiguous data block is raw data.

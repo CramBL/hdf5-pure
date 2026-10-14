@@ -21,6 +21,7 @@ use crate::convert::Narrow;
 use crate::error::FormatError;
 use crate::metadata_source::MetadataSource;
 use crate::signature::HDF5_SIGNATURE;
+use crate::width;
 use crate::width::LengthWidth;
 use crate::width::OffsetWidth;
 
@@ -67,7 +68,7 @@ pub fn serialize_superblock(superblock: &Superblock) -> Result<Vec<u8>, FormatEr
         "superblock extension",
         superblock
             .superblock_extension_address
-            .unwrap_or(StoredAddress::undefined(superblock.offset_size))
+            .unwrap_or(StoredAddress::undefined(offset_width))
             .get(),
     )?;
     write_address(
@@ -323,7 +324,7 @@ fn write_address(
     field: &str,
     address: u64,
 ) -> Result<(), FormatError> {
-    if !width.holds(address) {
+    if !width::offset_width_holds(width, address) {
         return Err(FormatError::Internal(format!(
             "the superblock's {field} address {address:#x} does not fit a {}-byte field",
             width.get()
@@ -391,7 +392,7 @@ mod tests {
             Some(if defined {
                 StoredAddress::new(64)
             } else {
-                StoredAddress::undefined(width.get())
+                StoredAddress::undefined(width)
             })
         );
         assert_eq!(
@@ -399,7 +400,7 @@ mod tests {
             Some(if defined {
                 StoredAddress::new(128)
             } else {
-                StoredAddress::undefined(width.get())
+                StoredAddress::undefined(width)
             })
         );
         assert_eq!(parsed.superblock_extension_address, None);
@@ -459,7 +460,7 @@ mod tests {
             Some(if defined {
                 StoredAddress::new(64)
             } else {
-                StoredAddress::undefined(width.get())
+                StoredAddress::undefined(width)
             })
         );
         assert_eq!(serialize_superblock(&parsed).unwrap(), data);

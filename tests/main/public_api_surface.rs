@@ -17,6 +17,7 @@
 //! with no finding and no changelog line, leaving callers a value they could
 //! compare and print but not use as a number.
 
+use hdf5_pure::OffsetWidth;
 use hdf5_pure::StoredAddress;
 use hdf5_pure::{BaseAddress, Error, File, FileBuilder, LibVer, MessageType, Superblock};
 
@@ -45,6 +46,10 @@ fn format_of(sb: &Superblock) -> LibVer {
 fn field_types(sb: &Superblock) {
     let _: fn(StoredAddress) -> u64 = StoredAddress::get;
     let _: fn(hdf5_pure_core::StoredAddress) -> u64 = StoredAddress::get;
+    let _: fn(OffsetWidth) -> StoredAddress = StoredAddress::undefined;
+    let _: fn(StoredAddress, OffsetWidth) -> bool = StoredAddress::is_undefined;
+    let _: fn(hdf5_pure_core::OffsetWidth) -> StoredAddress = StoredAddress::undefined;
+    let _: fn(StoredAddress, hdf5_pure_core::OffsetWidth) -> bool = StoredAddress::is_undefined;
     let _: u8 = sb.version;
     let _: u8 = sb.offset_size;
     let _: u8 = sb.length_size;

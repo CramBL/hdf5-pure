@@ -197,3 +197,67 @@ fn filter_errors_convert_to_the_public_error() {
     let filter_error: FormatError = hdf5_pure_filter::__private::Error::UnsupportedFilter(1).into();
     assert_eq!(filter_error, FormatError::UnsupportedFilter(1));
 }
+
+#[test]
+fn width_and_undefined_address_apis_are_public() {
+    assert_eq!(
+        hdf5_pure::OffsetWidth::try_from(2),
+        Ok(hdf5_pure::OffsetWidth::Two)
+    );
+    assert_eq!(
+        hdf5_pure::OffsetWidth::try_from(4),
+        Ok(hdf5_pure::OffsetWidth::Four)
+    );
+    assert_eq!(
+        hdf5_pure::OffsetWidth::try_from(8),
+        Ok(hdf5_pure::OffsetWidth::Eight)
+    );
+    assert_eq!(
+        hdf5_pure::OffsetWidth::try_from(1),
+        Err(FormatError::InvalidOffsetSize(1))
+    );
+    assert_eq!(hdf5_pure::OffsetWidth::Two.get(), 2);
+    assert_eq!(hdf5_pure::OffsetWidth::Four.get(), 4);
+    assert_eq!(hdf5_pure::OffsetWidth::Eight.get(), 8);
+
+    assert_eq!(
+        hdf5_pure::LengthWidth::try_from(2),
+        Ok(hdf5_pure::LengthWidth::Two)
+    );
+    assert_eq!(
+        hdf5_pure::LengthWidth::try_from(4),
+        Ok(hdf5_pure::LengthWidth::Four)
+    );
+    assert_eq!(
+        hdf5_pure::LengthWidth::try_from(8),
+        Ok(hdf5_pure::LengthWidth::Eight)
+    );
+    assert_eq!(
+        hdf5_pure::LengthWidth::try_from(1),
+        Err(FormatError::InvalidLengthSize(1))
+    );
+    assert_eq!(hdf5_pure::LengthWidth::Two.get(), 2);
+    assert_eq!(hdf5_pure::LengthWidth::Four.get(), 4);
+    assert_eq!(hdf5_pure::LengthWidth::Eight.get(), 8);
+
+    assert_eq!(
+        hdf5_pure::StoredAddress::undefined(hdf5_pure::OffsetWidth::Two).get(),
+        0xFFFF
+    );
+    assert_eq!(
+        hdf5_pure::StoredAddress::undefined(hdf5_pure::OffsetWidth::Four).get(),
+        0xFFFF_FFFF
+    );
+    assert_eq!(
+        hdf5_pure::StoredAddress::undefined(hdf5_pure::OffsetWidth::Eight).get(),
+        u64::MAX
+    );
+    assert!(
+        hdf5_pure::StoredAddress::undefined(hdf5_pure::OffsetWidth::Two)
+            .is_undefined(hdf5_pure::OffsetWidth::Two)
+    );
+    assert!(
+        !hdf5_pure::StoredAddress::undefined(hdf5_pure::OffsetWidth::Two)
+            .is_undefined(hdf5_pure::OffsetWidth::Four)
+    );
+}

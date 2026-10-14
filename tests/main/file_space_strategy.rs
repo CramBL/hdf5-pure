@@ -9,6 +9,7 @@ use hdf5_pure::FileBuilder;
 use hdf5_pure::FileSpacePageSize;
 use hdf5_pure::FileSpaceStrategy;
 use hdf5_pure::FormatError;
+use hdf5_pure::OffsetWidth;
 use hdf5_pure::StoredAddress;
 use hdf5_pure_core::__private::FileSpaceInfoFields;
 use hdf5_pure_format::__private::DEFAULT_THRESHOLD;
@@ -40,7 +41,8 @@ fn each_strategy_roundtrips(#[case] strategy: FileSpaceStrategy, #[case] thresho
     assert_eq!(info.page_size.get(), 8192);
     assert!(info.manager_addrs.is_empty());
     let ext = f.superblock().superblock_extension_address;
-    assert!(matches!(ext, Some(a) if !a.is_undefined(f.superblock().offset_size)));
+    let offset_width = OffsetWidth::try_from(f.superblock().offset_size).unwrap();
+    assert!(matches!(ext, Some(a) if !a.is_undefined(offset_width)));
     assert_eq!(
         f.dataset("d").unwrap().read_i32().unwrap(),
         vec![1, 2, 3, 4]
