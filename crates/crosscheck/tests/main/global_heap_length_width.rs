@@ -6,6 +6,7 @@ use hdf5::plist::file_create::Sizeof;
 use hdf5::types::VarLenUnicode;
 use hdf5_pure_format::__private::LengthWidth;
 use rstest::rstest;
+use test_util::global_heap;
 
 use super::global_heap_framing;
 
@@ -19,7 +20,7 @@ fn a_narrow_length_collection_matches_the_one_libhdf5_writes(
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("vlen.h5");
     let bytes = libhdf5_file(&path, sizeof_size);
-    let start = global_heap_framing::collection_starts(&bytes)
+    let start = global_heap::collection_starts(&bytes)
         .first()
         .copied()
         .map(|start| usize::try_from(start).unwrap())
@@ -48,7 +49,7 @@ fn hdf5_pure_reads_the_string_from_an_encoded_collection_in_a_libhdf5_file(
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("vlen.h5");
     let mut bytes = libhdf5_file(&path, sizeof_size);
-    let start = global_heap_framing::collection_starts(&bytes)
+    let start = global_heap::collection_starts(&bytes)
         .first()
         .copied()
         .map(|start| usize::try_from(start).unwrap())

@@ -913,6 +913,31 @@ impl WriteEngine {
         raw: &mut Vec<(u64, u64)>,
         metadata: &mut Vec<(u64, u64)>,
     ) -> Result<bool, Error> {
+        self.walk_reachable_objects(root, |addr, header, child| {
+            if header.version != OWNED_HEADER_VERSION {
+                return Ok(false);
+            }
+            metadata.extend(self.oh_chunk_spans(addr)?);
+            self.collect_object_owned_spans(header, raw, metadata, child)
+        })
+    }
+
+    /// Visits each object reachable from the object header at `root` once, and returns whether the
+    /// walk is complete.
+    ///
+    /// `visit` receives the absolute address of an object header, the parsed header, and a
+    /// callback that adds a child object to the walk by the absolute address of its header. The
+    /// walk is incomplete if `visit` returns `false` for an object, or if the walk skips an object
+    /// [`MAX_COPY_DEPTH`] links from `root` or after visiting [`MAX_LINK_GRAPH_NODES`] objects.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Format`] if an object header is malformed, and any error `visit` returns.
+    pub(super) fn walk_reachable_objects(
+        &self,
+        root: u64,
+        mut visit: impl FnMut(u64, &ObjectHeader, &mut dyn FnMut(u64)) -> Result<bool, Error>,
+    ) -> Result<bool, Error> {
         let mut complete = true;
         let mut visited = HashSet::new();
         let mut pending = vec![(root, 0)];
@@ -933,14 +958,7 @@ impl WriteEngine {
                 LENGTH_SIZE,
                 self.addresses.effective_base(),
             )?;
-            if header.version != OWNED_HEADER_VERSION {
-                complete = false;
-                continue;
-            }
-            metadata.extend(self.oh_chunk_spans(addr)?);
-            complete &= self.collect_object_owned_spans(&header, raw, metadata, |child| {
-                pending.push((child, depth + 1));
-            })?;
+            complete &= visit(addr, &header, &mut |child| pending.push((child, depth + 1)))?;
         }
         Ok(complete)
     }

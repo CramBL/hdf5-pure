@@ -836,33 +836,15 @@ pub fn datatype_holds_object_address(dt: &Datatype) -> bool {
     }
 }
 
-/// Returns `true` if `dt`'s element bytes carry a **file-absolute address** at
-/// any depth.
+/// Returns `true` if an element of `dt` holds a file address at any depth.
 ///
-/// A file-absolute address is a variable-length element (a global-heap
-/// collection address and index) or a reference (an object address, or for a
-/// dataset-region reference a heap id). This function searches compound
-/// members, array entries, and enumeration bases.
+/// A variable-length element and a dataset region reference each hold the address of a global
+/// heap collection and an index into it, and an object reference holds the address of an object
+/// header. The search descends into compound members, array elements, and enumeration bases.
 ///
-/// The result covers both addresses an element can hold. A finer distinction
-/// is not required, since either caller only requires whether an address is
-/// present at all:
-///
-/// - A **cross-file copy** (`reject_foreign_addresses`) rejects such a
-///   datatype, since an address into the source file cannot be translated into
-///   another one.
-/// - A **variable-length overwrite** (issue #321) tracks which heap collection
-///   holds its value, and releases that record when a raw-bytes write could
-///   name a collection a second time.
-///
-/// Both callers are one-sided. Returning `true` too often costs a rejection or
-/// a reclaim. Returning `false` too often would cost correctness.
-///
-/// Distinct from [`datatype_holds_object_address`], which checks specifically
-/// for an *object header* address. A variable-length string holds a heap id in
-/// its element bytes, and both callers of this function must treat that heap id
-/// as an address. The object-header check serves a caller that only relocates
-/// object headers, so a heap id falls outside its scope.
+/// The function does not report which kind of address an element holds, or where.
+/// [`datatype_holds_object_address`] checks for a reference alone, and returns `false` for a
+/// variable-length string.
 pub fn datatype_holds_file_address(dt: &Datatype) -> bool {
     match dt {
         Datatype::VariableLength { .. } | Datatype::Reference { .. } => true,

@@ -11,6 +11,7 @@ use hdf5_pure_format::__private::GlobalHeapCollectionLocator;
 use hdf5_pure_format::__private::GlobalHeapObject;
 use hdf5_pure_format::__private::LengthWidth;
 use rstest::rstest;
+use test_util::global_heap;
 
 #[rstest]
 #[case::two_byte_lengths(Sizeof::Bytes2, LengthWidth::Two)]
@@ -22,7 +23,7 @@ fn a_walk_reads_every_string_libhdf5_writes(
 ) {
     let bytes = libhdf5_file(sizeof_size);
     let image = whole_file(&bytes);
-    let mut walked: Vec<String> = collection_starts(&bytes)
+    let mut walked: Vec<String> = global_heap::collection_starts(&bytes)
         .into_iter()
         .flat_map(|start| walk(image, start, lengths))
         .map(|object| String::from_utf8(object.payload().parse(image).unwrap().to_vec()).unwrap())
@@ -36,7 +37,7 @@ fn a_walk_reads_every_string_libhdf5_writes(
 fn a_walk_frames_each_libhdf5_payload_after_its_object_header() {
     let bytes = libhdf5_file(Sizeof::Bytes8);
     let image = whole_file(&bytes);
-    for start in collection_starts(&bytes) {
+    for start in global_heap::collection_starts(&bytes) {
         let objects = walk(image, start, LengthWidth::Eight);
         let framed: Vec<(u16, u64, u64)> = objects
             .iter()
@@ -103,16 +104,6 @@ fn whole_file(bytes: &[u8]) -> FileRegion<'_> {
         bytes,
     )
     .unwrap()
-}
-
-/// Returns the offset of each `GCOL` signature in `bytes`, the start of a global heap collection.
-pub(crate) fn collection_starts(bytes: &[u8]) -> Vec<u64> {
-    bytes
-        .windows(4)
-        .enumerate()
-        .filter(|(_, window)| *window == b"GCOL")
-        .map(|(start, _)| start as u64)
-        .collect()
 }
 
 fn walk(image: FileRegion<'_>, start: u64, lengths: LengthWidth) -> Vec<GlobalHeapObject> {

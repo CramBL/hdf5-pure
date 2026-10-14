@@ -14,6 +14,7 @@ use crate::address::BaseAddressExt;
 use crate::address::OpenedImageContext;
 use crate::address::StoredAddress;
 use crate::address::StoredAddressExt;
+use crate::edit::GlobalHeapLiveness;
 use crate::edit::{
     AppendBuilder, AppendGeometry, AppendTarget, EditBacking, MemoryStrategy, SpaceAccounting,
     SpaceOwnership, StagedChild, StagedKind, StagedMeta, StagedObject, SyncPolicy, WriteEngine,
@@ -3343,6 +3344,26 @@ impl File {
                 let session = m.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                 session.space_ownership()
             }
+            _ => Err(Error::ReadOnly),
+        }
+    }
+
+    /// Returns the global heap collections that the objects reachable from the root group refer
+    /// to.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::ReadOnly`] if the file was opened read-only, such as with [`File::open`].
+    /// Returns [`Error::Format`] if the metadata of a reachable object or one of its
+    /// variable-length elements is malformed, and [`Error::MissingMessage`] if a dataset lacks its
+    /// datatype or dataspace message.
+    #[doc(hidden)]
+    pub fn __global_heap_liveness(&self) -> Result<GlobalHeapLiveness, Error> {
+        match &self.inner.backend {
+            Backend::Edit(m) => m
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .global_heap_liveness(),
             _ => Err(Error::ReadOnly),
         }
     }

@@ -92,7 +92,7 @@ impl VlElement {
     /// is undefined or its object index does not fit a `u16`,
     /// [`FormatError::OffsetOverflow`] if the collection address resolves past [`u64::MAX`], and
     /// [`FormatError::GlobalHeapObjectNotFound`] if the object index is 0.
-    fn heap_id(
+    pub(crate) fn heap_id(
         &self,
         offset_size: u8,
         addresses: AddressContext,
