@@ -3,15 +3,20 @@
 use std::collections::BTreeSet;
 use std::path::Path;
 
+use hdf5::Extent;
 use hdf5::H5Type;
 use hdf5::Location;
+use hdf5::dataset::AllocTime;
 use hdf5::file::LibraryVersion;
 use hdf5::plist::GroupCreate;
 use hdf5::plist::dataset_create::Layout;
 use hdf5::types::VarLenArray;
 use hdf5::types::VarLenUnicode;
+use hdf5_pure::ChunkIndex;
 use hdf5_pure::File;
 use hdf5_pure::GlobalHeapLiveness;
+use ndarray::ArrayView2;
+use ndarray::s;
 use rstest::rstest;
 use tempfile::TempDir;
 use test_util::global_heap;
@@ -55,6 +60,48 @@ fn libhdf5_collections_are_each_referenced(
     drop(group);
     file.close().unwrap();
 
+    assert_collections_are_referenced(&path);
+}
+
+#[rstest]
+#[case::version_1_btree(ChunkIndex::BTreeV1, false)]
+#[case::filtered_version_1_btree(ChunkIndex::BTreeV1, true)]
+#[case::single_chunk(ChunkIndex::SingleChunk, false)]
+#[case::filtered_single_chunk(ChunkIndex::SingleChunk, true)]
+#[case::implicit(ChunkIndex::Implicit, false)]
+#[case::fixed_array(ChunkIndex::FixedArray, false)]
+#[case::filtered_fixed_array(ChunkIndex::FixedArray, true)]
+#[case::extensible_array(ChunkIndex::ExtensibleArray, false)]
+#[case::filtered_extensible_array(ChunkIndex::ExtensibleArray, true)]
+#[case::version_2_btree(ChunkIndex::BTreeV2, false)]
+#[case::filtered_version_2_btree(ChunkIndex::BTreeV2, true)]
+fn libhdf5_chunked_collections_are_each_referenced(
+    #[case] index: ChunkIndex,
+    #[case] filtered: bool,
+) {
+    let directory = TempDir::new().unwrap();
+    let path = directory.path().join("liveness_chunked.h5");
+    let low = match index {
+        ChunkIndex::BTreeV1 => LibraryVersion::Earliest,
+        _ => LibraryVersion::V110,
+    };
+    let file = libhdf5_file(&path, low);
+    write_chunked(&file, "strings", index, filtered, &strings());
+    write_chunked(&file, "records", index, filtered, &records());
+    file.close().unwrap();
+
+    let file = File::open(&path).unwrap();
+    for name in ["strings", "records"] {
+        let dataset = file.dataset(name).unwrap();
+        assert_eq!(dataset.chunk_index().unwrap(), Some(index));
+        let allocated = match index {
+            ChunkIndex::SingleChunk => 1,
+            ChunkIndex::Implicit => 4,
+            _ => 2,
+        };
+        assert_eq!(dataset.chunks().unwrap().len(), allocated);
+    }
+    drop(file);
     assert_collections_are_referenced(&path);
 }
 
@@ -103,6 +150,60 @@ fn shared_messages_are_incomplete(#[case] storage: SharedStorage, #[case] dense:
         }
     );
     file.close().unwrap();
+}
+
+/// Writes the dataset `name` of 1 by 7 elements, compressed with deflate if `filtered` is `true`,
+/// with the first two of `values` in its first two elements and the last in its last element.
+///
+/// From a lower library version bound of 1.10 on, libhdf5 chooses the chunk index from the shape,
+/// the filters, and the allocation time (`H5D__chunk_construct` in `H5Dchunk.c`, HDF5 2.2.0), and
+/// the dataset has the shape and allocation time for which it chooses `index`. In chunks of 1 by
+/// 2, chunks 1 and 2 stay unallocated, except under [`ChunkIndex::Implicit`]: libhdf5 chooses it
+/// only for early allocation, and allocates all four chunks when it creates the dataset. Under
+/// [`ChunkIndex::SingleChunk`], the dataset is one chunk. Under [`ChunkIndex::BTreeV1`], the
+/// caller creates the file with a lower bound earlier than 1.10.
+fn write_chunked<T: H5Type>(
+    group: &hdf5::Group,
+    name: &str,
+    index: ChunkIndex,
+    filtered: bool,
+    values: &[T; 3],
+) {
+    let builder = match index {
+        ChunkIndex::BTreeV2 => group
+            .new_dataset::<T>()
+            .chunk((1, 2))
+            .shape((Extent::resizable(1), Extent::resizable(7))),
+        ChunkIndex::ExtensibleArray => group
+            .new_dataset::<T>()
+            .chunk((1, 2))
+            .shape((1, Extent::resizable(7))),
+        ChunkIndex::SingleChunk => group.new_dataset::<T>().chunk((1, 7)).shape((1, 7)),
+        ChunkIndex::Implicit => group
+            .new_dataset::<T>()
+            .chunk((1, 2))
+            .shape((1, 7))
+            .alloc_time(Some(AllocTime::Early)),
+        _ => group.new_dataset::<T>().chunk((1, 2)).shape((1, 7)),
+    };
+    let builder = if filtered {
+        builder.deflate(6)
+    } else {
+        builder
+    };
+    let dataset = builder.create(name).unwrap();
+    dataset
+        .write_slice(
+            ArrayView2::from_shape((1, 2), &values[..2]).unwrap(),
+            s![0..1, 0..2],
+        )
+        .unwrap();
+    dataset
+        .write_slice(
+            ArrayView2::from_shape((1, 1), &values[2..]).unwrap(),
+            s![0..1, 6..7],
+        )
+        .unwrap();
 }
 
 #[derive(Clone, Copy, Debug)]
