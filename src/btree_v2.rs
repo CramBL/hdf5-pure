@@ -26,8 +26,9 @@ use crate::bytes;
 use crate::convert::Narrow;
 use crate::error::FormatError;
 use crate::source::Source;
+#[cfg(test)]
 use crate::width::LengthWidth;
-use crate::width::OffsetWidth;
+use crate::width::{FormatWidths, OffsetWidth};
 
 /// Returns the allocations reachable from a version 2 B-tree header in file-address order.
 ///
@@ -72,13 +73,29 @@ pub(crate) fn collect_btree_v2_storage_extents<S: Source + ?Sized>(
     offset_size: u8,
     length_size: u8,
 ) -> Result<Vec<Extent>, FormatError> {
-    let offset_width = OffsetWidth::try_from(offset_size)?;
-    let length_width = LengthWidth::try_from(length_size)?;
+    collect_btree_v2_storage_extents_with_widths(
+        source,
+        header_address,
+        FormatWidths::from_sizes(offset_size, length_size)?,
+    )
+}
+
+/// Returns the allocations reachable from a version 2 B-tree header using validated file widths.
+///
+/// # Errors
+///
+/// Returns the structural error of the first B-tree header or node that does not parse.
+pub(crate) fn collect_btree_v2_storage_extents_with_widths<S: Source + ?Sized>(
+    source: &S,
+    header_address: StoredAddress,
+    widths: FormatWidths,
+) -> Result<Vec<Extent>, FormatError> {
     // "Node Size" applies to BTIN and BTLF nodes. BTHD has its own layout and encoded length.
-    let header_len = hdf5_pure_format::__private::btree_v2_header_size(offset_width, length_width);
+    let header_len =
+        hdf5_pure_format::__private::btree_v2_header_size(widths.offsets, widths.lengths);
     let header_extent = extent_in_source(source, header_address.get(), header_len.to_u64())?;
     let header_bytes = source.read_metadata_at(header_address.get(), header_len)?;
-    let header = BTreeV2Header::parse(&header_bytes, 0, offset_size, length_size)?;
+    let header = BTreeV2Header::parse_with_widths(&header_bytes, 0, widths)?;
     // BTIN and BTLF both have a 6-byte signature/version/type prefix and a 4-byte checksum.
     if header.node_size < 10 {
         return Err(FormatError::UnexpectedEof {
@@ -89,14 +106,14 @@ pub(crate) fn collect_btree_v2_storage_extents<S: Source + ?Sized>(
 
     let mut extents = Vec::with_capacity(1);
     extents.push(header_extent);
-    if !storage_header_has_root(&header, offset_size)? {
+    if !storage_header_has_root(&header, widths.offsets)? {
         return Ok(extents);
     }
 
     let node_info = BTreeV2NodeInfo::compute(
         header.node_size,
         header.record_size,
-        offset_size,
+        widths.offsets,
         header.depth,
     );
     let mut visited = BTreeSet::new();
@@ -106,7 +123,7 @@ pub(crate) fn collect_btree_v2_storage_extents<S: Source + ?Sized>(
         header.num_records_in_root,
         header.depth,
         &header,
-        offset_size,
+        widths.offsets,
         &node_info,
         &mut visited,
         &mut extents,
@@ -129,8 +146,10 @@ pub(crate) fn collect_btree_v2_storage_extents<S: Source + ?Sized>(
 /// being accepted merely because there is no node to visit.
 ///
 /// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_infra_btrees_v2
-fn storage_header_has_root(header: &BTreeV2Header, offset_size: u8) -> Result<bool, FormatError> {
-    let offset_width = OffsetWidth::try_from(offset_size)?;
+fn storage_header_has_root(
+    header: &BTreeV2Header,
+    offset_width: OffsetWidth,
+) -> Result<bool, FormatError> {
     let root_is_undefined = header.root_node_address.is_undefined(offset_width);
     let valid = if header.total_records == 0 {
         root_is_undefined && header.num_records_in_root == 0
@@ -158,7 +177,7 @@ fn collect_storage_node<S: Source + ?Sized>(
     num_records: u16,
     depth: u16,
     header: &BTreeV2Header,
-    offset_size: u8,
+    offset_width: OffsetWidth,
     node_info: &BTreeV2NodeInfo,
     visited: &mut BTreeSet<StoredAddress>,
     extents: &mut Vec<Extent>,
@@ -181,10 +200,9 @@ fn collect_storage_node<S: Source + ?Sized>(
         num_records,
         depth,
         header.record_size,
-        offset_size,
+        offset_width,
         node_info,
     )?;
-    let offset_width = OffsetWidth::try_from(offset_size)?;
     for (child_address, child_records) in children {
         if child_address.is_undefined(offset_width) {
             return Err(FormatError::InvalidBTreeV2Signature);
@@ -195,7 +213,7 @@ fn collect_storage_node<S: Source + ?Sized>(
             child_records,
             depth.get() - 1,
             header,
-            offset_size,
+            offset_width,
             node_info,
             visited,
             extents,
@@ -277,7 +295,24 @@ pub fn collect_btree_v2_records(
     file_data: &[u8],
     header: &BTreeV2Header,
     offset_size: u8,
-    length_size: u8,
+    _length_size: u8,
+) -> Result<Vec<BTreeV2Record>, FormatError> {
+    collect_btree_v2_records_with_offset_width(
+        file_data,
+        header,
+        OffsetWidth::try_from(offset_size)?,
+    )
+}
+
+/// Returns all records from a version 2 B-tree using a validated address width.
+///
+/// # Errors
+///
+/// Returns the [`FormatError`] of the first B-tree node that does not parse.
+pub fn collect_btree_v2_records_with_offset_width(
+    file_data: &[u8],
+    header: &BTreeV2Header,
+    offset_width: OffsetWidth,
 ) -> Result<Vec<BTreeV2Record>, FormatError> {
     if header.total_records == 0 || header.num_records_in_root == 0 {
         return Ok(Vec::new());
@@ -296,7 +331,7 @@ pub fn collect_btree_v2_records(
     let node_info = BTreeV2NodeInfo::compute(
         header.node_size,
         header.record_size,
-        offset_size,
+        offset_width,
         header.depth,
     );
     let mut records = Vec::new();
@@ -307,8 +342,7 @@ pub fn collect_btree_v2_records(
         depth,
         header.record_size,
         header.node_size,
-        offset_size,
-        length_size,
+        offset_width,
         &node_info,
         &mut records,
     )?;
@@ -324,8 +358,7 @@ fn collect_internal_records(
     depth: NonZeroU16,
     record_size: u16,
     node_size: u32,
-    offset_size: u8,
-    length_size: u8,
+    offset_width: OffsetWidth,
     node_info: &BTreeV2NodeInfo,
     out: &mut Vec<BTreeV2Record>,
 ) -> Result<(), FormatError> {
@@ -336,7 +369,7 @@ fn collect_internal_records(
         num_records,
         depth,
         record_size,
-        offset_size,
+        offset_width,
         node_info,
     )?;
 
@@ -354,8 +387,7 @@ fn collect_internal_records(
                 child_depth,
                 record_size,
                 node_size,
-                offset_size,
-                length_size,
+                offset_width,
                 node_info,
                 out,
             )?;
@@ -388,13 +420,31 @@ pub fn collect_btree_v2_records_from_source<S: Source + ?Sized>(
     offset_size: u8,
     _length_size: u8,
 ) -> Result<Vec<BTreeV2Record>, FormatError> {
+    collect_btree_v2_records_from_source_with_offset_width(
+        source,
+        header,
+        OffsetWidth::try_from(offset_size)?,
+    )
+}
+
+/// Returns all records from a version 2 B-tree source using a validated address width.
+///
+/// # Errors
+///
+/// Returns the [`FormatError`] of the first B-tree node that does not parse, or the error `source`
+/// reports for a node it cannot read.
+pub fn collect_btree_v2_records_from_source_with_offset_width<S: Source + ?Sized>(
+    source: &S,
+    header: &BTreeV2Header,
+    offset_width: OffsetWidth,
+) -> Result<Vec<BTreeV2Record>, FormatError> {
     if header.total_records == 0 || header.num_records_in_root == 0 {
         return Ok(Vec::new());
     }
     let node_info = BTreeV2NodeInfo::compute(
         header.node_size,
         header.record_size,
-        offset_size,
+        offset_width,
         header.depth,
     );
     let mut visited = BTreeSet::new();
@@ -407,7 +457,7 @@ pub fn collect_btree_v2_records_from_source<S: Source + ?Sized>(
         header.tree_type,
         header.record_size,
         header.node_size,
-        offset_size,
+        offset_width,
         &node_info,
         &mut visited,
         &mut records,
@@ -417,7 +467,7 @@ pub fn collect_btree_v2_records_from_source<S: Source + ?Sized>(
 
 /// Reads one node from the source and recursively collects its records in tree order.
 ///
-/// This mirrors the buffered [`collect_btree_v2_records`] traversal.
+/// This mirrors the buffered [`collect_btree_v2_records_with_offset_width`] traversal.
 #[allow(clippy::too_many_arguments)]
 fn collect_node_from_source<S: Source + ?Sized>(
     source: &S,
@@ -427,7 +477,7 @@ fn collect_node_from_source<S: Source + ?Sized>(
     tree_type: u8,
     record_size: u16,
     node_size: u32,
-    offset_size: u8,
+    offset_width: OffsetWidth,
     node_info: &BTreeV2NodeInfo,
     visited: &mut BTreeSet<StoredAddress>,
     out: &mut Vec<BTreeV2Record>,
@@ -460,7 +510,7 @@ fn collect_node_from_source<S: Source + ?Sized>(
         num_records,
         depth,
         record_size,
-        offset_size,
+        offset_width,
         node_info,
     )?;
 
@@ -476,7 +526,7 @@ fn collect_node_from_source<S: Source + ?Sized>(
             tree_type,
             record_size,
             node_size,
-            offset_size,
+            offset_width,
             node_info,
             visited,
             out,

@@ -21,7 +21,8 @@ use crate::address::BaseAddressExt;
 use crate::address::StoredAddressExt;
 use crate::address::{AddressContext, StoredAddress};
 use crate::btree_v2::{
-    BTreeV2Header, collect_btree_v2_records, collect_btree_v2_records_from_source,
+    BTreeV2Header, collect_btree_v2_records_from_source_with_offset_width,
+    collect_btree_v2_records_with_offset_width,
 };
 use crate::convert::Narrow;
 use crate::dense_storage::{self, DenseIndex};
@@ -37,8 +38,7 @@ use crate::source::SourceMetadata;
 use crate::source::{BaseOffsetSource, Source, frame};
 use crate::superblock::Superblock;
 use crate::symbol_table::SymbolTableMessage;
-use crate::width::LengthWidth;
-use crate::width::OffsetWidth;
+use crate::width::FormatWidths;
 
 /// Returns the version 2 B-tree allocations owned by a dense group's link set.
 ///
@@ -87,45 +87,36 @@ pub(crate) fn collect_dense_group_index_storage_extents<S: Source + ?Sized>(
     )
 }
 
-/// Returns one entry per hard link of the version 2 group `object_header` describes.
-///
-/// A compact group holds its links as Link messages in the header itself, and a dense one holds
-/// them in a fractal heap indexed by a version 2 B-tree. A soft or external link is passed over:
-/// it identifies no object header in this file. The dense walk reads through a view of `file_data`
-/// framed at the effective base in `addresses`, so the heap and index addresses of the Link Info
-/// message index that view directly. Read-write access requires complete checksum validation
-/// before reading a checksummed direct block's objects.
+/// Returns one entry per hard link of a version 2 group using validated file widths.
 ///
 /// # Errors
 ///
-/// Returns [`FormatError::PathNotFound`] if a dense group's Link Info message contains no B-tree
-/// name index address, and the [`FormatError`] of the first structure that does not parse.
-pub fn resolve_v2_group_entries(
+/// Returns [`FormatError::PathNotFound`] if a dense group has no B-tree name index address, and
+/// the [`FormatError`] of the first structure that does not parse.
+pub fn resolve_v2_group_entries_with_widths(
     file_data: &[u8],
     access_mode: AccessMode,
     object_header: &ObjectHeader,
-    offset_size: u8,
-    length_size: u8,
+    widths: FormatWidths,
     addresses: AddressContext,
 ) -> Result<Vec<GroupEntry>, FormatError> {
     // Look for Link Info message to determine storage type
-    let link_info = find_link_info(object_header, offset_size)?;
+    let link_info = find_link_info(object_header, widths.offsets.get())?;
 
     if let Some(fh_addr) = link_info.fractal_heap_address {
         // Dense storage
         let framed = frame(file_data, addresses.effective_base())?;
-        resolve_dense_entries(
+        resolve_dense_entries_with_widths(
             framed,
             access_mode,
             addresses,
             &link_info,
             fh_addr,
-            offset_size,
-            length_size,
+            widths,
         )
     } else {
         // Compact storage: links are stored directly as Link messages
-        resolve_compact_entries(object_header, offset_size)
+        resolve_compact_entries(object_header, widths.offsets.get())
     }
 }
 
@@ -193,45 +184,27 @@ impl ChildLookup {
     }
 }
 
-/// The child named `name` in the group whose header is at `group_address`, found
-/// without reading every other child.
+/// Returns the child named `name` using validated file widths.
 ///
-/// A group of *n* children is *n* Link messages in its object header, and
-/// [`resolve_group_entries`] turns each into a [`GroupEntry`] with an owned name.
-/// Resolving one path needs one of them, so a walk that opens each child of a
-/// group in turn paid for *n* names *n* times over — 310 KiB and two thousand
-/// allocations per lookup in a 1,024-child group, which is what made that walk
-/// quadratic in the group's size (issue #228).
+/// # Errors
 ///
-/// So the header is parsed asking only for the link that was named. The filter
-/// drops nothing else, and only a *compact* v2 group stores its links as Link
-/// messages — a dense group keeps them in a fractal heap and a v1 group in a
-/// symbol table — so the fallback below reads a header that is whole as far as
-/// it is concerned.
-///
-/// The object searched is classified before it is searched, so that one that is
-/// no group at all answers [`ChildLookup::NotAGroup`] rather than an error the
-/// caller cannot tell from an absent child; see that type.
-///
-/// The address answered is absolute; see [`ChildLookup::of`].
-pub(crate) fn find_child_address(
+/// Returns the [`FormatError`] of the first structure needed for the lookup that does not parse.
+pub(crate) fn find_child_address_with_widths(
     file_data: &[u8],
     access_mode: AccessMode,
     group_address: u64,
-    offset_size: u8,
-    length_size: u8,
+    widths: FormatWidths,
     addresses: AddressContext,
     name: LinkName<'_>,
 ) -> Result<ChildLookup, FormatError> {
     let mut saw_link = false;
     let header = {
         let mut wanted = wanted_link_only(name, &mut saw_link);
-        ObjectHeader::parse_filtered(
+        ObjectHeader::parse_filtered_with_widths(
             file_data,
             access_mode,
             group_address.to_usize()?,
-            offset_size,
-            length_size,
+            widths,
             addresses.effective_base(),
             MessageFilter::Only(&mut wanted),
         )?
@@ -239,44 +212,43 @@ pub(crate) fn find_child_address(
     if !filtered_is_group(&header, saw_link) {
         return Ok(ChildLookup::NotAGroup);
     }
-    if holds_compact_links(&header, offset_size)? {
-        return ChildLookup::of(addresses, scan_compact_links(&header, offset_size, name)?);
+    if holds_compact_links(&header, widths.offsets.get())? {
+        return ChildLookup::of(
+            addresses,
+            scan_compact_links(&header, widths.offsets.get(), name)?,
+        );
     }
     ChildLookup::of(
         addresses,
-        resolve_group_entries(
-            file_data,
-            access_mode,
-            &header,
-            offset_size,
-            length_size,
-            addresses,
-        )?
-        .into_iter()
-        .find(|e| e.name == name.as_str())
-        .map(|e| e.object_header_address),
+        resolve_group_entries_with_widths(file_data, access_mode, &header, widths, addresses)?
+            .into_iter()
+            .find(|e| e.name == name.as_str())
+            .map(|e| e.object_header_address),
     )
 }
 
-/// Streaming counterpart of [`find_child_address`].
-pub(crate) fn find_child_address_from_source<S: Source + ?Sized>(
+/// Returns the child named `name` from `source` using validated file widths.
+///
+/// # Errors
+///
+/// Returns the [`FormatError`] of the first structure needed for the lookup that does not parse,
+/// or the error `source` reports for a structure it cannot read.
+pub(crate) fn find_child_address_from_source_with_widths<S: Source + ?Sized>(
     source: &S,
     access_mode: AccessMode,
     group_address: u64,
-    offset_size: u8,
-    length_size: u8,
+    widths: FormatWidths,
     addresses: AddressContext,
     name: LinkName<'_>,
 ) -> Result<ChildLookup, FormatError> {
     let mut saw_link = false;
     let header = {
         let mut wanted = wanted_link_only(name, &mut saw_link);
-        ObjectHeader::parse_from_source_filtered(
+        ObjectHeader::parse_from_source_filtered_with_widths(
             &SourceMetadata(source),
             access_mode,
             group_address,
-            offset_size,
-            length_size,
+            widths,
             addresses.effective_base(),
             MessageFilter::Only(&mut wanted),
         )?
@@ -284,17 +256,19 @@ pub(crate) fn find_child_address_from_source<S: Source + ?Sized>(
     if !filtered_is_group(&header, saw_link) {
         return Ok(ChildLookup::NotAGroup);
     }
-    if holds_compact_links(&header, offset_size)? {
-        return ChildLookup::of(addresses, scan_compact_links(&header, offset_size, name)?);
+    if holds_compact_links(&header, widths.offsets.get())? {
+        return ChildLookup::of(
+            addresses,
+            scan_compact_links(&header, widths.offsets.get(), name)?,
+        );
     }
     ChildLookup::of(
         addresses,
-        resolve_group_entries_from_source(
+        resolve_group_entries_from_source_with_widths(
             source,
             access_mode,
             &header,
-            offset_size,
-            length_size,
+            widths,
             addresses,
         )?
         .into_iter()
@@ -337,7 +311,7 @@ fn wanted_link_only<'a>(
 /// took nothing from.
 ///
 /// The `!is_v1_group` term is what gives the symbol table precedence, matching
-/// [`resolve_group_entries`], which checks it first: a header carrying both a
+/// [`resolve_group_entries_with_widths`], which checks it first: a header carrying both a
 /// Symbol Table message and a Link Info message is not something any writer here
 /// produces, but the two paths must agree on what it is, or a child that the
 /// fallback finds through the symbol table would be reported as absent by the
@@ -381,7 +355,7 @@ fn filtered_is_group(header: &ObjectHeader, saw_link: bool) -> bool {
 /// What a lookup no longer refuses is a link whose *target* is malformed and
 /// whose name is not the one asked for — resolving one path used to parse every
 /// link's target, so any such link failed every lookup in the group. Listing the
-/// group ([`resolve_group_entries`]) still reports it; a lookup reads the link it
+/// group ([`resolve_group_entries_with_widths`]) still reports it. A lookup reads the link it
 /// was asked for.
 fn scan_compact_links(
     object_header: &ObjectHeader,
@@ -399,53 +373,46 @@ fn scan_compact_links(
     Ok(found)
 }
 
-/// Returns one entry per hard link of a group's dense storage: the fractal heap at `fh_addr`, read
-/// through the name index in `link_info`.
-///
-/// `file_data` is framed at the effective base in `addresses`. Read-write access requires
-/// complete checksum validation before reading a checksummed direct block's objects.
+/// Returns dense group entries using validated file widths.
 ///
 /// # Errors
 ///
-/// Returns [`FormatError::PathNotFound`] if `link_info` contains no B-tree name index address,
-/// and the [`FormatError`] of the first structure that does not parse.
-fn resolve_dense_entries(
+/// Returns [`FormatError::PathNotFound`] if the link info has no B-tree name index address, and
+/// the [`FormatError`] of the first dense-storage structure that does not parse.
+fn resolve_dense_entries_with_widths(
     file_data: &[u8],
     access_mode: AccessMode,
     addresses: AddressContext,
     link_info: &LinkInfoMessage,
     fh_addr: StoredAddress,
-    offset_size: u8,
-    length_size: u8,
+    widths: FormatWidths,
 ) -> Result<Vec<GroupEntry>, FormatError> {
     // Parse fractal heap
-    let fh =
-        crate::fractal_heap::parse_header(file_data, addresses, fh_addr, offset_size, length_size)?;
+    let fh = crate::fractal_heap::parse_header(
+        file_data,
+        addresses,
+        fh_addr,
+        widths.offsets.get(),
+        widths.lengths.get(),
+    )?;
 
     // Parse B-tree v2 for name index
     let btree_addr = link_info
         .btree_name_index_address
         .ok_or_else(|| FormatError::PathNotFound(String::from("no B-tree v2 name index")))?;
-    let btree_hdr = BTreeV2Header::parse(
-        file_data,
-        btree_addr.get().to_usize()?,
-        offset_size,
-        length_size,
-    )?;
-    let records = collect_btree_v2_records(file_data, &btree_hdr, offset_size, length_size)?;
+    let btree_hdr =
+        BTreeV2Header::parse_with_widths(file_data, btree_addr.get().to_usize()?, widths)?;
+    let records =
+        collect_btree_v2_records_with_offset_width(file_data, &btree_hdr, widths.offsets)?;
 
-    let layout = FractalHeapIdLayout::new(
-        &fh,
-        OffsetWidth::try_from(offset_size)?,
-        LengthWidth::try_from(length_size)?,
-    );
+    let layout = FractalHeapIdLayout::new(&fh, widths.offsets, widths.lengths);
     let mut heap = HeapObjectReader::new(
         &fh,
         addresses,
         fh_addr,
         access_mode,
-        offset_size,
-        length_size,
+        widths.offsets.get(),
+        widths.lengths.get(),
     );
     let mut entries = Vec::new();
     for record in &records {
@@ -457,7 +424,7 @@ fn resolve_dense_entries(
         let link_data = heap.read(file_data, layout.parse(id_bytes)?)?;
 
         // Parse as Link message
-        let link = LinkMessage::parse(&link_data, offset_size)?;
+        let link = LinkMessage::parse(&link_data, widths.offsets.get())?;
         if let LinkTarget::Hard {
             object_header_address,
         } = link.link_target
@@ -508,21 +475,18 @@ fn is_v1_group(object_header: &ObjectHeader) -> bool {
         .any(|m| m.msg_type == MessageType::SYMBOL_TABLE)
 }
 
-/// Whether an object header describes a group at all, in either form.
+/// Returns whether an object header uses either supported group representation.
 ///
-/// The union of the two predicates above, which is to say: exactly the headers
-/// [`resolve_group_entries`] will enumerate rather than refuse. A by-name group
-/// lookup ([`crate::File::group`], [`crate::Group::group`]) asks the same
-/// question to decide whether to open at all, and a path walk asks it through
-/// [`filtered_is_group`] to decide whether it can descend at all. Each asks it
-/// here, so a header this module would enumerate cannot be one they turn away.
+/// [`resolve_group_entries_with_widths`] enumerates every header accepted here. By-name group
+/// lookups ([`crate::File::group`], [`crate::Group::group`]) use the same predicate before opening
+/// a group. Path traversal uses it through [`filtered_is_group`] before descending.
 pub(crate) fn is_group(object_header: &ObjectHeader) -> bool {
     is_v1_group(object_header) || is_v2_group(object_header)
 }
 
 /// Returns the address of the object header `path` identifies, walked from the root group.
 ///
-/// Each component is looked up through [`find_child_address`], which reads a v1 symbol-table
+/// Each component is looked up through [`find_child_address_with_widths`], which reads a v1 symbol-table
 /// group, a compact v2 group and a dense one alike. The caller parses the spelling it holds,
 /// through [`ObjectPath::parse`], and a `path` with no components identifies the root group.
 /// The root and child addresses are interpreted through the same `addresses` context.
@@ -542,18 +506,37 @@ pub fn resolve_path_any(
     addresses: AddressContext,
     path: &ObjectPath<'_>,
 ) -> Result<u64, ResolveError> {
-    let os = superblock.offset_size;
-    let ls = superblock.length_size;
+    resolve_path_any_with_widths(
+        file_data,
+        access_mode,
+        superblock,
+        FormatWidths::from_sizes(superblock.offset_size, superblock.length_size)?,
+        addresses,
+        path,
+    )
+}
 
+/// Returns the address of the object header `path` identifies using validated file widths.
+///
+/// # Errors
+///
+/// Returns the errors of [`resolve_path_any`] except width-validation errors.
+pub fn resolve_path_any_with_widths(
+    file_data: &[u8],
+    access_mode: AccessMode,
+    superblock: &Superblock,
+    widths: FormatWidths,
+    addresses: AddressContext,
+    path: &ObjectPath<'_>,
+) -> Result<u64, ResolveError> {
     let mut current_addr = addresses.absolute(superblock.root_group_address)?;
 
     for (walked, &name) in path.components().iter().enumerate() {
-        match find_child_address(
+        match find_child_address_with_widths(
             file_data,
             access_mode,
             current_addr,
-            os,
-            ls,
+            widths,
             addresses,
             name,
         )? {
@@ -570,22 +553,17 @@ pub fn resolve_path_any(
     Ok(current_addr)
 }
 
-/// Returns the entries of the group `object_header` describes, in either group version.
-///
-/// A header carrying a Symbol Table message describes a version 1 group, and one carrying a Link
-/// Info or Link message a version 2 group. A version 2 group's soft and external links are passed
-/// over: they identify no object header in this file.
+/// Returns the entries of a group using validated file widths.
 ///
 /// # Errors
 ///
 /// Returns [`FormatError::PathNotFound`] if the header describes no group, and the
 /// [`FormatError`] of the first structure of the group that does not parse.
-pub fn resolve_group_entries(
+pub fn resolve_group_entries_with_widths(
     file_data: &[u8],
     access_mode: AccessMode,
     object_header: &ObjectHeader,
-    offset_size: u8,
-    length_size: u8,
+    widths: FormatWidths,
     addresses: AddressContext,
 ) -> Result<Vec<GroupEntry>, FormatError> {
     if is_v1_group(object_header) {
@@ -595,15 +573,14 @@ pub fn resolve_group_entries(
             .iter()
             .find(|m| m.msg_type == MessageType::SYMBOL_TABLE)
             .ok_or_else(|| FormatError::PathNotFound(String::from("no symbol table message")))?;
-        let stm = SymbolTableMessage::parse(&sym_msg.data, offset_size)?;
-        group_v1::resolve_v1_group_entries(file_data, &stm, offset_size, length_size, addresses)
+        let stm = SymbolTableMessage::parse_with_offset_width(&sym_msg.data, widths.offsets)?;
+        group_v1::resolve_v1_group_entries_with_widths(file_data, &stm, widths, addresses)
     } else if is_v2_group(object_header) {
-        resolve_v2_group_entries(
+        resolve_v2_group_entries_with_widths(
             file_data,
             access_mode,
             object_header,
-            offset_size,
-            length_size,
+            widths,
             addresses,
         )
     } else {
@@ -630,7 +607,7 @@ pub fn resolve_group_entries(
 /// and, for a dense group, the fractal heap and the version 2 B-tree from a [`Source`].
 ///
 /// A v1 symbol-table group resolves through
-/// [`group_v1::resolve_v1_group_entries_from_source`].
+/// [`group_v1::resolve_v1_group_entries_from_source_with_widths`].
 ///
 /// # Errors
 ///
@@ -642,18 +619,37 @@ pub fn resolve_path_any_from_source<S: Source + ?Sized>(
     addresses: AddressContext,
     path: &ObjectPath<'_>,
 ) -> Result<u64, ResolveError> {
-    let os = superblock.offset_size;
-    let ls = superblock.length_size;
+    resolve_path_any_from_source_with_widths(
+        source,
+        access_mode,
+        superblock,
+        FormatWidths::from_sizes(superblock.offset_size, superblock.length_size)?,
+        addresses,
+        path,
+    )
+}
 
+/// Returns the address of the object header `path` identifies from `source` using validated widths.
+///
+/// # Errors
+///
+/// Returns the errors of [`resolve_path_any_from_source`] except width-validation errors.
+pub fn resolve_path_any_from_source_with_widths<S: Source + ?Sized>(
+    source: &S,
+    access_mode: AccessMode,
+    superblock: &Superblock,
+    widths: FormatWidths,
+    addresses: AddressContext,
+    path: &ObjectPath<'_>,
+) -> Result<u64, ResolveError> {
     let mut current_addr = addresses.absolute(superblock.root_group_address)?;
 
     for (walked, &name) in path.components().iter().enumerate() {
-        match find_child_address_from_source(
+        match find_child_address_from_source_with_widths(
             source,
             access_mode,
             current_addr,
-            os,
-            ls,
+            widths,
             addresses,
             name,
         )? {
@@ -670,12 +666,12 @@ pub fn resolve_path_any_from_source<S: Source + ?Sized>(
     Ok(current_addr)
 }
 
-/// Streaming counterpart of [`resolve_group_entries`], reading each structure of the group from
+/// Streaming counterpart of [`resolve_group_entries_with_widths`], reading each structure of the group from
 /// `source` on demand.
 ///
 /// # Errors
 ///
-/// Returns the errors of [`resolve_group_entries`], and the error `source` reports for a structure
+/// Returns the errors of [`resolve_group_entries_with_widths`], and the error `source` reports for a structure
 /// it cannot read.
 pub fn resolve_group_entries_from_source<S: Source + ?Sized>(
     source: &S,
@@ -685,29 +681,38 @@ pub fn resolve_group_entries_from_source<S: Source + ?Sized>(
     length_size: u8,
     addresses: AddressContext,
 ) -> Result<Vec<GroupEntry>, FormatError> {
+    resolve_group_entries_from_source_with_widths(
+        source,
+        access_mode,
+        object_header,
+        FormatWidths::from_sizes(offset_size, length_size)?,
+        addresses,
+    )
+}
+
+/// Returns the entries of a group from `source` using validated file widths.
+///
+/// # Errors
+///
+/// Returns the errors of [`resolve_group_entries_with_widths`], and the error `source` reports for
+/// a structure it cannot read.
+pub fn resolve_group_entries_from_source_with_widths<S: Source + ?Sized>(
+    source: &S,
+    access_mode: AccessMode,
+    object_header: &ObjectHeader,
+    widths: FormatWidths,
+    addresses: AddressContext,
+) -> Result<Vec<GroupEntry>, FormatError> {
     if is_v1_group(object_header) {
         let sym_msg = object_header
             .messages
             .iter()
             .find(|m| m.msg_type == MessageType::SYMBOL_TABLE)
             .ok_or_else(|| FormatError::PathNotFound(String::from("no symbol table message")))?;
-        let stm = SymbolTableMessage::parse(&sym_msg.data, offset_size)?;
-        group_v1::resolve_v1_group_entries_from_source(
-            source,
-            &stm,
-            offset_size,
-            length_size,
-            addresses,
-        )
+        let stm = SymbolTableMessage::parse_with_offset_width(&sym_msg.data, widths.offsets)?;
+        group_v1::resolve_v1_group_entries_from_source_with_widths(source, &stm, widths, addresses)
     } else if is_v2_group(object_header) {
-        resolve_v2_group_entries_from_source(
-            source,
-            access_mode,
-            object_header,
-            offset_size,
-            length_size,
-            addresses,
-        )
+        resolve_v2_group_entries_from_source(source, access_mode, object_header, widths, addresses)
     } else {
         Err(FormatError::PathNotFound(String::from(
             "object header is not a group",
@@ -715,50 +720,51 @@ pub fn resolve_group_entries_from_source<S: Source + ?Sized>(
     }
 }
 
-/// Streaming counterpart of [`resolve_v2_group_entries`].
+/// Returns one entry per hard link of the version 2 group in `object_header`.
+///
+/// Reads dense-group metadata from `source` on demand. `addresses` supplies the effective file
+/// base used to interpret stored addresses.
 ///
 /// # Errors
 ///
-/// Returns the errors of [`resolve_v2_group_entries`], and the error `source` reports for a
-/// structure it cannot read.
+/// Returns [`FormatError::PathNotFound`] if a dense group has no B-tree name index address, and
+/// the [`FormatError`] of the first structure that does not parse or cannot be read from `source`.
 fn resolve_v2_group_entries_from_source<S: Source + ?Sized>(
     source: &S,
     access_mode: AccessMode,
     object_header: &ObjectHeader,
-    offset_size: u8,
-    length_size: u8,
+    widths: FormatWidths,
     addresses: AddressContext,
 ) -> Result<Vec<GroupEntry>, FormatError> {
-    let link_info = find_link_info(object_header, offset_size)?;
+    let link_info = find_link_info(object_header, widths.offsets.get())?;
     if let Some(fh_addr) = link_info.fractal_heap_address {
         let framed = BaseOffsetSource {
             inner: source,
             base: addresses.effective_base(),
         };
-        resolve_dense_entries_from_source(
+        resolve_dense_entries_from_source_with_widths(
             &framed,
             access_mode,
             addresses,
             &link_info,
             fh_addr,
-            offset_size,
-            length_size,
+            widths,
         )
     } else {
         // Compact storage: links live in the (already-parsed) object header.
-        resolve_compact_entries(object_header, offset_size)
+        resolve_compact_entries(object_header, widths.offsets.get())
     }
 }
 
-/// Streaming counterpart of [`resolve_dense_entries`], reading `source` framed at the file's base
-/// address.
+/// Returns one entry per hard link in dense group storage read from `source`.
 ///
-/// `addresses` holds the effective base used to frame `source`.
+/// `source` is framed at the effective file base in `addresses`.
 ///
 /// # Errors
 ///
-/// Returns the errors of [`resolve_dense_entries`], and the error `source` reports for a structure
-/// it cannot read.
+/// Returns [`FormatError::InvalidOffsetSize`] or [`FormatError::InvalidLengthSize`] if a width is
+/// invalid, [`FormatError::PathNotFound`] if the group has no B-tree name index address, and the
+/// [`FormatError`] of the first structure that does not parse or cannot be read from `source`.
 pub(crate) fn resolve_dense_entries_from_source<S: Source + ?Sized>(
     source: &S,
     access_mode: AccessMode,
@@ -768,38 +774,57 @@ pub(crate) fn resolve_dense_entries_from_source<S: Source + ?Sized>(
     offset_size: u8,
     length_size: u8,
 ) -> Result<Vec<GroupEntry>, FormatError> {
+    resolve_dense_entries_from_source_with_widths(
+        source,
+        access_mode,
+        addresses,
+        link_info,
+        fh_addr,
+        FormatWidths::from_sizes(offset_size, length_size)?,
+    )
+}
+
+/// Returns dense group entries from `source` using validated file widths.
+///
+/// # Errors
+///
+/// Returns the errors of [`resolve_dense_entries_with_widths`], and the error `source` reports for
+/// a dense-storage structure it cannot read.
+pub(crate) fn resolve_dense_entries_from_source_with_widths<S: Source + ?Sized>(
+    source: &S,
+    access_mode: AccessMode,
+    addresses: AddressContext,
+    link_info: &LinkInfoMessage,
+    fh_addr: StoredAddress,
+    widths: FormatWidths,
+) -> Result<Vec<GroupEntry>, FormatError> {
     let fh = crate::fractal_heap::read_header_from_source(
         source,
         addresses,
         fh_addr,
-        offset_size,
-        length_size,
+        widths.offsets.get(),
+        widths.lengths.get(),
     )?;
 
     let btree_addr = link_info
         .btree_name_index_address
         .ok_or_else(|| FormatError::PathNotFound(String::from("no B-tree v2 name index")))?;
-    let btree_hdr = BTreeV2Header::parse_from_source(
+    let btree_hdr = BTreeV2Header::parse_from_source_with_widths(
         &SourceMetadata(source),
         btree_addr.get(),
-        offset_size,
-        length_size,
+        widths,
     )?;
     let records =
-        collect_btree_v2_records_from_source(source, &btree_hdr, offset_size, length_size)?;
+        collect_btree_v2_records_from_source_with_offset_width(source, &btree_hdr, widths.offsets)?;
 
-    let layout = FractalHeapIdLayout::new(
-        &fh,
-        OffsetWidth::try_from(offset_size)?,
-        LengthWidth::try_from(length_size)?,
-    );
+    let layout = FractalHeapIdLayout::new(&fh, widths.offsets, widths.lengths);
     let mut heap = HeapObjectReader::new(
         &fh,
         addresses,
         fh_addr,
         access_mode,
-        offset_size,
-        length_size,
+        widths.offsets.get(),
+        widths.lengths.get(),
     );
     let mut entries = Vec::new();
     for record in &records {
@@ -807,7 +832,7 @@ pub(crate) fn resolve_dense_entries_from_source<S: Source + ?Sized>(
             continue;
         };
         let link_data = heap.read_from_source(source, layout.parse(id_bytes)?)?;
-        let link = LinkMessage::parse(&link_data, offset_size)?;
+        let link = LinkMessage::parse(&link_data, widths.offsets.get())?;
         if let LinkTarget::Hard {
             object_header_address,
         } = link.link_target
@@ -1039,12 +1064,11 @@ mod tests {
             birth_time: None,
         };
 
-        let entries = resolve_v2_group_entries(
+        let entries = resolve_v2_group_entries_with_widths(
             &[],
             AccessMode::ReadOnly,
             &oh,
-            8,
-            8,
+            FormatWidths::from_sizes(8, 8).unwrap(),
             AddressContext::from_effective_base(BaseAddress::new(0)),
         )
         .unwrap();
@@ -1496,14 +1520,13 @@ mod huge_link_tests {
         let (link_info, fh_addr, offset_size, length_size) = dense_link_info(&bytes);
 
         reset_huge_index_decodes();
-        let buffered = resolve_dense_entries(
+        let buffered = resolve_dense_entries_with_widths(
             &bytes,
             AccessMode::ReadOnly,
             AddressContext::from_effective_base(BaseAddress::new(0)),
             &link_info,
             fh_addr,
-            offset_size,
-            length_size,
+            FormatWidths::from_sizes(offset_size, length_size).unwrap(),
         )
         .unwrap();
         assert_eq!(buffered.len(), COUNT, "the walk must still read every link");

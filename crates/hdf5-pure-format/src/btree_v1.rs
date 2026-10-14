@@ -11,7 +11,7 @@ use crate::bytes;
 use crate::convert::Narrow;
 use crate::error::FormatError;
 use crate::metadata_source::MetadataSource;
-use crate::width::OffsetWidth;
+use crate::width::{FormatWidths, OffsetWidth};
 
 /// The size in bytes of the prefix of a version 1 B-tree node that does not depend on the
 /// offset width: the signature (4), the node type (1), the node level (1), and the entries
@@ -78,11 +78,30 @@ impl BTreeV1Node {
         offset_size: u8,
         length_size: u8,
     ) -> Result<BTreeV1Node, FormatError> {
+        Self::parse_with_widths(
+            file_data,
+            offset,
+            FormatWidths::from_sizes(offset_size, length_size)?,
+        )
+    }
+
+    /// Parses the version 1 B-tree node at `offset` with validated file widths.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::UnexpectedEof`] if the node header or the keys and children in use
+    /// run past the end of `file_data`, or [`FormatError::InvalidBTreeSignature`] if the node does
+    /// not begin with `TREE`.
+    pub fn parse_with_widths(
+        file_data: &[u8],
+        offset: usize,
+        widths: FormatWidths,
+    ) -> Result<BTreeV1Node, FormatError> {
         // signature(4) + node_type(1) + node_level(1) + entries_used(2),
-        // then left_sibling(offset_size) + right_sibling(offset_size).
-        let os = offset_size as usize;
-        let ls = length_size as usize;
-        let header_size = btree_v1_node_header_size(offset_size);
+        // then left_sibling(offset_width) + right_sibling(offset_width).
+        let os = usize::from(widths.offsets.get());
+        let ls = usize::from(widths.lengths.get());
+        let header_size = btree_v1_node_header_size(widths.offsets.get());
         if header_size > file_data.len() || offset > file_data.len() - header_size {
             return Err(FormatError::UnexpectedEof {
                 expected: offset.saturating_add(header_size),
@@ -99,11 +118,11 @@ impl BTreeV1Node {
         let entries_used = u16::from_le_bytes([file_data[offset + 6], file_data[offset + 7]]);
 
         let mut pos = offset + BTREE_V1_NODE_PREFIX_LEN;
-        let left_sibling =
-            bytes::read_optional_offset(file_data, pos, offset_size)?.map(StoredAddress::new);
+        let left_sibling = bytes::read_optional_offset_width(file_data, pos, widths.offsets)?
+            .map(StoredAddress::new);
         pos += os;
-        let right_sibling =
-            bytes::read_optional_offset(file_data, pos, offset_size)?.map(StoredAddress::new);
+        let right_sibling = bytes::read_optional_offset_width(file_data, pos, widths.offsets)?
+            .map(StoredAddress::new);
         pos += os;
 
         // For type 0: keys are `length_size` bytes, children are `offset_size` bytes
@@ -123,19 +142,19 @@ impl BTreeV1Node {
 
         for _ in 0..eu {
             // key[i]
-            let key = bytes::read_length(file_data, pos, length_size)?;
+            let key = bytes::read_length_width(file_data, pos, widths.lengths)?;
             keys.push(key);
             pos += key_size;
             // child[i]
-            children.push(StoredAddress::new(bytes::read_offset(
+            children.push(StoredAddress::new(bytes::read_offset_width(
                 file_data,
                 pos,
-                offset_size,
+                widths.offsets,
             )?));
             pos += os;
         }
         // final key
-        let key = bytes::read_length(file_data, pos, length_size)?;
+        let key = bytes::read_length_width(file_data, pos, widths.lengths)?;
         keys.push(key);
 
         Ok(BTreeV1Node {
@@ -164,6 +183,24 @@ impl BTreeV1Node {
         offset_size: u8,
         length_size: u8,
     ) -> Result<BTreeV1Node, FormatError> {
+        Self::parse_from_source_with_widths(
+            source,
+            address,
+            FormatWidths::from_sizes(offset_size, length_size)?,
+        )
+    }
+
+    /// Parses the version 1 B-tree node at `address` with validated file widths.
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors [`parse_with_widths`](Self::parse_with_widths) returns, and the error
+    /// `source` returns if a read fails.
+    pub fn parse_from_source_with_widths(
+        source: &(impl MetadataSource + ?Sized),
+        address: u64,
+        widths: FormatWidths,
+    ) -> Result<BTreeV1Node, FormatError> {
         let prefix = source.read_metadata_at(address, BTREE_V1_NODE_PREFIX_LEN)?;
         if &prefix[0..4] != BTREE_V1_SIGNATURE {
             return Err(FormatError::InvalidBTreeSignature);
@@ -172,11 +209,11 @@ impl BTreeV1Node {
 
         // For type 0: header + entries_used*(key + child) + a trailing key,
         // with child `offset_size` bytes wide and key `length_size` bytes wide.
-        let os = offset_size as usize;
-        let ls = length_size as usize;
-        let total = btree_v1_node_header_size(offset_size) + entries_used * (ls + os) + ls;
+        let os = usize::from(widths.offsets.get());
+        let ls = usize::from(widths.lengths.get());
+        let total = btree_v1_node_header_size(widths.offsets.get()) + entries_used * (ls + os) + ls;
         let buf = source.read_metadata_at(address, total)?;
-        Self::parse(&buf, 0, offset_size, length_size)
+        Self::parse_with_widths(&buf, 0, widths)
     }
 }
 

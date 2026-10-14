@@ -8,13 +8,16 @@ use crate::address::StoredAddressExt;
 use crate::address::{AddressContext, StoredAddress};
 #[cfg(test)]
 use crate::address::{BaseAddress, BaseAddressExt};
-use crate::btree_v1::{collect_symbol_table_nodes, collect_symbol_table_nodes_from_source};
+use crate::btree_v1::{
+    collect_symbol_table_nodes_from_source_with_widths, collect_symbol_table_nodes_with_widths,
+};
 use crate::convert::Narrow;
 use crate::error::FormatError;
 use crate::local_heap::LocalHeap;
 use crate::source::Source;
 use crate::source::SourceMetadata;
 use crate::symbol_table::{SymbolTableMessage, SymbolTableNode};
+use crate::width::FormatWidths;
 
 /// A resolved group entry (child name + object header address).
 #[derive(Debug, Clone)]
@@ -29,46 +32,38 @@ pub struct GroupEntry {
     pub cache_type: u32,
 }
 
-/// Returns one entry per child of the version 1 group `sym_table_msg` describes.
-///
-/// The message names two structures: the local heap that holds the link names, and the B-tree
-/// whose leaves lead to the symbol table nodes that hold the entries.
+/// Returns one entry per child using validated file widths.
 ///
 /// # Errors
 ///
-/// Returns the [`FormatError`] of the first structure that does not parse: the local heap, the
-/// B-tree, or one of the symbol table nodes.
-pub fn resolve_v1_group_entries(
+/// Returns the [`FormatError`] of the first group structure that does not parse.
+pub fn resolve_v1_group_entries_with_widths(
     file_data: &[u8],
     sym_table_msg: &SymbolTableMessage,
-    offset_size: u8,
-    length_size: u8,
+    widths: FormatWidths,
     addresses: AddressContext,
 ) -> Result<Vec<GroupEntry>, FormatError> {
-    let heap = LocalHeap::parse(
+    let heap = LocalHeap::parse_with_widths(
         file_data,
         addresses
             .absolute(sym_table_msg.local_heap_address)?
             .to_usize()?,
-        offset_size,
-        length_size,
+        widths,
     )?;
 
-    let snod_addrs = collect_symbol_table_nodes(
+    let snod_addrs = collect_symbol_table_nodes_with_widths(
         file_data,
         sym_table_msg.btree_address,
-        offset_size,
-        length_size,
+        widths,
         addresses,
     )?;
 
     let mut entries = Vec::new();
     for snod_addr in snod_addrs {
-        let snod = SymbolTableNode::parse(
+        let snod = SymbolTableNode::parse_with_widths(
             file_data,
             addresses.absolute(snod_addr)?.to_usize()?,
-            offset_size,
-            length_size,
+            widths,
         )?;
         for entry in &snod.entries {
             let name = heap.read_string(
@@ -87,26 +82,21 @@ pub fn resolve_v1_group_entries(
     Ok(entries)
 }
 
-/// Streaming counterpart of [`resolve_v1_group_entries`].
-///
-/// Reads the local heap header, B-tree v1, and each symbol-table node from a
-/// [`Source`] on demand. The heap's data segment, which holds the link names, is read once and
-/// every name is sliced from that single buffer.
+/// Returns one entry per child from `source` using validated file widths.
 ///
 /// # Errors
 ///
-/// Returns the errors of [`resolve_v1_group_entries`], and the error `source` reports for a
-/// structure it cannot read.
-pub fn resolve_v1_group_entries_from_source<S: Source + ?Sized>(
+/// Returns the errors of [`resolve_v1_group_entries_with_widths`], and the error `source` reports
+/// for a structure it cannot read.
+pub fn resolve_v1_group_entries_from_source_with_widths<S: Source + ?Sized>(
     source: &S,
     sym_table_msg: &SymbolTableMessage,
-    offset_size: u8,
-    length_size: u8,
+    widths: FormatWidths,
     addresses: AddressContext,
 ) -> Result<Vec<GroupEntry>, FormatError> {
     let heap_addr = addresses.absolute(sym_table_msg.local_heap_address)?;
     let heap =
-        LocalHeap::parse_from_source(&SourceMetadata(source), heap_addr, offset_size, length_size)?;
+        LocalHeap::parse_from_source_with_widths(&SourceMetadata(source), heap_addr, widths)?;
 
     // Read the heap data segment once; every link name is sliced from it.
     let segment = source.read_metadata_at(
@@ -114,22 +104,20 @@ pub fn resolve_v1_group_entries_from_source<S: Source + ?Sized>(
         heap.data_segment_size.to_usize()?,
     )?;
 
-    let snod_addrs = collect_symbol_table_nodes_from_source(
+    let snod_addrs = collect_symbol_table_nodes_from_source_with_widths(
         source,
         sym_table_msg.btree_address,
-        offset_size,
-        length_size,
+        widths,
         addresses,
     )?;
 
     let mut entries = Vec::new();
     for snod_addr in snod_addrs {
         let snod_offset = addresses.absolute(snod_addr)?;
-        let snod = SymbolTableNode::parse_from_source(
+        let snod = SymbolTableNode::parse_from_source_with_widths(
             &SourceMetadata(source),
             snod_offset,
-            offset_size,
-            length_size,
+            widths,
         )?;
         for entry in &snod.entries {
             let name = heap.read_string_in_segment(&segment, entry.link_name_offset)?;
@@ -221,11 +209,10 @@ mod tests {
     fn resolve_entries_two_children() {
         let (file, msg) =
             build_synthetic_group(&[("alpha", 0x1000, 0), ("beta", 0x2000, 0)], Widths::EIGHT);
-        let entries = resolve_v1_group_entries(
+        let entries = resolve_v1_group_entries_with_widths(
             &file,
             &msg,
-            8,
-            8,
+            FormatWidths::from_sizes(8, 8).unwrap(),
             AddressContext::from_effective_base(BaseAddress::ZERO),
         )
         .unwrap();
@@ -304,11 +291,10 @@ mod tests {
         let sb = hdf5_pure_format::__private::parse_superblock(file_data, sig_offset).unwrap();
         let root_sym = get_root_sym_table(file_data, &sb);
 
-        let entries = resolve_v1_group_entries(
+        let entries = resolve_v1_group_entries_with_widths(
             file_data,
             &root_sym,
-            sb.offset_size,
-            sb.length_size,
+            FormatWidths::from_sizes(sb.offset_size, sb.length_size).unwrap(),
             AddressContext::from_effective_base(BaseAddress::ZERO),
         )
         .unwrap();

@@ -5036,7 +5036,7 @@ mod tests {
             let (info, depth) = hdf5_pure_format::__private::BTreeV2NodeInfo::for_record_count(
                 BTREE_V2_NODE_SIZE,
                 record_size,
-                OFFSET_SIZE,
+                hdf5_pure_format::__private::OffsetWidth::Eight,
                 0,
             )
             .expect("the emitted geometry is plannable");
