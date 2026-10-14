@@ -8,6 +8,7 @@ use hdf5_pure::File;
 use hdf5_pure::FileBuilder;
 use hdf5_pure::FillTime;
 use hdf5_pure::GlobalHeapLiveness;
+use hdf5_pure::ReferenceType;
 use hdf5_pure::StringPadding;
 use hdf5_pure_format::__private as format;
 use rstest::rstest;
@@ -110,21 +111,55 @@ fn only_an_element_with_an_object_refers_to_its_collection(
     );
 }
 
+// `slots` holds the byte offset of each variable-length reference in an element.
 #[rstest]
-#[case::compound_with_a_variable_length_member(
-    CompoundTypeBuilder::new().field("s", vlen_string()).build().unwrap()
-)]
-#[case::array_of_variable_length_strings(Datatype::Array {
-    base_type: Box::new(vlen_string()),
-    dimensions: vec![2],
-})]
+#[case::compound_with_a_string_member(with_integer(vlen_string()), &[4])]
+#[case::compound_with_a_sequence_member(with_integer(vlen_sequence()), &[4])]
+#[case::array_of_strings(array_of(vlen_string()), &[0, 16])]
+#[case::array_of_compounds_with_a_sequence_member(array_of(with_integer(vlen_sequence())), &[4, 24])]
+fn embedded_members_refer_to_their_collections(
+    #[values(
+        Form::CompactAttribute,
+        Form::CompactDataset,
+        Form::ContiguousDataset,
+        Form::FillValue
+    )]
+    form: Form,
+    #[case] datatype: Datatype,
+    #[case] slots: &[usize],
+) {
+    let mut fixture = Fixture::new();
+    let collections: Vec<u64> = slots
+        .iter()
+        .map(|_| fixture.collection(&[Object::new(1, b"alpha"), Object::new(2, b"beta")]))
+        .collect();
+    let mut element = vec![0; datatype.type_size() as usize];
+    let elements: Vec<u8> = [1, 2]
+        .into_iter()
+        .flat_map(|index| {
+            for (&slot, &collection) in slots.iter().zip(&collections) {
+                element[slot..slot + REFERENCE_SIZE]
+                    .copy_from_slice(&reference(5, collection, index));
+            }
+            element.clone()
+        })
+        .collect();
+    let messages = form.messages(&mut fixture, &datatype, &elements);
+    fixture.object("x", messages);
+
+    assert_eq!(fixture.liveness(), complete(collections));
+}
+
+#[rstest]
 #[case::sequence_of_sequences(Datatype::VariableLength {
     is_string: false,
     padding: None,
     charset: None,
     base_type: Box::new(vlen_sequence()),
 })]
-fn a_datatype_with_embedded_references_is_incomplete(#[case] datatype: Datatype) {
+#[case::object_reference(object_reference())]
+#[case::compound_with_an_object_reference(with_integer(object_reference()))]
+fn a_datatype_with_unlocated_addresses_is_incomplete(#[case] datatype: Datatype) {
     let mut fixture = Fixture::new();
     let mut messages = dataset_messages(&datatype, &dataspace::scalar());
     messages.push(Message::new(
@@ -234,7 +269,8 @@ enum Form {
 
 impl Form {
     fn messages(self, fixture: &mut Fixture, datatype: &Datatype, elements: &[u8]) -> Vec<Message> {
-        let count = (elements.len() / REFERENCE_SIZE) as u64;
+        let element_size = datatype.type_size() as usize;
+        let count = (elements.len() / element_size) as u64;
         let space = dataspace::v2(
             1,
             dataspace::Flags::NONE,
@@ -261,7 +297,7 @@ impl Form {
                     MessageType::FILL_VALUE,
                     &format::serialize_fill_value_message_v3(
                         FillTime::IfSet,
-                        Some(&elements[..REFERENCE_SIZE]),
+                        Some(&elements[..element_size]),
                     )
                     .unwrap(),
                 ));
@@ -434,6 +470,28 @@ fn vlen_string() -> Datatype {
         padding: Some(StringPadding::NullTerminate),
         charset: Some(CharacterSet::Ascii),
         base_type: Box::new(hdf5_pure::make_u8_type()),
+    }
+}
+
+fn with_integer(member: Datatype) -> Datatype {
+    CompoundTypeBuilder::new()
+        .field("n", hdf5_pure::make_i32_type())
+        .field("v", member)
+        .build()
+        .unwrap()
+}
+
+fn array_of(base_type: Datatype) -> Datatype {
+    Datatype::Array {
+        base_type: Box::new(base_type),
+        dimensions: vec![2],
+    }
+}
+
+fn object_reference() -> Datatype {
+    Datatype::Reference {
+        size: 8,
+        ref_type: ReferenceType::Object,
     }
 }
 

@@ -1,6 +1,7 @@
 //! The global heap collections that the objects reachable from the root group refer to.
 
 use alloc::collections::BTreeSet;
+use core::num::NonZeroU32;
 use core::num::NonZeroU64;
 
 use crate::access_mode::AccessMode;
@@ -22,6 +23,8 @@ use crate::read_spec::RawReadSpec;
 use crate::read_spec::RawReadStorage;
 use crate::source::BaseOffsetSource;
 use crate::vl_data;
+use crate::vl_data::EmbeddedVlSlot;
+use crate::vl_data::VlElement;
 
 use super::LENGTH_SIZE;
 use super::OFFSET_SIZE;
@@ -31,11 +34,12 @@ use super::WriteEngine;
 /// The global heap collections that the objects reachable from the root group refer to.
 ///
 /// The editor follows the hard links of each group and reads the variable-length elements of
-/// each attribute, compact or contiguous dataset, and fill value. The analysis is incomplete if it
-/// reaches a shared message, an attribute with a shared datatype or dataspace, a virtual dataset,
-/// a chunked dataset of variable-length elements, a datatype that holds a reference or a
-/// variable-length type inside another type, a message of a type it does not recognize, or a
-/// traversal limit.
+/// each attribute, compact or contiguous dataset, and fill value, including the variable-length
+/// members of compound and array elements. The analysis is incomplete if it reaches a shared
+/// message, an attribute with a shared datatype or dataspace, a virtual dataset, a chunked dataset
+/// of variable-length elements, a datatype that holds a reference or a variable-length type nested
+/// in another variable-length type, a datatype too small for its variable-length members, a
+/// message of a type it does not recognize, or a traversal limit.
 ///
 /// This type is outside the supported API.
 #[doc(hidden)]
@@ -178,22 +182,27 @@ impl WriteEngine {
         if matches!(layout, DataLayout::Virtual) {
             return Ok(false);
         }
-        match HeapReferences::of(&datatype) {
+        let slots = match HeapReferences::of(&datatype)? {
             HeapReferences::Absent => return Ok(true),
+            HeapReferences::Located(slots) => slots,
             HeapReferences::Unsupported => return Ok(false),
-            HeapReferences::WholeElement => {}
-        }
-        self.collect_fill_value_collections(messages, referenced)?;
+        };
+        self.collect_fill_value_collections(messages, &slots, referenced)?;
         let dataspace = Dataspace::parse(&dataspace.data, LENGTH_SIZE)?;
         let spec = RawReadSpec::parse(&layout, &dataspace, &datatype, None, FillPattern::ZERO)?;
         match spec.storage() {
             RawReadStorage::Compact { data } => {
-                self.collect_element_collections(data, dataspace.num_elements(), referenced)?;
+                self.collect_element_collections(
+                    data,
+                    dataspace.num_elements(),
+                    &slots,
+                    referenced,
+                )?;
             }
             RawReadStorage::Contiguous { address } => self.collect_contiguous_collections(
                 address,
                 spec.byte_len_u64(),
-                NonZeroU64::from(datatype.element_size()?),
+                &slots,
                 referenced,
             )?,
             RawReadStorage::ContiguousUnallocated => {}
@@ -205,6 +214,7 @@ impl WriteEngine {
     fn collect_fill_value_collections(
         &self,
         messages: &[HeaderMessage],
+        slots: &ReferenceSlots,
         referenced: &mut BTreeSet<u64>,
     ) -> Result<(), FormatError> {
         for HeaderMessage {
@@ -223,7 +233,7 @@ impl WriteEngine {
                 continue;
             }
             if let Some(value) = FillValueView::parse(*msg_type, data)?.value() {
-                self.collect_element_collections(value, 1, referenced)?;
+                self.collect_element_collections(value, 1, slots, referenced)?;
             }
         }
         Ok(())
@@ -233,10 +243,11 @@ impl WriteEngine {
         &self,
         address: StoredAddress,
         len: u64,
-        element_size: NonZeroU64,
+        slots: &ReferenceSlots,
         referenced: &mut BTreeSet<u64>,
     ) -> Result<(), FormatError> {
         let start = self.addresses.absolute(address)?;
+        let element_size = NonZeroU64::from(slots.element_size);
         let batch_len = element_size.saturating_mul(ELEMENT_BATCH);
         for first in (0..len).step_by(batch_len.get().to_usize()?) {
             let offset = start
@@ -247,7 +258,7 @@ impl WriteEngine {
                 })?;
             let read_len = (len - first).min(batch_len.get());
             let bytes = self.image().read_exact_at(offset, read_len.to_usize()?)?;
-            self.collect_element_collections(&bytes, read_len / element_size, referenced)?;
+            self.collect_element_collections(&bytes, read_len / element_size, slots, referenced)?;
         }
         Ok(())
     }
@@ -315,29 +326,68 @@ impl WriteEngine {
             Err(FormatError::UnresolvedSharedMessage(_)) => return Ok(false),
             Err(error) => return Err(error),
         };
-        Ok(match HeapReferences::of(&attribute.datatype) {
+        Ok(match HeapReferences::of(&attribute.datatype)? {
             HeapReferences::Absent => true,
-            HeapReferences::Unsupported => false,
-            HeapReferences::WholeElement => {
+            HeapReferences::Located(slots) => {
                 self.collect_element_collections(
                     &attribute.raw_data,
                     attribute.dataspace.num_elements(),
+                    &slots,
                     referenced,
                 )?;
                 true
             }
+            HeapReferences::Unsupported => false,
         })
     }
 
+    /// Adds the collections that the variable-length references at `slots` in the first `count`
+    /// elements of `raw` refer to.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::ValueTooLargeForPlatform`] if `count` exceeds [`usize::MAX`],
+    /// [`FormatError::OffsetOverflow`] if `count` elements exceed [`usize::MAX`] bytes,
+    /// [`FormatError::UnexpectedEof`] if `raw` holds fewer than `count` elements, and the errors
+    /// of [`VlElement::heap_id`] for a malformed reference.
     fn collect_element_collections(
         &self,
         raw: &[u8],
         count: u64,
+        slots: &ReferenceSlots,
         referenced: &mut BTreeSet<u64>,
     ) -> Result<(), FormatError> {
-        for element in vl_data::parse_vl_references(raw, count, OFFSET_SIZE)? {
-            if let Some(id) = element.heap_id(OFFSET_SIZE, self.addresses)? {
-                referenced.insert(id.collection.get());
+        let ReferenceSlots {
+            element_size,
+            vlen_slots,
+        } = slots;
+        let element_size = NonZeroU64::from(*element_size);
+        let stride = element_size.get().to_usize()?;
+        let len = count
+            .to_usize()?
+            .checked_mul(stride)
+            .ok_or(FormatError::OffsetOverflow {
+                offset: count,
+                length: element_size.get(),
+            })?;
+        let elements = raw.get(..len).ok_or(FormatError::UnexpectedEof {
+            expected: len,
+            available: raw.len(),
+        })?;
+        for element in elements.chunks_exact(stride) {
+            for slot in vlen_slots {
+                let reference =
+                    element
+                        .get(slot.byte_offset..)
+                        .ok_or(FormatError::UnexpectedEof {
+                            expected: slot.byte_offset,
+                            available: element.len(),
+                        })?;
+                if let Some(id) = VlElement::parse(reference, OFFSET_SIZE)?
+                    .heap_id(OFFSET_SIZE, self.addresses)?
+                {
+                    referenced.insert(id.collection.get());
+                }
             }
         }
         Ok(())
@@ -348,28 +398,60 @@ impl WriteEngine {
 enum HeapReferences {
     /// An element is free of file addresses.
     Absent,
+    /// Every file address in an element is in one of the variable-length references of
+    /// [`ReferenceSlots`].
+    Located(ReferenceSlots),
     /// An element holds a file address the analysis does not locate, such as an object reference
-    /// or a variable-length member of a compound.
+    /// or a sequence of variable-length strings.
     Unsupported,
-    /// The datatype is variable-length over a base type without a file address, and each element
-    /// refers to at most one global heap object.
-    WholeElement,
 }
 
 impl HeapReferences {
     /// Returns how an element of `datatype` refers to global heap objects.
-    fn of(datatype: &Datatype) -> Self {
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::ZeroSizedDatatype`] if the size of `datatype` is 0, it holds a file
+    /// address, and the analysis locates each one.
+    fn of(datatype: &Datatype) -> Result<Self, FormatError> {
         if !crate::datatype::datatype_holds_file_address(datatype) {
-            return Self::Absent;
+            return Ok(Self::Absent);
         }
-        match datatype {
-            Datatype::VariableLength { base_type, .. }
-                if !crate::datatype::datatype_holds_file_address(base_type) =>
-            {
-                Self::WholeElement
-            }
-            _ => Self::Unsupported,
+        if holds_unlocated_address(datatype) {
+            return Ok(Self::Unsupported);
         }
+        let element_size = datatype.element_size()?;
+        Ok(match vl_data::embedded_vlen_slots(datatype) {
+            Some(vlen_slots) => Self::Located(ReferenceSlots {
+                element_size,
+                vlen_slots,
+            }),
+            None => Self::Unsupported,
+        })
+    }
+}
+
+/// The positions of the variable-length references in an element of a datatype.
+struct ReferenceSlots {
+    /// The size in bytes of an element.
+    element_size: NonZeroU32,
+    vlen_slots: Vec<EmbeddedVlSlot>,
+}
+
+/// Returns whether `datatype` holds a file address the analysis does not locate: a reference, or
+/// a variable-length type whose base type holds a file address.
+fn holds_unlocated_address(datatype: &Datatype) -> bool {
+    match datatype {
+        Datatype::VariableLength { base_type, .. } => {
+            crate::datatype::datatype_holds_file_address(base_type)
+        }
+        Datatype::Compound { members, .. } => members
+            .iter()
+            .any(|member| holds_unlocated_address(&member.datatype)),
+        Datatype::Array { base_type, .. } | Datatype::Enumeration { base_type, .. } => {
+            holds_unlocated_address(base_type)
+        }
+        _ => crate::datatype::datatype_holds_file_address(datatype),
     }
 }
 
