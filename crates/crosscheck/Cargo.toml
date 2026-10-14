@@ -52,6 +52,8 @@ hdf5-pure = { workspace = true, features = ["__fractal-heap-storage-crosscheck"]
 # The address type the hdf5-pure-format parsers and writers take, for the tests that call them.
 hdf5-pure-core.workspace = true
 hdf5-pure-format.workspace = true
+# Exercises the pure allocation policy against the reference library's placements.
+hdf5-pure-space.workspace = true
 ndarray.workspace = true
 proptest.workspace = true
 rstest.workspace = true
