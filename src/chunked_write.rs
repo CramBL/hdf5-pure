@@ -681,9 +681,8 @@ pub fn split_into_chunks(
 /// second copy of this product is how one of them ends up declaring a width the
 /// others do not write.
 ///
-/// `ensure_chunk_bytes_representable` caps a chunk at 4 GiB before any of them
-/// runs, so the product saturates here only so that a malformed geometry cannot
-/// wrap into a small, plausible width.
+/// The product saturates so that a malformed geometry cannot wrap into a small, plausible
+/// width.
 pub(crate) fn full_chunk_bytes(
     chunk_dims: impl IntoIterator<Item = u64>,
     element_size: NonZeroUsize,

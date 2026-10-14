@@ -57,21 +57,39 @@ fn decode_all_chunks_from_source<S: Source + ?Sized>(
     // One decoder for every chunk; see `FilterScratch`.
     let mut scratch = FilterScratch::new();
     for chunk_info in chunks {
-        let raw_chunk =
-            source.read_exact_at(chunk_info.address.get(), chunk_info.chunk_size.to_usize()?)?;
-        let filtering = ChunkFiltering::for_chunk(flags, chunk_dims, ds_dims, chunk_info);
-        result.push(
-            decode_chunk(
-                &mut scratch,
-                Cow::Owned(raw_chunk),
-                pipeline,
-                ctx,
-                filtering,
-            )?
-            .into_owned(),
-        );
+        result.push(read_decoded_chunk(
+            source,
+            &mut scratch,
+            flags,
+            chunk_dims,
+            ds_dims,
+            pipeline,
+            ctx,
+            chunk_info,
+        )?);
     }
     Ok(result)
+}
+
+/// Reads the stored bytes of `chunk` from `source` and decodes them with [`decode_chunk`].
+///
+/// # Errors
+///
+/// Returns [`FormatError::ValueTooLargeForPlatform`] if the stored size of `chunk` exceeds
+/// [`usize::MAX`], the error `source` returns for the read, and the errors of [`decode_chunk`].
+fn read_decoded_chunk(
+    source: &(impl Source + ?Sized),
+    scratch: &mut FilterScratch,
+    flags: ChunkedLayoutFlags,
+    chunk_dims: &[u64],
+    ds_dims: &[u64],
+    pipeline: Option<&FilterPipeline>,
+    ctx: ChunkContext<'_>,
+    chunk: &ChunkInfo,
+) -> Result<Vec<u8>, FormatError> {
+    let raw_chunk = source.read_exact_at(chunk.address.get(), chunk.chunk_size.to_usize()?)?;
+    let filtering = ChunkFiltering::for_chunk(flags, chunk_dims, ds_dims, chunk);
+    Ok(decode_chunk(scratch, Cow::Owned(raw_chunk), pipeline, ctx, filtering)?.into_owned())
 }
 
 /// Runs the inverse filter pipeline over a chunk's stored bytes, and passes
@@ -514,28 +532,23 @@ fn chunked_dims(
 
 const MAX_CHUNK_ALLOCATION_BYTES: u64 = u32::MAX as u64;
 
-/// Reject a chunk geometry whose logical byte size — `product(chunk_dims) *
-/// elem_size` — is impossible for the format, before it is used to size a
-/// full-extent output allocation.
+/// Returns the size in bytes of a decoded chunk of `chunk_dims` elements of `elem_size` bytes
+/// each.
 ///
-/// The chunk edge lengths come from the data-layout message and `elem_size` from
-/// the datatype message, both attacker-controlled in an untrusted file. A crafted
-/// datatype size (for example a fixed-length string element of billions of bytes)
-/// or chunk extent otherwise multiplies into a multi-gigabyte `vec![0u8; …]` for
-/// the assembled dataset — an out-of-memory abort driven by a tiny file — even
-/// though the on-disk chunk data is small. Bounding the *per-chunk* logical size
-/// (rather than the whole dataset) refuses that case while leaving a genuinely
-/// large dataset, which is large through its element count across many
-/// normally-sized chunks, entirely readable.
-fn ensure_chunk_bytes_representable(
-    chunk_dims: &[usize],
-    elem_size: NonZeroUsize,
-) -> Result<(), FormatError> {
+/// The chunk dimensions and the element size are read from the file. The size is bounded per
+/// chunk by [`MAX_CHUNK_ALLOCATION_BYTES`], so a dataset that is large through its number of
+/// chunks stays readable.
+///
+/// # Errors
+///
+/// Returns [`FormatError::InvalidChunkGeometry`] if the size exceeds
+/// [`MAX_CHUNK_ALLOCATION_BYTES`].
+fn bounded_chunk_len(chunk_dims: &[usize], elem_size: NonZeroUsize) -> Result<usize, FormatError> {
     let logical = chunk_dims
         .iter()
         .try_fold(elem_size.get() as u64, |acc, &d| acc.checked_mul(d as u64));
     match logical {
-        Some(bytes) if bytes <= MAX_CHUNK_ALLOCATION_BYTES => Ok(()),
+        Some(bytes) if bytes <= MAX_CHUNK_ALLOCATION_BYTES => bytes.to_usize(),
         _ => Err(FormatError::InvalidChunkGeometry(
             "chunk logical byte size exceeds the reader's single-chunk allocation limit",
         )),
@@ -560,36 +573,20 @@ pub fn read_chunked_data_from_source<S: Source + ?Sized>(
         spec.pipeline(),
         spec.fill(),
     );
-    let RawReadStorage::Chunked {
+    let Some(ChunkedPlan {
         flags,
-        chunk_dimensions,
-        index,
-    } = spec.storage()
+        rank,
+        chunk_dims,
+        ds_dims,
+        chunk_dims_u64,
+        elem_size,
+        #[cfg(feature = "std")]
+            chunk_len: _,
+        chunks,
+    }) = ChunkedPlan::new(source, spec, offset_size, length_size)?
     else {
-        return Err(FormatError::ChunkedReadError(
-            "expected chunked layout".into(),
-        ));
-    };
-
-    if index.address().is_none() {
         return spec.unallocated_buffer();
-    }
-
-    let elem_size = crate::datatype::element_size_usize(datatype)?;
-    let (rank, chunk_dims, ds_dims) = chunked_dims(chunk_dimensions, dataspace)?;
-    ensure_chunk_bytes_representable(&chunk_dims, elem_size)?;
-
-    let chunks = collect_chunks_for_layout_from_source(
-        source,
-        index,
-        chunk_dimensions,
-        dataspace,
-        elem_size.get() as u64,
-        offset_size,
-        length_size,
-    )?;
-
-    let chunk_dims_u64: Vec<u64> = chunk_dims.iter().map(|&d| d as u64).collect();
+    };
     let ctx = ChunkContext::from_datatype(&chunk_dims_u64, datatype)?;
     let decoded_chunks = decode_all_chunks_from_source(
         source,
@@ -618,6 +615,85 @@ pub fn read_chunked_data_from_source<S: Source + ?Sized>(
         total_bytes,
         fill,
     )
+}
+
+/// The geometry of a chunked dataset and the allocated chunks its chunk index lists.
+struct ChunkedPlan {
+    flags: ChunkedLayoutFlags,
+    rank: usize,
+    /// The size of a chunk in elements along each dimension of the dataset.
+    chunk_dims: Vec<usize>,
+    ds_dims: Vec<usize>,
+    chunk_dims_u64: Vec<u64>,
+    elem_size: NonZeroUsize,
+    /// The size in bytes of a decoded chunk.
+    #[cfg(feature = "std")]
+    chunk_len: usize,
+    chunks: Vec<ChunkInfo>,
+}
+
+impl ChunkedPlan {
+    /// Reads the chunk index of the chunked dataset `spec` describes, or returns `None` if the
+    /// index address is undefined, as it is before the dataset's storage is allocated.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::ChunkedReadError`] if `spec` describes another layout or its chunk
+    /// dimensions do not match the dataspace, [`FormatError::ZeroSizedDatatype`] if the size of
+    /// the datatype is 0, [`FormatError::ValueTooLargeForPlatform`] if the size of the datatype or
+    /// a dimension exceeds [`usize::MAX`], [`FormatError::InvalidChunkGeometry`] if a chunk exceeds
+    /// the reader's single-chunk allocation limit, and the errors of a malformed chunk index.
+    fn new(
+        source: &(impl Source + ?Sized),
+        spec: RawReadSpec<'_>,
+        offset_size: u8,
+        length_size: u8,
+    ) -> Result<Option<Self>, FormatError> {
+        let RawReadStorage::Chunked {
+            flags,
+            chunk_dimensions,
+            index,
+        } = spec.storage()
+        else {
+            return Err(FormatError::ChunkedReadError(
+                "expected chunked layout".into(),
+            ));
+        };
+        if index.address().is_none() {
+            return Ok(None);
+        }
+        let elem_size = crate::datatype::element_size_usize(spec.datatype())?;
+        let (rank, chunk_dims, ds_dims) = chunked_dims(chunk_dimensions, spec.dataspace())?;
+        #[cfg_attr(
+            not(feature = "std"),
+            expect(
+                unused_variables,
+                reason = "only the std-only chunk visitor reads the chunk length"
+            )
+        )]
+        let chunk_len = bounded_chunk_len(&chunk_dims, elem_size)?;
+        let chunks = collect_chunks_for_layout_from_source(
+            source,
+            index,
+            chunk_dimensions,
+            spec.dataspace(),
+            elem_size.get() as u64,
+            offset_size,
+            length_size,
+        )?;
+        let chunk_dims_u64 = chunk_dims.iter().map(|&d| d as u64).collect();
+        Ok(Some(Self {
+            flags,
+            rank,
+            chunk_dims,
+            ds_dims,
+            chunk_dims_u64,
+            elem_size,
+            #[cfg(feature = "std")]
+            chunk_len,
+            chunks,
+        }))
+    }
 }
 
 /// Put a dataset's chunks in address order, which is the order a coalescing
@@ -724,7 +800,7 @@ pub(crate) fn read_chunked_rows_from_source<S: Source + ?Sized>(
 
     let elem_size = crate::datatype::element_size_usize(datatype)?;
     let (rank, chunk_dims, ds_dims) = chunked_dims(chunk_dimensions, dataspace)?;
-    ensure_chunk_bytes_representable(&chunk_dims, elem_size)?;
+    bounded_chunk_len(&chunk_dims, elem_size)?;
 
     // A rank-0 (scalar) chunked layout has no leading dimension to window; fall
     // back to the whole-dataset reader, which handles rank 0. Only a crafted
@@ -999,7 +1075,7 @@ pub fn read_chunked_data_cached_from_source<S: Source + ?Sized>(
 
     let elem_size = crate::datatype::element_size_usize(datatype)?;
     let (rank, chunk_dims, ds_dims) = chunked_dims(chunk_dimensions, dataspace)?;
-    ensure_chunk_bytes_representable(&chunk_dims, elem_size)?;
+    bounded_chunk_len(&chunk_dims, elem_size)?;
 
     let mut chunks = if let Some(chunks) = cache.all_indexed_chunks() {
         chunks
@@ -1394,6 +1470,63 @@ pub(crate) fn enumerate_chunks_from_source<S: Source + ?Sized>(
     )
 }
 
+/// Reads and decodes each allocated chunk of a chunked dataset in address order, and calls
+/// `visit` with its bytes.
+///
+/// For a chunk that cannot be read or decoded, or that decodes to a length other than the size of
+/// a chunk, `visit` is called with the error in place of the bytes, and the next chunk follows if
+/// `visit` returns `Ok`. A dataset whose index address is undefined has no chunk to visit.
+///
+/// # Errors
+///
+/// Returns the errors of [`ChunkedPlan::new`], and the first error `visit` returns.
+#[cfg(feature = "std")]
+pub(crate) fn visit_decoded_chunks_from_source(
+    source: &(impl Source + ?Sized),
+    spec: RawReadSpec<'_>,
+    offset_size: u8,
+    length_size: u8,
+    mut visit: impl FnMut(Result<&[u8], &FormatError>) -> Result<(), FormatError>,
+) -> Result<(), FormatError> {
+    let Some(ChunkedPlan {
+        flags,
+        chunk_dims_u64,
+        chunk_len,
+        mut chunks,
+        ..
+    }) = ChunkedPlan::new(source, spec, offset_size, length_size)?
+    else {
+        return Ok(());
+    };
+    sort_chunks_by_address(&mut chunks);
+    let ctx = ChunkContext::from_datatype(&chunk_dims_u64, spec.datatype())?;
+    let mut scratch = FilterScratch::new();
+    for chunk in &chunks {
+        let decoded = read_decoded_chunk(
+            source,
+            &mut scratch,
+            flags,
+            &chunk_dims_u64,
+            &spec.dataspace().dimensions,
+            spec.pipeline(),
+            ctx,
+            chunk,
+        )
+        .and_then(|decoded| {
+            if decoded.len() == chunk_len {
+                Ok(decoded)
+            } else {
+                Err(FormatError::DataSizeMismatch {
+                    expected: chunk_len,
+                    actual: decoded.len(),
+                })
+            }
+        });
+        visit(decoded.as_deref())?;
+    }
+    Ok(())
+}
+
 /// A chunked dataset's chunks mapped onto a dense logical grid: every grid slot
 /// filled exactly once, ordered row-major (last dimension fastest) so the order
 /// matches [`split_into_chunks`](crate::chunked_write::split_into_chunks) and the
@@ -1756,7 +1889,7 @@ pub fn read_chunked_data_cached(
     let elem_width = datatype.element_size()?;
     let elem_size = elem_width.narrow::<NonZeroUsize>()?;
     let (rank, chunk_dims, ds_dims) = chunked_dims(chunk_dimensions, dataspace)?;
-    ensure_chunk_bytes_representable(&chunk_dims, elem_size)?;
+    bounded_chunk_len(&chunk_dims, elem_size)?;
     let ndims = rank + 1; // rank + the trailing element-size dimension
 
     let mut chunks = if let Some(chunks) = cache.all_indexed_chunks() {
@@ -2090,22 +2223,23 @@ mod tests {
     #[test]
     fn chunk_bytes_within_limit_are_accepted() {
         // A realistic chunk: 256 KiB of f64 elements.
-        assert!(ensure_chunk_bytes_representable(&[128, 256], nz(8)).is_ok());
+        assert_eq!(bounded_chunk_len(&[128, 256], nz(8)).unwrap(), 262_144);
         // A single chunk right at the 4 GiB limit is still representable.
-        assert!(ensure_chunk_bytes_representable(&[u32::MAX as usize], nz(1)).is_ok());
+        assert_eq!(
+            bounded_chunk_len(&[u32::MAX as usize], nz(1)).unwrap(),
+            u32::MAX as usize
+        );
     }
 
     #[test]
     fn chunk_bytes_over_limit_are_refused() {
         // The issue #185 shape: 10 elements of a ~2.86 GB fixed-length string
         // (0xAAAAAAAA bytes) is ~28.6 GB per chunk — impossible for the format.
-        let err = ensure_chunk_bytes_representable(&[10], nz(0xAAAA_AAAA)).unwrap_err();
+        let err = bounded_chunk_len(&[10], nz(0xAAAA_AAAA)).unwrap_err();
         assert!(matches!(err, FormatError::InvalidChunkGeometry(_)));
 
         // A geometry whose product overflows u64 is refused, not wrapped.
-        assert!(
-            ensure_chunk_bytes_representable(&[usize::MAX, usize::MAX], nz(usize::MAX)).is_err()
-        );
+        assert!(bounded_chunk_len(&[usize::MAX, usize::MAX], nz(usize::MAX)).is_err());
     }
 
     /// A chunk grid with a *hole* — some chunks allocated, others never — reads

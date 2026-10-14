@@ -34,12 +34,12 @@ use super::WriteEngine;
 /// The global heap collections that the objects reachable from the root group refer to.
 ///
 /// The editor follows the hard links of each group and reads the variable-length elements of
-/// each attribute, compact or contiguous dataset, and fill value, including the variable-length
-/// members of compound and array elements. The analysis is incomplete if it reaches a shared
-/// message, an attribute with a shared datatype or dataspace, a virtual dataset, a chunked dataset
-/// of variable-length elements, a datatype that holds a reference or a variable-length type nested
-/// in another variable-length type, a datatype too small for its variable-length members, a
-/// message of a type it does not recognize, or a traversal limit.
+/// each attribute, compact, contiguous, or chunked dataset, and fill value, including the
+/// variable-length members of compound and array elements. The analysis is incomplete if it
+/// reaches a shared message, an attribute with a shared datatype or dataspace, a virtual dataset,
+/// a chunk it cannot read or decode, a datatype that holds a reference or a variable-length type
+/// nested in another variable-length type, a datatype too small for its variable-length members,
+/// a message of a type it does not recognize, or a traversal limit.
 ///
 /// This type is outside the supported API.
 #[doc(hidden)]
@@ -149,15 +149,16 @@ impl WriteEngine {
     /// Adds the collections that a dataset's elements and fill value refer to.
     ///
     /// Returns `true` for an object without a data layout message, and `false` if the layout,
-    /// datatype, or dataspace message is shared or the layout is virtual. For a datatype that holds
-    /// a file address, it also returns `false` if the layout is chunked or [`HeapReferences::of`]
-    /// returns [`HeapReferences::Unsupported`] for the datatype.
+    /// datatype, dataspace, or filter pipeline message is shared or the layout is virtual. For a
+    /// datatype that holds a file address, it also returns `false` if [`HeapReferences::of`]
+    /// returns [`HeapReferences::Unsupported`] for the datatype, or if
+    /// [`collect_chunked_collections`](Self::collect_chunked_collections) returns `false`.
     ///
     /// # Errors
     ///
     /// Returns [`Error::MissingMessage`] if the object has a data layout message and lacks its
-    /// datatype or dataspace message, and [`Error::Format`] if a message or an element is
-    /// malformed.
+    /// datatype or dataspace message, and [`Error::Format`] if a message, the chunk index, or an
+    /// element is malformed.
     fn collect_dataset_collections(
         &self,
         messages: &[HeaderMessage],
@@ -177,6 +178,10 @@ impl WriteEngine {
         {
             return Ok(false);
         }
+        let pipeline = find(MessageType::FILTER_PIPELINE);
+        if pipeline.is_some_and(|m| m.flags.is_shared()) {
+            return Ok(false);
+        }
         let layout = DataLayout::parse(&layout.data, OFFSET_SIZE, LENGTH_SIZE)?;
         let (datatype, _) = hdf5_pure_format::__private::parse_datatype(&datatype.data)?;
         if matches!(layout, DataLayout::Virtual) {
@@ -189,8 +194,17 @@ impl WriteEngine {
         };
         self.collect_fill_value_collections(messages, &slots, referenced)?;
         let dataspace = Dataspace::parse(&dataspace.data, LENGTH_SIZE)?;
-        let spec = RawReadSpec::parse(&layout, &dataspace, &datatype, None, FillPattern::ZERO)?;
-        match spec.storage() {
+        let pipeline = pipeline
+            .map(|m| crate::filter_pipeline::parse_filter_pipeline(&m.data))
+            .transpose()?;
+        let spec = RawReadSpec::parse(
+            &layout,
+            &dataspace,
+            &datatype,
+            pipeline.as_ref(),
+            FillPattern::ZERO,
+        )?;
+        Ok(match spec.storage() {
             RawReadStorage::Compact { data } => {
                 self.collect_element_collections(
                     data,
@@ -198,17 +212,23 @@ impl WriteEngine {
                     &slots,
                     referenced,
                 )?;
+                true
             }
-            RawReadStorage::Contiguous { address } => self.collect_contiguous_collections(
-                address,
-                spec.byte_len_u64(),
-                &slots,
-                referenced,
-            )?,
-            RawReadStorage::ContiguousUnallocated => {}
-            RawReadStorage::Chunked { .. } | RawReadStorage::Virtual => return Ok(false),
-        }
-        Ok(true)
+            RawReadStorage::Contiguous { address } => {
+                self.collect_contiguous_collections(
+                    address,
+                    spec.byte_len_u64(),
+                    &slots,
+                    referenced,
+                )?;
+                true
+            }
+            RawReadStorage::ContiguousUnallocated => true,
+            RawReadStorage::Chunked { .. } => {
+                self.collect_chunked_collections(spec, &slots, referenced)?
+            }
+            RawReadStorage::Virtual => false,
+        })
     }
 
     fn collect_fill_value_collections(
@@ -261,6 +281,47 @@ impl WriteEngine {
             self.collect_element_collections(&bytes, read_len / element_size, slots, referenced)?;
         }
         Ok(())
+    }
+
+    /// Adds the collections that the elements of a chunked dataset refer to.
+    ///
+    /// The analysis reads every element of each allocated chunk, including the elements of an
+    /// edge chunk past the dataset's extent. Returns `false` if a chunk cannot be read, or cannot
+    /// be decoded to the size of a chunk.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`FormatError`] if the layout, the chunk index, or an element is malformed.
+    fn collect_chunked_collections(
+        &self,
+        spec: RawReadSpec<'_>,
+        slots: &ReferenceSlots,
+        referenced: &mut BTreeSet<u64>,
+    ) -> Result<bool, FormatError> {
+        let element_size = u64::from(slots.element_size.get());
+        let mut complete = true;
+        crate::chunked_read::visit_decoded_chunks_from_source(
+            &BaseOffsetSource {
+                inner: &self.image(),
+                base: self.addresses.effective_base(),
+            },
+            spec,
+            OFFSET_SIZE,
+            LENGTH_SIZE,
+            |chunk| {
+                let Ok(bytes) = chunk else {
+                    complete = false;
+                    return Ok(());
+                };
+                self.collect_element_collections(
+                    bytes,
+                    bytes.len() as u64 / element_size,
+                    slots,
+                    referenced,
+                )
+            },
+        )?;
+        Ok(complete)
     }
 
     /// Adds the collections that the attributes in an object's dense attribute storage refer to.

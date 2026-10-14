@@ -8,12 +8,16 @@ use hdf5_pure::File;
 use hdf5_pure::FileBuilder;
 use hdf5_pure::FillTime;
 use hdf5_pure::GlobalHeapLiveness;
+use hdf5_pure::MaxExtent;
 use hdf5_pure::ReferenceType;
+use hdf5_pure::StoredAddress;
 use hdf5_pure::StringPadding;
+use hdf5_pure_core::__private::StoredAddressExt;
 use hdf5_pure_format::__private as format;
 use rstest::rstest;
 use test_util::attribute;
 use test_util::attribute::Attribute;
+use test_util::btree_v1;
 use test_util::data_layout;
 use test_util::dataspace;
 use test_util::global_heap;
@@ -192,20 +196,23 @@ fn a_message_the_analysis_cannot_read_is_incomplete(#[case] message: Message) {
     assert_eq!(fixture.liveness(), incomplete());
 }
 
-#[test]
-fn a_dataset_with_a_shared_datatype_is_incomplete() {
+#[rstest]
+#[case::shared_datatype(vec![
+    Message::new(MessageType::DATATYPE, &shared_message()).with_flags(MessageFlags::SHARED),
+    Message::new(MessageType::DATASPACE, &dataspace::scalar()),
+])]
+#[case::shared_filter_pipeline(vec![
+    Message::new(MessageType::DATATYPE, &format::serialize_datatype(&vlen_string())),
+    Message::new(MessageType::DATASPACE, &dataspace::scalar()),
+    Message::new(MessageType::FILTER_PIPELINE, &shared_message()).with_flags(MessageFlags::SHARED),
+])]
+fn a_dataset_with_a_shared_message_is_incomplete(#[case] mut messages: Vec<Message>) {
     let mut fixture = Fixture::new();
-    fixture.object(
-        "d",
-        vec![
-            Message::new(MessageType::DATATYPE, &shared_message()).with_flags(MessageFlags::SHARED),
-            Message::new(MessageType::DATASPACE, &dataspace::scalar()),
-            Message::new(
-                MessageType::DATA_LAYOUT,
-                &data_layout::contiguous(UNDEFINED_ADDRESS, 0),
-            ),
-        ],
-    );
+    messages.push(Message::new(
+        MessageType::DATA_LAYOUT,
+        &data_layout::contiguous(UNDEFINED_ADDRESS, 0),
+    ));
+    fixture.object("d", messages);
 
     assert_eq!(fixture.liveness(), incomplete());
 }
@@ -223,19 +230,110 @@ fn every_batch_of_a_contiguous_dataset_is_read() {
     assert_eq!(fixture.liveness(), complete([first, last]));
 }
 
-#[test]
-fn a_chunked_variable_length_dataset_is_incomplete() {
-    let path = temp::temp_path("liveness_chunked.h5");
-    let mut builder = FileBuilder::new();
-    builder
-        .create_dataset("d")
-        .with_vlen_strings(&["alpha", "beta", "gamma"])
-        .with_chunks(&[2]);
-    builder.write(&path).unwrap();
-    let file = File::open_rw(&path).unwrap();
+#[rstest]
+#[case::corrupt_deflate_stream(DEFLATE_FILTER, 32)]
+#[case::filter_without_a_decoder(UNKNOWN_FILTER, 32)]
+// The filtered size runs past the end of the file.
+#[case::unreadable_chunk(DEFLATE_FILTER, 1 << 20)]
+fn a_chunk_that_cannot_be_read_or_decoded_is_incomplete(
+    #[case] filter_id: u16,
+    #[case] filtered_size: u64,
+) {
+    let mut fixture = Fixture::new();
+    let stored = [0xff; 32];
+    let chunk = fixture.image.append(&stored) as u64;
+    let pipeline = format::FilterPipeline {
+        version: FILTER_PIPELINE_VERSION,
+        filters: vec![format::FilterDescription {
+            filter_id,
+            name: None,
+            flags: 0,
+            client_data: vec![6],
+        }],
+    };
+    let layout = format::DataLayout::encode_chunked(
+        &[2],
+        REFERENCE_SIZE as u32,
+        format::ChunkIndexInfo::SingleChunk {
+            filtered: Some(format::FilteredSingleChunk {
+                filtered_size,
+                filter_mask: 0,
+            }),
+        },
+        StoredAddress::new(chunk),
+        format::OffsetWidth::Eight,
+        format::LengthWidth::Eight,
+    )
+    .unwrap();
+    let space = dataspace::v2(
+        1,
+        dataspace::Flags::NONE,
+        dataspace::Kind::SIMPLE,
+        &[2],
+        None,
+    );
+    let mut messages = dataset_messages(&vlen_string(), &space);
+    messages.push(Message::new(
+        MessageType::FILTER_PIPELINE,
+        &pipeline.serialize().unwrap(),
+    ));
+    messages.push(Message::new(MessageType::DATA_LAYOUT, &layout));
+    fixture.object("d", messages);
 
-    assert_eq!(file.__global_heap_liveness().unwrap(), incomplete());
-    file.close().unwrap();
+    assert_eq!(fixture.liveness(), incomplete());
+}
+
+#[test]
+fn an_unallocated_chunked_dataset_refers_to_no_collection() {
+    let mut fixture = Fixture::new();
+    let space = dataspace::v2(
+        1,
+        dataspace::Flags::NONE,
+        dataspace::Kind::SIMPLE,
+        &[2],
+        None,
+    );
+    let mut messages = dataset_messages(&vlen_string(), &space);
+    messages.push(Message::new(
+        MessageType::DATA_LAYOUT,
+        &data_layout::chunked(UNDEFINED_ADDRESS, &[2], REFERENCE_SIZE as u32),
+    ));
+    fixture.object("d", messages);
+
+    assert_eq!(fixture.liveness(), complete([]));
+}
+
+#[test]
+fn an_unfiltered_chunk_of_the_wrong_length_is_incomplete() {
+    let mut fixture = Fixture::new();
+    // One element, where a chunk of two holds 32 bytes.
+    let stored = [0; REFERENCE_SIZE];
+    let chunk = fixture.image.append(&stored) as u64;
+    let index = fixture.image.append(&btree_v1::node(
+        btree_v1::NodeType::CHUNK,
+        0,
+        &[
+            btree_v1::chunk_key(stored.len() as u32, 0, &[0, 0]),
+            btree_v1::chunk_key(0, 0, &[2, 0]),
+        ],
+        &[chunk],
+        Widths::EIGHT,
+    )) as u64;
+    let space = dataspace::v2(
+        1,
+        dataspace::Flags::NONE,
+        dataspace::Kind::SIMPLE,
+        &[2],
+        None,
+    );
+    let mut messages = dataset_messages(&vlen_string(), &space);
+    messages.push(Message::new(
+        MessageType::DATA_LAYOUT,
+        &data_layout::chunked(index, &[2], REFERENCE_SIZE as u32),
+    ));
+    fixture.object("d", messages);
+
+    assert_eq!(fixture.liveness(), incomplete());
 }
 
 #[rstest]
@@ -243,6 +341,10 @@ fn a_chunked_variable_length_dataset_is_incomplete() {
 #[case::compact_attribute(Written::Attributes(0))]
 // The writer stores the attributes of an object with more than 8 in dense storage.
 #[case::dense_attribute(Written::Attributes(12))]
+#[case::chunked_dataset(Written::Chunked { filtered: false, extendable: false })]
+#[case::filtered_chunked_dataset(Written::Chunked { filtered: true, extendable: false })]
+#[case::extendable_chunked_dataset(Written::Chunked { filtered: false, extendable: true })]
+#[case::filtered_extendable_chunked_dataset(Written::Chunked { filtered: true, extendable: true })]
 #[case::no_variable_length_data(Written::Integers)]
 fn a_written_file_refers_to_every_collection_it_holds(
     #[case] written: Written,
@@ -333,7 +435,11 @@ impl Element {
 #[derive(Clone, Copy, Debug)]
 enum Written {
     /// A variable-length attribute and this many integer attributes beside it.
-    Attributes(usize),
+    Attributes(u8),
+    Chunked {
+        filtered: bool,
+        extendable: bool,
+    },
     Dataset,
     Integers,
 }
@@ -350,6 +456,21 @@ impl Written {
                 );
                 for index in 0..others {
                     builder.set_attr(&format!("a{index}"), AttrValue::I64(1));
+                }
+            }
+            Self::Chunked {
+                filtered,
+                extendable,
+            } => {
+                let dataset = builder
+                    .create_dataset("d")
+                    .with_vlen_strings(&["alpha", "", "beta"])
+                    .with_chunks(&[2]);
+                if filtered {
+                    dataset.with_deflate(6);
+                }
+                if extendable {
+                    dataset.with_maxshape(&[MaxExtent::Unlimited]);
                 }
             }
             Self::Dataset => {
@@ -505,6 +626,9 @@ fn vlen_sequence() -> Datatype {
 }
 
 const REFERENCE_SIZE: usize = 16;
+const FILTER_PIPELINE_VERSION: u8 = 2;
+const DEFLATE_FILTER: u16 = 1;
+const UNKNOWN_FILTER: u16 = 0x7fff;
 /// One element more than the editor reads from a contiguous dataset at a time.
 const ELEMENTS_PAST_A_BATCH: usize = 4097;
 const UNDEFINED_ADDRESS: u64 = u64::MAX;
