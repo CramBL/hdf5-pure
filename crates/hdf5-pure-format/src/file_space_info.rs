@@ -16,7 +16,6 @@ pub(crate) use hdf5_pure_core::FileSpacePageSize;
 pub(crate) use hdf5_pure_core::FileSpaceStrategy;
 
 use crate::address::StoredAddress;
-use crate::address::StoredAddressExt;
 use crate::bytes;
 use crate::error::FormatError;
 use crate::width::FormatWidths;
@@ -109,7 +108,7 @@ fn parse_version_0(
     let mut fields = bytes::Fields::new(data, 1);
     let strategy_code = fields.u8()?;
     let threshold = fields.length(lengths)?;
-    let undefined = StoredAddress::undefined(offsets.get()).get();
+    let undefined = StoredAddress::undefined(offsets).get();
     let defaults = FileSpaceInfoFields {
         strategy: FileSpaceStrategy::FsmAggr,
         persist: false,
@@ -260,6 +259,7 @@ mod tests {
     use crate::address::BaseAddressExt;
     use crate::address::StoredAddress;
     use crate::address::StoredAddressExt;
+    use crate::width::OffsetWidth;
 
     #[test]
     fn parses_persistent_manager_addresses() {
@@ -500,7 +500,7 @@ mod tests {
         #[values(2, 4, 8)] offset_size: u8,
         #[values(2, 4, 8)] length_size: u8,
     ) {
-        let undefined = StoredAddress::undefined(offset_size).get();
+        let undefined = StoredAddress::undefined(OffsetWidth::try_from(offset_size).unwrap()).get();
         let info = FileSpaceInfoFields {
             strategy: FileSpaceStrategy::Page,
             persist: true,

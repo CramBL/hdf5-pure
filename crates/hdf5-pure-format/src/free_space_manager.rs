@@ -29,10 +29,10 @@ use crate::convert::Narrow;
 use crate::error::FormatError;
 use crate::fractal_heap::FractalHeapHeader;
 use crate::fractal_heap_free_space::FractalHeapFreeSpaceManager;
+use crate::width;
 use crate::width::FormatWidths;
 use crate::width::LengthWidth;
 use crate::width::OffsetWidth;
-use crate::width::OffsetWidthExt;
 
 const FSHD_SIGNATURE: &[u8; 4] = b"FSHD";
 const FSSE_SIGNATURE: &[u8; 4] = b"FSSE";
@@ -219,7 +219,7 @@ impl FreeSpaceManagerHeaderFrame {
             ))
         })?;
         let max_section_size = fields.length(lengths)?;
-        let section_list_addr = offsets.decode_address(block, fields.pos())?;
+        let section_list_addr = crate::width::decode_stored_address(offsets, block, fields.pos())?;
         fields.address(offsets)?;
         let section_list_used = fields.length(lengths)?;
         let section_list_allocated = fields.length(lengths)?;
@@ -300,7 +300,7 @@ impl FreeSpaceManagerHeaderFrame {
             max_section_size,
             section_list_addr: match section_list_addr {
                 DecodedStoredAddress::Defined(addr) => addr,
-                DecodedStoredAddress::Undefined => StoredAddress::undefined(offsets.get()),
+                DecodedStoredAddress::Undefined => StoredAddress::undefined(offsets),
             },
             section_list_used,
             section_list_allocated,
@@ -440,13 +440,13 @@ impl FreeSpaceManagerHeaderFrame {
                 "the header stores no section list address".into(),
             ));
         }
-        if header_addr.get() > StoredAddress::undefined(self.widths.offsets.get()).get() {
+        if header_addr.get() > StoredAddress::undefined(self.widths.offsets).get() {
             return Err(FormatError::AddressTooLarge {
                 address: header_addr.get(),
                 offset_size: self.widths.offsets.get(),
             });
         }
-        if header_addr.is_undefined(self.widths.offsets.get()) {
+        if header_addr.is_undefined(self.widths.offsets) {
             return Err(FormatError::InvalidFreeSpaceManager(
                 "the section list's expected header address is undefined".into(),
             ));
@@ -766,7 +766,9 @@ impl FreeSpaceManagerHeader {
     ///
     /// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsec_fmt4_infra_freespaceindex
     fn section_size_width(&self, lengths: LengthWidth, offset: usize) -> usize {
-        if lengths != LengthWidth::Eight && self.max_section_size >= lengths.max() - 1 {
+        if lengths != LengthWidth::Eight
+            && self.max_section_size >= width::length_width_max(lengths) - 1
+        {
             offset
         } else {
             enc_size(self.max_section_size)
@@ -965,7 +967,7 @@ pub fn serialize_free_space_manager_with_allocation(
              {section_list_allocated} bytes allocated to it"
         )));
     }
-    if !widths.lengths.holds(section_list_allocated) {
+    if !width::length_width_holds(widths.lengths, section_list_allocated) {
         return Err(FormatError::LengthTooLarge {
             length: section_list_allocated,
             length_size: widths.lengths.get(),
@@ -1244,8 +1246,12 @@ impl SectionFields {
 /// truncated addresses [`FreeSpaceManagerHeader::section_size_width`] reads as libhdf5's.
 fn written_max_section_size(lengths: LengthWidth) -> NonZeroU64 {
     match lengths {
-        LengthWidth::Two => const { NonZeroU64::new(LengthWidth::Two.max() - 2).unwrap() },
-        LengthWidth::Four => const { NonZeroU64::new(LengthWidth::Four.max() - 2).unwrap() },
+        LengthWidth::Two => {
+            const { NonZeroU64::new(width::length_width_max(LengthWidth::Two) - 2).unwrap() }
+        }
+        LengthWidth::Four => {
+            const { NonZeroU64::new(width::length_width_max(LengthWidth::Four) - 2).unwrap() }
+        }
         LengthWidth::Eight => const { NonZeroU64::new(FILE_FSM_MAX_SECTION_SIZE).unwrap() },
     }
 }
@@ -1325,9 +1331,9 @@ fn parse_section_list_prefix(
             "the section list version is {version}, not {FSSE_VERSION}"
         )));
     }
-    let owner_addr = match offsets.decode_address(list, fields.pos())? {
+    let owner_addr = match crate::width::decode_stored_address(offsets, list, fields.pos())? {
         DecodedStoredAddress::Defined(addr) => addr,
-        DecodedStoredAddress::Undefined => StoredAddress::undefined(offsets.get()),
+        DecodedStoredAddress::Undefined => StoredAddress::undefined(offsets),
     };
     if owner_addr != header_addr {
         return Err(FormatError::InvalidFreeSpaceManager(format!(
@@ -1492,7 +1498,7 @@ mod tests {
         let max_section_size = if widths.lengths == LengthWidth::Eight {
             FILE_FSM_MAX_SECTION_SIZE
         } else {
-            widths.lengths.max()
+            width::length_width_max(widths.lengths)
         };
         assert_eq!(
             frame.file_header().unwrap(),
@@ -1551,7 +1557,7 @@ mod tests {
             widths,
             &[],
             StoredAddress::new(32),
-            StoredAddress::undefined(widths.offsets.get()),
+            StoredAddress::undefined(widths.offsets),
             SECTION_CLASS_SIMPLE,
         )
         .unwrap();
@@ -1559,7 +1565,7 @@ mod tests {
         assert_eq!(frame.section_list_addr(), DecodedStoredAddress::Undefined);
         assert_eq!(
             frame.file_header().unwrap().section_list_addr(),
-            StoredAddress::undefined(widths.offsets.get())
+            StoredAddress::undefined(widths.offsets)
         );
         assert_eq!(
             frame
@@ -2025,7 +2031,7 @@ mod tests {
                 total_space: 1600,
                 total_sections: 1,
                 addr_space_bits: AddressSpaceBits(63),
-                max_section_size: widths.lengths.max(),
+                max_section_size: width::length_width_max(widths.lengths),
                 section_list_addr: StoredAddress::new(section_list_addr),
                 section_list_used,
                 section_list_allocated: section_list_used,

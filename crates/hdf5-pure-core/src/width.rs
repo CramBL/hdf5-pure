@@ -42,26 +42,6 @@ impl OffsetWidth {
             Self::Eight => 8,
         }
     }
-
-    /// Returns `true` if an address field of this width can store `address`.
-    ///
-    /// `u64::MAX` fits every width, as the undefined address, which a writer writes as all ones.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use hdf5_pure_core::OffsetWidth;
-    ///
-    /// assert!(OffsetWidth::Two.holds(0xFFFF));
-    /// assert!(!OffsetWidth::Two.holds(0x1_0000));
-    /// assert!(OffsetWidth::Two.holds(u64::MAX));
-    /// ```
-    pub fn holds(self, address: u64) -> bool {
-        address == u64::MAX
-            || address
-                .checked_shr(8 * u32::from(self.get()))
-                .is_none_or(|high| high == 0)
-    }
 }
 
 impl TryFrom<u8> for OffsetWidth {
@@ -111,37 +91,6 @@ impl LengthWidth {
             Self::Four => 4,
             Self::Eight => 8,
         }
-    }
-
-    /// Returns the largest length a field of this width can store.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use hdf5_pure_core::LengthWidth;
-    ///
-    /// assert_eq!(LengthWidth::Two.max(), 0xFFFF);
-    /// assert_eq!(LengthWidth::Four.max(), 0xFFFF_FFFF);
-    /// assert_eq!(LengthWidth::Eight.max(), u64::MAX);
-    /// ```
-    pub const fn max(self) -> u64 {
-        u64::MAX >> (64 - 8 * self.get())
-    }
-
-    /// Returns `true` if a length field of this width can store `length`.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use hdf5_pure_core::LengthWidth;
-    ///
-    /// assert!(LengthWidth::Two.holds(0xFFFF));
-    /// assert!(!LengthWidth::Two.holds(0x1_0000));
-    /// ```
-    pub fn holds(self, length: u64) -> bool {
-        length
-            .checked_shr(8 * u32::from(self.get()))
-            .is_none_or(|high| high == 0)
     }
 }
 

@@ -563,7 +563,7 @@ impl Located {
         let sblk_addr = match region.parent {
             Parent::Super { sblk_j, .. } => {
                 let a = self.super_block_addr(file, sblk_j)?;
-                if a.is_undefined(file.offset_size()) {
+                if a.is_undefined(self.offset_width) {
                     return Ok(None);
                 }
                 Some(a)
@@ -572,7 +572,7 @@ impl Located {
         };
         let dblk_ptr_off = self.dblk_ptr_off(sblk_addr, &region, os, blk_off)?;
         let dblk_addr = file.read_addr_at(dblk_ptr_off)?;
-        if dblk_addr.is_undefined(file.offset_size()) {
+        if dblk_addr.is_undefined(self.offset_width) {
             return Ok(None);
         }
 
@@ -630,7 +630,7 @@ impl Located {
             None => Ok(None),
             Some(off) => {
                 let rec = self.read_element_at(file, off)?;
-                if rec.addr.is_undefined(file.offset_size()) {
+                if rec.addr.is_undefined(self.offset_width) {
                     Ok(None)
                 } else {
                     Ok(Some(rec))
@@ -691,7 +691,7 @@ impl Located {
         // in-place element update reuse the existing block instead of leaking it.
         let dblk_ptr_off = self.dblk_ptr_off(sblk_addr, &region, os, blk_off)?;
         let existing = file.read_addr_at(dblk_ptr_off)?;
-        let dblk_addr = if existing.is_undefined(file.offset_size()) {
+        let dblk_addr = if existing.is_undefined(self.offset_width) {
             let new_addr = self.alloc_undef_data_block(file, dblk_nelmts, block_offset_rel)?;
             #[cfg(test)]
             alloc_probe::note_data_block();
@@ -779,7 +779,7 @@ impl Located {
         sb: SuperBlockGeometry,
     ) -> Result<StoredAddress, Error> {
         let existing = self.super_block_addr(file, sblk_j)?;
-        if !existing.is_undefined(file.offset_size()) {
+        if !existing.is_undefined(self.offset_width) {
             return Ok(existing);
         }
         let os = file.offset_size() as usize;
@@ -787,7 +787,7 @@ impl Located {
         let ndblk_addrs = self.geom.direct_dblk_nelmts().len();
 
         let bitmap = vec![0u8; sb.bitmap_size().to_usize()?];
-        let undef = vec![StoredAddress::undefined(file.offset_size()); sb.ndblks.to_usize()?];
+        let undef = vec![StoredAddress::undefined(self.offset_width); sb.ndblks.to_usize()?];
         let super_block = hdf5_pure_format::__private::encode_super_block(
             self.ea_addr,
             sb_block_offset,

@@ -11,7 +11,6 @@ pub(crate) use hdf5_pure_format::__private::DEFAULT_THRESHOLD;
 pub(crate) use hdf5_pure_format::__private::NUM_FILE_FSM_MANAGERS;
 
 use crate::address::StoredAddress;
-use crate::address::StoredAddressExt;
 use crate::width::OffsetWidth;
 
 /// The settings of the free-space managers of a strategy that has them.
@@ -59,7 +58,7 @@ pub(crate) fn non_persistent(
         threshold,
         page_size,
         page_end_meta_threshold: 0,
-        eoa_pre_fsm: StoredAddress::undefined(offsets.get()).get(),
+        eoa_pre_fsm: StoredAddress::undefined(offsets).get(),
         manager_addrs: Vec::new(),
     }
     .build()
@@ -82,7 +81,7 @@ pub(crate) fn persistent_empty(
     page_size: FileSpacePageSize,
     eoa_pre_fsm: u64,
 ) -> FileSpaceInfo {
-    let undefined = StoredAddress::undefined(offsets.get()).get();
+    let undefined = StoredAddress::undefined(offsets).get();
     FileSpaceInfoFields {
         strategy,
         persist: true,
@@ -109,8 +108,7 @@ pub(crate) fn persistent_single_manager(
     manager0_addr: u64,
     eoa_pre_fsm: u64,
 ) -> FileSpaceInfo {
-    let mut manager_addrs =
-        vec![StoredAddress::undefined(offsets.get()).get(); NUM_FILE_FSM_MANAGERS];
+    let mut manager_addrs = vec![StoredAddress::undefined(offsets).get(); NUM_FILE_FSM_MANAGERS];
     manager_addrs[0] = manager0_addr;
     FileSpaceInfoFields {
         strategy,
@@ -156,6 +154,7 @@ mod tests {
     use rstest::rstest;
 
     use super::*;
+    use crate::address::StoredAddressExt;
     use crate::file_writer::WIDTHS;
 
     #[rstest]

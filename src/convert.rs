@@ -1,5 +1,4 @@
 pub use hdf5_pure_format::__private::Narrow;
-pub use hdf5_pure_format::__private::is_undefined_addr;
 pub use hdf5_pure_format::__private::slice_range;
 
 #[cfg(test)]

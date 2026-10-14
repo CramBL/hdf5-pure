@@ -17,6 +17,7 @@ use hdf5_pure::File;
 use hdf5_pure::FormatError;
 use hdf5_pure::MessageType;
 use hdf5_pure_core::__private::StoredAddressExt;
+use hdf5_pure_core::OffsetWidth;
 use hdf5_pure_core::StoredAddress;
 use hdf5_pure_format::__private::AccessMode;
 use hdf5_pure_format::__private::AttributeInfoMessage;
@@ -764,7 +765,7 @@ fn owned_heap_allocations(
         assert_eq!(
             heap.header
                 .managed_block_free_space_manager_address
-                .is_undefined(8),
+                .is_undefined(OffsetWidth::Eight),
             !managed_fsm
         );
         if !managed_fsm {
@@ -783,7 +784,7 @@ fn free_space_manager_blocks(path: &Path) -> Vec<(u64, u64)> {
         .unwrap()
         .manager_addrs
         .iter()
-        .filter(|&&addr| !hdf5_pure_format::__private::is_undefined_addr(addr, 8))
+        .filter(|&&addr| !StoredAddress::new(addr).is_undefined(OffsetWidth::Eight))
         .flat_map(|&addr| {
             let header =
                 FreeSpaceManagerHeader::parse(widths, &bytes[usize::try_from(addr).unwrap()..])
@@ -792,7 +793,7 @@ fn free_space_manager_blocks(path: &Path) -> Vec<(u64, u64)> {
                 addr,
                 hdf5_pure_format::__private::free_space_manager_header_len(widths),
             )];
-            if !header.section_list_addr().is_undefined(8) {
+            if !header.section_list_addr().is_undefined(OffsetWidth::Eight) {
                 blocks.push((
                     header.section_list_addr().get(),
                     header.section_list_allocated(),
@@ -845,12 +846,12 @@ fn manager_sections(path: &Path, manager: usize) -> Vec<(u64, u64)> {
         .file_space_info()
         .unwrap()
         .manager_addrs[manager];
-    if hdf5_pure_format::__private::is_undefined_addr(addr, 8) {
+    if StoredAddress::new(addr).is_undefined(OffsetWidth::Eight) {
         return Vec::new();
     }
     let header =
         FreeSpaceManagerHeader::parse(widths, &bytes[usize::try_from(addr).unwrap()..]).unwrap();
-    if header.section_list_addr().is_undefined(8) {
+    if header.section_list_addr().is_undefined(OffsetWidth::Eight) {
         return Vec::new();
     }
     let at = usize::try_from(header.section_list_addr().get()).unwrap();

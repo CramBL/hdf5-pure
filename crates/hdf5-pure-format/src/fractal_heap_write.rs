@@ -507,7 +507,7 @@ impl AttributeHeapPlan {
                     }
                     None => bytes::write_offset(
                         &mut bytes,
-                        StoredAddress::undefined(self.offset_width.get()).get(),
+                        StoredAddress::undefined(self.offset_width).get(),
                         self.offset_width,
                     ),
                 }

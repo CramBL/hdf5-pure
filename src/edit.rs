@@ -2690,7 +2690,7 @@ impl WriteEngine {
             .manager_addrs
             .iter()
             .enumerate()
-            .filter(|&(_, &m)| !StoredAddress::new(m).is_undefined(os))
+            .filter(|&(_, &m)| !StoredAddress::new(m).is_undefined(widths.offsets))
             .map(|(slot, &m)| {
                 let read = free_space_manager::read_persisted_sections_source(
                     &self.image(),
@@ -2842,7 +2842,8 @@ impl WriteEngine {
         let Some(ext_rel) = superblock.superblock_extension_address else {
             return Ok(None);
         };
-        if ext_rel.is_undefined(os) {
+        let offset_width = OffsetWidth::try_from(os)?;
+        if ext_rel.is_undefined(offset_width) {
             return Ok(None);
         }
         // The header is read at the extension's absolute file offset, which is the stored
@@ -3430,8 +3431,9 @@ impl WriteEngine {
     /// superblock extension at all, and nothing on one that does not.
     fn shared_message_table(&self) -> Result<Option<crate::sohm::SohmTable>, Error> {
         let os = self.superblock.offset_size;
+        let offset_width = OffsetWidth::try_from(os)?;
         let rel = match self.superblock.superblock_extension_address {
-            Some(rel) if !rel.is_undefined(os) => rel,
+            Some(rel) if !rel.is_undefined(offset_width) => rel,
             _ => return Ok(None),
         };
         let base = self.addresses;
@@ -6776,7 +6778,7 @@ impl WriteEngine {
         let old_ext_addr = base.absolute(
             self.superblock
                 .superblock_extension_address
-                .filter(|a| !a.is_undefined(os))
+                .filter(|a| !a.is_undefined(offset_width))
                 .ok_or(Error::EditUnsupported(
                     "a persisting file has no superblock extension to update",
                 ))?,
@@ -7191,7 +7193,7 @@ impl WriteEngine {
         let old_ext_addr = base.absolute(
             self.superblock
                 .superblock_extension_address
-                .filter(|a| !a.is_undefined(os))
+                .filter(|a| !a.is_undefined(offset_width))
                 .ok_or(Error::EditUnsupported(
                     "a persisting file has no superblock extension to update",
                 ))?,
@@ -8071,7 +8073,7 @@ impl WriteEngine {
                 // failed attempt leaves the region genuinely dead and re-offering
                 // it is sound — which is the invariant `restore_free` states.
                 if fd.vl_string_staging.is_none()
-                    && !data_addr.is_undefined(OFFSET_SIZE)
+                    && !data_addr.is_undefined(OFFSET_WIDTH)
                     && data_size == fd.raw.len() as u64
                 {
                     if let Ok(start) = base.absolute(data_addr) {
@@ -8088,7 +8090,7 @@ impl WriteEngine {
                 // data goes elsewhere and the old extent (if any) is freed. The
                 // freed extent is recorded as an absolute file offset, which is the
                 // frame the session free list uses.
-                let old_extent = if !data_addr.is_undefined(OFFSET_SIZE) && data_size > 0 {
+                let old_extent = if !data_addr.is_undefined(OFFSET_WIDTH) && data_size > 0 {
                     Some((base.absolute(data_addr)?, data_size))
                 } else {
                     None
@@ -8857,7 +8859,7 @@ impl WriteEngine {
                 // Only reached once external storage is out of the way: it uses
                 // this same undefined address for a dataset that *does* hold
                 // data, and `read_object` refuses it by name above.
-                let data = if data_addr.is_undefined(OFFSET_SIZE) {
+                let data = if data_addr.is_undefined(OFFSET_WIDTH) {
                     None
                 } else {
                     // The data block is read at its absolute offset into `src`.
@@ -18800,7 +18802,7 @@ mod tests {
             BaseAddress::new(UB),
             "userblock file must have base == UB"
         );
-        sb.root_group_address = StoredAddress::UNDEFINED_64;
+        sb.root_group_address = StoredAddress::undefined(OffsetWidth::Eight);
         let bytes = hdf5_pure_format::__private::serialize_superblock(&sb).unwrap();
         data[off..off + bytes.len()].copy_from_slice(&bytes);
         std::fs::write(&path, &data).unwrap();
@@ -18808,7 +18810,7 @@ mod tests {
         let session = WriteEngine::open_with_locking(&path, FileLocking::Enabled).unwrap();
         assert_eq!(
             session.superblock.root_group_address,
-            StoredAddress::UNDEFINED_64
+            StoredAddress::undefined(OffsetWidth::Eight)
         );
         let err = crate::group_v2::resolve_path_any_from_source(
             session.image(),

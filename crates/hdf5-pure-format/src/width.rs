@@ -21,6 +21,8 @@ use alloc::vec::Vec;
 
 use hdf5_pure_core::__private::DecodedStoredAddress;
 use hdf5_pure_core::__private::StoredAddressExt;
+pub use hdf5_pure_core::LengthWidth;
+pub use hdf5_pure_core::OffsetWidth;
 use hdf5_pure_core::StoredAddress;
 
 use crate::bytes;
@@ -49,22 +51,34 @@ impl FormatWidths {
     }
 }
 
-pub use hdf5_pure_core::LengthWidth;
-pub use hdf5_pure_core::OffsetWidth;
-
-pub trait OffsetWidthExt {
-    fn decode_address(self, data: &[u8], pos: usize) -> Result<DecodedStoredAddress, FormatError>;
+pub(crate) fn offset_width_holds(width: OffsetWidth, address: u64) -> bool {
+    address == u64::MAX
+        || address
+            .checked_shr(8 * u32::from(width.get()))
+            .is_none_or(|high| high == 0)
 }
 
-impl OffsetWidthExt for OffsetWidth {
-    fn decode_address(self, data: &[u8], pos: usize) -> Result<DecodedStoredAddress, FormatError> {
-        let stored = StoredAddress::new(bytes::read_offset_width(data, pos, self)?);
-        Ok(if stored.is_undefined(self.get()) {
-            DecodedStoredAddress::Undefined
-        } else {
-            DecodedStoredAddress::Defined(stored)
-        })
-    }
+pub(crate) fn length_width_holds(width: LengthWidth, length: u64) -> bool {
+    length
+        .checked_shr(8 * u32::from(width.get()))
+        .is_none_or(|high| high == 0)
+}
+
+pub(crate) const fn length_width_max(width: LengthWidth) -> u64 {
+    u64::MAX >> (64 - 8 * width.get())
+}
+
+pub(crate) fn decode_stored_address(
+    width: OffsetWidth,
+    data: &[u8],
+    pos: usize,
+) -> Result<DecodedStoredAddress, FormatError> {
+    let stored = StoredAddress::new(bytes::read_offset_width(data, pos, width)?);
+    Ok(if stored.is_undefined(width) {
+        DecodedStoredAddress::Undefined
+    } else {
+        DecodedStoredAddress::Defined(stored)
+    })
 }
 
 /// The width in bytes of an unsigned integer that two bits of a flag byte select: 1, 2, 4, or 8.
@@ -172,7 +186,7 @@ mod tests {
         #[case] bytes: &[u8],
     ) {
         assert_eq!(
-            width.decode_address(bytes, 0).unwrap(),
+            decode_stored_address(width, bytes, 0).unwrap(),
             DecodedStoredAddress::Undefined
         );
     }
@@ -192,7 +206,7 @@ mod tests {
         #[case] expected: u64,
     ) {
         assert_eq!(
-            width.decode_address(bytes, pos).unwrap(),
+            decode_stored_address(width, bytes, pos).unwrap(),
             DecodedStoredAddress::Defined(StoredAddress::new(expected))
         );
     }
@@ -210,7 +224,7 @@ mod tests {
         #[case] expected: usize,
     ) {
         assert_eq!(
-            width.decode_address(bytes, pos).unwrap_err(),
+            decode_stored_address(width, bytes, pos).unwrap_err(),
             FormatError::UnexpectedEof {
                 expected,
                 available: bytes.len()

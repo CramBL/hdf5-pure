@@ -17,6 +17,7 @@ use hdf5_pure_core::__private::PhysicalAddress;
 
 use crate::bytes;
 use crate::error::FormatError;
+use crate::width;
 use crate::width::LengthWidth;
 
 /// The position of a global heap collection and the width of its length fields.
@@ -504,7 +505,7 @@ pub fn encode_global_heap_collection(
         .max(MIN_COLLECTION_SIZE)
         .next_multiple_of(ALIGNMENT);
     // Every length the collection stores is at most its own size.
-    if !length_width.holds(padded_collection as u64) {
+    if !width::length_width_holds(length_width, padded_collection as u64) {
         return Err(GlobalHeapCollectionError::TooLarge {
             size: padded_collection,
             length_width,

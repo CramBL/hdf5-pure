@@ -10,6 +10,7 @@
 //! [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsec_fmt4_boot_super
 
 use crate::error::FormatError;
+use crate::width::OffsetWidth;
 
 /// A byte position in a physical source.
 ///
@@ -159,31 +160,84 @@ impl BaseAddressExt for BaseAddress {
 pub struct StoredAddress(u64);
 
 impl StoredAddress {
+    /// Returns the undefined address of a file whose addresses are `offset_width` bytes wide.
+    ///
+    /// The undefined address has every bit of the address field set, so the width fixes which
+    /// value it is: `0xFFFF` is undefined in a file with 2-byte addresses and an ordinary
+    /// address in a file with 8-byte ones. Metadata stores it in an address field whose structure
+    /// has no storage allocated, such as the section-info address of a free-space manager that
+    /// tracks nothing.
+    ///
+    /// The undefined address is defined in "Appendix A: Definitions" of the [format
+    /// specification, version 4.0][spec].
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use hdf5_pure_core::OffsetWidth;
+    /// use hdf5_pure_core::StoredAddress;
+    ///
+    /// let addr = StoredAddress::undefined(OffsetWidth::Two);
+    /// assert_eq!(addr.get(), 0xFFFF);
+    /// assert!(addr.is_undefined(OffsetWidth::Two));
+    /// ```
+    ///
+    /// ```compile_fail
+    /// use hdf5_pure_core::LengthWidth;
+    /// use hdf5_pure_core::StoredAddress;
+    ///
+    /// let _ = StoredAddress::undefined(LengthWidth::Two);
+    /// ```
+    ///
+    /// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#sec_fmt4_appendixa
+    pub const fn undefined(offset_width: OffsetWidth) -> Self {
+        Self(match offset_width {
+            OffsetWidth::Two => 0xFFFF,
+            OffsetWidth::Four => 0xFFFF_FFFF,
+            OffsetWidth::Eight => u64::MAX,
+        })
+    }
+
     /// Returns the encoded base-relative value.
     pub const fn get(self) -> u64 {
         self.0
     }
 
     /// Returns `true` if this is the undefined address of a file whose addresses are
-    /// `offset_size` bytes wide.
+    /// `offset_width` bytes wide.
     ///
     /// The undefined address has every bit of the address field set, so the width fixes which
     /// value it is: `0xFFFF_FFFF` is undefined in a file with 4-byte addresses and an ordinary
     /// address in a file with 8-byte ones. Metadata stores it in an address field whose structure
     /// has no storage allocated, such as the section-info address of a free-space manager that
-    /// tracks nothing. Returns `false` for an `offset_size` other than 2, 4, or 8.
+    /// tracks nothing.
     ///
     /// The undefined address is defined in "Appendix A: Definitions" of the [format
     /// specification, version 4.0][spec].
     ///
+    /// # Examples
+    ///
+    /// ```
+    /// use hdf5_pure_core::OffsetWidth;
+    /// use hdf5_pure_core::StoredAddress;
+    ///
+    /// let addr = StoredAddress::undefined(OffsetWidth::Two);
+    /// assert!(addr.is_undefined(OffsetWidth::Two));
+    /// assert!(!addr.is_undefined(OffsetWidth::Four));
+    /// ```
+    ///
+    /// ```compile_fail
+    /// use hdf5_pure_core::LengthWidth;
+    /// use hdf5_pure_core::OffsetWidth;
+    /// use hdf5_pure_core::StoredAddress;
+    ///
+    /// let addr = StoredAddress::undefined(OffsetWidth::Two);
+    /// let _ = addr.is_undefined(LengthWidth::Two);
+    /// ```
+    ///
     /// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#sec_fmt4_appendixa
-    pub fn is_undefined(self, offset_size: u8) -> bool {
-        match offset_size {
-            2 => self.0 == 0xFFFF,
-            4 => self.0 == 0xFFFF_FFFF,
-            8 => self.0 == u64::MAX,
-            _ => false,
-        }
+    pub const fn is_undefined(self, offset_width: OffsetWidth) -> bool {
+        self.0 == Self::undefined(offset_width).0
     }
 }
 
@@ -195,17 +249,8 @@ pub trait StoredAddressExt {
     /// The stored address at the file's address base.
     const ZERO: Self;
 
-    /// The undefined address for an 8-byte address field.
-    const UNDEFINED_64: Self;
-
     /// Creates a stored address from an encoded base-relative value.
     fn new(stored: u64) -> Self;
-
-    /// Creates the undefined address for an `offset_size`-byte address field.
-    ///
-    /// Uses [`u64::MAX`] as the stored value for an `offset_size` other than 2, 4, or 8. At those widths,
-    /// [`StoredAddress::is_undefined`] returns `false`.
-    fn undefined(offset_size: u8) -> Self;
 
     /// Returns the address `delta` bytes past this one.
     ///
@@ -218,18 +263,9 @@ pub trait StoredAddressExt {
 #[doc(hidden)]
 impl StoredAddressExt for StoredAddress {
     const ZERO: Self = Self(0);
-    const UNDEFINED_64: Self = Self(u64::MAX);
 
     fn new(stored: u64) -> Self {
         Self(stored)
-    }
-
-    fn undefined(offset_size: u8) -> Self {
-        Self(match offset_size {
-            2 => 0xFFFF,
-            4 => 0xFFFF_FFFF,
-            _ => 0xFFFF_FFFF_FFFF_FFFF,
-        })
     }
 
     fn offset(self, delta: u64) -> Self {
@@ -330,24 +366,41 @@ mod tests {
     }
 
     #[rstest]
-    #[case(2, 0xFFFF)]
-    #[case(4, 0xFFFF_FFFF)]
-    #[case(8, u64::MAX)]
+    #[case::two(OffsetWidth::Two, 0xFFFF)]
+    #[case::four(OffsetWidth::Four, 0xFFFF_FFFF)]
+    #[case::eight(OffsetWidth::Eight, u64::MAX)]
     fn the_undefined_address_sentinel_is_as_wide_as_the_offset_field(
-        #[case] offset_size: u8,
+        #[case] width: OffsetWidth,
         #[case] sentinel: u64,
     ) {
         assert_eq!(
-            StoredAddress::undefined(offset_size),
+            StoredAddress::undefined(width),
             StoredAddress::new(sentinel),
-            "the constructor and the predicate name the same value at this width"
         );
-        assert!(StoredAddress::new(sentinel).is_undefined(offset_size));
-        assert!(!StoredAddress::new(sentinel - 1).is_undefined(offset_size));
+        assert!(StoredAddress::new(sentinel).is_undefined(width));
+        assert!(!StoredAddress::new(sentinel - 1).is_undefined(width));
         assert_eq!(
-            StoredAddress::new(u64::MAX).is_undefined(offset_size),
-            offset_size == 8,
-            "a wider file's sentinel is an ordinary address in a narrower one"
+            StoredAddress::new(u64::MAX).is_undefined(width),
+            width == OffsetWidth::Eight,
         );
+    }
+
+    #[rstest]
+    #[case::two_under_two(OffsetWidth::Two, OffsetWidth::Two, true)]
+    #[case::two_under_four(OffsetWidth::Two, OffsetWidth::Four, false)]
+    #[case::two_under_eight(OffsetWidth::Two, OffsetWidth::Eight, false)]
+    #[case::four_under_two(OffsetWidth::Four, OffsetWidth::Two, false)]
+    #[case::four_under_four(OffsetWidth::Four, OffsetWidth::Four, true)]
+    #[case::four_under_eight(OffsetWidth::Four, OffsetWidth::Eight, false)]
+    #[case::eight_under_two(OffsetWidth::Eight, OffsetWidth::Two, false)]
+    #[case::eight_under_four(OffsetWidth::Eight, OffsetWidth::Four, false)]
+    #[case::eight_under_eight(OffsetWidth::Eight, OffsetWidth::Eight, true)]
+    fn undefined_sentinel_matches_only_its_own_width(
+        #[case] sentinel_width: OffsetWidth,
+        #[case] query_width: OffsetWidth,
+        #[case] expected: bool,
+    ) {
+        let addr = StoredAddress::undefined(sentinel_width);
+        assert_eq!(addr.is_undefined(query_width), expected);
     }
 }

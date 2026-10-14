@@ -9,7 +9,6 @@
 use hdf5_pure_core::__private::{DecodedStoredAddress, FileRange, FileRegion, PhysicalAddress};
 
 use crate::address::StoredAddress;
-use crate::address::StoredAddressExt;
 use crate::bytes;
 use crate::checksum;
 use crate::error::FormatError;
@@ -19,7 +18,6 @@ use crate::fractal_heap::FractalHeapHeader;
 use crate::fractal_heap::FractalHeapLayout;
 use crate::width::LengthWidth;
 use crate::width::OffsetWidth;
-use crate::width::OffsetWidthExt;
 
 /// Describes managed blocks using a heap header's doubling table and filter metadata.
 ///
@@ -95,8 +93,8 @@ impl FractalHeapBlockLayout {
         lengths: LengthWidth,
         owner: StoredAddress,
     ) -> Result<Self, FormatError> {
-        if owner.get() >= StoredAddress::undefined(offsets.get()).get()
-            || header.root_block_address.get() > StoredAddress::undefined(offsets.get()).get()
+        if owner.get() >= StoredAddress::undefined(offsets).get()
+            || header.root_block_address.get() > StoredAddress::undefined(offsets).get()
         {
             return Err(FormatError::InvalidFractalHeapGeometry);
         }
@@ -113,7 +111,7 @@ impl FractalHeapBlockLayout {
         let heap = Self {
             layout,
             owner,
-            root: if header.root_block_address.is_undefined(offsets.get()) {
+            root: if header.root_block_address.is_undefined(offsets) {
                 DecodedStoredAddress::Undefined
             } else {
                 DecodedStoredAddress::Defined(header.root_block_address)
@@ -812,7 +810,7 @@ impl<'heap, 'bytes> FractalHeapIndirectBlockView<'heap, 'bytes> {
             0
         };
         let pos = heap.prefix_len() + entry * offset_size + entry.min(direct_count) * filter_size;
-        let address = layout.offset_width().decode_address(self.bytes, pos)?;
+        let address = crate::width::decode_stored_address(layout.offset_width(), self.bytes, pos)?;
         let filtered = if direct && filter_size != 0 {
             let mut fields = bytes::Fields::new(self.bytes, pos + offset_size);
             Some((fields.length(layout.length_width())?, fields.u32()?))
@@ -881,6 +879,7 @@ mod tests {
     use test_util::fractal_heap;
     use test_util::widths::Widths;
 
+    use crate::address::StoredAddressExt;
     use crate::filter_pipeline::FilterDescription;
     use crate::filter_pipeline::FilterPipeline;
 
@@ -952,7 +951,7 @@ mod tests {
 
     fn indirect_bytes(heap: &FractalHeapBlockLayout, entries: &[(usize, usize, u64)]) -> Vec<u8> {
         let mut bytes = prefix(heap, &INDIRECT_SIGNATURE, 0);
-        let width = heap.layout.offset_width().get();
+        let width = heap.layout.offset_width();
         let undefined = StoredAddress::undefined(width).get();
         for row in 0..usize::from(heap.root_rows) {
             for column in 0..heap.layout.table_width() {
@@ -960,7 +959,7 @@ mod tests {
                     .iter()
                     .find(|&&(r, c, _)| r == row && c == column)
                     .map_or(undefined, |&(_, _, addr)| addr);
-                push_number(&mut bytes, address, usize::from(width));
+                push_number(&mut bytes, address, usize::from(width.get()));
                 if row < heap.layout.direct_rows() && heap.filtering.is_filtered() {
                     push_number(
                         &mut bytes,
@@ -1392,7 +1391,7 @@ mod tests {
         let mut header =
             FractalHeapHeader::parse_bytes(&encoded, OffsetWidth::Eight, LengthWidth::Eight)
                 .unwrap();
-        header.root_block_address = StoredAddress::undefined(offsets.get());
+        header.root_block_address = StoredAddress::undefined(offsets);
         header.huge_objects_count = 3;
         header.huge_objects_size = 300_000;
         let heap = FractalHeapBlockLayout::new(

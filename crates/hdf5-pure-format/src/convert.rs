@@ -174,20 +174,6 @@ pub fn slice_range(offset: u64, len: u64) -> Result<Range<usize>, FormatError> {
     Ok(offset.to_usize()?..end.to_usize()?)
 }
 
-/// True when `addr` is the all-`0xFF` "undefined address" marker for a file
-/// whose size-of-offsets is `offset_size` (2, 4, or 8 bytes). HDF5 stores an
-/// unallocated block or chunk pointer this way. Readers and the free-space
-/// reclaim walk skip such entries. Any other `offset_size` returns `false`.
-#[inline]
-pub fn is_undefined_addr(addr: u64, offset_size: u8) -> bool {
-    match offset_size {
-        2 => addr == 0xFFFF,
-        4 => addr == 0xFFFF_FFFF,
-        8 => addr == 0xFFFF_FFFF_FFFF_FFFF,
-        _ => false,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

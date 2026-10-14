@@ -57,6 +57,7 @@ use crate::superblock::Superblock;
 use crate::types::{AttrValue, DType, attrs_to_map, classify_datatype};
 use crate::vl_data::{self, VlenStringReadOptions};
 use crate::width::FormatWidths;
+use crate::width::OffsetWidth;
 
 // ---------------------------------------------------------------------------
 // File
@@ -1701,7 +1702,8 @@ impl FileInner {
         let Some(rel) = self.superblock.superblock_extension_address else {
             return Ok(None);
         };
-        if rel.is_undefined(self.superblock.offset_size) {
+        let offset_width = OffsetWidth::try_from(self.superblock.offset_size)?;
+        if rel.is_undefined(offset_width) {
             return Ok(None);
         }
         let abs = self.addresses().absolute(rel)?;
@@ -1732,7 +1734,8 @@ impl FileInner {
     /// still reads.
     fn read_sohm_table(&self) -> Option<Box<crate::sohm::SohmTable>> {
         let rel = self.superblock.superblock_extension_address?;
-        if rel.is_undefined(self.superblock.offset_size) {
+        let offset_width = OffsetWidth::try_from(self.superblock.offset_size).ok()?;
+        if rel.is_undefined(offset_width) {
             return None;
         }
         let abs = self.addresses().absolute(rel).ok()?;

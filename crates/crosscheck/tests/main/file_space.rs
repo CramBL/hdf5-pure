@@ -29,6 +29,7 @@ use hdf5_pure::SyncPolicy;
 use hdf5_pure_core::__private::BaseAddressExt;
 use hdf5_pure_core::__private::FileSpaceInfoFields;
 use hdf5_pure_core::__private::StoredAddressExt;
+use hdf5_pure_core::OffsetWidth;
 use hdf5_pure_core::StoredAddress;
 use hdf5_pure_format::__private::AccessMode;
 use hdf5_pure_format::__private::DEFAULT_THRESHOLD;
@@ -738,10 +739,7 @@ fn the_serializer_writes_the_message_libhdf5_writes_at_the_widths_of_its_file(
     assert!(
         info.manager_addrs
             .iter()
-            .any(|&addr| !hdf5_pure_format::__private::is_undefined_addr(
-                addr,
-                superblock.offset_size
-            )),
+            .any(|&addr| !StoredAddress::new(addr).is_undefined(widths.offsets)),
         "libhdf5 records a manager for the deleted dataset's space"
     );
     let encoded = hdf5_pure_format::__private::serialize_file_space_info(widths, info).unwrap();
@@ -797,7 +795,7 @@ fn libhdf5_truncates_the_maximum_section_size_and_writes_section_sizes_as_wide_a
     let bytes = std::fs::read(&path).unwrap();
     let headers: Vec<FreeSpaceManagerHeader> = manager_addrs
         .into_iter()
-        .filter(|&addr| !hdf5_pure_format::__private::is_undefined_addr(addr, offset_size))
+        .filter(|&addr| !StoredAddress::new(addr).is_undefined(widths.offsets))
         .map(|addr| {
             FreeSpaceManagerHeader::parse(widths, &bytes[usize::try_from(addr).unwrap()..]).unwrap()
         })
@@ -899,9 +897,7 @@ fn the_sections_libhdf5_persists_in_an_oversized_section_list_are_read() {
         .unwrap()
         .manager_addrs
         .iter()
-        .filter(|&&addr| {
-            !hdf5_pure_format::__private::is_undefined_addr(addr, superblock.offset_size)
-        })
+        .filter(|&&addr| !StoredAddress::new(addr).is_undefined(widths.offsets))
         .map(|&addr| {
             let header =
                 FreeSpaceManagerHeader::parse(widths, &bytes[usize::try_from(addr).unwrap()..])
@@ -954,9 +950,7 @@ fn libhdf5_loads_the_managers_the_serializer_writes_at_the_widths_of_its_file(
         .manager_addrs
         .iter()
         .copied()
-        .filter(|&addr| {
-            !hdf5_pure_format::__private::is_undefined_addr(addr, superblock.offset_size)
-        })
+        .filter(|&addr| !StoredAddress::new(addr).is_undefined(widths.offsets))
         .collect();
     drop(file);
 
@@ -1102,7 +1096,7 @@ fn enlarged_section_list_file(path: &Path, userblock: u64) -> (Vec<(u64, u64)>, 
         .manager_addrs
         .iter()
         .copied()
-        .filter(|&addr| !hdf5_pure_format::__private::is_undefined_addr(addr, 8))
+        .filter(|&addr| !StoredAddress::new(addr).is_undefined(widths.offsets))
         .map(|addr| {
             let at = usize::try_from(base.absolute(StoredAddress::new(addr)).unwrap()).unwrap();
             (
@@ -1359,7 +1353,7 @@ fn deleted_dataset_manager_block(path: &std::path::Path, block: ManagerBlock) ->
     let bytes = std::fs::read(path).unwrap();
     let (fshd_at, header) = manager_addrs
         .into_iter()
-        .filter(|&addr| !hdf5_pure_format::__private::is_undefined_addr(addr, 8))
+        .filter(|&addr| !StoredAddress::new(addr).is_undefined(widths.offsets))
         .map(|addr| {
             let at = usize::try_from(addr).unwrap();
             (
@@ -1631,7 +1625,8 @@ fn assert_version_0_free_space_reads_as_libhdf5_reads_it(
     let path = dir.path().join("c_persisted_version_0.h5");
     let freed =
         write_c_persisted_with_a_hole(&path, Driver::Sec2, sizeof_addr, sizeof_size, userblock);
-    let undefined = StoredAddress::undefined(sizeof_addr as u8).get();
+    let undefined =
+        StoredAddress::undefined(OffsetWidth::try_from(sizeof_addr as u8).unwrap()).get();
     let version_1 = rewrite_as_version_0(
         &path,
         Widths::new(sizeof_addr.into(), sizeof_size.into()),

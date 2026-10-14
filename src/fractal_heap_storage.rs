@@ -33,12 +33,13 @@ use crate::address::StoredAddressExt;
 #[cfg(test)]
 use crate::address::{BaseAddress, BaseAddressExt};
 use crate::btree_v2::{BTreeV2Header, collect_btree_v2_records_from_source};
-use crate::convert::{Narrow, is_undefined_addr};
+use crate::convert::Narrow;
 use crate::error::FormatError;
 #[cfg(test)]
 use crate::source::BytesSource;
 use crate::source::{Source, SourceMetadata};
-use crate::width::{LengthWidth, OffsetWidth, OffsetWidthExt};
+use crate::width::LengthWidth;
+use crate::width::OffsetWidth;
 
 /// Describes a failure to prove complete ownership of a fractal heap's file storage.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -381,11 +382,7 @@ fn collect_managed_fsm_storage(
     allocations: &mut Vec<(Extent, FractalHeapAllocation)>,
 ) -> Result<(), FractalHeapStorageError> {
     let address = heap.managed_block_free_space_manager_address;
-    if widths
-        .offsets
-        .decode_address(&address.get().to_le_bytes(), 0)?
-        == DecodedStoredAddress::Undefined
-    {
+    if address.is_undefined(widths.offsets) {
         return Ok(());
     }
     let reference = FreeSpaceManagerHeaderRef::new(widths, addresses.resolve(address)?)?;
@@ -424,7 +421,7 @@ fn collect_huge_storage<S: Source + ?Sized>(
     allocations: &mut Vec<(Extent, FractalHeapAllocation)>,
 ) -> Result<(), FractalHeapStorageError> {
     let tree_address = heap.btree_huge_objects_address;
-    if is_undefined_addr(tree_address.get(), offset_size) {
+    if tree_address.is_undefined(offset_width) {
         if heap.huge_objects_count != 0 || heap.huge_objects_size != 0 {
             return Err(FractalHeapStorageError::InvalidStorage);
         }
@@ -476,7 +473,7 @@ fn collect_huge_storage<S: Source + ?Sized>(
             let record = record.huge_object(offset_width, length_width)?;
             (record.address, record.length)
         };
-        if address.is_undefined(offset_size) {
+        if address.is_undefined(offset_width) {
             return Err(FractalHeapStorageError::InvalidStorage);
         }
         payload_bytes = payload_bytes

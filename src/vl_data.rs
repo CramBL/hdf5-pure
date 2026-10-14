@@ -26,6 +26,7 @@ use crate::global_heap::GlobalHeapReader;
 use crate::source::BytesSource;
 use crate::source::Source;
 use crate::width::LengthWidth;
+use crate::width::OffsetWidth;
 
 /// Allocation limits for reading variable-length strings.
 ///
@@ -96,7 +97,8 @@ impl VlElement {
         offset_size: u8,
         addresses: AddressContext,
     ) -> Result<Option<GlobalHeapId>, FormatError> {
-        let undefined = self.collection_address.is_undefined(offset_size);
+        let offset_width = OffsetWidth::try_from(offset_size)?;
+        let undefined = self.collection_address.is_undefined(offset_width);
         if self.length == 0 && (undefined || self.collection_address.get() == 0) {
             return Ok(None);
         }

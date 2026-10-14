@@ -138,6 +138,7 @@ pub fn fixed_array_index_spans(
     offset_size: u8,
     length_size: u8,
 ) -> Result<Vec<(u64, u64)>, FormatError> {
+    let offset_width = OffsetWidth::try_from(offset_size)?;
     let header = FixedArrayHeader::parse_from_source(source, fa_base, offset_size, length_size)?;
     let os = offset_size as usize;
 
@@ -147,7 +148,7 @@ pub fn fixed_array_index_spans(
     let mut spans = vec![(fa_base.get(), fahd_size)];
 
     // An array with the undefined data block address has no data block.
-    if header.data_block_address.is_undefined(offset_size) {
+    if header.data_block_address.is_undefined(offset_width) {
         return Ok(spans);
     }
 

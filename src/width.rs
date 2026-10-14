@@ -1,4 +1,3 @@
+pub use hdf5_pure_core::LengthWidth;
+pub use hdf5_pure_core::OffsetWidth;
 pub use hdf5_pure_format::__private::FormatWidths;
-pub use hdf5_pure_format::__private::LengthWidth;
-pub use hdf5_pure_format::__private::OffsetWidth;
-pub use hdf5_pure_format::__private::OffsetWidthExt;
