@@ -620,6 +620,9 @@ pub use edit::{AppendBuilder, EditBacking, MemoryStrategy, SpaceAccounting, Sync
 
 #[doc(hidden)]
 #[cfg(feature = "std")]
+pub use edit::GlobalHeapLiveness;
+#[doc(hidden)]
+#[cfg(feature = "std")]
 pub use edit::SpaceOwnership;
 
 #[cfg(feature = "std")]

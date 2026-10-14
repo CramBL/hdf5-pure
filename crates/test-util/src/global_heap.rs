@@ -108,6 +108,18 @@ pub fn reference(len: u32, collection_address: u64, index: u32, widths: Widths) 
     reference
 }
 
+/// Returns the offset of each [`SIGNATURE`] in `bytes`, where a collection starts.
+///
+/// An object whose data holds the signature bytes matches as well.
+pub fn collection_starts(bytes: &[u8]) -> Vec<u64> {
+    bytes
+        .windows(SIGNATURE.len())
+        .enumerate()
+        .filter(|(_, window)| window == SIGNATURE)
+        .map(|(start, _)| start as u64)
+        .collect()
+}
+
 pub const SIGNATURE: &[u8; 4] = b"GCOL";
 
 // The C library pads the collection header and each object header to 16 bytes at every length

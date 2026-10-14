@@ -1,0 +1,378 @@
+//! The global heap collections that the objects reachable from the root group refer to.
+
+use alloc::collections::BTreeSet;
+use core::num::NonZeroU64;
+
+use crate::access_mode::AccessMode;
+use crate::address::StoredAddress;
+use crate::attribute::AttributeMessage;
+use crate::attribute_info::AttributeInfoMessage;
+use crate::convert::Narrow;
+use crate::data_layout::DataLayout;
+use crate::dataspace::Dataspace;
+use crate::datatype::Datatype;
+use crate::error::Error;
+use crate::error::FormatError;
+use crate::fill_value::FillPattern;
+use crate::fill_value::FillValueView;
+use crate::message_type::MessageType;
+use crate::object_header::HeaderMessage;
+use crate::object_header::ObjectHeader;
+use crate::read_spec::RawReadSpec;
+use crate::read_spec::RawReadStorage;
+use crate::source::BaseOffsetSource;
+use crate::vl_data;
+
+use super::LENGTH_SIZE;
+use super::OFFSET_SIZE;
+use super::OFFSET_WIDTH;
+use super::WriteEngine;
+
+/// The global heap collections that the objects reachable from the root group refer to.
+///
+/// The editor follows the hard links of each group and reads the variable-length elements of
+/// each attribute, compact or contiguous dataset, and fill value. The analysis is incomplete if it
+/// reaches a shared message, an attribute with a shared datatype or dataspace, a virtual dataset,
+/// a chunked dataset of variable-length elements, a datatype that holds a reference or a
+/// variable-length type inside another type, a message of a type it does not recognize, or a
+/// traversal limit.
+///
+/// This type is outside the supported API.
+#[doc(hidden)]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GlobalHeapLiveness {
+    /// The absolute file offset of each collection, counted from byte 0 and including any
+    /// userblock.
+    pub referenced_collections: BTreeSet<u64>,
+    /// Whether the editor read every reachable structure that can refer to a collection.
+    ///
+    /// A collection outside [`referenced_collections`](Self::referenced_collections) can still be
+    /// live when this is `false`.
+    pub analysis_complete: bool,
+}
+
+impl WriteEngine {
+    /// Returns the global heap collections that the objects reachable from the root group refer
+    /// to.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Format`] if the metadata of a reachable object or one of its
+    /// variable-length elements is malformed, and [`Error::MissingMessage`] if a dataset lacks its
+    /// datatype or dataspace message.
+    pub(crate) fn global_heap_liveness(&self) -> Result<GlobalHeapLiveness, Error> {
+        let mut referenced_collections = BTreeSet::new();
+        let root = self
+            .addresses
+            .absolute(self.superblock.root_group_address)?;
+        let analysis_complete = self.walk_reachable_objects(root, |_, header, child| {
+            self.collect_object_collections(header, child, &mut referenced_collections)
+        })?;
+        Ok(GlobalHeapLiveness {
+            referenced_collections,
+            analysis_complete,
+        })
+    }
+
+    /// Adds the collections an object refers to, and passes the children of a group to `child`.
+    ///
+    /// Returns `false` if the object has a shared message, a message of a type the analysis does
+    /// not recognize, or an attribute or a dataset that the analysis does not read in full.
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors of [`global_heap_liveness`](Self::global_heap_liveness).
+    fn collect_object_collections(
+        &self,
+        header: &ObjectHeader,
+        child: &mut dyn FnMut(u64),
+        referenced: &mut BTreeSet<u64>,
+    ) -> Result<bool, Error> {
+        if crate::group_v2::is_group(header) {
+            for entry in crate::group_v2::resolve_group_entries_from_source(
+                &self.image(),
+                AccessMode::ReadWrite,
+                header,
+                OFFSET_SIZE,
+                LENGTH_SIZE,
+                self.addresses,
+            )? {
+                if !entry.object_header_address.is_undefined(OFFSET_WIDTH) {
+                    child(self.addresses.absolute(entry.object_header_address)?);
+                }
+            }
+        }
+        let mut complete = true;
+        for HeaderMessage {
+            msg_type,
+            flags,
+            data,
+            ..
+        } in &header.messages
+        {
+            if flags.is_shared() {
+                complete = false;
+                continue;
+            }
+            match *msg_type {
+                MessageType::ATTRIBUTE => {
+                    complete &= self.collect_attribute_collections(data, referenced)?;
+                }
+                MessageType::ATTRIBUTE_INFO => {
+                    complete &= self.collect_dense_attribute_collections(data, referenced)?;
+                }
+                MessageType::NIL
+                | MessageType::DATASPACE
+                | MessageType::LINK_INFO
+                | MessageType::DATATYPE
+                | MessageType::FILL_VALUE_OLD
+                | MessageType::FILL_VALUE
+                | MessageType::LINK
+                | MessageType::DATA_LAYOUT
+                | MessageType::GROUP_INFO
+                | MessageType::FILTER_PIPELINE
+                | MessageType::OBJECT_HEADER_CONTINUATION
+                | MessageType::SYMBOL_TABLE
+                | MessageType::OBJECT_MODIFICATION_TIME
+                | MessageType::OBJECT_REFERENCE_COUNT => {}
+                _ => complete = false,
+            }
+        }
+        complete &= self.collect_dataset_collections(&header.messages, referenced)?;
+        Ok(complete)
+    }
+
+    /// Adds the collections that a dataset's elements and fill value refer to.
+    ///
+    /// Returns `true` for an object without a data layout message, and `false` if the layout,
+    /// datatype, or dataspace message is shared or the layout is virtual. For a datatype that holds
+    /// a file address, it also returns `false` if the layout is chunked or [`HeapReferences::of`]
+    /// returns [`HeapReferences::Unsupported`] for the datatype.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::MissingMessage`] if the object has a data layout message and lacks its
+    /// datatype or dataspace message, and [`Error::Format`] if a message or an element is
+    /// malformed.
+    fn collect_dataset_collections(
+        &self,
+        messages: &[HeaderMessage],
+        referenced: &mut BTreeSet<u64>,
+    ) -> Result<bool, Error> {
+        let find = |msg_type| messages.iter().find(|m| m.msg_type == msg_type);
+        let Some(layout) = find(MessageType::DATA_LAYOUT) else {
+            return Ok(true);
+        };
+        let datatype =
+            find(MessageType::DATATYPE).ok_or(Error::MissingMessage(MessageType::DATATYPE))?;
+        let dataspace =
+            find(MessageType::DATASPACE).ok_or(Error::MissingMessage(MessageType::DATASPACE))?;
+        if [layout, datatype, dataspace]
+            .iter()
+            .any(|m| m.flags.is_shared())
+        {
+            return Ok(false);
+        }
+        let layout = DataLayout::parse(&layout.data, OFFSET_SIZE, LENGTH_SIZE)?;
+        let (datatype, _) = hdf5_pure_format::__private::parse_datatype(&datatype.data)?;
+        if matches!(layout, DataLayout::Virtual) {
+            return Ok(false);
+        }
+        match HeapReferences::of(&datatype) {
+            HeapReferences::Absent => return Ok(true),
+            HeapReferences::Unsupported => return Ok(false),
+            HeapReferences::WholeElement => {}
+        }
+        self.collect_fill_value_collections(messages, referenced)?;
+        let dataspace = Dataspace::parse(&dataspace.data, LENGTH_SIZE)?;
+        let spec = RawReadSpec::parse(&layout, &dataspace, &datatype, None, FillPattern::ZERO)?;
+        match spec.storage() {
+            RawReadStorage::Compact { data } => {
+                self.collect_element_collections(data, dataspace.num_elements(), referenced)?;
+            }
+            RawReadStorage::Contiguous { address } => self.collect_contiguous_collections(
+                address,
+                spec.byte_len_u64(),
+                NonZeroU64::from(datatype.element_size()?),
+                referenced,
+            )?,
+            RawReadStorage::ContiguousUnallocated => {}
+            RawReadStorage::Chunked { .. } | RawReadStorage::Virtual => return Ok(false),
+        }
+        Ok(true)
+    }
+
+    fn collect_fill_value_collections(
+        &self,
+        messages: &[HeaderMessage],
+        referenced: &mut BTreeSet<u64>,
+    ) -> Result<(), FormatError> {
+        for HeaderMessage {
+            msg_type,
+            flags,
+            data,
+            ..
+        } in messages
+        {
+            if flags.is_shared()
+                || !matches!(
+                    *msg_type,
+                    MessageType::FILL_VALUE_OLD | MessageType::FILL_VALUE
+                )
+            {
+                continue;
+            }
+            if let Some(value) = FillValueView::parse(*msg_type, data)?.value() {
+                self.collect_element_collections(value, 1, referenced)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn collect_contiguous_collections(
+        &self,
+        address: StoredAddress,
+        len: u64,
+        element_size: NonZeroU64,
+        referenced: &mut BTreeSet<u64>,
+    ) -> Result<(), FormatError> {
+        let start = self.addresses.absolute(address)?;
+        let batch_len = element_size.saturating_mul(ELEMENT_BATCH);
+        for first in (0..len).step_by(batch_len.get().to_usize()?) {
+            let offset = start
+                .checked_add(first)
+                .ok_or(FormatError::OffsetOverflow {
+                    offset: start,
+                    length: first,
+                })?;
+            let read_len = (len - first).min(batch_len.get());
+            let bytes = self.image().read_exact_at(offset, read_len.to_usize()?)?;
+            self.collect_element_collections(&bytes, read_len / element_size, referenced)?;
+        }
+        Ok(())
+    }
+
+    /// Adds the collections that the attributes in an object's dense attribute storage refer to.
+    ///
+    /// Returns `false` if a record in the storage is shared, or if
+    /// [`collect_attribute_collections`](Self::collect_attribute_collections) returns `false` for
+    /// an attribute.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`FormatError`] if the attribute info message, the storage, or an attribute is
+    /// malformed.
+    fn collect_dense_attribute_collections(
+        &self,
+        data: &[u8],
+        referenced: &mut BTreeSet<u64>,
+    ) -> Result<bool, FormatError> {
+        let info = AttributeInfoMessage::parse(data, OFFSET_SIZE)?;
+        let Some(heap) = info.fractal_heap_address else {
+            return Ok(true);
+        };
+        let mut shared_records = false;
+        let mut complete = true;
+        crate::attribute::visit_dense_attribute_messages_from_source(
+            &BaseOffsetSource {
+                inner: &self.image(),
+                base: self.addresses.effective_base(),
+            },
+            AccessMode::ReadWrite,
+            self.addresses,
+            &info,
+            heap,
+            OFFSET_SIZE,
+            LENGTH_SIZE,
+            |flags| {
+                shared_records |= flags.is_shared();
+                !flags.is_shared()
+            },
+            |data, _creation_index| {
+                complete &= self.collect_attribute_collections(data, referenced)?;
+                Ok(())
+            },
+        )?;
+        Ok(complete && !shared_records)
+    }
+
+    /// Adds the collections that an attribute's elements refer to.
+    ///
+    /// Returns `false` if the attribute has a shared datatype or dataspace, or if
+    /// [`HeapReferences::of`] returns [`HeapReferences::Unsupported`] for its datatype.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`FormatError`] if the attribute message or one of its variable-length elements
+    /// is malformed.
+    fn collect_attribute_collections(
+        &self,
+        data: &[u8],
+        referenced: &mut BTreeSet<u64>,
+    ) -> Result<bool, FormatError> {
+        let attribute = match AttributeMessage::parse(data, LENGTH_SIZE) {
+            Ok(attribute) => attribute,
+            Err(FormatError::UnresolvedSharedMessage(_)) => return Ok(false),
+            Err(error) => return Err(error),
+        };
+        Ok(match HeapReferences::of(&attribute.datatype) {
+            HeapReferences::Absent => true,
+            HeapReferences::Unsupported => false,
+            HeapReferences::WholeElement => {
+                self.collect_element_collections(
+                    &attribute.raw_data,
+                    attribute.dataspace.num_elements(),
+                    referenced,
+                )?;
+                true
+            }
+        })
+    }
+
+    fn collect_element_collections(
+        &self,
+        raw: &[u8],
+        count: u64,
+        referenced: &mut BTreeSet<u64>,
+    ) -> Result<(), FormatError> {
+        for element in vl_data::parse_vl_references(raw, count, OFFSET_SIZE)? {
+            if let Some(id) = element.heap_id(OFFSET_SIZE, self.addresses)? {
+                referenced.insert(id.collection.get());
+            }
+        }
+        Ok(())
+    }
+}
+
+/// How an element of a datatype refers to global heap objects.
+enum HeapReferences {
+    /// An element is free of file addresses.
+    Absent,
+    /// An element holds a file address the analysis does not locate, such as an object reference
+    /// or a variable-length member of a compound.
+    Unsupported,
+    /// The datatype is variable-length over a base type without a file address, and each element
+    /// refers to at most one global heap object.
+    WholeElement,
+}
+
+impl HeapReferences {
+    /// Returns how an element of `datatype` refers to global heap objects.
+    fn of(datatype: &Datatype) -> Self {
+        if !crate::datatype::datatype_holds_file_address(datatype) {
+            return Self::Absent;
+        }
+        match datatype {
+            Datatype::VariableLength { base_type, .. }
+                if !crate::datatype::datatype_holds_file_address(base_type) =>
+            {
+                Self::WholeElement
+            }
+            _ => Self::Unsupported,
+        }
+    }
+}
+
+/// The number of elements the analysis reads from a contiguous dataset at a time.
+// The literal is non-zero, and the `unwrap` in a constant is evaluated at compile time.
+const ELEMENT_BATCH: NonZeroU64 = NonZeroU64::new(4096).unwrap();

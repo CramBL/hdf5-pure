@@ -13,6 +13,7 @@ use hdf5_pure_format::__private as format;
 use hdf5_pure_format::__private::AttributeInfoMessage;
 use hdf5_pure_format::__private::OffsetWidth;
 use rstest::rstest;
+use test_util::data_layout;
 use test_util::fractal_heap::Header as HeapHeader;
 use test_util::image::Image;
 use test_util::link_message::HardLink;
@@ -125,7 +126,7 @@ fn ownership_is_complete_only_below_the_traversal_depth_limit(
 )]
 #[case::truncated_attribute(MessageType::ATTRIBUTE, vec![], FormatError::UnexpectedEof { expected: 2, available: 0 })]
 #[case::truncated_link(MessageType::LINK, vec![], FormatError::UnexpectedEof { expected: 2, available: 0 })]
-#[case::overflowing_raw_address(MessageType::DATA_LAYOUT, contiguous_layout(u64::MAX - 1, 8), FormatError::OffsetOverflow { offset: u64::MAX - 1, length: 8 })]
+#[case::overflowing_raw_address(MessageType::DATA_LAYOUT, data_layout::contiguous(u64::MAX - 1, 8), FormatError::OffsetOverflow { offset: u64::MAX - 1, length: 8 })]
 fn reachable_metadata_failures_are_returned(
     #[case] message: MessageType,
     #[case] body: Vec<u8>,
@@ -155,7 +156,7 @@ fn invalid_owned_extents_report_their_geometry(#[case] address: u64, #[case] len
         2,
         &[Message::new(
             MessageType::DATA_LAYOUT,
-            &contiguous_layout(address, length),
+            &data_layout::contiguous(address, length),
         )],
     );
     let logical_size = bytes.len() as u64;
@@ -309,13 +310,6 @@ fn ownership_chain(depth: usize, leaf: &[Message]) -> Vec<u8> {
     image.build()
 }
 
-fn contiguous_layout(address: u64, size: u64) -> Vec<u8> {
-    let mut layout = vec![LAYOUT_VERSION, CONTIGUOUS_LAYOUT_CLASS];
-    layout.extend_from_slice(&address.to_le_bytes());
-    layout.extend_from_slice(&size.to_le_bytes());
-    layout
-}
-
 fn attribute_heap_at_superblock() -> Vec<u8> {
     AttributeInfoMessage {
         max_creation_index: None,
@@ -326,9 +320,6 @@ fn attribute_heap_at_superblock() -> Vec<u8> {
     }
     .serialize(OffsetWidth::Eight)
 }
-
-const LAYOUT_VERSION: u8 = 3;
-const CONTIGUOUS_LAYOUT_CLASS: u8 = 1;
 
 const SUPERBLOCK_VERSION: u8 = 3;
 

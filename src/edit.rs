@@ -362,7 +362,10 @@ use crate::type_builders::{
 use crate::width::FormatWidths;
 use crate::width::OffsetWidth;
 
+mod global_heap_liveness;
 mod reclaim;
+
+pub use global_heap_liveness::GlobalHeapLiveness;
 
 use reclaim::meta_spans;
 
