@@ -8,7 +8,7 @@ use alloc::vec::Vec;
 use crate::address::StoredAddress;
 use crate::address::StoredAddressExt;
 use crate::bytes;
-use crate::bytes::{ensure_len, read_optional_offset};
+use crate::bytes::ensure_len;
 use crate::error::FormatError;
 use crate::width::OffsetWidth;
 
@@ -36,16 +36,27 @@ pub struct AttributeInfoMessage {
 impl AttributeInfoMessage {
     /// Parses the body of an Attribute Info message.
     ///
-    /// Layout: version(1) + flags(1) + [max_creation_index(2)] +
-    ///         fractal_heap_address(os) + btree_name_index(os) +
-    ///         [btree_creation_order(os)]
+    /// # Errors
+    ///
+    /// Returns [`FormatError::InvalidOffsetSize`] if `offset_size` is not 2, 4, or 8. Returns the
+    /// errors of [`parse_with_offset_width`](Self::parse_with_offset_width) in the cases it lists.
+    pub fn parse(data: &[u8], offset_size: u8) -> Result<AttributeInfoMessage, FormatError> {
+        Self::parse_with_offset_width(data, OffsetWidth::try_from(offset_size)?)
+    }
+
+    /// Parses the body of an Attribute Info message using a validated address width.
+    ///
+    /// The body stores an optional maximum creation index followed by the fractal-heap address,
+    /// the name-index B-tree address, and an optional creation-order-index B-tree address.
     ///
     /// # Errors
     ///
-    /// Returns [`FormatError::InvalidAttributeInfoVersion`] if the version is not 0,
-    /// [`FormatError::InvalidOffsetSize`] if `offset_size` is not 2, 4, or 8, and
+    /// Returns [`FormatError::InvalidAttributeInfoVersion`] if the version is not 0, and
     /// [`FormatError::UnexpectedEof`] if `data` ends inside a field.
-    pub fn parse(data: &[u8], offset_size: u8) -> Result<AttributeInfoMessage, FormatError> {
+    pub fn parse_with_offset_width(
+        data: &[u8],
+        offset_width: OffsetWidth,
+    ) -> Result<AttributeInfoMessage, FormatError> {
         ensure_len(data, 0, 2)?;
 
         let version = data[0];
@@ -69,15 +80,15 @@ impl AttributeInfoMessage {
         };
 
         let fractal_heap_address =
-            read_optional_offset(data, pos, offset_size)?.map(StoredAddress::new);
-        pos += offset_size as usize;
+            bytes::read_optional_offset_width(data, pos, offset_width)?.map(StoredAddress::new);
+        pos += usize::from(offset_width.get());
 
         let btree_name_index_address =
-            read_optional_offset(data, pos, offset_size)?.map(StoredAddress::new);
-        pos += offset_size as usize;
+            bytes::read_optional_offset_width(data, pos, offset_width)?.map(StoredAddress::new);
+        pos += usize::from(offset_width.get());
 
         let btree_creation_order_address = if has_creation_order_index {
-            read_optional_offset(data, pos, offset_size)?.map(StoredAddress::new)
+            bytes::read_optional_offset_width(data, pos, offset_width)?.map(StoredAddress::new)
         } else {
             None
         };

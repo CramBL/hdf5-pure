@@ -216,8 +216,13 @@ impl WriteEngine {
                 if attr_info.is_some() {
                     return None;
                 }
-                attr_info =
-                    Some(AttributeInfoMessage::parse(&region[body..body_end], OFFSET_SIZE).ok()?);
+                attr_info = Some(
+                    AttributeInfoMessage::parse_with_offset_width(
+                        &region[body..body_end],
+                        crate::file_writer::OFFSET_WIDTH,
+                    )
+                    .ok()?,
+                );
             }
             p = body_end;
         }
@@ -1013,7 +1018,10 @@ impl WriteEngine {
                     complete &= !super::datatype_holds_file_address(&datatype);
                 }
                 MessageType::ATTRIBUTE => {
-                    match crate::attribute::AttributeMessage::parse(data, LENGTH_SIZE) {
+                    match crate::attribute::AttributeMessage::parse_with_length_width(
+                        data,
+                        crate::file_writer::LENGTH_WIDTH,
+                    ) {
                         Ok(attr) => complete &= !super::datatype_holds_file_address(&attr.datatype),
                         Err(FormatError::UnresolvedSharedMessage(_)) => complete = false,
                         Err(error) => return Err(error.into()),
@@ -1151,7 +1159,8 @@ impl WriteEngine {
         metadata: &mut Vec<(u64, u64)>,
     ) -> Result<bool, Error> {
         let mut complete = true;
-        let info = AttributeInfoMessage::parse(data, OFFSET_SIZE)?;
+        let info =
+            AttributeInfoMessage::parse_with_offset_width(data, crate::file_writer::OFFSET_WIDTH)?;
         if let Some(heap) = info.fractal_heap_address {
             let source = BaseOffsetSource {
                 inner: &self.image(),
@@ -1183,7 +1192,10 @@ impl WriteEngine {
                     !flags.is_shared()
                 },
                 |data, _creation_index| {
-                    match crate::attribute::AttributeMessage::parse(data, LENGTH_SIZE) {
+                    match crate::attribute::AttributeMessage::parse_with_length_width(
+                        data,
+                        crate::file_writer::LENGTH_WIDTH,
+                    ) {
                         Ok(attribute) => {
                             complete &= !super::datatype_holds_file_address(&attribute.datatype)
                         }
