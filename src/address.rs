@@ -4,6 +4,7 @@ pub(crate) use hdf5_pure_core::__private::BaseAddressExt;
 use hdf5_pure_core::__private::PhysicalAddress;
 pub(crate) use hdf5_pure_core::__private::StoredAddressExt;
 pub use hdf5_pure_core::BaseAddress;
+pub use hdf5_pure_core::DecodedStoredAddress;
 pub use hdf5_pure_core::StoredAddress;
 
 use crate::error::FormatError;
@@ -76,19 +77,6 @@ impl OpenedImageContext {
     /// Returns the stored-address mapping for the reconciled physical base.
     pub(crate) const fn addresses(self) -> AddressContext {
         self.addresses
-    }
-
-    /// Returns the recorded end of allocation relative to the effective base.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`FormatError::AddressBelowBase`] if the effective EOF is below the effective base.
-    pub(crate) fn end_of_allocation(self) -> Result<StoredAddress, FormatError> {
-        let Self {
-            addresses,
-            effective_eof,
-        } = self;
-        addresses.relative(effective_eof)
     }
 }
 

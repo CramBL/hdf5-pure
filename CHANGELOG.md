@@ -24,6 +24,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- **Breaking:** The address fields of `FileSpaceInfo` change type from integers to decoded stored addresses.
 - **Breaking:** `StoredAddress::is_undefined` no longer accepts a raw integer width.
 - **Breaking:** The base-relative address fields of `Superblock` change type from integers to stored addresses. Base and end-of-file addresses retain their absolute coordinates ([#733](https://github.com/CramBL/hdf5-pure/pull/733)).
 - **Breaking:** The `flate2` Cargo feature is removed. Enable `deflate` instead. The `provenance` feature no longer exposes `sha2` as a selectable feature ([#689](https://github.com/CramBL/hdf5-pure/pull/689)).

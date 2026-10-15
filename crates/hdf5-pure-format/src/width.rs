@@ -51,6 +51,10 @@ impl FormatWidths {
     }
 }
 
+pub(crate) const fn offset_width_max(width: OffsetWidth) -> u64 {
+    u64::MAX >> (64 - 8 * width.get())
+}
+
 pub(crate) fn offset_width_holds(width: OffsetWidth, address: u64) -> bool {
     address == u64::MAX
         || address

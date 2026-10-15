@@ -297,9 +297,12 @@ use hdf5_pure_space::__private::{
 use crate::DatatypeByteOrder;
 use crate::FillTime;
 use crate::access_mode::AccessMode;
+use crate::address::AddressContext;
+use crate::address::BaseAddress;
 use crate::address::BaseAddressExt;
+use crate::address::DecodedStoredAddress;
+use crate::address::StoredAddress;
 use crate::address::StoredAddressExt;
-use crate::address::{AddressContext, BaseAddress, StoredAddress};
 use crate::attribute::StoredAttribute;
 use crate::attribute_info::AttributeInfoMessage;
 use crate::chunk_index_inplace::{Located, Store, apply_ea_append, plan_ea_append};
@@ -2684,23 +2687,26 @@ impl WriteEngine {
         };
         let managers: Vec<(
             Option<ManagerKind>,
-            u64,
+            StoredAddress,
             Result<PersistedSections, FormatError>,
         )> = info
             .manager_addrs
             .iter()
             .enumerate()
-            .filter(|&(_, &m)| !StoredAddress::new(m).is_undefined(widths.offsets))
-            .map(|(slot, &m)| {
+            .filter_map(|(slot, &m)| match m {
+                DecodedStoredAddress::Defined(addr) => Some((slot, addr)),
+                DecodedStoredAddress::Undefined => None,
+            })
+            .map(|(slot, addr)| {
                 let read = free_space_manager::read_persisted_sections_source(
                     &self.image(),
                     widths,
                     self.addresses.effective_base(),
-                    &[m],
+                    &[DecodedStoredAddress::Defined(addr)],
                 );
                 (
                     free_space_manager::manager_kind(info.strategy, slot),
-                    m,
+                    addr,
                     read,
                 )
             })
@@ -2771,8 +2777,7 @@ impl WriteEngine {
                         .iter()
                         .filter_map(|&(at, len)| self.stored_extent(at, len)),
                 ),
-                Err(_) => old_blocks
-                    .extend(self.manager_header_block(widths, StoredAddress::new(*manager))),
+                Err(_) => old_blocks.extend(self.manager_header_block(widths, *manager)),
             }
         }
 
@@ -2867,7 +2872,6 @@ impl WriteEngine {
         };
         let info = hdf5_pure_format::__private::parse_file_space_info(
             FormatWidths::from_sizes(os, ls)?,
-            || addresses.relative(superblock.eof_address),
             &msg.data,
         )?;
         Ok(Some((ext_addr, info)))
@@ -13157,7 +13161,7 @@ pub(crate) fn rewrite_extension_region_bytes(
     widths: FormatWidths,
     info: &FileSpaceInfo,
 ) -> Result<OhRegion, Error> {
-    let new_body = hdf5_pure_format::__private::serialize_file_space_info(widths, info)?;
+    let new_body = hdf5_pure_format::__private::serialize_file_space_info_v1(widths, info)?;
     // The message body is the fixed-size File Space Info record (≤ 125 bytes),
     // so it always fits the u16 size field.
     let new_len: u16 = new_body
@@ -16384,7 +16388,11 @@ mod tests {
         let bytes = std::fs::read(&path).unwrap();
         let src = crate::source::BytesSource::new(bytes.as_slice());
         let slot6 = info.manager_addrs[6];
-        assert_ne!(slot6, UNDEF, "the C library populated the large manager");
+        assert_ne!(
+            slot6,
+            DecodedStoredAddress::Undefined,
+            "the C library populated the large manager"
+        );
         let (sections, _) = free_space_manager::read_persisted_sections_source(
             &src,
             crate::file_writer::WIDTHS,

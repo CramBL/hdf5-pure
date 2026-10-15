@@ -729,8 +729,16 @@ fn a_version_0_message_s_persisted_free_space_is_recovered_and_reused() {
         .split_at(file_space_info::VERSION_0_MANAGERS);
     assert_eq!(
         unused,
-        [u64::MAX; NUM_FILE_FSM_MANAGERS - file_space_info::VERSION_0_MANAGERS]
+        [hdf5_pure::DecodedStoredAddress::Undefined;
+            NUM_FILE_FSM_MANAGERS - file_space_info::VERSION_0_MANAGERS]
     );
+    let v0_raw_managers: Vec<u64> = version_0_managers
+        .iter()
+        .map(|&m| match m {
+            hdf5_pure::DecodedStoredAddress::Defined(addr) => addr.get(),
+            hdf5_pure::DecodedStoredAddress::Undefined => u64::MAX,
+        })
+        .collect();
     file_space_info::replace_message(
         &path,
         extension,
@@ -738,7 +746,7 @@ fn a_version_0_message_s_persisted_free_space_is_recovered_and_reused() {
             Widths::EIGHT,
             file_space_info::ALL_PERSIST,
             version_1.threshold,
-            version_0_managers,
+            &v0_raw_managers,
         ),
     );
 
@@ -752,8 +760,8 @@ fn a_version_0_message_s_persisted_free_space_is_recovered_and_reused() {
                 threshold: 1,
                 page_size: FileSpacePageSize::DEFAULT,
                 page_end_meta_threshold: 0,
-                eoa_pre_fsm: std::fs::metadata(&path).unwrap().len(),
-                manager_addrs: version_1.manager_addrs,
+                eoa_pre_fsm: None,
+                manager_addrs: version_0_managers.to_vec(),
             }
             .build()
         )
@@ -1474,8 +1482,10 @@ fn a_paged_commit_tail_is_placed_in_free_space() {
             .expect("a persisting file records its managers")
             .manager_addrs
             .iter()
-            .copied()
-            .filter(|&a| a != u64::MAX)
+            .filter_map(|&a| match a {
+                hdf5_pure::DecodedStoredAddress::Defined(addr) => Some(addr.get()),
+                hdf5_pure::DecodedStoredAddress::Undefined => None,
+            })
             .collect();
         assert!(
             !managers.is_empty(),
@@ -1742,8 +1752,10 @@ fn a_persisting_commit_tail_is_placed_in_free_space() {
             .expect("a persisting file records its managers")
             .manager_addrs
             .iter()
-            .copied()
-            .filter(|&a| a != u64::MAX)
+            .filter_map(|&a| match a {
+                hdf5_pure::DecodedStoredAddress::Defined(addr) => Some(addr.get()),
+                hdf5_pure::DecodedStoredAddress::Undefined => None,
+            })
             .collect();
         assert!(
             !managers.is_empty(),

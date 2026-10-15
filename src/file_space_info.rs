@@ -10,7 +10,9 @@ pub use hdf5_pure_core::FileSpaceStrategy;
 pub(crate) use hdf5_pure_format::__private::DEFAULT_THRESHOLD;
 pub(crate) use hdf5_pure_format::__private::NUM_FILE_FSM_MANAGERS;
 
+use crate::address::DecodedStoredAddress;
 use crate::address::StoredAddress;
+use crate::address::StoredAddressExt;
 use crate::width::OffsetWidth;
 
 /// The settings of the free-space managers of a strategy that has them.
@@ -47,7 +49,7 @@ impl FreeSpaceSettings {
 /// This is the form the writer emits (no free-space manager blocks). The
 /// end-of-allocation address is undefined, all ones at `offsets`.
 pub(crate) fn non_persistent(
-    offsets: OffsetWidth,
+    _offsets: OffsetWidth,
     strategy: FileSpaceStrategy,
     threshold: u64,
     page_size: FileSpacePageSize,
@@ -58,8 +60,27 @@ pub(crate) fn non_persistent(
         threshold,
         page_size,
         page_end_meta_threshold: 0,
-        eoa_pre_fsm: StoredAddress::undefined(offsets).get(),
+        eoa_pre_fsm: Some(DecodedStoredAddress::Undefined),
         manager_addrs: Vec::new(),
+    }
+    .build()
+}
+
+/// Returns a persisting message with an undefined end-of-allocation address and undefined manager
+/// slots for a newly initialized file before free space is allocated.
+pub(crate) fn persistent_placeholder(
+    strategy: FileSpaceStrategy,
+    threshold: u64,
+    page_size: FileSpacePageSize,
+) -> FileSpaceInfo {
+    FileSpaceInfoFields {
+        strategy,
+        persist: true,
+        threshold,
+        page_size,
+        page_end_meta_threshold: 0,
+        eoa_pre_fsm: Some(DecodedStoredAddress::Undefined),
+        manager_addrs: vec![DecodedStoredAddress::Undefined; NUM_FILE_FSM_MANAGERS],
     }
     .build()
 }
@@ -75,21 +96,22 @@ pub(crate) fn non_persistent(
 /// `H5F__super_read` (`H5Fsuper.c`, HDF5 1.14.6) on a persisting file whose `eoa_pre_fsm` is
 /// undefined (issue #178).
 pub(crate) fn persistent_empty(
-    offsets: OffsetWidth,
+    _offsets: OffsetWidth,
     strategy: FileSpaceStrategy,
     threshold: u64,
     page_size: FileSpacePageSize,
     eoa_pre_fsm: u64,
 ) -> FileSpaceInfo {
-    let undefined = StoredAddress::undefined(offsets).get();
     FileSpaceInfoFields {
         strategy,
         persist: true,
         threshold,
         page_size,
         page_end_meta_threshold: 0,
-        eoa_pre_fsm,
-        manager_addrs: vec![undefined; NUM_FILE_FSM_MANAGERS],
+        eoa_pre_fsm: Some(DecodedStoredAddress::Defined(StoredAddress::new(
+            eoa_pre_fsm,
+        ))),
+        manager_addrs: vec![DecodedStoredAddress::Undefined; NUM_FILE_FSM_MANAGERS],
     }
     .build()
 }
@@ -101,22 +123,24 @@ pub(crate) fn persistent_empty(
 /// when it persists a non-empty free list: every tracked region lives in that
 /// one manager.
 pub(crate) fn persistent_single_manager(
-    offsets: OffsetWidth,
+    _offsets: OffsetWidth,
     strategy: FileSpaceStrategy,
     threshold: u64,
     page_size: FileSpacePageSize,
     manager0_addr: u64,
     eoa_pre_fsm: u64,
 ) -> FileSpaceInfo {
-    let mut manager_addrs = vec![StoredAddress::undefined(offsets).get(); NUM_FILE_FSM_MANAGERS];
-    manager_addrs[0] = manager0_addr;
+    let mut manager_addrs = vec![DecodedStoredAddress::Undefined; NUM_FILE_FSM_MANAGERS];
+    manager_addrs[0] = DecodedStoredAddress::Defined(StoredAddress::new(manager0_addr));
     FileSpaceInfoFields {
         strategy,
         persist: true,
         threshold,
         page_size,
         page_end_meta_threshold: 0,
-        eoa_pre_fsm,
+        eoa_pre_fsm: Some(DecodedStoredAddress::Defined(StoredAddress::new(
+            eoa_pre_fsm,
+        ))),
         manager_addrs,
     }
     .build()
@@ -137,14 +161,26 @@ pub(crate) fn persistent_managers(
     slots: [u64; NUM_FILE_FSM_MANAGERS],
     eoa_pre_fsm: u64,
 ) -> FileSpaceInfo {
+    let manager_addrs = slots
+        .into_iter()
+        .map(|addr| {
+            if addr == u64::MAX {
+                DecodedStoredAddress::Undefined
+            } else {
+                DecodedStoredAddress::Defined(StoredAddress::new(addr))
+            }
+        })
+        .collect();
     FileSpaceInfoFields {
         strategy,
         persist: true,
         threshold,
         page_size,
         page_end_meta_threshold: 0,
-        eoa_pre_fsm,
-        manager_addrs: slots.to_vec(),
+        eoa_pre_fsm: Some(DecodedStoredAddress::Defined(StoredAddress::new(
+            eoa_pre_fsm,
+        ))),
+        manager_addrs,
     }
     .build()
 }
@@ -164,16 +200,12 @@ mod tests {
     #[case::none(FileSpaceStrategy::None)]
     fn non_persistent_roundtrip_29_bytes(#[case] strategy: FileSpaceStrategy) {
         let info = non_persistent(OffsetWidth::Eight, strategy, 1, FileSpacePageSize::DEFAULT);
-        let bytes = hdf5_pure_format::__private::serialize_file_space_info(WIDTHS, &info).unwrap();
+        let bytes =
+            hdf5_pure_format::__private::serialize_file_space_info_v1(WIDTHS, &info).unwrap();
         assert_eq!(bytes.len(), 29, "non-persistent message is 29 bytes");
-        let parsed = hdf5_pure_format::__private::parse_file_space_info(
-            WIDTHS,
-            || Ok(StoredAddress::new(0)),
-            &bytes,
-        )
-        .unwrap();
+        let parsed = hdf5_pure_format::__private::parse_file_space_info(WIDTHS, &bytes).unwrap();
         assert_eq!(parsed, info);
-        assert_eq!(parsed.eoa_pre_fsm, u64::MAX);
+        assert_eq!(parsed.eoa_pre_fsm, Some(DecodedStoredAddress::Undefined));
         assert!(parsed.manager_addrs.is_empty());
     }
 
@@ -195,7 +227,7 @@ mod tests {
             FileSpacePageSize::DEFAULT,
         );
         assert_eq!(
-            hdf5_pure_format::__private::serialize_file_space_info(WIDTHS, &info).unwrap(),
+            hdf5_pure_format::__private::serialize_file_space_info_v1(WIDTHS, &info).unwrap(),
             expected
         );
     }
@@ -216,30 +248,37 @@ mod tests {
             65536,
         );
         assert!(info.persist);
-        assert_eq!(info.eoa_pre_fsm, 65536);
-        let bytes = hdf5_pure_format::__private::serialize_file_space_info(WIDTHS, &info).unwrap();
+        assert_eq!(
+            info.eoa_pre_fsm,
+            Some(DecodedStoredAddress::Defined(StoredAddress::new(65536)))
+        );
+        let bytes =
+            hdf5_pure_format::__private::serialize_file_space_info_v1(WIDTHS, &info).unwrap();
         // 29-byte head + 12 * 8 manager slots.
         assert_eq!(bytes.len(), 29 + NUM_FILE_FSM_MANAGERS * 8);
-        let parsed = hdf5_pure_format::__private::parse_file_space_info(
-            WIDTHS,
-            || Ok(StoredAddress::new(0)),
-            &bytes,
-        )
-        .unwrap();
+        let parsed = hdf5_pure_format::__private::parse_file_space_info(WIDTHS, &bytes).unwrap();
         assert_eq!(parsed, info);
-        assert_eq!(parsed.manager_addrs[0], 841);
-        assert_eq!(parsed.manager_addrs[2], 18384);
-        assert_eq!(parsed.manager_addrs[6], 806);
-        assert_eq!(parsed.manager_addrs[1], u64::MAX);
+        assert_eq!(
+            parsed.manager_addrs[0],
+            DecodedStoredAddress::Defined(StoredAddress::new(841))
+        );
+        assert_eq!(
+            parsed.manager_addrs[2],
+            DecodedStoredAddress::Defined(StoredAddress::new(18384))
+        );
+        assert_eq!(
+            parsed.manager_addrs[6],
+            DecodedStoredAddress::Defined(StoredAddress::new(806))
+        );
+        assert_eq!(parsed.manager_addrs[1], DecodedStoredAddress::Undefined);
     }
 
     #[rstest]
-    #[case::two(OffsetWidth::Two, 0xFFFF)]
-    #[case::four(OffsetWidth::Four, 0xFFFF_FFFF)]
-    #[case::eight(OffsetWidth::Eight, u64::MAX)]
+    #[case::two(OffsetWidth::Two)]
+    #[case::four(OffsetWidth::Four)]
+    #[case::eight(OffsetWidth::Eight)]
     fn a_single_manager_message_leaves_its_other_slots_undefined_at_the_offset_width(
         #[case] offsets: OffsetWidth,
-        #[case] undefined: u64,
     ) {
         let info = persistent_single_manager(
             offsets,
@@ -252,17 +291,20 @@ mod tests {
 
         assert_eq!(
             info.manager_addrs,
-            [vec![0x0a48], vec![undefined; NUM_FILE_FSM_MANAGERS - 1]].concat()
+            [
+                vec![DecodedStoredAddress::Defined(StoredAddress::new(0x0a48))],
+                vec![DecodedStoredAddress::Undefined; NUM_FILE_FSM_MANAGERS - 1]
+            ]
+            .concat()
         );
     }
 
     #[rstest]
-    #[case::two(OffsetWidth::Two, 0xFFFF)]
-    #[case::four(OffsetWidth::Four, 0xFFFF_FFFF)]
-    #[case::eight(OffsetWidth::Eight, u64::MAX)]
+    #[case::two(OffsetWidth::Two)]
+    #[case::four(OffsetWidth::Four)]
+    #[case::eight(OffsetWidth::Eight)]
     fn an_empty_message_records_its_managers_undefined_at_the_offset_width(
         #[case] offsets: OffsetWidth,
-        #[case] undefined: u64,
     ) {
         let info = persistent_empty(
             offsets,
@@ -274,7 +316,10 @@ mod tests {
 
         assert_eq!(
             (info.eoa_pre_fsm, info.manager_addrs),
-            (0x0a48, vec![undefined; NUM_FILE_FSM_MANAGERS])
+            (
+                Some(DecodedStoredAddress::Defined(StoredAddress::new(0x0a48))),
+                vec![DecodedStoredAddress::Undefined; NUM_FILE_FSM_MANAGERS]
+            )
         );
     }
 }
