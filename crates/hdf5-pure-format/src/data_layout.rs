@@ -23,6 +23,7 @@ use crate::error::OBJECT_HEADER_MESSAGE_MAX;
 use crate::extensible_array;
 use crate::fixed_array::FIXED_ARRAY_PAGE_BITS;
 use crate::message_type::MessageType;
+use crate::width::FormatWidths;
 use crate::width::LengthWidth;
 use crate::width::OffsetWidth;
 use crate::width::UintWidth;
@@ -61,23 +62,30 @@ pub enum DataLayout {
 impl DataLayout {
     /// Parses a data layout message from its body.
     ///
-    /// `offset_size` and `length_size` are the superblock's address and length
-    /// widths.
+    /// # Errors
+    ///
+    /// Returns [`FormatError::InvalidOffsetSize`] or [`FormatError::InvalidLengthSize`] if a width
+    /// is not 2, 4, or 8, and otherwise returns the errors
+    /// [`parse_with_widths`](Self::parse_with_widths) returns.
+    pub fn parse(data: &[u8], offset_size: u8, length_size: u8) -> Result<DataLayout, FormatError> {
+        Self::parse_with_widths(data, FormatWidths::from_sizes(offset_size, length_size)?)
+    }
+
+    /// Parses a data layout message using the file's validated format widths.
     ///
     /// # Errors
     ///
-    /// Returns [`FormatError::InvalidLayoutVersion`] if the version byte is
-    /// neither 3 nor 4, [`FormatError::InvalidLayoutClass`] if the class byte
-    /// is outside the storage classes that version defines,
-    /// [`FormatError::InvalidChunkIndexType`] if a version 4 chunked message
-    /// stores an indexing type outside 1 to 5, and
-    /// [`FormatError::UnexpectedEof`] if the message body ends inside a field.
-    pub fn parse(data: &[u8], offset_size: u8, length_size: u8) -> Result<DataLayout, FormatError> {
+    /// Returns [`FormatError::InvalidLayoutVersion`] if the version byte is neither 3 nor 4,
+    /// [`FormatError::InvalidLayoutClass`] if the class byte is outside the storage classes that
+    /// version defines, [`FormatError::InvalidChunkIndexType`] if a version 4 chunked message
+    /// stores an indexing type outside 1 to 5, or [`FormatError::UnexpectedEof`] if the message
+    /// body ends inside a field.
+    pub fn parse_with_widths(data: &[u8], widths: FormatWidths) -> Result<DataLayout, FormatError> {
         bytes::ensure_len(data, 0, 2)?;
         let layout_class = data[1];
         match LayoutVersion::try_from(data[0])? {
-            LayoutVersion::Three => Self::parse_v3(data, layout_class, offset_size, length_size),
-            LayoutVersion::Four => Self::parse_v4(data, layout_class, offset_size, length_size),
+            LayoutVersion::Three => Self::parse_v3(data, layout_class, widths),
+            LayoutVersion::Four => Self::parse_v4(data, layout_class, widths),
         }
     }
 
@@ -204,22 +212,21 @@ impl DataLayout {
     fn parse_v3(
         data: &[u8],
         layout_class: u8,
-        offset_size: u8,
-        length_size: u8,
+        widths: FormatWidths,
     ) -> Result<DataLayout, FormatError> {
         let pos = LAYOUT_PROPERTIES_OFFSET;
         match layout_class {
             LAYOUT_CLASS_COMPACT => Self::parse_compact(data),
-            LAYOUT_CLASS_CONTIGUOUS => Self::parse_contiguous(data, offset_size, length_size),
+            LAYOUT_CLASS_CONTIGUOUS => Self::parse_contiguous(data, widths),
             LAYOUT_CLASS_CHUNKED => {
                 bytes::ensure_len(data, pos, 1)?;
                 let dimensionality = data[pos] as usize;
                 let mut p = pos + 1;
                 // btree address first
-                let os = offset_size as usize;
+                let os = usize::from(widths.offsets.get());
                 bytes::ensure_len(data, p, os)?;
-                let address =
-                    bytes::read_optional_offset(data, p, offset_size)?.map(StoredAddress::new);
+                let address = bytes::read_optional_offset_width(data, p, widths.offsets)?
+                    .map(StoredAddress::new);
                 p += os;
                 // chunk dim sizes: dimensionality × 4 bytes each
                 bytes::ensure_len(data, p, dimensionality * 4)?;
@@ -242,13 +249,12 @@ impl DataLayout {
     fn parse_v4(
         data: &[u8],
         layout_class: u8,
-        offset_size: u8,
-        length_size: u8,
+        widths: FormatWidths,
     ) -> Result<DataLayout, FormatError> {
         let pos = LAYOUT_PROPERTIES_OFFSET;
         match layout_class {
             LAYOUT_CLASS_COMPACT => Self::parse_compact(data),
-            LAYOUT_CLASS_CONTIGUOUS => Self::parse_contiguous(data, offset_size, length_size),
+            LAYOUT_CLASS_CONTIGUOUS => Self::parse_contiguous(data, widths),
             LAYOUT_CLASS_CHUNKED => {
                 bytes::ensure_len(data, pos, 3)?;
                 let flags = ChunkedLayoutFlags::new(data[pos]);
@@ -293,7 +299,7 @@ impl DataLayout {
                 Ok(DataLayout::Chunked {
                     flags,
                     chunk_dimensions,
-                    index: parse_chunk_index(data, p, flags, offset_size, length_size)?,
+                    index: parse_chunk_index(data, p, flags, widths)?,
                 })
             }
             LAYOUT_CLASS_VIRTUAL => Ok(DataLayout::Virtual),
@@ -311,17 +317,14 @@ impl DataLayout {
         })
     }
 
-    fn parse_contiguous(
-        data: &[u8],
-        offset_size: u8,
-        length_size: u8,
-    ) -> Result<DataLayout, FormatError> {
+    fn parse_contiguous(data: &[u8], widths: FormatWidths) -> Result<DataLayout, FormatError> {
         let pos = LAYOUT_PROPERTIES_OFFSET;
-        let os = offset_size as usize;
-        bytes::ensure_len(data, pos, os + length_size as usize)?;
+        let os = usize::from(widths.offsets.get());
+        bytes::ensure_len(data, pos, os + usize::from(widths.lengths.get()))?;
         Ok(DataLayout::Contiguous {
-            address: bytes::read_optional_offset(data, pos, offset_size)?.map(StoredAddress::new),
-            size: bytes::read_length(data, pos + os, length_size)?,
+            address: bytes::read_optional_offset_width(data, pos, widths.offsets)?
+                .map(StoredAddress::new),
+            size: bytes::read_length_width(data, pos + os, widths.lengths)?,
         })
     }
 }
@@ -524,8 +527,7 @@ fn parse_chunk_index(
     data: &[u8],
     pos: usize,
     flags: ChunkedLayoutFlags,
-    offset_size: u8,
-    length_size: u8,
+    widths: FormatWidths,
 ) -> Result<ChunkIndexLayout, FormatError> {
     bytes::ensure_len(data, pos, 1)?;
     let index_type = data[pos];
@@ -538,14 +540,15 @@ fn parse_chunk_index(
     // record geometry from the B-tree header itself.
     let address = |info_len: usize| {
         Ok::<_, FormatError>(
-            bytes::read_optional_offset(data, info + info_len, offset_size)?
+            bytes::read_optional_offset_width(data, info + info_len, widths.offsets)?
                 .map(StoredAddress::new),
         )
     };
     Ok(match index_type {
         CHUNK_INDEX_SINGLE_CHUNK => {
-            let filtered = read_filtered_single_chunk(data, info, flags, length_size)?;
-            let info_len = filtered.map_or(0, |_| length_size as usize + FILTER_MASK_LEN);
+            let filtered = read_filtered_single_chunk(data, info, flags, widths.lengths)?;
+            let info_len =
+                filtered.map_or(0, |_| usize::from(widths.lengths.get()) + FILTER_MASK_LEN);
             ChunkIndexLayout::SingleChunk {
                 filtered,
                 address: address(info_len)?,
@@ -573,15 +576,15 @@ fn read_filtered_single_chunk(
     data: &[u8],
     pos: usize,
     flags: ChunkedLayoutFlags,
-    length_size: u8,
+    length_width: LengthWidth,
 ) -> Result<Option<FilteredSingleChunk>, FormatError> {
     if !flags.single_index_with_filter() {
         return Ok(None);
     }
-    let mask_at = pos + length_size as usize;
+    let mask_at = pos + usize::from(length_width.get());
     bytes::ensure_len(data, mask_at, FILTER_MASK_LEN)?;
     Ok(Some(FilteredSingleChunk {
-        filtered_size: bytes::read_length(data, pos, length_size)?,
+        filtered_size: bytes::read_length_width(data, pos, length_width)?,
         filter_mask: u32::from_le_bytes([
             data[mask_at],
             data[mask_at + 1],

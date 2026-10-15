@@ -2169,14 +2169,6 @@ impl FileInner {
         }
     }
 
-    fn offset_size(&self) -> u8 {
-        self.widths.offsets.get()
-    }
-
-    fn length_size(&self) -> u8 {
-        self.widths.lengths.get()
-    }
-
     /// Returns the entries of the group `hdr` describes, dispatching on the backend.
     ///
     /// Each entry holds the address the file stores for its child, which
@@ -2273,7 +2265,11 @@ impl FileInner {
     /// Read all attributes attached to an object header, dispatching on the
     /// backend.
     fn attrs_of(&self, hdr: &ObjectHeader) -> Result<HashMap<String, AttrValue>, Error> {
-        let (os, ls, base) = (self.offset_size(), self.length_size(), self.addresses());
+        let (os, ls, base) = (
+            self.widths.offsets.get(),
+            self.widths.lengths.get(),
+            self.addresses(),
+        );
         let attr_msgs = self.attr_messages_of(hdr)?;
         match &self.backend {
             Backend::Edit(m) => Ok(Self::with_engine(
@@ -6390,7 +6386,7 @@ the same commit to replace it",
         Ok(vl_data::vlen_string_payload_size(
             &raw,
             dataspace.num_elements(),
-            self.file.offset_size(),
+            self.file.widths.offsets.get(),
         )?)
     }
 
@@ -6444,8 +6440,8 @@ the same commit to replace it",
                 source,
                 &raw,
                 dataspace.num_elements(),
-                self.file.offset_size(),
-                self.file.length_size(),
+                self.file.widths.offsets.get(),
+                self.file.widths.lengths.get(),
                 self.file.addresses(),
                 options,
                 visitor,
@@ -6488,8 +6484,8 @@ the same commit to replace it",
                 source,
                 &raw,
                 dataspace.num_elements(),
-                self.file.offset_size(),
-                self.file.length_size(),
+                self.file.widths.offsets.get(),
+                self.file.widths.lengths.get(),
                 self.file.addresses(),
                 1, // a VL string's base type is a single byte
                 options,
@@ -6548,8 +6544,8 @@ the same commit to replace it",
                 source,
                 &raw,
                 dataspace.num_elements(),
-                self.file.offset_size(),
-                self.file.length_size(),
+                self.file.widths.offsets.get(),
+                self.file.widths.lengths.get(),
                 self.file.addresses(),
                 element_size,
                 options,
@@ -6623,8 +6619,8 @@ the same commit to replace it",
                     source,
                     &dense,
                     n,
-                    self.file.offset_size(),
-                    self.file.length_size(),
+                    self.file.widths.offsets.get(),
+                    self.file.widths.lengths.get(),
                     self.file.addresses(),
                     slot.element_size,
                     options,
@@ -6705,20 +6701,16 @@ the same commit to replace it",
     pub(crate) fn dataspace(&self) -> Result<Dataspace, Error> {
         let state = self.resolved()?;
         let msg = find_message(&state.header, MessageType::DATASPACE)?;
-        Ok(Dataspace::parse(
+        Ok(Dataspace::parse_with_length_width(
             &self.file.message_body(msg)?,
-            self.file.length_size(),
+            self.file.widths.lengths,
         )?)
     }
 
     pub(crate) fn data_layout(&self) -> Result<DataLayout, Error> {
         let state = self.resolved()?;
         let msg = find_message(&state.header, MessageType::DATA_LAYOUT)?;
-        Ok(DataLayout::parse(
-            &msg.data,
-            self.file.offset_size(),
-            self.file.length_size(),
-        )?)
+        Ok(DataLayout::parse_with_widths(&msg.data, self.file.widths)?)
     }
 
     /// A handle that can no longer be resolved reports no pipeline, the same
@@ -7019,7 +7011,7 @@ the same commit to replace it",
             // only those against the global heap keeps the bound — the same
             // resolution `read_string` runs over the whole dataset's references.
             let raw = self.read_raw_rows(start_row, num_rows)?;
-            let ref_size = 4 + self.file.offset_size() as usize + 4;
+            let ref_size = 4 + usize::from(self.file.widths.offsets.get()) + 4;
             let num_elements = (raw.len() / ref_size) as u64;
             let mut strings = Vec::new();
             self.file.with_source(|source| -> Result<(), Error> {
@@ -7027,8 +7019,8 @@ the same commit to replace it",
                     source,
                     &raw,
                     num_elements,
-                    self.file.offset_size(),
-                    self.file.length_size(),
+                    self.file.widths.offsets.get(),
+                    self.file.widths.lengths.get(),
                     self.file.addresses(),
                     VlenStringReadOptions::default(),
                     |string| strings.push(String::from(string)),
