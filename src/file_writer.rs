@@ -4364,7 +4364,7 @@ mod tests {
             sb.length_size,
         )
         .unwrap();
-        let attrs = crate::attribute::extract_attributes(&hdr, sb.length_size).unwrap();
+        let attrs = crate::attribute::extract_attributes(&hdr, LENGTH_WIDTH).unwrap();
         assert_eq!(attrs.len(), 1);
         assert_eq!(attrs[0].name, "scale");
     }
@@ -4489,8 +4489,8 @@ mod tests {
         let mut fw = FileWriter::new();
         fw.set_root_attr("version", AttrValue::I64(42));
         let bytes = fw.finish().unwrap();
-        let (sb, oh) = parse_file(&bytes);
-        let attrs = crate::attribute::extract_attributes(&oh, sb.length_size).unwrap();
+        let (_sb, oh) = parse_file(&bytes);
+        let attrs = crate::attribute::extract_attributes(&oh, LENGTH_WIDTH).unwrap();
         assert_eq!(attrs[0].name, "version");
     }
 
@@ -4616,7 +4616,7 @@ mod tests {
             .expect("a compact attribute set still carries an Attribute Info message");
         assert_eq!(info.fractal_heap_address, None);
         assert_eq!(info.btree_name_index_address, None);
-        let attrs = crate::attribute::extract_attributes(&hdr, sb.length_size).unwrap();
+        let attrs = crate::attribute::extract_attributes(&hdr, LENGTH_WIDTH).unwrap();
         assert_eq!(attrs.len(), 5);
     }
 

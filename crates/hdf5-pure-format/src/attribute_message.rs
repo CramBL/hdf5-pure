@@ -19,7 +19,7 @@ use crate::message_type::MessageType;
 use crate::shared_message::DatatypeLocation;
 use crate::shared_message::SharedResolver;
 use crate::shared_message::Unresolvable;
-use crate::width::OffsetWidth;
+use crate::width::{LengthWidth, OffsetWidth};
 
 /// An Attribute message: the name, datatype, dataspace, and data of one attribute.
 ///
@@ -91,22 +91,58 @@ impl AttributeMessage {
     /// Parses an attribute message without access to the file it came from.
     ///
     /// A message whose datatype or dataspace is shared cannot be parsed this way. Use
-    /// [`parse_resolving`](Self::parse_resolving) where the file is available. `length_size` is
-    /// the width of a length the superblock stores.
+    /// [`parse_resolving`](Self::parse_resolving) where the file is available.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::InvalidLengthSize`] if `length_size` is not 2, 4, or 8. Returns
+    /// [`FormatError::UnresolvedSharedMessage`] if the flags byte marks the datatype or dataspace
+    /// as shared, and the errors of [`parse_with_length_width`](Self::parse_with_length_width) in
+    /// the cases it lists.
+    pub fn parse(data: &[u8], length_size: u8) -> Result<AttributeMessage, FormatError> {
+        Self::parse_with_length_width(data, LengthWidth::try_from(length_size)?)
+    }
+
+    /// Parses an attribute message using the file's validated length width.
+    ///
+    /// A message whose datatype or dataspace is shared cannot be parsed this way. Use
+    /// [`parse_resolving_with_length_width`](Self::parse_resolving_with_length_width) where the
+    /// file is available.
     ///
     /// # Errors
     ///
     /// Returns [`FormatError::UnresolvedSharedMessage`] if the flags byte marks the datatype or
-    /// dataspace as shared, and the errors of [`parse_resolving`](Self::parse_resolving) in the
-    /// cases it lists.
-    pub fn parse(data: &[u8], length_size: u8) -> Result<AttributeMessage, FormatError> {
-        Self::parse_resolving(data, length_size, &Unresolvable)
+    /// dataspace as shared, and the errors of
+    /// [`parse_resolving_with_length_width`](Self::parse_resolving_with_length_width) in the cases
+    /// it lists.
+    pub fn parse_with_length_width(
+        data: &[u8],
+        length_width: LengthWidth,
+    ) -> Result<AttributeMessage, FormatError> {
+        Self::parse_resolving_with_length_width(data, length_width, &Unresolvable)
     }
 
     /// Parses an attribute message, and resolves its datatype or dataspace through `resolver`
     /// where the flags byte marks the field as shared.
     ///
-    /// `length_size` is the width of a length the superblock stores.
+    /// # Errors
+    ///
+    /// Returns [`FormatError::InvalidLengthSize`] if `length_size` is not 2, 4, or 8. Returns the
+    /// errors of
+    /// [`parse_resolving_with_length_width`](Self::parse_resolving_with_length_width) in the cases
+    /// it lists.
+    pub fn parse_resolving(
+        data: &[u8],
+        length_size: u8,
+        resolver: &dyn SharedResolver,
+    ) -> Result<AttributeMessage, FormatError> {
+        Self::parse_resolving_with_length_width(data, LengthWidth::try_from(length_size)?, resolver)
+    }
+
+    /// Parses an attribute message using the file's validated length width.
+    ///
+    /// The parser resolves a datatype or dataspace through `resolver` where the flags byte marks
+    /// the field as shared.
     ///
     /// # Errors
     ///
@@ -117,16 +153,16 @@ impl AttributeMessage {
     /// `u64`, and [`FormatError::ValueTooLargeForPlatform`] if the product does not fit a `usize`.
     /// Returns the error of `resolver` if it fails, and the error of the datatype or dataspace
     /// parser if the field does not parse.
-    pub fn parse_resolving(
+    pub fn parse_resolving_with_length_width(
         data: &[u8],
-        length_size: u8,
+        length_width: LengthWidth,
         resolver: &dyn SharedResolver,
     ) -> Result<AttributeMessage, FormatError> {
-        Self::parse_resolving_at(data, length_size, resolver).map(|(attr, _)| attr)
+        Self::parse_resolving_at_with_length_width(data, length_width, resolver)
+            .map(|(attr, _)| attr)
     }
 
-    /// Parses an attribute message as [`parse_resolving`](Self::parse_resolving) does, and returns
-    /// the offset in `data` at which the element bytes start.
+    /// Parses an attribute message and returns the offset at which the element bytes start.
     ///
     /// A caller that rewrites an element in the file, such as a stored object reference, finds it
     /// through this offset. Version 1 pads the name, datatype, and dataspace fields to multiples of
@@ -135,24 +171,52 @@ impl AttributeMessage {
     ///
     /// # Errors
     ///
-    /// Returns the errors of [`parse_resolving`](Self::parse_resolving) in the cases it lists.
+    /// Returns [`FormatError::InvalidLengthSize`] if `length_size` is not 2, 4, or 8. Returns the
+    /// errors of
+    /// [`parse_resolving_at_with_length_width`](Self::parse_resolving_at_with_length_width) in the
+    /// cases it lists.
     pub fn parse_resolving_at(
         data: &[u8],
         length_size: u8,
+        resolver: &dyn SharedResolver,
+    ) -> Result<(AttributeMessage, usize), FormatError> {
+        Self::parse_resolving_at_with_length_width(
+            data,
+            LengthWidth::try_from(length_size)?,
+            resolver,
+        )
+    }
+
+    /// Parses an attribute message and returns the offset at which the element bytes start.
+    ///
+    /// The parser uses the file's validated length width and resolves shared datatype or dataspace
+    /// fields through `resolver`.
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors of
+    /// [`parse_resolving_with_length_width`](Self::parse_resolving_with_length_width) in the cases
+    /// it lists.
+    pub fn parse_resolving_at_with_length_width(
+        data: &[u8],
+        length_width: LengthWidth,
         resolver: &dyn SharedResolver,
     ) -> Result<(AttributeMessage, usize), FormatError> {
         bytes::ensure_len(data, 0, 2)?;
         let version = data[0];
 
         match version {
-            VERSION_ONE => Self::parse_v1(data, length_size),
-            VERSION_TWO => Self::parse_v2(data, length_size, resolver),
-            VERSION_THREE => Self::parse_v3(data, length_size, resolver),
+            VERSION_ONE => Self::parse_v1(data, length_width),
+            VERSION_TWO => Self::parse_v2(data, length_width, resolver),
+            VERSION_THREE => Self::parse_v3(data, length_width, resolver),
             _ => Err(FormatError::InvalidAttributeVersion(version)),
         }
     }
 
-    fn parse_v1(data: &[u8], length_size: u8) -> Result<(AttributeMessage, usize), FormatError> {
+    fn parse_v1(
+        data: &[u8],
+        length_width: LengthWidth,
+    ) -> Result<(AttributeMessage, usize), FormatError> {
         // version(1) + reserved(1) + name_size(2) + datatype_size(2) + dataspace_size(2) = 8
         bytes::ensure_len(data, 0, V1_V2_PREFIX_SIZE)?;
         let name_size = u16::from_le_bytes([data[2], data[3]]) as usize;
@@ -174,7 +238,8 @@ impl AttributeMessage {
 
         // Dataspace (padded to 8-byte boundary)
         bytes::ensure_len(data, pos, dataspace_size)?;
-        let dataspace = Dataspace::parse(&data[pos..pos + dataspace_size], length_size)?;
+        let dataspace =
+            Dataspace::parse_with_length_width(&data[pos..pos + dataspace_size], length_width)?;
         pos += pad8(dataspace_size);
 
         // Raw data: `num_elements` × `type_size` bytes
@@ -194,7 +259,7 @@ impl AttributeMessage {
 
     fn parse_v2(
         data: &[u8],
-        length_size: u8,
+        length_width: LengthWidth,
         resolver: &dyn SharedResolver,
     ) -> Result<(AttributeMessage, usize), FormatError> {
         // version(1) + flags(1) + name_size(2) + datatype_size(2) + dataspace_size(2) = 8
@@ -222,7 +287,7 @@ impl AttributeMessage {
         pos += dataspace_size;
 
         let (datatype, dataspace, datatype_location) =
-            decode_type_and_space(dt_field, ds_field, flags, length_size, resolver)?;
+            decode_type_and_space(dt_field, ds_field, flags, length_width, resolver)?;
         let raw_data = compute_raw_data(data, pos, &dataspace, &datatype)?;
 
         Ok((
@@ -239,7 +304,7 @@ impl AttributeMessage {
 
     fn parse_v3(
         data: &[u8],
-        length_size: u8,
+        length_width: LengthWidth,
         resolver: &dyn SharedResolver,
     ) -> Result<(AttributeMessage, usize), FormatError> {
         // version(1) + flags(1) + name_size(2) + datatype_size(2) + dataspace_size(2) + encoding(1) = 9
@@ -268,7 +333,7 @@ impl AttributeMessage {
         pos += dataspace_size;
 
         let (datatype, dataspace, datatype_location) =
-            decode_type_and_space(dt_field, ds_field, flags, length_size, resolver)?;
+            decode_type_and_space(dt_field, ds_field, flags, length_width, resolver)?;
         let raw_data = compute_raw_data(data, pos, &dataspace, &datatype)?;
 
         Ok((
@@ -404,7 +469,7 @@ fn decode_type_and_space(
     dt_field: &[u8],
     ds_field: &[u8],
     flags: u8,
-    length_size: u8,
+    length_width: LengthWidth,
     resolver: &dyn SharedResolver,
 ) -> Result<(Datatype, Dataspace, DatatypeLocation), FormatError> {
     // The C library rejects a flags byte that sets any other bit (`H5Oattr.c`, HDF5 2.1.0).
@@ -437,9 +502,9 @@ fn decode_type_and_space(
 
     let dataspace = if flags & FLAG_SHARED_DATASPACE != 0 {
         let body = resolver.resolve(ds_field, MessageType::DATASPACE)?;
-        Dataspace::parse(&body, length_size)?
+        Dataspace::parse_with_length_width(&body, length_width)?
     } else {
-        Dataspace::parse(ds_field, length_size)?
+        Dataspace::parse_with_length_width(ds_field, length_width)?
     };
 
     Ok((datatype, dataspace, location))

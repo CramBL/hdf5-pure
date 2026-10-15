@@ -645,11 +645,13 @@ fn scan_object<S: Source + ?Sized>(
                 // the object unproven rather than proven reference-free.
                 MessageType::ATTRIBUTE if shared => out.fully_read = false,
                 MessageType::ATTRIBUTE => {
-                    let Ok((attr, data_off)) = AttributeMessage::parse_resolving_at(
-                        &region[body..body_end],
-                        crate::file_writer::LENGTH_SIZE,
-                        &resolver,
-                    ) else {
+                    let Ok((attr, data_off)) =
+                        AttributeMessage::parse_resolving_at_with_length_width(
+                            &region[body..body_end],
+                            crate::file_writer::LENGTH_WIDTH,
+                            &resolver,
+                        )
+                    else {
                         out.fully_read = false;
                         p = body_end;
                         continue;

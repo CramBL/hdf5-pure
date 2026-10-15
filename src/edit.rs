@@ -8634,9 +8634,9 @@ impl WriteEngine {
                 // creation-order metadata. Only a *defined* heap address is real
                 // dense (fractal-heap) storage. A message that cannot be parsed
                 // is refused conservatively.
-                let ai = crate::attribute_info::AttributeInfoMessage::parse(
+                let ai = crate::attribute_info::AttributeInfoMessage::parse_with_offset_width(
                     &region[body..body_end],
-                    OFFSET_SIZE,
+                    crate::file_writer::OFFSET_WIDTH,
                 )?;
                 if ai.fractal_heap_address.is_some() {
                     dense = true;
@@ -12869,7 +12869,10 @@ fn bump_creation_index(index: u16) -> Result<u16, Error> {
 /// Mirrors the copy path's dense detection so the compact-attribute editors accept
 /// the undefined-address message that nearly every real-world object carries.
 pub(crate) fn attribute_info_is_dense(body: &[u8]) -> bool {
-    match crate::attribute_info::AttributeInfoMessage::parse(body, OFFSET_SIZE) {
+    match crate::attribute_info::AttributeInfoMessage::parse_with_offset_width(
+        body,
+        crate::file_writer::OFFSET_WIDTH,
+    ) {
         Ok(ai) => ai.fractal_heap_address.is_some(),
         Err(_) => true,
     }
@@ -12946,7 +12949,10 @@ fn find_attribute_info(
     let mut p = 0;
     while let Some((msg_type, body, body_end)) = region.next_message(p)? {
         if msg_type == MessageType::ATTRIBUTE_INFO
-            && let Ok(info) = AttributeInfoMessage::parse(&region[body..body_end], OFFSET_SIZE)
+            && let Ok(info) = AttributeInfoMessage::parse_with_offset_width(
+                &region[body..body_end],
+                crate::file_writer::OFFSET_WIDTH,
+            )
         {
             return Ok(Some((p, body..body_end, info)));
         }
@@ -13029,9 +13035,10 @@ fn put_attr_message(
             // Bumping the recorded maximum re-encodes the message, since a
             // header that was not recording one at all needs the field added.
             MessageType::ATTRIBUTE_INFO if new_max.is_some() => {
-                if let Ok(mut info) =
-                    AttributeInfoMessage::parse(&region[msg_body..body_end], OFFSET_SIZE)
-                {
+                if let Ok(mut info) = AttributeInfoMessage::parse_with_offset_width(
+                    &region[msg_body..body_end],
+                    crate::file_writer::OFFSET_WIDTH,
+                ) {
                     info.max_creation_index = new_max;
                     info.indexes_creation_order |= layout.indexes_creation_order();
                     let encoded = info.serialize(crate::file_writer::OFFSET_WIDTH);
@@ -13630,9 +13637,9 @@ fn reject_foreign_addresses(region: &OhRegion) -> Result<(), Error> {
                         "an attribute with a committed (shared) datatype cannot be copied to another file yet",
                     ));
                 }
-                let attr = crate::attribute::AttributeMessage::parse(
+                let attr = crate::attribute::AttributeMessage::parse_with_length_width(
                     &region[body..body_end],
-                    LENGTH_SIZE,
+                    crate::file_writer::LENGTH_WIDTH,
                 )?;
                 if datatype_holds_file_address(&attr.datatype) {
                     return Err(Error::EditUnsupported(
@@ -13905,9 +13912,9 @@ fn screen_copied_references(
                 // datatype field can name a committed message, which the record's
                 // shared flag does not report — that flag describes the attribute
                 // message, not the fields inside it — and `parse` refuses one.
-                let attr = crate::attribute::AttributeMessage::parse_resolving(
+                let attr = crate::attribute::AttributeMessage::parse_resolving_with_length_width(
                     &region[body..body_end],
-                    LENGTH_SIZE,
+                    crate::file_writer::LENGTH_WIDTH,
                     &resolver,
                 )
                 .map_err(|source| Error::CopyScreenUnreadable {

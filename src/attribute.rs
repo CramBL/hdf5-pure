@@ -36,6 +36,8 @@ use crate::shared_message::SourceResolver;
 use crate::sohm::SohmTable;
 use crate::source::Source;
 use crate::source::SourceMetadata;
+#[cfg(test)]
+use crate::width::LengthWidth;
 use crate::width::{FormatWidths, OffsetWidth};
 
 /// Returns the v2 B-tree allocations owned by a dense attribute set.
@@ -91,12 +93,12 @@ pub(crate) fn collect_dense_attribute_index_storage_extents<S: Source + ?Sized>(
 #[cfg(test)]
 pub fn extract_attributes(
     header: &ObjectHeader,
-    length_size: u8,
+    length_width: LengthWidth,
 ) -> Result<Vec<AttributeMessage>, FormatError> {
     let mut attrs = Vec::new();
     for msg in &header.messages {
         if msg.msg_type == MessageType::ATTRIBUTE {
-            let attr = AttributeMessage::parse(&msg.data, length_size)?;
+            let attr = AttributeMessage::parse_with_length_width(&msg.data, length_width)?;
             attrs.push(attr);
         }
     }
@@ -129,9 +131,17 @@ pub fn extract_attributes_full(
                 // The whole attribute message is shared: resolve the reference to
                 // get the message, which may itself name a committed datatype.
                 let resolved = resolver.resolve(&msg.data, MessageType::ATTRIBUTE)?;
-                AttributeMessage::parse_resolving(&resolved, widths.lengths.get(), &resolver)?
+                AttributeMessage::parse_resolving_with_length_width(
+                    &resolved,
+                    widths.lengths,
+                    &resolver,
+                )?
             } else {
-                AttributeMessage::parse_resolving(&msg.data, widths.lengths.get(), &resolver)?
+                AttributeMessage::parse_resolving_with_length_width(
+                    &msg.data,
+                    widths.lengths,
+                    &resolver,
+                )?
             };
             attrs.push(attr);
         }
@@ -226,9 +236,17 @@ pub fn extract_stored_attributes_from_source<S: Source + ?Sized>(
         if msg.msg_type == MessageType::ATTRIBUTE {
             let attr = if msg.flags.is_shared() {
                 let resolved = resolver.resolve(&msg.data, MessageType::ATTRIBUTE)?;
-                AttributeMessage::parse_resolving(&resolved, widths.lengths.get(), &resolver)?
+                AttributeMessage::parse_resolving_with_length_width(
+                    &resolved,
+                    widths.lengths,
+                    &resolver,
+                )?
             } else {
-                AttributeMessage::parse_resolving(&msg.data, widths.lengths.get(), &resolver)?
+                AttributeMessage::parse_resolving_with_length_width(
+                    &msg.data,
+                    widths.lengths,
+                    &resolver,
+                )?
             };
             attrs.push(StoredAttribute {
                 message: attr,
@@ -264,7 +282,7 @@ fn find_attribute_info(
 ) -> Result<Option<AttributeInfoMessage>, FormatError> {
     for msg in &header.messages {
         if msg.msg_type == MessageType::ATTRIBUTE_INFO {
-            let info = AttributeInfoMessage::parse(&msg.data, offset_width.get())?;
+            let info = AttributeInfoMessage::parse_with_offset_width(&msg.data, offset_width)?;
             return Ok(Some(info));
         }
     }
@@ -319,7 +337,11 @@ fn extract_dense_attributes(
 
         // The data in the heap is a complete attribute message, and it names a
         // committed datatype the same way a compact one does.
-        let attr = AttributeMessage::parse_resolving(&attr_data, widths.lengths.get(), &resolver)?;
+        let attr = AttributeMessage::parse_resolving_with_length_width(
+            &attr_data,
+            widths.lengths,
+            &resolver,
+        )?;
         attrs.push(attr);
     }
 
@@ -349,7 +371,11 @@ fn extract_dense_attributes_from_source<S: Source + ?Sized>(
         |_flags| true,
         |data, creation_index| {
             attrs.push(StoredAttribute {
-                message: AttributeMessage::parse_resolving(data, widths.lengths.get(), &resolver)?,
+                message: AttributeMessage::parse_resolving_with_length_width(
+                    data,
+                    widths.lengths,
+                    &resolver,
+                )?,
                 creation_index,
             });
             Ok(())
@@ -769,7 +795,7 @@ mod tests {
             birth_time: None,
         };
 
-        let attrs = extract_attributes(&header, 8).unwrap();
+        let attrs = extract_attributes(&header, LengthWidth::Eight).unwrap();
         assert_eq!(attrs.len(), 3);
         assert_eq!(attrs[0].name, "attr0");
         assert_eq!(attrs[1].name, "attr1");

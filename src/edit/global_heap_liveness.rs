@@ -26,7 +26,6 @@ use crate::vl_data;
 use crate::vl_data::EmbeddedVlSlot;
 use crate::vl_data::VlElement;
 
-use super::LENGTH_SIZE;
 use super::OFFSET_SIZE;
 use super::WriteEngine;
 
@@ -339,7 +338,7 @@ impl WriteEngine {
         data: &[u8],
         referenced: &mut BTreeSet<u64>,
     ) -> Result<bool, FormatError> {
-        let info = AttributeInfoMessage::parse(data, OFFSET_SIZE)?;
+        let info = AttributeInfoMessage::parse_with_offset_width(data, self.widths().offsets)?;
         let Some(heap) = info.fractal_heap_address else {
             return Ok(true);
         };
@@ -381,7 +380,8 @@ impl WriteEngine {
         data: &[u8],
         referenced: &mut BTreeSet<u64>,
     ) -> Result<bool, FormatError> {
-        let attribute = match AttributeMessage::parse(data, LENGTH_SIZE) {
+        let attribute = match AttributeMessage::parse_with_length_width(data, self.widths().lengths)
+        {
             Ok(attribute) => attribute,
             Err(FormatError::UnresolvedSharedMessage(_)) => return Ok(false),
             Err(error) => return Err(error),
