@@ -183,7 +183,7 @@ impl WriteEngine {
         if pipeline.is_some_and(|m| m.flags.is_shared()) {
             return Ok(false);
         }
-        let layout = DataLayout::parse(&layout.data, OFFSET_SIZE, LENGTH_SIZE)?;
+        let layout = DataLayout::parse_with_widths(&layout.data, self.widths())?;
         let (datatype, _) = hdf5_pure_format::__private::parse_datatype(&datatype.data)?;
         if matches!(layout, DataLayout::Virtual) {
             return Ok(false);
@@ -194,7 +194,7 @@ impl WriteEngine {
             HeapReferences::Unsupported => return Ok(false),
         };
         self.collect_fill_value_collections(messages, &slots, referenced)?;
-        let dataspace = Dataspace::parse(&dataspace.data, LENGTH_SIZE)?;
+        let dataspace = Dataspace::parse_with_length_width(&dataspace.data, self.widths().lengths)?;
         let pipeline = pipeline
             .map(|m| crate::filter_pipeline::parse_filter_pipeline(&m.data))
             .transpose()?;

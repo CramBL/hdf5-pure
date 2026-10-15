@@ -4,6 +4,7 @@ use alloc::vec::Vec;
 
 use crate::bytes;
 use crate::error::FormatError;
+use crate::width::LengthWidth;
 
 /// Type of dataspace.
 #[derive(Debug, Clone, PartialEq)]
@@ -32,16 +33,25 @@ pub struct Dataspace {
 impl Dataspace {
     /// Parses a dataspace message body from raw bytes.
     ///
-    /// `length_size` is needed for dimension value width (from superblock).
+    /// # Errors
+    ///
+    /// Returns [`FormatError::InvalidLengthSize`] if `length_size` is not 2, 4, or 8, and otherwise
+    /// returns the errors [`parse_with_length_width`](Self::parse_with_length_width) returns.
+    pub fn parse(data: &[u8], length_size: u8) -> Result<Dataspace, FormatError> {
+        Self::parse_with_length_width(data, LengthWidth::try_from(length_size)?)
+    }
+
+    /// Parses a dataspace message body using the file's validated length width.
     ///
     /// # Errors
     ///
     /// Returns [`FormatError::InvalidDataspaceVersion`] if the version is unsupported,
     /// [`FormatError::InvalidDataspaceType`] if a version 2 type byte is invalid, or
-    /// [`FormatError::InvalidLengthSize`] if the rank is nonzero and `length_size` is not 2, 4,
-    /// or 8. Returns
     /// [`FormatError::UnexpectedEof`] if the message ends within a field.
-    pub fn parse(data: &[u8], length_size: u8) -> Result<Dataspace, FormatError> {
+    pub fn parse_with_length_width(
+        data: &[u8],
+        length_width: LengthWidth,
+    ) -> Result<Dataspace, FormatError> {
         bytes::ensure_len(data, 0, V2_HEADER_SIZE)?;
 
         let version = data[0];
@@ -73,13 +83,13 @@ impl Dataspace {
             _ => return Err(FormatError::InvalidDataspaceVersion(version)),
         };
 
-        let ls = length_size as usize;
+        let ls = usize::from(length_width.get());
         let mut pos = header_size;
 
         // Read current dimensions
         let mut dimensions = Vec::with_capacity(rank as usize);
         for _ in 0..rank {
-            let dim = bytes::read_length(data, pos, length_size)?;
+            let dim = bytes::read_length_width(data, pos, length_width)?;
             dimensions.push(dim);
             pos += ls;
         }
@@ -88,10 +98,10 @@ impl Dataspace {
         let max_dimensions = if flags & MAX_DIMENSIONS_FLAG != 0 {
             let mut max_dims = Vec::with_capacity(rank as usize);
             for _ in 0..rank {
-                max_dims.push(max_extent_from_length(bytes::read_length(
+                max_dims.push(max_extent_from_length(bytes::read_length_width(
                     data,
                     pos,
-                    length_size,
+                    length_width,
                 )?));
                 pos += ls;
             }
