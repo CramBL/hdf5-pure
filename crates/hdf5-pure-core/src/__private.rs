@@ -42,8 +42,8 @@ pub struct FileSpaceInfoFields {
     pub threshold: u64,
     pub page_size: FileSpacePageSize,
     pub page_end_meta_threshold: u16,
-    pub eoa_pre_fsm: u64,
-    pub manager_addrs: Vec<u64>,
+    pub eoa_pre_fsm: Option<DecodedStoredAddress>,
+    pub manager_addrs: Vec<DecodedStoredAddress>,
 }
 
 impl FileSpaceInfoFields {

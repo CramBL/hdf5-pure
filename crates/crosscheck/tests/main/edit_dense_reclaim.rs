@@ -16,9 +16,7 @@ use hdf5_pure::Error;
 use hdf5_pure::File;
 use hdf5_pure::FormatError;
 use hdf5_pure::MessageType;
-use hdf5_pure_core::__private::StoredAddressExt;
 use hdf5_pure_core::OffsetWidth;
-use hdf5_pure_core::StoredAddress;
 use hdf5_pure_format::__private::AccessMode;
 use hdf5_pure_format::__private::AttributeInfoMessage;
 use hdf5_pure_format::__private::FormatWidths;
@@ -784,13 +782,18 @@ fn free_space_manager_blocks(path: &Path) -> Vec<(u64, u64)> {
         .unwrap()
         .manager_addrs
         .iter()
-        .filter(|&&addr| !StoredAddress::new(addr).is_undefined(OffsetWidth::Eight))
-        .flat_map(|&addr| {
-            let header =
-                FreeSpaceManagerHeader::parse(widths, &bytes[usize::try_from(addr).unwrap()..])
-                    .unwrap();
+        .filter_map(|&addr| match addr {
+            hdf5_pure::DecodedStoredAddress::Defined(stored) => Some(stored),
+            hdf5_pure::DecodedStoredAddress::Undefined => None,
+        })
+        .flat_map(|stored| {
+            let header = FreeSpaceManagerHeader::parse(
+                widths,
+                &bytes[usize::try_from(stored.get()).unwrap()..],
+            )
+            .unwrap();
             let mut blocks = vec![(
-                addr,
+                stored.get(),
                 hdf5_pure_format::__private::free_space_manager_header_len(widths),
             )];
             if !header.section_list_addr().is_undefined(OffsetWidth::Eight) {
@@ -846,25 +849,21 @@ fn manager_sections(path: &Path, manager: usize) -> Vec<(u64, u64)> {
         .file_space_info()
         .unwrap()
         .manager_addrs[manager];
-    if StoredAddress::new(addr).is_undefined(OffsetWidth::Eight) {
+    let hdf5_pure::DecodedStoredAddress::Defined(stored) = addr else {
         return Vec::new();
-    }
+    };
     let header =
-        FreeSpaceManagerHeader::parse(widths, &bytes[usize::try_from(addr).unwrap()..]).unwrap();
+        FreeSpaceManagerHeader::parse(widths, &bytes[usize::try_from(stored.get()).unwrap()..])
+            .unwrap();
     if header.section_list_addr().is_undefined(OffsetWidth::Eight) {
         return Vec::new();
     }
     let at = usize::try_from(header.section_list_addr().get()).unwrap();
-    hdf5_pure_format::__private::parse_section_info(
-        widths,
-        &bytes[at..],
-        StoredAddress::new(addr),
-        &header,
-    )
-    .unwrap()
-    .into_iter()
-    .map(|section| (section.addr.get(), section.size))
-    .collect()
+    hdf5_pure_format::__private::parse_section_info(widths, &bytes[at..], stored, &header)
+        .unwrap()
+        .into_iter()
+        .map(|section| (section.addr.get(), section.size))
+        .collect()
 }
 
 fn assert_page_classes(path: &Path, page_size: u64, allocations: &[(u64, u64, PageClass)]) {

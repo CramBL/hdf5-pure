@@ -6,6 +6,7 @@ use hdf5_pure::File;
 use hdf5_pure::FileBuilder;
 use hdf5_pure::FileSpaceStrategy;
 use hdf5_pure::SpaceOwnership;
+use hdf5_pure_core::__private::StoredAddressExt;
 use rstest::rstest;
 use test_util::free_space;
 use test_util::temp;
@@ -120,8 +121,10 @@ fn every_commit_keeps_the_userblock_and_writes_stored_manager_addresses(
             .unwrap()
             .manager_addrs
             .iter()
-            .copied()
-            .filter(|&addr| addr != u64::MAX)
+            .filter_map(|&addr| match addr {
+                hdf5_pure::DecodedStoredAddress::Defined(stored) => Some(stored.get()),
+                hdf5_pure::DecodedStoredAddress::Undefined => None,
+            })
             .collect::<BTreeSet<_>>();
         let bytes = std::fs::read(&path).unwrap();
         assert_eq!(
@@ -197,7 +200,9 @@ fn a_deletion_that_frees_the_end_of_the_file_truncates_it(
     if strategy == Strategy::Page {
         assert_eq!(
             file.file_space_info().unwrap().eoa_pre_fsm,
-            truncated - userblock
+            Some(hdf5_pure::DecodedStoredAddress::Defined(
+                hdf5_pure::StoredAddress::new(truncated - userblock)
+            ))
         );
         assert_eq!((truncated - userblock) % PAGE, 0);
     }

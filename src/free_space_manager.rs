@@ -15,9 +15,11 @@ use hdf5_pure_format::__private::SECTION_CLASS_SIMPLE;
 use hdf5_pure_format::__private::SECTION_CLASS_SMALL;
 use hdf5_pure_space::__private::{ManagerKind, ManagerSections};
 
+use crate::address::BaseAddress;
 use crate::address::BaseAddressExt;
+use crate::address::DecodedStoredAddress;
+use crate::address::StoredAddress;
 use crate::address::StoredAddressExt;
-use crate::address::{BaseAddress, StoredAddress};
 use crate::convert::Narrow;
 use crate::error::FormatError;
 use crate::file_space_info::FileSpacePageSize;
@@ -27,9 +29,8 @@ use crate::width::FormatWidths;
 
 /// Reads the free sections of the managers at `manager_addrs` from the file `data`.
 ///
-/// Adds `base`, the file's base address, to every address the file stores. Skips a manager whose
-/// address is undefined at the offset width of `widths`, and a manager whose section list address
-/// is undefined.
+/// Adds `base`, the file's base address, to every address the file stores. Skips an undefined
+/// manager address, and a manager whose section list address is undefined.
 ///
 /// # Errors
 ///
@@ -43,14 +44,13 @@ pub(crate) fn read_persisted_sections(
     data: &[u8],
     widths: FormatWidths,
     base: BaseAddress,
-    manager_addrs: &[u64],
+    manager_addrs: &[DecodedStoredAddress],
 ) -> Result<Vec<FreeSection>, FormatError> {
     let mut sections = Vec::new();
     for &addr in manager_addrs {
-        let addr = StoredAddress::new(addr);
-        if addr.is_undefined(widths.offsets) {
+        let DecodedStoredAddress::Defined(addr) = addr else {
             continue;
-        }
+        };
         let a = base.absolute(addr)?.to_usize()?;
         let header = FreeSpaceManagerHeader::parse(
             widths,
@@ -100,9 +100,8 @@ pub(crate) type PersistedSections = (Vec<FreeSection>, Vec<(u64, u64)>);
 /// Recovers free sections and complete manager allocations through a random-access
 /// [`Source`](crate::Source).
 ///
-/// Adds `base` to stored addresses and skips undefined manager or section list addresses at the
-/// offset width of `widths`. Reads each section list's used bytes and records its allocated
-/// length for reclamation.
+/// Adds `base` to stored addresses and skips undefined manager or section list addresses.
+/// Reads each section list's used bytes and records its allocated length for reclamation.
 ///
 /// # Errors
 ///
@@ -115,16 +114,15 @@ pub(crate) fn read_persisted_sections_source<S: crate::source::Source>(
     src: &S,
     widths: FormatWidths,
     base: BaseAddress,
-    manager_addrs: &[u64],
+    manager_addrs: &[DecodedStoredAddress],
 ) -> Result<PersistedSections, FormatError> {
     let mut sections = Vec::new();
     let mut blocks = Vec::new();
     let hdr_len = hdf5_pure_format::__private::free_space_manager_header_len(widths);
     for &addr in manager_addrs {
-        let addr = StoredAddress::new(addr);
-        if addr.is_undefined(widths.offsets) {
+        let DecodedStoredAddress::Defined(addr) = addr else {
             continue;
-        }
+        };
         let a = base.absolute(addr)?;
         let fshd = src.read_exact_at(a, hdr_len.to_usize()?)?;
         let header = FreeSpaceManagerHeader::parse(widths, &fshd)?;
@@ -329,7 +327,14 @@ mod tests {
         buf.truncate(file_len);
 
         assert_eq!(
-            read_persisted_sections(&buf, widths(8, 8), BaseAddress::ZERO, &[manager_addr]),
+            read_persisted_sections(
+                &buf,
+                widths(8, 8),
+                BaseAddress::ZERO,
+                &[DecodedStoredAddress::Defined(StoredAddress::new(
+                    manager_addr
+                ))],
+            ),
             Err(FormatError::InvalidFreeSpaceManager(reason.to_owned()))
         );
     }
@@ -344,9 +349,13 @@ mod tests {
         #[case] allocated: u64,
     ) {
         let source = manager_source(base, allocated, base + 701 + allocated);
-        let (sections, blocks) =
-            read_persisted_sections_source(&source, widths(8, 8), BaseAddress::new(base), &[619])
-                .unwrap();
+        let (sections, blocks) = read_persisted_sections_source(
+            &source,
+            widths(8, 8),
+            BaseAddress::new(base),
+            &[DecodedStoredAddress::Defined(StoredAddress::new(619))],
+        )
+        .unwrap();
 
         assert_eq!(sections, vec![section(2848, 1600)]);
         assert_eq!(blocks, vec![(base + 619, 82), (base + 701, allocated)]);
@@ -379,8 +388,13 @@ mod tests {
     ) {
         let source = manager_source(base, allocated, file_len);
         assert_eq!(
-            read_persisted_sections_source(&source, widths(8, 8), BaseAddress::new(base), &[619],)
-                .unwrap_err(),
+            read_persisted_sections_source(
+                &source,
+                widths(8, 8),
+                BaseAddress::new(base),
+                &[DecodedStoredAddress::Defined(StoredAddress::new(619))],
+            )
+            .unwrap_err(),
             expected
         );
         assert_eq!(*source.reads.borrow(), vec![(base + 619, 82)]);
@@ -400,24 +414,38 @@ mod tests {
             &buf,
             widths(8, 8),
             BaseAddress::ZERO,
-            &[619, u64::MAX, u64::MAX],
+            &[
+                DecodedStoredAddress::Defined(StoredAddress::new(619)),
+                DecodedStoredAddress::Undefined,
+                DecodedStoredAddress::Undefined,
+            ],
         )
         .unwrap();
         assert_eq!(got, vec![section(2848, 1600)]);
         // No defined managers -> no sections.
         assert!(
-            read_persisted_sections(&buf, widths(8, 8), BaseAddress::ZERO, &[u64::MAX])
-                .unwrap()
-                .is_empty()
+            read_persisted_sections(
+                &buf,
+                widths(8, 8),
+                BaseAddress::ZERO,
+                &[DecodedStoredAddress::Undefined]
+            )
+            .unwrap()
+            .is_empty()
         );
     }
 
     #[test]
     fn an_undefined_manager_slot_is_skipped_in_a_four_byte_offset_file() {
         assert!(
-            read_persisted_sections(&[], widths(4, 8), BaseAddress::ZERO, &[0xFFFF_FFFF])
-                .unwrap()
-                .is_empty(),
+            read_persisted_sections(
+                &[],
+                widths(4, 8),
+                BaseAddress::ZERO,
+                &[DecodedStoredAddress::Undefined]
+            )
+            .unwrap()
+            .is_empty(),
             "an all-0xFF manager address is the sentinel for an unused slot"
         );
     }
@@ -434,9 +462,14 @@ mod tests {
         .unwrap();
 
         assert!(
-            read_persisted_sections(&fshd, widths(4, 8), BaseAddress::ZERO, &[0])
-                .unwrap()
-                .is_empty(),
+            read_persisted_sections(
+                &fshd,
+                widths(4, 8),
+                BaseAddress::ZERO,
+                &[DecodedStoredAddress::Defined(StoredAddress::new(0))]
+            )
+            .unwrap()
+            .is_empty(),
             "a manager tracking nothing records no section info"
         );
 
@@ -444,7 +477,7 @@ mod tests {
             &crate::source::BytesSource::new(&fshd),
             widths(4, 8),
             BaseAddress::ZERO,
-            &[0],
+            &[DecodedStoredAddress::Defined(StoredAddress::new(0))],
         )
         .unwrap();
         assert!(sections.is_empty());
@@ -491,8 +524,13 @@ mod tests {
         let mut buf = vec![0u8; 1100 + fsse.len()];
         buf[1000..1000 + fshd.len()].copy_from_slice(&fshd);
         buf[1100..1100 + fsse.len()].copy_from_slice(&fsse);
-        let mut got =
-            read_persisted_sections(&buf, widths(8, 8), BaseAddress::ZERO, &[1000]).unwrap();
+        let mut got = read_persisted_sections(
+            &buf,
+            widths(8, 8),
+            BaseAddress::ZERO,
+            &[DecodedStoredAddress::Defined(StoredAddress::new(1000))],
+        )
+        .unwrap();
         got.sort_by_key(|s| s.addr);
         let mut want = sections.to_vec();
         want.sort_by_key(|s| s.addr);
@@ -513,12 +551,23 @@ mod tests {
         ));
 
         assert_eq!(
-            read_persisted_sections(&buf, widths(8, 8), BaseAddress::ZERO, &[619]).unwrap_err(),
+            read_persisted_sections(
+                &buf,
+                widths(8, 8),
+                BaseAddress::ZERO,
+                &[DecodedStoredAddress::Defined(StoredAddress::new(619))],
+            )
+            .unwrap_err(),
             expected
         );
         assert_eq!(
-            read_persisted_sections_source(&source, widths(8, 8), BaseAddress::ZERO, &[619])
-                .unwrap_err(),
+            read_persisted_sections_source(
+                &source,
+                widths(8, 8),
+                BaseAddress::ZERO,
+                &[DecodedStoredAddress::Defined(StoredAddress::new(619))],
+            )
+            .unwrap_err(),
             expected
         );
     }
@@ -546,8 +595,13 @@ mod tests {
             let mut buf = vec![0u8; 1100 + fsse.len()];
             buf[1000..1000 + fshd.len()].copy_from_slice(&fshd);
             buf[1100..1100 + fsse.len()].copy_from_slice(&fsse);
-            let got =
-                read_persisted_sections(&buf, widths(8, 8), BaseAddress::ZERO, &[1000]).unwrap();
+            let got = read_persisted_sections(
+                &buf,
+                widths(8, 8),
+                BaseAddress::ZERO,
+                &[DecodedStoredAddress::Defined(StoredAddress::new(1000))],
+            )
+            .unwrap();
             assert_eq!(got, sections, "class {class} round-trips");
         }
     }

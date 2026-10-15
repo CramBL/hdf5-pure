@@ -13,11 +13,8 @@ use hdf5::File as Hdf5File;
 use hdf5::FileBuilder as Hdf5FileBuilder;
 #[cfg(feature = "__hdf5-1.10")]
 use hdf5::plist::file_create::FileSpaceStrategy as Hdf5FileSpaceStrategy;
-use hdf5_pure::SpaceOwnership;
-use hdf5_pure::StoredAddress;
-use hdf5_pure::{File, FileBuilder, FileSpaceStrategy, Layout, SpaceAccounting};
+use hdf5_pure::{File, FileBuilder, FileSpaceStrategy, Layout, SpaceAccounting, SpaceOwnership};
 use hdf5_pure_core::__private::BaseAddressExt;
-use hdf5_pure_core::__private::StoredAddressExt;
 use hdf5_pure_format::__private as format;
 use hdf5_pure_format::__private::FormatWidths;
 use hdf5_pure_format::__private::FreeSpaceManagerHeader;
@@ -42,22 +39,22 @@ pub fn serialized_manager_padding(path: &Path) -> u64 {
         .unwrap()
         .manager_addrs
         .iter()
-        .copied()
-        .filter(|&addr| addr != u64::MAX)
-        .map(|addr| {
-            let at = usize::try_from(addr).unwrap();
+        .filter_map(|&addr| match addr {
+            hdf5_pure::DecodedStoredAddress::Defined(stored) => Some(stored),
+            hdf5_pure::DecodedStoredAddress::Undefined => None,
+        })
+        .map(|stored| {
+            let at = usize::try_from(stored.get()).unwrap();
             let header = FreeSpaceManagerHeader::parse(widths, &bytes[at..]).unwrap();
             let list_addr = header.section_list_addr();
             let start = usize::try_from(list_addr.get()).unwrap();
             let used = usize::try_from(header.section_list_used()).unwrap();
             let list = &bytes[start..start + used];
-            let sections =
-                format::parse_section_info(widths, list, StoredAddress::new(addr), &header)
-                    .unwrap();
+            let sections = format::parse_section_info(widths, list, stored, &header).unwrap();
             let (_, minimal) = format::serialize_free_space_manager(
                 widths,
                 &sections,
-                StoredAddress::new(addr),
+                stored,
                 list_addr,
                 format::SECTION_CLASS_SIMPLE,
             )

@@ -28,6 +28,7 @@
 
 use alloc::vec::Vec;
 
+use crate::address::DecodedStoredAddress;
 use crate::address::StoredAddress;
 use crate::address::StoredAddressExt;
 use crate::error::FormatError;
@@ -239,6 +240,43 @@ pub(crate) fn try_write_offset(
     Ok(())
 }
 
+/// Appends the decoded address `addr` to `buf` as a little-endian field of `width` bytes.
+///
+/// # Errors
+///
+/// Returns [`FormatError::AddressTooLarge`] if a defined address does not fit `width`, or
+/// [`FormatError::DefinedAddressIsUndefined`] if a defined address equals the undefined
+/// sentinel value for `width`, and leaves `buf` unchanged.
+pub(crate) fn try_write_decoded_address(
+    buf: &mut Vec<u8>,
+    addr: DecodedStoredAddress,
+    width: OffsetWidth,
+) -> Result<(), FormatError> {
+    match addr {
+        DecodedStoredAddress::Undefined => {
+            write_offset(buf, StoredAddress::undefined(width).get(), width);
+            Ok(())
+        }
+        DecodedStoredAddress::Defined(addr) => {
+            let val = addr.get();
+            if val > width::offset_width_max(width) {
+                return Err(FormatError::AddressTooLarge {
+                    address: val,
+                    offset_size: width.get(),
+                });
+            }
+            if addr.is_undefined(width) {
+                return Err(FormatError::DefinedAddressIsUndefined {
+                    address: val,
+                    offset_size: width.get(),
+                });
+            }
+            write_offset(buf, val, width);
+            Ok(())
+        }
+    }
+}
+
 /// Appends the length `val` to `buf` as a little-endian field of `width` bytes, as
 /// [`write_length`] does, and returns an error where [`write_length`] panics.
 ///
@@ -354,6 +392,16 @@ impl<'a> Fields<'a> {
         let value = read_offset_width(self.data, self.pos, width)?;
         self.pos += usize::from(width.get());
         Ok(StoredAddress::new(value))
+    }
+
+    /// Reads a file address of `width` bytes, decoded as [`DecodedStoredAddress`].
+    pub(crate) fn decoded_address(
+        &mut self,
+        width: OffsetWidth,
+    ) -> Result<DecodedStoredAddress, FormatError> {
+        let value = width::decode_stored_address(width, self.data, self.pos)?;
+        self.pos += usize::from(width.get());
+        Ok(value)
     }
 
     /// Reads the next `N` bytes.
@@ -613,5 +661,77 @@ mod tests {
     #[should_panic(expected = "address 0x10000 does not fit a 2-byte address field")]
     fn an_address_wider_than_its_field_panics() {
         write_offset(&mut Vec::new(), 0x1_0000, OffsetWidth::Two);
+    }
+
+    #[rstest::rstest]
+    #[case::two_sentinel(OffsetWidth::Two, 0xFFFF)]
+    #[case::four_sentinel(OffsetWidth::Four, 0xFFFF_FFFF)]
+    #[case::eight_sentinel(OffsetWidth::Eight, u64::MAX)]
+    fn writing_a_defined_address_matching_the_undefined_sentinel_fails(
+        #[case] width: OffsetWidth,
+        #[case] sentinel: u64,
+    ) {
+        let mut buf = vec![1, 2, 3];
+        let err = try_write_decoded_address(
+            &mut buf,
+            DecodedStoredAddress::Defined(StoredAddress::new(sentinel)),
+            width,
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            err,
+            FormatError::DefinedAddressIsUndefined {
+                address: sentinel,
+                offset_size: width.get(),
+            }
+        );
+        assert_eq!(buf, vec![1, 2, 3]);
+    }
+
+    #[rstest::rstest]
+    #[case::two_overflow(OffsetWidth::Two, 0x1_0000)]
+    #[case::two_max_token(OffsetWidth::Two, u64::MAX)]
+    #[case::four_overflow(OffsetWidth::Four, 0x1_0000_0000)]
+    #[case::four_max_token(OffsetWidth::Four, u64::MAX)]
+    fn writing_a_defined_address_exceeding_width_fails(
+        #[case] width: OffsetWidth,
+        #[case] addr: u64,
+    ) {
+        let mut buf = vec![4, 5, 6];
+        let err = try_write_decoded_address(
+            &mut buf,
+            DecodedStoredAddress::Defined(StoredAddress::new(addr)),
+            width,
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            err,
+            FormatError::AddressTooLarge {
+                address: addr,
+                offset_size: width.get(),
+            }
+        );
+        assert_eq!(buf, vec![4, 5, 6]);
+    }
+
+    #[rstest::rstest]
+    #[case::undefined_two(OffsetWidth::Two, DecodedStoredAddress::Undefined, vec![0xFF, 0xFF])]
+    #[case::undefined_four(OffsetWidth::Four, DecodedStoredAddress::Undefined, vec![0xFF, 0xFF, 0xFF, 0xFF])]
+    #[case::undefined_eight(OffsetWidth::Eight, DecodedStoredAddress::Undefined, vec![0xFF; 8])]
+    #[case::defined_two_max(OffsetWidth::Two, DecodedStoredAddress::Defined(StoredAddress::new(0xFFFE)), vec![0xFE, 0xFF])]
+    #[case::defined_four_sentinel_two(OffsetWidth::Four, DecodedStoredAddress::Defined(StoredAddress::new(0xFFFF)), vec![0xFF, 0xFF, 0, 0])]
+    #[case::defined_four_max(OffsetWidth::Four, DecodedStoredAddress::Defined(StoredAddress::new(0xFFFF_FFFE)), vec![0xFE, 0xFF, 0xFF, 0xFF])]
+    #[case::defined_eight_sentinel_four(OffsetWidth::Eight, DecodedStoredAddress::Defined(StoredAddress::new(0xFFFF_FFFF)), vec![0xFF, 0xFF, 0xFF, 0xFF, 0, 0, 0, 0])]
+    #[case::defined_eight_max(OffsetWidth::Eight, DecodedStoredAddress::Defined(StoredAddress::new(u64::MAX - 1)), vec![0xFE, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF])]
+    fn writing_a_valid_decoded_address_succeeds(
+        #[case] width: OffsetWidth,
+        #[case] addr: DecodedStoredAddress,
+        #[case] expected: Vec<u8>,
+    ) {
+        let mut buf = Vec::new();
+        try_write_decoded_address(&mut buf, addr, width).unwrap();
+        assert_eq!(buf, expected);
     }
 }

@@ -81,7 +81,10 @@ fn paged_metadata_only() {
     let f = File::open(&path).unwrap();
     let info = f.file_space_info().unwrap();
     assert!(info.persist);
-    assert_eq!(info.eoa_pre_fsm % PAGE, 0);
+    let Some(hdf5_pure::DecodedStoredAddress::Defined(eoa)) = info.eoa_pre_fsm else {
+        panic!("expected Defined eoa_pre_fsm");
+    };
+    assert_eq!(eoa.get() % PAGE, 0);
 }
 
 /// A paged file with chunked datasets (small + a large compressed one) round-
@@ -100,7 +103,10 @@ fn paged_chunked_roundtrip() {
     let f = File::open(&path).unwrap();
     let info = f.file_space_info().unwrap();
     assert!(info.persist);
-    assert_eq!(info.eoa_pre_fsm % PAGE, 0);
+    let Some(hdf5_pure::DecodedStoredAddress::Defined(eoa)) = info.eoa_pre_fsm else {
+        panic!("expected Defined eoa_pre_fsm");
+    };
+    assert_eq!(eoa.get() % PAGE, 0);
     assert_eq!(f.dataset("s").unwrap().read_f64().unwrap(), small);
     assert_eq!(f.dataset("big").unwrap().read_f64().unwrap(), big);
 }
@@ -123,7 +129,10 @@ fn paged_exact_page_multiple_large_block() {
     let f = File::open(&path).unwrap();
     assert_eq!(f.dataset("exact").unwrap().read_i32().unwrap(), big);
     // No large fragment: the generic-large manager (slot 6) is undefined.
-    assert_eq!(f.file_space_info().unwrap().manager_addrs[6], u64::MAX);
+    assert_eq!(
+        f.file_space_info().unwrap().manager_addrs[6],
+        hdf5_pure::DecodedStoredAddress::Undefined
+    );
 }
 
 /// A paged file that exercises the metadata-heavy paths: a root attribute, a

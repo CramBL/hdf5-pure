@@ -1,5 +1,6 @@
 use alloc::vec::Vec;
 
+use crate::DecodedStoredAddress;
 use crate::FormatError;
 
 /// File-space management strategy, mirroring HDF5's `H5F_fspace_strategy_t`
@@ -43,16 +44,15 @@ pub struct FileSpaceInfo {
     pub page_size: FileSpacePageSize,
     /// Page-end metadata threshold (paged allocation tuning).
     pub page_end_meta_threshold: u16,
-    /// End-of-allocation address recorded before free-space manager metadata
-    /// was allocated, or the undefined address, all ones at the file's offset
-    /// width, where the file records none.
-    pub eoa_pre_fsm: u64,
-    /// The addresses of the free-space manager headers, present only if [`persist`] is set. An
-    /// unused slot holds the undefined address, all ones at the file's offset width.
+    /// The end-of-allocation address recorded before allocating free-space manager metadata, or
+    /// `None` for format version 0, which has no such field.
+    pub eoa_pre_fsm: Option<DecodedStoredAddress>,
+    /// The addresses of the free-space manager headers, present only if [`persist`] is true. An
+    /// unused slot holds [`DecodedStoredAddress::Undefined`].
     /// `hdf5_pure::File::persisted_free_space` reads the free regions that these managers track.
     ///
     /// [`persist`]: Self::persist
-    pub manager_addrs: Vec<u64>,
+    pub manager_addrs: Vec<DecodedStoredAddress>,
 }
 
 /// A file space page size in bytes, from 512 bytes to 1 GiB.

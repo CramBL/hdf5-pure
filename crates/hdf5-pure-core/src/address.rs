@@ -47,7 +47,7 @@ impl PhysicalAddress {
 }
 
 /// An encoded address classified at the width of its field.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum DecodedStoredAddress {
     /// A base-relative address whose encoded bits are not all set.
     Defined(StoredAddress),

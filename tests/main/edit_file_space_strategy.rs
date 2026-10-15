@@ -2,6 +2,7 @@
 
 use hdf5_pure::File;
 use hdf5_pure::FileBuilder;
+use hdf5_pure::FileSpacePageSize;
 use hdf5_pure::FileSpaceStrategy;
 use hdf5_pure_core::__private::BaseAddressExt;
 use hdf5_pure_core::__private::FileSpaceInfoFields;
@@ -11,6 +12,7 @@ use tempfile::tempdir;
 
 use test_util::file_space_info;
 use test_util::range;
+use test_util::widths::Widths;
 use test_util_hdf5::file_space;
 
 #[rstest]
@@ -129,7 +131,7 @@ fn persisted_free_space_is_not_reused_under_a_strategy_without_a_free_space_mana
     file_space_info::replace_message(
         &path,
         extension,
-        &hdf5_pure_format::__private::serialize_file_space_info(
+        &hdf5_pure_format::__private::serialize_file_space_info_v1(
             FormatWidths::from_sizes(8, 8).unwrap(),
             &relabeled,
         )
@@ -188,6 +190,79 @@ fn a_file_whose_strategy_cannot_be_read_reuses_no_deleted_extent() {
     assert!(
         !range::overlaps(&deleted, &placed),
         "{deleted:?}, {placed:?}"
+    );
+}
+
+#[test]
+fn editing_a_non_persisting_version_0_file_reuses_a_deleted_extent() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("v0_non_persistent.h5");
+    file_space::write_strategy_triplet(&path, FileSpaceStrategy::FsmAggr, false, 1);
+    let extension = {
+        let file = File::open(&path).unwrap();
+        let superblock = file.superblock();
+        superblock
+            .base_address
+            .absolute(superblock.superblock_extension_address.unwrap())
+            .unwrap()
+    };
+    file_space_info::replace_message(
+        &path,
+        extension,
+        &file_space_info::version_0(Widths::EIGHT, file_space_info::ALL, 1, &[]),
+    );
+
+    let file = File::open(&path).unwrap();
+    assert_eq!(
+        file.file_space_info(),
+        Some(
+            &FileSpaceInfoFields {
+                strategy: FileSpaceStrategy::FsmAggr,
+                persist: false,
+                threshold: 1,
+                page_size: FileSpacePageSize::DEFAULT,
+                page_end_meta_threshold: 0,
+                eoa_pre_fsm: None,
+                manager_addrs: Vec::new(),
+            }
+            .build()
+        )
+    );
+    drop(file);
+
+    let file = File::open_rw(&path).unwrap();
+    let deleted = file_space::contiguous_extent(&file, "b");
+    file.root().delete("b").unwrap();
+    file.commit().unwrap();
+    file.root()
+        .create_dataset("d", |b| {
+            b.with_i32_data(&[4; 300]);
+        })
+        .unwrap();
+    file.commit().unwrap();
+    let placed = file_space::contiguous_extent(&file, "d");
+
+    assert!(
+        range::overlaps(&deleted, &placed),
+        "{deleted:?}, {placed:?}"
+    );
+    drop(file);
+    let file = File::open(&path).unwrap();
+    assert_eq!(file.dataset("d").unwrap().read_i32().unwrap(), vec![4; 300]);
+    assert_eq!(
+        file.file_space_info(),
+        Some(
+            &FileSpaceInfoFields {
+                strategy: FileSpaceStrategy::FsmAggr,
+                persist: false,
+                threshold: 1,
+                page_size: FileSpacePageSize::DEFAULT,
+                page_end_meta_threshold: 0,
+                eoa_pre_fsm: None,
+                manager_addrs: Vec::new(),
+            }
+            .build()
+        )
     );
 }
 

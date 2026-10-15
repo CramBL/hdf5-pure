@@ -108,6 +108,13 @@ pub enum FormatError {
     DatasetMissingData,
     /// Dataset is missing shape.
     DatasetMissingShape,
+    /// A defined address equals the undefined sentinel value for an address field of `offset_size` bytes.
+    DefinedAddressIsUndefined {
+        /// The defined address that matches the sentinel value.
+        address: u64,
+        /// The address field's width in bytes.
+        offset_size: u8,
+    },
     /// An object's attributes need more space than a dense attribute heap can
     /// address: its offsets are 40 bits wide, so the blocks holding the
     /// attributes cannot span more than `limit` bytes between them. Reaching this
@@ -746,6 +753,15 @@ impl fmt::Display for FormatError {
                 write!(
                     f,
                     "address {address:#x} does not fit a {offset_size}-byte address field"
+                )
+            }
+            Self::DefinedAddressIsUndefined {
+                address,
+                offset_size,
+            } => {
+                write!(
+                    f,
+                    "defined address {address:#x} equals the undefined sentinel for a {offset_size}-byte address field"
                 )
             }
             Self::LengthTooLarge {

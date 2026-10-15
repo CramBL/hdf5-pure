@@ -2,7 +2,8 @@
 
 use std::path::Path;
 
-use hdf5_pure::{File, FileBuilder, FileSpaceStrategy};
+use hdf5_pure::{File, FileBuilder, FileSpaceStrategy, StoredAddress};
+use hdf5_pure_core::__private::StoredAddressExt;
 use test_util::{
     btree_v2, bytes, fractal_heap, free_space, global_heap, local_heap, object_header, symbol_table,
 };
@@ -115,7 +116,13 @@ pub fn assert_consistent(path: &Path, page_size: u64) {
     let info = file.file_space_info().expect("records a strategy");
     assert!(info.persist, "still persisting");
     assert_eq!(info.page_size.get(), page_size);
-    assert_eq!(info.eoa_pre_fsm, eoa, "EOA == file size less the userblock");
+    assert_eq!(
+        info.eoa_pre_fsm,
+        Some(hdf5_pure::DecodedStoredAddress::Defined(
+            StoredAddress::new(eoa)
+        )),
+        "EOA == file size less the userblock"
+    );
 
     let mut free = file.persisted_free_space().unwrap();
     free.sort_by_key(|&(address, _)| address);

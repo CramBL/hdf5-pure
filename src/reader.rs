@@ -1717,12 +1717,7 @@ impl FileInner {
         };
         let widths =
             FormatWidths::from_sizes(self.superblock.offset_size, self.superblock.length_size)?;
-        hdf5_pure_format::__private::parse_file_space_info(
-            widths,
-            || self.opened.end_of_allocation(),
-            &msg.data,
-        )
-        .map(Some)
+        hdf5_pure_format::__private::parse_file_space_info(widths, &msg.data).map(Some)
     }
 
     /// Parse the Shared Message Table message from the superblock extension and
@@ -7202,6 +7197,7 @@ mod tests {
     use test_util::widths::Widths;
 
     use super::*;
+    use crate::address::DecodedStoredAddress;
     use crate::data_layout::{ChunkIndexLayout, ChunkedLayoutFlags};
     use crate::dataspace::DataspaceType;
     use crate::datatype::layout::FixedPointLayout;
@@ -7241,7 +7237,6 @@ mod tests {
             object_header::MessageType::FILE_SPACE_INFO,
             &body,
         );
-        let expected_eoa = (original.len() - stored_base) as u64;
         let mut relocated = vec![0; signature_offset];
         relocated.extend_from_slice(&original[stored_base..]);
         let file = if source_backed {
@@ -7250,10 +7245,19 @@ mod tests {
             File::from_bytes(relocated).unwrap()
         };
         let info = file.parse_file_space_info().unwrap().unwrap();
-        assert_eq!(info.eoa_pre_fsm, expected_eoa);
+        assert_eq!(info.eoa_pre_fsm, None);
         assert_eq!(info.strategy, FileSpaceStrategy::FsmAggr);
         assert!(info.persist);
         assert_eq!(info.threshold, 64);
+        assert_eq!(
+            info.manager_addrs.len(),
+            file_space_info::VERSION_0_MANAGERS
+        );
+        assert!(
+            info.manager_addrs
+                .iter()
+                .all(|&a| a == DecodedStoredAddress::Undefined)
+        );
         assert_eq!(file.dataset("data").unwrap().read_i32().unwrap(), [1, 2, 3]);
     }
 

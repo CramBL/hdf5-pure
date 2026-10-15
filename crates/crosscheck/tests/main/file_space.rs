@@ -468,8 +468,10 @@ fn c_library_reads_managers_we_placed_mid_file() {
         .expect("a persisting file records its managers")
         .manager_addrs
         .iter()
-        .copied()
-        .filter(|&a| a != u64::MAX)
+        .filter_map(|&a| match a {
+            hdf5_pure::DecodedStoredAddress::Defined(stored) => Some(stored.get()),
+            hdf5_pure::DecodedStoredAddress::Undefined => None,
+        })
         .collect();
     assert!(!managers.is_empty(), "the file has free space to record");
     let Layout::Contiguous {
@@ -739,10 +741,10 @@ fn the_serializer_writes_the_message_libhdf5_writes_at_the_widths_of_its_file(
     assert!(
         info.manager_addrs
             .iter()
-            .any(|&addr| !StoredAddress::new(addr).is_undefined(widths.offsets)),
+            .any(|&addr| matches!(addr, hdf5_pure::DecodedStoredAddress::Defined(_))),
         "libhdf5 records a manager for the deleted dataset's space"
     );
-    let encoded = hdf5_pure_format::__private::serialize_file_space_info(widths, info).unwrap();
+    let encoded = hdf5_pure_format::__private::serialize_file_space_info_v1(widths, info).unwrap();
     // The version, strategy and persist bytes, the 2-byte page-end threshold, two lengths, the end
     // of allocation, and twelve manager addresses.
     assert_eq!(
@@ -795,9 +797,13 @@ fn libhdf5_truncates_the_maximum_section_size_and_writes_section_sizes_as_wide_a
     let bytes = std::fs::read(&path).unwrap();
     let headers: Vec<FreeSpaceManagerHeader> = manager_addrs
         .into_iter()
-        .filter(|&addr| !StoredAddress::new(addr).is_undefined(widths.offsets))
-        .map(|addr| {
-            FreeSpaceManagerHeader::parse(widths, &bytes[usize::try_from(addr).unwrap()..]).unwrap()
+        .filter_map(|addr| match addr {
+            hdf5_pure::DecodedStoredAddress::Defined(stored) => Some(stored),
+            hdf5_pure::DecodedStoredAddress::Undefined => None,
+        })
+        .map(|stored| {
+            FreeSpaceManagerHeader::parse(widths, &bytes[usize::try_from(stored.get()).unwrap()..])
+                .unwrap()
         })
         .collect();
 
@@ -897,16 +903,21 @@ fn the_sections_libhdf5_persists_in_an_oversized_section_list_are_read() {
         .unwrap()
         .manager_addrs
         .iter()
-        .filter(|&&addr| !StoredAddress::new(addr).is_undefined(widths.offsets))
-        .map(|&addr| {
-            let header =
-                FreeSpaceManagerHeader::parse(widths, &bytes[usize::try_from(addr).unwrap()..])
-                    .unwrap();
+        .filter_map(|&addr| match addr {
+            hdf5_pure::DecodedStoredAddress::Defined(stored) => Some(stored),
+            hdf5_pure::DecodedStoredAddress::Undefined => None,
+        })
+        .map(|stored| {
+            let header = FreeSpaceManagerHeader::parse(
+                widths,
+                &bytes[usize::try_from(stored.get()).unwrap()..],
+            )
+            .unwrap();
             let fsse_at = usize::try_from(header.section_list_addr().get()).unwrap();
             let sizes: Vec<u64> = hdf5_pure_format::__private::parse_section_info(
                 widths,
                 &bytes[fsse_at..],
-                StoredAddress::new(addr),
+                stored,
                 &header,
             )
             .unwrap()
@@ -949,8 +960,10 @@ fn libhdf5_loads_the_managers_the_serializer_writes_at_the_widths_of_its_file(
         .unwrap()
         .manager_addrs
         .iter()
-        .copied()
-        .filter(|&addr| !StoredAddress::new(addr).is_undefined(widths.offsets))
+        .filter_map(|&addr| match addr {
+            hdf5_pure::DecodedStoredAddress::Defined(stored) => Some(stored.get()),
+            hdf5_pure::DecodedStoredAddress::Undefined => None,
+        })
         .collect();
     drop(file);
 
@@ -1095,10 +1108,12 @@ fn enlarged_section_list_file(path: &Path, userblock: u64) -> (Vec<(u64, u64)>, 
         .unwrap()
         .manager_addrs
         .iter()
-        .copied()
-        .filter(|&addr| !StoredAddress::new(addr).is_undefined(widths.offsets))
-        .map(|addr| {
-            let at = usize::try_from(base.absolute(StoredAddress::new(addr)).unwrap()).unwrap();
+        .filter_map(|&addr| match addr {
+            hdf5_pure::DecodedStoredAddress::Defined(stored) => Some(stored),
+            hdf5_pure::DecodedStoredAddress::Undefined => None,
+        })
+        .map(|stored| {
+            let at = usize::try_from(base.absolute(stored).unwrap()).unwrap();
             (
                 at,
                 FreeSpaceManagerHeader::parse(widths, &bytes[at..]).unwrap(),
@@ -1353,9 +1368,12 @@ fn deleted_dataset_manager_block(path: &std::path::Path, block: ManagerBlock) ->
     let bytes = std::fs::read(path).unwrap();
     let (fshd_at, header) = manager_addrs
         .into_iter()
-        .filter(|&addr| !StoredAddress::new(addr).is_undefined(widths.offsets))
-        .map(|addr| {
-            let at = usize::try_from(addr).unwrap();
+        .filter_map(|addr| match addr {
+            hdf5_pure::DecodedStoredAddress::Defined(stored) => Some(stored),
+            hdf5_pure::DecodedStoredAddress::Undefined => None,
+        })
+        .map(|stored| {
+            let at = usize::try_from(stored.get()).unwrap();
             (
                 at,
                 FreeSpaceManagerHeader::parse(widths, &bytes[at..]).unwrap(),
@@ -1516,7 +1534,7 @@ fn unmanaged_file_space_info(strategy: FileSpaceStrategy) -> FileSpaceInfo {
         threshold: DEFAULT_THRESHOLD,
         page_size: FileSpacePageSize::DEFAULT,
         page_end_meta_threshold: 0,
-        eoa_pre_fsm: u64::MAX,
+        eoa_pre_fsm: Some(hdf5_pure::DecodedStoredAddress::Undefined),
         manager_addrs: Vec::new(),
     }
     .build()
@@ -1585,13 +1603,7 @@ fn a_version_0_strategy_reads_as_libhdf5_maps_it(
     let f = File::open(&path).unwrap();
     assert_eq!(
         f.file_space_info(),
-        Some(&version_0_mapped(
-            strategy,
-            false,
-            threshold,
-            u64::MAX,
-            Vec::new()
-        ))
+        Some(&version_0_mapped(strategy, false, threshold, Vec::new()))
     );
     assert_eq!(f.dataset("d").unwrap().read_i32().unwrap(), vec![1, 2, 3]);
 }
@@ -1645,14 +1657,16 @@ fn assert_version_0_free_space_reads_as_libhdf5_reads_it(
     let free_c = f.free_space();
     drop(f);
     let f = File::open(&path).unwrap();
+    let (version_0_managers, _) = version_1
+        .manager_addrs
+        .split_at(file_space_info::VERSION_0_MANAGERS);
     assert_eq!(
         f.file_space_info(),
         Some(&version_0_mapped(
             FileSpaceStrategy::FsmAggr,
             true,
             1,
-            std::fs::metadata(&path).unwrap().len() - userblock,
-            version_1.manager_addrs
+            version_0_managers.to_vec(),
         ))
     );
     let free = f.persisted_free_space().unwrap();
@@ -1714,6 +1728,65 @@ fn libhdf5_reads_a_version_0_file_after_an_edit_reuses_its_persisted_free_space(
         vec![4; 5000]
     );
     assert_eq!(f.free_space(), total_ours);
+}
+
+#[test]
+fn libhdf5_reads_a_non_persisting_version_0_file_after_an_edit() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("c_non_persisted_version_0_edited.h5");
+    {
+        let file = hdf5::FileBuilder::new()
+            .with_fapl(|fapl| fapl.libver_v110())
+            .with_fcpl(|fcpl| {
+                fcpl.file_space_strategy(CStrategy::FreeSpaceManager {
+                    paged: false,
+                    persist: false,
+                    threshold: 64,
+                })
+            })
+            .create(&path)
+            .unwrap();
+        file.new_dataset::<i32>()
+            .shape((3,))
+            .create("d")
+            .unwrap()
+            .write(&[1i32, 2, 3])
+            .unwrap();
+        file.close().unwrap();
+    }
+    file_space_info::replace_message(
+        &path,
+        extension_addr(&path),
+        &file_space_info::version_0(Widths::EIGHT, file_space_info::ALL, 64, &[]),
+    );
+
+    {
+        let s = File::open_rw(&path).unwrap();
+        s.root()
+            .create_dataset("extra", |b| {
+                b.with_i32_data(&[10, 20, 30]);
+            })
+            .unwrap();
+        s.commit().unwrap();
+    }
+
+    let f = hdf5::File::open(&path).unwrap();
+    assert_eq!(
+        f.create_plist().unwrap().get_file_space_strategy().unwrap(),
+        CStrategy::FreeSpaceManager {
+            paged: false,
+            persist: false,
+            threshold: 64,
+        }
+    );
+    assert_eq!(
+        f.dataset("d").unwrap().read_raw::<i32>().unwrap(),
+        vec![1, 2, 3]
+    );
+    assert_eq!(
+        f.dataset("extra").unwrap().read_raw::<i32>().unwrap(),
+        vec![10, 20, 30]
+    );
 }
 
 #[rstest]
@@ -2053,8 +2126,16 @@ fn rewrite_as_version_0(path: &Path, widths: Widths, undefined: u64) -> FileSpac
         .split_at(file_space_info::VERSION_0_MANAGERS);
     assert_eq!(
         unused,
-        [undefined; NUM_FILE_FSM_MANAGERS - file_space_info::VERSION_0_MANAGERS]
+        [hdf5_pure::DecodedStoredAddress::Undefined;
+            NUM_FILE_FSM_MANAGERS - file_space_info::VERSION_0_MANAGERS]
     );
+    let v0_raw_managers: Vec<u64> = version_0_managers
+        .iter()
+        .map(|&m| match m {
+            hdf5_pure::DecodedStoredAddress::Defined(addr) => addr.get(),
+            hdf5_pure::DecodedStoredAddress::Undefined => undefined,
+        })
+        .collect();
     file_space_info::replace_message(
         path,
         extension_addr(path),
@@ -2062,7 +2143,7 @@ fn rewrite_as_version_0(path: &Path, widths: Widths, undefined: u64) -> FileSpac
             widths,
             file_space_info::ALL_PERSIST,
             version_1.threshold,
-            version_0_managers,
+            &v0_raw_managers,
         ),
     );
     version_1
@@ -2083,8 +2164,7 @@ fn version_0_mapped(
     strategy: FileSpaceStrategy,
     persist: bool,
     threshold: u64,
-    eoa_pre_fsm: u64,
-    manager_addrs: Vec<u64>,
+    manager_addrs: Vec<hdf5_pure::DecodedStoredAddress>,
 ) -> FileSpaceInfo {
     FileSpaceInfoFields {
         strategy,
@@ -2092,7 +2172,7 @@ fn version_0_mapped(
         threshold,
         page_size: FileSpacePageSize::DEFAULT,
         page_end_meta_threshold: 0,
-        eoa_pre_fsm,
+        eoa_pre_fsm: None,
         manager_addrs,
     }
     .build()
@@ -3280,9 +3360,11 @@ fn a_persisting_edit_that_tracks_no_free_space_records_the_end_of_allocation_for
             c_file.free_space(),
         ),
         (
+            Some(hdf5_pure::DecodedStoredAddress::Defined(
+                hdf5_pure::StoredAddress::new(len)
+            )),
             len,
-            len,
-            vec![u64::MAX; NUM_FILE_FSM_MANAGERS],
+            vec![hdf5_pure::DecodedStoredAddress::Undefined; NUM_FILE_FSM_MANAGERS],
             Vec::new(),
             vec![1; 100],
             0
@@ -3572,9 +3654,11 @@ fn a_paged_persisting_edit_that_tracks_no_free_space_records_the_end_of_allocati
             c_file.free_space(),
         ),
         (
+            Some(hdf5_pure::DecodedStoredAddress::Defined(
+                hdf5_pure::StoredAddress::new(len)
+            )),
             len,
-            len,
-            vec![u64::MAX; NUM_FILE_FSM_MANAGERS],
+            vec![hdf5_pure::DecodedStoredAddress::Undefined; NUM_FILE_FSM_MANAGERS],
             Vec::new(),
             vec![1; PAGE_ELEMENTS],
             0

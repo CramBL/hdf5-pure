@@ -72,7 +72,7 @@ fn a_strategy_without_a_free_space_manager_records_neither_persistence_nor_a_thr
                 threshold: DEFAULT_THRESHOLD,
                 page_size: FileSpacePageSize::DEFAULT,
                 page_end_meta_threshold: 0,
-                eoa_pre_fsm: u64::MAX,
+                eoa_pre_fsm: Some(hdf5_pure::DecodedStoredAddress::Undefined),
                 manager_addrs: Vec::new(),
             }
             .build()
@@ -215,7 +215,11 @@ fn persist_true_records_intent_on_a_fresh_file() {
     assert_eq!(info.strategy, FileSpaceStrategy::FsmAggr);
     assert!(info.persist, "persist flag is recorded");
     // No free space yet: every manager slot is undefined and nothing is persisted.
-    assert!(info.manager_addrs.iter().all(|&a| a == u64::MAX));
+    assert!(
+        info.manager_addrs
+            .iter()
+            .all(|&a| a == hdf5_pure::DecodedStoredAddress::Undefined)
+    );
     assert!(f.persisted_free_space().unwrap().is_empty());
     assert_eq!(f.dataset("d").unwrap().read_i32().unwrap(), vec![1, 2, 3]);
 }

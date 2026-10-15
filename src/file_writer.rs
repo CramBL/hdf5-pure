@@ -3383,7 +3383,7 @@ impl FileWriter {
                 let mut oh = ObjectHeaderWriter::new();
                 oh.add_message_with_flags(
                     MessageType::FILE_SPACE_INFO,
-                    hdf5_pure_format::__private::serialize_file_space_info(WIDTHS, &info)?,
+                    hdf5_pure_format::__private::serialize_file_space_info_v1(WIDTHS, &info)?,
                     MessageFlags::FORBID_SHARING | MessageFlags::MARK_IF_UNKNOWN,
                 );
                 oh.serialize()?
@@ -3863,7 +3863,7 @@ impl FileWriter {
                 let mut oh = ObjectHeaderWriter::new();
                 oh.add_message_with_flags(
                     MessageType::FILE_SPACE_INFO,
-                    hdf5_pure_format::__private::serialize_file_space_info(WIDTHS, &info)?,
+                    hdf5_pure_format::__private::serialize_file_space_info_v1(WIDTHS, &info)?,
                     MessageFlags::FORBID_SHARING | MessageFlags::MARK_IF_UNKNOWN,
                 );
                 Some(oh.serialize()?)
@@ -3916,13 +3916,7 @@ impl FileSpaceConfig {
         let free_space = FreeSpaceSettings::of(strategy, persist, threshold);
         let threshold = free_space.map_or(DEFAULT_THRESHOLD, |settings| settings.threshold);
         if free_space.is_some_and(|settings| settings.persist) {
-            file_space_info::persistent_empty(
-                OFFSET_WIDTH,
-                strategy,
-                threshold,
-                page_size,
-                StoredAddress::undefined(OFFSET_WIDTH).get(),
-            )
+            file_space_info::persistent_placeholder(strategy, threshold, page_size)
         } else {
             file_space_info::non_persistent(OFFSET_WIDTH, strategy, threshold, page_size)
         }
@@ -3947,7 +3941,7 @@ fn file_space_extension_oh(info: &FileSpaceInfo) -> Result<Vec<u8>, FormatError>
     // still opens the file.
     oh.add_message_with_flags(
         MessageType::FILE_SPACE_INFO,
-        hdf5_pure_format::__private::serialize_file_space_info(WIDTHS, info)?,
+        hdf5_pure_format::__private::serialize_file_space_info_v1(WIDTHS, info)?,
         MessageFlags::FORBID_SHARING | MessageFlags::MARK_IF_UNKNOWN,
     );
     oh.serialize()
