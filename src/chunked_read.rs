@@ -1352,11 +1352,8 @@ fn collect_btree_v2_chunks_from_source<S: Source + ?Sized>(
     )?;
     context.require_record_size(header.record_size)?;
 
-    let records = crate::btree_v2::collect_btree_v2_records_from_source_with_offset_width(
-        source,
-        &header,
-        widths.offsets,
-    )?;
+    let records =
+        crate::btree_v2::collect_btree_v2_records_from_source(source, &header, widths.offsets)?;
     let expected_records = header.total_records.to_usize()?;
     if records.len() != expected_records {
         return Err(FormatError::ChunkedReadError(format!(
@@ -1716,17 +1713,15 @@ fn collect_chunk_index_spans<S: Source + ?Sized>(
                 widths,
             )
         }
-        ChunkIndexLayout::BTreeV2 { .. } => {
-            crate::btree_v2::collect_btree_v2_storage_extents_with_widths(
-                source, index_addr, widths,
-            )
-            .map(|extents| {
-                extents
-                    .into_iter()
-                    .map(|extent| (extent.start(), extent.len()))
-                    .collect()
-            })
-        }
+        ChunkIndexLayout::BTreeV2 { .. } => crate::btree_v2::collect_btree_v2_storage_extents(
+            source, index_addr, widths,
+        )
+        .map(|extents| {
+            extents
+                .into_iter()
+                .map(|extent| (extent.start(), extent.len()))
+                .collect()
+        }),
     }
 }
 

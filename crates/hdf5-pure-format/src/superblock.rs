@@ -98,7 +98,8 @@ pub fn serialize_superblock(superblock: &Superblock) -> Result<Vec<u8>, FormatEr
 ///
 /// Returns the error `source` returns if the read fails, and otherwise the errors
 /// [`parse_superblock`] returns.
-pub fn parse_superblock_from_source<S: MetadataSource + ?Sized>(
+#[cfg(test)]
+pub(crate) fn parse_superblock_from_source<S: MetadataSource + ?Sized>(
     source: &S,
     signature_offset: u64,
 ) -> Result<Superblock, FormatError> {
@@ -139,7 +140,11 @@ pub fn parse_superblock_from_source_with_widths<S: MetadataSource + ?Sized>(
 /// [`FormatError::InvalidOffsetSize`] or [`FormatError::InvalidLengthSize`] if a width is not 2, 4,
 /// or 8, and, under the `checksum` feature, [`FormatError::ChecksumMismatch`] if the checksum of a
 /// version 2 or 3 superblock does not match its bytes.
-pub fn parse_superblock(data: &[u8], signature_offset: usize) -> Result<Superblock, FormatError> {
+#[cfg(test)]
+pub(crate) fn parse_superblock(
+    data: &[u8],
+    signature_offset: usize,
+) -> Result<Superblock, FormatError> {
     parse_superblock_with_widths(data, signature_offset).map(|(superblock, _)| superblock)
 }
 

@@ -27,7 +27,7 @@ const MAX_SYMBOL_TABLE_BTREE_DEPTH: u32 = 64;
 /// # Errors
 ///
 /// Returns the [`FormatError`] of the first B-tree node that does not parse.
-pub fn collect_symbol_table_nodes_with_widths(
+pub fn collect_symbol_table_nodes(
     file_data: &[u8],
     btree_address: StoredAddress,
     widths: FormatWidths,
@@ -36,7 +36,7 @@ pub fn collect_symbol_table_nodes_with_widths(
     collect_symbol_table_nodes_inner(file_data, btree_address, widths, addresses, 0)
 }
 
-/// Depth-tracking core of [`collect_symbol_table_nodes_with_widths`]. The `depth` guard
+/// Depth-tracking core of [`collect_symbol_table_nodes`]. The `depth` guard
 /// stops a cyclic or pathologically deep internal node from recursing until the
 /// stack overflows (an uncatchable process abort) when listing a v1 group.
 fn collect_symbol_table_nodes_inner(
@@ -80,9 +80,9 @@ fn collect_symbol_table_nodes_inner(
 ///
 /// # Errors
 ///
-/// Returns the errors of [`collect_symbol_table_nodes_with_widths`], and the error `source`
+/// Returns the errors of [`collect_symbol_table_nodes`], and the error `source`
 /// reports for a node it cannot read.
-pub fn collect_symbol_table_nodes_from_source_with_widths<S: Source + ?Sized>(
+pub fn collect_symbol_table_nodes_from_source<S: Source + ?Sized>(
     source: &S,
     btree_address: StoredAddress,
     widths: FormatWidths,
@@ -91,7 +91,7 @@ pub fn collect_symbol_table_nodes_from_source_with_widths<S: Source + ?Sized>(
     collect_symbol_table_nodes_from_source_inner(source, btree_address, widths, addresses, 0)
 }
 
-/// Tracks recursion depth for [`collect_symbol_table_nodes_from_source_with_widths`].
+/// Tracks recursion depth for [`collect_symbol_table_nodes_from_source`].
 ///
 /// See [`collect_symbol_table_nodes_inner`] for why the bound is required.
 fn collect_symbol_table_nodes_from_source_inner<S: Source + ?Sized>(
@@ -168,7 +168,7 @@ mod tests {
         file[leaf2_offset..leaf2_offset + leaf2.len()].copy_from_slice(&leaf2);
         file[internal_offset..internal_offset + internal.len()].copy_from_slice(&internal);
 
-        let snods = collect_symbol_table_nodes_with_widths(
+        let snods = collect_symbol_table_nodes(
             &file,
             StoredAddress::new(internal_offset as u64),
             FormatWidths::from_sizes(os, ls).unwrap(),
@@ -187,7 +187,7 @@ mod tests {
             btree_v1::node_with_group_keys(btree_v1::NodeType::CHUNK, 0, &[0, 1], &[0x100], WIDTHS);
         let mut file = vec![0u8; 512];
         file[..data.len()].copy_from_slice(&data);
-        let err = collect_symbol_table_nodes_with_widths(
+        let err = collect_symbol_table_nodes(
             &file,
             StoredAddress::new(0),
             FormatWidths::from_sizes(8, 8).unwrap(),
@@ -209,7 +209,7 @@ mod tests {
         let mut file = vec![0u8; 1024];
         file[..node.len()].copy_from_slice(&node);
 
-        let err = collect_symbol_table_nodes_with_widths(
+        let err = collect_symbol_table_nodes(
             &file,
             StoredAddress::new(0),
             FormatWidths::from_sizes(os, ls).unwrap(),

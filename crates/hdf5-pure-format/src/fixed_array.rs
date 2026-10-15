@@ -175,9 +175,9 @@ impl FixedArrayHeader {
 /// Returns the `(address, length)` spans of the header and the data block of the Fixed Array at
 /// `fa_base`.
 ///
-/// The spans cover the index alone, and [`read_fixed_array_chunks`] reports the chunks it points
-/// at. An array whose data block address is undefined has the header span alone. The caller
-/// checks the spans against the end of the file.
+/// The spans cover the index alone. [`read_fixed_array_chunks_with_offset_width`] reports the
+/// chunks it points at. An array whose data block address is undefined has the header span alone.
+/// The caller checks the spans against the end of the file.
 ///
 /// # Errors
 ///
@@ -185,7 +185,8 @@ impl FixedArrayHeader {
 /// [`FormatError::ChunkedReadError`] if the page exponent is 64 or more, and
 /// [`FormatError::OffsetOverflow`] or [`FormatError::ValueTooLargeForPlatform`] if the length of
 /// the data block does not fit a `usize`.
-pub fn fixed_array_index_spans(
+#[cfg(test)]
+pub(crate) fn fixed_array_index_spans(
     source: &(impl MetadataSource + ?Sized),
     fa_base: StoredAddress,
     offset_size: u8,
@@ -338,7 +339,8 @@ fn parse_fa_element(
 /// [`FormatError::ChecksumMismatch`] if a checksum does not match, [`FormatError::OffsetOverflow`]
 /// or [`FormatError::ValueTooLargeForPlatform`] if a position does not fit a `usize`, and the error
 /// `visit` returns.
-pub fn read_fixed_array_chunks(
+#[cfg(test)]
+pub(crate) fn read_fixed_array_chunks(
     file_data: &[u8],
     header: &FixedArrayHeader,
     offset_size: u8,
@@ -527,7 +529,8 @@ pub fn read_fixed_array_chunks_with_offset_width(
 ///
 /// Returns the errors [`read_fixed_array_chunks`] returns, and the error `source` returns if a
 /// read fails.
-pub fn read_fixed_array_chunks_from_source(
+#[cfg(test)]
+pub(crate) fn read_fixed_array_chunks_from_source(
     source: &(impl MetadataSource + ?Sized),
     header: &FixedArrayHeader,
     offset_size: u8,

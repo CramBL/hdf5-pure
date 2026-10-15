@@ -33,8 +33,8 @@ use crate::object_header::ObjectHeader;
 use crate::source::{BaseOffsetSource, Source, SourceMetadata};
 
 use super::{
-    LENGTH_SIZE, MAX_COPY_DEPTH, MAX_LINK_GRAPH_NODES, OFFSET_SIZE, OFFSET_WIDTH, ObjModel,
-    OhRegion, SpaceOwnership, WriteEngine, read_oh_chunks, spans_disjoint_in_bounds,
+    MAX_COPY_DEPTH, MAX_LINK_GRAPH_NODES, ObjModel, OhRegion, SpaceOwnership, WriteEngine,
+    read_oh_chunks, spans_disjoint_in_bounds,
 };
 
 struct ChunkedStorageParts {
@@ -85,15 +85,14 @@ impl WriteEngine {
         live_metadata_space.push((self.sb_sig_off, superblock_len));
 
         if let Some(extension) = self.superblock.superblock_extension_address
-            && !extension.is_undefined(OFFSET_WIDTH)
+            && !extension.is_undefined(self.widths().offsets)
         {
             let extension = self.addresses.absolute(extension)?;
-            let header = ObjectHeader::parse_from_source(
+            let header = ObjectHeader::parse_from_source_with_widths(
                 &SourceMetadata(&self.image()),
                 AccessMode::ReadWrite,
                 extension,
-                OFFSET_SIZE,
-                LENGTH_SIZE,
+                self.widths(),
                 self.addresses.effective_base(),
             )?;
             live_metadata_space.extend(self.oh_chunk_spans(extension)?);
@@ -110,14 +109,14 @@ impl WriteEngine {
         }
 
         let mut free_space_manager_space = Vec::new();
-        if let Some((_, info)) =
-            Self::extension_fsinfo(&self.image(), &self.superblock, self.addresses)?
-        {
+        if let Some((_, info)) = Self::extension_fsinfo(
+            &self.image(),
+            &self.superblock,
+            self.widths(),
+            self.addresses,
+        )? {
             if info.persist {
-                let widths = crate::width::FormatWidths::from_sizes(
-                    self.superblock.offset_size,
-                    self.superblock.length_size,
-                )?;
+                let widths = self.widths();
                 let (_, blocks) = crate::free_space_manager::read_persisted_sections_source(
                     &self.image(),
                     widths,
@@ -219,7 +218,7 @@ impl WriteEngine {
                 attr_info = Some(
                     AttributeInfoMessage::parse_with_offset_width(
                         &region[body..body_end],
-                        crate::file_writer::OFFSET_WIDTH,
+                        self.widths().offsets,
                     )
                     .ok()?,
                 );
@@ -239,7 +238,7 @@ impl WriteEngine {
                 base: self.addresses.effective_base(),
             },
             &attr_info,
-            crate::file_writer::WIDTHS,
+            self.widths(),
         )
         .ok()?;
         self.dense_storage_spans(header_spans, heap_address, &index)
@@ -264,13 +263,13 @@ impl WriteEngine {
         let Some(heap_address) = link_info.fractal_heap_address else {
             return Some(Vec::new());
         };
-        let index = crate::group_v2::collect_dense_group_index_storage_extents_with_widths(
+        let index = crate::group_v2::collect_dense_group_index_storage_extents(
             &BaseOffsetSource {
                 inner: &self.image(),
                 base: self.addresses.effective_base(),
             },
             link_info,
-            crate::file_writer::WIDTHS,
+            self.widths(),
         )
         .ok()?;
         let owned: Vec<(u64, u64)> = header_spans
@@ -331,8 +330,8 @@ impl WriteEngine {
     /// the free class [`fractal_heap_free_spans`] gives it.
     ///
     /// Returns `None` if
-    /// [`collect_fractal_heap_storage_from_source_with_widths`](
-    ///     fractal_heap_storage::collect_fractal_heap_storage_from_source_with_widths
+    /// [`collect_fractal_heap_storage_from_source`](
+    ///     fractal_heap_storage::collect_fractal_heap_storage_from_source
     /// )
     /// cannot prove the heap's ownership, as for a filtered heap or invalid manager metadata.
     fn fractal_heap_spans(
@@ -340,14 +339,14 @@ impl WriteEngine {
         heap_address: StoredAddress,
     ) -> Option<Vec<(u64, u64, FreeClass)>> {
         let base = self.addresses;
-        let storage = fractal_heap_storage::collect_fractal_heap_storage_from_source_with_widths(
+        let storage = fractal_heap_storage::collect_fractal_heap_storage_from_source(
             &BaseOffsetSource {
                 inner: &self.image(),
                 base: base.effective_base(),
             },
             self.addresses,
             heap_address,
-            crate::file_writer::WIDTHS,
+            self.widths(),
         )
         .ok()?;
         let allocations: Vec<_> = storage
@@ -377,8 +376,6 @@ impl WriteEngine {
     /// each object once. Base-aware: stored child addresses are shifted by the
     /// userblock base, so the returned keys are absolute file offsets.
     pub(super) fn count_incoming_hard_links(&self) -> Option<HashMap<u64, u32>> {
-        let os = self.superblock.offset_size;
-        let ls = self.superblock.length_size;
         let base = self.addresses;
         let mut counts: HashMap<u64, u32> = HashMap::new();
         let mut visited: HashSet<u64> = HashSet::new();
@@ -396,12 +393,11 @@ impl WriteEngine {
                 return None; // graph exceeds the walk limit, so leak conservatively
             }
             budget -= 1;
-            let header = ObjectHeader::parse_from_source(
+            let header = ObjectHeader::parse_from_source_with_widths(
                 &SourceMetadata(&self.image()),
                 AccessMode::ReadWrite,
                 addr,
-                os,
-                ls,
+                self.widths(),
                 base.effective_base(),
             )
             .ok()?;
@@ -421,8 +417,7 @@ impl WriteEngine {
                 &self.image(),
                 AccessMode::ReadWrite,
                 &header,
-                os,
-                ls,
+                self.widths(),
                 self.addresses,
             )
             .ok()?;
@@ -521,7 +516,7 @@ impl WriteEngine {
                 // A defined, in-bounds contiguous data block is owned outright.
                 // An empty dataset stores the undefined address and owns none. Its
                 // absolute file offset is what this bounds-checks and records.
-                if !data_addr.is_undefined(OFFSET_WIDTH) && data_size > 0 {
+                if !data_addr.is_undefined(self.widths().offsets) && data_size > 0 {
                     if let Ok(abs) = base.absolute(data_addr) {
                         if abs.checked_add(data_size).is_some_and(|e| e <= file_len) {
                             // A contiguous data block is raw data.
@@ -613,14 +608,19 @@ impl WriteEngine {
                 if link_info.is_some() {
                     return None;
                 }
-                link_info =
-                    Some(LinkInfoMessage::parse(&region[body..body_end], OFFSET_SIZE).ok()?);
+                link_info = Some(
+                    LinkInfoMessage::parse_with_offset_width(
+                        &region[body..body_end],
+                        self.widths().offsets,
+                    )
+                    .ok()?,
+                );
             }
             p = body_end;
         }
         let link_info = link_info?;
         let heap_address = link_info.fractal_heap_address?;
-        let entries = crate::group_v2::resolve_dense_entries_from_source_with_widths(
+        let entries = crate::group_v2::resolve_dense_entries_from_source(
             &BaseOffsetSource {
                 inner: &self.image(),
                 base: self.addresses.effective_base(),
@@ -629,7 +629,7 @@ impl WriteEngine {
             self.addresses,
             &link_info,
             heap_address,
-            crate::file_writer::WIDTHS,
+            self.widths(),
         )
         .ok()?;
         Some((
@@ -705,11 +705,12 @@ impl WriteEngine {
         let (lb, le) = layout_msg?;
         let (db, de) = dataspace_msg?;
 
-        let layout = DataLayout::parse(&region[lb..le], OFFSET_SIZE, LENGTH_SIZE).ok()?;
+        let layout = DataLayout::parse_with_widths(&region[lb..le], self.widths()).ok()?;
         if !matches!(layout, DataLayout::Chunked { .. }) {
             return None;
         }
-        let dataspace = Dataspace::parse(&region[db..de], LENGTH_SIZE).ok()?;
+        let dataspace =
+            Dataspace::parse_with_length_width(&region[db..de], self.widths().lengths).ok()?;
 
         // Delegate the per-index-type enumeration to the chunked reader (the
         // single owner of chunk-storage layout knowledge), then validate: every
@@ -731,7 +732,7 @@ impl WriteEngine {
             },
             &layout,
             &dataspace,
-            crate::file_writer::WIDTHS,
+            self.widths(),
         )
         .ok()?;
         // Chunk data is raw under every writer, so its spans are raw outright. A version 2
@@ -876,7 +877,7 @@ impl WriteEngine {
             }
         }
         let (lb, le) = layout_msg?;
-        let layout = DataLayout::parse(&region[lb..le], OFFSET_SIZE, LENGTH_SIZE).ok()?;
+        let layout = DataLayout::parse_with_widths(&region[lb..le], self.widths()).ok()?;
         if !matches!(layout, DataLayout::Chunked { .. }) {
             return None;
         }
@@ -887,7 +888,7 @@ impl WriteEngine {
                 base: base.effective_base(),
             },
             &layout,
-            crate::file_writer::WIDTHS,
+            self.widths(),
         )
         .ok()?;
         for (a, _) in &mut spans {
@@ -951,12 +952,11 @@ impl WriteEngine {
                 continue;
             }
             visited.insert(addr);
-            let header = ObjectHeader::parse_from_source(
+            let header = ObjectHeader::parse_from_source_with_widths(
                 &SourceMetadata(&self.image()),
                 AccessMode::ReadWrite,
                 addr,
-                OFFSET_SIZE,
-                LENGTH_SIZE,
+                self.widths(),
                 self.addresses.effective_base(),
             )?;
             complete &= visit(addr, &header, &mut |child| pending.push((child, depth + 1)))?;
@@ -999,7 +999,7 @@ impl WriteEngine {
                     complete &= self.collect_layout_owned_spans(messages, data, raw, metadata)?
                 }
                 MessageType::LINK => {
-                    let link = LinkMessage::parse(data, OFFSET_SIZE)?;
+                    let link = LinkMessage::parse_with_offset_width(data, self.widths().offsets)?;
                     if let LinkTarget::Hard {
                         object_header_address,
                     } = link.link_target
@@ -1020,7 +1020,7 @@ impl WriteEngine {
                 MessageType::ATTRIBUTE => {
                     match crate::attribute::AttributeMessage::parse_with_length_width(
                         data,
-                        crate::file_writer::LENGTH_WIDTH,
+                        self.widths().lengths,
                     ) {
                         Ok(attr) => complete &= !super::datatype_holds_file_address(&attr.datatype),
                         Err(FormatError::UnresolvedSharedMessage(_)) => complete = false,
@@ -1058,7 +1058,7 @@ impl WriteEngine {
         metadata: &mut Vec<(u64, u64)>,
     ) -> Result<bool, Error> {
         let mut complete = true;
-        let layout = DataLayout::parse(data, OFFSET_SIZE, LENGTH_SIZE)?;
+        let layout = DataLayout::parse_with_widths(data, self.widths())?;
         match &layout {
             DataLayout::Compact { .. } => {}
             DataLayout::Contiguous { address, size } => {
@@ -1076,7 +1076,8 @@ impl WriteEngine {
                 if space.flags.is_shared() {
                     return Ok(false);
                 }
-                let dataspace = Dataspace::parse(&space.data, LENGTH_SIZE)?;
+                let dataspace =
+                    Dataspace::parse_with_length_width(&space.data, self.widths().lengths)?;
                 let storage = crate::chunked_read::collect_chunked_storage_spans(
                     &BaseOffsetSource {
                         inner: &self.image(),
@@ -1084,7 +1085,7 @@ impl WriteEngine {
                     },
                     &layout,
                     &dataspace,
-                    crate::file_writer::WIDTHS,
+                    self.widths(),
                 )?;
                 raw.extend(self.absolute_owned_spans(storage.data)?);
                 metadata.extend(self.absolute_owned_spans(storage.index)?);
@@ -1109,16 +1110,16 @@ impl WriteEngine {
         metadata: &mut Vec<(u64, u64)>,
         mut child: impl FnMut(u64),
     ) -> Result<bool, Error> {
-        let info = LinkInfoMessage::parse(data, OFFSET_SIZE)?;
+        let info = LinkInfoMessage::parse_with_offset_width(data, self.widths().offsets)?;
         if let Some(heap) = info.fractal_heap_address {
             let source = BaseOffsetSource {
                 inner: &self.image(),
                 base: self.addresses.effective_base(),
             };
-            let index = crate::group_v2::collect_dense_group_index_storage_extents_with_widths(
+            let index = crate::group_v2::collect_dense_group_index_storage_extents(
                 &source,
                 &info,
-                crate::file_writer::WIDTHS,
+                self.widths(),
             )?;
             metadata.extend(
                 self.absolute_owned_spans(
@@ -1128,13 +1129,13 @@ impl WriteEngine {
             if !self.collect_owned_heap(heap, metadata)? {
                 return Ok(false);
             }
-            let entries = crate::group_v2::resolve_dense_entries_from_source_with_widths(
+            let entries = crate::group_v2::resolve_dense_entries_from_source(
                 &source,
                 AccessMode::ReadWrite,
                 self.addresses,
                 &info,
                 heap,
-                crate::file_writer::WIDTHS,
+                self.widths(),
             )?;
             for entry in entries {
                 child(self.addresses.absolute(entry.object_header_address)?);
@@ -1159,8 +1160,7 @@ impl WriteEngine {
         metadata: &mut Vec<(u64, u64)>,
     ) -> Result<bool, Error> {
         let mut complete = true;
-        let info =
-            AttributeInfoMessage::parse_with_offset_width(data, crate::file_writer::OFFSET_WIDTH)?;
+        let info = AttributeInfoMessage::parse_with_offset_width(data, self.widths().offsets)?;
         if let Some(heap) = info.fractal_heap_address {
             let source = BaseOffsetSource {
                 inner: &self.image(),
@@ -1169,7 +1169,7 @@ impl WriteEngine {
             let index = crate::attribute::collect_dense_attribute_index_storage_extents(
                 &source,
                 &info,
-                crate::file_writer::WIDTHS,
+                self.widths(),
             )?;
             metadata.extend(
                 self.absolute_owned_spans(
@@ -1186,7 +1186,7 @@ impl WriteEngine {
                 self.addresses,
                 &info,
                 heap,
-                crate::file_writer::WIDTHS,
+                self.widths(),
                 |flags| {
                     shared_records |= flags.is_shared();
                     !flags.is_shared()
@@ -1194,7 +1194,7 @@ impl WriteEngine {
                 |data, _creation_index| {
                     match crate::attribute::AttributeMessage::parse_with_length_width(
                         data,
-                        crate::file_writer::LENGTH_WIDTH,
+                        self.widths().lengths,
                     ) {
                         Ok(attribute) => {
                             complete &= !super::datatype_holds_file_address(&attribute.datatype)
@@ -1234,27 +1234,24 @@ impl WriteEngine {
         heap: StoredAddress,
         metadata: &mut Vec<(u64, u64)>,
     ) -> Result<bool, Error> {
-        let storage =
-            match fractal_heap_storage::collect_fractal_heap_storage_from_source_with_widths(
-                &BaseOffsetSource {
-                    inner: &self.image(),
-                    base: self.addresses.effective_base(),
-                },
-                self.addresses,
-                heap,
-                crate::file_writer::WIDTHS,
-            ) {
-                Ok(storage) => storage,
-                Err(FractalHeapStorageError::UnsupportedOwnership(_)) => return Ok(false),
-                Err(FractalHeapStorageError::Format(error)) => return Err(error.into()),
-                Err(
-                    FractalHeapStorageError::Layout(_) | FractalHeapStorageError::InvalidStorage,
-                ) => {
-                    return Err(Error::InvalidFractalHeapStorage {
-                        address: heap.get(),
-                    });
-                }
-            };
+        let storage = match fractal_heap_storage::collect_fractal_heap_storage_from_source(
+            &BaseOffsetSource {
+                inner: &self.image(),
+                base: self.addresses.effective_base(),
+            },
+            self.addresses,
+            heap,
+            self.widths(),
+        ) {
+            Ok(storage) => storage,
+            Err(FractalHeapStorageError::UnsupportedOwnership(_)) => return Ok(false),
+            Err(FractalHeapStorageError::Format(error)) => return Err(error.into()),
+            Err(FractalHeapStorageError::Layout(_) | FractalHeapStorageError::InvalidStorage) => {
+                return Err(Error::InvalidFractalHeapStorage {
+                    address: heap.get(),
+                });
+            }
+        };
         for &(extent, _) in storage.allocations() {
             metadata.push((
                 self.addresses

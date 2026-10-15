@@ -1885,7 +1885,7 @@ impl FileInner {
     fn resolve_path(&self, path: &ObjectPath<'_>) -> Result<u64, Error> {
         let access = self.access_mode();
         Ok(match &self.backend {
-            Backend::InMemory(v) => group_v2::resolve_path_any_with_widths(
+            Backend::InMemory(v) => group_v2::resolve_path_any(
                 v,
                 access,
                 &self.superblock,
@@ -1893,7 +1893,7 @@ impl FileInner {
                 self.addresses(),
                 path,
             )?,
-            Backend::Streaming(s) => group_v2::resolve_path_any_from_source_with_widths(
+            Backend::Streaming(s) => group_v2::resolve_path_any_from_source(
                 s.as_ref(),
                 access,
                 &self.superblock,
@@ -1908,7 +1908,7 @@ impl FileInner {
                 let core = m.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                 let sb = core.superblock().clone();
                 match core.image_slice() {
-                    Some(data) => group_v2::resolve_path_any_with_widths(
+                    Some(data) => group_v2::resolve_path_any(
                         data,
                         access,
                         &sb,
@@ -1916,7 +1916,7 @@ impl FileInner {
                         core.addresses(),
                         path,
                     )?,
-                    None => group_v2::resolve_path_any_from_source_with_widths(
+                    None => group_v2::resolve_path_any_from_source(
                         core.image(),
                         access,
                         &sb,
@@ -1989,6 +1989,11 @@ impl FileInner {
     /// Returns a reference to the parsed superblock.
     pub fn superblock(&self) -> &Superblock {
         &self.superblock
+    }
+
+    /// Returns the address and length widths validated when this file was opened.
+    pub(crate) const fn widths(&self) -> FormatWidths {
+        self.widths
     }
 
     /// The whole-file byte image when this file is buffered in memory
@@ -2182,9 +2187,9 @@ impl FileInner {
         let (widths, base) = (self.widths, self.addresses());
         match &self.backend {
             Backend::InMemory(v) => {
-                group_v2::resolve_group_entries_with_widths(v, self.access_mode, hdr, widths, base)
+                group_v2::resolve_group_entries(v, self.access_mode, hdr, widths, base)
             }
-            Backend::Streaming(s) => group_v2::resolve_group_entries_from_source_with_widths(
+            Backend::Streaming(s) => group_v2::resolve_group_entries_from_source(
                 s.as_ref(),
                 self.access_mode,
                 hdr,
@@ -2193,17 +2198,9 @@ impl FileInner {
             ),
             Backend::Edit(m) => Self::with_engine(
                 m,
-                |d| {
-                    group_v2::resolve_group_entries_with_widths(
-                        d,
-                        self.access_mode,
-                        hdr,
-                        widths,
-                        base,
-                    )
-                },
+                |d| group_v2::resolve_group_entries(d, self.access_mode, hdr, widths, base),
                 |s| {
-                    group_v2::resolve_group_entries_from_source_with_widths(
+                    group_v2::resolve_group_entries_from_source(
                         s,
                         self.access_mode,
                         hdr,
@@ -2239,9 +2236,9 @@ impl FileInner {
         let addr = group_address;
         match &self.backend {
             Backend::InMemory(v) => {
-                group_v2::find_child_address_with_widths(v, access, addr, widths, base, name)
+                group_v2::find_child_address(v, access, addr, widths, base, name)
             }
-            Backend::Streaming(s) => group_v2::find_child_address_from_source_with_widths(
+            Backend::Streaming(s) => group_v2::find_child_address_from_source(
                 s.as_ref(),
                 access,
                 addr,
@@ -2251,12 +2248,8 @@ impl FileInner {
             ),
             Backend::Edit(m) => Self::with_engine(
                 m,
-                |d| group_v2::find_child_address_with_widths(d, access, addr, widths, base, name),
-                |s| {
-                    group_v2::find_child_address_from_source_with_widths(
-                        s, access, addr, widths, base, name,
-                    )
-                },
+                |d| group_v2::find_child_address(d, access, addr, widths, base, name),
+                |s| group_v2::find_child_address_from_source(s, access, addr, widths, base, name),
             ),
         }
         .map_err(Error::Format)
@@ -3667,6 +3660,11 @@ impl File {
     /// For a relocated image, the effective base and EOF differ from the encoded values.
     pub fn superblock(&self) -> &Superblock {
         self.inner.superblock()
+    }
+
+    /// Returns the address and length widths validated when this file was opened.
+    pub(crate) fn widths(&self) -> FormatWidths {
+        self.inner.widths()
     }
 
     /// The file-space management strategy this file records in its superblock
@@ -8243,7 +8241,7 @@ mod tests {
     fn a_root_that_is_not_a_group_refuses_rather_than_being_searched() {
         let mut bytes = nested_dataset_bytes();
         let sig = crate::signature::find_signature(&bytes).unwrap();
-        let mut sb = hdf5_pure_format::__private::parse_superblock(&bytes, sig).unwrap();
+        let mut sb = crate::superblock::parse_superblock(&bytes, sig).unwrap();
         assert_eq!(sb.base_address, BaseAddress::ZERO);
         let addresses = AddressContext::from_effective_base(sb.base_address);
         sb.root_group_address = addresses
@@ -8252,6 +8250,7 @@ mod tests {
                     &bytes,
                     AccessMode::ReadOnly,
                     &sb,
+                    FormatWidths::from_sizes(sb.offset_size, sb.length_size).unwrap(),
                     AddressContext::from_effective_base(sb.base_address),
                     &ObjectPath::parse("plain"),
                 )
@@ -9944,7 +9943,7 @@ mod tests {
         {
             let mut bytes = std::fs::read(&old_format).unwrap();
             let sig = crate::signature::find_signature(&bytes).unwrap();
-            let mut sb = hdf5_pure_format::__private::parse_superblock(&bytes, sig).unwrap();
+            let mut sb = crate::superblock::parse_superblock(&bytes, sig).unwrap();
             assert_eq!(sb.version, 3, "the fixture must start at the newer format");
             sb.version = 2;
             let rewritten = hdf5_pure_format::__private::serialize_superblock(&sb).unwrap();

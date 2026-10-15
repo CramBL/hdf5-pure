@@ -7,10 +7,9 @@
 //! Three distinctions are worth keeping, because they are the ones the copies
 //! actually disagreed on:
 //!
-//! * [`read_offset`] and [`read_length`] differ only in which error they report
-//!   for an unsupported width. That error identifies the on-disk field the width came
-//!   from ("size of offsets" against "size of lengths"), so a malformed file is
-//!   reported against the field that is wrong.
+//! * The offset and length wrappers report different errors for unsupported raw widths. That
+//!   error identifies the on-disk field the width came from ("size of offsets" against "size of
+//!   lengths"), so a malformed file is reported against the field that is wrong.
 //! * [`read_uint_width`] is **not** an address read. Object header and link
 //!   messages store a width in a two-bit flag field, where 1 is a legal value.
 //!   A file address is 2, 4, or 8 and a 1 there is malformed. Giving the two
@@ -20,9 +19,9 @@
 //!   is file-derived, so on a 32-bit target that sum can wrap and admit a read
 //!   past the end of the buffer (issue #140).
 //!
-//! Each address and length read comes in two forms. A `_width` function takes a
-//! width already parsed into an [`OffsetWidth`] or a [`LengthWidth`]. The plain
-//! form takes the `u8` the superblock stores and parses it first.
+//! Production parsing uses the `_width` functions with validated [`OffsetWidth`] or
+//! [`LengthWidth`] values. Test-only helpers also exercise the raw `u8` forms to verify
+//! malformed-width handling.
 //!
 //! Reads are from an in-memory slice.
 
@@ -106,7 +105,8 @@ fn read_le(data: &[u8], pos: usize, width: u8) -> u64 {
 /// Returns [`FormatError::InvalidOffsetSize`] if `offset_size` is not 2, 4, or 8, or
 /// [`FormatError::UnexpectedEof`] if fewer than `offset_size` bytes remain at `pos`.
 #[inline]
-pub fn read_offset(data: &[u8], pos: usize, offset_size: u8) -> Result<u64, FormatError> {
+#[cfg(test)]
+pub(crate) fn read_offset(data: &[u8], pos: usize, offset_size: u8) -> Result<u64, FormatError> {
     read_offset_width(data, pos, OffsetWidth::try_from(offset_size)?)
 }
 
@@ -130,7 +130,8 @@ pub fn read_offset_width(data: &[u8], pos: usize, width: OffsetWidth) -> Result<
 /// Returns [`FormatError::InvalidLengthSize`] if `length_size` is not 2, 4, or 8, or
 /// [`FormatError::UnexpectedEof`] if fewer than `length_size` bytes remain at `pos`.
 #[inline]
-pub fn read_length(data: &[u8], pos: usize, length_size: u8) -> Result<u64, FormatError> {
+#[cfg(test)]
+pub(crate) fn read_length(data: &[u8], pos: usize, length_size: u8) -> Result<u64, FormatError> {
     read_length_width(data, pos, LengthWidth::try_from(length_size)?)
 }
 
@@ -153,7 +154,7 @@ pub(crate) fn read_length_width(
 ///
 /// `width` is a [`UintWidth`], the width an object header or a link message
 /// encodes in two bits of a flag byte. It sizes a value such as a chunk size or
-/// a name length, so 1 is legal here and malformed in [`read_offset`].
+/// a name length, so 1 is legal here but malformed as a file-address width.
 ///
 /// # Errors
 ///
@@ -182,7 +183,8 @@ pub(crate) fn read_uint_width(
 /// Returns [`FormatError::InvalidOffsetSize`] if `offset_size` is not 2, 4, or 8, or
 /// [`FormatError::UnexpectedEof`] if fewer than `offset_size` bytes remain at `pos`.
 #[inline]
-pub fn read_optional_offset(
+#[cfg(test)]
+pub(crate) fn read_optional_offset(
     data: &[u8],
     pos: usize,
     offset_size: u8,

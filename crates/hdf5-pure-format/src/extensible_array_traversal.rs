@@ -276,10 +276,10 @@ impl<'a> Reader<'a> {
         let bytes = bytes.ok_or(FormatError::Internal(
             "Extensible Array address count differs from geometry".into(),
         ))?;
-        Ok(StoredAddress::new(bytes::read_offset(
+        Ok(StoredAddress::new(bytes::read_offset_width(
             bytes,
             0,
-            self.offset_width.get(),
+            self.offset_width,
         )?))
     }
 
@@ -858,12 +858,22 @@ mod tests {
                     file.resize(address.to_usize().unwrap() + block.len(), 0);
                     file[address.to_usize().unwrap()..].copy_from_slice(block);
                 }
-                super::super::read_extensible_array_chunks(&file, &header, 8, 8, &mut visit)
-                    .unwrap();
+                super::super::read_extensible_array_chunks_with_offset_width(
+                    &file,
+                    &header,
+                    super::OffsetWidth::Eight,
+                    8,
+                    &mut visit,
+                )
+                .unwrap();
             }
             Backend::Stream | Backend::SparseStream => {
-                super::super::read_extensible_array_chunks_from_source(
-                    &source, &header, 8, 8, &mut visit,
+                super::super::read_extensible_array_chunks_from_source_with_offset_width(
+                    &source,
+                    &header,
+                    super::OffsetWidth::Eight,
+                    8,
+                    &mut visit,
                 )
                 .unwrap();
                 assert_eq!(source.reads.borrow().len(), 4);

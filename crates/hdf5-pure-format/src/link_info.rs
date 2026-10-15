@@ -34,10 +34,22 @@ impl LinkInfoMessage {
     ///
     /// # Errors
     ///
-    /// Returns [`FormatError::InvalidLinkInfoVersion`] if the version is not 0,
-    /// [`FormatError::InvalidOffsetSize`] if `offset_size` is not 2, 4, or 8, and
-    /// [`FormatError::UnexpectedEof`] if `data` ends inside a field.
+    /// Returns [`FormatError::InvalidOffsetSize`] if `offset_size` is not 2, 4, or 8, and the
+    /// errors of [`parse_with_offset_width`](Self::parse_with_offset_width) in the cases it lists.
     pub fn parse(data: &[u8], offset_size: u8) -> Result<LinkInfoMessage, FormatError> {
+        Self::parse_with_offset_width(data, OffsetWidth::try_from(offset_size)?)
+    }
+
+    /// Parses the body of a Link Info message using a validated address width.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::InvalidLinkInfoVersion`] if the version is not 0, and
+    /// [`FormatError::UnexpectedEof`] if `data` ends inside a field.
+    pub fn parse_with_offset_width(
+        data: &[u8],
+        offset_width: OffsetWidth,
+    ) -> Result<LinkInfoMessage, FormatError> {
         bytes::ensure_len(data, 0, 2)?;
 
         let version = data[0];
@@ -70,15 +82,17 @@ impl LinkInfoMessage {
         };
 
         let fractal_heap_address =
-            bytes::read_optional_offset(data, pos, offset_size)?.map(StoredAddress::new);
-        pos += offset_size as usize;
+            bytes::read_optional_offset_width(data, pos, offset_width)?.map(StoredAddress::new);
+        pos += usize::from(offset_width.get());
 
         let btree_name_index_address =
-            bytes::read_optional_offset(data, pos, offset_size)?.map(StoredAddress::new);
-        pos += offset_size as usize;
+            bytes::read_optional_offset_width(data, pos, offset_width)?.map(StoredAddress::new);
+        pos += usize::from(offset_width.get());
 
         let btree_creation_order_address = if has_creation_order_index {
-            Some(bytes::read_optional_offset(data, pos, offset_size)?.map(StoredAddress::new))
+            Some(
+                bytes::read_optional_offset_width(data, pos, offset_width)?.map(StoredAddress::new),
+            )
         } else {
             None
         };

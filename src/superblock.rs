@@ -1,5 +1,17 @@
 pub use hdf5_pure_core::Superblock;
 
+/// Parses a superblock when the caller only needs its decoded fields.
+///
+/// The format parser also returns the validated offset and length widths. Callers that open a
+/// file should use that result directly and retain the widths in file state.
+pub(crate) fn parse_superblock(
+    data: &[u8],
+    signature_offset: usize,
+) -> Result<Superblock, hdf5_pure_format::FormatError> {
+    hdf5_pure_format::__private::parse_superblock_with_widths(data, signature_offset)
+        .map(|(superblock, _widths)| superblock)
+}
+
 #[cfg(all(test, feature = "std"))]
 mod tests {
     use test_util::superblock::v2;
@@ -15,7 +27,7 @@ mod tests {
         let superblock = superblock_bytes();
         data[512..512 + superblock.len()].copy_from_slice(&superblock);
 
-        let buffered = hdf5_pure_format::__private::parse_superblock(&data, 512).unwrap();
+        let buffered = crate::superblock::parse_superblock(&data, 512).unwrap();
         let memory = parse_through(&BytesSource::new(&data), 512).unwrap();
         let seek = parse_through(
             &ReadSeekSource::new(std::io::Cursor::new(data)).unwrap(),
@@ -45,10 +57,11 @@ mod tests {
         source: &impl Source,
         signature_offset: u64,
     ) -> Result<Superblock, FormatError> {
-        hdf5_pure_format::__private::parse_superblock_from_source(
+        hdf5_pure_format::__private::parse_superblock_from_source_with_widths(
             &SourceMetadata(source),
             signature_offset,
         )
+        .map(|(superblock, _widths)| superblock)
     }
 
     fn superblock_bytes() -> Vec<u8> {

@@ -405,7 +405,7 @@ pub(crate) fn clear_swmr_flag_at(path: &Path) -> Result<(), Error> {
     let mut data = Vec::new();
     w.read_to_end(&mut data).map_err(Error::Io)?;
     let sig = signature::find_signature(&data)?;
-    let mut sb = hdf5_pure_format::__private::parse_superblock(&data, sig)?;
+    let mut sb = crate::superblock::parse_superblock(&data, sig)?;
     if sb.version < 2 {
         // `serialize_superblock` writes only the v2/v3 layout and returns an error for a v0/v1
         // superblock. `check_status_flags`, like `H5Fopen`, reads the status flags from version 3
@@ -676,7 +676,7 @@ mod tests {
     fn write_file_with(path: &Path, version: u8, flags: u32) {
         let mut bytes = crate::writer::FileBuilder::new().finish().unwrap();
         let off = crate::signature::find_signature(&bytes).unwrap();
-        let mut sb = hdf5_pure_format::__private::parse_superblock(&bytes, off).unwrap();
+        let mut sb = crate::superblock::parse_superblock(&bytes, off).unwrap();
         assert_eq!(sb.version, 3, "this writer emits a v3 superblock");
         sb.version = version;
         sb.consistency_flags = flags;

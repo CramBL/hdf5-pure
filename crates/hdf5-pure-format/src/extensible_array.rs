@@ -167,7 +167,7 @@ impl ExtensibleArrayHeader {
 
     /// Returns the header length for validated format widths.
     pub fn serialized_size_with_widths(widths: FormatWidths) -> usize {
-        Self::serialized_size(widths.offsets.get(), widths.lengths.get())
+        4 + 8 + 6 * usize::from(widths.lengths.get()) + usize::from(widths.offsets.get()) + 4
     }
 
     /// Parses the Extensible Array header at `address` in `source`.
@@ -665,42 +665,6 @@ fn read_element(
     }
 }
 
-/// Reads the Extensible Array `header` describes from `file_data`, and calls `visit` with the slot
-/// and the record of each element that stores a chunk address.
-///
-/// The reader walks the elements of the index block, the data blocks it addresses, and then the
-/// super blocks and their data blocks, and stops at the header's "Max Index Set". A record of an
-/// unfiltered chunk has `chunk_byte_size` as its stored size. A block whose address is undefined
-/// is unoccupied.
-///
-/// # Errors
-///
-/// Returns [`FormatError::ChunkedReadError`] if a signature does not match or the element size is
-/// too small for a filtered element or leaves more than 8 bytes for its chunk size,
-/// [`FormatError::UnexpectedEof`] if a block runs past the end of `file_data`,
-/// [`FormatError::InvalidOffsetSize`] if `offset_size` is not 2, 4, or 8,
-/// [`FormatError::ChecksumMismatch`] if a checksum does not match,
-/// [`FormatError::InvalidChunkGeometry`] if the minimum data block element count is zero,
-/// a data block contains a partial page, or a direct data block requires paging,
-/// [`FormatError::OffsetOverflow`] if a byte extent overflows a [`u64`], and
-/// [`FormatError::ValueTooLargeForPlatform`] if a read length or buffer offset does not fit a
-/// [`usize`]. Also returns the error `visit` returns.
-pub fn read_extensible_array_chunks(
-    file_data: &[u8],
-    header: &ExtensibleArrayHeader,
-    offset_size: u8,
-    chunk_byte_size: u64,
-    visit: impl FnMut(u64, ChunkRecord) -> Result<(), FormatError>,
-) -> Result<(), FormatError> {
-    read_extensible_array_chunks_with_offset_width(
-        file_data,
-        header,
-        OffsetWidth::try_from(offset_size)?,
-        chunk_byte_size,
-        visit,
-    )
-}
-
 /// Reads the Extensible Array using a validated address width.
 ///
 /// # Errors
@@ -721,33 +685,6 @@ pub fn read_extensible_array_chunks_with_offset_width(
 ) -> Result<(), FormatError> {
     traversal::Reader::parse(header, offset_width, chunk_byte_size)?
         .read(&traversal::Buffer(file_data), &mut visit)
-}
-
-/// Returns the `(address, length)` spans of the header, the index block, and every super block and
-/// data block of the Extensible Array at `ea_base`.
-///
-/// The spans cover the index alone, and [`read_extensible_array_chunks`] reports the chunks it
-/// points at. The walk reads the block addresses as that reader does, and takes each length from
-/// the geometry the writer builds from. A block whose address is undefined has no span. The
-/// caller checks the spans against the end of the file.
-///
-/// # Errors
-///
-/// Returns the errors [`ExtensibleArrayHeader::parse_from_source`] returns,
-/// [`FormatError::ChunkedReadError`] if a signature does not match,
-/// [`FormatError::ChecksumMismatch`] if the checksum of the index block or a super block
-/// does not match, and the error `source` returns if a read fails.
-pub fn extensible_array_index_spans(
-    source: &(impl MetadataSource + ?Sized),
-    ea_base: StoredAddress,
-    offset_size: u8,
-    length_size: u8,
-) -> Result<Vec<(u64, u64)>, FormatError> {
-    extensible_array_index_spans_with_widths(
-        source,
-        ea_base,
-        FormatWidths::from_sizes(offset_size, length_size)?,
-    )
 }
 
 /// Returns the index spans of the Extensible Array at `ea_base` using validated format widths.
@@ -785,13 +722,8 @@ pub fn extensible_array_index_spans_with_widths(
     let inline = header.idx_blk_elmts as usize;
     // The signature, the version, the client ID, and the header address.
     let ib_header = 4 + 1 + 1 + os;
-    let index_block_len = index_block_len(
-        offset_width.get(),
-        inline,
-        elem_size,
-        ndblk_addrs,
-        nsblk_addrs,
-    );
+    let index_block_len =
+        index_block_len(offset_width, inline, elem_size, ndblk_addrs, nsblk_addrs);
     let ib_addr = header.index_block_address;
     // The read fails for an index block that runs past the end of the file.
     let ib = source.read_metadata_at(ib_addr.get(), index_block_len)?;
@@ -822,7 +754,7 @@ pub fn extensible_array_index_spans_with_widths(
                     page_nelmts,
                 },
                 elem_size,
-                offset_width.get(),
+                offset_width,
                 blk_off_size,
             ),
         ));
@@ -834,10 +766,7 @@ pub fn extensible_array_index_spans_with_widths(
             continue;
         }
         let sb = geom.super_block_at(j, page_nelmts);
-        spans.push((
-            addr.get(),
-            super_block_len(sb, offset_width.get(), blk_off_size),
-        ));
+        spans.push((addr.get(), super_block_len(sb, offset_width, blk_off_size)));
         easb_data_block_spans(
             source,
             addr,
@@ -874,7 +803,7 @@ fn easb_data_block_spans(
     let sb_header = 4 + 1 + 1 + os + blk_off_size.bytes();
     // The caller frees the spans, so the walk verifies the checksum of the whole block before it
     // reads an address.
-    let sb_len = super_block_len(sb, offset_width.get(), blk_off_size).to_usize()?;
+    let sb_len = super_block_len(sb, offset_width, blk_off_size).to_usize()?;
     let block = source.read_metadata_at(sb_addr.get(), sb_len)?;
     if &block[..4] != b"EASB" {
         return Err(FormatError::ChunkedReadError(
@@ -892,7 +821,7 @@ fn easb_data_block_spans(
         }
         spans.push((
             addr.get(),
-            data_block_len(sb.blocks, elem_size, offset_width.get(), blk_off_size),
+            data_block_len(sb.blocks, elem_size, offset_width, blk_off_size),
         ));
     }
     Ok(())
@@ -901,34 +830,6 @@ fn easb_data_block_spans(
 // ---------------------------------------------------------------------------
 // Streaming traversal (read each block from a `MetadataSource` on demand)
 // ---------------------------------------------------------------------------
-
-/// Reads the Extensible Array `header` describes from `source`, as [`read_extensible_array_chunks`]
-/// reads it from a buffer.
-///
-/// The reader reads each index block, super block, and unpaged data block once. For a paged data
-/// block, it reads the prefix and all pages through the last initialized page together when that
-/// read length fits a [`usize`]. Otherwise, it reads the prefix and initialized pages separately.
-/// Logical element indexes and file addresses may exceed the range of a [`usize`].
-///
-/// # Errors
-///
-/// Returns the errors [`read_extensible_array_chunks`] returns, and the error `source` returns if
-/// a read fails.
-pub fn read_extensible_array_chunks_from_source(
-    source: &(impl MetadataSource + ?Sized),
-    header: &ExtensibleArrayHeader,
-    offset_size: u8,
-    chunk_byte_size: u64,
-    visit: impl FnMut(u64, ChunkRecord) -> Result<(), FormatError>,
-) -> Result<(), FormatError> {
-    read_extensible_array_chunks_from_source_with_offset_width(
-        source,
-        header,
-        OffsetWidth::try_from(offset_size)?,
-        chunk_byte_size,
-        visit,
-    )
-}
 
 /// Reads the Extensible Array from `source` using a validated address width.
 ///
@@ -1123,16 +1024,16 @@ pub fn encode_super_block(
 /// Returns the length in bytes of an index block (`EAIB`): the prefix, `inline_elmts` elements,
 /// the data block and super block addresses, and the checksum.
 ///
-/// [`build_extensible_array_at`] and [`extensible_array_index_spans`] both size the index block
-/// with it.
+/// [`build_extensible_array_at`] and [`extensible_array_index_spans_with_widths`] both size the
+/// index block with it.
 pub(crate) fn index_block_len(
-    offset_size: u8,
+    offset_width: OffsetWidth,
     inline_elmts: usize,
     elem_size: usize,
     ndblk_addrs: usize,
     nsblk_addrs: usize,
 ) -> usize {
-    let os = offset_size as usize;
+    let os = usize::from(offset_width.get());
     4 + 1 + 1 + os // signature + version + client id + header address
         + inline_elmts * elem_size // inline element slots (always all written)
         + ndblk_addrs * os // direct data-block addresses
@@ -1164,10 +1065,10 @@ pub struct ExtensibleArrayStats {
 pub(crate) fn data_block_len(
     blocks: DataBlockGeometry,
     elem_size: usize,
-    offset_size: u8,
+    offset_width: OffsetWidth,
     blk_off_size: BlockOffsetWidth,
 ) -> u64 {
-    let prefix = (4 + 1 + 1 + offset_size as u64) + blk_off_size.bytes() as u64;
+    let prefix = (4 + 1 + 1 + u64::from(offset_width.get())) + blk_off_size.bytes() as u64;
     if blocks.is_paged() {
         // Paged: the prefix and its checksum, then every page and its checksum.
         prefix + 4 + blocks.npages() * (blocks.page_nelmts * elem_size as u64 + 4)
@@ -1183,10 +1084,10 @@ pub(crate) fn data_block_len(
 /// they are multiplied.
 pub(crate) fn super_block_len(
     geom: SuperBlockGeometry,
-    offset_size: u8,
+    offset_width: OffsetWidth,
     blk_off_size: BlockOffsetWidth,
 ) -> u64 {
-    let os = offset_size as u64;
+    let os = u64::from(offset_width.get());
     let header = 4 + 1 + 1 + os + blk_off_size.bytes() as u64;
     header + geom.bitmap_size() + geom.ndblks * os + 4
 }
@@ -1204,7 +1105,6 @@ pub fn extensible_array_stats(
     max_idx_set: u64,
     occupancy: SlotOccupancy<'_>,
 ) -> ExtensibleArrayStats {
-    let offset_size = offset_size.get();
     let page_nelmts = bits.page_nelmts().get();
     let blk_off_size = bits.block_offset_width();
     let mut s = ExtensibleArrayStats {
@@ -1307,9 +1207,12 @@ pub fn extensible_array_layout(
     let geom = ExtensibleArrayGeometry::from_header(&geom_header);
     let inline = geom_header.idx_blk_elmts as usize;
 
-    let header_len = ExtensibleArrayHeader::serialized_size(offset_size.get(), length_size.get());
+    let header_len = ExtensibleArrayHeader::serialized_size_with_widths(FormatWidths {
+        offsets: offset_size,
+        lengths: length_size,
+    });
     let index_block_len = index_block_len(
-        offset_size.get(),
+        offset_size,
         inline,
         elem_size,
         geom.direct_dblk_nelmts.len(),
@@ -1922,10 +1825,16 @@ mod tests {
         chunk_byte_size: u64,
     ) -> Result<Vec<(u64, ChunkRecord)>, FormatError> {
         let mut records = Vec::new();
-        read_extensible_array_chunks(file_data, header, 8, chunk_byte_size, |slot, record| {
-            records.push((slot, record));
-            Ok(())
-        })?;
+        read_extensible_array_chunks_with_offset_width(
+            file_data,
+            header,
+            OffsetWidth::Eight,
+            chunk_byte_size,
+            |slot, record| {
+                records.push((slot, record));
+                Ok(())
+            },
+        )?;
         Ok(records)
     }
 
@@ -1936,10 +1845,10 @@ mod tests {
         chunk_byte_size: u64,
     ) -> Result<Vec<(u64, ChunkRecord)>, FormatError> {
         let mut records = Vec::new();
-        read_extensible_array_chunks_from_source(
+        read_extensible_array_chunks_from_source_with_offset_width(
             source,
             header,
-            8,
+            OffsetWidth::Eight,
             chunk_byte_size,
             |slot, record| {
                 records.push((slot, record));
@@ -2183,10 +2092,16 @@ mod tests {
             reads: Cell::new(0),
         };
         let mut records = Vec::new();
-        super::read_extensible_array_chunks_from_source(&source, &header, 8, 8, |index, record| {
-            records.push((index, record));
-            Ok(())
-        })
+        super::read_extensible_array_chunks_from_source_with_offset_width(
+            &source,
+            &header,
+            OffsetWidth::Eight,
+            8,
+            |index, record| {
+                records.push((index, record));
+                Ok(())
+            },
+        )
         .unwrap();
         assert_eq!(records, expected);
         let stats = super::extensible_array_layout(
@@ -2223,8 +2138,8 @@ mod tests {
                         index_block_address: StoredAddress::new(0),
                     };
                     let blk_off = header.block_offset_width();
-                    let stride =
-                        ea_elem_stride(&header, OffsetWidth::try_from(offset_size).unwrap());
+                    let offset_width = OffsetWidth::try_from(offset_size).unwrap();
+                    let stride = ea_elem_stride(&header, offset_width);
                     let page_nelmts = header.page_nelmts().get();
                     // Every count a non-paged block can have, up to the page
                     // size that would make it paged instead.
@@ -2242,7 +2157,7 @@ mod tests {
                                     page_nelmts,
                                 },
                                 stride,
-                                offset_size,
+                                offset_width,
                                 blk_off,
                             ),
                             "client={client_id} os={offset_size} bits={max_nelmts_bits} \
@@ -2480,9 +2395,15 @@ mod tests {
                 "the fixture must read before it is corrupted, at n={n}"
             );
 
-            let spans =
-                extensible_array_index_spans(file.as_slice(), StoredAddress::new(base), 8, 8)
-                    .unwrap();
+            let spans = extensible_array_index_spans_with_widths(
+                file.as_slice(),
+                StoredAddress::new(base),
+                FormatWidths {
+                    offsets: OffsetWidth::Eight,
+                    lengths: LengthWidth::Eight,
+                },
+            )
+            .unwrap();
             assert!(spans.len() > 1, "the sweep must reach past the header");
 
             let header = ExtensibleArrayHeader::parse(&file, base as usize, 8, 8).unwrap();
@@ -2536,11 +2457,13 @@ mod tests {
                     "n={n}: the streaming backend must reject what the buffered one does, at {at:#x}"
                 );
                 if walked {
-                    let walk = extensible_array_index_spans(
+                    let walk = extensible_array_index_spans_with_widths(
                         file.as_slice(),
                         StoredAddress::new(base),
-                        8,
-                        8,
+                        FormatWidths {
+                            offsets: OffsetWidth::Eight,
+                            lengths: LengthWidth::Eight,
+                        },
                     );
                     assert!(
                         matches!(walk, Err(FormatError::ChecksumMismatch { .. })),
@@ -2581,9 +2504,12 @@ mod tests {
             let mut file = vec![0u8; base as usize + ea.len()];
             file[base as usize..].copy_from_slice(&ea);
 
-            let spans =
-                extensible_array_index_spans(file.as_slice(), StoredAddress::new(base), os, ls)
-                    .unwrap();
+            let spans = extensible_array_index_spans_with_widths(
+                file.as_slice(),
+                StoredAddress::new(base),
+                FormatWidths::from_sizes(os, ls).unwrap(),
+            )
+            .unwrap();
 
             // Expected total = EAHD + EAIB + `super_blk_size` + `data_blk_size`, the
             // last two read straight from the statistics the builder wrote.
@@ -2592,7 +2518,7 @@ mod tests {
             let header_len = ExtensibleArrayHeader::serialized_size(os, ls) as u64;
             // Unfiltered EA: element stride equals the offset size.
             let index_block_len = index_block_len(
-                os,
+                OffsetWidth::try_from(os).unwrap(),
                 header.idx_blk_elmts as usize,
                 os as usize,
                 geom.direct_dblk_nelmts.len(),
@@ -2845,7 +2771,7 @@ mod tests {
             ExtensibleArrayHeader::parse(&file, base as usize, offsets.get(), lengths.get())
                 .unwrap();
         let mut read = Vec::new();
-        read_extensible_array_chunks(&file, &header, offsets.get(), 8, |_, record| {
+        read_extensible_array_chunks_with_offset_width(&file, &header, offsets, 8, |_, record| {
             read.push(record);
             Ok(())
         })

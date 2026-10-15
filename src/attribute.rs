@@ -78,7 +78,7 @@ pub(crate) fn collect_dense_attribute_index_storage_extents<S: Source + ?Sized>(
     {
         indexes.push(DenseIndex::new(address, BTREE_V2_ATTRIBUTE_CREATION_ORDER));
     }
-    dense_storage::collect_dense_index_storage_extents_with_widths(
+    dense_storage::collect_dense_index_storage_extents(
         source,
         fractal_heap_address,
         indexes,
@@ -306,7 +306,7 @@ fn extract_dense_attributes(
     sohm: Option<&SohmTable>,
 ) -> Result<Vec<AttributeMessage>, FormatError> {
     // Parse fractal heap
-    let fh = crate::fractal_heap::parse_header_with_widths(file_data, addresses, fh_addr, widths)?;
+    let fh = crate::fractal_heap::parse_header(file_data, addresses, fh_addr, widths)?;
 
     // Parse B-tree v2 for name index (type 8)
     let btree_addr = attr_info
@@ -317,11 +317,7 @@ fn extract_dense_attributes(
         })?;
     let btree_hdr =
         BTreeV2Header::parse_with_widths(file_data, btree_addr.get().to_usize()?, widths)?;
-    let records = crate::btree_v2::collect_btree_v2_records_with_offset_width(
-        file_data,
-        &btree_hdr,
-        widths.offsets,
-    )?;
+    let records = crate::btree_v2::collect_btree_v2_records(file_data, &btree_hdr, widths.offsets)?;
 
     let resolver = BufferedResolver::new(file_data, addresses, access_mode, widths, sohm);
     let layout = FractalHeapIdLayout::new(&fh, widths.offsets, widths.lengths);
@@ -411,9 +407,7 @@ pub(crate) fn visit_dense_attribute_messages_from_source(
     mut select: impl FnMut(MessageFlags) -> bool,
     mut visit: impl FnMut(&[u8], Option<u16>) -> Result<(), FormatError>,
 ) -> Result<(), FormatError> {
-    let fh = crate::fractal_heap::read_header_from_source_with_widths(
-        source, addresses, fh_addr, widths,
-    )?;
+    let fh = crate::fractal_heap::read_header_from_source(source, addresses, fh_addr, widths)?;
 
     let btree_addr = attr_info
         .btree_name_index_address
@@ -426,11 +420,8 @@ pub(crate) fn visit_dense_attribute_messages_from_source(
         btree_addr.get(),
         widths,
     )?;
-    let records = crate::btree_v2::collect_btree_v2_records_from_source_with_offset_width(
-        source,
-        &btree_hdr,
-        widths.offsets,
-    )?;
+    let records =
+        crate::btree_v2::collect_btree_v2_records_from_source(source, &btree_hdr, widths.offsets)?;
 
     let layout = FractalHeapIdLayout::new(&fh, widths.offsets, widths.lengths);
     let mut heap = HeapObjectReader::new(&fh, addresses, fh_addr, access_mode, widths);

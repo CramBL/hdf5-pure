@@ -5,7 +5,7 @@
 //! the size in bytes of every B-tree node, not of the header. Its "Root Node Address" is undefined
 //! for a tree with no records. Otherwise, "Depth" determines whether that root is a leaf or an
 //! internal node. Record walks preserve tree order.
-//! [`collect_btree_v2_storage_extents_with_widths`] returns the header allocation and every
+//! [`collect_btree_v2_storage_extents`] returns the header allocation and every
 //! reachable full "Node Size" allocation in file-address order.
 //!
 //! [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_infra_btrees_v2
@@ -36,7 +36,7 @@ use crate::width::{FormatWidths, OffsetWidth};
 /// # Errors
 ///
 /// Returns the structural error of the first B-tree header or node that does not parse.
-pub(crate) fn collect_btree_v2_storage_extents_with_widths<S: Source + ?Sized>(
+pub(crate) fn collect_btree_v2_storage_extents<S: Source + ?Sized>(
     source: &S,
     header_address: StoredAddress,
     widths: FormatWidths,
@@ -246,7 +246,7 @@ fn extent_in_source<S: Source + ?Sized>(
 /// # Errors
 ///
 /// Returns the [`FormatError`] of the first B-tree node that does not parse.
-pub fn collect_btree_v2_records_with_offset_width(
+pub fn collect_btree_v2_records(
     file_data: &[u8],
     header: &BTreeV2Header,
     offset_width: OffsetWidth,
@@ -354,7 +354,7 @@ fn collect_internal_records(
 ///
 /// Returns the [`FormatError`] of the first B-tree node that does not parse, or the error `source`
 /// reports for a node it cannot read.
-pub fn collect_btree_v2_records_from_source_with_offset_width<S: Source + ?Sized>(
+pub fn collect_btree_v2_records_from_source<S: Source + ?Sized>(
     source: &S,
     header: &BTreeV2Header,
     offset_width: OffsetWidth,
@@ -388,7 +388,7 @@ pub fn collect_btree_v2_records_from_source_with_offset_width<S: Source + ?Sized
 
 /// Reads one node from the source and recursively collects its records in tree order.
 ///
-/// This mirrors the buffered [`collect_btree_v2_records_with_offset_width`] traversal.
+/// This mirrors the buffered [`collect_btree_v2_records`] traversal.
 #[allow(clippy::too_many_arguments)]
 fn collect_node_from_source<S: Source + ?Sized>(
     source: &S,
@@ -625,12 +625,11 @@ mod tests {
     fn reads_depth_3_btree() {
         let tree = depth_3_tree();
         let header = BTreeV2Header::parse(&tree.file, 0, OFFSET_SIZE, LENGTH_SIZE).unwrap();
-        let ids: Vec<u8> =
-            collect_btree_v2_records_with_offset_width(&tree.file, &header, OffsetWidth::Eight)
-                .unwrap()
-                .iter()
-                .map(|record| record.data[0])
-                .collect();
+        let ids: Vec<u8> = collect_btree_v2_records(&tree.file, &header, OffsetWidth::Eight)
+            .unwrap()
+            .iter()
+            .map(|record| record.data[0])
+            .collect();
         assert_eq!(ids, (0u8..15).collect::<Vec<_>>());
 
         #[cfg(feature = "std")]
@@ -645,15 +644,12 @@ mod tests {
                 LENGTH_SIZE,
             )
             .unwrap();
-            let ids: Vec<u8> = collect_btree_v2_records_from_source_with_offset_width(
-                &source,
-                &header,
-                OffsetWidth::Eight,
-            )
-            .unwrap()
-            .iter()
-            .map(|record| record.data[0])
-            .collect();
+            let ids: Vec<u8> =
+                collect_btree_v2_records_from_source(&source, &header, OffsetWidth::Eight)
+                    .unwrap()
+                    .iter()
+                    .map(|record| record.data[0])
+                    .collect();
             assert_eq!(ids, (0u8..15).collect::<Vec<_>>());
         }
     }
@@ -662,12 +658,9 @@ mod tests {
     fn storage_walk_of_a_leaf_returns_header_and_full_node() {
         let (file, root) = single_leaf_tree(WIDTHS);
         let source = BytesSource::new(&file);
-        let extents = collect_btree_v2_storage_extents_with_widths(
-            &source,
-            StoredAddress::new(0),
-            FORMAT_WIDTHS,
-        )
-        .unwrap();
+        let extents =
+            collect_btree_v2_storage_extents(&source, StoredAddress::new(0), FORMAT_WIDTHS)
+                .unwrap();
         let header_len = hdf5_pure_format::__private::btree_v2_header_size(
             OffsetWidth::Eight,
             LengthWidth::Eight,
@@ -686,12 +679,9 @@ mod tests {
     fn storage_walk_enumerates_every_depth_3_node_once() {
         let tree = depth_3_tree();
         let source = BytesSource::new(&tree.file);
-        let extents = collect_btree_v2_storage_extents_with_widths(
-            &source,
-            StoredAddress::new(0),
-            FORMAT_WIDTHS,
-        )
-        .unwrap();
+        let extents =
+            collect_btree_v2_storage_extents(&source, StoredAddress::new(0), FORMAT_WIDTHS)
+                .unwrap();
 
         assert_eq!(extents.len(), tree.nodes.len() + 1);
         let mut expected_nodes = tree.nodes.to_vec();
@@ -720,12 +710,9 @@ mod tests {
         let root = StoredAddress::undefined(OFFSET_WIDTH).get();
         let header = btree_v2::Header::new(5, 11, root, 0).build(WIDTHS);
         let source = BytesSource::new(&header);
-        let extents = collect_btree_v2_storage_extents_with_widths(
-            &source,
-            StoredAddress::new(0),
-            FORMAT_WIDTHS,
-        )
-        .unwrap();
+        let extents =
+            collect_btree_v2_storage_extents(&source, StoredAddress::new(0), FORMAT_WIDTHS)
+                .unwrap();
         assert_eq!(extents, [Extent::new(0, header.len().to_u64()).unwrap()]);
     }
 
@@ -734,12 +721,8 @@ mod tests {
         let header = btree_v2::Header::new(5, 11, 0x100, 0).build(WIDTHS);
         let source = BytesSource::new(header);
 
-        let err = collect_btree_v2_storage_extents_with_widths(
-            &source,
-            StoredAddress::new(0),
-            FORMAT_WIDTHS,
-        )
-        .unwrap_err();
+        let err = collect_btree_v2_storage_extents(&source, StoredAddress::new(0), FORMAT_WIDTHS)
+            .unwrap_err();
 
         assert_eq!(err, FormatError::InvalidBTreeV2Signature);
     }
@@ -752,12 +735,8 @@ mod tests {
             .build(WIDTHS);
         let source = BytesSource::new(header);
 
-        let err = collect_btree_v2_storage_extents_with_widths(
-            &source,
-            StoredAddress::new(0),
-            FORMAT_WIDTHS,
-        )
-        .unwrap_err();
+        let err = collect_btree_v2_storage_extents(&source, StoredAddress::new(0), FORMAT_WIDTHS)
+            .unwrap_err();
 
         assert_eq!(err, FormatError::InvalidBTreeV2Signature);
     }
@@ -768,12 +747,8 @@ mod tests {
         let header = btree_v2::Header::new(5, 11, root, 1).build(WIDTHS);
         let source = BytesSource::new(header);
 
-        let err = collect_btree_v2_storage_extents_with_widths(
-            &source,
-            StoredAddress::new(0),
-            FORMAT_WIDTHS,
-        )
-        .unwrap_err();
+        let err = collect_btree_v2_storage_extents(&source, StoredAddress::new(0), FORMAT_WIDTHS)
+            .unwrap_err();
 
         assert_eq!(err, FormatError::InvalidBTreeV2Signature);
     }
@@ -783,12 +758,8 @@ mod tests {
         let mut header = btree_v2::Header::new(5, 11, 0, 0).build(WIDTHS);
         header.pop();
         let source = BytesSource::new(&header);
-        let err = collect_btree_v2_storage_extents_with_widths(
-            &source,
-            StoredAddress::new(0),
-            FORMAT_WIDTHS,
-        )
-        .unwrap_err();
+        let err = collect_btree_v2_storage_extents(&source, StoredAddress::new(0), FORMAT_WIDTHS)
+            .unwrap_err();
         assert_eq!(
             err,
             FormatError::UnexpectedEof {
@@ -803,12 +774,8 @@ mod tests {
         let (mut file, root) = single_leaf_tree(WIDTHS);
         file.pop();
         let source = BytesSource::new(&file);
-        let err = collect_btree_v2_storage_extents_with_widths(
-            &source,
-            StoredAddress::new(0),
-            FORMAT_WIDTHS,
-        )
-        .unwrap_err();
+        let err = collect_btree_v2_storage_extents(&source, StoredAddress::new(0), FORMAT_WIDTHS)
+            .unwrap_err();
         assert_eq!(
             err,
             FormatError::UnexpectedEof {
@@ -827,12 +794,8 @@ mod tests {
         file[checksum] ^= 1;
         let source = BytesSource::new(file);
 
-        let err = collect_btree_v2_storage_extents_with_widths(
-            &source,
-            StoredAddress::new(0),
-            FORMAT_WIDTHS,
-        )
-        .unwrap_err();
+        let err = collect_btree_v2_storage_extents(&source, StoredAddress::new(0), FORMAT_WIDTHS)
+            .unwrap_err();
         assert_eq!(
             err,
             FormatError::ChecksumMismatch {
@@ -847,12 +810,8 @@ mod tests {
         let (mut file, root) = single_leaf_tree(WIDTHS);
         file[root.to_usize().unwrap() + 4] = 1;
         let source = BytesSource::new(file);
-        let err = collect_btree_v2_storage_extents_with_widths(
-            &source,
-            StoredAddress::new(0),
-            FORMAT_WIDTHS,
-        )
-        .unwrap_err();
+        let err = collect_btree_v2_storage_extents(&source, StoredAddress::new(0), FORMAT_WIDTHS)
+            .unwrap_err();
         assert_eq!(err, FormatError::InvalidBTreeV2Version(1));
     }
 
@@ -861,12 +820,8 @@ mod tests {
         let (mut file, root) = single_leaf_tree(WIDTHS);
         file[root.to_usize().unwrap() + 5] = 6;
         let source = BytesSource::new(file);
-        let err = collect_btree_v2_storage_extents_with_widths(
-            &source,
-            StoredAddress::new(0),
-            FORMAT_WIDTHS,
-        )
-        .unwrap_err();
+        let err = collect_btree_v2_storage_extents(&source, StoredAddress::new(0), FORMAT_WIDTHS)
+            .unwrap_err();
         assert_eq!(err, FormatError::InvalidBTreeNodeType(6));
     }
 
@@ -896,12 +851,8 @@ mod tests {
         file[checksum] ^= 1;
         let source = BytesSource::new(file);
 
-        let err = collect_btree_v2_storage_extents_with_widths(
-            &source,
-            StoredAddress::new(0),
-            FORMAT_WIDTHS,
-        )
-        .unwrap_err();
+        let err = collect_btree_v2_storage_extents(&source, StoredAddress::new(0), FORMAT_WIDTHS)
+            .unwrap_err();
         assert_eq!(
             err,
             FormatError::ChecksumMismatch {
@@ -931,12 +882,8 @@ mod tests {
         image.place(0, &header);
         let source = BytesSource::new(image.build());
 
-        let err = collect_btree_v2_storage_extents_with_widths(
-            &source,
-            StoredAddress::new(0),
-            FORMAT_WIDTHS,
-        )
-        .unwrap_err();
+        let err = collect_btree_v2_storage_extents(&source, StoredAddress::new(0), FORMAT_WIDTHS)
+            .unwrap_err();
         assert_eq!(err, FormatError::InvalidBTreeV2Signature);
     }
 
@@ -969,12 +916,8 @@ mod tests {
         image.place(0, &header);
         let source = BytesSource::new(image.build());
 
-        let err = collect_btree_v2_storage_extents_with_widths(
-            &source,
-            StoredAddress::new(0),
-            FORMAT_WIDTHS,
-        )
-        .unwrap_err();
+        let err = collect_btree_v2_storage_extents(&source, StoredAddress::new(0), FORMAT_WIDTHS)
+            .unwrap_err();
         assert_eq!(err, FormatError::InvalidBTreeV2Signature);
     }
 
@@ -982,12 +925,8 @@ mod tests {
     fn storage_walk_rejects_a_child_past_eof() {
         let (file, bad_address) = tree_with_one_invalid_child(4096);
         let source = BytesSource::new(&file);
-        let err = collect_btree_v2_storage_extents_with_widths(
-            &source,
-            StoredAddress::new(0),
-            FORMAT_WIDTHS,
-        )
-        .unwrap_err();
+        let err = collect_btree_v2_storage_extents(&source, StoredAddress::new(0), FORMAT_WIDTHS)
+            .unwrap_err();
         assert_eq!(
             err,
             FormatError::UnexpectedEof {
@@ -1004,12 +943,8 @@ mod tests {
         let bad_address = u64::MAX - 255;
         let (file, _) = tree_with_one_invalid_child(bad_address);
         let source = BytesSource::new(file);
-        let err = collect_btree_v2_storage_extents_with_widths(
-            &source,
-            StoredAddress::new(0),
-            FORMAT_WIDTHS,
-        )
-        .unwrap_err();
+        let err = collect_btree_v2_storage_extents(&source, StoredAddress::new(0), FORMAT_WIDTHS)
+            .unwrap_err();
         assert_eq!(
             err,
             FormatError::OffsetOverflow {
@@ -1027,7 +962,7 @@ mod tests {
         ] {
             let (file, root) = single_leaf_tree(widths);
             let source = BytesSource::new(file);
-            let extents = collect_btree_v2_storage_extents_with_widths(
+            let extents = collect_btree_v2_storage_extents(
                 &source,
                 StoredAddress::new(0),
                 FormatWidths {
@@ -1060,12 +995,8 @@ mod tests {
             .node_size(0)
             .build(WIDTHS);
         let source = BytesSource::new(header);
-        let err = collect_btree_v2_storage_extents_with_widths(
-            &source,
-            StoredAddress::new(0),
-            FORMAT_WIDTHS,
-        )
-        .unwrap_err();
+        let err = collect_btree_v2_storage_extents(&source, StoredAddress::new(0), FORMAT_WIDTHS)
+            .unwrap_err();
         assert_eq!(
             err,
             FormatError::UnexpectedEof {
@@ -1081,18 +1012,11 @@ mod tests {
         let tree = depth_3_tree();
         let memory = BytesSource::new(&tree.file);
         let seek = ReadSeekSource::new(Cursor::new(tree.file.clone())).unwrap();
-        let memory_extents = collect_btree_v2_storage_extents_with_widths(
-            &memory,
-            StoredAddress::new(0),
-            FORMAT_WIDTHS,
-        )
-        .unwrap();
-        let seek_extents = collect_btree_v2_storage_extents_with_widths(
-            &seek,
-            StoredAddress::new(0),
-            FORMAT_WIDTHS,
-        )
-        .unwrap();
+        let memory_extents =
+            collect_btree_v2_storage_extents(&memory, StoredAddress::new(0), FORMAT_WIDTHS)
+                .unwrap();
+        let seek_extents =
+            collect_btree_v2_storage_extents(&seek, StoredAddress::new(0), FORMAT_WIDTHS).unwrap();
         assert_eq!(memory_extents, seek_extents);
     }
 
@@ -1131,9 +1055,7 @@ mod tests {
         file_data[leaf_offset..leaf_offset + leaf.len()].copy_from_slice(&leaf);
 
         let hdr = BTreeV2Header::parse(&file_data, 0, 8, 8).unwrap();
-        let records =
-            collect_btree_v2_records_with_offset_width(&file_data, &hdr, OffsetWidth::Eight)
-                .unwrap();
+        let records = collect_btree_v2_records(&file_data, &hdr, OffsetWidth::Eight).unwrap();
         assert_eq!(records.len(), 2);
         assert_eq!(records[0].data, rec1.to_vec());
         assert_eq!(records[1].data, rec2.to_vec());
@@ -1143,8 +1065,7 @@ mod tests {
     fn empty_tree() {
         let header = btree_v2::Header::new(5, 11, 0, 0).build(WIDTHS);
         let hdr = BTreeV2Header::parse(&header, 0, 8, 8).unwrap();
-        let records =
-            collect_btree_v2_records_with_offset_width(&header, &hdr, OffsetWidth::Eight).unwrap();
+        let records = collect_btree_v2_records(&header, &hdr, OffsetWidth::Eight).unwrap();
         assert!(records.is_empty());
     }
 
@@ -1164,12 +1085,8 @@ mod tests {
         let source = BytesSource::new(&file_data);
         let header = BTreeV2Header::parse_from_source(&SourceMetadata(&source), 0, 8, 8).unwrap();
         assert_eq!(
-            collect_btree_v2_records_from_source_with_offset_width(
-                &source,
-                &header,
-                OffsetWidth::Eight,
-            )
-            .unwrap_err(),
+            collect_btree_v2_records_from_source(&source, &header, OffsetWidth::Eight,)
+                .unwrap_err(),
             FormatError::InvalidBTreeNodeType(11)
         );
     }
@@ -1188,37 +1105,30 @@ mod tests {
         file_data[leaf_offset..leaf_offset + leaf.len()].copy_from_slice(&leaf);
 
         let hdr = BTreeV2Header::parse(&file_data, 0, 8, 8).unwrap();
-        let buffered: Vec<_> =
-            collect_btree_v2_records_with_offset_width(&file_data, &hdr, OffsetWidth::Eight)
+        let buffered: Vec<_> = collect_btree_v2_records(&file_data, &hdr, OffsetWidth::Eight)
+            .unwrap()
+            .into_iter()
+            .map(|r| r.data)
+            .collect();
+
+        let mem = BytesSource::new(&file_data);
+        let hdr_mem = BTreeV2Header::parse_from_source(&SourceMetadata(&mem), 0, 8, 8).unwrap();
+        assert_eq!(hdr_mem.root_node_address, hdr.root_node_address);
+        let from_mem: Vec<_> =
+            collect_btree_v2_records_from_source(&mem, &hdr_mem, OffsetWidth::Eight)
                 .unwrap()
                 .into_iter()
                 .map(|r| r.data)
                 .collect();
 
-        let mem = BytesSource::new(&file_data);
-        let hdr_mem = BTreeV2Header::parse_from_source(&SourceMetadata(&mem), 0, 8, 8).unwrap();
-        assert_eq!(hdr_mem.root_node_address, hdr.root_node_address);
-        let from_mem: Vec<_> = collect_btree_v2_records_from_source_with_offset_width(
-            &mem,
-            &hdr_mem,
-            OffsetWidth::Eight,
-        )
-        .unwrap()
-        .into_iter()
-        .map(|r| r.data)
-        .collect();
-
         let seek = ReadSeekSource::new(Cursor::new(file_data)).unwrap();
         let hdr_seek = BTreeV2Header::parse_from_source(&SourceMetadata(&seek), 0, 8, 8).unwrap();
-        let from_seek: Vec<_> = collect_btree_v2_records_from_source_with_offset_width(
-            &seek,
-            &hdr_seek,
-            OffsetWidth::Eight,
-        )
-        .unwrap()
-        .into_iter()
-        .map(|r| r.data)
-        .collect();
+        let from_seek: Vec<_> =
+            collect_btree_v2_records_from_source(&seek, &hdr_seek, OffsetWidth::Eight)
+                .unwrap()
+                .into_iter()
+                .map(|r| r.data)
+                .collect();
 
         assert_eq!(buffered, from_mem);
         assert_eq!(buffered, from_seek);
@@ -1268,8 +1178,7 @@ mod tests {
         let header = BTreeV2Header::parse(&file, 0, OFFSET_SIZE, LENGTH_SIZE).expect("header");
         assert_eq!(header.node_size, BTREE_V2_NODE_SIZE);
         assert_eq!(header.total_records, count as u64);
-        let read = collect_btree_v2_records_with_offset_width(&file, &header, OffsetWidth::Eight)
-            .expect("read");
+        let read = collect_btree_v2_records(&file, &header, OffsetWidth::Eight).expect("read");
         let ids = read
             .iter()
             .map(|r| u64::from_le_bytes(r.data[..8].try_into().expect("8 bytes")))

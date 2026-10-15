@@ -8,9 +8,7 @@ use crate::address::StoredAddressExt;
 use crate::address::{AddressContext, StoredAddress};
 #[cfg(test)]
 use crate::address::{BaseAddress, BaseAddressExt};
-use crate::btree_v1::{
-    collect_symbol_table_nodes_from_source_with_widths, collect_symbol_table_nodes_with_widths,
-};
+use crate::btree_v1::{collect_symbol_table_nodes, collect_symbol_table_nodes_from_source};
 use crate::convert::Narrow;
 use crate::error::FormatError;
 use crate::local_heap::LocalHeap;
@@ -37,7 +35,7 @@ pub struct GroupEntry {
 /// # Errors
 ///
 /// Returns the [`FormatError`] of the first group structure that does not parse.
-pub fn resolve_v1_group_entries_with_widths(
+pub fn resolve_v1_group_entries(
     file_data: &[u8],
     sym_table_msg: &SymbolTableMessage,
     widths: FormatWidths,
@@ -51,12 +49,8 @@ pub fn resolve_v1_group_entries_with_widths(
         widths,
     )?;
 
-    let snod_addrs = collect_symbol_table_nodes_with_widths(
-        file_data,
-        sym_table_msg.btree_address,
-        widths,
-        addresses,
-    )?;
+    let snod_addrs =
+        collect_symbol_table_nodes(file_data, sym_table_msg.btree_address, widths, addresses)?;
 
     let mut entries = Vec::new();
     for snod_addr in snod_addrs {
@@ -86,9 +80,9 @@ pub fn resolve_v1_group_entries_with_widths(
 ///
 /// # Errors
 ///
-/// Returns the errors of [`resolve_v1_group_entries_with_widths`], and the error `source` reports
+/// Returns the errors of [`resolve_v1_group_entries`], and the error `source` reports
 /// for a structure it cannot read.
-pub fn resolve_v1_group_entries_from_source_with_widths<S: Source + ?Sized>(
+pub fn resolve_v1_group_entries_from_source<S: Source + ?Sized>(
     source: &S,
     sym_table_msg: &SymbolTableMessage,
     widths: FormatWidths,
@@ -104,7 +98,7 @@ pub fn resolve_v1_group_entries_from_source_with_widths<S: Source + ?Sized>(
         heap.data_segment_size.to_usize()?,
     )?;
 
-    let snod_addrs = collect_symbol_table_nodes_from_source_with_widths(
+    let snod_addrs = collect_symbol_table_nodes_from_source(
         source,
         sym_table_msg.btree_address,
         widths,
@@ -209,7 +203,7 @@ mod tests {
     fn resolve_entries_two_children() {
         let (file, msg) =
             build_synthetic_group(&[("alpha", 0x1000, 0), ("beta", 0x2000, 0)], Widths::EIGHT);
-        let entries = resolve_v1_group_entries_with_widths(
+        let entries = resolve_v1_group_entries(
             &file,
             &msg,
             FormatWidths::from_sizes(8, 8).unwrap(),
@@ -288,10 +282,10 @@ mod tests {
     fn integration_simple_dataset_full_traversal() {
         let file_data: &[u8] = include_bytes!("../tests/data/unattributed/simple_dataset.h5");
         let sig_offset = crate::signature::find_signature(file_data).unwrap();
-        let sb = hdf5_pure_format::__private::parse_superblock(file_data, sig_offset).unwrap();
+        let sb = crate::superblock::parse_superblock(file_data, sig_offset).unwrap();
         let root_sym = get_root_sym_table(file_data, &sb);
 
-        let entries = resolve_v1_group_entries_with_widths(
+        let entries = resolve_v1_group_entries(
             file_data,
             &root_sym,
             FormatWidths::from_sizes(sb.offset_size, sb.length_size).unwrap(),

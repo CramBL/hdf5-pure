@@ -90,7 +90,7 @@ impl WriteEngine {
         referenced: &mut BTreeSet<u64>,
     ) -> Result<bool, Error> {
         if crate::group_v2::is_group(header) {
-            for entry in crate::group_v2::resolve_group_entries_from_source_with_widths(
+            for entry in crate::group_v2::resolve_group_entries_from_source(
                 &self.image(),
                 AccessMode::ReadWrite,
                 header,

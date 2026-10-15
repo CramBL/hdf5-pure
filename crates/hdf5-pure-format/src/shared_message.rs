@@ -97,7 +97,8 @@ impl DatatypeLocation {
 /// Returns [`FormatError::InvalidSharedMessageVersion`] if the version is not 1, 2, or 3,
 /// [`FormatError::InvalidOffsetSize`] if the reference holds an address and `offset_size` is not
 /// 2, 4, or 8, and [`FormatError::UnexpectedEof`] if `data` ends inside the reference.
-pub fn parse_shared_ref(
+#[cfg(test)]
+pub(crate) fn parse_shared_ref(
     data: &[u8],
     offset_size: u8,
     length_size: u8,
@@ -174,7 +175,7 @@ const WRITE_REF_VERSION: u8 = 2;
 
 /// Encodes a reference to the committed datatype object at `address`.
 ///
-/// The inverse of the version 2 arm of [`parse_shared_ref`], and the body a
+/// The inverse of the version 2 arm of [`parse_shared_ref_with_widths`], and the body a
 /// message record with the shared flag holds in place of its content.
 ///
 /// # Panics
@@ -196,7 +197,7 @@ const SOHM_REF_VERSION: u8 = 3;
 
 /// Encodes a reference to the shared-message heap object `heap_id`.
 ///
-/// The inverse of [`parse_shared_ref`]'s heap arm, and the modern form of a
+/// The inverse of [`parse_shared_ref_with_widths`]'s heap arm, and the modern form of a
 /// reference a rewrite has to keep unchanged: it refers to the same heap
 /// entry, so the message's reference count is the same before and after.
 pub fn encode_sohm_ref(heap_id: &[u8; FHEAP_ID_LEN]) -> Vec<u8> {
@@ -267,7 +268,8 @@ impl SharedResolver for Unresolvable {
 /// # Errors
 ///
 /// Returns the error [`parse_shared_ref`] returns if `reference` is malformed.
-pub fn committed_address_in(
+#[cfg(test)]
+pub(crate) fn committed_address_in(
     reference: &[u8],
     offset_size: u8,
     length_size: u8,

@@ -97,6 +97,7 @@ use crate::object_header::ObjectHeader;
 use crate::source::Source;
 use crate::source::SourceMetadata;
 use crate::superblock::Superblock;
+use crate::width::FormatWidths;
 
 /// The byte edits that repoint a commit's relocated object headers.
 ///
@@ -270,6 +271,7 @@ pub(crate) fn walks() -> usize {
 pub(crate) fn plan<S: Source + ?Sized>(
     src: &S,
     superblock: &Superblock,
+    widths: FormatWidths,
     addresses: AddressContext,
     relocations: &BTreeMap<u64, u64>,
     budget: u32,
@@ -279,8 +281,6 @@ pub(crate) fn plan<S: Source + ?Sized>(
         return Ok(plan);
     }
     WALKS.with(|count| count.set(count.get() + 1));
-    let os = superblock.offset_size;
-    let ls = superblock.length_size;
     let base = addresses;
 
     let mut visited: BTreeSet<u64> = BTreeSet::new();
@@ -322,7 +322,7 @@ pub(crate) fn plan<S: Source + ?Sized>(
         // once only groups were. No test holds those figures — unlike
         // `publish_checksummed`, whose claim its own crash test pins — so treat
         // them as a record of one measurement rather than as a bound.
-        let outcome = scan_object(src, addr, base, relocations, &mut plan)?;
+        let outcome = scan_object(src, addr, base, widths, relocations, &mut plan)?;
         saw_reference |= outcome.holds_a_reference;
         complete &= outcome.fully_read;
         if !outcome.descend {
@@ -330,12 +330,11 @@ pub(crate) fn plan<S: Source + ?Sized>(
         }
         // A group whose header or links cannot be read hides its subtree from
         // the walk; that leaves references below it unpatched, never mispatched.
-        let Ok(header) = ObjectHeader::parse_from_source(
+        let Ok(header) = ObjectHeader::parse_from_source_with_widths(
             &SourceMetadata(src),
             AccessMode::ReadWrite,
             addr,
-            os,
-            ls,
+            widths,
             base.effective_base(),
         ) else {
             complete = false;
@@ -347,14 +346,13 @@ pub(crate) fn plan<S: Source + ?Sized>(
         // element data — which lives outside the header — and not an attribute's
         // value, which does not.
         if !outcome.header_located {
-            saw_reference |= scan_parsed_header(src, &header, base, relocations, &mut plan);
+            saw_reference |= scan_parsed_header(src, &header, base, widths, relocations, &mut plan);
         }
         let Ok(entries) = resolve_group_entries_from_source(
             src,
             AccessMode::ReadWrite,
             &header,
-            os,
-            ls,
+            widths,
             addresses,
         ) else {
             complete = false;
@@ -392,6 +390,7 @@ fn scan_parsed_header<S: Source + ?Sized>(
     src: &S,
     header: &ObjectHeader,
     base: AddressContext,
+    widths: FormatWidths,
     relocations: &BTreeMap<u64, u64>,
     plan: &mut Plan,
 ) -> bool {
@@ -417,7 +416,7 @@ fn scan_parsed_header<S: Source + ?Sized>(
                         &framed,
                         base,
                         AccessMode::ReadWrite,
-                        crate::file_writer::WIDTHS,
+                        widths,
                         // No shared-message table: a heap-stored datatype is not
                         // followed here, and the arm below treats an unresolved
                         // one as a datatype this walk cannot read.
@@ -443,12 +442,7 @@ fn scan_parsed_header<S: Source + ?Sized>(
                 }
             }
             MessageType::DATA_LAYOUT => {
-                layout = DataLayout::parse(
-                    &message.data,
-                    crate::file_writer::OFFSET_SIZE,
-                    crate::file_writer::LENGTH_SIZE,
-                )
-                .ok();
+                layout = DataLayout::parse_with_widths(&message.data, widths).ok();
             }
             _ => {}
         }
@@ -521,6 +515,7 @@ fn scan_object<S: Source + ?Sized>(
     src: &S,
     addr: u64,
     base: AddressContext,
+    widths: FormatWidths,
     relocations: &BTreeMap<u64, u64>,
     plan: &mut Plan,
 ) -> Result<Scanned, Error> {
@@ -552,7 +547,7 @@ fn scan_object<S: Source + ?Sized>(
         &framed,
         base,
         AccessMode::ReadWrite,
-        crate::file_writer::WIDTHS,
+        widths,
         // No shared-message table; see the note on the other resolver in this
         // module.
         None,
@@ -648,7 +643,7 @@ fn scan_object<S: Source + ?Sized>(
                     let Ok((attr, data_off)) =
                         AttributeMessage::parse_resolving_at_with_length_width(
                             &region[body..body_end],
-                            crate::file_writer::LENGTH_WIDTH,
+                            widths.lengths,
                             &resolver,
                         )
                     else {
@@ -688,11 +683,7 @@ fn scan_object<S: Source + ?Sized>(
     let Some(slots) = element_slots(&dt) else {
         return Ok(out);
     };
-    let Ok(dl) = DataLayout::parse(
-        layout_body,
-        crate::file_writer::OFFSET_SIZE,
-        crate::file_writer::LENGTH_SIZE,
-    ) else {
+    let Ok(dl) = DataLayout::parse_with_widths(layout_body, widths) else {
         return Ok(out);
     };
     match dl {
@@ -952,6 +943,7 @@ mod tests {
             src,
             HEADER_AT,
             AddressContext::from_effective_base(BaseAddress::ZERO),
+            crate::file_writer::WIDTHS,
             &map,
             &mut plan,
         )
@@ -1243,8 +1235,15 @@ mod tests {
                 300 + base.effective_base().get(),
                 900 + base.effective_base().get(),
             )]);
-            let scanned =
-                scan_object(&BytesSource::new(bytes), HEADER_AT, base, &map, &mut plan).unwrap();
+            let scanned = scan_object(
+                &BytesSource::new(bytes),
+                HEADER_AT,
+                base,
+                crate::file_writer::WIDTHS,
+                &map,
+                &mut plan,
+            )
+            .unwrap();
             assert!(
                 scanned.holds_a_reference,
                 "base {base:?}: the committed type must be followed far enough to \
@@ -1298,6 +1297,7 @@ mod tests {
         let reached = super::plan(
             &source,
             &superblock,
+            FormatWidths::from_sizes(superblock.offset_size, superblock.length_size).unwrap(),
             AddressContext::from_effective_base(superblock.base_address),
             &moved,
             1 << 20,
@@ -1314,6 +1314,7 @@ mod tests {
         let skipped = super::plan(
             &source,
             &superblock,
+            FormatWidths::from_sizes(superblock.offset_size, superblock.length_size).unwrap(),
             AddressContext::from_effective_base(superblock.base_address),
             &vacated,
             1 << 20,

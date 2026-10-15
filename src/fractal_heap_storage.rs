@@ -172,13 +172,13 @@ impl FractalHeapAllocation {
 /// layout calculations and [`FractalHeapStorageError::Format`] for parser or source errors,
 /// including malformed block geometry, incorrect heap-header owner addresses, truncated
 /// allocations, invalid checksums, and unsupported serialized manager section classes.
-pub(crate) fn collect_fractal_heap_storage_from_source_with_widths<S: Source + ?Sized>(
+pub(crate) fn collect_fractal_heap_storage_from_source<S: Source + ?Sized>(
     source: &S,
     addresses: AddressContext,
     heap_header_address: StoredAddress,
     widths: FormatWidths,
 ) -> Result<FractalHeapStorage, FractalHeapStorageError> {
-    let header = crate::fractal_heap::read_header_from_source_with_widths(
+    let header = crate::fractal_heap::read_header_from_source(
         source,
         addresses,
         heap_header_address,
@@ -226,7 +226,7 @@ fn collect_fractal_heap_storage(
     file_data: &[u8],
     heap_header_address: StoredAddress,
 ) -> Result<FractalHeapStorage, FractalHeapStorageError> {
-    collect_fractal_heap_storage_from_source_with_widths(
+    collect_fractal_heap_storage_from_source(
         &BytesSource::new(file_data),
         AddressContext::from_effective_base(BaseAddress::ZERO),
         heap_header_address,
@@ -427,16 +427,10 @@ fn collect_huge_storage<S: Source + ?Sized>(
         return Err(FractalHeapStorageError::InvalidStorage);
     }
 
-    let tree_extents = crate::btree_v2::collect_btree_v2_storage_extents_with_widths(
-        source,
-        tree_address,
-        widths,
-    )?;
-    let records = crate::btree_v2::collect_btree_v2_records_from_source_with_offset_width(
-        source,
-        &header,
-        widths.offsets,
-    )?;
+    let tree_extents =
+        crate::btree_v2::collect_btree_v2_storage_extents(source, tree_address, widths)?;
+    let records =
+        crate::btree_v2::collect_btree_v2_records_from_source(source, &header, widths.offsets)?;
     if u64::try_from(records.len()).ok() != Some(heap.huge_objects_count)
         || header.total_records != heap.huge_objects_count
     {
@@ -661,7 +655,7 @@ mod tests {
             bytes: &file,
             reads: RefCell::new(Vec::new()),
         };
-        let result = collect_fractal_heap_storage_from_source_with_widths(
+        let result = collect_fractal_heap_storage_from_source(
             &source,
             AddressContext::from_effective_base(BaseAddress::ZERO),
             StoredAddress::new(STORAGE_HEAP_AT),
@@ -710,7 +704,7 @@ mod tests {
             bytes: &file,
             reads: RefCell::new(Vec::new()),
         };
-        let storage = collect_fractal_heap_storage_from_source_with_widths(
+        let storage = collect_fractal_heap_storage_from_source(
             &source,
             AddressContext::from_effective_base(BaseAddress::ZERO),
             StoredAddress::new(STORAGE_HEAP_AT),
@@ -946,7 +940,7 @@ mod tests {
         );
 
         let buffered = collect_storage(&file).unwrap();
-        let streamed = collect_fractal_heap_storage_from_source_with_widths(
+        let streamed = collect_fractal_heap_storage_from_source(
             &BytesSource::new(&file),
             AddressContext::from_effective_base(BaseAddress::ZERO),
             StoredAddress::new(STORAGE_HEAP_AT),
@@ -1177,7 +1171,7 @@ mod tests {
             inner: &inner,
             base: addresses.effective_base(),
         };
-        let result = collect_fractal_heap_storage_from_source_with_widths(
+        let result = collect_fractal_heap_storage_from_source(
             &source,
             addresses,
             StoredAddress::new(STORAGE_HEAP_AT),
@@ -1222,7 +1216,7 @@ mod tests {
             bytes: &file,
             reads: RefCell::new(Vec::new()),
         };
-        let storage = collect_fractal_heap_storage_from_source_with_widths(
+        let storage = collect_fractal_heap_storage_from_source(
             &source,
             AddressContext::from_effective_base(BaseAddress::ZERO),
             StoredAddress::new(STORAGE_HEAP_AT),

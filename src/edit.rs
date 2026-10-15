@@ -360,7 +360,6 @@ use crate::type_builders::{
     make_u64_type, patch_vl_refs, patch_vl_refs_masked, write_reference_address,
 };
 use crate::width::FormatWidths;
-use crate::width::OffsetWidth;
 
 mod global_heap_liveness;
 mod reclaim;
@@ -2448,7 +2447,7 @@ impl WriteEngine {
 
         // `H5Fopen` rejects a page size outside 512 bytes to 1 GiB as well (`H5Ofsinfo.c` and
         // `H5Fsuper.c`, HDF5 2.2.0).
-        let file_space_info = match Self::extension_fsinfo(&probe, &superblock, addresses) {
+        let file_space_info = match Self::extension_fsinfo(&probe, &superblock, widths, addresses) {
             Err(err @ FormatError::InvalidFileSpacePageSize(_)) => return Err(err.into()),
             other => other,
         };
@@ -2685,10 +2684,7 @@ impl WriteEngine {
         if !info.persist || !self.space.is_enabled() {
             return;
         }
-        let os = self.superblock.offset_size;
-        let Ok(widths) = FormatWidths::from_sizes(os, self.superblock.length_size) else {
-            return;
-        };
+        let widths = self.widths;
         let Ok(eoa) = self.end_of_allocation() else {
             return;
         };
@@ -2843,10 +2839,9 @@ impl WriteEngine {
     fn extension_fsinfo(
         source: &(impl Source + ?Sized),
         superblock: &Superblock,
+        widths: FormatWidths,
         addresses: AddressContext,
     ) -> Result<Option<(u64, FileSpaceInfo)>, FormatError> {
-        let os = superblock.offset_size;
-        let ls = superblock.length_size;
         let base = addresses;
         if superblock.version < 2 {
             return Ok(None); // no superblock extension exists before v2
@@ -2854,20 +2849,18 @@ impl WriteEngine {
         let Some(ext_rel) = superblock.superblock_extension_address else {
             return Ok(None);
         };
-        let offset_width = OffsetWidth::try_from(os)?;
-        if ext_rel.is_undefined(offset_width) {
+        if ext_rel.is_undefined(widths.offsets) {
             return Ok(None);
         }
         // The header is read at the extension's absolute file offset, which is the stored
         // address on a file without a userblock. The caller reads the strategy of a file with a
         // userblock as well, so the address is resolved here for both.
         let ext_addr = base.absolute(ext_rel)?;
-        let oh = ObjectHeader::parse_from_source(
+        let oh = ObjectHeader::parse_from_source_with_widths(
             &SourceMetadata(source),
             AccessMode::ReadWrite,
             ext_addr,
-            os,
-            ls,
+            widths,
             base.effective_base(),
         )?;
         let Some(msg) = oh
@@ -2877,10 +2870,7 @@ impl WriteEngine {
         else {
             return Ok(None);
         };
-        let info = hdf5_pure_format::__private::parse_file_space_info(
-            FormatWidths::from_sizes(os, ls)?,
-            &msg.data,
-        )?;
+        let info = hdf5_pure_format::__private::parse_file_space_info(widths, &msg.data)?;
         Ok(Some((ext_addr, info)))
     }
 
@@ -3083,6 +3073,7 @@ impl WriteEngine {
             &self.image(),
             AccessMode::ReadWrite,
             &self.superblock,
+            self.widths,
             self.addresses,
             &path.as_path(),
         ) else {
@@ -3123,10 +3114,12 @@ impl WriteEngine {
         else {
             return false;
         };
-        let Ok(disk_ds) = Dataspace::parse(&region[ds_b..ds_e], LENGTH_SIZE) else {
+        let Ok(disk_ds) =
+            Dataspace::parse_with_length_width(&region[ds_b..ds_e], self.widths.lengths)
+        else {
             return false;
         };
-        let Ok(dl) = DataLayout::parse(&region[lb..le], OFFSET_SIZE, LENGTH_SIZE) else {
+        let Ok(dl) = DataLayout::parse_with_widths(&region[lb..le], self.widths) else {
             return false;
         };
         // Rank 1 is the shape the preflight's `current_dim0 % chunk_elems`
@@ -3713,6 +3706,7 @@ impl WriteEngine {
         EditStore {
             image: self.image.as_mut(),
             superblock: &mut self.superblock,
+            widths: self.widths,
             sb_sig_off: self.sb_sig_off,
             addresses: self.addresses,
             space: &mut self.space,
@@ -4224,6 +4218,7 @@ impl WriteEngine {
                         &self.image(),
                         AccessMode::ReadWrite,
                         &self.superblock,
+                        self.widths,
                         self.addresses,
                         &dataset.as_path(),
                     )?;
@@ -4376,6 +4371,7 @@ impl WriteEngine {
                 let Self {
                     image,
                     superblock,
+                    widths,
                     sb_sig_off,
                     addresses,
                     space,
@@ -4387,6 +4383,7 @@ impl WriteEngine {
                 let store = EditStore {
                     image: image.as_mut(),
                     superblock,
+                    widths: *widths,
                     sb_sig_off: *sb_sig_off,
                     addresses: *addresses,
                     space,
@@ -4441,6 +4438,7 @@ impl WriteEngine {
                 let Self {
                     image,
                     superblock,
+                    widths,
                     sb_sig_off,
                     addresses,
                     space,
@@ -4453,6 +4451,7 @@ impl WriteEngine {
                 let mut store = EditStore {
                     image: image.as_mut(),
                     superblock,
+                    widths: *widths,
                     sb_sig_off: *sb_sig_off,
                     addresses: *addresses,
                     space,
@@ -4644,6 +4643,7 @@ impl WriteEngine {
                 data,
                 AccessMode::ReadWrite,
                 &self.superblock,
+                self.widths,
                 self.addresses,
                 &path.as_path(),
             )
@@ -4652,6 +4652,7 @@ impl WriteEngine {
                 &self.image(),
                 AccessMode::ReadWrite,
                 &self.superblock,
+                self.widths,
                 self.addresses,
                 &path.as_path(),
             )
@@ -5074,6 +5075,7 @@ impl WriteEngine {
             src_data,
             source.access_mode(),
             src_sb,
+            source.widths(),
             source.addresses(),
             &src.as_path(),
         )?;
@@ -5087,6 +5089,7 @@ impl WriteEngine {
             0,
             true,
             source.addresses(),
+            source.widths(),
         )?;
         self.refuse_if_claimed(dst)?;
         self.staged.cross_copies.push((dst.clone(), tree));
@@ -5378,10 +5381,11 @@ impl WriteEngine {
                 &self.image(),
                 AccessMode::ReadWrite,
                 &self.superblock,
+                self.widths,
                 self.addresses,
                 &full.as_path(),
             )?;
-            match Self::prepare_write(&self.image(), addr, fd, base, full)? {
+            match Self::prepare_write(&self.image(), addr, fd, base, self.widths, full)? {
                 WritePlan::InPlace { data_addr, bytes } => {
                     inplace_writes.push((data_addr, bytes));
                 }
@@ -5451,10 +5455,11 @@ impl WriteEngine {
                 &self.image(),
                 AccessMode::ReadWrite,
                 &self.superblock,
+                self.widths,
                 self.addresses,
                 &full.as_path(),
             )?;
-            let mw = Self::prepare_append(&self.image(), addr, ab, base)?;
+            let mw = Self::prepare_append(&self.image(), addr, ab, base, self.widths)?;
             // A relocating append moves the dataset's object header and patches only
             // the one parent link that names it, so it is safe only when this is the
             // dataset's sole hard link (same rule as a relocating overwrite).
@@ -5511,6 +5516,7 @@ impl WriteEngine {
                     &self.image(),
                     AccessMode::ReadWrite,
                     &self.superblock,
+                    self.widths,
                     self.addresses,
                     &full.as_path(),
                 )?;
@@ -5687,6 +5693,7 @@ impl WriteEngine {
                 &self.image(),
                 AccessMode::ReadWrite,
                 &self.superblock,
+                self.widths,
                 self.addresses,
                 &src.as_path(),
             )?;
@@ -5701,6 +5708,7 @@ impl WriteEngine {
                 0,
                 false,
                 base,
+                self.widths,
             )?;
             copy_sources.push(src.clone());
             add_targets.push(dst.clone());
@@ -5736,6 +5744,7 @@ impl WriteEngine {
                 &self.image(),
                 AccessMode::ReadWrite,
                 &self.superblock,
+                self.widths,
                 self.addresses,
                 &d.as_path(),
             )?;
@@ -5860,6 +5869,7 @@ impl WriteEngine {
                     &self.image(),
                     AccessMode::ReadWrite,
                     &self.superblock,
+                    self.widths,
                     self.addresses,
                     &key.as_path(),
                 )?;
@@ -6099,7 +6109,13 @@ impl WriteEngine {
             };
             for key in &keys {
                 for (_, tree) in &nodes[key].copies {
-                    screen_copied_references(tree, self.addresses, &for_copied, &framed)?;
+                    screen_copied_references(
+                        tree,
+                        self.addresses,
+                        self.widths,
+                        &for_copied,
+                        &framed,
+                    )?;
                 }
             }
         }
@@ -6169,6 +6185,7 @@ impl WriteEngine {
             &for_supplied,
             &self.image(),
             &self.superblock,
+            self.widths,
             self.addresses,
         )?;
 
@@ -6431,6 +6448,7 @@ impl WriteEngine {
                             &for_supplied,
                             &self.image(),
                             &self.superblock,
+                            self.widths,
                             self.addresses,
                         )?;
                         write_reference_address(&mut fd.raw, patch.byte_offset, addr);
@@ -6718,6 +6736,7 @@ impl WriteEngine {
         let plan = crate::reference_patch::plan(
             &self.image(),
             &self.superblock,
+            self.widths,
             self.addresses,
             relocations,
             MAX_LINK_GRAPH_NODES,
@@ -6768,8 +6787,7 @@ impl WriteEngine {
         if self.space.is_paged() {
             return self.commit_persisting_paged(new_root, to_free, placement);
         }
-        let os = self.superblock.offset_size;
-        let widths = FormatWidths::from_sizes(os, self.superblock.length_size)?;
+        let widths = self.widths;
         let offset_width = widths.offsets;
         let (strategy, threshold, page_size, old_blocks) = {
             // Copy what we need so no borrow of `self.persist` is held across the
@@ -7181,8 +7199,7 @@ impl WriteEngine {
         to_free: Vec<(StoredAddress, u64, FreeClass)>,
         placement: TailPlacement,
     ) -> Result<(), Error> {
-        let os = self.superblock.offset_size;
-        let widths = FormatWidths::from_sizes(os, self.superblock.length_size)?;
+        let widths = self.widths;
         let offset_width = widths.offsets;
         let (strategy, threshold, page_size, old_blocks) = {
             let ps = self
@@ -7646,8 +7663,7 @@ impl WriteEngine {
         ext_addr: u64,
         info: &FileSpaceInfo,
     ) -> Result<OhRegion, Error> {
-        let widths =
-            FormatWidths::from_sizes(self.superblock.offset_size, self.superblock.length_size)?;
+        let widths = self.widths;
         let region = Self::gather_oh_messages(&self.image(), ext_addr, self.addresses)?;
         rewrite_extension_region_bytes(&region, widths, info)
     }
@@ -7724,15 +7740,12 @@ impl WriteEngine {
     /// converts it to the latest format. Refuses an attribute it cannot
     /// reproduce (shared, or larger than a v2 message can hold).
     fn reconstruct_v1_group(&self, addr: u64) -> Result<GroupInfo, Error> {
-        let os = self.superblock.offset_size;
-        let ls = self.superblock.length_size;
         let base = self.addresses;
-        let oh = ObjectHeader::parse_from_source(
+        let oh = ObjectHeader::parse_from_source_with_widths(
             &SourceMetadata(&self.image()),
             AccessMode::ReadWrite,
             addr,
-            os,
-            ls,
+            self.widths,
             base.effective_base(),
         )?;
         if oh
@@ -7748,8 +7761,7 @@ impl WriteEngine {
             &self.image(),
             AccessMode::ReadWrite,
             &oh,
-            os,
-            ls,
+            self.widths,
             self.addresses,
         )?;
 
@@ -7842,7 +7854,9 @@ impl WriteEngine {
                     }
                 }
                 MessageType::LINK => {
-                    if let Ok(link) = LinkMessage::parse(&region[body..body_end], OFFSET_SIZE) {
+                    if let Ok(link) =
+                        LinkMessage::parse_with_offset_width(&region[body..body_end], OFFSET_WIDTH)
+                    {
                         link_names.push(link.name);
                     }
                 }
@@ -7961,6 +7975,7 @@ impl WriteEngine {
         addr: u64,
         fd: &FlatDataset,
         base: AddressContext,
+        widths: FormatWidths,
         path: &ObjectPathBuf,
     ) -> Result<WritePlan, Error> {
         // Enforced by construction: `staged.writes` has one producer, and it
@@ -8030,7 +8045,7 @@ impl WriteEngine {
                 "write_dataset datatype does not match the on-disk dataset (overwrite, not retype)",
             ));
         }
-        let disk_ds = Dataspace::parse(&region[ds_b..ds_e], LENGTH_SIZE)?;
+        let disk_ds = Dataspace::parse_with_length_width(&region[ds_b..ds_e], widths.lengths)?;
         if disk_ds.space_type != fd.ds.space_type
             || disk_ds.rank != fd.ds.rank
             || disk_ds.dimensions != fd.ds.dimensions
@@ -8131,7 +8146,7 @@ impl WriteEngine {
                 // the file and shifts the resulting write offsets back by `base`,
                 // and the relocating path rebuilds the chunk blob with stored
                 // addresses (see `write_chunked_relocatable`).
-                let dl = DataLayout::parse(&region[lb..le], OFFSET_SIZE, LENGTH_SIZE)?;
+                let dl = DataLayout::parse_with_widths(&region[lb..le], widths)?;
                 let DataLayout::Chunked { index, .. } = dl else {
                     return Err(Error::EditUnsupported("dataset is not chunked"));
                 };
@@ -8274,6 +8289,7 @@ impl WriteEngine {
         addr: u64,
         ab: &AppendBuilder,
         base: AddressContext,
+        widths: FormatWidths,
     ) -> Result<MovingWrite, Error> {
         if ab.dt_conflict {
             return Err(Error::AppendUnsupported(
@@ -8333,8 +8349,8 @@ impl WriteEngine {
         ))?;
 
         let (disk_dt, _) = hdf5_pure_format::__private::parse_datatype(&region[dt_b..dt_e])?;
-        let disk_ds = Dataspace::parse(&region[ds_b..ds_e], LENGTH_SIZE)?;
-        let dl = DataLayout::parse(&region[lb..le], OFFSET_SIZE, LENGTH_SIZE)?;
+        let disk_ds = Dataspace::parse_with_length_width(&region[ds_b..ds_e], widths.lengths)?;
+        let dl = DataLayout::parse_with_widths(&region[lb..le], widths)?;
 
         // Require a chunked dataset indexed by an Extensible Array, which only a
         // version 4 layout message stores.
@@ -8711,7 +8727,10 @@ impl WriteEngine {
                 }
                 MessageType::LINK => {
                     keep = false;
-                    match LinkMessage::parse(&region[body..body_end], OFFSET_SIZE) {
+                    match LinkMessage::parse_with_offset_width(
+                        &region[body..body_end],
+                        OFFSET_WIDTH,
+                    ) {
                         Ok(LinkMessage {
                             name,
                             link_target:
@@ -8824,6 +8843,7 @@ impl WriteEngine {
         depth: u32,
         cross_file: bool,
         base: AddressContext,
+        widths: FormatWidths,
     ) -> Result<CopyTree, Error> {
         if depth >= MAX_COPY_DEPTH {
             return Err(Error::EditUnsupported(
@@ -8912,7 +8932,7 @@ impl WriteEngine {
                     ds,
                     layout,
                     pipeline_message,
-                } = parse_chunked_header(&region)?;
+                } = parse_chunked_header(&region, widths)?;
                 let DataLayout::Chunked { index, .. } = layout else {
                     return Err(Error::EditUnsupported("dataset is not chunked"));
                 };
@@ -9009,6 +9029,7 @@ impl WriteEngine {
                             depth + 1,
                             cross_file,
                             base,
+                            widths,
                         )?,
                     ));
                 }
@@ -10031,6 +10052,7 @@ impl WriteEngine {
         invalidated: &InvalidatedAddresses,
         src: &(impl Source + ?Sized),
         superblock: &Superblock,
+        widths: FormatWidths,
         addresses: AddressContext,
     ) -> Result<StoredAddress, Error> {
         let path = match target {
@@ -10079,6 +10101,7 @@ impl WriteEngine {
                 src,
                 AccessMode::ReadWrite,
                 superblock,
+                widths,
                 addresses,
                 &path.as_path(),
             ) {
@@ -10122,6 +10145,7 @@ impl WriteEngine {
         invalidated: &InvalidatedAddresses,
         src: &(impl Source + ?Sized),
         superblock: &Superblock,
+        widths: FormatWidths,
         addresses: AddressContext,
     ) -> Result<(), Error> {
         let mut by_depth = keys.to_vec();
@@ -10151,6 +10175,7 @@ impl WriteEngine {
                                 invalidated,
                                 src,
                                 superblock,
+                                widths,
                                 addresses,
                             )?;
                         }
@@ -10772,6 +10797,7 @@ impl FlatDataset {
 struct EditStore<'a> {
     image: &'a mut dyn FileImage,
     superblock: &'a mut Superblock,
+    widths: FormatWidths,
     sb_sig_off: u64,
     /// The mapping between the stored addresses in `space` and the positions in `image`.
     addresses: AddressContext,
@@ -10838,11 +10864,8 @@ impl crate::source::Source for EditStore<'_> {
 }
 
 impl Store for EditStore<'_> {
-    fn offset_size(&self) -> u8 {
-        self.superblock.offset_size
-    }
-    fn length_size(&self) -> u8 {
-        self.superblock.length_size
+    fn widths(&self) -> FormatWidths {
+        self.widths
     }
     fn allocate(&mut self, bytes: &[u8], class: AllocationClass) -> Result<u64, Error> {
         let extent = if let Some(reserve) = self.reserve.as_deref_mut() {
@@ -11545,7 +11568,10 @@ struct ChunkedHeaderParts {
 /// pipeline message bytes (if any) from a chunked dataset header `region`. Used by
 /// the chunked copy path to derive chunk geometry and the on-disk filter pipeline.
 /// Errors if any required message is missing or the layout is not chunked.
-fn parse_chunked_header(region: &OhRegion) -> Result<ChunkedHeaderParts, Error> {
+fn parse_chunked_header(
+    region: &OhRegion,
+    widths: FormatWidths,
+) -> Result<ChunkedHeaderParts, Error> {
     let mut datatype: Option<(usize, usize)> = None;
     let mut dataspace: Option<(usize, usize)> = None;
     let mut layout: Option<(usize, usize)> = None;
@@ -11566,8 +11592,8 @@ fn parse_chunked_header(region: &OhRegion) -> Result<ChunkedHeaderParts, Error> 
         dataspace.ok_or(Error::EditUnsupported("dataset header has no dataspace"))?;
     let (lb, le) = layout.ok_or(Error::EditUnsupported("dataset header has no data layout"))?;
     let (dt, _) = hdf5_pure_format::__private::parse_datatype(&region[dt_b..dt_e])?;
-    let ds = Dataspace::parse(&region[ds_b..ds_e], LENGTH_SIZE)?;
-    let dl = DataLayout::parse(&region[lb..le], OFFSET_SIZE, LENGTH_SIZE)?;
+    let ds = Dataspace::parse_with_length_width(&region[ds_b..ds_e], widths.lengths)?;
+    let dl = DataLayout::parse_with_widths(&region[lb..le], widths)?;
     if !matches!(dl, DataLayout::Chunked { .. }) {
         return Err(Error::EditUnsupported("dataset is not chunked"));
     }
@@ -12023,7 +12049,8 @@ fn patch_link_target(
     let mut p = 0;
     while let Some((msg_type, body, body_end)) = region.next_message(p)? {
         if msg_type == MessageType::LINK {
-            if let Ok(link) = LinkMessage::parse(&region[body..body_end], OFFSET_SIZE)
+            if let Ok(link) =
+                LinkMessage::parse_with_offset_width(&region[body..body_end], OFFSET_WIDTH)
                 && link.name == name
             {
                 let Some(address) =
@@ -12201,7 +12228,8 @@ fn find_link_info(
     let mut p = 0;
     while let Some((msg_type, body, body_end)) = region.next_message(p)? {
         if msg_type == MessageType::LINK_INFO
-            && let Ok(info) = LinkInfoMessage::parse(&region[body..body_end], OFFSET_SIZE)
+            && let Ok(info) =
+                LinkInfoMessage::parse_with_offset_width(&region[body..body_end], OFFSET_WIDTH)
         {
             return Ok(Some((p, body..body_end, info)));
         }
@@ -12292,7 +12320,9 @@ fn remove_link_from_region(region: &OhRegion, name: &str) -> Result<OhRegion, Er
     while let Some((msg_type, body, body_end)) = region.next_message(p)? {
         let mut skip = false;
         if msg_type == MessageType::LINK {
-            if let Ok(link) = LinkMessage::parse(&region[body..body_end], OFFSET_SIZE) {
+            if let Ok(link) =
+                LinkMessage::parse_with_offset_width(&region[body..body_end], OFFSET_WIDTH)
+            {
                 if link.name == name {
                     skip = true;
                     removed = true;
@@ -13817,6 +13847,7 @@ fn screen_resolved_references(
 fn screen_copied_references(
     tree: &CopyTree,
     addresses: AddressContext,
+    widths: FormatWidths,
     invalidated: &InvalidatedAddresses,
     src: &(impl Source + ?Sized),
 ) -> Result<(), Error> {
@@ -13831,7 +13862,7 @@ fn screen_copied_references(
         src,
         addresses,
         AccessMode::ReadWrite,
-        crate::file_writer::WIDTHS,
+        widths,
         None,
     );
     let (region, dense_attrs) = match tree {
@@ -13890,7 +13921,7 @@ fn screen_copied_references(
             }
             MessageType::DATA_LAYOUT => {
                 if let Ok(DataLayout::Compact { data }) =
-                    DataLayout::parse(&region[body..body_end], OFFSET_SIZE, LENGTH_SIZE)
+                    DataLayout::parse_with_widths(&region[body..body_end], widths)
                 {
                     compact = Some(data);
                 }
@@ -13914,7 +13945,7 @@ fn screen_copied_references(
                 // message, not the fields inside it — and `parse` refuses one.
                 let attr = crate::attribute::AttributeMessage::parse_resolving_with_length_width(
                     &region[body..body_end],
-                    crate::file_writer::LENGTH_WIDTH,
+                    widths.lengths,
                     &resolver,
                 )
                 .map_err(|source| Error::CopyScreenUnreadable {
@@ -13976,7 +14007,7 @@ fn screen_copied_references(
         }
         CopyTree::Group { children, .. } => {
             for (_, _, child) in children {
-                screen_copied_references(child, addresses, invalidated, src)?;
+                screen_copied_references(child, addresses, widths, invalidated, src)?;
             }
         }
     }
@@ -14467,6 +14498,7 @@ mod tests {
             &session.image(),
             AccessMode::ReadWrite,
             session.superblock(),
+            session.widths(),
             session.addresses(),
             &object.as_path(),
         )
@@ -14632,7 +14664,7 @@ mod tests {
     /// superblock's base and end-of-file addresses to match.
     fn prepend_userblock(path: &Path, len: u64) {
         let original = std::fs::read(path).unwrap();
-        let mut superblock = hdf5_pure_format::__private::parse_superblock(&original, 0).unwrap();
+        let mut superblock = crate::superblock::parse_superblock(&original, 0).unwrap();
         superblock.base_address = BaseAddress::new(len);
         superblock.eof_address += len;
         let rewritten = hdf5_pure_format::__private::serialize_superblock(&superblock).unwrap();
@@ -14719,14 +14751,13 @@ mod tests {
                 storage,
             } = dense_attribute_owner(&session, object);
             let heap_address = attribute_heap_address(&session, addr);
-            let heap =
-                crate::fractal_heap_storage::collect_fractal_heap_storage_from_source_with_widths(
-                    &session.image(),
-                    AddressContext::from_effective_base(BaseAddress::ZERO),
-                    StoredAddress::new(heap_address),
-                    crate::file_writer::WIDTHS,
-                )
-                .unwrap();
+            let heap = crate::fractal_heap_storage::collect_fractal_heap_storage_from_source(
+                &session.image(),
+                AddressContext::from_effective_base(BaseAddress::ZERO),
+                StoredAddress::new(heap_address),
+                crate::file_writer::WIDTHS,
+            )
+            .unwrap();
             (addr, header_spans, storage, heap_address, heap)
         };
 
@@ -14782,7 +14813,7 @@ mod tests {
             }
         };
         assert_eq!(
-            crate::fractal_heap_storage::collect_fractal_heap_storage_from_source_with_widths(
+            crate::fractal_heap_storage::collect_fractal_heap_storage_from_source(
                 &BytesSource::new(bytes.as_slice()),
                 AddressContext::from_effective_base(BaseAddress::ZERO),
                 StoredAddress::new(heap_address),
@@ -14948,6 +14979,7 @@ mod tests {
                 &session.image(),
                 AccessMode::ReadWrite,
                 session.superblock(),
+                session.widths(),
                 session.addresses(),
                 &object_path.as_path(),
             )
@@ -14955,12 +14987,11 @@ mod tests {
         };
         let addr = resolve(&object);
         let header_spans = session.oh_chunk_spans(addr).unwrap();
-        let header = ObjectHeader::parse_from_source(
+        let header = ObjectHeader::parse_from_source_with_widths(
             &SourceMetadata(&session.image()),
             AccessMode::ReadWrite,
             addr,
-            OFFSET_SIZE,
-            LENGTH_SIZE,
+            session.widths(),
             BaseAddress::ZERO,
         )
         .unwrap();
@@ -14968,7 +14999,9 @@ mod tests {
             .messages
             .iter()
             .find(|message| message.msg_type == MessageType::LINK_INFO)
-            .map(|message| LinkInfoMessage::parse(&message.data, OFFSET_SIZE).unwrap())
+            .map(|message| {
+                LinkInfoMessage::parse_with_offset_width(&message.data, OFFSET_WIDTH).unwrap()
+            })
             .expect("a dense group has a Link Info message");
         let heap_address = link_info
             .fractal_heap_address
@@ -14976,14 +15009,13 @@ mod tests {
         let link_storage = session
             .dense_group_storage_spans(&header_spans, None, &link_info)
             .expect("the dense link storage is structurally complete");
-        let heap =
-            crate::fractal_heap_storage::collect_fractal_heap_storage_from_source_with_widths(
-                &session.image(),
-                AddressContext::from_effective_base(BaseAddress::ZERO),
-                heap_address,
-                crate::file_writer::WIDTHS,
-            )
-            .unwrap();
+        let heap = crate::fractal_heap_storage::collect_fractal_heap_storage_from_source(
+            &session.image(),
+            AddressContext::from_effective_base(BaseAddress::ZERO),
+            heap_address,
+            crate::file_writer::WIDTHS,
+        )
+        .unwrap();
         assert_eq!(
             heap.allocations()
                 .iter()
@@ -15282,6 +15314,7 @@ mod tests {
             let got = screen_copied_references(
                 &tree,
                 AddressContext::from_effective_base(BaseAddress::ZERO),
+                crate::file_writer::WIDTHS,
                 &invalidated,
                 &empty,
             );
@@ -15305,6 +15338,7 @@ mod tests {
         let err = screen_copied_references(
             &no_layout,
             AddressContext::from_effective_base(BaseAddress::ZERO),
+            crate::file_writer::WIDTHS,
             &invalidated,
             &empty,
         )
@@ -15341,6 +15375,7 @@ mod tests {
         let err = screen_copied_references(
             &tree,
             AddressContext::from_effective_base(BaseAddress::ZERO),
+            crate::file_writer::WIDTHS,
             &invalidated,
             &empty,
         )
@@ -15587,6 +15622,7 @@ mod tests {
                 },
                 &engine.image(),
                 engine.superblock(),
+                engine.widths(),
                 AddressContext::from_effective_base(engine.superblock().base_address),
             )
         };
@@ -15651,6 +15687,7 @@ mod tests {
                 },
                 &engine.image(),
                 engine.superblock(),
+                engine.widths(),
                 AddressContext::from_effective_base(engine.superblock().base_address),
             )
         };
@@ -15701,6 +15738,7 @@ mod tests {
                 let got = screen_copied_references(
                     tree,
                     AddressContext::from_effective_base(BaseAddress::ZERO),
+                    crate::file_writer::WIDTHS,
                     &invalidated,
                     &empty,
                 );
@@ -16232,6 +16270,7 @@ mod tests {
             s.image.as_slice().unwrap(),
             AccessMode::ReadWrite,
             &s.superblock,
+            s.widths,
             AddressContext::from_effective_base(s.superblock.base_address),
             &ObjectPath::parse("victim"),
         )
@@ -17894,7 +17933,8 @@ mod tests {
         let mut p = 0;
         while let Some((mt, body, end)) = region.next_message(p).unwrap() {
             if mt == MessageType::LINK {
-                let link = LinkMessage::parse(&region[body..end], OFFSET_SIZE).unwrap();
+                let link =
+                    LinkMessage::parse_with_offset_width(&region[body..end], OFFSET_WIDTH).unwrap();
                 out.push((link.name, link.creation_order));
             }
             p = end;
@@ -18643,7 +18683,7 @@ mod tests {
         for (path, version, flags) in [(&flagged, 3, SWMR_WRITE_FLAGS), (&ancient, 9, 0)] {
             let mut data = std::fs::read(path).unwrap();
             let off = signature::find_signature(&data).unwrap();
-            let mut sb = hdf5_pure_format::__private::parse_superblock(&data, off).unwrap();
+            let mut sb = crate::superblock::parse_superblock(&data, off).unwrap();
             sb.consistency_flags = flags;
             let mut bytes = hdf5_pure_format::__private::serialize_superblock(&sb).unwrap();
             bytes[signature::HDF5_SIGNATURE.len()] = version;
@@ -18694,7 +18734,7 @@ mod tests {
         {
             let mut data = std::fs::read(&path).unwrap();
             let off = signature::find_signature(&data).unwrap();
-            let mut sb = hdf5_pure_format::__private::parse_superblock(&data, off).unwrap();
+            let mut sb = crate::superblock::parse_superblock(&data, off).unwrap();
             assert!(
                 sb.version >= 2,
                 "FileBuilder should emit a v2/v3 superblock"
@@ -18705,7 +18745,7 @@ mod tests {
             std::fs::write(&path, &data).unwrap();
             // Sanity: the stale flag is really set on disk now.
             assert_eq!(
-                hdf5_pure_format::__private::parse_superblock(&data, off)
+                crate::superblock::parse_superblock(&data, off)
                     .unwrap()
                     .consistency_flags,
                 0x05
@@ -18728,7 +18768,7 @@ mod tests {
         {
             let mut data = std::fs::read(&path).unwrap();
             let off = signature::find_signature(&data).unwrap();
-            let mut sb = hdf5_pure_format::__private::parse_superblock(&data, off).unwrap();
+            let mut sb = crate::superblock::parse_superblock(&data, off).unwrap();
             sb.version = 2;
             sb.consistency_flags = crate::file_lock::WRITE_ACCESS;
             let bytes = hdf5_pure_format::__private::serialize_superblock(&sb).unwrap();
@@ -18750,7 +18790,7 @@ mod tests {
         let data = std::fs::read(&path).unwrap();
         let off = signature::find_signature(&data).unwrap();
         assert_eq!(
-            hdf5_pure_format::__private::parse_superblock(&data, off)
+            crate::superblock::parse_superblock(&data, off)
                 .unwrap()
                 .consistency_flags,
             0,
@@ -18818,7 +18858,7 @@ mod tests {
 
         let mut data = std::fs::read(&path).unwrap();
         let off = signature::find_signature(&data).unwrap();
-        let mut sb = hdf5_pure_format::__private::parse_superblock(&data, off).unwrap();
+        let mut sb = crate::superblock::parse_superblock(&data, off).unwrap();
         assert_eq!(
             sb.base_address,
             BaseAddress::new(UB),
@@ -18838,6 +18878,7 @@ mod tests {
             session.image(),
             AccessMode::ReadWrite,
             &session.superblock,
+            session.widths,
             session.addresses,
             &ObjectPath::parse("d"),
         )
@@ -18888,6 +18929,7 @@ mod tests {
             &engine.image(),
             AccessMode::ReadWrite,
             engine.superblock(),
+            engine.widths(),
             engine.addresses(),
             &ObjectPath::parse("d"),
         )
@@ -19282,6 +19324,7 @@ mod tests {
             &engine.image(),
             AccessMode::ReadWrite,
             engine.superblock(),
+            engine.widths(),
             engine.addresses(),
             &ObjectPath::parse("d"),
         )
@@ -21605,6 +21648,7 @@ mod staged_query_tests {
             &e.image(),
             AccessMode::ReadWrite,
             e.superblock(),
+            e.widths(),
             e.addresses(),
             &ObjectPath::parse("col"),
         )
@@ -21763,6 +21807,7 @@ mod staged_query_tests {
                 &e.image(),
                 AccessMode::ReadWrite,
                 e.superblock(),
+                e.widths(),
                 e.addresses(),
                 &ObjectPath::parse("existing")
             )

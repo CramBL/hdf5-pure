@@ -23,8 +23,7 @@ use crate::address::AddressContext;
 use crate::address::StoredAddress;
 use crate::address::StoredAddressExt;
 use crate::btree_v2::{
-    BTreeV2Header, BTreeV2Record, collect_btree_v2_records_from_source_with_offset_width,
-    collect_btree_v2_records_with_offset_width,
+    BTreeV2Header, BTreeV2Record, collect_btree_v2_records, collect_btree_v2_records_from_source,
 };
 use crate::convert::Narrow;
 use crate::error::FormatError;
@@ -39,8 +38,8 @@ use crate::width::{LengthWidth, OffsetWidth};
 /// # Errors
 ///
 /// Returns [`FormatError::UnexpectedEof`] if the image is truncated, and the address and header
-/// parsing errors of [`read_header_from_source_with_widths`].
-pub(crate) fn parse_header_with_widths(
+/// parsing errors of [`read_header_from_source`].
+pub(crate) fn parse_header(
     bytes: &[u8],
     addresses: AddressContext,
     address: StoredAddress,
@@ -89,7 +88,7 @@ fn buffered_region<'a>(
 /// the parsing errors of [`FractalHeapHeaderLocator::parse`] and
 /// [`FractalHeapHeaderRef::parse`](hdf5_pure_format::__private::FractalHeapHeaderRef::parse).
 /// Returns the source error if a read fails.
-pub(crate) fn read_header_from_source_with_widths(
+pub(crate) fn read_header_from_source(
     source: &(impl Source + ?Sized),
     addresses: AddressContext,
     address: StoredAddress,
@@ -427,7 +426,7 @@ impl<'h> HeapObjectReader<'h> {
                 self.locate_huge(huge_id, Backend::Buffered, || {
                     let header = BTreeV2Header::parse_with_widths(file_data, btree_addr, widths)?;
                     check_huge_object_btree(&header, widths)?;
-                    collect_btree_v2_records_with_offset_width(file_data, &header, widths.offsets)
+                    collect_btree_v2_records(file_data, &header, widths.offsets)
                 })?
             }
         };
@@ -456,11 +455,7 @@ impl<'h> HeapObjectReader<'h> {
                         widths,
                     )?;
                     check_huge_object_btree(&header, widths)?;
-                    collect_btree_v2_records_from_source_with_offset_width(
-                        source,
-                        &header,
-                        widths.offsets,
-                    )
+                    collect_btree_v2_records_from_source(source, &header, widths.offsets)
                 })?
             }
         };
@@ -660,7 +655,7 @@ mod tests {
             base: addresses.effective_base(),
         };
         assert_eq!(
-            read_header_from_source_with_widths(
+            read_header_from_source(
                 &framed,
                 addresses,
                 StoredAddress::new(header_address),
@@ -691,7 +686,7 @@ mod tests {
         let mut bytes = fractal_heap::Header::new(256).build(Widths::EIGHT);
         bytes.truncate(available);
         assert_eq!(
-            read_header_from_source_with_widths(
+            read_header_from_source(
                 &BytesSource::new(&bytes),
                 AddressContext::from_effective_base(BaseAddress::ZERO),
                 StoredAddress::ZERO,
@@ -940,7 +935,7 @@ mod tests {
 
         // Header parsed from a source, then the object fetched from a source.
         let mem = BytesSource::new(&file_data);
-        let hdr_mem = read_header_from_source_with_widths(
+        let hdr_mem = read_header_from_source(
             &mem,
             AddressContext::from_effective_base(BaseAddress::ZERO),
             StoredAddress::ZERO,
@@ -958,7 +953,7 @@ mod tests {
         .unwrap();
 
         let seek = ReadSeekSource::new(std::io::Cursor::new(file_data)).unwrap();
-        let hdr_seek = read_header_from_source_with_widths(
+        let hdr_seek = read_header_from_source(
             &seek,
             AddressContext::from_effective_base(BaseAddress::ZERO),
             StoredAddress::ZERO,
