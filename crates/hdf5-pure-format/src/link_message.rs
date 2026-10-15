@@ -7,7 +7,7 @@ use core::ops::Range;
 use crate::address::StoredAddress;
 use crate::address::StoredAddressExt;
 use crate::bytes;
-use crate::bytes::{ensure_len, read_offset, read_uint_width};
+use crate::bytes::{ensure_len, read_uint_width};
 use crate::convert::Narrow;
 use crate::datatype::CharacterSet;
 use crate::error::FormatError;
@@ -208,11 +208,30 @@ impl LinkMessage {
         offset_size: u8,
         name: &str,
     ) -> Result<Option<StoredAddress>, FormatError> {
+        Self::hard_link_address_if_named_with_offset_width(
+            data,
+            OffsetWidth::try_from(offset_size)?,
+            name,
+        )
+    }
+
+    /// Returns the object header address of the hard link named `name` using a validated address
+    /// width.
+    ///
+    /// # Errors
+    ///
+    /// Returns the error [`parse_with_offset_width`](Self::parse_with_offset_width) returns if the
+    /// message is malformed up to the end of the name, and, for a link named `name`, if its link
+    /// type or hard link address is malformed.
+    pub fn hard_link_address_if_named_with_offset_width(
+        data: &[u8],
+        offset_width: OffsetWidth,
+        name: &str,
+    ) -> Result<Option<StoredAddress>, FormatError> {
         let prefix = LinkPrefix::parse(data)?;
         if !name_matches(prefix.name, name) {
             return Ok(None);
         }
-        let offset_width = OffsetWidth::try_from(offset_size)?;
         prefix
             .hard_link_address_range(data, offset_width)?
             .map(|address| {
@@ -330,17 +349,27 @@ impl LinkMessage {
 
     /// Parses the body of a Link message.
     ///
-    /// `offset_size` is the width of a hard link's address.
+    /// # Errors
+    ///
+    /// Returns [`FormatError::InvalidOffsetSize`] if `offset_size` is not 2, 4, or 8, and the
+    /// errors of [`parse_with_offset_width`](Self::parse_with_offset_width) in the cases it lists.
+    pub fn parse(data: &[u8], offset_size: u8) -> Result<LinkMessage, FormatError> {
+        Self::parse_with_offset_width(data, OffsetWidth::try_from(offset_size)?)
+    }
+
+    /// Parses the body of a Link message using a validated hard-link address width.
     ///
     /// # Errors
     ///
     /// Returns [`FormatError::InvalidLinkVersion`] if the version is not 1,
     /// [`FormatError::InvalidCharacterSet`] if the character set is not ASCII or UTF-8,
     /// [`FormatError::InvalidLinkType`] if the link type is not hard, soft, or external,
-    /// [`FormatError::InvalidOffsetSize`] if the link is a hard link and `offset_size` is not 2, 4,
-    /// or 8, [`FormatError::ValueTooLargeForPlatform`] if the name length does not fit `usize`, and
+    /// [`FormatError::ValueTooLargeForPlatform`] if the name length does not fit `usize`, and
     /// [`FormatError::UnexpectedEof`] if `data` ends inside a field.
-    pub fn parse(data: &[u8], offset_size: u8) -> Result<LinkMessage, FormatError> {
+    pub fn parse_with_offset_width(
+        data: &[u8],
+        offset_width: OffsetWidth,
+    ) -> Result<LinkMessage, FormatError> {
         let LinkPrefix {
             name,
             link_type_code,
@@ -355,7 +384,11 @@ impl LinkMessage {
             HARD_LINK => {
                 // Hard link
                 LinkTarget::Hard {
-                    object_header_address: StoredAddress::new(read_offset(data, pos, offset_size)?),
+                    object_header_address: StoredAddress::new(bytes::read_offset_width(
+                        data,
+                        pos,
+                        offset_width,
+                    )?),
                 }
             }
             SOFT_LINK => {

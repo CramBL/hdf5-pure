@@ -576,7 +576,7 @@ pub fn __fractal_heap_storage_extents(
     offset_size: u8,
     length_size: u8,
 ) -> Result<alloc::vec::Vec<(u64, u64)>, alloc::string::String> {
-    let storage = fractal_heap_storage::collect_fractal_heap_storage_from_source_with_widths(
+    let storage = fractal_heap_storage::collect_fractal_heap_storage_from_source(
         &source::BytesSource::new(file_data),
         address::AddressContext::from_effective_base(address::BaseAddress::ZERO),
         address::StoredAddress::new(heap_header_address),

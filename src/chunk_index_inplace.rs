@@ -64,7 +64,7 @@ use crate::message_flags::MessageFlags;
 use crate::message_type::MessageType;
 use crate::source::Source;
 use crate::source::SourceMetadata;
-use crate::width::OffsetWidth;
+use crate::width::{FormatWidths, OffsetWidth};
 
 /// Counts the two index-block allocations, so a test can say whether its fixture
 /// reached them.
@@ -134,10 +134,8 @@ impl ElemRecord {
 /// against its own image and exclusive lock, rather than opening a second one
 /// that would take a second lock and keep a divergent view.
 pub(crate) trait Store: Source {
-    /// This file's address (offset) field width in bytes.
-    fn offset_size(&self) -> u8;
-    /// This file's length field width in bytes.
-    fn length_size(&self) -> u8;
+    /// This file's validated address and length field widths.
+    fn widths(&self) -> FormatWidths;
 
     /// Writes `bytes` into an allocation of `class` and returns its physical position.
     ///
@@ -180,7 +178,7 @@ pub(crate) trait Store: Source {
     /// Read an offset-sized address at `offset`.
     fn read_addr_at(&self, offset: u64) -> Result<StoredAddress, Error> {
         let mut buf = [0u8; 8];
-        let width = if self.offset_size() == 4 { 4 } else { 8 };
+        let width = usize::from(self.widths().offsets.get());
         self.read_at(offset, &mut buf[..width])?;
         Ok(StoredAddress::new(u64::from_le_bytes(buf)))
     }
@@ -321,10 +319,10 @@ impl Located {
         oh_addr: u64,
         unsupported: fn(&'static str) -> Error,
     ) -> Result<LocateResult, Error> {
-        let os = file.offset_size();
-        let ls = file.length_size();
+        let widths = file.widths();
+        let os = widths.offsets.get();
 
-        let walk = walk_v2_object_header(file, oh_addr, os, ls)?;
+        let walk = walk_v2_object_header(file, oh_addr, widths)?;
 
         let dataspace_msg = walk
             .messages
@@ -375,7 +373,7 @@ impl Located {
 
         // Parse the dataspace: must be rank 1 with one unlimited dimension.
         let ds_bytes = file.read_metadata_at(dataspace_msg.data_off, dataspace_msg.size)?;
-        let dataspace = Dataspace::parse(&ds_bytes, ls)?;
+        let dataspace = Dataspace::parse_with_length_width(&ds_bytes, widths.lengths)?;
         if dataspace.rank != 1 {
             return Err(unsupported("only rank-1 datasets are supported"));
         }
@@ -391,7 +389,7 @@ impl Located {
 
         // Parse the layout: must be a v4 chunked Extensible Array (index type 4).
         let layout_bytes = file.read_metadata_at(layout_msg.data_off, layout_msg.size)?;
-        let layout = DataLayout::parse(&layout_bytes, os, ls)?;
+        let layout = DataLayout::parse_with_widths(&layout_bytes, widths)?;
         let (ea_addr, chunk_dims) = match layout {
             DataLayout::Chunked {
                 chunk_dimensions,
@@ -439,8 +437,11 @@ impl Located {
         };
         let chunk_bytes = chunk_elems.to_usize()? * elem_bytes.get();
 
-        let ea_header =
-            ExtensibleArrayHeader::parse_from_source(&SourceMetadata(file), ea_addr, os, ls)?;
+        let ea_header = ExtensibleArrayHeader::parse_from_source_with_widths(
+            &SourceMetadata(file),
+            ea_addr,
+            widths,
+        )?;
         let has_filters = filter_msg.is_some();
         if (ea_header.client_id == 1) != has_filters {
             return Err(unsupported(
@@ -490,7 +491,7 @@ impl Located {
                 chunk_bytes,
                 client_id: ea_header.client_id,
                 ea_addr,
-                offset_width: OffsetWidth::try_from(os)?,
+                offset_width: widths.offsets,
                 geom,
                 idx_blk_elmts: ea_header.idx_blk_elmts as u64,
                 ea_elem_size: ea_header.element_size as usize,
@@ -508,13 +509,13 @@ impl Located {
 
     /// Read the element record stored at byte offset `off`.
     fn read_element_at<F: Store>(&self, file: &F, off: u64) -> Result<ElemRecord, Error> {
-        let os = file.offset_size() as usize;
+        let os = file.widths().offsets.get() as usize;
         if self.client_id == 0 {
             return Ok(ElemRecord::addr_only(file.read_addr_at(off)?));
         }
         // One bounded read of the whole fixed-width element record.
         let elem = file.read_exact_at(off, self.ea_elem_size)?;
-        let addr_w = if file.offset_size() == 4 { 4 } else { 8 };
+        let addr_w = os;
         let mut a = [0u8; 8];
         a[..addr_w].copy_from_slice(&elem[..addr_w]);
         let addr = StoredAddress::new(u64::from_le_bytes(a));
@@ -536,7 +537,7 @@ impl Located {
     /// (or super block) is not yet allocated, i.e. the element does not exist on
     /// disk yet.
     fn elem_slot_off<F: Store>(&self, file: &F, e: u64) -> Result<Option<u64>, Error> {
-        let os = file.offset_size() as usize;
+        let os = file.widths().offsets.get() as usize;
         let elem_size = self.ea_elem_size as u64;
         let idx = self.idx_blk_elmts;
         let blk_off = self.ea_bits.block_offset_width();
@@ -563,7 +564,7 @@ impl Located {
         let sblk_addr = match region.parent {
             Parent::Super { sblk_j, .. } => {
                 let a = self.super_block_addr(file, sblk_j)?;
-                if a.is_undefined(self.offset_width) {
+                if a.is_undefined(file.widths().offsets) {
                     return Ok(None);
                 }
                 Some(a)
@@ -572,7 +573,7 @@ impl Located {
         };
         let dblk_ptr_off = self.dblk_ptr_off(sblk_addr, &region, os, blk_off)?;
         let dblk_addr = file.read_addr_at(dblk_ptr_off)?;
-        if dblk_addr.is_undefined(self.offset_width) {
+        if dblk_addr.is_undefined(file.widths().offsets) {
             return Ok(None);
         }
 
@@ -630,7 +631,7 @@ impl Located {
             None => Ok(None),
             Some(off) => {
                 let rec = self.read_element_at(file, off)?;
-                if rec.addr.is_undefined(self.offset_width) {
+                if rec.addr.is_undefined(file.widths().offsets) {
                     Ok(None)
                 } else {
                     Ok(Some(rec))
@@ -651,7 +652,7 @@ impl Located {
         e: u64,
         rec: ElemRecord,
     ) -> Result<(), Error> {
-        let os = file.offset_size() as usize;
+        let os = file.widths().offsets.get() as usize;
         let elem_size = self.ea_elem_size as u64;
         let idx = self.idx_blk_elmts;
         let blk_off = self.ea_bits.block_offset_width();
@@ -691,7 +692,7 @@ impl Located {
         // in-place element update reuse the existing block instead of leaking it.
         let dblk_ptr_off = self.dblk_ptr_off(sblk_addr, &region, os, blk_off)?;
         let existing = file.read_addr_at(dblk_ptr_off)?;
-        let dblk_addr = if existing.is_undefined(self.offset_width) {
+        let dblk_addr = if existing.is_undefined(file.widths().offsets) {
             let new_addr = self.alloc_undef_data_block(file, dblk_nelmts, block_offset_rel)?;
             #[cfg(test)]
             alloc_probe::note_data_block();
@@ -758,7 +759,7 @@ impl Located {
     /// Address of an already-allocated super block (`sblk_j`-th super-block
     /// pointer in the index block); the undefined sentinel when not yet allocated.
     fn super_block_addr<F: Store>(&self, file: &F, sblk_j: usize) -> Result<StoredAddress, Error> {
-        let os = file.offset_size() as usize;
+        let os = file.widths().offsets.get() as usize;
         let ib_prefix = (4 + 1 + 1 + os) as u64;
         let ndblk_addrs = self.geom.direct_dblk_nelmts().len();
         let slot_off = self.index_block_addr.get()
@@ -779,15 +780,15 @@ impl Located {
         sb: SuperBlockGeometry,
     ) -> Result<StoredAddress, Error> {
         let existing = self.super_block_addr(file, sblk_j)?;
-        if !existing.is_undefined(self.offset_width) {
+        if !existing.is_undefined(file.widths().offsets) {
             return Ok(existing);
         }
-        let os = file.offset_size() as usize;
+        let os = file.widths().offsets.get() as usize;
         let ib_prefix = (4 + 1 + 1 + os) as u64;
         let ndblk_addrs = self.geom.direct_dblk_nelmts().len();
 
         let bitmap = vec![0u8; sb.bitmap_size().to_usize()?];
-        let undef = vec![StoredAddress::undefined(self.offset_width); sb.ndblks.to_usize()?];
+        let undef = vec![StoredAddress::undefined(file.widths().offsets); sb.ndblks.to_usize()?];
         let super_block = hdf5_pure_format::__private::encode_super_block(
             self.ea_addr,
             sb_block_offset,
@@ -913,7 +914,7 @@ impl Located {
         at: u64,
         value: &[u8],
     ) -> Result<(), Error> {
-        let os = file.offset_size() as usize;
+        let os = file.widths().offsets.get() as usize;
         let ib_prefix = (4 + 1 + 1 + os) as u64;
         let ndblk_addrs = self.geom.direct_dblk_nelmts().len();
         let nsblk_addrs = self.geom.nsblk_addrs();
@@ -934,7 +935,7 @@ impl Located {
         at: u64,
         value: &[u8],
     ) -> Result<(), Error> {
-        let os = file.offset_size() as usize;
+        let os = file.widths().offsets.get() as usize;
         let prefix = (4 + 1 + 1 + os + blk_off.bytes()) as u64;
         let block_start = sblk_addr.get();
         let cks_off = block_start + prefix + sb.bitmap_size() + sb.ndblks * os as u64;
@@ -960,7 +961,7 @@ impl Located {
             // construction and this is the predicate the walk always had.
             SlotOccupancy::Dense(num_chunks),
         );
-        let ls = file.length_size() as usize;
+        let ls = file.widths().lengths.get() as usize;
         let ea_addr = self.ea_addr.get();
         // The six statistics are adjacent length-sized fields, so they are one
         // span and go out as one write. Six writes of eight bytes each into the
@@ -982,8 +983,7 @@ impl Located {
             stat_block[at..at + ls].copy_from_slice(&value.to_le_bytes()[..ls]);
             at += ls;
         }
-        let header_len =
-            ExtensibleArrayHeader::serialized_size(file.offset_size(), file.length_size()) as u64;
+        let header_len = ExtensibleArrayHeader::serialized_size_with_widths(file.widths()) as u64;
         let cks_off = ea_addr + header_len - 4;
         file.publish_checksummed(ea_addr, cks_off, ea_addr + 12, &stat_block[..at])
     }
@@ -995,7 +995,7 @@ impl Located {
         file: &mut F,
         new_dim: u64,
     ) -> Result<(), Error> {
-        let ls = file.length_size() as usize;
+        let ls = file.widths().lengths.get() as usize;
         file.publish_checksummed(
             self.ohdr_chunk_start,
             self.ohdr_chunk_msg_end,
@@ -1178,7 +1178,7 @@ pub(crate) fn plan_ea_append<F: Store>(
     // while nothing has been written, rather than where the element is laid out
     // in phase 2 — by then phase 1 has already placed the chunk bytes, and the
     // refusal would leave them behind unreferenced.
-    let os = file.offset_size() as usize;
+    let os = file.widths().offsets.get() as usize;
     for blob in &new_chunk_bytes {
         loc.check_stored_size(os, blob.len() as u64)?;
     }
@@ -1289,7 +1289,7 @@ fn sb_page_bit<F: Store>(
     blk_off: BlockOffsetWidth,
     global_page: u64,
 ) -> Result<(u64, u8), Error> {
-    let os = file.offset_size() as usize;
+    let os = file.widths().offsets.get() as usize;
     let bitmap_start = sblk_addr.get() + (4 + 1 + 1 + os + blk_off.bytes()) as u64;
     let byte = bitmap_start + global_page / 8;
     let mut v = [0u8; 1];
@@ -1445,8 +1445,7 @@ struct Walk {
 fn walk_v2_object_header<S: Source + ?Sized>(
     source: &S,
     offset: u64,
-    offset_size: u8,
-    length_size: u8,
+    widths: FormatWidths,
 ) -> Result<Walk, Error> {
     let head_len = source
         .len()
@@ -1466,8 +1465,7 @@ fn walk_v2_object_header<S: Source + ?Sized>(
         offset,
         chunk0_msg_start + chunk0.len().to_u64(),
         layout,
-        offset_size,
-        length_size,
+        widths,
         &mut messages,
         &mut continuations,
     )?;
@@ -1495,8 +1493,7 @@ fn walk_v2_object_header<S: Source + ?Sized>(
             cont_off,
             cont_off + messages_range.end.to_u64(),
             layout,
-            offset_size,
-            length_size,
+            widths,
             &mut messages,
             &mut continuations,
         )?;
@@ -1524,8 +1521,7 @@ fn walk_messages(
     chunk_start: u64,
     chunk_msg_end: u64,
     layout: MessageRecordLayout,
-    offset_size: u8,
-    length_size: u8,
+    widths: FormatWidths,
     messages: &mut Vec<WalkedMessage>,
     continuations: &mut Vec<(u64, usize)>,
 ) -> Result<(), Error> {
@@ -1539,7 +1535,7 @@ fn walk_messages(
             ..
         } = record;
         if msg_type == MessageType::OBJECT_HEADER_CONTINUATION {
-            let continuation = ObjectHeaderContinuation::parse(body, offset_size, length_size)?;
+            let continuation = ObjectHeaderContinuation::parse_with_widths(body, widths)?;
             continuations.push((
                 continuation.address().get(),
                 continuation.length().to_usize()?,
@@ -1619,6 +1615,7 @@ mod tests {
     struct WindowProbeStore {
         data: Vec<u8>,
         superblock: Superblock,
+        widths: FormatWidths,
         sb_sig_off: usize,
         max_read: Cell<usize>,
         total_read: Cell<usize>,
@@ -1644,11 +1641,13 @@ mod tests {
     impl WindowProbeStore {
         fn open(data: Vec<u8>) -> Self {
             let sb_sig_off = signature::find_signature(&data).unwrap();
-            let superblock =
-                hdf5_pure_format::__private::parse_superblock(&data, sb_sig_off).unwrap();
+            let superblock = crate::superblock::parse_superblock(&data, sb_sig_off).unwrap();
+            let widths =
+                FormatWidths::from_sizes(superblock.offset_size, superblock.length_size).unwrap();
             Self {
                 data,
                 superblock,
+                widths,
                 sb_sig_off,
                 max_read: Cell::new(0),
                 total_read: Cell::new(0),
@@ -1713,11 +1712,8 @@ mod tests {
     }
 
     impl Store for WindowProbeStore {
-        fn offset_size(&self) -> u8 {
-            self.superblock.offset_size
-        }
-        fn length_size(&self) -> u8 {
-            self.superblock.length_size
+        fn widths(&self) -> FormatWidths {
+            self.widths
         }
         fn allocate(&mut self, bytes: &[u8], class: AllocationClass) -> Result<u64, Error> {
             self.allocations.get_mut().push(class);
@@ -1771,6 +1767,7 @@ mod tests {
             &store.data,
             AccessMode::ReadOnly,
             &store.superblock,
+            crate::file_writer::WIDTHS,
             AddressContext::from_effective_base(store.superblock.base_address),
             &ObjectPath::parse("d"),
         )
@@ -1853,13 +1850,14 @@ mod tests {
             &store.data,
             AccessMode::ReadOnly,
             &store.superblock,
+            crate::file_writer::WIDTHS,
             AddressContext::from_effective_base(store.superblock.base_address),
             &ObjectPath::parse("d"),
         )
         .unwrap();
         store.reset_counters();
 
-        let walk = walk_v2_object_header(&store, oh_addr, 8, 8).unwrap();
+        let walk = walk_v2_object_header(&store, oh_addr, store.widths).unwrap();
 
         let reads = store.reads.borrow().clone();
         let [(head_at, head_len), (messages_at, messages_len)] = reads[..] else {
@@ -1893,7 +1891,9 @@ mod tests {
     #[case::a_short_continuation_block(continuation_block_shorter_than_its_signature_and_checksum())]
     #[case::a_continuation_block_without_its_signature(continuation_block_without_its_signature())]
     fn a_damaged_header_fails_the_walk(#[case] (bytes, expected): (Vec<u8>, FormatError)) {
-        let Err(err) = walk_v2_object_header(&BytesSource::new(&bytes), 0, 8, 8) else {
+        let Err(err) =
+            walk_v2_object_header(&BytesSource::new(&bytes), 0, crate::file_writer::WIDTHS)
+        else {
             panic!("expected the walk to fail with {expected:?}");
         };
         let Error::Format(format_error) = err else {
@@ -2017,6 +2017,7 @@ mod tests {
             &store.data,
             AccessMode::ReadOnly,
             &store.superblock,
+            crate::file_writer::WIDTHS,
             AddressContext::from_effective_base(store.superblock.base_address),
             &ObjectPath::parse("d"),
         )

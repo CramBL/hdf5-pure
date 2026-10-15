@@ -56,10 +56,8 @@ pub fn read_index_records_from_source<S: Source + ?Sized>(
     };
     match index.kind {
         SohmIndexKind::List => {
-            let len = hdf5_pure_format::__private::sohm_list_len_with_offset_width(
-                index.message_count,
-                widths.offsets,
-            );
+            let len =
+                hdf5_pure_format::__private::sohm_list_len(index.message_count, widths.offsets);
             let image = source.read_metadata_at(address.get(), len)?;
             hdf5_pure_format::__private::parse_sohm_list_with_offset_width(
                 &image,
@@ -74,7 +72,7 @@ pub fn read_index_records_from_source<S: Source + ?Sized>(
                 widths,
             )?;
             check_btree_type(&header)?;
-            let records = crate::btree_v2::collect_btree_v2_records_from_source_with_offset_width(
+            let records = crate::btree_v2::collect_btree_v2_records_from_source(
                 source,
                 &header,
                 widths.offsets,
@@ -125,7 +123,7 @@ fn index_for_read(
 /// Returns [`FormatError::SohmIndexMissing`] if `table` has no allocated heap for `message_type`,
 /// [`FormatError::InvalidFractalHeapIdLength`] if the heap's declared ID length differs from
 /// [`FHEAP_ID_LEN`], and the errors of
-/// [`parse_header_with_widths`](crate::fractal_heap::parse_header_with_widths),
+/// [`parse_header`](crate::fractal_heap::parse_header),
 /// [`FractalHeapIdLayout::parse`], and [`HeapObjectReader::read`] if parsing or resolution fails.
 pub fn read_heap_message(
     file_data: &[u8],
@@ -137,8 +135,7 @@ pub fn read_heap_message(
     widths: FormatWidths,
 ) -> Result<Vec<u8>, FormatError> {
     let (_, heap_address) = index_for_read(table, message_type)?;
-    let heap =
-        crate::fractal_heap::parse_header_with_widths(file_data, addresses, heap_address, widths)?;
+    let heap = crate::fractal_heap::parse_header(file_data, addresses, heap_address, widths)?;
     let layout = FractalHeapIdLayout::new(&heap, widths.offsets, widths.lengths);
     let id = layout.parse(heap_id)?;
     HeapObjectReader::new(&heap, addresses, heap_address, access_mode, widths).read(file_data, id)
@@ -163,12 +160,8 @@ pub fn read_heap_message_from_source<S: Source + ?Sized>(
     widths: FormatWidths,
 ) -> Result<Vec<u8>, FormatError> {
     let (_, heap_address) = index_for_read(table, message_type)?;
-    let heap = crate::fractal_heap::read_header_from_source_with_widths(
-        source,
-        addresses,
-        heap_address,
-        widths,
-    )?;
+    let heap =
+        crate::fractal_heap::read_header_from_source(source, addresses, heap_address, widths)?;
     let layout = FractalHeapIdLayout::new(&heap, widths.offsets, widths.lengths);
     let id = layout.parse(heap_id)?;
     HeapObjectReader::new(&heap, addresses, heap_address, access_mode, widths)

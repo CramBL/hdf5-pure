@@ -464,7 +464,10 @@ impl FractalHeapHeader {
         if self.filtering.is_filtered() {
             return Err(FormatError::UnsupportedFilteredHeapObject);
         }
-        if self.huge_ids_direct(offset_width.get(), length_width.get()) {
+        if self.huge_ids_direct_with_widths(FormatWidths {
+            offsets: offset_width,
+            lengths: length_width,
+        }) {
             return Err(FormatError::Internal(
                 "a key was encoded into a heap ID that holds its object's address".into(),
             ));
@@ -512,12 +515,10 @@ impl FractalHeapHeader {
     /// widths of an address and a length, as `H5HF__huge_init` in `H5HFhuge.c` (HDF5 2.2.0) sets
     /// `huge_ids_direct`.
     pub fn huge_ids_direct(&self, offset_size: u8, length_size: u8) -> bool {
-        let avail = (self.heap_id_length as usize).saturating_sub(1);
-        if self.filtering.is_filtered() {
-            avail >= offset_size as usize + length_size as usize + 4 + length_size as usize
-        } else {
-            avail >= offset_size as usize + length_size as usize
-        }
+        let Ok(widths) = FormatWidths::from_sizes(offset_size, length_size) else {
+            return false;
+        };
+        self.huge_ids_direct_with_widths(widths)
     }
 
     /// Returns whether huge heap IDs store object addresses and lengths at `widths`.
@@ -922,7 +923,7 @@ impl FractalHeapLayout {
                             .ok_or_else(Self::geometry_format_error)?,
                     )
                     .ok_or_else(Self::geometry_format_error)?;
-                let child_addr = bytes::read_offset(block, pos, self.offset_width.get())?;
+                let child_addr = bytes::read_offset_width(block, pos, self.offset_width)?;
                 if StoredAddress::new(child_addr).is_undefined(self.offset_width) {
                     continue;
                 }
@@ -1306,7 +1307,7 @@ impl FractalHeapIdLayout {
         let payload_bits = u32::from(header.heap_id_length.saturating_sub(1)) * 8;
         let huge = if header.filtering.is_filtered() {
             HugeIdLayout::Filtered
-        } else if header.huge_ids_direct(offsets.get(), lengths.get()) {
+        } else if header.huge_ids_direct_with_widths(FormatWidths { offsets, lengths }) {
             HugeIdLayout::Inline { offsets, lengths }
         } else {
             HugeIdLayout::Indexed {
@@ -1379,8 +1380,8 @@ impl FractalHeapIdLayout {
         Ok(match self.huge {
             HugeIdLayout::Filtered => return Err(FormatError::UnsupportedFilteredHeapObject),
             HugeIdLayout::Inline { offsets, lengths } => HugeObjectReference::Inline {
-                addr: StoredAddress::new(bytes::read_offset(payload, 0, offsets.get())?),
-                len: bytes::read_length(payload, usize::from(offsets.get()), lengths.get())?,
+                addr: StoredAddress::new(bytes::read_offset_width(payload, 0, offsets)?),
+                len: bytes::read_length_width(payload, usize::from(offsets.get()), lengths)?,
             },
             HugeIdLayout::Indexed { has_btree } => {
                 let key = read_var_le(payload);

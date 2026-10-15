@@ -3983,8 +3983,7 @@ mod tests {
             chunks: Vec::new(),
         };
         writer.finish_to_sink(&mut sink).unwrap();
-        let superblock =
-            hdf5_pure_format::__private::parse_superblock(&sink.chunks[0].1, 0).unwrap();
+        let superblock = crate::superblock::parse_superblock(&sink.chunks[0].1, 0).unwrap();
         assert_eq!(superblock.root_group_address.get(), 1u64 << 32);
         assert_eq!(superblock.eof_address, sink.position);
         let collections: Vec<u64> = sink
@@ -4173,11 +4172,12 @@ mod tests {
     /// `None` when the header carries no Object Reference Count message.
     fn committed_reference_count(bytes: &[u8], path: &str) -> Option<u32> {
         let sig = signature::find_signature(bytes).unwrap();
-        let sb = hdf5_pure_format::__private::parse_superblock(bytes, sig).unwrap();
+        let sb = crate::superblock::parse_superblock(bytes, sig).unwrap();
         let addr = group_v2::resolve_path_any(
             bytes,
             AccessMode::ReadOnly,
             &sb,
+            WIDTHS,
             AddressContext::from_effective_base(sb.base_address),
             &ObjectPath::parse(path),
         )
@@ -4213,11 +4213,12 @@ mod tests {
         let bytes = w.finish().unwrap();
 
         let sig = signature::find_signature(&bytes).unwrap();
-        let sb = hdf5_pure_format::__private::parse_superblock(&bytes, sig).unwrap();
+        let sb = crate::superblock::parse_superblock(&bytes, sig).unwrap();
         let type_addr = group_v2::resolve_path_any(
             &bytes,
             AccessMode::ReadOnly,
             &sb,
+            WIDTHS,
             AddressContext::from_effective_base(sb.base_address),
             &ObjectPath::parse("mytype"),
         )
@@ -4226,6 +4227,7 @@ mod tests {
             &bytes,
             AccessMode::ReadOnly,
             &sb,
+            WIDTHS,
             AddressContext::from_effective_base(sb.base_address),
             &ObjectPath::parse("typed"),
         )
@@ -4260,7 +4262,7 @@ mod tests {
 
     fn parse_file(bytes: &[u8]) -> (Superblock, ObjectHeader) {
         let sig = signature::find_signature(bytes).unwrap();
-        let sb = hdf5_pure_format::__private::parse_superblock(bytes, sig).unwrap();
+        let sb = crate::superblock::parse_superblock(bytes, sig).unwrap();
         let oh = ObjectHeader::parse(
             bytes,
             AccessMode::ReadOnly,
@@ -4278,11 +4280,12 @@ mod tests {
 
     fn read_dataset_f64(bytes: &[u8], path: &str) -> Vec<f64> {
         let sig = signature::find_signature(bytes).unwrap();
-        let sb = hdf5_pure_format::__private::parse_superblock(bytes, sig).unwrap();
+        let sb = crate::superblock::parse_superblock(bytes, sig).unwrap();
         let addr = group_v2::resolve_path_any(
             bytes,
             AccessMode::ReadOnly,
             &sb,
+            WIDTHS,
             AddressContext::from_effective_base(sb.base_address),
             &ObjectPath::parse(path),
         )
@@ -4347,11 +4350,12 @@ mod tests {
         let bytes = fw.finish().unwrap();
         assert_eq!(read_dataset_f64(&bytes, "data"), vec![1.0, 2.0]);
         let sig = signature::find_signature(&bytes).unwrap();
-        let sb = hdf5_pure_format::__private::parse_superblock(&bytes, sig).unwrap();
+        let sb = crate::superblock::parse_superblock(&bytes, sig).unwrap();
         let addr = group_v2::resolve_path_any(
             &bytes,
             AccessMode::ReadOnly,
             &sb,
+            WIDTHS,
             AddressContext::from_effective_base(sb.base_address),
             &ObjectPath::parse("data"),
         )
@@ -4404,11 +4408,12 @@ mod tests {
         fw.add_group(gb.finish());
         let bytes = fw.finish().unwrap();
         let sig = signature::find_signature(&bytes).unwrap();
-        let sb = hdf5_pure_format::__private::parse_superblock(&bytes, sig).unwrap();
+        let sb = crate::superblock::parse_superblock(&bytes, sig).unwrap();
         let addr = group_v2::resolve_path_any(
             &bytes,
             AccessMode::ReadOnly,
             &sb,
+            WIDTHS,
             AddressContext::from_effective_base(sb.base_address),
             &ObjectPath::parse("grp"),
         )
@@ -4440,11 +4445,12 @@ mod tests {
         fw.add_group(gb.finish());
         let bytes = fw.finish().unwrap();
         let sig = signature::find_signature(&bytes).unwrap();
-        let sb = hdf5_pure_format::__private::parse_superblock(&bytes, sig).unwrap();
+        let sb = crate::superblock::parse_superblock(&bytes, sig).unwrap();
         let addr = group_v2::resolve_path_any(
             &bytes,
             AccessMode::ReadOnly,
             &sb,
+            WIDTHS,
             AddressContext::from_effective_base(sb.base_address),
             &ObjectPath::parse("grp"),
         )
@@ -4504,11 +4510,12 @@ mod tests {
         }
         let bytes = fw.finish().unwrap();
         let sig = signature::find_signature(&bytes).unwrap();
-        let sb = hdf5_pure_format::__private::parse_superblock(&bytes, sig).unwrap();
+        let sb = crate::superblock::parse_superblock(&bytes, sig).unwrap();
         let addr = group_v2::resolve_path_any(
             &bytes,
             AccessMode::ReadOnly,
             &sb,
+            WIDTHS,
             AddressContext::from_effective_base(sb.base_address),
             &ObjectPath::parse("data"),
         )
@@ -4551,7 +4558,7 @@ mod tests {
         }
         let bytes = fw.finish().unwrap();
         let sig = signature::find_signature(&bytes).unwrap();
-        let sb = hdf5_pure_format::__private::parse_superblock(&bytes, sig).unwrap();
+        let sb = crate::superblock::parse_superblock(&bytes, sig).unwrap();
         let oh = ObjectHeader::parse(
             &bytes,
             AccessMode::ReadOnly,
@@ -4586,11 +4593,12 @@ mod tests {
         }
         let bytes = fw.finish().unwrap();
         let sig = signature::find_signature(&bytes).unwrap();
-        let sb = hdf5_pure_format::__private::parse_superblock(&bytes, sig).unwrap();
+        let sb = crate::superblock::parse_superblock(&bytes, sig).unwrap();
         let addr = group_v2::resolve_path_any(
             &bytes,
             AccessMode::ReadOnly,
             &sb,
+            WIDTHS,
             AddressContext::from_effective_base(sb.base_address),
             &ObjectPath::parse("data"),
         )
@@ -5159,11 +5167,12 @@ mod tests {
         );
 
         let sig = signature::find_signature(&bytes).unwrap();
-        let sb = hdf5_pure_format::__private::parse_superblock(&bytes, sig).unwrap();
+        let sb = crate::superblock::parse_superblock(&bytes, sig).unwrap();
         let addr = group_v2::resolve_path_any(
             &bytes,
             AccessMode::ReadOnly,
             &sb,
+            WIDTHS,
             AddressContext::from_effective_base(sb.base_address),
             &ObjectPath::parse("data"),
         )
@@ -5632,11 +5641,12 @@ mod tests {
     /// the other could not tell whether they had come apart.
     fn layout_message_version(bytes: &[u8], path: &str) -> u8 {
         let sig = signature::find_signature(bytes).unwrap();
-        let sb = hdf5_pure_format::__private::parse_superblock(bytes, sig).unwrap();
+        let sb = crate::superblock::parse_superblock(bytes, sig).unwrap();
         let addr = group_v2::resolve_path_any(
             bytes,
             AccessMode::ReadOnly,
             &sb,
+            WIDTHS,
             AddressContext::from_effective_base(sb.base_address),
             &ObjectPath::parse(path),
         )

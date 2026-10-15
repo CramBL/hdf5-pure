@@ -4,8 +4,8 @@
 //! A file created with `H5Pset_shared_mesg_nindexes` and `H5Pset_shared_mesg_index` stores one
 //! copy of each message it shares, in the fractal heap of the index that covers the message type.
 //! An object that uses the message holds an 8-byte heap ID in place of its body, which
-//! [`parse_shared_ref`](crate::shared_message::parse_shared_ref) reads into a
-//! [`SharedLocation::SohmHeap`]. Three structures lead from the superblock to the heap:
+//! [`parse_shared_ref_with_widths`](crate::shared_message::parse_shared_ref_with_widths) reads
+//! into a [`SharedLocation::SohmHeap`]. Three structures lead from the superblock to the heap:
 //!
 //! - the Shared Message Table message (type 0x000F) in the superblock extension, with the address
 //!   of the master table and its number of indexes ([`SharedMessageTableMessage`])
@@ -216,22 +216,12 @@ fn table_len(index_count: u8, offset_width: OffsetWidth) -> usize {
     TABLE_FIXED_LEN + index_count as usize * index_header_len(offset_width)
 }
 
-/// Returns the size in bytes of one record of a shared message index.
+/// Returns the size in bytes of one record of a shared message index using a validated address
+/// width.
 ///
 /// A record has one of two shapes, and a list gives every record the size of the wider shape,
 /// `H5SM_SOHM_ENTRY_SIZE`.
-pub(crate) fn sohm_record_len(offset_size: u8) -> usize {
-    match OffsetWidth::try_from(offset_size) {
-        Ok(offset_width) => sohm_record_len_with_offset_width(offset_width),
-        Err(_) => {
-            let object_header_location = 1 + 1 + 2 + offset_size as usize;
-            RECORD_PREFIX_LEN + HEAP_LOCATION_LEN.max(object_header_location)
-        }
-    }
-}
-
-/// Returns the size in bytes of one shared-message index record using a validated address width.
-pub(crate) fn sohm_record_len_with_offset_width(offset_width: OffsetWidth) -> usize {
+pub(crate) fn sohm_record_len(offset_width: OffsetWidth) -> usize {
     let object_header_location = 1 + 1 + 2 + usize::from(offset_width.get());
     RECORD_PREFIX_LEN + HEAP_LOCATION_LEN.max(object_header_location)
 }
@@ -512,7 +502,8 @@ impl SohmRecord {
 /// [`FormatError::ChecksumMismatch`] if the stored checksum differs from the computed one.
 ///
 /// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsec_fmt4_infra_sohm
-pub fn parse_sohm_list(
+#[cfg(test)]
+pub(crate) fn parse_sohm_list(
     image: &[u8],
     message_count: u16,
     offset_size: u8,
@@ -524,13 +515,14 @@ pub fn parse_sohm_list(
 ///
 /// # Errors
 ///
-/// Returns the list, record, and checksum errors of [`parse_sohm_list`].
+/// Returns `FormatError` for a truncated or malformed list, an invalid record, or a checksum
+/// mismatch.
 pub fn parse_sohm_list_with_offset_width(
     image: &[u8],
     message_count: u16,
     offset_width: OffsetWidth,
 ) -> Result<Vec<SohmRecord>, FormatError> {
-    let stride = sohm_record_len_with_offset_width(offset_width);
+    let stride = sohm_record_len(offset_width);
     let expected = LIST_FIXED_LEN + message_count as usize * stride;
     bytes::ensure_len(image, 0, expected)?;
     let image = &image[..expected];
@@ -550,15 +542,10 @@ pub fn parse_sohm_list_with_offset_width(
     Ok(records)
 }
 
-/// Returns the size in bytes of a list index of `message_count` records, its signature and
-/// checksum included.
-pub fn sohm_list_len(message_count: u16, offset_size: u8) -> usize {
-    LIST_FIXED_LEN + message_count as usize * sohm_record_len(offset_size)
-}
-
-/// Returns the size in bytes of a list index using a validated address width.
-pub fn sohm_list_len_with_offset_width(message_count: u16, offset_width: OffsetWidth) -> usize {
-    LIST_FIXED_LEN + message_count as usize * sohm_record_len_with_offset_width(offset_width)
+/// Returns the size in bytes of a list index of `message_count` records using a validated address
+/// width, its signature and checksum included.
+pub fn sohm_list_len(message_count: u16, offset_width: OffsetWidth) -> usize {
+    LIST_FIXED_LEN + message_count as usize * sohm_record_len(offset_width)
 }
 
 #[cfg(test)]
@@ -775,10 +762,8 @@ mod tests {
     /// object-header record at the wrong offset, in a file with 2- or 4-byte addresses.
     #[test]
     fn both_record_shapes_share_one_stride() {
-        assert_eq!(sohm_record_len(8), 17);
-        assert_eq!(sohm_record_len(4), 17);
-        // A 16-byte address makes the object-header shape the wider one.
-        assert_eq!(sohm_record_len(16), 25);
+        assert_eq!(sohm_record_len(OffsetWidth::Eight), 17);
+        assert_eq!(sohm_record_len(OffsetWidth::Four), 17);
     }
 
     #[test]
@@ -836,7 +821,7 @@ mod tests {
         let image = sohm::list(&[first, second]);
 
         let records = parse_sohm_list(&image, 2, 8).unwrap();
-        assert_eq!(sohm_list_len(2, 8), image.len());
+        assert_eq!(sohm_list_len(2, OffsetWidth::Eight), image.len());
         assert_eq!(records.len(), 2);
         assert_eq!(
             records[1].location,
@@ -854,7 +839,7 @@ mod tests {
         let record = sohm::heap_record(0xDEAD_BEEF, 1, [1, 0, 0, 0, 0, 0, 0, 0], Widths::EIGHT);
         let mut image = sohm::list(&[record]);
         // The unused end of the block, zeroed.
-        image.extend_from_slice(&vec![0u8; 4 * sohm_record_len(8)]);
+        image.extend_from_slice(&vec![0u8; 4 * sohm_record_len(OffsetWidth::Eight)]);
 
         assert_eq!(parse_sohm_list(&image, 1, 8).unwrap().len(), 1);
     }
