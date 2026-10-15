@@ -26,8 +26,15 @@ use crate::error::FormatError;
 use crate::fill_value::FillPattern;
 use crate::read_spec::{RawReadSpec, RawReadStorage};
 use crate::source::Source;
+use crate::width::FormatWidths;
 
 mod primitive;
+
+#[cfg(test)]
+const TEST_WIDTHS: FormatWidths = FormatWidths {
+    offsets: crate::width::OffsetWidth::Eight,
+    lengths: crate::width::LengthWidth::Eight,
+};
 
 /// Read raw bytes for a dataset given its layout and the file data buffer,
 /// using default filter/size parameters.
@@ -44,8 +51,7 @@ pub fn read_raw_data(
     read_raw_data_full(
         file_data,
         RawReadSpec::parse(layout, dataspace, datatype, None, FillPattern::ZERO)?,
-        8,
-        8,
+        TEST_WIDTHS,
     )
 }
 
@@ -53,8 +59,7 @@ pub fn read_raw_data(
 pub fn read_raw_data_full(
     file_data: &[u8],
     spec: RawReadSpec<'_>,
-    offset_size: u8,
-    length_size: u8,
+    widths: FormatWidths,
 ) -> Result<Vec<u8>, FormatError> {
     let (dataspace, fill) = (spec.dataspace(), spec.fill());
     let expected_size = spec.byte_len()?;
@@ -77,13 +82,9 @@ pub fn read_raw_data_full(
             Ok(file_data[r].to_vec())
         }
         RawReadStorage::ContiguousUnallocated => fill.buffer(expected_size),
-        RawReadStorage::Chunked { .. } => read_chunked_data_cached(
-            file_data,
-            spec,
-            offset_size,
-            length_size,
-            &ChunkCache::new(),
-        ),
+        RawReadStorage::Chunked { .. } => {
+            read_chunked_data_cached(file_data, spec, widths, &ChunkCache::new())
+        }
         RawReadStorage::Virtual => Err(FormatError::UnsupportedVirtualLayout),
     }
 }
@@ -96,15 +97,12 @@ pub fn read_raw_data_full(
 pub fn read_raw_data_cached(
     file_data: &[u8],
     spec: RawReadSpec<'_>,
-    offset_size: u8,
-    length_size: u8,
+    widths: FormatWidths,
     cache: &ChunkCache,
 ) -> Result<Vec<u8>, FormatError> {
     match spec.storage() {
-        RawReadStorage::Chunked { .. } => {
-            read_chunked_data_cached(file_data, spec, offset_size, length_size, cache)
-        }
-        _ => read_raw_data_full(file_data, spec, offset_size, length_size),
+        RawReadStorage::Chunked { .. } => read_chunked_data_cached(file_data, spec, widths, cache),
+        _ => read_raw_data_full(file_data, spec, widths),
     }
 }
 
@@ -113,8 +111,7 @@ pub fn read_raw_data_cached(
 pub fn read_raw_data_full_from_source<S: Source + ?Sized>(
     source: &S,
     spec: RawReadSpec<'_>,
-    offset_size: u8,
-    length_size: u8,
+    widths: FormatWidths,
 ) -> Result<Vec<u8>, FormatError> {
     let (dataspace, fill) = (spec.dataspace(), spec.fill());
     let expected_size = spec.byte_len()?;
@@ -129,9 +126,7 @@ pub fn read_raw_data_full_from_source<S: Source + ?Sized>(
             source.read_exact_at(address.get(), expected_size)
         }
         RawReadStorage::ContiguousUnallocated => fill.buffer(expected_size),
-        RawReadStorage::Chunked { .. } => {
-            read_chunked_data_from_source(source, spec, offset_size, length_size)
-        }
+        RawReadStorage::Chunked { .. } => read_chunked_data_from_source(source, spec, widths),
         RawReadStorage::Virtual => Err(FormatError::UnsupportedVirtualLayout),
     }
 }
@@ -140,15 +135,14 @@ pub fn read_raw_data_full_from_source<S: Source + ?Sized>(
 pub fn read_raw_data_cached_from_source<S: Source + ?Sized>(
     source: &S,
     spec: RawReadSpec<'_>,
-    offset_size: u8,
-    length_size: u8,
+    widths: FormatWidths,
     cache: &ChunkCache,
 ) -> Result<Vec<u8>, FormatError> {
     match spec.storage() {
         RawReadStorage::Chunked { .. } => {
-            read_chunked_data_cached_from_source(source, spec, offset_size, length_size, cache)
+            read_chunked_data_cached_from_source(source, spec, widths, cache)
         }
-        _ => read_raw_data_full_from_source(source, spec, offset_size, length_size),
+        _ => read_raw_data_full_from_source(source, spec, widths),
     }
 }
 
@@ -996,8 +990,7 @@ mod tests {
                 FillPattern::new(FillTime::IfSet, Some(&seven), nz(8)),
             )
             .unwrap(),
-            8,
-            8,
+            TEST_WIDTHS,
         )
         .unwrap();
         assert_eq!(read_as_f64(&filled, &dt).unwrap(), vec![7.0, 7.0, 7.0]);
@@ -1063,14 +1056,14 @@ mod tests {
         };
 
         let spec = RawReadSpec::plain(&layout, &ds, &dt);
-        let buffered = read_raw_data_full(&file_data, spec, 8, 8).unwrap();
+        let buffered = read_raw_data_full(&file_data, spec, TEST_WIDTHS).unwrap();
         let from_mem =
-            read_raw_data_full_from_source(&BytesSource::new(&file_data), spec, 8, 8).unwrap();
+            read_raw_data_full_from_source(&BytesSource::new(&file_data), spec, TEST_WIDTHS)
+                .unwrap();
         let from_seek = read_raw_data_full_from_source(
             &ReadSeekSource::new(std::io::Cursor::new(file_data)).unwrap(),
             spec,
-            8,
-            8,
+            TEST_WIDTHS,
         )
         .unwrap();
 
@@ -1091,9 +1084,10 @@ mod tests {
         }
         let layout = DataLayout::Compact { data };
         let spec = RawReadSpec::plain(&layout, &ds, &dt);
-        let buffered = read_raw_data_full(&[], spec, 8, 8).unwrap();
+        let buffered = read_raw_data_full(&[], spec, TEST_WIDTHS).unwrap();
         let streamed =
-            read_raw_data_full_from_source(&BytesSource::new(Vec::new()), spec, 8, 8).unwrap();
+            read_raw_data_full_from_source(&BytesSource::new(Vec::new()), spec, TEST_WIDTHS)
+                .unwrap();
         assert_eq!(buffered, streamed);
     }
 
@@ -1113,9 +1107,10 @@ mod tests {
             FillPattern::new(FillTime::IfSet, Some(&seven), nz(8)),
         ] {
             let spec = RawReadSpec::parse(&layout, &ds, &dt, None, fill).unwrap();
-            let buffered = read_raw_data_full(&[], spec, 8, 8).unwrap();
+            let buffered = read_raw_data_full(&[], spec, TEST_WIDTHS).unwrap();
             let streamed =
-                read_raw_data_full_from_source(&BytesSource::new(Vec::new()), spec, 8, 8).unwrap();
+                read_raw_data_full_from_source(&BytesSource::new(Vec::new()), spec, TEST_WIDTHS)
+                    .unwrap();
             assert_eq!(buffered, streamed);
             assert_eq!(buffered.len(), 24);
         }

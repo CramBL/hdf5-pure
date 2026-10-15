@@ -8450,11 +8450,10 @@ impl WriteEngine {
         // or the kept chunks — carried by metadata into the new index — would be
         // re-encoded in the wrong element width.
         if let Some(idx_addr) = *address {
-            let hdr = ExtensibleArrayHeader::parse_from_source(
+            let hdr = ExtensibleArrayHeader::parse_from_source_with_widths(
                 &SourceMetadata(&view),
                 idx_addr,
-                OFFSET_SIZE,
-                LENGTH_SIZE,
+                crate::file_writer::WIDTHS,
             )?;
             if (hdr.client_id == 1) != has_filters {
                 return Err(Error::AppendUnsupported(
@@ -8467,7 +8466,7 @@ impl WriteEngine {
         // Enumerate the existing chunks (base-relative addresses) and require a
         // dense grid: `plan_dense_grid` returns the chunks in index order and
         // `None` on any hole, duplicate, or count mismatch against the dimension.
-        let infos = enumerate_chunks_from_source(&view, &dl, &disk_ds, OFFSET_SIZE, LENGTH_SIZE)?;
+        let infos = enumerate_chunks_from_source(&view, &dl, &disk_ds, crate::file_writer::WIDTHS)?;
         let grid = plan_dense_grid(infos, &disk_ds.dimensions, &spatial).ok_or(
             Error::AppendUnsupported(
                 "dataset has a sparse or inconsistent chunk grid; cannot append",
@@ -8943,7 +8942,7 @@ impl WriteEngine {
                 // sparse (holed/unallocated) dataset cannot be reproduced by the
                 // verbatim layout path, which needs every grid slot filled.
                 let infos =
-                    enumerate_chunks_from_source(&dview, &layout, &ds, OFFSET_SIZE, LENGTH_SIZE)?;
+                    enumerate_chunks_from_source(&dview, &layout, &ds, crate::file_writer::WIDTHS)?;
                 let grid = plan_dense_grid(infos, &ds.dimensions, &chunk_dims).ok_or(
                     Error::EditUnsupported(
                         "a chunked dataset with unallocated (sparse) chunks cannot be copied in place yet",
@@ -11722,7 +11721,7 @@ fn try_inplace_chunk_writes<S: Source + ?Sized>(
     raw_size: u64,
     new_bytes: &[Vec<u8>],
 ) -> Option<Vec<(u64, Vec<u8>)>> {
-    let infos = enumerate_chunks_from_source(src, layout, ds, OFFSET_SIZE, LENGTH_SIZE).ok()?;
+    let infos = enumerate_chunks_from_source(src, layout, ds, crate::file_writer::WIDTHS).ok()?;
     let grid = plan_dense_grid(infos, &ds.dimensions, spatial)?;
     if grid.grid_order.len() != new_bytes.len() {
         return None;
@@ -11877,7 +11876,7 @@ fn try_rebuild_index_in_place<S: Source + ?Sized>(
     // an index this crate wrote). A scattered or different on-disk layout fails
     // the check and the caller relocates.
     let mut spans =
-        crate::chunked_read::chunk_index_spans_from_source(src, layout, OFFSET_SIZE, LENGTH_SIZE)
+        crate::chunked_read::chunk_index_spans_from_source(src, layout, crate::file_writer::WIDTHS)
             .ok()?;
     if spans.is_empty() {
         return None;

@@ -27,6 +27,7 @@ use crate::chunk_record::IndexSlots;
 use crate::convert::Narrow;
 use crate::error::FormatError;
 use crate::metadata_source::MetadataSource;
+use crate::width::FormatWidths;
 use crate::width::LengthWidth;
 use crate::width::OffsetWidth;
 
@@ -76,10 +77,29 @@ impl ExtensibleArrayHeader {
         offset_size: u8,
         length_size: u8,
     ) -> Result<Self, FormatError> {
+        Self::parse_with_widths(
+            file_data,
+            offset,
+            FormatWidths::from_sizes(offset_size, length_size)?,
+        )
+    }
+
+    /// Parses the Extensible Array header at `offset` using validated format widths.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::UnexpectedEof`] if the header runs past the end of `file_data`,
+    /// [`FormatError::ChunkedReadError`] if the signature is not `EAHD` or the version is not 0,
+    /// [`FormatError::ChecksumMismatch`] if the checksum does not match, and
+    /// [`FormatError::InvalidChunkGeometry`] if the stored bit geometry is invalid.
+    pub fn parse_with_widths(
+        file_data: &[u8],
+        offset: usize,
+        widths: FormatWidths,
+    ) -> Result<Self, FormatError> {
         // EAHD: the signature (4), eight 1-byte fields, six statistics of `length_size` bytes,
         // the index block address, and the checksum (4).
-        let min_size =
-            4 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 6 * length_size as usize + offset_size as usize + 4;
+        let min_size = Self::serialized_size_with_widths(widths);
         if min_size > file_data.len() || offset > file_data.len() - min_size {
             return Err(FormatError::UnexpectedEof {
                 expected: offset.saturating_add(min_size),
@@ -117,12 +137,13 @@ impl ExtensibleArrayHeader {
         //   [3] `data_blk_size` [4] `max_idx_set`      [5] `nelmts`
         // The parser reads `max_idx_set`, one more than the highest element index set, which
         // bounds the elements in use. `nelmts` counts every slot of the allocated blocks.
-        let ls = length_size as usize;
+        let ls = usize::from(widths.lengths.get());
         pos += 4 * ls; // skip [0]..[3]
-        let max_idx_set = bytes::read_length(d, pos, length_size)?; // [4]
+        let max_idx_set = bytes::read_length_width(d, pos, widths.lengths)?; // [4]
         pos += ls;
         pos += ls; // skip [5] nelmts
-        let index_block_address = StoredAddress::new(bytes::read_offset(d, pos, offset_size)?);
+        let index_block_address =
+            StoredAddress::new(bytes::read_offset_width(d, pos, widths.offsets)?);
 
         crate::checksum::verify_trailing(&d[..min_size])?;
 
@@ -144,6 +165,11 @@ impl ExtensibleArrayHeader {
         4 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 6 * length_size as usize + offset_size as usize + 4
     }
 
+    /// Returns the header length for validated format widths.
+    pub fn serialized_size_with_widths(widths: FormatWidths) -> usize {
+        Self::serialized_size(widths.offsets.get(), widths.lengths.get())
+    }
+
     /// Parses the Extensible Array header at `address` in `source`.
     ///
     /// # Errors
@@ -156,9 +182,27 @@ impl ExtensibleArrayHeader {
         offset_size: u8,
         length_size: u8,
     ) -> Result<Self, FormatError> {
-        let size = Self::serialized_size(offset_size, length_size);
+        Self::parse_from_source_with_widths(
+            source,
+            address,
+            FormatWidths::from_sizes(offset_size, length_size)?,
+        )
+    }
+
+    /// Parses the Extensible Array header at `address` using validated format widths.
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors [`parse_with_widths`](Self::parse_with_widths) returns, and the error
+    /// `source` returns if a read fails.
+    pub fn parse_from_source_with_widths(
+        source: &(impl MetadataSource + ?Sized),
+        address: StoredAddress,
+        widths: FormatWidths,
+    ) -> Result<Self, FormatError> {
+        let size = Self::serialized_size_with_widths(widths);
         let buf = source.read_metadata_at(address.get(), size)?;
-        Self::parse(&buf, 0, offset_size, length_size)
+        Self::parse_with_widths(&buf, 0, widths)
     }
 
     /// Returns the parsed maximum element bit count and data block page exponent.
@@ -370,9 +414,9 @@ fn read_variable_length(data: &[u8], size: usize) -> Result<u64, FormatError> {
 
 /// Returns the width in bytes of an element: the address alone for an unfiltered index, and the
 /// element size of the header for a filtered one.
-fn ea_elem_stride(header: &ExtensibleArrayHeader, offset_size: u8) -> usize {
+fn ea_elem_stride(header: &ExtensibleArrayHeader, offset_width: OffsetWidth) -> usize {
     if header.client_id == 0 {
-        offset_size as usize
+        usize::from(offset_width.get())
     } else {
         header.element_size as usize
     }
@@ -551,18 +595,17 @@ impl SuperBlockGeometry {
 /// # Errors
 ///
 /// Returns [`FormatError::ChunkedReadError`] if `element_size` is too small for a filtered element
-/// or leaves more than 8 bytes for its chunk size, [`FormatError::InvalidOffsetSize`] if
-/// `offset_size` is not 2, 4, or 8, and [`FormatError::UnexpectedEof`] if the element runs past the
-/// end of `data`.
+/// or leaves more than 8 bytes for its chunk size, and [`FormatError::UnexpectedEof`] if the
+/// element runs past the end of `data`.
 fn read_element(
     data: &[u8],
     pos: usize,
     client_id: u8,
     element_size: u8,
-    offset_size: u8,
+    offset_width: OffsetWidth,
     chunk_byte_size: u64,
 ) -> Result<(Option<ChunkRecord>, usize), FormatError> {
-    let os = offset_size as usize;
+    let os = usize::from(offset_width.get());
 
     if client_id == 0 {
         // Non-filtered: just address
@@ -573,7 +616,7 @@ fn read_element(
             });
         }
         let Some(address) =
-            bytes::read_optional_offset(data, pos, offset_size)?.map(StoredAddress::new)
+            bytes::read_optional_offset_width(data, pos, offset_width)?.map(StoredAddress::new)
         else {
             return Ok((None, os));
         };
@@ -599,7 +642,7 @@ fn read_element(
             });
         }
         let Some(address) =
-            bytes::read_optional_offset(data, pos, offset_size)?.map(StoredAddress::new)
+            bytes::read_optional_offset_width(data, pos, offset_width)?.map(StoredAddress::new)
         else {
             return Ok((None, elem_total));
         };
@@ -647,9 +690,36 @@ pub fn read_extensible_array_chunks(
     header: &ExtensibleArrayHeader,
     offset_size: u8,
     chunk_byte_size: u64,
+    visit: impl FnMut(u64, ChunkRecord) -> Result<(), FormatError>,
+) -> Result<(), FormatError> {
+    read_extensible_array_chunks_with_offset_width(
+        file_data,
+        header,
+        OffsetWidth::try_from(offset_size)?,
+        chunk_byte_size,
+        visit,
+    )
+}
+
+/// Reads the Extensible Array using a validated address width.
+///
+/// # Errors
+///
+/// Returns [`FormatError::ChunkedReadError`] if a signature or element encoding is invalid,
+/// [`FormatError::UnexpectedEof`] if a block runs past the end of `file_data`,
+/// [`FormatError::ChecksumMismatch`] if a checksum does not match,
+/// [`FormatError::InvalidChunkGeometry`] if the block geometry is invalid,
+/// [`FormatError::OffsetOverflow`] if a byte extent overflows a [`u64`], and
+/// [`FormatError::ValueTooLargeForPlatform`] if a read length or buffer offset does not fit a
+/// [`usize`]. Also returns the error `visit` returns.
+pub fn read_extensible_array_chunks_with_offset_width(
+    file_data: &[u8],
+    header: &ExtensibleArrayHeader,
+    offset_width: OffsetWidth,
+    chunk_byte_size: u64,
     mut visit: impl FnMut(u64, ChunkRecord) -> Result<(), FormatError>,
 ) -> Result<(), FormatError> {
-    traversal::Reader::parse(header, offset_size, chunk_byte_size)?
+    traversal::Reader::parse(header, offset_width, chunk_byte_size)?
         .read(&traversal::Buffer(file_data), &mut visit)
 }
 
@@ -673,16 +743,35 @@ pub fn extensible_array_index_spans(
     offset_size: u8,
     length_size: u8,
 ) -> Result<Vec<(u64, u64)>, FormatError> {
-    let offset_width = OffsetWidth::try_from(offset_size)?;
-    let header =
-        ExtensibleArrayHeader::parse_from_source(source, ea_base, offset_size, length_size)?;
-    let os = offset_size as usize;
-    let elem_size = ea_elem_stride(&header, offset_size);
+    extensible_array_index_spans_with_widths(
+        source,
+        ea_base,
+        FormatWidths::from_sizes(offset_size, length_size)?,
+    )
+}
+
+/// Returns the index spans of the Extensible Array at `ea_base` using validated format widths.
+///
+/// # Errors
+///
+/// Returns the errors [`ExtensibleArrayHeader::parse_from_source_with_widths`] returns,
+/// [`FormatError::ChunkedReadError`] if a signature does not match,
+/// [`FormatError::ChecksumMismatch`] if the checksum of an index or super block does not match,
+/// and the error `source` returns if a read fails.
+pub fn extensible_array_index_spans_with_widths(
+    source: &(impl MetadataSource + ?Sized),
+    ea_base: StoredAddress,
+    widths: FormatWidths,
+) -> Result<Vec<(u64, u64)>, FormatError> {
+    let header = ExtensibleArrayHeader::parse_from_source_with_widths(source, ea_base, widths)?;
+    let offset_width = widths.offsets;
+    let os = usize::from(offset_width.get());
+    let elem_size = ea_elem_stride(&header, offset_width);
     let page_nelmts = header.page_nelmts().get();
     let blk_off_size = header.block_offset_width();
 
     // EAHD header block.
-    let header_len = ExtensibleArrayHeader::serialized_size(offset_size, length_size) as u64;
+    let header_len = ExtensibleArrayHeader::serialized_size_with_widths(widths) as u64;
     let mut spans = vec![(ea_base.get(), header_len)];
 
     if header.index_block_address.is_undefined(offset_width) {
@@ -696,7 +785,13 @@ pub fn extensible_array_index_spans(
     let inline = header.idx_blk_elmts as usize;
     // The signature, the version, the client ID, and the header address.
     let ib_header = 4 + 1 + 1 + os;
-    let index_block_len = index_block_len(offset_size, inline, elem_size, ndblk_addrs, nsblk_addrs);
+    let index_block_len = index_block_len(
+        offset_width.get(),
+        inline,
+        elem_size,
+        ndblk_addrs,
+        nsblk_addrs,
+    );
     let ib_addr = header.index_block_address;
     // The read fails for an index block that runs past the end of the file.
     let ib = source.read_metadata_at(ib_addr.get(), index_block_len)?;
@@ -714,7 +809,7 @@ pub fn extensible_array_index_spans(
     // addresses, immediately following the inline element slots.
     let mut pos = ib_header + inline * elem_size;
     for &dblk_nelmts in &geom.direct_dblk_nelmts {
-        let addr = StoredAddress::new(bytes::read_offset(&ib, pos, offset_size)?);
+        let addr = StoredAddress::new(bytes::read_offset_width(&ib, pos, offset_width)?);
         pos += os;
         if addr.is_undefined(offset_width) {
             continue;
@@ -727,19 +822,22 @@ pub fn extensible_array_index_spans(
                     page_nelmts,
                 },
                 elem_size,
-                offset_size,
+                offset_width.get(),
                 blk_off_size,
             ),
         ));
     }
     for j in 0..nsblk_addrs {
-        let addr = StoredAddress::new(bytes::read_offset(&ib, pos, offset_size)?);
+        let addr = StoredAddress::new(bytes::read_offset_width(&ib, pos, offset_width)?);
         pos += os;
         if addr.is_undefined(offset_width) {
             continue;
         }
         let sb = geom.super_block_at(j, page_nelmts);
-        spans.push((addr.get(), super_block_len(sb, offset_size, blk_off_size)));
+        spans.push((
+            addr.get(),
+            super_block_len(sb, offset_width.get(), blk_off_size),
+        ));
         easb_data_block_spans(
             source,
             addr,
@@ -771,13 +869,12 @@ fn easb_data_block_spans(
     elem_size: usize,
     spans: &mut Vec<(u64, u64)>,
 ) -> Result<(), FormatError> {
-    let offset_size = offset_width.get();
-    let os = offset_size as usize;
+    let os = usize::from(offset_width.get());
     // The signature, the version, the client ID, the header address, and the block offset.
     let sb_header = 4 + 1 + 1 + os + blk_off_size.bytes();
     // The caller frees the spans, so the walk verifies the checksum of the whole block before it
     // reads an address.
-    let sb_len = super_block_len(sb, offset_size, blk_off_size).to_usize()?;
+    let sb_len = super_block_len(sb, offset_width.get(), blk_off_size).to_usize()?;
     let block = source.read_metadata_at(sb_addr.get(), sb_len)?;
     if &block[..4] != b"EASB" {
         return Err(FormatError::ChunkedReadError(
@@ -788,14 +885,14 @@ fn easb_data_block_spans(
 
     let mut pos = sb_header + sb.bitmap_size().to_usize()?;
     for _ in 0..sb.ndblks {
-        let addr = StoredAddress::new(bytes::read_offset(&block, pos, offset_size)?);
+        let addr = StoredAddress::new(bytes::read_offset_width(&block, pos, offset_width)?);
         pos += os;
         if addr.is_undefined(offset_width) {
             continue;
         }
         spans.push((
             addr.get(),
-            data_block_len(sb.blocks, elem_size, offset_size, blk_off_size),
+            data_block_len(sb.blocks, elem_size, offset_width.get(), blk_off_size),
         ));
     }
     Ok(())
@@ -822,9 +919,31 @@ pub fn read_extensible_array_chunks_from_source(
     header: &ExtensibleArrayHeader,
     offset_size: u8,
     chunk_byte_size: u64,
+    visit: impl FnMut(u64, ChunkRecord) -> Result<(), FormatError>,
+) -> Result<(), FormatError> {
+    read_extensible_array_chunks_from_source_with_offset_width(
+        source,
+        header,
+        OffsetWidth::try_from(offset_size)?,
+        chunk_byte_size,
+        visit,
+    )
+}
+
+/// Reads the Extensible Array from `source` using a validated address width.
+///
+/// # Errors
+///
+/// Returns the errors [`read_extensible_array_chunks_with_offset_width`] returns, and the error
+/// `source` returns if a read fails.
+pub fn read_extensible_array_chunks_from_source_with_offset_width(
+    source: &(impl MetadataSource + ?Sized),
+    header: &ExtensibleArrayHeader,
+    offset_width: OffsetWidth,
+    chunk_byte_size: u64,
     mut visit: impl FnMut(u64, ChunkRecord) -> Result<(), FormatError>,
 ) -> Result<(), FormatError> {
-    traversal::Reader::parse(header, offset_size, chunk_byte_size)?
+    traversal::Reader::parse(header, offset_width, chunk_byte_size)?
         .read(&traversal::Streaming(source), &mut visit)
 }
 
@@ -2104,7 +2223,8 @@ mod tests {
                         index_block_address: StoredAddress::new(0),
                     };
                     let blk_off = header.block_offset_width();
-                    let stride = ea_elem_stride(&header, offset_size);
+                    let stride =
+                        ea_elem_stride(&header, OffsetWidth::try_from(offset_size).unwrap());
                     let page_nelmts = header.page_nelmts().get();
                     // Every count a non-paged block can have, up to the page
                     // size that would make it paged instead.
@@ -2145,7 +2265,7 @@ mod tests {
     #[test]
     fn read_element_unallocated() {
         let data = vec![0xFFu8; 16];
-        let (record, consumed) = read_element(&data, 0, 0, 8, 8, 80).unwrap();
+        let (record, consumed) = read_element(&data, 0, 0, 8, OffsetWidth::Eight, 80).unwrap();
         assert_eq!(record, None);
         assert_eq!(consumed, 8);
     }
@@ -2164,8 +2284,15 @@ mod tests {
         // Filter mask
         data[8 + chunk_size_bytes..12 + chunk_size_bytes].copy_from_slice(&0u32.to_le_bytes());
 
-        let (record, consumed) =
-            read_element(&data, 0, 1, u8::try_from(elem_size).unwrap(), os, 80).unwrap();
+        let (record, consumed) = read_element(
+            &data,
+            0,
+            1,
+            u8::try_from(elem_size).unwrap(),
+            OffsetWidth::try_from(os).unwrap(),
+            80,
+        )
+        .unwrap();
         assert_eq!(
             record,
             Some(ChunkRecord {
@@ -2185,8 +2312,15 @@ mod tests {
 
         // `element_size` must be at least os + 4 = 12 to hold what it claims.
         for element_size in 0..(os + 4) {
-            let err = read_element(&data, 0, 1, element_size, os, 80)
-                .expect_err("a filtered element narrower than its own fields must be rejected");
+            let err = read_element(
+                &data,
+                0,
+                1,
+                element_size,
+                OffsetWidth::try_from(os).unwrap(),
+                80,
+            )
+            .expect_err("a filtered element narrower than its own fields must be rejected");
             assert!(
                 matches!(err, FormatError::ChunkedReadError(_)),
                 "element_size {element_size} gave {err:?}, want a ChunkedReadError"
@@ -2194,8 +2328,15 @@ mod tests {
         }
 
         // The first width that can hold them is accepted.
-        read_element(&data, 0, 1, os + 4 + 1, os, 80)
-            .expect("a width that fits address + 1-byte size + mask must parse");
+        read_element(
+            &data,
+            0,
+            1,
+            os + 4 + 1,
+            OffsetWidth::try_from(os).unwrap(),
+            80,
+        )
+        .expect("a width that fits address + 1-byte size + mask must parse");
     }
 
     // The oracle is the end of the index block, which both readers bound before they read a field.
@@ -2345,7 +2486,7 @@ mod tests {
             assert!(spans.len() > 1, "the sweep must reach past the header");
 
             let header = ExtensibleArrayHeader::parse(&file, base as usize, 8, 8).unwrap();
-            let stride = ea_elem_stride(&header, 8);
+            let stride = ea_elem_stride(&header, OffsetWidth::Eight);
             let page_nelmts = header.page_nelmts().get().to_usize().unwrap();
             // The prefix of a data block, and the length of the largest unpaged one. A paged block
             // holds at least two pages and is longer.

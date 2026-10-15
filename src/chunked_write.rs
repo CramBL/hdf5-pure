@@ -2337,8 +2337,7 @@ mod tests {
                 FillPattern::ZERO,
             )
             .unwrap(),
-            8,
-            8,
+            crate::file_writer::WIDTHS,
             &ChunkCache::new(),
         )
         .unwrap();
@@ -3032,8 +3031,7 @@ mod tests {
         let output = read_chunked_data_cached(
             &file_data,
             RawReadSpec::plain(&layout, &dataspace, &datatype),
-            8,
-            8,
+            crate::file_writer::WIDTHS,
             &ChunkCache::new(),
         )
         .unwrap();

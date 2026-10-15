@@ -38,7 +38,7 @@ use crate::filters::{ChunkContext, FilterScratch, decompress_chunk_with};
 use crate::read_spec::{RawReadSpec, RawReadStorage};
 use crate::source::Source;
 use crate::source::SourceMetadata;
-use crate::width::OffsetWidth;
+use crate::width::{FormatWidths, OffsetWidth};
 
 /// Decodes every chunk, reading each chunk's bytes from a [`Source`].
 ///
@@ -283,10 +283,9 @@ pub fn collect_chunk_info(
     file_data: &[u8],
     btree_address: StoredAddress,
     ndims: usize,
-    offset_size: u8,
-    length_size: u8,
+    offset_width: OffsetWidth,
 ) -> Result<Vec<ChunkInfo>, FormatError> {
-    collect_chunk_info_inner(file_data, btree_address, ndims, offset_size, length_size, 0)
+    collect_chunk_info_inner(file_data, btree_address, ndims, offset_width, 0)
 }
 
 /// Depth-tracking core of [`collect_chunk_info`]. The `depth` guard mirrors
@@ -297,8 +296,7 @@ fn collect_chunk_info_inner(
     file_data: &[u8],
     btree_address: StoredAddress,
     ndims: usize,
-    offset_size: u8,
-    _length_size: u8,
+    offset_width: OffsetWidth,
     depth: u32,
 ) -> Result<Vec<ChunkInfo>, FormatError> {
     if depth > MAX_CHUNK_BTREE_DEPTH {
@@ -306,10 +304,10 @@ fn collect_chunk_info_inner(
             "chunk B-tree nested too deeply".into(),
         ));
     }
-    let node = BTreeV1ChunkNode::parse(
+    let node = BTreeV1ChunkNode::parse_with_offset_width(
         file_data,
         btree_address.get().to_usize()?,
-        offset_size,
+        offset_width,
         ndims,
     )?;
     if node.node_level() == 0 {
@@ -321,8 +319,7 @@ fn collect_chunk_info_inner(
             file_data,
             child_addr?,
             ndims,
-            offset_size,
-            _length_size,
+            offset_width,
             depth + 1,
         )?);
     }
@@ -354,10 +351,10 @@ pub(crate) fn collect_chunk_btree_node_spans<S: Source + ?Sized>(
     source: &S,
     btree_address: StoredAddress,
     ndims: usize,
-    offset_size: u8,
+    offset_width: OffsetWidth,
 ) -> Result<Vec<(u64, u64)>, FormatError> {
     let mut out = Vec::new();
-    collect_chunk_btree_node_spans_inner(source, btree_address, ndims, offset_size, 0, &mut out)?;
+    collect_chunk_btree_node_spans_inner(source, btree_address, ndims, offset_width, 0, &mut out)?;
     Ok(out)
 }
 
@@ -365,7 +362,7 @@ fn collect_chunk_btree_node_spans_inner<S: Source + ?Sized>(
     source: &S,
     btree_address: StoredAddress,
     ndims: usize,
-    offset_size: u8,
+    offset_width: OffsetWidth,
     depth: u32,
     out: &mut Vec<(u64, u64)>,
 ) -> Result<(), FormatError> {
@@ -376,10 +373,10 @@ fn collect_chunk_btree_node_spans_inner<S: Source + ?Sized>(
     }
     // Reading the node is also the bounds check: a node claiming to run past
     // end-of-file fails here rather than being recorded as reclaimable.
-    let bytes = BTreeV1ChunkNodeBytes::read_from_source(
+    let bytes = BTreeV1ChunkNodeBytes::read_from_source_with_offset_width(
         &SourceMetadata(source),
         btree_address.get(),
-        offset_size,
+        offset_width,
         ndims,
     )?;
     let node = bytes.node();
@@ -393,7 +390,7 @@ fn collect_chunk_btree_node_spans_inner<S: Source + ?Sized>(
                 source,
                 child_addr?,
                 ndims,
-                offset_size,
+                offset_width,
                 depth + 1,
                 out,
             )?;
@@ -412,10 +409,9 @@ pub fn collect_chunk_info_from_source<S: Source + ?Sized>(
     source: &S,
     btree_address: StoredAddress,
     ndims: usize,
-    offset_size: u8,
-    length_size: u8,
+    offset_width: OffsetWidth,
 ) -> Result<Vec<ChunkInfo>, FormatError> {
-    collect_chunk_info_from_source_inner(source, btree_address, ndims, offset_size, length_size, 0)
+    collect_chunk_info_from_source_inner(source, btree_address, ndims, offset_width, 0)
 }
 
 /// Depth-tracking core of [`collect_chunk_info_from_source`]; see
@@ -424,8 +420,7 @@ fn collect_chunk_info_from_source_inner<S: Source + ?Sized>(
     source: &S,
     btree_address: StoredAddress,
     ndims: usize,
-    offset_size: u8,
-    _length_size: u8,
+    offset_width: OffsetWidth,
     depth: u32,
 ) -> Result<Vec<ChunkInfo>, FormatError> {
     if depth > MAX_CHUNK_BTREE_DEPTH {
@@ -433,10 +428,10 @@ fn collect_chunk_info_from_source_inner<S: Source + ?Sized>(
             "chunk B-tree nested too deeply".into(),
         ));
     }
-    let bytes = BTreeV1ChunkNodeBytes::read_from_source(
+    let bytes = BTreeV1ChunkNodeBytes::read_from_source_with_offset_width(
         &SourceMetadata(source),
         btree_address.get(),
-        offset_size,
+        offset_width,
         ndims,
     )?;
     let node = bytes.node();
@@ -449,8 +444,7 @@ fn collect_chunk_info_from_source_inner<S: Source + ?Sized>(
             source,
             child_addr?,
             ndims,
-            offset_size,
-            _length_size,
+            offset_width,
             depth + 1,
         )?);
     }
@@ -564,8 +558,7 @@ fn bounded_chunk_len(chunk_dims: &[usize], elem_size: NonZeroUsize) -> Result<us
 pub fn read_chunked_data_from_source<S: Source + ?Sized>(
     source: &S,
     spec: RawReadSpec<'_>,
-    offset_size: u8,
-    length_size: u8,
+    widths: FormatWidths,
 ) -> Result<Vec<u8>, FormatError> {
     let (dataspace, datatype, pipeline, fill) = (
         spec.dataspace(),
@@ -583,7 +576,7 @@ pub fn read_chunked_data_from_source<S: Source + ?Sized>(
         #[cfg(feature = "std")]
             chunk_len: _,
         chunks,
-    }) = ChunkedPlan::new(source, spec, offset_size, length_size)?
+    }) = ChunkedPlan::new(source, spec, widths)?
     else {
         return spec.unallocated_buffer();
     };
@@ -646,8 +639,7 @@ impl ChunkedPlan {
     fn new(
         source: &(impl Source + ?Sized),
         spec: RawReadSpec<'_>,
-        offset_size: u8,
-        length_size: u8,
+        widths: FormatWidths,
     ) -> Result<Option<Self>, FormatError> {
         let RawReadStorage::Chunked {
             flags,
@@ -678,8 +670,7 @@ impl ChunkedPlan {
             chunk_dimensions,
             spec.dataspace(),
             elem_size.get() as u64,
-            offset_size,
-            length_size,
+            widths,
         )?;
         let chunk_dims_u64 = chunk_dims.iter().map(|&d| d as u64).collect();
         Ok(Some(Self {
@@ -774,8 +765,7 @@ fn plan_chunk_spans(
 pub(crate) fn read_chunked_rows_from_source<S: Source + ?Sized>(
     source: &S,
     spec: RawReadSpec<'_>,
-    offset_size: u8,
-    length_size: u8,
+    widths: FormatWidths,
     cache: &ChunkCache,
     pass: CachePass,
     row_start: u64,
@@ -897,8 +887,7 @@ pub(crate) fn read_chunked_rows_from_source<S: Source + ?Sized>(
             chunk_dimensions,
             dataspace,
             elem_size.get() as u64,
-            offset_size,
-            length_size,
+            widths,
         )?;
         cache.populate_index(&chunks, rank);
         chunks.into_iter().filter(chunk_overlaps).collect()
@@ -1048,8 +1037,7 @@ fn row_major_strides(dims: &[usize]) -> Result<Vec<usize>, FormatError> {
 pub fn read_chunked_data_cached_from_source<S: Source + ?Sized>(
     source: &S,
     spec: RawReadSpec<'_>,
-    offset_size: u8,
-    length_size: u8,
+    widths: FormatWidths,
     cache: &ChunkCache,
 ) -> Result<Vec<u8>, FormatError> {
     let (dataspace, datatype, pipeline, fill) = (
@@ -1086,8 +1074,7 @@ pub fn read_chunked_data_cached_from_source<S: Source + ?Sized>(
             chunk_dimensions,
             dataspace,
             elem_size.get() as u64,
-            offset_size,
-            length_size,
+            widths,
         )?;
         cache.populate_index(&chunks, rank);
         chunks
@@ -1236,8 +1223,7 @@ pub(crate) fn collect_chunks_for_layout_from_source<S: Source + ?Sized>(
     chunk_dimensions: &[u64],
     dataspace: &Dataspace,
     elem_size: u64,
-    offset_size: u8,
-    length_size: u8,
+    widths: FormatWidths,
 ) -> Result<Vec<ChunkInfo>, FormatError> {
     let ndims = chunk_dimensions.len();
     let rank = ndims
@@ -1251,7 +1237,7 @@ pub(crate) fn collect_chunks_for_layout_from_source<S: Source + ?Sized>(
     let spatial_dims = || chunk_dimensions[..rank].to_vec();
     match index {
         ChunkIndexLayout::BTreeV1 { .. } => {
-            collect_chunk_info_from_source(source, addr, ndims, offset_size, length_size)
+            collect_chunk_info_from_source(source, addr, ndims, widths.offsets)
         }
         ChunkIndexLayout::SingleChunk { filtered, .. } => {
             let chunk_byte_size: u64 =
@@ -1282,14 +1268,13 @@ pub(crate) fn collect_chunks_for_layout_from_source<S: Source + ?Sized>(
         )?),
         ChunkIndexLayout::FixedArray { .. } => {
             let source = SourceMetadata(source);
-            let header =
-                FixedArrayHeader::parse_from_source(&source, addr, offset_size, length_size)?;
+            let header = FixedArrayHeader::parse_from_source_with_widths(&source, addr, widths)?;
             let grid = index_grid(dataspace, &spatial_dims(), GridOrder::RowMajor)?;
             let mut chunks = Vec::new();
-            hdf5_pure_format::__private::read_fixed_array_chunks_from_source(
+            hdf5_pure_format::__private::read_fixed_array_chunks_from_source_with_offset_width(
                 &source,
                 &header,
-                offset_size,
+                widths.offsets,
                 grid.chunk_byte_size(elem_size)?,
                 |slot, record| {
                     chunks.extend(ChunkInfo::in_extent(&grid, slot, record)?);
@@ -1301,13 +1286,13 @@ pub(crate) fn collect_chunks_for_layout_from_source<S: Source + ?Sized>(
         ChunkIndexLayout::ExtensibleArray { .. } => {
             let source = SourceMetadata(source);
             let header =
-                ExtensibleArrayHeader::parse_from_source(&source, addr, offset_size, length_size)?;
+                ExtensibleArrayHeader::parse_from_source_with_widths(&source, addr, widths)?;
             let grid = index_grid(dataspace, &spatial_dims(), GridOrder::UnlimitedFirst)?;
             let mut chunks = Vec::new();
-            hdf5_pure_format::__private::read_extensible_array_chunks_from_source(
+            hdf5_pure_format::__private::read_extensible_array_chunks_from_source_with_offset_width(
                 &source,
                 &header,
-                offset_size,
+                widths.offsets,
                 grid.chunk_byte_size(elem_size)?,
                 |slot, record| {
                     chunks.extend(ChunkInfo::in_extent(&grid, slot, record)?);
@@ -1322,8 +1307,7 @@ pub(crate) fn collect_chunks_for_layout_from_source<S: Source + ?Sized>(
             &chunk_dimensions[..rank],
             dataspace,
             elem_size,
-            offset_size,
-            length_size,
+            widths,
         ),
     }
 }
@@ -1335,8 +1319,7 @@ fn collect_btree_v2_chunks_from_source<S: Source + ?Sized>(
     chunk_dims: &[u64],
     dataspace: &Dataspace,
     elem_size: u64,
-    offset_size: u8,
-    length_size: u8,
+    widths: FormatWidths,
 ) -> Result<Vec<ChunkInfo>, FormatError> {
     if dataspace.dimensions.len() != chunk_dims.len() {
         return Err(FormatError::ChunkedReadError(format!(
@@ -1350,11 +1333,10 @@ fn collect_btree_v2_chunks_from_source<S: Source + ?Sized>(
         .ok_or(FormatError::InvalidChunkGeometry(
             "version 2 B-tree chunks must have a non-zero logical size",
         ))?;
-    let header = BTreeV2Header::parse_from_source(
+    let header = BTreeV2Header::parse_from_source_with_widths(
         &SourceMetadata(source),
         header_address.get(),
-        offset_size,
-        length_size,
+        widths,
     )?;
     if u64::from(header.num_records_in_root) > header.total_records {
         return Err(FormatError::ChunkedReadError(
@@ -1363,18 +1345,17 @@ fn collect_btree_v2_chunks_from_source<S: Source + ?Sized>(
     }
     let context = BTreeV2ChunkRecordContext::new(
         header.tree_type,
-        OffsetWidth::try_from(offset_size)?,
+        widths.offsets,
         chunk_dims.len(),
         fixed_chunk_size,
         LayoutVersion::Four,
     )?;
     context.require_record_size(header.record_size)?;
 
-    let records = crate::btree_v2::collect_btree_v2_records_from_source(
+    let records = crate::btree_v2::collect_btree_v2_records_from_source_with_offset_width(
         source,
         &header,
-        offset_size,
-        length_size,
+        widths.offsets,
     )?;
     let expected_records = header.total_records.to_usize()?;
     if records.len() != expected_records {
@@ -1435,8 +1416,7 @@ pub(crate) fn enumerate_chunks_from_source<S: Source + ?Sized>(
     source: &S,
     layout: &DataLayout,
     dataspace: &Dataspace,
-    offset_size: u8,
-    length_size: u8,
+    widths: FormatWidths,
 ) -> Result<Vec<ChunkInfo>, FormatError> {
     let DataLayout::Chunked {
         chunk_dimensions,
@@ -1465,8 +1445,7 @@ pub(crate) fn enumerate_chunks_from_source<S: Source + ?Sized>(
         chunk_dimensions,
         dataspace,
         elem_size,
-        offset_size,
-        length_size,
+        widths,
     )
 }
 
@@ -1484,8 +1463,7 @@ pub(crate) fn enumerate_chunks_from_source<S: Source + ?Sized>(
 pub(crate) fn visit_decoded_chunks_from_source(
     source: &(impl Source + ?Sized),
     spec: RawReadSpec<'_>,
-    offset_size: u8,
-    length_size: u8,
+    widths: FormatWidths,
     mut visit: impl FnMut(Result<&[u8], &FormatError>) -> Result<(), FormatError>,
 ) -> Result<(), FormatError> {
     let Some(ChunkedPlan {
@@ -1494,7 +1472,7 @@ pub(crate) fn visit_decoded_chunks_from_source(
         chunk_len,
         mut chunks,
         ..
-    }) = ChunkedPlan::new(source, spec, offset_size, length_size)?
+    }) = ChunkedPlan::new(source, spec, widths)?
     else {
         return Ok(());
     };
@@ -1616,15 +1594,14 @@ pub(crate) fn plan_dense_grid(
 ///
 /// Chunk data spans come from the same index walkers the reader uses
 /// ([`collect_chunks_for_layout_from_source`]); index-structure spans come from
-/// [`collect_chunk_index_spans`]. `offset_size`/`length_size` are the
-/// superblock's address and length widths.
+/// [`collect_chunk_index_spans`]. `widths` are the address and length widths from the
+/// superblock.
 #[cfg(feature = "std")]
 pub(crate) fn collect_chunked_storage_spans<S: Source + ?Sized>(
     source: &S,
     layout: &DataLayout,
     dataspace: &Dataspace,
-    offset_size: u8,
-    length_size: u8,
+    widths: FormatWidths,
 ) -> Result<ChunkedStorageSpans, FormatError> {
     let DataLayout::Chunked {
         chunk_dimensions,
@@ -1665,8 +1642,7 @@ pub(crate) fn collect_chunked_storage_spans<S: Source + ?Sized>(
         chunk_dimensions,
         dataspace,
         elem_size,
-        offset_size,
-        length_size,
+        widths,
     )? {
         if ci.chunk_size.is_zero() {
             continue;
@@ -1681,13 +1657,7 @@ pub(crate) fn collect_chunked_storage_spans<S: Source + ?Sized>(
     }
 
     // The chunk index's own structure blocks.
-    let index = collect_chunk_index_spans(
-        source,
-        *chunk_index,
-        chunk_dimensions.len(),
-        offset_size,
-        length_size,
-    )?;
+    let index = collect_chunk_index_spans(source, *chunk_index, chunk_dimensions.len(), widths)?;
     Ok(ChunkedStorageSpans { data, index })
 }
 
@@ -1720,8 +1690,7 @@ fn collect_chunk_index_spans<S: Source + ?Sized>(
     source: &S,
     index: ChunkIndexLayout,
     ndims: usize,
-    offset_size: u8,
-    length_size: u8,
+    widths: FormatWidths,
 ) -> Result<Vec<(u64, u64)>, FormatError> {
     // An undefined index address means the index structure was never written.
     let Some(index_addr) = index.address() else {
@@ -1729,38 +1698,35 @@ fn collect_chunk_index_spans<S: Source + ?Sized>(
     };
     match index {
         ChunkIndexLayout::BTreeV1 { .. } => {
-            collect_chunk_btree_node_spans(source, index_addr, ndims, offset_size)
+            collect_chunk_btree_node_spans(source, index_addr, ndims, widths.offsets)
         }
         // Single chunk and implicit indexes have no separate index structure.
         ChunkIndexLayout::SingleChunk { .. } | ChunkIndexLayout::Implicit { .. } => Ok(Vec::new()),
         ChunkIndexLayout::FixedArray { .. } => {
-            hdf5_pure_format::__private::fixed_array_index_spans(
+            hdf5_pure_format::__private::fixed_array_index_spans_with_widths(
                 &SourceMetadata(source),
                 index_addr,
-                offset_size,
-                length_size,
+                widths,
             )
         }
         ChunkIndexLayout::ExtensibleArray { .. } => {
-            hdf5_pure_format::__private::extensible_array_index_spans(
+            hdf5_pure_format::__private::extensible_array_index_spans_with_widths(
                 &SourceMetadata(source),
                 index_addr,
-                offset_size,
-                length_size,
+                widths,
             )
         }
-        ChunkIndexLayout::BTreeV2 { .. } => crate::btree_v2::collect_btree_v2_storage_extents(
-            source,
-            index_addr,
-            offset_size,
-            length_size,
-        )
-        .map(|extents| {
-            extents
-                .into_iter()
-                .map(|extent| (extent.start(), extent.len()))
-                .collect()
-        }),
+        ChunkIndexLayout::BTreeV2 { .. } => {
+            crate::btree_v2::collect_btree_v2_storage_extents_with_widths(
+                source, index_addr, widths,
+            )
+            .map(|extents| {
+                extents
+                    .into_iter()
+                    .map(|extent| (extent.start(), extent.len()))
+                    .collect()
+            })
+        }
     }
 }
 
@@ -1774,8 +1740,7 @@ fn collect_chunk_index_spans<S: Source + ?Sized>(
 pub(crate) fn chunk_index_spans_from_source<S: Source + ?Sized>(
     source: &S,
     layout: &DataLayout,
-    offset_size: u8,
-    length_size: u8,
+    widths: FormatWidths,
 ) -> Result<Vec<(u64, u64)>, FormatError> {
     let DataLayout::Chunked {
         chunk_dimensions,
@@ -1787,13 +1752,7 @@ pub(crate) fn chunk_index_spans_from_source<S: Source + ?Sized>(
             "chunk_index_spans_from_source called on a non-chunked layout".into(),
         ));
     };
-    collect_chunk_index_spans(
-        source,
-        *index,
-        chunk_dimensions.len(),
-        offset_size,
-        length_size,
-    )
+    collect_chunk_index_spans(source, *index, chunk_dimensions.len(), widths)
 }
 
 /// Scatters the decoded chunks into the dense output buffer. Pure (no file
@@ -1860,8 +1819,7 @@ fn assemble_chunks(
 pub fn read_chunked_data_cached(
     file_data: &[u8],
     spec: RawReadSpec<'_>,
-    offset_size: u8,
-    length_size: u8,
+    widths: FormatWidths,
     cache: &ChunkCache,
 ) -> Result<Vec<u8>, FormatError> {
     let (dataspace, datatype, pipeline, fill) = (
@@ -1898,7 +1856,7 @@ pub fn read_chunked_data_cached(
         let spatial_dims = || chunk_dimensions[..rank].to_vec();
         let chunks = match index {
             ChunkIndexLayout::BTreeV1 { .. } => {
-                collect_chunk_info(file_data, addr, ndims, offset_size, length_size)?
+                collect_chunk_info(file_data, addr, ndims, widths.offsets)?
             }
             ChunkIndexLayout::SingleChunk { filtered, .. } => {
                 let chunk_byte_size: u64 = chunk_dimensions[..rank].iter().try_fold(
@@ -1928,18 +1886,14 @@ pub fn read_chunked_data_cached(
                 elem_width.get().to_u64(),
             )?,
             ChunkIndexLayout::FixedArray { .. } => {
-                let header = FixedArrayHeader::parse(
-                    file_data,
-                    addr.get().to_usize()?,
-                    offset_size,
-                    length_size,
-                )?;
+                let header =
+                    FixedArrayHeader::parse_with_widths(file_data, addr.get().to_usize()?, widths)?;
                 let grid = index_grid(dataspace, &spatial_dims(), GridOrder::RowMajor)?;
                 let mut chunks = Vec::new();
-                hdf5_pure_format::__private::read_fixed_array_chunks(
+                hdf5_pure_format::__private::read_fixed_array_chunks_with_offset_width(
                     file_data,
                     &header,
-                    offset_size,
+                    widths.offsets,
                     grid.chunk_byte_size(u64::from(elem_width.get()))?,
                     |slot, record| {
                         chunks.extend(ChunkInfo::in_extent(&grid, slot, record)?);
@@ -1949,18 +1903,17 @@ pub fn read_chunked_data_cached(
                 chunks
             }
             ChunkIndexLayout::ExtensibleArray { .. } => {
-                let header = ExtensibleArrayHeader::parse(
+                let header = ExtensibleArrayHeader::parse_with_widths(
                     file_data,
                     addr.get().to_usize()?,
-                    offset_size,
-                    length_size,
+                    widths,
                 )?;
                 let grid = index_grid(dataspace, &spatial_dims(), GridOrder::UnlimitedFirst)?;
                 let mut chunks = Vec::new();
-                hdf5_pure_format::__private::read_extensible_array_chunks(
+                hdf5_pure_format::__private::read_extensible_array_chunks_with_offset_width(
                     file_data,
                     &header,
-                    offset_size,
+                    widths.offsets,
                     grid.chunk_byte_size(u64::from(elem_width.get()))?,
                     |slot, record| {
                         chunks.extend(ChunkInfo::in_extent(&grid, slot, record)?);
@@ -1975,8 +1928,7 @@ pub fn read_chunked_data_cached(
                 &chunk_dimensions[..rank],
                 dataspace,
                 elem_width.get().to_u64(),
-                offset_size,
-                length_size,
+                widths,
             )?,
         };
         cache.populate_index(&chunks, rank);
@@ -2220,6 +2172,11 @@ mod tests {
     #[cfg(feature = "std")]
     use crate::source::ReadSeekSource;
 
+    const FORMAT_WIDTHS: FormatWidths = FormatWidths {
+        offsets: OffsetWidth::Eight,
+        lengths: crate::width::LengthWidth::Eight,
+    };
+
     #[test]
     fn chunk_bytes_within_limit_are_accepted() {
         // A realistic chunk: 256 KiB of f64 elements.
@@ -2306,8 +2263,7 @@ mod tests {
                 FillPattern::new(FillTime::IfSet, Some(&fill_bytes), nz(8)),
             )
             .unwrap(),
-            8,
-            8,
+            FORMAT_WIDTHS,
         )
         .unwrap();
 
@@ -2377,17 +2333,18 @@ mod tests {
             let ds = simple(dims.clone());
             let spec = RawReadSpec::parse(&layout, &ds, &datatype, None, fill).unwrap();
             let from_source =
-                read_chunked_data_from_source(&BytesSource::new(&file_data), spec, 8, 8).unwrap();
+                read_chunked_data_from_source(&BytesSource::new(&file_data), spec, FORMAT_WIDTHS)
+                    .unwrap();
             let cached_from_source = read_chunked_data_cached_from_source(
                 &BytesSource::new(&file_data),
                 spec,
-                8,
-                8,
+                FORMAT_WIDTHS,
                 &ChunkCache::new(),
             )
             .unwrap();
             let cached =
-                read_chunked_data_cached(&file_data, spec, 8, 8, &ChunkCache::new()).unwrap();
+                read_chunked_data_cached(&file_data, spec, FORMAT_WIDTHS, &ChunkCache::new())
+                    .unwrap();
             assert_eq!(from_source, expected, "dims {dims:?}");
             assert_eq!(cached_from_source, expected, "dims {dims:?}");
             assert_eq!(cached, expected, "dims {dims:?}");
@@ -2529,8 +2486,7 @@ mod tests {
             &chunk_dimensions,
             &dataspace,
             4,
-            offset_size,
-            length_size,
+            FormatWidths::from_sizes(offset_size, length_size).unwrap(),
         )
         .unwrap();
         let bounded = collect_chunks_for_layout_from_source(
@@ -2539,8 +2495,7 @@ mod tests {
             &chunk_dimensions,
             &dataspace,
             4,
-            offset_size,
-            length_size,
+            FormatWidths::from_sizes(offset_size, length_size).unwrap(),
         )
         .unwrap();
 
@@ -2623,8 +2578,11 @@ mod tests {
             &BytesSource::new(&file),
             &layout,
             &btree_v2_dataspace(&[16, 16]),
-            u8::try_from(widths.offset).unwrap(),
-            u8::try_from(widths.length).unwrap(),
+            FormatWidths::from_sizes(
+                u8::try_from(widths.offset).unwrap(),
+                u8::try_from(widths.length).unwrap(),
+            )
+            .unwrap(),
         )
         .unwrap();
 
@@ -2671,8 +2629,11 @@ mod tests {
             &BytesSource::new(&file),
             &layout,
             &btree_v2_dataspace(&[2, 2]),
-            u8::try_from(widths.offset).unwrap(),
-            u8::try_from(widths.length).unwrap(),
+            FormatWidths::from_sizes(
+                u8::try_from(widths.offset).unwrap(),
+                u8::try_from(widths.length).unwrap(),
+            )
+            .unwrap(),
         ) else {
             panic!("expected a truncated version 2 B-tree node to fail");
         };
@@ -2729,8 +2690,7 @@ mod tests {
             &[2, 2, 4],
             &btree_v2_dataspace(&[6, 4]),
             4,
-            8,
-            8,
+            FORMAT_WIDTHS,
         )
         .unwrap();
 
@@ -2790,8 +2750,7 @@ mod tests {
             &BytesSource::new(&file),
             &layout,
             &btree_v2_dataspace(&[6, 4]),
-            8,
-            8,
+            FORMAT_WIDTHS,
         )
         .unwrap();
 
@@ -2829,8 +2788,7 @@ mod tests {
                 &[2, 2, 4],
                 &dataspace,
                 4,
-                8,
-                8,
+                FORMAT_WIDTHS,
             )
             .unwrap_err(),
             FormatError::InvalidBTreeNodeType(hdf5_pure_format::__private::BTREE_V2_ATTRIBUTE_NAME)
@@ -2847,8 +2805,7 @@ mod tests {
                 &[2, 2, 4],
                 &dataspace,
                 4,
-                8,
-                8,
+                FORMAT_WIDTHS,
             )
             .unwrap_err(),
             FormatError::DataSizeMismatch {
@@ -2884,8 +2841,7 @@ mod tests {
             &[2, 2, 4],
             &btree_v2_dataspace(&[4, 4]),
             4,
-            8,
-            8,
+            FORMAT_WIDTHS,
         )
         .unwrap_err();
         assert_eq!(
@@ -2923,8 +2879,7 @@ mod tests {
                 &[2, 2, 4],
                 &btree_v2_dataspace(&[4, 4]),
                 4,
-                8,
-                8,
+                FORMAT_WIDTHS,
             )
             .unwrap_err(),
             FormatError::ChunkedReadError(
@@ -2958,7 +2913,13 @@ mod tests {
         let mut file_data = vec![0u8; 0x3000];
         file_data[..btree.len()].copy_from_slice(&btree);
 
-        let result = collect_chunk_info(&file_data, StoredAddress::new(0), ndims, os, os).unwrap();
+        let result = collect_chunk_info(
+            &file_data,
+            StoredAddress::new(0),
+            ndims,
+            OffsetWidth::try_from(os).unwrap(),
+        )
+        .unwrap();
         assert_eq!(result.len(), 2);
         assert_eq!(result[0].address, StoredAddress::new(0x1000));
         assert_eq!(result[0].offsets, vec![0, 0]);
@@ -3011,7 +2972,7 @@ mod tests {
             &BytesSource::new(&file_data),
             StoredAddress::new(at as u64),
             ndims,
-            os,
+            OffsetWidth::try_from(os).unwrap(),
         )
         .unwrap();
         assert_eq!(spans, vec![(at as u64, leaf.len() as u64)]);
@@ -3043,7 +3004,7 @@ mod tests {
             &BytesSource::new(&file),
             StoredAddress::new(root as u64),
             ndims,
-            os,
+            OffsetWidth::try_from(os).unwrap(),
         )
         .unwrap();
         spans.sort_unstable();
@@ -3087,7 +3048,13 @@ mod tests {
         let mut file_data = vec![0u8; 0x1000];
         file_data[..btree.len()].copy_from_slice(&btree);
 
-        let result = collect_chunk_info(&file_data, StoredAddress::new(0), ndims, os, os).unwrap();
+        let result = collect_chunk_info(
+            &file_data,
+            StoredAddress::new(0),
+            ndims,
+            OffsetWidth::try_from(os).unwrap(),
+        )
+        .unwrap();
         assert_eq!(result.len(), 3);
         assert_eq!(result[0].address, StoredAddress::new(0x100));
         assert_eq!(result[1].address, StoredAddress::new(0x200));
@@ -3102,7 +3069,13 @@ mod tests {
         let mut file_data = vec![0u8; 0x1000];
         file_data[..btree.len()].copy_from_slice(&btree);
 
-        let result = collect_chunk_info(&file_data, StoredAddress::new(0), ndims, os, os).unwrap();
+        let result = collect_chunk_info(
+            &file_data,
+            StoredAddress::new(0),
+            ndims,
+            OffsetWidth::try_from(os).unwrap(),
+        )
+        .unwrap();
         assert_eq!(result.len(), 0);
     }
 
@@ -3117,7 +3090,13 @@ mod tests {
         let mut file_data = vec![0u8; 0x1000];
         file_data[..node.len()].copy_from_slice(&node);
 
-        let err = collect_chunk_info(&file_data, StoredAddress::new(0), ndims, os, os).unwrap_err();
+        let err = collect_chunk_info(
+            &file_data,
+            StoredAddress::new(0),
+            ndims,
+            OffsetWidth::try_from(os).unwrap(),
+        )
+        .unwrap_err();
         assert!(matches!(err, FormatError::ChunkedReadError(_)));
     }
 
@@ -3230,8 +3209,7 @@ mod tests {
         let raw = read_chunked_data_cached(
             &file_data,
             RawReadSpec::plain(&layout, &dataspace, &datatype),
-            8,
-            8,
+            FORMAT_WIDTHS,
             &ChunkCache::new(),
         )
         .unwrap();
@@ -3254,8 +3232,7 @@ mod tests {
         let raw = read_chunked_data_cached(
             &file_data,
             RawReadSpec::plain(&layout, &dataspace, &datatype),
-            8,
-            8,
+            FORMAT_WIDTHS,
             &ChunkCache::new(),
         )
         .unwrap();
@@ -3280,14 +3257,15 @@ mod tests {
         use crate::source::ReadSeekSource;
         let spec =
             RawReadSpec::parse(layout, dataspace, datatype, pipeline, FillPattern::ZERO).unwrap();
-        let buffered = read_chunked_data_cached(file_data, spec, 8, 8, &ChunkCache::new()).unwrap();
+        let buffered =
+            read_chunked_data_cached(file_data, spec, FORMAT_WIDTHS, &ChunkCache::new()).unwrap();
         let from_mem =
-            read_chunked_data_from_source(&BytesSource::new(file_data), spec, 8, 8).unwrap();
+            read_chunked_data_from_source(&BytesSource::new(file_data), spec, FORMAT_WIDTHS)
+                .unwrap();
         let from_seek = read_chunked_data_from_source(
             &ReadSeekSource::new(std::io::Cursor::new(file_data.to_vec())).unwrap(),
             spec,
-            8,
-            8,
+            FORMAT_WIDTHS,
         )
         .unwrap();
         assert_eq!(buffered, from_mem, "BytesSource mismatch");
@@ -3454,8 +3432,7 @@ mod tests {
             &chunk_dimensions,
             &dataspace,
             4,
-            8,
-            8,
+            FORMAT_WIDTHS,
         )
         .unwrap();
         let expected: Vec<ChunkInfo> = [0x1000, 0x2000]
@@ -3495,8 +3472,7 @@ mod tests {
             &[2, 2, 4],
             &dataspace,
             4,
-            8,
-            8,
+            FORMAT_WIDTHS,
         )
         .unwrap_err();
         let FormatError::ChunkedReadError(message) = &err else {
@@ -3586,8 +3562,7 @@ mod tests {
                 FillPattern::ZERO,
             )
             .unwrap(),
-            8,
-            8,
+            FORMAT_WIDTHS,
             &ChunkCache::new(),
         )
         .unwrap();
@@ -3789,8 +3764,7 @@ mod tests {
             &chunk_dimensions,
             &dataspace,
             elem_size as u64,
-            8,
-            8,
+            FORMAT_WIDTHS,
         )
         .unwrap()
         {
@@ -3844,25 +3818,32 @@ mod tests {
         };
 
         assert_eq!(
-            decoded(read_chunked_data_from_source(&source, spec, 8, 8).unwrap()),
-            values
-        );
-        assert_eq!(
-            decoded(read_chunked_data_cached(&file_data, spec, 8, 8, &ChunkCache::new()).unwrap()),
+            decoded(read_chunked_data_from_source(&source, spec, FORMAT_WIDTHS).unwrap()),
             values
         );
         assert_eq!(
             decoded(
-                read_chunked_data_cached_from_source(&source, spec, 8, 8, &ChunkCache::new())
+                read_chunked_data_cached(&file_data, spec, FORMAT_WIDTHS, &ChunkCache::new())
                     .unwrap()
+            ),
+            values
+        );
+        assert_eq!(
+            decoded(
+                read_chunked_data_cached_from_source(
+                    &source,
+                    spec,
+                    FORMAT_WIDTHS,
+                    &ChunkCache::new(),
+                )
+                .unwrap()
             ),
             values
         );
         let rows = read_chunked_rows_from_source(
             &source,
             spec,
-            8,
-            8,
+            FORMAT_WIDTHS,
             &ChunkCache::new(),
             CachePass::LRU,
             8,
@@ -3981,8 +3962,7 @@ mod tests {
         let raw = read_chunked_data_cached(
             &file_data,
             RawReadSpec::plain(&layout, &dataspace, &datatype),
-            8,
-            8,
+            FORMAT_WIDTHS,
             &ChunkCache::new(),
         )
         .unwrap();
@@ -4012,7 +3992,8 @@ mod tests {
         let mut file_data = vec![0u8; 512];
         file_data[..buf.len()].copy_from_slice(&buf);
 
-        let err = collect_chunk_info(&file_data, StoredAddress::new(0), 2, 8, 8).unwrap_err();
+        let err = collect_chunk_info(&file_data, StoredAddress::new(0), 2, OffsetWidth::Eight)
+            .unwrap_err();
         assert_eq!(err, FormatError::InvalidBTreeNodeType(0));
     }
 
@@ -4129,8 +4110,7 @@ mod tests {
         let raw = read_chunked_data_cached(
             &file_data,
             RawReadSpec::plain(&layout, &dataspace, &datatype),
-            8,
-            8,
+            FORMAT_WIDTHS,
             &ChunkCache::new(),
         )
         .unwrap();
@@ -4156,8 +4136,7 @@ mod tests {
         let raw = read_chunked_data_cached(
             &file_data,
             RawReadSpec::plain(&layout, &dataspace, &datatype),
-            8,
-            8,
+            FORMAT_WIDTHS,
             &cache,
         )
         .unwrap();
@@ -4180,8 +4159,7 @@ mod tests {
         let raw1 = read_chunked_data_cached(
             &file_data,
             RawReadSpec::plain(&layout, &dataspace, &datatype),
-            8,
-            8,
+            FORMAT_WIDTHS,
             &cache,
         )
         .unwrap();
@@ -4192,8 +4170,7 @@ mod tests {
         let raw2 = read_chunked_data_cached(
             &file_data,
             RawReadSpec::plain(&layout, &dataspace, &datatype),
-            8,
-            8,
+            FORMAT_WIDTHS,
             &cache,
         )
         .unwrap();
@@ -4210,8 +4187,7 @@ mod tests {
         let raw = read_chunked_data_cached(
             &file_data,
             RawReadSpec::plain(&layout, &dataspace, &datatype),
-            8,
-            8,
+            FORMAT_WIDTHS,
             &cache,
         )
         .unwrap();
@@ -4247,8 +4223,7 @@ mod tests {
         let out = read_chunked_rows_from_source(
             &BytesSource::new(b""),
             RawReadSpec::plain(&layout, &dataspace, &make_f64_type()),
-            8,
-            8,
+            FORMAT_WIDTHS,
             &cache,
             CachePass::LRU,
             0,
@@ -4286,8 +4261,7 @@ mod tests {
         let err = read_chunked_rows_from_source(
             &BytesSource::new(b""),
             RawReadSpec::plain(&layout, &dataspace, &make_f64_type()),
-            8,
-            8,
+            FORMAT_WIDTHS,
             &cache,
             CachePass::LRU,
             0,
@@ -4326,8 +4300,7 @@ mod tests {
         let err = read_chunked_rows_from_source(
             &BytesSource::new(b""),
             RawReadSpec::plain(&layout, &dataspace, &make_f64_type()),
-            8,
-            8,
+            FORMAT_WIDTHS,
             &cache,
             CachePass::LRU,
             0,
@@ -4370,16 +4343,19 @@ mod tests {
         ] {
             let cache = ChunkCache::new();
             let spec = RawReadSpec::parse(&layout, &dataspace, &datatype, None, fill).unwrap();
-            let whole =
-                read_chunked_data_cached_from_source(&BytesSource::new(b""), spec, 8, 8, &cache)
-                    .expect("an unallocated dataset reads as fill");
+            let whole = read_chunked_data_cached_from_source(
+                &BytesSource::new(b""),
+                spec,
+                FORMAT_WIDTHS,
+                &cache,
+            )
+            .expect("an unallocated dataset reads as fill");
             assert_eq!(whole.len(), 80);
 
             let window = read_chunked_rows_from_source(
                 &BytesSource::new(b""),
                 spec,
-                8,
-                8,
+                FORMAT_WIDTHS,
                 &cache,
                 CachePass::LRU,
                 2,
@@ -4392,8 +4368,7 @@ mod tests {
             let empty = read_chunked_rows_from_source(
                 &BytesSource::new(b""),
                 spec,
-                8,
-                8,
+                FORMAT_WIDTHS,
                 &cache,
                 CachePass::LRU,
                 0,

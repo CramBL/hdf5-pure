@@ -23,6 +23,7 @@ use crate::chunk_record::IndexSlots;
 use crate::convert::Narrow;
 use crate::error::FormatError;
 use crate::metadata_source::MetadataSource;
+use crate::width::FormatWidths;
 use crate::width::LengthWidth;
 use crate::width::OffsetWidth;
 
@@ -57,9 +58,35 @@ impl FixedArrayHeader {
         offset_size: u8,
         length_size: u8,
     ) -> Result<Self, FormatError> {
+        Self::parse_with_widths(
+            file_data,
+            offset,
+            FormatWidths::from_sizes(offset_size, length_size)?,
+        )
+    }
+
+    /// Parses the Fixed Array header at `offset` in `file_data` using validated format widths.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::UnexpectedEof`] if the header runs past the end of `file_data`,
+    /// [`FormatError::ChunkedReadError`] if the signature is not `FAHD` or the version is not 0,
+    /// and [`FormatError::ChecksumMismatch`] if the checksum does not match.
+    pub fn parse_with_widths(
+        file_data: &[u8],
+        offset: usize,
+        widths: FormatWidths,
+    ) -> Result<Self, FormatError> {
         // FAHD signature(4) + version(1) + client_id(1) + element_size(1) + max_nelmts_bits(1) +
         // num_elements(length_size) + data_block_addr(offset_size) + checksum(4)
-        let min_size = 4 + 1 + 1 + 1 + 1 + length_size as usize + offset_size as usize + 4;
+        let min_size = 4
+            + 1
+            + 1
+            + 1
+            + 1
+            + usize::from(widths.lengths.get())
+            + usize::from(widths.offsets.get())
+            + 4;
         if min_size > file_data.len() || offset > file_data.len() - min_size {
             return Err(FormatError::UnexpectedEof {
                 expected: offset.saturating_add(min_size),
@@ -86,9 +113,10 @@ impl FixedArrayHeader {
         let max_nelmts_bits = d[7];
 
         let mut pos = 8;
-        let num_elements = bytes::read_length(d, pos, length_size)?;
-        pos += length_size as usize;
-        let data_block_address = StoredAddress::new(bytes::read_offset(d, pos, offset_size)?);
+        let num_elements = bytes::read_length_width(d, pos, widths.lengths)?;
+        pos += usize::from(widths.lengths.get());
+        let data_block_address =
+            StoredAddress::new(bytes::read_offset_width(d, pos, widths.offsets)?);
 
         crate::checksum::verify_trailing(&d[..min_size])?;
 
@@ -113,9 +141,34 @@ impl FixedArrayHeader {
         offset_size: u8,
         length_size: u8,
     ) -> Result<Self, FormatError> {
-        let min_size = 4 + 1 + 1 + 1 + 1 + length_size as usize + offset_size as usize + 4;
+        Self::parse_from_source_with_widths(
+            source,
+            address,
+            FormatWidths::from_sizes(offset_size, length_size)?,
+        )
+    }
+
+    /// Parses the Fixed Array header at `address` in `source` using validated format widths.
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors [`parse_with_widths`](Self::parse_with_widths) returns, and the error
+    /// `source` returns if a read fails.
+    pub fn parse_from_source_with_widths(
+        source: &(impl MetadataSource + ?Sized),
+        address: StoredAddress,
+        widths: FormatWidths,
+    ) -> Result<Self, FormatError> {
+        let min_size = 4
+            + 1
+            + 1
+            + 1
+            + 1
+            + usize::from(widths.lengths.get())
+            + usize::from(widths.offsets.get())
+            + 4;
         let buf = source.read_metadata_at(address.get(), min_size)?;
-        Self::parse(&buf, 0, offset_size, length_size)
+        Self::parse_with_widths(&buf, 0, widths)
     }
 }
 
@@ -138,17 +191,36 @@ pub fn fixed_array_index_spans(
     offset_size: u8,
     length_size: u8,
 ) -> Result<Vec<(u64, u64)>, FormatError> {
-    let offset_width = OffsetWidth::try_from(offset_size)?;
-    let header = FixedArrayHeader::parse_from_source(source, fa_base, offset_size, length_size)?;
-    let os = offset_size as usize;
+    fixed_array_index_spans_with_widths(
+        source,
+        fa_base,
+        FormatWidths::from_sizes(offset_size, length_size)?,
+    )
+}
+
+/// Returns the index spans of the Fixed Array at `fa_base` using validated format widths.
+///
+/// # Errors
+///
+/// Returns the errors [`FixedArrayHeader::parse_from_source_with_widths`] returns,
+/// [`FormatError::ChunkedReadError`] if the page exponent is 64 or more, and
+/// [`FormatError::OffsetOverflow`] or [`FormatError::ValueTooLargeForPlatform`] if the length of
+/// the data block does not fit a `usize`.
+pub fn fixed_array_index_spans_with_widths(
+    source: &(impl MetadataSource + ?Sized),
+    fa_base: StoredAddress,
+    widths: FormatWidths,
+) -> Result<Vec<(u64, u64)>, FormatError> {
+    let header = FixedArrayHeader::parse_from_source_with_widths(source, fa_base, widths)?;
+    let os = usize::from(widths.offsets.get());
 
     // FAHD: sig(4) + ver(1) + client(1) + elem_size(1) + max_bits(1) + num_elements(ls) +
     // dblk_addr(os) + checksum(4).
-    let fahd_size = (4 + 1 + 1 + 1 + 1 + length_size as usize + os + 4) as u64;
+    let fahd_size = (4 + 1 + 1 + 1 + 1 + usize::from(widths.lengths.get()) + os + 4) as u64;
     let mut spans = vec![(fa_base.get(), fahd_size)];
 
     // An array with the undefined data block address has no data block.
-    if header.data_block_address.is_undefined(offset_width) {
+    if header.data_block_address.is_undefined(widths.offsets) {
         return Ok(spans);
     }
 
@@ -214,7 +286,7 @@ fn parse_fa_element(
     chunk_byte_size: u64,
     elem_size: usize,
     chunk_size_bytes: usize,
-    offset_size: u8,
+    offset_width: OffsetWidth,
 ) -> Result<Option<ChunkRecord>, FormatError> {
     if elem_size > block.len() || elem_pos > block.len() - elem_size {
         return Err(FormatError::UnexpectedEof {
@@ -223,7 +295,7 @@ fn parse_fa_element(
         });
     }
     let Some(address) =
-        bytes::read_optional_offset(block, elem_pos, offset_size)?.map(StoredAddress::new)
+        bytes::read_optional_offset_width(block, elem_pos, offset_width)?.map(StoredAddress::new)
     else {
         return Ok(None);
     };
@@ -234,7 +306,7 @@ fn parse_fa_element(
             filter_mask: 0,
         }))
     } else {
-        let os = offset_size as usize;
+        let os = usize::from(offset_width.get());
         let chunk_size = read_variable_length(&block[elem_pos + os..], chunk_size_bytes)?;
         let fm_off = elem_pos + os + chunk_size_bytes;
         let filter_mask = u32::from_le_bytes([
@@ -271,10 +343,36 @@ pub fn read_fixed_array_chunks(
     header: &FixedArrayHeader,
     offset_size: u8,
     chunk_byte_size: u64,
+    visit: impl FnMut(u64, ChunkRecord) -> Result<(), FormatError>,
+) -> Result<(), FormatError> {
+    read_fixed_array_chunks_with_offset_width(
+        file_data,
+        header,
+        OffsetWidth::try_from(offset_size)?,
+        chunk_byte_size,
+        visit,
+    )
+}
+
+/// Reads the Fixed Array data block using a validated address width.
+///
+/// # Errors
+///
+/// Returns [`FormatError::ChunkedReadError`] if the signature is not `FADB` or the entry size is
+/// too small for a filtered element or leaves more than 8 bytes for its chunk size,
+/// [`FormatError::UnexpectedEof`] if the data block runs past the end of `file_data`,
+/// [`FormatError::ChecksumMismatch`] if a checksum does not match, [`FormatError::OffsetOverflow`]
+/// or [`FormatError::ValueTooLargeForPlatform`] if a position does not fit a `usize`, and the error
+/// `visit` returns.
+pub fn read_fixed_array_chunks_with_offset_width(
+    file_data: &[u8],
+    header: &FixedArrayHeader,
+    offset_width: OffsetWidth,
+    chunk_byte_size: u64,
     mut visit: impl FnMut(u64, ChunkRecord) -> Result<(), FormatError>,
 ) -> Result<(), FormatError> {
     let db_offset = header.data_block_address.get().to_usize()?;
-    let os = offset_size as usize;
+    let os = usize::from(offset_width.get());
 
     // Parse data block prefix: FADB(4) + version(1) + client_id(1) + header_address(offset_size)
     let db_header_size = 4 + 1 + 1 + os;
@@ -339,7 +437,7 @@ pub fn read_fixed_array_chunks(
                 chunk_byte_size,
                 elem_size,
                 chunk_size_bytes,
-                offset_size,
+                offset_width,
             )? {
                 visit(index as u64, record)?;
             }
@@ -409,7 +507,7 @@ pub fn read_fixed_array_chunks(
                 chunk_byte_size,
                 elem_size,
                 chunk_size_bytes,
-                offset_size,
+                offset_width,
             )? {
                 visit(index as u64, record)?;
             }
@@ -434,10 +532,32 @@ pub fn read_fixed_array_chunks_from_source(
     header: &FixedArrayHeader,
     offset_size: u8,
     chunk_byte_size: u64,
+    visit: impl FnMut(u64, ChunkRecord) -> Result<(), FormatError>,
+) -> Result<(), FormatError> {
+    read_fixed_array_chunks_from_source_with_offset_width(
+        source,
+        header,
+        OffsetWidth::try_from(offset_size)?,
+        chunk_byte_size,
+        visit,
+    )
+}
+
+/// Reads the Fixed Array data block from `source` using a validated address width.
+///
+/// # Errors
+///
+/// Returns the errors [`read_fixed_array_chunks_with_offset_width`] returns, and the error
+/// `source` returns if a read fails.
+pub fn read_fixed_array_chunks_from_source_with_offset_width(
+    source: &(impl MetadataSource + ?Sized),
+    header: &FixedArrayHeader,
+    offset_width: OffsetWidth,
+    chunk_byte_size: u64,
     mut visit: impl FnMut(u64, ChunkRecord) -> Result<(), FormatError>,
 ) -> Result<(), FormatError> {
     let db_address = header.data_block_address.get();
-    let os = offset_size as usize;
+    let os = usize::from(offset_width.get());
     let db_header_size = 4 + 1 + 1 + os;
 
     // Both branches read the prefix in the read its checksum covers, and check the signature
@@ -490,7 +610,7 @@ pub fn read_fixed_array_chunks_from_source(
                 chunk_byte_size,
                 elem_size,
                 chunk_size_bytes,
-                offset_size,
+                offset_width,
             )? {
                 visit(index as u64, record)?;
             }
@@ -550,7 +670,7 @@ pub fn read_fixed_array_chunks_from_source(
                 chunk_byte_size,
                 elem_size,
                 chunk_size_bytes,
-                offset_size,
+                offset_width,
             )? {
                 visit((page * page_size + j) as u64, record)?;
             }

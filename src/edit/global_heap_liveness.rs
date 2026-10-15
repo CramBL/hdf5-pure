@@ -307,8 +307,7 @@ impl WriteEngine {
                 base: self.addresses.effective_base(),
             },
             spec,
-            OFFSET_SIZE,
-            LENGTH_SIZE,
+            self.widths(),
             |chunk| {
                 let Ok(bytes) = chunk else {
                     complete = false;
