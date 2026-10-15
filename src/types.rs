@@ -7,6 +7,7 @@ use crate::address::AddressContext;
 use crate::datatype::Datatype;
 use crate::datatype::layout::FixedPointLayout;
 use crate::display::{DISPLAY_MAX_MEMBERS, Dims, EscapedName, write_elided};
+use crate::width::FormatWidths;
 
 pub use crate::file_writer::AttrValue;
 
@@ -192,13 +193,12 @@ pub(crate) fn classify_datatype(dt: &Datatype) -> DType {
 pub(crate) fn attrs_to_map<S: crate::source::Source + ?Sized>(
     attrs: &[crate::attribute::AttributeMessage],
     source: &S,
-    offset_size: u8,
-    length_size: u8,
+    widths: FormatWidths,
     addresses: AddressContext,
 ) -> HashMap<std::string::String, AttrValue> {
     let mut map = HashMap::new();
     for attr in attrs {
-        if let Some(val) = decode_attr_value(attr, source, offset_size, length_size, addresses) {
+        if let Some(val) = decode_attr_value(attr, source, widths, addresses) {
             map.insert(attr.name.clone(), val);
         }
     }
@@ -263,8 +263,7 @@ pub(crate) fn attrs_to_map<S: crate::source::Source + ?Sized>(
 fn decode_attr_value<S: crate::source::Source + ?Sized>(
     attr: &crate::attribute::AttributeMessage,
     source: &S,
-    offset_size: u8,
-    length_size: u8,
+    widths: FormatWidths,
     addresses: AddressContext,
 ) -> Option<AttrValue> {
     use crate::dataspace::DataspaceType;
@@ -353,8 +352,7 @@ fn decode_attr_value<S: crate::source::Source + ?Sized>(
                 source,
                 &attr.raw_data,
                 attr.dataspace.num_elements(),
-                offset_size,
-                length_size,
+                widths,
                 addresses,
                 crate::vl_data::VlenStringReadOptions::default(),
             )
@@ -782,8 +780,10 @@ mod tests {
         decode_attr_value(
             &attr,
             &crate::source::BytesSource::new(Vec::new()),
-            8,
-            8,
+            FormatWidths {
+                offsets: crate::width::OffsetWidth::Eight,
+                lengths: crate::width::LengthWidth::Eight,
+            },
             AddressContext::from_effective_base(BaseAddress::ZERO),
         )
     }

@@ -56,7 +56,7 @@ use crate::source::{
 };
 use crate::superblock::Superblock;
 use crate::types::{AttrValue, DType, attrs_to_map, classify_datatype};
-use crate::vl_data::{self, VlenStringReadOptions};
+use crate::vl_data::{self, VlElement, VlenStringReadOptions};
 use crate::width::FormatWidths;
 
 // ---------------------------------------------------------------------------
@@ -2265,19 +2265,15 @@ impl FileInner {
     /// Read all attributes attached to an object header, dispatching on the
     /// backend.
     fn attrs_of(&self, hdr: &ObjectHeader) -> Result<HashMap<String, AttrValue>, Error> {
-        let (os, ls, base) = (
-            self.widths.offsets.get(),
-            self.widths.lengths.get(),
-            self.addresses(),
-        );
+        let (widths, base) = (self.widths, self.addresses());
         let attr_msgs = self.attr_messages_of(hdr)?;
         match &self.backend {
             Backend::Edit(m) => Ok(Self::with_engine(
                 m,
-                |d| attrs_to_map(&attr_msgs, &BytesSource::new(d), os, ls, base),
-                |s| attrs_to_map(&attr_msgs, s, os, ls, base),
+                |d| attrs_to_map(&attr_msgs, &BytesSource::new(d), widths, base),
+                |s| attrs_to_map(&attr_msgs, s, widths, base),
             )),
-            _ => Ok(attrs_to_map(&attr_msgs, &self.source(), os, ls, base)),
+            _ => Ok(attrs_to_map(&attr_msgs, &self.source(), widths, base)),
         }
     }
 
@@ -6386,7 +6382,7 @@ the same commit to replace it",
         Ok(vl_data::vlen_string_payload_size(
             &raw,
             dataspace.num_elements(),
-            self.file.widths.offsets.get(),
+            self.file.widths.offsets,
         )?)
     }
 
@@ -6440,8 +6436,7 @@ the same commit to replace it",
                 source,
                 &raw,
                 dataspace.num_elements(),
-                self.file.widths.offsets.get(),
-                self.file.widths.lengths.get(),
+                self.file.widths,
                 self.file.addresses(),
                 options,
                 visitor,
@@ -6484,8 +6479,7 @@ the same commit to replace it",
                 source,
                 &raw,
                 dataspace.num_elements(),
-                self.file.widths.offsets.get(),
-                self.file.widths.lengths.get(),
+                self.file.widths,
                 self.file.addresses(),
                 1, // a VL string's base type is a single byte
                 options,
@@ -6544,8 +6538,7 @@ the same commit to replace it",
                 source,
                 &raw,
                 dataspace.num_elements(),
-                self.file.widths.offsets.get(),
-                self.file.widths.lengths.get(),
+                self.file.widths,
                 self.file.addresses(),
                 element_size,
                 options,
@@ -6619,8 +6612,7 @@ the same commit to replace it",
                     source,
                     &dense,
                     n,
-                    self.file.widths.offsets.get(),
-                    self.file.widths.lengths.get(),
+                    self.file.widths,
                     self.file.addresses(),
                     slot.element_size,
                     options,
@@ -7011,7 +7003,7 @@ the same commit to replace it",
             // only those against the global heap keeps the bound — the same
             // resolution `read_string` runs over the whole dataset's references.
             let raw = self.read_raw_rows(start_row, num_rows)?;
-            let ref_size = 4 + usize::from(self.file.widths.offsets.get()) + 4;
+            let ref_size = VlElement::serialized_size(self.file.widths.offsets);
             let num_elements = (raw.len() / ref_size) as u64;
             let mut strings = Vec::new();
             self.file.with_source(|source| -> Result<(), Error> {
@@ -7019,8 +7011,7 @@ the same commit to replace it",
                     source,
                     &raw,
                     num_elements,
-                    self.file.widths.offsets.get(),
-                    self.file.widths.lengths.get(),
+                    self.file.widths,
                     self.file.addresses(),
                     VlenStringReadOptions::default(),
                     |string| strings.push(String::from(string)),

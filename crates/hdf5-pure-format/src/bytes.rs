@@ -116,11 +116,7 @@ pub fn read_offset(data: &[u8], pos: usize, offset_size: u8) -> Result<u64, Form
 ///
 /// Returns [`FormatError::UnexpectedEof`] if fewer than `width` bytes remain at `pos`.
 #[inline]
-pub(crate) fn read_offset_width(
-    data: &[u8],
-    pos: usize,
-    width: OffsetWidth,
-) -> Result<u64, FormatError> {
+pub fn read_offset_width(data: &[u8], pos: usize, width: OffsetWidth) -> Result<u64, FormatError> {
     ensure_len(data, pos, usize::from(width.get()))?;
     Ok(read_le(data, pos, width.get()))
 }

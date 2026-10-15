@@ -35,6 +35,7 @@ pub use crate::btree_v2_write::BTreeV2Plan;
 pub use crate::bytes::ensure_len;
 pub use crate::bytes::read_length;
 pub use crate::bytes::read_offset;
+pub use crate::bytes::read_offset_width;
 pub use crate::bytes::read_optional_offset;
 pub use crate::checksum::jenkins_lookup3;
 pub use crate::checksum::verify_trailing;
