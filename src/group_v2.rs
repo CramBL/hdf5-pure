@@ -40,39 +40,6 @@ use crate::superblock::Superblock;
 use crate::symbol_table::SymbolTableMessage;
 use crate::width::FormatWidths;
 
-/// Returns the version 2 B-tree allocations owned by a dense group's link set.
-///
-/// "The Link Info Message" and "Version 2 B-trees" of the [format specification, version
-/// 4.0][spec] identify the dense-link fractal heap, the type 5 name index, and the optional type 6
-/// creation-order index. Only the two index allocations participate in this ownership proof. The
-/// fractal heap remains outside it.
-///
-/// The complete index set is proven before any extent is returned. A creation-order tree is
-/// followed only when the Link Info message states that the index exists and supplies a defined
-/// address. Tracking creation order alone does not add that tree. `H5G__dense_delete` deletes the
-/// two B-trees separately before deleting the heap (`H5Gdense.c`, HDF5 2.2.0).
-///
-/// # Errors
-///
-/// Returns [`FormatError::InvalidBTreeNodeType`] if either index has the wrong client type. Returns
-/// the structural error from the version 2 B-tree storage walker if an index cannot be enumerated
-/// completely. Returns [`FormatError::InvalidBTreeV2Signature`] if the two indexes overlap or an
-/// index allocation contains the fractal-heap header address.
-///
-/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_linkinfo
-pub(crate) fn collect_dense_group_index_storage_extents<S: Source + ?Sized>(
-    source: &S,
-    link_info: &LinkInfoMessage,
-    offset_size: u8,
-    length_size: u8,
-) -> Result<Vec<Extent>, FormatError> {
-    collect_dense_group_index_storage_extents_with_widths(
-        source,
-        link_info,
-        FormatWidths::from_sizes(offset_size, length_size)?,
-    )
-}
-
 /// Returns the version 2 B-tree allocations owned by a dense group's link set using validated
 /// file widths.
 ///
@@ -926,9 +893,12 @@ mod tests {
             btree_creation_order_address: None,
         };
 
-        let extents =
-            collect_dense_group_index_storage_extents(&BytesSource::new(file), &info, 8, 8)
-                .unwrap();
+        let extents = collect_dense_group_index_storage_extents_with_widths(
+            &BytesSource::new(file),
+            &info,
+            crate::file_writer::WIDTHS,
+        )
+        .unwrap();
 
         assert_eq!(extents, expected);
     }
@@ -944,9 +914,12 @@ mod tests {
             btree_creation_order_address: Some(None),
         };
 
-        let extents =
-            collect_dense_group_index_storage_extents(&BytesSource::new(file), &info, 8, 8)
-                .unwrap();
+        let extents = collect_dense_group_index_storage_extents_with_widths(
+            &BytesSource::new(file),
+            &info,
+            crate::file_writer::WIDTHS,
+        )
+        .unwrap();
 
         assert_eq!(extents, expected);
     }

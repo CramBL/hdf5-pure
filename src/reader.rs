@@ -2469,7 +2469,7 @@ impl FileInner {
         spec: RawReadSpec<'_>,
         cache: &ChunkCache,
     ) -> Result<Vec<u8>, FormatError> {
-        let (os, ls) = (self.offset_size(), self.length_size());
+        let widths = self.widths;
         // Every on-disk address in `dl` — the contiguous data address, the chunk
         // index root, and (followed deeper in the chunked reader) every B-tree /
         // fixed-array / extensible-array node and chunk-data address — is stored
@@ -2480,27 +2480,27 @@ impl FileInner {
         let base = self.addresses().effective_base();
         match &self.backend {
             Backend::InMemory(v) => {
-                data_read::read_raw_data_cached(frame(v, base)?, spec, os, ls, cache)
+                data_read::read_raw_data_cached(frame(v, base)?, spec, widths, cache)
             }
             Backend::Streaming(s) if base.is_zero() => {
-                data_read::read_raw_data_cached_from_source(s.as_ref(), spec, os, ls, cache)
+                data_read::read_raw_data_cached_from_source(s.as_ref(), spec, widths, cache)
             }
             Backend::Streaming(s) => {
                 let framed = BaseOffsetSource {
                     inner: s.as_ref(),
                     base,
                 };
-                data_read::read_raw_data_cached_from_source(&framed, spec, os, ls, cache)
+                data_read::read_raw_data_cached_from_source(&framed, spec, widths, cache)
             }
             Backend::Edit(m) => Self::with_engine(
                 m,
                 |data| {
                     let framed = frame(data, base)?;
-                    data_read::read_raw_data_cached(framed, spec, os, ls, cache)
+                    data_read::read_raw_data_cached(framed, spec, widths, cache)
                 },
                 |s| {
                     let framed = BaseOffsetSource { inner: s, base };
-                    data_read::read_raw_data_cached_from_source(&framed, spec, os, ls, cache)
+                    data_read::read_raw_data_cached_from_source(&framed, spec, widths, cache)
                 },
             ),
         }
@@ -2519,7 +2519,7 @@ impl FileInner {
         start_row: u64,
         num_rows: u64,
     ) -> Result<Vec<u8>, FormatError> {
-        let (os, ls) = (self.offset_size(), self.length_size());
+        let widths = self.widths;
         let (ds, dt) = (spec.dataspace(), spec.datatype());
         let elem_size = crate::datatype::element_size_usize(dt)?;
         // Elements per row (product of inner dims; 1 when 0-D or 1-D). Checked so
@@ -2552,8 +2552,7 @@ impl FileInner {
                 read_rows_framed(
                     &BytesSource::new(framed),
                     spec,
-                    os,
-                    ls,
+                    widths,
                     cache,
                     pass,
                     start_row,
@@ -2564,8 +2563,7 @@ impl FileInner {
             Backend::Streaming(s) if base.is_zero() => read_rows_framed(
                 s.as_ref(),
                 spec,
-                os,
-                ls,
+                widths,
                 cache,
                 pass,
                 start_row,
@@ -2578,7 +2576,7 @@ impl FileInner {
                     base,
                 };
                 read_rows_framed(
-                    &framed, spec, os, ls, cache, pass, start_row, num_rows, row_bytes,
+                    &framed, spec, widths, cache, pass, start_row, num_rows, row_bytes,
                 )
             }
             Backend::Edit(m) => Self::with_engine(
@@ -2588,8 +2586,7 @@ impl FileInner {
                     read_rows_framed(
                         &BytesSource::new(framed),
                         spec,
-                        os,
-                        ls,
+                        widths,
                         cache,
                         pass,
                         start_row,
@@ -2600,7 +2597,7 @@ impl FileInner {
                 |s| {
                     let framed = BaseOffsetSource { inner: s, base };
                     read_rows_framed(
-                        &framed, spec, os, ls, cache, pass, start_row, num_rows, row_bytes,
+                        &framed, spec, widths, cache, pass, start_row, num_rows, row_bytes,
                     )
                 },
             ),
@@ -2624,8 +2621,7 @@ impl FileInner {
 fn read_rows_framed<S: Source + ?Sized>(
     source: &S,
     spec: RawReadSpec<'_>,
-    os: u8,
-    ls: u8,
+    widths: FormatWidths,
     cache: &ChunkCache,
     pass: CachePass,
     start_row: u64,
@@ -2672,14 +2668,14 @@ fn read_rows_framed<S: Source + ?Sized>(
         }
         RawReadStorage::Chunked { .. } => {
             match crate::chunked_read::read_chunked_rows_from_source(
-                source, spec, os, ls, cache, pass, start_row, num_rows,
+                source, spec, widths, cache, pass, start_row, num_rows,
             )? {
                 Some(bytes) => Ok(bytes),
                 // Rank-0 chunked (a crafted-file corner): fall back to a whole
                 // read, then slice.
                 None => {
                     let full =
-                        data_read::read_raw_data_cached_from_source(source, spec, os, ls, cache)?;
+                        data_read::read_raw_data_cached_from_source(source, spec, widths, cache)?;
                     let start = start_row.to_usize()? * row_bytes;
                     let len = num_rows.to_usize()? * row_bytes;
                     full.get(start..start + len).map(<[u8]>::to_vec).ok_or(
@@ -6818,8 +6814,7 @@ the same commit to replace it",
                     &chunk_dimensions,
                     &dataspace,
                     elem_size.get() as u64,
-                    self.file.offset_size(),
-                    self.file.length_size(),
+                    self.file.widths,
                 )?);
             }
             let framed = BaseOffsetSource {
@@ -6832,8 +6827,7 @@ the same commit to replace it",
                 &chunk_dimensions,
                 &dataspace,
                 elem_size.get() as u64,
-                self.file.offset_size(),
-                self.file.length_size(),
+                self.file.widths,
             )?)
         })
     }
@@ -8704,8 +8698,7 @@ mod tests {
         let out = read_rows_framed(
             &BytesSource::new(b""),
             RawReadSpec::plain(&dl, &ds, &dt),
-            8,
-            8,
+            FormatWidths::from_sizes(8, 8).unwrap(),
             &cache,
             CachePass::LRU,
             0,
@@ -8722,8 +8715,7 @@ mod tests {
         let err = read_rows_framed(
             &BytesSource::new(b""),
             RawReadSpec::plain(&virtual_dl, &ds, &dt),
-            8,
-            8,
+            FormatWidths::from_sizes(8, 8).unwrap(),
             &cache,
             CachePass::LRU,
             0,
@@ -8762,8 +8754,7 @@ mod tests {
             read_rows_framed(
                 &BytesSource::new(b""),
                 RawReadSpec::plain(&dl, &ds, &dt),
-                8,
-                8,
+                FormatWidths::from_sizes(8, 8).unwrap(),
                 &cache,
                 CachePass::LRU,
                 start_row,

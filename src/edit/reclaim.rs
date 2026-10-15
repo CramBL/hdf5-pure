@@ -259,14 +259,13 @@ impl WriteEngine {
         let Some(heap_address) = link_info.fractal_heap_address else {
             return Some(Vec::new());
         };
-        let index = crate::group_v2::collect_dense_group_index_storage_extents(
+        let index = crate::group_v2::collect_dense_group_index_storage_extents_with_widths(
             &BaseOffsetSource {
                 inner: &self.image(),
                 base: self.addresses.effective_base(),
             },
             link_info,
-            OFFSET_SIZE,
-            LENGTH_SIZE,
+            crate::file_writer::WIDTHS,
         )
         .ok()?;
         let owned: Vec<(u64, u64)> = header_spans
@@ -727,8 +726,7 @@ impl WriteEngine {
             },
             &layout,
             &dataspace,
-            OFFSET_SIZE,
-            LENGTH_SIZE,
+            crate::file_writer::WIDTHS,
         )
         .ok()?;
         // Chunk data is raw under every writer, so its spans are raw outright. A version 2
@@ -884,8 +882,7 @@ impl WriteEngine {
                 base: base.effective_base(),
             },
             &layout,
-            OFFSET_SIZE,
-            LENGTH_SIZE,
+            crate::file_writer::WIDTHS,
         )
         .ok()?;
         for (a, _) in &mut spans {
@@ -1079,8 +1076,7 @@ impl WriteEngine {
                     },
                     &layout,
                     &dataspace,
-                    OFFSET_SIZE,
-                    LENGTH_SIZE,
+                    crate::file_writer::WIDTHS,
                 )?;
                 raw.extend(self.absolute_owned_spans(storage.data)?);
                 metadata.extend(self.absolute_owned_spans(storage.index)?);

@@ -243,12 +243,34 @@ impl BTreeV1ChunkNodeBytes {
         offset_size: u8,
         ndims: usize,
     ) -> Result<Self, FormatError> {
+        Self::read_from_source_with_offset_width(
+            source,
+            address,
+            OffsetWidth::try_from(offset_size)?,
+            ndims,
+        )
+    }
+
+    /// Reads the chunk node at `address` in `source` using a validated address width.
+    ///
+    /// Reads the 8-byte prefix for the number of entries in use, then the rest of the node.
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors [`BTreeV1ChunkNode::parse_with_offset_width`] returns, and the error
+    /// `source` returns if a read fails.
+    pub fn read_from_source_with_offset_width(
+        source: &(impl MetadataSource + ?Sized),
+        address: u64,
+        offset_width: OffsetWidth,
+        ndims: usize,
+    ) -> Result<Self, FormatError> {
         let header = source.read_metadata_at(address, BTREE_V1_NODE_PREFIX_LEN)?;
         let prefix = header.first_chunk().ok_or(FormatError::UnexpectedEof {
             expected: BTREE_V1_NODE_PREFIX_LEN,
             available: header.len(),
         })?;
-        let layout = ChunkNodeLayout::parse(prefix, offset_size, ndims)?;
+        let layout = ChunkNodeLayout::parse(prefix, offset_width, ndims)?;
         let body_address = address
             .checked_add(BTREE_V1_NODE_PREFIX_LEN.to_u64())
             .ok_or(FormatError::OffsetOverflow {
@@ -314,6 +336,31 @@ impl<'a> BTreeV1ChunkNode<'a> {
         offset_size: u8,
         ndims: usize,
     ) -> Result<Self, FormatError> {
+        Self::parse_with_offset_width(
+            file_data,
+            offset,
+            OffsetWidth::try_from(offset_size)?,
+            ndims,
+        )
+    }
+
+    /// Parses the chunk node at `offset` in `file_data` using a validated address width.
+    ///
+    /// `ndims` is the rank of the dataset plus one, for the offset in the datatype that each key
+    /// stores after the chunk's offsets.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::UnexpectedEof`] if the node runs past the end of `file_data`,
+    /// [`FormatError::InvalidBTreeSignature`] if the node does not begin with `TREE`,
+    /// [`FormatError::InvalidBTreeNodeType`] if its node type is not 1, and
+    /// [`FormatError::OffsetOverflow`] if the length of the node does not fit a `usize`.
+    pub fn parse_with_offset_width(
+        file_data: &'a [u8],
+        offset: usize,
+        offset_width: OffsetWidth,
+        ndims: usize,
+    ) -> Result<Self, FormatError> {
         let rest = file_data.get(offset..).unwrap_or_default();
         let eof = |len: usize| FormatError::UnexpectedEof {
             expected: offset.saturating_add(len),
@@ -321,8 +368,8 @@ impl<'a> BTreeV1ChunkNode<'a> {
         };
         let prefix = rest
             .first_chunk()
-            .ok_or_else(|| eof(btree_v1_node_header_size(offset_size)))?;
-        let layout = ChunkNodeLayout::parse(prefix, offset_size, ndims)?;
+            .ok_or_else(|| eof(btree_v1_node_header_size(offset_width.get())))?;
+        let layout = ChunkNodeLayout::parse(prefix, offset_width, ndims)?;
         let entries = rest
             .get(BTREE_V1_NODE_PREFIX_LEN..)
             .and_then(|body| body.get(layout.entries()))
@@ -393,11 +440,10 @@ impl ChunkNodeLayout {
     ///
     /// Returns [`FormatError::InvalidBTreeSignature`] if the prefix does not begin with `TREE`,
     /// [`FormatError::InvalidBTreeNodeType`] if its node type is not 1,
-    /// [`FormatError::InvalidOffsetSize`] if `offset_size` is not 2, 4, or 8, and
     /// [`FormatError::OffsetOverflow`] if the length of the node does not fit a `usize`.
     fn parse(
         prefix: &[u8; BTREE_V1_NODE_PREFIX_LEN],
-        offset_size: u8,
+        offset_width: OffsetWidth,
         ndims: usize,
     ) -> Result<Self, FormatError> {
         let [s0, s1, s2, s3, node_type, node_level, used0, used1] = *prefix;
@@ -407,7 +453,6 @@ impl ChunkNodeLayout {
         if node_type != BTREE_V1_CHUNK_NODE_TYPE {
             return Err(FormatError::InvalidBTreeNodeType(node_type));
         }
-        let offset_width = OffsetWidth::try_from(offset_size)?;
         let entries_used = u16::from_le_bytes([used0, used1]);
         let key_size = chunk_key_size(ndims)?;
         Ok(Self {

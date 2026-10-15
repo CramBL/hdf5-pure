@@ -35,16 +35,15 @@ impl<'a> Reader<'a> {
     ///
     /// # Errors
     ///
-    /// Returns [`FormatError::InvalidOffsetSize`] if `offset_size` is not 2, 4, or 8, and
-    /// [`FormatError::InvalidChunkGeometry`] if the minimum data block element count is zero,
+    /// Returns [`FormatError::InvalidChunkGeometry`] if the minimum data block element count is
+    /// zero,
     /// a data block contains a partial page, or a direct data block requires paging.
     pub(super) fn parse(
         header: &'a ExtensibleArrayHeader,
-        offset_size: u8,
+        offset_width: OffsetWidth,
         chunk_byte_size: u64,
     ) -> Result<Self, FormatError> {
-        let offset_width = OffsetWidth::try_from(offset_size)?;
-        let element_stride = super::ea_elem_stride(header, offset_size);
+        let element_stride = super::ea_elem_stride(header, offset_width);
         Ok(Self {
             header,
             offset_width,
@@ -262,7 +261,7 @@ impl<'a> Reader<'a> {
                 pos,
                 self.header.client_id,
                 self.header.element_size,
-                self.offset_width.get(),
+                self.offset_width,
                 self.chunk_byte_size,
             )?;
             if let Some(record) = record {
@@ -895,7 +894,7 @@ mod tests {
         let mut header =
             ExtensibleArrayHeader::parse_from_source(&source, StoredAddress::new(0), 8, 8).unwrap();
         header.max_idx_set = published;
-        let reader = Reader::parse(&header, 8, 8).unwrap();
+        let reader = Reader::parse(&header, OffsetWidth::Eight, 8).unwrap();
         let mut index = source.blocks[1].1.clone();
         let len = index.len();
         index[14..len - 4].fill(0xff);
@@ -921,7 +920,7 @@ mod tests {
         let mut header =
             ExtensibleArrayHeader::parse_from_source(&source, StoredAddress::new(0), 8, 8).unwrap();
         header.min_dblk_nelmts = 0;
-        let Err(error) = Reader::parse(&header, 8, 8) else {
+        let Err(error) = Reader::parse(&header, OffsetWidth::Eight, 8) else {
             panic!("zero block size parsed");
         };
         assert_eq!(
@@ -939,7 +938,7 @@ mod tests {
         let header =
             ExtensibleArrayHeader::parse_from_source(&fixture, StoredAddress::new(0), 8, 8)
                 .unwrap();
-        let reader = Reader::parse(&header, 8, 8).unwrap();
+        let reader = Reader::parse(&header, OffsetWidth::Eight, 8).unwrap();
         let count = 524_288u64;
         let mut bitmap = vec![0; (count / 8).to_usize().unwrap()];
         *bitmap.last_mut().unwrap() = 1;
