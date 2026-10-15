@@ -26,7 +26,6 @@ use crate::vl_data;
 use crate::vl_data::EmbeddedVlSlot;
 use crate::vl_data::VlElement;
 
-use super::OFFSET_SIZE;
 use super::WriteEngine;
 
 /// The global heap collections that the objects reachable from the root group refer to.
@@ -443,8 +442,8 @@ impl WriteEngine {
                             expected: slot.byte_offset,
                             available: element.len(),
                         })?;
-                if let Some(id) = VlElement::parse(reference, OFFSET_SIZE)?
-                    .heap_id(OFFSET_SIZE, self.addresses)?
+                if let Some(id) = VlElement::parse(reference, self.widths().offsets)?
+                    .heap_id(self.widths().offsets, self.addresses)?
                 {
                     referenced.insert(id.collection.get());
                 }

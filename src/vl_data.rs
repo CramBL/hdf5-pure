@@ -16,7 +16,7 @@ use crate::address::BaseAddress;
 use crate::address::BaseAddressExt;
 use crate::address::StoredAddress;
 use crate::address::StoredAddressExt;
-use crate::bytes::read_offset;
+use crate::bytes;
 use crate::convert::Narrow;
 use crate::datatype::{CharacterSet, Datatype};
 use crate::error::FormatError;
@@ -25,8 +25,7 @@ use crate::global_heap::GlobalHeapReader;
 #[cfg(test)]
 use crate::source::BytesSource;
 use crate::source::Source;
-use crate::width::LengthWidth;
-use crate::width::OffsetWidth;
+use crate::width::{FormatWidths, OffsetWidth};
 
 /// Allocation limits for reading variable-length strings.
 ///
@@ -83,24 +82,33 @@ pub struct VlElement {
 }
 
 impl VlElement {
+    pub(crate) fn serialized_size(offset_width: OffsetWidth) -> usize {
+        SEQUENCE_LENGTH_BYTES + usize::from(offset_width.get()) + HEAP_INDEX_BYTES
+    }
+
     /// Parses the variable-length element at the start of `raw`: a 4-byte length, then the global
-    /// heap ID of its data, an `offset_size`-byte collection address and a 4-byte object index.
+    /// heap ID of its data, a collection address of `offset_width.get()` bytes and a 4-byte object
+    /// index.
     ///
     /// The global heap ID is defined in "Global Heap" of the [format specification, version
     /// 4.0][spec].
     ///
     /// # Errors
     ///
-    /// Returns [`FormatError::UnexpectedEof`] if `raw` is shorter than `offset_size` + 8 bytes, and
-    /// [`FormatError::InvalidOffsetSize`] if `offset_size` is not 2, 4, or 8.
+    /// Returns [`FormatError::UnexpectedEof`] if `raw` is shorter than `offset_width.get() + 8`
+    /// bytes.
     ///
     /// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsec_fmt4_infra_globalheap
-    pub(crate) fn parse(raw: &[u8], offset_size: u8) -> Result<Self, FormatError> {
-        let index_at = 4 + usize::from(offset_size);
-        crate::bytes::ensure_len(raw, 0, index_at + 4)?;
+    pub(crate) fn parse(raw: &[u8], offset_width: OffsetWidth) -> Result<Self, FormatError> {
+        let index_at = SEQUENCE_LENGTH_BYTES + usize::from(offset_width.get());
+        bytes::ensure_len(raw, 0, Self::serialized_size(offset_width))?;
         Ok(Self {
             length: u32::from_le_bytes([raw[0], raw[1], raw[2], raw[3]]),
-            collection_address: StoredAddress::new(read_offset(raw, 4, offset_size)?),
+            collection_address: StoredAddress::new(bytes::read_offset_width(
+                raw,
+                SEQUENCE_LENGTH_BYTES,
+                offset_width,
+            )?),
             object_index: u32::from_le_bytes([
                 raw[index_at],
                 raw[index_at + 1],
@@ -121,10 +129,9 @@ impl VlElement {
     /// [`FormatError::GlobalHeapObjectNotFound`] if the object index is 0.
     pub(crate) fn heap_id(
         &self,
-        offset_size: u8,
+        offset_width: OffsetWidth,
         addresses: AddressContext,
     ) -> Result<Option<GlobalHeapId>, FormatError> {
-        let offset_width = OffsetWidth::try_from(offset_size)?;
         let undefined = self.collection_address.is_undefined(offset_width);
         if self.length == 0 && (undefined || self.collection_address.get() == 0) {
             return Ok(None);
@@ -168,9 +175,9 @@ impl VlElement {
 pub fn parse_vl_references(
     raw_data: &[u8],
     num_elements: u64,
-    offset_size: u8,
+    offset_width: OffsetWidth,
 ) -> Result<Vec<VlElement>, FormatError> {
-    let elem_size = 4 + offset_size as u64 + 4; // length + address + index
+    let elem_size = VlElement::serialized_size(offset_width) as u64;
     let total = num_elements
         .checked_mul(elem_size)
         .ok_or(FormatError::OffsetOverflow {
@@ -187,7 +194,7 @@ pub fn parse_vl_references(
 
     let mut elements = Vec::with_capacity(num_elements.to_usize()?);
     for raw in raw_data[..total].chunks_exact(elem_size.to_usize()?) {
-        elements.push(VlElement::parse(raw, offset_size)?);
+        elements.push(VlElement::parse(raw, offset_width)?);
     }
     Ok(elements)
 }
@@ -276,6 +283,12 @@ pub(crate) fn embedded_vlen_slots(datatype: &Datatype) -> Option<Vec<EmbeddedVlS
 /// On-disk width of a variable-length reference with 8-byte offsets, which is
 /// the only offset size the write path emits and the only one repack re-stages.
 const VL_REF_BYTES: usize = 16;
+
+// H5T__vlen_disk_write writes the sequence length as a u32 in H5Tvlen.c, HDF5 2.2.0.
+const SEQUENCE_LENGTH_BYTES: usize = 4;
+
+// The object index occupies four bytes: section `subsec_fmt4_infra_globalheap`, version 4.0.
+const HEAP_INDEX_BYTES: usize = 4;
 
 /// Walk `datatype`, appending a slot for each variable-length reference it
 /// reaches. Returns `false` if it cannot be walked on this target: an offset the
@@ -424,10 +437,10 @@ fn payload_size(refs: &[VlElement], options: VlenStringReadOptions) -> Result<u6
 pub fn vlen_string_payload_size(
     raw_data: &[u8],
     num_elements: u64,
-    offset_size: u8,
+    offset_width: OffsetWidth,
 ) -> Result<u64, FormatError> {
     check_element_limit(num_elements, VlenStringReadOptions::default())?;
-    let refs = parse_vl_references(raw_data, num_elements, offset_size)?;
+    let refs = parse_vl_references(raw_data, num_elements, offset_width)?;
     payload_size(&refs, VlenStringReadOptions::default())
 }
 
@@ -437,8 +450,7 @@ pub fn visit_vl_strings_from_source<S, F>(
     source: &S,
     raw_data: &[u8],
     num_elements: u64,
-    offset_size: u8,
-    length_size: u8,
+    widths: FormatWidths,
     addresses: AddressContext,
     options: VlenStringReadOptions,
     mut visitor: F,
@@ -447,19 +459,11 @@ where
     S: Source + ?Sized,
     F: FnMut(&str),
 {
-    let refs = checked_references(raw_data, num_elements, offset_size, options)?;
-    visit_vl_objects(
-        source,
-        &refs,
-        offset_size,
-        length_size,
-        addresses,
-        1,
-        |object| match object {
-            VlByteObject::Null => visitor(""),
-            VlByteObject::Bytes(bytes) => visitor(&String::from_utf8_lossy(&bytes)),
-        },
-    )
+    let refs = checked_references(raw_data, num_elements, widths.offsets, options)?;
+    visit_vl_objects(source, &refs, widths, addresses, 1, |object| match object {
+        VlByteObject::Null => visitor(""),
+        VlByteObject::Bytes(bytes) => visitor(&String::from_utf8_lossy(&bytes)),
+    })
 }
 
 /// Resolve VL strings from a random-access file source.
@@ -467,8 +471,7 @@ pub fn read_vl_strings_from_source<S: Source + ?Sized>(
     source: &S,
     raw_data: &[u8],
     num_elements: u64,
-    offset_size: u8,
-    length_size: u8,
+    widths: FormatWidths,
     addresses: AddressContext,
     options: VlenStringReadOptions,
 ) -> Result<Vec<String>, FormatError> {
@@ -477,8 +480,7 @@ pub fn read_vl_strings_from_source<S: Source + ?Sized>(
         source,
         raw_data,
         num_elements,
-        offset_size,
-        length_size,
+        widths,
         addresses,
         options,
         |string| strings.push(String::from(string)),
@@ -519,23 +521,16 @@ pub(crate) fn read_vl_byte_objects_from_source<S: Source + ?Sized>(
     source: &S,
     raw_data: &[u8],
     num_elements: u64,
-    offset_size: u8,
-    length_size: u8,
+    widths: FormatWidths,
     addresses: AddressContext,
     element_size: usize,
     options: VlenStringReadOptions,
 ) -> Result<Vec<VlByteObject>, FormatError> {
-    let refs = checked_references(raw_data, num_elements, offset_size, options)?;
+    let refs = checked_references(raw_data, num_elements, widths.offsets, options)?;
     let mut objects = Vec::with_capacity(refs.len());
-    visit_vl_objects(
-        source,
-        &refs,
-        offset_size,
-        length_size,
-        addresses,
-        element_size,
-        |object| objects.push(object),
-    )?;
+    visit_vl_objects(source, &refs, widths, addresses, element_size, |object| {
+        objects.push(object)
+    })?;
     Ok(objects)
 }
 
@@ -550,11 +545,11 @@ pub(crate) fn read_vl_byte_objects_from_source<S: Source + ?Sized>(
 fn checked_references(
     raw_data: &[u8],
     num_elements: u64,
-    offset_size: u8,
+    offset_width: OffsetWidth,
     options: VlenStringReadOptions,
 ) -> Result<Vec<VlElement>, FormatError> {
     check_element_limit(num_elements, options)?;
-    let refs = parse_vl_references(raw_data, num_elements, offset_size)?;
+    let refs = parse_vl_references(raw_data, num_elements, offset_width)?;
     payload_size(&refs, options)?;
     Ok(refs)
 }
@@ -568,27 +563,26 @@ fn checked_references(
 ///
 /// # Errors
 ///
-/// Returns [`FormatError::InvalidLengthSize`] if `length_size` is not 2, 4, or 8, and otherwise the
-/// first error of an element, in the order of `refs`: the errors [`VlElement::heap_id`],
+/// Returns the first error of an element, in the order of `refs`: the errors
+/// [`VlElement::heap_id`],
 /// [`VlElement::byte_len`] and [`GlobalHeapReader::read`] return. `visitor` receives the objects of
 /// the elements before the one that fails.
 fn visit_vl_objects(
     source: &(impl Source + ?Sized),
     refs: &[VlElement],
-    offset_size: u8,
-    length_size: u8,
+    widths: FormatWidths,
     addresses: AddressContext,
     element_size: usize,
     mut visitor: impl FnMut(VlByteObject),
 ) -> Result<(), FormatError> {
     let mut heap = GlobalHeapReader::new(
         source,
-        LengthWidth::try_from(length_size)?,
+        widths.lengths,
         refs.iter()
-            .filter_map(|element| element.heap_id(offset_size, addresses).ok().flatten()),
+            .filter_map(|element| element.heap_id(widths.offsets, addresses).ok().flatten()),
     );
     for element in refs {
-        visitor(match element.heap_id(offset_size, addresses)? {
+        visitor(match element.heap_id(widths.offsets, addresses)? {
             None => VlByteObject::Null,
             Some(id) => VlByteObject::Bytes(heap.read(id, element.byte_len(element_size)?)?),
         });
@@ -605,15 +599,13 @@ pub fn read_vl_strings(
     file_data: &[u8],
     raw_data: &[u8],
     num_elements: u64,
-    offset_size: u8,
-    length_size: u8,
+    widths: FormatWidths,
 ) -> Result<Vec<String>, FormatError> {
     read_vl_strings_from_source(
         &BytesSource::new(file_data),
         raw_data,
         num_elements,
-        offset_size,
-        length_size,
+        widths,
         AddressContext::from_effective_base(BaseAddress::ZERO),
         VlenStringReadOptions::default(),
     )
@@ -634,6 +626,25 @@ mod tests {
     use crate::source::ReadSeekSource;
     #[cfg(feature = "std")]
     use crate::source::ValidatedSource;
+    use crate::width::LengthWidth;
+
+    const FORMAT_WIDTHS: FormatWidths = FormatWidths {
+        offsets: OffsetWidth::Eight,
+        lengths: LengthWidth::Eight,
+    };
+
+    fn format_widths(lengths: usize) -> FormatWidths {
+        let lengths = match lengths {
+            2 => LengthWidth::Two,
+            4 => LengthWidth::Four,
+            8 => LengthWidth::Eight,
+            other => panic!("unsupported test length width {other}"),
+        };
+        FormatWidths {
+            offsets: OffsetWidth::Eight,
+            lengths,
+        }
+    }
 
     /// Build a global heap collection at given offset in a file buffer.
     /// Writes a global heap collection of `(index, data)` objects at `offset`,
@@ -674,7 +685,7 @@ mod tests {
     #[test]
     fn parse_vl_references_two_elements() {
         let raw = build_vl_refs(&["hello", "world"], 0x1000, 1, WIDTHS);
-        let refs = parse_vl_references(&raw, 2, 8).unwrap();
+        let refs = parse_vl_references(&raw, 2, OffsetWidth::Eight).unwrap();
         assert_eq!(refs.len(), 2);
         assert_eq!(refs[0].length, 5);
         assert_eq!(refs[0].collection_address, StoredAddress::new(0x1000));
@@ -690,7 +701,7 @@ mod tests {
         build_gcol_at(&mut file_data, gcol_offset, &[(1, b"Alice"), (2, b"Bob")]);
 
         let raw = build_vl_refs(&["Alice", "Bob"], gcol_offset as u64, 1, WIDTHS);
-        let strings = read_vl_strings(&file_data, &raw, 2, 8, 8).unwrap();
+        let strings = read_vl_strings(&file_data, &raw, 2, FORMAT_WIDTHS).unwrap();
         assert_eq!(strings, vec!["Alice", "Bob"]);
     }
 
@@ -707,8 +718,7 @@ mod tests {
             &source,
             &raw,
             2,
-            8,
-            8,
+            FORMAT_WIDTHS,
             AddressContext::from_effective_base(BaseAddress::ZERO),
             VlenStringReadOptions::default(),
         )
@@ -725,7 +735,7 @@ mod tests {
         raw.extend_from_slice(&0u32.to_le_bytes()); // index
 
         let file_data = vec![0u8; 16];
-        let strings = read_vl_strings(&file_data, &raw, 1, 8, 8).unwrap();
+        let strings = read_vl_strings(&file_data, &raw, 1, FORMAT_WIDTHS).unwrap();
         assert_eq!(strings, vec![""]);
     }
 
@@ -737,14 +747,14 @@ mod tests {
         raw.extend_from_slice(&0u32.to_le_bytes());
 
         let file_data = vec![0u8; 16];
-        let strings = read_vl_strings(&file_data, &raw, 1, 8, 8).unwrap();
+        let strings = read_vl_strings(&file_data, &raw, 1, FORMAT_WIDTHS).unwrap();
         assert_eq!(strings, vec![""]);
     }
 
     #[test]
     fn parse_vl_references_truncated_error() {
         let raw = vec![0u8; 10]; // too short for 1 element with offset_size=8
-        let err = parse_vl_references(&raw, 1, 8).unwrap_err();
+        let err = parse_vl_references(&raw, 1, OffsetWidth::Eight).unwrap_err();
         assert!(matches!(err, FormatError::UnexpectedEof { .. }));
     }
 
@@ -938,8 +948,7 @@ mod tests {
                 &ValidatedSource::new(ShortMetadata(file)),
                 &refs,
                 1,
-                8,
-                8,
+                FORMAT_WIDTHS,
                 AddressContext::from_effective_base(BaseAddress::ZERO),
                 1,
                 VlenStringReadOptions::default(),
@@ -1016,8 +1025,7 @@ mod tests {
                 &source,
                 &refs,
                 2,
-                8,
-                8,
+                FORMAT_WIDTHS,
                 AddressContext::from_effective_base(BaseAddress::ZERO),
                 1,
                 VlenStringReadOptions::default(),
@@ -1082,23 +1090,14 @@ mod tests {
         expected: Result<Vec<VlByteObject>, FormatError>,
     ) {
         let count = (refs.len() / VL_REF_BYTES) as u64;
-        let length_size = lengths as u8;
+        let widths = format_widths(lengths);
         let addresses = AddressContext::from_effective_base(base);
         let options = VlenStringReadOptions::default();
         let objects = |source: &dyn Source| {
-            read_vl_byte_objects_from_source(
-                source,
-                refs,
-                count,
-                8,
-                length_size,
-                addresses,
-                1,
-                options,
-            )
+            read_vl_byte_objects_from_source(source, refs, count, widths, addresses, 1, options)
         };
         let strings = |source: &dyn Source| {
-            read_vl_strings_from_source(source, refs, count, 8, length_size, addresses, options)
+            read_vl_strings_from_source(source, refs, count, widths, addresses, options)
         };
         let decoded = expected.clone().map(|objects| {
             objects
