@@ -24,7 +24,7 @@
 
 use hdf5_pure::File;
 use hdf5_pure::mat::{self, EmptySequencePolicy, MatBuilder, MatClass, Options};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use test_util_hdf5::mat_file::{self, ObjectKind};
 
 /// Every dataset in `file` that carries a `MATLAB_empty` attribute, as
@@ -187,4 +187,26 @@ fn the_serde_emitters_write_matlab_conformant_empties() {
             assert_eq!(dims, vec![0, 0], "{label}: {class} empty is not 0x0");
         }
     }
+}
+
+/// A struct-array field that MATLAB did not set decodes to an empty value.
+///
+/// MATLAB points such fields at a shared placeholder whose `MATLAB_class` is
+/// `canonical empty`, which is not a storage class. The test file was written with
+/// `s(2).x = 1`, which leaves `s(1).x` unset (`[]`).
+#[test]
+fn an_unset_struct_array_field_reads_as_empty() {
+    #[derive(Deserialize)]
+    struct Element {
+        x: Vec<f64>,
+    }
+    #[derive(Deserialize)]
+    struct Doc {
+        s: Vec<Element>,
+    }
+
+    let doc: Doc = mat::from_file("tests/data/matlab/test_struct_unset_field_v73.mat").unwrap();
+
+    let x: Vec<Vec<f64>> = doc.s.into_iter().map(|element| element.x).collect();
+    assert_eq!(x, [vec![], vec![1.0]]);
 }
