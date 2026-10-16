@@ -11,7 +11,10 @@ use hdf5_pure_core::__private::{DecodedStoredAddress, FileRange, FileRegion, Phy
 use crate::address::StoredAddress;
 use crate::bytes;
 use crate::checksum;
+use crate::convert;
+use crate::convert::Narrow;
 use crate::error::FormatError;
+use crate::filter_pipeline::FilterPipeline;
 use crate::fractal_heap::FRACTAL_HEAP_DIRECT_BLOCKS_CHECKSUMMED;
 use crate::fractal_heap::FractalHeapFiltering;
 use crate::fractal_heap::FractalHeapHeader;
@@ -328,6 +331,34 @@ impl<'a> FractalHeapDirectBlock<'a> {
     pub const fn filter_mask(&self) -> Option<u32> {
         self.filter_mask
     }
+    /// Returns the heap's filter pipeline with this block's filter mask, or [`None`] for an
+    /// unfiltered heap.
+    pub fn filters(&self) -> Option<FractalHeapBlockFilters<'a>> {
+        let FractalHeapFiltering::Filtered { pipeline, .. } = &self.heap.filtering else {
+            return None;
+        };
+        Some(FractalHeapBlockFilters {
+            pipeline,
+            mask: self.filter_mask?,
+        })
+    }
+}
+
+/// Describes the filter pipeline and the filter mask of one direct block of a filtered heap.
+///
+/// The pipeline is the heap header's "I/O Filter Information" field. The mask is the root
+/// direct block's "I/O Filter Mask" in the header, or a child's "Filter Mask for Direct Block"
+/// entry in its parent indirect block. Both are defined for version 0 of the heap header and of
+/// the indirect block in "Fractal Heap" of the [format specification, version 4.0][spec].
+///
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsec_fmt4_infra_fractalheap
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct FractalHeapBlockFilters<'a> {
+    /// The heap's filters, in the order the writer applies them.
+    pub pipeline: &'a FilterPipeline,
+    /// Bit `i` is set if the writer skipped filter `i` of [`pipeline`](Self::pipeline) for this
+    /// block.
+    pub mask: u32,
 }
 
 /// Describes a direct block's physical allocation and expected structural fields.
@@ -470,20 +501,67 @@ impl FractalHeapDirectBlockRef<'_> {
         } else {
             None
         };
-        let local = heap_offset
-            .checked_sub(self.block.heap_offset)
-            .ok_or(FormatError::InvalidFractalHeapGeometry)?;
-        let end = local
-            .checked_add(length)
-            .ok_or(FormatError::InvalidFractalHeapGeometry)?;
-        if local < prefix.len() as u64 || end > self.block.decoded_size {
-            return Err(FormatError::InvalidFractalHeapGeometry);
-        }
+        let local = self.object_offset(heap_offset, length)?;
         Ok(FractalHeapObjectRef {
             range: FileRange::new(self.range.start().checked_add(local)?, length)?,
             block_range: self.range,
             stored_checksum,
         })
+    }
+
+    /// Parses a block from its decoded bytes and borrows its complete bytes and object-data area.
+    ///
+    /// `decoded` holds the block with its filters reversed, or the stored block of an unfiltered
+    /// heap. Validates its length, signature, version, owner, and heap offset. If the heap header
+    /// requires a checksum, validates it regardless of the `checksum` feature.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::InvalidFractalHeapGeometry`] if `decoded` is not
+    /// [`FractalHeapDirectBlock::decoded_size`] bytes long,
+    /// [`FormatError::InvalidFractalHeapSignature`], [`FormatError::InvalidFractalHeapVersion`],
+    /// [`FormatError::InvalidFractalHeapBlockOwner`], or
+    /// [`FormatError::InvalidFractalHeapBlockOffset`] if a prefix field is invalid, and
+    /// [`FormatError::ChecksumMismatch`] if the block's checksum differs from its stored value.
+    pub fn parse_decoded_checked<'bytes>(
+        &self,
+        decoded: &'bytes [u8],
+    ) -> Result<FractalHeapDirectBlockView<'bytes>, FormatError> {
+        self.check_decoded_len(decoded)?;
+        self.parse_block_bytes(decoded, true)
+    }
+
+    /// Validates a managed object's bounds in a block's decoded bytes and borrows the object.
+    ///
+    /// `decoded` is as for [`Self::parse_decoded_checked`], and `heap_offset` is in the heap's
+    /// managed address space. Validates the length, signature, version, owner, and block offset of
+    /// `decoded`, then checks that the object lies within the block's data area. Checksum
+    /// validation requires [`Self::parse_decoded_checked`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::InvalidFractalHeapGeometry`] if `decoded` is not
+    /// [`FractalHeapDirectBlock::decoded_size`] bytes long or if the object bounds overflow,
+    /// overlap the prefix, or exceed the block, and
+    /// [`FormatError::InvalidFractalHeapSignature`], [`FormatError::InvalidFractalHeapVersion`],
+    /// [`FormatError::InvalidFractalHeapBlockOwner`], or
+    /// [`FormatError::InvalidFractalHeapBlockOffset`] if a prefix field is invalid.
+    pub fn parse_decoded_object<'bytes>(
+        &self,
+        decoded: &'bytes [u8],
+        heap_offset: u64,
+        length: u64,
+    ) -> Result<&'bytes [u8], FormatError> {
+        self.check_decoded_len(decoded)?;
+        self.block
+            .heap
+            .parse_prefix(decoded, &DIRECT_SIGNATURE, self.block.heap_offset)?;
+        decoded
+            .get(convert::slice_range(
+                self.object_offset(heap_offset, length)?,
+                length,
+            )?)
+            .ok_or(FormatError::InvalidFractalHeapGeometry)
     }
 
     /// Returns the unfiltered prefix and the checksum field when present.
@@ -536,7 +614,8 @@ impl FractalHeapDirectBlockRef<'_> {
     }
     /// Returns the physical bytes required for complete block parsing.
     ///
-    /// This equals [`Self::range`]. Parsing a filtered block is unsupported.
+    /// This equals [`Self::range`]. Use [`Self::parse_decoded_checked`] for a filtered block's
+    /// decoded bytes.
     pub const fn parse_range(&self) -> FileRange {
         self.range
     }
@@ -560,7 +639,14 @@ impl FractalHeapDirectBlockRef<'_> {
         if self.block.filter_mask.is_some() {
             return Err(FormatError::UnsupportedFilteredHeapObject);
         }
-        let block = region.subregion(self.range)?.bytes();
+        self.parse_block_bytes(region.subregion(self.range)?.bytes(), require_checksum)
+    }
+
+    fn parse_block_bytes<'bytes>(
+        &self,
+        block: &'bytes [u8],
+        require_checksum: bool,
+    ) -> Result<FractalHeapDirectBlockView<'bytes>, FormatError> {
         self.block
             .heap
             .parse_prefix(block, &DIRECT_SIGNATURE, self.block.heap_offset)?;
@@ -579,6 +665,32 @@ impl FractalHeapDirectBlockRef<'_> {
             .get(data_at..)
             .ok_or(FormatError::InvalidFractalHeapGeometry)?;
         Ok(FractalHeapDirectBlockView { bytes: block, data })
+    }
+
+    fn check_decoded_len(&self, decoded: &[u8]) -> Result<(), FormatError> {
+        if decoded.len().to_u64() != self.block.decoded_size {
+            return Err(FormatError::InvalidFractalHeapGeometry);
+        }
+        Ok(())
+    }
+
+    fn object_offset(&self, heap_offset: u64, length: u64) -> Result<u64, FormatError> {
+        let local = heap_offset
+            .checked_sub(self.block.heap_offset)
+            .ok_or(FormatError::InvalidFractalHeapGeometry)?;
+        let end = local
+            .checked_add(length)
+            .ok_or(FormatError::InvalidFractalHeapGeometry)?;
+        let data_at = self.block.heap.prefix_len()
+            + if self.block.heap.checksummed {
+                CHECKSUM_LEN
+            } else {
+                0
+            };
+        if local < data_at.to_u64() || end > self.block.decoded_size {
+            return Err(FormatError::InvalidFractalHeapGeometry);
+        }
+        Ok(local)
     }
 }
 
@@ -1261,6 +1373,137 @@ mod tests {
     }
 
     #[rstest]
+    #[case::unfiltered(false)]
+    #[case::filtered(true)]
+    fn direct_blocks_parse_from_their_decoded_bytes(#[case] filtered: bool) {
+        let heap = heap(OffsetWidth::Eight, 0, true, filtered);
+        let block = direct_root(&heap);
+        let reference = block.at(PhysicalAddress::new(768)).unwrap();
+        let decoded = direct_bytes(&heap);
+        let data_at = heap.prefix_len() + CHECKSUM_LEN;
+        let view = reference.parse_decoded_checked(&decoded).unwrap();
+        assert_eq!(view.bytes(), decoded);
+        assert_eq!(view.data(), vec![0x5A; 128 - data_at]);
+        assert_eq!(
+            reference
+                .parse_decoded_object(&decoded, data_at.to_u64() + 2, 3)
+                .unwrap(),
+            &[0x5A; 3]
+        );
+        let FractalHeapFiltering::Filtered { pipeline, .. } = &heap.filtering else {
+            assert_eq!(block.filters(), None);
+            return;
+        };
+        assert_eq!(
+            block.filters(),
+            Some(FractalHeapBlockFilters { pipeline, mask: 1 })
+        );
+    }
+
+    #[rstest]
+    #[case::short(Damage::Truncate, FormatError::InvalidFractalHeapGeometry)]
+    #[case::long(Damage::Extend, FormatError::InvalidFractalHeapGeometry)]
+    #[case::owner(
+        Damage::Byte(OWNER_AT, 97),
+        FormatError::InvalidFractalHeapBlockOwner { expected: 96, actual: 97 }
+    )]
+    #[case::offset(
+        Damage::Byte(BLOCK_OFFSET_AT, 1),
+        FormatError::InvalidFractalHeapBlockOffset { expected: 0, actual: 1 }
+    )]
+    fn decoded_blocks_reject_a_wrong_length_or_prefix(
+        #[case] damage: Damage,
+        #[case] expected: FormatError,
+    ) {
+        let heap = heap(OffsetWidth::Eight, 0, true, true);
+        let reference = direct_root(&heap).at(PhysicalAddress::new(768)).unwrap();
+        let mut decoded = direct_bytes(&heap);
+        match damage {
+            Damage::Truncate => {
+                decoded.pop();
+            }
+            Damage::Extend => decoded.push(0),
+            Damage::Byte(at, value) => decoded[at] = value,
+        }
+        assert_eq!(
+            reference.parse_decoded_checked(&decoded).unwrap_err(),
+            expected
+        );
+        let data_at = (heap.prefix_len() + CHECKSUM_LEN).to_u64();
+        assert_eq!(
+            reference
+                .parse_decoded_object(&decoded, data_at, 3)
+                .unwrap_err(),
+            expected
+        );
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum Damage {
+        Byte(usize, u8),
+        Extend,
+        Truncate,
+    }
+
+    #[test]
+    fn a_decoded_block_checksum_is_validated_by_the_checked_parse_alone() {
+        let heap = heap(OffsetWidth::Eight, 0, true, true);
+        let reference = direct_root(&heap).at(PhysicalAddress::new(768)).unwrap();
+        let mut decoded = direct_bytes(&heap);
+        let checksum_at = heap.prefix_len();
+        let stored = u32::from_le_bytes(
+            decoded[checksum_at..checksum_at + CHECKSUM_LEN]
+                .try_into()
+                .unwrap(),
+        );
+        *decoded.last_mut().unwrap() ^= 1;
+        let mut zeroed = decoded.clone();
+        zeroed[checksum_at..checksum_at + CHECKSUM_LEN].fill(0);
+        assert_eq!(
+            reference.parse_decoded_checked(&decoded).unwrap_err(),
+            FormatError::ChecksumMismatch {
+                expected: stored,
+                computed: checksum::jenkins_lookup3(&zeroed)
+            }
+        );
+        let data_at = (checksum_at + CHECKSUM_LEN).to_u64();
+        assert_eq!(
+            reference
+                .parse_decoded_object(&decoded, data_at, 3)
+                .unwrap(),
+            &[0x5A; 3]
+        );
+    }
+
+    #[rstest]
+    #[case::checksum_field(ObjectBounds::ChecksumField)]
+    #[case::past_the_block(ObjectBounds::PastTheBlock)]
+    #[case::overflow(ObjectBounds::Overflow)]
+    fn decoded_objects_reject_invalid_bounds(#[case] bounds: ObjectBounds) {
+        let heap = heap(OffsetWidth::Eight, 0, true, true);
+        let reference = direct_root(&heap).at(PhysicalAddress::new(768)).unwrap();
+        let decoded = direct_bytes(&heap);
+        let (offset, length) = match bounds {
+            ObjectBounds::ChecksumField => (heap.prefix_len().to_u64(), 3),
+            ObjectBounds::Overflow => (u64::MAX, 1),
+            ObjectBounds::PastTheBlock => (decoded.len().to_u64() - 2, 3),
+        };
+        assert_eq!(
+            reference
+                .parse_decoded_object(&decoded, offset, length)
+                .unwrap_err(),
+            FormatError::InvalidFractalHeapGeometry
+        );
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum ObjectBounds {
+        ChecksumField,
+        Overflow,
+        PastTheBlock,
+    }
+
+    #[rstest]
     #[case::size(8, 0, false)]
     #[case::mask(16, 2, false)]
     #[case::undefined_address(0, 0xFF, true)]
@@ -1514,4 +1757,8 @@ mod tests {
             }
         );
     }
+
+    // The fixture heaps store eight-byte offsets, so the block offset follows an eight-byte owner.
+    const OWNER_AT: usize = SIGNATURE_LEN + 1;
+    const BLOCK_OFFSET_AT: usize = OWNER_AT + 8;
 }
