@@ -36,6 +36,18 @@ It holds a `datetime` with a non-zero imaginary (sub-millisecond) component,
 stored as an HDF5 **version-1 compound** `{real, imag}` of `f64` — the case used
 to pin the datetime double-double scale and to regression-test compound parsing.
 
+### Also: `test_struct_unset_field_v73.mat`
+
+Written by MATLAB R2026a (`Platform: PCWIN64`) for this repository with:
+
+```matlab
+s(2).x = 1;
+save('test_struct_unset_field_v73.mat', 's', '-v7.3');
+```
+
+Because `s(1).x` was never set, MATLAB stores it as a reference to the `canonical empty`
+placeholder. The file is distributed under this crate's license.
+
 ## Licenses
 
 `foreverallama/matio` is distributed under the BSD 3-Clause License and
