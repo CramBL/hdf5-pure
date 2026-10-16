@@ -74,6 +74,7 @@ mod superblock_addresses;
 mod superblock_search;
 mod swmr_append;
 mod swmr_refresh;
+mod symbol_table_soft_links;
 mod userblock_base_address;
 mod vlen_chunked;
 mod vlen_string_attrs;

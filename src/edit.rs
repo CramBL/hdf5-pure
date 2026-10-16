@@ -345,6 +345,7 @@ use crate::filter_pipeline::FilterPipeline;
 use crate::filters::{ChunkContext, FilterScratch, compress_chunk_with, decompress_chunk};
 use crate::free_space_manager::PersistedSections;
 use crate::free_space_manager::{self, ManagerPlan, align_up};
+use crate::group_v1;
 use crate::group_v2::resolve_group_entries_from_source;
 use crate::image::{FileImage, HandleImage, MirrorImage, WriteBuffering};
 use crate::libver::LibVer;
@@ -361,6 +362,7 @@ use crate::source::{BaseOffsetSource, BytesSource, MetadataCacheConfig, Source};
 use crate::superblock;
 use crate::superblock::LocatedSuperblock;
 use crate::superblock::Superblock;
+use crate::symbol_table::SymbolTableMessage;
 use crate::type_builders::{
     AttrValue, DatasetBuilder, ObjectRefPatch, ObjectRefTarget, VlStringStaging,
     build_attr_message, build_global_heap_collections, make_f32_type, make_f64_type, make_i8_type,
@@ -7827,7 +7829,8 @@ impl WriteEngine {
     /// symbol-table message and other non-link/non-attribute messages
     /// (modification time, comment, …) are dropped — editing a v0/v1 group
     /// converts it to the latest format. Refuses an attribute it cannot
-    /// reproduce (shared, or larger than a v2 message can hold).
+    /// reproduce (shared, or larger than a v2 message can hold), and a group
+    /// holding a soft link, which the conversion would drop.
     fn reconstruct_v1_group(&self, addr: u64) -> Result<GroupInfo, Error> {
         let base = self.addresses;
         let oh = ObjectHeader::parse_from_source_with_widths(
@@ -7845,6 +7848,24 @@ impl WriteEngine {
             return Err(Error::EditUnsupported(
                 "a target path names a dataset, not a group",
             ));
+        }
+        if let Some(message) = oh
+            .messages
+            .iter()
+            .find(|m| m.msg_type == MessageType::SYMBOL_TABLE)
+        {
+            let symbol_table =
+                SymbolTableMessage::parse_with_offset_width(&message.data, self.widths.offsets)?;
+            if group_v1::v1_group_holds_symbolic_link_from_source(
+                &self.image(),
+                &symbol_table,
+                self.widths,
+                self.addresses,
+            )? {
+                return Err(Error::EditUnsupported(
+                    "a version 1 group holding a soft link cannot be converted in place",
+                ));
+            }
         }
         let entries = resolve_group_entries_from_source(
             &self.image(),

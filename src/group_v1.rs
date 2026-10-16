@@ -24,13 +24,16 @@ pub struct GroupEntry {
     pub name: String,
     /// Address of the child's object header.
     pub object_header_address: StoredAddress,
-    /// Cache type from the symbol table (SNOD) entry. Parsed for on-disk
-    /// completeness; the reader does not currently act on it.
+    /// Cache type from the symbol table (SNOD) entry. The group walks never return a
+    /// [`SYMBOLIC_LINK`] entry.
     #[allow(dead_code)]
     pub cache_type: u32,
 }
 
 /// Returns one entry per child using validated file widths.
+///
+/// A symbolic link ([`SYMBOLIC_LINK`]) identifies no object header in this file and is passed
+/// over, as a version 2 group's soft links are.
 ///
 /// # Errors
 ///
@@ -59,7 +62,11 @@ pub fn resolve_v1_group_entries(
             addresses.absolute(snod_addr)?.to_usize()?,
             widths,
         )?;
-        for entry in &snod.entries {
+        for entry in snod
+            .entries
+            .iter()
+            .filter(|entry| entry.cache_type != SYMBOLIC_LINK)
+        {
             let name = heap.read_string(
                 file_data,
                 addresses.effective_base(),
@@ -83,6 +90,37 @@ pub fn resolve_v1_group_entries(
 /// Returns the errors of [`resolve_v1_group_entries`], and the error `source` reports
 /// for a structure it cannot read.
 pub fn resolve_v1_group_entries_from_source<S: Source + ?Sized>(
+    source: &S,
+    sym_table_msg: &SymbolTableMessage,
+    widths: FormatWidths,
+    addresses: AddressContext,
+) -> Result<Vec<GroupEntry>, FormatError> {
+    let mut entries = v1_symbols_from_source(source, sym_table_msg, widths, addresses)?;
+    entries.retain(|entry| entry.cache_type != SYMBOLIC_LINK);
+    Ok(entries)
+}
+
+/// Returns whether the version 1 group `sym_table_msg` describes holds a symbolic link
+/// ([`SYMBOLIC_LINK`]), which [`resolve_v1_group_entries_from_source`] passes over.
+///
+/// # Errors
+///
+/// Returns the errors of [`resolve_v1_group_entries_from_source`].
+pub(crate) fn v1_group_holds_symbolic_link_from_source<S: Source + ?Sized>(
+    source: &S,
+    sym_table_msg: &SymbolTableMessage,
+    widths: FormatWidths,
+    addresses: AddressContext,
+) -> Result<bool, FormatError> {
+    Ok(
+        v1_symbols_from_source(source, sym_table_msg, widths, addresses)?
+            .iter()
+            .any(|entry| entry.cache_type == SYMBOLIC_LINK),
+    )
+}
+
+/// Returns every entry of the version 1 group `sym_table_msg` describes, symbolic links included.
+fn v1_symbols_from_source<S: Source + ?Sized>(
     source: &S,
     sym_table_msg: &SymbolTableMessage,
     widths: FormatWidths,
@@ -126,6 +164,17 @@ pub fn resolve_v1_group_entries_from_source<S: Source + ?Sized>(
     Ok(entries)
 }
 
+/// The symbol table entry cache type of a symbolic link. Its object header address is the
+/// undefined address and its scratch pad holds the local heap offset of the link's value, so the
+/// entry identifies no object header in this file. The C library calls this cache type
+/// `H5G_CACHED_SLINK`.
+///
+/// The cache types are defined in "Symbol Table Entry" of the [format specification, version
+/// 4.0][spec].
+///
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsec_fmt4_infra_symboltableentry
+pub(crate) const SYMBOLIC_LINK: u32 = 2;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -133,6 +182,7 @@ mod tests {
     use crate::address::AddressContext;
     use crate::message_type::MessageType;
     use crate::object_header::ObjectHeader;
+    use crate::source::BytesSource;
     use test_util::image::Image;
     use test_util::widths::Widths;
     use test_util::{btree_v1, local_heap, symbol_table};
@@ -197,6 +247,34 @@ mod tests {
         };
 
         (image.build(), msg)
+    }
+
+    /// A symbolic link's entry carries the undefined address. Listing it as a
+    /// child would send the walk to an object header that is not even there.
+    #[test]
+    fn a_symbolic_link_is_not_a_child() {
+        let (file, msg) = build_synthetic_group(
+            &[
+                ("data", 0x1000, 0),
+                ("pointer", u64::MAX, SYMBOLIC_LINK),
+                ("group", 0x2000, 1),
+            ],
+            Widths::EIGHT,
+        );
+        let widths = FormatWidths::from_sizes(8, 8).unwrap();
+        let addresses = AddressContext::from_effective_base(BaseAddress::ZERO);
+        let names = |entries: Vec<GroupEntry>| -> Vec<String> {
+            entries.into_iter().map(|entry| entry.name).collect()
+        };
+        let in_memory = resolve_v1_group_entries(&file, &msg, widths, addresses).unwrap();
+        assert_eq!(names(in_memory), ["data", "group"]);
+        let source = BytesSource::new(&file[..]);
+        let streamed =
+            resolve_v1_group_entries_from_source(&source, &msg, widths, addresses).unwrap();
+        assert_eq!(names(streamed), ["data", "group"]);
+        assert!(
+            v1_group_holds_symbolic_link_from_source(&source, &msg, widths, addresses).unwrap()
+        );
     }
 
     #[test]
