@@ -683,7 +683,8 @@ Before editing or reclaiming a checksummed fractal-heap direct block, the editor
 complete block's checksum, including when the `checksum` feature is disabled. Read-only heap
 object lookups may read only a block prefix and the object bytes. Those bounded reads
 validate structural fields and object bounds without establishing the complete block's checksum
-integrity.
+integrity. In a filtered heap, the whole direct block is read and decoded for a lookup, and the
+editor validates the checksum on the decoded bytes.
 
 On a paged file ([`FileSpaceStrategy::Page`](crate::FileSpaceStrategy::Page)) an allocation is served from free space of the page type it is writing, or from a page that is wholly free, since a page with nothing in it has no type to contradict, so reuse cannot make metadata and raw data share a page. Freed space whose page type cannot be established, a whole-file-generic free section recorded by another writer, or a chunk index that writer placed among its metadata, is recorded and never handed out, which costs some space and keeps the page separation.
 

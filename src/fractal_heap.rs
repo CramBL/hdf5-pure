@@ -6,10 +6,12 @@ use alloc::borrow::Cow;
 use alloc::collections::BTreeSet;
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
+use core::num::NonZeroU32;
 
 use hdf5_pure_core::__private::{FileRange, FileRegion};
 use hdf5_pure_format::__private::BTREE_V2_HUGE_OBJECT;
 use hdf5_pure_format::__private::FractalHeapBlock;
+use hdf5_pure_format::__private::FractalHeapBlockFilters;
 use hdf5_pure_format::__private::FractalHeapBlockLayout;
 pub use hdf5_pure_format::__private::FractalHeapHeader;
 use hdf5_pure_format::__private::FractalHeapHeaderLocator;
@@ -27,6 +29,9 @@ use crate::btree_v2::{
 };
 use crate::convert::Narrow;
 use crate::error::FormatError;
+use crate::filter_pipeline::FILTER_SHUFFLE;
+use crate::filters;
+use crate::filters::ChunkContext;
 use crate::source::Source;
 use crate::source::SourceMetadata;
 use crate::width::FormatWidths;
@@ -119,6 +124,52 @@ pub(crate) fn read_header_range(
     source.read_metadata_at(
         addresses.relative(range.start().get())?.get(),
         range.length().to_usize()?,
+    )
+}
+
+/// Reverses the active filters on a direct block's encoded bytes.
+///
+/// The block is decoded as one chunk of `decoded_size` one-byte elements.
+///
+/// # Errors
+///
+/// Returns [`FormatError::UnsupportedFilter`] if an active filter has no decoder or an active
+/// shuffle filter has an element width other than one byte,
+/// [`FormatError::DataSizeMismatch`] if the decoded block is not `decoded_size` bytes long, and a
+/// filter-specific [`FormatError`] if the encoded bytes are malformed.
+pub(crate) fn decode_direct_block(
+    encoded: &[u8],
+    filters: FractalHeapBlockFilters<'_>,
+    decoded_size: u64,
+) -> Result<Vec<u8>, FormatError> {
+    // `H5Z__filter_shuffle` in `H5Zshuffle.c`, HDF5 2.2.0, shuffles at the width in its first
+    // client value. `filters::decompress_chunk` reverses a shuffle at the element size of its
+    // context, one byte here, so an active shuffle filter of another width is rejected.
+    let wide_shuffle = filters
+        .pipeline
+        .filters
+        .iter()
+        .enumerate()
+        .any(|(index, filter)| {
+            let skipped = u32::try_from(index)
+                .ok()
+                .and_then(|bit| filters.mask.checked_shr(bit))
+                .is_some_and(|mask| mask & 1 == 1);
+            filter.filter_id == FILTER_SHUFFLE && !skipped && filter.client_data != [1]
+        });
+    if wide_shuffle {
+        return Err(FormatError::UnsupportedFilter(FILTER_SHUFFLE));
+    }
+    filters::decompress_chunk(
+        encoded,
+        filters.pipeline,
+        ChunkContext {
+            chunk_dims: &[decoded_size],
+            element_size: NonZeroU32::MIN,
+            element_type: None,
+            scale_offset_type: None,
+        },
+        filters.mask,
     )
 }
 
@@ -255,6 +306,11 @@ impl HugeObjectIndex {
 /// validates a checksummed direct block in full before reading an object and caches successful
 /// validation for subsequent objects in that block. Validation caches require an unchanged image
 /// and one backend for the lifetime of the reader.
+///
+/// In a filtered heap, the reader reads and decodes the whole direct block that holds a managed
+/// object, then validates the block's prefix and the object bounds in the decoded bytes. It keeps
+/// the decoded block for the next lookup in that block, under the same requirements. With
+/// read-write access, it validates a checksummed block in full on its decoded bytes.
 pub struct HeapObjectReader<'h> {
     header: &'h FractalHeapHeader,
     widths: FormatWidths,
@@ -263,6 +319,8 @@ pub struct HeapObjectReader<'h> {
     /// Direct blocks whose complete checksums were validated against this reader's image.
     validated_direct: BTreeSet<StoredAddress>,
     validated_backend: Option<Backend>,
+    /// The stored address and the decoded bytes of the filtered direct block read last.
+    decoded_direct: Option<(StoredAddress, Vec<u8>)>,
     layout: Result<FractalHeapBlockLayout, FormatError>,
     /// Parsed on demand, since most heaps hold no huge object at all.
     huge: Option<HugeObjectIndex>,
@@ -302,18 +360,11 @@ impl<'h> HeapObjectReader<'h> {
             access_mode,
             validated_direct: BTreeSet::new(),
             validated_backend: None,
-            layout: if header.filtering.is_filtered() {
-                Err(FormatError::UnsupportedFilteredHeapObject)
-            } else {
-                FractalHeapBlockLayout::new(header, widths.offsets, widths.lengths, owner)
-            },
+            decoded_direct: None,
+            layout: FractalHeapBlockLayout::new(header, widths.offsets, widths.lengths, owner),
             huge: None,
             huge_backend: None,
         }
-    }
-
-    fn managed_layout(&self) -> Result<&FractalHeapBlockLayout, FormatError> {
-        self.layout.as_ref().map_err(Clone::clone)
     }
 
     /// Reads the object identified by a parsed ID from a file image.
@@ -323,13 +374,14 @@ impl<'h> HeapObjectReader<'h> {
     ///
     /// # Errors
     ///
-    /// Returns [`FormatError::UnsupportedFilteredHeapObject`] for a managed object in a filtered
-    /// heap, [`FormatError::HugeObjectNotFound`] if an indexed huge object is absent, and
+    /// Returns [`FormatError::HugeObjectNotFound`] if an indexed huge object is absent, and
     /// [`FormatError::UnexpectedEof`] if a managed object has no allocated block or a required
-    /// file region is truncated. Returns [`FormatError::ChunkedReadError`] if indirect-block
-    /// traversal exceeds 64 levels, [`FormatError::ValueTooLargeForPlatform`] if a value does not
-    /// fit the platform's address width, and [`FormatError::OffsetOverflow`] if a file offset
-    /// overflows. Returns errors from parsing heap blocks and huge-object index metadata.
+    /// file region is truncated. Returns the errors of decoding a filtered direct block, such as
+    /// [`FormatError::UnsupportedFilter`] if its pipeline has a filter without a decoder.
+    /// Returns [`FormatError::ChunkedReadError`] if indirect-block traversal exceeds 64 levels,
+    /// [`FormatError::ValueTooLargeForPlatform`] if a value does not fit the platform's address
+    /// width, and [`FormatError::OffsetOverflow`] if a file offset overflows. Returns errors from
+    /// parsing heap blocks and huge-object index metadata.
     ///
     /// # Panics
     ///
@@ -508,10 +560,7 @@ impl<'h> HeapObjectReader<'h> {
         heap_offset: u64,
         object_length: u64,
     ) -> Result<Vec<u8>, FormatError> {
-        if self.header.filtering.is_filtered() {
-            return Err(FormatError::UnsupportedFilteredHeapObject);
-        }
-        if self.validated_direct.is_empty() {
+        if self.validated_direct.is_empty() && self.decoded_direct.is_none() {
             self.validated_backend = Some(backend);
         }
         debug_assert_eq!(
@@ -519,7 +568,7 @@ impl<'h> HeapObjectReader<'h> {
             Some(backend),
             "validated direct blocks belong to the backend that supplied their bytes"
         );
-        let blocks = self.managed_layout()?;
+        let blocks = self.layout.as_ref().map_err(Clone::clone)?;
         let mut block = blocks.root()?.ok_or(FormatError::UnexpectedEof {
             expected: 1,
             available: 0,
@@ -533,6 +582,25 @@ impl<'h> HeapObjectReader<'h> {
                             & hdf5_pure_format::__private::FRACTAL_HEAP_DIRECT_BLOCKS_CHECKSUMMED
                             != 0
                         && !self.validated_direct.contains(&direct.address());
+                    if let Some(filters) = direct.filters() {
+                        let decoded = match self.decoded_direct.take() {
+                            Some((address, decoded)) if address == direct.address() => decoded,
+                            _ => decode_direct_block(
+                                &read(reference.range())?,
+                                filters,
+                                direct.decoded_size(),
+                            )?,
+                        };
+                        if require_checksum {
+                            reference.parse_decoded_checked(&decoded)?;
+                            self.validated_direct.insert(direct.address());
+                        }
+                        let object = reference
+                            .parse_decoded_object(&decoded, heap_offset, object_length)?
+                            .to_vec();
+                        self.decoded_direct = Some((direct.address(), decoded));
+                        return Ok(object);
+                    }
                     let range = if require_checksum {
                         reference.parse_range()
                     } else {
@@ -602,6 +670,7 @@ mod tests {
 
     use crate::address::{BaseAddress, BaseAddressExt, OpenedImageContext};
     use crate::source::{BaseOffsetSource, BytesSource};
+    use crate::test_data;
 
     use super::*;
 
@@ -975,74 +1044,275 @@ mod tests {
         assert_eq!(&from_seek, b"Hello, World!");
     }
 
-    #[test]
-    fn filtered_managed_heap_is_refused_not_misparsed() {
-        // A filtered managed heap stores its direct-block contents filter-encoded
-        // and inserts per-child `filtered_size`/`filter_mask` fields in indirect
-        // blocks. We do not decode either, so every managed read path must refuse
-        // cleanly (UnsupportedFilteredHeapObject) rather than return raw bytes or
-        // mis-stride the child-pointer walk.
-        let managed_id = [0x00u8, 0, 0, 0, 0, 0, 0]; // type bits 0 -> Managed
-
-        // Root is a direct block.
-        let mut h = FractalHeapHeader {
-            heap_id_length: 7,
-            filtering: FractalHeapFiltering::Filtered {
-                root_direct_block_size: 91,
-                root_filter_mask: 1,
-                pipeline: FilterPipeline {
-                    version: PIPELINE_VERSION_TWO,
-                    filters: vec![],
-                },
-            },
-            flags: 0,
-            max_managed_object_size: 0,
-            next_huge_object_id: 0,
-            btree_huge_objects_address: StoredAddress::new(u64::MAX),
-            free_space_in_managed_blocks: 0,
-            managed_block_free_space_manager_address: StoredAddress::new(u64::MAX),
-            managed_space: 0,
-            allocated_managed_space: 0,
-            direct_block_allocation_iterator_offset: 0,
-            managed_objects_count: 0,
-            huge_objects_size: 0,
-            huge_objects_count: 0,
-            tiny_objects_size: 0,
-            tiny_objects_count: 0,
-            table_width: 4,
-            starting_block_size: 512,
-            max_direct_block_size: 65536,
-            max_heap_size: 64,
-            start_root_rows: 1,
-            root_block_address: StoredAddress::new(0x100),
-            current_rows_in_root_indirect_block: 0,
+    #[cfg(feature = "deflate")]
+    #[rstest]
+    #[case::direct_root(false)]
+    #[case::indirect_root(true)]
+    fn filtered_managed_objects_are_read_from_their_decoded_block(
+        #[case] indirect: bool,
+        #[values(AccessMode::ReadOnly, AccessMode::ReadWrite)] mode: AccessMode,
+        #[values(
+            test_data::deflate_pipeline(),
+            test_data::filter_pipeline(vec![
+                test_data::shuffle(1),
+                test_data::deflate_pipeline().filters[0].clone(),
+            ])
+        )]
+        pipeline: FilterPipeline,
+    ) {
+        let heap = FilteredHeap::new(indirect, pipeline, |_block| {});
+        let source = HeaderSource {
+            bytes: &heap.image,
+            reads: RefCell::new(Vec::new()),
         };
-        let file = vec![0u8; 0x400];
+        let id = heap.object_id();
+        let mut reader = heap.reader(mode);
+        for _ in 0..2 {
+            assert_eq!(
+                reader
+                    .read_from_source(&source, parse_id(&heap.header, &id))
+                    .unwrap(),
+                b"abc"
+            );
+        }
+        let block = (FILTERED_BLOCK_AT, heap.encoded_len);
+        let root = (FILTERED_ROOT_AT, heap.indirect_len);
+        // The reader reuses the decoded block on the second read and reads only the root indirect
+        // block again.
         assert_eq!(
-            HeapObjectReader::new(
-                &h,
-                AddressContext::from_effective_base(BaseAddress::ZERO),
-                StoredAddress::ZERO,
-                AccessMode::ReadOnly,
-                FORMAT_WIDTHS
-            )
-            .read(&file, parse_id(&h, &managed_id)),
-            Err(FormatError::UnsupportedFilteredHeapObject)
+            *source.reads.borrow(),
+            if indirect {
+                vec![root, block, root]
+            } else {
+                vec![block]
+            }
         );
+        assert_eq!(
+            heap.reader(mode)
+                .read(&heap.image, parse_id(&heap.header, &id))
+                .unwrap(),
+            b"abc"
+        );
+    }
 
-        // Root is an indirect block: the refusal happens before any child walk.
-        h.current_rows_in_root_indirect_block = 2;
+    #[cfg(feature = "deflate")]
+    #[rstest]
+    #[case::read_only(AccessMode::ReadOnly, false)]
+    #[case::read_write(AccessMode::ReadWrite, true)]
+    fn a_decoded_block_checksum_is_validated_for_read_write_access(
+        #[case] mode: AccessMode,
+        #[case] validated: bool,
+    ) {
+        let mut stored = 0;
+        let mut computed = 0;
+        let heap = FilteredHeap::new(true, test_data::deflate_pipeline(), |block| {
+            let checksum = test_data::DIRECT_BLOCK_CHECKSUM_AT..test_data::DIRECT_BLOCK_DATA_AT;
+            stored = u32::from_le_bytes(block[checksum.clone()].try_into().unwrap());
+            *block.last_mut().unwrap() ^= 1;
+            let mut zeroed = block.to_vec();
+            zeroed[checksum].fill(0);
+            computed = crate::checksum::jenkins_lookup3(&zeroed);
+        });
+        let id = heap.object_id();
+        let result = heap
+            .reader(mode)
+            .read(&heap.image, parse_id(&heap.header, &id));
+        if validated {
+            assert_eq!(
+                result.unwrap_err(),
+                FormatError::ChecksumMismatch {
+                    expected: stored,
+                    computed
+                }
+            );
+        } else {
+            assert_eq!(result.unwrap(), b"abc");
+        }
+    }
+
+    #[rstest]
+    #[case::unknown_filter(
+        FilterDescription {
+            filter_id: test_data::FILTER_BZIP2,
+            name: None,
+            flags: 0,
+            client_data: vec![],
+        },
+        test_data::FILTER_BZIP2
+    )]
+    #[case::wide_shuffle(test_data::shuffle(4), FILTER_SHUFFLE)]
+    fn a_filtered_block_without_a_decoder_is_rejected(
+        #[case] filter: FilterDescription,
+        #[case] unsupported: u16,
+    ) {
+        let mut heap = FilteredHeap::new(false, test_data::filter_pipeline(vec![]), |_block| {});
+        let FractalHeapFiltering::Filtered { pipeline, .. } = &mut heap.header.filtering else {
+            panic!("the fixture heap is filtered");
+        };
+        *pipeline = test_data::filter_pipeline(vec![filter]);
+        let id = heap.object_id();
         assert_eq!(
+            heap.reader(AccessMode::ReadOnly)
+                .read(&heap.image, parse_id(&heap.header, &id))
+                .unwrap_err(),
+            FormatError::UnsupportedFilter(unsupported)
+        );
+    }
+
+    #[test]
+    fn a_block_that_skips_a_wide_shuffle_is_read() {
+        let mut heap = FilteredHeap::new(false, test_data::filter_pipeline(vec![]), |_block| {});
+        let FractalHeapFiltering::Filtered {
+            pipeline,
+            root_filter_mask,
+            ..
+        } = &mut heap.header.filtering
+        else {
+            panic!("the fixture heap is filtered");
+        };
+        *pipeline = test_data::filter_pipeline(vec![test_data::shuffle(4)]);
+        *root_filter_mask = 1;
+        let id = heap.object_id();
+        assert_eq!(
+            heap.reader(AccessMode::ReadOnly)
+                .read(&heap.image, parse_id(&heap.header, &id))
+                .unwrap(),
+            b"abc"
+        );
+    }
+
+    #[cfg(feature = "deflate")]
+    #[test]
+    fn a_filtered_block_that_decodes_to_another_size_is_rejected() {
+        let mut heap = FilteredHeap::new(false, test_data::deflate_pipeline(), |_block| {});
+        let decoded = vec![0; 127];
+        let encoded = test_data::encode_block(&decoded, &test_data::deflate_pipeline());
+        let at = usize::try_from(FILTERED_BLOCK_AT).unwrap();
+        heap.image[at..at + encoded.len()].copy_from_slice(&encoded);
+        let FractalHeapFiltering::Filtered {
+            root_direct_block_size,
+            ..
+        } = &mut heap.header.filtering
+        else {
+            panic!("the fixture heap is filtered");
+        };
+        *root_direct_block_size = u64::try_from(encoded.len()).unwrap();
+        let id = heap.object_id();
+        assert_eq!(
+            heap.reader(AccessMode::ReadOnly)
+                .read(&heap.image, parse_id(&heap.header, &id))
+                .unwrap_err(),
+            FormatError::DataSizeMismatch {
+                expected: 128,
+                actual: 127
+            }
+        );
+    }
+
+    /// A heap whose one checksummed direct block holds `abc` and is encoded through a pipeline:
+    /// the root block, or the second child of a root indirect block.
+    struct FilteredHeap {
+        header: FractalHeapHeader,
+        image: Vec<u8>,
+        block_offset: u64,
+        encoded_len: usize,
+        indirect_len: usize,
+    }
+
+    impl FilteredHeap {
+        /// Encodes the block through `pipeline`, after applying `damage` to its decoded bytes.
+        fn new(indirect: bool, pipeline: FilterPipeline, damage: impl FnOnce(&mut [u8])) -> Self {
+            let block_offset = if indirect { FILTERED_BLOCK_SIZE } else { 0 };
+            let mut block = fractal_heap::DIRECT_BLOCK_SIGNATURE.to_vec();
+            block.push(test_data::BLOCK_VERSION);
+            block.extend_from_slice(&0u64.to_le_bytes());
+            block.extend_from_slice(&u16::try_from(block_offset).unwrap().to_le_bytes());
+            block.extend_from_slice(&[0; 4]);
+            block.extend_from_slice(b"abc");
+            block.resize(usize::try_from(FILTERED_BLOCK_SIZE).unwrap(), 0);
+            let checksum = crate::checksum::jenkins_lookup3(&block);
+            block[test_data::DIRECT_BLOCK_CHECKSUM_AT..test_data::DIRECT_BLOCK_DATA_AT]
+                .copy_from_slice(&checksum.to_le_bytes());
+            damage(&mut block);
+            let encoded = test_data::encode_block(&block, &pipeline);
+            let encoded_len = encoded.len();
+            let mut image = vec![0; 0x400];
+            let at = usize::try_from(FILTERED_BLOCK_AT).unwrap();
+            image[at..at + encoded_len].copy_from_slice(&encoded);
+            let mut indirect_len = 0;
+            if indirect {
+                let mut root = fractal_heap::INDIRECT_BLOCK_SIGNATURE.to_vec();
+                root.push(test_data::BLOCK_VERSION);
+                root.extend_from_slice(&0u64.to_le_bytes());
+                root.extend_from_slice(&0u16.to_le_bytes());
+                for column in 0..4 {
+                    let (address, size) = if column == 1 {
+                        (FILTERED_BLOCK_AT, u64::try_from(encoded_len).unwrap())
+                    } else {
+                        (u64::MAX, 0)
+                    };
+                    root.extend_from_slice(&address.to_le_bytes());
+                    root.extend_from_slice(&size.to_le_bytes());
+                    root.extend_from_slice(&0u32.to_le_bytes());
+                }
+                let checksum = crate::checksum::jenkins_lookup3(&root);
+                root.extend_from_slice(&checksum.to_le_bytes());
+                indirect_len = root.len();
+                let at = usize::try_from(FILTERED_ROOT_AT).unwrap();
+                image[at..at + indirect_len].copy_from_slice(&root);
+            }
+            let header = FractalHeapHeader {
+                flags: hdf5_pure_format::__private::FRACTAL_HEAP_DIRECT_BLOCKS_CHECKSUMMED,
+                root_block_address: StoredAddress::new(if indirect {
+                    FILTERED_ROOT_AT
+                } else {
+                    FILTERED_BLOCK_AT
+                }),
+                current_rows_in_root_indirect_block: u16::from(indirect),
+                filtering: FractalHeapFiltering::Filtered {
+                    root_direct_block_size: if indirect {
+                        0
+                    } else {
+                        u64::try_from(encoded_len).unwrap()
+                    },
+                    root_filter_mask: 0,
+                    pipeline,
+                },
+                ..FractalHeapHeader::parse(
+                    &fractal_heap::Header::new(0).build(Widths::EIGHT),
+                    0,
+                    8,
+                    8,
+                )
+                .unwrap()
+            };
+            Self {
+                header,
+                image,
+                block_offset,
+                encoded_len,
+                indirect_len,
+            }
+        }
+
+        fn object_id(&self) -> Vec<u8> {
+            let mut id = vec![0];
+            let object_at =
+                self.block_offset + u64::try_from(test_data::DIRECT_BLOCK_DATA_AT).unwrap();
+            id.extend_from_slice(&u16::try_from(object_at).unwrap().to_le_bytes());
+            id.extend_from_slice(&[3, 0, 0, 0]);
+            id
+        }
+
+        fn reader(&self, mode: AccessMode) -> HeapObjectReader<'_> {
             HeapObjectReader::new(
-                &h,
+                &self.header,
                 AddressContext::from_effective_base(BaseAddress::ZERO),
                 StoredAddress::ZERO,
-                AccessMode::ReadOnly,
-                FORMAT_WIDTHS
+                mode,
+                FORMAT_WIDTHS,
             )
-            .read(&file, parse_id(&h, &managed_id)),
-            Err(FormatError::UnsupportedFilteredHeapObject)
-        );
+        }
     }
 
     /// Type-1 record: address(8) + length(8) + id(8), little-endian.
@@ -1245,6 +1515,9 @@ mod tests {
             .unwrap()
     }
 
+    const FILTERED_ROOT_AT: u64 = 0x100;
+    const FILTERED_BLOCK_AT: u64 = 0x200;
+    const FILTERED_BLOCK_SIZE: u64 = 128;
     // A version 0 huge ID has type 1 in bits 4 and 5 ("Fractal Heap", specification 4.0).
     const HUGE_ID_FIRST_BYTE: u8 = 0x10;
     // A version 0 tiny ID has type 2 in bits 4 and 5 ("Fractal Heap", specification 4.0).

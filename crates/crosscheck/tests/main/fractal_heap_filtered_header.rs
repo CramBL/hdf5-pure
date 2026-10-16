@@ -5,9 +5,7 @@ use std::fs;
 use hdf5::File as CFile;
 use hdf5::plist::GroupCreate;
 use hdf5::plist::file_access::LibraryVersion;
-use hdf5_pure::Error;
 use hdf5_pure::File;
-use hdf5_pure::FormatError;
 use hdf5_pure_core::__private::{FileRange, FileRegion, PhysicalAddress};
 use hdf5_pure_format::__private::FilterDescription;
 use hdf5_pure_format::__private::FilterPipeline;
@@ -21,7 +19,7 @@ use test_util_hdf5::group_filter;
 #[rstest]
 #[case::earliest(LibraryVersion::V18)]
 #[case::latest(LibraryVersion::latest())]
-fn a_c_written_filtered_header_retains_the_root_fields_and_pipeline(
+fn a_c_written_filtered_link_heap_is_parsed_and_its_links_are_listed(
     #[case] bounds: LibraryVersion,
     #[values(0, 512)] userblock: u64,
 ) {
@@ -93,32 +91,22 @@ fn a_c_written_filtered_header_retains_the_root_fields_and_pipeline(
     names.sort();
     assert_eq!(names, expected_names);
     c_file.close().unwrap();
-    let buffered = File::open(&path)
+    let mut buffered = File::open(&path)
         .unwrap()
         .group("g")
         .unwrap()
         .groups()
-        .unwrap_err();
-    assert!(
-        matches!(
-            buffered,
-            Error::Format(FormatError::UnsupportedFilteredHeapObject)
-        ),
-        "{buffered:?}"
-    );
-    let streaming = File::open_streaming(&path)
+        .unwrap();
+    buffered.sort();
+    assert_eq!(buffered, expected_names);
+    let mut streaming = File::open_streaming(&path)
         .unwrap()
         .group("g")
         .unwrap()
         .groups()
-        .unwrap_err();
-    assert!(
-        matches!(
-            streaming,
-            Error::Format(FormatError::UnsupportedFilteredHeapObject)
-        ),
-        "{streaming:?}"
-    );
+        .unwrap();
+    streaming.sort();
+    assert_eq!(streaming, expected_names);
 }
 
 // "Fractal Heap", format specification version 4.0, defines the header signature.

@@ -612,10 +612,8 @@ pub enum FormatError {
     UnsupportedFillValueVersion(u8),
     /// Unsupported filter ID.
     UnsupportedFilter(u16),
-    /// A fractal-heap object lives in an I/O-filter-encoded heap (filtered
-    /// managed or huge storage), whose filtered bytes this reader does not
-    /// decode. Link and attribute heaps are never filtered, so this does not
-    /// arise for them.
+    /// A filtered fractal heap holds an object or structure that this crate does not decode or
+    /// encode, such as a huge object.
     UnsupportedFilteredHeapObject,
     /// Unknown message type that is marked as must-understand.
     UnsupportedMessage(u16),

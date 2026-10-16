@@ -124,6 +124,7 @@ pub use crate::fractal_heap::FractalHeapLayout;
 pub use crate::fractal_heap::FractalHeapLayoutError;
 pub use crate::fractal_heap::HugeObjectReference;
 pub use crate::fractal_heap_block::FractalHeapBlock;
+pub use crate::fractal_heap_block::FractalHeapBlockFilters;
 pub use crate::fractal_heap_block::FractalHeapBlockLayout;
 pub use crate::fractal_heap_block::FractalHeapDirectBlock;
 pub use crate::fractal_heap_block::FractalHeapDirectBlockRef;
