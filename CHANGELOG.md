@@ -35,6 +35,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- Fixed `mat::from_file` and `mat::from_bytes` failing with `MatError::UnknownClass("canonical empty")` on a struct-array field that MATLAB never set. The field reads as `[]`, an empty double ([#NN](https://github.com/CramBL/hdf5-pure/pull/NN)).
 - Fixed `Dataset::write_staged` rejecting compatible one-byte fixed-point datatypes whose byte-order fields differ, including nested variable-length base types. All other datatype fields remain checked ([#763](https://github.com/CramBL/hdf5-pure/pull/763)).
 - Fixed `Dataset::read_string` and related reads of variable-length data failing on a file that stores 2- or 4-byte lengths. Reads reject a global heap collection that is smaller than 4096 bytes or malformed after the object they read ([#760](https://github.com/CramBL/hdf5-pure/pull/760)).
 - Fixed global heap collections sharing metadata pages in files created through `FileBuilder::with_file_space_strategy`. Paged edits also place replacement collections in raw pages ([#763](https://github.com/CramBL/hdf5-pure/pull/763)).
