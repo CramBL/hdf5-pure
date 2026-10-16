@@ -43,6 +43,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- Fixed `Group::datasets`, `Group::groups` and path lookup failing on a version 1 (symbol-table) group that holds a soft link, whose entry the reader resolved as a child at the undefined address. The soft link is passed over, as in a version 2 group ([#771](https://github.com/CramBL/hdf5-pure/pull/771)).
+- Fixed `File::open_rw` converting a version 1 group that holds a soft link into one whose link points at the undefined address. The conversion returns `Error::EditUnsupported` instead ([#771](https://github.com/CramBL/hdf5-pure/pull/771)).
 - Fixed `Dataset::chunks` and related reads accepting a Fixed Array chunk index whose header has a reserved client ID, or whose data block has a version other than 0 or a client ID or header address that differs from the header's ([#782](https://github.com/CramBL/hdf5-pure/pull/782)).
 - Fixed `Dataset::chunks` and related reads failing on a Fixed Array chunk index whose header stores the undefined data block address. Such an index reads as empty ([#782](https://github.com/CramBL/hdf5-pure/pull/782)).
 - Fixed `Dataset::write_staged` rejecting compatible one-byte fixed-point datatypes whose byte-order fields differ, including nested variable-length base types. All other datatype fields remain checked ([#763](https://github.com/CramBL/hdf5-pure/pull/763)).

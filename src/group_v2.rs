@@ -490,6 +490,9 @@ pub fn resolve_path_any(
 
 /// Returns the entries of a group using validated file widths.
 ///
+/// A version 2 group's soft and external links, and a version 1 group's symbolic links, are passed
+/// over: they identify no object header in this file.
+///
 /// # Errors
 ///
 /// Returns [`FormatError::PathNotFound`] if the header describes no group, and the
