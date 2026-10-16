@@ -99,6 +99,22 @@ pub(crate) fn read_header_from_source(
     address: StoredAddress,
     widths: FormatWidths,
 ) -> Result<FractalHeapHeader, FormatError> {
+    read_header_and_range_from_source(source, addresses, address, widths).map(|(header, _)| header)
+}
+
+/// Reads a fractal heap header from a source, with the physical range of its encoded bytes.
+///
+/// The range includes the header's filter fields when it stores them.
+///
+/// # Errors
+///
+/// Returns the errors of [`read_header_from_source`].
+pub(crate) fn read_header_and_range_from_source(
+    source: &(impl Source + ?Sized),
+    addresses: AddressContext,
+    address: StoredAddress,
+    widths: FormatWidths,
+) -> Result<(FractalHeapHeader, FileRange), FormatError> {
     let locator =
         FractalHeapHeaderLocator::new(addresses.resolve(address)?, widths.offsets, widths.lengths);
     let prefix_range = locator.parse_range()?;
@@ -106,7 +122,10 @@ pub(crate) fn read_header_from_source(
     let header_ref = locator.parse(FileRegion::new(prefix_range, &prefix)?)?;
     let range = header_ref.parse_range();
     let bytes = read_header_range(source, addresses, range)?;
-    header_ref.parse(FileRegion::new(range, &bytes)?)
+    Ok((
+        header_ref.parse(FileRegion::new(range, &bytes)?)?,
+        header_ref.range(),
+    ))
 }
 
 /// Reads a physical header range through a source framed at `addresses`' effective base.

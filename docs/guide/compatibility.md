@@ -19,7 +19,7 @@ The tables cover file-format compatibility and HDF5 behavior. Features not liste
 |---|:---:|:---:|:---:|---|
 | Version 1 symbol table | ✅ | ⬆️ | ✅ | Modified groups use compact link storage. |
 | Compact link storage | ✅ | ✅ | ✅ | |
-| Dense link storage | ✅ | ❌ | ❌ | Deleting a group's last hard link reclaims its v2 B-tree indexes, its fractal heap, and its subtree. A group whose link heap is filtered stays allocated with its subtree. Managed-space free-space-manager metadata is reclaimed with the heap when that metadata is valid and supported. Invalid or unsupported manager metadata leaves the heap allocated. |
+| Dense link storage | ✅ | ❌ | ❌ | Deleting a group's last hard link reclaims its v2 B-tree indexes, its fractal heap, and its subtree. A filtered link heap is reclaimed too. A group whose link heap is filtered and has huge objects or a filter without a decoder stays allocated with its subtree. Managed-space free-space-manager metadata is reclaimed with the heap when that metadata is valid and supported. Invalid or unsupported manager metadata leaves the heap allocated. |
 | Link creation-order tracking | ✅ | ❌ | 🟡 | New links can be added while compact storage remains valid. |
 
 ### Attributes
@@ -27,7 +27,7 @@ The tables cover file-format compatibility and HDF5 behavior. Features not liste
 | Feature | Read | Create | Modify | Detail |
 |---|:---:|:---:|:---:|---|
 | Compact storage | ✅ | ✅ | ✅ | |
-| Dense storage | ✅ | ✅ | ✅ | Deleting an object's last hard link, or editing its dense attributes, reclaims the set's v2 B-tree indexes and its fractal heap. A filtered attribute heap stays allocated, and so does its owner unless the owner is a group with dense link storage. Managed-space free-space-manager metadata is reclaimed with the heap when that metadata is valid and supported. Invalid or unsupported manager metadata leaves the heap allocated. |
+| Dense storage | ✅ | ✅ | ✅ | Deleting an object's last hard link, or editing its dense attributes, reclaims the set's v2 B-tree indexes and its fractal heap. A filtered attribute heap is reclaimed too. One with huge objects or a filter without a decoder stays allocated, and so does its owner unless the owner is a group with dense link storage. Managed-space free-space-manager metadata is reclaimed with the heap when that metadata is valid and supported. Invalid or unsupported manager metadata leaves the heap allocated. |
 | Attribute creation-order tracking | ✅ | ❌ | ✅ | |
 | Attribute phase-change thresholds | ✅ | ❌ | ✅ | Existing thresholds are preserved. |
 | Null dataspace | ✅ | ❌ | ❌ | Reading returns an empty value. |

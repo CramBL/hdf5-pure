@@ -12,6 +12,7 @@ use hdf5::plist::file_create::FileSpaceStrategy as CStrategy;
 use hdf5::plist::group_create::{GroupCreate, GroupCreateBuilder};
 use hdf5::{IndexType, IterationOrder};
 use hdf5_pure::AttrValue;
+use hdf5_pure::DecodedStoredAddress;
 use hdf5_pure::Error;
 use hdf5_pure::File;
 use hdf5_pure::FormatError;
@@ -20,6 +21,7 @@ use hdf5_pure_core::OffsetWidth;
 use hdf5_pure_format::__private::AccessMode;
 use hdf5_pure_format::__private::AttributeInfoMessage;
 use hdf5_pure_format::__private::FormatWidths;
+use hdf5_pure_format::__private::FractalHeapFiltering;
 use hdf5_pure_format::__private::FractalHeapHeader;
 use hdf5_pure_format::__private::FreeSpaceManagerHeader;
 use hdf5_pure_format::__private::FreeSpaceManagerHeaderFrame;
@@ -35,6 +37,7 @@ use test_util::free_space;
 use test_util::range;
 use test_util_hdf5::absence;
 use test_util_hdf5::creation_order::{self, Indexing};
+use test_util_hdf5::group_filter;
 
 fn object_location(path: &Path, object: &str) -> (hdf5::File, hdf5::Location) {
     let file = hdf5::File::open(path)
@@ -777,7 +780,6 @@ fn owned_heap_allocations(
 
 fn free_space_manager_blocks(path: &Path) -> Vec<(u64, u64)> {
     let bytes = framed_bytes(path);
-    let widths = FormatWidths::from_sizes(8, 8).unwrap();
     File::open(path)
         .unwrap()
         .file_space_info()
@@ -785,28 +787,26 @@ fn free_space_manager_blocks(path: &Path) -> Vec<(u64, u64)> {
         .manager_addrs
         .iter()
         .filter_map(|&addr| match addr {
-            hdf5_pure::DecodedStoredAddress::Defined(stored) => Some(stored),
-            hdf5_pure::DecodedStoredAddress::Undefined => None,
+            DecodedStoredAddress::Defined(stored) => Some(stored),
+            DecodedStoredAddress::Undefined => None,
         })
-        .flat_map(|stored| {
-            let header = FreeSpaceManagerHeader::parse(
-                widths,
-                &bytes[usize::try_from(stored.get()).unwrap()..],
-            )
-            .unwrap();
-            let mut blocks = vec![(
-                stored.get(),
-                hdf5_pure_format::__private::free_space_manager_header_len(widths),
-            )];
-            if !header.section_list_addr().is_undefined(OffsetWidth::Eight) {
-                blocks.push((
-                    header.section_list_addr().get(),
-                    header.section_list_allocated(),
-                ));
-            }
-            blocks
-        })
+        .flat_map(|stored| free_space_manager_extents(&bytes, stored.get()))
         .collect()
+}
+
+fn free_space_manager_extents(bytes: &[u8], address: u64) -> Vec<(u64, u64)> {
+    let widths = FormatWidths::from_sizes(8, 8).unwrap();
+    let frame =
+        FreeSpaceManagerHeaderFrame::parse(widths, &bytes[usize::try_from(address).unwrap()..])
+            .unwrap();
+    let mut extents = vec![(
+        address,
+        hdf5_pure_format::__private::free_space_manager_header_len(widths),
+    )];
+    if let DecodedStoredAddress::Defined(list) = frame.section_list_addr() {
+        extents.push((list.get(), frame.section_list_allocated()));
+    }
+    extents
 }
 
 fn released_regions(path: &Path) -> Vec<(u64, u64)> {
@@ -851,7 +851,7 @@ fn manager_sections(path: &Path, manager: usize) -> Vec<(u64, u64)> {
         .file_space_info()
         .unwrap()
         .manager_addrs[manager];
-    let hdf5_pure::DecodedStoredAddress::Defined(stored) = addr else {
+    let DecodedStoredAddress::Defined(stored) = addr else {
         return Vec::new();
     };
     let header =
@@ -1220,10 +1220,161 @@ fn repeated_dense_storage_create_and_delete_on_a_paged_file_settles_at_a_steady_
     assert_c_reads_after_reclaim(&path);
 }
 
+#[rstest]
+fn c_written_filtered_link_heaps_are_reclaimed_with_their_group(
+    #[values(
+        FileSpace::Managers,
+        FileSpace::ManagersAfterUserblock,
+        FileSpace::Pages(DENSE_PAGE_SIZE)
+    )]
+    file_space: FileSpace,
+    #[values(DIRECT_ROOT_LINKS, INDIRECT_ROOT_LINKS)] links: usize,
+) {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("filtered_heap_reclaim.h5");
+    write_filtered_link_fixture(&path, file_space, links);
+    let heaps = dense_heaps(&path);
+    assert_eq!(heaps.len(), 1, "the fixture holds one dense heap");
+    let heap = &heaps[0];
+    let FractalHeapFiltering::Filtered {
+        root_direct_block_size,
+        ..
+    } = heap.header.filtering
+    else {
+        panic!("expected a filtered heap, got {:?}", heap.header.filtering);
+    };
+    let bytes = framed_bytes(&path);
+    let heap_at = usize::try_from(heap.address).unwrap();
+    let mut expected = vec![(
+        heap.address,
+        fractal_heap::encoded_header_len(&bytes, heap_at),
+    )];
+    if links == DIRECT_ROOT_LINKS {
+        assert_eq!(heap.header.current_rows_in_root_indirect_block, 0);
+        expected.push((heap.header.root_block_address.get(), root_direct_block_size));
+    } else {
+        assert!(heap.header.current_rows_in_root_indirect_block > 0);
+        let blocks = fractal_heap::filtered_indirect_root_blocks(&bytes, heap_at);
+        assert!(
+            blocks.len() > 2,
+            "the root indirect block has several children"
+        );
+        expected.extend(blocks);
+    }
+    let manager = heap.header.managed_block_free_space_manager_address;
+    if !manager.is_undefined(OffsetWidth::Eight) {
+        expected.extend(free_space_manager_extents(&bytes, manager.get()));
+    }
+    expected.sort_unstable();
+    let owned = hdf5_pure::__fractal_heap_storage_extents(&bytes, heap.address, 8, 8).unwrap();
+    assert_eq!(owned, expected);
+    let allocations: Vec<(u64, u64, PageClass)> = owned
+        .into_iter()
+        .map(|(address, len)| (address, len, PageClass::Metadata))
+        .collect();
+    let mut names = File::open(&path)
+        .unwrap()
+        .group("g")
+        .unwrap()
+        .groups()
+        .unwrap();
+    names.sort();
+    assert_eq!(names, filtered_link_names(links));
+
+    let session = File::open_rw(&path).unwrap();
+    let ownership = session.__space_ownership().unwrap();
+    assert!(ownership.analysis_complete);
+    let base = session.superblock().base_address.get();
+    for &(address, len, _) in &allocations {
+        assert_eq!(
+            range::covered_len(
+                &ownership.live_metadata_space,
+                &(base + address..base + address + len)
+            ),
+            len,
+            "the heap allocation ({address}, {len}) is live metadata"
+        );
+    }
+    session.root().delete("g").unwrap();
+    session.commit().unwrap();
+    assert!(session.__space_ownership().unwrap().analysis_complete);
+    drop(session);
+
+    assert_released(
+        file_space.page_size(),
+        &released_regions(&path),
+        &allocations,
+    );
+    if let Some(page_size) = file_space.page_size() {
+        assert_page_classes(&path, page_size, &allocations);
+    }
+    assert_c_reads_after_reclaim(&path);
+    {
+        let c = hdf5::File::open_rw(&path).unwrap();
+        let group = c
+            .create_group_builder()
+            .set_gcpl(&filtered_link_gcpl())
+            .create("g")
+            .unwrap();
+        for link_name in filtered_link_names(links) {
+            group.create_group(&link_name).unwrap();
+        }
+        drop(group);
+        c.close().unwrap();
+    }
+    let c = hdf5::File::open(&path).unwrap();
+    let mut names = c.group("g").unwrap().member_names().unwrap();
+    names.sort();
+    assert_eq!(names, filtered_link_names(links));
+    assert_eq!(
+        c.dataset("keep").unwrap().read_raw::<i32>().unwrap(),
+        vec![1, 2, 3, 4]
+    );
+}
+
+fn filtered_link_gcpl() -> GroupCreate {
+    let gcpl = GroupCreate::build()
+        .obj_track_times(false)
+        .finish()
+        .unwrap();
+    assert_eq!(group_filter::set_deflate(&gcpl, 6), 0);
+    gcpl
+}
+
+fn filtered_link_names(links: usize) -> Vec<String> {
+    (0..links).map(|i| format!("child_{i:03}")).collect()
+}
+
+/// Writes a file through the C library with a group `g` of `links` child groups, whose link heap
+/// has a deflate pipeline, and a dataset `keep`.
+fn write_filtered_link_fixture(path: &Path, file_space: FileSpace, links: usize) {
+    let file = create_dense_file(path, file_space);
+    let group = file
+        .create_group_builder()
+        .set_gcpl(&filtered_link_gcpl())
+        .create("g")
+        .unwrap();
+    for link_name in filtered_link_names(links) {
+        group
+            .create_group(&link_name)
+            .unwrap_or_else(|e| panic!("create filtered-group child {link_name}: {e}"));
+    }
+    drop(group);
+    file.new_dataset::<i32>()
+        .shape([4])
+        .create("keep")
+        .unwrap()
+        .write(&[1, 2, 3, 4])
+        .unwrap();
+    file.close().unwrap();
+}
+
 const DENSE_PAGE_SIZE: u64 = 16 * 1024;
 // `H5F_FILE_SPACE_PAGE_SIZE_MIN` in `H5Fprivate.h`, libhdf5 2.2.0.
 const SMALL_PAGE_SIZE: u64 = 512;
 const USERBLOCK: u64 = 512;
+const DIRECT_ROOT_LINKS: usize = 12;
+const INDIRECT_ROOT_LINKS: usize = 200;
 // `H5G_FHEAP_MAN_START_BLOCK_SIZE` in `H5Gdense.c` and `H5O_FHEAP_MAN_START_BLOCK_SIZE` in
 // `H5Oprivate.h`, libhdf5 2.2.0.
 const LINK_HEAP_START_BLOCK_SIZE: u64 = 512;

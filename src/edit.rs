@@ -210,9 +210,10 @@
 //! also reclaims their fractal heaps where complete ownership is proven, including managed-space
 //! manager headers and complete allocated section lists. Logical sections within the heap are
 //! excluded from file-space reclamation. Storage whose allocations cannot be enumerated
-//! exhaustively, such as a variable-length global heap collection or a filtered fractal heap, is
-//! left as dead bytes. This avoids freeing a region that may still be in use. Under-reclaiming only wastes space. Over-reclaiming could
-//! corrupt the file.
+//! exhaustively, such as a variable-length global heap collection or a filtered fractal heap with
+//! a filter this crate does not decode or with huge objects, is left as dead bytes. This avoids
+//! freeing a region that may still be in use. Under-reclaiming only wastes space. Over-reclaiming
+//! could corrupt the file.
 //!
 //! On a paged file that conservatism extends to anything whose *page type* is not
 //! established. A file another writer produced records free space this one cannot
@@ -14130,7 +14131,6 @@ mod tests {
     use crate::datatype::layout::FixedPointLayout;
     use crate::datatype::layout::FloatingPointLayout;
     use crate::datatype::{CharacterSet, StringPadding};
-    use crate::filter_pipeline::FilterDescription;
     use crate::fractal_heap_storage::FractalHeapAllocation;
     use crate::fractal_heap_storage::FractalHeapStorage;
     use crate::fractal_heap_storage::FractalHeapStorageError;
@@ -14723,10 +14723,11 @@ mod tests {
     enum HeapDamage {
         /// The root direct block stores a heap header address other than its heap's.
         DirectBlockOwner,
-        /// The heap header stores a deflate pipeline for its managed blocks.
-        Filters,
         /// The heap header stores a managed-space free-space manager address.
         FreeSpaceManager,
+        /// The heap header stores a deflate pipeline, and the root direct block stores bytes that
+        /// are not deflate-encoded.
+        UnencodedFilteredBlock,
     }
 
     struct RejectedHeapOwner {
@@ -14765,33 +14766,27 @@ mod tests {
         let heap_at = usize::try_from(heap_address).unwrap();
         let mut header =
             FractalHeapHeader::parse(&bytes, heap_at, OFFSET_SIZE, LENGTH_SIZE).unwrap();
-        let rejection = match damage {
+        let rejections = match damage {
             HeapDamage::DirectBlockOwner => {
                 assert_eq!(header.current_rows_in_root_indirect_block, 0);
                 let owner_at = usize::try_from(header.root_block_address.get()).unwrap()
                     + DIRECT_BLOCK_HEAP_ADDRESS_AT;
                 bytes[owner_at..owner_at + usize::from(OFFSET_SIZE)]
                     .copy_from_slice(&(heap_address + 1).to_le_bytes());
-                FractalHeapStorageError::Format(FormatError::InvalidFractalHeapBlockOwner {
-                    expected: heap_address,
-                    actual: heap_address + 1,
-                })
+                vec![FractalHeapStorageError::Format(
+                    FormatError::InvalidFractalHeapBlockOwner {
+                        expected: heap_address,
+                        actual: heap_address + 1,
+                    },
+                )]
             }
-            HeapDamage::Filters => {
-                let pipeline = FilterPipeline {
-                    version: PIPELINE_VERSION_TWO,
-                    filters: vec![FilterDescription {
-                        filter_id: crate::filter_pipeline::FILTER_DEFLATE,
-                        name: None,
-                        flags: 0,
-                        client_data: vec![6],
-                    }],
-                };
-                let encoded = test_util::fractal_heap::Header::new(header.root_block_address.get())
-                    .filtering(header.starting_block_size, 0, pipeline.serialize().unwrap())
-                    .build(Widths::EIGHT);
-                bytes[heap_at..heap_at + encoded.len()].copy_from_slice(&encoded);
-                FractalHeapStorageError::UnsupportedOwnership("filtered managed blocks")
+            HeapDamage::UnencodedFilteredBlock => {
+                filter_attribute_heap(&mut bytes, 0, heap_address, false);
+                crate::test_data::DEFLATE_HEADER_ERRORS
+                    .map(|reason| {
+                        FractalHeapStorageError::Format(FormatError::FilterError(reason.into()))
+                    })
+                    .to_vec()
             }
             HeapDamage::FreeSpaceManager => {
                 header.managed_block_free_space_manager_address =
@@ -14800,27 +14795,28 @@ mod tests {
                     .serialize(OffsetWidth::Eight, LengthWidth::Eight)
                     .unwrap();
                 bytes[heap_at..heap_at + encoded.len()].copy_from_slice(&encoded);
-                FractalHeapStorageError::Format(FormatError::UnexpectedEof {
-                    expected: bytes.len()
-                        + usize::try_from(
-                            hdf5_pure_format::__private::free_space_manager_header_len(
-                                FormatWidths::from_sizes(OFFSET_SIZE, LENGTH_SIZE).unwrap(),
-                            ),
-                        )
-                        .unwrap(),
-                    available: bytes.len(),
-                })
+                vec![FractalHeapStorageError::Format(
+                    FormatError::UnexpectedEof {
+                        expected: bytes.len()
+                            + usize::try_from(
+                                hdf5_pure_format::__private::free_space_manager_header_len(
+                                    FormatWidths::from_sizes(OFFSET_SIZE, LENGTH_SIZE).unwrap(),
+                                ),
+                            )
+                            .unwrap(),
+                        available: bytes.len(),
+                    },
+                )]
             }
         };
-        assert_eq!(
-            crate::fractal_heap_storage::collect_fractal_heap_storage_from_source(
-                &BytesSource::new(bytes.as_slice()),
-                AddressContext::from_effective_base(BaseAddress::ZERO),
-                StoredAddress::new(heap_address),
-                crate::file_writer::WIDTHS,
-            ),
-            Err(rejection)
-        );
+        let err = crate::fractal_heap_storage::collect_fractal_heap_storage_from_source(
+            &BytesSource::new(bytes.as_slice()),
+            AddressContext::from_effective_base(BaseAddress::ZERO),
+            StoredAddress::new(heap_address),
+            crate::file_writer::WIDTHS,
+        )
+        .unwrap_err();
+        assert!(rejections.contains(&err), "{err:?}");
         std::fs::write(path, bytes).unwrap();
 
         let index: Vec<(u64, u64, FreeClass)> = storage
@@ -14843,9 +14839,6 @@ mod tests {
         }
     }
 
-    // Version 2 of the filter pipeline message is defined in "The Data Storage - Filter Pipeline
-    // Message" of the format specification, version 4.0.
-    const PIPELINE_VERSION_TWO: u8 = 2;
     // The "Fractal Heap Direct Block" layout in "Fractal Heap" of the format specification,
     // version 4.0, places the Heap Header Address after the signature and the version byte.
     const DIRECT_BLOCK_HEAP_ADDRESS_AT: usize =
@@ -14854,6 +14847,7 @@ mod tests {
     #[rstest]
     #[case::wrong_block_owner(HeapDamage::DirectBlockOwner, false)]
     #[case::managed_free_space_manager(HeapDamage::FreeSpaceManager, true)]
+    #[case::unencoded_filtered_block(HeapDamage::UnencodedFilteredBlock, false)]
     fn reclamation_retains_storage_after_heap_validation_fails(
         #[case] damage: HeapDamage,
         #[case] reclaim_other: bool,
@@ -14905,46 +14899,129 @@ mod tests {
         }
     }
 
-    #[test]
-    fn deleting_the_owner_of_a_filtered_attribute_heap_reclaims_none_of_its_storage() {
+    #[rstest]
+    #[case::flat(FileSpaceStrategy::FsmAggr, 0)]
+    #[case::userblock(FileSpaceStrategy::FsmAggr, 512)]
+    #[case::paged(FileSpaceStrategy::Page, 0)]
+    fn deleting_the_owner_of_a_filtered_attribute_heap_reclaims_its_storage(
+        #[case] strategy: FileSpaceStrategy,
+        #[case] userblock: u64,
+    ) {
         let dir = tempdir().unwrap();
         let path = dir.path().join("dense_attribute_filtered_heap.h5");
+        write_dense_attribute_owner(&path, 0, strategy);
+        prepend_userblock(&path, userblock);
         let object = ObjectPathBuf::parse("/g");
-        let RejectedHeapOwner {
-            header_spans,
-            index,
-            heap,
-        } = write_rejected_heap_owner(&path, &object, HeapDamage::Filters);
+        let heap_address = {
+            let session = WriteEngine::open_with_locking(&path, FileLocking::Enabled).unwrap();
+            let DenseAttributeOwner { addr, .. } = dense_attribute_owner(&session, &object);
+            attribute_heap_address(&session, addr)
+        };
+        let mut bytes = std::fs::read(&path).unwrap();
+        let heap = filter_attribute_heap(&mut bytes, userblock, heap_address, true);
+        std::fs::write(&path, bytes).unwrap();
+        let attrs = crate::reader::File::open(&path)
+            .unwrap()
+            .group("g")
+            .unwrap()
+            .attrs()
+            .unwrap();
+        assert_eq!(attrs.len(), 12);
+        assert_eq!(attrs.get("a3"), Some(&AttrValue::I64(3)));
 
         let mut session = WriteEngine::open_with_locking(&path, FileLocking::Enabled).unwrap();
+        let DenseAttributeOwner {
+            header_spans,
+            storage,
+            ..
+        } = dense_attribute_owner(&session, &object);
+        for &(addr, len) in &heap {
+            assert!(
+                storage.contains(&(addr, len, FreeClass::Page(PageType::Meta))),
+                "the filtered heap allocation ({addr}, {len}) is in {storage:?}"
+            );
+        }
         session.delete(&object).unwrap();
         session.commit().unwrap();
 
-        let owned = header_spans
-            .iter()
-            .copied()
-            .chain(index.iter().map(|&(addr, len, _)| (addr, len)))
-            .chain(
-                heap.allocations()
-                    .iter()
-                    .map(|(extent, _)| (extent.start(), extent.len())),
-            );
-        for (addr, len) in owned {
+        for (addr, len) in header_spans
+            .into_iter()
+            .chain(storage.into_iter().map(|(addr, len, _)| (addr, len)))
+        {
             assert!(
-                !reusable_overlaps(&session, addr, len),
-                "({addr}, {len}) of an object the editor cannot read must stay allocated"
+                reusable_covers(&session, addr - userblock, len),
+                "({addr}, {len}) of the deleted object is reusable"
             );
         }
         drop(session);
-        let err = crate::reader::File::open(&path)
-            .unwrap()
-            .group("g")
-            .unwrap_err();
+        let reader = crate::reader::File::open(&path).unwrap();
+        let err = reader.group("g").unwrap_err();
         let Error::Format(FormatError::PathNotFound(missing)) = &err else {
             panic!("expected PathNotFound for g, got {err:?}");
         };
         assert_eq!(missing, "g");
+        assert_eq!(
+            reader.dataset("keep").unwrap().read_i32().unwrap(),
+            (0..1024).collect::<Vec<_>>()
+        );
     }
+
+    /// Rewrites the attribute heap at `heap_address` as a filtered heap with a deflate pipeline.
+    ///
+    /// Moves the root direct block to just after the longer header, deflate-encoded if `encode`
+    /// and cut to its first [`UNENCODED_BLOCK_LEN`] bytes otherwise.
+    /// `base` is the userblock length. Returns the file position and the length of the header
+    /// and of the root direct block.
+    fn filter_attribute_heap(
+        bytes: &mut [u8],
+        base: u64,
+        heap_address: u64,
+        encode: bool,
+    ) -> Vec<(u64, u64)> {
+        let heap_at = usize::try_from(heap_address).unwrap();
+        let header = FractalHeapHeader::parse(bytes, heap_at, OFFSET_SIZE, LENGTH_SIZE).unwrap();
+        assert_eq!(header.current_rows_in_root_indirect_block, 0);
+        let root_at = usize::try_from(header.root_block_address.get() + base).unwrap();
+        let block_len = usize::try_from(header.starting_block_size).unwrap();
+        let block = bytes[root_at..root_at + block_len].to_vec();
+        let pipeline = crate::test_data::deflate_pipeline();
+        let encoded = if encode {
+            crate::test_data::encode_block(&block, &pipeline)
+        } else {
+            block[..UNENCODED_BLOCK_LEN].to_vec()
+        };
+        let pipeline = pipeline.serialize().unwrap();
+        let filtered_header = |root: u64| {
+            let unfiltered = FractalHeapHeader {
+                root_block_address: StoredAddress::new(root),
+                ..header.clone()
+            }
+            .serialize(OffsetWidth::Eight, LengthWidth::Eight)
+            .unwrap();
+            crate::test_data::with_filtering(
+                &unfiltered,
+                Widths::EIGHT,
+                u64::try_from(encoded.len()).unwrap(),
+                0,
+                &pipeline,
+            )
+        };
+        let header_len = filtered_header(header.root_block_address.get()).len();
+        let filtered_root = heap_at + header_len;
+        assert!(filtered_root + encoded.len() <= root_at + block_len);
+        let filtered = filtered_header(u64::try_from(filtered_root).unwrap() - base);
+        bytes[heap_at..heap_at + header_len].copy_from_slice(&filtered);
+        bytes[filtered_root..filtered_root + encoded.len()].copy_from_slice(&encoded);
+        vec![
+            (heap_address, u64::try_from(header_len).unwrap()),
+            (
+                u64::try_from(filtered_root).unwrap(),
+                u64::try_from(encoded.len()).unwrap(),
+            ),
+        ]
+    }
+
+    const UNENCODED_BLOCK_LEN: usize = 64;
 
     #[test]
     fn deleting_a_c_written_dense_link_group_reclaims_its_whole_subtree() {

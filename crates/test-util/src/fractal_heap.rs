@@ -310,6 +310,67 @@ pub fn root_indirect_rows(bytes: &[u8]) -> u16 {
     )
 }
 
+/// Returns the length of the heap header at `header` in `bytes`, with its filter fields when it
+/// stores them.
+pub fn encoded_header_len(bytes: &[u8], header: usize) -> u64 {
+    let filter_info_len = usize::from(bytes::u16_at(bytes, header + FILTER_INFO_LEN_AT));
+    let filter_fields_len = if filter_info_len == 0 {
+        0
+    } else {
+        LENGTH + FILTER_MASK_LEN + filter_info_len
+    };
+    u64::try_from(ROOT_ROWS_AT + 2 + filter_fields_len + checksum::CHECKSUM).unwrap()
+}
+
+/// Returns the root indirect block of the filtered heap whose header is at `header` in `bytes`,
+/// then the direct children of the root, each as an address and a length.
+///
+/// The length of a direct block is its filtered size.
+///
+/// # Panics
+///
+/// Panics if the root is a direct block or has an indirect child.
+pub fn filtered_indirect_root_blocks(bytes: &[u8], header: usize) -> Vec<(u64, u64)> {
+    let table_width = usize::from(bytes::u16_at(bytes, header + TABLE_WIDTH_AT));
+    let starting_block_size = bytes::u64_at(bytes, header + TABLE_WIDTH_AT + 2);
+    let max_direct_block_size = bytes::u64_at(bytes, header + TABLE_WIDTH_AT + 2 + LENGTH);
+    let max_heap_size = usize::from(bytes::u16_at(
+        bytes,
+        header + TABLE_WIDTH_AT + 2 + 2 * LENGTH,
+    ));
+    let root = usize::try_from(bytes::u64_at(bytes, header + ROOT_ROWS_AT - LENGTH)).unwrap();
+    let rows = usize::from(bytes::u16_at(bytes, header + ROOT_ROWS_AT));
+    assert_ne!(rows, 0, "the heap's root is an indirect block");
+    assert_eq!(
+        bytes::slice_at(bytes, root, INDIRECT_BLOCK_SIGNATURE.len()),
+        INDIRECT_BLOCK_SIGNATURE
+    );
+    let direct_rows = usize::try_from(
+        max_direct_block_size.trailing_zeros() - starting_block_size.trailing_zeros() + 2,
+    )
+    .unwrap();
+    let mut at = root + INDIRECT_BLOCK_SIGNATURE.len() + 1 + LENGTH + max_heap_size.div_ceil(8);
+    let mut children = Vec::new();
+    for row in 0..rows {
+        for _ in 0..table_width {
+            let address = bytes::u64_at(bytes, at);
+            at += LENGTH;
+            if row >= direct_rows {
+                assert_eq!(address, u64::MAX, "the fixture nests no indirect block");
+                continue;
+            }
+            let filtered_size = bytes::u64_at(bytes, at);
+            at += LENGTH + FILTER_MASK_LEN;
+            if address != u64::MAX {
+                children.push((address, filtered_size));
+            }
+        }
+    }
+    let root_len = u64::try_from(at + checksum::CHECKSUM - root).unwrap();
+    children.insert(0, (u64::try_from(root).unwrap(), root_len));
+    children
+}
+
 /// How many fractal-heap indirect blocks the file holds. More than one means the
 /// root's own row of them filled up and the table nested.
 pub fn indirect_block_count(bytes: &[u8]) -> usize {
@@ -327,3 +388,14 @@ const VERSION: u8 = 0;
 /// Byte offsets below are for the eight-byte lengths every file these readers
 /// are pointed at carries.
 const LENGTH: usize = 8;
+
+/// The offset of the "I/O Filters' Encoded Length" field in a heap header, after the signature,
+/// the version, and the heap ID length.
+pub const FILTER_INFO_LEN_AT: usize = SIGNATURE.len() + 1 + 2;
+// "Fractal Heap" of the format specification, version 4.0, defines the twelve eight-byte length
+// and address fields of the version 0 heap header after the flags and the maximum managed object
+// size. The table width, the starting and maximum direct block sizes, the maximum heap size, the
+// starting root rows and the root block address precede the current root rows.
+const TABLE_WIDTH_AT: usize = FILTER_INFO_LEN_AT + 2 + 1 + 4 + 12 * LENGTH;
+const ROOT_ROWS_AT: usize = TABLE_WIDTH_AT + 2 + 2 * LENGTH + 2 + 2 + LENGTH;
+const FILTER_MASK_LEN: usize = 4;
