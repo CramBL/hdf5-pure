@@ -329,12 +329,18 @@ pub fn repack<P: AsRef<Path>, Q: AsRef<Path>>(
     dst: Q,
     options: &RepackOptions,
 ) -> Result<(), Error> {
+    stage(src.as_ref(), options)?.write(dst)
+}
+
+/// Stages every object of `src` that `options` keeps in a [`FileBuilder`], with the
+/// output format chosen, running every fidelity check before a byte is written.
+fn stage(src: &Path, options: &RepackOptions) -> Result<FileBuilder, Error> {
     // Open the source for on-demand streaming reads: metadata and one working
     // chunk are resident at a time, never the whole file. Shared so each streamed
     // dataset's chunk provider can pull from the same handle during the write
     // without an extra open.
     let file = Arc::new(File::open_streaming_with_access_mode(
-        src.as_ref(),
+        src,
         options.source_access_mode(),
     )?);
 
@@ -430,8 +436,7 @@ pub fn repack<P: AsRef<Path>, Q: AsRef<Path>>(
         )));
     }
 
-    builder.write(dst)?;
-    Ok(())
+    Ok(builder)
 }
 
 /// A destination that group contents can be added to. Implemented for both the
