@@ -10,6 +10,9 @@
 
 use std::path::{Path, PathBuf};
 
+use test_util::fractal_heap;
+use test_util::widths::Widths;
+
 use crate::filter_pipeline::FilterDescription;
 use crate::filter_pipeline::FilterPipeline;
 use crate::filters::ChunkContext;
@@ -65,6 +68,30 @@ pub fn shuffle(width: u32) -> FilterDescription {
     }
 }
 
+/// Returns the unfiltered fractal heap `header` with the filter fields of a filtered one.
+///
+/// The fields hold the encoded length of `pipeline`, the root direct block's filtered size
+/// `root_size`, its filter mask `mask`, and `pipeline` itself. The checksum is computed over the
+/// result.
+pub fn with_filtering(
+    header: &[u8],
+    widths: Widths,
+    root_size: u64,
+    mask: u32,
+    pipeline: &[u8],
+) -> Vec<u8> {
+    let mut filtered = header[..header.len() - test_util::checksum::CHECKSUM].to_vec();
+    let encoded_len = u16::try_from(pipeline.len()).expect("fixture pipeline fits u16");
+    filtered[fractal_heap::FILTER_INFO_LEN_AT..fractal_heap::FILTER_INFO_LEN_AT + 2]
+        .copy_from_slice(&encoded_len.to_le_bytes());
+    test_util::bytes::push_uint(&mut filtered, root_size, widths.length);
+    filtered.extend_from_slice(&mask.to_le_bytes());
+    filtered.extend_from_slice(pipeline);
+    test_util::checksum::append(&mut filtered);
+    filtered
+}
+
+/// Encodes `block` through `pipeline` as one chunk of one-byte elements.
 pub fn encode_block(block: &[u8], pipeline: &FilterPipeline) -> Vec<u8> {
     crate::filters::compress_chunk(
         block,
@@ -85,4 +112,10 @@ pub const FILTER_BZIP2: u16 = 307;
 pub const BLOCK_VERSION: u8 = 0;
 pub const DIRECT_BLOCK_OWNER_AT: usize = test_util::fractal_heap::DIRECT_BLOCK_SIGNATURE.len() + 1;
 pub const DIRECT_BLOCK_CHECKSUM_AT: usize = DIRECT_BLOCK_OWNER_AT + 8 + 2;
-pub const DIRECT_BLOCK_DATA_AT: usize = DIRECT_BLOCK_CHECKSUM_AT + 4;
+pub const DIRECT_BLOCK_DATA_AT: usize = DIRECT_BLOCK_CHECKSUM_AT + test_util::checksum::CHECKSUM;
+// The messages the deflate decoders of the `deflate` and `fast-deflate` features report for a
+// stream without a zlib header.
+pub const DEFLATE_HEADER_ERRORS: [&str; 2] = [
+    "deflate: deflate decompression error",
+    "deflate: deflate decompression error: incorrect header check",
+];

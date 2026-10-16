@@ -14,7 +14,10 @@ use hdf5_pure_format::__private::BTREE_V2_HUGE_OBJECT;
 use hdf5_pure_format::__private::BTREE_V2_HUGE_OBJECT_DIRECT;
 use hdf5_pure_format::__private::FormatWidths;
 use hdf5_pure_format::__private::FractalHeapBlock;
+use hdf5_pure_format::__private::FractalHeapBlockFilters;
 use hdf5_pure_format::__private::FractalHeapBlockLayout;
+use hdf5_pure_format::__private::FractalHeapDirectBlock;
+use hdf5_pure_format::__private::FractalHeapDirectBlockRef;
 use hdf5_pure_format::__private::FractalHeapHeader;
 #[cfg(any(test, doc))]
 use hdf5_pure_format::__private::FractalHeapLayout;
@@ -50,14 +53,17 @@ const FORMAT_WIDTHS: FormatWidths = FormatWidths {
 /// Describes a failure to prove complete ownership of a fractal heap's file storage.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum FractalHeapStorageError {
+    /// A filtered heap has a huge-object index, whose ownership the walker does not prove.
+    FilteredHugeObjects,
     /// A lower-level HDF5 parser or source read failed.
     Format(FormatError),
-    /// The heap header does not define valid doubling-table geometry.
-    Layout(FractalHeapLayoutError),
     /// The heap's ownership graph or structural metadata is inconsistent.
     InvalidStorage,
-    /// The named heap feature prevents a complete ownership proof.
-    UnsupportedOwnership(&'static str),
+    /// The heap header does not define valid doubling-table geometry.
+    Layout(FractalHeapLayoutError),
+    /// A direct block's filter pipeline has an active filter, identified by its filter ID, that
+    /// this crate does not decode.
+    UnsupportedFilter(u16),
 }
 
 impl From<FormatError> for FractalHeapStorageError {
@@ -159,46 +165,40 @@ impl FractalHeapAllocation {
 /// coordinates. The walker bounds every allocation and parses managed blocks through
 /// [`FractalHeapBlockLayout`]. Checksummed direct blocks are read and validated in full,
 /// regardless of the `checksum` feature. Direct blocks without checksums require only their prefix.
+/// A filtered direct block is read at its filtered size and decoded, and its decoded bytes are
+/// validated in full.
 /// Managed-space manager headers and section lists also require checksum validation, regardless
 /// of the `checksum` feature. The walker reads only the used section-list bytes and accounts for
 /// the complete allocation. Huge-object payload contents are omitted from the reads.
 ///
 /// # Errors
 ///
-/// Returns [`FractalHeapStorageError::UnsupportedOwnership`] for filtered managed blocks.
-/// Returns [`FractalHeapStorageError::InvalidStorage`]
+/// Returns [`FractalHeapStorageError::UnsupportedFilter`] if a filtered direct block has an active
+/// filter this crate does not decode, and [`FractalHeapStorageError::FilteredHugeObjects`] if a
+/// filtered heap has a huge-object index. Returns [`FractalHeapStorageError::InvalidStorage`]
 /// for duplicate blocks, contradictory allocation accounting, an unexpected huge-object index
 /// layout, or overlapping allocations. Returns [`FractalHeapStorageError::Layout`] for invalid
 /// layout calculations and [`FractalHeapStorageError::Format`] for parser or source errors,
 /// including malformed block geometry, incorrect heap-header owner addresses, truncated
-/// allocations, invalid checksums, and unsupported serialized manager section classes.
+/// allocations, invalid checksums, filtered blocks that do not decode, and unsupported serialized
+/// manager section classes.
 pub(crate) fn collect_fractal_heap_storage_from_source<S: Source + ?Sized>(
     source: &S,
     addresses: AddressContext,
     heap_header_address: StoredAddress,
     widths: FormatWidths,
 ) -> Result<FractalHeapStorage, FractalHeapStorageError> {
-    let header = crate::fractal_heap::read_header_from_source(
+    let (header, header_range) = crate::fractal_heap::read_header_and_range_from_source(
         source,
         addresses,
         heap_header_address,
         widths,
     )?;
-    if header.filtering.is_filtered() {
-        return Err(FractalHeapStorageError::UnsupportedOwnership(
-            "filtered managed blocks",
-        ));
-    }
     let blocks =
         FractalHeapBlockLayout::new(&header, widths.offsets, widths.lengths, heap_header_address)?;
 
-    let header_len = u64::try_from(FractalHeapHeader::serialized_size(
-        widths.offsets,
-        widths.lengths,
-    ))
-    .map_err(|_conversion_error| FractalHeapStorageError::InvalidStorage)?;
     let mut allocations = vec![(
-        extent_in_source(source, heap_header_address.get(), header_len)?,
+        extent_in_source(source, heap_header_address.get(), header_range.length())?,
         FractalHeapAllocation::Header,
     )];
 
@@ -299,24 +299,9 @@ impl<'a, 'e, S: Source + ?Sized> ManagedStorageWalk<'a, 'e, S> {
                     let reference = block.at(self.addresses.resolve(address)?)?;
                     let extent =
                         extent_in_source(self.source, address.get(), reference.range().length())?;
-                    let range = if self.header.flags
-                        & hdf5_pure_format::__private::FRACTAL_HEAP_DIRECT_BLOCKS_CHECKSUMMED
-                        != 0
-                    {
-                        reference.parse_range()
-                    } else {
-                        reference.prefix_range()?
-                    };
-                    let bytes =
-                        crate::fractal_heap::read_header_range(self.source, self.addresses, range)?;
-                    let region = FileRegion::new(range, &bytes)?;
-                    if self.header.flags
-                        & hdf5_pure_format::__private::FRACTAL_HEAP_DIRECT_BLOCKS_CHECKSUMMED
-                        != 0
-                    {
-                        reference.parse_checked(region)?;
-                    } else {
-                        reference.parse_prefix(region)?;
+                    match block.filters() {
+                        Some(filters) => self.check_filtered_direct(block, reference, filters)?,
+                        None => self.check_direct(reference)?,
                     }
                     self.allocations
                         .push((extent, FractalHeapAllocation::DirectBlock));
@@ -343,6 +328,62 @@ impl<'a, 'e, S: Source + ?Sized> ManagedStorageWalk<'a, 'e, S> {
         if self.allocated_direct_space != self.header.allocated_managed_space {
             return Err(FractalHeapStorageError::InvalidStorage);
         }
+        Ok(())
+    }
+
+    /// Validates an unfiltered direct block: in full if the heap header requires checksums, and
+    /// its prefix otherwise.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FractalHeapStorageError::Format`] if the read or the validation fails.
+    fn check_direct(
+        &self,
+        reference: FractalHeapDirectBlockRef<'_>,
+    ) -> Result<(), FractalHeapStorageError> {
+        let checksummed = self.header.flags
+            & hdf5_pure_format::__private::FRACTAL_HEAP_DIRECT_BLOCKS_CHECKSUMMED
+            != 0;
+        let range = if checksummed {
+            reference.parse_range()
+        } else {
+            reference.prefix_range()?
+        };
+        let bytes = crate::fractal_heap::read_header_range(self.source, self.addresses, range)?;
+        let region = FileRegion::new(range, &bytes)?;
+        if checksummed {
+            reference.parse_checked(region)?;
+        } else {
+            reference.parse_prefix(region)?;
+        }
+        Ok(())
+    }
+
+    /// Decodes a filtered direct block and validates its decoded bytes in full.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FractalHeapStorageError::UnsupportedFilter`] if an active filter has no decoder
+    /// or an active shuffle filter has an element width other than one byte, and
+    /// [`FractalHeapStorageError::Format`] if the read, the decoding, or the validation of the
+    /// decoded bytes fails otherwise.
+    fn check_filtered_direct(
+        &self,
+        block: FractalHeapDirectBlock<'_>,
+        reference: FractalHeapDirectBlockRef<'_>,
+        filters: FractalHeapBlockFilters<'_>,
+    ) -> Result<(), FractalHeapStorageError> {
+        let encoded =
+            crate::fractal_heap::read_header_range(self.source, self.addresses, reference.range())?;
+        let decoded =
+            crate::fractal_heap::decode_direct_block(&encoded, filters, block.decoded_size())
+                .map_err(|error| match error {
+                    FormatError::UnsupportedFilter(filter_id) => {
+                        FractalHeapStorageError::UnsupportedFilter(filter_id)
+                    }
+                    error => FractalHeapStorageError::Format(error),
+                })?;
+        reference.parse_decoded_checked(&decoded)?;
         Ok(())
     }
 }
@@ -404,6 +445,9 @@ fn collect_huge_storage<S: Source + ?Sized>(
             return Err(FractalHeapStorageError::InvalidStorage);
         }
         return Ok(());
+    }
+    if heap.filtering.is_filtered() {
+        return Err(FractalHeapStorageError::FilteredHugeObjects);
     }
 
     let header = BTreeV2Header::parse_from_source_with_widths(
@@ -509,15 +553,12 @@ mod tests {
     use crate::address::OpenedImageContext;
     use crate::fractal_heap::HeapObjectReader;
     use crate::source::BaseOffsetSource;
+    use crate::test_data;
 
     use super::*;
 
     const STORAGE_HEAP_AT: u64 = 0x100;
     const STORAGE_ROOT_AT: u64 = 0x400;
-    // Section `subsubsec_fmt4_dataobject_hdr_msg_filter`, version 4.0, defines pipeline version 2
-    // and deflate ID 1.
-    const PIPELINE_VERSION_TWO: u8 = 2;
-    const FILTER_DEFLATE: u16 = 1;
 
     fn storage_header() -> FractalHeapHeader {
         FractalHeapHeader {
@@ -565,14 +606,14 @@ mod tests {
 
     fn managed_prefix(signature: &[u8; 4], heap_offset: u64) -> Vec<u8> {
         let mut block = signature.to_vec();
-        block.push(0);
+        block.push(test_data::BLOCK_VERSION);
         block.extend_from_slice(&STORAGE_HEAP_AT.to_le_bytes());
         block.extend_from_slice(&heap_offset.to_le_bytes()[..2]);
         block
     }
 
     fn direct_block(heap_offset: u64, size: usize) -> Vec<u8> {
-        let mut block = managed_prefix(b"FHDB", heap_offset);
+        let mut block = managed_prefix(fractal_heap::DIRECT_BLOCK_SIGNATURE, heap_offset);
         block.resize(size, 0);
         block
     }
@@ -581,20 +622,31 @@ mod tests {
         header: &FractalHeapHeader,
         heap_offset: u64,
         nrows: u16,
-        children: &[(usize, u64)],
+        children: &[(usize, u64, Option<u64>)],
     ) -> Vec<u8> {
-        let size = storage_layout(header).indirect_block_size(nrows).unwrap();
-        let mut block = managed_prefix(b"FHIB", heap_offset);
-        let entries = usize::from(nrows) * usize::from(header.table_width);
-        for entry in 0..entries {
-            let address = children
+        let layout = storage_layout(header);
+        let filtered_entries = if header.filtering.is_filtered() {
+            usize::from(nrows).min(layout.direct_rows()) * layout.table_width()
+        } else {
+            0
+        };
+        let mut block = managed_prefix(fractal_heap::INDIRECT_BLOCK_SIGNATURE, heap_offset);
+        for entry in 0..usize::from(nrows) * layout.table_width() {
+            let (address, filtered_size) = children
                 .iter()
-                .find_map(|&(at, address)| (at == entry).then_some(address))
-                .unwrap_or(u64::MAX);
+                .find_map(|&(at, address, size)| (at == entry).then_some((address, size)))
+                .unwrap_or((u64::MAX, None));
             block.extend_from_slice(&address.to_le_bytes());
+            if entry < filtered_entries {
+                block.extend_from_slice(&filtered_size.unwrap_or(0).to_le_bytes());
+                block.extend_from_slice(&0u32.to_le_bytes());
+            }
         }
         block.extend_from_slice(&[0; 4]);
-        assert_eq!(u64::try_from(block.len()).unwrap(), size);
+        assert_eq!(
+            len_u64(block.len()),
+            layout.indirect_block_size(nrows).unwrap()
+        );
         let len = block.len();
         crate::checksum::stamp_trailing(&mut block, 0, len);
         block
@@ -779,6 +831,7 @@ mod tests {
                     &[(
                         if rows == 6 { 20 } else { 0 },
                         if rows == 6 { NESTED } else { DIRECT },
+                        None,
                     )],
                 ),
             );
@@ -787,7 +840,7 @@ mod tests {
             place(
                 &mut image,
                 NESTED,
-                &indirect_block(&header, offset, 3, &[(0, DIRECT)]),
+                &indirect_block(&header, offset, 3, &[(0, DIRECT, None)]),
             );
         }
         let direct_at = if rows == 0 { STORAGE_ROOT_AT } else { DIRECT };
@@ -986,13 +1039,23 @@ mod tests {
         place(
             &mut file,
             STORAGE_ROOT_AT,
-            &indirect_block(&header, 0, 6, &[(0, DIRECT_A), (20, CHILD_INDIRECT)]),
+            &indirect_block(
+                &header,
+                0,
+                6,
+                &[(0, DIRECT_A, None), (20, CHILD_INDIRECT, None)],
+            ),
         );
         place(&mut file, DIRECT_A, &direct_block(0, 128));
         place(
             &mut file,
             CHILD_INDIRECT,
-            &indirect_block(&header, child_heap_offset, child_rows, &[(0, DIRECT_B)]),
+            &indirect_block(
+                &header,
+                child_heap_offset,
+                child_rows,
+                &[(0, DIRECT_B, None)],
+            ),
         );
         place(&mut file, DIRECT_B, &direct_block(child_heap_offset, 128));
 
@@ -1039,7 +1102,7 @@ mod tests {
             managed_objects_count: 1,
             ..storage_header()
         };
-        let mut block = indirect_block(&header, 0, 2, &[(0, DIRECT)]);
+        let mut block = indirect_block(&header, 0, 2, &[(0, DIRECT, None)]);
         let checksum = block.len() - 4;
         let stored = u32::from_le_bytes(block[checksum..].try_into().unwrap());
         block[checksum] ^= 1;
@@ -1074,7 +1137,7 @@ mod tests {
         place(
             &mut file,
             STORAGE_ROOT_AT,
-            &indirect_block(&header, 0, 2, &[(0, CHILD), (1, CHILD)]),
+            &indirect_block(&header, 0, 2, &[(0, CHILD, None), (1, CHILD, None)]),
         );
         place(&mut file, CHILD, &direct_block(128, 128));
 
@@ -1131,29 +1194,450 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "deflate")]
     #[test]
-    fn a_filtered_heap_is_an_explicitly_unsupported_owner() {
-        let pipeline = FilterPipeline {
-            version: PIPELINE_VERSION_TWO,
-            filters: vec![FilterDescription {
-                filter_id: FILTER_DEFLATE,
-                name: None,
-                flags: 0,
-                client_data: vec![6],
-            }],
-        };
-        let header = fractal_heap::Header::new(u64::MAX)
-            .filtering(0, 0, pipeline.serialize().unwrap())
-            .build(Widths::EIGHT);
+    fn a_filtered_direct_root_is_owned_at_its_stored_sizes() {
+        let block = checksummed_direct_block(0, 128);
+        let encoded = test_data::encode_block(&block, &test_data::deflate_pipeline());
+        let header = filtered_header(
+            FractalHeapHeader {
+                flags: hdf5_pure_format::__private::FRACTAL_HEAP_DIRECT_BLOCKS_CHECKSUMMED,
+                root_block_address: StoredAddress::new(STORAGE_ROOT_AT),
+                managed_space: 128,
+                allocated_managed_space: 128,
+                managed_objects_count: 1,
+                ..storage_header()
+            },
+            len_u64(encoded.len()),
+            test_data::deflate_pipeline(),
+        );
         let mut file = vec![0; 0x800];
-        place(&mut file, STORAGE_HEAP_AT, &header);
+        let header_len = place_filtered_storage_header(&mut file, &header);
+        place(&mut file, STORAGE_ROOT_AT, &encoded);
+        let source = PrefixSource {
+            bytes: &file,
+            reads: RefCell::new(Vec::new()),
+        };
+
+        let storage = collect_fractal_heap_storage_from_source(
+            &source,
+            AddressContext::from_effective_base(BaseAddress::ZERO),
+            StoredAddress::new(STORAGE_HEAP_AT),
+            FORMAT_WIDTHS,
+        )
+        .unwrap();
+
+        assert_eq!(
+            storage.allocations(),
+            &[
+                allocation(STORAGE_HEAP_AT, header_len, FractalHeapAllocation::Header),
+                allocation(
+                    STORAGE_ROOT_AT,
+                    len_u64(encoded.len()),
+                    FractalHeapAllocation::DirectBlock
+                ),
+            ]
+        );
+        assert_eq!(
+            *source.reads.borrow(),
+            vec![
+                (
+                    STORAGE_HEAP_AT,
+                    hdf5_pure_format::__private::FractalHeapHeaderFrame::PREFIX_LEN
+                ),
+                (STORAGE_HEAP_AT, usize::try_from(header_len).unwrap()),
+                (STORAGE_ROOT_AT, encoded.len()),
+            ]
+        );
+    }
+
+    #[cfg(feature = "deflate")]
+    #[test]
+    fn a_filtered_indirect_root_owns_its_children_at_their_stored_sizes() {
+        const DIRECT_A: u64 = 0x800;
+        const CHILD_INDIRECT: u64 = 0x1000;
+        const DIRECT_B: u64 = 0x1400;
+        let header = filtered_header(
+            FractalHeapHeader {
+                root_block_address: StoredAddress::new(STORAGE_ROOT_AT),
+                current_rows_in_root_indirect_block: 6,
+                managed_space: 16 * 1024,
+                allocated_managed_space: 256,
+                managed_objects_count: 2,
+                ..storage_header()
+            },
+            0,
+            test_data::deflate_pipeline(),
+        );
+        let layout = storage_layout(&header);
+        let child_heap_offset = layout.row_offset(5).unwrap();
+        let child_rows = layout.child_indirect_rows(5).unwrap();
+        let encoded_a =
+            test_data::encode_block(&direct_block(0, 128), &test_data::deflate_pipeline());
+        let encoded_b = test_data::encode_block(
+            &direct_block(child_heap_offset, 128),
+            &test_data::deflate_pipeline(),
+        );
+        let mut file = vec![0; 0x1800];
+        let header_len = place_filtered_storage_header(&mut file, &header);
+        place(
+            &mut file,
+            STORAGE_ROOT_AT,
+            &indirect_block(
+                &header,
+                0,
+                6,
+                &[
+                    (0, DIRECT_A, Some(len_u64(encoded_a.len()))),
+                    (20, CHILD_INDIRECT, None),
+                ],
+            ),
+        );
+        place(&mut file, DIRECT_A, &encoded_a);
+        place(
+            &mut file,
+            CHILD_INDIRECT,
+            &indirect_block(
+                &header,
+                child_heap_offset,
+                child_rows,
+                &[(0, DIRECT_B, Some(len_u64(encoded_b.len())))],
+            ),
+        );
+        place(&mut file, DIRECT_B, &encoded_b);
+
+        let storage = collect_storage(&file).unwrap();
+
+        assert_eq!(
+            storage.allocations(),
+            &[
+                allocation(STORAGE_HEAP_AT, header_len, FractalHeapAllocation::Header),
+                allocation(
+                    STORAGE_ROOT_AT,
+                    layout.indirect_block_size(6).unwrap(),
+                    FractalHeapAllocation::IndirectBlock,
+                ),
+                allocation(
+                    DIRECT_A,
+                    len_u64(encoded_a.len()),
+                    FractalHeapAllocation::DirectBlock
+                ),
+                allocation(
+                    CHILD_INDIRECT,
+                    layout.indirect_block_size(child_rows).unwrap(),
+                    FractalHeapAllocation::IndirectBlock,
+                ),
+                allocation(
+                    DIRECT_B,
+                    len_u64(encoded_b.len()),
+                    FractalHeapAllocation::DirectBlock
+                ),
+            ]
+        );
+    }
+
+    #[cfg(feature = "deflate")]
+    #[test]
+    fn a_filtered_heap_owns_its_managed_free_space_manager() {
+        let (mut file, used) = managed_fsm_image(64);
+        let unfiltered = FractalHeapHeader::parse_bytes(
+            &file[usize::try_from(STORAGE_HEAP_AT).unwrap()..],
+            OffsetWidth::Eight,
+            LengthWidth::Eight,
+        )
+        .unwrap();
+        let encoded =
+            test_data::encode_block(&direct_block(0, 128), &test_data::deflate_pipeline());
+        let header = filtered_header(
+            unfiltered,
+            len_u64(encoded.len()),
+            test_data::deflate_pipeline(),
+        );
+        let header_len = place_filtered_storage_header(&mut file, &header);
+        place(&mut file, STORAGE_ROOT_AT, &encoded);
+
+        assert_eq!(
+            collect_storage(&file).unwrap().allocations(),
+            &[
+                allocation(STORAGE_HEAP_AT, header_len, FractalHeapAllocation::Header),
+                allocation(
+                    STORAGE_ROOT_AT,
+                    len_u64(encoded.len()),
+                    FractalHeapAllocation::DirectBlock
+                ),
+                allocation(MANAGED_FSM_AT, 82, FractalHeapAllocation::ManagedFsmHeader),
+                allocation(
+                    MANAGED_FSSE_AT,
+                    used + 64,
+                    FractalHeapAllocation::ManagedFsmSectionList
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn huge_objects_in_a_filtered_heap_are_an_unsupported_owner() {
+        let header = filtered_header(
+            FractalHeapHeader {
+                btree_huge_objects_address: StoredAddress::new(0x600),
+                huge_objects_count: 1,
+                huge_objects_size: 64,
+                ..storage_header()
+            },
+            0,
+            test_data::filter_pipeline(vec![]),
+        );
+        let mut file = vec![0; 0x800];
+        place_filtered_storage_header(&mut file, &header);
 
         assert_eq!(
             collect_storage(&file),
-            Err(FractalHeapStorageError::UnsupportedOwnership(
-                "filtered managed blocks"
+            Err(FractalHeapStorageError::FilteredHugeObjects)
+        );
+    }
+
+    #[test]
+    fn a_filter_without_a_decoder_makes_the_heap_an_unsupported_owner() {
+        let block = direct_block(0, 128);
+        let header = filtered_header(
+            FractalHeapHeader {
+                root_block_address: StoredAddress::new(STORAGE_ROOT_AT),
+                managed_space: 128,
+                allocated_managed_space: 128,
+                ..storage_header()
+            },
+            len_u64(block.len()),
+            test_data::filter_pipeline(vec![FilterDescription {
+                filter_id: test_data::FILTER_BZIP2,
+                name: None,
+                flags: 0,
+                client_data: vec![],
+            }]),
+        );
+        let mut file = vec![0; 0x800];
+        place_filtered_storage_header(&mut file, &header);
+        place(&mut file, STORAGE_ROOT_AT, &block);
+
+        assert_eq!(
+            collect_storage(&file),
+            Err(FractalHeapStorageError::UnsupportedFilter(
+                test_data::FILTER_BZIP2
             ))
         );
+    }
+
+    #[cfg(feature = "deflate")]
+    #[rstest::rstest]
+    #[case::zero_root_size(FilteredDamage::ZeroRootSize)]
+    #[case::zero_child_size(FilteredDamage::ZeroChildSize)]
+    #[case::past_the_end_of_the_file(FilteredDamage::PastTheEndOfTheFile)]
+    #[case::overlapping_sibling(FilteredDamage::OverlappingSibling)]
+    #[case::overlapping_header(FilteredDamage::OverlappingHeader)]
+    #[case::undecodable(FilteredDamage::Undecodable)]
+    #[case::short_decoded_block(FilteredDamage::ShortDecodedBlock)]
+    #[case::wrong_owner(FilteredDamage::WrongOwner)]
+    #[case::bad_checksum(FilteredDamage::BadChecksum)]
+    fn malformed_filtered_direct_blocks_are_rejected(#[case] damage: FilteredDamage) {
+        const DIRECT_A: u64 = 0x800;
+        const DIRECT_B: u64 = 0x900;
+        let indirect = matches!(
+            damage,
+            FilteredDamage::ZeroChildSize | FilteredDamage::OverlappingSibling
+        );
+        let mut block_a = checksummed_direct_block(0, 128);
+        let mut computed = 0;
+        let checksum = test_data::DIRECT_BLOCK_CHECKSUM_AT..test_data::DIRECT_BLOCK_DATA_AT;
+        let stored = u32::from_le_bytes(block_a[checksum.clone()].try_into().unwrap());
+        match damage {
+            FilteredDamage::WrongOwner => {
+                let owner = test_data::DIRECT_BLOCK_OWNER_AT;
+                block_a[owner..owner + 8].copy_from_slice(&0x200u64.to_le_bytes());
+            }
+            FilteredDamage::BadChecksum => {
+                *block_a.last_mut().unwrap() ^= 1;
+                let mut zeroed = block_a.clone();
+                zeroed[checksum].fill(0);
+                computed = crate::checksum::jenkins_lookup3(&zeroed);
+            }
+            FilteredDamage::ShortDecodedBlock => {
+                block_a.pop();
+            }
+            _ => {}
+        }
+        let mut encoded_a = test_data::encode_block(&block_a, &test_data::deflate_pipeline());
+        if damage == FilteredDamage::Undecodable {
+            encoded_a.fill(0xFF);
+        }
+        let encoded_b = test_data::encode_block(
+            &checksummed_direct_block(128, 128),
+            &test_data::deflate_pipeline(),
+        );
+        let mut size_a = len_u64(encoded_a.len());
+        let mut file = vec![0; 0xc00];
+        let file_len = len_u64(file.len());
+        let root_at = match damage {
+            FilteredDamage::PastTheEndOfTheFile => {
+                size_a = file_len - 0xb00 + 1;
+                0xb00
+            }
+            FilteredDamage::OverlappingHeader => STORAGE_HEAP_AT - size_a,
+            _ => STORAGE_ROOT_AT,
+        };
+        match damage {
+            FilteredDamage::ZeroRootSize | FilteredDamage::ZeroChildSize => size_a = 0,
+            FilteredDamage::OverlappingSibling => size_a = DIRECT_B - DIRECT_A + 1,
+            FilteredDamage::OverlappingHeader => size_a += 1,
+            _ => {}
+        }
+        let header = filtered_header(
+            FractalHeapHeader {
+                flags: hdf5_pure_format::__private::FRACTAL_HEAP_DIRECT_BLOCKS_CHECKSUMMED,
+                root_block_address: StoredAddress::new(root_at),
+                current_rows_in_root_indirect_block: if indirect { 2 } else { 0 },
+                managed_space: if indirect { 1024 } else { 128 },
+                allocated_managed_space: if indirect { 256 } else { 128 },
+                ..storage_header()
+            },
+            if indirect { 0 } else { size_a },
+            test_data::deflate_pipeline(),
+        );
+        if indirect {
+            place(
+                &mut file,
+                root_at,
+                &indirect_block(
+                    &header,
+                    0,
+                    2,
+                    &[
+                        (0, DIRECT_A, Some(size_a)),
+                        (1, DIRECT_B, Some(len_u64(encoded_b.len()))),
+                    ],
+                ),
+            );
+            place(&mut file, DIRECT_A, &encoded_a);
+            place(&mut file, DIRECT_B, &encoded_b);
+        } else {
+            let length = encoded_a
+                .len()
+                .min(file.len() - usize::try_from(root_at).unwrap());
+            place(&mut file, root_at, &encoded_a[..length]);
+        }
+        place_filtered_storage_header(&mut file, &header);
+
+        let error = collect_storage(&file).unwrap_err();
+        let expected = match damage {
+            FilteredDamage::ZeroRootSize | FilteredDamage::ZeroChildSize => {
+                FractalHeapStorageError::Format(FormatError::InvalidFractalHeapGeometry)
+            }
+            FilteredDamage::PastTheEndOfTheFile => {
+                FractalHeapStorageError::Format(FormatError::UnexpectedEof {
+                    expected: file.len() + 1,
+                    available: file.len(),
+                })
+            }
+            FilteredDamage::OverlappingSibling | FilteredDamage::OverlappingHeader => {
+                FractalHeapStorageError::InvalidStorage
+            }
+            FilteredDamage::Undecodable => {
+                let FractalHeapStorageError::Format(FormatError::FilterError(reason)) = &error
+                else {
+                    panic!("expected FilterError, got {error:?}");
+                };
+                assert!(
+                    test_data::DEFLATE_HEADER_ERRORS.contains(&reason.as_str()),
+                    "{reason:?}"
+                );
+                return;
+            }
+            FilteredDamage::ShortDecodedBlock => {
+                FractalHeapStorageError::Format(FormatError::DataSizeMismatch {
+                    expected: 128,
+                    actual: 127,
+                })
+            }
+            FilteredDamage::WrongOwner => {
+                FractalHeapStorageError::Format(FormatError::InvalidFractalHeapBlockOwner {
+                    expected: STORAGE_HEAP_AT,
+                    actual: 0x200,
+                })
+            }
+            FilteredDamage::BadChecksum => {
+                FractalHeapStorageError::Format(FormatError::ChecksumMismatch {
+                    expected: stored,
+                    computed,
+                })
+            }
+        };
+        assert_eq!(error, expected);
+    }
+
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    enum FilteredDamage {
+        BadChecksum,
+        OverlappingHeader,
+        OverlappingSibling,
+        PastTheEndOfTheFile,
+        ShortDecodedBlock,
+        Undecodable,
+        WrongOwner,
+        ZeroChildSize,
+        ZeroRootSize,
+    }
+
+    fn filtered_header(
+        header: FractalHeapHeader,
+        root_direct_block_size: u64,
+        pipeline: FilterPipeline,
+    ) -> FractalHeapHeader {
+        FractalHeapHeader {
+            filtering: FractalHeapFiltering::Filtered {
+                root_direct_block_size,
+                root_filter_mask: 0,
+                pipeline,
+            },
+            ..header
+        }
+    }
+
+    /// Writes the filtered `header` at [`STORAGE_HEAP_AT`] and returns its encoded length.
+    fn place_filtered_storage_header(file: &mut [u8], header: &FractalHeapHeader) -> u64 {
+        let FractalHeapFiltering::Filtered {
+            root_direct_block_size,
+            root_filter_mask,
+            pipeline,
+        } = &header.filtering
+        else {
+            panic!("the header is filtered");
+        };
+        let unfiltered = FractalHeapHeader {
+            filtering: FractalHeapFiltering::Unfiltered,
+            ..header.clone()
+        }
+        .serialize(OffsetWidth::Eight, LengthWidth::Eight)
+        .unwrap();
+        let bytes = test_data::with_filtering(
+            &unfiltered,
+            Widths::EIGHT,
+            *root_direct_block_size,
+            *root_filter_mask,
+            &pipeline.serialize().unwrap(),
+        );
+        place(file, STORAGE_HEAP_AT, &bytes);
+        len_u64(bytes.len())
+    }
+
+    fn checksummed_direct_block(heap_offset: u64, size: usize) -> Vec<u8> {
+        let mut block = direct_block(heap_offset, size);
+        block[test_data::DIRECT_BLOCK_DATA_AT..].fill(0x5A);
+        let checksum = crate::checksum::jenkins_lookup3(&block);
+        block[test_data::DIRECT_BLOCK_CHECKSUM_AT..test_data::DIRECT_BLOCK_DATA_AT]
+            .copy_from_slice(&checksum.to_le_bytes());
+        block
+    }
+
+    fn len_u64(len: usize) -> u64 {
+        u64::try_from(len).unwrap()
     }
 
     #[rstest::rstest]

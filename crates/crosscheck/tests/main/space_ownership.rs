@@ -3,6 +3,8 @@
 use hdf5_pure::File;
 use rstest::rstest;
 use tempfile::TempDir;
+use test_util::fractal_heap;
+use test_util::range;
 use test_util_hdf5::space_ownership;
 use test_util_hdf5::space_ownership::SharedStorage;
 
@@ -27,13 +29,25 @@ fn native_shared_storage_has_incomplete_ownership(
 }
 
 #[test]
-fn a_native_filtered_heap_has_incomplete_ownership() {
+fn a_native_filtered_heap_has_complete_ownership() {
     let directory = TempDir::new().unwrap();
     let path = directory.path().join("filtered.h5");
     space_ownership::libhdf5_write_filtered_heap(&path);
+    let bytes = std::fs::read(&path).unwrap();
+    let heaps = fractal_heap::header_offsets(&bytes);
+    assert_eq!(heaps.len(), 1);
+    let allocations =
+        hdf5_pure::__fractal_heap_storage_extents(&bytes, u64::try_from(heaps[0]).unwrap(), 8, 8)
+            .unwrap();
     let file = File::open_rw(&path).unwrap();
     let ownership = file.__space_ownership().unwrap();
-    assert!(!ownership.analysis_complete);
-    assert!(!ownership.unclassified_space.is_empty());
+    assert!(ownership.analysis_complete);
+    for (address, len) in allocations {
+        assert_eq!(
+            range::covered_len(&ownership.live_metadata_space, &(address..address + len)),
+            len,
+            "the heap allocation ({address}, {len}) is live metadata"
+        );
+    }
     file.close().unwrap();
 }
