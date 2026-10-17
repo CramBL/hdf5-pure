@@ -388,9 +388,11 @@ pub(crate) fn check_status_flags(
 /// through the editor, which is why it lives beside the locking policy it
 /// depends on.
 pub(crate) fn clear_swmr_flag_at(path: &Path) -> Result<(), Error> {
-    use crate::signature;
     use std::fs::OpenOptions;
     use std::io::{Read, Seek, SeekFrom, Write};
+
+    use crate::superblock;
+    use crate::superblock::LocatedSuperblock;
 
     let mut w = OpenOptions::new()
         .read(true)
@@ -404,8 +406,11 @@ pub(crate) fn clear_swmr_flag_at(path: &Path) -> Result<(), Error> {
     acquire_exclusive(&w, FileLocking::Enabled, path)?;
     let mut data = Vec::new();
     w.read_to_end(&mut data).map_err(Error::Io)?;
-    let sig = signature::find_signature(&data)?;
-    let mut sb = crate::superblock::parse_superblock(&data, sig)?;
+    let LocatedSuperblock {
+        address,
+        superblock: mut sb,
+        ..
+    } = superblock::read(data.as_slice())?;
     if sb.version < 2 {
         // `serialize_superblock` writes only the v2/v3 layout and returns an error for a v0/v1
         // superblock. `check_status_flags`, like `H5Fopen`, reads the status flags from version 3
@@ -417,7 +422,7 @@ pub(crate) fn clear_swmr_flag_at(path: &Path) -> Result<(), Error> {
     }
     sb.consistency_flags = 0;
     let bytes = hdf5_pure_format::__private::serialize_superblock(&sb)?;
-    w.seek(SeekFrom::Start(sig as u64)).map_err(Error::Io)?;
+    w.seek(SeekFrom::Start(address.get())).map_err(Error::Io)?;
     w.write_all(&bytes).map_err(Error::Io)?;
     w.sync_data().map_err(Error::Io)?;
     Ok(())
@@ -431,6 +436,7 @@ mod tests {
     use crate::address::BaseAddressExt;
     use crate::address::StoredAddress;
     use crate::address::StoredAddressExt;
+    use crate::superblock::LocatedSuperblock;
     use crate::width::LengthWidth;
     use crate::width::OffsetWidth;
 
@@ -675,8 +681,12 @@ mod tests {
     /// re-serializing the superblock so its checksum stays valid.
     fn write_file_with(path: &Path, version: u8, flags: u32) {
         let mut bytes = crate::writer::FileBuilder::new().finish().unwrap();
-        let off = crate::signature::find_signature(&bytes).unwrap();
-        let mut sb = crate::superblock::parse_superblock(&bytes, off).unwrap();
+        let LocatedSuperblock {
+            address,
+            superblock: mut sb,
+            ..
+        } = crate::superblock::read(bytes.as_slice()).unwrap();
+        let off = usize::try_from(address.get()).unwrap();
         assert_eq!(sb.version, 3, "this writer emits a v3 superblock");
         sb.version = version;
         sb.consistency_flags = flags;
@@ -716,7 +726,13 @@ mod tests {
             "got {err:?}"
         );
         let bytes = std::fs::read(&path).unwrap();
-        let off = crate::signature::find_signature(&bytes).unwrap();
+        let off = usize::try_from(
+            crate::superblock::read(bytes.as_slice())
+                .unwrap()
+                .address
+                .get(),
+        )
+        .unwrap();
         assert_eq!(
             bytes[off + 11],
             0,

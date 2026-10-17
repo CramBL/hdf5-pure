@@ -218,8 +218,6 @@ pub use crate::superblock::SuperblockCandidateRead;
 pub use crate::superblock::SuperblockLocator;
 pub use crate::superblock::SuperblockRef;
 pub use crate::superblock::SuperblockSignature;
-pub use crate::superblock::parse_superblock_from_source_with_widths;
-pub use crate::superblock::parse_superblock_with_widths;
 pub use crate::superblock::serialize_superblock;
 pub use crate::symbol_table::SymbolTableEntry;
 pub use crate::symbol_table::SymbolTableMessage;

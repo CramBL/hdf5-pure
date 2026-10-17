@@ -3955,7 +3955,6 @@ mod tests {
     use crate::link_info::LinkInfoMessage;
     use crate::object_header::ObjectHeader;
     use crate::object_path::ObjectPath;
-    use crate::signature;
     use crate::superblock::Superblock;
     use crate::type_builders::{build_attr_message, make_i32_type};
 
@@ -3983,7 +3982,9 @@ mod tests {
             chunks: Vec::new(),
         };
         writer.finish_to_sink(&mut sink).unwrap();
-        let superblock = crate::superblock::parse_superblock(&sink.chunks[0].1, 0).unwrap();
+        let superblock = crate::superblock::read(sink.chunks[0].1.as_slice())
+            .unwrap()
+            .superblock;
         assert_eq!(superblock.root_group_address.get(), 1u64 << 32);
         assert_eq!(superblock.eof_address, sink.position);
         let collections: Vec<u64> = sink
@@ -4171,8 +4172,7 @@ mod tests {
     /// The reference count recorded in the committed datatype object at `path`, or
     /// `None` when the header carries no Object Reference Count message.
     fn committed_reference_count(bytes: &[u8], path: &str) -> Option<u32> {
-        let sig = signature::find_signature(bytes).unwrap();
-        let sb = crate::superblock::parse_superblock(bytes, sig).unwrap();
+        let sb = crate::superblock::read(bytes).unwrap().superblock;
         let addr = group_v2::resolve_path_any(
             bytes,
             AccessMode::ReadOnly,
@@ -4212,8 +4212,9 @@ mod tests {
         ds.with_committed_datatype("mytype");
         let bytes = w.finish().unwrap();
 
-        let sig = signature::find_signature(&bytes).unwrap();
-        let sb = crate::superblock::parse_superblock(&bytes, sig).unwrap();
+        let sb = crate::superblock::read(bytes.as_slice())
+            .unwrap()
+            .superblock;
         let type_addr = group_v2::resolve_path_any(
             &bytes,
             AccessMode::ReadOnly,
@@ -4261,8 +4262,7 @@ mod tests {
     }
 
     fn parse_file(bytes: &[u8]) -> (Superblock, ObjectHeader) {
-        let sig = signature::find_signature(bytes).unwrap();
-        let sb = crate::superblock::parse_superblock(bytes, sig).unwrap();
+        let sb = crate::superblock::read(bytes).unwrap().superblock;
         let oh = ObjectHeader::parse(
             bytes,
             AccessMode::ReadOnly,
@@ -4279,8 +4279,7 @@ mod tests {
     }
 
     fn read_dataset_f64(bytes: &[u8], path: &str) -> Vec<f64> {
-        let sig = signature::find_signature(bytes).unwrap();
-        let sb = crate::superblock::parse_superblock(bytes, sig).unwrap();
+        let sb = crate::superblock::read(bytes).unwrap().superblock;
         let addr = group_v2::resolve_path_any(
             bytes,
             AccessMode::ReadOnly,
@@ -4349,8 +4348,9 @@ mod tests {
             .set_attr("scale", AttrValue::F64(0.5));
         let bytes = fw.finish().unwrap();
         assert_eq!(read_dataset_f64(&bytes, "data"), vec![1.0, 2.0]);
-        let sig = signature::find_signature(&bytes).unwrap();
-        let sb = crate::superblock::parse_superblock(&bytes, sig).unwrap();
+        let sb = crate::superblock::read(bytes.as_slice())
+            .unwrap()
+            .superblock;
         let addr = group_v2::resolve_path_any(
             &bytes,
             AccessMode::ReadOnly,
@@ -4407,8 +4407,9 @@ mod tests {
         gb.create_dataset("vals").with_f64_data(&[1.0]);
         fw.add_group(gb.finish());
         let bytes = fw.finish().unwrap();
-        let sig = signature::find_signature(&bytes).unwrap();
-        let sb = crate::superblock::parse_superblock(&bytes, sig).unwrap();
+        let sb = crate::superblock::read(bytes.as_slice())
+            .unwrap()
+            .superblock;
         let addr = group_v2::resolve_path_any(
             &bytes,
             AccessMode::ReadOnly,
@@ -4444,8 +4445,9 @@ mod tests {
         }
         fw.add_group(gb.finish());
         let bytes = fw.finish().unwrap();
-        let sig = signature::find_signature(&bytes).unwrap();
-        let sb = crate::superblock::parse_superblock(&bytes, sig).unwrap();
+        let sb = crate::superblock::read(bytes.as_slice())
+            .unwrap()
+            .superblock;
         let addr = group_v2::resolve_path_any(
             &bytes,
             AccessMode::ReadOnly,
@@ -4509,8 +4511,9 @@ mod tests {
             ds.set_attr(&format!("attr_{i:03}"), AttrValue::F64(i as f64 * 1.5));
         }
         let bytes = fw.finish().unwrap();
-        let sig = signature::find_signature(&bytes).unwrap();
-        let sb = crate::superblock::parse_superblock(&bytes, sig).unwrap();
+        let sb = crate::superblock::read(bytes.as_slice())
+            .unwrap()
+            .superblock;
         let addr = group_v2::resolve_path_any(
             &bytes,
             AccessMode::ReadOnly,
@@ -4557,8 +4560,9 @@ mod tests {
             fw.set_root_attr(&format!("root_{i:02}"), AttrValue::F64(i as f64 * 2.0));
         }
         let bytes = fw.finish().unwrap();
-        let sig = signature::find_signature(&bytes).unwrap();
-        let sb = crate::superblock::parse_superblock(&bytes, sig).unwrap();
+        let sb = crate::superblock::read(bytes.as_slice())
+            .unwrap()
+            .superblock;
         let oh = ObjectHeader::parse(
             &bytes,
             AccessMode::ReadOnly,
@@ -4592,8 +4596,9 @@ mod tests {
             ds.set_attr(&format!("a{i}"), AttrValue::F64(i as f64));
         }
         let bytes = fw.finish().unwrap();
-        let sig = signature::find_signature(&bytes).unwrap();
-        let sb = crate::superblock::parse_superblock(&bytes, sig).unwrap();
+        let sb = crate::superblock::read(bytes.as_slice())
+            .unwrap()
+            .superblock;
         let addr = group_v2::resolve_path_any(
             &bytes,
             AccessMode::ReadOnly,
@@ -5166,8 +5171,9 @@ mod tests {
             "expected a nested indirect block, got {nested}"
         );
 
-        let sig = signature::find_signature(&bytes).unwrap();
-        let sb = crate::superblock::parse_superblock(&bytes, sig).unwrap();
+        let sb = crate::superblock::read(bytes.as_slice())
+            .unwrap()
+            .superblock;
         let addr = group_v2::resolve_path_any(
             &bytes,
             AccessMode::ReadOnly,
@@ -5640,8 +5646,7 @@ mod tests {
     /// the two are set from one resolved format, and a test that derived one from
     /// the other could not tell whether they had come apart.
     fn layout_message_version(bytes: &[u8], path: &str) -> u8 {
-        let sig = signature::find_signature(bytes).unwrap();
-        let sb = crate::superblock::parse_superblock(bytes, sig).unwrap();
+        let sb = crate::superblock::read(bytes).unwrap().superblock;
         let addr = group_v2::resolve_path_any(
             bytes,
             AccessMode::ReadOnly,
@@ -5683,7 +5688,13 @@ mod tests {
             (Some((LibVer::V18, LibVer::V18)), 2, 3),
         ] {
             let bytes = write_bounded(bounds).expect("these bounds are satisfiable");
-            let sig = signature::find_signature(&bytes).unwrap();
+            let sig = usize::try_from(
+                crate::superblock::read(bytes.as_slice())
+                    .unwrap()
+                    .address
+                    .get(),
+            )
+            .unwrap();
             assert_eq!(
                 bytes[sig + 8],
                 superblock,
@@ -5709,7 +5720,13 @@ mod tests {
         assert_eq!(newer.len(), older.len(), "the two formats differ in size");
 
         let differing: Vec<usize> = (0..newer.len()).filter(|&i| newer[i] != older[i]).collect();
-        let sig = signature::find_signature(&newer).unwrap();
+        let sig = usize::try_from(
+            crate::superblock::read(newer.as_slice())
+                .unwrap()
+                .address
+                .get(),
+        )
+        .unwrap();
 
         // Ten bytes, and every one of them accounted for: the superblock's
         // version byte and the four-byte checksum covering it, the layout

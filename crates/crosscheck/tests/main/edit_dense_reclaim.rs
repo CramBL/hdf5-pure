@@ -262,9 +262,7 @@ fn overlaps_free(sections: &[(u64, u64)], addr: u64, len: u64) -> bool {
 /// Returns header and root-node spans for each dense-link type 5 or type 6 B-tree in `path`.
 fn dense_link_tree_anchor_spans(path: &Path) -> Vec<(u8, u64, u64)> {
     let bytes = std::fs::read(path).unwrap();
-    let superblock = hdf5_pure_format::__private::parse_superblock_with_widths(&bytes, 0)
-        .unwrap()
-        .0;
+    let superblock = File::open(path).unwrap().superblock().clone();
     let header_size = 22 + u64::from(superblock.offset_size) + u64::from(superblock.length_size);
     let mut spans = Vec::new();
     for at in 0..bytes.len().saturating_sub(5) {

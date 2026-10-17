@@ -48,13 +48,15 @@ use crate::object_header::ObjectHeader;
 use crate::object_path::{LinkName, LinkNameBuf, ObjectPath, ObjectPathBuf};
 use crate::read_spec::{RawReadSpec, RawReadStorage};
 use crate::shared_message::{self, BufferedResolver, SharedResolver, SourceResolver};
-use crate::signature;
 use crate::source::SourceMetadata;
 use crate::source::{
     BaseOffsetSource, BytesSource, MetadataCacheConfig, MetadataCacheStats, MetadataCachingSource,
     ReadSeekSource, Source, ValidatedSource, frame,
 };
+use crate::superblock;
+use crate::superblock::LocatedSuperblock;
 use crate::superblock::Superblock;
+use crate::superblock::SuperblockSource;
 use crate::types::{AttrValue, DType, attrs_to_map, classify_datatype};
 use crate::vl_data::{self, VlElement, VlenStringReadOptions};
 use crate::width::FormatWidths;
@@ -802,34 +804,32 @@ impl DatasetAccessProperties {
     }
 }
 
-/// Test whether a file looks like an HDF5 file, without reading it whole.
+/// Returns `Ok(true)` if the file at `path` contains the HDF5 signature at an address where a
+/// superblock may start.
 ///
-/// This is the spelling of the C library's `H5Fis_accessible` /
-/// `H5Fis_hdf5`: it opens the file and scans only the 8-byte candidate windows
-/// where the HDF5 signature is permitted (offsets 0, 512, 1024, 2048, …), so it
-/// never buffers the whole file. Returns:
+/// Reads at most 15 bytes at byte 0, byte 512, and each address twice the previous one, up to the
+/// signature or the end of the file. Returns `Ok(true)` for a file whose bytes after the signature
+/// are truncated or malformed. [`File::open`] parses the superblock and the rest of the file.
+/// `H5Fis_accessible` makes the same check.
 ///
-/// - `Ok(true)` — the HDF5 signature was found,
-/// - `Ok(false)` — the file opened but has no HDF5 signature,
-/// - `Err(..)` — the file could not be opened (missing, permissions, …).
+/// # Errors
 ///
-/// It validates only the signature, not the rest of the format; a truncated or
-/// corrupt file past the signature still reports `true`. Use [`File::open`] to
-/// fully parse and validate.
+/// Returns an [`io::Error`](std::io::Error) if opening the file, seeking to its end, or reading
+/// it fails.
 pub fn is_hdf5<P: AsRef<std::path::Path>>(path: P) -> std::io::Result<bool> {
     let handle = std::fs::File::open(path)?;
     let source = ReadSeekSource::new(handle).map_err(std::io::Error::other)?;
-    match signature::find_signature_in(&source) {
-        Ok(_) => Ok(true),
-        Err(FormatError::SignatureNotFound) => Ok(false),
-        Err(e) => Err(std::io::Error::other(e)),
-    }
+    superblock::find_signature(&source)
+        .map(|address| address.is_some())
+        .map_err(std::io::Error::other)
 }
 
-/// Test whether an in-memory buffer begins (at a permitted offset) with the
-/// HDF5 signature. The buffer-backed counterpart of [`is_hdf5`].
+/// Returns `true` if `data` contains the HDF5 signature at an address where a superblock may
+/// start.
+///
+/// This is the in-memory counterpart of [`is_hdf5`].
 pub fn is_hdf5_bytes(data: &[u8]) -> bool {
-    signature::find_signature(data).is_ok()
+    matches!(superblock::find_signature(data), Ok(Some(_)))
 }
 
 /// An open HDF5 file for reading.
@@ -1077,7 +1077,7 @@ impl FileInner {
         } else {
             Box::new(source)
         };
-        let (superblock, widths, opened) = Self::parse_superblock_source(source.as_ref())?;
+        let (superblock, widths, opened) = Self::parse_superblock(source.as_ref())?;
         opened.require_complete(source.len())?;
         file_lock::check_status_flags(
             &superblock,
@@ -1120,7 +1120,7 @@ impl FileInner {
         let mut handle = std::fs::File::open(path.as_ref()).map_err(Error::Io)?;
         let mut data = Vec::new();
         handle.read_to_end(&mut data).map_err(Error::Io)?;
-        let (superblock, widths, opened) = Self::parse_superblock(&data)?;
+        let (superblock, widths, opened) = Self::parse_superblock(data.as_slice())?;
         if superblock.version < SWMR_SUPERBLOCK_VERSION {
             opened.require_complete(data.len() as u64)?;
         }
@@ -1150,7 +1150,7 @@ impl FileInner {
         data: Vec<u8>,
         properties: FileAccessProperties,
     ) -> Result<Self, Error> {
-        let (superblock, widths, opened) = Self::parse_superblock(&data)?;
+        let (superblock, widths, opened) = Self::parse_superblock(data.as_slice())?;
         opened.require_complete(data.len() as u64)?;
         Ok(Self::from_parts(
             Backend::InMemory(data),
@@ -1625,44 +1625,21 @@ impl FileInner {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::Format`] if the signature is absent, the superblock does not parse, or
-    /// the relocated EOF is outside the [`u64`] range.
+    /// Returns [`Error::Format`] if a read of `file` fails, the signature is absent, `file` ends
+    /// inside the superblock, the superblock does not parse, or the relocated EOF is outside the
+    /// [`u64`] range.
     fn parse_superblock(
-        data: &[u8],
+        file: &(impl SuperblockSource + ?Sized),
     ) -> Result<(Superblock, FormatWidths, OpenedImageContext), Error> {
-        let signature_offset = signature::find_signature(data)?;
-        let (superblock, widths) =
-            hdf5_pure_format::__private::parse_superblock_with_widths(data, signature_offset)?;
+        let LocatedSuperblock {
+            address,
+            superblock,
+            widths,
+        } = superblock::read(file)?;
         let opened = OpenedImageContext::reconcile(
             superblock.base_address,
             superblock.eof_address,
-            signature_offset as u64,
-        )?;
-        Ok((superblock, widths, opened))
-    }
-
-    /// Parses the superblock and constructs the address context through metadata reads.
-    ///
-    /// The returned superblock and address context have the same semantics as
-    /// [`parse_superblock`](Self::parse_superblock).
-    ///
-    /// # Errors
-    ///
-    /// Returns [`Error::Format`] if the signature is absent, the superblock does not parse, or
-    /// the relocated EOF is outside the [`u64`] range. Returns the source's error if a read fails.
-    fn parse_superblock_source<S: Source + ?Sized>(
-        source: &S,
-    ) -> Result<(Superblock, FormatWidths, OpenedImageContext), Error> {
-        let signature_offset = signature::find_signature_in(source)?;
-        let (superblock, widths) =
-            hdf5_pure_format::__private::parse_superblock_from_source_with_widths(
-                &SourceMetadata(source),
-                signature_offset,
-            )?;
-        let opened = OpenedImageContext::reconcile(
-            superblock.base_address,
-            superblock.eof_address,
-            signature_offset,
+            address.get(),
         )?;
         Ok((superblock, widths, opened))
     }
@@ -1849,7 +1826,7 @@ impl FileInner {
             let mut data = Vec::new();
             handle.seek(SeekFrom::Start(0)).map_err(Error::Io)?;
             handle.read_to_end(&mut data).map_err(Error::Io)?;
-            match Self::parse_superblock(&data) {
+            match Self::parse_superblock(data.as_slice()) {
                 Ok((superblock, widths, opened)) => {
                     self.backend = Backend::InMemory(data);
                     self.superblock = superblock;
@@ -8240,8 +8217,12 @@ mod tests {
     #[test]
     fn a_root_that_is_not_a_group_refuses_rather_than_being_searched() {
         let mut bytes = nested_dataset_bytes();
-        let sig = crate::signature::find_signature(&bytes).unwrap();
-        let mut sb = crate::superblock::parse_superblock(&bytes, sig).unwrap();
+        let LocatedSuperblock {
+            address,
+            superblock: mut sb,
+            ..
+        } = crate::superblock::read(bytes.as_slice()).unwrap();
+        let sig = usize::try_from(address.get()).unwrap();
         assert_eq!(sb.base_address, BaseAddress::ZERO);
         let addresses = AddressContext::from_effective_base(sb.base_address);
         sb.root_group_address = addresses
@@ -9942,8 +9923,12 @@ mod tests {
         std::fs::copy(&paged, &old_format).unwrap();
         {
             let mut bytes = std::fs::read(&old_format).unwrap();
-            let sig = crate::signature::find_signature(&bytes).unwrap();
-            let mut sb = crate::superblock::parse_superblock(&bytes, sig).unwrap();
+            let LocatedSuperblock {
+                address,
+                superblock: mut sb,
+                ..
+            } = crate::superblock::read(bytes.as_slice()).unwrap();
+            let sig = usize::try_from(address.get()).unwrap();
             assert_eq!(sb.version, 3, "the fixture must start at the newer format");
             sb.version = 2;
             let rewritten = hdf5_pure_format::__private::serialize_superblock(&sb).unwrap();

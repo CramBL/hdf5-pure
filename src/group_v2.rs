@@ -699,7 +699,6 @@ mod tests {
     use crate::message_flags::MessageFlags;
     #[cfg(feature = "std")]
     use crate::reader::File;
-    use crate::signature;
     use crate::source::BytesSource;
     #[cfg(feature = "std")]
     use crate::writer::FileBuilder;
@@ -1057,8 +1056,7 @@ mod tests {
     #[test]
     fn integration_v2_groups_temperature() {
         let file_data: &[u8] = include_bytes!("../tests/data/unattributed/v2_groups.h5");
-        let sig_offset = signature::find_signature(file_data).unwrap();
-        let sb = crate::superblock::parse_superblock(file_data, sig_offset).unwrap();
+        let sb = crate::superblock::read(file_data).unwrap().superblock;
         assert!(sb.version >= 2); // v2/v3 superblock
 
         let addr = resolve_path_any(
@@ -1087,8 +1085,7 @@ mod tests {
     #[test]
     fn integration_v2_groups_humidity() {
         let file_data: &[u8] = include_bytes!("../tests/data/unattributed/v2_groups.h5");
-        let sig_offset = signature::find_signature(file_data).unwrap();
-        let sb = crate::superblock::parse_superblock(file_data, sig_offset).unwrap();
+        let sb = crate::superblock::read(file_data).unwrap().superblock;
 
         let addr = resolve_path_any(
             file_data,
@@ -1116,8 +1113,7 @@ mod tests {
     #[test]
     fn integration_v2_many_links() {
         let file_data: &[u8] = include_bytes!("../tests/data/unattributed/v2_many_links.h5");
-        let sig_offset = signature::find_signature(file_data).unwrap();
-        let sb = crate::superblock::parse_superblock(file_data, sig_offset).unwrap();
+        let sb = crate::superblock::read(file_data).unwrap().superblock;
 
         let addr = resolve_path_any(
             file_data,
@@ -1146,8 +1142,7 @@ mod tests {
     fn integration_resolve_path_any_v1() {
         // Test that resolve_path_any also works for v1 files
         let file_data: &[u8] = include_bytes!("../tests/data/unattributed/two_groups.h5");
-        let sig_offset = signature::find_signature(file_data).unwrap();
-        let sb = crate::superblock::parse_superblock(file_data, sig_offset).unwrap();
+        let sb = crate::superblock::read(file_data).unwrap().superblock;
 
         let addr = resolve_path_any(
             file_data,
@@ -1175,8 +1170,7 @@ mod tests {
     #[test]
     fn integration_resolve_path_any_v2() {
         let file_data: &[u8] = include_bytes!("../tests/data/unattributed/v2_groups.h5");
-        let sig_offset = signature::find_signature(file_data).unwrap();
-        let sb = crate::superblock::parse_superblock(file_data, sig_offset).unwrap();
+        let sb = crate::superblock::read(file_data).unwrap().superblock;
 
         let addr = resolve_path_any(
             file_data,
@@ -1204,8 +1198,7 @@ mod tests {
     #[test]
     fn path_not_found_v2() {
         let file_data: &[u8] = include_bytes!("../tests/data/unattributed/v2_groups.h5");
-        let sig_offset = signature::find_signature(file_data).unwrap();
-        let sb = crate::superblock::parse_superblock(file_data, sig_offset).unwrap();
+        let sb = crate::superblock::read(file_data).unwrap().superblock;
 
         let err = resolve_path_any(
             file_data,
@@ -1336,7 +1329,6 @@ mod tests {
 mod huge_link_tests {
     use super::*;
     use crate::fractal_heap::{huge_index_decodes, reset_huge_index_decodes};
-    use crate::signature;
     use crate::source::BytesSource;
 
     fn test_widths(superblock: &Superblock) -> FormatWidths {
@@ -1353,8 +1345,7 @@ mod huge_link_tests {
     /// Group `g`'s dense-link storage: its info message, its heap address, and
     /// the file's offset and length sizes.
     fn dense_link_info(bytes: &[u8]) -> (LinkInfoMessage, StoredAddress, u8, u8) {
-        let sig = signature::find_signature(bytes).unwrap();
-        let superblock = crate::superblock::parse_superblock(bytes, sig).unwrap();
+        let superblock = crate::superblock::read(bytes).unwrap().superblock;
         let (offset_size, length_size) = (superblock.offset_size, superblock.length_size);
         let group_addr = resolve_path_any(
             bytes,

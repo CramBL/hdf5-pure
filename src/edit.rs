@@ -352,9 +352,10 @@ use crate::object_header::ObjectHeader;
 use crate::object_path::{LinkNameBuf, ObjectPathBuf};
 use crate::reader::FileAccessProperties;
 use crate::shared_message::DatatypeLocation;
-use crate::signature;
 use crate::source::SourceMetadata;
 use crate::source::{BaseOffsetSource, BytesSource, MetadataCacheConfig, Source};
+use crate::superblock;
+use crate::superblock::LocatedSuperblock;
 use crate::superblock::Superblock;
 use crate::type_builders::{
     AttrValue, DatasetBuilder, ObjectRefPatch, ObjectRefTarget, VlStringStaging,
@@ -2414,12 +2415,12 @@ impl WriteEngine {
         // handle; it leaves the handle's cursor wherever its last read ended,
         // which is why the mirror positions the handle before reading it whole.
         let probe = crate::image::BorrowedHandle::new(&handle, len);
-        let sb_sig_off = signature::find_signature_in(&probe)?;
-        let (superblock, widths) =
-            hdf5_pure_format::__private::parse_superblock_from_source_with_widths(
-                &SourceMetadata(&probe),
-                sb_sig_off,
-            )?;
+        let LocatedSuperblock {
+            address,
+            superblock,
+            widths,
+        } = superblock::read(&probe)?;
+        let sb_sig_off = address.get();
 
         if superblock.version > 3 {
             return Err(Error::EditUnsupported("unsupported superblock version"));
@@ -14748,7 +14749,9 @@ mod tests {
     /// superblock's base and end-of-file addresses to match.
     fn prepend_userblock(path: &Path, len: u64) {
         let original = std::fs::read(path).unwrap();
-        let mut superblock = crate::superblock::parse_superblock(&original, 0).unwrap();
+        let mut superblock = crate::superblock::read(original.as_slice())
+            .unwrap()
+            .superblock;
         superblock.base_address = BaseAddress::new(len);
         superblock.eof_address += len;
         let rewritten = hdf5_pure_format::__private::serialize_superblock(&superblock).unwrap();
@@ -18848,11 +18851,15 @@ mod tests {
         std::fs::copy(&flagged, &ancient).unwrap();
         for (path, version, flags) in [(&flagged, 3, SWMR_WRITE_FLAGS), (&ancient, 9, 0)] {
             let mut data = std::fs::read(path).unwrap();
-            let off = signature::find_signature(&data).unwrap();
-            let mut sb = crate::superblock::parse_superblock(&data, off).unwrap();
+            let LocatedSuperblock {
+                address,
+                superblock: mut sb,
+                ..
+            } = crate::superblock::read(data.as_slice()).unwrap();
+            let off = usize::try_from(address.get()).unwrap();
             sb.consistency_flags = flags;
             let mut bytes = hdf5_pure_format::__private::serialize_superblock(&sb).unwrap();
-            bytes[signature::HDF5_SIGNATURE.len()] = version;
+            bytes[hdf5_pure_format::__private::HDF5_SIGNATURE.len()] = version;
             data[off..off + bytes.len()].copy_from_slice(&bytes);
             std::fs::write(path, &data).unwrap();
         }
@@ -18899,8 +18906,12 @@ mod tests {
         // (0x05) into the superblock, recomputing its checksum.
         {
             let mut data = std::fs::read(&path).unwrap();
-            let off = signature::find_signature(&data).unwrap();
-            let mut sb = crate::superblock::parse_superblock(&data, off).unwrap();
+            let LocatedSuperblock {
+                address,
+                superblock: mut sb,
+                ..
+            } = crate::superblock::read(data.as_slice()).unwrap();
+            let off = usize::try_from(address.get()).unwrap();
             assert!(
                 sb.version >= 2,
                 "FileBuilder should emit a v2/v3 superblock"
@@ -18911,8 +18922,9 @@ mod tests {
             std::fs::write(&path, &data).unwrap();
             // Sanity: the stale flag is really set on disk now.
             assert_eq!(
-                crate::superblock::parse_superblock(&data, off)
+                crate::superblock::read(data.as_slice())
                     .unwrap()
+                    .superblock
                     .consistency_flags,
                 0x05
             );
@@ -18933,8 +18945,12 @@ mod tests {
         // write access, without the SWMR bit.
         {
             let mut data = std::fs::read(&path).unwrap();
-            let off = signature::find_signature(&data).unwrap();
-            let mut sb = crate::superblock::parse_superblock(&data, off).unwrap();
+            let LocatedSuperblock {
+                address,
+                superblock: mut sb,
+                ..
+            } = crate::superblock::read(data.as_slice()).unwrap();
+            let off = usize::try_from(address.get()).unwrap();
             sb.version = 2;
             sb.consistency_flags = crate::file_lock::WRITE_ACCESS;
             let bytes = hdf5_pure_format::__private::serialize_superblock(&sb).unwrap();
@@ -18954,10 +18970,10 @@ mod tests {
         }
 
         let data = std::fs::read(&path).unwrap();
-        let off = signature::find_signature(&data).unwrap();
         assert_eq!(
-            crate::superblock::parse_superblock(&data, off)
+            crate::superblock::read(data.as_slice())
                 .unwrap()
+                .superblock
                 .consistency_flags,
             0,
             "commit must clear the stale consistency flag"
@@ -19023,8 +19039,12 @@ mod tests {
         b.write(&path).unwrap();
 
         let mut data = std::fs::read(&path).unwrap();
-        let off = signature::find_signature(&data).unwrap();
-        let mut sb = crate::superblock::parse_superblock(&data, off).unwrap();
+        let LocatedSuperblock {
+            address,
+            superblock: mut sb,
+            ..
+        } = crate::superblock::read(data.as_slice()).unwrap();
+        let off = usize::try_from(address.get()).unwrap();
         assert_eq!(
             sb.base_address,
             BaseAddress::new(UB),

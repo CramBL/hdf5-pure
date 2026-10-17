@@ -26,7 +26,6 @@ use crate::bytes;
 use crate::checksum;
 use crate::convert::Narrow;
 use crate::error::FormatError;
-use crate::metadata_source::MetadataSource;
 use crate::signature::HDF5_SIGNATURE;
 use crate::width;
 use crate::width::FormatWidths;
@@ -300,55 +299,6 @@ impl SuperblockRef {
     }
 }
 
-/// Parses the superblock whose signature starts at `signature_offset` in `source`.
-///
-/// Reads one window of at most 128 bytes from `source`, enough for the largest superblock.
-///
-/// # Errors
-///
-/// Returns the error `source` returns if the read fails, and otherwise the errors
-/// [`parse_superblock_with_widths`] returns.
-pub fn parse_superblock_from_source_with_widths<S: MetadataSource + ?Sized>(
-    source: &S,
-    signature_offset: u64,
-) -> Result<(Superblock, FormatWidths), FormatError> {
-    let available = source.len().saturating_sub(signature_offset);
-    let window = available.min(MAX_SUPERBLOCK_LEN).to_usize()?;
-    let buf = source.read_metadata_at(signature_offset, window)?;
-    // The window begins at the signature, so within `buf` it sits at 0.
-    parse_superblock_with_widths(&buf, 0)
-}
-
-/// Returns the decoded superblock and its validated format widths.
-///
-/// The returned [`FormatWidths`] stores the superblock's "Size of Offsets" field as an
-/// [`OffsetWidth`] and its "Size of Lengths" field as a [`LengthWidth`].
-///
-/// # Errors
-///
-/// Returns [`FormatError::UnexpectedEof`] if `data` ends inside the superblock,
-/// [`FormatError::SignatureNotFound`] if the signature is not at `signature_offset`,
-/// [`FormatError::UnsupportedVersion`] if the version is above 3,
-/// [`FormatError::InvalidOffsetSize`] or [`FormatError::InvalidLengthSize`] if a width is not 2, 4,
-/// or 8, and, under the `checksum` feature, [`FormatError::ChecksumMismatch`] if the checksum of a
-/// version 2 or 3 superblock does not match its bytes.
-pub fn parse_superblock_with_widths(
-    data: &[u8],
-    signature_offset: usize,
-) -> Result<(Superblock, FormatWidths), FormatError> {
-    let data = data
-        .get(signature_offset..)
-        .ok_or(FormatError::UnexpectedEof {
-            expected: signature_offset,
-            available: data.len(),
-        })?;
-    let len = SuperblockCandidateFields::parse(data)?.encoded_len();
-    parse_superblock(data.get(..len).ok_or(FormatError::UnexpectedEof {
-        expected: len,
-        available: data.len(),
-    })?)
-}
-
 fn parse_superblock(bytes: &[u8]) -> Result<(Superblock, FormatWidths), FormatError> {
     let mut fields = bytes::Fields::new(bytes, 0);
     let candidate = SuperblockCandidateFields::read(&mut fields)?;
@@ -370,7 +320,8 @@ fn parse_superblock(bytes: &[u8]) -> Result<(Superblock, FormatWidths), FormatEr
     Ok((superblock, candidate.widths))
 }
 
-/// The version and the two widths of a superblock, the fields that fix its length.
+/// The version and the two widths of a superblock, which a candidate's range contains and which
+/// fix the superblock's length.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct SuperblockCandidateFields {
     version: SuperblockVersion,
@@ -529,14 +480,6 @@ fn write_address(
     Ok(())
 }
 
-/// Upper bound on the on-disk size of a superblock across all versions: the
-/// largest is v1 with 8-byte offsets at 100 bytes (28 prefix + 4 addresses +
-/// a 40-byte root symbol-table entry). 128 leaves headroom while staying a
-/// tiny, fixed window to pull from a streaming source.
-const MAX_SUPERBLOCK_LEN: u64 = 128;
-
-// The search starts at byte 0, then 512, then each multiple of two of the previous candidate:
-// section `subsec_fmt4_boot_super`, version 4.0.
 const FIRST_CANDIDATE: u64 = 0;
 const SECOND_CANDIDATE: u64 = 512;
 
