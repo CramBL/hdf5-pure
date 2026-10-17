@@ -382,6 +382,7 @@ fn sub_threshold_extents_that_end_the_file_are_given_back_in_one_commit() {
     b.create_dataset("c").with_i32_data(&[3; 100]);
     b.with_file_space_strategy(FileSpaceStrategy::FsmAggr, false, THRESHOLD);
     b.write(&path).unwrap();
+    let retained_end = 5_359;
 
     let file = File::open_rw(&path).unwrap();
     file.root().delete("b").unwrap();
@@ -409,10 +410,18 @@ fn sub_threshold_extents_that_end_the_file_are_given_back_in_one_commit() {
     file.root().delete("y").unwrap();
     file.commit().unwrap();
 
+    assert_eq!(x.start - retained_end, 1977);
     assert_eq!(
         (x.end, y.end, file.space_accounting().unwrap().logical_size),
-        (y.start, len, x.start)
+        (y.start, len, retained_end)
     );
+    file.close().unwrap();
+    let file = File::open(&path).unwrap();
+    assert_eq!(file.file_size(), retained_end);
+    assert_eq!(file.root().datasets().unwrap(), ["a", "c", "w"]);
+    assert_eq!(file.dataset("a").unwrap().read_i32().unwrap(), [1; 100]);
+    assert_eq!(file.dataset("c").unwrap().read_i32().unwrap(), [3; 100]);
+    assert_eq!(file.dataset("w").unwrap().read_i32().unwrap(), [8; 700]);
 }
 
 const UNKNOWN_VERSION: u8 = 0xff;

@@ -152,7 +152,7 @@ fn every_commit_keeps_the_userblock_and_writes_stored_manager_addresses(
 }
 
 #[rstest]
-#[case::fsm_aggr_transient(Strategy::FsmAggr, false, 65_681, 0)]
+#[case::fsm_aggr_transient(Strategy::FsmAggr, false, 67_584, 0)]
 #[case::fsm_aggr_persisting(Strategy::FsmAggr, true, 65_956, 1145)]
 #[case::page_persisting(Strategy::Page, true, TAIL_BYTES, PAGE)]
 fn a_deletion_that_frees_the_end_of_the_file_truncates_it(

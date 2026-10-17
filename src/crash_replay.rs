@@ -484,7 +484,7 @@ const WARMUP: i32 = WARMUP_ROUNDS * ROUND;
 /// this harness is about, with the blocks allocated in the order an append
 /// allocates them.
 fn warmed_base(path: &Path, paged: bool) {
-    warmed_base_padded(path, paged, 0);
+    warmed_base_padded(path, paged, 0, None);
 }
 
 /// [`warmed_base`], with `pad` bytes of attribute in the dataset's object header.
@@ -496,11 +496,13 @@ fn warmed_base(path: &Path, paged: bool) {
 /// prefix can fall between them, which is why the unpadded sweeps below cannot
 /// see issue #307. Above it they split, and the crash state between them is a
 /// new value under its old checksum.
-fn warmed_base_padded(path: &Path, paged: bool, pad: usize) {
+fn warmed_base_padded(path: &Path, paged: bool, pad: usize, strategy: Option<FileSpaceStrategy>) {
     let mut b = FileBuilder::new();
     if paged {
         b.with_file_space_strategy(FileSpaceStrategy::Page, true, 1)
             .with_file_space_page_size(4096);
+    } else if let Some(strategy) = strategy {
+        b.with_file_space_strategy(strategy, false, 1);
     }
     {
         let d = b.create_dataset("d");
@@ -1473,7 +1475,7 @@ const HEADER_PAD: usize = 4096;
 fn publishing_a_dimension_in_a_wide_header_survives_a_crash_at_every_write() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("wide_header.h5");
-    warmed_base_padded(&path, true, HEADER_PAD);
+    warmed_base_padded(&path, true, HEADER_PAD, None);
 
     let rec = Recording::of("wide-header", &path, |p| {
         let mut s = WriteEngine::open_with_locking(p, FileLocking::Enabled).unwrap();
@@ -1521,7 +1523,7 @@ fn a_publish_costs_the_same_whether_or_not_it_spans_a_page() {
         for pad in [0usize, 2000, 3800, 3900, 4200, 8300] {
             let dir = tempfile::tempdir().unwrap();
             let path = dir.path().join("pad.h5");
-            warmed_base_padded(&path, true, pad);
+            warmed_base_padded(&path, true, pad, None);
 
             let mut s = WriteEngine::open_with_locking(&path, FileLocking::Enabled).unwrap();
             s.set_sync_policy(SyncPolicy::OnClose);
@@ -1583,7 +1585,8 @@ fn buffering_saves_a_constant_number_of_writes_not_one_per_append() {
         let cost = |rounds: i32, unbuffered: bool| -> usize {
             let dir = tempfile::tempdir().unwrap();
             let path = dir.path().join("gap.h5");
-            warmed_base(&path, paged);
+            // NONE isolates write gathering from classic aggregate padding.
+            warmed_base_padded(&path, paged, 0, Some(FileSpaceStrategy::None));
             let mut s = WriteEngine::open_with_locking(&path, FileLocking::Enabled).unwrap();
             s.set_sync_policy(SyncPolicy::OnClose);
             if unbuffered {

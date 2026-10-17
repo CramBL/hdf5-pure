@@ -6,6 +6,7 @@ use hdf5_pure_space::__private::AggregationError;
 use hdf5_pure_space::__private::AllocationClass;
 use hdf5_pure_space::__private::ClassicAggregators;
 use hdf5_pure_space::__private::Extent;
+use hdf5_pure_space::__private::SessionSpace;
 
 use crate::address::AddressContext;
 use crate::address::StoredAddress;
@@ -64,7 +65,8 @@ impl AggregateSpace {
     /// Reserves an allocation for `class` and resolves its physical positions.
     ///
     /// The caller writes the reservation through [`place`](Self::place). On error, the
-    /// aggregate state is unchanged.
+    /// aggregate and reusable-space states are unchanged. In a flat session, tracks abandoned
+    /// aggregate spare subject to the free-section threshold.
     ///
     /// # Errors
     ///
@@ -72,6 +74,7 @@ impl AggregateSpace {
     pub(super) fn reserve(
         &mut self,
         addresses: AddressContext,
+        space: &mut SessionSpace,
         size: NonZeroU64,
         class: AllocationClass,
     ) -> Result<Placement, Error> {
@@ -97,8 +100,67 @@ impl AggregateSpace {
             len,
             end: physical_end,
         };
+        // H5MF__aggr_alloc in H5MFaggr.c, HDF5 2.2.0, returns abandoned spare through
+        // H5MF_xfree, whose threshold applies to newly tracked free sections.
+        if let Some(released) = allocation.released()
+            && let Some((post, _)) = space.flat_post_free(next.eoa, [released])
+        {
+            space.adopt_flat_post_free(post);
+        }
         *self = next;
         Ok(placement)
+    }
+
+    /// Tracks freed extents and releases aggregate spare when a free run reaches EOA.
+    ///
+    /// Clears both aggregate windows before truncation and returns their interior spare to
+    /// `space`, subject to its free-section threshold. Returns `None` for a strategy without a
+    /// flat free list or when no free run reaches an aggregate tail or EOA.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::Internal`] if aggregate state exceeds EOA or the flat reusable-space
+    /// strategy changes during release.
+    pub(super) fn release_freed(
+        &mut self,
+        space: &mut SessionSpace,
+        extents: impl IntoIterator<Item = Extent>,
+    ) -> Result<Option<u64>, FormatError> {
+        let Some((post, eoa)) = space.flat_post_free(self.eoa, extents) else {
+            return Ok(None);
+        };
+        let mut policy = self.policy;
+        let tail = policy.release_tail(self.eoa).map_err(|error| {
+            FormatError::Internal(format!("cannot release aggregate tails: {error}"))
+        })?;
+        if eoa == self.eoa
+            && !post
+                .extents()
+                .last()
+                .is_some_and(|extent| extent.end() == tail)
+        {
+            space.adopt_flat_post_free(post);
+            return Ok(None);
+        }
+        // Retained windows prevent truncation below their reserved ends. Clearing both windows
+        // returns their interior spare before the free tail is removed.
+        let released = policy
+            .reset(tail)
+            .map_err(|error| FormatError::Internal(format!("cannot reset aggregates: {error}")))?;
+        space.adopt_flat_post_free(post);
+        let (mut post, eoa) = space
+            .flat_post_free(
+                eoa.min(released.end_of_allocation()),
+                [AllocationClass::Metadata, AllocationClass::Raw]
+                    .into_iter()
+                    .filter_map(|class| released.released(class)),
+            )
+            .ok_or_else(|| FormatError::Internal("flat free-space strategy changed".into()))?;
+        let eoa = post.take_trailing(eoa).unwrap_or(eoa);
+        space.adopt_flat_post_free(post);
+        self.policy = policy;
+        self.eoa = eoa;
+        Ok(Some(eoa))
     }
 
     pub(super) fn unused(self) -> impl Iterator<Item = Extent> {
@@ -110,6 +172,7 @@ impl AggregateSpace {
     pub(super) fn eoa(self) -> u64 {
         self.eoa
     }
+
     fn extend(image: &mut dyn FileImage, end: u64) -> Result<(), Error> {
         let padding = [0; 4096];
         while image.len() < end {
@@ -154,11 +217,14 @@ impl WriteEngine {
         else {
             return Ok(None);
         };
-        aggregation.reserve(self.addresses, size, class).map(Some)
+        aggregation
+            .reserve(self.addresses, &mut self.space, size, class)
+            .map(Some)
     }
 
     /// Releases unused aggregate tails at EOA while retaining the published root.
     ///
+    /// In a flat session, tracks interior aggregate spare subject to the free-section threshold.
     /// The finalizer preserves the root and file length after an uncertain publication.
     ///
     /// # Errors
@@ -185,6 +251,16 @@ impl WriteEngine {
                 }
             })?;
         aggregation.eoa = released.end_of_allocation();
+        let post = self.space.flat_post_free(
+            aggregation.eoa,
+            [AllocationClass::Metadata, AllocationClass::Raw]
+                .into_iter()
+                .filter_map(|class| released.released(class)),
+        );
+        let post = post.map(|(mut post, eoa)| {
+            aggregation.eoa = post.take_trailing(eoa).unwrap_or(eoa);
+            post
+        });
         let end = self
             .addresses
             .resolve(StoredAddress::new(aggregation.eoa))?;
@@ -197,10 +273,16 @@ impl WriteEngine {
             if result.is_ok() || self.publish_attempted {
                 aggregation.publication_confirmed = result.is_ok();
                 self.aggregation = Some(aggregation);
+                if let Some(post) = post {
+                    self.space.adopt_flat_post_free(post);
+                }
             }
             result?;
         } else {
             self.aggregation = Some(aggregation);
+            if let Some(post) = post {
+                self.space.adopt_flat_post_free(post);
+            }
         }
         Ok(())
     }
@@ -208,6 +290,9 @@ impl WriteEngine {
 
 #[cfg(test)]
 mod immediate_tests;
+
+#[cfg(test)]
+mod fsm_tests;
 
 #[cfg(test)]
 mod tests {
@@ -346,12 +431,14 @@ mod tests {
         assert_eq!(engine.image.len(), end);
     }
 
-    #[test]
-    fn failed_staged_write_restores_aggregate_state() {
+    #[rstest]
+    fn failed_staged_write_restores_aggregate_state(
+        #[values(FileSpaceStrategy::Aggr, FileSpaceStrategy::FsmAggr)] strategy: FileSpaceStrategy,
+    ) {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("failed.h5");
         let mut builder = FileBuilder::new();
-        builder.with_file_space_strategy(FileSpaceStrategy::Aggr, false, 1);
+        builder.with_file_space_strategy(strategy, false, 1);
         builder.create_dataset("keep").with_i32_data(&[7]);
         builder.write(&path).unwrap();
         let end = std::fs::metadata(&path).unwrap().len();
@@ -375,12 +462,14 @@ mod tests {
         assert_eq!(file.dataset("keep").unwrap().read_i32().unwrap(), [7]);
     }
 
-    #[test]
-    fn failed_staged_write_restores_existing_aggregate_state() {
+    #[rstest]
+    fn failed_staged_write_restores_existing_aggregate_state(
+        #[values(FileSpaceStrategy::Aggr, FileSpaceStrategy::FsmAggr)] strategy: FileSpaceStrategy,
+    ) {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("rollback_reserve.h5");
         let mut builder = FileBuilder::new();
-        builder.with_file_space_strategy(FileSpaceStrategy::Aggr, false, 1);
+        builder.with_file_space_strategy(strategy, false, 1);
         builder.write(&path).unwrap();
         let start = std::fs::metadata(&path).unwrap().len();
         let mut engine = WriteEngine::open_torn_writes(&path, start + 64..start + 128).unwrap();
@@ -410,12 +499,14 @@ mod tests {
         assert_eq!(file.dataset("first").unwrap().read_i32().unwrap(), [43; 16]);
     }
 
-    #[test]
-    fn failed_publish_keeps_consumed_aggregate_space() {
+    #[rstest]
+    fn failed_publish_keeps_consumed_aggregate_space(
+        #[values(FileSpaceStrategy::Aggr, FileSpaceStrategy::FsmAggr)] strategy: FileSpaceStrategy,
+    ) {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("publish.h5");
         let mut builder = FileBuilder::new();
-        builder.with_file_space_strategy(FileSpaceStrategy::Aggr, false, 1);
+        builder.with_file_space_strategy(strategy, false, 1);
         builder.write(&path).unwrap();
         let mut engine = WriteEngine::open_torn_writes(&path, 0..48).unwrap();
         let original = engine.aggregation;
@@ -446,11 +537,12 @@ mod tests {
     fn aggregate_teardown_preserves_a_publication_after_transient_failure(
         #[case] failure: PublicationFailure,
         #[case] applied: bool,
+        #[values(FileSpaceStrategy::Aggr, FileSpaceStrategy::FsmAggr)] strategy: FileSpaceStrategy,
     ) {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("transient.h5");
         let mut builder = FileBuilder::new();
-        builder.with_file_space_strategy(FileSpaceStrategy::Aggr, false, 1);
+        builder.with_file_space_strategy(strategy, false, 1);
         builder.create_dataset("keep").with_i32_data(&[41]);
         builder.write(&path).unwrap();
         let mut engine =

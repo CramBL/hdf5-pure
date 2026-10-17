@@ -2330,7 +2330,7 @@ fn immediate_append_reuses_a_freed_hole() {
     session
         .root()
         .create_dataset("ceiling", |b| {
-            b.with_i32_data(&[9, 9, 9]);
+            b.with_i32_data(&[9; 1024]);
         })
         .unwrap();
     session.commit().unwrap();
@@ -2360,7 +2360,7 @@ fn immediate_append_reuses_a_freed_hole() {
     assert_eq!(file.dataset("keep").unwrap().read_i32().unwrap(), [1, 2, 3]);
     assert_eq!(
         file.dataset("ceiling").unwrap().read_i32().unwrap(),
-        [9, 9, 9]
+        [9; 1024]
     );
 }
 
