@@ -385,11 +385,17 @@ impl<'a> Fields<'a> {
         Ok(value)
     }
 
-    /// Reads a file address of `width` bytes.
-    pub(crate) fn address(&mut self, width: OffsetWidth) -> Result<StoredAddress, FormatError> {
+    /// Reads an absolute address of `width` bytes, such as the superblock's base address or its
+    /// end-of-file address.
+    pub(crate) fn offset(&mut self, width: OffsetWidth) -> Result<u64, FormatError> {
         let value = read_offset_width(self.data, self.pos, width)?;
         self.pos += usize::from(width.get());
-        Ok(StoredAddress::new(value))
+        Ok(value)
+    }
+
+    /// Reads a file address of `width` bytes.
+    pub(crate) fn address(&mut self, width: OffsetWidth) -> Result<StoredAddress, FormatError> {
+        self.offset(width).map(StoredAddress::new)
     }
 
     /// Reads a file address of `width` bytes, decoded as [`DecodedStoredAddress`].
