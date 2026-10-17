@@ -6331,12 +6331,10 @@ fn overwriting_a_chunked_vlen_string_dataset_reclaims_its_old_chunk_storage() {
 /// (issue #321).
 ///
 /// Each overwrite places a fresh global heap collection for the new strings.
-/// Nothing else in the editor reclaims a collection, and for good reason — one
-/// can be shared between objects — so before this the old strings were simply
-/// left behind and only `repack` recovered them. What makes these reclaimable
-/// is provenance: this session placed them, for this dataset, and
-/// `invalidate_heap_provenance` drops the record the moment anything could name
-/// them twice.
+/// A collection can be shared between objects, and outside a delete the editor
+/// reclaims one only where it records that this session placed it for one
+/// dataset, and `invalidate_heap_provenance` drops the record the moment
+/// anything could name the collection twice.
 ///
 /// Judged from the second round, like the fixed-size rotation test above: the
 /// first has nothing freed to draw on yet.

@@ -1,8 +1,9 @@
 //! Collects the storage a commit frees, with the [`FreeClass`] of each span.
 //!
-//! A commit frees an object's storage when it deletes the object's last hard link, and the storage
-//! of a dense attribute set or a chunk index when it replaces one. The walk returns a span only
-//! once it accounts for every allocation of the structure the span belongs to, and leaves a
+//! A commit frees an object's storage when it deletes the object's last hard link, a global heap
+//! collection when the objects it deletes are the only ones that refer to the collection, and the
+//! storage of a dense attribute set or a chunk index when it replaces one. The walk returns a span
+//! only once it accounts for every allocation of the structure the span belongs to, and leaves a
 //! structure it cannot account for in full allocated.
 
 use std::collections::{HashMap, HashSet};
@@ -39,6 +40,10 @@ use super::{
     MAX_COPY_DEPTH, MAX_LINK_GRAPH_NODES, ObjModel, OhRegion, SpaceOwnership, WriteEngine,
     read_oh_chunks, spans_disjoint_in_bounds,
 };
+
+/// The spans `(address, length)` of the global heap collections that the objects a commit deletes
+/// refer to, as [`WriteEngine::deleted_collections`] returns them.
+pub(super) struct DeletedCollections(Vec<(u64, u64)>);
 
 struct ChunkedStorageParts {
     data: Vec<(u64, u64)>,
@@ -472,11 +477,13 @@ impl WriteEngine {
     /// links and subtree, compact or dense. An object it cannot account for in full, such as one
     /// with a header that is not version 2, a chunk index that cannot be walked in full, or a
     /// compact group with a soft or external link, contributes nothing and is not descended into,
-    /// so `out` never holds a region still in use. A dense set's indexes join `out` only once the whole index set is
-    /// accounted for, and its fractal heap only once the heap's ownership is proven. A group's link
-    /// storage and the objects its links reach are separate: either can be reclaimed without the
-    /// other. Variable-length data in global heap collections stays allocated, since objects can
-    /// share a collection. The walk stops at [`MAX_COPY_DEPTH`] against a hard-link cycle.
+    /// so `out` never holds a region still in use. A dense set's indexes join `out` only once the
+    /// whole index set is accounted for, and its fractal heap only once the heap's ownership is
+    /// proven. A group's link storage and the objects its links reach are separate: either can be
+    /// reclaimed without the other. The walk excludes the global heap collections the objects
+    /// refer to, since objects can share a collection, and the commit frees those it leaves
+    /// unreferenced through [`unreferenced_collection_spans`](Self::unreferenced_collection_spans).
+    /// The walk stops at [`MAX_COPY_DEPTH`] against a hard-link cycle.
     ///
     /// `incoming` holds the file-wide hard-link count of each object header address, from
     /// [`count_incoming_hard_links`](Self::count_incoming_hard_links). An object is reclaimed, and
@@ -674,6 +681,65 @@ impl WriteEngine {
         ))
     }
 
+    /// Returns the global heap collections that the objects at `deleted`, and the objects
+    /// reachable from them, refer to.
+    ///
+    /// `deleted` holds the absolute addresses of the object headers whose links a commit deletes.
+    /// The result is empty if [`collections_reachable_from`](Self::collections_reachable_from)
+    /// returns an error or an incomplete analysis for them, and leaves out a collection that
+    /// cannot be parsed, so the commit keeps that collection allocated.
+    pub(super) fn deleted_collections(&self, deleted: &[u64]) -> DeletedCollections {
+        let Ok(GlobalHeapLiveness {
+            referenced_collections,
+            analysis_complete: true,
+        }) = self.collections_reachable_from(deleted.iter().copied())
+        else {
+            return DeletedCollections(Vec::new());
+        };
+        DeletedCollections(
+            referenced_collections
+                .into_iter()
+                .filter_map(|address| self.collection_span(address).ok())
+                .collect(),
+        )
+    }
+
+    /// Returns the span and free class of each of the deleted `collections` that is unreferenced
+    /// by the objects reachable from the object header at `root`.
+    ///
+    /// `root` is the absolute address of the root group header that the commit publishes. The
+    /// result is empty if [`collections_reachable_from`](Self::collections_reachable_from) returns
+    /// an error or an incomplete analysis for `root`, since an object the analysis cannot read may
+    /// refer to any collection. Each span has the free class [`collection_free_class`] returns.
+    pub(super) fn unreferenced_collection_spans(
+        &self,
+        root: u64,
+        DeletedCollections(collections): DeletedCollections,
+    ) -> Vec<(u64, u64, FreeClass)> {
+        if collections.is_empty() {
+            return Vec::new();
+        }
+        let Ok(GlobalHeapLiveness {
+            referenced_collections,
+            analysis_complete: true,
+        }) = self.collections_reachable_from([root])
+        else {
+            return Vec::new();
+        };
+        collections
+            .into_iter()
+            .filter(|(address, _)| !referenced_collections.contains(address))
+            .filter_map(|(address, len)| {
+                let stored = self.addresses.relative(address).ok()?;
+                Some((
+                    address,
+                    len,
+                    collection_free_class(self.space.page_size(), stored.get(), len),
+                ))
+            })
+            .collect()
+    }
+
     /// Returns every on-disk block a *chunked* dataset at `addr` owns: its
     /// chunk index structure (B-tree v1 nodes, or fixed- / extensible-array
     /// header, index, super, and data blocks) plus every allocated chunk data
@@ -696,9 +762,8 @@ impl WriteEngine {
     /// per-layout enumeration lives in
     /// [`chunked_read::collect_chunked_storage_spans`](crate::chunked_read::collect_chunked_storage_spans).
     /// This method only locates the layout and dataspace messages and validates
-    /// the result. Variable-length data in global-heap collections is still
-    /// never reclaimed (a collection can be shared between objects). See the
-    /// [module docs](self).
+    /// the result. The global heap collections that the chunks refer to are
+    /// excluded, as in [`collect_free_spans`](Self::collect_free_spans).
     pub(super) fn chunked_storage_spans(&self, addr: u64) -> Option<Vec<(u64, u64, FreeClass)>> {
         let split = self.chunked_storage_parts(addr)?;
         let index_class = chunk_index_free_class(
@@ -948,7 +1013,7 @@ impl WriteEngine {
         raw: &mut Vec<(u64, u64)>,
         metadata: &mut Vec<(u64, u64)>,
     ) -> Result<bool, Error> {
-        self.walk_reachable_objects(root, |addr, header, child| {
+        self.walk_reachable_objects([root], |addr, header, child| {
             if header.version != OWNED_HEADER_VERSION {
                 return Ok(false);
             }
@@ -957,25 +1022,25 @@ impl WriteEngine {
         })
     }
 
-    /// Visits each object reachable from the object header at `root` once, and returns whether the
-    /// walk is complete.
+    /// Visits each object reachable from the object headers in `roots` once, and returns whether
+    /// the walk is complete.
     ///
     /// `visit` receives the absolute address of an object header, the parsed header, and a
     /// callback that adds a child object to the walk by the absolute address of its header. The
     /// walk is incomplete if `visit` returns `false` for an object, or if the walk skips an object
-    /// [`MAX_COPY_DEPTH`] links from `root` or after visiting [`MAX_LINK_GRAPH_NODES`] objects.
+    /// [`MAX_COPY_DEPTH`] links from a root or after visiting [`MAX_LINK_GRAPH_NODES`] objects.
     ///
     /// # Errors
     ///
     /// Returns [`Error::Format`] if an object header is malformed, and any error `visit` returns.
     pub(super) fn walk_reachable_objects(
         &self,
-        root: u64,
+        roots: impl IntoIterator<Item = u64>,
         mut visit: impl FnMut(u64, &ObjectHeader, &mut dyn FnMut(u64)) -> Result<bool, Error>,
     ) -> Result<bool, Error> {
         let mut complete = true;
         let mut visited = HashSet::new();
-        let mut pending = vec![(root, 0)];
+        let mut pending: Vec<(u64, u32)> = roots.into_iter().map(|root| (root, 0)).collect();
         while let Some((addr, depth)) = pending.pop() {
             if visited.contains(&addr) {
                 continue;
@@ -1310,12 +1375,32 @@ pub(super) fn index_abuts_chunk_data(data: &[(u64, u64)], index: &[(u64, u64)]) 
     })
 }
 
+/// Returns the PAGE free-space class of a global heap collection of `len` bytes at the stored
+/// address `stored` that a delete frees.
+///
+/// A collection is raw data. On a paged file, a collection with a byte in page 0 or of a page or
+/// more is [dead](FreeClass::Dead).
+///
+/// `H5HG_remove` (`H5HG.c`, libhdf5 2.2.0) frees a collection whole once its last object is
+/// removed, as `H5FD_MEM_GHEAP` space, which the `H5FD_FLMAP_DICHOTOMY` free-list map
+/// (`H5FDdevelop.h`) files with raw data. On a paged file, `H5MF_xfree` (`H5MF.c`, libhdf5 2.2.0)
+/// files freed space of a page or more in the generic large manager by its size alone, whatever
+/// its type.
+fn collection_free_class(page_size: Option<FileSpacePageSize>, stored: u64, len: u64) -> FreeClass {
+    match page_size {
+        Some(page_size) if touches_page_zero(page_size, [(stored, len)]) => FreeClass::Dead,
+        Some(page_size) if len >= page_size.get() => FreeClass::Dead,
+        _ => FreeClass::Page(PageType::Raw),
+    }
+}
+
 /// Returns whether any byte of `spans`, in stored addresses, lies in page 0 of a paged file.
 ///
 /// Page 0 begins at the base address with the superblock, so it is a metadata page.
 ///
 /// [`WriteEngine::index_is_provably_raw`], whose doc gives the reasoning, screens a chunk index
-/// with it. [`huge_object_free_class`] screens a run of huge objects with it.
+/// with it. [`huge_object_free_class`] screens a run of huge objects with it, and
+/// [`collection_free_class`] a global heap collection.
 pub(super) fn touches_page_zero(
     page_size: FileSpacePageSize,
     spans: impl IntoIterator<Item = (u64, u64)>,
@@ -1515,6 +1600,24 @@ mod tests {
                 (0x1100, 0x80, RAW)
             ]
         );
+    }
+
+    #[rstest]
+    #[case::without_pages(None, 0x0800, 0x1000, RAW)]
+    #[case::below_a_page(Some(0x2000), 0x2000, 0x1000, RAW)]
+    #[case::a_page_or_more_off_a_page_boundary(Some(0x1000), 0x1800, 0x1000, FreeClass::Dead)]
+    #[case::a_page_or_more_on_a_page_boundary(Some(0x1000), 0x1000, 0x1000, FreeClass::Dead)]
+    #[case::in_page_zero(Some(0x2000), 0x0800, 0x1000, FreeClass::Dead)]
+    #[case::across_the_end_of_page_zero(Some(0x2000), 0x1f00, 0x1000, FreeClass::Dead)]
+    fn a_collection_is_raw_data_below_a_page_and_outside_page_zero(
+        #[case] page_size: Option<u64>,
+        #[case] stored: u64,
+        #[case] len: u64,
+        #[case] expected: FreeClass,
+    ) {
+        let page_size = page_size.map(|size| FileSpacePageSize::try_from(size).unwrap());
+
+        assert_eq!(collection_free_class(page_size, stored, len), expected);
     }
 
     const HEADER: FractalHeapAllocation = FractalHeapAllocation::Header;

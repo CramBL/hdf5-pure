@@ -28,7 +28,8 @@ use crate::vl_data::VlElement;
 
 use super::WriteEngine;
 
-/// The global heap collections that the objects reachable from the root group refer to.
+/// The global heap collections that the objects reachable from a set of object headers, such as
+/// the root group's, refer to.
 ///
 /// The editor follows the hard links of each group and reads the variable-length elements of
 /// each attribute, compact, contiguous, or chunked dataset, and fill value, including the
@@ -62,11 +63,26 @@ impl WriteEngine {
     /// variable-length elements is malformed, and [`Error::MissingMessage`] if a dataset lacks its
     /// datatype or dataspace message.
     pub(crate) fn global_heap_liveness(&self) -> Result<GlobalHeapLiveness, Error> {
-        let mut referenced_collections = BTreeSet::new();
-        let root = self
+        self.collections_reachable_from([self
             .addresses
-            .absolute(self.superblock.root_group_address)?;
-        let analysis_complete = self.walk_reachable_objects(root, |_, header, child| {
+            .absolute(self.superblock.root_group_address)?])
+    }
+
+    /// Returns the global heap collections that the objects reachable from the object headers in
+    /// `roots` refer to.
+    ///
+    /// `roots` holds absolute addresses, and
+    /// [`global_heap_liveness`](Self::global_heap_liveness) passes the root group alone.
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors of [`global_heap_liveness`](Self::global_heap_liveness).
+    pub(super) fn collections_reachable_from(
+        &self,
+        roots: impl IntoIterator<Item = u64>,
+    ) -> Result<GlobalHeapLiveness, Error> {
+        let mut referenced_collections = BTreeSet::new();
+        let analysis_complete = self.walk_reachable_objects(roots, |_, header, child| {
             self.collect_object_collections(header, child, &mut referenced_collections)
         })?;
         Ok(GlobalHeapLiveness {

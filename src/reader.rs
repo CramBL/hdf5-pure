@@ -5641,11 +5641,11 @@ impl Dataset {
     /// global heap collection for the new strings and resolves the staged
     /// element references against it. Overwriting the same dataset again
     /// reclaims the collection the previous overwrite placed, so rotating its
-    /// strings in a session does not grow the file without bound. The
-    /// collections it held when the session *opened* are not reclaimed — a
-    /// collection can be shared between objects, and only this session's own
-    /// placements are known not to be, so [`repack`](crate::repack()) is what
-    /// recovers those.
+    /// strings in a session does not grow the file without bound. An overwrite
+    /// does not reclaim the collections the dataset held when the session
+    /// *opened*: a collection can be shared between objects, and only this
+    /// session's own placements are known not to be, so
+    /// [`repack`](crate::repack()) is what recovers those.
     ///
     /// The reference refusal is on the builder, not on the datatype it produces:
     /// such a dataset can still be overwritten by supplying element bytes that
