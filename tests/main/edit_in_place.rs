@@ -5391,12 +5391,8 @@ fn rotating_one_path_in_a_session_stops_growing_the_file() {
         }
     }
 
-    // A rotation is what the refusal used to cost two commits, and the point of
-    // paying it once is that the file reaches a steady state instead of growing
-    // by a dataset per round: each commit frees the object the previous one
-    // placed, and the next reuses that space. Judged against the *second* round
-    // rather than the first, because the first has nothing freed to draw on yet.
-    let ceiling = sizes[1];
+    // The first two rounds establish reusable extents and aggregate reservations.
+    let ceiling = sizes[..2].iter().copied().max().unwrap();
     assert!(
         sizes[2..].iter().all(|&s| s <= ceiling),
         "the file grew past its second-round size under rotation: {sizes:?}"

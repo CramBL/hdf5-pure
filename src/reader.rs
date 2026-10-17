@@ -911,9 +911,9 @@ impl Drop for FileInner {
     ///   true crash (`SIGKILL`, power loss) skips `drop` entirely; the appended
     ///   data is still durable, under the default
     ///   [`SyncPolicy::Always`](crate::SyncPolicy).
-    /// - A file using [`FileSpaceStrategy::Aggr`] releases unused aggregate tails after
-    ///   publishing the shorter EOA with the current root. An uncertain publication prevents
-    ///   this cleanup.
+    /// - A file using [`FileSpaceStrategy::Aggr`] or [`FileSpaceStrategy::FsmAggr`] with
+    ///   persistence disabled releases unused aggregate tails after publishing the shorter EOA
+    ///   with the current root. An uncertain publication prevents this cleanup.
     ///
     /// Staged edits are *not* committed here: dropping a handle discards them,
     /// which is what `close` exists to distinguish.
@@ -3384,16 +3384,25 @@ impl File {
         self.with_mirror_session(Change::Nothing, |session| session.force_sync())
     }
 
-    /// Commit any staged edits and seal this file. The exclusive OS lock is
+    /// Commits any staged edits and seals this file. The exclusive OS lock is
     /// released once the last handle derived from this file is also dropped.
     ///
     /// After `close`, a write through any surviving [`Dataset`]/[`Group`] handle
     /// or [`File`] clone returns [`Error::FileClosed`], and
-    /// reads still work. Unused AGGR aggregate tails are released after publishing the shorter
-    /// EOA with the current root, provided publication completed successfully.
+    /// reads still work. Under [`FileSpaceStrategy::Aggr`] or [`FileSpaceStrategy::FsmAggr`] with
+    /// persistence disabled, an ordinary read-write session releases unused aggregate
+    /// tails after publishing the shorter EOA with the current root, provided publication
+    /// completed successfully.
     /// A handle reached by [`Dataset::dereference`] reports
     /// [`Error::StaleHandle`] after the commit, while a handle opened by path
     /// re-resolves and keeps reading.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::FileClosed`] if another handle already closed the file. Returns
+    /// [`Error::Io`] if writing, synchronizing, or truncating the file fails. Returns
+    /// [`Error::Format`] if metadata geometry or address conversion is invalid. Errors from
+    /// applying staged edits are returned as described in [`commit`](Self::commit).
     pub fn close(self) -> Result<(), Error> {
         if matches!(self.inner.backend, Backend::Edit(_)) {
             // SWMR mode stages nothing — the staged surface is refused — so there

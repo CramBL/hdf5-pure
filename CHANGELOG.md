@@ -8,6 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- `File::open_rw` uses separate metadata and raw aggregates for staged edits and immediate appends under `FsmAggr` with persistence disabled, including files without a recorded strategy. Freed storage is reused before aggregate reservations, which last only for the session ([#781](https://github.com/CramBL/hdf5-pure/pull/781)).
 - `Dataset::append` shares the session's metadata and raw aggregates with staged edits under the `Aggr` file-space strategy. Unused reservations are available within the session, while freed object extents remain unavailable for reuse ([#778](https://github.com/CramBL/hdf5-pure/pull/778)).
 - `Group::groups` and related listings and attribute reads support dense link and attribute storage whose fractal heap is filtered. Huge objects in such a heap remain unsupported ([#776](https://github.com/CramBL/hdf5-pure/pull/776)).
 - `File::open_rw` reclaims the filtered fractal heap of dense attribute or link storage that becomes dead. A filtered heap with huge objects or a filter without a decoder stays allocated ([#776](https://github.com/CramBL/hdf5-pure/pull/776)).

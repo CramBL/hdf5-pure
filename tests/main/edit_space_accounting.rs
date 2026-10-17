@@ -67,9 +67,9 @@ fn logical_size_grows_with_immediate_append() {
         "logical_size must match the on-disk file length after a durable append"
     );
     assert_eq!(
-        acct.reusable_free_bytes, 0,
-        "an in-place append feeds no reusable free space (any abandoned index block \
-         is untracked, never reused)"
+        acct.reusable_free_space,
+        [(before + 32, 2016)],
+        "an immediate append retains its unused raw aggregate reservation"
     );
     file_space::assert_space_accounting_consistent(&acct);
 }
@@ -227,6 +227,7 @@ fn a_relocating_overwrite_reclaims_the_old_header_with_its_storage() {
     Unlimited::new("d", &[0i32; 64], 16)
         .filters(&[Filter::Deflate(6)])
         .pure_create(&path);
+    let original_end = std::fs::metadata(&path).unwrap().len();
 
     let session = File::open_rw(&path).unwrap();
     let incompressible: Vec<i32> = (0..64)
@@ -244,7 +245,10 @@ fn a_relocating_overwrite_reclaims_the_old_header_with_its_storage() {
     let acct = session.space_accounting().unwrap();
     file_space::assert_space_accounting_consistent(&acct);
     assert_eq!(
-        acct.reusable_free_space.len(),
+        acct.reusable_free_space
+            .iter()
+            .filter(|&&(start, _)| start < original_end)
+            .count(),
         1,
         "the vacated header and chunk storage are adjacent and must coalesce: {:?}",
         acct.reusable_free_space

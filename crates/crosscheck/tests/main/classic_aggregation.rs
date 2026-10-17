@@ -8,6 +8,7 @@ use hdf5::types::VarLenUnicode;
 use hdf5_pure::File;
 use hdf5_pure::FileAccessProperties;
 use hdf5_pure::FileSpaceStrategy;
+use hdf5_pure::Layout;
 use hdf5_pure::MemoryStrategy;
 use hdf5_sys::h5o::H5O_INFO_BASIC;
 use hdf5_sys::h5o::H5O_info1_t;
@@ -128,16 +129,21 @@ fn libhdf5_reads_the_workload_hdf5_pure_writes(
 #[case::global_heap(aggregation::GLOBAL_HEAP)]
 #[case::freed_extent(aggregation::FREED_EXTENT)]
 #[case::block_edges(aggregation::BLOCK_EDGES)]
-fn libhdf5_reads_and_mutates_its_aggr_file_after_staged_edits(
+fn libhdf5_reads_and_mutates_its_classic_file_after_staged_edits(
     #[case] workload: Workload,
     #[values((MemoryStrategy::Mirrored, 0), (MemoryStrategy::Bounded, 0), (MemoryStrategy::Mirrored, 512))]
     (backing, userblock): (MemoryStrategy, u64),
+    #[values(AGGR, FSM_AGGR)] strategy: CStrategy,
 ) {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("staged.h5");
     let seed = hdf5::FileBuilder::new()
         .with_fapl(|properties| properties.libver_v110())
-        .with_fcpl(|properties| properties.file_space_strategy(AGGR).userblock(userblock))
+        .with_fcpl(|properties| {
+            properties
+                .file_space_strategy(strategy)
+                .userblock(userblock)
+        })
         .create(&path)
         .unwrap();
     seed.new_dataset::<u8>()
@@ -203,18 +209,19 @@ fn libhdf5_reads_and_mutates_its_aggr_file_after_staged_edits(
 #[case::small(6, 4, 14)]
 #[case::raw_refill(6, 4, 6000)]
 #[case::index_blocks(4, 1, 1500)]
-fn libhdf5_reads_and_extends_its_aggr_file_after_immediate_appends(
+fn libhdf5_reads_and_extends_its_classic_file_after_immediate_appends(
     #[case] initial: usize,
     #[case] chunk: usize,
     #[case] end: usize,
     #[values(MemoryStrategy::Mirrored, MemoryStrategy::Bounded)] backing: MemoryStrategy,
     #[values(false, true)] filtered: bool,
+    #[values(AGGR, FSM_AGGR)] strategy: CStrategy,
 ) {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("immediate.h5");
     let seed = hdf5::FileBuilder::new()
         .with_fapl(|properties| properties.libver_v110())
-        .with_fcpl(|properties| properties.file_space_strategy(AGGR))
+        .with_fcpl(|properties| properties.file_space_strategy(strategy))
         .create(&path)
         .unwrap();
     let mut builder = seed.new_dataset::<u8>();
@@ -251,6 +258,7 @@ fn libhdf5_reads_and_extends_its_aggr_file_after_immediate_appends(
         .map(|&(start, length)| start + length)
         .max()
         .unwrap();
+    let reusable = file.space_accounting().unwrap().reusable_free_space;
     file.dataset("values")
         .unwrap()
         .append_raw(&expected[initial..])
@@ -259,12 +267,20 @@ fn libhdf5_reads_and_extends_its_aggr_file_after_immediate_appends(
     assert!(ownership.analysis_complete);
     assert_eq!(ownership.physical_size, ownership.logical_size);
     assert_eq!(ownership.free_space_manager_space, []);
-    assert!(
-        ownership
-            .live_raw_space
-            .iter()
-            .any(|&(start, _)| start == raw_cursor)
-    );
+    if strategy == AGGR {
+        assert!(
+            ownership
+                .live_raw_space
+                .iter()
+                .any(|&(start, _)| start == raw_cursor)
+        );
+    } else {
+        assert!(ownership.live_raw_space.iter().any(|&(start, length)| {
+            reusable
+                .iter()
+                .any(|&(address, size)| start < address + size && address < start + length)
+        }));
+    }
     file.root()
         .create_dataset("last", |dataset| {
             dataset.with_u8_data(&[19; 16]);
@@ -295,6 +311,128 @@ fn libhdf5_reads_and_extends_its_aggr_file_after_immediate_appends(
     drop(dataset);
     file.close().unwrap();
     expected.extend_from_slice(&[101, 102]);
+    assert_eq!(
+        File::open(&path)
+            .unwrap()
+            .dataset("values")
+            .unwrap()
+            .read_u8()
+            .unwrap(),
+        expected
+    );
+}
+
+#[rstest]
+fn libhdf5_fsm_file_reuses_deleted_storage_before_aggregate_spare(
+    #[values(MemoryStrategy::Mirrored, MemoryStrategy::Bounded)] backing: MemoryStrategy,
+) {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("fsm_reuse.h5");
+    let seed = hdf5::FileBuilder::new()
+        .with_fapl(|properties| properties.libver_v110())
+        .with_fcpl(|properties| properties.file_space_strategy(FSM_AGGR))
+        .create(&path)
+        .unwrap();
+    seed.new_dataset::<u8>()
+        .shape((4..,))
+        .chunk([4])
+        .create("values")
+        .unwrap()
+        .write(&[1, 2, 3, 4])
+        .unwrap();
+    let scratch = seed
+        .new_dataset::<u8>()
+        .shape(4096)
+        .create("scratch")
+        .unwrap();
+    scratch.write(&[7; 4096]).unwrap();
+    let hole = scratch.offset().unwrap();
+    drop(scratch);
+    seed.new_dataset::<u8>()
+        .shape(4096)
+        .create("keep")
+        .unwrap()
+        .write(&[11; 4096])
+        .unwrap();
+    seed.link_hard("keep", "alias").unwrap();
+    seed.close().unwrap();
+    let file = File::open_rw_with_options(
+        &path,
+        FileAccessProperties::new().with_memory_strategy(backing),
+    )
+    .unwrap();
+    file.root()
+        .create_dataset("first", |dataset| {
+            dataset.with_u8_data(&[17; 64]);
+        })
+        .unwrap();
+    file.commit().unwrap();
+    file.root().delete("scratch").unwrap();
+    file.root().delete("keep").unwrap();
+    file.commit().unwrap();
+    let before = file.space_accounting().unwrap();
+    let &(free_start, free_size) = before
+        .reusable_free_space
+        .iter()
+        .find(|&&(address, size)| address <= hole && hole + 4096 <= address + size)
+        .unwrap();
+    file.root()
+        .create_dataset("replacement", |dataset| {
+            dataset.with_u8_data(&[19; 3072]);
+        })
+        .unwrap();
+    file.commit().unwrap();
+    let Layout::Contiguous {
+        address: Some(address),
+        size,
+    } = file.dataset("replacement").unwrap().layout().unwrap()
+    else {
+        panic!("expected contiguous replacement");
+    };
+    assert_eq!(size, 3072);
+    assert!(free_start <= address && address + size <= free_start + free_size);
+    file.dataset("values")
+        .unwrap()
+        .append_raw(&[5; 1024])
+        .unwrap();
+    let chunks = file.dataset("values").unwrap().chunks().unwrap();
+    assert!(chunks.iter().any(|chunk| free_start <= chunk.address
+        && chunk.address + chunk.storage_size <= free_start + free_size));
+    let ownership = file.__space_ownership().unwrap();
+    assert!(ownership.analysis_complete);
+    assert_eq!(ownership.free_space_manager_space, []);
+    assert!(
+        ownership
+            .reusable_free_space
+            .iter()
+            .all(|&(start, length)| ownership
+                .live_raw_space
+                .iter()
+                .chain(&ownership.live_metadata_space)
+                .all(|&(address, size)| start + length <= address || address + size <= start))
+    );
+    file.close().unwrap();
+    let file = hdf5::File::open_rw(&path).unwrap();
+    assert_eq!(
+        file.dataset("replacement")
+            .unwrap()
+            .read_raw::<u8>()
+            .unwrap(),
+        [19; 3072]
+    );
+    assert_eq!(
+        file.dataset("alias").unwrap().read_raw::<u8>().unwrap(),
+        [11; 4096]
+    );
+    let mut expected = vec![1, 2, 3, 4];
+    expected.extend_from_slice(&[5; 1024]);
+    let dataset = file.dataset("values").unwrap();
+    assert_eq!(dataset.read_raw::<u8>().unwrap(), expected);
+    dataset.resize([1032]).unwrap();
+    dataset.write_slice(&[6; 4], 1028..1032).unwrap();
+    drop(dataset);
+    file.close().unwrap();
+    expected.extend_from_slice(&[6; 4]);
     assert_eq!(
         File::open(&path)
             .unwrap()

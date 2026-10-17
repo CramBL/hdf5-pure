@@ -4,6 +4,8 @@
 //! issue #393 every write it makes is the immediate in-place one, filtered or
 //! not, so the type buys write *frequency* and nothing else.
 
+use hdf5_pure::FileAccessProperties;
+use hdf5_pure::FileLocking;
 use hdf5_pure::{AttrValue, Error, File, FileBuilder, ScaleOffset};
 use tempfile::tempdir;
 use test_util_hdf5::dataset::{self, Filter, Unlimited};
@@ -12,10 +14,7 @@ const SHUFFLE_DEFLATE: &[Filter] = &[Filter::Shuffle, Filter::Deflate(4)];
 
 // ---- what the buffer buys ----------------------------------------------------
 
-/// The point of the type: a call that does not complete a chunk does not touch
-/// the file. Asserted against the file's own size, which changes only when
-/// something is written, so this measures the property rather than restating
-/// the implementation.
+/// Compares complete file bytes to detect writes within retained aggregate reservations.
 #[test]
 fn a_call_that_does_not_complete_a_chunk_does_not_touch_the_file() {
     let dir = tempdir().unwrap();
@@ -25,28 +24,29 @@ fn a_call_that_does_not_complete_a_chunk_does_not_touch_the_file() {
         .filters(SHUFFLE_DEFLATE)
         .pure_create(&p);
 
-    let session = File::open_rw(&p).unwrap();
+    let session = File::open_rw_with_options(
+        &p,
+        FileAccessProperties::new().with_locking(FileLocking::Disabled),
+    )
+    .unwrap();
     let mut ds = session.dataset("d").unwrap();
     let mut app = ds.buffered_appender().unwrap();
     assert_eq!(app.chunk_elements(), chunk);
 
-    // Four elements per call into a chunk of sixteen: twelve calls complete
-    // three chunks, so the file must change on calls 4, 8, and 12 and on no
-    // other. Recording the size before the first call makes every call
-    // comparable to its predecessor.
-    let mut sizes = vec![session.file_size()];
+    // Four elements per call complete a sixteen-element chunk on calls 4, 8, and 12.
+    let mut images = vec![std::fs::read(&p).unwrap()];
     for i in 0..12i32 {
         app.append(&[i * 4, i * 4 + 1, i * 4 + 2, i * 4 + 3])
             .unwrap();
-        sizes.push(session.file_size());
+        images.push(std::fs::read(&p).unwrap());
     }
-    let wrote_on: Vec<usize> = (1..sizes.len())
-        .filter(|&i| sizes[i] != sizes[i - 1])
+    let wrote_on: Vec<usize> = (1..images.len())
+        .filter(|&i| images[i] != images[i - 1])
         .collect();
     assert_eq!(
         wrote_on,
         vec![4, 8, 12],
-        "expected a write only where a chunk completed; sizes {sizes:?}"
+        "expected file changes only where a chunk completed"
     );
     assert_eq!(app.buffered_elements(), 0);
 

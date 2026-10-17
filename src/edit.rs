@@ -165,7 +165,11 @@
 //! and immediate appends allocate from separate metadata and raw aggregates with
 //! 2048-byte refill blocks. A clean close or drop releases unused
 //! aggregate space at EOA after publishing the shorter EOA with the same root. An uncertain
-//! publication prevents this cleanup. The other strategies use no classic aggregates.
+//! publication prevents this cleanup. An ordinary read-write session under
+//! `H5F_FSPACE_STRATEGY_FSM_AGGR` with persistence disabled, including a file without a recorded
+//! strategy, tries reusable free space before these aggregates. Persistent `FSM_AGGR` sessions,
+//! SWMR sessions under
+//! `FSM_AGGR`, and PAGE sessions use no classic aggregates.
 //! The reuse is crash-safe: it only ever overwrites space
 //! freed by an *earlier*, already-durable commit (never space the current commit
 //! is mid-way through freeing), and truncation happens only after the superblock
@@ -1120,7 +1124,10 @@ pub(crate) struct WriteEngine {
     /// records them.
     space: SessionSpace,
     /// Classic aggregate windows shared by staged edits and immediate appends under
-    /// [`FileSpaceStrategy::Aggr`].
+    /// [`FileSpaceStrategy::Aggr`] or [`FileSpaceStrategy::FsmAggr`] with persistence disabled.
+    ///
+    /// An ordinary read-write session without a recorded strategy uses FSM_AGGR with persistence
+    /// disabled.
     aggregation: Option<AggregateSpace>,
     /// Space this session has taken *out* of the on-disk free-space managers so
     /// that an immediate in-place append may spend it (issue #387).
@@ -1993,10 +2000,13 @@ pub struct SpaceAccounting {
     /// is neither a lower bound on the next write's growth nor a promise of
     /// shrinkage: a region counted here may be truncated away at commit — rather
     /// than reused — if adjacent space is later freed and the coalesced run
-    /// reaches end-of-file. A session reports `0` under [`FileSpaceStrategy::None`]. Under [`FileSpaceStrategy::Aggr`],
-    /// this includes unused metadata and raw aggregate reservations for staged edits and immediate
-    /// appends. These
-    /// reservations are session state and are forgotten on reopen. Under
+    /// reaches end-of-file. A session reports `0` under [`FileSpaceStrategy::None`]. Under
+    /// [`FileSpaceStrategy::Aggr`] and [`FileSpaceStrategy::FsmAggr`] with persistence disabled,
+    /// this includes unused metadata and raw aggregate reservations for staged edits and
+    /// immediate appends.
+    /// Held aggregate spare is counted even when shorter than the free-section threshold. Once
+    /// abandoned, interior spare is admitted under the same threshold and adjacency rules as
+    /// other freed extents. These reservations are session state and are forgotten on reopen. Under
     /// [`FileSpaceStrategy::FsmAggr`] a commit tracks a
     /// hole shorter than the file's [`threshold`](crate::FileSpaceInfo::threshold) only
     /// where the hole adjoins a tracked one.
@@ -2270,6 +2280,9 @@ impl WriteEngine {
             ));
         }
         session.swmr_mode = true;
+        if session.space.is_enabled() {
+            session.aggregation = None;
+        }
         session.set_consistency_flags(SWMR_WRITE_FLAGS)?;
         Ok(session)
     }
@@ -2667,8 +2680,10 @@ impl WriteEngine {
     /// blocks that the next persisting commit frees.
     ///
     /// A file without a File Space Info message keeps the default `FSM_AGGR` strategy installed by
-    /// [`open_imaged`](Self::open_imaged). A message that fails safe parsing disables reusable
-    /// space for the session. Persisted manager sections are read only for a file whose strategy
+    /// [`open_imaged`](Self::open_imaged), with separate metadata and raw aggregates. Explicit
+    /// [`FileSpaceStrategy::Aggr`] and [`FileSpaceStrategy::FsmAggr`] with persistence disabled
+    /// also use these aggregates. A message that fails safe parsing disables reusable space for
+    /// the session. Persisted manager sections are read only for a file whose strategy
     /// has free-space managers and whose message requests persistence. The session adds each
     /// section to the free lists at the stored address its manager records.
     fn load_persisted_free_space(
@@ -2677,7 +2692,12 @@ impl WriteEngine {
     ) {
         let (ext_addr, info) = match file_space_info {
             Ok(Some(found)) => found,
-            Ok(None) => return,
+            Ok(None) => {
+                if let Ok(eoa) = self.end_of_allocation() {
+                    self.aggregation = Some(AggregateSpace::new(eoa.get()));
+                }
+                return;
+            }
             Err(_) => {
                 self.space = SessionSpace::from_strategy(
                     None,
@@ -2689,7 +2709,8 @@ impl WriteEngine {
         };
         self.space =
             SessionSpace::from_strategy(Some(info.strategy), info.threshold, info.page_size);
-        if info.strategy == FileSpaceStrategy::Aggr
+        if (info.strategy == FileSpaceStrategy::Aggr
+            || (info.strategy == FileSpaceStrategy::FsmAggr && !info.persist))
             && let Ok(eoa) = self.end_of_allocation()
         {
             self.aggregation = Some(AggregateSpace::new(eoa.get()));
@@ -3691,26 +3712,32 @@ impl WriteEngine {
             )?;
             Ok((range.start().get(), range.length()))
         };
-        let mut reusable_free_space = if self.reserved.is_empty() {
+        let reusable_free_space = if let Some(aggregation) = self.aggregation
+            && !self.space.is_enabled()
+        {
+            let mut extents = aggregation
+                .unused()
+                .map(physical)
+                .collect::<Result<Vec<_>, _>>()?;
+            extents.sort_unstable();
+            extents
+        } else if self.reserved.is_empty() && self.aggregation.is_none() {
             self.space
                 .reusable_sections()
                 .map(physical)
                 .collect::<Result<Vec<_>, FormatError>>()?
         } else {
             self.space
-                .reusable_sections_with_raw(self.reserved.extents().iter().copied())
+                .reusable_sections_with_raw(
+                    self.reserved.extents().iter().copied().chain(
+                        self.aggregation
+                            .into_iter()
+                            .flat_map(AggregateSpace::unused),
+                    ),
+                )
                 .map(physical)
                 .collect::<Result<Vec<_>, FormatError>>()?
         };
-        if let Some(aggregation) = self.aggregation {
-            reusable_free_space.extend(
-                aggregation
-                    .unused()
-                    .map(physical)
-                    .collect::<Result<Vec<_>, FormatError>>()?,
-            );
-            reusable_free_space.sort_unstable();
-        }
         let reusable_free_bytes = reusable_free_space.iter().map(|(_, len)| len).sum();
         Ok(SpaceAccounting {
             logical_size: self.image.len(),
@@ -4114,9 +4141,10 @@ impl WriteEngine {
     /// Finalizes free-space metadata or classic aggregate tails at session teardown.
     ///
     /// A persisting session rewrites stale free-space managers and returns unspent immediate
-    /// append reserves. An AGGR session releases unused aggregate space at EOA after publishing
-    /// the shorter EOA with the current root. An uncertain publication prevents aggregate cleanup.
-    /// Other non-persisting sessions require no finalization.
+    /// append reserves. A session with classic aggregation releases unused aggregate space at EOA
+    /// after publishing the shorter EOA with the current root. An uncertain publication prevents
+    /// aggregate cleanup. Non-persisting sessions without classic aggregation require no
+    /// finalization.
     ///
     /// # Errors
     ///
@@ -6719,12 +6747,24 @@ impl WriteEngine {
     ///
     /// Returns [`FormatError::AddressBelowBase`] if the image ends below the base address, and
     /// [`FormatError::OffsetOverflow`] if the truncation point plus the base address exceeds
-    /// [`u64::MAX`].
+    /// [`u64::MAX`]. Returns [`FormatError::Internal`] if aggregate state exceeds EOA or the
+    /// flat reusable-space strategy changes during release.
     fn release_freed(
         &mut self,
         to_free: Vec<(StoredAddress, u64, FreeClass)>,
     ) -> Result<Option<PhysicalAddress>, FormatError> {
         let eoa = self.end_of_allocation()?;
+        if let Some(aggregation) = &mut self.aggregation {
+            return aggregation
+                .release_freed(
+                    &mut self.space,
+                    to_free
+                        .into_iter()
+                        .filter_map(|(addr, len, _)| FreeExtent::new(addr.get(), len)),
+                )?
+                .map(|cut| self.addresses.resolve(StoredAddress::new(cut)))
+                .transpose();
+        }
         self.space
             .release_freed(
                 eoa.get(),
@@ -10851,9 +10891,10 @@ impl FlatDataset {
 /// Provides the extensible-array append engine with the session's image and superblock.
 ///
 /// The engine borrows its image through [`Store`] and maintains its dataset geometry separately
-/// in [`WriteEngine::located`]. Under [`FileSpaceStrategy::Aggr`], the adapter allocates chunk
-/// payloads from the raw aggregate and index blocks from the metadata aggregate. On PAGE files,
-/// both use raw pages, with [`SessionSpace::plan_transition`] before extending the image.
+/// in [`WriteEngine::located`]. The adapter tries reusable space before classic aggregates,
+/// allocating chunk payloads from the raw aggregate and index blocks from the metadata aggregate.
+/// On PAGE files, both use raw pages, with [`SessionSpace::plan_transition`] before extending the
+/// image.
 struct EditStore<'a> {
     image: &'a mut dyn FileImage,
     superblock: &'a mut Superblock,
@@ -10864,7 +10905,8 @@ struct EditStore<'a> {
     /// The session allocation strategy. PAGE transition state recorded here reaches the manager
     /// rewrite at the next commit or close.
     space: &'a mut SessionSpace,
-    /// Classic aggregate windows shared with staged edits under [`FileSpaceStrategy::Aggr`].
+    /// Classic aggregate windows shared with staged edits under [`FileSpaceStrategy::Aggr`] or
+    /// [`FileSpaceStrategy::FsmAggr`] with persistence disabled.
     aggregation: Option<&'a mut AggregateSpace>,
     /// Published-manager space reserved for an immediate append on a persisting session.
     reserve: Option<&'a mut FreeList>,
@@ -10933,21 +10975,6 @@ impl Store for EditStore<'_> {
         self.superblock.eof_address
     }
     fn allocate(&mut self, bytes: &[u8], class: AllocationClass) -> Result<u64, Error> {
-        if let (Some(aggregation), Some(size)) = (
-            self.aggregation.as_deref_mut(),
-            NonZeroU64::new(bytes.len() as u64),
-        ) {
-            let Placement::Aggregated { addr, end, .. } =
-                aggregation.reserve(self.addresses, size, class)?
-            else {
-                return Err(FormatError::Internal(
-                    "aggregate reservation is not aggregated".into(),
-                )
-                .into());
-            };
-            AggregateSpace::place(self.image, addr, bytes, end)?;
-            return Ok(addr);
-        }
         let extent = if let Some(reserve) = self.reserve.as_deref_mut() {
             reserve.alloc(bytes.len() as u64)
         } else if self.reuse_session_space {
@@ -10960,6 +10987,21 @@ impl Store for EditStore<'_> {
             let at = self.addresses.resolve(StoredAddress::new(extent.start()))?;
             self.image.write_at(at.get(), bytes)?;
             return Ok(at.get());
+        }
+        if let (Some(aggregation), Some(size)) = (
+            self.aggregation.as_deref_mut(),
+            NonZeroU64::new(bytes.len() as u64),
+        ) {
+            let Placement::Aggregated { addr, end, .. } =
+                aggregation.reserve(self.addresses, self.space, size, class)?
+            else {
+                return Err(FormatError::Internal(
+                    "aggregate reservation is not aggregated".into(),
+                )
+                .into());
+            };
+            AggregateSpace::place(self.image, addr, bytes, end)?;
+            return Ok(addr);
         }
         self.append_into_raw_page(bytes)
     }

@@ -35,10 +35,11 @@ fn staged_and_immediate_edits_share_aggregate_windows(
     #[case] chunk: u64,
     #[case] end: i32,
     #[values(MemoryStrategy::Mirrored, MemoryStrategy::Bounded)] backing: MemoryStrategy,
+    #[values(FileSpaceStrategy::Aggr, FileSpaceStrategy::FsmAggr)] strategy: FileSpaceStrategy,
 ) {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("interleaved.h5");
-    write_appendable(&path, initial, chunk, false);
+    write_appendable(&path, initial, chunk, false, strategy);
     let mut engine = open_engine(&path, backing);
     let mut first = DatasetBuilder::new("");
     first.with_i32_data(&[41; 16]);
@@ -49,6 +50,7 @@ fn staged_and_immediate_edits_share_aggregate_windows(
     let state = engine.aggregation.unwrap();
     let raw = state.policy.unused(AllocationClass::Raw).unwrap();
     let metadata = state.policy.unused(AllocationClass::Metadata).unwrap();
+    let fsm_hit = engine.space.largest(AllocationClass::Raw) >= 16;
     alloc_probe::take();
     engine
         .append_inplace_i32_phased("values", &(initial..end).collect::<Vec<_>>(), 4)
@@ -61,10 +63,14 @@ fn staged_and_immediate_edits_share_aggregate_windows(
             after.policy.unused(AllocationClass::Metadata),
             Some(metadata)
         );
-        assert_eq!(
-            after.policy.unused(AllocationClass::Raw).unwrap().start(),
-            raw.start() + 16
-        );
+        if fsm_hit {
+            assert_eq!(after.policy.unused(AllocationClass::Raw), Some(raw));
+        } else {
+            assert_eq!(
+                after.policy.unused(AllocationClass::Raw).unwrap().start(),
+                raw.start() + 16
+            );
+        }
     } else {
         assert!(after.eoa > state.eoa);
         assert!(data_blocks > 0);
@@ -116,10 +122,11 @@ fn immediate_phase_stops_keep_reservations_consumed(
     #[case] phase: u8,
     #[values(MemoryStrategy::Mirrored, MemoryStrategy::Bounded)] backing: MemoryStrategy,
     #[values(false, true)] filtered: bool,
+    #[values(FileSpaceStrategy::Aggr, FileSpaceStrategy::FsmAggr)] strategy: FileSpaceStrategy,
 ) {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("phase.h5");
-    write_appendable(&path, 6, 4, filtered);
+    write_appendable(&path, 6, 4, filtered, strategy);
     let mut engine = open_engine(&path, backing);
     engine
         .append_inplace_i32_phased("values", &(6..29).collect::<Vec<_>>(), phase)
@@ -144,10 +151,13 @@ fn immediate_phase_stops_keep_reservations_consumed(
 }
 
 #[rstest]
-fn bounded_immediate_batches_share_aggregate_state(#[values(false, true)] filtered: bool) {
+fn bounded_immediate_batches_share_aggregate_state(
+    #[values(false, true)] filtered: bool,
+    #[values(FileSpaceStrategy::Aggr, FileSpaceStrategy::FsmAggr)] strategy: FileSpaceStrategy,
+) {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("batches.h5");
-    write_appendable(&path, 6, 512, filtered);
+    write_appendable(&path, 6, 512, filtered, strategy);
     let mut engine = open_engine(&path, MemoryStrategy::Bounded);
     let end = 600_000;
     engine
@@ -187,10 +197,11 @@ fn failed_immediate_append_preserves_consumed_space(
     )]
     mode: FailureMode,
     #[values(Continuation::Drop, Continuation::Append, Continuation::Commit)] next: Continuation,
+    #[values(FileSpaceStrategy::Aggr, FileSpaceStrategy::FsmAggr)] strategy: FileSpaceStrategy,
 ) {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("failure.h5");
-    write_appendable(&path, 4, 1, false);
+    write_appendable(&path, 4, 1, false, strategy);
     let mut engine = open_engine(&path, MemoryStrategy::Mirrored);
     let address = engine
         .append_prepare(AppendTarget::Path(&ObjectPathBuf::parse("values")))
@@ -264,9 +275,59 @@ fn failed_immediate_append_preserves_consumed_space(
     assert_eq!(file.persisted_free_space().unwrap(), []);
 }
 
-fn write_appendable(path: &Path, initial: i32, chunk: u64, filtered: bool) {
+#[test]
+fn failed_commit_restores_spare_returned_during_refill() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("failed_refill.h5");
+    FileBuilder::new().write(&path).unwrap();
+    let start = std::fs::metadata(&path).unwrap().len();
+    let mut engine = WriteEngine::open_imaged(&path, Some(FileLocking::Enabled), |handle, _| {
+        Ok(Box::new(FailureImage {
+            inner: WriteEngine::read_mirror(handle)?,
+            target: FailureTarget::Raw,
+            mode: FailureMode::WriteBefore,
+            armed: false,
+            failed: false,
+            eof: start + 4096,
+            index: 0..0,
+            header: 0,
+            dimension: 0,
+            eof_writes: 0,
+        }))
+    })
+    .unwrap();
+    let reservation = engine.reserve(2000, AllocationClass::Metadata).unwrap();
+    engine.place(reservation, &[19; 2000]).unwrap();
+    let reservation = engine.reserve(64, AllocationClass::Raw).unwrap();
+    engine.place(reservation, &[23; 64]).unwrap();
+    let state = engine.aggregation;
+    let free = engine.space_accounting().unwrap().reusable_free_space;
+    engine.create_group(&ObjectPathBuf::parse("group")).unwrap();
+    let error = engine.commit().unwrap_err();
+    let Error::Io(error) = error else {
+        panic!("expected aggregate refill write failure, got {error:?}");
+    };
+    assert_eq!(error.kind(), ErrorKind::Other);
+    assert!(!engine.publish_attempted);
+    assert_eq!(engine.aggregation, state);
+    assert_eq!(engine.space_accounting().unwrap().reusable_free_space, free);
+    assert_eq!(engine.space.reusable_sections().count(), 0);
+    drop(engine);
+    assert_eq!(
+        File::open(&path).unwrap().root().groups().unwrap(),
+        Vec::<String>::new()
+    );
+}
+
+fn write_appendable(
+    path: &Path,
+    initial: i32,
+    chunk: u64,
+    filtered: bool,
+    strategy: FileSpaceStrategy,
+) {
     let mut builder = FileBuilder::new();
-    builder.with_file_space_strategy(FileSpaceStrategy::Aggr, false, 1);
+    builder.with_file_space_strategy(strategy, false, 1);
     let dataset = builder.create_dataset("values");
     dataset
         .with_i32_data(&(0..initial).collect::<Vec<_>>())
