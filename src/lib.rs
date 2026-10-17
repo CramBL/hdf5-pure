@@ -476,7 +476,6 @@ pub(crate) mod object_path;
 pub(crate) mod read_spec;
 pub(crate) mod scaleoffset;
 pub(crate) mod shared_message;
-pub(crate) mod signature;
 pub(crate) mod sohm;
 pub(crate) mod source;
 pub(crate) mod superblock;

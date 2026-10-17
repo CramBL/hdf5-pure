@@ -599,9 +599,9 @@ mod tests {
     /// The root group's dense-attribute storage: its info message, its heap
     /// address, and the file's format widths.
     fn dense_attribute_info(bytes: &[u8]) -> (AttributeInfoMessage, StoredAddress, FormatWidths) {
-        let sig = crate::signature::find_signature(bytes).unwrap();
-        let (superblock, widths) =
-            hdf5_pure_format::__private::parse_superblock_with_widths(bytes, sig).unwrap();
+        let crate::superblock::LocatedSuperblock {
+            superblock, widths, ..
+        } = crate::superblock::read(bytes).unwrap();
         let root = ObjectHeader::parse_with_widths(
             bytes,
             AccessMode::ReadOnly,

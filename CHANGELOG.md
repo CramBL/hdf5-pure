@@ -37,6 +37,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - **Breaking:** `File::persisted_free_space` reports a malformed free-space manager as an error, which changes its return type ([#698](https://github.com/CramBL/hdf5-pure/pull/698)).
 - **Breaking:** `FileSpaceInfo::page_size` changes type from `u64` to `FileSpacePageSize`, which holds a page size from 512 bytes to 1 GiB ([#702](https://github.com/CramBL/hdf5-pure/pull/702)).
 - `File::open_rw` validates complete checksummed fractal-heap direct blocks before editing or proving storage ownership. Read-only object lookups validate block prefixes and object bounds without reading the complete block ([#750](https://github.com/CramBL/hdf5-pure/pull/750)).
+- `FormatError::UnexpectedEof` reports a superblock that the file ends inside with positions counted from the start of the file. Opening a file that ends within 15 bytes of the start of its signature returns it whatever the version byte ([#780](https://github.com/CramBL/hdf5-pure/pull/780)).
 
 ### Fixed
 

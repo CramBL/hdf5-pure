@@ -1576,8 +1576,8 @@ mod tests {
     use crate::access_mode::AccessMode;
     use crate::group_v2;
     use crate::object_path::ObjectPath;
-    use crate::signature;
     use crate::source::BytesSource;
+    use crate::superblock::LocatedSuperblock;
     use crate::superblock::Superblock;
     use crate::writer::FileBuilder;
 
@@ -1645,10 +1645,12 @@ mod tests {
 
     impl WindowProbeStore {
         fn open(data: Vec<u8>) -> Self {
-            let sb_sig_off = signature::find_signature(&data).unwrap();
-            let superblock = crate::superblock::parse_superblock(&data, sb_sig_off).unwrap();
-            let widths =
-                FormatWidths::from_sizes(superblock.offset_size, superblock.length_size).unwrap();
+            let LocatedSuperblock {
+                address,
+                superblock,
+                widths,
+            } = crate::superblock::read(data.as_slice()).unwrap();
+            let sb_sig_off = usize::try_from(address.get()).unwrap();
             Self {
                 data,
                 superblock,

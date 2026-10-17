@@ -429,7 +429,7 @@ fn editor_rejects_relocated_image(#[case] stored_base: usize, #[case] signature_
 }
 
 #[derive(Clone, Copy, Debug)]
-enum ReadBackend {
+pub(crate) enum ReadBackend {
     Buffered,
     Bytes,
     Source,
@@ -437,7 +437,7 @@ enum ReadBackend {
 }
 
 impl ReadBackend {
-    fn open(self, path: &Path) -> File {
+    pub(crate) fn open(self, path: &Path) -> File {
         self.try_open(path).unwrap()
     }
 

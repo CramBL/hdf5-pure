@@ -70,6 +70,7 @@ mod serde;
 mod sohm;
 mod space_ownership;
 mod superblock_addresses;
+mod superblock_search;
 mod swmr_append;
 mod swmr_refresh;
 mod userblock_base_address;
