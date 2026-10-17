@@ -1,3 +1,5 @@
+use std::path::Path;
+
 use hdf5_pure::CharacterSet;
 use hdf5_pure::CompoundTypeBuilder;
 use hdf5_pure::Datatype;
@@ -21,15 +23,19 @@ use test_util::superblock::v2::Superblock;
 use test_util::temp;
 use test_util::widths::Widths;
 
+/// Where an object stores the elements that refer to global heap objects.
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum Form {
     CompactAttribute,
     CompactDataset,
     ContiguousDataset,
+    /// The fill value of a dataset without data, which holds the first element.
     FillValue,
 }
 
 impl Form {
+    /// Returns the header messages of an object that stores `elements` of `datatype` in this
+    /// form, and appends the data of a contiguous dataset to the image of `fixture`.
     pub(crate) fn messages(
         self,
         fixture: &mut Fixture,
@@ -112,8 +118,29 @@ impl Fixture {
         self.links.push(hard_link(link_name, address));
     }
 
-    pub(crate) fn liveness(mut self) -> GlobalHeapLiveness {
-        let root = Header::new().messages(self.links).build();
+    pub(crate) fn liveness(self) -> GlobalHeapLiveness {
+        let path = temp::temp_path("liveness_fixture.h5");
+        self.write(&path);
+        let file = File::open_rw(&path).unwrap();
+        let liveness = file.__global_heap_liveness().unwrap();
+        file.close().unwrap();
+        liveness
+    }
+
+    pub(crate) fn write(mut self, path: &Path) {
+        let link_info = format::LinkInfoMessage {
+            max_creation_order: None,
+            fractal_heap_address: None,
+            btree_name_index_address: None,
+            btree_creation_order_address: None,
+        };
+        let root = Header::new()
+            .message(Message::new(
+                MessageType::LINK_INFO,
+                &link_info.serialize(format::OffsetWidth::Eight),
+            ))
+            .messages(self.links)
+            .build();
         assert!(
             root.len() <= ROOT_HEADER_SPACE,
             "the root header outgrows its space"
@@ -121,12 +148,7 @@ impl Fixture {
         self.image.place(Self::ROOT as usize, &root);
         let eof = self.image.as_bytes().len() as u64;
         self.image.place(0, &superblock().eof_address(eof).build());
-        let path = temp::temp_path("liveness_fixture.h5");
-        std::fs::write(&path, self.image.build()).unwrap();
-        let file = File::open_rw(&path).unwrap();
-        let liveness = file.__global_heap_liveness().unwrap();
-        file.close().unwrap();
-        liveness
+        std::fs::write(path, self.image.build()).unwrap();
     }
 
     /// The address of the root group's object header, directly after the superblock.

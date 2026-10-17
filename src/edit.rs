@@ -209,11 +209,12 @@
 //! group version 2 B-tree indexes are reclaimed when their owning storage becomes dead. The editor
 //! also reclaims their fractal heaps where complete ownership is proven, including managed-space
 //! manager headers and complete allocated section lists. Logical sections within the heap are
-//! excluded from file-space reclamation. Storage whose allocations cannot be enumerated
-//! exhaustively, such as a variable-length global heap collection or a filtered fractal heap with
-//! a filter this crate does not decode or with huge objects, is left as dead bytes. This avoids
-//! freeing a region that may still be in use. Under-reclaiming only wastes space. Over-reclaiming
-//! could corrupt the file.
+//! excluded from file-space reclamation. The editor reclaims a global heap collection that only
+//! the objects a delete removes refer to, and keeps every collection when it cannot read each
+//! object that can refer to one. Storage whose allocations cannot be enumerated exhaustively, such
+//! as a filtered fractal heap with a filter this crate does not decode or with huge objects, is
+//! left as dead bytes. This avoids freeing a region that may still be in use. Under-reclaiming only
+//! wastes space. Over-reclaiming could corrupt the file.
 //!
 //! On a paged file that conservatism extends to anything whose *page type* is not
 //! established. A file another writer produced records free space this one cannot
@@ -1220,9 +1221,10 @@ pub(crate) struct WriteEngine {
     ///
     /// This is what lets the *next* overwrite of the same dataset reclaim the
     /// strings the previous one left, instead of growing the file by its whole
-    /// payload on every commit forever (issue #321). Nothing else in the editor
-    /// reclaims a collection, and the reason is sound: a collection can be
-    /// shared between objects, and **nothing in the format proves otherwise**.
+    /// payload on every commit forever (issue #321). Outside a delete, nothing
+    /// else in the editor reclaims a collection, and the reason is sound: a
+    /// collection can be shared between objects, and **nothing in the format
+    /// proves otherwise**.
     /// The per-object reference count does not: an in-file
     /// [`copy`](Self::copy) of a variable-length dataset re-emits its
     /// element references verbatim, so two datasets name one collection with
@@ -1236,8 +1238,8 @@ pub(crate) struct WriteEngine {
     /// anything that could name one of them a second time.
     ///
     /// The collections a dataset held when the session *opened* are never in
-    /// here and are never reclaimed: their provenance is whatever wrote the
-    /// file. `repack` is what recovers those.
+    /// here, and an overwrite does not reclaim them: whatever wrote the file
+    /// placed them. `repack` is what recovers those.
     vl_overwrite_heaps: HashMap<ObjectPathBuf, Vec<(u64, u64)>>,
     /// Heap collections superseded by a value overwrite this commit is applying,
     /// freed once the commit's superblock repoint has landed — never before, so
@@ -4903,10 +4905,12 @@ impl WriteEngine {
     /// objects instead of growing the file, and if a freed run reaches
     /// end-of-file the file is truncated. Contiguous and chunked datasets (their
     /// chunk index and chunk data blocks) and whole group subtrees are all
-    /// reclaimed. Dense attribute version 2 B-tree indexes are reclaimed with the object. Their
-    /// fractal heap remains dead storage. Reclaim is best-effort. An object whose other blocks this
-    /// engine cannot enumerate exhaustively (variable-length global-heap storage or dense link
-    /// storage) is left as dead bytes to avoid freeing a region that may still be in use.
+    /// reclaimed. Dense attribute and link storage is reclaimed with the object, its fractal heap
+    /// where the engine proves the heap's ownership. A global heap collection is reclaimed when
+    /// only the deleted objects refer to it. Reclaim is best-effort. An object whose blocks this
+    /// engine cannot enumerate exhaustively is left as dead bytes to avoid freeing a region that
+    /// may still be in use, and every collection stays allocated when the engine cannot read each
+    /// object that can refer to one.
     /// Freed space is reused within the open session. For a file created with
     /// `H5Pset_file_space_strategy(persist = true)` it is also recorded on disk so
     /// it survives reopen, otherwise it is forgotten
@@ -6095,6 +6099,7 @@ impl WriteEngine {
                 }
             }
         }
+        let deleted_collections = self.deleted_collections(&deleted_addrs);
         // An in-file copy re-emits its source's element bytes verbatim, so a
         // copied object reference keeps naming whatever it named in the source —
         // including an object this same commit is removing (issue #317). The page
@@ -6608,6 +6613,7 @@ impl WriteEngine {
         // does not force a write-back, so sync the appended bytes to disk first
         // (the barrier), then flip the pointer, then sync the flip.
         let new_root = path_addr[&ObjectPathBuf::root()];
+        to_free.extend(self.unreferenced_collection_spans(new_root, deleted_collections));
 
         // Keep superseded collections unavailable until the new root is durable. These collections
         // were placed as raw allocations by this session, so their PAGE free-space type is known.
@@ -9939,7 +9945,7 @@ impl WriteEngine {
     /// this same path placed are handed to the commit's free list, and the ones
     /// placed here are recorded in their stead, so rotating a dataset's strings
     /// reaches a steady state instead of leaking a generation per commit. Only
-    /// collections this session placed are ever reclaimed, and only while
+    /// collections this session placed are reclaimed by an overwrite, and only while
     /// nothing has been able to name them twice — see
     /// [`vl_overwrite_heaps`](Self::vl_overwrite_heaps) for why that provenance
     /// is the whole proof, and `repack` for the collections it cannot make.
@@ -13902,9 +13908,11 @@ fn screen_resolved_references(
 /// An in-file copy re-emits its source's element bytes verbatim, which is what
 /// keeps a copied variable-length or reference dataset valid: the addresses
 /// still name the same file, so nothing has to be rewritten. A deletion in the
-/// same commit takes that away for object references alone — a global heap
-/// collection is never reclaimed by a delete, so variable-length elements keep
-/// pointing at data that is still there.
+/// same commit takes that away for object references alone. The editor
+/// reclaims a global heap collection on a delete only when it is unreferenced
+/// by the objects reachable from the commit's new root group, and the copy is
+/// one of those objects, so its variable-length elements keep pointing at data
+/// that is still there.
 ///
 /// Every element that can be read is screened by address, through the same
 /// [`screen_resolved_references`] a staged dataset's bytes go through: a
