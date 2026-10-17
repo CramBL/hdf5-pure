@@ -40,6 +40,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- Fixed `Group::datasets`, `Group::groups` and path lookup failing on a version 1 (symbol-table) group that holds a soft link, whose entry the reader resolved as a child at the undefined address. The soft link is passed over, as in a version 2 group ([#771](https://github.com/CramBL/hdf5-pure/pull/771)).
+- Fixed `File::open_rw` converting a version 1 group that holds a soft link into one whose link points at the undefined address. The conversion returns `Error::EditUnsupported` instead ([#771](https://github.com/CramBL/hdf5-pure/pull/771)).
 - Fixed `Dataset::write_staged` rejecting compatible one-byte fixed-point datatypes whose byte-order fields differ, including nested variable-length base types. All other datatype fields remain checked ([#763](https://github.com/CramBL/hdf5-pure/pull/763)).
 - Fixed `Dataset::read_string` and related reads of variable-length data failing on a file that stores 2- or 4-byte lengths. Reads reject a global heap collection that is smaller than 4096 bytes or malformed after the object they read ([#760](https://github.com/CramBL/hdf5-pure/pull/760)).
 - Fixed global heap collections sharing metadata pages in files created through `FileBuilder::with_file_space_strategy`. Paged edits also place replacement collections in raw pages ([#763](https://github.com/CramBL/hdf5-pure/pull/763)).
