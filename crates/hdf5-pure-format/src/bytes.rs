@@ -408,6 +408,31 @@ impl<'a> Fields<'a> {
         Ok(value)
     }
 
+    /// Reads an unsigned integer of `len` bytes, such as the chunk size of a filtered chunk
+    /// index element.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::Internal`] if the block holds `len` bytes at the cursor and `len`
+    /// is more than 8.
+    pub(crate) fn uint(&mut self, len: usize) -> Result<u64, FormatError> {
+        let bytes = self
+            .data
+            .get(self.pos..)
+            .and_then(|rest| rest.get(..len))
+            .ok_or(FormatError::UnexpectedEof {
+                expected: self.pos.saturating_add(len),
+                available: self.data.len(),
+            })?;
+        let mut value = [0; 8];
+        value
+            .get_mut(..len)
+            .ok_or_else(|| FormatError::Internal("an integer field is wider than 8 bytes".into()))?
+            .copy_from_slice(bytes);
+        self.pos += len;
+        Ok(u64::from_le_bytes(value))
+    }
+
     /// Reads the next `N` bytes.
     pub(crate) fn array<const N: usize>(&mut self) -> Result<[u8; N], FormatError> {
         let value = self
@@ -737,5 +762,41 @@ mod tests {
         let mut buf = Vec::new();
         try_write_decoded_address(&mut buf, addr, width).unwrap();
         assert_eq!(buf, expected);
+    }
+
+    #[rstest::rstest]
+    #[case::empty(0, 0)]
+    #[case::one(1, 0x11)]
+    #[case::three(3, 0x33_2211)]
+    #[case::eight(8, 0x8877_6655_4433_2211)]
+    fn an_integer_field_reads_little_endian_at_its_width(#[case] len: usize, #[case] value: u64) {
+        let data = [0xAA, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88];
+        let mut fields = Fields::new(&data, 1);
+        assert_eq!(fields.uint(len).unwrap(), value);
+        assert_eq!(fields.pos(), 1 + len);
+    }
+
+    #[test]
+    fn an_integer_field_past_the_block_is_an_error() {
+        let data = [0x11, 0x22, 0x33];
+        let mut fields = Fields::new(&data, 1);
+        assert_eq!(
+            fields.uint(3).unwrap_err(),
+            FormatError::UnexpectedEof {
+                expected: 4,
+                available: 3,
+            }
+        );
+        assert_eq!(fields.pos(), 1);
+    }
+
+    #[test]
+    fn an_integer_field_wider_than_8_bytes_is_an_internal_error() {
+        let data = [0; 9];
+        let err = Fields::new(&data, 0).uint(9).unwrap_err();
+        let FormatError::Internal(message) = &err else {
+            panic!("expected Internal, got {err:?}");
+        };
+        assert_eq!(message, "an integer field is wider than 8 bytes");
     }
 }

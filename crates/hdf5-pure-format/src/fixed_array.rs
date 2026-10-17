@@ -3,15 +3,30 @@
 //! A Fixed Array indexes the chunks of a dataset whose maximum shape is fixed. Its header
 //! (`FAHD`) points at one data block (`FADB`), which holds an element per slot. Past `2^page_bits`
 //! slots the data block holds a page-init bitmap and then the elements in pages, each with its
-//! own checksum. The index is defined in "The Fixed Array Index" of the [format specification,
-//! version 4.0][spec].
+//! own checksum.
+//!
+//! A caller reads the bytes of each range the parser returns and passes them back to it.
+//! [`FixedArrayHeaderLocator`] returns the range of the header, [`FixedArrayDataBlockRef`] the
+//! range of an unpaged data block or of a paged one's prefix and page-init bitmap, and
+//! [`FixedArrayPageRef`] the range of one page.
+//!
+//! The index is defined in "The Fixed Array Index" of the [format specification, version
+//! 4.0][spec].
 //!
 //! [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsec_fmt4_appendixc_fixedarr
 
-use alloc::format;
+use alloc::borrow::Cow;
 use alloc::vec;
 use alloc::vec::Vec;
+use core::num::NonZeroU8;
 
+use hdf5_pure_core::__private::FileRange;
+use hdf5_pure_core::__private::FileRegion;
+use hdf5_pure_core::__private::PhysicalAddress;
+
+use crate::address::BaseAddress;
+use crate::address::BaseAddressExt;
+use crate::address::DecodedStoredAddress;
 use crate::address::StoredAddress;
 use crate::address::StoredAddressExt;
 use crate::bytes;
@@ -27,679 +42,692 @@ use crate::width::FormatWidths;
 use crate::width::LengthWidth;
 use crate::width::OffsetWidth;
 
-/// A Fixed Array header, signature `FAHD`, version 0.
-#[derive(Debug, Clone)]
+/// The address of a Fixed Array header, from the chunk index address of a data layout message.
+///
+/// A caller reads the bytes of [`parse_range`](Self::parse_range) and passes them to
+/// [`parse`](Self::parse), which returns the header and the reference to its data block.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct FixedArrayHeaderLocator {
+    widths: FormatWidths,
+    base: BaseAddress,
+    address: StoredAddress,
+}
+
+impl FixedArrayHeaderLocator {
+    /// Creates the locator of the header at the base-relative `address`.
+    pub const fn new(widths: FormatWidths, base: BaseAddress, address: StoredAddress) -> Self {
+        Self {
+            widths,
+            base,
+            address,
+        }
+    }
+
+    /// Parses the header in `region`.
+    ///
+    /// An unfiltered element is the chunk address alone, whatever the header's entry size.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::InsufficientRegion`] if `region` does not contain
+    /// [`parse_range`](Self::parse_range), [`FormatError::InvalidFixedArraySignature`] if the
+    /// bytes do not start with `FAHD`, [`FormatError::InvalidFixedArrayVersion`] if the version is
+    /// not 0, [`FormatError::InvalidFixedArrayClient`] if the client ID is 2 or more, and
+    /// [`FormatError::InvalidFixedArrayGeometry`] if the page bits, the entry size, or the entry
+    /// count is out of range. Returns [`FormatError::OffsetOverflow`] if the base address plus
+    /// `address` or plus the data block address, or the end of the header or of the data block,
+    /// is past [`u64::MAX`], and, under the `checksum` feature, [`FormatError::ChecksumMismatch`]
+    /// if the checksum does not match the header's bytes.
+    pub fn parse(&self, region: FileRegion<'_>) -> Result<FixedArrayHeader, FormatError> {
+        let Self {
+            widths,
+            base,
+            address: _,
+        } = *self;
+        let range = self.parse_range()?;
+        let bytes = region.subregion(range)?.bytes();
+        let mut fields = bytes::Fields::new(bytes, 0);
+        if fields.array::<{ HEADER_SIGNATURE.len() }>()? != HEADER_SIGNATURE {
+            return Err(FormatError::InvalidFixedArraySignature);
+        }
+        let version = fields.u8()?;
+        if version != VERSION {
+            return Err(FormatError::InvalidFixedArrayVersion(version));
+        }
+        let client_id = fields.u8()?;
+        let entry_size = fields.u8()?;
+        let page_bits = fields.u8()?;
+        let entries = fields.length(widths.lengths)?;
+        let data_block = fields.decoded_address(widths.offsets)?;
+        checksum::verify_trailing(bytes)?;
+
+        let geometry = Geometry::new(
+            ElementEncoding::new(widths.offsets, client_id, entry_size)?,
+            entries,
+            page_bits,
+        )?;
+        let data_block = match data_block {
+            DecodedStoredAddress::Defined(address) => Some(FixedArrayDataBlockRef::new(
+                base,
+                range.start(),
+                PhysicalAddress::new(base.absolute(address)?),
+                geometry,
+            )?),
+            DecodedStoredAddress::Undefined => None,
+        };
+        Ok(FixedArrayHeader { range, data_block })
+    }
+
+    /// Returns the range a caller reads for [`parse`](Self::parse), the whole header.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::OffsetOverflow`] if the base address plus `address`, or the end of
+    /// the header, is past [`u64::MAX`].
+    pub fn parse_range(&self) -> Result<FileRange, FormatError> {
+        let Self {
+            widths,
+            base,
+            address,
+        } = *self;
+        FileRange::new(
+            PhysicalAddress::new(base.absolute(address)?),
+            header_len(widths),
+        )
+    }
+}
+
+/// A Fixed Array header, from [`FixedArrayHeaderLocator::parse`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct FixedArrayHeader {
-    /// The client ID: 0 for unfiltered chunks and 1 for filtered ones.
-    pub client_id: u8,
-    /// The width in bytes of one element, the "Entry Size" field.
-    pub element_size: u8,
-    /// The base 2 logarithm of the number of elements in a data block page, the "Page Bits"
-    /// field.
-    pub max_nelmts_bits: u8,
-    /// The number of elements in the array.
-    pub num_elements: u64,
-    /// The address of the data block.
-    pub data_block_address: StoredAddress,
+    range: FileRange,
+    data_block: Option<FixedArrayDataBlockRef>,
 }
 
 impl FixedArrayHeader {
-    /// Parses the Fixed Array header at `offset` in `file_data`.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`FormatError::UnexpectedEof`] if the header runs past the end of `file_data`,
-    /// [`FormatError::ChunkedReadError`] if the signature is not `FAHD` or the version is not 0,
-    /// [`FormatError::InvalidOffsetSize`] or [`FormatError::InvalidLengthSize`] if a width is not
-    /// 2, 4, or 8, and [`FormatError::ChecksumMismatch`] if the checksum does not match.
-    pub fn parse(
-        file_data: &[u8],
-        offset: usize,
-        offset_size: u8,
-        length_size: u8,
-    ) -> Result<Self, FormatError> {
-        Self::parse_with_widths(
-            file_data,
-            offset,
-            FormatWidths::from_sizes(offset_size, length_size)?,
-        )
+    /// Returns the physical range of the header.
+    pub const fn range(&self) -> FileRange {
+        self.range
     }
 
-    /// Parses the Fixed Array header at `offset` in `file_data` using validated format widths.
+    /// Returns the reference to the data block, or `None` if the header stores the undefined
+    /// address, in an array without chunks.
+    pub const fn data_block(&self) -> Option<FixedArrayDataBlockRef> {
+        self.data_block
+    }
+}
+
+/// The position and the layout of a Fixed Array data block, from [`FixedArrayHeader::data_block`].
+///
+/// A caller reads the bytes of [`parse_range`](Self::parse_range) and passes them to
+/// [`parse`](Self::parse). The range is the whole data block if it is unpaged, and its prefix
+/// and page-init bitmap if it is paged.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct FixedArrayDataBlockRef {
+    base: BaseAddress,
+    header: PhysicalAddress,
+    range: FileRange,
+    geometry: Geometry,
+}
+
+impl FixedArrayDataBlockRef {
+    fn new(
+        base: BaseAddress,
+        header: PhysicalAddress,
+        address: PhysicalAddress,
+        geometry: Geometry,
+    ) -> Result<Self, FormatError> {
+        Ok(Self {
+            base,
+            header,
+            range: FileRange::new(address, geometry.data_block_len()?)?,
+            geometry,
+        })
+    }
+
+    /// Parses the data block in `region`, and returns its elements or, in a paged block, its
+    /// page-init bitmap.
     ///
     /// # Errors
     ///
-    /// Returns [`FormatError::UnexpectedEof`] if the header runs past the end of `file_data`,
-    /// [`FormatError::ChunkedReadError`] if the signature is not `FAHD` or the version is not 0,
-    /// and [`FormatError::ChecksumMismatch`] if the checksum does not match.
+    /// Returns [`FormatError::InsufficientRegion`] if `region` does not contain
+    /// [`parse_range`](Self::parse_range), [`FormatError::InvalidFixedArraySignature`] if the
+    /// bytes do not start with `FADB`, [`FormatError::InvalidFixedArrayVersion`] if the version is
+    /// not 0, [`FormatError::InvalidFixedArrayBlockClient`] if the client ID differs from the
+    /// header's, and [`FormatError::InvalidFixedArrayBlockOwner`] if the header address differs
+    /// from the header's own. Returns [`FormatError::OffsetOverflow`] if the base address plus the
+    /// header address is past [`u64::MAX`], and, under the `checksum` feature,
+    /// [`FormatError::ChecksumMismatch`] if the checksum does not match the bytes of the range.
+    pub fn parse<'a>(
+        &self,
+        region: FileRegion<'a>,
+    ) -> Result<FixedArrayDataBlock<'a>, FormatError> {
+        let Self {
+            base,
+            header,
+            range: _,
+            geometry,
+        } = *self;
+        let bytes = region.subregion(self.parse_range()?)?.bytes();
+        let mut fields = bytes::Fields::new(bytes, 0);
+        if fields.array::<{ DATA_BLOCK_SIGNATURE.len() }>()? != DATA_BLOCK_SIGNATURE {
+            return Err(FormatError::InvalidFixedArraySignature);
+        }
+        let version = fields.u8()?;
+        if version != VERSION {
+            return Err(FormatError::InvalidFixedArrayVersion(version));
+        }
+        let client_id = fields.u8()?;
+        if client_id != geometry.encoding.client.id() {
+            return Err(FormatError::InvalidFixedArrayBlockClient {
+                expected: geometry.encoding.client.id(),
+                actual: client_id,
+            });
+        }
+        let owner =
+            PhysicalAddress::new(base.absolute(fields.address(geometry.encoding.offsets)?)?);
+        if owner != header {
+            return Err(FormatError::InvalidFixedArrayBlockOwner {
+                expected: header.get(),
+                actual: owner.get(),
+            });
+        }
+        checksum::verify_trailing(bytes)?;
+
+        let body = without_checksum(bytes)?
+            .get(fields.pos()..)
+            .ok_or_else(|| {
+                FormatError::Internal("a Fixed Array data block ends inside its prefix".into())
+            })?;
+        Ok(match geometry.paging {
+            Some(paging) => FixedArrayDataBlock::PageBitmap(FixedArrayPageBitmap {
+                block: *self,
+                paging,
+                bitmap: body,
+            }),
+            None => FixedArrayDataBlock::Elements(FixedArrayElements {
+                bytes: body,
+                first_slot: 0,
+                encoding: geometry.encoding,
+            }),
+        })
+    }
+
+    /// Returns the range a caller reads for [`parse`](Self::parse).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::InvalidFixedArrayGeometry`] or [`FormatError::OffsetOverflow`] if
+    /// the range ends past [`u64::MAX`]. The range of every data block a header parses to ends
+    /// below it.
+    pub fn parse_range(&self) -> Result<FileRange, FormatError> {
+        let Self {
+            range, geometry, ..
+        } = *self;
+        match geometry.paging {
+            Some(paging) => FileRange::new(
+                range.start(),
+                paging.pages_offset(geometry.encoding.offsets)?,
+            ),
+            None => Ok(range),
+        }
+    }
+
+    /// Returns the physical range of the whole data block, the pages of a paged one included.
+    pub const fn range(&self) -> FileRange {
+        self.range
+    }
+
+    fn page(&self, paging: Paging, index: u64) -> Result<FixedArrayPageRef, FormatError> {
+        let Self {
+            range, geometry, ..
+        } = *self;
+        let encoding = geometry.encoding;
+        let first_slot = product(index, paging.page_entries)?;
+        let entries = geometry
+            .entries
+            .checked_sub(first_slot)
+            .ok_or(FormatError::InvalidFixedArrayGeometry)?
+            .min(paging.page_entries);
+        let offset = sum([
+            paging.pages_offset(encoding.offsets)?,
+            product(index, encoding.page_len(paging.page_entries)?)?,
+        ])?;
+        Ok(FixedArrayPageRef {
+            range: FileRange::new(
+                range.start().checked_add(offset)?,
+                encoding.page_len(entries)?,
+            )?,
+            first_slot,
+            encoding,
+        })
+    }
+}
+
+/// A parsed Fixed Array data block, from [`FixedArrayDataBlockRef::parse`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FixedArrayDataBlock<'a> {
+    /// The elements of an unpaged data block.
+    Elements(FixedArrayElements<'a>),
+    /// The page-init bitmap of a paged data block.
+    PageBitmap(FixedArrayPageBitmap<'a>),
+}
+
+/// The page-init bitmap of a paged Fixed Array data block, which marks the pages that hold
+/// elements.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct FixedArrayPageBitmap<'a> {
+    block: FixedArrayDataBlockRef,
+    paging: Paging,
+    bitmap: &'a [u8],
+}
+
+impl<'a> FixedArrayPageBitmap<'a> {
+    /// Returns the reference to each page the bitmap marks initialized, in page order.
+    ///
+    /// Page 0 is the most significant bit of the first byte. A page the bitmap does not mark is
+    /// uninitialized and has no reference.
+    pub fn pages(&self) -> impl Iterator<Item = Result<FixedArrayPageRef, FormatError>> + 'a {
+        let Self {
+            block,
+            paging,
+            bitmap,
+        } = *self;
+        (0..paging.pages)
+            .filter(move |&index| initialized(bitmap, index))
+            .map(move |index| block.page(paging, index))
+    }
+}
+
+/// The position of one page of a paged Fixed Array data block, from
+/// [`FixedArrayPageBitmap::pages`].
+///
+/// A caller reads the bytes of [`parse_range`](Self::parse_range) and passes them to
+/// [`parse`](Self::parse).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct FixedArrayPageRef {
+    range: FileRange,
+    first_slot: u64,
+    encoding: ElementEncoding,
+}
+
+impl FixedArrayPageRef {
+    /// Parses the page in `region` and returns its elements.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::InsufficientRegion`] if `region` does not contain
+    /// [`parse_range`](Self::parse_range), and, under the `checksum` feature,
+    /// [`FormatError::ChecksumMismatch`] if the checksum does not match the page's bytes.
+    pub fn parse<'a>(&self, region: FileRegion<'a>) -> Result<FixedArrayElements<'a>, FormatError> {
+        let Self {
+            range,
+            first_slot,
+            encoding,
+        } = *self;
+        let bytes = region.subregion(range)?.bytes();
+        checksum::verify_trailing(bytes)?;
+        Ok(FixedArrayElements {
+            bytes: without_checksum(bytes)?,
+            first_slot,
+            encoding,
+        })
+    }
+
+    /// Returns the range a caller reads for [`parse`](Self::parse), the page's elements and its
+    /// checksum.
+    pub const fn parse_range(&self) -> FileRange {
+        self.range
+    }
+}
+
+/// The elements of an unpaged Fixed Array data block or of one page.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct FixedArrayElements<'a> {
+    bytes: &'a [u8],
+    first_slot: u64,
+    encoding: ElementEncoding,
+}
+
+impl<'a> FixedArrayElements<'a> {
+    /// Returns the slot and the record of each element that stores a chunk address.
+    ///
+    /// The slot is the element's index in the whole array. A record of an unfiltered chunk has
+    /// `chunk_byte_size` as its stored size and a filter mask of 0. An element that stores the
+    /// undefined address has no record.
+    pub fn records(
+        &self,
+        chunk_byte_size: u64,
+    ) -> impl Iterator<Item = Result<(u64, ChunkRecord), FormatError>> + 'a {
+        let Self {
+            bytes,
+            first_slot,
+            encoding,
+        } = *self;
+        bytes
+            .chunks_exact(usize::from(encoding.stride.get()))
+            .zip(first_slot..)
+            .filter_map(move |(element, slot)| {
+                encoding
+                    .record(element, chunk_byte_size)
+                    .map(|record| record.map(|record| (slot, record)))
+                    .transpose()
+            })
+    }
+}
+
+/// The element encoding, the entry count, and the paging of a Fixed Array, which its header fixes.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct Geometry {
+    encoding: ElementEncoding,
+    /// The number of elements in the array, the maximum number of entries the header stores.
+    entries: u64,
+    /// `None` if the data block holds the elements itself.
+    paging: Option<Paging>,
+}
+
+impl Geometry {
+    fn new(encoding: ElementEncoding, entries: u64, page_bits: u8) -> Result<Self, FormatError> {
+        let page_entries = 1u64
+            .checked_shl(u32::from(page_bits))
+            .ok_or(FormatError::InvalidFixedArrayGeometry)?;
+        Ok(Self {
+            encoding,
+            entries,
+            paging: (entries > page_entries).then(|| Paging {
+                page_entries,
+                pages: entries.div_ceil(page_entries),
+            }),
+        })
+    }
+
+    fn data_block_len(&self) -> Result<u64, FormatError> {
+        let Self {
+            encoding,
+            entries,
+            paging,
+        } = *self;
+        let elements = product(entries, u64::from(encoding.stride.get()))?;
+        match paging {
+            Some(paging) => sum([
+                paging.pages_offset(encoding.offsets)?,
+                elements,
+                product(paging.pages, CHECKSUM_LEN)?,
+            ]),
+            None => sum([
+                data_block_prefix_len(encoding.offsets),
+                elements,
+                CHECKSUM_LEN,
+            ]),
+        }
+    }
+}
+
+/// The pages of a paged Fixed Array data block.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct Paging {
+    /// The number of elements in a page, 2 to the power of the header's page bits. The last page
+    /// holds the remaining elements, and may hold fewer.
+    page_entries: u64,
+    pages: u64,
+}
+
+impl Paging {
+    /// Returns the offset of the first page from the start of the data block, past the prefix,
+    /// the page-init bitmap, and its checksum.
+    fn pages_offset(self, offsets: OffsetWidth) -> Result<u64, FormatError> {
+        sum([
+            data_block_prefix_len(offsets),
+            self.pages.div_ceil(8),
+            CHECKSUM_LEN,
+        ])
+    }
+}
+
+/// The fields of a Fixed Array element and its width.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ElementEncoding {
+    offsets: OffsetWidth,
+    client: FixedArrayClient,
+    /// The width of an element in bytes: the address width for an unfiltered chunk, and the
+    /// header's entry size for a filtered one.
+    stride: NonZeroU8,
+}
+
+impl ElementEncoding {
+    fn new(offsets: OffsetWidth, client_id: u8, entry_size: u8) -> Result<Self, FormatError> {
+        let (client, stride) = match client_id {
+            CLIENT_CHUNKS => (FixedArrayClient::Chunks, offsets.get()),
+            CLIENT_FILTERED_CHUNKS => (
+                FixedArrayClient::FilteredChunks {
+                    chunk_size_len: entry_size
+                        .checked_sub(offsets.get() + FILTER_MASK_LEN)
+                        .filter(|&len| len <= MAX_CHUNK_SIZE_LEN)
+                        .ok_or(FormatError::InvalidFixedArrayGeometry)?,
+                },
+                entry_size,
+            ),
+            id => return Err(FormatError::InvalidFixedArrayClient(id)),
+        };
+        Ok(Self {
+            offsets,
+            client,
+            // Never zero: an `OffsetWidth` is at least 2, and a filtered entry size passed the
+            // `checked_sub` above.
+            stride: NonZeroU8::new(stride).ok_or_else(|| {
+                FormatError::Internal("a Fixed Array element has a zero stride".into())
+            })?,
+        })
+    }
+
+    /// Parses `element`, or returns `None` if it stores the undefined address.
+    fn record(
+        self,
+        element: &[u8],
+        chunk_byte_size: u64,
+    ) -> Result<Option<ChunkRecord>, FormatError> {
+        let mut fields = bytes::Fields::new(element, 0);
+        let DecodedStoredAddress::Defined(address) = fields.decoded_address(self.offsets)? else {
+            return Ok(None);
+        };
+        Ok(Some(match self.client {
+            FixedArrayClient::Chunks => ChunkRecord {
+                address,
+                stored_size: chunk_byte_size,
+                filter_mask: 0,
+            },
+            FixedArrayClient::FilteredChunks { chunk_size_len } => ChunkRecord {
+                address,
+                stored_size: fields.uint(usize::from(chunk_size_len))?,
+                filter_mask: fields.u32()?,
+            },
+        }))
+    }
+
+    /// Returns the length in bytes of a page of `entries` elements, with its checksum.
+    fn page_len(self, entries: u64) -> Result<u64, FormatError> {
+        sum([
+            product(entries, u64::from(self.stride.get()))?,
+            CHECKSUM_LEN,
+        ])
+    }
+}
+
+/// The client of a Fixed Array, the "Client ID" field of its header and of its data block.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum FixedArrayClient {
+    /// Client 0, unfiltered chunks.
+    Chunks,
+    /// Client 1, filtered chunks.
+    FilteredChunks {
+        /// The width in bytes of an element's "Chunk Size" field.
+        chunk_size_len: u8,
+    },
+}
+
+impl FixedArrayClient {
+    const fn id(self) -> u8 {
+        match self {
+            Self::Chunks => CLIENT_CHUNKS,
+            Self::FilteredChunks { .. } => CLIENT_FILTERED_CHUNKS,
+        }
+    }
+}
+
+// Page 0 is the most significant bit of the first byte, as `H5VM_bit_get` reads it
+// (`H5VMprivate.h`, HDF5 2.2.0).
+fn initialized(bitmap: &[u8], page: u64) -> bool {
+    usize::try_from(page / 8)
+        .ok()
+        .and_then(|byte| bitmap.get(byte))
+        .is_some_and(|&byte| byte & (0x80 >> (page % 8)) != 0)
+}
+
+/// Returns the length in bytes of a Fixed Array header in a file with the address and length
+/// widths `widths`.
+fn header_len(widths: FormatWidths) -> u64 {
+    let FormatWidths { offsets, lengths } = widths;
+    SIGNATURE_LEN
+        + HEADER_BYTE_FIELDS
+        + u64::from(lengths.get())
+        + u64::from(offsets.get())
+        + CHECKSUM_LEN
+}
+
+/// Returns the length in bytes of a data block's signature, version, client ID, and header
+/// address.
+fn data_block_prefix_len(offsets: OffsetWidth) -> u64 {
+    SIGNATURE_LEN + DATA_BLOCK_BYTE_FIELDS + u64::from(offsets.get())
+}
+
+/// Returns `a * b`, or [`FormatError::InvalidFixedArrayGeometry`] if the product overflows.
+fn product(a: u64, b: u64) -> Result<u64, FormatError> {
+    a.checked_mul(b)
+        .ok_or(FormatError::InvalidFixedArrayGeometry)
+}
+
+/// Returns the sum of `terms`, or [`FormatError::InvalidFixedArrayGeometry`] if it overflows.
+fn sum<const N: usize>(terms: [u64; N]) -> Result<u64, FormatError> {
+    terms
+        .into_iter()
+        .try_fold(0, u64::checked_add)
+        .ok_or(FormatError::InvalidFixedArrayGeometry)
+}
+
+fn without_checksum(bytes: &[u8]) -> Result<&[u8], FormatError> {
+    bytes
+        .split_last_chunk::<{ size_of::<u32>() }>()
+        .map(|(body, _checksum)| body)
+        .ok_or_else(|| FormatError::Internal("a Fixed Array block ends inside its checksum".into()))
+}
+
+impl FixedArrayHeader {
     pub fn parse_with_widths(
         file_data: &[u8],
         offset: usize,
         widths: FormatWidths,
     ) -> Result<Self, FormatError> {
-        // FAHD signature(4) + version(1) + client_id(1) + element_size(1) + max_nelmts_bits(1) +
-        // num_elements(length_size) + data_block_addr(offset_size) + checksum(4)
-        let min_size = 4
-            + 1
-            + 1
-            + 1
-            + 1
-            + usize::from(widths.lengths.get())
-            + usize::from(widths.offsets.get())
-            + 4;
-        if min_size > file_data.len() || offset > file_data.len() - min_size {
-            return Err(FormatError::UnexpectedEof {
-                expected: offset.saturating_add(min_size),
-                available: file_data.len(),
-            });
-        }
-
-        let d = &file_data[offset..];
-        if &d[0..4] != b"FAHD" {
-            return Err(FormatError::ChunkedReadError(
-                "invalid Fixed Array header signature".into(),
-            ));
-        }
-
-        let version = d[4];
-        if version != 0 {
-            return Err(FormatError::ChunkedReadError(format!(
-                "unsupported Fixed Array header version: {version}"
-            )));
-        }
-
-        let client_id = d[5];
-        let element_size = d[6];
-        let max_nelmts_bits = d[7];
-
-        let mut pos = 8;
-        let num_elements = bytes::read_length_width(d, pos, widths.lengths)?;
-        pos += usize::from(widths.lengths.get());
-        let data_block_address =
-            StoredAddress::new(bytes::read_offset_width(d, pos, widths.offsets)?);
-
-        crate::checksum::verify_trailing(&d[..min_size])?;
-
-        Ok(FixedArrayHeader {
-            client_id,
-            element_size,
-            max_nelmts_bits,
-            num_elements,
-            data_block_address,
-        })
+        let locator = FixedArrayHeaderLocator::new(
+            widths,
+            BaseAddress::ZERO,
+            StoredAddress::new(offset.to_u64()),
+        );
+        locator.parse(image_region(file_data)?)
     }
 
-    /// Parses the Fixed Array header at `address` in `source`.
-    ///
-    /// # Errors
-    ///
-    /// Returns the errors [`parse`](Self::parse) returns, and the error `source` returns if a read
-    /// fails.
-    pub fn parse_from_source(
-        source: &(impl MetadataSource + ?Sized),
-        address: StoredAddress,
-        offset_size: u8,
-        length_size: u8,
-    ) -> Result<Self, FormatError> {
-        Self::parse_from_source_with_widths(
-            source,
-            address,
-            FormatWidths::from_sizes(offset_size, length_size)?,
-        )
-    }
-
-    /// Parses the Fixed Array header at `address` in `source` using validated format widths.
-    ///
-    /// # Errors
-    ///
-    /// Returns the errors [`parse_with_widths`](Self::parse_with_widths) returns, and the error
-    /// `source` returns if a read fails.
     pub fn parse_from_source_with_widths(
         source: &(impl MetadataSource + ?Sized),
         address: StoredAddress,
         widths: FormatWidths,
     ) -> Result<Self, FormatError> {
-        let min_size = 4
-            + 1
-            + 1
-            + 1
-            + 1
-            + usize::from(widths.lengths.get())
-            + usize::from(widths.offsets.get())
-            + 4;
-        let buf = source.read_metadata_at(address.get(), min_size)?;
-        Self::parse_with_widths(&buf, 0, widths)
+        let locator = FixedArrayHeaderLocator::new(widths, BaseAddress::ZERO, address);
+        let range = locator.parse_range()?;
+        let bytes = source.read_metadata_at(range.start().get(), range.length().to_usize()?)?;
+        locator.parse(FileRegion::new(range, &bytes)?)
     }
 }
 
-/// Returns the `(address, length)` spans of the header and the data block of the Fixed Array at
-/// `fa_base`.
-///
-/// The spans cover the index alone. [`read_fixed_array_chunks_with_offset_width`] reports the
-/// chunks it points at. An array whose data block address is undefined has the header span alone.
-/// The caller checks the spans against the end of the file.
-///
-/// # Errors
-///
-/// Returns the errors [`FixedArrayHeader::parse_from_source`] returns,
-/// [`FormatError::ChunkedReadError`] if the page exponent is 64 or more, and
-/// [`FormatError::OffsetOverflow`] or [`FormatError::ValueTooLargeForPlatform`] if the length of
-/// the data block does not fit a `usize`.
-#[cfg(test)]
-pub(crate) fn fixed_array_index_spans(
-    source: &(impl MetadataSource + ?Sized),
-    fa_base: StoredAddress,
-    offset_size: u8,
-    length_size: u8,
-) -> Result<Vec<(u64, u64)>, FormatError> {
-    fixed_array_index_spans_with_widths(
-        source,
-        fa_base,
-        FormatWidths::from_sizes(offset_size, length_size)?,
-    )
-}
-
-/// Returns the index spans of the Fixed Array at `fa_base` using validated format widths.
-///
-/// # Errors
-///
-/// Returns the errors [`FixedArrayHeader::parse_from_source_with_widths`] returns,
-/// [`FormatError::ChunkedReadError`] if the page exponent is 64 or more, and
-/// [`FormatError::OffsetOverflow`] or [`FormatError::ValueTooLargeForPlatform`] if the length of
-/// the data block does not fit a `usize`.
 pub fn fixed_array_index_spans_with_widths(
     source: &(impl MetadataSource + ?Sized),
     fa_base: StoredAddress,
     widths: FormatWidths,
 ) -> Result<Vec<(u64, u64)>, FormatError> {
     let header = FixedArrayHeader::parse_from_source_with_widths(source, fa_base, widths)?;
-    let os = usize::from(widths.offsets.get());
-
-    // FAHD: sig(4) + ver(1) + client(1) + elem_size(1) + max_bits(1) + num_elements(ls) +
-    // dblk_addr(os) + checksum(4).
-    let fahd_size = (4 + 1 + 1 + 1 + 1 + usize::from(widths.lengths.get()) + os + 4) as u64;
-    let mut spans = vec![(fa_base.get(), fahd_size)];
-
-    // An array with the undefined data block address has no data block.
-    if header.data_block_address.is_undefined(widths.offsets) {
-        return Ok(spans);
-    }
-
-    // An unfiltered element is the chunk address alone, whatever the entry size.
-    let elem_size = if header.client_id == 0 {
-        os
-    } else {
-        header.element_size as usize
-    };
-    if header.max_nelmts_bits >= 64 {
-        return Err(FormatError::ChunkedReadError(
-            "Fixed Array page exponent out of range".into(),
-        ));
-    }
-    let page_size = 1usize << header.max_nelmts_bits;
-    let num_elements = header.num_elements.to_usize()?;
-    let db_prefix = 4 + 1 + 1 + os; // FADB sig(4)+ver(1)+client(1)+header_addr(os)
-
-    let fadb_size: u64 = if num_elements <= page_size {
-        // Not paged: the prefix, the elements, and the checksum.
-        (db_prefix
-            + num_elements
-                .checked_mul(elem_size)
-                .ok_or(FormatError::OffsetOverflow {
-                    offset: num_elements as u64,
-                    length: elem_size as u64,
-                })?
-            + 4) as u64
-    } else {
-        // Paged: the prefix, the page-init bitmap, and their checksum, then `npages` pages with
-        // a checksum each. The writer does not pad the last page.
-        let npages = num_elements.div_ceil(page_size);
-        let bitmap_size = npages.div_ceil(8);
-        let elements_bytes =
-            num_elements
-                .checked_mul(elem_size)
-                .ok_or(FormatError::OffsetOverflow {
-                    offset: num_elements as u64,
-                    length: elem_size as u64,
-                })?;
-        (db_prefix + bitmap_size + 4 + elements_bytes + npages * 4) as u64
-    };
-
-    spans.push((header.data_block_address.get(), fadb_size));
-    Ok(spans)
+    Ok(core::iter::once(header.range())
+        .chain(header.data_block().map(|block| block.range()))
+        .map(|range| (range.start().get(), range.length()))
+        .collect())
 }
 
-/// Parses the element at `elem_pos` in `block`, or returns `None` where it stores the undefined
-/// address.
-///
-/// `block` is the whole file for the buffered reader, with `elem_pos` absolute, or a block the
-/// streaming reader read, with `elem_pos` relative to its start.
-///
-/// # Errors
-///
-/// Returns [`FormatError::UnexpectedEof`] if the element runs past the end of `block`,
-/// [`FormatError::InvalidOffsetSize`] if `offset_size` is not 2, 4, or 8, and
-/// [`FormatError::ChunkedReadError`] if `chunk_size_bytes` is more than 8.
-fn parse_fa_element(
-    block: &[u8],
-    elem_pos: usize,
-    client_id: u8,
-    chunk_byte_size: u64,
-    elem_size: usize,
-    chunk_size_bytes: usize,
-    offset_width: OffsetWidth,
-) -> Result<Option<ChunkRecord>, FormatError> {
-    if elem_size > block.len() || elem_pos > block.len() - elem_size {
-        return Err(FormatError::UnexpectedEof {
-            expected: elem_pos.saturating_add(elem_size),
-            available: block.len(),
-        });
-    }
-    let Some(address) =
-        bytes::read_optional_offset_width(block, elem_pos, offset_width)?.map(StoredAddress::new)
-    else {
-        return Ok(None);
-    };
-    if client_id == 0 {
-        Ok(Some(ChunkRecord {
-            address,
-            stored_size: chunk_byte_size,
-            filter_mask: 0,
-        }))
-    } else {
-        let os = usize::from(offset_width.get());
-        let chunk_size = read_variable_length(&block[elem_pos + os..], chunk_size_bytes)?;
-        let fm_off = elem_pos + os + chunk_size_bytes;
-        let filter_mask = u32::from_le_bytes([
-            block[fm_off],
-            block[fm_off + 1],
-            block[fm_off + 2],
-            block[fm_off + 3],
-        ]);
-        Ok(Some(ChunkRecord {
-            address,
-            stored_size: chunk_size,
-            filter_mask,
-        }))
-    }
-}
-
-/// Reads the data block of the Fixed Array `header` describes from `file_data`, and calls `visit`
-/// with the slot and the record of each element that stores a chunk address.
-///
-/// A record of an unfiltered chunk has `chunk_byte_size` as its stored size. A reader of a paged
-/// data block skips a page the page-init bitmap does not mark initialized.
-///
-/// # Errors
-///
-/// Returns [`FormatError::ChunkedReadError`] if the signature is not `FADB` or the entry size is
-/// too small for a filtered element or leaves more than 8 bytes for its chunk size,
-/// [`FormatError::UnexpectedEof`] if the data block runs past the end of `file_data`,
-/// [`FormatError::InvalidOffsetSize`] if `offset_size` is not 2, 4, or 8,
-/// [`FormatError::ChecksumMismatch`] if a checksum does not match, [`FormatError::OffsetOverflow`]
-/// or [`FormatError::ValueTooLargeForPlatform`] if a position does not fit a `usize`, and the error
-/// `visit` returns.
-#[cfg(test)]
-pub(crate) fn read_fixed_array_chunks(
-    file_data: &[u8],
-    header: &FixedArrayHeader,
-    offset_size: u8,
-    chunk_byte_size: u64,
-    visit: impl FnMut(u64, ChunkRecord) -> Result<(), FormatError>,
-) -> Result<(), FormatError> {
-    read_fixed_array_chunks_with_offset_width(
-        file_data,
-        header,
-        OffsetWidth::try_from(offset_size)?,
-        chunk_byte_size,
-        visit,
-    )
-}
-
-/// Reads the Fixed Array data block using a validated address width.
-///
-/// # Errors
-///
-/// Returns [`FormatError::ChunkedReadError`] if the signature is not `FADB` or the entry size is
-/// too small for a filtered element or leaves more than 8 bytes for its chunk size,
-/// [`FormatError::UnexpectedEof`] if the data block runs past the end of `file_data`,
-/// [`FormatError::ChecksumMismatch`] if a checksum does not match, [`FormatError::OffsetOverflow`]
-/// or [`FormatError::ValueTooLargeForPlatform`] if a position does not fit a `usize`, and the error
-/// `visit` returns.
 pub fn read_fixed_array_chunks_with_offset_width(
     file_data: &[u8],
     header: &FixedArrayHeader,
-    offset_width: OffsetWidth,
-    chunk_byte_size: u64,
-    mut visit: impl FnMut(u64, ChunkRecord) -> Result<(), FormatError>,
-) -> Result<(), FormatError> {
-    let db_offset = header.data_block_address.get().to_usize()?;
-    let os = usize::from(offset_width.get());
-
-    // Parse data block prefix: FADB(4) + version(1) + client_id(1) + header_address(offset_size)
-    let db_header_size = 4 + 1 + 1 + os;
-    if db_header_size > file_data.len() || db_offset > file_data.len() - db_header_size {
-        return Err(FormatError::UnexpectedEof {
-            expected: db_offset.saturating_add(db_header_size),
-            available: file_data.len(),
-        });
-    }
-
-    if &file_data[db_offset..db_offset + 4] != b"FADB" {
-        return Err(FormatError::ChunkedReadError(
-            "invalid Fixed Array data block signature".into(),
-        ));
-    }
-
-    // Per-element encoding width. Non-filtered: just the chunk address.
-    // Filtered: address + variable-width chunk size + 4-byte filter mask.
-    let chunk_size_bytes = if header.client_id == 0 {
-        0
-    } else {
-        (header.element_size as usize)
-            .checked_sub(os + 4)
-            .ok_or_else(|| {
-                FormatError::ChunkedReadError("Fixed Array element size too small".into())
-            })?
-    };
-    let elem_size = if header.client_id == 0 {
-        os
-    } else {
-        header.element_size as usize
-    };
-
-    let num_elements = header.num_elements.to_usize()?;
-    let page_size = (1u64 << header.max_nelmts_bits).to_usize()?;
-    let is_paged = num_elements > page_size;
-
-    if !is_paged {
-        // Not paged: the prefix, every element, and one checksum over both. A slot no chunk
-        // occupies stores the undefined address.
-        let db_len = num_elements
-            .checked_mul(elem_size)
-            .and_then(|elems| elems.checked_add(db_header_size + 4))
-            .ok_or(FormatError::OffsetOverflow {
-                offset: num_elements as u64,
-                length: elem_size as u64,
-            })?;
-        if db_len > file_data.len() || db_offset > file_data.len() - db_len {
-            return Err(FormatError::UnexpectedEof {
-                expected: db_offset.saturating_add(db_len),
-                available: file_data.len(),
-            });
-        }
-        crate::checksum::verify_trailing(&file_data[db_offset..db_offset + db_len])?;
-
-        let mut pos = db_offset + db_header_size;
-        for index in 0..num_elements {
-            if let Some(record) = parse_fa_element(
-                file_data,
-                pos,
-                header.client_id,
-                chunk_byte_size,
-                elem_size,
-                chunk_size_bytes,
-                offset_width,
-            )? {
-                visit(index as u64, record)?;
-            }
-            pos += elem_size;
-        }
-        return Ok(());
-    }
-
-    // Paged: the prefix, a page-init bitmap with page 0 as its most significant bit, and a
-    // checksum, then the pages at a stride of `page_size` elements and a checksum.
-    let npages = num_elements.div_ceil(page_size);
-    let bitmap_size = npages.div_ceil(8);
-    let bitmap_pos = db_offset + db_header_size;
-    // A crafted element count can put the end of the bitmap past `usize::MAX`.
-    let fits = bitmap_pos
-        .checked_add(bitmap_size)
-        .and_then(|x| x.checked_add(4))
-        .is_some_and(|end| end <= file_data.len());
-    if !fits {
-        return Err(FormatError::UnexpectedEof {
-            expected: bitmap_pos.saturating_add(bitmap_size).saturating_add(4),
-            available: file_data.len(),
-        });
-    }
-    let bitmap = &file_data[bitmap_pos..bitmap_pos + bitmap_size];
-    // A paged block checksums its prefix and bitmap together, then each page.
-    crate::checksum::verify_trailing(&file_data[db_offset..bitmap_pos + bitmap_size + 4])?;
-    let pages_start = bitmap_pos + bitmap_size + 4;
-    let page_stride = page_size
-        .checked_mul(elem_size)
-        .and_then(|bytes| bytes.checked_add(4))
-        .ok_or(FormatError::OffsetOverflow {
-            offset: page_size as u64,
-            length: elem_size as u64,
-        })?;
-
-    for page in 0..npages {
-        let nelem_in_page = core::cmp::min(page_size, num_elements - page * page_size);
-        // A cleared bit marks an unoccupied page.
-        let initialized = (bitmap[page / 8] >> (7 - (page % 8))) & 1 == 1;
-        if !initialized {
-            continue;
-        }
-        let page_offset = page
-            .checked_mul(page_stride)
-            .ok_or(FormatError::OffsetOverflow {
-                offset: page as u64,
-                length: page_stride as u64,
-            })?;
-        let page_start = pages_start + page_offset;
-        // The writer does not pad the last page, so its checksum follows its last element.
-        let page_end = page_start
-            .checked_add(nelem_in_page * elem_size + 4)
-            .filter(|&end| end <= file_data.len())
-            .ok_or(FormatError::UnexpectedEof {
-                expected: page_start.saturating_add(nelem_in_page * elem_size + 4),
-                available: file_data.len(),
-            })?;
-        crate::checksum::verify_trailing(&file_data[page_start..page_end])?;
-        for j in 0..nelem_in_page {
-            let index = page * page_size + j;
-            let elem_pos = page_start + j * elem_size;
-            if let Some(record) = parse_fa_element(
-                file_data,
-                elem_pos,
-                header.client_id,
-                chunk_byte_size,
-                elem_size,
-                chunk_size_bytes,
-                offset_width,
-            )? {
-                visit(index as u64, record)?;
-            }
-        }
-    }
-
-    Ok(())
-}
-
-/// Reads the data block of the Fixed Array `header` describes from `source`, as
-/// [`read_fixed_array_chunks`] reads it from a buffer.
-///
-/// An unpaged data block takes one read, and a paged one a read of its prefix and bitmap and one
-/// read per initialized page.
-///
-/// # Errors
-///
-/// Returns the errors [`read_fixed_array_chunks`] returns, and the error `source` returns if a
-/// read fails.
-#[cfg(test)]
-pub(crate) fn read_fixed_array_chunks_from_source(
-    source: &(impl MetadataSource + ?Sized),
-    header: &FixedArrayHeader,
-    offset_size: u8,
+    _offset_width: OffsetWidth,
     chunk_byte_size: u64,
     visit: impl FnMut(u64, ChunkRecord) -> Result<(), FormatError>,
 ) -> Result<(), FormatError> {
-    read_fixed_array_chunks_from_source_with_offset_width(
-        source,
+    let image = image_region(file_data)?;
+    walk(
         header,
-        OffsetWidth::try_from(offset_size)?,
+        |range| Ok(Cow::Borrowed(image.subregion(range)?.bytes())),
         chunk_byte_size,
         visit,
     )
 }
 
-/// Reads the Fixed Array data block from `source` using a validated address width.
-///
-/// # Errors
-///
-/// Returns the errors [`read_fixed_array_chunks_with_offset_width`] returns, and the error
-/// `source` returns if a read fails.
 pub fn read_fixed_array_chunks_from_source_with_offset_width(
     source: &(impl MetadataSource + ?Sized),
     header: &FixedArrayHeader,
-    offset_width: OffsetWidth,
+    _offset_width: OffsetWidth,
+    chunk_byte_size: u64,
+    visit: impl FnMut(u64, ChunkRecord) -> Result<(), FormatError>,
+) -> Result<(), FormatError> {
+    walk(
+        header,
+        |range| {
+            Ok(Cow::Owned(source.read_metadata_at(
+                range.start().get(),
+                range.length().to_usize()?,
+            )?))
+        },
+        chunk_byte_size,
+        visit,
+    )
+}
+
+fn image_region(file_data: &[u8]) -> Result<FileRegion<'_>, FormatError> {
+    FileRegion::new(
+        FileRange::new(PhysicalAddress::new(0), file_data.len().to_u64())?,
+        file_data,
+    )
+}
+
+fn walk<'a>(
+    header: &FixedArrayHeader,
+    mut read: impl FnMut(FileRange) -> Result<Cow<'a, [u8]>, FormatError>,
     chunk_byte_size: u64,
     mut visit: impl FnMut(u64, ChunkRecord) -> Result<(), FormatError>,
 ) -> Result<(), FormatError> {
-    let db_address = header.data_block_address.get();
-    let os = usize::from(offset_width.get());
-    let db_header_size = 4 + 1 + 1 + os;
-
-    // Both branches read the prefix in the read its checksum covers, and check the signature
-    // there.
-    let signature = |block: &[u8]| -> Result<(), FormatError> {
-        if &block[0..4] != b"FADB" {
-            return Err(FormatError::ChunkedReadError(
-                "invalid Fixed Array data block signature".into(),
-            ));
-        }
-        Ok(())
-    };
-
-    let chunk_size_bytes = if header.client_id == 0 {
-        0
-    } else {
-        (header.element_size as usize)
-            .checked_sub(os + 4)
-            .ok_or_else(|| {
-                FormatError::ChunkedReadError("Fixed Array element size too small".into())
-            })?
-    };
-    let elem_size = if header.client_id == 0 {
-        os
-    } else {
-        header.element_size as usize
-    };
-
-    let num_elements = header.num_elements.to_usize()?;
-    let page_size = (1u64 << header.max_nelmts_bits).to_usize()?;
-    let is_paged = num_elements > page_size;
-
-    if !is_paged {
-        // Not paged: the prefix, every element, and one checksum, in one read.
-        let db_len = num_elements
-            .checked_mul(elem_size)
-            .and_then(|elems| elems.checked_add(db_header_size + 4))
-            .ok_or(FormatError::OffsetOverflow {
-                offset: num_elements as u64,
-                length: elem_size as u64,
-            })?;
-        let region = source.read_metadata_at(db_address, db_len)?;
-        signature(&region)?;
-        crate::checksum::verify_trailing(&region)?;
-        for index in 0..num_elements {
-            if let Some(record) = parse_fa_element(
-                &region,
-                db_header_size + index * elem_size,
-                header.client_id,
-                chunk_byte_size,
-                elem_size,
-                chunk_size_bytes,
-                offset_width,
-            )? {
-                visit(index as u64, record)?;
-            }
-        }
+    let Some(block) = header.data_block() else {
         return Ok(());
+    };
+    let mut visit_elements = |elements: FixedArrayElements<'_>| {
+        elements.records(chunk_byte_size).try_for_each(|record| {
+            let (slot, record) = record?;
+            visit(slot, record)
+        })
+    };
+    let range = block.parse_range()?;
+    let bytes = read(range)?;
+    match block.parse(FileRegion::new(range, &bytes)?)? {
+        FixedArrayDataBlock::Elements(elements) => visit_elements(elements),
+        FixedArrayDataBlock::Paged(bitmap) => bitmap.pages().try_for_each(|page| {
+            let page = page?;
+            let range = page.parse_range();
+            let bytes = read(range)?;
+            visit_elements(page.parse(FileRegion::new(range, &bytes)?)?)
+        }),
     }
-
-    // Paged: the page-init bitmap, then each initialized page.
-    let npages = num_elements.div_ceil(page_size);
-    let bitmap_size = npages.div_ceil(8);
-    let bitmap_addr = db_address + db_header_size as u64;
-    // A paged block checksums its prefix and bitmap together, then each page.
-    let prefix_and_bitmap =
-        source.read_metadata_at(db_address, db_header_size + bitmap_size + 4)?;
-    signature(&prefix_and_bitmap)?;
-    crate::checksum::verify_trailing(&prefix_and_bitmap)?;
-    let bitmap = prefix_and_bitmap[db_header_size..db_header_size + bitmap_size].to_vec();
-    let pages_start_addr = bitmap_addr + bitmap_size as u64 + 4;
-    let page_stride = page_size
-        .checked_mul(elem_size)
-        .and_then(|bytes| bytes.checked_add(4))
-        .ok_or(FormatError::OffsetOverflow {
-            offset: page_size as u64,
-            length: elem_size as u64,
-        })?;
-
-    for page in 0..npages {
-        let nelem_in_page = core::cmp::min(page_size, num_elements - page * page_size);
-        let initialized = (bitmap[page / 8] >> (7 - (page % 8))) & 1 == 1;
-        if !initialized {
-            continue;
-        }
-        let page_offset = page
-            .checked_mul(page_stride)
-            .ok_or(FormatError::OffsetOverflow {
-                offset: page as u64,
-                length: page_stride as u64,
-            })?;
-        let page_addr = pages_start_addr + page_offset as u64;
-        // The writer does not pad the last page, so its checksum follows its last element.
-        let region = source.read_metadata_at(
-            page_addr,
-            nelem_in_page
-                .checked_mul(elem_size)
-                .and_then(|elems| elems.checked_add(4))
-                .ok_or(FormatError::OffsetOverflow {
-                    offset: nelem_in_page as u64,
-                    length: elem_size as u64,
-                })?,
-        )?;
-        crate::checksum::verify_trailing(&region)?;
-        for j in 0..nelem_in_page {
-            if let Some(record) = parse_fa_element(
-                &region,
-                j * elem_size,
-                header.client_id,
-                chunk_byte_size,
-                elem_size,
-                chunk_size_bytes,
-                offset_width,
-            )? {
-                visit((page * page_size + j) as u64, record)?;
-            }
-        }
-    }
-
-    Ok(())
-}
-
-/// Reads a little-endian unsigned integer `size` bytes wide from the start of `data`.
-///
-/// # Errors
-///
-/// Returns [`FormatError::ChunkedReadError`] if `size` is more than 8 or `data` is shorter than
-/// `size`.
-fn read_variable_length(data: &[u8], size: usize) -> Result<u64, FormatError> {
-    if size > 8 || data.len() < size {
-        return Err(FormatError::ChunkedReadError(
-            "invalid variable-length size".into(),
-        ));
-    }
-    let mut val = 0u64;
-    for (i, &byte) in data.iter().enumerate().take(size) {
-        val |= (byte as u64) << (i * 8);
-    }
-    Ok(val)
 }
 
 /// The base 2 logarithm of the number of elements in a data block page of a Fixed Array the
@@ -896,511 +924,490 @@ pub fn build_fixed_array_at(
     Ok(combined)
 }
 
+// The signatures, the version, the client IDs, and the field widths are defined in "The Fixed
+// Array Index" of the format specification, version 4.0.
+const HEADER_SIGNATURE: [u8; 4] = *b"FAHD";
+const DATA_BLOCK_SIGNATURE: [u8; 4] = *b"FADB";
+const VERSION: u8 = 0;
+const CLIENT_CHUNKS: u8 = 0;
+const CLIENT_FILTERED_CHUNKS: u8 = 1;
+const SIGNATURE_LEN: u64 = 4;
+/// The version, client ID, entry size, and page bits bytes of a header.
+const HEADER_BYTE_FIELDS: u64 = 4;
+/// The version and client ID bytes of a data block.
+const DATA_BLOCK_BYTE_FIELDS: u64 = 2;
+const CHECKSUM_LEN: u64 = 4;
+const FILTER_MASK_LEN: u8 = 4;
+const MAX_CHUNK_SIZE_LEN: u8 = 8;
+
 #[cfg(test)]
 mod tests {
     use rstest::rstest;
-    use test_util::checksum::restamp as stamp;
+    use test_util::checksum::restamp;
 
     use super::*;
-    use crate::width::FormatWidths;
 
-    /// Returns the length of a header: 8 fixed bytes, the element count, the data block address,
-    /// and the checksum.
-    const fn fahd_len(os: u8, ls: u8) -> usize {
-        8 + ls as usize + os as usize + 4
+    const WIDTHS: FormatWidths = FormatWidths {
+        offsets: OffsetWidth::Eight,
+        lengths: LengthWidth::Eight,
+    };
+
+    const ARRAY_AT: u64 = 0x80;
+
+    fn chunks(chunk_bytes: u64, n: u64, has_filters: bool) -> Vec<ChunkRecord> {
+        (0..n)
+            .map(|i| ChunkRecord {
+                address: StoredAddress::new(0x100 + i * 8),
+                stored_size: if has_filters {
+                    chunk_bytes - i % 7
+                } else {
+                    chunk_bytes
+                },
+                filter_mask: if has_filters {
+                    u32::from(i % 3 == 0)
+                } else {
+                    0
+                },
+            })
+            .collect()
     }
 
-    /// Returns the chunks the buffered walk reports, with the slot of each.
-    fn records(
-        file_data: &[u8],
-        header: &FixedArrayHeader,
-        chunk_byte_size: u64,
-    ) -> Result<Vec<(u64, ChunkRecord)>, FormatError> {
-        let mut records = Vec::new();
-        read_fixed_array_chunks(file_data, header, 8, chunk_byte_size, |slot, record| {
-            records.push((slot, record));
-            Ok(())
-        })?;
-        Ok(records)
+    /// The Fixed Array the writer builds at `ARRAY_AT`, in an image whose first byte is at
+    /// physical address `base`.
+    struct Fixture {
+        base: u64,
+        widths: FormatWidths,
+        bytes: Vec<u8>,
     }
 
-    /// Returns the chunks the streaming walk reports, with the slot of each.
-    fn records_from_source(
-        source: &[u8],
-        header: &FixedArrayHeader,
-        chunk_byte_size: u64,
-    ) -> Result<Vec<(u64, ChunkRecord)>, FormatError> {
-        let mut records = Vec::new();
-        read_fixed_array_chunks_from_source(source, header, 8, chunk_byte_size, |slot, record| {
-            records.push((slot, record));
-            Ok(())
-        })?;
-        Ok(records)
-    }
-
-    #[test]
-    fn read_variable_length_values() {
-        assert_eq!(read_variable_length(&[0x78, 0x56], 2).unwrap(), 0x5678);
-        assert_eq!(
-            read_variable_length(&[0x01, 0x02, 0x03, 0x04], 4).unwrap(),
-            0x04030201
-        );
-        assert_eq!(read_variable_length(&[0xFF], 1).unwrap(), 0xFF);
-    }
-
-    #[test]
-    fn parse_fixed_array_header_valid() {
-        let mut buf = vec![0u8; 256];
-        // FAHD signature
-        buf[0..4].copy_from_slice(b"FAHD");
-        buf[4] = 0; // version
-        buf[5] = 1; // client_id = filtered
-        buf[6] = 16; // element_size
-        buf[7] = 10; // max_nelmts_bits (page_size = 1024)
-        // num_elements (length_size=8)
-        buf[8..16].copy_from_slice(&5u64.to_le_bytes());
-        // data_block_address (offset_size=8)
-        buf[16..24].copy_from_slice(&0x1000u64.to_le_bytes());
-        stamp(&mut buf, 0, fahd_len(8, 8));
-
-        let header = FixedArrayHeader::parse(&buf, 0, 8, 8).unwrap();
-        assert_eq!(header.client_id, 1);
-        assert_eq!(header.element_size, 16);
-        assert_eq!(header.max_nelmts_bits, 10);
-        assert_eq!(header.num_elements, 5);
-        assert_eq!(header.data_block_address, StoredAddress::new(0x1000));
-    }
-
-    #[test]
-    fn parse_fixed_array_header_invalid_signature() {
-        let mut buf = vec![0u8; 256];
-        buf[0..4].copy_from_slice(b"XXXX");
-        let result = FixedArrayHeader::parse(&buf, 0, 8, 8);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn parse_fixed_array_header_invalid_version() {
-        let mut buf = vec![0u8; 256];
-        buf[0..4].copy_from_slice(b"FAHD");
-        buf[4] = 1; // unsupported version
-        let result = FixedArrayHeader::parse(&buf, 0, 8, 8);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn read_non_filtered_chunks() {
-        let offset_size: u8 = 8;
-        let length_size: u8 = 8;
-        let os = offset_size as usize;
-        let num_chunks = 5u64;
-
-        let mut file_data = vec![0u8; 0x3000];
-
-        // Build FAHD at offset 0x100
-        let fahd_offset = 0x100usize;
-        let db_offset = 0x200usize;
-        file_data[fahd_offset..fahd_offset + 4].copy_from_slice(b"FAHD");
-        file_data[fahd_offset + 4] = 0; // version
-        file_data[fahd_offset + 5] = 0; // client_id = non-filtered
-        file_data[fahd_offset + 6] = os as u8; // element_size = just address
-        file_data[fahd_offset + 7] = 10; // max_nelmts_bits
-        file_data[fahd_offset + 8..fahd_offset + 16].copy_from_slice(&num_chunks.to_le_bytes());
-        file_data[fahd_offset + 16..fahd_offset + 24]
-            .copy_from_slice(&(db_offset as u64).to_le_bytes());
-        stamp(
-            &mut file_data,
-            fahd_offset,
-            fahd_len(offset_size, length_size),
-        );
-
-        // Build FADB at db_offset
-        file_data[db_offset..db_offset + 4].copy_from_slice(b"FADB");
-        file_data[db_offset + 4] = 0; // version
-        file_data[db_offset + 5] = 0; // client_id
-        file_data[db_offset + 6..db_offset + 14]
-            .copy_from_slice(&(fahd_offset as u64).to_le_bytes()); // header_address
-
-        // Elements: 5 addresses
-        let elem_start = db_offset + 6 + os;
-        let base_addr = 0x1000u64;
-        let chunk_byte_size = 20 * 8; // 20 elements × 8 bytes
-        for i in 0..5 {
-            let addr = base_addr + i as u64 * chunk_byte_size;
-            let pos = elem_start + i * os;
-            file_data[pos..pos + os].copy_from_slice(&addr.to_le_bytes());
+    impl Fixture {
+        fn new(n: u64, has_filters: bool) -> Self {
+            Self::at(0, WIDTHS, 8, n, has_filters)
         }
 
-        // Prefix, one address per element slot, checksum.
-        stamp(
-            &mut file_data,
-            db_offset,
-            (6 + os) + num_chunks as usize * os + 4,
-        );
+        fn at(
+            base: u64,
+            widths: FormatWidths,
+            chunk_bytes: u64,
+            n: u64,
+            has_filters: bool,
+        ) -> Self {
+            let array = build_fixed_array_at(
+                &IndexSlots::dense(&chunks(chunk_bytes, n, has_filters)),
+                chunk_bytes,
+                widths.offsets,
+                widths.lengths,
+                has_filters,
+                StoredAddress::new(ARRAY_AT),
+            )
+            .unwrap();
+            let mut bytes = vec![0; usize::try_from(ARRAY_AT).unwrap()];
+            bytes.extend_from_slice(&array);
+            Self {
+                base,
+                widths,
+                bytes,
+            }
+        }
 
-        let expected: Vec<(u64, ChunkRecord)> = (0..num_chunks)
-            .map(|slot| {
-                let record = ChunkRecord {
-                    address: StoredAddress::new(base_addr + slot * chunk_byte_size),
-                    stored_size: chunk_byte_size,
-                    filter_mask: 0,
-                };
-                (slot, record)
+        fn locator(&self) -> FixedArrayHeaderLocator {
+            FixedArrayHeaderLocator::new(
+                self.widths,
+                BaseAddress::new(self.base),
+                StoredAddress::new(ARRAY_AT),
+            )
+        }
+
+        fn image(&self) -> FileRegion<'_> {
+            FileRegion::new(
+                FileRange::new(PhysicalAddress::new(self.base), self.bytes.len() as u64).unwrap(),
+                &self.bytes,
+            )
+            .unwrap()
+        }
+
+        fn header(&self) -> Result<FixedArrayHeader, FormatError> {
+            let locator = self.locator();
+            locator.parse(self.image().subregion(locator.parse_range()?)?)
+        }
+
+        fn data_block(&self) -> FixedArrayDataBlockRef {
+            self.header().unwrap().data_block().unwrap()
+        }
+
+        fn pages(&self) -> Vec<FixedArrayPageRef> {
+            let block = self.data_block();
+            let region = self
+                .image()
+                .subregion(block.parse_range().unwrap())
+                .unwrap();
+            let FixedArrayDataBlock::PageBitmap(bitmap) = block.parse(region).unwrap() else {
+                panic!("the data block of {block:?} is not paged");
+            };
+            bitmap.pages().collect::<Result<_, _>>().unwrap()
+        }
+
+        fn local(&self, at: PhysicalAddress) -> usize {
+            usize::try_from(at.get() - self.base).unwrap()
+        }
+
+        fn header_at(&self) -> usize {
+            usize::try_from(ARRAY_AT).unwrap()
+        }
+
+        fn data_block_at(&self) -> usize {
+            self.local(self.data_block().range().start())
+        }
+
+        fn restamp_header(&mut self) {
+            let at = self.header_at();
+            let len = usize::try_from(header_len(self.widths)).unwrap();
+            restamp(&mut self.bytes, at, len);
+        }
+
+        fn restamp_prefix(&mut self) {
+            let block = self.data_block();
+            let at = self.local(block.range().start());
+            let len = usize::try_from(block.parse_range().unwrap().length()).unwrap();
+            restamp(&mut self.bytes, at, len);
+        }
+
+        fn records(&self, chunk_byte_size: u64) -> Result<Vec<(u64, ChunkRecord)>, FormatError> {
+            let image = self.image();
+            let Some(block) = self.header()?.data_block() else {
+                return Ok(Vec::new());
+            };
+            match block.parse(image.subregion(block.parse_range()?)?)? {
+                FixedArrayDataBlock::Elements(elements) => {
+                    elements.records(chunk_byte_size).collect()
+                }
+                FixedArrayDataBlock::PageBitmap(bitmap) => {
+                    let mut records = Vec::new();
+                    for page in bitmap.pages() {
+                        let page = page?;
+                        for record in page
+                            .parse(image.subregion(page.parse_range())?)?
+                            .records(chunk_byte_size)
+                        {
+                            records.push(record?);
+                        }
+                    }
+                    Ok(records)
+                }
+            }
+        }
+    }
+
+    fn slotted(chunks: Vec<ChunkRecord>) -> Vec<(u64, ChunkRecord)> {
+        (0..).zip(chunks).collect()
+    }
+
+    #[rstest]
+    fn an_array_reads_back_at_every_width(
+        #[values(
+            FormatWidths { offsets: OffsetWidth::Two, lengths: LengthWidth::Two },
+            FormatWidths { offsets: OffsetWidth::Four, lengths: LengthWidth::Four },
+            FormatWidths { offsets: OffsetWidth::Eight, lengths: LengthWidth::Eight }
+        )]
+        widths: FormatWidths,
+        #[values(0, 5, 1_024, 1_025, 3_000)] n: u64,
+        #[values(false, true)] has_filters: bool,
+        #[values(8, 300, 100_000, 1 << 32)] chunk_bytes: u64,
+    ) {
+        let fixture = Fixture::at(0, widths, chunk_bytes, n, has_filters);
+        let read = fixture.records(chunk_bytes).unwrap();
+        assert_eq!(read, slotted(chunks(chunk_bytes, n, has_filters)));
+    }
+
+    #[rstest]
+    fn the_header_and_data_block_ranges_tile_the_array(
+        #[values(0, 1, 5, 1_024, 1_025, 3_000)] n: u64,
+        #[values(false, true)] has_filters: bool,
+    ) {
+        let fixture = Fixture::new(n, has_filters);
+        let header = fixture.header().unwrap();
+        let block = header.data_block().unwrap();
+        assert_eq!(header.range().start().get(), ARRAY_AT);
+        assert_eq!(header.range().end(), block.range().start());
+        assert_eq!(block.range().end().get(), fixture.bytes.len() as u64);
+    }
+
+    #[test]
+    fn the_pages_of_a_paged_data_block_are_contiguous_with_an_unpadded_last_page() {
+        let fixture = Fixture::new(3_000, false);
+        let block = fixture.data_block();
+        let prefix = block.parse_range().unwrap();
+        let pages: Vec<(u64, u64, u64)> = fixture
+            .pages()
+            .into_iter()
+            .map(|page| {
+                let range = page.parse_range();
+                (range.start().get(), range.length(), page.first_slot)
             })
             .collect();
+        let start = prefix.end().get();
+        assert_eq!(prefix.length(), 4 + 2 + 8 + 1 + 4);
         assert_eq!(
-            walk_both(&file_data, fahd_offset, chunk_byte_size),
-            expected
-        );
-    }
-
-    /// Returns the chunks both walks report for the array whose header is at `header_offset`, and
-    /// asserts that the two agree.
-    fn walk_both(
-        file_data: &[u8],
-        header_offset: usize,
-        chunk_byte_size: u64,
-    ) -> Vec<(u64, ChunkRecord)> {
-        let header = FixedArrayHeader::parse(file_data, header_offset, 8, 8).unwrap();
-        let buffered = records(file_data, &header, chunk_byte_size).unwrap();
-        let header = FixedArrayHeader::parse_from_source(
-            file_data,
-            StoredAddress::new(header_offset as u64),
-            8,
-            8,
-        )
-        .unwrap();
-        let streamed = records_from_source(file_data, &header, chunk_byte_size).unwrap();
-        assert_eq!(buffered, streamed, "the two walks disagree");
-        buffered
-    }
-
-    #[test]
-    fn read_filtered_chunks() {
-        let offset_size: u8 = 8;
-        let length_size: u8 = 8;
-        let os = offset_size as usize;
-        let num_chunks = 3u64;
-        // element_size for filtered: offset_size + chunk_size_bytes + 4(filter_mask)
-        let chunk_size_bytes = 5usize;
-        let elem_size = os + chunk_size_bytes + 4;
-
-        let mut file_data = vec![0u8; 0x3000];
-
-        let fahd_offset = 0x100usize;
-        let db_offset = 0x200usize;
-        file_data[fahd_offset..fahd_offset + 4].copy_from_slice(b"FAHD");
-        file_data[fahd_offset + 4] = 0;
-        file_data[fahd_offset + 5] = 1; // client_id = filtered
-        file_data[fahd_offset + 6] = u8::try_from(elem_size).unwrap();
-        file_data[fahd_offset + 7] = 10;
-        file_data[fahd_offset + 8..fahd_offset + 16].copy_from_slice(&num_chunks.to_le_bytes());
-        file_data[fahd_offset + 16..fahd_offset + 24]
-            .copy_from_slice(&(db_offset as u64).to_le_bytes());
-        stamp(
-            &mut file_data,
-            fahd_offset,
-            fahd_len(offset_size, length_size),
-        );
-
-        file_data[db_offset..db_offset + 4].copy_from_slice(b"FADB");
-        file_data[db_offset + 4] = 0;
-        file_data[db_offset + 5] = 1;
-        file_data[db_offset + 6..db_offset + 14]
-            .copy_from_slice(&(fahd_offset as u64).to_le_bytes());
-
-        let elem_start = db_offset + 6 + os;
-        let test_chunks = [
-            (0x1000u64, u64::from(u32::MAX) + 120, 0u32),
-            (0x2000u64, 115u64, 0u32),
-            (0x3000u64, 100u64, 0u32),
-        ];
-
-        for (i, &(addr, csize, fmask)) in test_chunks.iter().enumerate() {
-            let pos = elem_start + i * elem_size;
-            file_data[pos..pos + os].copy_from_slice(&addr.to_le_bytes());
-            file_data[pos + os..pos + os + chunk_size_bytes]
-                .copy_from_slice(&csize.to_le_bytes()[..chunk_size_bytes]);
-            file_data[pos + os + chunk_size_bytes..pos + os + chunk_size_bytes + 4]
-                .copy_from_slice(&fmask.to_le_bytes());
-        }
-
-        // Prefix, one filtered element record per slot, checksum.
-        stamp(
-            &mut file_data,
-            db_offset,
-            (6 + os) + num_chunks as usize * elem_size + 4,
-        );
-
-        let expected: Vec<(u64, ChunkRecord)> = (0..)
-            .zip(test_chunks)
-            .map(|(slot, (address, stored_size, filter_mask))| {
-                let record = ChunkRecord {
-                    address: StoredAddress::new(address),
-                    stored_size,
-                    filter_mask,
-                };
-                (slot, record)
-            })
-            .collect();
-        assert_eq!(walk_both(&file_data, fahd_offset, 20 * 8), expected);
-    }
-
-    /// Returns the chunks both walks read from an unfiltered array of 3 elements in two pages of
-    /// 2, with `bitmap` as its page-init byte and page 0 as its most significant bit.
-    fn read_paged(bitmap: u8) -> Vec<(u64, ChunkRecord)> {
-        let offset_size: u8 = 8;
-        let length_size: u8 = 8;
-        let os = offset_size as usize;
-        let num_chunks = 3u64; // > page_size(2) => paged, npages = 2
-
-        let mut file_data = vec![0u8; 0x400];
-
-        let fahd_offset = 0x100usize;
-        let db_offset = 0x200usize;
-        file_data[fahd_offset..fahd_offset + 4].copy_from_slice(b"FAHD");
-        file_data[fahd_offset + 4] = 0; // version
-        file_data[fahd_offset + 5] = 0; // client_id = non-filtered
-        file_data[fahd_offset + 6] = os as u8; // element_size
-        file_data[fahd_offset + 7] = 1; // max_nelmts_bits => page_size = 2
-        file_data[fahd_offset + 8..fahd_offset + 16].copy_from_slice(&num_chunks.to_le_bytes());
-        file_data[fahd_offset + 16..fahd_offset + 24]
-            .copy_from_slice(&(db_offset as u64).to_le_bytes());
-        stamp(
-            &mut file_data,
-            fahd_offset,
-            fahd_len(offset_size, length_size),
-        );
-
-        // FADB prefix: sig + version + client_id + header_addr + bitmap + checksum
-        file_data[db_offset..db_offset + 4].copy_from_slice(b"FADB");
-        file_data[db_offset + 4] = 0; // version
-        file_data[db_offset + 5] = 0; // client_id
-        file_data[db_offset + 6..db_offset + 14]
-            .copy_from_slice(&(fahd_offset as u64).to_le_bytes());
-        file_data[db_offset + 14] = bitmap; // page-init bitmap (1 byte for 2 pages)
-        // A paged block checksums its prefix and bitmap together.
-        stamp(&mut file_data, db_offset, 6 + os + 1 + 4);
-
-        // Pages: stride = page_size(2)*elem_size(8) + 4 checksum = 20 bytes.
-        let pages_start = db_offset + 14 + 1 + 4;
-        let stride = 2 * os + 4;
-        let addrs = [0x1000u64, 0x2000, 0x3000];
-        for (i, &addr) in addrs.iter().enumerate() {
-            let page = i / 2;
-            let j = i % 2;
-            let pos = pages_start + page * stride + j * os;
-            file_data[pos..pos + os].copy_from_slice(&addr.to_le_bytes());
-        }
-        // Each page carries its own checksum after its elements. Page 0 is
-        // full at two slots; page 1 holds the array's odd third and is not
-        // padded, so its checksum sits one slot in.
-        stamp(&mut file_data, pages_start, 2 * os + 4);
-        stamp(&mut file_data, pages_start + stride, os + 4);
-
-        let header =
-            FixedArrayHeader::parse(&file_data, fahd_offset, offset_size, length_size).unwrap();
-        assert_eq!(header.num_elements, 3);
-        walk_both(&file_data, fahd_offset, 8)
-    }
-
-    /// Returns the record of an unfiltered 8-byte chunk at `address`.
-    fn unfiltered(address: u64) -> ChunkRecord {
-        ChunkRecord {
-            address: StoredAddress::new(address),
-            stored_size: 8,
-            filter_mask: 0,
-        }
-    }
-
-    #[test]
-    fn read_paged_all_pages_initialized() {
-        // bitmap 0xC0 => both pages initialized (page 0 and page 1).
-        assert_eq!(
-            read_paged(0b1100_0000),
+            pages,
             vec![
-                (0, unfiltered(0x1000)),
-                (1, unfiltered(0x2000)),
-                (2, unfiltered(0x3000)),
+                (start, 1_024 * 8 + 4, 0),
+                (start + 1_024 * 8 + 4, 1_024 * 8 + 4, 1_024),
+                (start + 2 * (1_024 * 8 + 4), 952 * 8 + 4, 2_048),
             ]
         );
+        assert_eq!(pages[2].0 + pages[2].1, block.range().end().get());
+    }
+
+    #[rstest]
+    #[case::second(0b1011_0000, &[0, 2, 3])]
+    #[case::first_and_last(0b0110_0000, &[1, 2])]
+    #[case::all_but_the_partial_last(0b0001_0000, &[3])]
+    #[case::every_page(0b0000_0000, &[])]
+    fn a_cleared_page_bit_skips_its_page(
+        #[case] bitmap: u8,
+        #[case] pages: &[u64],
+        #[values(false, true)] has_filters: bool,
+    ) {
+        let mut fixture = Fixture::new(4_000, has_filters);
+        let at = fixture.data_block_at() + 4 + 2 + 8;
+        fixture.bytes[at] = bitmap;
+        fixture.restamp_prefix();
+        let expected: Vec<(u64, ChunkRecord)> = slotted(chunks(8, 4_000, has_filters))
+            .into_iter()
+            .filter(|(slot, _)| pages.contains(&(slot / 1_024)))
+            .collect();
+        assert_eq!(fixture.records(8).unwrap(), expected);
     }
 
     #[test]
-    fn read_paged_skips_uninitialized_page() {
-        // bitmap 0x80 => only page 0 initialized; page 1's chunk is unallocated.
+    fn a_page_parses_from_a_region_holding_only_that_page() {
+        let fixture = Fixture::new(3_000, true);
+        let page = fixture.pages()[1];
+        let read: Vec<(u64, ChunkRecord)> = page
+            .parse(fixture.image().subregion(page.parse_range()).unwrap())
+            .unwrap()
+            .records(8)
+            .collect::<Result<_, _>>()
+            .unwrap();
+        let expected: Vec<(u64, ChunkRecord)> = slotted(chunks(8, 3_000, true))
+            .into_iter()
+            .skip(1_024)
+            .take(1_024)
+            .collect();
+        assert_eq!(read, expected);
+    }
+
+    #[test]
+    fn a_slot_that_stores_the_undefined_address_has_no_record() {
+        let chunks = chunks(8, 3, true);
+        let slots = IndexSlots::new(&chunks, &[0, 2, 4], 5).unwrap();
+        let array = build_fixed_array_at(
+            &slots,
+            8,
+            OffsetWidth::Eight,
+            LengthWidth::Eight,
+            true,
+            StoredAddress::new(ARRAY_AT),
+        )
+        .unwrap();
+        let mut fixture = Fixture::new(0, false);
+        fixture.bytes.truncate(fixture.header_at());
+        fixture.bytes.extend_from_slice(&array);
         assert_eq!(
-            read_paged(0b1000_0000),
-            vec![(0, unfiltered(0x1000)), (1, unfiltered(0x2000))]
+            fixture.records(8).unwrap(),
+            vec![(0, chunks[0]), (2, chunks[1]), (4, chunks[2])]
         );
     }
 
-    // Flips a checksum byte of each structure for every reader of the structure to reject.
-    #[cfg(feature = "checksum")]
     #[test]
-    fn a_corrupted_fixed_array_structure_fails_its_checksum() {
-        let os: u8 = 8;
-        let ls: u8 = 8;
-        let base = 0x800u64;
-        for has_filters in [false, true] {
-            // 1025 and 3000 are paged, and 3000 leaves a partial last page.
-            for &n in &[5u64, 1024, 1025, 3000] {
-                let chunks: Vec<ChunkRecord> = (0..n)
-                    .map(|i| ChunkRecord {
-                        address: StoredAddress::new(0x100000 + i * 8),
-                        stored_size: if has_filters { 8 + (i % 7) } else { 8 },
-                        filter_mask: 0,
-                    })
-                    .collect();
-                let fa = build_fixed_array_at(
-                    &IndexSlots::dense(&chunks),
-                    8,
-                    OffsetWidth::Eight,
-                    LengthWidth::Eight,
-                    has_filters,
-                    StoredAddress::new(base),
-                )
-                .unwrap();
-                let mut file = vec![0u8; base as usize + fa.len()];
-                file[base as usize..].copy_from_slice(&fa);
-
-                let read_both = |file: &[u8]| {
-                    let buffered = FixedArrayHeader::parse(file, base as usize, os, ls)
-                        .and_then(|h| records(file, &h, 8));
-                    let streamed =
-                        FixedArrayHeader::parse_from_source(file, StoredAddress::new(base), os, ls)
-                            .and_then(|h| records_from_source(file, &h, 8));
-                    (buffered, streamed.is_err())
-                };
-                let sound = read_both(&file).0.expect("the sound file must read");
-                assert_eq!(
-                    sound.len() as u64,
-                    n,
-                    "the fixture must read before it is corrupted (filters={has_filters}, n={n})"
-                );
-
-                let spans =
-                    fixed_array_index_spans(file.as_slice(), StoredAddress::new(base), os, ls)
-                        .unwrap();
-                assert_eq!(spans.len(), 2, "FA index = FAHD + FADB");
-
-                let header = FixedArrayHeader::parse(&file, base as usize, os, ls).unwrap();
-                let elem_size = if has_filters {
-                    header.element_size as usize
-                } else {
-                    os as usize
-                };
-                let page_size = 1usize << header.max_nelmts_bits;
-                let db_prefix = 4 + 1 + 1 + os as usize;
-
-                // The last byte of a structure is the top byte of its checksum, for a paged data
-                // block the checksum of its last page, which the reader verifies since the writer
-                // marks every page initialized. The span walk reads the header alone and sizes
-                // the data block from it.
-                let mut poke_sites: Vec<(u64, bool)> = spans
-                    .iter()
-                    .enumerate()
-                    .map(|(i, &(at, len))| (at + len - 1, i == 0))
-                    .collect();
-                if n as usize > page_size {
-                    let (db_at, _) = spans[1];
-                    let bitmap = (n as usize).div_ceil(page_size).div_ceil(8);
-                    // The prefix-and-bitmap checksum, then the first page's.
-                    poke_sites.push((db_at + (db_prefix + bitmap + 4) as u64 - 1, false));
-                    poke_sites.push((
-                        db_at + (db_prefix + bitmap + 4 + page_size * elem_size + 4) as u64 - 1,
-                        false,
-                    ));
-                }
-
-                for (site, walked) in poke_sites {
-                    let at = site.to_usize().unwrap();
-                    let original = file[at];
-                    file[at] ^= 0x01;
-                    let (buffered, streamed_err) = read_both(&file);
-                    assert!(
-                        matches!(buffered, Err(FormatError::ChecksumMismatch { .. })),
-                        "filters={has_filters}, n={n}: a corrupted checksum at {at:#x} must be \
-                         rejected, got {buffered:?}"
-                    );
-                    assert!(
-                        streamed_err,
-                        "filters={has_filters}, n={n}: the streaming backend must reject what the \
-                         buffered one does, at {at:#x}"
-                    );
-                    if walked {
-                        let walk = fixed_array_index_spans(
-                            file.as_slice(),
-                            StoredAddress::new(base),
-                            os,
-                            ls,
-                        );
-                        assert!(
-                            matches!(walk, Err(FormatError::ChecksumMismatch { .. })),
-                            "filters={has_filters}, n={n}: the reclaim walk must reject a corrupt \
-                             header at {at:#x} rather than release spans read out of it, got \
-                             {walk:?}"
-                        );
-                    }
-                    file[at] = original;
-                }
-            }
-        }
+    fn an_undefined_data_block_address_leaves_the_array_without_a_data_block() {
+        let mut fixture = Fixture::new(5, false);
+        let at = fixture.header_at() + 8 + 8;
+        fixture.bytes[at..at + 8].copy_from_slice(&u64::MAX.to_le_bytes());
+        fixture.restamp_header();
+        let header = fixture.header().unwrap();
+        assert_eq!(header.data_block(), None);
+        assert_eq!(header.range().length(), header_len(WIDTHS));
     }
 
-    // The oracle is the array `build_fixed_array_at` builds, paged and not, filtered and not.
+    #[rstest]
+    #[case::signature(0, b'X', FormatError::InvalidFixedArraySignature)]
+    #[case::version(4, 1, FormatError::InvalidFixedArrayVersion(1))]
+    #[case::client(5, 2, FormatError::InvalidFixedArrayClient(2))]
+    #[case::page_bits(7, 64, FormatError::InvalidFixedArrayGeometry)]
+    #[case::filtered_entry_too_small(6, 8 + 4 - 1, FormatError::InvalidFixedArrayGeometry)]
+    #[case::filtered_entry_too_large(6, 8 + 4 + 9, FormatError::InvalidFixedArrayGeometry)]
+    fn a_malformed_header_is_rejected(
+        #[case] field: usize,
+        #[case] value: u8,
+        #[case] expected: FormatError,
+    ) {
+        let mut fixture = Fixture::new(5, true);
+        let at = fixture.header_at() + field;
+        fixture.bytes[at] = value;
+        fixture.restamp_header();
+        assert_eq!(fixture.header().unwrap_err(), expected);
+    }
+
     #[test]
-    fn index_spans_tile_fixed_array_blob() {
-        let os: u8 = 8;
-        let ls: u8 = 8;
-        let base = 0x800u64;
-        for has_filters in [false, true] {
-            // 1025 and 3000 are paged.
-            for &n in &[1u64, 5, 1024, 1025, 3000] {
-                let chunks: Vec<ChunkRecord> = (0..n)
-                    .map(|i| ChunkRecord {
-                        address: StoredAddress::new(0x100000 + i * 8),
-                        stored_size: if has_filters { 8 + (i % 7) } else { 8 },
-                        filter_mask: 0,
-                    })
-                    .collect();
-                let fa = build_fixed_array_at(
-                    &IndexSlots::dense(&chunks),
-                    8,
-                    OffsetWidth::Eight,
-                    LengthWidth::Eight,
-                    has_filters,
-                    StoredAddress::new(base),
-                )
-                .unwrap();
-                let mut file = vec![0u8; base as usize + fa.len()];
-                file[base as usize..].copy_from_slice(&fa);
+    fn an_entry_count_whose_data_block_overflows_is_rejected() {
+        let mut fixture = Fixture::new(5, false);
+        let at = fixture.header_at() + 8;
+        fixture.bytes[at..at + 8].copy_from_slice(&(u64::MAX / 4).to_le_bytes());
+        fixture.restamp_header();
+        assert_eq!(
+            fixture.header().unwrap_err(),
+            FormatError::InvalidFixedArrayGeometry
+        );
+    }
 
-                let spans =
-                    fixed_array_index_spans(file.as_slice(), StoredAddress::new(base), os, ls)
-                        .unwrap();
-                assert_eq!(
-                    spans.len(),
-                    2,
-                    "FA index = FAHD + FADB (filters={has_filters}, n={n})"
-                );
+    #[rstest]
+    #[case::signature(0, b"X", FormatError::InvalidFixedArraySignature)]
+    #[case::version(4, &[1], FormatError::InvalidFixedArrayVersion(1))]
+    #[case::client(5, &[1], FormatError::InvalidFixedArrayBlockClient { expected: 0, actual: 1 })]
+    #[case::header_address(6, &[0x81], FormatError::InvalidFixedArrayBlockOwner { expected: ARRAY_AT, actual: 0x81 })]
+    fn a_malformed_data_block_prefix_is_rejected(
+        #[case] field: usize,
+        #[case] value: &[u8],
+        #[case] expected: FormatError,
+        #[values(5, 3_000)] n: u64,
+    ) {
+        let mut fixture = Fixture::new(n, false);
+        let at = fixture.data_block_at() + field;
+        fixture.bytes[at..at + value.len()].copy_from_slice(value);
+        fixture.restamp_prefix();
+        let block = fixture.data_block();
+        let region = fixture
+            .image()
+            .subregion(block.parse_range().unwrap())
+            .unwrap();
+        assert_eq!(block.parse(region).unwrap_err(), expected);
+    }
 
-                let mut sorted = spans.clone();
-                sorted.sort_by_key(|&(a, _)| a);
-                // The header at the base, and the data block after it to the end of the array.
-                assert_eq!(sorted[0].0, base);
-                assert_eq!(
-                    sorted[0].0 + sorted[0].1,
-                    sorted[1].0,
-                    "FAHD must abut FADB (filters={has_filters}, n={n})"
-                );
-                assert_eq!(
-                    sorted[1].0 + sorted[1].1,
-                    base + fa.len() as u64,
-                    "FA index spans must tile the blob (filters={has_filters}, n={n})"
-                );
+    #[rstest]
+    #[case::plain(0)]
+    #[case::userblock(512)]
+    #[case::above_u32(1 << 40)]
+    fn an_array_reads_at_its_physical_position(#[case] base: u64, #[values(5, 3_000)] n: u64) {
+        let fixture = Fixture::at(base, WIDTHS, 8, n, true);
+        let header = fixture.header().unwrap();
+        assert_eq!(header.range().start().get(), base + ARRAY_AT);
+        assert_eq!(fixture.records(8).unwrap(), slotted(chunks(8, n, true)));
+    }
+
+    #[test]
+    fn a_header_address_at_the_physical_header_position_is_rejected() {
+        let base = 1 << 40;
+        let mut fixture = Fixture::at(base, WIDTHS, 8, 5, false);
+        let at = fixture.data_block_at() + 6;
+        fixture.bytes[at..at + 8].copy_from_slice(&(base + ARRAY_AT).to_le_bytes());
+        fixture.restamp_prefix();
+        let block = fixture.data_block();
+        let region = fixture
+            .image()
+            .subregion(block.parse_range().unwrap())
+            .unwrap();
+        assert_eq!(
+            block.parse(region).unwrap_err(),
+            FormatError::InvalidFixedArrayBlockOwner {
+                expected: base + ARRAY_AT,
+                actual: 2 * base + ARRAY_AT,
             }
-        }
+        );
+    }
+
+    #[rstest]
+    #[case::header(Truncated::Header)]
+    #[case::prefix(Truncated::Prefix)]
+    #[case::page(Truncated::Page)]
+    fn a_region_short_of_its_range_is_rejected(#[case] truncated: Truncated) {
+        let fixture = Fixture::new(3_000, false);
+        let short = |range: FileRange| {
+            fixture
+                .image()
+                .subregion(FileRange::new(range.start(), range.length() - 1).unwrap())
+                .unwrap()
+        };
+        let (range, err) = match truncated {
+            Truncated::Header => {
+                let locator = fixture.locator();
+                let range = locator.parse_range().unwrap();
+                (range, locator.parse(short(range)).unwrap_err())
+            }
+            Truncated::Prefix => {
+                let block = fixture.data_block();
+                let range = block.parse_range().unwrap();
+                (range, block.parse(short(range)).unwrap_err())
+            }
+            Truncated::Page => {
+                let page = *fixture.pages().last().unwrap();
+                let range = page.parse_range();
+                (range, page.parse(short(range)).unwrap_err())
+            }
+        };
+        assert_eq!(
+            err,
+            FormatError::InsufficientRegion {
+                required_start: range.start().get(),
+                required_length: range.length(),
+                provided_start: range.start().get(),
+                provided_length: range.length() - 1,
+            }
+        );
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum Truncated {
+        Header,
+        Prefix,
+        Page,
+    }
+
+    #[cfg(feature = "checksum")]
+    #[rstest]
+    #[case::header(Corrupted::Header)]
+    #[case::unpaged_data_block(Corrupted::DataBlock)]
+    #[case::prefix(Corrupted::Prefix)]
+    #[case::first_page(Corrupted::FirstPage)]
+    #[case::last_page(Corrupted::LastPage)]
+    fn a_corrupted_checksum_is_rejected(
+        #[case] corrupted: Corrupted,
+        #[values(false, true)] has_filters: bool,
+    ) {
+        let n = if matches!(corrupted, Corrupted::DataBlock) {
+            5
+        } else {
+            3_000
+        };
+        let mut fixture = Fixture::new(n, has_filters);
+        let range = match corrupted {
+            Corrupted::Header => fixture.header().unwrap().range(),
+            Corrupted::DataBlock | Corrupted::Prefix => fixture.data_block().parse_range().unwrap(),
+            Corrupted::FirstPage => fixture.pages()[0].parse_range(),
+            Corrupted::LastPage => fixture.pages().last().unwrap().parse_range(),
+        };
+        let start = fixture.local(range.start());
+        let end = fixture.local(range.end());
+        fixture.bytes[end - 1] ^= 0x01;
+        let stored = u32::from_le_bytes(fixture.bytes[end - 4..end].try_into().unwrap());
+        let computed = checksum::jenkins_lookup3(&fixture.bytes[start..end - 4]);
+        assert_eq!(
+            fixture.records(8).unwrap_err(),
+            FormatError::ChecksumMismatch {
+                expected: stored,
+                computed,
+            }
+        );
+    }
+
+    #[cfg(feature = "checksum")]
+    #[derive(Clone, Copy, Debug)]
+    enum Corrupted {
+        Header,
+        DataBlock,
+        Prefix,
+        FirstPage,
+        LastPage,
     }
 
     #[test]
@@ -1498,48 +1505,5 @@ mod tests {
                 check(n, chunk_bytes, OffsetWidth::Eight, LengthWidth::Eight, true);
             }
         }
-    }
-
-    #[rstest]
-    fn an_array_reads_back_at_every_width(
-        #[values(
-            FormatWidths { offsets: OffsetWidth::Two, lengths: LengthWidth::Two },
-            FormatWidths { offsets: OffsetWidth::Four, lengths: LengthWidth::Four },
-            FormatWidths { offsets: OffsetWidth::Eight, lengths: LengthWidth::Eight }
-        )]
-        widths: FormatWidths,
-        #[values(5, 3_000)] n: u64,
-        #[values(false, true)] has_filters: bool,
-    ) {
-        let FormatWidths { offsets, lengths } = widths;
-        let chunks: Vec<ChunkRecord> = (0..n)
-            .map(|i| ChunkRecord {
-                address: StoredAddress::new(0x100 + i * 8),
-                stored_size: if has_filters { 8 + (i % 7) } else { 8 },
-                filter_mask: 0,
-            })
-            .collect();
-        let base = 0x80;
-        let fa = build_fixed_array_at(
-            &IndexSlots::dense(&chunks),
-            8,
-            offsets,
-            lengths,
-            has_filters,
-            StoredAddress::new(base),
-        )
-        .unwrap();
-        let mut file = vec![0u8; base as usize];
-        file.extend_from_slice(&fa);
-
-        let header =
-            FixedArrayHeader::parse(&file, base as usize, offsets.get(), lengths.get()).unwrap();
-        let mut read = Vec::new();
-        read_fixed_array_chunks(&file, &header, offsets.get(), 8, |_, record| {
-            read.push(record);
-            Ok(())
-        })
-        .unwrap();
-        assert_eq!(read, chunks);
     }
 }

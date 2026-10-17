@@ -8,9 +8,13 @@ use hdf5::file::LibraryVersion;
 use hdf5::plist::file_create::Sizeof;
 use hdf5::plist::file_create::SizeofInfo;
 use hdf5_pure::ChunkIndex;
+use hdf5_pure::Error;
 use hdf5_pure::File;
+use hdf5_pure::FormatError;
 use rstest::rstest;
 use tempfile::tempdir;
+use test_util::bytes::sole_signature;
+use test_util::checksum::restamp;
 
 #[derive(Clone, Copy, Debug)]
 struct Fixture {
@@ -178,4 +182,71 @@ fn pure_reads_the_fixed_array_libhdf5_writes(
     assert_eq!(dataset.chunk_index().unwrap(), Some(ChunkIndex::FixedArray));
     assert_eq!(dataset.read_i32().unwrap(), fixture.expected());
     assert_eq!(pure_chunks(&file), libhdf5_chunks(&path, userblock));
+}
+
+#[derive(Clone, Copy, Debug)]
+enum Corruption {
+    HeaderVersion,
+    DataBlockOwner,
+}
+
+#[rstest]
+fn pure_rejects_a_corrupted_fixed_array_libhdf5_writes(
+    #[values(Corruption::HeaderVersion, Corruption::DataBlockOwner)] corruption: Corruption,
+    #[values(64, 3_000)] len: usize,
+    #[values(Backend::Buffered, Backend::Streaming)] backend: Backend,
+) {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("fixed_array.h5");
+    let fixture = Fixture {
+        len,
+        chunk: 1,
+        deflate: false,
+        sparse: None,
+    };
+    fixture.libhdf5_create(
+        &path,
+        SizeofInfo {
+            sizeof_addr: Sizeof::Bytes8,
+            sizeof_size: Sizeof::Bytes8,
+        },
+        0,
+    );
+    let mut bytes = std::fs::read(&path).unwrap();
+    let header = sole_signature(&bytes, b"FAHD");
+    let data_block = sole_signature(&bytes, b"FADB");
+    let entries = u64::try_from(len).unwrap();
+    let prefix_len = if entries > 1_024 {
+        4 + 2 + 8 + entries.div_ceil(1_024).div_ceil(8) + 4
+    } else {
+        4 + 2 + 8 + entries * 8 + 4
+    };
+    let expected = match corruption {
+        Corruption::HeaderVersion => {
+            bytes[header + 4] = 1;
+            restamp(&mut bytes, header, 4 + 4 + 8 + 8 + 4);
+            FormatError::InvalidFixedArrayVersion(1)
+        }
+        Corruption::DataBlockOwner => {
+            let owner = u64::try_from(header).unwrap() + 1;
+            bytes[data_block + 6..data_block + 14].copy_from_slice(&owner.to_le_bytes());
+            restamp(&mut bytes, data_block, usize::try_from(prefix_len).unwrap());
+            FormatError::InvalidFixedArrayBlockOwner {
+                expected: owner - 1,
+                actual: owner,
+            }
+        }
+    };
+    std::fs::write(&path, &bytes).unwrap();
+
+    let err = backend
+        .open(&path)
+        .dataset("d")
+        .unwrap()
+        .read_i32()
+        .unwrap_err();
+    let Error::Format(err) = err else {
+        panic!("expected Error::Format, got {err:?}");
+    };
+    assert_eq!(err, expected);
 }
