@@ -41,6 +41,7 @@ mod external_storage;
 mod file_space;
 mod file_space_fuzz;
 mod fill_value;
+mod fixed_array;
 mod fixed_string;
 mod fractal_heap_dense_links;
 mod fractal_heap_filtered_header;
