@@ -39,28 +39,33 @@ fn main() {
     builder.write(&path).expect("write initial file");
 
     // ---- Append ten at a time into a chunk of sixty-four -------------------
-    let mut writes = 0usize;
+    let mut published_appends = 0usize;
     {
         let session = File::open_rw(&path).expect("open for editing");
         let mut samples = session.dataset("samples").expect("open dataset");
         let mut appender = samples.buffered_appender().expect("eligible for appending");
 
-        let mut size = session.file_size();
+        let mut published_elements = 0;
         for b in 0..BATCHES {
             let lo = b * BATCH;
             appender
                 .append(&(lo..lo + BATCH).collect::<Vec<i32>>())
                 .expect("append");
-            // The file only changes where a chunk completed.
-            let now = session.file_size();
-            if now != size {
-                writes += 1;
-                size = now;
+            // Count completed appends from the published length. The editor can reuse
+            // reserved space without changing the file size.
+            let now = session
+                .dataset("samples")
+                .expect("open dataset")
+                .shape()
+                .expect("read published shape")[0];
+            if now != published_elements {
+                published_appends += 1;
+                published_elements = now;
             }
         }
         println!(
             "{BATCHES} calls of {BATCH} elements into a chunk of {CHUNK}: \
-             {writes} writes, {} elements still buffered",
+             {published_appends} published appends, {} elements still buffered",
             appender.buffered_elements()
         );
         // The buffered tail reaches the file here. `Drop` would flush too, but
@@ -69,8 +74,11 @@ fn main() {
     }
 
     // Twenty-five calls of ten elements fill three chunks of sixty-four and
-    // leave 250 - 192 = 58 buffered, so the loop wrote three times.
-    assert_eq!(writes, 3, "expected one write per completed chunk");
+    // leave 250 - 192 = 58 buffered, with three appends completed during the loop.
+    assert_eq!(
+        published_appends, 3,
+        "expected one published append per completed chunk"
+    );
 
     // ---- Verify -----------------------------------------------------------
     let file = File::open(&path).expect("reopen");
