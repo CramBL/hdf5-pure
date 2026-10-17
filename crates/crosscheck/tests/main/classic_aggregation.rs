@@ -199,6 +199,113 @@ fn libhdf5_reads_and_mutates_its_aggr_file_after_staged_edits(
     assert_eq!(file.dataset("c_added").unwrap().read_u8().unwrap(), [31]);
 }
 
+#[rstest]
+#[case::small(6, 4, 14)]
+#[case::raw_refill(6, 4, 6000)]
+#[case::index_blocks(4, 1, 1500)]
+fn libhdf5_reads_and_extends_its_aggr_file_after_immediate_appends(
+    #[case] initial: usize,
+    #[case] chunk: usize,
+    #[case] end: usize,
+    #[values(MemoryStrategy::Mirrored, MemoryStrategy::Bounded)] backing: MemoryStrategy,
+    #[values(false, true)] filtered: bool,
+) {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("immediate.h5");
+    let seed = hdf5::FileBuilder::new()
+        .with_fapl(|properties| properties.libver_v110())
+        .with_fcpl(|properties| properties.file_space_strategy(AGGR))
+        .create(&path)
+        .unwrap();
+    let mut builder = seed.new_dataset::<u8>();
+    if filtered {
+        builder = builder.deflate(6);
+    }
+    let dataset = builder
+        .shape((initial..,))
+        .chunk([chunk])
+        .create("values")
+        .unwrap();
+    let expected = (0..end)
+        .map(|value| (value % 251) as u8)
+        .collect::<Vec<_>>();
+    dataset.write(&expected[..initial]).unwrap();
+    drop(dataset);
+    seed.close().unwrap();
+    let file = File::open_rw_with_options(
+        &path,
+        FileAccessProperties::new().with_memory_strategy(backing),
+    )
+    .unwrap();
+    file.root()
+        .create_dataset("first", |dataset| {
+            dataset.with_u8_data(&[17; 16]);
+        })
+        .unwrap();
+    file.commit().unwrap();
+    let raw_cursor = file
+        .__space_ownership()
+        .unwrap()
+        .live_raw_space
+        .iter()
+        .map(|&(start, length)| start + length)
+        .max()
+        .unwrap();
+    file.dataset("values")
+        .unwrap()
+        .append_raw(&expected[initial..])
+        .unwrap();
+    let ownership = file.__space_ownership().unwrap();
+    assert!(ownership.analysis_complete);
+    assert_eq!(ownership.physical_size, ownership.logical_size);
+    assert_eq!(ownership.free_space_manager_space, []);
+    assert!(
+        ownership
+            .live_raw_space
+            .iter()
+            .any(|&(start, _)| start == raw_cursor)
+    );
+    file.root()
+        .create_dataset("last", |dataset| {
+            dataset.with_u8_data(&[19; 16]);
+        })
+        .unwrap();
+    file.commit().unwrap();
+    file.dataset("values")
+        .unwrap()
+        .append_raw(&[97, 98])
+        .unwrap();
+    file.close().unwrap();
+    let file = hdf5::File::open_rw(&path).unwrap();
+    assert_eq!(
+        file.dataset("first").unwrap().read_raw::<u8>().unwrap(),
+        [17; 16]
+    );
+    assert_eq!(
+        file.dataset("last").unwrap().read_raw::<u8>().unwrap(),
+        [19; 16]
+    );
+    let mut expected = expected;
+    expected.extend_from_slice(&[97, 98]);
+    assert_eq!(file.free_space(), 0);
+    let dataset = file.dataset("values").unwrap();
+    assert_eq!(dataset.read_raw::<u8>().unwrap(), expected);
+    dataset.resize([end + 4]).unwrap();
+    dataset.write_slice(&[101, 102], end + 2..end + 4).unwrap();
+    drop(dataset);
+    file.close().unwrap();
+    expected.extend_from_slice(&[101, 102]);
+    assert_eq!(
+        File::open(&path)
+            .unwrap()
+            .dataset("values")
+            .unwrap()
+            .read_u8()
+            .unwrap(),
+        expected
+    );
+}
+
 /// Where the C library places the allocations of a workload, and the file size after each step.
 #[derive(Debug, Default, Eq, PartialEq)]
 struct Placements<T> {

@@ -228,9 +228,9 @@ Verbatim repack requires a fully allocated chunk grid.
 |---|:---:|:---:|---|
 | `H5F_FSPACE_STRATEGY_FSM_AGGR` | ✅ | 🟡 | Edits reuse freed space through the free-space managers, without aggregators. |
 | `H5F_FSPACE_STRATEGY_PAGE` | ✅ | ✅ | |
-| `H5F_FSPACE_STRATEGY_AGGR` | ✅ | 🟡 | Recorded for other libraries. Edits allocate at the end of the file, without aggregators, and a deletion leaves the file at its length. |
+| `H5F_FSPACE_STRATEGY_AGGR` | ✅ | 🟡 | Staged edits and immediate appends use separate metadata and raw aggregates. Freed extents are discarded. |
 | `H5F_FSPACE_STRATEGY_NONE` | ✅ | 🟡 | Edits allocate at the end of the file, and a deletion leaves the file at its length. |
-| Aggregators | ✅ | ❌ | No strategy allocates through aggregators. |
+| Aggregators | ✅ | 🟡 | Staged edits and immediate appends under `H5F_FSPACE_STRATEGY_AGGR` share session aggregates. Whole-file writes and other strategies use no classic aggregates. |
 | Persistent free-space managers | ✅ | ✅ | |
 | Free-space threshold | ✅ | ✅ | Edits track a freed region shorter than the threshold only where it adjoins tracked free space, which under `H5F_FSPACE_STRATEGY_PAGE` is free space in its own page for a region shorter than a page. Page tails are tracked whatever the threshold. |
 | File-space page size | ✅ | ✅ | The writer rejects a page size outside 512 bytes to 1 GiB under every strategy, as libhdf5 does. `File::open` reads a file that stores one without its file-space settings, and `File::open_rw` rejects it. |
