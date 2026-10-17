@@ -4,17 +4,20 @@
 //! reader that seeks. [`MetadataCachingSource`] wraps either with a bounded cache of the metadata
 //! reads and passes a dataset's payload through to the inner source.
 
+use alloc::borrow::Cow;
 #[cfg(not(feature = "std"))]
 use alloc::{vec, vec::Vec};
 
 #[cfg(feature = "std")]
 use std::collections::BTreeMap;
 
+use hdf5_pure_core::__private::FileRange;
 use hdf5_pure_format::__private::MetadataSource;
 
 use crate::address::BaseAddressExt;
 use crate::address::StoredAddressExt;
 use crate::address::{BaseAddress, StoredAddress};
+use crate::convert;
 use crate::convert::Narrow;
 use crate::error::FormatError;
 
@@ -540,6 +543,56 @@ impl<S: Source + ?Sized> MetadataSource for SourceMetadata<'_, S> {
 
     fn read_metadata_at(&self, offset: u64, len: usize) -> Result<Vec<u8>, FormatError> {
         self.0.read_metadata_at(offset, len)
+    }
+}
+
+/// The metadata reads of a file, a byte slice that holds the whole file or a [`Source`].
+///
+/// A [`Source`] reads each range through [`Source::read_metadata_at`], the read a metadata cache
+/// can keep.
+pub(crate) trait RangeReader {
+    /// Returns the bytes of `range`, borrowed from a byte slice or read from a [`Source`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::UnexpectedEof`] if the file ends inside `range`,
+    /// [`FormatError::ValueTooLargeForPlatform`] if the range does not fit a `usize`, and the
+    /// error of a failed read of a [`Source`].
+    fn read_range(&self, range: FileRange) -> Result<Cow<'_, [u8]>, FormatError>;
+}
+
+impl RangeReader for [u8] {
+    fn read_range(&self, range: FileRange) -> Result<Cow<'_, [u8]>, FormatError> {
+        bytes_in(self, range).map(Cow::Borrowed)
+    }
+}
+
+impl<S: Source + ?Sized> RangeReader for S {
+    fn read_range(&self, range: FileRange) -> Result<Cow<'_, [u8]>, FormatError> {
+        self.read_metadata_at(range.start().get(), range.length().to_usize()?)
+            .map(Cow::Owned)
+    }
+}
+
+/// Returns the bytes of `range` in `bytes`, a buffer whose first byte is at address 0.
+///
+/// # Errors
+///
+/// Returns [`FormatError::UnexpectedEof`] if `bytes` ends inside `range`, and
+/// [`FormatError::ValueTooLargeForPlatform`] if the range ends past [`usize::MAX`].
+pub(crate) fn bytes_in(bytes: &[u8], range: FileRange) -> Result<&[u8], FormatError> {
+    bytes
+        .get(convert::slice_range(range.start().get(), range.length())?)
+        .ok_or_else(|| unexpected_eof(range, bytes.len().to_u64()))
+}
+
+/// Returns the [`FormatError::UnexpectedEof`] of a read of `range` from a file of `extent` bytes.
+///
+/// A position past [`usize::MAX`] is reported as [`usize::MAX`].
+pub(crate) fn unexpected_eof(range: FileRange, extent: u64) -> FormatError {
+    FormatError::UnexpectedEof {
+        expected: range.end().get().to_usize().unwrap_or(usize::MAX),
+        available: extent.to_usize().unwrap_or(usize::MAX),
     }
 }
 

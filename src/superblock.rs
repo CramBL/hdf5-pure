@@ -1,6 +1,5 @@
 //! The superblock search and read over a byte slice or a [`Source`].
 
-use alloc::borrow::Cow;
 use alloc::format;
 
 use hdf5_pure_core::__private::FileRange;
@@ -11,9 +10,10 @@ use hdf5_pure_format::__private::SuperblockCandidateRead;
 use hdf5_pure_format::__private::SuperblockLocator;
 use hdf5_pure_format::__private::SuperblockSignature;
 
-use crate::convert;
 use crate::convert::Narrow;
 use crate::error::FormatError;
+use crate::source;
+use crate::source::RangeReader;
 use crate::source::Source;
 use crate::width::FormatWidths;
 
@@ -51,14 +51,14 @@ pub(crate) fn read(
     let (signature, held) = search(file, &mut candidate)?.ok_or(FormatError::SignatureNotFound)?;
     let candidate_range = signature.parse_range()?;
     if !held.contains(candidate_range) {
-        return Err(unexpected_eof(candidate_range, file.extent()));
+        return Err(source::unexpected_eof(candidate_range, file.extent()));
     }
     let held_bytes = candidate
         .get(..held.length().to_usize()?)
         .ok_or_else(|| candidate_overrun(held))?;
     let superblock = signature.parse(FileRegion::new(held, held_bytes)?)?;
     let range = superblock.parse_range();
-    let bytes = file.read_superblock(range)?;
+    let bytes = file.read_range(range)?;
     let (superblock, widths) = superblock.parse(FileRegion::new(range, &bytes)?)?;
     Ok(LocatedSuperblock {
         address: signature.address(),
@@ -87,7 +87,7 @@ pub(crate) fn find_signature(
 ///
 /// A [`Source`] reads each candidate through [`Source::read_at`] and the superblock through
 /// [`Source::read_metadata_at`], the read a metadata cache can keep.
-pub(crate) trait SuperblockSource {
+pub(crate) trait SuperblockSource: RangeReader {
     /// Returns the length of the file in bytes.
     fn extent(&self) -> u64;
 
@@ -98,14 +98,6 @@ pub(crate) trait SuperblockSource {
     /// Returns [`FormatError::UnexpectedEof`] if the file ends before `offset + buf.len()`, and
     /// the error of a failed read of a [`Source`].
     fn read_candidate(&self, offset: u64, buf: &mut [u8]) -> Result<(), FormatError>;
-
-    /// Returns the bytes of `range`, borrowed from a byte slice or read from a [`Source`].
-    ///
-    /// # Errors
-    ///
-    /// Returns [`FormatError::UnexpectedEof`] if the file ends inside `range`, and the error of a
-    /// failed read of a [`Source`].
-    fn read_superblock(&self, range: FileRange) -> Result<Cow<'_, [u8]>, FormatError>;
 }
 
 impl SuperblockSource for [u8] {
@@ -114,15 +106,11 @@ impl SuperblockSource for [u8] {
     }
 
     fn read_candidate(&self, offset: u64, buf: &mut [u8]) -> Result<(), FormatError> {
-        buf.copy_from_slice(bytes_in(
+        buf.copy_from_slice(source::bytes_in(
             self,
             FileRange::new(PhysicalAddress::new(offset), buf.len().to_u64())?,
         )?);
         Ok(())
-    }
-
-    fn read_superblock(&self, range: FileRange) -> Result<Cow<'_, [u8]>, FormatError> {
-        bytes_in(self, range).map(Cow::Borrowed)
     }
 }
 
@@ -133,11 +121,6 @@ impl<S: Source + ?Sized> SuperblockSource for S {
 
     fn read_candidate(&self, offset: u64, buf: &mut [u8]) -> Result<(), FormatError> {
         self.read_at(offset, buf)
-    }
-
-    fn read_superblock(&self, range: FileRange) -> Result<Cow<'_, [u8]>, FormatError> {
-        self.read_metadata_at(range.start().get(), range.length().to_usize()?)
-            .map(Cow::Owned)
     }
 }
 
@@ -178,19 +161,6 @@ fn search(
             SuperblockCandidate::Exhausted => return Ok(None),
             SuperblockCandidate::Present(signature) => return Ok(Some((signature, held))),
         }
-    }
-}
-
-fn bytes_in(bytes: &[u8], range: FileRange) -> Result<&[u8], FormatError> {
-    bytes
-        .get(convert::slice_range(range.start().get(), range.length())?)
-        .ok_or_else(|| unexpected_eof(range, bytes.len().to_u64()))
-}
-
-fn unexpected_eof(range: FileRange, extent: u64) -> FormatError {
-    FormatError::UnexpectedEof {
-        expected: range.end().get().to_usize().unwrap_or(usize::MAX),
-        available: extent.to_usize().unwrap_or(usize::MAX),
     }
 }
 

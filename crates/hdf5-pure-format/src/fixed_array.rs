@@ -15,7 +15,6 @@
 //!
 //! [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsec_fmt4_appendixc_fixedarr
 
-use alloc::borrow::Cow;
 use alloc::vec;
 use alloc::vec::Vec;
 use core::num::NonZeroU8;
@@ -37,7 +36,6 @@ use crate::chunk_record::ChunkRecord;
 use crate::chunk_record::IndexSlots;
 use crate::convert::Narrow;
 use crate::error::FormatError;
-use crate::metadata_source::MetadataSource;
 use crate::width::FormatWidths;
 use crate::width::LengthWidth;
 use crate::width::OffsetWidth;
@@ -619,115 +617,6 @@ fn without_checksum(bytes: &[u8]) -> Result<&[u8], FormatError> {
         .split_last_chunk::<{ size_of::<u32>() }>()
         .map(|(body, _checksum)| body)
         .ok_or_else(|| FormatError::Internal("a Fixed Array block ends inside its checksum".into()))
-}
-
-impl FixedArrayHeader {
-    pub fn parse_with_widths(
-        file_data: &[u8],
-        offset: usize,
-        widths: FormatWidths,
-    ) -> Result<Self, FormatError> {
-        let locator = FixedArrayHeaderLocator::new(
-            widths,
-            BaseAddress::ZERO,
-            StoredAddress::new(offset.to_u64()),
-        );
-        locator.parse(image_region(file_data)?)
-    }
-
-    pub fn parse_from_source_with_widths(
-        source: &(impl MetadataSource + ?Sized),
-        address: StoredAddress,
-        widths: FormatWidths,
-    ) -> Result<Self, FormatError> {
-        let locator = FixedArrayHeaderLocator::new(widths, BaseAddress::ZERO, address);
-        let range = locator.parse_range()?;
-        let bytes = source.read_metadata_at(range.start().get(), range.length().to_usize()?)?;
-        locator.parse(FileRegion::new(range, &bytes)?)
-    }
-}
-
-pub fn fixed_array_index_spans_with_widths(
-    source: &(impl MetadataSource + ?Sized),
-    fa_base: StoredAddress,
-    widths: FormatWidths,
-) -> Result<Vec<(u64, u64)>, FormatError> {
-    let header = FixedArrayHeader::parse_from_source_with_widths(source, fa_base, widths)?;
-    Ok(core::iter::once(header.range())
-        .chain(header.data_block().map(|block| block.range()))
-        .map(|range| (range.start().get(), range.length()))
-        .collect())
-}
-
-pub fn read_fixed_array_chunks_with_offset_width(
-    file_data: &[u8],
-    header: &FixedArrayHeader,
-    _offset_width: OffsetWidth,
-    chunk_byte_size: u64,
-    visit: impl FnMut(u64, ChunkRecord) -> Result<(), FormatError>,
-) -> Result<(), FormatError> {
-    let image = image_region(file_data)?;
-    walk(
-        header,
-        |range| Ok(Cow::Borrowed(image.subregion(range)?.bytes())),
-        chunk_byte_size,
-        visit,
-    )
-}
-
-pub fn read_fixed_array_chunks_from_source_with_offset_width(
-    source: &(impl MetadataSource + ?Sized),
-    header: &FixedArrayHeader,
-    _offset_width: OffsetWidth,
-    chunk_byte_size: u64,
-    visit: impl FnMut(u64, ChunkRecord) -> Result<(), FormatError>,
-) -> Result<(), FormatError> {
-    walk(
-        header,
-        |range| {
-            Ok(Cow::Owned(source.read_metadata_at(
-                range.start().get(),
-                range.length().to_usize()?,
-            )?))
-        },
-        chunk_byte_size,
-        visit,
-    )
-}
-
-fn image_region(file_data: &[u8]) -> Result<FileRegion<'_>, FormatError> {
-    FileRegion::new(
-        FileRange::new(PhysicalAddress::new(0), file_data.len().to_u64())?,
-        file_data,
-    )
-}
-
-fn walk<'a>(
-    header: &FixedArrayHeader,
-    mut read: impl FnMut(FileRange) -> Result<Cow<'a, [u8]>, FormatError>,
-    chunk_byte_size: u64,
-    mut visit: impl FnMut(u64, ChunkRecord) -> Result<(), FormatError>,
-) -> Result<(), FormatError> {
-    let Some(block) = header.data_block() else {
-        return Ok(());
-    };
-    let mut visit_elements = |elements: FixedArrayElements<'_>| {
-        elements.records(chunk_byte_size).try_for_each(|record| {
-            let (slot, record) = record?;
-            visit(slot, record)
-        })
-    };
-    let range = block.parse_range()?;
-    let bytes = read(range)?;
-    match block.parse(FileRegion::new(range, &bytes)?)? {
-        FixedArrayDataBlock::Elements(elements) => visit_elements(elements),
-        FixedArrayDataBlock::Paged(bitmap) => bitmap.pages().try_for_each(|page| {
-            let page = page?;
-            let range = page.parse_range();
-            let bytes = read(range)?;
-            visit_elements(page.parse(FileRegion::new(range, &bytes)?)?)
-        }),
-    }
 }
 
 /// The base 2 logarithm of the number of elements in a data block page of a Fixed Array the

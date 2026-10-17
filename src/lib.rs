@@ -457,6 +457,7 @@ pub(crate) mod file_writer;
 pub(crate) mod fill_value;
 pub(crate) mod filter_pipeline;
 pub(crate) mod filters;
+pub(crate) mod fixed_array;
 pub(crate) mod fractal_heap;
 pub(crate) mod fractal_heap_storage;
 pub(crate) mod free_space_manager;
