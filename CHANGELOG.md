@@ -8,10 +8,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- `Dataset::append` shares the session's metadata and raw aggregates with staged edits under the `Aggr` file-space strategy. Unused reservations are available within the session, while freed object extents remain unavailable for reuse ([#778](https://github.com/CramBL/hdf5-pure/pull/778)).
 - `Group::groups` and related listings and attribute reads support dense link and attribute storage whose fractal heap is filtered. Huge objects in such a heap remain unsupported ([#776](https://github.com/CramBL/hdf5-pure/pull/776)).
 - `File::open_rw` reclaims the filtered fractal heap of dense attribute or link storage that becomes dead. A filtered heap with huge objects or a filter without a decoder stays allocated ([#776](https://github.com/CramBL/hdf5-pure/pull/776)).
 - `File::commit` uses separate metadata and raw aggregates for staged edits under the `Aggr` file-space strategy. Unused reservations are available across commits within the session, while freed object extents remain unavailable for reuse ([#777](https://github.com/CramBL/hdf5-pure/pull/777)).
-
 - `File::open_rw` reclaims managed-space free-space manager headers and complete allocated section lists with their dead fractal heaps, including reserved capacity. Invalid or unsupported manager metadata prevents heap reclamation ([#758](https://github.com/CramBL/hdf5-pure/pull/758)).
 - `DatasetBuilder::with_fill_time` selects when a dataset writes its fill value, with the policy preserved across repacking and reported by dataset reads. Modifying the fill time of an existing dataset remains unsupported ([#755](https://github.com/CramBL/hdf5-pure/pull/755)).
 - `FormatError` reports unsupported serialized free-space section classes with their client and class identifiers. These diagnostics apply to internal fractal-heap manager parsing ([#757](https://github.com/CramBL/hdf5-pure/pull/757)).

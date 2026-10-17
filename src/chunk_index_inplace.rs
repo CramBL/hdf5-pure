@@ -137,6 +137,11 @@ pub(crate) trait Store: Source {
     /// This file's validated address and length field widths.
     fn widths(&self) -> FormatWidths;
 
+    /// Returns the end of file recorded in the cached superblock.
+    ///
+    /// An interrupted append may leave image bytes beyond this position.
+    fn recorded_eof(&self) -> u64;
+
     /// Writes `bytes` into an allocation of `class` and returns its physical position.
     ///
     /// Chunk payloads use [`AllocationClass::Raw`]. Extensible-array data and super blocks use
@@ -144,7 +149,8 @@ pub(crate) trait Store: Source {
     /// During reclamation, the editor returns index storage to raw-page free space only where
     /// its PAGE placement is proven.
     ///
-    /// The store may reuse committed free space or append at end-of-file. The allocation lies
+    /// The store may allocate from a classic aggregate, reuse committed free space, or append at
+    /// end-of-file. The allocation lies
     /// within the image's logical length on return. Before publishing a chunk address,
     /// [`apply_ea_append`] records any increase in that length in the superblock.
     ///
@@ -1217,10 +1223,9 @@ pub(crate) fn apply_ea_append<F: Store>(
     // already, so it needs no patch, and issuing one would rewrite the whole
     // superblock and barrier for it on every batch. Both patches below are
     // therefore the same rule: rewrite the superblock only where the file grew
-    // past what it records. `recorded_eof` is that value throughout — the
-    // engine's own reads of `file.len()` are what maintain it, since this trait
-    // exposes no accessor for the superblock field itself.
-    let mut recorded_eof = file.len();
+    // past what it records. The initial value comes from the superblock: an
+    // interrupted append can leave reserved storage beyond its recorded EOF.
+    let mut recorded_eof = file.recorded_eof();
     let mut chunk_addrs = Vec::with_capacity(plan.new_chunk_bytes.len());
     for blob in &plan.new_chunk_bytes {
         chunk_addrs.push((
@@ -1714,6 +1719,9 @@ mod tests {
     impl Store for WindowProbeStore {
         fn widths(&self) -> FormatWidths {
             self.widths
+        }
+        fn recorded_eof(&self) -> u64 {
+            self.superblock.eof_address
         }
         fn allocate(&mut self, bytes: &[u8], class: AllocationClass) -> Result<u64, Error> {
             self.allocations.get_mut().push(class);

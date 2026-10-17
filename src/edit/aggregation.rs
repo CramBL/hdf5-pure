@@ -1,4 +1,4 @@
-//! Classic aggregate reservations for staged edits.
+//! Classic aggregate reservations for staged edits and immediate appends.
 
 use core::num::NonZeroU64;
 
@@ -7,11 +7,13 @@ use hdf5_pure_space::__private::AllocationClass;
 use hdf5_pure_space::__private::ClassicAggregators;
 use hdf5_pure_space::__private::Extent;
 
+use crate::address::AddressContext;
 use crate::address::StoredAddress;
 use crate::address::StoredAddressExt;
 use crate::convert::Narrow;
 use crate::error::Error;
 use crate::error::FormatError;
+use crate::image::FileImage;
 
 use super::Placement;
 use super::WriteEngine;
@@ -28,12 +30,75 @@ pub(super) struct AggregateSpace {
 }
 
 impl AggregateSpace {
+    /// Writes a reservation at its physical position and pads to its physical EOA.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Format`] if a local byte count exceeds `usize`. Returns [`Error::Io`]
+    /// if writing the reservation or appending padding fails.
+    pub(super) fn place(
+        image: &mut dyn FileImage,
+        address: u64,
+        bytes: &[u8],
+        end: u64,
+    ) -> Result<(), Error> {
+        Self::extend(image, address)?;
+        let existing = (image.len() - address).min(bytes.len() as u64).to_usize()?;
+        if existing > 0 {
+            image.write_at(address, &bytes[..existing])?;
+        }
+        if existing < bytes.len() {
+            image.append(&bytes[existing..])?;
+        }
+        Self::extend(image, end)
+    }
+
     pub(super) fn new(eoa: u64) -> Self {
         Self {
             policy: ClassicAggregators::new(),
             eoa,
             publication_confirmed: true,
         }
+    }
+
+    /// Reserves an allocation for `class` and resolves its physical positions.
+    ///
+    /// The caller writes the reservation through [`place`](Self::place). On error, the
+    /// aggregate state is unchanged.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Format`] if aggregate planning or physical address resolution fails.
+    pub(super) fn reserve(
+        &mut self,
+        addresses: AddressContext,
+        size: NonZeroU64,
+        class: AllocationClass,
+    ) -> Result<Placement, Error> {
+        let len = size.get();
+        let mut next = *self;
+        let allocation =
+            next.policy
+                .allocate(next.eoa, size, class)
+                .map_err(|error| match error {
+                    AggregationError::OffsetOverflow { offset, length } => {
+                        FormatError::OffsetOverflow { offset, length }
+                    }
+                    AggregationError::EndOfAllocationTooSmall { .. } => {
+                        FormatError::Internal("aggregate reservation exceeds the editor EOA".into())
+                    }
+                })?;
+        next.eoa = allocation.end_of_allocation();
+        let physical_end = addresses.resolve(StoredAddress::new(next.eoa))?.get();
+        let placement = Placement::Aggregated {
+            addr: addresses
+                .resolve(StoredAddress::new(allocation.extent().start()))?
+                .get(),
+            len,
+            end: physical_end,
+        };
+        *self = next;
+        Ok(placement)
     }
 
     pub(super) fn unused(self) -> impl Iterator<Item = Extent> {
@@ -45,10 +110,20 @@ impl AggregateSpace {
     pub(super) fn eoa(self) -> u64 {
         self.eoa
     }
+    fn extend(image: &mut dyn FileImage, end: u64) -> Result<(), Error> {
+        let padding = [0; 4096];
+        while image.len() < end {
+            let length = (end - image.len()).min(padding.len() as u64).to_usize()?;
+            image.append(&padding[..length])?;
+        }
+        Ok(())
+    }
 }
 
 impl WriteEngine {
-    /// Updates the stored EOA after writes outside the aggregate windows.
+    /// Advances the stored EOA to include writes outside the aggregate windows.
+    ///
+    /// Retains aggregate reservations beyond the current image length after an interrupted write.
     ///
     /// # Errors
     ///
@@ -56,15 +131,16 @@ impl WriteEngine {
     pub(super) fn synchronize_aggregates(&mut self) -> Result<(), Error> {
         let eoa = self.end_of_allocation()?;
         if let Some(aggregation) = &mut self.aggregation {
-            aggregation.eoa = eoa.get();
+            aggregation.eoa = aggregation.eoa.max(eoa.get());
         }
         Ok(())
     }
 
     /// Reserves bytes from the aggregate for `class`, if aggregation is enabled.
     ///
-    /// Returns `None` for an empty request. The caller writes the reserved bytes through
-    /// [`place_aggregated`](Self::place_aggregated) before making another reservation.
+    /// Returns `None` for an empty request or a session without classic aggregation. The caller
+    /// writes the reserved bytes through [`AggregateSpace::place`] before making another
+    /// reservation.
     ///
     /// # Errors
     ///
@@ -74,70 +150,11 @@ impl WriteEngine {
         len: u64,
         class: AllocationClass,
     ) -> Result<Option<Placement>, Error> {
-        let (Some(mut aggregation), Some(size)) = (self.aggregation, NonZeroU64::new(len)) else {
+        let (Some(aggregation), Some(size)) = (self.aggregation.as_mut(), NonZeroU64::new(len))
+        else {
             return Ok(None);
         };
-        let allocation = aggregation
-            .policy
-            .allocate(aggregation.eoa, size, class)
-            .map_err(|error| match error {
-                AggregationError::OffsetOverflow { offset, length } => {
-                    FormatError::OffsetOverflow { offset, length }
-                }
-                AggregationError::EndOfAllocationTooSmall { .. } => {
-                    FormatError::Internal("aggregate reservation exceeds the editor EOA".into())
-                }
-            })?;
-        aggregation.eoa = allocation.end_of_allocation();
-        let physical_end = self
-            .addresses
-            .resolve(StoredAddress::new(aggregation.eoa))?
-            .get();
-        self.aggregation = Some(aggregation);
-        Ok(Some(Placement::Aggregated {
-            addr: self
-                .addresses
-                .resolve(StoredAddress::new(allocation.extent().start()))?
-                .get(),
-            len,
-            end: physical_end,
-        }))
-    }
-
-    /// Writes a reservation and pads the image to its physical end of allocation.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`Error::Format`] if `address` lies beyond the image or a local length does not
-    /// fit `usize`. Returns [`Error::Io`] if writing or appending bytes fails.
-    pub(super) fn place_aggregated(
-        &mut self,
-        address: u64,
-        bytes: &[u8],
-        end: u64,
-    ) -> Result<(), Error> {
-        if address > self.image.len() {
-            return Err(
-                FormatError::Internal("aggregate allocation starts past the image".into()).into(),
-            );
-        }
-        let existing = (self.image.len() - address)
-            .min(bytes.len() as u64)
-            .to_usize()?;
-        if existing > 0 {
-            self.image.write_at(address, &bytes[..existing])?;
-        }
-        if existing < bytes.len() {
-            self.image.append(&bytes[existing..])?;
-        }
-        let padding = [0; 4096];
-        while self.image.len() < end {
-            let length = (end - self.image.len())
-                .min(padding.len() as u64)
-                .to_usize()?;
-            self.image.append(&padding[..length])?;
-        }
-        Ok(())
+        aggregation.reserve(self.addresses, size, class).map(Some)
     }
 
     /// Releases unused aggregate tails at EOA while retaining the published root.
@@ -188,6 +205,9 @@ impl WriteEngine {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod immediate_tests;
 
 #[cfg(test)]
 mod tests {
@@ -510,12 +530,21 @@ mod tests {
             .unwrap();
         engine.commit().unwrap();
         let before = engine.image.len();
-        let policy = engine.aggregation;
+        let policy = engine.aggregation.unwrap();
+        let raw = policy.policy.unused(AllocationClass::Raw).unwrap();
         engine
             .append_inplace_i32_phased("append", &[5, 6, 7, 8], 4)
             .unwrap();
-        assert!(engine.image.len() > before);
-        assert_eq!(engine.aggregation, policy);
+        assert_eq!(engine.image.len(), before);
+        let after = engine.aggregation.unwrap();
+        assert_eq!(
+            after.policy.unused(AllocationClass::Metadata),
+            policy.policy.unused(AllocationClass::Metadata)
+        );
+        assert_eq!(
+            after.policy.unused(AllocationClass::Raw).unwrap().start(),
+            raw.start() + 16
+        );
         engine
             .create_group(&ObjectPathBuf::parse("/second"))
             .unwrap();

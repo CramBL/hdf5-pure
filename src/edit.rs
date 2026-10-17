@@ -162,8 +162,8 @@
 //! Under `H5F_FSPACE_STRATEGY_AGGR` and `H5F_FSPACE_STRATEGY_NONE`, which have no
 //! free-space managers, and in a file whose strategy the session cannot read, the
 //! session drops the regions it vacates. Under `H5F_FSPACE_STRATEGY_AGGR`, staged edits
-//! allocate from separate metadata and raw aggregates with 2048-byte refill blocks.
-//! Immediate appends bypass those aggregates. A clean close or drop releases unused
+//! and immediate appends allocate from separate metadata and raw aggregates with
+//! 2048-byte refill blocks. A clean close or drop releases unused
 //! aggregate space at EOA after publishing the shorter EOA with the same root. An uncertain
 //! publication prevents this cleanup. The other strategies use no classic aggregates.
 //! The reuse is crash-safe: it only ever overwrites space
@@ -274,6 +274,7 @@ use std::fs;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
 
+use core::num::NonZeroU64;
 use core::num::NonZeroUsize;
 
 use hdf5_pure_core::__private::FileRange;
@@ -1116,7 +1117,8 @@ pub(crate) struct WriteEngine {
     /// Its extents are stored addresses, relative to the base address, as a free-space manager
     /// records them.
     space: SessionSpace,
-    /// Classic aggregate windows for staged edits under [`FileSpaceStrategy::Aggr`].
+    /// Classic aggregate windows shared by staged edits and immediate appends under
+    /// [`FileSpaceStrategy::Aggr`].
     aggregation: Option<AggregateSpace>,
     /// Space this session has taken *out* of the on-disk free-space managers so
     /// that an immediate in-place append may spend it (issue #387).
@@ -1989,7 +1991,8 @@ pub struct SpaceAccounting {
     /// shrinkage: a region counted here may be truncated away at commit — rather
     /// than reused — if adjacent space is later freed and the coalesced run
     /// reaches end-of-file. A session reports `0` under [`FileSpaceStrategy::None`]. Under [`FileSpaceStrategy::Aggr`],
-    /// this includes unused metadata and raw aggregate reservations for staged writes. These
+    /// this includes unused metadata and raw aggregate reservations for staged edits and immediate
+    /// appends. These
     /// reservations are session state and are forgotten on reopen. Under
     /// [`FileSpaceStrategy::FsmAggr`] a commit tracks a
     /// hole shorter than the file's [`threshold`](crate::FileSpaceInfo::threshold) only
@@ -3725,6 +3728,7 @@ impl WriteEngine {
             sb_sig_off: self.sb_sig_off,
             addresses: self.addresses,
             space: &mut self.space,
+            aggregation: self.aggregation.as_mut(),
             reserve: None,
             reuse_session_space: false,
             sync_policy: self.sync_policy,
@@ -4367,6 +4371,7 @@ impl WriteEngine {
                     sb_sig_off,
                     addresses,
                     space,
+                    aggregation,
                     located,
                     sync_policy,
                     ..
@@ -4379,6 +4384,7 @@ impl WriteEngine {
                     sb_sig_off: *sb_sig_off,
                     addresses: *addresses,
                     space,
+                    aggregation: aggregation.as_mut(),
                     reserve: None,
                     reuse_session_space: false,
                     sync_policy: *sync_policy,
@@ -4413,6 +4419,7 @@ impl WriteEngine {
                 .max()
                 .unwrap_or(0);
             self.reserve_for_immediate_append(largest_blob)?;
+            self.synchronize_aggregates()?;
             {
                 let reuse = self.immediate_reuse_allowed();
                 // Two terms, not one. A **paged** session must never be handed
@@ -4434,6 +4441,7 @@ impl WriteEngine {
                     sb_sig_off,
                     addresses,
                     space,
+                    aggregation,
                     located,
                     reserved,
                     sync_policy,
@@ -4447,14 +4455,30 @@ impl WriteEngine {
                     sb_sig_off: *sb_sig_off,
                     addresses: *addresses,
                     space,
+                    aggregation: aggregation.as_mut(),
                     reserve: (reuse && from_reserve).then_some(reserved),
                     reuse_session_space: reuse && !from_reserve,
                     sync_policy: *sync_policy,
                 };
-                apply_ea_append(&mut store, &mut st.loc, &plan, max_phase)
-                    .map_err(as_inplace_error)?;
+                let confirmed = store
+                    .aggregation
+                    .as_ref()
+                    .is_none_or(|state| state.publication_confirmed);
+                if let Some(state) = store.aggregation.as_deref_mut() {
+                    state.publication_confirmed = false;
+                }
+                let result = apply_ea_append(&mut store, &mut st.loc, &plan, max_phase);
+                if result.is_ok() {
+                    if let Some(state) = store.aggregation.as_deref_mut() {
+                        state.publication_confirmed = confirmed;
+                    }
+                } else {
+                    located.remove(&oh_addr);
+                }
+                result.map_err(as_inplace_error)?;
             }
             if max_phase < 4 {
+                self.located.remove(&oh_addr);
                 // Crash-consistency hook: the caller asked to stop inside the
                 // first batch's durability sequence, so there is no next batch.
                 // Each phase's own barrier has already issued the writes up to it
@@ -8427,7 +8451,7 @@ impl WriteEngine {
             Some(_) => {}
             // A raw append trusts the caller's bytes but still refuses any datatype
             // whose flat little-endian bytes cannot be written verbatim: a
-            // big-endian numeric leaf would silently misencode, and a
+            // multi-byte big-endian numeric leaf would silently misencode, and a
             // variable-length or reference leaf embeds heap/object addresses a byte
             // append cannot reproduce. A typed append is byte-order- and
             // class-checked by the datatype-equality arm above.
@@ -9825,7 +9849,7 @@ impl WriteEngine {
         }
         match at {
             Placement::Aggregated { addr, end, .. } => {
-                self.place_aggregated(addr, bytes, end)?;
+                AggregateSpace::place(self.image.as_mut(), addr, bytes, end)?;
                 Ok(addr)
             }
             Placement::Reused { addr, .. } => {
@@ -10818,8 +10842,9 @@ impl FlatDataset {
 /// Provides the extensible-array append engine with the session's image and superblock.
 ///
 /// The engine borrows its image through [`Store`] and maintains its dataset geometry separately
-/// in [`WriteEngine::located`]. The adapter allocates both chunk payloads and index blocks in raw
-/// PAGE space, using [`SessionSpace::plan_transition`] before extending the image.
+/// in [`WriteEngine::located`]. Under [`FileSpaceStrategy::Aggr`], the adapter allocates chunk
+/// payloads from the raw aggregate and index blocks from the metadata aggregate. On PAGE files,
+/// both use raw pages, with [`SessionSpace::plan_transition`] before extending the image.
 struct EditStore<'a> {
     image: &'a mut dyn FileImage,
     superblock: &'a mut Superblock,
@@ -10830,6 +10855,8 @@ struct EditStore<'a> {
     /// The session allocation strategy. PAGE transition state recorded here reaches the manager
     /// rewrite at the next commit or close.
     space: &'a mut SessionSpace,
+    /// Classic aggregate windows shared with staged edits under [`FileSpaceStrategy::Aggr`].
+    aggregation: Option<&'a mut AggregateSpace>,
     /// Published-manager space reserved for an immediate append on a persisting session.
     reserve: Option<&'a mut FreeList>,
     /// Whether a non-persisting session may allocate directly from `space`.
@@ -10893,7 +10920,25 @@ impl Store for EditStore<'_> {
     fn widths(&self) -> FormatWidths {
         self.widths
     }
+    fn recorded_eof(&self) -> u64 {
+        self.superblock.eof_address
+    }
     fn allocate(&mut self, bytes: &[u8], class: AllocationClass) -> Result<u64, Error> {
+        if let (Some(aggregation), Some(size)) = (
+            self.aggregation.as_deref_mut(),
+            NonZeroU64::new(bytes.len() as u64),
+        ) {
+            let Placement::Aggregated { addr, end, .. } =
+                aggregation.reserve(self.addresses, size, class)?
+            else {
+                return Err(FormatError::Internal(
+                    "aggregate reservation is not aggregated".into(),
+                )
+                .into());
+            };
+            AggregateSpace::place(self.image, addr, bytes, end)?;
+            return Ok(addr);
+        }
         let extent = if let Some(reserve) = self.reserve.as_deref_mut() {
             reserve.alloc(bytes.len() as u64)
         } else if self.reuse_session_space {
@@ -10916,10 +10961,12 @@ impl Store for EditStore<'_> {
         // Advance only the recorded end-of-file and re-serialize the superblock in
         // place. Unlike `WriteEngine::commit`, this leaves the consistency flags and stored root
         // group address unchanged.
-        let eof = self.image.len();
-        self.superblock.eof_address = eof;
-        let bytes = hdf5_pure_format::__private::serialize_superblock(self.superblock)?;
-        self.write_at(self.sb_sig_off, &bytes)
+        let mut superblock = self.superblock.clone();
+        superblock.eof_address = self.image.len();
+        let bytes = hdf5_pure_format::__private::serialize_superblock(&superblock)?;
+        self.write_at(self.sb_sig_off, &bytes)?;
+        *self.superblock = superblock;
+        Ok(())
     }
     fn sync(&mut self) -> Result<(), Error> {
         barrier_data(self.image, self.sync_policy)
@@ -11552,12 +11599,13 @@ fn overwrite_datatypes_match(disk: &Datatype, staged: &Datatype) -> bool {
 /// via [`AppendBuilder::append_raw`]. True only when every scalar leaf is safe to
 /// write as flat little-endian bytes:
 ///
-/// - numeric leaves (fixed-point, floating-point, time, bit field) must be
-///   little-endian, or the caller's little-endian bytes would silently misencode
-///   into a big-endian (or VAX) field;
+/// - one-byte fixed-point leaves are byte-order agnostic, all other numeric
+///   leaves (fixed-point, floating-point, time, bit field) must be little-endian,
+///   or the caller's little-endian bytes would silently misencode into a
+///   big-endian (or VAX) field
 /// - string and opaque leaves are byte arrays with no numeric byte order, so they
-///   are order-agnostic and safe;
-/// - aggregates (enumeration, array, compound) are appendable iff every leaf is;
+///   are order-agnostic and safe
+/// - aggregates (enumeration, array, compound) are appendable if every leaf is
 /// - variable-length and reference leaves embed global-heap or object addresses
 ///   that a flat byte append cannot reproduce, so they are never raw-appendable.
 ///
@@ -11565,6 +11613,7 @@ fn overwrite_datatypes_match(disk: &Datatype, staged: &Datatype) -> bool {
 /// it already refuses every non-little-endian and non-scalar dataset.
 pub(crate) fn datatype_is_raw_appendable(dt: &Datatype) -> bool {
     match dt {
+        Datatype::FixedPoint { size: 1, .. } => true,
         Datatype::FixedPoint { byte_order, .. }
         | Datatype::FloatingPoint { byte_order, .. }
         | Datatype::Time { byte_order, .. }
@@ -17933,6 +17982,11 @@ mod tests {
         // Little-endian scalar: appendable. Big-endian scalar: not.
         assert!(datatype_is_raw_appendable(&le_f64));
         assert!(!datatype_is_raw_appendable(&be_f64));
+
+        // A one-byte fixed-point value has no byte-order distinction in its stored
+        // representation. libhdf5 still labels native u8 as BE on a big-endian
+        // host, so that datatype must remain raw-appendable.
+        assert!(datatype_is_raw_appendable(&big_endian_u8_type()));
 
         // The confirmed bug: a compound / array whose leaf is big-endian must be
         // refused (it was wrongly accepted before recursion was added).
