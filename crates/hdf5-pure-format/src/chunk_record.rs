@@ -11,7 +11,9 @@
 
 use alloc::format;
 use alloc::vec::Vec;
+use core::num::NonZeroU8;
 
+use crate::address::DecodedStoredAddress;
 use crate::address::StoredAddress;
 #[cfg(test)]
 use crate::address::StoredAddressExt;
@@ -266,6 +268,168 @@ pub(crate) fn write_undefined_element(
         buf.extend_from_slice(&0u32.to_le_bytes());
     }
 }
+
+/// The fields and the width of an element of a Fixed Array or an Extensible Array, as a reader
+/// parses them from the array's header.
+///
+/// [`ChunkElementEncoding`] is the encoding a writer chooses.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct ElementEncoding {
+    offsets: OffsetWidth,
+    client: ArrayClient,
+    /// The width of an element in bytes: the address width for an unfiltered chunk, and the
+    /// header's entry size for a filtered one.
+    stride: NonZeroU8,
+}
+
+impl ElementEncoding {
+    /// Creates the encoding of an array whose header stores `client_id` and `entry_size`.
+    ///
+    /// An unfiltered element is the chunk address alone, whatever the entry size.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`InvalidElementEncoding::Client`] if `client_id` is 2 or more, and
+    /// [`InvalidElementEncoding::EntrySize`] if a filtered entry size is shorter than an address and
+    /// a filter mask, or leaves a chunk size wider than 8 bytes.
+    pub(crate) fn new(
+        offsets: OffsetWidth,
+        client_id: u8,
+        entry_size: u8,
+    ) -> Result<Self, InvalidElementEncoding> {
+        Ok(match client_id {
+            CLIENT_CHUNKS => Self {
+                offsets,
+                client: ArrayClient::Chunks,
+                stride: address_stride(offsets),
+            },
+            CLIENT_FILTERED_CHUNKS => Self {
+                offsets,
+                client: ArrayClient::FilteredChunks {
+                    chunk_size_len: entry_size
+                        .checked_sub(offsets.get() + FILTER_MASK_LEN)
+                        .filter(|&len| len <= MAX_CHUNK_SIZE_LEN)
+                        .ok_or(InvalidElementEncoding::EntrySize)?,
+                },
+                stride: NonZeroU8::new(entry_size).ok_or(InvalidElementEncoding::EntrySize)?,
+            },
+            id => return Err(InvalidElementEncoding::Client(id)),
+        })
+    }
+
+    pub(crate) const fn offsets(self) -> OffsetWidth {
+        self.offsets
+    }
+
+    pub(crate) const fn client(self) -> ArrayClient {
+        self.client
+    }
+
+    pub(crate) const fn stride(self) -> NonZeroU8 {
+        self.stride
+    }
+
+    /// Returns the slot and the record of each element in `bytes` that stores a chunk address,
+    /// with the first element in `first_slot`.
+    ///
+    /// A record of an unfiltered chunk has `chunk_byte_size` as its stored size and a filter mask
+    /// of 0.
+    pub(crate) fn records<'a>(
+        self,
+        bytes: &'a [u8],
+        first_slot: u64,
+        chunk_byte_size: u64,
+    ) -> impl Iterator<Item = Result<(u64, ChunkRecord), FormatError>> + 'a {
+        bytes
+            .chunks_exact(usize::from(self.stride.get()))
+            .zip(first_slot..)
+            .filter_map(move |(element, slot)| {
+                self.record(element, chunk_byte_size)
+                    .map(|record| record.map(|record| (slot, record)))
+                    .transpose()
+            })
+    }
+
+    /// Parses `element`, or returns `None` if it stores the undefined address.
+    fn record(
+        self,
+        element: &[u8],
+        chunk_byte_size: u64,
+    ) -> Result<Option<ChunkRecord>, FormatError> {
+        let mut fields = bytes::Fields::new(element, 0);
+        let DecodedStoredAddress::Defined(address) = fields.decoded_address(self.offsets)? else {
+            return Ok(None);
+        };
+        Ok(Some(match self.client {
+            ArrayClient::Chunks => ChunkRecord {
+                address,
+                stored_size: chunk_byte_size,
+                filter_mask: 0,
+            },
+            ArrayClient::FilteredChunks { chunk_size_len } => ChunkRecord {
+                address,
+                stored_size: fields.uint(usize::from(chunk_size_len))?,
+                filter_mask: fields.u32()?,
+            },
+        }))
+    }
+}
+
+/// The client of a Fixed Array or an Extensible Array, the "Client ID" field of its header and of
+/// its blocks.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ArrayClient {
+    /// Client 0, unfiltered chunks.
+    Chunks,
+    /// Client 1, filtered chunks.
+    FilteredChunks {
+        /// The width in bytes of an element's "Chunk Size" field.
+        chunk_size_len: u8,
+    },
+}
+
+impl ArrayClient {
+    pub(crate) const fn id(self) -> u8 {
+        match self {
+            Self::Chunks => CLIENT_CHUNKS,
+            Self::FilteredChunks { .. } => CLIENT_FILTERED_CHUNKS,
+        }
+    }
+}
+
+/// The field of an array header that [`ElementEncoding::new`] rejects.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum InvalidElementEncoding {
+    /// A reserved client ID, 2 or more.
+    Client(u8),
+    /// A filtered entry size shorter than an address and a filter mask, or with a chunk size wider
+    /// than 8 bytes.
+    EntrySize,
+}
+
+// Page 0 is the most significant bit of the first byte, as `H5VM_bit_get` reads it
+// (`H5VMprivate.h`, HDF5 2.2.0).
+pub(crate) fn page_initialized(bitmap: &[u8], page: u64) -> bool {
+    usize::try_from(page / 8)
+        .ok()
+        .and_then(|byte| bitmap.get(byte))
+        .is_some_and(|&byte| byte & (0x80 >> (page % 8)) != 0)
+}
+
+const fn address_stride(offsets: OffsetWidth) -> NonZeroU8 {
+    match offsets {
+        OffsetWidth::Two => const { NonZeroU8::new(OffsetWidth::Two.get()).unwrap() },
+        OffsetWidth::Four => const { NonZeroU8::new(OffsetWidth::Four.get()).unwrap() },
+        OffsetWidth::Eight => const { NonZeroU8::new(OffsetWidth::Eight.get()).unwrap() },
+    }
+}
+
+// The client IDs and the element fields are defined in "The Fixed Array Index" and "The Extensible
+// Array Index" of the format specification, version 4.0.
+const CLIENT_CHUNKS: u8 = 0;
+const CLIENT_FILTERED_CHUNKS: u8 = 1;
+const FILTER_MASK_LEN: u8 = 4;
+const MAX_CHUNK_SIZE_LEN: u8 = 8;
 
 /// Chunk sizes before filtering that select four different chunk size field widths, for the
 /// length tests of both arrays.
