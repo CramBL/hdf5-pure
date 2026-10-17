@@ -438,6 +438,33 @@ const MAX_CHUNK_SIZE_LEN: u8 = 8;
 #[cfg(test)]
 pub(crate) const CHUNK_BYTES: [u64; 4] = [8, 300, 100_000, 1 << 32];
 
+/// Returns `n` records 8 bytes apart from address 0x100, of `chunk_bytes` each or, where
+/// `has_filters` is set, of stored sizes and filter masks that vary.
+#[cfg(test)]
+pub(crate) fn chunks(chunk_bytes: u64, n: u64, has_filters: bool) -> Vec<ChunkRecord> {
+    (0..n)
+        .map(|i| ChunkRecord {
+            address: StoredAddress::new(0x100 + i * 8),
+            stored_size: if has_filters {
+                chunk_bytes - i % 7
+            } else {
+                chunk_bytes
+            },
+            filter_mask: if has_filters {
+                u32::from(i % 3 == 0)
+            } else {
+                0
+            },
+        })
+        .collect()
+}
+
+/// Pairs each record with its index in `chunks` as its slot.
+#[cfg(test)]
+pub(crate) fn slotted(chunks: Vec<ChunkRecord>) -> Vec<(u64, ChunkRecord)> {
+    (0..).zip(chunks).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use rstest::rstest;
