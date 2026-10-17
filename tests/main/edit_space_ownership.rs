@@ -13,8 +13,11 @@ use hdf5_pure_format::__private as format;
 use hdf5_pure_format::__private::AttributeInfoMessage;
 use hdf5_pure_format::__private::OffsetWidth;
 use rstest::rstest;
+use test_util::attribute::Attribute;
 use test_util::data_layout;
+use test_util::dataspace;
 use test_util::fractal_heap::Header as HeapHeader;
+use test_util::global_heap;
 use test_util::image::Image;
 use test_util::link_message::HardLink;
 use test_util::object_header::Message;
@@ -26,6 +29,8 @@ use test_util::superblock::v2::Superblock;
 use test_util::temp;
 use test_util::widths::Widths;
 use test_util_hdf5::file_space;
+
+use crate::global_heap_fixture;
 
 #[rstest]
 #[case::plain(0, &[])]
@@ -53,7 +58,10 @@ fn a_contiguous_i32_dataset_has_complete_ownership(
 #[case::dataset(true, 0)]
 #[case::compact_attribute(false, 0)]
 #[case::dense_attribute(false, 12)]
-fn variable_length_storage_is_incomplete(#[case] dataset: bool, #[case] attributes: usize) {
+fn variable_length_collections_are_live_raw_space(
+    #[case] dataset: bool,
+    #[case] attributes: usize,
+) {
     let path = temp::temp_path("variable_length_ownership.h5");
     let mut builder = FileBuilder::new();
     if dataset {
@@ -70,21 +78,70 @@ fn variable_length_storage_is_incomplete(#[case] dataset: bool, #[case] attribut
         }
     }
     builder.write(&path).unwrap();
+    let mut expected: Vec<(u64, u64)> =
+        global_heap::collection_ranges(&std::fs::read(&path).unwrap(), Widths::EIGHT)
+            .into_iter()
+            .map(|collection| (collection.start, collection.end - collection.start))
+            .collect();
     let file = File::open_rw(&path).unwrap();
-    let ownership = file.__space_ownership().unwrap();
-    assert!(!ownership.analysis_complete);
-    assert!(!ownership.unclassified_space.is_empty());
+    if dataset {
+        let data = file_space::contiguous_extent(&file, "d");
+        expected.push((data.start, data.end - data.start));
+    }
+    expected.sort_unstable();
+
+    file_space::assert_exact_space_ownership(&file);
+    let mut live_raw_space = file.__space_ownership().unwrap().live_raw_space;
+    live_raw_space.sort_unstable();
+    assert_eq!(live_raw_space, expected);
     file.close().unwrap();
 }
 
 #[test]
-fn unknown_reachable_metadata_is_incomplete_even_without_unclassified_bytes() {
-    let path = temp::temp_path("unknown_ownership.h5");
-    std::fs::write(
-        &path,
-        ownership_chain(2, &[Message::new(MessageType(0x7f), &[])]),
+fn a_malformed_live_collection_is_an_error() {
+    let path = temp::temp_path("malformed_collection_ownership.h5");
+    let mut builder = FileBuilder::new();
+    builder
+        .create_dataset("d")
+        .with_vlen_strings(&["alpha", "beta"]);
+    builder.write(&path).unwrap();
+    let mut bytes = std::fs::read(&path).unwrap();
+    let [collection] = global_heap::collection_starts(&bytes)[..] else {
+        panic!("expected one collection");
+    };
+    bytes[collection as usize + global_heap::VERSION_OFFSET] = 2;
+    std::fs::write(&path, bytes).unwrap();
+    let file = File::open_rw(&path).unwrap();
+
+    let error = file.__space_ownership().unwrap_err();
+    assert!(
+        matches!(
+            error,
+            Error::Format(FormatError::InvalidGlobalHeapVersion(2))
+        ),
+        "{error:?}"
+    );
+    file.close().unwrap();
+}
+
+#[rstest]
+#[case::unknown_message(vec![Message::new(MessageType(0x7f), &[])])]
+#[case::object_reference_dataset(object_reference_dataset())]
+#[case::object_reference_attribute(vec![Message::new(
+    MessageType::ATTRIBUTE,
+    &Attribute::new(
+        "a",
+        &format::serialize_datatype(&global_heap_fixture::object_reference()),
+        &dataspace::scalar(),
+        &vec![0; global_heap_fixture::object_reference().type_size() as usize],
     )
-    .unwrap();
+    .build(),
+)])]
+fn unaccounted_reachable_metadata_is_incomplete_even_without_unclassified_bytes(
+    #[case] leaf: Vec<Message>,
+) {
+    let path = temp::temp_path("unknown_ownership.h5");
+    std::fs::write(&path, ownership_chain(2, &leaf)).unwrap();
     let file = File::open_rw(&path).unwrap();
     let ownership = file.__space_ownership().unwrap();
     assert!(!ownership.analysis_complete);
@@ -135,7 +192,15 @@ fn reachable_metadata_failures_are_returned(
     let path = temp::temp_path("malformed_ownership.h5");
     std::fs::write(
         &path,
-        ownership_chain(2, &[Message::new(message, &body), Message::nil(128)]),
+        ownership_chain(
+            2,
+            &[
+                datatype_message(),
+                dataspace_message(),
+                Message::new(message, &body),
+                Message::nil(128),
+            ],
+        ),
     )
     .unwrap();
     let file = File::open_rw(&path).unwrap();
@@ -154,10 +219,14 @@ fn invalid_owned_extents_report_their_geometry(#[case] address: u64, #[case] len
     let path = temp::temp_path("owned_extent_geometry.h5");
     let bytes = ownership_chain(
         2,
-        &[Message::new(
-            MessageType::DATA_LAYOUT,
-            &data_layout::contiguous(address, length),
-        )],
+        &[
+            datatype_message(),
+            dataspace_message(),
+            Message::new(
+                MessageType::DATA_LAYOUT,
+                &data_layout::contiguous(address, length),
+            ),
+        ],
     );
     let logical_size = bytes.len() as u64;
     std::fs::write(&path, bytes).unwrap();
@@ -308,6 +377,29 @@ fn ownership_chain(depth: usize, leaf: &[Message]) -> Vec<u8> {
             .build(),
     );
     image.build()
+}
+
+fn datatype_message() -> Message {
+    Message::new(
+        MessageType::DATATYPE,
+        &format::serialize_datatype(&hdf5_pure::make_u8_type()),
+    )
+}
+
+fn dataspace_message() -> Message {
+    Message::new(MessageType::DATASPACE, &dataspace::scalar())
+}
+
+fn object_reference_dataset() -> Vec<Message> {
+    let mut messages = global_heap_fixture::dataset_messages(
+        &global_heap_fixture::object_reference(),
+        &dataspace::scalar(),
+    );
+    messages.push(Message::new(
+        MessageType::DATA_LAYOUT,
+        &data_layout::contiguous(global_heap_fixture::UNDEFINED_ADDRESS, 0),
+    ));
+    messages
 }
 
 fn attribute_heap_at_superblock() -> Vec<u8> {

@@ -12,6 +12,7 @@ use hdf5_pure_core::__private::FileRange;
 use hdf5_pure_core::__private::FileRegion;
 use hdf5_pure_core::__private::PhysicalAddress;
 use hdf5_pure_format::__private::GlobalHeapCollectionLocator;
+use hdf5_pure_format::__private::GlobalHeapObject;
 use hdf5_pure_format::__private::GlobalHeapPayloadRef;
 
 use crate::convert::Narrow;
@@ -150,34 +151,57 @@ impl Directory {
         lengths: LengthWidth,
         address: PhysicalAddress,
     ) -> Result<(), FormatError> {
-        let locator = GlobalHeapCollectionLocator::new(address, lengths);
-        let header_range = locator.parse_range()?;
-        let header = read(source, header_range)?;
-        let collection = locator.parse(FileRegion::new(header_range, &header)?)?;
-        let end = collection.range().end().get();
-        if end > source.len() {
-            return Err(FormatError::UnexpectedEof {
-                expected: end.to_usize().unwrap_or(usize::MAX),
-                available: source.len().to_usize().unwrap_or(usize::MAX),
-            });
-        }
-
-        let mut window = HeaderWindow::new(collection.range());
-        let mut walk = collection.walk();
-        while let Some(range) = walk.parse_range() {
-            let Some(object) = walk.parse(window.region(source, range)?)? else {
-                continue;
-            };
+        walk_collection(source, lengths, address, |object| {
             if let Ok(at) = self
                 .objects
                 .binary_search_by_key(&object.index(), |&(index, _)| index)
             {
                 self.objects[at].1 = Some(object.payload());
             }
-        }
+        })?;
         self.walked = true;
         Ok(())
     }
+}
+
+/// Walks the global heap collection at `address`, passes each object other than the free space
+/// to `visit`, and returns the range of the collection.
+///
+/// The walk parses every object header of the collection, in the order the collection stores
+/// them.
+///
+/// # Errors
+///
+/// Returns [`FormatError::UnexpectedEof`] if the collection runs past the end of `source`, the
+/// errors [`GlobalHeapCollectionLocator::parse`] and
+/// [`GlobalHeapWalk::parse`](hdf5_pure_format::__private::GlobalHeapWalk::parse) return, and the
+/// errors [`read`] returns.
+pub(crate) fn walk_collection(
+    source: &(impl Source + ?Sized),
+    lengths: LengthWidth,
+    address: PhysicalAddress,
+    mut visit: impl FnMut(GlobalHeapObject),
+) -> Result<FileRange, FormatError> {
+    let locator = GlobalHeapCollectionLocator::new(address, lengths);
+    let header_range = locator.parse_range()?;
+    let header = read(source, header_range)?;
+    let collection = locator.parse(FileRegion::new(header_range, &header)?)?;
+    let end = collection.range().end().get();
+    if end > source.len() {
+        return Err(FormatError::UnexpectedEof {
+            expected: end.to_usize().unwrap_or(usize::MAX),
+            available: source.len().to_usize().unwrap_or(usize::MAX),
+        });
+    }
+
+    let mut window = HeaderWindow::new(collection.range());
+    let mut walk = collection.walk();
+    while let Some(range) = walk.parse_range() {
+        if let Some(object) = walk.parse(window.region(source, range)?)? {
+            visit(object);
+        }
+    }
+    Ok(collection.range())
 }
 
 /// The bytes of one collection that a walk reads its object headers from.

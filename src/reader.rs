@@ -3342,8 +3342,9 @@ impl File {
     /// # Errors
     ///
     /// Returns [`Error::ReadOnly`] if the file was opened without the editor. Returns
-    /// [`Error::Format`] if supported reachable metadata cannot be parsed. Returns
-    /// [`Error::MissingMessage`] if a chunked dataset lacks its dataspace. Returns
+    /// [`Error::Format`] if supported reachable metadata, a variable-length element, or a global
+    /// heap collection that a reachable object refers to cannot be parsed. Returns
+    /// [`Error::MissingMessage`] if a dataset lacks its datatype or dataspace message. Returns
     /// [`Error::InvalidFractalHeapStorage`] if a heap has inconsistent allocation geometry.
     /// Returns [`Error::InvalidSpaceOwnershipExtent`] if identified extents overlap or exceed
     /// the logical end of file.

@@ -2043,7 +2043,8 @@ pub struct SpaceOwnership {
     pub logical_size: u64,
     /// The userblock, from byte 0 to the superblock, or empty for a file without one.
     pub userblock_space: Vec<(u64, u64)>,
-    /// The dataset payload allocations stored outside object headers in this file.
+    /// The dataset payload allocations stored outside object headers in this file, and the global
+    /// heap collections that reachable objects refer to.
     pub live_raw_space: Vec<(u64, u64)>,
     /// The identified object headers, indexes, heaps, and file metadata.
     pub live_metadata_space: Vec<(u64, u64)>,
@@ -2055,8 +2056,9 @@ pub struct SpaceOwnership {
     pub unclassified_space: Vec<(u64, u64)>,
     /// Whether every reachable storage structure is supported and the traversal finished.
     ///
-    /// Shared messages, variable-length data, unsupported headers or heaps, and traversal limits
-    /// make the analysis incomplete, even when every byte has been classified.
+    /// Shared messages, unsupported headers or heaps, data the editor cannot read or that holds a
+    /// file address it cannot locate, and traversal limits make the analysis incomplete, even when
+    /// every byte has been classified.
     pub analysis_complete: bool,
     /// The bytes between the logical end of file and the physical file length.
     pub trailing_slack_space: Vec<(u64, u64)>,
