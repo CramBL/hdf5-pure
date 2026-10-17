@@ -911,6 +911,9 @@ impl Drop for FileInner {
     ///   true crash (`SIGKILL`, power loss) skips `drop` entirely; the appended
     ///   data is still durable, under the default
     ///   [`SyncPolicy::Always`](crate::SyncPolicy).
+    /// - A file using [`FileSpaceStrategy::Aggr`] releases unused aggregate tails after
+    ///   publishing the shorter EOA with the current root. An uncertain publication prevents
+    ///   this cleanup.
     ///
     /// Staged edits are *not* committed here: dropping a handle discards them,
     /// which is what `close` exists to distinguish.
@@ -3408,9 +3411,10 @@ impl File {
     ///
     /// After `close`, a write through any surviving [`Dataset`]/[`Group`] handle
     /// or [`File`] clone returns [`Error::FileClosed`], and
-    /// reads still work. `close` commits, so the one handle a commit ends ends
-    /// here too: one reached by [`Dataset::dereference`] reports
-    /// [`Error::StaleHandle`] afterwards, where a handle opened by path
+    /// reads still work. Unused AGGR aggregate tails are released after publishing the shorter
+    /// EOA with the current root, provided publication completed successfully.
+    /// A handle reached by [`Dataset::dereference`] reports
+    /// [`Error::StaleHandle`] after the commit, while a handle opened by path
     /// re-resolves and keeps reading.
     pub fn close(self) -> Result<(), Error> {
         if matches!(self.inner.backend, Backend::Edit(_)) {
@@ -3421,14 +3425,9 @@ impl File {
             if !swmr {
                 self.commit()?;
             }
-            // Free-space managers and status flags, both rewritten where they
-            // stand. No object header moves, so a handle that could read through
-            // this file before `close` still can — which is what `close`'s own
-            // documentation promises.
+            // Finalization preserves object addresses while updating free-space managers,
+            // aggregate tails, and status flags. Existing handles remain readable.
             self.with_mirror_session(Change::InPlace, |session| {
-                // Immediate appends grow the file past any persisted free-space
-                // managers without running a commit tail, so re-home them here. A
-                // no-op unless this session left them stale.
                 if !swmr {
                     session.finalize_persist()?;
                 }

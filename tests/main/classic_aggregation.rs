@@ -2,7 +2,10 @@ use std::collections::BTreeSet;
 use std::fmt::Write as _;
 
 use hdf5_pure::File;
+use hdf5_pure::FileAccessProperties;
+use hdf5_pure::FileBuilder;
 use hdf5_pure::FileSpaceStrategy;
+use hdf5_pure::MemoryStrategy;
 use hdf5_pure::SpaceOwnership;
 use rstest::rstest;
 use tempfile::tempdir;
@@ -149,6 +152,83 @@ fn hdf5_pure_places_a_workload_under_page_as_recorded(
     }
 
     insta::assert_snapshot!(format!("page_{}", workload.name), report);
+}
+
+#[rstest]
+#[case::mirror(MemoryStrategy::Mirrored, 0)]
+#[case::bounded(MemoryStrategy::Bounded, 0)]
+#[case::userblock(MemoryStrategy::Mirrored, 512)]
+fn staged_aggr_allocations_reuse_session_windows(
+    #[case] backing: MemoryStrategy,
+    #[case] userblock: u64,
+    #[values(false, true)] reopen: bool,
+) {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("session.h5");
+    let mut builder = FileBuilder::new();
+    builder.with_file_space_strategy(FileSpaceStrategy::Aggr, false, 1);
+    builder.with_userblock(userblock);
+    builder.write(&path).unwrap();
+    let properties = FileAccessProperties::new().with_memory_strategy(backing);
+    let mut file = File::open_rw_with_options(&path, properties).unwrap();
+    let original_end = file.__space_ownership().unwrap().logical_size;
+    file.root()
+        .create_dataset("first", |builder| {
+            builder.with_i32_data(&[23; 16]);
+        })
+        .unwrap();
+    file.commit().unwrap();
+    let first = file_space::contiguous_extent(&file, "first");
+    let ownership = file.__space_ownership().unwrap();
+    assert!(ownership.analysis_complete);
+    assert_eq!(ownership.physical_size, ownership.logical_size);
+    assert_eq!(ownership.free_space_manager_space, []);
+    assert_eq!(ownership.trailing_slack_space, []);
+    assert!(
+        ownership
+            .unclassified_space
+            .iter()
+            .all(|&(start, length)| start + length <= original_end)
+    );
+    assert!(!ownership.reusable_free_space.is_empty());
+    assert_eq!(
+        file.space_accounting().unwrap().reusable_free_space,
+        ownership.reusable_free_space
+    );
+    if reopen {
+        file.close().unwrap();
+        file = File::open_rw_with_options(&path, properties).unwrap();
+        assert_eq!(file.space_accounting().unwrap().reusable_free_space, []);
+    }
+    let before_second = file.__space_ownership().unwrap().logical_size;
+    file.root()
+        .create_dataset("second", |builder| {
+            builder.with_i32_data(&[29; 16]);
+        })
+        .unwrap();
+    file.commit().unwrap();
+    let second = file_space::contiguous_extent(&file, "second");
+    if reopen {
+        assert!(second.start >= before_second);
+    } else {
+        assert_eq!(second.start, first.end);
+        assert_eq!(
+            file.__space_ownership().unwrap().logical_size,
+            before_second
+        );
+    }
+    file.close().unwrap();
+    let file = File::open(&path).unwrap();
+    assert_eq!(file.dataset("first").unwrap().read_i32().unwrap(), [23; 16]);
+    assert_eq!(
+        file.dataset("second").unwrap().read_i32().unwrap(),
+        [29; 16]
+    );
+    assert_eq!(file.persisted_free_space().unwrap(), []);
+    assert_eq!(
+        file.superblock().eof_address,
+        std::fs::metadata(&path).unwrap().len()
+    );
 }
 
 /// Returns the extents that hold metadata, raw data, or a free-space manager.
