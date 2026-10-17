@@ -74,7 +74,7 @@ fn matlab_stamps_every_refs_object_with_its_own_path() {
     }
     assert_eq!(
         exceptions.len(),
-        8,
+        9,
         "expected one canonical empty per readable fixture, got {exceptions:?}"
     );
 }

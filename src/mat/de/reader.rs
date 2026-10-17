@@ -420,6 +420,16 @@ fn read_dataset(
         return decode_opaque(ds, &attrs, decode, mcos, depth);
     }
 
+    // If a struct-array field was not set, MATLAB points that field at a shared
+    // placeholder whose `MATLAB_class` names no storage class. Its value is a
+    // 0x0 double (`[]`). The empty flag is required so that a non-empty dataset
+    // of an unknown class stays an error.
+    if is_empty_attr(&attrs)
+        && attrs.get("MATLAB_class").and_then(AttrValue::as_str) == Some("canonical empty")
+    {
+        return Ok(empty_value_for_class(MatClass::Double));
+    }
+
     let class = matlab_class_from_attrs(&attrs)?;
     let shape = ds.shape().map_err(MatError::Hdf5)?;
     let dtype = ds.dtype().map_err(MatError::Hdf5)?;
