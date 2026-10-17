@@ -316,6 +316,35 @@ pub enum FormatError {
     },
     /// Invalid filter pipeline version.
     InvalidFilterPipelineVersion(u8),
+    /// A Fixed Array data block's client ID differs from its header's.
+    InvalidFixedArrayBlockClient {
+        /// The client ID the header stores.
+        expected: u8,
+        /// The client ID the data block stores.
+        actual: u8,
+    },
+    /// A Fixed Array data block's header address differs from the address of the header that
+    /// points at it.
+    InvalidFixedArrayBlockOwner {
+        /// The address of the header.
+        expected: u64,
+        /// The header address the data block stores, in the coordinates of `expected`.
+        actual: u64,
+    },
+    /// A reserved client ID in a Fixed Array header, 2 or more.
+    InvalidFixedArrayClient(u8),
+    /// A Fixed Array header's page bits, entry size, or entry count is out of range.
+    ///
+    /// The parser returns it for page bits of 64 or more, for a filtered entry size shorter than
+    /// an address and a filter mask or with a chunk size wider than 8 bytes, and for an entry
+    /// count that makes the data block longer than `u64::MAX` bytes.
+    InvalidFixedArrayGeometry,
+    /// A Fixed Array header that does not start with `FAHD`, or a data block that does not start
+    /// with `FADB`.
+    InvalidFixedArraySignature,
+    /// A Fixed Array header or data block version other than 0, the only version the format
+    /// defines.
+    InvalidFixedArrayVersion(u8),
     /// A fractal-heap block's stored offset differs from its position in the doubling table.
     InvalidFractalHeapBlockOffset {
         /// The block's expected offset in the heap's managed address space, in bytes.
@@ -998,6 +1027,31 @@ impl fmt::Display for FormatError {
             }
             Self::InvalidBTreeV2Version(v) => {
                 write!(f, "invalid B-tree v2 version: {v}")
+            }
+            Self::InvalidFixedArrayBlockClient { expected, actual } => {
+                write!(
+                    f,
+                    "invalid fixed array data block client ID: expected {expected}, got {actual}"
+                )
+            }
+            Self::InvalidFixedArrayBlockOwner { expected, actual } => {
+                write!(
+                    f,
+                    "invalid fixed array data block header address: expected {expected}, got \
+                     {actual}"
+                )
+            }
+            Self::InvalidFixedArrayClient(id) => {
+                write!(f, "invalid fixed array client ID: {id}")
+            }
+            Self::InvalidFixedArrayGeometry => {
+                write!(f, "invalid fixed array geometry")
+            }
+            Self::InvalidFixedArraySignature => {
+                write!(f, "invalid fixed array signature")
+            }
+            Self::InvalidFixedArrayVersion(v) => {
+                write!(f, "invalid fixed array version: {v}")
             }
             Self::InvalidFractalHeapBlockOffset { expected, actual } => {
                 write!(
