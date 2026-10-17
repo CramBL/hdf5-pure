@@ -38,9 +38,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - **Breaking:** `FileSpaceInfo::page_size` changes type from `u64` to `FileSpacePageSize`, which holds a page size from 512 bytes to 1 GiB ([#702](https://github.com/CramBL/hdf5-pure/pull/702)).
 - `File::open_rw` validates complete checksummed fractal-heap direct blocks before editing or proving storage ownership. Read-only object lookups validate block prefixes and object bounds without reading the complete block ([#750](https://github.com/CramBL/hdf5-pure/pull/750)).
 - `FormatError::UnexpectedEof` reports a superblock that the file ends inside with positions counted from the start of the file. Opening a file that ends within 15 bytes of the start of its signature returns it whatever the version byte ([#780](https://github.com/CramBL/hdf5-pure/pull/780)).
+- `FormatError` reports a corrupt Fixed Array chunk index with variants of its own. An Extensible Array chunk index with an invalid signature or version reports a generic chunked-read error ([#782](https://github.com/CramBL/hdf5-pure/pull/782)).
 
 ### Fixed
 
+- Fixed `Dataset::chunks` and related reads accepting a Fixed Array chunk index whose header has a reserved client ID, or whose data block has a version other than 0 or a client ID or header address that differs from the header's ([#782](https://github.com/CramBL/hdf5-pure/pull/782)).
+- Fixed `Dataset::chunks` and related reads failing on a Fixed Array chunk index whose header stores the undefined data block address. Such an index reads as empty ([#782](https://github.com/CramBL/hdf5-pure/pull/782)).
 - Fixed `Dataset::write_staged` rejecting compatible one-byte fixed-point datatypes whose byte-order fields differ, including nested variable-length base types. All other datatype fields remain checked ([#763](https://github.com/CramBL/hdf5-pure/pull/763)).
 - Fixed `Dataset::read_string` and related reads of variable-length data failing on a file that stores 2- or 4-byte lengths. Reads reject a global heap collection that is smaller than 4096 bytes or malformed after the object they read ([#760](https://github.com/CramBL/hdf5-pure/pull/760)).
 - Fixed global heap collections sharing metadata pages in files created through `FileBuilder::with_file_space_strategy`. Paged edits also place replacement collections in raw pages ([#763](https://github.com/CramBL/hdf5-pure/pull/763)).

@@ -16,7 +16,6 @@ use hdf5_pure_format::__private::BTreeV2ChunkRecordContext;
 use hdf5_pure_format::__private::BTreeV2Header;
 use hdf5_pure_format::__private::ChunkRecord;
 use hdf5_pure_format::__private::ExtensibleArrayHeader;
-use hdf5_pure_format::__private::FixedArrayHeader;
 use hdf5_pure_format::__private::LayoutVersion;
 #[cfg(feature = "std")]
 use hdf5_pure_space::__private::Extent;
@@ -35,6 +34,7 @@ use crate::error::FormatError;
 use crate::fill_value::FillPattern;
 use crate::filter_pipeline::FilterPipeline;
 use crate::filters::{ChunkContext, FilterScratch, decompress_chunk_with};
+use crate::fixed_array;
 use crate::read_spec::{RawReadSpec, RawReadStorage};
 use crate::source::Source;
 use crate::source::SourceMetadata;
@@ -1267,14 +1267,12 @@ pub(crate) fn collect_chunks_for_layout_from_source<S: Source + ?Sized>(
             elem_size,
         )?),
         ChunkIndexLayout::FixedArray { .. } => {
-            let source = SourceMetadata(source);
-            let header = FixedArrayHeader::parse_from_source_with_widths(&source, addr, widths)?;
             let grid = index_grid(dataspace, &spatial_dims(), GridOrder::RowMajor)?;
             let mut chunks = Vec::new();
-            hdf5_pure_format::__private::read_fixed_array_chunks_from_source_with_offset_width(
-                &source,
-                &header,
-                widths.offsets,
+            fixed_array::read_chunks(
+                source,
+                widths,
+                addr,
                 grid.chunk_byte_size(elem_size)?,
                 |slot, record| {
                     chunks.extend(ChunkInfo::in_extent(&grid, slot, record)?);
@@ -1699,13 +1697,7 @@ fn collect_chunk_index_spans<S: Source + ?Sized>(
         }
         // Single chunk and implicit indexes have no separate index structure.
         ChunkIndexLayout::SingleChunk { .. } | ChunkIndexLayout::Implicit { .. } => Ok(Vec::new()),
-        ChunkIndexLayout::FixedArray { .. } => {
-            hdf5_pure_format::__private::fixed_array_index_spans_with_widths(
-                &SourceMetadata(source),
-                index_addr,
-                widths,
-            )
-        }
+        ChunkIndexLayout::FixedArray { .. } => fixed_array::index_spans(source, widths, index_addr),
         ChunkIndexLayout::ExtensibleArray { .. } => {
             hdf5_pure_format::__private::extensible_array_index_spans_with_widths(
                 &SourceMetadata(source),
@@ -1881,14 +1873,12 @@ pub fn read_chunked_data_cached(
                 elem_width.get().to_u64(),
             )?,
             ChunkIndexLayout::FixedArray { .. } => {
-                let header =
-                    FixedArrayHeader::parse_with_widths(file_data, addr.get().to_usize()?, widths)?;
                 let grid = index_grid(dataspace, &spatial_dims(), GridOrder::RowMajor)?;
                 let mut chunks = Vec::new();
-                hdf5_pure_format::__private::read_fixed_array_chunks_with_offset_width(
+                fixed_array::read_chunks(
                     file_data,
-                    &header,
-                    widths.offsets,
+                    widths,
+                    addr,
                     grid.chunk_byte_size(u64::from(elem_width.get()))?,
                     |slot, record| {
                         chunks.extend(ChunkInfo::in_extent(&grid, slot, record)?);
