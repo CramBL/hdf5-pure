@@ -742,24 +742,6 @@ mod tests {
 
     const ARRAY_AT: u64 = 0x80;
 
-    fn chunks(chunk_bytes: u64, n: u64, has_filters: bool) -> Vec<ChunkRecord> {
-        (0..n)
-            .map(|i| ChunkRecord {
-                address: StoredAddress::new(0x100 + i * 8),
-                stored_size: if has_filters {
-                    chunk_bytes - i % 7
-                } else {
-                    chunk_bytes
-                },
-                filter_mask: if has_filters {
-                    u32::from(i % 3 == 0)
-                } else {
-                    0
-                },
-            })
-            .collect()
-    }
-
     /// The Fixed Array the writer builds at `ARRAY_AT`, in an image whose first byte is at
     /// physical address `base`.
     struct Fixture {
@@ -781,7 +763,7 @@ mod tests {
             has_filters: bool,
         ) -> Self {
             let array = build_fixed_array_at(
-                &IndexSlots::dense(&chunks(chunk_bytes, n, has_filters)),
+                &IndexSlots::dense(&chunk_record::chunks(chunk_bytes, n, has_filters)),
                 chunk_bytes,
                 widths.offsets,
                 widths.lengths,
@@ -886,10 +868,6 @@ mod tests {
         }
     }
 
-    fn slotted(chunks: Vec<ChunkRecord>) -> Vec<(u64, ChunkRecord)> {
-        (0..).zip(chunks).collect()
-    }
-
     #[rstest]
     fn an_array_reads_back_at_every_width(
         #[values(
@@ -904,7 +882,10 @@ mod tests {
     ) {
         let fixture = Fixture::at(0, widths, chunk_bytes, n, has_filters);
         let read = fixture.records(chunk_bytes).unwrap();
-        assert_eq!(read, slotted(chunks(chunk_bytes, n, has_filters)));
+        assert_eq!(
+            read,
+            chunk_record::slotted(chunk_record::chunks(chunk_bytes, n, has_filters))
+        );
     }
 
     #[rstest]
@@ -960,10 +941,11 @@ mod tests {
         let at = fixture.data_block_at() + 4 + 2 + 8;
         fixture.bytes[at] = bitmap;
         fixture.restamp_prefix();
-        let expected: Vec<(u64, ChunkRecord)> = slotted(chunks(8, 4_000, has_filters))
-            .into_iter()
-            .filter(|(slot, _)| pages.contains(&(slot / 1_024)))
-            .collect();
+        let expected: Vec<(u64, ChunkRecord)> =
+            chunk_record::slotted(chunk_record::chunks(8, 4_000, has_filters))
+                .into_iter()
+                .filter(|(slot, _)| pages.contains(&(slot / 1_024)))
+                .collect();
         assert_eq!(fixture.records(8).unwrap(), expected);
     }
 
@@ -977,17 +959,18 @@ mod tests {
             .records(8)
             .collect::<Result<_, _>>()
             .unwrap();
-        let expected: Vec<(u64, ChunkRecord)> = slotted(chunks(8, 3_000, true))
-            .into_iter()
-            .skip(1_024)
-            .take(1_024)
-            .collect();
+        let expected: Vec<(u64, ChunkRecord)> =
+            chunk_record::slotted(chunk_record::chunks(8, 3_000, true))
+                .into_iter()
+                .skip(1_024)
+                .take(1_024)
+                .collect();
         assert_eq!(read, expected);
     }
 
     #[test]
     fn a_slot_that_stores_the_undefined_address_has_no_record() {
-        let chunks = chunks(8, 3, true);
+        let chunks = chunk_record::chunks(8, 3, true);
         let slots = IndexSlots::new(&chunks, &[0, 2, 4], 5).unwrap();
         let array = build_fixed_array_at(
             &slots,
@@ -1080,7 +1063,10 @@ mod tests {
         let fixture = Fixture::at(base, WIDTHS, 8, n, true);
         let header = fixture.header().unwrap();
         assert_eq!(header.range().start().get(), base + ARRAY_AT);
-        assert_eq!(fixture.records(8).unwrap(), slotted(chunks(8, n, true)));
+        assert_eq!(
+            fixture.records(8).unwrap(),
+            chunk_record::slotted(chunk_record::chunks(8, n, true))
+        );
     }
 
     #[test]

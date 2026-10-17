@@ -286,6 +286,53 @@ pub enum FormatError {
         /// The version found.
         version: u8,
     },
+    /// An Extensible Array index block, super block, or data block whose client ID differs from
+    /// its header's.
+    InvalidExtensibleArrayBlockClient {
+        /// The client ID the header stores.
+        expected: u8,
+        /// The client ID the block stores.
+        actual: u8,
+    },
+    /// An Extensible Array super block or data block whose block offset differs from its position
+    /// in the array.
+    InvalidExtensibleArrayBlockOffset {
+        /// The block's position in the array, the number of elements before it that the index
+        /// block does not hold.
+        expected: u64,
+        /// The block offset the block stores.
+        actual: u64,
+    },
+    /// An Extensible Array index block, super block, or data block whose header address differs
+    /// from the address of the array's header.
+    InvalidExtensibleArrayBlockOwner {
+        /// The address of the header.
+        expected: u64,
+        /// The header address the block stores, in the coordinates of `expected`.
+        actual: u64,
+    },
+    /// A reserved client ID in an Extensible Array header, 2 or more.
+    InvalidExtensibleArrayClient(u8),
+    /// An Extensible Array header's element size or creation parameters are out of range, or a
+    /// length or a slot the parser derives from them is past `u64::MAX`.
+    ///
+    /// The parser returns it for a header with:
+    ///
+    /// - a filtered element size shorter than an address and a filter mask, or with a chunk size
+    ///   wider than 8 bytes
+    /// - a maximum element bit count outside `1..=64`
+    /// - a minimum data block element count that is not a power of two
+    /// - a minimum data block pointer count of a super block that is not a power of two, or is 1
+    /// - a page bit count past the maximum element bit count or past 63
+    /// - creation parameters whose blocks do not fit the maximum element count, or that page a
+    ///   data block whose address the index block holds
+    InvalidExtensibleArrayGeometry,
+    /// An Extensible Array header that does not start with `EAHD`, or an index block, super block,
+    /// or data block that does not start with `EAIB`, `EASB`, or `EADB`.
+    InvalidExtensibleArraySignature,
+    /// An Extensible Array header or block version other than 0, the only version the format
+    /// defines.
+    InvalidExtensibleArrayVersion(u8),
     /// A file space page size is outside 512 bytes to 1 GiB, the range of [`FileSpacePageSize`].
     InvalidFileSpacePageSize(u64),
     /// Invalid file-space management strategy code in a File Space Info message.
@@ -1027,6 +1074,37 @@ impl fmt::Display for FormatError {
             }
             Self::InvalidBTreeV2Version(v) => {
                 write!(f, "invalid B-tree v2 version: {v}")
+            }
+            Self::InvalidExtensibleArrayBlockClient { expected, actual } => {
+                write!(
+                    f,
+                    "invalid extensible array block client ID: expected {expected}, got {actual}"
+                )
+            }
+            Self::InvalidExtensibleArrayBlockOffset { expected, actual } => {
+                write!(
+                    f,
+                    "invalid extensible array block offset: expected {expected}, got {actual}"
+                )
+            }
+            Self::InvalidExtensibleArrayBlockOwner { expected, actual } => {
+                write!(
+                    f,
+                    "invalid extensible array block header address: expected {expected}, got \
+                     {actual}"
+                )
+            }
+            Self::InvalidExtensibleArrayClient(id) => {
+                write!(f, "invalid extensible array client ID: {id}")
+            }
+            Self::InvalidExtensibleArrayGeometry => {
+                write!(f, "invalid extensible array geometry")
+            }
+            Self::InvalidExtensibleArraySignature => {
+                write!(f, "invalid extensible array signature")
+            }
+            Self::InvalidExtensibleArrayVersion(v) => {
+                write!(f, "invalid extensible array version: {v}")
             }
             Self::InvalidFixedArrayBlockClient { expected, actual } => {
                 write!(
