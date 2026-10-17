@@ -111,6 +111,7 @@
 //! [#82]: https://github.com/CramBL/hdf5-pure/issues/82
 
 use std::collections::{BTreeSet, HashMap};
+use std::io::Write;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -329,12 +330,53 @@ pub fn repack<P: AsRef<Path>, Q: AsRef<Path>>(
     dst: Q,
     options: &RepackOptions,
 ) -> Result<(), Error> {
+    stage(src.as_ref(), options)?.write(dst)
+}
+
+/// Repack `src` into `output`, applying `options`.
+///
+/// Does what [`repack`](fn@repack) does, with the same fidelity checks and errors, but
+/// writes the file front to back into `output` through [`FileBuilder::finish_to`], so the
+/// output can be an in-memory buffer, a pipe or a file the caller already holds open.
+///
+/// As with [`repack`](fn@repack), a refusal is reported before any byte reaches
+/// `output`, and an I/O error partway through leaves what was already written there.
+///
+/// # Examples
+///
+/// ```rust
+/// # let dir = tempfile::tempdir()?;
+/// # let src = dir.path().join("data.h5");
+/// # let mut builder = hdf5_pure::FileBuilder::new();
+/// # builder.create_dataset("keep").with_i32_data(&[1, 2, 3]);
+/// # builder.create_dataset("drop").with_f64_data(&[0.0; 64]);
+/// # builder.write(&src)?;
+/// use hdf5_pure::{File, RepackOptions, repack_to};
+///
+/// // Repacks into memory, leaving out `drop`.
+/// let mut bytes = Vec::new();
+/// repack_to(&src, &mut bytes, &RepackOptions::new().drop_path("drop"))?;
+///
+/// assert_eq!(File::from_bytes(bytes)?.root().datasets()?, ["keep"]);
+/// # Ok::<(), hdf5_pure::Error>(())
+/// ```
+pub fn repack_to(
+    src: impl AsRef<Path>,
+    output: impl Write,
+    options: &RepackOptions,
+) -> Result<(), Error> {
+    stage(src.as_ref(), options)?.finish_to(output)
+}
+
+/// Stages every object of `src` that `options` keeps in a [`FileBuilder`], with the
+/// output format chosen, running every fidelity check before a byte is written.
+fn stage(src: &Path, options: &RepackOptions) -> Result<FileBuilder, Error> {
     // Open the source for on-demand streaming reads: metadata and one working
     // chunk are resident at a time, never the whole file. Shared so each streamed
     // dataset's chunk provider can pull from the same handle during the write
     // without an extra open.
     let file = Arc::new(File::open_streaming_with_access_mode(
-        src.as_ref(),
+        src,
         options.source_access_mode(),
     )?);
 
@@ -430,8 +472,7 @@ pub fn repack<P: AsRef<Path>, Q: AsRef<Path>>(
         )));
     }
 
-    builder.write(dst)?;
-    Ok(())
+    Ok(builder)
 }
 
 /// A destination that group contents can be added to. Implemented for both the

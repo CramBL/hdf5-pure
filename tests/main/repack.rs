@@ -5,7 +5,7 @@ use hdf5_pure::Error;
 use hdf5_pure::File;
 use hdf5_pure::{
     AttrValue, Datatype, DatatypeByteOrder, FileBuilder, FileSpaceStrategy, LibVer, MaxExtent,
-    RepackOptions, ScaleOffset, repack,
+    RepackOptions, ScaleOffset, repack, repack_to,
 };
 use hdf5_pure_core::__private::BaseAddressExt;
 use rstest::rstest;
@@ -76,6 +76,42 @@ fn drops_object_and_shrinks_file() {
         vec![1, 2, 3]
     );
     assert!(f.dataset("bulk").is_err());
+}
+
+/// `repack_to` writes the same bytes into a buffer that `repack` writes to a file.
+#[test]
+fn repack_to_writes_the_bytes_repack_writes() {
+    let src = temp::temp_path("hdf5_pure_repack_to_src.h5");
+    let dst = temp::temp_path("hdf5_pure_repack_to_dst.h5");
+    let mut b = FileBuilder::new();
+    b.create_dataset("keep").with_i32_data(&[1, 2, 3]);
+    b.create_dataset("bulk").with_f64_data(&vec![9.0; 4096]);
+    b.write(&src).unwrap();
+    let options = RepackOptions::new().drop_path("bulk");
+
+    repack(&src, &dst, &options).unwrap();
+    let mut bytes = Vec::new();
+    repack_to(&src, &mut bytes, &options).unwrap();
+
+    assert_eq!(bytes, std::fs::read(&dst).unwrap());
+}
+
+/// A refused `repack_to` writes nothing into its sink.
+#[test]
+fn a_refused_repack_to_writes_nothing() {
+    let src = temp::temp_path("hdf5_pure_repack_to_refused_src.h5");
+    let mut b = FileBuilder::new();
+    b.create_dataset("keep").with_i32_data(&[1, 2, 3]);
+    b.write(&src).unwrap();
+
+    let mut bytes = Vec::new();
+    let err = repack_to(&src, &mut bytes, &RepackOptions::new().drop_path("missing")).unwrap_err();
+
+    let Error::RepackUnsupported(reason) = &err else {
+        panic!("expected RepackUnsupported, got {err:?}");
+    };
+    assert_eq!(reason, "drop path does not exist in the source: missing");
+    assert!(bytes.is_empty());
 }
 
 #[test]
