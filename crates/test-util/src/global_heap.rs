@@ -4,6 +4,8 @@
 //!
 //! [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsec_fmt4_infra_globalheap
 
+use std::ops::Range;
+
 use crate::bytes;
 use crate::widths::Widths;
 
@@ -108,6 +110,18 @@ pub fn reference(len: u32, collection_address: u64, index: u32, widths: Widths) 
     reference
 }
 
+/// Returns the range of each collection that [`collection_starts`] finds in `bytes`, with the
+/// length read from its `widths.length`-byte collection size field.
+pub fn collection_ranges(bytes: &[u8], widths: Widths) -> Vec<Range<u64>> {
+    collection_starts(bytes)
+        .into_iter()
+        .map(|start| {
+            let size = bytes::uint_at(bytes, start as usize + SIZE_OFFSET, widths.length);
+            start..start + size
+        })
+        .collect()
+}
+
 /// Returns the offset of each [`SIGNATURE`] in `bytes`, where a collection starts.
 ///
 /// An object whose data holds the signature bytes matches as well.
@@ -121,6 +135,12 @@ pub fn collection_starts(bytes: &[u8]) -> Vec<u64> {
 }
 
 pub const SIGNATURE: &[u8; 4] = b"GCOL";
+
+/// The offset of the version in a collection header.
+pub const VERSION_OFFSET: usize = SIGNATURE.len();
+
+/// The offset of the collection size in a collection header.
+pub const SIZE_OFFSET: usize = VERSION_OFFSET + 1 + COLLECTION_RESERVED;
 
 // The C library pads the collection header and each object header to 16 bytes at every length
 // width, in `H5HG_SIZEOF_HDR` and `H5HG_SIZEOF_OBJHDR` (`H5HGpkg.h`, HDF5 1.8.23 to 2.2.0).
@@ -140,8 +160,12 @@ const OBJECT_RESERVED: usize = 4;
 /// The index of the free space object.
 const FREE_SPACE_INDEX: u16 = 0;
 
-// The minimum collection size, defined in "Global Heap" of the format specification, version
-// 4.0. The C library calls it `H5HG_MINSIZE` (`H5HGpkg.h`, HDF5 2.2.0).
-const MIN_COLLECTION_SIZE: usize = 4096;
+/// The minimum collection size in bytes, defined in "Global Heap" of the [format specification,
+/// version 4.0][spec].
+///
+/// The C library calls it `H5HG_MINSIZE` (`H5HGpkg.h`, HDF5 2.2.0).
+///
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsec_fmt4_infra_globalheap
+pub const MIN_COLLECTION_SIZE: usize = 4096;
 
 const VERSION: u8 = 1;

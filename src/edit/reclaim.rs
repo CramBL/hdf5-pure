@@ -7,6 +7,7 @@
 
 use std::collections::{HashMap, HashSet};
 
+use hdf5_pure_core::__private::PhysicalAddress;
 use hdf5_pure_space::__private::Extent;
 use hdf5_pure_space::__private::FreeClass;
 use hdf5_pure_space::__private::PageType;
@@ -23,6 +24,7 @@ use crate::file_space_info::FileSpacePageSize;
 use crate::fractal_heap_storage;
 use crate::fractal_heap_storage::FractalHeapAllocation;
 use crate::fractal_heap_storage::FractalHeapStorageError;
+use crate::global_heap;
 use crate::group_v2::resolve_group_entries_from_source;
 use crate::link_info::LinkInfoMessage;
 use crate::link_message::LinkMessage;
@@ -32,6 +34,7 @@ use crate::object_header::HeaderMessage;
 use crate::object_header::ObjectHeader;
 use crate::source::{BaseOffsetSource, Source, SourceMetadata};
 
+use super::GlobalHeapLiveness;
 use super::{
     MAX_COPY_DEPTH, MAX_LINK_GRAPH_NODES, ObjModel, OhRegion, SpaceOwnership, WriteEngine,
     read_oh_chunks, spans_disjoint_in_bounds,
@@ -48,13 +51,15 @@ impl WriteEngine {
     ///
     /// The editor visits each reachable object once, including objects with several hard
     /// links or cycles. The identified storage includes the userblock, the superblock, its
-    /// extension, persisted free-space managers, and reusable free extents. Unsupported storage or
-    /// a traversal limit makes the analysis incomplete.
+    /// extension, persisted free-space managers, reusable free extents, and the global heap
+    /// collections that reachable objects refer to. Unsupported storage or a traversal limit makes
+    /// the analysis incomplete, as does a [`GlobalHeapLiveness`] analysis that is incomplete.
     ///
     /// # Errors
     ///
-    /// Returns [`Error::Format`] if supported reachable metadata cannot be parsed. Returns
-    /// [`Error::MissingMessage`] if a chunked dataset lacks its dataspace. Returns
+    /// Returns [`Error::Format`] if supported reachable metadata, a variable-length element, or a
+    /// global heap collection that a reachable object refers to cannot be parsed. Returns
+    /// [`Error::MissingMessage`] if a dataset lacks its datatype or dataspace message. Returns
     /// [`Error::InvalidFractalHeapStorage`] if a heap has inconsistent allocation geometry.
     /// Returns [`Error::InvalidSpaceOwnershipExtent`] if identified extents overlap or exceed
     /// the logical end of file.
@@ -76,6 +81,14 @@ impl WriteEngine {
             .absolute(self.superblock.root_group_address)?;
         let mut analysis_complete =
             self.collect_owned_spans(root, &mut live_raw_space, &mut live_metadata_space)?;
+        let GlobalHeapLiveness {
+            referenced_collections,
+            analysis_complete: collections_complete,
+        } = self.global_heap_liveness()?;
+        analysis_complete &= collections_complete;
+        for collection in referenced_collections {
+            live_raw_space.push(self.collection_span(collection)?);
+        }
         let userblock_space = Vec::from_iter((self.sb_sig_off > 0).then_some((0, self.sb_sig_off)));
 
         let superblock_len = u64::try_from(
@@ -174,6 +187,25 @@ impl WriteEngine {
             analysis_complete,
             trailing_slack_space,
         })
+    }
+
+    /// Returns the span `(address, length)` of the global heap collection at the absolute file
+    /// offset `address`.
+    ///
+    /// The walk parses every object header of the collection, so a collection that is malformed
+    /// past its header is an error.
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors of [`global_heap::walk_collection`].
+    fn collection_span(&self, address: u64) -> Result<(u64, u64), FormatError> {
+        let range = global_heap::walk_collection(
+            self.image(),
+            self.widths().lengths,
+            PhysicalAddress::new(address),
+            |_| {},
+        )?;
+        Ok((range.start().get(), range.length()))
     }
 
     /// Returns the on-disk byte spans `(addr, len)` of every chunk of the
@@ -967,8 +999,8 @@ impl WriteEngine {
 
     /// Appends storage identified in the header and passes hard-link targets to `child`.
     ///
-    /// Returns `false` for shared or unrecognized messages, data that embeds file addresses, or
-    /// storage the layout, link, or attribute collectors cannot classify.
+    /// Returns `false` for shared or unrecognized messages, or storage the layout, link, or
+    /// attribute collectors cannot classify.
     ///
     /// # Errors
     ///
@@ -1014,26 +1046,14 @@ impl WriteEngine {
                 MessageType::ATTRIBUTE_INFO => {
                     complete &= self.collect_attribute_owned_spans(data, metadata)?
                 }
-                MessageType::DATATYPE => {
-                    let (datatype, _) = hdf5_pure_format::__private::parse_datatype(data)?;
-                    complete &= !super::datatype_holds_file_address(&datatype);
-                }
-                MessageType::ATTRIBUTE => {
-                    match crate::attribute::AttributeMessage::parse_with_length_width(
-                        data,
-                        self.widths().lengths,
-                    ) {
-                        Ok(attr) => complete &= !super::datatype_holds_file_address(&attr.datatype),
-                        Err(FormatError::UnresolvedSharedMessage(_)) => complete = false,
-                        Err(error) => return Err(error.into()),
-                    }
-                }
                 MessageType::NIL
                 | MessageType::DATASPACE
+                | MessageType::DATATYPE
                 | MessageType::FILL_VALUE_OLD
                 | MessageType::FILL_VALUE
                 | MessageType::GROUP_INFO
                 | MessageType::FILTER_PIPELINE
+                | MessageType::ATTRIBUTE
                 | MessageType::OBJECT_HEADER_CONTINUATION
                 | MessageType::OBJECT_MODIFICATION_TIME
                 | MessageType::OBJECT_REFERENCE_COUNT => {}
@@ -1148,8 +1168,8 @@ impl WriteEngine {
 
     /// Appends dense-attribute storage and returns whether it can be classified completely.
     ///
-    /// Returns `false` for unsupported heaps, shared messages or fields, or attribute data that
-    /// embeds file addresses.
+    /// Returns `false` if the ownership of the fractal heap is unsupported or a record in the
+    /// storage is shared.
     ///
     /// # Errors
     ///
@@ -1160,56 +1180,40 @@ impl WriteEngine {
         data: &[u8],
         metadata: &mut Vec<(u64, u64)>,
     ) -> Result<bool, Error> {
-        let mut complete = true;
         let info = AttributeInfoMessage::parse_with_offset_width(data, self.widths().offsets)?;
-        if let Some(heap) = info.fractal_heap_address {
-            let source = BaseOffsetSource {
-                inner: &self.image(),
-                base: self.addresses.effective_base(),
-            };
-            let index = crate::attribute::collect_dense_attribute_index_storage_extents(
-                &source,
-                &info,
-                self.widths(),
-            )?;
-            metadata.extend(
-                self.absolute_owned_spans(
-                    index.iter().map(|extent| (extent.start(), extent.len())),
-                )?,
-            );
-            if !self.collect_owned_heap(heap, metadata)? {
-                return Ok(false);
-            }
-            let mut shared_records = false;
-            crate::attribute::visit_dense_attribute_messages_from_source(
-                &source,
-                AccessMode::ReadWrite,
-                self.addresses,
-                &info,
-                heap,
-                self.widths(),
-                |flags| {
-                    shared_records |= flags.is_shared();
-                    !flags.is_shared()
-                },
-                |data, _creation_index| {
-                    match crate::attribute::AttributeMessage::parse_with_length_width(
-                        data,
-                        self.widths().lengths,
-                    ) {
-                        Ok(attribute) => {
-                            complete &= !super::datatype_holds_file_address(&attribute.datatype)
-                        }
-                        Err(FormatError::UnresolvedSharedMessage(_)) => complete = false,
-                        Err(error) => return Err(error),
-                    }
-                    Ok(())
-                },
-            )?;
-            complete &= !shared_records;
+        let Some(heap) = info.fractal_heap_address else {
+            return Ok(true);
+        };
+        let source = BaseOffsetSource {
+            inner: &self.image(),
+            base: self.addresses.effective_base(),
+        };
+        let index = crate::attribute::collect_dense_attribute_index_storage_extents(
+            &source,
+            &info,
+            self.widths(),
+        )?;
+        metadata.extend(
+            self.absolute_owned_spans(index.iter().map(|extent| (extent.start(), extent.len())))?,
+        );
+        if !self.collect_owned_heap(heap, metadata)? {
+            return Ok(false);
         }
-
-        Ok(complete)
+        let mut shared_records = false;
+        crate::attribute::visit_dense_attribute_messages_from_source(
+            &source,
+            AccessMode::ReadWrite,
+            self.addresses,
+            &info,
+            heap,
+            self.widths(),
+            |flags| {
+                shared_records |= flags.is_shared();
+                !flags.is_shared()
+            },
+            |_data, _creation_index| Ok(()),
+        )?;
+        Ok(!shared_records)
     }
 
     fn absolute_owned_spans(
