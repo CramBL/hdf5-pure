@@ -17,7 +17,6 @@
 
 use alloc::vec;
 use alloc::vec::Vec;
-use core::num::NonZeroU8;
 
 use hdf5_pure_core::__private::FileRange;
 use hdf5_pure_core::__private::FileRegion;
@@ -33,7 +32,9 @@ use crate::checksum;
 use crate::chunk_record;
 use crate::chunk_record::ChunkElementEncoding;
 use crate::chunk_record::ChunkRecord;
+use crate::chunk_record::ElementEncoding;
 use crate::chunk_record::IndexSlots;
+use crate::chunk_record::InvalidElementEncoding;
 use crate::convert::Narrow;
 use crate::error::FormatError;
 use crate::width::FormatWidths;
@@ -99,11 +100,13 @@ impl FixedArrayHeaderLocator {
         let data_block = fields.decoded_address(widths.offsets)?;
         checksum::verify_trailing(bytes)?;
 
-        let geometry = Geometry::new(
-            ElementEncoding::new(widths.offsets, client_id, entry_size)?,
-            entries,
-            page_bits,
+        let encoding = ElementEncoding::new(widths.offsets, client_id, entry_size).map_err(
+            |err| match err {
+                InvalidElementEncoding::Client(id) => FormatError::InvalidFixedArrayClient(id),
+                InvalidElementEncoding::EntrySize => FormatError::InvalidFixedArrayGeometry,
+            },
         )?;
+        let geometry = Geometry::new(encoding, entries, page_bits)?;
         let data_block = match data_block {
             DecodedStoredAddress::Defined(address) => Some(FixedArrayDataBlockRef::new(
                 base,
@@ -216,14 +219,15 @@ impl FixedArrayDataBlockRef {
             return Err(FormatError::InvalidFixedArrayVersion(version));
         }
         let client_id = fields.u8()?;
-        if client_id != geometry.encoding.client.id() {
+        let expected_client = geometry.encoding.client().id();
+        if client_id != expected_client {
             return Err(FormatError::InvalidFixedArrayBlockClient {
-                expected: geometry.encoding.client.id(),
+                expected: expected_client,
                 actual: client_id,
             });
         }
         let owner =
-            PhysicalAddress::new(base.absolute(fields.address(geometry.encoding.offsets)?)?);
+            PhysicalAddress::new(base.absolute(fields.address(geometry.encoding.offsets())?)?);
         if owner != header {
             return Err(FormatError::InvalidFixedArrayBlockOwner {
                 expected: header.get(),
@@ -265,7 +269,7 @@ impl FixedArrayDataBlockRef {
         match geometry.paging {
             Some(paging) => FileRange::new(
                 range.start(),
-                paging.pages_offset(geometry.encoding.offsets)?,
+                paging.pages_offset(geometry.encoding.offsets())?,
             ),
             None => Ok(range),
         }
@@ -280,7 +284,6 @@ impl FixedArrayDataBlockRef {
         let Self {
             range, geometry, ..
         } = *self;
-        let encoding = geometry.encoding;
         let first_slot = product(index, paging.page_entries)?;
         let entries = geometry
             .entries
@@ -288,16 +291,16 @@ impl FixedArrayDataBlockRef {
             .ok_or(FormatError::InvalidFixedArrayGeometry)?
             .min(paging.page_entries);
         let offset = sum([
-            paging.pages_offset(encoding.offsets)?,
-            product(index, encoding.page_len(paging.page_entries)?)?,
+            paging.pages_offset(geometry.encoding.offsets())?,
+            product(index, geometry.page_len(paging.page_entries)?)?,
         ])?;
         Ok(FixedArrayPageRef {
             range: FileRange::new(
                 range.start().checked_add(offset)?,
-                encoding.page_len(entries)?,
+                geometry.page_len(entries)?,
             )?,
             first_slot,
-            encoding,
+            encoding: geometry.encoding,
         })
     }
 }
@@ -332,7 +335,7 @@ impl<'a> FixedArrayPageBitmap<'a> {
             bitmap,
         } = *self;
         (0..paging.pages)
-            .filter(move |&index| initialized(bitmap, index))
+            .filter(move |&index| chunk_record::page_initialized(bitmap, index))
             .map(move |index| block.page(paging, index))
     }
 }
@@ -402,15 +405,7 @@ impl<'a> FixedArrayElements<'a> {
             first_slot,
             encoding,
         } = *self;
-        bytes
-            .chunks_exact(usize::from(encoding.stride.get()))
-            .zip(first_slot..)
-            .filter_map(move |(element, slot)| {
-                encoding
-                    .record(element, chunk_byte_size)
-                    .map(|record| record.map(|record| (slot, record)))
-                    .transpose()
-            })
+        encoding.records(bytes, first_slot, chunk_byte_size)
     }
 }
 
@@ -445,19 +440,27 @@ impl Geometry {
             entries,
             paging,
         } = *self;
-        let elements = product(entries, u64::from(encoding.stride.get()))?;
+        let elements = product(entries, u64::from(encoding.stride().get()))?;
         match paging {
             Some(paging) => sum([
-                paging.pages_offset(encoding.offsets)?,
+                paging.pages_offset(encoding.offsets())?,
                 elements,
                 product(paging.pages, CHECKSUM_LEN)?,
             ]),
             None => sum([
-                data_block_prefix_len(encoding.offsets),
+                data_block_prefix_len(encoding.offsets()),
                 elements,
                 CHECKSUM_LEN,
             ]),
         }
+    }
+
+    /// Returns the length in bytes of a page of `entries` elements, with its checksum.
+    fn page_len(&self, entries: u64) -> Result<u64, FormatError> {
+        sum([
+            product(entries, u64::from(self.encoding.stride().get()))?,
+            CHECKSUM_LEN,
+        ])
     }
 }
 
@@ -480,105 +483,6 @@ impl Paging {
             CHECKSUM_LEN,
         ])
     }
-}
-
-/// The fields of a Fixed Array element and its width.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct ElementEncoding {
-    offsets: OffsetWidth,
-    client: FixedArrayClient,
-    /// The width of an element in bytes: the address width for an unfiltered chunk, and the
-    /// header's entry size for a filtered one.
-    stride: NonZeroU8,
-}
-
-impl ElementEncoding {
-    fn new(offsets: OffsetWidth, client_id: u8, entry_size: u8) -> Result<Self, FormatError> {
-        let (client, stride) = match client_id {
-            CLIENT_CHUNKS => (FixedArrayClient::Chunks, offsets.get()),
-            CLIENT_FILTERED_CHUNKS => (
-                FixedArrayClient::FilteredChunks {
-                    chunk_size_len: entry_size
-                        .checked_sub(offsets.get() + FILTER_MASK_LEN)
-                        .filter(|&len| len <= MAX_CHUNK_SIZE_LEN)
-                        .ok_or(FormatError::InvalidFixedArrayGeometry)?,
-                },
-                entry_size,
-            ),
-            id => return Err(FormatError::InvalidFixedArrayClient(id)),
-        };
-        Ok(Self {
-            offsets,
-            client,
-            // Never zero: an `OffsetWidth` is at least 2, and a filtered entry size passed the
-            // `checked_sub` above.
-            stride: NonZeroU8::new(stride).ok_or_else(|| {
-                FormatError::Internal("a Fixed Array element has a zero stride".into())
-            })?,
-        })
-    }
-
-    /// Parses `element`, or returns `None` if it stores the undefined address.
-    fn record(
-        self,
-        element: &[u8],
-        chunk_byte_size: u64,
-    ) -> Result<Option<ChunkRecord>, FormatError> {
-        let mut fields = bytes::Fields::new(element, 0);
-        let DecodedStoredAddress::Defined(address) = fields.decoded_address(self.offsets)? else {
-            return Ok(None);
-        };
-        Ok(Some(match self.client {
-            FixedArrayClient::Chunks => ChunkRecord {
-                address,
-                stored_size: chunk_byte_size,
-                filter_mask: 0,
-            },
-            FixedArrayClient::FilteredChunks { chunk_size_len } => ChunkRecord {
-                address,
-                stored_size: fields.uint(usize::from(chunk_size_len))?,
-                filter_mask: fields.u32()?,
-            },
-        }))
-    }
-
-    /// Returns the length in bytes of a page of `entries` elements, with its checksum.
-    fn page_len(self, entries: u64) -> Result<u64, FormatError> {
-        sum([
-            product(entries, u64::from(self.stride.get()))?,
-            CHECKSUM_LEN,
-        ])
-    }
-}
-
-/// The client of a Fixed Array, the "Client ID" field of its header and of its data block.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum FixedArrayClient {
-    /// Client 0, unfiltered chunks.
-    Chunks,
-    /// Client 1, filtered chunks.
-    FilteredChunks {
-        /// The width in bytes of an element's "Chunk Size" field.
-        chunk_size_len: u8,
-    },
-}
-
-impl FixedArrayClient {
-    const fn id(self) -> u8 {
-        match self {
-            Self::Chunks => CLIENT_CHUNKS,
-            Self::FilteredChunks { .. } => CLIENT_FILTERED_CHUNKS,
-        }
-    }
-}
-
-// Page 0 is the most significant bit of the first byte, as `H5VM_bit_get` reads it
-// (`H5VMprivate.h`, HDF5 2.2.0).
-fn initialized(bitmap: &[u8], page: u64) -> bool {
-    usize::try_from(page / 8)
-        .ok()
-        .and_then(|byte| bitmap.get(byte))
-        .is_some_and(|&byte| byte & (0x80 >> (page % 8)) != 0)
 }
 
 /// Returns the length in bytes of a Fixed Array header in a file with the address and length
@@ -812,21 +716,17 @@ pub fn build_fixed_array_at(
     Ok(combined)
 }
 
-// The signatures, the version, the client IDs, and the field widths are defined in "The Fixed
-// Array Index" of the format specification, version 4.0.
+// The signatures, the version, and the field widths are defined in "The Fixed Array Index" of the
+// format specification, version 4.0.
 const HEADER_SIGNATURE: [u8; 4] = *b"FAHD";
 const DATA_BLOCK_SIGNATURE: [u8; 4] = *b"FADB";
 const VERSION: u8 = 0;
-const CLIENT_CHUNKS: u8 = 0;
-const CLIENT_FILTERED_CHUNKS: u8 = 1;
 const SIGNATURE_LEN: u64 = 4;
 /// The version, client ID, entry size, and page bits bytes of a header.
 const HEADER_BYTE_FIELDS: u64 = 4;
 /// The version and client ID bytes of a data block.
 const DATA_BLOCK_BYTE_FIELDS: u64 = 2;
 const CHECKSUM_LEN: u64 = 4;
-const FILTER_MASK_LEN: u8 = 4;
-const MAX_CHUNK_SIZE_LEN: u8 = 8;
 
 #[cfg(test)]
 mod tests {
