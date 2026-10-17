@@ -74,20 +74,28 @@ fn a_replacement_reuses_a_deleted_extent_only_where_a_free_space_manager_tracks_
 }
 
 #[rstest]
-#[case::aggr(FileSpaceStrategy::Aggr)]
-#[case::none(FileSpaceStrategy::None)]
-fn a_deletion_leaves_no_reusable_free_space_without_a_free_space_manager(
+#[case::aggr(FileSpaceStrategy::Aggr, true)]
+#[case::none(FileSpaceStrategy::None, false)]
+fn a_deletion_discards_its_extent_without_a_free_space_manager(
     #[case] strategy: FileSpaceStrategy,
+    #[case] has_aggregate: bool,
 ) {
     let dir = tempdir().unwrap();
     let path = dir.path().join("strategy.h5");
     file_space::write_strategy_triplet(&path, strategy, false, 1);
 
     let file = File::open_rw(&path).unwrap();
+    let deleted = file_space::contiguous_extent(&file, "b");
     file.root().delete("b").unwrap();
     file.commit().unwrap();
 
-    assert_eq!(file.space_accounting().unwrap().reusable_free_space, []);
+    let free = file.space_accounting().unwrap().reusable_free_space;
+    assert_eq!(!free.is_empty(), has_aggregate);
+    assert!(
+        free.iter()
+            .all(|&(start, length)| !range::overlaps(&deleted, &(start..start + length))),
+        "{deleted:?}, {free:?}"
+    );
 }
 
 #[rstest]

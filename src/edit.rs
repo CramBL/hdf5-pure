@@ -2,10 +2,9 @@
 //!
 //! The in-place edit engine opens an existing file and adds objects, overwrites dataset
 //! values, or edits compact group attributes **in place**:
-//! new data and object headers are written at the end of the file, and the
-//! object headers of the touched groups (and their ancestors up to the root)
-//! are rewritten — also appended — so the superblock ends up pointing at the
-//! new root header. Nothing already in the file is moved, so the cost is
+//! new data and object headers are allocated according to the file-space strategy, and
+//! the object headers of the touched groups and their ancestors are rewritten so the
+//! superblock points at the new root header. Nothing already in the file is moved, so the cost is
 //! proportional to what you add, not to the file size — unlike the
 //! read-everything-then-rebuild path through [`FileBuilder`](crate::FileBuilder).
 //!
@@ -26,15 +25,12 @@
 //! #305): the link is removed from the rebuilt parent before the new object's is
 //! appended, and the one superblock write publishes both, so a rotating store
 //! expresses a rotation as one commit and the path is never momentarily absent.
-//! The new object's storage is still appended rather than laid over the old
-//! one's — the original stays live until the superblock repoint, which is what
-//! makes a crash during the rotation land on one side or the other — so the
-//! space the deletion released is what a *later* commit draws on, by reuse or by
-//! truncation.
+//! The original storage remains live until the superblock repoint. Under a strategy with
+//! free-space managers, a later commit can reuse or truncate the released storage.
 //! Object copy ([`File::copy`](crate::File::copy), the HDF5 `H5Ocopy`) deep-copies
-//! a source subtree — appending fresh copies of every object, repointing internal
-//! links and the contiguous data address — and links the copy in like an
-//! addition; the headers are reproduced from their verbatim message bytes, so
+//! a source subtree. The engine allocates fresh copies of every object, repoints internal
+//! links and contiguous data addresses, and links the copy like an addition. The headers
+//! are reproduced from their verbatim message bytes, so
 //! datatypes, dataspaces, and attributes stay byte-exact. A chunked (and filtered)
 //! dataset is copied with its chunk payloads and filter pipeline preserved
 //! byte-for-byte, its index rebuilt at the new location. The same machinery,
@@ -59,7 +55,7 @@
 //! When a length differs (a resized contiguous block, a filtered chunk that no
 //! longer fits, or a compact dataset) the dataset's storage is rebuilt and its
 //! header relocated like an addition: the new data and a rewritten header are
-//! appended, the data-layout message is repointed, the old storage is freed, and
+//! allocated, the data-layout message is repointed, the old storage is freed, and
 //! the parent group's link is patched. A relocating overwrite of a dataset
 //! reachable through more than one hard link is refused, since only the one named
 //! link could be repointed at the moved header.
@@ -106,8 +102,8 @@
 //!   whole-file writer supports (deflate, shuffle, fletcher32, scale-offset,
 //!   LZF, ZFP), and may declare extensible (maximum, optionally unlimited)
 //!   dimensions. A chunked dataset's data and index — and any filtered chunks —
-//!   are produced by the same builder the whole-file writer uses and appended at
-//!   end-of-file, so its object header is byte-identical to a freshly written
+//!   are produced by the same builder the whole-file writer uses and placed according to
+//!   the file-space strategy, so its object header is byte-identical to a freshly written
 //!   one. A dataset may be empty (zero-element) under either storage, which is
 //!   how an extensible dataset is created before the first
 //!   [`append_staged`](crate::Dataset::append_staged) fills it: a contiguous one
@@ -165,7 +161,11 @@
 //! managers keeps the whole run and writes the managers past it.
 //! Under `H5F_FSPACE_STRATEGY_AGGR` and `H5F_FSPACE_STRATEGY_NONE`, which have no
 //! free-space managers, and in a file whose strategy the session cannot read, the
-//! session drops the regions it vacates and allocates at the end of the file.
+//! session drops the regions it vacates. Under `H5F_FSPACE_STRATEGY_AGGR`, staged edits
+//! allocate from separate metadata and raw aggregates with 2048-byte refill blocks.
+//! Immediate appends bypass those aggregates. A clean close or drop releases unused
+//! aggregate space at EOA after publishing the shorter EOA with the same root. An uncertain
+//! publication prevents this cleanup. The other strategies use no classic aggregates.
 //! The reuse is crash-safe: it only ever overwrites space
 //! freed by an *earlier*, already-durable commit (never space the current commit
 //! is mid-way through freeing), and truncation happens only after the superblock
@@ -362,6 +362,9 @@ use crate::type_builders::{
 };
 use crate::width::FormatWidths;
 
+use self::aggregation::AggregateSpace;
+
+mod aggregation;
 mod global_heap_liveness;
 mod reclaim;
 
@@ -1113,6 +1116,8 @@ pub(crate) struct WriteEngine {
     /// Its extents are stored addresses, relative to the base address, as a free-space manager
     /// records them.
     space: SessionSpace,
+    /// Classic aggregate windows for staged edits under [`FileSpaceStrategy::Aggr`].
+    aggregation: Option<AggregateSpace>,
     /// Space this session has taken *out* of the on-disk free-space managers so
     /// that an immediate in-place append may spend it (issue #387).
     ///
@@ -1400,24 +1405,15 @@ pub(crate) struct WriteEngine {
     sync_policy: SyncPolicy,
 }
 
-/// The free lists as they stood before a commit's apply loop drew from them.
+/// Holds allocator state and heap allocation records from before a commit's apply loop.
 ///
-/// A commit allocates as it goes — a free region it hands to an object header or
-/// a chunk blob leaves the list immediately, so no two objects in the same commit
-/// can be handed the same region. If the commit then fails, those regions are as
-/// dead as they were before it started: nothing the commit wrote is reachable,
-/// because the superblock still names the old root — and the one write that does
-/// not wait for the repoint, a same-length value overwrite, is one
-/// [`WriteEngine::undo_inplace_writes`] has already tried to put back by the
-/// time this runs (issue #344). Restoring this snapshot gives them back instead
-/// of leaking them for the rest of the session.
-///
-/// The restore is sound only *before* the repoint. After it, the objects written
-/// into those regions are live, and handing the same addresses out again would
-/// overwrite the tree the commit just published — which is why
-/// [`WriteEngine::publish_attempted`] gates it.
+/// A commit reserves bytes before publishing the new root. If it fails before attempting
+/// publication, restoring this snapshot makes those bytes available again. Once publication
+/// is attempted, the live tree may reference them, so [`WriteEngine::publish_attempted`]
+/// prevents restoration.
 struct FreeSnapshot {
     space: SessionSpaceSnapshot,
+    aggregation: Option<AggregateSpace>,
     /// The append reserve, which the persisting commit tail drains back into the
     /// lists above before it rewrites the managers. A commit that then fails
     /// before publishing leaves those managers as they were — still not listing
@@ -1776,33 +1772,35 @@ enum TailPlacement {
     ReuseOnly,
 }
 
-/// Where a commit has decided to put one allocation's bytes, handed out by
-/// [`WriteEngine::reserve`] and consumed by [`WriteEngine::place`].
+/// Holds a physical reservation for [`WriteEngine::place`].
 ///
-/// The two arms differ in how the bytes are written — over a dead interior region
-/// or past the end of the file — and in nothing else the caller sees, so a caller
-/// that needs the address before the bytes (a relocatable blob) never has to know
-/// which it got.
+/// The caller can build a relocatable allocation for its reserved address before writing it.
 #[derive(Clone, Copy, Debug)]
 enum Placement {
-    /// A region an earlier commit freed, already removed from its free list.
-    Reused { addr: u64, len: u64 },
+    /// A reservation from a classic aggregate, including its physical end of allocation.
+    Aggregated { addr: u64, len: u64, end: u64 },
     /// The end-of-file, with the page for the requested type already open.
     Appended { addr: u64, len: u64 },
+    /// A region an earlier commit freed, already removed from its free list.
+    Reused { addr: u64, len: u64 },
 }
 
 impl Placement {
     /// The absolute file address the bytes will occupy.
     fn address(self) -> u64 {
         match self {
-            Placement::Reused { addr, .. } | Placement::Appended { addr, .. } => addr,
+            Placement::Aggregated { addr, .. }
+            | Placement::Reused { addr, .. }
+            | Placement::Appended { addr, .. } => addr,
         }
     }
 
     /// The reserved byte count, which the placed bytes must match exactly.
     fn len(self) -> u64 {
         match self {
-            Placement::Reused { len, .. } | Placement::Appended { len, .. } => len,
+            Placement::Aggregated { len, .. }
+            | Placement::Reused { len, .. }
+            | Placement::Appended { len, .. } => len,
         }
     }
 }
@@ -1990,9 +1988,10 @@ pub struct SpaceAccounting {
     /// is neither a lower bound on the next write's growth nor a promise of
     /// shrinkage: a region counted here may be truncated away at commit — rather
     /// than reused — if adjacent space is later freed and the coalesced run
-    /// reaches end-of-file. A session on a file whose strategy has no free-space
-    /// managers, [`FileSpaceStrategy::Aggr`] or [`FileSpaceStrategy::None`],
-    /// reports `0` throughout. Under [`FileSpaceStrategy::FsmAggr`] a commit tracks a
+    /// reaches end-of-file. A session reports `0` under [`FileSpaceStrategy::None`]. Under [`FileSpaceStrategy::Aggr`],
+    /// this includes unused metadata and raw aggregate reservations for staged writes. These
+    /// reservations are session state and are forgotten on reopen. Under
+    /// [`FileSpaceStrategy::FsmAggr`] a commit tracks a
     /// hole shorter than the file's [`threshold`](crate::FileSpaceInfo::threshold) only
     /// where the hole adjoins a tracked one.
     ///
@@ -2470,6 +2469,7 @@ impl WriteEngine {
                 DEFAULT_THRESHOLD,
                 FileSpacePageSize::DEFAULT,
             ),
+            aggregation: None,
             reserved: FreeList::new(),
             proved_free_of_references: false,
             persist: None,
@@ -2681,6 +2681,11 @@ impl WriteEngine {
         };
         self.space =
             SessionSpace::from_strategy(Some(info.strategy), info.threshold, info.page_size);
+        if info.strategy == FileSpaceStrategy::Aggr
+            && let Ok(eoa) = self.end_of_allocation()
+        {
+            self.aggregation = Some(AggregateSpace::new(eoa.get()));
+        }
         let paged = self.space.is_paged();
         if !info.persist || !self.space.is_enabled() {
             return;
@@ -3678,7 +3683,7 @@ impl WriteEngine {
             )?;
             Ok((range.start().get(), range.length()))
         };
-        let reusable_free_space = if self.reserved.is_empty() {
+        let mut reusable_free_space = if self.reserved.is_empty() {
             self.space
                 .reusable_sections()
                 .map(physical)
@@ -3689,6 +3694,15 @@ impl WriteEngine {
                 .map(physical)
                 .collect::<Result<Vec<_>, FormatError>>()?
         };
+        if let Some(aggregation) = self.aggregation {
+            reusable_free_space.extend(
+                aggregation
+                    .unused()
+                    .map(physical)
+                    .collect::<Result<Vec<_>, FormatError>>()?,
+            );
+            reusable_free_space.sort_unstable();
+        }
         let reusable_free_bytes = reusable_free_space.iter().map(|(_, len)| len).sum();
         Ok(SpaceAccounting {
             logical_size: self.image.len(),
@@ -4088,44 +4102,21 @@ impl WriteEngine {
         self.image.sync_all()
     }
 
-    /// Rewrite the on-disk free-space managers for a file that persists them, if
-    /// this session left them stale.
+    /// Finalizes free-space metadata or classic aggregate tails at session teardown.
     ///
-    /// Immediate in-place appends grow the file past the managers, leaving them
-    /// describing a length the file no longer has, or spend a reserve those
-    /// managers no longer list. A staged
-    /// [`commit`](Self::commit) rewrites them as part of its tail, but a session
-    /// that only appends never runs one, so [`File::close`](crate::File::close)
-    /// and `FileInner::drop` call this instead. It is the same tail the commit
-    /// writes — placed in space an earlier commit freed, or appended past
-    /// everything live when none fits, with the superblock repoint as the
-    /// crash-atomic linearization point — with nothing to free and the root
-    /// unchanged.
+    /// A persisting session rewrites stale free-space managers and returns unspent immediate
+    /// append reserves. An AGGR session releases unused aggregate space at EOA after publishing
+    /// the shorter EOA with the current root. An uncertain publication prevents aggregate cleanup.
+    /// Other non-persisting sessions require no finalization.
     ///
-    /// Where those blocks end up is not something a reader has to care about, and
-    /// after this change usually is not end-of-file: a file with free space to
-    /// spend has its managers inside it, above and below live data alike. What has
-    /// to hold is that they describe the file as it now stands, which is what makes
-    /// this call's own writes the last the session issues.
+    /// # Errors
     ///
-    /// It is also where a session's last release of trailing free space happens,
-    /// since it takes the same tail as a commit (issue #418).
-    ///
-    /// A no-op for a non-persisting file, and skipped when the file has not grown
-    /// past the managers since they were last written *and* the session holds no
-    /// unspent append reserve, so an unchanged session never grows the file. The
-    /// reserve is the second condition because an append that spent a hole rather
-    /// than the end of the file leaves the length alone, and what it did not
-    /// spend is space the managers must be told about again (issue #387).
-    ///
-    /// If a session that grew the file ends without `close` or `drop` running (a
-    /// true crash — `SIGKILL`, power loss), the managers are left describing the
-    /// shorter file, and an unspent reserve is left out of them altogether. Every
-    /// append was durable and crash-atomic, so no data is lost, and both this
-    /// crate and the reference C library reopen the file and read it correctly;
-    /// the managers simply under-report until a clean rewrite, which wastes those
-    /// bytes and never hands them out twice.
+    /// Returns [`Error::Format`] if metadata serialization, aggregate planning, or address
+    /// resolution fails. Returns [`Error::Io`] if writing, syncing, or truncating fails.
     pub(crate) fn finalize_persist(&mut self) -> Result<(), Error> {
+        if self.aggregation.is_some() {
+            return self.finalize_aggregates();
+        }
         if self.persist.is_none() || (self.image.len() == self.fsm_len && self.reserved.is_empty())
         {
             return Ok(());
@@ -5148,6 +5139,7 @@ impl WriteEngine {
     /// refusal after which a dataset the batch named may hold either value.
     /// Every other refusal leaves them all as they were.
     pub fn commit(&mut self) -> Result<(), Error> {
+        self.synchronize_aggregates()?;
         let snapshot = self.snapshot_free();
         self.publish_attempted = false;
         // Cleared at entry, like `superseded_heaps` and for the same reason: a
@@ -5192,6 +5184,11 @@ impl WriteEngine {
             // stops being pending and addresses the file from here on.
             self.staged_generation += 1;
         }
+        if self.publish_attempted
+            && let Some(aggregation) = &mut self.aggregation
+        {
+            aggregation.publication_confirmed = result.is_ok();
+        }
         // For the paths that took no rollback — a commit that succeeded, whose
         // overwrites are now the file's values, and one that failed with the
         // publish already issued, where undoing anything is unsound. A rollback
@@ -5200,19 +5197,19 @@ impl WriteEngine {
         result
     }
 
-    /// The free lists as they stand now, for [`commit`](Self::commit) to restore
-    /// if its apply loop draws from them and then fails.
+    /// Captures allocator state and heap allocation records for rollback before publication.
     fn snapshot_free(&self) -> FreeSnapshot {
         FreeSnapshot {
             space: self.space.allocation_snapshot(),
+            aggregation: self.aggregation,
             reserved: self.reserved.clone(),
             vl_overwrite_heaps: self.vl_overwrite_heaps.clone(),
         }
     }
 
-    /// Put the free lists back as [`snapshot_free`](Self::snapshot_free) found
-    /// them. Called only for a commit that failed before publishing anything, so
-    /// every region it restores is dead again.
+    /// Restores allocator state and heap allocation records after failure before publication.
+    ///
+    /// The snapshot was captured by [`snapshot_free`](Self::snapshot_free).
     ///
     /// That rests on nothing the live tree reaches naming a span the attempt
     /// allocated, which takes two rules rather than one. Every object a commit
@@ -5229,6 +5226,7 @@ impl WriteEngine {
     fn restore_free(&mut self, snapshot: FreeSnapshot) {
         self.vl_overwrite_heaps = snapshot.vl_overwrite_heaps;
         self.space.restore_allocation(snapshot.space);
+        self.aggregation = snapshot.aggregation;
         self.reserved = snapshot.reserved;
     }
 
@@ -6611,9 +6609,26 @@ impl WriteEngine {
             return self.repoint_stored_references(&relocations);
         }
 
-        let trunc_to = self.release_freed(to_free)?;
-        let new_eof = trunc_to.map_or(self.image.len(), PhysicalAddress::get);
+        let mut trunc_to = self.release_freed(to_free)?;
+        if let Some(aggregation) = self.aggregation {
+            let end = self
+                .addresses
+                .resolve(StoredAddress::new(aggregation.eoa()))?;
+            if end.get() < self.image.len() {
+                trunc_to = Some(end);
+            }
+        }
+        self.publish_nonpersisting(new_root, trunc_to)?;
+        self.repoint_stored_references(&relocations)
+    }
 
+    fn publish_nonpersisting(
+        &mut self,
+        new_root: u64,
+        trunc_to: Option<PhysicalAddress>,
+    ) -> Result<(), Error> {
+        let base = self.addresses;
+        let new_eof = trunc_to.map_or(self.image.len(), PhysicalAddress::get);
         self.barrier()?;
         if self.superblock.version >= 2 {
             // Build the new superblock off a clone and adopt it only once the
@@ -6657,7 +6672,7 @@ impl WriteEngine {
             self.image.truncate(cut.get())?;
             self.barrier()?;
         }
-        self.repoint_stored_references(&relocations)
+        Ok(())
     }
 
     /// Records the regions a non-persisting commit vacated under the active reusable-space
@@ -9689,11 +9704,14 @@ impl WriteEngine {
         self.place(at, bytes)
     }
 
-    /// Reserves `len` bytes for `class` in reusable space or at the end of the file.
+    /// Reserves `len` bytes for `class` according to the active file-space strategy.
     ///
     /// The returned
     /// [`Placement`] must be handed to [`place`](Self::place) with exactly `len`
     /// bytes.
+    ///
+    /// Under [`FileSpaceStrategy::Aggr`], the reservation comes from the matching metadata
+    /// or raw aggregate. Other strategies use reusable space or append at EOA.
     ///
     /// Splitting the choice from the write is what lets a *relocatable* blob — one
     /// whose interior addresses are all `base + fixed offset`, like a chunked
@@ -9716,8 +9734,8 @@ impl WriteEngine {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::Format`] if address resolution or PAGE transition planning fails. Returns
-    /// the write error if writing PAGE padding fails.
+    /// Returns [`Error::Format`] if address resolution, aggregate planning, or PAGE transition
+    /// planning fails. Returns the write error if writing PAGE padding fails.
     fn reserve(&mut self, len: u64, class: AllocationClass) -> Result<Placement, Error> {
         self.reserve_with_page_type(len, class, class.into())
     }
@@ -9728,8 +9746,8 @@ impl WriteEngine {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::Format`] if address resolution or PAGE transition planning fails. Returns
-    /// the write error if writing PAGE padding fails.
+    /// Returns [`Error::Format`] if address resolution, aggregate planning, or PAGE transition
+    /// planning fails. Returns the write error if writing PAGE padding fails.
     fn reserve_with_page_type(
         &mut self,
         len: u64,
@@ -9744,6 +9762,9 @@ impl WriteEngine {
                     .get(),
                 len,
             });
+        }
+        if let Some(placement) = self.reserve_aggregated(len, class)? {
+            return Ok(placement);
         }
         self.begin_page(page_type)?;
         Ok(Placement::Appended {
@@ -9803,6 +9824,10 @@ impl WriteEngine {
             ))));
         }
         match at {
+            Placement::Aggregated { addr, end, .. } => {
+                self.place_aggregated(addr, bytes, end)?;
+                Ok(addr)
+            }
             Placement::Reused { addr, .. } => {
                 self.write_at(addr, bytes)?;
                 Ok(addr)

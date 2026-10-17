@@ -6,7 +6,9 @@ use std::path::Path;
 use hdf5::plist::file_create::FileSpaceStrategy as CStrategy;
 use hdf5::types::VarLenUnicode;
 use hdf5_pure::File;
+use hdf5_pure::FileAccessProperties;
 use hdf5_pure::FileSpaceStrategy;
+use hdf5_pure::MemoryStrategy;
 use hdf5_sys::h5o::H5O_INFO_BASIC;
 use hdf5_sys::h5o::H5O_info1_t;
 use hdf5_sys::h5p::H5P_DEFAULT;
@@ -117,6 +119,84 @@ fn libhdf5_reads_the_workload_hdf5_pure_writes(
             ),
         }
     }
+}
+
+#[rstest]
+#[case::metadata_heavy(aggregation::METADATA_HEAVY)]
+#[case::small_raw(aggregation::SMALL_RAW)]
+#[case::alternating(aggregation::ALTERNATING)]
+#[case::global_heap(aggregation::GLOBAL_HEAP)]
+#[case::freed_extent(aggregation::FREED_EXTENT)]
+#[case::block_edges(aggregation::BLOCK_EDGES)]
+fn libhdf5_reads_and_mutates_its_aggr_file_after_staged_edits(
+    #[case] workload: Workload,
+    #[values((MemoryStrategy::Mirrored, 0), (MemoryStrategy::Bounded, 0), (MemoryStrategy::Mirrored, 512))]
+    (backing, userblock): (MemoryStrategy, u64),
+) {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("staged.h5");
+    let seed = hdf5::FileBuilder::new()
+        .with_fapl(|properties| properties.libver_v110())
+        .with_fcpl(|properties| properties.file_space_strategy(AGGR).userblock(userblock))
+        .create(&path)
+        .unwrap();
+    seed.new_dataset::<u8>()
+        .shape(1)
+        .create("keep")
+        .unwrap()
+        .write(&[17])
+        .unwrap();
+    seed.close().unwrap();
+    let file = File::open_rw_with_options(
+        &path,
+        FileAccessProperties::new().with_memory_strategy(backing),
+    )
+    .unwrap();
+    for step in workload.steps {
+        step.apply(&file);
+        assert_eq!(
+            file.__space_ownership().unwrap().free_space_manager_space,
+            []
+        );
+        assert_eq!(file.persisted_free_space().unwrap(), []);
+    }
+    file.close().unwrap();
+    let file = hdf5::File::open_rw(&path).unwrap();
+    assert_eq!(
+        file.dataset("keep").unwrap().read_raw::<u8>().unwrap(),
+        [17]
+    );
+    for object in workload.surviving_objects() {
+        match object {
+            Object::Dataset(name, len) => assert_eq!(
+                file.dataset(name).unwrap().read_raw::<i32>().unwrap(),
+                vec![aggregation::DATASET_VALUE; len],
+            ),
+            Object::Group(name) => {
+                file.group(name).unwrap();
+            }
+            Object::Strings(name) => assert_eq!(
+                file.dataset(name)
+                    .unwrap()
+                    .read_raw::<VarLenUnicode>()
+                    .unwrap()
+                    .iter()
+                    .map(VarLenUnicode::as_str)
+                    .collect::<Vec<_>>(),
+                aggregation::STRINGS,
+            ),
+        }
+    }
+    assert_eq!(file.free_space(), 0);
+    file.new_dataset::<u8>()
+        .shape(1)
+        .create("c_added")
+        .unwrap()
+        .write(&[31])
+        .unwrap();
+    file.close().unwrap();
+    let file = File::open(&path).unwrap();
+    assert_eq!(file.dataset("c_added").unwrap().read_u8().unwrap(), [31]);
 }
 
 /// Where the C library places the allocations of a workload, and the file size after each step.
