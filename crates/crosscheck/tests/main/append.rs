@@ -6,12 +6,12 @@
 //! nonzero per-chunk filter mask that the append must preserve.
 
 use hdf5_pure::FileBuilder;
-use tempfile::tempdir;
+
 use test_util_hdf5::dataset::{self, AppendInteropFixture, Unlimited};
 
 #[test]
 fn pure_creates_pure_appends_c_reads() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("d.h5");
     AppendInteropFixture::filtered_pure(12, 4).write(&path);
     // Aligned append (12 -> 20) then unaligned (20 -> 27).
@@ -25,7 +25,7 @@ fn pure_creates_pure_appends_c_reads() {
 #[test]
 #[cfg(target_endian = "little")]
 fn c_creates_pure_appends_both_read() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("d.h5");
     AppendInteropFixture::filtered_libhdf5(20, 5).write(&path);
     dataset::pure_append_staged(&path, "d", &(20..33).collect::<Vec<_>>()); // unaligned 20 -> 33
@@ -42,7 +42,7 @@ fn c_incompressible_kept_chunks_filter_mask_preserved() {
     // carry each kept chunk's original mask (not force 0) into the rebuilt index,
     // or the C library would try to inflate stored-uncompressed bytes and read
     // garbage.
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("d.h5");
     // 8 chunks of 5, all incompressible.
     let base = AppendInteropFixture::incompressible_libhdf5(0xABCD_1234, 40, 5).write(&path);
@@ -63,7 +63,7 @@ fn c_incompressible_kept_chunks_filter_mask_preserved() {
 #[test]
 #[cfg(target_endian = "little")]
 fn append_to_c_empty_extensible() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("d.h5");
     // C creates an empty (0-length) resizable filtered dataset.
     Unlimited::<i32>::new("d", &[], 4)
@@ -77,7 +77,7 @@ fn append_to_c_empty_extensible() {
 
 #[test]
 fn pure_unfiltered_append_c_reads() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("d.h5");
     AppendInteropFixture::unfiltered_pure(10, 4).write(&path);
     dataset::pure_append_staged(&path, "d", &(10..23).collect::<Vec<_>>());
@@ -88,7 +88,7 @@ fn pure_unfiltered_append_c_reads() {
 
 #[test]
 fn userblock_append_c_reads() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("ub.h5");
     let mut b = FileBuilder::new();
     b.with_userblock(512);
@@ -106,7 +106,7 @@ fn userblock_append_c_reads() {
 fn large_paged_ea_append_c_reads() {
     // Append enough chunks (chunk length 1) that the rebuilt Extensible Array uses
     // super blocks / paged data blocks, then confirm the C library reads it back.
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("d.h5");
     AppendInteropFixture::filtered_pure(64, 1).write(&path);
     dataset::pure_append_staged(&path, "d", &(64..4096).collect::<Vec<_>>());

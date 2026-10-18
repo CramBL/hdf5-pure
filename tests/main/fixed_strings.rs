@@ -15,7 +15,7 @@ use hdf5_pure::{
     AttrValue, CharacterSet, Datatype, Error, File, FileBuilder, FormatError, StringPadding,
     VlenStringReadOptions,
 };
-use tempfile::tempdir;
+
 use test_util_hdf5::fixed_string;
 
 /// Every fixed-width string entry point, through a file and back.
@@ -83,7 +83,7 @@ fn a_utf8_value_is_measured_in_bytes_and_read_back_whole() {
 /// does today — the typed append counterpart is not written yet.
 #[test]
 fn a_declared_width_leaves_room_for_a_later_longer_value() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("stations.h5");
 
     let mut b = FileBuilder::new();
@@ -232,7 +232,7 @@ fn a_declared_attribute_width_round_trips_through_a_file() {
 /// contrast is real rather than an artefact of how this test writes.
 #[test]
 fn a_declared_slot_keeps_its_width_when_it_is_rewritten() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("slots.h5");
 
     let mut b = FileBuilder::new();
@@ -281,7 +281,7 @@ fn a_declared_slot_keeps_its_width_when_it_is_rewritten() {
 /// was: the value carries the width, so a read-modify-write preserves it.
 #[test]
 fn a_slot_read_back_can_be_rewritten_without_measuring_it() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("reuse.h5");
 
     let mut b = FileBuilder::new();
@@ -326,7 +326,7 @@ fn a_slot_read_back_can_be_rewritten_without_measuring_it() {
 /// rebuild — so the dataset tests above say nothing about it.
 #[test]
 fn a_group_attribute_keeps_a_declared_width_through_an_edit() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("group_slot.h5");
 
     let mut b = FileBuilder::new();

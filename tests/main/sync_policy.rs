@@ -11,7 +11,7 @@
 //! else*: the same file, the same content, the same refusals.
 
 use hdf5_pure::{AttrValue, Error, File, FileAccessProperties, SyncPolicy};
-use tempfile::tempdir;
+
 use test_util_hdf5::dataset::Unlimited;
 use test_util_hdf5::file_space;
 
@@ -60,7 +60,7 @@ fn write_everything(path: &std::path::Path, policy: SyncPolicy) -> Vec<u8> {
 /// reading the content back would not.
 #[test]
 fn on_close_writes_the_same_file_as_always() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let always = write_everything(&dir.path().join("always.h5"), SyncPolicy::Always);
     let deferred = write_everything(&dir.path().join("on_close.h5"), SyncPolicy::OnClose);
     assert_eq!(
@@ -93,7 +93,7 @@ fn on_close_writes_the_same_file_as_always() {
 /// durable and says so, rather than reporting a success it did not perform.
 #[test]
 fn sync_is_refused_on_a_read_only_file() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("ro.h5");
     fixture(&path);
 
@@ -110,7 +110,7 @@ fn sync_is_refused_on_a_read_only_file() {
 /// does not have to.
 #[test]
 fn a_closed_file_refuses_sync_and_does_not_need_one() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
 
     // A file that persists its free space, so `close` has manager re-homing to
     // do after the last barrier the caller could have asked for.

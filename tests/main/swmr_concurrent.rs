@@ -12,7 +12,7 @@
 //! `uv run` puts a pinned python3 + h5py on PATH for the duration of the test.
 
 use hdf5_pure::File;
-use tempfile::tempdir;
+
 use test_util::superblock;
 use test_util_hdf5::dataset::Unlimited;
 
@@ -58,7 +58,7 @@ print(n, int(d[0]) if n else 0, int(d[-1]) if n else 0)
 
 #[test]
 fn h5py_swmr_reads_pure_appends_concurrently() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("d.h5");
 
     // Create the dataset (unlimited, chunked) with hdf5-pure.
@@ -112,7 +112,7 @@ fn h5py_swmr_reads_pure_appends_concurrently() {
 /// file left flagged by a crashed writer.
 #[test]
 fn swmr_flag_lifecycle() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("d.h5");
     {
         let data: Vec<i32> = (0..5).collect();

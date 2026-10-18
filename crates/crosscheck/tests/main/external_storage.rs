@@ -11,8 +11,7 @@
 //! every element of a dataset that holds data, and a rewrite that did would emit
 //! a schema-only dataset in place of it — both reporting success.
 
-use hdf5_pure::{File, RepackOptions, repack};
-use tempfile::tempdir;
+use hdf5_pure::{File, RepackOptions};
 
 use test_util_hdf5::file;
 
@@ -43,7 +42,7 @@ fn write_external_fixture(path: &std::path::Path, payload: &str) {
 /// still fires first, so this test does not rest on that.
 #[test]
 fn repack_refuses_external_data_storage() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let src = dir.path().join("external.h5");
     let dst = dir.path().join("external_repacked.h5");
     let payload = dir.path().join("repack_payload.bin");
@@ -74,7 +73,7 @@ fn repack_refuses_external_data_storage() {
         ));
     }
 
-    let err = repack(&src, &dst, &RepackOptions::new()).unwrap_err();
+    let err = hdf5_pure::repack(&src, &dst, &RepackOptions::new()).unwrap_err();
     match err {
         hdf5_pure::Error::RepackUnsupported(msg) => assert!(
             msg.contains('d') && msg.contains("external"),
@@ -103,7 +102,7 @@ fn repack_refuses_external_data_storage() {
 /// assertion before it.
 #[test]
 fn every_read_path_refuses_external_data_storage() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let src = dir.path().join("external.h5");
     let payload = dir.path().join("read_payload.bin");
     write_external_fixture(&src, payload.to_str().unwrap());
@@ -147,7 +146,7 @@ fn every_read_path_refuses_external_data_storage() {
 /// with no address is the evidence.
 #[test]
 fn external_data_storage_still_reports_its_metadata() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let src = dir.path().join("external.h5");
     let payload = dir.path().join("meta_payload.bin");
     write_external_fixture(&src, payload.to_str().unwrap());
@@ -181,7 +180,7 @@ fn external_data_storage_still_reports_its_metadata() {
 /// the way to stop a file depending on external files.
 #[test]
 fn no_write_reaches_an_external_dataset() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let src = dir.path().join("external.h5");
     let payload = dir.path().join("write_payload.bin");
     write_external_fixture(&src, payload.to_str().unwrap());
@@ -293,7 +292,7 @@ fn no_write_reaches_an_external_dataset() {
 /// source need not outlive the call) and refuses on the spot.
 #[test]
 fn copy_refuses_an_external_dataset_by_name() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let src = dir.path().join("external.h5");
     let payload = dir.path().join("copy_payload.bin");
     write_external_fixture(&src, payload.to_str().unwrap());

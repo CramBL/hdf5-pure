@@ -1594,7 +1594,6 @@ mod tests {
     use core::cell::Cell;
 
     use rstest::rstest;
-    use test_util::checksum::restamp as stamp;
 
     use super::*;
     use crate::width::FormatWidths;
@@ -1659,7 +1658,7 @@ mod tests {
         buf[44..52].copy_from_slice(&5u64.to_le_bytes()); // stat[4] = `max_idx_set`
         buf[52..60].copy_from_slice(&0u64.to_le_bytes()); // stat[5]
         buf[60..68].copy_from_slice(&0x1000u64.to_le_bytes()); // `index_block_address`
-        stamp(&mut buf, 0, eahd_len(os, ls));
+        test_util::checksum::restamp(&mut buf, 0, eahd_len(os, ls));
 
         let hdr = ExtensibleArrayHeader::parse(&buf, 0, os, ls).unwrap();
         assert_eq!(hdr.client_id, 0);
@@ -1733,7 +1732,7 @@ mod tests {
         let mut header = empty_array();
         header[7] = max_bits;
         header[11] = page_bits;
-        stamp(&mut header, 0, eahd_len(8, 8));
+        test_util::checksum::restamp(&mut header, 0, eahd_len(8, 8));
 
         let err = if source {
             ExtensibleArrayHeader::parse_from_source(header.as_slice(), StoredAddress::new(0), 8, 8)
@@ -1762,7 +1761,7 @@ mod tests {
         let mut bytes = empty_array();
         bytes[7] = max_bits;
         bytes[11] = page_bits;
-        stamp(&mut bytes, 0, eahd_len(8, 8));
+        test_util::checksum::restamp(&mut bytes, 0, eahd_len(8, 8));
         let header = ExtensibleArrayHeader::parse(&bytes, 0, 8, 8).unwrap();
         assert_eq!(header.max_index_bits().get(), max_bits);
         assert_eq!(header.page_nelmts().get(), page_nelmts);
@@ -1927,7 +1926,7 @@ mod tests {
             .copy_from_slice(&(num_chunks as u64).to_le_bytes());
         file_data[header_offset + 60..header_offset + 68]
             .copy_from_slice(&(index_block_offset as u64).to_le_bytes());
-        stamp(&mut file_data, header_offset, eahd_len(os, ls));
+        test_util::checksum::restamp(&mut file_data, header_offset, eahd_len(os, ls));
 
         // Build EAIB at `index_block_offset`
         file_data[index_block_offset..index_block_offset + 4].copy_from_slice(b"EAIB");
@@ -1950,7 +1949,7 @@ mod tests {
         // (min_dblk_nelmts=4 and super_blk_min_data_ptrs=2 give two) and one per
         // super block (nine levels less the two taken as direct, so seven).
         // The pointers stay zero, and the read stops at the inline slots.
-        stamp(
+        test_util::checksum::restamp(
             &mut file_data,
             index_block_offset,
             (6 + osv) + 2 * osv + 2 * osv + 7 * osv + 4,
@@ -1994,7 +1993,7 @@ mod tests {
         // The index block address at offset 12 + 6*8 = 60
         file_data[header_offset + 60..header_offset + 68]
             .copy_from_slice(&(index_block_offset as u64).to_le_bytes());
-        stamp(&mut file_data, header_offset, eahd_len(os, ls));
+        test_util::checksum::restamp(&mut file_data, header_offset, eahd_len(os, ls));
 
         // EAIB
         file_data[index_block_offset..index_block_offset + 4].copy_from_slice(b"EAIB");
@@ -2042,13 +2041,13 @@ mod tests {
         // Prefix, two inline slots, the two direct pointers written above, and
         // one pointer per remaining super block (ten levels less the two taken
         // as direct).
-        stamp(
+        test_util::checksum::restamp(
             &mut file_data,
             index_block_offset,
             (6 + osv) + 2 * osv + n_direct_dblks * osv + 8 * osv + 4,
         );
         // Prefix, block offset, `min_dblk_nelmts` element slots, checksum.
-        stamp(
+        test_util::checksum::restamp(
             &mut file_data,
             data_block_offset,
             (6 + osv) + blk_off_size + min_dblk_nelmts as usize * osv + 4,
@@ -2302,7 +2301,7 @@ mod tests {
         // the six length-sized statistics fields.
         let addr_field = base as usize + 12 + 6 * 8;
         file[addr_field..addr_field + 8].copy_from_slice(&(new_ib as u64).to_le_bytes());
-        stamp(&mut file, base as usize, eahd_len(8, 8));
+        test_util::checksum::restamp(&mut file, base as usize, eahd_len(8, 8));
 
         let header = ExtensibleArrayHeader::parse(&file, base as usize, 8, 8).unwrap();
         assert_eq!(header.index_block_address.get() as usize, new_ib);

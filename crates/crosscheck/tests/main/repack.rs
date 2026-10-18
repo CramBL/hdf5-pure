@@ -5,16 +5,15 @@
 //! contract on a real variable-length string dataset the C library produces.
 
 use hdf5_pure::{
-    Error, File, FillTime, FormatError, MaxExtent, RepackOptions, VlenStringReadOptions, repack,
+    Error, File, FillTime, FormatError, MaxExtent, RepackOptions, VlenStringReadOptions,
 };
 use rstest::rstest;
-use tempfile::tempdir;
 
 use test_util_hdf5::{absence, file, fixtures};
 
 #[test]
 fn c_file_repacked_then_read_by_c_library() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let src = dir.path().join("c_src.h5");
     let dst = dir.path().join("repacked.h5");
 
@@ -26,7 +25,7 @@ fn c_file_repacked_then_read_by_c_library() {
         file.close().unwrap();
     }
 
-    repack(&src, &dst, &RepackOptions::new().drop_path("doomed")).unwrap();
+    hdf5_pure::repack(&src, &dst, &RepackOptions::new().drop_path("doomed")).unwrap();
 
     // hdf5-pure reads the repacked file: survivors intact, dropped gone.
     let f = File::open(&dst).unwrap();
@@ -62,7 +61,7 @@ fn c_reads_repacked_scale_offset() {
     // values back proves the verbatim-copied chunk format and reused pipeline
     // message are valid and interoperable, not a layout that merely round-trips
     // in-crate.
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let src = dir.path().join("so_src.h5");
     let dst = dir.path().join("so_repacked.h5");
 
@@ -76,7 +75,7 @@ fn c_reads_repacked_scale_offset() {
         b.write(&src).unwrap();
     }
 
-    repack(&src, &dst, &RepackOptions::new()).unwrap();
+    hdf5_pure::repack(&src, &dst, &RepackOptions::new()).unwrap();
 
     let f = File::open(&dst).unwrap();
     assert_eq!(f.dataset("vals").unwrap().read_i32().unwrap(), data);
@@ -90,7 +89,7 @@ fn repack_roundtrips_c_vlen_string_dataset() {
     use hdf5::types::VarLenUnicode;
     use std::str::FromStr;
 
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let src = dir.path().join("c_vlen.h5");
     let dst = dir.path().join("vlen_repacked.h5");
 
@@ -111,7 +110,7 @@ fn repack_roundtrips_c_vlen_string_dataset() {
     }
 
     // A VL-string dataset the C library wrote must now round-trip faithfully.
-    repack(&src, &dst, &RepackOptions::new()).unwrap();
+    hdf5_pure::repack(&src, &dst, &RepackOptions::new()).unwrap();
 
     // hdf5-pure reads the repacked values back, in order, including the empty
     // and non-ASCII elements.
@@ -155,7 +154,7 @@ fn repack_roundtrips_c_vlen_dataset_spanning_many_collections() {
     use hdf5::types::VarLenUnicode;
     use std::str::FromStr;
 
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let src = dir.path().join("c_vlen_many.h5");
     let dst = dir.path().join("vlen_many_repacked.h5");
 
@@ -177,7 +176,7 @@ fn repack_roundtrips_c_vlen_dataset_spanning_many_collections() {
         file.close().unwrap();
     }
 
-    repack(&src, &dst, &RepackOptions::new()).unwrap();
+    hdf5_pure::repack(&src, &dst, &RepackOptions::new()).unwrap();
 
     let f = File::open(&dst).unwrap();
     let got = f
@@ -205,7 +204,7 @@ fn repack_roundtrips_vlen_string_2d() {
     use hdf5::types::VarLenUnicode;
     use std::str::FromStr;
 
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let src = dir.path().join("c_vlen_2d.h5");
     let dst = dir.path().join("vlen_2d_repacked.h5");
 
@@ -226,7 +225,7 @@ fn repack_roundtrips_vlen_string_2d() {
         file.close().unwrap();
     }
 
-    repack(&src, &dst, &RepackOptions::new()).unwrap();
+    hdf5_pure::repack(&src, &dst, &RepackOptions::new()).unwrap();
 
     let f = File::open(&dst).unwrap();
     let grid = f.dataset("grid").unwrap();
@@ -250,7 +249,7 @@ fn repack_roundtrips_vlen_string_2d() {
 fn repack_roundtrips_c_vlen_sequence_dataset() {
     use hdf5::types::VarLenArray;
 
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let src = dir.path().join("c_vlen_seq.h5");
     let dst = dir.path().join("vlen_seq_repacked.h5");
 
@@ -272,7 +271,7 @@ fn repack_roundtrips_c_vlen_sequence_dataset() {
         file.close().unwrap();
     }
 
-    repack(&src, &dst, &RepackOptions::new()).unwrap();
+    hdf5_pure::repack(&src, &dst, &RepackOptions::new()).unwrap();
 
     // hdf5-pure must see the repacked datatype as a non-string variable-length
     // sequence (not silently converted).
@@ -302,7 +301,7 @@ fn repack_roundtrips_c_vlen_sequence_dataset() {
 fn repack_roundtrips_c_object_reference_dataset() {
     use hdf5::{ObjectReference, ObjectReference1, ReferencedObject};
 
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let src = dir.path().join("c_refs.h5");
     let dst = dir.path().join("refs_repacked.h5");
 
@@ -338,7 +337,7 @@ fn repack_roundtrips_c_object_reference_dataset() {
         file.close().unwrap();
     }
 
-    repack(&src, &dst, &RepackOptions::new()).unwrap();
+    hdf5_pure::repack(&src, &dst, &RepackOptions::new()).unwrap();
 
     // hdf5-pure sees the repacked datatype as an object reference (not converted).
     let f = File::open(&dst).unwrap();
@@ -382,7 +381,7 @@ fn repack_roundtrips_c_object_reference_dataset() {
 fn repack_refuses_reference_to_dropped_object() {
     use hdf5::{ObjectReference, ObjectReference1};
 
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let src = dir.path().join("c_refs_drop.h5");
     let dst = dir.path().join("refs_drop_repacked.h5");
 
@@ -406,7 +405,7 @@ fn repack_refuses_reference_to_dropped_object() {
 
     // Dropping the referenced object must fail the repack by name rather than
     // silently leave a dangling reference.
-    let err = repack(&src, &dst, &RepackOptions::new().drop_path("target")).unwrap_err();
+    let err = hdf5_pure::repack(&src, &dst, &RepackOptions::new().drop_path("target")).unwrap_err();
     match err {
         hdf5_pure::Error::RepackUnsupported(msg) => assert!(
             msg.contains("refs") && msg.contains("target") && msg.contains("dropped"),
@@ -426,7 +425,7 @@ fn repack_roundtrips_chunked_vlen_string_dataset() {
     use hdf5::types::VarLenUnicode;
     use std::str::FromStr;
 
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let src = dir.path().join("c_vlen_chunked.h5");
     let dst = dir.path().join("vlen_chunked_repacked.h5");
 
@@ -447,7 +446,7 @@ fn repack_roundtrips_chunked_vlen_string_dataset() {
         file.close().unwrap();
     }
 
-    repack(&src, &dst, &RepackOptions::new()).unwrap();
+    hdf5_pure::repack(&src, &dst, &RepackOptions::new()).unwrap();
 
     assert_eq!(
         File::open(&dst)
@@ -480,7 +479,7 @@ fn repack_roundtrips_chunked_vlen_string_dataset() {
 fn repack_roundtrips_filtered_and_resizable_vlen_string_datasets() {
     use hdf5::types::VarLenUnicode;
 
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let src = dir.path().join("filtered_vlen.h5");
     let dst = dir.path().join("filtered_vlen_repacked.h5");
 
@@ -500,7 +499,7 @@ fn repack_roundtrips_filtered_and_resizable_vlen_string_datasets() {
         b.write(&src).unwrap();
     }
 
-    repack(&src, &dst, &RepackOptions::new()).unwrap();
+    hdf5_pure::repack(&src, &dst, &RepackOptions::new()).unwrap();
 
     let out = File::open(&dst).unwrap();
     for name in ["compressed", "growable"] {
@@ -536,7 +535,7 @@ fn repack_roundtrips_filtered_and_resizable_vlen_string_datasets() {
 
 #[test]
 fn c_file_with_fill_times_repacked_then_read_by_c_library() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let src = dir.path().join("c_fill_src.h5");
     let dst = dir.path().join("c_fill_repacked.h5");
 
@@ -567,7 +566,7 @@ fn c_file_with_fill_times_repacked_then_read_by_c_library() {
         file.close().unwrap();
     }
 
-    repack(&src, &dst, &RepackOptions::new()).unwrap();
+    hdf5_pure::repack(&src, &dst, &RepackOptions::new()).unwrap();
 
     let f = File::open(&dst).unwrap();
     assert_eq!(
@@ -614,7 +613,7 @@ fn c_file_with_fill_times_repacked_then_read_by_c_library() {
 fn repack_carries_an_attribute_attr_value_cannot_express_faithfully() {
     use hdf5::types::TypeDescriptor;
 
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let src = dir.path().join("c_boolattr.h5");
     let dst = dir.path().join("boolattr_repacked.h5");
 
@@ -651,7 +650,7 @@ fn repack_carries_an_attribute_attr_value_cannot_express_faithfully() {
         "the C library should have written an enumeration: {source_type:?}"
     );
 
-    repack(&src, &dst, &RepackOptions::new()).unwrap();
+    hdf5_pure::repack(&src, &dst, &RepackOptions::new()).unwrap();
 
     let c = hdf5::File::open(&dst).unwrap();
     let attr = c.dataset("data").unwrap().attr("active").unwrap();
@@ -679,7 +678,7 @@ fn repack_carries_an_attribute_attr_value_cannot_express_faithfully() {
 fn repack_refuses_an_attribute_whose_address_it_cannot_rewrite() {
     use hdf5::{ObjectReference, ObjectReference1};
 
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let src = dir.path().join("c_refattr.h5");
     let dst = dir.path().join("refattr_repacked.h5");
 
@@ -700,7 +699,7 @@ fn repack_refuses_an_attribute_whose_address_it_cannot_rewrite() {
         file.close().unwrap();
     }
 
-    let err = repack(&src, &dst, &RepackOptions::new()).unwrap_err();
+    let err = hdf5_pure::repack(&src, &dst, &RepackOptions::new()).unwrap_err();
     match err {
         hdf5_pure::Error::RepackUnsupported(msg) => {
             assert!(
@@ -720,7 +719,7 @@ fn c_deflate_dataset_repacked_verbatim_read_by_both() {
     // streams verbatim (it never re-encodes them), then both readers decode the
     // result. That the C library reads its exact values back proves the copied
     // chunk bytes and the carried-through filter-pipeline message remain valid.
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let src = dir.path().join("c_deflate.h5");
     let dst = dir.path().join("c_deflate_repacked.h5");
 
@@ -739,7 +738,7 @@ fn c_deflate_dataset_repacked_verbatim_read_by_both() {
         file.close().unwrap();
     }
 
-    repack(&src, &dst, &RepackOptions::new()).unwrap();
+    hdf5_pure::repack(&src, &dst, &RepackOptions::new()).unwrap();
 
     let f = File::open(&dst).unwrap();
     assert_eq!(f.dataset("vals").unwrap().read_i32().unwrap(), data);
@@ -755,7 +754,7 @@ fn c_sparse_chunked_lossless_repacked_falls_back() {
     // grid, so repack falls back to the read-raw + re-encode path. With a lossless
     // pipeline (deflate) that fallback is faithful: the written values survive and
     // the unwritten tail reads back as the fill value (0).
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let src = dir.path().join("c_sparse.h5");
     let dst = dir.path().join("c_sparse_repacked.h5");
 
@@ -775,7 +774,7 @@ fn c_sparse_chunked_lossless_repacked_falls_back() {
         file.close().unwrap();
     }
 
-    repack(&src, &dst, &RepackOptions::new()).unwrap();
+    hdf5_pure::repack(&src, &dst, &RepackOptions::new()).unwrap();
 
     let f = File::open(&dst).unwrap();
     let vals = f.dataset("data").unwrap().read_i32().unwrap();
@@ -804,7 +803,7 @@ fn c_sparse_chunked_lossless_repacked_falls_back() {
 fn c_sparse_chunked_scale_offset_repacks_with_its_fill_value() {
     use hdf5::filters::ScaleOffset as CScaleOffset;
 
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let src = dir.path().join("c_sparse_so.h5");
     let dst = dir.path().join("c_sparse_so_repacked.h5");
 
@@ -848,7 +847,7 @@ fn c_sparse_chunked_scale_offset_repacks_with_its_fill_value() {
             .client_data
     };
 
-    repack(&src, &dst, &RepackOptions::new()).unwrap();
+    hdf5_pure::repack(&src, &dst, &RepackOptions::new()).unwrap();
 
     let mut want = head.clone();
     want.resize(n, fill);
@@ -888,7 +887,7 @@ fn c_sparse_chunked_lossy_repack_refused() {
     // than risk silently perturbing the data.
     use hdf5::filters::ScaleOffset as CScaleOffset;
 
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let src = dir.path().join("c_sparse_lossy.h5");
     let dst = dir.path().join("c_sparse_lossy_repacked.h5");
 
@@ -908,7 +907,7 @@ fn c_sparse_chunked_lossy_repack_refused() {
         file.close().unwrap();
     }
 
-    let err = repack(&src, &dst, &RepackOptions::new()).unwrap_err();
+    let err = hdf5_pure::repack(&src, &dst, &RepackOptions::new()).unwrap_err();
     match err {
         hdf5_pure::Error::RepackUnsupported(msg) => assert!(
             msg.contains("data") && msg.contains("scale-offset"),
@@ -941,7 +940,7 @@ fn repack_roundtrips_c_compound_with_vlen_string_member() {
         label: VarLenUnicode,
     }
 
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let src = dir.path().join("c_compound_vlen.h5");
     let dst = dir.path().join("compound_vlen_repacked.h5");
 
@@ -971,7 +970,7 @@ fn repack_roundtrips_c_compound_with_vlen_string_member() {
         file.close().unwrap();
     }
 
-    repack(&src, &dst, &RepackOptions::new()).unwrap();
+    hdf5_pure::repack(&src, &dst, &RepackOptions::new()).unwrap();
 
     // The datatype must stay a compound carrying a variable-length member, not
     // be flattened or converted.
@@ -1019,7 +1018,7 @@ fn repack_roundtrips_c_compound_with_two_vlen_members() {
         samples: VarLenArray<i32>,
     }
 
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let src = dir.path().join("c_compound_two_vlen.h5");
     let dst = dir.path().join("compound_two_vlen_repacked.h5");
 
@@ -1046,7 +1045,7 @@ fn repack_roundtrips_c_compound_with_two_vlen_members() {
         file.close().unwrap();
     }
 
-    repack(&src, &dst, &RepackOptions::new()).unwrap();
+    hdf5_pure::repack(&src, &dst, &RepackOptions::new()).unwrap();
 
     let c = hdf5::File::open(&dst).unwrap();
     let cvals = c.dataset("rows").unwrap().read_raw::<Row>().unwrap();
@@ -1078,7 +1077,7 @@ fn repack_roundtrips_c_chunked_compound_with_vlen_member() {
         label: VarLenUnicode,
     }
 
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let src = dir.path().join("c_chunked_compound_vlen.h5");
     let dst = dir.path().join("chunked_compound_vlen_repacked.h5");
 
@@ -1104,7 +1103,7 @@ fn repack_roundtrips_c_chunked_compound_with_vlen_member() {
         file.close().unwrap();
     }
 
-    repack(&src, &dst, &RepackOptions::new()).unwrap();
+    hdf5_pure::repack(&src, &dst, &RepackOptions::new()).unwrap();
 
     // Chunking must survive the rebuild, not be flattened to contiguous.
     let f = File::open(&dst).unwrap();
@@ -1142,7 +1141,7 @@ fn repack_roundtrips_c_compound_with_object_reference_member() {
         target: ObjectReference1,
     }
 
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let src = dir.path().join("c_compound_ref.h5");
     let dst = dir.path().join("compound_ref_repacked.h5");
 
@@ -1180,7 +1179,7 @@ fn repack_roundtrips_c_compound_with_object_reference_member() {
         file.close().unwrap();
     }
 
-    repack(&src, &dst, &RepackOptions::new()).unwrap();
+    hdf5_pure::repack(&src, &dst, &RepackOptions::new()).unwrap();
 
     let c = hdf5::File::open(&dst).unwrap();
     let cvals = c.dataset("rows").unwrap().read_raw::<Row>().unwrap();
@@ -1218,7 +1217,7 @@ fn repack_refuses_compound_reference_to_dropped_object() {
         target: ObjectReference1,
     }
 
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let src = dir.path().join("c_compound_ref_dropped.h5");
     let dst = dir.path().join("compound_ref_dropped_repacked.h5");
 
@@ -1243,7 +1242,7 @@ fn repack_refuses_compound_reference_to_dropped_object() {
         file.close().unwrap();
     }
 
-    let err = repack(&src, &dst, &RepackOptions::new().drop_path("doomed")).unwrap_err();
+    let err = hdf5_pure::repack(&src, &dst, &RepackOptions::new().drop_path("doomed")).unwrap_err();
     match err {
         hdf5_pure::Error::RepackUnsupported(msg) => assert!(
             msg.contains("rows") && msg.contains("doomed"),
@@ -1275,7 +1274,7 @@ fn repack_roundtrips_c_compound_with_both_vlen_and_reference_members() {
         target: ObjectReference1,
     }
 
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let src = dir.path().join("c_compound_both.h5");
     let dst = dir.path().join("compound_both_repacked.h5");
 
@@ -1306,7 +1305,7 @@ fn repack_roundtrips_c_compound_with_both_vlen_and_reference_members() {
         file.close().unwrap();
     }
 
-    repack(&src, &dst, &RepackOptions::new()).unwrap();
+    hdf5_pure::repack(&src, &dst, &RepackOptions::new()).unwrap();
 
     let c = hdf5::File::open(&dst).unwrap();
     let cvals = c.dataset("rows").unwrap().read_raw::<Row>().unwrap();
@@ -1341,7 +1340,7 @@ fn repack_refuses_dropped_target_in_a_compound_that_also_has_a_vlen_member() {
         target: ObjectReference1,
     }
 
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let src = dir.path().join("c_both_dropped.h5");
     let dst = dir.path().join("both_dropped_repacked.h5");
 
@@ -1366,7 +1365,7 @@ fn repack_refuses_dropped_target_in_a_compound_that_also_has_a_vlen_member() {
         file.close().unwrap();
     }
 
-    let err = repack(&src, &dst, &RepackOptions::new().drop_path("doomed")).unwrap_err();
+    let err = hdf5_pure::repack(&src, &dst, &RepackOptions::new().drop_path("doomed")).unwrap_err();
     match err {
         hdf5_pure::Error::RepackUnsupported(msg) => assert!(
             msg.contains("rows") && msg.contains("doomed"),
@@ -1393,7 +1392,7 @@ fn repack_refuses_chunked_compound_with_both_vlen_and_reference_members() {
         target: ObjectReference1,
     }
 
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let src = dir.path().join("c_both_chunked.h5");
     let dst = dir.path().join("both_chunked_repacked.h5");
 
@@ -1421,7 +1420,7 @@ fn repack_refuses_chunked_compound_with_both_vlen_and_reference_members() {
         file.close().unwrap();
     }
 
-    let err = repack(&src, &dst, &RepackOptions::new()).unwrap_err();
+    let err = hdf5_pure::repack(&src, &dst, &RepackOptions::new()).unwrap_err();
     match err {
         hdf5_pure::Error::RepackUnsupported(msg) => assert!(
             msg.contains("rows") && msg.contains("object-reference"),
@@ -1446,7 +1445,7 @@ fn c_written_attribute_encodings_survive_a_repack() {
     use hdf5::types::{FixedAscii, FloatSize, IntSize, TypeDescriptor, VarLenUnicode};
     use std::str::FromStr;
 
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let src = dir.path().join("c_attr_src.h5");
     let dst = dir.path().join("c_attr_dst.h5");
 
@@ -1551,7 +1550,7 @@ fn c_written_attribute_encodings_survive_a_repack() {
         file.close().unwrap();
     }
 
-    repack(&src, &dst, &RepackOptions::new()).unwrap();
+    hdf5_pure::repack(&src, &dst, &RepackOptions::new()).unwrap();
 
     // One row per entry in issue #241's table of what a decode loses.
     let expected: [(&str, TypeDescriptor, Vec<usize>); 10] = [
@@ -1664,7 +1663,7 @@ fn repack_preserves_c_written_unallocated_storage_in_every_layout() {
     const MATERIALIZED: u64 = (N * core::mem::size_of::<i32>()) as u64;
 
     for layout in ["contiguous", "chunked", "filtered", "extensible"] {
-        let dir = tempdir().unwrap();
+        let dir = tempfile::tempdir().unwrap();
         let src = dir.path().join("src.h5");
         let dst = dir.path().join("dst.h5");
         {
@@ -1708,7 +1707,7 @@ fn repack_preserves_c_written_unallocated_storage_in_every_layout() {
             );
         }
 
-        repack(&src, &dst, &RepackOptions::new()).unwrap();
+        hdf5_pure::repack(&src, &dst, &RepackOptions::new()).unwrap();
 
         let f = File::open(&dst).unwrap();
         let ds = f.dataset("col").unwrap();
@@ -1825,7 +1824,7 @@ fn repack_preserves_c_written_unallocated_storage_in_every_layout() {
 fn repack_keeps_the_chunks_a_partly_written_dataset_holds() {
     const N: usize = 1000;
     const FILL: i32 = 7;
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let src = dir.path().join("src.h5");
     let dst = dir.path().join("dst.h5");
     {
@@ -1853,7 +1852,7 @@ fn repack_keeps_the_chunks_a_partly_written_dataset_holds() {
         );
     }
 
-    repack(&src, &dst, &RepackOptions::new()).unwrap();
+    hdf5_pure::repack(&src, &dst, &RepackOptions::new()).unwrap();
 
     let f = File::open(&dst).unwrap();
     let ds = f.dataset("col").unwrap();
@@ -1893,7 +1892,7 @@ fn repack_keeps_the_chunks_a_partly_written_dataset_holds() {
 fn repack_still_refuses_a_never_written_dataset_with_a_lossy_filter() {
     use hdf5::filters::ScaleOffset as CScaleOffset;
 
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let src = dir.path().join("c_unwritten_lossy.h5");
     let dst = dir.path().join("c_unwritten_lossy_repacked.h5");
     {
@@ -1916,7 +1915,7 @@ fn repack_still_refuses_a_never_written_dataset_with_a_lossy_filter() {
         assert!(f.dataset("data").unwrap().chunks().unwrap().is_empty());
     }
 
-    let err = repack(&src, &dst, &RepackOptions::new()).unwrap_err();
+    let err = hdf5_pure::repack(&src, &dst, &RepackOptions::new()).unwrap_err();
     match err {
         hdf5_pure::Error::RepackUnsupported(msg) => assert!(
             msg.contains("data") && msg.contains("scale-offset"),
@@ -1960,7 +1959,7 @@ fn pipeline_of(path: &std::path::Path, dataset: &str) -> Vec<(u16, bool)> {
 /// message byte-exact and never had this defect.
 #[test]
 fn c_pipeline_order_and_optional_flags_survive_re_encoding_repack() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let src = dir.path().join("c_order.h5");
     let dst = dir.path().join("c_order_repacked.h5");
 
@@ -1984,7 +1983,7 @@ fn c_pipeline_order_and_optional_flags_survive_re_encoding_repack() {
 
     let source_pipeline = pipeline_of(&src, "data");
 
-    repack(&src, &dst, &RepackOptions::new()).unwrap();
+    hdf5_pure::repack(&src, &dst, &RepackOptions::new()).unwrap();
 
     assert_eq!(
         pipeline_of(&dst, "data"),
@@ -2016,7 +2015,7 @@ fn c_pipeline_order_and_optional_flags_survive_re_encoding_repack() {
 /// library's pipeline as a literal rather than comparing destination to source.
 #[test]
 fn a_never_written_dataset_keeps_its_pipeline_order_and_optional_flags() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let src = dir.path().join("c_unwritten.h5");
     let dst = dir.path().join("c_unwritten_repacked.h5");
 
@@ -2044,7 +2043,7 @@ fn a_never_written_dataset_keeps_its_pipeline_order_and_optional_flags() {
         "the C library did not write the pipeline this test is about"
     );
 
-    repack(&src, &dst, &RepackOptions::new()).unwrap();
+    hdf5_pure::repack(&src, &dst, &RepackOptions::new()).unwrap();
 
     assert_eq!(
         pipeline_of(&dst, "data"),
@@ -2068,7 +2067,7 @@ fn a_never_written_dataset_keeps_its_pipeline_order_and_optional_flags() {
 #[cfg(feature = "__hdf5-2")]
 #[test]
 fn a_vlen_string_dataset_keeps_its_pipeline_order_and_optional_flags() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let src = dir.path().join("c_vlen_order.h5");
     let dst = dir.path().join("c_vlen_order_repacked.h5");
 
@@ -2101,7 +2100,7 @@ fn a_vlen_string_dataset_keeps_its_pipeline_order_and_optional_flags() {
         "the C library did not write the pipeline this test is about"
     );
 
-    repack(&src, &dst, &RepackOptions::new()).unwrap();
+    hdf5_pure::repack(&src, &dst, &RepackOptions::new()).unwrap();
 
     assert_eq!(
         pipeline_of(&dst, "data"),
@@ -2182,7 +2181,7 @@ fn the_encodings_only_this_crate_writes_survive_a_repack_for_the_c_library() {
 #[case("./grp/doomed")]
 #[case("grp/./doomed/")]
 fn every_spelling_of_a_drop_path_drops_one_object_the_c_library_wrote(#[case] spelling: &str) {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let src = dir.path().join("c_drop_spelling.h5");
     let dst = dir.path().join("drop_spelling_repacked.h5");
 
@@ -2204,7 +2203,7 @@ fn every_spelling_of_a_drop_path_drops_one_object_the_c_library_wrote(#[case] sp
         file.close().unwrap();
     }
 
-    repack(&src, &dst, &RepackOptions::new().drop_path(spelling)).unwrap();
+    hdf5_pure::repack(&src, &dst, &RepackOptions::new().drop_path(spelling)).unwrap();
 
     let f = File::open(&dst).unwrap();
     assert_eq!(

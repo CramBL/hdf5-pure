@@ -38,15 +38,11 @@ use std::sync::{Arc, Mutex};
 
 use crate::file_writer::AttrValue;
 use crate::mat::class::MatClass;
-use crate::mat::dims::{
-    STORAGE_DIMS_BUF_LEN, matrix_dims, storage_dims_u64, storage_dims_u64_into, vector_dims,
-};
+use crate::mat::dims::{self, STORAGE_DIMS_BUF_LEN};
 use crate::mat::error::MatError;
-use crate::mat::identifier::{dedupe_name, is_valid_name, sanitize_name};
+use crate::mat::identifier;
 use crate::mat::options::{Compression, EmptyMarkerEncoding, InvalidNamePolicy, Options};
-use crate::mat::producer::{
-    BlockElement, DataProducer, ProducerChunks, plan_blocking, total_elements,
-};
+use crate::mat::producer::{self, BlockElement, DataProducer, ProducerChunks};
 use crate::mat::string_object;
 use crate::mat::userblock::{self, USERBLOCK_SIZE};
 use crate::mat::utf16;
@@ -186,14 +182,14 @@ impl MatBuilder {
     ) -> Result<String, MatError> {
         let candidate = match policy {
             InvalidNamePolicy::Error => {
-                if !is_valid_name(raw) {
+                if !identifier::is_valid_name(raw) {
                     return Err(MatError::Custom(format!("invalid MATLAB name: {raw}")));
                 }
                 raw.to_owned()
             }
-            InvalidNamePolicy::Sanitize => sanitize_name(raw),
+            InvalidNamePolicy::Sanitize => identifier::sanitize_name(raw),
         };
-        let unique = dedupe_name(candidate, used);
+        let unique = identifier::dedupe_name(candidate, used);
         used.insert(unique.clone());
         Ok(unique)
     }
@@ -544,7 +540,7 @@ impl MatBuilder {
         data: &[(T, T)],
     ) -> Result<&mut Self, MatError> {
         let mut storage_buf = [0u64; STORAGE_DIMS_BUF_LEN];
-        let storage = storage_dims_u64_into(matlab_dims, &mut storage_buf);
+        let storage = dims::storage_dims_u64_into(matlab_dims, &mut storage_buf);
         let compression = self.options.compression;
         let target = self.resolve_target(name)?;
         let ds = self.dataset_at_target(&target);
@@ -640,7 +636,8 @@ impl MatBuilder {
             return Err(MatError::CompressionUnsupportedForBlocks);
         }
 
-        let blocking = plan_blocking(total_elements(matlab_dims), T::ELEMENT_SIZE)?;
+        let blocking =
+            producer::plan_blocking(producer::total_elements(matlab_dims), T::ELEMENT_SIZE)?;
         if blocking.block_count == 0 {
             return self.write_empty(name, T::CLASS, matlab_dims);
         }
@@ -649,7 +646,7 @@ impl MatBuilder {
         // this one takes its shape from the caller with no accompanying slice to
         // bound its rank, and the stack form panics past
         // `STORAGE_DIMS_BUF_LEN` dimensions.
-        let storage = storage_dims_u64(matlab_dims);
+        let storage = dims::storage_dims_u64(matlab_dims);
         // Cloned before the builder is borrowed: the adapter needs the stash and
         // `dataset_at_target` holds `self` for the rest of the function.
         let error = Arc::clone(&self.producer_error);
@@ -778,7 +775,7 @@ impl MatBuilder {
             return self.write_empty(name, class, matlab_dims);
         }
         let mut storage_buf = [0u64; STORAGE_DIMS_BUF_LEN];
-        let storage = storage_dims_u64_into(matlab_dims, &mut storage_buf);
+        let storage = dims::storage_dims_u64_into(matlab_dims, &mut storage_buf);
         let compression = self.options.compression;
         let target = self.resolve_target(name)?;
         let ds = self.dataset_at_target(&target);
@@ -896,7 +893,7 @@ impl MatBuilder {
         res?;
 
         let mut storage_buf = [0u64; STORAGE_DIMS_BUF_LEN];
-        let storage = storage_dims_u64_into(matlab_dims, &mut storage_buf);
+        let storage = dims::storage_dims_u64_into(matlab_dims, &mut storage_buf);
         if paths.is_empty() {
             // Empty cell: emit a class=cell empty marker at the resolved
             // target. Reuse the empty-marker emit path.
@@ -945,7 +942,7 @@ impl MatBuilder {
     /// 1-D mode. Returns a stack-allocated 2-element array.
     #[inline]
     pub fn vector_dims(&self, len: usize) -> [usize; 2] {
-        vector_dims(len, self.options.one_dimensional_mode)
+        dims::vector_dims(len, self.options.one_dimensional_mode)
     }
 
     /// MATLAB shape for a value with the given multi-dimensional `extents`.
@@ -953,7 +950,7 @@ impl MatBuilder {
     /// a `Vec<usize>` with capacity 2.
     #[inline]
     pub fn matrix_dims(&self, extents: &[usize]) -> Vec<usize> {
-        matrix_dims(extents, self.options.one_dimensional_mode)
+        dims::matrix_dims(extents, self.options.one_dimensional_mode)
     }
 
     // -- finalize ----------------------------------------------------------
@@ -1224,7 +1221,7 @@ impl MatBuilder {
         class: &str,
     ) {
         let mut storage_buf = [0u64; STORAGE_DIMS_BUF_LEN];
-        let storage = storage_dims_u64_into(matlab_dims, &mut storage_buf);
+        let storage = dims::storage_dims_u64_into(matlab_dims, &mut storage_buf);
         let refs = self.refs_mut();
         let ds = refs.create_dataset(ref_name);
         ds.set_attr("H5PATH", refs_h5path(ref_name));
@@ -1270,7 +1267,7 @@ pub(crate) fn emit_empty_storage(
     match encoding {
         EmptyMarkerEncoding::ZeroElement => {
             let mut storage_buf = [0u64; STORAGE_DIMS_BUF_LEN];
-            let shape = storage_dims_u64_into(matlab_dims, &mut storage_buf);
+            let shape = dims::storage_dims_u64_into(matlab_dims, &mut storage_buf);
             emit_zero_element(ds, class, shape);
         }
         EmptyMarkerEncoding::DataAsDims => {

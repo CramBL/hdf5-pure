@@ -8,7 +8,7 @@ use crate::address::StoredAddressExt;
 use crate::address::{AddressContext, StoredAddress};
 #[cfg(test)]
 use crate::address::{BaseAddress, BaseAddressExt};
-use crate::btree_v1::{collect_symbol_table_nodes, collect_symbol_table_nodes_from_source};
+use crate::btree_v1;
 use crate::convert::Narrow;
 use crate::error::FormatError;
 use crate::local_heap::LocalHeap;
@@ -52,8 +52,12 @@ pub fn resolve_v1_group_entries(
         widths,
     )?;
 
-    let snod_addrs =
-        collect_symbol_table_nodes(file_data, sym_table_msg.btree_address, widths, addresses)?;
+    let snod_addrs = btree_v1::collect_symbol_table_nodes(
+        file_data,
+        sym_table_msg.btree_address,
+        widths,
+        addresses,
+    )?;
 
     let mut entries = Vec::new();
     for snod_addr in snod_addrs {
@@ -136,7 +140,7 @@ fn v1_symbols_from_source<S: Source + ?Sized>(
         heap.data_segment_size.to_usize()?,
     )?;
 
-    let snod_addrs = collect_symbol_table_nodes_from_source(
+    let snod_addrs = btree_v1::collect_symbol_table_nodes_from_source(
         source,
         sym_table_msg.btree_address,
         widths,

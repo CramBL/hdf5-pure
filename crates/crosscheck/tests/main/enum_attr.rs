@@ -15,11 +15,10 @@
 use std::collections::{BTreeMap, HashMap};
 
 use hdf5_pure::{AttrValue, Datatype, File};
-use tempfile::tempdir;
 
 /// Write attributes with the C library, then open the file with this crate.
 fn c_writes(write: impl FnOnce(&hdf5::File)) -> File {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("enum_attrs.h5");
 
     {

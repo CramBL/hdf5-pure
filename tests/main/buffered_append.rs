@@ -7,7 +7,7 @@
 use hdf5_pure::FileAccessProperties;
 use hdf5_pure::FileLocking;
 use hdf5_pure::{AttrValue, Error, File, FileBuilder, ScaleOffset};
-use tempfile::tempdir;
+
 use test_util_hdf5::dataset::{self, Filter, Unlimited};
 
 const SHUFFLE_DEFLATE: &[Filter] = &[Filter::Shuffle, Filter::Deflate(4)];
@@ -17,7 +17,7 @@ const SHUFFLE_DEFLATE: &[Filter] = &[Filter::Shuffle, Filter::Deflate(4)];
 /// Compares complete file bytes to detect writes within retained aggregate reservations.
 #[test]
 fn a_call_that_does_not_complete_a_chunk_does_not_touch_the_file() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let p = dir.path().join("d.h5");
     let chunk = 16u64;
     Unlimited::<i32>::new("d", &[], chunk)
@@ -73,7 +73,7 @@ fn a_call_that_does_not_complete_a_chunk_does_not_touch_the_file() {
 /// tell the two apart.
 #[test]
 fn the_on_disk_length_stays_chunk_aligned_after_every_call() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     for &filtered in &[true, false] {
         let p = dir.path().join(format!("aligned_{filtered}.h5"));
         let chunk = 16u64;
@@ -117,7 +117,7 @@ fn the_on_disk_length_stays_chunk_aligned_after_every_call() {
 /// a side effect and `has_staged_edits` would have gone false.
 #[test]
 fn an_unaligned_filtered_flush_never_commits() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let p = dir.path().join("d.h5");
     Unlimited::new("d", &(0..10).collect::<Vec<i32>>(), 8)
         .filters(SHUFFLE_DEFLATE)
@@ -167,7 +167,7 @@ fn an_unaligned_filtered_flush_never_commits() {
 /// equal to the chunk length.
 #[test]
 fn every_shape_round_trips() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     for &filtered in &[true, false] {
         for &(start, chunk, batch, calls) in &[
             (0i32, 4u64, 1usize, 13usize), // one element at a time
@@ -209,7 +209,7 @@ fn every_shape_round_trips() {
 /// to re-encode a trailing chunk.
 #[test]
 fn a_filtered_dataset_takes_any_append_length() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let p = dir.path().join("d.h5");
     Unlimited::<i32>::new("d", &[], 100)
         .filters(SHUFFLE_DEFLATE)
@@ -237,7 +237,7 @@ fn a_filtered_dataset_takes_any_append_length() {
 /// on when a crash takes the buffer.
 #[test]
 fn the_file_holds_exactly_what_was_written_not_what_was_buffered() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let p = dir.path().join("d.h5");
     Unlimited::<i32>::new("d", &[], 8)
         .filters(SHUFFLE_DEFLATE)
@@ -265,7 +265,7 @@ fn the_file_holds_exactly_what_was_written_not_what_was_buffered() {
 /// appender, and appending afterwards still works.
 #[test]
 fn flush_publishes_the_tail_and_the_appender_stays_usable() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let p = dir.path().join("d.h5");
     Unlimited::<i32>::new("d", &[], 8)
         .filters(SHUFFLE_DEFLATE)
@@ -299,7 +299,7 @@ fn flush_publishes_the_tail_and_the_appender_stays_usable() {
 /// data silently, even though it cannot report an error.
 #[test]
 fn dropping_the_appender_flushes_its_buffer() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let p = dir.path().join("d.h5");
     Unlimited::<i32>::new("d", &[], 16)
         .filters(SHUFFLE_DEFLATE)
@@ -324,7 +324,7 @@ fn dropping_the_appender_flushes_its_buffer() {
 /// `Dataset::append` afterwards picks it up from there.
 #[test]
 fn resuming_an_unaligned_filtered_log_lands_back_on_a_boundary() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let p = dir.path().join("d.h5");
     Unlimited::new("d", &(0..10).collect::<Vec<i32>>(), 8)
         .filters(SHUFFLE_DEFLATE)
@@ -367,7 +367,7 @@ fn resuming_an_unaligned_filtered_log_lands_back_on_a_boundary() {
 /// and values they published.
 #[test]
 fn the_handle_reads_what_the_appender_wrote() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let p = dir.path().join("d.h5");
     Unlimited::new("d", &(0..10).collect::<Vec<i32>>(), 8)
         .filters(SHUFFLE_DEFLATE)
@@ -390,7 +390,7 @@ fn the_handle_reads_what_the_appender_wrote() {
 /// its own, so there is nothing for the staged set to collide with (issue #393).
 #[test]
 fn an_appender_on_an_unaligned_filtered_dataset_is_made_beside_staged_edits() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let p = dir.path().join("d.h5");
     Unlimited::new("d", &(0..10).collect::<Vec<i32>>(), 8)
         .filters(SHUFFLE_DEFLATE)
@@ -436,7 +436,7 @@ fn an_appender_on_an_unaligned_filtered_dataset_is_made_beside_staged_edits() {
 /// so a caller learns immediately rather than after buffering a run of data.
 #[test]
 fn an_ineligible_dataset_is_refused_at_construction() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let p = dir.path().join("d.h5");
     let mut b = FileBuilder::new();
     b.create_dataset("d").with_i32_data(&[1, 2, 3]); // contiguous
@@ -456,7 +456,7 @@ fn an_ineligible_dataset_is_refused_at_construction() {
 /// A read-only file has nothing to append to.
 #[test]
 fn a_read_only_file_is_refused() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let p = dir.path().join("d.h5");
     Unlimited::new("d", &(0..8).collect::<Vec<i32>>(), 4).pure_create(&p);
     let file = File::open(&p).unwrap();
@@ -474,7 +474,7 @@ fn a_read_only_file_is_refused() {
 /// retry, so the call rolls its own bytes back out of the buffer.
 #[test]
 fn a_refused_append_buffers_nothing() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let p = dir.path().join("d.h5");
     Unlimited::<i32>::new("d", &[], 8).pure_create(&p);
 
@@ -503,7 +503,7 @@ fn a_refused_append_buffers_nothing() {
 /// no error reported anywhere.
 #[test]
 fn a_staged_edit_on_a_dataset_with_a_live_appender_is_refused() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let p = dir.path().join("d.h5");
     Unlimited::<i32>::new("d", &[], 8).pure_create(&p);
 
@@ -538,7 +538,7 @@ fn a_staged_edit_on_a_dataset_with_a_live_appender_is_refused() {
 /// would break the appender, not everything.
 #[test]
 fn an_unrelated_staged_edit_is_allowed_beside_a_live_appender() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let p = dir.path().join("d.h5");
     Unlimited::<i32>::new("d", &[], 8).pure_create(&p);
 
@@ -574,7 +574,7 @@ fn an_unrelated_staged_edit_is_allowed_beside_a_live_appender() {
 /// realignment commit was owed (issue #393).
 #[test]
 fn an_unrelated_staged_edit_is_allowed_beside_an_unaligned_filtered_appender() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let p = dir.path().join("d.h5");
     Unlimited::new("d", &(0..10).collect::<Vec<i32>>(), 8)
         .filters(SHUFFLE_DEFLATE)
@@ -607,7 +607,7 @@ fn an_unrelated_staged_edit_is_allowed_beside_an_unaligned_filtered_appender() {
 /// goes, so a later one works.
 #[test]
 fn a_second_appender_on_the_same_dataset_is_refused() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let p = dir.path().join("d.h5");
     Unlimited::<i32>::new("d", &[], 8).pure_create(&p);
 
@@ -642,7 +642,7 @@ fn a_second_appender_on_the_same_dataset_is_refused() {
 /// `finish` that always fails and a drop that discards the buffer silently.
 #[test]
 fn a_swmr_writer_is_refused_at_construction() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let p = dir.path().join("d.h5");
     Unlimited::new("d", &(0..8).collect::<Vec<i32>>(), 8).pure_create(&p); // unfiltered and aligned: SWMR-eligible otherwise
 
@@ -667,7 +667,7 @@ fn a_swmr_writer_is_refused_at_construction() {
 /// the appender holding the ones that did not, rather than losing them.
 #[test]
 fn a_failed_write_keeps_the_unwritten_elements() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let p = dir.path().join("d.h5");
     Unlimited::<i32>::new("d", &[], 4).pure_create(&p);
 
@@ -693,7 +693,7 @@ fn a_failed_write_keeps_the_unwritten_elements() {
 /// split wherever it likes; the halves join up and the pair writes as one.
 #[test]
 fn append_raw_completes_an_element_split_across_calls() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let p = dir.path().join("d.h5");
     Unlimited::<i32>::new("d", &[], 4).pure_create(&p);
     {
@@ -716,7 +716,7 @@ fn append_raw_completes_an_element_split_across_calls() {
 /// truncated value or padding one.
 #[test]
 fn a_partial_trailing_element_is_refused_at_the_flush() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let p = dir.path().join("d.h5");
     Unlimited::<i32>::new("d", &[], 4).pure_create(&p);
     let session = File::open_rw(&p).unwrap();
@@ -734,7 +734,7 @@ fn a_partial_trailing_element_is_refused_at_the_flush() {
 /// writes them. Elements an earlier call already wrote stay in the file.
 #[test]
 fn discard_abandons_the_buffer_but_not_what_was_written() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let p = dir.path().join("d.h5");
     Unlimited::<i32>::new("d", &[], 4)
         .filters(SHUFFLE_DEFLATE)
@@ -760,7 +760,7 @@ fn discard_abandons_the_buffer_but_not_what_was_written() {
 /// a named behaviour is worth an assertion.
 #[test]
 fn a_buffered_appender_writes_into_freed_space() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let p = dir.path().join("d.h5");
     Unlimited::<i32>::new("d", &[], 1024).pure_create(&p);
     let payload: Vec<i32> = (0..16384).collect();
@@ -837,7 +837,7 @@ fn build_lossy(path: &std::path::Path, n: usize) {
 /// is where the caller can still act on it, and the buffer is left whole.
 #[test]
 fn a_partial_flush_on_a_lossy_dataset_is_refused_with_the_buffer_intact() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let p = dir.path().join("d.h5");
     build_lossy(&p, 4);
     let committed = dataset::read_pure::<f64>(&p, "d");
@@ -895,7 +895,7 @@ fn a_partial_flush_on_a_lossy_dataset_is_refused_with_the_buffer_intact() {
 /// applying it would discard the elements instead of landing them.
 #[test]
 fn dropping_a_lossy_appender_still_writes_its_partial_tail() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let p = dir.path().join("d.h5");
     build_lossy(&p, 4);
     {

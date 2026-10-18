@@ -4,7 +4,6 @@
 
 use hdf5_pure::{AttrValue, Error, File, FileBuilder, Object};
 
-use tempfile::tempdir;
 use test_util_hdf5::dataset::Unlimited;
 use test_util_hdf5::session;
 
@@ -29,7 +28,7 @@ fn deref_dataset(file: &File) -> hdf5_pure::Dataset {
 /// live dataset.
 #[test]
 fn a_dereferenced_handle_can_append() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let p = dir.path().join("byref.h5");
     build(&p);
     {
@@ -53,7 +52,7 @@ fn a_dereferenced_handle_can_append() {
 /// engines were merged.
 #[test]
 fn a_dereferenced_handle_can_append_on_a_bounded_file() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let p = dir.path().join("byref_bounded.h5");
     build(&p);
     {
@@ -82,7 +81,7 @@ fn a_dereferenced_handle_can_append_on_a_bounded_file() {
 /// error, whichever way the handle is used.
 #[test]
 fn appending_by_reference_after_a_commit_is_refused_not_silently_lost() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let p = dir.path().join("byref_stale.h5");
     build(&p);
     {
@@ -129,7 +128,7 @@ fn appending_by_reference_after_a_commit_is_refused_not_silently_lost() {
 /// applied. Two conditions, two errors, each saying which it is.
 #[test]
 fn appending_by_reference_dereferenced_after_staging_is_refused_by_the_session() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let p = dir.path().join("byref_staged_first.h5");
     build(&p);
     let file = File::open_rw(&p).unwrap();
@@ -148,7 +147,7 @@ fn appending_by_reference_dereferenced_after_staging_is_refused_by_the_session()
 /// committing would.
 #[test]
 fn appending_by_reference_with_staged_edits_pending_is_refused() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let p = dir.path().join("byref_staged.h5");
     build(&p);
     let file = File::open_rw(&p).unwrap();

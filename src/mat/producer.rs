@@ -42,10 +42,7 @@ use crate::datatype::Datatype;
 use crate::error::FormatError;
 use crate::mat::class::MatClass;
 use crate::mat::error::MatError;
-use crate::type_builders::{
-    CompoundTypeBuilder, make_f32_type, make_f64_type, make_i8_type, make_i16_type, make_i32_type,
-    make_i64_type, make_u8_type, make_u16_type, make_u32_type, make_u64_type,
-};
+use crate::type_builders::{self, CompoundTypeBuilder};
 use std::sync::{Arc, Mutex};
 
 /// Byte size a block aims for. Large enough that a producer call's overhead is
@@ -341,7 +338,7 @@ pub trait BlockElement: sealed::Sealed {
 }
 
 macro_rules! block_elements {
-    ($($ty:ty => $class:ident, $make:ident),* $(,)?) => {
+    ($($ty:ty => $class:ident, $make:path),* $(,)?) => {
         $(
             impl sealed::Sealed for $ty {}
             impl BlockElement for $ty {
@@ -369,16 +366,16 @@ macro_rules! block_elements {
 }
 
 block_elements! {
-    f64 => Double, make_f64_type,
-    f32 => Single, make_f32_type,
-    i8  => Int8,   make_i8_type,
-    i16 => Int16,  make_i16_type,
-    i32 => Int32,  make_i32_type,
-    i64 => Int64,  make_i64_type,
-    u8  => UInt8,  make_u8_type,
-    u16 => UInt16, make_u16_type,
-    u32 => UInt32, make_u32_type,
-    u64 => UInt64, make_u64_type,
+    f64 => Double, type_builders::make_f64_type,
+    f32 => Single, type_builders::make_f32_type,
+    i8  => Int8,   type_builders::make_i8_type,
+    i16 => Int16,  type_builders::make_i16_type,
+    i32 => Int32,  type_builders::make_i32_type,
+    i64 => Int64,  type_builders::make_i64_type,
+    u8  => UInt8,  type_builders::make_u8_type,
+    u16 => UInt16, type_builders::make_u16_type,
+    u32 => UInt32, type_builders::make_u32_type,
+    u64 => UInt64, type_builders::make_u64_type,
 }
 
 impl sealed::Sealed for bool {}
@@ -387,7 +384,7 @@ impl BlockElement for bool {
     const ELEMENT_SIZE: usize = 1;
     const INT_DECODE: Option<i32> = Some(1);
     fn datatype() -> Datatype {
-        make_u8_type()
+        type_builders::make_u8_type()
     }
 }
 

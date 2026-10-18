@@ -1,6 +1,6 @@
 use hdf5_pure::{
     AttrValue, CompoundTypeBuilder, DType, Datatype, Error, File, FileBuilder, FormatError,
-    MaxExtent, make_f64_type, make_i32_type,
+    MaxExtent,
 };
 use test_util_hdf5::{dataset, fixtures};
 
@@ -750,7 +750,7 @@ fn roundtrip_empty_dataset_zero_dims() {
     builder.set_attr("MATLAB_empty", AttrValue::U32(1));
     builder
         .create_dataset("empty")
-        .with_dtype(make_f64_type())
+        .with_dtype(hdf5_pure::make_f64_type())
         .with_shape(&[0, 0]);
     let bytes = builder.finish().unwrap();
 
@@ -1144,7 +1144,7 @@ fn zero_element_shape_without_data_is_accepted() {
                     if staged_empty_slice {
                         db.with_i32_data(&[]);
                     } else {
-                        db.with_dtype(make_i32_type());
+                        db.with_dtype(hdf5_pure::make_i32_type());
                     }
                     db.with_shape(shape);
                     if chunked {

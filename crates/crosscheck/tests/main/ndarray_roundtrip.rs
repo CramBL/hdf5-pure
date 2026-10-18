@@ -2,8 +2,6 @@
 
 use hdf5_pure::{Error, File, FileBuilder};
 use ndarray::{Array1, Array2, Array3, ArrayD, ShapeBuilder, array};
-#[cfg(feature = "__hdf5-1.10")]
-use tempfile::tempdir;
 use test_util_hdf5::file_builder;
 
 /// Build a one-dataset file from an ndarray and reopen it in memory.
@@ -149,7 +147,7 @@ fn read_array_wrong_rank_errors() {
 #[cfg(feature = "__hdf5-1.10")]
 #[test]
 fn crosscheck_2d_with_reference_library() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("nd2.h5");
 
     let a: Array2<f64> = array![[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]];
@@ -168,7 +166,7 @@ fn crosscheck_2d_with_reference_library() {
 #[cfg(feature = "__hdf5-1.10")]
 #[test]
 fn crosscheck_3d_with_reference_library() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("nd3.h5");
 
     let a: Array3<i32> = Array3::from_shape_vec((2, 3, 4), (0..24).collect()).unwrap();
@@ -187,7 +185,7 @@ fn crosscheck_3d_with_reference_library() {
 #[test]
 fn crosscheck_chunked_compressed_ndarray() {
     // ndarray write composes with the existing chunking/compression builders.
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("nd_chunked.h5");
 
     let a: Array2<f64> = Array2::from_shape_fn((8, 8), |(i, j)| (i * 8 + j) as f64 * 0.25);

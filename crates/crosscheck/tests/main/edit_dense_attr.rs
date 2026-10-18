@@ -13,7 +13,7 @@ use hdf5_pure::{
     AttrValue, Error, File, FileAccessProperties, FileBuilder, FormatError, MaxExtent,
     MemoryStrategy, SyncPolicy,
 };
-use tempfile::tempdir;
+
 use test_util::fractal_heap;
 use test_util_hdf5::file;
 
@@ -113,7 +113,7 @@ fn i64_attr(f: &File, path: &str, name: &str) -> i64 {
 
 #[test]
 fn a_compact_edit_crossing_the_threshold_moves_the_set_to_a_heap() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let p = dir.path().join("d.h5");
     write_compact(&p);
 
@@ -156,7 +156,7 @@ fn a_compact_edit_crossing_the_threshold_moves_the_set_to_a_heap() {
 
 #[test]
 fn a_dense_object_takes_a_new_attribute() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let p = dir.path().join("d.h5");
     write_dense(&p);
 
@@ -192,7 +192,7 @@ fn a_dense_object_takes_a_new_attribute() {
 
 #[test]
 fn a_dense_attribute_is_updated_in_place_and_keeps_its_position() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let p = dir.path().join("d.h5");
     write_dense(&p);
 
@@ -215,7 +215,7 @@ fn a_dense_attribute_is_updated_in_place_and_keeps_its_position() {
 
 #[test]
 fn removing_one_dense_attribute_keeps_the_rest() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let p = dir.path().join("d.h5");
     write_dense(&p);
 
@@ -240,7 +240,7 @@ fn removing_one_dense_attribute_keeps_the_rest() {
 
 #[test]
 fn removing_every_dense_attribute_leaves_an_object_with_none() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let p = dir.path().join("d.h5");
     // Only the dataset is dense here, so the heaps in the file can be counted:
     // `write_dense`'s group would contribute one of its own.
@@ -286,7 +286,7 @@ fn removing_every_dense_attribute_leaves_an_object_with_none() {
 
 #[test]
 fn an_attribute_too_large_for_the_object_header_goes_to_a_heap() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let p = dir.path().join("d.h5");
     write_compact(&p);
 
@@ -325,7 +325,7 @@ fn an_attribute_too_large_for_the_object_header_goes_to_a_heap() {
 
 #[test]
 fn a_variable_length_attribute_survives_a_dense_rebuild() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let p = dir.path().join("d.h5");
     write_compact(&p);
 
@@ -401,7 +401,7 @@ fn a_variable_length_attribute_survives_a_dense_rebuild() {
 
 #[test]
 fn a_dataset_added_in_place_may_carry_a_dense_attribute_set() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let p = dir.path().join("d.h5");
     write_compact(&p);
 
@@ -465,7 +465,7 @@ fn a_dataset_added_in_place_may_carry_a_dense_attribute_set() {
 
 #[test]
 fn a_group_created_in_place_may_carry_a_dense_attribute_set() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let p = dir.path().join("d.h5");
     write_compact(&p);
 
@@ -498,7 +498,7 @@ fn a_group_created_in_place_may_carry_a_dense_attribute_set() {
 
 #[test]
 fn the_root_group_takes_a_dense_attribute_set() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let p = dir.path().join("d.h5");
     write_compact(&p);
 
@@ -528,7 +528,7 @@ fn the_root_group_takes_a_dense_attribute_set() {
 
 #[test]
 fn a_dense_edit_keeps_a_chunked_dataset_readable() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let p = dir.path().join("d.h5");
     {
         let mut b = FileBuilder::new();
@@ -570,7 +570,7 @@ fn a_dense_edit_keeps_a_chunked_dataset_readable() {
 /// heap it reads back are two different paths through that window.
 #[test]
 fn a_bounded_session_edits_a_dense_attribute_set() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let p = dir.path().join("d.h5");
     write_dense(&p);
 
@@ -611,7 +611,7 @@ fn a_bounded_session_edits_a_dense_attribute_set() {
 /// the file it was staged against is byte-for-byte unchanged.
 #[test]
 fn an_attribute_name_past_its_length_field_is_refused_without_writing() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let p = dir.path().join("d.h5");
     write_compact(&p);
     let before = std::fs::read(&p).unwrap();
@@ -647,7 +647,7 @@ fn an_attribute_name_past_its_length_field_is_refused_without_writing() {
 fn an_attribute_holding_an_object_reference_is_not_moved_to_a_heap() {
     use hdf5::{ObjectReference, ObjectReference1};
 
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let p = dir.path().join("ref_attr.h5");
     {
         let c = file::libhdf5_create_v110(&p);
@@ -720,7 +720,7 @@ fn an_attribute_holding_an_object_reference_is_not_moved_to_a_heap() {
 fn an_already_dense_object_keeps_its_reference_attribute_through_a_rebuild() {
     use hdf5::{ObjectReference, ObjectReference1, ReferencedObject};
 
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let p = dir.path().join("dense_ref_attr.h5");
     {
         let c = file::libhdf5_create_v110(&p);
@@ -787,7 +787,7 @@ fn a_variable_length_of_references_does_not_block_the_move_to_a_heap() {
     use hdf5::types::VarLenArray;
     use hdf5::{ObjectReference, ObjectReference1, ReferencedObject};
 
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let p = dir.path().join("dimension_list.h5");
     {
         let c = file::libhdf5_create_v110(&p);

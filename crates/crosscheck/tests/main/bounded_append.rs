@@ -8,14 +8,14 @@ use hdf5::Extent;
 use hdf5::file::LibraryVersion;
 use hdf5::plist::file_create::FileSpaceStrategy as CStrategy;
 use hdf5_pure::File;
-use tempfile::tempdir;
+
 use test_util_hdf5::dataset::{self, Filter, Unlimited};
 use test_util_hdf5::{file, file_space, paged, session};
 
 #[test]
 #[cfg(target_endian = "little")]
 fn bounded_append_to_c_dataset_both_read() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("c.h5");
     Unlimited::new("d", &(0..8).collect::<Vec<i32>>(), 4).libhdf5_create(&path);
 
@@ -33,7 +33,7 @@ fn bounded_append_to_c_dataset_both_read() {
 
 #[test]
 fn bounded_filtered_append_reads_back_in_c() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("filtered.h5");
     Unlimited::new("d", &(0..8).collect::<Vec<i32>>(), 4)
         .filters(&[Filter::Deflate(6)])
@@ -53,7 +53,7 @@ fn bounded_filtered_append_reads_back_in_c() {
 
 #[test]
 fn bounded_batched_large_append_reads_back_in_c() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("large.h5");
     Unlimited::new("d", &(0..3).collect::<Vec<i32>>(), 256).pure_create(&path);
 
@@ -79,7 +79,7 @@ fn bounded_batched_large_append_reads_back_in_c() {
 /// (issue #173).
 #[test]
 fn bounded_persist_finalize_reads_back_in_c() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("pure_persist.h5");
 
     file_space::write_persisting_unlimited_i32(&path, 10, 4, 1);
@@ -123,7 +123,7 @@ fn bounded_persist_finalize_reads_back_in_c() {
 #[test]
 #[cfg(target_endian = "little")]
 fn bounded_persist_on_c_created_file_reads_back() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("c_persist.h5");
 
     {
@@ -170,7 +170,7 @@ fn vlen_strings_read_on_bounded_and_mirror_files() {
     use hdf5::types::VarLenUnicode;
     use std::str::FromStr;
 
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("vlen.h5");
     let words = ["alpha", "beta", "", "δelta"];
     {
@@ -227,7 +227,7 @@ fn vlen_strings_read_on_bounded_and_mirror_files() {
 #[test]
 #[cfg(target_endian = "little")]
 fn bounded_staged_commit_reads_back_in_c() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("staged_c.h5");
     Unlimited::new("d", &(0..8).collect::<Vec<i32>>(), 4).libhdf5_create(&path);
 
@@ -286,7 +286,7 @@ fn bounded_staged_commit_reads_back_in_c() {
 /// is what covers that, by comparing the recorded free space across the close.
 #[test]
 fn mirror_inplace_append_to_a_persisting_file_reads_back_in_c() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("persist_mirror.h5");
 
     file_space::write_persisting_unlimited_i32(&path, 8, 4, 1);
@@ -318,7 +318,7 @@ fn mirror_inplace_append_to_a_persisting_file_reads_back_in_c() {
 /// C-readable.
 #[test]
 fn mirror_inplace_append_to_a_paged_file_stays_page_aligned() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("persist_paged.h5");
 
     paged::write_unlimited_i32(&path, 4096, true, 64, 64);

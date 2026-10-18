@@ -6,7 +6,7 @@
 
 use hdf5::file::LibraryVersion;
 use hdf5_pure::{Error, File, FileBuilder};
-use tempfile::tempdir;
+
 use test_util::bytes;
 use test_util::superblock;
 use test_util_hdf5::dataset::{self, Filter, Unlimited};
@@ -15,7 +15,7 @@ use test_util_hdf5::dataset::{self, Filter, Unlimited};
 /// confirm both hdf5-pure and the C library read the full result.
 #[test]
 fn append_to_pure_file() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("d.h5");
     Unlimited::new("d", &(0..10).collect::<Vec<i32>>(), 1).pure_create(&path);
 
@@ -55,7 +55,7 @@ fn append_to_pure_file() {
 #[test]
 #[cfg(target_endian = "little")]
 fn append_to_c_file() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("d.h5");
     Unlimited::new("d", &(0..10).collect::<Vec<i32>>(), 1).libhdf5_create(&path);
 
@@ -84,7 +84,7 @@ fn append_to_c_file() {
 /// append writer's in-place appends (separate file handles, same file).
 #[test]
 fn refreshing_reader_follows_pure_appends() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("d.h5");
     Unlimited::new("d", &(0..10).collect::<Vec<i32>>(), 1).pure_create(&path);
 
@@ -124,7 +124,7 @@ fn refreshing_reader_follows_pure_appends() {
 /// writer must allocate a paged super block and paged data blocks in place.
 #[test]
 fn append_crosses_paging_boundary() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("d.h5");
     let start = 131_000usize;
     let end = 135_000usize;
@@ -156,7 +156,7 @@ fn append_crosses_paging_boundary() {
 /// error and left byte-for-byte unchanged.
 #[test]
 fn rejects_and_preserves_non_latest_format_file() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("legacy.h5");
     // Force the earliest format so the file gets a v0/v1 superblock.
     {
@@ -198,7 +198,7 @@ fn rejects_and_preserves_non_latest_format_file() {
 /// f64 dataset append, just to exercise a non-4-byte element size.
 #[test]
 fn append_f64_pure_file() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("f.h5");
     {
         let data: Vec<f64> = (0..5).map(|i| i as f64).collect();
@@ -223,7 +223,7 @@ fn append_f64_pure_file() {
 /// be rejected before any write.
 #[test]
 fn append_chunk_size_greater_than_one() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("chunk4.h5");
 
     Unlimited::new("d", &(0..16).collect::<Vec<i32>>(), 4).pure_create(&path);
@@ -271,7 +271,7 @@ fn append_chunk_size_greater_than_one() {
 /// sibling is checked by reading it back, not byte-for-byte.
 #[test]
 fn append_to_one_of_multiple_datasets_leaves_others_intact() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("multi.h5");
 
     let mut b = FileBuilder::new();
@@ -337,7 +337,7 @@ fn append_to_one_of_multiple_datasets_leaves_others_intact() {
 /// continues at the correct ordinal rather than re-appending or gapping.
 #[test]
 fn recover_and_reappend_after_clean_phase4() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("reopen.h5");
     Unlimited::new("d", &(0..10).collect::<Vec<i32>>(), 1).pure_create(&path);
 
@@ -380,7 +380,7 @@ fn recover_and_reappend_after_clean_phase4() {
 /// reason, and the dataset's existing (compressed) data is left readable.
 #[test]
 fn rejects_filtered_pure_dataset() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("filtered.h5");
     {
         Unlimited::new("d", &(0..100).collect::<Vec<i32>>(), 10)
@@ -427,7 +427,7 @@ fn rejects_filtered_pure_dataset() {
 /// than the dataspace dimension and would cross the repoint.
 #[test]
 fn rejects_filtered_pure_dataset_with_a_partial_trailing_chunk() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("filtered_partial.h5");
     {
         // 105 % 10 != 0: a partial trailing chunk

@@ -312,21 +312,14 @@ use crate::address::StoredAddress;
 use crate::address::StoredAddressExt;
 use crate::attribute::StoredAttribute;
 use crate::attribute_info::AttributeInfoMessage;
-use crate::chunk_index_inplace::{Located, Store, apply_ea_append, plan_ea_append};
-use crate::chunked_read::{enumerate_chunks_from_source, plan_dense_grid};
-use crate::chunked_write::{
-    ChunkMeta, ChunkOptions, ChunkProvider, StorageAllocation, assemble_chunked_at,
-    chunked_data_len, compress_chunks, emit_chunked_data_verbatim, full_chunk_bytes,
-    plan_chunked_data_verbatim, split_into_chunks,
-};
+use crate::chunk_index_inplace::{self, Located, Store};
+use crate::chunked_read;
+use crate::chunked_write::{self, ChunkMeta, ChunkOptions, ChunkProvider, StorageAllocation};
 use crate::convert::Narrow;
 use crate::data_layout::COMPACT_DATA_OFFSET;
 use crate::data_layout::{ChunkIndexLayout, DataLayout};
 use crate::dataspace::{Dataspace, DataspaceType, Extent, MaxExtent};
-use crate::datatype::{
-    Datatype, datatype_holds_file_address, datatype_holds_object_address, embedded_reference_slots,
-    stored_object_references,
-};
+use crate::datatype::{self, Datatype};
 use crate::error::{Error, FormatError, OBJECT_HEADER_MESSAGE_MAX};
 use crate::file_create_properties::FileCreateProperties;
 use crate::file_lock::{self, FileLocking};
@@ -337,16 +330,15 @@ use crate::file_space_info::FileSpacePageSize;
 use crate::file_space_info::FileSpaceStrategy;
 use crate::file_space_info::NUM_FILE_FSM_MANAGERS;
 use crate::file_writer::{
-    DenseAttrCreationOrder, LENGTH_SIZE, LENGTH_WIDTH, OFFSET_SIZE, OFFSET_WIDTH,
-    build_chunked_dataset_oh, build_dataset_oh, make_link,
+    self, DenseAttrCreationOrder, LENGTH_SIZE, LENGTH_WIDTH, OFFSET_SIZE, OFFSET_WIDTH,
 };
 use crate::fill_value::FillPattern;
 use crate::filter_pipeline::FilterPipeline;
-use crate::filters::{ChunkContext, FilterScratch, compress_chunk_with, decompress_chunk};
+use crate::filters::{self, ChunkContext, FilterScratch};
 use crate::free_space_manager::PersistedSections;
-use crate::free_space_manager::{self, ManagerPlan, align_up};
+use crate::free_space_manager::{self, ManagerPlan};
 use crate::group_v1;
-use crate::group_v2::resolve_group_entries_from_source;
+use crate::group_v2;
 use crate::image::{FileImage, HandleImage, MirrorImage, WriteBuffering};
 use crate::libver::LibVer;
 use crate::link_info::LinkInfoMessage;
@@ -364,10 +356,7 @@ use crate::superblock::LocatedSuperblock;
 use crate::superblock::Superblock;
 use crate::symbol_table::SymbolTableMessage;
 use crate::type_builders::{
-    AttrValue, DatasetBuilder, ObjectRefPatch, ObjectRefTarget, VlStringStaging,
-    build_attr_message, build_global_heap_collections, make_f32_type, make_f64_type, make_i8_type,
-    make_i16_type, make_i32_type, make_i64_type, make_u8_type, make_u16_type, make_u32_type,
-    make_u64_type, patch_vl_refs, patch_vl_refs_masked, write_reference_address,
+    self, AttrValue, DatasetBuilder, ObjectRefPatch, ObjectRefTarget, VlStringStaging,
 };
 use crate::width::FormatWidths;
 
@@ -378,8 +367,6 @@ mod global_heap_liveness;
 mod reclaim;
 
 pub use global_heap_liveness::GlobalHeapLiveness;
-
-use reclaim::meta_spans;
 
 /// An undefined on-disk address (all bits set), HDF5's "no address" sentinel.
 const UNDEF: u64 = u64::MAX;
@@ -663,7 +650,7 @@ impl AppendBuilder {
 /// Generate the typed `append_*` methods: serialize each value little-endian and
 /// record the implied element datatype.
 macro_rules! append_typed {
-    ($($method:ident, $ty:ty, $make:ident;)*) => {
+    ($($method:ident, $ty:ty, $make:path;)*) => {
         impl AppendBuilder {
             $(
                 #[doc = concat!("Append `", stringify!($ty), "` values to the dataset.")]
@@ -685,16 +672,16 @@ macro_rules! append_typed {
 }
 
 append_typed! {
-    append_f64, f64, make_f64_type;
-    append_f32, f32, make_f32_type;
-    append_i8, i8, make_i8_type;
-    append_i16, i16, make_i16_type;
-    append_i32, i32, make_i32_type;
-    append_i64, i64, make_i64_type;
-    append_u8, u8, make_u8_type;
-    append_u16, u16, make_u16_type;
-    append_u32, u32, make_u32_type;
-    append_u64, u64, make_u64_type;
+    append_f64, f64, type_builders::make_f64_type;
+    append_f32, f32, type_builders::make_f32_type;
+    append_i8, i8, type_builders::make_i8_type;
+    append_i16, i16, type_builders::make_i16_type;
+    append_i32, i32, type_builders::make_i32_type;
+    append_i64, i64, type_builders::make_i64_type;
+    append_u8, u8, type_builders::make_u8_type;
+    append_u16, u16, type_builders::make_u16_type;
+    append_u32, u32, type_builders::make_u32_type;
+    append_u64, u64, type_builders::make_u64_type;
 }
 
 /// Every edit a session has staged and not yet committed, as one value.
@@ -4420,7 +4407,7 @@ impl WriteEngine {
                     reuse_session_space: false,
                     sync_policy: *sync_policy,
                 };
-                plan_ea_append(
+                chunk_index_inplace::plan_ea_append(
                     &store,
                     &st.loc,
                     &st.datatype,
@@ -4497,7 +4484,8 @@ impl WriteEngine {
                 if let Some(state) = store.aggregation.as_deref_mut() {
                     state.publication_confirmed = false;
                 }
-                let result = apply_ea_append(&mut store, &mut st.loc, &plan, max_phase);
+                let result =
+                    chunk_index_inplace::apply_ea_append(&mut store, &mut st.loc, &plan, max_phase);
                 if result.is_ok() {
                     if let Some(state) = store.aggregation.as_deref_mut() {
                         state.publication_confirmed = confirmed;
@@ -6215,11 +6203,11 @@ impl WriteEngine {
         // this collection, and the check that means what it says is the one that
         // looks.
         if staged.datasets.iter().chain(&staged.writes).any(|(_, fd)| {
-            datatype_holds_object_address(&fd.dt)
+            datatype::datatype_holds_object_address(&fd.dt)
                 || fd
                     .attrs
                     .iter()
-                    .any(|a| datatype_holds_object_address(&a.datatype))
+                    .any(|a| datatype::datatype_holds_object_address(&a.datatype))
         }) || !staged.copies.is_empty()
             || !staged.cross_copies.is_empty()
         {
@@ -6297,7 +6285,7 @@ impl WriteEngine {
                 {
                     to_free.extend(storage);
                 }
-                to_free.extend(meta_spans(spans));
+                to_free.extend(reclaim::meta_spans(spans));
             }
         }
 
@@ -6384,7 +6372,7 @@ impl WriteEngine {
                     {
                         to_free.extend(storage);
                     }
-                    to_free.extend(meta_spans(spans));
+                    to_free.extend(reclaim::meta_spans(spans));
                 }
             }
         }
@@ -6486,7 +6474,7 @@ impl WriteEngine {
                 // covers both.
                 for (idx, collections) in std::mem::take(&mut fd.vl_attrs) {
                     let addrs = self.place_vl_collections(&collections)?;
-                    patch_vl_refs(&mut fd.attrs[idx].raw_data, &addrs);
+                    type_builders::patch_vl_refs(&mut fd.attrs[idx].raw_data, &addrs);
                 }
                 // Resolve an object-reference dataset's per-element targets now
                 // that every earlier-placed object in this commit is in
@@ -6507,7 +6495,11 @@ impl WriteEngine {
                             self.widths,
                             self.addresses,
                         )?;
-                        write_reference_address(&mut fd.raw, patch.byte_offset, addr);
+                        type_builders::write_reference_address(
+                            &mut fd.raw,
+                            patch.byte_offset,
+                            addr,
+                        );
                     }
                 }
                 let oh = if fd.chunk_options.is_chunked() || fd.maxshape.is_some() {
@@ -6520,7 +6512,11 @@ impl WriteEngine {
                     if let Some(staging) = fd.vl_string_staging.take() {
                         if !staging.collections.is_empty() {
                             let addrs = self.place_vl_collections(&staging.collections)?;
-                            patch_vl_refs_masked(&mut fd.raw, &staging.patch_offsets, &addrs);
+                            type_builders::patch_vl_refs_masked(
+                                &mut fd.raw,
+                                &staging.patch_offsets,
+                                &addrs,
+                            );
                         }
                     }
                     // A zero-element dataset has no data block to allocate; its
@@ -6538,7 +6534,7 @@ impl WriteEngine {
                     // holds resolved references — and the header names the heap
                     // instead of carrying them inline.
                     let attr_info = self.place_dense_attrs_if_needed(&fd)?;
-                    build_dataset_oh(
+                    file_writer::build_dataset_oh(
                         &fd.dt,
                         // Committed datatypes are refused when a dataset is
                         // staged (`flatten_dataset`), so every type here is
@@ -7453,7 +7449,7 @@ impl WriteEngine {
             // records and the truncation below gives back (issue #418).
             eoa
         } else {
-            align_up(ext_addr + blocks_len, page_size)
+            free_space_manager::align_up(ext_addr + blocks_len, page_size)
         };
         debug_assert!(
             ext_addr + blocks_len <= final_eoa,
@@ -7911,7 +7907,7 @@ impl WriteEngine {
                 ));
             }
         }
-        let entries = resolve_group_entries_from_source(
+        let entries = group_v2::resolve_group_entries_from_source(
             &self.image(),
             AccessMode::ReadWrite,
             &oh,
@@ -8636,8 +8632,13 @@ impl WriteEngine {
         // Enumerate the existing chunks (base-relative addresses) and require a
         // dense grid: `plan_dense_grid` returns the chunks in index order and
         // `None` on any hole, duplicate, or count mismatch against the dimension.
-        let infos = enumerate_chunks_from_source(&view, &dl, &disk_ds, crate::file_writer::WIDTHS)?;
-        let grid = plan_dense_grid(infos, &disk_ds.dimensions, &spatial).ok_or(
+        let infos = chunked_read::enumerate_chunks_from_source(
+            &view,
+            &dl,
+            &disk_ds,
+            crate::file_writer::WIDTHS,
+        )?;
+        let grid = chunked_read::plan_dense_grid(infos, &disk_ds.dimensions, &spatial).ok_or(
             Error::AppendUnsupported(
                 "dataset has a sparse or inconsistent chunk grid; cannot append",
             ),
@@ -8692,7 +8693,8 @@ impl WriteEngine {
             let stored = view.read_exact_at(partial.address.get(), len)?;
             let full = if let Some(pl) = &pipeline {
                 let ctx = ChunkContext::from_datatype(&spatial, &disk_dt)?;
-                decompress_chunk(&stored, pl, ctx, partial.filter_mask).map_err(Error::Format)?
+                filters::decompress_chunk(&stored, pl, ctx, partial.filter_mask)
+                    .map_err(Error::Format)?
             } else {
                 stored
             };
@@ -8717,7 +8719,7 @@ impl WriteEngine {
         let padding = fill_msg.map_or(crate::fill_value::PaddingFill::Zero, |(mt, b, e)| {
             crate::fill_value::PaddingFill::from_message(mt, &region[b..e])
         });
-        let split = split_into_chunks(
+        let split = chunked_write::split_into_chunks(
             &tail_raw,
             &[tail_len_elems],
             &spatial,
@@ -8731,7 +8733,10 @@ impl WriteEngine {
             // One encoder across the appended tail; see `FilterScratch`.
             let mut scratch = FilterScratch::new();
             for buf in &split {
-                out.push(compress_chunk_with(&mut scratch, buf, pl, ctx).map_err(Error::Format)?);
+                out.push(
+                    filters::compress_chunk_with(&mut scratch, buf, pl, ctx)
+                        .map_err(Error::Format)?,
+                );
             }
             out
         } else {
@@ -9115,9 +9120,13 @@ impl WriteEngine {
                 // Enumerate the source chunks and map them onto a dense grid; a
                 // sparse (holed/unallocated) dataset cannot be reproduced by the
                 // verbatim layout path, which needs every grid slot filled.
-                let infos =
-                    enumerate_chunks_from_source(&dview, &layout, &ds, crate::file_writer::WIDTHS)?;
-                let grid = plan_dense_grid(infos, &ds.dimensions, &chunk_dims).ok_or(
+                let infos = chunked_read::enumerate_chunks_from_source(
+                    &dview,
+                    &layout,
+                    &ds,
+                    crate::file_writer::WIDTHS,
+                )?;
+                let grid = chunked_read::plan_dense_grid(infos, &ds.dimensions, &chunk_dims).ok_or(
                     Error::EditUnsupported(
                         "a chunked dataset with unallocated (sparse) chunks cannot be copied in place yet",
                     ),
@@ -9294,7 +9303,7 @@ impl WriteEngine {
     /// and a relocating chunked overwrite ([`MovingWrite::Chunked`]).
     ///
     /// A fresh chunk-data blob and index are laid out relocatably via
-    /// [`plan_chunked_data_verbatim`] / [`emit_chunked_data_verbatim`], pulling
+    /// [`chunked_write::plan_chunked_data_verbatim`] / [`chunked_write::emit_chunked_data_verbatim`], pulling
     /// each chunk's already-compressed bytes from `chunk_bytes` (in dense
     /// row-major grid order) and carrying `meta`'s sizes and filter masks and the
     /// source `pipeline_message` verbatim — no recompression, no filter-parameter
@@ -9329,7 +9338,7 @@ impl WriteEngine {
         // what lets the address be chosen — a freed region or end-of-file — before
         // the bytes exist. This plan is discarded; the one built at the real base
         // below is what the emit works from.
-        let sizing = plan_chunked_data_verbatim(
+        let sizing = chunked_write::plan_chunked_data_verbatim(
             meta,
             shape,
             chunk_dims,
@@ -9343,7 +9352,7 @@ impl WriteEngine {
                 // Re-plan at the address the blob really occupies, so its embedded
                 // addresses resolve to their real file offsets once the reader adds
                 // the userblock base back (see `build_chunked_dataset`).
-                let layout = plan_chunked_data_verbatim(
+                let layout = chunked_write::plan_chunked_data_verbatim(
                     meta,
                     shape,
                     chunk_dims,
@@ -9354,7 +9363,7 @@ impl WriteEngine {
                 )?;
                 let mut buf =
                     Vec::with_capacity(usize::try_from(layout.plan.total_len).unwrap_or(0));
-                emit_chunked_data_verbatim(
+                chunked_write::emit_chunked_data_verbatim(
                     &mut buf,
                     &layout.plan,
                     &SliceChunkProvider {
@@ -9460,7 +9469,7 @@ impl WriteEngine {
                         creation_index,
                     } = pending;
                     let addrs = self.place_vl_collections(&collections)?;
-                    patch_vl_refs(&mut msg.raw_data, &addrs);
+                    type_builders::patch_vl_refs(&mut msg.raw_data, &addrs);
                     *region = put_attr_message(
                         region,
                         &msg.name,
@@ -9473,7 +9482,7 @@ impl WriteEngine {
             EditedAttrs::Dense(mut dense) => {
                 for (idx, collections) in std::mem::take(&mut dense.vl) {
                     let addrs = self.place_vl_collections(&collections)?;
-                    patch_vl_refs(&mut dense.set.attrs[idx].raw_data, &addrs);
+                    type_builders::patch_vl_refs(&mut dense.set.attrs[idx].raw_data, &addrs);
                 }
                 self.append_dense_attrs(region, dense.set)
             }
@@ -9662,8 +9671,10 @@ impl WriteEngine {
         // The element width comes from the chunk geometry rather than from the
         // chunk list, so a rebuild declares the same width the original index did —
         // including when the dataset it grows was created empty.
-        let chunk_bytes =
-            full_chunk_bytes(chunk_dims_u32.iter().map(|&d| u64::from(d)), element_size);
+        let chunk_bytes = chunked_write::full_chunk_bytes(
+            chunk_dims_u32.iter().map(|&d| u64::from(d)),
+            element_size,
+        );
         // Rank 1 and unlimited along axis 0 (`prepare_append` refuses anything
         // else), so every chunk's index slot is its position in the grid and the
         // array is dense from zero.
@@ -9996,7 +10007,7 @@ impl WriteEngine {
     /// of the content alone — the addresses sit in fixed-width fields — so every
     /// caller derives it, and none builds the blob to measure it:
     /// [`DenseAttrPlan::blob_len`](crate::file_writer::DenseAttrPlan::blob_len)
-    /// for a dense attribute heap, and [`chunked_data_len`] / [`plan_chunked_data_verbatim`]
+    /// for a dense attribute heap, and [`chunked_write::chunked_data_len`] / [`chunked_write::plan_chunked_data_verbatim`]
     /// for a whole chunked data region, both of which size their index through
     /// [`chunk_index_len`](crate::chunked_write::chunk_index_len).
     ///
@@ -10018,7 +10029,7 @@ impl WriteEngine {
 
     /// Place one variable-length dataset's or attribute's already-built,
     /// self-contained global heap collections (from
-    /// [`build_global_heap_collections`] or a
+    /// [`type_builders::build_global_heap_collections`] or a
     /// [`VlStringStaging::collections`]) and return, in the same order, the
     /// base-relative addresses its variable-length references should be patched
     /// to. A `GCOL` blob embeds no addresses of its own, so it can be appended
@@ -10084,7 +10095,7 @@ impl WriteEngine {
         // object, so no offsets is no iterations — and it still records (an
         // empty record) and still supersedes.
         let addrs = self.place_vl_collections(&staging.collections)?;
-        patch_vl_refs_masked(&mut raw, &staging.patch_offsets, &addrs);
+        type_builders::patch_vl_refs_masked(&mut raw, &staging.patch_offsets, &addrs);
         // `place_vl_collections` answers base-relative, since that is what an
         // element reference stores; the free list is absolute.
         let placed = addrs
@@ -10111,7 +10122,7 @@ impl WriteEngine {
     ///   variable-length dataset is exactly how two datasets come to name one
     ///   collection.
     /// - a **raw-bytes write** over a datatype that reaches a heap address
-    ///   ([`datatype_holds_file_address`]). `with_raw_data` hands the engine
+    ///   ([`datatype::datatype_holds_file_address`]). `with_raw_data` hands the engine
     ///   element bytes it does not interpret, so a caller that read them from
     ///   one dataset and wrote them to another has aliased whatever they named —
     ///   the same unscreened door issue #317 recorded for object references.
@@ -10136,7 +10147,7 @@ impl WriteEngine {
                 .chain(&staged.datasets)
                 .any(|(_, fd)| {
                     fd.vl_string_staging.is_none()
-                        && datatype_holds_file_address(&fd.dt)
+                        && datatype::datatype_holds_file_address(&fd.dt)
                 });
         if aliasing_edit {
             self.vl_overwrite_heaps.clear();
@@ -10359,16 +10370,16 @@ impl WriteEngine {
     /// pipeline applied) are produced as one relocatable blob, whose internal
     /// layout — and therefore total size — is independent of the base address it
     /// is given. That is what lets the dataset be *sized before it is placed*
-    /// ([`chunked_data_len`]): the blob goes into a freed region big enough to
+    /// ([`chunked_write::chunked_data_len`]): the blob goes into a freed region big enough to
     /// hold it, or at end-of-file when there is none, and is then assembled for
     /// whichever address it got, so every absolute address it embeds (chunk
     /// addresses, index-structure addresses, the addresses in the data-layout
     /// message) lands exactly where the bytes are written. The header is then
-    /// built with [`build_chunked_dataset_oh`] — the same function the whole-file
-    /// writer uses — so the header is byte-identical to one written fresh.
+    /// built with [`file_writer::build_chunked_dataset_oh`], which the whole-file
+    /// writer also uses. The header is byte-identical to one written fresh.
     ///
     /// The dataset's single pass of the filter pipeline happens in
-    /// [`compress_chunks`], before either decision; sizing and assembly work from
+    /// [`chunked_write::compress_chunks`], before either decision. Sizing and assembly work from
     /// the compressed set, so choosing an address never costs a recompression
     /// (issue #261).
     fn build_chunked_dataset(&mut self, fd: &FlatDataset) -> Result<Vec<u8>, Error> {
@@ -10379,7 +10390,7 @@ impl WriteEngine {
         let elem = ctx.element_size.narrow::<NonZeroUsize>()?;
         let fill_time = fd.fill_time.unwrap_or_default();
         let fill = FillPattern::new(fill_time, fd.fill.as_deref(), elem);
-        let set = compress_chunks(
+        let set = chunked_write::compress_chunks(
             &fd.raw,
             &fd.ds.dimensions,
             ctx,
@@ -10393,10 +10404,10 @@ impl WriteEngine {
         // Chunk data and the index beside it are raw (see `chunked_storage_spans`,
         // which reclaims both as raw).
         let (_addr, (layout_message, pipeline_message)) = self.place_relocatable(
-            chunked_data_len(&set)?,
+            chunked_write::chunked_data_len(&set)?,
             AllocationClass::Raw,
             |stored_base| {
-                let result = assemble_chunked_at(&set, stored_base)?;
+                let result = chunked_write::assemble_chunked_at(&set, stored_base)?;
                 Ok((
                     result.data_bytes,
                     (result.layout_message, result.pipeline_message),
@@ -10406,7 +10417,7 @@ impl WriteEngine {
         // As in the contiguous branch: a set too large for the header goes to a
         // fractal heap, which the header then names instead of carrying it.
         let attr_info = self.place_dense_attrs_if_needed(fd)?;
-        Ok(build_chunked_dataset_oh(
+        Ok(file_writer::build_chunked_dataset_oh(
             &fd.dt,
             &DatatypeLocation::Inline,
             &fd.ds,
@@ -10978,7 +10989,7 @@ struct EditStore<'a> {
     /// Whether a non-persisting session may allocate directly from `space`.
     reuse_session_space: bool,
     /// The session's `fsync` cadence, carried by value: the append engine's own
-    /// ordered barriers ([`apply_ea_append`]) are durability points like the
+    /// ordered barriers ([`chunk_index_inplace::apply_ea_append`]) are durability points like the
     /// commit's, and answer to the same policy.
     sync_policy: SyncPolicy,
 }
@@ -11383,7 +11394,7 @@ fn flatten_dataset(db: DatasetBuilder, name: LinkNameBuf) -> Result<FlatDataset,
         // build compiled out is not among them: `build_pipeline` emits its
         // descriptor regardless, which is why the check above exists. Chunked/filtered
         // storage flows through the very builder the normal writer uses
-        // ([`compress_chunks`] + [`assemble_chunked_at`] + [`build_chunked_dataset_oh`]),
+        // ([`chunked_write::compress_chunks`] + [`assemble_chunked_at`] + [`file_writer::build_chunked_dataset_oh`]),
         // so the
         // resulting object header is byte-identical to a freshly written one.
         //
@@ -11408,7 +11419,7 @@ fn flatten_dataset(db: DatasetBuilder, name: LinkNameBuf) -> Result<FlatDataset,
     // name would otherwise overflow it into silent corruption. Measured with a
     // creation index present — the widest form, written into a group that tracks
     // link creation order — since the parent group is not known here.
-    let mut sized = make_link(name.as_str(), StoredAddress::new(0));
+    let mut sized = file_writer::make_link(name.as_str(), StoredAddress::new(0));
     sized.creation_order = Some(0);
     if sized.serialize(crate::file_writer::OFFSET_WIDTH).len() > OBJECT_HEADER_MESSAGE_MAX {
         return Err(Error::EditUnsupported(
@@ -11443,7 +11454,7 @@ fn flatten_dataset(db: DatasetBuilder, name: LinkNameBuf) -> Result<FlatDataset,
     let mut vl_attrs: Vec<(usize, Vec<Vec<u8>>)> = Vec::new();
     for (i, (_, v)) in db.attrs.iter().enumerate() {
         if let Some(strings) = v.var_len_strings() {
-            vl_attrs.push((i, build_global_heap_collections(strings)));
+            vl_attrs.push((i, type_builders::build_global_heap_collections(strings)));
         }
     }
     // Appended last, and recorded as such: `raw` can still grow before the
@@ -11546,7 +11557,7 @@ pub(crate) fn pipeline_lossless(pipeline: &FilterPipeline) -> bool {
 
 /// The refusal both append paths raise for a lossy pipeline sitting on a partial
 /// trailing chunk. Named here beside the predicate it goes with, and used from
-/// [`chunk_index_inplace`](crate::chunk_index_inplace) as well as the staged
+/// [`chunk_index_inplace`] as well as the staged
 /// rebuild above.
 pub(crate) const LOSSY_TAIL_REFUSAL: &str = "this dataset's filter pipeline is lossy (ZFP, or float D-scale scale-offset), and its \
      length is not a whole multiple of the chunk length: growing that trailing chunk would \
@@ -11889,7 +11900,7 @@ fn split_and_encode_chunks(
     pipeline_message: Option<&[u8]>,
     dt: &crate::datatype::Datatype,
 ) -> Result<Vec<Vec<u8>>, Error> {
-    let split = split_into_chunks(
+    let split = chunked_write::split_into_chunks(
         raw,
         shape,
         chunk_dims,
@@ -11906,7 +11917,12 @@ fn split_and_encode_chunks(
     // One encoder across the rewrite; see `FilterScratch`.
     let mut scratch = FilterScratch::new();
     for buf in &split {
-        encoded.push(compress_chunk_with(&mut scratch, buf, &pipeline, ctx)?);
+        encoded.push(filters::compress_chunk_with(
+            &mut scratch,
+            buf,
+            &pipeline,
+            ctx,
+        )?);
     }
     Ok(encoded)
 }
@@ -11938,8 +11954,10 @@ fn try_inplace_chunk_writes<S: Source + ?Sized>(
     raw_size: u64,
     new_bytes: &[Vec<u8>],
 ) -> Option<Vec<(u64, Vec<u8>)>> {
-    let infos = enumerate_chunks_from_source(src, layout, ds, crate::file_writer::WIDTHS).ok()?;
-    let grid = plan_dense_grid(infos, &ds.dimensions, spatial)?;
+    let infos =
+        chunked_read::enumerate_chunks_from_source(src, layout, ds, crate::file_writer::WIDTHS)
+            .ok()?;
+    let grid = chunked_read::plan_dense_grid(infos, &ds.dimensions, spatial)?;
     if grid.grid_order.len() != new_bytes.len() {
         return None;
     }
@@ -12222,7 +12240,7 @@ fn encode_link_message(
     addr: StoredAddress,
     creation_order: Option<u64>,
 ) -> Vec<u8> {
-    let mut link = make_link(name, addr);
+    let mut link = file_writer::make_link(name, addr);
     link.creation_order = creation_order;
     let body = link.serialize(crate::file_writer::OFFSET_WIDTH);
     layout.record(MessageType::LINK, &body)
@@ -12571,7 +12589,7 @@ fn apply_compact_attr_ops(
                     // Nothing yet to remove from `region` if this name has
                     // never been set as a fixed-size attribute.
                     out = remove_attr_from_region(&out, name, false)?;
-                    let msg = build_attr_message(name, value);
+                    let msg = type_builders::build_attr_message(name, value);
                     if msg
                         .serialize(crate::file_writer::OFFSET_WIDTH, LENGTH_SIZE)?
                         .len()
@@ -12583,7 +12601,7 @@ fn apply_compact_attr_ops(
                     }
                     pending_vl.push(PendingVlAttr {
                         msg,
-                        collections: build_global_heap_collections(strings),
+                        collections: type_builders::build_global_heap_collections(strings),
                         creation_index,
                     });
                 } else {
@@ -12732,7 +12750,7 @@ fn plan_attr_ops<S: Source + ?Sized>(
         let mut oversized = false;
         for op in ops {
             if let AttrOp::Set { name, value } = op {
-                oversized |= build_attr_message(name, value)
+                oversized |= type_builders::build_attr_message(name, value)
                     .serialize(crate::file_writer::OFFSET_WIDTH, LENGTH_SIZE)?
                     .len()
                     > OBJECT_HEADER_MESSAGE_MAX;
@@ -12796,8 +12814,10 @@ fn plan_attr_ops<S: Source + ?Sized>(
     for op in ops {
         match op {
             AttrOp::Set { name, value } => {
-                let msg = build_attr_message(name, value);
-                let collections = value.var_len_strings().map(build_global_heap_collections);
+                let msg = type_builders::build_attr_message(name, value);
+                let collections = value
+                    .var_len_strings()
+                    .map(type_builders::build_global_heap_collections);
                 match set.iter_mut().find(|slot| &slot.msg.name == name) {
                     // Setting an attribute the object already has replaces it
                     // where it stands, so a repeated `set_attr` does not reorder
@@ -13375,8 +13395,8 @@ fn encode_attr_body(name: &str, value: &AttrValue) -> Result<Vec<u8>, Error> {
         value.var_len_strings().is_none(),
         "a variable-length attribute must be intercepted by apply_compact_attr_ops before reaching encode_attr_message"
     );
-    let body =
-        build_attr_message(name, value).serialize(crate::file_writer::OFFSET_WIDTH, LENGTH_SIZE)?;
+    let body = type_builders::build_attr_message(name, value)
+        .serialize(crate::file_writer::OFFSET_WIDTH, LENGTH_SIZE)?;
     if body.len() > OBJECT_HEADER_MESSAGE_MAX {
         return Err(Error::EditUnsupported(
             "group attribute is too large to encode in place",
@@ -13840,7 +13860,7 @@ fn reject_foreign_addresses(region: &OhRegion) -> Result<(), Error> {
         match msg_type {
             MessageType::DATATYPE => {
                 let (dt, _) = hdf5_pure_format::__private::parse_datatype(&region[body..body_end])?;
-                if datatype_holds_file_address(&dt) {
+                if datatype::datatype_holds_file_address(&dt) {
                     return Err(Error::EditUnsupported(
                         "variable-length or reference datasets cannot be copied to another file yet",
                     ));
@@ -13862,7 +13882,7 @@ fn reject_foreign_addresses(region: &OhRegion) -> Result<(), Error> {
                     &region[body..body_end],
                     crate::file_writer::LENGTH_WIDTH,
                 )?;
-                if datatype_holds_file_address(&attr.datatype) {
+                if datatype::datatype_holds_file_address(&attr.datatype) {
                     return Err(Error::EditUnsupported(
                         "variable-length or reference attributes cannot be copied to another file yet",
                     ));
@@ -13885,7 +13905,7 @@ fn reject_foreign_addresses(region: &OhRegion) -> Result<(), Error> {
 /// construction, so only the source datatypes matter.
 fn reject_foreign_dense_attrs(attrs: &[crate::attribute::AttributeMessage]) -> Result<(), Error> {
     for attr in attrs {
-        if datatype_holds_file_address(&attr.datatype) {
+        if datatype::datatype_holds_file_address(&attr.datatype) {
             return Err(Error::EditUnsupported(
                 "variable-length or reference dense (fractal-heap) attributes cannot be copied to another file yet",
             ));
@@ -13964,7 +13984,7 @@ fn screen_resolved_references(
     raw: &[u8],
     invalidated: &InvalidatedAddresses,
 ) -> Result<(), Error> {
-    if !datatype_holds_object_address(dt) {
+    if !datatype::datatype_holds_object_address(dt) {
         return Ok(());
     }
     // The datatype declares an object reference, so the walker must find one.
@@ -13976,7 +13996,8 @@ fn screen_resolved_references(
     // `datatype_holds_object_address` had just recognised. Neither shape is
     // one this crate builds; refuse rather than write references past a screen
     // that could not see them.
-    let Some(slots) = embedded_reference_slots(dt).filter(|slots| !slots.is_empty()) else {
+    let Some(slots) = datatype::embedded_reference_slots(dt).filter(|slots| !slots.is_empty())
+    else {
         // Unconditional, unlike the per-address checks below. Those refuse an
         // address that lands somewhere this commit vacates; this one cannot read
         // the addresses at all, so there is nothing to compare against and no
@@ -14002,7 +14023,7 @@ fn screen_resolved_references(
     };
     // Non-empty slots mean the datatype has room for at least one 8-byte
     // address, so the element size is at least 8.
-    for (_, stored) in stored_object_references(raw, dt.type_size() as usize, &slots) {
+    for (_, stored) in datatype::stored_object_references(raw, dt.type_size() as usize, &slots) {
         if let Some(refusal) = invalidated.refusal(StoredAddress::new(stored)) {
             return Err(Error::EditUnsupported(refusal));
         }
@@ -14158,7 +14179,7 @@ fn screen_copied_references(
         // is refused for the same reason a chunked one is.
         CopyTree::DatasetVerbatim { .. } => match (&element_dt, &compact) {
             (Some(dt), Some(data)) => screen_resolved_references(dt, data, invalidated)?,
-            (Some(dt), None) if datatype_holds_object_address(dt) => {
+            (Some(dt), None) if datatype::datatype_holds_object_address(dt) => {
                 return Err(Error::EditUnsupported(
                     "a compact object-reference dataset's elements could not be read to screen \
                      them against this commit's deletions; use separate commits",
@@ -14189,7 +14210,7 @@ fn screen_copied_references(
         CopyTree::DatasetChunked { .. } => {
             if element_dt
                 .as_ref()
-                .is_some_and(datatype_holds_object_address)
+                .is_some_and(datatype::datatype_holds_object_address)
             {
                 return Err(Error::EditUnsupported(
                     "a chunked object-reference dataset cannot be copied in a commit that also \
@@ -14403,36 +14424,36 @@ mod tests {
     }
 
     #[rstest]
-    #[case::array(array_type(big_endian_u8_type(), vec![2]), array_type(make_u8_type(), vec![2]), true)]
-    #[case::array_shape(array_type(big_endian_u8_type(), vec![2]), array_type(make_u8_type(), vec![1, 2]), false)]
+    #[case::array(array_type(big_endian_u8_type(), vec![2]), array_type(type_builders::make_u8_type(), vec![2]), true)]
+    #[case::array_shape(array_type(big_endian_u8_type(), vec![2]), array_type(type_builders::make_u8_type(), vec![1, 2]), false)]
     #[case::compound(
         single_member_compound_type(big_endian_u8_type(), 1, "x", 0),
-        single_member_compound_type(make_u8_type(), 1, "x", 0),
+        single_member_compound_type(type_builders::make_u8_type(), 1, "x", 0),
         true
     )]
     #[case::compound_size(
         single_member_compound_type(big_endian_u8_type(), 2, "x", 0),
-        single_member_compound_type(make_u8_type(), 1, "x", 0),
+        single_member_compound_type(type_builders::make_u8_type(), 1, "x", 0),
         false
     )]
     #[case::compound_name(
         single_member_compound_type(big_endian_u8_type(), 1, "x", 0),
-        single_member_compound_type(make_u8_type(), 1, "y", 0),
+        single_member_compound_type(type_builders::make_u8_type(), 1, "y", 0),
         false
     )]
     #[case::compound_offset(
         single_member_compound_type(big_endian_u8_type(), 2, "x", 1),
-        single_member_compound_type(make_u8_type(), 2, "x", 0),
+        single_member_compound_type(type_builders::make_u8_type(), 2, "x", 0),
         false
     )]
     #[case::enum_base(
         single_member_enumeration_type(big_endian_u8_type(), 1),
-        single_member_enumeration_type(make_u8_type(), 1),
+        single_member_enumeration_type(type_builders::make_u8_type(), 1),
         true
     )]
     #[case::enum_value(
         single_member_enumeration_type(big_endian_u8_type(), 1),
-        single_member_enumeration_type(make_u8_type(), 2),
+        single_member_enumeration_type(type_builders::make_u8_type(), 2),
         false
     )]
     #[case::vlen_string(
@@ -14443,7 +14464,7 @@ mod tests {
             StringPadding::NullTerminate
         ),
         variable_length_type(
-            make_u8_type(),
+            type_builders::make_u8_type(),
             true,
             CharacterSet::Utf8,
             StringPadding::NullTerminate
@@ -14458,7 +14479,7 @@ mod tests {
             StringPadding::NullTerminate
         ),
         variable_length_type(
-            make_u8_type(),
+            type_builders::make_u8_type(),
             false,
             CharacterSet::Utf8,
             StringPadding::NullTerminate
@@ -14473,7 +14494,7 @@ mod tests {
             StringPadding::NullTerminate
         ),
         variable_length_type(
-            make_u8_type(),
+            type_builders::make_u8_type(),
             true,
             CharacterSet::Utf8,
             StringPadding::NullTerminate
@@ -14488,7 +14509,7 @@ mod tests {
             StringPadding::NullTerminate
         ),
         variable_length_type(
-            make_u8_type(),
+            type_builders::make_u8_type(),
             true,
             CharacterSet::Utf8,
             StringPadding::NullTerminate
@@ -14503,14 +14524,14 @@ mod tests {
             StringPadding::SpacePad
         ),
         variable_length_type(
-            make_u8_type(),
+            type_builders::make_u8_type(),
             true,
             CharacterSet::Utf8,
             StringPadding::NullTerminate
         ),
         false
     )]
-    #[case::nested(array_type(single_member_compound_type(variable_length_type(big_endian_u8_type(), true, CharacterSet::Utf8, StringPadding::NullTerminate), 16, "x", 0), vec![2]), array_type(single_member_compound_type(variable_length_type(make_u8_type(), true, CharacterSet::Utf8, StringPadding::NullTerminate), 16, "x", 0), vec![2]), true)]
+    #[case::nested(array_type(single_member_compound_type(variable_length_type(big_endian_u8_type(), true, CharacterSet::Utf8, StringPadding::NullTerminate), 16, "x", 0), vec![2]), array_type(single_member_compound_type(variable_length_type(type_builders::make_u8_type(), true, CharacterSet::Utf8, StringPadding::NullTerminate), 16, "x", 0), vec![2]), true)]
     fn overwrite_requires_matching_nested_fields_except_one_byte_order(
         #[case] disk: Datatype,
         #[case] staged: Datatype,
@@ -14760,7 +14781,7 @@ mod tests {
     #[case::managed_objects(0)]
     #[case::huge_objects(2)]
     fn deleting_a_dense_attribute_owner_reclaims_its_heap_as_metadata(#[case] huge_attrs: usize) {
-        let dir = tempdir().unwrap();
+        let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("dense_attribute_reclaim.h5");
         write_dense_attribute_owner(&path, huge_attrs, FileSpaceStrategy::Page);
         assert_eq!(
@@ -14817,7 +14838,7 @@ mod tests {
 
     #[rstest]
     fn dense_attribute_storage_is_classified_by_its_stored_pages(#[values(0, 512)] userblock: u64) {
-        let dir = tempdir().unwrap();
+        let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("dense_attribute_pages.h5");
         let mut builder = FileBuilder::new();
         let mut group = builder.create_group("g");
@@ -14872,7 +14893,7 @@ mod tests {
 
     #[test]
     fn rebuilding_dense_group_attributes_reclaims_the_old_storage_in_flat_space() {
-        let dir = tempdir().unwrap();
+        let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("dense_attribute_replace.h5");
         write_dense_attribute_owner(&path, 1, FileSpaceStrategy::FsmAggr);
 
@@ -15047,7 +15068,7 @@ mod tests {
         #[case] damage: HeapDamage,
         #[case] reclaim_other: bool,
     ) {
-        let dir = tempdir().unwrap();
+        let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("dense_attribute_rejected_heap.h5");
         let object = ObjectPathBuf::parse("/g");
         let RejectedHeapOwner {
@@ -15102,7 +15123,7 @@ mod tests {
         #[case] strategy: FileSpaceStrategy,
         #[case] userblock: u64,
     ) {
-        let dir = tempdir().unwrap();
+        let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("dense_attribute_filtered_heap.h5");
         write_dense_attribute_owner(&path, 0, strategy);
         prepend_userblock(&path, userblock);
@@ -15220,7 +15241,7 @@ mod tests {
 
     #[test]
     fn deleting_a_c_written_dense_link_group_reclaims_its_whole_subtree() {
-        let dir = tempdir().unwrap();
+        let dir = tempfile::tempdir().unwrap();
         let path = test_util::copy_data("c/huge_links_12.h5", dir.path());
         let reader = crate::reader::File::open(&path).unwrap();
         let link_names = reader.group("g").unwrap().datasets().unwrap();
@@ -15307,12 +15328,12 @@ mod tests {
             );
         }
 
-        let mut expected: Vec<(u64, u64, FreeClass)> = meta_spans(header_spans)
+        let mut expected: Vec<(u64, u64, FreeClass)> = reclaim::meta_spans(header_spans)
             .chain(link_storage)
             .chain(data_blocks)
             .chain(link_names.iter().flat_map(|link_name| {
                 let child = resolve(&ObjectPathBuf::parse(&format!("/g/{link_name}")));
-                meta_spans(session.oh_chunk_spans(child).unwrap())
+                reclaim::meta_spans(session.oh_chunk_spans(child).unwrap())
             }))
             .collect();
         expected.sort_unstable_by_key(|&(span_addr, _, _)| span_addr);
@@ -15430,7 +15451,7 @@ mod tests {
 
     #[rstest]
     fn the_page_zero_screen_measures_pages_from_the_base_address(#[values(0, 512)] userblock: u64) {
-        let dir = tempdir().unwrap();
+        let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("paged_index.h5");
         let mut b = FileBuilder::new();
         b.with_userblock(userblock);
@@ -15505,7 +15526,7 @@ mod tests {
     }
 
     fn hard_link_region(trailing: &[u8]) -> OhRegion {
-        let mut body = make_link("child", StoredAddress::new(0x1000))
+        let mut body = file_writer::make_link("child", StoredAddress::new(0x1000))
             .serialize(crate::file_writer::OFFSET_WIDTH);
         body.extend_from_slice(trailing);
         plain_region(message_record(MessageType::LINK, &body))
@@ -15689,7 +15710,7 @@ mod tests {
             )],
         };
         assert!(
-            embedded_reference_slots(&dt).is_none(),
+            datatype::embedded_reference_slots(&dt).is_none(),
             "the fixture must be one the walker cannot map"
         );
 
@@ -15774,7 +15795,7 @@ mod tests {
             ref_type: ReferenceType::Object,
         };
         assert!(
-            embedded_reference_slots(&dt).is_none(),
+            datatype::embedded_reference_slots(&dt).is_none(),
             "the walker must report a width it cannot map, not an empty slot list"
         );
 
@@ -15822,9 +15843,9 @@ mod tests {
     /// is what stops a too-eager proof from being the fix for the first.
     #[test]
     fn a_file_proved_free_of_references_is_walked_once_and_no_more() {
-        use crate::reference_patch::{reset_walks, walks};
-        use tempfile::tempdir;
-        let dir = tempdir().unwrap();
+        use crate::reference_patch;
+
+        let dir = tempfile::tempdir().unwrap();
 
         let commit_three = |path: &std::path::Path| {
             let session = crate::File::open_rw(path).unwrap();
@@ -15843,10 +15864,10 @@ mod tests {
         let mut b = crate::writer::FileBuilder::new();
         b.create_dataset("d").with_i32_data(&[1, 2, 3]);
         b.write(&plain).unwrap();
-        reset_walks();
+        reference_patch::reset_walks();
         commit_three(&plain);
         assert_eq!(
-            walks(),
+            reference_patch::walks(),
             1,
             "the first commit's walk proves the file reference-free; the rest \
              must take its word for it"
@@ -15857,10 +15878,10 @@ mod tests {
         b.create_dataset("d").with_i32_data(&[1, 2, 3]);
         b.create_dataset("refs").with_path_references(&["d"]);
         b.write(&referencing).unwrap();
-        reset_walks();
+        reference_patch::reset_walks();
         commit_three(&referencing);
         assert_eq!(
-            walks(),
+            reference_patch::walks(),
             3,
             "a file that holds a reference is never proved free of one, so every \
              commit walks it"
@@ -15869,8 +15890,7 @@ mod tests {
 
     #[test]
     fn a_raw_reference_target_is_screened_like_a_path_one() {
-        use tempfile::tempdir;
-        let dir = tempdir().unwrap();
+        let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("raw_target.h5");
         let mut b = crate::writer::FileBuilder::new();
         b.create_dataset("d").with_i32_data(&[1, 2, 3]);
@@ -15935,8 +15955,7 @@ mod tests {
     #[case("a/./b")]
     #[case("a//b/")]
     fn a_reference_target_is_keyed_by_the_object_its_spelling_names(#[case] spelling: &str) {
-        use tempfile::tempdir;
-        let dir = tempdir().unwrap();
+        let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("path_target.h5");
         let mut b = crate::writer::FileBuilder::new();
         b.create_dataset("d").with_i32_data(&[1, 2, 3]);
@@ -16050,7 +16069,6 @@ mod tests {
     fn append_inplace_crash_consistency_partial_tail_prefix() {
         use crate::reader::File as PureFile;
         use crate::writer::FileBuilder;
-        use tempfile::tempdir;
 
         let build = |path: &std::path::Path, n: i32, chunk: u64, deflate: bool| {
             let data: Vec<i32> = (0..n).collect();
@@ -16073,7 +16091,7 @@ mod tests {
             (6, 4, 5, true),
             (9, 4, 3, true),
         ] {
-            let dir = tempdir().unwrap();
+            let dir = tempfile::tempdir().unwrap();
             let base = dir.path().join("base.h5");
             build(&base, n, chunk, deflate);
 
@@ -16116,9 +16134,8 @@ mod tests {
     fn append_onto_a_lossy_partial_tail_is_refused() {
         use crate::reader::File as PureFile;
         use crate::writer::FileBuilder;
-        use tempfile::tempdir;
 
-        let dir = tempdir().unwrap();
+        let dir = tempfile::tempdir().unwrap();
         let committed: Vec<f64> = vec![0.5, 1.5, 2.5, 3.5, 4.5, 5.5];
 
         // `d` is 6 of a chunk of 4: a partial trailing chunk holding 4.5 and 5.5.
@@ -16243,9 +16260,8 @@ mod tests {
         use crate::reader::File as PureFile;
         use crate::scaleoffset::ScaleOffset;
         use crate::writer::FileBuilder;
-        use tempfile::tempdir;
 
-        let dir = tempdir().unwrap();
+        let dir = tempfile::tempdir().unwrap();
 
         let p = dir.path().join("dscale.h5");
         {
@@ -16310,7 +16326,6 @@ mod tests {
     fn append_inplace_crash_consistency_filtered_partial_last_chunk() {
         use crate::reader::File as PureFile;
         use crate::writer::FileBuilder;
-        use tempfile::tempdir;
 
         let build = |path: &std::path::Path, n: i32, chunk: u64| {
             let data: Vec<i32> = (0..n).collect();
@@ -16330,7 +16345,7 @@ mod tests {
         // (An unaligned *start* is the sibling sweep,
         // `append_inplace_crash_consistency_partial_tail_prefix`.)
         for (n, chunk, add) in [(8i32, 4u64, 2i32), (8, 4, 9), (0, 4, 3)] {
-            let dir = tempdir().unwrap();
+            let dir = tempfile::tempdir().unwrap();
             let base = dir.path().join("base.h5");
             build(&base, n, chunk);
 
@@ -16396,9 +16411,8 @@ mod tests {
     #[test]
     fn append_inplace_crash_consistency_across_ea_boundaries() {
         use crate::reader::File as PureFile;
-        use tempfile::tempdir;
 
-        let dir = tempdir().unwrap();
+        let dir = tempfile::tempdir().unwrap();
         let base = dir.path().join("base.h5");
         let (n, target) = (50i32, 250i32);
         build_unit_chunked(&base, n);
@@ -16435,9 +16449,8 @@ mod tests {
     #[test]
     fn paged_open_seeds_each_manager_by_slot() {
         use crate::writer::FileBuilder;
-        use tempfile::tempdir;
 
-        let dir = tempdir().unwrap();
+        let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("paged_seed.h5");
         let mut b = FileBuilder::new();
         b.create_dataset("d")
@@ -16527,10 +16540,8 @@ mod tests {
     // The file is a committed one libhdf5 wrote, see
     // `crates/crosscheck/tests/main/c_test_data.rs`.
     fn a_c_written_chunk_index_is_not_reclaimed_as_raw() {
-        use tempfile::tempdir;
-
         const PAGE: u64 = 4096;
-        let dir = tempdir().unwrap();
+        let dir = tempfile::tempdir().unwrap();
         let path = test_util::copy_data("c/paged_index.h5", dir.path());
 
         let mut s = WriteEngine::open_with_locking(&path, FileLocking::Enabled).unwrap();
@@ -16612,10 +16623,9 @@ mod tests {
     #[test]
     fn padding_a_tail_page_of_unknown_type_records_nothing() {
         use crate::writer::FileBuilder;
-        use tempfile::tempdir;
 
         const PAGE: u64 = 4096;
-        let dir = tempdir().unwrap();
+        let dir = tempfile::tempdir().unwrap();
 
         let build = |path: &std::path::Path| {
             let mut b = FileBuilder::new();
@@ -16694,10 +16704,8 @@ mod tests {
     // The file is a committed one libhdf5 wrote, see
     // `crates/crosscheck/tests/main/c_test_data.rs`.
     fn a_generic_large_section_is_only_reusable_as_whole_pages() {
-        use tempfile::tempdir;
-
         const PAGE: u64 = 512;
-        let dir = tempdir().unwrap();
+        let dir = tempfile::tempdir().unwrap();
         let path = test_util::copy_data("c/generic_large.h5", dir.path());
 
         // The premise: at least one section in the generic-large manager (slot 6)
@@ -16775,7 +16783,6 @@ mod tests {
     #[test]
     fn a_paged_allocation_only_crosses_page_types_over_whole_free_pages() {
         use crate::writer::FileBuilder;
-        use tempfile::tempdir;
 
         const PAGE: u64 = 4096;
 
@@ -16815,7 +16822,7 @@ mod tests {
             s
         }
 
-        let dir = tempdir().unwrap();
+        let dir = tempfile::tempdir().unwrap();
         // Two interior regions well inside the file the builder wrote (16 KiB of
         // raw data alone), each a *fragment* of a page whose other bytes are live,
         // so either could physically hold the request and only the page-type rule
@@ -16950,7 +16957,6 @@ mod tests {
     #[test]
     fn a_paged_tail_takes_exactly_the_space_it_fills() {
         use crate::writer::FileBuilder;
-        use tempfile::tempdir;
 
         const PAGE: u64 = FileSpacePageSize::DEFAULT.get();
         /// Any plausible extension length exercises the same arithmetic, and the
@@ -16958,7 +16964,7 @@ mod tests {
         /// by the commit, which is not what is under test here.
         const EXT_LEN: u64 = 100;
 
-        let dir = tempdir().unwrap();
+        let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("tail_exact.h5");
         let mut b = FileBuilder::new();
         b.create_dataset("d")
@@ -17023,9 +17029,8 @@ mod tests {
     #[test]
     fn a_reuse_only_tail_rewrite_that_cannot_place_itself_writes_nothing() {
         use crate::writer::FileBuilder;
-        use tempfile::tempdir;
 
-        let dir = tempdir().unwrap();
+        let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("reuse_only.h5");
         let mut b = FileBuilder::new();
         b.create_dataset("d")
@@ -17088,7 +17093,6 @@ mod tests {
     #[test]
     fn a_flat_tail_takes_exactly_the_extent_it_records() {
         use crate::writer::FileBuilder;
-        use tempfile::tempdir;
 
         /// Any plausible extension length exercises the same arithmetic; the real
         /// one is settled by the commit, which is not what is under test here.
@@ -17096,7 +17100,7 @@ mod tests {
         /// Any address does: the layout only ever asks the free list for a length.
         const HOLE_AT: u64 = 512;
 
-        let dir = tempdir().unwrap();
+        let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("flat_tail_exact.h5");
         let mut b = FileBuilder::new();
         b.create_dataset("d")
@@ -17190,10 +17194,9 @@ mod tests {
     #[test]
     fn a_paged_tail_with_nowhere_to_go_opens_a_page_and_frees_the_rest() {
         use crate::writer::FileBuilder;
-        use tempfile::tempdir;
 
         const PAGE: u64 = 4096;
-        let dir = tempdir().unwrap();
+        let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("tail_appends.h5");
         let mut b = FileBuilder::new();
         b.create_dataset("d")
@@ -17255,9 +17258,8 @@ mod tests {
     #[test]
     fn deleted_chunk_index_is_freed_into_a_raw_manager() {
         use crate::writer::FileBuilder;
-        use tempfile::tempdir;
 
-        let dir = tempdir().unwrap();
+        let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("paged_chunk_index_free.h5");
         let page = 4096u64;
         let mut b = FileBuilder::new();
@@ -17332,9 +17334,8 @@ mod tests {
     #[test]
     fn failed_paged_commit_leaves_the_free_lists_untouched() {
         use crate::writer::FileBuilder;
-        use tempfile::tempdir;
 
-        let dir = tempdir().unwrap();
+        let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("paged_failed_commit.h5");
         let mut b = FileBuilder::new();
         b.create_dataset("keep")
@@ -17404,7 +17405,7 @@ mod tests {
         #[case] strategy: FileSpaceStrategy,
         #[case] userblock: u64,
     ) {
-        let dir = tempdir().unwrap();
+        let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("failed_persisting_commit.h5");
         let mut b = FileBuilder::new();
         b.with_userblock(userblock);
@@ -17479,9 +17480,8 @@ mod tests {
     #[test]
     fn a_failed_commit_rolls_back_the_heap_collection_provenance() {
         use crate::writer::FileBuilder;
-        use tempfile::tempdir;
 
-        let dir = tempdir().unwrap();
+        let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("failed_commit_vl_provenance.h5");
         let mut b = FileBuilder::new();
         b.create_dataset("labels")
@@ -17565,9 +17565,8 @@ mod tests {
     #[test]
     fn a_failed_commit_leaves_no_reusable_span_the_image_names() {
         use crate::writer::FileBuilder;
-        use tempfile::tempdir;
 
-        let dir = tempdir().unwrap();
+        let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("failed_commit_live_span.h5");
         let mut b = FileBuilder::new();
         b.create_dataset("labels")
@@ -17648,9 +17647,8 @@ mod tests {
     #[test]
     fn a_failed_commit_that_reused_free_space_leaves_the_file_intact() {
         use crate::writer::FileBuilder;
-        use tempfile::tempdir;
 
-        let dir = tempdir().unwrap();
+        let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("reuse_failed_commit.h5");
         let victim: Vec<f64> = (0..4096).map(|i| (i % 13) as f64).collect();
         let ceiling: Vec<i32> = (0..500).collect();
@@ -17741,9 +17739,8 @@ mod tests {
     #[test]
     fn a_failed_commit_puts_back_the_value_it_overwrote() {
         use crate::writer::FileBuilder;
-        use tempfile::tempdir;
 
-        let dir = tempdir().unwrap();
+        let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("inplace_partial.h5");
         let mut b = FileBuilder::new();
         b.create_dataset("nums").with_i32_data(&[1, 2, 3]);
@@ -17826,9 +17823,8 @@ mod tests {
     #[test]
     fn a_failed_fast_path_commit_puts_back_the_value_it_overwrote() {
         use crate::writer::FileBuilder;
-        use tempfile::tempdir;
 
-        let dir = tempdir().unwrap();
+        let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("inplace_fast_path_torn.h5");
         let mut b = FileBuilder::new();
         b.create_dataset("kept").with_i32_data(&[1, 2, 3]);
@@ -17893,9 +17889,8 @@ mod tests {
     #[test]
     fn a_commit_that_fails_past_its_repoint_keeps_the_value_it_published() {
         use crate::writer::FileBuilder;
-        use tempfile::tempdir;
 
-        let dir = tempdir().unwrap();
+        let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("inplace_after_repoint.h5");
         let mut b = FileBuilder::new();
         b.create_dataset("nums").with_i32_data(&[1, 2, 3]);
@@ -17951,9 +17946,8 @@ mod tests {
     #[test]
     fn append_inplace_crash_consistency_paged_prefix() {
         use crate::reader::File as PureFile;
-        use tempfile::tempdir;
 
-        let dir = tempdir().unwrap();
+        let dir = tempfile::tempdir().unwrap();
         let base = dir.path().join("base.h5");
         let (start, target) = (131_000i32, 132_000i32);
         build_unit_chunked(&base, start);
@@ -17989,12 +17983,10 @@ mod tests {
     /// (issue #202).
     #[test]
     fn append_inplace_crash_consistency_leaves_the_committed_prefix() {
-        use tempfile::tempdir;
-
         // (initial length, chunk length, appended length): a partial trailing
         // chunk, a chunk-aligned start, and the EA-boundary crossing.
         for (n, chunk, add) in [(6i32, 4u64, 5i32), (8, 2, 6), (50, 1, 200)] {
-            let dir = tempdir().unwrap();
+            let dir = tempfile::tempdir().unwrap();
             let base = dir.path().join("base.h5");
             {
                 use crate::writer::FileBuilder;
@@ -18042,9 +18034,8 @@ mod tests {
     #[test]
     fn append_inplace_recover_and_reappend_after_phase3_crash() {
         use crate::reader::File as PureFile;
-        use tempfile::tempdir;
 
-        let dir = tempdir().unwrap();
+        let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("phase3_recover.h5");
         let n = 50i32;
         build_unit_chunked(&path, n);
@@ -19187,8 +19178,6 @@ mod tests {
         }
     }
 
-    use tempfile::tempdir;
-
     // -----------------------------------------------------------------------
     // Bounded sessions: the same engine over a `HandleImage`, which holds no
     // whole-file mirror. These came across from the standalone bounded engine
@@ -19237,7 +19226,7 @@ mod tests {
     /// chunk (relocated tail) and a chunk-aligned start.
     #[test]
     fn bounded_append_crash_consistency_partial_tail_prefix() {
-        let dir = tempdir().unwrap();
+        let dir = tempfile::tempdir().unwrap();
         for (case, (n, chunk, add)) in [(0usize, (6i32, 4u64, 5i32)), (1, (8, 2, 6))] {
             let base = dir.path().join(std::format!("base_{case}.h5"));
             build_appendable(&base, n, chunk);
@@ -19276,7 +19265,7 @@ mod tests {
     /// append the file reads the complete sequence.
     #[test]
     fn bounded_multi_batch_append_commits_every_batch() {
-        let dir = tempdir().unwrap();
+        let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join("multibatch.h5");
         build_appendable(&p, 5, 512);
         let total = 700_000i32;
@@ -19305,7 +19294,7 @@ mod tests {
     /// arithmetic.
     #[test]
     fn only_a_bounded_session_batches_a_large_append() {
-        let dir = tempdir().unwrap();
+        let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join("batching.h5");
         build_appendable(&p, 8, 4);
 
@@ -19347,7 +19336,7 @@ mod tests {
     /// `tests/main/bounded_append.rs` integration tests.
     #[test]
     fn bounded_persist_append_without_finalize_is_readable() {
-        let dir = tempdir().unwrap();
+        let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join("persist_crash.h5");
         let mut b = crate::writer::FileBuilder::new();
         b.with_file_space_strategy(crate::FileSpaceStrategy::FsmAggr, true, 1);
@@ -19384,7 +19373,7 @@ mod tests {
     /// then re-page-aligns the file and every row reads back.
     #[test]
     fn bounded_paged_reopen_after_crash_realigns_and_stays_readable() {
-        let dir = tempdir().unwrap();
+        let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join("paged_crash.h5");
         let mut b = crate::writer::FileBuilder::new();
         b.with_file_space_strategy(crate::FileSpaceStrategy::Page, true, 0)
@@ -19451,7 +19440,7 @@ mod tests {
         use std::sync::Arc;
         use std::sync::atomic::{AtomicU64, Ordering};
 
-        let dir = tempdir().unwrap();
+        let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join("bulk.h5");
         // ~8 MiB of chunked data, so "reads the whole file" and "reads only the
         // metadata" differ by orders of magnitude rather than by a margin.
@@ -19489,7 +19478,7 @@ mod tests {
     #[test]
     fn a_commit_after_an_append_pads_the_raw_page_the_append_left() {
         const PAGE: u64 = 4096;
-        let dir = tempdir().unwrap();
+        let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join("paged_interleave.h5");
         let mut b = crate::writer::FileBuilder::new();
         b.with_file_space_strategy(crate::FileSpaceStrategy::Page, true, 0)
@@ -19570,7 +19559,7 @@ mod tests {
     #[test]
     fn an_inplace_append_to_a_paged_file_allocates_only_raw_pages() {
         const PAGE: u64 = 4096;
-        let dir = tempdir().unwrap();
+        let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join("paged_raw.h5");
         let mut b = crate::writer::FileBuilder::new();
         b.with_file_space_strategy(crate::FileSpaceStrategy::Page, true, 0)
@@ -19707,9 +19696,7 @@ mod tests {
     /// an implementation detail that should be free to fall further.
     #[test]
     fn gathering_writes_costs_fewer_of_them_and_changes_no_byte() {
-        use tempfile::tempdir;
-
-        let dir = tempdir().unwrap();
+        let dir = tempfile::tempdir().unwrap();
         for paged in [false, true] {
             let straight = dir.path().join(std::format!("straight_{paged}.h5"));
             let gathered = dir.path().join(std::format!("gathered_{paged}.h5"));
@@ -19777,9 +19764,7 @@ mod tests {
     /// rather than at it.
     #[test]
     fn the_merge_page_follows_the_file_rather_than_the_default() {
-        use tempfile::tempdir;
-
-        let dir = tempdir().unwrap();
+        let dir = tempfile::tempdir().unwrap();
         let paged = dir.path().join("paged.h5");
         let plain = dir.path().join("plain.h5");
         gather_fixture(&paged, 1, true);
@@ -19810,9 +19795,8 @@ mod tests {
     #[test]
     fn a_status_flag_write_leaves_a_userblock_files_root_alone() {
         use crate::writer::FileBuilder;
-        use tempfile::tempdir;
 
-        let dir = tempdir().unwrap();
+        let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("userblock.h5");
         let mut b = FileBuilder::new();
         b.with_userblock(4096);
@@ -19867,9 +19851,7 @@ mod tests {
     /// a count, since how many a 4 MiB append needs is free to change.
     #[test]
     fn a_page_buffered_session_flushes_when_it_outruns_its_budget() {
-        use tempfile::tempdir;
-
-        let dir = tempdir().unwrap();
+        let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("outrun.h5");
         gather_fixture(&path, 1, true);
 
@@ -19926,9 +19908,7 @@ mod tests {
     /// budget issues fewer (issues #357, #391).
     #[test]
     fn a_smaller_budget_issues_more_writes() {
-        use tempfile::tempdir;
-
-        let dir = tempdir().unwrap();
+        let dir = tempfile::tempdir().unwrap();
         let fixture = |path: &std::path::Path, tables: usize| {
             use crate::writer::FileBuilder;
             let mut b = FileBuilder::new();
@@ -20019,9 +19999,8 @@ mod tests {
         #[values(false, true)] paged: bool,
     ) {
         use crate::writer::FileBuilder;
-        use tempfile::tempdir;
 
-        let dir = tempdir().unwrap();
+        let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("ub_buffered.h5");
         let mut b = FileBuilder::new();
         b.with_userblock(4096);
@@ -20112,9 +20091,7 @@ mod tests {
     /// the property was reachable only from a file deliberately created paged.
     #[test]
     fn a_page_buffer_holds_dirty_pages_across_operations() {
-        use tempfile::tempdir;
-
-        let dir = tempdir().unwrap();
+        let dir = tempfile::tempdir().unwrap();
         let run = |path: &std::path::Path, page_buffer: usize| {
             let mut s = WriteEngine::open_with_locking(path, FileLocking::Enabled).unwrap();
             s.set_sync_policy(SyncPolicy::OnClose);
@@ -20172,9 +20149,7 @@ mod tests {
     /// file at 256 KiB is the case the issue reported.
     #[test]
     fn a_page_buffer_below_the_gather_budget_writes_the_same_file() {
-        use tempfile::tempdir;
-
-        let dir = tempdir().unwrap();
+        let dir = tempfile::tempdir().unwrap();
         let run = |path: &std::path::Path, budget: usize| -> Vec<i32> {
             let file = crate::reader::File::create_with_options(
                 path,
@@ -20265,9 +20240,7 @@ mod tests {
     /// `sync_policy_governs_the_persisting_and_flag_barriers` and nothing else.
     #[test]
     fn a_barrier_orders_the_publish_point_last_under_every_policy() {
-        use tempfile::tempdir;
-
-        let dir = tempdir().unwrap();
+        let dir = tempfile::tempdir().unwrap();
         for policy in [SyncPolicy::Always, SyncPolicy::OnClose] {
             let path = dir.path().join(std::format!("order_{policy:?}.h5"));
             gather_fixture(&path, 1, false);
@@ -20333,9 +20306,8 @@ mod tests {
     #[test]
     fn a_page_buffer_changes_no_byte_through_the_bounded_backing() {
         use crate::reader::File;
-        use tempfile::tempdir;
 
-        let dir = tempdir().unwrap();
+        let dir = tempfile::tempdir().unwrap();
         let run = |name: &str, page_buffer: usize| {
             let path = dir.path().join(name);
             gather_fixture(&path, 4, true);
@@ -20389,9 +20361,7 @@ mod tests {
     /// Windows.
     #[test]
     fn a_finished_operation_has_nothing_left_to_write() {
-        use tempfile::tempdir;
-
-        let dir = tempdir().unwrap();
+        let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("finished_op.h5");
         gather_fixture(&path, 1, false);
 
@@ -20454,9 +20424,8 @@ mod tests {
     #[test]
     fn overwriting_the_root_group_is_refused_at_staging() {
         use crate::writer::FileBuilder;
-        use tempfile::tempdir;
 
-        let dir = tempdir().unwrap();
+        let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("root_overwrite.h5");
         let mut b = FileBuilder::new();
         b.create_dataset("d").with_i32_data(&[1]);
@@ -20490,9 +20459,8 @@ mod tests {
     #[test]
     fn staging_unallocated_storage_into_an_existing_file_is_refused() {
         use crate::writer::FileBuilder;
-        use tempfile::tempdir;
 
-        let dir = tempdir().unwrap();
+        let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("unallocated.h5");
         let mut b = FileBuilder::new();
         b.create_dataset("d").with_i32_data(&[1]);
@@ -20500,7 +20468,7 @@ mod tests {
 
         let mut s = WriteEngine::open_with_locking(&path, FileLocking::Enabled).unwrap();
         let mut db = crate::type_builders::DatasetBuilder::new("sparse");
-        db.with_unallocated_storage(make_i32_type(), &[1000]);
+        db.with_unallocated_storage(type_builders::make_i32_type(), &[1000]);
         db.with_chunks(&[100]);
         let err = s
             .stage_created_dataset(&ObjectPathBuf::parse("/sparse"), db)
@@ -20522,9 +20490,8 @@ mod tests {
     #[test]
     fn finalize_persist_has_nothing_left_to_write() {
         use crate::writer::FileBuilder;
-        use tempfile::tempdir;
 
-        let dir = tempdir().unwrap();
+        let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("persisting.h5");
         let mut b = FileBuilder::new();
         b.with_file_space_strategy(FileSpaceStrategy::FsmAggr, true, 1);
@@ -20567,7 +20534,6 @@ mod tests {
     #[test]
     fn the_append_reserve_is_reported_as_one_coalesced_free_list() {
         use crate::writer::FileBuilder;
-        use tempfile::tempdir;
 
         /// Elements of the dataset the delete vacates: three reserve batches, so
         /// the hole outlives several draws.
@@ -20575,7 +20541,7 @@ mod tests {
         /// Elements per chunk: 64 KiB, so sixteen appends spend a whole batch.
         const CHUNK: u64 = 16384;
 
-        let dir = tempdir().unwrap();
+        let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("reserve_coalesced.h5");
         let mut b = FileBuilder::new();
         b.with_file_space_strategy(FileSpaceStrategy::FsmAggr, true, 1);
@@ -20637,14 +20603,13 @@ mod tests {
     #[test]
     fn an_unspent_append_reserve_goes_back_to_the_managers() {
         use crate::writer::FileBuilder;
-        use tempfile::tempdir;
 
         /// Elements of the dataset the delete below vacates. Its blocks are the
         /// hole the append draws from, so it has to exceed one reserve batch or
         /// nothing is drawn and this measures the old behaviour.
         const VICTIM: usize = (APPEND_RESERVE_BYTES as usize * 2) / 4;
 
-        let dir = tempdir().unwrap();
+        let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("reserve_return.h5");
         let mut b = FileBuilder::new();
         b.with_file_space_strategy(FileSpaceStrategy::FsmAggr, true, 1);
@@ -20763,9 +20728,7 @@ mod tests {
     /// held exactly one run, so the count is what tells the two apart.
     #[test]
     fn a_draw_gathers_every_hole_the_append_fits_in() {
-        use tempfile::tempdir;
-
-        let dir = tempdir().unwrap();
+        let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("draw_gathers.h5");
         let mut s = fragmented_persisting_fixture(&path, 3, 4 * 64);
         let before: Vec<_> = s.space.reusable_sections().collect();
@@ -20815,9 +20778,7 @@ mod tests {
     /// end-of-file, which is the case both assertions rule out.
     #[test]
     fn a_draws_rewrite_places_its_tail_inside_the_draw() {
-        use tempfile::tempdir;
-
-        let dir = tempdir().unwrap();
+        let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("draw_tail.h5");
         let mut s = fragmented_persisting_fixture(&path, 1, 8 * 64);
         let len_before = s.image.len();
@@ -20861,9 +20822,7 @@ mod tests {
     /// from the value it covers, four.
     #[test]
     fn an_unbuffered_append_costs_a_small_constant_number_of_writes() {
-        use tempfile::tempdir;
-
-        let dir = tempdir().unwrap();
+        let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("swmr_cost.h5");
         gather_fixture(&path, 1, false);
 
@@ -20895,9 +20854,7 @@ mod tests {
     /// permits precisely because it takes no lock.
     #[test]
     fn the_swmr_writer_holds_no_write_back() {
-        use tempfile::tempdir;
-
-        let dir = tempdir().unwrap();
+        let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("swmr.h5");
         gather_fixture(&path, 1, false);
 
@@ -20946,9 +20903,8 @@ mod tests {
         use crate::writer::FileBuilder;
         use std::sync::Arc;
         use std::sync::atomic::{AtomicU64, Ordering};
-        use tempfile::tempdir;
 
-        let dir = tempdir().unwrap();
+        let dir = tempfile::tempdir().unwrap();
         // [after an immediate append, after a staged commit, after a same-length
         // overwrite, after a commit that truncates, after the close barrier,
         // after an explicit sync].
@@ -21057,9 +21013,8 @@ mod tests {
         use crate::writer::FileBuilder;
         use std::sync::Arc;
         use std::sync::atomic::{AtomicU64, Ordering};
-        use tempfile::tempdir;
 
-        let dir = tempdir().unwrap();
+        let dir = tempfile::tempdir().unwrap();
         // [after a commit on a persisting file, after the flag write, after the
         // close barrier and its manager re-homing].
         let run = |name: &str, strategy: FileSpaceStrategy, policy: SyncPolicy| -> [u64; 3] {
@@ -21185,9 +21140,8 @@ mod tests {
     #[test]
     fn a_commit_whose_publish_write_fails_rolls_nothing_back() {
         use crate::writer::FileBuilder;
-        use tempfile::tempdir;
 
-        let dir = tempdir().unwrap();
+        let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("torn_publish.h5");
         let mut b = FileBuilder::new();
         b.create_dataset("nums").with_i32_data(&[1, 2, 3]);
@@ -21243,9 +21197,7 @@ mod tests {
     /// `crates/crosscheck/tests/main/c_test_data.rs`.
     #[test]
     fn an_undo_replays_two_hard_links_to_one_block_newest_first() {
-        use tempfile::tempdir;
-
-        let dir = tempdir().unwrap();
+        let dir = tempfile::tempdir().unwrap();
         let path = test_util::copy_data("c/hard_link_undo.h5", dir.path());
 
         let mut s = WriteEngine::open_with_locking(&path, FileLocking::Enabled).unwrap();
@@ -21291,9 +21243,8 @@ mod tests {
     #[test]
     fn a_failed_commit_puts_back_every_chunk_it_overwrote() {
         use crate::writer::FileBuilder;
-        use tempfile::tempdir;
 
-        let dir = tempdir().unwrap();
+        let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("chunked_undo.h5");
         let original: Vec<i32> = (0..4096i32)
             .map(|i| i.wrapping_mul(2_654_435_761u32 as i32) ^ i)
@@ -21351,9 +21302,8 @@ mod tests {
     #[test]
     fn a_commit_does_not_replay_a_journal_it_did_not_write() {
         use crate::writer::FileBuilder;
-        use tempfile::tempdir;
 
-        let dir = tempdir().unwrap();
+        let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("stale_journal.h5");
         let mut b = FileBuilder::new();
         b.create_dataset("nums").with_i32_data(&[1, 2, 3]);
@@ -21409,11 +21359,10 @@ mod tests {
         use crate::writer::FileBuilder;
         use std::sync::Arc;
         use std::sync::atomic::{AtomicU64, Ordering};
-        use tempfile::tempdir;
 
         let mut counted = Vec::new();
         for with_overwrite in [false, true] {
-            let dir = tempdir().unwrap();
+            let dir = tempfile::tempdir().unwrap();
             let path = dir.path().join("rollback_syncs.h5");
             let mut b = FileBuilder::new();
             b.create_dataset("nums").with_i32_data(&[1, 2, 3]);
@@ -21472,9 +21421,8 @@ mod tests {
         use crate::writer::FileBuilder;
         use std::sync::Arc;
         use std::sync::atomic::{AtomicU64, Ordering};
-        use tempfile::tempdir;
 
-        let dir = tempdir().unwrap();
+        let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join("journal_reads.h5");
         let data: Vec<i32> = (0..250_000).collect();
         let payload = (data.len() * 4) as u64;
@@ -21512,7 +21460,6 @@ mod staged_query_tests {
     //! committed (issue #392).
 
     use rstest::rstest;
-    use tempfile::tempdir;
 
     use super::*;
     use crate::object_path::ObjectPath;
@@ -21551,7 +21498,7 @@ mod staged_query_tests {
 
     #[test]
     fn a_staged_creation_is_named_at_every_level_of_its_path() {
-        let dir = tempdir().unwrap();
+        let dir = tempfile::tempdir().unwrap();
         let mut e = open_session(&dir.path().join("q.h5"));
         e.create_group(&ObjectPathBuf::parse("a")).unwrap();
         let mut col = DatasetBuilder::new("");
@@ -21596,7 +21543,7 @@ mod staged_query_tests {
 
     #[test]
     fn a_staged_dataset_reports_what_its_builder_settled() {
-        let dir = tempdir().unwrap();
+        let dir = tempfile::tempdir().unwrap();
         let mut e = open_session(&dir.path().join("q.h5"));
         let mut col = DatasetBuilder::new("");
         col.with_i32_data(&[1, 2, 3, 4])
@@ -21636,7 +21583,7 @@ mod staged_query_tests {
 
     #[test]
     fn a_deletion_hides_nothing_until_a_creation_replaces_it() {
-        let dir = tempdir().unwrap();
+        let dir = tempfile::tempdir().unwrap();
         let mut e = open_session(&dir.path().join("q.h5"));
         e.delete(&ObjectPathBuf::parse("existing")).unwrap();
         // The object is still in the file, and still readable, so a handle must
@@ -21660,7 +21607,7 @@ mod staged_query_tests {
 
     #[test]
     fn a_creation_colliding_with_a_surviving_link_is_refused_where_it_is_staged() {
-        let dir = tempdir().unwrap();
+        let dir = tempfile::tempdir().unwrap();
         let mut e = open_session(&dir.path().join("q.h5"));
         // No deletion beside it, so this creation collides with a link the
         // commit keeps. That is the commit's own refusal, raised where the call
@@ -21691,7 +21638,7 @@ mod staged_query_tests {
 
     #[test]
     fn a_second_creation_at_a_staged_path_is_refused_where_it_is_staged() {
-        let dir = tempdir().unwrap();
+        let dir = tempfile::tempdir().unwrap();
         let mut e = open_session(&dir.path().join("q.h5"));
         e.stage_created_dataset(&ObjectPathBuf::parse("fresh"), i32_dataset(&[1, 2, 3]))
             .unwrap();
@@ -21735,7 +21682,7 @@ mod staged_query_tests {
 
     #[test]
     fn a_replacement_is_staged_once_and_a_withdrawal_frees_the_name_again() {
-        let dir = tempdir().unwrap();
+        let dir = tempfile::tempdir().unwrap();
         let mut e = open_session(&dir.path().join("q.h5"));
         // A creation over a link this session deletes is a replacement, which
         // the file arm admits — but only one of them, since the second would
@@ -21770,7 +21717,7 @@ mod staged_query_tests {
 
     #[test]
     fn a_group_staged_twice_is_one_group_and_stays_allowed() {
-        let dir = tempdir().unwrap();
+        let dir = tempfile::tempdir().unwrap();
         let mut e = open_session(&dir.path().join("q.h5"));
         // Two group creations at one path name one node: the commit builds a
         // single group from them, so a handle onto either addresses it and
@@ -21796,7 +21743,7 @@ mod staged_query_tests {
         // `g/inner` is what the name means: calling the staged creation beside
         // it a replacement would make a live, readable dataset answer
         // `NotCommitted` and vanish from its group's listing (issue #392).
-        let dir = tempdir().unwrap();
+        let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("prefix.h5");
         let mut b = crate::writer::FileBuilder::new();
         let mut g = b.create_group("g");
@@ -21840,7 +21787,7 @@ mod staged_query_tests {
         // The other side of that rule: `g` is replaced, so a creation under it
         // owns its name from the moment it is staged and the object the commit
         // removes is no longer what the path means.
-        let dir = tempdir().unwrap();
+        let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("replaced.h5");
         let mut b = crate::writer::FileBuilder::new();
         let mut g = b.create_group("g");
@@ -21877,7 +21824,7 @@ mod staged_query_tests {
         // Nothing links to the root, so there is no link to remove — and an
         // empty path is a prefix of every other, so a deletion staged there
         // would make every creation in the session look like a replacement.
-        let dir = tempdir().unwrap();
+        let dir = tempfile::tempdir().unwrap();
         let mut e = open_session(&dir.path().join("q.h5"));
         let err = e.delete(&ObjectPathBuf::parse(spelling)).unwrap_err();
         let Error::EditUnsupported(message) = &err else {
@@ -21902,7 +21849,7 @@ mod staged_query_tests {
     #[case("/")]
     #[case(".")]
     fn the_root_group_cannot_be_created(#[case] spelling: &str) {
-        let dir = tempdir().unwrap();
+        let dir = tempfile::tempdir().unwrap();
         let mut e = open_session(&dir.path().join("q.h5"));
         let err = e.create_group(&ObjectPathBuf::parse(spelling)).unwrap_err();
         let Error::EditUnsupported(message) = &err else {
@@ -21917,7 +21864,7 @@ mod staged_query_tests {
 
     #[test]
     fn an_append_onto_a_staged_dataset_grows_the_pending_creation() {
-        let dir = tempdir().unwrap();
+        let dir = tempfile::tempdir().unwrap();
         let mut e = open_session(&dir.path().join("q.h5"));
         e.stage_created_dataset(&ObjectPathBuf::parse("col"), i32_dataset(&[1, 2]))
             .unwrap();
@@ -21951,7 +21898,7 @@ mod staged_query_tests {
 
     #[test]
     fn an_append_through_a_handle_onto_the_replaced_object_is_refused() {
-        let dir = tempdir().unwrap();
+        let dir = tempfile::tempdir().unwrap();
         let mut e = open_session(&dir.path().join("q.h5"));
         e.delete(&ObjectPathBuf::parse("existing")).unwrap();
         e.stage_created_dataset(&ObjectPathBuf::parse("existing"), i32_dataset(&[100]))
@@ -21978,7 +21925,7 @@ mod staged_query_tests {
 
     #[test]
     fn an_append_the_staged_dataset_cannot_carry_is_refused_without_changing_it() {
-        let dir = tempdir().unwrap();
+        let dir = tempfile::tempdir().unwrap();
         let mut e = open_session(&dir.path().join("q.h5"));
         e.stage_created_dataset(&ObjectPathBuf::parse("col"), i32_dataset(&[1, 2]))
             .unwrap();
@@ -22029,7 +21976,7 @@ mod staged_query_tests {
 
     #[test]
     fn an_append_onto_a_committed_dataset_still_stages_an_append() {
-        let dir = tempdir().unwrap();
+        let dir = tempfile::tempdir().unwrap();
         let mut e = open_session(&dir.path().join("q.h5"));
         let mut b = AppendBuilder::new();
         b.append_i32(&[4]);
@@ -22048,7 +21995,7 @@ mod staged_query_tests {
 
     #[test]
     fn deleting_a_staged_creation_withdraws_it() {
-        let dir = tempdir().unwrap();
+        let dir = tempfile::tempdir().unwrap();
         let mut e = open_session(&dir.path().join("q.h5"));
         e.stage_created_dataset(&ObjectPathBuf::parse("col"), i32_dataset(&[1, 2]))
             .unwrap();
@@ -22062,7 +22009,7 @@ mod staged_query_tests {
 
     #[test]
     fn deleting_a_staged_group_withdraws_its_staged_subtree() {
-        let dir = tempdir().unwrap();
+        let dir = tempfile::tempdir().unwrap();
         let mut e = open_session(&dir.path().join("q.h5"));
         e.create_group(&ObjectPathBuf::parse("g")).unwrap();
         e.create_group(&ObjectPathBuf::parse("g/inner")).unwrap();
@@ -22084,7 +22031,7 @@ mod staged_query_tests {
 
     #[test]
     fn deleting_a_staged_replacement_leaves_the_plain_deletion() {
-        let dir = tempdir().unwrap();
+        let dir = tempfile::tempdir().unwrap();
         let mut e = open_session(&dir.path().join("q.h5"));
         e.delete(&ObjectPathBuf::parse("existing")).unwrap();
         e.stage_created_dataset(&ObjectPathBuf::parse("existing"), i32_dataset(&[9]))
@@ -22110,7 +22057,7 @@ mod staged_query_tests {
 
     #[test]
     fn a_batch_that_fails_leaves_the_staged_index_matching_the_staged_set() {
-        let dir = tempdir().unwrap();
+        let dir = tempfile::tempdir().unwrap();
         let mut e = open_session(&dir.path().join("q.h5"));
         e.stage_created_dataset(&ObjectPathBuf::parse("kept"), i32_dataset(&[1]))
             .unwrap();
@@ -22153,7 +22100,7 @@ mod staged_query_tests {
 
     #[test]
     fn an_edit_that_changes_staged_work_is_refused_inside_a_batch() {
-        let dir = tempdir().unwrap();
+        let dir = tempfile::tempdir().unwrap();
         let mut e = open_session(&dir.path().join("q.h5"));
         e.stage_created_dataset(&ObjectPathBuf::parse("col"), i32_dataset(&[1, 2]))
             .unwrap();

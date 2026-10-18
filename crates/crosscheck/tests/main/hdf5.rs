@@ -6,9 +6,8 @@
 
 use hdf5_pure::{
     AttrValue, CompoundTypeBuilder, Datatype, File, FileBuilder, VlenStringReadOptions,
-    make_f64_type,
 };
-use tempfile::tempdir;
+
 use test_util_hdf5::{file, fixtures};
 
 /// Read a MATLAB-style variable-length ASCII attribute from an `hdf5::Attribute`.
@@ -29,7 +28,7 @@ fn read_vl_ascii_attr(attr: &hdf5::Attribute) -> Vec<String> {
 
 #[test]
 fn crosscheck_f64_dataset() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("f64.h5");
 
     let mut builder = FileBuilder::new();
@@ -47,7 +46,7 @@ fn crosscheck_f64_dataset() {
 
 #[test]
 fn crosscheck_f32_dataset() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("f32.h5");
 
     let mut builder = FileBuilder::new();
@@ -64,7 +63,7 @@ fn crosscheck_f32_dataset() {
 
 #[test]
 fn crosscheck_i8_dataset() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("i8.h5");
 
     let mut builder = FileBuilder::new();
@@ -81,7 +80,7 @@ fn crosscheck_i8_dataset() {
 
 #[test]
 fn crosscheck_i16_dataset() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("i16.h5");
 
     let mut builder = FileBuilder::new();
@@ -98,7 +97,7 @@ fn crosscheck_i16_dataset() {
 
 #[test]
 fn crosscheck_i32_dataset() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("i32.h5");
 
     let mut builder = FileBuilder::new();
@@ -115,7 +114,7 @@ fn crosscheck_i32_dataset() {
 
 #[test]
 fn crosscheck_i64_dataset() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("i64.h5");
 
     let mut builder = FileBuilder::new();
@@ -132,7 +131,7 @@ fn crosscheck_i64_dataset() {
 
 #[test]
 fn crosscheck_u8_dataset() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("u8.h5");
 
     let mut builder = FileBuilder::new();
@@ -147,7 +146,7 @@ fn crosscheck_u8_dataset() {
 
 #[test]
 fn crosscheck_u16_dataset() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("u16.h5");
 
     let mut builder = FileBuilder::new();
@@ -164,7 +163,7 @@ fn crosscheck_u16_dataset() {
 
 #[test]
 fn crosscheck_u32_dataset() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("u32.h5");
 
     let mut builder = FileBuilder::new();
@@ -181,7 +180,7 @@ fn crosscheck_u32_dataset() {
 
 #[test]
 fn crosscheck_u64_dataset() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("u64.h5");
 
     let mut builder = FileBuilder::new();
@@ -202,7 +201,7 @@ fn crosscheck_u64_dataset() {
 
 #[test]
 fn crosscheck_2d_f64_dataset() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("2d.h5");
 
     let data = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
@@ -227,7 +226,7 @@ fn crosscheck_2d_f64_dataset() {
 
 #[test]
 fn crosscheck_multiple_datasets() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("multi.h5");
 
     let mut builder = FileBuilder::new();
@@ -254,7 +253,7 @@ fn crosscheck_multiple_datasets() {
 
 #[test]
 fn crosscheck_group_with_dataset() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("group.h5");
 
     let mut builder = FileBuilder::new();
@@ -276,7 +275,7 @@ fn crosscheck_group_with_dataset() {
 
 #[test]
 fn crosscheck_nested_groups() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("nested.h5");
 
     let mut builder = FileBuilder::new();
@@ -324,7 +323,7 @@ fn crosscheck_nested_groups() {
 
 #[test]
 fn crosscheck_f64_attribute() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("attr_f64.h5");
 
     let mut builder = FileBuilder::new();
@@ -340,7 +339,7 @@ fn crosscheck_f64_attribute() {
 
 #[test]
 fn crosscheck_i64_attribute() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("attr_i64.h5");
 
     let mut builder = FileBuilder::new();
@@ -356,7 +355,7 @@ fn crosscheck_i64_attribute() {
 
 #[test]
 fn crosscheck_i32_attribute() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("attr_i32.h5");
 
     let mut builder = FileBuilder::new();
@@ -372,7 +371,7 @@ fn crosscheck_i32_attribute() {
 
 #[test]
 fn crosscheck_u32_attribute() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("attr_u32.h5");
 
     let mut builder = FileBuilder::new();
@@ -388,7 +387,7 @@ fn crosscheck_u32_attribute() {
 
 #[test]
 fn crosscheck_string_attribute() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("attr_str.h5");
 
     let mut builder = FileBuilder::new();
@@ -403,7 +402,7 @@ fn crosscheck_string_attribute() {
 
 #[test]
 fn crosscheck_ascii_string_attribute() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("attr_ascii.h5");
 
     let mut builder = FileBuilder::new();
@@ -418,7 +417,7 @@ fn crosscheck_ascii_string_attribute() {
 
 #[test]
 fn crosscheck_dataset_attributes() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("ds_attr.h5");
 
     let mut builder = FileBuilder::new();
@@ -441,7 +440,7 @@ fn crosscheck_dataset_attributes() {
 
 #[test]
 fn crosscheck_group_attributes() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("grp_attr.h5");
 
     let mut builder = FileBuilder::new();
@@ -463,7 +462,7 @@ fn crosscheck_group_attributes() {
 
 #[test]
 fn crosscheck_userblock() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("userblock.h5");
 
     let mut builder = FileBuilder::new();
@@ -490,7 +489,7 @@ fn crosscheck_userblock() {
 
 #[test]
 fn crosscheck_chunked_dataset() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("chunked.h5");
 
     let data: Vec<f64> = (0..100).map(|i| i as f64 * 0.1).collect();
@@ -515,7 +514,7 @@ fn crosscheck_paged_fixed_array() {
     // > 1024 chunks pushes the Fixed Array index into its paged data block
     // layout. A non-compliant (flat) data block makes the C library reject the
     // file or misread it; this asserts the reference reader accepts ours.
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("paged_fa.h5");
 
     let n = 2500usize;
@@ -541,7 +540,7 @@ fn crosscheck_paged_fixed_array() {
 fn crosscheck_paged_fixed_array_deflate() {
     // Paged data block on the filtered element path, read back by the reference
     // C library (which validates each page checksum).
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("paged_fa_deflate.h5");
 
     let n = 1500usize;
@@ -570,7 +569,7 @@ fn crosscheck_read_paged_fixed_array_from_c_lib() {
     // (the layout that previously triggered "paged Fixed Array data blocks not
     // yet supported"), and hdf5-pure must read it back. `libver_v110` forces the
     // v110+ Fixed Array index; > 1024 fixed-shape chunks make it paged.
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("c_paged_fa.h5");
 
     let n = 2500usize;
@@ -604,7 +603,7 @@ fn crosscheck_read_paged_fixed_array_with_uninitialized_page() {
     // never allocated, so its page-init bitmap bit stays cleared. hdf5-pure must
     // skip that page (no chunk records) and fill the unwritten tail with the
     // dataset's fill value, exercising the bitmap-skip path against real bytes.
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("c_paged_fa_sparse.h5");
 
     let n = 2000usize; // 2 pages of 1024; page 1 (chunks 1024..) left untouched
@@ -639,7 +638,7 @@ fn crosscheck_read_paged_fixed_array_with_uninitialized_page() {
 
 #[test]
 fn crosscheck_deflate_compressed() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("deflate.h5");
 
     let data: Vec<f64> = (0..200).map(|i| i as f64).collect();
@@ -662,7 +661,7 @@ fn crosscheck_deflate_compressed() {
 
 #[test]
 fn crosscheck_shuffle_deflate() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("shuffle_deflate.h5");
 
     let data: Vec<f64> = (0..100).map(|i| i as f64 * 0.01).collect();
@@ -686,7 +685,7 @@ fn crosscheck_shuffle_deflate() {
 
 #[test]
 fn crosscheck_fletcher32_all_ones_written_by_pure_read_by_c() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("fletcher32_ones.h5");
 
     let data = vec![-1i32; 128];
@@ -706,7 +705,7 @@ fn crosscheck_fletcher32_all_ones_written_by_pure_read_by_c() {
 
 #[test]
 fn crosscheck_fletcher32_all_ones_written_by_c_read_by_pure() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("c_fletcher32_ones.h5");
 
     let data = vec![-1i32; 128];
@@ -735,7 +734,7 @@ fn crosscheck_fletcher32_all_ones_written_by_c_read_by_pure() {
 
 #[test]
 fn crosscheck_compound_f64_pairs() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("compound.h5");
 
     let ct = CompoundTypeBuilder::new()
@@ -772,7 +771,7 @@ struct PaddedTuple(
 
 #[test]
 fn c_library_reads_explicit_offset_compound() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("padded_compound.h5");
 
     let datatype = CompoundTypeBuilder::with_size(24)
@@ -806,7 +805,7 @@ fn c_library_reads_explicit_offset_compound() {
 #[cfg(not(target_pointer_width = "32"))]
 #[test]
 fn pure_reader_decodes_c_written_padded_compound() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("c_padded_compound.h5");
     let expected = [PaddedTuple(-9, 23, 4.5), PaddedTuple(3, 77, -6.25)];
 
@@ -848,7 +847,7 @@ struct NestedOuter(#[hdf5(rename = "0")] NestedInner, #[hdf5(rename = "1")] f32)
 
 #[test]
 fn c_library_reads_nested_explicit_compound() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("nested_compound.h5");
 
     let inner = CompoundTypeBuilder::with_size(16)
@@ -890,7 +889,7 @@ fn c_library_reads_nested_explicit_compound() {
 
 #[test]
 fn crosscheck_large_dataset() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("large.h5");
 
     let n = 10_000;
@@ -914,7 +913,7 @@ fn crosscheck_large_dataset() {
 
 #[test]
 fn crosscheck_empty_file() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("empty.h5");
 
     let builder = FileBuilder::new();
@@ -931,7 +930,7 @@ fn crosscheck_empty_file() {
 
 #[test]
 fn crosscheck_varlen_ascii_array_attr() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("vl_ascii.h5");
 
     let mut builder = FileBuilder::new();
@@ -960,7 +959,7 @@ fn crosscheck_varlen_ascii_array_attr() {
 /// left libhdf5 resolving addresses that were never assigned.
 #[test]
 fn crosscheck_varlen_ascii_array_attr_in_dense_storage() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("vl_ascii_dense.h5");
 
     let expected = ["x", "y", "velocity"];
@@ -988,7 +987,7 @@ fn crosscheck_varlen_ascii_array_attr_in_dense_storage() {
 /// `tests/main/userblock_dense_attrs.rs`.
 #[test]
 fn crosscheck_dense_attributes_past_a_userblock() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("ub_dense_attrs.h5");
 
     let mut builder = FileBuilder::new();
@@ -1015,7 +1014,7 @@ fn crosscheck_dense_attributes_past_a_userblock() {
 
 #[test]
 fn crosscheck_dense_attributes() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("dense_attrs.h5");
 
     let mut builder = FileBuilder::new();
@@ -1047,14 +1046,14 @@ fn crosscheck_dense_attributes() {
 
 #[test]
 fn crosscheck_empty_dataset_zero_dims() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("empty_ds.h5");
 
     let mut builder = FileBuilder::new();
     builder.set_attr("MATLAB_empty", AttrValue::U32(1));
     builder
         .create_dataset("empty")
-        .with_dtype(make_f64_type())
+        .with_dtype(hdf5_pure::make_f64_type())
         .with_shape(&[0, 0]);
     builder.write(&path).unwrap();
 
@@ -1071,7 +1070,7 @@ fn crosscheck_empty_dataset_zero_dims() {
 #[test]
 fn crosscheck_matlab_empty_shape_marker() {
     // MATLAB pattern: store original shape as u64 data with MATLAB_empty=1
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("matlab_empty.h5");
 
     let matlab_dims: &[usize] = &[3, 4];
@@ -1105,7 +1104,7 @@ fn crosscheck_matlab_empty_shape_marker() {
 
 #[test]
 fn crosscheck_path_references_2d_shape() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("refs_2d.h5");
 
     let mut builder = FileBuilder::new();
@@ -1123,7 +1122,7 @@ fn crosscheck_path_references_2d_shape() {
 
 #[test]
 fn crosscheck_matlab_refs_subsystem_pattern() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("refs_subsystem.h5");
 
     let mut builder = FileBuilder::new();
@@ -1175,7 +1174,7 @@ fn crosscheck_matlab_refs_subsystem_pattern() {
 /// that the C library can read back the exact string values.
 #[test]
 fn crosscheck_varlen_ascii_array_encoding_vs_metno() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let forge_path = dir.path().join("forge_vl.h5");
 
     let fields = vec!["x".to_string(), "y".to_string(), "z".to_string()];
@@ -1231,7 +1230,7 @@ fn crosscheck_varlen_ascii_array_encoding_vs_metno() {
 
 #[test]
 fn crosscheck_varlen_ascii_on_nested_group() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("grp_vl.h5");
 
     let mut builder = FileBuilder::new();
@@ -1277,7 +1276,7 @@ fn crosscheck_varlen_ascii_on_nested_group() {
 /// cause the C library to fail.
 #[test]
 fn crosscheck_userblock_all_address_types() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("ub_all.h5");
 
     let mut builder = FileBuilder::new();
@@ -1360,7 +1359,7 @@ fn crosscheck_userblock_all_address_types() {
 
 #[test]
 fn crosscheck_group_only_no_datasets() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("grp_only.h5");
 
     let mut builder = FileBuilder::new();
@@ -1407,7 +1406,7 @@ fn crosscheck_group_only_no_datasets() {
 /// works for long class names like "canonical empty" (15 chars).
 #[test]
 fn crosscheck_long_ascii_class_attr() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("long_class.h5");
 
     let mut builder = FileBuilder::new();
@@ -1436,7 +1435,7 @@ fn crosscheck_long_ascii_class_attr() {
 /// and child datasets with their own MATLAB_class attributes.
 #[test]
 fn crosscheck_matlab_struct_pattern() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("matlab_struct.h5");
 
     let mut builder = FileBuilder::new();
@@ -1497,7 +1496,7 @@ fn crosscheck_matlab_struct_pattern() {
 /// MATLAB cell array: #refs# group + reference dataset with cell class.
 #[test]
 fn crosscheck_matlab_cell_array() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("matlab_cell.h5");
 
     let mut builder = FileBuilder::new();
@@ -1546,7 +1545,7 @@ fn crosscheck_matlab_cell_array() {
 /// Userblock with MATLAB header bytes at offsets 126-127.
 #[test]
 fn crosscheck_matlab_userblock_header() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("matlab_ub.h5");
 
     let mut builder = FileBuilder::new();
@@ -1580,7 +1579,7 @@ fn crosscheck_matlab_userblock_header() {
 fn crosscheck_read_scale_offset_int_from_c_lib() {
     // Reference C library writes an integer scale-offset dataset (multi-chunk,
     // partial last chunk); hdf5-pure must decode it losslessly.
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("c_scaleoffset_int.h5");
 
     let n = 250usize;
@@ -1608,7 +1607,7 @@ fn crosscheck_read_scale_offset_int_from_c_lib() {
 fn crosscheck_read_scale_offset_float_from_c_lib() {
     // Reference C library writes a float D-scale dataset; hdf5-pure decodes it
     // within the decimal tolerance.
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("c_scaleoffset_float.h5");
 
     let decimals = 3u8;
@@ -1641,7 +1640,7 @@ fn crosscheck_read_scale_offset_float_from_c_lib() {
 #[test]
 fn crosscheck_scale_offset_int_compressed() {
     // hdf5-pure writes integer scale-offset data that libhdf5 reads.
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("scaleoffset_int.h5");
 
     let n = 250usize;
@@ -1665,7 +1664,7 @@ fn crosscheck_scale_offset_int_compressed() {
 fn crosscheck_scale_offset_float_dscale() {
     // hdf5-pure writes float D-scale data that libhdf5 reads within
     // the decimal tolerance.
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("scaleoffset_float.h5");
 
     let decimals = 2i32;
@@ -1693,7 +1692,7 @@ fn crosscheck_scale_offset_float_dscale() {
 #[test]
 fn crosscheck_scale_offset_then_deflate() {
     // hdf5-pure writes [scaleoffset, deflate] data that libhdf5 reads.
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("scaleoffset_deflate.h5");
 
     let n = 300usize;
@@ -1721,7 +1720,7 @@ fn crosscheck_vlen_string_dataset() {
     // library reads back the values and confirms the datatype is VL Unicode.
     use hdf5::types::VarLenUnicode;
 
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("vlen_strings.h5");
 
     let words = ["alpha", "", "γάμμα", "delta"];
@@ -1761,7 +1760,7 @@ fn crosscheck_vlen_strings_span_multiple_heap_collections() {
     // format rather than only with this crate's reader.
     use hdf5::types::VarLenUnicode;
 
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("vlen_multi_collection.h5");
 
     // Just past two collections, so the split happens twice and the last
@@ -1794,7 +1793,7 @@ fn crosscheck_vlen_strings_span_multiple_heap_collections() {
 /// would pass the moment the empty one alone was fixed.
 #[test]
 fn an_empty_string_attribute_does_not_hide_its_neighbours() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("empty_string_attr.h5");
 
     let mut builder = FileBuilder::new();

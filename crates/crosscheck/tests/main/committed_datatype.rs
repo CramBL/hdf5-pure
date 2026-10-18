@@ -27,7 +27,6 @@ use hdf5_pure::CharacterSet;
 use hdf5_pure::StringPadding;
 use hdf5_pure::{AttrValue, Datatype, File, FixedPointLayout, RepackOptions};
 use rstest::rstest;
-use tempfile::tempdir;
 
 use test_util_hdf5::file;
 
@@ -181,7 +180,7 @@ fn write_attr(owner: &hdf5::Location, name: &str, committed: Option<&hdf5::Datat
 #[test]
 #[cfg(target_endian = "little")]
 fn a_committed_attribute_datatype_resolves_to_the_type_it_names() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("committed.h5");
     write_committed_fixture(&path, EVERYTHING);
 
@@ -224,7 +223,7 @@ fn a_committed_attribute_datatype_resolves_to_the_type_it_names() {
 #[test]
 #[cfg(target_endian = "little")]
 fn a_committed_dataset_datatype_resolves_and_its_data_reads() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("committed.h5");
     write_committed_fixture(&path, EVERYTHING);
 
@@ -241,7 +240,7 @@ fn a_committed_dataset_datatype_resolves_and_its_data_reads() {
 #[test]
 #[cfg(target_endian = "little")]
 fn committed_datatypes_resolve_in_dense_attribute_storage() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("dense.h5");
     // Comfortably past the eight-attribute threshold that moves storage to a heap.
     const DENSE: usize = 40;
@@ -291,7 +290,7 @@ fn committed_datatypes_resolve_in_dense_attribute_storage() {
 #[test]
 #[cfg(target_endian = "little")]
 fn an_edit_passes_over_a_committed_attribute_it_does_not_touch() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("committed.h5");
     write_committed_fixture(&path, EVERYTHING);
 
@@ -350,7 +349,7 @@ fn an_edit_passes_over_a_committed_attribute_it_does_not_touch() {
 /// attribute's flags byte to see it at all.
 #[test]
 fn a_cross_file_copy_refuses_a_committed_attribute() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let src_path = dir.path().join("committed.h5");
     let dst_path = dir.path().join("dest.h5");
     write_committed_fixture(&src_path, EVERYTHING);
@@ -380,7 +379,7 @@ fn a_cross_file_copy_refuses_a_committed_attribute() {
 /// `maxshape=(None,)` on a latest-format file.
 #[test]
 fn an_in_place_append_refuses_a_committed_element_type() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("appendable.h5");
     write_appendable_committed_fixture(&path);
 
@@ -412,7 +411,7 @@ fn write_appendable_committed_fixture(path: &Path) {
 #[test]
 #[cfg(target_endian = "little")]
 fn the_streaming_backend_resolves_a_committed_datatype_too() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("committed.h5");
     write_committed_fixture(&path, EVERYTHING);
 
@@ -475,7 +474,7 @@ fn attr_type_is_committed(file: &hdf5::File, owner: &str, attr: &str) -> bool {
 #[test]
 #[cfg(target_endian = "little")]
 fn repack_reproduces_a_committed_datatype() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let src = dir.path().join("committed.h5");
     let dst = dir.path().join("repacked.h5");
     write_committed_fixture(&src, EVERYTHING);
@@ -535,7 +534,7 @@ fn repack_reproduces_a_committed_datatype() {
 #[test]
 #[cfg(target_endian = "little")]
 fn users_of_one_committed_type_still_share_one_object() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let src = dir.path().join("committed.h5");
     let dst = dir.path().join("repacked.h5");
     write_committed_fixture(&src, EVERYTHING);
@@ -686,7 +685,7 @@ fn write_pure_committed_string_fixture(path: &Path) {
 /// same drop is an ordinary one.
 #[test]
 fn repack_refuses_dropping_a_committed_type_still_in_use() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
 
     for (what, fixture, expected) in [
         (
@@ -745,7 +744,7 @@ fn repack_refuses_dropping_a_committed_type_still_in_use() {
 /// it is false for an inline encoding no matter how correct the bytes are.
 #[test]
 fn a_committed_datatype_this_crate_writes_reads_back_as_committed() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("written.h5");
 
     let mut builder = hdf5_pure::FileBuilder::new();
@@ -796,7 +795,7 @@ fn a_committed_datatype_this_crate_writes_reads_back_as_committed() {
 /// count is the one the C library reads back from its own file.
 #[test]
 fn a_version_1_header_reports_the_reference_count_the_c_library_wrote() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("committed_v1.h5");
     let file = hdf5::FileBuilder::new()
         .with_fapl(|fapl| fapl.libver_bounds(LibraryVersion::Earliest, LibraryVersion::V18))
@@ -833,7 +832,7 @@ fn a_version_1_header_reports_the_reference_count_the_c_library_wrote() {
 /// `H5Tcommit2` wrote rather than from a constant.
 #[test]
 fn the_reference_count_matches_what_the_c_library_writes() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let src = dir.path().join("committed.h5");
     write_committed_fixture(&src, EVERYTHING);
 
@@ -929,7 +928,7 @@ fn a_dataset_naming_a_type_the_file_does_not_commit_is_refused() {
 /// group, so the check has to look at ancestors too.
 #[test]
 fn repack_refuses_dropping_the_group_a_named_type_lives_in() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let src = dir.path().join("nested.h5");
     let dst = dir.path().join("repacked.h5");
 
@@ -960,7 +959,7 @@ fn repack_refuses_dropping_the_group_a_named_type_lives_in() {
 /// to point at, and the reference was refused.
 #[test]
 fn an_object_reference_to_a_committed_type_survives_a_repack() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let src = dir.path().join("refs.h5");
     let dst = dir.path().join("repacked.h5");
     write_committed_fixture(&src, EVERYTHING);
@@ -1005,7 +1004,7 @@ fn an_object_reference_to_a_committed_type_survives_a_repack() {
 /// longer sharing the named type — the silent degradation this crate refuses.
 #[test]
 fn an_in_place_edit_refuses_a_committed_datatype() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("edit.h5");
 
     let mut builder = hdf5_pure::FileBuilder::new();
@@ -1074,7 +1073,7 @@ fn an_in_place_edit_refuses_a_committed_datatype() {
 #[test]
 #[cfg(target_endian = "little")]
 fn only_what_the_c_library_calls_a_named_datatype_is_accepted() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("committed.h5");
     write_committed_fixture(&path, EVERYTHING);
     // A group as well, so all three of the C library's object classes are

@@ -17,7 +17,7 @@
 
 use hdf5::{MajorErrorCode, MinorErrorCode};
 use hdf5_pure::{Error, File, FormatError, RepackOptions};
-use tempfile::tempdir;
+
 use test_util::object_header::{MessageFlags, MessageType};
 
 use super::fixture;
@@ -28,7 +28,7 @@ const COPY_NAME: &str = "copied";
 
 #[test]
 fn an_unknown_message_only_a_writer_must_understand_is_read_as_the_c_library_reads_it() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("fail_if_unknown_for_write.h5");
     write_fixture_with_the_flagged_message(&path);
 
@@ -75,7 +75,7 @@ fn an_unknown_message_only_a_writer_must_understand_is_read_as_the_c_library_rea
 
 #[test]
 fn a_repack_reads_past_the_message_and_writes_a_destination_both_libraries_open_for_writing() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let src = dir.path().join("source.h5");
     let dst = dir.path().join("repacked.h5");
     write_fixture_with_the_flagged_message(&src);
@@ -112,7 +112,7 @@ fn a_repack_reads_past_the_message_and_writes_a_destination_both_libraries_open_
 #[test]
 fn a_repack_asked_to_reject_unknown_messages_only_a_writer_must_understand_names_the_type_and_leaves_the_destination_absent()
  {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let src = dir.path().join("source.h5");
     let dst = dir.path().join("repacked.h5");
     write_fixture_with_the_flagged_message(&src);
@@ -135,7 +135,7 @@ fn a_repack_asked_to_reject_unknown_messages_only_a_writer_must_understand_names
 
 #[test]
 fn a_cross_file_copy_reads_past_the_message_and_stops_only_at_the_version_1_header() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let src = dir.path().join("source.h5");
     let dst = dir.path().join("destination.h5");
     write_fixture_with_the_flagged_message(&src);
@@ -171,7 +171,7 @@ fn a_cross_file_copy_reads_past_the_message_and_stops_only_at_the_version_1_head
 #[test]
 fn a_same_file_copy_rejects_a_file_whose_root_group_header_holds_a_message_only_a_writer_must_understand()
  {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("source.h5");
     write_fixture_with_the_flagged_message(&path);
 

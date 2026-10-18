@@ -26,7 +26,7 @@ use std::path::Path;
 use hdf5::file::LibraryVersion;
 use hdf5::{IndexType, IterationOrder, LinkInfo};
 use hdf5_pure::{AttrValue, Error, File};
-use tempfile::tempdir;
+
 use test_util_hdf5::creation_order::{self, Indexing};
 
 /// A file whose group `/g` tracks *link* creation order, as netCDF-4 writes,
@@ -201,7 +201,7 @@ fn set_on_both(path: &Path, name: &str, value: i64) {
 
 #[test]
 fn an_object_tracking_creation_order_can_be_edited_at_all() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let p = dir.path().join("t.h5");
     creation_order::write_attribute_fixture(&p, &creation_order::names(3), Indexing::Yes, false);
 
@@ -229,7 +229,7 @@ fn an_object_tracking_creation_order_can_be_edited_at_all() {
 
 #[test]
 fn the_editor_reads_a_tracked_object_back_itself() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let p = dir.path().join("t.h5");
     creation_order::write_attribute_fixture(&p, &creation_order::names(3), Indexing::Yes, false);
     set_on_both(&p, "added", 7);
@@ -243,7 +243,7 @@ fn the_editor_reads_a_tracked_object_back_itself() {
 
 #[test]
 fn overwriting_an_attribute_keeps_the_creation_index_it_had() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let p = dir.path().join("t.h5");
     creation_order::write_attribute_fixture(&p, &creation_order::names(3), Indexing::Yes, false);
 
@@ -263,7 +263,7 @@ fn overwriting_an_attribute_keeps_the_creation_index_it_had() {
 
 #[test]
 fn deleting_an_attribute_leaves_a_gap_rather_than_renumbering() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let p = dir.path().join("t.h5");
     creation_order::write_attribute_fixture(&p, &creation_order::names(4), Indexing::Yes, false);
 
@@ -308,7 +308,7 @@ fn deleting_an_attribute_leaves_a_gap_rather_than_renumbering() {
 
 #[test]
 fn a_compact_set_crossing_the_threshold_carries_its_creation_order_into_the_heap() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let p = dir.path().join("t.h5");
     // Eight compact attributes; one is deleted and six more added in one
     // session. That is past the writer's compact threshold, so the whole set is
@@ -367,7 +367,7 @@ fn a_compact_set_crossing_the_threshold_carries_its_creation_order_into_the_heap
 
 #[test]
 fn a_tracked_set_goes_dense_without_a_creation_order_index_when_the_object_has_none() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let p = dir.path().join("t.h5");
     // Tracked but not *indexed*: the heap gets a name index only, and the
     // creation index each attribute carries lives in that index's records.
@@ -392,7 +392,7 @@ fn a_tracked_set_goes_dense_without_a_creation_order_index_when_the_object_has_n
 
 #[test]
 fn an_object_already_dense_keeps_its_creation_order_across_an_edit() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let p = dir.path().join("t.h5");
     // Twelve attributes is past the C library's own compact threshold, so both
     // objects already store their attributes in a fractal heap.
@@ -434,7 +434,7 @@ fn an_object_already_dense_keeps_its_creation_order_across_an_edit() {
 /// link carries, and `H5Gget_info`'s `max_corder` is the running counter.
 #[test]
 fn links_created_in_a_tracked_group_take_the_next_creation_indexes() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let p = dir.path().join("t.h5");
     write_link_tracked(&p, &["first", "second"]);
 
@@ -486,7 +486,7 @@ fn links_created_in_a_tracked_group_take_the_next_creation_indexes() {
 /// maximum rather than reusing the gap.
 #[test]
 fn a_tracked_group_leaves_a_deletion_gap_and_adds_past_it() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let p = dir.path().join("t.h5");
     write_link_tracked(&p, &["first", "middle", "last"]);
     assert_eq!(
@@ -547,7 +547,7 @@ fn a_tracked_group_leaves_a_deletion_gap_and_adds_past_it() {
 /// not write (issue #102). The refusal lands before any byte changes.
 #[test]
 fn a_tracked_group_at_its_compact_threshold_is_refused() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let p = dir.path().join("t.h5");
     // Eight links is the C library's default maximum compact value, so the
     // fixture is the largest tracked group that still stores its links in the
@@ -586,7 +586,7 @@ fn a_tracked_group_at_its_compact_threshold_is_refused() {
 /// reason, and refused as it is read rather than as the addition is planned.
 #[test]
 fn a_dense_tracked_group_is_refused() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let p = dir.path().join("t.h5");
     // One past the default maximum compact value, so the C library wrote the
     // links into a fractal heap.
@@ -625,7 +625,7 @@ fn a_dense_tracked_group_is_refused() {
 /// order none of its links carries.
 #[test]
 fn a_copied_group_keeps_its_link_creation_order() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let p = dir.path().join("t.h5");
     write_link_tracked(&p, &["first", "second", "third"]);
 

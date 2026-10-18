@@ -4,7 +4,6 @@ use std::path::Path;
 use hdf5::plist::file_create::{Sizeof, SizeofInfo};
 use hdf5_pure::File;
 use rstest::rstest;
-use tempfile::tempdir;
 
 fn write_c_chunked_file(path: &Path, sizeof_addr: Sizeof, sizeof_size: Sizeof) {
     let sizes = SizeofInfo {
@@ -52,7 +51,7 @@ fn read_chunked_dataset_with_various_offset_and_length_sizes(
     #[case] sizeof_addr: Sizeof,
     #[case] sizeof_size: Sizeof,
 ) {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("test_sizes.h5");
     write_c_chunked_file(&path, sizeof_addr, sizeof_size);
 

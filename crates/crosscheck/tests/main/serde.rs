@@ -6,7 +6,6 @@
 
 use hdf5_pure::mat::{self, Complex64, ComplexI16, Matrix};
 use serde::{Deserialize, Serialize};
-use tempfile::tempdir;
 
 #[derive(Serialize, Deserialize, Debug, PartialEq)]
 struct Experiment {
@@ -25,7 +24,7 @@ struct Config {
 
 #[test]
 fn c_library_reads_nested_struct_file() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("experiment.mat");
 
     let e = Experiment {
@@ -99,7 +98,7 @@ struct MatStruct {
 
 #[test]
 fn c_library_reads_2d_matrix_with_matlab_orientation() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("matrix.mat");
 
     // Rust 2×3 row-major matrix:
@@ -127,7 +126,7 @@ struct Waves {
 
 #[test]
 fn c_library_reads_complex_as_compound() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("waves.mat");
 
     let w = Waves {
@@ -177,7 +176,7 @@ struct Capture {
 /// offsets 0 and 2, and four bytes per sample rather than eight.
 #[test]
 fn c_library_reads_complex_int16_as_a_four_byte_compound() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("capture.mat");
 
     let c = Capture {
@@ -224,7 +223,7 @@ struct Flags {
 
 #[test]
 fn c_library_reads_logical_as_uint8() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("flags.mat");
 
     let f = Flags {
@@ -256,7 +255,7 @@ fn c_library_reads_logical_as_uint8() {
 /// deserializer, using the same `to_file` / `from_file` convenience methods.
 #[test]
 fn to_file_and_from_file_roundtrip() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("roundtrip.mat");
 
     let e = Experiment {

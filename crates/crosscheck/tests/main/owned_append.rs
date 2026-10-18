@@ -5,12 +5,12 @@
 //! filtered datasets this crate wrote, and for a dataset the C library created.
 
 use hdf5_pure::File;
-use tempfile::tempdir;
+
 use test_util_hdf5::dataset::{self, Filter, Unlimited};
 
 #[test]
 fn owned_append_unfiltered_reads_back_in_c() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("d.h5");
     Unlimited::new("d", &(0..5).collect::<Vec<i32>>(), 4).pure_create(&path);
     {
@@ -27,7 +27,7 @@ fn owned_append_unfiltered_reads_back_in_c() {
 
 #[test]
 fn owned_append_filtered_reads_back_in_c() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("d.h5");
     Unlimited::new("d", &(0..8).collect::<Vec<i32>>(), 4)
         .filters(&[Filter::Shuffle, Filter::Deflate(6)])
@@ -46,7 +46,7 @@ fn owned_append_filtered_reads_back_in_c() {
 #[test]
 #[cfg(target_endian = "little")]
 fn owned_append_onto_c_created_dataset() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("d.h5");
     Unlimited::new("d", &(0..5).collect::<Vec<i32>>(), 4).libhdf5_create(&path);
     {

@@ -12,7 +12,7 @@
 
 use hdf5::{MajorErrorCode, MinorErrorCode};
 use hdf5_pure::{Error, File, FormatError};
-use tempfile::tempdir;
+
 use test_util::object_header::{MessageFlags, MessageType};
 
 use super::fixture;
@@ -20,7 +20,7 @@ use super::fixture::{ATTRIBUTE_NAME, ATTRIBUTE_VALUE, DATA, DATASET_NAME};
 
 #[test]
 fn an_unknown_message_that_must_always_be_understood_is_rejected_as_the_c_library_rejects_it() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("fail_if_unknown_always.h5");
     fixture::write_earliest_format_fixture(&path);
 

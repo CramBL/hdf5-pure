@@ -17,7 +17,7 @@ use hdf5_pure::mat::{
 };
 use hdf5_pure::{
     AttrValue, CompoundTypeBuilder, Datatype, DatatypeByteOrder, File, FileBuilder,
-    FixedPointLayout, LibVer, make_i64_type,
+    FixedPointLayout, LibVer,
 };
 use serde::{Deserialize, Serialize};
 
@@ -430,8 +430,8 @@ fn a_class_attribute_that_contradicts_the_compound_is_refused() {
 #[test]
 fn an_unlabelled_complex_integer_array_is_not_decoded_as_double() {
     let ct = CompoundTypeBuilder::new()
-        .field("real", make_i64_type())
-        .field("imag", make_i64_type())
+        .field("real", hdf5_pure::make_i64_type())
+        .field("imag", hdf5_pure::make_i64_type())
         .build()
         .unwrap();
     let mut raw = Vec::new();

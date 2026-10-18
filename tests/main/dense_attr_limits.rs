@@ -14,7 +14,7 @@
 use hdf5_pure::{AttrValue, Error, File, FileBuilder, FormatError};
 use test_util::btree_v2;
 use test_util::fractal_heap;
-use test_util_hdf5::dense_attr::{largest_managed_payload, nine_attrs};
+use test_util_hdf5::dense_attr;
 
 /// The text of a string attribute, whichever string variant the reader chose for
 /// it. Which one it picks is a datatype question and not what these tests are
@@ -29,9 +29,9 @@ fn text<'a>(attrs: &'a std::collections::HashMap<String, AttrValue>, name: &str)
 
 #[test]
 fn an_attribute_past_the_managed_object_limit_becomes_a_huge_object() {
-    let payload = largest_managed_payload();
+    let payload = dense_attr::largest_managed_payload();
 
-    let at_limit = nine_attrs(payload).finish().unwrap();
+    let at_limit = dense_attr::nine_attrs(payload).finish().unwrap();
     assert_eq!(fractal_heap::huge_object_count(&at_limit), 0);
     assert_eq!(
         File::from_bytes(at_limit)
@@ -44,7 +44,7 @@ fn an_attribute_past_the_managed_object_limit_becomes_a_huge_object() {
     );
 
     // One byte more changes the storage class, and nothing else.
-    let past = nine_attrs(payload + 1).finish().unwrap();
+    let past = dense_attr::nine_attrs(payload + 1).finish().unwrap();
     assert_eq!(fractal_heap::huge_object_count(&past), 1);
 
     let file = File::from_bytes(past).unwrap();
@@ -333,7 +333,7 @@ fn an_attribute_name_too_long_for_its_length_field_is_refused() {
 /// same emitter.
 #[test]
 fn group_and_dataset_attributes_use_huge_storage_too() {
-    let payload = largest_managed_payload() + 1;
+    let payload = dense_attr::largest_managed_payload() + 1;
 
     let mut builder = FileBuilder::new();
     let mut group = builder.create_group("g");

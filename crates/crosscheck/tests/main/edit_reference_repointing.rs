@@ -10,7 +10,6 @@
 //! pure-Rust read would notice.
 
 use hdf5_pure::File;
-use tempfile::tempdir;
 
 use test_util_hdf5::{file, fixtures};
 
@@ -28,7 +27,7 @@ fn assert_resolves_to_the_moved_group(group: &hdf5::Group) {
 fn a_c_written_reference_attribute_is_repointed_and_the_header_resealed() {
     use hdf5::{ObjectReference, ObjectReference1, ReferencedObject};
 
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("attr_ref.h5");
 
     {
@@ -74,7 +73,7 @@ fn a_c_written_reference_attribute_is_repointed_and_the_header_resealed() {
 fn a_c_written_reference_dataset_is_repointed() {
     use hdf5::{ObjectReference, ObjectReference1, ReferencedObject};
 
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("ds_ref.h5");
 
     {
@@ -122,7 +121,7 @@ fn a_c_written_reference_dataset_is_repointed() {
 fn a_chunked_reference_dataset_is_left_unrepointed() {
     use hdf5::{ObjectReference, ObjectReference1};
 
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("chunked_ref.h5");
 
     {
@@ -189,7 +188,7 @@ fn a_chunked_reference_dataset_is_left_unrepointed() {
 fn a_reference_on_a_rebuilt_header_is_repointed_in_the_header_the_commit_published() {
     use hdf5::{ObjectReference, ObjectReference1, ReferencedObject};
 
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("root_attr_ref.h5");
 
     {
@@ -231,7 +230,7 @@ fn a_reference_on_a_rebuilt_header_is_repointed_in_the_header_the_commit_publish
 #[test]
 fn a_reference_dataset_through_a_committed_datatype_is_repointed() {
     use hdf5::{ObjectReference, ObjectReference1, ReferencedObject};
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("committed_ref.h5");
 
     {
@@ -284,7 +283,7 @@ fn a_reference_dataset_through_a_committed_datatype_is_repointed() {
 fn an_earliest_format_reference_dataset_is_repointed() {
     use hdf5::{ObjectReference, ObjectReference1, ReferencedObject};
 
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("earliest.h5");
     {
         let file = file::libhdf5_create_earliest(&path);

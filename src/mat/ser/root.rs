@@ -6,10 +6,10 @@
 
 use serde::ser::{Impossible, Serialize, SerializeMap, SerializeStruct, Serializer};
 
-use super::emit::{emit_file, emit_file_to};
-use super::emit_with_builder::{emit_file_with_options, emit_file_with_options_to};
+use super::emit;
+use super::emit_with_builder;
 use super::value::{Leaf, Value};
-use super::value_ser::{ValueSerializer, to_value};
+use super::value_ser::{self, ValueSerializer};
 use crate::mat::error::MatError;
 use crate::mat::options::Options;
 
@@ -17,7 +17,7 @@ use crate::mat::options::Options;
 pub fn to_bytes<T: Serialize + ?Sized>(value: &T) -> Result<Vec<u8>, MatError> {
     let options = Options::default();
     let fields = value.serialize(RootSerializer::new(&options))?;
-    emit_file(fields)
+    emit::emit_file(fields)
 }
 
 /// Like [`to_bytes`] but with explicit options. Use this to opt into the
@@ -27,7 +27,7 @@ pub fn to_bytes_with_options<T: Serialize + ?Sized>(
     options: &Options,
 ) -> Result<Vec<u8>, MatError> {
     let fields = value.serialize(RootSerializer::new(options))?;
-    emit_file_with_options(fields, options)
+    emit_with_builder::emit_file_with_options(fields, options)
 }
 
 /// Serialize `value` straight onto `w`, without assembling the file in memory.
@@ -37,7 +37,7 @@ pub fn to_writer<T: Serialize + ?Sized, W: std::io::Write>(
 ) -> Result<(), MatError> {
     let options = Options::default();
     let fields = value.serialize(RootSerializer::new(&options))?;
-    emit_file_to(fields, w)
+    emit::emit_file_to(fields, w)
 }
 
 /// Like [`to_writer`] but with explicit options.
@@ -47,7 +47,7 @@ pub fn to_writer_with_options<T: Serialize + ?Sized, W: std::io::Write>(
     w: W,
 ) -> Result<(), MatError> {
     let fields = value.serialize(RootSerializer::new(options))?;
-    emit_file_with_options_to(fields, options, w)
+    emit_with_builder::emit_file_with_options_to(fields, options, w)
 }
 
 /// Serialize `value` to `path`, streaming the file rather than buffering it.
@@ -63,7 +63,7 @@ pub fn to_path<T: Serialize + ?Sized, P: AsRef<std::path::Path>>(
 ) -> Result<(), MatError> {
     let options = Options::default();
     let fields = value.serialize(RootSerializer::new(&options))?;
-    emit_file_to(fields, create(path)?)
+    emit::emit_file_to(fields, create(path)?)
 }
 
 /// Like [`to_path`] but with explicit options.
@@ -73,7 +73,7 @@ pub fn to_path_with_options<T: Serialize + ?Sized, P: AsRef<std::path::Path>>(
     options: &Options,
 ) -> Result<(), MatError> {
     let fields = value.serialize(RootSerializer::new(options))?;
-    emit_file_with_options_to(fields, options, create(path)?)
+    emit_with_builder::emit_file_with_options_to(fields, options, create(path)?)
 }
 
 /// Create the destination. Called only once the value is known to be
@@ -292,7 +292,7 @@ impl SerializeStruct for RootStructSer<'_> {
         key: &'static str,
         value: &T,
     ) -> Result<(), MatError> {
-        let v = to_value(value, self.opts)?;
+        let v = value_ser::to_value(value, self.opts)?;
         if !matches!(v, Value::Omit) {
             self.fields.push((key.to_owned(), v));
         }
@@ -347,7 +347,7 @@ impl SerializeMap for RootMapSer<'_> {
             .pending_key
             .take()
             .ok_or_else(|| MatError::Custom("serialize_value before serialize_key".into()))?;
-        let v = to_value(value, self.opts)?;
+        let v = value_ser::to_value(value, self.opts)?;
         if !matches!(v, Value::Omit) {
             self.fields.push((k, v));
         }

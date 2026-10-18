@@ -8,7 +8,6 @@
 use hdf5::{MajorErrorCode, MinorErrorCode};
 use hdf5_pure::{Error, File};
 use rstest::rstest;
-use tempfile::tempdir;
 
 /// Writes a file holding `/b`, `/a/b` and `/a`, where `/b` reads 2 and `/a/b` reads 1, so that a
 /// path resolved from the root and the same path resolved from `a` reach different data.
@@ -42,7 +41,7 @@ fn nested_file(path: &std::path::Path) {
 #[case("a/./b")]
 #[case("a/b/.")]
 fn both_libraries_resolve_every_spelling_of_a_path_to_one_dataset(#[case] spelling: &str) {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("nested.h5");
     nested_file(&path);
 
@@ -71,7 +70,7 @@ fn both_libraries_walk_a_path_opened_on_a_group_from_the_same_place(
     #[case] spelling: &str,
     #[case] value: i32,
 ) {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("nested.h5");
     nested_file(&path);
 
@@ -99,7 +98,7 @@ fn both_libraries_walk_a_path_opened_on_a_group_from_the_same_place(
 
 #[test]
 fn both_libraries_read_two_dots_as_an_ordinary_link_name() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("two_dots.h5");
 
     {
@@ -156,7 +155,7 @@ fn neither_library_deletes_a_group_through_a_path_that_spells_no_link(
     #[case] major: MajorErrorCode,
     #[case] minor: MinorErrorCode,
 ) {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("nested.h5");
     nested_file(&path);
 

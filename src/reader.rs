@@ -24,7 +24,7 @@ use crate::type_builders::{DatasetBuilder, VL_REF_SIZE};
 
 use crate::FillTime;
 use crate::appender::BufferedAppender;
-use crate::attribute::{extract_attributes_full, extract_attributes_full_from_source};
+use crate::attribute;
 use crate::chunk_cache::{CachePass, ChunkCache, ChunkCacheConfig, ChunkCacheStats};
 use crate::compound::CompoundType;
 use crate::convert::Narrow;
@@ -40,7 +40,7 @@ use crate::fill_value::{FillPattern, FillValueMessage, FillValueView};
 use crate::filter_pipeline::FilterPipeline;
 use crate::free_space_manager;
 use crate::group_v1::GroupEntry;
-use crate::group_v2::{self, ChildLookup, is_group};
+use crate::group_v2::{self, ChildLookup};
 use crate::layout_info::{Chunk, ChunkIndex, Filter, Layout};
 use crate::libver::LibVer;
 use crate::message_type::MessageType;
@@ -50,14 +50,14 @@ use crate::read_spec::{RawReadSpec, RawReadStorage};
 use crate::shared_message::{self, BufferedResolver, SharedResolver, SourceResolver};
 use crate::source::SourceMetadata;
 use crate::source::{
-    BaseOffsetSource, BytesSource, MetadataCacheConfig, MetadataCacheStats, MetadataCachingSource,
-    ReadSeekSource, Source, ValidatedSource, frame,
+    self, BaseOffsetSource, BytesSource, MetadataCacheConfig, MetadataCacheStats,
+    MetadataCachingSource, ReadSeekSource, Source, ValidatedSource,
 };
 use crate::superblock;
 use crate::superblock::LocatedSuperblock;
 use crate::superblock::Superblock;
 use crate::superblock::SuperblockSource;
-use crate::types::{AttrValue, DType, attrs_to_map, classify_datatype};
+use crate::types::{self, AttrValue, DType};
 use crate::vl_data::{self, VlElement, VlenStringReadOptions};
 use crate::width::FormatWidths;
 
@@ -1740,7 +1740,7 @@ impl FileInner {
         let offset_width = self.widths.offsets;
         match &self.backend {
             Backend::InMemory(v) => crate::sohm::SohmTable::read_with_offset_width(
-                frame(v, base).ok()?,
+                source::frame(v, base).ok()?,
                 &message,
                 offset_width,
             )
@@ -1766,7 +1766,7 @@ impl FileInner {
                 m,
                 |d| {
                     Ok::<_, Error>(crate::sohm::SohmTable::read_with_offset_width(
-                        frame(d, base)?,
+                        source::frame(d, base)?,
                         &message,
                         offset_width,
                     )?)
@@ -2147,7 +2147,7 @@ impl FileInner {
                 chunk_cache,
                 None,
             ))))
-        } else if is_group(&hdr) {
+        } else if group_v2::is_group(&hdr) {
             Ok(Object::Group(Group::new(file.clone(), at, None)))
         } else {
             Err(FormatError::InvalidObjectReference(rel_addr).into())
@@ -2243,10 +2243,15 @@ impl FileInner {
         match &self.backend {
             Backend::Edit(m) => Ok(Self::with_engine(
                 m,
-                |d| attrs_to_map(&attr_msgs, &BytesSource::new(d), widths, base),
-                |s| attrs_to_map(&attr_msgs, s, widths, base),
+                |d| types::attrs_to_map(&attr_msgs, &BytesSource::new(d), widths, base),
+                |s| types::attrs_to_map(&attr_msgs, s, widths, base),
             )),
-            _ => Ok(attrs_to_map(&attr_msgs, &self.source(), widths, base)),
+            _ => Ok(types::attrs_to_map(
+                &attr_msgs,
+                &self.source(),
+                widths,
+                base,
+            )),
         }
     }
 
@@ -2273,10 +2278,14 @@ impl FileInner {
         // A shared reference stores its address relative to the base address, so
         // frame the file at `base` exactly as [`Self::attr_messages_of`] does.
         let resolved = match &self.backend {
-            Backend::InMemory(v) => {
-                BufferedResolver::new(frame(v, base)?, self.addresses(), access, widths, sohm)
-                    .resolve(&msg.data, msg.msg_type)
-            }
+            Backend::InMemory(v) => BufferedResolver::new(
+                source::frame(v, base)?,
+                self.addresses(),
+                access,
+                widths,
+                sohm,
+            )
+            .resolve(&msg.data, msg.msg_type),
             Backend::Streaming(s) if base.is_zero() => {
                 SourceResolver::new(s.as_ref(), self.addresses(), access, widths, sohm)
                     .resolve(&msg.data, msg.msg_type)
@@ -2295,8 +2304,14 @@ impl FileInner {
             Backend::Edit(m) => Self::with_engine(
                 m,
                 |d| {
-                    BufferedResolver::new(frame(d, base)?, self.addresses(), access, widths, sohm)
-                        .resolve(&msg.data, msg.msg_type)
+                    BufferedResolver::new(
+                        source::frame(d, base)?,
+                        self.addresses(),
+                        access,
+                        widths,
+                        sohm,
+                    )
+                    .resolve(&msg.data, msg.msg_type)
                 },
                 |s| {
                     if base.is_zero() {
@@ -2360,28 +2375,30 @@ impl FileInner {
         let access = self.access_mode();
         let sohm = self.sohm_table.as_deref();
         match &self.backend {
-            Backend::InMemory(v) => Ok(extract_attributes_full(
-                frame(v, base)?,
+            Backend::InMemory(v) => Ok(attribute::extract_attributes_full(
+                source::frame(v, base)?,
                 access,
                 self.addresses(),
                 hdr,
                 widths,
                 sohm,
             )?),
-            Backend::Streaming(s) if base.is_zero() => Ok(extract_attributes_full_from_source(
-                s.as_ref(),
-                self.addresses(),
-                access,
-                hdr,
-                widths,
-                sohm,
-            )?),
+            Backend::Streaming(s) if base.is_zero() => {
+                Ok(attribute::extract_attributes_full_from_source(
+                    s.as_ref(),
+                    self.addresses(),
+                    access,
+                    hdr,
+                    widths,
+                    sohm,
+                )?)
+            }
             Backend::Streaming(s) => {
                 let framed = BaseOffsetSource {
                     inner: s.as_ref(),
                     base,
                 };
-                Ok(extract_attributes_full_from_source(
+                Ok(attribute::extract_attributes_full_from_source(
                     &framed,
                     self.addresses(),
                     access,
@@ -2393,8 +2410,8 @@ impl FileInner {
             Backend::Edit(m) => Self::with_engine(
                 m,
                 |d| {
-                    Ok(extract_attributes_full(
-                        frame(d, base)?,
+                    Ok(attribute::extract_attributes_full(
+                        source::frame(d, base)?,
                         access,
                         self.addresses(),
                         hdr,
@@ -2404,7 +2421,7 @@ impl FileInner {
                 },
                 |s| {
                     if base.is_zero() {
-                        Ok(extract_attributes_full_from_source(
+                        Ok(attribute::extract_attributes_full_from_source(
                             s,
                             self.addresses(),
                             access,
@@ -2414,7 +2431,7 @@ impl FileInner {
                         )?)
                     } else {
                         let framed = BaseOffsetSource { inner: s, base };
-                        Ok(extract_attributes_full_from_source(
+                        Ok(attribute::extract_attributes_full_from_source(
                             &framed,
                             self.addresses(),
                             access,
@@ -2445,7 +2462,7 @@ impl FileInner {
         let base = self.addresses().effective_base();
         match &self.backend {
             Backend::InMemory(v) => {
-                data_read::read_raw_data_cached(frame(v, base)?, spec, widths, cache)
+                data_read::read_raw_data_cached(source::frame(v, base)?, spec, widths, cache)
             }
             Backend::Streaming(s) if base.is_zero() => {
                 data_read::read_raw_data_cached_from_source(s.as_ref(), spec, widths, cache)
@@ -2460,7 +2477,7 @@ impl FileInner {
             Backend::Edit(m) => Self::with_engine(
                 m,
                 |data| {
-                    let framed = frame(data, base)?;
+                    let framed = source::frame(data, base)?;
                     data_read::read_raw_data_cached(framed, spec, widths, cache)
                 },
                 |s| {
@@ -2513,7 +2530,7 @@ impl FileInner {
         let base = self.addresses().effective_base();
         match &self.backend {
             Backend::InMemory(v) => {
-                let framed = frame(v, base)?;
+                let framed = source::frame(v, base)?;
                 read_rows_framed(
                     &BytesSource::new(framed),
                     spec,
@@ -2547,7 +2564,7 @@ impl FileInner {
             Backend::Edit(m) => Self::with_engine(
                 m,
                 |data| {
-                    let framed = frame(data, base)?;
+                    let framed = source::frame(data, base)?;
                     read_rows_framed(
                         &BytesSource::new(framed),
                         spec,
@@ -3531,7 +3548,7 @@ impl File {
         }
         let revisions = self.inner.revisions();
         let addr = self.inner.resolve_path(&path.as_path())?;
-        if !is_group(&self.inner.parse_header(addr)?) {
+        if !group_v2::is_group(&self.inner.parse_header(addr)?) {
             // Normalized, so that the same object refused here and refused by a
             // live handle below names itself the same way: a handle knows only
             // the normalized path it memoized.
@@ -4026,7 +4043,7 @@ impl Group {
         // Every other resolution is classified before it is memoized.
         let initial_root =
             memo.is_none() && self.path.as_ref().is_some_and(ObjectPathBuf::is_empty);
-        if !initial_root && !is_group(&self.file.parse_header(at.address)?) {
+        if !initial_root && !group_v2::is_group(&self.file.parse_header(at.address)?) {
             // A path-less handle never reaches here: it failed the short-circuit
             // above, and `locate` answers `StaleHandle` for one whose address
             // memo it cannot reuse.
@@ -4282,7 +4299,7 @@ impl Group {
                 continue;
             }
             let hdr = self.file.parse_header(self.file.entry_address(entry)?)?;
-            if is_group(&hdr) {
+            if group_v2::is_group(&hdr) {
                 names.push(entry.name.clone());
             }
         }
@@ -4335,7 +4352,7 @@ impl Group {
             // classified this child is dropped here rather than held for the
             // length of the walk.
             let address = self.file.entry_address(&entry)?;
-            if is_group(&self.file.parse_header(address)?) {
+            if group_v2::is_group(&self.file.parse_header(address)?) {
                 members.push((entry.name, Some(address)));
             }
         }
@@ -4526,7 +4543,7 @@ impl Group {
         }
         let revisions = self.file.revisions();
         let address = self.resolve_path(&relative)?;
-        if !is_group(&self.file.parse_header(address)?) {
+        if !group_v2::is_group(&self.file.parse_header(address)?) {
             return Err(Error::NotAGroup(self.root_relative(&relative)));
         }
         Ok(Group::new(self.file.clone(), revisions.at(address), child))
@@ -6074,7 +6091,7 @@ the same commit to replace it",
     /// datatype its builder settled on.
     pub fn dtype(&self) -> Result<DType, Error> {
         let dt = self.datatype()?;
-        Ok(classify_datatype(&dt))
+        Ok(types::classify_datatype(&dt))
     }
 
     /// The size in bytes of one on-disk element of this dataset's datatype —
@@ -7110,7 +7127,7 @@ the same commit to replace it",
     /// from an actual mismatch.
     #[cfg(feature = "provenance")]
     pub fn verify_provenance(&self) -> Result<crate::provenance::VerifyResult, Error> {
-        use crate::provenance::{ATTR_SHA256, VerifyResult, sha256_hex};
+        use crate::provenance::{self, ATTR_SHA256, VerifyResult};
 
         let attrs = self.attrs()?;
         let stored = match attrs.get(ATTR_SHA256).and_then(AttrValue::as_str) {
@@ -7118,7 +7135,7 @@ the same commit to replace it",
             None => return Ok(VerifyResult::NoHash),
         };
 
-        let computed = sha256_hex(&self.read_raw()?);
+        let computed = provenance::sha256_hex(&self.read_raw()?);
         if computed == stored {
             Ok(VerifyResult::Ok)
         } else {
@@ -7166,7 +7183,7 @@ fn has_message(header: &ObjectHeader, msg_type: MessageType) -> bool {
 fn is_named_datatype(header: &ObjectHeader) -> bool {
     has_message(header, MessageType::DATATYPE)
         && !has_message(header, MessageType::DATA_LAYOUT)
-        && !is_group(header)
+        && !group_v2::is_group(header)
 }
 
 /// The root-relative path of a child named `name` under `parent`, or `None` if
@@ -9761,9 +9778,7 @@ mod tests {
     /// asserts the property at each of them rather than at the funnel.
     #[test]
     fn every_read_write_open_carries_the_fapl_sync_policy() {
-        use tempfile::tempdir;
-
-        let dir = tempdir().unwrap();
+        let dir = tempfile::tempdir().unwrap();
         let fixture = |name: &str| {
             let path = dir.path().join(name);
             let mut b = FileBuilder::new();
@@ -9846,9 +9861,7 @@ mod tests {
     /// existed, which is a file nothing can open until `clear_swmr_flag`.
     #[test]
     fn a_page_buffer_is_rejected_where_it_cannot_be_honored() {
-        use tempfile::tempdir;
-
-        let dir = tempdir().unwrap();
+        let dir = tempfile::tempdir().unwrap();
         let fixture = |name: &str, paged: bool| {
             let path = dir.path().join(name);
             let mut b = FileBuilder::new();
@@ -10040,9 +10053,7 @@ mod tests {
     /// and without a check here it would be written and only then refused.
     #[test]
     fn create_with_options_refuses_a_page_buffer_it_could_not_reopen_with() {
-        use tempfile::tempdir;
-
-        let dir = tempdir().unwrap();
+        let dir = tempfile::tempdir().unwrap();
         let paged = |page: u64| {
             crate::FileCreateProperties::new()
                 .with_file_space_strategy(crate::FileSpaceStrategy::Page, true, 1)
@@ -10157,9 +10168,8 @@ mod tests {
         use crate::edit::WriteEngine;
         use std::sync::Arc;
         use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
-        use tempfile::tempdir;
 
-        let dir = tempdir().unwrap();
+        let dir = tempfile::tempdir().unwrap();
         // `swmr` picks the teardown branch; `explicit` picks `close` over `drop`.
         let teardown = |name: &str, swmr: bool, explicit: bool| -> u64 {
             let path = dir.path().join(name);

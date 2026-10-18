@@ -4,12 +4,12 @@
 //! reads the streamed appends back exactly.
 
 use hdf5_pure::File;
-use tempfile::tempdir;
+
 use test_util_hdf5::dataset::{self, Unlimited};
 
 #[test]
 fn c_library_reads_swmr_appends_after_close() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("s.h5");
     Unlimited::new("d", &(0..50).collect::<Vec<i32>>(), 1).pure_create(&path); // chunk length 1: the common streaming layout
 
@@ -44,7 +44,7 @@ fn c_library_reads_swmr_appends_after_close() {
 fn a_v1_superblock_reports_the_flags_the_c_library_wrote() {
     use hdf5::file::LibraryVersion;
 
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("legacy.h5");
     // A non-default, odd chunk B-tree K: it sits beside the flags in the v1
     // layout, and reading it as the flags would report bit 0 — "open for write".
@@ -89,7 +89,7 @@ fn a_v1_superblock_reports_the_flags_the_c_library_wrote() {
 /// in place, a file `H5Fopen` refuses.
 #[test]
 fn both_libraries_refuse_a_file_a_crashed_swmr_writer_left_flagged() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("flagged.h5");
     Unlimited::new("d", &(0..4).collect::<Vec<i32>>(), 4).pure_create(&path);
 

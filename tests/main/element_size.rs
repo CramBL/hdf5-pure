@@ -3,14 +3,14 @@
 //! front instead of trusting an untrusted file's declared extent.
 
 use hdf5_pure::{File, FileBuilder};
-use tempfile::tempdir;
-use test_util::fuzz::fixture_with_recorded_extent;
+
+use test_util::fuzz;
 
 /// `element_size` reports the datatype's storage size, and `shape().product() *
 /// element_size()` is exactly the length of the raw buffer a full read returns.
 #[test]
 fn element_size_matches_datatype_and_read_raw() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("sizes.h5");
     {
         let mut b = FileBuilder::new();
@@ -46,7 +46,7 @@ fn element_size_matches_datatype_and_read_raw() {
 /// heaps and is not counted here.
 #[test]
 fn element_size_of_vlen_string_is_the_descriptor_width() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("vl.h5");
     {
         let mut b = FileBuilder::new();
@@ -71,7 +71,7 @@ fn element_size_of_vlen_string_is_the_descriptor_width() {
 /// before a full read tries to allocate `50 * 2.86 GB`.
 #[test]
 fn element_size_exposes_a_hostile_declared_size() {
-    let bytes = fixture_with_recorded_extent("oom_chunked_string_huge_elem.h5");
+    let bytes = fuzz::fixture_with_recorded_extent("oom_chunked_string_huge_elem.h5");
     let file = File::from_bytes(bytes).unwrap();
     let (name, ds) = file.root().iter_datasets().unwrap().next().unwrap();
     assert_eq!(name, "", "the fixture's one link has an empty name");

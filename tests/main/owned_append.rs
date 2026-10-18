@@ -6,12 +6,12 @@
 //! append.
 
 use hdf5_pure::{Error, File};
-use tempfile::tempdir;
+
 use test_util_hdf5::dataset::Unlimited;
 
 #[test]
 fn append_and_read_through_one_handle() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("d.h5");
     Unlimited::new("d", &(0..5).collect::<Vec<i32>>(), 4).pure_create(&path); // [0,1,2,3,4]
     {
@@ -32,7 +32,7 @@ fn append_and_read_through_one_handle() {
 
 #[test]
 fn many_appends_across_calls() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("d.h5");
     Unlimited::<i32>::new("d", &[], 4).pure_create(&path);
     {
@@ -52,7 +52,7 @@ fn many_appends_across_calls() {
 
 #[test]
 fn append_to_readonly_file_is_refused() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("d.h5");
     Unlimited::new("d", &(0..3).collect::<Vec<i32>>(), 4).pure_create(&path);
     let bytes = std::fs::read(&path).unwrap();
@@ -63,7 +63,7 @@ fn append_to_readonly_file_is_refused() {
 
 #[test]
 fn open_rw_reads_like_open() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("d.h5");
     Unlimited::new("d", &(0..6).collect::<Vec<i32>>(), 3).pure_create(&path);
     let file = File::open_rw(&path).unwrap();
@@ -81,7 +81,7 @@ fn open_rw_reads_like_open() {
 /// the stale index and returned zeros for the appended elements.
 #[test]
 fn interleaved_reads_observe_every_append() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let p = dir.path().join("interleaved.h5");
     Unlimited::new("d", &(0..6).collect::<Vec<i32>>(), 4).pure_create(&p);
     let file = File::open_rw(&p).unwrap();

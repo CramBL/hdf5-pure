@@ -13,9 +13,9 @@ use serde::ser::{
 };
 
 use super::value::{Leaf, Value};
-use crate::mat::complex::{complex_tag_for_array_sentinel, complex_tag_for_sentinel};
+use crate::mat::complex;
 use crate::mat::error::MatError;
-use crate::mat::matrix::{MATRIX_SENTINEL, complex_tag_for_matrix_sentinel};
+use crate::mat::matrix::{self, MATRIX_SENTINEL};
 use crate::mat::options::{EmptySequencePolicy, NullPolicy, Options, UnitVariantEncoding};
 use crate::mat::value::{ComplexNum, ComplexTag, ComplexVec, NumVec, ScalarNum, ScalarTag};
 
@@ -178,7 +178,7 @@ impl<'a> Serializer for ValueSerializer<'a> {
         // slice over as one byte payload rather than paying a serializer
         // dispatch per sample. The result is the value the element-wise path
         // would have built, so the file is unchanged either way.
-        if let Some(tag) = complex_tag_for_array_sentinel(name) {
+        if let Some(tag) = complex::complex_tag_for_array_sentinel(name) {
             return value.serialize(ComplexArraySer { tag });
         }
         // Transparent newtype — pass through.
@@ -225,9 +225,9 @@ impl<'a> Serializer for ValueSerializer<'a> {
     }
 
     fn serialize_struct(self, name: &'static str, len: usize) -> Result<StructSer<'a>, MatError> {
-        let kind = if let Some(tag) = complex_tag_for_sentinel(name) {
+        let kind = if let Some(tag) = complex::complex_tag_for_sentinel(name) {
             StructKind::Complex(tag, ComplexFields::default())
-        } else if let Some(tag) = complex_tag_for_matrix_sentinel(name) {
+        } else if let Some(tag) = matrix::complex_tag_for_matrix_sentinel(name) {
             StructKind::Matrix(MatrixFields::default(), MatrixKind::Complex(tag))
         } else {
             match name {

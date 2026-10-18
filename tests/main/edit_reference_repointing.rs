@@ -13,7 +13,7 @@ use hdf5_pure::{
     AttrValue, CompoundTypeBuilder, Datatype, DatatypeByteOrder, File, FileBuilder,
     FileSpaceStrategy, FixedPointLayout, Group, Object, ReferenceType,
 };
-use tempfile::tempdir;
+
 use test_util_hdf5::{dataset::Unlimited, fixtures};
 
 /// The names of the datasets the file's first stored reference resolves to,
@@ -46,7 +46,7 @@ fn build_file_referencing_a_group(path: &std::path::Path) {
 
 #[test]
 fn a_reference_to_a_group_follows_it_when_the_group_gains_a_child() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("group_target.h5");
     build_file_referencing_a_group(&path);
 
@@ -78,7 +78,7 @@ fn a_reference_to_a_group_follows_it_when_the_group_gains_a_child() {
 
 #[test]
 fn a_reference_to_a_dataset_follows_its_relocating_attribute_edit() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("dataset_target.h5");
 
     let mut b = FileBuilder::new();
@@ -114,7 +114,7 @@ fn a_reference_to_a_dataset_follows_its_relocating_attribute_edit() {
 
 #[test]
 fn a_reference_to_the_root_group_follows_the_rebuilt_root() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("root_target.h5");
 
     // Every commit rebuilds the root group, so a reference to it is the one that
@@ -143,7 +143,7 @@ fn a_reference_to_the_root_group_follows_the_rebuilt_root() {
 
 #[test]
 fn every_element_of_a_multi_reference_dataset_is_repointed() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("many.h5");
 
     let mut b = FileBuilder::new();
@@ -186,7 +186,7 @@ fn every_element_of_a_multi_reference_dataset_is_repointed() {
 
 #[test]
 fn a_reference_inside_a_compound_element_is_repointed() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("compound.h5");
 
     // A compound of {object reference, i32} is the shape libhdf5
@@ -270,7 +270,7 @@ fn a_reference_inside_a_compound_element_is_repointed() {
 
 #[test]
 fn a_reference_to_a_deleted_object_is_left_dangling() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("deleted.h5");
     build_file_referencing_a_group(&path);
 
@@ -297,7 +297,7 @@ fn a_reference_to_a_deleted_object_is_left_dangling() {
 
 #[test]
 fn references_are_repointed_on_a_userblock_file() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("userblock.h5");
 
     // Stored addresses are relative to the superblock base, so a userblock is
@@ -338,7 +338,7 @@ fn reference_survives_on(path: &std::path::Path, strategy: Option<FileSpaceStrat
 
 #[test]
 fn references_are_repointed_on_a_persisting_file() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     reference_survives_on(
         &dir.path().join("persist.h5"),
         Some(FileSpaceStrategy::FsmAggr),
@@ -347,13 +347,13 @@ fn references_are_repointed_on_a_persisting_file() {
 
 #[test]
 fn references_are_repointed_on_a_paged_file() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     reference_survives_on(&dir.path().join("paged.h5"), Some(FileSpaceStrategy::Page));
 }
 
 #[test]
 fn repeated_commits_in_one_session_each_repoint() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("many_commits.h5");
     build_file_referencing_a_group(&path);
 
@@ -381,7 +381,7 @@ fn repeated_commits_in_one_session_each_repoint() {
 
 #[test]
 fn a_reference_dataset_added_after_a_reference_free_walk_is_still_repointed() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("added_later.h5");
 
     // The file starts with nothing a reference could live in, so the first
@@ -424,7 +424,7 @@ fn a_reference_dataset_added_after_a_reference_free_walk_is_still_repointed() {
 
 #[test]
 fn a_copy_made_in_the_same_commit_that_moves_its_target_is_repointed() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("copied.h5");
     build_file_referencing_a_group(&path);
 
@@ -456,7 +456,7 @@ fn a_copy_made_in_the_same_commit_that_moves_its_target_is_repointed() {
 
 #[test]
 fn a_reference_to_an_appended_dataset_follows_its_relocating_append() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("appended.h5");
 
     // A staged append rebuilds the dataset's chunk index and rewrites its header

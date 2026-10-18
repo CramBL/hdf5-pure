@@ -2,7 +2,7 @@
 
 use hdf5::file::LibraryVersion;
 use rstest::rstest;
-use tempfile::tempdir;
+
 use test_util::superblock;
 use test_util_hdf5::reader::ReadBackend;
 
@@ -25,7 +25,7 @@ fn every_reader_finds_the_superblock_after_a_userblock_libhdf5_wrote(
     backend: ReadBackend,
 ) {
     let (low, high, indexed_storage_k, version) = format;
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("userblock.h5");
     {
         let file = hdf5::File::with_options()

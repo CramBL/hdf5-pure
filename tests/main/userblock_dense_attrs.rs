@@ -12,8 +12,8 @@
 //! to reach once a single oversized attribute could select dense storage on its
 //! own (#195).
 
-use hdf5_pure::{AttrValue, File, FileBuilder, RepackOptions, repack};
-use tempfile::tempdir;
+use hdf5_pure::{AttrValue, File, FileBuilder, RepackOptions};
+
 use test_util::fractal_heap;
 
 const USERBLOCK: u64 = 512;
@@ -87,7 +87,7 @@ fn assert_all_attrs_readable(file: &File) {
 
 #[test]
 fn buffered_reader_reads_dense_attributes_past_a_userblock() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("ub_dense.h5");
     write_source(&path);
 
@@ -99,7 +99,7 @@ fn buffered_reader_reads_dense_attributes_past_a_userblock() {
 /// so it needs its own framing and is worth its own test.
 #[test]
 fn streaming_reader_reads_dense_attributes_past_a_userblock() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("ub_dense_stream.h5");
     write_source(&path);
 
@@ -110,12 +110,12 @@ fn streaming_reader_reads_dense_attributes_past_a_userblock() {
 /// one it cannot reproduce, so on a userblock file it used to fail outright.
 #[test]
 fn repack_carries_dense_attributes_past_a_userblock() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let src = dir.path().join("ub_dense_src.h5");
     let dst = dir.path().join("ub_dense_packed.h5");
     write_source(&src);
 
-    repack(&src, &dst, &RepackOptions::new()).unwrap();
+    hdf5_pure::repack(&src, &dst, &RepackOptions::new()).unwrap();
     assert_all_attrs_readable(&File::open(&dst).unwrap());
 }
 
@@ -123,7 +123,7 @@ fn repack_carries_dense_attributes_past_a_userblock() {
 /// here is the userblock file itself.
 #[test]
 fn same_file_copy_reproduces_dense_attributes_past_a_userblock() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("ub_dense_copy.h5");
     write_source(&path);
 
@@ -158,7 +158,7 @@ fn same_file_copy_reproduces_dense_attributes_past_a_userblock() {
 /// been given the chance to have.
 #[test]
 fn cross_file_copy_still_refuses_a_userblock_source() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let src = dir.path().join("ub_dense_xsrc.h5");
     let dst = dir.path().join("plain_xdst.h5");
     write_source(&src);

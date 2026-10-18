@@ -19,7 +19,7 @@
 
 use hdf5::types::{FixedAscii, FixedUnicode, TypeDescriptor};
 use hdf5_pure::FileBuilder;
-use tempfile::tempdir;
+
 use test_util_hdf5::fixed_string;
 
 /// The width the C library reports comes from the datatype message, so a writer
@@ -27,7 +27,7 @@ use test_util_hdf5::fixed_string;
 /// this crate would read its own file back correctly.
 #[test]
 fn the_c_library_reports_the_width_this_crate_declared() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("strings.h5");
 
     let mut b = FileBuilder::new();
@@ -60,7 +60,7 @@ fn the_c_library_reports_the_width_this_crate_declared() {
 /// catch that.
 #[test]
 fn the_c_library_reads_back_every_value() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("strings.h5");
 
     let mut b = FileBuilder::new();
@@ -108,7 +108,7 @@ fn the_c_library_reads_back_every_value() {
 /// dataset over as the one it was not written as.
 #[test]
 fn the_c_library_holds_each_charset_to_its_own_reader() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("charsets.h5");
 
     let mut b = FileBuilder::new();
@@ -140,7 +140,7 @@ fn the_c_library_holds_each_charset_to_its_own_reader() {
 /// point measures what it does.
 #[test]
 fn the_c_library_reads_a_multi_byte_value_whole() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("units.h5");
 
     let mut b = FileBuilder::new();
@@ -165,7 +165,7 @@ fn the_c_library_reads_a_multi_byte_value_whole() {
 /// where "readable at all" is the assertion.
 #[test]
 fn the_c_library_opens_an_all_empty_fixed_string_dataset() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("blank.h5");
 
     let mut b = FileBuilder::new();
@@ -191,7 +191,7 @@ fn the_c_library_opens_an_all_empty_fixed_string_dataset() {
 /// well as before one.
 #[test]
 fn the_c_library_extends_a_declared_width_dataset() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("stations.h5");
 
     let mut b = FileBuilder::new();

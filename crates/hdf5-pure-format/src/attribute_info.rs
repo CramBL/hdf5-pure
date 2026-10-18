@@ -8,7 +8,7 @@ use alloc::vec::Vec;
 use crate::address::StoredAddress;
 use crate::address::StoredAddressExt;
 use crate::bytes;
-use crate::bytes::ensure_len;
+
 use crate::error::FormatError;
 use crate::width::OffsetWidth;
 
@@ -57,7 +57,7 @@ impl AttributeInfoMessage {
         data: &[u8],
         offset_width: OffsetWidth,
     ) -> Result<AttributeInfoMessage, FormatError> {
-        ensure_len(data, 0, 2)?;
+        bytes::ensure_len(data, 0, 2)?;
 
         let version = data[0];
         if version != 0 {
@@ -71,7 +71,7 @@ impl AttributeInfoMessage {
         let mut pos = 2;
 
         let max_creation_index = if has_max_creation_index {
-            ensure_len(data, pos, 2)?;
+            bytes::ensure_len(data, pos, 2)?;
             let v = u16::from_le_bytes([data[pos], data[pos + 1]]);
             pos += 2;
             Some(v)

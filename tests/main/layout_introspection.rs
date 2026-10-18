@@ -9,7 +9,6 @@
 //! reference-C-library files in `crates/crosscheck/tests/main/layout_introspection.rs`.
 
 use hdf5_pure::{ChunkIndex, Dataset, File, FileBuilder, Layout, MaxExtent};
-use tempfile::tempdir;
 
 fn open(f: &File, name: &str) -> Dataset {
     f.dataset(name).unwrap()
@@ -26,7 +25,7 @@ fn sorted_offsets(ds: &Dataset) -> Vec<Vec<u64>> {
 
 #[test]
 fn contiguous_fixed_dataset() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let p = dir.path().join("contig.h5");
     {
         let mut b = FileBuilder::new();
@@ -60,7 +59,7 @@ fn contiguous_fixed_dataset() {
 
 #[test]
 fn chunked_single_chunk() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let p = dir.path().join("single.h5");
     {
         let mut b = FileBuilder::new();
@@ -94,7 +93,7 @@ fn chunked_single_chunk() {
 
 #[test]
 fn chunked_fixed_array() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let p = dir.path().join("fixed.h5");
     {
         let mut b = FileBuilder::new();
@@ -135,7 +134,7 @@ fn chunked_fixed_array() {
 fn chunk_addresses_of_a_userblock_file_are_absolute() {
     const USERBLOCK: u64 = 512;
     const CHUNK_ELEMS: usize = 4;
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let p = dir.path().join("userblock.h5");
     let values: Vec<i32> = (0..8).collect();
     {
@@ -176,7 +175,7 @@ fn chunk_addresses_of_a_userblock_file_are_absolute() {
 
 #[test]
 fn chunked_extensible_array_supports_append() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let p = dir.path().join("ea.h5");
     {
         let mut b = FileBuilder::new();
@@ -211,7 +210,7 @@ fn chunked_extensible_array_supports_append() {
 
 #[test]
 fn deflate_pipeline_details() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let p = dir.path().join("deflate.h5");
     {
         let mut b = FileBuilder::new();
@@ -242,7 +241,7 @@ fn deflate_pipeline_details() {
 
 #[test]
 fn shuffle_then_deflate_pipeline_order() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let p = dir.path().join("shuffle_deflate.h5");
     {
         let mut b = FileBuilder::new();
@@ -274,7 +273,7 @@ fn shuffle_then_deflate_pipeline_order() {
 
 #[test]
 fn unallocated_extensible_has_no_chunks() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let p = dir.path().join("empty_ea.h5");
     {
         let mut b = FileBuilder::new();
@@ -303,7 +302,7 @@ fn unallocated_extensible_has_no_chunks() {
 
 #[test]
 fn layout_chunk_shape_agrees_with_chunk_shape_accessor() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let p = dir.path().join("agree.h5");
     {
         let mut b = FileBuilder::new();

@@ -6,10 +6,8 @@ use alloc::{string::String, vec::Vec};
 use core::num::NonZeroUsize;
 
 use crate::chunk_cache::ChunkCache;
-use crate::chunked_read::{
-    read_chunked_data_cached, read_chunked_data_cached_from_source, read_chunked_data_from_source,
-};
-use crate::convert::slice_range;
+use crate::chunked_read;
+use crate::convert;
 #[cfg(test)]
 use crate::data_layout::DataLayout;
 use crate::data_read::primitive::{
@@ -72,7 +70,7 @@ pub fn read_raw_data_full(
     match spec.storage() {
         RawReadStorage::Compact { data } => Ok(data.to_vec()),
         RawReadStorage::Contiguous { address } => {
-            let r = slice_range(address.get(), spec.byte_len_u64())?;
+            let r = convert::slice_range(address.get(), spec.byte_len_u64())?;
             if r.end > file_data.len() {
                 return Err(FormatError::UnexpectedEof {
                     expected: r.end,
@@ -83,7 +81,7 @@ pub fn read_raw_data_full(
         }
         RawReadStorage::ContiguousUnallocated => fill.buffer(expected_size),
         RawReadStorage::Chunked { .. } => {
-            read_chunked_data_cached(file_data, spec, widths, &ChunkCache::new())
+            chunked_read::read_chunked_data_cached(file_data, spec, widths, &ChunkCache::new())
         }
         RawReadStorage::Virtual => Err(FormatError::UnsupportedVirtualLayout),
     }
@@ -101,7 +99,9 @@ pub fn read_raw_data_cached(
     cache: &ChunkCache,
 ) -> Result<Vec<u8>, FormatError> {
     match spec.storage() {
-        RawReadStorage::Chunked { .. } => read_chunked_data_cached(file_data, spec, widths, cache),
+        RawReadStorage::Chunked { .. } => {
+            chunked_read::read_chunked_data_cached(file_data, spec, widths, cache)
+        }
         _ => read_raw_data_full(file_data, spec, widths),
     }
 }
@@ -126,7 +126,9 @@ pub fn read_raw_data_full_from_source<S: Source + ?Sized>(
             source.read_exact_at(address.get(), expected_size)
         }
         RawReadStorage::ContiguousUnallocated => fill.buffer(expected_size),
-        RawReadStorage::Chunked { .. } => read_chunked_data_from_source(source, spec, widths),
+        RawReadStorage::Chunked { .. } => {
+            chunked_read::read_chunked_data_from_source(source, spec, widths)
+        }
         RawReadStorage::Virtual => Err(FormatError::UnsupportedVirtualLayout),
     }
 }
@@ -140,7 +142,7 @@ pub fn read_raw_data_cached_from_source<S: Source + ?Sized>(
 ) -> Result<Vec<u8>, FormatError> {
     match spec.storage() {
         RawReadStorage::Chunked { .. } => {
-            read_chunked_data_cached_from_source(source, spec, widths, cache)
+            chunked_read::read_chunked_data_cached_from_source(source, spec, widths, cache)
         }
         _ => read_raw_data_full_from_source(source, spec, widths),
     }
@@ -737,7 +739,7 @@ mod tests {
     use crate::FillTime;
     use crate::address::StoredAddress;
     use crate::address::StoredAddressExt;
-    use crate::convert::nz;
+    use crate::convert;
     use crate::dataspace::{Dataspace, DataspaceType};
     use crate::datatype::layout::FloatingPointLayout;
     use crate::datatype::{CharacterSet, StringPadding};
@@ -987,7 +989,7 @@ mod tests {
                 &ds,
                 &dt,
                 None,
-                FillPattern::new(FillTime::IfSet, Some(&seven), nz(8)),
+                FillPattern::new(FillTime::IfSet, Some(&seven), convert::nz(8)),
             )
             .unwrap(),
             TEST_WIDTHS,
@@ -1104,7 +1106,7 @@ mod tests {
         let seven = 7.0f64.to_le_bytes();
         for fill in [
             FillPattern::ZERO,
-            FillPattern::new(FillTime::IfSet, Some(&seven), nz(8)),
+            FillPattern::new(FillTime::IfSet, Some(&seven), convert::nz(8)),
         ] {
             let spec = RawReadSpec::parse(&layout, &ds, &dt, None, fill).unwrap();
             let buffered = read_raw_data_full(&[], spec, TEST_WIDTHS).unwrap();

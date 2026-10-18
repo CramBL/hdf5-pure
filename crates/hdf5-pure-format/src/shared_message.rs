@@ -10,7 +10,7 @@ use alloc::vec::Vec;
 use crate::address::StoredAddress;
 use crate::address::StoredAddressExt;
 use crate::bytes;
-use crate::bytes::ensure_len;
+
 use crate::error::FormatError;
 use crate::message_type::MessageType;
 use crate::width::FormatWidths;
@@ -120,7 +120,7 @@ pub fn parse_shared_ref_with_widths(
     data: &[u8],
     widths: FormatWidths,
 ) -> Result<SharedMessageRef, FormatError> {
-    ensure_len(data, 0, 2)?;
+    bytes::ensure_len(data, 0, 2)?;
     let version = data[0];
 
     match version {
@@ -144,7 +144,7 @@ pub fn parse_shared_ref_with_widths(
             // those for version 1 alone.
             let ref_type = data[1];
             let location = if ref_type == REF_TYPE_SOHM {
-                ensure_len(data, 2, FHEAP_ID_LEN)?;
+                bytes::ensure_len(data, 2, FHEAP_ID_LEN)?;
                 let mut id = [0u8; FHEAP_ID_LEN];
                 id.copy_from_slice(&data[2..2 + FHEAP_ID_LEN]);
                 SharedLocation::SohmHeap(id)

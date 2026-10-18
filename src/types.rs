@@ -6,7 +6,7 @@ use std::fmt;
 use crate::address::AddressContext;
 use crate::datatype::Datatype;
 use crate::datatype::layout::FixedPointLayout;
-use crate::display::{DISPLAY_MAX_MEMBERS, Dims, EscapedName, write_elided};
+use crate::display::{self, DISPLAY_MAX_MEMBERS, Dims, EscapedName};
 use crate::width::FormatWidths;
 
 pub use crate::file_writer::AttrValue;
@@ -90,7 +90,7 @@ impl fmt::Display for DType {
                     }
                     write!(f, "{}: {dt}", EscapedName(name))?;
                 }
-                write_elided(f, fields.len().saturating_sub(DISPLAY_MAX_MEMBERS))?;
+                display::write_elided(f, fields.len().saturating_sub(DISPLAY_MAX_MEMBERS))?;
                 write!(f, "}}")
             }
             DType::Enum(names) => {
@@ -101,7 +101,7 @@ impl fmt::Display for DType {
                     }
                     write!(f, "{}", EscapedName(name))?;
                 }
-                write_elided(f, names.len().saturating_sub(DISPLAY_MAX_MEMBERS))?;
+                display::write_elided(f, names.len().saturating_sub(DISPLAY_MAX_MEMBERS))?;
                 write!(f, "]")
             }
             DType::Array(base, dims) => write!(f, "array<{base}, {}>", Dims(dims)),

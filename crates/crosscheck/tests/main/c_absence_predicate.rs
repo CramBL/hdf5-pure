@@ -17,7 +17,6 @@
 //! calls through an internal lock, so no extra guard is needed.
 
 use hdf5_pure::FileBuilder;
-use tempfile::tempdir;
 
 use test_util_hdf5::absence;
 
@@ -36,7 +35,7 @@ fn metadata_heavy(path: &std::path::Path) {
 /// produce. A false negative here is a flaky crosscheck.
 #[test]
 fn genuine_absences_are_accepted() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
 
     // A compact group (<= 8 links, symbol-table/compact storage).
     let compact = dir.path().join("compact.h5");
@@ -91,7 +90,7 @@ fn genuine_absences_are_accepted() {
 /// become untestable here and this file no longer proves anything.
 #[test]
 fn corruption_is_never_mistaken_for_absence() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let good = dir.path().join("good.h5");
     metadata_heavy(&good);
     let baseline = std::fs::read(&good).unwrap();

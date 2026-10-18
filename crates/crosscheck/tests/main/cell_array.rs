@@ -9,7 +9,6 @@
 
 use hdf5_pure::mat;
 use serde::{Deserialize, Serialize};
-use tempfile::tempdir;
 
 #[derive(Serialize, Deserialize, Debug, PartialEq, Clone)]
 struct Point {
@@ -24,7 +23,7 @@ struct PathRoot {
 
 #[test]
 fn vec_of_struct_writes_cell_array_with_refs_group() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("path.mat");
 
     let root = PathRoot {
@@ -79,7 +78,7 @@ struct OptionalSeq {
 
 #[test]
 fn vec_of_option_with_none_uses_empty_struct_marker() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("optional.mat");
 
     let root = OptionalSeq {
@@ -145,7 +144,7 @@ struct NestedSeq {
 
 #[test]
 fn nested_vec_of_vec_produces_cell_of_cells() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("nested.mat");
 
     // `Vec<Vec<Option<Struct>>>`: rows of optional points. Each outer
@@ -219,7 +218,7 @@ struct RaggedRoot {
 fn ragged_vec_of_vec_falls_back_to_cell() {
     // Same-length inner vecs unify into a numeric matrix; ragged vecs go to
     // cell so we don't lose data.
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("ragged.mat");
 
     let root = RaggedRoot {
@@ -253,7 +252,7 @@ fn empty_vec_of_struct_serializes_as_empty_double() {
     struct Root {
         items: Vec<Point>,
     }
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("empty.mat");
     mat::to_file(&Root { items: Vec::new() }, &path).unwrap();
     let file = hdf5::File::open(&path).unwrap();
@@ -273,7 +272,7 @@ fn empty_vec_of_struct_serializes_as_empty_double() {
 /// write checks above.)
 #[test]
 fn from_file_on_cell_array_roundtrips() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("roundtrip_cell.mat");
 
     let original = PathRoot {
@@ -290,7 +289,7 @@ fn c_library_can_open_cell_array_file() {
     // Sanity-check that the cell-array file is valid HDF5: the reference
     // C library opens it, sees the cell dataset and the #refs# group, and
     // can follow the references back to the element data.
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("c_check.mat");
 
     mat::to_file(
@@ -324,7 +323,7 @@ fn cell_references_resolve_in_element_order() {
     // reordered, would surface here.
     use hdf5::{ObjectReference1, ReferencedObject};
 
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("ordered.mat");
 
     let inputs = vec![

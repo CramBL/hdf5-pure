@@ -8,7 +8,6 @@ use hdf5_pure::FileSpaceStrategy;
 use hdf5_pure::MemoryStrategy;
 use hdf5_pure::SpaceOwnership;
 use rstest::rstest;
-use tempfile::tempdir;
 
 use test_util_hdf5::aggregation;
 use test_util_hdf5::aggregation::Object;
@@ -29,7 +28,7 @@ fn hdf5_pure_writes_no_free_space_manager_under_aggr_or_none(
     )]
     workload: Workload,
 ) {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("workload.h5");
 
     let file = aggregation::create_file(&path, strategy, true);
@@ -64,7 +63,7 @@ fn hdf5_pure_places_every_allocation_of_an_edit_under_none_at_or_past_the_end_of
     )]
     workload: Workload,
 ) {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("workload.h5");
 
     let file = aggregation::create_file(&path, FileSpaceStrategy::None, false);
@@ -118,7 +117,7 @@ fn hdf5_pure_places_a_workload_under_page_as_recorded(
     )]
     workload: Workload,
 ) {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("workload.h5");
 
     let file = aggregation::create_file(&path, FileSpaceStrategy::Page, true);

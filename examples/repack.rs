@@ -12,7 +12,7 @@
 //! cargo run --example repack
 //! ```
 
-use hdf5_pure::{File, FileBuilder, RepackOptions, repack};
+use hdf5_pure::{File, FileBuilder, RepackOptions};
 
 fn main() {
     let dir = tempfile::tempdir().expect("temp dir");
@@ -39,7 +39,7 @@ fn main() {
 
     // Rewrite compact, dropping a dataset and a whole subtree.
     let options = RepackOptions::new().drop_path("scratch").drop_path("runs");
-    repack(&input, &output, &options).expect("repack");
+    hdf5_pure::repack(&input, &output, &options).expect("repack");
 
     let after = std::fs::metadata(&output).unwrap().len();
     println!("input:  {before:>8} bytes");

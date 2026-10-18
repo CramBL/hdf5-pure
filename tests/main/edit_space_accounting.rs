@@ -18,7 +18,7 @@ use test_util_hdf5::{
 
 #[test]
 fn fresh_session_reports_file_size_and_no_reusable_free() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let p = dir.path().join("plain.h5");
     let mut b = FileBuilder::new();
     b.create_dataset("d").with_f64_data(&[1.0, 2.0, 3.0, 4.0]);
@@ -42,7 +42,7 @@ fn fresh_session_reports_file_size_and_no_reusable_free() {
 
 #[test]
 fn logical_size_grows_with_immediate_append() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let p = dir.path().join("append.h5");
     Unlimited::new("d", &(0..8).collect::<Vec<i32>>(), 4).pure_create(&p);
 
@@ -77,7 +77,7 @@ fn logical_size_grows_with_immediate_append() {
 
 #[test]
 fn staged_delete_is_not_counted_until_commit() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let p = dir.path().join("staged.h5");
     file_space::write_interior_hole_source(&p, false);
 
@@ -109,7 +109,7 @@ fn staged_delete_is_not_counted_until_commit() {
 
 #[test]
 fn reused_free_shrinks_the_reusable_total() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let p = dir.path().join("reuse.h5");
     file_space::write_interior_hole_source(&p, false);
 
@@ -146,7 +146,7 @@ fn reused_free_shrinks_the_reusable_total() {
 
 #[test]
 fn fresh_nonpersisting_session_ignores_existing_holes() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let p = dir.path().join("holes.h5");
     file_space::write_interior_hole_source(&p, false);
 
@@ -171,7 +171,7 @@ fn fresh_nonpersisting_session_ignores_existing_holes() {
 
 #[test]
 fn persisting_session_seeds_reusable_free_on_open() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let p = dir.path().join("persist.h5");
     file_space::write_interior_hole_source(&p, true);
 
@@ -209,7 +209,7 @@ fn persisting_session_seeds_reusable_free_on_open() {
 
 #[test]
 fn a_relocating_overwrite_reclaims_the_old_header_with_its_storage() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("relocate.h5");
 
     // Zeros compress to almost nothing, so the replacement below cannot fit back

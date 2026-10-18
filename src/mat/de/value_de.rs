@@ -11,10 +11,10 @@ use serde::de::{
 };
 use serde::forward_to_deserialize_any;
 
-use crate::mat::complex::complex_tag_for_sentinel;
+use crate::mat::complex;
 use crate::mat::de::mcos_reader::TABLE_META_KEY;
 use crate::mat::error::MatError;
-use crate::mat::matrix::{MATRIX_SENTINEL, complex_tag_for_matrix_sentinel};
+use crate::mat::matrix::{self, MATRIX_SENTINEL};
 use crate::mat::table::{MATCOLUMN_SENTINEL, MATTABLE_SENTINEL};
 use crate::mat::value::{ComplexNum, ComplexVec, MatValue, NumVec, ScalarNum};
 
@@ -291,7 +291,7 @@ impl<'de> Deserializer<'de> for MatValueDeserializer {
         // `Complex64` (or the reverse) is refused rather than converted: the
         // component width is what the file says it holds, so silently changing
         // it would make the Rust type a poor witness of the file.
-        if let Some(tag) = complex_tag_for_sentinel(name) {
+        if let Some(tag) = complex::complex_tag_for_sentinel(name) {
             let got = self.value.kind();
             let wanted = || {
                 MatError::Custom(format!(
@@ -317,7 +317,9 @@ impl<'de> Deserializer<'de> for MatValueDeserializer {
             // consumes the same set of `MatValue` shapes; the sentinel name
             // only matters at serialize time, where it preserves the element
             // class for an empty Vec.
-            _ if name == MATRIX_SENTINEL || complex_tag_for_matrix_sentinel(name).is_some() => {
+            _ if name == MATRIX_SENTINEL
+                || matrix::complex_tag_for_matrix_sentinel(name).is_some() =>
+            {
                 match self.value {
                     MatValue::Matrix { rows, cols, vec } => {
                         visitor.visit_map(MatrixStructMap::numeric(rows, cols, vec))

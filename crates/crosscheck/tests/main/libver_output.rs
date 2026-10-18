@@ -35,7 +35,7 @@
 use hdf5_pure::{AttrValue, File, FileBuilder, LibVer};
 #[cfg(feature = "__hdf5-1.10")]
 use hdf5_pure::{FileAccessProperties, FileCreateProperties};
-use tempfile::tempdir;
+
 use test_util::bytes;
 use test_util::superblock;
 
@@ -60,7 +60,7 @@ fn write_v18(path: &std::path::Path) {
 
 #[test]
 fn c_reads_every_part_of_a_1_8_format_file() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("v18.h5");
     write_v18(&path);
 
@@ -104,7 +104,7 @@ fn c_reads_every_part_of_a_1_8_format_file() {
 /// make a 1.8-format test fail for an unrelated repair.
 #[test]
 fn c_writes_into_a_1_8_format_file() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("v18_rw.h5");
     let mut b = FileBuilder::new();
     b.with_libver_bounds(LibVer::Earliest, LibVer::V18);
@@ -162,7 +162,7 @@ fn c_writes_into_a_1_8_format_file() {
 /// under its own default bounds (issue #101, `crates/crosscheck/tests/main/edit.rs`).
 #[test]
 fn an_edit_session_keeps_a_1_8_file_in_the_1_8_format() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("v18_edit.h5");
     write_v18(&path);
 
@@ -218,7 +218,7 @@ fn an_edit_session_keeps_a_1_8_file_in_the_1_8_format() {
 #[cfg(feature = "__hdf5-1.10")]
 #[test]
 fn c_reads_a_file_written_at_a_lower_bound_of_latest() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
 
     let via_builder = dir.path().join("latest_builder.h5");
     let mut b = FileBuilder::new();

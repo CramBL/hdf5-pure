@@ -15,8 +15,6 @@
 //! Each group fixes a representative dataset size; compare the reported times
 //! before and after a change rather than reading absolute numbers.
 
-use std::hint::black_box;
-
 use criterion::{Criterion, criterion_group, criterion_main};
 use hdf5_pure::{File, FileBuilder, MaxExtent};
 
@@ -55,17 +53,17 @@ fn bench_contiguous_decode(c: &mut Criterion) {
 
     let mut g = c.benchmark_group("contiguous_decode_1M");
     g.bench_function("read_f64", |b| {
-        b.iter(|| black_box(f64_file.dataset("d").unwrap().read_f64().unwrap()))
+        b.iter(|| std::hint::black_box(f64_file.dataset("d").unwrap().read_f64().unwrap()))
     });
     g.bench_function("read_i32", |b| {
-        b.iter(|| black_box(i32_file.dataset("d").unwrap().read_i32().unwrap()))
+        b.iter(|| std::hint::black_box(i32_file.dataset("d").unwrap().read_i32().unwrap()))
     });
     g.bench_function("read_u16", |b| {
-        b.iter(|| black_box(u16_file.dataset("d").unwrap().read_u16().unwrap()))
+        b.iter(|| std::hint::black_box(u16_file.dataset("d").unwrap().read_u16().unwrap()))
     });
     // Cross-type coercion: decode an i32-stored dataset to f64 (FixedPoint path).
     g.bench_function("read_i32_as_f64", |b| {
-        b.iter(|| black_box(i32_file.dataset("d").unwrap().read_f64().unwrap()))
+        b.iter(|| std::hint::black_box(i32_file.dataset("d").unwrap().read_f64().unwrap()))
     });
     g.finish();
 }
@@ -101,10 +99,10 @@ fn bench_chunked_assembly(c: &mut Criterion) {
 
     let mut g = c.benchmark_group("chunked_read_1024x1024_f64");
     g.bench_function("uncompressed", |b| {
-        b.iter(|| black_box(plain_file.dataset("d").unwrap().read_f64().unwrap()))
+        b.iter(|| std::hint::black_box(plain_file.dataset("d").unwrap().read_f64().unwrap()))
     });
     g.bench_function("shuffle_deflate", |b| {
-        b.iter(|| black_box(shuf_def_file.dataset("d").unwrap().read_f64().unwrap()))
+        b.iter(|| std::hint::black_box(shuf_def_file.dataset("d").unwrap().read_f64().unwrap()))
     });
     g.finish();
 }
@@ -123,16 +121,17 @@ fn bench_write(c: &mut Criterion) {
     let mut g = c.benchmark_group("write_1M_f64");
     g.bench_function("contiguous", |b| {
         b.iter(|| {
-            black_box(build(|bld| {
-                bld.create_dataset("d").with_f64_data(black_box(&data));
+            std::hint::black_box(build(|bld| {
+                bld.create_dataset("d")
+                    .with_f64_data(std::hint::black_box(&data));
             }))
         })
     });
     g.bench_function("chunked_shuffle_deflate", |b| {
         b.iter(|| {
-            black_box(build(|bld| {
+            std::hint::black_box(build(|bld| {
                 bld.create_dataset("d")
-                    .with_f64_data(black_box(&data2d))
+                    .with_f64_data(std::hint::black_box(&data2d))
                     .with_shape(&[rows, cols])
                     .with_chunks(&[128, 128])
                     .with_shuffle()
@@ -182,12 +181,12 @@ fn bench_mat_roundtrip(c: &mut Criterion) {
 
     let mut g = c.benchmark_group("mat_roundtrip");
     g.bench_function("to_bytes", |b| {
-        b.iter(|| black_box(mat::to_bytes(black_box(&payload)).unwrap()))
+        b.iter(|| std::hint::black_box(mat::to_bytes(std::hint::black_box(&payload)).unwrap()))
     });
     g.bench_function("from_bytes", |b| {
         b.iter(|| {
-            let p: Payload = mat::from_bytes(black_box(&bytes)).unwrap();
-            black_box(p)
+            let p: Payload = mat::from_bytes(std::hint::black_box(&bytes)).unwrap();
+            std::hint::black_box(p)
         })
     });
     g.finish();
@@ -299,7 +298,7 @@ fn bench_page_buffer(c: &mut Criterion) {
                         for _ in 0..rounds {
                             for name in &names {
                                 let mut ds = file.dataset(name).unwrap();
-                                ds.append(black_box(&batch)).unwrap();
+                                ds.append(std::hint::black_box(&batch)).unwrap();
                             }
                         }
                         file.close().unwrap();

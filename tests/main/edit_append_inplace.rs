@@ -16,7 +16,7 @@ use hdf5_pure::{
 };
 use hdf5_pure_format::__private::ExtensibleArrayHeader;
 use rstest::rstest;
-use tempfile::tempdir;
+
 use test_util::checksum;
 use test_util_hdf5::dataset::{self, Filter, Unlimited};
 use test_util_hdf5::file_space;
@@ -25,7 +25,7 @@ use test_util_hdf5::file_space;
 
 #[test]
 fn unfiltered_any_length_across_calls() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let p = dir.path().join("d.h5");
     Unlimited::new("d", &(0..6).collect::<Vec<i32>>(), 4).pure_create(&p); // partial tail (6 % 4 != 0)
 
@@ -44,7 +44,7 @@ fn unfiltered_any_length_across_calls() {
 
 #[test]
 fn unfiltered_raw_append() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let p = dir.path().join("d.h5");
     Unlimited::new("d", &(0..4).collect::<Vec<i32>>(), 4).pure_create(&p);
 
@@ -62,7 +62,7 @@ fn unfiltered_raw_append() {
 
 #[test]
 fn filtered_whole_chunk() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let p = dir.path().join("d.h5");
     Unlimited::new("d", &(0..8).collect::<Vec<i32>>(), 4)
         .filters(&[Filter::Deflate(6)])
@@ -86,7 +86,7 @@ fn filtered_whole_chunk() {
 /// on the staged path for the rest of its life.
 #[test]
 fn filtered_onto_a_partial_trailing_chunk_grows() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let p = dir.path().join("d.h5");
     Unlimited::new("d", &(0..8).collect::<Vec<i32>>(), 4)
         .filters(&[Filter::Deflate(6)])
@@ -119,7 +119,7 @@ fn filtered_onto_a_partial_trailing_chunk_grows() {
 #[case::scale_offset(&[Filter::ScaleOffset(ScaleOffset::Integer(0))])]
 #[case::lzf(&[Filter::Lzf])]
 fn a_filtered_timer_flush_pattern_appends_by_any_length(#[case] filters: &[Filter]) {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let p = dir.path().join("d.h5");
     Unlimited::<u64>::new("d", &[], 1000)
         .filters(filters)
@@ -150,7 +150,7 @@ fn a_filtered_timer_flush_pattern_appends_by_any_length(#[case] filters: &[Filte
 #[case::scale_offset(&[Filter::ScaleOffset(ScaleOffset::Integer(0))])]
 #[case::lzf(&[Filter::Lzf])]
 fn repeated_short_filtered_appends_keep_every_element(#[case] filters: &[Filter]) {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let p = dir.path().join("d.h5");
     Unlimited::<u64>::new("d", &[], 64)
         .filters(filters)
@@ -181,7 +181,7 @@ fn repeated_short_filtered_appends_keep_every_element(#[case] filters: &[Filter]
 /// `append_raw` reaches the same engine, so it grows a filtered partial tail too.
 #[test]
 fn filtered_raw_append_onto_a_partial_trailing_chunk() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let p = dir.path().join("d.h5");
     Unlimited::new("d", &(0..8).collect::<Vec<i32>>(), 4)
         .filters(&[Filter::Deflate(6)])
@@ -215,7 +215,7 @@ fn append_to_malformed_ea_bit_geometry_returns_a_format_error_and_preserves_the_
     #[case] value: u8,
     #[case] reason: &str,
 ) {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("d.h5");
     Unlimited::new("d", &[0i32, 1, 2, 3], 4).pure_create(&path);
     let mut bytes = fs::read(&path).unwrap();
@@ -248,7 +248,7 @@ fn append_to_malformed_ea_bit_geometry_returns_a_format_error_and_preserves_the_
 
 #[test]
 fn interleave_append_stage_commit_append() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let p = dir.path().join("d.h5");
     // Two datasets: "d" grows in place, "doomed" is deleted.
     {
@@ -309,7 +309,7 @@ fn interleave_append_stage_commit_append() {
 
 #[test]
 fn guard_refuses_pending_delete() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let p = dir.path().join("d.h5");
     Unlimited::new("d", &(0..4).collect::<Vec<i32>>(), 4).pure_create(&p);
 
@@ -321,7 +321,7 @@ fn guard_refuses_pending_delete() {
 
 #[test]
 fn guard_refuses_append_after_staged_write() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let p = dir.path().join("d.h5");
     Unlimited::new("d", &(0..4).collect::<Vec<i32>>(), 4).pure_create(&p);
 
@@ -343,7 +343,7 @@ fn guard_refuses_append_after_staged_write() {
 
 #[test]
 fn guard_refuses_ancestor_delete() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let p = dir.path().join("d.h5");
     {
         let mut b = FileBuilder::new();
@@ -377,7 +377,7 @@ fn guard_refuses_ancestor_delete() {
 
 #[test]
 fn fallback_non_extensible_array_refused() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let p = dir.path().join("d.h5");
     // A plain contiguous dataset (no maxshape / chunks) is not Extensible-Array
     // indexed.
@@ -394,7 +394,7 @@ fn fallback_non_extensible_array_refused() {
 
 #[test]
 fn userblock_refuses_inplace_but_staged_append_dataset_works() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let p = dir.path().join("ub.h5");
     {
         let mut b = FileBuilder::new();
@@ -427,7 +427,7 @@ fn userblock_refuses_inplace_but_staged_append_dataset_works() {
 
 #[test]
 fn refusal_leaves_session_usable() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let p = dir.path().join("d.h5");
     Unlimited::new("d", &(0..4).collect::<Vec<i32>>(), 4).pure_create(&p);
 
@@ -452,7 +452,7 @@ fn refusal_leaves_session_usable() {
 /// `File::close` rewrites; both paths must leave every row readable.
 #[test]
 fn persisting_file_takes_both_inplace_and_staged_appends() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let p = dir.path().join("persist.h5");
     file_space::write_persisting_unlimited_i32(&p, 8, 4, 1);
 
@@ -509,7 +509,7 @@ fn persisting_file_takes_both_inplace_and_staged_appends() {
 
 #[test]
 fn many_small_appends_one_session() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let p = dir.path().join("d.h5");
     Unlimited::<i32>::new("d", &[], 8).pure_create(&p); // start empty (but index allocated by the writer)
 

@@ -231,7 +231,7 @@ mod fill_pattern_tests {
 
     use super::*;
     use crate::convert;
-    use hdf5_pure_format::__private::fill_value_is_written;
+    use hdf5_pure_format::__private;
 
     /// `PaddingFill::from_message` keeps the three answers apart. Folding the
     /// unreadable case onto `Zero` would write a fabricated fill value into a
@@ -370,27 +370,31 @@ mod fill_pattern_tests {
         // and 0x2a the same with IfSet. The C library writes Defined for
         // `H5D_FILL_TIME_NEVER` whenever a fill value is set (`H5Ofill.c`, HDF5 2.1.0).
         let v3 = |flags: u8| vec![3u8, flags, 4, 0, 0, 0, 7, 0, 0, 0];
-        assert!(!fill_value_is_written(MessageType::FILL_VALUE, &v3(0x26)).unwrap());
-        assert!(fill_value_is_written(MessageType::FILL_VALUE, &v3(0x2a)).unwrap());
-        assert!(fill_value_is_written(MessageType::FILL_VALUE, &v3(0x22)).unwrap());
+        assert!(!__private::fill_value_is_written(MessageType::FILL_VALUE, &v3(0x26)).unwrap());
+        assert!(__private::fill_value_is_written(MessageType::FILL_VALUE, &v3(0x2a)).unwrap());
+        assert!(__private::fill_value_is_written(MessageType::FILL_VALUE, &v3(0x22)).unwrap());
 
         // Versions 1 and 2: a byte of its own at index 2.
         for version in [1u8, 2] {
             let msg = |write_time: u8| vec![version, 2, write_time, 1, 4, 0, 0, 0, 7, 0, 0, 0];
-            assert!(!fill_value_is_written(MessageType::FILL_VALUE, &msg(1)).unwrap());
-            assert!(fill_value_is_written(MessageType::FILL_VALUE, &msg(0)).unwrap());
-            assert!(fill_value_is_written(MessageType::FILL_VALUE, &msg(2)).unwrap());
+            assert!(!__private::fill_value_is_written(MessageType::FILL_VALUE, &msg(1)).unwrap());
+            assert!(__private::fill_value_is_written(MessageType::FILL_VALUE, &msg(0)).unwrap());
+            assert!(__private::fill_value_is_written(MessageType::FILL_VALUE, &msg(2)).unwrap());
         }
 
         // The legacy message has no write time to read.
         assert!(
-            fill_value_is_written(MessageType::FILL_VALUE_OLD, &[4, 0, 0, 0, 7, 0, 0, 0]).unwrap()
+            __private::fill_value_is_written(
+                MessageType::FILL_VALUE_OLD,
+                &[4, 0, 0, 0, 7, 0, 0, 0],
+            )
+            .unwrap()
         );
 
         // Truncated and unrecognized messages error rather than guessing.
-        assert!(fill_value_is_written(MessageType::FILL_VALUE, &[]).is_err());
-        assert!(fill_value_is_written(MessageType::FILL_VALUE, &[3]).is_err());
-        assert!(fill_value_is_written(MessageType::FILL_VALUE, &[2, 0]).is_err());
-        assert!(fill_value_is_written(MessageType::FILL_VALUE, &[9, 0]).is_err());
+        assert!(__private::fill_value_is_written(MessageType::FILL_VALUE, &[]).is_err());
+        assert!(__private::fill_value_is_written(MessageType::FILL_VALUE, &[3]).is_err());
+        assert!(__private::fill_value_is_written(MessageType::FILL_VALUE, &[2, 0]).is_err());
+        assert!(__private::fill_value_is_written(MessageType::FILL_VALUE, &[9, 0]).is_err());
     }
 }

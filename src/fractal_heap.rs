@@ -24,9 +24,7 @@ use crate::access_mode::AccessMode;
 use crate::address::AddressContext;
 use crate::address::StoredAddress;
 use crate::address::StoredAddressExt;
-use crate::btree_v2::{
-    BTreeV2Header, BTreeV2Record, collect_btree_v2_records, collect_btree_v2_records_from_source,
-};
+use crate::btree_v2::{self, BTreeV2Header, BTreeV2Record};
 use crate::convert::Narrow;
 use crate::error::FormatError;
 use crate::filter_pipeline::FILTER_SHUFFLE;
@@ -497,7 +495,7 @@ impl<'h> HeapObjectReader<'h> {
                 self.locate_huge(huge_id, Backend::Buffered, || {
                     let header = BTreeV2Header::parse_with_widths(file_data, btree_addr, widths)?;
                     check_huge_object_btree(&header, widths)?;
-                    collect_btree_v2_records(file_data, &header, widths.offsets)
+                    btree_v2::collect_btree_v2_records(file_data, &header, widths.offsets)
                 })?
             }
         };
@@ -526,7 +524,7 @@ impl<'h> HeapObjectReader<'h> {
                         widths,
                     )?;
                     check_huge_object_btree(&header, widths)?;
-                    collect_btree_v2_records_from_source(source, &header, widths.offsets)
+                    btree_v2::collect_btree_v2_records_from_source(source, &header, widths.offsets)
                 })?
             }
         };

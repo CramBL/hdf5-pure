@@ -23,7 +23,6 @@ use hdf5_pure_format::__private::{
     FractalHeapBlock, FractalHeapBlockLayout, FractalHeapHeaderLocator, LengthWidth, OffsetWidth,
 };
 use rstest::rstest;
-use tempfile::tempdir;
 
 /// Write a group of `n` single-i32 datasets `g/d{i}` with the latest format, so
 /// the C library stores the links densely in a fractal heap.
@@ -46,7 +45,7 @@ fn write_dense_group(path: &std::path::Path, n: usize) {
 
 #[test]
 fn reads_c_written_dense_link_groups_across_sizes() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     // 16: spills compact storage into a single fractal-heap direct block.
     // 150: the root grows to a 2-row indirect block — both rows direct — which
     // is the size that used to fail outright. 600: a larger root indirect block
@@ -247,7 +246,7 @@ fn caller_supplied_regions_parse_c_written_heap_blocks(
 
 #[test]
 fn edits_reject_corrupt_checksummed_direct_blocks() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("corrupt_direct.h5");
     write_dense_group(&path, 16);
     let mut bytes = std::fs::read(&path).unwrap();

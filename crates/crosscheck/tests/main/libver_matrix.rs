@@ -18,9 +18,9 @@ use hdf5::file::LibraryVersion;
 use hdf5::types::{FixedAscii, VarLenArray};
 use hdf5::{H5Type, ObjectReference, ObjectReference1, ReferencedObject};
 use hdf5_pure::mat::{self, Options};
-use hdf5_pure::{AttrValue, FileBuilder, LibVer, make_i32_type};
+use hdf5_pure::{AttrValue, FileBuilder, LibVer};
 use serde::Serialize;
-use tempfile::tempdir;
+
 use test_util::superblock;
 
 #[derive(Serialize)]
@@ -83,7 +83,7 @@ fn write_plain(path: &Path, libver: LibVer) {
     b.create_dataset("values")
         .with_f64_data(&[1.0, 2.0, 3.0])
         .set_attr("units", AttrValue::AsciiString("m/s".into()));
-    b.commit_datatype("reading_t", make_i32_type());
+    b.commit_datatype("reading_t", hdf5_pure::make_i32_type());
     b.create_dataset("typed")
         .with_i32_data(&[3, 1, 4])
         .with_committed_datatype("reading_t")
@@ -309,7 +309,7 @@ fn check_mat_string(c: &hdf5::File) {
 
 #[test]
 fn the_1_8_format_this_crate_writes_opens_in_every_release() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let plain = dir.path().join("plain_v18.h5");
     write_plain(&plain, LibVer::V18);
     let mat = dir.path().join("mat_v18.mat");
@@ -347,7 +347,7 @@ fn write_v110(dir: &Path) -> (std::path::PathBuf, std::path::PathBuf) {
 #[cfg(feature = "__hdf5-1.10")]
 #[test]
 fn the_1_10_format_this_crate_writes_opens_from_1_10_on() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let (plain, mat) = write_v110(dir.path());
     check_plain(&hdf5::File::open(&plain).expect("the C library opens the 1.10 plain file"));
     check_mat(&hdf5::File::open(&mat).expect("the C library opens the 1.10 mat file"));
@@ -356,7 +356,7 @@ fn the_1_10_format_this_crate_writes_opens_from_1_10_on() {
 #[cfg(not(feature = "__hdf5-1.10"))]
 #[test]
 fn the_1_10_format_this_crate_writes_is_rejected_before_1_10() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let (plain, mat) = write_v110(dir.path());
     for path in [&plain, &mat] {
         assert!(
@@ -563,7 +563,7 @@ fn check_compound(path: &Path) {
 #[test]
 #[cfg(target_endian = "little")]
 fn this_crate_reads_the_oldest_format_the_release_writes() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("oldest.h5");
     c_write(&path, LibraryVersion::Earliest, LibraryVersion::latest());
     assert_eq!(superblock::version(&path), 0);
@@ -575,7 +575,7 @@ fn this_crate_reads_the_oldest_format_the_release_writes() {
 #[test]
 #[cfg(target_endian = "little")]
 fn this_crate_reads_the_newest_format_the_release_writes() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("newest.h5");
     c_write(&path, LibraryVersion::latest(), LibraryVersion::latest());
     assert_eq!(superblock::version(&path), 2);
@@ -587,7 +587,7 @@ fn this_crate_reads_the_newest_format_the_release_writes() {
 #[test]
 #[cfg(target_endian = "little")]
 fn this_crate_reads_the_newest_format_the_release_writes() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("newest.h5");
     c_write(&path, LibraryVersion::latest(), LibraryVersion::latest());
     assert_eq!(superblock::version(&path), 3);

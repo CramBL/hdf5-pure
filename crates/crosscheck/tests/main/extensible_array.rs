@@ -14,7 +14,7 @@
 
 use hdf5::Extent;
 use hdf5_pure::File;
-use tempfile::tempdir;
+
 use test_util::extensible_array;
 use test_util_hdf5::dataset::Unlimited;
 use test_util_hdf5::file;
@@ -46,7 +46,7 @@ fn write_with_pure(path: &std::path::Path, n: usize) {
 #[test]
 fn pure_writes_c_reads() {
     for &n in SIZES {
-        let dir = tempdir().unwrap();
+        let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("ea.h5");
         write_with_pure(&path, n);
 
@@ -63,7 +63,7 @@ fn pure_writes_c_reads() {
 #[test]
 fn c_writes_pure_reads() {
     for &n in SIZES {
-        let dir = tempdir().unwrap();
+        let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("ea.h5");
         write_with_c(&path, n);
 
@@ -84,7 +84,7 @@ fn c_writes_pure_reads() {
 #[test]
 fn eahd_stats_match_c() {
     for &n in SIZES {
-        let dir = tempdir().unwrap();
+        let dir = tempfile::tempdir().unwrap();
         let c_path = dir.path().join("c.h5");
         let pure_path = dir.path().join("pure.h5");
         write_with_c(&c_path, n);
@@ -115,7 +115,7 @@ fn eahd_stats_match_c() {
 #[test]
 fn eahd_stats_match_c_after_an_in_place_append() {
     for &(start, grown) in &[(4usize, 20usize), (16, 300), (300, 700)] {
-        let dir = tempdir().unwrap();
+        let dir = tempfile::tempdir().unwrap();
         let c_path = dir.path().join("c.h5");
         let pure_path = dir.path().join("pure.h5");
         write_with_c(&c_path, grown);

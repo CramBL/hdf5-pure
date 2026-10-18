@@ -63,7 +63,7 @@ use hdf5_pure::FileAccessProperties;
 use hdf5_pure::FileBuilder;
 use hdf5_pure::FormatError;
 use rstest::rstest;
-use tempfile::tempdir;
+
 use test_util::superblock;
 use test_util_hdf5::reader::ReadBackend;
 
@@ -497,7 +497,7 @@ fn c_add_dataset(file: &hdf5::File, name: &str, value: i32) {
 /// that the base is what makes the difference, not the C edit.
 #[test]
 fn c_modified_file_with_a_userblock_reads_whole() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     for ub in [0, UB] {
         let path = dir.path().join(format!("ours_then_c_{ub}.h5"));
         let mut b = FileBuilder::new();
@@ -534,7 +534,7 @@ fn c_modified_file_with_a_userblock_reads_whole() {
 /// this reaches the continuation block without adding any link.
 #[test]
 fn c_added_attribute_in_a_userblock_file_reads_whole() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     for ub in [0, UB] {
         let path = dir.path().join(format!("attr_{ub}.h5"));
         let mut b = FileBuilder::new();
@@ -576,7 +576,7 @@ fn c_added_attribute_in_a_userblock_file_reads_whole() {
 /// a group to dense storage.
 #[test]
 fn c_written_dense_links_in_a_userblock_file() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     for ub in [0, UB] {
         let path = dir.path().join(format!("dense_{ub}.h5"));
         c_file(&path, ub, |f| {
@@ -603,7 +603,7 @@ fn c_written_dense_links_in_a_userblock_file() {
 /// only where the root group is resolved.
 #[test]
 fn c_written_nested_dense_group_in_a_userblock_file() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("nested.h5");
     c_file(&path, UB, |f| {
         let g = f.create_group("inner").unwrap();
@@ -652,7 +652,7 @@ fn a_mat_file_repacked_by_the_c_library_still_reads() {
         .map(|i| (format!("var{i:02}"), vec![i as f64, i as f64 + 0.5]))
         .collect();
 
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let src = dir.path().join("in.mat");
     mat::to_file(&doc, &src).unwrap();
     assert_eq!(
@@ -738,7 +738,7 @@ fn every_backend(path: &std::path::Path, what: &str, read: impl Fn(&File) -> Str
 /// home for its case.
 #[test]
 fn every_c_written_shape_reads_under_a_userblock() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
 
     for ub in [0, UB] {
         // Chunked with a filter: the chunk addresses live in a chunk index, and

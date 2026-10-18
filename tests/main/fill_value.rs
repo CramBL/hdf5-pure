@@ -10,7 +10,7 @@ use hdf5_pure::{
     Dataset, Error, File, FileBuilder, FillTime, FormatError, H5Element, MaxExtent, RepackOptions,
 };
 use rstest::rstest;
-use tempfile::tempdir;
+
 use test_util_hdf5::file_builder;
 
 #[test]
@@ -202,7 +202,7 @@ fn empty_dataset_carries_a_fill_value() {
 
 #[test]
 fn edit_session_created_dataset_carries_fill() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let p = dir.path().join("edit.h5");
 
     // A base file to open for editing.
@@ -237,7 +237,7 @@ fn edit_session_created_dataset_carries_fill() {
 
 #[test]
 fn edit_session_fill_size_mismatch_is_refused() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let p = dir.path().join("edit_bad.h5");
     {
         let mut fb = FileBuilder::new();
@@ -269,7 +269,7 @@ fn write_dataset_refuses_a_fill_value() {
     // A value overwrite reuses the dataset's existing fill value, so a fill value
     // staged on the overwrite builder is refused rather than silently ignored —
     // consistent with write_dataset refusing attributes and layout changes.
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let p = dir.path().join("overwrite.h5");
     {
         let mut fb = FileBuilder::new();
@@ -302,7 +302,7 @@ fn assert_fill<T: H5Element + PartialEq + std::fmt::Debug>(ds: &Dataset, expect:
 
 #[test]
 fn repack_preserves_fill_value() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let src = dir.path().join("src.h5");
     let dst = dir.path().join("dst.h5");
 
@@ -501,7 +501,7 @@ fn chunk_edge_padding_is_zeroed_under_fill_time_never() {
 
 #[test]
 fn edit_session_created_dataset_preserves_fill_time() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let p = dir.path().join("edit_fill_time.h5");
 
     {
@@ -540,7 +540,7 @@ fn edit_session_created_dataset_preserves_fill_time() {
 
 #[test]
 fn write_dataset_rejects_a_fill_time_change() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let p = dir.path().join("overwrite_fill_time.h5");
     {
         let mut fb = FileBuilder::new();
@@ -570,7 +570,7 @@ fn write_dataset_rejects_a_fill_time_change() {
 
 #[test]
 fn repack_preserves_fill_time_policies() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let src = dir.path().join("src_policies.h5");
     let dst = dir.path().join("dst_policies.h5");
 

@@ -12,7 +12,7 @@
 
 use hdf5::plist::file_create::FileSpaceStrategy as CStrategy;
 use hdf5_pure::{File, FileBuilder, FileSpaceStrategy};
-use tempfile::tempdir;
+
 use test_util_hdf5::{dataset::Unlimited, session};
 
 /// An appendable file, paged or not. A page buffer requires neither (issue
@@ -35,7 +35,7 @@ fn build(path: &std::path::Path, paged: bool) {
 /// whether it refuses this one, which is the bit this crate is newly raising.
 #[test]
 fn the_c_library_refuses_a_file_a_crashed_page_buffered_session_left_marked() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("crashed.h5");
     build(&path, true);
 
@@ -85,7 +85,7 @@ fn the_c_library_refuses_a_file_a_crashed_page_buffered_session_left_marked() {
 /// would not distinguish a correct merge from a consistently wrong one.
 #[test]
 fn the_c_library_reads_a_file_written_through_a_page_buffer() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     for paged in [true, false] {
         let label = if paged { "paged" } else { "unpaged" };
         let path = dir.path().join(format!("buffered_{label}.h5"));

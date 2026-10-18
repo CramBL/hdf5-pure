@@ -6,7 +6,7 @@ use hdf5_pure::{
     AttrValue, Error, File, FileAccessProperties, FileBuilder, FileSpaceStrategy, MemoryStrategy,
     MetadataCacheConfig, SyncPolicy,
 };
-use tempfile::tempdir;
+
 use test_util_hdf5::{
     dataset::{self, Filter, Unlimited},
     file_space, session,
@@ -14,7 +14,7 @@ use test_util_hdf5::{
 
 #[test]
 fn append_and_read_through_one_handle() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let p = dir.path().join("a.h5");
     Unlimited::new("d", &(0..6).collect::<Vec<i32>>(), 4).pure_create(&p);
     {
@@ -36,7 +36,7 @@ fn append_and_read_through_one_handle() {
 
 #[test]
 fn many_appends_across_calls_stay_o1() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let p = dir.path().join("many.h5");
     Unlimited::<i32>::new("d", &[], 8).pure_create(&p);
     {
@@ -58,7 +58,7 @@ fn many_appends_across_calls_stay_o1() {
 
 #[test]
 fn refetched_handle_observes_appends() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let p = dir.path().join("refetch.h5");
     Unlimited::new("d", &(0..4).collect::<Vec<i32>>(), 4).pure_create(&p);
     let file = session::open_bounded_on_close(&p).unwrap();
@@ -71,7 +71,7 @@ fn refetched_handle_observes_appends() {
 
 #[test]
 fn filtered_appends_start_and_end_at_any_length() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let p = dir.path().join("filtered.h5");
     Unlimited::new("d", &(0..8).collect::<Vec<i32>>(), 4)
         .filters(&[Filter::Deflate(6)])
@@ -99,7 +99,7 @@ fn filtered_appends_start_and_end_at_any_length() {
 
 #[test]
 fn large_append_batches_internally() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let p = dir.path().join("large.h5");
     Unlimited::new("d", &(0..3).collect::<Vec<i32>>(), 256).pure_create(&p);
     // ~2.5 MiB of i32 in ONE call: far past the 1 MiB batch budget, unaligned
@@ -124,7 +124,7 @@ fn large_append_batches_internally() {
 /// fails if any of them silently no-ops rather than merely returning `Ok`.
 #[test]
 fn staged_surface_works_on_a_bounded_file() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let p = dir.path().join("staged.h5");
     Unlimited::new("d", &(0..4).collect::<Vec<i32>>(), 4).pure_create(&p);
     {
@@ -197,7 +197,7 @@ fn staged_surface_works_on_a_bounded_file() {
 
 #[test]
 fn close_seals_writes_but_not_reads() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let p = dir.path().join("close.h5");
     Unlimited::new("d", &(0..4).collect::<Vec<i32>>(), 4).pure_create(&p);
     let file = session::open_bounded_on_close(&p).unwrap();
@@ -211,7 +211,7 @@ fn close_seals_writes_but_not_reads() {
 
 #[test]
 fn bounded_open_takes_the_exclusive_lock() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let p = dir.path().join("lock.h5");
     Unlimited::new("d", &(0..4).collect::<Vec<i32>>(), 4).pure_create(&p);
     let bounded = session::open_bounded_on_close(&p).unwrap();
@@ -223,7 +223,7 @@ fn bounded_open_takes_the_exclusive_lock() {
 
 #[test]
 fn userblock_file_is_refused_at_open() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let p = dir.path().join("userblock.h5");
     let mut b = FileBuilder::new();
     b.with_userblock(512);
@@ -238,7 +238,7 @@ fn userblock_file_is_refused_at_open() {
 /// on-disk free-space managers so a reopen recovers the data and the strategy.
 #[test]
 fn persisted_free_space_file_appends_and_finalizes() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let p = dir.path().join("persist.h5");
     file_space::write_persisting_unlimited_i32(&p, 10, 4, 1);
 
@@ -273,7 +273,7 @@ fn persisted_free_space_file_appends_and_finalizes() {
 /// the finalize runs once and the reopened file reads the whole sequence.
 #[test]
 fn persisted_free_space_many_appends_one_finalize() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let p = dir.path().join("persist_many.h5");
     file_space::write_persisting_unlimited_i32(&p, 1, 16, 3);
 
@@ -298,7 +298,7 @@ fn persisted_free_space_many_appends_one_finalize() {
 /// just like an explicit `close`.
 #[test]
 fn persisted_free_space_drop_finalizes() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let p = dir.path().join("persist_drop.h5");
     file_space::write_persisting_unlimited_i32(&p, 8, 4, 1);
 
@@ -326,7 +326,7 @@ fn persisted_free_space_drop_finalizes() {
 /// grow the file — the finalize is skipped when nothing was appended.
 #[test]
 fn persisted_free_space_noop_close_does_not_grow() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let p = dir.path().join("persist_noop.h5");
     file_space::write_persisting_unlimited_i32(&p, 8, 4, 1);
     let before = std::fs::metadata(&p).unwrap().len();
@@ -351,7 +351,7 @@ fn persisted_free_space_noop_close_does_not_grow() {
 /// `tests/main/paged_mutation.rs`).
 #[test]
 fn paged_non_persist_is_refused_at_open() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let p = dir.path().join("paged_plain.h5");
     let mut b = FileBuilder::new();
     b.with_file_space_strategy(FileSpaceStrategy::Page, false, 0)
@@ -375,7 +375,7 @@ fn paged_non_persist_is_refused_at_open() {
 
 #[test]
 fn metadata_cache_stays_coherent_across_appends() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let p = dir.path().join("cache.h5");
     Unlimited::new("d", &(0..4).collect::<Vec<i32>>(), 4).pure_create(&p);
     let properties = FileAccessProperties::new()
@@ -400,7 +400,7 @@ fn metadata_cache_stays_coherent_across_appends() {
 /// tells a caller a larger budget will not help this workload (issue #353).
 #[test]
 fn appends_report_the_cached_windows_they_invalidate() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let p = dir.path().join("mdc_invalidations.h5");
     Unlimited::new("d", &(0..4).collect::<Vec<i32>>(), 4).pure_create(&p);
     let properties = FileAccessProperties::new()
@@ -431,7 +431,7 @@ fn appends_report_the_cached_windows_they_invalidate() {
 /// front of it whatever the budget says.
 #[test]
 fn a_mirrored_session_reports_no_metadata_cache() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let p = dir.path().join("mdc_mirrored.h5");
     Unlimited::new("d", &(0..4).collect::<Vec<i32>>(), 4).pure_create(&p);
     let file = File::open_rw_with_options(
@@ -451,7 +451,7 @@ fn a_mirrored_session_reports_no_metadata_cache() {
 
 #[test]
 fn reads_match_streaming_capabilities() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let p = dir.path().join("reads.h5");
     let mut b = FileBuilder::new();
     Unlimited::new("d", &[1, 2, 3], 2).add_to(&mut b);
@@ -483,7 +483,7 @@ fn unaligned_filtered_multi_batch_append_lands_every_element() {
     // fills to the boundary, and every batch after it starts aligned. Each
     // batch is its own crash-atomic apply, so this is also the shape where a
     // batching mistake shows up as lost or duplicated elements.
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let p = dir.path().join("atomic.h5");
     Unlimited::new("d", &(0..257).collect::<Vec<i32>>(), 256)
         .filters(&[Filter::Deflate(6)])
@@ -523,7 +523,7 @@ fn chunk_introspection_works_on_bounded_files() {
     // chunks() walks the chunk index through the file source; on a bounded
     // (and mirror) file that must go through the engine's store, not the
     // empty borrowed view.
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let p = dir.path().join("chunks.h5");
     Unlimited::new("d", &(0..8).collect::<Vec<i32>>(), 4).pure_create(&p);
     let file = session::open_bounded_on_close(&p).unwrap();
@@ -544,7 +544,7 @@ fn chunk_introspection_works_on_bounded_files() {
 /// reach the end: reuse draws only on regions this session freed.
 #[test]
 fn a_bounded_commit_truncates_when_the_freed_run_reaches_the_end() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let p = dir.path().join("truncate.h5");
     Unlimited::new("d", &(0..4).collect::<Vec<i32>>(), 4).pure_create(&p);
 

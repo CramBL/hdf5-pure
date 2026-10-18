@@ -32,8 +32,8 @@ use crate::filter_pipeline::{
     FILTER_DEFLATE, FILTER_FLETCHER32, FILTER_LZF, FILTER_SCALEOFFSET, FILTER_SHUFFLE,
     FilterDescription, FilterPipeline, H5Z_FLAG_OPTIONAL,
 };
-use crate::filters::{ChunkContext, compress_chunk_with};
-use crate::scaleoffset::{FillAvailability, ScaleOffset, build_cd_values};
+use crate::filters::{self, ChunkContext};
+use crate::scaleoffset::{self, FillAvailability, ScaleOffset};
 use crate::width::LengthWidth;
 use crate::width::OffsetWidth;
 
@@ -337,7 +337,7 @@ impl ChunkOptions {
                         filter_id: FILTER_SCALEOFFSET,
                         name: None,
                         flags,
-                        client_data: build_cd_values(
+                        client_data: scaleoffset::build_cd_values(
                             mode,
                             ty,
                             element_size,
@@ -987,7 +987,7 @@ pub(crate) fn compress_chunks(
     let mut scratch = crate::filters::FilterScratch::new();
     for chunk_bytes in chunks {
         let c = if let Some(ref pl) = pipeline {
-            compress_chunk_with(&mut scratch, &chunk_bytes, pl, ctx)?
+            filters::compress_chunk_with(&mut scratch, &chunk_bytes, pl, ctx)?
         } else {
             // No pipeline: the split already produced an owned chunk buffer;
             // move it into the set instead of cloning.
@@ -1784,8 +1784,8 @@ mod tests {
     use crate::chunk_cache::ChunkCache;
 
     use crate::FillTime;
-    use crate::chunked_read::read_chunked_data_cached;
-    use crate::convert::nz;
+    use crate::chunked_read;
+    use crate::convert;
     use crate::data_layout::ChunkIndexLayout;
     use crate::data_layout::DataLayout;
     use crate::dataspace::{Dataspace, DataspaceType};
@@ -1836,7 +1836,7 @@ mod tests {
     /// fully-allocated dataset reads fine however unreadable its fill message.
     #[test]
     fn an_unknown_fill_refuses_only_the_chunks_that_need_padding() {
-        let elem = nz(4);
+        let elem = convert::nz(4);
         let data = vec![0u8; 8 * 4];
 
         // 8 elements in chunks of 4: two whole chunks, nothing uncovered.
@@ -1889,10 +1889,15 @@ mod tests {
             for elem in [1usize, 4, 8] {
                 let n: u64 = shape.iter().product();
                 let raw = vec![0u8; (n as usize) * elem];
-                let expected = full_chunk_bytes(chunk_dims.iter().copied(), nz(elem));
-                let chunks =
-                    split_into_chunks(&raw, shape, chunk_dims, nz(elem), FillPattern::ZERO)
-                        .unwrap();
+                let expected = full_chunk_bytes(chunk_dims.iter().copied(), convert::nz(elem));
+                let chunks = split_into_chunks(
+                    &raw,
+                    shape,
+                    chunk_dims,
+                    convert::nz(elem),
+                    FillPattern::ZERO,
+                )
+                .unwrap();
                 assert!(
                     !chunks.is_empty(),
                     "shape {shape:?} chunk {chunk_dims:?} must produce chunks"
@@ -2327,7 +2332,7 @@ mod tests {
             .as_ref()
             .map(|pm| crate::filter_pipeline::FilterPipeline::parse(pm).unwrap());
 
-        let output = read_chunked_data_cached(
+        let output = chunked_read::read_chunked_data_cached(
             &file_data,
             RawReadSpec::parse(
                 &layout,
@@ -2348,7 +2353,8 @@ mod tests {
     #[test]
     fn split_1d_single_chunk() {
         let data = f64_to_bytes(&[1.0, 2.0, 3.0]);
-        let result = split_into_chunks(&data, &[3], &[3], nz(8), FillPattern::ZERO).unwrap();
+        let result =
+            split_into_chunks(&data, &[3], &[3], convert::nz(8), FillPattern::ZERO).unwrap();
         assert_eq!(result.len(), 1);
         assert_eq!(bytes_to_f64(&result[0]), vec![1.0, 2.0, 3.0]);
     }
@@ -2357,7 +2363,8 @@ mod tests {
     fn split_1d_multiple_chunks() {
         let values: Vec<f64> = (0..10).map(|i| i as f64).collect();
         let data = f64_to_bytes(&values);
-        let result = split_into_chunks(&data, &[10], &[4], nz(8), FillPattern::ZERO).unwrap();
+        let result =
+            split_into_chunks(&data, &[10], &[4], convert::nz(8), FillPattern::ZERO).unwrap();
         assert_eq!(result.len(), 3); // ceil(10/4) = 3
         // Contents in chunk order, which is what the offsets this used to return
         // encoded: chunk `i` starts at element `4 * i`.
@@ -2372,7 +2379,8 @@ mod tests {
         // 4x4 dataset, 2x2 chunks -> 4 chunks
         let values: Vec<f64> = (0..16).map(|i| i as f64).collect();
         let data = f64_to_bytes(&values);
-        let result = split_into_chunks(&data, &[4, 4], &[2, 2], nz(8), FillPattern::ZERO).unwrap();
+        let result =
+            split_into_chunks(&data, &[4, 4], &[2, 2], convert::nz(8), FillPattern::ZERO).unwrap();
         assert_eq!(result.len(), 4);
         // Row-major chunk order, asserted by content rather than by the offsets
         // this used to return: every chunk, so the ordering is pinned end to end
@@ -2506,7 +2514,7 @@ mod tests {
             &meta,
             &[21],
             &[7],
-            nz(8),
+            convert::nz(8),
             Some(&[]),
             StoredAddress::new(0x1000),
             None,
@@ -2571,7 +2579,7 @@ mod tests {
                 &meta,
                 shape,
                 &[7],
-                nz(8),
+                convert::nz(8),
                 Some(&[]),
                 StoredAddress::new(0x1000),
                 maxshape,
@@ -2610,7 +2618,7 @@ mod tests {
             &[],
             &[21],
             &[7],
-            nz(8),
+            convert::nz(8),
             None,
             StoredAddress::new(0x1000),
             None,
@@ -2631,7 +2639,7 @@ mod tests {
             &meta,
             &[6],
             &[2],
-            nz(1),
+            convert::nz(1),
             Some(&[]),
             StoredAddress::new(0x1000),
             None,
@@ -3028,7 +3036,7 @@ mod tests {
         };
         let datatype = make_f64_type();
 
-        let output = read_chunked_data_cached(
+        let output = chunked_read::read_chunked_data_cached(
             &file_data,
             RawReadSpec::plain(&layout, &dataspace, &datatype),
             crate::file_writer::WIDTHS,

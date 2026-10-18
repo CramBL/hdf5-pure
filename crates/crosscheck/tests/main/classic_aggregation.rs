@@ -17,7 +17,6 @@ use hdf5_sys::h5o::H5O_INFO_BASIC;
 use hdf5_sys::h5o::H5O_info1_t;
 use hdf5_sys::h5p::H5P_DEFAULT;
 use rstest::rstest;
-use tempfile::tempdir;
 
 use test_util_hdf5::aggregation;
 use test_util_hdf5::aggregation::Object;
@@ -181,7 +180,7 @@ fn libhdf5_places_a_workload_as_recorded(
     #[case] strategy: CStrategy,
     #[case] expected: Placements<&[u64]>,
 ) {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("workload.h5");
 
     let observed = Placements::observe(&path, workload, strategy);
@@ -191,7 +190,7 @@ fn libhdf5_places_a_workload_as_recorded(
 
 #[test]
 fn libhdf5_persists_no_free_space_manager_under_aggr() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("aggr.h5");
     Placements::observe(&path, aggregation::FREED_EXTENT, AGGR);
 
@@ -226,7 +225,7 @@ fn libhdf5_reads_the_workload_hdf5_pure_writes(
     )]
     strategy: FileSpaceStrategy,
 ) {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("workload.h5");
     workload.write(&path, strategy, true);
 

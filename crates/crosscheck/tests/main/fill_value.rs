@@ -12,7 +12,7 @@
 use hdf5::file::LibraryVersion;
 use hdf5_pure::{File, FileBuilder, FillTime, MaxExtent, ScaleOffset};
 use rstest::rstest;
-use tempfile::tempdir;
+
 use test_util_hdf5::dataset::{self, Filter, Unlimited};
 use test_util_hdf5::file;
 
@@ -29,7 +29,7 @@ fn c_fill_value<T: hdf5::H5Type>(path: &std::path::Path, name: &str) -> Option<T
 
 #[test]
 fn c_reads_pure_written_contiguous_fill() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("pure_contig.h5");
     let mut fb = FileBuilder::new();
     fb.create_dataset("d")
@@ -42,7 +42,7 @@ fn c_reads_pure_written_contiguous_fill() {
 
 #[test]
 fn c_reads_pure_written_chunked_fill() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("pure_chunked.h5");
     Unlimited::new("d", &[1.0, 2.0, 3.0, 4.0], 2)
         .fill_value(3.5_f64)
@@ -53,7 +53,7 @@ fn c_reads_pure_written_chunked_fill() {
 
 #[test]
 fn c_sees_no_fill_value_when_pure_sets_none() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("pure_none.h5");
     let mut fb = FileBuilder::new();
     fb.create_dataset("d").with_i32_data(&[1, 2, 3]);
@@ -90,7 +90,7 @@ fn c_write_i32_fill(path: &std::path::Path, low: LibraryVersion, high: LibraryVe
 
 #[test]
 fn pure_reads_c_written_v2_fill() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("c_v2.h5");
     // Earliest..=V18 keeps the classic format, whose Fill Value message is v2.
     c_write_i32_fill(&path, LibraryVersion::Earliest, LibraryVersion::V18);
@@ -103,7 +103,7 @@ fn pure_reads_c_written_v2_fill() {
 
 #[test]
 fn pure_reads_c_written_v3_fill() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("c_v3.h5");
     // The latest format writes a version-3 Fill Value message.
     c_write_i32_fill(&path, LibraryVersion::V110, LibraryVersion::latest());
@@ -118,7 +118,7 @@ fn pure_reads_c_written_v3_fill() {
 #[case::v2(LibraryVersion::Earliest, LibraryVersion::V18)]
 #[case::v3(LibraryVersion::V110, LibraryVersion::latest())]
 fn pure_reads_c_written_fill_time_never(#[case] low: LibraryVersion, #[case] high: LibraryVersion) {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("c_never.h5");
     {
         let file = hdf5::File::with_options()
@@ -144,7 +144,7 @@ fn pure_reads_c_written_fill_time_never(#[case] low: LibraryVersion, #[case] hig
 #[case::v2(LibraryVersion::Earliest, LibraryVersion::V18)]
 #[case::v3(LibraryVersion::V110, LibraryVersion::latest())]
 fn pure_reads_c_written_fill_time_alloc(#[case] low: LibraryVersion, #[case] high: LibraryVersion) {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("c_alloc.h5");
     {
         let file = hdf5::File::with_options()
@@ -173,7 +173,7 @@ fn pure_reads_c_written_default_fill_time_as_if_set(
     #[case] low: LibraryVersion,
     #[case] high: LibraryVersion,
 ) {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("c_default.h5");
     {
         let file = hdf5::File::with_options()
@@ -212,7 +212,7 @@ fn c_write_chunked_f64_fill(path: &std::path::Path) {
 
 #[test]
 fn pure_reads_c_written_chunked_f64_fill() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("c_chunked.h5");
     c_write_chunked_f64_fill(&path);
 
@@ -238,7 +238,7 @@ fn c_write_i32_no_fill(path: &std::path::Path) {
 
 #[test]
 fn pure_reads_none_when_c_sets_no_fill() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("c_no_fill.h5");
     c_write_i32_no_fill(&path);
 
@@ -258,7 +258,7 @@ fn c_reads_pure_scaleoffset_dataset_data_and_fill() {
     // a defined dataset Fill Value message. The C library decodes the data through
     // the filter's own fill config (so the data is intact) and reports the dataset
     // fill value separately — the two do not collide.
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("pure_so_fill.h5");
     let data: Vec<i32> = (0..16).collect();
     let mut fb = FileBuilder::new();
@@ -304,7 +304,7 @@ fn c_extend_and_read(path: &std::path::Path, to: usize) -> Vec<u32> {
 /// into the tail of its last chunk and both writers' files must read the same.
 #[test]
 fn extending_into_a_partial_chunk_reads_the_fill_value() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let data = [1u32, 2, 3, 4, 5];
     let fill = 77u32;
 
@@ -330,7 +330,7 @@ fn extending_into_a_partial_chunk_reads_the_fill_value() {
 /// trailing chunk and so decides the padding a second time.
 #[test]
 fn appending_leaves_the_fill_value_in_the_rest_of_the_chunk() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let fill = 77u32;
 
     let p_path = dir.path().join("appended.h5");
@@ -357,7 +357,7 @@ fn appending_leaves_the_fill_value_in_the_rest_of_the_chunk() {
 /// every fixture that pins written bytes is unaffected.
 #[test]
 fn no_fill_value_still_pads_with_zeros() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let data = [1u32, 2, 3, 4, 5];
 
     let c_path = dir.path().join("c.h5");
@@ -374,7 +374,7 @@ fn no_fill_value_still_pads_with_zeros() {
 /// tiling path for nothing.
 #[test]
 fn a_zero_fill_value_pads_with_zeros() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let data = [1u32, 2, 3, 4, 5];
     let p_path = dir.path().join("pure.h5");
     Unlimited::new("col", &data, 4)
@@ -388,7 +388,7 @@ fn a_zero_fill_value_pads_with_zeros() {
 /// rather than patched into the stored bytes.
 #[test]
 fn a_filtered_partial_chunk_is_padded_before_compression() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let fill = 77u32;
     let data: Vec<u32> = (0..5).collect();
     let p_path = dir.path().join("deflate.h5");
@@ -409,7 +409,7 @@ fn a_filtered_partial_chunk_is_padded_before_compression() {
 /// down as element bytes and not appended as an afterthought.
 #[test]
 fn a_scale_offset_partial_chunk_is_padded_before_encoding() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let fill = 77u32;
     let data: Vec<u32> = (0..5).collect();
     let p_path = dir.path().join("so.h5");
@@ -430,7 +430,7 @@ fn a_scale_offset_partial_chunk_is_padded_before_encoding() {
 /// and decides the padding from its own copy of the dataset's fill value.
 #[test]
 fn an_immediate_append_leaves_the_fill_value_in_the_rest_of_the_chunk() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let fill = 77u32;
     let path = dir.path().join("immediate.h5");
     Unlimited::new("col", &[1u32, 2], 4)
@@ -453,7 +453,7 @@ fn an_immediate_append_leaves_the_fill_value_in_the_rest_of_the_chunk() {
 #[test]
 #[cfg(target_endian = "little")]
 fn a_fill_time_of_never_still_pads_with_zeros() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("never.h5");
     // Only the C library can express this today, so it builds the fixture and
     // this crate's append rewrites the trailing chunk through it.
@@ -498,7 +498,7 @@ fn a_fill_time_of_never_still_pads_with_zeros() {
 #[test]
 #[cfg(target_endian = "little")]
 fn overwriting_values_keeps_the_fill_value_in_the_rest_of_the_chunk() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let fill = 77u32;
     let path = dir.path().join("overwrite.h5");
     Unlimited::new("col", &[1u32, 2, 3, 4, 5], 4)
@@ -529,7 +529,7 @@ fn overwriting_values_keeps_the_fill_value_in_the_rest_of_the_chunk() {
 /// fill value.
 #[test]
 fn a_dataset_created_in_a_session_pads_with_its_fill_value() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let fill = 77u32;
     let path = dir.path().join("session.h5");
     // Any file to open; the dataset under test is added to it.
@@ -567,7 +567,7 @@ fn a_dataset_created_in_a_session_pads_with_its_fill_value() {
 /// rank > 1 resizable chunked dataset is written unreadable today (#299), so a
 /// fixture built the way the rank-1 tests are built could not run here at all.
 fn assert_chunks_match_the_c_library(shape: &[usize], chunks: &[usize], fill: u32) {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let n: usize = shape.iter().product();
     let data: Vec<u32> = (1..=n as u32).collect();
 
@@ -637,7 +637,7 @@ fn a_partial_chunk_is_filled_in_every_dimension() {
 /// element-alignment mistake in the tiling would be invisible.
 #[test]
 fn a_partial_chunk_of_single_byte_elements_is_filled() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("u8.h5");
     Unlimited::new("col", &[1u8, 2, 3, 4, 5], 4)
         .fill_value(9u8)
@@ -659,7 +659,7 @@ fn a_partial_chunk_of_single_byte_elements_is_filled() {
 
 #[test]
 fn c_reads_pure_written_fill_time_never() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("pure_never.h5");
     let mut fb = FileBuilder::new();
     fb.create_dataset("contig")
@@ -682,7 +682,7 @@ fn c_reads_pure_written_fill_time_never() {
 
 #[test]
 fn c_reads_pure_written_fill_time_alloc() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("pure_alloc.h5");
     let mut fb = FileBuilder::new();
     fb.create_dataset("d")
@@ -698,7 +698,7 @@ fn c_reads_pure_written_fill_time_alloc() {
 
 #[test]
 fn c_reads_pure_written_fill_time_never_with_defined_fill() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("pure_never_def.h5");
     let mut fb = FileBuilder::new();
     fb.create_dataset("d")
@@ -721,7 +721,7 @@ fn c_reads_pure_written_fill_time_never_with_defined_fill() {
 #[test]
 #[cfg(target_endian = "little")]
 fn c_reads_pure_written_chunk_padding_under_fill_time_never() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("pure_never_pad.h5");
     let fill = 77u32;
     let data = [1u32, 2, 3, 4, 5];

@@ -24,7 +24,7 @@ use crate::datatype::Datatype;
 use crate::datatype::StringPadding;
 use crate::datatype::byte_order::DatatypeByteOrder;
 use crate::datatype::layout::{FixedPointLayout, FloatingPointLayout};
-use crate::display::write_elided;
+use crate::display;
 use crate::error::FormatError;
 use crate::object_path::ObjectPathBuf;
 use crate::scaleoffset::{FillAvailability, ScaleOffset};
@@ -2160,7 +2160,7 @@ fn write_elements<T: fmt::Debug>(f: &mut fmt::Formatter<'_>, values: &[T]) -> fm
         }
         write!(f, "{value:?}")?;
     }
-    write_elided(f, values.len().saturating_sub(ATTR_DISPLAY_MAX_ELEMENTS))?;
+    display::write_elided(f, values.len().saturating_sub(ATTR_DISPLAY_MAX_ELEMENTS))?;
     f.write_str("]")
 }
 
@@ -4153,7 +4153,7 @@ mod attr_value_display_tests {
 mod fixed_string_tests {
     use super::{
         AttrValue, CharacterSet, DatasetBuilder, DataspaceType, Datatype, FormatError,
-        StringPadding, build_attr_message, derived_string_width,
+        StringPadding,
     };
 
     /// One fixed-width string entry point as a value, so a case table can name
@@ -4189,14 +4189,20 @@ mod fixed_string_tests {
 
     #[test]
     fn a_derived_width_is_the_longest_value_and_never_zero() {
-        assert_eq!(derived_string_width(&["north", "s", "east"]).get(), 5);
-        assert_eq!(derived_string_width(&["s", "east", "north"]).get(), 5);
+        assert_eq!(
+            super::derived_string_width(&["north", "s", "east"]).get(),
+            5
+        );
+        assert_eq!(
+            super::derived_string_width(&["s", "east", "north"]).get(),
+            5
+        );
         // A multi-byte character is measured in bytes, not characters.
-        assert_eq!(derived_string_width(&["é", "ab"]).get(), 2);
+        assert_eq!(super::derived_string_width(&["é", "ab"]).get(), 2);
         // All-empty and no values at all both take the one byte the format's
         // minimum requires, rather than a zero-width datatype.
-        assert_eq!(derived_string_width::<&str>(&[]).get(), 1);
-        assert_eq!(derived_string_width(&["", ""]).get(), 1);
+        assert_eq!(super::derived_string_width::<&str>(&[]).get(), 1);
+        assert_eq!(super::derived_string_width(&["", ""]).get(), 1);
     }
 
     #[test]
@@ -4326,7 +4332,7 @@ mod fixed_string_tests {
             }),
         ];
         for (attr, stage) in cases {
-            let message = build_attr_message("a", &attr);
+            let message = super::build_attr_message("a", &attr);
             let mut b = DatasetBuilder::new("d");
             stage(&mut b).unwrap();
             let (datatype, raw) = staged(&b);
@@ -4385,7 +4391,7 @@ mod fixed_string_tests {
             ),
         ];
         for (value, expected_charset, expected_space, count) in cases {
-            let message = build_attr_message("a", &value);
+            let message = super::build_attr_message("a", &value);
             let Datatype::String {
                 size,
                 padding,
@@ -4412,10 +4418,10 @@ mod fixed_string_tests {
     /// the sized variants answer.
     #[test]
     fn a_plain_attribute_takes_the_content_width_and_a_sized_one_keeps_its_slot() {
-        let shrunk = build_attr_message("a", &AttrValue::AsciiString("x".into()));
+        let shrunk = super::build_attr_message("a", &AttrValue::AsciiString("x".into()));
         assert!(matches!(shrunk.datatype, Datatype::String { size: 1, .. }));
 
-        let kept = build_attr_message("a", &AttrValue::ascii_string_sized("x", 5).unwrap());
+        let kept = super::build_attr_message("a", &AttrValue::ascii_string_sized("x", 5).unwrap());
         assert!(matches!(kept.datatype, Datatype::String { size: 5, .. }));
     }
 

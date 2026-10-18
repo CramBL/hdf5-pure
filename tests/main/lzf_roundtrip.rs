@@ -4,7 +4,7 @@
 //! writer, filter pipeline, edit engine, and repack all thread LZF through
 //! correctly. LZF is lossless, so every comparison is exact equality.
 
-use hdf5_pure::{Error, File, FileBuilder, FormatError, RepackOptions, repack};
+use hdf5_pure::{Error, File, FileBuilder, FormatError, RepackOptions};
 
 use test_util::temp;
 
@@ -332,7 +332,7 @@ fn repack_roundtrips_lzf() {
         .with_lzf();
     b.write(&src).unwrap();
 
-    repack(&src, &dst, &RepackOptions::new()).unwrap();
+    hdf5_pure::repack(&src, &dst, &RepackOptions::new()).unwrap();
 
     let file = File::open(&dst).unwrap();
     let ds = file.dataset("vals").unwrap();

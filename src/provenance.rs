@@ -13,7 +13,7 @@ use alloc::{format, string::String, vec::Vec};
 use sha2::{Digest, Sha256};
 
 use crate::attribute::AttributeMessage;
-use crate::type_builders::{AttrValue, build_attr_message};
+use crate::type_builders::{self, AttrValue};
 
 /// SHA-256 hex digest of the raw dataset bytes.
 pub const ATTR_SHA256: &str = "_provenance_sha256";
@@ -53,14 +53,17 @@ impl Provenance {
         let hash = sha256_hex(raw_data);
         let mut attrs = Vec::with_capacity(4);
         let hash_val = AttrValue::String(hash);
-        attrs.push(build_attr_message(ATTR_SHA256, &hash_val));
+        attrs.push(type_builders::build_attr_message(ATTR_SHA256, &hash_val));
         let creator_val = AttrValue::String(self.creator.clone());
-        attrs.push(build_attr_message(ATTR_CREATOR, &creator_val));
+        attrs.push(type_builders::build_attr_message(
+            ATTR_CREATOR,
+            &creator_val,
+        ));
         let ts_val = AttrValue::String(self.timestamp.clone());
-        attrs.push(build_attr_message(ATTR_TIMESTAMP, &ts_val));
+        attrs.push(type_builders::build_attr_message(ATTR_TIMESTAMP, &ts_val));
         if let Some(ref src) = self.source {
             let src_val = AttrValue::String(src.clone());
-            attrs.push(build_attr_message(ATTR_SOURCE, &src_val));
+            attrs.push(type_builders::build_attr_message(ATTR_SOURCE, &src_val));
         }
         attrs
     }
