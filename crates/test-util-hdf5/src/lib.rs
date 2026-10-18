@@ -15,6 +15,8 @@ pub mod file_builder;
 pub mod file_space;
 pub mod fixed_string;
 pub mod fixtures;
+#[cfg(feature = "hdf5")]
+pub mod global_heap;
 pub mod global_heap_fixture;
 #[cfg(feature = "__hdf5-1.10")]
 pub mod group_filter;

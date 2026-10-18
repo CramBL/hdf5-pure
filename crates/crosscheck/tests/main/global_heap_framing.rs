@@ -1,8 +1,6 @@
 #![cfg(feature = "hdf5")]
-use std::path::Path;
 
 use hdf5::plist::file_create::Sizeof;
-use hdf5::plist::file_create::SizeofInfo;
 use hdf5::types::VarLenUnicode;
 use hdf5_pure_core::__private::FileRange;
 use hdf5_pure_core::__private::FileRegion;
@@ -12,6 +10,7 @@ use hdf5_pure_format::__private::GlobalHeapObject;
 use hdf5_pure_format::__private::LengthWidth;
 use rstest::rstest;
 use test_util::global_heap;
+use test_util_hdf5::global_heap as libhdf5_heap;
 
 #[rstest]
 #[case::two_byte_lengths(Sizeof::Bytes2, LengthWidth::Two)]
@@ -30,7 +29,7 @@ fn a_walk_reads_every_string_libhdf5_writes(
         .collect();
 
     walked.sort();
-    assert_eq!(walked, strings());
+    assert_eq!(walked, libhdf5_heap::strings());
 }
 
 #[test]
@@ -64,38 +63,19 @@ fn a_walk_frames_each_libhdf5_payload_after_its_object_header() {
 fn libhdf5_file(sizeof_size: Sizeof) -> Vec<u8> {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("vlen.h5");
-    let file = create_libhdf5_file(&path, sizeof_size, 0);
-    let values: Vec<VarLenUnicode> = strings().iter().map(|s| s.parse().unwrap()).collect();
+    let file = libhdf5_heap::create_libhdf5_file(&path, sizeof_size, 0);
+    let values: Vec<VarLenUnicode> = libhdf5_heap::strings()
+        .iter()
+        .map(|s| s.parse().unwrap())
+        .collect();
     file.new_dataset::<VarLenUnicode>()
-        .shape([STRING_COUNT])
+        .shape([libhdf5_heap::STRING_COUNT])
         .create("strings")
         .unwrap()
         .write(&values)
         .unwrap();
     file.close().unwrap();
     std::fs::read(&path).unwrap()
-}
-
-/// Creates a file at `path` through libhdf5, with 8-byte addresses, lengths `sizeof_size` wide, and
-/// a userblock of `userblock` bytes.
-pub(crate) fn create_libhdf5_file(path: &Path, sizeof_size: Sizeof, userblock: u64) -> hdf5::File {
-    hdf5::File::with_options()
-        .with_create_plist(|p| {
-            p.sizes(SizeofInfo {
-                sizeof_addr: Sizeof::Bytes8,
-                sizeof_size,
-            })
-            .userblock(userblock)
-        })
-        .create(path)
-        .unwrap()
-}
-
-/// Returns the [`STRING_COUNT`] strings the tests write, each 11 bytes long.
-pub(crate) fn strings() -> Vec<String> {
-    (0..STRING_COUNT)
-        .map(|i| format!("string {i:04}"))
-        .collect()
 }
 
 fn whole_file(bytes: &[u8]) -> FileRegion<'_> {
@@ -118,5 +98,3 @@ fn walk(image: FileRegion<'_>, start: u64, lengths: LengthWidth) -> Vec<GlobalHe
     }
     objects
 }
-
-pub(crate) const STRING_COUNT: usize = 300;
