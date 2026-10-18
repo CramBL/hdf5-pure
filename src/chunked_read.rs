@@ -216,13 +216,12 @@ impl ChunkInfo {
     fn in_extent(
         grid: &ChunkGrid,
         slot: u64,
-        record: ChunkRecord,
-    ) -> Result<Option<Self>, FormatError> {
-        let ChunkRecord {
+        ChunkRecord {
             address,
             stored_size,
             filter_mask,
-        } = record;
+        }: ChunkRecord,
+    ) -> Result<Option<Self>, FormatError> {
         Ok(grid.offsets_in_extent(slot)?.map(|offsets| Self {
             chunk_size: StoredChunkSize::v4(stored_size),
             filter_mask,

@@ -223,15 +223,14 @@ impl<'a> Reader<'a> {
         &self,
         source: &impl Source,
         prefix: Region,
-        pages: Pages<'_>,
-        mut elements: Elements,
-        visit: &mut impl FnMut(u64, ChunkRecord) -> Result<(), FormatError>,
-    ) -> Result<(), FormatError> {
-        let Pages {
+        Pages {
             elements: page_elements,
             bitmap,
             stride,
-        } = pages;
+        }: Pages<'_>,
+        mut elements: Elements,
+        visit: &mut impl FnMut(u64, ChunkRecord) -> Result<(), FormatError>,
+    ) -> Result<(), FormatError> {
         for (page, initialized) in bitmap.iter() {
             if elements.is_empty() {
                 break;

@@ -181,8 +181,10 @@ impl FreeSpaceManagerHeaderFrame {
     /// enabled, or [`FormatError::InvalidFreeSpaceManager`] if the signature or version is
     /// invalid, the address space is outside 1 to 64 bits, or the used section-list length
     /// exceeds its allocated length.
-    pub fn parse(widths: FormatWidths, data: &[u8]) -> Result<Self, FormatError> {
-        let FormatWidths { offsets, lengths } = widths;
+    pub fn parse(
+        widths @ FormatWidths { offsets, lengths }: FormatWidths,
+        data: &[u8],
+    ) -> Result<Self, FormatError> {
         let block = data
             .get(..header_len(widths))
             .ok_or(FormatError::UnexpectedEof {
@@ -781,7 +783,10 @@ impl FreeSpaceManagerHeader {
     ///
     /// Returns [`FormatError::AddressTooLarge`] or [`FormatError::LengthTooLarge`] if a field does
     /// not fit its width.
-    fn encode(&self, widths: FormatWidths) -> Result<Vec<u8>, FormatError> {
+    fn encode(
+        &self,
+        widths @ FormatWidths { offsets, lengths }: FormatWidths,
+    ) -> Result<Vec<u8>, FormatError> {
         let Self {
             total_space,
             total_sections,
@@ -791,7 +796,6 @@ impl FreeSpaceManagerHeader {
             section_list_used,
             section_list_allocated,
         } = *self;
-        let FormatWidths { offsets, lengths } = widths;
         let mut fshd = Vec::with_capacity(header_len(widths));
         fshd.extend_from_slice(FSHD_SIGNATURE);
         fshd.push(FSHD_VERSION);
@@ -1285,8 +1289,7 @@ fn section_list_len(widths: FormatWidths, sets: usize, sections: usize) -> u64 {
 }
 
 /// Returns the length in bytes of a header at `widths`, checksum included.
-fn header_len(widths: FormatWidths) -> usize {
-    let FormatWidths { offsets, lengths } = widths;
+fn header_len(FormatWidths { offsets, lengths }: FormatWidths) -> usize {
     let (os, ls) = (usize::from(offsets.get()), usize::from(lengths.get()));
     // sig(4) ver(1) client(1) + 4*L + classes/shrink/expand/abits (2 each) +
     // max(L) + fsse_addr(O) + used(L) + alloc(L) + checksum(4)

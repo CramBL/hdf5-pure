@@ -40,10 +40,9 @@ use crate::width::FormatWidths;
 ///
 /// [`persist`]: FileSpaceInfo::persist
 pub fn serialize_file_space_info_v1(
-    widths: FormatWidths,
+    widths @ FormatWidths { offsets, lengths }: FormatWidths,
     info: &FileSpaceInfo,
 ) -> Result<Vec<u8>, FormatError> {
-    let FormatWidths { offsets, lengths } = widths;
     let Some(eoa_pre_fsm) = info.eoa_pre_fsm else {
         return Err(FormatError::UnsupportedFileSpaceInfoVersion(VERSION_0));
     };
@@ -134,8 +133,10 @@ pub fn parse_file_space_info(
 }
 
 /// Parses a version 0 message into source-faithful fields.
-fn parse_version_0(widths: FormatWidths, data: &[u8]) -> Result<FileSpaceInfo, FormatError> {
-    let FormatWidths { offsets, lengths } = widths;
+fn parse_version_0(
+    FormatWidths { offsets, lengths }: FormatWidths,
+    data: &[u8],
+) -> Result<FileSpaceInfo, FormatError> {
     let head_len = 2 + usize::from(lengths.get());
     bytes::ensure_len(data, 0, head_len)?;
     let mut fields = bytes::Fields::new(data, 1);
@@ -184,8 +185,10 @@ fn parse_version_0(widths: FormatWidths, data: &[u8]) -> Result<FileSpaceInfo, F
     .build())
 }
 
-fn parse_version_1(widths: FormatWidths, data: &[u8]) -> Result<FileSpaceInfo, FormatError> {
-    let FormatWidths { offsets, lengths } = widths;
+fn parse_version_1(
+    widths @ FormatWidths { offsets, lengths }: FormatWidths,
+    data: &[u8],
+) -> Result<FileSpaceInfo, FormatError> {
     let fixed = fixed_len(widths);
     let (head, managers) = data
         .split_at_checked(fixed)

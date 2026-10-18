@@ -114,12 +114,14 @@ impl FileRange {
     /// Returns `true` if both endpoints of `required` lie within this interval's endpoints.
     ///
     /// An empty range at either endpoint is contained.
-    pub fn contains(self, required: Self) -> bool {
-        let Self { start, end } = self;
-        let Self {
+    pub fn contains(
+        self,
+        Self {
             start: required_start,
             end: required_end,
-        } = required;
+        }: Self,
+    ) -> bool {
+        let Self { start, end } = self;
         start <= required_start && required_end <= end
     }
 }

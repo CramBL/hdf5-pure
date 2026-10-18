@@ -96,8 +96,10 @@ impl<'s, S: Source + ?Sized> GlobalHeapReader<'s, S> {
             .read_exact_at(payload.start().get(), len.to_usize()?)
     }
 
-    fn payload(&mut self, id: GlobalHeapId) -> Result<GlobalHeapPayloadRef, FormatError> {
-        let GlobalHeapId { collection, index } = id;
+    fn payload(
+        &mut self,
+        GlobalHeapId { collection, index }: GlobalHeapId,
+    ) -> Result<GlobalHeapPayloadRef, FormatError> {
         let unregistered = || {
             FormatError::Internal(format!(
                 "global heap object {index} of the collection at {} is not registered",

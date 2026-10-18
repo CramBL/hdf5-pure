@@ -660,8 +660,10 @@ impl ObjectHeaderContinuation {
     ///
     /// Returns [`FormatError::UnexpectedEof`] if `body` ends inside a field, and
     /// [`FormatError::UndefinedContinuationAddress`] if the address is the undefined address.
-    pub fn parse_with_widths(body: &[u8], widths: FormatWidths) -> Result<Self, FormatError> {
-        let FormatWidths { offsets, lengths } = widths;
+    pub fn parse_with_widths(
+        body: &[u8],
+        FormatWidths { offsets, lengths }: FormatWidths,
+    ) -> Result<Self, FormatError> {
         Ok(Self {
             address: bytes::read_optional_offset_width(body, 0, offsets)?
                 .map(StoredAddress::new)

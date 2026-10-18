@@ -429,13 +429,12 @@ impl WriteEngine {
         &self,
         raw: &[u8],
         count: u64,
-        slots: &ReferenceSlots,
-        referenced: &mut BTreeSet<u64>,
-    ) -> Result<(), FormatError> {
-        let ReferenceSlots {
+        ReferenceSlots {
             element_size,
             vlen_slots,
-        } = slots;
+        }: &ReferenceSlots,
+        referenced: &mut BTreeSet<u64>,
+    ) -> Result<(), FormatError> {
         let element_size = NonZeroU64::from(*element_size);
         let stride = element_size.get().to_usize()?;
         let len = count
