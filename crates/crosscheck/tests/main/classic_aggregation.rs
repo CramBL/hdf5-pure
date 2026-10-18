@@ -30,7 +30,7 @@ fn libhdf5_reads_and_edits_an_aggregated_creation(
     #[values(None, Some(FileSpaceStrategy::Aggr), Some(FileSpaceStrategy::FsmAggr))]
     strategy: Option<FileSpaceStrategy>,
 ) {
-    let directory = tempdir().unwrap();
+    let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("created.h5");
     let mut builder = FileBuilder::new();
     if let Some(strategy) = strategy {

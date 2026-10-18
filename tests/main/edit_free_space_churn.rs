@@ -680,8 +680,10 @@ impl ChurnReport {
     }
 }
 
-fn render_ownership(out: &mut String, heading: &str, ownership: SpaceOwnershipSummary) {
-    let SpaceOwnershipSummary {
+fn render_ownership(
+    out: &mut String,
+    heading: &str,
+    SpaceOwnershipSummary {
         physical_size,
         logical_size,
         userblock_bytes: _,
@@ -697,7 +699,8 @@ fn render_ownership(out: &mut String, heading: &str, ownership: SpaceOwnershipSu
         reusable_free_extents,
         unclassified_extents,
         trailing_slack_extents,
-    } = ownership;
+    }: SpaceOwnershipSummary,
+) {
     writeln!(out, "{heading}").unwrap();
     writeln!(out, "  physical file size       : {physical_size}").unwrap();
     writeln!(out, "  logical EOF              : {logical_size}").unwrap();
@@ -737,8 +740,9 @@ struct RunStats {
 }
 
 impl RunStats {
-    fn observe_epoch(&mut self, sample: ChurnSample) {
-        let ChurnSample {
+    fn observe_epoch(
+        &mut self,
+        ChurnSample {
             sequence,
             active_epochs,
             physical_size,
@@ -747,7 +751,8 @@ impl RunStats {
             pressure,
             cumulative_epochs_written,
             cumulative_epochs_deleted,
-        } = sample;
+        }: ChurnSample,
+    ) {
         assert_eq!(
             active_epochs,
             cumulative_epochs_written - cumulative_epochs_deleted
@@ -1723,8 +1728,9 @@ struct Coverage {
 }
 
 impl Coverage {
-    fn add(&mut self, other: Self) {
-        let Coverage {
+    fn add(
+        &mut self,
+        Coverage {
             nested_epoch_groups,
             compact_attr_objects,
             dense_attr_objects,
@@ -1744,7 +1750,8 @@ impl Coverage {
             filter_scale_offset,
             compressible_filtered,
             incompressible_filtered,
-        } = other;
+        }: Self,
+    ) {
         self.nested_epoch_groups += nested_epoch_groups;
         self.compact_attr_objects += compact_attr_objects;
         self.dense_attr_objects += dense_attr_objects;

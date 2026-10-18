@@ -251,8 +251,8 @@ pub fn assert_exact_space_ownership(file: &File) -> SpaceOwnershipSummary {
     summary
 }
 
-fn assert_ownership_extents_disjoint(ownership: &SpaceOwnership) {
-    let SpaceOwnership {
+fn assert_ownership_extents_disjoint(
+    SpaceOwnership {
         physical_size,
         logical_size: _,
         userblock_space,
@@ -263,7 +263,8 @@ fn assert_ownership_extents_disjoint(ownership: &SpaceOwnership) {
         unclassified_space,
         analysis_complete: _,
         trailing_slack_space,
-    } = ownership;
+    }: &SpaceOwnership,
+) {
     let mut extents = userblock_space
         .iter()
         .chain(live_raw_space)

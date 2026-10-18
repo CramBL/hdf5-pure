@@ -583,8 +583,7 @@ fn initialized(bitmap: &[u8], page: u64) -> bool {
 
 /// Returns the length in bytes of a Fixed Array header in a file with the address and length
 /// widths `widths`.
-fn header_len(widths: FormatWidths) -> u64 {
-    let FormatWidths { offsets, lengths } = widths;
+fn header_len(FormatWidths { offsets, lengths }: FormatWidths) -> u64 {
     SIGNATURE_LEN
         + HEADER_BYTE_FIELDS
         + u64::from(lengths.get())

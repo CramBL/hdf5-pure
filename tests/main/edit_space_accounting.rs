@@ -9,7 +9,6 @@
 //! region lengths.
 
 use hdf5_pure::{File, FileBuilder};
-use tempfile::tempdir;
 use test_util::range;
 use test_util_hdf5::{
     dataset::{Filter, Unlimited},
