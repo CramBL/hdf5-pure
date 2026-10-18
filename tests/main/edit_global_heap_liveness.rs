@@ -22,10 +22,9 @@ use test_util::object_header::MessageFlags;
 use test_util::object_header::MessageType;
 use test_util::temp;
 use test_util::widths::Widths;
-
-use crate::global_heap_fixture;
-use crate::global_heap_fixture::Fixture;
-use crate::global_heap_fixture::Form;
+use test_util_hdf5::global_heap_fixture;
+use test_util_hdf5::global_heap_fixture::Fixture;
+use test_util_hdf5::global_heap_fixture::Form;
 
 #[rstest]
 #[case::compact_attribute_of_strings(Form::CompactAttribute, global_heap_fixture::vlen_string())]

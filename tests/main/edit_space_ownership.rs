@@ -29,8 +29,7 @@ use test_util::superblock::v2::Superblock;
 use test_util::temp;
 use test_util::widths::Widths;
 use test_util_hdf5::file_space;
-
-use crate::global_heap_fixture;
+use test_util_hdf5::global_heap_fixture;
 
 #[rstest]
 #[case::plain(0, &[])]
