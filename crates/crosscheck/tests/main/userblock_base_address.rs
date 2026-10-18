@@ -62,10 +62,10 @@ use hdf5_pure::File;
 use hdf5_pure::FileAccessProperties;
 use hdf5_pure::FileBuilder;
 use hdf5_pure::FormatError;
-use hdf5_pure::ReadSeekSource;
 use rstest::rstest;
 use tempfile::tempdir;
 use test_util::superblock;
+use test_util_hdf5::reader::ReadBackend;
 
 #[rstest]
 #[case::plain(0, 0)]
@@ -142,7 +142,7 @@ fn relocated_c_image_preserves_encoded_superblock_and_reads_data(
             [4, 5, 6, 7]
         );
     }
-    let file = backend.open(&relocated_path);
+    let file = backend.open(&relocated_path).unwrap();
     assert_eq!(file.superblock().base_address.get(), stored_base as u64);
     assert_eq!(file.superblock().eof_address, stored_eof);
     assert_eq!(file.root().groups().unwrap(), ["outer"]);
@@ -206,7 +206,7 @@ fn snapshot_open_requires_effective_eof(
         let error = hdf5::File::open(&path).unwrap_err();
         assert!(error.contains_major(MajorErrorCode::File), "{error}");
         assert!(error.contains_minor(MinorErrorCode::Truncated), "{error}");
-        let error = backend.try_open(&path).unwrap_err();
+        let error = backend.open(&path).unwrap_err();
         let Error::Format(error) = error else {
             panic!("expected a format error, got {error:?}");
         };
@@ -232,7 +232,7 @@ fn snapshot_open_requires_effective_eof(
         oracle.dataset("tail").unwrap().read_raw::<i32>().unwrap(),
         vec![7; 4096]
     );
-    let file = backend.try_open(&path).unwrap();
+    let file = backend.open(&path).unwrap();
     assert_eq!(file.superblock().base_address.get(), stored_base as u64);
     assert_eq!(file.superblock().eof_address, original.len() as u64);
     assert_eq!(file.file_size(), actual_len);
@@ -426,31 +426,6 @@ fn editor_rejects_relocated_image(#[case] stored_base: usize, #[case] signature_
         "{error:?}"
     );
     assert_eq!(std::fs::read(&path).unwrap(), relocated);
-}
-
-#[derive(Clone, Copy, Debug)]
-pub(crate) enum ReadBackend {
-    Buffered,
-    Bytes,
-    Source,
-    Streaming,
-}
-
-impl ReadBackend {
-    pub(crate) fn open(self, path: &Path) -> File {
-        self.try_open(path).unwrap()
-    }
-
-    fn try_open(self, path: &Path) -> Result<File, Error> {
-        match self {
-            Self::Buffered => File::open(path),
-            Self::Bytes => File::from_bytes(std::fs::read(path).unwrap()),
-            Self::Source => {
-                File::from_source(ReadSeekSource::new(std::fs::File::open(path).unwrap()).unwrap())
-            }
-            Self::Streaming => File::open_streaming(path),
-        }
-    }
 }
 
 /// The size MATLAB uses, and the one every `.mat` this crate writes carries.

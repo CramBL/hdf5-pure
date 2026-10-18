@@ -1,12 +1,10 @@
 #![cfg(feature = "hdf5")]
-use std::path::Path;
-
 use hdf5::dataset::Layout as CLayout;
 use hdf5::plist::file_create::Sizeof;
 use hdf5::types::VarLenUnicode;
 use hdf5_pure::AttrValue;
-use hdf5_pure::File;
 use rstest::rstest;
+use test_util_hdf5::reader::ReadBackend;
 
 use super::global_heap_framing;
 use super::global_heap_framing::STRING_COUNT;
@@ -15,7 +13,7 @@ use super::global_heap_framing::STRING_COUNT;
 fn hdf5_pure_reads_the_strings_libhdf5_writes(
     #[values(Sizeof::Bytes2, Sizeof::Bytes4, Sizeof::Bytes8)] sizeof_size: Sizeof,
     #[values(0, USERBLOCK)] userblock: u64,
-    #[values(Backend::Buffered, Backend::Streaming)] backend: Backend,
+    #[values(ReadBackend::Buffered, ReadBackend::Streaming)] backend: ReadBackend,
 ) {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("vlen.h5");
@@ -46,7 +44,7 @@ fn hdf5_pure_reads_the_strings_libhdf5_writes(
         file.close().unwrap();
     }
 
-    let file = backend.open(&path);
+    let file = backend.open(&path).unwrap();
     let read: Vec<(&str, Vec<String>)> = ["contiguous", "chunked", "compact"]
         .into_iter()
         .map(|name| (name, file.dataset(name).unwrap().read_string().unwrap()))
@@ -136,25 +134,6 @@ fn a_repack_preserves_the_sequences_libhdf5_writes(
             .unwrap(),
         labelled
     );
-}
-
-/// The way a [`File`] reads the file it opens.
-#[derive(Clone, Copy, Debug)]
-enum Backend {
-    /// [`File::open`], which reads the file into memory.
-    Buffered,
-    /// [`File::open_streaming`], which reads metadata and data on demand.
-    Streaming,
-}
-
-impl Backend {
-    fn open(self, path: &Path) -> File {
-        match self {
-            Self::Buffered => File::open(path),
-            Self::Streaming => File::open_streaming(path),
-        }
-        .unwrap()
-    }
 }
 
 const USERBLOCK: u64 = 512;
