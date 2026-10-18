@@ -7,6 +7,7 @@
 use hdf5_pure::{Dataset, Error, File, FileBuilder, FormatError, Group, Object};
 use rstest::rstest;
 use tempfile::tempdir;
+use test_util::fuzz::fixture_with_recorded_extent;
 
 /// Returns a file holding `/b`, `/a/b`, `/a/mytype` and `/a/inner`, where `/b` reads 2 and `/a/b`
 /// reads 1, so that a path resolved from the root and the same path resolved from `a` reach
@@ -270,8 +271,7 @@ fn a_group_rejected_as_a_dataset_is_reported_the_same_way_before_and_after_a_com
 /// The fixture's one link has an empty name, which no path spells.
 #[test]
 fn a_link_whose_name_is_no_path_component_is_listed_and_not_opened() {
-    let bytes =
-        super::fuzz_regressions::fixture_with_recorded_extent("oom_chunked_string_huge_elem.h5");
+    let bytes = fixture_with_recorded_extent("oom_chunked_string_huge_elem.h5");
     let file = File::from_bytes(bytes).unwrap();
     let root = file.root();
 

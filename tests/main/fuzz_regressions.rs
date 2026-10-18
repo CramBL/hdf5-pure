@@ -9,8 +9,7 @@ use std::io::Cursor;
 
 use hdf5_pure::{Error, File, FormatError, Group, ReadSeekSource};
 use rstest::rstest;
-use test_util::bytes;
-use test_util::superblock::v0::Fields;
+use test_util::fuzz::fixture_with_recorded_extent;
 
 #[rstest]
 #[case::buffered(false)]
@@ -102,21 +101,6 @@ fn zero_width_element_type_is_refused_not_divided_by() {
             other => panic!("{name}: expected ZeroSizedDatatype for class 3, got {other:?}"),
         }
     }
-}
-
-pub(super) fn fixture_with_recorded_extent(filename: &str) -> Vec<u8> {
-    let mut image = std::fs::read(format!("tests/data/fuzz/{filename}")).unwrap();
-    let Fields {
-        widths,
-        base_address,
-        eof_address_at,
-        root_header_address: _,
-    } = Fields::read(&image, 0);
-    assert_eq!(base_address, 0);
-    let stored_eof = bytes::uint_at(&image, eof_address_at, widths.offset);
-    assert!(stored_eof >= image.len() as u64);
-    image.resize(usize::try_from(stored_eof).unwrap(), 0);
-    image
 }
 
 /// Returns the first dataset reachable from `group`, driving the by-name entry

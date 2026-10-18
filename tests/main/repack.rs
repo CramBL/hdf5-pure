@@ -10,6 +10,7 @@ use hdf5_pure::{
 use hdf5_pure_core::__private::BaseAddressExt;
 use rstest::rstest;
 use test_util::file_space_info;
+use test_util::fuzz::fixture_with_recorded_extent;
 use test_util::widths::Widths;
 use test_util::{superblock, temp};
 use test_util_hdf5::dataset::{Filter, Unlimited};
@@ -954,7 +955,7 @@ fn a_source_link_whose_name_is_not_a_path_component_is_rejected() {
     let src = temp::temp_path("hdf5_pure_repack_nameless_link_src.h5");
     std::fs::write(
         &src,
-        super::fuzz_regressions::fixture_with_recorded_extent("oom_chunked_string_huge_elem.h5"),
+        fixture_with_recorded_extent("oom_chunked_string_huge_elem.h5"),
     )
     .unwrap();
     let err = repack(&src, &dst, &RepackOptions::new()).unwrap_err();
