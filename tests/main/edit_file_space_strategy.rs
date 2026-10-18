@@ -396,8 +396,6 @@ fn sub_threshold_extents_that_end_the_file_are_given_back_in_one_commit() {
     b.create_dataset("c").with_i32_data(&[3; 100]);
     b.with_file_space_strategy(FileSpaceStrategy::FsmAggr, false, THRESHOLD);
     b.write(&path).unwrap();
-    let retained_end = 5_359;
-
     let file = File::open_rw(&path).unwrap();
     file.root().delete("b").unwrap();
     file.commit().unwrap();
@@ -407,6 +405,13 @@ fn sub_threshold_extents_that_end_the_file_are_given_back_in_one_commit() {
         })
         .unwrap();
     file.commit().unwrap();
+    let ownership = file.__space_ownership().unwrap();
+    assert!(ownership.analysis_complete);
+    let (retained_end, _) = ownership
+        .reusable_free_space
+        .into_iter()
+        .find(|&(start, len)| start + len == ownership.logical_size)
+        .unwrap();
     for path in ["x", "y"] {
         file.root()
             .create_dataset(path, |b| {

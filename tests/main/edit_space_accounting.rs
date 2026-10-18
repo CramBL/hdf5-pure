@@ -10,6 +10,7 @@
 
 use hdf5_pure::{File, FileBuilder};
 use tempfile::tempdir;
+use test_util::range;
 use test_util_hdf5::{
     dataset::{Filter, Unlimited},
     file_space,
@@ -206,17 +207,6 @@ fn persisting_session_seeds_reusable_free_on_open() {
     file_space::assert_space_accounting_consistent(&acct);
 }
 
-/// A relocating overwrite leaves three adjacent things free — the superseded
-/// root group header, the dataset's old object header, and its old chunk storage
-/// — and all three are reclaimed, so they coalesce into a single reusable region
-/// rather than leaving the dataset's header stranded between the other two
-/// (issue #317's refactor carries that header's address on the write plan; before
-/// it, the reclaim loop re-derived it with a second path lookup).
-///
-/// The single region is the assertion that bites: leaving the dataset's header
-/// unreclaimed still reports free space, just less of it and in two pieces. It
-/// is one-sided — freeing *too much* would also coalesce — so the read-back
-/// below is what stands against that direction.
 #[test]
 fn a_relocating_overwrite_reclaims_the_old_header_with_its_storage() {
     let dir = tempdir().unwrap();
@@ -230,6 +220,8 @@ fn a_relocating_overwrite_reclaims_the_old_header_with_its_storage() {
     let original_end = std::fs::metadata(&path).unwrap().len();
 
     let session = File::open_rw(&path).unwrap();
+    let original = session.__space_ownership().unwrap();
+    assert!(original.analysis_complete);
     let incompressible: Vec<i32> = (0..64)
         .map(|i: i32| i.wrapping_mul(0x9E37_79B1u32 as i32))
         .collect();
@@ -244,14 +236,26 @@ fn a_relocating_overwrite_reclaims_the_old_header_with_its_storage() {
 
     let acct = session.space_accounting().unwrap();
     file_space::assert_space_accounting_consistent(&acct);
+    for (start, len) in original
+        .live_metadata_space
+        .into_iter()
+        .chain(original.live_raw_space)
+        .filter(|&(start, _)| start != 0)
+    {
+        assert_eq!(
+            range::covered_len(&acct.reusable_free_space, &(start..start + len)),
+            len,
+            "old allocation {start}..{} is not fully reclaimed: {:?}",
+            start + len,
+            acct.reusable_free_space,
+        );
+    }
     assert_eq!(
         acct.reusable_free_space
             .iter()
             .filter(|&&(start, _)| start < original_end)
             .count(),
-        1,
-        "the vacated header and chunk storage are adjacent and must coalesce: {:?}",
-        acct.reusable_free_space
+        2,
     );
 
     drop(session);

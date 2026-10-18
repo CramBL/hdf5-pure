@@ -26,11 +26,17 @@ use test_util_hdf5::aggregation::Workload;
 use test_util_hdf5::file_space;
 
 #[rstest]
-fn libhdf5_reads_and_edits_an_aggregated_creation(#[values(0, 512)] userblock: u64) {
+fn libhdf5_reads_and_edits_an_aggregated_creation(
+    #[values(0, 512)] userblock: u64,
+    #[values(None, Some(FileSpaceStrategy::Aggr), Some(FileSpaceStrategy::FsmAggr))]
+    strategy: Option<FileSpaceStrategy>,
+) {
     let directory = tempdir().unwrap();
     let path = directory.path().join("created.h5");
     let mut builder = FileBuilder::new();
-    builder.with_file_space_strategy(FileSpaceStrategy::Aggr, true, 9);
+    if let Some(strategy) = strategy {
+        builder.with_file_space_strategy(strategy, strategy == FileSpaceStrategy::Aggr, 9);
+    }
     builder.with_userblock(userblock);
     builder.set_attr("huge", AttrValue::AsciiString("h".repeat(70_000)));
     for index in 0..9 {
@@ -65,7 +71,15 @@ fn libhdf5_reads_and_edits_an_aggregated_creation(#[values(0, 512)] userblock: u
                 .unwrap()
                 .get_file_space_strategy()
                 .unwrap(),
-            AGGR
+            if strategy == Some(FileSpaceStrategy::Aggr) {
+                AGGR
+            } else {
+                CStrategy::FreeSpaceManager {
+                    paged: false,
+                    persist: false,
+                    threshold: if strategy.is_some() { 9 } else { 1 },
+                }
+            }
         );
         assert_eq!(file.free_space(), 0);
         assert_eq!(

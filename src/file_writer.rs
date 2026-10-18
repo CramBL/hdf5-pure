@@ -1290,9 +1290,11 @@ impl FileWriter {
     /// and the default threshold of 1. `H5Pset_file_space_strategy` ignores both for those
     /// strategies too.
     ///
-    /// Under [`FileSpaceStrategy::Aggr`], the writer uses separate metadata and raw aggregates
-    /// and releases their unused tails at EOA before emission. Interior unused space remains
-    /// allocated without a free-space manager.
+    /// Under [`FileSpaceStrategy::Aggr`] or [`FileSpaceStrategy::FsmAggr`] with `persist = false`,
+    /// the writer uses separate metadata and raw aggregates and releases unused tails at EOA
+    /// before emission. This also applies when the strategy is unset. Under `FsmAggr`, the
+    /// writer reuses abandoned aggregate spare subject to `threshold` before reserving more
+    /// aggregate space. Unused interior space remains allocated without persisted free sections.
     pub fn with_file_space_strategy(
         &mut self,
         strategy: FileSpaceStrategy,
@@ -1471,9 +1473,17 @@ impl FileWriter {
     pub(crate) fn finish_to_sink<S: ByteSink>(self, sink: &mut S) -> Result<(), FormatError> {
         let libver = self.resolve_libver()?;
         let file_space = self.file_space_config()?;
-        let aggregated =
-            file_space.is_some_and(|config| config.strategy == FileSpaceStrategy::Aggr);
-        let mut allocation = FileAllocation::new(SUPERBLOCK_SIZE as u64, aggregated);
+        let reuse_threshold = match file_space {
+            None => Some(DEFAULT_THRESHOLD),
+            Some(config) if config.strategy == FileSpaceStrategy::FsmAggr && !config.persist => {
+                Some(config.threshold)
+            }
+            Some(_) => None,
+        };
+        let aggregated = reuse_threshold.is_some()
+            || file_space.is_some_and(|config| config.strategy == FileSpaceStrategy::Aggr);
+        let mut allocation =
+            FileAllocation::new(SUPERBLOCK_SIZE as u64, aggregated, reuse_threshold);
 
         // File-space settings are recorded in a File Space Info message, which
         // arrived with HDF5 1.10. Refused beside the bounds themselves rather
@@ -2901,7 +2911,7 @@ impl FileWriter {
             Ok(StoredAddress::new(addr))
         };
         if paged.is_some() {
-            allocation = FileAllocation::new(SUPERBLOCK_SIZE as u64 + early_gcol_size, false);
+            allocation = FileAllocation::new(SUPERBLOCK_SIZE as u64 + early_gcol_size, false, None);
         }
         let root_group_addr = allocation.reserve(root_oh_size as u64, AllocationClass::Metadata)?;
 
