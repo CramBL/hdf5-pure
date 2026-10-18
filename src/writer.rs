@@ -263,9 +263,12 @@ impl FileBuilder {
     /// whatever the caller passes for `persist` and `threshold`. `H5Pset_file_space_strategy`
     /// ignores both for those strategies too.
     ///
-    /// Under [`FileSpaceStrategy::Aggr`], the writer uses separate metadata and raw aggregates
-    /// with 2048-byte refill blocks. Unused tails at the end of allocation are released before
-    /// output, while interior unused space remains allocated without a free-space manager.
+    /// Under [`FileSpaceStrategy::Aggr`] or [`FileSpaceStrategy::FsmAggr`] with `persist = false`,
+    /// the writer uses separate metadata and raw aggregates with 2048-byte refill blocks. This
+    /// also applies when the strategy is unset. Under `FsmAggr`, the writer reuses abandoned
+    /// aggregate spare subject to `threshold` before reserving more aggregate space. Unused
+    /// tails at the end of allocation are released before output, while unused interior space
+    /// remains allocated without persisted free sections.
     pub fn with_file_space_strategy(
         &mut self,
         strategy: FileSpaceStrategy,
@@ -598,7 +601,10 @@ mod streaming_tests {
                 Arc::clone(chunk_calls),
                 None,
             );
-            if strategy.is_some_and(|(strategy, _)| strategy == FileSpaceStrategy::Aggr) {
+            if strategy.is_none_or(|(strategy, persist)| {
+                strategy == FileSpaceStrategy::Aggr
+                    || (strategy == FileSpaceStrategy::FsmAggr && !persist)
+            }) {
                 builder.set_attr("huge", AttrValue::AsciiString("h".repeat(70_000)));
             }
             builder
@@ -652,10 +658,14 @@ mod streaming_tests {
     fn aggregated_creation_streams_final_addresses(
         #[case] workload: usize,
         #[values(0, 512)] userblock: u64,
+        #[values(None, Some(FileSpaceStrategy::Aggr), Some(FileSpaceStrategy::FsmAggr))]
+        strategy: Option<FileSpaceStrategy>,
     ) {
         let build = || {
             let mut builder = FileBuilder::new();
-            builder.with_file_space_strategy(FileSpaceStrategy::Aggr, true, 9);
+            if let Some(strategy) = strategy {
+                builder.with_file_space_strategy(strategy, strategy == FileSpaceStrategy::Aggr, 9);
+            }
             builder.with_userblock(userblock);
             match workload {
                 0 => {
@@ -694,11 +704,14 @@ mod streaming_tests {
         let length = bytes.len() as u64;
         let file = crate::reader::File::from_bytes(bytes).unwrap();
         assert_eq!(file.superblock().eof_address, length);
-        let info = file.file_space_info().unwrap();
-        assert_eq!(
-            (info.strategy, info.persist, info.manager_addrs.as_slice()),
-            (FileSpaceStrategy::Aggr, false, [].as_slice())
-        );
+        assert_eq!(file.file_space_strategy(), strategy);
+        if let Some(strategy) = strategy {
+            let info = file.file_space_info().unwrap();
+            assert_eq!(
+                (info.strategy, info.persist, info.manager_addrs.as_slice()),
+                (strategy, false, [].as_slice())
+            );
+        }
         assert_eq!(file.persisted_free_space().unwrap(), []);
         match workload {
             0 => assert_eq!(file.root().groups().unwrap().len(), 40),
@@ -773,9 +786,13 @@ mod streaming_tests {
     fn aggregated_creation_reports_provider_errors(
         #[case] short: usize,
         #[values(false, true)] streamed: bool,
+        #[values(None, Some(FileSpaceStrategy::Aggr), Some(FileSpaceStrategy::FsmAggr))]
+        strategy: Option<FileSpaceStrategy>,
     ) {
         let mut builder = FileBuilder::new();
-        builder.with_file_space_strategy(FileSpaceStrategy::Aggr, false, 1);
+        if let Some(strategy) = strategy {
+            builder.with_file_space_strategy(strategy, false, 1);
+        }
         let calls = Calls::default();
         builder.create_dataset("data").with_produced_data(
             crate::type_builders::make_u8_type(),
@@ -804,8 +821,11 @@ mod streaming_tests {
         assert_eq!(*calls.lock().unwrap(), (0..=short).collect::<Vec<_>>());
     }
 
-    #[test]
-    fn aggregated_creation_reports_sink_errors() {
+    #[rstest::rstest]
+    fn aggregated_creation_reports_sink_errors(
+        #[values(None, Some(FileSpaceStrategy::Aggr), Some(FileSpaceStrategy::FsmAggr))]
+        strategy: Option<FileSpaceStrategy>,
+    ) {
         struct BrokenOutput;
         impl Write for BrokenOutput {
             fn write(&mut self, _: &[u8]) -> io::Result<usize> {
@@ -816,7 +836,9 @@ mod streaming_tests {
             }
         }
         let mut builder = FileBuilder::new();
-        builder.with_file_space_strategy(FileSpaceStrategy::Aggr, false, 1);
+        if let Some(strategy) = strategy {
+            builder.with_file_space_strategy(strategy, false, 1);
+        }
         builder.create_dataset("data").with_u8_data(&[17; 19]);
         let error = builder.finish_to(BrokenOutput).unwrap_err();
         let Error::Io(error) = error else {

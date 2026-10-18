@@ -8,6 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- `FileBuilder` uses separate metadata and raw aggregates for new files under `FsmAggr` with persistence disabled, including when the strategy is unset. Abandoned spare is reused during construction subject to the free-section threshold, while unused interior space remains allocated after output ([#787](https://github.com/CramBL/hdf5-pure/pull/787)).
 - `repack_into` repacks an open `File` into any `Write` sink, such as an in-memory buffer, and `repack_to_path` repacks it into a new file at a path. Both run the fidelity checks of `repack` ([#772](https://github.com/CramBL/hdf5-pure/pull/772)).
 - `FileBuilder::with_file_space_strategy` uses separate metadata and raw aggregates for new files under `Aggr`. Unused tails at the end of allocation are released before output, while interior unused reservations remain allocated without a free-space manager ([#785](https://github.com/CramBL/hdf5-pure/pull/785)).
 - `File::open_rw` uses separate metadata and raw aggregates for staged edits and immediate appends in persistent `FsmAggr` sessions. Active reservations are excluded from persisted free space until released ([#783](https://github.com/CramBL/hdf5-pure/pull/783)).

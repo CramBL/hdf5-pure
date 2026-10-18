@@ -5,6 +5,7 @@ use hdf5_pure::AttrValue;
 use hdf5_pure::Error;
 use hdf5_pure::File;
 use hdf5_pure::FileBuilder;
+use hdf5_pure::FileSpaceStrategy;
 use hdf5_pure::FormatError;
 use hdf5_pure::SpaceOwnership;
 use hdf5_pure::StoredAddress;
@@ -12,6 +13,7 @@ use hdf5_pure_core::__private::StoredAddressExt;
 use hdf5_pure_format::__private as format;
 use hdf5_pure_format::__private::AttributeInfoMessage;
 use hdf5_pure_format::__private::OffsetWidth;
+use hdf5_pure_space::__private::AGGREGATE_BLOCK_SIZE;
 use rstest::rstest;
 use test_util::attribute::Attribute;
 use test_util::data_layout;
@@ -40,6 +42,7 @@ fn a_contiguous_i32_dataset_has_complete_ownership(
 ) {
     let path = temp::temp_path("supported_ownership.h5");
     let mut builder = FileBuilder::new();
+    builder.with_file_space_strategy(FileSpaceStrategy::FsmAggr, true, 1);
     builder.with_userblock(userblock);
     builder.create_dataset("d").with_i32_data(&[1, 2, 3]);
     builder.write(&path).unwrap();
@@ -54,6 +57,46 @@ fn a_contiguous_i32_dataset_has_complete_ownership(
 }
 
 #[rstest]
+fn default_creation_leaves_only_unused_metadata_spare_unclassified(
+    #[values(0, USERBLOCK_SIZE)] userblock: u64,
+) {
+    let path = temp::temp_path("default_ownership.h5");
+    let mut builder = FileBuilder::new();
+    builder.with_userblock(userblock);
+    builder.create_dataset("d").with_i32_data(&[1, 2, 3]);
+    builder.write(&path).unwrap();
+    let file = File::open_rw(&path).unwrap();
+    let ownership = file.__space_ownership().unwrap();
+    let metadata_end = ownership
+        .live_metadata_space
+        .iter()
+        .map(|&(start, len)| start + len)
+        .max()
+        .unwrap();
+    let data = file_space::contiguous_extent(&file, "d");
+    assert!(ownership.analysis_complete);
+    assert_eq!(ownership.live_raw_space, [(data.start, 12)]);
+    assert_eq!(ownership.free_space_manager_space, []);
+    assert_eq!(ownership.reusable_free_space, []);
+    assert_eq!(ownership.trailing_slack_space, []);
+    assert_eq!(
+        ownership.unclassified_space,
+        [(metadata_end, data.start - metadata_end)]
+    );
+    let superblock_len = format::serialize_superblock(file.superblock())
+        .unwrap()
+        .len() as u64;
+    assert_eq!(
+        data.start,
+        userblock + superblock_len + AGGREGATE_BLOCK_SIZE
+    );
+    assert_eq!(ownership.logical_size, data.end);
+    assert_eq!(ownership.physical_size, data.end);
+    assert_eq!(file.dataset("d").unwrap().read_i32().unwrap(), [1, 2, 3]);
+    file.close().unwrap();
+}
+
+#[rstest]
 #[case::dataset(true, 0)]
 #[case::compact_attribute(false, 0)]
 #[case::dense_attribute(false, 12)]
@@ -63,6 +106,7 @@ fn variable_length_collections_are_live_raw_space(
 ) {
     let path = temp::temp_path("variable_length_ownership.h5");
     let mut builder = FileBuilder::new();
+    builder.with_file_space_strategy(FileSpaceStrategy::FsmAggr, true, 1);
     if dataset {
         builder
             .create_dataset("d")
