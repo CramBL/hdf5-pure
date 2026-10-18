@@ -15,11 +15,15 @@ pub mod file_builder;
 pub mod file_space;
 pub mod fixed_string;
 pub mod fixtures;
+#[cfg(feature = "hdf5")]
+pub mod global_heap;
+pub mod global_heap_fixture;
 #[cfg(feature = "__hdf5-1.10")]
 pub mod group_filter;
 pub mod lock;
 pub mod mat_file;
 pub mod paged;
+pub mod reader;
 pub mod session;
 #[cfg(feature = "__hdf5-1.10")]
 pub mod space_ownership;

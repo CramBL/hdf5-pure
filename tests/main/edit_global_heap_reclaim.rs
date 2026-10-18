@@ -17,11 +17,10 @@ use test_util::object_header::MessageType;
 use test_util::temp;
 use test_util::widths::Widths;
 use test_util_hdf5::file_space;
+use test_util_hdf5::global_heap_fixture;
+use test_util_hdf5::global_heap_fixture::Fixture;
+use test_util_hdf5::global_heap_fixture::Form;
 use test_util_hdf5::paged;
-
-use crate::global_heap_fixture;
-use crate::global_heap_fixture::Fixture;
-use crate::global_heap_fixture::Form;
 
 #[rstest]
 #[case::contiguous_dataset(Written::Contiguous)]

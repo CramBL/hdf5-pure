@@ -7,8 +7,7 @@ use hdf5::types::VarLenUnicode;
 use hdf5_pure_format::__private::LengthWidth;
 use rstest::rstest;
 use test_util::global_heap;
-
-use super::global_heap_framing;
+use test_util_hdf5::global_heap as libhdf5_heap;
 
 #[rstest]
 #[case::two_byte_lengths(Sizeof::Bytes2, LengthWidth::Two)]
@@ -73,7 +72,7 @@ fn hdf5_pure_reads_the_string_from_an_encoded_collection_in_a_libhdf5_file(
 /// Returns a file in which libhdf5 writes [`PAYLOAD`] to a scalar variable-length string dataset,
 /// with lengths `sizeof_size` wide.
 fn libhdf5_file(path: &Path, sizeof_size: Sizeof) -> Vec<u8> {
-    let file = global_heap_framing::create_libhdf5_file(path, sizeof_size, 0);
+    let file = libhdf5_heap::create_libhdf5_file(path, sizeof_size, 0);
     file.new_dataset::<VarLenUnicode>()
         .shape(())
         .create("string")

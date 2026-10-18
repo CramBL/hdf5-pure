@@ -1342,7 +1342,7 @@ mod huge_link_tests {
     /// link message exceeds the heap's managed-object limit and is stored as a
     /// huge object. Written by `crates/crosscheck/tests/main/c_test_data.rs`.
     fn file_with_huge_links(count: usize) -> Vec<u8> {
-        std::fs::read(crate::test_data::path(&format!("c/huge_links_{count}.h5"))).unwrap()
+        std::fs::read(test_util::data(&format!("c/huge_links_{count}.h5"))).unwrap()
     }
 
     /// Group `g`'s dense-link storage: its info message, its heap address, and

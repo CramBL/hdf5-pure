@@ -15,6 +15,7 @@ use rstest::rstest;
 use tempfile::tempdir;
 use test_util::bytes::sole_signature;
 use test_util::checksum::restamp;
+use test_util_hdf5::reader::ReadBackend;
 
 #[derive(Clone, Copy, Debug)]
 struct Fixture {
@@ -69,21 +70,6 @@ impl Fixture {
         (0..self.len)
             .map(|i| i32::try_from(i).unwrap() % 7 + 1)
             .collect()
-    }
-}
-
-#[derive(Clone, Copy, Debug)]
-enum Backend {
-    Buffered,
-    Streaming,
-}
-
-impl Backend {
-    fn open(self, path: &Path) -> File {
-        match self {
-            Self::Buffered => File::open(path).unwrap(),
-            Self::Streaming => File::open_streaming(path).unwrap(),
-        }
     }
 }
 
@@ -163,7 +149,7 @@ fn pure_reads_the_fixed_array_libhdf5_writes(
     #[values((Sizeof::Bytes2, Sizeof::Bytes2), (Sizeof::Bytes4, Sizeof::Bytes4), (Sizeof::Bytes8, Sizeof::Bytes8))]
     widths: (Sizeof, Sizeof),
     #[values(0, 512)] userblock: u64,
-    #[values(Backend::Buffered, Backend::Streaming)] backend: Backend,
+    #[values(ReadBackend::Buffered, ReadBackend::Streaming)] backend: ReadBackend,
 ) {
     let (sizeof_addr, sizeof_size) = widths;
     let dir = tempdir().unwrap();
@@ -177,7 +163,7 @@ fn pure_reads_the_fixed_array_libhdf5_writes(
         userblock,
     );
 
-    let file = backend.open(&path);
+    let file = backend.open(&path).unwrap();
     let dataset = file.dataset("d").unwrap();
     assert_eq!(dataset.chunk_index().unwrap(), Some(ChunkIndex::FixedArray));
     assert_eq!(dataset.read_i32().unwrap(), fixture.expected());
@@ -194,7 +180,7 @@ enum Corruption {
 fn pure_rejects_a_corrupted_fixed_array_libhdf5_writes(
     #[values(Corruption::HeaderVersion, Corruption::DataBlockOwner)] corruption: Corruption,
     #[values(64, 3_000)] len: usize,
-    #[values(Backend::Buffered, Backend::Streaming)] backend: Backend,
+    #[values(ReadBackend::Buffered, ReadBackend::Streaming)] backend: ReadBackend,
 ) {
     let dir = tempdir().unwrap();
     let path = dir.path().join("fixed_array.h5");
@@ -241,6 +227,7 @@ fn pure_rejects_a_corrupted_fixed_array_libhdf5_writes(
 
     let err = backend
         .open(&path)
+        .unwrap()
         .dataset("d")
         .unwrap()
         .read_i32()

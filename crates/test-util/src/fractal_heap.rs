@@ -196,6 +196,33 @@ fn decode_hex(digits: &str) -> Vec<u8> {
         .collect()
 }
 
+/// Returns a heap header with root filter metadata and an updated checksum.
+///
+/// The filter metadata holds the encoded length of `pipeline`, the root direct block's filtered
+/// size `root_size`, its filter mask `mask`, and the encoded `pipeline` bytes.
+///
+/// # Panics
+///
+/// Panics if `header` is too short for its checksum or filter metadata, if `pipeline` exceeds
+/// [`u16::MAX`] bytes, or if `root_size` does not fit the file's length width.
+pub fn with_filtering(
+    header: &[u8],
+    widths: Widths,
+    root_size: u64,
+    mask: u32,
+    pipeline: &[u8],
+) -> Vec<u8> {
+    let mut filtered = header[..header.len() - checksum::CHECKSUM].to_vec();
+    let encoded_len = u16::try_from(pipeline.len()).expect("fixture pipeline fits u16");
+    filtered[FILTER_INFO_LEN_AT..FILTER_INFO_LEN_AT + 2]
+        .copy_from_slice(&encoded_len.to_le_bytes());
+    bytes::push_uint(&mut filtered, root_size, widths.length);
+    filtered.extend_from_slice(&mask.to_le_bytes());
+    filtered.extend_from_slice(pipeline);
+    checksum::append(&mut filtered);
+    filtered
+}
+
 /// Returns a file image with a fractal heap of one managed object: the header at offset 0, and
 /// the root direct block at offset 256, with `object` after the prefix of the block.
 ///
@@ -384,6 +411,19 @@ pub const DIRECT_BLOCK_SIGNATURE: &[u8; 4] = b"FHDB";
 pub const INDIRECT_BLOCK_SIGNATURE: &[u8; 4] = b"FHIB";
 
 const VERSION: u8 = 0;
+
+/// The version of a fractal heap direct block, as defined in "Fractal Heap" of the format
+/// specification, version 4.0.
+pub const BLOCK_VERSION: u8 = VERSION;
+
+/// The position of the owning heap's address in an `FHDB` direct block.
+pub const DIRECT_BLOCK_OWNER_AT: usize = DIRECT_BLOCK_SIGNATURE.len() + 1;
+/// The position of the checksum in fixture direct blocks with eight-byte addresses and
+/// two-byte block offsets.
+pub const DIRECT_BLOCK_CHECKSUM_AT: usize = DIRECT_BLOCK_OWNER_AT + 8 + 2;
+/// The position of the payload in a direct block with a checksum, eight-byte addresses,
+/// and two-byte block offsets.
+pub const DIRECT_BLOCK_DATA_AT: usize = DIRECT_BLOCK_CHECKSUM_AT + checksum::CHECKSUM;
 
 /// Byte offsets below are for the eight-byte lengths every file these readers
 /// are pointed at carries.

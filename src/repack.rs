@@ -2437,7 +2437,7 @@ mod attribute_fidelity_tests {
     /// committed copy has to hold them, and `HDF5_PURE_UPDATE_TEST_DATA` rewrites
     /// it.
     fn assert_fixture_holds(src: &Path, exotic: &[AttributeMessage]) {
-        let fixture = crate::test_data::path("pure/exotic_attributes.h5");
+        let fixture = test_util::data("pure/exotic_attributes.h5");
         if std::env::var_os(crate::test_data::UPDATE).is_some() {
             std::fs::create_dir_all(fixture.parent().unwrap()).unwrap();
             std::fs::copy(src, &fixture).unwrap();

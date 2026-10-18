@@ -4,8 +4,7 @@ use hdf5::file::LibraryVersion;
 use rstest::rstest;
 use tempfile::tempdir;
 use test_util::superblock;
-
-use crate::userblock_base_address::ReadBackend;
+use test_util_hdf5::reader::ReadBackend;
 
 #[rstest]
 fn every_reader_finds_the_superblock_after_a_userblock_libhdf5_wrote(
@@ -49,7 +48,7 @@ fn every_reader_finds_the_superblock_after_a_userblock_libhdf5_wrote(
     );
     assert!(hdf5_pure::is_hdf5(&path).unwrap());
     assert!(hdf5_pure::is_hdf5_bytes(&bytes));
-    let file = backend.open(&path);
+    let file = backend.open(&path).unwrap();
     assert_eq!(file.superblock().version, version);
     assert_eq!(file.superblock().base_address.get(), userblock);
     assert_eq!(file.superblock().eof_address, bytes.len() as u64);

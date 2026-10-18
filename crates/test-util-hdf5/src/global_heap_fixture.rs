@@ -1,3 +1,5 @@
+//! Builds HDF5 images with global heap references and version 2 object headers.
+
 use std::path::Path;
 
 use hdf5_pure::CharacterSet;
@@ -23,20 +25,28 @@ use test_util::superblock::v2::Superblock;
 use test_util::temp;
 use test_util::widths::Widths;
 
-/// Where an object stores the elements that refer to global heap objects.
+/// Selects where an object stores elements that refer to global heap objects.
 #[derive(Clone, Copy, Debug)]
-pub(crate) enum Form {
+pub enum Form {
+    /// Stores global heap references in a compact attribute.
     CompactAttribute,
+    /// Stores global heap references in a compact dataset.
     CompactDataset,
+    /// Stores global heap references in a contiguous dataset.
     ContiguousDataset,
-    /// The fill value of a dataset without data, which holds the first element.
+    /// Stores the first element in the fill value of a dataset without data.
     FillValue,
 }
 
 impl Form {
     /// Returns the header messages of an object that stores `elements` of `datatype` in this
     /// form, and appends the data of a contiguous dataset to the image of `fixture`.
-    pub(crate) fn messages(
+    ///
+    /// # Panics
+    ///
+    /// Panics if the datatype has a zero size, the first element is incomplete, or the fill
+    /// value cannot be serialized.
+    pub fn messages(
         self,
         fixture: &mut Fixture,
         datatype: &Datatype,
@@ -82,15 +92,18 @@ impl Form {
     }
 }
 
-/// A file of version 2 object headers under a version 3 superblock, whose root group refers to
-/// each object through a hard link.
-pub(crate) struct Fixture {
-    pub(crate) image: Image,
+/// Builds a file with version 2 object headers under a version 3 superblock.
+///
+/// The root group refers to each linked object through a hard link.
+pub struct Fixture {
+    /// The bytes of the file, including unlinked global heap collections and object headers.
+    pub image: Image,
     links: Vec<Message>,
 }
 
 impl Fixture {
-    pub(crate) fn new() -> Self {
+    /// Starts a file image with a reserved root object header and a version 3 superblock.
+    pub fn new() -> Self {
         let mut image = Image::new();
         image.place(0, &superblock().build());
         image.place(Self::ROOT as usize, &[0; ROOT_HEADER_SPACE]);
@@ -100,25 +113,34 @@ impl Fixture {
         }
     }
 
-    pub(crate) fn collection(&mut self, objects: &[Object<'_>]) -> u64 {
+    /// Appends a global heap collection and returns its address in the image.
+    pub fn collection(&mut self, objects: &[Object<'_>]) -> u64 {
         self.image
             .append(&global_heap::collection(objects, Widths::EIGHT)) as u64
     }
 
-    pub(crate) fn object(&mut self, link_name: &str, messages: Vec<Message>) {
+    /// Appends an object header and adds a hard link to it from the root group.
+    pub fn object(&mut self, link_name: &str, messages: Vec<Message>) {
         let address = self.append_header(messages);
         self.link(link_name, address);
     }
 
-    pub(crate) fn append_header(&mut self, messages: Vec<Message>) -> u64 {
+    /// Appends an object header without linking it and returns its address.
+    pub fn append_header(&mut self, messages: Vec<Message>) -> u64 {
         self.image.append(&Header::new().messages(messages).build()) as u64
     }
 
-    pub(crate) fn link(&mut self, link_name: &str, address: u64) {
+    /// Adds a hard link from the root group to the object header at `address`.
+    pub fn link(&mut self, link_name: &str, address: u64) {
         self.links.push(hard_link(link_name, address));
     }
 
-    pub(crate) fn liveness(self) -> GlobalHeapLiveness {
+    /// Writes the fixture and returns its [`GlobalHeapLiveness`] analysis.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the fixture cannot be written, opened, inspected, or closed.
+    pub fn liveness(self) -> GlobalHeapLiveness {
         let path = temp::temp_path("liveness_fixture.h5");
         self.write(&path);
         let file = File::open_rw(&path).unwrap();
@@ -127,7 +149,12 @@ impl Fixture {
         liveness
     }
 
-    pub(crate) fn write(mut self, path: &Path) {
+    /// Writes the complete image to `path`, with the root header and superblock finalized.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the root header exceeds the reserved space or the file cannot be written.
+    pub fn write(mut self, path: &Path) {
         let link_info = format::LinkInfoMessage {
             max_creation_order: None,
             fractal_heap_address: None,
@@ -152,34 +179,45 @@ impl Fixture {
     }
 
     /// The address of the root group's object header, directly after the superblock.
-    pub(crate) const ROOT: u64 = 48;
+    pub const ROOT: u64 = 48;
 }
 
-pub(crate) fn superblock() -> Superblock {
+impl Default for Fixture {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Returns a version 3 superblock whose root group uses [`Fixture::ROOT`].
+fn superblock() -> Superblock {
     Superblock::new(Widths::EIGHT)
         .version(SUPERBLOCK_VERSION)
         .root_header_address(Fixture::ROOT)
 }
 
-pub(crate) fn dataset_messages(datatype: &Datatype, space: &[u8]) -> Vec<Message> {
+/// Returns the datatype and dataspace messages of a dataset object header.
+pub fn dataset_messages(datatype: &Datatype, space: &[u8]) -> Vec<Message> {
     vec![
         Message::new(MessageType::DATATYPE, &format::serialize_datatype(datatype)),
         Message::new(MessageType::DATASPACE, space),
     ]
 }
 
-pub(crate) fn hard_link(link_name: &str, address: u64) -> Message {
+/// Returns a hard-link message that points to the object header at `address`.
+pub fn hard_link(link_name: &str, address: u64) -> Message {
     Message::new(
         MessageType::LINK,
         &HardLink::new(link_name, address).build(Widths::EIGHT),
     )
 }
 
-pub(crate) fn reference(len: u32, collection: u64, index: u32) -> Vec<u8> {
+/// Encodes a global heap reference using eight-byte file addresses.
+pub fn reference(len: u32, collection: u64, index: u32) -> Vec<u8> {
     global_heap::reference(len, collection, index, Widths::EIGHT)
 }
 
-pub(crate) fn vlen_string() -> Datatype {
+/// Returns a null-terminated ASCII variable-length string datatype.
+pub fn vlen_string() -> Datatype {
     Datatype::VariableLength {
         is_string: true,
         padding: Some(StringPadding::NullTerminate),
@@ -188,7 +226,12 @@ pub(crate) fn vlen_string() -> Datatype {
     }
 }
 
-pub(crate) fn with_integer(member: Datatype) -> Datatype {
+/// Returns a compound datatype with an `i32` member and a `member` field.
+///
+/// # Panics
+///
+/// Panics if the compound datatype cannot be built.
+pub fn with_integer(member: Datatype) -> Datatype {
     CompoundTypeBuilder::new()
         .field("n", hdf5_pure::make_i32_type())
         .field("v", member)
@@ -196,21 +239,24 @@ pub(crate) fn with_integer(member: Datatype) -> Datatype {
         .unwrap()
 }
 
-pub(crate) fn array_of(base_type: Datatype) -> Datatype {
+/// Returns an array datatype with two elements of `base_type`.
+pub fn array_of(base_type: Datatype) -> Datatype {
     Datatype::Array {
         base_type: Box::new(base_type),
         dimensions: vec![2],
     }
 }
 
-pub(crate) fn object_reference() -> Datatype {
+/// Returns an eight-byte object reference datatype.
+pub fn object_reference() -> Datatype {
     Datatype::Reference {
         size: 8,
         ref_type: ReferenceType::Object,
     }
 }
 
-pub(crate) fn vlen_sequence() -> Datatype {
+/// Returns a variable-length sequence of 32-bit integers.
+pub fn vlen_sequence() -> Datatype {
     Datatype::VariableLength {
         is_string: false,
         padding: None,
@@ -219,9 +265,12 @@ pub(crate) fn vlen_sequence() -> Datatype {
     }
 }
 
-pub(crate) const REFERENCE_SIZE: usize = 16;
-pub(crate) const UNDEFINED_ADDRESS: u64 = u64::MAX;
+/// The size in bytes of a global heap reference with eight-byte addresses.
+pub const REFERENCE_SIZE: usize = 16;
+/// The on-disk value for an undefined eight-byte address.
+pub const UNDEFINED_ADDRESS: u64 = u64::MAX;
 /// The bytes reserved for the root group's object header, which the fixture writes once every
 /// link is known.
-pub(crate) const ROOT_HEADER_SPACE: usize = 512;
-pub(crate) const SUPERBLOCK_VERSION: u8 = 3;
+const ROOT_HEADER_SPACE: usize = 512;
+/// The superblock version written by this fixture.
+const SUPERBLOCK_VERSION: u8 = 3;

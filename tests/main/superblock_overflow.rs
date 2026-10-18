@@ -5,8 +5,7 @@ use hdf5_pure::Source;
 use rstest::rstest;
 use test_util::superblock::v2::Superblock;
 use test_util::widths::Widths;
-
-use super::superblock_addresses::ReadBackend;
+use test_util_hdf5::reader::ReadBackend;
 
 fn overflowing_root_address_file() -> Vec<u8> {
     let mut image = vec![0; 512];

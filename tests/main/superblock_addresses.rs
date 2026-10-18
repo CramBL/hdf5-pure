@@ -1,12 +1,11 @@
 use std::path::Path;
 
-use hdf5_pure::Error;
 use hdf5_pure::File;
 use hdf5_pure::FileBuilder;
 use hdf5_pure::LibVer;
-use hdf5_pure::ReadSeekSource;
 use rstest::rstest;
 use test_util::superblock;
+use test_util_hdf5::reader::ReadBackend;
 
 #[rstest]
 #[case(ReadBackend::Buffered)]
@@ -123,25 +122,4 @@ fn write_fixture(path: &Path, libver: LibVer) {
     outer.add_group(inner.finish());
     builder.add_group(outer.finish());
     builder.write(path).unwrap();
-}
-
-#[derive(Clone, Copy, Debug)]
-pub(super) enum ReadBackend {
-    Buffered,
-    Bytes,
-    Source,
-    Streaming,
-}
-
-impl ReadBackend {
-    pub(super) fn open(self, path: &Path) -> Result<File, Error> {
-        match self {
-            Self::Buffered => File::open(path),
-            Self::Bytes => File::from_bytes(std::fs::read(path).unwrap()),
-            Self::Source => {
-                File::from_source(ReadSeekSource::new(std::fs::File::open(path).unwrap()).unwrap())
-            }
-            Self::Streaming => File::open_streaming(path),
-        }
-    }
 }

@@ -47,7 +47,6 @@ mod fill_value;
 mod fixed_strings;
 mod fuzz_regressions;
 mod generic_element;
-mod global_heap_fixture;
 mod layout_introspection;
 mod lzf_roundtrip;
 mod mat_builder;

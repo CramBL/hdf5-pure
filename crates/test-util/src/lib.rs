@@ -16,6 +16,7 @@ pub mod extensible_array;
 pub mod file_space_info;
 pub mod fractal_heap;
 pub mod free_space;
+pub mod fuzz;
 pub mod global_heap;
 pub mod image;
 pub mod link_message;
@@ -35,6 +36,25 @@ pub fn data(relative: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../tests/data")
         .join(relative)
+}
+
+/// Copies a committed fixture into `dir` for a test that modifies it.
+///
+/// The returned path has the same file name as the committed fixture.
+///
+/// # Panics
+///
+/// Panics if the committed fixture is missing, its path has no file name, or the copy fails.
+pub fn copy_data(relative: &str, dir: &Path) -> PathBuf {
+    let committed = data(relative);
+    assert!(
+        committed.is_file(),
+        "{} is missing; `just test-data::c` writes it",
+        committed.display()
+    );
+    let copy = dir.join(committed.file_name().unwrap());
+    std::fs::copy(&committed, &copy).unwrap();
+    copy
 }
 
 #[track_caller]

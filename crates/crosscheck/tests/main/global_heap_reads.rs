@@ -1,27 +1,24 @@
 #![cfg(feature = "hdf5")]
-use std::path::Path;
-
 use hdf5::dataset::Layout as CLayout;
 use hdf5::plist::file_create::Sizeof;
 use hdf5::types::VarLenUnicode;
 use hdf5_pure::AttrValue;
-use hdf5_pure::File;
 use rstest::rstest;
-
-use super::global_heap_framing;
-use super::global_heap_framing::STRING_COUNT;
+use test_util_hdf5::global_heap as libhdf5_heap;
+use test_util_hdf5::global_heap::STRING_COUNT;
+use test_util_hdf5::reader::ReadBackend;
 
 #[rstest]
 fn hdf5_pure_reads_the_strings_libhdf5_writes(
     #[values(Sizeof::Bytes2, Sizeof::Bytes4, Sizeof::Bytes8)] sizeof_size: Sizeof,
     #[values(0, USERBLOCK)] userblock: u64,
-    #[values(Backend::Buffered, Backend::Streaming)] backend: Backend,
+    #[values(ReadBackend::Buffered, ReadBackend::Streaming)] backend: ReadBackend,
 ) {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("vlen.h5");
     {
-        let file = global_heap_framing::create_libhdf5_file(&path, sizeof_size, userblock);
-        let values: Vec<VarLenUnicode> = global_heap_framing::strings()
+        let file = libhdf5_heap::create_libhdf5_file(&path, sizeof_size, userblock);
+        let values: Vec<VarLenUnicode> = libhdf5_heap::strings()
             .iter()
             .map(|s| s.parse().unwrap())
             .collect();
@@ -46,18 +43,18 @@ fn hdf5_pure_reads_the_strings_libhdf5_writes(
         file.close().unwrap();
     }
 
-    let file = backend.open(&path);
+    let file = backend.open(&path).unwrap();
     let read: Vec<(&str, Vec<String>)> = ["contiguous", "chunked", "compact"]
         .into_iter()
         .map(|name| (name, file.dataset(name).unwrap().read_string().unwrap()))
         .collect();
     assert_eq!(
         read,
-        ["contiguous", "chunked", "compact"].map(|name| (name, global_heap_framing::strings()))
+        ["contiguous", "chunked", "compact"].map(|name| (name, libhdf5_heap::strings()))
     );
     assert_eq!(
         file.root().attrs().unwrap()["labels"],
-        AttrValue::VarLenStringArray(global_heap_framing::strings())
+        AttrValue::VarLenStringArray(libhdf5_heap::strings())
     );
 }
 
@@ -83,7 +80,7 @@ fn a_repack_preserves_the_sequences_libhdf5_writes(
     let sequences: Vec<Vec<i32>> = (0..STRING_COUNT as i32)
         .map(|i| (0..i % 5).map(|j| i * 10 + j).collect())
         .collect();
-    let labelled: Vec<Labelled> = global_heap_framing::strings()
+    let labelled: Vec<Labelled> = libhdf5_heap::strings()
         .iter()
         .zip(&sequences)
         .enumerate()
@@ -97,7 +94,7 @@ fn a_repack_preserves_the_sequences_libhdf5_writes(
         })
         .collect();
     {
-        let file = global_heap_framing::create_libhdf5_file(&source, sizeof_size, userblock);
+        let file = libhdf5_heap::create_libhdf5_file(&source, sizeof_size, userblock);
         let values: Vec<VarLenArray<i32>> = sequences
             .iter()
             .map(|sequence| VarLenArray::from_slice(sequence))
@@ -136,25 +133,6 @@ fn a_repack_preserves_the_sequences_libhdf5_writes(
             .unwrap(),
         labelled
     );
-}
-
-/// The way a [`File`] reads the file it opens.
-#[derive(Clone, Copy, Debug)]
-enum Backend {
-    /// [`File::open`], which reads the file into memory.
-    Buffered,
-    /// [`File::open_streaming`], which reads metadata and data on demand.
-    Streaming,
-}
-
-impl Backend {
-    fn open(self, path: &Path) -> File {
-        match self {
-            Self::Buffered => File::open(path),
-            Self::Streaming => File::open_streaming(path),
-        }
-        .unwrap()
-    }
 }
 
 const USERBLOCK: u64 = 512;
