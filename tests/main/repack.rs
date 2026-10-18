@@ -5,7 +5,7 @@ use hdf5_pure::Error;
 use hdf5_pure::File;
 use hdf5_pure::{
     AttrValue, Datatype, DatatypeByteOrder, FileBuilder, FileSpaceStrategy, LibVer, MaxExtent,
-    RepackOptions, ScaleOffset, repack,
+    RepackOptions, ScaleOffset, repack, repack_into, repack_to_path,
 };
 use hdf5_pure_core::__private::BaseAddressExt;
 use rstest::rstest;
@@ -76,6 +76,80 @@ fn drops_object_and_shrinks_file() {
         vec![1, 2, 3]
     );
     assert!(f.dataset("bulk").is_err());
+}
+
+/// `repack_into` and `repack_to_path` write the bytes `repack` writes.
+#[test]
+fn repack_into_and_repack_to_path_write_the_bytes_repack_writes() {
+    let src = temp::temp_path("hdf5_pure_repack_into_src.h5");
+    let dst = temp::temp_path("hdf5_pure_repack_into_dst.h5");
+    let to_path = temp::temp_path("hdf5_pure_repack_into_to_path.h5");
+    let mut b = FileBuilder::new();
+    b.create_dataset("keep").with_i32_data(&[1, 2, 3]);
+    b.create_dataset("bulk").with_f64_data(&vec![9.0; 4096]);
+    b.write(&src).unwrap();
+    let options = RepackOptions::new().drop_path("bulk");
+
+    repack(&src, &dst, &options).unwrap();
+    let source = File::open(&src).unwrap();
+    let mut bytes = Vec::new();
+    repack_into(&source, &mut bytes, &options).unwrap();
+    repack_to_path(&source, &to_path, &options).unwrap();
+
+    let expected = std::fs::read(&dst).unwrap();
+    assert_eq!(bytes, expected);
+    assert_eq!(std::fs::read(&to_path).unwrap(), expected);
+}
+
+/// A `repack_into` that reports an error writes nothing into its writer.
+#[test]
+fn a_failed_repack_into_writes_nothing() {
+    let src = temp::temp_path("hdf5_pure_repack_into_missing_src.h5");
+    let mut b = FileBuilder::new();
+    b.create_dataset("keep").with_i32_data(&[1, 2, 3]);
+    b.write(&src).unwrap();
+    let source = File::open(&src).unwrap();
+
+    let mut bytes = Vec::new();
+    let err = repack_into(
+        &source,
+        &mut bytes,
+        &RepackOptions::new().drop_path("missing"),
+    )
+    .unwrap_err();
+
+    let Error::RepackUnsupported(reason) = &err else {
+        panic!("expected RepackUnsupported, got {err:?}");
+    };
+    assert_eq!(reason, "drop path does not exist in the source: missing");
+    assert!(bytes.is_empty());
+}
+
+/// Parsing a source as a writer does needs a source opened for writing.
+#[test]
+fn repack_into_a_read_only_source_needs_its_writer_parse_opened_for_writing() {
+    let src = temp::temp_path("hdf5_pure_repack_into_read_only_src.h5");
+    let mut b = FileBuilder::new();
+    b.create_dataset("keep").with_i32_data(&[1, 2, 3]);
+    b.write(&src).unwrap();
+    let source = File::open(&src).unwrap();
+
+    let mut bytes = Vec::new();
+    let err = repack_into(
+        &source,
+        &mut bytes,
+        &RepackOptions::new().reject_unknown_messages_only_a_writer_must_understand(),
+    )
+    .unwrap_err();
+
+    let Error::RepackUnsupported(reason) = &err else {
+        panic!("expected RepackUnsupported, got {err:?}");
+    };
+    assert_eq!(
+        reason,
+        "reject_unknown_messages_only_a_writer_must_understand needs a source opened for writing"
+    );
+    assert!(bytes.is_empty());
 }
 
 #[test]

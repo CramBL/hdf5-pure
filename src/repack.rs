@@ -111,6 +111,7 @@
 //! [#82]: https://github.com/CramBL/hdf5-pure/issues/82
 
 use std::collections::{BTreeSet, HashMap};
+use std::io::Write;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -329,20 +330,93 @@ pub fn repack<P: AsRef<Path>, Q: AsRef<Path>>(
     dst: Q,
     options: &RepackOptions,
 ) -> Result<(), Error> {
-    stage(src.as_ref(), options)?.write(dst)
+    // Open the source for on-demand streaming reads: metadata and one working chunk are
+    // resident at a time, never the whole file.
+    let source = File::open_streaming_with_access_mode(src.as_ref(), options.source_access_mode())?;
+    stage(&source, options)?.write(dst)
 }
 
-/// Stages every object of `src` that `options` keeps in a [`FileBuilder`], with the
+/// Repacks the open file `source` into `writer` with `options`.
+///
+/// Performs what [`repack`](fn@repack) does, with the same fidelity checks and errors. The
+/// difference is that it writes the file front to back into `writer` through
+/// [`FileBuilder::finish_to`], so the output can be an in-memory buffer, a pipe or a file
+/// the caller already holds open.
+///
+/// An [`Error::RepackUnsupported`] is reported before bytes reach `writer`. If an
+/// I/O error happens partway through, it leaves what was already written there.
+///
+/// # Errors
+///
+/// Returns the errors of [`repack`](fn@repack). Returns [`Error::RepackUnsupported`] if
+/// `options` sets [`RepackOptions::reject_unknown_messages_only_a_writer_must_understand`]
+/// and `source` was opened read-only, because its object headers are parsed in the mode the
+/// file was opened in.
+///
+/// # Examples
+///
+/// ```rust
+/// # let dir = tempfile::tempdir()?;
+/// # let path = dir.path().join("data.h5");
+/// # let mut builder = hdf5_pure::FileBuilder::new();
+/// # builder.create_dataset("keep").with_i32_data(&[1, 2, 3]);
+/// # builder.create_dataset("drop").with_f64_data(&[0.0; 64]);
+/// # builder.write(&path)?;
+/// use hdf5_pure::{File, RepackOptions, repack_into};
+///
+/// // Repacks into memory, leaving out `drop`.
+/// let source = File::open_streaming(&path)?;
+/// let mut bytes = Vec::new();
+/// repack_into(&source, &mut bytes, &RepackOptions::new().drop_path("drop"))?;
+///
+/// assert_eq!(File::from_bytes(bytes)?.root().datasets()?, ["keep"]);
+/// # Ok::<(), hdf5_pure::Error>(())
+/// ```
+pub fn repack_into(
+    source: &File,
+    writer: impl Write,
+    options: &RepackOptions,
+) -> Result<(), Error> {
+    check_source_access_mode(source, options)?;
+    stage(source, options)?.finish_to(writer)
+}
+
+/// Repacks the open file `source` into a new file at `path`, applying `options`.
+///
+/// Does what [`repack`](fn@repack) does for a source the caller has already opened.
+///
+/// # Errors
+///
+/// Returns the errors of [`repack_into`].
+pub fn repack_to_path(
+    source: &File,
+    path: impl AsRef<Path>,
+    options: &RepackOptions,
+) -> Result<(), Error> {
+    check_source_access_mode(source, options)?;
+    stage(source, options)?.write(path)
+}
+
+/// Returns an error if `options` requests the source's object headers to be parsed as a
+/// writer parses them and `source` was opened in another mode.
+fn check_source_access_mode(source: &File, options: &RepackOptions) -> Result<(), Error> {
+    if options.source_access_mode() == AccessMode::ReadWrite
+        && source.access_mode() != AccessMode::ReadWrite
+    {
+        return Err(Error::RepackUnsupported(String::from(
+            "reject_unknown_messages_only_a_writer_must_understand needs a source opened for \
+             writing",
+        )));
+    }
+    Ok(())
+}
+
+/// Stages every object of `source` that `options` keeps in a [`FileBuilder`], with the
 /// output format chosen, running every fidelity check before a byte is written.
-fn stage(src: &Path, options: &RepackOptions) -> Result<FileBuilder, Error> {
-    // Open the source for on-demand streaming reads: metadata and one working
-    // chunk are resident at a time, never the whole file. Shared so each streamed
-    // dataset's chunk provider can pull from the same handle during the write
-    // without an extra open.
-    let file = Arc::new(File::open_streaming_with_access_mode(
-        src,
-        options.source_access_mode(),
-    )?);
+fn stage(source: &File, options: &RepackOptions) -> Result<FileBuilder, Error> {
+    // Shared so each streamed dataset's chunk provider can pull from the same handle
+    // during the write without an extra open.
+    let file = Arc::new(source.clone());
 
     // Parse the drop set and remember which of its paths matched an object, so an
     // unmatched drop can be reported as an error.
