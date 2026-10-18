@@ -606,7 +606,7 @@ mod tests {
 
     fn managed_prefix(signature: &[u8; 4], heap_offset: u64) -> Vec<u8> {
         let mut block = signature.to_vec();
-        block.push(test_data::BLOCK_VERSION);
+        block.push(fractal_heap::BLOCK_VERSION);
         block.extend_from_slice(&STORAGE_HEAP_AT.to_le_bytes());
         block.extend_from_slice(&heap_offset.to_le_bytes()[..2]);
         block
@@ -1446,11 +1446,11 @@ mod tests {
         );
         let mut block_a = checksummed_direct_block(0, 128);
         let mut computed = 0;
-        let checksum = test_data::DIRECT_BLOCK_CHECKSUM_AT..test_data::DIRECT_BLOCK_DATA_AT;
+        let checksum = fractal_heap::DIRECT_BLOCK_CHECKSUM_AT..fractal_heap::DIRECT_BLOCK_DATA_AT;
         let stored = u32::from_le_bytes(block_a[checksum.clone()].try_into().unwrap());
         match damage {
             FilteredDamage::WrongOwner => {
-                let owner = test_data::DIRECT_BLOCK_OWNER_AT;
+                let owner = fractal_heap::DIRECT_BLOCK_OWNER_AT;
                 block_a[owner..owner + 8].copy_from_slice(&0x200u64.to_le_bytes());
             }
             FilteredDamage::BadChecksum => {
@@ -1616,7 +1616,7 @@ mod tests {
         }
         .serialize(OffsetWidth::Eight, LengthWidth::Eight)
         .unwrap();
-        let bytes = test_data::with_filtering(
+        let bytes = fractal_heap::with_filtering(
             &unfiltered,
             Widths::EIGHT,
             *root_direct_block_size,
@@ -1629,9 +1629,9 @@ mod tests {
 
     fn checksummed_direct_block(heap_offset: u64, size: usize) -> Vec<u8> {
         let mut block = direct_block(heap_offset, size);
-        block[test_data::DIRECT_BLOCK_DATA_AT..].fill(0x5A);
+        block[fractal_heap::DIRECT_BLOCK_DATA_AT..].fill(0x5A);
         let checksum = crate::checksum::jenkins_lookup3(&block);
-        block[test_data::DIRECT_BLOCK_CHECKSUM_AT..test_data::DIRECT_BLOCK_DATA_AT]
+        block[fractal_heap::DIRECT_BLOCK_CHECKSUM_AT..fractal_heap::DIRECT_BLOCK_DATA_AT]
             .copy_from_slice(&checksum.to_le_bytes());
         block
     }

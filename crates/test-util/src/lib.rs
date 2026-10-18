@@ -37,6 +37,25 @@ pub fn data(relative: &str) -> PathBuf {
         .join(relative)
 }
 
+/// Copies a committed fixture into `dir` for a test that modifies it.
+///
+/// The returned path has the same file name as the committed fixture.
+///
+/// # Panics
+///
+/// Panics if the committed fixture is missing, its path has no file name, or the copy fails.
+pub fn copy_data(relative: &str, dir: &Path) -> PathBuf {
+    let committed = data(relative);
+    assert!(
+        committed.is_file(),
+        "{} is missing; `just test-data::c` writes it",
+        committed.display()
+    );
+    let copy = dir.join(committed.file_name().unwrap());
+    std::fs::copy(&committed, &copy).unwrap();
+    copy
+}
+
 #[track_caller]
 pub(crate) fn read_file(path: &Path) -> Vec<u8> {
     std::fs::read(path).unwrap_or_else(|e| panic!("read {path:?}: {e}"))

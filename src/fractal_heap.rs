@@ -1125,7 +1125,8 @@ mod tests {
         let mut stored = 0;
         let mut computed = 0;
         let heap = FilteredHeap::new(true, test_data::deflate_pipeline(), |block| {
-            let checksum = test_data::DIRECT_BLOCK_CHECKSUM_AT..test_data::DIRECT_BLOCK_DATA_AT;
+            let checksum =
+                fractal_heap::DIRECT_BLOCK_CHECKSUM_AT..fractal_heap::DIRECT_BLOCK_DATA_AT;
             stored = u32::from_le_bytes(block[checksum.clone()].try_into().unwrap());
             *block.last_mut().unwrap() ^= 1;
             let mut zeroed = block.to_vec();
@@ -1243,14 +1244,14 @@ mod tests {
         fn new(indirect: bool, pipeline: FilterPipeline, damage: impl FnOnce(&mut [u8])) -> Self {
             let block_offset = if indirect { FILTERED_BLOCK_SIZE } else { 0 };
             let mut block = fractal_heap::DIRECT_BLOCK_SIGNATURE.to_vec();
-            block.push(test_data::BLOCK_VERSION);
+            block.push(fractal_heap::BLOCK_VERSION);
             block.extend_from_slice(&0u64.to_le_bytes());
             block.extend_from_slice(&u16::try_from(block_offset).unwrap().to_le_bytes());
             block.extend_from_slice(&[0; 4]);
             block.extend_from_slice(b"abc");
             block.resize(usize::try_from(FILTERED_BLOCK_SIZE).unwrap(), 0);
             let checksum = crate::checksum::jenkins_lookup3(&block);
-            block[test_data::DIRECT_BLOCK_CHECKSUM_AT..test_data::DIRECT_BLOCK_DATA_AT]
+            block[fractal_heap::DIRECT_BLOCK_CHECKSUM_AT..fractal_heap::DIRECT_BLOCK_DATA_AT]
                 .copy_from_slice(&checksum.to_le_bytes());
             damage(&mut block);
             let encoded = test_data::encode_block(&block, &pipeline);
@@ -1261,7 +1262,7 @@ mod tests {
             let mut indirect_len = 0;
             if indirect {
                 let mut root = fractal_heap::INDIRECT_BLOCK_SIGNATURE.to_vec();
-                root.push(test_data::BLOCK_VERSION);
+                root.push(fractal_heap::BLOCK_VERSION);
                 root.extend_from_slice(&0u64.to_le_bytes());
                 root.extend_from_slice(&0u16.to_le_bytes());
                 for column in 0..4 {
@@ -1317,7 +1318,7 @@ mod tests {
         fn object_id(&self) -> Vec<u8> {
             let mut id = vec![0];
             let object_at =
-                self.block_offset + u64::try_from(test_data::DIRECT_BLOCK_DATA_AT).unwrap();
+                self.block_offset + u64::try_from(fractal_heap::DIRECT_BLOCK_DATA_AT).unwrap();
             id.extend_from_slice(&u16::try_from(object_at).unwrap().to_le_bytes());
             id.extend_from_slice(&[3, 0, 0, 0]);
             id

@@ -14313,6 +14313,7 @@ mod tests {
     use hdf5_pure_format::__private::ObjectTimes;
     use hdf5_pure_space::__private::PagedSections;
     use rstest::rstest;
+    use test_util::fractal_heap;
     use test_util::object_header::Message;
     use test_util::object_header::v2 as v2_bytes;
     use test_util::object_header::v2::HeaderFlags;
@@ -15192,7 +15193,7 @@ mod tests {
             }
             .serialize(OffsetWidth::Eight, LengthWidth::Eight)
             .unwrap();
-            crate::test_data::with_filtering(
+            fractal_heap::with_filtering(
                 &unfiltered,
                 Widths::EIGHT,
                 u64::try_from(encoded.len()).unwrap(),
@@ -15220,7 +15221,7 @@ mod tests {
     #[test]
     fn deleting_a_c_written_dense_link_group_reclaims_its_whole_subtree() {
         let dir = tempdir().unwrap();
-        let path = crate::test_data::copy("c/huge_links_12.h5", dir.path());
+        let path = test_util::copy_data("c/huge_links_12.h5", dir.path());
         let reader = crate::reader::File::open(&path).unwrap();
         let link_names = reader.group("g").unwrap().datasets().unwrap();
         assert_eq!(link_names.len(), 12);
@@ -16530,7 +16531,7 @@ mod tests {
 
         const PAGE: u64 = 4096;
         let dir = tempdir().unwrap();
-        let path = crate::test_data::copy("c/paged_index.h5", dir.path());
+        let path = test_util::copy_data("c/paged_index.h5", dir.path());
 
         let mut s = WriteEngine::open_with_locking(&path, FileLocking::Enabled).unwrap();
         let page_size = s.space.page_size().expect("a paged file has a page size");
@@ -16697,7 +16698,7 @@ mod tests {
 
         const PAGE: u64 = 512;
         let dir = tempdir().unwrap();
-        let path = crate::test_data::copy("c/generic_large.h5", dir.path());
+        let path = test_util::copy_data("c/generic_large.h5", dir.path());
 
         // The premise: at least one section in the generic-large manager (slot 6)
         // is a sub-page fragment. Read the managers slot by slot, since the
@@ -21245,7 +21246,7 @@ mod tests {
         use tempfile::tempdir;
 
         let dir = tempdir().unwrap();
-        let path = crate::test_data::copy("c/hard_link_undo.h5", dir.path());
+        let path = test_util::copy_data("c/hard_link_undo.h5", dir.path());
 
         let mut s = WriteEngine::open_with_locking(&path, FileLocking::Enabled).unwrap();
         // Fail the commit in its tail, after both writes have landed.
