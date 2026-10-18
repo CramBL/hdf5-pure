@@ -166,10 +166,10 @@
 //! 2048-byte refill blocks. A clean close or drop releases unused
 //! aggregate space at EOA after publishing the shorter EOA with the same root. An uncertain
 //! publication prevents this cleanup. An ordinary read-write session under
-//! `H5F_FSPACE_STRATEGY_FSM_AGGR` with persistence disabled, including a file without a recorded
-//! strategy, tries reusable free space before these aggregates. Persistent `FSM_AGGR` sessions,
-//! SWMR sessions under
-//! `FSM_AGGR`, and PAGE sessions use no classic aggregates.
+//! `H5F_FSPACE_STRATEGY_FSM_AGGR`, including a file without a recorded strategy, tries reusable
+//! free space before these aggregates. Persistent sessions exclude active aggregate spare from
+//! their managers and return surrendered spare through a manager rewrite. SWMR sessions under
+//! `FSM_AGGR` and PAGE sessions use no classic aggregates.
 //! The reuse is crash-safe: it only ever overwrites space
 //! freed by an *earlier*, already-durable commit (never space the current commit
 //! is mid-way through freeing), and truncation happens only after the superblock
@@ -1126,7 +1126,7 @@ pub(crate) struct WriteEngine {
     /// records them.
     space: SessionSpace,
     /// Classic aggregate windows shared by staged edits and immediate appends under
-    /// [`FileSpaceStrategy::Aggr`] or [`FileSpaceStrategy::FsmAggr`] with persistence disabled.
+    /// [`FileSpaceStrategy::Aggr`] or [`FileSpaceStrategy::FsmAggr`].
     ///
     /// An ordinary read-write session without a recorded strategy uses FSM_AGGR with persistence
     /// disabled.
@@ -1344,12 +1344,11 @@ pub(crate) struct WriteEngine {
     ///
     /// [`FileAccessProperties::with_libver_bounds`]: crate::FileAccessProperties::with_libver_bounds
     libver_ceiling: Option<LibVer>,
-    /// The file length when the on-disk free-space managers were last written,
-    /// for a file that persists them. Every immediate in-place append grows the
-    /// file past those managers and leaves them mid-file, so a session that ends
-    /// with `image.len() != fsm_len` owes a rewrite; that is what
-    /// [`finalize_persist`](Self::finalize_persist) settles at close. Meaningless
-    /// (and untouched) when `persist` is `None`.
+    /// The physical file length associated with the persisted free-space state.
+    ///
+    /// [`finalize_persist`](Self::finalize_persist) compares this length with the image length
+    /// and checks unspent append reserves and aggregate state before rewriting the managers.
+    /// This field is used when [`persist`](Self::persist) is `Some`.
     fsm_len: u64,
     /// Whether the commit currently running has *asked* the disk to repoint the
     /// superblock at its new root. Set by whichever tail performs that write,
@@ -2003,12 +2002,13 @@ pub struct SpaceAccounting {
     /// shrinkage: a region counted here may be truncated away at commit — rather
     /// than reused — if adjacent space is later freed and the coalesced run
     /// reaches end-of-file. A session reports `0` under [`FileSpaceStrategy::None`]. Under
-    /// [`FileSpaceStrategy::Aggr`] and [`FileSpaceStrategy::FsmAggr`] with persistence disabled,
+    /// [`FileSpaceStrategy::Aggr`] and [`FileSpaceStrategy::FsmAggr`],
     /// this includes unused metadata and raw aggregate reservations for staged edits and
     /// immediate appends.
     /// Held aggregate spare is counted even when shorter than the free-section threshold. Once
     /// abandoned, interior spare is admitted under the same threshold and adjacency rules as
-    /// other freed extents. These reservations are session state and are forgotten on reopen. Under
+    /// other freed extents. At persistent session teardown, unused reservations return through a
+    /// manager rewrite. The aggregate windows themselves are session state. Under
     /// [`FileSpaceStrategy::FsmAggr`] a commit tracks a
     /// hole shorter than the file's [`threshold`](crate::FileSpaceInfo::threshold) only
     /// where the hole adjoins a tracked one.
@@ -2683,9 +2683,8 @@ impl WriteEngine {
     ///
     /// A file without a File Space Info message keeps the default `FSM_AGGR` strategy installed by
     /// [`open_imaged`](Self::open_imaged), with separate metadata and raw aggregates. Explicit
-    /// [`FileSpaceStrategy::Aggr`] and [`FileSpaceStrategy::FsmAggr`] with persistence disabled
-    /// also use these aggregates. A message that fails safe parsing disables reusable space for
-    /// the session. Persisted manager sections are read only for a file whose strategy
+    /// [`FileSpaceStrategy::Aggr`] and [`FileSpaceStrategy::FsmAggr`] also use these aggregates.
+    /// A message that fails safe parsing disables reusable space for the session. Persisted manager sections are read only for a file whose strategy
     /// has free-space managers and whose message requests persistence. The session adds each
     /// section to the free lists at the stored address its manager records.
     fn load_persisted_free_space(
@@ -2711,8 +2710,7 @@ impl WriteEngine {
         };
         self.space =
             SessionSpace::from_strategy(Some(info.strategy), info.threshold, info.page_size);
-        if (info.strategy == FileSpaceStrategy::Aggr
-            || (info.strategy == FileSpaceStrategy::FsmAggr && !info.persist))
+        if (info.strategy == FileSpaceStrategy::Aggr || info.strategy == FileSpaceStrategy::FsmAggr)
             && let Ok(eoa) = self.end_of_allocation()
         {
             self.aggregation = Some(AggregateSpace::new(eoa.get()));
@@ -3848,9 +3846,8 @@ impl WriteEngine {
     /// still valid across this call, which is what lets it run between an
     /// append's plan and its apply.
     ///
-    /// Draws nothing — not an error — when the session persists nothing to draw
-    /// from, or when no hole can hold the allocation in hand; the caller simply
-    /// grows the file, as it always did. An error means the manager rewrite
+    /// When the session has no qualifying persistent free region, the caller tries aggregate
+    /// capacity or allocates at EOA. An error means the manager rewrite
     /// itself failed, and the lists are put back so they agree with whatever the
     /// disk now holds, on the rule [`commit`](Self::commit) applies: a rewrite that
     /// never reached its superblock write left the managers as they were, so the
@@ -3879,6 +3876,9 @@ impl WriteEngine {
             Err(e) => {
                 if self.publish_attempted {
                     self.release_reserve();
+                    if let Some(aggregation) = &mut self.aggregation {
+                        aggregation.publication_confirmed = false;
+                    }
                 } else {
                     self.restore_free(snapshot);
                 }
@@ -3986,40 +3986,28 @@ impl WriteEngine {
     fn commit_persisting_releasing_reserve(
         &mut self,
         new_root: u64,
-        to_free: Vec<(StoredAddress, u64, FreeClass)>,
+        mut to_free: Vec<(StoredAddress, u64, FreeClass)>,
     ) -> Result<(), Error> {
+        self.release_aggregates_for_tail(&mut to_free)?;
         self.release_reserve();
         self.commit_persisting(new_root, to_free, TailPlacement::Anywhere)?;
         self.shrink_to_the_trailing_free_run(new_root)
     }
 
-    /// Move a commit's manager blocks down into the space that commit freed, and
-    /// truncate the file to them (issue #418).
+    /// Relocates persistent manager blocks into earlier free space before truncating.
     ///
-    /// A commit that frees a run reaching end-of-file cannot land its own tail in
-    /// that run: the regions it is vacating are still referenced by the *on-disk*
-    /// root until the superblock repoint, so writing over them would destroy the
-    /// pre-commit file if the process died in between. The tail therefore goes
-    /// past end-of-file, above the very space that should have been given back,
-    /// and the file cannot shrink — the delete-then-commit case of issue #418.
+    /// Runs after the root publication makes the preceding commit's freed regions reusable.
+    /// The manager tail must end at EOA or, for a flat file, adjoin a tracked free run reaching
+    /// EOA. The combined run below and above the tail must meet the retention threshold in
+    /// [`release_trailing_run`].
     ///
-    /// Once that repoint is durable those regions are genuinely free, so a second
-    /// tail-only rewrite can place the blocks inside them. It publishes through
-    /// the same crash-atomic tail as any other commit, with nothing to free and
-    /// the root unchanged, and the truncation follows its superblock write.
+    /// [`TailPlacement::ReuseOnly`] requires the replacement to fit below the old manager tail.
+    /// The writer publishes the replacement with the current root before truncating.
     ///
-    /// It runs under [`TailPlacement::ReuseOnly`], so it places the tail in free
-    /// space or writes nothing at all. That is the safety property: a pass taken
-    /// for the sake of a smaller file can never leave a larger one.
+    /// # Errors
     ///
-    /// Skipped unless the last commit's tail is the highest thing in the file and
-    /// the free run reaching it is long enough for [`release_trailing_run`] to
-    /// release any of — the shape a delete leaves, and the condition that bounds
-    /// this to one extra rewrite on the commits that can actually use it. A
-    /// non-persisting file never gets here (its commit truncates directly), and
-    /// neither does the SWMR writer, which
-    /// [`open_swmr_writer`](crate::File::open_swmr_writer) refuses to open on a
-    /// file that persists its free space at all.
+    /// Returns [`Error::Format`] if metadata serialization or address resolution fails. Returns
+    /// [`Error::Io`] if writing, synchronizing, or truncating fails.
     fn shrink_to_the_trailing_free_run(&mut self, new_root: u64) -> Result<(), Error> {
         let Some(persist) = self.persist.as_ref() else {
             return Ok(());
@@ -4030,8 +4018,12 @@ impl WriteEngine {
         ) else {
             return Ok(());
         };
-        // Only a tail at the very end of the file is standing in the way of one.
-        if tail_end != self.end_of_allocation()?.get() {
+        // A flat tail may have published reusable space above it. That space contains no live
+        // allocations and can be released by the same manager rewrite.
+        let eoa = self.end_of_allocation()?.get();
+        if tail_end != eoa
+            && (self.space.is_paged() || self.space.trailing_run_start(eoa) != tail_end)
+        {
             return Ok(());
         }
         // The free run reaching up to it, plus the tail the rewrite frees, is what
@@ -4040,7 +4032,7 @@ impl WriteEngine {
         // file's length unchanged and the pass would cost a rewrite to publish
         // exactly what the commit before it did.
         let run_start = self.space.trailing_run_start(tail_start);
-        if tail_end - run_start < 2 * free_space::TRAILING_RESERVE_TAILS * (tail_end - tail_start) {
+        if eoa - run_start < 2 * free_space::TRAILING_RESERVE_TAILS * (tail_end - tail_start) {
             return Ok(());
         }
         self.commit_persisting(new_root, Vec::new(), TailPlacement::ReuseOnly)
@@ -4143,8 +4135,9 @@ impl WriteEngine {
     /// Finalizes free-space metadata or classic aggregate tails at session teardown.
     ///
     /// A persisting session rewrites stale free-space managers and returns unspent immediate
-    /// append reserves. A session with classic aggregation releases unused aggregate space at EOA
-    /// after publishing the shorter EOA with the current root. An uncertain publication prevents
+    /// append reserves. A persistent session also returns unused aggregate spare through those
+    /// managers. A session with classic aggregation releases unused aggregate space at EOA after
+    /// publishing the shorter EOA with the current root. An uncertain publication prevents
     /// aggregate cleanup. Non-persisting sessions without classic aggregation require no
     /// finalization.
     ///
@@ -4154,6 +4147,9 @@ impl WriteEngine {
     /// resolution fails. Returns [`Error::Io`] if writing, syncing, or truncating fails.
     pub(crate) fn finalize_persist(&mut self) -> Result<(), Error> {
         if self.aggregation.is_some() {
+            if self.persist.is_some() {
+                return self.finalize_persistent_aggregates();
+            }
             return self.finalize_aggregates();
         }
         if self.persist.is_none() || (self.image.len() == self.fsm_len && self.reserved.is_empty())
@@ -4443,10 +4439,9 @@ impl WriteEngine {
             // them is written into. Sized on the largest single blob, since the
             // allocator serves each one from a contiguous run: a reserve that
             // cannot hold the biggest is a reserve the biggest goes past. A
-            // refusal here (nothing left to draw, or nothing to draw from) is not
-            // an error — the append grows the file, as it always did. Placed
-            // between the plan and the apply because the manager rewrite it makes
-            // publishes a superblock, and nothing may be half-applied across that.
+            // draw may be empty. The editor then tries aggregate capacity or allocates at EOA.
+            // The manager rewrite runs between planning and application, because it publishes
+            // a superblock and must precede any partial application of the append.
             let largest_blob = plan
                 .new_chunk_bytes
                 .iter()
@@ -6931,8 +6926,11 @@ impl WriteEngine {
         // already unreachable from the on-disk root, which is the guarantee
         // [`reserve`](Self::reserve) rests on too.
         let current_eoa = self.end_of_allocation()?.get();
+        let limit = (placement == TailPlacement::ReuseOnly)
+            .then(|| old_blocks.iter().map(|extent| extent.start()).min())
+            .flatten();
         let (post, placed_at, tail_len, eoa) =
-            self.flat_tail_layout(current_eoa, &to_free, &old_blocks, ext_len, widths);
+            self.flat_tail_layout(current_eoa, &to_free, &old_blocks, ext_len, widths, limit);
         if placed_at.is_none() && placement == TailPlacement::ReuseOnly {
             // The shrink pass appends nothing: growing the file by a tail is the
             // opposite of what it was called for. Nothing has been written and the
@@ -6959,6 +6957,10 @@ impl WriteEngine {
             "the tail must end at or below the end-of-allocation it was placed under"
         );
         let final_eof = self.addresses.resolve(StoredAddress::new(final_eoa))?;
+        let aggregation = self
+            .aggregation
+            .map(|state| state.reconcile(final_eoa))
+            .transpose()?;
 
         let flat_block = match plan.blocks.as_slice() {
             [] => None,
@@ -7071,9 +7073,28 @@ impl WriteEngine {
         new_sb.consistency_flags = self.held_status_flags;
         let sb_bytes = hdf5_pure_format::__private::serialize_superblock(&new_sb)?;
         self.publish_attempted = true;
+        let confirmed = self
+            .aggregation
+            .as_ref()
+            .is_none_or(|state| state.publication_confirmed);
+        if let Some(state) = &mut self.aggregation {
+            state.publication_confirmed = false;
+        }
         self.write_at(self.sb_sig_off, &sb_bytes)?;
         self.barrier()?;
         self.superblock = new_sb;
+
+        self.space.adopt_flat_post_free(post);
+        self.persist = Some(PersistState {
+            strategy,
+            threshold,
+            page_size,
+            old_blocks: new_old_blocks,
+        });
+        self.aggregation = aggregation;
+        if let Some(state) = &mut self.aggregation {
+            state.publication_confirmed = false;
+        }
 
         // Physically shrink the file only after the superblock — now carrying the
         // smaller end-of-file — is durable, exactly as the non-persisting tail
@@ -7089,16 +7110,11 @@ impl WriteEngine {
         // The repoint is durable: the prior free list plus this commit's vacated
         // regions are now genuinely free, and the freshly written blocks become
         // the ones a future commit will supersede.
-        self.space.adopt_flat_post_free(post);
-        self.persist = Some(PersistState {
-            strategy,
-            threshold,
-            page_size,
-            old_blocks: new_old_blocks,
-        });
-        // The managers describe the file at this length, so nothing is owed until
-        // it grows past them again.
+        // The rewritten managers describe persistent free sections at this file length.
         self.fsm_len = self.image.len();
+        if let Some(state) = &mut self.aggregation {
+            state.publication_confirmed = confirmed;
+        }
         Ok(())
     }
 
@@ -7174,11 +7190,9 @@ impl WriteEngine {
     /// rather than a guarantee — and the cap bounds the work, since each round
     /// clones the free list and sizes the section list for real.
     ///
-    /// Draws from [`space`](Self::space) before anything is written. [`commit`](Self::commit)
-    /// restores that allocation state if the attempt then fails. The one caller
-    /// that does not snapshot is [`finalize_persist`](Self::finalize_persist), whose
-    /// failure leaves this session's list short by the reservation — in memory only,
-    /// on a session already being torn down, with the on-disk managers unchanged.
+    /// Draws from [`space`](Self::space) before writing. [`commit`](Self::commit) and
+    /// [`finalize_persistent_aggregates`](Self::finalize_persistent_aggregates) restore their
+    /// snapshots after a failure before publication.
     ///
     /// When [`space`](Self::space) has no hole for it, the tail may take one out of
     /// [`reserved`](Self::reserved) instead. Only the rewrite that publishes an
@@ -7198,6 +7212,9 @@ impl WriteEngine {
     /// has no such fallback: it opens a page when nothing fits, and
     /// `paged_group_churn_with_populated_datasets_reaches_a_steady_size` holds it
     /// to not doing so once per draw.
+    ///
+    /// With a `limit`, restricts reservations to extents ending at or below it and uses only
+    /// [`space`](Self::space). This permits relocating managers below the old tail.
     fn flat_tail_layout(
         &mut self,
         current_eoa: u64,
@@ -7205,6 +7222,7 @@ impl WriteEngine {
         old_blocks: &[FreeExtent],
         ext_len: u64,
         widths: FormatWidths,
+        limit: Option<u64>,
     ) -> (FreeList, Option<u64>, u64, u64) {
         /// Enough rounds for the section set to settle after a reservation shrinks
         /// it, without letting a proposal that keeps growing spin.
@@ -7220,14 +7238,19 @@ impl WriteEngine {
         let mut proposed = appended_len;
 
         for _ in 0..ROUNDS {
-            let (reserved, from_reserve) =
-                match self.space.allocate(proposed, AllocationClass::Metadata) {
-                    Some(extent) => (extent, false),
-                    None => match self.reserved.alloc(proposed) {
-                        Some(extent) => (extent, true),
-                        None => break,
-                    },
-                };
+            let allocation = if let Some(limit) = limit {
+                self.reserve_flat_tail_below(current_eoa, proposed, limit)
+            } else {
+                self.space.allocate(proposed, AllocationClass::Metadata)
+            };
+            let (reserved, from_reserve) = match allocation {
+                Some(extent) => (extent, false),
+                None if limit.is_none() => match self.reserved.alloc(proposed) {
+                    Some(extent) => (extent, true),
+                    None => break,
+                },
+                None => break,
+            };
             let at = reserved.start();
             let (mut post, eoa) = self.flat_post_free(current_eoa, to_free, old_blocks);
             // Free space that reaches end-of-file is released rather than
@@ -7259,6 +7282,28 @@ impl WriteEngine {
         // was too small for the tail and stays recorded below it, and a dropped
         // extent that ended the allocation stays below it untracked.
         (probe, None, appended_len, current_eoa)
+    }
+
+    /// Reserves the smallest reusable extent whose first `len` bytes end at or below `limit`.
+    ///
+    /// Returns `None` when the session has no flat free list or no qualifying extent.
+    fn reserve_flat_tail_below(&mut self, eoa: u64, len: u64, limit: u64) -> Option<FreeExtent> {
+        let (mut available, _) = self.space.flat_post_free(eoa, [])?;
+        let extent = available
+            .extents()
+            .iter()
+            .filter(|extent| {
+                extent.len() >= len
+                    && extent
+                        .start()
+                        .checked_add(len)
+                        .is_some_and(|end| end <= limit)
+            })
+            .min_by_key(|extent| extent.len())?;
+        let allocation = FreeExtent::new(extent.start(), len)?;
+        available.take_range(allocation);
+        self.space.adopt_flat_post_free(available);
+        Some(allocation)
     }
 
     /// Commit tail for a genuine paged file (`H5F_FSPACE_STRATEGY_PAGE`, issue
@@ -7536,8 +7581,7 @@ impl WriteEngine {
             page_size,
             old_blocks: new_old_blocks,
         });
-        // The managers describe the file at this length, so nothing is owed until
-        // it grows past them again.
+        // The rewritten managers describe persistent free sections at this file length.
         self.fsm_len = self.image.len();
         Ok(())
     }
@@ -10927,7 +10971,7 @@ struct EditStore<'a> {
     /// rewrite at the next commit or close.
     space: &'a mut SessionSpace,
     /// Classic aggregate windows shared with staged edits under [`FileSpaceStrategy::Aggr`] or
-    /// [`FileSpaceStrategy::FsmAggr`] with persistence disabled.
+    /// [`FileSpaceStrategy::FsmAggr`].
     aggregation: Option<&'a mut AggregateSpace>,
     /// Published-manager space reserved for an immediate append on a persisting session.
     reserve: Option<&'a mut FreeList>,
@@ -17080,7 +17124,7 @@ mod tests {
             );
             let free_before = free_total(&s);
             let eoa = s.end_of_allocation().unwrap().get();
-            let (post, at, tail_len, _) = s.flat_tail_layout(eoa, &[], &[], EXT_LEN, widths);
+            let (post, at, tail_len, _) = s.flat_tail_layout(eoa, &[], &[], EXT_LEN, widths, None);
             let free_after = free_total(&s);
             // The blocks the commit will write into the extent it was handed. A hole
             // consumed outright drops a section from the managers, so this comes out
@@ -20492,8 +20536,7 @@ mod tests {
 
         let mut s = WriteEngine::open_with_locking(&path, FileLocking::Enabled).unwrap();
         s.set_sync_policy(SyncPolicy::OnClose);
-        // Grow the file past the managers, which is what gives the finalize
-        // something to re-home.
+        // Finalization settles the append's aggregate spare and persistent manager state.
         s.append_inplace_i32_phased("t0", &[7; 64], 4).unwrap();
 
         s.finalize_persist().unwrap();

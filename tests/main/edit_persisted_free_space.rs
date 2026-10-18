@@ -9,6 +9,7 @@ use hdf5_pure::SpaceOwnership;
 use hdf5_pure_core::__private::StoredAddressExt;
 use rstest::rstest;
 use test_util::free_space;
+use test_util::range;
 use test_util::temp;
 use test_util::userblock::Userblock;
 use test_util_hdf5::file_space;
@@ -28,12 +29,23 @@ fn a_session_reuses_the_free_space_an_earlier_session_persisted(
     first.commit().unwrap();
     first.close().unwrap();
     let persisted = File::open(&path).unwrap().persisted_free_space().unwrap();
-    assert!(
-        persisted.contains(&(hole.start - userblock, HOLE_BYTES)),
-        "{persisted:?}"
-    );
-
     let second = File::open_rw(&path).unwrap();
+    let ownership = second.__space_ownership().unwrap();
+    assert!(ownership.analysis_complete);
+    let mut available_or_reused = ownership.reusable_free_space;
+    available_or_reused.extend(ownership.live_metadata_space);
+    available_or_reused.extend(ownership.free_space_manager_space);
+    assert_eq!(range::covered_len(&available_or_reused, &hole), HOLE_BYTES);
+    let expected = persisted
+        .iter()
+        .filter(|&&(address, length)| {
+            address + userblock >= hole.start
+                && address + userblock + length <= hole.end
+                && length >= 1200
+        })
+        .map(|&(address, _)| address + userblock)
+        .min()
+        .unwrap();
     assert_eq!(
         second.space_accounting().unwrap().reusable_free_space,
         persisted
@@ -53,7 +65,7 @@ fn a_session_reuses_the_free_space_an_earlier_session_persisted(
     let file = File::open(&path).unwrap();
     assert_eq!(
         file_space::contiguous_extent(&file, "d"),
-        hole.start..hole.start + 1200
+        expected..expected + 1200
     );
     assert_eq!(file.dataset("d").unwrap().read_i32().unwrap(), vec![9; 300]);
     assert_eq!(file.dataset("a").unwrap().read_i32().unwrap(), vec![1; 100]);
@@ -76,12 +88,14 @@ fn every_commit_keeps_the_userblock_and_writes_stored_manager_addresses(
         let session = File::open_rw(&path).unwrap();
         step.apply(&session);
         session.commit().unwrap();
-        let reusable = session.space_accounting().unwrap().reusable_free_space;
-        let ownership = session.__space_ownership().unwrap();
         if strategy == Strategy::Page {
             assert_owned_pages_homogeneous(&session, PAGE);
         }
         session.close().unwrap();
+        let settled = File::open_rw(&path).unwrap();
+        let reusable = settled.space_accounting().unwrap().reusable_free_space;
+        let ownership = settled.__space_ownership().unwrap();
+        settled.close().unwrap();
 
         stamped.assert_unchanged(&path);
         let SpaceOwnership {
@@ -153,7 +167,7 @@ fn every_commit_keeps_the_userblock_and_writes_stored_manager_addresses(
 
 #[rstest]
 #[case::fsm_aggr_transient(Strategy::FsmAggr, false, 67_584, 0)]
-#[case::fsm_aggr_persisting(Strategy::FsmAggr, true, 65_956, 1145)]
+#[case::fsm_aggr_persisting(Strategy::FsmAggr, true, 67_859, 1145)]
 #[case::page_persisting(Strategy::Page, true, TAIL_BYTES, PAGE)]
 fn a_deletion_that_frees_the_end_of_the_file_truncates_it(
     #[case] strategy: Strategy,

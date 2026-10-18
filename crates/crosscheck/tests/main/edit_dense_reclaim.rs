@@ -811,6 +811,21 @@ fn released_regions(path: &Path) -> Vec<(u64, u64)> {
     let file_len = u64::try_from(framed_bytes(path).len()).unwrap();
     let mut released = persistent_free(path);
     released.extend(free_space_manager_blocks(path));
+    let file = File::open_rw(path).unwrap();
+    let base = file.superblock().base_address.get();
+    let extension = file
+        .superblock()
+        .superblock_extension_address
+        .unwrap()
+        .get();
+    released.extend(
+        file.__space_ownership()
+            .unwrap()
+            .live_metadata_space
+            .into_iter()
+            .filter(|&(address, _)| address == base + extension)
+            .map(|(address, length)| (address - base, length)),
+    );
     released.push((file_len, u64::MAX - file_len));
     released
 }

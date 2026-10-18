@@ -1062,7 +1062,7 @@ fn persisted_chunked_free_space_is_reused_after_a_reopen() {
     b.with_file_space_strategy(FileSpaceStrategy::FsmAggr, true, 1);
     b.create_dataset("keep").with_i32_data(&[1, 2, 3]);
     b.create_dataset("big")
-        .with_f64_data(&vec![1.0; ELEMS])
+        .with_f64_data(&vec![1.0; ELEMS + 4096])
         .with_chunks(&[4096]);
     b.create_dataset("tail").with_i32_data(&[9; 16]);
     b.write(&path).unwrap();
@@ -2775,11 +2775,16 @@ fn scratch_delete_releases(
         })
         .unwrap();
     f.commit().unwrap();
-    let before = f.space_accounting().unwrap().reusable_free_bytes;
+    let before = file_space::assert_exact_space_ownership(&f);
     f.root().delete("scratch").unwrap();
     f.commit().unwrap();
-    let after = f.space_accounting().unwrap().reusable_free_bytes;
-    (f, after - before)
+    let after = file_space::assert_exact_space_ownership(&f);
+    (
+        f,
+        before.live_raw_bytes + before.live_metadata_bytes
+            - after.live_raw_bytes
+            - after.live_metadata_bytes,
+    )
 }
 
 /// How many whole, page-aligned free pages the session is offering back.

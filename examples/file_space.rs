@@ -1,23 +1,8 @@
-//! File-space strategy and persistent free-space *reuse*.
+//! Demonstrates persistent free-space reuse across editing sessions.
 //!
-//! Mirroring `H5Pset_file_space_strategy` / `H5Pset_file_space_page_size`, a
-//! written file can record how it manages free space. With `persist = true`, the
-//! regions a `File::open_rw` session frees are written to on-disk free-space-manager
-//! blocks, so a *later* session (this crate's or the reference C library's) seeds
-//! its free list from them and writes new objects into the holes instead of
-//! growing the file.
-//!
-//! It also gives space back. When the region a delete frees runs to the end of
-//! the file, the commit shortens the file to just above its last live allocation
-//! rather than carrying the freed bytes as a hole, so `File::file_size()` is not
-//! a high-water mark.
-//!
-//! This example shows both halves on one add/delete/re-add cycle: the file
-//! shrinks on the delete, and the re-add takes the space back without the file
-//! ever exceeding what it measured before. The same churn runs on a *paged* file
-//! (`FileSpaceStrategy::Page`), which works in whole pages, and on a
-//! non-persisting file as a control, where the freed space is forgotten on close
-//! — that file keeps both copies and ends up twice the size.
+//! A separate session adds, deletes, or replaces a dataset in each step. Compare file lengths
+//! and persisted free space under `FsmAggr` and `Page`, with a file that forgets free space on
+//! close as a control. The length change after replacement is printed as a signed value.
 //!
 //! Run with:
 //!
@@ -42,7 +27,7 @@ const OVERHEAD_ALLOWANCE: u64 = SCRATCH_BYTES / 4;
 
 /// The file's length at the three points of one add/delete/re-add cycle.
 struct Cycle {
-    /// After `scratch` was added: the high-water mark the file reaches.
+    /// After `scratch` was added in the first editing session.
     before_delete: u64,
     /// After it was deleted in its own session.
     after_delete: u64,
@@ -143,9 +128,7 @@ fn main() {
     );
 }
 
-/// The two halves of the persisting story, on one cycle: the delete gave the end
-/// of the file back, and taking the same space again did not push the file past
-/// the mark it had already reached.
+/// Asserts that deletion releases space and replacement fits within the metadata allowance.
 fn assert_released_and_reclaimed(label: &str, c: &Cycle) {
     assert!(
         c.after_delete + SCRATCH_BYTES / 2 < c.before_delete,
@@ -164,10 +147,7 @@ fn assert_released_and_reclaimed(label: &str, c: &Cycle) {
     );
 }
 
-/// Add a dataset, delete it, then add a same-sized one in a *fresh* session,
-/// reporting the file's length at each step. Whether the delete shortened the
-/// file and whether the re-add pushed it past its old peak are what the three
-/// numbers reveal.
+/// Measures file length after adding, deleting, and replacing a dataset in separate sessions.
 fn churn(path: &Path) -> Cycle {
     // Add `scratch`, then delete it in its own session so the region is freed.
     let session = File::open_rw(path).expect("open for editing");
@@ -209,9 +189,9 @@ fn churn(path: &Path) -> Cycle {
     session.commit().unwrap();
     drop(session); // release the lock before reading the file back
     let after_readd = len(path);
-    let growth = after_readd - after_delete;
+    let growth = i128::from(after_readd) - i128::from(after_delete);
     println!(
-        "  after re-adding {SCRATCH_BYTES} bytes of new data: {after_readd} bytes (+{growth})"
+        "  after re-adding {SCRATCH_BYTES} bytes of new data: {after_readd} bytes ({growth:+})"
     );
     Cycle {
         before_delete,

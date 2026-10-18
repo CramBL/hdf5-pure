@@ -158,6 +158,66 @@ impl ClassicAggregators {
         Ok(released)
     }
 
+    /// Forgets consumed aggregate windows that extend beyond `eoa`.
+    ///
+    /// Retains every window with unused space. The caller establishes that allocations beyond
+    /// `eoa` have been released before passing a shorter end of allocation.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AggregationError::EndOfAllocationTooSmall`] if unused aggregate space extends
+    /// beyond `eoa`. The aggregate state is unchanged on error.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use core::num::NonZeroU64;
+    /// use hdf5_pure_space::__private::{
+    ///     AggregationError, AllocationClass, ClassicAggregators, Extent,
+    /// };
+    ///
+    /// let mut aggregates = ClassicAggregators::new();
+    /// let reservation = aggregates.allocate(
+    ///     8_192, NonZeroU64::new(64).unwrap(), AllocationClass::Metadata,
+    /// )?;
+    /// let before = aggregates;
+    /// assert_eq!(
+    ///     aggregates.reconcile_eoa(8_256),
+    ///     Err(AggregationError::EndOfAllocationTooSmall { eoa: 8_256, minimum: 10_240 }),
+    /// );
+    /// assert_eq!(aggregates, before);
+    /// aggregates.allocate(
+    ///     reservation.end_of_allocation(),
+    ///     NonZeroU64::new(1_984).unwrap(),
+    ///     AllocationClass::Metadata,
+    /// )?;
+    /// aggregates.reconcile_eoa(8_256)?;
+    /// let raw = aggregates.allocate(
+    ///     8_256, NonZeroU64::new(64).unwrap(), AllocationClass::Raw,
+    /// )?;
+    /// assert_eq!(raw.extent(), Extent::new(8_256, 64).unwrap());
+    /// # Ok::<(), AggregationError>(())
+    /// ```
+    pub fn reconcile_eoa(&mut self, eoa: u64) -> Result<(), AggregationError> {
+        let Self { metadata, raw } = self;
+        let minimum = [*metadata, *raw]
+            .into_iter()
+            .flatten()
+            .filter(|window| window.unused().is_some())
+            .map(|window| window.range.end())
+            .max()
+            .unwrap_or(0);
+        if eoa < minimum {
+            return Err(AggregationError::EndOfAllocationTooSmall { eoa, minimum });
+        }
+        for window in [metadata, raw] {
+            if window.is_some_and(|window| window.range.end() > eoa) {
+                *window = None;
+            }
+        }
+        Ok(())
+    }
+
     /// Returns the selected aggregate's unused extent, if any.
     pub fn unused(&self, class: AllocationClass) -> Option<Extent> {
         let Self { metadata, raw } = self;
@@ -317,11 +377,11 @@ impl AggregationRelease {
 /// Reports an invalid EOA or an overflowing aggregate extent.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AggregationError {
-    /// The supplied EOA precedes the end of a reserved aggregate.
+    /// The supplied EOA excludes aggregate storage required by the operation.
     EndOfAllocationTooSmall {
         /// The EOA supplied by the caller.
         eoa: u64,
-        /// The greatest end address among the reserved aggregates.
+        /// The minimum permitted EOA for the operation.
         minimum: u64,
     },
     /// The extent's end exceeds [`u64::MAX`].
@@ -391,6 +451,50 @@ mod tests {
     use super::AllocationClass;
     use super::ClassicAggregators;
     use super::Extent;
+
+    #[rstest]
+    #[case::spent(2048, 8_256, true)]
+    #[case::retained(64, 10_240, true)]
+    #[case::spare_beyond_eoa(64, 8_256, false)]
+    fn reconciliation_preserves_spare(#[case] size: u64, #[case] eoa: u64, #[case] accepted: bool) {
+        let mut aggregates = ClassicAggregators::new();
+        aggregates
+            .allocate(
+                8_192,
+                NonZeroU64::new(64).unwrap(),
+                AllocationClass::Metadata,
+            )
+            .unwrap();
+        if size == 2048 {
+            aggregates
+                .allocate(
+                    10_240,
+                    NonZeroU64::new(1984).unwrap(),
+                    AllocationClass::Metadata,
+                )
+                .unwrap();
+        }
+        let before = aggregates;
+        if accepted {
+            aggregates.reconcile_eoa(eoa).unwrap();
+            assert_eq!(
+                aggregates.unused(AllocationClass::Metadata),
+                before.unused(AllocationClass::Metadata)
+            );
+            aggregates
+                .allocate(eoa, NonZeroU64::new(1).unwrap(), AllocationClass::Raw)
+                .unwrap();
+        } else {
+            assert_eq!(
+                aggregates.reconcile_eoa(eoa).unwrap_err(),
+                AggregationError::EndOfAllocationTooSmall {
+                    eoa,
+                    minimum: 10_240
+                }
+            );
+            assert_eq!(aggregates, before);
+        }
+    }
 
     #[rstest]
     #[case(1, 2048)]

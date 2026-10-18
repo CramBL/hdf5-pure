@@ -133,7 +133,7 @@ fn libhdf5_reads_and_mutates_its_classic_file_after_staged_edits(
     #[case] workload: Workload,
     #[values((MemoryStrategy::Mirrored, 0), (MemoryStrategy::Bounded, 0), (MemoryStrategy::Mirrored, 512))]
     (backing, userblock): (MemoryStrategy, u64),
-    #[values(AGGR, FSM_AGGR)] strategy: CStrategy,
+    #[values(AGGR, FSM_AGGR, PERSISTENT_FSM_AGGR)] strategy: CStrategy,
 ) {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("staged.h5");
@@ -160,11 +160,13 @@ fn libhdf5_reads_and_mutates_its_classic_file_after_staged_edits(
     .unwrap();
     for step in workload.steps {
         step.apply(&file);
-        assert_eq!(
-            file.__space_ownership().unwrap().free_space_manager_space,
-            []
-        );
-        assert_eq!(file.persisted_free_space().unwrap(), []);
+        if strategy != PERSISTENT_FSM_AGGR {
+            assert_eq!(
+                file.__space_ownership().unwrap().free_space_manager_space,
+                []
+            );
+            assert_eq!(file.persisted_free_space().unwrap(), []);
+        }
     }
     file.close().unwrap();
     let file = hdf5::File::open_rw(&path).unwrap();
@@ -193,7 +195,9 @@ fn libhdf5_reads_and_mutates_its_classic_file_after_staged_edits(
             ),
         }
     }
-    assert_eq!(file.free_space(), 0);
+    if strategy != PERSISTENT_FSM_AGGR {
+        assert_eq!(file.free_space(), 0);
+    }
     file.new_dataset::<u8>()
         .shape(1)
         .create("c_added")
@@ -215,7 +219,7 @@ fn libhdf5_reads_and_extends_its_classic_file_after_immediate_appends(
     #[case] end: usize,
     #[values(MemoryStrategy::Mirrored, MemoryStrategy::Bounded)] backing: MemoryStrategy,
     #[values(false, true)] filtered: bool,
-    #[values(AGGR, FSM_AGGR)] strategy: CStrategy,
+    #[values(AGGR, FSM_AGGR, PERSISTENT_FSM_AGGR)] strategy: CStrategy,
 ) {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("immediate.h5");
@@ -266,7 +270,9 @@ fn libhdf5_reads_and_extends_its_classic_file_after_immediate_appends(
     let ownership = file.__space_ownership().unwrap();
     assert!(ownership.analysis_complete);
     assert_eq!(ownership.physical_size, ownership.logical_size);
-    assert_eq!(ownership.free_space_manager_space, []);
+    if strategy != PERSISTENT_FSM_AGGR {
+        assert_eq!(ownership.free_space_manager_space, []);
+    }
     if strategy == AGGR {
         assert!(
             ownership
@@ -303,7 +309,9 @@ fn libhdf5_reads_and_extends_its_classic_file_after_immediate_appends(
     );
     let mut expected = expected;
     expected.extend_from_slice(&[97, 98]);
-    assert_eq!(file.free_space(), 0);
+    if strategy != PERSISTENT_FSM_AGGR {
+        assert_eq!(file.free_space(), 0);
+    }
     let dataset = file.dataset("values").unwrap();
     assert_eq!(dataset.read_raw::<u8>().unwrap(), expected);
     dataset.resize([end + 4]).unwrap();
@@ -325,12 +333,13 @@ fn libhdf5_reads_and_extends_its_classic_file_after_immediate_appends(
 #[rstest]
 fn libhdf5_fsm_file_reuses_deleted_storage_before_aggregate_spare(
     #[values(MemoryStrategy::Mirrored, MemoryStrategy::Bounded)] backing: MemoryStrategy,
+    #[values(FSM_AGGR, PERSISTENT_FSM_AGGR)] strategy: CStrategy,
 ) {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("fsm_reuse.h5");
     let seed = hdf5::FileBuilder::new()
         .with_fapl(|properties| properties.libver_v110())
-        .with_fcpl(|properties| properties.file_space_strategy(FSM_AGGR))
+        .with_fcpl(|properties| properties.file_space_strategy(strategy))
         .create(&path)
         .unwrap();
     seed.new_dataset::<u8>()
@@ -400,7 +409,9 @@ fn libhdf5_fsm_file_reuses_deleted_storage_before_aggregate_spare(
         && chunk.address + chunk.storage_size <= free_start + free_size));
     let ownership = file.__space_ownership().unwrap();
     assert!(ownership.analysis_complete);
-    assert_eq!(ownership.free_space_manager_space, []);
+    if strategy != PERSISTENT_FSM_AGGR {
+        assert_eq!(ownership.free_space_manager_space, []);
+    }
     assert!(
         ownership
             .reusable_free_space
@@ -592,6 +603,12 @@ const AGGR: CStrategy = CStrategy::PageAggregation;
 const FSM_AGGR: CStrategy = CStrategy::FreeSpaceManager {
     paged: false,
     persist: false,
+    threshold: 1,
+};
+
+const PERSISTENT_FSM_AGGR: CStrategy = CStrategy::FreeSpaceManager {
+    paged: false,
+    persist: true,
     threshold: 1,
 };
 const PAGE: CStrategy = CStrategy::FreeSpaceManager {
