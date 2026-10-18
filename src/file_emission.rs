@@ -119,6 +119,10 @@ impl<T> Reservation<T> {
             value,
         })
     }
+
+    pub(crate) fn start(&self) -> PhysicalAddress {
+        self.range.start()
+    }
 }
 
 #[cfg(test)]

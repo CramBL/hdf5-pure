@@ -5,10 +5,13 @@ use std::path::Path;
 
 use hdf5::plist::file_create::FileSpaceStrategy as CStrategy;
 use hdf5::types::VarLenUnicode;
+use hdf5_pure::AttrValue;
 use hdf5_pure::File;
 use hdf5_pure::FileAccessProperties;
+use hdf5_pure::FileBuilder;
 use hdf5_pure::FileSpaceStrategy;
 use hdf5_pure::Layout;
+use hdf5_pure::MaxExtent;
 use hdf5_pure::MemoryStrategy;
 use hdf5_sys::h5o::H5O_INFO_BASIC;
 use hdf5_sys::h5o::H5O_info1_t;
@@ -21,6 +24,129 @@ use test_util_hdf5::aggregation::Object;
 use test_util_hdf5::aggregation::Step;
 use test_util_hdf5::aggregation::Workload;
 use test_util_hdf5::file_space;
+
+#[rstest]
+fn libhdf5_reads_and_edits_an_aggregated_creation(#[values(0, 512)] userblock: u64) {
+    let directory = tempdir().unwrap();
+    let path = directory.path().join("created.h5");
+    let mut builder = FileBuilder::new();
+    builder.with_file_space_strategy(FileSpaceStrategy::Aggr, true, 9);
+    builder.with_userblock(userblock);
+    builder.set_attr("huge", AttrValue::AsciiString("h".repeat(70_000)));
+    for index in 0..9 {
+        builder.set_attr(&format!("attribute_{index}"), AttrValue::I64(index));
+    }
+    builder.set_attr("label", AttrValue::VarLenString("collection".into()));
+    builder.create_dataset("small").with_i32_data(&[11; 17]);
+    builder.create_dataset("large").with_u8_data(&[13; 4_097]);
+    builder.create_dataset("last").with_u8_data(&[17; 19]);
+    builder
+        .create_dataset("strings")
+        .with_vlen_strings(&["late", "collection"]);
+    builder
+        .create_dataset("chunked_strings")
+        .with_vlen_strings(&["early", "collection"])
+        .with_chunks(&[1])
+        .with_deflate(6);
+    builder
+        .create_dataset("fixed")
+        .with_i32_data(&[1, 2, 3, 4, 5])
+        .with_chunks(&[2]);
+    builder
+        .create_dataset("extensible")
+        .with_i32_data(&[7, 8, 9])
+        .with_chunks(&[2])
+        .with_maxshape(&[MaxExtent::Unlimited]);
+    builder.write(&path).unwrap();
+    {
+        let file = hdf5::File::open_rw(&path).unwrap();
+        assert_eq!(
+            file.create_plist()
+                .unwrap()
+                .get_file_space_strategy()
+                .unwrap(),
+            AGGR
+        );
+        assert_eq!(file.free_space(), 0);
+        assert_eq!(
+            file.dataset("small").unwrap().read_raw::<i32>().unwrap(),
+            [11; 17]
+        );
+        assert_eq!(
+            file.dataset("large").unwrap().read_raw::<u8>().unwrap(),
+            [13; 4_097]
+        );
+        assert_eq!(
+            file.dataset("last").unwrap().read_raw::<u8>().unwrap(),
+            [17; 19]
+        );
+        assert_eq!(
+            file.dataset("fixed").unwrap().read_raw::<i32>().unwrap(),
+            [1, 2, 3, 4, 5]
+        );
+        assert_eq!(
+            file.dataset("extensible")
+                .unwrap()
+                .read_raw::<i32>()
+                .unwrap(),
+            [7, 8, 9]
+        );
+        assert_eq!(
+            file.attr("huge")
+                .unwrap()
+                .read_scalar::<hdf5::types::FixedAscii<70_000>>()
+                .unwrap()
+                .as_str(),
+            "h".repeat(70_000)
+        );
+        assert_eq!(
+            file.attr("label")
+                .unwrap()
+                .read_scalar::<VarLenUnicode>()
+                .unwrap()
+                .as_str(),
+            "collection"
+        );
+        assert_eq!(
+            file.dataset("strings")
+                .unwrap()
+                .read_raw::<VarLenUnicode>()
+                .unwrap()
+                .iter()
+                .map(VarLenUnicode::as_str)
+                .collect::<Vec<_>>(),
+            ["late", "collection"]
+        );
+        assert_eq!(
+            file.dataset("chunked_strings")
+                .unwrap()
+                .read_raw::<VarLenUnicode>()
+                .unwrap()
+                .iter()
+                .map(VarLenUnicode::as_str)
+                .collect::<Vec<_>>(),
+            ["early", "collection"]
+        );
+        file.dataset("small").unwrap().write_raw(&[23; 17]).unwrap();
+        file.new_dataset::<u8>()
+            .shape(3)
+            .create("added")
+            .unwrap()
+            .write_raw(&[29, 31, 37])
+            .unwrap();
+    }
+    let file = File::open(&path).unwrap();
+    assert_eq!(file.dataset("small").unwrap().read_i32().unwrap(), [23; 17]);
+    assert_eq!(
+        file.dataset("added").unwrap().read_raw().unwrap(),
+        [29, 31, 37]
+    );
+    assert_eq!(file.persisted_free_space().unwrap(), []);
+    assert_eq!(
+        file.superblock().eof_address,
+        std::fs::metadata(path).unwrap().len()
+    );
+}
 
 #[rstest]
 #[case::metadata_heavy_aggr(aggregation::METADATA_HEAVY, AGGR, METADATA_HEAVY_AGGR)]

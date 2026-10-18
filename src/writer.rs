@@ -262,6 +262,10 @@ impl FileBuilder {
     /// so for either the writer records a clear persist flag and the default threshold of 1,
     /// whatever the caller passes for `persist` and `threshold`. `H5Pset_file_space_strategy`
     /// ignores both for those strategies too.
+    ///
+    /// Under [`FileSpaceStrategy::Aggr`], the writer uses separate metadata and raw aggregates
+    /// with 2048-byte refill blocks. Unused tails at the end of allocation are released before
+    /// output, while interior unused space remains allocated without a free-space manager.
     pub fn with_file_space_strategy(
         &mut self,
         strategy: FileSpaceStrategy,
@@ -502,10 +506,13 @@ impl Default for FileBuilder {
 
 #[cfg(test)]
 mod streaming_tests {
+    use std::io;
+
     use super::*;
     use crate::chunked_write::{ChunkMeta, ChunkProvider};
     use crate::convert::nz;
     use crate::dataspace::MaxExtent;
+    use crate::layout_info::Layout;
     use std::sync::{Arc, Mutex};
 
     type Calls = Arc<Mutex<Vec<usize>>>;
@@ -591,6 +598,9 @@ mod streaming_tests {
                 Arc::clone(chunk_calls),
                 None,
             );
+            if strategy.is_some_and(|(strategy, _)| strategy == FileSpaceStrategy::Aggr) {
+                builder.set_attr("huge", AttrValue::AsciiString("h".repeat(70_000)));
+            }
             builder
         };
         let produced_calls = Calls::default();
@@ -631,6 +641,188 @@ mod streaming_tests {
             BlockProvider::expected(67)
         );
         assert_eq!(read_back_f64(&sink.bytes, "verbatim"), [1.0, 2.0, 3.0, 4.0]);
+    }
+
+    #[rstest::rstest]
+    #[case::metadata(0)]
+    #[case::raw(1)]
+    #[case::alternating(2)]
+    #[case::block_edges(3)]
+    #[case::empty(4)]
+    fn aggregated_creation_streams_final_addresses(
+        #[case] workload: usize,
+        #[values(0, 512)] userblock: u64,
+    ) {
+        let build = || {
+            let mut builder = FileBuilder::new();
+            builder.with_file_space_strategy(FileSpaceStrategy::Aggr, true, 9);
+            builder.with_userblock(userblock);
+            match workload {
+                0 => {
+                    for i in 0..40 {
+                        let group = builder.create_group(&format!("group_{i}")).finish();
+                        builder.add_group(group);
+                    }
+                }
+                1 => {
+                    for i in 0..40 {
+                        builder
+                            .create_dataset(&format!("values_{i}"))
+                            .with_u8_data(&[i; 17]);
+                    }
+                }
+                2 => {
+                    for i in 0..20 {
+                        let mut group = builder.create_group(&format!("group_{i}"));
+                        group.create_dataset("values").with_i32_data(&[i; 13]);
+                        builder.add_group(group.finish());
+                    }
+                }
+                3 => {
+                    builder.create_dataset("first").with_u8_data(&[11; 17]);
+                    builder.create_dataset("large").with_u8_data(&[13; 4_097]);
+                    builder.create_dataset("last").with_u8_data(&[17; 19]);
+                }
+                _ => {}
+            }
+            builder
+        };
+        let bytes = build().finish().unwrap();
+        let mut sink = NonseekableSink::default();
+        build().finish_to(&mut sink).unwrap();
+        assert_eq!(sink.bytes, bytes);
+        let length = bytes.len() as u64;
+        let file = crate::reader::File::from_bytes(bytes).unwrap();
+        assert_eq!(file.superblock().eof_address, length);
+        let info = file.file_space_info().unwrap();
+        assert_eq!(
+            (info.strategy, info.persist, info.manager_addrs.as_slice()),
+            (FileSpaceStrategy::Aggr, false, [].as_slice())
+        );
+        assert_eq!(file.persisted_free_space().unwrap(), []);
+        match workload {
+            0 => assert_eq!(file.root().groups().unwrap().len(), 40),
+            1 => {
+                for i in 0..40 {
+                    assert_eq!(
+                        file.dataset(&format!("values_{i}"))
+                            .unwrap()
+                            .read_raw()
+                            .unwrap(),
+                        [i; 17]
+                    );
+                }
+            }
+            2 => {
+                for i in 0..20 {
+                    assert_eq!(
+                        file.dataset(&format!("group_{i}/values"))
+                            .unwrap()
+                            .read_i32()
+                            .unwrap(),
+                        [i; 13]
+                    );
+                }
+            }
+            3 => {
+                let first = userblock
+                    + hdf5_pure_format::__private::serialize_superblock(file.superblock())
+                        .unwrap()
+                        .len() as u64
+                    + hdf5_pure_space::__private::AGGREGATE_BLOCK_SIZE;
+                assert_eq!(
+                    file.dataset("first").unwrap().layout().unwrap(),
+                    Layout::Contiguous {
+                        address: Some(first),
+                        size: 17
+                    }
+                );
+                assert_eq!(
+                    file.dataset("large").unwrap().layout().unwrap(),
+                    Layout::Contiguous {
+                        address: Some(first + 17),
+                        size: 4_097
+                    }
+                );
+                assert_eq!(
+                    file.dataset("last").unwrap().layout().unwrap(),
+                    Layout::Contiguous {
+                        address: Some(first + 4_114),
+                        size: 19
+                    }
+                );
+                assert_eq!(length, first + 4_133);
+                assert!(file.dataset("last").unwrap().header_address().unwrap() < first);
+                assert_eq!(file.dataset("first").unwrap().read_raw().unwrap(), [11; 17]);
+                assert_eq!(
+                    file.dataset("large").unwrap().read_raw().unwrap(),
+                    [13; 4_097]
+                );
+                assert_eq!(file.dataset("last").unwrap().read_raw().unwrap(), [17; 19]);
+            }
+            _ => {
+                assert_eq!(file.root().groups().unwrap(), Vec::<String>::new());
+                assert_eq!(file.root().datasets().unwrap(), Vec::<String>::new());
+            }
+        }
+    }
+
+    #[rstest::rstest]
+    #[case::first(0)]
+    #[case::later(2)]
+    fn aggregated_creation_reports_provider_errors(
+        #[case] short: usize,
+        #[values(false, true)] streamed: bool,
+    ) {
+        let mut builder = FileBuilder::new();
+        builder.with_file_space_strategy(FileSpaceStrategy::Aggr, false, 1);
+        let calls = Calls::default();
+        builder.create_dataset("data").with_produced_data(
+            crate::type_builders::make_u8_type(),
+            &[67],
+            67,
+            16,
+            Box::new(BlockProvider {
+                total: 67,
+                block: 16,
+                calls: Arc::clone(&calls),
+                short_block: Some(short),
+            }),
+        );
+        let error = if streamed {
+            builder.finish_to(NonseekableSink::default()).unwrap_err()
+        } else {
+            builder.finish().unwrap_err()
+        };
+        let Error::Format(FormatError::SerializationError(reason)) = error else {
+            panic!("expected SerializationError, got {error:?}");
+        };
+        assert_eq!(
+            reason,
+            "a produced dataset's block does not match its planned size"
+        );
+        assert_eq!(*calls.lock().unwrap(), (0..=short).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn aggregated_creation_reports_sink_errors() {
+        struct BrokenOutput;
+        impl Write for BrokenOutput {
+            fn write(&mut self, _: &[u8]) -> io::Result<usize> {
+                Err(io::ErrorKind::BrokenPipe.into())
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+        let mut builder = FileBuilder::new();
+        builder.with_file_space_strategy(FileSpaceStrategy::Aggr, false, 1);
+        builder.create_dataset("data").with_u8_data(&[17; 19]);
+        let error = builder.finish_to(BrokenOutput).unwrap_err();
+        let Error::Io(error) = error else {
+            panic!("expected Io, got {error:?}");
+        };
+        assert_eq!(error.kind(), io::ErrorKind::BrokenPipe);
     }
 
     #[derive(Default)]

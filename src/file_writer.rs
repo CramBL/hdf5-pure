@@ -40,6 +40,7 @@ use hdf5_pure_format::__private::HugeObjectRecord;
 use hdf5_pure_format::__private::LayoutVersion;
 use hdf5_pure_format::__private::SECTION_CLASS_LARGE;
 use hdf5_pure_format::__private::SECTION_CLASS_SMALL;
+use hdf5_pure_space::__private::AllocationClass;
 
 use crate::FillTime;
 #[cfg(test)]
@@ -58,6 +59,7 @@ use crate::convert::Narrow;
 use crate::data_layout::DataLayout;
 use crate::dataspace::{Dataspace, DataspaceType, Extent, MaxExtent};
 use crate::error::{FormatError, OBJECT_HEADER_MESSAGE_MAX};
+use crate::file_allocation::FileAllocation;
 use crate::file_create_properties::FileCreateProperties;
 use crate::file_emission::Emission;
 use crate::file_emission::Reservation;
@@ -1287,6 +1289,10 @@ impl FileWriter {
     /// so for them the writer ignores `persist` and `threshold` and records a clear persist flag
     /// and the default threshold of 1. `H5Pset_file_space_strategy` ignores both for those
     /// strategies too.
+    ///
+    /// Under [`FileSpaceStrategy::Aggr`], the writer uses separate metadata and raw aggregates
+    /// and releases their unused tails at EOA before emission. Interior unused space remains
+    /// allocated without a free-space manager.
     pub fn with_file_space_strategy(
         &mut self,
         strategy: FileSpaceStrategy,
@@ -1465,6 +1471,9 @@ impl FileWriter {
     pub(crate) fn finish_to_sink<S: ByteSink>(self, sink: &mut S) -> Result<(), FormatError> {
         let libver = self.resolve_libver()?;
         let file_space = self.file_space_config()?;
+        let aggregated =
+            file_space.is_some_and(|config| config.strategy == FileSpaceStrategy::Aggr);
+        let mut allocation = FileAllocation::new(SUPERBLOCK_SIZE as u64, aggregated);
 
         // File-space settings are recorded in a File Space Info message, which
         // arrived with HDF5 1.10. Refused beside the bounds themselves rather
@@ -2182,29 +2191,30 @@ impl FileWriter {
             attr_index: usize, // index into the relevant attrs Vec
         }
 
-        /// Returns consecutive stored addresses for the collections and advances `cursor`.
+        /// Reserves raw collection allocations and returns addresses for reference patching.
         ///
-        /// The writer emits collections in this order after patching their references.
+        /// If `retain` is set, appends the addresses to `retained` for address-ordered emission.
+        /// Under direct placement, the writer derives emission addresses from collection lengths.
         ///
         /// # Errors
         ///
-        /// Returns [`FormatError::OffsetOverflow`] if a collection extends beyond [`u64::MAX`].
+        /// Returns [`FormatError::OffsetOverflow`] if a reservation exceeds [`u64::MAX`], or
+        /// [`FormatError::Internal`] if an aggregate extends beyond the writer's EOA.
         fn place_collections(
             collections: &[Vec<u8>],
-            cursor: &mut u64,
+            allocation: &mut FileAllocation,
+            retained: &mut Vec<StoredAddress>,
+            retain: bool,
         ) -> Result<Vec<u64>, FormatError> {
-            collections
-                .iter()
-                .try_fold(Vec::with_capacity(collections.len()), |mut addrs, c| {
-                    let addr = *cursor;
-                    let len = c.len() as u64;
-                    *cursor = cursor.checked_add(len).ok_or(FormatError::OffsetOverflow {
-                        offset: addr,
-                        length: len,
-                    })?;
-                    addrs.push(addr);
-                    Ok(addrs)
-                })
+            let mut addresses = Vec::with_capacity(collections.len());
+            for collection in collections {
+                let address = allocation.reserve(collection.len() as u64, AllocationClass::Raw)?;
+                if retain {
+                    retained.push(address);
+                }
+                addresses.push(address.get());
+            }
+            Ok(addresses)
         }
 
         fn collect_vl_patches(attrs_raw: &[(String, AttrSpec)]) -> Vec<VlPatch> {
@@ -2504,11 +2514,12 @@ impl FileWriter {
             });
         }
 
-        // Resolve global-heap references before encoding chunks. PAGE collections occupy raw
-        // pages between the superblock and the object headers. In an unpaged file, chunked
-        // datasets' collections follow the superblock, and other collections follow dataset data.
+        // Reserve chunked datasets' global heaps before encoding their references into chunks.
+        // Under PAGE, reserve every collection in raw pages before the object headers. Under
+        // other strategies, reserve the remaining collections after reserving dataset data.
         let mut early_gcol: Vec<usize> = Vec::new();
         let mut paged_collection_addresses = Vec::new();
+        let mut aggregate_collection_addresses = Vec::new();
         let mut collection_meta_sections = Vec::new();
         let mut collection_raw_sections = Vec::new();
         let mut collection_large_sections = Vec::new();
@@ -2602,7 +2613,6 @@ impl FileWriter {
             }
             cursor - SUPERBLOCK_SIZE as u64
         } else {
-            let mut cursor = SUPERBLOCK_SIZE as u64;
             for i in 0..all_ds.len() {
                 if !is_chunked[i] || all_ds[i].raw_chunks.is_some() {
                     continue;
@@ -2610,12 +2620,17 @@ impl FileWriter {
                 let Some(staging) = all_ds[i].vl_string_staging.take() else {
                     continue;
                 };
-                let addrs = place_collections(&staging.collections, &mut cursor)?;
+                let addrs = place_collections(
+                    &staging.collections,
+                    &mut allocation,
+                    &mut aggregate_collection_addresses,
+                    aggregated,
+                )?;
                 patch_vl_refs_masked(&mut all_ds[i].raw, &staging.patch_offsets, &addrs);
                 all_ds[i].vl_string_staging = Some(staging);
                 early_gcol.push(i);
             }
-            cursor - SUPERBLOCK_SIZE as u64
+            allocation.end() - SUPERBLOCK_SIZE as u64
         };
 
         // Compress each encode-path chunked dataset exactly once, up front. The
@@ -2868,15 +2883,15 @@ impl FileWriter {
         }
 
         // Pass 2: compute real addresses.
-        // Metadata addresses are relative to the userblock base. cursor2 tracks stored positions.
+        // The allocator returns stored addresses relative to the userblock base.
         #[expect(
             clippy::cast_possible_truncation,
             reason = "userblock_size is a small power-of-two header size used as an in-memory \
                       buffer offset; it fits usize on every supported target"
         )]
         let ub = self.userblock_size as usize;
-        // The root header follows the collections placed before chunk encoding, including their
-        // PAGE padding. A file without those collections places the root after the superblock.
+        // Under direct placement, reserve the root after the early collections and PAGE padding.
+        // Under aggregation, reserve the root header through the metadata aggregate.
         let advance = |cursor: &mut u64, len: u64| -> Result<StoredAddress, FormatError> {
             let addr = *cursor;
             *cursor = cursor.checked_add(len).ok_or(FormatError::OffsetOverflow {
@@ -2885,26 +2900,31 @@ impl FileWriter {
             })?;
             Ok(StoredAddress::new(addr))
         };
-        let mut cursor2 = SUPERBLOCK_SIZE as u64;
-        advance(&mut cursor2, early_gcol_size)?;
-        let root_group_addr = advance(&mut cursor2, root_oh_size as u64)?;
+        if paged.is_some() {
+            allocation = FileAllocation::new(SUPERBLOCK_SIZE as u64 + early_gcol_size, false);
+        }
+        let root_group_addr = allocation.reserve(root_oh_size as u64, AllocationClass::Metadata)?;
 
         // Reserve dense-attribute spans before building their bytes. The heap contains copies of
         // the attributes, so every global-heap reference must be resolved before serialization.
-        let reserve = |cursor: &mut u64, len: Option<usize>| {
-            len.map(|len| advance(cursor, len as u64).map(|addr| (addr, len)))
-                .transpose()
+        let reserve = |allocation: &mut FileAllocation, len: Option<usize>| {
+            len.map(|len| {
+                allocation
+                    .reserve(len as u64, AllocationClass::Metadata)
+                    .map(|addr| (addr, len))
+            })
+            .transpose()
         };
 
-        let root_dense_span = reserve(&mut cursor2, root_dense_len)?;
+        let root_dense_span = reserve(&mut allocation, root_dense_len)?;
 
         let mut group_dense_spans: Vec<Option<(StoredAddress, usize)>> =
             Vec::with_capacity(groups.len());
         let group_addrs2: Vec<StoredAddress> = group_oh_sizes.iter().enumerate().try_fold(
             Vec::with_capacity(group_oh_sizes.len()),
             |mut addrs, (gi, &sz)| {
-                let addr = advance(&mut cursor2, sz as u64)?;
-                group_dense_spans.push(reserve(&mut cursor2, group_dense_lens[gi])?);
+                let addr = allocation.reserve(sz as u64, AllocationClass::Metadata)?;
+                group_dense_spans.push(reserve(&mut allocation, group_dense_lens[gi])?);
                 addrs.push(addr);
                 Ok::<_, FormatError>(addrs)
             },
@@ -2917,7 +2937,7 @@ impl FileWriter {
         let committed_addrs: Vec<StoredAddress> = committed_oh.iter().try_fold(
             Vec::with_capacity(committed_oh.len()),
             |mut addrs, oh| {
-                addrs.push(advance(&mut cursor2, oh.len() as u64)?);
+                addrs.push(allocation.reserve(oh.len() as u64, AllocationClass::Metadata)?);
                 Ok::<_, FormatError>(addrs)
             },
         )?;
@@ -2927,8 +2947,8 @@ impl FileWriter {
         let ds_oh_addrs2: Vec<StoredAddress> = actual_ds_oh_sizes.iter().enumerate().try_fold(
             Vec::with_capacity(actual_ds_oh_sizes.len()),
             |mut addrs, (i, &sz)| {
-                let addr = advance(&mut cursor2, sz as u64)?;
-                ds_dense_spans.push(reserve(&mut cursor2, ds_dense_lens[i])?);
+                let addr = allocation.reserve(sz as u64, AllocationClass::Metadata)?;
+                ds_dense_spans.push(reserve(&mut allocation, ds_dense_lens[i])?);
                 addrs.push(addr);
                 Ok::<_, FormatError>(addrs)
             },
@@ -3120,7 +3140,7 @@ impl FileWriter {
         // physical file reaches the page-aligned end-of-allocation.
         if let Some((page_size, persist_paged, fs_threshold)) = paged {
             let base = BaseAddress::new(ub as u64);
-            let mut meta = cursor2; // metadata cursor, base-relative
+            let mut meta = allocation.end(); // metadata cursor, base-relative
 
             // The attributes are final now, so the dense heaps that copy them can
             // be built into the spans reserved above.
@@ -3577,9 +3597,13 @@ impl FileWriter {
         let mut ds_layouts: Vec<DsLayout> = Vec::new();
         for (i, d) in all_ds.iter_mut().enumerate() {
             if is_chunked[i] {
-                let data_address = StoredAddress::new(cursor2);
+                let data_address = allocation.reserve(ds_data_lens[i], AllocationClass::Raw)?;
                 let built = build_chunked(d, data_address, chunk_sets[i].as_ref())?;
-                advance(&mut cursor2, built.data.len())?;
+                if built.data.len() != ds_data_lens[i] {
+                    return Err(FormatError::Internal(
+                        "chunk data differs from its allocation".into(),
+                    ));
+                }
                 ds_layouts.push(DsLayout {
                     data: built.data,
                     data_addr: data_address,
@@ -3593,7 +3617,7 @@ impl FileWriter {
                 let addr = if data.len() == 0 {
                     UNDEF_ADDRESS
                 } else {
-                    advance(&mut cursor2, data.len())?
+                    allocation.reserve(data.len(), AllocationClass::Raw)?
                 };
                 ds_layouts.push(DsLayout {
                     data,
@@ -3603,38 +3627,50 @@ impl FileWriter {
             }
         }
 
-        // Place the remaining global heap collections after dataset data and patch their
-        // references. The writer places attribute collections in root, group, and dataset order,
-        // followed by dataset-element collections, and derives their emission addresses in the
-        // same order.
+        // Reserve the remaining global heaps as raw allocations and patch their references.
+        // Reserve attribute collections in root, group, and dataset order, then dataset-element
+        // collections. With aggregation enabled, retain every address for emission.
         let has_vl = !vl_root.is_empty()
             || grp_vl.iter().any(|v| !v.is_empty())
             || ds_vl.iter().any(|v| !v.is_empty())
             || all_ds.iter().any(|d| d.vl_string_staging.is_some());
 
-        let gcol_start = cursor2;
-        let mut gcol_total_size = 0u64;
+        let gcol_start = allocation.end();
         if has_vl {
-            let mut gcol_cursor = cursor2;
             for patch in &vl_root {
-                let addrs = place_collections(&patch.collections, &mut gcol_cursor)?;
+                let addrs = place_collections(
+                    &patch.collections,
+                    &mut allocation,
+                    &mut aggregate_collection_addresses,
+                    aggregated,
+                )?;
                 patch_vl_refs(&mut root_attrs[patch.attr_index].raw_data, &addrs);
             }
             for (gi, patches) in grp_vl.iter().enumerate() {
                 for patch in patches {
-                    let addrs = place_collections(&patch.collections, &mut gcol_cursor)?;
+                    let addrs = place_collections(
+                        &patch.collections,
+                        &mut allocation,
+                        &mut aggregate_collection_addresses,
+                        aggregated,
+                    )?;
                     patch_vl_refs(&mut groups[gi].attrs[patch.attr_index].raw_data, &addrs);
                 }
             }
             for (di, patches) in ds_vl.iter().enumerate() {
                 for patch in patches {
-                    let addrs = place_collections(&patch.collections, &mut gcol_cursor)?;
+                    let addrs = place_collections(
+                        &patch.collections,
+                        &mut allocation,
+                        &mut aggregate_collection_addresses,
+                        aggregated,
+                    )?;
                     patch_vl_refs(&mut all_ds[di].attrs[patch.attr_index].raw_data, &addrs);
                 }
             }
             // Patch dataset-element references in the contiguous element bytes moved into
-            // `ds_layouts[i].data`. The writer patches chunked references before encoding and
-            // places their collections after the superblock.
+            // `ds_layouts[i].data`. The writer reserves chunked datasets' collections and patches
+            // their references before chunk encoding.
             for (i, d) in all_ds.iter().enumerate() {
                 // A chunked VL dataset was placed and patched before its chunks
                 // were encoded; its references are already final.
@@ -3648,11 +3684,15 @@ impl FileWriter {
                     let Some(bytes) = ds_layouts[i].data.in_memory_mut() else {
                         return Err(vl_element_bytes_absent(d.name.as_str()));
                     };
-                    let addrs = place_collections(&staging.collections, &mut gcol_cursor)?;
+                    let addrs = place_collections(
+                        &staging.collections,
+                        &mut allocation,
+                        &mut aggregate_collection_addresses,
+                        aggregated,
+                    )?;
                     patch_vl_refs_masked(bytes, &staging.patch_offsets, &addrs);
                 }
             }
-            gcol_total_size = gcol_cursor - cursor2;
         }
 
         // The attributes are final now, so the dense heaps that copy them can be
@@ -3672,16 +3712,16 @@ impl FileWriter {
         let actual_ds_oh_sizes2: Vec<usize> = ds_oh_bytes2.iter().map(|b| b.len()).collect();
         debug_assert_eq!(actual_ds_oh_sizes, actual_ds_oh_sizes2);
 
-        // The superblock extension, if any, is appended after the GCOLs. Its
-        // address is base-relative (like every other stored address); the reader
-        // adds the base address. eof grows by the extension's size.
+        // Reserve the superblock extension as metadata after reserving the global heaps.
+        // Its stored address can lie in an earlier aggregate window.
         let ext_len = ext_oh.as_ref().map_or(0, |bytes| bytes.len());
-        advance(&mut cursor2, gcol_total_size)?;
         let ext_addr = ext_oh
             .as_ref()
-            .map(|bytes| advance(&mut cursor2, bytes.len() as u64))
+            .map(|bytes| allocation.reserve(bytes.len() as u64, AllocationClass::Metadata))
             .transpose()?;
         let ext_addr = ext_addr.map(StoredAddress::get);
+
+        let cursor2 = allocation.finish()?;
 
         // eof_address is absolute file size (includes userblock + GCOLs + ext)
         let eof_addr2 = (ub as u64)
@@ -3727,8 +3767,24 @@ impl FileWriter {
             Group(usize),
         }
 
-        // Derive collection addresses in the placement order used to patch their references.
+        // Use retained aggregate addresses or derive consecutive addresses in reservation order.
         let base = BaseAddress::new(ub as u64);
+        // Each early index is recorded after the dataset's VL staging is restored.
+        let early_count = early_gcol
+            .iter()
+            .map(|&i| {
+                all_ds[i]
+                    .vl_string_staging
+                    .as_ref()
+                    .expect("early_gcol only holds datasets with VL staging")
+                    .collections
+                    .len()
+            })
+            .sum::<usize>();
+        let (early_addresses, late_addresses) =
+            aggregate_collection_addresses.split_at(if aggregated { early_count } else { 0 });
+        let mut early_addresses = early_addresses.iter();
+        let mut late_addresses = late_addresses.iter();
         let mut early_collections = early_gcol
             .iter()
             .flat_map(|&i| {
@@ -3741,7 +3797,14 @@ impl FileWriter {
             })
             .scan(SUPERBLOCK_SIZE as u64, |cursor, collection| {
                 Some(
-                    advance(cursor, collection.len() as u64).and_then(|address| {
+                    (if aggregated {
+                        early_addresses.next().copied().ok_or_else(|| {
+                            FormatError::Internal("global heap placement is absent".into())
+                        })
+                    } else {
+                        advance(cursor, collection.len() as u64)
+                    })
+                    .and_then(|address| {
                         Reservation::new(
                             base,
                             address,
@@ -3767,7 +3830,14 @@ impl FileWriter {
                 .chain(late_collections)
                 .scan(gcol_start, |cursor, collection| {
                     Some(
-                        advance(cursor, collection.len() as u64).and_then(|address| {
+                        (if aggregated {
+                            late_addresses.next().copied().ok_or_else(|| {
+                                FormatError::Internal("global heap placement is absent".into())
+                            })
+                        } else {
+                            advance(cursor, collection.len() as u64)
+                        })
+                        .and_then(|address| {
                             Reservation::new(
                                 base,
                                 address,
@@ -3903,8 +3973,10 @@ impl FileWriter {
             }
         }
         .into_iter();
-        // Each source is ordered by physical address independently of the other sources.
-        Emission::new([
+        // Under direct placement, supply each source in ascending physical order. With aggregation
+        // enabled, a small reservation can precede a large one already placed outside its window,
+        // so sort the reservations before emission.
+        let sources: [&mut dyn Iterator<Item = Result<Reservation<FileData<'_>>, FormatError>>; 9] = [
             &mut early_collections,
             &mut root_header,
             &mut group_headers,
@@ -3914,8 +3986,8 @@ impl FileWriter {
             &mut dataset_regions,
             &mut late_collections,
             &mut extension,
-        ])
-        .emit(sink, eof_addr2, |sink, emission| match emission {
+        ];
+        let emit = |sink: &mut S, emission| match emission {
             FileData::Bytes(bytes) => sink.put(bytes),
             FileData::Group(gi) => {
                 let g = &groups[gi];
@@ -3935,7 +4007,30 @@ impl FileWriter {
                 all_ds[i].raw_chunks.as_ref(),
                 all_ds[i].produced.as_ref(),
             ),
-        })?;
+        };
+        if aggregated {
+            let count = aggregate_collection_addresses.len()
+                + 1
+                + group_addrs2.len()
+                + committed_addrs.len()
+                + ds_oh_addrs2.len()
+                + usize::from(dense_spans.root.is_some())
+                + dense_spans.groups.iter().flatten().count()
+                + dense_spans.datasets.iter().flatten().count()
+                + ds_layouts
+                    .iter()
+                    .filter(|layout| layout.data.len() != 0)
+                    .count()
+                + usize::from(real_ext_oh.is_some());
+            let mut reservations = Vec::with_capacity(count);
+            for reservation in sources.into_iter().flatten() {
+                reservations.push(reservation?);
+            }
+            reservations.sort_unstable_by_key(Reservation::start);
+            Emission::new([&mut reservations.into_iter().map(Ok)]).emit(sink, eof_addr2, emit)?;
+        } else {
+            Emission::new(sources).emit(sink, eof_addr2, emit)?;
+        }
 
         Ok(())
     }
