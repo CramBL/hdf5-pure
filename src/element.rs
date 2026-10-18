@@ -248,7 +248,7 @@ impl Dataset {
     ///
     /// Returns `Ok(Some(value))` when the dataset carries a user-defined fill
     /// value (set via [`DatasetBuilder::with_fill_value`], or by another writer
-    /// such as the reference C library or h5py), and `Ok(None)` when it does not
+    /// such as libhdf5 or h5py), and `Ok(None)` when it does not
     /// — the HDF5 library default, where unwritten elements read back as the
     /// type's implicit zero.
     ///

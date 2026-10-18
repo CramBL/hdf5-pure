@@ -23,7 +23,7 @@ pub struct AttributeInfoMessage {
     /// Distinct from [`btree_creation_order_address`](Self::btree_creation_order_address)
     /// being `Some`: an object that indexes creation order while storing its
     /// attributes compactly declares the index and leaves its address undefined,
-    /// which is what the reference C library writes before a set goes dense.
+    /// which is what libhdf5 writes before a set goes dense.
     pub indexes_creation_order: bool,
     /// Address of the fractal heap storing attribute messages.
     pub fractal_heap_address: Option<StoredAddress>,

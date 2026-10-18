@@ -4261,7 +4261,7 @@ fn a_reference_address_to_a_relocated_dataset_is_refused() {
 /// unaddressable instead, which is what its fall-through arm asks
 /// `datatype_holds_object_reference` in order to know.
 ///
-/// The variable-length half is what the reference C library writes (`H5T_VLEN`
+/// The variable-length half is what libhdf5 writes (`H5T_VLEN`
 /// of `H5T_STD_REF_OBJ`), so a plain `copy` reaches it; the 16-byte reference is
 /// this crate's own construction. Both arrive through `with_raw_data`, which
 /// takes whatever `Datatype` it is given.

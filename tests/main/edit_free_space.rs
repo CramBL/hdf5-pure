@@ -1004,7 +1004,7 @@ fn paged_commit_reuses_freed_space_within_its_page_type() {
     // it is placing. It used to draw from none of them and always append.
     //
     // The file stays valid and every page stays homogeneous — the crosscheck
-    // suite reads these files with the reference C library, which is where a
+    // suite reads these files with libhdf5, which is where a
     // mixed page would show up.
     let path = temp::temp_path("hdf5_pure_fs_paged_reuse.h5");
     const ELEMS: usize = 32768;
@@ -1997,7 +1997,7 @@ fn paged_free_space_is_reused_after_a_reopen() {
 ///
 /// The free-space managers name absolute file offsets, so a run given back to
 /// the filesystem has to leave the record as well as the file — a section past
-/// the end of the file is one the reference C library would hand a writer.
+/// the end of the file is one libhdf5 would hand a writer.
 fn assert_released_file_is_self_consistent(path: &std::path::Path) {
     file_space::assert_eof_matches_physical_size(path);
     let len = std::fs::metadata(path).unwrap().len();
@@ -2044,7 +2044,7 @@ fn create_populated_group(f: &File, name: &str, rows: usize, cols: usize) {
 ///
 /// What is guaranteed is the release, not that a delete never grows a file:
 /// persisting the free-space managers costs metadata that has to go somewhere,
-/// and the reference C library grows a file to persist them too. So this
+/// and libhdf5 grows a file to persist them too. So this
 /// measures the file against the data left alive in it — a few kilobytes of
 /// manager blocks and the reserve the next commit's tail needs, not the
 /// megabyte the deleted group occupied.
@@ -2466,7 +2466,7 @@ const CEILING_ELEMS: usize = 4096;
 ///
 /// This is the half of issue #387 that is about safety rather than size. A
 /// manager offering space a chunk occupies is not a stale number: the next
-/// session — this crate or the reference C library — allocates straight out of
+/// session - this crate or libhdf5 - allocates straight out of
 /// those managers and would write over the top of live data.
 fn assert_no_persisted_free_space_holds_live_chunks(path: &std::path::Path, datasets: &[&str]) {
     let file = File::open(path).unwrap();

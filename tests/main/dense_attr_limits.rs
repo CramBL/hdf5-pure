@@ -60,7 +60,7 @@ fn an_attribute_past_the_managed_object_limit_becomes_a_huge_object() {
 /// *single* large attribute can be written at all — the compact path's answer to
 /// one is `AttributeMessageTooLarge`, no matter that dense storage could hold it.
 ///
-/// This mirrors the reference C library's own disjunction, and it is what makes
+/// This mirrors libhdf5's own disjunction, and it is what makes
 /// the ordinary case work: one big attribute on an object with no others.
 #[test]
 fn one_large_attribute_forces_dense_storage_on_its_own() {
@@ -256,7 +256,7 @@ fn managed_attributes_span_as_many_blocks_as_they_need() {
 }
 
 /// The attribute count used to stop at 61,680, where a single B-tree leaf grown
-/// to hold every record pushed the capacity width the reference C library derives
+/// to hold every record pushed the capacity width libhdf5 derives
 /// past the 2 bytes it allots. A name index of fixed 512-byte nodes grows a level
 /// instead, so counts on both sides of that old bound are ordinary now.
 #[test]

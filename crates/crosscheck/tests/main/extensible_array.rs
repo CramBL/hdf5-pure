@@ -21,7 +21,7 @@ use test_util_hdf5::file;
 
 const SIZES: &[usize] = &[20, 300, 2000, 50000, 140000];
 
-/// Create a 1-D unlimited, chunked i32 dataset with the reference C library,
+/// Create a 1-D unlimited, chunked i32 dataset with libhdf5,
 /// using the latest format so the chunk index is an Extensible Array.
 fn write_with_c(path: &std::path::Path, n: usize) {
     let file = file::libhdf5_create_v110(path);
@@ -42,7 +42,7 @@ fn write_with_pure(path: &std::path::Path, n: usize) {
     Unlimited::new("d", &data, 1).pure_create(path);
 }
 
-/// Direction 1: hdf5-pure writes, the reference C library reads.
+/// Direction 1: hdf5-pure writes, libhdf5 reads.
 #[test]
 fn pure_writes_c_reads() {
     for &n in SIZES {
@@ -59,7 +59,7 @@ fn pure_writes_c_reads() {
     }
 }
 
-/// Direction 2: the reference C library writes, hdf5-pure reads.
+/// Direction 2: libhdf5 writes, hdf5-pure reads.
 #[test]
 fn c_writes_pure_reads() {
     for &n in SIZES {

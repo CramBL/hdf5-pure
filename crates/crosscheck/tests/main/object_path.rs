@@ -1,5 +1,5 @@
 #![cfg(feature = "__hdf5-1.10")]
-//! Object paths, resolved over one file by the reference C library and by hdf5-pure.
+//! Object paths, resolved over one file by libhdf5 and by hdf5-pure.
 //!
 //! The C library's traversal is the oracle for the grammar: which spellings name one object, where
 //! an absolute path opened on a group starts, that `..` is an ordinary link name, and which path

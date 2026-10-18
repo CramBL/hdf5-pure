@@ -1,6 +1,6 @@
 #![cfg(feature = "__hdf5-1.10")]
 //! Interop for the owned SWMR writer (issue #148, PR B): after a clean
-//! `File::close`, the SWMR-write flag is cleared and the reference C library
+//! `File::close`, the SWMR-write flag is cleared and libhdf5
 //! reads the streamed appends back exactly.
 
 use hdf5_pure::File;

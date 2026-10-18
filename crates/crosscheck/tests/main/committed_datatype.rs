@@ -1,5 +1,5 @@
 #![cfg(feature = "__hdf5-1.10")]
-//! Committed (`H5Tcommit`) datatypes, written by the reference C library and read
+//! Committed (`H5Tcommit`) datatypes, written by libhdf5 and read
 //! back by hdf5-pure (issue #254).
 //!
 //! A committed datatype is stored in its own object header, and every object that

@@ -251,7 +251,7 @@ impl FileBuilder {
     /// Set the file-space management strategy, mirroring HDF5's
     /// `H5Pset_file_space_strategy`. The strategy, persist flag, and free-space
     /// section `threshold` are recorded in the file's superblock extension, so
-    /// the reference C library and a later reopen observe the choice.
+    /// libhdf5 and a later reopen observe the choice.
     ///
     /// `persist = true` records that freed space should be tracked on disk across
     /// closes. A brand-new file has nothing to track, so this only records the

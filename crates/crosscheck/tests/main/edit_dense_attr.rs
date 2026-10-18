@@ -64,7 +64,7 @@ fn write_compact(path: &std::path::Path) {
     );
 }
 
-/// Every attribute of `path`'s dataset `d`, read by the reference C library, so a
+/// Every attribute of `path`'s dataset `d`, read by libhdf5, so a
 /// heap this crate builds is checked by the library that defines the format.
 fn c_dataset_attrs(path: &std::path::Path) -> Vec<(String, i64)> {
     let f = hdf5::File::open(path).unwrap();
@@ -82,7 +82,7 @@ fn c_dataset_attrs(path: &std::path::Path) -> Vec<(String, i64)> {
     out
 }
 
-/// One `i64` attribute read by the reference C library, from the dataset or the
+/// One `i64` attribute read by libhdf5, from the dataset or the
 /// group at `path`. The heap these tests build is only worth as much as the
 /// library that defines the format can make of it, so every case checks at least
 /// one value this way.

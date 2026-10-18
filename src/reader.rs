@@ -472,7 +472,7 @@ impl FileAccessProperties {
     /// Defaults to [`SyncPolicy::Always`]: every commit and every immediate
     /// [`Dataset::append`](crate::Dataset::append) forces its writes to durable
     /// storage before returning. [`SyncPolicy::OnClose`] issues no `fsync` at all,
-    /// which is what the reference C library does; the writes still reach the
+    /// matching libhdf5. The writes still reach the
     /// operating system by the time the operation making them returns, so only
     /// power-loss durability moves to the caller. [`with_page_buffer_size`](Self::with_page_buffer_size),
     /// off by default, is the one setting that changes that — and it requires
@@ -3099,7 +3099,7 @@ impl File {
 
     /// Clear a stale status flag left in `path` by a writer that exited without a
     /// clean [`close`](Self::close) — the `h5clear -s` equivalent, for recovering
-    /// a file that both this crate and the reference C library otherwise refuse
+    /// a file that both this crate and libhdf5 otherwise reject
     /// to open ([`Error::FileMarkedInUse`]). A no-op if the flag is already
     /// clear.
     ///

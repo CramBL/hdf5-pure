@@ -1,4 +1,4 @@
-//! Committed (`H5Tcommit`) datatypes in files the reference C library wrote,
+//! Committed (`H5Tcommit`) datatypes in files libhdf5 wrote,
 //! from committed bytes.
 
 use hdf5_pure::File;

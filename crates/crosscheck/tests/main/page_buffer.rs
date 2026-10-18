@@ -1,5 +1,5 @@
 #![cfg(feature = "__hdf5-1.10")]
-//! The write-back page buffer against the reference C library (issue #308).
+//! The write-back page buffer against libhdf5 (issue #308).
 //!
 //! Two claims are made for the crash mark a page-buffered session raises, and
 //! only the C library can settle either. The first is that a session which dies

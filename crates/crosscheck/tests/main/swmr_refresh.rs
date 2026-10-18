@@ -2,8 +2,8 @@
 //! SWMR-reader (refresh) tests: hdf5-pure follows an Extensible-Array dataset
 //! that an external HDF5 writer appends to.
 //!
-//! The reference C library acts as the writer here (create, then reopen and
-//! extend); hdf5-pure opens the file with `open_swmr` and `refresh`es to observe
+//! libhdf5 creates the file, reopens it, and extends the dataset.
+//! hdf5-pure opens the file with `open_swmr` and `refresh`es to observe
 //! the appended rows. The append crosses the direct-data-block -> super-block
 //! boundary, so the chunk index grows structurally between refreshes.
 

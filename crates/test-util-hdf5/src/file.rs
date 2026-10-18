@@ -1,4 +1,4 @@
-//! Files the reference C library creates under a chosen low bound on the format version.
+//! Files libhdf5 creates under a chosen low bound on the format version.
 
 use std::path::Path;
 

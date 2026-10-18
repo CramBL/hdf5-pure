@@ -1,5 +1,5 @@
 #![cfg(feature = "hdf5")]
-//! The reference C library must read a `.mat` written by the streaming path.
+//! libhdf5 must read a `.mat` written by the streaming path.
 //!
 //! This exercises the combination nothing else does: a userblock-offset file
 //! assembled front-to-back onto a non-seekable sink, whose dataset's contiguous

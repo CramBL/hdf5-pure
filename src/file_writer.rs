@@ -389,7 +389,7 @@ const DENSE_ATTR_BLOCK_OFFSET_BYTES: usize = ATTRIBUTE_HEAP_BLOCK_OFFSET_BYTES;
 
 /// Whether `attrs` must go in a fractal heap rather than the object header.
 ///
-/// Two independent reasons, matching the reference C library's own disjunction in
+/// Two independent reasons, matching libhdf5's own disjunction in
 /// `H5Oattribute.c` (`nattrs == max_compact || raw_size >= H5O_MESG_MAX_SIZE`):
 /// too many attributes to keep compact, *or* one attribute too large for an
 /// object-header message, whose size field is 2 bytes wide.
@@ -447,7 +447,7 @@ pub(crate) fn needs_dense_attrs(attrs: &[AttributeMessage]) -> Result<bool, Form
 /// huge-objects v2 B-tree maps a generated ID to their address and length. So
 /// this is where the emitter changes representation, not where it gives up.
 ///
-/// The reference C library splits far earlier — it declares 4,096 for an
+/// libhdf5 splits far earlier - it declares 4,096 for an
 /// attribute heap — but the threshold is the heap's own declaration, read back
 /// out of the header, so a higher one is equally readable.
 pub(crate) const DENSE_ATTR_MAX_MANAGED_OBJECT: usize =
@@ -485,7 +485,7 @@ pub(crate) enum DenseAttrCreationOrder {
     Tracked {
         /// Creation index of each attribute, parallel to the attribute slice.
         indices: Vec<u16>,
-        /// The next index the object would hand out. The reference C library
+        /// The next index the object would hand out. libhdf5
         /// does not lower this when an attribute is deleted, so it is carried
         /// rather than derived from `indices`.
         max: u16,
@@ -762,7 +762,7 @@ pub(crate) fn dense_attrs_plan(
 
     // Records are ordered the way the index is searched: by name hash, and by
     // the name itself where two names hash alike. The tie-break has to be the
-    // name because that is what the reference C library compares on a hash
+    // name because that is what libhdf5 compares on a hash
     // collision — `H5A__dense_fh_name_cmp` does `strcmp` against the name pulled
     // back out of the heap — and a binary search ordered any other way walks
     // away from a colliding record. Rust's `str` ordering is byte-wise over
@@ -885,7 +885,7 @@ impl DenseAttrPlan {
         let huge_nodes_addr = address_of(self.huge_nodes_off);
         let huge_data_addr = address_of(self.huge_data_off);
 
-        // The reference C library does not read a heap ID's length field at a fixed
+        // libhdf5 does not read a heap ID's length field at a fixed
         // width: it derives that width from the heap's declared maximum managed
         // object size, then decodes `1 + offset_bytes + length_bytes` from the ID. If
         // that total ever exceeded `heap_id_length` it would read past the ID stored
@@ -1089,7 +1089,7 @@ pub(crate) fn build_dense_attrs(
     dense_attrs_plan(attrs, creation)?.build(heap_address)
 }
 
-/// Bytes the reference C library uses to encode a limit of `value`
+/// Bytes libhdf5 uses to encode a limit of `value`
 /// (`H5VM_limit_enc_size`): the width of the smallest field that can hold it.
 fn encoded_size_width(value: u64) -> usize {
     (64 - value.leading_zeros() as usize).div_ceil(8).max(1)
@@ -1098,7 +1098,7 @@ fn encoded_size_width(value: u64) -> usize {
 /// The Attribute Info (0x0015) message a version 2 object header needs when its
 /// attributes are stored *compactly*, as inline Attribute messages.
 ///
-/// On a version 2 header the reference C library does not count attribute
+/// On a version 2 header libhdf5 does not count attribute
 /// messages to answer `H5Oget_info().num_attrs`; it reads the Attribute Info
 /// message and, finding an undefined fractal-heap address there, falls back to
 /// the header's own attribute-message tally (`H5A__get_ainfo`, `H5Aint.c`). With
@@ -4094,7 +4094,7 @@ impl FileSpaceConfig {
 /// `info` does not fit its field at the writer's widths.
 fn file_space_extension_oh(info: &FileSpaceInfo) -> Result<Vec<u8>, FormatError> {
     let mut oh = ObjectHeaderWriter::new();
-    // The flags the reference C library writes for this message (`H5Fsuper.c`,
+    // The flags libhdf5 writes for this message (`H5Fsuper.c`,
     // HDF5 2.2.0). Neither must-understand bit is among them, so an older reader
     // still opens the file.
     oh.add_message_with_flags(
@@ -4812,7 +4812,7 @@ mod tests {
     fn dense_attrs_check_bounds_each_attribute_not_the_total() {
         // A multi-megabyte set of individually small attributes is exactly what
         // the emitter handles: it sizes its root direct block to the content, and
-        // both this crate and the reference C library read such a heap back. The
+        // both this crate and libhdf5 read such a heap back. The
         // old bound rejected these.
         let many: Vec<AttributeMessage> = (0..40)
             .map(|i| dense_attr_of_size(&format!("a{i}"), 60_000))
@@ -5079,7 +5079,7 @@ mod tests {
     /// (type 9) beside the name index, over the same heap IDs and ordered by
     /// creation index — and the Attribute Info message names it.
     ///
-    /// The reference C library reaches this index from `H5Aopen_by_idx`; its
+    /// libhdf5 reaches this index from `H5Aopen_by_idx`. Its
     /// `H5Aiterate2` builds a table off the name index instead, so a file
     /// missing the tree it declares still iterates correctly. That is why this
     /// reads the bytes rather than leaving the claim to a crosscheck.
@@ -5274,7 +5274,7 @@ mod tests {
     }
 
     /// The root stays a single direct block only while the attributes fit one
-    /// starting-size block, which is where the reference C library also grows a
+    /// starting-size block, which is where libhdf5 also grows a
     /// root indirect block instead of a bigger block.
     #[test]
     fn the_root_grows_into_an_indirect_block_rather_than_a_bigger_direct_one() {

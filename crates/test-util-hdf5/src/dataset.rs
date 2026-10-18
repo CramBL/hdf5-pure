@@ -1,5 +1,5 @@
 //! The rank-1 unlimited dataset the append tests grow, built and read by `hdf5-pure` and, behind
-//! the `hdf5` feature, by the reference C library.
+//! the `hdf5` feature, by libhdf5.
 
 use std::path::Path;
 

@@ -5,7 +5,7 @@
 //! `Dataset::append` grows the dataset's Extensible-Array index *in place*, so it
 //! never re-reads the file or rebuilds the index the way `Dataset::append_staged`
 //! does. Every append is crash-atomic (the dataspace dimension is published
-//! last), and the result reads back in the reference C library and h5py.
+//! last), and the result reads back in libhdf5 and h5py.
 //!
 //! Appends are **any-length** and may start at any length, on filtered and
 //! unfiltered datasets alike: a partial trailing chunk is rewritten into a fresh

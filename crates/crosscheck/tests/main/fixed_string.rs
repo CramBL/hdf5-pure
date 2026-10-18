@@ -1,5 +1,5 @@
 #![cfg(feature = "__hdf5-1.10")]
-//! The reference C library reads the fixed-width string datasets this crate
+//! libhdf5 reads the fixed-width string datasets this crate
 //! writes (issue #355).
 //!
 //! A fixed-width string dataset is a datatype message declaring one width and a

@@ -1,7 +1,7 @@
 //! Compressing dataset storage with deflate, shuffle, scale-offset, and LZF.
 //!
 //! Deflate, shuffle, and scale-offset are built-in HDF5 filters, so those
-//! files stay readable by the reference C library, h5py, and MATLAB; LZF is
+//! files stay readable by libhdf5, h5py, and MATLAB. LZF is
 //! h5py's registered filter (id 32000), which h5py reads with no plugin.
 //! Compression is transparent on read: the same `read_*` call returns the
 //! decoded data regardless of how it was stored.

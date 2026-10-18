@@ -3,7 +3,7 @@
 //! an Extensible Array rotates its unlimited dimension to the front first
 //! (issue #299). Both facts are invisible to a round trip through this crate
 //! alone — the writer and the reader agreed with each other while disagreeing
-//! with every other HDF5 reader — so the oracle here is the reference C library
+//! with every other HDF5 reader - so the oracle here is libhdf5
 //! on the other side of each file.
 //!
 //! The combinations are swept rather than sampled. There are few enough of them
@@ -171,7 +171,7 @@ fn pure_write(path: &std::path::Path, shape: &[u64], chunks: &[u64], maxshape: &
     b.write(path).unwrap();
 }
 
-/// Write through the reference C library, pinned to the latest format so it
+/// Write through libhdf5, pinned to the latest format so it
 /// chooses a Fixed or Extensible Array.
 ///
 /// Without the bound it writes a version-1 B-tree, whose keys carry each chunk's

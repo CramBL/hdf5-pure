@@ -461,7 +461,7 @@ const SHARED_ATTRIBUTE_MESSAGE: &str =
     "a target object has a shared attribute message (not editable in place yet)";
 
 /// A shared-message (SOHM) index record does not always name a heap entry: where
-/// the reference C library shares a message written into an object header it
+/// libhdf5 shares a message written into an object header it
 /// already holds open, the record names *that header* and the message stays
 /// where it is. Such a record is a stored address like any other, and it is the
 /// one no rewrite reaches — the index lives outside every object a commit
@@ -1198,7 +1198,7 @@ pub(crate) struct WriteEngine {
     /// - `groups` stages a bare path: no datatype, no data, no attributes.
     /// - `group_attrs` and `dataset_attrs` carry an [`AttrValue`], which has no
     ///   reference variant — the reason a reference-typed attribute can only
-    ///   have come from the reference C library.
+    ///   have come from libhdf5.
     /// - `appends` grows an *existing* dataset along its own datatype, so it can
     ///   only add references to a dataset that already held them.
     /// - `deletes` removes objects and adds nothing.
@@ -1543,7 +1543,7 @@ impl From<EditBacking> for MemoryStrategy {
 /// across operations — trading exactly the guarantee in the paragraph above,
 /// which is why it is opt-in and this is not.
 ///
-/// The reference C library does not `fsync` on its normal path either: the
+/// libhdf5 does not `fsync` on its normal path either: the
 /// default `sec2` driver installs no flush callback at all, so `H5Fflush` drains
 /// libhdf5's own caches with `write` and stops there, leaving power-loss
 /// durability to the application. [`OnClose`](Self::OnClose) is that behavior;
@@ -1918,7 +1918,7 @@ pub(crate) struct AppendGeometry {
 
 /// Superblock consistency-flag bits raised while a SWMR writer is active: bit 0
 /// (write access) | bit 2 (SWMR write access). Cleared on a clean close. Matches
-/// the reference C library, h5py, and [`crate::File::open_swmr_writer`]. These
+/// libhdf5, h5py, and [`crate::File::open_swmr_writer`]. These
 /// are the bits every open path checks — see [`file_lock::check_status_flags`].
 const SWMR_WRITE_FLAGS: u32 = file_lock::WRITE_ACCESS | file_lock::SWMR_WRITE_ACCESS;
 
@@ -7950,7 +7950,7 @@ impl WriteEngine {
                     // The body is a reference, not an attribute; the reference is
                     // what gets rewrapped, in the encoding a version 2 header
                     // uses. Reachable only from a file whose version 1 objects
-                    // share messages, which the reference C library does not
+                    // share messages, which libhdf5 does not
                     // write — it moves an object to a version 2 header before
                     // sharing anything on it.
                     region.push_shared(
@@ -8798,7 +8798,7 @@ impl WriteEngine {
         while let Some((msg_type, body, body_end)) = region.next_message(p)? {
             if msg_type == MessageType::ATTRIBUTE_INFO {
                 // An Attribute Info message does not by itself mean dense
-                // storage: the reference C library and h5py emit one (with an
+                // storage: libhdf5 and h5py emit one (with an
                 // *undefined* fractal-heap address) even for compact, inline
                 // attributes in the latest format, to carry attribute
                 // creation-order metadata. Only a *defined* heap address is real
@@ -12175,7 +12175,7 @@ fn ensure_group_info(region: &mut OhRegion) -> Result<(), Error> {
 /// carries an Attribute Info message, appending the compact-storage one when
 /// absent.
 ///
-/// On a version 2 object header the reference C library never counts attribute
+/// On a version 2 object header libhdf5 never counts attribute
 /// messages: `H5O__attr_count_real` reads the count out of the Attribute Info
 /// message, and reports zero when there is none, even though `H5Aiterate` and
 /// `H5Aopen_by_name` still find every attribute. Tools that size their work by
@@ -12336,7 +12336,7 @@ fn rebuild_compact_layout_region(region: &OhRegion, raw: &[u8]) -> Result<OhRegi
 /// the object header's own flags describe: a group that tracks it — h5py's
 /// `track_order=True`, `H5Pset_link_creation_order`, and every group netCDF-4
 /// writes — carries a creation index on every Link message and, in its Link Info
-/// message, the maximum it has ever assigned. The reference C library hands out
+/// message, the maximum it has ever assigned. libhdf5 hands out
 /// that maximum and increments it (`H5G_obj_insert`), so the recorded value is
 /// the *next* index rather than the highest in use, and deleting a link never
 /// lowers it. This is the link-side counterpart of [`next_attr_creation_index`],
@@ -12431,7 +12431,7 @@ fn find_link_info(
 
 /// The number of links a group keeps in its object header before they move into
 /// a fractal heap: the "maximum compact value" its Group Info message (type
-/// 0x000A) declares, or the reference C library's default of 8 where that
+/// 0x000A) declares, or libhdf5's default of 8 where that
 /// message stores no link-phase-change values.
 ///
 /// Body: version(1), flags(1), then the maximum compact (2) and minimum dense
@@ -12467,7 +12467,7 @@ fn max_compact_links(region: &OhRegion) -> Result<u16, Error> {
 ///
 /// `links_after_commit` is how many links the group would hold once this commit's
 /// deletions and additions are applied. Past the threshold its Group Info message
-/// declares, the reference C library moves a tracked group's links into a fractal
+/// declares, libhdf5 moves a tracked group's links into a fractal
 /// heap indexed by *two* B-trees: one on name, and a type 6 one on creation
 /// order. This crate emits neither, so the point where the group would stop
 /// being compact is the point where an addition stops being reproducible — that
@@ -12704,7 +12704,7 @@ struct DenseAttrEdit {
 ///   removing it again in one commit still sends the object to a heap.
 /// - **Neither.** The edit removes the object's last attribute, so the rebuilt
 ///   header carries no attribute message and no Attribute Info message — what
-///   this crate and the reference C library both write for an object with none.
+///   this crate and libhdf5 both write for an object with none.
 ///
 /// A dense rebuild is a re-encoding rather than a byte copy: the attributes are
 /// read into messages and re-serialized, as [`WriteEngine::read_object`] already
@@ -12714,7 +12714,7 @@ struct DenseAttrEdit {
 /// form — does not.
 ///
 /// An object that is dense stays dense, even where the edit takes its set back
-/// under the threshold. The reference C library keeps one dense down to its
+/// under the threshold. libhdf5 keeps one dense down to its
 /// `min_dense` (6 by default) as well, and re-encoding a set that is only losing
 /// members buys nothing.
 fn plan_attr_ops<S: Source + ?Sized>(
@@ -12824,7 +12824,7 @@ fn plan_attr_ops<S: Source + ?Sized>(
                 let before = set.len();
                 // A deletion leaves a gap in the creation order rather than
                 // renumbering what is left, and does not lower the maximum:
-                // the reference C library hands out indexes from a counter that
+                // libhdf5 hands out indexes from a counter that
                 // only ever rises.
                 set.retain(|slot| &slot.msg.name != name);
                 if set.len() == before {
@@ -13082,7 +13082,7 @@ fn bump_creation_index(index: u16) -> Result<u16, Error> {
 }
 
 /// Whether an Attribute Info (0x0015) message body denotes *dense* (fractal-heap)
-/// attribute storage — a *defined* heap address. The reference C library and h5py
+/// attribute storage - a *defined* heap address. libhdf5 and h5py
 /// emit an Attribute Info message with an *undefined* heap address even for
 /// compact, inline attributes in the latest format (to carry creation-order
 /// metadata), so its mere presence is not dense storage; only a defined heap
@@ -13141,7 +13141,7 @@ fn highest_attr_creation_index(region: &OhRegion) -> Result<Option<u16>, Error> 
 /// The next unused attribute creation index for an object whose messages are
 /// `region`.
 ///
-/// The reference C library hands out `ainfo.max_crt_idx` and increments it
+/// libhdf5 hands out `ainfo.max_crt_idx` and increments it
 /// (`H5O__attr_create`), so the recorded maximum is the *next* index rather
 /// than the highest in use, and deleting an attribute never lowers it. Read it
 /// from the Attribute Info message where there is one, and otherwise derive one
@@ -13210,7 +13210,7 @@ fn compact_attribute_info_body(region: &OhRegion) -> Result<Vec<u8>, Error> {
 /// appending one carrying `body`, then keep the object's Attribute Info message
 /// in step with the creation index the new record takes.
 ///
-/// `keep` is the index an *overwrite* preserves: the reference C library modifies
+/// `keep` is the index an *overwrite* preserves: libhdf5 modifies
 /// an attribute in place, so writing over one does not move it in an iteration
 /// by creation order. `None` asks for the object's next unused index, which then
 /// becomes the maximum the Attribute Info message records. Both are inert on a
@@ -13267,7 +13267,7 @@ fn put_attr_message(
                         Error::EditUnsupported("an Attribute Info message is too large to record")
                     })?;
                     // Only the body and its length change: the record keeps its
-                    // own flags — the reference C library marks this message
+                    // own flags - libhdf5 marks this message
                     // "don't share" — and its creation index.
                     out.push(region[p]);
                     out.extend_from_slice(&len.to_le_bytes());
@@ -14238,7 +14238,7 @@ pub(crate) fn build_v2_object_header(region: &OhRegion) -> Result<Vec<u8>, Error
 ///
 /// **The header's optional prefix blocks are re-emitted, and its timestamps are
 /// stamped.** A region carries whatever chunk 0's prefix declared
-/// ([`ObjectHeaderPrefix`]), so a rewrite of a header from the reference C library,
+/// ([`ObjectHeaderPrefix`]), so a rewrite of a header from libhdf5,
 /// h5py or netCDF-4 puts its four timestamps and any attribute phase-change
 /// thresholds back where it found them, with the flag bits that announce them.
 ///
@@ -15476,7 +15476,7 @@ mod tests {
     /// endian bytes an object reference is stored as — and relabelling its
     /// datatype, because no public API stages one: [`AttrValue`] has no
     /// reference variant, so a file carrying such an attribute was written by
-    /// the reference C library, and the copy path re-emits its bytes verbatim
+    /// libhdf5, and the copy path re-emits its bytes verbatim
     /// like any other attribute's.
     fn reference_attr(name: &str, address: u64) -> crate::attribute::AttributeMessage {
         let mut attr = crate::type_builders::build_attr_message(name, &AttrValue::U64(address));
@@ -15721,7 +15721,7 @@ mod tests {
     /// its addresses live in the global heap the elements point at, not in the
     /// element bytes this screen reads (issue #317).
     ///
-    /// The reference C library writes such a datatype (`H5T_VLEN` of
+    /// libhdf5 writes such a datatype (`H5T_VLEN` of
     /// `H5T_STD_REF_OBJ`) and an in-file copy carries it, so it reaches the
     /// screen through `copy` even though nothing here builds one. A
     /// variable-length *string* is unaffected — the heap it points at is never
@@ -16524,7 +16524,7 @@ mod tests {
     /// about placement itself: no byte this commit writes may land in a page that
     /// held live metadata beforehand.
     #[test]
-    // The file is a committed one the reference C library wrote, see
+    // The file is a committed one libhdf5 wrote, see
     // `crates/crosscheck/tests/main/c_test_data.rs`.
     fn a_c_written_chunk_index_is_not_reclaimed_as_raw() {
         use tempfile::tempdir;
@@ -16672,7 +16672,7 @@ mod tests {
         );
     }
 
-    /// The reference C library's generic-large manager holds free space of *both*
+    /// libhdf5's generic-large manager holds free space of *both*
     /// page types, so a section from it is only reusable when it covers whole
     /// aligned pages.
     ///
@@ -16691,7 +16691,7 @@ mod tests {
     /// keeps it out of reach: it is recorded, so a rewrite gives it back to the
     /// manager it came from, but never offered to an allocation.
     #[test]
-    // The file is a committed one the reference C library wrote, see
+    // The file is a committed one libhdf5 wrote, see
     // `crates/crosscheck/tests/main/c_test_data.rs`.
     fn a_generic_large_section_is_only_reusable_as_whole_pages() {
         use tempfile::tempdir;
@@ -17978,7 +17978,7 @@ mod tests {
     ///
     /// This reader is the lenient one. It bounds chunk reads by `min(EA count,
     /// dimension)`, so it tolerates a phase-3 state where the element count has
-    /// advanced past the dimension, where the reference C library walks strictly
+    /// advanced past the dimension, where libhdf5 walks strictly
     /// by the dataspace dimension and re-validates block checksums. The C
     /// library read these states until it became a dependency of the crosscheck
     /// package alone; the phased append that produces them is private, so that
@@ -18518,7 +18518,7 @@ mod tests {
             MessageType::ATTRIBUTE_INFO,
             &info.serialize(crate::file_writer::OFFSET_WIDTH),
         );
-        // The reference C library sets this flag on the Attribute Info message it writes
+        // libhdf5 sets this flag on the Attribute Info message it writes
         // (`H5Oattribute.c`, HDF5 2.2.0), so a rewrite of that message has to keep it.
         record[3] = MessageFlags::FORBID_SHARING.get();
         region.push_bytes(&record);
@@ -18623,7 +18623,7 @@ mod tests {
         birth: 0x4444_4444,
     };
 
-    /// A phase-change pair the reference C library would never write by default
+    /// A phase-change pair libhdf5 would never write by default
     /// (its defaults are 8 and 6), so a rebuild that dropped the block and a
     /// rebuild that substituted the defaults both fail.
     const FIXTURE_PHASE: AttributePhaseChange = AttributePhaseChange {
@@ -21238,7 +21238,7 @@ mod tests {
     /// needs no single-hard-link rule (`write_dataset_shared_hard_link_crosscheck`
     /// is the interop half of that). Which is what makes this reachable.
     ///
-    /// The second link is made with the reference C library because this crate
+    /// The second link is made with libhdf5 because this crate
     /// has no API that creates one: the file is a committed one, see
     /// `crates/crosscheck/tests/main/c_test_data.rs`.
     #[test]

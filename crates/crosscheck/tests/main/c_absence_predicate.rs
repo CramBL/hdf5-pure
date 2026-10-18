@@ -4,7 +4,7 @@
 //! merely unreachable.
 //!
 //! Without this file the helper could silently decay. Its conditions are tuned
-//! to which minor error codes the reference C library reports, and a libhdf5
+//! to which minor error codes libhdf5 reports, and a libhdf5
 //! upgrade can change that: if a future version stopped reporting a load
 //! failure when metadata is damaged, the helper would keep passing while no
 //! longer distinguishing damage from absence, and every delete crosscheck would

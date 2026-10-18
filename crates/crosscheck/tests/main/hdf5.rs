@@ -566,7 +566,7 @@ fn crosscheck_paged_fixed_array_deflate() {
 
 #[test]
 fn crosscheck_read_paged_fixed_array_from_c_lib() {
-    // Reverse direction: the reference C library writes a paged Fixed Array
+    // Reverse direction: libhdf5 writes a paged Fixed Array
     // (the layout that previously triggered "paged Fixed Array data blocks not
     // yet supported"), and hdf5-pure must read it back. `libver_v110` forces the
     // v110+ Fixed Array index; > 1024 fixed-shape chunks make it paged.
@@ -599,7 +599,7 @@ fn crosscheck_read_paged_fixed_array_from_c_lib() {
 
 #[test]
 fn crosscheck_read_paged_fixed_array_with_uninitialized_page() {
-    // The reference C library writes a paged Fixed Array but, with incremental
+    // libhdf5 writes a paged Fixed Array but, with incremental
     // allocation, only the first page's chunks are written. The second page is
     // never allocated, so its page-init bitmap bit stays cleared. hdf5-pure must
     // skip that page (no chunk records) and fill the unwritten tail with the
@@ -957,7 +957,7 @@ fn crosscheck_varlen_ascii_array_attr() {
 /// A variable-length attribute in *dense* storage, which the compact case above
 /// does not reach. The heap embeds a copy of the attribute's element bytes, and
 /// those bytes are global-heap references: a heap built before they were patched
-/// left the reference C library resolving addresses that were never assigned.
+/// left libhdf5 resolving addresses that were never assigned.
 #[test]
 fn crosscheck_varlen_ascii_array_attr_in_dense_storage() {
     let dir = tempdir().unwrap();
@@ -1640,7 +1640,7 @@ fn crosscheck_read_scale_offset_float_from_c_lib() {
 
 #[test]
 fn crosscheck_scale_offset_int_compressed() {
-    // hdf5-pure writes integer scale-offset; the reference C library reads it.
+    // hdf5-pure writes integer scale-offset data that libhdf5 reads.
     let dir = tempdir().unwrap();
     let path = dir.path().join("scaleoffset_int.h5");
 
@@ -1663,7 +1663,7 @@ fn crosscheck_scale_offset_int_compressed() {
 
 #[test]
 fn crosscheck_scale_offset_float_dscale() {
-    // hdf5-pure writes float D-scale; the reference C library reads it within
+    // hdf5-pure writes float D-scale data that libhdf5 reads within
     // the decimal tolerance.
     let dir = tempdir().unwrap();
     let path = dir.path().join("scaleoffset_float.h5");
@@ -1692,7 +1692,7 @@ fn crosscheck_scale_offset_float_dscale() {
 
 #[test]
 fn crosscheck_scale_offset_then_deflate() {
-    // hdf5-pure writes [scaleoffset, deflate]; the reference C library reads it.
+    // hdf5-pure writes [scaleoffset, deflate] data that libhdf5 reads.
     let dir = tempdir().unwrap();
     let path = dir.path().join("scaleoffset_deflate.h5");
 
@@ -1739,7 +1739,7 @@ fn crosscheck_vlen_string_dataset() {
         words
     );
 
-    // The reference C library agrees on values and that the type is VL Unicode.
+    // libhdf5 agrees on values and that the type is VL Unicode.
     let file = hdf5::File::open(&path).unwrap();
     let ds = file.dataset("labels").unwrap();
     let vals = ds.read_raw::<VarLenUnicode>().unwrap();

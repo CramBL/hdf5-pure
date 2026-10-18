@@ -1,5 +1,5 @@
 #![cfg(feature = "__hdf5-1.10")]
-//! A soft link in a version 1 (symbol-table) group, as the reference C library
+//! A soft link in a version 1 (symbol-table) group, as libhdf5
 //! (libhdf5) writes it under the earliest format bounds. Its symbol table entry
 //! carries the undefined address in place of an object header, so the group
 //! only lists its hard links. An edit that would convert the group to the latest

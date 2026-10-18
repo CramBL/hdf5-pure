@@ -1,4 +1,4 @@
-//! Whether the reference C library reports an object absent, as opposed to failing to read the
+//! Distinguish libhdf5's report that an object is absent from errors reading the
 //! file around it.
 
 use hdf5::MinorErrorCode;

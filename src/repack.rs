@@ -2106,7 +2106,7 @@ mod tests {
 
     #[test]
     fn repack_preserves_big_endian_time_dataset() {
-        // The reference C library cannot create H5T_TIME, so this round-trips a
+        // libhdf5 cannot create H5T_TIME, so this round-trips a
         // big-endian time dataset through our own writer and reader: repack must
         // preserve both the byte order (bf0 bit 0) and the raw element bytes.
 
@@ -2283,7 +2283,7 @@ mod attribute_fidelity_tests {
         }
     }
 
-    /// The two rows of issue #241's table that the reference C library's own API
+    /// The two rows of issue #241's table that libhdf5's own API
     /// cannot express, so no crosscheck can state them: a fixed-width string's
     /// *padding*, and a Null dataspace.
     ///

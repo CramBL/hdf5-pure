@@ -6,7 +6,7 @@
 //! The writer used to refuse a larger one; since #195 it moves it to a fractal
 //! heap instead, so the limit is now where *storage changes*, not where writing
 //! stops. Either way the boundary is only worth anything if the largest attribute
-//! still written compactly produces a file the reference C library reads
+//! still written compactly produces a file libhdf5 reads
 //! correctly — otherwise the limit would just be sitting in the wrong place. So
 //! this writes right up against it and reads the values back through libhdf5.
 

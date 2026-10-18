@@ -1324,7 +1324,7 @@ mod tests {
 }
 
 /// The dense-link walks hold to the same one-parse-per-walk invariant as the
-/// dense-attribute ones. The file comes from the reference C library, the only
+/// dense-attribute ones. The file comes from libhdf5, the only
 /// writer that produces a huge *link*: this crate's writer stores even a
 /// 60,000-byte link name as a managed heap object, so the huge path these tests
 /// cover is unreachable from a file it wrote.

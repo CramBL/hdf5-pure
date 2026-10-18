@@ -3,11 +3,11 @@
 //!
 //! Two directions, both make-or-break:
 //!
-//! * The pure writer sets a fill value and the reference C library must report
+//! * The pure writer sets a fill value and libhdf5 must report
 //!   the same value through its own `H5Pget_fill_value` path.
-//! * The reference C library writes a fill value — under both the default format
+//! * libhdf5 writes a fill value - under both the default format
 //!   (a version-2 Fill Value message) and the latest format (a version-3
-//!   message) — and the pure reader must recover it.
+//!   message) - and the pure reader must recover it.
 
 use hdf5::file::LibraryVersion;
 use hdf5_pure::{File, FileBuilder, FillTime, MaxExtent, ScaleOffset};
@@ -16,7 +16,7 @@ use tempfile::tempdir;
 use test_util_hdf5::dataset::{self, Filter, Unlimited};
 use test_util_hdf5::file;
 
-/// Read a dataset's typed fill value back through the reference C library.
+/// Read a dataset's typed fill value back through libhdf5.
 fn c_fill_value<T: hdf5::H5Type>(path: &std::path::Path, name: &str) -> Option<T> {
     let file = hdf5::File::open(path).unwrap();
     let ds = file.dataset(name).unwrap();
@@ -69,8 +69,8 @@ fn c_sees_no_fill_value_when_pure_sets_none() {
 
 // ---- C library writes, pure reads ------------------------------------------
 
-/// Create a dataset with a fill value using the reference C library under the
-/// given format bounds, so the on-disk Fill Value message version is controlled:
+/// Create a dataset with a fill value using libhdf5 under configured
+/// library-version bounds, controlling the on-disk Fill Value message version:
 /// the default (`Earliest`) bound writes a version-2 message, `V110`/latest a
 /// version-3 message.
 fn c_write_i32_fill(path: &std::path::Path, low: LibraryVersion, high: LibraryVersion) {
@@ -194,7 +194,7 @@ fn pure_reads_c_written_default_fill_time_as_if_set(
     assert_eq!(ds.fill_value::<i32>().unwrap(), Some(10));
 }
 
-/// Create a chunked f64 dataset with a fill value using the reference C library.
+/// Create a chunked f64 dataset with a fill value using libhdf5.
 /// The handles are dropped when this returns, so the file is fully flushed before
 /// the caller reopens it.
 fn c_write_chunked_f64_fill(path: &std::path::Path) {
@@ -223,7 +223,7 @@ fn pure_reads_c_written_chunked_f64_fill() {
 }
 
 /// Create an i32 dataset whose fill value is explicitly *undefined* (a version-3
-/// message with the "undefined" bit set), with the reference C library.
+/// message with the "undefined" bit set), with libhdf5.
 fn c_write_i32_no_fill(path: &std::path::Path) {
     let file = file::libhdf5_create_v110(path);
     let ds = file
@@ -289,7 +289,7 @@ fn c_reads_pure_scaleoffset_dataset_data_and_fill() {
 // stayed invisible: it takes a later `resize` (or another library's) to bring
 // them inside it, and then every reader returns what is physically stored.
 
-/// Grow `col` from `from` to `to` elements with the reference C library,
+/// Grow `col` from `from` to `to` elements with libhdf5,
 /// writing no new data, and read the whole dataset back through it.
 fn c_extend_and_read(path: &std::path::Path, to: usize) -> Vec<u32> {
     {

@@ -18,7 +18,7 @@
 //! One case is missing from here and lives in `crates/crosscheck/tests/main/empty_chunked.rs`
 //! instead: a chunk grid with holes in it, where a window is answered partly from
 //! storage and partly from the fill value. This crate's writer allocates every
-//! chunk it declares, so only the reference C library can produce that file
+//! chunk it declares, so only libhdf5 can produce that file
 //! (issue #293), and a test of it has to link the library.
 
 use hdf5_pure::{File, FileBuilder};

@@ -1,5 +1,5 @@
 #![cfg(feature = "__hdf5-1.10")]
-//! The reference C library must agree about an enumeration this crate wrote over
+//! libhdf5 must agree about an enumeration this crate wrote over
 //! a base type other than `i32`/`u8` (issue #208).
 //!
 //! `EnumTypeBuilder::with_base` reaches base types the old constructors could

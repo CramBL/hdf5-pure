@@ -23,9 +23,9 @@ use crate::message_type::MessageType;
 /// HDF5 allocates a dataset's storage lazily, so a dataset can be *created* with
 /// a shape and then read before anything is written — as a whole, when no chunk
 /// index or contiguous block exists at all, or in parts, when some chunks of a
-/// chunked dataset exist and others do not. The reference C library answers
-/// those regions with the dataset's fill value, and this is the pattern that
-/// answers them here.
+/// chunked dataset exist and others do not. libhdf5 fills
+/// those regions with the dataset's fill value. This implementation
+/// uses the same fill behavior.
 ///
 /// `None` means the library default, which is the type's implicit zero. Keeping
 /// that case as `None` lets the common path stay a plain zeroed allocation with

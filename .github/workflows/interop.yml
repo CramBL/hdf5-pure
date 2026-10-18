@@ -187,7 +187,7 @@ jobs:
         if: matrix.os == 'ubuntu-latest' && matrix.version == needs.releases.outputs.latest
         run: just interop::lint-hdf5 "$HDF5_VERSION" "$CROSSCHECK_FEATURES"
 
-  # The reference C library for MATLAB files, reading back what `mat` writes.
+  # libhdf5 for MATLAB files, reading back what `mat` writes.
   # From conda-forge because the test calls `Mat_VarCreateStruct2`, which no
   # distribution package has yet.
   matio:

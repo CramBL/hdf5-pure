@@ -57,7 +57,7 @@ jobs:
               - scripts/constants.just
               - .github/workflows/ci.yml
 
-  # The crate's own suite. The crosschecks against the reference C library
+  # The crate's own suite. The crosschecks against libhdf5
   # are the interop workflow's.
   test:
     name: test / ${{ matrix.os }} / ${{ matrix.config.name }}

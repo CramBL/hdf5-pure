@@ -2,13 +2,13 @@
 
 `cargo fmt` formats the code and `cargo clippy` with warnings denied checks it. `Cargo.toml` lists the style lints the crate mutes, with the reason for each. Everything below is what those two tools do not decide.
 
-The crate implements a binary format that the reference C library defined over three decades, so much of the code is careful bookkeeping over bytes. Read some of it before writing your own.
+The crate implements a binary format that libhdf5 defined over three decades, so much of the code is careful bookkeeping over bytes. Read some of it before writing your own.
 
 ## Design
 
 - **No C dependencies.** The crate is pure Rust. `byteorder` is the only mandatory dependency, and every other one is optional behind a cargo feature. A new mandatory dependency needs an issue first.
 - **A `no_std` core.** Everything below the filesystem API builds on `core` and `alloc`. The `std` feature adds the filesystem and nothing else.
-- **Interoperability defines correctness.** A file the crate writes is read by the reference C library, h5py and MATLAB, and a file they write is read by the crate.
+- **Interoperability defines correctness.** A file the crate writes is read by libhdf5, h5py and MATLAB, and a file they write is read by the crate.
 - **Faithful or nothing.** An operation produces a result correct to the byte, or an error that says why. [Error handling](#faithful-or-nothing) has the rule.
 
 ## Ordering

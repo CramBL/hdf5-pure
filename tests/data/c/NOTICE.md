@@ -1,4 +1,4 @@
-# Written by the reference C library
+# Written by libhdf5
 
 `1.8/` holds files HDF5 1.8.23 wrote, described there.
 

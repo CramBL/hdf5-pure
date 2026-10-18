@@ -6,7 +6,7 @@
 //! bytes wide instead of four, carrying a creation index. `EditSession` used to
 //! refuse such an object outright.
 //!
-//! The fixtures have to come from the reference C library: nothing in this
+//! The fixtures have to come from libhdf5: nothing in this
 //! crate's whole-file writer emits creation order, so a fixture written here
 //! would only test the editor against itself. And the interesting assertion is
 //! not "the attributes are still there" — this crate's own reader ignores
@@ -282,7 +282,7 @@ fn deleting_an_attribute_leaves_a_gap_rather_than_renumbering() {
         s.commit().unwrap();
     }
     // A fresh attribute takes index 4, neither a freed index nor one past the
-    // highest survivor: the reference C library hands them out from a counter
+    // highest survivor: libhdf5 hands them out from a counter
     // that only rises.
     set_on_both(&p, "added", 5);
 
@@ -428,7 +428,7 @@ fn an_object_already_dense_keeps_its_creation_order_across_an_edit() {
 /// numbered from the running maximum its Link Info message records, and that
 /// maximum is bumped by the number added.
 ///
-/// The reference C library is the judge, because this crate's own reader ignores
+/// libhdf5 is the judge, because this crate's own reader ignores
 /// link creation order entirely: `H5Literate2` over `H5_INDEX_CRT_ORDER` walks
 /// the per-link creation indexes, `H5Lget_info2`'s `corder` names the index one
 /// link carries, and `H5Gget_info`'s `max_corder` is the running counter.
@@ -542,7 +542,7 @@ fn a_tracked_group_leaves_a_deletion_gap_and_adds_past_it() {
 }
 
 /// A group at the compact-storage threshold its Group Info message declares
-/// cannot take another link: past it the reference C library moves the links
+/// cannot take another link: past it libhdf5 moves the links
 /// into a fractal heap indexed by a creation-order B-tree, which this crate does
 /// not write (issue #102). The refusal lands before any byte changes.
 #[test]

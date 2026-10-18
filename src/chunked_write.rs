@@ -742,7 +742,7 @@ pub(crate) enum ChunkIndexKind {
     /// No index structure and no chunk address: a fixed-shape dataset with no
     /// chunks at all, whose layout message carries the undefined address.
     ///
-    /// This is the reference C library's convention for a chunked dataset with
+    /// This is libhdf5's convention for a chunked dataset with
     /// nothing stored. For a fixed-shape dataset of *zero* slots it is the only
     /// encoding that library accepts: a Fixed Array declaring zero entries makes
     /// `H5Dget_num_chunks` fail on the dataset, where the undefined address

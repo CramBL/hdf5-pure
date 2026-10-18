@@ -1,5 +1,5 @@
 #![cfg(feature = "__hdf5-1.10")]
-//! Shared object header messages (SOHM), written by the reference C library and
+//! Shared object header messages (SOHM), written by libhdf5 and
 //! read back by hdf5-pure (issue #417).
 //!
 //! A file created with `H5Pset_shared_mesg_index` stores one copy of each message
@@ -309,7 +309,7 @@ fn shared_filter_pipelines_and_fill_values_read_back() {
 /// B-tree — to check that nothing it moves or removes is named there, so a
 /// misread index shows up as a failed commit rather than as a stranded record.
 ///
-/// Neither fixture's index names an object header (the reference C library puts
+/// Neither fixture's index references an object header (libhdf5 puts
 /// even a single-user message straight in the heap here), so both commits go
 /// through; what they prove is that the walk reads both index kinds.
 #[test]

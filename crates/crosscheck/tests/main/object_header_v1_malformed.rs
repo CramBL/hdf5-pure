@@ -1,7 +1,7 @@
 #![cfg(feature = "hdf5")]
 //! Cross-checks malformed version 1 object-header message records.
 //!
-//! The reference C library creates earliest-format files whose root groups use
+//! libhdf5 creates earliest-format files whose root groups use
 //! version 1 object headers. Tests apply narrowly scoped mutations while
 //! preserving the surrounding file structure, then compare `libhdf5` with both
 //! hdf5-pure parser backends.
@@ -28,7 +28,7 @@ struct AlignmentTarget {
     record: v1::Record,
 }
 
-/// Creates a simple earliest-format file with the reference C library.
+/// Creates a simple earliest-format file with libhdf5.
 fn write_earliest_file(path: &Path) {
     let file = file::libhdf5_create_earliest(path);
 
@@ -239,14 +239,14 @@ fn corrupt_final_root_nil_message_alignment(bytes: &mut [u8], target: &Alignment
         .set(bytes, (chunk.range.len() - 1) as u64);
 }
 
-/// Reads the control dataset through the reference C library.
+/// Reads the control dataset through libhdf5.
 fn read_with_c(path: &Path) -> Result<Vec<i32>, hdf5::Error> {
     let file = hdf5::File::open(path)?;
     let dataset = file.dataset("data")?;
     dataset.read_raw::<i32>()
 }
 
-/// Reads the control dataset through the reference C library under explicit
+/// Reads the control dataset through libhdf5 under explicit
 /// file-format version bounds.
 #[cfg(any(feature = "__hdf5-1.14", feature = "__hdf5-2"))]
 fn read_with_c_libver(
