@@ -627,7 +627,7 @@ pub use edit::GlobalHeapLiveness;
 pub use edit::SpaceOwnership;
 
 #[cfg(feature = "std")]
-pub use repack::{RepackOptions, repack};
+pub use repack::{RepackOptions, repack, repack_into, repack_to_path};
 
 #[cfg(feature = "std")]
 pub use element::H5Element;
