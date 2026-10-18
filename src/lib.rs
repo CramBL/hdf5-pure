@@ -452,6 +452,7 @@ pub(crate) mod dense_storage;
 pub(crate) mod display;
 pub(crate) mod error;
 pub(crate) mod file_create_properties;
+pub(crate) mod file_emission;
 pub(crate) mod file_space_info;
 pub(crate) mod file_writer;
 pub(crate) mod fill_value;
